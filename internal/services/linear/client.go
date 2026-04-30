@@ -470,6 +470,61 @@ func (c *graphQLClient) IssueRecentHumanEdits(ctx context.Context, issueID strin
 	return false, nil
 }
 
+// FindRecentBotCommentByURL scans the issue's recent comments and returns
+// the ID of the most recent comment whose body contains the given session
+// URL. Used by HandleMilestone's recovery path to recover an orphaned
+// comment when our commentCreate response was lost in flight (so we have
+// no local CommentID to drive the update branch on retry).
+//
+// Linear has no client-supplied idempotency key on commentCreate, so we
+// embed the deterministic per-session URL in the body and search for it
+// here. A scan is restricted to ~50 recent comments — enough for our
+// retry window (a stuck job retries within minutes) and avoids paginating
+// long-lived issues.
+//
+// Returns "" with no error when no matching comment is found.
+func (c *graphQLClient) FindRecentBotCommentByURL(ctx context.Context, issueID, sessionURL string) (string, error) {
+	if issueID == "" || sessionURL == "" {
+		return "", nil
+	}
+	query := `query($id: String!) {
+		issue(id: $id) {
+			comments(first: 50, orderBy: createdAt) {
+				nodes { id body }
+			}
+		}
+	}`
+	var result struct {
+		Data struct {
+			Issue *struct {
+				Comments struct {
+					Nodes []struct {
+						ID   string `json:"id"`
+						Body string `json:"body"`
+					} `json:"nodes"`
+				} `json:"comments"`
+			} `json:"issue"`
+		} `json:"data"`
+	}
+	if err := c.do(ctx, query, map[string]any{"id": issueID}, &result); err != nil {
+		return "", err
+	}
+	if result.Data.Issue == nil {
+		return "", nil
+	}
+	// Walk newest-last so we return the most recent match (Linear's
+	// orderBy: createdAt is ascending). Match on the session URL only —
+	// the bot prefix is convention but a future format change shouldn't
+	// invalidate the recovery.
+	var foundID string
+	for _, c := range result.Data.Issue.Comments.Nodes {
+		if strings.Contains(c.Body, sessionURL) {
+			foundID = c.ID
+		}
+	}
+	return foundID, nil
+}
+
 // HasGitHubIntegrationAttachment checks whether Linear's native GitHub
 // integration has already posted attachments to this issue. When true, we
 // suppress our merge-time writes to avoid double cycle/sprint membership.

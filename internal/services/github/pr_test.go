@@ -3058,6 +3058,27 @@ func TestApplyLinearKeyPrefixes_OverlongPrefixSetDoesNotPanic(t *testing.T) {
 	}, "overlong Linear prefix sets should not panic when the subject budget is exhausted")
 }
 
+func TestApplyLinearKeyPrefixes_LongConventionalScopeReservesSubject(t *testing.T) {
+	t.Parallel()
+
+	source := models.IssueSourceLinear
+	id := "ACS-1"
+	session := &models.Session{
+		LinkedIssues: []models.SessionIssueLink{{
+			Role: models.SessionIssueLinkRolePrimary, IssueSource: &source, ExternalID: &id,
+		}},
+	}
+	// A conventional commit scope long enough that conv + primary brackets
+	// alone fill most of the title budget. Without the subject-budget guard,
+	// secondaries would still be appended and the descriptive subject would
+	// be silently dropped.
+	longConv := "feat(" + strings.Repeat("a", 80) + "): "
+	got := applyLinearKeyPrefixes(session, longConv+"add new endpoint", nil)
+	require.LessOrEqual(t, len(got), maxPRTitleLen, "title must respect maxPRTitleLen even with a long scope")
+	require.Contains(t, got, "[ACS-1]", "primary identifier must always survive")
+	require.True(t, strings.HasPrefix(got, "feat("), "conventional commit prefix must be preserved")
+}
+
 func TestFormatBranchName_ResultSummaryFallback(t *testing.T) {
 	t.Parallel()
 

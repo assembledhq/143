@@ -32,11 +32,16 @@ import (
 )
 
 const (
-	defaultGitHubAPI   = "https://api.github.com"
-	maxBranchSlugLen   = 60
-	maxLabelsToCreate  = 5
-	maxPRTitleLen      = 120
-	prTemplateCacheTTL = 24 * time.Hour // re-fetch repo PR template after this duration
+	defaultGitHubAPI  = "https://api.github.com"
+	maxBranchSlugLen  = 60
+	maxLabelsToCreate = 5
+	maxPRTitleLen     = 120
+	// minPRTitleSubjectChars is the smallest descriptive subject we'll allow
+	// after Linear key prefixes are applied. Prefixes are trimmed (secondaries
+	// first) before the subject so a session linked to many issues can never
+	// produce a title that is just brackets with no human-readable content.
+	minPRTitleSubjectChars = 12
+	prTemplateCacheTTL     = 24 * time.Hour // re-fetch repo PR template after this duration
 )
 
 // PreviewStopper stops a running preview instance. Implemented by
@@ -1937,6 +1942,12 @@ func formatPRTitle(session *models.Session, issue *models.Issue) string {
 
 // stripLinearColonPrefix removes a leading "ACS-1234: " preamble from a
 // title so applyLinearKeyPrefixes can take over without duplicating the key.
+//
+// Linear enforces uppercase team keys at the workspace level (the team-key
+// editor in Linear's settings UI uppercases input on save), so a strictly
+// uppercase regex is sufficient. Any lowercase prefix here would be a
+// human-typed string Linear would not recognize as one of its keys, so we
+// deliberately leave it in place.
 var linearColonPrefixRE = regexp.MustCompile(`^[A-Z][A-Z0-9_]{0,9}-\d+\s*:\s*`)
 
 // linearKeyShapeRE matches a Linear human key like "ACS-1234". Used to gate
@@ -2021,48 +2032,74 @@ func applyLinearKeyPrefixes(session *models.Session, title string, primaryIssue 
 		return truncatePRTitle(title, maxPRTitleLen)
 	}
 
+	// Conventional commit prefix preserved: place Linear prefixes after it.
+	var conv, subject string
+	if m := conventionalCommitPrefixRE.FindStringSubmatch(title); len(m) == 3 {
+		conv, subject = m[1], m[2]
+	} else {
+		subject = title
+	}
+
 	// Cap prefix consumption so a session linked to many Linear issues
 	// doesn't push the descriptive subject out of the title. The primary
 	// (identifiers[0]) is always kept — Linear's GitHub integration only
 	// needs that one to claim the PR — and additional related identifiers
-	// are appended only while the running prefix fits the budget. Anything
-	// that doesn't fit is silently dropped from the title; users still see
-	// the full link set in the session detail header chips.
+	// are appended only while the running prefix leaves at least
+	// minPRTitleSubjectChars for the descriptive subject. Identifiers that
+	// don't fit are dropped from the title; users still see the full link
+	// set in the session detail header chips.
 	const prefixBudget = maxPRTitleLen / 2
-	bracketPrefix := strings.Builder{}
-	for i, id := range identifiers {
-		next := "[" + id + "] "
-		if i > 0 && bracketPrefix.Len()+len(next) > prefixBudget {
-			break
-		}
-		bracketPrefix.WriteString(next)
-	}
+	bracketPrefix := buildLinearBracketPrefix(identifiers, len(conv), prefixBudget)
 
-	// Conventional commit prefix preserved: place Linear prefixes after it.
-	if m := conventionalCommitPrefixRE.FindStringSubmatch(title); len(m) == 3 {
-		conv := m[1]
-		rest := m[2]
-		joined := conv + bracketPrefix.String() + rest
-		if len(joined) <= maxPRTitleLen {
-			return joined
-		}
-		// Trim the rest, never the prefixes.
-		fixed := conv + bracketPrefix.String()
-		if len(fixed) >= maxPRTitleLen {
-			return truncatePRTitle(strings.TrimSpace(fixed), maxPRTitleLen)
-		}
-		return fixed + truncatePRTitle(rest, maxPRTitleLen-len(fixed))
+	fixed := conv + bracketPrefix
+	// If conv + primary identifier alone overflow the title, fall back to
+	// truncating the whole joined string — losing some prefix is better than
+	// emitting a title with no descriptive content. buildLinearBracketPrefix
+	// has already trimmed secondaries to leave subject room when possible,
+	// so this only fires for pathological inputs (e.g. an extremely long
+	// conventional commit scope).
+	joined := fixed + subject
+	if len(fixed) >= maxPRTitleLen {
+		return truncatePRTitle(strings.TrimSpace(joined), maxPRTitleLen)
 	}
-
-	joined := bracketPrefix.String() + title
 	if len(joined) <= maxPRTitleLen {
 		return joined
 	}
-	fixed := bracketPrefix.String()
-	if len(fixed) >= maxPRTitleLen {
-		return truncatePRTitle(strings.TrimSpace(fixed), maxPRTitleLen)
+	// Trim the subject, never the prefix. The budget is positive here
+	// (len(fixed) < maxPRTitleLen), so truncatePRTitle gets a positive limit.
+	return fixed + truncatePRTitle(subject, maxPRTitleLen-len(fixed))
+}
+
+// buildLinearBracketPrefix concatenates `[KEY-N] ` prefixes while honoring
+// two budgets:
+//
+//   - prefixBudget caps total bracket characters so the prefix can't dominate
+//     the title.
+//   - The combined `convLen + bracket length + minPRTitleSubjectChars` must
+//     fit in maxPRTitleLen, so a descriptive subject always survives.
+//
+// The primary identifier (identifiers[0]) is always emitted, even if doing
+// so violates the subject budget — Linear's GitHub integration needs it to
+// claim the PR. Secondaries are added only while both budgets allow.
+func buildLinearBracketPrefix(identifiers []string, convLen, prefixBudget int) string {
+	if len(identifiers) == 0 {
+		return ""
 	}
-	return fixed + truncatePRTitle(title, maxPRTitleLen-len(fixed))
+	subjectBudget := maxPRTitleLen - convLen - minPRTitleSubjectChars
+	out := strings.Builder{}
+	for i, id := range identifiers {
+		next := "[" + id + "] "
+		if i > 0 {
+			if out.Len()+len(next) > prefixBudget {
+				break
+			}
+			if out.Len()+len(next) > subjectBudget {
+				break
+			}
+		}
+		out.WriteString(next)
+	}
+	return out.String()
 }
 
 // collectLinearIdentifiers returns the deterministically-ordered Linear

@@ -58,6 +58,12 @@ const botCommentPrefix = "🤖 143 automated update —"
 //   - the linked issue is `related` (only `primary` drives lifecycle)
 //   - org/team automation flags say "don't post session links to Linear"
 //
+// Authorization: writes are made with the org-level integration token, not
+// the requesting user's token. The Service-type doc comment explains the
+// access model — in short, any user who can create a linking session can
+// trigger these writes, and admins gate by toggling automation flags org-
+// wide or per-team rather than per-user.
+//
 // Idempotency: AttachmentID and CommentID in provider_state act as the
 // dedupe anchors. Re-running this with the same milestone is a no-op modulo
 // Linear-side metadata refresh.
@@ -114,20 +120,22 @@ func (s *Service) HandleMilestone(ctx context.Context, in MilestoneInput) error 
 	// this best-effort rescue is the closest we can get to outbox semantics
 	// without a side table.
 	//
-	// TODO(linear-outbox): close the unrescuable double-post window. If a
-	// Linear write succeeds server-side but the response is lost in flight
-	// (network reset, client timeout), we never observe the new ID, the
-	// rescue stages nothing, and the next retry posts a duplicate comment /
-	// attaches a duplicate attachment. Intrinsic to the lack of a client-
-	// supplied idempotency key on commentCreate / attachmentCreate.
-	// Mitigations considered and rejected for v1: per-write outbox table
-	// (heavy infra), pre-write listComments scan (extra round-trip on every
-	// milestone). The proper long-term fix is the outbox: stage the intended
-	// write under a deterministic key, hand it to a separate dispatcher
-	// that owns "did Linear see this yet" via a server-side scan keyed by
-	// our metadata. Operators who hit a duplicate today can delete the
-	// older comment in Linear; the AttachmentID we eventually record will
-	// be the latest write so future updates flow to the right object.
+	// Attachments are idempotent on (issueID, url) at the Linear API level
+	// — passing the same sessionURL returns the existing attachment — so
+	// the duplicate-post risk is comment-only. For comments we mitigate
+	// the lost-response zone (Linear write succeeded server-side but our
+	// response was lost) via FindRecentBotCommentByURL: when state has no
+	// recorded CommentID we scan recent comments for our session-URL
+	// signature before issuing commentCreate. This adds one extra GraphQL
+	// call per link's first milestone — every subsequent milestone takes
+	// the UpdateComment branch and skips the scan — so the lifetime cost
+	// is one extra round-trip per session-link, not per milestone.
+	//
+	// Residual risk: if the scan itself fails (rate limit, transient API
+	// error) we log and fall through to commentCreate, which may double-
+	// post on a lost-response retry. Operators chasing this can delete
+	// the older comment in Linear; the AttachmentID we record is the
+	// latest write so future updates flow to the right object.
 	var rescue db.LinearProviderState
 	hasRescue := false
 
@@ -156,15 +164,42 @@ func (s *Service) HandleMilestone(ctx context.Context, in MilestoneInput) error 
 			}
 
 			if state.CommentID == "" {
-				// First write — create. Subsequent milestones update in
-				// place to avoid notification fatigue.
-				commentID, err := client.CreateComment(ctx, in.IssueID, body)
-				if err != nil {
-					return fmt.Errorf("create linear comment: %w", err)
+				// Recovery scan for the lost-response zone: a prior attempt
+				// may have created a comment server-side that we never
+				// observed. Linear has no idempotency key on commentCreate,
+				// so we look for a comment whose body contains our
+				// deterministic session URL before issuing a fresh create.
+				// Best-effort: a scan failure is logged and we fall through
+				// to commentCreate (worst case is a duplicate, same as
+				// before this recovery existed).
+				orphan, scanErr := client.FindRecentBotCommentByURL(ctx, in.IssueID, sessionURL)
+				if scanErr != nil {
+					s.logger.Warn().Err(scanErr).
+						Str("link_id", in.Link.ID.String()).
+						Msg("linear comment-recovery scan failed; proceeding with commentCreate (may double-post on lost-response retry)")
 				}
-				state.CommentID = commentID
-				rescue.CommentID = commentID
-				hasRescue = true
+				if orphan != "" {
+					s.logger.Info().
+						Str("link_id", in.Link.ID.String()).
+						Str("recovered_comment_id", orphan).
+						Msg("linear comment-recovery: found orphaned comment from prior attempt; updating in place")
+					if err := client.UpdateComment(ctx, orphan, body); err != nil {
+						return fmt.Errorf("update recovered linear comment: %w", err)
+					}
+					state.CommentID = orphan
+					rescue.CommentID = orphan
+					hasRescue = true
+				} else {
+					// First write — create. Subsequent milestones update in
+					// place to avoid notification fatigue.
+					commentID, err := client.CreateComment(ctx, in.IssueID, body)
+					if err != nil {
+						return fmt.Errorf("create linear comment: %w", err)
+					}
+					state.CommentID = commentID
+					rescue.CommentID = commentID
+					hasRescue = true
+				}
 			} else {
 				if err := client.UpdateComment(ctx, state.CommentID, body); err != nil {
 					return fmt.Errorf("update linear comment: %w", err)
@@ -354,6 +389,15 @@ func teamKeyFromIdentifier(identifier string) string {
 // every guard from design 62 §"Guards (all must hold)". Records the decision
 // (transition or skip) in session_issue_link_state_events for fire-once and
 // audit. Replays are no-ops.
+//
+// Authorization: state transitions are made with the org-level integration
+// token. Per the Service-type doc comment, any user who can create a
+// linking session can trigger this code path, and admins must gate at the
+// org/team level via LinearAutomationSettings.MoveWorkflowStates rather
+// than per-user. The user-driven flag LinearStateSyncDisabled lets a
+// session opt out, and AllowPerSessionOverrides=false on the org settings
+// prevents users from setting that flag — both are enforced upstream of
+// this function.
 //
 // Atomicity: the row-level lock on provider_state plus the unique constraint
 // on (session_id, issue_id, event_kind) gate the Linear API call so a

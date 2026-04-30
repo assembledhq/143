@@ -41,7 +41,11 @@ func (c *teamKeyAllowlistCache) get(orgID uuid.UUID) (map[string]bool, bool) {
 	return entry.allow, true
 }
 
-func (c *teamKeyAllowlistCache) put(orgID uuid.UUID, allow map[string]bool) {
+// put inserts allow under orgID and opportunistically evicts other expired
+// entries. Returns the number of expired entries swept so the caller can
+// surface eviction activity in logs (operators verifying the TTL is firing
+// in production look for non-zero values in the breadcrumb).
+func (c *teamKeyAllowlistCache) put(orgID uuid.UUID, allow map[string]bool) int {
 	// Defensive copy of the inbound map so callers can't retain a reference
 	// to the cached storage and mutate it later. The caller in
 	// TeamKeyAllowlist already builds a fresh map per miss, but a future
@@ -62,15 +66,18 @@ func (c *teamKeyAllowlistCache) put(orgID uuid.UUID, allow map[string]bool) {
 	// indefinitely. The TTL window is short and put() is cold (cache miss
 	// path), so the O(n) walk is fine.
 	now := time.Now()
+	evicted := 0
 	for id, entry := range c.entries {
 		if now.After(entry.expiresAt) {
 			delete(c.entries, id)
+			evicted++
 		}
 	}
 	c.entries[orgID] = teamKeyCacheEntry{
 		allow:     stored,
 		expiresAt: now.Add(teamKeyCacheTTL),
 	}
+	return evicted
 }
 
 func (c *teamKeyAllowlistCache) invalidate(orgID uuid.UUID) {

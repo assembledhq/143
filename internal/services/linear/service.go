@@ -20,6 +20,35 @@ import (
 // attachment/comment/state mutations, coexistence checks). The session-create
 // handler decides only "resolve inline or enqueue pre-start preparation"; the
 // service answers everything else.
+//
+// Authorization model:
+//
+// Service writes (HandleMilestone, HandleStateTransition, the linker's
+// attachmentCreate / commentCreate / state-move calls) authenticate to
+// Linear with the org's stored integration token, NOT the requesting user's
+// token. This is intentional and follows Linear's own integration model
+// (one workspace-scoped install per org), but it has a consequence:
+//
+//	Any 143 user who can create a session linked to an issue in the
+//	connected Linear workspace can indirectly trigger an attachment, a
+//	rolling comment, and (when MoveWorkflowStates is enabled) workflow
+//	state transitions on that issue. There is no per-user check that the
+//	requesting user has Linear-side edit access to the issue.
+//
+// Org admins control the surface in two places:
+//
+//   - LinearAutomationSettings.MoveWorkflowStates / PostSessionLinks gate
+//     state transitions and comments at the org or per-team level. With
+//     MoveWorkflowStates=false, the service never calls workflow-state
+//     mutation APIs even on a session create that links to that team.
+//   - LinearAutomationSettings.AllowPerSessionOverrides gates whether an
+//     individual session can opt out of state-sync (linear_state_sync_disabled)
+//     or attachment/comment writes (linear_private). Setting this to false
+//     centralizes the policy decision with the admin.
+//
+// Per-user authorization (e.g. "this user shouldn't move that team's
+// issues") is intentionally out of scope for v1. Orgs that need stricter
+// isolation should disable MoveWorkflowStates org-wide or per-team.
 type Service struct {
 	logger zerolog.Logger
 
@@ -116,6 +145,11 @@ type Client interface {
 	CreateOrUpdateAttachment(ctx context.Context, in AttachmentWriteInput) (AttachmentResult, error)
 	CreateComment(ctx context.Context, issueID, body string) (string, error)
 	UpdateComment(ctx context.Context, commentID, body string) error
+	// FindRecentBotCommentByURL scans recent comments on the issue for one
+	// whose body contains the given session URL (used as a deterministic
+	// per-session marker). Returns "" if none match. Best-effort recovery
+	// for the lost-response zone in HandleMilestone — see writes.go.
+	FindRecentBotCommentByURL(ctx context.Context, issueID, sessionURL string) (string, error)
 	WorkflowStateForType(ctx context.Context, teamID string, prefer []string, stateType string) (*WorkflowState, error)
 	UpdateIssueState(ctx context.Context, issueID, stateID string) error
 	IssueRecentHumanEdits(ctx context.Context, issueID string, since time.Time) (bool, error)
@@ -404,7 +438,14 @@ func (s *Service) TeamKeyAllowlist(ctx context.Context, orgID uuid.UUID) (map[st
 	for _, k := range keys {
 		allow[k.TeamKey] = true
 	}
-	s.teamKeyCache.put(orgID, allow)
+	if evicted := s.teamKeyCache.put(orgID, allow); evicted > 0 {
+		// Eviction count surfaces TTL activity to operators chasing "is the
+		// cache actually expiring?" without committing to per-hit logging.
+		s.logger.Debug().
+			Int("evicted", evicted).
+			Str("org_id", orgID.String()).
+			Msg("linear team-key cache: swept expired entries on miss")
+	}
 	return copyAllowlist(allow), nil
 }
 
@@ -454,9 +495,24 @@ func (s *Service) RefreshTeamKeys(ctx context.Context, orgID uuid.UUID) error {
 // issues row for it. Used by the session-create fast path and the
 // prepare_linear_primary worker.
 //
-// Workspace verification: URL refs must match the connected workspace; bare
-// identifiers are confirmed via the Linear API. Cross-workspace refs drop
-// silently as required by design.
+// Workspace verification is asymmetric by design (62 §"Path B"):
+//
+//   - URL refs carry an explicit workspace slug and must match the org's
+//     connected workspace; mismatches drop silently via ErrCrossWorkspace.
+//   - Bare identifiers (e.g. "ACS-1234") have no workspace component, so
+//     they implicitly resolve against whichever workspace the integration
+//     is currently connected to. Detection only fires on bare identifiers
+//     for keys present in linear_team_keys, which limits collisions, but
+//     it does not validate workspace identity.
+//
+// Operational consequence: if an org's Linear workspace slug is renamed,
+// existing URL-ref'd issues created before the rename will start failing
+// the workspace check and drop silently, while bare-identifier refs will
+// continue to resolve against the new workspace as if nothing changed.
+// We accept this asymmetry — Linear treats workspace slugs as effectively
+// immutable after install — but operators reconnecting an integration to
+// a different workspace should expect URL-based detection to break for
+// historical references. Slug changes warrant an integration health note.
 func (s *Service) ResolvePrimary(ctx context.Context, orgID uuid.UUID, hit Detected) (*ResolvedIssue, error) {
 	integration, token, err := s.integrationFor(ctx, orgID)
 	if err != nil {

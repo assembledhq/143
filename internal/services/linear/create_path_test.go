@@ -48,6 +48,10 @@ func (c createPathClient) UpdateComment(context.Context, string, string) error {
 	return errors.New("UpdateComment not used")
 }
 
+func (c createPathClient) FindRecentBotCommentByURL(context.Context, string, string) (string, error) {
+	return "", nil
+}
+
 func (c createPathClient) WorkflowStateForType(context.Context, string, []string, string) (*WorkflowState, error) {
 	return nil, errors.New("WorkflowStateForType not used")
 }

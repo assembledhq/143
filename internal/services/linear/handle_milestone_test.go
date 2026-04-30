@@ -90,22 +90,25 @@ func (f *fakeStateEventStore) Insert(_ context.Context, _ uuid.UUID, in db.Linea
 // tests can assert "exactly one CreateComment was called even with a race"
 // and similar invariants.
 type fakeLinearClient struct {
-	mu                  sync.Mutex
-	createCommentCalls  int
-	updateCommentCalls  int
-	createOrUpdateCalls int
-	updateStateCalls    int
-	humanEdited         bool
-	hasGitHubAttachment bool
-	currentIssue        *FetchedIssue
-	commentIDToReturn   string
-	attachmentToReturn  AttachmentResult
-	target              *WorkflowState
-	updateStateErr      error
-	attachmentErr       error
-	createCommentErr    error
-	humanEditedErr      error
-	hasGitHubErr        error
+	mu                     sync.Mutex
+	createCommentCalls     int
+	updateCommentCalls     int
+	createOrUpdateCalls    int
+	updateStateCalls       int
+	findOrphanCommentCalls int
+	humanEdited            bool
+	hasGitHubAttachment    bool
+	currentIssue           *FetchedIssue
+	commentIDToReturn      string
+	attachmentToReturn     AttachmentResult
+	target                 *WorkflowState
+	updateStateErr         error
+	attachmentErr          error
+	createCommentErr       error
+	humanEditedErr         error
+	hasGitHubErr           error
+	findOrphanCommentID    string
+	findOrphanCommentErr   error
 }
 
 func newFakeLinearClient() *fakeLinearClient {
@@ -153,6 +156,13 @@ func (f *fakeLinearClient) UpdateComment(_ context.Context, _, _ string) error {
 	defer f.mu.Unlock()
 	f.updateCommentCalls++
 	return nil
+}
+
+func (f *fakeLinearClient) FindRecentBotCommentByURL(_ context.Context, _, _ string) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.findOrphanCommentCalls++
+	return f.findOrphanCommentID, f.findOrphanCommentErr
 }
 
 func (f *fakeLinearClient) WorkflowStateForType(_ context.Context, _ string, _ []string, _ string) (*WorkflowState, error) {
@@ -381,6 +391,73 @@ func TestHandleMilestone_RollingCommentTakesUpdateBranchAfterFirstWrite(t *testi
 	}
 	if client.updateCommentCalls != 1 {
 		t.Fatalf("second call must UpdateComment exactly once, got %d", client.updateCommentCalls)
+	}
+}
+
+// TestHandleMilestone_RecoversOrphanedCommentFromPriorAttempt pins the
+// recovery behavior for the lost-response zone. When a prior attempt
+// created a comment server-side but the response was lost, our local
+// state has CommentID="". On the next attempt, FindRecentBotCommentByURL
+// finds the orphan (matched by session URL) and we take the UpdateComment
+// branch instead of creating a duplicate.
+func TestHandleMilestone_RecoversOrphanedCommentFromPriorAttempt(t *testing.T) {
+	t.Parallel()
+	client := newFakeLinearClient()
+	client.findOrphanCommentID = "orphan-comment-7"
+	svc, provider, _ := buildTestService(t, client)
+	link := newPrimaryLink()
+	session := newSession()
+
+	if err := svc.HandleMilestone(context.Background(), MilestoneInput{
+		Event:      MilestoneLinked,
+		Session:    session,
+		Link:       link,
+		IssueID:    "linear-issue-id",
+		IssueIdent: "ACS-1",
+	}); err != nil {
+		t.Fatalf("HandleMilestone returned error: %v", err)
+	}
+	if client.findOrphanCommentCalls != 1 {
+		t.Fatalf("expected one FindRecentBotCommentByURL scan on first write, got %d", client.findOrphanCommentCalls)
+	}
+	if client.createCommentCalls != 0 {
+		t.Fatalf("recovery must NOT call CreateComment; got %d (would have created a duplicate)", client.createCommentCalls)
+	}
+	if client.updateCommentCalls != 1 {
+		t.Fatalf("recovery should UpdateComment exactly once on the orphan, got %d", client.updateCommentCalls)
+	}
+	if got := provider.rows[link.ID].CommentID; got != "orphan-comment-7" {
+		t.Fatalf("provider state should record the recovered comment id; got %q", got)
+	}
+}
+
+// TestHandleMilestone_RecoveryScanFailureFallsThroughToCreate verifies
+// that a transient FindRecentBotCommentByURL failure is logged but does
+// not block the milestone — we still issue commentCreate. Worst-case is
+// a duplicate (same as before recovery existed), best-case is a normal
+// first write.
+func TestHandleMilestone_RecoveryScanFailureFallsThroughToCreate(t *testing.T) {
+	t.Parallel()
+	client := newFakeLinearClient()
+	client.findOrphanCommentErr = errors.New("transient")
+	svc, _, _ := buildTestService(t, client)
+	link := newPrimaryLink()
+	session := newSession()
+
+	if err := svc.HandleMilestone(context.Background(), MilestoneInput{
+		Event:      MilestoneLinked,
+		Session:    session,
+		Link:       link,
+		IssueID:    "linear-issue-id",
+		IssueIdent: "ACS-1",
+	}); err != nil {
+		t.Fatalf("HandleMilestone should not surface scan errors: %v", err)
+	}
+	if client.findOrphanCommentCalls != 1 {
+		t.Fatalf("expected one scan attempt, got %d", client.findOrphanCommentCalls)
+	}
+	if client.createCommentCalls != 1 {
+		t.Fatalf("scan failure should fall through to CreateComment, got %d", client.createCommentCalls)
 	}
 }
 
