@@ -27,16 +27,16 @@ type ContainerUsageEvent struct {
 
 // UsageSummary is the aggregated billing data for an org over a time period.
 type UsageSummary struct {
-	OrgID                 uuid.UUID `json:"org_id"`
-	PeriodStart           time.Time `json:"period_start"`
-	PeriodEnd             time.Time `json:"period_end"`
-	TotalContainerMinutes float64   `json:"total_container_minutes"`
-	TotalSessions         int       `json:"total_sessions"`
-	PeakConcurrent        int       `json:"peak_concurrent"`
+	OrgID                 uuid.UUID        `json:"org_id"`
+	PeriodStart           time.Time        `json:"period_start"`
+	PeriodEnd             time.Time        `json:"period_end"`
+	TotalContainerMinutes float64          `json:"total_container_minutes"`
+	TotalSessions         int              `json:"total_sessions"`
+	PeakConcurrent        int              `json:"peak_concurrent"`
 	ByCapacity            []CapacityBucket `json:"by_capacity"`
-	TotalInputTokens      int64     `json:"total_input_tokens"`
-	TotalOutputTokens     int64     `json:"total_output_tokens"`
-	TotalLLMCostUSD       float64   `json:"total_llm_cost_usd"`
+	TotalInputTokens      int64            `json:"total_input_tokens"`
+	TotalOutputTokens     int64            `json:"total_output_tokens"`
+	TotalLLMCostUSD       float64          `json:"total_llm_cost_usd"`
 }
 
 // CapacityBucket groups usage by resource tier (CPU + memory combination).

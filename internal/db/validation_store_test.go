@@ -40,8 +40,8 @@ func TestValidationStore_Create_Success(t *testing.T) {
 
 	v := &models.Validation{
 		SessionID: uuid.New(),
-		OrgID:      uuid.New(),
-		Status:     "pending",
+		OrgID:     uuid.New(),
+		Status:    "pending",
 	}
 
 	mock.ExpectQuery("INSERT INTO validations").

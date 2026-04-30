@@ -3096,6 +3096,18 @@ func TestBuildPushScript_QuotesHostileBranchName(t *testing.T) {
 	require.Contains(t, script, `HEAD:refs/heads/'143/abc/it'\''s-fine'`)
 }
 
+func TestFormatBranchName_PrefersSessionWorkingBranch(t *testing.T) {
+	t.Parallel()
+
+	workingBranch := "143/abc123/fix-typo"
+	session := &models.Session{
+		ID:            uuid.MustParse("11111111-2222-3333-4444-555555555555"),
+		WorkingBranch: &workingBranch,
+	}
+
+	require.Equal(t, workingBranch, formatBranchName(session, &models.Issue{Title: "Ignored"}), "formatBranchName should reuse the session working branch when present")
+}
+
 func TestGithubAPIError_IsNoCommitsBetween(t *testing.T) {
 	t.Parallel()
 

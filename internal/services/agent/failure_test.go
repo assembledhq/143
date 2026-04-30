@@ -133,7 +133,7 @@ func TestClassifyFailure(t *testing.T) {
 		},
 		{
 			name: "empty diff no error",
-			run: models.Session{
+			run:  models.Session{
 				// No error, no diff
 			},
 			wantCategory:     "context",

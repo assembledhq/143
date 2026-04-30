@@ -454,12 +454,11 @@ func (o *Orchestrator) prepareSandboxGitHubAuth(
 	ctx context.Context,
 	run *models.Session,
 	repo *models.Repository,
-	integrationSkills string,
 	fallbackToken string,
 	sandboxCfg *SandboxConfig,
 	log zerolog.Logger,
 ) (*sandboxGitHubAuthState, error) {
-	if repo == nil || integrationSkills == "" || sandboxCfg == nil {
+	if repo == nil || sandboxCfg == nil {
 		return nil, nil
 	}
 	if repo.FullName != "" {
@@ -478,6 +477,19 @@ func (o *Orchestrator) prepareSandboxGitHubAuth(
 			Msg("sandbox auth socket bridge unavailable; falling back to env token (legacy path)")
 		if fallbackToken != "" {
 			sandboxCfg.Env["GITHUB_TOKEN"] = fallbackToken
+		}
+		name, email := identity.CommitIdentity(nil)
+		sandboxCfg.Env[sandboxauth.GitNameEnvVar] = name
+		sandboxCfg.Env[sandboxauth.GitEmailEnvVar] = email
+		prependSandboxBinDir(sandboxCfg.Env, sandboxCfg.HomeDir)
+		if run.TriggeredByUserID != nil && o.users != nil {
+			if user, userErr := o.users.GetByID(ctx, run.OrgID, *run.TriggeredByUserID); userErr == nil {
+				if trailer := identity.CoAuthorTrailer(&user); trailer != "" {
+					sandboxCfg.Env[sandboxauth.CoAuthorEnvVar] = trailer
+				}
+			} else {
+				log.Warn().Err(userErr).Str("user_id", run.TriggeredByUserID.String()).Msg("failed to load triggering user for legacy co-author trailer")
+			}
 		}
 		return nil, nil
 	}
@@ -1014,6 +1026,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 		repoURL, branch, token, repoFullName string
 		authRepo                             *models.Repository
 	)
+	var designatedWorkingBranch string
 	if resolvedRepoID != nil {
 		repo, err := o.repositories.GetByID(ctx, run.OrgID, *resolvedRepoID)
 		if err != nil {
@@ -1038,6 +1051,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 		token = ghToken
 		repoCopy := repo
 		authRepo = &repoCopy
+		designatedWorkingBranch = sessionWorkingBranch(run, issue)
 	}
 
 	// 5. Get the adapter for this agent type.
@@ -1148,6 +1162,9 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 			sandboxCfg.Env[envVar] = *run.ModelOverride
 		}
 	}
+	if designatedWorkingBranch != "" {
+		sandboxCfg.Env[sandboxauth.WorkingBranchEnvVar] = designatedWorkingBranch
+	}
 	if err := o.env.CheckAuth(run.AgentType, sandboxCfg.Env); err != nil {
 		o.failRun(ctx, run, err.Error())
 		return err
@@ -1159,7 +1176,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 	if slug := SlugForRepo(repoFullName); slug != "" {
 		sandboxCfg.WorkDir = sandboxCfg.HomeDir + "/" + slug
 	}
-	authState, authErr := o.prepareSandboxGitHubAuth(ctx, run, authRepo, input.IntegrationSkills, token, &sandboxCfg, log)
+	authState, authErr := o.prepareSandboxGitHubAuth(ctx, run, authRepo, token, &sandboxCfg, log)
 	if authErr != nil {
 		o.failRun(ctx, run, authErr.Error())
 		return authErr
@@ -1300,21 +1317,20 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 
 		// 8b. Create a working branch so the agent operates on a separate
 		// branch from the start, keeping the base branch clean.
-		workingBranch := formatWorkingBranch(run, issue)
+		workingBranch := designatedWorkingBranch
 		checkoutCmd := fmt.Sprintf("git checkout -b '%s'", shellEscapeSingleQuote(workingBranch))
 		var checkoutOut, checkoutErr bytes.Buffer
 		exitCode, execErr := o.provider.Exec(ctx, sandbox, checkoutCmd, &checkoutOut, &checkoutErr)
 		if execErr != nil || exitCode != 0 {
-			log.Warn().
-				Err(execErr).
-				Int("exit_code", exitCode).
-				Str("stderr", checkoutErr.String()).
-				Msg("failed to create working branch, agent will work on base branch")
-		} else {
-			run.WorkingBranch = &workingBranch
-			if dbErr := o.sessions.UpdateWorkingBranch(ctx, run.OrgID, run.ID, workingBranch); dbErr != nil {
-				log.Warn().Err(dbErr).Str("branch", workingBranch).Msg("failed to persist working branch")
+			o.failRun(ctx, run, fmt.Sprintf("create working branch: exit=%d err=%v stderr=%s", exitCode, execErr, checkoutErr.String()))
+			if execErr != nil {
+				return fmt.Errorf("create working branch %s: exit=%d err=%w stderr=%s", workingBranch, exitCode, execErr, checkoutErr.String())
 			}
+			return fmt.Errorf("create working branch %s: exit=%d stderr=%s", workingBranch, exitCode, checkoutErr.String())
+		}
+		run.WorkingBranch = &workingBranch
+		if dbErr := o.sessions.UpdateWorkingBranch(ctx, run.OrgID, run.ID, workingBranch); dbErr != nil {
+			log.Warn().Err(dbErr).Str("branch", workingBranch).Msg("failed to persist working branch")
 		}
 
 		// 8c. Wire git/gh inside the sandbox up to the per-session credential
@@ -1322,9 +1338,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 		// the .git directory exists; idempotent so it's safe to re-run on
 		// session resume. Skipped when the auth socket isn't bound (legacy
 		// or non-integration path).
-		if sandboxCfg.AuthSocketPath != "" {
-			o.runSandboxGitBootstrap(ctx, sandbox, sandboxCfg.WorkDir, log)
-		}
+		o.runSandboxGitBootstrap(ctx, sandbox, sandboxCfg.WorkDir, log)
 		// 8d. Stamp git identity on the session row for audit. Best-effort —
 		// a failure here only affects post-hoc reporting, not the run.
 		if authState != nil && authState.source != "" {
@@ -1709,6 +1723,9 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 			sandboxCfg.Env[envVar] = *session.ModelOverride
 		}
 	}
+	if branch := sessionWorkingBranch(session, promptIssue); branch != "" {
+		sandboxCfg.Env[sandboxauth.WorkingBranchEnvVar] = branch
+	}
 	if authErr := o.env.CheckAuth(session.AgentType, sandboxCfg.Env); authErr != nil {
 		log.Error().Err(authErr).Msg("agent auth pre-flight failed during continue_session")
 		if revertErr := o.sessions.UpdateStatus(ctx, session.OrgID, session.ID, string(models.SessionStatusIdle)); revertErr != nil {
@@ -1783,7 +1800,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	if repoID == nil && promptIssue != nil {
 		repoID = promptIssue.RepositoryID
 	}
-	if repoID != nil && integrationSkills != "" {
+	if repoID != nil {
 		repo, repoErr := o.repositories.GetByID(ctx, session.OrgID, *repoID)
 		if repoErr != nil {
 			log.Error().Err(repoErr).Msg("failed to fetch repository for continue-session auth wiring")
@@ -1823,7 +1840,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 			fallbackToken = token
 		}
 		repoCopy := repo
-		authState, authErr = o.prepareSandboxGitHubAuth(ctx, session, &repoCopy, integrationSkills, fallbackToken, &sandboxCfg, log)
+		authState, authErr = o.prepareSandboxGitHubAuth(ctx, session, &repoCopy, fallbackToken, &sandboxCfg, log)
 		if authErr != nil {
 			log.Error().Err(authErr).Msg("failed to wire GitHub auth for continue-session sandbox")
 			if revertErr := o.sessions.UpdateStatus(ctx, session.OrgID, session.ID, string(models.SessionStatusIdle)); revertErr != nil {
@@ -2052,7 +2069,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 				return err
 			}
 		}
-		if !reusedExisting && sandboxCfg.AuthSocketPath != "" {
+		if !reusedExisting {
 			o.runSandboxGitBootstrap(ctx, sandbox, sandboxCfg.WorkDir, log)
 		}
 
@@ -2096,9 +2113,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 			o.failRun(ctx, session, fmt.Sprintf("setup fresh sandbox: %s", err))
 			return fmt.Errorf("setup fresh sandbox: %w", err)
 		}
-		if sandboxCfg.AuthSocketPath != "" {
-			o.runSandboxGitBootstrap(ctx, sandbox, sandboxCfg.WorkDir, log)
-		}
+		o.runSandboxGitBootstrap(ctx, sandbox, sandboxCfg.WorkDir, log)
 
 		// Build a full prompt via PreparePrompt so the agent gets the system
 		// prompt with integration skills, memory, and repo conventions.
@@ -2286,6 +2301,18 @@ func (o *Orchestrator) setupFreshSandbox(ctx context.Context, session *models.Se
 		}
 		if err := o.provider.CloneRepo(ctx, sandbox, repo.CloneURL, branch, token); err != nil {
 			return models.Issue{}, "", fmt.Errorf("clone repo: %w", err)
+		}
+		workingBranch := sessionWorkingBranch(session, &issue)
+		if workingBranch != "" {
+			var checkoutOut, checkoutErr bytes.Buffer
+			exitCode, execErr := o.provider.Exec(ctx, sandbox, fmt.Sprintf("git checkout -b '%s'", shellEscapeSingleQuote(workingBranch)), &checkoutOut, &checkoutErr)
+			if execErr != nil {
+				return models.Issue{}, "", fmt.Errorf("create working branch %s: %w", workingBranch, execErr)
+			}
+			if exitCode != 0 {
+				return models.Issue{}, "", fmt.Errorf("create working branch %s: exit=%d stderr=%s", workingBranch, exitCode, checkoutErr.String())
+			}
+			session.WorkingBranch = &workingBranch
 		}
 	}
 
@@ -3211,8 +3238,16 @@ func slugifyForBranch(s string) string {
 	return s
 }
 
+func sessionWorkingBranch(run *models.Session, issue *models.Issue) string {
+	if run != nil && run.WorkingBranch != nil && *run.WorkingBranch != "" {
+		return *run.WorkingBranch
+	}
+	return formatWorkingBranch(run, issue)
+}
+
 // formatWorkingBranch generates a branch name for an agent session.
-// Format: 143-<short-id>-<slug> — short, flat, and descriptive.
+// Format: 143/<short-id>/<slug> so the local working branch and the PR push
+// branch stay identical across fresh runs, resumes, and PR creation.
 func formatWorkingBranch(run *models.Session, issue *models.Issue) string {
 	short := run.ID.String()[:8]
 
@@ -3227,7 +3262,7 @@ func formatWorkingBranch(run *models.Session, issue *models.Issue) string {
 		slug = "session"
 	}
 
-	return fmt.Sprintf("143-%s-%s", short, slug)
+	return fmt.Sprintf("143/%s/%s", short, slug)
 }
 
 // shellEscapeSingleQuote escapes single quotes for safe use in shell commands.

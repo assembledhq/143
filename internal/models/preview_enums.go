@@ -117,11 +117,11 @@ func (s PreviewInfraStatus) Validate() error {
 type PreviewSnapshotTrigger string
 
 const (
-	PreviewSnapshotTriggerBaseline    PreviewSnapshotTrigger = "baseline"
-	PreviewSnapshotTriggerAgentChange PreviewSnapshotTrigger = "agent_change"
+	PreviewSnapshotTriggerBaseline      PreviewSnapshotTrigger = "baseline"
+	PreviewSnapshotTriggerAgentChange   PreviewSnapshotTrigger = "agent_change"
 	PreviewSnapshotTriggerAgentExplicit PreviewSnapshotTrigger = "agent_explicit"
-	PreviewSnapshotTriggerUserRequest PreviewSnapshotTrigger = "user_request"
-	PreviewSnapshotTriggerDesignMode  PreviewSnapshotTrigger = "design_mode"
+	PreviewSnapshotTriggerUserRequest   PreviewSnapshotTrigger = "user_request"
+	PreviewSnapshotTriggerDesignMode    PreviewSnapshotTrigger = "design_mode"
 )
 
 func (t PreviewSnapshotTrigger) Validate() error {

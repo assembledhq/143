@@ -735,7 +735,7 @@ type notionSearchRequest struct {
 	Query       string              `json:"query,omitempty"`
 	Filter      *notionSearchFilter `json:"filter,omitempty"`
 	PageSize    int                 `json:"page_size,omitempty"`
-	StartCursor string             `json:"start_cursor,omitempty"`
+	StartCursor string              `json:"start_cursor,omitempty"`
 }
 
 type notionSearchFilter struct {
@@ -746,17 +746,17 @@ type notionSearchFilter struct {
 type notionSearchResponse struct {
 	Results    []notionPage `json:"results"`
 	HasMore    bool         `json:"has_more"`
-	NextCursor string      `json:"next_cursor"`
+	NextCursor string       `json:"next_cursor"`
 }
 
 type notionPage struct {
-	ID             string                      `json:"id"`
-	URL            string                      `json:"url"`
-	CreatedTime    string                      `json:"created_time"`
-	LastEditedTime string                      `json:"last_edited_time"`
-	CreatedBy      notionUser                  `json:"created_by"`
-	Properties     map[string]notionProperty   `json:"properties"`
-	Title          []notionRichText            `json:"title"` // databases use this
+	ID             string                    `json:"id"`
+	URL            string                    `json:"url"`
+	CreatedTime    string                    `json:"created_time"`
+	LastEditedTime string                    `json:"last_edited_time"`
+	CreatedBy      notionUser                `json:"created_by"`
+	Properties     map[string]notionProperty `json:"properties"`
+	Title          []notionRichText          `json:"title"` // databases use this
 }
 
 type notionUser struct {
@@ -789,32 +789,32 @@ type notionDate struct {
 type notionBlocksResponse struct {
 	Results    []notionBlock `json:"results"`
 	HasMore    bool          `json:"has_more"`
-	NextCursor string       `json:"next_cursor"`
+	NextCursor string        `json:"next_cursor"`
 }
 
 type notionBlock struct {
-	ID              string `json:"id"`
-	Type            string `json:"type"`
-	HasChildren     bool   `json:"has_children"`
+	ID          string `json:"id"`
+	Type        string `json:"type"`
+	HasChildren bool   `json:"has_children"`
 
 	// Type-specific content. Only the field matching Type is populated.
-	Paragraph        *notionTextBlock   `json:"paragraph,omitempty"`
-	Heading1         *notionTextBlock   `json:"heading_1,omitempty"`
-	Heading2         *notionTextBlock   `json:"heading_2,omitempty"`
-	Heading3         *notionTextBlock   `json:"heading_3,omitempty"`
-	BulletedListItem *notionTextBlock   `json:"bulleted_list_item,omitempty"`
-	NumberedListItem *notionTextBlock   `json:"numbered_list_item,omitempty"`
-	ToDo             *notionToDoBlock   `json:"to_do,omitempty"`
-	Toggle           *notionTextBlock   `json:"toggle,omitempty"`
-	Code             *notionCodeBlock   `json:"code,omitempty"`
-	Quote            *notionTextBlock   `json:"quote,omitempty"`
+	Paragraph        *notionTextBlock    `json:"paragraph,omitempty"`
+	Heading1         *notionTextBlock    `json:"heading_1,omitempty"`
+	Heading2         *notionTextBlock    `json:"heading_2,omitempty"`
+	Heading3         *notionTextBlock    `json:"heading_3,omitempty"`
+	BulletedListItem *notionTextBlock    `json:"bulleted_list_item,omitempty"`
+	NumberedListItem *notionTextBlock    `json:"numbered_list_item,omitempty"`
+	ToDo             *notionToDoBlock    `json:"to_do,omitempty"`
+	Toggle           *notionTextBlock    `json:"toggle,omitempty"`
+	Code             *notionCodeBlock    `json:"code,omitempty"`
+	Quote            *notionTextBlock    `json:"quote,omitempty"`
 	Callout          *notionCalloutBlock `json:"callout,omitempty"`
-	Image            *notionFileBlock   `json:"image,omitempty"`
-	Bookmark         *notionBookmark    `json:"bookmark,omitempty"`
-	Table            *notionTableBlock  `json:"table,omitempty"`
-	TableRow         *notionTableRow    `json:"table_row,omitempty"`
-	ChildPage        *notionChildRef    `json:"child_page,omitempty"`
-	ChildDatabase    *notionChildRef    `json:"child_database,omitempty"`
+	Image            *notionFileBlock    `json:"image,omitempty"`
+	Bookmark         *notionBookmark     `json:"bookmark,omitempty"`
+	Table            *notionTableBlock   `json:"table,omitempty"`
+	TableRow         *notionTableRow     `json:"table_row,omitempty"`
+	ChildPage        *notionChildRef     `json:"child_page,omitempty"`
+	ChildDatabase    *notionChildRef     `json:"child_database,omitempty"`
 
 	// Populated by fetchAllBlocks for blocks with has_children=true.
 	Children []notionBlock `json:"-"`
@@ -860,9 +860,9 @@ type notionBookmark struct {
 }
 
 type notionTableBlock struct {
-	TableWidth     int  `json:"table_width"`
+	TableWidth      int  `json:"table_width"`
 	HasColumnHeader bool `json:"has_column_header"`
-	HasRowHeader   bool `json:"has_row_header"`
+	HasRowHeader    bool `json:"has_row_header"`
 }
 
 type notionTableRow struct {
@@ -874,9 +874,9 @@ type notionChildRef struct {
 }
 
 type notionRichText struct {
-	PlainText   string              `json:"plain_text"`
-	Href        string              `json:"href,omitempty"`
-	Annotations notionAnnotations   `json:"annotations"`
+	PlainText   string            `json:"plain_text"`
+	Href        string            `json:"href,omitempty"`
+	Annotations notionAnnotations `json:"annotations"`
 }
 
 type notionAnnotations struct {

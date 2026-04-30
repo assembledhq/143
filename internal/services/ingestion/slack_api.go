@@ -57,11 +57,11 @@ type slackResponseMetadata struct {
 
 // slackHistoryResponse is the response shape for conversations.history.
 type slackHistoryResponse struct {
-	OK               bool                   `json:"ok"`
-	Error            string                 `json:"error,omitempty"`
-	Messages         []SlackMessage         `json:"messages"`
-	HasMore          bool                   `json:"has_more"`
-	ResponseMetadata slackResponseMetadata  `json:"response_metadata"`
+	OK               bool                  `json:"ok"`
+	Error            string                `json:"error,omitempty"`
+	Messages         []SlackMessage        `json:"messages"`
+	HasMore          bool                  `json:"has_more"`
+	ResponseMetadata slackResponseMetadata `json:"response_metadata"`
 }
 
 // slackRepliesResponse is the response shape for conversations.replies.
