@@ -827,7 +827,7 @@ export function PreviewPanel({
           <div className="space-y-1">
             <p className="text-sm font-medium">No preview running</p>
             <p className="text-xs text-muted-foreground">
-              Start a preview to see live changes from the agent.
+              Start a preview to see live changes from the agent. Note that it can take a few minutes for the environment to finish booting.
             </p>
           </div>
           <Button
@@ -840,7 +840,6 @@ export function PreviewPanel({
             Start Preview
           </Button>
           <p className="text-xs text-muted-foreground">
-            Preview startup can take a few minutes once the environment begins booting.
           </p>
         </div>
       )}
