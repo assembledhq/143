@@ -1766,13 +1766,16 @@ func (s *SessionStore) UpdateWorkingBranch(ctx context.Context, orgID, sessionID
 // failed with an explanatory error.
 // lint:allow-no-orgid reason="cross-org reaper scan for stuck pending sessions"
 func (s *SessionStore) ListStalePendingSessions(ctx context.Context, createdBefore time.Time) ([]models.Session, error) {
+	// No alias on `sessions`: sessionPrimaryIssueIDColumn references
+	// sessions.org_id / sessions.id literally, and a table alias would shadow
+	// the original name (Postgres 42P01).
 	query := `
 		SELECT ` + sessionListColumns + `
-		FROM sessions s
-		WHERE s.status = 'pending'
-		  AND s.deleted_at IS NULL
-		  AND s.created_at < @created_before
-		ORDER BY s.created_at ASC
+		FROM sessions
+		WHERE status = 'pending'
+		  AND deleted_at IS NULL
+		  AND created_at < @created_before
+		ORDER BY created_at ASC
 		LIMIT 100`
 
 	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
@@ -1805,14 +1808,17 @@ func (s *SessionStore) ListStalePendingSessions(ctx context.Context, createdBefo
 // corrupted write path and needs investigation rather than reaping.
 // lint:allow-no-orgid reason="cross-org reaper scan for stuck running sessions"
 func (s *SessionStore) ListStaleRunningSessions(ctx context.Context, startedBefore time.Time) ([]models.Session, error) {
+	// No alias on `sessions`: sessionPrimaryIssueIDColumn references
+	// sessions.org_id / sessions.id literally, and a table alias would shadow
+	// the original name (Postgres 42P01).
 	query := `
 		SELECT ` + sessionListColumns + `
-		FROM sessions s
-		WHERE s.status = 'running'
-		  AND s.deleted_at IS NULL
-		  AND s.started_at IS NOT NULL
-		  AND s.started_at < @started_before
-		ORDER BY s.started_at ASC
+		FROM sessions
+		WHERE status = 'running'
+		  AND deleted_at IS NULL
+		  AND started_at IS NOT NULL
+		  AND started_at < @started_before
+		ORDER BY started_at ASC
 		LIMIT 100`
 
 	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
