@@ -320,14 +320,23 @@ export function ManualSessionCreatePageContent() {
     setBranchByRepoId((prev) => ({ ...prev, [selectedRepoId]: branch }));
   };
 
+  const codexAuthCompleted = codexAuthResponse?.data?.status === "completed";
   const modelGroups = useMemo(() => {
+    // Only show agents whose integrations are configured, so the picker matches
+    // what the user can actually run — same gating as AgentKeyRequiredBanner.
+    const integratedAgents = AGENTS.filter((agent) => {
+      if (agent.key === "codex" && codexAuthCompleted) return true;
+      return resolvedCredentials.some(
+        (c) => c.provider === agent.providerKey && c.source !== "none",
+      );
+    });
     // Sort so the default agent type appears first, preserve original order otherwise.
-    return [...AGENTS].sort((a, b) => {
+    return [...integratedAgents].sort((a, b) => {
       if (a.key === defaultAgentType) return -1;
       if (b.key === defaultAgentType) return 1;
       return AGENTS.indexOf(a) - AGENTS.indexOf(b);
     });
-  }, [defaultAgentType]);
+  }, [defaultAgentType, resolvedCredentials, codexAuthCompleted]);
 
   // Determine which agent type would be used and whether credentials exist.
   const effectiveAgentType: string = selectedModel ? agentTypeForModel(selectedModel) ?? defaultAgentType : defaultAgentType;
