@@ -629,8 +629,25 @@ func (d *DockerProvider) ConnectionInfo(ctx context.Context, sb *agent.Sandbox) 
 	}, nil
 }
 
+// tarStderrCap bounds how much stderr we keep from snapshot/restore tar
+// processes for diagnostic messages. Tar's error output is short by design;
+// 4 KiB leaves room for several wrapped messages without unbounded memory
+// growth on a tar that goes haywire (e.g. runaway warnings on a huge tree).
+const tarStderrCap = 4 * 1024
+
+// execPollInterval is how often we poll Docker to discover that an exec
+// process has finished. 50 ms keeps responsiveness without burning CPU on
+// idle sessions; matches the cadence Restore used historically.
+const execPollInterval = 50 * time.Millisecond
+
 // Snapshot tars the workspace and agent state directories from the container.
 // The returned reader streams a compressed tar archive; the caller must close it.
+//
+// Tar's exit status is checked after the stream completes — a non-zero exit
+// surfaces as an error from Read or Close on the returned ReadCloser. This
+// matters: an earlier version silently uploaded partial archives whenever tar
+// failed (e.g. when the gVisor runtime crashed mid-turn), which left sessions
+// permanently un-restorable. We now refuse to claim success on a broken tar.
 func (d *DockerProvider) Snapshot(ctx context.Context, sb *agent.Sandbox) (io.ReadCloser, error) {
 	d.logger.Info().
 		Str("container_id", sb.ID).
@@ -639,10 +656,14 @@ func (d *DockerProvider) Snapshot(ctx context.Context, sb *agent.Sandbox) (io.Re
 	// Tar workspace + agent state dirs. --ignore-failed-read handles missing dirs gracefully.
 	// Agent state dirs (.claude/, .codex/, .gemini/) live under HomeDir, not WorkDir —
 	// HOME is set to the sandbox user's home so CLI configs resolve there.
+	//
+	// Stderr is intentionally NOT redirected to /dev/null inside the shell so
+	// diagnostic messages from a failing tar reach our caller via the docker
+	// multiplex stream. --ignore-failed-read keeps benign warnings silent.
 	workDirRel := strings.TrimPrefix(sb.WorkDir, "/")
 	homeDirRel := strings.TrimPrefix(sb.HomeDir, "/")
 	cmd := fmt.Sprintf(
-		"tar czf - --ignore-failed-read -C / '%s' '%s/.claude' '%s/.codex' '%s/.gemini' 2>/dev/null",
+		"tar czf - --ignore-failed-read -C / '%s' '%s/.claude' '%s/.codex' '%s/.gemini'",
 		workDirRel, homeDirRel, homeDirRel, homeDirRel,
 	)
 
@@ -662,19 +683,34 @@ func (d *DockerProvider) Snapshot(ctx context.Context, sb *agent.Sandbox) (io.Re
 		return nil, fmt.Errorf("attach snapshot exec: %w", err)
 	}
 
-	// Docker multiplexes stdout/stderr. We pipe into a buffer via StdCopy
-	// and return a reader over the stdout portion.
+	// Docker multiplexes stdout/stderr over a single connection. StdCopy
+	// demuxes: tar's stdout (the archive) flows through the pipe to the
+	// caller; stderr is captured into a bounded buffer so a non-zero exit
+	// surfaces an actionable error rather than a bare "code 2".
 	pr, pw := io.Pipe()
 	go func() {
 		defer attachResp.Close()
-		_, err := stdcopy.StdCopy(pw, io.Discard, attachResp.Reader)
-		pw.CloseWithError(err)
+
+		stderrBuf := newCappedBuffer(tarStderrCap)
+		_, copyErr := stdcopy.StdCopy(pw, stderrBuf, attachResp.Reader)
+
+		// StdCopy returning means the connection drained, not that tar
+		// exited. Without this wait we'd accept a half-written gzip stream
+		// as a successful snapshot the moment the connection closed.
+		inspect, waitErr := waitForExecExit(ctx, d.client, execResp.ID)
+
+		pw.CloseWithError(snapshotExecError(copyErr, waitErr, inspect, stderrBuf))
 	}()
 
 	return pr, nil
 }
 
 // Restore extracts a snapshot tarball into the sandbox container.
+//
+// Tar's stderr is captured (bounded) and included in the error returned
+// when tar exits non-zero. Without that, callers see only "exited with
+// code N" and have to guess whether the archive is corrupt, the path is
+// missing, or the container ran out of disk.
 func (d *DockerProvider) Restore(ctx context.Context, sb *agent.Sandbox, reader io.Reader) error {
 	d.logger.Info().
 		Str("container_id", sb.ID).
@@ -706,31 +742,123 @@ func (d *DockerProvider) Restore(ctx context.Context, sb *agent.Sandbox, reader 
 	// does not affect the snapshot data already written.
 	_ = attachResp.CloseWrite()
 
-	// Drain stdout/stderr so the exec process can finish writing.
-	// Without this, the process may block on a full output buffer.
-	_, _ = stdcopy.StdCopy(io.Discard, io.Discard, attachResp.Reader)
+	// Drain stdout/stderr so the exec process can finish writing. Stderr is
+	// captured in a bounded buffer so a non-zero exit surfaces tar's actual
+	// complaint instead of just an exit code.
+	stderrBuf := newCappedBuffer(tarStderrCap)
+	_, _ = stdcopy.StdCopy(io.Discard, stderrBuf, attachResp.Reader)
 
-	// Poll until the exec process finishes. ContainerExecInspect may return
-	// Running=true if called immediately after CloseWrite.
-	ticker := time.NewTicker(50 * time.Millisecond)
+	inspect, err := waitForExecExit(ctx, d.client, execResp.ID)
+	if err != nil {
+		return fmt.Errorf("inspect restore exec: %w", err)
+	}
+	if inspect.ExitCode != 0 {
+		return fmt.Errorf("restore tar exited with code %d%s", inspect.ExitCode, formatStderrSuffix(stderrBuf))
+	}
+	return nil
+}
+
+// waitForExecExit polls until the given exec finishes and returns the
+// inspect snapshot. Polls at execPollInterval and respects ctx cancellation;
+// the only error returns are ctx.Err() and inspect transport failures.
+func waitForExecExit(ctx context.Context, client DockerClient, execID string) (container.ExecInspect, error) {
+	ticker := time.NewTicker(execPollInterval)
 	defer ticker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			return container.ExecInspect{}, ctx.Err()
 		case <-ticker.C:
-			inspectResp, err := d.client.ContainerExecInspect(ctx, execResp.ID)
+			inspect, err := client.ContainerExecInspect(ctx, execID)
 			if err != nil {
-				return fmt.Errorf("inspect restore exec: %w", err)
+				return container.ExecInspect{}, err
 			}
-			if !inspectResp.Running {
-				if inspectResp.ExitCode != 0 {
-					return fmt.Errorf("restore tar exited with code %d", inspectResp.ExitCode)
-				}
-				return nil
+			if !inspect.Running {
+				return inspect, nil
 			}
 		}
 	}
+}
+
+// snapshotExecError rolls up the three failure modes of a snapshot tar — an
+// in-flight read error, a Docker inspect failure waiting for the exec to
+// finish, or a non-zero tar exit — into the single error that gets handed
+// to the caller via PipeWriter.CloseWithError. nil means clean EOF.
+func snapshotExecError(copyErr, waitErr error, inspect container.ExecInspect, stderr *cappedBuffer) error {
+	switch {
+	case copyErr != nil:
+		return fmt.Errorf("read snapshot stream: %w", copyErr)
+	case waitErr != nil:
+		return fmt.Errorf("wait for snapshot tar: %w", waitErr)
+	case inspect.ExitCode != 0:
+		return fmt.Errorf("snapshot tar exited with code %d%s", inspect.ExitCode, formatStderrSuffix(stderr))
+	default:
+		return nil
+	}
+}
+
+// formatStderrSuffix renders captured stderr into an error suffix like
+// `: tar: /workspace: Cannot stat: ...`, or "" if stderr was empty.
+// Whitespace (often a trailing newline) is trimmed for readability.
+func formatStderrSuffix(stderr *cappedBuffer) string {
+	if stderr == nil || stderr.Len() == 0 {
+		return ""
+	}
+	msg := strings.TrimSpace(stderr.String())
+	if msg == "" {
+		return ""
+	}
+	return ": " + msg
+}
+
+// cappedBuffer is a write-only sink that retains at most limit bytes and
+// silently drops the rest, while still reporting a "successful" Write.
+// Used for capturing diagnostic stderr without unbounded memory exposure
+// to a misbehaving process.
+//
+// Invariant: limit > 0 (enforced by newCappedBuffer). That means dropped
+// only ever flips to true after at least one byte has been buffered, so
+// `Len() == 0` reliably implies "no data captured" — callers can use Len
+// alone to gate empty-message handling without also having to consult
+// dropped.
+type cappedBuffer struct {
+	buf     bytes.Buffer
+	limit   int
+	dropped bool
+}
+
+func newCappedBuffer(limit int) *cappedBuffer {
+	if limit <= 0 {
+		// A zero/negative cap would let dropped flip to true with Len()==0,
+		// silently swallowing the [truncated] marker. Programmer error;
+		// loud panic beats a quiet diagnostic regression.
+		panic(fmt.Sprintf("newCappedBuffer: limit must be positive, got %d", limit))
+	}
+	return &cappedBuffer{limit: limit}
+}
+
+func (b *cappedBuffer) Write(p []byte) (int, error) {
+	n := len(p)
+	remaining := b.limit - b.buf.Len()
+	switch {
+	case remaining <= 0 && n > 0:
+		b.dropped = true
+	case n <= remaining:
+		b.buf.Write(p)
+	default:
+		b.buf.Write(p[:remaining])
+		b.dropped = true
+	}
+	return n, nil
+}
+
+func (b *cappedBuffer) Len() int { return b.buf.Len() }
+
+func (b *cappedBuffer) String() string {
+	if b.dropped {
+		return b.buf.String() + " [truncated]"
+	}
+	return b.buf.String()
 }
 
 // ExecStream runs a command inside the sandbox and calls onLine for each

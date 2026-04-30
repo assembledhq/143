@@ -1441,7 +1441,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 	}
 
 	// 11b. Snapshot workspace for multi-turn support (does not change session status).
-	snapshotKey, snapshotSize, snapshotErr := o.snapshotSession(ctx, run, sandbox, result)
+	snapshotKey, snapshotSize, snapshotErr := o.snapshotSessionOnTurnSuccess(ctx, run, sandbox, result, log)
 	if snapshotErr != nil {
 		log.Warn().Err(snapshotErr).Msg("failed to snapshot session, session will not support follow-up turns")
 	} else if snapshotKey != "" {
@@ -2233,7 +2233,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	}
 
 	// 8. Snapshot again.
-	newSnapshotKey, snapshotSize, snapshotErr := o.snapshotSession(ctx, session, sandbox, result)
+	newSnapshotKey, snapshotSize, snapshotErr := o.snapshotSessionOnTurnSuccess(ctx, session, sandbox, result, log)
 	if snapshotErr != nil {
 		log.Warn().Err(snapshotErr).Msg("failed to snapshot session after continue")
 	} else if newSnapshotKey != "" {
@@ -3026,10 +3026,39 @@ func (o *Orchestrator) handleCancelledSession(ctx context.Context, session *mode
 	}
 }
 
+// snapshotSessionOnTurnSuccess wraps snapshotSession with the guard the
+// "normal completion" paths (RunAgent / ContinueSession success branches)
+// need: skip the snapshot when result.ExitCode != 0. That's the signal that
+// the agent CLI — and likely the sandbox runtime under it — crashed mid-turn,
+// leaving the workspace incoherent.
+//
+// The cancel and policy-stop paths intentionally do NOT use this wrapper:
+// their non-zero exits just mean the agent caught the signal and shut down
+// cleanly, so the workspace state is still valid. Calling this only on the
+// success path keeps both invariants:
+//   - graceful stops still produce a resumable checkpoint
+//   - a sandbox crash never overwrites a known-good prior snapshot with a
+//     truncated archive (incident: a 298-byte garbage upload bricked an
+//     active session for the rest of its lifetime)
+func (o *Orchestrator) snapshotSessionOnTurnSuccess(ctx context.Context, session *models.Session, sandbox *Sandbox, result *AgentResult, log zerolog.Logger) (string, int64, error) {
+	if result != nil && result.ExitCode != 0 {
+		log.Warn().
+			Int("exit_code", result.ExitCode).
+			Str("agent_error", truncateForLog(result.Error, 256)).
+			Msg("agent exited non-zero on the success path; skipping snapshot to preserve any prior good checkpoint")
+		return "", 0, nil
+	}
+	return o.snapshotSession(ctx, session, sandbox, result)
+}
+
 // snapshotSession snapshots the sandbox workspace to object storage for multi-turn support.
 // If snapshots are not configured, this is a no-op. This only saves the snapshot
 // and updates sandbox state — it does NOT change session status or call UpdateTurnComplete.
 // result is unused but kept in the signature for future extensibility (e.g. metadata).
+//
+// Most callers should use snapshotSessionOnTurnSuccess; only the cancel and
+// policy-stop paths legitimately bypass the exit-code guard because they
+// know the non-zero exit was a graceful shutdown.
 func (o *Orchestrator) snapshotSession(ctx context.Context, session *models.Session, sandbox *Sandbox, result *AgentResult) (string, int64, error) {
 	if o.snapshots == nil {
 		return "", 0, nil
@@ -3064,6 +3093,22 @@ func (r *countingReadCloser) Read(p []byte) (int, error) {
 	n, err := r.ReadCloser.Read(p)
 	r.n += int64(n)
 	return n, err
+}
+
+// truncateForLog clips s to at most max bytes (rune-safe), appending "…"
+// when truncation occurs. Used when an unbounded user/CLI string is included
+// in a structured log field.
+func truncateForLog(s string, max int) string {
+	if max <= 0 || len(s) <= max {
+		return s
+	}
+	// Trim back to the previous rune boundary so we don't split a UTF-8
+	// codepoint when the cutoff lands mid-encoding.
+	cut := max
+	for cut > 0 && (s[cut]&0xC0) == 0x80 {
+		cut--
+	}
+	return s[:cut] + "…"
 }
 
 func (o *Orchestrator) handlePolicyStoppedSession(ctx context.Context, session *models.Session, sandbox *Sandbox, result *AgentResult, turnNumber int, reason StopReason, log zerolog.Logger) {
