@@ -30,12 +30,24 @@ export function fileNameFromURL(url: string): string {
   return url.split("?")[0].split("#")[0].split("/").pop() || "file";
 }
 
-export function formatTimeAgo(dateStr: string | null | undefined): string {
-  if (!dateStr) return "—";
+type FormatTimeAgoOptions = {
+  fallback?: string;
+  includeSeconds?: boolean;
+  nowMs?: number;
+};
+
+export function formatTimeAgo(
+  dateStr: string | null | undefined,
+  options?: FormatTimeAgoOptions,
+): string {
+  const fallback = options?.fallback ?? "—";
+  if (!dateStr) return fallback;
   const date = new Date(dateStr);
-  if (Number.isNaN(date.getTime())) return "—";
-  const now = new Date();
-  const diffMs = now.getTime() - date.getTime();
+  if (Number.isNaN(date.getTime())) return fallback;
+  const diffMs = Math.max(0, (options?.nowMs ?? Date.now()) - date.getTime());
+  if (options?.includeSeconds && diffMs < 60_000) {
+    return `${Math.floor(diffMs / 1000)}s ago`;
+  }
   const diffMins = Math.floor(diffMs / 60000);
   if (diffMins < 1) return "just now";
   if (diffMins < 60) return `${diffMins}m ago`;

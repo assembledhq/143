@@ -2180,11 +2180,20 @@ export function SessionDetailContent({ id }: { id: string }) {
   const [composerCommands, setComposerCommands] = useState<SessionInputCommand[]>([]);
   const [composerIsUploading, setComposerIsUploading] = useState(false);
   const [composerUploadError, setComposerUploadError] = useState<string | null>(null);
+  const [dismissedAttachedReviewCommentIDs, setDismissedAttachedReviewCommentIDs] = useState<string[]>([]);
   const composerTextareaRef = useRef<HTMLTextAreaElement>(null);
   const composerUploadInputRef = useRef<HTMLInputElement>(null);
   const chatPanelScrollToLiveEdgeRef = useRef<(() => void) | null>(null);
   const openComments = useMemo(() => comments.filter((comment) => !comment.resolved), [comments]);
-  const attachedReviewComments = openComments;
+  useEffect(() => {
+    setDismissedAttachedReviewCommentIDs((previous) =>
+      previous.filter((commentID) => openComments.some((comment) => comment.id === commentID))
+    );
+  }, [openComments]);
+  const attachedReviewComments = useMemo(
+    () => openComments.filter((comment) => !dismissedAttachedReviewCommentIDs.includes(comment.id)),
+    [dismissedAttachedReviewCommentIDs, openComments]
+  );
   const composerCanSendMessage = session?.status !== "skipped" && session?.status !== "pending" && session?.sandbox_state !== "destroyed";
   const composerIsRunning = session?.status === "running";
   const composerIsSnapshotExpired = session?.sandbox_state === "destroyed";
@@ -2246,6 +2255,12 @@ export function SessionDetailContent({ id }: { id: string }) {
       });
     },
     onSuccess: () => {
+      setDismissedAttachedReviewCommentIDs((previous) => {
+        if (attachedReviewComments.length === 0) {
+          return previous;
+        }
+        return Array.from(new Set([...previous, ...attachedReviewComments.map((comment) => comment.id)]));
+      });
       setComposerMessage("");
       setComposerAttachments([]);
       setComposerReferences([]);
