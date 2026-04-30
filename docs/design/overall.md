@@ -1,6 +1,6 @@
 # Design: 143.dev
 
-> **Status:** Partially Implemented | **Last reviewed:** 2026-04-23
+> **Status:** Partially Implemented | **Last reviewed:** 2026-04-30
 
 [143.dev](http://143.dev) is an open-source platform that turns customer pain and production errors into safe, validated code fixes that ship automatically.
 
@@ -19,6 +19,7 @@ The system aggregates issues from support, Sentry, and Linear, prioritizes them 
 - Explicit organization switches should persist across logins. The user-visible selection is still tab-local while browsing, but the system should remember the user's last explicitly selected org as the default seed for the next fresh login so multi-org users land back where they left off.
 - Audit log entries are expected to be self-describing. Every emitted audit event should include structured `details` with operator-useful context such as resource names, source/provenance, runtime choices, job IDs, related IDs, counts, and before/after changes. Audit details must not copy secrets, full document contents, large diffs, or access tokens; use booleans, lengths, hashes, masked summaries, and IDs instead.
 - Toast notifications should behave like platform-owned status surfaces rather than skinned third-party banners: success toasts are compact and auto-dismissing by default, error toasts align with the shared recoverable-error visual language, and dismiss controls only appear when needed in the top-right instead of the main content flow. Detailed design: [55-toast-notifications.md](55-toast-notifications.md).
+- Free-form form fields that can receive focus on phones, especially multi-line composers and settings textareas, must compute to at least `16px` on small screens to prevent iOS Safari auto-zoom while preserving denser desktop typography.
 
 ## Autopilot workspace UX
 
