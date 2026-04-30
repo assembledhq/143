@@ -60,13 +60,13 @@ export function PRHealthBanner({
               </div>
               <div className="min-w-0">
                 <div className="text-sm font-medium text-foreground">PR health</div>
-                <div className="text-sm text-muted-foreground">
+                <div className="text-xs text-muted-foreground">
                   PR #{health.pull_request_number} · {health.repository}
                 </div>
               </div>
             </div>
 
-            <p className="text-sm text-foreground">{health.summary}</p>
+            <p className="text-xs text-foreground">{health.summary}</p>
 
             <div className="flex flex-wrap items-center gap-2">
               <Badge variant="secondary" className="text-xs">
