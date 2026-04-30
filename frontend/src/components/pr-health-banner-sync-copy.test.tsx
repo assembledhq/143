@@ -21,6 +21,7 @@ const health: PullRequestHealthResponse = {
   github_state_synced_at: "2026-04-29T11:57:00.000Z",
   summary: "PR #42 is healthy.",
   checks: [],
+  checks_confirmed: false,
   can_resolve_conflicts: false,
   can_fix_tests: false,
   can_merge: false,
