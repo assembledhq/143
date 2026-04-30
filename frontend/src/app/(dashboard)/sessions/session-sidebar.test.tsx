@@ -1,5 +1,9 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { http, HttpResponse } from 'msw';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { NuqsTestingAdapter } from 'nuqs/adapters/testing';
+import React from 'react';
+import { parseAsString, useQueryState } from 'nuqs';
 import { renderWithProviders, screen, waitFor } from '@/test/test-utils';
 import userEvent from '@testing-library/user-event';
 import { server } from '@/test/mocks/server';
@@ -78,6 +82,39 @@ function serveSessions(sessions: SessionListItem[]) {
       return HttpResponse.json({ data: sessions, meta: {} });
     }),
   );
+}
+
+function renderSidebarWithMutableSearchParams(initialSearchParams: Record<string, string>) {
+  function ClearSearchParamsButton() {
+    const [, setSearchParam] = useQueryState('search', parseAsString);
+    return (
+      <button type="button" onClick={() => void setSearchParam(null)}>
+        Clear search params
+      </button>
+    );
+  }
+
+  function Harness() {
+    const queryClient = new QueryClient({
+      defaultOptions: {
+        queries: {
+          retry: false,
+          gcTime: 0,
+        },
+      },
+    });
+
+    return (
+      <NuqsTestingAdapter searchParams={initialSearchParams}>
+        <ClearSearchParamsButton />
+        <QueryClientProvider client={queryClient}>
+          <SessionSidebar />
+        </QueryClientProvider>
+      </NuqsTestingAdapter>
+    );
+  }
+
+  return renderWithProviders(<Harness />);
 }
 
 describe('SessionSidebar', () => {
@@ -190,6 +227,27 @@ describe('SessionSidebar', () => {
       'href',
       '/sessions/s2?user=all&search=Beta',
     );
+  });
+
+  it('clears the local search when navigation removes the search param', async () => {
+    serveSessions([
+      makeSession({ id: 's1', result_summary: 'Alpha fix' }),
+      makeSession({ id: 's2', result_summary: 'Beta update' }),
+    ]);
+
+    renderSidebarWithMutableSearchParams({ search: 'Beta' });
+
+    const input = await screen.findByPlaceholderText('Search sessions...');
+    expect(input).toHaveValue('Beta');
+    expect(screen.queryByText('Alpha fix')).not.toBeInTheDocument();
+    expect(await screen.findByText('Beta update')).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole('button', { name: 'Clear search params' }));
+
+    await waitFor(() => {
+      expect(input).toHaveValue('');
+    });
+    expect(screen.getByText('Alpha fix')).toBeInTheDocument();
   });
 
   // -----------------------------------------------------------------------
@@ -621,6 +679,23 @@ describe('SessionSidebar', () => {
 
     const link = screen.getByText('Plain session').closest('a');
     expect(link).toHaveAttribute('href', '/sessions/s1');
+  });
+
+  it('preserves the current filters in the new session link', async () => {
+    serveSessions([
+      makeSession({ id: 's1', result_summary: 'Linked session' }),
+    ]);
+
+    renderWithProviders(<SessionSidebar />, {
+      searchParams: { user: 'all', status: 'active', repo: 'repo-1', search: 'Linked' },
+    });
+    const input = await screen.findByPlaceholderText('Search sessions...');
+    expect(input).toHaveValue('Linked');
+
+    expect(screen.getByRole('link', { name: 'New session' })).toHaveAttribute(
+      'href',
+      '/sessions/new?user=all&status=active&repo=repo-1&search=Linked',
+    );
   });
 
 });
