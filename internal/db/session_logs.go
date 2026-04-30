@@ -64,7 +64,7 @@ func (s *SessionLogStore) Create(ctx context.Context, log *models.SessionLog) er
 func (s *SessionLogStore) MarkAssistantTranscriptDuplicate(ctx context.Context, orgID, sessionID uuid.UUID, threadID *uuid.UUID, turnNumber int, message string) error {
 	query := `
 		UPDATE session_logs
-		SET metadata = COALESCE(metadata, '{}'::jsonb) || '{"type":"assistant_final","duplicate_of_transcript":true}'::jsonb
+		SET metadata = COALESCE(NULLIF(metadata, 'null'::jsonb), '{}'::jsonb) || '{"type":"assistant_final","duplicate_of_transcript":true}'::jsonb
 		WHERE id = (
 			SELECT id
 			FROM session_logs
