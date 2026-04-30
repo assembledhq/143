@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/assembledhq/143/internal/db"
+	"github.com/assembledhq/143/internal/jobctx"
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/services/agent"
 	"github.com/assembledhq/143/internal/services/feedback"
@@ -32,6 +33,18 @@ var workerIssueColumns = []string{
 	"title", "description", "raw_data", "status", "first_seen_at", "last_seen_at",
 	"occurrence_count", "affected_customer_count", "severity", "tags", "fingerprint",
 	"created_at", "updated_at", "deleted_at",
+}
+
+type workerLinearIntegrationReader struct{}
+
+func (workerLinearIntegrationReader) GetByOrgAndProvider(context.Context, uuid.UUID, string) (models.Integration, error) {
+	return models.Integration{ID: uuid.New(), Provider: "linear", Status: "active"}, nil
+}
+
+type workerLinearCredentialReader struct{}
+
+func (workerLinearCredentialReader) Get(context.Context, uuid.UUID, models.ProviderName) (*models.DecryptedCredential, error) {
+	return &models.DecryptedCredential{Config: models.LinearConfig{AccessToken: "linear-token"}}, nil
 }
 
 var workerSessionColumns = []string{
@@ -559,6 +572,40 @@ func TestLinearJobHandlers(t *testing.T) {
 		require.Error(t, handler(context.Background(), "prepare_linear_primary", json.RawMessage(`{bad json`)), "prepare_linear_primary should reject invalid JSON")
 		require.Error(t, handler(context.Background(), "prepare_linear_primary", json.RawMessage(`{"org_id":"not-a-uuid","session_id":"`+uuid.NewString()+`"}`)), "prepare_linear_primary should reject invalid org ids")
 		require.Error(t, handler(context.Background(), "prepare_linear_primary", json.RawMessage(`{"org_id":"`+uuid.NewString()+`","session_id":"not-a-uuid"}`)), "prepare_linear_primary should reject invalid session ids")
+	})
+
+	t.Run("prepare_linear_primary leaves pending until dead-letter hook", func(t *testing.T) {
+		t.Parallel()
+
+		stores, mock := newTestStores(t)
+		defer mock.Close()
+
+		orgID := uuid.New()
+		sessionID := uuid.New()
+		handlerCtx := jobctx.WithDeadLetterHooks(context.Background())
+		svc := linearservice.NewService(linearservice.Config{
+			Sessions:     stores.Sessions,
+			Integrations: workerLinearIntegrationReader{},
+			Credentials:  workerLinearCredentialReader{},
+			ClientFactory: func(context.Context, string) (linearservice.Client, error) {
+				return nil, errors.New("linear unavailable")
+			},
+			Logger: zerolog.Nop(),
+		})
+		handler := newPrepareLinearPrimaryHandler(svc, zerolog.Nop())
+		payload := json.RawMessage(`{"org_id":"` + orgID.String() + `","session_id":"` + sessionID.String() + `","identifiers":["ACS-123"]}`)
+
+		err := handler(handlerCtx, "prepare_linear_primary", payload)
+		require.Error(t, err, "prepare_linear_primary should return a retryable error while dependencies are unavailable")
+		var retryable *RetryableError
+		require.ErrorAs(t, err, &retryable, "prepare_linear_primary should keep retrying instead of failing immediately")
+		require.NoError(t, mock.ExpectationsWereMet(), "retryable prepare failure should not update prepare state before dead-letter")
+
+		mock.ExpectExec("UPDATE sessions[\\s\\S]+SET linear_prepare_state[\\s\\S]+linear_prepare_state <>").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+		jobctx.RunDeadLetterHooks(handlerCtx, err)
+		require.NoError(t, mock.ExpectationsWereMet(), "dead-letter hook should mark prepare state failed after retries exhaust")
 	})
 
 	t.Run("link_linear_issue does not mutate prepare state for empty related payloads", func(t *testing.T) {

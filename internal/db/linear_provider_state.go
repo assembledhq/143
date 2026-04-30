@@ -367,18 +367,34 @@ func BoolPtr(b bool) *bool { return &b }
 // on LinearProviderState (e.g. CoexistsCheckedAt). Mirrors BoolPtr.
 func TimePtr(t time.Time) *time.Time { return &t }
 
-// CoexistsCheckTTL is the staleness window for CoexistsWithGitHubIntegration.
-// After this elapses the linker re-queries Linear so a removed GitHub
-// integration eventually unblocks our state-sync writes. 24h matches the
-// team-key cache refresh cadence — both are infrequent admin actions.
+// CoexistsCheckTTL is the staleness window for a cached "no GitHub
+// integration" observation. After this elapses the linker re-queries Linear
+// in case an operator since installed Linear's GitHub integration. 24h is
+// fine for the false direction because cached=false means we still
+// transition — a stale false is the safe path.
 const CoexistsCheckTTL = 24 * time.Hour
 
+// CoexistsCheckTTLActive is the staleness window for a cached "Linear's
+// GitHub integration is present" observation. Tighter than the false case
+// because cached=true *suppresses* our state moves: if an operator removes
+// the GitHub integration mid-day, a sticky 24h cache would silently keep
+// blocking transitions for the rest of the day. 1h bounds that operator
+// surprise without churning the API on every milestone.
+const CoexistsCheckTTLActive = 1 * time.Hour
+
 // CoexistsCheckIsStale reports whether the cached coexistence observation
-// has aged past CoexistsCheckTTL. A nil timestamp counts as stale so legacy
-// rows written before the timestamp existed get re-checked once.
-func CoexistsCheckIsStale(checkedAt *time.Time, now time.Time) bool {
+// has aged past its TTL. The TTL is asymmetric: stale-false is benign (we
+// re-check, then transition either way), but stale-true silently suppresses
+// transitions, so the active window is much tighter. A nil timestamp counts
+// as stale so legacy rows written before the timestamp existed get
+// re-checked once.
+func CoexistsCheckIsStale(cached *bool, checkedAt *time.Time, now time.Time) bool {
 	if checkedAt == nil {
 		return true
 	}
-	return now.Sub(*checkedAt) >= CoexistsCheckTTL
+	ttl := CoexistsCheckTTL
+	if cached != nil && *cached {
+		ttl = CoexistsCheckTTLActive
+	}
+	return now.Sub(*checkedAt) >= ttl
 }

@@ -36,6 +36,15 @@ func (f *fakeLinearLinker) ResolveAndLinkAtCreate(_ context.Context, in linear.C
 	return f.result, nil
 }
 
+type countingLinearTitleLLM struct {
+	called int
+}
+
+func (c *countingLinearTitleLLM) Complete(context.Context, string, string) (string, error) {
+	c.called++
+	return "LLM title should not be used", nil
+}
+
 func TestLooksLikeLinearReference(t *testing.T) {
 	t.Parallel()
 
@@ -244,6 +253,66 @@ func TestSessionHandler_CreateManual_LinearLinkerSuccess(t *testing.T) {
 	require.Equal(t, orgID, linker.gotIn.OrgID)
 	require.Equal(t, "ACS-1234", linker.gotIn.ReferenceText, "the reference text should be threaded through to the linker")
 	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestSessionHandler_CreateManual_LinearIssueOnlySkipsLLMTitleGeneration(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	now := time.Now()
+	runID := uuid.New()
+	messageID := int64(1)
+	jobID := uuid.New()
+
+	mock.ExpectQuery("SELECT .+ FROM organizations WHERE id").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "name", "settings", "created_at", "updated_at"}).
+			AddRow(orgID, "test-org", nil, now, now))
+	expectManualSessionCreate(mock, runID, now)
+	mock.ExpectQuery("INSERT INTO session_messages").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(messageID, now))
+	mock.ExpectExec("UPDATE sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectExec("UPDATE sessions SET title").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectQuery("SELECT count").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
+	mock.ExpectQuery("INSERT INTO jobs").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(jobID))
+
+	handler := newSessionHandler(t, mock)
+	llm := &countingLinearTitleLLM{}
+	handler.llmClient = llm
+	handler.SetLinearLinker(&fakeLinearLinker{
+		result: linear.CreateResult{
+			PrepareInline:     true,
+			PrimaryIdentifier: "ACS-1234",
+			PrimaryTitle:      "Fix the OAuth callback",
+		},
+	})
+
+	body := `{"message":"","agent_type":"claude_code","references":[{"kind":"app","id":"linear","display":"ACS-1234"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/manual", strings.NewReader(body))
+	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+	w := httptest.NewRecorder()
+
+	handler.CreateManual(w, req)
+
+	require.Equal(t, http.StatusCreated, w.Code, "Linear issue-only create should succeed")
+	require.Equal(t, 0, llm.called, "empty issue-only sessions should keep the Linear title and skip LLM title generation")
+	require.Contains(t, w.Body.String(), "Fix the OAuth callback", "response should keep the Linear issue title")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
 // TestSessionHandler_CreateManual_LinearLinkerError covers the failure

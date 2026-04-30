@@ -147,6 +147,17 @@ func expectPrepareStateUpdate(t *testing.T, mock pgxmock.PgxPoolIface, rowsAffec
 		WillReturnResult(pgxmock.NewResult("UPDATE", rowsAffected))
 }
 
+// expectPrepareStateGuardedUpdate matches the conditional UPDATE issued by
+// SessionStore.SetLinearPrepareStateIfNotReady (4 args: id, org_id, target,
+// "ready" sentinel). The worker failure paths use this guarded write so a
+// sibling worker that already reached "ready" can't be clobbered.
+func expectPrepareStateGuardedUpdate(t *testing.T, mock pgxmock.PgxPoolIface, rowsAffected int64) {
+	t.Helper()
+	mock.ExpectExec("UPDATE sessions[\\s\\S]+SET linear_prepare_state[\\s\\S]+linear_prepare_state <>").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", rowsAffected))
+}
+
 func expectIdentifierHintUpdate(t *testing.T, mock pgxmock.PgxPoolIface, rowsAffected int64) {
 	t.Helper()
 	mock.ExpectExec("UPDATE sessions[\\s\\S]+SET linear_identifier_hint").
@@ -377,6 +388,53 @@ func TestResolveAndLinkAtCreate(t *testing.T) {
 		require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 	})
 
+	t.Run("resolved primary enqueues linked milestone", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err, "should create mock pool")
+		defer mock.Close()
+
+		now := time.Now().UTC()
+		orgID := uuid.New()
+		sessionID := uuid.New()
+		linkID := uuid.New()
+		var enqueuedJobType string
+		var enqueuedPayload map[string]any
+		var enqueuedDedupe string
+		provider := newFakeProviderStateStore()
+		svc := newCreatePathService(mock, createPathClient{fetch: map[string]*FetchedIssue{"ACS-123": fetchedIssueForTest("ACS-123")}}, provider)
+		svc.jobEnqueuer = func(_ context.Context, gotOrgID uuid.UUID, jobType string, payload any, dedupeKey *string) error {
+			require.Equal(t, orgID, gotOrgID, "linked milestone enqueue should preserve org scope")
+			require.Equal(t, "linear_milestone", jobType, "linked milestone should use the milestone worker")
+			require.NotNil(t, dedupeKey, "linked milestone should use a dedupe key")
+			enqueuedJobType = jobType
+			enqueuedDedupe = *dedupeKey
+			body, err := json.Marshal(payload)
+			require.NoError(t, err, "linked milestone payload should marshal for assertion")
+			require.NoError(t, json.Unmarshal(body, &enqueuedPayload), "linked milestone payload should be an object")
+			return nil
+		}
+
+		expectIssueUpsert(t, mock, uuid.New(), now)
+		expectLinearLinkInsert(t, mock, linkID)
+		expectPrepareStateUpdate(t, mock, 1)
+
+		got, err := svc.ResolveAndLinkAtCreate(context.Background(), CreateInput{
+			OrgID:       orgID,
+			SessionID:   sessionID,
+			MessageBody: "please start from https://linear.app/acme/issue/ACS-123",
+		})
+		require.NoError(t, err, "ResolveAndLinkAtCreate should succeed after enqueueing the linked milestone")
+		require.Equal(t, CreateResult{PrepareInline: true, PrimaryIdentifier: "ACS-123", PrimaryTitle: "Fix ACS-123"}, got, "inline primary should still return metadata")
+		require.Equal(t, "linear_milestone", enqueuedJobType, "linked milestone enqueue should fire")
+		require.Contains(t, enqueuedDedupe, sessionID.String(), "linked milestone dedupe key should include the session id")
+		require.Equal(t, orgID.String(), enqueuedPayload["org_id"], "linked milestone payload should include org_id")
+		require.Equal(t, sessionID.String(), enqueuedPayload["session_id"], "linked milestone payload should include session_id")
+		require.Equal(t, string(MilestoneLinked), enqueuedPayload["event"], "linked milestone payload should use the linked event")
+		require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+	})
+
 	t.Run("additional refs are enqueued after inline primary link", func(t *testing.T) {
 		t.Parallel()
 
@@ -389,17 +447,28 @@ func TestResolveAndLinkAtCreate(t *testing.T) {
 		sessionID := uuid.New()
 		linkID := uuid.New()
 		var enqueuedIdentifiers []string
+		var linkedMilestoneEnqueued bool
 		svc := newCreatePathService(mock, createPathClient{fetch: map[string]*FetchedIssue{"ACS-123": fetchedIssueForTest("ACS-123")}}, newFakeProviderStateStore())
 		svc.jobEnqueuer = func(_ context.Context, _ uuid.UUID, jobType string, payload any, dedupeKey *string) error {
-			require.Equal(t, "link_linear_issue", jobType, "additional refs should enqueue link worker jobs")
 			require.NotNil(t, dedupeKey, "additional refs should use a dedupe key")
 			body, err := json.Marshal(payload)
 			require.NoError(t, err, "enqueued payload should marshal for assertion")
-			var decoded struct {
-				Identifiers []string `json:"identifiers"`
+			switch jobType {
+			case "linear_milestone":
+				var decoded struct {
+					Event string `json:"event"`
+				}
+				require.NoError(t, json.Unmarshal(body, &decoded), "milestone payload should include event")
+				linkedMilestoneEnqueued = decoded.Event == string(MilestoneLinked)
+			case "link_linear_issue":
+				var decoded struct {
+					Identifiers []string `json:"identifiers"`
+				}
+				require.NoError(t, json.Unmarshal(body, &decoded), "enqueued payload should include identifiers")
+				enqueuedIdentifiers = decoded.Identifiers
+			default:
+				require.Failf(t, "unexpected job type", "jobType=%s", jobType)
 			}
-			require.NoError(t, json.Unmarshal(body, &decoded), "enqueued payload should include identifiers")
-			enqueuedIdentifiers = decoded.Identifiers
 			return nil
 		}
 
@@ -415,6 +484,7 @@ func TestResolveAndLinkAtCreate(t *testing.T) {
 		})
 		require.NoError(t, err, "ResolveAndLinkAtCreate should succeed with additional refs")
 		require.Equal(t, CreateResult{PrepareInline: true, PrimaryIdentifier: "ACS-123", PrimaryTitle: "Fix ACS-123"}, got, "inline primary should still return metadata")
+		require.True(t, linkedMilestoneEnqueued, "inline primary should enqueue the initial linked milestone even when related refs exist")
 		require.Equal(t, []string{"ACS-123", "ACS-124"}, enqueuedIdentifiers, "additional refs should be forwarded with the primary first so the worker preserves roles")
 		require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 	})
@@ -447,6 +517,41 @@ func TestResolveAndLinkAtCreate(t *testing.T) {
 		require.Equal(t, CreateResult{PrepareInline: true, PrimaryIdentifier: "ACS-123", PrimaryTitle: "Fix ACS-123"}, got, "snapshot failures should not clear primary metadata")
 		require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 	})
+
+	t.Run("ready-flip failure on inline success is non-fatal", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err, "should create mock pool")
+		defer mock.Close()
+
+		now := time.Now().UTC()
+		orgID := uuid.New()
+		sessionID := uuid.New()
+		linkID := uuid.New()
+		provider := newFakeProviderStateStore()
+		svc := newCreatePathService(mock, createPathClient{fetch: map[string]*FetchedIssue{"ACS-123": fetchedIssueForTest("ACS-123")}}, provider)
+
+		expectIssueUpsert(t, mock, uuid.New(), now)
+		expectLinearLinkInsert(t, mock, linkID)
+		// Simulate a transient DB hiccup on the final "ready" flip. The
+		// inline path must still return success — the run-agent gate
+		// passes through on the default "none" state, so turn 1 still
+		// boots with the snapshot already written.
+		mock.ExpectExec("UPDATE sessions[\\s\\S]+SET linear_prepare_state").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnError(errors.New("db hiccup"))
+
+		got, err := svc.ResolveAndLinkAtCreate(context.Background(), CreateInput{
+			OrgID:       orgID,
+			SessionID:   sessionID,
+			MessageBody: "please start from https://linear.app/acme/issue/ACS-123",
+		})
+		require.NoError(t, err, "ready-flip DB failures must NOT propagate; the link is durable and the run-agent gate falls through on default state")
+		require.Equal(t, CreateResult{PrepareInline: true, PrimaryIdentifier: "ACS-123", PrimaryTitle: "Fix ACS-123"}, got, "ready-flip failure should not clear primary metadata")
+		require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+	})
+
 }
 
 func TestLinkRelatedLinearIssues(t *testing.T) {
@@ -493,7 +598,7 @@ func TestPrepareLinearPrimary(t *testing.T) {
 		require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 	})
 
-	t.Run("resolution failure marks failed", func(t *testing.T) {
+	t.Run("resolution failure leaves prepare state pending until job dead-letter", func(t *testing.T) {
 		t.Parallel()
 
 		mock, err := pgxmock.NewPool()
@@ -501,11 +606,30 @@ func TestPrepareLinearPrimary(t *testing.T) {
 		defer mock.Close()
 
 		svc := newCreatePathService(mock, createPathClient{err: errors.New("linear unavailable")}, nil)
-		expectPrepareStateUpdate(t, mock, 1)
 
 		err = svc.PrepareLinearPrimary(context.Background(), uuid.New(), uuid.New(), []string{"ACS-123"}, nil)
-		require.Error(t, err, "PrepareLinearPrimary should surface resolution errors")
-		require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+		require.Error(t, err, "PrepareLinearPrimary should surface resolution errors so the worker can retry")
+		require.NoError(t, mock.ExpectationsWereMet(), "transient failures should not mark prepare state failed before retries exhaust")
+	})
+
+	t.Run("link failure leaves prepare state pending until job dead-letter", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err, "should create mock pool")
+		defer mock.Close()
+
+		svc := newCreatePathService(mock, createPathClient{fetch: map[string]*FetchedIssue{
+			"ACS-123": fetchedIssueForTest("ACS-123"),
+		}}, nil)
+		expectIssueUpsert(t, mock, uuid.New(), time.Now())
+		mock.ExpectQuery("INSERT INTO session_issue_links").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnError(errors.New("repo mismatch"))
+
+		err = svc.PrepareLinearPrimary(context.Background(), uuid.New(), uuid.New(), []string{"ACS-123"}, nil)
+		require.Error(t, err, "PrepareLinearPrimary should surface link errors so the worker can retry")
+		require.NoError(t, mock.ExpectationsWereMet(), "link failures should not mark prepare state failed before retries exhaust")
 	})
 
 	t.Run("cross workspace worker ref clears prepare state without failing session", func(t *testing.T) {
@@ -542,10 +666,24 @@ func TestPrepareLinearPrimary(t *testing.T) {
 		primaryLinkID := uuid.New()
 		relatedLinkID := uuid.New()
 		provider := newFakeProviderStateStore()
+		var enqueuedEvent string
 		svc := newCreatePathService(mock, createPathClient{fetch: map[string]*FetchedIssue{
 			"ACS-123": fetchedIssueForTest("ACS-123"),
 			"ACS-124": fetchedIssueForTest("ACS-124"),
 		}}, provider)
+		svc.jobEnqueuer = func(_ context.Context, gotOrgID uuid.UUID, jobType string, payload any, dedupeKey *string) error {
+			require.Equal(t, orgID, gotOrgID, "prepare worker milestone enqueue should preserve org scope")
+			require.Equal(t, "linear_milestone", jobType, "prepare worker should enqueue the linked milestone after primary link")
+			require.NotNil(t, dedupeKey, "prepare worker milestone should use a dedupe key")
+			body, err := json.Marshal(payload)
+			require.NoError(t, err, "prepare worker milestone payload should marshal for assertion")
+			var decoded struct {
+				Event string `json:"event"`
+			}
+			require.NoError(t, json.Unmarshal(body, &decoded), "prepare worker milestone payload should include event")
+			enqueuedEvent = decoded.Event
+			return nil
+		}
 
 		expectIssueUpsert(t, mock, uuid.New(), now)
 		expectLinearLinkInsert(t, mock, primaryLinkID)
@@ -562,6 +700,7 @@ func TestPrepareLinearPrimary(t *testing.T) {
 		relatedState, err := provider.Get(context.Background(), orgID, relatedLinkID)
 		require.NoError(t, err, "related provider state should be readable")
 		require.Equal(t, "ACS-124", relatedState.Identifier, "related link should persist the resolved identifier")
+		require.Equal(t, string(MilestoneLinked), enqueuedEvent, "prepare worker should enqueue the initial linked milestone")
 		require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 	})
 }

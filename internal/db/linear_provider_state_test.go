@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -392,4 +393,69 @@ func TestBoolPtr(t *testing.T) {
 	got := BoolPtr(false)
 	require.NotNil(t, got, "BoolPtr should return a non-nil pointer")
 	require.False(t, *got, "BoolPtr should preserve false values")
+}
+
+// TestCoexistsCheckIsStale_AsymmetricTTL locks the design intent that the
+// "Linear's GitHub integration is present" cache ages out faster than the
+// "absent" cache: a cached `true` *suppresses* our state moves, so a sticky
+// 24h would silently keep blocking transitions for the rest of the day after
+// an operator removed the integration. The 1h active TTL bounds that
+// surprise window without churning the API on every milestone.
+func TestCoexistsCheckIsStale_AsymmetricTTL(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 4, 29, 12, 0, 0, 0, time.UTC)
+
+	tests := []struct {
+		name      string
+		cached    *bool
+		checkedAt *time.Time
+		want      bool
+	}{
+		{
+			name:      "nil checkedAt is always stale",
+			cached:    BoolPtr(true),
+			checkedAt: nil,
+			want:      true,
+		},
+		{
+			name:      "cached=true at 30m is fresh",
+			cached:    BoolPtr(true),
+			checkedAt: TimePtr(now.Add(-30 * time.Minute)),
+			want:      false,
+		},
+		{
+			name:      "cached=true at 90m is stale (active TTL is 1h)",
+			cached:    BoolPtr(true),
+			checkedAt: TimePtr(now.Add(-90 * time.Minute)),
+			want:      true,
+		},
+		{
+			name:      "cached=false at 90m is fresh (long TTL applies)",
+			cached:    BoolPtr(false),
+			checkedAt: TimePtr(now.Add(-90 * time.Minute)),
+			want:      false,
+		},
+		{
+			name:      "cached=false at 25h is stale (long TTL is 24h)",
+			cached:    BoolPtr(false),
+			checkedAt: TimePtr(now.Add(-25 * time.Hour)),
+			want:      true,
+		},
+		{
+			name:      "nil cached uses long TTL (treated as 'no observation yet')",
+			cached:    nil,
+			checkedAt: TimePtr(now.Add(-90 * time.Minute)),
+			want:      false,
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := CoexistsCheckIsStale(tt.cached, tt.checkedAt, now)
+			require.Equal(t, tt.want, got, "CoexistsCheckIsStale should age cached=true out faster than cached=false")
+		})
+	}
 }

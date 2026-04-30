@@ -2171,7 +2171,7 @@ func (h *SessionHandler) CreateManual(w http.ResponseWriter, r *http.Request) {
 
 	// Generate a concise session title via LLM (with a short timeout so the
 	// request doesn't block for too long).
-	if h.llmClient != nil {
+	if h.llmClient != nil && body.Message != "" {
 		if err := h.generateSessionTitle(r.Context(), session, orgID, body.Message); err != nil {
 			writeError(w, r, http.StatusInternalServerError, "TITLE_GENERATION_FAILED", "failed to generate session title", err)
 			return

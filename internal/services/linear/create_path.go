@@ -76,6 +76,13 @@ func (r LinkRef) detected() Detected {
 // margin, but we still give up before users feel the page hang.
 const inlineBudget = 2500 * time.Millisecond
 
+// snapshotWriteTimeout caps the detached-context window we give the post-
+// link snapshot write. Detached from the request context because closing the
+// browser tab between LinkResolved and the snapshot write would otherwise
+// drop the cache and force turn 1 onto a live Linear fetch. We still cap so
+// a wedged DB connection can't hold the goroutine forever.
+const snapshotWriteTimeout = 5 * time.Second
+
 // ResolveAndLinkAtCreate is the session-create entry point. It owns:
 //
 //  1. Detection across the bounded inputs.
@@ -132,13 +139,28 @@ func (s *Service) ResolveAndLinkAtCreate(ctx context.Context, in CreateInput) (C
 	}
 
 	// Snapshot the linked issue context for turn 0 so the worker doesn't
-	// have to re-fetch when it boots.
-	if err := s.snapshotPrimaryContext(ctx, in.OrgID, linkID, resolved); err != nil {
+	// have to re-fetch when it boots. Detached from the request context so a
+	// closed-tab cancellation between LinkResolved and the snapshot write
+	// doesn't drop the cache and force turn 1 onto a live Linear fetch.
+	snapshotCtx, snapshotCancel := context.WithTimeout(context.WithoutCancel(ctx), snapshotWriteTimeout)
+	if err := s.snapshotPrimaryContext(snapshotCtx, in.OrgID, linkID, resolved); err != nil {
 		s.logger.Warn().Err(err).Msg("failed to snapshot linear context; turn 1 may need to refetch")
 	}
+	snapshotCancel()
 
-	// Mark prepare state so run_agent can start immediately.
-	_ = s.sessions.SetLinearPrepareState(ctx, in.OrgID, in.SessionID, models.LinearPrepareStateReady)
+	// Mark prepare state so the run-agent gate sees an explicit "ready"
+	// instead of falling through on the default "none". A failure here is
+	// non-fatal — the gate treats "none" as pass-through, so turn 1 still
+	// starts with the snapshot already written above — but we log so an
+	// operator chasing why a session never showed "ready" can find the
+	// failure rather than guess.
+	if err := s.sessions.SetLinearPrepareState(ctx, in.OrgID, in.SessionID, models.LinearPrepareStateReady); err != nil {
+		s.logger.Warn().Err(err).
+			Str("session_id", in.SessionID.String()).
+			Str("identifier", resolved.Identifier).
+			Msg("inline linear primary linked but prepare-state ready flip failed; turn 1 still starts via default-state pass-through")
+	}
+	s.enqueueLinkedMilestone(ctx, in.OrgID, in.SessionID)
 
 	// Schedule async follow-up for additional refs (related links, mid-
 	// session re-detection later).
@@ -314,17 +336,26 @@ func (s *Service) PrepareLinearPrimaryRefs(ctx context.Context, orgID, sessionID
 
 	resolved, err := s.ResolvePrimary(ctx, orgID, refs[0].detected())
 	if errors.Is(err, ErrCrossWorkspace) {
+		// Cross-workspace drops use the unguarded write because "none" is
+		// the terminal "no Linear preparation needed" outcome: a sibling
+		// worker that already linked successfully and reached "ready" would
+		// be clobbered, but cross-workspace can only fire on a fresh session
+		// where no successful sibling has run yet.
 		_ = s.sessions.SetLinearPrepareState(ctx, orgID, sessionID, models.LinearPrepareStateNone)
 		return nil
 	}
 	if err != nil {
-		_ = s.sessions.SetLinearPrepareState(ctx, orgID, sessionID, models.LinearPrepareStateFailed)
+		// Keep the session pending while the worker retries. The worker's
+		// dead-letter hook is the single terminal writer for "failed" so a
+		// transient Linear outage cannot make run_agent fail before retry
+		// recovery has a chance to link the primary.
 		return err
 	}
 
 	linkID, err := s.LinkResolved(ctx, orgID, sessionID, resolved, models.SessionIssueLinkRolePrimary, 0, userID)
 	if err != nil {
-		_ = s.sessions.SetLinearPrepareState(ctx, orgID, sessionID, models.LinearPrepareStateFailed)
+		// Same retry contract as the resolve path above: leave the row in
+		// "pending" until the prepare job is truly exhausted.
 		return err
 	}
 	// Snapshot + identifier-hint failures are non-fatal: turn 1 can still
@@ -350,11 +381,23 @@ func (s *Service) PrepareLinearPrimaryRefs(ctx context.Context, orgID, sessionID
 	if err := s.sessions.SetLinearPrepareState(ctx, orgID, sessionID, models.LinearPrepareStateReady); err != nil {
 		return err
 	}
+	s.enqueueLinkedMilestone(ctx, orgID, sessionID)
 	// Tell the session detail UI the session moved to "ready" so the
 	// run_agent unblock + linked-issue chips appear without a manual
 	// reload. Failures notifying are non-fatal.
 	s.notifyLinksChanged(ctx, orgID, sessionID, "refreshed")
 	return nil
+}
+
+// MarkLinearPrepareFailed is called from the prepare job's dead-letter hook
+// after retry exhaustion. It is intentionally separate from
+// PrepareLinearPrimaryRefs so transient worker attempts leave run_agent gated
+// in "pending" instead of tripping the fatal "failed" gate immediately.
+func (s *Service) MarkLinearPrepareFailed(ctx context.Context, orgID, sessionID uuid.UUID) error {
+	if s == nil || s.sessions == nil {
+		return nil
+	}
+	return s.sessions.SetLinearPrepareStateIfNotReady(ctx, orgID, sessionID, models.LinearPrepareStateFailed)
 }
 
 // LinkRelatedLinearIssues is the worker-side catch-up path after the primary
@@ -384,6 +427,24 @@ func (s *Service) linkRelatedRefs(ctx context.Context, orgID, sessionID uuid.UUI
 		if _, err := s.LinkResolved(ctx, orgID, sessionID, related, models.SessionIssueLinkRoleRelated, i+1, userID); err != nil {
 			s.logger.Warn().Err(err).Str("identifier", ref.Identifier).Msg("failed to link related linear issue")
 		}
+	}
+}
+
+func (s *Service) enqueueLinkedMilestone(ctx context.Context, orgID, sessionID uuid.UUID) {
+	if s.jobEnqueuer == nil {
+		return
+	}
+	dedupeKey := "linear_milestone:" + sessionID.String() + ":" + string(MilestoneLinked)
+	payload := map[string]any{
+		"org_id":     orgID.String(),
+		"session_id": sessionID.String(),
+		"event":      string(MilestoneLinked),
+		"pr_number":  0,
+	}
+	if err := s.jobEnqueuer(ctx, orgID, "linear_milestone", payload, &dedupeKey); err != nil {
+		s.logger.Warn().Err(err).
+			Str("session_id", sessionID.String()).
+			Msg("failed to enqueue linear linked milestone")
 	}
 }
 

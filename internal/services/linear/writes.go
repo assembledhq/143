@@ -114,17 +114,20 @@ func (s *Service) HandleMilestone(ctx context.Context, in MilestoneInput) error 
 	// this best-effort rescue is the closest we can get to outbox semantics
 	// without a side table.
 	//
-	// Known unrescuable window: if a Linear write succeeds server-side but
-	// the response is lost in flight (network reset, client timeout), we
-	// never observe the new ID, the rescue stages nothing, and the next
-	// retry posts a duplicate comment / attaches a duplicate attachment.
-	// This is intrinsic to the lack of a client-supplied idempotency key
-	// on commentCreate / attachmentCreate. Mitigations considered and
-	// rejected for v1: per-write outbox table (heavy infra), pre-write
-	// listComments scan (extra round-trip on every milestone). Operators
-	// who hit a duplicate can delete the older comment in Linear; the
-	// AttachmentID we eventually record will be the latest write so future
-	// updates flow to the right object.
+	// TODO(linear-outbox): close the unrescuable double-post window. If a
+	// Linear write succeeds server-side but the response is lost in flight
+	// (network reset, client timeout), we never observe the new ID, the
+	// rescue stages nothing, and the next retry posts a duplicate comment /
+	// attaches a duplicate attachment. Intrinsic to the lack of a client-
+	// supplied idempotency key on commentCreate / attachmentCreate.
+	// Mitigations considered and rejected for v1: per-write outbox table
+	// (heavy infra), pre-write listComments scan (extra round-trip on every
+	// milestone). The proper long-term fix is the outbox: stage the intended
+	// write under a deterministic key, hand it to a separate dispatcher
+	// that owns "did Linear see this yet" via a server-side scan keyed by
+	// our metadata. Operators who hit a duplicate today can delete the
+	// older comment in Linear; the AttachmentID we eventually record will
+	// be the latest write so future updates flow to the right object.
 	var rescue db.LinearProviderState
 	hasRescue := false
 
@@ -417,11 +420,12 @@ func (s *Service) HandleStateTransition(ctx context.Context, in MilestoneInput) 
 			//
 			// Cache invalidation: a sticky "true" without a TTL would keep
 			// suppressing transitions forever after an operator removes
-			// Linear's GitHub integration. Re-check past CoexistsCheckTTL
-			// so a `false` observation eventually clears the flag.
+			// Linear's GitHub integration. CoexistsCheckIsStale uses an
+			// asymmetric TTL — short for cached=true (the dangerous side
+			// that suppresses) and long for cached=false (the safe side).
 			if isPRDrivenTransition(in.Event) {
 				cached := state.CoexistsWithGitHubIntegration != nil && *state.CoexistsWithGitHubIntegration
-				stale := db.CoexistsCheckIsStale(state.CoexistsCheckedAt, time.Now())
+				stale := db.CoexistsCheckIsStale(state.CoexistsWithGitHubIntegration, state.CoexistsCheckedAt, time.Now())
 				coexists := cached
 				if !cached || stale {
 					detected, detectErr := client.HasGitHubIntegrationAttachment(ctx, in.IssueID)

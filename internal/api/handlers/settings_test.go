@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/assembledhq/143/internal/api/middleware"
 	"github.com/assembledhq/143/internal/db"
+	"github.com/assembledhq/143/internal/models"
 	"github.com/google/uuid"
 	"github.com/pashagolub/pgxmock/v4"
 	"github.com/rs/zerolog"
@@ -29,6 +31,18 @@ type testOrgSettingsInvalidator struct {
 func (i *testOrgSettingsInvalidator) InvalidateOrg(orgID uuid.UUID) {
 	i.called = true
 	i.orgID = orgID
+}
+
+type testCredentialSummaryStore struct {
+	summaries []models.CredentialSummary
+	err       error
+}
+
+func (s testCredentialSummaryStore) ListSummaries(context.Context, uuid.UUID) ([]models.CredentialSummary, error) {
+	if s.err != nil {
+		return nil, s.err
+	}
+	return s.summaries, nil
 }
 
 func TestSettingsHandler_Get(t *testing.T) {
@@ -245,6 +259,15 @@ func TestSettingsHandler_Update(t *testing.T) {
 			expectedBody: "INVALID_SETTINGS",
 		},
 		{
+			name: "returns bad request when platform default caps llm_model",
+			body: `{"settings":{"llm_model":"gpt-5.4"}}`,
+			setupMock: func(mock pgxmock.PgxPoolIface, orgID uuid.UUID) {
+				// no DB calls expected
+			},
+			expectedCode: http.StatusBadRequest,
+			expectedBody: "INVALID_SETTINGS",
+		},
+		{
 			name: "accepts valid llm_model",
 			body: `{"settings":{"llm_model":"gpt-5.4-mini"}}`,
 			setupMock: func(mock pgxmock.PgxPoolIface, orgID uuid.UUID) {
@@ -328,7 +351,7 @@ func TestSettingsHandler_Update(t *testing.T) {
 
 			orgID := uuid.New()
 			store := db.NewOrganizationStore(mock)
-			handler := NewSettingsHandler(store, nil)
+			handler := NewSettingsHandler(store, map[string]string{"openai": "sk-...platform"})
 
 			tt.setupMock(mock, orgID)
 
@@ -343,6 +366,43 @@ func TestSettingsHandler_Update(t *testing.T) {
 			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 		})
 	}
+}
+
+func TestSettingsHandler_Update_AllowsCappedPlatformModelWithOrgCredential(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create pgxmock pool without error")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	now := time.Now()
+	mock.ExpectQuery("SELECT .+ FROM organizations WHERE id").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(orgColumns()).AddRow(
+				orgID, "Test Org", json.RawMessage(`{}`), now, now,
+			),
+		)
+	mock.ExpectQuery("UPDATE organizations").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows([]string{"updated_at"}).AddRow(now),
+		)
+
+	handler := NewSettingsHandler(db.NewOrganizationStore(mock), map[string]string{"openai": "sk-...platform"})
+	handler.SetCredentialStore(testCredentialSummaryStore{summaries: []models.CredentialSummary{
+		{Provider: models.ProviderOpenAI, Configured: true},
+	}})
+	req := httptest.NewRequest(http.MethodPatch, "/api/v1/settings", strings.NewReader(`{"settings":{"llm_model":"gpt-5.4"}}`))
+	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+	w := httptest.NewRecorder()
+
+	handler.Update(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "org-owned OpenAI key should unlock models capped on the platform default key")
+	require.Contains(t, w.Body.String(), "gpt-5.4", "response should include the saved model")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
 func TestSettingsHandler_Update_SkipsNoOpPatch(t *testing.T) {
