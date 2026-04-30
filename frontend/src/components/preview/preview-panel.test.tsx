@@ -618,6 +618,34 @@ describe("PreviewPanel component", () => {
     });
   });
 
+  it("shows the backend message verbatim (no 'Failed to start preview:' prefix) when no .143/preview.json is committed", async () => {
+    const user = userEvent.setup();
+    mockGet.mockResolvedValue(makePreviewStatus({ status: "stopped" }));
+    const backendMessage =
+      "this repo has no .143/preview.json committed. Add one (see docs/guides/previews.md) so the preview knows what command to run.";
+    const err = new Error(backendMessage);
+    (err as Error & { code?: string }).code = "PREVIEW_NO_CONFIG";
+    mockStart.mockRejectedValueOnce(err);
+
+    renderWithProviders(<PreviewPanel {...DEFAULT_PROPS} />);
+
+    await waitFor(() => {
+      expect(screen.getByText("No preview running")).toBeInTheDocument();
+    });
+
+    await user.click(screen.getByRole("button", { name: "Start Preview" }));
+
+    await waitFor(() => {
+      expect(screen.getByText(backendMessage)).toBeInTheDocument();
+    });
+    // Guard against regression: if anyone wraps this code in the generic
+    // "Failed to start preview:" prefix, the backend's actionable message
+    // (which names the file the user must add) gets buried.
+    expect(
+      screen.queryByText(`Failed to start preview: ${backendMessage}`)
+    ).not.toBeInTheDocument();
+  });
+
   it("dismisses mutation error banner when X is clicked", async () => {
     const user = userEvent.setup();
     mockGet.mockResolvedValue(makePreviewStatus({ status: "stopped" }));
