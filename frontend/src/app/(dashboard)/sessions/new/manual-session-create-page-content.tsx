@@ -52,6 +52,7 @@ import { NoReposWarning } from "@/components/no-repos-warning";
 import { AgentKeyRequiredBanner } from "@/components/agent-key-required-banner";
 import { useOptimisticSessions } from "@/contexts/optimistic-sessions";
 import { useAuth } from "@/hooks/use-auth";
+import { buildFilterSuffix } from "@/hooks/use-owner-scope-filter";
 import { MobileBackButton } from "@/components/mobile-back-button";
 import {
   type CodingAgentReasoningEffort,
@@ -107,6 +108,15 @@ export function ManualSessionCreatePageContent() {
   // Read the currently selected repository from the URL query params
   // (set by the RepoContextSwitcher) so we clone the codebase into the sandbox.
   const repoId = searchParams.get("repo") ?? undefined;
+  const filterSuffix = useMemo(
+    () => buildFilterSuffix(
+      searchParams.get("user") ?? "mine",
+      searchParams.get("status"),
+      searchParams.get("repo"),
+      searchParams.get("search"),
+    ),
+    [searchParams],
+  );
 
   const [message, setMessage] = useState("");
   const [attachments, setAttachments] = useState<string[]>([]);
@@ -430,7 +440,7 @@ export function ManualSessionCreatePageContent() {
       // session once the refetch lands. See OptimisticSession.resolvedId.
       markOptimisticResolved(context.optimisticId, response.data.id);
       queryClient.invalidateQueries({ queryKey: queryKeys.sessions.all });
-      router.push(`/sessions/${response.data.id}`);
+      router.push(`/sessions/${response.data.id}${filterSuffix}`);
     },
     onError: (error, _variables, context) => {
       captureError(error, { feature: "session-create" });
