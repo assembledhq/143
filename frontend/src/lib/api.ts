@@ -611,7 +611,7 @@ export const api = {
       ),
   },
   projects: {
-    list: (params?: { status?: string; cursor?: string; limit?: number; repository_id?: string; search?: string; proposed_by_pm?: boolean; created_by?: string }) => {
+    list: (params?: { status?: string; cursor?: string; limit?: number; repository_id?: string; search?: string; proposed_by_pm?: boolean; created_by?: string; include_archived?: boolean; only_archived?: boolean }) => {
       const searchParams = new URLSearchParams();
       if (params?.status) searchParams.set('status', params.status);
       if (params?.cursor) searchParams.set('cursor', params.cursor);
@@ -620,6 +620,8 @@ export const api = {
       if (params?.search) searchParams.set('search', params.search);
       if (params?.proposed_by_pm !== undefined) searchParams.set('proposed_by_pm', String(params.proposed_by_pm));
       if (params?.created_by) searchParams.set('created_by', params.created_by);
+      if (params?.only_archived) searchParams.set('only_archived', 'true');
+      else if (params?.include_archived) searchParams.set('include_archived', 'true');
       const qs = searchParams.toString();
       return get<import('./types').ListResponse<import('./types').Project>>(`/api/v1/projects${qs ? `?${qs}` : ''}`);
     },
@@ -630,6 +632,10 @@ export const api = {
       patch<import('./types').SingleResponse<import('./types').Project>>(`/api/v1/projects/${id}`, body),
     del: (id: string) => del(`/api/v1/projects/${id}`),
     start: (id: string) => post(`/api/v1/projects/${id}/start`),
+    archive: (projectId: string) =>
+      post<{ status: string }>(`/api/v1/projects/${projectId}/archive`, {}),
+    unarchive: (projectId: string) =>
+      post<{ status: string }>(`/api/v1/projects/${projectId}/unarchive`, {}),
     proposalSummary: () =>
       get<import('./types').SingleResponse<import('./types').ProposalSummary>>('/api/v1/projects/proposals/summary'),
     runNow: (id: string) => post<import('./types').SingleResponse<{ job_id: string }>>(`/api/v1/projects/${id}/run`),

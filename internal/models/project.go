@@ -39,6 +39,7 @@ type Project struct {
 	CreatedAt          time.Time        `db:"created_at" json:"created_at"`
 	UpdatedAt          time.Time        `db:"updated_at" json:"updated_at"`
 	CompletedAt        *time.Time       `db:"completed_at" json:"completed_at,omitempty"`
+	ArchivedAt         *time.Time       `db:"archived_at" json:"archived_at,omitempty"`
 
 	// Raw JSONB for store-layer scanning.
 	LessonsLearnedRaw  json.RawMessage `db:"lessons_learned" json:"-"`
@@ -56,29 +57,29 @@ type ProposalOverlap struct {
 
 // ProjectTask is a single work item within a project, created by the PM each cycle.
 type ProjectTask struct {
-	ID            uuid.UUID         `db:"id" json:"id"`
-	ProjectID     uuid.UUID         `db:"project_id" json:"project_id"`
-	OrgID         uuid.UUID         `db:"org_id" json:"org_id"`
-	Title         string            `db:"title" json:"title"`
-	Description   *string           `db:"description" json:"description,omitempty"`
-	Approach      *string           `db:"approach" json:"approach,omitempty"`
-	Reasoning     *string           `db:"reasoning" json:"reasoning,omitempty"`
-	SortOrder     int               `db:"sort_order" json:"sort_order"`
-	DependsOn     []uuid.UUID       `json:"depends_on,omitempty"`
-	BatchNumber   int               `db:"batch_number" json:"batch_number"`
-	Status        ProjectTaskStatus `db:"status" json:"status"`
-	Complexity    *string           `db:"complexity" json:"complexity,omitempty"`
-	Confidence    *string           `db:"confidence" json:"confidence,omitempty"`
+	ID           uuid.UUID         `db:"id" json:"id"`
+	ProjectID    uuid.UUID         `db:"project_id" json:"project_id"`
+	OrgID        uuid.UUID         `db:"org_id" json:"org_id"`
+	Title        string            `db:"title" json:"title"`
+	Description  *string           `db:"description" json:"description,omitempty"`
+	Approach     *string           `db:"approach" json:"approach,omitempty"`
+	Reasoning    *string           `db:"reasoning" json:"reasoning,omitempty"`
+	SortOrder    int               `db:"sort_order" json:"sort_order"`
+	DependsOn    []uuid.UUID       `json:"depends_on,omitempty"`
+	BatchNumber  int               `db:"batch_number" json:"batch_number"`
+	Status       ProjectTaskStatus `db:"status" json:"status"`
+	Complexity   *string           `db:"complexity" json:"complexity,omitempty"`
+	Confidence   *string           `db:"confidence" json:"confidence,omitempty"`
 	SessionID    *uuid.UUID        `db:"session_id" json:"session_id,omitempty"`
-	IssueID       *uuid.UUID        `db:"issue_id" json:"issue_id,omitempty"`
-	BranchName    *string           `db:"branch_name" json:"branch_name,omitempty"`
-	PRURL         *string           `db:"pr_url" json:"pr_url,omitempty"`
-	OutcomeNotes  *string           `db:"outcome_notes" json:"outcome_notes,omitempty"`
-	RetryCount    int               `db:"retry_count" json:"retry_count"`
-	MaxRetries    int               `db:"max_retries" json:"max_retries"`
-	CreatedAt     time.Time         `db:"created_at" json:"created_at"`
-	UpdatedAt     time.Time         `db:"updated_at" json:"updated_at"`
-	CompletedAt   *time.Time        `db:"completed_at" json:"completed_at,omitempty"`
+	IssueID      *uuid.UUID        `db:"issue_id" json:"issue_id,omitempty"`
+	BranchName   *string           `db:"branch_name" json:"branch_name,omitempty"`
+	PRURL        *string           `db:"pr_url" json:"pr_url,omitempty"`
+	OutcomeNotes *string           `db:"outcome_notes" json:"outcome_notes,omitempty"`
+	RetryCount   int               `db:"retry_count" json:"retry_count"`
+	MaxRetries   int               `db:"max_retries" json:"max_retries"`
+	CreatedAt    time.Time         `db:"created_at" json:"created_at"`
+	UpdatedAt    time.Time         `db:"updated_at" json:"updated_at"`
+	CompletedAt  *time.Time        `db:"completed_at" json:"completed_at,omitempty"`
 }
 
 // ProjectCycle records a PM planning cycle for a project.
