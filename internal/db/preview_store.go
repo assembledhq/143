@@ -165,6 +165,41 @@ func (s *PreviewStore) GetActivePreviewForSession(ctx context.Context, orgID, se
 // and preview_infrastructure rows so the UI's startup checklist doesn't spin
 // forever on orphaned children.
 func (s *PreviewStore) UpdatePreviewStatus(ctx context.Context, orgID, id uuid.UUID, status models.PreviewStatus, errMsg string) error {
+	if status.IsTerminal() {
+		tx, err := s.db.Begin(ctx)
+		if err != nil {
+			return fmt.Errorf("begin terminal preview status transaction: %w", err)
+		}
+		defer func() { _ = tx.Rollback(ctx) }()
+
+		txStore := s.WithTx(tx)
+		rowsAffected, err := txStore.updatePreviewStatus(ctx, orgID, id, status, errMsg)
+		if err != nil {
+			return err
+		}
+		if rowsAffected == 0 {
+			return fmt.Errorf("preview instance not found")
+		}
+		if err := txStore.cascadeChildrenToTerminal(ctx, orgID, id, status, errMsg); err != nil {
+			return err
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return fmt.Errorf("commit terminal preview status transaction: %w", err)
+		}
+		return nil
+	}
+
+	rowsAffected, err := s.updatePreviewStatus(ctx, orgID, id, status, errMsg)
+	if err != nil {
+		return err
+	}
+	if rowsAffected == 0 {
+		return fmt.Errorf("preview instance not found")
+	}
+	return nil
+}
+
+func (s *PreviewStore) updatePreviewStatus(ctx context.Context, orgID, id uuid.UUID, status models.PreviewStatus, errMsg string) (int64, error) {
 	var query string
 	if status.IsTerminal() {
 		query = `UPDATE preview_instances SET status = @status, error = @error, stopped_at = now(), updated_at = now()
@@ -177,17 +212,9 @@ func (s *PreviewStore) UpdatePreviewStatus(ctx context.Context, orgID, id uuid.U
 		"id": id, "org_id": orgID, "status": status, "error": errMsg,
 	})
 	if err != nil {
-		return fmt.Errorf("update preview status: %w", err)
+		return 0, fmt.Errorf("update preview status: %w", err)
 	}
-	if tag.RowsAffected() == 0 {
-		return fmt.Errorf("preview instance not found")
-	}
-	if status.IsTerminal() {
-		if err := s.cascadeChildrenToTerminal(ctx, orgID, id, status, errMsg); err != nil {
-			return err
-		}
-	}
-	return nil
+	return tag.RowsAffected(), nil
 }
 
 // UpdatePreviewStatusIfActive atomically transitions a preview to the given
@@ -198,21 +225,51 @@ func (s *PreviewStore) UpdatePreviewStatus(ctx context.Context, orgID, id uuid.U
 // When the new status is terminal, it also cascades the transition to
 // non-terminal child preview_services / preview_infrastructure rows.
 func (s *PreviewStore) UpdatePreviewStatusIfActive(ctx context.Context, orgID, id uuid.UUID, status models.PreviewStatus, errMsg string) (bool, error) {
+	if status.IsTerminal() {
+		tx, err := s.db.Begin(ctx)
+		if err != nil {
+			return false, fmt.Errorf("begin conditional terminal preview status transaction: %w", err)
+		}
+		defer func() { _ = tx.Rollback(ctx) }()
+
+		txStore := s.WithTx(tx)
+		rowsAffected, err := txStore.updatePreviewStatusIfActive(ctx, orgID, id, status, errMsg)
+		if err != nil {
+			return false, err
+		}
+		if rowsAffected == 0 {
+			return false, nil
+		}
+		if err := txStore.cascadeChildrenToTerminal(ctx, orgID, id, status, errMsg); err != nil {
+			return true, err
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return true, fmt.Errorf("commit conditional terminal preview status transaction: %w", err)
+		}
+		return true, nil
+	}
+
+	rowsAffected, err := s.updatePreviewStatusIfActive(ctx, orgID, id, status, errMsg)
+	if err != nil {
+		return false, err
+	}
+	return rowsAffected > 0, nil
+}
+
+func (s *PreviewStore) updatePreviewStatusIfActive(ctx context.Context, orgID, id uuid.UUID, status models.PreviewStatus, errMsg string) (int64, error) {
 	query := `UPDATE preview_instances SET status = @status, error = @error, updated_at = now()
 		WHERE id = @id AND org_id = @org_id AND status NOT IN ('stopped', 'failed', 'expired')`
+	if status.IsTerminal() {
+		query = `UPDATE preview_instances SET status = @status, error = @error, stopped_at = now(), updated_at = now()
+			WHERE id = @id AND org_id = @org_id AND status NOT IN ('stopped', 'failed', 'expired')`
+	}
 	tag, err := s.db.Exec(ctx, query, pgx.NamedArgs{
 		"id": id, "org_id": orgID, "status": status, "error": errMsg,
 	})
 	if err != nil {
-		return false, fmt.Errorf("conditional update preview status: %w", err)
+		return 0, fmt.Errorf("conditional update preview status: %w", err)
 	}
-	updated := tag.RowsAffected() > 0
-	if updated && status.IsTerminal() {
-		if err := s.cascadeChildrenToTerminal(ctx, orgID, id, status, errMsg); err != nil {
-			return updated, err
-		}
-	}
-	return updated, nil
+	return tag.RowsAffected(), nil
 }
 
 // UpdatePreviewAccess updates the last_accessed_at timestamp.

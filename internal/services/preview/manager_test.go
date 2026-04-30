@@ -1685,6 +1685,20 @@ func expectCreatePreviewInstance(mock pgxmock.PgxPoolIface, previewID, sessionID
 		)
 }
 
+func expectUpdatePreviewStatusFailed(mock pgxmock.PgxPoolIface) {
+	mock.ExpectBegin()
+	mock.ExpectExec("UPDATE preview_instances SET status").
+		WithArgs(previewAnyArgs(4)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectExec("UPDATE preview_services SET").
+		WithArgs(previewAnyArgs(5)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
+	mock.ExpectExec("UPDATE preview_infrastructure SET").
+		WithArgs(previewAnyArgs(5)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
+	mock.ExpectCommit()
+}
+
 // previewAnyArgs matches the helper style in the db package tests.
 func previewAnyArgs(n int) []any {
 	args := make([]any, n)
@@ -1863,10 +1877,8 @@ func TestReservePreview_HoldErrorMarksFailed(t *testing.T) {
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnError(fmt.Errorf("boom"))
 
-	// UpdatePreviewStatus failed.
-	mock.ExpectExec("UPDATE preview_instances SET status").
-		WithArgs(previewAnyArgs(4)...).
-		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	// UpdatePreviewStatus(failed).
+	expectUpdatePreviewStatusFailed(mock)
 
 	_, err = mgr.ReservePreview(context.Background(), StartPreviewInput{
 		SessionID: sessionID,
@@ -2213,9 +2225,7 @@ func TestAbortReservation_ReleasesHoldAndDestroysHydratedContainer(t *testing.T)
 	}
 
 	// UpdatePreviewStatus(failed).
-	mock.ExpectExec("UPDATE preview_instances SET status").
-		WithArgs(previewAnyArgs(4)...).
-		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	expectUpdatePreviewStatusFailed(mock)
 
 	// ReleasePreviewHold: destroyNow=true (container-1 and no turn).
 	mock.ExpectQuery(`WITH released AS`).
@@ -2266,9 +2276,7 @@ func TestAbortReservation_LeavesContainerWhenNotHydrated(t *testing.T) {
 		SessionID: uuid.New(),
 	}
 
-	mock.ExpectExec("UPDATE preview_instances SET status").
-		WithArgs(previewAnyArgs(4)...).
-		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	expectUpdatePreviewStatusFailed(mock)
 	mock.ExpectQuery(`WITH released AS`).
 		WithArgs(previewAnyArgs(2)...).
 		WillReturnRows(
@@ -2306,9 +2314,7 @@ func TestAbortReservation_LeavesContainerWhenSessionTracksDifferent(t *testing.T
 		SessionID: uuid.New(),
 	}
 
-	mock.ExpectExec("UPDATE preview_instances SET status").
-		WithArgs(previewAnyArgs(4)...).
-		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	expectUpdatePreviewStatusFailed(mock)
 	// Session reports a different container_id than the one we hydrated.
 	mock.ExpectQuery(`WITH released AS`).
 		WithArgs(previewAnyArgs(2)...).
@@ -2346,9 +2352,7 @@ func TestAbortReservation_FinalizeNotClearedSkipsDestroy(t *testing.T) {
 		SessionID: uuid.New(),
 	}
 
-	mock.ExpectExec("UPDATE preview_instances SET status").
-		WithArgs(previewAnyArgs(4)...).
-		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	expectUpdatePreviewStatusFailed(mock)
 	mock.ExpectQuery(`WITH released AS`).
 		WithArgs(previewAnyArgs(2)...).
 		WillReturnRows(
@@ -2389,9 +2393,7 @@ func TestAbortReservation_FinalizeErrorSkipsDestroy(t *testing.T) {
 		SessionID: uuid.New(),
 	}
 
-	mock.ExpectExec("UPDATE preview_instances SET status").
-		WithArgs(previewAnyArgs(4)...).
-		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	expectUpdatePreviewStatusFailed(mock)
 	mock.ExpectQuery(`WITH released AS`).
 		WithArgs(previewAnyArgs(2)...).
 		WillReturnRows(
@@ -2431,9 +2433,7 @@ func TestAbortReservation_ReleaseHoldErrorLeavesContainer(t *testing.T) {
 		SessionID: uuid.New(),
 	}
 
-	mock.ExpectExec("UPDATE preview_instances SET status").
-		WithArgs(previewAnyArgs(4)...).
-		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	expectUpdatePreviewStatusFailed(mock)
 	mock.ExpectQuery(`WITH released AS`).
 		WithArgs(previewAnyArgs(2)...).
 		WillReturnError(fmt.Errorf("db down"))
@@ -2583,9 +2583,7 @@ func TestStartPreview_LaunchFailureAborts(t *testing.T) {
 		)
 
 	// AbortReservation: UpdatePreviewStatus(failed) + ReleasePreviewHold.
-	mock.ExpectExec("UPDATE preview_instances SET status").
-		WithArgs(previewAnyArgs(4)...).
-		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	expectUpdatePreviewStatusFailed(mock)
 	mock.ExpectQuery(`WITH released AS`).
 		WithArgs(previewAnyArgs(2)...).
 		WillReturnRows(
