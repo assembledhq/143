@@ -1011,8 +1011,33 @@ describe('SessionDetailPage', () => {
     const actions = screen.getByLabelText('Session detail actions');
 
     expect(tabRail).toHaveClass('overflow-x-auto');
+    expect(tabRail).toHaveClass('scrollbar-hide');
     expect(actions).toHaveClass('shrink-0');
     expect(within(actions).getByRole('button', { name: 'View PR' })).toBeInTheDocument();
+  });
+
+  it('shows the horizontal tab scrollbar only when tabs run into the action buttons', async () => {
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+
+    const tabRail = await screen.findByLabelText('Session detail tabs');
+
+    Object.defineProperty(tabRail, 'clientWidth', {
+      configurable: true,
+      value: 140,
+    });
+    Object.defineProperty(tabRail, 'scrollWidth', {
+      configurable: true,
+      value: 360,
+    });
+
+    await act(async () => {
+      window.dispatchEvent(new Event('resize'));
+    });
+
+    await waitFor(() => {
+      expect(tabRail).not.toHaveClass('scrollbar-hide');
+    });
+    expect(tabRail).toHaveClass('mask-fade-r');
   });
 
   it('renders the PR health banner at the top of Overview when a linked PR is open', async () => {
