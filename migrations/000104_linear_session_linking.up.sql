@@ -49,6 +49,15 @@ CREATE INDEX idx_session_issue_link_state_events_org_session
 -- identifier (e.g. "ACS-1234") as a Linear ref when the prefix matches a team
 -- key in this cache; without it, JIRA keys, AWS resource IDs, and internal
 -- codes would all be false positives. Refreshed on OAuth install and every 24h.
+--
+-- workspace_id is informational only and not part of any unique constraint.
+-- Linear treats workspace ids as effectively immutable, but if a row's
+-- workspace_id ever drifts from what the integration is currently bound to
+-- (e.g. mid-rollout reconnect), the row is still uniquely identified by
+-- (integration_id, team_key), and ReplaceForIntegration upserts workspace_id
+-- back to the live value. The detection path keys on team_key alone, so a
+-- stale workspace_id can't redirect a write — but it can keep an old row
+-- visible to ListByOrg until the next refresh.
 CREATE TABLE linear_team_keys (
     id             uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     org_id         uuid NOT NULL REFERENCES organizations(id),
@@ -76,9 +85,27 @@ ALTER TABLE sessions
     ADD COLUMN linear_private boolean NOT NULL DEFAULT false,
     ADD COLUMN linear_state_sync_disabled boolean NOT NULL DEFAULT false,
     ADD COLUMN linear_identifier_hint text,
-    ADD COLUMN linear_prepare_state text NOT NULL DEFAULT 'none',
+    ADD COLUMN linear_prepare_state text NOT NULL DEFAULT 'none';
+
+-- Validate the prepare-state vocabulary in a separate ADD CONSTRAINT NOT
+-- VALID + VALIDATE pair so the AccessExclusiveLock taken by the inline ADD
+-- CONSTRAINT above doesn't have to wait for a full table scan to validate.
+-- NOT VALID accepts the constraint immediately; VALIDATE re-scans under a
+-- weaker SHARE UPDATE EXCLUSIVE lock that doesn't block reads or writes.
+ALTER TABLE sessions
     ADD CONSTRAINT chk_sessions_linear_prepare_state
-        CHECK (linear_prepare_state IN ('none', 'pending', 'ready', 'failed'));
+        CHECK (linear_prepare_state IN ('none', 'pending', 'ready', 'failed'))
+        NOT VALID;
+ALTER TABLE sessions VALIDATE CONSTRAINT chk_sessions_linear_prepare_state;
+
+-- Partial index on the Linear identifier hint. The column is sparsely
+-- populated (only set on sessions that resolved a Linear primary), so a
+-- partial index keeps the index small and avoids bloating sessions writes
+-- for the common no-Linear case. Future queries that filter sessions by
+-- Linear identifier (analytics, "all sessions for ACS-1234") use this.
+CREATE INDEX idx_sessions_linear_identifier_hint
+    ON sessions (org_id, linear_identifier_hint)
+    WHERE linear_identifier_hint IS NOT NULL;
 
 -- Org/team Linear automation defaults. Stored as JSON in org_settings to avoid
 -- a fresh per-team table for v1 — see linear_settings.go for the parser.

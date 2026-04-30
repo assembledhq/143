@@ -44,7 +44,7 @@ func TestLinearTeamKeyStore_ListByOrg(t *testing.T) {
 			name: "returns team keys",
 			setup: func(mock pgxmock.PgxPoolIface, orgID uuid.UUID) {
 				now := time.Now().UTC()
-				mock.ExpectQuery("SELECT org_id, integration_id, workspace_id, team_id, team_key, team_name, refreshed_at").
+				mock.ExpectQuery(`SELECT k\.org_id, k\.integration_id, k\.workspace_id, k\.team_id, k\.team_key, k\.team_name, k\.refreshed_at`).
 					WithArgs(pgxmock.AnyArg()).
 					WillReturnRows(pgxmock.NewRows([]string{"org_id", "integration_id", "workspace_id", "team_id", "team_key", "team_name", "refreshed_at"}).
 						AddRow(orgID, uuid.MustParse("11111111-1111-1111-1111-111111111111"), "workspace-1", "team-1", "ACS", "Core", now))
@@ -60,7 +60,7 @@ func TestLinearTeamKeyStore_ListByOrg(t *testing.T) {
 		{
 			name: "wraps query errors",
 			setup: func(mock pgxmock.PgxPoolIface, _ uuid.UUID) {
-				mock.ExpectQuery("SELECT org_id, integration_id, workspace_id, team_id, team_key, team_name, refreshed_at").
+				mock.ExpectQuery(`SELECT k\.org_id, k\.integration_id, k\.workspace_id, k\.team_id, k\.team_key, k\.team_name, k\.refreshed_at`).
 					WithArgs(pgxmock.AnyArg()).
 					WillReturnError(errors.New("db unavailable"))
 			},

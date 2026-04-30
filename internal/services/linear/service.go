@@ -8,7 +8,9 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgerrcode"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/rs/zerolog"
 
 	"github.com/assembledhq/143/internal/db"
@@ -80,6 +82,14 @@ type Service struct {
 	// invalidation is best-effort via the TTL since stale entries only cause
 	// transient detection misses (the next session create within the TTL
 	// after a refresh might miss new keys, then self-heal).
+	//
+	// Multi-node staleness: cache invalidation (RefreshTeamKeys) only
+	// invalidates the *local* node's entry. With more than one API/worker
+	// pod, a session create on a different pod can miss new keys for up to
+	// the TTL window after the OAuth post-install or 24h cron refresh fires
+	// on another node. This is by design — detection misses are
+	// self-healing within the TTL and the alternative (LISTEN/NOTIFY for
+	// cross-pod invalidation) wasn't worth the wiring for a 60s ceiling.
 	teamKeyCache teamKeyAllowlistCache
 }
 
@@ -328,6 +338,21 @@ func (s *Service) withProviderStateLocked(
 			"org_id":   orgID,
 			"provider": "linear",
 		}); err != nil {
+		// FK violation on link_id means the link row was deleted between
+		// resolution and this milestone job firing (e.g. session deleted,
+		// link unlinked, or a DB-level CASCADE swept it). The milestone is
+		// moot — short-circuit cleanly so the worker doesn't retry forever
+		// chasing a link that no longer exists. Operators chasing "why is
+		// this milestone job in failure mode?" would otherwise see a
+		// confusing wrapped FK error with no obvious resolution.
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == pgerrcode.ForeignKeyViolation {
+			s.logger.Debug().
+				Str("link_id", linkID.String()).
+				Str("org_id", orgID.String()).
+				Msg("linear: provider_state seed hit FK violation; link is gone, treating milestone as no-op")
+			return nil
+		}
 		return fmt.Errorf("seed provider state: %w", err)
 	}
 

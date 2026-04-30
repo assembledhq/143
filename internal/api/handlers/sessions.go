@@ -102,7 +102,11 @@ type linearSessionLinker interface {
 // with the actual detection regexes.
 func looksLikeLinearReference(refs []models.SessionInputReference) bool {
 	for _, r := range refs {
-		if linear.MightContainLinearRef(r.Display) {
+		// Reference-picker entries can carry the Linear key in either Display
+		// (human-readable label) or ID (the picker's underlying value), so
+		// scan both. Without ID we'd miss pickers that put "ACS-1234" in the
+		// id field and a generic label like "Linear issue" in display.
+		if linear.MightContainLinearRef(r.Display) || linear.MightContainLinearRef(r.ID) {
 			return true
 		}
 	}
@@ -2105,13 +2109,15 @@ func (h *SessionHandler) CreateManual(w http.ResponseWriter, r *http.Request) {
 			referenceText = strings.Join(refDisplays, "\n")
 		}
 		linearResult, linkErr := h.linearLinker.ResolveAndLinkAtCreate(r.Context(), linear.CreateInput{
-			OrgID:         orgID,
-			SessionID:     session.ID,
-			MessageBody:   body.Message,
-			SessionTitle:  title,
-			BranchName:    body.Branch,
-			ReferenceText: referenceText,
-			UserID:        userID,
+			OrgID:                   orgID,
+			SessionID:               session.ID,
+			MessageBody:             body.Message,
+			SessionTitle:            title,
+			BranchName:              body.Branch,
+			ReferenceText:           referenceText,
+			UserID:                  userID,
+			LinearPrivate:           body.LinearPrivate,
+			LinearStateSyncDisabled: body.LinearStateSyncDisabled,
 		})
 		if linkErr != nil {
 			errMsg := "Linear context could not be prepared. Retry the session after the Linear integration recovers."
@@ -2119,9 +2125,16 @@ func (h *SessionHandler) CreateManual(w http.ResponseWriter, r *http.Request) {
 			// request context (client disconnect) doesn't leave the session
 			// stuck in "pending" forever — the agent run hasn't been
 			// enqueued yet, so without this transition the row is orphaned.
+			//
+			// Backstop: if this 5s detached write also fails (DB hiccup,
+			// process death), agent.SessionReaper Phase 0
+			// (FailureCategoryStuckPending, 10-minute cutoff) sweeps stale
+			// pending rows on its next tick. The detached write is the
+			// fast path that surfaces the failure to the user immediately;
+			// the reaper is the eventual-consistency safety net.
 			cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			if err := h.runStore.UpdateResult(cleanupCtx, orgID, session.ID, "failed", &models.SessionResult{Error: &errMsg}); err != nil {
-				h.logger.Error().Err(err).Str("session_id", session.ID.String()).Msg("failed to mark session failed after linear pre-start linking error; session row may be orphaned in pending")
+				h.logger.Error().Err(err).Str("session_id", session.ID.String()).Msg("failed to mark session failed after linear pre-start linking error; SessionReaper Phase 0 will reap the stuck-pending row within max_pending_age")
 			}
 			cancel()
 			h.logger.Warn().Err(linkErr).Str("session_id", session.ID.String()).Msg("linear pre-start linking failed; refusing to enqueue agent run")
@@ -2247,6 +2260,14 @@ func buildManualSessionDescription(message string, images []string) string {
 // session has no message body to derive a title from. The Linear-issue-only
 // fast path overwrites this with the linked issue's title, which means the
 // constant doubles as a sentinel — exposed for that comparison.
+//
+// CAUTION: shouldOverrideTitleWithLinearIssue compares trimmed titles to
+// this exact literal. Renaming the constant — including for i18n or copy
+// updates — silently changes which historical sessions are eligible for
+// Linear-title overwrite (every existing row whose title still equals the
+// old literal will stop matching). If this value ever needs to change,
+// migrate existing rows in the same change or switch to a non-displayable
+// sentinel column rather than a string compare.
 const defaultManualSessionTitle = "Manual Session"
 
 func manualSessionTitle(message string) string {

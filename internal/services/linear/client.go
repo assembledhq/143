@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // graphQLClient is a small Linear GraphQL client that owns the API surface
@@ -482,6 +483,13 @@ func (c *graphQLClient) IssueRecentHumanEdits(ctx context.Context, issueID strin
 // retry window (a stuck job retries within minutes) and avoids paginating
 // long-lived issues.
 //
+// Pagination shape: Linear's `orderBy: createdAt` is ascending and
+// `first: N` would return the OLDEST N comments, so on any issue with
+// more than 50 comments the orphan we just posted (which is the most
+// recent) would never appear in the result. We use `last: N` which —
+// per the Relay-style pagination — returns the LAST N entries in the
+// ordering, i.e. the newest 50.
+//
 // Returns "" with no error when no matching comment is found.
 func (c *graphQLClient) FindRecentBotCommentByURL(ctx context.Context, issueID, sessionURL string) (string, error) {
 	if issueID == "" || sessionURL == "" {
@@ -489,7 +497,7 @@ func (c *graphQLClient) FindRecentBotCommentByURL(ctx context.Context, issueID, 
 	}
 	query := `query($id: String!) {
 		issue(id: $id) {
-			comments(first: 50, orderBy: createdAt) {
+			comments(last: 50, orderBy: createdAt) {
 				nodes { id body }
 			}
 		}
@@ -512,10 +520,11 @@ func (c *graphQLClient) FindRecentBotCommentByURL(ctx context.Context, issueID, 
 	if result.Data.Issue == nil {
 		return "", nil
 	}
-	// Walk newest-last so we return the most recent match (Linear's
-	// orderBy: createdAt is ascending). Match on the session URL only —
-	// the bot prefix is convention but a future format change shouldn't
-	// invalidate the recovery.
+	// `last: N` with an ascending orderBy returns the newest N entries in
+	// ascending order, so we still walk last-wins to return the most
+	// recent match. Match on the session URL only — the bot prefix is
+	// convention but a future format change shouldn't invalidate the
+	// recovery.
 	var foundID string
 	for _, c := range result.Data.Issue.Comments.Nodes {
 		if strings.Contains(c.Body, sessionURL) {
@@ -631,7 +640,14 @@ func truncateErrorMessage(s string) string {
 	if len(s) <= maxLinearErrorMessageLen {
 		return s
 	}
-	return s[:maxLinearErrorMessageLen] + "…[truncated]"
+	// Trim back to the previous valid UTF-8 boundary so the cap doesn't
+	// split a multi-byte rune and produce invalid UTF-8 in error logs (some
+	// JSON encoders reject or replace it, masking the actual error message).
+	cut := maxLinearErrorMessageLen
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut] + "…[truncated]"
 }
 
 // ErrUnauthorized is returned by the client when Linear rejects the access

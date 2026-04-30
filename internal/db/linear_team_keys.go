@@ -33,13 +33,25 @@ func NewLinearTeamKeyStore(db DBTX) *LinearTeamKeyStore {
 	return &LinearTeamKeyStore{db: db}
 }
 
-// ListByOrg returns all team-key entries for the org. Used by detection,
-// where the caller transforms this to a `map[string]bool` keyed by TeamKey.
+// ListByOrg returns the org's team-key entries scoped to integrations that
+// are currently `active`. Detection consumes this allowlist as authoritative
+// for "is this bare identifier a Linear ref?" — a stale row from a paused
+// or dead integration could otherwise match a key the org no longer owns,
+// and resolution would route the write through the active integration's
+// token to a different workspace's issue (cross-workspace token misuse).
+//
+// The JOIN against `integrations` is the cheapest place to enforce this:
+// it keeps the cache append-only (we don't need to delete rows when an
+// integration leaves active status), and the cardinality is low enough
+// that the join cost is negligible compared with the remote Linear fetch
+// every detection avoids.
 func (s *LinearTeamKeyStore) ListByOrg(ctx context.Context, orgID uuid.UUID) ([]LinearTeamKey, error) {
 	rows, err := s.db.Query(ctx, `
-		SELECT org_id, integration_id, workspace_id, team_id, team_key, team_name, refreshed_at
-		FROM linear_team_keys
-		WHERE org_id = @org_id`,
+		SELECT k.org_id, k.integration_id, k.workspace_id, k.team_id, k.team_key, k.team_name, k.refreshed_at
+		FROM linear_team_keys k
+		JOIN integrations i ON i.id = k.integration_id
+		WHERE k.org_id = @org_id
+		  AND i.status = 'active'`,
 		pgx.NamedArgs{"org_id": orgID})
 	if err != nil {
 		return nil, fmt.Errorf("query linear team keys: %w", err)

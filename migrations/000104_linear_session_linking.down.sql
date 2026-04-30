@@ -5,6 +5,8 @@
 -- and the two `session_issue_link_*` tables have no inter-dependencies
 -- beyond the FK each holds back into core tables (organizations, sessions,
 -- issues), and those core tables are not dropped here.
+DROP INDEX IF EXISTS idx_sessions_linear_identifier_hint;
+
 ALTER TABLE sessions
     DROP CONSTRAINT IF EXISTS chk_sessions_linear_prepare_state,
     DROP COLUMN IF EXISTS linear_prepare_state,

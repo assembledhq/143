@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 
@@ -63,6 +65,17 @@ const botCommentPrefix = "🤖 143 automated update —"
 // access model — in short, any user who can create a linking session can
 // trigger these writes, and admins gate by toggling automation flags org-
 // wide or per-team rather than per-user.
+//
+// Workspace scoping: this method does not pre-fetch the issue to verify
+// that the integration's token still authorizes against the issue's
+// workspace. The Linear API enforces this implicitly — a token for
+// workspace B has no access to an issue in workspace A, so attachmentCreate
+// or commentCreate against a cross-workspace issue ID returns a
+// permission error, which surfaces here as a write failure (no silent
+// cross-workspace write happens). HandleStateTransition does an explicit
+// state-fetch and slug-compare for the same drift, so audited skip events
+// flow through that path; the milestone path relies on the API's own
+// authorization to fail closed.
 //
 // Idempotency: AttachmentID and CommentID in provider_state act as the
 // dedupe anchors. Re-running this with the same milestone is a no-op modulo
@@ -295,12 +308,60 @@ func defaultLinearAutomationSettings() models.LinearAutomationSettings {
 	return defaultLinearAutomationSettingsValue
 }
 
+// maxAttachmentTitleLen caps the attachment title length sent to Linear.
+// Linear renders attachment titles in compact list views — anything past
+// ~120 chars is truncated by their UI anyway, and capping locally avoids
+// shipping pathological lengths over the wire when a user pastes a
+// novella into the title field.
+const maxAttachmentTitleLen = 200
+
 func attachmentTitle(session *models.Session) string {
 	t := "143 session"
 	if session != nil && session.Title != nil && *session.Title != "" {
-		t = "143: " + *session.Title
+		t = "143: " + sanitizeAttachmentTitle(*session.Title)
 	}
 	return t
+}
+
+// sanitizeAttachmentTitle strips ASCII/Unicode control characters from a
+// user-set session title and caps its length on a rune boundary before it
+// flows into Linear. We can't fully sanitize markdown here (Linear renders
+// comment bodies as markdown but attachment titles as plain text — the body
+// path uses only system-controlled fields so it's safe), but stripping
+// control characters protects against unicode-direction-override tricks and
+// stray newlines that confuse Linear's UI without rejecting legitimate
+// punctuation in titles.
+func sanitizeAttachmentTitle(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, r := range s {
+		if r == utf8.RuneError {
+			continue
+		}
+		// Allow common whitespace chars to pass through but collapse them
+		// to a regular space so titles stay single-line.
+		if r == '\t' || r == '\n' || r == '\r' {
+			b.WriteByte(' ')
+			continue
+		}
+		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
+			continue
+		}
+		b.WriteRune(r)
+	}
+	out := strings.TrimSpace(b.String())
+	if utf8.RuneCountInString(out) <= maxAttachmentTitleLen {
+		return out
+	}
+	// Truncate on a rune boundary so we don't split a multi-byte character.
+	count := 0
+	for i := range out {
+		if count == maxAttachmentTitleLen {
+			return strings.TrimSpace(out[:i]) + "…"
+		}
+		count++
+	}
+	return out
 }
 
 func subtitleForMilestone(event MilestoneEvent, prNumber int) string {
@@ -506,6 +567,29 @@ func (s *Service) HandleStateTransition(ctx context.Context, in MilestoneInput) 
 			if currentIssue == nil {
 				return fmt.Errorf("fetch current linear issue state: issue not found")
 			}
+			// Workspace consistency guard. The Linear API itself rejects
+			// cross-workspace token usage (a token for workspace B cannot
+			// access an issue in workspace A — that's caught by FetchIssue
+			// returning an error or a nil issue). This check covers the
+			// remaining narrow window: the token successfully authenticated
+			// against the issue's workspace, but the workspace_slug we
+			// persisted at link time disagrees with what FetchIssue returns
+			// now. That can happen if an org reconnected its integration to
+			// a different Linear workspace whose IDs happen to overlap, or
+			// if Linear's slug for the workspace was renamed and the issue
+			// payload now reflects the new slug. Skip rather than write —
+			// surfacing the mismatch via a skip event lets operators see
+			// the drift without us silently overwriting state under the
+			// wrong workspace's branding.
+			if state.WorkspaceSlug != "" && currentIssue.WorkspaceSlug != "" &&
+				!strings.EqualFold(state.WorkspaceSlug, currentIssue.WorkspaceSlug) {
+				s.logger.Warn().
+					Str("link_id", in.Link.ID.String()).
+					Str("persisted_workspace", state.WorkspaceSlug).
+					Str("observed_workspace", currentIssue.WorkspaceSlug).
+					Msg("linear: workspace slug drift detected at state-transition time; skipping")
+				return recordSkipInTx(ctx, txState, txEvents, in, eventKind, db.LinearStateSkipAlreadyPastTarget)
+			}
 			state = mergeCurrentIssueObservation(state, currentIssue)
 			if err := txState.Merge(ctx, in.Session.OrgID, in.Link.ID, db.LinearProviderState{
 				LastKnownStateName: state.LastKnownStateName,
@@ -548,11 +632,24 @@ func (s *Service) HandleStateTransition(ctx context.Context, in MilestoneInput) 
 				// ErrLinearStateEventExists and silently no-op.
 				return fmt.Errorf("resolve target workflow state: %w", err)
 			}
-			if target == nil {
-				// No target state exists for this type in this team. This is
-				// a permanent (operator-fixable) condition — record a skip
+			if target == nil || target.ID == "" {
+				// No target state (or one returned with an empty ID, which
+				// shouldn't happen but would otherwise be sent to Linear and
+				// produce a useless 422). Permanent condition — record a skip
 				// so the audit trail explains it.
 				return recordSkipInTx(ctx, txState, txEvents, in, eventKind, db.LinearStateSkipAlreadyPastTarget)
+			}
+
+			// State-id divergence guard. Catches the rollback-recovery race:
+			// a previous attempt's UpdateIssueState succeeded but the local
+			// tx commit failed, so the fire-once claim was rolled back too.
+			// The retry would normally re-issue the move; instead, we
+			// observe currentIssue.StateID == target.ID and skip
+			// idempotently. This is a stricter check than the StateName/
+			// StateType comparison below — IDs are unambiguous, names can
+			// drift (Linear lets workspaces rename states).
+			if currentIssue.StateID != "" && currentIssue.StateID == target.ID {
+				return recordSkipInTx(ctx, txState, txEvents, in, eventKind, db.LinearStateSkipAlreadyInTargetState)
 			}
 
 			// Forward-only: refuse to move backwards. Differentiate

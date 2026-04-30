@@ -38,8 +38,9 @@ export function LinkedIssueChips({ session }: { session: Session }) {
               title attributes, so the detail goes through aria-describedby. */}
           <span id="linear-prepare-failed-detail" className="sr-only">
             Linear context preparation failed; turn 1 ran without the primary
-            issue snapshot. Check the operator debug surface or re-link the
-            issue manually.
+            issue snapshot. Re-paste the Linear URL in a follow-up message
+            to re-trigger detection, or contact an operator to inspect the
+            session's debug surface.
           </span>
         </span>
       )}

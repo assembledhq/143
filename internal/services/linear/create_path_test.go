@@ -188,7 +188,7 @@ func TestResolveAndLinkAtCreate(t *testing.T) {
 
 		svc := newCreatePathService(mock, createPathClient{}, nil)
 		svc.teamKeys = db.NewLinearTeamKeyStore(mock)
-		mock.ExpectQuery("SELECT org_id, integration_id, workspace_id, team_id, team_key, team_name, refreshed_at").
+		mock.ExpectQuery(`SELECT k\.org_id, k\.integration_id, k\.workspace_id, k\.team_id, k\.team_key, k\.team_name, k\.refreshed_at`).
 			WithArgs(pgxmock.AnyArg()).
 			WillReturnError(errors.New("db unavailable"))
 
@@ -896,7 +896,7 @@ func TestServiceIntegrationAndTeamKeys(t *testing.T) {
 		require.NoError(t, err, "should create mock pool")
 		defer mock.Close()
 
-		mock.ExpectQuery("SELECT org_id, integration_id, workspace_id, team_id, team_key, team_name, refreshed_at").
+		mock.ExpectQuery(`SELECT k\.org_id, k\.integration_id, k\.workspace_id, k\.team_id, k\.team_key, k\.team_name, k\.refreshed_at`).
 			WithArgs(pgxmock.AnyArg()).
 			WillReturnRows(pgxmock.NewRows([]string{"org_id", "integration_id", "workspace_id", "team_id", "team_key", "team_name", "refreshed_at"}).
 				AddRow(orgID, activeIntegration.ID, "workspace-1", "team-1", "ACS", "Core", time.Now().UTC()))
