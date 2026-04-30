@@ -398,13 +398,20 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
     done
   }
 
-  # Ensure gVisor runtime is configured with --ignore-cgroups so Docker
-  # handles cgroup management (prevents EOF errors from cgroup conflicts).
+  # Ensure gVisor runtime is configured with the flags the sandbox depends on:
+  #   --ignore-cgroups: Docker handles cgroup management (prevents EOF errors
+  #     from cgroup conflicts).
+  #   --host-uds=open: allow the in-sandbox 143-tools client to connect() to
+  #     the per-session GitHub credential socket bind-mounted from the host.
+  #     Default is "none", which makes connect() return ECONNREFUSED even
+  #     though the inode is visible inside the sandbox.
+  # Re-runs `runsc install` whenever either flag is missing so existing hosts
+  # get patched on the next deploy.
   if [ "$ROLE" = "worker" ] && command -v runsc &>/dev/null; then
     DAEMON_JSON="/etc/docker/daemon.json"
-    if [ -f "$DAEMON_JSON" ] && ! grep -q "ignore-cgroups" "$DAEMON_JSON"; then
-      echo "Patching runsc runtime to use --ignore-cgroups..."
-      sudo runsc install -- --ignore-cgroups
+    if [ ! -f "$DAEMON_JSON" ] || ! grep -q "ignore-cgroups" "$DAEMON_JSON" || ! grep -q "host-uds" "$DAEMON_JSON"; then
+      echo "Patching runsc runtime with --ignore-cgroups --host-uds=open..."
+      sudo runsc install -- --ignore-cgroups --host-uds=open
       sudo systemctl restart docker
       echo "Docker restarted with updated gVisor config."
     fi
