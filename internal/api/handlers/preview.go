@@ -425,6 +425,71 @@ func (h *PreviewHandler) requireInspector(w http.ResponseWriter, r *http.Request
 	return inspector, true
 }
 
+// classifyLaunchError converts a preview-launch error into the most specific
+// HTTP error code we can. Before this existed, every launch failure surfaced
+// as a generic 422 PREVIEW_START_FAILED with the message "failed to start
+// preview" — the actual cause (missing image, unhealthy container, init
+// script crash, readiness timeout) was logged but never reached the user, so
+// the frontend rendered the unhelpful "Failed to start preview: failed to
+// start preview".
+//
+// We pick out the provider sentinels from internal/services/preview/errors.go
+// and map each to a stable, debuggable error code. The user-visible message
+// always includes the underlying cause so an operator can act on it without
+// digging through Grafana.
+func classifyLaunchError(err error) *previewHTTPError {
+	if err == nil {
+		return nil
+	}
+	cause := err.Error()
+	switch {
+	case errors.Is(err, preview.ErrInfraImageUnavailable):
+		return newPreviewHTTPError(
+			http.StatusUnprocessableEntity,
+			"PREVIEW_INFRA_IMAGE_UNAVAILABLE",
+			"preview infrastructure image is not available on this worker. The image could not be pulled from its registry — check the worker's network egress and registry credentials. Details: "+cause,
+			err,
+		)
+	case errors.Is(err, preview.ErrInfraStartFailed):
+		return newPreviewHTTPError(
+			http.StatusUnprocessableEntity,
+			"PREVIEW_INFRA_START_FAILED",
+			"preview infrastructure container failed to start. Details: "+cause,
+			err,
+		)
+	case errors.Is(err, preview.ErrInfraUnhealthy):
+		return newPreviewHTTPError(
+			http.StatusUnprocessableEntity,
+			"PREVIEW_INFRA_UNHEALTHY",
+			"preview infrastructure container did not become healthy in time. The container started but its health check (e.g. pg_isready) never passed. Details: "+cause,
+			err,
+		)
+	case errors.Is(err, preview.ErrInitScriptFailed):
+		return newPreviewHTTPError(
+			http.StatusUnprocessableEntity,
+			"PREVIEW_INIT_SCRIPT_FAILED",
+			"preview init script failed. Check the script referenced in .143/preview.json. Details: "+cause,
+			err,
+		)
+	case errors.Is(err, preview.ErrServiceNotReady):
+		return newPreviewHTTPError(
+			http.StatusUnprocessableEntity,
+			"PREVIEW_SERVICE_NOT_READY",
+			"preview service did not pass its readiness probe. The service may have crashed at boot, taken too long to start, or be listening on a different port than declared in .143/preview.json. Details: "+cause,
+			err,
+		)
+	default:
+		// Pass the underlying cause through as the message so the frontend
+		// shows something actionable instead of "failed to start preview".
+		return newPreviewHTTPError(
+			http.StatusUnprocessableEntity,
+			"PREVIEW_START_FAILED",
+			"failed to start preview: "+cause,
+			err,
+		)
+	}
+}
+
 // =============================================================================
 // POST /api/v1/sessions/{id}/preview — Start a preview
 // =============================================================================
@@ -570,7 +635,7 @@ func (h *PreviewHandler) startPreviewLocal(ctx context.Context, orgID, userID, s
 	if err != nil {
 		h.manager.AbortReservation(ctx, reservation, hydratedID, fmt.Sprintf("launch: %v", err))
 		h.logger.Warn().Err(err).Str("session_id", sessionID.String()).Msg("preview launch failed")
-		return nil, newPreviewHTTPError(http.StatusUnprocessableEntity, "PREVIEW_START_FAILED", "failed to start preview", err)
+		return nil, classifyLaunchError(err)
 	}
 
 	if h.localNodeID != "" && (acq.Hydrated || (session.ContainerID != nil && *session.ContainerID != "")) {
