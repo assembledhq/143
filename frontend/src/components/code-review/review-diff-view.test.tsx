@@ -19,10 +19,22 @@ vi.mock("./diff-toolbar", () => ({
       <button onClick={() => (props.onViewModeChange as (m: string) => void)("split")}>
         ChangeView
       </button>
+      {props.onPrevFile ? (
+        <button onClick={props.onPrevFile as () => void}>PrevFile</button>
+      ) : null}
+      {props.onNextFile ? (
+        <button onClick={props.onNextFile as () => void}>NextFile</button>
+      ) : null}
+      {props.onOpenFileList ? (
+        <button onClick={props.onOpenFileList as () => void}>OpenFilesList</button>
+      ) : null}
       {props.onBrowseRepo ? (
         <button onClick={props.onBrowseRepo as () => void}>Browse</button>
       ) : null}
       <span data-testid="view-mode">{String(props.viewMode)}</span>
+      <span data-testid="toolbar-mobile-mode">{String(props.isMobile)}</span>
+      <span data-testid="toolbar-file-path">{String(props.filePath ?? "")}</span>
+      <span data-testid="toolbar-file-position">{String(props.filePositionLabel ?? "")}</span>
     </div>
   ),
 }));
@@ -197,6 +209,84 @@ describe("ReviewDiffView", () => {
     fireEvent.click(screen.getByText("BrowseFile"));
     expect(screen.getByTestId("repo-explorer")).toBeInTheDocument();
     expect(screen.getByTestId("explorer-initial-path")).toHaveTextContent("test.ts");
+  });
+
+  it("renders a single-file mobile reader with file navigation metadata", () => {
+    render(
+      <ReviewDiffView
+        {...defaultProps({
+          files: [makeDiffFile("src/a.ts"), makeDiffFile("src/b.ts")],
+          activeFileIndex: 1,
+          isMobile: true,
+          onOpenFileList: vi.fn(),
+        })}
+      />
+    );
+
+    const lastProps = mockDiffPaneRender.mock.calls.at(-1)?.[0] as Record<string, unknown>;
+
+    expect((lastProps.files as DiffFile[]).map((file) => file.newPath)).toEqual(["src/b.ts"]);
+    expect(screen.getByTestId("toolbar-mobile-mode")).toHaveTextContent("true");
+    expect(screen.getByTestId("toolbar-file-path")).toHaveTextContent("src/b.ts");
+    expect(screen.getByTestId("toolbar-file-position")).toHaveTextContent("2 of 2");
+  });
+
+  it("forces unified mode in mobile review", () => {
+    localStorage.setItem("diff-view-mode", "split");
+
+    render(
+      <ReviewDiffView
+        {...defaultProps({
+          files: [makeDiffFile("src/a.ts"), makeDiffFile("src/b.ts")],
+          activeFileIndex: 0,
+          isMobile: true,
+        })}
+      />
+    );
+
+    const lastProps = mockDiffPaneRender.mock.calls.at(-1)?.[0] as Record<string, unknown>;
+    expect(lastProps.viewMode).toBe("unified");
+    expect(screen.getByTestId("view-mode")).toHaveTextContent("unified");
+  });
+
+  it("advances to the next file in mobile review when the toolbar requests it", () => {
+    function Harness() {
+      const [activeFileIndex, setActiveFileIndex] = useState(0);
+
+      return (
+        <ReviewDiffView
+          {...defaultProps({
+            files: [makeDiffFile("src/a.ts"), makeDiffFile("src/b.ts")],
+            activeFileIndex,
+            onFileChange: setActiveFileIndex,
+            isMobile: true,
+          })}
+        />
+      );
+    }
+
+    render(<Harness />);
+    expect(screen.getByTestId("toolbar-file-position")).toHaveTextContent("1 of 2");
+
+    fireEvent.click(screen.getByText("NextFile"));
+
+    expect(screen.getByTestId("toolbar-file-path")).toHaveTextContent("src/b.ts");
+    expect(screen.getByTestId("toolbar-file-position")).toHaveTextContent("2 of 2");
+  });
+
+  it("keeps repo browsing available in mobile review", () => {
+    render(
+      <ReviewDiffView
+        {...defaultProps({
+          files: [makeDiffFile("src/a.ts"), makeDiffFile("src/b.ts")],
+          activeFileIndex: 0,
+          isMobile: true,
+        })}
+      />
+    );
+
+    fireEvent.click(screen.getByText("Browse"));
+    expect(screen.getByTestId("repo-explorer")).toBeInTheDocument();
   });
 
   it("calls onBack on Escape key when not in explorer/comment/help mode", () => {
