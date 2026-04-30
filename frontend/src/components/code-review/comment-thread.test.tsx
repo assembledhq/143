@@ -194,4 +194,18 @@ describe("CommentThread", () => {
     );
     expect(screen.getByText("Pass 2")).toBeInTheDocument();
   });
+
+  it("renders saved comments inside a width-constrained thread container", () => {
+    const comments = [makeComment()];
+    const { container } = render(
+      <CommentThread comments={comments} onUpdate={vi.fn()} onDelete={vi.fn()} />
+    );
+
+    expect(container.querySelector('[data-testid="comment-thread"]')).toHaveClass(
+      "w-fit"
+    );
+    expect(container.querySelector('[data-testid="comment-thread"]')).toHaveClass(
+      "max-w-full"
+    );
+  });
 });

@@ -128,10 +128,10 @@ describe("DiffHunk", () => {
     // CommentInput should have a submit button
     expect(screen.getByRole("button", { name: /submit|comment/i })).toBeInTheDocument();
     expect(container.querySelector('[data-testid="inline-comment-composer"]')).toHaveClass(
-      "max-w-2xl"
+      "max-w-[min(42rem,calc(100cqw-10rem))]"
     );
     expect(container.querySelector('[data-testid="inline-comment-composer-anchor"]')).toHaveClass(
-      "pl-[120px]"
+      "sticky"
     );
   });
 
