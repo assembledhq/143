@@ -33,7 +33,7 @@ const baseHealth: PullRequestHealthResponse = {
 };
 
 describe("PRHealthBanner", () => {
-  it("uses text-sm sizing for the header and metadata copy", () => {
+  it("uses text-sm for the header and text-xs for non-header copy", () => {
     renderWithProviders(
       <PRHealthBanner
         health={baseHealth}
@@ -47,7 +47,8 @@ describe("PRHealthBanner", () => {
     );
 
     expect(screen.getByText("PR health")).toHaveClass("text-sm");
-    expect(screen.getByText("PR #42 · acme/widgets")).toHaveClass("text-sm");
+    expect(screen.getByText("PR #42 · acme/widgets")).toHaveClass("text-xs");
+    expect(screen.getByText("PR #42 is healthy.")).toHaveClass("text-xs");
   });
 
   it("hides the Merge button when can_merge is false", () => {
