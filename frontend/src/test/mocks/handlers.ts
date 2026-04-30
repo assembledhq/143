@@ -135,6 +135,7 @@ export const mockPRHealth: PullRequestHealthResponse = {
   github_state_synced_at: '2026-02-17T07:07:00Z',
   summary: 'PR #42 is mergeable and all required test checks are passing.',
   checks: [],
+  checks_confirmed: false,
   can_resolve_conflicts: false,
   can_fix_tests: false,
   can_merge: false,

@@ -37,10 +37,11 @@ export function PRHealthBanner({
   onMerge,
 }: PRHealthBannerProps) {
   const isHealthy = !health.can_fix_tests && !health.can_resolve_conflicts;
-  const hasActionableButton = health.can_resolve_conflicts || health.can_fix_tests || health.can_merge;
   const orderedChecks = [...(health.checks ?? [])]
     .map((check) => ({ ...check, status: normalizeCheckStatus(check.status) }))
     .sort((a, b) => statusRank(a.status) - statusRank(b.status) || a.name.localeCompare(b.name));
+  const canShowMergeButton = health.can_merge && checksAllowMerge(health.checks_confirmed, orderedChecks);
+  const hasActionableButton = health.can_resolve_conflicts || health.can_fix_tests || canShowMergeButton;
   const failedChecks = orderedChecks.filter((check) => check.status === "failed").length;
   const failedSummaryLabel = orderedChecks.length > 0
     ? `${failedChecks}/${orderedChecks.length} failed`
@@ -147,7 +148,7 @@ export function PRHealthBanner({
                       {pendingAction === "fix_tests" ? "Opening repair session…" : "Fix tests"}
                     </Button>
                   )}
-                  {health.can_merge && (
+                  {canShowMergeButton && (
                     <Button
                       size="sm"
                       variant="default"
@@ -168,7 +169,7 @@ export function PRHealthBanner({
                     Resolve conflicts first. CI may need to rerun afterward.
                   </p>
                 )}
-                {mergeAuthRequired && health.can_merge && (
+                {mergeAuthRequired && canShowMergeButton && (
                   <p className="text-xs text-muted-foreground">
                     Connect your GitHub account to merge this pull request as yourself.
                   </p>
@@ -202,6 +203,15 @@ function normalizeCheckStatus(status?: string): PullRequestCheckStatus {
     default:
       return "pending";
   }
+}
+
+function checksAllowMerge(
+  checksConfirmed: boolean,
+  checks: Array<{ status: PullRequestCheckStatus }>,
+) {
+  return checks.length === 0
+    ? checksConfirmed
+    : checks.every((check) => check.status === "passed");
 }
 
 function checkStatusBadgeClassName(status: PullRequestCheckStatus) {
