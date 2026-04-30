@@ -313,8 +313,8 @@ func TestMilestoneFormattingAndStateHelpers(t *testing.T) {
 		{event: MilestoneLinked, expected: db.LinearStateEventLinked},
 		{event: MilestonePROpened, expected: db.LinearStateEventPROpened},
 		{event: MilestonePRMerged, expected: db.LinearStateEventPRMerged},
-		{event: MilestoneEndedNoPR, expected: db.LinearStateEventEnded},
-		{event: MilestoneFailed, expected: db.LinearStateEventCanceled},
+		{event: MilestoneEndedNoPR, expected: ""},
+		{event: MilestoneFailed, expected: ""},
 		{event: MilestoneEvent("unknown"), expected: ""},
 	}
 	for _, tt := range eventKindCases {
@@ -572,16 +572,28 @@ func TestHandleStateTransition_GuardsAndSkips(t *testing.T) {
 		}
 	})
 
-	t.Run("non-transition milestone records nothing", func(t *testing.T) {
+	t.Run("non-transition milestones record nothing", func(t *testing.T) {
 		t.Parallel()
-		client := newFakeLinearClient()
-		svc, _, events := buildTestService(t, client)
-		err := svc.HandleStateTransition(context.Background(), MilestoneInput{Event: MilestoneEvent("noop"), Session: newSession(), Link: newPrimaryLink(), IssueID: "linear-issue-id", IssueIdent: "ACS-1"})
-		if err != nil {
-			t.Fatalf("failed milestone should not transition: %v", err)
+		tests := []MilestoneEvent{
+			MilestoneEvent("noop"),
+			MilestoneEndedNoPR,
+			MilestoneFailed,
 		}
-		if len(events.inserts) != 0 || client.updateStateCalls != 0 {
-			t.Fatalf("failed milestone should not record or update, events=%d updates=%d", len(events.inserts), client.updateStateCalls)
+		for _, event := range tests {
+			event := event
+			t.Run(string(event), func(t *testing.T) {
+				t.Parallel()
+
+				client := newFakeLinearClient()
+				svc, _, events := buildTestService(t, client)
+				err := svc.HandleStateTransition(context.Background(), MilestoneInput{Event: event, Session: newSession(), Link: newPrimaryLink(), IssueID: "linear-issue-id", IssueIdent: "ACS-1"})
+				if err != nil {
+					t.Fatalf("terminal/non-transition milestone should not transition: %v", err)
+				}
+				if len(events.inserts) != 0 || client.updateStateCalls != 0 {
+					t.Fatalf("terminal/non-transition milestone should not record or update, events=%d updates=%d", len(events.inserts), client.updateStateCalls)
+				}
+			})
 		}
 	})
 

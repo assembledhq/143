@@ -205,7 +205,7 @@ func (w *Worker) poll(ctx context.Context) {
 	if errors.As(err, &fatal) {
 		w.logger.Error().Err(err).Str("job_id", job.ID.String()).Msg("job failed (fatal, skipping retries)")
 		w.deadLetterJob(ctx, job.ID, *job.LockToken, err.Error())
-		jobctx.RunDeadLetterHooks(handlerCtx, err)
+		w.runDeadLetterHooks(handlerCtx, err)
 		return
 	}
 
@@ -218,7 +218,7 @@ func (w *Worker) poll(ctx context.Context) {
 				Msg("retryable job exceeded max duration, dead-lettering")
 			timeoutErr := fmt.Errorf("retryable job timed out after %s: %w", maxRetryableDuration, err)
 			w.deadLetterJob(ctx, job.ID, *job.LockToken, timeoutErr.Error())
-			jobctx.RunDeadLetterHooks(handlerCtx, timeoutErr)
+			w.runDeadLetterHooks(handlerCtx, timeoutErr)
 			return
 		}
 		w.logger.Info().Err(err).Str("job_id", job.ID.String()).Msg("job deferred (retryable)")
@@ -229,7 +229,7 @@ func (w *Worker) poll(ctx context.Context) {
 	w.logger.Error().Err(err).Str("job_id", job.ID.String()).Msg("job failed")
 	if job.Attempts >= job.MaxAttempts {
 		w.deadLetterJob(ctx, job.ID, *job.LockToken, err.Error())
-		jobctx.RunDeadLetterHooks(handlerCtx, err)
+		w.runDeadLetterHooks(handlerCtx, err)
 		return
 	}
 	w.retryJob(ctx, job.ID, *job.LockToken, err.Error(), job.Attempts, false)
@@ -354,6 +354,12 @@ func (w *Worker) deadLetterJob(ctx context.Context, jobID, lockToken uuid.UUID, 
 	if !ok {
 		w.logger.Warn().Str("job_id", jobID.String()).Msg("lost ownership before dead-lettering job")
 	}
+}
+
+func (w *Worker) runDeadLetterHooks(handlerCtx context.Context, err error) {
+	hookCtx, cancel := context.WithTimeout(context.WithoutCancel(handlerCtx), 30*time.Second)
+	defer cancel()
+	jobctx.RunDeadLetterHooks(hookCtx, err)
 }
 
 func retryBackoff(attempt int) time.Duration {

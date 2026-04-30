@@ -623,10 +623,6 @@ func stateEventKindFor(event MilestoneEvent) db.LinearStateEventKind {
 		return db.LinearStateEventPROpened
 	case MilestonePRMerged:
 		return db.LinearStateEventPRMerged
-	case MilestoneEndedNoPR:
-		return db.LinearStateEventEnded
-	case MilestoneFailed:
-		return db.LinearStateEventCanceled
 	}
 	return ""
 }

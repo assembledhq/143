@@ -703,6 +703,31 @@ func TestLinearJobHandlers(t *testing.T) {
 		require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 	})
 
+	t.Run("linear_milestone retries when link hydration fails", func(t *testing.T) {
+		t.Parallel()
+
+		stores, mock := newTestStores(t)
+		defer mock.Close()
+		stores.SessionIssueLinks = db.NewSessionIssueLinkStore(mock)
+
+		orgID := uuid.New()
+		sessionID := uuid.New()
+		mock.ExpectQuery("SELECT .* FROM sessions").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(workerSessionRow(sessionID, uuid.Nil, orgID, string(models.SessionStatusCompleted), 1, nil, nil)...))
+		mock.ExpectQuery("SELECT .+ FROM session_issue_links").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnError(errors.New("db unavailable"))
+
+		handler := newLinearMilestoneHandler(stores, linearservice.NewService(linearservice.Config{}), zerolog.Nop())
+		payload := json.RawMessage(`{"org_id":"` + orgID.String() + `","session_id":"` + sessionID.String() + `","event":"linked","pr_number":42}`)
+
+		err := handler(context.Background(), "linear_milestone", payload)
+		require.Error(t, err, "linear_milestone should retry when linked issue hydration fails")
+		require.Contains(t, err.Error(), "list linear session issue links", "error should explain that link hydration failed")
+		require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+	})
+
 	t.Run("linear_milestone validates payloads", func(t *testing.T) {
 		t.Parallel()
 

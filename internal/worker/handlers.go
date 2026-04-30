@@ -2505,6 +2505,8 @@ func newLinearMilestoneHandler(stores *Stores, svc *linear.Service, logger zerol
 		if stores.SessionIssueLinks != nil {
 			if links, listErr := stores.SessionIssueLinks.ListBySession(ctx, orgID, sessionID); listErr == nil {
 				session.LinkedIssues = links
+			} else {
+				return fmt.Errorf("list linear session issue links: %w", listErr)
 			}
 		}
 		var primary *models.SessionIssueLink
