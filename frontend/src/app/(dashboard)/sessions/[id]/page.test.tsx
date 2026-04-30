@@ -2950,7 +2950,7 @@ describe('SessionDetailPage', () => {
     });
   });
 
-  it('keeps unresolved review comments attached after returning to the main chat view', async () => {
+  it('clears attached review comments after sending them to the agent', async () => {
     let postedMessage = '';
     const idleSessionWithDiff: Session = {
       ...mockSessions[0],
@@ -3025,6 +3025,11 @@ describe('SessionDetailPage', () => {
       expect(postedMessage).toContain('"Handle the null edge case"');
       expect(postedMessage).toContain('Hello agent');
     });
+
+    await waitFor(() => {
+      expect(screen.queryByText('1 comment attached')).not.toBeInTheDocument();
+    });
+    expect(screen.queryByText('Handle the null edge case')).not.toBeInTheDocument();
   });
 
   it('scrolls the chat transcript back to the live edge after sending a follow-up message', async () => {
