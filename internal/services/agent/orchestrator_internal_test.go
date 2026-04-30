@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 	"time"
 
@@ -114,4 +115,61 @@ func TestStreamLogs_CarriesThreadID(t *testing.T) {
 	require.Equal(t, 2, logs.logs[0].TurnNumber, "persisted log should keep the turn number")
 	require.Equal(t, "streamed message", logs.logs[0].Message, "persisted log should keep the message content")
 	require.Nil(t, logs.logs[0].Metadata, "persisted log should leave absent metadata as SQL null")
+}
+
+func TestStreamLogs_PersistsMetadataAsJSON(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.MustParse("22222222-2222-2222-2222-222222222222")
+	sessionID := uuid.MustParse("11111111-1111-1111-1111-111111111111")
+
+	logs := &testInternalSessionLogStore{}
+	orch := &Orchestrator{
+		agentRunLogs: logs,
+		logger:       zerolog.Nop(),
+	}
+
+	logCh := make(chan LogEntry, 1)
+	logCh <- LogEntry{
+		Timestamp: time.Now(),
+		Level:     "output",
+		Message:   "with metadata",
+		Metadata:  map[string]interface{}{"step": "two"},
+	}
+	close(logCh)
+
+	orch.streamLogs(context.Background(), sessionID, orgID, nil, 1, logCh, nil)
+
+	require.Len(t, logs.logs, 1, "streamLogs should persist the log entry")
+	require.NotNil(t, logs.logs[0].Metadata, "non-nil metadata should be marshaled and persisted")
+	var decoded map[string]interface{}
+	require.NoError(t, json.Unmarshal(logs.logs[0].Metadata, &decoded), "persisted metadata should be valid JSON")
+	require.Equal(t, "two", decoded["step"], "persisted metadata should round-trip the entry payload")
+}
+
+func TestStreamLogs_DropsUnmarshalableMetadata(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.MustParse("22222222-2222-2222-2222-222222222222")
+	sessionID := uuid.MustParse("11111111-1111-1111-1111-111111111111")
+
+	logs := &testInternalSessionLogStore{}
+	orch := &Orchestrator{
+		agentRunLogs: logs,
+		logger:       zerolog.Nop(),
+	}
+
+	logCh := make(chan LogEntry, 1)
+	logCh <- LogEntry{
+		Timestamp: time.Now(),
+		Level:     "output",
+		Message:   "bad metadata",
+		Metadata:  map[string]interface{}{"fn": func() {}},
+	}
+	close(logCh)
+
+	orch.streamLogs(context.Background(), sessionID, orgID, nil, 1, logCh, nil)
+
+	require.Len(t, logs.logs, 1, "streamLogs should still persist the log entry when metadata fails to marshal")
+	require.Nil(t, logs.logs[0].Metadata, "unmarshalable metadata should be dropped to nil rather than blocking the log")
 }
