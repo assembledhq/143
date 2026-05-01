@@ -1,3 +1,4 @@
+import { act } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { fireEvent, renderWithProviders, screen } from '@/test/test-utils';
 import { SwipeActionRow } from './swipe-action-row';
@@ -107,6 +108,151 @@ describe('SwipeActionRow', () => {
 
     fireEvent.touchEnd(surface!);
     expect(onAction).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps the moving row surface opaque while the action is revealed', () => {
+    renderWithProviders(
+      <SwipeActionRow
+        actionLabel="Archive item"
+        actionText="Archive"
+        onAction={() => {}}
+      >
+        <div>Row content</div>
+      </SwipeActionRow>,
+    );
+
+    const surface = screen.getByText('Row content').closest('[data-swipe-surface="true"]');
+    expect(surface).not.toBeNull();
+
+    fireEvent.touchStart(surface!, {
+      touches: [{ clientX: 220, clientY: 20 }],
+    });
+    fireEvent.touchMove(surface!, {
+      touches: [{ clientX: 120, clientY: 24 }],
+    });
+
+    expect(surface).toHaveClass('bg-background');
+  });
+
+  it('auto-fires on a deliberate mobile-width swipe before half-row travel', () => {
+    const onAction = vi.fn();
+
+    renderWithProviders(
+      <SwipeActionRow
+        actionLabel="Archive item"
+        actionText="Archive"
+        onAction={onAction}
+      >
+        <div>Row content</div>
+      </SwipeActionRow>,
+    );
+
+    const surface = screen.getByText('Row content').closest('[data-swipe-surface="true"]');
+    expect(surface).not.toBeNull();
+    const container = surface!.parentElement;
+    expect(container).not.toBeNull();
+    Object.defineProperty(container!, 'offsetWidth', {
+      configurable: true,
+      value: 390,
+    });
+
+    fireEvent.touchStart(surface!, {
+      touches: [{ clientX: 320, clientY: 20 }],
+    });
+    fireEvent.touchMove(surface!, {
+      touches: [{ clientX: 170, clientY: 24 }],
+    });
+    fireEvent.touchEnd(surface!);
+
+    expect(onAction).toHaveBeenCalledTimes(1);
+  });
+
+  it('auto-fires when touchend lands before React flushes the latest drag offset', () => {
+    const onAction = vi.fn();
+
+    renderWithProviders(
+      <SwipeActionRow
+        actionLabel="Archive item"
+        actionText="Archive"
+        onAction={onAction}
+      >
+        <div>Row content</div>
+      </SwipeActionRow>,
+    );
+
+    const surface = screen.getByText('Row content').closest('[data-swipe-surface="true"]');
+    expect(surface).not.toBeNull();
+    const container = surface!.parentElement;
+    expect(container).not.toBeNull();
+    Object.defineProperty(container!, 'offsetWidth', {
+      configurable: true,
+      value: 390,
+    });
+
+    act(() => {
+      fireEvent.touchStart(surface!, {
+        touches: [{ clientX: 320, clientY: 20 }],
+      });
+      fireEvent.touchMove(surface!, {
+        touches: [{ clientX: 170, clientY: 24 }],
+      });
+      fireEvent.touchEnd(surface!);
+    });
+
+    expect(onAction).toHaveBeenCalledTimes(1);
+  });
+
+  it('still completes the action when the haptic request fails', () => {
+    const onAction = vi.fn();
+    const originalVibrate = navigator.vibrate;
+    const originalConsoleError = console.error;
+    const consoleError = vi.fn();
+    Object.defineProperty(navigator, 'vibrate', {
+      configurable: true,
+      value: vi.fn(() => {
+        throw new Error('blocked');
+      }),
+    });
+    console.error = consoleError;
+
+    try {
+      renderWithProviders(
+        <SwipeActionRow
+          actionLabel="Archive item"
+          actionText="Archive"
+          onAction={onAction}
+        >
+          <div>Row content</div>
+        </SwipeActionRow>,
+      );
+
+      const surface = screen.getByText('Row content').closest('[data-swipe-surface="true"]');
+      expect(surface).not.toBeNull();
+
+      fireEvent.touchStart(surface!, {
+        touches: [{ clientX: 320, clientY: 20 }],
+      });
+      fireEvent.touchMove(surface!, {
+        touches: [{ clientX: 100, clientY: 24 }],
+      });
+      fireEvent.touchEnd(surface!);
+
+      expect(onAction).toHaveBeenCalledTimes(1);
+      expect(consoleError).toHaveBeenCalledWith(
+        'Failed to trigger swipe haptic feedback',
+        expect.any(Error),
+      );
+    } finally {
+      console.error = originalConsoleError;
+      if (originalVibrate) {
+        Object.defineProperty(navigator, 'vibrate', {
+          configurable: true,
+          value: originalVibrate,
+        });
+      } else {
+        Reflect.deleteProperty(navigator, 'vibrate');
+      }
+    }
   });
 
   it('does not auto-fire the action when a committed swipe is cancelled', () => {
