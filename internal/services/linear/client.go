@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -362,12 +363,22 @@ func (c *graphQLClient) WorkflowStateForType(ctx context.Context, teamID string,
 	if err := c.do(ctx, query, map[string]any{"teamID": teamID}, &result); err != nil {
 		return nil, err
 	}
+	// Sort by position ascending so the no-preferences fallback is
+	// deterministic ("leftmost typed state in the team's UI"). Linear's
+	// workflowStates query has no orderBy argument, so default ordering is
+	// API-implementation-dependent — without this sort, two `started`-type
+	// states like "In Progress" and "In Review" could swap in API responses
+	// and silently land a session-start move on "In Review."
+	nodes := result.Data.WorkflowStates.Nodes
+	sort.SliceStable(nodes, func(i, j int) bool {
+		return nodes[i].Position < nodes[j].Position
+	})
 	preferred := make(map[string]bool, len(prefer))
 	for _, p := range prefer {
 		preferred[strings.ToLower(p)] = true
 	}
 	var fallback *WorkflowState
-	for _, n := range result.Data.WorkflowStates.Nodes {
+	for _, n := range nodes {
 		if n.Type != stateType {
 			continue
 		}

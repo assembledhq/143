@@ -10,7 +10,9 @@ import { useQueryState, parseAsString } from "nuqs";
 import { cn, formatTimeAgo, sessionTitle } from "@/lib/utils";
 import { StatusDot } from "@/components/status-dot";
 import { AnimatedEllipsis } from "@/components/animated-ellipsis";
+import { SwipeActionRow } from "@/components/swipe-action-row";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { api } from "@/lib/api";
 import { useSessionUserFilter } from "@/hooks/use-session-user-filter";
@@ -347,8 +349,7 @@ export function SessionSidebar() {
         <div className="flex items-center gap-2">
           <div className="relative flex-1 min-w-0">
             <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground/50" />
-            <input
-              type="text"
+            <Input
               placeholder="Search sessions..."
               value={search}
               onChange={(e) => setSearch(e.target.value)}
@@ -358,7 +359,7 @@ export function SessionSidebar() {
                   e.currentTarget.blur();
                 }
               }}
-              className="w-full h-8 pl-8 pr-3 rounded-md border border-border bg-background text-xs placeholder:text-muted-foreground/50 focus:outline-none focus:ring-1 focus:ring-ring"
+              className="h-8 pl-8 text-xs"
             />
           </div>
           <SessionOwnerToggle
@@ -460,11 +461,24 @@ export function SessionSidebar() {
           const isArchived = !!session.archived_at;
 
           return (
-            <div key={session.id} className="group relative">
+            <SwipeActionRow
+              key={session.id}
+              className="mb-0.5"
+              actionLabel={isArchived ? "Unarchive session" : "Archive session"}
+              actionText={isArchived ? "Restore" : "Archive"}
+              actionIcon={isArchived ? <ArchiveRestore className="h-4 w-4" /> : <Archive className="h-4 w-4" />}
+              onAction={() => {
+                if (isArchived) {
+                  unarchiveMutation.mutate(session.id);
+                } else {
+                  archiveMutation.mutate(session.id);
+                }
+              }}
+            >
               <Link
                 href={`/sessions/${session.id}${filterSuffix}`}
                 className={cn(
-                  "block rounded-lg px-3 py-2.5 mb-0.5 transition-all duration-150",
+                  "block rounded-lg bg-muted/30 px-3 py-2.5 transition-all duration-150",
                   isSelected
                     ? "bg-background shadow-sm border border-border/50"
                     : "hover:bg-background/60"
@@ -518,27 +532,9 @@ export function SessionSidebar() {
                     </p>
                   )}
                 </div>
-              </div>
+                </div>
               </Link>
-              {/* Archive / Unarchive button — visible on hover */}
-              <Button
-                variant="ghost"
-                size="icon-xs"
-                className="absolute top-2 right-2 hidden group-hover:flex group-focus-within:flex bg-background border border-border/60 text-muted-foreground hover:text-foreground shadow-sm"
-                title={isArchived ? "Unarchive session" : "Archive session"}
-                onClick={(e) => {
-                  e.preventDefault();
-                  e.stopPropagation();
-                  if (isArchived) {
-                    unarchiveMutation.mutate(session.id);
-                  } else {
-                    archiveMutation.mutate(session.id);
-                  }
-                }}
-              >
-                {isArchived ? <ArchiveRestore className="h-3 w-3" /> : <Archive className="h-3 w-3" />}
-              </Button>
-            </div>
+            </SwipeActionRow>
           );
         })}
 

@@ -324,7 +324,8 @@ func TestMilestoneFormattingAndStateHelpers(t *testing.T) {
 		event    MilestoneEvent
 		expected db.LinearStateEventKind
 	}{
-		{event: MilestoneLinked, expected: db.LinearStateEventLinked},
+		{event: MilestoneLinked, expected: ""},
+		{event: MilestoneStarted, expected: db.LinearStateEventStarted},
 		{event: MilestonePROpened, expected: db.LinearStateEventPROpened},
 		{event: MilestonePRMerged, expected: db.LinearStateEventPRMerged},
 		{event: MilestoneEndedNoPR, expected: ""},
@@ -341,7 +342,8 @@ func TestMilestoneFormattingAndStateHelpers(t *testing.T) {
 		event    MilestoneEvent
 		expected string
 	}{
-		{event: MilestoneLinked, expected: "started"},
+		{event: MilestoneLinked, expected: ""},
+		{event: MilestoneStarted, expected: "started"},
 		{event: MilestonePROpened, expected: "started"},
 		{event: MilestonePRMerged, expected: "completed"},
 		{event: MilestoneFailed, expected: ""},
@@ -622,7 +624,7 @@ func TestHandleStateTransition_LinearStateSyncDisabledRecordsSkip(t *testing.T) 
 	session.LinearStateSyncDisabled = true
 
 	if err := svc.HandleStateTransition(context.Background(), MilestoneInput{
-		Event:      MilestoneLinked,
+		Event:      MilestoneStarted,
 		Session:    session,
 		Link:       link,
 		IssueID:    "linear-issue-id",
@@ -683,7 +685,7 @@ func TestHandleStateTransition_GuardsAndSkips(t *testing.T) {
 		svc, _, events := buildTestService(t, newFakeLinearClient())
 		link := newPrimaryLink()
 		link.Role = models.SessionIssueLinkRoleRelated
-		if err := svc.HandleStateTransition(context.Background(), MilestoneInput{Event: MilestoneLinked, Session: newSession(), Link: link, IssueID: "linear-issue-id", IssueIdent: "ACS-1"}); err != nil {
+		if err := svc.HandleStateTransition(context.Background(), MilestoneInput{Event: MilestoneStarted, Session: newSession(), Link: link, IssueID: "linear-issue-id", IssueIdent: "ACS-1"}); err != nil {
 			t.Fatalf("related link skip should not error: %v", err)
 		}
 		if got := events.inserts[0].SkippedReason; got != db.LinearStateSkipNotPrimary {
@@ -702,7 +704,7 @@ func TestHandleStateTransition_GuardsAndSkips(t *testing.T) {
 				},
 			}}, nil
 		}
-		if err := svc.HandleStateTransition(context.Background(), MilestoneInput{Event: MilestoneLinked, Session: newSession(), Link: newPrimaryLink(), IssueID: "linear-issue-id", IssueIdent: "ACS-1"}); err != nil {
+		if err := svc.HandleStateTransition(context.Background(), MilestoneInput{Event: MilestoneStarted, Session: newSession(), Link: newPrimaryLink(), IssueID: "linear-issue-id", IssueIdent: "ACS-1"}); err != nil {
 			t.Fatalf("per-team disabled skip should not error: %v", err)
 		}
 		if got := events.inserts[0].SkippedReason; got != db.LinearStateSkipPerTeamDisabled {
@@ -715,7 +717,7 @@ func TestHandleStateTransition_GuardsAndSkips(t *testing.T) {
 		client := newFakeLinearClient()
 		client.humanEdited = true
 		svc, _, events := buildTestService(t, client)
-		if err := svc.HandleStateTransition(context.Background(), MilestoneInput{Event: MilestoneLinked, Session: newSession(), Link: newPrimaryLink(), IssueID: "linear-issue-id", IssueIdent: "ACS-1"}); err != nil {
+		if err := svc.HandleStateTransition(context.Background(), MilestoneInput{Event: MilestoneStarted, Session: newSession(), Link: newPrimaryLink(), IssueID: "linear-issue-id", IssueIdent: "ACS-1"}); err != nil {
 			t.Fatalf("human edit skip should not error: %v", err)
 		}
 		if got := events.inserts[0].SkippedReason; got != db.LinearStateSkipUserRecentEdit {
@@ -762,26 +764,26 @@ func TestHandleStateTransition_GuardsAndSkips(t *testing.T) {
 		}
 	})
 
-	// Linked-event must NOT trip the coexistence guard — Linear's GitHub
+	// Session-start must NOT trip the coexistence guard — Linear's GitHub
 	// integration only runs on PR-lifecycle events, so suppressing our
-	// own "started" move on session-link would silently lose the only
+	// own "started" move on session-start would silently lose the only
 	// transition we own.
-	t.Run("session linked does not trip coexistence guard", func(t *testing.T) {
+	t.Run("session started does not trip coexistence guard", func(t *testing.T) {
 		t.Parallel()
 		client := newFakeLinearClient()
 		client.hasGitHubAttachment = true
 		svc, _, events := buildTestService(t, client)
-		if err := svc.HandleStateTransition(context.Background(), MilestoneInput{Event: MilestoneLinked, Session: newSession(), Link: newPrimaryLink(), IssueID: "linear-issue-id", IssueIdent: "ACS-1"}); err != nil {
-			t.Fatalf("linked transition should not error: %v", err)
+		if err := svc.HandleStateTransition(context.Background(), MilestoneInput{Event: MilestoneStarted, Session: newSession(), Link: newPrimaryLink(), IssueID: "linear-issue-id", IssueIdent: "ACS-1"}); err != nil {
+			t.Fatalf("started transition should not error: %v", err)
 		}
 		if client.updateStateCalls != 1 {
-			t.Fatalf("linked event must fire UpdateIssueState even when GitHub integration is present (got %d)", client.updateStateCalls)
+			t.Fatalf("started event must fire UpdateIssueState even when GitHub integration is present (got %d)", client.updateStateCalls)
 		}
 		if len(events.inserts) != 1 {
 			t.Fatalf("expected 1 transition event recorded, got %d", len(events.inserts))
 		}
 		if got := events.inserts[0].SkippedReason; got != "" {
-			t.Fatalf("linked event must record a real transition, not a skip (got SkippedReason=%q)", got)
+			t.Fatalf("started event must record a real transition, not a skip (got SkippedReason=%q)", got)
 		}
 	})
 
@@ -920,7 +922,7 @@ func TestHandleStateTransition_GuardsAndSkips(t *testing.T) {
 		})
 
 		if err := svc.HandleStateTransition(context.Background(), MilestoneInput{
-			Event:      MilestoneLinked,
+			Event:      MilestoneStarted,
 			Session:    newSession(),
 			Link:       link,
 			IssueID:    "linear-issue-id",
@@ -944,7 +946,7 @@ func TestHandleStateTransition_GuardsAndSkips(t *testing.T) {
 		client := newFakeLinearClient()
 		client.target = nil
 		svc, _, events := buildTestService(t, client)
-		if err := svc.HandleStateTransition(context.Background(), MilestoneInput{Event: MilestoneLinked, Session: newSession(), Link: newPrimaryLink(), IssueID: "linear-issue-id", IssueIdent: "ACS-1"}); err != nil {
+		if err := svc.HandleStateTransition(context.Background(), MilestoneInput{Event: MilestoneStarted, Session: newSession(), Link: newPrimaryLink(), IssueID: "linear-issue-id", IssueIdent: "ACS-1"}); err != nil {
 			t.Fatalf("nil target skip should not error: %v", err)
 		}
 		if got := events.inserts[0].SkippedReason; got != db.LinearStateSkipNoTargetState {
@@ -996,7 +998,7 @@ func TestHandleStateTransition_GuardLookupErrorsAreRetried(t *testing.T) {
 		svc, _, events := buildTestService(t, client)
 
 		err := svc.HandleStateTransition(context.Background(), MilestoneInput{
-			Event:      MilestoneLinked,
+			Event:      MilestoneStarted,
 			Session:    newSession(),
 			Link:       newPrimaryLink(),
 			IssueID:    "linear-issue-id",
@@ -1058,7 +1060,7 @@ func TestHandleStateTransition_FireOnceCollapseDuplicates(t *testing.T) {
 	link := newPrimaryLink()
 	session := newSession()
 	in := MilestoneInput{
-		Event:      MilestoneLinked,
+		Event:      MilestoneStarted,
 		Session:    session,
 		Link:       link,
 		IssueID:    "linear-issue-id",
@@ -1099,7 +1101,7 @@ func TestHandleStateTransition_PersistsPriorStateID(t *testing.T) {
 	link := newPrimaryLink()
 	session := newSession()
 	in := MilestoneInput{
-		Event:      MilestoneLinked,
+		Event:      MilestoneStarted,
 		Session:    session,
 		Link:       link,
 		IssueID:    "linear-issue-id",

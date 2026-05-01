@@ -415,7 +415,7 @@ func (s *Service) Analyze(ctx context.Context, orgID uuid.UUID, trigger models.P
 	}
 	defer func() {
 		if s.usageTracker != nil {
-			s.usageTracker.ContainerStopped(ctx, orgID, sessionID, usageEventID, containerStartedAt, exitReason)
+			s.usageTracker.ContainerStopped(ctx, orgID, sessionID, usageEventID, sb.ID, containerStartedAt, exitReason)
 		}
 		if destroyErr := s.sandbox.Destroy(ctx, sb); destroyErr != nil {
 			s.logger.Warn().Err(destroyErr).Msg("failed to destroy PM sandbox")

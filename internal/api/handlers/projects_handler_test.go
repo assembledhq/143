@@ -30,7 +30,7 @@ func projectColumns() []string {
 		"total_tasks", "completed_tasks", "failed_tasks",
 		"proposed_by_pm", "source_issue_ids", "proposal_reasoning", "similar_projects",
 		"agent_type", "model_override",
-		"created_by", "deleted_at", "created_at", "updated_at", "completed_at",
+		"created_by", "deleted_at", "created_at", "updated_at", "completed_at", "archived_at",
 	}
 }
 
@@ -43,7 +43,7 @@ func newProjectRow(id, orgID, repoID uuid.UUID, status models.ProjectStatus, now
 		0, 0, 0,
 		false, []uuid.UUID{}, nil, json.RawMessage("[]"),
 		nil, nil, // agent_type, model_override
-		&createdBy, (*time.Time)(nil), now, now, nil,
+		&createdBy, (*time.Time)(nil), now, now, nil, nil,
 	}
 }
 
@@ -189,6 +189,97 @@ func TestProjectHandler_List_InvalidCreatedBy(t *testing.T) {
 
 	require.Equal(t, http.StatusBadRequest, rr.Code, "List should reject an invalid created_by filter")
 	require.Contains(t, rr.Body.String(), "INVALID_USER_ID", "List should surface the created_by validation error")
+}
+
+func TestProjectHandler_List_WithOnlyArchived(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	handler := NewProjectHandler(db.NewProjectStore(mock), nil, nil, nil, nil)
+	orgID := uuid.New()
+
+	mock.ExpectQuery("SELECT .+ FROM projects WHERE org_id .+ archived_at IS NOT NULL").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(projectColumns()))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/projects?only_archived=true", nil)
+	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+	rr := httptest.NewRecorder()
+
+	handler.List(rr, req)
+
+	require.Equal(t, http.StatusOK, rr.Code, "List should accept only_archived")
+	require.Contains(t, rr.Body.String(), `"data":[]`, "List should return an empty list response")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestProjectHandler_Archive(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	handler := NewProjectHandler(db.NewProjectStore(mock), nil, nil, nil, nil)
+	orgID := uuid.New()
+	projectID := uuid.New()
+	repoID := uuid.New()
+	now := time.Now()
+
+	mock.ExpectQuery("SELECT .+ FROM projects WHERE id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(projectColumns()).AddRow(newProjectRow(projectID, orgID, repoID, models.ProjectStatusActive, now)...))
+	mock.ExpectExec("UPDATE projects SET archived_at = now\\(\\), updated_at = now\\(\\)").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/projects/"+projectID.String()+"/archive", nil)
+	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+	req = req.WithContext(withProjectRouteParam(req.Context(), projectID))
+	rr := httptest.NewRecorder()
+
+	handler.Archive(rr, req)
+
+	require.Equal(t, http.StatusOK, rr.Code, "Archive should succeed")
+	require.Contains(t, rr.Body.String(), `"status":"archived"`, "Archive should return archived status")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestProjectHandler_Unarchive(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	handler := NewProjectHandler(db.NewProjectStore(mock), nil, nil, nil, nil)
+	orgID := uuid.New()
+	projectID := uuid.New()
+	repoID := uuid.New()
+	now := time.Now()
+
+	row := newProjectRow(projectID, orgID, repoID, models.ProjectStatusCompleted, now)
+	row[len(row)-1] = &now
+	mock.ExpectQuery("SELECT .+ FROM projects WHERE id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(projectColumns()).AddRow(row...))
+	mock.ExpectExec("UPDATE projects SET archived_at = NULL, updated_at = now\\(\\)").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/projects/"+projectID.String()+"/unarchive", nil)
+	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+	req = req.WithContext(withProjectRouteParam(req.Context(), projectID))
+	rr := httptest.NewRecorder()
+
+	handler.Unarchive(rr, req)
+
+	require.Equal(t, http.StatusOK, rr.Code, "Unarchive should succeed")
+	require.Contains(t, rr.Body.String(), `"status":"completed"`, "Unarchive should preserve the project's lifecycle status")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
 // --- Get handler tests ---

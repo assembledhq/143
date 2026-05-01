@@ -177,6 +177,12 @@ type Services struct {
 	// leftover dirs from prior worker generations don't accumulate. nil
 	// when no SandboxAuthSocketDir is configured.
 	SandboxAuthSweep func(keep map[uuid.UUID]struct{})
+	// RuntimeSampler periodically polls per-container resource usage and
+	// records it as OTel histograms so operators can size SANDBOX_* limits
+	// against actual consumption rather than allocation. nil when sampling
+	// is disabled (interval <= 0 in config) or the provider can't report
+	// stats (e.g. a non-Docker provider in the future).
+	RuntimeSampler *agent.RuntimeSampler
 }
 
 type orchestratorService interface {

@@ -65,7 +65,7 @@ func TestDefaultSandboxConfig_InvalidEnvironmentOverridesFallbackToDefaults(t *t
 	cfg := DefaultSandboxConfig()
 
 	require.Equal(t, 2.0, cfg.CPULimit, "DefaultSandboxConfig should fall back to default CPU limit for invalid SANDBOX_CPU_LIMIT")
-	require.Equal(t, 4096, cfg.MemoryLimitMB, "DefaultSandboxConfig should fall back to default memory limit for invalid SANDBOX_MEMORY_LIMIT_MB")
+	require.Equal(t, 3072, cfg.MemoryLimitMB, "DefaultSandboxConfig should fall back to default memory limit for invalid SANDBOX_MEMORY_LIMIT_MB")
 	require.Equal(t, 10, cfg.DiskLimitGB, "DefaultSandboxConfig should fall back to default disk limit for invalid SANDBOX_DISK_LIMIT_GB")
 }
 

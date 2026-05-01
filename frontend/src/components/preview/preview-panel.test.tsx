@@ -6,7 +6,7 @@ import {
   PreviewPanel,
 } from "./preview-panel";
 import { renderWithProviders, screen, waitFor, userEvent } from "@/test/test-utils";
-import type { PreviewStatusResponse } from "@/lib/preview-types";
+import { PREVIEW_ERROR_CODES, type PreviewStatusResponse } from "@/lib/preview-types";
 
 /* ------------------------------------------------------------------ */
 /* Hoisted mocks                                                      */
@@ -621,6 +621,51 @@ describe("PreviewPanel component", () => {
     expect(screen.getByText("Open the preview")).toBeInTheDocument();
   });
 
+  it("renders orphaned pending children as terminal when the parent preview failed", async () => {
+    mockGet.mockResolvedValue(
+      makePreviewStatus(
+        { status: "failed", error: "provider start preview failed" },
+        [
+          {
+            id: "svc-1",
+            preview_instance_id: "prev-1",
+            service_name: "web",
+            role: "primary",
+            status: "starting",
+            command: ["npm", "run", "dev"],
+            cwd: "",
+            port: 3000,
+            created_at: "2026-01-01T00:00:00Z",
+          },
+        ],
+        [
+          {
+            id: "infra-1",
+            preview_instance_id: "prev-1",
+            infra_name: "postgres",
+            template: "postgres",
+            container_id: "ctr-1",
+            status: "provisioning",
+            host: "postgres",
+            port: 5432,
+            created_at: "2026-01-01T00:00:00Z",
+          },
+        ],
+      ),
+    );
+
+    renderWithProviders(<PreviewPanel {...DEFAULT_PROPS} />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Startup checklist")).toBeInTheDocument();
+    });
+
+    expect(screen.getByText("postgres did not finish provisioning")).toBeInTheDocument();
+    expect(screen.getByText("web did not finish starting")).toBeInTheDocument();
+    expect(screen.queryByText("postgres is provisioning")).not.toBeInTheDocument();
+    expect(screen.queryByText("web is starting")).not.toBeInTheDocument();
+  });
+
   /* ---------- Stop mutation ---------- */
 
   it("calls stop mutation when Stop button is clicked", async () => {
@@ -701,6 +746,73 @@ describe("PreviewPanel component", () => {
         )
       ).toBeInTheDocument();
     });
+  });
+
+  it("shows a retry-the-turn message when the sandbox is busy with a concurrent agent turn", async () => {
+    const user = userEvent.setup();
+    mockGet.mockResolvedValue(makePreviewStatus({ status: "stopped" }));
+    const err = new Error(
+      "another process attached to this session's sandbox first; please retry"
+    );
+    (err as Error & { code?: string }).code = PREVIEW_ERROR_CODES.SANDBOX_BUSY;
+    mockStart.mockRejectedValueOnce(err);
+
+    renderWithProviders(<PreviewPanel {...DEFAULT_PROPS} />);
+
+    await waitFor(() => {
+      expect(screen.getByText("No preview running")).toBeInTheDocument();
+    });
+
+    await user.click(screen.getByRole("button", { name: "Start Preview" }));
+
+    await waitFor(() => {
+      expect(
+        screen.getByText(
+          "The agent is currently using this session's sandbox. Wait for the current turn to finish, then try Start Preview again."
+        )
+      ).toBeInTheDocument();
+    });
+    // Guard against regression: the historical message conflated SANDBOX_BUSY
+    // with "Docker not configured" because both used to share the NO_SANDBOX
+    // code. Splitting the codes was the whole point — fail loudly if anyone
+    // re-merges them.
+    expect(
+      screen.queryByText(
+        "Preview is unavailable on this server (Docker not configured). Contact an admin."
+      )
+    ).not.toBeInTheDocument();
+  });
+
+  it("shows a transient-retry message when the API can't reach the preview worker", async () => {
+    const user = userEvent.setup();
+    mockGet.mockResolvedValue(makePreviewStatus({ status: "stopped" }));
+    // PREVIEW_WORKER_REQUEST_FAILED happens when the API's RPC to the worker
+    // EOFs (e.g. worker WriteTimeout overrun, or worker container restart).
+    // No structured error came back — without explicit handling it would
+    // fall through to "Failed to start preview: preview worker request failed",
+    // which buries the transient/retryable nature of the failure.
+    const err = new Error("preview worker request failed");
+    (err as Error & { code?: string }).code = PREVIEW_ERROR_CODES.WORKER_REQUEST_FAILED;
+    mockStart.mockRejectedValueOnce(err);
+
+    renderWithProviders(<PreviewPanel {...DEFAULT_PROPS} />);
+
+    await waitFor(() => {
+      expect(screen.getByText("No preview running")).toBeInTheDocument();
+    });
+
+    await user.click(screen.getByRole("button", { name: "Start Preview" }));
+
+    await waitFor(() => {
+      expect(
+        screen.getByText(
+          "Could not reach the preview worker (connection dropped). Try Start Preview again — if this keeps happening, the worker may be unhealthy."
+        )
+      ).toBeInTheDocument();
+    });
+    expect(
+      screen.queryByText("Failed to start preview: preview worker request failed")
+    ).not.toBeInTheDocument();
   });
 
   it("shows the backend message verbatim (no 'Failed to start preview:' prefix) when no .143/preview.json is committed", async () => {
