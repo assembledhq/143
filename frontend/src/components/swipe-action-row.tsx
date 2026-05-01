@@ -1,12 +1,13 @@
 "use client";
 
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 
 const ACTION_WIDTH = 92;
 const OPEN_THRESHOLD = 44;
 const HORIZONTAL_LOCK_THRESHOLD = 12;
+const TOUCH_QUERY = "(pointer: coarse)";
 
 type DragState = {
   startX: number;
@@ -14,6 +15,30 @@ type DragState = {
   swiping: boolean;
   locked: boolean;
 };
+
+// Resolved synchronously on first client render via useSyncExternalStore so
+// non-touch desktops never paint the swipe overlay (which bleeds amber through
+// the row's translucent background). SSR and jsdom (no matchMedia) get the
+// touch-friendly variant — keeps tests passing without mocks.
+function subscribeTouchDevice(callback: () => void): () => void {
+  if (typeof window === "undefined" || typeof window.matchMedia !== "function") {
+    return () => {};
+  }
+  const mql = window.matchMedia(TOUCH_QUERY);
+  mql.addEventListener("change", callback);
+  return () => mql.removeEventListener("change", callback);
+}
+
+function getTouchDeviceSnapshot(): boolean {
+  if (typeof window === "undefined" || typeof window.matchMedia !== "function") {
+    return true;
+  }
+  return window.matchMedia(TOUCH_QUERY).matches;
+}
+
+function getTouchDeviceServerSnapshot(): boolean {
+  return true;
+}
 
 export function SwipeActionRow({
   actionLabel,
@@ -33,20 +58,11 @@ export function SwipeActionRow({
   const dragRef = useRef<DragState | null>(null);
   const [offset, setOffset] = useState(0);
   const [isDragging, setIsDragging] = useState(false);
-  // Default to true so SSR and test environments (no matchMedia) get the
-  // touch-friendly variant — non-touch desktops flip to false in the effect.
-  const [isTouchDevice, setIsTouchDevice] = useState(true);
-
-  useEffect(() => {
-    if (typeof window === "undefined" || typeof window.matchMedia !== "function") {
-      return;
-    }
-    const mql = window.matchMedia("(pointer: coarse)");
-    setIsTouchDevice(mql.matches);
-    const onChange = (event: MediaQueryListEvent) => setIsTouchDevice(event.matches);
-    mql.addEventListener("change", onChange);
-    return () => mql.removeEventListener("change", onChange);
-  }, []);
+  const isTouchDevice = useSyncExternalStore(
+    subscribeTouchDevice,
+    getTouchDeviceSnapshot,
+    getTouchDeviceServerSnapshot,
+  );
 
   const close = () => {
     setOffset(0);
@@ -110,6 +126,26 @@ export function SwipeActionRow({
   const state = isTouchDevice && offset > 0 ? "open" : "closed";
   const trailingActionHidden = state === "closed";
 
+  const swipeSurfaceProps = isTouchDevice
+    ? {
+        className: cn(
+          "relative z-10 touch-pan-y",
+          !isDragging && "transition-transform duration-200 ease-out",
+        ),
+        style: { transform: `translateX(-${offset}px)` },
+        onTouchStart: handleTouchStart,
+        onTouchMove: handleTouchMove,
+        onTouchEnd: handleTouchEnd,
+        onTouchCancel: handleTouchEnd,
+        onClickCapture: (event: React.MouseEvent<HTMLDivElement>) => {
+          if (offset === 0) return;
+          event.preventDefault();
+          event.stopPropagation();
+          close();
+        },
+      }
+    : { className: "relative z-10" };
+
   return (
     <div
       className={cn("group relative overflow-hidden rounded-lg", className)}
@@ -135,25 +171,7 @@ export function SwipeActionRow({
         </div>
       )}
 
-      <div
-        data-swipe-surface="true"
-        className={cn(
-          "relative z-10",
-          isTouchDevice && "touch-pan-y",
-          isTouchDevice && !isDragging && "transition-transform duration-200 ease-out",
-        )}
-        style={isTouchDevice ? { transform: `translateX(-${offset}px)` } : undefined}
-        onTouchStart={isTouchDevice ? handleTouchStart : undefined}
-        onTouchMove={isTouchDevice ? handleTouchMove : undefined}
-        onTouchEnd={isTouchDevice ? handleTouchEnd : undefined}
-        onTouchCancel={isTouchDevice ? handleTouchEnd : undefined}
-        onClickCapture={(event) => {
-          if (offset === 0) return;
-          event.preventDefault();
-          event.stopPropagation();
-          close();
-        }}
-      >
+      <div data-swipe-surface="true" {...swipeSurfaceProps}>
         {children}
       </div>
 
