@@ -92,7 +92,7 @@ func (s *PullRequestStore) GetBySessionID(ctx context.Context, orgID, sessionID 
 
 func (s *PullRequestStore) UpdateStatus(ctx context.Context, orgID, id uuid.UUID, status string) error {
 	query := `UPDATE pull_requests SET status = @status, updated_at = now() WHERE id = @id AND org_id = @org_id`
-	if status == "merged" {
+	if status == models.PullRequestStatusMerged {
 		query = `UPDATE pull_requests SET status = @status, merged_at = now(), updated_at = now() WHERE id = @id AND org_id = @org_id`
 	}
 	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{

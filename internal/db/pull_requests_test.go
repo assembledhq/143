@@ -188,6 +188,41 @@ func TestPullRequestStore_UpdateHeadSHA(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+// Load-bearing regression: pr_health_service.go's currentMatchesHead
+// short-circuit treats `pr.HealthVersion != 0` as proof that UpdateHeadSHA
+// has not run since the cached health summary was written. If a future writer
+// stops resetting health_version to 0 here, that short-circuit will silently
+// surface stale "Resolve conflicts" / "Fix tests" banners after a fresh push.
+// Pin the literal `health_version = 0` substring so the test fails loudly if
+// the SET clause changes.
+//
+// Bumping the column to a non-zero default? Update pr_health_service.go's
+// currentMatchesHead at the same time so the SHA comparison becomes
+// unconditional, then update this regression to match.
+func TestPullRequestStore_UpdateHeadSHA_ResetsHealthVersionToZero(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := NewPullRequestStore(mock)
+
+	orgID := uuid.New()
+	prID := uuid.New()
+
+	// Anchor the literal SET fragment so accidental edits like
+	// `health_version = pr.health_version` or `health_version = @hv` fail
+	// the regex match instead of silently sliding past it.
+	mock.ExpectExec(`SET\s+head_sha = @head_sha,\s+github_state_synced_at = NULL,\s+health_version = 0,`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	err = store.UpdateHeadSHA(context.Background(), orgID, prID, "abc123def456")
+	require.NoError(t, err, "UpdateHeadSHA should reset health_version to 0 on every push to invalidate the cached health summary")
+	require.NoError(t, mock.ExpectationsWereMet(), "the SET clause must literally write health_version = 0 — see currentMatchesHead in pr_health_service.go")
+}
+
 // Drift detection: if the PR row was deleted between the push and the
 // follow-up UpdateHeadSHA, surface pgx.ErrNoRows so the worker dead-letters
 // and we can investigate instead of silently leaving GitHub with a new

@@ -122,17 +122,30 @@ func parsePRAuthResumeToken(key []byte, token string, now time.Time) (prAuthResu
 	return claims, nil
 }
 
-// prAuthInterceptOpts customizes the user-facing copy and resume-claim payload
-// for requirePRAuthOrIntercept. ActionDescription is interpolated into the
-// "Authorize GitHub to <action> as you." message; ResumeExpiredMessage is
-// shown when the resume token decoded but expired (e.g. user took 10+ minutes
-// to complete the OAuth handshake). Draft is preserved in the resume claims so
-// the original Draft choice survives the GitHub round-trip — pass nil for
-// endpoints that don't expose a draft toggle. Action identifies the calling
-// endpoint and is signed into the claims so the OAuth callback can dispatch
-// the correct replay action regardless of any state change during the
-// handshake.
-type prAuthInterceptOpts struct {
+// prAuthInterceptParams bundles every input requirePRAuthOrIntercept needs.
+// SessionID/OrgID/Session/OrgSettings are session context; AuthorMode and
+// ResumeToken come from the request body; Action/ActionDescription/
+// ResumeExpiredMessage/Draft customize the user-facing copy and resume-claim
+// payload. Bundled into one struct because the helper otherwise grew a
+// nine-parameter signature that's hard to read at the call sites.
+//
+//   - Action identifies the calling endpoint and is signed into the resume
+//     claims so the OAuth callback can dispatch the correct replay action
+//     regardless of any state change during the handshake.
+//   - ActionDescription is interpolated into the "Authorize GitHub to
+//     <action> as you." message.
+//   - ResumeExpiredMessage is shown when the resume token decoded but
+//     expired (e.g. user took 10+ minutes to complete OAuth).
+//   - Draft is preserved in the resume claims so the original Draft choice
+//     survives the GitHub round-trip — leave nil for endpoints that don't
+//     expose a draft toggle.
+type prAuthInterceptParams struct {
+	SessionID            uuid.UUID
+	OrgID                uuid.UUID
+	Session              *models.Session
+	OrgSettings          models.OrgSettings
+	AuthorMode           prAuthorMode
+	ResumeToken          string
 	Action               prAuthAction
 	ActionDescription    string
 	ResumeExpiredMessage string
@@ -146,35 +159,26 @@ type prAuthInterceptOpts struct {
 // resume token expired → 409 PR_RESUME_EXPIRED, app-user-auth not configured →
 // 503, or an internal error). Single-source-of-truth for the auth flow so a
 // fix to the credential check or token-signing path lands in both endpoints.
-func (h *SessionHandler) requirePRAuthOrIntercept(
-	w http.ResponseWriter,
-	r *http.Request,
-	sessionID, orgID uuid.UUID,
-	session *models.Session,
-	orgSettings models.OrgSettings,
-	authorMode prAuthorMode,
-	resumeToken string,
-	opts prAuthInterceptOpts,
-) bool {
+func (h *SessionHandler) requirePRAuthOrIntercept(w http.ResponseWriter, r *http.Request, p prAuthInterceptParams) bool {
 	user := middleware.UserFromContext(r.Context())
-	if !shouldPromptForPRAuth(authorMode, orgSettings.PRAuthorship) ||
-		session.TriggeredByUserID == nil ||
+	if !shouldPromptForPRAuth(p.AuthorMode, p.OrgSettings.PRAuthorship) ||
+		p.Session.TriggeredByUserID == nil ||
 		user == nil ||
-		user.ID != *session.TriggeredByUserID {
+		user.ID != *p.Session.TriggeredByUserID {
 		return true
 	}
 
-	if resumeToken != "" {
+	if p.ResumeToken != "" {
 		if len(h.prAuthSigningKey) == 0 {
 			writeError(w, r, http.StatusInternalServerError, "INTERNAL_ERROR", "PR auth flow is not configured")
 			return false
 		}
-		claims, tokenErr := parsePRAuthResumeToken(h.prAuthSigningKey, resumeToken, time.Now())
-		if tokenErr != nil || claims.SessionID != sessionID || claims.UserID != user.ID || claims.OrgID != orgID {
+		claims, tokenErr := parsePRAuthResumeToken(h.prAuthSigningKey, p.ResumeToken, time.Now())
+		if tokenErr != nil || claims.SessionID != p.SessionID || claims.UserID != user.ID || claims.OrgID != p.OrgID {
 			writeJSON(w, http.StatusConflict, models.ErrorResponse{
 				Error: models.ErrorDetail{
 					Code:    "PR_RESUME_EXPIRED",
-					Message: opts.ResumeExpiredMessage,
+					Message: p.ResumeExpiredMessage,
 				},
 			})
 			return false
@@ -185,14 +189,14 @@ func (h *SessionHandler) requirePRAuthOrIntercept(
 	authUnavailable := h.prAuthChecker == nil
 	if h.prAuthChecker != nil {
 		var checkErr error
-		hasCredential, checkErr = h.prAuthChecker.HasValidCredential(r.Context(), orgID, user.ID)
+		hasCredential, checkErr = h.prAuthChecker.HasValidCredential(r.Context(), p.OrgID, user.ID)
 		if checkErr != nil {
 			writeError(w, r, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to verify GitHub PR authorization", checkErr)
 			return false
 		}
 	}
 	if authUnavailable && !hasCredential {
-		if orgSettings.PRAuthorship == models.PRAuthorshipUserRequired || authorMode == prAuthorModeUser {
+		if p.OrgSettings.PRAuthorship == models.PRAuthorshipUserRequired || p.AuthorMode == prAuthorModeUser {
 			writeError(w, r, http.StatusServiceUnavailable, "GITHUB_APP_USER_AUTH_NOT_CONFIGURED", "github app user auth is not configured")
 			return false
 		}
@@ -208,12 +212,12 @@ func (h *SessionHandler) requirePRAuthOrIntercept(
 		return false
 	}
 	signedToken, signErr := signPRAuthResumeToken(h.prAuthSigningKey, prAuthResumeClaims{
-		SessionID:  sessionID,
+		SessionID:  p.SessionID,
 		UserID:     user.ID,
-		OrgID:      orgID,
-		Draft:      opts.Draft,
+		OrgID:      p.OrgID,
+		Draft:      p.Draft,
 		AuthorMode: string(prAuthorModeUser),
-		Action:     string(opts.Action),
+		Action:     string(p.Action),
 		ExpiresAt:  time.Now().Add(prAuthResumeTokenTTL).Unix(),
 	})
 	if signErr != nil {
@@ -223,12 +227,12 @@ func (h *SessionHandler) requirePRAuthOrIntercept(
 	writeJSON(w, http.StatusConflict, models.ErrorResponse{
 		Error: models.ErrorDetail{
 			Code:    "GITHUB_PR_AUTHORSHIP_REQUIRED",
-			Message: fmt.Sprintf("Authorize GitHub to %s as you.", opts.ActionDescription),
+			Message: fmt.Sprintf("Authorize GitHub to %s as you.", p.ActionDescription),
 			Details: map[string]any{
-				"session_id":            sessionID.String(),
+				"session_id":            p.SessionID.String(),
 				"connect_url":           "/api/v1/users/me/github/connect?flow=pr_authorship",
 				"resume_token":          signedToken,
-				"can_fallback_to_app":   orgSettings.PRAuthorship != models.PRAuthorshipUserRequired,
+				"can_fallback_to_app":   p.OrgSettings.PRAuthorship != models.PRAuthorshipUserRequired,
 				"suggested_author_mode": string(prAuthorModeUser),
 			},
 		},

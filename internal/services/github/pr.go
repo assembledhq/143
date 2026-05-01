@@ -659,6 +659,16 @@ var ErrNoPullRequest = errors.New("no pull request exists for session")
 // take effect on the user's behalf. The caller should disable the button.
 var ErrPRClosed = errors.New("pull request is closed")
 
+// ErrLegacyPRMissingHeadRef is returned by PushChangesToPR when the PR row was
+// created before migration 107 added the head_ref column and therefore has no
+// persisted branch name. We refuse to silently push to a recomputed branch
+// name because formatBranchName is sensitive to the session's title and
+// Linear identifier — both of which can drift after CreatePR runs — so a
+// fallback push could land on a branch the PR doesn't track and silently
+// orphan the user's commits. The user should re-create the PR (or wait for a
+// future backfill migration) instead.
+var ErrLegacyPRMissingHeadRef = errors.New("pull request was created before head_ref was tracked; cannot determine push branch")
+
 // PushChangesToPR stages, commits, and pushes any uncommitted/unpushed changes
 // from the session's sandbox up to the existing PR's branch, then updates the
 // PR row's head_sha. Mirrors the push half of CreatePR (sandbox hydrate, git
@@ -666,15 +676,17 @@ var ErrPRClosed = errors.New("pull request is closed")
 // PR-row creation, content generation, label attachment, status transitions,
 // or Linear milestones — those side effects belong to PR creation only.
 //
-// Branch resolution: prefers the head_ref captured at PR-creation time so the
-// push always targets the same ref the original CreatePR landed on. Falls back
-// to recomputing via formatBranchName for PRs created before the head_ref
-// column was added (migration 107). This avoids a divergence where a session's
-// title or Linear identifier changes after CreatePR ran and a fresh
-// formatBranchName would point at a branch the PR doesn't track.
+// Branch resolution: requires the head_ref captured at PR-creation time so
+// the push always targets the same ref the original CreatePR landed on. PRs
+// created before migration 107 don't have head_ref persisted; in that case we
+// return ErrLegacyPRMissingHeadRef rather than recomputing via
+// formatBranchName, because the recomputed name is sensitive to the session's
+// title and Linear identifier (both of which can drift after CreatePR ran)
+// and a guess could silently push to a branch the PR doesn't track.
 //
 // Returns ErrNoPullRequest if the session has no PR row, ErrPRClosed if the
-// PR is merged/closed, ErrNoChanges when there is nothing to push, and the
+// PR is merged/closed, ErrLegacyPRMissingHeadRef for legacy PRs without a
+// persisted branch name, ErrNoChanges when there is nothing to push, and the
 // same snapshot sentinels as CreatePR when the sandbox is unavailable.
 func (s *PRService) PushChangesToPR(ctx context.Context, run *models.Session, params ...CreatePRParams) (*models.PullRequest, error) {
 	pr, err := s.pullRequests.GetBySessionID(ctx, run.OrgID, run.ID)
@@ -686,6 +698,11 @@ func (s *PRService) PushChangesToPR(ctx context.Context, run *models.Session, pa
 	}
 	if pr.Status != models.PullRequestStatusOpen {
 		return nil, ErrPRClosed
+	}
+	// Refuse legacy PRs early — before any sandbox hydrate or token resolution
+	// — so we don't burn work on a request that's guaranteed to fail.
+	if pr.HeadRef == nil || *pr.HeadRef == "" {
+		return nil, ErrLegacyPRMissingHeadRef
 	}
 
 	if s.sandboxProvider == nil || s.snapshots == nil {
@@ -741,15 +758,9 @@ func (s *PRService) PushChangesToPR(ctx context.Context, run *models.Session, pa
 	}
 	token := resolution.Token
 
-	// Prefer the persisted head_ref so the push targets the exact branch the
-	// original CreatePR landed on. Fall back to recomputing for PRs created
-	// before head_ref was captured.
-	var branchName string
-	if pr.HeadRef != nil && *pr.HeadRef != "" {
-		branchName = *pr.HeadRef
-	} else {
-		branchName = formatBranchName(run, issue)
-	}
+	// Use the persisted head_ref captured at PR-creation time. Guarded by the
+	// ErrLegacyPRMissingHeadRef check above, so we know it's set here.
+	branchName := *pr.HeadRef
 	commitMsg := formatCommitMessage(run, issue)
 	authorName, authorEmail := identity.CommitIdentity(resolution)
 	if !resolution.IsUserToken() && run.TriggeredByUserID != nil && s.users != nil {
@@ -1231,7 +1242,7 @@ func (s *PRService) HandlePullRequestEvent(ctx context.Context, event PullReques
 // to head SHA when GitHub omits merge_commit_sha.
 func (s *PRService) applyClosedPRTransition(ctx context.Context, pr models.PullRequest, merged bool, mergeCommitSHA, headSHA string) error {
 	if merged {
-		if err := s.pullRequests.UpdateStatus(ctx, pr.OrgID, pr.ID, "merged"); err != nil {
+		if err := s.pullRequests.UpdateStatus(ctx, pr.OrgID, pr.ID, models.PullRequestStatusMerged); err != nil {
 			return fmt.Errorf("update PR status to merged: %w", err)
 		}
 		commitSHA := mergeCommitSHA
@@ -1242,7 +1253,7 @@ func (s *PRService) applyClosedPRTransition(ctx context.Context, pr models.PullR
 		return nil
 	}
 
-	if err := s.pullRequests.UpdateStatus(ctx, pr.OrgID, pr.ID, "closed"); err != nil {
+	if err := s.pullRequests.UpdateStatus(ctx, pr.OrgID, pr.ID, models.PullRequestStatusClosed); err != nil {
 		return fmt.Errorf("update PR status to closed: %w", err)
 	}
 	// Tell the Linear linker the session ended without a merge so the

@@ -7218,6 +7218,7 @@ type pushSessionRowOpts struct {
 	nilSnapshot        bool   // if true, snapshot_key is NULL
 	sandboxState       string // defaults to "none"
 	pushState          string // defaults to "idle"
+	status             string // defaults to "completed"
 }
 
 // pushSessionRow builds a fully-padded session row (matching sessionColumns
@@ -7249,6 +7250,10 @@ func pushSessionRow(sessionID, issueID, orgID uuid.UUID, now time.Time, opts pus
 	if pushState == "" {
 		pushState = "idle"
 	}
+	status := opts.status
+	if status == "" {
+		status = "completed"
+	}
 	primaryIssueID := &issueID
 	values := map[string]any{
 		"id":                             sessionID,
@@ -7258,7 +7263,7 @@ func pushSessionRow(sessionID, issueID, orgID uuid.UUID, now time.Time, opts pus
 		"interaction_mode":               string(models.SessionInteractionModeSingleRun),
 		"validation_policy":              string(models.SessionValidationPolicyOnSessionEnd),
 		"agent_type":                     string(models.AgentTypeClaudeCode),
-		"status":                         "completed",
+		"status":                         status,
 		"autonomy_level":                 "semi",
 		"token_mode":                     "low",
 		"complexity_tier":                nil,
@@ -7718,6 +7723,44 @@ func TestSessionHandler_PushChangesToPR_SessionNotFound(t *testing.T) {
 
 	require.Equal(t, http.StatusNotFound, w.Code, "should return 404 when session does not exist")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+// Defense-in-depth: the frontend gates the push button on isRunning, but a
+// stale tab or a racing client could still POST while the session is mid-turn.
+// The handler must reject it server-side so the worker doesn't hydrate a
+// snapshot the active turn is about to invalidate.
+func TestSessionHandler_PushChangesToPR_RejectsRunningSession(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	now := time.Now()
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	issueID := uuid.New()
+	handler := newSessionHandler(t, mock)
+
+	mock.ExpectQuery("SELECT .+ FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pushSessionRow(sessionID, issueID, orgID, now, pushSessionRowOpts{
+			status: string(models.SessionStatusRunning),
+		}))
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/"+sessionID.String()+"/pr/push", nil)
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("id", sessionID.String())
+	ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
+	ctx = middleware.WithOrgID(ctx, orgID)
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	handler.PushChangesToPR(w, req)
+
+	require.Equal(t, http.StatusConflict, w.Code, "should return 409 when session is currently running")
+	require.Contains(t, w.Body.String(), "SESSION_RUNNING", "error code should distinguish running-session from other in-flight states")
+	require.NoError(t, mock.ExpectationsWereMet(), "handler should not query PRs or enqueue jobs while session is running")
 }
 
 // mockCanceller implements SessionCanceller for testing.

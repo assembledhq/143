@@ -1530,41 +1530,59 @@ func TestPushPRChangesHandler_NoChangesIsTreatedAsSuccess(t *testing.T) {
 func TestPushPRChangesHandler_TerminalErrorBecomesFatal(t *testing.T) {
 	t.Parallel()
 
-	stores, mock := newTestStores(t)
-	defer mock.Close()
-
-	orgID := uuid.New()
-	sessionID := uuid.New()
-	now := time.Now()
-	snapshotKey := "snap-push-pr-fatal"
-
-	mock.ExpectQuery("SELECT .* FROM sessions").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(newWorkerSessionRow(sessionID, orgID, now, &snapshotKey)...))
-	// pushing → failed.
-	mock.ExpectExec("UPDATE sessions").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
-	mock.ExpectExec("UPDATE sessions").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
-
-	services := &Services{
-		PR: &stubPRService{
-			pushChangesToPRFn: func(ctx context.Context, run *models.Session, params ...ghservice.CreatePRParams) (*models.PullRequest, error) {
-				return nil, ghservice.ErrSnapshotExpired
-			},
-		},
+	tests := []struct {
+		name string
+		err  error
+	}{
+		{name: "snapshot expired", err: ghservice.ErrSnapshotExpired},
+		// Legacy PRs can never succeed at push time — no head_ref means we
+		// can't safely identify the branch — so the worker must dead-letter
+		// rather than retry forever. The user-facing message tells the user
+		// to create a new PR.
+		{name: "legacy PR missing head_ref", err: ghservice.ErrLegacyPRMissingHeadRef},
 	}
 
-	handler := newPushPRChangesHandler(stores, services, zerolog.Nop())
-	payload := json.RawMessage(`{"session_id":"` + sessionID.String() + `","org_id":"` + orgID.String() + `"}`)
-	err := handler(context.Background(), "push_pr_changes", payload)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 
-	var fatalErr *FatalError
-	require.ErrorAs(t, err, &fatalErr, "push_pr_changes should dead-letter terminal errors instead of retrying")
-	require.ErrorIs(t, fatalErr, ghservice.ErrSnapshotExpired, "push_pr_changes should preserve the underlying terminal error")
-	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+			stores, mock := newTestStores(t)
+			defer mock.Close()
+
+			orgID := uuid.New()
+			sessionID := uuid.New()
+			now := time.Now()
+			snapshotKey := "snap-push-pr-fatal-" + tt.name
+
+			mock.ExpectQuery("SELECT .* FROM sessions").
+				WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+				WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(newWorkerSessionRow(sessionID, orgID, now, &snapshotKey)...))
+			// pushing → failed.
+			mock.ExpectExec("UPDATE sessions").
+				WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+				WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+			mock.ExpectExec("UPDATE sessions").
+				WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+				WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+			services := &Services{
+				PR: &stubPRService{
+					pushChangesToPRFn: func(ctx context.Context, run *models.Session, params ...ghservice.CreatePRParams) (*models.PullRequest, error) {
+						return nil, tt.err
+					},
+				},
+			}
+
+			handler := newPushPRChangesHandler(stores, services, zerolog.Nop())
+			payload := json.RawMessage(`{"session_id":"` + sessionID.String() + `","org_id":"` + orgID.String() + `"}`)
+			err := handler(context.Background(), "push_pr_changes", payload)
+
+			var fatalErr *FatalError
+			require.ErrorAs(t, err, &fatalErr, "push_pr_changes should dead-letter terminal errors instead of retrying")
+			require.ErrorIs(t, fatalErr, tt.err, "push_pr_changes should preserve the underlying terminal error")
+			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+		})
+	}
 }
 
 func TestOpenPRHandler_TerminalPRErrorsBecomeFatal(t *testing.T) {

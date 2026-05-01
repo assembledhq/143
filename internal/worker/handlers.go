@@ -1284,6 +1284,8 @@ func userFacingPRError(err error) string {
 		return "No pull request exists for this session."
 	case errors.Is(err, ghservice.ErrPRClosed):
 		return "This pull request is no longer open."
+	case errors.Is(err, ghservice.ErrLegacyPRMissingHeadRef):
+		return "This PR predates branch tracking; create a new PR to push follow-up changes."
 	default:
 		return "Check GitHub access or repo permissions and try again."
 	}
@@ -1401,6 +1403,8 @@ func shouldDeadLetterPRError(err error) bool {
 	case errors.Is(err, ghservice.ErrNoPullRequest):
 		return true
 	case errors.Is(err, ghservice.ErrPRClosed):
+		return true
+	case errors.Is(err, ghservice.ErrLegacyPRMissingHeadRef):
 		return true
 	default:
 		return false

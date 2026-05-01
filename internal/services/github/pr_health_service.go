@@ -82,7 +82,7 @@ func (s *PRService) GetPullRequestHealth(ctx context.Context, orgID, pullRequest
 		return nil, err
 	}
 
-	if (pr.GitHubStateSyncedAt == nil || pr.HealthVersion == 0) && pr.Status == "open" {
+	if (pr.GitHubStateSyncedAt == nil || pr.HealthVersion == 0) && pr.Status == models.PullRequestStatusOpen {
 		if err := s.SyncPullRequestState(ctx, orgID, pullRequestID); err != nil {
 			s.logger.Warn().Err(err).Str("pull_request_id", pullRequestID.String()).Msg("failed to sync pull request health inline")
 		}
@@ -90,7 +90,7 @@ func (s *PRService) GetPullRequestHealth(ctx context.Context, orgID, pullRequest
 		if err != nil {
 			return nil, err
 		}
-	} else if pr.Status == "open" && pr.GitHubStateSyncedAt != nil && time.Since(*pr.GitHubStateSyncedAt) > prHealthStaleAfter {
+	} else if pr.Status == models.PullRequestStatusOpen && pr.GitHubStateSyncedAt != nil && time.Since(*pr.GitHubStateSyncedAt) > prHealthStaleAfter {
 		s.enqueuePullRequestStateSync(ctx, pr)
 	}
 
@@ -99,7 +99,7 @@ func (s *PRService) GetPullRequestHealth(ctx context.Context, orgID, pullRequest
 		return nil, err
 	}
 
-	if pr.Status == "open" && resp.FailingTestCount > 0 && !resp.EnrichmentReady && !resp.EnrichmentRequested {
+	if pr.Status == models.PullRequestStatusOpen && resp.FailingTestCount > 0 && !resp.EnrichmentReady && !resp.EnrichmentRequested {
 		s.enqueuePullRequestHealthEnrichment(ctx, pr, resp.HealthVersion)
 		resp.EnrichmentRequested = true
 	}
@@ -190,7 +190,7 @@ func derivePullRequestRepairActions(resp *models.PullRequestHealthResponse) {
 	// Once GitHub health has been loaded, zero checks means "no CI rules
 	// configured" and is mergeable. Before that health snapshot exists, zero
 	// checks remains ambiguous and we keep merge hidden.
-	resp.CanMerge = resp.Status == "open" &&
+	resp.CanMerge = resp.Status == models.PullRequestStatusOpen &&
 		resp.MergeState == models.PullRequestMergeStateClean &&
 		checksAllowMerge(resp.ChecksConfirmed, resp.Checks)
 }
@@ -233,7 +233,7 @@ func (s *PRService) SyncPullRequestState(ctx context.Context, orgID, pullRequest
 	// signature mismatch, app restart, etc.). Apply the same transition the
 	// webhook handler would have, then stop — a closed PR has no live health
 	// to track and re-running follow-ups would just churn idempotent work.
-	if strings.EqualFold(strings.TrimSpace(details.State), "closed") && pr.Status == "open" {
+	if strings.EqualFold(strings.TrimSpace(details.State), "closed") && pr.Status == models.PullRequestStatusOpen {
 		s.logger.Warn().
 			Str("pull_request_id", pullRequestID.String()).
 			Str("repo", pr.GitHubRepo).

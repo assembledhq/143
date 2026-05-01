@@ -1354,7 +1354,13 @@ func (h *SessionHandler) CreatePR(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if !h.requirePRAuthOrIntercept(w, r, sessionID, orgID, &session, orgSettings, authorMode, req.ResumeToken, prAuthInterceptOpts{
+	if !h.requirePRAuthOrIntercept(w, r, prAuthInterceptParams{
+		SessionID:            sessionID,
+		OrgID:                orgID,
+		Session:              &session,
+		OrgSettings:          orgSettings,
+		AuthorMode:           authorMode,
+		ResumeToken:          req.ResumeToken,
 		Action:               prAuthActionCreatePR,
 		ActionDescription:    "create this pull request",
 		ResumeExpiredMessage: "GitHub authorization completed, but the PR resume request expired. Please click Create PR again.",
@@ -1434,6 +1440,15 @@ func (h *SessionHandler) PushChangesToPR(w http.ResponseWriter, r *http.Request)
 		writeError(w, r, http.StatusConflict, "SNAPSHOT_PENDING", "a snapshot upload is still finishing; try again in a moment")
 		return
 	}
+	// Defense-in-depth against the frontend's isRunning gate: pushing while a
+	// turn is in flight would race the active sandbox and the snapshot we'd
+	// hydrate could be stale relative to commits the running turn is about
+	// to make. Reject server-side so a racing client (or a stale tab whose
+	// session.status hadn't refreshed) can't slip through.
+	if session.Status == string(models.SessionStatusRunning) {
+		writeError(w, r, http.StatusConflict, "SESSION_RUNNING", "wait for the session to finish before pushing")
+		return
+	}
 
 	switch session.PRPushState {
 	case models.PRPushStateQueued, models.PRPushStatePushing:
@@ -1480,8 +1495,17 @@ func (h *SessionHandler) PushChangesToPR(w http.ResponseWriter, r *http.Request)
 		}
 	}
 
-	if !h.requirePRAuthOrIntercept(w, r, sessionID, orgID, &session, orgSettings, authorMode, req.ResumeToken, prAuthInterceptOpts{
-		Action:               prAuthActionPushChanges,
+	if !h.requirePRAuthOrIntercept(w, r, prAuthInterceptParams{
+		SessionID:   sessionID,
+		OrgID:       orgID,
+		Session:     &session,
+		OrgSettings: orgSettings,
+		AuthorMode:  authorMode,
+		ResumeToken: req.ResumeToken,
+		Action:      prAuthActionPushChanges,
+		// Draft is intentionally omitted: the push endpoint has no draft
+		// toggle, and the field has no meaning once the PR row already
+		// exists. Leaving it nil keeps the resume claim minimal.
 		ActionDescription:    "push these changes",
 		ResumeExpiredMessage: "GitHub authorization completed, but the resume request expired. Please click Push changes again.",
 	}) {

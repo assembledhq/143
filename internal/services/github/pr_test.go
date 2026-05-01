@@ -3275,12 +3275,15 @@ func TestPushChangesToPR_ReturnsErrSnapshotNotCapturedWhenSnapshotKeyMissing(t *
 	prID := uuid.New()
 	body := "body"
 
+	prRow := newPRTestRow(prID, &sessionID, orgID, "testorg/testrepo", now, &body)
+	// head_ref must be set so we don't short-circuit on ErrLegacyPRMissingHeadRef
+	// before reaching the snapshot check this test exercises.
+	headRef := "143/session/changes"
+	prRow[13] = &headRef
 	mock.ExpectQuery("SELECT .+ FROM pull_requests").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
-			pgxmock.NewRows(prTestPullRequestColumns).AddRow(
-				newPRTestRow(prID, &sessionID, orgID, "testorg/testrepo", now, &body)...,
-			),
+			pgxmock.NewRows(prTestPullRequestColumns).AddRow(prRow...),
 		)
 
 	svc := &PRService{
@@ -3311,12 +3314,15 @@ func TestPushChangesToPR_ReturnsErrSnapshotPendingWhenUploadInFlight(t *testing.
 	snapshotKey := "snapshots/session.tar"
 	pendingSnapshotKey := "snapshots/session/post-pr.tar.zst"
 
+	prRow := newPRTestRow(prID, &sessionID, orgID, "testorg/testrepo", now, &body)
+	// See TestPushChangesToPR_ReturnsErrSnapshotNotCapturedWhenSnapshotKeyMissing
+	// for why head_ref must be set on this fixture.
+	headRef := "143/session/changes"
+	prRow[13] = &headRef
 	mock.ExpectQuery("SELECT .+ FROM pull_requests").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
-			pgxmock.NewRows(prTestPullRequestColumns).AddRow(
-				newPRTestRow(prID, &sessionID, orgID, "testorg/testrepo", now, &body)...,
-			),
+			pgxmock.NewRows(prTestPullRequestColumns).AddRow(prRow...),
 		)
 
 	svc := &PRService{
@@ -3421,10 +3427,13 @@ func TestPushChangesToPR_EnqueuesHealthSyncAfterSuccessfulPush(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
-// Regression: PRs created before migration 107 don't have head_ref persisted,
-// so the push code must fall back to recomputing via formatBranchName. Without
-// the fallback, legacy PRs would error out (or worse, push to the wrong ref).
-func TestPushChangesToPR_FallsBackToFormatBranchNameWhenHeadRefIsNil(t *testing.T) {
+// PRs created before migration 107 don't have head_ref persisted. The push
+// code refuses to recompute via formatBranchName because the result is
+// sensitive to the session's title and Linear identifier — both of which can
+// drift after CreatePR runs — so a guess could land the push on a branch the
+// PR doesn't track. Surface ErrLegacyPRMissingHeadRef instead and let the
+// caller dead-letter / show a "create a new PR" message.
+func TestPushChangesToPR_RefusesLegacyPRWithoutHeadRef(t *testing.T) {
 	t.Parallel()
 
 	mock, err := pgxmock.NewPool()
@@ -3435,83 +3444,30 @@ func TestPushChangesToPR_FallsBackToFormatBranchNameWhenHeadRefIsNil(t *testing.
 	orgID := uuid.New()
 	sessionID := uuid.New()
 	prID := uuid.New()
-	repoID := uuid.New()
-	integrationID := uuid.New()
 	body := "body"
 	snapshotKey := "snapshots/session.tar"
-	headSHA := "abc1234567890abcdef1234567890abcdef12345"
-	// WorkingBranch makes formatBranchName deterministic without depending
-	// on slugify or the session's title fields, so the assertion below is
-	// stable across formatting changes elsewhere in the codebase.
-	workingBranch := "legacy-pr-branch"
 
 	prRow := newPRTestRow(prID, &sessionID, orgID, "owner/repo", now, &body)
-	// Leave prRow[13] (head_ref) at nil — that's the legacy condition the
-	// fallback must handle.
+	// prRow[13] (head_ref) is nil by default — that's the legacy condition we
+	// refuse rather than guess past.
 	mock.ExpectQuery("SELECT .+ FROM pull_requests").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(prTestPullRequestColumns).AddRow(prRow...))
-	mock.ExpectQuery("SELECT .+ FROM repositories WHERE id").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnRows(
-			pgxmock.NewRows(prTestRepoColumns).AddRow(
-				repoID, orgID, integrationID, int64(12345), "owner/repo", "main",
-				false, nil, nil, "https://github.com/owner/repo.git", int64(99),
-				"active", nil, nil, json.RawMessage(`{}`), now, now,
-			),
-		)
-	mock.ExpectQuery("SELECT .+ FROM organizations").
-		WithArgs(pgxmock.AnyArg()).
-		WillReturnRows(
-			pgxmock.NewRows(prTestOrganizationColumns).AddRow(
-				orgID, "Test Org", json.RawMessage(`{"pr_authorship":"app_only"}`), now, now,
-			),
-		)
-	mock.ExpectExec("UPDATE pull_requests SET head_sha").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
-	mock.ExpectQuery("INSERT INTO jobs").
-		WithArgs(pgx.NamedArgs{
-			"org_id":     orgID,
-			"queue":      "default",
-			"job_type":   "sync_pull_request_state",
-			"payload":    pgxmock.AnyArg(),
-			"priority":   6,
-			"dedupe_key": pgxmock.AnyArg(),
-		}).
-		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
 
-	provider := &prTestSandboxProvider{
-		execStdout:  pushHeadSHASentinel + headSHA + "\n",
-		snapshotErr: errors.New("test: skip post-push snapshot"),
-	}
 	svc := &PRService{
-		tokenProvider: &Service{
-			cache: map[int64]*cachedToken{
-				99: {Token: "app-token", ExpiresAt: time.Now().Add(time.Hour)},
-			},
-		},
-		pullRequests:    db.NewPullRequestStore(mock),
-		sessions:        db.NewSessionStore(mock),
-		repos:           db.NewRepositoryStore(mock),
-		orgs:            db.NewOrganizationStore(mock),
-		jobs:            db.NewJobStore(mock),
-		sandboxProvider: provider,
-		snapshots:       &prTestSnapshotStore{payload: []byte("snapshot")},
-		logger:          zerolog.Nop(),
+		pullRequests: db.NewPullRequestStore(mock),
+		// sandboxProvider/snapshots intentionally nil — the legacy refusal must
+		// fire before any sandbox or token work runs.
+		logger: zerolog.Nop(),
 	}
 
-	pr, err := svc.PushChangesToPR(context.Background(), &models.Session{
-		ID:            sessionID,
-		OrgID:         orgID,
-		RepositoryID:  &repoID,
-		SnapshotKey:   &snapshotKey,
-		WorkingBranch: &workingBranch,
+	_, err = svc.PushChangesToPR(context.Background(), &models.Session{
+		ID:          sessionID,
+		OrgID:       orgID,
+		SnapshotKey: &snapshotKey,
 	})
-	require.NoError(t, err, "PushChangesToPR should succeed for a legacy PR with no head_ref")
-	require.Equal(t, headSHA, *pr.HeadSHA, "PushChangesToPR should return the just-pushed head SHA")
-	require.Contains(t, provider.lastExecCmd, "HEAD:refs/heads/'"+workingBranch+"'", "PushChangesToPR should fall back to formatBranchName when head_ref is nil")
-	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+	require.ErrorIs(t, err, ErrLegacyPRMissingHeadRef, "PushChangesToPR should refuse legacy PRs without a persisted head_ref")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met (no sandbox/token work should run)")
 }
 
 func TestCreatePR_ReturnsPRLookupErrorBeforeCheckingSandboxDeps(t *testing.T) {
