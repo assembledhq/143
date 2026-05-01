@@ -20,7 +20,7 @@ var projectTestColumns = []string{
 	"total_tasks", "completed_tasks", "failed_tasks",
 	"proposed_by_pm", "source_issue_ids", "proposal_reasoning", "similar_projects",
 	"agent_type", "model_override",
-	"created_by", "deleted_at", "created_at", "updated_at", "completed_at",
+	"created_by", "deleted_at", "created_at", "updated_at", "completed_at", "archived_at",
 }
 
 func newProjectRow(projectID, orgID, repoID uuid.UUID, now time.Time) []interface{} {
@@ -31,7 +31,7 @@ func newProjectRow(projectID, orgID, repoID uuid.UUID, now time.Time) []interfac
 		0, 0, 0,
 		false, []uuid.UUID{}, nil, json.RawMessage(`[]`),
 		nil, nil,
-		nil, (*time.Time)(nil), now, now, nil,
+		nil, (*time.Time)(nil), now, now, nil, nil,
 	}
 }
 
@@ -194,6 +194,32 @@ func TestProjectStore_ListByOrg(t *testing.T) {
 			expected: 1,
 		},
 		{
+			name:    "excludes archived projects by default",
+			filters: ProjectFilters{},
+			setupMock: func(mock pgxmock.PgxPoolIface) {
+				mock.ExpectQuery("SELECT .+ FROM projects WHERE org_id .+ archived_at IS NULL").
+					WithArgs(pgxmock.AnyArg()).
+					WillReturnRows(
+						pgxmock.NewRows(projectTestColumns).
+							AddRow(newProjectRow(uuid.New(), orgID, repoID, now)...),
+					)
+			},
+			expected: 1,
+		},
+		{
+			name:    "returns only archived projects when requested",
+			filters: ProjectFilters{OnlyArchived: true},
+			setupMock: func(mock pgxmock.PgxPoolIface) {
+				mock.ExpectQuery("SELECT .+ FROM projects WHERE org_id .+ archived_at IS NOT NULL").
+					WithArgs(pgxmock.AnyArg()).
+					WillReturnRows(
+						pgxmock.NewRows(projectTestColumns).
+							AddRow(newProjectRow(uuid.New(), orgID, repoID, now)...),
+					)
+			},
+			expected: 1,
+		},
+		{
 			name:    "returns empty when no projects exist",
 			filters: ProjectFilters{},
 			setupMock: func(mock pgxmock.PgxPoolIface) {
@@ -233,6 +259,110 @@ func TestProjectStore_ListByOrg(t *testing.T) {
 			}
 			require.NoError(t, err, "ListByOrg should not return an error")
 			require.Len(t, projects, tt.expected, "should return expected number of projects")
+			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+		})
+	}
+}
+
+func TestProjectStore_Archive(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	projectID := uuid.New()
+
+	tests := []struct {
+		name      string
+		setupMock func(mock pgxmock.PgxPoolIface)
+		expectErr bool
+	}{
+		{
+			name: "archives project successfully",
+			setupMock: func(mock pgxmock.PgxPoolIface) {
+				mock.ExpectExec("UPDATE projects SET archived_at = now\\(\\), updated_at = now\\(\\) WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL AND archived_at IS NULL").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+			},
+		},
+		{
+			name: "returns error when project is already archived",
+			setupMock: func(mock pgxmock.PgxPoolIface) {
+				mock.ExpectExec("UPDATE projects SET archived_at = now\\(\\), updated_at = now\\(\\) WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL AND archived_at IS NULL").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnResult(pgxmock.NewResult("UPDATE", 0))
+			},
+			expectErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "should create mock pool")
+			defer mock.Close()
+
+			store := NewProjectStore(mock)
+			tt.setupMock(mock)
+
+			err = store.Archive(context.Background(), orgID, projectID)
+			if tt.expectErr {
+				require.Error(t, err, "Archive should return an error")
+				return
+			}
+			require.NoError(t, err, "Archive should not return an error")
+			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+		})
+	}
+}
+
+func TestProjectStore_Unarchive(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	projectID := uuid.New()
+
+	tests := []struct {
+		name      string
+		setupMock func(mock pgxmock.PgxPoolIface)
+		expectErr bool
+	}{
+		{
+			name: "unarchives project successfully",
+			setupMock: func(mock pgxmock.PgxPoolIface) {
+				mock.ExpectExec("UPDATE projects SET archived_at = NULL, updated_at = now\\(\\) WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL AND archived_at IS NOT NULL").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+			},
+		},
+		{
+			name: "returns error when project is not archived",
+			setupMock: func(mock pgxmock.PgxPoolIface) {
+				mock.ExpectExec("UPDATE projects SET archived_at = NULL, updated_at = now\\(\\) WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL AND archived_at IS NOT NULL").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnResult(pgxmock.NewResult("UPDATE", 0))
+			},
+			expectErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "should create mock pool")
+			defer mock.Close()
+
+			store := NewProjectStore(mock)
+			tt.setupMock(mock)
+
+			err = store.Unarchive(context.Background(), orgID, projectID)
+			if tt.expectErr {
+				require.Error(t, err, "Unarchive should return an error")
+				return
+			}
+			require.NoError(t, err, "Unarchive should not return an error")
 			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 		})
 	}

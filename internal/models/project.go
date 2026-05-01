@@ -39,6 +39,7 @@ type Project struct {
 	CreatedAt          time.Time        `db:"created_at" json:"created_at"`
 	UpdatedAt          time.Time        `db:"updated_at" json:"updated_at"`
 	CompletedAt        *time.Time       `db:"completed_at" json:"completed_at,omitempty"`
+	ArchivedAt         *time.Time       `db:"archived_at" json:"archived_at,omitempty"`
 
 	// Raw JSONB for store-layer scanning.
 	LessonsLearnedRaw  json.RawMessage `db:"lessons_learned" json:"-"`
