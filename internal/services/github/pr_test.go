@@ -226,14 +226,14 @@ func TestFormatPRTitle(t *testing.T) {
 		expect  string
 	}{
 		{
-			name:    "linear source uses external ID prefix",
+			name:    "linear source uses bracket key prefix",
 			session: models.Session{ID: uuid.New()},
 			issue: &models.Issue{
 				Source:     models.IssueSourceLinear,
 				ExternalID: "ENG-1234",
 				Title:      "Fix null pointer in user API",
 			},
-			expect: "ENG-1234: Fix null pointer in user API",
+			expect: "[ENG-1234] Fix null pointer in user API",
 		},
 		{
 			name:    "sentry source uses fix prefix",
@@ -2083,7 +2083,27 @@ func TestFormatPRBody_SessionLink(t *testing.T) {
 
 	body := svc.formatPRBody(context.Background(), run, nil)
 	require.Contains(t, body, "session abcdef01", "should contain short session ID in footer")
-	require.Contains(t, body, "app.143.dev/sessions/", "should contain session link")
+	require.Contains(t, body, "https://143.dev/sessions/", "should contain session link with the public app base URL")
+	require.NotContains(t, body, "https://app.143.dev/sessions/", "should not use the deprecated app subdomain in the footer")
+}
+
+func TestFormatPRBody_SessionLinkUsesConfiguredAppBaseURL(t *testing.T) {
+	t.Parallel()
+
+	svc := &PRService{
+		logger:     zerolog.Nop(),
+		appBaseURL: "https://frontend.example.com/",
+	}
+	summary := "Fixed a bug"
+	run := &models.Session{
+		ID:            uuid.MustParse("abcdef01-2345-6789-abcd-ef0123456789"),
+		OrgID:         uuid.New(),
+		ResultSummary: &summary,
+	}
+
+	body := svc.formatPRBody(context.Background(), run, nil)
+	require.Contains(t, body, "https://frontend.example.com/sessions/abcdef01-2345-6789-abcd-ef0123456789", "should use the configured app base URL for the session link")
+	require.NotContains(t, body, "//sessions/", "should trim trailing slashes when building the session link")
 }
 
 func TestFormatPRBody_WithIssueContext(t *testing.T) {
@@ -2338,7 +2358,7 @@ func TestSyncSessionTitle_UsesEditedSessionTitleForLinearIssue(t *testing.T) {
 				var body map[string]any
 				err := json.NewDecoder(req.Body).Decode(&body)
 				require.NoError(t, err, "sync should send valid JSON")
-				require.Equal(t, "ENG-123: Updated session title", body["title"], "sync should keep the Linear prefix and use the edited session title")
+				require.Equal(t, "[ENG-123] Updated session title", body["title"], "sync should keep the Linear prefix and use the edited session title")
 				return &http.Response{
 					StatusCode: http.StatusOK,
 					Body:       io.NopCloser(strings.NewReader(`{"number":42}`)),
@@ -2848,6 +2868,237 @@ func TestNormalizePRTitleCandidate_TruncatesLongTitle(t *testing.T) {
 	require.Len(t, result, 120, "normalizePRTitleCandidate should cap PR titles at 120 chars")
 }
 
+func TestApplyLinearKeyPrefixes_SinglePrimary(t *testing.T) {
+	t.Parallel()
+	source := models.IssueSourceLinear
+	id := "ACS-1"
+	session := &models.Session{
+		LinkedIssues: []models.SessionIssueLink{{
+			Role:        models.SessionIssueLinkRolePrimary,
+			IssueSource: &source,
+			ExternalID:  &id,
+		}},
+	}
+	got := applyLinearKeyPrefixes(session, "Fix null pointer", nil)
+	require.Equal(t, "[ACS-1] Fix null pointer", got)
+}
+
+func TestApplyLinearKeyPrefixes_MultipleOrderedPrimaryFirst(t *testing.T) {
+	t.Parallel()
+	source := models.IssueSourceLinear
+	id1, id2 := "ACS-1234", "ACS-1277"
+	session := &models.Session{
+		LinkedIssues: []models.SessionIssueLink{
+			{Role: models.SessionIssueLinkRolePrimary, IssueSource: &source, ExternalID: &id1},
+			{Role: models.SessionIssueLinkRoleRelated, IssueSource: &source, ExternalID: &id2, Position: 1},
+		},
+	}
+	got := applyLinearKeyPrefixes(session, "Add OAuth callback handler", nil)
+	require.Equal(t, "[ACS-1234] [ACS-1277] Add OAuth callback handler", got)
+}
+
+func TestApplyLinearKeyPrefixes_PreservesConventionalCommit(t *testing.T) {
+	t.Parallel()
+	source := models.IssueSourceLinear
+	id1, id2 := "ACS-1234", "ACS-1277"
+	session := &models.Session{
+		LinkedIssues: []models.SessionIssueLink{
+			{Role: models.SessionIssueLinkRolePrimary, IssueSource: &source, ExternalID: &id1},
+			{Role: models.SessionIssueLinkRoleRelated, IssueSource: &source, ExternalID: &id2, Position: 1},
+		},
+	}
+	got := applyLinearKeyPrefixes(session, "feat: Add OAuth callback handler", nil)
+	require.Equal(t, "feat: [ACS-1234] [ACS-1277] Add OAuth callback handler", got)
+}
+
+func TestApplyLinearKeyPrefixes_DoesNotDoublePrefix(t *testing.T) {
+	t.Parallel()
+	source := models.IssueSourceLinear
+	id := "ACS-1"
+	session := &models.Session{
+		LinkedIssues: []models.SessionIssueLink{{
+			Role: models.SessionIssueLinkRolePrimary, IssueSource: &source, ExternalID: &id,
+		}},
+	}
+	// Title already has the bracket prefix from a prior resync — strip,
+	// then re-prefix.
+	got := applyLinearKeyPrefixes(session, "[ACS-1] feat: Add OAuth callback handler", nil)
+	require.Equal(t, "feat: [ACS-1] Add OAuth callback handler", got)
+}
+
+func TestApplyLinearKeyPrefixes_NoLinkedIssuesIsPassthrough(t *testing.T) {
+	t.Parallel()
+	got := applyLinearKeyPrefixes(&models.Session{}, "fix: something", nil)
+	require.Equal(t, "fix: something", got)
+}
+
+func TestApplyLinearKeyPrefixes_SkipsAlreadyEmbeddedKeys(t *testing.T) {
+	t.Parallel()
+	source := models.IssueSourceLinear
+	id := "ACS-1"
+	session := &models.Session{
+		LinkedIssues: []models.SessionIssueLink{{
+			Role: models.SessionIssueLinkRolePrimary, IssueSource: &source, ExternalID: &id,
+		}},
+	}
+	// User-typed title contains the key already; we shouldn't double up.
+	got := applyLinearKeyPrefixes(session, "fix something for ACS-1 specifically", nil)
+	require.Equal(t, "fix something for ACS-1 specifically", got)
+}
+
+// TestApplyLinearKeyPrefixes_SkipsEmbeddedKeysCaseInsensitively pins the
+// case-insensitive dedup behavior. A user who typed "acs-1" in their commit
+// subject still embedded the same Linear reference; double-prefixing
+// `[ACS-1] feat: ... acs-1 ...` would land both casings in one title.
+func TestApplyLinearKeyPrefixes_SkipsEmbeddedKeysCaseInsensitively(t *testing.T) {
+	t.Parallel()
+	source := models.IssueSourceLinear
+	id := "ACS-1"
+	session := &models.Session{
+		LinkedIssues: []models.SessionIssueLink{{
+			Role: models.SessionIssueLinkRolePrimary, IssueSource: &source, ExternalID: &id,
+		}},
+	}
+	got := applyLinearKeyPrefixes(session, "fix something for acs-1 specifically", nil)
+	require.Equal(t, "fix something for acs-1 specifically", got, "lowercase embed of the canonical key must be treated as already-present")
+}
+
+func TestStripLeadingBracketPrefixes(t *testing.T) {
+	t.Parallel()
+	got := stripLeadingBracketPrefixes("[ACS-1] [ACS-2] feat: x")
+	require.Equal(t, "feat: x", got)
+	got = stripLeadingBracketPrefixes("feat: x")
+	require.Equal(t, "feat: x", got)
+}
+
+// TestApplyLinearKeyPrefixes_DropsRemovedLinkOnResync locks the contract
+// that title resync drops a Linear key when the underlying link was
+// removed between turns. design 62 §"Title resync" mandates resync from
+// the *current* linked-issue set, not the title's history.
+func TestApplyLinearKeyPrefixes_DropsRemovedLinkOnResync(t *testing.T) {
+	t.Parallel()
+	source := models.IssueSourceLinear
+	id := "ACS-1234"
+	// Session now has only one link (ACS-1234). The title still carries
+	// the old [ACS-1277] prefix from a prior resync.
+	session := &models.Session{
+		LinkedIssues: []models.SessionIssueLink{{
+			Role: models.SessionIssueLinkRolePrimary, IssueSource: &source, ExternalID: &id,
+		}},
+	}
+	got := applyLinearKeyPrefixes(session, "[ACS-1234] [ACS-1277] feat: Add OAuth callback handler", nil)
+	// ACS-1277 should be gone — it's no longer linked.
+	require.Equal(t, "feat: [ACS-1234] Add OAuth callback handler", got)
+}
+
+// TestApplyLinearKeyPrefixes_ReordersOnPrimaryChange covers the case where
+// the primary issue swaps between resyncs — e.g. a session originally
+// linked to ACS-1 has its primary reassigned to ACS-2 mid-flight. The
+// previous title's `[ACS-1] [ACS-2]` ordering must rebuild to
+// `[ACS-2] [ACS-1]` so the PR's most prominent key matches the current
+// primary.
+func TestApplyLinearKeyPrefixes_ReordersOnPrimaryChange(t *testing.T) {
+	t.Parallel()
+	source := models.IssueSourceLinear
+	primaryKey := "ACS-2"
+	relatedKey := "ACS-1"
+	session := &models.Session{
+		LinkedIssues: []models.SessionIssueLink{
+			{Role: models.SessionIssueLinkRolePrimary, IssueSource: &source, ExternalID: &primaryKey},
+			{Role: models.SessionIssueLinkRoleRelated, IssueSource: &source, ExternalID: &relatedKey},
+		},
+	}
+	got := applyLinearKeyPrefixes(session, "[ACS-1] [ACS-2] feat: x", nil)
+	require.Equal(t, "feat: [ACS-2] [ACS-1] x", got, "primary must lead even when prior title had inverse order")
+}
+
+// TestApplyLinearKeyPrefixes_PathologicalPrefixesAreCapped verifies the
+// 20-iteration safety cap on stripLeadingBracketPrefixes — a malformed or
+// adversarial title with absurd nesting must not lock up the PR pipeline.
+// On input far past the cap, the strip loop intentionally bails with
+// residual prefixes (a malformed title is malformed; we just refuse to
+// spin). The contract under test is bounded time, not perfect cleanup.
+func TestApplyLinearKeyPrefixes_PathologicalPrefixesAreCapped(t *testing.T) {
+	t.Parallel()
+	source := models.IssueSourceLinear
+	id := "ACS-1"
+	session := &models.Session{
+		LinkedIssues: []models.SessionIssueLink{{
+			Role: models.SessionIssueLinkRolePrimary, IssueSource: &source, ExternalID: &id,
+		}},
+	}
+	// 50 stacked prefixes — well past the 20-iteration cap.
+	pathological := strings.Repeat("[ACS-1] ", 50) + "feat: x"
+	done := make(chan string, 1)
+	go func() { done <- applyLinearKeyPrefixes(session, pathological, nil) }()
+	select {
+	case got := <-done:
+		require.NotEmpty(t, got, "should return a non-empty title on pathological input")
+		require.Contains(t, got, "[ACS-1]", "result should still carry the linked key")
+	case <-time.After(2 * time.Second):
+		t.Fatal("applyLinearKeyPrefixes did not return within 2s on pathological input — strip-loop cap may be missing")
+	}
+}
+
+func TestApplyLinearKeyPrefixes_OverlongPrefixSetDoesNotPanic(t *testing.T) {
+	t.Parallel()
+
+	source := models.IssueSourceLinear
+	links := make([]models.SessionIssueLink, 0, 30)
+	for i := 1; i <= 30; i++ {
+		id := fmt.Sprintf("ACS-%d", i)
+		role := models.SessionIssueLinkRoleRelated
+		if i == 1 {
+			role = models.SessionIssueLinkRolePrimary
+		}
+		links = append(links, models.SessionIssueLink{
+			Role:        role,
+			IssueSource: &source,
+			ExternalID:  &id,
+			Position:    i - 1,
+		})
+	}
+	session := &models.Session{LinkedIssues: links}
+
+	require.NotPanics(t, func() {
+		got := applyLinearKeyPrefixes(session, "feat: x", nil)
+		require.NotEmpty(t, got, "overlong Linear prefixes should still produce a PR title")
+		require.LessOrEqual(t, len(got), maxPRTitleLen, "overlong Linear prefixes should be clamped to the GitHub title budget")
+		require.Contains(t, got, "[ACS-1]", "overlong Linear prefixes should keep the primary identifier")
+		// Subject must survive: with the half-budget cap on prefixes the
+		// descriptive title body keeps room. The conventional-commit path
+		// places brackets between `feat: ` and the rest, so check for both
+		// landmarks separately.
+		require.True(t, strings.HasPrefix(got, "feat: "), "conventional commit prefix must be preserved: %q", got)
+		require.True(t, strings.HasSuffix(got, " x"), "subject must remain at the tail: %q", got)
+		// Sanity: at least one related identifier must be dropped — the
+		// 30-link input cannot fit inside a 120-char title with budget left
+		// for the subject.
+		require.NotContains(t, got, "[ACS-30]", "tail identifiers must be dropped under the prefix-budget cap")
+	}, "overlong Linear prefix sets should not panic when the subject budget is exhausted")
+}
+
+func TestApplyLinearKeyPrefixes_LongConventionalScopeReservesSubject(t *testing.T) {
+	t.Parallel()
+
+	source := models.IssueSourceLinear
+	id := "ACS-1"
+	session := &models.Session{
+		LinkedIssues: []models.SessionIssueLink{{
+			Role: models.SessionIssueLinkRolePrimary, IssueSource: &source, ExternalID: &id,
+		}},
+	}
+	// A conventional commit scope long enough that conv + primary brackets
+	// alone fill most of the title budget. Without the subject-budget guard,
+	// secondaries would still be appended and the descriptive subject would
+	// be silently dropped.
+	longConv := "feat(" + strings.Repeat("a", 80) + "): "
+	got := applyLinearKeyPrefixes(session, longConv+"add new endpoint", nil)
+	require.LessOrEqual(t, len(got), maxPRTitleLen, "title must respect maxPRTitleLen even with a long scope")
+	require.Contains(t, got, "[ACS-1]", "primary identifier must always survive")
+	require.True(t, strings.HasPrefix(got, "feat("), "conventional commit prefix must be preserved")
+}
+
 func TestFormatBranchName_ResultSummaryFallback(t *testing.T) {
 	t.Parallel()
 
@@ -3094,6 +3345,18 @@ func TestBuildPushScript_QuotesHostileBranchName(t *testing.T) {
 		"https://x-access-token@github.com/o/r.git",
 	)
 	require.Contains(t, script, `HEAD:refs/heads/'143/abc/it'\''s-fine'`)
+}
+
+func TestFormatBranchName_PrefersSessionWorkingBranch(t *testing.T) {
+	t.Parallel()
+
+	workingBranch := "143/abc123/fix-typo"
+	session := &models.Session{
+		ID:            uuid.MustParse("11111111-2222-3333-4444-555555555555"),
+		WorkingBranch: &workingBranch,
+	}
+
+	require.Equal(t, workingBranch, formatBranchName(session, &models.Issue{Title: "Ignored"}), "formatBranchName should reuse the session working branch when present")
 }
 
 func TestGithubAPIError_IsNoCommitsBetween(t *testing.T) {
@@ -4106,4 +4369,105 @@ func TestFindOpenPullRequestByHead_ErrorPaths(t *testing.T) {
 			require.Contains(t, err.Error(), tt.wantErrSubstr, "findOpenPullRequestByHead should include the expected error context")
 		})
 	}
+}
+
+// TestCollectLinearIdentifiers locks the order contract: primary first then
+// related by position, deduplicating, with the primary-issue fallback used
+// only when LinkedIssues is empty.
+func TestCollectLinearIdentifiers(t *testing.T) {
+	t.Parallel()
+
+	src := models.IssueSourceLinear
+	link := func(extID string, role models.SessionIssueLinkRole, pos int) models.SessionIssueLink {
+		ext := extID
+		return models.SessionIssueLink{
+			IssueSource: &src,
+			ExternalID:  &ext,
+			Role:        role,
+			Position:    pos,
+		}
+	}
+
+	t.Run("primary first then related", func(t *testing.T) {
+		t.Parallel()
+		s := &models.Session{
+			LinkedIssues: []models.SessionIssueLink{
+				link("ENG-1", models.SessionIssueLinkRolePrimary, 0),
+				link("ENG-2", models.SessionIssueLinkRoleRelated, 1),
+			},
+		}
+		require.Equal(t, []string{"ENG-1", "ENG-2"}, collectLinearIdentifiers(s, nil))
+	})
+
+	t.Run("dedupes identical externals", func(t *testing.T) {
+		t.Parallel()
+		s := &models.Session{
+			LinkedIssues: []models.SessionIssueLink{
+				link("ENG-1", models.SessionIssueLinkRolePrimary, 0),
+				link("ENG-1", models.SessionIssueLinkRoleRelated, 1),
+			},
+		}
+		require.Equal(t, []string{"ENG-1"}, collectLinearIdentifiers(s, nil))
+	})
+
+	t.Run("non-linear sources are skipped", func(t *testing.T) {
+		t.Parallel()
+		sentry := models.IssueSourceSentry
+		ext := "SEN-1"
+		s := &models.Session{
+			LinkedIssues: []models.SessionIssueLink{
+				{IssueSource: &sentry, ExternalID: &ext, Role: models.SessionIssueLinkRolePrimary},
+				link("ENG-1", models.SessionIssueLinkRoleRelated, 1),
+			},
+		}
+		require.Equal(t, []string{"ENG-1"}, collectLinearIdentifiers(s, nil))
+	})
+
+	t.Run("falls back to primaryIssue when LinkedIssues is unhydrated", func(t *testing.T) {
+		t.Parallel()
+		got := collectLinearIdentifiers(&models.Session{}, &models.Issue{
+			Source:     models.IssueSourceLinear,
+			ExternalID: "ENG-7",
+		})
+		require.Equal(t, []string{"ENG-7"}, got)
+	})
+
+	t.Run("ignores non-linear primary fallback", func(t *testing.T) {
+		t.Parallel()
+		got := collectLinearIdentifiers(&models.Session{}, &models.Issue{
+			Source:     models.IssueSourceSentry,
+			ExternalID: "SEN-1",
+		})
+		require.Nil(t, got)
+	})
+
+	t.Run("nil session with nil primary returns nil", func(t *testing.T) {
+		t.Parallel()
+		require.Nil(t, collectLinearIdentifiers(nil, nil))
+	})
+
+	t.Run("rejects non-key-shaped external_ids (UUID leak guard)", func(t *testing.T) {
+		t.Parallel()
+		// Simulates the COALESCE fall-through to issues.external_id when
+		// provider_state.identifier hasn't been written yet — the link
+		// row carries Linear's UUID instead of the human key. We must not
+		// emit it as a prefix; once baked in, linearBracketPrefixRE wouldn't
+		// strip it on resync.
+		s := &models.Session{
+			LinkedIssues: []models.SessionIssueLink{
+				link("ENG-1", models.SessionIssueLinkRolePrimary, 0),
+				link("01a2b3c4-d5e6-7890-abcd-ef1234567890", models.SessionIssueLinkRoleRelated, 1),
+			},
+		}
+		require.Equal(t, []string{"ENG-1"}, collectLinearIdentifiers(s, nil))
+	})
+
+	t.Run("rejects non-key-shaped primaryIssue fallback", func(t *testing.T) {
+		t.Parallel()
+		got := collectLinearIdentifiers(&models.Session{}, &models.Issue{
+			Source:     models.IssueSourceLinear,
+			ExternalID: "01a2b3c4-d5e6-7890-abcd-ef1234567890",
+		})
+		require.Nil(t, got)
+	})
 }

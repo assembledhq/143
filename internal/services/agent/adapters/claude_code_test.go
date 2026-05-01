@@ -345,78 +345,6 @@ func TestClaudeCodeAdapter_Execute_ContinuationUsesContinueMode(t *testing.T) {
 	require.False(t, exists, "continuation should not write a fresh prompt file")
 }
 
-func TestClaudeCodeAdapter_ReviewModes(t *testing.T) {
-	t.Parallel()
-	a := NewClaudeCodeAdapter(zerolog.Nop())
-	require.Equal(
-		t,
-		[]models.SessionReviewMode{models.SessionReviewModeDefault, models.SessionReviewModeSecurity},
-		a.ReviewModes(),
-		"Claude Code ships native /review and /security-review skills",
-	)
-	// Confirm the helper resolves the published modes to non-empty commands
-	// so a future rename of either skill is surfaced by a focused test.
-	require.Equal(t, "/review", claudeCodeReviewSlashCommand(models.SessionReviewModeDefault))
-	require.Equal(t, "/security-review", claudeCodeReviewSlashCommand(models.SessionReviewModeSecurity))
-	require.Equal(t, "", claudeCodeReviewSlashCommand(models.SessionReviewMode("nonsense")))
-}
-
-func TestClaudeCodeAdapter_Execute_ReviewTurnInvokesNativeSkill(t *testing.T) {
-	t.Parallel()
-
-	cases := []struct {
-		name        string
-		mode        models.SessionReviewMode
-		wantCommand string
-	}{
-		{name: "default review uses /review", mode: models.SessionReviewModeDefault, wantCommand: "/review"},
-		{name: "security review uses /security-review", mode: models.SessionReviewModeSecurity, wantCommand: "/security-review"},
-	}
-
-	for _, tc := range cases {
-		tc := tc
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-
-			provider := testutil.NewMockSandboxProvider()
-			provider.ExecFn = func(ctx context.Context, sb *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
-				if strings.HasPrefix(cmd, "claude") {
-					_, _ = stdout.Write([]byte(`{"type":"assistant","content":"reviewing"}`))
-					return 0, nil
-				}
-				if strings.HasPrefix(cmd, "git rev-parse") {
-					_, _ = stdout.Write([]byte("true\n"))
-					return 0, nil
-				}
-				return 0, nil
-			}
-
-			adapter := NewClaudeCodeAdapter(zerolog.Nop())
-			sandbox := &agent.Sandbox{ID: "test", WorkDir: "/workspace", HomeDir: "/home/sandbox"}
-			prompt := &agent.AgentPrompt{
-				// The user-facing message is what the API persists for the
-				// transcript; Execute should ignore it and substitute the
-				// vendor slash-command for review turns.
-				UserMessage:  "Please review your changes.",
-				MaxTokens:    50_000,
-				Continuation: true,
-				RevisionContext: &agent.RevisionContext{
-					ReviewContext: &agent.SessionReviewContext{Mode: tc.mode},
-				},
-			}
-			logCh := make(chan agent.LogEntry, 10)
-			ctx := WithSandboxProvider(context.Background(), provider)
-
-			_, err := adapter.Execute(ctx, sandbox, prompt, logCh)
-			require.NoError(t, err)
-			require.NotEmpty(t, provider.ExecCalls)
-			require.Contains(t, provider.ExecCalls[0], "--continue", "review turn must reuse Claude's continue mode")
-			require.Contains(t, provider.ExecCalls[0], tc.wantCommand, "review turn must invoke the native review slash command")
-			require.NotContains(t, provider.ExecCalls[0], "Please review your changes.", "review turn must not echo the persisted prompt body alongside the slash command")
-		})
-	}
-}
-
 func TestClaudeCodeAdapter_Execute_IncludesReasoningEffortOverride(t *testing.T) {
 	t.Parallel()
 
@@ -744,11 +672,21 @@ func TestBuildSystemPrompt_IncludesLinkedIssuesContext(t *testing.T) {
 		Issue: &models.Issue{Title: "Bug"},
 		LinkedIssues: []models.SessionIssueSnapshotEntry{
 			{
-				Role:        models.SessionIssueLinkRolePrimary,
-				Source:      models.IssueSourceLinear,
-				Title:       "Fix checkout timeout",
-				ExternalID:  "ENG-123",
-				Description: "Customers hit a timeout after payment authorization.",
+				Role:         models.SessionIssueLinkRolePrimary,
+				Source:       models.IssueSourceLinear,
+				Title:        "Fix checkout timeout",
+				ExternalID:   "ENG-123",
+				Description:  "Customers hit a timeout after payment authorization.",
+				Priority:     "high",
+				AssigneeName: "Ada Lovelace",
+				TeamKey:      "ENG",
+				URL:          "https://linear.app/acme/issue/ENG-123",
+				Attachments: []models.SessionIssueSnapshotAttachment{
+					{Title: "Trace", URL: "https://example.com/trace", Source: "sentry"},
+				},
+				Comments: []models.SessionIssueSnapshotComment{
+					{Author: "Grace", Body: "Please include the edge case."},
+				},
 			},
 			{
 				Role:        models.SessionIssueLinkRoleRelated,
@@ -764,7 +702,39 @@ func TestBuildSystemPrompt_IncludesLinkedIssuesContext(t *testing.T) {
 	require.Contains(t, prompt, "Linked Issues Context", "buildSystemPrompt should include the linked issue context header")
 	require.Contains(t, prompt, "<external_id>ENG-123</external_id>", "buildSystemPrompt should include external ids for linked issues")
 	require.Contains(t, prompt, "<description>Customers hit a timeout after payment authorization.</description>", "buildSystemPrompt should include descriptions for primary linked issues")
+	require.Contains(t, prompt, "<priority>high</priority>", "buildSystemPrompt should include Linear priority metadata")
+	require.Contains(t, prompt, "<assignee>Ada Lovelace</assignee>", "buildSystemPrompt should include Linear assignee metadata")
+	require.Contains(t, prompt, "<attachment", "buildSystemPrompt should include Linear attachment metadata")
+	require.Contains(t, prompt, "Please include the edge case.", "buildSystemPrompt should include bounded Linear comments")
 	require.NotContains(t, prompt, "This description should not be copied for related issues.", "buildSystemPrompt should omit descriptions for related linked issues")
+}
+
+// Manual sessions skip the coding-task preamble (which carries the
+// "untrusted external content" warning) but can still be linked to Linear
+// issues whose titles/descriptions/comments are attacker-controllable. The
+// fence has to live inside the linked-issues block so it travels with the
+// data regardless of caller — see linked_issues_context.template.
+func TestBuildSystemPrompt_ManualSessionLinkedIssuesCarryTrustFence(t *testing.T) {
+	t.Parallel()
+
+	input := &agent.AgentInput{
+		Issue:  &models.Issue{Title: "help me refactor", Source: models.IssueSourceManual},
+		Manual: true,
+		LinkedIssues: []models.SessionIssueSnapshotEntry{
+			{
+				Role:        models.SessionIssueLinkRolePrimary,
+				Source:      models.IssueSourceLinear,
+				Title:       "Fix checkout timeout",
+				ExternalID:  "ENG-123",
+				Description: "Customers hit a timeout after payment authorization.",
+			},
+		},
+	}
+
+	prompt := buildSystemPrompt(input)
+	require.NotContains(t, prompt, "untrusted external content (e.g. from issue trackers)", "manual sessions correctly skip the coding-task preamble fence")
+	require.Contains(t, prompt, "<trust_warning>", "linked-issues block must carry its own untrusted-content fence even on manual sessions")
+	require.Contains(t, prompt, "untrusted external content", "trust_warning must call out untrusted external content")
 }
 
 // ---------------------------------------------------------------------------

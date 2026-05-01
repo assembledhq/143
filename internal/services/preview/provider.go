@@ -27,8 +27,13 @@ type PreviewCapableProvider interface {
 	// carry platform-level values (e.g. PREVIEW_ORIGIN) that must always be
 	// available and should win over user overrides.
 	//
+	// observer receives per-service Ready/Failed transitions as they happen,
+	// so callers (typically the manager) can persist per-service state to the
+	// DB without waiting for StartPreview to fully return. observer may be
+	// nil; provider implementations must tolerate it.
+	//
 	// The returned PreviewHandle contains connection details for DialPreview.
-	StartPreview(ctx context.Context, sb *agent.Sandbox, cfg *models.PreviewConfig, extraEnv map[string]string) (*PreviewHandle, error)
+	StartPreview(ctx context.Context, sb *agent.Sandbox, cfg *models.PreviewConfig, extraEnv map[string]string, observer ServiceObserver) (*PreviewHandle, error)
 
 	// StopPreview gracefully stops all preview processes and tears down
 	// infrastructure containers. Safe to call multiple times.
@@ -101,6 +106,21 @@ type ServiceSnapshot struct {
 	PID    int
 	Port   int
 	Error  string
+}
+
+// ServiceObserver receives notifications when a preview service flips state
+// during StartPreview. It is invoked from both the calling goroutine and
+// background goroutines spawned by the provider, so implementations must be
+// safe for concurrent use and should return promptly. A nil observer is
+// allowed and is treated as a no-op.
+type ServiceObserver interface {
+	// OnServiceReady is invoked once a service has passed its readiness probe.
+	OnServiceReady(name string, port, pid int)
+	// OnServiceFailed is invoked when a service has crashed at boot, exited
+	// non-zero before becoming ready, or otherwise failed to come up. tail
+	// holds up to the last few hundred lines of stdout/stderr captured from
+	// the service process; it is best-effort and may be empty.
+	OnServiceFailed(name, errMsg string, tail []string)
 }
 
 // InfraSnapshot is the current state of a platform infrastructure container.

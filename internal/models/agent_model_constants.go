@@ -337,28 +337,41 @@ var PlatformDefaultAllowedLLMModels = map[string][]string{
 // focused update.
 //
 // Returns nil if platform providers can serve the model under the access rules.
-// Returns nil if the model has no key path at all — the existing
-// "no provider configured" UX handles that elsewhere; this validator only
-// blocks the cost-cap bypass.
+// Returns an error when the model is supported but no configured runtime key path
+// can currently serve it.
 func ValidateLLMModelAccess(model string, _ map[string]bool, platformAvailable map[string]bool) error {
 	if model == "" {
 		return nil
 	}
 
 	byProvider := LLMModelsByProvider()
-	for provider, allowed := range PlatformDefaultAllowedLLMModels {
-		if !platformAvailable[provider] || !providerHostsLLMModel(byProvider, provider, model) {
+	cappedProvider := ""
+	for provider, available := range platformAvailable {
+		if !available || !providerHostsLLMModel(byProvider, provider, model) {
 			continue
 		}
-		for _, m := range allowed {
-			if m == model {
-				return nil
+		if allowed, ok := PlatformDefaultAllowedLLMModels[provider]; ok {
+			for _, m := range allowed {
+				if m == model {
+					return nil
+				}
+			}
+			cappedProvider = provider
+			continue
+		}
+		return nil
+	}
+	if cappedProvider != "" {
+		return fmt.Errorf("model %q requires a platform provider that allows it — 143's default %s key is capped at lower-cost models", model, cappedProvider)
+	}
+	for provider, models := range byProvider {
+		for _, availableModel := range models {
+			if availableModel == model {
+				return fmt.Errorf("model %q requires a configured %s key", model, provider)
 			}
 		}
-		return fmt.Errorf("model %q requires a platform provider that allows it — 143's default %s key is capped at lower-cost models", model, provider)
 	}
-
-	return nil
+	return fmt.Errorf("model %q is not supported", model)
 }
 
 func providerHostsLLMModel(byProvider map[string][]string, provider, model string) bool {

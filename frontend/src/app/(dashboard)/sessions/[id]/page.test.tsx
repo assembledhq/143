@@ -118,48 +118,15 @@ describe('SessionDetailPage', () => {
     expect(screen.getAllByText(/Claude Code/).length).toBeGreaterThanOrEqual(1);
   });
 
-  it('shows the native Review button for review-capable sessions', async () => {
-    server.use(
-      http.get('/api/v1/sessions/:id/review-capabilities', () => {
-        return HttpResponse.json({
-          data: {
-            can_review: true,
-            modes: ['default', 'security'],
-          },
-        });
-      }),
-    );
-
+  it('does not show a dedicated self-review button in session detail', async () => {
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
 
-    expect(await screen.findByRole('button', { name: 'Review' })).toBeInTheDocument();
+    await screen.findAllByText('Fixed TypeError by adding null check');
+    expect(screen.queryByRole('button', { name: 'Review' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Code review' })).not.toBeInTheDocument();
   });
 
-  it('shows a hover tooltip when the native Review button is disabled', async () => {
-    server.use(
-      http.get('/api/v1/sessions/:id/review-capabilities', () => {
-        return HttpResponse.json({
-          data: {
-            can_review: false,
-            reason: 'Code review is only available after the session finishes running.',
-            modes: ['default'],
-          },
-        });
-      }),
-    );
-
-    const user = userEvent.setup();
-    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
-
-    const reviewButton = await screen.findByRole('button', { name: 'Code review' });
-    expect(reviewButton).toBeDisabled();
-
-    await user.hover(reviewButton.parentElement as HTMLElement);
-
-    expect(await screen.findByRole('tooltip', { name: 'Code review is only available after the session finishes running.' })).toBeInTheDocument();
-  });
-
-  it('hides the native Review button for viewers even when the session is review-capable', async () => {
+  it('does not show a dedicated self-review button for viewers', async () => {
     server.use(
       http.get('/api/v1/auth/me', () => {
         return HttpResponse.json({
@@ -168,14 +135,6 @@ describe('SessionDetailPage', () => {
             role: 'viewer',
           },
         } satisfies SingleResponse<User>);
-      }),
-      http.get('/api/v1/sessions/:id/review-capabilities', () => {
-        return HttpResponse.json({
-          data: {
-            can_review: true,
-            modes: ['default', 'security'],
-          },
-        });
       }),
     );
 
@@ -788,7 +747,7 @@ describe('SessionDetailPage', () => {
 
     renderWithProviders(<SessionDetailContent id={runningSession.id} />);
     expect(await screen.findByText('Agent is working...')).toBeInTheDocument();
-    expect(screen.getByPlaceholderText('Agent is responding...')).toBeDisabled();
+    expect(screen.getByPlaceholderText('Send a follow-up message...')).toBeEnabled();
   });
 
   it('disables input for pending session', async () => {
@@ -1010,9 +969,10 @@ describe('SessionDetailPage', () => {
     const tabRail = await screen.findByLabelText('Session detail tabs');
     const actions = screen.getByLabelText('Session detail actions');
 
-    expect(tabRail).toHaveClass('overflow-x-auto');
-    expect(tabRail).toHaveClass('scrollbar-hide');
-    expect(actions).toHaveClass('shrink-0');
+	expect(tabRail).toHaveClass('overflow-x-auto');
+	expect(tabRail).toHaveClass('scrollbar-hide');
+	expect(tabRail).toHaveClass('min-w-0');
+	expect(actions).toHaveClass('shrink-0');
     expect(within(actions).getByRole('button', { name: 'View PR' })).toBeInTheDocument();
   });
 
@@ -2452,7 +2412,52 @@ describe('SessionDetailPage', () => {
     renderWithProviders(<SessionDetailContent id={runningSession.id} />);
     await screen.findByText('Agent is working...');
     expect(screen.getByTitle('Cancel session')).toBeInTheDocument();
-    expect(screen.queryByTitle('Send message')).not.toBeInTheDocument();
+    expect(screen.getByTitle('Send message')).toBeInTheDocument();
+  });
+
+  it('keeps the composer enabled and sends follow-up messages while the session is running', async () => {
+    let postedMessage = '';
+    const runningSession: Session = {
+      ...mockSessions[0],
+      status: 'running',
+      completed_at: undefined,
+      current_turn: 1,
+      sandbox_state: 'running',
+    };
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({ data: runningSession } satisfies SingleResponse<Session>);
+      }),
+      http.post('/api/v1/sessions/:id/messages', async ({ request }) => {
+        const body = await request.json() as { message: string };
+        postedMessage = body.message;
+        return HttpResponse.json({
+          data: {
+            id: 99,
+            session_id: runningSession.id,
+            org_id: 'org-1',
+            user_id: 'user-1',
+            turn_number: 2,
+            role: 'user' as const,
+            content: body.message,
+            created_at: '2026-02-17T07:10:00Z',
+          },
+        } satisfies SingleResponse<SessionMessage>);
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id={runningSession.id} />);
+    const textarea = await screen.findByPlaceholderText('Send a follow-up message...');
+    expect(textarea).toBeEnabled();
+
+    const user = userEvent.setup();
+    await user.type(textarea, 'Queue this behind the current work');
+    await user.click(screen.getByTitle('Send message'));
+
+    await waitFor(() => {
+      expect(postedMessage).toBe('Queue this behind the current work');
+    });
   });
 
   it('shows send button instead of stop button when session is idle', async () => {
@@ -3076,6 +3081,7 @@ describe('SessionDetailPage', () => {
 
   it('clears attached review comments after sending them to the agent', async () => {
     let postedMessage = '';
+    let postedResolveIDs: string[] | undefined;
     const idleSessionWithDiff: Session = {
       ...mockSessions[0],
       status: 'idle',
@@ -3085,7 +3091,7 @@ describe('SessionDetailPage', () => {
       diff: 'diff --git a/src/app.ts b/src/app.ts\n--- a/src/app.ts\n+++ b/src/app.ts\n@@ -1,3 +1,4 @@\n import express from "express";\n+import cors from "cors";\n const app = express();\n app.listen(3000);',
       diff_stats: { added: 1, removed: 0, files_changed: 1 },
     };
-    const comments: SessionReviewComment[] = [{
+    const comment: SessionReviewComment = {
       id: 'comment-1',
       session_id: idleSessionWithDiff.id,
       org_id: 'org-1',
@@ -3098,7 +3104,11 @@ describe('SessionDetailPage', () => {
       pass_number: 1,
       created_at: '2026-02-17T07:10:00Z',
       updated_at: '2026-02-17T07:10:00Z',
-    }];
+    };
+    // Mutable backing store: GET returns whatever state POST /messages
+    // transitions the comment to. Mirrors the real backend, which resolves
+    // attached comments in the same transaction as the message create.
+    let comments: SessionReviewComment[] = [comment];
 
     server.use(
       http.get('/api/v1/sessions/:id', () => {
@@ -3111,8 +3121,13 @@ describe('SessionDetailPage', () => {
         } satisfies ListResponse<SessionReviewComment>);
       }),
       http.post('/api/v1/sessions/:id/messages', async ({ request }) => {
-        const body = await request.json() as { message: string };
+        const body = await request.json() as { message: string; resolve_review_comment_ids?: string[] };
         postedMessage = body.message;
+        postedResolveIDs = body.resolve_review_comment_ids;
+        if (postedResolveIDs && postedResolveIDs.length > 0) {
+          const resolved = new Set(postedResolveIDs);
+          comments = comments.map((c) => (resolved.has(c.id) ? { ...c, resolved: true } : c));
+        }
         return HttpResponse.json({
           data: {
             id: 99,
@@ -3149,11 +3164,93 @@ describe('SessionDetailPage', () => {
       expect(postedMessage).toContain('"Handle the null edge case"');
       expect(postedMessage).toContain('Hello agent');
     });
+    // The send must include the comment ID so the backend can resolve it
+    // atomically with the message create. Without this, a page refresh
+    // would resurrect the attached comment.
+    expect(postedResolveIDs).toEqual([comment.id]);
 
     await waitFor(() => {
       expect(screen.queryByText('1 comment attached')).not.toBeInTheDocument();
     });
     expect(screen.queryByText('Handle the null edge case')).not.toBeInTheDocument();
+  });
+
+  it('caps attached review comments to the backend per-message resolve limit', async () => {
+    let postedResolveIDs: string[] | undefined;
+    const idleSessionWithDiff: Session = {
+      ...mockSessions[0],
+      status: 'idle',
+      completed_at: undefined,
+      current_turn: 1,
+      sandbox_state: 'snapshotted',
+      diff: 'diff --git a/src/app.ts b/src/app.ts\n--- a/src/app.ts\n+++ b/src/app.ts\n@@ -1,3 +1,4 @@\n import express from "express";\n+import cors from "cors";\n const app = express();\n app.listen(3000);',
+      diff_stats: { added: 1, removed: 0, files_changed: 1 },
+    };
+    const originalComments: SessionReviewComment[] = Array.from({ length: 51 }, (_, index) => ({
+      id: `00000000-0000-4000-8000-${index.toString().padStart(12, '0')}`,
+      session_id: idleSessionWithDiff.id,
+      org_id: 'org-1',
+      user_id: mockMembers[0].id,
+      file_path: 'src/app.ts',
+      line_number: index + 1,
+      diff_side: 'new',
+      body: `Review comment ${index + 1}`,
+      resolved: false,
+      pass_number: 1,
+      created_at: '2026-02-17T07:10:00Z',
+      updated_at: '2026-02-17T07:10:00Z',
+    }));
+    let comments = originalComments;
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({ data: idleSessionWithDiff } satisfies SingleResponse<Session>);
+      }),
+      http.get('/api/v1/sessions/:id/review-comments', () => {
+        return HttpResponse.json({
+          data: comments,
+          meta: {},
+        } satisfies ListResponse<SessionReviewComment>);
+      }),
+      http.post('/api/v1/sessions/:id/messages', async ({ request }) => {
+        const body = await request.json() as { message: string; resolve_review_comment_ids?: string[] };
+        postedResolveIDs = body.resolve_review_comment_ids;
+        if (postedResolveIDs && postedResolveIDs.length > 0) {
+          const resolved = new Set(postedResolveIDs);
+          comments = comments.map((comment) => (resolved.has(comment.id) ? { ...comment, resolved: true } : comment));
+        }
+        return HttpResponse.json({
+          data: {
+            id: 99,
+            session_id: idleSessionWithDiff.id,
+            org_id: 'org-1',
+            user_id: 'user-1',
+            turn_number: 2,
+            role: 'user' as const,
+            content: body.message,
+            created_at: '2026-02-17T07:10:00Z',
+          },
+        } satisfies SingleResponse<SessionMessage>);
+      }),
+    );
+
+    const user = userEvent.setup();
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+
+    const textarea = await screen.findByPlaceholderText('Send a follow-up message...');
+    expect(await screen.findByText('50 comments attached')).toBeInTheDocument();
+
+    await user.type(textarea, 'Please handle these');
+    await user.keyboard('{Enter}');
+
+    await waitFor(() => {
+      expect(postedResolveIDs).toHaveLength(50);
+    });
+    expect(postedResolveIDs).toEqual(originalComments.slice(0, 50).map((comment) => comment.id));
+
+    await waitFor(() => {
+      expect(screen.getByText('1 comment attached')).toBeInTheDocument();
+    });
   });
 
   it('scrolls the chat transcript back to the live edge after sending a follow-up message', async () => {

@@ -9,10 +9,10 @@ import (
 
 // MemoryMetrics holds OTel instruments for memory service observability.
 type MemoryMetrics struct {
-	InjectionsTotal  otelmetric.Int64Counter
-	InjectedCount    otelmetric.Float64Histogram
-	ReinforcedTotal  otelmetric.Int64Counter
-	ReinforcedCount  otelmetric.Float64Histogram
+	InjectionsTotal otelmetric.Int64Counter
+	InjectedCount   otelmetric.Float64Histogram
+	ReinforcedTotal otelmetric.Int64Counter
+	ReinforcedCount otelmetric.Float64Histogram
 }
 
 // NewMemoryMetrics creates and registers memory OTel instruments.

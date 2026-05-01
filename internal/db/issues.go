@@ -132,6 +132,46 @@ func (s *IssueStore) ListByIDs(ctx context.Context, orgID uuid.UUID, issueIDs []
 	return pgx.CollectRows(rows, pgx.RowToStructByName[models.Issue])
 }
 
+// GetByOrgAndExternalID looks up a single issue by its external (provider)
+// identifier. Returns pgx.ErrNoRows when no row matches. Useful for the Linear
+// linker which holds Linear issue IDs (UUIDs from Linear) but needs to resolve
+// them to local issues row IDs.
+func (s *IssueStore) GetByOrgAndExternalID(ctx context.Context, orgID uuid.UUID, source models.IssueSource, externalID string) (models.Issue, error) {
+	query := `
+		SELECT id, org_id, external_id, source, source_integration_id, repository_id,
+		       title, description, raw_data, status, first_seen_at, last_seen_at,
+		       occurrence_count, affected_customer_count, severity, tags, fingerprint,
+		       created_at, updated_at, deleted_at
+		FROM issues
+		WHERE org_id = @org_id AND source = @source AND external_id = @external_id AND deleted_at IS NULL
+		LIMIT 1`
+
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
+		"org_id":      orgID,
+		"source":      source,
+		"external_id": externalID,
+	})
+	if err != nil {
+		return models.Issue{}, fmt.Errorf("query issue by external id: %w", err)
+	}
+	return pgx.CollectOneRow(rows, pgx.RowToStructByName[models.Issue])
+}
+
+// UpdateRepositoryID re-associates an issue with a repository. Used by the
+// Linear linker's webhook re-validation path when a Linear issue's repo
+// association changes after the link was created.
+func (s *IssueStore) UpdateRepositoryID(ctx context.Context, orgID, issueID uuid.UUID, repoID *uuid.UUID) error {
+	_, err := s.db.Exec(ctx, `
+		UPDATE issues SET repository_id = @repository_id, updated_at = now()
+		WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL`,
+		pgx.NamedArgs{
+			"id":            issueID,
+			"org_id":        orgID,
+			"repository_id": repoID,
+		})
+	return err
+}
+
 func (s *IssueStore) Upsert(ctx context.Context, issue *models.Issue) error {
 	query := `
 		INSERT INTO issues (org_id, external_id, source, source_integration_id, repository_id,

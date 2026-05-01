@@ -217,7 +217,7 @@ func TestAuditLogStore_List(t *testing.T) {
 					{
 						ID: 2, OrgID: orgID, ActorType: "system",
 						ActorID: "pm_agent",
-						Action: "pm.plan_created", ResourceType: "pm_plan",
+						Action:  "pm.plan_created", ResourceType: "pm_plan",
 						CreatedAt: now,
 					},
 				}
@@ -441,4 +441,176 @@ func TestAuditLogStore_GetByID(t *testing.T) {
 			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 		})
 	}
+}
+
+func TestAuditLogStore_CreateBatch(t *testing.T) {
+	t.Parallel()
+
+	t.Run("empty batch is a no-op", func(t *testing.T) {
+		t.Parallel()
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err)
+		defer mock.Close()
+
+		err = NewAuditLogStore(mock).CreateBatch(context.Background(), uuid.New(), nil)
+		require.NoError(t, err, "empty batch should not error")
+		require.NoError(t, mock.ExpectationsWereMet(), "no query should run for an empty batch")
+	})
+
+	t.Run("single-entry batch falls through to Create", func(t *testing.T) {
+		t.Parallel()
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err)
+		defer mock.Close()
+
+		orgID := uuid.New()
+		userID := uuid.New()
+		now := time.Now()
+		// Single-row path uses INSERT ... RETURNING (Query, not Exec).
+		mock.ExpectQuery("INSERT INTO audit_logs").
+			WithArgs(
+				pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+				pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+				pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+				pgxmock.AnyArg(),
+			).
+			WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(int64(1), now))
+
+		entry := &models.AuditLog{
+			OrgID:        orgID,
+			ActorType:    models.AuditActorUser,
+			ActorID:      userID.String(),
+			UserID:       &userID,
+			Action:       models.AuditActionSessionCreated,
+			ResourceType: models.AuditResourceSession,
+		}
+		err = NewAuditLogStore(mock).CreateBatch(context.Background(), orgID, []*models.AuditLog{entry})
+		require.NoError(t, err)
+		require.Equal(t, int64(1), entry.ID, "single-entry batch should populate ID via RETURNING")
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+
+	t.Run("single-entry batch rejects mismatched org", func(t *testing.T) {
+		t.Parallel()
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err, "pgxmock pool should initialize")
+		defer mock.Close()
+
+		entry := &models.AuditLog{
+			OrgID:        uuid.New(),
+			ActorType:    models.AuditActorUser,
+			ActorID:      uuid.NewString(),
+			Action:       models.AuditActionSessionCreated,
+			ResourceType: models.AuditResourceSession,
+		}
+		err = NewAuditLogStore(mock).CreateBatch(context.Background(), uuid.New(), []*models.AuditLog{entry})
+		require.Error(t, err, "single-entry batch should reject a mismatched org before insert")
+		require.NoError(t, mock.ExpectationsWereMet(), "mismatched single-entry batch should not query")
+	})
+
+	t.Run("multi-entry batch issues a single Exec with all rows", func(t *testing.T) {
+		t.Parallel()
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err)
+		defer mock.Close()
+
+		orgID := uuid.New()
+		userID := uuid.New()
+
+		const n = 3
+		entries := make([]*models.AuditLog, 0, n)
+		for i := 0; i < n; i++ {
+			entries = append(entries, &models.AuditLog{
+				OrgID:        orgID,
+				ActorType:    models.AuditActorUser,
+				ActorID:      userID.String(),
+				UserID:       &userID,
+				Action:       models.AuditActionSessionReviewCommentUpdated,
+				ResourceType: models.AuditResourceSessionReviewComment,
+				Details:      json.RawMessage(`{"i":` + fmt.Sprint(i) + `}`),
+			})
+		}
+
+		// 3 rows × 13 columns = 39 args, all surfaced via the multi-row INSERT.
+		argMatchers := make([]any, 0, n*13)
+		for i := 0; i < n*13; i++ {
+			argMatchers = append(argMatchers, pgxmock.AnyArg())
+		}
+		mock.ExpectExec("INSERT INTO audit_logs.+ VALUES \\(\\$1, \\$2.+\\), \\(\\$14.+\\), \\(\\$27.+\\)$").
+			WithArgs(argMatchers...).
+			WillReturnResult(pgxmock.NewResult("INSERT", n))
+
+		err = NewAuditLogStore(mock).CreateBatch(context.Background(), orgID, entries)
+		require.NoError(t, err)
+		require.NoError(t, mock.ExpectationsWereMet(),
+			"multi-row batch must issue exactly one Exec — regression risk for the per-comment audit N+1")
+	})
+
+	t.Run("validates every entry up front", func(t *testing.T) {
+		t.Parallel()
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err)
+		defer mock.Close()
+
+		orgID := uuid.New()
+		userID := uuid.New()
+		good := &models.AuditLog{
+			OrgID: orgID, ActorType: models.AuditActorUser, ActorID: userID.String(),
+			UserID: &userID, Action: models.AuditActionSessionCreated, ResourceType: models.AuditResourceSession,
+		}
+		bad := &models.AuditLog{
+			OrgID: orgID, ActorType: "invalid", ActorID: userID.String(),
+			Action: models.AuditActionSessionCreated, ResourceType: models.AuditResourceSession,
+		}
+		err = NewAuditLogStore(mock).CreateBatch(context.Background(), orgID, []*models.AuditLog{good, bad})
+		require.Error(t, err, "should reject the batch when any entry is invalid")
+		require.NoError(t, mock.ExpectationsWereMet(), "no query should run when validation fails")
+	})
+
+	t.Run("rejects mixed-org batches", func(t *testing.T) {
+		t.Parallel()
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err)
+		defer mock.Close()
+
+		expectedOrg := uuid.New()
+		foreignOrg := uuid.New()
+		userID := uuid.New()
+		entries := []*models.AuditLog{
+			{OrgID: expectedOrg, ActorType: models.AuditActorUser, ActorID: userID.String(), UserID: &userID,
+				Action: models.AuditActionSessionCreated, ResourceType: models.AuditResourceSession},
+			{OrgID: foreignOrg, ActorType: models.AuditActorUser, ActorID: userID.String(), UserID: &userID,
+				Action: models.AuditActionSessionCreated, ResourceType: models.AuditResourceSession},
+		}
+		err = NewAuditLogStore(mock).CreateBatch(context.Background(), expectedOrg, entries)
+		require.Error(t, err, "must reject when an entry's org_id mismatches the batch org")
+		require.NoError(t, mock.ExpectationsWereMet(), "no query should run when tenancy check fails")
+	})
+
+	t.Run("propagates db errors", func(t *testing.T) {
+		t.Parallel()
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err)
+		defer mock.Close()
+
+		orgID := uuid.New()
+		userID := uuid.New()
+		entries := []*models.AuditLog{
+			{OrgID: orgID, ActorType: models.AuditActorUser, ActorID: userID.String(), UserID: &userID,
+				Action: models.AuditActionSessionCreated, ResourceType: models.AuditResourceSession},
+			{OrgID: orgID, ActorType: models.AuditActorUser, ActorID: userID.String(), UserID: &userID,
+				Action: models.AuditActionSessionCreated, ResourceType: models.AuditResourceSession},
+		}
+		argMatchers := make([]any, 0, 2*13)
+		for i := 0; i < 2*13; i++ {
+			argMatchers = append(argMatchers, pgxmock.AnyArg())
+		}
+		mock.ExpectExec("INSERT INTO audit_logs").
+			WithArgs(argMatchers...).
+			WillReturnError(fmt.Errorf("connection refused"))
+
+		err = NewAuditLogStore(mock).CreateBatch(context.Background(), orgID, entries)
+		require.Error(t, err)
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
 }

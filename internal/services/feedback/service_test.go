@@ -214,7 +214,7 @@ func TestProcessComment(t *testing.T) {
 		commentID                uuid.UUID
 		orgID                    uuid.UUID
 		setupCommentStore        func(commentID, orgID uuid.UUID) *mockReviewCommentStore
-		setupMemoryStore        func() *mockMemoryStore
+		setupMemoryStore         func() *mockMemoryStore
 		setupLLM                 func() *mockLLMClient
 		expectErr                bool
 		expectedUpdateFilterStat string // the filter_status passed to UpdateClassification, if any
@@ -408,14 +408,14 @@ func TestUpdateMemories(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name              string
-		orgID             uuid.UUID
-		commentID         uuid.UUID
-		repo              string
-		rule              string
-		category          string
+		name             string
+		orgID            uuid.UUID
+		commentID        uuid.UUID
+		repo             string
+		rule             string
+		category         string
 		setupMemoryStore func(orgID, commentID uuid.UUID) *mockMemoryStore
-		expectErr         bool
+		expectErr        bool
 	}{
 		{
 			name:      "creates new pattern when no match exists",
@@ -584,13 +584,13 @@ func TestGenerateConventionsDoc(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name              string
-		orgID             uuid.UUID
-		repo              string
+		name             string
+		orgID            uuid.UUID
+		repo             string
 		setupMemoryStore func(orgID uuid.UUID) *mockMemoryStore
-		expectContains    []string
-		expectEmpty       bool
-		expectErr         bool
+		expectContains   []string
+		expectEmpty      bool
+		expectErr        bool
 	}{
 		{
 			name:  "generates markdown from active patterns",

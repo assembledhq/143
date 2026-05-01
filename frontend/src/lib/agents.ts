@@ -10,7 +10,7 @@ import {
   AVAILABLE_GEMINI_CLI_MODELS,
   AVAILABLE_PI_MODELS,
 } from "@/lib/model-constants";
-import type { CodexAuthStatus, ResolvedCredential } from "@/lib/types";
+import type { CodexAuthStatus, CodingAuth, ResolvedCredential } from "@/lib/types";
 
 export interface AgentEnvVar {
   name: string;
@@ -156,5 +156,21 @@ export function isAgentConnected(
   if (!agent) return false;
   return resolvedCredentials.some(
     (c) => c.provider === agent.providerKey && c.source !== "none",
+  );
+}
+
+function codingAuthStatusAllowsSelection(status: CodingAuth["status"]): boolean {
+  return status === "healthy" || status === "never_verified" || status === "rate_limited";
+}
+
+export function isAgentAvailable(
+  agentType: string,
+  resolvedCredentials: readonly ResolvedCredential[],
+  codexAuthStatus?: CodexAuthStatus | null,
+  codingAuths: readonly CodingAuth[] = [],
+): boolean {
+  if (isAgentConnected(agentType, resolvedCredentials, codexAuthStatus)) return true;
+  return codingAuths.some(
+    (row) => row.agent === agentType && codingAuthStatusAllowsSelection(row.status),
   );
 }

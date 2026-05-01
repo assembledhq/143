@@ -163,7 +163,23 @@ export interface Session {
     issue_title?: string;
     issue_source?: string;
     external_id?: string;
+    issue_status?: string;
+    // Linear workspace slug (e.g. "acs"). Used to build deep links to
+    // linear.app/<slug>/issue/<KEY>. Empty/undefined for non-Linear links.
+    issue_workspace_slug?: string;
   }>;
+  // Linear-specific session policy flags. Frozen at session create.
+  linear_private?: boolean;
+  linear_state_sync_disabled?: boolean;
+  linear_identifier_hint?: string;
+  // linear_prepare_state is the server-side gate that blocks turn 1 until
+  // the primary Linear issue snapshot is captured. The backend emits it on
+  // every session payload. The 'failed' state surfaces in
+  // linked-issue-chips.tsx as a warning chip so dogfooders see the
+  // missing-context signal; 'pending'/'ready' are not yet rendered (the
+  // "Preparing Linear context..." indicator is one diff away when we want
+  // it).
+  linear_prepare_state?: 'none' | 'pending' | 'ready' | 'failed';
   error?: string;
   result_summary?: string;
   diff?: string;
@@ -406,22 +422,6 @@ export interface PullRequestUpdatedEvent {
   head_sha: string;
   base_sha: string;
   synced_at: string;
-}
-
-export type SessionReviewMode = 'default' | 'security';
-
-// Mirrors models.SessionReviewCapabilities. The Review button uses `modes`
-// to decide whether to render a single button or a dropdown, and `can_review`
-// to gate against in-flight or empty-diff sessions before the user clicks.
-export interface SessionReviewCapabilities {
-  can_review: boolean;
-  reason?: string;
-  modes: SessionReviewMode[];
-}
-
-export interface SessionReviewResponse {
-  session_id: string;
-  mode: SessionReviewMode;
 }
 
 export interface SessionReviewComment {
@@ -1336,6 +1336,37 @@ export interface AutomationRun {
   result_summary?: string;
   created_at: string;
   updated_at: string;
+  // Compact view of the session this run spawned. Populated by the list
+  // endpoint via a LATERAL join (see internal/db/automations.go); absent
+  // when the run hasn't spawned a session yet (pending/skipped, or
+  // mid-flight before the worker creates the session).
+  session?: AutomationRunSession;
+}
+
+// Mirrors models.PRCreationState. Kept as a literal union so the row UI
+// gets exhaustiveness checks when branching on it (e.g. the "Creating PR…"
+// pill on completed_no_pr rows).
+export type PRCreationState =
+  | 'idle'
+  | 'queued'
+  | 'pushing'
+  | 'succeeded'
+  | 'failed';
+
+export interface AutomationRunSession {
+  id: string;
+  title?: string;
+  // Mirrors models.SessionStatus values; the row UI keys off this
+  // (notably "needs_human_guidance") to choose between failure and
+  // attention treatments.
+  status: string;
+  diff_stats?: { added: number; removed: number; files_changed?: number };
+  failure_explanation?: string;
+  failure_category?: string;
+  failure_next_steps?: string[];
+  failure_retry_advised: boolean;
+  pr_creation_state: PRCreationState;
+  pr?: PRSummary;
 }
 
 export interface AutomationRunStatsBucket {

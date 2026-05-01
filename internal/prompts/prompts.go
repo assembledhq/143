@@ -5,6 +5,7 @@ package prompts
 import (
 	"bytes"
 	"embed"
+	"strings"
 	"text/template"
 )
 
@@ -125,10 +126,95 @@ type LinkedIssueContextEntry struct {
 	Title       string
 	ExternalID  string
 	Description string
+	StateName   string
+	StateType   string
+	Priority    string
+	Assignee    string
+	TeamKey     string
+	TeamName    string
+	URL         string
+	Attachments []LinkedIssueAttachment
+	Comments    []LinkedIssueComment
 }
 
+type LinkedIssueAttachment struct {
+	Title  string
+	URL    string
+	Source string
+}
+
+type LinkedIssueComment struct {
+	Author string
+	Body   string
+}
+
+// untrustedXMLEscaper escapes the four characters that can break out of the
+// surrounding XML-shaped trust fence: `<` and `>` would let Linear-supplied
+// text close `</linked_issues>` or `</trust_warning>` and inject pseudo-
+// instructions; `&` is escaped for round-trippability; `"` is escaped because
+// several fields (StateName, TeamKey, attachment Source, etc.) interpolate
+// into XML attributes where a stray quote would close the attribute and
+// allow attribute injection. Applied to every Linear-derived field in
+// LinkedIssuesContext below; the template itself uses text/template (no
+// auto-escape) so the escape must happen at the data layer.
+var untrustedXMLEscaper = strings.NewReplacer(
+	"&", "&amp;",
+	"<", "&lt;",
+	">", "&gt;",
+	"\"", "&quot;",
+)
+
+func sanitizeUntrustedXML(s string) string {
+	return untrustedXMLEscaper.Replace(s)
+}
+
+// LinkedIssuesContext renders the trust-fenced linked-issue block. Every
+// string field on each entry is treated as untrusted external content
+// (Linear titles, descriptions, comment bodies, attachment metadata, etc.)
+// and is HTML-entity-escaped before reaching the template so an attacker
+// can't smuggle a literal `</linked_issues>` or `</trust_warning>` past
+// the fence and inject text the agent would treat as instructions.
 func LinkedIssuesContext(data LinkedIssueContextData) string {
-	return render("linked_issues_context.template", data)
+	sanitized := LinkedIssueContextData{
+		LinkedIssues: make([]LinkedIssueContextEntry, len(data.LinkedIssues)),
+	}
+	for i, entry := range data.LinkedIssues {
+		safe := LinkedIssueContextEntry{
+			Role:        sanitizeUntrustedXML(entry.Role),
+			Source:      sanitizeUntrustedXML(entry.Source),
+			Title:       sanitizeUntrustedXML(entry.Title),
+			ExternalID:  sanitizeUntrustedXML(entry.ExternalID),
+			Description: sanitizeUntrustedXML(entry.Description),
+			StateName:   sanitizeUntrustedXML(entry.StateName),
+			StateType:   sanitizeUntrustedXML(entry.StateType),
+			Priority:    sanitizeUntrustedXML(entry.Priority),
+			Assignee:    sanitizeUntrustedXML(entry.Assignee),
+			TeamKey:     sanitizeUntrustedXML(entry.TeamKey),
+			TeamName:    sanitizeUntrustedXML(entry.TeamName),
+			URL:         sanitizeUntrustedXML(entry.URL),
+		}
+		if len(entry.Attachments) > 0 {
+			safe.Attachments = make([]LinkedIssueAttachment, 0, len(entry.Attachments))
+			for _, a := range entry.Attachments {
+				safe.Attachments = append(safe.Attachments, LinkedIssueAttachment{
+					Title:  sanitizeUntrustedXML(a.Title),
+					URL:    sanitizeUntrustedXML(a.URL),
+					Source: sanitizeUntrustedXML(a.Source),
+				})
+			}
+		}
+		if len(entry.Comments) > 0 {
+			safe.Comments = make([]LinkedIssueComment, 0, len(entry.Comments))
+			for _, c := range entry.Comments {
+				safe.Comments = append(safe.Comments, LinkedIssueComment{
+					Author: sanitizeUntrustedXML(c.Author),
+					Body:   sanitizeUntrustedXML(c.Body),
+				})
+			}
+		}
+		sanitized.LinkedIssues[i] = safe
+	}
+	return render("linked_issues_context.template", sanitized)
 }
 
 // ─── Slack ────────────────────────────────────────────────────────────────────

@@ -99,6 +99,7 @@ import type { ListResponse, Session, SessionDetail, SessionInputCommand, Session
 import { AuditLogTrigger } from "@/components/audit/audit-log-trigger";
 import { ResizeHandle } from "@/components/resize-handle";
 import { DiffStatsBadge, FileTree, SessionFooter, CommentsSummary, ReviewDiffView, PassSelector, type DiffPassEntry, type PassRange } from "@/components/code-review";
+import { LinkedIssueChips } from "./linked-issue-chips";
 import { useReviewComments } from "@/hooks/use-review-comments";
 import { useDiffViewState } from "@/hooks/use-diff-view-state";
 import { CodexDeviceCodeModal } from "@/components/codex-device-code-modal";
@@ -106,7 +107,6 @@ import { AgentBadge } from "@/components/agent-badge";
 import { PreviewPanel } from "@/components/preview/preview-panel";
 import { PendingAttachmentStrip } from "@/components/pending-attachment-strip";
 import { PRHealthBanner } from "@/components/pr-health-banner";
-import { ReviewButton } from "@/components/review-button";
 import { MobileBackButton } from "@/components/mobile-back-button";
 import { useAuth } from "@/hooks/use-auth";
 import { prMergedAccent } from "@/lib/pr-status-styles";
@@ -120,6 +120,7 @@ const PREVIEW_ORIGIN_TEMPLATE =
 const FAILURE_CATEGORY_CODEX_AUTH = "codex_auth_expired";
 const PR_ERROR_TOAST_DURATION_MS = 10_000;
 const PR_ERROR_TOAST_MESSAGE = "PR creation failed";
+const MAX_RESOLVE_REVIEW_COMMENTS_PER_MESSAGE = 50;
 
 const statusConfig: Record<string, { color: string; label: string }> = {
   pending: { color: "bg-muted text-muted-foreground", label: "Pending" },
@@ -898,7 +899,7 @@ function SessionComposer({
   const hasInvalidCommands = invalidCommandTokens.length > 0;
 
   const hasContent = message.trim() || attachments.length > 0 || openComments.length > 0;
-  const sendDisabled = hasInvalidCommands || !hasContent || !canSendMessage || sendPending || isRunning;
+  const sendDisabled = hasInvalidCommands || !hasContent || !canSendMessage || sendPending;
   const inactiveSessionMessage = isSnapshotExpired
     ? "Session environment has expired and can no longer be continued."
     : "Session is not active.";
@@ -914,10 +915,8 @@ function SessionComposer({
       ? "Add a message, attachment, or review comment before sending."
       : !canSendMessage
         ? inactiveSessionMessage
-        : sendPending
-          ? (planMode ? "Sending plan request..." : "Sending message...")
-          : isRunning
-            ? "Wait for the current agent response to finish before sending another message."
+          : sendPending
+            ? (planMode ? "Sending plan request..." : "Sending message...")
             : undefined;
 
   function handleKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
@@ -1066,11 +1065,9 @@ function SessionComposer({
                   ? "Session is not active"
                   : planMode
                     ? "Describe what you want to plan..."
-                    : isRunning
-                      ? "Agent is responding..."
-                      : "Send a follow-up message..."
+                    : "Send a follow-up message..."
             }
-            disabled={!canSendMessage || sendPending || isRunning}
+            disabled={!canSendMessage || sendPending}
             className="min-h-[44px] max-h-[200px] resize-none border-none bg-transparent shadow-none focus-visible:ring-0"
           />
 
@@ -1195,7 +1192,7 @@ function SessionComposer({
             )}
 
             <div className="ml-auto flex items-center gap-1">
-              {isRunning ? (
+              {isRunning && (
                 <DisabledTooltip disabled={cancelPending} content={cancelDisabledReason}>
                   <Button
                     size="icon"
@@ -1208,26 +1205,25 @@ function SessionComposer({
                     <Square className="h-3 w-3" />
                   </Button>
                 </DisabledTooltip>
-              ) : (
-                <DisabledTooltip disabled={sendDisabled} content={sendDisabledReason}>
-                  <Button
-                    size="icon"
-                    variant={planMode ? "outline" : "default"}
-                    className={cn("h-8 w-8 shrink-0 rounded-lg", planMode && "border-amber-300 dark:border-amber-700 text-amber-700 dark:text-amber-400 hover:bg-amber-50 dark:hover:bg-amber-950/30")}
-                    title={planMode ? "Send plan request" : "Send message"}
-                    disabled={sendDisabled}
-                    onClick={onSend}
-                  >
-                    {sendPending ? (
-                      <Loader2 className="h-4 w-4 animate-spin" />
-                    ) : planMode ? (
-                      <ClipboardList className="h-4 w-4" />
-                    ) : (
-                      <ArrowUp className="h-4 w-4" />
-                    )}
-                  </Button>
-                </DisabledTooltip>
               )}
+              <DisabledTooltip disabled={sendDisabled} content={sendDisabledReason}>
+                <Button
+                  size="icon"
+                  variant={planMode ? "outline" : "default"}
+                  className={cn("h-8 w-8 shrink-0 rounded-lg", planMode && "border-amber-300 dark:border-amber-700 text-amber-700 dark:text-amber-400 hover:bg-amber-50 dark:hover:bg-amber-950/30")}
+                  title={planMode ? "Send plan request" : "Send message"}
+                  disabled={sendDisabled}
+                  onClick={onSend}
+                >
+                  {sendPending ? (
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                  ) : planMode ? (
+                    <ClipboardList className="h-4 w-4" />
+                  ) : (
+                    <ArrowUp className="h-4 w-4" />
+                  )}
+                </Button>
+              </DisabledTooltip>
             </div>
           </div>
         </div>
@@ -1752,7 +1748,6 @@ export function SessionDetailContent({ id }: { id: string }) {
   const [localPRActionError, setLocalPRActionError] = useState<PRActionErrorState | null>(null);
   const [pendingPRAction, setPendingPRAction] = useState<"fix_tests" | "resolve_conflicts" | "merge" | null>(null);
   const [repairActionError, setRepairActionError] = useState<string | null>(null);
-  const [pendingReviewMode, setPendingReviewMode] = useState<import("@/lib/types").SessionReviewMode | null>(null);
   const [prAuthPrompt, setPRAuthPrompt] = useState<PRAuthPromptState | null>(null);
   const resumeAttemptRef = useRef<string | null>(null);
   const apiBase = process.env.NEXT_PUBLIC_API_URL || "";
@@ -1786,8 +1781,6 @@ export function SessionDetailContent({ id }: { id: string }) {
   const isActive = session ? !terminalStatuses.has(session.status) : false;
   const isRunning = session?.status === "running";
   const currentTitle = session ? sessionTitle(session) : "";
-  const { user } = useAuth();
-  const canRequestReview = user?.role === "admin" || user?.role === "member";
 
   const queryClient = useQueryClient();
 
@@ -1890,38 +1883,6 @@ export function SessionDetailContent({ id }: { id: string }) {
     }
     prevPRUrlRef.current = prUrl;
   }, [localPRState, prUrl, session?.pr_creation_state]);
-  // Session-native review affordance. Capabilities are server-driven so the
-  // button only appears when the agent's adapter implements ReviewCapableAdapter
-  // and the session is in a state that can run another turn (idle/paused with
-  // a non-empty diff). Key on status only so the button flips visibility when
-  // the session transitions running → idle, without burning a refetch on every
-  // assistant SSE tick (which advances last_activity_at).
-  const { data: reviewCapabilitiesData } = useQuery({
-    queryKey: ["session", id, "review-capabilities", session?.status],
-    queryFn: () => api.sessions.getReviewCapabilities(id),
-    enabled: !!session && canRequestReview,
-  });
-  const reviewCapabilities = reviewCapabilitiesData?.data;
-  const startReviewMutation = useMutation({
-    mutationFn: (mode: import("@/lib/types").SessionReviewMode) => api.sessions.startReview(id, mode),
-    onMutate: (mode) => {
-      setPendingReviewMode(mode);
-    },
-    onSuccess: () => {
-      // Stay in the current view; the assistant message will stream into the
-      // session timeline via SSE just like any other turn. Bust caches so the
-      // status flips from idle → running immediately.
-      void queryClient.invalidateQueries({ queryKey: ["session", id] });
-      void queryClient.invalidateQueries({ queryKey: ["session", id, "messages"] });
-      void queryClient.invalidateQueries({ queryKey: ["session", id, "timeline"] });
-      setPendingReviewMode(null);
-    },
-    onError: (err) => {
-      setPendingReviewMode(null);
-      const message = err instanceof ApiError ? err.message : "Failed to start review";
-      toast.error(message);
-    },
-  });
   const startRepairMutation = useMutation({
     mutationFn: async (action: "fix_tests" | "resolve_conflicts") => {
       if (!pullRequestId) {
@@ -2218,19 +2179,17 @@ export function SessionDetailContent({ id }: { id: string }) {
   const [composerCommands, setComposerCommands] = useState<SessionInputCommand[]>([]);
   const [composerIsUploading, setComposerIsUploading] = useState(false);
   const [composerUploadError, setComposerUploadError] = useState<string | null>(null);
-  const [dismissedAttachedReviewCommentIDs, setDismissedAttachedReviewCommentIDs] = useState<string[]>([]);
   const composerTextareaRef = useRef<HTMLTextAreaElement>(null);
   const composerUploadInputRef = useRef<HTMLInputElement>(null);
   const chatPanelScrollToLiveEdgeRef = useRef<(() => void) | null>(null);
-  const openComments = useMemo(() => comments.filter((comment) => !comment.resolved), [comments]);
-  useEffect(() => {
-    setDismissedAttachedReviewCommentIDs((previous) =>
-      previous.filter((commentID) => openComments.some((comment) => comment.id === commentID))
-    );
-  }, [openComments]);
+  // Open comments are the source of truth for what gets attached to the next
+  // message — once a send succeeds, the backend marks them resolved in the
+  // same transaction, the comments query is invalidated below, and the next
+  // refetch flips them out of openComments. No local "dismissed" state is
+  // needed (and would be wrong: it wouldn't survive page reloads).
   const attachedReviewComments = useMemo(
-    () => openComments.filter((comment) => !dismissedAttachedReviewCommentIDs.includes(comment.id)),
-    [dismissedAttachedReviewCommentIDs, openComments]
+    () => comments.filter((comment) => !comment.resolved).slice(0, MAX_RESOLVE_REVIEW_COMMENTS_PER_MESSAGE),
+    [comments],
   );
   const composerCanSendMessage = session?.status !== "skipped" && session?.status !== "pending" && session?.sandbox_state !== "destroyed";
   const composerIsRunning = session?.status === "running";
@@ -2282,6 +2241,7 @@ export function SessionDetailContent({ id }: { id: string }) {
         ? formatReviewMessage(attachedReviewComments, filteredFiles, draftMessage)
         : draftMessage;
       const isPlanRequest = opts.planMode ?? composerPlanMode;
+      const resolveReviewCommentIDs = attachedReviewComments.map((comment) => comment.id);
 
       return api.sessions.sendMessage(id, {
         message: formattedMessage,
@@ -2290,15 +2250,10 @@ export function SessionDetailContent({ id }: { id: string }) {
         commands: composerCommands.length > 0 ? composerCommands : undefined,
         planMode: isPlanRequest,
         model: composerSelectedModel || undefined,
-      });
+        resolveReviewCommentIDs: resolveReviewCommentIDs.length > 0 ? resolveReviewCommentIDs : undefined,
+      }).then((response) => ({ response, resolvedIDs: resolveReviewCommentIDs }));
     },
-    onSuccess: () => {
-      setDismissedAttachedReviewCommentIDs((previous) => {
-        if (attachedReviewComments.length === 0) {
-          return previous;
-        }
-        return Array.from(new Set([...previous, ...attachedReviewComments.map((comment) => comment.id)]));
-      });
+    onSuccess: ({ resolvedIDs }) => {
       setComposerMessage("");
       setComposerAttachments([]);
       setComposerReferences([]);
@@ -2313,6 +2268,26 @@ export function SessionDetailContent({ id }: { id: string }) {
       chatPanelScrollToLiveEdgeRef.current?.();
       queryClient.invalidateQueries({ queryKey: ["session", id] });
       queryClient.invalidateQueries({ queryKey: ["session", id, "timeline"] });
+      // Backend resolved the attached review comments inside the same tx as
+      // the message. Optimistically flip them to resolved=true in the cache
+      // so the "N comments attached" banner disappears immediately, then
+      // invalidate to reconcile with the canonical server state.
+      if (resolvedIDs.length > 0) {
+        const resolvedSet = new Set(resolvedIDs);
+        queryClient.setQueryData<ListResponse<SessionReviewComment>>(
+          ["session", id, "review-comments"],
+          (previous) => {
+            if (!previous) return previous;
+            return {
+              ...previous,
+              data: previous.data.map((comment) =>
+                resolvedSet.has(comment.id) ? { ...comment, resolved: true } : comment
+              ),
+            };
+          }
+        );
+      }
+      queryClient.invalidateQueries({ queryKey: ["session", id, "review-comments"] });
     },
   });
 
@@ -2657,15 +2632,6 @@ export function SessionDetailContent({ id }: { id: string }) {
               </CardContent>
             </Card>
           )}
-          {canRequestReview && (
-            <div className="flex">
-              <ReviewButton
-                capabilities={reviewCapabilities}
-                pendingMode={pendingReviewMode}
-                onReview={(mode) => startReviewMutation.mutate(mode)}
-              />
-            </div>
-          )}
           <OverviewTab session={session} members={members} />
         </div>
       </TabsContent>
@@ -2756,6 +2722,7 @@ export function SessionDetailContent({ id }: { id: string }) {
                 onClick={() => openReview()}
               />
             )}
+            <LinkedIssueChips session={session} />
           </div>
           {/* Desktop toggle: hides/shows the inline right panel. */}
           <DisabledTooltip disabled={centerMode === "review" && showDetailPanel} content={detailToggleTitle}>

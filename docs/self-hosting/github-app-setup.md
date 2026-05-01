@@ -92,6 +92,7 @@ Under **Permissions**, configure:
 |---|---|---|
 | **Repository > Contents** | Read & Write | Clone repos, create branches, push commits |
 | **Repository > Pull requests** | Read & Write | Create and update PRs, read reviews |
+| **Repository > Workflows** | Read & Write | Push commits that add or modify `.github/workflows/*.yml` files |
 | **Repository > Issues** | Read | Reference issues from commits and PRs |
 | **Repository > Checks** | Read | Monitor CI status on PRs |
 | **Repository > Deployments** | Read | Detect when fixes are deployed |
@@ -212,6 +213,7 @@ Create separate GitHub OAuth Apps and GitHub Apps for development and production
 | First-time `Create PR` fails with `GITHUB_APP_USER_AUTH_NOT_CONFIGURED` | Check that `GITHUB_APP_CLIENT_ID` and `GITHUB_APP_CLIENT_SECRET` are set and that the GitHub App has a user authorization callback URL pointing to `{BASE_URL}/api/v1/users/me/github/callback` |
 | Webhook signature verification fails (401) | Make sure `GITHUB_WEBHOOK_SECRET` matches what you entered in the GitHub App settings |
 | "Resource not accessible by integration" on API calls | The app is missing a required permission — check the permissions table above and update in GitHub App settings |
+| `refusing to allow a GitHub App to ... workflow '.github/workflows/...' without 'workflows' permission` on push | Add **Workflows: Read & Write** in the GitHub App permissions, then accept the new permission on each installation (GitHub emails the org owner). Existing installation tokens are cached up to 1 hour — restart workers or wait for the cache to expire after accepting |
 | PRs aren't being created | Verify the app is installed on the target repo and has Contents + Pull Requests write access |
 | Webhooks not arriving | Check that the webhook URL is correct and reachable. Use the Recent Deliveries tab in GitHub App settings to debug |
 | "redirect_uri is not associated with this application" | Your `BASE_URL` doesn't match the callback URL registered in GitHub. For login, update the GitHub OAuth App callback URL or set `GITHUB_OAUTH_REDIRECT_URI`. For PR authorship, update the GitHub App user authorization callback URL to `{BASE_URL}/api/v1/users/me/github/callback` |

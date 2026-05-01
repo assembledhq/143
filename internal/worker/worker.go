@@ -21,8 +21,16 @@ type JobHandler func(ctx context.Context, jobType string, payload json.RawMessag
 // RetryableError wraps an error to indicate that the job should be retried
 // without consuming an attempt. This is useful for transient conditions like
 // concurrency limits where the job will succeed once a slot opens.
+//
+// RetryAfter, when non-nil, replaces the exponential backoff schedule for
+// this retry only. Use it for transient gates where the wait time is known —
+// e.g. waiting on the Linear pre-start preparation worker — so we don't
+// thrash the queue with `1<<attempts`-second backoffs. A pointer (rather
+// than a bare time.Duration) is used so callers can request an explicit
+// zero-delay retry without colliding with the "unset, use backoff" sentinel.
 type RetryableError struct {
-	Err error
+	Err        error
+	RetryAfter *time.Duration
 }
 
 func (e *RetryableError) Error() string { return e.Err.Error() }
@@ -197,7 +205,7 @@ func (w *Worker) poll(ctx context.Context) {
 	if errors.As(err, &fatal) {
 		w.logger.Error().Err(err).Str("job_id", job.ID.String()).Msg("job failed (fatal, skipping retries)")
 		w.deadLetterJob(ctx, job.ID, *job.LockToken, err.Error())
-		jobctx.RunDeadLetterHooks(handlerCtx, err)
+		w.runDeadLetterHooks(handlerCtx, err)
 		return
 	}
 
@@ -210,18 +218,18 @@ func (w *Worker) poll(ctx context.Context) {
 				Msg("retryable job exceeded max duration, dead-lettering")
 			timeoutErr := fmt.Errorf("retryable job timed out after %s: %w", maxRetryableDuration, err)
 			w.deadLetterJob(ctx, job.ID, *job.LockToken, timeoutErr.Error())
-			jobctx.RunDeadLetterHooks(handlerCtx, timeoutErr)
+			w.runDeadLetterHooks(handlerCtx, timeoutErr)
 			return
 		}
 		w.logger.Info().Err(err).Str("job_id", job.ID.String()).Msg("job deferred (retryable)")
-		w.retryJob(ctx, job.ID, *job.LockToken, err.Error(), job.Attempts, true)
+		w.retryJobWithDelay(ctx, job.ID, *job.LockToken, err.Error(), job.Attempts, true, retryable.RetryAfter)
 		return
 	}
 
 	w.logger.Error().Err(err).Str("job_id", job.ID.String()).Msg("job failed")
 	if job.Attempts >= job.MaxAttempts {
 		w.deadLetterJob(ctx, job.ID, *job.LockToken, err.Error())
-		jobctx.RunDeadLetterHooks(handlerCtx, err)
+		w.runDeadLetterHooks(handlerCtx, err)
 		return
 	}
 	w.retryJob(ctx, job.ID, *job.LockToken, err.Error(), job.Attempts, false)
@@ -307,7 +315,16 @@ func (w *Worker) failJob(ctx context.Context, jobID, lockToken uuid.UUID, errMsg
 }
 
 func (w *Worker) retryJob(ctx context.Context, jobID, lockToken uuid.UUID, errMsg string, attempt int, preserveAttempts bool) {
-	backoff := retryBackoff(attempt)
+	w.retryJobWithDelay(ctx, jobID, lockToken, errMsg, attempt, preserveAttempts, nil)
+}
+
+func (w *Worker) retryJobWithDelay(ctx context.Context, jobID, lockToken uuid.UUID, errMsg string, attempt int, preserveAttempts bool, override *time.Duration) {
+	var backoff time.Duration
+	if override != nil {
+		backoff = *override
+	} else {
+		backoff = retryBackoff(attempt)
+	}
 	runAt := time.Now().Add(backoff)
 
 	var (
@@ -337,6 +354,12 @@ func (w *Worker) deadLetterJob(ctx context.Context, jobID, lockToken uuid.UUID, 
 	if !ok {
 		w.logger.Warn().Str("job_id", jobID.String()).Msg("lost ownership before dead-lettering job")
 	}
+}
+
+func (w *Worker) runDeadLetterHooks(handlerCtx context.Context, err error) {
+	hookCtx, cancel := context.WithTimeout(context.WithoutCancel(handlerCtx), 30*time.Second)
+	defer cancel()
+	jobctx.RunDeadLetterHooks(hookCtx, err)
 }
 
 func retryBackoff(attempt int) time.Duration {

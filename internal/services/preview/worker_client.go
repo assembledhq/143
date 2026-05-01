@@ -19,6 +19,12 @@ import (
 
 const previewWorkerTokenTTL = 30 * time.Second
 
+// previewWorkerHTTPTimeout caps app->worker preview RPCs. It must exceed the
+// worst-case launch budget (image pulls + infra startup + service readiness
+// probes, each defaulting to 90s) or the API gives up before the worker
+// finishes, surfacing as "context canceled" on a readiness probe.
+const previewWorkerHTTPTimeout = 10 * time.Minute
+
 // WorkerRequestError preserves structured worker error responses.
 type WorkerRequestError struct {
 	StatusCode int
@@ -87,7 +93,7 @@ func NewWorkerPreviewClient(secret string) *WorkerPreviewClient {
 	return &WorkerPreviewClient{
 		secret: secret,
 		httpClient: &http.Client{
-			Timeout: 90 * time.Second,
+			Timeout: previewWorkerHTTPTimeout,
 		},
 	}
 }

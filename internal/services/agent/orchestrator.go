@@ -20,6 +20,7 @@ import (
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/services/github/identity"
 	"github.com/assembledhq/143/internal/services/integration"
+	"github.com/assembledhq/143/internal/services/linear"
 	"github.com/assembledhq/143/internal/services/mcp"
 	"github.com/assembledhq/143/internal/services/sandboxauth"
 	"github.com/assembledhq/143/internal/services/storage"
@@ -124,9 +125,7 @@ type SessionStore interface {
 	SetGitIdentity(ctx context.Context, orgID, sessionID uuid.UUID, source string, userID *uuid.UUID) error
 	UpdateFailure(ctx context.Context, orgID, runID uuid.UUID, explanation, category string, nextSteps []string, retryAdvised bool) error
 	UpdateTitle(ctx context.Context, orgID, sessionID uuid.UUID, title string) error
-	// UpdateRevisionContext rewrites sessions.revision_context. The orchestrator
-	// uses it to clear ReviewContext after consumption so a subsequent user
-	// message isn't silently swapped for /review again.
+	// UpdateRevisionContext rewrites sessions.revision_context.
 	UpdateRevisionContext(ctx context.Context, orgID, sessionID uuid.UUID, revisionContext []byte) error
 	GetByID(ctx context.Context, orgID, sessionID uuid.UUID) (models.Session, error)
 	// AcquireTurnHold flips turn_holding_container=TRUE and publishes the
@@ -454,12 +453,11 @@ func (o *Orchestrator) prepareSandboxGitHubAuth(
 	ctx context.Context,
 	run *models.Session,
 	repo *models.Repository,
-	integrationSkills string,
 	fallbackToken string,
 	sandboxCfg *SandboxConfig,
 	log zerolog.Logger,
 ) (*sandboxGitHubAuthState, error) {
-	if repo == nil || integrationSkills == "" || sandboxCfg == nil {
+	if repo == nil || sandboxCfg == nil {
 		return nil, nil
 	}
 	if repo.FullName != "" {
@@ -478,6 +476,19 @@ func (o *Orchestrator) prepareSandboxGitHubAuth(
 			Msg("sandbox auth socket bridge unavailable; falling back to env token (legacy path)")
 		if fallbackToken != "" {
 			sandboxCfg.Env["GITHUB_TOKEN"] = fallbackToken
+		}
+		name, email := identity.CommitIdentity(nil)
+		sandboxCfg.Env[sandboxauth.GitNameEnvVar] = name
+		sandboxCfg.Env[sandboxauth.GitEmailEnvVar] = email
+		prependSandboxBinDir(sandboxCfg.Env, sandboxCfg.HomeDir)
+		if run.TriggeredByUserID != nil && o.users != nil {
+			if user, userErr := o.users.GetByID(ctx, run.OrgID, *run.TriggeredByUserID); userErr == nil {
+				if trailer := identity.CoAuthorTrailer(&user); trailer != "" {
+					sandboxCfg.Env[sandboxauth.CoAuthorEnvVar] = trailer
+				}
+			} else {
+				log.Warn().Err(userErr).Str("user_id", run.TriggeredByUserID.String()).Msg("failed to load triggering user for legacy co-author trailer")
+			}
 		}
 		return nil, nil
 	}
@@ -735,7 +746,7 @@ func primaryLinkedIssue(links []models.SessionIssueLink) *models.SessionIssueLin
 	return nil
 }
 
-func snapshotEntriesFromLinks(links []models.SessionIssueLink) []models.SessionIssueSnapshotEntry {
+func snapshotEntriesFromLinks(links []models.SessionIssueLink) ([]models.SessionIssueSnapshotEntry, error) {
 	entries := make([]models.SessionIssueSnapshotEntry, 0, len(links))
 	for _, link := range links {
 		entry := models.SessionIssueSnapshotEntry{
@@ -760,9 +771,59 @@ func snapshotEntriesFromLinks(links []models.SessionIssueLink) []models.SessionI
 		if link.IssueSource != nil {
 			entry.Source = *link.IssueSource
 		}
+		if err := applyLinearPrimarySnapshot(&entry, link.RawLinearPrimarySnapshot); err != nil {
+			return nil, fmt.Errorf("decode linear primary snapshot for link %s: %w", link.ID, err)
+		}
 		entries = append(entries, entry)
 	}
-	return entries
+	return entries, nil
+}
+
+func applyLinearPrimarySnapshot(entry *models.SessionIssueSnapshotEntry, raw json.RawMessage) error {
+	if entry == nil || len(raw) == 0 || string(raw) == "null" {
+		return nil
+	}
+	var snapshot linear.LinearTurnContext
+	if err := json.Unmarshal(raw, &snapshot); err != nil {
+		return err
+	}
+	if snapshot.Identifier != "" {
+		entry.ExternalID = snapshot.Identifier
+	}
+	if snapshot.Title != "" {
+		entry.Title = snapshot.Title
+	}
+	if snapshot.Description != "" {
+		entry.Description = snapshot.Description
+	}
+	entry.StateName = snapshot.StateName
+	entry.StateType = snapshot.StateType
+	entry.Priority = snapshot.Priority
+	entry.AssigneeName = snapshot.AssigneeName
+	entry.TeamKey = snapshot.TeamKey
+	entry.TeamName = snapshot.TeamName
+	entry.URL = snapshot.URL
+	if len(snapshot.Attachments) > 0 {
+		entry.Attachments = make([]models.SessionIssueSnapshotAttachment, 0, len(snapshot.Attachments))
+		for _, attachment := range snapshot.Attachments {
+			entry.Attachments = append(entry.Attachments, models.SessionIssueSnapshotAttachment{
+				Title:  attachment.Title,
+				URL:    attachment.URL,
+				Source: attachment.Source,
+			})
+		}
+	}
+	if len(snapshot.Comments) > 0 {
+		entry.Comments = make([]models.SessionIssueSnapshotComment, 0, len(snapshot.Comments))
+		for _, comment := range snapshot.Comments {
+			entry.Comments = append(entry.Comments, models.SessionIssueSnapshotComment{
+				Author:    comment.Author,
+				Body:      comment.Body,
+				CreatedAt: comment.CreatedAt,
+			})
+		}
+	}
+	return nil
 }
 
 func (o *Orchestrator) createIssueSnapshotForTurn(ctx context.Context, session *models.Session, turnNumber int) (*models.SessionTurnIssueSnapshot, error) {
@@ -776,11 +837,15 @@ func (o *Orchestrator) createIssueSnapshotForTurn(ctx context.Context, session *
 	if len(links) > 0 && primaryLinkedIssue(links) == nil {
 		return nil, fmt.Errorf("execution requires exactly one primary issue when links are present")
 	}
+	linkedIssues, err := snapshotEntriesFromLinks(links)
+	if err != nil {
+		return nil, err
+	}
 	snapshot := &models.SessionTurnIssueSnapshot{
 		OrgID:        session.OrgID,
 		SessionID:    session.ID,
 		TurnNumber:   turnNumber,
-		LinkedIssues: snapshotEntriesFromLinks(links),
+		LinkedIssues: linkedIssues,
 	}
 	if err := o.issueSnapshots.Create(ctx, snapshot); err != nil {
 		return nil, fmt.Errorf("create issue snapshot: %w", err)
@@ -1014,6 +1079,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 		repoURL, branch, token, repoFullName string
 		authRepo                             *models.Repository
 	)
+	var designatedWorkingBranch string
 	if resolvedRepoID != nil {
 		repo, err := o.repositories.GetByID(ctx, run.OrgID, *resolvedRepoID)
 		if err != nil {
@@ -1038,6 +1104,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 		token = ghToken
 		repoCopy := repo
 		authRepo = &repoCopy
+		designatedWorkingBranch = sessionWorkingBranch(run, issue)
 	}
 
 	// 5. Get the adapter for this agent type.
@@ -1148,6 +1215,9 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 			sandboxCfg.Env[envVar] = *run.ModelOverride
 		}
 	}
+	if designatedWorkingBranch != "" {
+		sandboxCfg.Env[sandboxauth.WorkingBranchEnvVar] = designatedWorkingBranch
+	}
 	if err := o.env.CheckAuth(run.AgentType, sandboxCfg.Env); err != nil {
 		o.failRun(ctx, run, err.Error())
 		return err
@@ -1159,7 +1229,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 	if slug := SlugForRepo(repoFullName); slug != "" {
 		sandboxCfg.WorkDir = sandboxCfg.HomeDir + "/" + slug
 	}
-	authState, authErr := o.prepareSandboxGitHubAuth(ctx, run, authRepo, input.IntegrationSkills, token, &sandboxCfg, log)
+	authState, authErr := o.prepareSandboxGitHubAuth(ctx, run, authRepo, token, &sandboxCfg, log)
 	if authErr != nil {
 		o.failRun(ctx, run, authErr.Error())
 		return authErr
@@ -1300,21 +1370,20 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 
 		// 8b. Create a working branch so the agent operates on a separate
 		// branch from the start, keeping the base branch clean.
-		workingBranch := formatWorkingBranch(run, issue)
+		workingBranch := designatedWorkingBranch
 		checkoutCmd := fmt.Sprintf("git checkout -b '%s'", shellEscapeSingleQuote(workingBranch))
 		var checkoutOut, checkoutErr bytes.Buffer
 		exitCode, execErr := o.provider.Exec(ctx, sandbox, checkoutCmd, &checkoutOut, &checkoutErr)
 		if execErr != nil || exitCode != 0 {
-			log.Warn().
-				Err(execErr).
-				Int("exit_code", exitCode).
-				Str("stderr", checkoutErr.String()).
-				Msg("failed to create working branch, agent will work on base branch")
-		} else {
-			run.WorkingBranch = &workingBranch
-			if dbErr := o.sessions.UpdateWorkingBranch(ctx, run.OrgID, run.ID, workingBranch); dbErr != nil {
-				log.Warn().Err(dbErr).Str("branch", workingBranch).Msg("failed to persist working branch")
+			o.failRun(ctx, run, fmt.Sprintf("create working branch: exit=%d err=%v stderr=%s", exitCode, execErr, checkoutErr.String()))
+			if execErr != nil {
+				return fmt.Errorf("create working branch %s: exit=%d err=%w stderr=%s", workingBranch, exitCode, execErr, checkoutErr.String())
 			}
+			return fmt.Errorf("create working branch %s: exit=%d stderr=%s", workingBranch, exitCode, checkoutErr.String())
+		}
+		run.WorkingBranch = &workingBranch
+		if dbErr := o.sessions.UpdateWorkingBranch(ctx, run.OrgID, run.ID, workingBranch); dbErr != nil {
+			log.Warn().Err(dbErr).Str("branch", workingBranch).Msg("failed to persist working branch")
 		}
 
 		// 8c. Wire git/gh inside the sandbox up to the per-session credential
@@ -1322,9 +1391,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 		// the .git directory exists; idempotent so it's safe to re-run on
 		// session resume. Skipped when the auth socket isn't bound (legacy
 		// or non-integration path).
-		if sandboxCfg.AuthSocketPath != "" {
-			o.runSandboxGitBootstrap(ctx, sandbox, sandboxCfg.WorkDir, log)
-		}
+		o.runSandboxGitBootstrap(ctx, sandbox, sandboxCfg.WorkDir, log)
 		// 8d. Stamp git identity on the session row for audit. Best-effort —
 		// a failure here only affects post-hoc reporting, not the run.
 		if authState != nil && authState.source != "" {
@@ -1427,7 +1494,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 	}
 
 	// 11b. Snapshot workspace for multi-turn support (does not change session status).
-	snapshotKey, snapshotSize, snapshotErr := o.snapshotSession(ctx, run, sandbox, result)
+	snapshotKey, snapshotSize, snapshotErr := o.snapshotSessionOnTurnSuccess(ctx, run, sandbox, result, log)
 	if snapshotErr != nil {
 		log.Warn().Err(snapshotErr).Msg("failed to snapshot session, session will not support follow-up turns")
 	} else if snapshotKey != "" {
@@ -1653,32 +1720,8 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		log.Warn().Err(revErr).Msg("failed to parse session revision context during continue_session")
 		revisionContext = nil
 	}
-	// Review turns route through the adapter's native review surface (e.g.
-	// Claude Code's /review skill). Appending the formatted revision context
-	// here would either pollute the slash-command line or hand-roll a fake
-	// review prompt — both are explicitly out of scope per doc 63. Skip the
-	// formatter for review turns; the adapter reads ReviewContext directly
-	// off AgentPrompt.RevisionContext.
-	if revisionContext != nil && revisionContext.ReviewContext == nil {
-		if formatted := FormatRevisionContextForContinuation(revisionContext); formatted != "" {
-			userMessage = strings.TrimSpace(userMessage + "\n\n" + formatted)
-		}
-	}
-	// ReviewContext is one-shot: clear it from the persisted row before the
-	// agent runs so the next user message ("now actually fix the issue you
-	// found") doesn't get silently swapped for /review again. Done before
-	// Execute on purpose — even if the turn fails or is retried, the user
-	// will retry by clicking the button again, not by re-firing the same
-	// stale directive against an unrelated message. Other RevisionContext
-	// fields (RepairAction, RepairContext, ...) are preserved so PR-repair
-	// behavior is unchanged.
-	if revisionContext != nil && revisionContext.ReviewContext != nil {
-		cleared, marshalErr := MarshalRevisionContextWithoutReview(revisionContext)
-		if marshalErr != nil {
-			log.Warn().Err(marshalErr).Msg("failed to re-encode revision context after review consumption")
-		} else if updateErr := o.sessions.UpdateRevisionContext(ctx, session.OrgID, session.ID, cleared); updateErr != nil {
-			log.Warn().Err(updateErr).Msg("failed to clear consumed review context; subsequent turns may double-fire /review")
-		}
+	if formatted := FormatRevisionContextForContinuation(revisionContext); formatted != "" {
+		userMessage = strings.TrimSpace(userMessage + "\n\n" + formatted)
 	}
 
 	turnNumber := session.CurrentTurn + 1
@@ -1708,6 +1751,9 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		if envVar := models.ModelEnvVarForAgentType(session.AgentType); envVar != "" {
 			sandboxCfg.Env[envVar] = *session.ModelOverride
 		}
+	}
+	if branch := sessionWorkingBranch(session, promptIssue); branch != "" {
+		sandboxCfg.Env[sandboxauth.WorkingBranchEnvVar] = branch
 	}
 	if authErr := o.env.CheckAuth(session.AgentType, sandboxCfg.Env); authErr != nil {
 		log.Error().Err(authErr).Msg("agent auth pre-flight failed during continue_session")
@@ -1783,7 +1829,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	if repoID == nil && promptIssue != nil {
 		repoID = promptIssue.RepositoryID
 	}
-	if repoID != nil && integrationSkills != "" {
+	if repoID != nil {
 		repo, repoErr := o.repositories.GetByID(ctx, session.OrgID, *repoID)
 		if repoErr != nil {
 			log.Error().Err(repoErr).Msg("failed to fetch repository for continue-session auth wiring")
@@ -1823,7 +1869,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 			fallbackToken = token
 		}
 		repoCopy := repo
-		authState, authErr = o.prepareSandboxGitHubAuth(ctx, session, &repoCopy, integrationSkills, fallbackToken, &sandboxCfg, log)
+		authState, authErr = o.prepareSandboxGitHubAuth(ctx, session, &repoCopy, fallbackToken, &sandboxCfg, log)
 		if authErr != nil {
 			log.Error().Err(authErr).Msg("failed to wire GitHub auth for continue-session sandbox")
 			if revertErr := o.sessions.UpdateStatus(ctx, session.OrgID, session.ID, string(models.SessionStatusIdle)); revertErr != nil {
@@ -2052,7 +2098,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 				return err
 			}
 		}
-		if !reusedExisting && sandboxCfg.AuthSocketPath != "" {
+		if !reusedExisting {
 			o.runSandboxGitBootstrap(ctx, sandbox, sandboxCfg.WorkDir, log)
 		}
 
@@ -2096,9 +2142,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 			o.failRun(ctx, session, fmt.Sprintf("setup fresh sandbox: %s", err))
 			return fmt.Errorf("setup fresh sandbox: %w", err)
 		}
-		if sandboxCfg.AuthSocketPath != "" {
-			o.runSandboxGitBootstrap(ctx, sandbox, sandboxCfg.WorkDir, log)
-		}
+		o.runSandboxGitBootstrap(ctx, sandbox, sandboxCfg.WorkDir, log)
 
 		// Build a full prompt via PreparePrompt so the agent gets the system
 		// prompt with integration skills, memory, and repo conventions.
@@ -2218,7 +2262,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	}
 
 	// 8. Snapshot again.
-	newSnapshotKey, snapshotSize, snapshotErr := o.snapshotSession(ctx, session, sandbox, result)
+	newSnapshotKey, snapshotSize, snapshotErr := o.snapshotSessionOnTurnSuccess(ctx, session, sandbox, result, log)
 	if snapshotErr != nil {
 		log.Warn().Err(snapshotErr).Msg("failed to snapshot session after continue")
 	} else if newSnapshotKey != "" {
@@ -2286,6 +2330,18 @@ func (o *Orchestrator) setupFreshSandbox(ctx context.Context, session *models.Se
 		}
 		if err := o.provider.CloneRepo(ctx, sandbox, repo.CloneURL, branch, token); err != nil {
 			return models.Issue{}, "", fmt.Errorf("clone repo: %w", err)
+		}
+		workingBranch := sessionWorkingBranch(session, &issue)
+		if workingBranch != "" {
+			var checkoutOut, checkoutErr bytes.Buffer
+			exitCode, execErr := o.provider.Exec(ctx, sandbox, fmt.Sprintf("git checkout -b '%s'", shellEscapeSingleQuote(workingBranch)), &checkoutOut, &checkoutErr)
+			if execErr != nil {
+				return models.Issue{}, "", fmt.Errorf("create working branch %s: %w", workingBranch, execErr)
+			}
+			if exitCode != 0 {
+				return models.Issue{}, "", fmt.Errorf("create working branch %s: exit=%d stderr=%s", workingBranch, exitCode, checkoutErr.String())
+			}
+			session.WorkingBranch = &workingBranch
 		}
 	}
 
@@ -2585,6 +2641,23 @@ func (o *Orchestrator) failRun(ctx context.Context, run *models.Session, errMsg 
 			o.logger.Warn().Err(err).Str("run_id", run.ID.String()).Msg("failed to update automation run on session failure")
 		}
 	}
+	o.enqueueLinearMilestone(ctx, run, "failed")
+}
+
+// enqueueLinearMilestone schedules a linear_milestone job for the terminal
+// session lifecycle states ("failed", "ended_no_pr"). The Linear linker is
+// the single owner of the attachment subtitle / rolling-comment / state
+// transition writes for these events; the orchestrator only fires the
+// signal. Best effort — a failed enqueue logs and moves on so terminal
+// session bookkeeping isn't held hostage by Linear-side hiccups.
+//
+// Routes through linear.EnqueueMilestone so the queue/priority/dedupe-key
+// shape stays consistent with the PR-event and no-changes paths.
+func (o *Orchestrator) enqueueLinearMilestone(ctx context.Context, run *models.Session, event string) {
+	if o == nil || run == nil {
+		return
+	}
+	linear.EnqueueMilestone(ctx, o.jobs, o.logger, run.OrgID, run.ID, event, 0)
 }
 
 // failRunWithCategory marks a run as failed with a structured failure category,
@@ -2999,10 +3072,39 @@ func (o *Orchestrator) handleCancelledSession(ctx context.Context, session *mode
 	}
 }
 
+// snapshotSessionOnTurnSuccess wraps snapshotSession with the guard the
+// "normal completion" paths (RunAgent / ContinueSession success branches)
+// need: skip the snapshot when result.ExitCode != 0. That's the signal that
+// the agent CLI — and likely the sandbox runtime under it — crashed mid-turn,
+// leaving the workspace incoherent.
+//
+// The cancel and policy-stop paths intentionally do NOT use this wrapper:
+// their non-zero exits just mean the agent caught the signal and shut down
+// cleanly, so the workspace state is still valid. Calling this only on the
+// success path keeps both invariants:
+//   - graceful stops still produce a resumable checkpoint
+//   - a sandbox crash never overwrites a known-good prior snapshot with a
+//     truncated archive (incident: a 298-byte garbage upload bricked an
+//     active session for the rest of its lifetime)
+func (o *Orchestrator) snapshotSessionOnTurnSuccess(ctx context.Context, session *models.Session, sandbox *Sandbox, result *AgentResult, log zerolog.Logger) (string, int64, error) {
+	if result != nil && result.ExitCode != 0 {
+		log.Warn().
+			Int("exit_code", result.ExitCode).
+			Str("agent_error", truncateForLog(result.Error, 256)).
+			Msg("agent exited non-zero on the success path; skipping snapshot to preserve any prior good checkpoint")
+		return "", 0, nil
+	}
+	return o.snapshotSession(ctx, session, sandbox, result)
+}
+
 // snapshotSession snapshots the sandbox workspace to object storage for multi-turn support.
 // If snapshots are not configured, this is a no-op. This only saves the snapshot
 // and updates sandbox state — it does NOT change session status or call UpdateTurnComplete.
 // result is unused but kept in the signature for future extensibility (e.g. metadata).
+//
+// Most callers should use snapshotSessionOnTurnSuccess; only the cancel and
+// policy-stop paths legitimately bypass the exit-code guard because they
+// know the non-zero exit was a graceful shutdown.
 func (o *Orchestrator) snapshotSession(ctx context.Context, session *models.Session, sandbox *Sandbox, result *AgentResult) (string, int64, error) {
 	if o.snapshots == nil {
 		return "", 0, nil
@@ -3037,6 +3139,22 @@ func (r *countingReadCloser) Read(p []byte) (int, error) {
 	n, err := r.ReadCloser.Read(p)
 	r.n += int64(n)
 	return n, err
+}
+
+// truncateForLog clips s to at most max bytes (rune-safe), appending "…"
+// when truncation occurs. Used when an unbounded user/CLI string is included
+// in a structured log field.
+func truncateForLog(s string, max int) string {
+	if max <= 0 || len(s) <= max {
+		return s
+	}
+	// Trim back to the previous rune boundary so we don't split a UTF-8
+	// codepoint when the cutoff lands mid-encoding.
+	cut := max
+	for cut > 0 && (s[cut]&0xC0) == 0x80 {
+		cut--
+	}
+	return s[:cut] + "…"
 }
 
 func (o *Orchestrator) handlePolicyStoppedSession(ctx context.Context, session *models.Session, sandbox *Sandbox, result *AgentResult, turnNumber int, reason StopReason, log zerolog.Logger) {
@@ -3211,8 +3329,16 @@ func slugifyForBranch(s string) string {
 	return s
 }
 
+func sessionWorkingBranch(run *models.Session, issue *models.Issue) string {
+	if run != nil && run.WorkingBranch != nil && *run.WorkingBranch != "" {
+		return *run.WorkingBranch
+	}
+	return formatWorkingBranch(run, issue)
+}
+
 // formatWorkingBranch generates a branch name for an agent session.
-// Format: 143-<short-id>-<slug> — short, flat, and descriptive.
+// Format: 143/<short-id>/<slug> so the local working branch and the PR push
+// branch stay identical across fresh runs, resumes, and PR creation.
 func formatWorkingBranch(run *models.Session, issue *models.Issue) string {
 	short := run.ID.String()[:8]
 
@@ -3227,7 +3353,7 @@ func formatWorkingBranch(run *models.Session, issue *models.Issue) string {
 		slug = "session"
 	}
 
-	return fmt.Sprintf("143-%s-%s", short, slug)
+	return fmt.Sprintf("143/%s/%s", short, slug)
 }
 
 // shellEscapeSingleQuote escapes single quotes for safe use in shell commands.

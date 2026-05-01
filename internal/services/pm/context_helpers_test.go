@@ -228,4 +228,3 @@ func TestEnrichLinearMetadata(t *testing.T) {
 		})
 	}
 }
-

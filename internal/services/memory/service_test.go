@@ -12,7 +12,7 @@ import (
 )
 
 type mockMemoryStore struct {
-	memories []models.Memory
+	memories   []models.Memory
 	reinforced []uuid.UUID
 }
 

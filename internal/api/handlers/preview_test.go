@@ -387,7 +387,7 @@ type mockPreviewProvider struct {
 	startConfig *models.PreviewConfig
 }
 
-func (m *mockPreviewProvider) StartPreview(_ context.Context, _ *agent.Sandbox, cfg *models.PreviewConfig, _ map[string]string) (*preview.PreviewHandle, error) {
+func (m *mockPreviewProvider) StartPreview(_ context.Context, _ *agent.Sandbox, cfg *models.PreviewConfig, _ map[string]string, _ preview.ServiceObserver) (*preview.PreviewHandle, error) {
 	m.startConfig = cfg
 	if m.startHandle != nil {
 		return m.startHandle, nil
@@ -544,15 +544,31 @@ func expectReserveSuccess(mock pgxmock.PgxPoolIface, sessionID, orgID, userID uu
 	return previewID
 }
 
+func previewAnyArgs(n int) []any {
+	args := make([]any, n)
+	for i := range args {
+		args[i] = pgxmock.AnyArg()
+	}
+	return args
+}
+
 // expectAbortReservationNoDestroy emits the pgxmock sequence for an Abort that
 // releases the hold without destroying a container (either the sandbox was
 // reused so hydratedContainerID is "", or the turn still holds it). Callers
 // that need the destroy path should build it inline.
 func expectAbortReservationNoDestroy(mock pgxmock.PgxPoolIface) {
-	// UpdatePreviewStatus: id, org_id, status, error (4 args).
+	// UpdatePreviewStatus(failed): parent status + child cascades in one transaction.
+	mock.ExpectBegin()
 	mock.ExpectExec("UPDATE preview_instances SET status").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectExec("UPDATE preview_services SET").
+		WithArgs(previewAnyArgs(5)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
+	mock.ExpectExec("UPDATE preview_infrastructure SET").
+		WithArgs(previewAnyArgs(5)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
+	mock.ExpectCommit()
 	// ReleasePreviewHold returns destroyNow=false because turn_holds=true.
 	mock.ExpectQuery("WITH released AS").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
@@ -861,63 +877,67 @@ var sessionRowColumns = []string{
 	"base_commit_sha", "repository_id", "diff_stats", "diff_history", "input_manifest",
 	"archived_at", "archived_by_user_id", "automation_run_id",
 	"pr_creation_state", "pr_creation_error", "diff_collected_at", "latest_diff_snapshot_id",
+	"linear_private", "linear_state_sync_disabled", "linear_identifier_hint", "linear_prepare_state",
 	"deleted_at", "git_identity_source", "git_identity_user_id", "created_at",
 }
 
-func previewSessionRow(values ...interface{}) []interface{} {
-	if len(values) == len(sessionRowColumns)-3 {
-		row := make([]interface{}, 0, len(values)+3)
-		row = append(row, values[:3]...)
-		row = append(
-			row,
-			"",
-			"",
-			"",
-		)
-		row = append(row, values[3:]...)
-		return row
+func previewSessionRow(id, orgID uuid.UUID, containerID *string, snapshotKey *string, sandboxState string) []interface{} {
+	now := time.Now()
+	byColumn := map[string]interface{}{
+		"id":                             id,
+		"primary_issue_id":               nil,
+		"org_id":                         orgID,
+		"origin":                         string(models.SessionOriginManual),
+		"interaction_mode":               string(models.SessionInteractionModeInteractive),
+		"validation_policy":              string(models.SessionValidationPolicyOnTurnComplete),
+		"agent_type":                     "claude_code",
+		"status":                         "running",
+		"autonomy_level":                 "supervised",
+		"token_mode":                     "low",
+		"risk_factors":                   []string{},
+		"container_id":                   containerID,
+		"turn_holding_container":         false,
+		"token_usage":                    json.RawMessage(`{}`),
+		"failure_next_steps":             []string{},
+		"failure_retry_advised":          false,
+		"revision_context":               json.RawMessage(`{}`),
+		"current_turn":                   0,
+		"last_activity_at":               now,
+		"sandbox_state":                  sandboxState,
+		"snapshot_key":                   snapshotKey,
+		"runtime_last_progress_type":     "",
+		"runtime_last_progress_strength": "",
+		"runtime_extension_count":        0,
+		"runtime_extension_seconds":      0,
+		"runtime_stop_reason":            "",
+		"checkpoint_kind":                "",
+		"checkpoint_capability":          "",
+		"checkpoint_size_bytes":          int64(0),
+		"recovery_state":                 "",
+		"recovery_attempt_count":         0,
+		"pr_creation_state":              "idle",
+		"pr_creation_error":              (*string)(nil),
+		"linear_private":                 false,
+		"linear_state_sync_disabled":     false,
+		"linear_identifier_hint":         (*string)(nil),
+		"linear_prepare_state":           string(models.LinearPrepareStateNone),
+		"deleted_at":                     nil,
+		"git_identity_source":            nil,
+		"git_identity_user_id":           nil,
+		"created_at":                     now,
 	}
-	return values
+	row := make([]interface{}, len(sessionRowColumns))
+	for i, col := range sessionRowColumns {
+		row[i] = byColumn[col]
+	}
+	return row
 }
 
 func sessionRowWithContainer(id, orgID uuid.UUID, containerID string) []interface{} {
-	return previewSessionRow(
-		id, nil, orgID, "claude_code", "running", "supervised", "low",
-		nil, nil, nil, []string{},
-		&containerID, nil, false, nil, nil, json.RawMessage(`{}`),
-		nil, nil, []string{}, false,
-		nil, json.RawMessage(`{}`), nil, nil, nil,
-		nil, nil, nil, nil,
-		nil, nil, nil, nil, nil,
-		0, time.Now(),
-		// sandbox_state must be "running" for the reuse branch of
-		// acquireSandbox to attach to the lingering container_id; otherwise
-		// the stale-ID guard falls through to hydrate/expired.
-		"running", nil,
-		nil,      // pending_snapshot_key
-		nil,      // pending_snapshot_set_at
-		nil,      // runtime_soft_deadline_at
-		nil,      // runtime_hard_deadline_at
-		nil,      // runtime_last_progress_at
-		"",       // runtime_last_progress_type
-		"",       // runtime_last_progress_strength
-		0,        // runtime_extension_count
-		0,        // runtime_extension_seconds
-		"",       // runtime_stop_reason
-		nil,      // runtime_graceful_stop_at
-		nil,      // checkpointed_at
-		"",       // checkpoint_kind
-		"",       // checkpoint_capability
-		int64(0), // checkpoint_size_bytes
-		nil,      // checkpoint_error
-		"",       // recovery_state
-		nil,      // recovery_queued_at
-		nil,      // recovery_started_at
-		0,        // recovery_attempt_count
-		nil, nil,
-		nil, nil, nil, nil, nil,
-		nil, nil, nil, "idle", (*string)(nil), nil, nil, nil, nil, nil, time.Now(),
-	)
+	// sandbox_state must be "running" for the reuse branch of acquireSandbox
+	// to attach to the lingering container_id; otherwise the stale-ID guard
+	// falls through to hydrate/expired.
+	return previewSessionRow(id, orgID, &containerID, nil, "running")
 }
 
 // sessionRowWithContainerAndRepo is sessionRowWithContainer plus a non-nil
@@ -939,80 +959,14 @@ func sessionRowWithContainerAndRepo(id, orgID, repoID uuid.UUID, containerID str
 // fallback precondition (snapshot_key set). Used by the zombie-reuse tests
 // where IsAlive decides which branch the handler takes.
 func sessionRowReuseWithSnapshot(id, orgID uuid.UUID, containerID string, snapshotKey *string) []interface{} {
-	return previewSessionRow(
-		id, nil, orgID, "claude_code", "running", "supervised", "low",
-		nil, nil, nil, []string{},
-		&containerID, nil, false, nil, nil, json.RawMessage(`{}`),
-		nil, nil, []string{}, false,
-		nil, json.RawMessage(`{}`), nil, nil, nil,
-		nil, nil, nil, nil,
-		nil, nil, nil, nil, nil,
-		0, time.Now(),
-		"running", snapshotKey,
-		nil,      // pending_snapshot_key
-		nil,      // pending_snapshot_set_at
-		nil,      // runtime_soft_deadline_at
-		nil,      // runtime_hard_deadline_at
-		nil,      // runtime_last_progress_at
-		"",       // runtime_last_progress_type
-		"",       // runtime_last_progress_strength
-		0,        // runtime_extension_count
-		0,        // runtime_extension_seconds
-		"",       // runtime_stop_reason
-		nil,      // runtime_graceful_stop_at
-		nil,      // checkpointed_at
-		"",       // checkpoint_kind
-		"",       // checkpoint_capability
-		int64(0), // checkpoint_size_bytes
-		nil,      // checkpoint_error
-		"",       // recovery_state
-		nil,      // recovery_queued_at
-		nil,      // recovery_started_at
-		0,        // recovery_attempt_count
-		nil, nil,
-		nil, nil, nil, nil, nil,
-		nil, nil, nil, "idle", (*string)(nil), nil, nil, nil, nil, nil, time.Now(),
-	)
+	return previewSessionRow(id, orgID, &containerID, snapshotKey, "running")
 }
 
 // sessionRowForHydrate builds a session row with no live container but a
 // configurable snapshot key and sandbox state — used to exercise the three
 // acquireSandbox branches (SNAPSHOT_EXPIRED, hydrate, NO_SANDBOX).
 func sessionRowForHydrate(id, orgID uuid.UUID, snapshotKey *string, sandboxState string) []interface{} {
-	return previewSessionRow(
-		id, nil, orgID, "claude_code", "running", "supervised", "low",
-		nil, nil, nil, []string{},
-		nil, nil, false, nil, nil, json.RawMessage(`{}`),
-		nil, nil, []string{}, false,
-		nil, json.RawMessage(`{}`), nil, nil, nil,
-		nil, nil, nil, nil,
-		nil, nil, nil, nil, nil,
-		0, time.Now(),
-		sandboxState, snapshotKey,
-		nil,      // pending_snapshot_key
-		nil,      // pending_snapshot_set_at
-		nil,      // runtime_soft_deadline_at
-		nil,      // runtime_hard_deadline_at
-		nil,      // runtime_last_progress_at
-		"",       // runtime_last_progress_type
-		"",       // runtime_last_progress_strength
-		0,        // runtime_extension_count
-		0,        // runtime_extension_seconds
-		"",       // runtime_stop_reason
-		nil,      // runtime_graceful_stop_at
-		nil,      // checkpointed_at
-		"",       // checkpoint_kind
-		"",       // checkpoint_capability
-		int64(0), // checkpoint_size_bytes
-		nil,      // checkpoint_error
-		"",       // recovery_state
-		nil,      // recovery_queued_at
-		nil,      // recovery_started_at
-		0,        // recovery_attempt_count
-		nil, nil,
-		nil, nil, nil, nil, nil,
-		nil, nil, nil, "idle", (*string)(nil), nil, nil, nil, nil, nil, time.Now(),
-	)
+	return previewSessionRow(id, orgID, nil, snapshotKey, sandboxState)
 }
 
 // fakeHydrateSnapshotStore is a minimal SnapshotStore that writes a canned
@@ -2092,11 +2046,18 @@ func TestPreviewHandler_StopPreview_Success(t *testing.T) {
 				AddRow(newActivePreviewRow(previewID, sessionID, orgID, userID, now)...),
 		)
 
-	// StopPreview calls StopPreviewWithRevocation which does Begin + StopPreview + RevokeAll + Commit.
+	// StopPreview calls StopPreviewWithRevocation which does
+	// Begin + StopPreview (instance UPDATE + child cascades) + RevokeAll + Commit.
 	mock.ExpectBegin()
 	mock.ExpectExec("UPDATE preview_instances SET status").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectExec("UPDATE preview_services SET").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
+	mock.ExpectExec("UPDATE preview_infrastructure SET").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
 	mock.ExpectExec("UPDATE preview_access_sessions SET revoked_at").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 0))

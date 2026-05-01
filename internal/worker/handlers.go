@@ -18,6 +18,7 @@ import (
 	"github.com/rs/zerolog"
 
 	"github.com/assembledhq/143/internal/db"
+	"github.com/assembledhq/143/internal/jobctx"
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/prompts"
 	"github.com/assembledhq/143/internal/services"
@@ -25,6 +26,7 @@ import (
 	"github.com/assembledhq/143/internal/services/feedback"
 	ghservice "github.com/assembledhq/143/internal/services/github"
 	"github.com/assembledhq/143/internal/services/ingestion"
+	"github.com/assembledhq/143/internal/services/linear"
 	"github.com/assembledhq/143/internal/services/pm"
 	"github.com/assembledhq/143/internal/services/prioritization"
 	"github.com/assembledhq/143/internal/services/validation"
@@ -76,6 +78,12 @@ func RegisterHandlers(w *Worker, stores *Stores, services *Services, retentionCf
 		w.Register("audit_retention_cleanup", newAuditRetentionCleanupHandler(stores, logger))
 	}
 	w.Register("data_retention_cleanup", newDataRetentionCleanupHandler(stores, retentionCfg, logger))
+	if services != nil && services.Linear != nil {
+		w.Register("prepare_linear_primary", newPrepareLinearPrimaryHandler(services.Linear, logger))
+		w.Register("link_linear_issue", newLinkLinearIssueHandler(services.Linear, logger))
+		w.Register("refresh_linear_team_keys", newRefreshLinearTeamKeysHandler(services.Linear, logger))
+		w.Register("linear_milestone", newLinearMilestoneHandler(stores, services.Linear, logger))
+	}
 	if stores.EvalRuns != nil && stores.EvalTasks != nil {
 		w.Register("run_eval", newRunEvalHandler(stores, services, logger))
 	}
@@ -117,8 +125,9 @@ type Stores struct {
 	Repositories        *db.RepositoryStore     // nil-safe: needed for eval repo lookup
 	SessionMessages     *db.SessionMessageStore // nil-safe: needed for title regeneration
 	IssueSnapshots      *db.SessionTurnIssueSnapshotStore
-	Automations         *db.AutomationStore    // nil-safe: automations feature disabled if nil
-	AutomationRuns      *db.AutomationRunStore // nil-safe: automations feature disabled if nil
+	Automations         *db.AutomationStore       // nil-safe: automations feature disabled if nil
+	AutomationRuns      *db.AutomationRunStore    // nil-safe: automations feature disabled if nil
+	SessionIssueLinks   *db.SessionIssueLinkStore // nil-safe: needed for Linear milestones
 }
 
 // MemoryReinforcer retrieves and reinforces memories for a repo.
@@ -155,6 +164,7 @@ type Services struct {
 	LLM             llmClient                     // nil-safe: needed for eval LLM judge grading
 	GitHub          agent.GitHubTokenProvider     // nil-safe: needed for eval repo cloning
 	TitleService    *services.SessionTitleService // nil-safe: session title regeneration
+	Linear          *linear.Service               // nil-safe: Linear session-linking disabled if nil
 	// SandboxAuthShutdown drains the per-session GitHub credential socket
 	// listeners. nil when no SandboxAuthSocketDir is configured (local
 	// dev). Called from cmd/server graceful shutdown after the API drains
@@ -830,6 +840,30 @@ func newRunAgentHandler(stores *Stores, services *Services, logger zerolog.Logge
 			return fmt.Errorf("fetch agent run: %w", err)
 		}
 
+		// Gate turn 1 on Linear pre-start preparation. If a session linked a
+		// Linear primary issue but its context isn't ready, hold the run in
+		// pending and retry — design 62 §"Pre-start preparation step" makes
+		// this strictly stronger than "link it later if we can": the first
+		// agent turn either has the linked issue's details or doesn't start.
+		switch run.LinearPrepareState {
+		case models.LinearPrepareStatePending:
+			// Try later; the prepare worker will mark this ready or failed.
+			// The fixed 5s wait avoids busy-spinning the queue against
+			// exponential backoff — design 62 promises a short-lived
+			// preparing state, not minutes-long waits.
+			d := 5 * time.Second
+			return &RetryableError{
+				Err:        fmt.Errorf("waiting for linear pre-start preparation"),
+				RetryAfter: &d,
+			}
+		case models.LinearPrepareStateFailed:
+			// Don't start blind. Surface to the user via the recoverable
+			// failure path so they can retry.
+			errMsg := "Linear context could not be loaded. Retry the session to fetch it again."
+			_ = stores.Sessions.UpdateResult(ctx, orgID, runID, "failed", &models.SessionResult{Error: &errMsg})
+			return &FatalError{Err: fmt.Errorf("linear pre-start preparation failed")}
+		}
+
 		// Apply the per-session wall-clock timeout at the handler boundary so
 		// the orchestrator exits cleanly when a container is killed or
 		// ExecStream hangs. HandlerCleanupBuffer gives the orchestrator slack
@@ -1142,6 +1176,14 @@ func newOpenPRHandler(stores *Stores, services *Services, logger zerolog.Logger)
 			return fmt.Errorf("fetch agent run: %w", err)
 		}
 
+		if stores.SessionIssueLinks != nil {
+			links, err := stores.SessionIssueLinks.ListBySession(ctx, orgID, runID)
+			if err != nil {
+				return fmt.Errorf("hydrate linked issues for open_pr: %w", err)
+			}
+			run.LinkedIssues = links
+		}
+
 		logger.Info().
 			Str("session_id", runID.String()).
 			Str("org_id", orgID.String()).
@@ -1191,6 +1233,16 @@ func newOpenPRHandler(stores *Stores, services *Services, logger zerolog.Logger)
 			msg := userFacingPRError(createErr)
 			if stateErr := stores.Sessions.UpdatePRCreationState(ctx, orgID, runID, models.PRCreationStateFailed, msg); stateErr != nil {
 				logger.Error().Err(stateErr).Msg("failed to mark PR creation as failed")
+			}
+			// "no changes to push" is a terminal-but-non-failure outcome:
+			// the session ran to completion but produced nothing worth
+			// shipping. Tell the Linear linker so the attachment subtitle
+			// stops saying "Running" forever and the audit log records the
+			// terminal state. Other PR creation errors are not fired as
+			// `failed` here because failRun in the orchestrator is the
+			// canonical entry point for those.
+			if errors.Is(createErr, ghservice.ErrNoChanges) {
+				linear.EnqueueMilestone(ctx, stores.Jobs, logger, orgID, runID, "ended_no_pr", 0)
 			}
 			if shouldDeadLetterPRError(createErr) {
 				return &FatalError{Err: createErr}
@@ -2321,4 +2373,266 @@ func shellSingleQuote(s string) string {
 // JSON fence in the template is not interpreted as command substitution.
 func bootstrapAgentCommand(prompt string) string {
 	return fmt.Sprintf("claude --print %s 2>&1", shellSingleQuote(prompt))
+}
+
+// prepare_linear_primary handler resolves the primary Linear issue for a
+// session that came through CreateManual when inline resolution either
+// missed the latency budget or hit a transient error. Marks the session
+// linear_prepare_state=ready so run_agent unblocks.
+func newPrepareLinearPrimaryHandler(svc *linear.Service, logger zerolog.Logger) JobHandler {
+	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
+		var input struct {
+			OrgID       string           `json:"org_id"`
+			SessionID   string           `json:"session_id"`
+			Identifiers []string         `json:"identifiers"`
+			Refs        []linear.LinkRef `json:"refs,omitempty"`
+			UserID      string           `json:"user_id,omitempty"`
+		}
+		if err := json.Unmarshal(payload, &input); err != nil {
+			return fmt.Errorf("unmarshal prepare_linear_primary payload: %w", err)
+		}
+		orgID, err := parseOrgID(input.OrgID, ctx)
+		if err != nil {
+			return err
+		}
+		sessionID, err := uuid.Parse(input.SessionID)
+		if err != nil {
+			return fmt.Errorf("parse session ID: %w", err)
+		}
+		var userID *uuid.UUID
+		if input.UserID != "" {
+			if parsed, err := uuid.Parse(input.UserID); err == nil {
+				userID = &parsed
+			} else {
+				// Audit attribution (added_by_user_id, "linked by you" filters)
+				// drops to nil here, so log loudly rather than silently
+				// degrading. The job still proceeds because the link is
+				// strictly more useful than a parse-error retry loop.
+				logger.Warn().Err(err).
+					Str("session_id", sessionID.String()).
+					Str("user_id_raw", input.UserID).
+					Msg("prepare_linear_primary: malformed user_id in payload; proceeding with nil attribution")
+			}
+		}
+		refs := input.Refs
+		if len(refs) == 0 {
+			refs = linearRefsFromIdentifiers(input.Identifiers)
+		}
+		jobctx.RegisterDeadLetterHook(ctx, func(hookCtx context.Context, _ error) {
+			if err := svc.MarkLinearPrepareFailed(hookCtx, orgID, sessionID); err != nil {
+				logger.Warn().Err(err).
+					Str("session_id", sessionID.String()).
+					Msg("prepare_linear_primary dead-letter hook failed to mark prepare state failed")
+			}
+		})
+		if err := svc.PrepareLinearPrimaryRefs(ctx, orgID, sessionID, refs, userID); err != nil {
+			logger.Warn().Err(err).Str("session_id", sessionID.String()).Msg("prepare_linear_primary failed")
+			return &RetryableError{Err: err}
+		}
+		return nil
+	}
+}
+
+// link_linear_issue handler is the post-create catch-up path. It runs
+// detection again over the bounded inputs, links any additional refs as
+// related, and is idempotent on (session_id, source_inputs_hash).
+func newLinkLinearIssueHandler(svc *linear.Service, logger zerolog.Logger) JobHandler {
+	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
+		var input struct {
+			OrgID       string           `json:"org_id"`
+			SessionID   string           `json:"session_id"`
+			Identifiers []string         `json:"identifiers"`
+			Refs        []linear.LinkRef `json:"refs,omitempty"`
+			UserID      string           `json:"user_id,omitempty"`
+		}
+		if err := json.Unmarshal(payload, &input); err != nil {
+			return fmt.Errorf("unmarshal link_linear_issue payload: %w", err)
+		}
+		orgID, err := parseOrgID(input.OrgID, ctx)
+		if err != nil {
+			return err
+		}
+		sessionID, err := uuid.Parse(input.SessionID)
+		if err != nil {
+			return fmt.Errorf("parse session ID: %w", err)
+		}
+		var userID *uuid.UUID
+		if input.UserID != "" {
+			if parsed, err := uuid.Parse(input.UserID); err == nil {
+				userID = &parsed
+			} else {
+				// See prepare_linear_primary handler for the rationale on
+				// logging instead of failing — same trade-off applies here.
+				logger.Warn().Err(err).
+					Str("session_id", sessionID.String()).
+					Str("user_id_raw", input.UserID).
+					Msg("link_linear_issue: malformed user_id in payload; proceeding with nil attribution")
+			}
+		}
+		refs := input.Refs
+		if len(refs) == 0 {
+			refs = linearRefsFromIdentifiers(input.Identifiers)
+		}
+		if err := svc.LinkRelatedLinearRefs(ctx, orgID, sessionID, refs, userID); err != nil {
+			logger.Warn().Err(err).Str("session_id", sessionID.String()).Msg("link_linear_issue failed")
+			return &RetryableError{Err: err}
+		}
+		return nil
+	}
+}
+
+func linearRefsFromIdentifiers(identifiers []string) []linear.LinkRef {
+	refs := make([]linear.LinkRef, 0, len(identifiers))
+	for _, ident := range identifiers {
+		refs = append(refs, linear.LinkRef{Identifier: ident})
+	}
+	return refs
+}
+
+// linear_milestone handler fires the Linear writes (attachment + rolling
+// comment + state-sync transitions under guards) for a session milestone.
+// Decoupled from the synchronous PR webhook path so retries are cheap and
+// rate-limit failures don't cascade to GitHub event handling.
+func newLinearMilestoneHandler(stores *Stores, svc *linear.Service, logger zerolog.Logger) JobHandler {
+	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
+		var input struct {
+			OrgID     string `json:"org_id"`
+			SessionID string `json:"session_id"`
+			Event     string `json:"event"`
+			PRNumber  int    `json:"pr_number,omitempty"`
+		}
+		if err := json.Unmarshal(payload, &input); err != nil {
+			return fmt.Errorf("unmarshal linear_milestone payload: %w", err)
+		}
+		orgID, err := parseOrgID(input.OrgID, ctx)
+		if err != nil {
+			return err
+		}
+		sessionID, err := uuid.Parse(input.SessionID)
+		if err != nil {
+			return fmt.Errorf("parse session ID: %w", err)
+		}
+		session, err := stores.Sessions.GetByID(ctx, orgID, sessionID)
+		if err != nil {
+			return fmt.Errorf("fetch session: %w", err)
+		}
+		// Hydrate linked issues so HandleMilestone can pick the primary
+		// link. SessionStore.GetByID doesn't include them by default.
+		if stores.SessionIssueLinks != nil {
+			if links, listErr := stores.SessionIssueLinks.ListBySession(ctx, orgID, sessionID); listErr == nil {
+				session.LinkedIssues = links
+			} else {
+				return fmt.Errorf("list linear session issue links: %w", listErr)
+			}
+		}
+		var primary *models.SessionIssueLink
+		for i := range session.LinkedIssues {
+			if session.LinkedIssues[i].Role == models.SessionIssueLinkRolePrimary {
+				primary = &session.LinkedIssues[i]
+				break
+			}
+		}
+		if primary == nil {
+			// No primary link at all — log so operators chasing "why
+			// didn't Linear update?" don't have to grep the worker for
+			// silence. Common when the link was removed before the
+			// milestone fired; benign.
+			logger.Info().Str("session_id", sessionID.String()).Msg("linear_milestone: no primary link; skipping")
+			return nil
+		}
+		// Resolve the Linear external ID + identifier from the issue.
+		issue, err := stores.Issues.GetByID(ctx, orgID, primary.IssueID)
+		if err != nil {
+			return fmt.Errorf("fetch primary linear issue: %w", err)
+		}
+		if issue.Source != models.IssueSourceLinear {
+			// The primary link points at a non-Linear issue (data drift —
+			// usually means the issue was re-sourced). Log loudly: this
+			// shouldn't happen for a job dispatched as `linear_milestone`,
+			// and silent return makes operator debugging painful.
+			logger.Warn().
+				Str("session_id", sessionID.String()).
+				Str("issue_id", primary.IssueID.String()).
+				Str("issue_source", string(issue.Source)).
+				Msg("linear_milestone: primary issue is not a Linear issue; skipping")
+			return nil
+		}
+		identifier := ""
+		if primary.ExternalID != nil {
+			identifier = *primary.ExternalID
+		}
+		if identifier == "" {
+			identifier = issue.ExternalID
+		}
+
+		// SessionURL is built inside the linear.Service from its configured
+		// AppBaseURL — the worker doesn't have the FRONTEND_URL plumbed
+		// here and would otherwise post a relative path that Linear renders
+		// as plain text.
+		event := linear.MilestoneEvent(input.Event)
+		in := linear.MilestoneInput{
+			Event:      event,
+			Session:    &session,
+			Link:       *primary,
+			IssueID:    issue.ExternalID,
+			PRNumber:   input.PRNumber,
+			IssueIdent: identifier,
+		}
+		if err := svc.HandleMilestone(ctx, in); err != nil {
+			logger.Warn().Err(err).Str("session_id", sessionID.String()).Msg("HandleMilestone failed")
+			return mapLinearWriteErrorToRetry(err)
+		}
+		if err := svc.HandleStateTransition(ctx, in); err != nil {
+			logger.Warn().Err(err).Str("session_id", sessionID.String()).Msg("HandleStateTransition failed")
+			// State transitions are recorded in the event log even when
+			// they skip; rate limits are the one case we *do* want to
+			// retry, otherwise the audit trail says "skipped" forever.
+			if retry := mapLinearWriteErrorToRetry(err); retry != nil {
+				return retry
+			}
+		}
+		return nil
+	}
+}
+
+// mapLinearWriteErrorToRetry returns a RetryableError with a Retry-After
+// hint when the underlying Linear API call hit a 429 rate limit. All other
+// errors return as-is (worker will use default exponential backoff).
+func mapLinearWriteErrorToRetry(err error) error {
+	var rate *linear.RateLimitError
+	if errors.As(err, &rate) {
+		delay := 30 * time.Second
+		if d, parseErr := strconv.Atoi(rate.RetryAfter); parseErr == nil && d > 0 {
+			delay = time.Duration(d) * time.Second
+		}
+		return &RetryableError{Err: err, RetryAfter: &delay}
+	}
+	if errors.Is(err, linear.ErrUnauthorized) {
+		// Token expired — let the retry happen at default backoff so the
+		// integration health check has time to refresh.
+		return &RetryableError{Err: err}
+	}
+	return &RetryableError{Err: err}
+}
+
+// refresh_linear_team_keys handler refreshes the per-org team-key cache.
+// Scheduled every 24h and after OAuth install. Idempotent.
+func newRefreshLinearTeamKeysHandler(svc *linear.Service, logger zerolog.Logger) JobHandler {
+	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
+		var input struct {
+			OrgID string `json:"org_id"`
+		}
+		if err := json.Unmarshal(payload, &input); err != nil {
+			return fmt.Errorf("unmarshal refresh_linear_team_keys payload: %w", err)
+		}
+		orgID, err := parseOrgID(input.OrgID, ctx)
+		if err != nil {
+			return err
+		}
+		if err := svc.RefreshTeamKeys(ctx, orgID); err != nil {
+			logger.Warn().Err(err).Str("org_id", orgID.String()).Msg("refresh_linear_team_keys failed")
+			return &RetryableError{Err: err}
+		}
+		return nil
+	}
 }

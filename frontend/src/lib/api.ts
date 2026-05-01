@@ -337,11 +337,11 @@ export const api = {
     getQuestions: (sessionId: string) => get<import('./types').ListResponse<import('./types').SessionQuestion>>(`/api/v1/sessions/${sessionId}/questions`),
     answerQuestion: (sessionId: string, questionId: string, answer: string) =>
       post<import('./types').SingleResponse<import('./types').SessionQuestion>>(`/api/v1/sessions/${sessionId}/questions/${questionId}/answer`, { answer }),
-    createManual: (body: { message: string; images?: string[]; references?: import('./types').SessionInputReference[]; commands?: import('./types').SessionInputCommand[]; agent_type?: string; model?: string; reasoning_effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max'; autonomy_level?: string; token_mode?: string; repository_id?: string; branch?: string }) =>
+    createManual: (body: { message: string; images?: string[]; references?: import('./types').SessionInputReference[]; commands?: import('./types').SessionInputCommand[]; agent_type?: string; model?: string; reasoning_effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max'; autonomy_level?: string; token_mode?: string; repository_id?: string; branch?: string; linear_private?: boolean; linear_state_sync_disabled?: boolean }) =>
       post<import('./types').SingleResponse<import('./types').Session>>('/api/v1/sessions/manual', body),
     getMessages: (sessionId: string) =>
       get<import('./types').ListResponse<import('./types').SessionMessage>>(`/api/v1/sessions/${sessionId}/messages`),
-    sendMessage: (sessionId: string, body: { message: string; images?: string[]; references?: import('./types').SessionInputReference[]; commands?: import('./types').SessionInputCommand[]; planMode?: boolean; model?: string }) =>
+    sendMessage: (sessionId: string, body: { message: string; images?: string[]; references?: import('./types').SessionInputReference[]; commands?: import('./types').SessionInputCommand[]; planMode?: boolean; model?: string; resolveReviewCommentIDs?: string[] }) =>
       post<import('./types').SingleResponse<import('./types').SessionMessage>>(
         `/api/v1/sessions/${sessionId}/messages`,
         {
@@ -351,6 +351,7 @@ export const api = {
           commands: body.commands && body.commands.length > 0 ? body.commands : undefined,
           plan_mode: body.planMode || undefined,
           ...(body.model ? { model: body.model } : {}),
+          resolve_review_comment_ids: body.resolveReviewCommentIDs && body.resolveReviewCommentIDs.length > 0 ? body.resolveReviewCommentIDs : undefined,
         },
       ),
     endSession: (sessionId: string) =>
@@ -388,10 +389,6 @@ export const api = {
       del(`/api/v1/sessions/${sessionId}/review-comments/${commentId}`),
     sendReviewComments: (sessionId: string) =>
       post<import('./types').SingleResponse<{ message: string; sent: boolean }>>(`/api/v1/sessions/${sessionId}/review-comments/send`),
-    getReviewCapabilities: (sessionId: string) =>
-      get<import('./types').SingleResponse<import('./types').SessionReviewCapabilities>>(`/api/v1/sessions/${sessionId}/review-capabilities`),
-    startReview: (sessionId: string, mode?: import('./types').SessionReviewMode) =>
-      post<import('./types').SingleResponse<import('./types').SessionReviewResponse>>(`/api/v1/sessions/${sessionId}/review`, mode ? { mode } : {}),
     listFiles: (sessionId: string, path?: string) => {
       const params = new URLSearchParams();
       if (path) params.set('path', path);
