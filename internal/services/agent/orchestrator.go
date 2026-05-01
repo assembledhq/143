@@ -1369,7 +1369,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 			if sandbox.Metadata == nil {
 				sandbox.Metadata = make(map[string]string)
 			}
-			sandbox.Metadata["base_commit_sha"] = baseCommitSHA
+			sandbox.Metadata[SandboxMetadataBaseCommitSHA] = baseCommitSHA
 			run.BaseCommitSHA = &baseCommitSHA
 			if dbErr := o.sessions.UpdateBaseCommitSHA(ctx, run.OrgID, run.ID, baseCommitSHA); dbErr != nil {
 				log.Warn().Err(dbErr).Str("base_commit_sha", baseCommitSHA).Msg("failed to persist base commit sha")
@@ -1953,6 +1953,22 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 			)
 			return fmt.Errorf("create sandbox: %w", err)
 		}
+	}
+	// Re-populate sandbox.Metadata["base_commit_sha"] from the DB so that
+	// sessiondiff.Collect can compute `git diff <base> -- .` (the cumulative
+	// session diff against the immutable base) instead of falling back to a
+	// plain `git diff` against the index. Without this, any continue turn
+	// run on a clean working tree (post-PR-push, post-merge) would collect
+	// an empty diff and overwrite the persisted authoritative diff, blanking
+	// out the Changes tab on the session page even though the PR clearly
+	// has changes. RunAgent sets this on the initial clone; the three setup
+	// branches above (reuse, hydrate, fresh-clone-on-continue) all leave
+	// Metadata empty, so we fix it here once for every continue path.
+	if session.BaseCommitSHA != nil && *session.BaseCommitSHA != "" {
+		if sandbox.Metadata == nil {
+			sandbox.Metadata = make(map[string]string)
+		}
+		sandbox.Metadata[SandboxMetadataBaseCommitSHA] = *session.BaseCommitSHA
 	}
 	// Record the turn hold. AcquireTurnHold uses COALESCE so it is idempotent
 	// when we reused a container (the row's container_id already matches our
