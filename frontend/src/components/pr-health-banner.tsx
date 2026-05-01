@@ -1,6 +1,6 @@
 "use client";
 
-import { AlertTriangle, CheckCircle2, ExternalLink, GitMerge, GitPullRequest, Loader2, Wrench } from "lucide-react";
+import { AlertTriangle, CheckCircle2, ExternalLink, GitMerge, GitPullRequest, Loader2, Upload, Wrench } from "lucide-react";
 
 import type { PullRequestHealthResponse } from "@/lib/types";
 import { cn } from "@/lib/utils";
@@ -17,6 +17,19 @@ import { SyncTimeText } from "@/components/sync-time-text";
 export type PRBannerAction = "fix_tests" | "resolve_conflicts" | "merge" | null;
 type PullRequestCheckStatus = NonNullable<PullRequestHealthResponse["checks"]>[number]["status"];
 
+// PushChangesAction is the descriptor the parent passes when a push-to-PR
+// button should appear in the banner's action row. The parent owns the full
+// state machine (idle/queueing/pushing/failed/retry); the banner renders
+// what it's told. Nullish means the button is hidden — render nothing.
+export type PushChangesAction = {
+  label: string;
+  disabled: boolean;
+  spinning: boolean;
+  showError: boolean;
+  title?: string;
+  onClick: () => void;
+};
+
 type PRHealthBannerProps = {
   health: PullRequestHealthResponse;
   pendingAction: PRBannerAction;
@@ -25,6 +38,7 @@ type PRHealthBannerProps = {
   onFixTests: () => void;
   onResolveConflicts: () => void;
   onMerge: () => void;
+  pushChanges?: PushChangesAction;
 };
 
 export function PRHealthBanner({
@@ -35,13 +49,15 @@ export function PRHealthBanner({
   onFixTests,
   onResolveConflicts,
   onMerge,
+  pushChanges,
 }: PRHealthBannerProps) {
   const isHealthy = !health.can_fix_tests && !health.can_resolve_conflicts;
   const orderedChecks = [...(health.checks ?? [])]
     .map((check) => ({ ...check, status: normalizeCheckStatus(check.status) }))
     .sort((a, b) => statusRank(a.status) - statusRank(b.status) || a.name.localeCompare(b.name));
   const canShowMergeButton = health.can_merge && checksAllowMerge(health.checks_confirmed, orderedChecks);
-  const hasActionableButton = health.can_resolve_conflicts || health.can_fix_tests || canShowMergeButton;
+  const hasActionableButton =
+    health.can_resolve_conflicts || health.can_fix_tests || canShowMergeButton || !!pushChanges;
   const failedChecks = orderedChecks.filter((check) => check.status === "failed").length;
   const failedSummaryLabel = orderedChecks.length > 0
     ? `${failedChecks}/${orderedChecks.length} failed`
@@ -179,6 +195,24 @@ export function PRHealthBanner({
                         <GitMerge className="mr-1.5 h-3.5 w-3.5" />
                       )}
                       {pendingAction === "merge" ? "Merging…" : "Merge"}
+                    </Button>
+                  )}
+                  {pushChanges && (
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      disabled={pushChanges.disabled || pendingAction !== null}
+                      title={pushChanges.title}
+                      onClick={pushChanges.onClick}
+                    >
+                      {pushChanges.spinning ? (
+                        <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
+                      ) : pushChanges.showError ? (
+                        <AlertTriangle className="mr-1.5 h-3.5 w-3.5" />
+                      ) : (
+                        <Upload className="mr-1.5 h-3.5 w-3.5" />
+                      )}
+                      {pushChanges.label}
                     </Button>
                   )}
                 </div>

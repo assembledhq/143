@@ -28,7 +28,6 @@ import {
   MessageSquare,
   Paperclip,
   Pencil,
-  Upload,
 } from "lucide-react";
 import { notify as toast } from "@/lib/notify";
 import { Badge } from "@/components/ui/badge";
@@ -2539,9 +2538,10 @@ export function SessionDetailContent({ id }: { id: string }) {
   }
 
   // Push-changes button derived state. Mirrors the PR creation block above
-  // but operates on session.pr_push_state. Shown next to "View PR" when the
-  // session has an open PR; the backend exits cleanly with "no changes" if
-  // there is nothing to push, so we don't gate on a frontend-side dirty
+  // but operates on session.pr_push_state. Rendered inside the PR health
+  // banner alongside Resolve conflicts / Fix tests / Merge so all PR-level
+  // actions live in one place; the backend exits cleanly with "no changes"
+  // if there is nothing to push, so we don't gate on a frontend-side dirty
   // check.
   const pushAvailable = hasPR && prStatus === "open";
   const pushState = session.pr_push_state;
@@ -2657,27 +2657,6 @@ export function SessionDetailContent({ id }: { id: string }) {
                     PR closed
                   </Badge>
                 )}
-                {showPushAction && (
-                  <DisabledTooltip disabled={pushActionDisabled} content={pushActionTitle}>
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      className="h-7 text-xs gap-1.5"
-                      disabled={pushActionDisabled}
-                      title={pushActionTitle}
-                      onClick={() => pushChangesMutation.mutate(undefined)}
-                    >
-                      {pushActionSpinning ? (
-                        <Loader2 className="h-3 w-3 animate-spin" />
-                      ) : pushState === "failed" || localPushActionError ? (
-                        <AlertTriangle className="h-3 w-3" />
-                      ) : (
-                        <Upload className="h-3 w-3" />
-                      )}
-                      {pushActionLabel}
-                    </Button>
-                  </DisabledTooltip>
-                )}
                 <a href={prData.data.github_pr_url} target="_blank" rel="noopener noreferrer">
                   <Button variant="outline" size="sm" className="h-7 text-xs gap-1.5">
                     <ExternalLink className="h-3 w-3" />
@@ -2748,6 +2727,14 @@ export function SessionDetailContent({ id }: { id: string }) {
                 onFixTests={() => startRepairMutation.mutate("fix_tests")}
                 onResolveConflicts={() => startRepairMutation.mutate("resolve_conflicts")}
                 onMerge={handleMergeAction}
+                pushChanges={showPushAction ? {
+                  label: pushActionLabel,
+                  disabled: pushActionDisabled,
+                  spinning: pushActionSpinning,
+                  showError: pushState === "failed" || !!localPushActionError,
+                  title: pushActionTitle,
+                  onClick: () => pushChangesMutation.mutate(undefined),
+                } : undefined}
               />
             ) : isPRHealthLoading ? (
               <Card className="border-border/60">
