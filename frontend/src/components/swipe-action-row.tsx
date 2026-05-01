@@ -204,6 +204,10 @@ export function SwipeActionRow({
     close();
   };
 
+  const handleTouchCancel = () => {
+    close();
+  };
+
   const state =
     isTouchDevice && offset > 0
       ? isCommitted
@@ -223,7 +227,7 @@ export function SwipeActionRow({
         onTouchStart: handleTouchStart,
         onTouchMove: handleTouchMove,
         onTouchEnd: handleTouchEnd,
-        onTouchCancel: handleTouchEnd,
+        onTouchCancel: handleTouchCancel,
         onClickCapture: (event: React.MouseEvent<HTMLDivElement>) => {
           if (offset === 0) return;
           event.preventDefault();
