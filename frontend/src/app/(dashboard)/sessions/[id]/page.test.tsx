@@ -52,13 +52,13 @@ class MockEventSource {
   close = vi.fn();
   dispatchEvent = vi.fn(() => true);
 }
-beforeAll(() => {
-  global.EventSource = MockEventSource as unknown as typeof EventSource;
+
+function setMobileViewport(matches: boolean) {
   Object.defineProperty(window, 'matchMedia', {
     writable: true,
     configurable: true,
     value: vi.fn().mockImplementation((query: string) => ({
-      matches: false,
+      matches: query === "(max-width: 767px)" ? matches : false,
       media: query,
       onchange: null,
       addListener: vi.fn(),
@@ -68,6 +68,11 @@ beforeAll(() => {
       dispatchEvent: vi.fn(),
     })),
   });
+}
+
+beforeAll(() => {
+  global.EventSource = MockEventSource as unknown as typeof EventSource;
+  setMobileViewport(false);
 });
 
 afterEach(() => {
@@ -78,6 +83,7 @@ afterEach(() => {
   vi.useRealTimers();
   window.localStorage.clear();
   vi.restoreAllMocks();
+  setMobileViewport(false);
 });
 
 function getChatScroller(container: HTMLElement): HTMLDivElement {
@@ -3678,6 +3684,36 @@ describe('SessionDetailPage', () => {
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
     await screen.findByPlaceholderText('Send a follow-up message...');
     // Model override selector should be present
+    expect(screen.getByLabelText('Model override')).toBeInTheDocument();
+  });
+
+  it('uses a mobile settings sheet for the resumed-session composer on small screens', async () => {
+    const idleSession: Session = {
+      ...mockSessions[0],
+      agent_type: 'claude_code',
+      status: 'idle',
+      completed_at: undefined,
+      current_turn: 1,
+      sandbox_state: 'snapshotted',
+    };
+
+    setMobileViewport(true);
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({ data: idleSession } satisfies SingleResponse<Session>);
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+    await screen.findByPlaceholderText('Send a follow-up message...');
+
+    expect(screen.getByRole('button', { name: 'Session settings' })).toBeInTheDocument();
+    expect(screen.queryByLabelText('Model override')).not.toBeInTheDocument();
+
+    const user = userEvent.setup();
+    await user.click(screen.getByRole('button', { name: 'Session settings' }));
+
+    expect(await screen.findByRole('dialog', { name: 'Session settings' })).toBeInTheDocument();
     expect(screen.getByLabelText('Model override')).toBeInTheDocument();
   });
 

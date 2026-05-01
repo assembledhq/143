@@ -58,9 +58,12 @@ import {
 import {
   Sheet,
   SheetContent,
+  SheetDescription,
+  SheetHeader,
   SheetTitle,
 } from "@/components/ui/sheet";
 import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { ChatTimeline } from "@/components/chat-timeline";
 import { SessionComposerTriggerPicker, flattenGroups, type TriggerPickerGroup, type TriggerPickerPosition } from "@/components/session-composer-trigger-picker";
@@ -108,6 +111,7 @@ import { PRHealthBanner } from "@/components/pr-health-banner";
 import { ReviewButton } from "@/components/review-button";
 import { MobileBackButton } from "@/components/mobile-back-button";
 import { useAuth } from "@/hooks/use-auth";
+import { useMediaQuery } from "@/hooks/use-media-query";
 import { prMergedAccent } from "@/lib/pr-status-styles";
 import { cn, sessionTitle, formatTimeAgo } from "@/lib/utils";
 import { activeSet } from "@/lib/session-status-groups";
@@ -737,6 +741,8 @@ function SessionComposer({
   const [selectedTriggerIndex, setSelectedTriggerIndex] = useState(0);
   const [triggerDismissed, setTriggerDismissed] = useState(false);
   const [pickerPosition, setPickerPosition] = useState<TriggerPickerPosition | null>(null);
+  const [mobileSettingsOpen, setMobileSettingsOpen] = useState(false);
+  const isMobile = useMediaQuery("(max-width: 767px)");
 
   const activeTrigger = useMemo(
     () => findActiveTrigger(message, caretPosition, COMPOSER_TRIGGER_SPECS),
@@ -969,6 +975,57 @@ function SessionComposer({
       : firstError
         ? "An error occurred"
         : null;
+  const modelSummary = selectedModel || "Default model";
+  const modeSummary = isClaudeCode && canSendMessage ? (planMode ? "Plan mode" : "Chat mode") : null;
+  const commentSummary = openComments.length > 0
+    ? `${openComments.length} comment${openComments.length > 1 ? "s" : ""} attached`
+    : null;
+
+  const settingsControls = (
+    <div className="space-y-4">
+      {availableModels.length > 0 && (
+        <div className="space-y-2">
+          <Label className="text-xs uppercase tracking-[0.14em] text-muted-foreground">Model</Label>
+          <Select value={selectedModel} onValueChange={onSelectedModelChange}>
+            <SelectTrigger className="h-11 rounded-xl border-border/70 bg-background text-sm" aria-label="Model override">
+              <SelectValue placeholder="Default model" />
+            </SelectTrigger>
+            <SelectContent>
+              {availableModels.map((model) => (
+                <SelectItem key={model} value={model}>
+                  {model}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+      )}
+
+      {isClaudeCode && canSendMessage && (
+        <div className="space-y-2">
+          <Label className="text-xs uppercase tracking-[0.14em] text-muted-foreground">Mode</Label>
+          <div className="grid grid-cols-2 gap-2">
+            <Button
+              type="button"
+              variant={planMode ? "outline" : "default"}
+              className="h-10 rounded-xl"
+              onClick={() => onPlanModeChange(false)}
+            >
+              Chat
+            </Button>
+            <Button
+              type="button"
+              variant={planMode ? "default" : "outline"}
+              className="h-10 rounded-xl"
+              onClick={() => onPlanModeChange(true)}
+            >
+              Plan
+            </Button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
 
   return (
     <>
@@ -1138,20 +1195,171 @@ function SessionComposer({
             className="px-3 pb-2"
           />
 
-          <div className="flex items-center gap-1 px-2 pb-2">
-            <DisabledTooltip disabled={!canSendMessage || isUploading} content={attachDisabledReason}>
-              <Button
-                type="button"
-                size="icon"
-                variant="ghost"
-                className="h-8 w-8 shrink-0 rounded-lg text-muted-foreground hover:text-foreground"
-                title="Attach files or images"
-                disabled={!canSendMessage || isUploading}
-                onClick={() => uploadInputRef.current?.click()}
-              >
-                {isUploading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Paperclip className="h-4 w-4" />}
-              </Button>
-            </DisabledTooltip>
+          <div className="px-2 pb-2">
+            {isMobile ? (
+              <>
+                <div className="flex items-center gap-2">
+                  <DisabledTooltip disabled={!canSendMessage || isUploading} content={attachDisabledReason}>
+                    <Button
+                      type="button"
+                      size="icon"
+                      variant="ghost"
+                      className="h-8 w-8 shrink-0 rounded-lg text-muted-foreground hover:text-foreground"
+                      title="Attach files or images"
+                      disabled={!canSendMessage || isUploading}
+                      onClick={() => uploadInputRef.current?.click()}
+                    >
+                      {isUploading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Paperclip className="h-4 w-4" />}
+                    </Button>
+                  </DisabledTooltip>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    aria-label="Session settings"
+                    className="h-8 rounded-full border border-border/60 bg-background/70 px-3 text-xs text-foreground shadow-sm hover:bg-background"
+                    onClick={() => setMobileSettingsOpen(true)}
+                  >
+                    <ClipboardList className="mr-1.5 h-3.5 w-3.5" />
+                    Settings
+                  </Button>
+                  <div className="ml-auto flex items-center gap-1">
+                    {isRunning ? (
+                      <DisabledTooltip disabled={cancelPending} content={cancelDisabledReason}>
+                        <Button
+                          size="icon"
+                          variant="outline"
+                          className="h-8 w-8 shrink-0 rounded-lg"
+                          title="Cancel session"
+                          disabled={cancelPending}
+                          onClick={onCancelSession}
+                        >
+                          <Square className="h-3 w-3" />
+                        </Button>
+                      </DisabledTooltip>
+                    ) : (
+                      <DisabledTooltip disabled={sendDisabled} content={sendDisabledReason}>
+                        <Button
+                          size="icon"
+                          variant={planMode ? "outline" : "default"}
+                          className={cn("h-8 w-8 shrink-0 rounded-lg", planMode && "border-amber-300 dark:border-amber-700 text-amber-700 dark:text-amber-400 hover:bg-amber-50 dark:hover:bg-amber-950/30")}
+                          title={planMode ? "Send plan request" : "Send message"}
+                          disabled={sendDisabled}
+                          onClick={onSend}
+                        >
+                          {sendPending ? (
+                            <Loader2 className="h-4 w-4 animate-spin" />
+                          ) : planMode ? (
+                            <ClipboardList className="h-4 w-4" />
+                          ) : (
+                            <ArrowUp className="h-4 w-4" />
+                          )}
+                        </Button>
+                      </DisabledTooltip>
+                    )}
+                  </div>
+                </div>
+                <div className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
+                  <span className="font-medium text-foreground">{modelSummary}</span>
+                  {modeSummary ? (
+                    <>
+                      <span aria-hidden="true">•</span>
+                      <span>{modeSummary}</span>
+                    </>
+                  ) : null}
+                  {commentSummary ? (
+                    <>
+                      <span aria-hidden="true">•</span>
+                      <span>{commentSummary}</span>
+                    </>
+                  ) : null}
+                </div>
+              </>
+            ) : (
+              <div className="flex items-center gap-1">
+                <DisabledTooltip disabled={!canSendMessage || isUploading} content={attachDisabledReason}>
+                  <Button
+                    type="button"
+                    size="icon"
+                    variant="ghost"
+                    className="h-8 w-8 shrink-0 rounded-lg text-muted-foreground hover:text-foreground"
+                    title="Attach files or images"
+                    disabled={!canSendMessage || isUploading}
+                    onClick={() => uploadInputRef.current?.click()}
+                  >
+                    {isUploading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Paperclip className="h-4 w-4" />}
+                  </Button>
+                </DisabledTooltip>
+
+                {availableModels.length > 0 && (
+                  <Select value={selectedModel} onValueChange={onSelectedModelChange}>
+                    <SelectTrigger className="h-8 w-auto gap-1.5 border-none bg-transparent px-2 text-xs text-muted-foreground shadow-none hover:text-foreground focus:ring-0" aria-label="Model override">
+                      <SelectValue placeholder="Default model" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {availableModels.map((model) => (
+                        <SelectItem key={model} value={model}>
+                          {model}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                )}
+
+                {isClaudeCode && canSendMessage && !planMode && (
+                  <button
+                    onClick={() => onPlanModeChange(true)}
+                    className="flex items-center gap-1 h-8 px-2 text-xs text-muted-foreground hover:text-foreground transition-colors rounded-md"
+                    title="Switch to plan mode (Shift+Tab)"
+                  >
+                    <ClipboardList className="h-3.5 w-3.5" />
+                    <span>Plan</span>
+                  </button>
+                )}
+
+                {openComments.length > 0 && (
+                  <span className="text-xs text-muted-foreground">
+                    {openComments.length} comment{openComments.length > 1 ? "s" : ""} attached
+                  </span>
+                )}
+
+                <div className="ml-auto flex items-center gap-1">
+                  {isRunning ? (
+                    <DisabledTooltip disabled={cancelPending} content={cancelDisabledReason}>
+                      <Button
+                        size="icon"
+                        variant="outline"
+                        className="h-8 w-8 shrink-0 rounded-lg"
+                        title="Cancel session"
+                        disabled={cancelPending}
+                        onClick={onCancelSession}
+                      >
+                        <Square className="h-3 w-3" />
+                      </Button>
+                    </DisabledTooltip>
+                  ) : (
+                    <DisabledTooltip disabled={sendDisabled} content={sendDisabledReason}>
+                      <Button
+                        size="icon"
+                        variant={planMode ? "outline" : "default"}
+                        className={cn("h-8 w-8 shrink-0 rounded-lg", planMode && "border-amber-300 dark:border-amber-700 text-amber-700 dark:text-amber-400 hover:bg-amber-50 dark:hover:bg-amber-950/30")}
+                        title={planMode ? "Send plan request" : "Send message"}
+                        disabled={sendDisabled}
+                        onClick={onSend}
+                      >
+                        {sendPending ? (
+                          <Loader2 className="h-4 w-4 animate-spin" />
+                        ) : planMode ? (
+                          <ClipboardList className="h-4 w-4" />
+                        ) : (
+                          <ArrowUp className="h-4 w-4" />
+                        )}
+                      </Button>
+                    </DisabledTooltip>
+                  )}
+                </div>
+              </div>
+            )}
             <input
               ref={uploadInputRef}
               type="file"
@@ -1160,77 +1368,26 @@ function SessionComposer({
               className="hidden"
               onChange={onUpload}
             />
-
-            {availableModels.length > 0 && (
-              <Select value={selectedModel} onValueChange={onSelectedModelChange}>
-                <SelectTrigger className="h-8 w-auto gap-1.5 border-none bg-transparent px-2 text-xs text-muted-foreground shadow-none hover:text-foreground focus:ring-0" aria-label="Model override">
-                  <SelectValue placeholder="Default model" />
-                </SelectTrigger>
-                <SelectContent>
-                  {availableModels.map((model) => (
-                    <SelectItem key={model} value={model}>
-                      {model}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            )}
-
-            {isClaudeCode && canSendMessage && !planMode && (
-              <button
-                onClick={() => onPlanModeChange(true)}
-                className="flex items-center gap-1 h-8 px-2 text-xs text-muted-foreground hover:text-foreground transition-colors rounded-md"
-                title="Switch to plan mode (Shift+Tab)"
-              >
-                <ClipboardList className="h-3.5 w-3.5" />
-                <span>Plan</span>
-              </button>
-            )}
-
-            {openComments.length > 0 && (
-              <span className="text-xs text-muted-foreground">
-                {openComments.length} comment{openComments.length > 1 ? "s" : ""} attached
-              </span>
-            )}
-
-            <div className="ml-auto flex items-center gap-1">
-              {isRunning ? (
-                <DisabledTooltip disabled={cancelPending} content={cancelDisabledReason}>
-                  <Button
-                    size="icon"
-                    variant="outline"
-                    className="h-8 w-8 shrink-0 rounded-lg"
-                    title="Cancel session"
-                    disabled={cancelPending}
-                    onClick={onCancelSession}
-                  >
-                    <Square className="h-3 w-3" />
-                  </Button>
-                </DisabledTooltip>
-              ) : (
-                <DisabledTooltip disabled={sendDisabled} content={sendDisabledReason}>
-                  <Button
-                    size="icon"
-                    variant={planMode ? "outline" : "default"}
-                    className={cn("h-8 w-8 shrink-0 rounded-lg", planMode && "border-amber-300 dark:border-amber-700 text-amber-700 dark:text-amber-400 hover:bg-amber-50 dark:hover:bg-amber-950/30")}
-                    title={planMode ? "Send plan request" : "Send message"}
-                    disabled={sendDisabled}
-                    onClick={onSend}
-                  >
-                    {sendPending ? (
-                      <Loader2 className="h-4 w-4 animate-spin" />
-                    ) : planMode ? (
-                      <ClipboardList className="h-4 w-4" />
-                    ) : (
-                      <ArrowUp className="h-4 w-4" />
-                    )}
-                  </Button>
-                </DisabledTooltip>
-              )}
-            </div>
           </div>
         </div>
       </div>
+
+      <Sheet open={isMobile && mobileSettingsOpen} onOpenChange={setMobileSettingsOpen}>
+        <SheetContent
+          side="bottom"
+          hideCloseButton
+          className="rounded-t-[1.75rem] border-border/70 px-4 pb-6 pt-5 sm:max-w-none"
+        >
+          <SheetHeader className="mb-4">
+            <SheetTitle className="text-base">Session settings</SheetTitle>
+            <SheetDescription>Adjust the follow-up model and mode without crowding the mobile composer.</SheetDescription>
+          </SheetHeader>
+          {settingsControls}
+          <Button type="button" className="mt-5 h-11 w-full rounded-xl" onClick={() => setMobileSettingsOpen(false)}>
+            Done
+          </Button>
+        </SheetContent>
+      </Sheet>
     </>
   );
 }
