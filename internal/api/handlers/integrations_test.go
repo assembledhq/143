@@ -396,16 +396,18 @@ func TestIntegrationHandler_HandleLinearOAuthCallback_SavesCredentialAndIntegrat
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
-// TestIntegrationHandler_HandleLinearOAuthCallback_InlineRefreshSkipsEnqueue
-// pins the two-tier refresh strategy: when the inline RefreshTeamKeys hook
-// succeeds, the OAuth callback must NOT also enqueue the worker job — that
-// would queue redundant work. The mock pool has no Enqueue expectation, so
-// any stray INSERT into job_queue would fail the mock expectations.
-func TestIntegrationHandler_HandleLinearOAuthCallback_InlineRefreshSkipsEnqueue(t *testing.T) {
+// TestIntegrationHandler_HandleLinearOAuthCallback_AsyncRefreshAndEnqueue
+// pins the post-OAuth refresh strategy: the inline RefreshTeamKeys hook
+// fires in a detached background goroutine (so the redirect doesn't block
+// on Linear's API), and the worker enqueue fires unconditionally as the
+// durable fallback so a slow / failing inline path still has a guaranteed
+// retry. Both paths share the same dedupe key so re-installs collapse.
+func TestIntegrationHandler_HandleLinearOAuthCallback_AsyncRefreshAndEnqueue(t *testing.T) {
 	t.Parallel()
 
 	orgID := uuid.New()
 	integrationID := uuid.New()
+	jobID := uuid.New()
 	now := time.Now().UTC()
 
 	mock, err := pgxmock.NewPool()
@@ -436,16 +438,17 @@ func TestIntegrationHandler_HandleLinearOAuthCallback_InlineRefreshSkipsEnqueue(
 
 	handler := NewIntegrationHandler(store, credentialStore, "linear-client-id", "linear-client-secret", "http://localhost:8080", "http://localhost:3000")
 	handler.client = &http.Client{Transport: transport}
-	// The job store is wired but inline refresh succeeds, so Enqueue must
-	// not fire. We set the job store to a non-nil value (zero JobStore is
-	// fine for this assertion because the path is short-circuited before
-	// any DB call).
-	handler.SetLinearJobStore(&db.JobStore{})
+	handler.SetLinearJobStore(db.NewJobStore(mock))
 
-	inlineCalls := 0
+	inlineCalls := make(chan uuid.UUID, 1)
 	handler.SetLinearTeamKeyRefresher(func(_ context.Context, gotOrg uuid.UUID) error {
-		inlineCalls++
-		require.Equal(t, orgID, gotOrg, "refresher must receive the callback's org id")
+		// Buffered channel keeps this non-blocking even if the test exits
+		// before this goroutine runs; the assertion below uses a generous
+		// timeout to catch the goroutine in CI without flaking.
+		select {
+		case inlineCalls <- gotOrg:
+		default:
+		}
 		return nil
 	})
 
@@ -458,6 +461,12 @@ func TestIntegrationHandler_HandleLinearOAuthCallback_InlineRefreshSkipsEnqueue(
 	mock.ExpectQuery("INSERT INTO integrations").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(integrationID, now))
+	// Worker enqueue always fires now: redirect must not block on inline
+	// refresh, so the worker job is the durable fallback.
+	mock.ExpectQuery("INSERT INTO jobs").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(jobID))
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/integrations/linear/callback?code=test-code&state=test-state", nil)
 	req.AddCookie(&http.Cookie{Name: "linear_integration_oauth_state", Value: "test-state"})
@@ -466,9 +475,14 @@ func TestIntegrationHandler_HandleLinearOAuthCallback_InlineRefreshSkipsEnqueue(
 
 	handler.HandleLinearOAuthCallback(w, req)
 
-	require.Equal(t, http.StatusTemporaryRedirect, w.Code, "callback should still redirect after inline refresh")
-	require.Equal(t, 1, inlineCalls, "inline refresher should be invoked exactly once")
-	require.NoError(t, mock.ExpectationsWereMet(), "no extra job-queue inserts should fire when inline refresh succeeds")
+	require.Equal(t, http.StatusTemporaryRedirect, w.Code, "callback should redirect immediately, not wait for the team-key refresh")
+	select {
+	case got := <-inlineCalls:
+		require.Equal(t, orgID, got, "inline refresher must receive the callback's org id")
+	case <-time.After(2 * time.Second):
+		t.Fatal("inline RefreshTeamKeys goroutine never ran within 2s")
+	}
+	require.NoError(t, mock.ExpectationsWereMet(), "exactly one INSERT INTO jobs should fire as the durable fallback")
 }
 
 func TestIntegrationHandler_HandleLinearOAuthCallback_StateMismatch(t *testing.T) {

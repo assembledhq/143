@@ -99,9 +99,17 @@ func (s *Service) HandleMilestone(ctx context.Context, in MilestoneInput) error 
 		return nil
 	}
 	if in.Session.LinearPrivate {
-		_ = s.providerState.Merge(ctx, in.Session.OrgID, in.Link.ID, db.LinearProviderState{
+		if err := s.providerState.Merge(ctx, in.Session.OrgID, in.Link.ID, db.LinearProviderState{
 			LastSkippedReason: string(db.LinearStateSkipPrivateSession),
-		})
+		}); err != nil {
+			// Best-effort debug surface; the skip itself is still authoritative
+			// (no Linear write happened, no audit row needed). Log so an
+			// operator chasing "why is LastSkippedReason blank for this private
+			// session?" can find the failure.
+			s.logger.Warn().Err(err).
+				Str("link_id", in.Link.ID.String()).
+				Msg("linear: failed to record private-session skip reason; provider_state debug field may be stale")
+		}
 		return nil
 	}
 
@@ -289,23 +297,25 @@ func (s *Service) linearAutomationSettingsOrFallback(ctx context.Context, orgID 
 	return settings.LinearAutomation
 }
 
-// defaultLinearAutomationOn is the shared *true used by the package-level
-// default settings below. Held in a var so we have a stable address to take
-// without re-allocating on every loader-failure path.
-var defaultLinearAutomationOn = true
-
-// defaultLinearAutomationSettingsValue is the design-62 default-on shape we
-// fall back to when the org row or settings parser is unavailable. Returned
-// by-value from defaultLinearAutomationSettings so callers can't mutate the
-// shared pointers.
-var defaultLinearAutomationSettingsValue = models.LinearAutomationSettings{
-	PostSessionLinks:           &defaultLinearAutomationOn,
-	MoveWorkflowStates:         &defaultLinearAutomationOn,
-	ReviewStateNamePreferences: models.DefaultLinearReviewStateNames,
-}
-
+// defaultLinearAutomationSettings returns the design-62 default-on shape we
+// fall back to when the org row or settings parser is unavailable.
+//
+// Each call allocates fresh *bool targets so the returned struct's pointer
+// fields never alias each other or any package-level state. A previous
+// version of this code shared a single `var defaultLinearAutomationOn = true`
+// across both PostSessionLinks and MoveWorkflowStates: a caller mutating
+// `*settings.PostSessionLinks` would have silently flipped MoveWorkflowStates
+// for that struct AND corrupted the global default for every future caller.
+// No production caller mutated the bools, but the footgun was real — this
+// allocation per call is the cheap, defensive fix.
 func defaultLinearAutomationSettings() models.LinearAutomationSettings {
-	return defaultLinearAutomationSettingsValue
+	postOn := true
+	moveOn := true
+	return models.LinearAutomationSettings{
+		PostSessionLinks:           &postOn,
+		MoveWorkflowStates:         &moveOn,
+		ReviewStateNamePreferences: models.DefaultLinearReviewStateNames,
+	}
 }
 
 // maxAttachmentTitleLen caps the attachment title length sent to Linear.
@@ -554,10 +564,19 @@ func (s *Service) HandleStateTransition(ctx context.Context, in MilestoneInput) 
 					if detected != cached {
 						patch.CoexistsWithGitHubIntegration = db.BoolPtr(detected)
 					}
-					_ = txState.Merge(ctx, in.Session.OrgID, in.Link.ID, patch)
+					if err := txState.Merge(ctx, in.Session.OrgID, in.Link.ID, patch); err != nil {
+						// Cache update is a best-effort optimization — the
+						// observation will be re-fetched on the next firing
+						// after CoexistsCheckTTL elapses. Log so a stuck cache
+						// (constant Merge failures) is visible to operators
+						// rather than silently re-paying the API call forever.
+						s.logger.Warn().Err(err).
+							Str("link_id", in.Link.ID.String()).
+							Msg("linear: failed to persist coexists-with-github observation; next call will re-detect")
+					}
 				}
 				if coexists {
-					return recordSkipInTx(ctx, txState, txEvents, in, eventKind, db.LinearStateSkipLinearGitHubIntegration)
+					return s.recordSkipInTx(ctx, txState, txEvents, in, eventKind, db.LinearStateSkipLinearGitHubIntegration)
 				}
 			}
 
@@ -589,7 +608,7 @@ func (s *Service) HandleStateTransition(ctx context.Context, in MilestoneInput) 
 					Str("persisted_workspace", state.WorkspaceSlug).
 					Str("observed_workspace", currentIssue.WorkspaceSlug).
 					Msg("linear: workspace slug drift detected at state-transition time; skipping")
-				return recordSkipInTx(ctx, txState, txEvents, in, eventKind, db.LinearStateSkipWorkspaceMismatch)
+				return s.recordSkipInTx(ctx, txState, txEvents, in, eventKind, db.LinearStateSkipWorkspaceMismatch)
 			}
 			state = mergeCurrentIssueObservation(state, currentIssue)
 			if err := txState.Merge(ctx, in.Session.OrgID, in.Link.ID, db.LinearProviderState{
@@ -613,7 +632,7 @@ func (s *Service) HandleStateTransition(ctx context.Context, in MilestoneInput) 
 				return fmt.Errorf("check linear recent human edits: %w", err)
 			}
 			if humanEdited {
-				return recordSkipInTx(ctx, txState, txEvents, in, eventKind, db.LinearStateSkipUserRecentEdit)
+				return s.recordSkipInTx(ctx, txState, txEvents, in, eventKind, db.LinearStateSkipUserRecentEdit)
 			}
 
 			// Resolve target state by type, applying the org's review-state
@@ -638,7 +657,7 @@ func (s *Service) HandleStateTransition(ctx context.Context, in MilestoneInput) 
 				// shouldn't happen but would otherwise be sent to Linear and
 				// produce a useless 422). Permanent condition — record a skip
 				// so the audit trail explains it.
-				return recordSkipInTx(ctx, txState, txEvents, in, eventKind, db.LinearStateSkipNoTargetState)
+				return s.recordSkipInTx(ctx, txState, txEvents, in, eventKind, db.LinearStateSkipNoTargetState)
 			}
 
 			// State-id divergence guard. Catches the rollback-recovery race:
@@ -650,7 +669,7 @@ func (s *Service) HandleStateTransition(ctx context.Context, in MilestoneInput) 
 			// StateType comparison below — IDs are unambiguous, names can
 			// drift (Linear lets workspaces rename states).
 			if currentIssue.StateID != "" && currentIssue.StateID == target.ID {
-				return recordSkipInTx(ctx, txState, txEvents, in, eventKind, db.LinearStateSkipAlreadyInTargetState)
+				return s.recordSkipInTx(ctx, txState, txEvents, in, eventKind, db.LinearStateSkipAlreadyInTargetState)
 			}
 
 			// Forward-only: refuse to move backwards. Differentiate
@@ -663,7 +682,7 @@ func (s *Service) HandleStateTransition(ctx context.Context, in MilestoneInput) 
 				if state.LastKnownStateType == target.Type && strings.EqualFold(state.LastKnownStateName, target.Name) {
 					reason = db.LinearStateSkipAlreadyInTargetState
 				}
-				return recordSkipInTx(ctx, txState, txEvents, in, eventKind, reason)
+				return s.recordSkipInTx(ctx, txState, txEvents, in, eventKind, reason)
 			}
 
 			// Claim fire-once *before* hitting Linear: the unique
@@ -674,12 +693,13 @@ func (s *Service) HandleStateTransition(ctx context.Context, in MilestoneInput) 
 			// row commits with the API call inside the same tx — on
 			// rollback, the claim disappears too, leaving the next attempt
 			// free to retry.
-			priorID := state.LastKnownStateName
+			priorStateID := currentIssue.StateID
+			transitionFrom := state.LastKnownStateName
 			err = txEvents.Insert(ctx, in.Session.OrgID, db.LinearStateEventInput{
 				SessionID:      in.Session.ID,
 				IssueID:        in.Link.IssueID,
 				EventKind:      eventKind,
-				TransitionFrom: priorID,
+				TransitionFrom: transitionFrom,
 				TransitionTo:   target.Name,
 			})
 			if errors.Is(err, db.ErrLinearStateEventExists) {
@@ -694,7 +714,7 @@ func (s *Service) HandleStateTransition(ctx context.Context, in MilestoneInput) 
 				return fmt.Errorf("update linear issue state: %w", err)
 			}
 			if err := txState.Merge(ctx, in.Session.OrgID, in.Link.ID, db.LinearProviderState{
-				PriorStateID:       priorID,
+				PriorStateID:       priorStateID,
 				LastKnownStateName: target.Name,
 				LastKnownStateType: target.Type,
 			}); err != nil {
@@ -724,7 +744,17 @@ func mergeCurrentIssueObservation(state db.LinearProviderState, issue *FetchedIs
 // shares a transaction with any sibling provider_state writes inside
 // HandleStateTransition. Mirrors recordSkip but without re-acquiring the
 // row lock.
-func recordSkipInTx(
+//
+// Skip permanence: once a skip event row commits, the unique constraint on
+// (session_id, issue_id, event_kind) blocks any future fire of the same
+// event for that session — including transient reasons like
+// LinearStateSkipUserRecentEdit (the 10-min human-edit window may have
+// elapsed by the time a worker retry would have re-evaluated). This is
+// intentional: re-evaluating a skip on retry would double the surface area
+// for races between automation and a human still editing in Linear, and
+// the design's "respect manual moves" contract treats the first skip as
+// authoritative for that session-event pair.
+func (s *Service) recordSkipInTx(
 	ctx context.Context,
 	txState providerStateStore,
 	txEvents stateEventStore,
@@ -741,9 +771,21 @@ func recordSkipInTx(
 	if err != nil && !errors.Is(err, db.ErrLinearStateEventExists) {
 		return err
 	}
-	_ = txState.Merge(ctx, in.Session.OrgID, in.Link.ID, db.LinearProviderState{
+	if err := txState.Merge(ctx, in.Session.OrgID, in.Link.ID, db.LinearProviderState{
 		LastSkippedReason: string(reason),
-	})
+	}); err != nil {
+		// The skip event itself is the audit-grade record; the
+		// LastSkippedReason field on provider_state is a debug
+		// breadcrumb for the operator UI. Log the merge failure so a
+		// stale debug surface is visible, then return nil — failing the
+		// transaction would force a retry that observes
+		// ErrLinearStateEventExists and silently no-ops, which is worse
+		// than a stale breadcrumb.
+		s.logger.Warn().Err(err).
+			Str("link_id", in.Link.ID.String()).
+			Str("skip_reason", string(reason)).
+			Msg("linear: failed to merge LastSkippedReason after skip event committed; debug field may be stale")
+	}
 	return nil
 }
 
@@ -757,9 +799,17 @@ func (s *Service) recordSkip(ctx context.Context, in MilestoneInput, kind db.Lin
 	if err != nil && !errors.Is(err, db.ErrLinearStateEventExists) {
 		return err
 	}
-	_ = s.providerState.Merge(ctx, in.Session.OrgID, in.Link.ID, db.LinearProviderState{
+	if err := s.providerState.Merge(ctx, in.Session.OrgID, in.Link.ID, db.LinearProviderState{
 		LastSkippedReason: string(reason),
-	})
+	}); err != nil {
+		// Same rationale as recordSkipInTx: the event row is the source
+		// of truth; LastSkippedReason is the debug breadcrumb. Log
+		// rather than fail.
+		s.logger.Warn().Err(err).
+			Str("link_id", in.Link.ID.String()).
+			Str("skip_reason", string(reason)).
+			Msg("linear: failed to merge LastSkippedReason after skip event committed; debug field may be stale")
+	}
 	return nil
 }
 

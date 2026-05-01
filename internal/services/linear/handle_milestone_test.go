@@ -1082,6 +1082,45 @@ func TestHandleStateTransition_FireOnceCollapseDuplicates(t *testing.T) {
 	}
 }
 
+func TestHandleStateTransition_PersistsPriorStateID(t *testing.T) {
+	t.Parallel()
+
+	client := newFakeLinearClient()
+	client.currentIssue = &FetchedIssue{
+		StateID:   "state-todo-id",
+		StateName: "Todo",
+		StateType: "unstarted",
+		TeamID:    "team-1",
+		TeamKey:   "ACS",
+		TeamName:  "App Core",
+	}
+	client.target = &WorkflowState{ID: "state-started-id", Name: "In Progress", Type: "started"}
+	svc, provider, events := buildTestService(t, client)
+	link := newPrimaryLink()
+	session := newSession()
+	in := MilestoneInput{
+		Event:      MilestoneLinked,
+		Session:    session,
+		Link:       link,
+		IssueID:    "linear-issue-id",
+		IssueIdent: "ACS-1",
+	}
+
+	if err := svc.HandleStateTransition(context.Background(), in); err != nil {
+		t.Fatalf("HandleStateTransition: %v", err)
+	}
+	state, err := provider.Get(context.Background(), session.OrgID, link.ID)
+	if err != nil {
+		t.Fatalf("provider state get: %v", err)
+	}
+	if state.PriorStateID != "state-todo-id" {
+		t.Fatalf("PriorStateID should store the Linear workflow state ID, got %q", state.PriorStateID)
+	}
+	if len(events.inserts) != 1 || events.inserts[0].TransitionFrom != "Todo" {
+		t.Fatalf("audit transition_from should remain the human-readable state name, got %+v", events.inserts)
+	}
+}
+
 // TestSessionURL_BuildsAbsoluteFromAppBaseURL verifies the URL helper
 // returns an absolute URL when AppBaseURL is set and a relative path as
 // the explicit fallback. The relative form is reserved for tests where
@@ -1181,7 +1220,7 @@ func TestLinearAutomationSettings_PerTeamOverridesOrgDefault(t *testing.T) {
 // We exercise the cache via the public TeamKeyAllowlist API.
 func TestTeamKeyAllowlist_CachesAcrossCalls(t *testing.T) {
 	t.Parallel()
-	svc := &Service{teamKeys: nil} // nil-safe: returns empty allow without hitting cache
+	svc := &Service{teamKeys: nil, teamKeyCache: NewTeamKeyCache()} // nil-safe: returns empty allow without hitting cache
 	got, err := svc.TeamKeyAllowlist(context.Background(), uuid.New())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)

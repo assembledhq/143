@@ -33,6 +33,30 @@ type BuildDeps struct {
 	// a relative path which Linear renders as plain text — production
 	// callers must always set this.
 	AppBaseURL string
+	// TeamKeyCache is the optional shared in-process team-key allowlist
+	// cache. In MODE=all the API router and the worker bundle both call
+	// Build inside the same process; passing the same cache to both keeps
+	// detection consistent (a refresh on the worker side immediately
+	// invalidates the API-side lookup). Leave nil when only one Build call
+	// runs in the process — NewService will allocate a per-Service cache.
+	TeamKeyCache *TeamKeyCache
+}
+
+// TeamKeyCache exposes the concrete cache type so cmd/server/main.go can
+// allocate one and pass it to both linear.Build call sites. The internal
+// implementation (TTL'd map) stays unexported; callers only need to be
+// able to construct a fresh empty instance with NewTeamKeyCache.
+type TeamKeyCache = teamKeyAllowlistCache
+
+// NewTeamKeyCache returns an empty cache suitable for sharing between the
+// API router's and the worker bundle's linear.Build calls in the same
+// process. MODE=all callers should allocate one with NewTeamKeyCache and
+// pass it to BuildDeps.TeamKeyCache so a refresh on either side invalidates
+// the other; otherwise the two Services keep independent caches and can
+// disagree on the allowlist for up to the 60s TTL window (the same staleness
+// envelope multi-node deployments already accept).
+func NewTeamKeyCache() *TeamKeyCache {
+	return &teamKeyAllowlistCache{}
 }
 
 // Build constructs the Linear service plus its three side-table stores from
@@ -73,6 +97,19 @@ func Build(deps BuildDeps) *Service {
 		}
 	}
 
+	teamKeyCache := deps.TeamKeyCache
+	if teamKeyCache == nil {
+		// No shared cache passed; allocate a fresh one local to this
+		// Service. MODE=all callers that want API+worker invalidation to
+		// stay in sync within the same process should pass an explicit
+		// NewTeamKeyCache() result to both linear.Build calls. Without a
+		// shared cache the two Services are still correct — refreshes
+		// land in the DB and the local TTL bounds staleness — they just
+		// don't proactively invalidate each other on a single-node MODE=all
+		// deployment, which matches the multi-node staleness envelope.
+		teamKeyCache = NewTeamKeyCache()
+	}
+
 	loader := func(ctx context.Context, orgID uuid.UUID) (models.OrgSettings, error) {
 		org, err := deps.Orgs.GetByID(ctx, orgID)
 		if err != nil {
@@ -95,6 +132,7 @@ func Build(deps BuildDeps) *Service {
 		OrgSettingsLoader: loader,
 		Pool:              deps.Pool,
 		AppBaseURL:        deps.AppBaseURL,
+		TeamKeyCache:      teamKeyCache,
 	})
 
 	if deps.Jobs != nil {

@@ -1955,6 +1955,13 @@ var linearColonPrefixRE = regexp.MustCompile(`^[A-Z][A-Z0-9_]{0,9}-\d+\s*:\s*`)
 // provider_state.identifier hasn't been written yet) we must not bake it
 // into the title; linearBracketPrefixRE only strips properly-shaped prefixes
 // on resync, so a UUID prefix would stick forever.
+//
+// Uppercase-only by design: Linear's team-key editor uppercases input on
+// save, so any lowercase value here is a human-typed string that Linear
+// would not recognize as one of its keys. applyLinearKeyPrefixes will
+// silently skip a lowercase external_id rather than fabricate a prefix
+// Linear cannot link back to. Mirrors the same constraint used by
+// linearColonPrefixRE / linearBracketPrefixRE just above.
 var linearKeyShapeRE = regexp.MustCompile(`^[A-Z][A-Z0-9_]{0,9}-[0-9]+$`)
 
 func stripLinearColonPrefix(s string) string {

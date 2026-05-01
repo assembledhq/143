@@ -101,6 +101,7 @@ func newCreatePathService(mock pgxmock.PgxPoolIface, client Client, providerStat
 		links:         db.NewSessionIssueLinkStore(mock),
 		sessions:      db.NewSessionStore(mock),
 		providerState: providerState,
+		teamKeyCache:  &teamKeyAllowlistCache{},
 		clientFactory: func(context.Context, string) (Client, error) {
 			return client, nil
 		},
@@ -149,6 +150,13 @@ func expectPrepareStateUpdate(t *testing.T, mock pgxmock.PgxPoolIface, rowsAffec
 	mock.ExpectExec("UPDATE sessions[\\s\\S]+SET linear_prepare_state").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", rowsAffected))
+}
+
+func expectPrepareStateUpdateError(t *testing.T, mock pgxmock.PgxPoolIface, err error) {
+	t.Helper()
+	mock.ExpectExec("UPDATE sessions[\\s\\S]+SET linear_prepare_state").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnError(err)
 }
 
 func expectIdentifierHintUpdate(t *testing.T, mock pgxmock.PgxPoolIface, rowsAffected int64) {
@@ -214,7 +222,7 @@ func TestResolveAndLinkAtCreate(t *testing.T) {
 		sessionID := uuid.New()
 		enqueued := false
 		svc := newCreatePathService(mock, createPathClient{err: errors.New("linear timeout")}, nil)
-		svc.jobEnqueuer = func(_ context.Context, gotOrgID uuid.UUID, jobType string, payload any, dedupeKey *string) error {
+		svc.SetJobEnqueuer(func(_ context.Context, gotOrgID uuid.UUID, jobType string, payload any, dedupeKey *string) error {
 			require.Equal(t, orgID, gotOrgID, "enqueue should preserve org scope")
 			require.Equal(t, "prepare_linear_primary", jobType, "enqueue should schedule the prepare worker")
 			require.NotNil(t, dedupeKey, "enqueue should use a dedupe key")
@@ -222,7 +230,7 @@ func TestResolveAndLinkAtCreate(t *testing.T) {
 			require.NotNil(t, payload, "enqueue should include a payload")
 			enqueued = true
 			return nil
-		}
+		})
 		expectPrepareStateUpdate(t, mock, 1)
 
 		got, err := svc.ResolveAndLinkAtCreate(context.Background(), CreateInput{
@@ -250,10 +258,10 @@ func TestResolveAndLinkAtCreate(t *testing.T) {
 				WorkspaceSlug: "other-workspace",
 			},
 		}}, nil)
-		svc.jobEnqueuer = func(context.Context, uuid.UUID, string, any, *string) error {
+		svc.SetJobEnqueuer(func(context.Context, uuid.UUID, string, any, *string) error {
 			require.Fail(t, "cross-workspace refs must not enqueue async fallback work")
 			return nil
-		}
+		})
 
 		got, err := svc.ResolveAndLinkAtCreate(context.Background(), CreateInput{
 			OrgID:       uuid.New(),
@@ -273,10 +281,10 @@ func TestResolveAndLinkAtCreate(t *testing.T) {
 		defer mock.Close()
 
 		svc := newCreatePathService(mock, createPathClient{err: errors.New("linear timeout")}, nil)
-		svc.jobEnqueuer = func(context.Context, uuid.UUID, string, any, *string) error {
+		svc.SetJobEnqueuer(func(context.Context, uuid.UUID, string, any, *string) error {
 			require.Fail(t, "enqueue must not run when the prepare-state gate was not persisted")
 			return nil
-		}
+		})
 		mock.ExpectExec("UPDATE sessions[\\s\\S]+SET linear_prepare_state").
 			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 			WillReturnError(errors.New("db unavailable"))
@@ -300,9 +308,9 @@ func TestResolveAndLinkAtCreate(t *testing.T) {
 		defer mock.Close()
 
 		svc := newCreatePathService(mock, createPathClient{err: errors.New("linear timeout")}, nil)
-		svc.jobEnqueuer = func(context.Context, uuid.UUID, string, any, *string) error {
+		svc.SetJobEnqueuer(func(context.Context, uuid.UUID, string, any, *string) error {
 			return errors.New("queue unavailable")
-		}
+		})
 		expectPrepareStateUpdate(t, mock, 1)
 		expectPrepareStateUpdate(t, mock, 1)
 
@@ -397,7 +405,7 @@ func TestResolveAndLinkAtCreate(t *testing.T) {
 		var enqueuedDedupe string
 		provider := newFakeProviderStateStore()
 		svc := newCreatePathService(mock, createPathClient{fetch: map[string]*FetchedIssue{"ACS-123": fetchedIssueForTest("ACS-123")}}, provider)
-		svc.jobEnqueuer = func(_ context.Context, gotOrgID uuid.UUID, jobType string, payload any, dedupeKey *string) error {
+		svc.SetJobEnqueuer(func(_ context.Context, gotOrgID uuid.UUID, jobType string, payload any, dedupeKey *string) error {
 			require.Equal(t, orgID, gotOrgID, "linked milestone enqueue should preserve org scope")
 			require.Equal(t, "linear_milestone", jobType, "linked milestone should use the milestone worker")
 			require.NotNil(t, dedupeKey, "linked milestone should use a dedupe key")
@@ -407,7 +415,7 @@ func TestResolveAndLinkAtCreate(t *testing.T) {
 			require.NoError(t, err, "linked milestone payload should marshal for assertion")
 			require.NoError(t, json.Unmarshal(body, &enqueuedPayload), "linked milestone payload should be an object")
 			return nil
-		}
+		})
 
 		expectIssueUpsert(t, mock, uuid.New(), now)
 		expectLinearLinkInsert(t, mock, linkID)
@@ -442,7 +450,7 @@ func TestResolveAndLinkAtCreate(t *testing.T) {
 		var enqueuedIdentifiers []string
 		var linkedMilestoneEnqueued bool
 		svc := newCreatePathService(mock, createPathClient{fetch: map[string]*FetchedIssue{"ACS-123": fetchedIssueForTest("ACS-123")}}, newFakeProviderStateStore())
-		svc.jobEnqueuer = func(_ context.Context, _ uuid.UUID, jobType string, payload any, dedupeKey *string) error {
+		svc.SetJobEnqueuer(func(_ context.Context, _ uuid.UUID, jobType string, payload any, dedupeKey *string) error {
 			require.NotNil(t, dedupeKey, "additional refs should use a dedupe key")
 			body, err := json.Marshal(payload)
 			require.NoError(t, err, "enqueued payload should marshal for assertion")
@@ -463,7 +471,7 @@ func TestResolveAndLinkAtCreate(t *testing.T) {
 				require.Failf(t, "unexpected job type", "jobType=%s", jobType)
 			}
 			return nil
-		}
+		})
 
 		expectIssueUpsert(t, mock, uuid.New(), now)
 		expectLinearLinkInsert(t, mock, linkID)
@@ -591,6 +599,22 @@ func TestPrepareLinearPrimary(t *testing.T) {
 		require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 	})
 
+	t.Run("empty identifiers surfaces prepare state clear failure", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err, "should create mock pool")
+		defer mock.Close()
+
+		svc := newCreatePathService(mock, createPathClient{}, nil)
+		expectPrepareStateUpdateError(t, mock, errors.New("db unavailable"))
+
+		err = svc.PrepareLinearPrimary(context.Background(), uuid.New(), uuid.New(), nil, nil)
+		require.Error(t, err, "PrepareLinearPrimary should retry when clearing pending prepare state fails")
+		require.ErrorContains(t, err, "clear linear prepare state", "error should identify the failed state clear")
+		require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+	})
+
 	t.Run("resolution failure leaves prepare state pending until job dead-letter", func(t *testing.T) {
 		t.Parallel()
 
@@ -646,6 +670,28 @@ func TestPrepareLinearPrimary(t *testing.T) {
 		require.NoError(t, mock.ExpectationsWereMet(), "cross-workspace worker drops should only clear prepare state")
 	})
 
+	t.Run("cross workspace worker ref surfaces prepare state clear failure", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err, "should create mock pool")
+		defer mock.Close()
+
+		svc := newCreatePathService(mock, createPathClient{fetch: map[string]*FetchedIssue{
+			"ACS-123": {
+				ID:            "linear-ACS-123",
+				Identifier:    "ACS-123",
+				WorkspaceSlug: "other-workspace",
+			},
+		}}, nil)
+		expectPrepareStateUpdateError(t, mock, errors.New("db unavailable"))
+
+		err = svc.PrepareLinearPrimaryRefs(context.Background(), uuid.New(), uuid.New(), []LinkRef{{Identifier: "ACS-123", Workspace: "acme"}}, nil)
+		require.Error(t, err, "PrepareLinearPrimaryRefs should retry when clearing a cross-workspace pending state fails")
+		require.ErrorContains(t, err, "clear linear prepare state", "error should identify the failed state clear")
+		require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+	})
+
 	t.Run("links primary and related identifiers", func(t *testing.T) {
 		t.Parallel()
 
@@ -664,7 +710,7 @@ func TestPrepareLinearPrimary(t *testing.T) {
 			"ACS-123": fetchedIssueForTest("ACS-123"),
 			"ACS-124": fetchedIssueForTest("ACS-124"),
 		}}, provider)
-		svc.jobEnqueuer = func(_ context.Context, gotOrgID uuid.UUID, jobType string, payload any, dedupeKey *string) error {
+		svc.SetJobEnqueuer(func(_ context.Context, gotOrgID uuid.UUID, jobType string, payload any, dedupeKey *string) error {
 			require.Equal(t, orgID, gotOrgID, "prepare worker milestone enqueue should preserve org scope")
 			require.Equal(t, "linear_milestone", jobType, "prepare worker should enqueue the linked milestone after primary link")
 			require.NotNil(t, dedupeKey, "prepare worker milestone should use a dedupe key")
@@ -676,7 +722,7 @@ func TestPrepareLinearPrimary(t *testing.T) {
 			require.NoError(t, json.Unmarshal(body, &decoded), "prepare worker milestone payload should include event")
 			enqueuedEvent = decoded.Event
 			return nil
-		}
+		})
 
 		expectIssueUpsert(t, mock, uuid.New(), now)
 		expectLinearLinkInsert(t, mock, primaryLinkID)
@@ -725,10 +771,10 @@ func TestPrepareLinearPrimaryRefs_IdempotentOnRetry(t *testing.T) {
 	svc := newCreatePathService(mock, createPathClient{fetch: map[string]*FetchedIssue{
 		"ACS-123": fetchedIssueForTest("ACS-123"),
 	}}, provider)
-	svc.jobEnqueuer = func(_ context.Context, _ uuid.UUID, _ string, _ any, _ *string) error {
+	svc.SetJobEnqueuer(func(_ context.Context, _ uuid.UUID, _ string, _ any, _ *string) error {
 		enqueueCount++
 		return nil
-	}
+	})
 
 	// First attempt: full happy path (issue upsert → link insert → identifier
 	// hint → prepare_state=ready).
@@ -901,7 +947,7 @@ func TestServiceIntegrationAndTeamKeys(t *testing.T) {
 			WillReturnRows(pgxmock.NewRows([]string{"org_id", "integration_id", "workspace_id", "team_id", "team_key", "team_name", "refreshed_at"}).
 				AddRow(orgID, activeIntegration.ID, "workspace-1", "team-1", "ACS", "Core", time.Now().UTC()))
 
-		svc := &Service{teamKeys: db.NewLinearTeamKeyStore(mock)}
+		svc := &Service{teamKeys: db.NewLinearTeamKeyStore(mock), teamKeyCache: NewTeamKeyCache()}
 		allow, err := svc.TeamKeyAllowlist(context.Background(), orgID)
 		require.NoError(t, err, "TeamKeyAllowlist should load team keys")
 		require.Equal(t, map[string]bool{"ACS": true}, allow, "TeamKeyAllowlist should build lookup table")
@@ -939,6 +985,7 @@ func TestRefreshTeamKeys(t *testing.T) {
 			integrations: createPathIntegrationReader{integration: models.Integration{ID: integrationID, Status: "active"}},
 			credentials:  createPathCredentialReader{credential: &models.DecryptedCredential{Config: models.LinearConfig{AccessToken: "tok"}}},
 			teamKeys:     db.NewLinearTeamKeyStore(mock),
+			teamKeyCache: NewTeamKeyCache(),
 			clientFactory: func(context.Context, string) (Client, error) {
 				return createPathClient{teams: []TeamKeyInfo{{TeamID: "team-1", Key: "ACS", Name: "Core", WorkspaceID: "workspace-1"}}}, nil
 			},

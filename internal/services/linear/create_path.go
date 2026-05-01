@@ -295,7 +295,8 @@ func (s *Service) enqueueLinkWorker(ctx context.Context, in CreateInput, hits []
 }
 
 func (s *Service) enqueueLinearWorker(ctx context.Context, in CreateInput, jobType string, hits []Detected) error {
-	if s.jobEnqueuer == nil {
+	enqueuer := s.loadJobEnqueuer()
+	if enqueuer == nil {
 		return fmt.Errorf("linear job enqueuer is not configured")
 	}
 	identifiers := make([]string, 0, len(hits))
@@ -322,7 +323,7 @@ func (s *Service) enqueueLinearWorker(ctx context.Context, in CreateInput, jobTy
 	if in.UserID != nil {
 		payload["user_id"] = in.UserID.String()
 	}
-	if err := s.jobEnqueuer(ctx, in.OrgID, jobType, payload, &dedupeKey); err != nil {
+	if err := enqueuer(ctx, in.OrgID, jobType, payload, &dedupeKey); err != nil {
 		return err
 	}
 	return nil
@@ -333,10 +334,26 @@ func (s *Service) enqueueLinearWorker(ctx context.Context, in CreateInput, jobTy
 // from the JobStore.
 type JobEnqueuer func(ctx context.Context, orgID uuid.UUID, jobType string, payload any, dedupeKey *string) error
 
-// SetJobEnqueuer wires the job enqueuer. Called once at startup; not
-// thread-safe afterwards.
+// SetJobEnqueuer wires the job enqueuer. Backed by atomic.Pointer so a
+// request that lands during boot — before Build's Set call returns —
+// observes `nil` cleanly instead of racing on the field assignment.
 func (s *Service) SetJobEnqueuer(enqueuer JobEnqueuer) {
-	s.jobEnqueuer = enqueuer
+	if enqueuer == nil {
+		s.jobEnqueuer.Store(nil)
+		return
+	}
+	s.jobEnqueuer.Store(&jobEnqueuerHolder{fn: enqueuer})
+}
+
+// loadJobEnqueuer returns the current enqueuer (or nil if none has been
+// wired). Hot path on session create + every milestone fire — keeping the
+// nil-check here so callers don't have to repeat it.
+func (s *Service) loadJobEnqueuer() JobEnqueuer {
+	holder := s.jobEnqueuer.Load()
+	if holder == nil {
+		return nil
+	}
+	return holder.fn
 }
 
 // PrepareLinearPrimary is the worker-side entry point used by the
@@ -348,7 +365,9 @@ func (s *Service) PrepareLinearPrimary(ctx context.Context, orgID, sessionID uui
 
 func (s *Service) PrepareLinearPrimaryRefs(ctx context.Context, orgID, sessionID uuid.UUID, refs []LinkRef, userID *uuid.UUID) error {
 	if len(refs) == 0 {
-		_ = s.sessions.SetLinearPrepareState(ctx, orgID, sessionID, models.LinearPrepareStateNone)
+		if err := s.sessions.SetLinearPrepareState(ctx, orgID, sessionID, models.LinearPrepareStateNone); err != nil {
+			return fmt.Errorf("clear linear prepare state: %w", err)
+		}
 		return nil
 	}
 
@@ -359,7 +378,9 @@ func (s *Service) PrepareLinearPrimaryRefs(ctx context.Context, orgID, sessionID
 		// worker that already linked successfully and reached "ready" would
 		// be clobbered, but cross-workspace can only fire on a fresh session
 		// where no successful sibling has run yet.
-		_ = s.sessions.SetLinearPrepareState(ctx, orgID, sessionID, models.LinearPrepareStateNone)
+		if stateErr := s.sessions.SetLinearPrepareState(ctx, orgID, sessionID, models.LinearPrepareStateNone); stateErr != nil {
+			return fmt.Errorf("clear linear prepare state after cross-workspace drop: %w", stateErr)
+		}
 		return nil
 	}
 	if err != nil {
@@ -456,7 +477,8 @@ func (s *Service) linkRelatedRefs(ctx context.Context, orgID, sessionID uuid.UUI
 }
 
 func (s *Service) enqueueLinkedMilestone(ctx context.Context, orgID, sessionID uuid.UUID) {
-	if s.jobEnqueuer == nil {
+	enqueuer := s.loadJobEnqueuer()
+	if enqueuer == nil {
 		return
 	}
 	dedupeKey := "linear_milestone:" + sessionID.String() + ":" + string(MilestoneLinked)
@@ -466,7 +488,7 @@ func (s *Service) enqueueLinkedMilestone(ctx context.Context, orgID, sessionID u
 		"event":      string(MilestoneLinked),
 		"pr_number":  0,
 	}
-	if err := s.jobEnqueuer(ctx, orgID, "linear_milestone", payload, &dedupeKey); err != nil {
+	if err := enqueuer(ctx, orgID, "linear_milestone", payload, &dedupeKey); err != nil {
 		s.logger.Warn().Err(err).
 			Str("session_id", sessionID.String()).
 			Msg("failed to enqueue linear linked milestone")

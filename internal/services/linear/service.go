@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -64,8 +65,15 @@ type Service struct {
 	sessions          *db.SessionStore
 	clientFactory     ClientFactory
 	orgSettingsLoader OrgSettingsLoader
-	jobEnqueuer       JobEnqueuer
-	linksChanged      LinksChangedNotifier
+	// jobEnqueuer / linksChanged are populated by the boot-time wiring in
+	// router.go and cmd/server/main.go *after* NewService returns: the SSE
+	// streams aren't constructed until later, and the JobStore comes from a
+	// shared infra bundle. We hold them in atomic.Pointer wrappers so a
+	// request that lands during boot (between NewService and the Set* call)
+	// reads `nil` cleanly instead of racing on the field assignment, which
+	// the race detector would otherwise flag.
+	jobEnqueuer  atomic.Pointer[jobEnqueuerHolder]
+	linksChanged atomic.Pointer[linksChangedHolder]
 	// pool is used to begin transactions for the rolling-comment and
 	// state-transition writes that need a SELECT ... FOR UPDATE row lock to
 	// be race-safe across concurrent milestone events. Optional: when nil,
@@ -83,25 +91,47 @@ type Service struct {
 	// transient detection misses (the next session create within the TTL
 	// after a refresh might miss new keys, then self-heal).
 	//
+	// Held by pointer so multiple Service instances inside the same process
+	// (e.g. MODE=all wires one for the API router + one for the worker bundle)
+	// share a single cache and a single invalidation surface — RefreshTeamKeys
+	// from the worker invalidates the API-side cache without requiring inter-
+	// instance plumbing.
+	//
 	// Multi-node staleness: cache invalidation (RefreshTeamKeys) only
-	// invalidates the *local* node's entry. With more than one API/worker
+	// invalidates the *local* process's entry. With more than one API/worker
 	// pod, a session create on a different pod can miss new keys for up to
 	// the TTL window after the OAuth post-install or 24h cron refresh fires
 	// on another node. This is by design — detection misses are
 	// self-healing within the TTL and the alternative (LISTEN/NOTIFY for
 	// cross-pod invalidation) wasn't worth the wiring for a 60s ceiling.
-	teamKeyCache teamKeyAllowlistCache
+	teamKeyCache *teamKeyAllowlistCache
 }
 
-// SetLinksChangedNotifier wires the SSE fan-out hook.
+// jobEnqueuerHolder / linksChangedHolder wrap the function values stored in
+// atomic.Pointer fields so atomic load/store can operate on a single pointer
+// type. Without the wrapper we'd need to round-trip through unsafe pointers
+// — these holders give us race-detector-clean Set/Get without that cost.
+type jobEnqueuerHolder struct{ fn JobEnqueuer }
+type linksChangedHolder struct{ fn LinksChangedNotifier }
+
+// SetLinksChangedNotifier wires the SSE fan-out hook. Safe to call after
+// NewService has returned and even concurrently with handler goroutines —
+// the atomic store lets late-running tests or multi-stage boot wire the
+// notifier without racing the read path.
 func (s *Service) SetLinksChangedNotifier(n LinksChangedNotifier) {
-	s.linksChanged = n
+	if n == nil {
+		s.linksChanged.Store(nil)
+		return
+	}
+	s.linksChanged.Store(&linksChangedHolder{fn: n})
 }
 
 func (s *Service) notifyLinksChanged(ctx context.Context, orgID, sessionID uuid.UUID, kind string) {
-	if s.linksChanged != nil {
-		s.linksChanged(ctx, orgID, sessionID, kind)
+	holder := s.linksChanged.Load()
+	if holder == nil || holder.fn == nil {
+		return
 	}
+	holder.fn(ctx, orgID, sessionID, kind)
 }
 
 // providerStateStore is the narrow store surface HandleMilestone /
@@ -274,10 +304,23 @@ type Config struct {
 	// posted to Linear. Required for clickable attachment URLs and comment
 	// bodies; passing a relative path here is treated as a misconfiguration.
 	AppBaseURL string
+	// TeamKeyCache is the optional in-process team-key allowlist cache. When
+	// MODE=all wires both an API-side and a worker-side Service in the same
+	// process, both should be passed the same cache so a refresh on one
+	// invalidates the other (without this, the API and worker can disagree
+	// on the allowlist for up to the TTL window). When nil, NewService
+	// allocates a fresh cache local to the Service — fine for tests and for
+	// MODE=api / MODE=worker single-Service processes.
+	TeamKeyCache *teamKeyAllowlistCache
 }
 
 func NewService(cfg Config) *Service {
+	cache := cfg.TeamKeyCache
+	if cache == nil {
+		cache = &teamKeyAllowlistCache{}
+	}
 	return &Service{
+		teamKeyCache:      cache,
 		logger:            cfg.Logger,
 		integrations:      cfg.Integrations,
 		credentials:       cfg.Credentials,
@@ -294,6 +337,24 @@ func NewService(cfg Config) *Service {
 	}
 }
 
+// maxProviderStateLockedDuration bounds how long a single milestone or
+// state-transition is allowed to hold the provider_state row lock. The
+// underlying GraphQL HTTP client already imposes a 30s per-call timeout
+// (client.go), but HandleStateTransition can chain up to five Linear API
+// calls inside the locked region (HasGitHubIntegrationAttachment → FetchIssue
+// → IssueRecentHumanEdits → WorkflowStateForType → UpdateIssueState), so a
+// slow-but-not-failing Linear API can pin a pool connection + the row lock
+// for >2 minutes worst case. Capping the locked region at 60s keeps a Linear
+// outage from cascading into DB connection pool exhaustion: a single
+// milestone job either makes progress within the window or is failed by ctx
+// cancellation, and the worker's RetryableError + dedupe key collapse the
+// retry into the next attempt without burning the fire-once event row.
+//
+// Tuned generously enough that a healthy Linear API has all the headroom it
+// needs (median FetchIssue is ~250ms; a five-call chain comfortably fits in
+// a couple of seconds), but tight enough that hung calls don't accumulate.
+const maxProviderStateLockedDuration = 60 * time.Second
+
 // withProviderStateLocked runs fn inside a transaction that holds a row-level
 // lock on the provider_state row for (org_id, link_id). Two concurrent
 // milestone events for the same link will serialize through this lock so
@@ -301,6 +362,12 @@ func NewService(cfg Config) *Service {
 // the loser sees the winner's CommentID and takes the update branch. fn
 // receives stores bound to the tx so any subsequent writes participate in
 // the same transaction.
+//
+// The ctx passed to fn is wrapped with maxProviderStateLockedDuration so the
+// chained Linear API calls inside the locked region can't pin a pool
+// connection during a Linear outage — see the constant's doc for the
+// rationale. Callers that need a tighter or looser bound must wrap the
+// outer ctx themselves before calling this method.
 //
 // When the service has no pool (older tests) the call falls through to fn
 // with the non-transactional stores. Any caller that needs strict
@@ -318,11 +385,24 @@ func (s *Service) withProviderStateLocked(
 		return fn(ctx, s.providerState, s.stateEvents, state)
 	}
 
+	ctx, cancel := context.WithTimeout(ctx, maxProviderStateLockedDuration)
+	defer cancel()
+
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("begin tx: %w", err)
 	}
-	defer func() { _ = tx.Rollback(ctx) }()
+	defer func() {
+		// pgx's Rollback returns ErrTxClosed after a successful Commit, which
+		// is the expected no-op shape; anything else is genuine
+		// rollback-on-error trouble (lock not released, connection stuck) that
+		// operators chasing a hang need to see in logs.
+		if rbErr := tx.Rollback(ctx); rbErr != nil && !errors.Is(rbErr, pgx.ErrTxClosed) {
+			s.logger.Warn().Err(rbErr).
+				Str("link_id", linkID.String()).
+				Msg("linear: deferred tx.Rollback returned non-ErrTxClosed; provider_state lock may be slow to release")
+		}
+	}()
 
 	// Lock or insert-then-lock the provider_state row. We can't SELECT FOR
 	// UPDATE a row that doesn't exist yet, so insert a zero-state row first
@@ -448,12 +528,14 @@ func (s *Service) TeamKeyAllowlist(ctx context.Context, orgID uuid.UUID) (map[st
 	if s == nil || s.teamKeys == nil {
 		return map[string]bool{}, nil
 	}
-	if cached, ok := s.teamKeyCache.get(orgID); ok {
-		// Defensive copy: callers iterate this map during detection but the
-		// cache shares the underlying storage across requests, so a mutation
-		// here would silently corrupt every future caller's allowlist for the
-		// org. Cheap relative to the DB hit it replaces.
-		return copyAllowlist(cached), nil
+	if s.teamKeyCache != nil {
+		if cached, ok := s.teamKeyCache.get(orgID); ok {
+			// Defensive copy: callers iterate this map during detection but the
+			// cache shares the underlying storage across requests, so a mutation
+			// here would silently corrupt every future caller's allowlist for the
+			// org. Cheap relative to the DB hit it replaces.
+			return copyAllowlist(cached), nil
+		}
 	}
 	keys, err := s.teamKeys.ListByOrg(ctx, orgID)
 	if err != nil {
@@ -463,13 +545,15 @@ func (s *Service) TeamKeyAllowlist(ctx context.Context, orgID uuid.UUID) (map[st
 	for _, k := range keys {
 		allow[k.TeamKey] = true
 	}
-	if evicted := s.teamKeyCache.put(orgID, allow); evicted > 0 {
-		// Eviction count surfaces TTL activity to operators chasing "is the
-		// cache actually expiring?" without committing to per-hit logging.
-		s.logger.Debug().
-			Int("evicted", evicted).
-			Str("org_id", orgID.String()).
-			Msg("linear team-key cache: swept expired entries on miss")
+	if s.teamKeyCache != nil {
+		if evicted := s.teamKeyCache.put(orgID, allow); evicted > 0 {
+			// Eviction count surfaces TTL activity to operators chasing "is the
+			// cache actually expiring?" without committing to per-hit logging.
+			s.logger.Debug().
+				Int("evicted", evicted).
+				Str("org_id", orgID.String()).
+				Msg("linear team-key cache: swept expired entries on miss")
+		}
 	}
 	return copyAllowlist(allow), nil
 }
@@ -480,6 +564,26 @@ func copyAllowlist(src map[string]bool) map[string]bool {
 		out[k] = v
 	}
 	return out
+}
+
+// InvalidateTeamKeyCache drops the in-process team-key allowlist entry for
+// an org. Wired into the Linear integration disconnect path so a session
+// created right after disconnect doesn't see stale team keys for up to the
+// TTL window. The DB-side ListByOrg already filters by `integrations.status
+// = 'active'`, so this is purely a cache-coherency concern: without it, a
+// detection that hits the cached entry mid-disconnect would still admit
+// bare-identifier matches against teams whose integration was just paused.
+//
+// Best-effort, no error: a no-op when the org has no entry, and idempotent
+// across repeated calls. Multi-node deployments still tolerate the same
+// 60s TTL staleness on other nodes — operators who need stricter cross-pod
+// invalidation should treat the disconnect as an integration outage and
+// expect the next session-create per-pod to refresh.
+func (s *Service) InvalidateTeamKeyCache(orgID uuid.UUID) {
+	if s == nil || s.teamKeyCache == nil {
+		return
+	}
+	s.teamKeyCache.invalidate(orgID)
 }
 
 // RefreshTeamKeys pulls the team list from Linear and replaces the cache.
@@ -512,7 +616,9 @@ func (s *Service) RefreshTeamKeys(ctx context.Context, orgID uuid.UUID) error {
 	if err := s.teamKeys.ReplaceForIntegration(ctx, orgID, integration.ID, workspaceID, rows); err != nil {
 		return err
 	}
-	s.teamKeyCache.invalidate(orgID)
+	if s.teamKeyCache != nil {
+		s.teamKeyCache.invalidate(orgID)
+	}
 	return nil
 }
 

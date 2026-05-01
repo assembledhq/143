@@ -25,6 +25,18 @@ type fakeLinearLinker struct {
 	gotIn  linear.CreateInput
 	result linear.CreateResult
 	err    error
+	// disabled makes Enabled return false while preserving the default
+	// active shape expected by most CreateManual tests.
+	disabled bool
+	// teamKeys is what TeamKeyAllowlist returns. Defaults to all-known so
+	// existing tests that exercise issue-only session start (where the
+	// MISSING_MESSAGE bypass requires the bare-identifier prefix to be in
+	// the allowlist) continue to pass without each test having to wire it.
+	teamKeys map[string]bool
+}
+
+func (f *fakeLinearLinker) Enabled(context.Context, uuid.UUID) bool {
+	return !f.disabled
 }
 
 func (f *fakeLinearLinker) ResolveAndLinkAtCreate(_ context.Context, in linear.CreateInput) (linear.CreateResult, error) {
@@ -34,6 +46,16 @@ func (f *fakeLinearLinker) ResolveAndLinkAtCreate(_ context.Context, in linear.C
 		return linear.CreateResult{}, f.err
 	}
 	return f.result, nil
+}
+
+func (f *fakeLinearLinker) TeamKeyAllowlist(_ context.Context, _ uuid.UUID) (map[string]bool, error) {
+	if f.teamKeys != nil {
+		return f.teamKeys, nil
+	}
+	// Permissive default — every common bare-identifier prefix in test
+	// fixtures resolves. Tests that need to exercise the "unknown team"
+	// branch should set teamKeys to a tighter map (or {}).
+	return map[string]bool{"ACS": true}, nil
 }
 
 type countingLinearTitleLLM struct {
@@ -118,10 +140,10 @@ func TestSessionHandler_SetLinearLinker(t *testing.T) {
 	defer mock.Close()
 
 	handler := newSessionHandler(t, mock)
-	require.Nil(t, handler.linearLinker, "linker should default to nil so CreateManual treats Linear refs as opaque text")
+	require.Nil(t, handler.getLinearLinker(), "linker should default to nil so CreateManual treats Linear refs as opaque text")
 
 	handler.SetLinearLinker(&fakeLinearLinker{})
-	require.NotNil(t, handler.linearLinker, "SetLinearLinker should wire the injected linker so CreateManual can resolve the primary issue")
+	require.NotNil(t, handler.getLinearLinker(), "SetLinearLinker should wire the injected linker so CreateManual can resolve the primary issue")
 }
 
 // TestSessionHandler_CreateManual_LinearLinkerNilWithFlags verifies that the
@@ -162,7 +184,7 @@ func TestSessionHandler_CreateManual_LinearLinkerNilWithFlags(t *testing.T) {
 	handler := newSessionHandler(t, mock)
 	// Intentionally NOT calling SetLinearLinker — the warning branch only
 	// fires when h.linearLinker is nil but the body opted into the flags.
-	require.Nil(t, handler.linearLinker)
+	require.Nil(t, handler.getLinearLinker())
 
 	body := `{"message":"Fix the login bug","agent_type":"claude_code","linear_private":true,"linear_state_sync_disabled":true}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/manual", strings.NewReader(body))
@@ -175,6 +197,31 @@ func TestSessionHandler_CreateManual_LinearLinkerNilWithFlags(t *testing.T) {
 	require.Equal(t, http.StatusCreated, w.Code, "session create should still succeed when the linker is unwired")
 	require.Contains(t, w.Body.String(), "claude_code")
 	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestSessionHandler_CreateManual_EmptyLinearURLRequiresActiveLinear(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	handler := newSessionHandler(t, mock)
+	linker := &fakeLinearLinker{disabled: true}
+	handler.SetLinearLinker(linker)
+
+	body := `{"message":"","agent_type":"claude_code","references":[{"kind":"app","id":"linear","display":"https://linear.app/acme/issue/ACS-1234"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/manual", strings.NewReader(body))
+	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+	w := httptest.NewRecorder()
+
+	handler.CreateManual(w, req)
+
+	require.Equal(t, http.StatusBadRequest, w.Code, "empty-message Linear URL starts should require an active Linear integration")
+	require.Contains(t, w.Body.String(), "MISSING_MESSAGE", "disabled Linear should not authorize the issue-only bypass")
+	require.Equal(t, 0, linker.called, "disabled Linear should be rejected before the linker performs side effects")
+	require.NoError(t, mock.ExpectationsWereMet(), "disabled empty-message bypass should not touch the database")
 }
 
 // TestSessionHandler_CreateManual_LinearLinkerSuccess covers the happy

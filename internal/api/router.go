@@ -236,6 +236,10 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	// worker enqueue. See HandleLinearOAuthCallback for the two-tier
 	// strategy.
 	integrationHandler.SetLinearTeamKeyRefresher(linearService.RefreshTeamKeys)
+	// Drop the in-process team-key cache as soon as the integration is
+	// disconnected so post-disconnect session creates can't admit
+	// bare-identifier matches via a stale cache.
+	integrationHandler.SetLinearTeamKeyCacheInvalidator(linearService.InvalidateTeamKeyCache)
 	sessionHandler.SetShutdownSignal(shutdownCh)
 	sessionHandler.SetSnapshotStore(snapshotStore)
 	sessionHandler.SetPRCredentialStore(userCredentialStore)

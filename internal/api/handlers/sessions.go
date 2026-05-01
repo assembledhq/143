@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"regexp"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/assembledhq/143/internal/api/middleware"
@@ -75,28 +76,48 @@ type SessionHandler struct {
 	prAuthSigningKey []byte
 	frontendURL      string
 	streams          *cache.SessionStreams
-	linearLinker     linearSessionLinker
+	// linearLinker is wired at boot via SetLinearLinker (called from
+	// router.go after the SSE-aware Linear service is constructed). Held
+	// behind an atomic.Pointer holder so a request that lands during boot —
+	// before the setter returns — observes nil cleanly instead of racing
+	// on the interface-value assignment, which the race detector flags as
+	// undefined behavior on multi-word interface stores.
+	linearLinker atomic.Pointer[linearLinkerHolder]
 	// shutdownCh is closed on SIGTERM; see SetShutdownSignal.
 	shutdownCh <-chan struct{}
 }
 
-// linearSessionLinker is the single-method surface SessionHandler invokes
-// on the Linear service. The interface lives here (not in the linear
-// package) so SetLinearLinker can accept a stub in tests without bringing
-// up the full Linear stack. We do still depend on linear.CreateInput /
-// linear.CreateResult at the type level — those are pure value structs
-// that the handler builds anyway, and re-defining them locally would only
-// add adapter code without breaking the dependency.
+// linearLinkerHolder wraps the linearSessionLinker interface so the field
+// has a single concrete pointer type for atomic.Pointer to operate on.
+type linearLinkerHolder struct{ fn linearSessionLinker }
+
+// linearSessionLinker is the surface SessionHandler invokes on the Linear
+// service. The interface lives here (not in the linear package) so
+// SetLinearLinker can accept a stub in tests without bringing up the full
+// Linear stack. We do still depend on linear.CreateInput / linear.CreateResult
+// at the type level — those are pure value structs that the handler builds
+// anyway, and re-defining them locally would only add adapter code without
+// breaking the dependency.
+//
+// TeamKeyAllowlist is exposed so the MISSING_MESSAGE bypass can verify that
+// a bare-identifier reference actually maps to a known Linear team before
+// letting an empty-message session through. Without this check, any
+// "FOO-123"-shaped string in the references picker would bypass the
+// validation and produce a session with an empty user turn.
 type linearSessionLinker interface {
 	ResolveAndLinkAtCreate(ctx context.Context, in linear.CreateInput) (linear.CreateResult, error)
+	Enabled(ctx context.Context, orgID uuid.UUID) bool
+	TeamKeyAllowlist(ctx context.Context, orgID uuid.UUID) (map[string]bool, error)
 }
 
-// looksLikeLinearReference is a cheap pre-validation hint: when the user
-// supplied no message text but the references picker carries Linear-shaped
-// content, allow CreateManual to proceed and let the linker hydrate context
-// from the issue alone (design 62 §"Issue-only session start"). Detection
-// runs again inside the linker — we are not relaxing security here, only
-// the message-required check.
+// looksLikeLinearReference is the legacy regex-only hint, retained for the
+// no-linker path and for callers that don't yet have an org context. Cheap
+// pre-validation hint: when the user supplied no message text but the
+// references picker carries Linear-shaped content, allow CreateManual to
+// proceed and let the linker hydrate context from the issue alone
+// (design 62 §"Issue-only session start"). Detection runs again inside the
+// linker — we are not relaxing security here, only the message-required
+// check.
 //
 // Defers to linear.MightContainLinearRef so this hint stays in lockstep
 // with the actual detection regexes.
@@ -113,6 +134,71 @@ func looksLikeLinearReference(refs []models.SessionInputReference) bool {
 	return false
 }
 
+// canBypassMissingMessageForLinear is the same check as looksLikeLinearReference
+// tightened with the team-key allowlist, so a malformed "FOO-123" can no
+// longer wave the request past MISSING_MESSAGE. URL refs always pass — a
+// linear.app URL is its own evidence and detection drops them via
+// ErrCrossWorkspace if the workspace doesn't match. Bare identifiers must
+// have their KEY prefix in the org's allowlist.
+//
+// Falls back to the regex-only hint when the linker isn't wired or the
+// allowlist lookup errors — this preserves the prior behavior in tests
+// that haven't installed the linker, and avoids hard-failing CreateManual
+// on a transient DB hiccup.
+func (h *SessionHandler) canBypassMissingMessageForLinear(ctx context.Context, orgID uuid.UUID, refs []models.SessionInputReference) bool {
+	linker := h.getLinearLinker()
+	if linker == nil {
+		return looksLikeLinearReference(refs)
+	}
+	if !linker.Enabled(ctx, orgID) {
+		return false
+	}
+	// URL hits short-circuit first: they don't depend on the allowlist and
+	// detection treats them as authoritative provenance.
+	for _, r := range refs {
+		if linearURLPattern.MatchString(r.Display) || linearURLPattern.MatchString(r.ID) {
+			return true
+		}
+	}
+	allow, err := linker.TeamKeyAllowlist(ctx, orgID)
+	if err != nil {
+		// Allowlist lookup failed; fall back to the laxer regex hint rather
+		// than hard-fail the request. Detection inside the linker re-checks
+		// before any side effects.
+		h.logger.Warn().Err(err).Str("org_id", orgID.String()).
+			Msg("MISSING_MESSAGE bypass: failed to load Linear team-key allowlist; falling back to regex-only hint")
+		return looksLikeLinearReference(refs)
+	}
+	for _, r := range refs {
+		for _, candidate := range []string{r.Display, r.ID} {
+			for _, m := range linearBareIdentifierAllPattern.FindAllStringSubmatch(candidate, -1) {
+				if len(m) < 2 {
+					continue
+				}
+				key := m[1]
+				idx := strings.IndexByte(key, '-')
+				if idx <= 0 {
+					continue
+				}
+				if allow[key[:idx]] {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// linearURLPattern / linearBareIdentifierAllPattern mirror the patterns
+// inside the linear package's detect.go but are re-declared here to keep
+// the handler from importing internal regex state. The two regexes must
+// stay in lockstep — a regression that drifts the handler-side regex
+// would silently widen or narrow the MISSING_MESSAGE bypass.
+var (
+	linearURLPattern               = regexp.MustCompile(`https?://linear\.app/[^/\s]+/issue/[A-Z][A-Z0-9_]{0,9}-[0-9]+`)
+	linearBareIdentifierAllPattern = regexp.MustCompile(`(?:^|[^A-Za-z0-9_/-])([A-Z][A-Z0-9_]{0,9}-[0-9]+)\b`)
+)
+
 func (h *SessionHandler) SetIssueLinkStore(store *db.SessionIssueLinkStore) {
 	h.linkStore = store
 }
@@ -120,8 +206,27 @@ func (h *SessionHandler) SetIssueLinkStore(store *db.SessionIssueLinkStore) {
 // SetLinearLinker injects the Linear session-linking service. When unset,
 // CreateManual treats Linear refs as opaque text — same behavior as when
 // the org has no Linear integration. This is the design 62 §"Path C" no-op.
+//
+// Safe to call after construction even if the HTTP server is already
+// serving requests: the atomic store lets a late-running test or a
+// reload-without-restart wire the linker without racing the read path.
 func (h *SessionHandler) SetLinearLinker(linker linearSessionLinker) {
-	h.linearLinker = linker
+	if linker == nil {
+		h.linearLinker.Store(nil)
+		return
+	}
+	h.linearLinker.Store(&linearLinkerHolder{fn: linker})
+}
+
+// getLinearLinker returns the currently-wired linker (or nil if none).
+// Used by the read-path; tests should use this rather than reading
+// h.linearLinker directly so the atomic load is visible.
+func (h *SessionHandler) getLinearLinker() linearSessionLinker {
+	holder := h.linearLinker.Load()
+	if holder == nil {
+		return nil
+	}
+	return holder.fn
 }
 
 func (h *SessionHandler) SetIssueSnapshotStore(store *db.SessionTurnIssueSnapshotStore) {
@@ -1869,10 +1974,11 @@ func (h *SessionHandler) CreateManual(w http.ResponseWriter, r *http.Request) {
 	// Empty message is allowed iff the user is starting from a linked
 	// Linear issue. Detection runs after the body validation, so we accept
 	// "looks like a Linear ref somewhere in the inputs" as the relaxation
-	// signal here. Worst case (no Linear integration) the linker is a
-	// no-op and the agent gets an empty user message — which is fine for a
-	// session that came in via the Linear-issue-only fast path.
-	if body.Message == "" && !looksLikeLinearReference(body.References) {
+	// signal here. The check is tightened with the team-key allowlist so
+	// a "FOO-123"-shaped string for an unknown team no longer waves the
+	// request past — preventing sessions with an empty user turn that
+	// silently no-op inside the linker.
+	if body.Message == "" && !h.canBypassMissingMessageForLinear(r.Context(), orgID, body.References) {
 		writeError(w, r, http.StatusBadRequest, "MISSING_MESSAGE", "message is required")
 		return
 	}
@@ -2097,7 +2203,8 @@ func (h *SessionHandler) CreateManual(w http.ResponseWriter, r *http.Request) {
 	// start") still get linked: SessionIssueLinkStore.CreateAllowingNullRepo
 	// already accepts a NULL repository on the link row when the underlying
 	// session has no repo, so we don't pre-filter on body.RepositoryID here.
-	if h.linearLinker == nil && (body.LinearPrivate || body.LinearStateSyncDisabled) {
+	linker := h.getLinearLinker()
+	if linker == nil && (body.LinearPrivate || body.LinearStateSyncDisabled) {
 		// User asked for Linear-aware behavior but no Linear integration is
 		// wired into this handler. The flags are persisted (so a later
 		// install backfills the right policy), but nothing will read them
@@ -2115,7 +2222,7 @@ func (h *SessionHandler) CreateManual(w http.ResponseWriter, r *http.Request) {
 			Bool("linear_state_sync_disabled", body.LinearStateSyncDisabled).
 			Msg("linear policy flags set on session but no Linear integration is configured; flags persisted but currently unused")
 	}
-	if h.linearLinker != nil {
+	if linker != nil {
 		userID := manualTriggeredByUserID
 		referenceText := ""
 		if len(body.References) > 0 {
@@ -2130,7 +2237,7 @@ func (h *SessionHandler) CreateManual(w http.ResponseWriter, r *http.Request) {
 			}
 			referenceText = strings.Join(refDisplays, "\n")
 		}
-		linearResult, linkErr := h.linearLinker.ResolveAndLinkAtCreate(r.Context(), linear.CreateInput{
+		linearResult, linkErr := linker.ResolveAndLinkAtCreate(r.Context(), linear.CreateInput{
 			OrgID:                   orgID,
 			SessionID:               session.ID,
 			MessageBody:             body.Message,
@@ -2143,6 +2250,16 @@ func (h *SessionHandler) CreateManual(w http.ResponseWriter, r *http.Request) {
 		})
 		if linkErr != nil {
 			errMsg := "Linear context could not be prepared. Retry the session after the Linear integration recovers."
+			// Sidebar rendering contract: session-sidebar.tsx displays
+			// `session.failure_explanation || session.error` for any row
+			// with status="failed", and sessionTitle() falls back to
+			// "Session XXXXXXXX" when the title is empty. So an
+			// orphaned-failed Linear session — title set from
+			// manualSessionTitle, no agent run, this errMsg in
+			// SessionResult.Error — renders cleanly with both the title
+			// and the user-visible explanation. Don't change errMsg to a
+			// raw stack-trace shape without also updating that contract.
+			//
 			// Use a detached context for the failure write so a cancelled
 			// request context (client disconnect) doesn't leave the session
 			// stuck in "pending" forever — the agent run hasn't been
