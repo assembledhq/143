@@ -198,14 +198,6 @@ jobs:
           cache: npm
           cache-dependency-path: frontend/package-lock.json
 
-      # actions/checkout on pull_request checks out refs/pull/N/merge and does not
-      # always set up origin/main as a remote-tracking ref — fetch it explicitly so
-      # vitest --changed=origin/main and diff-cover both resolve.
-      - name: Fetch base branch (PR only)
-        if: github.event_name == 'pull_request'
-        working-directory: ${{ github.workspace }}
-        run: git fetch --no-tags --prune origin +refs/heads/main:refs/remotes/origin/main
-
       - uses: actions/setup-python@v5
         if: github.event_name == 'pull_request'
         with:
@@ -221,15 +213,19 @@ jobs:
       - name: Run affected tests (PR)
         if: github.event_name == 'pull_request'
         timeout-minutes: 10
-        run: npx vitest run --changed=origin/main --passWithNoTests --coverage --coverage.reporter=lcov --coverage.reporter=json-summary
+        env:
+          FRONTEND_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: npx vitest run --changed="$FRONTEND_BASE_SHA" --passWithNoTests --coverage --coverage.reporter=lcov --coverage.reporter=json-summary
 
       - name: Patch coverage gate (PR only)
         if: github.event_name == 'pull_request'
+        env:
+          FRONTEND_BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
           if [ ! -f coverage/lcov.info ]; then
             # vitest --changed found no affected tests, so no coverage was emitted.
             # Fail if the diff includes frontend source files — uncovered changes shouldn't merge silently.
-            CHANGED_SOURCES=$(cd .. && git diff --name-only origin/main...HEAD \
+            CHANGED_SOURCES=$(cd .. && git diff --name-only "$FRONTEND_BASE_SHA"...HEAD \
               | grep -E '^frontend/src/.*\.(ts|tsx)$' \
               | grep -v '\.test\.' || true)
             if [ -n "$CHANGED_SOURCES" ]; then
@@ -240,7 +236,7 @@ jobs:
             echo "::notice::No frontend source files in diff; skipping patch-coverage gate."
             exit 0
           fi
-          diff-cover coverage/lcov.info --compare-branch=origin/main --fail-under=80
+          diff-cover coverage/lcov.info --compare-branch="$FRONTEND_BASE_SHA" --fail-under=80
 
       - name: Run full tests with coverage (main only)
         if: github.event_name == 'push'
