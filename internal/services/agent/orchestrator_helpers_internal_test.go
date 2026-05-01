@@ -685,6 +685,196 @@ func TestSnapshotSession_PropagatesProviderErrorWithoutUpdatingSession(t *testin
 	require.Empty(t, store.saves, "Save must not be called when Snapshot failed")
 }
 
+// TestShedOnRunResultDispatch wires a real AgentEnv with an instrumented
+// CodingCredentialProvider and asserts that the orchestrator's
+// shedOnRunResult routes a finished run's result.Error to the right
+// (ShedRateLimited / ShedAuthRejected / no-op) branch based on the error
+// surface. This is the regression guard that prevents a silent shedding
+// failure if the helper string matchers ever drift apart from the dispatcher.
+func TestShedOnRunResultDispatch(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	userID := uuid.New()
+	credID := uuid.New()
+
+	cases := []struct {
+		name             string
+		agentType        models.AgentType
+		result           *AgentResult
+		runErr           error
+		wantRateLimited  bool
+		wantAuthRejected bool
+	}{
+		{
+			name:             "claude code rate limit error sheds rate limited",
+			agentType:        models.AgentTypeClaudeCode,
+			result:           &AgentResult{Error: "anthropic api: 429 too many requests"},
+			wantRateLimited:  true,
+			wantAuthRejected: false,
+		},
+		{
+			name:             "claude code auth rejected error sheds auth rejected",
+			agentType:        models.AgentTypeClaudeCode,
+			result:           &AgentResult{Error: "401 Unauthorized: refresh_token_reused"},
+			wantRateLimited:  false,
+			wantAuthRejected: true,
+		},
+		{
+			name:             "claude code clean result is a no-op",
+			agentType:        models.AgentTypeClaudeCode,
+			result:           &AgentResult{Error: ""},
+			wantRateLimited:  false,
+			wantAuthRejected: false,
+		},
+		{
+			name:             "codex agent type bypasses shedding even on rate limit",
+			agentType:        models.AgentTypeCodex,
+			result:           &AgentResult{Error: "rate limit hit"},
+			wantRateLimited:  false,
+			wantAuthRejected: false,
+		},
+		{
+			name:             "nil result is a silent no-op",
+			agentType:        models.AgentTypeClaudeCode,
+			result:           nil,
+			wantRateLimited:  false,
+			wantAuthRejected: false,
+		},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			coding := &envCodingCredentialProvider{
+				resolvable: map[models.ProviderName][]models.DecryptedCodingCredential{
+					models.ProviderAnthropic: {
+						{
+							ID:       credID,
+							OrgID:    orgID,
+							UserID:   &userID,
+							Provider: models.ProviderAnthropic,
+							Status:   models.CodingCredentialStatusActive,
+							Config:   models.AnthropicConfig{APIKey: "sk-ant-test-1234"},
+						},
+					},
+				},
+			}
+			env := NewAgentEnv(AgentEnvDeps{
+				CodingCredentials: coding,
+				Provider:          &envSandboxProvider{},
+				Logger:            zerolog.Nop(),
+			})
+			// Seed recentPicks for the (orgID, userID, anthropic) key so the
+			// shed lookup resolves to credID. For the Codex case the lookup
+			// never runs because codingProviderForAgent returns "".
+			_ = env.resolveProviderConfig(context.Background(), orgID, &userID, models.ProviderAnthropic)
+
+			o := &Orchestrator{env: env, logger: zerolog.Nop()}
+			o.shedOnRunResult(tc.agentType, orgID, &userID, tc.result, tc.runErr, zerolog.Nop())
+
+			require.Equal(t, tc.wantRateLimited, len(coding.rateLimitedIDs) > 0,
+				"rate-limit shedding state mismatch for %q", tc.name)
+			require.Equal(t, tc.wantAuthRejected, len(coding.authRejectedIDs) > 0,
+				"auth-rejected shedding state mismatch for %q", tc.name)
+			if tc.wantRateLimited {
+				require.Equal(t, credID, coding.rateLimitedIDs[0],
+					"shed call must target the just-picked credential")
+			}
+			if tc.wantAuthRejected {
+				require.Equal(t, credID, coding.authRejectedIDs[0],
+					"shed call must target the just-picked credential")
+			}
+		})
+	}
+}
+
+// TestIsRateLimitedError pins the surface that triggers a ShedRateLimited
+// call. Drift here would silently turn shedding off on an upstream change in
+// provider error wording.
+func TestIsRateLimitedError(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name string
+		in   string
+		want bool
+	}{
+		{"empty string is not rate limited", "", false},
+		{"unrelated error is not rate limited", "context canceled", false},
+		{"phrase rate limit hit", "anthropic api: rate limit exceeded", true},
+		{"snake-case rate_limit code", `{"code":"rate_limit_exceeded"}`, true},
+		{"http 429 status", "got status 429 from upstream", true},
+		{"too many requests phrase", "Error: too many requests; retry later", true},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			require.Equal(t, tc.want, isRateLimitedError(tc.in))
+		})
+	}
+}
+
+// TestIsAuthRejectedError pins the surface that triggers a ShedAuthRejected
+// call. We keep the input lower-cased because the orchestrator does that
+// before matching; the test mirrors that contract.
+func TestIsAuthRejectedError(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name string
+		in   string
+		want bool
+	}{
+		{"empty string is not auth rejected", "", false},
+		{"unrelated error is not auth rejected", "context canceled", false},
+		{"refresh token reused", `error code: refresh_token_reused`, true},
+		{"invalid grant", `oauth: invalid_grant`, true},
+		{"invalid api key human form", "the provider returned: invalid api key", true},
+		{"invalid api key snake-case", `{"error":"invalid_api_key"}`, true},
+		{"401 unauthorized", "received 401 unauthorized from upstream", true},
+		{"401 unauthenticated", "401 unauthenticated: token expired and refresh failed", true},
+		{"authentication_error code", `{"type":"authentication_error"}`, true},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			require.Equal(t, tc.want, isAuthRejectedError(tc.in))
+		})
+	}
+}
+
+// TestCodingProviderForAgent locks the agent-type → provider mapping the
+// shed dispatcher uses. Codex and unknown agent types must return "" so the
+// dispatcher silently skips agents whose auth path bypasses recordPick.
+func TestCodingProviderForAgent(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name      string
+		agentType models.AgentType
+		want      models.ProviderName
+	}{
+		{"claude code maps to anthropic api key", models.AgentTypeClaudeCode, models.ProviderAnthropic},
+		{"gemini cli maps to gemini", models.AgentTypeGeminiCLI, models.ProviderGemini},
+		{"amp maps to amp", models.AgentTypeAmp, models.ProviderAmp},
+		{"pi maps to pi", models.AgentTypePi, models.ProviderPi},
+		{"codex returns empty so subscription auth is skipped", models.AgentTypeCodex, ""},
+		{"unknown agent type returns empty", models.AgentType("unknown"), ""},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			require.Equal(t, tc.want, codingProviderForAgent(tc.agentType))
+		})
+	}
+}
+
 func TestTruncateForLog(t *testing.T) {
 	t.Parallel()
 
