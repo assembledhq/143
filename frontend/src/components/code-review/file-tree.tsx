@@ -80,8 +80,6 @@ const TreeDirectory = memo(function TreeDirectory({
 }) {
   const [expanded, setExpanded] = useState(true);
   const entries = [...node.children.values()];
-  const dirs = entries.filter((n) => n.fileIndex === undefined);
-  const files = entries.filter((n) => n.fileIndex !== undefined);
 
   return (
     <div>
@@ -102,38 +100,43 @@ const TreeDirectory = memo(function TreeDirectory({
       )}
       {expanded && (
         <>
-          {dirs.map((dir) => (
-            <TreeDirectory
-              key={dir.fullPath}
-              node={dir}
-              activeFileIndex={activeFileIndex}
-              onFileSelect={onFileSelect}
-              depth={node.name ? depth + 1 : depth}
-            />
-          ))}
-          {files.map((fileNode) => (
-            <button
-              key={fileNode.fullPath}
-              onClick={() => onFileSelect(fileNode.fileIndex!)}
-              className={cn(
-                "flex items-center gap-1.5 w-full px-2 py-1 text-xs rounded transition-colors text-left",
-                fileNode.fileIndex === activeFileIndex
-                  ? "bg-primary/10 text-primary font-medium"
-                  : "text-foreground hover:bg-muted/50"
-              )}
-              style={{ paddingLeft: `${(node.name ? depth + 1 : depth) * 12 + 8}px` }}
-            >
-              <FileText className="h-3 w-3 shrink-0 text-muted-foreground" />
-              <span className="truncate flex-1">{fileNode.name}</span>
-              {fileNode.file && (
-                <span className="shrink-0 text-xs font-mono text-muted-foreground">
-                  <span className="text-green-600 dark:text-green-400">+{fileNode.file.stats.added}</span>
-                  {" "}
-                  <span className="text-red-600 dark:text-red-400">-{fileNode.file.stats.removed}</span>
-                </span>
-              )}
-            </button>
-          ))}
+          {entries.map((entry) => {
+            if (entry.fileIndex === undefined) {
+              return (
+                <TreeDirectory
+                  key={entry.fullPath}
+                  node={entry}
+                  activeFileIndex={activeFileIndex}
+                  onFileSelect={onFileSelect}
+                  depth={node.name ? depth + 1 : depth}
+                />
+              );
+            }
+
+            return (
+              <button
+                key={entry.fullPath}
+                onClick={() => onFileSelect(entry.fileIndex!)}
+                className={cn(
+                  "flex items-center gap-1.5 w-full px-2 py-1 text-xs rounded transition-colors text-left",
+                  entry.fileIndex === activeFileIndex
+                    ? "bg-primary/10 text-primary font-medium"
+                    : "text-foreground hover:bg-muted/50"
+                )}
+                style={{ paddingLeft: `${(node.name ? depth + 1 : depth) * 12 + 8}px` }}
+              >
+                <FileText className="h-3 w-3 shrink-0 text-muted-foreground" />
+                <span className="truncate flex-1">{entry.name}</span>
+                {entry.file && (
+                  <span className="shrink-0 text-xs font-mono text-muted-foreground">
+                    <span className="text-green-600 dark:text-green-400">+{entry.file.stats.added}</span>
+                    {" "}
+                    <span className="text-red-600 dark:text-red-400">-{entry.file.stats.removed}</span>
+                  </span>
+                )}
+              </button>
+            );
+          })}
         </>
       )}
     </div>
