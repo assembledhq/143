@@ -608,6 +608,76 @@ func TestLinearJobHandlers(t *testing.T) {
 		require.NoError(t, mock.ExpectationsWereMet(), "dead-letter hook should mark prepare state failed after retries exhaust")
 	})
 
+	t.Run("prepare_linear_primary forwards a valid user_id", func(t *testing.T) {
+		t.Parallel()
+
+		stores, mock := newTestStores(t)
+		defer mock.Close()
+
+		orgID := uuid.New()
+		sessionID := uuid.New()
+		userID := uuid.New()
+		mock.ExpectExec("UPDATE sessions[\\s\\S]+SET linear_prepare_state").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+		svc := linearservice.NewService(linearservice.Config{Sessions: stores.Sessions, Logger: zerolog.Nop()})
+		handler := newPrepareLinearPrimaryHandler(svc, zerolog.Nop())
+		payload := json.RawMessage(`{"org_id":"` + orgID.String() + `","session_id":"` + sessionID.String() + `","identifiers":[],"user_id":"` + userID.String() + `"}`)
+
+		err := handler(context.Background(), "prepare_linear_primary", payload)
+		require.NoError(t, err, "prepare_linear_primary should accept a well-formed user_id and proceed")
+		require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+	})
+
+	t.Run("prepare_linear_primary tolerates malformed user_id", func(t *testing.T) {
+		t.Parallel()
+
+		stores, mock := newTestStores(t)
+		defer mock.Close()
+
+		orgID := uuid.New()
+		sessionID := uuid.New()
+		mock.ExpectExec("UPDATE sessions[\\s\\S]+SET linear_prepare_state").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+		svc := linearservice.NewService(linearservice.Config{Sessions: stores.Sessions, Logger: zerolog.Nop()})
+		handler := newPrepareLinearPrimaryHandler(svc, zerolog.Nop())
+		payload := json.RawMessage(`{"org_id":"` + orgID.String() + `","session_id":"` + sessionID.String() + `","identifiers":[],"user_id":"not-a-uuid"}`)
+
+		err := handler(context.Background(), "prepare_linear_primary", payload)
+		require.NoError(t, err, "prepare_linear_primary should warn and proceed when user_id is malformed instead of failing the job")
+		require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+	})
+
+	t.Run("link_linear_issue validates payloads", func(t *testing.T) {
+		t.Parallel()
+
+		handler := newLinkLinearIssueHandler(linearservice.NewService(linearservice.Config{}), zerolog.Nop())
+		require.Error(t, handler(context.Background(), "link_linear_issue", json.RawMessage(`{bad json`)), "link_linear_issue should reject invalid JSON")
+		require.Error(t, handler(context.Background(), "link_linear_issue", json.RawMessage(`{"org_id":"not-a-uuid","session_id":"`+uuid.NewString()+`"}`)), "link_linear_issue should reject invalid org ids")
+		require.Error(t, handler(context.Background(), "link_linear_issue", json.RawMessage(`{"org_id":"`+uuid.NewString()+`","session_id":"not-a-uuid"}`)), "link_linear_issue should reject invalid session ids")
+	})
+
+	t.Run("link_linear_issue tolerates malformed user_id", func(t *testing.T) {
+		t.Parallel()
+
+		stores, mock := newTestStores(t)
+		defer mock.Close()
+
+		orgID := uuid.New()
+		sessionID := uuid.New()
+
+		svc := linearservice.NewService(linearservice.Config{Sessions: stores.Sessions, Logger: zerolog.Nop()})
+		handler := newLinkLinearIssueHandler(svc, zerolog.Nop())
+		payload := json.RawMessage(`{"org_id":"` + orgID.String() + `","session_id":"` + sessionID.String() + `","identifiers":[],"user_id":"not-a-uuid"}`)
+
+		err := handler(context.Background(), "link_linear_issue", payload)
+		require.NoError(t, err, "link_linear_issue should warn and proceed when user_id is malformed instead of failing the job")
+		require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+	})
+
 	t.Run("link_linear_issue does not mutate prepare state for empty related payloads", func(t *testing.T) {
 		t.Parallel()
 
@@ -633,6 +703,26 @@ func TestLinearJobHandlers(t *testing.T) {
 		handler := newRefreshLinearTeamKeysHandler(linearservice.NewService(linearservice.Config{}), zerolog.Nop())
 		require.Error(t, handler(context.Background(), "refresh_linear_team_keys", json.RawMessage(`{bad json`)), "refresh_linear_team_keys should reject invalid JSON")
 		require.Error(t, handler(context.Background(), "refresh_linear_team_keys", json.RawMessage(`{"org_id":"not-a-uuid"}`)), "refresh_linear_team_keys should reject invalid org ids")
+	})
+
+	t.Run("refresh_linear_team_keys returns retryable when service fails", func(t *testing.T) {
+		t.Parallel()
+
+		svc := linearservice.NewService(linearservice.Config{
+			Integrations: workerLinearIntegrationReader{},
+			Credentials:  workerLinearCredentialReader{},
+			ClientFactory: func(context.Context, string) (linearservice.Client, error) {
+				return nil, errors.New("linear unavailable")
+			},
+			Logger: zerolog.Nop(),
+		})
+		handler := newRefreshLinearTeamKeysHandler(svc, zerolog.Nop())
+		payload := json.RawMessage(`{"org_id":"` + uuid.NewString() + `"}`)
+
+		err := handler(context.Background(), "refresh_linear_team_keys", payload)
+		require.Error(t, err, "refresh_linear_team_keys should propagate service errors")
+		var retryable *RetryableError
+		require.ErrorAs(t, err, &retryable, "refresh_linear_team_keys should return a retryable error so transient outages don't drop the cron run")
 	})
 
 	t.Run("linear_milestone skips sessions without primary link", func(t *testing.T) {
@@ -725,6 +815,27 @@ func TestLinearJobHandlers(t *testing.T) {
 		err := handler(context.Background(), "linear_milestone", payload)
 		require.Error(t, err, "linear_milestone should retry when linked issue hydration fails")
 		require.Contains(t, err.Error(), "list linear session issue links", "error should explain that link hydration failed")
+		require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+	})
+
+	t.Run("linear_milestone retries when session fetch fails", func(t *testing.T) {
+		t.Parallel()
+
+		stores, mock := newTestStores(t)
+		defer mock.Close()
+
+		orgID := uuid.New()
+		sessionID := uuid.New()
+		mock.ExpectQuery("SELECT .* FROM sessions").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnError(errors.New("db unavailable"))
+
+		handler := newLinearMilestoneHandler(stores, linearservice.NewService(linearservice.Config{}), zerolog.Nop())
+		payload := json.RawMessage(`{"org_id":"` + orgID.String() + `","session_id":"` + sessionID.String() + `","event":"linked"}`)
+
+		err := handler(context.Background(), "linear_milestone", payload)
+		require.Error(t, err, "linear_milestone should surface session fetch failures so the worker can retry on the next attempt")
+		require.Contains(t, err.Error(), "fetch session", "error should explain that session fetch failed")
 		require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 	})
 

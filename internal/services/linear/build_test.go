@@ -1,6 +1,7 @@
 package linear
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"testing"
@@ -53,6 +54,53 @@ func TestBuildConstructsServiceDefaults(t *testing.T) {
 	client, err := svc.clientFactory(context.Background(), "tok")
 	require.NoError(t, err, "Build should use the injected client factory")
 	require.NotNil(t, client, "Build should preserve injected client factory result")
+}
+
+func TestBuildWarnsOnMissingAppBaseURL(t *testing.T) {
+	t.Parallel()
+
+	var buf bytes.Buffer
+	logger := zerolog.New(&buf)
+	svc := Build(BuildDeps{
+		Logger:        logger,
+		Integrations:  fakeIntegrationReader{},
+		Credentials:   fakeCredentialReader{},
+		ClientFactory: func(context.Context, string) (Client, error) { return newFakeLinearClient(), nil },
+	})
+	require.NotNil(t, svc, "Build should still construct a service when AppBaseURL is missing")
+	require.Contains(t, buf.String(), "AppBaseURL is empty",
+		"Build should warn when AppBaseURL is empty so misconfigured deployments surface in logs")
+}
+
+func TestBuildWarnsOnNonAbsoluteAppBaseURL(t *testing.T) {
+	t.Parallel()
+
+	var buf bytes.Buffer
+	logger := zerolog.New(&buf)
+	Build(BuildDeps{
+		Logger:        logger,
+		Integrations:  fakeIntegrationReader{},
+		Credentials:   fakeCredentialReader{},
+		ClientFactory: func(context.Context, string) (Client, error) { return newFakeLinearClient(), nil },
+		AppBaseURL:    "/relative",
+	})
+	require.Contains(t, buf.String(), "AppBaseURL is not absolute",
+		"Build should warn when AppBaseURL lacks an http(s) scheme since Linear renders such links as plain text")
+}
+
+func TestBuildUsesDefaultClientFactoryWhenUnset(t *testing.T) {
+	t.Parallel()
+
+	svc := Build(BuildDeps{
+		Logger:       zerolog.Nop(),
+		Integrations: fakeIntegrationReader{},
+		Credentials:  fakeCredentialReader{},
+		AppBaseURL:   "https://app.test",
+	})
+	require.NotNil(t, svc.clientFactory, "Build should fall back to a default client factory when none is supplied")
+	client, err := svc.clientFactory(context.Background(), "tok")
+	require.NoError(t, err, "default client factory should not error for a non-empty token")
+	require.NotNil(t, client, "default client factory should return a Linear client")
 }
 
 func TestEnqueueMilestone(t *testing.T) {
