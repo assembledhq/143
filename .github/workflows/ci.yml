@@ -105,6 +105,16 @@ jobs:
         with:
           python-version: '3.x'
 
+      - name: Materialize PR base ref (PR only)
+        if: github.event_name == 'pull_request'
+        env:
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          if ! git cat-file -e "${PR_BASE_SHA}^{commit}" 2>/dev/null; then
+            git fetch --no-tags --depth=1 origin "${PR_BASE_SHA}"
+          fi
+          git branch -f pr-base "${PR_BASE_SHA}"
+
       - name: Install diff-cover tooling (PR only)
         if: github.event_name == 'pull_request'
         run: |
@@ -125,7 +135,7 @@ jobs:
 
       - name: Patch coverage gate (PR only)
         if: github.event_name == 'pull_request'
-        run: diff-cover coverage.xml --compare-branch='${{ github.event.pull_request.base.sha }}' --fail-under=80
+        run: diff-cover coverage.xml --compare-branch=pr-base --fail-under=80
 
       - name: Run tests with race + coverage (main only)
         if: github.event_name == 'push'
@@ -196,6 +206,17 @@ jobs:
         with:
           python-version: '3.x'
 
+      - name: Materialize PR base ref (PR only)
+        if: github.event_name == 'pull_request'
+        env:
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        working-directory: ${{ github.workspace }}
+        run: |
+          if ! git cat-file -e "${PR_BASE_SHA}^{commit}" 2>/dev/null; then
+            git fetch --no-tags --depth=1 origin "${PR_BASE_SHA}"
+          fi
+          git branch -f pr-base "${PR_BASE_SHA}"
+
       - name: Install diff-cover (PR only)
         if: github.event_name == 'pull_request'
         run: pip install 'diff_cover==10.2.0'
@@ -206,7 +227,7 @@ jobs:
       - name: Run affected tests (PR)
         if: github.event_name == 'pull_request'
         timeout-minutes: 10
-        run: npx vitest run --changed='${{ github.event.pull_request.base.sha }}' --passWithNoTests --coverage --coverage.reporter=lcov --coverage.reporter=json-summary
+        run: npx vitest run --changed=pr-base --passWithNoTests --coverage --coverage.reporter=lcov --coverage.reporter=json-summary
 
       - name: Patch coverage gate (PR only)
         if: github.event_name == 'pull_request'
@@ -214,7 +235,7 @@ jobs:
           if [ ! -f coverage/lcov.info ]; then
             # vitest --changed found no affected tests, so no coverage was emitted.
             # Fail if the diff includes frontend source files — uncovered changes shouldn't merge silently.
-            CHANGED_SOURCES=$(cd .. && git diff --name-only '${{ github.event.pull_request.base.sha }}'...HEAD \
+            CHANGED_SOURCES=$(cd .. && git diff --name-only pr-base...HEAD \
               | grep -E '^frontend/src/.*\.(ts|tsx)$' \
               | grep -v '\.test\.' || true)
             if [ -n "$CHANGED_SOURCES" ]; then
@@ -225,7 +246,7 @@ jobs:
             echo "::notice::No frontend source files in diff; skipping patch-coverage gate."
             exit 0
           fi
-          diff-cover coverage/lcov.info --compare-branch='${{ github.event.pull_request.base.sha }}' --fail-under=80
+          diff-cover coverage/lcov.info --compare-branch=pr-base --fail-under=80
 
       - name: Run full tests with coverage (main only)
         if: github.event_name == 'push'
