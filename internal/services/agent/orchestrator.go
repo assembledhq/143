@@ -20,6 +20,7 @@ import (
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/services/github/identity"
 	"github.com/assembledhq/143/internal/services/integration"
+	"github.com/assembledhq/143/internal/services/linear"
 	"github.com/assembledhq/143/internal/services/mcp"
 	"github.com/assembledhq/143/internal/services/sandboxauth"
 	"github.com/assembledhq/143/internal/services/storage"
@@ -745,7 +746,7 @@ func primaryLinkedIssue(links []models.SessionIssueLink) *models.SessionIssueLin
 	return nil
 }
 
-func snapshotEntriesFromLinks(links []models.SessionIssueLink) []models.SessionIssueSnapshotEntry {
+func snapshotEntriesFromLinks(links []models.SessionIssueLink) ([]models.SessionIssueSnapshotEntry, error) {
 	entries := make([]models.SessionIssueSnapshotEntry, 0, len(links))
 	for _, link := range links {
 		entry := models.SessionIssueSnapshotEntry{
@@ -770,9 +771,59 @@ func snapshotEntriesFromLinks(links []models.SessionIssueLink) []models.SessionI
 		if link.IssueSource != nil {
 			entry.Source = *link.IssueSource
 		}
+		if err := applyLinearPrimarySnapshot(&entry, link.RawLinearPrimarySnapshot); err != nil {
+			return nil, fmt.Errorf("decode linear primary snapshot for link %s: %w", link.ID, err)
+		}
 		entries = append(entries, entry)
 	}
-	return entries
+	return entries, nil
+}
+
+func applyLinearPrimarySnapshot(entry *models.SessionIssueSnapshotEntry, raw json.RawMessage) error {
+	if entry == nil || len(raw) == 0 || string(raw) == "null" {
+		return nil
+	}
+	var snapshot linear.LinearTurnContext
+	if err := json.Unmarshal(raw, &snapshot); err != nil {
+		return err
+	}
+	if snapshot.Identifier != "" {
+		entry.ExternalID = snapshot.Identifier
+	}
+	if snapshot.Title != "" {
+		entry.Title = snapshot.Title
+	}
+	if snapshot.Description != "" {
+		entry.Description = snapshot.Description
+	}
+	entry.StateName = snapshot.StateName
+	entry.StateType = snapshot.StateType
+	entry.Priority = snapshot.Priority
+	entry.AssigneeName = snapshot.AssigneeName
+	entry.TeamKey = snapshot.TeamKey
+	entry.TeamName = snapshot.TeamName
+	entry.URL = snapshot.URL
+	if len(snapshot.Attachments) > 0 {
+		entry.Attachments = make([]models.SessionIssueSnapshotAttachment, 0, len(snapshot.Attachments))
+		for _, attachment := range snapshot.Attachments {
+			entry.Attachments = append(entry.Attachments, models.SessionIssueSnapshotAttachment{
+				Title:  attachment.Title,
+				URL:    attachment.URL,
+				Source: attachment.Source,
+			})
+		}
+	}
+	if len(snapshot.Comments) > 0 {
+		entry.Comments = make([]models.SessionIssueSnapshotComment, 0, len(snapshot.Comments))
+		for _, comment := range snapshot.Comments {
+			entry.Comments = append(entry.Comments, models.SessionIssueSnapshotComment{
+				Author:    comment.Author,
+				Body:      comment.Body,
+				CreatedAt: comment.CreatedAt,
+			})
+		}
+	}
+	return nil
 }
 
 func (o *Orchestrator) createIssueSnapshotForTurn(ctx context.Context, session *models.Session, turnNumber int) (*models.SessionTurnIssueSnapshot, error) {
@@ -786,11 +837,15 @@ func (o *Orchestrator) createIssueSnapshotForTurn(ctx context.Context, session *
 	if len(links) > 0 && primaryLinkedIssue(links) == nil {
 		return nil, fmt.Errorf("execution requires exactly one primary issue when links are present")
 	}
+	linkedIssues, err := snapshotEntriesFromLinks(links)
+	if err != nil {
+		return nil, err
+	}
 	snapshot := &models.SessionTurnIssueSnapshot{
 		OrgID:        session.OrgID,
 		SessionID:    session.ID,
 		TurnNumber:   turnNumber,
-		LinkedIssues: snapshotEntriesFromLinks(links),
+		LinkedIssues: linkedIssues,
 	}
 	if err := o.issueSnapshots.Create(ctx, snapshot); err != nil {
 		return nil, fmt.Errorf("create issue snapshot: %w", err)
@@ -2586,6 +2641,23 @@ func (o *Orchestrator) failRun(ctx context.Context, run *models.Session, errMsg 
 			o.logger.Warn().Err(err).Str("run_id", run.ID.String()).Msg("failed to update automation run on session failure")
 		}
 	}
+	o.enqueueLinearMilestone(ctx, run, "failed")
+}
+
+// enqueueLinearMilestone schedules a linear_milestone job for the terminal
+// session lifecycle states ("failed", "ended_no_pr"). The Linear linker is
+// the single owner of the attachment subtitle / rolling-comment / state
+// transition writes for these events; the orchestrator only fires the
+// signal. Best effort — a failed enqueue logs and moves on so terminal
+// session bookkeeping isn't held hostage by Linear-side hiccups.
+//
+// Routes through linear.EnqueueMilestone so the queue/priority/dedupe-key
+// shape stays consistent with the PR-event and no-changes paths.
+func (o *Orchestrator) enqueueLinearMilestone(ctx context.Context, run *models.Session, event string) {
+	if o == nil || run == nil {
+		return
+	}
+	linear.EnqueueMilestone(ctx, o.jobs, o.logger, run.OrgID, run.ID, event, 0)
 }
 
 // failRunWithCategory marks a run as failed with a structured failure category,

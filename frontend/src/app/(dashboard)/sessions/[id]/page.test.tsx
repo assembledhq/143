@@ -969,9 +969,10 @@ describe('SessionDetailPage', () => {
     const tabRail = await screen.findByLabelText('Session detail tabs');
     const actions = screen.getByLabelText('Session detail actions');
 
-    expect(tabRail).toHaveClass('overflow-x-auto');
-    expect(tabRail).toHaveClass('scrollbar-hide');
-    expect(actions).toHaveClass('shrink-0');
+	expect(tabRail).toHaveClass('overflow-x-auto');
+	expect(tabRail).toHaveClass('scrollbar-hide');
+	expect(tabRail).toHaveClass('min-w-0');
+	expect(actions).toHaveClass('shrink-0');
     expect(within(actions).getByRole('button', { name: 'View PR' })).toBeInTheDocument();
   });
 

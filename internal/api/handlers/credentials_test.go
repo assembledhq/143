@@ -348,14 +348,14 @@ func TestCredentialHandler_Delete_SelfHealsCappedLLMModel(t *testing.T) {
 			expectReset:   false,
 		},
 		{
-			// Org keeps an Anthropic key; gpt-5.4 still has no key path here, but
-			// the validator only blocks the cost-cap bypass, not "no provider
-			// configured." Don't reset on missing-provider — that's a read-side UX.
-			name:          "skips reset when no provider serves the model at all",
-			settings:      `{"llm_model":"gpt-5.4"}`,
-			listSummaries: []models.CredentialSummary{{Provider: models.ProviderAnthropic, Configured: true}},
-			llmDefaults:   map[string]string{},
-			expectReset:   false,
+			// Org keeps an Anthropic key; gpt-5.4 still has no runtime key path
+			// after the OpenAI delete, so the persisted model must be cleared.
+			name:              "clears llm_model when no provider serves the model at all",
+			settings:          `{"llm_model":"gpt-5.4"}`,
+			listSummaries:     []models.CredentialSummary{{Provider: models.ProviderAnthropic, Configured: true}},
+			llmDefaults:       map[string]string{},
+			expectReset:       true,
+			expectedFinalJSON: `{"llm_model":""}`,
 		},
 		{
 			name:          "no-op when llm_model is empty",

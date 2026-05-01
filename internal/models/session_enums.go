@@ -108,6 +108,45 @@ func (p SessionValidationPolicy) Validate() error {
 	}
 }
 
+// LinearPrepareState gates turn 1 of a session against pre-start Linear
+// resolution. "none" means there is no Linear primary to wait for. "pending"
+// holds the session in a recoverable preparing state. "ready" lets the
+// orchestrator start the agent. "failed" means we could not fetch the
+// promised Linear context — the user can retry; we never start blind.
+type LinearPrepareState string
+
+const (
+	LinearPrepareStateNone    LinearPrepareState = "none"
+	LinearPrepareStatePending LinearPrepareState = "pending"
+	LinearPrepareStateReady   LinearPrepareState = "ready"
+	LinearPrepareStateFailed  LinearPrepareState = "failed"
+)
+
+// AllLinearPrepareStates is the canonical, ordered list of valid
+// LinearPrepareState values. Validate() and the
+// chk_sessions_linear_prepare_state CHECK constraint in
+// migrations/000105_linear_session_linking.up.sql both consume this
+// vocabulary; TestLinearPrepareStateMigrationVocabularyMatchesGoEnum parses
+// the migration and pins the two together so a value added in one place
+// without the other breaks the build instead of the database.
+func AllLinearPrepareStates() []LinearPrepareState {
+	return []LinearPrepareState{
+		LinearPrepareStateNone,
+		LinearPrepareStatePending,
+		LinearPrepareStateReady,
+		LinearPrepareStateFailed,
+	}
+}
+
+func (s LinearPrepareState) Validate() error {
+	for _, valid := range AllLinearPrepareStates() {
+		if s == valid {
+			return nil
+		}
+	}
+	return fmt.Errorf("invalid LinearPrepareState: %q", s)
+}
+
 // SessionIssueLinkRole captures whether a linked issue owns lifecycle
 // transitions for the session or is contextual-only related context.
 type SessionIssueLinkRole string

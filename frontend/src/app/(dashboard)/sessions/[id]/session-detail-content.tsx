@@ -99,6 +99,7 @@ import type { ListResponse, Session, SessionDetail, SessionInputCommand, Session
 import { AuditLogTrigger } from "@/components/audit/audit-log-trigger";
 import { ResizeHandle } from "@/components/resize-handle";
 import { DiffStatsBadge, FileTree, SessionFooter, CommentsSummary, ReviewDiffView, PassSelector, type DiffPassEntry, type PassRange } from "@/components/code-review";
+import { LinkedIssueChips } from "./linked-issue-chips";
 import { useReviewComments } from "@/hooks/use-review-comments";
 import { useDiffViewState } from "@/hooks/use-diff-view-state";
 import { CodexDeviceCodeModal } from "@/components/codex-device-code-modal";
@@ -2706,6 +2707,7 @@ export function SessionDetailContent({ id }: { id: string }) {
                 onClick={() => openReview()}
               />
             )}
+            <LinkedIssueChips session={session} />
           </div>
           {/* Desktop toggle: hides/shows the inline right panel. */}
           <DisabledTooltip disabled={centerMode === "review" && showDetailPanel} content={detailToggleTitle}>

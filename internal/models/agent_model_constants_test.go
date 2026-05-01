@@ -445,11 +445,14 @@ func TestValidateLLMModelAccess(t *testing.T) {
 			platformAvailable: map[string]bool{"anthropic": true},
 		},
 		{
-			// No org or platform key serves the model — settings handler accepts;
-			// the read path will surface "no provider configured."
-			name:    "no key path returns nil (handled by read-side UX)",
+			name:    "no key path rejects otherwise supported models",
 			model:   "gpt-5.4-mini",
-			wantErr: false,
+			wantErr: true,
+		},
+		{
+			name:    "no key path rejects non-openai models too",
+			model:   "claude-sonnet-4-6",
+			wantErr: true,
 		},
 	}
 
