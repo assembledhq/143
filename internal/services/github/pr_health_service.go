@@ -131,6 +131,15 @@ func (s *PRService) buildPullRequestHealthResponse(ctx context.Context, pr model
 
 	current, err := s.pullRequests.GetHealthCurrent(ctx, pr.OrgID, pr.ID)
 	if err == nil {
+		// currentMatchesHead suppresses the cached health summary when it
+		// describes a SHA the PR has already moved past (e.g. after a "Push
+		// changes" follow-up). The HealthVersion != 0 short-circuit relies
+		// on PullRequestStore.UpdateHeadSHA resetting health_version to 0
+		// on every push — if a future writer changes that invariant the
+		// SHA comparison must become unconditional, otherwise stale
+		// "Resolve conflicts"/"Fix tests" banners can survive a fresh push.
+		// resp.HeadSHA == "" preserves legacy behavior for PRs that never
+		// had a head SHA recorded; nothing to compare against.
 		currentMatchesHead := pr.HealthVersion != 0 || resp.HeadSHA == "" || current.HeadSHA == resp.HeadSHA
 		var summary models.PullRequestHealthSummary
 		if currentMatchesHead {

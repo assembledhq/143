@@ -7,6 +7,7 @@ import (
 
 	"github.com/assembledhq/143/internal/models"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/pashagolub/pgxmock/v4"
 	"github.com/stretchr/testify/require"
 )
@@ -184,5 +185,30 @@ func TestPullRequestStore_UpdateHeadSHA(t *testing.T) {
 
 	err = store.UpdateHeadSHA(context.Background(), orgID, prID, "abc123def456")
 	require.NoError(t, err, "UpdateHeadSHA should persist the new commit SHA and mark cached health stale")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+// Drift detection: if the PR row was deleted between the push and the
+// follow-up UpdateHeadSHA, surface pgx.ErrNoRows so the worker dead-letters
+// and we can investigate instead of silently leaving GitHub with a new
+// commit no DB row tracks.
+func TestPullRequestStore_UpdateHeadSHA_NoRowReturnsErrNoRows(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := NewPullRequestStore(mock)
+
+	orgID := uuid.New()
+	prID := uuid.New()
+
+	mock.ExpectExec("UPDATE pull_requests[\\s\\S]*SET head_sha = @head_sha").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
+
+	err = store.UpdateHeadSHA(context.Background(), orgID, prID, "abc123def456")
+	require.ErrorIs(t, err, pgx.ErrNoRows, "UpdateHeadSHA should report drift when no PR row matched")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }

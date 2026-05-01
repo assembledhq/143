@@ -2182,6 +2182,14 @@ export function SessionDetailContent({ id }: { id: string }) {
             ? "push_changes"
             : "create_pr";
     if (action === "push_changes") {
+      // Mirror the canCreatePR gate on the create branch: don't fire the
+      // mutation until the session has a snapshot and isn't mid-turn.
+      // Without this, the OAuth callback firing while the session is still
+      // running would land an immediate 409 (or stale-snapshot error). The
+      // effect re-runs when these dependencies flip, so the replay still
+      // happens — just on the next tick when the session is actually ready.
+      const pushAvailable = hasPR && prStatus === "open";
+      if (!pushAvailable || !hasSnapshot || isRunning) return;
       resumeAttemptRef.current = resumePRParam;
       pushChangesMutation.mutate({ authorMode: "user", resumeToken: resumePRParam });
       return;
@@ -2189,7 +2197,7 @@ export function SessionDetailContent({ id }: { id: string }) {
     if (!canCreatePR) return;
     resumeAttemptRef.current = resumePRParam;
     createPRMutation.mutate({ authorMode: "user", resumeToken: resumePRParam });
-  }, [canCreatePR, createPRMutation, hasPR, prStatus, pushChangesMutation, resumeActionParam, resumePRParam]);
+  }, [canCreatePR, createPRMutation, hasPR, hasSnapshot, isRunning, prStatus, pushChangesMutation, resumeActionParam, resumePRParam]);
 
   const sessionDiff = session?.diff;
   const diffStats = useMemo(() => {

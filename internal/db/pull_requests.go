@@ -129,6 +129,10 @@ func (s *PullRequestStore) UpdateTitle(ctx context.Context, orgID, id uuid.UUID,
 // Stale signals are intentionally cleared rather than preserved so the UI
 // does not surface a misleading "needs action" banner against a commit that
 // no longer exists at HEAD.
+//
+// Returns pgx.ErrNoRows if no PR row matched (org_id/id mismatch or PR was
+// deleted between push and update). Callers can detect drift instead of
+// silently swallowing a no-op write.
 func (s *PullRequestStore) UpdateHeadSHA(ctx context.Context, orgID, id uuid.UUID, headSHA string) error {
 	query := `UPDATE pull_requests
 		SET head_sha = @head_sha,
@@ -140,13 +144,19 @@ func (s *PullRequestStore) UpdateHeadSHA(ctx context.Context, orgID, id uuid.UUI
 		    needs_agent_action = false,
 		    updated_at = now()
 		WHERE id = @id AND org_id = @org_id`
-	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
+	res, err := s.db.Exec(ctx, query, pgx.NamedArgs{
 		"id":          id,
 		"org_id":      orgID,
 		"head_sha":    headSHA,
 		"merge_state": models.PullRequestMergeStateUnknown,
 	})
-	return err
+	if err != nil {
+		return err
+	}
+	if res.RowsAffected() == 0 {
+		return pgx.ErrNoRows
+	}
+	return nil
 }
 
 // GetByRepoAndNumber looks up a PR by repo and number without org scoping.
