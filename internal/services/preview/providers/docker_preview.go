@@ -125,7 +125,18 @@ type serviceState struct {
 	port   int
 	status models.PreviewServiceStatus
 	err    string
+
+	// outputTail holds the last serviceTailLines stdout/stderr lines captured
+	// from the service process. It is appended to from the ExecStream onLine
+	// callback under d.mu and is surfaced to the observer when the service
+	// fails so the user can see why it exited.
+	outputTail []string
 }
+
+// serviceTailLines is the size of the per-service stdout/stderr ring buffer
+// that the provider keeps so it can replay the tail to the observer when a
+// service exits non-zero.
+const serviceTailLines = 200
 
 // DockerPreviewOption configures a DockerPreviewProvider.
 type DockerPreviewOption func(*DockerPreviewProvider)
@@ -161,7 +172,7 @@ func NewDockerPreviewProvider(
 // StartPreview
 // =============================================================================
 
-func (d *DockerPreviewProvider) StartPreview(ctx context.Context, sb *agent.Sandbox, cfg *models.PreviewConfig, extraEnv map[string]string) (*preview.PreviewHandle, error) {
+func (d *DockerPreviewProvider) StartPreview(ctx context.Context, sb *agent.Sandbox, cfg *models.PreviewConfig, extraEnv map[string]string, observer preview.ServiceObserver) (*preview.PreviewHandle, error) {
 	handle, err := generateHandle()
 	if err != nil {
 		return nil, fmt.Errorf("generate preview handle: %w", err)
@@ -239,7 +250,7 @@ func (d *DockerPreviewProvider) StartPreview(ctx context.Context, sb *agent.Sand
 		if name == cfg.Primary {
 			continue // primary starts last
 		}
-		if err := d.startService(svcCtx, state, name, svcCfg, svcEnvs[name]); err != nil {
+		if err := d.startService(svcCtx, state, name, svcCfg, svcEnvs[name], observer); err != nil {
 			d.cleanupState(handle)
 			return nil, fmt.Errorf("start service %q: %w", name, err)
 		}
@@ -247,7 +258,7 @@ func (d *DockerPreviewProvider) StartPreview(ctx context.Context, sb *agent.Sand
 	// Start primary service.
 	if primaryCfg, ok := cfg.Services[cfg.Primary]; ok {
 		primaryPort = primaryCfg.Port
-		if err := d.startService(svcCtx, state, cfg.Primary, primaryCfg, svcEnvs[cfg.Primary]); err != nil {
+		if err := d.startService(svcCtx, state, cfg.Primary, primaryCfg, svcEnvs[cfg.Primary], observer); err != nil {
 			d.cleanupState(handle)
 			return nil, fmt.Errorf("start primary service %q: %w", cfg.Primary, err)
 		}
@@ -269,14 +280,16 @@ func (d *DockerPreviewProvider) StartPreview(ctx context.Context, sb *agent.Sand
 			if primaryCfg.Ready.TimeoutSeconds > 0 {
 				timeout = time.Duration(primaryCfg.Ready.TimeoutSeconds) * time.Second
 			}
-			if err := d.waitForReadiness(ctx, sb, primaryCfg.Port, primaryCfg.Ready.HTTPPath, timeout); err != nil {
+			if err := d.waitForReadiness(ctx, state, cfg.Primary, primaryCfg.Port, primaryCfg.Ready.HTTPPath, timeout); err != nil {
 				d.cleanupState(handle)
 				return nil, fmt.Errorf("%w: primary service %q (port %d): %v", preview.ErrServiceNotReady, cfg.Primary, primaryCfg.Port, err)
 			}
 			d.mu.Lock()
 			state.services[cfg.Primary].status = models.PreviewServiceStatusReady
+			pid := state.services[cfg.Primary].pid
 			d.mu.Unlock()
 			d.logger.Info().Str("service", cfg.Primary).Int("port", primaryCfg.Port).Msg("primary service ready (progressive)")
+			notifyServiceReady(observer, cfg.Primary, primaryCfg.Port, pid)
 			partiallyReady = true
 		}
 
@@ -293,21 +306,27 @@ func (d *DockerPreviewProvider) StartPreview(ctx context.Context, sb *agent.Sand
 					timeout = time.Duration(svcCfg.Ready.TimeoutSeconds) * time.Second
 				}
 				bgCtx, cancel := context.WithTimeout(svcCtx, timeout)
-				if err := d.waitForReadiness(bgCtx, sb, svcCfg.Port, svcCfg.Ready.HTTPPath, timeout); err != nil {
+				if err := d.waitForReadiness(bgCtx, state, name, svcCfg.Port, svcCfg.Ready.HTTPPath, timeout); err != nil {
 					d.logger.Warn().Err(err).Str("service", name).Msg("support service readiness failed (progressive)")
 					d.mu.Lock()
+					var tail []string
 					if ss, ok := state.services[name]; ok {
 						ss.status = models.PreviewServiceStatusFailed
 						ss.err = err.Error()
+						tail = append([]string(nil), ss.outputTail...)
 					}
 					d.mu.Unlock()
+					notifyServiceFailed(observer, name, err.Error(), tail)
 				} else {
 					d.mu.Lock()
+					var pid int
 					if ss, ok := state.services[name]; ok {
 						ss.status = models.PreviewServiceStatusReady
+						pid = ss.pid
 					}
 					d.mu.Unlock()
 					d.logger.Info().Str("service", name).Int("port", svcCfg.Port).Msg("support service ready (progressive)")
+					notifyServiceReady(observer, name, svcCfg.Port, pid)
 				}
 				cancel()
 			}
@@ -319,14 +338,16 @@ func (d *DockerPreviewProvider) StartPreview(ctx context.Context, sb *agent.Sand
 			if svcCfg.Ready.TimeoutSeconds > 0 {
 				timeout = time.Duration(svcCfg.Ready.TimeoutSeconds) * time.Second
 			}
-			if err := d.waitForReadiness(ctx, sb, svcCfg.Port, svcCfg.Ready.HTTPPath, timeout); err != nil {
+			if err := d.waitForReadiness(ctx, state, name, svcCfg.Port, svcCfg.Ready.HTTPPath, timeout); err != nil {
 				d.cleanupState(handle)
 				return nil, fmt.Errorf("%w: service %q (port %d): %v", preview.ErrServiceNotReady, name, svcCfg.Port, err)
 			}
 			d.mu.Lock()
 			state.services[name].status = models.PreviewServiceStatusReady
+			pid := state.services[name].pid
 			d.mu.Unlock()
 			d.logger.Info().Str("service", name).Int("port", svcCfg.Port).Msg("service ready")
+			notifyServiceReady(observer, name, svcCfg.Port, pid)
 		}
 	}
 
@@ -829,12 +850,30 @@ func (d *DockerPreviewProvider) runInitScript(
 // Service management
 // =============================================================================
 
+// notifyServiceReady invokes observer.OnServiceReady when observer is non-nil.
+// Centralised so callers can stay nil-safe without scattering checks.
+func notifyServiceReady(observer preview.ServiceObserver, name string, port, pid int) {
+	if observer == nil {
+		return
+	}
+	observer.OnServiceReady(name, port, pid)
+}
+
+// notifyServiceFailed invokes observer.OnServiceFailed when observer is non-nil.
+func notifyServiceFailed(observer preview.ServiceObserver, name, errMsg string, tail []string) {
+	if observer == nil {
+		return
+	}
+	observer.OnServiceFailed(name, errMsg, tail)
+}
+
 func (d *DockerPreviewProvider) startService(
 	ctx context.Context,
 	state *previewState,
 	name string,
 	svcCfg models.ServiceConfig,
 	env map[string]string,
+	observer preview.ServiceObserver,
 ) error {
 	// Build the command with environment variables and working directory.
 	var cmdParts []string
@@ -900,30 +939,60 @@ func (d *DockerPreviewProvider) startService(
 		}()
 
 		exitCode, err := d.executor.ExecStream(svcCtx, state.sandbox, cmd, func(line []byte) {
-			// Log output for diagnostics. In a full implementation this
-			// would be streamed to the preview log store.
-			d.logger.Debug().Str("service", name).Str("output", string(line)).Msg("service output")
+			// Append to the per-service ring buffer so we can replay the tail
+			// to the observer when the service fails. We copy the bytes
+			// because ExecStream reuses the slice across calls.
+			s := string(line)
+			d.mu.Lock()
+			if len(ss.outputTail) >= serviceTailLines {
+				ss.outputTail = ss.outputTail[1:]
+			}
+			ss.outputTail = append(ss.outputTail, s)
+			d.mu.Unlock()
+			d.logger.Debug().Str("service", name).Str("output", s).Msg("service output")
 		}, io.Discard)
 
 		d.mu.Lock()
-		defer d.mu.Unlock()
-		if err != nil || exitCode != 0 {
+		var tail []string
+		failed := err != nil || exitCode != 0
+		if failed {
 			ss.status = models.PreviewServiceStatusFailed
 			if err != nil {
 				ss.err = err.Error()
 			} else {
 				ss.err = fmt.Sprintf("exited with code %d", exitCode)
 			}
-			d.logger.Error().Str("service", name).Int("exit_code", exitCode).Err(err).Msg("service exited")
+			tail = append([]string(nil), ss.outputTail...)
 		} else {
 			ss.status = models.PreviewServiceStatusStopped
+		}
+		errMsg := ss.err
+		d.mu.Unlock()
+
+		if failed {
+			// Surface the tail at error level so it shows up in worker logs
+			// for ops debugging — the ExecStream callback only logs each line
+			// at debug, which is filtered out in production.
+			evt := d.logger.Error().Str("service", name).Int("exit_code", exitCode).Err(err)
+			if len(tail) > 0 {
+				evt = evt.Strs("output_tail", tail)
+			}
+			evt.Msg("service exited")
+			notifyServiceFailed(observer, name, errMsg, tail)
 		}
 	}()
 
 	return nil
 }
 
-func (d *DockerPreviewProvider) waitForReadiness(ctx context.Context, sb *agent.Sandbox, port int, httpPath string, timeout time.Duration) error {
+// readinessProbeAttemptTimeout caps how long a single curl-via-docker-exec
+// call inside the sandbox is allowed to take. Without this, a wedged docker
+// daemon can stretch the overall readiness budget far past its declared
+// timeout — the for-select can only react to deadline.C *between* probe
+// attempts, so a slow exec stalls the timer too.
+const readinessProbeAttemptTimeout = 5 * time.Second
+
+func (d *DockerPreviewProvider) waitForReadiness(ctx context.Context, state *previewState, name string, port int, httpPath string, timeout time.Duration) error {
 	deadline := time.NewTimer(timeout)
 	defer deadline.Stop()
 	tick := time.NewTicker(time.Second)
@@ -933,14 +1002,42 @@ func (d *DockerPreviewProvider) waitForReadiness(ctx context.Context, sb *agent.
 	// Shell-escape the path defensively even though ValidateConfig restricts characters.
 	cmd := fmt.Sprintf("curl -sf -o /dev/null %s", shellEscape(fmt.Sprintf("http://localhost:%d%s", port, httpPath)))
 
+	// Snapshot of the service status read each tick. If the goroutine
+	// running the service in startService has already set Failed/Stopped
+	// (i.e. the process exited before becoming ready), there is no point
+	// continuing to poll — bail immediately with the captured error.
+	checkExited := func() error {
+		d.mu.RLock()
+		defer d.mu.RUnlock()
+		ss, ok := state.services[name]
+		if !ok {
+			return nil
+		}
+		switch ss.status {
+		case models.PreviewServiceStatusFailed:
+			if ss.err != "" {
+				return fmt.Errorf("service %q exited before becoming ready: %s", name, ss.err)
+			}
+			return fmt.Errorf("service %q exited before becoming ready", name)
+		case models.PreviewServiceStatusStopped:
+			return fmt.Errorf("service %q stopped before becoming ready", name)
+		}
+		return nil
+	}
+
 	for {
+		if err := checkExited(); err != nil {
+			return err
+		}
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-deadline.C:
 			return fmt.Errorf("readiness probe timed out after %s", timeout)
 		case <-tick.C:
-			exitCode, _ := d.executor.Exec(ctx, sb, cmd, io.Discard, io.Discard)
+			execCtx, cancel := context.WithTimeout(ctx, readinessProbeAttemptTimeout)
+			exitCode, _ := d.executor.Exec(execCtx, state.sandbox, cmd, io.Discard, io.Discard)
+			cancel()
 			if exitCode == 0 {
 				return nil
 			}
