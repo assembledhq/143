@@ -804,6 +804,8 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Patch("/api/v1/projects/{id}", projectHandler.Update)
 				r.Delete("/api/v1/projects/{id}", projectHandler.Delete)
 				r.Post("/api/v1/projects/{id}/start", projectHandler.Start)
+				r.Post("/api/v1/projects/{id}/archive", projectHandler.Archive)
+				r.Post("/api/v1/projects/{id}/unarchive", projectHandler.Unarchive)
 				r.Post("/api/v1/projects/{id}/run", projectHandler.RunNow)
 				r.Post("/api/v1/projects/{id}/tasks", projectHandler.CreateTask)
 				r.Patch("/api/v1/projects/{id}/tasks/{taskId}", projectHandler.UpdateTask)

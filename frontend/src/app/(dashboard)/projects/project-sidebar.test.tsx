@@ -1,10 +1,14 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { http, HttpResponse } from 'msw';
-import { renderWithProviders, screen } from '@/test/test-utils';
+import { fireEvent, renderWithProviders, screen, waitFor } from '@/test/test-utils';
 import userEvent from '@testing-library/user-event';
 import { server } from '@/test/mocks/server';
 import { ProjectSidebar } from './project-sidebar';
 import type { Project, ListResponse } from '@/lib/types';
+
+const { notifyError } = vi.hoisted(() => ({
+  notifyError: vi.fn(),
+}));
 
 vi.mock('next/link', () => ({
   default: ({ children, href, ...props }: React.ComponentProps<'a'> & { href: string }) => (
@@ -36,6 +40,12 @@ vi.mock('@/hooks/use-auth', () => ({
   useAuth: () => mockAuthState,
 }));
 
+vi.mock('@/lib/notify', () => ({
+  notify: {
+    error: notifyError,
+  },
+}));
+
 describe('ProjectSidebar', () => {
   beforeEach(() => {
     mockPathname = '/projects';
@@ -43,6 +53,7 @@ describe('ProjectSidebar', () => {
     mockAuthState.user = { id: 'user-1' };
     mockAuthState.isLoading = false;
     mockAuthState.logout = vi.fn();
+    notifyError.mockReset();
   });
 
   it('shows loading state initially', () => {
@@ -181,6 +192,58 @@ describe('ProjectSidebar', () => {
     expect(screen.getByRole('tab', { name: /Active/ })).toBeInTheDocument();
     expect(screen.getByRole('tab', { name: /Draft/ })).toBeInTheDocument();
     expect(screen.getByRole('tab', { name: /Done/ })).toBeInTheDocument();
+    expect(screen.getByRole('tab', { name: /Archived/ })).toBeInTheDocument();
+  });
+
+  it('archives a project from the swipe action', async () => {
+    let archiveCalls = 0;
+    server.use(
+      http.post('*/api/v1/projects/proj-1/archive', () => {
+        archiveCalls += 1;
+        return HttpResponse.json({ status: 'archived' });
+      }),
+    );
+
+    renderWithProviders(<ProjectSidebar />);
+    const row = await screen.findByText('Test Project');
+    const surface = row.closest('[data-swipe-surface="true"]');
+    expect(surface).not.toBeNull();
+
+    fireEvent.touchStart(surface!, { touches: [{ clientX: 220, clientY: 24 }] });
+    fireEvent.touchMove(surface!, { touches: [{ clientX: 120, clientY: 26 }] });
+    fireEvent.touchEnd(surface!);
+
+    fireEvent.click(screen.getAllByRole('button', { name: 'Archive project' })[0]);
+
+    await waitFor(() => {
+      expect(archiveCalls).toBe(1);
+    });
+  });
+
+  it('shows an error toast when project archive fails', async () => {
+    server.use(
+      http.post('*/api/v1/projects/proj-1/archive', () => {
+        return HttpResponse.json(
+          { error: { code: 'ARCHIVE_FAILED', message: 'archive failed' } },
+          { status: 409 },
+        );
+      }),
+    );
+
+    renderWithProviders(<ProjectSidebar />);
+    const row = await screen.findByText('Test Project');
+    const surface = row.closest('[data-swipe-surface="true"]');
+    expect(surface).not.toBeNull();
+
+    fireEvent.touchStart(surface!, { touches: [{ clientX: 220, clientY: 24 }] });
+    fireEvent.touchMove(surface!, { touches: [{ clientX: 120, clientY: 26 }] });
+    fireEvent.touchEnd(surface!);
+
+    fireEvent.click(screen.getAllByRole('button', { name: 'Archive project' })[0]);
+
+    await waitFor(() => {
+      expect(notifyError).toHaveBeenCalledWith('Failed to archive project');
+    });
   });
 
   it('uses a left-aligned horizontal-only tab scroller', async () => {

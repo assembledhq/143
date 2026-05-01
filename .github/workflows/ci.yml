@@ -8,6 +8,7 @@ on:
 
 env:
   GO_VERSION: "1.26"
+  GOFLAGS: "-buildvcs=false"
   NODE_VERSION: "22"
   BACKEND_COVERAGE_MIN: "70.0"
   BACKEND_COVERAGE_TARGET: "75.0"
@@ -28,7 +29,7 @@ jobs:
       docker: ${{ steps.filter.outputs.docker }}
       ci: ${{ steps.filter.outputs.ci }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dorny/paths-filter@v3
         id: filter
         with:
@@ -60,8 +61,8 @@ jobs:
     if: needs.changes.outputs.backend == 'true' || needs.changes.outputs.ci == 'true' || needs.changes.outputs.migrations == 'true' || github.event_name == 'push'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
         with:
           go-version: ${{ env.GO_VERSION }}
       - name: Multi-tenancy guardrails (schema + stores)
@@ -93,30 +94,10 @@ jobs:
     env:
       DATABASE_URL: postgres://onefortythree:dev@localhost:5432/onefortythree?sslmode=disable
     steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
         with:
           go-version: ${{ env.GO_VERSION }}
-
-      # actions/checkout on pull_request checks out refs/pull/N/merge and does not
-      # always set up origin/main as a remote-tracking ref — fetch it explicitly so
-      # diff-cover's `--compare-branch=origin/main` resolves.
-      - name: Fetch base branch (PR only)
-        if: github.event_name == 'pull_request'
-        run: git fetch --no-tags --prune origin +refs/heads/main:refs/remotes/origin/main
-
-      - uses: actions/setup-python@v5
-        if: github.event_name == 'pull_request'
-        with:
-          python-version: '3.x'
-
-      - name: Install diff-cover tooling (PR only)
-        if: github.event_name == 'pull_request'
-        run: |
-          pip install 'diff_cover==10.2.0'
-          go install github.com/boumenot/gocover-cobertura@v1.4.0
 
       - name: Run go vet and migrations
         run: |
@@ -126,13 +107,7 @@ jobs:
 
       - name: Run tests (PR — no race)
         if: github.event_name == 'pull_request'
-        run: |
-          go test ./internal/... -coverprofile=coverage.out -covermode=count -timeout=120s
-          gocover-cobertura < coverage.out > coverage.xml
-
-      - name: Patch coverage gate (PR only)
-        if: github.event_name == 'pull_request'
-        run: diff-cover coverage.xml --compare-branch=origin/main --fail-under=80
+        run: go test ./internal/... -coverprofile=coverage.out -covermode=count -timeout=120s
 
       - name: Run tests with race + coverage (main only)
         if: github.event_name == 'push'
@@ -169,8 +144,8 @@ jobs:
       run:
         working-directory: frontend
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v5
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
@@ -189,27 +164,24 @@ jobs:
       run:
         working-directory: frontend
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
           cache-dependency-path: frontend/package-lock.json
 
-      # actions/checkout on pull_request checks out refs/pull/N/merge and does not
-      # always set up origin/main as a remote-tracking ref — fetch it explicitly so
-      # vitest --changed=origin/main and diff-cover both resolve.
-      - name: Fetch base branch (PR only)
-        if: github.event_name == 'pull_request'
-        working-directory: ${{ github.workspace }}
-        run: git fetch --no-tags --prune origin +refs/heads/main:refs/remotes/origin/main
-
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         if: github.event_name == 'pull_request'
         with:
           python-version: '3.x'
+
+      - name: Materialize PR base ref (PR only)
+        if: github.event_name == 'pull_request'
+        working-directory: ${{ github.workspace }}
+        run: git branch -f pr-base HEAD^1
 
       - name: Install diff-cover (PR only)
         if: github.event_name == 'pull_request'
@@ -221,7 +193,7 @@ jobs:
       - name: Run affected tests (PR)
         if: github.event_name == 'pull_request'
         timeout-minutes: 10
-        run: npx vitest run --changed=origin/main --passWithNoTests --coverage --coverage.reporter=lcov --coverage.reporter=json-summary
+        run: npx vitest run --changed=pr-base --passWithNoTests --coverage --coverage.reporter=lcov --coverage.reporter=json-summary
 
       - name: Patch coverage gate (PR only)
         if: github.event_name == 'pull_request'
@@ -229,7 +201,7 @@ jobs:
           if [ ! -f coverage/lcov.info ]; then
             # vitest --changed found no affected tests, so no coverage was emitted.
             # Fail if the diff includes frontend source files — uncovered changes shouldn't merge silently.
-            CHANGED_SOURCES=$(cd .. && git diff --name-only origin/main...HEAD \
+            CHANGED_SOURCES=$(cd .. && git diff --name-only pr-base...HEAD \
               | grep -E '^frontend/src/.*\.(ts|tsx)$' \
               | grep -v '\.test\.' || true)
             if [ -n "$CHANGED_SOURCES" ]; then
@@ -240,7 +212,7 @@ jobs:
             echo "::notice::No frontend source files in diff; skipping patch-coverage gate."
             exit 0
           fi
-          diff-cover coverage/lcov.info --compare-branch=origin/main --fail-under=80
+          diff-cover coverage/lcov.info --compare-branch=pr-base --fail-under=80
 
       - name: Run full tests with coverage (main only)
         if: github.event_name == 'push'
@@ -292,8 +264,8 @@ jobs:
     env:
       DATABASE_URL: postgres://onefortythree:dev@localhost:5432/onefortythree?sslmode=disable
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
         with:
           go-version: ${{ env.GO_VERSION }}
 
@@ -312,7 +284,7 @@ jobs:
     if: needs.changes.outputs.docker == 'true' || needs.changes.outputs.ci == 'true' || github.event_name == 'push'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: docker/setup-buildx-action@v3
       - name: Build app Docker image
         uses: docker/build-push-action@v6
@@ -337,10 +309,10 @@ jobs:
     if: needs.changes.outputs.backend == 'true' || needs.changes.outputs.ci == 'true' || github.event_name == 'push'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           go-version: "1.26"
 
