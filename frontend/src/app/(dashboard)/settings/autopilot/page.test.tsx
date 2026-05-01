@@ -119,6 +119,8 @@ describe("AutopilotSettingsPage", () => {
     await waitFor(() => {
       expect(screen.getByLabelText("Max concurrent runs")).toHaveValue(5);
     });
+    expect(screen.getByLabelText("Suggest").parentElement).not.toHaveClass("rounded-lg", "border", "p-3");
+    expect(screen.getByLabelText("Conservative").parentElement).not.toHaveClass("rounded-lg", "border", "p-3");
   });
 
   it("autosaves a changed autonomy level immediately", async () => {

@@ -185,28 +185,35 @@ function AutopilotSteeringSheetBody({
                 },
               })
             }
+            className="gap-4"
           >
-            <label className="flex items-center gap-3 rounded-lg border p-3">
-              <RadioGroupItem value="manual" aria-label="Suggest" />
-              <div>
-                <p className="text-sm font-medium">Suggest</p>
-                <p className="text-xs text-muted-foreground">Autopilot recommends, you decide.</p>
-              </div>
-            </label>
-            <label className="flex items-center gap-3 rounded-lg border p-3">
-              <RadioGroupItem value="auto_simple" aria-label="Act on low-risk" />
-              <div>
-                <p className="text-sm font-medium">Act on low-risk</p>
-                <p className="text-xs text-muted-foreground">Auto-create sessions for bounded work.</p>
-              </div>
-            </label>
-            <label className="flex items-center gap-3 rounded-lg border p-3">
-              <RadioGroupItem value="auto_all" aria-label="Operate broadly" />
-              <div>
-                <p className="text-sm font-medium">Operate broadly</p>
-                <p className="text-xs text-muted-foreground">Autopilot runs automatically on eligible work.</p>
-              </div>
-            </label>
+            <div className="flex items-start gap-3">
+              <RadioGroupItem value="manual" id="steering-autonomy-manual" aria-label="Suggest" className="mt-0.5" />
+              <Label htmlFor="steering-autonomy-manual" className="items-start gap-0">
+                <div>
+                  <p className="text-sm font-medium">Suggest</p>
+                  <p className="text-xs text-muted-foreground">Autopilot recommends, you decide.</p>
+                </div>
+              </Label>
+            </div>
+            <div className="flex items-start gap-3">
+              <RadioGroupItem value="auto_simple" id="steering-autonomy-auto-simple" aria-label="Act on low-risk" className="mt-0.5" />
+              <Label htmlFor="steering-autonomy-auto-simple" className="items-start gap-0">
+                <div>
+                  <p className="text-sm font-medium">Act on low-risk</p>
+                  <p className="text-xs text-muted-foreground">Auto-create sessions for bounded work.</p>
+                </div>
+              </Label>
+            </div>
+            <div className="flex items-start gap-3">
+              <RadioGroupItem value="auto_all" id="steering-autonomy-auto-all" aria-label="Operate broadly" className="mt-0.5" />
+              <Label htmlFor="steering-autonomy-auto-all" className="items-start gap-0">
+                <div>
+                  <p className="text-sm font-medium">Operate broadly</p>
+                  <p className="text-xs text-muted-foreground">Autopilot runs automatically on eligible work.</p>
+                </div>
+              </Label>
+            </div>
           </RadioGroup>
         </div>
         <div className="flex justify-end">
