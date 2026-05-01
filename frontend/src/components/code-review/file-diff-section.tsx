@@ -32,6 +32,8 @@ interface FileDiffSectionProps {
   onUpdateComment?: (commentId: string, data: { body?: string; resolved?: boolean }) => void;
   onDeleteComment?: (commentId: string) => void;
   onBrowseFile?: (filePath: string) => void;
+  contextUnavailable?: boolean;
+  onContextUnavailable?: () => void;
 }
 
 type GapKind = "top" | "middle" | "bottom";
@@ -101,6 +103,8 @@ export const FileDiffSection = forwardRef<HTMLDivElement, FileDiffSectionProps>(
     onUpdateComment,
     onDeleteComment,
     onBrowseFile,
+    contextUnavailable,
+    onContextUnavailable,
   }, ref) {
     // Collect all line contents across hunks for a single batch highlight call
     const allLineContents = useMemo(() => {
@@ -217,6 +221,8 @@ export const FileDiffSection = forwardRef<HTMLDivElement, FileDiffSectionProps>(
             visibleStart={gapState.visibleStart}
             visibleEnd={gapState.visibleEnd}
             onExpand={makeHandleContextExpand(gapState)}
+            contextUnavailable={contextUnavailable}
+            onContextUnavailable={onContextUnavailable}
           />
           {expandedHunk ? (
             viewMode === "split" ? (
@@ -227,7 +233,7 @@ export const FileDiffSection = forwardRef<HTMLDivElement, FileDiffSectionProps>(
           ) : null}
         </div>
       );
-    }, [commonHunkProps, file.newPath, gapStates, makeHandleContextExpand, sessionId, viewMode]);
+    }, [commonHunkProps, file.newPath, gapStates, makeHandleContextExpand, sessionId, viewMode, contextUnavailable, onContextUnavailable]);
 
     const sections = useMemo(() => {
       const items: Array<{ type: "gap"; gap: ContextGapState } | { type: "hunk"; index: number; hunk: DiffFile["hunks"][number] }> = [];
