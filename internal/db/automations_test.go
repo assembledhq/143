@@ -572,30 +572,212 @@ func TestAutomationRunStore_GetByID(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
+// listByAutomationColumnSlice mirrors the column list emitted by
+// listByAutomationSelectColumns. Kept here (rather than reusing
+// automationRunColumnSlice) because the enriched query joins sessions and
+// pull_requests onto each row — the test needs to feed pgxmock the same
+// shape the scanner expects, including all-NULL rows for runs without a
+// linked session.
+func listByAutomationColumnSlice() []string {
+	return []string{
+		"id", "automation_id", "org_id", "triggered_at", "triggered_by",
+		"triggered_by_user_id", "scheduled_time", "goal_snapshot", "config_snapshot",
+		"status", "completed_at", "result_summary", "created_at", "updated_at",
+		"session_id", "session_title", "session_status",
+		"session_diff_stats",
+		"session_failure_explanation",
+		"session_failure_category",
+		"session_failure_next_steps",
+		"session_failure_retry_advised",
+		"session_pr_creation_state",
+		"pr_number", "pr_url", "pr_status", "pr_ci_status",
+	}
+}
+
 func TestAutomationRunStore_ListByAutomation(t *testing.T) {
 	t.Parallel()
 
-	mock, err := pgxmock.NewPool()
-	require.NoError(t, err)
-	defer mock.Close()
-
-	store := NewAutomationRunStore(mock)
 	now := time.Now()
+	sessionID := uuid.New()
+	title := "Refactor diff viewer"
+	failureExplanation := "Three tests failed in orchestrator_test.go"
+	failureCategory := "tests-failing"
+	failureNextSteps := []string{"Re-run with --focus orchestrator", "Inspect logs in session"}
+	prURL := "https://github.com/example/repo/pull/1213"
 
-	mock.ExpectQuery("SELECT .+ FROM automation_runs WHERE automation_id").
-		WithArgs(anyArgs(2)...).
-		WillReturnRows(
-			pgxmock.NewRows(automationRunColumnSlice()).AddRow(
+	type prRow struct {
+		number   int
+		url      string
+		status   string
+		ciStatus string
+	}
+	type sessionRow struct {
+		id                  uuid.UUID
+		title               *string
+		status              string
+		diffStats           []byte
+		failureExplanation  *string
+		failureCategory     *string
+		failureNextSteps    []string
+		failureRetryAdvised bool
+		prCreationState     string
+		pr                  *prRow
+	}
+
+	cases := []struct {
+		name             string
+		runStatus        string
+		session          *sessionRow
+		assertEnrichment func(t *testing.T, got models.AutomationRun)
+	}{
+		{
+			name:      "completed run with session and PR",
+			runStatus: models.AutomationRunStatusCompleted,
+			session: &sessionRow{
+				id:              sessionID,
+				title:           &title,
+				status:          string(models.SessionStatusCompleted),
+				diffStats:       []byte(`{"added":128,"removed":23,"files_changed":4}`),
+				prCreationState: "succeeded",
+				pr: &prRow{
+					number:   1213,
+					url:      prURL,
+					status:   "open",
+					ciStatus: "success",
+				},
+			},
+			assertEnrichment: func(t *testing.T, got models.AutomationRun) {
+				t.Helper()
+				require.NotNil(t, got.Session)
+				require.Equal(t, sessionID, got.Session.ID)
+				require.Equal(t, "Refactor diff viewer", *got.Session.Title)
+				require.Equal(t, string(models.SessionStatusCompleted), got.Session.Status)
+				require.JSONEq(t, `{"added":128,"removed":23,"files_changed":4}`, string(got.Session.DiffStats))
+				require.NotNil(t, got.Session.PR)
+				require.Equal(t, 1213, got.Session.PR.Number)
+				require.Equal(t, prURL, got.Session.PR.URL)
+				require.Equal(t, "open", got.Session.PR.Status)
+				require.Equal(t, "success", got.Session.PR.CIStatus)
+			},
+		},
+		{
+			name:      "completed run with session but no PR",
+			runStatus: models.AutomationRunStatusCompleted,
+			session: &sessionRow{
+				id:              sessionID,
+				title:           &title,
+				status:          string(models.SessionStatusCompleted),
+				diffStats:       []byte(`{"added":12,"removed":3}`),
+				prCreationState: "idle",
+			},
+			assertEnrichment: func(t *testing.T, got models.AutomationRun) {
+				t.Helper()
+				require.NotNil(t, got.Session)
+				require.Nil(t, got.Session.PR)
+				require.Equal(t, models.PRCreationState("idle"), got.Session.PRCreationState)
+			},
+		},
+		{
+			name:      "failed run carries failure metadata",
+			runStatus: models.AutomationRunStatusFailed,
+			session: &sessionRow{
+				id:                  sessionID,
+				title:               nil,
+				status:              string(models.SessionStatusFailed),
+				failureExplanation:  &failureExplanation,
+				failureCategory:     &failureCategory,
+				failureNextSteps:    failureNextSteps,
+				failureRetryAdvised: true,
+				prCreationState:     "idle",
+			},
+			assertEnrichment: func(t *testing.T, got models.AutomationRun) {
+				t.Helper()
+				require.NotNil(t, got.Session)
+				require.Equal(t, failureExplanation, *got.Session.FailureExplanation)
+				require.Equal(t, failureCategory, *got.Session.FailureCategory)
+				require.Equal(t, failureNextSteps, got.Session.FailureNextSteps)
+				require.True(t, got.Session.FailureRetryAdvised)
+			},
+		},
+		{
+			name:      "pending run without a spawned session yet",
+			runStatus: models.AutomationRunStatusPending,
+			session:   nil,
+			assertEnrichment: func(t *testing.T, got models.AutomationRun) {
+				t.Helper()
+				require.Nil(t, got.Session)
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err)
+			defer mock.Close()
+
+			store := NewAutomationRunStore(mock)
+
+			cols := listByAutomationColumnSlice()
+			row := []any{
 				uuid.New(), uuid.New(), uuid.New(), now, models.AutomationTriggeredBySchedule,
 				nil, nil, "goal", []byte(`{}`),
-				models.AutomationRunStatusCompleted, nil, nil, now, now,
-			),
-		)
+				tc.runStatus, nil, nil, now, now,
+			}
+			if tc.session != nil {
+				// pgxmock matches scan kinds via reflection: a *T scan
+				// destination requires *T (or nil) as the AddRow value, so
+				// we wrap every non-NULL nullable column in a pointer.
+				// Address-takeable copies are needed because struct fields
+				// are not addressable through interface{} boxing.
+				sessionIDCopy := tc.session.id
+				sessionStatusCopy := tc.session.status
+				retryCopy := tc.session.failureRetryAdvised
+				prCreationCopy := tc.session.prCreationState
+				row = append(row,
+					&sessionIDCopy,
+					tc.session.title,
+					&sessionStatusCopy,
+					tc.session.diffStats,
+					tc.session.failureExplanation,
+					tc.session.failureCategory,
+					tc.session.failureNextSteps,
+					&retryCopy,
+					&prCreationCopy,
+				)
+				if tc.session.pr != nil {
+					prNumberCopy := tc.session.pr.number
+					prURLCopy := tc.session.pr.url
+					prStatusCopy := tc.session.pr.status
+					prCICopy := tc.session.pr.ciStatus
+					row = append(row, &prNumberCopy, &prURLCopy, &prStatusCopy, &prCICopy)
+				} else {
+					row = append(row, nil, nil, nil, nil)
+				}
+			} else {
+				// 9 session columns + 4 PR columns = 13 NULLs.
+				for i := 0; i < 13; i++ {
+					row = append(row, nil)
+				}
+			}
 
-	runs, err := store.ListByAutomation(context.Background(), uuid.New(), uuid.New(), AutomationRunFilters{Limit: 25})
-	require.NoError(t, err)
-	require.Len(t, runs, 1)
-	require.NoError(t, mock.ExpectationsWereMet())
+			mock.ExpectQuery("SELECT .+ FROM automation_runs ar.+LEFT JOIN LATERAL").
+				WithArgs(anyArgs(2)...).
+				WillReturnRows(
+					pgxmock.NewRows(cols).AddRow(row...),
+				)
+
+			runs, err := store.ListByAutomation(context.Background(), uuid.New(), uuid.New(), AutomationRunFilters{Limit: 25})
+			require.NoError(t, err)
+			require.Len(t, runs, 1)
+			require.Equal(t, tc.runStatus, runs[0].Status)
+			tc.assertEnrichment(t, runs[0])
+			require.NoError(t, mock.ExpectationsWereMet())
+		})
+	}
 }
 
 func TestAutomationRunStore_UpdateStatus(t *testing.T) {

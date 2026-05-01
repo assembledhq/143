@@ -649,9 +649,62 @@ type AutomationRunFilters struct {
 	Cursor string
 }
 
+// listByAutomationSelectColumns extends automationRunColumns with a small
+// projection of the spawned session and its newest PR. Lateral joins keep
+// one row per run (preserving keyset pagination on triggered_at, id) while
+// avoiding an N+1 from the frontend's polling loop.
+//
+// Heavy session fields (diff_history, input_manifest, goal_snapshot blob)
+// are intentionally excluded — this query runs on a 10s poll for the open
+// automation page, so the row stays small.
+const listByAutomationSelectColumns = `ar.id, ar.automation_id, ar.org_id, ar.triggered_at, ar.triggered_by,
+	ar.triggered_by_user_id, ar.scheduled_time, ar.goal_snapshot, ar.config_snapshot,
+	ar.status, ar.completed_at, ar.result_summary, ar.created_at, ar.updated_at,
+	s.id AS session_id, s.title AS session_title, s.status AS session_status,
+	s.diff_stats AS session_diff_stats,
+	s.failure_explanation AS session_failure_explanation,
+	s.failure_category AS session_failure_category,
+	s.failure_next_steps AS session_failure_next_steps,
+	s.failure_retry_advised AS session_failure_retry_advised,
+	s.pr_creation_state AS session_pr_creation_state,
+	pr.github_pr_number AS pr_number, pr.github_pr_url AS pr_url,
+	pr.status AS pr_status, pr.ci_status AS pr_ci_status`
+
+// listByAutomationFromClause is the FROM + LATERAL JOINs used by
+// ListByAutomation. Pulled out as a const so the cursor variants can share
+// the same join shape and the query plan stays predictable.
+//
+// Multiplicity note: sessions.automation_run_id has no UNIQUE constraint
+// today (the design doc explicitly leaves room for multi-session fan-out
+// per run), so we collapse to the most recent session per run via the
+// LATERAL + LIMIT 1. The next PR per session likewise picks the most
+// recently created — sufficient for the row-level "Review PR →" CTA.
+const listByAutomationFromClause = `FROM automation_runs ar
+	LEFT JOIN LATERAL (
+		SELECT id, title, status, diff_stats,
+			failure_explanation, failure_category, failure_next_steps, failure_retry_advised,
+			pr_creation_state
+		FROM sessions
+		WHERE sessions.automation_run_id = ar.id AND sessions.org_id = ar.org_id
+		ORDER BY sessions.created_at DESC
+		LIMIT 1
+	) s ON true
+	LEFT JOIN LATERAL (
+		SELECT github_pr_number, github_pr_url, status, ci_status
+		FROM pull_requests
+		WHERE pull_requests.session_id = s.id AND pull_requests.org_id = ar.org_id
+		-- Prefer an open PR over a stale closed/merged one, then break
+		-- ties by recency. The ranked status case keeps the row's
+		-- "Review PR" CTA pointing at the actionable PR when a session
+		-- has been through revisions.
+		ORDER BY CASE pull_requests.status WHEN 'open' THEN 0 ELSE 1 END, pull_requests.created_at DESC
+		LIMIT 1
+	) pr ON true`
+
 func (s *AutomationRunStore) ListByAutomation(ctx context.Context, orgID, automationID uuid.UUID, filters AutomationRunFilters) ([]models.AutomationRun, error) {
-	query := fmt.Sprintf(`SELECT %s FROM automation_runs
-		WHERE automation_id = @automation_id AND org_id = @org_id`, automationRunColumns)
+	query := fmt.Sprintf(`SELECT %s %s
+		WHERE ar.automation_id = @automation_id AND ar.org_id = @org_id`,
+		listByAutomationSelectColumns, listByAutomationFromClause)
 	args := pgx.NamedArgs{
 		"automation_id": automationID,
 		"org_id":        orgID,
@@ -660,12 +713,12 @@ func (s *AutomationRunStore) ListByAutomation(ctx context.Context, orgID, automa
 	if filters.Cursor != "" {
 		cursorID, err := uuid.Parse(filters.Cursor)
 		if err == nil {
-			query += ` AND (triggered_at < (SELECT triggered_at FROM automation_runs WHERE id = @cursor_id) OR (triggered_at = (SELECT triggered_at FROM automation_runs WHERE id = @cursor_id) AND id < @cursor_id))`
+			query += ` AND (ar.triggered_at < (SELECT triggered_at FROM automation_runs WHERE id = @cursor_id) OR (ar.triggered_at = (SELECT triggered_at FROM automation_runs WHERE id = @cursor_id) AND ar.id < @cursor_id))`
 			args["cursor_id"] = cursorID
 		}
 	}
 
-	query += ` ORDER BY triggered_at DESC, id DESC`
+	query += ` ORDER BY ar.triggered_at DESC, ar.id DESC`
 
 	limit := filters.Limit
 	if limit <= 0 || limit > 100 {
@@ -678,7 +731,94 @@ func (s *AutomationRunStore) ListByAutomation(ctx context.Context, orgID, automa
 		return nil, fmt.Errorf("query automation runs: %w", err)
 	}
 	defer rows.Close()
-	return scanAutomationRuns(rows)
+	return scanAutomationRunsWithSession(rows)
+}
+
+// scanAutomationRunsWithSession decodes rows from the enriched
+// ListByAutomation query. Each row is one automation_run plus an optional
+// embedded session (and its optional embedded PR), all collapsed by
+// LATERAL JOINs upstream so we never have to dedupe runs here.
+func scanAutomationRunsWithSession(rows pgx.Rows) ([]models.AutomationRun, error) {
+	var runs []models.AutomationRun
+	for rows.Next() {
+		r, err := scanAutomationRunWithSession(rows)
+		if err != nil {
+			return nil, err
+		}
+		runs = append(runs, r)
+	}
+	return runs, rows.Err()
+}
+
+func scanAutomationRunWithSession(row pgx.Row) (models.AutomationRun, error) {
+	var (
+		r models.AutomationRun
+
+		// Session columns. All nullable because the LEFT JOIN may produce
+		// NULL for runs that haven't spawned a session yet (pending,
+		// skipped, in-flight before the worker creates the session).
+		sessionID                  *uuid.UUID
+		sessionTitle               *string
+		sessionStatus              *string
+		sessionDiffStats           []byte
+		sessionFailureExplanation  *string
+		sessionFailureCategory     *string
+		sessionFailureNextSteps    []string
+		sessionFailureRetryAdvised *bool
+		sessionPRCreationState     *string
+
+		// PR columns. NULL when the session has no PullRequest row yet —
+		// the inner LATERAL is also a LEFT JOIN.
+		prNumber   *int
+		prURL      *string
+		prStatus   *string
+		prCIStatus *string
+	)
+
+	err := row.Scan(
+		&r.ID, &r.AutomationID, &r.OrgID, &r.TriggeredAt, &r.TriggeredBy,
+		&r.TriggeredByUserID, &r.ScheduledTime, &r.GoalSnapshot, &r.ConfigSnapshot,
+		&r.Status, &r.CompletedAt, &r.ResultSummary, &r.CreatedAt, &r.UpdatedAt,
+		&sessionID, &sessionTitle, &sessionStatus,
+		&sessionDiffStats,
+		&sessionFailureExplanation,
+		&sessionFailureCategory,
+		&sessionFailureNextSteps,
+		&sessionFailureRetryAdvised,
+		&sessionPRCreationState,
+		&prNumber, &prURL, &prStatus, &prCIStatus,
+	)
+	if err != nil {
+		return r, err
+	}
+
+	if sessionID != nil {
+		// status, failure_retry_advised, and pr_creation_state are NOT
+		// NULL on sessions, so a non-nil sessionID guarantees the rest of
+		// the session columns scanned non-nil — dereference directly.
+		// Same for pr.status / pr.ci_status when prNumber + prURL are set.
+		r.Session = &models.AutomationRunSession{
+			ID:                  *sessionID,
+			Title:               sessionTitle,
+			Status:              *sessionStatus,
+			DiffStats:           sessionDiffStats,
+			FailureExplanation:  sessionFailureExplanation,
+			FailureCategory:     sessionFailureCategory,
+			FailureNextSteps:    sessionFailureNextSteps,
+			FailureRetryAdvised: *sessionFailureRetryAdvised,
+			PRCreationState:     models.PRCreationState(*sessionPRCreationState),
+		}
+		if prNumber != nil && prURL != nil {
+			r.Session.PR = &models.PRSummary{
+				Number:   *prNumber,
+				URL:      *prURL,
+				Status:   *prStatus,
+				CIStatus: *prCIStatus,
+			}
+		}
+	}
+
+	return r, nil
 }
 
 // UpdateStatus updates a run's status. Scoped by org_id so a leaked run UUID

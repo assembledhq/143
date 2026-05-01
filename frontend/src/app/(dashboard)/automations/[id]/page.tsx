@@ -2,16 +2,7 @@
 
 import { useMemo, useRef, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import {
-  RefreshCw,
-  Play,
-  Pause,
-  AlertTriangle,
-  CheckCircle2,
-  Clock,
-  Minus,
-  Loader2,
-} from "lucide-react";
+import { Play, Pause, Loader2 } from "lucide-react";
 import { useParams, useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -29,9 +20,9 @@ import { PageContainer } from "@/components/page-container";
 import { PageHeader } from "@/components/page-header";
 import { BranchPicker } from "@/components/branch-picker";
 import { api } from "@/lib/api";
-import { cn } from "@/lib/utils";
-import type { Automation, AutomationRun, AutomationRunStatus } from "@/lib/types";
+import type { Automation } from "@/lib/types";
 import { AutomationStatsCard } from "./automation-stats-card";
+import { RunsTab } from "./runs-tab";
 import {
   browserTimezone,
   formatRunAtWithTimezone,
@@ -48,133 +39,6 @@ const INTERVAL_UNITS = ["hours", "days", "weeks"] as const;
 type IntervalUnit = (typeof INTERVAL_UNITS)[number];
 const toIntervalUnit = (v: string, fallback: IntervalUnit): IntervalUnit =>
   (INTERVAL_UNITS as readonly string[]).includes(v) ? (v as IntervalUnit) : fallback;
-
-const runStatusConfig: Record<AutomationRunStatus, { icon: React.ComponentType<{ className?: string }>; label: string; color: string }> = {
-  pending: { icon: Clock, label: "Pending", color: "text-muted-foreground" },
-  running: { icon: RefreshCw, label: "Running", color: "text-blue-500" },
-  completed: { icon: CheckCircle2, label: "Completed", color: "text-green-500" },
-  completed_noop: { icon: Minus, label: "Not executed", color: "text-amber-600 dark:text-amber-500" },
-  failed: { icon: AlertTriangle, label: "Failed", color: "text-red-500" },
-  skipped: { icon: Minus, label: "Skipped", color: "text-muted-foreground" },
-};
-
-function RunCard({ run }: { run: AutomationRun }) {
-  const cfg = runStatusConfig[run.status] || runStatusConfig.pending;
-  const Icon = cfg.icon;
-  const isFailed = run.status === "failed";
-  const isNoop = run.status === "completed_noop";
-
-  return (
-    <div
-      className={cn(
-        "rounded-lg border p-4",
-        isFailed ? "border-red-200 bg-red-50/50 dark:border-red-900/30 dark:bg-red-950/20" :
-        isNoop ? "border-amber-200 bg-amber-50/50 dark:border-amber-900/30 dark:bg-amber-950/20" : "border-border bg-background"
-      )}
-    >
-      <div className="flex items-center justify-between mb-2">
-        <div className="flex items-center gap-2">
-          <Icon className={cn("h-4 w-4", cfg.color)} />
-          <span className="text-sm font-medium">{cfg.label}</span>
-          <span className="text-xs text-muted-foreground">
-            {new Date(run.triggered_at).toLocaleString()}
-          </span>
-        </div>
-        <div className="flex items-center gap-2 text-xs text-muted-foreground">
-          {run.triggered_by === "manual" && (
-            <span className="rounded-full bg-muted px-2 py-0.5 text-xs">Manual</span>
-          )}
-          {run.completed_at && (
-            <span>
-              {Math.round(
-                (new Date(run.completed_at).getTime() - new Date(run.triggered_at).getTime()) / 1000
-              )}s
-            </span>
-          )}
-        </div>
-      </div>
-      {run.result_summary && (
-        <p className="text-sm text-muted-foreground mt-1">{run.result_summary}</p>
-      )}
-    </div>
-  );
-}
-
-function RunsTab({ automationId }: { automationId: string }) {
-  // Pages are stored as a list of result pages so the polling refetch only
-  // replaces page 0 (latest runs) and any pages loaded via "Load more" persist
-  // across refetches. Using setState inside `select` would reset pagination on
-  // every poll tick.
-  const [extraPages, setExtraPages] = useState<AutomationRun[][]>([]);
-  const [loadMoreCursor, setLoadMoreCursor] = useState<string | undefined>(undefined);
-
-  // Pause polling once the user paginates. If polling kept running while
-  // extra pages were loaded, any new run arriving at the top would shift the
-  // window and make the stored loadMoreCursor point into the middle of a
-  // now-different result set — producing skipped or duplicated runs on the
-  // next "Load more". Users who want fresh first-page runs can reload or
-  // re-navigate to the tab.
-  const isPaginated = extraPages.length > 0;
-
-  const { data, isLoading } = useQuery({
-    queryKey: ["automation-runs", automationId],
-    queryFn: () => api.automations.listRuns(automationId, { limit: 25 }),
-    refetchInterval: isPaginated ? false : 10000,
-  });
-
-  const firstPage = data?.data ?? [];
-  const firstPageCursor = data?.meta?.next_cursor || undefined;
-
-  // Before the user paginates, the cursor tracks the freshest first-page poll.
-  // Once extra pages exist, polling is disabled (see above) and the cursor
-  // comes from the most recent Load-more response.
-  const cursor = isPaginated ? loadMoreCursor : firstPageCursor;
-
-  const loadMoreMutation = useMutation({
-    mutationFn: () => api.automations.listRuns(automationId, { limit: 25, cursor }),
-    onSuccess: (res) => {
-      setExtraPages((prev) => [...prev, res.data ?? []]);
-      setLoadMoreCursor(res.meta?.next_cursor || undefined);
-    },
-  });
-
-  const allRuns = [firstPage, ...extraPages].flat();
-  const hasMore = !!cursor;
-
-  return (
-    <div className="space-y-3">
-      {isLoading && (
-        <div className="text-center py-8 text-sm text-muted-foreground">
-          Loading runs...
-        </div>
-      )}
-      {!isLoading && allRuns.length === 0 && (
-        <div className="text-center py-8 text-sm text-muted-foreground">
-          No runs yet. The first run will appear after the scheduled time.
-        </div>
-      )}
-      {allRuns.map((run) => (
-        <RunCard key={run.id} run={run} />
-      ))}
-      {loadMoreMutation.isError && (
-        <p className="text-center text-xs text-destructive">
-          Failed to load more runs. Please try again.
-        </p>
-      )}
-      {hasMore && (
-        <Button
-          variant="ghost"
-          size="sm"
-          className="w-full"
-          onClick={() => loadMoreMutation.mutate()}
-          disabled={loadMoreMutation.isPending}
-        >
-          {loadMoreMutation.isPending ? "Loading..." : "Load more"}
-        </Button>
-      )}
-    </div>
-  );
-}
 
 function SettingsTab({ automation }: { automation: Automation }) {
   const queryClient = useQueryClient();

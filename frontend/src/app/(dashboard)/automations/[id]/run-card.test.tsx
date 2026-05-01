@@ -1,0 +1,143 @@
+import { describe, it, expect, vi, beforeEach } from "vitest";
+import { renderWithProviders, screen, userEvent } from "@/test/test-utils";
+
+import type { AutomationRun, AutomationRunStatus } from "@/lib/types";
+import { RunCard } from "./run-card";
+
+const pushMock = vi.fn();
+
+vi.mock("next/navigation", () => ({
+  useRouter: () => ({ push: pushMock, replace: vi.fn() }),
+}));
+
+beforeEach(() => {
+  pushMock.mockClear();
+});
+
+function makeRun(overrides: Partial<AutomationRun> = {}): AutomationRun {
+  return {
+    id: "run-1",
+    automation_id: "auto-1",
+    triggered_at: "2026-04-30T00:00:00Z",
+    triggered_by: "schedule",
+    goal_snapshot: "g",
+    status: "completed" as AutomationRunStatus,
+    completed_at: "2026-04-30T00:00:30Z",
+    created_at: "2026-04-30T00:00:00Z",
+    updated_at: "2026-04-30T00:00:30Z",
+    ...overrides,
+  };
+}
+
+describe("RunCard click-through", () => {
+  it("navigates to /sessions/{id} when the card body is clicked", async () => {
+    const user = userEvent.setup();
+    const run = makeRun({
+      session: {
+        id: "sess-123",
+        title: "Refactor diff viewer",
+        status: "completed",
+        failure_retry_advised: false,
+        pr_creation_state: "succeeded",
+      },
+    });
+
+    renderWithProviders(<RunCard run={run} />);
+
+    // Click the card surface (not the inner action button) — the
+    // role="button" landing here is the whole-card affordance.
+    await user.click(screen.getByRole("button", { name: /open session for completed run/i }));
+
+    expect(pushMock).toHaveBeenCalledWith("/sessions/sess-123");
+  });
+
+  it("activates with Enter on the focused card", async () => {
+    const user = userEvent.setup();
+    const run = makeRun({
+      session: {
+        id: "sess-456",
+        status: "completed",
+        failure_retry_advised: false,
+        pr_creation_state: "idle",
+      },
+    });
+
+    renderWithProviders(<RunCard run={run} />);
+
+    const card = screen.getByRole("button", { name: /open session for completed run/i });
+    card.focus();
+    await user.keyboard("{Enter}");
+
+    expect(pushMock).toHaveBeenCalledWith("/sessions/sess-456");
+  });
+
+  it("Review PR link does not also fire whole-card navigation", async () => {
+    const user = userEvent.setup();
+    const run = makeRun({
+      session: {
+        id: "sess-789",
+        title: "Refactor",
+        status: "completed",
+        failure_retry_advised: false,
+        pr_creation_state: "succeeded",
+        pr: {
+          number: 1213,
+          url: "https://github.com/example/repo/pull/1213",
+          status: "open",
+          ci_status: "success",
+        },
+      },
+    });
+
+    renderWithProviders(<RunCard run={run} />);
+
+    const reviewLink = screen.getByRole("link", { name: /review pr/i });
+    expect(reviewLink).toHaveAttribute("href", "https://github.com/example/repo/pull/1213");
+    expect(reviewLink).toHaveAttribute("target", "_blank");
+    expect(reviewLink).toHaveAttribute("rel", "noopener noreferrer");
+
+    await user.click(reviewLink);
+
+    // The card-level router.push should not fire — the click was
+    // handled by the anchor and stopPropagation prevents the wrapping
+    // div from also navigating.
+    expect(pushMock).not.toHaveBeenCalled();
+  });
+
+  it("uses 'Reply to agent' as the CTA when the session is awaiting human guidance", () => {
+    const run = makeRun({
+      status: "failed",
+      session: {
+        id: "sess-help",
+        status: "needs_human_guidance",
+        failure_retry_advised: false,
+        pr_creation_state: "idle",
+      },
+    });
+
+    renderWithProviders(<RunCard run={run} />);
+
+    expect(screen.getByRole("button", { name: /reply to agent/i })).toBeInTheDocument();
+    // The headline copy should match the amber attention treatment, not
+    // the red "Failed" treatment — both the run.status (failed) and the
+    // session.status (needs_human_guidance) are present, and the linked
+    // session wins.
+    expect(screen.getByText(/needs your input/i)).toBeInTheDocument();
+  });
+
+  it("renders a non-interactive thin row for completed_noop without a session", () => {
+    const run = makeRun({ status: "completed_noop", completed_at: undefined });
+    renderWithProviders(<RunCard run={run} />);
+    // Quiet rows without a linked session should not be clickable —
+    // there's nowhere meaningful to navigate to.
+    expect(screen.queryByRole("button")).not.toBeInTheDocument();
+    expect(screen.getByText(/no work needed/i)).toBeInTheDocument();
+  });
+
+  it("renders a non-interactive thin row for pending runs", () => {
+    const run = makeRun({ status: "pending", completed_at: undefined });
+    renderWithProviders(<RunCard run={run} />);
+    expect(screen.queryByRole("button")).not.toBeInTheDocument();
+    expect(screen.getByText(/pending/i)).toBeInTheDocument();
+  });
+});

@@ -1319,6 +1319,27 @@ export interface AutomationRun {
   result_summary?: string;
   created_at: string;
   updated_at: string;
+  // Compact view of the session this run spawned. Populated by the list
+  // endpoint via a LATERAL join (see internal/db/automations.go); absent
+  // when the run hasn't spawned a session yet (pending/skipped, or
+  // mid-flight before the worker creates the session).
+  session?: AutomationRunSession;
+}
+
+export interface AutomationRunSession {
+  id: string;
+  title?: string;
+  // Mirrors models.SessionStatus values; the row UI keys off this
+  // (notably "needs_human_guidance") to choose between failure and
+  // attention treatments.
+  status: string;
+  diff_stats?: { added: number; removed: number; files_changed?: number };
+  failure_explanation?: string;
+  failure_category?: string;
+  failure_next_steps?: string[];
+  failure_retry_advised: boolean;
+  pr_creation_state: 'idle' | 'queued' | 'pushing' | 'succeeded' | 'failed' | string;
+  pr?: PRSummary;
 }
 
 export interface AutomationRunStatsBucket {

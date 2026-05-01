@@ -59,6 +59,26 @@ func automationRunTestColumns() []string {
 	}
 }
 
+// automationRunListTestColumns mirrors the enriched column shape returned
+// by AutomationRunStore.ListByAutomation: the base run columns plus a
+// LATERAL-joined session projection and its newest PR. Keep aligned with
+// listByAutomationSelectColumns in internal/db/automations.go.
+func automationRunListTestColumns() []string {
+	return []string{
+		"id", "automation_id", "org_id", "triggered_at", "triggered_by",
+		"triggered_by_user_id", "scheduled_time", "goal_snapshot", "config_snapshot",
+		"status", "completed_at", "result_summary", "created_at", "updated_at",
+		"session_id", "session_title", "session_status",
+		"session_diff_stats",
+		"session_failure_explanation",
+		"session_failure_category",
+		"session_failure_next_steps",
+		"session_failure_retry_advised",
+		"session_pr_creation_state",
+		"pr_number", "pr_url", "pr_status", "pr_ci_status",
+	}
+}
+
 func testAnyArgs(n int) []any {
 	out := make([]any, n)
 	for i := range out {
@@ -1273,7 +1293,9 @@ func TestAutomationHandler_ListRuns_OK(t *testing.T) {
 
 	orgID := uuid.New()
 	id := uuid.New()
+	sessionID := uuid.New()
 	now := time.Now()
+	title := "Refactor diff viewer"
 	a := models.Automation{
 		ID: id, OrgID: orgID, Name: "a", Goal: "g",
 		ExecutionMode: "sequential", BaseBranch: "main", ScheduleType: "interval",
@@ -1282,13 +1304,24 @@ func TestAutomationHandler_ListRuns_OK(t *testing.T) {
 	mock.ExpectQuery("SELECT .+ FROM automations WHERE id =").
 		WithArgs(testAnyArgs(2)...).
 		WillReturnRows(newAutomationRow(mock, a))
-	mock.ExpectQuery("SELECT .+ FROM automation_runs WHERE automation_id").
+	sessionStatus := string(models.SessionStatusCompleted)
+	retryAdvised := false
+	prCreationState := "succeeded"
+	prNumber := 1213
+	prURL := "https://github.com/example/repo/pull/1213"
+	prStatus := "open"
+	prCIStatus := "success"
+	mock.ExpectQuery("SELECT .+ FROM automation_runs ar.+LEFT JOIN LATERAL").
 		WithArgs(testAnyArgs(2)...).
 		WillReturnRows(
-			pgxmock.NewRows(automationRunTestColumns()).AddRow(
+			pgxmock.NewRows(automationRunListTestColumns()).AddRow(
 				uuid.New(), id, orgID, now, models.AutomationTriggeredBySchedule,
 				nil, nil, "goal", []byte(`{}`),
 				models.AutomationRunStatusCompleted, nil, nil, now, now,
+				&sessionID, &title, &sessionStatus,
+				[]byte(`{"added":12,"removed":3}`),
+				nil, nil, nil, &retryAdvised, &prCreationState,
+				&prNumber, &prURL, &prStatus, &prCIStatus,
 			),
 		)
 
@@ -1297,6 +1330,20 @@ func TestAutomationHandler_ListRuns_OK(t *testing.T) {
 	rr := httptest.NewRecorder()
 	h.ListRuns(rr, req)
 	require.Equal(t, http.StatusOK, rr.Code)
+
+	// Confirm the response carries the embedded session payload — the
+	// frontend's clickable rows + diff/PR badges depend on this shape.
+	var resp models.ListResponse[models.AutomationRun]
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
+	require.Len(t, resp.Data, 1)
+	got := resp.Data[0]
+	require.NotNil(t, got.Session)
+	require.Equal(t, sessionID, got.Session.ID)
+	require.Equal(t, "Refactor diff viewer", *got.Session.Title)
+	require.NotNil(t, got.Session.PR)
+	require.Equal(t, 1213, got.Session.PR.Number)
+	require.Equal(t, "https://github.com/example/repo/pull/1213", got.Session.PR.URL)
+
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
