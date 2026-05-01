@@ -42,6 +42,21 @@ export function DiffLineRow({ line, filePath, highlightedContent, onAddComment, 
     [filePath]
   );
 
+  const handleLineNumberButtonClick = useCallback(
+    (e: React.MouseEvent<HTMLButtonElement>, lineNum: number | null, side: "L" | "R") => {
+      e.stopPropagation();
+      handleLineNumberClick(lineNum, side);
+    },
+    [handleLineNumberClick]
+  );
+
+  const handleLineNumberButtonKeyDown = useCallback(
+    (e: React.KeyboardEvent<HTMLButtonElement>) => {
+      e.stopPropagation();
+    },
+    []
+  );
+
   const ariaLineNumber = line.type === "remove" ? line.oldLineNumber : line.newLineNumber;
 
   const handleKeyDown = onAddComment
@@ -99,7 +114,8 @@ export function DiffLineRow({ line, filePath, highlightedContent, onAddComment, 
       {/* Old line number gutter */}
       <button
         type="button"
-        onClick={() => handleLineNumberClick(line.oldLineNumber, "L")}
+        onClick={(e) => handleLineNumberButtonClick(e, line.oldLineNumber, "L")}
+        onKeyDown={handleLineNumberButtonKeyDown}
         className={cn(
           "w-[50px] shrink-0 text-right pr-2 select-none text-xs text-muted-foreground/60 hover:text-primary cursor-pointer",
           lineNumberStyles[line.type]
@@ -110,7 +126,8 @@ export function DiffLineRow({ line, filePath, highlightedContent, onAddComment, 
       {/* New line number gutter */}
       <button
         type="button"
-        onClick={() => handleLineNumberClick(line.newLineNumber, "R")}
+        onClick={(e) => handleLineNumberButtonClick(e, line.newLineNumber, "R")}
+        onKeyDown={handleLineNumberButtonKeyDown}
         className={cn(
           "w-[50px] shrink-0 text-right pr-2 select-none text-xs text-muted-foreground/60 hover:text-primary cursor-pointer",
           lineNumberStyles[line.type]

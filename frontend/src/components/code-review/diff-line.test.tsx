@@ -142,6 +142,42 @@ describe("DiffLineRow", () => {
     replaceStateSpy.mockRestore();
   });
 
+  it("does not add a comment when line number gutter is clicked", async () => {
+    const user = userEvent.setup();
+    const onAddComment = vi.fn();
+    const replaceStateSpy = vi.spyOn(window.history, "replaceState");
+    render(
+      <DiffLineRow
+        line={makeLine({ oldLineNumber: 7, newLineNumber: 9 })}
+        filePath="src/app.ts"
+        onAddComment={onAddComment}
+      />
+    );
+    await user.click(screen.getByText("7"));
+    expect(replaceStateSpy).toHaveBeenCalledWith(null, "", "#src/app.ts-L7");
+    expect(onAddComment).not.toHaveBeenCalled();
+    replaceStateSpy.mockRestore();
+  });
+
+  it("does not add a comment when Enter is pressed on a focused line number gutter", async () => {
+    const user = userEvent.setup();
+    const onAddComment = vi.fn();
+    const replaceStateSpy = vi.spyOn(window.history, "replaceState");
+    render(
+      <DiffLineRow
+        line={makeLine({ oldLineNumber: 7, newLineNumber: 9 })}
+        filePath="src/app.ts"
+        onAddComment={onAddComment}
+      />
+    );
+    const oldLineButton = screen.getByText("7");
+    oldLineButton.focus();
+    await user.keyboard("{Enter}");
+    expect(replaceStateSpy).toHaveBeenCalledWith(null, "", "#src/app.ts-L7");
+    expect(onAddComment).not.toHaveBeenCalled();
+    replaceStateSpy.mockRestore();
+  });
+
   it("sets id attribute on the row when filePath and newLineNumber are present", () => {
     const { container } = render(
       <DiffLineRow line={makeLine({ newLineNumber: 42 })} filePath="src/foo.ts" />
