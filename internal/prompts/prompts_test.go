@@ -191,6 +191,10 @@ func TestLinkedIssuesContext(t *testing.T) {
 	assert.Contains(t, result, "<description>Customers hit a timeout after payment authorization.</description>")
 	assert.Contains(t, result, `role="related"`)
 	assert.NotContains(t, result, "<external_id></external_id>")
+	// Untrusted-content fence travels with the data — every caller (including
+	// manual sessions, which skip the coding-task preamble) must surface it.
+	assert.Contains(t, result, "<trust_warning>")
+	assert.Contains(t, result, "untrusted external content")
 }
 
 func TestProjectGeneratePrompt(t *testing.T) {

@@ -709,6 +709,34 @@ func TestBuildSystemPrompt_IncludesLinkedIssuesContext(t *testing.T) {
 	require.NotContains(t, prompt, "This description should not be copied for related issues.", "buildSystemPrompt should omit descriptions for related linked issues")
 }
 
+// Manual sessions skip the coding-task preamble (which carries the
+// "untrusted external content" warning) but can still be linked to Linear
+// issues whose titles/descriptions/comments are attacker-controllable. The
+// fence has to live inside the linked-issues block so it travels with the
+// data regardless of caller — see linked_issues_context.template.
+func TestBuildSystemPrompt_ManualSessionLinkedIssuesCarryTrustFence(t *testing.T) {
+	t.Parallel()
+
+	input := &agent.AgentInput{
+		Issue:  &models.Issue{Title: "help me refactor", Source: models.IssueSourceManual},
+		Manual: true,
+		LinkedIssues: []models.SessionIssueSnapshotEntry{
+			{
+				Role:        models.SessionIssueLinkRolePrimary,
+				Source:      models.IssueSourceLinear,
+				Title:       "Fix checkout timeout",
+				ExternalID:  "ENG-123",
+				Description: "Customers hit a timeout after payment authorization.",
+			},
+		},
+	}
+
+	prompt := buildSystemPrompt(input)
+	require.NotContains(t, prompt, "untrusted external content (e.g. from issue trackers)", "manual sessions correctly skip the coding-task preamble fence")
+	require.Contains(t, prompt, "<trust_warning>", "linked-issues block must carry its own untrusted-content fence even on manual sessions")
+	require.Contains(t, prompt, "untrusted external content", "trust_warning must call out untrusted external content")
+}
+
 // ---------------------------------------------------------------------------
 // buildUserPrompt
 // ---------------------------------------------------------------------------
