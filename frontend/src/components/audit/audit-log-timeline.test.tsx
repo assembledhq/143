@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { renderWithProviders, screen, waitFor } from '@/test/test-utils';
+import { renderWithProviders, screen, waitFor, userEvent } from '@/test/test-utils';
 import { AuditLogTimeline } from './audit-log-timeline';
 import type { User } from '@/lib/types';
 
@@ -95,6 +95,53 @@ describe('AuditLogTimeline', () => {
       expect(auditLogListMock).toHaveBeenCalledWith(
         expect.objectContaining({ session_id: 'sess-1', limit: 5 })
       );
+    });
+  });
+
+  it('loads older activity without replacing existing entries', async () => {
+    auditLogListMock
+      .mockResolvedValueOnce({
+        data: [
+          {
+            id: 'audit-1',
+            actor_type: 'user',
+            user_id: 'user-1',
+            actor_id: 'user-1',
+            action: 'session.created',
+            resource_type: 'session',
+            details: null,
+            created_at: new Date(Date.now() - 5 * 60000).toISOString(),
+          },
+        ],
+        meta: { next_cursor: 'cursor-2' },
+      })
+      .mockResolvedValueOnce({
+        data: [
+          {
+            id: 'audit-2',
+            actor_type: 'user',
+            user_id: 'user-1',
+            actor_id: 'user-1',
+            action: 'project.created',
+            resource_type: 'project',
+            details: null,
+            created_at: new Date(Date.now() - 10 * 60000).toISOString(),
+          },
+        ],
+        meta: {},
+      });
+
+    renderWithProviders(<AuditLogTimeline members={mockMembers} />);
+
+    await waitFor(() => {
+      expect(screen.getByText('created session')).toBeInTheDocument();
+    });
+
+    await userEvent.click(screen.getByRole('button', { name: 'Load older' }));
+
+    await waitFor(() => {
+      expect(screen.getByText('created session')).toBeInTheDocument();
+      expect(screen.getByText('created project')).toBeInTheDocument();
     });
   });
 });
