@@ -51,7 +51,7 @@ type MilestoneInput struct {
 // installer's account on most Linear plans (no true bot identity yet — see
 // design 62 §"Authoring identity"), so readers need an unambiguous "this is
 // a bot voice" marker. Required by design.
-const botCommentPrefix = "🤖 143 automated update —"
+const botCommentPrefix = "🤖 143 automated update"
 
 // HandleMilestone idempotently writes the durable attachment and the single
 // rolling comment for the given milestone. Skipped silently when:
