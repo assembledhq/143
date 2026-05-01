@@ -621,6 +621,51 @@ describe("PreviewPanel component", () => {
     expect(screen.getByText("Open the preview")).toBeInTheDocument();
   });
 
+  it("renders orphaned pending children as terminal when the parent preview failed", async () => {
+    mockGet.mockResolvedValue(
+      makePreviewStatus(
+        { status: "failed", error: "provider start preview failed" },
+        [
+          {
+            id: "svc-1",
+            preview_instance_id: "prev-1",
+            service_name: "web",
+            role: "primary",
+            status: "starting",
+            command: ["npm", "run", "dev"],
+            cwd: "",
+            port: 3000,
+            created_at: "2026-01-01T00:00:00Z",
+          },
+        ],
+        [
+          {
+            id: "infra-1",
+            preview_instance_id: "prev-1",
+            infra_name: "postgres",
+            template: "postgres",
+            container_id: "ctr-1",
+            status: "provisioning",
+            host: "postgres",
+            port: 5432,
+            created_at: "2026-01-01T00:00:00Z",
+          },
+        ],
+      ),
+    );
+
+    renderWithProviders(<PreviewPanel {...DEFAULT_PROPS} />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Startup checklist")).toBeInTheDocument();
+    });
+
+    expect(screen.getByText("postgres did not finish provisioning")).toBeInTheDocument();
+    expect(screen.getByText("web did not finish starting")).toBeInTheDocument();
+    expect(screen.queryByText("postgres is provisioning")).not.toBeInTheDocument();
+    expect(screen.queryByText("web is starting")).not.toBeInTheDocument();
+  });
+
   /* ---------- Stop mutation ---------- */
 
   it("calls stop mutation when Stop button is clicked", async () => {
