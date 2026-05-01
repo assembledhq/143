@@ -69,6 +69,9 @@ const mocks = vi.hoisted(() => ({
       { provider: "pi", source: "personal" },
     ],
   }),
+  codingAuthsListMock: vi.fn().mockResolvedValue({
+    data: [],
+  }),
   codexAuthStatusMock: vi.fn().mockResolvedValue({ data: { status: "completed" } }),
   authMeMock: vi.fn().mockResolvedValue({
     data: {
@@ -103,6 +106,9 @@ vi.mock("@/lib/api", () => ({
     },
     userCredentials: {
       listResolved: mocks.resolvedCredsMock,
+    },
+    codingAuths: {
+      list: mocks.codingAuthsListMock,
     },
     codexAuth: {
       status: mocks.codexAuthStatusMock,
@@ -483,6 +489,52 @@ describe("ManualSessionCreatePageContent", () => {
     });
   });
 
+  it("shows org coding-auth models even when the user has no personal credentials", async () => {
+    const user = userEvent.setup();
+    mocks.settingsGetMock.mockResolvedValueOnce({
+      data: {
+        name: "Test Org",
+        settings: {
+          default_agent_type: "codex",
+        },
+      },
+    });
+    mocks.resolvedCredsMock.mockResolvedValueOnce({
+      data: [
+        { provider: "openai", source: "none" },
+        { provider: "anthropic", source: "none" },
+        { provider: "gemini", source: "none" },
+        { provider: "amp", source: "none" },
+        { provider: "pi", source: "none" },
+      ],
+    });
+    mocks.codexAuthStatusMock.mockResolvedValueOnce({ data: { status: "pending" } });
+    mocks.codingAuthsListMock.mockResolvedValueOnce({
+      data: [
+        {
+          id: "auth-1",
+          org_id: "org-1",
+          priority: 1,
+          agent: "codex",
+          auth_type: "api_key",
+          label: "Org Codex",
+          scope: "organization",
+          provider: "openai",
+          status: "healthy",
+          is_default: true,
+          created_at: "2026-01-01T00:00:00Z",
+          updated_at: "2026-01-01T00:00:00Z",
+        },
+      ],
+    });
+
+    renderWithProviders(<ManualSessionCreatePageContent />);
+
+    await user.click(await screen.findByRole("combobox", { name: /Model/i }));
+
+    expect(screen.getByRole("option", { name: "gpt-5.4" })).toBeInTheDocument();
+  });
+
   describe("draft persistence", () => {
     it("restores a stored prompt on mount", async () => {
       window.sessionStorage.setItem(
@@ -526,6 +578,89 @@ describe("ManualSessionCreatePageContent", () => {
           __v: 2,
           message: "draft in progress",
         });
+      });
+    });
+
+    it("does not clear a restored model that is available only through org coding auths", async () => {
+      type CodingAuthListResponse = {
+        data: Array<{
+          id: string;
+          org_id: string;
+          priority: number;
+          agent: string;
+          auth_type: string;
+          label: string;
+          scope: string;
+          provider: string;
+          status: string;
+          is_default: boolean;
+          created_at: string;
+          updated_at: string;
+        }>;
+      };
+      let resolveCodingAuths: ((value: CodingAuthListResponse) => void) | undefined;
+      mocks.resolvedCredsMock.mockResolvedValueOnce({
+        data: [
+          { provider: "openai", source: "none" },
+          { provider: "anthropic", source: "none" },
+          { provider: "gemini", source: "none" },
+          { provider: "amp", source: "none" },
+          { provider: "pi", source: "none" },
+        ],
+      });
+      mocks.codexAuthStatusMock.mockResolvedValueOnce({ data: { status: "pending" } });
+      mocks.codingAuthsListMock.mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            resolveCodingAuths = resolve;
+          }),
+      );
+      window.sessionStorage.setItem(
+        DRAFT_STORAGE_KEY,
+        JSON.stringify({
+          __v: 2,
+          message: "Restore my draft",
+          attachments: [],
+          references: [],
+          commands: [],
+          selectedModel: "gpt-5.4",
+          userSelectedRepoId: null,
+          branchByRepoId: {},
+          showImageInput: false,
+          imageURL: "",
+        }),
+      );
+
+      renderWithProviders(<ManualSessionCreatePageContent />);
+
+      const modelSelect = await screen.findByRole("combobox", { name: /Model/i });
+      await waitFor(() => {
+        expect(mocks.resolvedCredsMock).toHaveBeenCalledTimes(1);
+        expect(mocks.codexAuthStatusMock).toHaveBeenCalledTimes(1);
+      });
+
+      expect(resolveCodingAuths).toBeDefined();
+      resolveCodingAuths!({
+        data: [
+          {
+            id: "auth-1",
+            org_id: "org-1",
+            priority: 1,
+            agent: "codex",
+            auth_type: "api_key",
+            label: "Org Codex",
+            scope: "organization",
+            provider: "openai",
+            status: "healthy",
+            is_default: true,
+            created_at: "2026-01-01T00:00:00Z",
+            updated_at: "2026-01-01T00:00:00Z",
+          },
+        ],
+      });
+
+      await waitFor(() => {
+        expect(modelSelect).toHaveTextContent("gpt-5.4");
       });
     });
 
