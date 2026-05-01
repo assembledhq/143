@@ -1326,6 +1326,16 @@ export interface AutomationRun {
   session?: AutomationRunSession;
 }
 
+// Mirrors models.PRCreationState. Kept as a literal union so the row UI
+// gets exhaustiveness checks when branching on it (e.g. the "Creating PR…"
+// pill on completed_no_pr rows).
+export type PRCreationState =
+  | 'idle'
+  | 'queued'
+  | 'pushing'
+  | 'succeeded'
+  | 'failed';
+
 export interface AutomationRunSession {
   id: string;
   title?: string;
@@ -1338,7 +1348,7 @@ export interface AutomationRunSession {
   failure_category?: string;
   failure_next_steps?: string[];
   failure_retry_advised: boolean;
-  pr_creation_state: 'idle' | 'queued' | 'pushing' | 'succeeded' | 'failed' | string;
+  pr_creation_state: PRCreationState;
   pr?: PRSummary;
 }
 

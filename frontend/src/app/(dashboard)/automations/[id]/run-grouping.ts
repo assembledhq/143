@@ -11,7 +11,7 @@ export function isQuietStatus(status: AutomationRunStatus): boolean {
 
 export type RunGroup =
   | { kind: "single"; run: AutomationRun }
-  | { kind: "quiet"; runs: AutomationRun[]; firstId: string };
+  | { kind: "quiet"; runs: AutomationRun[]; groupKey: string };
 
 // Collapse runs of consecutive quiet statuses into a single group.
 //
@@ -24,17 +24,18 @@ export type RunGroup =
 // - Order is preserved — the input is expected DESC by triggered_at and
 //   the groups carry that ordering through.
 //
-// The function is intentionally pure / order-only so the same `firstId`
-// keys stay stable across polling refetches as long as the first run in a
-// quiet streak hasn't fallen off the page; that lets RunsTab persist
-// "expanded" state across polls without flicker.
+// Group keying uses the *oldest* run in the streak (the last element,
+// since DESC ordering puts the oldest at the end). New quiet runs landing
+// on top of an existing streak grow the streak without changing its key,
+// so RunsTab's user-collapse state survives polling refetches. The key
+// only changes once the oldest run scrolls off the visible page entirely.
 export function groupRuns(runs: AutomationRun[]): RunGroup[] {
   const out: RunGroup[] = [];
   let buf: AutomationRun[] = [];
 
   const flushQuiet = () => {
     if (buf.length >= 2) {
-      out.push({ kind: "quiet", runs: buf, firstId: buf[0].id });
+      out.push({ kind: "quiet", runs: buf, groupKey: buf[buf.length - 1].id });
     } else if (buf.length === 1) {
       out.push({ kind: "single", run: buf[0] });
     }

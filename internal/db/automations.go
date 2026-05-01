@@ -649,16 +649,39 @@ type AutomationRunFilters struct {
 	Cursor string
 }
 
-// listByAutomationSelectColumns extends automationRunColumns with a small
-// projection of the spawned session and its newest PR. Lateral joins keep
-// one row per run (preserving keyset pagination on triggered_at, id) while
-// avoiding an N+1 from the frontend's polling loop.
+// AutomationRunListColumns is the post-projection column list returned by
+// ListByAutomation: the lean run columns (config_snapshot intentionally
+// dropped to keep the 10s polling row small — the row UI doesn't read it)
+// plus a small projection of the spawned session and its newest PR.
 //
-// Heavy session fields (diff_history, input_manifest, goal_snapshot blob)
-// are intentionally excluded — this query runs on a 10s poll for the open
-// automation page, so the row stays small.
+// Exported so tests in this package and downstream handler tests can build
+// pgxmock rows without redefining the list and silently drifting from the
+// SQL. Any change to listByAutomationSelectColumns must update this slice
+// in lockstep.
+var AutomationRunListColumns = []string{
+	"id", "automation_id", "org_id", "triggered_at", "triggered_by",
+	"triggered_by_user_id", "scheduled_time", "goal_snapshot",
+	"status", "completed_at", "result_summary", "created_at", "updated_at",
+	"session_id", "session_title", "session_status",
+	"session_diff_stats",
+	"session_failure_explanation",
+	"session_failure_category",
+	"session_failure_next_steps",
+	"session_failure_retry_advised",
+	"session_pr_creation_state",
+	"pr_number", "pr_url", "pr_status", "pr_ci_status",
+}
+
+// listByAutomationSelectColumns is the SQL projection matching
+// AutomationRunListColumns. Lateral joins keep one row per run (preserving
+// keyset pagination on triggered_at, id) while avoiding an N+1 from the
+// frontend's polling loop.
+//
+// Heavy session fields (diff_history, input_manifest) and the run's
+// config_snapshot blob are intentionally excluded — this query runs on a
+// 10s poll for the open automation page, so the row stays small.
 const listByAutomationSelectColumns = `ar.id, ar.automation_id, ar.org_id, ar.triggered_at, ar.triggered_by,
-	ar.triggered_by_user_id, ar.scheduled_time, ar.goal_snapshot, ar.config_snapshot,
+	ar.triggered_by_user_id, ar.scheduled_time, ar.goal_snapshot,
 	ar.status, ar.completed_at, ar.result_summary, ar.created_at, ar.updated_at,
 	s.id AS session_id, s.title AS session_title, s.status AS session_status,
 	s.diff_stats AS session_diff_stats,
@@ -777,7 +800,7 @@ func scanAutomationRunWithSession(row pgx.Row) (models.AutomationRun, error) {
 
 	err := row.Scan(
 		&r.ID, &r.AutomationID, &r.OrgID, &r.TriggeredAt, &r.TriggeredBy,
-		&r.TriggeredByUserID, &r.ScheduledTime, &r.GoalSnapshot, &r.ConfigSnapshot,
+		&r.TriggeredByUserID, &r.ScheduledTime, &r.GoalSnapshot,
 		&r.Status, &r.CompletedAt, &r.ResultSummary, &r.CreatedAt, &r.UpdatedAt,
 		&sessionID, &sessionTitle, &sessionStatus,
 		&sessionDiffStats,
@@ -794,28 +817,41 @@ func scanAutomationRunWithSession(row pgx.Row) (models.AutomationRun, error) {
 
 	if sessionID != nil {
 		// status, failure_retry_advised, and pr_creation_state are NOT
-		// NULL on sessions, so a non-nil sessionID guarantees the rest of
-		// the session columns scanned non-nil — dereference directly.
-		// Same for pr.status / pr.ci_status when prNumber + prURL are set.
-		r.Session = &models.AutomationRunSession{
-			ID:                  *sessionID,
-			Title:               sessionTitle,
-			Status:              *sessionStatus,
-			DiffStats:           sessionDiffStats,
-			FailureExplanation:  sessionFailureExplanation,
-			FailureCategory:     sessionFailureCategory,
-			FailureNextSteps:    sessionFailureNextSteps,
-			FailureRetryAdvised: *sessionFailureRetryAdvised,
-			PRCreationState:     models.PRCreationState(*sessionPRCreationState),
+		// NULL on sessions today, so a non-nil sessionID normally implies
+		// non-nil scans here. Fall back to zero values defensively so a
+		// future migration that relaxes one of those constraints can't
+		// turn this scanner into a nil-deref panic in the polling loop.
+		s := &models.AutomationRunSession{
+			ID:                 *sessionID,
+			Title:              sessionTitle,
+			DiffStats:          sessionDiffStats,
+			FailureExplanation: sessionFailureExplanation,
+			FailureCategory:    sessionFailureCategory,
+			FailureNextSteps:   sessionFailureNextSteps,
+		}
+		if sessionStatus != nil {
+			s.Status = *sessionStatus
+		}
+		if sessionFailureRetryAdvised != nil {
+			s.FailureRetryAdvised = *sessionFailureRetryAdvised
+		}
+		if sessionPRCreationState != nil {
+			s.PRCreationState = models.PRCreationState(*sessionPRCreationState)
 		}
 		if prNumber != nil && prURL != nil {
-			r.Session.PR = &models.PRSummary{
-				Number:   *prNumber,
-				URL:      *prURL,
-				Status:   *prStatus,
-				CIStatus: *prCIStatus,
+			pr := &models.PRSummary{
+				Number: *prNumber,
+				URL:    *prURL,
 			}
+			if prStatus != nil {
+				pr.Status = *prStatus
+			}
+			if prCIStatus != nil {
+				pr.CIStatus = *prCIStatus
+			}
+			s.PR = pr
 		}
+		r.Session = s
 	}
 
 	return r, nil

@@ -2,6 +2,7 @@
 
 import { useMemo, useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
+import { useRouter } from "next/navigation";
 import { ChevronRight } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
@@ -27,12 +28,11 @@ export function RunsTab({ automationId }: { automationId: string }) {
   // pagination on every poll tick.
   const [extraPages, setExtraPages] = useState<AutomationRun[][]>([]);
   const [loadMoreCursor, setLoadMoreCursor] = useState<string | undefined>(undefined);
-  // Tracks user-driven toggle state for quiet groups, keyed by firstId.
-  // We deliberately store explicit (id → open) instead of "set of open
-  // ids" so we can distinguish "user hasn't touched this group" from
-  // "user collapsed it" and let the auto-expand fall-through only apply
-  // to the former. This avoids needing a setState-in-effect for the
-  // all-quiet auto-expand rule.
+  // Tracks user-driven toggle state for quiet groups, keyed by groupKey
+  // (the streak's oldest run id, stable across polling). We deliberately
+  // store explicit (key → open) instead of "set of open keys" so we can
+  // distinguish "user hasn't touched this group" from "user collapsed it"
+  // and let the auto-expand fall-through only apply to the former.
   const [userToggles, setUserToggles] = useState<Record<string, boolean>>({});
 
   // Pause polling once the user paginates. If polling kept running while
@@ -55,7 +55,12 @@ export function RunsTab({ automationId }: { automationId: string }) {
   const loadMoreMutation = useMutation({
     mutationFn: () => api.automations.listRuns(automationId, { limit: PAGE_SIZE, cursor }),
     onSuccess: (res) => {
-      setExtraPages((prev) => [...prev, res.data ?? []]);
+      // Skip empty pages so a "Load more" near the end of history doesn't
+      // permanently pause polling — extraPages.length stays 0 if the
+      // server returned no rows, and the standard 10s refetch resumes.
+      if (res.data && res.data.length > 0) {
+        setExtraPages((prev) => [...prev, res.data]);
+      }
       setLoadMoreCursor(res.meta?.next_cursor || undefined);
     },
   });
@@ -73,23 +78,26 @@ export function RunsTab({ automationId }: { automationId: string }) {
   // during render — no effect, no setState — so polling refetches don't
   // need to re-run it. Once the user clicks any group's toggle we honor
   // their explicit choice via userToggles.
-  const autoExpandedFirstId = useMemo(() => {
+  const autoExpandedKey = useMemo(() => {
     if (groups.length === 0) return null;
     const onlyQuiet = groups.every((g) => g.kind === "quiet");
     if (!onlyQuiet) return null;
     const topQuiet = groups.find(
       (g): g is Extract<RunGroup, { kind: "quiet" }> => g.kind === "quiet",
     );
-    return topQuiet?.firstId ?? null;
+    return topQuiet?.groupKey ?? null;
   }, [groups]);
 
-  const isGroupOpen = (firstId: string): boolean => {
-    if (firstId in userToggles) return userToggles[firstId];
-    return firstId === autoExpandedFirstId;
+  const isGroupOpen = (groupKey: string): boolean => {
+    if (groupKey in userToggles) return userToggles[groupKey];
+    return groupKey === autoExpandedKey;
   };
-  const setGroupOpen = (firstId: string, open: boolean) => {
-    setUserToggles((prev) => ({ ...prev, [firstId]: open }));
+  const setGroupOpen = (groupKey: string, open: boolean) => {
+    setUserToggles((prev) => ({ ...prev, [groupKey]: open }));
   };
+
+  const router = useRouter();
+  const navigateTo = (path: string) => router.push(path);
 
   if (isLoading) return <RunsSkeleton />;
   if (allRuns.length === 0) {
@@ -111,10 +119,11 @@ export function RunsTab({ automationId }: { automationId: string }) {
         }
         return (
           <QuietGroup
-            key={`${group.firstId}-${idx}`}
+            key={`${group.groupKey}-${idx}`}
             group={group}
-            open={isGroupOpen(group.firstId)}
-            onOpenChange={(open) => setGroupOpen(group.firstId, open)}
+            open={isGroupOpen(group.groupKey)}
+            onOpenChange={(open) => setGroupOpen(group.groupKey, open)}
+            navigateTo={navigateTo}
           />
         );
       })}
@@ -147,9 +156,10 @@ interface QuietGroupProps {
   group: Extract<RunGroup, { kind: "quiet" }>;
   open: boolean;
   onOpenChange: (open: boolean) => void;
+  navigateTo: (path: string) => void;
 }
 
-function QuietGroup({ group, open, onOpenChange }: QuietGroupProps) {
+function QuietGroup({ group, open, onOpenChange, navigateTo }: QuietGroupProps) {
   const newest = group.runs[0];
   const oldest = group.runs[group.runs.length - 1];
   const summary = `${group.runs.length} quiet runs`;
@@ -182,7 +192,7 @@ function QuietGroup({ group, open, onOpenChange }: QuietGroupProps) {
       <CollapsibleContent>
         <div className="space-y-1 px-2 pb-2 pt-1">
           {group.runs.map((run) => (
-            <QuietRunRow key={run.id} run={run} />
+            <QuietRunRow key={run.id} run={run} navigateTo={navigateTo} />
           ))}
         </div>
       </CollapsibleContent>

@@ -53,9 +53,11 @@ describe("groupRuns", () => {
     ];
     const groups = groupRuns(runs);
     expect(groups).toHaveLength(1);
+    // groupKey is the oldest run in the streak (last in DESC order) so
+    // the key stays stable as new runs land on top during polling.
     expect(groups[0]).toMatchObject({
       kind: "quiet",
-      firstId: "a",
+      groupKey: "c",
     });
     if (groups[0].kind === "quiet") {
       expect(groups[0].runs.map((r) => r.id)).toEqual(["a", "b", "c"]);
@@ -99,26 +101,24 @@ describe("groupRuns", () => {
     expect(groups).toHaveLength(1);
     if (groups[0].kind === "quiet") {
       expect(groups[0].runs).toHaveLength(4);
-      expect(groups[0].firstId).toBe("a");
+      expect(groups[0].groupKey).toBe("d");
     }
   });
 
-  it("uses the first run's id as the group key (stable across polling)", () => {
+  it("keys quiet groups by the oldest run id so the key is stable across polling", () => {
     const initial = [
       makeRun("a", "completed_noop"),
       makeRun("b", "completed_noop"),
     ];
-    const initialKey = (groupRuns(initial)[0] as { firstId: string }).firstId;
+    const initialKey = (groupRuns(initial)[0] as { groupKey: string }).groupKey;
 
     // Simulate a polling tick: a new quiet run lands on top, but the
-    // existing two stay. The firstId should now follow the new top run —
-    // the test guards against the contract change rather than asserting
-    // it stays equal: when the top changes, expanded state for the old
-    // group naturally retires, which is fine.
+    // existing two stay. The streak's oldest run is still "b", so the
+    // key — and therefore RunsTab's user-collapse state — survives.
     const after = [makeRun("z", "completed_noop"), ...initial];
-    const afterKey = (groupRuns(after)[0] as { firstId: string }).firstId;
-    expect(initialKey).toBe("a");
-    expect(afterKey).toBe("z");
+    const afterKey = (groupRuns(after)[0] as { groupKey: string }).groupKey;
+    expect(initialKey).toBe("b");
+    expect(afterKey).toBe("b");
   });
 
   it("preserves run order inside a quiet group", () => {

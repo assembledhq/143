@@ -572,28 +572,6 @@ func TestAutomationRunStore_GetByID(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
-// listByAutomationColumnSlice mirrors the column list emitted by
-// listByAutomationSelectColumns. Kept here (rather than reusing
-// automationRunColumnSlice) because the enriched query joins sessions and
-// pull_requests onto each row — the test needs to feed pgxmock the same
-// shape the scanner expects, including all-NULL rows for runs without a
-// linked session.
-func listByAutomationColumnSlice() []string {
-	return []string{
-		"id", "automation_id", "org_id", "triggered_at", "triggered_by",
-		"triggered_by_user_id", "scheduled_time", "goal_snapshot", "config_snapshot",
-		"status", "completed_at", "result_summary", "created_at", "updated_at",
-		"session_id", "session_title", "session_status",
-		"session_diff_stats",
-		"session_failure_explanation",
-		"session_failure_category",
-		"session_failure_next_steps",
-		"session_failure_retry_advised",
-		"session_pr_creation_state",
-		"pr_number", "pr_url", "pr_status", "pr_ci_status",
-	}
-}
-
 func TestAutomationRunStore_ListByAutomation(t *testing.T) {
 	t.Parallel()
 
@@ -721,10 +699,10 @@ func TestAutomationRunStore_ListByAutomation(t *testing.T) {
 
 			store := NewAutomationRunStore(mock)
 
-			cols := listByAutomationColumnSlice()
+			cols := AutomationRunListColumns
 			row := []any{
 				uuid.New(), uuid.New(), uuid.New(), now, models.AutomationTriggeredBySchedule,
-				nil, nil, "goal", []byte(`{}`),
+				nil, nil, "goal",
 				tc.runStatus, nil, nil, now, now,
 			}
 			if tc.session != nil {

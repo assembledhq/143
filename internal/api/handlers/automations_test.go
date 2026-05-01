@@ -59,26 +59,6 @@ func automationRunTestColumns() []string {
 	}
 }
 
-// automationRunListTestColumns mirrors the enriched column shape returned
-// by AutomationRunStore.ListByAutomation: the base run columns plus a
-// LATERAL-joined session projection and its newest PR. Keep aligned with
-// listByAutomationSelectColumns in internal/db/automations.go.
-func automationRunListTestColumns() []string {
-	return []string{
-		"id", "automation_id", "org_id", "triggered_at", "triggered_by",
-		"triggered_by_user_id", "scheduled_time", "goal_snapshot", "config_snapshot",
-		"status", "completed_at", "result_summary", "created_at", "updated_at",
-		"session_id", "session_title", "session_status",
-		"session_diff_stats",
-		"session_failure_explanation",
-		"session_failure_category",
-		"session_failure_next_steps",
-		"session_failure_retry_advised",
-		"session_pr_creation_state",
-		"pr_number", "pr_url", "pr_status", "pr_ci_status",
-	}
-}
-
 func testAnyArgs(n int) []any {
 	out := make([]any, n)
 	for i := range out {
@@ -1314,9 +1294,9 @@ func TestAutomationHandler_ListRuns_OK(t *testing.T) {
 	mock.ExpectQuery("SELECT .+ FROM automation_runs ar.+LEFT JOIN LATERAL").
 		WithArgs(testAnyArgs(2)...).
 		WillReturnRows(
-			pgxmock.NewRows(automationRunListTestColumns()).AddRow(
+			pgxmock.NewRows(db.AutomationRunListColumns).AddRow(
 				uuid.New(), id, orgID, now, models.AutomationTriggeredBySchedule,
-				nil, nil, "goal", []byte(`{}`),
+				nil, nil, "goal",
 				models.AutomationRunStatusCompleted, nil, nil, now, now,
 				&sessionID, &title, &sessionStatus,
 				[]byte(`{"added":12,"removed":3}`),

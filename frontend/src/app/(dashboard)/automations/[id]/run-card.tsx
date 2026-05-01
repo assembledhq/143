@@ -17,7 +17,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { DiffStatsBadge } from "@/components/code-review/diff-stats-badge";
 import { cn, formatTimeAgo } from "@/lib/utils";
-import type { AutomationRun, AutomationRunStatus } from "@/lib/types";
+import type { AutomationRun, AutomationRunStatus, PRCreationState } from "@/lib/types";
 
 // "Quiet" runs — no work was needed (or the schedule fired while paused).
 // Treated as low-signal: rendered as thin dim rows individually and
@@ -70,11 +70,18 @@ interface RunCardProps {
 }
 
 export function RunCard({ run }: RunCardProps) {
+  // useRouter is hoisted here once and threaded down so the three nested
+  // components don't each re-subscribe to the router context.
+  const router = useRouter();
+  const navigateTo = (path: string) => router.push(path);
+
   const kind = classifyRun(run);
-  if (kind === "quiet") return <QuietRunRow run={run} />;
+  if (kind === "quiet") return <QuietRunRow run={run} navigateTo={navigateTo} />;
   if (kind === "pending") return <PendingRow run={run} />;
-  return <FullCard run={run} kind={kind} />;
+  return <FullCard run={run} kind={kind} navigateTo={navigateTo} />;
 }
+
+type Navigator = (path: string) => void;
 
 // ---------------------------------------------------------------------------
 // Full-card variants (running / completed / failed / needs_input)
@@ -83,12 +90,12 @@ export function RunCard({ run }: RunCardProps) {
 interface FullCardProps {
   run: AutomationRun;
   kind: FullCardKind;
+  navigateTo: Navigator;
 }
 
-function FullCard({ run, kind }: FullCardProps) {
-  const router = useRouter();
+function FullCard({ run, kind, navigateTo }: FullCardProps) {
   const sessionId = run.session?.id;
-  const navigate = sessionId ? () => router.push(`/sessions/${sessionId}`) : undefined;
+  const navigate = sessionId ? () => navigateTo(`/sessions/${sessionId}`) : undefined;
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
     if (!navigate) return;
@@ -125,7 +132,7 @@ function FullCard({ run, kind }: FullCardProps) {
         </div>
         <div className="flex shrink-0 items-center gap-2">
           <RowMeta run={run} kind={kind} />
-          <PrimaryAction run={run} kind={kind} />
+          <PrimaryAction run={run} kind={kind} navigateTo={navigateTo} />
           {navigate && (
             <ChevronRight
               aria-hidden
@@ -284,7 +291,11 @@ function primaryLine(run: AutomationRun, kind: FullCardKind): string | null {
 }
 
 function secondaryLine(run: AutomationRun, kind: FullCardKind): string | null {
-  if (kind === "failed") {
+  // Surface the agent's first suggested next step on both failure and
+  // needs-input rows — both states are blocked on the user, and the
+  // session's failure_next_steps is the same field powering the session
+  // page's guidance UI, so users see a consistent hint either place.
+  if (kind === "failed" || kind === "needs_input") {
     const next = run.session?.failure_next_steps?.[0];
     return next ? `Suggested next step: ${next}` : null;
   }
@@ -303,6 +314,7 @@ function secondaryLine(run: AutomationRun, kind: FullCardKind): string | null {
 function RowMeta({ run, kind }: { run: AutomationRun; kind: FullCardKind }) {
   const diff = run.session?.diff_stats;
   const pr = run.session?.pr;
+  const prState = run.session?.pr_creation_state;
   const hasDiff = diff && (diff.added > 0 || diff.removed > 0);
   const showInRow = kind === "completed_with_pr" || kind === "completed_no_pr";
   if (!showInRow) return null;
@@ -322,22 +334,71 @@ function RowMeta({ run, kind }: { run: AutomationRun; kind: FullCardKind }) {
           PR #{pr.number} · {pr.status}
         </Badge>
       ) : (
-        hasDiff && (
-          <Badge variant="outline" className="text-xs text-muted-foreground">
-            No PR yet
-          </Badge>
-        )
+        // No PR row joined — distinguish "in flight" (the worker is
+        // pushing a branch / opening the PR) from "PR creation failed"
+        // from the everyday "session done, user hasn't asked for a PR
+        // yet" case. All three conditions read off pr_creation_state,
+        // which is now a typed PRCreationState union so the branches
+        // are exhaustive.
+        <PRCreationPill prState={prState} hasDiff={!!hasDiff} />
       )}
     </div>
   );
+}
+
+function PRCreationPill({
+  prState,
+  hasDiff,
+}: {
+  prState: PRCreationState | undefined;
+  hasDiff: boolean;
+}) {
+  if (prState === "queued" || prState === "pushing") {
+    return (
+      <Badge
+        variant="outline"
+        className="gap-1 text-xs text-muted-foreground"
+        title="The worker is pushing the branch and opening a pull request."
+      >
+        <Loader2 aria-hidden className="h-3 w-3 animate-spin" />
+        Creating PR…
+      </Badge>
+    );
+  }
+  if (prState === "failed") {
+    return (
+      <Badge
+        variant="outline"
+        className="border-red-500/40 text-xs text-red-700 dark:text-red-300"
+        title="PR creation failed. Open the session to retry."
+      >
+        PR creation failed
+      </Badge>
+    );
+  }
+  if (hasDiff) {
+    return (
+      <Badge variant="outline" className="text-xs text-muted-foreground">
+        No PR yet
+      </Badge>
+    );
+  }
+  return null;
 }
 
 // ---------------------------------------------------------------------------
 // Primary action button — varies by row state
 // ---------------------------------------------------------------------------
 
-function PrimaryAction({ run, kind }: { run: AutomationRun; kind: FullCardKind }) {
-  const router = useRouter();
+function PrimaryAction({
+  run,
+  kind,
+  navigateTo,
+}: {
+  run: AutomationRun;
+  kind: FullCardKind;
+  navigateTo: Navigator;
+}) {
   const sessionId = run.session?.id;
   // Stop card-level navigation from firing when the inner control handles
   // the click — otherwise the user lands on the session page after we
@@ -378,7 +439,7 @@ function PrimaryAction({ run, kind }: { run: AutomationRun; kind: FullCardKind }
       className="shrink-0"
       onClick={(e) => {
         stop(e);
-        router.push(`/sessions/${sessionId}`);
+        navigateTo(`/sessions/${sessionId}`);
       }}
       onKeyDown={stop}
     >
@@ -440,10 +501,15 @@ function PendingRow({ run }: { run: AutomationRun }) {
 // Quiet row — used both standalone and inside a quiet group
 // ---------------------------------------------------------------------------
 
-export function QuietRunRow({ run }: { run: AutomationRun }) {
-  const router = useRouter();
+export function QuietRunRow({
+  run,
+  navigateTo,
+}: {
+  run: AutomationRun;
+  navigateTo: Navigator;
+}) {
   const sessionId = run.session?.id;
-  const navigate = sessionId ? () => router.push(`/sessions/${sessionId}`) : undefined;
+  const navigate = sessionId ? () => navigateTo(`/sessions/${sessionId}`) : undefined;
   const headline = run.status === "skipped" ? "Skipped" : "No work needed";
   const summary = run.result_summary;
 
