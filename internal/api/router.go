@@ -120,6 +120,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				ghSvc, pullRequestStore, sessionStore, issueStore,
 				deployStore, validationStore, repoStore, jobStore, logger,
 			)
+			prService.SetAppBaseURL(cfg.FrontendURL)
 			prService.SetReviewCommentStore(reviewCommentStore)
 			prService.SetIntegrationStore(integrationStore)
 			prService.SetSandboxPushDeps(sandboxProvider, snapshotStore)
