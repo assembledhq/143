@@ -2083,7 +2083,27 @@ func TestFormatPRBody_SessionLink(t *testing.T) {
 
 	body := svc.formatPRBody(context.Background(), run, nil)
 	require.Contains(t, body, "session abcdef01", "should contain short session ID in footer")
-	require.Contains(t, body, "app.143.dev/sessions/", "should contain session link")
+	require.Contains(t, body, "https://143.dev/sessions/", "should contain session link with the public app base URL")
+	require.NotContains(t, body, "https://app.143.dev/sessions/", "should not use the deprecated app subdomain in the footer")
+}
+
+func TestFormatPRBody_SessionLinkUsesConfiguredAppBaseURL(t *testing.T) {
+	t.Parallel()
+
+	svc := &PRService{
+		logger:     zerolog.Nop(),
+		appBaseURL: "https://frontend.example.com/",
+	}
+	summary := "Fixed a bug"
+	run := &models.Session{
+		ID:            uuid.MustParse("abcdef01-2345-6789-abcd-ef0123456789"),
+		OrgID:         uuid.New(),
+		ResultSummary: &summary,
+	}
+
+	body := svc.formatPRBody(context.Background(), run, nil)
+	require.Contains(t, body, "https://frontend.example.com/sessions/abcdef01-2345-6789-abcd-ef0123456789", "should use the configured app base URL for the session link")
+	require.NotContains(t, body, "//sessions/", "should trim trailing slashes when building the session link")
 }
 
 func TestFormatPRBody_WithIssueContext(t *testing.T) {
