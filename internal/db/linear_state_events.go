@@ -16,6 +16,7 @@ type LinearStateEventKind string
 
 const (
 	LinearStateEventLinked   LinearStateEventKind = "linked"
+	LinearStateEventStarted  LinearStateEventKind = "started"
 	LinearStateEventPROpened LinearStateEventKind = "pr_opened"
 	LinearStateEventPRMerged LinearStateEventKind = "pr_merged"
 	LinearStateEventEnded    LinearStateEventKind = "ended"
