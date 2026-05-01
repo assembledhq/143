@@ -2,7 +2,7 @@ You are writing a pull request title and description for a code change. Write fo
 
 {{ if .HasTemplate }}
 <instructions>
-You are given a PR template from the repository. Fill in its sections using the provided context. Do not add sections that are not in the template. If a section is not applicable, write "N/A".
+You are given a PR template from the repository. Preserve the template's structure, headings, checklists, and field ordering. Fill in its existing sections using the provided context, replacing placeholders where possible. Do not add sections that are not in the template. If a field truly cannot be filled, write "N/A" and leave the rest of the template intact.
 </instructions>
 {{ else }}
 <instructions>
