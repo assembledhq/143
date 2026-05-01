@@ -3,6 +3,7 @@ package providers
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"strings"
 	"sync"
@@ -606,6 +607,383 @@ func (h *hangingSandboxExecutor) Exec(ctx context.Context, _ *agent.Sandbox, _ s
 
 func (h *hangingSandboxExecutor) ReadFile(_ context.Context, _ *agent.Sandbox, _ string) ([]byte, error) {
 	return nil, nil
+}
+
+// recordingObserver captures Ready/Failed calls so tests can assert the
+// provider notified the observer at the right transitions. Safe for
+// concurrent use because progressive support and the startService goroutine
+// can both fire it at the same time.
+type recordingObserver struct {
+	mu          sync.Mutex
+	readyCalls  []recordedReady
+	failedCalls []recordedFailed
+}
+
+type recordedReady struct {
+	name string
+	port int
+	pid  int
+}
+
+type recordedFailed struct {
+	name   string
+	errMsg string
+	tail   []string
+}
+
+func (r *recordingObserver) OnServiceReady(name string, port, pid int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.readyCalls = append(r.readyCalls, recordedReady{name: name, port: port, pid: pid})
+}
+
+func (r *recordingObserver) OnServiceFailed(name, errMsg string, tail []string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.failedCalls = append(r.failedCalls, recordedFailed{
+		name:   name,
+		errMsg: errMsg,
+		tail:   append([]string(nil), tail...),
+	})
+}
+
+func (r *recordingObserver) ready() []recordedReady {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]recordedReady(nil), r.readyCalls...)
+}
+
+func (r *recordingObserver) failed() []recordedFailed {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]recordedFailed(nil), r.failedCalls...)
+}
+
+// fakeServiceExecutor lets a single test customize what each kind of exec
+// call returns. ExecStream simulates the long-running service process
+// (npm run dev / sh script.sh); Exec handles the readiness curl probes
+// and the per-service `lsof` PID detection.
+type fakeServiceExecutor struct {
+	execStreamFn func(ctx context.Context, cmd string, onLine func([]byte)) (int, error)
+	execFn       func(ctx context.Context, cmd string) (int, error)
+}
+
+func (f *fakeServiceExecutor) ExecStream(ctx context.Context, _ *agent.Sandbox, cmd string, onLine func(line []byte), _ io.Writer) (int, error) {
+	if f.execStreamFn != nil {
+		return f.execStreamFn(ctx, cmd, onLine)
+	}
+	return 0, nil
+}
+
+func (f *fakeServiceExecutor) Exec(ctx context.Context, _ *agent.Sandbox, cmd string, _, _ io.Writer) (int, error) {
+	if f.execFn != nil {
+		return f.execFn(ctx, cmd)
+	}
+	return 0, nil
+}
+
+func (f *fakeServiceExecutor) ReadFile(_ context.Context, _ *agent.Sandbox, _ string) ([]byte, error) {
+	return nil, nil
+}
+
+// TestNotifyService_NilSafe verifies the helper functions tolerate a nil
+// observer — providers must work both when StartPreview is called from the
+// manager (with an observer) and when it's called from a context that
+// doesn't care about per-service updates.
+func TestNotifyService_NilSafe(t *testing.T) {
+	t.Parallel()
+	require.NotPanics(t, func() { notifyServiceReady(nil, "web", 3000, 42) })
+	require.NotPanics(t, func() { notifyServiceFailed(nil, "web", "boom", []string{"line"}) })
+}
+
+// TestNotifyService_InvokesObserver verifies the helpers forward arguments
+// faithfully when the observer is non-nil.
+func TestNotifyService_InvokesObserver(t *testing.T) {
+	t.Parallel()
+	obs := &recordingObserver{}
+	notifyServiceReady(obs, "web", 3000, 42)
+	notifyServiceFailed(obs, "server", "exited with code 126", []string{"hi", "bye"})
+
+	ready := obs.ready()
+	require.Len(t, ready, 1)
+	require.Equal(t, recordedReady{name: "web", port: 3000, pid: 42}, ready[0])
+
+	failed := obs.failed()
+	require.Len(t, failed, 1)
+	require.Equal(t, "server", failed[0].name)
+	require.Equal(t, "exited with code 126", failed[0].errMsg)
+	require.Equal(t, []string{"hi", "bye"}, failed[0].tail)
+}
+
+// TestStartService_FailureCapturesTailAndNotifies exercises the entire
+// startService failure path: the goroutine streams output through onLine
+// (which fills the ring buffer), then ExecStream returns a non-zero exit,
+// and the deferred section copies the tail and fires the observer. This
+// covers ~25 lines that previously had no test.
+func TestStartService_FailureCapturesTailAndNotifies(t *testing.T) {
+	t.Parallel()
+
+	exec := &fakeServiceExecutor{
+		execFn: func(_ context.Context, _ string) (int, error) {
+			// lsof for PID detection: pretend nothing's listening.
+			return 1, nil
+		},
+		execStreamFn: func(_ context.Context, _ string, onLine func([]byte)) (int, error) {
+			onLine([]byte("starting up"))
+			onLine([]byte("./bin/server: cannot execute"))
+			return 126, nil
+		},
+	}
+	d := NewDockerPreviewProvider(&mockDockerPreviewClient{}, exec, zerolog.Nop())
+	obs := &recordingObserver{}
+
+	state := &previewState{
+		sandbox:  &agent.Sandbox{ID: "sb"},
+		services: map[string]*serviceState{},
+		cancelFn: func() {},
+	}
+
+	err := d.startService(
+		context.Background(),
+		state,
+		"server",
+		models.ServiceConfig{Command: []string{"sh", "preview-start.sh"}, Port: 8080},
+		nil,
+		obs,
+	)
+	require.NoError(t, err)
+	state.wg.Wait()
+
+	failed := obs.failed()
+	require.Len(t, failed, 1, "observer should have been notified of the failure")
+	require.Equal(t, "server", failed[0].name)
+	require.Contains(t, failed[0].errMsg, "126")
+	require.Equal(t, []string{"starting up", "./bin/server: cannot execute"}, failed[0].tail)
+	require.Empty(t, obs.ready(), "should not see any Ready calls when the service exited non-zero")
+
+	// Service status flipped to Failed in-memory so waitForReadiness can
+	// fail-fast on it (covered by TestWaitForReadiness_FailsFastWhenServiceExited).
+	d.mu.RLock()
+	require.Equal(t, models.PreviewServiceStatusFailed, state.services["server"].status)
+	d.mu.RUnlock()
+}
+
+// TestStartService_TailRingBufferBoundedAtServiceTailLines verifies that
+// the per-service stdout/stderr ring buffer drops oldest lines after it
+// fills, so a chatty service can't OOM the worker before it dies.
+func TestStartService_TailRingBufferBoundedAtServiceTailLines(t *testing.T) {
+	t.Parallel()
+
+	totalLines := serviceTailLines + 50
+	exec := &fakeServiceExecutor{
+		execFn: func(_ context.Context, _ string) (int, error) { return 1, nil },
+		execStreamFn: func(_ context.Context, _ string, onLine func([]byte)) (int, error) {
+			for i := 0; i < totalLines; i++ {
+				onLine([]byte(fmt.Sprintf("line-%d", i)))
+			}
+			return 1, nil
+		},
+	}
+	d := NewDockerPreviewProvider(&mockDockerPreviewClient{}, exec, zerolog.Nop())
+	obs := &recordingObserver{}
+	state := &previewState{
+		sandbox:  &agent.Sandbox{},
+		services: map[string]*serviceState{},
+		cancelFn: func() {},
+	}
+
+	err := d.startService(context.Background(), state, "web",
+		models.ServiceConfig{Command: []string{"true"}, Port: 3000},
+		nil, obs)
+	require.NoError(t, err)
+	state.wg.Wait()
+
+	failed := obs.failed()
+	require.Len(t, failed, 1)
+	require.Len(t, failed[0].tail, serviceTailLines)
+	// First retained line should be the (totalLines - serviceTailLines)th input.
+	require.Equal(t, fmt.Sprintf("line-%d", totalLines-serviceTailLines), failed[0].tail[0])
+	require.Equal(t, fmt.Sprintf("line-%d", totalLines-1), failed[0].tail[len(failed[0].tail)-1])
+}
+
+// TestWaitForReadiness_FailsFastWhenServiceStopped covers the second branch
+// of checkExited: a service that exited cleanly (Stopped, not Failed) before
+// becoming ready also short-circuits the loop.
+func TestWaitForReadiness_FailsFastWhenServiceStopped(t *testing.T) {
+	t.Parallel()
+	d := NewDockerPreviewProvider(&mockDockerPreviewClient{}, &noopSandboxExecutor{}, zerolog.Nop())
+	state := &previewState{
+		sandbox:  &agent.Sandbox{},
+		services: map[string]*serviceState{},
+	}
+	state.services["web"] = &serviceState{
+		name:   "web",
+		port:   3000,
+		status: models.PreviewServiceStatusStopped,
+	}
+	err := d.waitForReadiness(context.Background(), state, "web", 3000, "/", 5*time.Second)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "stopped before becoming ready")
+}
+
+// TestStartPreview_StandardMode_NotifiesObserverPerService runs StartPreview
+// to completion in standard mode with two services, both of which become
+// ready promptly, and asserts the observer received one OnServiceReady per
+// service. This covers Phase 5 (startService) and the standard branch of
+// Phase 6 (the readiness loop and notifyServiceReady call).
+func TestStartPreview_StandardMode_NotifiesObserverPerService(t *testing.T) {
+	t.Parallel()
+
+	// Each service's exec stream blocks until the test releases it.
+	release := make(chan struct{})
+	exec := &fakeServiceExecutor{
+		execStreamFn: func(ctx context.Context, _ string, _ func([]byte)) (int, error) {
+			select {
+			case <-release:
+			case <-ctx.Done():
+			}
+			return 0, nil
+		},
+		execFn: func(_ context.Context, cmd string) (int, error) {
+			// curl readiness probes return 0 (ready); lsof PID detection
+			// returns 1 (no listener). Distinguish by looking for "curl" in
+			// the command.
+			if strings.Contains(cmd, "curl") {
+				return 0, nil
+			}
+			return 1, nil
+		},
+	}
+	d := NewDockerPreviewProvider(&mockDockerPreviewClient{}, exec, zerolog.Nop())
+	obs := &recordingObserver{}
+
+	cfg := &models.PreviewConfig{
+		Name:    "test-app",
+		Primary: "web",
+		Services: map[string]models.ServiceConfig{
+			"web":     {Command: []string{"npm", "run", "dev"}, Port: 3000, Ready: models.ReadinessProbe{HTTPPath: "/"}},
+			"support": {Command: []string{"node", "worker.js"}, Port: 9000, Ready: models.ReadinessProbe{HTTPPath: "/"}},
+		},
+	}
+
+	handle, err := d.StartPreview(context.Background(), &agent.Sandbox{ID: "sb"}, cfg, nil, obs)
+	require.NoError(t, err)
+	require.NotNil(t, handle)
+	require.Equal(t, 3000, handle.PrimaryPort)
+	require.False(t, handle.PartiallyReady)
+
+	ready := obs.ready()
+	require.Len(t, ready, 2)
+	names := []string{ready[0].name, ready[1].name}
+	require.ElementsMatch(t, []string{"web", "support"}, names)
+
+	// Cleanup.
+	close(release)
+	require.NoError(t, d.StopPreview(context.Background(), handle.Handle))
+}
+
+// TestStartPreview_ProgressiveMode_NotifiesObserver covers Phase 6's
+// progressive branch — primary becomes ready first (synchronously), support
+// services come up in a background goroutine.
+func TestStartPreview_ProgressiveMode_NotifiesObserver(t *testing.T) {
+	t.Parallel()
+
+	release := make(chan struct{})
+	exec := &fakeServiceExecutor{
+		execStreamFn: func(ctx context.Context, _ string, _ func([]byte)) (int, error) {
+			select {
+			case <-release:
+			case <-ctx.Done():
+			}
+			return 0, nil
+		},
+		execFn: func(_ context.Context, cmd string) (int, error) {
+			if strings.Contains(cmd, "curl") {
+				return 0, nil
+			}
+			return 1, nil
+		},
+	}
+	d := NewDockerPreviewProvider(&mockDockerPreviewClient{}, exec, zerolog.Nop())
+	obs := &recordingObserver{}
+
+	cfg := &models.PreviewConfig{
+		Name:        "test-app",
+		Primary:     "web",
+		Progressive: true,
+		Services: map[string]models.ServiceConfig{
+			"web":     {Command: []string{"npm", "run", "dev"}, Port: 3000, Ready: models.ReadinessProbe{HTTPPath: "/"}},
+			"support": {Command: []string{"node", "worker.js"}, Port: 9000, Ready: models.ReadinessProbe{HTTPPath: "/"}},
+		},
+	}
+
+	handle, err := d.StartPreview(context.Background(), &agent.Sandbox{ID: "sb"}, cfg, nil, obs)
+	require.NoError(t, err)
+	require.True(t, handle.PartiallyReady)
+
+	// Primary should be ready synchronously — assert without waiting.
+	require.Eventually(t, func() bool {
+		for _, r := range obs.ready() {
+			if r.name == "web" {
+				return true
+			}
+		}
+		return false
+	}, 5*time.Second, 10*time.Millisecond, "primary service should fire OnServiceReady before StartPreview returns")
+
+	// Support service is polled in the background; allow time for it.
+	require.Eventually(t, func() bool {
+		for _, r := range obs.ready() {
+			if r.name == "support" {
+				return true
+			}
+		}
+		return false
+	}, 5*time.Second, 50*time.Millisecond, "support service should eventually fire OnServiceReady")
+
+	close(release)
+	require.NoError(t, d.StopPreview(context.Background(), handle.Handle))
+}
+
+// TestStartPreview_NilObserver_DoesNotPanic verifies that providers tolerate
+// a nil observer — code paths in callers (e.g. tests, future internal
+// callers) shouldn't be forced to construct a no-op observer just to call
+// StartPreview.
+func TestStartPreview_NilObserver_DoesNotPanic(t *testing.T) {
+	t.Parallel()
+
+	release := make(chan struct{})
+	exec := &fakeServiceExecutor{
+		execStreamFn: func(ctx context.Context, _ string, _ func([]byte)) (int, error) {
+			select {
+			case <-release:
+			case <-ctx.Done():
+			}
+			return 0, nil
+		},
+		execFn: func(_ context.Context, cmd string) (int, error) {
+			if strings.Contains(cmd, "curl") {
+				return 0, nil
+			}
+			return 1, nil
+		},
+	}
+	d := NewDockerPreviewProvider(&mockDockerPreviewClient{}, exec, zerolog.Nop())
+
+	cfg := &models.PreviewConfig{
+		Name:    "test-app",
+		Primary: "web",
+		Services: map[string]models.ServiceConfig{
+			"web": {Command: []string{"npm", "start"}, Port: 3000, Ready: models.ReadinessProbe{HTTPPath: "/"}},
+		},
+	}
+
+	handle, err := d.StartPreview(context.Background(), &agent.Sandbox{ID: "sb"}, cfg, nil, nil)
+	require.NoError(t, err)
+	require.Equal(t, 3000, handle.PrimaryPort)
+
+	close(release)
+	require.NoError(t, d.StopPreview(context.Background(), handle.Handle))
 }
 
 // TestWaitForReadiness_FailsFastWhenServiceExited verifies that the readiness
