@@ -66,19 +66,6 @@ func (t *UsageTracker) ContainerStarted(ctx context.Context, orgID, sessionID uu
 		t.metrics.RecordStart(ctx, orgIDStr, sandbox.Provider, cfg.CPULimit, cfg.MemoryLimitMB)
 	}
 
-	// In-memory registry for the runtime sampler. Stored even when the DB
-	// path is disabled so self-hosters without persistence still get live
-	// resource metrics.
-	t.mu.Lock()
-	t.active[sandbox.ID] = ActiveContainer{
-		EventID:       eventID,
-		Sandbox:       sandbox,
-		StartedAt:     startedAt,
-		CPULimit:      cfg.CPULimit,
-		MemoryLimitMB: cfg.MemoryLimitMB,
-	}
-	t.mu.Unlock()
-
 	// DB persistence.
 	if t.store != nil {
 		event := &models.ContainerUsageEvent{
@@ -101,6 +88,21 @@ func (t *UsageTracker) ContainerStarted(ctx context.Context, orgID, sessionID uu
 			return uuid.Nil
 		}
 	}
+
+	// In-memory registry for the runtime sampler. Stored even when the DB
+	// path is disabled so self-hosters without persistence still get live
+	// resource metrics. When DB persistence is enabled, register only after
+	// RecordStart succeeds; otherwise the stop path receives uuid.Nil and
+	// cannot remove this entry by event ID.
+	t.mu.Lock()
+	t.active[sandbox.ID] = ActiveContainer{
+		EventID:       eventID,
+		Sandbox:       sandbox,
+		StartedAt:     startedAt,
+		CPULimit:      cfg.CPULimit,
+		MemoryLimitMB: cfg.MemoryLimitMB,
+	}
+	t.mu.Unlock()
 
 	return eventID
 }

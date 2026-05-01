@@ -17,9 +17,10 @@ import (
 
 // mockContainerUsageStore records calls for verification.
 type mockContainerUsageStore struct {
-	startCalls    []models.ContainerUsageEvent
-	stopCalls     []stopCall
-	recordStopErr error
+	startCalls     []models.ContainerUsageEvent
+	recordStartErr error
+	stopCalls      []stopCall
+	recordStopErr  error
 }
 
 type stopCall struct {
@@ -30,7 +31,7 @@ type stopCall struct {
 
 func (m *mockContainerUsageStore) RecordStart(_ context.Context, event *models.ContainerUsageEvent) error {
 	m.startCalls = append(m.startCalls, *event)
-	return nil
+	return m.recordStartErr
 }
 
 func (m *mockContainerUsageStore) RecordStop(_ context.Context, eventID uuid.UUID, stoppedAt time.Time, exitReason string) error {
@@ -129,4 +130,23 @@ func TestUsageTracker_RecordStopSkippedOnNilEventID(t *testing.T) {
 
 	tracker.ContainerStopped(context.Background(), uuid.New(), uuid.New(), uuid.Nil, time.Now(), "failed")
 	require.Empty(t, store.stopCalls, "RecordStop should be skipped when eventID is Nil")
+}
+
+func TestUsageTracker_RecordStartFailureDoesNotLeaveActiveContainer(t *testing.T) {
+	t.Parallel()
+
+	store := &mockContainerUsageStore{recordStartErr: fmt.Errorf("db down")}
+	tracker := agent.NewUsageTracker(store, testBillingMetrics(t), zerolog.Nop())
+
+	eventID := tracker.ContainerStarted(
+		context.Background(),
+		uuid.New(),
+		uuid.New(),
+		&agent.Sandbox{ID: "ctr-start-failed", Provider: "docker", WorkDir: "/workspace"},
+		agent.DefaultSandboxConfig(),
+		time.Now(),
+	)
+
+	require.Equal(t, uuid.Nil, eventID, "ContainerStarted should return Nil when DB start recording fails")
+	require.Empty(t, tracker.Snapshot(), "failed start recording should not leave a container in the sampler registry")
 }

@@ -25,7 +25,7 @@ test_bucket_map_uses_bucket_then_host_with_colon_separator() {
   reset_worker_env
   WORKER_BUCKET_MAP="hcloud-ccx23:87.99.158.39,hcloud-cpx31:10.0.0.5"
   apply_worker_bucket_overrides worker "87.99.158.39"
-  assert_eq "5" "${WORKER_PROCESS_COUNT:-}" "bucket map should match bucket:host entries"
+  assert_eq "4" "${WORKER_PROCESS_COUNT:-}" "bucket map should match bucket:host entries"
 }
 
 test_bucket_map_does_not_override_other_hosts() {
@@ -63,13 +63,42 @@ test_bucket_map_uses_default_bucket_when_set() {
   reset_worker_env
   WORKER_DEFAULT_BUCKET="hcloud-ccx23"
   apply_worker_bucket_overrides worker "87.99.158.40"
-  assert_eq "5" "${WORKER_PROCESS_COUNT:-}" "default bucket should still work for unmapped workers"
+  assert_eq "4" "${WORKER_PROCESS_COUNT:-}" "default bucket should still work for unmapped workers"
 }
 
 test_bucket_map_uses_builtin_fallback_without_mapping() {
   reset_worker_env
   apply_worker_bucket_overrides worker "87.99.158.40"
   assert_eq "2" "${WORKER_PROCESS_COUNT:-}" "builtin default bucket should apply when no mapping is configured"
+}
+
+test_builtin_bucket_counts_follow_reserved_ram_rule() {
+  local cases=(
+    "hcloud-cpx11:1"
+    "hcloud-cpx21:1"
+    "hcloud-cpx31:2"
+    "hcloud-cpx41:4"
+    "hcloud-cpx51:9"
+    "hcloud-ccx13:2"
+    "hcloud-ccx23:4"
+    "hcloud-ccx33:8"
+    "hcloud-ccx43:16"
+    "hcloud-ccx53:32"
+    "hcloud-ccx63:48"
+    "ec2-t3.xlarge:4"
+    "ec2-c6i.2xlarge:4"
+    "ec2-c6i.4xlarge:9"
+  )
+
+  local case bucket expected
+  for case in "${cases[@]}"; do
+    reset_worker_env
+    bucket="${case%%:*}"
+    expected="${case#*:}"
+    WORKER_DEFAULT_BUCKET="$bucket"
+    apply_worker_bucket_overrides worker "87.99.158.40"
+    assert_eq "$expected" "${WORKER_PROCESS_COUNT:-}" "$bucket should follow the reserved RAM sizing rule"
+  done
 }
 
 main() {
@@ -80,6 +109,7 @@ main() {
   test_bucket_map_ignores_non_worker_roles
   test_bucket_map_uses_default_bucket_when_set
   test_bucket_map_uses_builtin_fallback_without_mapping
+  test_builtin_bucket_counts_follow_reserved_ram_rule
 }
 
 main "$@"

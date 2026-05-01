@@ -42,11 +42,14 @@ How shared-CPU (CPX) counts were chosen:
 - Base sandbox memory default is 3072 MB (3 GB cgroup limit). Tmpfs at /tmp
   (256 MiB) + /var/tmp (512 MiB) consumes up to ~768 MB of that, leaving
   ~2.25 GB for the agent's actual heap.
-- The first-order limit is roughly `floor(node_ram_gb / 3)`.
-- We cap by available vCPU when that is lower.
-- In short: `WORKER_PROCESS_COUNT ~= min(vCPU, floor(RAM_GB / 3))`.
+- Reserve host RAM first: `max(2 GB, 10% of node RAM)`.
+- The first-order memory limit is roughly `floor((node_ram_gb - reserve_gb) / 3)`.
+- We cap by available vCPU when that is lower. `SANDBOX_CPU_LIMIT=2` is a
+  throttling ceiling, not a reservation, so this allows modest CPU overcommit
+  for LLM/network-bound runs without letting memory overcommit be the default.
+- In short: `WORKER_PROCESS_COUNT ~= max(1, min(vCPU, floor((RAM_GB - reserve_GB) / 3)))`.
 
-This is intentionally not ultra-conservative: it targets full utilization at the default sandbox memory size.
+This is intentionally not ultra-conservative: it targets high utilization at the default sandbox memory size while leaving room for the worker process, Docker/gVisor overhead, kernel memory, and page cache.
 
 ## Where to set these in production
 
@@ -67,18 +70,18 @@ Built-in bucket presets used by deploy/provision scripts:
   - `hcloud-cpx11` → `WORKER_PROCESS_COUNT=1`
   - `hcloud-cpx21` → `WORKER_PROCESS_COUNT=1`
   - `hcloud-cpx31` → `WORKER_PROCESS_COUNT=2`
-  - `hcloud-cpx41` → `WORKER_PROCESS_COUNT=5`
-  - `hcloud-cpx51` → `WORKER_PROCESS_COUNT=10`
+  - `hcloud-cpx41` → `WORKER_PROCESS_COUNT=4`
+  - `hcloud-cpx51` → `WORKER_PROCESS_COUNT=9`
 - Hetzner CCX (dedicated CPU):
   - `hcloud-ccx13` → `WORKER_PROCESS_COUNT=2`
-  - `hcloud-ccx23` → `WORKER_PROCESS_COUNT=5`
-  - `hcloud-ccx33` → `WORKER_PROCESS_COUNT=10`
-  - `hcloud-ccx43` → `WORKER_PROCESS_COUNT=21`
-  - `hcloud-ccx53` → `WORKER_PROCESS_COUNT=42`
-  - `hcloud-ccx63` → `WORKER_PROCESS_COUNT=64`
-- `ec2-t3.xlarge` → `WORKER_PROCESS_COUNT=5`
-- `ec2-c6i.2xlarge` → `WORKER_PROCESS_COUNT=8`
-- `ec2-c6i.4xlarge` → `WORKER_PROCESS_COUNT=10`
+  - `hcloud-ccx23` → `WORKER_PROCESS_COUNT=4`
+  - `hcloud-ccx33` → `WORKER_PROCESS_COUNT=8`
+  - `hcloud-ccx43` → `WORKER_PROCESS_COUNT=16`
+  - `hcloud-ccx53` → `WORKER_PROCESS_COUNT=32`
+  - `hcloud-ccx63` → `WORKER_PROCESS_COUNT=48`
+- `ec2-t3.xlarge` → `WORKER_PROCESS_COUNT=4`
+- `ec2-c6i.2xlarge` → `WORKER_PROCESS_COUNT=4`
+- `ec2-c6i.4xlarge` → `WORKER_PROCESS_COUNT=9`
 
 Per-sandbox defaults are intentionally consistent across buckets unless you explicitly override:
 
