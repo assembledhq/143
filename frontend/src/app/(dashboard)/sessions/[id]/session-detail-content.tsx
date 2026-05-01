@@ -2508,7 +2508,7 @@ export function SessionDetailContent({ id }: { id: string }) {
               <TabsTrigger value="preview">Preview</TabsTrigger>
             </TabsList>
           </div>
-          <div aria-label="Session detail actions" className="flex items-center gap-2 shrink-0 pl-2">
+          <div aria-label="Session detail actions" className="flex items-center justify-end gap-2 shrink-0 pl-2">
             {hasPR && prData?.data?.github_pr_url ? (
               <>
                 {prStatus === "closed" && (
@@ -2544,6 +2544,15 @@ export function SessionDetailContent({ id }: { id: string }) {
                 </Button>
               </DisabledTooltip>
             ) : null}
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-8 w-8 md:hidden"
+              aria-label="Close details"
+              onClick={() => setMobileDetailOpen(false)}
+            >
+              <X className="h-4 w-4" />
+            </Button>
           </div>
         </div>
         {prErrorNotice && (
@@ -2880,6 +2889,7 @@ export function SessionDetailContent({ id }: { id: string }) {
         <SheetContent
           side="bottom"
           id="session-detail-sheet"
+          hideCloseButton
           className="md:hidden h-[85vh] max-h-[85vh] min-h-[60vh] p-0 flex flex-col gap-0 bg-background"
         >
           <SheetTitle className="sr-only">Session details</SheetTitle>

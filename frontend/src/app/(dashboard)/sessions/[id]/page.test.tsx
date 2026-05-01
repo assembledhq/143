@@ -253,6 +253,38 @@ describe('SessionDetailPage', () => {
     expect(screen.getByRole('tab', { name: 'Validation' })).toBeInTheDocument();
   });
 
+  it('uses a dedicated mobile close button that does not compete with PR actions', async () => {
+    vi.mocked(window.matchMedia).mockImplementation((query: string) => ({
+      matches: query === '(max-width: 767px)',
+      media: query,
+      onchange: null,
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      dispatchEvent: vi.fn(),
+    }));
+
+    const user = userEvent.setup();
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+
+    await screen.findAllByText('Fixed TypeError by adding null check');
+    await user.click(screen.getByRole('button', { name: 'Open details' }));
+
+    expect(await screen.findByRole('button', { name: 'Close details' })).toBeInTheDocument();
+    const viewPRButton = screen.getByRole('button', { name: 'View PR' });
+    expect(viewPRButton).toBeInTheDocument();
+    expect(viewPRButton.className).not.toContain('w-full');
+    expect(viewPRButton.closest('a')?.className ?? '').not.toContain('w-full');
+    expect(screen.queryByRole('button', { name: 'Close' })).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: 'Close details' }));
+
+    await waitFor(() => {
+      expect(screen.queryByRole('button', { name: 'Close details' })).not.toBeInTheDocument();
+    });
+  });
+
   it('does not hide vertical overflow on the detail tablist', async () => {
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
     await screen.findAllByText('Fixed TypeError by adding null check');
