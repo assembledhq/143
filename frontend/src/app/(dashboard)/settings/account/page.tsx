@@ -5,7 +5,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Plus, Trash2 } from "lucide-react";
 import { notify as toast } from "@/lib/notify";
 import { api } from "@/lib/api";
-import { apiKeyHelp, PERSONAL_PROVIDER_OPTIONS, type PersonalProvider } from "@/lib/coding-auth-metadata";
+import { apiKeyHelp, PERSONAL_PROVIDER_OPTIONS, personalProviderToAgent, type PersonalProvider } from "@/lib/coding-auth-metadata";
 import { captureError } from "@/lib/errors";
 import { APIKeyHelpTooltip } from "@/components/api-key-help-tooltip";
 import { CodingAuthDialog } from "@/components/coding-auth-dialog";
@@ -72,25 +72,6 @@ function statusLabel(status: CodingAuthStatus | string | undefined) {
       return "Never verified";
     default:
       return "Unknown";
-  }
-}
-
-// personalProviderToAgent maps the dialog's provider key (which matches
-// historical user_credentials.provider strings) to the unified API's agent
-// field. Subscription flows still go through their dedicated /codex-auth and
-// /claude-code-auth endpoints; this mapping is API-key-only.
-function personalProviderToAgent(provider: PersonalProvider): CodingAuthAgent {
-  switch (provider) {
-    case "openai":
-      return "codex";
-    case "anthropic":
-      return "claude_code";
-    case "gemini":
-      return "gemini_cli";
-    case "amp":
-      return "amp";
-    case "pi":
-      return "pi";
   }
 }
 
@@ -192,6 +173,10 @@ export default function AccountPage() {
     },
     onError: (error) => {
       captureError(error, { feature: "personal-coding-auth-delete" });
+      // Force a refetch so any divergence between the cached list and the
+      // server's actual state (e.g. a concurrent disable from another tab)
+      // is reconciled instead of silently persisting until the next nav.
+      void queryClient.invalidateQueries({ queryKey: ["coding-credentials"] });
       toast.error("Could not remove personal auth");
     },
   });

@@ -792,6 +792,43 @@ func TestCodingCredentialStoreReorderMoveAndJanitor(t *testing.T) {
 		})
 	}
 
+	t.Run("move rejects before_id from a different scope", func(t *testing.T) {
+		t.Parallel()
+
+		store, mock := newMockCodingCredentialStore(t)
+		defer mock.Close()
+
+		orgID := uuid.New()
+		userID := uuid.New()
+		scope := models.Scope{OrgID: orgID, UserID: &userID}
+		movingID := uuid.New()
+		stackID := uuid.New()
+		// foreignID is the supposed before_id — it belongs to a different
+		// scope (org-scoped, or a different user). It must NOT appear in
+		// fetchStackTx's scope-bounded list.
+		foreignID := uuid.New()
+
+		// 1. Begin + lockAndAssertScope on the moving id.
+		mock.ExpectBegin()
+		mock.ExpectQuery("SELECT org_id, user_id, provider").
+			WithArgs(codingAnyArgs(1)...).
+			WillReturnRows(pgxmock.NewRows([]string{"org_id", "user_id", "provider"}).
+				AddRow(orgID, &userID, string(models.ProviderOpenAI)))
+		// 2. fetchStackTx returns only ids that belong to scope. foreignID is
+		//    deliberately absent.
+		mock.ExpectQuery("SELECT id FROM coding_credentials").
+			WithArgs(codingAnyArgs(2)...).
+			WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(movingID).AddRow(stackID))
+		// 3. The store sees foreignID is not in `without`, returns an error,
+		//    and rolls back. We do NOT expect any UPDATEs.
+		mock.ExpectRollback()
+
+		err := store.Move(context.Background(), scope, movingID, models.MoveCodingCredentialInput{BeforeID: &foreignID})
+		require.Error(t, err, "Move should reject a before_id that does not belong to the requested scope")
+		require.Contains(t, err.Error(), "before_id not found in scope", "error should explain the cross-scope rejection")
+		require.NoError(t, mock.ExpectationsWereMet(), "no priority writes should fire when the move is rejected")
+	})
+
 	t.Run("janitor deletes old pending auth rows", func(t *testing.T) {
 		t.Parallel()
 

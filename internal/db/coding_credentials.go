@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"math/rand/v2"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -95,6 +96,17 @@ type CodingCredentialStore struct {
 	// Production wires the application logger via SetMirrorLogger; nil is
 	// treated as a silent no-op for tests.
 	mirrorLogf func(format string, args ...any)
+
+	// mirrorDriftTotal counts every detected legacy-row drift case (e.g.
+	// dual-set Anthropic APIKey+Subscription rows). mirrorFailureTotal counts
+	// every mirror-write or cascade error returned to the legacy store.
+	// Both are observable via MirrorDriftCount / MirrorFailureCount so the
+	// telemetry pipeline can alert on persistent dual-write inconsistency.
+	// Persistent non-zero values mean the unified table is drifting from the
+	// legacy stores; the cleanup PR retires the mirror, so this signal only
+	// matters during the rollout window.
+	mirrorDriftTotal   atomic.Uint64
+	mirrorFailureTotal atomic.Uint64
 }
 
 // SetMirrorLogger installs the structured-log hook used when the mirror
@@ -111,6 +123,52 @@ func (s *CodingCredentialStore) mirrorWarn(format string, args ...any) {
 		return
 	}
 	s.mirrorLogf(format, args...)
+}
+
+// recordMirrorDrift increments the drift counter for an observed structural
+// inconsistency (e.g. a legacy Anthropic row with both APIKey and Subscription
+// set). Distinct from recordMirrorFailure: drift means a legacy row is
+// malformed but the mirror succeeded; failure means the mirror itself errored.
+func (s *CodingCredentialStore) recordMirrorDrift() {
+	if s == nil {
+		return
+	}
+	s.mirrorDriftTotal.Add(1)
+}
+
+// recordMirrorFailure increments the failure counter for an unsuccessful
+// mirror write (DB error, cascade error, encryption failure).
+func (s *CodingCredentialStore) recordMirrorFailure() {
+	if s == nil {
+		return
+	}
+	s.mirrorFailureTotal.Add(1)
+}
+
+// MirrorDriftCount returns the running total of detected drift events. A
+// non-zero value during the dual-write window indicates legacy data that
+// would not round-trip cleanly into the unified schema; alert on a
+// non-trivial baseline rather than the first hit, since dual-set legacy rows
+// can pre-date validation.
+//
+// lint:allow-no-orgid reason="process-wide observability counter; not tenant data"
+func (s *CodingCredentialStore) MirrorDriftCount() uint64 {
+	if s == nil {
+		return 0
+	}
+	return s.mirrorDriftTotal.Load()
+}
+
+// MirrorFailureCount returns the running total of mirror-write failures. A
+// sustained non-zero rate means the unified table is drifting from the
+// legacy stores; investigate before letting the cleanup PR retire the mirror.
+//
+// lint:allow-no-orgid reason="process-wide observability counter; not tenant data"
+func (s *CodingCredentialStore) MirrorFailureCount() uint64 {
+	if s == nil {
+		return 0
+	}
+	return s.mirrorFailureTotal.Load()
 }
 
 // NewCodingCredentialStore constructs a store with default cache TTLs.

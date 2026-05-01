@@ -130,6 +130,19 @@ type mockCredentialProvider struct {
 	err        error
 }
 
+// withDefaultStatus applies Status="active" when the test fixture didn't set
+// one. The legacy fallback resolver filters by Status, and the orchestrator
+// tests pre-date that filter — every fixture would otherwise need to repeat
+// `Status: "active"` for behavior that's already production reality.
+func (m *mockCredentialProvider) withDefaultStatus(cred *models.DecryptedCredential) *models.DecryptedCredential {
+	if cred == nil || cred.Status != "" {
+		return cred
+	}
+	copy := *cred
+	copy.Status = models.CodingCredentialStatusActive
+	return &copy
+}
+
 func (m *mockCredentialProvider) Get(ctx context.Context, orgID uuid.UUID, provider models.ProviderName) (*models.DecryptedCredential, error) {
 	if m.err != nil {
 		return nil, m.err
@@ -137,7 +150,7 @@ func (m *mockCredentialProvider) Get(ctx context.Context, orgID uuid.UUID, provi
 	if m.byProvider == nil {
 		return nil, nil
 	}
-	return m.byProvider[provider], nil
+	return m.withDefaultStatus(m.byProvider[provider]), nil
 }
 
 func (m *mockCredentialProvider) ListByProvider(ctx context.Context, orgID uuid.UUID, provider models.ProviderName) ([]models.DecryptedCredential, error) {

@@ -360,6 +360,15 @@ func TestCodingCredentialHandlerCreate(t *testing.T) {
 			},
 			expectedStatus: http.StatusBadRequest,
 		},
+		{
+			name: "rejects oversized label",
+			body: fmt.Sprintf(`{"scope":"personal","agent":"codex","auth_type":"api_key","api_key":"sk-openai-1234","label":"%s"}`, strings.Repeat("a", models.CodingCredentialLabelMax+1)),
+			role: "admin",
+			setupStore: func(t *testing.T) *mockCodingCredentialStore {
+				return &mockCodingCredentialStore{}
+			},
+			expectedStatus: http.StatusBadRequest,
+		},
 	}
 
 	for _, tt := range tests {
@@ -870,7 +879,7 @@ func TestCodingCredentialHandlerDeleteMoveReorderErrorBranches(t *testing.T) {
 			name:   "reorder maps store error",
 			method: http.MethodPatch,
 			target: "/api/v1/coding-credentials/reorder",
-			body:   `{"scope":"personal","ordered_ids":[]}`,
+			body:   fmt.Sprintf(`{"scope":"personal","ordered_ids":["%s"]}`, rowID),
 			role:   "admin",
 			invoke: func(handler *CodingCredentialHandler, rr *httptest.ResponseRecorder, req *http.Request) {
 				handler.Reorder(rr, req)
@@ -881,6 +890,34 @@ func TestCodingCredentialHandlerDeleteMoveReorderErrorBranches(t *testing.T) {
 				}}
 			},
 			expectedStatus: http.StatusNotFound,
+		},
+		{
+			name:   "reorder rejects empty ids",
+			method: http.MethodPatch,
+			target: "/api/v1/coding-credentials/reorder",
+			body:   `{"scope":"personal","ordered_ids":[]}`,
+			role:   "admin",
+			invoke: func(handler *CodingCredentialHandler, rr *httptest.ResponseRecorder, req *http.Request) {
+				handler.Reorder(rr, req)
+			},
+			setupStore: func(t *testing.T) *mockCodingCredentialStore {
+				return &mockCodingCredentialStore{}
+			},
+			expectedStatus: http.StatusBadRequest,
+		},
+		{
+			name:   "reorder rejects duplicate ids",
+			method: http.MethodPatch,
+			target: "/api/v1/coding-credentials/reorder",
+			body:   fmt.Sprintf(`{"scope":"personal","ordered_ids":["%s","%s"]}`, rowID, rowID),
+			role:   "admin",
+			invoke: func(handler *CodingCredentialHandler, rr *httptest.ResponseRecorder, req *http.Request) {
+				handler.Reorder(rr, req)
+			},
+			setupStore: func(t *testing.T) *mockCodingCredentialStore {
+				return &mockCodingCredentialStore{}
+			},
+			expectedStatus: http.StatusBadRequest,
 		},
 	}
 

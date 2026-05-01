@@ -50,9 +50,13 @@ type CodingCredentialMirror interface {
 	MirrorUserCredential(ctx context.Context, row models.UserCredential, decryptedCfg models.ProviderConfig) error
 
 	// MirrorUserCredentialDelete + MirrorUserCredentialDisable are the
-	// counterparts for the user-credentials surface.
-	MirrorUserCredentialDelete(ctx context.Context, id uuid.UUID) error
-	MirrorUserCredentialDisable(ctx context.Context, id uuid.UUID) error
+	// counterparts for the user-credentials surface. Both also clean up any
+	// team-default mirror row that may have been minted by the SQL migration
+	// (which uses a fresh uuid, not the legacy id) — see § "Team-default
+	// cascade" in the design doc. The orgID/userID/provider triple is enough
+	// to compute the deterministic team-default label and reach that row.
+	MirrorUserCredentialDelete(ctx context.Context, id, orgID, userID uuid.UUID, provider models.ProviderName) error
+	MirrorUserCredentialDisable(ctx context.Context, id, orgID, userID uuid.UUID, provider models.ProviderName) error
 }
 
 // MirrorOrgCredential implements CodingCredentialMirror against the unified store.
@@ -64,6 +68,7 @@ func (s *CodingCredentialStore) MirrorOrgCredential(ctx context.Context, row mod
 	if row.Provider == models.ProviderAnthropic {
 		if c, ok := decryptedCfg.(models.AnthropicConfig); ok && c.Subscription != nil && c.APIKey != "" {
 			s.mirrorWarn("anthropic row id=%s has both APIKey and Subscription set; mirroring subscription only and dropping APIKey", row.ID)
+			s.recordMirrorDrift()
 		}
 	}
 	provider, cfg, ok := mirrorProviderForOrg(row.Provider, decryptedCfg)
@@ -94,14 +99,22 @@ func (s *CodingCredentialStore) MirrorOrgCredential(ctx context.Context, row mod
 //
 // lint:allow-no-orgid reason="legacy id was already scope-checked by the calling OrgCredentialStore method; mirror loads scope back via RETURNING for cache invalidation"
 func (s *CodingCredentialStore) MirrorOrgCredentialDelete(ctx context.Context, id uuid.UUID) error {
-	return s.mirrorDelete(ctx, id)
+	if err := s.mirrorDelete(ctx, id); err != nil {
+		s.recordMirrorFailure()
+		return err
+	}
+	return nil
 }
 
 // MirrorOrgCredentialDisable disables a mirrored org credential by legacy id.
 //
 // lint:allow-no-orgid reason="legacy id was already scope-checked by the calling OrgCredentialStore method; mirror loads scope back via RETURNING for cache invalidation"
 func (s *CodingCredentialStore) MirrorOrgCredentialDisable(ctx context.Context, id uuid.UUID) error {
-	return s.mirrorDisable(ctx, id)
+	if err := s.mirrorDisable(ctx, id); err != nil {
+		s.recordMirrorFailure()
+		return err
+	}
+	return nil
 }
 
 func (s *CodingCredentialStore) MirrorUserCredential(ctx context.Context, row models.UserCredential, decryptedCfg models.ProviderConfig) error {
@@ -111,7 +124,21 @@ func (s *CodingCredentialStore) MirrorUserCredential(ctx context.Context, row mo
 	}
 	encrypted, err := s.marshalAndEncrypt(cfg)
 	if err != nil {
+		s.recordMirrorFailure()
 		return fmt.Errorf("mirror user credential: %w", err)
+	}
+
+	// If the legacy row is no longer team_default, clear any prior
+	// team-default mirror row at the natural key. The SQL data-copy migration
+	// mints fresh uuids for team-default rows, so an id-keyed disable/upsert
+	// won't reach them — without this sweep, a user toggling team-default
+	// on then off (or disabling the legacy row) leaves an orphan org-scoped
+	// row in coding_credentials.
+	if !row.IsTeamDefault {
+		if err := s.deleteTeamDefaultMirror(ctx, row.OrgID, row.UserID, provider); err != nil {
+			s.recordMirrorFailure()
+			return fmt.Errorf("clear stale team default mirror: %w", err)
+		}
 	}
 
 	// is_team_default → org-scoped row (user_id = NULL). The label
@@ -135,7 +162,7 @@ func (s *CodingCredentialStore) MirrorUserCredential(ctx context.Context, row mo
 		priority = teamDefaultMirrorPriority
 	}
 
-	return s.upsertMirroredRow(ctx, mirroredRow{
+	if err := s.upsertMirroredRow(ctx, mirroredRow{
 		ID:             row.ID,
 		OrgID:          row.OrgID,
 		UserID:         userID,
@@ -148,21 +175,66 @@ func (s *CodingCredentialStore) MirrorUserCredential(ctx context.Context, row mo
 		LastVerifiedAt: row.LastVerifiedAt,
 		CreatedAt:      row.CreatedAt,
 		UpdatedAt:      row.UpdatedAt,
-	})
+	}); err != nil {
+		s.recordMirrorFailure()
+		return err
+	}
+	return nil
 }
 
-// MirrorUserCredentialDelete removes a mirrored user credential by legacy id.
-//
-// lint:allow-no-orgid reason="legacy id was already scope-checked by the calling UserCredentialStore method; mirror loads scope back via RETURNING for cache invalidation"
-func (s *CodingCredentialStore) MirrorUserCredentialDelete(ctx context.Context, id uuid.UUID) error {
-	return s.mirrorDelete(ctx, id)
+// MirrorUserCredentialDelete removes a mirrored user credential by legacy id
+// AND any team-default mirror row whose label encodes the same originating
+// user. The migration SQL mints fresh uuids for team-default rows, so the
+// id-keyed delete alone leaves them orphaned — see § "Team-default cascade"
+// in the design doc.
+func (s *CodingCredentialStore) MirrorUserCredentialDelete(ctx context.Context, id, orgID, userID uuid.UUID, provider models.ProviderName) error {
+	if err := s.mirrorDelete(ctx, id); err != nil {
+		s.recordMirrorFailure()
+		return err
+	}
+	if err := s.deleteTeamDefaultMirror(ctx, orgID, userID, provider); err != nil {
+		s.recordMirrorFailure()
+		return fmt.Errorf("delete team default mirror: %w", err)
+	}
+	return nil
 }
 
-// MirrorUserCredentialDisable disables a mirrored user credential by legacy id.
-//
-// lint:allow-no-orgid reason="legacy id was already scope-checked by the calling UserCredentialStore method; mirror loads scope back via RETURNING for cache invalidation"
-func (s *CodingCredentialStore) MirrorUserCredentialDisable(ctx context.Context, id uuid.UUID) error {
-	return s.mirrorDisable(ctx, id)
+// MirrorUserCredentialDisable disables a mirrored user credential by legacy id
+// AND removes any team-default mirror row that may have been minted by the SQL
+// migration. The team-default cleanup is a hard delete (not a status flip)
+// because a stale "Team default (migrated…)" row in 'disabled' state is just
+// noise — the legacy row is gone, the row should not be visible at all.
+func (s *CodingCredentialStore) MirrorUserCredentialDisable(ctx context.Context, id, orgID, userID uuid.UUID, provider models.ProviderName) error {
+	if err := s.mirrorDisable(ctx, id); err != nil {
+		s.recordMirrorFailure()
+		return err
+	}
+	if err := s.deleteTeamDefaultMirror(ctx, orgID, userID, provider); err != nil {
+		s.recordMirrorFailure()
+		return fmt.Errorf("disable cascade: clear team default mirror: %w", err)
+	}
+	return nil
+}
+
+// deleteTeamDefaultMirror drops any org-scoped mirror row whose deterministic
+// "Team default (migrated from <user_id>)" label was minted by the SQL
+// data-copy migration or by an earlier mirror call. Idempotent — no-op when
+// no such row exists. Invalidates the resolver cache for the affected
+// (org, provider) so a stale read does not survive the cleanup.
+func (s *CodingCredentialStore) deleteTeamDefaultMirror(ctx context.Context, orgID, originalUserID uuid.UUID, provider models.ProviderName) error {
+	label := "Team default (migrated from " + originalUserID.String() + ")"
+	tag, err := s.db.Exec(ctx,
+		`DELETE FROM coding_credentials
+		 WHERE org_id = @org_id AND user_id IS NULL AND provider = @provider AND label = @label`,
+		pgx.NamedArgs{"org_id": orgID, "provider": string(provider), "label": label},
+	)
+	if err != nil {
+		return fmt.Errorf("delete team default mirror: %w", err)
+	}
+	if tag.RowsAffected() > 0 {
+		s.invalidate(models.Scope{OrgID: orgID}, provider)
+	}
+	return nil
 }
 
 // teamDefaultMirrorPriority parks team-default mirrors at the bottom of the
@@ -191,6 +263,13 @@ type mirroredRow struct {
 // mirror has already inserted at that natural key — when that happens we treat
 // the conflict as an update keyed by the natural key instead of by id, leaving
 // at most one row per (scope, provider, label).
+//
+// Provider IS included in the SET list. AnthropicConfig.Validate enforces
+// APIKey/Subscription mutual exclusion, but a row that flips between the two
+// (e.g. user removes a subscription and saves an API key under the same id)
+// must rewrite the unified row's provider too — otherwise the config blob
+// (now an AnthropicConfig) would be stored under provider='anthropic_subscription'
+// and ParseCodingProviderConfig would fail at decrypt time.
 func (s *CodingCredentialStore) upsertMirroredRow(ctx context.Context, row mirroredRow) error {
 	args := pgx.NamedArgs{
 		"id":               row.ID,
@@ -207,8 +286,9 @@ func (s *CodingCredentialStore) upsertMirroredRow(ctx context.Context, row mirro
 		"updated_at":       row.UpdatedAt,
 	}
 
-	// Insert by id; on conflict, update the row in place. Provider and scope
-	// are immutable; we only refresh mutable fields.
+	// Insert by id; on conflict, update the row in place. Scope (org_id +
+	// user_id) is immutable for a given legacy row; provider can flip during
+	// the api-key ↔ subscription split path so it is part of the refresh.
 	_, err := s.db.Exec(ctx, `
 		INSERT INTO coding_credentials (
 			id, org_id, user_id, provider, label, config, priority, status,
@@ -218,6 +298,7 @@ func (s *CodingCredentialStore) upsertMirroredRow(ctx context.Context, row mirro
 			@created_by, @last_verified_at, @created_at, @updated_at
 		)
 		ON CONFLICT (id) DO UPDATE SET
+			provider         = EXCLUDED.provider,
 			label            = EXCLUDED.label,
 			config           = EXCLUDED.config,
 			priority         = EXCLUDED.priority,
@@ -402,8 +483,12 @@ func (noopMirror) MirrorOrgCredentialDisable(context.Context, uuid.UUID) error {
 func (noopMirror) MirrorUserCredential(context.Context, models.UserCredential, models.ProviderConfig) error {
 	return nil
 }
-func (noopMirror) MirrorUserCredentialDelete(context.Context, uuid.UUID) error  { return nil }
-func (noopMirror) MirrorUserCredentialDisable(context.Context, uuid.UUID) error { return nil }
+func (noopMirror) MirrorUserCredentialDelete(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, models.ProviderName) error {
+	return nil
+}
+func (noopMirror) MirrorUserCredentialDisable(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, models.ProviderName) error {
+	return nil
+}
 
 // NoopMirror returns the no-op mirror.
 func NoopMirror() CodingCredentialMirror { return noopMirror{} }

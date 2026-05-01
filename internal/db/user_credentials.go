@@ -251,8 +251,12 @@ func (s *UserCredentialStore) Disable(ctx context.Context, orgID, userID uuid.UU
 	if err != nil {
 		return err
 	}
+	// Pass orgID/userID/provider so the mirror can also clean up any
+	// team-default row minted by the SQL data-copy migration (which uses a
+	// fresh uuid, not the legacy id) — without that cascade the team-default
+	// row in coding_credentials would outlive the disabled legacy row.
 	for _, id := range collectMirrorIDs(rows) {
-		if mirrErr := s.codingMirror.MirrorUserCredentialDisable(ctx, id); mirrErr != nil {
+		if mirrErr := s.codingMirror.MirrorUserCredentialDisable(ctx, id, orgID, userID, provider); mirrErr != nil {
 			s.logMirrorFailure("disable", id, mirrErr)
 		}
 	}

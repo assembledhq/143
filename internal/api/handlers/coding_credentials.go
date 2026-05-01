@@ -249,6 +249,10 @@ func (h *CodingCredentialHandler) Update(w http.ResponseWriter, r *http.Request)
 		writeError(w, r, http.StatusBadRequest, "INVALID_JSON", "invalid request body")
 		return
 	}
+	if err := input.Validate(); err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_INPUT", err.Error())
+		return
+	}
 	scope, err := h.resolveScope(r, orgID, input.Scope, true)
 	if err != nil {
 		writeError(w, r, http.StatusForbidden, "FORBIDDEN", err.Error())
@@ -358,6 +362,10 @@ func (h *CodingCredentialHandler) Reorder(w http.ResponseWriter, r *http.Request
 	var input models.ReorderCodingCredentialsInput
 	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
 		writeError(w, r, http.StatusBadRequest, "INVALID_JSON", "invalid request body")
+		return
+	}
+	if err := input.Validate(); err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_INPUT", err.Error())
 		return
 	}
 	scope, err := h.resolveScope(r, orgID, input.Scope, true)

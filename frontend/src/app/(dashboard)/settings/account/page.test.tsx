@@ -107,6 +107,58 @@ describe("Account settings page", () => {
     expect(await screen.findByText(/Personal #1.*Personal #2.*Org #1/)).toBeInTheDocument();
   });
 
+  it("renders the org fallback section even when the personal stack is empty", async () => {
+    server.use(
+      http.get("/api/v1/coding-credentials", ({ request }) => {
+        const scope = new URL(request.url).searchParams.get("scope");
+        if (scope === "personal") {
+          return HttpResponse.json({ data: [], meta: {} });
+        }
+        if (scope === "org") {
+          return HttpResponse.json({
+            data: [
+              {
+                id: "o1",
+                org_id: "org-1",
+                scope: "org",
+                priority: 1,
+                agent: "claude_code",
+                auth_type: "api_key",
+                provider: "anthropic",
+                label: "Org Claude key",
+                status: "healthy",
+                is_default: true,
+                usage_note: "sk-ant...team",
+                created_at: "2026-01-01T00:00:00Z",
+                updated_at: "2026-01-01T00:00:00Z",
+              },
+            ],
+            meta: {},
+          });
+        }
+        // resolved: org-only
+        return HttpResponse.json({
+          data: [
+            { id: "o1", scope: "org", agent: "claude_code", auth_type: "api_key", provider: "anthropic", label: "o1", status: "healthy", is_default: true, priority: 1, org_id: "org-1", created_at: "x", updated_at: "x" },
+          ],
+          meta: {},
+        });
+      }),
+    );
+
+    renderWithProviders(<AccountPage />);
+
+    // Personal stack should show the empty-state copy.
+    expect(await screen.findByText(/No personal auth configured/)).toBeInTheDocument();
+    // Org fallback should still render. Notes column prefers usage_note over
+    // label, so we look for the masked-key style hint.
+    expect(await screen.findByText("sk-ant...team")).toBeInTheDocument();
+    // Effective resolution should be Org #1 only — no Personal segments.
+    const resolutionLine = await screen.findByText(/Effective resolution for you/);
+    expect(resolutionLine.parentElement?.textContent).toMatch(/Org #1/);
+    expect(resolutionLine.parentElement?.textContent).not.toMatch(/Personal #/);
+  });
+
   it("uses the shared provider-card modal with Gemini, Amp, and Pi support", async () => {
     const user = userEvent.setup();
     server.use(...emptyCodingCredentialsHandlers());

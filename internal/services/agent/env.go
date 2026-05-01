@@ -588,46 +588,79 @@ func unifiedSubscriptionTwin(provider models.ProviderName) models.ProviderName {
 // net during the migration window. It is consulted only when the unified
 // resolver returns nothing, so once `coding_credentials` is fully populated
 // this code path produces no work.
+//
+// Status filter: legacy stores' Get/ListByProvider methods do not all filter
+// to status='active' the same way the unified ListResolvable does. We re-
+// assert active-only here so a disabled or invalid legacy row that lingered
+// in the table during cleanup cannot suddenly become picked when unified
+// returns no rows.
+//
+// Shed integration: legacy-path picks call recordPick under the legacy id.
+// During the dual-write window the mirror reuses legacy ids as the unified
+// row's id, so a shed marker keyed by legacy id correctly poisons the
+// matching unified row's health-cache entry.
 func (e *AgentEnv) resolveFromLegacy(ctx context.Context, orgID uuid.UUID, userID *uuid.UUID, provider models.ProviderName) models.ProviderConfig {
 	if userID != nil && e.userCredentials != nil {
-		if cred, err := e.userCredentials.GetForUser(ctx, orgID, *userID, provider); err == nil && cred != nil {
+		if cred, err := e.userCredentials.GetForUser(ctx, orgID, *userID, provider); err == nil && cred != nil && legacyStatusActive(cred.Status) {
+			e.recordPick(orgID, userID, provider, cred.ID)
 			return cred.Config
 		}
 	}
 	if e.userCredentials != nil {
-		if cred, err := e.userCredentials.GetTeamDefault(ctx, orgID, provider); err == nil && cred != nil {
+		if cred, err := e.userCredentials.GetTeamDefault(ctx, orgID, provider); err == nil && cred != nil && legacyStatusActive(cred.Status) {
+			e.recordPick(orgID, userID, provider, cred.ID)
 			return cred.Config
 		}
 	}
-	if cfg := e.resolveOrgProviderConfig(ctx, orgID, provider); cfg != nil {
+	if cfg, id, ok := e.resolveOrgProviderConfig(ctx, orgID, provider); ok {
+		e.recordPick(orgID, userID, provider, id)
 		return cfg
 	}
 	return nil
 }
 
-func (e *AgentEnv) resolveOrgProviderConfig(ctx context.Context, orgID uuid.UUID, provider models.ProviderName) models.ProviderConfig {
+// legacyStatusActive reports whether a legacy credential row should be picked
+// by the resolver. Mirrors the unified store's
+// `Status == CodingCredentialStatusActive` filter so the two paths agree
+// during the migration window.
+func legacyStatusActive(status string) bool {
+	return status == models.CodingCredentialStatusActive
+}
+
+// resolveOrgProviderConfig returns (config, picked-id, found) for an org-
+// scoped legacy credential. The id is surfaced so the caller can record it
+// for ShedRateLimited / ShedAuthRejected — without that, legacy-path picks
+// would have no traceable id and the health cache would never learn of
+// upstream failures during the migration window.
+func (e *AgentEnv) resolveOrgProviderConfig(ctx context.Context, orgID uuid.UUID, provider models.ProviderName) (models.ProviderConfig, uuid.UUID, bool) {
 	if e.credentials == nil {
-		return nil
+		return nil, uuid.Nil, false
 	}
 
 	if provider.IsCodingAgentProvider() {
 		if creds, err := e.credentials.ListByProvider(ctx, orgID, provider); err == nil {
 			for _, cred := range creds {
+				if !legacyStatusActive(cred.Status) {
+					continue
+				}
 				if cfg := compatibleCodingProviderConfig(provider, cred.Config); cfg != nil {
-					return cfg
+					return cfg, cred.ID, true
 				}
 			}
 		}
 	}
 
-	if cred, err := e.credentials.Get(ctx, orgID, provider); err == nil && cred != nil {
+	if cred, err := e.credentials.Get(ctx, orgID, provider); err == nil && cred != nil && legacyStatusActive(cred.Status) {
 		if provider.IsCodingAgentProvider() {
-			return compatibleCodingProviderConfig(provider, cred.Config)
+			if cfg := compatibleCodingProviderConfig(provider, cred.Config); cfg != nil {
+				return cfg, cred.ID, true
+			}
+			return nil, uuid.Nil, false
 		}
-		return cred.Config
+		return cred.Config, cred.ID, true
 	}
 
-	return nil
+	return nil, uuid.Nil, false
 }
 
 func compatibleCodingProviderConfig(provider models.ProviderName, cfg models.ProviderConfig) models.ProviderConfig {

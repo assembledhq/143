@@ -23,12 +23,40 @@ type envCredentialProvider struct {
 	listErrs  map[models.ProviderName]error
 }
 
+// defaultActiveStatus returns the credential with Status="active" when the
+// caller didn't explicitly set one. The legacy tables' production rows always
+// carry an explicit status; tests that pre-date the resolver's status filter
+// were written without it, and forcing every fixture to repeat
+// `Status: "active"` would be churn for no signal.
+func (envCredentialProvider) defaultActiveStatus(cred *models.DecryptedCredential) *models.DecryptedCredential {
+	if cred == nil {
+		return nil
+	}
+	if cred.Status == "" {
+		copy := *cred
+		copy.Status = models.CodingCredentialStatusActive
+		return &copy
+	}
+	return cred
+}
+
+func (envCredentialProvider) defaultActiveStatuses(creds []models.DecryptedCredential) []models.DecryptedCredential {
+	out := make([]models.DecryptedCredential, len(creds))
+	for i, c := range creds {
+		if c.Status == "" {
+			c.Status = models.CodingCredentialStatusActive
+		}
+		out[i] = c
+	}
+	return out
+}
+
 func (m *envCredentialProvider) Get(_ context.Context, _ uuid.UUID, provider models.ProviderName) (*models.DecryptedCredential, error) {
 	if err, ok := m.errs[provider]; ok {
 		return nil, err
 	}
 	if cred, ok := m.creds[provider]; ok {
-		return cred, nil
+		return m.defaultActiveStatus(cred), nil
 	}
 	return nil, nil
 }
@@ -38,10 +66,11 @@ func (m *envCredentialProvider) ListByProvider(_ context.Context, _ uuid.UUID, p
 		return nil, err
 	}
 	if creds, ok := m.listCreds[provider]; ok {
-		return creds, nil
+		return m.defaultActiveStatuses(creds), nil
 	}
 	if cred, ok := m.creds[provider]; ok && cred != nil {
-		return []models.DecryptedCredential{*cred}, nil
+		c := m.defaultActiveStatus(cred)
+		return []models.DecryptedCredential{*c}, nil
 	}
 	return nil, nil
 }
@@ -51,16 +80,31 @@ type envUserCredentialProvider struct {
 	team     map[models.ProviderName]*models.DecryptedUserCredential
 }
 
+// defaultUserActiveStatus mirrors envCredentialProvider.defaultActiveStatus
+// for DecryptedUserCredential. Same rationale: pre-status-filter tests didn't
+// set Status, and the legacy production data always does.
+func defaultUserActiveStatus(cred *models.DecryptedUserCredential) *models.DecryptedUserCredential {
+	if cred == nil {
+		return nil
+	}
+	if cred.Status == "" {
+		copy := *cred
+		copy.Status = models.CodingCredentialStatusActive
+		return &copy
+	}
+	return cred
+}
+
 func (m *envUserCredentialProvider) GetForUser(_ context.Context, _, _ uuid.UUID, provider models.ProviderName) (*models.DecryptedUserCredential, error) {
 	if cred, ok := m.personal[provider]; ok {
-		return cred, nil
+		return defaultUserActiveStatus(cred), nil
 	}
 	return nil, nil
 }
 
 func (m *envUserCredentialProvider) GetTeamDefault(_ context.Context, _ uuid.UUID, provider models.ProviderName) (*models.DecryptedUserCredential, error) {
 	if cred, ok := m.team[provider]; ok {
-		return cred, nil
+		return defaultUserActiveStatus(cred), nil
 	}
 	return nil, nil
 }
@@ -623,7 +667,8 @@ func TestAgentEnvResolveOrgProviderConfigAndCompatibility(t *testing.T) {
 			Logger:   zerolog.Nop(),
 		})
 
-		cfg := env.resolveOrgProviderConfig(ctx, orgID, models.ProviderAnthropic)
+		cfg, _, ok := env.resolveOrgProviderConfig(ctx, orgID, models.ProviderAnthropic)
+		require.False(t, ok, "resolveOrgProviderConfig should not report a hit when the credential store is unwired")
 		require.Nil(t, cfg, "resolveOrgProviderConfig should return nil when no org credential store is configured")
 	})
 
@@ -646,7 +691,8 @@ func TestAgentEnvResolveOrgProviderConfigAndCompatibility(t *testing.T) {
 			Logger:   zerolog.Nop(),
 		})
 
-		cfg := env.resolveOrgProviderConfig(ctx, orgID, models.ProviderOpenAI)
+		cfg, _, ok := env.resolveOrgProviderConfig(ctx, orgID, models.ProviderOpenAI)
+		require.True(t, ok, "resolveOrgProviderConfig should report a hit on the singleton fallback")
 		require.IsType(t, models.OpenAIConfig{}, cfg, "resolveOrgProviderConfig should fall back to Get when list lookup fails")
 		require.Equal(t, "sk-openai-fallback", cfg.(models.OpenAIConfig).APIKey, "resolveOrgProviderConfig should use the fallback org API key")
 	})
@@ -765,6 +811,123 @@ func TestAgentEnvShedNoopWhenNoRecentPick(t *testing.T) {
 	env.ShedAuthRejected(orgID, &userID, models.ProviderGemini)
 	require.Empty(t, coding.rateLimitedIDs, "ShedRateLimited without a recorded pick should not call the store")
 	require.Empty(t, coding.authRejectedIDs, "ShedAuthRejected without a recorded pick should not call the store")
+}
+
+// TestAgentEnvLegacyFallbackSkipsInactiveRows verifies that the legacy
+// fallback resolver only picks status='active' rows. Disabled / invalid /
+// pending_auth rows in the legacy stores must NOT be returned even when the
+// unified resolver has nothing to offer — otherwise a row left around during
+// migration cleanup would silently re-enter the runtime path.
+func TestAgentEnvLegacyFallbackSkipsInactiveRows(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	orgID := uuid.New()
+	userID := uuid.New()
+
+	tests := []struct {
+		name     string
+		userCred *envUserCredentialProvider
+		orgCred  *envCredentialProvider
+		wantNil  bool
+		wantKey  string
+	}{
+		{
+			name: "disabled personal row is skipped",
+			userCred: &envUserCredentialProvider{
+				personal: map[models.ProviderName]*models.DecryptedUserCredential{
+					models.ProviderAnthropic: {ID: uuid.New(), Status: models.CodingCredentialStatusDisabled, Config: models.AnthropicConfig{APIKey: "personal"}},
+				},
+			},
+			orgCred: &envCredentialProvider{
+				creds: map[models.ProviderName]*models.DecryptedCredential{
+					models.ProviderAnthropic: {ID: uuid.New(), Status: models.CodingCredentialStatusActive, Config: models.AnthropicConfig{APIKey: "org"}},
+				},
+			},
+			wantKey: "org",
+		},
+		{
+			name: "invalid team row is skipped, falls through to org",
+			userCred: &envUserCredentialProvider{
+				team: map[models.ProviderName]*models.DecryptedUserCredential{
+					models.ProviderAnthropic: {ID: uuid.New(), Status: models.CodingCredentialStatusInvalid, Config: models.AnthropicConfig{APIKey: "team"}},
+				},
+			},
+			orgCred: &envCredentialProvider{
+				creds: map[models.ProviderName]*models.DecryptedCredential{
+					models.ProviderAnthropic: {ID: uuid.New(), Status: models.CodingCredentialStatusActive, Config: models.AnthropicConfig{APIKey: "org"}},
+				},
+			},
+			wantKey: "org",
+		},
+		{
+			name:     "all inactive returns nil",
+			userCred: &envUserCredentialProvider{},
+			orgCred: &envCredentialProvider{
+				creds: map[models.ProviderName]*models.DecryptedCredential{
+					models.ProviderAnthropic: {ID: uuid.New(), Status: models.CodingCredentialStatusDisabled, Config: models.AnthropicConfig{APIKey: "org"}},
+				},
+			},
+			wantNil: true,
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			env := NewAgentEnv(AgentEnvDeps{
+				Credentials:     tt.orgCred,
+				UserCredentials: tt.userCred,
+				Provider:        &envSandboxProvider{},
+				Logger:          zerolog.Nop(),
+			})
+			cfg := env.resolveProviderConfig(ctx, orgID, &userID, models.ProviderAnthropic)
+			if tt.wantNil {
+				require.Nil(t, cfg, "resolver should return nil when every legacy row is inactive")
+				return
+			}
+			require.IsType(t, models.AnthropicConfig{}, cfg, "resolver should return the active legacy row's config")
+			require.Equal(t, tt.wantKey, cfg.(models.AnthropicConfig).APIKey, "resolver should pick the active legacy row, not an inactive one")
+		})
+	}
+}
+
+// TestAgentEnvLegacyFallbackRecordsPickForShed locks in the integration of
+// shed signals with the legacy fallback path. Without this, a 429 on a
+// legacy-resolved credential would be a silent no-op (no recorded pick →
+// lookupRecentPick returns false → MarkRateLimited never fires) and the
+// health cache would never learn about legacy upstream failures during the
+// dual-write window.
+func TestAgentEnvLegacyFallbackRecordsPickForShed(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	orgID := uuid.New()
+	userID := uuid.New()
+	legacyCredID := uuid.New()
+
+	coding := &envCodingCredentialProvider{} // unified returns nothing → legacy is consulted
+	userCred := &envUserCredentialProvider{
+		personal: map[models.ProviderName]*models.DecryptedUserCredential{
+			models.ProviderAnthropic: {ID: legacyCredID, Status: models.CodingCredentialStatusActive, Config: models.AnthropicConfig{APIKey: "legacy-key"}},
+		},
+	}
+
+	env := NewAgentEnv(AgentEnvDeps{
+		CodingCredentials: coding,
+		UserCredentials:   userCred,
+		Provider:          &envSandboxProvider{},
+		Logger:            zerolog.Nop(),
+	})
+
+	cfg := env.resolveProviderConfig(ctx, orgID, &userID, models.ProviderAnthropic)
+	require.IsType(t, models.AnthropicConfig{}, cfg, "legacy fallback should return an AnthropicConfig")
+	require.Equal(t, "legacy-key", cfg.(models.AnthropicConfig).APIKey)
+
+	env.ShedRateLimited(orgID, &userID, models.ProviderAnthropic)
+	require.Equal(t, []uuid.UUID{legacyCredID}, coding.rateLimitedIDs,
+		"legacy-path picks must record the legacy id so Shed* reaches the unified store's health cache (legacy and unified ids agree during the mirror window)")
 }
 
 func TestAgentEnvInjectCodexAuth(t *testing.T) {

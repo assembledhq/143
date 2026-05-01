@@ -354,6 +354,12 @@ func TestCodingCredentialStore_MirrorUserCredential(t *testing.T) {
 				} else {
 					uid := tt.row.UserID
 					tt.expectUserID = &uid
+					// Personal-scope mirror writes always sweep any prior
+					// team-default mirror row at the natural key first; see
+					// MirrorUserCredential for the rationale.
+					mock.ExpectExec(`DELETE FROM coding_credentials\s+WHERE org_id = @org_id AND user_id IS NULL AND provider = @provider AND label = @label`).
+						WithArgs(codingAnyArgs(3)...).
+						WillReturnResult(pgxmock.NewResult("DELETE", 0))
 					mock.ExpectExec(`(?s)INSERT INTO coding_credentials.*ON CONFLICT \(id\) DO UPDATE`).
 						WithArgs(codingAnyArgs(12)...).
 						WillReturnResult(pgxmock.NewResult("INSERT", 1))
@@ -474,8 +480,91 @@ func TestMirrorProviderHelpers(t *testing.T) {
 	require.NoError(t, NoopMirror().MirrorOrgCredentialDelete(context.Background(), uuid.New()), "noop mirror should ignore org delete")
 	require.NoError(t, NoopMirror().MirrorOrgCredentialDisable(context.Background(), uuid.New()), "noop mirror should ignore org disable")
 	require.NoError(t, NoopMirror().MirrorUserCredential(context.Background(), models.UserCredential{}, models.OpenAIConfig{}), "noop mirror should ignore user upsert")
-	require.NoError(t, NoopMirror().MirrorUserCredentialDelete(context.Background(), uuid.New()), "noop mirror should ignore user delete")
-	require.NoError(t, NoopMirror().MirrorUserCredentialDisable(context.Background(), uuid.New()), "noop mirror should ignore user disable")
+	require.NoError(t, NoopMirror().MirrorUserCredentialDelete(context.Background(), uuid.New(), uuid.New(), uuid.New(), models.ProviderOpenAI), "noop mirror should ignore user delete")
+	require.NoError(t, NoopMirror().MirrorUserCredentialDisable(context.Background(), uuid.New(), uuid.New(), uuid.New(), models.ProviderOpenAI), "noop mirror should ignore user disable")
+}
+
+// TestMirrorUpsertIncludesProviderInOnConflict locks in the fix for the case
+// where a legacy Anthropic row's mirror representation flips between
+// `anthropic_subscription` (when Subscription is set) and `anthropic` (when
+// only APIKey is set) on the same legacy id. Without `provider` in the SET
+// list, the unified row's provider would never be rewritten and the stored
+// (provider, config) pair would diverge — the next decrypt would fail with
+// "invalid <provider> config" because ParseCodingProviderConfig dispatches on
+// provider name.
+func TestMirrorUpsertIncludesProviderInOnConflict(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := NewCodingCredentialStore(mock, nil)
+	row := models.UserCredential{
+		ID: uuid.New(), UserID: uuid.New(), OrgID: uuid.New(),
+		Provider: models.ProviderAnthropic, Status: "active",
+		CreatedAt: time.Now(), UpdatedAt: time.Now(),
+	}
+
+	// MirrorUserCredential first sweeps any prior team-default row (the
+	// idempotent natural-key delete), then runs the upsert. The order is
+	// load-bearing — pgxmock matches expectations FIFO.
+	mock.ExpectExec(`DELETE FROM coding_credentials\s+WHERE org_id = @org_id AND user_id IS NULL AND provider = @provider AND label = @label`).
+		WithArgs(codingAnyArgs(3)...).
+		WillReturnResult(pgxmock.NewResult("DELETE", 0))
+	// The upsert SQL must include `provider = EXCLUDED.provider` in the SET
+	// list. We assert that with a regex on the rendered SQL.
+	mock.ExpectExec(`(?s)ON CONFLICT \(id\) DO UPDATE SET\s+provider\s*=\s*EXCLUDED\.provider`).
+		WithArgs(codingAnyArgs(12)...).
+		WillReturnResult(pgxmock.NewResult("INSERT", 1))
+
+	require.NoError(t, store.MirrorUserCredential(context.Background(), row, models.AnthropicConfig{APIKey: "sk-ant-test"}))
+	require.NoError(t, mock.ExpectationsWereMet(), "ON CONFLICT SET must include provider so subscription↔key transitions stay consistent")
+}
+
+// TestMirrorUserCredentialDisableCascadesTeamDefault locks in the fix where
+// disabling a legacy user_credentials row also clears any team-default mirror
+// row that the SQL data-copy migration minted with a fresh uuid. Without the
+// cascade, the team-default mirror would outlive the legacy row and keep
+// serving its config from /api/v1/coding-credentials?scope=org.
+func TestMirrorUserCredentialDisableCascadesTeamDefault(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := NewCodingCredentialStore(mock, nil)
+
+	id := uuid.New()
+	orgID := uuid.New()
+	userID := uuid.New()
+
+	// Seed the resolver cache for the org-scoped read so we can verify the
+	// team-default cleanup invalidates it.
+	store.resolverCache.put(orgID, nil, models.ProviderAnthropic, []models.DecryptedCodingCredential{{ID: uuid.New()}})
+
+	// Step 1: id-keyed disable returns the row's scope/provider for cache
+	// invalidation.
+	mock.ExpectQuery(`UPDATE coding_credentials SET status = 'disabled'.*WHERE id = @id RETURNING`).
+		WithArgs(id).
+		WillReturnRows(pgxmock.NewRows([]string{"org_id", "user_id", "provider"}).
+			AddRow(orgID, &userID, string(models.ProviderAnthropic)))
+
+	// Step 2: cascade-delete the natural-key team-default row (any args; we
+	// just need the call to fire).
+	mock.ExpectExec(`DELETE FROM coding_credentials\s+WHERE org_id = @org_id AND user_id IS NULL AND provider = @provider AND label = @label`).
+		WithArgs(codingAnyArgs(3)...).
+		WillReturnResult(pgxmock.NewResult("DELETE", 1))
+
+	require.NoError(t, store.MirrorUserCredentialDisable(context.Background(), id, orgID, userID, models.ProviderAnthropic))
+	require.NoError(t, mock.ExpectationsWereMet(), "disable must cascade to the team-default mirror row")
+
+	// The team-default sweep deleted a row, so the org-scoped cache for that
+	// (org, provider) should have been invalidated.
+	if _, hit := store.resolverCache.get(orgID, nil, models.ProviderAnthropic); hit {
+		t.Fatalf("team-default cascade should invalidate the org-scoped resolver cache")
+	}
 }
 
 // captureBytes returns a pgxmock argument matcher that records the bytes

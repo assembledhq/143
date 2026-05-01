@@ -54,6 +54,13 @@ const (
 	CodingCredentialStatusInvalid     = "invalid"
 )
 
+// CodingCredentialLabelMax bounds Label inputs at every API surface that
+// writes to coding_credentials. Matches the Codex/Claude subscription label
+// caps (handlers/codex_auth.go, handlers/claude_code_auth.go) so a
+// subscription completed via the OAuth flow and an API key created via the
+// unified endpoint share the same upper bound.
+const CodingCredentialLabelMax = 100
+
 // CodingCredential is the DB row representation. Config is encrypted bytea.
 type CodingCredential struct {
 	ID             uuid.UUID    `db:"id"`
@@ -144,6 +151,9 @@ func (i CreateCodingCredentialInput) Validate() error {
 	if err := i.AuthType.Validate(); err != nil {
 		return err
 	}
+	if len(i.Label) > CodingCredentialLabelMax {
+		return fmt.Errorf("label must be %d characters or fewer", CodingCredentialLabelMax)
+	}
 	if i.AuthType == CodingAuthTypeAPIKey && i.APIKey == "" {
 		return errors.New("api_key is required for api_key auth")
 	}
@@ -170,6 +180,16 @@ type UpdateCodingCredentialInput struct {
 	Scope  string  `json:"scope"`
 	Label  *string `json:"label,omitempty"`
 	Status *string `json:"status,omitempty"`
+}
+
+// Validate enforces the label length bound when one is provided. Scope and
+// status are checked at the handler layer (resolveScope, isAllowedHandlerStatus)
+// so we only re-assert the bounded fields here.
+func (i UpdateCodingCredentialInput) Validate() error {
+	if i.Label != nil && len(*i.Label) > CodingCredentialLabelMax {
+		return fmt.Errorf("label must be %d characters or fewer", CodingCredentialLabelMax)
+	}
+	return nil
 }
 
 // MoveCodingCredentialInput is the body for PATCH /coding-credentials/{id}/move.
@@ -207,6 +227,34 @@ func (m MoveCodingCredentialInput) Validate() error {
 type ReorderCodingCredentialsInput struct {
 	Scope      string      `json:"scope"`
 	OrderedIDs []uuid.UUID `json:"ordered_ids"`
+}
+
+// Validate rejects empty / duplicate / nil ids before the request reaches the
+// store. The store's per-row UPDATE would survive an empty slice (no-op) but
+// duplicate ids produce inconsistent priorities — the second occurrence wins
+// at SET while later siblings get rewritten to indices that overlap with
+// already-applied UPDATEs. Catching the malformed shape here keeps the store
+// a single authoritative caller-side guard.
+func (i ReorderCodingCredentialsInput) Validate() error {
+	switch i.Scope {
+	case CodingCredentialScopeOrg, CodingCredentialScopePersonal:
+	default:
+		return fmt.Errorf("invalid scope: %q", i.Scope)
+	}
+	if len(i.OrderedIDs) == 0 {
+		return errors.New("ordered_ids must contain at least one id")
+	}
+	seen := make(map[uuid.UUID]struct{}, len(i.OrderedIDs))
+	for _, id := range i.OrderedIDs {
+		if id == uuid.Nil {
+			return errors.New("ordered_ids contains an empty id")
+		}
+		if _, dup := seen[id]; dup {
+			return fmt.Errorf("ordered_ids contains a duplicate id %s", id)
+		}
+		seen[id] = struct{}{}
+	}
+	return nil
 }
 
 // AnthropicSubscriptionConfig holds Claude Code OAuth tokens.
