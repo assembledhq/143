@@ -239,9 +239,9 @@ type acquireSandboxResult struct {
 	// existing container (a turn still owns it — leave it alone on abort).
 	Hydrated bool
 	// ErrCode, when non-empty, is the HTTP error code to surface:
-	// "NO_SANDBOX" (409), "SNAPSHOT_UNAVAILABLE" (409), "SNAPSHOT_EXPIRED"
-	// (410). Empty for infrastructure failures that should map to
-	// 500 PREVIEW_HYDRATE_FAILED.
+	// "NO_SANDBOX" (409), "SANDBOX_BUSY" (409), "SNAPSHOT_UNAVAILABLE" (409),
+	// "SNAPSHOT_EXPIRED" (410). Empty for infrastructure failures that should
+	// map to 500 PREVIEW_HYDRATE_FAILED.
 	ErrCode string
 	// Err is the underlying error for logging and user messaging. Always
 	// non-nil when acquisition failed; always nil when Sandbox is non-nil.
@@ -346,6 +346,34 @@ func (h *PreviewHandler) acquireSandbox(ctx context.Context, orgID uuid.UUID, se
 		}
 	}
 
+	// Pre-hydrate race check: re-read the session and bail early if a peer
+	// (typically a continue_session turn) has published a container_id since
+	// we read the row at the top of startPreviewLocal. Without this, hydrate
+	// runs the full snapshot restore + container create (~20s) before
+	// PublishHydratedContainerID's CAS detects the loss — and that work
+	// blows past the HTTP server's WriteTimeout on the worker, so the
+	// caller sees a 502 EOF instead of a clean 409 SANDBOX_BUSY.
+	fresh, freshErr := h.sessionStore.GetByID(ctx, orgID, session.ID)
+	switch {
+	case freshErr != nil:
+		// Fail open: the CAS in PublishHydratedContainerID still catches the
+		// race after restore. Log so a regression in the optimization is
+		// visible in prod (e.g. DB blips making us silently fall back to
+		// the slow path).
+		h.logger.Warn().Err(freshErr).
+			Str("session_id", session.ID.String()).
+			Msg("preview hydrate: pre-hydrate peek failed; falling through to CAS race detection")
+	case fresh.ContainerID != nil && *fresh.ContainerID != "":
+		h.logger.Info().
+			Str("session_id", session.ID.String()).
+			Str("winning_container_id", *fresh.ContainerID).
+			Msg("preview hydrate: peer published container_id before restore; returning SANDBOX_BUSY without hydrating")
+		return acquireSandboxResult{
+			ErrCode: "SANDBOX_BUSY",
+			Err:     fmt.Errorf("another process attached to this session's sandbox first; please retry"),
+		}
+	}
+
 	// Hydrate: build a SandboxConfig matching what the orchestrator uses so
 	// the restored container has consistent resource limits and paths.
 	// WorkDir resolves from the session's repo (HomeDir + "/" + slug) so
@@ -396,7 +424,7 @@ func (h *PreviewHandler) acquireSandbox(ctx context.Context, orgID uuid.UUID, se
 			Str("losing_container_id", sandbox.ID).
 			Msg("preview hydrate lost race to another holder; destroyed local container")
 		return acquireSandboxResult{
-			ErrCode: "NO_SANDBOX",
+			ErrCode: "SANDBOX_BUSY",
 			Err:     fmt.Errorf("another process attached to this session's sandbox first; please retry"),
 		}
 	}
@@ -594,6 +622,8 @@ func (h *PreviewHandler) startPreviewLocal(ctx context.Context, orgID, userID, s
 			return nil, newPreviewHTTPError(http.StatusConflict, acq.ErrCode, acq.Err.Error(), acq.Err)
 		case "NO_SANDBOX":
 			return nil, newPreviewHTTPError(http.StatusConflict, acq.ErrCode, acq.Err.Error(), acq.Err)
+		case "SANDBOX_BUSY":
+			return nil, newPreviewHTTPError(http.StatusConflict, acq.ErrCode, acq.Err.Error(), acq.Err)
 		default:
 			return nil, newPreviewHTTPError(http.StatusInternalServerError, "PREVIEW_HYDRATE_FAILED", "failed to hydrate sandbox for preview", acq.Err)
 		}
@@ -653,6 +683,12 @@ func (h *PreviewHandler) startPreviewLocal(ctx context.Context, orgID, userID, s
 }
 
 func (h *PreviewHandler) StartPreview(w http.ResponseWriter, r *http.Request) {
+	// Preview start can take ≫15s (snapshot restore + infra image pull +
+	// readiness probes). Clear the per-request write deadline so the
+	// server's 15s WriteTimeout doesn't kill the connection mid-handler
+	// and turn a real error code into a 502 EOF.
+	clearWriteDeadline(w, r)
+
 	if !h.requireManager(w, r) {
 		return
 	}
@@ -815,6 +851,10 @@ func (h *PreviewHandler) StopPreview(w http.ResponseWriter, r *http.Request) {
 // =============================================================================
 
 func (h *PreviewHandler) RestartPreview(w http.ResponseWriter, r *http.Request) {
+	// Recycle tears down + relaunches; same WriteTimeout-overrun risk as
+	// StartPreview (image pulls + readiness probes), so clear the deadline.
+	clearWriteDeadline(w, r)
+
 	if !h.requireManager(w, r) {
 		return
 	}

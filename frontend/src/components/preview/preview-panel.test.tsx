@@ -703,6 +703,73 @@ describe("PreviewPanel component", () => {
     });
   });
 
+  it("shows a retry-the-turn message when the sandbox is busy with a concurrent agent turn", async () => {
+    const user = userEvent.setup();
+    mockGet.mockResolvedValue(makePreviewStatus({ status: "stopped" }));
+    const err = new Error(
+      "another process attached to this session's sandbox first; please retry"
+    );
+    (err as Error & { code?: string }).code = "SANDBOX_BUSY";
+    mockStart.mockRejectedValueOnce(err);
+
+    renderWithProviders(<PreviewPanel {...DEFAULT_PROPS} />);
+
+    await waitFor(() => {
+      expect(screen.getByText("No preview running")).toBeInTheDocument();
+    });
+
+    await user.click(screen.getByRole("button", { name: "Start Preview" }));
+
+    await waitFor(() => {
+      expect(
+        screen.getByText(
+          "The agent is currently using this session's sandbox. Wait for the current turn to finish, then try Start Preview again."
+        )
+      ).toBeInTheDocument();
+    });
+    // Guard against regression: the historical message conflated SANDBOX_BUSY
+    // with "Docker not configured" because both used to share the NO_SANDBOX
+    // code. Splitting the codes was the whole point — fail loudly if anyone
+    // re-merges them.
+    expect(
+      screen.queryByText(
+        "Preview is unavailable on this server (Docker not configured). Contact an admin."
+      )
+    ).not.toBeInTheDocument();
+  });
+
+  it("shows a transient-retry message when the API can't reach the preview worker", async () => {
+    const user = userEvent.setup();
+    mockGet.mockResolvedValue(makePreviewStatus({ status: "stopped" }));
+    // PREVIEW_WORKER_REQUEST_FAILED happens when the API's RPC to the worker
+    // EOFs (e.g. worker WriteTimeout overrun, or worker container restart).
+    // No structured error came back — without explicit handling it would
+    // fall through to "Failed to start preview: preview worker request failed",
+    // which buries the transient/retryable nature of the failure.
+    const err = new Error("preview worker request failed");
+    (err as Error & { code?: string }).code = "PREVIEW_WORKER_REQUEST_FAILED";
+    mockStart.mockRejectedValueOnce(err);
+
+    renderWithProviders(<PreviewPanel {...DEFAULT_PROPS} />);
+
+    await waitFor(() => {
+      expect(screen.getByText("No preview running")).toBeInTheDocument();
+    });
+
+    await user.click(screen.getByRole("button", { name: "Start Preview" }));
+
+    await waitFor(() => {
+      expect(
+        screen.getByText(
+          "Could not reach the preview worker (connection dropped). Try Start Preview again — if this keeps happening, the worker may be unhealthy."
+        )
+      ).toBeInTheDocument();
+    });
+    expect(
+      screen.queryByText("Failed to start preview: preview worker request failed")
+    ).not.toBeInTheDocument();
+  });
+
   it("shows the backend message verbatim (no 'Failed to start preview:' prefix) when no .143/preview.json is committed", async () => {
     const user = userEvent.setup();
     mockGet.mockResolvedValue(makePreviewStatus({ status: "stopped" }));
