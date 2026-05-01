@@ -897,7 +897,7 @@ function SessionComposer({
   const hasInvalidCommands = invalidCommandTokens.length > 0;
 
   const hasContent = message.trim() || attachments.length > 0 || openComments.length > 0;
-  const sendDisabled = hasInvalidCommands || !hasContent || !canSendMessage || sendPending || isRunning;
+  const sendDisabled = hasInvalidCommands || !hasContent || !canSendMessage || sendPending;
   const inactiveSessionMessage = isSnapshotExpired
     ? "Session environment has expired and can no longer be continued."
     : "Session is not active.";
@@ -913,10 +913,8 @@ function SessionComposer({
       ? "Add a message, attachment, or review comment before sending."
       : !canSendMessage
         ? inactiveSessionMessage
-        : sendPending
-          ? (planMode ? "Sending plan request..." : "Sending message...")
-          : isRunning
-            ? "Wait for the current agent response to finish before sending another message."
+          : sendPending
+            ? (planMode ? "Sending plan request..." : "Sending message...")
             : undefined;
 
   function handleKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
@@ -1065,11 +1063,9 @@ function SessionComposer({
                   ? "Session is not active"
                   : planMode
                     ? "Describe what you want to plan..."
-                    : isRunning
-                      ? "Agent is responding..."
-                      : "Send a follow-up message..."
+                    : "Send a follow-up message..."
             }
-            disabled={!canSendMessage || sendPending || isRunning}
+            disabled={!canSendMessage || sendPending}
             className="min-h-[44px] max-h-[200px] resize-none border-none bg-transparent shadow-none focus-visible:ring-0"
           />
 
@@ -1194,7 +1190,7 @@ function SessionComposer({
             )}
 
             <div className="ml-auto flex items-center gap-1">
-              {isRunning ? (
+              {isRunning && (
                 <DisabledTooltip disabled={cancelPending} content={cancelDisabledReason}>
                   <Button
                     size="icon"
@@ -1207,26 +1203,25 @@ function SessionComposer({
                     <Square className="h-3 w-3" />
                   </Button>
                 </DisabledTooltip>
-              ) : (
-                <DisabledTooltip disabled={sendDisabled} content={sendDisabledReason}>
-                  <Button
-                    size="icon"
-                    variant={planMode ? "outline" : "default"}
-                    className={cn("h-8 w-8 shrink-0 rounded-lg", planMode && "border-amber-300 dark:border-amber-700 text-amber-700 dark:text-amber-400 hover:bg-amber-50 dark:hover:bg-amber-950/30")}
-                    title={planMode ? "Send plan request" : "Send message"}
-                    disabled={sendDisabled}
-                    onClick={onSend}
-                  >
-                    {sendPending ? (
-                      <Loader2 className="h-4 w-4 animate-spin" />
-                    ) : planMode ? (
-                      <ClipboardList className="h-4 w-4" />
-                    ) : (
-                      <ArrowUp className="h-4 w-4" />
-                    )}
-                  </Button>
-                </DisabledTooltip>
               )}
+              <DisabledTooltip disabled={sendDisabled} content={sendDisabledReason}>
+                <Button
+                  size="icon"
+                  variant={planMode ? "outline" : "default"}
+                  className={cn("h-8 w-8 shrink-0 rounded-lg", planMode && "border-amber-300 dark:border-amber-700 text-amber-700 dark:text-amber-400 hover:bg-amber-50 dark:hover:bg-amber-950/30")}
+                  title={planMode ? "Send plan request" : "Send message"}
+                  disabled={sendDisabled}
+                  onClick={onSend}
+                >
+                  {sendPending ? (
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                  ) : planMode ? (
+                    <ClipboardList className="h-4 w-4" />
+                  ) : (
+                    <ArrowUp className="h-4 w-4" />
+                  )}
+                </Button>
+              </DisabledTooltip>
             </div>
           </div>
         </div>
