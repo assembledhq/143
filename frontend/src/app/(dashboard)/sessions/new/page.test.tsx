@@ -82,10 +82,14 @@ describe('ManualSessionCreatePage', () => {
     await user.click(screen.getByRole('button', { name: 'Add files or photos' }));
     expect(screen.getByTestId('add-image-url-link-icon')).toBeInTheDocument();
     await user.click(screen.getByRole('menuitem', { name: 'Add image URL' }));
-    await user.type(screen.getByPlaceholderText('https://example.com/screenshot.png'), 'https://example.com/checkout-timeout.png');
+    fireEvent.change(screen.getByPlaceholderText('https://example.com/screenshot.png'), {
+      target: { value: 'https://example.com/checkout-timeout.png' },
+    });
     await user.click(screen.getByRole('button', { name: 'Add' }));
 
-    await user.type(screen.getByPlaceholderText('Tell the agent what to do...'), 'Investigate checkout timeout and propose a fix.');
+    fireEvent.change(screen.getByPlaceholderText('Tell the agent what to do...'), {
+      target: { value: 'Investigate checkout timeout and propose a fix.' },
+    });
     await user.click(screen.getByRole('button', { name: 'Start session' }));
 
     await waitFor(() => {

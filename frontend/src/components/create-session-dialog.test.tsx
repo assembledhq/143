@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { renderWithProviders, screen, userEvent, waitFor } from "@/test/test-utils";
+import { fireEvent, renderWithProviders, screen, userEvent, waitFor } from "@/test/test-utils";
 import { CreateSessionDialog } from "./create-session-dialog";
 import { http, HttpResponse } from "msw";
 import { server } from "@/test/mocks/server";
@@ -260,7 +260,9 @@ describe("CreateSessionDialog", () => {
     await user.click(screen.getByRole("button", { name: /Add files or photos/ }));
     await user.click(screen.getByText("Add image URL"));
 
-    await user.type(screen.getByLabelText("Image URL"), "https://example.com/screenshot.png");
+    fireEvent.change(screen.getByLabelText("Image URL"), {
+      target: { value: "https://example.com/screenshot.png" },
+    });
     await user.click(screen.getByRole("button", { name: "Add" }));
 
     // Should show the image as an attachment with a remove button
@@ -277,7 +279,9 @@ describe("CreateSessionDialog", () => {
 
     await user.click(screen.getByRole("button", { name: /Add files or photos/ }));
     await user.click(screen.getByText("Add image URL"));
-    await user.type(screen.getByLabelText("Image URL"), "https://example.com/screenshot.png");
+    fireEvent.change(screen.getByLabelText("Image URL"), {
+      target: { value: "https://example.com/screenshot.png" },
+    });
     await user.click(screen.getByRole("button", { name: "Add" }));
 
     await user.click(screen.getByRole("button", { name: "Preview screenshot.png" }));
@@ -296,7 +300,9 @@ describe("CreateSessionDialog", () => {
     // Add an image URL attachment
     await user.click(screen.getByRole("button", { name: /Add files or photos/ }));
     await user.click(screen.getByText("Add image URL"));
-    await user.type(screen.getByLabelText("Image URL"), "https://example.com/shot.png");
+    fireEvent.change(screen.getByLabelText("Image URL"), {
+      target: { value: "https://example.com/shot.png" },
+    });
     await user.click(screen.getByRole("button", { name: "Add" }));
 
     // Verify it's there
@@ -419,7 +425,9 @@ describe("CreateSessionDialog", () => {
     // Add a non-image URL as attachment
     await user.click(screen.getByRole("button", { name: /Add files or photos/ }));
     await user.click(screen.getByText("Add image URL"));
-    await user.type(screen.getByLabelText("Image URL"), "https://example.com/data.json");
+    fireEvent.change(screen.getByLabelText("Image URL"), {
+      target: { value: "https://example.com/data.json" },
+    });
     await user.click(screen.getByRole("button", { name: "Add" }));
 
     // Non-image URLs should render as a badge with filename, not as img
@@ -460,10 +468,9 @@ describe("CreateSessionDialog", () => {
       );
 
       // Type a message
-      await user.type(
-        screen.getByPlaceholderText("Tell the agent what to do..."),
-        "Fix the bug",
-      );
+      fireEvent.change(screen.getByPlaceholderText("Tell the agent what to do..."), {
+        target: { value: "Fix the bug" },
+      });
 
       // First repo is auto-selected; wait for branch data to load
       await waitFor(() => {
@@ -523,10 +530,9 @@ describe("CreateSessionDialog", () => {
 
     await user.click(screen.getByRole("combobox", { name: /Model/i }));
     await user.click(screen.getByRole("option", { name: "gemini-2.5-pro" }));
-    await user.type(
-      screen.getByPlaceholderText("Tell the agent what to do..."),
-      "Fix the login bug",
-    );
+    fireEvent.change(screen.getByPlaceholderText("Tell the agent what to do..."), {
+      target: { value: "Fix the login bug" },
+    });
     await user.click(screen.getByRole("button", { name: /Create/ }));
 
     await waitFor(() => {
