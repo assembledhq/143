@@ -107,13 +107,8 @@ jobs:
 
       - name: Materialize PR base ref (PR only)
         if: github.event_name == 'pull_request'
-        env:
-          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
-          if ! git cat-file -e "${PR_BASE_SHA}^{commit}" 2>/dev/null; then
-            git fetch --no-tags --depth=1 origin "${PR_BASE_SHA}"
-          fi
-          git branch -f pr-base "${PR_BASE_SHA}"
+          git branch -f pr-base HEAD^1
 
       - name: Install diff-cover tooling (PR only)
         if: github.event_name == 'pull_request'
@@ -208,14 +203,8 @@ jobs:
 
       - name: Materialize PR base ref (PR only)
         if: github.event_name == 'pull_request'
-        env:
-          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
         working-directory: ${{ github.workspace }}
-        run: |
-          if ! git cat-file -e "${PR_BASE_SHA}^{commit}" 2>/dev/null; then
-            git fetch --no-tags --depth=1 origin "${PR_BASE_SHA}"
-          fi
-          git branch -f pr-base "${PR_BASE_SHA}"
+        run: git branch -f pr-base HEAD^1
 
       - name: Install diff-cover (PR only)
         if: github.event_name == 'pull_request'
