@@ -88,6 +88,44 @@ describe("SplitDiffHunk", () => {
     expect(onAddComment).toHaveBeenCalledWith(1, "old");
   });
 
+  it("calls onAddComment exactly once when + button is clicked (no double-fire via bubble)", async () => {
+    const user = userEvent.setup();
+    const onAddComment = vi.fn();
+    const hunk = makeHunk([contextLine]);
+    render(
+      <SplitDiffHunk hunk={hunk} filePath="src/app.ts" onAddComment={onAddComment} />
+    );
+    const buttons = screen.getAllByTitle("Add comment");
+    await user.click(buttons[0]);
+    expect(onAddComment).toHaveBeenCalledTimes(1);
+  });
+
+  it("calls onAddComment when clicking anywhere on the line content", async () => {
+    const user = userEvent.setup();
+    const onAddComment = vi.fn();
+    const hunk = makeHunk([contextLine]);
+    render(
+      <SplitDiffHunk hunk={hunk} filePath="src/app.ts" onAddComment={onAddComment} />
+    );
+    // Context lines render content twice (left + right). Click the first.
+    const contentEls = screen.getAllByText("const x = 1;");
+    await user.click(contentEls[0]);
+    expect(onAddComment).toHaveBeenCalledWith(1, "old");
+  });
+
+  it("invokes onAddComment via Enter on the focused row", async () => {
+    const user = userEvent.setup();
+    const onAddComment = vi.fn();
+    const hunk = makeHunk([contextLine]);
+    render(
+      <SplitDiffHunk hunk={hunk} filePath="src/app.ts" onAddComment={onAddComment} />
+    );
+    const rows = screen.getAllByRole("button", { name: /add comment on line/i });
+    rows[0].focus();
+    await user.keyboard("{Enter}");
+    expect(onAddComment).toHaveBeenCalledWith(1, "old");
+  });
+
   it("renders highlighted content via dangerouslySetInnerHTML", () => {
     const hunk = makeHunk([contextLine]);
     const highlightedLines = new Map([[0, '<span style="color:red">const x = 1;</span>']]);
