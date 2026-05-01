@@ -152,6 +152,8 @@ export interface Session {
   snapshot_key?: string;
   pr_creation_state?: "idle" | "queued" | "pushing" | "succeeded" | "failed";
   pr_creation_error?: string;
+  pr_push_state?: "idle" | "queued" | "pushing" | "succeeded" | "failed";
+  pr_push_error?: string;
   target_branch?: string;
   repository_id?: string;
   linked_issues?: Array<{

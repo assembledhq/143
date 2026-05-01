@@ -26,8 +26,8 @@ type PullRequestFilters struct {
 
 func (s *PullRequestStore) Create(ctx context.Context, pr *models.PullRequest) error {
 	query := `
-		INSERT INTO pull_requests (session_id, org_id, github_pr_number, github_pr_url, github_repo, title, body, status, review_status, authored_by, head_sha)
-		VALUES (@session_id, @org_id, @github_pr_number, @github_pr_url, @github_repo, @title, @body, @status, @review_status, @authored_by, @head_sha)
+		INSERT INTO pull_requests (session_id, org_id, github_pr_number, github_pr_url, github_repo, title, body, status, review_status, authored_by, head_sha, head_ref)
+		VALUES (@session_id, @org_id, @github_pr_number, @github_pr_url, @github_repo, @title, @body, @status, @review_status, @authored_by, @head_sha, @head_ref)
 		RETURNING id, created_at, updated_at`
 
 	authoredBy := pr.AuthoredBy
@@ -46,6 +46,7 @@ func (s *PullRequestStore) Create(ctx context.Context, pr *models.PullRequest) e
 		"review_status":    pr.ReviewStatus,
 		"authored_by":      authoredBy,
 		"head_sha":         pr.HeadSHA,
+		"head_ref":         pr.HeadRef,
 	}
 
 	row := s.db.QueryRow(ctx, query, args)
@@ -53,7 +54,7 @@ func (s *PullRequestStore) Create(ctx context.Context, pr *models.PullRequest) e
 }
 
 const prSelectColumns = `id, session_id, org_id, github_pr_number, github_pr_url, github_repo,
-		       title, body, status, review_status, authored_by, ci_status, head_sha, base_sha,
+		       title, body, status, review_status, authored_by, ci_status, head_sha, head_ref, base_sha,
 		       merge_state, has_conflicts, failing_test_count, needs_agent_action, github_state_synced_at,
 		       health_version, merged_at, created_at, updated_at`
 
@@ -91,7 +92,7 @@ func (s *PullRequestStore) GetBySessionID(ctx context.Context, orgID, sessionID 
 
 func (s *PullRequestStore) UpdateStatus(ctx context.Context, orgID, id uuid.UUID, status string) error {
 	query := `UPDATE pull_requests SET status = @status, updated_at = now() WHERE id = @id AND org_id = @org_id`
-	if status == "merged" {
+	if status == models.PullRequestStatusMerged {
 		query = `UPDATE pull_requests SET status = @status, merged_at = now(), updated_at = now() WHERE id = @id AND org_id = @org_id`
 	}
 	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
@@ -110,6 +111,52 @@ func (s *PullRequestStore) UpdateTitle(ctx context.Context, orgID, id uuid.UUID,
 		"title":  title,
 	})
 	return err
+}
+
+// UpdateHeadSHA persists the SHA of the most recent commit pushed to the PR's
+// head branch. Called after a "Push changes" follow-up push lands so the PR
+// row reflects the new HEAD without waiting for the GitHub webhook to round-
+// trip. Last-write-wins with the webhook is intentional — both writes carry
+// the same SHA after a successful push.
+//
+// Beyond head_sha, this also resets every column whose value was derived from
+// the *previous* HEAD: github_state_synced_at, health_version, merge_state,
+// has_conflicts, failing_test_count, and needs_agent_action. A fresh push
+// invalidates each of them — a previously-conflicted PR may now be clean,
+// previously-failing tests must re-run on the new SHA, and any pending
+// "agent action" tag (e.g. a fix-tests prompt) was scoped to the prior
+// commit. The next sync_pull_request_state job repopulates them from GitHub.
+// Stale signals are intentionally cleared rather than preserved so the UI
+// does not surface a misleading "needs action" banner against a commit that
+// no longer exists at HEAD.
+//
+// Returns pgx.ErrNoRows if no PR row matched (org_id/id mismatch or PR was
+// deleted between push and update). Callers can detect drift instead of
+// silently swallowing a no-op write.
+func (s *PullRequestStore) UpdateHeadSHA(ctx context.Context, orgID, id uuid.UUID, headSHA string) error {
+	query := `UPDATE pull_requests
+		SET head_sha = @head_sha,
+		    github_state_synced_at = NULL,
+		    health_version = 0,
+		    merge_state = @merge_state,
+		    has_conflicts = false,
+		    failing_test_count = 0,
+		    needs_agent_action = false,
+		    updated_at = now()
+		WHERE id = @id AND org_id = @org_id`
+	res, err := s.db.Exec(ctx, query, pgx.NamedArgs{
+		"id":          id,
+		"org_id":      orgID,
+		"head_sha":    headSHA,
+		"merge_state": models.PullRequestMergeStateUnknown,
+	})
+	if err != nil {
+		return err
+	}
+	if res.RowsAffected() == 0 {
+		return pgx.ErrNoRows
+	}
+	return nil
 }
 
 // GetByRepoAndNumber looks up a PR by repo and number without org scoping.
