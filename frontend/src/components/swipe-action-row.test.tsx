@@ -79,6 +79,35 @@ describe('SwipeActionRow', () => {
     expect(onAction).toHaveBeenCalledTimes(1);
   });
 
+  it('auto-fires the action when released past the commit threshold', () => {
+    const onAction = vi.fn();
+
+    renderWithProviders(
+      <SwipeActionRow
+        actionLabel="Archive item"
+        actionText="Archive"
+        onAction={onAction}
+      >
+        <div>Row content</div>
+      </SwipeActionRow>,
+    );
+
+    const surface = screen.getByText('Row content').closest('[data-swipe-surface="true"]');
+    expect(surface).not.toBeNull();
+
+    fireEvent.touchStart(surface!, {
+      touches: [{ clientX: 320, clientY: 20 }],
+    });
+    fireEvent.touchMove(surface!, {
+      touches: [{ clientX: 100, clientY: 24 }],
+    });
+
+    expect(surface!.closest('[data-swipe-state="committed"]')).not.toBeNull();
+
+    fireEvent.touchEnd(surface!);
+    expect(onAction).toHaveBeenCalledTimes(1);
+  });
+
   it('does not open for mostly vertical movement', () => {
     renderWithProviders(
       <SwipeActionRow

@@ -1,6 +1,13 @@
 "use client";
 
-import { useRef, useState, useSyncExternalStore, type ReactNode } from "react";
+import {
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+  useSyncExternalStore,
+  type ReactNode,
+} from "react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 
@@ -8,6 +15,9 @@ const ACTION_WIDTH = 92;
 const OPEN_THRESHOLD = 44;
 const HORIZONTAL_LOCK_THRESHOLD = 12;
 const TOUCH_QUERY = "(pointer: coarse)";
+const COMMIT_THRESHOLD_RATIO = 0.5;
+const MIN_COMMIT_THRESHOLD = 140;
+const COMMIT_ANIMATION_MS = 220;
 
 type DragState = {
   startX: number;
@@ -40,6 +50,17 @@ function getTouchDeviceServerSnapshot(): boolean {
   return true;
 }
 
+function vibrate(pattern: number | number[]) {
+  if (typeof navigator === "undefined") return;
+  // iOS Safari does not implement the Vibration API; this is a no-op there.
+  if (typeof navigator.vibrate !== "function") return;
+  try {
+    navigator.vibrate(pattern);
+  } catch {
+    // ignore
+  }
+}
+
 export function SwipeActionRow({
   actionLabel,
   actionText,
@@ -55,25 +76,72 @@ export function SwipeActionRow({
   children: ReactNode;
   className?: string;
 }) {
+  const containerRef = useRef<HTMLDivElement | null>(null);
   const dragRef = useRef<DragState | null>(null);
+  const commitTimerRef = useRef<number | null>(null);
   const [offset, setOffset] = useState(0);
   const [isDragging, setIsDragging] = useState(false);
+  const [isCommitted, setIsCommitted] = useState(false);
+  const [containerWidth, setContainerWidth] = useState(0);
   const isTouchDevice = useSyncExternalStore(
     subscribeTouchDevice,
     getTouchDeviceSnapshot,
     getTouchDeviceServerSnapshot,
   );
 
+  useLayoutEffect(() => {
+    const node = containerRef.current;
+    if (!node) return;
+    const update = () => setContainerWidth(node.offsetWidth);
+    update();
+    if (typeof ResizeObserver === "undefined") return;
+    const ro = new ResizeObserver(update);
+    ro.observe(node);
+    return () => ro.disconnect();
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (commitTimerRef.current !== null) {
+        window.clearTimeout(commitTimerRef.current);
+      }
+    };
+  }, []);
+
+  const commitThreshold = Math.max(
+    MIN_COMMIT_THRESHOLD,
+    containerWidth * COMMIT_THRESHOLD_RATIO,
+  );
+  const maxOffset = containerWidth > 0 ? containerWidth : ACTION_WIDTH * 4;
+
   const close = () => {
     setOffset(0);
     setIsDragging(false);
+    setIsCommitted(false);
     dragRef.current = null;
   };
 
   const open = () => {
     setOffset(ACTION_WIDTH);
     setIsDragging(false);
+    setIsCommitted(false);
     dragRef.current = null;
+  };
+
+  const commitAction = () => {
+    setIsDragging(false);
+    setOffset(maxOffset);
+    dragRef.current = null;
+    vibrate([15, 30, 40]);
+    onAction();
+    if (commitTimerRef.current !== null) {
+      window.clearTimeout(commitTimerRef.current);
+    }
+    commitTimerRef.current = window.setTimeout(() => {
+      setOffset(0);
+      setIsCommitted(false);
+      commitTimerRef.current = null;
+    }, COMMIT_ANIMATION_MS);
   };
 
   const handleTouchStart = (event: React.TouchEvent<HTMLDivElement>) => {
@@ -111,11 +179,24 @@ export function SwipeActionRow({
 
     if (!drag.swiping) return;
 
-    const nextOffset = Math.max(0, Math.min(ACTION_WIDTH, -deltaX));
+    const nextOffset = Math.max(0, Math.min(maxOffset, -deltaX));
     setOffset(nextOffset);
+
+    const willCommit = nextOffset >= commitThreshold;
+    if (willCommit !== isCommitted) {
+      setIsCommitted(willCommit);
+      if (willCommit) {
+        // Light tick when the user crosses into the auto-commit zone.
+        vibrate(8);
+      }
+    }
   };
 
   const handleTouchEnd = () => {
+    if (offset >= commitThreshold) {
+      commitAction();
+      return;
+    }
     if (offset >= OPEN_THRESHOLD) {
       open();
       return;
@@ -123,8 +204,14 @@ export function SwipeActionRow({
     close();
   };
 
-  const state = isTouchDevice && offset > 0 ? "open" : "closed";
+  const state =
+    isTouchDevice && offset > 0
+      ? isCommitted
+        ? "committed"
+        : "open"
+      : "closed";
   const trailingActionHidden = state === "closed";
+  const actionAreaWidth = Math.max(ACTION_WIDTH, offset);
 
   const swipeSurfaceProps = isTouchDevice
     ? {
@@ -148,22 +235,36 @@ export function SwipeActionRow({
 
   return (
     <div
+      ref={containerRef}
       className={cn("group relative overflow-hidden rounded-lg", className)}
       data-swipe-state={state}
     >
       {isTouchDevice && (
-        <div className="absolute inset-y-0 right-0 flex w-[92px] items-stretch justify-end">
+        <div
+          className="absolute inset-y-0 right-0"
+          style={{ width: `${actionAreaWidth}px` }}
+        >
           <Button
             aria-label={actionLabel}
             aria-hidden={trailingActionHidden}
             tabIndex={trailingActionHidden ? -1 : 0}
-            className="h-full w-full rounded-none rounded-r-lg bg-amber-500 px-0 text-white hover:bg-amber-600 active:bg-amber-600"
+            className={cn(
+              "h-full w-full rounded-none rounded-r-lg px-0 text-white transition-colors duration-150",
+              isCommitted
+                ? "bg-amber-600 hover:bg-amber-700 active:bg-amber-700"
+                : "bg-amber-500 hover:bg-amber-600 active:bg-amber-600",
+            )}
             onClick={() => {
               close();
               onAction();
             }}
           >
-            <span className="flex flex-col items-center justify-center gap-1 text-xs font-medium">
+            <span
+              className={cn(
+                "flex flex-col items-center justify-center gap-1 text-xs font-medium transition-transform duration-150",
+                isCommitted && "scale-110",
+              )}
+            >
               {actionIcon}
               <span>{actionText}</span>
             </span>
