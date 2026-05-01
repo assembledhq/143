@@ -164,6 +164,40 @@ func TestResolverCacheInvalidateScope(t *testing.T) {
 	}
 }
 
+// TestResolverCacheInvalidateUser locks the personal-scope Reorder/Move
+// invalidation behavior: a personal stack mutation should drop only the
+// requesting user's entries, leaving every other user's resolved view and
+// the org-only entries intact.
+func TestResolverCacheInvalidateUser(t *testing.T) {
+	t.Parallel()
+
+	cache := newResolverCache(30 * time.Second)
+	orgID := uuid.New()
+	userA := uuid.New()
+	userB := uuid.New()
+
+	val := []models.DecryptedCodingCredential{{ID: uuid.New()}}
+	cache.put(orgID, &userA, models.ProviderAnthropicSubscription, val)
+	cache.put(orgID, &userA, models.ProviderOpenAISubscription, val)
+	cache.put(orgID, &userB, models.ProviderAnthropicSubscription, val)
+	cache.put(orgID, nil, models.ProviderAnthropicSubscription, val)
+
+	cache.invalidateUser(orgID, userA)
+
+	if _, ok := cache.get(orgID, &userA, models.ProviderAnthropicSubscription); ok {
+		t.Fatalf("expected userA anthropic_subscription invalidated")
+	}
+	if _, ok := cache.get(orgID, &userA, models.ProviderOpenAISubscription); ok {
+		t.Fatalf("expected userA openai_subscription invalidated")
+	}
+	if _, ok := cache.get(orgID, &userB, models.ProviderAnthropicSubscription); !ok {
+		t.Fatalf("expected userB entry untouched by userA invalidation")
+	}
+	if _, ok := cache.get(orgID, nil, models.ProviderAnthropicSubscription); !ok {
+		t.Fatalf("expected org entry untouched by personal invalidation")
+	}
+}
+
 func TestHealthCacheShedAndExpire(t *testing.T) {
 	t.Parallel()
 

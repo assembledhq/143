@@ -23,13 +23,16 @@ var ErrAnthropicSplitSentinelMissing = errors.New(
 )
 
 // EnsureAnthropicSplitSentinel verifies the post-step migration has run, or
-// auto-marks completion when there is provably nothing to split (no
-// provider='anthropic' rows in coding_credentials). Fresh installs pass
-// without operator action; databases that contain pre-split anthropic rows
-// must run the post-step before this returns nil.
+// auto-marks completion when there is provably nothing to split. The check
+// covers both the unified table and the legacy tables, because a partial
+// migration (000106 applied, 000107 not yet) leaves coding_credentials empty
+// while pre-split rows still live in org_credentials/user_credentials. Without
+// the legacy check, that mid-migration state would auto-pass the gate and the
+// post-step would never execute on a later boot.
 //
 // Returns ErrAnthropicSplitSentinelMissing when the sentinel is absent and
-// pre-split rows exist; returns wrapped errors for I/O failures.
+// any anthropic row exists in the unified or legacy tables; returns wrapped
+// errors for I/O failures.
 //
 // lint:allow-no-orgid reason="schema-level invariant; not tenant data"
 func EnsureAnthropicSplitSentinel(ctx context.Context, dbtx DBTX) error {
@@ -41,16 +44,23 @@ func EnsureAnthropicSplitSentinel(ctx context.Context, dbtx DBTX) error {
 		return nil
 	}
 
-	// Sentinel absent. If there are no anthropic rows at all, the post-step
-	// has nothing to do — auto-write the sentinel so fresh installs and
-	// freshly-truncated test databases boot cleanly.
-	var count int
-	if err := dbtx.QueryRow(ctx,
-		`SELECT count(*) FROM coding_credentials WHERE provider = 'anthropic'`,
-	).Scan(&count); err != nil {
+	// Sentinel absent. Auto-write only when no anthropic rows exist anywhere
+	// — unified or legacy. Legacy rows that haven't yet been copied by 000107
+	// still represent split work the post-step must do once the data lands in
+	// coding_credentials.
+	unifiedCount, err := countAnthropicRows(ctx, dbtx, "coding_credentials")
+	if err != nil {
 		return fmt.Errorf("count pre-split anthropic rows: %w", err)
 	}
-	if count > 0 {
+	legacyOrgCount, err := countAnthropicRows(ctx, dbtx, "org_credentials")
+	if err != nil {
+		return fmt.Errorf("count legacy org anthropic rows: %w", err)
+	}
+	legacyUserCount, err := countAnthropicRows(ctx, dbtx, "user_credentials")
+	if err != nil {
+		return fmt.Errorf("count legacy user anthropic rows: %w", err)
+	}
+	if unifiedCount > 0 || legacyOrgCount > 0 || legacyUserCount > 0 {
 		return ErrAnthropicSplitSentinelMissing
 	}
 
@@ -62,6 +72,20 @@ func EnsureAnthropicSplitSentinel(ctx context.Context, dbtx DBTX) error {
 		return fmt.Errorf("auto-write anthropic_split sentinel: %w", err)
 	}
 	return nil
+}
+
+// countAnthropicRows returns the number of provider='anthropic' rows in the
+// named table. Table name is interpolated rather than parameterised because
+// the SQL parser doesn't accept a placeholder in that position; the call sites
+// pass only fixed string literals.
+func countAnthropicRows(ctx context.Context, dbtx DBTX, table string) (int, error) {
+	var count int
+	if err := dbtx.QueryRow(ctx,
+		`SELECT count(*) FROM `+table+` WHERE provider = 'anthropic'`,
+	).Scan(&count); err != nil {
+		return 0, err
+	}
+	return count, nil
 }
 
 func anthropicSplitSentinelPresent(ctx context.Context, dbtx DBTX) (bool, error) {

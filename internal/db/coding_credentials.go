@@ -514,10 +514,15 @@ func (s *CodingCredentialStore) Create(ctx context.Context, scope models.Scope, 
 			"priority":   nextPriority,
 		}
 		// On conflict (label collision) we surface a typed error so the API
-		// layer can render a meaningful message. Disabled rows are eligible
-		// for resurrection — INSERT … ON CONFLICT bumps the priority into the
-		// new tail slot so a previously-deleted credential reappears at the
-		// bottom of the stack rather than carrying a stale slot.
+		// layer can render a meaningful message. Disabled and pending_auth
+		// rows are eligible for resurrection — disabled rows take the new
+		// tail-slot priority (their old slot was relinquished when they were
+		// soft-deleted), while pending_auth rows keep their existing priority
+		// so a pending OAuth flow that completes does not jump the stack
+		// behind unrelated rows added in the meantime. Active and invalid
+		// rows are not eligible: the WHERE clause makes RETURNING return no
+		// rows, and the lookup-after-conflict below surfaces
+		// ErrCodingCredentialLabelTaken with the existing status.
 		query := `
 			INSERT INTO coding_credentials
 				(org_id, user_id, provider, label, config, status, created_by, priority)
@@ -1130,7 +1135,17 @@ func (s *CodingCredentialStore) invalidate(scope models.Scope, provider models.P
 	}
 }
 
+// invalidateScope drops cache entries affected by a stack-level mutation
+// (Reorder, Move). Personal mutations only affect the requesting user's
+// resolved view, so we wipe just that user's keys instead of the whole org —
+// the org tail concatenated onto every other user's resolution is unchanged.
+// Org mutations affect every user because their resolved lists end with the
+// org rows.
 func (s *CodingCredentialStore) invalidateScope(scope models.Scope) {
+	if scope.IsPersonal() {
+		s.resolverCache.invalidateUser(scope.OrgID, *scope.UserID)
+		return
+	}
 	s.resolverCache.invalidateAll(scope.OrgID)
 }
 
@@ -1247,6 +1262,22 @@ func (c *resolverCache) invalidateAll(orgID uuid.UUID) {
 	defer c.mu.Unlock()
 	for k := range c.data {
 		if k.orgID == orgID {
+			delete(c.data, k)
+		}
+	}
+}
+
+// invalidateUser drops every cache entry in the org that belongs to one
+// user's personal stack. Used by personal-scope Reorder/Move so an unrelated
+// user's resolver cache is not blown away by another user's drag-drop.
+func (c *resolverCache) invalidateUser(orgID uuid.UUID, userID uuid.UUID) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for k := range c.data {
+		if k.orgID == orgID && k.userKey == userID {
 			delete(c.data, k)
 		}
 	}

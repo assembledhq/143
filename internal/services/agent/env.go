@@ -649,6 +649,11 @@ func compatibleCodingProviderConfig(provider models.ProviderName, cfg models.Pro
 		if !ok || sub.AccessToken == "" || sub.RefreshToken == "" {
 			return nil
 		}
+		// Drop PKCE-only fields (State, CodeVerifier, AuthorizeURL) when
+		// constructing the runtime config. They are pre-completion artifacts;
+		// the Status='active' filter upstream already excludes pending rows,
+		// but re-asserting their absence here keeps the runtime config minimal
+		// in case that filter ever loosens.
 		return models.AnthropicConfig{Subscription: &models.AnthropicSubscription{
 			AccessToken:   sub.AccessToken,
 			RefreshToken:  sub.RefreshToken,
@@ -656,16 +661,25 @@ func compatibleCodingProviderConfig(provider models.ProviderName, cfg models.Pro
 			AccountType:   sub.AccountType,
 			RateLimitTier: sub.RateLimitTier,
 			Scopes:        sub.Scopes,
-			State:         sub.State,
-			CodeVerifier:  sub.CodeVerifier,
-			AuthorizeURL:  sub.AuthorizeURL,
 		}}
 	case models.ProviderOpenAISubscription:
 		sub, ok := cfg.(models.OpenAISubscriptionConfig)
 		if !ok || sub.AccessToken == "" || sub.RefreshToken == "" {
 			return nil
 		}
-		return sub.AsOpenAIChatGPTConfig()
+		// Strip device-code pending fields (DeviceAuthID, UserCode,
+		// VerificationURI, PollInterval) when constructing the runtime
+		// config. AsOpenAIChatGPTConfig is a type conversion that would
+		// carry them through; the Status='active' filter upstream already
+		// excludes pending rows, but re-asserting their absence here keeps
+		// the runtime config minimal in case that filter ever loosens.
+		return models.OpenAIChatGPTConfig{
+			AccessToken:  sub.AccessToken,
+			RefreshToken: sub.RefreshToken,
+			IDToken:      sub.IDToken,
+			ExpiresAt:    sub.ExpiresAt,
+			AccountType:  sub.AccountType,
+		}
 	case models.ProviderGemini:
 		gemini, ok := cfg.(models.GeminiConfig)
 		if !ok || gemini.APIKey == "" {
