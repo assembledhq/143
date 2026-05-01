@@ -26,8 +26,8 @@ func (s *ValidationStore) Create(ctx context.Context, v *models.Validation) erro
 
 	args := pgx.NamedArgs{
 		"session_id": v.SessionID,
-		"org_id":       v.OrgID,
-		"status":       v.Status,
+		"org_id":     v.OrgID,
+		"status":     v.Status,
 	}
 
 	row := s.db.QueryRow(ctx, query, args)
@@ -67,7 +67,7 @@ func (s *ValidationStore) GetBySessionID(ctx context.Context, orgID, sessionID u
 
 	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
 		"session_id": sessionID,
-		"org_id":       orgID,
+		"org_id":     orgID,
 	})
 	if err != nil {
 		return models.Validation{}, fmt.Errorf("query validation by session: %w", err)

@@ -1142,6 +1142,49 @@ describe('SessionDetailPage', () => {
     await waitFor(() => expect(toast.success).toHaveBeenCalledWith('PR merged', expect.any(Object)));
   });
 
+  it('renders external links for CI checks shown from the PR details hover card', async () => {
+    server.use(
+      http.get('/api/v1/pull-requests/:id/health', () => {
+        return HttpResponse.json({
+          data: {
+            ...mockPRHealth,
+            failing_test_count: 2,
+            can_fix_tests: true,
+            checks: [
+              {
+                name: 'unit tests',
+                category: 'test' as const,
+                status: 'failed' as const,
+                details_url: 'https://ci.example.com/unit-tests',
+              },
+              {
+                name: 'integration tests',
+                category: 'test' as const,
+                status: 'failed' as const,
+                details_url: 'https://ci.example.com/integration-tests',
+              },
+            ],
+          },
+        } satisfies SingleResponse<typeof mockPRHealth>);
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+
+    const user = userEvent.setup();
+    await user.hover(await screen.findByText('2/2 failed'));
+
+    const unitLink = await screen.findByRole('link', { name: /unit tests/i });
+    const integrationLink = screen.getByRole('link', { name: /integration tests/i });
+
+    expect(unitLink).toHaveAttribute('href', 'https://ci.example.com/unit-tests');
+    expect(unitLink).toHaveAttribute('target', '_blank');
+    expect(unitLink).toHaveAttribute('rel', expect.stringContaining('noopener'));
+    expect(integrationLink).toHaveAttribute('href', 'https://ci.example.com/integration-tests');
+    expect(integrationLink).toHaveAttribute('target', '_blank');
+    expect(integrationLink).toHaveAttribute('rel', expect.stringContaining('noreferrer'));
+  });
+
   it('shows merged PR state when a linked PR has already been merged', async () => {
     server.use(
       http.get('/api/v1/sessions/:id/pr', () => {
@@ -2354,7 +2397,7 @@ describe('SessionDetailPage', () => {
     await user.click(viewChangesButtons[0]);
 
     // Should show the diff content in the Changes tab
-    expect(await screen.findByText('src/app.ts')).toBeInTheDocument();
+    expect((await screen.findAllByText('src/app.ts')).length).toBeGreaterThan(0);
   });
 
   it('shows contextual empty state for completed session with no changes', async () => {
@@ -3091,7 +3134,7 @@ describe('SessionDetailPage', () => {
 
     const textarea = await screen.findByPlaceholderText('Send a follow-up message...');
     await user.click(screen.getAllByTitle('View changes')[0]);
-    await screen.findByText('src/app.ts');
+    expect((await screen.findAllByText('src/app.ts')).length).toBeGreaterThan(0);
     expect(await screen.findByText('1 comment attached')).toBeInTheDocument();
 
     await user.click(screen.getByRole('tab', { name: 'Overview' }));
@@ -3432,7 +3475,7 @@ describe('SessionDetailPage', () => {
 
     // After entering review mode, the review diff view should be shown
     // and the file should be visible
-    expect(await screen.findByText('src/app.ts')).toBeInTheDocument();
+    expect((await screen.findAllByText('src/app.ts')).length).toBeGreaterThan(0);
   });
 
   it('exits plan mode when exit button is clicked', async () => {
@@ -3610,7 +3653,7 @@ describe('SessionDetailPage', () => {
     await user.click(reviewButton);
 
     // Should show the file content in the review diff view
-    expect(await screen.findByText('src/app.ts')).toBeInTheDocument();
+    expect((await screen.findAllByText('src/app.ts')).length).toBeGreaterThan(0);
 
     // The detail panel toggle should be disabled during review
     const toggleButton = screen.getByTitle('File tree required during review');
@@ -3619,6 +3662,117 @@ describe('SessionDetailPage', () => {
     await user.hover(toggleButton.parentElement as HTMLElement);
 
     expect(await screen.findByRole('tooltip', { name: 'File tree required during review' })).toBeInTheDocument();
+  });
+
+  it('opens the mobile diff view immediately when the chat files-changed summary is clicked', async () => {
+    vi.mocked(window.matchMedia).mockImplementation((query: string) => ({
+      matches: query === '(max-width: 767px)',
+      media: query,
+      onchange: null,
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      dispatchEvent: vi.fn(),
+    }));
+
+    const sessionWithDiff: Session = {
+      ...mockSessions[0],
+      diff: 'diff --git a/src/app.ts b/src/app.ts\n--- a/src/app.ts\n+++ b/src/app.ts\n@@ -1,3 +1,4 @@\n import express from "express";\n+import cors from "cors";\n const app = express();\n app.listen(3000);',
+      diff_stats: { added: 1, removed: 0, files_changed: 1 },
+    };
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({ data: sessionWithDiff } satisfies SingleResponse<Session>);
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+    await screen.findAllByText('Fixed TypeError by adding null check');
+
+    const user = userEvent.setup();
+    await user.click(await screen.findByText('1 file changed'));
+
+    expect((await screen.findAllByText('src/app.ts')).length).toBeGreaterThan(0);
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+  });
+
+  it('opens a full-screen mobile diff when a file is selected from the Changes sheet', async () => {
+    vi.mocked(window.matchMedia).mockImplementation((query: string) => ({
+      matches: query === '(max-width: 767px)',
+      media: query,
+      onchange: null,
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      dispatchEvent: vi.fn(),
+    }));
+
+    const sessionWithDiff: Session = {
+      ...mockSessions[0],
+      diff: 'diff --git a/src/app.ts b/src/app.ts\n--- a/src/app.ts\n+++ b/src/app.ts\n@@ -1,3 +1,4 @@\n import express from "express";\n+import cors from "cors";\n const app = express();\n app.listen(3000);',
+      diff_stats: { added: 1, removed: 0, files_changed: 1 },
+    };
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({ data: sessionWithDiff } satisfies SingleResponse<Session>);
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+    await screen.findAllByText('Fixed TypeError by adding null check');
+
+    const user = userEvent.setup();
+    await user.click(screen.getByRole('button', { name: 'Open details' }));
+
+    const detailSheet = await screen.findByRole('dialog');
+    await user.click(within(detailSheet).getByRole('tab', { name: /^Changes/ }));
+    await user.click(within(detailSheet).getByRole('button', { name: /app\.ts/ }));
+
+    expect((await screen.findAllByText('src/app.ts')).length).toBeGreaterThan(0);
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+  });
+
+  it('reopens the mobile files list from the diff reader', async () => {
+    vi.mocked(window.matchMedia).mockImplementation((query: string) => ({
+      matches: query === '(max-width: 767px)',
+      media: query,
+      onchange: null,
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      dispatchEvent: vi.fn(),
+    }));
+
+    const sessionWithDiff: Session = {
+      ...mockSessions[0],
+      diff: 'diff --git a/src/app.ts b/src/app.ts\n--- a/src/app.ts\n+++ b/src/app.ts\n@@ -1,3 +1,4 @@\n import express from "express";\n+import cors from "cors";\n const app = express();\n app.listen(3000);\ndiff --git a/src/new.ts b/src/new.ts\n--- /dev/null\n+++ b/src/new.ts\n@@ -0,0 +1 @@\n+export const x = 1;',
+      diff_stats: { added: 2, removed: 0, files_changed: 2 },
+    };
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({ data: sessionWithDiff } satisfies SingleResponse<Session>);
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+    await screen.findAllByText('Fixed TypeError by adding null check');
+
+    const user = userEvent.setup();
+    await user.click(await screen.findByText('2 files changed'));
+
+    expect((await screen.findAllByText('src/app.ts')).length).toBeGreaterThan(0);
+    expect(screen.getByText('1 of 2')).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: 'Open files list' }));
+    const detailSheet = await screen.findByRole('dialog');
+    expect(within(detailSheet).getByText('2 files changed')).toBeInTheDocument();
+    expect(within(detailSheet).getByText('Browse session details, changed files, validation, and preview on mobile.')).toBeInTheDocument();
   });
 
   it('exits review mode when clicking a non-changes tab', async () => {
@@ -3642,7 +3796,7 @@ describe('SessionDetailPage', () => {
     // Enter review mode via diff stats badge
     const viewChangesButtons = screen.getAllByTitle('View changes');
     await user.click(viewChangesButtons[0]);
-    expect(await screen.findByText('src/app.ts')).toBeInTheDocument();
+    expect((await screen.findAllByText('src/app.ts')).length).toBeGreaterThan(0);
 
     // Click Overview tab — should exit review mode
     const overviewTab = screen.getByRole('tab', { name: 'Overview' });
@@ -3865,7 +4019,7 @@ describe('SessionDetailPage', () => {
 
     const textarea = await screen.findByPlaceholderText('Send a follow-up message...');
     await user.click(screen.getAllByTitle('View changes')[0]);
-    expect(await screen.findByText('src/app.ts')).toBeInTheDocument();
+    expect((await screen.findAllByText('src/app.ts')).length).toBeGreaterThan(0);
 
     await user.type(textarea, 'Hello from review');
     await user.keyboard('{Enter}');

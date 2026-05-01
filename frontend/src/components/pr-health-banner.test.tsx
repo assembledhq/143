@@ -205,9 +205,9 @@ describe("PRHealthBanner", () => {
           ...baseHealth,
           failing_test_count: 1,
           checks: [
-            { name: "Unit tests", category: "test", status: "failed" },
-            { name: "E2E tests", category: "test", status: "pending" },
-            { name: "Lint", category: "lint", status: "passed" },
+            { name: "Unit tests", category: "test", status: "failed", details_url: "https://ci.example.com/unit-tests" },
+            { name: "E2E tests", category: "test", status: "pending", details_url: "https://ci.example.com/e2e-tests" },
+            { name: "Lint", category: "lint", status: "passed", details_url: "https://ci.example.com/lint" },
           ],
         }}
         pendingAction={null}
@@ -229,6 +229,40 @@ describe("PRHealthBanner", () => {
     expect(screen.getAllByText("failed").length).toBeGreaterThan(0);
     expect(screen.getAllByText("pending").length).toBeGreaterThan(0);
     expect(screen.getAllByText("passed").length).toBeGreaterThan(0);
+  });
+
+  it("renders each hover-card check as an external link when details URLs are available", async () => {
+    renderWithProviders(
+      <PRHealthBanner
+        health={{
+          ...baseHealth,
+          failing_test_count: 2,
+          checks: [
+            { name: "Unit tests", category: "test", status: "failed", details_url: "https://ci.example.com/unit-tests" },
+            { name: "E2E tests", category: "test", status: "failed", details_url: "https://ci.example.com/e2e-tests" },
+          ],
+        }}
+        pendingAction={null}
+        repairError={null}
+        mergeAuthRequired={false}
+        onFixTests={vi.fn()}
+        onResolveConflicts={vi.fn()}
+        onMerge={vi.fn()}
+      />,
+    );
+
+    const user = userEvent.setup();
+    await user.hover(screen.getByText("2/2 failed"));
+
+    const unitLink = await screen.findByRole("link", { name: /Unit tests/i });
+    const e2eLink = screen.getByRole("link", { name: /E2E tests/i });
+
+    expect(unitLink).toHaveAttribute("href", "https://ci.example.com/unit-tests");
+    expect(unitLink).toHaveAttribute("target", "_blank");
+    expect(unitLink).toHaveAttribute("rel", expect.stringContaining("noopener"));
+    expect(e2eLink).toHaveAttribute("href", "https://ci.example.com/e2e-tests");
+    expect(e2eLink).toHaveAttribute("target", "_blank");
+    expect(e2eLink).toHaveAttribute("rel", expect.stringContaining("noreferrer"));
   });
 
   it("shows failed-over-total summary and normalizes missing legacy statuses to pending", async () => {

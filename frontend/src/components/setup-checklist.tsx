@@ -17,8 +17,7 @@ import { CodexDeviceCodeModal } from "@/components/codex-device-code-modal";
 import { useDisconnectIntegration } from "@/hooks/use-disconnect-integration";
 import { useGitHubRepoSync } from "@/hooks/use-github-repo-sync";
 import { queryKeys } from "@/lib/query-keys";
-import { isAgentConnected } from "@/components/autopilot/autopilot-helpers";
-import { AGENTS_BY_KEY } from "@/lib/agents";
+import { AGENTS_BY_KEY, isAgentConnected } from "@/lib/agents";
 import {
   Select,
   SelectContent,

@@ -153,12 +153,12 @@ type EvalRun struct {
 	BatchID *uuid.UUID `db:"batch_id" json:"batch_id,omitempty"`
 
 	// Configuration used
-	InputManifest        json.RawMessage `db:"input_manifest" json:"input_manifest,omitempty"`
-	Model                string          `db:"model" json:"model"`
-	ServerDeploySHA      *string         `db:"server_deploy_sha" json:"server_deploy_sha,omitempty"`
-	PMDocumentSetPinID   *uuid.UUID      `db:"pm_document_set_pin_id" json:"pm_document_set_pin_id,omitempty"`
-	ConfigRef            *string         `db:"config_ref" json:"config_ref,omitempty"`
-	ContextOverrides     json.RawMessage `db:"context_overrides" json:"context_overrides"`
+	InputManifest      json.RawMessage `db:"input_manifest" json:"input_manifest,omitempty"`
+	Model              string          `db:"model" json:"model"`
+	ServerDeploySHA    *string         `db:"server_deploy_sha" json:"server_deploy_sha,omitempty"`
+	PMDocumentSetPinID *uuid.UUID      `db:"pm_document_set_pin_id" json:"pm_document_set_pin_id,omitempty"`
+	ConfigRef          *string         `db:"config_ref" json:"config_ref,omitempty"`
+	ContextOverrides   json.RawMessage `db:"context_overrides" json:"context_overrides"`
 
 	// Output
 	AgentDiff  *string         `db:"agent_diff" json:"agent_diff,omitempty"`
@@ -192,15 +192,15 @@ const (
 
 // EvalBatch groups multiple eval runs for comparison across tasks × configs.
 type EvalBatch struct {
-	ID          uuid.UUID        `db:"id" json:"id"`
-	OrgID       uuid.UUID        `db:"org_id" json:"org_id"`
-	Name        string           `db:"name" json:"name"`
-	Status      EvalBatchStatus  `db:"status" json:"status"`
-	TaskCount   int              `db:"task_count" json:"task_count"`
-	RunCount    int              `db:"run_count" json:"run_count"`
-	CreatedBy   *uuid.UUID       `db:"created_by" json:"created_by,omitempty"`
-	CreatedAt   time.Time        `db:"created_at" json:"created_at"`
-	CompletedAt *time.Time       `db:"completed_at" json:"completed_at,omitempty"`
+	ID          uuid.UUID       `db:"id" json:"id"`
+	OrgID       uuid.UUID       `db:"org_id" json:"org_id"`
+	Name        string          `db:"name" json:"name"`
+	Status      EvalBatchStatus `db:"status" json:"status"`
+	TaskCount   int             `db:"task_count" json:"task_count"`
+	RunCount    int             `db:"run_count" json:"run_count"`
+	CreatedBy   *uuid.UUID      `db:"created_by" json:"created_by,omitempty"`
+	CreatedAt   time.Time       `db:"created_at" json:"created_at"`
+	CompletedAt *time.Time      `db:"completed_at" json:"completed_at,omitempty"`
 }
 
 // EvalBatchDetail enriches a batch with its runs for the comparison matrix.

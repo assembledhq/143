@@ -1,5 +1,5 @@
 import React from "react";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { renderWithProviders, screen } from "@/test/test-utils";
 import SessionsLayout from "./layout";
 
@@ -17,8 +17,10 @@ const sidebarLayoutMock = vi.fn(
   ),
 );
 
+let mockPathname = "/sessions";
+
 vi.mock("next/navigation", () => ({
-  usePathname: () => "/sessions",
+  usePathname: () => mockPathname,
 }));
 
 vi.mock("@/components/sidebar-layout", () => ({
@@ -34,7 +36,35 @@ vi.mock("./session-sidebar", () => ({
 }));
 
 describe("SessionsLayout", () => {
-  it("shows the content pane on mobile for the /sessions route", () => {
+  beforeEach(() => {
+    mockPathname = "/sessions";
+  });
+
+  it("shows the sidebar pane on mobile for the /sessions route", () => {
+    renderWithProviders(
+      <SessionsLayout>
+        <div>Child content</div>
+      </SessionsLayout>,
+    );
+
+    expect(screen.getByTestId("sidebar-layout")).toHaveAttribute("data-mobile-show", "sidebar");
+  });
+
+  it("shows the content pane on mobile for the /sessions/new route", () => {
+    mockPathname = "/sessions/new";
+
+    renderWithProviders(
+      <SessionsLayout>
+        <div>Child content</div>
+      </SessionsLayout>,
+    );
+
+    expect(screen.getByTestId("sidebar-layout")).toHaveAttribute("data-mobile-show", "content");
+  });
+
+  it("shows the content pane on mobile for session detail routes", () => {
+    mockPathname = "/sessions/session-123";
+
     renderWithProviders(
       <SessionsLayout>
         <div>Child content</div>

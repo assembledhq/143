@@ -182,9 +182,23 @@ func main() {
 			// Build sandbox+preview provider so worker-capable modes can start,
 			// stop, and hydrate previews locally.
 			sandboxExec := providers.NewDockerProvider(apiDockerCli, logger, providers.WithResolvConf(cfg.SandboxResolvConf))
-			pvProvider = previewproviders.NewDockerPreviewProvider(apiDockerCli, sandboxExec, logger)
+			dockerPreviewProvider := previewproviders.NewDockerPreviewProvider(apiDockerCli, sandboxExec, logger)
+			pvProvider = dockerPreviewProvider
 			snapshotExec = sandboxExec
 			apiSandboxProvider = sandboxExec
+
+			// Pre-pull infrastructure template images in the background so
+			// the first preview start that needs e.g. postgres:17-alpine
+			// answers the HTTP request inside the server's WriteTimeout
+			// instead of timing out on a multi-minute cold pull. The
+			// provider's lazy-pull stays as a safety net for templates
+			// added after boot. Detached from the process ctx so a slow
+			// pull never blocks shutdown.
+			go func() {
+				prepullCtx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+				defer cancel()
+				dockerPreviewProvider.EnsureInfraImages(prepullCtx)
+			}()
 		} else {
 			logger.Warn().Err(dockerErr).Msg("Docker not available — file browsing and preview provider disabled")
 		}

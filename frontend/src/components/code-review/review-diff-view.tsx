@@ -19,6 +19,8 @@ interface ReviewDiffViewProps {
   activeFileIndex: number;
   onFileChange: (index: number) => void;
   onBack: () => void;
+  isMobile?: boolean;
+  onOpenFileList?: () => void;
   commentsByLine: Map<CommentLineKey, SessionReviewComment[]>;
   activeCommentLine: {
     filePath: string;
@@ -51,6 +53,8 @@ export function ReviewDiffView({
   onDeleteComment,
   diffSearchQuery,
   onDiffSearchChange,
+  isMobile = false,
+  onOpenFileList,
 }: ReviewDiffViewProps) {
   const diffPaneRef = useRef<DiffPaneHandle>(null);
   const skipNextScrollToFileRef = useRef(false);
@@ -63,6 +67,12 @@ export function ReviewDiffView({
     }
     return "unified";
   });
+  const activeFile = files[activeFileIndex] ?? files[0] ?? null;
+  const displayFiles = isMobile ? (activeFile ? [activeFile] : []) : files;
+  const filePositionLabel =
+    files.length > 0 && activeFile
+      ? `${activeFileIndex + 1} of ${files.length}`
+      : "";
 
   // Escape key exits review mode (when not in an input, comment, or explorer).
   // Check e.defaultPrevented to avoid conflicts with KeyboardHelpOverlay's own
@@ -88,11 +98,12 @@ export function ReviewDiffView({
   }, [explorerMode, activeCommentLine, showKeyboardHelp, onBack]);
 
   const handleViewModeChange = useCallback((mode: ViewMode) => {
+    if (isMobile) return;
     setViewMode(mode);
     if (typeof window !== "undefined") {
       localStorage.setItem("diff-view-mode", mode);
     }
-  }, []);
+  }, [isMobile]);
 
   const handleFileSelect = useCallback(
     (index: number) => {
@@ -133,6 +144,16 @@ export function ReviewDiffView({
   const handleJumpToFile = useCallback(() => {
     diffPaneRef.current?.scrollToFile(activeFileIndex);
   }, [activeFileIndex]);
+
+  const handlePrevFile = useCallback(() => {
+    if (activeFileIndex <= 0) return;
+    onFileChange(activeFileIndex - 1);
+  }, [activeFileIndex, onFileChange]);
+
+  const handleNextFile = useCallback(() => {
+    if (activeFileIndex >= files.length - 1) return;
+    onFileChange(activeFileIndex + 1);
+  }, [activeFileIndex, files.length, onFileChange]);
 
   const toggleShowHelp = useCallback(() => {
     setShowKeyboardHelp((v) => !v);
@@ -207,13 +228,16 @@ export function ReviewDiffView({
     );
   }
 
+  const effectiveViewMode: ViewMode = isMobile ? "unified" : viewMode;
+
   if (files.length === 0) {
     return (
       <div className="flex flex-col h-full">
         <DiffToolbar
           onBack={onBack}
-          viewMode={viewMode}
+          viewMode={effectiveViewMode}
           onViewModeChange={handleViewModeChange}
+          isMobile={isMobile}
         />
         <div className="flex-1 flex items-center justify-center py-12">
           <div className="text-center space-y-2 max-w-[280px]">
@@ -231,22 +255,30 @@ export function ReviewDiffView({
   }
 
   return (
-    <div className="flex flex-col h-full">
+      <div className="flex flex-col h-full">
       <DiffToolbar
         onBack={onBack}
-        viewMode={viewMode}
+        viewMode={effectiveViewMode}
         onViewModeChange={handleViewModeChange}
         onBrowseRepo={handleBrowseRepo}
         searchQuery={diffSearchQuery}
         onSearchChange={onDiffSearchChange}
+        isMobile={isMobile}
+        filePath={activeFile?.newPath}
+        filePositionLabel={filePositionLabel}
+        onOpenFileList={isMobile ? onOpenFileList : undefined}
+        onPrevFile={isMobile ? handlePrevFile : undefined}
+        onNextFile={isMobile ? handleNextFile : undefined}
+        canGoPrev={isMobile && activeFileIndex > 0}
+        canGoNext={isMobile && activeFileIndex < files.length - 1}
       />
       <DiffPane
         ref={diffPaneRef}
-        files={files}
-        viewMode={viewMode}
+        files={displayFiles}
+        viewMode={effectiveViewMode}
         sessionId={sessionId}
-        activeFileIndex={activeFileIndex}
-        onActiveFileChange={handleVisibleFileChange}
+        activeFileIndex={isMobile ? undefined : activeFileIndex}
+        onActiveFileChange={isMobile ? undefined : handleVisibleFileChange}
         commentsByLine={commentsByLine}
         activeCommentLine={activeCommentLine}
         onAddComment={onAddComment}
@@ -255,6 +287,7 @@ export function ReviewDiffView({
         onUpdateComment={onUpdateComment}
         onDeleteComment={onDeleteComment}
         onBrowseFile={handleBrowseFile}
+        resetScrollKey={isMobile ? activeFile?.newPath : undefined}
       />
       <KeyboardHelpOverlay open={showKeyboardHelp} onClose={toggleShowHelp} />
     </div>

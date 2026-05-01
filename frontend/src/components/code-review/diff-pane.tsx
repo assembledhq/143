@@ -18,6 +18,7 @@ interface DiffPaneProps {
   viewMode: ViewMode;
   sessionId?: string;
   activeFileIndex?: number;
+  resetScrollKey?: string;
   onActiveFileChange?: (index: number) => void;
   commentsByLine?: Map<CommentLineKey, SessionReviewComment[]>;
   activeCommentLine?: ActiveCommentLine | null;
@@ -41,6 +42,7 @@ export const DiffPane = forwardRef<DiffPaneHandle, DiffPaneProps>(
     viewMode,
     sessionId,
     activeFileIndex,
+    resetScrollKey,
     onActiveFileChange,
     commentsByLine,
     activeCommentLine,
@@ -134,6 +136,13 @@ export const DiffPane = forwardRef<DiffPaneHandle, DiffPaneProps>(
     useEffect(() => {
       lastReportedActiveFileIndexRef.current = activeFileIndex ?? null;
     }, [activeFileIndex]);
+
+    useEffect(() => {
+      if (!resetScrollKey) return;
+      const container = containerRef.current;
+      if (!container) return;
+      container.scrollTop = 0;
+    }, [resetScrollKey]);
 
     useImperativeHandle(ref, () => ({
       scrollToFile: (index: number) => {

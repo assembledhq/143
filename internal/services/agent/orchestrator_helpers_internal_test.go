@@ -1,12 +1,16 @@
 package agent
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"io"
+	"sync/atomic"
 	"testing"
 
 	"github.com/assembledhq/143/internal/models"
 	"github.com/google/uuid"
+	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 )
 
@@ -420,4 +424,223 @@ func TestResolvePromptSeed_EarlyReturnAndErrors(t *testing.T) {
 		require.Error(t, err, "resolvePromptSeed should return primary issue fetch errors")
 		require.Contains(t, err.Error(), "fetch primary issue", "resolvePromptSeed should wrap primary issue fetch errors")
 	})
+}
+
+// snapshotSessionStubProvider is a no-op SandboxProvider whose only relevant
+// behavior is Snapshot — every other call panics so an unexpected provider
+// interaction shows up loudly in tests instead of returning silent zero values.
+type snapshotSessionStubProvider struct {
+	snapshotFn   func(ctx context.Context, sb *Sandbox) (io.ReadCloser, error)
+	snapshotCals int32
+}
+
+func (s *snapshotSessionStubProvider) Snapshot(ctx context.Context, sb *Sandbox) (io.ReadCloser, error) {
+	atomic.AddInt32(&s.snapshotCals, 1)
+	if s.snapshotFn != nil {
+		return s.snapshotFn(ctx, sb)
+	}
+	return io.NopCloser(bytes.NewReader(nil)), nil
+}
+func (s *snapshotSessionStubProvider) calls() int { return int(atomic.LoadInt32(&s.snapshotCals)) }
+
+func (s *snapshotSessionStubProvider) Name() string { return "stub" }
+func (s *snapshotSessionStubProvider) Create(context.Context, SandboxConfig) (*Sandbox, error) {
+	panic("snapshotSessionStubProvider.Create called unexpectedly")
+}
+func (s *snapshotSessionStubProvider) CloneRepo(context.Context, *Sandbox, string, string, string) error {
+	panic("snapshotSessionStubProvider.CloneRepo called unexpectedly")
+}
+func (s *snapshotSessionStubProvider) Exec(context.Context, *Sandbox, string, io.Writer, io.Writer) (int, error) {
+	panic("snapshotSessionStubProvider.Exec called unexpectedly")
+}
+func (s *snapshotSessionStubProvider) ReadFile(context.Context, *Sandbox, string) ([]byte, error) {
+	panic("snapshotSessionStubProvider.ReadFile called unexpectedly")
+}
+func (s *snapshotSessionStubProvider) WriteFile(context.Context, *Sandbox, string, []byte) error {
+	panic("snapshotSessionStubProvider.WriteFile called unexpectedly")
+}
+func (s *snapshotSessionStubProvider) Destroy(context.Context, *Sandbox) error { return nil }
+func (s *snapshotSessionStubProvider) IsAlive(context.Context, *Sandbox) (bool, error) {
+	panic("snapshotSessionStubProvider.IsAlive called unexpectedly")
+}
+func (s *snapshotSessionStubProvider) ConnectionInfo(context.Context, *Sandbox) (*SandboxConnectionInfo, error) {
+	panic("snapshotSessionStubProvider.ConnectionInfo called unexpectedly")
+}
+func (s *snapshotSessionStubProvider) Restore(context.Context, *Sandbox, io.Reader) error {
+	panic("snapshotSessionStubProvider.Restore called unexpectedly")
+}
+func (s *snapshotSessionStubProvider) ExecStream(context.Context, *Sandbox, string, func([]byte), io.Writer) (int, error) {
+	panic("snapshotSessionStubProvider.ExecStream called unexpectedly")
+}
+
+// snapshotSessionRecordingStore is a SnapshotStore that records every
+// Save call so tests can assert that we did NOT save a corrupt archive.
+type snapshotSessionRecordingStore struct {
+	saves []string
+}
+
+func (s *snapshotSessionRecordingStore) Save(ctx context.Context, key string, reader io.Reader) error {
+	if _, err := io.Copy(io.Discard, reader); err != nil {
+		return err
+	}
+	s.saves = append(s.saves, key)
+	return nil
+}
+func (s *snapshotSessionRecordingStore) Load(context.Context, string, io.Writer) error {
+	return errors.New("not implemented")
+}
+func (s *snapshotSessionRecordingStore) Delete(context.Context, string) error { return nil }
+
+func TestSnapshotSessionOnTurnSuccess_SkipsWhenAgentExitedNonZero(t *testing.T) {
+	t.Parallel()
+
+	provider := &snapshotSessionStubProvider{}
+	store := &snapshotSessionRecordingStore{}
+	o := &Orchestrator{
+		provider:  provider,
+		snapshots: store,
+		logger:    zerolog.Nop(),
+	}
+
+	session := &models.Session{ID: uuid.New(), OrgID: uuid.New()}
+	sandbox := &Sandbox{ID: "sandbox-1"}
+	result := &AgentResult{
+		ExitCode: 128,
+		Error:    `codex CLI exited with code 128: urpc method "containerManager.WaitPID" failed: EOF`,
+	}
+
+	key, size, err := o.snapshotSessionOnTurnSuccess(context.Background(), session, sandbox, result, zerolog.Nop())
+	require.NoError(t, err, "skipping should not surface as an error — callers log err and continue")
+	require.Empty(t, key, "no snapshot key should be returned when we skipped")
+	require.Zero(t, size)
+	require.Nil(t, session.SnapshotKey, "the prior snapshot pointer must not be touched")
+	require.Equal(t, 0, provider.calls(), "provider.Snapshot must not be called for a non-zero-exit run on the success path — that's exactly how the corrupt 298-byte archive was produced")
+	require.Empty(t, store.saves, "no Save call should reach storage")
+}
+
+func TestSnapshotSessionOnTurnSuccess_SnapshotsWhenAgentExitedClean(t *testing.T) {
+	t.Parallel()
+
+	provider := &snapshotSessionStubProvider{
+		snapshotFn: func(ctx context.Context, sb *Sandbox) (io.ReadCloser, error) {
+			return io.NopCloser(bytes.NewReader([]byte("archive-bytes"))), nil
+		},
+	}
+	store := &snapshotSessionRecordingStore{}
+	o := &Orchestrator{
+		provider:  provider,
+		snapshots: store,
+		logger:    zerolog.Nop(),
+	}
+
+	session := &models.Session{ID: uuid.New(), OrgID: uuid.New()}
+	sandbox := &Sandbox{ID: "sandbox-1"}
+	result := &AgentResult{ExitCode: 0}
+
+	key, size, err := o.snapshotSessionOnTurnSuccess(context.Background(), session, sandbox, result, zerolog.Nop())
+	require.NoError(t, err)
+	require.Equal(t, 1, provider.calls())
+	require.Equal(t, []string{key}, store.saves)
+	require.NotNil(t, session.SnapshotKey)
+	require.Equal(t, key, *session.SnapshotKey)
+	require.Equal(t, int64(len("archive-bytes")), size)
+}
+
+func TestSnapshotSessionOnTurnSuccess_PassesNilResultThrough(t *testing.T) {
+	// nil result has no exit code to check; the wrapper must not block — the
+	// underlying snapshotSession is responsible for the rest.
+	t.Parallel()
+
+	provider := &snapshotSessionStubProvider{
+		snapshotFn: func(ctx context.Context, sb *Sandbox) (io.ReadCloser, error) {
+			return io.NopCloser(bytes.NewReader([]byte("nil-result-archive"))), nil
+		},
+	}
+	store := &snapshotSessionRecordingStore{}
+	o := &Orchestrator{
+		provider:  provider,
+		snapshots: store,
+		logger:    zerolog.Nop(),
+	}
+	session := &models.Session{ID: uuid.New(), OrgID: uuid.New()}
+
+	key, _, err := o.snapshotSessionOnTurnSuccess(context.Background(), session, &Sandbox{ID: "sandbox-1"}, nil, zerolog.Nop())
+	require.NoError(t, err)
+	require.NotEmpty(t, key)
+	require.Equal(t, 1, provider.calls())
+}
+
+// TestSnapshotSession_AlwaysSnapshotsRegardlessOfExitCode pins the contract
+// that the cancel/policy paths rely on: snapshotSession itself is unconditional
+// once snapshots is configured. The exit-code guard lives only in the
+// snapshotSessionOnTurnSuccess wrapper so graceful stops (where the agent
+// exits non-zero on purpose because it caught a signal) still checkpoint.
+func TestSnapshotSession_AlwaysSnapshotsRegardlessOfExitCode(t *testing.T) {
+	t.Parallel()
+
+	provider := &snapshotSessionStubProvider{
+		snapshotFn: func(context.Context, *Sandbox) (io.ReadCloser, error) {
+			return io.NopCloser(bytes.NewReader([]byte("graceful-stop-archive"))), nil
+		},
+	}
+	store := &snapshotSessionRecordingStore{}
+	o := &Orchestrator{provider: provider, snapshots: store, logger: zerolog.Nop()}
+
+	session := &models.Session{ID: uuid.New(), OrgID: uuid.New()}
+	gracefulResult := &AgentResult{ExitCode: 1, Summary: "Interrupted cleanly"}
+
+	key, _, err := o.snapshotSession(context.Background(), session, &Sandbox{ID: "sandbox-1"}, gracefulResult)
+	require.NoError(t, err)
+	require.NotEmpty(t, key, "policy/cancel paths must still get a checkpoint despite the non-zero exit")
+	require.Equal(t, 1, provider.calls())
+	require.Equal(t, []string{key}, store.saves)
+}
+
+func TestSnapshotSession_NilStoreIsNoOp(t *testing.T) {
+	t.Parallel()
+
+	provider := &snapshotSessionStubProvider{}
+	o := &Orchestrator{provider: provider, snapshots: nil, logger: zerolog.Nop()}
+
+	key, size, err := o.snapshotSession(context.Background(), &models.Session{ID: uuid.New(), OrgID: uuid.New()}, &Sandbox{ID: "sandbox-1"}, &AgentResult{ExitCode: 0})
+	require.NoError(t, err)
+	require.Empty(t, key)
+	require.Zero(t, size)
+	require.Equal(t, 0, provider.calls(), "no provider call should happen when snapshots store is unset")
+}
+
+func TestSnapshotSession_PropagatesProviderErrorWithoutUpdatingSession(t *testing.T) {
+	t.Parallel()
+
+	provider := &snapshotSessionStubProvider{
+		snapshotFn: func(context.Context, *Sandbox) (io.ReadCloser, error) {
+			return nil, errors.New("provider boom")
+		},
+	}
+	store := &snapshotSessionRecordingStore{}
+	o := &Orchestrator{provider: provider, snapshots: store, logger: zerolog.Nop()}
+
+	session := &models.Session{ID: uuid.New(), OrgID: uuid.New()}
+	priorKey := "snapshots/prior/key"
+	session.SnapshotKey = &priorKey
+
+	_, _, err := o.snapshotSession(context.Background(), session, &Sandbox{ID: "sandbox-1"}, &AgentResult{ExitCode: 0})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "snapshot sandbox")
+	require.Equal(t, &priorKey, session.SnapshotKey, "the prior snapshot pointer must remain intact when Snapshot fails")
+	require.Empty(t, store.saves, "Save must not be called when Snapshot failed")
+}
+
+func TestTruncateForLog(t *testing.T) {
+	t.Parallel()
+
+	require.Equal(t, "hello", truncateForLog("hello", 10), "no truncation when under cap")
+	require.Equal(t, "hello", truncateForLog("hello", 5), "no truncation when exactly at cap")
+	require.Equal(t, "hell…", truncateForLog("hello there", 4), "should truncate and append ellipsis")
+	// UTF-8 boundary: "héllo" is 6 bytes (h é l l o, where é is 2 bytes).
+	// Cutting at byte 2 lands on the second byte of é; we should back up to
+	// byte 1 so we don't emit invalid UTF-8.
+	out := truncateForLog("héllo", 2)
+	require.Equal(t, "h…", out, "should rewind to a rune boundary before appending the ellipsis")
+	require.Equal(t, "x", truncateForLog("x", 0), "non-positive max disables truncation")
 }

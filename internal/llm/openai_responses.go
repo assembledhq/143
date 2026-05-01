@@ -108,9 +108,9 @@ func (p *OpenAIResponsesProvider) Complete(ctx context.Context, model, systemPro
 }
 
 type responsesRequest struct {
-	Model           string `json:"model"`
-	Instructions    string `json:"instructions,omitempty"`
-	Input           string `json:"input"`
+	Model           string          `json:"model"`
+	Instructions    string          `json:"instructions,omitempty"`
+	Input           string          `json:"input"`
 	ReasoningEffort ReasoningEffort `json:"reasoning_effort,omitempty"`
 }
 
