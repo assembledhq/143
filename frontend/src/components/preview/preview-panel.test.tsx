@@ -6,7 +6,7 @@ import {
   PreviewPanel,
 } from "./preview-panel";
 import { renderWithProviders, screen, waitFor, userEvent } from "@/test/test-utils";
-import type { PreviewStatusResponse } from "@/lib/preview-types";
+import { PREVIEW_ERROR_CODES, type PreviewStatusResponse } from "@/lib/preview-types";
 
 /* ------------------------------------------------------------------ */
 /* Hoisted mocks                                                      */
@@ -709,7 +709,7 @@ describe("PreviewPanel component", () => {
     const err = new Error(
       "another process attached to this session's sandbox first; please retry"
     );
-    (err as Error & { code?: string }).code = "SANDBOX_BUSY";
+    (err as Error & { code?: string }).code = PREVIEW_ERROR_CODES.SANDBOX_BUSY;
     mockStart.mockRejectedValueOnce(err);
 
     renderWithProviders(<PreviewPanel {...DEFAULT_PROPS} />);
@@ -747,7 +747,7 @@ describe("PreviewPanel component", () => {
     // fall through to "Failed to start preview: preview worker request failed",
     // which buries the transient/retryable nature of the failure.
     const err = new Error("preview worker request failed");
-    (err as Error & { code?: string }).code = "PREVIEW_WORKER_REQUEST_FAILED";
+    (err as Error & { code?: string }).code = PREVIEW_ERROR_CODES.WORKER_REQUEST_FAILED;
     mockStart.mockRejectedValueOnce(err);
 
     renderWithProviders(<PreviewPanel {...DEFAULT_PROPS} />);

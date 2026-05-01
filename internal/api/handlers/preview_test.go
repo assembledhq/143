@@ -1619,14 +1619,11 @@ func TestPreviewHandler_StartPreview_PublishLosesRace(t *testing.T) {
 				AddRow(sessionRowForHydrate(sessionID, orgID, &key, "snapshotted")...),
 		)
 	expectReserveSuccess(mock, sessionID, orgID, userID)
-	// Pre-hydrate peek re-reads the session and finds container_id still NULL
+	// Pre-hydrate peek (single-column COALESCE) finds container_id still NULL
 	// (the orchestrator hasn't published yet) — hydrate proceeds.
-	mock.ExpectQuery("SELECT .+ FROM sessions WHERE id").
+	mock.ExpectQuery("SELECT COALESCE\\(container_id").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnRows(
-			pgxmock.NewRows(sessionRowColumns).
-				AddRow(sessionRowForHydrate(sessionID, orgID, &key, "snapshotted")...),
-		)
+		WillReturnRows(pgxmock.NewRows([]string{"container_id"}).AddRow(""))
 	// COALESCE returns the orchestrator's pre-existing ID, proving our preview
 	// lost the race during the snapshot restore window.
 	mock.ExpectQuery("UPDATE sessions\\s+SET container_id = COALESCE").
@@ -1686,14 +1683,12 @@ func TestPreviewHandler_StartPreview_PrehydratePeekShortCircuit(t *testing.T) {
 				AddRow(sessionRowForHydrate(sessionID, orgID, &key, "snapshotted")...),
 		)
 	expectReserveSuccess(mock, sessionID, orgID, userID)
-	// Pre-hydrate peek finds container_id has been published since our first
-	// read — short-circuit out without restoring or creating a container.
-	mock.ExpectQuery("SELECT .+ FROM sessions WHERE id").
+	// Pre-hydrate peek (single-column COALESCE) finds container_id has been
+	// published since our first read — short-circuit out without restoring
+	// or creating a container.
+	mock.ExpectQuery("SELECT COALESCE\\(container_id").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnRows(
-			pgxmock.NewRows(sessionRowColumns).
-				AddRow(previewSessionRow(sessionID, orgID, strPtr("orch-winner"), &key, "running")...),
-		)
+		WillReturnRows(pgxmock.NewRows([]string{"container_id"}).AddRow("orch-winner"))
 	// hydratedID="" because we never created a container.
 	expectAbortReservationNoDestroy(mock)
 

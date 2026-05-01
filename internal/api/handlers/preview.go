@@ -346,14 +346,22 @@ func (h *PreviewHandler) acquireSandbox(ctx context.Context, orgID uuid.UUID, se
 		}
 	}
 
-	// Pre-hydrate race check: re-read the session and bail early if a peer
-	// (typically a continue_session turn) has published a container_id since
-	// we read the row at the top of startPreviewLocal. Without this, hydrate
-	// runs the full snapshot restore + container create (~20s) before
-	// PublishHydratedContainerID's CAS detects the loss — and that work
-	// blows past the HTTP server's WriteTimeout on the worker, so the
-	// caller sees a 502 EOF instead of a clean 409 SANDBOX_BUSY.
-	fresh, freshErr := h.sessionStore.GetByID(ctx, orgID, session.ID)
+	// Pre-hydrate race check: re-read just container_id and bail early if a
+	// peer (typically a continue_session turn) has published one since we
+	// read `session` at the top of startPreviewLocal. This is a *latency*
+	// optimization layered on top of clearWriteDeadline (StartPreview):
+	// the deadline fix already prevents the slow path's 502 EOF, so the
+	// CAS inside PublishHydratedContainerID is sufficient for correctness.
+	// The peek's value is sub-100ms user feedback and avoiding ~20s of
+	// pointless snapshot restore + container create + destroy churn when
+	// we already know we'll lose.
+	//
+	// Only container_id is rechecked: sandbox_state and snapshot_key from
+	// the original `session` row are still trusted. A reaper expiring the
+	// snapshot in this window would slip past the peek and fail in
+	// HydrateSandboxFromSnapshot below — same behavior as before this peek
+	// existed, so out of scope for this fix.
+	winningID, freshErr := h.sessionStore.PeekContainerID(ctx, orgID, session.ID)
 	switch {
 	case freshErr != nil:
 		// Fail open: the CAS in PublishHydratedContainerID still catches the
@@ -363,10 +371,10 @@ func (h *PreviewHandler) acquireSandbox(ctx context.Context, orgID uuid.UUID, se
 		h.logger.Warn().Err(freshErr).
 			Str("session_id", session.ID.String()).
 			Msg("preview hydrate: pre-hydrate peek failed; falling through to CAS race detection")
-	case fresh.ContainerID != nil && *fresh.ContainerID != "":
+	case winningID != "":
 		h.logger.Info().
 			Str("session_id", session.ID.String()).
-			Str("winning_container_id", *fresh.ContainerID).
+			Str("winning_container_id", winningID).
 			Msg("preview hydrate: peer published container_id before restore; returning SANDBOX_BUSY without hydrating")
 		return acquireSandboxResult{
 			ErrCode: "SANDBOX_BUSY",

@@ -81,6 +81,11 @@ func strPtr(s string) *string { return &s }
 // context's own deadline (driven by the client connection or the
 // worker_client's 10-minute timeout) still bounds the handler.
 //
+// Stop / StopActivePreviewForSession deliberately do NOT clear the
+// deadline: those paths only signal an existing container and complete
+// well within the 15s budget; keeping the default catches a genuinely
+// stuck stop instead of letting it hang the connection.
+//
 // Logs at Debug and returns silently on response writers that don't
 // support http.ResponseController — this is a perf/UX optimization, not
 // a correctness requirement, so degrading to the default WriteTimeout
