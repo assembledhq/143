@@ -2,7 +2,6 @@
 
 import {
   useEffect,
-  useLayoutEffect,
   useRef,
   useState,
   useSyncExternalStore,
@@ -18,10 +17,14 @@ const TOUCH_QUERY = "(pointer: coarse)";
 const COMMIT_THRESHOLD_RATIO = 0.5;
 const MIN_COMMIT_THRESHOLD = 140;
 const COMMIT_ANIMATION_MS = 220;
+// Pre-measurement fallback when a gesture starts before the row has dimensions.
+// Real width is captured from offsetWidth at touchstart.
+const FALLBACK_ROW_WIDTH = ACTION_WIDTH * 4;
 
 type DragState = {
   startX: number;
   startY: number;
+  width: number;
   swiping: boolean;
   locked: boolean;
 };
@@ -61,6 +64,10 @@ function vibrate(pattern: number | number[]) {
   }
 }
 
+function commitThresholdFor(width: number) {
+  return Math.max(MIN_COMMIT_THRESHOLD, width * COMMIT_THRESHOLD_RATIO);
+}
+
 export function SwipeActionRow({
   actionLabel,
   actionText,
@@ -79,26 +86,17 @@ export function SwipeActionRow({
   const containerRef = useRef<HTMLDivElement | null>(null);
   const dragRef = useRef<DragState | null>(null);
   const commitTimerRef = useRef<number | null>(null);
+  // Mirrors isCommitted for use inside touchmove handlers, where the rendered
+  // closure can lag behind rapid state transitions.
+  const committedRef = useRef(false);
   const [offset, setOffset] = useState(0);
   const [isDragging, setIsDragging] = useState(false);
   const [isCommitted, setIsCommitted] = useState(false);
-  const [containerWidth, setContainerWidth] = useState(0);
   const isTouchDevice = useSyncExternalStore(
     subscribeTouchDevice,
     getTouchDeviceSnapshot,
     getTouchDeviceServerSnapshot,
   );
-
-  useLayoutEffect(() => {
-    const node = containerRef.current;
-    if (!node) return;
-    const update = () => setContainerWidth(node.offsetWidth);
-    update();
-    if (typeof ResizeObserver === "undefined") return;
-    const ro = new ResizeObserver(update);
-    ro.observe(node);
-    return () => ro.disconnect();
-  }, []);
 
   useEffect(() => {
     return () => {
@@ -108,16 +106,11 @@ export function SwipeActionRow({
     };
   }, []);
 
-  const commitThreshold = Math.max(
-    MIN_COMMIT_THRESHOLD,
-    containerWidth * COMMIT_THRESHOLD_RATIO,
-  );
-  const maxOffset = containerWidth > 0 ? containerWidth : ACTION_WIDTH * 4;
-
   const close = () => {
     setOffset(0);
     setIsDragging(false);
     setIsCommitted(false);
+    committedRef.current = false;
     dragRef.current = null;
   };
 
@@ -125,13 +118,18 @@ export function SwipeActionRow({
     setOffset(ACTION_WIDTH);
     setIsDragging(false);
     setIsCommitted(false);
+    committedRef.current = false;
     dragRef.current = null;
   };
 
-  const commitAction = () => {
+  // Slides the row fully off, fires onAction, then resets after the animation.
+  // Common case: onAction unmounts the row and the unmount effect clears the
+  // timer. Fallback: caller keeps the row mounted, the timer snaps offset back.
+  const commitAction = (width: number) => {
     setIsDragging(false);
-    setOffset(maxOffset);
+    setOffset(width);
     dragRef.current = null;
+    committedRef.current = false;
     vibrate([15, 30, 40]);
     onAction();
     if (commitTimerRef.current !== null) {
@@ -147,9 +145,16 @@ export function SwipeActionRow({
   const handleTouchStart = (event: React.TouchEvent<HTMLDivElement>) => {
     const touch = event.touches[0];
     if (!touch) return;
+    // Cancel a pending post-commit reset so a quick follow-up swipe isn't
+    // clobbered by the trailing setTimeout firing mid-gesture.
+    if (commitTimerRef.current !== null) {
+      window.clearTimeout(commitTimerRef.current);
+      commitTimerRef.current = null;
+    }
     dragRef.current = {
       startX: touch.clientX,
       startY: touch.clientY,
+      width: containerRef.current?.offsetWidth || FALLBACK_ROW_WIDTH,
       swiping: false,
       locked: false,
     };
@@ -179,11 +184,12 @@ export function SwipeActionRow({
 
     if (!drag.swiping) return;
 
-    const nextOffset = Math.max(0, Math.min(maxOffset, -deltaX));
+    const nextOffset = Math.max(0, Math.min(drag.width, -deltaX));
     setOffset(nextOffset);
 
-    const willCommit = nextOffset >= commitThreshold;
-    if (willCommit !== isCommitted) {
+    const willCommit = nextOffset >= commitThresholdFor(drag.width);
+    if (willCommit !== committedRef.current) {
+      committedRef.current = willCommit;
       setIsCommitted(willCommit);
       if (willCommit) {
         // Light tick when the user crosses into the auto-commit zone.
@@ -193,8 +199,12 @@ export function SwipeActionRow({
   };
 
   const handleTouchEnd = () => {
-    if (offset >= commitThreshold) {
-      commitAction();
+    const width =
+      dragRef.current?.width ??
+      containerRef.current?.offsetWidth ??
+      FALLBACK_ROW_WIDTH;
+    if (offset >= commitThresholdFor(width)) {
+      commitAction(width);
       return;
     }
     if (offset >= OPEN_THRESHOLD) {

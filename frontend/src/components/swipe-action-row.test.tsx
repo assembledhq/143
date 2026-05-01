@@ -102,7 +102,8 @@ describe('SwipeActionRow', () => {
       touches: [{ clientX: 100, clientY: 24 }],
     });
 
-    expect(surface!.closest('[data-swipe-state="committed"]')).not.toBeNull();
+    const container = surface!.parentElement;
+    expect(container).toHaveAttribute('data-swipe-state', 'committed');
 
     fireEvent.touchEnd(surface!);
     expect(onAction).toHaveBeenCalledTimes(1);
@@ -133,7 +134,8 @@ describe('SwipeActionRow', () => {
     fireEvent.touchCancel(surface!);
 
     expect(onAction).not.toHaveBeenCalled();
-    expect(surface!.closest('[data-swipe-state="closed"]')).not.toBeNull();
+    const container = surface!.parentElement;
+    expect(container).toHaveAttribute('data-swipe-state', 'closed');
   });
 
   it('does not open for mostly vertical movement', () => {
