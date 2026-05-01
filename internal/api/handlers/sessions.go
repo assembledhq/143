@@ -1961,11 +1961,16 @@ func (h *SessionHandler) emitReviewCommentResolutionAudits(
 	if len(resolved) == 0 {
 		return
 	}
+	entries := make([]userAuditEntry, 0, len(resolved))
 	for _, c := range resolved {
 		resID := c.ID.String()
 		sid := sessionID
-		emitUserAuditWithSession(h.audit, r, models.AuditActionSessionReviewCommentUpdated, models.AuditResourceSessionReviewComment,
-			&resID, &sid, nil, marshalAuditDetails(h.logger, map[string]any{
+		entries = append(entries, userAuditEntry{
+			Action:       models.AuditActionSessionReviewCommentUpdated,
+			ResourceType: models.AuditResourceSessionReviewComment,
+			ResourceID:   &resID,
+			SessionID:    &sid,
+			Details: marshalAuditDetails(h.logger, map[string]any{
 				"review_comment_id":    c.ID.String(),
 				"session_id":           sid.String(),
 				"file_path":            c.FilePath,
@@ -1978,8 +1983,12 @@ func (h *SessionHandler) emitReviewCommentResolutionAudits(
 				"changes": map[string]any{
 					"resolved": auditChange(false, true),
 				},
-			}))
+			}),
+		})
 	}
+	// One INSERT regardless of N — keeps post-commit latency O(1) in the
+	// number of attached comments.
+	emitUserAuditsWithSession(h.audit, r, entries)
 }
 
 // ListMessages handles GET /sessions/{id}/messages — returns the conversation messages.

@@ -5449,6 +5449,76 @@ func TestSessionHandler_SendMessage_ResolvesReviewComments(t *testing.T) {
 		require.NoError(t, mock.ExpectationsWereMet(), "no DB queries should run when validation rejects upfront")
 	})
 
+	t.Run("batches audit emission into a single INSERT for many resolved comments", func(t *testing.T) {
+		t.Parallel()
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err)
+		defer mock.Close()
+
+		orgID := uuid.New()
+		sessionID := uuid.New()
+		userID := uuid.New()
+		commentUserID := uuid.New()
+		const n = 4
+		commentIDs := make([]uuid.UUID, n)
+		for i := range commentIDs {
+			commentIDs[i] = uuid.New()
+		}
+		handler := newSessionHandler(t, mock)
+		handler.audit = db.NewAuditEmitter(db.NewAuditLogStore(mock), zerolog.Nop())
+
+		// Build the SELECT response: every requested ID exists, all unresolved.
+		selectRows := pgxmock.NewRows(reviewCommentColumns)
+		for i, id := range commentIDs {
+			selectRows.AddRow(id, sessionID, orgID, commentUserID, "main.go",
+				10+i, "right", "comment body", false, (*time.Time)(nil), (*int)(nil),
+				1, now, now)
+		}
+		// Build the UPDATE RETURNING response: all flip to resolved.
+		updateRows := pgxmock.NewRows(reviewCommentColumns)
+		for i, id := range commentIDs {
+			updateRows.AddRow(id, sessionID, orgID, commentUserID, "main.go",
+				10+i, "right", "comment body", true, &now, srcIntPtr(1),
+				1, now, now)
+		}
+
+		mock.ExpectQuery("SELECT .+ FROM sessions WHERE").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnRows(idleSessionRow(pgxmock.NewRows(sessionColumns), sessionID, orgID, "running"))
+		mock.ExpectBegin()
+		mock.ExpectQuery("INSERT INTO session_messages").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(int64(7), now))
+		mock.ExpectQuery("SELECT .+ FROM session_review_comments WHERE id = ANY").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnRows(selectRows)
+		mock.ExpectQuery("UPDATE session_review_comments SET resolved = true").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnRows(updateRows)
+		mock.ExpectCommit()
+		// CRITICAL: a single batched audit INSERT (Exec, not Query — the
+		// batch path skips RETURNING). If this asserts N times instead of
+		// once, the N+1 has regressed.
+		auditArgs := make([]any, 0, n*13)
+		for i := 0; i < n*13; i++ {
+			auditArgs = append(auditArgs, pgxmock.AnyArg())
+		}
+		mock.ExpectExec("INSERT INTO audit_logs").
+			WithArgs(auditArgs...).
+			WillReturnResult(pgxmock.NewResult("INSERT", n))
+
+		idsJSON := make([]string, n)
+		for i, id := range commentIDs {
+			idsJSON[i] = `"` + id.String() + `"`
+		}
+		body := fmt.Sprintf(`{"message":"addressing all of these","resolve_review_comment_ids":[%s]}`, strings.Join(idsJSON, ","))
+		req := newSendMessageRequest(sessionID, orgID, userID, body)
+		w := httptest.NewRecorder()
+		handler.SendMessage(w, req)
+		require.Equal(t, http.StatusCreated, w.Code, w.Body.String())
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+
 	t.Run("idempotent: already-resolved IDs commit cleanly with no audit emission", func(t *testing.T) {
 		t.Parallel()
 		mock, err := pgxmock.NewPool()
