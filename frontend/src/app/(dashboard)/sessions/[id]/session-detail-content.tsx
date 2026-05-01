@@ -120,6 +120,7 @@ const PREVIEW_ORIGIN_TEMPLATE =
 const FAILURE_CATEGORY_CODEX_AUTH = "codex_auth_expired";
 const PR_ERROR_TOAST_DURATION_MS = 10_000;
 const PR_ERROR_TOAST_MESSAGE = "PR creation failed";
+const MAX_RESOLVE_REVIEW_COMMENTS_PER_MESSAGE = 50;
 
 const statusConfig: Record<string, { color: string; label: string }> = {
   pending: { color: "bg-muted text-muted-foreground", label: "Pending" },
@@ -2186,7 +2187,10 @@ export function SessionDetailContent({ id }: { id: string }) {
   // same transaction, the comments query is invalidated below, and the next
   // refetch flips them out of openComments. No local "dismissed" state is
   // needed (and would be wrong: it wouldn't survive page reloads).
-  const attachedReviewComments = useMemo(() => comments.filter((comment) => !comment.resolved), [comments]);
+  const attachedReviewComments = useMemo(
+    () => comments.filter((comment) => !comment.resolved).slice(0, MAX_RESOLVE_REVIEW_COMMENTS_PER_MESSAGE),
+    [comments],
+  );
   const composerCanSendMessage = session?.status !== "skipped" && session?.status !== "pending" && session?.sandbox_state !== "destroyed";
   const composerIsRunning = session?.status === "running";
   const composerIsSnapshotExpired = session?.sandbox_state === "destroyed";

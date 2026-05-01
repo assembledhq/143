@@ -3175,6 +3175,84 @@ describe('SessionDetailPage', () => {
     expect(screen.queryByText('Handle the null edge case')).not.toBeInTheDocument();
   });
 
+  it('caps attached review comments to the backend per-message resolve limit', async () => {
+    let postedResolveIDs: string[] | undefined;
+    const idleSessionWithDiff: Session = {
+      ...mockSessions[0],
+      status: 'idle',
+      completed_at: undefined,
+      current_turn: 1,
+      sandbox_state: 'snapshotted',
+      diff: 'diff --git a/src/app.ts b/src/app.ts\n--- a/src/app.ts\n+++ b/src/app.ts\n@@ -1,3 +1,4 @@\n import express from "express";\n+import cors from "cors";\n const app = express();\n app.listen(3000);',
+      diff_stats: { added: 1, removed: 0, files_changed: 1 },
+    };
+    const originalComments: SessionReviewComment[] = Array.from({ length: 51 }, (_, index) => ({
+      id: `00000000-0000-4000-8000-${index.toString().padStart(12, '0')}`,
+      session_id: idleSessionWithDiff.id,
+      org_id: 'org-1',
+      user_id: mockMembers[0].id,
+      file_path: 'src/app.ts',
+      line_number: index + 1,
+      diff_side: 'new',
+      body: `Review comment ${index + 1}`,
+      resolved: false,
+      pass_number: 1,
+      created_at: '2026-02-17T07:10:00Z',
+      updated_at: '2026-02-17T07:10:00Z',
+    }));
+    let comments = originalComments;
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({ data: idleSessionWithDiff } satisfies SingleResponse<Session>);
+      }),
+      http.get('/api/v1/sessions/:id/review-comments', () => {
+        return HttpResponse.json({
+          data: comments,
+          meta: {},
+        } satisfies ListResponse<SessionReviewComment>);
+      }),
+      http.post('/api/v1/sessions/:id/messages', async ({ request }) => {
+        const body = await request.json() as { message: string; resolve_review_comment_ids?: string[] };
+        postedResolveIDs = body.resolve_review_comment_ids;
+        if (postedResolveIDs && postedResolveIDs.length > 0) {
+          const resolved = new Set(postedResolveIDs);
+          comments = comments.map((comment) => (resolved.has(comment.id) ? { ...comment, resolved: true } : comment));
+        }
+        return HttpResponse.json({
+          data: {
+            id: 99,
+            session_id: idleSessionWithDiff.id,
+            org_id: 'org-1',
+            user_id: 'user-1',
+            turn_number: 2,
+            role: 'user' as const,
+            content: body.message,
+            created_at: '2026-02-17T07:10:00Z',
+          },
+        } satisfies SingleResponse<SessionMessage>);
+      }),
+    );
+
+    const user = userEvent.setup();
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+
+    const textarea = await screen.findByPlaceholderText('Send a follow-up message...');
+    expect(await screen.findByText('50 comments attached')).toBeInTheDocument();
+
+    await user.type(textarea, 'Please handle these');
+    await user.keyboard('{Enter}');
+
+    await waitFor(() => {
+      expect(postedResolveIDs).toHaveLength(50);
+    });
+    expect(postedResolveIDs).toEqual(originalComments.slice(0, 50).map((comment) => comment.id));
+
+    await waitFor(() => {
+      expect(screen.getByText('1 comment attached')).toBeInTheDocument();
+    });
+  });
+
   it('scrolls the chat transcript back to the live edge after sending a follow-up message', async () => {
     let messageSent = false;
     const idleSession: Session = {
