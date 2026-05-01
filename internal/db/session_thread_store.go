@@ -126,6 +126,10 @@ func (s *SessionThreadStore) UpdateStatus(ctx context.Context, orgID, threadID u
 }
 
 // UpdateResult persists agent results on a thread.
+//
+// COALESCE on diff preserves the prior thread diff when the current turn did
+// not produce one — same rationale as the session-level update; see
+// session_store.go updateResultRow for full details.
 func (s *SessionThreadStore) UpdateResult(ctx context.Context, orgID, threadID uuid.UUID, status models.ThreadStatus, result *models.SessionResult) error {
 	query := `
 		UPDATE session_threads
@@ -137,7 +141,7 @@ func (s *SessionThreadStore) UpdateResult(ctx context.Context, orgID, threadID u
 		    END,
 		    confidence_score = @confidence_score,
 		    result_summary = @result_summary,
-		    diff = @diff,
+		    diff = COALESCE(@diff, diff),
 		    failure_explanation = @failure_explanation,
 		    failure_category = @failure_category
 		WHERE id = @id AND org_id = @org_id`
@@ -186,13 +190,15 @@ func (s *SessionThreadStore) ClaimIdle(ctx context.Context, orgID, threadID uuid
 }
 
 // UpdateTurnComplete sets the thread to idle and persists turn metadata.
+// COALESCE on diff: see UpdateResult above.
 func (s *SessionThreadStore) UpdateTurnComplete(ctx context.Context, orgID, threadID uuid.UUID, turn int, result *models.SessionResult, agentSessionID string) error {
 	query := `
 		UPDATE session_threads
 		SET status = 'idle', current_turn = @current_turn, last_activity_at = now(),
 		    agent_session_id = @agent_session_id,
 		    confidence_score = @confidence_score,
-		    result_summary = @result_summary, diff = @diff
+		    result_summary = @result_summary,
+		    diff = COALESCE(@diff, diff)
 		WHERE id = @id AND org_id = @org_id`
 
 	ct, err := s.db.Exec(ctx, query, pgx.NamedArgs{

@@ -397,6 +397,14 @@ type Sandbox struct {
 	Purpose   string
 }
 
+// SandboxMetadataBaseCommitSHA is the well-known sandbox.Metadata key under
+// which the orchestrator stashes the immutable base commit captured at session
+// start. Adapters read it when collecting the authoritative session diff. The
+// constant lives in the agent package (rather than sessiondiff) so callers in
+// the agent package can reference it without creating an import cycle —
+// sessiondiff already imports agent for SandboxProvider/Sandbox.
+const SandboxMetadataBaseCommitSHA = "base_commit_sha"
+
 // SandboxConnectionInfo holds provider-specific connection details for local resume.
 type SandboxConnectionInfo struct {
 	Provider     string            // "docker" or "e2b"
