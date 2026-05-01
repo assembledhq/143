@@ -179,6 +179,76 @@ func TestSessionStore_UpdateTurnComplete_WithDiffSnapshotInsertFailure(t *testin
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+// TestSessionStore_UpdateResult_PreservesDiffWhenNil verifies that the
+// UPDATE sessions ... SET diff = COALESCE(@diff, diff) clause is in place,
+// so that a turn that did not collect a fresh diff (sessiondiff.Collect
+// returned ErrNoBaseCommitSHA, the agent produced no changes against the
+// base, etc. — strPtr converts the empty string to a nil *string) does not
+// blank out the previously persisted authoritative diff. This is the bug
+// users hit when pushing a PR or resolving conflicts: every clean-tree
+// continue turn used to overwrite the Changes tab with NULL.
+func TestSessionStore_UpdateResult_PreservesDiffWhenNil(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewSessionStore(mock)
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	collectedAt := time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC)
+
+	// result.Diff is nil — the prior turn's diff must be preserved.
+	result := &models.SessionResult{}
+
+	// The SQL must contain `diff = COALESCE(@diff, diff)` so a NULL @diff
+	// leaves the existing value intact. Same for diff_stats and
+	// diff_collected_at to keep them consistent with the preserved diff.
+	mock.ExpectQuery(`UPDATE sessions[\s\S]+diff = COALESCE\(@diff, diff\)[\s\S]+diff_collected_at = COALESCE\(@diff_collected_at, diff_collected_at\)[\s\S]+diff_stats = COALESCE\(@diff_stats, diff_stats\)`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(sessionTestColumns).AddRow(
+				newAgentSessionRow(sessionID, uuid.New(), orgID, collectedAt)...,
+			),
+		)
+
+	err = store.UpdateResult(context.Background(), orgID, sessionID, "completed", result)
+	require.NoError(t, err, "UpdateResult should succeed when diff is nil")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+// TestSessionStore_UpdateTurnComplete_PreservesDiffWhenNil mirrors the
+// UpdateResult test for the continue-session write path — the same COALESCE
+// guard applies.
+func TestSessionStore_UpdateTurnComplete_PreservesDiffWhenNil(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewSessionStore(mock)
+	orgID := uuid.New()
+	sessionID := uuid.New()
+
+	result := &models.SessionResult{}
+
+	mock.ExpectExec(`UPDATE sessions[\s\S]+SET status = 'idle'[\s\S]+diff = COALESCE\(@diff, diff\)[\s\S]+diff_collected_at = COALESCE\(@diff_collected_at, diff_collected_at\)[\s\S]+diff_stats = COALESCE\(@diff_stats, diff_stats\)`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	err = store.UpdateTurnComplete(context.Background(), orgID, sessionID, 2, result, "agent-123", "snap-key")
+	require.NoError(t, err, "UpdateTurnComplete should succeed when diff is nil")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func TestSessionStore_UpdateBaseCommitSHA(t *testing.T) {
 	t.Parallel()
 

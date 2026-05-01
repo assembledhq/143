@@ -214,9 +214,10 @@ func TestGeminiCLIAdapter_Execute(t *testing.T) {
 
 			adapter := NewGeminiCLIAdapter(zerolog.Nop())
 			sandbox := &agent.Sandbox{
-				ID:      "test-sandbox",
-				WorkDir: "/workspace",
-				HomeDir: "/home/sandbox",
+				ID:       "test-sandbox",
+				WorkDir:  "/workspace",
+				HomeDir:  "/home/sandbox",
+				Metadata: map[string]string{agent.SandboxMetadataBaseCommitSHA: "abc123"},
 			}
 			prompt := &agent.AgentPrompt{
 				SystemPrompt: "Fix the bug.",
@@ -261,7 +262,7 @@ func TestGeminiCLIAdapter_Execute_WriteFileError(t *testing.T) {
 	}
 
 	adapter := NewGeminiCLIAdapter(zerolog.Nop())
-	sandbox := &agent.Sandbox{ID: "test", WorkDir: "/workspace", HomeDir: "/home/sandbox"}
+	sandbox := &agent.Sandbox{ID: "test", WorkDir: "/workspace", HomeDir: "/home/sandbox", Metadata: map[string]string{agent.SandboxMetadataBaseCommitSHA: "abc123"}}
 	prompt := &agent.AgentPrompt{SystemPrompt: "test", UserPrompt: "test", MaxTokens: 50_000}
 	logCh := make(chan agent.LogEntry, 10)
 	ctx := WithSandboxProvider(context.Background(), provider)
@@ -284,7 +285,7 @@ func TestGeminiCLIAdapter_Execute_ExecError(t *testing.T) {
 	}
 
 	adapter := NewGeminiCLIAdapter(zerolog.Nop())
-	sandbox := &agent.Sandbox{ID: "test", WorkDir: "/workspace", HomeDir: "/home/sandbox"}
+	sandbox := &agent.Sandbox{ID: "test", WorkDir: "/workspace", HomeDir: "/home/sandbox", Metadata: map[string]string{agent.SandboxMetadataBaseCommitSHA: "abc123"}}
 	prompt := &agent.AgentPrompt{SystemPrompt: "test", UserPrompt: "test", MaxTokens: 50_000}
 	logCh := make(chan agent.LogEntry, 10)
 	ctx := WithSandboxProvider(context.Background(), provider)
@@ -299,7 +300,7 @@ func TestGeminiCLIAdapter_Execute_MissingSandboxProvider(t *testing.T) {
 	t.Parallel()
 
 	adapter := NewGeminiCLIAdapter(zerolog.Nop())
-	sandbox := &agent.Sandbox{ID: "test", WorkDir: "/workspace", HomeDir: "/home/sandbox"}
+	sandbox := &agent.Sandbox{ID: "test", WorkDir: "/workspace", HomeDir: "/home/sandbox", Metadata: map[string]string{agent.SandboxMetadataBaseCommitSHA: "abc123"}}
 	prompt := &agent.AgentPrompt{SystemPrompt: "test", UserPrompt: "test", MaxTokens: 50_000}
 	logCh := make(chan agent.LogEntry, 10)
 
@@ -650,7 +651,7 @@ func TestGeminiCLIAdapter_Execute_StreamingOutput(t *testing.T) {
 	}
 
 	adapter := NewGeminiCLIAdapter(zerolog.Nop())
-	sandbox := &agent.Sandbox{ID: "test-sandbox", WorkDir: "/workspace", HomeDir: "/home/sandbox"}
+	sandbox := &agent.Sandbox{ID: "test-sandbox", WorkDir: "/workspace", HomeDir: "/home/sandbox", Metadata: map[string]string{agent.SandboxMetadataBaseCommitSHA: "abc123"}}
 	prompt := &agent.AgentPrompt{SystemPrompt: "Fix the bug.", UserPrompt: "Null pointer error.", MaxTokens: 50_000}
 
 	logCh := make(chan agent.LogEntry, 100)
@@ -700,7 +701,7 @@ func TestGeminiCLIAdapter_Execute_ContinuationWithoutSessionIDUsesResumeMode(t *
 	}
 
 	adapter := NewGeminiCLIAdapter(zerolog.Nop())
-	sandbox := &agent.Sandbox{ID: "test", WorkDir: "/workspace", HomeDir: "/home/sandbox"}
+	sandbox := &agent.Sandbox{ID: "test", WorkDir: "/workspace", HomeDir: "/home/sandbox", Metadata: map[string]string{agent.SandboxMetadataBaseCommitSHA: "abc123"}}
 	prompt := &agent.AgentPrompt{
 		UserMessage:  "Please include a regression test.",
 		MaxTokens:    50_000,

@@ -3442,6 +3442,72 @@ func TestContinueSession_ReusesExistingContainer(t *testing.T) {
 	require.GreaterOrEqual(t, d.sessions.releaseHoldCalls, 1)
 }
 
+// TestContinueSession_RestoresBaseCommitSHAOntoSandboxMetadata is the
+// regression test for the "Changes tab goes blank after PR push / resolve
+// conflicts" bug. ContinueSession previously left sandbox.Metadata empty in
+// every setup branch (reuse / hydrate / fresh-clone), so sessiondiff.Collect
+// fell back to plain `git diff` and returned an empty string for any clean
+// working tree (post-push, post-merge). That empty diff overwrote the
+// authoritative session diff in the DB, blanking the Changes tab even
+// though the PR itself was healthy. With the fix, the orchestrator copies
+// session.BaseCommitSHA back onto sandbox.Metadata after every setup branch,
+// so the diff collector always has the immutable base SHA to compare
+// against. We exercise the reuse path here because it's the simplest setup
+// that goes through the post-switch metadata restore.
+func TestContinueSession_RestoresBaseCommitSHAOntoSandboxMetadata(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	issue.Source = models.IssueSourceManual
+	session := testRun(orgID, issue.ID)
+	session.Origin = models.SessionOriginManual
+	session.InteractionMode = models.SessionInteractionModeInteractive
+	session.ValidationPolicy = models.SessionValidationPolicyOnSessionEnd
+	session.Status = string(models.SessionStatusIdle)
+	session.CurrentTurn = 1
+	existing := "preview-container-base-sha"
+	session.ContainerID = &existing
+	session.SandboxState = string(models.SandboxStateRunning)
+
+	const expectedBaseSHA = "feedfacecafe1234"
+	baseSHA := expectedBaseSHA
+	session.BaseCommitSHA = &baseSHA
+
+	d := defaultDeps()
+	d.issues.issue = issue
+	d.messages.messages = []models.SessionMessage{
+		{
+			ID:         1,
+			SessionID:  session.ID,
+			OrgID:      orgID,
+			TurnNumber: 2,
+			Role:       models.MessageRoleUser,
+			Content:    "follow-up after PR push",
+		},
+	}
+
+	var observedBaseSHA string
+	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
+		require.NotNil(t, sandbox.Metadata, "ContinueSession must populate sandbox.Metadata before the agent runs")
+		observedBaseSHA = sandbox.Metadata[agent.SandboxMetadataBaseCommitSHA]
+		return &agent.AgentResult{
+			Summary:         "done",
+			ConfidenceScore: 0.9,
+			ExitCode:        0,
+		}, nil
+	}
+	d.provider.SnapshotFn = func(ctx context.Context, sb *agent.Sandbox) (io.ReadCloser, error) {
+		return io.NopCloser(bytes.NewReader([]byte("snap"))), nil
+	}
+
+	orch := buildOrchestrator(d)
+	require.NoError(t, orch.ContinueSession(context.Background(), session))
+
+	require.Equal(t, expectedBaseSHA, observedBaseSHA,
+		"ContinueSession must restore session.BaseCommitSHA onto sandbox.Metadata so sessiondiff.Collect can run `git diff <base> -- .` instead of falling back to plain `git diff`")
+}
+
 // TestContinueSession_ReusedContainerReopensAuthListener locks in the
 // regression: when a preview is holding the container alive across turns,
 // ContinueSession must (re)open the per-session credential listener even

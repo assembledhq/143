@@ -817,6 +817,13 @@ func (s *SessionStore) UpdateResult(ctx context.Context, orgID, runID uuid.UUID,
 
 func (s *SessionStore) updateResultRow(ctx context.Context, db DBTX, orgID, runID uuid.UUID, status string, result *models.SessionResult, diffStats json.RawMessage) error {
 
+	// COALESCE on diff / diff_stats / diff_collected_at preserves the
+	// previously persisted authoritative diff when the current turn did not
+	// produce one (collection skipped or failed — sessiondiff.Collect returned
+	// ErrNoBaseCommitSHA, which the adapter logs and leaves result.Diff empty,
+	// which strPtr converts to nil here). Without this guard, an empty/NULL
+	// diff would overwrite the prior diff and blank out the Changes tab.
+	// diff_history's append SQL already no-ops when @diff IS NULL.
 	query := `
 		UPDATE sessions
 		SET status = @status,
@@ -828,10 +835,12 @@ func (s *SessionStore) updateResultRow(ctx context.Context, db DBTX, orgID, runI
 		    END,
 		    confidence_score = @confidence_score, confidence_reasoning = @confidence_reasoning,
 		    risk_factors = @risk_factors, token_usage = @token_usage,
-		    result_summary = @result_summary, diff = @diff, error = @error,
+		    result_summary = @result_summary,
+		    diff = COALESCE(@diff, diff),
+		    error = @error,
 		    base_commit_sha = COALESCE(@base_commit_sha, base_commit_sha),
-		    diff_collected_at = @diff_collected_at,
-		    diff_stats = @diff_stats,
+		    diff_collected_at = COALESCE(@diff_collected_at, diff_collected_at),
+		    diff_stats = COALESCE(@diff_stats, diff_stats),
 		    diff_history = ` + diffHistoryAppendSQL("COALESCE(current_turn, 0) + 1") + `
 		WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL`
 
@@ -1190,6 +1199,12 @@ func (s *SessionStore) UpdateTurnComplete(ctx context.Context, orgID, sessionID 
 
 func (s *SessionStore) updateTurnCompleteRow(ctx context.Context, db DBTX, orgID, sessionID uuid.UUID, turn int, result *models.SessionResult, agentSessionID, snapshotKey string, diffStats json.RawMessage) error {
 
+	// COALESCE on diff / diff_stats / diff_collected_at: see updateResultRow
+	// for the full rationale. Briefly: when sessiondiff.Collect returns
+	// ErrNoBaseCommitSHA (or the agent produces no changes against base), the
+	// adapter leaves result.Diff empty → strPtr returns nil → @diff is NULL
+	// here. Falling back to the previously persisted diff is strictly better
+	// than clobbering the Changes tab with a blank value.
 	query := `
 		UPDATE sessions
 		SET status = 'idle', current_turn = @current_turn, last_activity_at = now(),
@@ -1198,10 +1213,12 @@ func (s *SessionStore) updateTurnCompleteRow(ctx context.Context, db DBTX, orgID
 		    pr_creation_state = 'idle', pr_creation_error = NULL,
 		    confidence_score = @confidence_score, confidence_reasoning = @confidence_reasoning,
 		    risk_factors = @risk_factors, token_usage = @token_usage,
-		    result_summary = @result_summary, diff = @diff, error = @error,
+		    result_summary = @result_summary,
+		    diff = COALESCE(@diff, diff),
+		    error = @error,
 		    base_commit_sha = COALESCE(@base_commit_sha, base_commit_sha),
-		    diff_collected_at = @diff_collected_at,
-		    diff_stats = @diff_stats,
+		    diff_collected_at = COALESCE(@diff_collected_at, diff_collected_at),
+		    diff_stats = COALESCE(@diff_stats, diff_stats),
 		    diff_history = ` + diffHistoryAppendSQL("@current_turn::int") + `
 		WHERE id = @id AND org_id = @org_id`
 
