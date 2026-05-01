@@ -3,16 +3,26 @@ import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { ContextExpander } from "./context-expander";
 
-// Mock the api module
-vi.mock("@/lib/api", () => ({
-  api: {
-    sessions: {
-      getFileContext: vi.fn(),
+// Mock the api module. The ApiError class is defined inside the factory
+// because vi.mock is hoisted above any module-level declarations.
+vi.mock("@/lib/api", () => {
+  class MockApiError extends Error {
+    constructor(public code: string, message: string, public details?: unknown) {
+      super(message);
+      this.name = "ApiError";
+    }
+  }
+  return {
+    ApiError: MockApiError,
+    api: {
+      sessions: {
+        getFileContext: vi.fn(),
+      },
     },
-  },
-}));
+  };
+});
 
-import { api } from "@/lib/api";
+import { ApiError, api } from "@/lib/api";
 
 describe("ContextExpander", () => {
   it("returns null when hiddenLineCount <= 0", () => {
@@ -216,6 +226,76 @@ describe("ContextExpander", () => {
     expect(onExpand).not.toHaveBeenCalled();
     // Button should still be visible (not expanded)
     expect(screen.getByRole("button", { name: "Show 20 above" })).toBeInTheDocument();
+  });
+
+  it("calls onContextUnavailable on NO_SANDBOX response", async () => {
+    const onContextUnavailable = vi.fn();
+    vi.mocked(api.sessions.getFileContext).mockRejectedValue(
+      new ApiError("NO_SANDBOX", "session has no active sandbox container")
+    );
+
+    const user = userEvent.setup();
+    render(
+      <ContextExpander
+        kind="middle"
+        hiddenLineCount={4}
+        sessionId="s1"
+        filePath="f.ts"
+        hiddenStart={1}
+        hiddenEnd={4}
+        onExpand={vi.fn()}
+        onContextUnavailable={onContextUnavailable}
+      />
+    );
+
+    await user.click(screen.getByRole("button", { name: "Show 20 above" }));
+    expect(onContextUnavailable).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not call onContextUnavailable on non-NO_SANDBOX errors", async () => {
+    const onContextUnavailable = vi.fn();
+    vi.mocked(api.sessions.getFileContext).mockRejectedValue(
+      new ApiError("INTERNAL", "boom")
+    );
+
+    const user = userEvent.setup();
+    render(
+      <ContextExpander
+        kind="middle"
+        hiddenLineCount={4}
+        sessionId="s1"
+        filePath="f.ts"
+        hiddenStart={1}
+        hiddenEnd={4}
+        onExpand={vi.fn()}
+        onContextUnavailable={onContextUnavailable}
+      />
+    );
+
+    await user.click(screen.getByRole("button", { name: "Show 20 above" }));
+    expect(onContextUnavailable).not.toHaveBeenCalled();
+  });
+
+  it("disables all controls and shows unavailable copy when contextUnavailable is true", () => {
+    render(
+      <ContextExpander
+        kind="middle"
+        hiddenLineCount={10}
+        sessionId="s1"
+        filePath="src/app.ts"
+        hiddenStart={6}
+        hiddenEnd={15}
+        onExpand={vi.fn()}
+        contextUnavailable
+      />
+    );
+
+    expect(screen.getByRole("button", { name: "Show 20 above" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Show 20 below" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Show all hidden lines" })).toBeDisabled();
+    expect(
+      screen.getByText("Additional file context unavailable for this session")
+    ).toBeInTheDocument();
   });
 
   it("disables above and below controls when the gap is fully revealed", () => {
