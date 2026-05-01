@@ -69,6 +69,13 @@ func (h *InternalPreviewHandler) requireInspector(w http.ResponseWriter, r *http
 }
 
 func (h *InternalPreviewHandler) StartPreview(w http.ResponseWriter, r *http.Request) {
+	// startPreviewLocal can run snapshot restore + infra image pull +
+	// readiness probes. The server's 15s WriteTimeout will otherwise drop
+	// the connection mid-handler — the API caller then sees `EOF` and
+	// returns 502 PREVIEW_WORKER_REQUEST_FAILED to the browser, hiding
+	// the real error code (e.g. SANDBOX_BUSY). See helpers.go.
+	clearWriteDeadline(w, r)
+
 	claims, ok := h.authorize(w, r, "start")
 	if !ok {
 		return
@@ -126,6 +133,10 @@ func (h *InternalPreviewHandler) StopPreview(w http.ResponseWriter, r *http.Requ
 }
 
 func (h *InternalPreviewHandler) RecyclePreview(w http.ResponseWriter, r *http.Request) {
+	// Recycle = teardown + relaunch (image pulls + readiness probes); same
+	// WriteTimeout-overrun risk as StartPreview.
+	clearWriteDeadline(w, r)
+
 	previewID, err := uuid.Parse(chi.URLParam(r, "previewID"))
 	if err != nil {
 		writeError(w, r, http.StatusBadRequest, "INVALID_PREVIEW_ID", "invalid preview id")
