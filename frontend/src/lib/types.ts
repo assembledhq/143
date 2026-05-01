@@ -163,7 +163,23 @@ export interface Session {
     issue_title?: string;
     issue_source?: string;
     external_id?: string;
+    issue_status?: string;
+    // Linear workspace slug (e.g. "acs"). Used to build deep links to
+    // linear.app/<slug>/issue/<KEY>. Empty/undefined for non-Linear links.
+    issue_workspace_slug?: string;
   }>;
+  // Linear-specific session policy flags. Frozen at session create.
+  linear_private?: boolean;
+  linear_state_sync_disabled?: boolean;
+  linear_identifier_hint?: string;
+  // linear_prepare_state is the server-side gate that blocks turn 1 until
+  // the primary Linear issue snapshot is captured. The backend emits it on
+  // every session payload. The 'failed' state surfaces in
+  // linked-issue-chips.tsx as a warning chip so dogfooders see the
+  // missing-context signal; 'pending'/'ready' are not yet rendered (the
+  // "Preparing Linear context..." indicator is one diff away when we want
+  // it).
+  linear_prepare_state?: 'none' | 'pending' | 'ready' | 'failed';
   error?: string;
   result_summary?: string;
   diff?: string;

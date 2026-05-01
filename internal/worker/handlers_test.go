@@ -11,10 +11,12 @@ import (
 	"time"
 
 	"github.com/assembledhq/143/internal/db"
+	"github.com/assembledhq/143/internal/jobctx"
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/services/agent"
 	"github.com/assembledhq/143/internal/services/feedback"
 	ghservice "github.com/assembledhq/143/internal/services/github"
+	linearservice "github.com/assembledhq/143/internal/services/linear"
 	"github.com/assembledhq/143/internal/services/pm"
 	"github.com/assembledhq/143/internal/services/prioritization"
 	"github.com/assembledhq/143/internal/services/validation"
@@ -25,6 +27,25 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 )
+
+var workerIssueColumns = []string{
+	"id", "org_id", "external_id", "source", "source_integration_id", "repository_id",
+	"title", "description", "raw_data", "status", "first_seen_at", "last_seen_at",
+	"occurrence_count", "affected_customer_count", "severity", "tags", "fingerprint",
+	"created_at", "updated_at", "deleted_at",
+}
+
+type workerLinearIntegrationReader struct{}
+
+func (workerLinearIntegrationReader) GetByOrgAndProvider(context.Context, uuid.UUID, string) (models.Integration, error) {
+	return models.Integration{ID: uuid.New(), Provider: "linear", Status: "active"}, nil
+}
+
+type workerLinearCredentialReader struct{}
+
+func (workerLinearCredentialReader) Get(context.Context, uuid.UUID, models.ProviderName) (*models.DecryptedCredential, error) {
+	return &models.DecryptedCredential{Config: models.LinearConfig{AccessToken: "linear-token"}}, nil
+}
 
 var workerSessionColumns = []string{
 	"id", "primary_issue_id", "org_id", "origin", "interaction_mode", "validation_policy", "agent_type", "status", "autonomy_level", "token_mode",
@@ -40,7 +61,9 @@ var workerSessionColumns = []string{
 	"checkpointed_at", "checkpoint_kind", "checkpoint_capability", "checkpoint_size_bytes", "checkpoint_error",
 	"recovery_state", "recovery_queued_at", "recovery_started_at", "recovery_attempt_count",
 	"target_branch", "working_branch", "base_commit_sha", "repository_id", "diff_stats", "diff_history", "input_manifest",
-	"archived_at", "archived_by_user_id", "automation_run_id", "pr_creation_state", "pr_creation_error", "diff_collected_at", "latest_diff_snapshot_id", "deleted_at", "git_identity_source", "git_identity_user_id", "created_at",
+	"archived_at", "archived_by_user_id", "automation_run_id", "pr_creation_state", "pr_creation_error", "diff_collected_at", "latest_diff_snapshot_id",
+	"linear_private", "linear_state_sync_disabled", "linear_identifier_hint", "linear_prepare_state",
+	"deleted_at", "git_identity_source", "git_identity_user_id", "created_at",
 }
 
 const (
@@ -55,14 +78,6 @@ const (
 	workerLegacyBaseCommitIndex       = 44
 	workerLegacyDiffCollectedIndex    = 54
 	workerLegacyLatestDiffIndex       = 55
-
-	// workerSessionPreIdentityColumnsLen is the column count before
-	// git_identity_source / git_identity_user_id were appended. The
-	// dispatch logic in workerSessionTestRowDispatch is calibrated to
-	// produce rows of this length; padWorkerIdentityNils fills in the
-	// missing 2 nils at the end so each test fixture doesn't need to
-	// know about the new columns.
-	workerSessionPreIdentityColumnsLen = 76
 )
 
 func workerSessionNeedsPolicyDefaults(values []any) bool {
@@ -160,8 +175,52 @@ func expandLegacyWorkerSessionRow(values []any) []any {
 	return row
 }
 
+// preLinearWorkerSessionColumnsLen is len(workerSessionColumns) before
+// migration 103 added the four linear_* fields. Test rows authored before
+// that migration produce dispatch output that's exactly 4 short of the
+// current sessionColumns; we pad after dispatch so the shape matches.
+const preLinearWorkerSessionColumnsLen = 76
+
+func workerLinearSessionDefaults() []any {
+	return []any{
+		false,          // linear_private
+		false,          // linear_state_sync_disabled
+		(*string)(nil), // linear_identifier_hint
+		"none",         // linear_prepare_state
+	}
+}
+
+// padWorkerLinearFields injects the four linear_* defaults at the position
+// right before the trailing deleted_at/created_at columns when a row was
+// built without them.
+func padWorkerLinearFields(values []any) []any {
+	if len(values) >= len(workerSessionColumns) {
+		return values
+	}
+	if len(values) < 2 {
+		return values
+	}
+	insertAt := len(values) - 2 // before deleted_at, created_at
+	row := make([]any, 0, len(values)+4)
+	row = append(row, values[:insertAt]...)
+	row = append(row, workerLinearSessionDefaults()...)
+	row = append(row, values[insertAt:]...)
+	return row
+}
+
 func workerSessionTestRow(values ...any) []any {
-	return padWorkerIdentityNils(workerSessionTestRowDispatch(values...))
+	row := workerSessionTestRowDispatch(values...)
+	// Dispatch returns the pre-Linear legacy shape (no pending_snapshot_*,
+	// no linear_*, no git_identity_*). Chain the pads so fixtures stay
+	// oblivious to the column-shaping migrations:
+	//   - padWorkerLinearFields adds the four linear_* defaults at the
+	//     position right before deleted_at/created_at (76 → 80).
+	//   - padWorkerIdentityNils splices pending_snapshot_* after snapshot_key
+	//     and the git_identity_* pair before created_at (80 → 84).
+	if len(row) == preLinearWorkerSessionColumnsLen {
+		row = padWorkerLinearFields(row)
+	}
+	return padWorkerIdentityNils(row)
 }
 
 // padWorkerIdentityNils retrofits a session row built by the legacy
@@ -195,23 +254,23 @@ func padWorkerIdentityNils(row []any) []any {
 func workerSessionTestRowDispatch(values ...any) []any {
 	if workerSessionNeedsPolicyDefaults(values) {
 		switch len(values) {
-		case workerSessionPreIdentityColumnsLen - 3:
+		case preLinearWorkerSessionColumnsLen - 3:
 			return workerSessionWithPolicyDefaults(values)
-		case workerSessionPreIdentityColumnsLen - 4:
+		case preLinearWorkerSessionColumnsLen - 4:
 			if workerSessionLikelyOmitsWorkerNode(values) {
 				return workerSessionCurrentOptionalDefaults(workerSessionWithPolicyDefaults(values), false, true, false)
 			}
 			return workerSessionCurrentOptionalDefaults(workerSessionWithPolicyDefaults(values), true, false, false)
-		case workerSessionPreIdentityColumnsLen - 5:
+		case preLinearWorkerSessionColumnsLen - 5:
 			return workerSessionCurrentOptionalDefaults(workerSessionWithPolicyDefaults(values), true, true, false)
-		case workerSessionPreIdentityColumnsLen - 6:
+		case preLinearWorkerSessionColumnsLen - 6:
 			return workerSessionCurrentOptionalDefaults(workerSessionWithPolicyDefaults(values), false, false, true)
-		case workerSessionPreIdentityColumnsLen - 7:
+		case preLinearWorkerSessionColumnsLen - 7:
 			if workerSessionLikelyOmitsWorkerNode(values) {
 				return workerSessionCurrentOptionalDefaults(workerSessionWithPolicyDefaults(values), false, true, true)
 			}
 			return workerSessionCurrentOptionalDefaults(workerSessionWithPolicyDefaults(values), true, false, true)
-		case workerSessionPreIdentityColumnsLen - 8:
+		case preLinearWorkerSessionColumnsLen - 8:
 			return workerSessionCurrentOptionalDefaults(workerSessionWithPolicyDefaults(values), true, true, true)
 		case workerLegacySessionColumnsLen - 3:
 			return expandLegacyWorkerSessionRow(workerSessionWithPolicyDefaults(values))
@@ -235,7 +294,7 @@ func workerSessionTestRowDispatch(values ...any) []any {
 	}
 
 	switch len(values) {
-	case workerSessionPreIdentityColumnsLen:
+	case preLinearWorkerSessionColumnsLen:
 		return values
 	case workerLegacySessionColumnsLen:
 		return expandLegacyWorkerSessionRow(values)
@@ -255,21 +314,21 @@ func workerSessionTestRowDispatch(values ...any) []any {
 		return expandLegacyWorkerSessionRow(workerSessionLegacyOptionalDefaults(values, true, false, true))
 	case workerLegacySessionColumnsLen - 5:
 		return expandLegacyWorkerSessionRow(workerSessionLegacyOptionalDefaults(values, true, true, true))
-	case workerSessionPreIdentityColumnsLen - 1:
+	case preLinearWorkerSessionColumnsLen - 1:
 		if workerSessionLikelyOmitsWorkerNode(values) {
 			return workerSessionCurrentOptionalDefaults(values, false, true, false)
 		}
 		return workerSessionCurrentOptionalDefaults(values, true, false, false)
-	case workerSessionPreIdentityColumnsLen - 2:
+	case preLinearWorkerSessionColumnsLen - 2:
 		return workerSessionCurrentOptionalDefaults(values, true, true, false)
-	case workerSessionPreIdentityColumnsLen - 3:
+	case preLinearWorkerSessionColumnsLen - 3:
 		if workerSessionLikelyOmitsWorkerNode(values) {
 			return workerSessionCurrentOptionalDefaults(values, false, true, true)
 		}
 		return workerSessionCurrentOptionalDefaults(values, true, false, true)
-	case workerSessionPreIdentityColumnsLen - 4:
+	case preLinearWorkerSessionColumnsLen - 4:
 		return workerSessionCurrentOptionalDefaults(values, false, false, true)
-	case workerSessionPreIdentityColumnsLen - 5:
+	case preLinearWorkerSessionColumnsLen - 5:
 		return workerSessionCurrentOptionalDefaults(values, true, true, true)
 	}
 	return values
@@ -361,6 +420,481 @@ func workerSessionRow(sessionID, issueID, orgID uuid.UUID, status string, curren
 		nil, nil, nil, nil, nil, nil, nil,
 		nil, nil, nil, "idle", (*string)(nil), nil, nil, nil, now,
 	)
+}
+
+// workerSessionRowWithLinearPrepareState mirrors workerSessionRow but lets
+// callers set the linear_prepare_state column. Used by the prepare-state
+// gate test below. The four linear_* columns are emitted in trailing
+// position so the row matches the post-migration column shape.
+func workerSessionRowWithLinearPrepareState(sessionID, issueID, orgID uuid.UUID, status string, prepareState string) []any {
+	now := time.Now()
+	var primaryIssueID any
+	if issueID != uuid.Nil {
+		issueIDCopy := issueID
+		primaryIssueID = &issueIDCopy
+	}
+	row := workerSessionTestRow(
+		sessionID, primaryIssueID, orgID, "claude_code", status, "semi", "low",
+		nil, nil, nil, nil,
+		nil, nil, false, nil, nil, nil,
+		nil, nil, nil, false,
+		nil, nil, nil, nil, nil, nil,
+		nil, nil, nil, nil,
+		nil, nil, nil,
+		(*string)(nil), 0, now, "snapshotted", (*string)(nil),
+		nil, nil, nil, "", "",
+		0, 0, "", nil,
+		nil, "", "", int64(0), nil,
+		"", nil, nil, 0,
+		nil, nil, nil, nil, nil, nil, nil,
+		nil, nil, nil, "idle", (*string)(nil), nil, nil, nil, now,
+	)
+	setWorkerSessionColumnValue(row, "linear_prepare_state", prepareState)
+	return row
+}
+
+func setWorkerSessionColumnValue(row []any, column string, value any) {
+	for i, col := range workerSessionColumns {
+		if col == column {
+			row[i] = value
+			return
+		}
+	}
+	panic("unknown worker session column: " + column)
+}
+
+// TestRunAgentHandler_LinearPrepareStateGatesTurnOne locks the design 62
+// contract: turn 1 must not start while linear_prepare_state == "pending".
+// The handler should return a RetryableError with a fixed Retry-After so
+// the queue doesn't busy-spin.
+func TestRunAgentHandler_LinearPrepareStateGatesTurnOne(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+
+	orgID := uuid.New()
+	runID := uuid.New()
+	issueID := uuid.New()
+
+	mock.ExpectQuery("SELECT .* FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(workerSessionColumns).AddRow(
+				workerSessionRowWithLinearPrepareState(runID, issueID, orgID, string(models.SessionStatusPending), "pending")...,
+			),
+		)
+
+	orch := &orchestratorServiceStub{}
+	handler := newRunAgentHandler(stores, &Services{Orchestrator: orch}, zerolog.Nop())
+	payload := json.RawMessage(`{"session_id":"` + runID.String() + `","org_id":"` + orgID.String() + `"}`)
+
+	err := handler(context.Background(), "run_agent", payload)
+	require.Error(t, err, "run_agent must defer when linear pre-start preparation is pending")
+	var retryable *RetryableError
+	require.ErrorAs(t, err, &retryable, "the error must be RetryableError so the worker re-enqueues without consuming an attempt")
+	require.NotNil(t, retryable.RetryAfter, "the gate must set a fixed short wait, not fall through to exponential backoff")
+	require.Equal(t, 5*time.Second, *retryable.RetryAfter, "the gate should use a fixed short wait")
+	require.Equal(t, 0, orch.runAgentCalls, "orchestrator must not run while preparation is pending")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+// TestRunAgentHandler_LinearPrepareStateFailedDeadLetters locks the
+// "don't start blind" contract: a session whose Linear pre-start fetch
+// failed must surface as a recoverable failure, not silently boot the
+// agent without context.
+func TestRunAgentHandler_LinearPrepareStateFailedDeadLetters(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+
+	orgID := uuid.New()
+	runID := uuid.New()
+	issueID := uuid.New()
+
+	mock.ExpectQuery("SELECT .* FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(workerSessionColumns).AddRow(
+				workerSessionRowWithLinearPrepareState(runID, issueID, orgID, string(models.SessionStatusPending), "failed")...,
+			),
+		)
+	// The handler best-effort updates the session row with a recoverable
+	// failure. We mock it as an UPDATE ... RETURNING (the actual shape of
+	// UpdateResult), but the handler ignores its error so a strict-match
+	// failure here would still let the test assert FatalError below.
+	mock.ExpectQuery("UPDATE sessions").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(
+			workerSessionRowWithLinearPrepareState(runID, issueID, orgID, string(models.SessionStatusFailed), "failed")...,
+		))
+
+	orch := &orchestratorServiceStub{}
+	handler := newRunAgentHandler(stores, &Services{Orchestrator: orch}, zerolog.Nop())
+	payload := json.RawMessage(`{"session_id":"` + runID.String() + `","org_id":"` + orgID.String() + `"}`)
+
+	err := handler(context.Background(), "run_agent", payload)
+	require.Error(t, err, "run_agent must surface a fatal error on linear pre-start failure")
+	var fatal *FatalError
+	require.ErrorAs(t, err, &fatal, "failure to fetch primary Linear context must dead-letter the run")
+	require.Equal(t, 0, orch.runAgentCalls, "orchestrator must not run after the prepare path failed")
+}
+
+func TestLinearJobHandlers(t *testing.T) {
+	t.Parallel()
+
+	t.Run("prepare_linear_primary clears empty identifier state", func(t *testing.T) {
+		t.Parallel()
+
+		stores, mock := newTestStores(t)
+		defer mock.Close()
+
+		orgID := uuid.New()
+		sessionID := uuid.New()
+		mock.ExpectExec("UPDATE sessions[\\s\\S]+SET linear_prepare_state").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+		svc := linearservice.NewService(linearservice.Config{Sessions: stores.Sessions, Logger: zerolog.Nop()})
+		handler := newPrepareLinearPrimaryHandler(svc, zerolog.Nop())
+		payload := json.RawMessage(`{"org_id":"` + orgID.String() + `","session_id":"` + sessionID.String() + `","identifiers":[]}`)
+
+		err := handler(context.Background(), "prepare_linear_primary", payload)
+		require.NoError(t, err, "prepare_linear_primary should clear prepare state for empty identifier payloads")
+		require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+	})
+
+	t.Run("prepare_linear_primary validates payloads before service call", func(t *testing.T) {
+		t.Parallel()
+
+		handler := newPrepareLinearPrimaryHandler(linearservice.NewService(linearservice.Config{}), zerolog.Nop())
+		require.Error(t, handler(context.Background(), "prepare_linear_primary", json.RawMessage(`{bad json`)), "prepare_linear_primary should reject invalid JSON")
+		require.Error(t, handler(context.Background(), "prepare_linear_primary", json.RawMessage(`{"org_id":"not-a-uuid","session_id":"`+uuid.NewString()+`"}`)), "prepare_linear_primary should reject invalid org ids")
+		require.Error(t, handler(context.Background(), "prepare_linear_primary", json.RawMessage(`{"org_id":"`+uuid.NewString()+`","session_id":"not-a-uuid"}`)), "prepare_linear_primary should reject invalid session ids")
+	})
+
+	t.Run("prepare_linear_primary leaves pending until dead-letter hook", func(t *testing.T) {
+		t.Parallel()
+
+		stores, mock := newTestStores(t)
+		defer mock.Close()
+
+		orgID := uuid.New()
+		sessionID := uuid.New()
+		handlerCtx := jobctx.WithDeadLetterHooks(context.Background())
+		svc := linearservice.NewService(linearservice.Config{
+			Sessions:     stores.Sessions,
+			Integrations: workerLinearIntegrationReader{},
+			Credentials:  workerLinearCredentialReader{},
+			ClientFactory: func(context.Context, string) (linearservice.Client, error) {
+				return nil, errors.New("linear unavailable")
+			},
+			Logger: zerolog.Nop(),
+		})
+		handler := newPrepareLinearPrimaryHandler(svc, zerolog.Nop())
+		payload := json.RawMessage(`{"org_id":"` + orgID.String() + `","session_id":"` + sessionID.String() + `","identifiers":["ACS-123"]}`)
+
+		err := handler(handlerCtx, "prepare_linear_primary", payload)
+		require.Error(t, err, "prepare_linear_primary should return a retryable error while dependencies are unavailable")
+		var retryable *RetryableError
+		require.ErrorAs(t, err, &retryable, "prepare_linear_primary should keep retrying instead of failing immediately")
+		require.NoError(t, mock.ExpectationsWereMet(), "retryable prepare failure should not update prepare state before dead-letter")
+
+		mock.ExpectExec("UPDATE sessions[\\s\\S]+SET linear_prepare_state[\\s\\S]+linear_prepare_state <>").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+		jobctx.RunDeadLetterHooks(handlerCtx, err)
+		require.NoError(t, mock.ExpectationsWereMet(), "dead-letter hook should mark prepare state failed after retries exhaust")
+	})
+
+	t.Run("prepare_linear_primary forwards a valid user_id", func(t *testing.T) {
+		t.Parallel()
+
+		stores, mock := newTestStores(t)
+		defer mock.Close()
+
+		orgID := uuid.New()
+		sessionID := uuid.New()
+		userID := uuid.New()
+		mock.ExpectExec("UPDATE sessions[\\s\\S]+SET linear_prepare_state").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+		svc := linearservice.NewService(linearservice.Config{Sessions: stores.Sessions, Logger: zerolog.Nop()})
+		handler := newPrepareLinearPrimaryHandler(svc, zerolog.Nop())
+		payload := json.RawMessage(`{"org_id":"` + orgID.String() + `","session_id":"` + sessionID.String() + `","identifiers":[],"user_id":"` + userID.String() + `"}`)
+
+		err := handler(context.Background(), "prepare_linear_primary", payload)
+		require.NoError(t, err, "prepare_linear_primary should accept a well-formed user_id and proceed")
+		require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+	})
+
+	t.Run("prepare_linear_primary tolerates malformed user_id", func(t *testing.T) {
+		t.Parallel()
+
+		stores, mock := newTestStores(t)
+		defer mock.Close()
+
+		orgID := uuid.New()
+		sessionID := uuid.New()
+		mock.ExpectExec("UPDATE sessions[\\s\\S]+SET linear_prepare_state").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+		svc := linearservice.NewService(linearservice.Config{Sessions: stores.Sessions, Logger: zerolog.Nop()})
+		handler := newPrepareLinearPrimaryHandler(svc, zerolog.Nop())
+		payload := json.RawMessage(`{"org_id":"` + orgID.String() + `","session_id":"` + sessionID.String() + `","identifiers":[],"user_id":"not-a-uuid"}`)
+
+		err := handler(context.Background(), "prepare_linear_primary", payload)
+		require.NoError(t, err, "prepare_linear_primary should warn and proceed when user_id is malformed instead of failing the job")
+		require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+	})
+
+	t.Run("link_linear_issue validates payloads", func(t *testing.T) {
+		t.Parallel()
+
+		handler := newLinkLinearIssueHandler(linearservice.NewService(linearservice.Config{}), zerolog.Nop())
+		require.Error(t, handler(context.Background(), "link_linear_issue", json.RawMessage(`{bad json`)), "link_linear_issue should reject invalid JSON")
+		require.Error(t, handler(context.Background(), "link_linear_issue", json.RawMessage(`{"org_id":"not-a-uuid","session_id":"`+uuid.NewString()+`"}`)), "link_linear_issue should reject invalid org ids")
+		require.Error(t, handler(context.Background(), "link_linear_issue", json.RawMessage(`{"org_id":"`+uuid.NewString()+`","session_id":"not-a-uuid"}`)), "link_linear_issue should reject invalid session ids")
+	})
+
+	t.Run("link_linear_issue tolerates malformed user_id", func(t *testing.T) {
+		t.Parallel()
+
+		stores, mock := newTestStores(t)
+		defer mock.Close()
+
+		orgID := uuid.New()
+		sessionID := uuid.New()
+
+		svc := linearservice.NewService(linearservice.Config{Sessions: stores.Sessions, Logger: zerolog.Nop()})
+		handler := newLinkLinearIssueHandler(svc, zerolog.Nop())
+		payload := json.RawMessage(`{"org_id":"` + orgID.String() + `","session_id":"` + sessionID.String() + `","identifiers":[],"user_id":"not-a-uuid"}`)
+
+		err := handler(context.Background(), "link_linear_issue", payload)
+		require.NoError(t, err, "link_linear_issue should warn and proceed when user_id is malformed instead of failing the job")
+		require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+	})
+
+	t.Run("link_linear_issue does not mutate prepare state for empty related payloads", func(t *testing.T) {
+		t.Parallel()
+
+		stores, mock := newTestStores(t)
+		defer mock.Close()
+
+		orgID := uuid.New()
+		sessionID := uuid.New()
+		userID := uuid.New()
+
+		svc := linearservice.NewService(linearservice.Config{Sessions: stores.Sessions, Logger: zerolog.Nop()})
+		handler := newLinkLinearIssueHandler(svc, zerolog.Nop())
+		payload := json.RawMessage(`{"org_id":"` + orgID.String() + `","session_id":"` + sessionID.String() + `","identifiers":[],"user_id":"` + userID.String() + `"}`)
+
+		err := handler(context.Background(), "link_linear_issue", payload)
+		require.NoError(t, err, "link_linear_issue should no-op when no related identifiers are present")
+		require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+	})
+
+	t.Run("refresh_linear_team_keys validates payloads", func(t *testing.T) {
+		t.Parallel()
+
+		handler := newRefreshLinearTeamKeysHandler(linearservice.NewService(linearservice.Config{}), zerolog.Nop())
+		require.Error(t, handler(context.Background(), "refresh_linear_team_keys", json.RawMessage(`{bad json`)), "refresh_linear_team_keys should reject invalid JSON")
+		require.Error(t, handler(context.Background(), "refresh_linear_team_keys", json.RawMessage(`{"org_id":"not-a-uuid"}`)), "refresh_linear_team_keys should reject invalid org ids")
+	})
+
+	t.Run("refresh_linear_team_keys returns retryable when service fails", func(t *testing.T) {
+		t.Parallel()
+
+		svc := linearservice.NewService(linearservice.Config{
+			Integrations: workerLinearIntegrationReader{},
+			Credentials:  workerLinearCredentialReader{},
+			ClientFactory: func(context.Context, string) (linearservice.Client, error) {
+				return nil, errors.New("linear unavailable")
+			},
+			Logger: zerolog.Nop(),
+		})
+		handler := newRefreshLinearTeamKeysHandler(svc, zerolog.Nop())
+		payload := json.RawMessage(`{"org_id":"` + uuid.NewString() + `"}`)
+
+		err := handler(context.Background(), "refresh_linear_team_keys", payload)
+		require.Error(t, err, "refresh_linear_team_keys should propagate service errors")
+		var retryable *RetryableError
+		require.ErrorAs(t, err, &retryable, "refresh_linear_team_keys should return a retryable error so transient outages don't drop the cron run")
+	})
+
+	t.Run("linear_milestone skips sessions without primary link", func(t *testing.T) {
+		t.Parallel()
+
+		stores, mock := newTestStores(t)
+		defer mock.Close()
+
+		orgID := uuid.New()
+		sessionID := uuid.New()
+		now := time.Now()
+		mock.ExpectQuery("SELECT .* FROM sessions").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(workerSessionRow(sessionID, uuid.Nil, orgID, string(models.SessionStatusCompleted), 1, nil, nil)...))
+
+		handler := newLinearMilestoneHandler(stores, linearservice.NewService(linearservice.Config{}), zerolog.Nop())
+		payload := json.RawMessage(`{"org_id":"` + orgID.String() + `","session_id":"` + sessionID.String() + `","event":"linked","pr_number":42}`)
+
+		err := handler(context.Background(), "linear_milestone", payload)
+		require.NoError(t, err, "linear_milestone should no-op when no primary link exists")
+		require.NotZero(t, now, "test fixture should initialize a timestamp")
+		require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+	})
+
+	t.Run("linear_milestone hydrates links and skips non-linear primary issue", func(t *testing.T) {
+		t.Parallel()
+
+		stores, mock := newTestStores(t)
+		defer mock.Close()
+		stores.SessionIssueLinks = db.NewSessionIssueLinkStore(mock)
+
+		orgID := uuid.New()
+		sessionID := uuid.New()
+		issueID := uuid.New()
+		linkID := uuid.New()
+		now := time.Now().UTC()
+		externalID := "SEN-1"
+		title := "Sentry issue"
+		source := models.IssueSourceSentry
+		status := "open"
+
+		mock.ExpectQuery("SELECT .* FROM sessions").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(workerSessionRow(sessionID, uuid.Nil, orgID, string(models.SessionStatusCompleted), 1, nil, nil)...))
+		mock.ExpectQuery("SELECT .+ FROM session_issue_links").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnRows(pgxmock.NewRows([]string{
+				"id", "org_id", "session_id", "issue_id", "role", "position", "added_by_user_id", "created_at",
+				"issue_title", "issue_source", "external_id", "description", "repository_id", "issue_status", "issue_workspace_slug", "linear_primary_snapshot",
+			}).AddRow(
+				linkID, orgID, sessionID, issueID, string(models.SessionIssueLinkRolePrimary), 0, nil, now,
+				&title, &source, &externalID, nil, nil, &status, nil, nil,
+			))
+		mock.ExpectQuery("SELECT .+ FROM issues WHERE id").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnRows(pgxmock.NewRows(workerIssueColumns).AddRow(
+				issueID, orgID, "sentry-external-id", models.IssueSourceSentry, nil, nil,
+				"Sentry issue", nil, json.RawMessage(`{}`), "open", now, now,
+				1, 0, "medium", []string{"sentry"}, "sentry:fingerprint",
+				now, now, nil,
+			))
+
+		handler := newLinearMilestoneHandler(stores, linearservice.NewService(linearservice.Config{}), zerolog.Nop())
+		payload := json.RawMessage(`{"org_id":"` + orgID.String() + `","session_id":"` + sessionID.String() + `","event":"linked","pr_number":42}`)
+
+		err := handler(context.Background(), "linear_milestone", payload)
+		require.NoError(t, err, "linear_milestone should skip non-Linear primary issues after hydration")
+		require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+	})
+
+	t.Run("linear_milestone retries when link hydration fails", func(t *testing.T) {
+		t.Parallel()
+
+		stores, mock := newTestStores(t)
+		defer mock.Close()
+		stores.SessionIssueLinks = db.NewSessionIssueLinkStore(mock)
+
+		orgID := uuid.New()
+		sessionID := uuid.New()
+		mock.ExpectQuery("SELECT .* FROM sessions").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(workerSessionRow(sessionID, uuid.Nil, orgID, string(models.SessionStatusCompleted), 1, nil, nil)...))
+		mock.ExpectQuery("SELECT .+ FROM session_issue_links").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnError(errors.New("db unavailable"))
+
+		handler := newLinearMilestoneHandler(stores, linearservice.NewService(linearservice.Config{}), zerolog.Nop())
+		payload := json.RawMessage(`{"org_id":"` + orgID.String() + `","session_id":"` + sessionID.String() + `","event":"linked","pr_number":42}`)
+
+		err := handler(context.Background(), "linear_milestone", payload)
+		require.Error(t, err, "linear_milestone should retry when linked issue hydration fails")
+		require.Contains(t, err.Error(), "list linear session issue links", "error should explain that link hydration failed")
+		require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+	})
+
+	t.Run("linear_milestone retries when session fetch fails", func(t *testing.T) {
+		t.Parallel()
+
+		stores, mock := newTestStores(t)
+		defer mock.Close()
+
+		orgID := uuid.New()
+		sessionID := uuid.New()
+		mock.ExpectQuery("SELECT .* FROM sessions").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnError(errors.New("db unavailable"))
+
+		handler := newLinearMilestoneHandler(stores, linearservice.NewService(linearservice.Config{}), zerolog.Nop())
+		payload := json.RawMessage(`{"org_id":"` + orgID.String() + `","session_id":"` + sessionID.String() + `","event":"linked"}`)
+
+		err := handler(context.Background(), "linear_milestone", payload)
+		require.Error(t, err, "linear_milestone should surface session fetch failures so the worker can retry on the next attempt")
+		require.Contains(t, err.Error(), "fetch session", "error should explain that session fetch failed")
+		require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+	})
+
+	t.Run("linear_milestone validates payloads", func(t *testing.T) {
+		t.Parallel()
+
+		handler := newLinearMilestoneHandler(&Stores{}, linearservice.NewService(linearservice.Config{}), zerolog.Nop())
+		require.Error(t, handler(context.Background(), "linear_milestone", json.RawMessage(`{bad json`)), "linear_milestone should reject invalid JSON")
+		require.Error(t, handler(context.Background(), "linear_milestone", json.RawMessage(`{"org_id":"not-a-uuid","session_id":"`+uuid.NewString()+`"}`)), "linear_milestone should reject invalid org ids")
+		require.Error(t, handler(context.Background(), "linear_milestone", json.RawMessage(`{"org_id":"`+uuid.NewString()+`","session_id":"not-a-uuid"}`)), "linear_milestone should reject invalid session ids")
+	})
+}
+
+func TestMapLinearWriteErrorToRetry(t *testing.T) {
+	t.Parallel()
+
+	parsedRetryAfter := 7 * time.Second
+	defaultRetryDelay := 30 * time.Second
+	tests := []struct {
+		name          string
+		err           error
+		expectedDelay *time.Duration
+	}{
+		{
+			name:          "rate limit uses retry after header",
+			err:           &linearservice.RateLimitError{RetryAfter: "7"},
+			expectedDelay: &parsedRetryAfter,
+		},
+		{
+			name:          "rate limit falls back for invalid retry after",
+			err:           &linearservice.RateLimitError{RetryAfter: "bad"},
+			expectedDelay: &defaultRetryDelay,
+		},
+		{
+			name: "unauthorized retries with default backoff",
+			err:  linearservice.ErrUnauthorized,
+		},
+		{
+			name: "generic errors retry with default backoff",
+			err:  errors.New("linear unavailable"),
+		},
+	}
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			err := mapLinearWriteErrorToRetry(tt.err)
+			var retryable *RetryableError
+			require.ErrorAs(t, err, &retryable, "mapLinearWriteErrorToRetry should always return a retryable wrapper")
+			require.ErrorIs(t, retryable.Err, tt.err, "retryable wrapper should preserve the original error")
+			if tt.expectedDelay == nil {
+				require.Nil(t, retryable.RetryAfter, "retryable wrapper should fall through to exponential backoff")
+			} else {
+				require.NotNil(t, retryable.RetryAfter, "retryable wrapper should set an explicit delay")
+				require.Equal(t, *tt.expectedDelay, *retryable.RetryAfter, "retryable wrapper should set the expected delay")
+			}
+		})
+	}
 }
 
 func TestIngestWebhookHandler(t *testing.T) {
@@ -1084,6 +1618,74 @@ func TestOpenPRHandler_SuccessMarksPushingAndSucceeded(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+func TestOpenPRHandler_HydratesLinkedIssuesBeforeCreatePR(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+	stores.SessionIssueLinks = db.NewSessionIssueLinkStore(mock)
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	issueID := uuid.New()
+	linkID := uuid.New()
+	now := time.Now().UTC()
+	snapshotKey := "snap-open-pr-linear-links"
+	externalID := "ACS-123"
+	title := "Fix Linear title"
+	source := models.IssueSourceLinear
+	status := "open"
+
+	mock.ExpectQuery("SELECT .* FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(newWorkerSessionRow(sessionID, orgID, now, &snapshotKey)...))
+	mock.ExpectQuery("SELECT .+ FROM session_issue_links").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "org_id", "session_id", "issue_id", "role", "position", "added_by_user_id", "created_at",
+			"issue_title", "issue_source", "external_id", "description", "repository_id", "issue_status", "issue_workspace_slug", "linear_primary_snapshot",
+		}).AddRow(
+			linkID, orgID, sessionID, issueID, string(models.SessionIssueLinkRolePrimary), 0, nil, now,
+			&title, &source, &externalID, nil, nil, &status, nil, nil,
+		))
+	mock.ExpectExec("UPDATE sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectExec("UPDATE sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	services := &Services{
+		PR: &stubPRService{
+			createPRFn: func(ctx context.Context, run *models.Session, params ...ghservice.CreatePRParams) (*models.PullRequest, error) {
+				require.Equal(t, []models.SessionIssueLink{
+					{
+						ID:          linkID,
+						OrgID:       orgID,
+						SessionID:   sessionID,
+						IssueID:     issueID,
+						Role:        models.SessionIssueLinkRolePrimary,
+						Position:    0,
+						CreatedAt:   now,
+						IssueTitle:  &title,
+						IssueSource: &source,
+						ExternalID:  &externalID,
+						IssueStatus: &status,
+					},
+				}, run.LinkedIssues, "open_pr should pass hydrated linked issues into PR creation for Linear title prefixing")
+				return &models.PullRequest{ID: uuid.New(), OrgID: orgID}, nil
+			},
+		},
+	}
+
+	handler := newOpenPRHandler(stores, services, zerolog.Nop())
+	payload := json.RawMessage(`{"session_id":"` + sessionID.String() + `","org_id":"` + orgID.String() + `"}`)
+	err := handler(context.Background(), "open_pr", payload)
+
+	require.NoError(t, err, "open_pr handler should succeed when PR creation succeeds")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func TestOpenPRHandler_ForwardsAuthorModeToPRService(t *testing.T) {
 	t.Parallel()
 
@@ -1482,17 +2084,21 @@ func TestAutomationRunHandler_HappyPath(t *testing.T) {
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
-	// 4. Create the session. The 19th arg is automation_run_id — asserting
+	// 4. Create the session. automation_run_id is the 19th arg — asserting
 	// that specific value here is what proves the handler actually linked the
 	// session back to the run it's servicing (without it, audit+stats joins
-	// on sessions.automation_run_id would silently miss every row).
+	// on sessions.automation_run_id would silently miss every row). The
+	// trailing four AnyArgs are the linear_* policy columns added by
+	// migration 103.
 	mock.ExpectBegin()
 	mock.ExpectQuery(`INSERT INTO sessions`).
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg(), &runID, pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			pgxmock.AnyArg(), pgxmock.AnyArg(), &runID,
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at", "last_activity_at"}).AddRow(sessionID, now, now))
 	mock.ExpectCommit()
 
@@ -2066,6 +2672,7 @@ func TestRegisterHandlers_WithAllServices(t *testing.T) {
 		Prioritization:  &prioritization.Service{},
 		Feedback:        feedback.NewService(&testFeedbackCommentStore{}, &testFeedbackMemoryStore{}, &testFeedbackJobStore{}, nil, zerolog.Nop()),
 		PM:              &mockPMService{},
+		Linear:          linearservice.NewService(linearservice.Config{}),
 	}
 
 	w := New(nil, logger, "test-node")
@@ -2084,6 +2691,10 @@ func TestRegisterHandlers_WithAllServices(t *testing.T) {
 		"process_review_comment",
 		"update_memories",
 		"data_retention_cleanup",
+		"prepare_linear_primary",
+		"link_linear_issue",
+		"refresh_linear_team_keys",
+		"linear_milestone",
 	}
 	for _, name := range allExpected {
 		_, ok := w.handlers[name]

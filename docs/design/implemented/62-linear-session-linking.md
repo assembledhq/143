@@ -1,8 +1,8 @@
 # 62 - Linear Session Linking and Bidirectional Updates
 
-> **Status:** Not Started | **Last reviewed:** 2026-04-25
+> **Status:** Implemented | **Last reviewed:** 2026-04-27
 >
-> **Depends on:** [../implemented/04-ingestion.md](../implemented/04-ingestion.md), [../implemented/08-pr-and-ship.md](../implemented/08-pr-and-ship.md), [./59-session-issue-decoupling-and-multi-issue-linking.md](./59-session-issue-decoupling-and-multi-issue-linking.md)
+> **Depends on:** [./04-ingestion.md](./04-ingestion.md), [./08-pr-and-ship.md](./08-pr-and-ship.md), [../future/59-session-issue-decoupling-and-multi-issue-linking.md](../future/59-session-issue-decoupling-and-multi-issue-linking.md)
 
 ## Summary
 

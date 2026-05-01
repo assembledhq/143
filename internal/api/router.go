@@ -13,6 +13,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/go-chi/chi/v5"
 	chiMiddleware "github.com/go-chi/chi/v5/middleware"
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/rs/zerolog"
@@ -32,6 +33,7 @@ import (
 	"github.com/assembledhq/143/internal/services/email"
 	ghservice "github.com/assembledhq/143/internal/services/github"
 	"github.com/assembledhq/143/internal/services/ingestion"
+	"github.com/assembledhq/143/internal/services/linear"
 	"github.com/assembledhq/143/internal/services/preview"
 	"github.com/assembledhq/143/internal/services/sandbox"
 	"github.com/assembledhq/143/internal/services/storage"
@@ -121,6 +123,8 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 			prService.SetReviewCommentStore(reviewCommentStore)
 			prService.SetIntegrationStore(integrationStore)
 			prService.SetSandboxPushDeps(sandboxProvider, snapshotStore)
+			// Linear milestone enqueuer fires post-PR-event Linear writes.
+			prService.SetLinearMilestoneEnqueuer(linear.MilestoneEnqueuerFor(jobStore, logger))
 		}
 	}
 	if cfg.GitHubAppClientID != "" && cfg.GitHubAppClientSecret != "" {
@@ -162,6 +166,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 		cfg.FrontendURL,
 		integrationOpts...,
 	)
+	integrationHandler.SetLinearJobStore(jobStore)
 	webhookHandler := handlers.NewWebhookHandler(cfg, orgStore, userStore, repoStore, integrationStore, prService)
 	containerUsageStore := db.NewContainerUsageStore(pool)
 	usageRollupStore := db.NewUsageRollupStore(pool)
@@ -196,6 +201,45 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	sessionHandler.SetViewStore(sessionViewStore)
 	sessionHandler.SetIssueLinkStore(sessionIssueLinkStore)
 	sessionHandler.SetIssueSnapshotStore(sessionIssueSnapshotStore)
+
+	// Linear session-linking: detection, primary resolution + context
+	// snapshotting, attachment/comment writes, state-sync transitions —
+	// see design 62. Wired here so it's available to CreateManual; the
+	// worker gets its own instance via buildServices in cmd/server/main.go.
+	// Both call linear.Build so wiring stays in lockstep.
+	linearService := linear.Build(linear.BuildDeps{
+		Pool:         pool,
+		Logger:       logger,
+		Integrations: integrationStore,
+		Credentials:  credentialStore,
+		Issues:       issueStore,
+		Sessions:     sessionStore,
+		IssueLinks:   sessionIssueLinkStore,
+		Orgs:         orgStore,
+		Jobs:         jobStore,
+		AppBaseURL:   cfg.FrontendURL,
+	})
+	if sessionStreams != nil {
+		// Republish session status on every link change so the detail view
+		// re-fetches the enriched LinkedIssues without a manual reload.
+		linearService.SetLinksChangedNotifier(func(ctx context.Context, orgID, sessionID uuid.UUID, _ string) {
+			session, err := sessionStore.GetByID(ctx, orgID, sessionID)
+			if err != nil {
+				return
+			}
+			_ = sessionStreams.PublishStatus(ctx, &session)
+		})
+	}
+	sessionHandler.SetLinearLinker(linearService)
+	// Wire the inline team-key refresh hook so the Linear OAuth callback
+	// can populate the allowlist synchronously before falling back to the
+	// worker enqueue. See HandleLinearOAuthCallback for the two-tier
+	// strategy.
+	integrationHandler.SetLinearTeamKeyRefresher(linearService.RefreshTeamKeys)
+	// Drop the in-process team-key cache as soon as the integration is
+	// disconnected so post-disconnect session creates can't admit
+	// bare-identifier matches via a stale cache.
+	integrationHandler.SetLinearTeamKeyCacheInvalidator(linearService.InvalidateTeamKeyCache)
 	sessionHandler.SetShutdownSignal(shutdownCh)
 	sessionHandler.SetSnapshotStore(snapshotStore)
 	sessionHandler.SetPRCredentialStore(userCredentialStore)
