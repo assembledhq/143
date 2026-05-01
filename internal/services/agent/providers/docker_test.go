@@ -33,6 +33,7 @@ type mockDockerClient struct {
 	containerStopFn        func(ctx context.Context, containerID string, options container.StopOptions) error
 	containerRemoveFn      func(ctx context.Context, containerID string, options container.RemoveOptions) error
 	containerInspectFn     func(ctx context.Context, containerID string) (container.InspectResponse, error)
+	containerStatsFn       func(ctx context.Context, containerID string, stream bool) (container.StatsResponseReader, error)
 	containerExecCreateFn  func(ctx context.Context, containerID string, config container.ExecOptions) (container.ExecCreateResponse, error)
 	containerExecAttachFn  func(ctx context.Context, execID string, config container.ExecAttachOptions) (types.HijackedResponse, error)
 	containerExecInspectFn func(ctx context.Context, execID string) (container.ExecInspect, error)
@@ -86,6 +87,13 @@ func (m *mockDockerClient) ContainerInspect(ctx context.Context, containerID str
 			},
 		},
 	}, nil
+}
+
+func (m *mockDockerClient) ContainerStats(ctx context.Context, containerID string, stream bool) (container.StatsResponseReader, error) {
+	if m.containerStatsFn != nil {
+		return m.containerStatsFn(ctx, containerID, stream)
+	}
+	return container.StatsResponseReader{Body: io.NopCloser(bytes.NewReader([]byte("{}")))}, nil
 }
 
 func (m *mockDockerClient) ContainerExecCreate(ctx context.Context, containerID string, config container.ExecOptions) (container.ExecCreateResponse, error) {
@@ -462,7 +470,7 @@ func TestDockerProvider_Create(t *testing.T) {
 
 		// Verify resource limits
 		require.Equal(t, int64(2e9), capturedHostConfig.Resources.NanoCPUs, "container should have 2 CPU cores")
-		require.Equal(t, int64(4096*1024*1024), capturedHostConfig.Resources.Memory, "container should have 4GB memory")
+		require.Equal(t, int64(3072*1024*1024), capturedHostConfig.Resources.Memory, "container should have 3GB memory")
 		require.NotNil(t, capturedHostConfig.Resources.PidsLimit, "container should have PID limit")
 		require.Equal(t, int64(256), *capturedHostConfig.Resources.PidsLimit, "container should have PID limit of 256")
 
@@ -1508,7 +1516,7 @@ func TestDefaultSandboxConfig(t *testing.T) {
 	cfg := agent.DefaultSandboxConfig()
 	require.Equal(t, "143-sandbox:latest", cfg.Image, "default image should be '143-sandbox:latest'")
 	require.Equal(t, float64(2), cfg.CPULimit, "default CPU limit should be 2")
-	require.Equal(t, 4096, cfg.MemoryLimitMB, "default memory limit should be 4096 MB")
+	require.Equal(t, 3072, cfg.MemoryLimitMB, "default memory limit should be 3072 MB")
 	require.Equal(t, "/workspace", cfg.WorkDir, "default work dir should be '/workspace'")
 	require.Equal(t, "restricted", cfg.NetworkPolicy, "default network policy should be 'restricted'")
 	require.Equal(t, 10, cfg.DiskLimitGB, "default disk limit should be 10GB")

@@ -324,10 +324,13 @@ func (creds *integrationCredentials) connectedProviderNames() []string {
 }
 
 func bootstrapSandboxConfig() agent.SandboxConfig {
+	// Inherit SANDBOX_CPU_LIMIT / SANDBOX_MEMORY_LIMIT_MB from
+	// DefaultSandboxConfig so capacity-planning math (deploy/scripts/
+	// worker_buckets.sh) doesn't have to special-case bootstraps. Bootstrap
+	// only overrides the wall-clock timeout (repo clone + analysis is the
+	// long pole) and the network policy.
 	cfg := agent.DefaultSandboxConfig()
 	cfg.Timeout = 30 * time.Minute
-	cfg.CPULimit = 2
-	cfg.MemoryLimitMB = 4096
 	cfg.NetworkPolicy = "restricted"
 	return cfg
 }

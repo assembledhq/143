@@ -44,6 +44,7 @@ type DockerClient interface {
 	ContainerStop(ctx context.Context, containerID string, options container.StopOptions) error
 	ContainerRemove(ctx context.Context, containerID string, options container.RemoveOptions) error
 	ContainerInspect(ctx context.Context, containerID string) (container.InspectResponse, error)
+	ContainerStats(ctx context.Context, containerID string, stream bool) (container.StatsResponseReader, error)
 	ContainerExecCreate(ctx context.Context, containerID string, config container.ExecOptions) (container.ExecCreateResponse, error)
 	ContainerExecAttach(ctx context.Context, execID string, config container.ExecAttachOptions) (types.HijackedResponse, error)
 	ContainerExecInspect(ctx context.Context, execID string) (container.ExecInspect, error)
@@ -327,8 +328,15 @@ func (d *DockerProvider) Create(ctx context.Context, cfg agent.SandboxConfig) (*
 			// and run it. /var/tmp is the exec-allowed scratch dir for tools
 			// that need to compile and exec in their tempdir; TMPDIR points
 			// here by default (see defaultScratchDir).
-			"/tmp":     "rw,noexec,nosuid,size=1073741824",
-			"/var/tmp": "rw,exec,nosuid,size=1073741824",
+			//
+			// Sizes count against the container's memory cgroup as soon as
+			// processes touch them, so they directly subtract from
+			// SANDBOX_MEMORY_LIMIT_MB. Keeping them small reserves more of
+			// that budget for the agent's actual heap. /var/tmp is the
+			// larger of the two because TMPDIR points there and most
+			// compile/test tooling churns scratch files there.
+			"/tmp":     "rw,noexec,nosuid,size=268435456", // 256 MiB
+			"/var/tmp": "rw,exec,nosuid,size=536870912",   // 512 MiB
 		},
 	}
 

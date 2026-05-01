@@ -39,10 +39,12 @@ Deploy/provision scripts now read bucket defaults from one shared file:
 
 How shared-CPU (CPX) counts were chosen:
 
-- Base sandbox memory default is 4096 MB.
-- The first-order limit is roughly `floor(node_ram_gb / 4)`.
+- Base sandbox memory default is 3072 MB (3 GB cgroup limit). Tmpfs at /tmp
+  (256 MiB) + /var/tmp (512 MiB) consumes up to ~768 MB of that, leaving
+  ~2.25 GB for the agent's actual heap.
+- The first-order limit is roughly `floor(node_ram_gb / 3)`.
 - We cap by available vCPU when that is lower.
-- In short: `WORKER_PROCESS_COUNT ~= min(vCPU, floor(RAM_GB / 4))`.
+- In short: `WORKER_PROCESS_COUNT ~= min(vCPU, floor(RAM_GB / 3))`.
 
 This is intentionally not ultra-conservative: it targets full utilization at the default sandbox memory size.
 
@@ -65,23 +67,23 @@ Built-in bucket presets used by deploy/provision scripts:
   - `hcloud-cpx11` → `WORKER_PROCESS_COUNT=1`
   - `hcloud-cpx21` → `WORKER_PROCESS_COUNT=1`
   - `hcloud-cpx31` → `WORKER_PROCESS_COUNT=2`
-  - `hcloud-cpx41` → `WORKER_PROCESS_COUNT=4`
-  - `hcloud-cpx51` → `WORKER_PROCESS_COUNT=8`
+  - `hcloud-cpx41` → `WORKER_PROCESS_COUNT=5`
+  - `hcloud-cpx51` → `WORKER_PROCESS_COUNT=10`
 - Hetzner CCX (dedicated CPU):
   - `hcloud-ccx13` → `WORKER_PROCESS_COUNT=2`
-  - `hcloud-ccx23` → `WORKER_PROCESS_COUNT=4`
-  - `hcloud-ccx33` → `WORKER_PROCESS_COUNT=8`
-  - `hcloud-ccx43` → `WORKER_PROCESS_COUNT=16`
-  - `hcloud-ccx53` → `WORKER_PROCESS_COUNT=32`
-  - `hcloud-ccx63` → `WORKER_PROCESS_COUNT=48`
-- `ec2-t3.xlarge` → `WORKER_PROCESS_COUNT=4`
-- `ec2-c6i.2xlarge` → `WORKER_PROCESS_COUNT=6`
+  - `hcloud-ccx23` → `WORKER_PROCESS_COUNT=5`
+  - `hcloud-ccx33` → `WORKER_PROCESS_COUNT=10`
+  - `hcloud-ccx43` → `WORKER_PROCESS_COUNT=21`
+  - `hcloud-ccx53` → `WORKER_PROCESS_COUNT=42`
+  - `hcloud-ccx63` → `WORKER_PROCESS_COUNT=64`
+- `ec2-t3.xlarge` → `WORKER_PROCESS_COUNT=5`
+- `ec2-c6i.2xlarge` → `WORKER_PROCESS_COUNT=8`
 - `ec2-c6i.4xlarge` → `WORKER_PROCESS_COUNT=10`
 
 Per-sandbox defaults are intentionally consistent across buckets unless you explicitly override:
 
 - `SANDBOX_CPU_LIMIT=2`
-- `SANDBOX_MEMORY_LIMIT_MB=4096`
+- `SANDBOX_MEMORY_LIMIT_MB=3072`
 - `SANDBOX_DISK_LIMIT_GB=10`
 
 `max_concurrent_runs` is a separate org-level execution policy in app settings, not a host-capacity bucket knob.
@@ -102,3 +104,16 @@ If a knob is omitted, runtime defaults still apply.
 - Increased p95/p99 run duration after increasing process count
 
 If you see these, lower `WORKER_PROCESS_COUNT` first, then lower per-sandbox CPU/memory limits if needed.
+
+## Verifying density with runtime metrics
+
+Workers emit OTel histograms (`container.memory.used`, `container.cpu.used`, `container.memory.utilization`, `container.cpu.utilization`) sampled every `RUNTIME_STATS_INTERVAL` (default 30s, set to `0` to disable). After bumping `WORKER_PROCESS_COUNT` or lowering `SANDBOX_MEMORY_LIMIT_MB`, watch p95 of `container.memory.utilization` for at least a week of real workload before treating the new size as proven. Sustained p95 above ~0.85 means you're one bad turn away from OOM kills; pull back.
+
+**gVisor (runsc) caveat.** Production workers run gVisor by default. gVisor's stat surface is partial: `container.memory.used` is reported but with coarse granularity, and CPU throttling stats are zero. The histograms are still useful for relative comparison ("did p95 mem go up after the bucket bump?"), but treat absolute numbers as approximate. When in doubt, double-check on a runc dev worker.
+
+## Migration notes
+
+The default `SANDBOX_MEMORY_LIMIT_MB` was lowered from `4096` to `3072` (paired with smaller tmpfs sizes so the agent's actual usable RAM went up, not down). Operators upgrading from earlier versions:
+
+- If you run workloads that genuinely need >3 GB cgroup headroom (large PM bootstraps on monorepos, agents that load big indices into memory), set `SANDBOX_MEMORY_LIMIT_MB=4096` explicitly to preserve old behavior.
+- If you also run with the old `WORKER_PROCESS_COUNT` and bump it per the new bucket presets, do it in one step per node — don't increase density and lower the per-sandbox limit at the same time on a node serving live traffic.

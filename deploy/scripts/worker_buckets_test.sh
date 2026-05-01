@@ -25,7 +25,7 @@ test_bucket_map_uses_bucket_then_host_with_colon_separator() {
   reset_worker_env
   WORKER_BUCKET_MAP="hcloud-ccx23:87.99.158.39,hcloud-cpx31:10.0.0.5"
   apply_worker_bucket_overrides worker "87.99.158.39"
-  assert_eq "4" "${WORKER_PROCESS_COUNT:-}" "bucket map should match bucket:host entries"
+  assert_eq "5" "${WORKER_PROCESS_COUNT:-}" "bucket map should match bucket:host entries"
 }
 
 test_bucket_map_does_not_override_other_hosts() {
@@ -48,7 +48,7 @@ test_bucket_map_sets_sandbox_defaults() {
   WORKER_BUCKET_MAP="hcloud-cpx31:87.99.158.39"
   apply_worker_bucket_overrides worker "87.99.158.39"
   assert_eq "2" "${SANDBOX_CPU_LIMIT:-}" "worker bucket overrides should set default sandbox CPU"
-  assert_eq "4096" "${SANDBOX_MEMORY_LIMIT_MB:-}" "worker bucket overrides should set default sandbox memory"
+  assert_eq "3072" "${SANDBOX_MEMORY_LIMIT_MB:-}" "worker bucket overrides should set default sandbox memory"
   assert_eq "10" "${SANDBOX_DISK_LIMIT_GB:-}" "worker bucket overrides should set default sandbox disk"
 }
 
@@ -63,7 +63,7 @@ test_bucket_map_uses_default_bucket_when_set() {
   reset_worker_env
   WORKER_DEFAULT_BUCKET="hcloud-ccx23"
   apply_worker_bucket_overrides worker "87.99.158.40"
-  assert_eq "4" "${WORKER_PROCESS_COUNT:-}" "default bucket should still work for unmapped workers"
+  assert_eq "5" "${WORKER_PROCESS_COUNT:-}" "default bucket should still work for unmapped workers"
 }
 
 test_bucket_map_uses_builtin_fallback_without_mapping() {
