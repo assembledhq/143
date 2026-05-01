@@ -25,7 +25,6 @@ import (
 	"github.com/assembledhq/143/internal/crypto"
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/llm"
-	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/observability"
 	"github.com/assembledhq/143/internal/services/agent"
 	"github.com/assembledhq/143/internal/services/claudecodeauth"
@@ -35,12 +34,11 @@ import (
 	"github.com/assembledhq/143/internal/services/ingestion"
 	"github.com/assembledhq/143/internal/services/preview"
 	"github.com/assembledhq/143/internal/services/sandbox"
-	"github.com/assembledhq/143/internal/services/sessionreview"
 	"github.com/assembledhq/143/internal/services/storage"
 	threadservice "github.com/assembledhq/143/internal/services/thread"
 )
 
-func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, sentryReporter observability.Reporter, codexAuthSvc *codexauth.Service, claudeCodeAuthSvc *claudecodeauth.Service, llmClient llm.Client, fileReader sandbox.FileReader, canceller handlers.SessionCanceller, previewProvider preview.PreviewCapableProvider, snapshotExecutor preview.SnapshotExecutor, sandboxProvider agent.SandboxProvider, snapshotStore storage.SnapshotStore, orgSettingsInvalidator handlers.OrgSettingsInvalidator, shutdownCh <-chan struct{}, redisClient *cache.Client, sessionStreams *cache.SessionStreams, reviewModes sessionreview.ReviewModeProvider) (*chi.Mux, *http.Server, *preview.RecycleWorker, io.Closer, *preview.Manager, error) {
+func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, sentryReporter observability.Reporter, codexAuthSvc *codexauth.Service, claudeCodeAuthSvc *claudecodeauth.Service, llmClient llm.Client, fileReader sandbox.FileReader, canceller handlers.SessionCanceller, previewProvider preview.PreviewCapableProvider, snapshotExecutor preview.SnapshotExecutor, sandboxProvider agent.SandboxProvider, snapshotStore storage.SnapshotStore, orgSettingsInvalidator handlers.OrgSettingsInvalidator, shutdownCh <-chan struct{}, redisClient *cache.Client, sessionStreams *cache.SessionStreams) (*chi.Mux, *http.Server, *preview.RecycleWorker, io.Closer, *preview.Manager, error) {
 	// Create stores
 	orgStore := db.NewOrganizationStore(pool)
 	userStore := db.NewUserStore(pool)
@@ -317,21 +315,6 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	sessionReviewCommentHandler := handlers.NewSessionReviewCommentHandler(sessionReviewCommentStore, sessionStore, logger)
 	sessionReviewCommentHandler.SetAuditEmitter(auditEmitter)
 	sessionReviewCommentHandler.SetMessageAndJobStores(sessionMessageStore, jobStore)
-	// Session-native review service. The reviewModes provider is injected
-	// from main.go so it sees the same adapter map the orchestrator uses;
-	// when nil (tests, etc.), no agents are advertised as review-capable.
-	if reviewModes == nil {
-		reviewModes = func(models.AgentType) []models.SessionReviewMode { return nil }
-	}
-	sessionReviewService := sessionreview.NewService(sessionreview.Deps{
-		Sessions:        sessionStore,
-		SessionMessages: sessionMessageStore,
-		Jobs:            jobStore,
-		ReviewModes:     reviewModes,
-		Logger:          logger,
-	})
-	sessionReviewHandler := handlers.NewSessionReviewHandler(sessionReviewService, logger)
-	sessionReviewHandler.SetAuditEmitter(auditEmitter)
 	sessionFileHandler := handlers.NewSessionFileHandler(sessionStore, fileReader, logger)
 
 	// Preview system: inspector, snapshot cache, HMR watcher, manager, recycler, gateway.
@@ -444,7 +427,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 		}()
 	}
 
-	previewHandler := handlers.NewPreviewHandler(previewManager, previewStore, sessionStore, fileReader, sandboxProvider, snapshotStore, logger)
+	previewHandler := handlers.NewPreviewHandler(previewManager, previewStore, sessionStore, repoStore, fileReader, sandboxProvider, snapshotStore, logger)
 	previewHandler.SetAuditEmitter(auditEmitter)
 	previewHandler.SetWorkerRuntime(workerSelector, workerClient, cfg.NodeID)
 	internalPreviewHandler := handlers.NewInternalPreviewHandler(previewHandler, previewManager, cfg.NodeID, cfg.SessionSecret, logger)
@@ -641,7 +624,6 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Get("/api/v1/sessions/{id}/threads/{tid}/messages", sessionThreadHandler.GetThreadMessages)
 				r.Get("/api/v1/sessions/{id}/threads/{tid}/logs", sessionThreadHandler.GetThreadLogs)
 				r.Get("/api/v1/sessions/{id}/review-comments", sessionReviewCommentHandler.List)
-				r.Get("/api/v1/sessions/{id}/review-capabilities", sessionReviewHandler.Capabilities)
 				r.Get("/api/v1/sessions/{id}/usage", usageHandler.ListBySession)
 				r.Get("/api/v1/usage", usageHandler.GetSummary)
 				r.Get("/api/v1/sessions/{id}/preview", previewHandler.GetPreview)
@@ -748,7 +730,6 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Post("/api/v1/sessions/{id}/threads/{tid}/messages", sessionThreadHandler.SendThreadMessage)
 				r.Post("/api/v1/sessions/{id}/threads/{tid}/end", sessionThreadHandler.EndThread)
 				r.Post("/api/v1/sessions/{id}/review-comments", sessionReviewCommentHandler.Create)
-				r.Post("/api/v1/sessions/{id}/review", sessionReviewHandler.Start)
 				r.Post("/api/v1/sessions/{id}/preview", previewHandler.StartPreview)
 				r.Delete("/api/v1/sessions/{id}/preview", previewHandler.StopPreview)
 				r.Post("/api/v1/sessions/{id}/preview/restart", previewHandler.RestartPreview)

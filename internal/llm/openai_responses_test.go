@@ -26,7 +26,7 @@ func TestOpenAIResponsesProvider_Complete_Success(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(responsesResponse{
 			Output: []responsesOutput{{
-				Type: "message",
+				Type:    "message",
 				Content: []responsesOutputContent{{Type: "output_text", Text: "hello from responses"}},
 			}},
 		})

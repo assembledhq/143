@@ -27,6 +27,7 @@ type PreviewHandler struct {
 	manager         *preview.Manager
 	store           *db.PreviewStore
 	sessionStore    *db.SessionStore
+	repoStore       *db.RepositoryStore
 	fileReader      sandbox.FileReader
 	sandboxProvider agent.SandboxProvider
 	snapshots       storage.SnapshotStore
@@ -50,11 +51,12 @@ type PreviewHandler struct {
 // snapshot into it so the preview has a live workspace to run against.
 // Both may be nil in test builds; the handler falls back to
 // "NO_SANDBOX"/"SNAPSHOT_EXPIRED" errors in that case.
-func NewPreviewHandler(manager *preview.Manager, store *db.PreviewStore, sessionStore *db.SessionStore, fileReader sandbox.FileReader, sandboxProvider agent.SandboxProvider, snapshots storage.SnapshotStore, logger zerolog.Logger) *PreviewHandler {
+func NewPreviewHandler(manager *preview.Manager, store *db.PreviewStore, sessionStore *db.SessionStore, repoStore *db.RepositoryStore, fileReader sandbox.FileReader, sandboxProvider agent.SandboxProvider, snapshots storage.SnapshotStore, logger zerolog.Logger) *PreviewHandler {
 	return &PreviewHandler{
 		manager:         manager,
 		store:           store,
 		sessionStore:    sessionStore,
+		repoStore:       repoStore,
 		fileReader:      fileReader,
 		sandboxProvider: sandboxProvider,
 		snapshots:       snapshots,
@@ -246,6 +248,32 @@ type acquireSandboxResult struct {
 	Err error
 }
 
+// resolveSandboxWorkDir returns the absolute path inside the sandbox where
+// the session's repo is checked out. Mirrors orchestrator.go's logic
+// (HomeDir + "/" + slug) so file-reads against sb.WorkDir resolve to the same
+// place the agent uses. Falls back to /workspace when there's no attached
+// repo or the lookup fails — losing auto-detect is preferable to refusing to
+// hydrate at all.
+func (h *PreviewHandler) resolveSandboxWorkDir(ctx context.Context, session *models.Session) string {
+	defaults := agent.DefaultSandboxConfig()
+	if session.RepositoryID == nil || h.repoStore == nil {
+		return defaults.WorkDir
+	}
+	repo, err := h.repoStore.GetByID(ctx, session.OrgID, *session.RepositoryID)
+	if err != nil {
+		h.logger.Warn().Err(err).
+			Str("session_id", session.ID.String()).
+			Str("repository_id", session.RepositoryID.String()).
+			Msg("preview: repo lookup for sandbox WorkDir failed; falling back to default")
+		return defaults.WorkDir
+	}
+	slug := agent.SlugForRepo(repo.FullName)
+	if slug == "" {
+		return defaults.WorkDir
+	}
+	return defaults.HomeDir + "/" + slug
+}
+
 // acquireSandbox resolves a live sandbox for a preview start, picking between
 // three strategies:
 //   - Reuse: session.ContainerID is set; attach by ID.
@@ -254,6 +282,8 @@ type acquireSandboxResult struct {
 //   - Expired/Unavailable: no container and no usable snapshot; caller should
 //     return 410 only when the reaper explicitly expired the snapshot.
 func (h *PreviewHandler) acquireSandbox(ctx context.Context, orgID uuid.UUID, session *models.Session) acquireSandboxResult {
+	workDir := h.resolveSandboxWorkDir(ctx, session)
+
 	// Reuse is only safe when the row believes the container is actually
 	// running. A lingering container_id from a crashed worker or a session
 	// whose sandbox_state has since moved to 'snapshotted'/'destroyed' should
@@ -263,7 +293,7 @@ func (h *PreviewHandler) acquireSandbox(ctx context.Context, orgID uuid.UUID, se
 		candidate := &agent.Sandbox{
 			ID:        *session.ContainerID,
 			Provider:  "docker",
-			WorkDir:   "/workspace",
+			WorkDir:   workDir,
 			SessionID: session.ID.String(),
 			OrgID:     session.OrgID.String(),
 			Purpose:   "preview",
@@ -317,13 +347,13 @@ func (h *PreviewHandler) acquireSandbox(ctx context.Context, orgID uuid.UUID, se
 	}
 
 	// Hydrate: build a SandboxConfig matching what the orchestrator uses so
-	// the restored container has consistent resource limits and paths. Note
-	// that WorkDir deliberately stays as the default — the snapshot tar
-	// restores at absolute paths (it was taken with tar including abs
-	// paths), so WorkDir only affects where ad-hoc commands run, and a
-	// subsequent agent turn will wrap the sandbox with the repo-specific
-	// WorkDir before executing.
+	// the restored container has consistent resource limits and paths.
+	// WorkDir resolves from the session's repo (HomeDir + "/" + slug) so
+	// downstream sandbox commands — notably readWorkspacePreviewConfig's
+	// ReadFile against sb.WorkDir + "/.143/preview.json" — land in the same
+	// path the orchestrator uses, not the legacy /workspace default.
 	sandboxCfg := agent.DefaultSandboxConfig()
+	sandboxCfg.WorkDir = workDir
 	sandboxCfg.SessionID = session.ID.String()
 	sandboxCfg.OrgID = session.OrgID.String()
 	sandboxCfg.Purpose = "preview_hydrate"
@@ -395,6 +425,71 @@ func (h *PreviewHandler) requireInspector(w http.ResponseWriter, r *http.Request
 	return inspector, true
 }
 
+// classifyLaunchError converts a preview-launch error into the most specific
+// HTTP error code we can. Before this existed, every launch failure surfaced
+// as a generic 422 PREVIEW_START_FAILED with the message "failed to start
+// preview" — the actual cause (missing image, unhealthy container, init
+// script crash, readiness timeout) was logged but never reached the user, so
+// the frontend rendered the unhelpful "Failed to start preview: failed to
+// start preview".
+//
+// We pick out the provider sentinels from internal/services/preview/errors.go
+// and map each to a stable, debuggable error code. The user-visible message
+// always includes the underlying cause so an operator can act on it without
+// digging through Grafana.
+func classifyLaunchError(err error) *previewHTTPError {
+	if err == nil {
+		return nil
+	}
+	cause := err.Error()
+	switch {
+	case errors.Is(err, preview.ErrInfraImageUnavailable):
+		return newPreviewHTTPError(
+			http.StatusUnprocessableEntity,
+			"PREVIEW_INFRA_IMAGE_UNAVAILABLE",
+			"preview infrastructure image is not available on this worker. The image could not be pulled from its registry — check the worker's network egress and registry credentials. Details: "+cause,
+			err,
+		)
+	case errors.Is(err, preview.ErrInfraStartFailed):
+		return newPreviewHTTPError(
+			http.StatusUnprocessableEntity,
+			"PREVIEW_INFRA_START_FAILED",
+			"preview infrastructure container failed to start. Details: "+cause,
+			err,
+		)
+	case errors.Is(err, preview.ErrInfraUnhealthy):
+		return newPreviewHTTPError(
+			http.StatusUnprocessableEntity,
+			"PREVIEW_INFRA_UNHEALTHY",
+			"preview infrastructure container did not become healthy in time. The container started but its health check (e.g. pg_isready) never passed. Details: "+cause,
+			err,
+		)
+	case errors.Is(err, preview.ErrInitScriptFailed):
+		return newPreviewHTTPError(
+			http.StatusUnprocessableEntity,
+			"PREVIEW_INIT_SCRIPT_FAILED",
+			"preview init script failed. Check the script referenced in .143/preview.json. Details: "+cause,
+			err,
+		)
+	case errors.Is(err, preview.ErrServiceNotReady):
+		return newPreviewHTTPError(
+			http.StatusUnprocessableEntity,
+			"PREVIEW_SERVICE_NOT_READY",
+			"preview service did not pass its readiness probe. The service may have crashed at boot, taken too long to start, or be listening on a different port than declared in .143/preview.json. Details: "+cause,
+			err,
+		)
+	default:
+		// Pass the underlying cause through as the message so the frontend
+		// shows something actionable instead of "failed to start preview".
+		return newPreviewHTTPError(
+			http.StatusUnprocessableEntity,
+			"PREVIEW_START_FAILED",
+			"failed to start preview: "+cause,
+			err,
+		)
+	}
+}
+
 // =============================================================================
 // POST /api/v1/sessions/{id}/preview — Start a preview
 // =============================================================================
@@ -405,13 +500,18 @@ type startPreviewRequest struct {
 	ProfileName   string                `json:"profile_name"`
 }
 
-func defaultPreviewConfig() *models.PreviewConfig {
+// reservationPlaceholderConfig returns a minimal valid config used solely to
+// satisfy ValidateConfig at reservation time when the client hasn't supplied
+// one. The real config (workspace .143/preview.json) is loaded after hydrate
+// and either replaces this placeholder or causes the reservation to abort
+// with PREVIEW_NO_CONFIG. This config is never executed.
+func reservationPlaceholderConfig() *models.PreviewConfig {
 	return &models.PreviewConfig{
-		Name:    "default",
+		Name:    "placeholder",
 		Primary: "app",
 		Services: map[string]models.ServiceConfig{
 			"app": {
-				Command: []string{"npm", "start"},
+				Command: []string{"true"},
 				Port:    3000,
 				Ready: models.ReadinessProbe{
 					HTTPPath: "/",
@@ -444,12 +544,14 @@ func (h *PreviewHandler) startPreviewLocal(ctx context.Context, orgID, userID, s
 	// container behind, and (b) acquires preview_holding_container=TRUE before
 	// hydrate publishes container_id, so a concurrent turn release's
 	// FinalizeContainerDestroy sees our hold and leaves the freshly-hydrated
-	// container alone. The config passed here is "initial" — if the client
-	// didn't supply one, we fall back to defaults and LaunchPreview will
-	// overwrite the row if workspace autodetect resolves something different.
+	// container alone. When the client didn't supply a config we reserve with
+	// a benign placeholder solely to satisfy ValidateConfig; the real config
+	// is loaded post-hydrate from the workspace and either replaces the
+	// placeholder before LaunchPreview or aborts the reservation with
+	// PREVIEW_NO_CONFIG. The placeholder is never executed.
 	initialConfig := body.Config
 	if initialConfig == nil {
-		initialConfig = defaultPreviewConfig()
+		initialConfig = reservationPlaceholderConfig()
 	}
 	input := preview.StartPreviewInput{
 		SessionID:     sessionID,
@@ -506,25 +608,26 @@ func (h *PreviewHandler) startPreviewLocal(ctx context.Context, orgID, userID, s
 	}
 
 	if body.Config == nil {
-		// Auto-detect: first try to read .143/preview.json from the session's
-		// workspace so repos with a committed config just work. Fall back to a
-		// Node.js default (npm start, port 3000) only if no config is present.
+		// Auto-detect: read .143/preview.json from the session's workspace.
+		// We deliberately do NOT fall back to a generic "npm start on :3000"
+		// default — for any repo without that file, that fallback exits within
+		// seconds and the user waits ~90s for the readiness probe to give up.
+		// Returning a clear PREVIEW_NO_CONFIG error is strictly more useful.
 		cfg, err := h.readWorkspacePreviewConfig(ctx, sb, sessionID)
 		if err != nil {
-			// Infrastructure failure (docker exec, sandbox gone, etc.) — do
-			// not silently swap in Node.js defaults, which would start the
-			// wrong preview for a non-Node project and time out after minutes.
 			h.manager.AbortReservation(ctx, reservation, hydratedID, fmt.Sprintf("read workspace config: %v", err))
 			return nil, newPreviewHTTPError(http.StatusInternalServerError, "PREVIEW_CONFIG_READ_FAILED", "failed to read preview config from workspace", err)
 		}
-		if cfg != nil {
-			input.Config = cfg
-		} else {
-			h.logger.Info().
-				Str("session_id", sessionID.String()).
-				Msg("no preview config provided or committed, using Node.js defaults (npm start, port 3000)")
-			// input.Config already holds defaults from the reservation.
+		if cfg == nil {
+			h.manager.AbortReservation(ctx, reservation, hydratedID, "no committed preview config")
+			return nil, newPreviewHTTPError(
+				http.StatusUnprocessableEntity,
+				"PREVIEW_NO_CONFIG",
+				"this repo has no .143/preview.json committed. Add one (see docs/guides/previews.md) so the preview knows what command to run.",
+				nil,
+			)
 		}
+		input.Config = cfg
 	}
 	input.Sandbox = sb
 
@@ -532,7 +635,7 @@ func (h *PreviewHandler) startPreviewLocal(ctx context.Context, orgID, userID, s
 	if err != nil {
 		h.manager.AbortReservation(ctx, reservation, hydratedID, fmt.Sprintf("launch: %v", err))
 		h.logger.Warn().Err(err).Str("session_id", sessionID.String()).Msg("preview launch failed")
-		return nil, newPreviewHTTPError(http.StatusUnprocessableEntity, "PREVIEW_START_FAILED", "failed to start preview", err)
+		return nil, classifyLaunchError(err)
 	}
 
 	if h.localNodeID != "" && (acq.Hydrated || (session.ContainerID != nil && *session.ContainerID != "")) {

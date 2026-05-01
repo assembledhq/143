@@ -3,7 +3,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { api } from "@/lib/api";
 import { queryKeys } from "@/lib/query-keys";
-import { isAgentConnected } from "@/components/autopilot/autopilot-helpers";
+import { isAgentConnected } from "@/lib/agents";
 import type { OrgSettings, Integration, Repository, ListResponse, Organization, SingleResponse } from "@/lib/types";
 
 export function useSetupStatus() {

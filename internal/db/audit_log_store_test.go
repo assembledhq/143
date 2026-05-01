@@ -217,7 +217,7 @@ func TestAuditLogStore_List(t *testing.T) {
 					{
 						ID: 2, OrgID: orgID, ActorType: "system",
 						ActorID: "pm_agent",
-						Action: "pm.plan_created", ResourceType: "pm_plan",
+						Action:  "pm.plan_created", ResourceType: "pm_plan",
 						CreatedAt: now,
 					},
 				}

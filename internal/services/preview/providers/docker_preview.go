@@ -2,8 +2,10 @@
 package providers
 
 import (
+	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net"
@@ -13,11 +15,15 @@ import (
 	"sync"
 	"time"
 
+	cerrdefs "github.com/containerd/errdefs"
 	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/container"
+	"github.com/docker/docker/api/types/image"
 	"github.com/docker/docker/api/types/network"
+	"github.com/docker/docker/client"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/rs/zerolog"
+	"golang.org/x/sync/singleflight"
 
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/services/agent"
@@ -37,7 +43,18 @@ type DockerPreviewClient interface {
 	ContainerExecCreate(ctx context.Context, containerID string, config container.ExecOptions) (container.ExecCreateResponse, error)
 	ContainerExecAttach(ctx context.Context, execID string, config container.ExecAttachOptions) (types.HijackedResponse, error)
 	ContainerExecInspect(ctx context.Context, execID string) (container.ExecInspect, error)
+	// ImageInspect / ImagePull are used to lazy-pull preview infrastructure
+	// images on first use, so worker hosts don't need to pre-pull every
+	// supported template (postgres:17-alpine, redis:7-alpine, mysql:8, …).
+	ImageInspect(ctx context.Context, ref string, opts ...client.ImageInspectOption) (image.InspectResponse, error)
+	ImagePull(ctx context.Context, ref string, options image.PullOptions) (io.ReadCloser, error)
 }
+
+// imagePullTimeout bounds how long a single infrastructure image pull can
+// take before we give up. 5 minutes is generous for postgres-alpine over a
+// reasonable connection but stops a wedged registry from blocking the
+// preview start indefinitely.
+const imagePullTimeout = 5 * time.Minute
 
 // SandboxExecutor defines the exec interface needed from the sandbox provider
 // for running preview service processes inside the sandbox.
@@ -73,6 +90,11 @@ type DockerPreviewProvider struct {
 
 	mu       sync.RWMutex
 	previews map[string]*previewState // handle → state
+
+	// imagePulls deduplicates concurrent pulls of the same image ref. Two
+	// preview starts hitting an absent image at the same moment share a
+	// single pull instead of fanning out N redundant streams.
+	imagePulls singleflight.Group
 }
 
 // previewState tracks all running components of a preview.
@@ -103,7 +125,18 @@ type serviceState struct {
 	port   int
 	status models.PreviewServiceStatus
 	err    string
+
+	// outputTail holds the last serviceTailLines stdout/stderr lines captured
+	// from the service process. It is appended to from the ExecStream onLine
+	// callback under d.mu and is surfaced to the observer when the service
+	// fails so the user can see why it exited.
+	outputTail []string
 }
+
+// serviceTailLines is the size of the per-service stdout/stderr ring buffer
+// that the provider keeps so it can replay the tail to the observer when a
+// service exits non-zero.
+const serviceTailLines = 200
 
 // DockerPreviewOption configures a DockerPreviewProvider.
 type DockerPreviewOption func(*DockerPreviewProvider)
@@ -139,7 +172,7 @@ func NewDockerPreviewProvider(
 // StartPreview
 // =============================================================================
 
-func (d *DockerPreviewProvider) StartPreview(ctx context.Context, sb *agent.Sandbox, cfg *models.PreviewConfig, extraEnv map[string]string) (*preview.PreviewHandle, error) {
+func (d *DockerPreviewProvider) StartPreview(ctx context.Context, sb *agent.Sandbox, cfg *models.PreviewConfig, extraEnv map[string]string, observer preview.ServiceObserver) (*preview.PreviewHandle, error) {
 	handle, err := generateHandle()
 	if err != nil {
 		return nil, fmt.Errorf("generate preview handle: %w", err)
@@ -189,7 +222,7 @@ func (d *DockerPreviewProvider) StartPreview(ctx context.Context, sb *agent.Sand
 		tmpl, _ := preview.LookupInfraTemplate(infraCfg.Template)
 		if err := d.waitForInfraHealth(ctx, ih.ContainerID, tmpl); err != nil {
 			d.cleanupState(handle)
-			return nil, fmt.Errorf("infrastructure %q health check failed: %w", name, err)
+			return nil, fmt.Errorf("%w: infrastructure %q (%s): %v", preview.ErrInfraUnhealthy, name, infraCfg.Template, err)
 		}
 		d.logger.Info().Str("infra", name).Str("template", infraCfg.Template).Msg("infrastructure healthy")
 	}
@@ -202,7 +235,7 @@ func (d *DockerPreviewProvider) StartPreview(ctx context.Context, sb *agent.Sand
 		ih := state.infra[name]
 		if err := d.runInitScript(ctx, sb, ih, infraCfg); err != nil {
 			d.cleanupState(handle)
-			return nil, fmt.Errorf("init script for %q failed: %w", name, err)
+			return nil, fmt.Errorf("%w: infrastructure %q script %q: %v", preview.ErrInitScriptFailed, name, infraCfg.InitScript, err)
 		}
 		d.logger.Info().Str("infra", name).Str("script", infraCfg.InitScript).Msg("init script completed")
 	}
@@ -217,7 +250,7 @@ func (d *DockerPreviewProvider) StartPreview(ctx context.Context, sb *agent.Sand
 		if name == cfg.Primary {
 			continue // primary starts last
 		}
-		if err := d.startService(svcCtx, state, name, svcCfg, svcEnvs[name]); err != nil {
+		if err := d.startService(svcCtx, state, name, svcCfg, svcEnvs[name], observer); err != nil {
 			d.cleanupState(handle)
 			return nil, fmt.Errorf("start service %q: %w", name, err)
 		}
@@ -225,7 +258,7 @@ func (d *DockerPreviewProvider) StartPreview(ctx context.Context, sb *agent.Sand
 	// Start primary service.
 	if primaryCfg, ok := cfg.Services[cfg.Primary]; ok {
 		primaryPort = primaryCfg.Port
-		if err := d.startService(svcCtx, state, cfg.Primary, primaryCfg, svcEnvs[cfg.Primary]); err != nil {
+		if err := d.startService(svcCtx, state, cfg.Primary, primaryCfg, svcEnvs[cfg.Primary], observer); err != nil {
 			d.cleanupState(handle)
 			return nil, fmt.Errorf("start primary service %q: %w", cfg.Primary, err)
 		}
@@ -247,14 +280,16 @@ func (d *DockerPreviewProvider) StartPreview(ctx context.Context, sb *agent.Sand
 			if primaryCfg.Ready.TimeoutSeconds > 0 {
 				timeout = time.Duration(primaryCfg.Ready.TimeoutSeconds) * time.Second
 			}
-			if err := d.waitForReadiness(ctx, sb, primaryCfg.Port, primaryCfg.Ready.HTTPPath, timeout); err != nil {
+			if err := d.waitForReadiness(ctx, state, cfg.Primary, primaryCfg.Port, primaryCfg.Ready.HTTPPath, timeout); err != nil {
 				d.cleanupState(handle)
-				return nil, fmt.Errorf("readiness probe for primary %q failed: %w", cfg.Primary, err)
+				return nil, fmt.Errorf("%w: primary service %q (port %d): %v", preview.ErrServiceNotReady, cfg.Primary, primaryCfg.Port, err)
 			}
 			d.mu.Lock()
 			state.services[cfg.Primary].status = models.PreviewServiceStatusReady
+			pid := state.services[cfg.Primary].pid
 			d.mu.Unlock()
 			d.logger.Info().Str("service", cfg.Primary).Int("port", primaryCfg.Port).Msg("primary service ready (progressive)")
+			notifyServiceReady(observer, cfg.Primary, primaryCfg.Port, pid)
 			partiallyReady = true
 		}
 
@@ -271,21 +306,27 @@ func (d *DockerPreviewProvider) StartPreview(ctx context.Context, sb *agent.Sand
 					timeout = time.Duration(svcCfg.Ready.TimeoutSeconds) * time.Second
 				}
 				bgCtx, cancel := context.WithTimeout(svcCtx, timeout)
-				if err := d.waitForReadiness(bgCtx, sb, svcCfg.Port, svcCfg.Ready.HTTPPath, timeout); err != nil {
+				if err := d.waitForReadiness(bgCtx, state, name, svcCfg.Port, svcCfg.Ready.HTTPPath, timeout); err != nil {
 					d.logger.Warn().Err(err).Str("service", name).Msg("support service readiness failed (progressive)")
 					d.mu.Lock()
+					var tail []string
 					if ss, ok := state.services[name]; ok {
 						ss.status = models.PreviewServiceStatusFailed
 						ss.err = err.Error()
+						tail = append([]string(nil), ss.outputTail...)
 					}
 					d.mu.Unlock()
+					notifyServiceFailed(observer, name, err.Error(), tail)
 				} else {
 					d.mu.Lock()
+					var pid int
 					if ss, ok := state.services[name]; ok {
 						ss.status = models.PreviewServiceStatusReady
+						pid = ss.pid
 					}
 					d.mu.Unlock()
 					d.logger.Info().Str("service", name).Int("port", svcCfg.Port).Msg("support service ready (progressive)")
+					notifyServiceReady(observer, name, svcCfg.Port, pid)
 				}
 				cancel()
 			}
@@ -297,14 +338,16 @@ func (d *DockerPreviewProvider) StartPreview(ctx context.Context, sb *agent.Sand
 			if svcCfg.Ready.TimeoutSeconds > 0 {
 				timeout = time.Duration(svcCfg.Ready.TimeoutSeconds) * time.Second
 			}
-			if err := d.waitForReadiness(ctx, sb, svcCfg.Port, svcCfg.Ready.HTTPPath, timeout); err != nil {
+			if err := d.waitForReadiness(ctx, state, name, svcCfg.Port, svcCfg.Ready.HTTPPath, timeout); err != nil {
 				d.cleanupState(handle)
-				return nil, fmt.Errorf("readiness probe for %q failed: %w", name, err)
+				return nil, fmt.Errorf("%w: service %q (port %d): %v", preview.ErrServiceNotReady, name, svcCfg.Port, err)
 			}
 			d.mu.Lock()
 			state.services[name].status = models.PreviewServiceStatusReady
+			pid := state.services[name].pid
 			d.mu.Unlock()
 			d.logger.Info().Str("service", name).Int("port", svcCfg.Port).Msg("service ready")
+			notifyServiceReady(observer, name, svcCfg.Port, pid)
 		}
 	}
 
@@ -471,6 +514,15 @@ func (d *DockerPreviewProvider) provisionInfra(
 	}
 	containerName := fmt.Sprintf("preview-%s-%s", infraName, handlePrefix)
 
+	// Ensure the image is on the host before asking Docker to create the
+	// container. Worker hosts only pre-pull the 143-server / 143-sandbox /
+	// headless-shell images; infrastructure templates (postgres-N,
+	// redis-N, mysql-N) are pulled lazily on first use so adding a new
+	// template doesn't require re-provisioning workers.
+	if err := d.ensureImage(ctx, tmpl.Image); err != nil {
+		return nil, err
+	}
+
 	env := d.buildInfraEnv(infraCfg.Template, cred)
 	memLimit := int64(tmpl.DefaultMemMB) * 1024 * 1024
 	cpuNanos := int64(tmpl.DefaultCPU * 1e9)
@@ -497,7 +549,7 @@ func (d *DockerPreviewProvider) provisionInfra(
 		containerName,
 	)
 	if err != nil {
-		return nil, fmt.Errorf("create container: %w", err)
+		return nil, fmt.Errorf("%w: create container for image %q: %v", preview.ErrInfraStartFailed, tmpl.Image, err)
 	}
 
 	if err := d.client.ContainerStart(ctx, resp.ID, container.StartOptions{}); err != nil {
@@ -507,7 +559,7 @@ func (d *DockerPreviewProvider) provisionInfra(
 		if rmErr := d.client.ContainerRemove(cleanCtx, resp.ID, container.RemoveOptions{Force: true}); rmErr != nil {
 			d.logger.Warn().Err(rmErr).Str("container_id", resp.ID).Msg("failed to remove container after start failure")
 		}
-		return nil, fmt.Errorf("start container: %w", err)
+		return nil, fmt.Errorf("%w: start container: %v", preview.ErrInfraStartFailed, err)
 	}
 
 	return &preview.InfraHandle{
@@ -518,6 +570,141 @@ func (d *DockerPreviewProvider) provisionInfra(
 		Port:        tmpl.DefaultPort,
 		Credential:  cred,
 	}, nil
+}
+
+// ensureImage makes sure the named image is present on the local Docker
+// host, pulling it from the registry on demand if it isn't. Concurrent
+// callers for the same image ref share a single pull (singleflight) so two
+// preview starts hitting a missing image don't fan out two redundant
+// streams.
+//
+// Failures are wrapped with preview.ErrInfraImageUnavailable so the HTTP
+// handler can map them to a specific error code that names the image, rather
+// than burying the cause inside a generic "failed to start preview".
+func (d *DockerPreviewProvider) ensureImage(ctx context.Context, ref string) error {
+	_, err, _ := d.imagePulls.Do(ref, func() (any, error) {
+		return nil, d.pullImage(ctx, ref)
+	})
+	return err
+}
+
+func (d *DockerPreviewProvider) pullImage(ctx context.Context, ref string) error {
+	if _, err := d.client.ImageInspect(ctx, ref); err == nil {
+		return nil
+	} else if !cerrdefs.IsNotFound(err) {
+		return fmt.Errorf("%w: inspect %q: %v", preview.ErrInfraImageUnavailable, ref, err)
+	}
+
+	d.logger.Info().Str("image", ref).Msg("preview infra image missing on host; pulling from registry")
+	start := time.Now()
+
+	pullCtx, cancel := context.WithTimeout(ctx, imagePullTimeout)
+	defer cancel()
+
+	rc, err := d.client.ImagePull(pullCtx, ref, image.PullOptions{})
+	if err != nil {
+		return fmt.Errorf("%w: pull %q: %v", preview.ErrInfraImageUnavailable, ref, err)
+	}
+	defer rc.Close()
+
+	// Docker streams pull progress as one JSON object per line. Errors
+	// surface as `{"errorDetail": {...}, "error": "..."}` events that the
+	// daemon does NOT report via the ImagePull return value — if we just
+	// drain to /dev/null we lose the actual reason (auth failure, manifest
+	// unknown, rate limit) and only see "image not present after pull",
+	// which is useless for debugging.
+	if pullErr := scanPullStreamForError(rc); pullErr != nil {
+		return fmt.Errorf("%w: pull %q: %v", preview.ErrInfraImageUnavailable, ref, pullErr)
+	}
+
+	// Confirm the image actually landed. Catches the rare case where the
+	// stream finished cleanly but no errorDetail was emitted yet the image
+	// isn't present (e.g., daemon-side race during prune).
+	if _, err := d.client.ImageInspect(pullCtx, ref); err != nil {
+		return fmt.Errorf("%w: image %q not present after pull: %v", preview.ErrInfraImageUnavailable, ref, err)
+	}
+
+	d.logger.Info().Str("image", ref).Dur("elapsed", time.Since(start)).Msg("preview infra image pulled successfully")
+	return nil
+}
+
+// scanPullStreamForError reads Docker's pull-progress NDJSON stream, drains
+// it (the pull only completes once the daemon-side reader is done), and
+// returns the first errorDetail it sees (or nil for a clean pull). The
+// stream format is documented at
+// https://docs.docker.com/reference/api/engine/version/v1.45/#tag/Image/operation/ImageCreate
+// — each line is a JSON object with optional `status`, `progress`,
+// `errorDetail`, or `error` fields.
+func scanPullStreamForError(r io.Reader) error {
+	type pullEvent struct {
+		Error       string `json:"error"`
+		ErrorDetail struct {
+			Message string `json:"message"`
+		} `json:"errorDetail"`
+	}
+	var firstErr error
+	scanner := bufio.NewScanner(r)
+	// Pull progress events are short, but a Pulling-from line on a big
+	// image can stretch; bump the buffer ceiling well above bufio's
+	// default 64KiB so we never trip on it.
+	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
+	for scanner.Scan() {
+		line := bytes.TrimSpace(scanner.Bytes())
+		if len(line) == 0 {
+			continue
+		}
+		var ev pullEvent
+		if err := json.Unmarshal(line, &ev); err != nil {
+			// Malformed line; ignore and keep draining so the daemon
+			// finishes writing.
+			continue
+		}
+		if firstErr == nil {
+			switch {
+			case ev.ErrorDetail.Message != "":
+				firstErr = fmt.Errorf("%s", ev.ErrorDetail.Message)
+			case ev.Error != "":
+				firstErr = fmt.Errorf("%s", ev.Error)
+			}
+		}
+	}
+	if err := scanner.Err(); err != nil && firstErr == nil {
+		return fmt.Errorf("read pull stream: %w", err)
+	}
+	return firstErr
+}
+
+// EnsureInfraImages pre-pulls every supported infrastructure template image
+// in parallel, deduplicating via the same singleflight group as the
+// on-demand path. Best-effort: failures are logged but not returned, so a
+// transient registry hiccup doesn't block server startup. Worker boot calls
+// this in a background goroutine so the first preview that needs e.g.
+// postgres:17-alpine usually finds the image already on disk and answers
+// the HTTP request well within the server's WriteTimeout.
+//
+// Safe to call multiple times (singleflight collapses to one inspect each
+// after the first run).
+func (d *DockerPreviewProvider) EnsureInfraImages(ctx context.Context) {
+	images := preview.AllInfraImages()
+	if len(images) == 0 {
+		return
+	}
+	d.logger.Info().Strs("images", images).Msg("pre-pulling preview infra images in background")
+
+	var wg sync.WaitGroup
+	for _, ref := range images {
+		ref := ref
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := d.ensureImage(ctx, ref); err != nil {
+				d.logger.Warn().Err(err).Str("image", ref).Msg("preview infra image pre-pull failed; will retry on first preview start")
+				return
+			}
+		}()
+	}
+	wg.Wait()
+	d.logger.Info().Msg("preview infra image pre-pull pass complete")
 }
 
 func (d *DockerPreviewProvider) buildInfraEnv(template string, cred preview.InfraCredential) []string {
@@ -663,12 +850,30 @@ func (d *DockerPreviewProvider) runInitScript(
 // Service management
 // =============================================================================
 
+// notifyServiceReady invokes observer.OnServiceReady when observer is non-nil.
+// Centralised so callers can stay nil-safe without scattering checks.
+func notifyServiceReady(observer preview.ServiceObserver, name string, port, pid int) {
+	if observer == nil {
+		return
+	}
+	observer.OnServiceReady(name, port, pid)
+}
+
+// notifyServiceFailed invokes observer.OnServiceFailed when observer is non-nil.
+func notifyServiceFailed(observer preview.ServiceObserver, name, errMsg string, tail []string) {
+	if observer == nil {
+		return
+	}
+	observer.OnServiceFailed(name, errMsg, tail)
+}
+
 func (d *DockerPreviewProvider) startService(
 	ctx context.Context,
 	state *previewState,
 	name string,
 	svcCfg models.ServiceConfig,
 	env map[string]string,
+	observer preview.ServiceObserver,
 ) error {
 	// Build the command with environment variables and working directory.
 	var cmdParts []string
@@ -734,30 +939,60 @@ func (d *DockerPreviewProvider) startService(
 		}()
 
 		exitCode, err := d.executor.ExecStream(svcCtx, state.sandbox, cmd, func(line []byte) {
-			// Log output for diagnostics. In a full implementation this
-			// would be streamed to the preview log store.
-			d.logger.Debug().Str("service", name).Str("output", string(line)).Msg("service output")
+			// Append to the per-service ring buffer so we can replay the tail
+			// to the observer when the service fails. We copy the bytes
+			// because ExecStream reuses the slice across calls.
+			s := string(line)
+			d.mu.Lock()
+			if len(ss.outputTail) >= serviceTailLines {
+				ss.outputTail = ss.outputTail[1:]
+			}
+			ss.outputTail = append(ss.outputTail, s)
+			d.mu.Unlock()
+			d.logger.Debug().Str("service", name).Str("output", s).Msg("service output")
 		}, io.Discard)
 
 		d.mu.Lock()
-		defer d.mu.Unlock()
-		if err != nil || exitCode != 0 {
+		var tail []string
+		failed := err != nil || exitCode != 0
+		if failed {
 			ss.status = models.PreviewServiceStatusFailed
 			if err != nil {
 				ss.err = err.Error()
 			} else {
 				ss.err = fmt.Sprintf("exited with code %d", exitCode)
 			}
-			d.logger.Error().Str("service", name).Int("exit_code", exitCode).Err(err).Msg("service exited")
+			tail = append([]string(nil), ss.outputTail...)
 		} else {
 			ss.status = models.PreviewServiceStatusStopped
+		}
+		errMsg := ss.err
+		d.mu.Unlock()
+
+		if failed {
+			// Surface the tail at error level so it shows up in worker logs
+			// for ops debugging — the ExecStream callback only logs each line
+			// at debug, which is filtered out in production.
+			evt := d.logger.Error().Str("service", name).Int("exit_code", exitCode).Err(err)
+			if len(tail) > 0 {
+				evt = evt.Strs("output_tail", tail)
+			}
+			evt.Msg("service exited")
+			notifyServiceFailed(observer, name, errMsg, tail)
 		}
 	}()
 
 	return nil
 }
 
-func (d *DockerPreviewProvider) waitForReadiness(ctx context.Context, sb *agent.Sandbox, port int, httpPath string, timeout time.Duration) error {
+// readinessProbeAttemptTimeout caps how long a single curl-via-docker-exec
+// call inside the sandbox is allowed to take. Without this, a wedged docker
+// daemon can stretch the overall readiness budget far past its declared
+// timeout — the for-select can only react to deadline.C *between* probe
+// attempts, so a slow exec stalls the timer too.
+const readinessProbeAttemptTimeout = 5 * time.Second
+
+func (d *DockerPreviewProvider) waitForReadiness(ctx context.Context, state *previewState, name string, port int, httpPath string, timeout time.Duration) error {
 	deadline := time.NewTimer(timeout)
 	defer deadline.Stop()
 	tick := time.NewTicker(time.Second)
@@ -767,14 +1002,42 @@ func (d *DockerPreviewProvider) waitForReadiness(ctx context.Context, sb *agent.
 	// Shell-escape the path defensively even though ValidateConfig restricts characters.
 	cmd := fmt.Sprintf("curl -sf -o /dev/null %s", shellEscape(fmt.Sprintf("http://localhost:%d%s", port, httpPath)))
 
+	// Snapshot of the service status read each tick. If the goroutine
+	// running the service in startService has already set Failed/Stopped
+	// (i.e. the process exited before becoming ready), there is no point
+	// continuing to poll — bail immediately with the captured error.
+	checkExited := func() error {
+		d.mu.RLock()
+		defer d.mu.RUnlock()
+		ss, ok := state.services[name]
+		if !ok {
+			return nil
+		}
+		switch ss.status {
+		case models.PreviewServiceStatusFailed:
+			if ss.err != "" {
+				return fmt.Errorf("service %q exited before becoming ready: %s", name, ss.err)
+			}
+			return fmt.Errorf("service %q exited before becoming ready", name)
+		case models.PreviewServiceStatusStopped:
+			return fmt.Errorf("service %q stopped before becoming ready", name)
+		}
+		return nil
+	}
+
 	for {
+		if err := checkExited(); err != nil {
+			return err
+		}
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-deadline.C:
 			return fmt.Errorf("readiness probe timed out after %s", timeout)
 		case <-tick.C:
-			exitCode, _ := d.executor.Exec(ctx, sb, cmd, io.Discard, io.Discard)
+			execCtx, cancel := context.WithTimeout(ctx, readinessProbeAttemptTimeout)
+			exitCode, _ := d.executor.Exec(execCtx, state.sandbox, cmd, io.Discard, io.Discard)
+			cancel()
 			if exitCode == 0 {
 				return nil
 			}

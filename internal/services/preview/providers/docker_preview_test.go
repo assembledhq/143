@@ -2,15 +2,23 @@ package providers
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"io"
+	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/services/agent"
 	"github.com/assembledhq/143/internal/services/preview"
+	cerrdefs "github.com/containerd/errdefs"
 	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/container"
+	"github.com/docker/docker/api/types/image"
 	"github.com/docker/docker/api/types/network"
+	"github.com/docker/docker/client"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
@@ -20,6 +28,23 @@ type mockDockerPreviewClient struct {
 	createHostConfig       *container.HostConfig
 	createNetworkingConfig *network.NetworkingConfig
 	inspectResp            container.InspectResponse
+
+	// Image presence simulation:
+	// - imagesPresent[ref] == true means ImageInspect returns success.
+	// - imagePullCalls counts ImagePull invocations so tests can assert
+	//   the lazy-pull path was (or was not) taken.
+	// - imagePullErr, when set, makes ImagePull fail.
+	// - imagePullPopulates, when true, flips imagesPresent[ref]=true
+	//   after a successful pull so the post-pull verification inspect
+	//   succeeds.
+	// - imagePullBody, when set, replaces the default pull-stream payload
+	//   so tests can inject errorDetail events.
+	imagesPresent      map[string]bool
+	imagePullCalls     int
+	imagePullErr       error
+	imagePullPopulates bool
+	imagePullBody      string
+	imagePullMu        sync.Mutex
 }
 
 func (m *mockDockerPreviewClient) ContainerCreate(_ context.Context, _ *container.Config, hostConfig *container.HostConfig, networkingConfig *network.NetworkingConfig, _ *ocispec.Platform, _ string) (container.CreateResponse, error) {
@@ -54,6 +79,49 @@ func (m *mockDockerPreviewClient) ContainerExecAttach(_ context.Context, _ strin
 
 func (m *mockDockerPreviewClient) ContainerExecInspect(_ context.Context, _ string) (container.ExecInspect, error) {
 	return container.ExecInspect{}, nil
+}
+
+func (m *mockDockerPreviewClient) ImageInspect(_ context.Context, ref string, _ ...client.ImageInspectOption) (image.InspectResponse, error) {
+	m.imagePullMu.Lock()
+	defer m.imagePullMu.Unlock()
+	if m.imagesPresent[ref] {
+		return image.InspectResponse{}, nil
+	}
+	return image.InspectResponse{}, cerrdefs.ErrNotFound
+}
+
+func (m *mockDockerPreviewClient) ImagePull(_ context.Context, ref string, _ image.PullOptions) (io.ReadCloser, error) {
+	m.imagePullMu.Lock()
+	m.imagePullCalls++
+	if m.imagePullErr != nil {
+		m.imagePullMu.Unlock()
+		return nil, m.imagePullErr
+	}
+	if m.imagePullPopulates {
+		if m.imagesPresent == nil {
+			m.imagesPresent = map[string]bool{}
+		}
+		m.imagesPresent[ref] = true
+	}
+	body := m.imagePullBody
+	m.imagePullMu.Unlock()
+	if body == "" {
+		body = `{"status":"Pulled"}`
+	}
+	return io.NopCloser(strings.NewReader(body)), nil
+}
+
+// gatedPullClient wraps the mock so ImagePull blocks on a shared channel —
+// the singleflight dedup test needs concurrent callers to all queue up on
+// the same key before any of them complete.
+type gatedPullClient struct {
+	*mockDockerPreviewClient
+	gate <-chan struct{}
+}
+
+func (g *gatedPullClient) ImagePull(ctx context.Context, ref string, opts image.PullOptions) (io.ReadCloser, error) {
+	<-g.gate
+	return g.mockDockerPreviewClient.ImagePull(ctx, ref, opts)
 }
 
 type noopSandboxExecutor struct{}
@@ -103,7 +171,8 @@ func TestNewDockerPreviewProvider_WithPreviewNetworkOverride(t *testing.T) {
 func TestProvisionInfra_UsesSandboxNetwork(t *testing.T) {
 	t.Parallel()
 
-	client := &mockDockerPreviewClient{
+	cli := &mockDockerPreviewClient{
+		imagesPresent: map[string]bool{"postgres:17": true},
 		inspectResp: container.InspectResponse{
 			ContainerJSONBase: &container.ContainerJSONBase{
 				HostConfig: &container.HostConfig{
@@ -117,7 +186,7 @@ func TestProvisionInfra_UsesSandboxNetwork(t *testing.T) {
 			},
 		},
 	}
-	provider := NewDockerPreviewProvider(client, &noopSandboxExecutor{}, zerolog.Nop())
+	provider := NewDockerPreviewProvider(cli, &noopSandboxExecutor{}, zerolog.Nop())
 
 	handle, err := provider.provisionInfra(
 		context.Background(),
@@ -130,8 +199,203 @@ func TestProvisionInfra_UsesSandboxNetwork(t *testing.T) {
 
 	require.NoError(t, err, "provisionInfra should use the sandbox network when creating infra containers")
 	require.NotNil(t, handle, "provisionInfra should return a handle")
-	require.Equal(t, container.NetworkMode("143-sandbox-custom"), client.createHostConfig.NetworkMode, "infra containers should join the sandbox container network")
-	require.Contains(t, client.createNetworkingConfig.EndpointsConfig, "143-sandbox-custom", "network aliases should be attached to the sandbox network")
+	require.Equal(t, container.NetworkMode("143-sandbox-custom"), cli.createHostConfig.NetworkMode, "infra containers should join the sandbox container network")
+	require.Contains(t, cli.createNetworkingConfig.EndpointsConfig, "143-sandbox-custom", "network aliases should be attached to the sandbox network")
+	require.Zero(t, cli.imagePullCalls, "image is already present; ensureImage must not pull")
+}
+
+// TestProvisionInfra_PullsMissingImage verifies the lazy-pull behavior:
+// when the requested template image isn't on the host, provisionInfra
+// pulls it before creating the container, so workers don't need every
+// supported postgres/redis/mysql image pre-pulled at provision time.
+func TestProvisionInfra_PullsMissingImage(t *testing.T) {
+	t.Parallel()
+
+	cli := &mockDockerPreviewClient{
+		// Image starts absent; the pull populates it so the post-pull
+		// verification inspect succeeds.
+		imagesPresent:      map[string]bool{},
+		imagePullPopulates: true,
+		inspectResp: container.InspectResponse{
+			ContainerJSONBase: &container.ContainerJSONBase{
+				HostConfig: &container.HostConfig{NetworkMode: container.NetworkMode("143-sandbox")},
+			},
+			NetworkSettings: &container.NetworkSettings{
+				Networks: map[string]*network.EndpointSettings{"143-sandbox": {IPAddress: "172.18.0.5"}},
+			},
+		},
+	}
+	provider := NewDockerPreviewProvider(cli, &noopSandboxExecutor{}, zerolog.Nop())
+
+	_, err := provider.provisionInfra(
+		context.Background(),
+		&agent.Sandbox{ID: "sandbox-1"},
+		"preview-handle",
+		"db",
+		models.InfrastructureConfig{Template: "postgres-17"},
+		preview.InfraTemplate{Image: "postgres:17-alpine", DefaultMemMB: 128, DefaultCPU: 0.25, DefaultPort: 5432},
+	)
+
+	require.NoError(t, err)
+	require.Equal(t, 1, cli.imagePullCalls, "missing image should trigger exactly one pull")
+}
+
+// TestProvisionInfra_PullFailureSurfacesAsImageUnavailable verifies that
+// when the registry pull fails, the caller receives ErrInfraImageUnavailable
+// (the sentinel the HTTP handler maps to PREVIEW_INFRA_IMAGE_UNAVAILABLE).
+// Bare network/registry errors must not bubble up unwrapped — that's what
+// produced the opaque "failed to start preview" message before this fix.
+func TestProvisionInfra_PullFailureSurfacesAsImageUnavailable(t *testing.T) {
+	t.Parallel()
+
+	cli := &mockDockerPreviewClient{
+		imagesPresent: map[string]bool{},
+		imagePullErr:  errors.New("registry unreachable"),
+		// Provide a usable inspect response so resolveSandboxNetwork
+		// succeeds; we want this test to fail in ensureImage, not earlier.
+		inspectResp: container.InspectResponse{
+			ContainerJSONBase: &container.ContainerJSONBase{
+				HostConfig: &container.HostConfig{NetworkMode: container.NetworkMode("143-sandbox")},
+			},
+			NetworkSettings: &container.NetworkSettings{
+				Networks: map[string]*network.EndpointSettings{"143-sandbox": {IPAddress: "172.18.0.5"}},
+			},
+		},
+	}
+	provider := NewDockerPreviewProvider(cli, &noopSandboxExecutor{}, zerolog.Nop())
+
+	_, err := provider.provisionInfra(
+		context.Background(),
+		&agent.Sandbox{ID: "sandbox-1"},
+		"preview-handle",
+		"db",
+		models.InfrastructureConfig{Template: "postgres-17"},
+		preview.InfraTemplate{Image: "postgres:17-alpine", DefaultMemMB: 128, DefaultCPU: 0.25, DefaultPort: 5432},
+	)
+
+	require.Error(t, err)
+	require.ErrorIs(t, err, preview.ErrInfraImageUnavailable, "pull failures must wrap ErrInfraImageUnavailable so the handler can classify them")
+	require.Contains(t, err.Error(), "postgres:17-alpine", "error must name the image so the user can debug")
+	require.Contains(t, err.Error(), "registry unreachable", "error must include the underlying cause")
+}
+
+// TestProvisionInfra_PullStreamErrorDetailSurfaces verifies that registry
+// errors which Docker reports as JSON `errorDetail` events inside the pull
+// stream — rather than as an ImagePull return value — are surfaced to the
+// caller. Without parsing the stream the user sees the useless message
+// "image not present after pull"; with parsing they see the actual cause
+// (manifest unknown, unauthorized, rate limit, …).
+func TestProvisionInfra_PullStreamErrorDetailSurfaces(t *testing.T) {
+	t.Parallel()
+
+	cli := &mockDockerPreviewClient{
+		imagesPresent: map[string]bool{},
+		// Simulate Docker's NDJSON pull stream emitting an error event.
+		imagePullBody: `{"status":"Pulling from library/postgres"}` + "\n" +
+			`{"errorDetail":{"message":"manifest for postgres:99-alpine not found: manifest unknown"},"error":"manifest unknown"}` + "\n",
+		inspectResp: container.InspectResponse{
+			ContainerJSONBase: &container.ContainerJSONBase{
+				HostConfig: &container.HostConfig{NetworkMode: container.NetworkMode("143-sandbox")},
+			},
+			NetworkSettings: &container.NetworkSettings{
+				Networks: map[string]*network.EndpointSettings{"143-sandbox": {IPAddress: "172.18.0.5"}},
+			},
+		},
+	}
+	provider := NewDockerPreviewProvider(cli, &noopSandboxExecutor{}, zerolog.Nop())
+
+	_, err := provider.provisionInfra(
+		context.Background(),
+		&agent.Sandbox{ID: "sandbox-1"},
+		"preview-handle",
+		"db",
+		models.InfrastructureConfig{Template: "postgres-17"},
+		preview.InfraTemplate{Image: "postgres:99-alpine", DefaultMemMB: 128, DefaultCPU: 0.25, DefaultPort: 5432},
+	)
+
+	require.Error(t, err)
+	require.ErrorIs(t, err, preview.ErrInfraImageUnavailable)
+	require.Contains(t, err.Error(), "manifest for postgres:99-alpine not found", "errorDetail message must reach the user, not be swallowed by io.Discard")
+}
+
+// TestEnsureImage_SingleflightDedupes verifies that two concurrent
+// ensureImage calls for the same ref share one underlying ImagePull call.
+// Without dedup, every preview start that lands on a missing image would
+// fan out a separate pull stream against the daemon — wasteful and prone
+// to thundering-herd at boot.
+func TestEnsureImage_SingleflightDedupes(t *testing.T) {
+	t.Parallel()
+
+	// pullGate blocks ImagePull until the test releases it, giving
+	// concurrent callers time to all enter the singleflight before any
+	// of them complete. Without this gate the first caller could finish
+	// before the second arrives, defeating the dedup test.
+	pullGate := make(chan struct{})
+	cli := &gatedPullClient{
+		mockDockerPreviewClient: &mockDockerPreviewClient{
+			imagesPresent:      map[string]bool{},
+			imagePullPopulates: true,
+		},
+		gate: pullGate,
+	}
+	provider := NewDockerPreviewProvider(cli, &noopSandboxExecutor{}, zerolog.Nop())
+
+	const callers = 5
+	errCh := make(chan error, callers)
+	for i := 0; i < callers; i++ {
+		go func() {
+			errCh <- provider.ensureImage(context.Background(), "postgres:17-alpine")
+		}()
+	}
+	// Release the pull and collect results.
+	close(pullGate)
+	for i := 0; i < callers; i++ {
+		require.NoError(t, <-errCh)
+	}
+	require.Equal(t, 1, cli.imagePullCalls, "%d concurrent ensureImage callers should share a single underlying pull", callers)
+}
+
+// TestEnsureInfraImages_PullsAllSupported verifies the worker-boot
+// pre-pull pass invokes the registry once per supported template image,
+// so the first preview start is a fast inspect rather than a multi-minute
+// cold pull that would blow through the HTTP server's WriteTimeout.
+func TestEnsureInfraImages_PullsAllSupported(t *testing.T) {
+	t.Parallel()
+
+	cli := &mockDockerPreviewClient{
+		imagesPresent:      map[string]bool{},
+		imagePullPopulates: true,
+	}
+	provider := NewDockerPreviewProvider(cli, &noopSandboxExecutor{}, zerolog.Nop())
+
+	provider.EnsureInfraImages(context.Background())
+
+	require.Equal(t, len(preview.AllInfraImages()), cli.imagePullCalls, "every supported infra image should be pre-pulled")
+
+	// Second call is a no-op: every image is already present, so we hit
+	// the fast inspect path.
+	cli.imagePullCalls = 0
+	provider.EnsureInfraImages(context.Background())
+	require.Zero(t, cli.imagePullCalls, "second pass must not re-pull images that are already present")
+}
+
+// TestEnsureInfraImages_LogsAndContinuesOnFailure verifies that pre-pull
+// is best-effort: a registry failure for one image does not propagate up
+// or stop the others (and definitely doesn't block server boot). The
+// lazy-pull path stays as a safety net for whatever didn't pre-pull.
+func TestEnsureInfraImages_LogsAndContinuesOnFailure(t *testing.T) {
+	t.Parallel()
+
+	cli := &mockDockerPreviewClient{
+		imagesPresent: map[string]bool{},
+		imagePullErr:  errors.New("registry unreachable"),
+	}
+	provider := NewDockerPreviewProvider(cli, &noopSandboxExecutor{}, zerolog.Nop())
+
+	// Should not panic, should not block, should not return.
+	provider.EnsureInfraImages(context.Background())
+
+	require.Equal(t, len(preview.AllInfraImages()), cli.imagePullCalls, "every image should still be attempted even when the first one fails")
 }
 
 func TestBuildInfraEnv_Redis(t *testing.T) {
@@ -307,4 +571,477 @@ func TestTcpPreviewStream_NilClose(t *testing.T) {
 	t.Parallel()
 	s := &tcpPreviewStream{Conn: nil}
 	require.NoError(t, s.Close())
+}
+
+// hangingSandboxExecutor blocks Exec on a per-call channel so tests can prove
+// the readiness loop bounds each docker-exec attempt with a timeout instead
+// of letting a wedged daemon stall the whole probe.
+type hangingSandboxExecutor struct {
+	calls   chan struct{}
+	release chan struct{}
+}
+
+func (h *hangingSandboxExecutor) ExecStream(_ context.Context, _ *agent.Sandbox, _ string, _ func(line []byte), _ io.Writer) (int, error) {
+	return 0, nil
+}
+
+func (h *hangingSandboxExecutor) Exec(ctx context.Context, _ *agent.Sandbox, _ string, _, _ io.Writer) (int, error) {
+	if h.calls != nil {
+		select {
+		case h.calls <- struct{}{}:
+		default:
+		}
+	}
+	if h.release != nil {
+		select {
+		case <-h.release:
+		case <-ctx.Done():
+			return 1, ctx.Err()
+		}
+	} else {
+		<-ctx.Done()
+		return 1, ctx.Err()
+	}
+	return 1, nil
+}
+
+func (h *hangingSandboxExecutor) ReadFile(_ context.Context, _ *agent.Sandbox, _ string) ([]byte, error) {
+	return nil, nil
+}
+
+// recordingObserver captures Ready/Failed calls so tests can assert the
+// provider notified the observer at the right transitions. Safe for
+// concurrent use because progressive support and the startService goroutine
+// can both fire it at the same time.
+type recordingObserver struct {
+	mu          sync.Mutex
+	readyCalls  []recordedReady
+	failedCalls []recordedFailed
+}
+
+type recordedReady struct {
+	name string
+	port int
+	pid  int
+}
+
+type recordedFailed struct {
+	name   string
+	errMsg string
+	tail   []string
+}
+
+func (r *recordingObserver) OnServiceReady(name string, port, pid int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.readyCalls = append(r.readyCalls, recordedReady{name: name, port: port, pid: pid})
+}
+
+func (r *recordingObserver) OnServiceFailed(name, errMsg string, tail []string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.failedCalls = append(r.failedCalls, recordedFailed{
+		name:   name,
+		errMsg: errMsg,
+		tail:   append([]string(nil), tail...),
+	})
+}
+
+func (r *recordingObserver) ready() []recordedReady {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]recordedReady(nil), r.readyCalls...)
+}
+
+func (r *recordingObserver) failed() []recordedFailed {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]recordedFailed(nil), r.failedCalls...)
+}
+
+// fakeServiceExecutor lets a single test customize what each kind of exec
+// call returns. ExecStream simulates the long-running service process
+// (npm run dev / sh script.sh); Exec handles the readiness curl probes
+// and the per-service `lsof` PID detection.
+type fakeServiceExecutor struct {
+	execStreamFn func(ctx context.Context, cmd string, onLine func([]byte)) (int, error)
+	execFn       func(ctx context.Context, cmd string) (int, error)
+}
+
+func (f *fakeServiceExecutor) ExecStream(ctx context.Context, _ *agent.Sandbox, cmd string, onLine func(line []byte), _ io.Writer) (int, error) {
+	if f.execStreamFn != nil {
+		return f.execStreamFn(ctx, cmd, onLine)
+	}
+	return 0, nil
+}
+
+func (f *fakeServiceExecutor) Exec(ctx context.Context, _ *agent.Sandbox, cmd string, _, _ io.Writer) (int, error) {
+	if f.execFn != nil {
+		return f.execFn(ctx, cmd)
+	}
+	return 0, nil
+}
+
+func (f *fakeServiceExecutor) ReadFile(_ context.Context, _ *agent.Sandbox, _ string) ([]byte, error) {
+	return nil, nil
+}
+
+// TestNotifyService_NilSafe verifies the helper functions tolerate a nil
+// observer — providers must work both when StartPreview is called from the
+// manager (with an observer) and when it's called from a context that
+// doesn't care about per-service updates.
+func TestNotifyService_NilSafe(t *testing.T) {
+	t.Parallel()
+	require.NotPanics(t, func() { notifyServiceReady(nil, "web", 3000, 42) })
+	require.NotPanics(t, func() { notifyServiceFailed(nil, "web", "boom", []string{"line"}) })
+}
+
+// TestNotifyService_InvokesObserver verifies the helpers forward arguments
+// faithfully when the observer is non-nil.
+func TestNotifyService_InvokesObserver(t *testing.T) {
+	t.Parallel()
+	obs := &recordingObserver{}
+	notifyServiceReady(obs, "web", 3000, 42)
+	notifyServiceFailed(obs, "server", "exited with code 126", []string{"hi", "bye"})
+
+	ready := obs.ready()
+	require.Len(t, ready, 1)
+	require.Equal(t, recordedReady{name: "web", port: 3000, pid: 42}, ready[0])
+
+	failed := obs.failed()
+	require.Len(t, failed, 1)
+	require.Equal(t, "server", failed[0].name)
+	require.Equal(t, "exited with code 126", failed[0].errMsg)
+	require.Equal(t, []string{"hi", "bye"}, failed[0].tail)
+}
+
+// TestStartService_FailureCapturesTailAndNotifies exercises the entire
+// startService failure path: the goroutine streams output through onLine
+// (which fills the ring buffer), then ExecStream returns a non-zero exit,
+// and the deferred section copies the tail and fires the observer. This
+// covers ~25 lines that previously had no test.
+func TestStartService_FailureCapturesTailAndNotifies(t *testing.T) {
+	t.Parallel()
+
+	exec := &fakeServiceExecutor{
+		execFn: func(_ context.Context, _ string) (int, error) {
+			// lsof for PID detection: pretend nothing's listening.
+			return 1, nil
+		},
+		execStreamFn: func(_ context.Context, _ string, onLine func([]byte)) (int, error) {
+			onLine([]byte("starting up"))
+			onLine([]byte("./bin/server: cannot execute"))
+			return 126, nil
+		},
+	}
+	d := NewDockerPreviewProvider(&mockDockerPreviewClient{}, exec, zerolog.Nop())
+	obs := &recordingObserver{}
+
+	state := &previewState{
+		sandbox:  &agent.Sandbox{ID: "sb"},
+		services: map[string]*serviceState{},
+		cancelFn: func() {},
+	}
+
+	err := d.startService(
+		context.Background(),
+		state,
+		"server",
+		models.ServiceConfig{Command: []string{"sh", "preview-start.sh"}, Port: 8080},
+		nil,
+		obs,
+	)
+	require.NoError(t, err)
+	state.wg.Wait()
+
+	failed := obs.failed()
+	require.Len(t, failed, 1, "observer should have been notified of the failure")
+	require.Equal(t, "server", failed[0].name)
+	require.Contains(t, failed[0].errMsg, "126")
+	require.Equal(t, []string{"starting up", "./bin/server: cannot execute"}, failed[0].tail)
+	require.Empty(t, obs.ready(), "should not see any Ready calls when the service exited non-zero")
+
+	// Service status flipped to Failed in-memory so waitForReadiness can
+	// fail-fast on it (covered by TestWaitForReadiness_FailsFastWhenServiceExited).
+	d.mu.RLock()
+	require.Equal(t, models.PreviewServiceStatusFailed, state.services["server"].status)
+	d.mu.RUnlock()
+}
+
+// TestStartService_TailRingBufferBoundedAtServiceTailLines verifies that
+// the per-service stdout/stderr ring buffer drops oldest lines after it
+// fills, so a chatty service can't OOM the worker before it dies.
+func TestStartService_TailRingBufferBoundedAtServiceTailLines(t *testing.T) {
+	t.Parallel()
+
+	totalLines := serviceTailLines + 50
+	exec := &fakeServiceExecutor{
+		execFn: func(_ context.Context, _ string) (int, error) { return 1, nil },
+		execStreamFn: func(_ context.Context, _ string, onLine func([]byte)) (int, error) {
+			for i := 0; i < totalLines; i++ {
+				onLine([]byte(fmt.Sprintf("line-%d", i)))
+			}
+			return 1, nil
+		},
+	}
+	d := NewDockerPreviewProvider(&mockDockerPreviewClient{}, exec, zerolog.Nop())
+	obs := &recordingObserver{}
+	state := &previewState{
+		sandbox:  &agent.Sandbox{},
+		services: map[string]*serviceState{},
+		cancelFn: func() {},
+	}
+
+	err := d.startService(context.Background(), state, "web",
+		models.ServiceConfig{Command: []string{"true"}, Port: 3000},
+		nil, obs)
+	require.NoError(t, err)
+	state.wg.Wait()
+
+	failed := obs.failed()
+	require.Len(t, failed, 1)
+	require.Len(t, failed[0].tail, serviceTailLines)
+	// First retained line should be the (totalLines - serviceTailLines)th input.
+	require.Equal(t, fmt.Sprintf("line-%d", totalLines-serviceTailLines), failed[0].tail[0])
+	require.Equal(t, fmt.Sprintf("line-%d", totalLines-1), failed[0].tail[len(failed[0].tail)-1])
+}
+
+// TestWaitForReadiness_FailsFastWhenServiceStopped covers the second branch
+// of checkExited: a service that exited cleanly (Stopped, not Failed) before
+// becoming ready also short-circuits the loop.
+func TestWaitForReadiness_FailsFastWhenServiceStopped(t *testing.T) {
+	t.Parallel()
+	d := NewDockerPreviewProvider(&mockDockerPreviewClient{}, &noopSandboxExecutor{}, zerolog.Nop())
+	state := &previewState{
+		sandbox:  &agent.Sandbox{},
+		services: map[string]*serviceState{},
+	}
+	state.services["web"] = &serviceState{
+		name:   "web",
+		port:   3000,
+		status: models.PreviewServiceStatusStopped,
+	}
+	err := d.waitForReadiness(context.Background(), state, "web", 3000, "/", 5*time.Second)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "stopped before becoming ready")
+}
+
+// TestStartPreview_StandardMode_NotifiesObserverPerService runs StartPreview
+// to completion in standard mode with two services, both of which become
+// ready promptly, and asserts the observer received one OnServiceReady per
+// service. This covers Phase 5 (startService) and the standard branch of
+// Phase 6 (the readiness loop and notifyServiceReady call).
+func TestStartPreview_StandardMode_NotifiesObserverPerService(t *testing.T) {
+	t.Parallel()
+
+	// Each service's exec stream blocks until the test releases it.
+	release := make(chan struct{})
+	exec := &fakeServiceExecutor{
+		execStreamFn: func(ctx context.Context, _ string, _ func([]byte)) (int, error) {
+			select {
+			case <-release:
+			case <-ctx.Done():
+			}
+			return 0, nil
+		},
+		execFn: func(_ context.Context, cmd string) (int, error) {
+			// curl readiness probes return 0 (ready); lsof PID detection
+			// returns 1 (no listener). Distinguish by looking for "curl" in
+			// the command.
+			if strings.Contains(cmd, "curl") {
+				return 0, nil
+			}
+			return 1, nil
+		},
+	}
+	d := NewDockerPreviewProvider(&mockDockerPreviewClient{}, exec, zerolog.Nop())
+	obs := &recordingObserver{}
+
+	cfg := &models.PreviewConfig{
+		Name:    "test-app",
+		Primary: "web",
+		Services: map[string]models.ServiceConfig{
+			"web":     {Command: []string{"npm", "run", "dev"}, Port: 3000, Ready: models.ReadinessProbe{HTTPPath: "/"}},
+			"support": {Command: []string{"node", "worker.js"}, Port: 9000, Ready: models.ReadinessProbe{HTTPPath: "/"}},
+		},
+	}
+
+	handle, err := d.StartPreview(context.Background(), &agent.Sandbox{ID: "sb"}, cfg, nil, obs)
+	require.NoError(t, err)
+	require.NotNil(t, handle)
+	require.Equal(t, 3000, handle.PrimaryPort)
+	require.False(t, handle.PartiallyReady)
+
+	ready := obs.ready()
+	require.Len(t, ready, 2)
+	names := []string{ready[0].name, ready[1].name}
+	require.ElementsMatch(t, []string{"web", "support"}, names)
+
+	// Cleanup.
+	close(release)
+	require.NoError(t, d.StopPreview(context.Background(), handle.Handle))
+}
+
+// TestStartPreview_ProgressiveMode_NotifiesObserver covers Phase 6's
+// progressive branch — primary becomes ready first (synchronously), support
+// services come up in a background goroutine.
+func TestStartPreview_ProgressiveMode_NotifiesObserver(t *testing.T) {
+	t.Parallel()
+
+	release := make(chan struct{})
+	exec := &fakeServiceExecutor{
+		execStreamFn: func(ctx context.Context, _ string, _ func([]byte)) (int, error) {
+			select {
+			case <-release:
+			case <-ctx.Done():
+			}
+			return 0, nil
+		},
+		execFn: func(_ context.Context, cmd string) (int, error) {
+			if strings.Contains(cmd, "curl") {
+				return 0, nil
+			}
+			return 1, nil
+		},
+	}
+	d := NewDockerPreviewProvider(&mockDockerPreviewClient{}, exec, zerolog.Nop())
+	obs := &recordingObserver{}
+
+	cfg := &models.PreviewConfig{
+		Name:        "test-app",
+		Primary:     "web",
+		Progressive: true,
+		Services: map[string]models.ServiceConfig{
+			"web":     {Command: []string{"npm", "run", "dev"}, Port: 3000, Ready: models.ReadinessProbe{HTTPPath: "/"}},
+			"support": {Command: []string{"node", "worker.js"}, Port: 9000, Ready: models.ReadinessProbe{HTTPPath: "/"}},
+		},
+	}
+
+	handle, err := d.StartPreview(context.Background(), &agent.Sandbox{ID: "sb"}, cfg, nil, obs)
+	require.NoError(t, err)
+	require.True(t, handle.PartiallyReady)
+
+	// Primary should be ready synchronously — assert without waiting.
+	require.Eventually(t, func() bool {
+		for _, r := range obs.ready() {
+			if r.name == "web" {
+				return true
+			}
+		}
+		return false
+	}, 5*time.Second, 10*time.Millisecond, "primary service should fire OnServiceReady before StartPreview returns")
+
+	// Support service is polled in the background; allow time for it.
+	require.Eventually(t, func() bool {
+		for _, r := range obs.ready() {
+			if r.name == "support" {
+				return true
+			}
+		}
+		return false
+	}, 5*time.Second, 50*time.Millisecond, "support service should eventually fire OnServiceReady")
+
+	close(release)
+	require.NoError(t, d.StopPreview(context.Background(), handle.Handle))
+}
+
+// TestStartPreview_NilObserver_DoesNotPanic verifies that providers tolerate
+// a nil observer — code paths in callers (e.g. tests, future internal
+// callers) shouldn't be forced to construct a no-op observer just to call
+// StartPreview.
+func TestStartPreview_NilObserver_DoesNotPanic(t *testing.T) {
+	t.Parallel()
+
+	release := make(chan struct{})
+	exec := &fakeServiceExecutor{
+		execStreamFn: func(ctx context.Context, _ string, _ func([]byte)) (int, error) {
+			select {
+			case <-release:
+			case <-ctx.Done():
+			}
+			return 0, nil
+		},
+		execFn: func(_ context.Context, cmd string) (int, error) {
+			if strings.Contains(cmd, "curl") {
+				return 0, nil
+			}
+			return 1, nil
+		},
+	}
+	d := NewDockerPreviewProvider(&mockDockerPreviewClient{}, exec, zerolog.Nop())
+
+	cfg := &models.PreviewConfig{
+		Name:    "test-app",
+		Primary: "web",
+		Services: map[string]models.ServiceConfig{
+			"web": {Command: []string{"npm", "start"}, Port: 3000, Ready: models.ReadinessProbe{HTTPPath: "/"}},
+		},
+	}
+
+	handle, err := d.StartPreview(context.Background(), &agent.Sandbox{ID: "sb"}, cfg, nil, nil)
+	require.NoError(t, err)
+	require.Equal(t, 3000, handle.PrimaryPort)
+
+	close(release)
+	require.NoError(t, d.StopPreview(context.Background(), handle.Handle))
+}
+
+// TestWaitForReadiness_FailsFastWhenServiceExited verifies that the readiness
+// loop bails immediately when the underlying service goroutine has set
+// status=Failed, instead of polling for the entire (long) probe timeout.
+// This was the worst part of the May 2026 16-minute preview-stuck incident:
+// the user's `server` exited 126 in seconds but waitForReadiness kept curling
+// a dead port for the full 4-minute budget.
+func TestWaitForReadiness_FailsFastWhenServiceExited(t *testing.T) {
+	t.Parallel()
+	d := NewDockerPreviewProvider(&mockDockerPreviewClient{}, &noopSandboxExecutor{}, zerolog.Nop())
+	state := &previewState{
+		sandbox:  &agent.Sandbox{},
+		services: map[string]*serviceState{},
+	}
+	state.services["server"] = &serviceState{
+		name:   "server",
+		port:   8080,
+		status: models.PreviewServiceStatusFailed,
+		err:    "exited with code 126",
+	}
+	// Use a generous timeout — the test asserts we return well before it.
+	err := d.waitForReadiness(context.Background(), state, "server", 8080, "/health", 5*time.Second)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "exited before becoming ready")
+	require.Contains(t, err.Error(), "126")
+}
+
+// TestWaitForReadiness_BoundsExecPerAttempt verifies that each Exec call is
+// wrapped in a per-attempt timeout, so a wedged docker daemon can't stretch
+// the readiness budget. We give the loop a 2.5s overall timeout against an
+// Exec that hangs forever; without per-attempt bounding the loop would never
+// return because the deadline.C case can only fire between attempts.
+func TestWaitForReadiness_BoundsExecPerAttempt(t *testing.T) {
+	t.Parallel()
+	hung := &hangingSandboxExecutor{calls: make(chan struct{}, 4)}
+	d := NewDockerPreviewProvider(&mockDockerPreviewClient{}, hung, zerolog.Nop())
+	state := &previewState{
+		sandbox:  &agent.Sandbox{},
+		services: map[string]*serviceState{},
+	}
+	state.services["web"] = &serviceState{
+		name:   "web",
+		port:   3000,
+		status: models.PreviewServiceStatusStarting,
+	}
+
+	// Overall budget shorter than a single hung Exec would take if unbounded.
+	// Per-attempt timeout (5s in production) is longer than this 2.5s overall
+	// budget, so the test really exercises the deadline.C path between
+	// attempts: the per-attempt timeout cancels the hung Exec, the loop
+	// re-enters select, and deadline.C fires.
+	start := time.Now()
+	err := d.waitForReadiness(context.Background(), state, "web", 3000, "/", 2500*time.Millisecond)
+	elapsed := time.Since(start)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "timed out")
+	// Generous upper bound so this isn't flaky on a loaded CI host but small
+	// enough to catch the regression where the loop stalls on a hung Exec.
+	require.Less(t, elapsed, 30*time.Second, "readiness loop didn't honor its timeout under a hung Exec")
 }

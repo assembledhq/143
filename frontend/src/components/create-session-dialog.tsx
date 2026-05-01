@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowUp, Loader2, GitBranch, ChevronDown, Paperclip, ImagePlus, Plus, SlidersHorizontal } from "lucide-react";
+import { ArrowUp, Loader2, GitBranch, ChevronDown, Paperclip, Link, Plus, SlidersHorizontal } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import {
@@ -419,17 +419,17 @@ export function CreateSessionDialog({ open, onOpenChange }: CreateSessionDialogP
                       <Plus className="h-4 w-4" />
                     </Button>
                   </DropdownMenuTrigger>
-                  <DropdownMenuContent align="start">
-                    <DropdownMenuItem onClick={() => uploadInputRef.current?.click()}>
-                      <Paperclip className="mr-2 h-4 w-4" />
-                      Upload files or photos
-                    </DropdownMenuItem>
-                    <DropdownMenuItem onClick={() => setShowImageInput(true)}>
-                      <ImagePlus className="mr-2 h-4 w-4" />
-                      Add image URL
-                    </DropdownMenuItem>
-                  </DropdownMenuContent>
-                </DropdownMenu>
+                    <DropdownMenuContent align="start">
+                      <DropdownMenuItem onClick={() => uploadInputRef.current?.click()}>
+                        <Paperclip className="mr-2 h-4 w-4" />
+                        Upload files or photos
+                      </DropdownMenuItem>
+                      <DropdownMenuItem onClick={() => setShowImageInput(true)}>
+                        <Link data-testid="add-image-url-link-icon" className="mr-2 h-4 w-4" />
+                        Add image URL
+                      </DropdownMenuItem>
+                    </DropdownMenuContent>
+                  </DropdownMenu>
                 <Button
                   type="button"
                   variant="ghost"
@@ -484,7 +484,7 @@ export function CreateSessionDialog({ open, onOpenChange }: CreateSessionDialogP
                     Upload files or photos
                   </DropdownMenuItem>
                   <DropdownMenuItem onClick={() => setShowImageInput(true)}>
-                    <ImagePlus className="mr-2 h-4 w-4" />
+                    <Link data-testid="add-image-url-link-icon" className="mr-2 h-4 w-4" />
                     Add image URL
                   </DropdownMenuItem>
                 </DropdownMenuContent>

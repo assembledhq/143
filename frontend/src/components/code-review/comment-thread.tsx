@@ -32,6 +32,7 @@ interface CommentThreadProps {
   comments: SessionReviewComment[];
   onUpdate: (commentId: string, data: { body?: string; resolved?: boolean }) => void;
   onDelete: (commentId: string) => void;
+  className?: string;
 }
 
 function formatRelativeTime(dateStr: string): string {
@@ -83,8 +84,8 @@ const SingleComment = memo(function SingleComment({
           : "border-primary/40 bg-primary/5"
       )}
     >
-      <div className="flex items-center justify-between mb-1">
-        <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+      <div className="mb-1 flex flex-wrap items-start gap-x-2 gap-y-1">
+        <div className="flex min-w-0 flex-wrap items-center gap-1.5 text-xs text-muted-foreground">
           <MessageSquare className="h-3 w-3" />
           <span className="font-medium text-foreground/80">You</span>
           <span>{formatRelativeTime(comment.created_at)}</span>
@@ -100,7 +101,7 @@ const SingleComment = memo(function SingleComment({
             </span>
           )}
         </div>
-        <div className="flex items-center gap-0.5">
+        <div className="ml-auto flex shrink-0 items-center gap-0.5">
           {comment.resolved ? (
             <Button
               variant="ghost"
@@ -154,14 +155,20 @@ const SingleComment = memo(function SingleComment({
 /**
  * Displays a stack of comments for a single line, with collapsed resolved view.
  */
-export function CommentThread({ comments, onUpdate, onDelete }: CommentThreadProps) {
+export function CommentThread({ comments, onUpdate, onDelete, className }: CommentThreadProps) {
   const [showResolved, setShowResolved] = useState(false);
 
   const openComments = comments.filter((c) => !c.resolved);
   const resolvedComments = comments.filter((c) => c.resolved);
 
   return (
-    <div className="mx-2 my-1 space-y-0.5">
+    <div
+      data-testid="comment-thread"
+      className={cn(
+        "mx-2 my-1 w-fit max-w-full space-y-0.5",
+        className
+      )}
+    >
       {/* Open comments always shown */}
       {openComments.map((c) => (
         <SingleComment key={c.id} comment={c} onUpdate={onUpdate} onDelete={onDelete} />

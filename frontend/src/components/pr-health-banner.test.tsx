@@ -21,6 +21,7 @@ const baseHealth: PullRequestHealthResponse = {
   github_state_synced_at: "2026-04-24T00:00:00.000Z",
   summary: "PR #42 is healthy.",
   checks: [],
+  checks_confirmed: false,
   can_resolve_conflicts: false,
   can_fix_tests: false,
   can_merge: false,
@@ -67,15 +68,22 @@ describe("PRHealthBanner", () => {
     expect(screen.queryByRole("button", { name: /^Merge$/ })).toBeNull();
   });
 
-  it("renders the Merge button when can_merge is true and invokes onMerge", async () => {
-    const onMerge = vi.fn();
-    renderWithProviders(
-      <PRHealthBanner
-        health={{ ...baseHealth, can_merge: true }}
-        pendingAction={null}
-        repairError={null}
-        mergeAuthRequired={false}
-        onFixTests={vi.fn()}
+	it("renders the Merge button when can_merge is true and invokes onMerge", async () => {
+		const onMerge = vi.fn();
+		renderWithProviders(
+			<PRHealthBanner
+				health={{
+					...baseHealth,
+					checks_confirmed: true,
+					can_merge: true,
+					checks: [
+						{ name: "Unit tests", category: "test", status: "passed" },
+					],
+				}}
+				pendingAction={null}
+				repairError={null}
+				mergeAuthRequired={false}
+				onFixTests={vi.fn()}
         onResolveConflicts={vi.fn()}
         onMerge={onMerge}
       />,
@@ -87,14 +95,21 @@ describe("PRHealthBanner", () => {
     expect(onMerge).toHaveBeenCalledTimes(1);
   });
 
-  it("shows a Merging… label and disables the button while pendingAction is merge", () => {
-    renderWithProviders(
-      <PRHealthBanner
-        health={{ ...baseHealth, can_merge: true }}
-        pendingAction="merge"
-        repairError={null}
-        mergeAuthRequired={false}
-        onFixTests={vi.fn()}
+	it("shows a Merging… label and disables the button while pendingAction is merge", () => {
+		renderWithProviders(
+			<PRHealthBanner
+				health={{
+					...baseHealth,
+					checks_confirmed: true,
+					can_merge: true,
+					checks: [
+						{ name: "Unit tests", category: "test", status: "passed" },
+					],
+				}}
+				pendingAction="merge"
+				repairError={null}
+				mergeAuthRequired={false}
+				onFixTests={vi.fn()}
         onResolveConflicts={vi.fn()}
         onMerge={vi.fn()}
       />,
@@ -104,14 +119,22 @@ describe("PRHealthBanner", () => {
     expect(button).toBeDisabled();
   });
 
-  it("disables the Merge button when another repair action is pending", () => {
-    renderWithProviders(
-      <PRHealthBanner
-        health={{ ...baseHealth, can_merge: true, can_fix_tests: true }}
-        pendingAction="fix_tests"
-        repairError={null}
-        mergeAuthRequired={false}
-        onFixTests={vi.fn()}
+	it("disables the Merge button when another repair action is pending", () => {
+		renderWithProviders(
+			<PRHealthBanner
+				health={{
+					...baseHealth,
+					checks_confirmed: true,
+					can_merge: true,
+					can_fix_tests: true,
+					checks: [
+						{ name: "Unit tests", category: "test", status: "passed" },
+					],
+				}}
+				pendingAction="fix_tests"
+				repairError={null}
+				mergeAuthRequired={false}
+				onFixTests={vi.fn()}
         onResolveConflicts={vi.fn()}
         onMerge={vi.fn()}
       />,
@@ -120,20 +143,59 @@ describe("PRHealthBanner", () => {
     expect(screen.getByRole("button", { name: /^Merge$/ })).toBeDisabled();
   });
 
-  it("shows a reconnect hint when merge requires GitHub user auth", () => {
+	it("shows a reconnect hint when merge requires GitHub user auth", () => {
+		renderWithProviders(
+			<PRHealthBanner
+				health={{
+					...baseHealth,
+					checks_confirmed: true,
+					can_merge: true,
+					checks: [
+						{ name: "Unit tests", category: "test", status: "passed" },
+					],
+				}}
+				pendingAction={null}
+				repairError={null}
+				mergeAuthRequired
+				onFixTests={vi.fn()}
+        onResolveConflicts={vi.fn()}
+        onMerge={vi.fn()}
+      />,
+    );
+
+		expect(screen.getByText("Connect your GitHub account to merge this pull request as yourself.")).toBeInTheDocument();
+	});
+
+  it("hides the Merge button until checks are explicitly confirmed as passed", () => {
     renderWithProviders(
       <PRHealthBanner
-        health={{ ...baseHealth, can_merge: true }}
+        health={{ ...baseHealth, can_merge: true, checks_confirmed: false, checks: [] }}
         pendingAction={null}
         repairError={null}
-        mergeAuthRequired
+        mergeAuthRequired={false}
+        onFixTests={vi.fn()}
+				onResolveConflicts={vi.fn()}
+				onMerge={vi.fn()}
+			/>,
+		);
+
+    expect(screen.queryByRole("button", { name: /^Merge$/ })).toBeNull();
+  });
+
+  it("shows the Merge button when GitHub has confirmed that no CI checks are configured", () => {
+    renderWithProviders(
+      <PRHealthBanner
+        health={{ ...baseHealth, can_merge: true, checks_confirmed: true, checks: [] }}
+        pendingAction={null}
+        repairError={null}
+        mergeAuthRequired={false}
         onFixTests={vi.fn()}
         onResolveConflicts={vi.fn()}
         onMerge={vi.fn()}
       />,
     );
 
-    expect(screen.getByText("Connect your GitHub account to merge this pull request as yourself.")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /^Merge$/ })).toBeInTheDocument();
   });
 
   it("shows CI job statuses when hovering the failing tests badge", async () => {
@@ -143,9 +205,9 @@ describe("PRHealthBanner", () => {
           ...baseHealth,
           failing_test_count: 1,
           checks: [
-            { name: "Unit tests", category: "test", status: "failed" },
-            { name: "E2E tests", category: "test", status: "pending" },
-            { name: "Lint", category: "lint", status: "passed" },
+            { name: "Unit tests", category: "test", status: "failed", details_url: "https://ci.example.com/unit-tests" },
+            { name: "E2E tests", category: "test", status: "pending", details_url: "https://ci.example.com/e2e-tests" },
+            { name: "Lint", category: "lint", status: "passed", details_url: "https://ci.example.com/lint" },
           ],
         }}
         pendingAction={null}
@@ -167,6 +229,40 @@ describe("PRHealthBanner", () => {
     expect(screen.getAllByText("failed").length).toBeGreaterThan(0);
     expect(screen.getAllByText("pending").length).toBeGreaterThan(0);
     expect(screen.getAllByText("passed").length).toBeGreaterThan(0);
+  });
+
+  it("renders each hover-card check as an external link when details URLs are available", async () => {
+    renderWithProviders(
+      <PRHealthBanner
+        health={{
+          ...baseHealth,
+          failing_test_count: 2,
+          checks: [
+            { name: "Unit tests", category: "test", status: "failed", details_url: "https://ci.example.com/unit-tests" },
+            { name: "E2E tests", category: "test", status: "failed", details_url: "https://ci.example.com/e2e-tests" },
+          ],
+        }}
+        pendingAction={null}
+        repairError={null}
+        mergeAuthRequired={false}
+        onFixTests={vi.fn()}
+        onResolveConflicts={vi.fn()}
+        onMerge={vi.fn()}
+      />,
+    );
+
+    const user = userEvent.setup();
+    await user.hover(screen.getByText("2/2 failed"));
+
+    const unitLink = await screen.findByRole("link", { name: /Unit tests/i });
+    const e2eLink = screen.getByRole("link", { name: /E2E tests/i });
+
+    expect(unitLink).toHaveAttribute("href", "https://ci.example.com/unit-tests");
+    expect(unitLink).toHaveAttribute("target", "_blank");
+    expect(unitLink).toHaveAttribute("rel", expect.stringContaining("noopener"));
+    expect(e2eLink).toHaveAttribute("href", "https://ci.example.com/e2e-tests");
+    expect(e2eLink).toHaveAttribute("target", "_blank");
+    expect(e2eLink).toHaveAttribute("rel", expect.stringContaining("noreferrer"));
   });
 
   it("shows failed-over-total summary and normalizes missing legacy statuses to pending", async () => {
@@ -196,5 +292,28 @@ describe("PRHealthBanner", () => {
     expect(await screen.findByText("CI jobs")).toBeInTheDocument();
     expect(screen.getByText("Legacy check")).toBeInTheDocument();
     expect(screen.getAllByText("pending").length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("does not render a separate conflicts badge when the summary already covers merge conflicts", () => {
+    renderWithProviders(
+      <PRHealthBanner
+        health={{
+          ...baseHealth,
+          has_conflicts: true,
+          can_resolve_conflicts: true,
+          summary: "PR #42 is blocked by merge conflicts.",
+        }}
+        pendingAction={null}
+        repairError={null}
+        mergeAuthRequired={false}
+        onFixTests={vi.fn()}
+        onResolveConflicts={vi.fn()}
+        onMerge={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("PR #42 is blocked by merge conflicts.")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Resolve conflicts" })).toBeInTheDocument();
+    expect(screen.queryByText(/^conflicts$/)).toBeNull();
   });
 });

@@ -19,11 +19,11 @@ type LinearWebhookPayload struct {
 
 // LinearIssue represents a Linear issue from a webhook or API.
 type LinearIssue struct {
-	ID          string  `json:"id"`
-	Identifier  string  `json:"identifier"` // e.g. "ENG-123"
-	Title       string  `json:"title"`
-	Description string  `json:"description"`
-	Priority    int     `json:"priority"` // 0=No, 1=Urgent, 2=High, 3=Medium, 4=Low
+	ID          string `json:"id"`
+	Identifier  string `json:"identifier"` // e.g. "ENG-123"
+	Title       string `json:"title"`
+	Description string `json:"description"`
+	Priority    int    `json:"priority"` // 0=No, 1=Urgent, 2=High, 3=Medium, 4=Low
 	State       struct {
 		Name string `json:"name"`
 		Type string `json:"type"` // triage, backlog, unstarted, started, completed, cancelled

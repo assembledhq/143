@@ -182,9 +182,23 @@ func main() {
 			// Build sandbox+preview provider so worker-capable modes can start,
 			// stop, and hydrate previews locally.
 			sandboxExec := providers.NewDockerProvider(apiDockerCli, logger, providers.WithResolvConf(cfg.SandboxResolvConf))
-			pvProvider = previewproviders.NewDockerPreviewProvider(apiDockerCli, sandboxExec, logger)
+			dockerPreviewProvider := previewproviders.NewDockerPreviewProvider(apiDockerCli, sandboxExec, logger)
+			pvProvider = dockerPreviewProvider
 			snapshotExec = sandboxExec
 			apiSandboxProvider = sandboxExec
+
+			// Pre-pull infrastructure template images in the background so
+			// the first preview start that needs e.g. postgres:17-alpine
+			// answers the HTTP request inside the server's WriteTimeout
+			// instead of timing out on a multi-minute cold pull. The
+			// provider's lazy-pull stays as a safety net for templates
+			// added after boot. Detached from the process ctx so a slow
+			// pull never blocks shutdown.
+			go func() {
+				prepullCtx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+				defer cancel()
+				dockerPreviewProvider.EnsureInfraImages(prepullCtx)
+			}()
 		} else {
 			logger.Warn().Err(dockerErr).Msg("Docker not available — file browsing and preview provider disabled")
 		}
@@ -244,13 +258,7 @@ func main() {
 	// Closed when the process receives SIGTERM so long-lived handlers (SSE
 	// streams, etc.) can end their loops cleanly during graceful shutdown.
 	shutdownCh := make(chan struct{})
-	// The router's session-review service needs to know which agents support
-	// native review. adapters.DefaultMap is the single source of truth for
-	// shipped agents — the orchestrator wires the same factory in
-	// buildServices below, so capability lookup and execution stay aligned
-	// without manual sync.
-	reviewModesProvider := agent.ReviewModeProvider(adapters.DefaultMap(logger))
-	router, gwSrv, recycleWorker, inspectorCloser, previewManager, err := api.NewRouter(cfg, pool, logger, sentryReporter, codexAuthSvc, claudeCodeAuthSvc, llmClient, fileReader, cancelRegistry, pvProvider, snapshotExec, apiSandboxProvider, apiSnapshotStore, orgSettingsCache, shutdownCh, redisClient, sessionStreams, reviewModesProvider)
+	router, gwSrv, recycleWorker, inspectorCloser, previewManager, err := api.NewRouter(cfg, pool, logger, sentryReporter, codexAuthSvc, claudeCodeAuthSvc, llmClient, fileReader, cancelRegistry, pvProvider, snapshotExec, apiSandboxProvider, apiSnapshotStore, orgSettingsCache, shutdownCh, redisClient, sessionStreams)
 	if err != nil {
 		logger.Fatal().Err(err).Msg("failed to initialize API router")
 	}

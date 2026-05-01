@@ -371,6 +371,7 @@ export interface PullRequestHealthResponse {
   github_state_synced_at?: string;
   summary: string;
   checks?: PullRequestCheckSummary[];
+  checks_confirmed: boolean;
   can_resolve_conflicts: boolean;
   can_fix_tests: boolean;
   can_merge: boolean;
@@ -405,22 +406,6 @@ export interface PullRequestUpdatedEvent {
   head_sha: string;
   base_sha: string;
   synced_at: string;
-}
-
-export type SessionReviewMode = 'default' | 'security';
-
-// Mirrors models.SessionReviewCapabilities. The Review button uses `modes`
-// to decide whether to render a single button or a dropdown, and `can_review`
-// to gate against in-flight or empty-diff sessions before the user clicks.
-export interface SessionReviewCapabilities {
-  can_review: boolean;
-  reason?: string;
-  modes: SessionReviewMode[];
-}
-
-export interface SessionReviewResponse {
-  session_id: string;
-  mode: SessionReviewMode;
 }
 
 export interface SessionReviewComment {
@@ -1334,6 +1319,37 @@ export interface AutomationRun {
   result_summary?: string;
   created_at: string;
   updated_at: string;
+  // Compact view of the session this run spawned. Populated by the list
+  // endpoint via a LATERAL join (see internal/db/automations.go); absent
+  // when the run hasn't spawned a session yet (pending/skipped, or
+  // mid-flight before the worker creates the session).
+  session?: AutomationRunSession;
+}
+
+// Mirrors models.PRCreationState. Kept as a literal union so the row UI
+// gets exhaustiveness checks when branching on it (e.g. the "Creating PR…"
+// pill on completed_no_pr rows).
+export type PRCreationState =
+  | 'idle'
+  | 'queued'
+  | 'pushing'
+  | 'succeeded'
+  | 'failed';
+
+export interface AutomationRunSession {
+  id: string;
+  title?: string;
+  // Mirrors models.SessionStatus values; the row UI keys off this
+  // (notably "needs_human_guidance") to choose between failure and
+  // attention treatments.
+  status: string;
+  diff_stats?: { added: number; removed: number; files_changed?: number };
+  failure_explanation?: string;
+  failure_category?: string;
+  failure_next_steps?: string[];
+  failure_retry_advised: boolean;
+  pr_creation_state: PRCreationState;
+  pr?: PRSummary;
 }
 
 export interface AutomationRunStatsBucket {

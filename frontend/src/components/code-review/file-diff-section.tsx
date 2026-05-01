@@ -289,7 +289,7 @@ export const FileDiffSection = forwardRef<HTMLDivElement, FileDiffSectionProps>(
           removed={file.stats.removed}
           onBrowseFile={onBrowseFile}
         />
-        <div className="overflow-x-auto">
+        <div className="overflow-x-auto [container-type:inline-size]">
         <div className="min-w-fit">
         {sections.map((section) => {
           if (section.type === "gap") {

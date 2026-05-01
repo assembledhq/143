@@ -108,7 +108,6 @@ import { AgentBadge } from "@/components/agent-badge";
 import { PreviewPanel } from "@/components/preview/preview-panel";
 import { PendingAttachmentStrip } from "@/components/pending-attachment-strip";
 import { PRHealthBanner } from "@/components/pr-health-banner";
-import { ReviewButton } from "@/components/review-button";
 import { MobileBackButton } from "@/components/mobile-back-button";
 import { useAuth } from "@/hooks/use-auth";
 import { useMediaQuery } from "@/hooks/use-media-query";
@@ -1823,6 +1822,7 @@ function ChatPanel({
 const MIN_DETAIL = 280;
 const MAX_DETAIL = 600;
 const DEFAULT_DETAIL = 384;
+const MOBILE_REVIEW_MEDIA_QUERY = "(max-width: 767px)";
 
 export function SessionDetailContent({ id }: { id: string }) {
   const router = useRouter();
@@ -1844,6 +1844,28 @@ export function SessionDetailContent({ id }: { id: string }) {
   const [activeFileIndex, setActiveFileIndex] = useState(0);
   const [isEditingTitle, setIsEditingTitle] = useState(false);
   const [draftTitle, setDraftTitle] = useState("");
+  const [isMobileReviewViewport, setIsMobileReviewViewport] = useState(false);
+
+  useEffect(() => {
+    if (typeof window === "undefined" || typeof window.matchMedia !== "function") {
+      return;
+    }
+
+    const mediaQuery = window.matchMedia(MOBILE_REVIEW_MEDIA_QUERY);
+    const syncViewport = (event?: MediaQueryListEvent) => {
+      setIsMobileReviewViewport(event ? event.matches : mediaQuery.matches);
+    };
+
+    syncViewport();
+
+    if (typeof mediaQuery.addEventListener === "function") {
+      mediaQuery.addEventListener("change", syncViewport);
+      return () => mediaQuery.removeEventListener("change", syncViewport);
+    }
+
+    mediaQuery.addListener(syncViewport);
+    return () => mediaQuery.removeListener(syncViewport);
+  }, []);
 
   const handleDetailResize = useCallback((delta: number) => {
     setDetailWidth((w) => Math.min(MAX_DETAIL, Math.max(MIN_DETAIL, w - delta)));
@@ -1855,15 +1877,17 @@ export function SessionDetailContent({ id }: { id: string }) {
     setReviewParam("active");
     setDetailTab("changes");
     setShowDetailPanel(true);
-    // On mobile the right panel lives in a bottom sheet — auto-open it so the
-    // file tree is reachable when entering review. Gate on viewport because
-    // the Sheet's overlay isn't viewport-aware (md:hidden only hides
-    // SheetContent, not SheetOverlay) — opening on desktop would dim the
-    // screen behind a hidden sheet.
-    if (typeof window !== "undefined" && window.matchMedia("(max-width: 767px)").matches) {
-      setMobileDetailOpen(true);
+    // Mobile review should hand off directly into the diff reader. The detail
+    // sheet stays available as a file index, but it should not remain on top
+    // of the review surface when the user asks to view changes.
+    if (isMobileReviewViewport) {
+      setMobileDetailOpen(false);
     }
-  }, [setReviewParam]);
+  }, [isMobileReviewViewport, setReviewParam]);
+  const openMobileFilesList = useCallback(() => {
+    setDetailTab("changes");
+    setMobileDetailOpen(true);
+  }, []);
 
   // --- Exit review mode ---
   const exitReview = useCallback(() => {
@@ -1883,7 +1907,6 @@ export function SessionDetailContent({ id }: { id: string }) {
   const [localPRActionError, setLocalPRActionError] = useState<PRActionErrorState | null>(null);
   const [pendingPRAction, setPendingPRAction] = useState<"fix_tests" | "resolve_conflicts" | "merge" | null>(null);
   const [repairActionError, setRepairActionError] = useState<string | null>(null);
-  const [pendingReviewMode, setPendingReviewMode] = useState<import("@/lib/types").SessionReviewMode | null>(null);
   const [prAuthPrompt, setPRAuthPrompt] = useState<PRAuthPromptState | null>(null);
   const resumeAttemptRef = useRef<string | null>(null);
   const apiBase = process.env.NEXT_PUBLIC_API_URL || "";
@@ -1917,8 +1940,6 @@ export function SessionDetailContent({ id }: { id: string }) {
   const isActive = session ? !terminalStatuses.has(session.status) : false;
   const isRunning = session?.status === "running";
   const currentTitle = session ? sessionTitle(session) : "";
-  const { user } = useAuth();
-  const canRequestReview = user?.role === "admin" || user?.role === "member";
 
   const queryClient = useQueryClient();
 
@@ -2021,38 +2042,6 @@ export function SessionDetailContent({ id }: { id: string }) {
     }
     prevPRUrlRef.current = prUrl;
   }, [localPRState, prUrl, session?.pr_creation_state]);
-  // Session-native review affordance. Capabilities are server-driven so the
-  // button only appears when the agent's adapter implements ReviewCapableAdapter
-  // and the session is in a state that can run another turn (idle/paused with
-  // a non-empty diff). Key on status only so the button flips visibility when
-  // the session transitions running → idle, without burning a refetch on every
-  // assistant SSE tick (which advances last_activity_at).
-  const { data: reviewCapabilitiesData } = useQuery({
-    queryKey: ["session", id, "review-capabilities", session?.status],
-    queryFn: () => api.sessions.getReviewCapabilities(id),
-    enabled: !!session && canRequestReview,
-  });
-  const reviewCapabilities = reviewCapabilitiesData?.data;
-  const startReviewMutation = useMutation({
-    mutationFn: (mode: import("@/lib/types").SessionReviewMode) => api.sessions.startReview(id, mode),
-    onMutate: (mode) => {
-      setPendingReviewMode(mode);
-    },
-    onSuccess: () => {
-      // Stay in the current view; the assistant message will stream into the
-      // session timeline via SSE just like any other turn. Bust caches so the
-      // status flips from idle → running immediately.
-      void queryClient.invalidateQueries({ queryKey: ["session", id] });
-      void queryClient.invalidateQueries({ queryKey: ["session", id, "messages"] });
-      void queryClient.invalidateQueries({ queryKey: ["session", id, "timeline"] });
-      setPendingReviewMode(null);
-    },
-    onError: (err) => {
-      setPendingReviewMode(null);
-      const message = err instanceof ApiError ? err.message : "Failed to start review";
-      toast.error(message);
-    },
-  });
   const startRepairMutation = useMutation({
     mutationFn: async (action: "fix_tests" | "resolve_conflicts") => {
       if (!pullRequestId) {
@@ -2279,6 +2268,18 @@ export function SessionDetailContent({ id }: { id: string }) {
   const diffViewState = useDiffViewState(session ?? { diff: null, diff_history: [] } as unknown as Session);
   const { files: allDiffFiles, filteredFiles, passes, passRange, setPassRange, diffSearchQuery, setDiffSearchQuery } = diffViewState;
 
+  useEffect(() => {
+    if (filteredFiles.length === 0) {
+      if (activeFileIndex !== 0) {
+        setActiveFileIndex(0);
+      }
+      return;
+    }
+    if (activeFileIndex >= filteredFiles.length) {
+      setActiveFileIndex(filteredFiles.length - 1);
+    }
+  }, [activeFileIndex, filteredFiles.length]);
+
   const {
     comments,
     commentsByLine,
@@ -2456,6 +2457,50 @@ export function SessionDetailContent({ id }: { id: string }) {
     composerTextareaRef.current?.focus();
   }, []);
 
+  const changesCount = diffStats?.filesChanged;
+  const showValidationTab = !session?.triggered_by_user_id;
+  const detailTabsRef = useRef<HTMLDivElement>(null);
+  const [detailTabsOverflow, setDetailTabsOverflow] = useState(false);
+
+  const checkDetailTabsOverflow = useCallback(() => {
+    const el = detailTabsRef.current;
+    if (el) {
+      setDetailTabsOverflow(el.scrollWidth > el.clientWidth);
+    }
+  }, []);
+
+  useEffect(() => {
+    checkDetailTabsOverflow();
+
+    const handleResize = () => checkDetailTabsOverflow();
+    window.addEventListener("resize", handleResize);
+
+    if (typeof ResizeObserver === "undefined") {
+      return () => window.removeEventListener("resize", handleResize);
+    }
+
+    const observer = new ResizeObserver(() => {
+      checkDetailTabsOverflow();
+    });
+
+    if (detailTabsRef.current) {
+      observer.observe(detailTabsRef.current);
+    }
+
+    return () => {
+      observer.disconnect();
+      window.removeEventListener("resize", handleResize);
+    };
+  }, [
+    changesCount,
+    checkDetailTabsOverflow,
+    hasPR,
+    session?.id,
+    session?.pr_creation_error,
+    session?.pr_creation_state,
+    showValidationTab,
+  ]);
+
   if (isLoading) {
     return (
       <div className="flex items-center justify-center h-full">
@@ -2480,9 +2525,6 @@ export function SessionDetailContent({ id }: { id: string }) {
   }
 
   const status = statusConfig[session.status] || statusConfig.pending;
-
-  const changesCount = diffStats?.filesChanged;
-  const showValidationTab = !session.triggered_by_user_id;
   const prState = session.pr_creation_state;
   const snapshotState = classifyPRSnapshotState({
     sessionSnapshotKey: session.snapshot_key,
@@ -2587,7 +2629,14 @@ export function SessionDetailContent({ id }: { id: string }) {
     >
       <div className="border-b border-border px-2 py-2 shrink-0">
         <div className="flex items-center gap-2 min-w-0">
-          <div aria-label="Session detail tabs" className="min-w-0 flex-1 overflow-x-auto scrollbar-hide">
+          <div
+            ref={detailTabsRef}
+            aria-label="Session detail tabs"
+            className={cn(
+              "min-w-0 flex-1 overflow-x-auto overflow-y-hidden",
+              detailTabsOverflow ? "mask-fade-r" : "scrollbar-hide",
+            )}
+          >
             <TabsList variant="line" size="sm" className="border-b-0 min-w-max">
               <TabsTrigger value="overview">Overview</TabsTrigger>
               <TabsTrigger value="changes">
@@ -2727,15 +2776,6 @@ export function SessionDetailContent({ id }: { id: string }) {
                 </div>
               </CardContent>
             </Card>
-          )}
-          {canRequestReview && (
-            <div className="flex">
-              <ReviewButton
-                capabilities={reviewCapabilities}
-                pendingMode={pendingReviewMode}
-                onReview={(mode) => startReviewMutation.mutate(mode)}
-              />
-            </div>
           )}
           <OverviewTab session={session} members={members} />
         </div>
@@ -2883,6 +2923,8 @@ export function SessionDetailContent({ id }: { id: string }) {
                   activeFileIndex={activeFileIndex}
                   onFileChange={setActiveFileIndex}
                   onBack={exitReview}
+                  isMobile={isMobileReviewViewport}
+                  onOpenFileList={openMobileFilesList}
                   commentsByLine={commentsByLine}
                   activeCommentLine={activeCommentLine}
                   onAddComment={handleAddComment}
@@ -2985,6 +3027,9 @@ export function SessionDetailContent({ id }: { id: string }) {
           className="md:hidden h-[85vh] max-h-[85vh] min-h-[60vh] p-0 flex flex-col gap-0 bg-background"
         >
           <SheetTitle className="sr-only">Session details</SheetTitle>
+          <SheetDescription className="sr-only">
+            Browse session details, changed files, validation, and preview on mobile.
+          </SheetDescription>
           {panelTabsEl}
         </SheetContent>
       </Sheet>

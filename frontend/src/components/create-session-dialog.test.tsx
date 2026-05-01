@@ -283,6 +283,7 @@ describe("CreateSessionDialog", () => {
 
     // Open the attachment dropdown
     await user.click(screen.getByRole("button", { name: /Add files or photos/ }));
+    expect(screen.getByTestId("add-image-url-link-icon")).toBeInTheDocument();
     // Click "Add image URL"
     await user.click(screen.getByText("Add image URL"));
 

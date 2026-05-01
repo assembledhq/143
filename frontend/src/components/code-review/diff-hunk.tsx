@@ -79,17 +79,26 @@ export function DiffHunk({
             />
             {/* Existing comments */}
             {lineComments && lineComments.length > 0 && onUpdateComment && onDeleteComment && (
-              <CommentThread
-                comments={lineComments}
-                onUpdate={onUpdateComment}
-                onDelete={onDeleteComment}
-              />
+              <div
+                data-testid="inline-comment-thread-anchor"
+                className="sticky left-0 pl-[120px] pr-2"
+              >
+                <CommentThread
+                  comments={lineComments}
+                  onUpdate={onUpdateComment}
+                  onDelete={onDeleteComment}
+                  className="max-w-[min(42rem,calc(100cqw-10rem))]"
+                />
+              </div>
             )}
             {/* New comment input */}
             {isActiveCommentLine && onSubmitComment && onCancelComment && (
-              <div data-testid="inline-comment-composer-anchor" className="pl-[120px] pr-2">
+              <div
+                data-testid="inline-comment-composer-anchor"
+                className="sticky left-0 pl-[120px] pr-2"
+              >
                 <CommentInput
-                  className="max-w-2xl"
+                  className="max-w-[min(42rem,calc(100cqw-10rem))]"
                   onSubmit={onSubmitComment}
                   onCancel={onCancelComment}
                 />

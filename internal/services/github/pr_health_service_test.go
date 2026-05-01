@@ -249,6 +249,52 @@ func TestPRServiceBuildPullRequestHealthResponseNormalizesLegacyCheckStatuses(t 
 	require.NoError(t, mock.ExpectationsWereMet(), "all health current queries should be executed")
 }
 
+func TestPRServiceBuildPullRequestHealthResponseMarksConfirmedZeroChecksMergeable(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create pgx mock pool")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	pullRequestID := uuid.New()
+	now := time.Now().UTC()
+	summaryJSON := []byte(`{
+		"merge_state":"clean",
+		"has_conflicts":false,
+		"failing_test_count":0,
+		"needs_agent_action":false,
+		"checks":[]
+	}`)
+
+	mock.ExpectQuery("SELECT .+ FROM pull_request_health_current WHERE org_id = .+ AND pull_request_id = .+").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": pullRequestID}).
+		WillReturnRows(pgxmock.NewRows(prHealthCurrentTestColumns).AddRow(
+			pullRequestID, orgID, int64(4), "head-ready", "base-ready", summaryJSON, summaryJSON, models.PullRequestHealthEnrichmentStatusNotRequested, nil, now, now,
+		))
+
+	service := &PRService{
+		pullRequests: db.NewPullRequestStore(mock),
+		logger:       zerolog.New(io.Discard),
+	}
+
+	resp, err := service.buildPullRequestHealthResponse(context.Background(), models.PullRequest{
+		ID:             pullRequestID,
+		OrgID:          orgID,
+		GitHubPRNumber: 52,
+		GitHubRepo:     "assembledhq/143",
+		GitHubPRURL:    "https://github.com/assembledhq/143/pull/52",
+		Status:         "open",
+		MergeState:     models.PullRequestMergeStateUnknown,
+		HealthVersion:  2,
+	})
+	require.NoError(t, err, "buildPullRequestHealthResponse should succeed")
+	require.True(t, resp.ChecksConfirmed, "response should mark current GitHub checks as confirmed even when none are configured")
+	require.True(t, resp.CanMerge, "response should allow merge when GitHub confirmed a clean PR with no checks configured")
+	require.Equal(t, "PR #52 is mergeable. No CI checks are configured for this repository.", resp.Summary, "response should explain the zero-check mergeable state")
+	require.NoError(t, mock.ExpectationsWereMet(), "all health current queries should be executed")
+}
+
 func TestPRServiceGetPullRequestHealthEnqueuesSyncAndEnrichment(t *testing.T) {
 	t.Parallel()
 

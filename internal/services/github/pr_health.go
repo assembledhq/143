@@ -205,6 +205,10 @@ func buildPRHealthSummaryText(health models.PullRequestHealthResponse) string {
 		return fmt.Sprintf("PR #%d has 1 failing test job.", health.PullRequestNumber)
 	case health.FailingTestCount > 1:
 		return fmt.Sprintf("PR #%d has %d failing test jobs.", health.PullRequestNumber, health.FailingTestCount)
+	case !health.ChecksConfirmed:
+		return fmt.Sprintf("PR #%d is waiting for required checks to report passing.", health.PullRequestNumber)
+	case len(health.Checks) == 0:
+		return fmt.Sprintf("PR #%d is mergeable. No CI checks are configured for this repository.", health.PullRequestNumber)
 	default:
 		return fmt.Sprintf("PR #%d is mergeable and all required test checks are passing.", health.PullRequestNumber)
 	}

@@ -32,7 +32,7 @@ type mockProvider struct {
 	statusErr   error
 }
 
-func (m *mockProvider) StartPreview(_ context.Context, _ *agent.Sandbox, _ *models.PreviewConfig, _ map[string]string) (*PreviewHandle, error) {
+func (m *mockProvider) StartPreview(_ context.Context, _ *agent.Sandbox, _ *models.PreviewConfig, _ map[string]string, _ ServiceObserver) (*PreviewHandle, error) {
 	if m.startErr != nil {
 		return nil, m.startErr
 	}
@@ -1359,6 +1359,12 @@ func TestStopActivePreviewForSession_StopsActivePreview(t *testing.T) {
 	mock.ExpectExec("UPDATE preview_instances SET status").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectExec("UPDATE preview_services SET").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
+	mock.ExpectExec("UPDATE preview_infrastructure SET").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
 	mock.ExpectExec("UPDATE preview_access_sessions SET revoked_at").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
@@ -1419,6 +1425,12 @@ func TestStopPreview_DestroysSandboxWhenTurnDoesNotHold(t *testing.T) {
 	mock.ExpectExec("UPDATE preview_instances SET status").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectExec("UPDATE preview_services SET").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
+	mock.ExpectExec("UPDATE preview_infrastructure SET").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
 	mock.ExpectExec("UPDATE preview_access_sessions SET revoked_at").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
@@ -1481,6 +1493,12 @@ func TestStopPreview_LeavesSandboxWhenNewHolderAcquiredAfterRelease(t *testing.T
 	mock.ExpectExec("UPDATE preview_instances SET status").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectExec("UPDATE preview_services SET").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
+	mock.ExpectExec("UPDATE preview_infrastructure SET").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
 	mock.ExpectExec("UPDATE preview_access_sessions SET revoked_at").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
@@ -1541,6 +1559,12 @@ func TestStopPreview_LeavesSandboxWhenTurnStillHolds(t *testing.T) {
 	mock.ExpectExec("UPDATE preview_instances SET status").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectExec("UPDATE preview_services SET").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
+	mock.ExpectExec("UPDATE preview_infrastructure SET").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
 	mock.ExpectExec("UPDATE preview_access_sessions SET revoked_at").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
@@ -1600,6 +1624,12 @@ func TestStopPreview_FinalizeErrorLeavesContainerForReconciler(t *testing.T) {
 	mock.ExpectExec("UPDATE preview_instances SET status").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectExec("UPDATE preview_services SET").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
+	mock.ExpectExec("UPDATE preview_infrastructure SET").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
 	mock.ExpectExec("UPDATE preview_access_sessions SET revoked_at").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
@@ -1653,6 +1683,20 @@ func expectCreatePreviewInstance(mock pgxmock.PgxPoolIface, previewID, sessionID
 			pgxmock.NewRows(previewInstanceTestCols).
 				AddRow(newPreviewInstanceRow(previewID, sessionID, orgID, userID, status, "", now)...),
 		)
+}
+
+func expectUpdatePreviewStatusFailed(mock pgxmock.PgxPoolIface) {
+	mock.ExpectBegin()
+	mock.ExpectExec("UPDATE preview_instances SET status").
+		WithArgs(previewAnyArgs(4)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectExec("UPDATE preview_services SET").
+		WithArgs(previewAnyArgs(5)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
+	mock.ExpectExec("UPDATE preview_infrastructure SET").
+		WithArgs(previewAnyArgs(5)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
+	mock.ExpectCommit()
 }
 
 // previewAnyArgs matches the helper style in the db package tests.
@@ -1833,10 +1877,8 @@ func TestReservePreview_HoldErrorMarksFailed(t *testing.T) {
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnError(fmt.Errorf("boom"))
 
-	// UpdatePreviewStatus failed.
-	mock.ExpectExec("UPDATE preview_instances SET status").
-		WithArgs(previewAnyArgs(4)...).
-		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	// UpdatePreviewStatus(failed).
+	expectUpdatePreviewStatusFailed(mock)
 
 	_, err = mgr.ReservePreview(context.Background(), StartPreviewInput{
 		SessionID: sessionID,
@@ -2183,9 +2225,7 @@ func TestAbortReservation_ReleasesHoldAndDestroysHydratedContainer(t *testing.T)
 	}
 
 	// UpdatePreviewStatus(failed).
-	mock.ExpectExec("UPDATE preview_instances SET status").
-		WithArgs(previewAnyArgs(4)...).
-		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	expectUpdatePreviewStatusFailed(mock)
 
 	// ReleasePreviewHold: destroyNow=true (container-1 and no turn).
 	mock.ExpectQuery(`WITH released AS`).
@@ -2236,9 +2276,7 @@ func TestAbortReservation_LeavesContainerWhenNotHydrated(t *testing.T) {
 		SessionID: uuid.New(),
 	}
 
-	mock.ExpectExec("UPDATE preview_instances SET status").
-		WithArgs(previewAnyArgs(4)...).
-		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	expectUpdatePreviewStatusFailed(mock)
 	mock.ExpectQuery(`WITH released AS`).
 		WithArgs(previewAnyArgs(2)...).
 		WillReturnRows(
@@ -2276,9 +2314,7 @@ func TestAbortReservation_LeavesContainerWhenSessionTracksDifferent(t *testing.T
 		SessionID: uuid.New(),
 	}
 
-	mock.ExpectExec("UPDATE preview_instances SET status").
-		WithArgs(previewAnyArgs(4)...).
-		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	expectUpdatePreviewStatusFailed(mock)
 	// Session reports a different container_id than the one we hydrated.
 	mock.ExpectQuery(`WITH released AS`).
 		WithArgs(previewAnyArgs(2)...).
@@ -2316,9 +2352,7 @@ func TestAbortReservation_FinalizeNotClearedSkipsDestroy(t *testing.T) {
 		SessionID: uuid.New(),
 	}
 
-	mock.ExpectExec("UPDATE preview_instances SET status").
-		WithArgs(previewAnyArgs(4)...).
-		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	expectUpdatePreviewStatusFailed(mock)
 	mock.ExpectQuery(`WITH released AS`).
 		WithArgs(previewAnyArgs(2)...).
 		WillReturnRows(
@@ -2359,9 +2393,7 @@ func TestAbortReservation_FinalizeErrorSkipsDestroy(t *testing.T) {
 		SessionID: uuid.New(),
 	}
 
-	mock.ExpectExec("UPDATE preview_instances SET status").
-		WithArgs(previewAnyArgs(4)...).
-		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	expectUpdatePreviewStatusFailed(mock)
 	mock.ExpectQuery(`WITH released AS`).
 		WithArgs(previewAnyArgs(2)...).
 		WillReturnRows(
@@ -2401,9 +2433,7 @@ func TestAbortReservation_ReleaseHoldErrorLeavesContainer(t *testing.T) {
 		SessionID: uuid.New(),
 	}
 
-	mock.ExpectExec("UPDATE preview_instances SET status").
-		WithArgs(previewAnyArgs(4)...).
-		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	expectUpdatePreviewStatusFailed(mock)
 	mock.ExpectQuery(`WITH released AS`).
 		WithArgs(previewAnyArgs(2)...).
 		WillReturnError(fmt.Errorf("db down"))
@@ -2553,9 +2583,7 @@ func TestStartPreview_LaunchFailureAborts(t *testing.T) {
 		)
 
 	// AbortReservation: UpdatePreviewStatus(failed) + ReleasePreviewHold.
-	mock.ExpectExec("UPDATE preview_instances SET status").
-		WithArgs(previewAnyArgs(4)...).
-		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	expectUpdatePreviewStatusFailed(mock)
 	mock.ExpectQuery(`WITH released AS`).
 		WithArgs(previewAnyArgs(2)...).
 		WillReturnRows(
@@ -2647,4 +2675,155 @@ func TestManager_HMRWatcherGetter(t *testing.T) {
 	watcher := &HMRWatcher{}
 	manager.hmrWatcher = watcher
 	require.Equal(t, watcher, manager.HMRWatcher(), "HMRWatcher should return the configured watcher")
+}
+
+// =============================================================================
+// managerServiceObserver tests
+//
+// The observer streams per-service Ready/Failed transitions into the DB while
+// StartPreview is still running, so the frontend's startup checklist sees
+// progress live. These tests exercise both methods including the PID-write
+// branch, the failure-path tail handling, and the warn-and-continue paths
+// when DB writes themselves fail.
+// =============================================================================
+
+func TestManagerServiceObserver_OnServiceReady_WithPID(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	mgr := newTestManager(mock, &mockProvider{})
+	orgID := uuid.New()
+	previewID := uuid.New()
+	obs := mgr.newServiceObserver(orgID, previewID).(*managerServiceObserver)
+
+	mock.ExpectExec("UPDATE preview_services SET status").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectExec("UPDATE preview_services SET pid").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	obs.OnServiceReady("web", 3000, 12345)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestManagerServiceObserver_OnServiceReady_NoPID(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	mgr := newTestManager(mock, &mockProvider{})
+	obs := mgr.newServiceObserver(uuid.New(), uuid.New()).(*managerServiceObserver)
+
+	// pid=0 must skip the second exec — the readiness probe runs before the
+	// PID-detection goroutine has had a chance to populate ss.pid for some
+	// services, and we don't want to clobber the column with 0.
+	mock.ExpectExec("UPDATE preview_services SET status").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	obs.OnServiceReady("web", 3000, 0)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestManagerServiceObserver_OnServiceReady_DBErrorsLogged(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	mgr := newTestManager(mock, &mockProvider{})
+	obs := mgr.newServiceObserver(uuid.New(), uuid.New()).(*managerServiceObserver)
+
+	mock.ExpectExec("UPDATE preview_services SET status").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnError(fmt.Errorf("status update boom"))
+	mock.ExpectExec("UPDATE preview_services SET pid").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnError(fmt.Errorf("pid update boom"))
+
+	require.NotPanics(t, func() { obs.OnServiceReady("web", 3000, 99) })
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestManagerServiceObserver_OnServiceFailed_WithTail(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	mgr := newTestManager(mock, &mockProvider{})
+	orgID := uuid.New()
+	previewID := uuid.New()
+	obs := mgr.newServiceObserver(orgID, previewID).(*managerServiceObserver)
+
+	mock.ExpectExec("UPDATE preview_services SET status").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	logID := uuid.New()
+	mock.ExpectQuery("INSERT INTO preview_logs").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "preview_instance_id", "org_id", "level", "step", "message", "metadata", "created_at",
+		}).AddRow(logID, previewID, orgID, "error", "start", "msg", json.RawMessage(`null`), time.Now()))
+
+	tail := []string{"line one", "line two: permission denied"}
+	obs.OnServiceFailed("server", "exited with code 126", tail)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestManagerServiceObserver_OnServiceFailed_NoTail(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	mgr := newTestManager(mock, &mockProvider{})
+	orgID := uuid.New()
+	previewID := uuid.New()
+	obs := mgr.newServiceObserver(orgID, previewID).(*managerServiceObserver)
+
+	mock.ExpectExec("UPDATE preview_services SET status").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	logID := uuid.New()
+	mock.ExpectQuery("INSERT INTO preview_logs").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "preview_instance_id", "org_id", "level", "step", "message", "metadata", "created_at",
+		}).AddRow(logID, previewID, orgID, "error", "start", "msg", json.RawMessage(`null`), time.Now()))
+
+	obs.OnServiceFailed("web", "boom", nil)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestManagerServiceObserver_OnServiceFailed_DBErrorsLogged(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	mgr := newTestManager(mock, &mockProvider{})
+	obs := mgr.newServiceObserver(uuid.New(), uuid.New()).(*managerServiceObserver)
+
+	// Both DB writes fail; the observer must log and return without panicking
+	// so a flaky DB doesn't crash the worker mid-launch.
+	mock.ExpectExec("UPDATE preview_services SET status").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnError(fmt.Errorf("status boom"))
+	mock.ExpectQuery("INSERT INTO preview_logs").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnError(fmt.Errorf("log boom"))
+
+	require.NotPanics(t, func() { obs.OnServiceFailed("web", "boom", []string{"line"}) })
+	require.NoError(t, mock.ExpectationsWereMet())
 }

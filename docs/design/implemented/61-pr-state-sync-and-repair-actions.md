@@ -180,7 +180,8 @@ When the PR needs attention:
 
 - show a short summary of the blocker
 - show the relevant repair button(s)
-- show the most recent GitHub sync timestamp
+- show the most recent GitHub sync timestamp as plain inline text, not a pill
+- keep the sync timestamp live relative to the current time (`Synced 15s ago`, `Synced 3m ago`) with an adaptive refresh cadence
 - keep the row visually compact so it reads like a lightweight action strip, not a large content block
 
 If the session is already showing a PR-related error notice, keep that notice as-is and render the PR health row directly below it as a separate element.

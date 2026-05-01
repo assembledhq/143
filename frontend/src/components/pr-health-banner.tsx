@@ -1,13 +1,14 @@
 "use client";
 
-import { AlertTriangle, CheckCircle2, GitMerge, GitPullRequest, Loader2, Wrench } from "lucide-react";
+import { AlertTriangle, CheckCircle2, ExternalLink, GitMerge, GitPullRequest, Loader2, Wrench } from "lucide-react";
 
 import type { PullRequestHealthResponse } from "@/lib/types";
-import { cn, formatTimeAgo } from "@/lib/utils";
+import { cn } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { HoverCard, HoverCardContent, HoverCardTrigger } from "@/components/ui/hover-card";
+import { SyncTimeText } from "@/components/sync-time-text";
 
 // PRBannerAction names every action the banner can launch. The pending value
 // is shared across buttons so they can disable each other while one is in
@@ -36,11 +37,11 @@ export function PRHealthBanner({
   onMerge,
 }: PRHealthBannerProps) {
   const isHealthy = !health.can_fix_tests && !health.can_resolve_conflicts;
-  const syncedLabel = health.github_state_synced_at ? formatTimeAgo(health.github_state_synced_at) : "Syncing";
-  const hasActionableButton = health.can_resolve_conflicts || health.can_fix_tests || health.can_merge;
   const orderedChecks = [...(health.checks ?? [])]
     .map((check) => ({ ...check, status: normalizeCheckStatus(check.status) }))
     .sort((a, b) => statusRank(a.status) - statusRank(b.status) || a.name.localeCompare(b.name));
+  const canShowMergeButton = health.can_merge && checksAllowMerge(health.checks_confirmed, orderedChecks);
+  const hasActionableButton = health.can_resolve_conflicts || health.can_fix_tests || canShowMergeButton;
   const failedChecks = orderedChecks.filter((check) => check.status === "failed").length;
   const failedSummaryLabel = orderedChecks.length > 0
     ? `${failedChecks}/${orderedChecks.length} failed`
@@ -69,14 +70,7 @@ export function PRHealthBanner({
             <p className="text-xs text-foreground">{health.summary}</p>
 
             <div className="flex flex-wrap items-center gap-2">
-              <Badge variant="secondary" className="text-xs">
-                Synced {syncedLabel}
-              </Badge>
-              {health.has_conflicts && (
-                <Badge variant="secondary" className="bg-amber-50 text-amber-700 dark:bg-amber-950/30 dark:text-amber-400 text-xs">
-                  conflicts
-                </Badge>
-              )}
+              <SyncTimeText syncedAt={health.github_state_synced_at} prefix="Synced" />
               {health.failing_test_count > 0 && (
                 orderedChecks.length > 0 ? (
                   <HoverCard openDelay={100} closeDelay={100}>
@@ -90,12 +84,30 @@ export function PRHealthBanner({
                         <div className="text-xs font-medium text-foreground">CI jobs</div>
                         <div className="space-y-1.5">
                           {orderedChecks.map((check) => (
-                            <div key={`${check.name}-${check.status}`} className="flex items-center justify-between gap-3">
-                              <div className="min-w-0 text-xs text-foreground truncate">{check.name}</div>
-                              <Badge variant="secondary" className={cn("shrink-0 text-xs", checkStatusBadgeClassName(check.status))}>
-                                {check.status}
-                              </Badge>
-                            </div>
+                            check.details_url ? (
+                              <a
+                                key={`${check.name}-${check.status}`}
+                                href={check.details_url}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="flex items-center justify-between gap-3 rounded-sm px-1 py-1 text-xs transition-colors hover:bg-muted/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                              >
+                                <div className="flex min-w-0 items-center gap-1.5">
+                                  <span className="min-w-0 truncate text-foreground">{check.name}</span>
+                                  <ExternalLink aria-hidden="true" className="h-3 w-3 shrink-0 text-muted-foreground" />
+                                </div>
+                                <Badge variant="secondary" className={cn("shrink-0 text-xs", checkStatusBadgeClassName(check.status))}>
+                                  {check.status}
+                                </Badge>
+                              </a>
+                            ) : (
+                              <div key={`${check.name}-${check.status}`} className="flex items-center justify-between gap-3 px-1 py-1">
+                                <div className="min-w-0 text-xs text-foreground truncate">{check.name}</div>
+                                <Badge variant="secondary" className={cn("shrink-0 text-xs", checkStatusBadgeClassName(check.status))}>
+                                  {check.status}
+                                </Badge>
+                              </div>
+                            )
                           ))}
                         </div>
                       </div>
@@ -154,7 +166,7 @@ export function PRHealthBanner({
                       {pendingAction === "fix_tests" ? "Opening repair session…" : "Fix tests"}
                     </Button>
                   )}
-                  {health.can_merge && (
+                  {canShowMergeButton && (
                     <Button
                       size="sm"
                       variant="default"
@@ -175,7 +187,7 @@ export function PRHealthBanner({
                     Resolve conflicts first. CI may need to rerun afterward.
                   </p>
                 )}
-                {mergeAuthRequired && health.can_merge && (
+                {mergeAuthRequired && canShowMergeButton && (
                   <p className="text-xs text-muted-foreground">
                     Connect your GitHub account to merge this pull request as yourself.
                   </p>
@@ -209,6 +221,15 @@ function normalizeCheckStatus(status?: string): PullRequestCheckStatus {
     default:
       return "pending";
   }
+}
+
+function checksAllowMerge(
+  checksConfirmed: boolean,
+  checks: Array<{ status: PullRequestCheckStatus }>,
+) {
+  return checks.length === 0
+    ? checksConfirmed
+    : checks.every((check) => check.status === "passed");
 }
 
 function checkStatusBadgeClassName(status: PullRequestCheckStatus) {

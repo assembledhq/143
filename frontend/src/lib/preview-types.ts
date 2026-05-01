@@ -32,6 +32,29 @@ export const PREVIEW_ERROR_CODES = {
   // 500 — internal failure while hydrating (restore error, provider
   // outage, DB write failure). Generic; details in the underlying message.
   HYDRATE_FAILED: "PREVIEW_HYDRATE_FAILED",
+  // 422 — the repo has no committed .143/preview.json and the client
+  // didn't supply an explicit config, so the backend has nothing to launch.
+  // User fix is to commit the config file (see docs/guides/previews.md).
+  NO_CONFIG: "PREVIEW_NO_CONFIG",
+  // 422 — a preview infrastructure container's image is not on the worker
+  // and the on-demand pull failed (registry unreachable, image renamed,
+  // rate-limit, no egress). The user-visible message names the image so an
+  // operator can pull manually or fix registry access.
+  INFRA_IMAGE_UNAVAILABLE: "PREVIEW_INFRA_IMAGE_UNAVAILABLE",
+  // 422 — Docker accepted the create call but the container failed to
+  // start (resource limits, label conflict, daemon error).
+  INFRA_START_FAILED: "PREVIEW_INFRA_START_FAILED",
+  // 422 — the infrastructure container started but its health check
+  // (pg_isready, redis-cli ping, etc.) never passed within the timeout.
+  INFRA_UNHEALTHY: "PREVIEW_INFRA_UNHEALTHY",
+  // 422 — a user-supplied init script (seed SQL etc.) returned a non-zero
+  // exit code or could not be read from the workspace.
+  INIT_SCRIPT_FAILED: "PREVIEW_INIT_SCRIPT_FAILED",
+  // 422 — an application service was launched but its readiness probe
+  // never passed within the configured timeout. The service likely
+  // crashed at boot or is bound to a different port than it declares in
+  // .143/preview.json.
+  SERVICE_NOT_READY: "PREVIEW_SERVICE_NOT_READY",
 } as const;
 
 export type PreviewErrorCode =
