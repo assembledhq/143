@@ -341,7 +341,7 @@ export const api = {
       post<import('./types').SingleResponse<import('./types').Session>>('/api/v1/sessions/manual', body),
     getMessages: (sessionId: string) =>
       get<import('./types').ListResponse<import('./types').SessionMessage>>(`/api/v1/sessions/${sessionId}/messages`),
-    sendMessage: (sessionId: string, body: { message: string; images?: string[]; references?: import('./types').SessionInputReference[]; commands?: import('./types').SessionInputCommand[]; planMode?: boolean; model?: string }) =>
+    sendMessage: (sessionId: string, body: { message: string; images?: string[]; references?: import('./types').SessionInputReference[]; commands?: import('./types').SessionInputCommand[]; planMode?: boolean; model?: string; resolveReviewCommentIDs?: string[] }) =>
       post<import('./types').SingleResponse<import('./types').SessionMessage>>(
         `/api/v1/sessions/${sessionId}/messages`,
         {
@@ -351,6 +351,7 @@ export const api = {
           commands: body.commands && body.commands.length > 0 ? body.commands : undefined,
           plan_mode: body.planMode || undefined,
           ...(body.model ? { model: body.model } : {}),
+          resolve_review_comment_ids: body.resolveReviewCommentIDs && body.resolveReviewCommentIDs.length > 0 ? body.resolveReviewCommentIDs : undefined,
         },
       ),
     endSession: (sessionId: string) =>

@@ -3081,6 +3081,7 @@ describe('SessionDetailPage', () => {
 
   it('clears attached review comments after sending them to the agent', async () => {
     let postedMessage = '';
+    let postedResolveIDs: string[] | undefined;
     const idleSessionWithDiff: Session = {
       ...mockSessions[0],
       status: 'idle',
@@ -3090,7 +3091,7 @@ describe('SessionDetailPage', () => {
       diff: 'diff --git a/src/app.ts b/src/app.ts\n--- a/src/app.ts\n+++ b/src/app.ts\n@@ -1,3 +1,4 @@\n import express from "express";\n+import cors from "cors";\n const app = express();\n app.listen(3000);',
       diff_stats: { added: 1, removed: 0, files_changed: 1 },
     };
-    const comments: SessionReviewComment[] = [{
+    const comment: SessionReviewComment = {
       id: 'comment-1',
       session_id: idleSessionWithDiff.id,
       org_id: 'org-1',
@@ -3103,7 +3104,11 @@ describe('SessionDetailPage', () => {
       pass_number: 1,
       created_at: '2026-02-17T07:10:00Z',
       updated_at: '2026-02-17T07:10:00Z',
-    }];
+    };
+    // Mutable backing store: GET returns whatever state POST /messages
+    // transitions the comment to. Mirrors the real backend, which resolves
+    // attached comments in the same transaction as the message create.
+    let comments: SessionReviewComment[] = [comment];
 
     server.use(
       http.get('/api/v1/sessions/:id', () => {
@@ -3116,8 +3121,13 @@ describe('SessionDetailPage', () => {
         } satisfies ListResponse<SessionReviewComment>);
       }),
       http.post('/api/v1/sessions/:id/messages', async ({ request }) => {
-        const body = await request.json() as { message: string };
+        const body = await request.json() as { message: string; resolve_review_comment_ids?: string[] };
         postedMessage = body.message;
+        postedResolveIDs = body.resolve_review_comment_ids;
+        if (postedResolveIDs && postedResolveIDs.length > 0) {
+          const resolved = new Set(postedResolveIDs);
+          comments = comments.map((c) => (resolved.has(c.id) ? { ...c, resolved: true } : c));
+        }
         return HttpResponse.json({
           data: {
             id: 99,
@@ -3154,6 +3164,10 @@ describe('SessionDetailPage', () => {
       expect(postedMessage).toContain('"Handle the null edge case"');
       expect(postedMessage).toContain('Hello agent');
     });
+    // The send must include the comment ID so the backend can resolve it
+    // atomically with the message create. Without this, a page refresh
+    // would resurrect the attached comment.
+    expect(postedResolveIDs).toEqual([comment.id]);
 
     await waitFor(() => {
       expect(screen.queryByText('1 comment attached')).not.toBeInTheDocument();

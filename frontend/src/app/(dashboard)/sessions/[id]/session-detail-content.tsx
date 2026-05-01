@@ -2178,20 +2178,15 @@ export function SessionDetailContent({ id }: { id: string }) {
   const [composerCommands, setComposerCommands] = useState<SessionInputCommand[]>([]);
   const [composerIsUploading, setComposerIsUploading] = useState(false);
   const [composerUploadError, setComposerUploadError] = useState<string | null>(null);
-  const [dismissedAttachedReviewCommentIDs, setDismissedAttachedReviewCommentIDs] = useState<string[]>([]);
   const composerTextareaRef = useRef<HTMLTextAreaElement>(null);
   const composerUploadInputRef = useRef<HTMLInputElement>(null);
   const chatPanelScrollToLiveEdgeRef = useRef<(() => void) | null>(null);
-  const openComments = useMemo(() => comments.filter((comment) => !comment.resolved), [comments]);
-  useEffect(() => {
-    setDismissedAttachedReviewCommentIDs((previous) =>
-      previous.filter((commentID) => openComments.some((comment) => comment.id === commentID))
-    );
-  }, [openComments]);
-  const attachedReviewComments = useMemo(
-    () => openComments.filter((comment) => !dismissedAttachedReviewCommentIDs.includes(comment.id)),
-    [dismissedAttachedReviewCommentIDs, openComments]
-  );
+  // Open comments are the source of truth for what gets attached to the next
+  // message — once a send succeeds, the backend marks them resolved in the
+  // same transaction, the comments query is invalidated below, and the next
+  // refetch flips them out of openComments. No local "dismissed" state is
+  // needed (and would be wrong: it wouldn't survive page reloads).
+  const attachedReviewComments = useMemo(() => comments.filter((comment) => !comment.resolved), [comments]);
   const composerCanSendMessage = session?.status !== "skipped" && session?.status !== "pending" && session?.sandbox_state !== "destroyed";
   const composerIsRunning = session?.status === "running";
   const composerIsSnapshotExpired = session?.sandbox_state === "destroyed";
@@ -2242,6 +2237,7 @@ export function SessionDetailContent({ id }: { id: string }) {
         ? formatReviewMessage(attachedReviewComments, filteredFiles, draftMessage)
         : draftMessage;
       const isPlanRequest = opts.planMode ?? composerPlanMode;
+      const resolveReviewCommentIDs = attachedReviewComments.map((comment) => comment.id);
 
       return api.sessions.sendMessage(id, {
         message: formattedMessage,
@@ -2250,15 +2246,10 @@ export function SessionDetailContent({ id }: { id: string }) {
         commands: composerCommands.length > 0 ? composerCommands : undefined,
         planMode: isPlanRequest,
         model: composerSelectedModel || undefined,
-      });
+        resolveReviewCommentIDs: resolveReviewCommentIDs.length > 0 ? resolveReviewCommentIDs : undefined,
+      }).then((response) => ({ response, resolvedIDs: resolveReviewCommentIDs }));
     },
-    onSuccess: () => {
-      setDismissedAttachedReviewCommentIDs((previous) => {
-        if (attachedReviewComments.length === 0) {
-          return previous;
-        }
-        return Array.from(new Set([...previous, ...attachedReviewComments.map((comment) => comment.id)]));
-      });
+    onSuccess: ({ resolvedIDs }) => {
       setComposerMessage("");
       setComposerAttachments([]);
       setComposerReferences([]);
@@ -2273,6 +2264,26 @@ export function SessionDetailContent({ id }: { id: string }) {
       chatPanelScrollToLiveEdgeRef.current?.();
       queryClient.invalidateQueries({ queryKey: ["session", id] });
       queryClient.invalidateQueries({ queryKey: ["session", id, "timeline"] });
+      // Backend resolved the attached review comments inside the same tx as
+      // the message. Optimistically flip them to resolved=true in the cache
+      // so the "N comments attached" banner disappears immediately, then
+      // invalidate to reconcile with the canonical server state.
+      if (resolvedIDs.length > 0) {
+        const resolvedSet = new Set(resolvedIDs);
+        queryClient.setQueryData<ListResponse<SessionReviewComment>>(
+          ["session", id, "review-comments"],
+          (previous) => {
+            if (!previous) return previous;
+            return {
+              ...previous,
+              data: previous.data.map((comment) =>
+                resolvedSet.has(comment.id) ? { ...comment, resolved: true } : comment
+              ),
+            };
+          }
+        );
+      }
+      queryClient.invalidateQueries({ queryKey: ["session", id, "review-comments"] });
     },
   });
 
