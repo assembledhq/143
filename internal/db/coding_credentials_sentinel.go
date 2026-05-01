@@ -25,7 +25,7 @@ var ErrAnthropicSplitSentinelMissing = errors.New(
 // EnsureAnthropicSplitSentinel verifies the post-step migration has run, or
 // auto-marks completion when there is provably nothing to split. The check
 // covers both the unified table and the legacy tables, because a partial
-// migration (000106 applied, 000107 not yet) leaves coding_credentials empty
+// migration (000108 applied, 000109 not yet) leaves coding_credentials empty
 // while pre-split rows still live in org_credentials/user_credentials. Without
 // the legacy check, that mid-migration state would auto-pass the gate and the
 // post-step would never execute on a later boot.
@@ -45,7 +45,7 @@ func EnsureAnthropicSplitSentinel(ctx context.Context, dbtx DBTX) error {
 	}
 
 	// Sentinel absent. Auto-write only when no anthropic rows exist anywhere
-	// — unified or legacy. Legacy rows that haven't yet been copied by 000107
+	// — unified or legacy. Legacy rows that haven't yet been copied by 000109
 	// still represent split work the post-step must do once the data lands in
 	// coding_credentials.
 	unifiedCount, err := countAnthropicRows(ctx, dbtx, "coding_credentials")

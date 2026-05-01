@@ -376,7 +376,7 @@ func TestCodingCredentialStore_MirrorUserCredential(t *testing.T) {
 
 // TestMirrorUserCredential_TeamDefaultLabelMatchesMigration locks the
 // team-default label format the mirror writes to byte-for-byte equality with
-// the format used by `migrations/000107_copy_coding_credentials.up.sql`
+// the format used by `migrations/000109_copy_coding_credentials.up.sql`
 // step 3. If this assertion drifts, the SQL data-copy will create one row
 // for a logical team-default credential and the dual-write mirror will
 // create a second one at the same (org, provider) — instead of upserting via
