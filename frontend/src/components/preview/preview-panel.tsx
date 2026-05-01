@@ -332,6 +332,25 @@ export function PreviewPanel({
         );
         return;
       }
+      if (code === PREVIEW_ERROR_CODES.SANDBOX_BUSY) {
+        // The agent is using the sandbox right now (running a turn). The
+        // backend already destroyed our half-built container; the user just
+        // needs to wait a beat and click again.
+        setMutationError(
+          "The agent is currently using this session's sandbox. Wait for the current turn to finish, then try Start Preview again."
+        );
+        return;
+      }
+      if (code === PREVIEW_ERROR_CODES.WORKER_REQUEST_FAILED) {
+        // Connection to the preview worker dropped mid-request — typically
+        // a timeout or a worker restart. No response body means no real
+        // error code; suggest retry rather than burying the cause under the
+        // generic "Failed to start preview:" prefix.
+        setMutationError(
+          "Could not reach the preview worker (connection dropped). Try Start Preview again — if this keeps happening, the worker may be unhealthy."
+        );
+        return;
+      }
       if (code === PREVIEW_ERROR_CODES.NO_CONFIG) {
         // Backend message already names the file the user needs to add and
         // points to the docs — pass it through verbatim.

@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"regexp"
 	"strings"
@@ -1585,6 +1586,32 @@ func (s *SessionStore) ReleaseTurnHold(ctx context.Context, orgID, sessionID uui
 		return false, "", fmt.Errorf("release turn hold: %w", err)
 	}
 	return cid != "" && !previewHolds, cid, nil
+}
+
+// PeekContainerID returns the session's current container_id (empty when
+// NULL) using a single-column lookup. It exists for the preview hydrate
+// race-detection peek, which only needs to know whether a peer has
+// published a container_id since the caller last read the row — fetching
+// the full Session struct via GetByID would pull ~30 columns and hydrate
+// the policy JSON for no benefit. Returns the empty string for both
+// "no row" and "NULL container_id"; the caller cannot distinguish those
+// cases, but neither outcome should change the hydrate path's behavior.
+func (s *SessionStore) PeekContainerID(ctx context.Context, orgID, sessionID uuid.UUID) (string, error) {
+	query := `SELECT COALESCE(container_id, '')
+		FROM sessions
+		WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL`
+	var containerID string
+	err := s.db.QueryRow(ctx, query, pgx.NamedArgs{
+		"id":     sessionID,
+		"org_id": orgID,
+	}).Scan(&containerID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return "", nil
+		}
+		return "", fmt.Errorf("peek container id: %w", err)
+	}
+	return containerID, nil
 }
 
 // PublishHydratedContainerID is the preview-hydrate CAS: a preview has just
