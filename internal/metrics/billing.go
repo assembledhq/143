@@ -22,12 +22,16 @@ const meterName = "github.com/assembledhq/143/billing"
 // from attributes and rely on the container_usage_events DB table for
 // per-org queries.
 type BillingMetrics struct {
-	ContainerStartsTotal  otelmetric.Int64Counter
-	ContainerStopsTotal   otelmetric.Int64Counter
-	ContainerDurationSec  otelmetric.Float64Histogram
-	ContainerCPUAllocated otelmetric.Float64Histogram
-	ContainerMemAllocated otelmetric.Float64Histogram
-	ContainerMinutesTotal otelmetric.Float64Counter
+	ContainerStartsTotal    otelmetric.Int64Counter
+	ContainerStopsTotal     otelmetric.Int64Counter
+	ContainerDurationSec    otelmetric.Float64Histogram
+	ContainerCPUAllocated   otelmetric.Float64Histogram
+	ContainerMemAllocated   otelmetric.Float64Histogram
+	ContainerMinutesTotal   otelmetric.Float64Counter
+	ContainerMemUsed        otelmetric.Float64Histogram // sampled working-set memory (MiB)
+	ContainerCPUUsed        otelmetric.Float64Histogram // sampled CPU usage (cores)
+	ContainerMemUtilization otelmetric.Float64Histogram // sampled mem used / mem limit (0..1)
+	ContainerCPUUtilization otelmetric.Float64Histogram // sampled cpu used / cpu limit (0..1)
 	// containersActiveReg holds the registration so it can be cleaned up.
 	containersActiveReg otelmetric.Registration
 }
@@ -115,14 +119,54 @@ func NewBillingMetrics(activeCounter ActiveContainerCounter) (*BillingMetrics, e
 		return nil, err
 	}
 
+	memUsed, err := meter.Float64Histogram("container.memory.used",
+		otelmetric.WithDescription("Sampled working-set memory used by sandbox containers"),
+		otelmetric.WithUnit("MiBy"),
+		otelmetric.WithExplicitBucketBoundaries(64, 128, 256, 512, 1024, 1536, 2048, 3072, 4096, 6144, 8192, 12288, 16384),
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	cpuUsed, err := meter.Float64Histogram("container.cpu.used",
+		otelmetric.WithDescription("Sampled CPU cores used by sandbox containers"),
+		otelmetric.WithUnit("{cores}"),
+		otelmetric.WithExplicitBucketBoundaries(0.05, 0.1, 0.25, 0.5, 1, 1.5, 2, 3, 4, 6, 8),
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	memUtil, err := meter.Float64Histogram("container.memory.utilization",
+		otelmetric.WithDescription("Sampled memory used divided by memory limit (0..1)"),
+		otelmetric.WithUnit("1"),
+		otelmetric.WithExplicitBucketBoundaries(0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 0.95, 1.0),
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	cpuUtil, err := meter.Float64Histogram("container.cpu.utilization",
+		otelmetric.WithDescription("Sampled CPU used divided by CPU limit (0..1)"),
+		otelmetric.WithUnit("1"),
+		otelmetric.WithExplicitBucketBoundaries(0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 0.95, 1.0),
+	)
+	if err != nil {
+		return nil, err
+	}
+
 	return &BillingMetrics{
-		ContainerStartsTotal:  starts,
-		ContainerStopsTotal:   stops,
-		ContainerDurationSec:  duration,
-		ContainerCPUAllocated: cpu,
-		ContainerMemAllocated: mem,
-		ContainerMinutesTotal: minutes,
-		containersActiveReg:   activeReg,
+		ContainerStartsTotal:    starts,
+		ContainerStopsTotal:     stops,
+		ContainerDurationSec:    duration,
+		ContainerCPUAllocated:   cpu,
+		ContainerMemAllocated:   mem,
+		ContainerMinutesTotal:   minutes,
+		ContainerMemUsed:        memUsed,
+		ContainerCPUUsed:        cpuUsed,
+		ContainerMemUtilization: memUtil,
+		ContainerCPUUtilization: cpuUtil,
+		containersActiveReg:     activeReg,
 	}, nil
 }
 
@@ -154,4 +198,16 @@ func (m *BillingMetrics) RecordStop(ctx context.Context, orgID, exitReason strin
 	m.ContainerStopsTotal.Add(ctx, 1, reasonAttrs)
 	m.ContainerDurationSec.Record(ctx, durationSec, reasonAttrs)
 	m.ContainerMinutesTotal.Add(ctx, durationMin, orgAttr)
+}
+
+// RecordSample records a runtime resource-usage sample for one running
+// container. memMiB is sampled working-set memory in MiB, cpuCores is the
+// average CPU cores observed in the sample window, and the *Util values are
+// the corresponding fractions of the configured limit (clamped 0..1).
+func (m *BillingMetrics) RecordSample(ctx context.Context, orgID string, memMiB, cpuCores, memUtil, cpuUtil float64) {
+	attrs := otelmetric.WithAttributes(AttrOrgID.String(orgID))
+	m.ContainerMemUsed.Record(ctx, memMiB, attrs)
+	m.ContainerCPUUsed.Record(ctx, cpuCores, attrs)
+	m.ContainerMemUtilization.Record(ctx, memUtil, attrs)
+	m.ContainerCPUUtilization.Record(ctx, cpuUtil, attrs)
 }

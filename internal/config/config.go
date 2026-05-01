@@ -190,6 +190,11 @@ type Config struct {
 	// Telemetry (OpenTelemetry)
 	OTLPEndpoint string `env:"OTEL_EXPORTER_OTLP_ENDPOINT"` // e.g. "otel-collector:4318" or "https://otlp.grafana.net"
 	OTLPInsecure bool   `env:"OTEL_EXPORTER_OTLP_INSECURE" envDefault:"false"`
+	// RuntimeStatsInterval controls how often the worker samples per-container
+	// memory/CPU usage and emits container.{memory,cpu}.{used,utilization}
+	// histograms. Operators use these to size SANDBOX_* limits against actual
+	// consumption rather than allocation. Set to 0 to disable sampling.
+	RuntimeStatsInterval time.Duration `env:"RUNTIME_STATS_INTERVAL" envDefault:"30s"`
 
 	// Redis (optional)
 	RedisTopology   string `env:"REDIS_TOPOLOGY" envDefault:"standalone"`

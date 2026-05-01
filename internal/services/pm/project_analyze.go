@@ -94,7 +94,7 @@ func (s *Service) AnalyzeProject(ctx context.Context, orgID, projectID uuid.UUID
 	}
 	defer func() {
 		if s.usageTracker != nil {
-			s.usageTracker.ContainerStopped(ctx, orgID, uuid.Nil, usageEventID, containerStartedAt, exitReason)
+			s.usageTracker.ContainerStopped(ctx, orgID, uuid.Nil, usageEventID, sb.ID, containerStartedAt, exitReason)
 		}
 		if destroyErr := s.sandbox.Destroy(ctx, sb); destroyErr != nil {
 			s.logger.Warn().Err(destroyErr).Msg("failed to destroy project PM sandbox")
