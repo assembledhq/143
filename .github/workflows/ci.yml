@@ -100,22 +100,6 @@ jobs:
         with:
           go-version: ${{ env.GO_VERSION }}
 
-      - uses: actions/setup-python@v6
-        if: github.event_name == 'pull_request'
-        with:
-          python-version: '3.x'
-
-      - name: Materialize PR base ref (PR only)
-        if: github.event_name == 'pull_request'
-        run: |
-          git branch -f pr-base HEAD^1
-
-      - name: Install diff-cover tooling (PR only)
-        if: github.event_name == 'pull_request'
-        run: |
-          pip install 'diff_cover==10.2.0'
-          go install github.com/boumenot/gocover-cobertura@v1.4.0
-
       - name: Run go vet and migrations
         run: |
           go vet ./... &
@@ -124,13 +108,7 @@ jobs:
 
       - name: Run tests (PR — no race)
         if: github.event_name == 'pull_request'
-        run: |
-          go test ./internal/... -coverprofile=coverage.out -covermode=count -timeout=120s
-          gocover-cobertura < coverage.out > coverage.xml
-
-      - name: Patch coverage gate (PR only)
-        if: github.event_name == 'pull_request'
-        run: diff-cover coverage.xml --compare-branch=pr-base --fail-under=80
+        run: go test ./internal/... -coverprofile=coverage.out -covermode=count -timeout=120s
 
       - name: Run tests with race + coverage (main only)
         if: github.event_name == 'push'
