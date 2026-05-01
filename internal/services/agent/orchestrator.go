@@ -207,7 +207,7 @@ type JobStore interface {
 // UsageRecorder tracks container lifecycle events for billing.
 type UsageRecorder interface {
 	ContainerStarted(ctx context.Context, orgID, sessionID uuid.UUID, sandbox *Sandbox, cfg SandboxConfig, startedAt time.Time) uuid.UUID
-	ContainerStopped(ctx context.Context, orgID, sessionID uuid.UUID, eventID uuid.UUID, startedAt time.Time, exitReason string)
+	ContainerStopped(ctx context.Context, orgID, sessionID uuid.UUID, eventID uuid.UUID, containerID string, startedAt time.Time, exitReason string)
 }
 
 // MemoryService provides scored memory context for agent prompts.
@@ -1292,7 +1292,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 			// the parent ctx was cancelled (timeout, shutdown).
 			stopCtx, stopCancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer stopCancel()
-			o.usageTracker.ContainerStopped(stopCtx, run.OrgID, run.ID, usageEventID, containerStartedAt, exitReason)
+			o.usageTracker.ContainerStopped(stopCtx, run.OrgID, run.ID, usageEventID, sandbox.ID, containerStartedAt, exitReason)
 		}
 		// Use a background context for cleanup since the run context may be cancelled.
 		destroyCtx := context.Background()
@@ -2019,7 +2019,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		if o.usageTracker != nil {
 			stopCtx, stopCancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer stopCancel()
-			o.usageTracker.ContainerStopped(stopCtx, session.OrgID, session.ID, usageEventID, containerStartedAt, exitReason)
+			o.usageTracker.ContainerStopped(stopCtx, session.OrgID, session.ID, usageEventID, sandbox.ID, containerStartedAt, exitReason)
 		}
 		// Detached context so DB writes + destroy succeed even if ctx was
 		// cancelled (user cancel, timeout, shutdown).

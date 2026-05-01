@@ -359,10 +359,12 @@ func TestWorker_Poll_RunsDeadLetterHooksOnTerminalPaths(t *testing.T) {
 			lockToken := uuid.New()
 			orgID := uuid.New()
 			var fired int
+			var hookCtxErr error
 
 			w.Register("hook_job", func(ctx context.Context, jobType string, got json.RawMessage) error {
-				jobctx.RegisterDeadLetterHook(ctx, func(_ context.Context, err error) {
+				jobctx.RegisterDeadLetterHook(ctx, func(hookCtx context.Context, err error) {
 					fired++
+					hookCtxErr = hookCtx.Err()
 				})
 				return tt.handlerErr()
 			})
@@ -382,6 +384,9 @@ func TestWorker_Poll_RunsDeadLetterHooksOnTerminalPaths(t *testing.T) {
 			w.poll(context.Background())
 
 			require.Equal(t, tt.expectHooks, fired, "dead-letter hooks should fire only on terminal give-up paths")
+			if tt.expectHooks > 0 {
+				require.NoError(t, hookCtxErr, "dead-letter hooks should receive a live context for terminal cleanup writes")
+			}
 			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 		})
 	}

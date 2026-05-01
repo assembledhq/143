@@ -291,6 +291,9 @@ export function PreviewPanel({
     status === "partially_ready" ||
     status === "starting";
   const isReady = status === "ready" || status === "partially_ready";
+  const hasStartupRows = services.length > 0 || infrastructure.length > 0;
+  const showStartupProgress =
+    (isActive && !isReady) || (status === "failed" && hasStartupRows);
 
   // Start preview
   const startMutation = useMutation({
@@ -509,10 +512,9 @@ export function PreviewPanel({
     startMutation.isPending ||
     stopMutation.isPending ||
     restartMutation.isPending;
-  const startupChecklist =
-    isActive && !isReady
-      ? buildStartupChecklist(status, services, infrastructure)
-      : [];
+  const startupChecklist = showStartupProgress
+    ? buildStartupChecklist(status, services, infrastructure)
+    : [];
 
   if (statusLoading) {
     return (
@@ -714,7 +716,7 @@ export function PreviewPanel({
       )}
 
       {/* Startup progress */}
-      {isActive && !isReady && (
+      {showStartupProgress && (
         <div className="space-y-2">
           <div className="rounded-lg border bg-muted/30 p-3">
             <p className="text-sm font-medium">Preview startup can take a few minutes.</p>

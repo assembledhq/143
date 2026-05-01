@@ -293,7 +293,7 @@ const HandlerCleanupBuffer = 2 * time.Minute
 type SandboxConfig struct {
 	Image         string            // base image with agent CLI tools pre-installed
 	CPULimit      float64           // CPU cores (default: 2)
-	MemoryLimitMB int               // memory in MB (default: 4096)
+	MemoryLimitMB int               // memory in MB (default: 3072)
 	Timeout       time.Duration     // max execution time (default: DefaultSandboxTimeout)
 	NetworkPolicy string            // "restricted" — allow only LLM API endpoints
 	WorkDir       string            // path to the repo checkout inside the sandbox (e.g. /home/sandbox/<repo>)
@@ -334,7 +334,7 @@ func DefaultSandboxConfig() SandboxConfig {
 			cpuLimit = parsed
 		}
 	}
-	memoryLimitMB := 4096
+	memoryLimitMB := 3072
 	if v := os.Getenv("SANDBOX_MEMORY_LIMIT_MB"); v != "" {
 		if parsed, err := strconv.Atoi(v); err == nil && parsed > 0 {
 			memoryLimitMB = parsed
