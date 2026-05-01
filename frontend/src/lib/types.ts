@@ -893,6 +893,7 @@ export interface Project {
   created_at: string;
   updated_at: string;
   completed_at?: string;
+  archived_at?: string;
 }
 
 export interface ProposalOverlap {
