@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/assembledhq/143/internal/models"
@@ -61,6 +62,71 @@ func (s *AuditLogStore) Create(ctx context.Context, entry *models.AuditLog) erro
 		"project_id":    entry.ProjectID,
 	})
 	return row.Scan(&entry.ID, &entry.CreatedAt)
+}
+
+// CreateBatch inserts multiple audit log entries in a single round-trip via
+// a multi-row VALUES INSERT. Use this when emitting more than one audit at
+// once (e.g. resolving N review comments inline with a message send) — at
+// LAN latency the cost of N separate INSERTs is dominated by per-query RTT.
+//
+// All entries must belong to orgID; cross-tenant batches are rejected so a
+// caller can't accidentally smear audit rows across orgs through a single
+// send. For a single entry the call falls through to Create so we don't pay
+// the cost of building a multi-row statement for the common case.
+func (s *AuditLogStore) CreateBatch(ctx context.Context, orgID uuid.UUID, entries []*models.AuditLog) error {
+	if len(entries) == 0 {
+		return nil
+	}
+	if len(entries) == 1 {
+		if entries[0].OrgID != orgID {
+			return fmt.Errorf("audit batch entry org_id %s does not match expected org_id %s", entries[0].OrgID, orgID)
+		}
+		return s.Create(ctx, entries[0])
+	}
+	for i, e := range entries {
+		if e.OrgID != orgID {
+			return fmt.Errorf("audit batch entry %d org_id %s does not match expected org_id %s", i, e.OrgID, orgID)
+		}
+		if err := e.ActorType.Validate(); err != nil {
+			return err
+		}
+		if err := e.Action.Validate(); err != nil {
+			return err
+		}
+		if err := e.ResourceType.Validate(); err != nil {
+			return err
+		}
+	}
+
+	// 13 placeholders per row, in the column order below.
+	const cols = 13
+	placeholders := make([]string, len(entries))
+	args := make([]any, 0, len(entries)*cols)
+	for i, e := range entries {
+		ph := make([]string, cols)
+		for j := 0; j < cols; j++ {
+			ph[j] = fmt.Sprintf("$%d", i*cols+j+1)
+		}
+		placeholders[i] = "(" + strings.Join(ph, ", ") + ")"
+		args = append(args,
+			e.OrgID, e.ActorType, e.ActorID, e.UserID,
+			e.Action, e.ResourceType, e.ResourceID,
+			e.Details, e.RequestID, e.IPAddress, e.UserAgent,
+			e.SessionID, e.ProjectID,
+		)
+	}
+
+	query := `INSERT INTO audit_logs (
+			org_id, actor_type, actor_id, user_id,
+			action, resource_type, resource_id,
+			details, request_id, ip_address, user_agent,
+			session_id, project_id
+		) VALUES ` + strings.Join(placeholders, ", ")
+
+	if _, err := s.db.Exec(ctx, query, args...); err != nil {
+		return fmt.Errorf("insert audit logs batch: %w", err)
+	}
+	return nil
 }
 
 // AuditLogFilters controls listing/search behavior.

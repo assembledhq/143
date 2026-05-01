@@ -47,6 +47,47 @@ func (e *AuditEmitter) EmitUserAction(ctx context.Context, params UserActionPara
 	}
 }
 
+// EmitUserActions logs multiple user-actor audits in a single DB round-trip.
+// Prefer this over a loop of EmitUserAction calls when emitting more than
+// one entry at a time: an N-row INSERT scales O(1) in network latency where
+// N separate INSERTs scale O(N). On error the whole batch is dropped — same
+// fire-and-forget contract as EmitUserAction, so callers don't need to
+// handle errors.
+//
+// All entries must share the same OrgID; mixed-org batches are rejected by
+// the underlying store. In practice this is naturally satisfied because a
+// batch emit comes from a single request, which has a single active org.
+func (e *AuditEmitter) EmitUserActions(ctx context.Context, paramsList []UserActionParams) {
+	if len(paramsList) == 0 {
+		return
+	}
+	orgID := paramsList[0].OrgID
+	entries := make([]*models.AuditLog, 0, len(paramsList))
+	for _, params := range paramsList {
+		userID := params.UserID
+		entries = append(entries, &models.AuditLog{
+			OrgID:        params.OrgID,
+			ActorType:    models.AuditActorUser,
+			ActorID:      userID.String(),
+			UserID:       &userID,
+			Action:       params.Action,
+			ResourceType: params.ResourceType,
+			ResourceID:   params.ResourceID,
+			Details:      params.Details,
+			RequestID:    params.RequestID,
+			IPAddress:    params.IPAddress,
+			UserAgent:    params.UserAgent,
+			SessionID:    params.SessionID,
+			ProjectID:    params.ProjectID,
+		})
+	}
+	if err := e.store.CreateBatch(ctx, orgID, entries); err != nil {
+		e.logger.Warn().Err(err).
+			Int("batch_size", len(entries)).
+			Msg("failed to emit audit log batch")
+	}
+}
+
 type UserActionParams struct {
 	OrgID        uuid.UUID
 	UserID       uuid.UUID

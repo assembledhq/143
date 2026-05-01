@@ -83,6 +83,62 @@ func emitUserAuditWithSession(emitter *db.AuditEmitter, r *http.Request, action 
 	emitter.EmitUserAction(r.Context(), params)
 }
 
+// userAuditEntry is a per-row payload for emitUserAuditsWithSession. The
+// shared per-request fields (orgID, userID, IP, request ID, user agent) are
+// pulled once at dispatch time, so callers only have to supply the bits that
+// vary across audit rows.
+type userAuditEntry struct {
+	Action       models.AuditAction
+	ResourceType models.AuditResourceType
+	ResourceID   *string
+	SessionID    *uuid.UUID
+	ProjectID    *uuid.UUID
+	Details      json.RawMessage
+}
+
+// emitUserAuditsWithSession is the batched form of emitUserAuditWithSession:
+// it extracts request context once and writes all entries in a single DB
+// round-trip via AuditEmitter.EmitUserActions. No-op when emitter or user
+// context is missing, mirroring the single-emit helpers.
+func emitUserAuditsWithSession(emitter *db.AuditEmitter, r *http.Request, entries []userAuditEntry) {
+	if emitter == nil || len(entries) == 0 {
+		return
+	}
+	user := middleware.UserFromContext(r.Context())
+	if user == nil {
+		return
+	}
+	orgID := middleware.OrgIDFromContext(r.Context())
+
+	var requestID *string
+	if reqID := chiMiddleware.GetReqID(r.Context()); reqID != "" {
+		requestID = &reqID
+	}
+	ipAddress := parseClientIP(r)
+	var userAgent *string
+	if ua := r.UserAgent(); ua != "" {
+		userAgent = &ua
+	}
+
+	paramsList := make([]db.UserActionParams, 0, len(entries))
+	for _, e := range entries {
+		paramsList = append(paramsList, db.UserActionParams{
+			OrgID:        orgID,
+			UserID:       user.ID,
+			Action:       e.Action,
+			ResourceType: e.ResourceType,
+			ResourceID:   e.ResourceID,
+			Details:      e.Details,
+			RequestID:    requestID,
+			IPAddress:    ipAddress,
+			UserAgent:    userAgent,
+			SessionID:    e.SessionID,
+			ProjectID:    e.ProjectID,
+		})
+	}
+	emitter.EmitUserActions(r.Context(), paramsList)
+}
+
 // parseClientIP extracts the client IP from the request as a netip.Prefix
 // suitable for PostgreSQL inet storage.
 func parseClientIP(r *http.Request) *netip.Prefix {
