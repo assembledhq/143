@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { renderWithProviders, screen, waitFor } from '@/test/test-utils';
+import { renderWithProviders, screen, waitFor, userEvent } from '@/test/test-utils';
 import AuditLogPage from './page';
 
 const {
@@ -121,6 +121,67 @@ describe('AuditLogPage', () => {
       expect(screen.getByText('All resources')).toBeInTheDocument();
       expect(screen.getByText('All actions')).toBeInTheDocument();
       expect(screen.getByText('All actors')).toBeInTheDocument();
+    });
+  });
+
+  it('appends older entries instead of replacing the feed', async () => {
+    auditLogListMock
+      .mockResolvedValueOnce({
+        data: [
+          {
+            id: 'audit-1',
+            org_id: 'org-1',
+            actor_type: 'user',
+            actor_id: 'user-1',
+            user_id: 'user-1',
+            action: 'session.created',
+            resource_type: 'session',
+            resource_id: 'sess-1',
+            details: null,
+            ip_address: null,
+            user_agent: null,
+            request_id: null,
+            session_id: null,
+            project_id: null,
+            created_at: '2026-03-15T10:00:00Z',
+          },
+        ],
+        meta: { next_cursor: 'cursor-2' },
+      })
+      .mockResolvedValueOnce({
+        data: [
+          {
+            id: 'audit-2',
+            org_id: 'org-1',
+            actor_type: 'user',
+            actor_id: 'user-1',
+            user_id: 'user-1',
+            action: 'project.created',
+            resource_type: 'project',
+            resource_id: 'proj-1',
+            details: null,
+            ip_address: null,
+            user_agent: null,
+            request_id: null,
+            session_id: null,
+            project_id: null,
+            created_at: '2026-03-15T09:00:00Z',
+          },
+        ],
+        meta: {},
+      });
+
+    renderWithProviders(<AuditLogPage />);
+
+    await waitFor(() => {
+      expect(screen.getByText('created session')).toBeInTheDocument();
+    });
+
+    await userEvent.click(screen.getByRole('button', { name: 'Load older' }));
+
+    await waitFor(() => {
+      expect(screen.getByText('created session')).toBeInTheDocument();
+      expect(screen.getByText('created project')).toBeInTheDocument();
     });
   });
 });
