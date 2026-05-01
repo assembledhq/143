@@ -792,6 +792,17 @@ func tryExtractConfidence(text string, result *agent.AgentResult) {
 // collectDiff runs git diff inside the sandbox to capture changes.
 // Returns an empty string (not an error) when the workspace is not a git repository,
 // which happens when no repository was configured for the issue.
+//
+// The base commit SHA is read from sandbox.Metadata, which the orchestrator
+// is responsible for populating both on the initial clone (RunAgent) and on
+// every continue path (ContinueSession). When the base SHA is missing,
+// sessiondiff.Collect returns ErrNoBaseCommitSHA — adapters log and leave
+// result.Diff unset so the persistence layer preserves the previous diff
+// rather than clobbering it with an empty string.
 func collectDiff(ctx context.Context, provider agent.SandboxProvider, sandbox *agent.Sandbox) (string, error) {
-	return sessiondiff.Collect(ctx, provider, sandbox)
+	baseCommitSHA := ""
+	if sandbox != nil && sandbox.Metadata != nil {
+		baseCommitSHA = sandbox.Metadata[sessiondiff.SandboxMetadataBaseCommitSHA]
+	}
+	return sessiondiff.Collect(ctx, provider, sandbox, baseCommitSHA)
 }

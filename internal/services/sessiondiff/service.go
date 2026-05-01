@@ -3,18 +3,35 @@ package sessiondiff
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
 	"github.com/assembledhq/143/internal/services/agent"
 )
 
-const SandboxMetadataBaseCommitSHA = "base_commit_sha"
+// SandboxMetadataBaseCommitSHA is re-exported from the agent package so
+// existing callers (adapters, etc.) that referenced sessiondiff.SandboxMetadataBaseCommitSHA
+// keep compiling. The canonical declaration lives in the agent package
+// (agent.SandboxMetadataBaseCommitSHA) — see the rationale there.
+const SandboxMetadataBaseCommitSHA = agent.SandboxMetadataBaseCommitSHA
+
+// ErrNoBaseCommitSHA is returned by Collect when the caller does not supply a
+// base commit SHA. The previous behavior — falling back to plain `git diff`
+// against the index — silently produced misleading results once the agent had
+// committed its work (e.g. after a PR push), because a clean working tree
+// would yield an empty diff and overwrite the previously persisted authoritative
+// diff. Returning this sentinel forces callers to handle the missing-base case
+// explicitly (typically by skipping the persistence write so the prior diff
+// is preserved).
+var ErrNoBaseCommitSHA = errors.New("sessiondiff: base commit sha is required")
 
 // Collect returns the authoritative session diff: the current workspace
 // compared against the immutable recorded base commit, plus synthetic additions
-// for any untracked files.
-func Collect(ctx context.Context, provider agent.SandboxProvider, sandbox *agent.Sandbox) (string, error) {
+// for any untracked files. baseCommitSHA must be non-empty — Collect refuses
+// to fall back to plain `git diff` so that callers cannot inadvertently store
+// an empty diff after the workspace has been committed (post-push, post-merge).
+func Collect(ctx context.Context, provider agent.SandboxProvider, sandbox *agent.Sandbox, baseCommitSHA string) (string, error) {
 	var checkStdout, checkStderr bytes.Buffer
 	checkExit, err := provider.Exec(ctx, sandbox, "git rev-parse --is-inside-work-tree", &checkStdout, &checkStderr)
 	if err != nil {
@@ -24,15 +41,11 @@ func Collect(ctx context.Context, provider agent.SandboxProvider, sandbox *agent
 		return "", nil
 	}
 
-	baseCommitSHA := ""
-	if sandbox.Metadata != nil {
-		baseCommitSHA = sandbox.Metadata[SandboxMetadataBaseCommitSHA]
+	if baseCommitSHA == "" {
+		return "", ErrNoBaseCommitSHA
 	}
 
-	diffCmd := "git diff"
-	if baseCommitSHA != "" {
-		diffCmd = fmt.Sprintf("git diff --find-renames --binary %s -- .", shellEscapeSingleQuote(baseCommitSHA))
-	}
+	diffCmd := fmt.Sprintf("git diff --find-renames --binary %s -- .", shellEscapeSingleQuote(baseCommitSHA))
 
 	var stdout, stderr bytes.Buffer
 	exitCode, err := provider.Exec(ctx, sandbox, diffCmd, &stdout, &stderr)

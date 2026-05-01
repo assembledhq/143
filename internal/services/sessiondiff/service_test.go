@@ -15,16 +15,19 @@ func TestCollect(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name        string
-		sandbox     *agent.Sandbox
-		execFn      func(ctx context.Context, sb *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error)
-		expected    string
-		expectedCmd []string
-		expectErr   string
+		name          string
+		sandbox       *agent.Sandbox
+		baseCommitSHA string
+		execFn        func(ctx context.Context, sb *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error)
+		expected      string
+		expectedCmd   []string
+		expectErr     string
+		expectErrIs   error
 	}{
 		{
-			name:    "returns empty when sandbox is not a git repo",
-			sandbox: &agent.Sandbox{ID: "sb"},
+			name:          "returns empty when sandbox is not a git repo",
+			sandbox:       &agent.Sandbox{ID: "sb"},
+			baseCommitSHA: "abc123",
 			execFn: func(_ context.Context, _ *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
 				require.Equal(t, "git rev-parse --is-inside-work-tree", cmd, "git repo check should run first")
 				return 1, nil
@@ -35,8 +38,9 @@ func TestCollect(t *testing.T) {
 			},
 		},
 		{
-			name:    "collects git diff and untracked file patches with base commit",
-			sandbox: &agent.Sandbox{ID: "sb", Metadata: map[string]string{SandboxMetadataBaseCommitSHA: "abc123"}},
+			name:          "collects git diff and untracked file patches with base commit",
+			sandbox:       &agent.Sandbox{ID: "sb"},
+			baseCommitSHA: "abc123",
 			execFn: func(_ context.Context, _ *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
 				switch cmd {
 				case "git rev-parse --is-inside-work-tree":
@@ -68,21 +72,36 @@ func TestCollect(t *testing.T) {
 			},
 		},
 		{
-			name:    "returns error when repo check fails",
-			sandbox: &agent.Sandbox{ID: "sb"},
+			name:          "returns error when repo check fails",
+			sandbox:       &agent.Sandbox{ID: "sb"},
+			baseCommitSHA: "abc123",
 			execFn: func(_ context.Context, _ *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
 				return 0, errors.New("boom")
 			},
 			expectErr: "check git repo",
 		},
 		{
-			name:    "returns error when git diff exits non zero",
-			sandbox: &agent.Sandbox{ID: "sb"},
+			name:          "refuses to compute a diff without a base commit sha",
+			sandbox:       &agent.Sandbox{ID: "sb"},
+			baseCommitSHA: "",
+			execFn: func(_ context.Context, _ *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
+				if cmd == "git rev-parse --is-inside-work-tree" {
+					return 0, nil
+				}
+				t.Fatalf("Collect should not run any git diff command when base sha is missing; got: %s", cmd)
+				return 0, nil
+			},
+			expectErrIs: ErrNoBaseCommitSHA,
+		},
+		{
+			name:          "returns error when git diff exits non zero",
+			sandbox:       &agent.Sandbox{ID: "sb"},
+			baseCommitSHA: "abc123",
 			execFn: func(_ context.Context, _ *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
 				switch cmd {
 				case "git rev-parse --is-inside-work-tree":
 					return 0, nil
-				case "git diff":
+				case "git diff --find-renames --binary abc123 -- .":
 					_, _ = io.WriteString(stderr, "bad diff")
 					return 2, nil
 				default:
@@ -93,13 +112,14 @@ func TestCollect(t *testing.T) {
 			expectErr: "git diff exited with code 2: bad diff",
 		},
 		{
-			name:    "returns error when listing untracked files fails",
-			sandbox: &agent.Sandbox{ID: "sb"},
+			name:          "returns error when listing untracked files fails",
+			sandbox:       &agent.Sandbox{ID: "sb"},
+			baseCommitSHA: "abc123",
 			execFn: func(_ context.Context, _ *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
 				switch cmd {
 				case "git rev-parse --is-inside-work-tree":
 					return 0, nil
-				case "git diff":
+				case "git diff --find-renames --binary abc123 -- .":
 					return 0, nil
 				case "git ls-files --others --exclude-standard -- .":
 					return 0, errors.New("ls failed")
@@ -111,13 +131,14 @@ func TestCollect(t *testing.T) {
 			expectErr: "list untracked files",
 		},
 		{
-			name:    "returns error when untracked diff exits with unexpected code",
-			sandbox: &agent.Sandbox{ID: "sb"},
+			name:          "returns error when untracked diff exits with unexpected code",
+			sandbox:       &agent.Sandbox{ID: "sb"},
+			baseCommitSHA: "abc123",
 			execFn: func(_ context.Context, _ *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
 				switch cmd {
 				case "git rev-parse --is-inside-work-tree":
 					return 0, nil
-				case "git diff":
+				case "git diff --find-renames --binary abc123 -- .":
 					return 0, nil
 				case "git ls-files --others --exclude-standard -- .":
 					_, _ = io.WriteString(stdout, "new.go\n")
@@ -145,7 +166,12 @@ func TestCollect(t *testing.T) {
 				return tt.execFn(ctx, sb, cmd, stdout, stderr)
 			}
 
-			diff, err := Collect(context.Background(), provider, tt.sandbox)
+			diff, err := Collect(context.Background(), provider, tt.sandbox, tt.baseCommitSHA)
+			if tt.expectErrIs != nil {
+				require.Error(t, err, "Collect should return an error")
+				require.ErrorIs(t, err, tt.expectErrIs, "Collect should return the expected sentinel error")
+				return
+			}
 			if tt.expectErr != "" {
 				require.Error(t, err, "Collect should return an error")
 				require.Contains(t, err.Error(), tt.expectErr, "Collect should return the expected error")
