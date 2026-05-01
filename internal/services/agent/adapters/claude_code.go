@@ -60,32 +60,6 @@ func (a *ClaudeCodeAdapter) Name() models.AgentType {
 	return models.AgentTypeClaudeCode
 }
 
-// ReviewModes declares the curated review surfaces Claude Code ships with.
-// "default" maps to the /review skill, "security" to /security-review. These
-// are vendor-tuned prompts that improve as Anthropic updates the CLI without
-// 143 shipping anything.
-func (a *ClaudeCodeAdapter) ReviewModes() []models.SessionReviewMode {
-	return []models.SessionReviewMode{
-		models.SessionReviewModeDefault,
-		models.SessionReviewModeSecurity,
-	}
-}
-
-// claudeCodeReviewSlashCommand returns the slash command that triggers the
-// requested native review surface inside Claude Code. Returns the empty
-// string for unsupported modes; callers should treat that as "fall through
-// to the regular continuation path."
-func claudeCodeReviewSlashCommand(mode models.SessionReviewMode) string {
-	switch mode {
-	case models.SessionReviewModeDefault:
-		return "/review"
-	case models.SessionReviewModeSecurity:
-		return "/security-review"
-	default:
-		return ""
-	}
-}
-
 // PreparePrompt constructs the system and user prompts for Claude Code
 // based on the issue context.
 func (a *ClaudeCodeAdapter) PreparePrompt(ctx context.Context, input *agent.AgentInput) (*agent.AgentPrompt, error) {
@@ -123,18 +97,7 @@ func (a *ClaudeCodeAdapter) Execute(ctx context.Context, sandbox *agent.Sandbox,
 	if prompt.Continuation {
 		// Subsequent turn: resume the latest session with --continue.
 		// The prompt is a positional argument to --print.
-		// For session-native review turns, swap in Claude Code's curated
-		// review skill (`/review` or `/security-review`) instead of the
-		// user message. The skill ships with vendor-tuned prompting and
-		// improves as Anthropic updates the CLI; we never want to wrap or
-		// re-prompt around it.
-		userMessage := prompt.UserMessage
-		if prompt.IsReview() {
-			if slash := claudeCodeReviewSlashCommand(prompt.RevisionContext.ReviewContext.Mode); slash != "" {
-				userMessage = slash
-			}
-		}
-		msg := shellEscapeDouble(userMessage)
+		msg := shellEscapeDouble(prompt.UserMessage)
 		cmd = fmt.Sprintf(
 			"claude --print --output-format stream-json --verbose%s --continue \"%s\"",
 			effortArg,

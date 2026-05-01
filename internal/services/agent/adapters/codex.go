@@ -32,23 +32,6 @@ func (a *CodexAdapter) Name() models.AgentType {
 	return models.AgentTypeCodex
 }
 
-// ReviewModes declares the native review surfaces Codex currently exposes.
-// Codex ships a default `/review` slash command; 143 routes session-native
-// review turns through that command instead of wrapping them in a custom
-// prompt so the vendor-tuned review behavior stays authoritative.
-func (a *CodexAdapter) ReviewModes() []models.SessionReviewMode {
-	return []models.SessionReviewMode{models.SessionReviewModeDefault}
-}
-
-func codexReviewSlashCommand(mode models.SessionReviewMode) string {
-	switch mode {
-	case models.SessionReviewModeDefault:
-		return "/review"
-	default:
-		return ""
-	}
-}
-
 // PreparePrompt constructs the prompts for Codex CLI based on the issue context.
 // Reuses the shared buildSystemPrompt() and buildUserPrompt() functions.
 func (a *CodexAdapter) PreparePrompt(ctx context.Context, input *agent.AgentInput) (*agent.AgentPrompt, error) {
@@ -88,14 +71,8 @@ func (a *CodexAdapter) Execute(ctx context.Context, sandbox *agent.Sandbox, prom
 		reasoningArg = fmt.Sprintf(" -c '%s'", shellEscapeSingle(fmt.Sprintf(`model_reasoning_effort="%s"`, prompt.ReasoningEffort)))
 	}
 	if prompt.Continuation {
-		userMessage := prompt.UserMessage
-		if prompt.IsReview() {
-			if slash := codexReviewSlashCommand(prompt.RevisionContext.ReviewContext.Mode); slash != "" {
-				userMessage = slash
-			}
-		}
 		// Subsequent turn: resume the latest restored session state.
-		msg := shellEscapeDouble(userMessage)
+		msg := shellEscapeDouble(prompt.UserMessage)
 		if prompt.ResumeSessionID != "" {
 			cmd = fmt.Sprintf(
 				"codex exec resume --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check --json%s %s \"%s\"",

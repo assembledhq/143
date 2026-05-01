@@ -125,6 +125,14 @@ function buildStartupChecklist(
   services: PreviewService[],
   infrastructure: PreviewInfrastructure[],
 ): StartupChecklistStep[] {
+  // When the parent preview reaches a terminal state, force any child rows
+  // that were still pending to render as terminal too. The backend cascades
+  // these on terminal transitions; this defensive layer also covers
+  // historical rows from before the cascade landed.
+  const parentTerminal =
+    status === "failed" || status === "stopped" || status === "expired";
+  const parentFailed = status === "failed";
+
   const infraFailed = infrastructure.find(
     (item) => item.status === "failed" || item.status === "unhealthy",
   );
@@ -161,42 +169,58 @@ function buildStartupChecklist(
   const steps: StartupChecklistStep[] = [];
 
   if (infrastructure.length > 0) {
-    steps.push({
-      title: "Spin up infrastructure",
-      state: infraFailed
-        ? "failed"
-        : allInfraHealthy
-          ? "complete"
-          : infraProvisioning
-            ? "active"
-            : "pending",
-      detail: infraFailed
-        ? `${infraFailed.infra_name} failed to become healthy`
-        : allInfraHealthy
-          ? `${infrastructure.length === 1 ? infrastructure[0].infra_name : `${infrastructure.length} services`} ready`
-          : infraProvisioning
-            ? `${infraProvisioning.infra_name} is provisioning`
-            : "Waiting to start preview infrastructure.",
-    });
+    let infraState: StartupChecklistStepState;
+    let infraDetail: string;
+    if (infraFailed) {
+      infraState = "failed";
+      infraDetail = `${infraFailed.infra_name} failed to become healthy`;
+    } else if (allInfraHealthy) {
+      infraState = "complete";
+      infraDetail = `${
+        infrastructure.length === 1
+          ? infrastructure[0].infra_name
+          : `${infrastructure.length} services`
+      } ready`;
+    } else if (parentTerminal) {
+      infraState = parentFailed ? "failed" : "pending";
+      infraDetail = parentFailed
+        ? `${infraProvisioning?.infra_name ?? "Infrastructure"} did not finish provisioning`
+        : "Infrastructure was stopped before reaching ready.";
+    } else if (infraProvisioning) {
+      infraState = "active";
+      infraDetail = `${infraProvisioning.infra_name} is provisioning`;
+    } else {
+      infraState = "pending";
+      infraDetail = "Waiting to start preview infrastructure.";
+    }
+    steps.push({ title: "Spin up infrastructure", state: infraState, detail: infraDetail });
   }
 
-  steps.push({
-    title: "Start services",
-    state: serviceFailed
-      ? "failed"
-      : allServicesReady
-        ? "complete"
-        : serviceStarting
-          ? "active"
-          : "pending",
-    detail: serviceFailed
-      ? `${serviceFailed.service_name} failed to start`
-      : allServicesReady
-        ? `${services.length === 1 ? services[0]?.service_name ?? "App" : `${services.length} services`} ready`
-        : serviceStarting
-          ? `${serviceStarting.service_name} is starting`
-          : "Waiting for services to boot.",
-  });
+  let serviceState: StartupChecklistStepState;
+  let serviceDetail: string;
+  if (serviceFailed) {
+    serviceState = "failed";
+    serviceDetail = `${serviceFailed.service_name} failed to start`;
+  } else if (allServicesReady) {
+    serviceState = "complete";
+    serviceDetail = `${
+      services.length === 1
+        ? services[0]?.service_name ?? "App"
+        : `${services.length} services`
+    } ready`;
+  } else if (parentTerminal) {
+    serviceState = parentFailed ? "failed" : "pending";
+    serviceDetail = parentFailed
+      ? `${serviceStarting?.service_name ?? "Service"} did not finish starting`
+      : "Services were stopped before reaching ready.";
+  } else if (serviceStarting) {
+    serviceState = "active";
+    serviceDetail = `${serviceStarting.service_name} is starting`;
+  } else {
+    serviceState = "pending";
+    serviceDetail = "Waiting for services to boot.";
+  }
+  steps.push({ title: "Start services", state: serviceState, detail: serviceDetail });
 
   steps.push({
     title: "Open the preview",

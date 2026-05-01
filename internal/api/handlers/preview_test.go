@@ -544,15 +544,31 @@ func expectReserveSuccess(mock pgxmock.PgxPoolIface, sessionID, orgID, userID uu
 	return previewID
 }
 
+func previewAnyArgs(n int) []any {
+	args := make([]any, n)
+	for i := range args {
+		args[i] = pgxmock.AnyArg()
+	}
+	return args
+}
+
 // expectAbortReservationNoDestroy emits the pgxmock sequence for an Abort that
 // releases the hold without destroying a container (either the sandbox was
 // reused so hydratedContainerID is "", or the turn still holds it). Callers
 // that need the destroy path should build it inline.
 func expectAbortReservationNoDestroy(mock pgxmock.PgxPoolIface) {
-	// UpdatePreviewStatus: id, org_id, status, error (4 args).
+	// UpdatePreviewStatus(failed): parent status + child cascades in one transaction.
+	mock.ExpectBegin()
 	mock.ExpectExec("UPDATE preview_instances SET status").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectExec("UPDATE preview_services SET").
+		WithArgs(previewAnyArgs(5)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
+	mock.ExpectExec("UPDATE preview_infrastructure SET").
+		WithArgs(previewAnyArgs(5)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
+	mock.ExpectCommit()
 	// ReleasePreviewHold returns destroyNow=false because turn_holds=true.
 	mock.ExpectQuery("WITH released AS").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
@@ -2092,11 +2108,18 @@ func TestPreviewHandler_StopPreview_Success(t *testing.T) {
 				AddRow(newActivePreviewRow(previewID, sessionID, orgID, userID, now)...),
 		)
 
-	// StopPreview calls StopPreviewWithRevocation which does Begin + StopPreview + RevokeAll + Commit.
+	// StopPreview calls StopPreviewWithRevocation which does
+	// Begin + StopPreview (instance UPDATE + child cascades) + RevokeAll + Commit.
 	mock.ExpectBegin()
 	mock.ExpectExec("UPDATE preview_instances SET status").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectExec("UPDATE preview_services SET").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
+	mock.ExpectExec("UPDATE preview_infrastructure SET").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
 	mock.ExpectExec("UPDATE preview_access_sessions SET revoked_at").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 0))

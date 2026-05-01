@@ -106,7 +106,6 @@ import { AgentBadge } from "@/components/agent-badge";
 import { PreviewPanel } from "@/components/preview/preview-panel";
 import { PendingAttachmentStrip } from "@/components/pending-attachment-strip";
 import { PRHealthBanner } from "@/components/pr-health-banner";
-import { ReviewButton } from "@/components/review-button";
 import { MobileBackButton } from "@/components/mobile-back-button";
 import { useAuth } from "@/hooks/use-auth";
 import { prMergedAccent } from "@/lib/pr-status-styles";
@@ -1759,7 +1758,6 @@ export function SessionDetailContent({ id }: { id: string }) {
   const [localPRActionError, setLocalPRActionError] = useState<PRActionErrorState | null>(null);
   const [pendingPRAction, setPendingPRAction] = useState<"fix_tests" | "resolve_conflicts" | "merge" | null>(null);
   const [repairActionError, setRepairActionError] = useState<string | null>(null);
-  const [pendingReviewMode, setPendingReviewMode] = useState<import("@/lib/types").SessionReviewMode | null>(null);
   const [prAuthPrompt, setPRAuthPrompt] = useState<PRAuthPromptState | null>(null);
   const resumeAttemptRef = useRef<string | null>(null);
   const apiBase = process.env.NEXT_PUBLIC_API_URL || "";
@@ -1793,8 +1791,6 @@ export function SessionDetailContent({ id }: { id: string }) {
   const isActive = session ? !terminalStatuses.has(session.status) : false;
   const isRunning = session?.status === "running";
   const currentTitle = session ? sessionTitle(session) : "";
-  const { user } = useAuth();
-  const canRequestReview = user?.role === "admin" || user?.role === "member";
 
   const queryClient = useQueryClient();
 
@@ -1897,38 +1893,6 @@ export function SessionDetailContent({ id }: { id: string }) {
     }
     prevPRUrlRef.current = prUrl;
   }, [localPRState, prUrl, session?.pr_creation_state]);
-  // Session-native review affordance. Capabilities are server-driven so the
-  // button only appears when the agent's adapter implements ReviewCapableAdapter
-  // and the session is in a state that can run another turn (idle/paused with
-  // a non-empty diff). Key on status only so the button flips visibility when
-  // the session transitions running → idle, without burning a refetch on every
-  // assistant SSE tick (which advances last_activity_at).
-  const { data: reviewCapabilitiesData } = useQuery({
-    queryKey: ["session", id, "review-capabilities", session?.status],
-    queryFn: () => api.sessions.getReviewCapabilities(id),
-    enabled: !!session && canRequestReview,
-  });
-  const reviewCapabilities = reviewCapabilitiesData?.data;
-  const startReviewMutation = useMutation({
-    mutationFn: (mode: import("@/lib/types").SessionReviewMode) => api.sessions.startReview(id, mode),
-    onMutate: (mode) => {
-      setPendingReviewMode(mode);
-    },
-    onSuccess: () => {
-      // Stay in the current view; the assistant message will stream into the
-      // session timeline via SSE just like any other turn. Bust caches so the
-      // status flips from idle → running immediately.
-      void queryClient.invalidateQueries({ queryKey: ["session", id] });
-      void queryClient.invalidateQueries({ queryKey: ["session", id, "messages"] });
-      void queryClient.invalidateQueries({ queryKey: ["session", id, "timeline"] });
-      setPendingReviewMode(null);
-    },
-    onError: (err) => {
-      setPendingReviewMode(null);
-      const message = err instanceof ApiError ? err.message : "Failed to start review";
-      toast.error(message);
-    },
-  });
   const startRepairMutation = useMutation({
     mutationFn: async (action: "fix_tests" | "resolve_conflicts") => {
       if (!pullRequestId) {
@@ -2730,15 +2694,6 @@ export function SessionDetailContent({ id }: { id: string }) {
                 </div>
               </CardContent>
             </Card>
-          )}
-          {canRequestReview && (
-            <div className="flex">
-              <ReviewButton
-                capabilities={reviewCapabilities}
-                pendingMode={pendingReviewMode}
-                onReview={(mode) => startReviewMutation.mutate(mode)}
-              />
-            </div>
           )}
           <OverviewTab session={session} members={members} />
         </div>
