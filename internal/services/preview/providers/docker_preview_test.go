@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/services/agent"
@@ -569,4 +570,100 @@ func TestTcpPreviewStream_NilClose(t *testing.T) {
 	t.Parallel()
 	s := &tcpPreviewStream{Conn: nil}
 	require.NoError(t, s.Close())
+}
+
+// hangingSandboxExecutor blocks Exec on a per-call channel so tests can prove
+// the readiness loop bounds each docker-exec attempt with a timeout instead
+// of letting a wedged daemon stall the whole probe.
+type hangingSandboxExecutor struct {
+	calls   chan struct{}
+	release chan struct{}
+}
+
+func (h *hangingSandboxExecutor) ExecStream(_ context.Context, _ *agent.Sandbox, _ string, _ func(line []byte), _ io.Writer) (int, error) {
+	return 0, nil
+}
+
+func (h *hangingSandboxExecutor) Exec(ctx context.Context, _ *agent.Sandbox, _ string, _, _ io.Writer) (int, error) {
+	if h.calls != nil {
+		select {
+		case h.calls <- struct{}{}:
+		default:
+		}
+	}
+	if h.release != nil {
+		select {
+		case <-h.release:
+		case <-ctx.Done():
+			return 1, ctx.Err()
+		}
+	} else {
+		<-ctx.Done()
+		return 1, ctx.Err()
+	}
+	return 1, nil
+}
+
+func (h *hangingSandboxExecutor) ReadFile(_ context.Context, _ *agent.Sandbox, _ string) ([]byte, error) {
+	return nil, nil
+}
+
+// TestWaitForReadiness_FailsFastWhenServiceExited verifies that the readiness
+// loop bails immediately when the underlying service goroutine has set
+// status=Failed, instead of polling for the entire (long) probe timeout.
+// This was the worst part of the May 2026 16-minute preview-stuck incident:
+// the user's `server` exited 126 in seconds but waitForReadiness kept curling
+// a dead port for the full 4-minute budget.
+func TestWaitForReadiness_FailsFastWhenServiceExited(t *testing.T) {
+	t.Parallel()
+	d := NewDockerPreviewProvider(&mockDockerPreviewClient{}, &noopSandboxExecutor{}, zerolog.Nop())
+	state := &previewState{
+		sandbox:  &agent.Sandbox{},
+		services: map[string]*serviceState{},
+	}
+	state.services["server"] = &serviceState{
+		name:   "server",
+		port:   8080,
+		status: models.PreviewServiceStatusFailed,
+		err:    "exited with code 126",
+	}
+	// Use a generous timeout — the test asserts we return well before it.
+	err := d.waitForReadiness(context.Background(), state, "server", 8080, "/health", 5*time.Second)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "exited before becoming ready")
+	require.Contains(t, err.Error(), "126")
+}
+
+// TestWaitForReadiness_BoundsExecPerAttempt verifies that each Exec call is
+// wrapped in a per-attempt timeout, so a wedged docker daemon can't stretch
+// the readiness budget. We give the loop a 2.5s overall timeout against an
+// Exec that hangs forever; without per-attempt bounding the loop would never
+// return because the deadline.C case can only fire between attempts.
+func TestWaitForReadiness_BoundsExecPerAttempt(t *testing.T) {
+	t.Parallel()
+	hung := &hangingSandboxExecutor{calls: make(chan struct{}, 4)}
+	d := NewDockerPreviewProvider(&mockDockerPreviewClient{}, hung, zerolog.Nop())
+	state := &previewState{
+		sandbox:  &agent.Sandbox{},
+		services: map[string]*serviceState{},
+	}
+	state.services["web"] = &serviceState{
+		name:   "web",
+		port:   3000,
+		status: models.PreviewServiceStatusStarting,
+	}
+
+	// Overall budget shorter than a single hung Exec would take if unbounded.
+	// Per-attempt timeout (5s in production) is longer than this 2.5s overall
+	// budget, so the test really exercises the deadline.C path between
+	// attempts: the per-attempt timeout cancels the hung Exec, the loop
+	// re-enters select, and deadline.C fires.
+	start := time.Now()
+	err := d.waitForReadiness(context.Background(), state, "web", 3000, "/", 2500*time.Millisecond)
+	elapsed := time.Since(start)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "timed out")
+	// Generous upper bound so this isn't flaky on a loaded CI host but small
+	// enough to catch the regression where the loop stalls on a hung Exec.
+	require.Less(t, elapsed, 30*time.Second, "readiness loop didn't honor its timeout under a hung Exec")
 }
