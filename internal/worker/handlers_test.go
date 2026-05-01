@@ -61,7 +61,7 @@ var workerSessionColumns = []string{
 	"checkpointed_at", "checkpoint_kind", "checkpoint_capability", "checkpoint_size_bytes", "checkpoint_error",
 	"recovery_state", "recovery_queued_at", "recovery_started_at", "recovery_attempt_count",
 	"target_branch", "working_branch", "base_commit_sha", "repository_id", "diff_stats", "diff_history", "input_manifest",
-	"archived_at", "archived_by_user_id", "automation_run_id", "pr_creation_state", "pr_creation_error", "diff_collected_at", "latest_diff_snapshot_id",
+	"archived_at", "archived_by_user_id", "automation_run_id", "pr_creation_state", "pr_creation_error", "pr_push_state", "pr_push_error", "diff_collected_at", "latest_diff_snapshot_id",
 	"linear_private", "linear_state_sync_disabled", "linear_identifier_hint", "linear_prepare_state",
 	"deleted_at", "git_identity_source", "git_identity_user_id", "created_at",
 }
@@ -227,15 +227,17 @@ func workerSessionTestRow(values ...any) []any {
 // workerSessionTestRowDispatch with nil values for columns added after the
 // fixture conventions were settled: the pending-snapshot pair
 // (pending_snapshot_key + pending_snapshot_set_at, between snapshot_key and
-// runtime_soft_deadline_at) and the trailing git_identity_source /
-// git_identity_user_id pair (immediately before created_at). Existing
-// fixtures emit a "pre-pending, pre-identity" row; we pad it to the
-// current layout without touching every call site.
+// runtime_soft_deadline_at), the pr_push pair (pr_push_state + pr_push_error,
+// between pr_creation_error and diff_collected_at), and the trailing
+// git_identity_source / git_identity_user_id pair (immediately before
+// created_at). Existing fixtures emit a "pre-pending, pre-pr_push,
+// pre-identity" row; we pad it to the current layout without touching every
+// call site.
 func padWorkerIdentityNils(row []any) []any {
 	if len(row) >= len(workerSessionColumns) {
 		return row
 	}
-	if len(row) != len(workerSessionColumns)-4 {
+	if len(row) != len(workerSessionColumns)-6 {
 		return row
 	}
 	const pendingSnapshotKeyIndex = 42
@@ -244,10 +246,23 @@ func padWorkerIdentityNils(row []any) []any {
 	withPending = append(withPending, nil, nil) // pending_snapshot_key, pending_snapshot_set_at
 	withPending = append(withPending, row[pendingSnapshotKeyIndex:]...)
 
+	// Insert the pr_push pair right after pr_creation_error (and before
+	// diff_collected_at). In the post-pending row, diff_collected_at sits at
+	// index 74 (the +2 shift from the pre-pending layout where it was at 72).
+	// The pr_push pair lands immediately before it. Use "idle" (not nil) for
+	// pr_push_state because the model's field is a non-pointer PRPushState —
+	// a NULL would fail pgx scanning. The migration mirrors this with NOT
+	// NULL DEFAULT 'idle'.
+	const prPushStateIndex = 74
+	withPRPush := make([]any, 0, len(withPending)+2)
+	withPRPush = append(withPRPush, withPending[:prPushStateIndex]...)
+	withPRPush = append(withPRPush, "idle", (*string)(nil)) // pr_push_state, pr_push_error
+	withPRPush = append(withPRPush, withPending[prPushStateIndex:]...)
+
 	padded := make([]any, 0, len(workerSessionColumns))
-	padded = append(padded, withPending[:len(withPending)-1]...)
+	padded = append(padded, withPRPush[:len(withPRPush)-1]...)
 	padded = append(padded, nil, nil)
-	padded = append(padded, withPending[len(withPending)-1])
+	padded = append(padded, withPRPush[len(withPRPush)-1])
 	return padded
 }
 
@@ -1312,6 +1327,7 @@ type mockPMService struct {
 
 type stubPRService struct {
 	createPRFn                func(ctx context.Context, run *models.Session, params ...ghservice.CreatePRParams) (*models.PullRequest, error)
+	pushChangesToPRFn         func(ctx context.Context, run *models.Session, params ...ghservice.CreatePRParams) (*models.PullRequest, error)
 	syncPullRequestStateFn    func(context.Context, uuid.UUID, uuid.UUID) error
 	reconcilePullRequestFn    func(context.Context, uuid.UUID, int) error
 	enrichPullRequestHealthFn func(context.Context, uuid.UUID, uuid.UUID, int64) error
@@ -1320,6 +1336,13 @@ type stubPRService struct {
 func (s *stubPRService) CreatePR(ctx context.Context, run *models.Session, params ...ghservice.CreatePRParams) (*models.PullRequest, error) {
 	if s.createPRFn != nil {
 		return s.createPRFn(ctx, run, params...)
+	}
+	return nil, nil
+}
+
+func (s *stubPRService) PushChangesToPR(ctx context.Context, run *models.Session, params ...ghservice.CreatePRParams) (*models.PullRequest, error) {
+	if s.pushChangesToPRFn != nil {
+		return s.pushChangesToPRFn(ctx, run, params...)
 	}
 	return nil, nil
 }
@@ -1374,6 +1397,174 @@ func newWorkerSessionRow(sessionID, orgID uuid.UUID, now time.Time, snapshotKey 
 		nil, nil, nil, nil, nil, nil, nil,
 		nil, nil, nil, "queued", (*string)(nil), nil, nil, nil, now,
 	)
+}
+
+func TestPushPRChangesHandler_SuccessMarksPushingAndSucceeded(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	now := time.Now()
+	snapshotKey := "snap-push-pr-success"
+
+	mock.ExpectQuery("SELECT .* FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(newWorkerSessionRow(sessionID, orgID, now, &snapshotKey)...))
+	// Two state-machine writes: pushing → succeeded.
+	mock.ExpectExec("UPDATE sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectExec("UPDATE sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	called := false
+	services := &Services{
+		PR: &stubPRService{
+			pushChangesToPRFn: func(ctx context.Context, run *models.Session, params ...ghservice.CreatePRParams) (*models.PullRequest, error) {
+				called = true
+				return &models.PullRequest{ID: uuid.New(), OrgID: orgID}, nil
+			},
+		},
+	}
+
+	handler := newPushPRChangesHandler(stores, services, zerolog.Nop())
+	payload := json.RawMessage(`{"session_id":"` + sessionID.String() + `","org_id":"` + orgID.String() + `"}`)
+	err := handler(context.Background(), "push_pr_changes", payload)
+
+	require.NoError(t, err, "push_pr_changes handler should succeed when PR push succeeds")
+	require.True(t, called, "push_pr_changes handler should invoke PRService.PushChangesToPR")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestPushPRChangesHandler_PendingSnapshotRetriesWithoutMarkingPushing(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	now := time.Now()
+	snapshotKey := "snap-push-pr-pending"
+	pendingSnapshotKey := "snapshots/session/post-pr.tar.zst"
+	row := newWorkerSessionRow(sessionID, orgID, now, &snapshotKey)
+	for i, col := range workerSessionColumns {
+		if col == "pending_snapshot_key" {
+			row[i] = &pendingSnapshotKey
+			break
+		}
+	}
+
+	mock.ExpectQuery("SELECT .* FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(row...))
+
+	called := false
+	services := &Services{
+		PR: &stubPRService{
+			pushChangesToPRFn: func(ctx context.Context, run *models.Session, params ...ghservice.CreatePRParams) (*models.PullRequest, error) {
+				called = true
+				return nil, nil
+			},
+		},
+	}
+
+	handler := newPushPRChangesHandler(stores, services, zerolog.Nop())
+	payload := json.RawMessage(`{"session_id":"` + sessionID.String() + `","org_id":"` + orgID.String() + `"}`)
+	err := handler(context.Background(), "push_pr_changes", payload)
+
+	var retryable *RetryableError
+	require.ErrorAs(t, err, &retryable, "pending snapshot should requeue push_pr_changes without consuming an attempt")
+	require.ErrorIs(t, retryable.Err, agent.ErrSnapshotPending, "retryable error should preserve the pending-snapshot sentinel")
+	require.False(t, called, "push_pr_changes handler should not invoke PRService while snapshot upload is pending")
+	require.NoError(t, mock.ExpectationsWereMet(), "handler should not write pushing state while snapshot upload is pending")
+}
+
+// Regression: a worker retry of a push that already landed re-runs the push
+// script which exits cleanly with ErrNoChanges (HEAD is ancestor of @{u}). The
+// handler must mark the operation succeeded so the user doesn't see a
+// misleading "failed" toast — pr_push_state = succeeded reflects the truth
+// that the PR's branch already has the session's commits.
+func TestPushPRChangesHandler_NoChangesIsTreatedAsSuccess(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	now := time.Now()
+	snapshotKey := "snap-push-pr-no-changes"
+
+	mock.ExpectQuery("SELECT .* FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(newWorkerSessionRow(sessionID, orgID, now, &snapshotKey)...))
+	// pushing → succeeded (NOT failed, despite the error from the service).
+	mock.ExpectExec("UPDATE sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectExec("UPDATE sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	services := &Services{
+		PR: &stubPRService{
+			pushChangesToPRFn: func(ctx context.Context, run *models.Session, params ...ghservice.CreatePRParams) (*models.PullRequest, error) {
+				return nil, ghservice.ErrNoChanges
+			},
+		},
+	}
+
+	handler := newPushPRChangesHandler(stores, services, zerolog.Nop())
+	payload := json.RawMessage(`{"session_id":"` + sessionID.String() + `","org_id":"` + orgID.String() + `"}`)
+	err := handler(context.Background(), "push_pr_changes", payload)
+
+	require.NoError(t, err, "push_pr_changes handler should swallow ErrNoChanges as a benign no-op")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met (succeeded write must fire, not failed)")
+}
+
+func TestPushPRChangesHandler_TerminalErrorBecomesFatal(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	now := time.Now()
+	snapshotKey := "snap-push-pr-fatal"
+
+	mock.ExpectQuery("SELECT .* FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(newWorkerSessionRow(sessionID, orgID, now, &snapshotKey)...))
+	// pushing → failed.
+	mock.ExpectExec("UPDATE sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectExec("UPDATE sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	services := &Services{
+		PR: &stubPRService{
+			pushChangesToPRFn: func(ctx context.Context, run *models.Session, params ...ghservice.CreatePRParams) (*models.PullRequest, error) {
+				return nil, ghservice.ErrSnapshotExpired
+			},
+		},
+	}
+
+	handler := newPushPRChangesHandler(stores, services, zerolog.Nop())
+	payload := json.RawMessage(`{"session_id":"` + sessionID.String() + `","org_id":"` + orgID.String() + `"}`)
+	err := handler(context.Background(), "push_pr_changes", payload)
+
+	var fatalErr *FatalError
+	require.ErrorAs(t, err, &fatalErr, "push_pr_changes should dead-letter terminal errors instead of retrying")
+	require.ErrorIs(t, fatalErr, ghservice.ErrSnapshotExpired, "push_pr_changes should preserve the underlying terminal error")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
 func TestOpenPRHandler_TerminalPRErrorsBecomeFatal(t *testing.T) {

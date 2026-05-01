@@ -24,7 +24,7 @@ func TestPullRequestStore_GetByRepoAndNumber(t *testing.T) {
 
 	cols := []string{
 		"id", "session_id", "org_id", "github_pr_number", "github_pr_url", "github_repo",
-		"title", "body", "status", "review_status", "authored_by", "ci_status", "head_sha", "base_sha",
+		"title", "body", "status", "review_status", "authored_by", "ci_status", "head_sha", "head_ref", "base_sha",
 		"merge_state", "has_conflicts", "failing_test_count", "needs_agent_action", "github_state_synced_at",
 		"health_version", "merged_at", "created_at", "updated_at",
 	}
@@ -39,7 +39,7 @@ func TestPullRequestStore_GetByRepoAndNumber(t *testing.T) {
 		WillReturnRows(
 			pgxmock.NewRows(cols).
 				AddRow(prID, &sessionID, orgID, 42, "https://github.com/org/repo/pull/42", "org/repo",
-					"Fix bug", ptrStr("Description"), "open", "pending", "user1", "", nil, nil,
+					"Fix bug", ptrStr("Description"), "open", "pending", "user1", "", nil, nil, nil,
 					models.PullRequestMergeStateUnknown, false, 0, false, nil, int64(0), nil, now, now),
 		)
 
@@ -82,7 +82,7 @@ func TestPullRequestStore_BatchGetBySessionIDs_Success(t *testing.T) {
 
 	cols := []string{
 		"id", "session_id", "org_id", "github_pr_number", "github_pr_url", "github_repo",
-		"title", "body", "status", "review_status", "authored_by", "ci_status", "head_sha", "base_sha",
+		"title", "body", "status", "review_status", "authored_by", "ci_status", "head_sha", "head_ref", "base_sha",
 		"merge_state", "has_conflicts", "failing_test_count", "needs_agent_action", "github_state_synced_at",
 		"health_version", "merged_at", "created_at", "updated_at",
 	}
@@ -97,7 +97,7 @@ func TestPullRequestStore_BatchGetBySessionIDs_Success(t *testing.T) {
 		WillReturnRows(
 			pgxmock.NewRows(cols).
 				AddRow(prID, &sessionID, orgID, 42, "https://github.com/org/repo/pull/42", "org/repo",
-					"Fix bug", ptrStr("body"), "open", "pending", "app", "success", nil, nil,
+					"Fix bug", ptrStr("body"), "open", "pending", "app", "success", nil, nil, nil,
 					models.PullRequestMergeStateUnknown, false, 0, false, nil, int64(0), nil, now, now),
 		)
 
@@ -164,4 +164,25 @@ func TestPullRequestStore_UpdateTitle(t *testing.T) {
 	err = store.UpdateTitle(context.Background(), orgID, prID, "Updated PR title")
 	require.NoError(t, err)
 	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestPullRequestStore_UpdateHeadSHA(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := NewPullRequestStore(mock)
+
+	orgID := uuid.New()
+	prID := uuid.New()
+
+	mock.ExpectExec("UPDATE pull_requests[\\s\\S]*SET head_sha = @head_sha[\\s\\S]*github_state_synced_at = NULL[\\s\\S]*health_version = 0[\\s\\S]*failing_test_count = 0").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	err = store.UpdateHeadSHA(context.Background(), orgID, prID, "abc123def456")
+	require.NoError(t, err, "UpdateHeadSHA should persist the new commit SHA and mark cached health stale")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }

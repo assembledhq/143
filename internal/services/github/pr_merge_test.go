@@ -310,14 +310,14 @@ func TestPRServiceMergePullRequestRunsMergedFollowUps(t *testing.T) {
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(prTestPullRequestColumns).AddRow(
 			prID, &sessionID, orgID, 42, "https://github.com/assembledhq/143/pull/42", "assembledhq/143",
-			"Fix bug", (*string)(nil), "open", "pending", "app", "", nil, nil,
+			"Fix bug", (*string)(nil), "open", "pending", "app", "", nil, nil, nil,
 			models.PullRequestMergeStateUnknown, false, 0, false, (*time.Time)(nil), int64(0), (*time.Time)(nil), now, now,
 		))
 	prMock.ExpectQuery("SELECT .+ FROM pull_requests WHERE id").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(prTestPullRequestColumns).AddRow(
 			prID, &sessionID, orgID, 42, "https://github.com/assembledhq/143/pull/42", "assembledhq/143",
-			"Fix bug", (*string)(nil), "open", "pending", "app", "", nil, nil,
+			"Fix bug", (*string)(nil), "open", "pending", "app", "", nil, nil, nil,
 			models.PullRequestMergeStateUnknown, false, 0, false, (*time.Time)(nil), int64(0), (*time.Time)(nil), now, now,
 		))
 
@@ -382,7 +382,7 @@ func TestPRServiceMergePullRequestRunsMergedFollowUps(t *testing.T) {
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(prTestPullRequestColumns).AddRow(
 			prID, &sessionID, orgID, 42, "https://github.com/assembledhq/143/pull/42", "assembledhq/143",
-			"Fix bug", (*string)(nil), "open", "pending", "app", "success", &headSHA, &baseSHA,
+			"Fix bug", (*string)(nil), "open", "pending", "app", "success", &headSHA, nil, &baseSHA,
 			models.PullRequestMergeStateClean, false, 0, false, &now, int64(1), (*time.Time)(nil), now, now,
 		))
 	prMock.ExpectQuery("SELECT .+ FROM pull_request_health_current").

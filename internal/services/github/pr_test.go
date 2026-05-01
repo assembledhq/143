@@ -63,7 +63,7 @@ var prTestUserColumns = []string{
 
 var prTestPullRequestColumns = []string{
 	"id", "session_id", "org_id", "github_pr_number", "github_pr_url", "github_repo",
-	"title", "body", "status", "review_status", "authored_by", "ci_status", "head_sha", "base_sha",
+	"title", "body", "status", "review_status", "authored_by", "ci_status", "head_sha", "head_ref", "base_sha",
 	"merge_state", "has_conflicts", "failing_test_count", "needs_agent_action", "github_state_synced_at",
 	"health_version", "merged_at", "created_at", "updated_at",
 }
@@ -86,6 +86,7 @@ func newPRTestRowWithTitle(prID uuid.UUID, sessionID *uuid.UUID, orgID uuid.UUID
 		"pending",
 		"app",
 		"",
+		nil,
 		nil,
 		nil,
 		models.PullRequestMergeStateUnknown,
@@ -3193,6 +3194,233 @@ func TestCreatePR_ReturnsExistingPRBeforeCheckingSandboxDeps(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+func TestPushChangesToPR_ReturnsErrNoPullRequestWhenSessionHasNoPR(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create pgxmock pool")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+
+	// PR lookup returns ErrNoRows — no PR row exists for this session.
+	mock.ExpectQuery("SELECT .+ FROM pull_requests").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(prTestPullRequestColumns))
+
+	svc := &PRService{
+		pullRequests: db.NewPullRequestStore(mock),
+		logger:       zerolog.Nop(),
+	}
+
+	_, err = svc.PushChangesToPR(context.Background(), &models.Session{ID: sessionID, OrgID: orgID})
+	require.ErrorIs(t, err, ErrNoPullRequest, "PushChangesToPR should return ErrNoPullRequest when no PR row exists")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestPushChangesToPR_ReturnsErrPRClosedForClosedOrMergedPR(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		status string
+	}{
+		{name: "merged PR", status: "merged"},
+		{name: "closed PR", status: "closed"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "should create pgxmock pool")
+			defer mock.Close()
+
+			now := time.Now()
+			orgID := uuid.New()
+			sessionID := uuid.New()
+			prID := uuid.New()
+			body := "body"
+
+			row := newPRTestRow(prID, &sessionID, orgID, "testorg/testrepo", now, &body)
+			row[8] = tt.status // status column index in prTestPullRequestColumns
+			mock.ExpectQuery("SELECT .+ FROM pull_requests").
+				WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+				WillReturnRows(pgxmock.NewRows(prTestPullRequestColumns).AddRow(row...))
+
+			svc := &PRService{
+				pullRequests: db.NewPullRequestStore(mock),
+				logger:       zerolog.Nop(),
+			}
+
+			_, err = svc.PushChangesToPR(context.Background(), &models.Session{ID: sessionID, OrgID: orgID})
+			require.ErrorIs(t, err, ErrPRClosed, "PushChangesToPR should refuse to push to a non-open PR")
+			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+		})
+	}
+}
+
+func TestPushChangesToPR_ReturnsErrSnapshotNotCapturedWhenSnapshotKeyMissing(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create pgxmock pool")
+	defer mock.Close()
+
+	now := time.Now()
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	prID := uuid.New()
+	body := "body"
+
+	mock.ExpectQuery("SELECT .+ FROM pull_requests").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(prTestPullRequestColumns).AddRow(
+				newPRTestRow(prID, &sessionID, orgID, "testorg/testrepo", now, &body)...,
+			),
+		)
+
+	svc := &PRService{
+		pullRequests:    db.NewPullRequestStore(mock),
+		sandboxProvider: &prTestSandboxProvider{},
+		snapshots:       &prTestSnapshotStore{},
+		logger:          zerolog.Nop(),
+	}
+
+	// SnapshotKey is nil — push must refuse to hydrate.
+	_, err = svc.PushChangesToPR(context.Background(), &models.Session{ID: sessionID, OrgID: orgID})
+	require.ErrorIs(t, err, ErrSnapshotNotCaptured, "PushChangesToPR should refuse to push without a captured snapshot")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestPushChangesToPR_ReturnsErrSnapshotPendingWhenUploadInFlight(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create pgxmock pool")
+	defer mock.Close()
+
+	now := time.Now()
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	prID := uuid.New()
+	body := "body"
+	snapshotKey := "snapshots/session.tar"
+	pendingSnapshotKey := "snapshots/session/post-pr.tar.zst"
+
+	mock.ExpectQuery("SELECT .+ FROM pull_requests").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(prTestPullRequestColumns).AddRow(
+				newPRTestRow(prID, &sessionID, orgID, "testorg/testrepo", now, &body)...,
+			),
+		)
+
+	svc := &PRService{
+		pullRequests:    db.NewPullRequestStore(mock),
+		sandboxProvider: &prTestSandboxProvider{},
+		snapshots:       &prTestSnapshotStore{},
+		logger:          zerolog.Nop(),
+	}
+
+	_, err = svc.PushChangesToPR(context.Background(), &models.Session{
+		ID:                 sessionID,
+		OrgID:              orgID,
+		SnapshotKey:        &snapshotKey,
+		PendingSnapshotKey: &pendingSnapshotKey,
+	})
+	require.ErrorIs(t, err, agent.ErrSnapshotPending, "PushChangesToPR should wait for pending snapshot uploads before hydrating")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestPushChangesToPR_EnqueuesHealthSyncAfterSuccessfulPush(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create pgxmock pool")
+	defer mock.Close()
+
+	now := time.Now()
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	prID := uuid.New()
+	repoID := uuid.New()
+	integrationID := uuid.New()
+	body := "body"
+	snapshotKey := "snapshots/session.tar"
+	headRef := "143/session/changes"
+	headSHA := "abc1234567890abcdef1234567890abcdef12345"
+
+	prRow := newPRTestRow(prID, &sessionID, orgID, "owner/repo", now, &body)
+	prRow[13] = &headRef
+	mock.ExpectQuery("SELECT .+ FROM pull_requests").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(prTestPullRequestColumns).AddRow(prRow...))
+	mock.ExpectQuery("SELECT .+ FROM repositories WHERE id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(prTestRepoColumns).AddRow(
+				repoID, orgID, integrationID, int64(12345), "owner/repo", "main",
+				false, nil, nil, "https://github.com/owner/repo.git", int64(99),
+				"active", nil, nil, json.RawMessage(`{}`), now, now,
+			),
+		)
+	mock.ExpectQuery("SELECT .+ FROM organizations").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(prTestOrganizationColumns).AddRow(
+				orgID, "Test Org", json.RawMessage(`{"pr_authorship":"app_only"}`), now, now,
+			),
+		)
+	mock.ExpectExec("UPDATE pull_requests SET head_sha").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectQuery("INSERT INTO jobs").
+		WithArgs(pgx.NamedArgs{
+			"org_id":     orgID,
+			"queue":      "default",
+			"job_type":   "sync_pull_request_state",
+			"payload":    pgxmock.AnyArg(),
+			"priority":   6,
+			"dedupe_key": pgxmock.AnyArg(),
+		}).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
+
+	provider := &prTestSandboxProvider{
+		execStdout:  pushHeadSHASentinel + headSHA + "\n",
+		snapshotErr: errors.New("test: skip post-push snapshot"),
+	}
+	svc := &PRService{
+		tokenProvider: &Service{
+			cache: map[int64]*cachedToken{
+				99: {Token: "app-token", ExpiresAt: time.Now().Add(time.Hour)},
+			},
+		},
+		pullRequests:    db.NewPullRequestStore(mock),
+		sessions:        db.NewSessionStore(mock),
+		repos:           db.NewRepositoryStore(mock),
+		orgs:            db.NewOrganizationStore(mock),
+		jobs:            db.NewJobStore(mock),
+		sandboxProvider: provider,
+		snapshots:       &prTestSnapshotStore{payload: []byte("snapshot")},
+		logger:          zerolog.Nop(),
+	}
+
+	pr, err := svc.PushChangesToPR(context.Background(), &models.Session{
+		ID:           sessionID,
+		OrgID:        orgID,
+		RepositoryID: &repoID,
+		SnapshotKey:  &snapshotKey,
+	})
+	require.NoError(t, err, "PushChangesToPR should succeed for a snapshot-backed session with an open PR")
+	require.Equal(t, headSHA, *pr.HeadSHA, "PushChangesToPR should return the just-pushed head SHA")
+	require.Contains(t, provider.lastExecCmd, "HEAD:refs/heads/'"+headRef+"'", "PushChangesToPR should push to the persisted PR head ref")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func TestCreatePR_ReturnsPRLookupErrorBeforeCheckingSandboxDeps(t *testing.T) {
 	t.Parallel()
 
@@ -3991,7 +4219,7 @@ func TestCreatePR_SuccessPushesSnapshotBranchAndStoresPR(t *testing.T) {
 			),
 		)
 	mock.ExpectQuery("INSERT INTO pull_requests").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at", "updated_at"}).AddRow(uuid.New(), now, now))
 	mock.ExpectQuery("UPDATE sessions SET status").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
@@ -4137,7 +4365,7 @@ func TestCreatePR_SuccessDispatchesPostPRSnapshotUpload(t *testing.T) {
 			),
 		)
 	mock.ExpectQuery("INSERT INTO pull_requests").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at", "updated_at"}).AddRow(uuid.New(), now, now))
 	// SetPendingSnapshotKey: the synchronous write that records the
 	// post-PR upload in flight. pgx NamedArgs expand to positional args by

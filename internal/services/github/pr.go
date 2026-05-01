@@ -584,6 +584,7 @@ func (s *PRService) CreatePR(ctx context.Context, run *models.Session, params ..
 
 	authoredBy := resolution.AuthoredBy()
 	headSHA := pushed.HeadSHA
+	headRef := branchName
 	pr := &models.PullRequest{
 		SessionID:      &run.ID,
 		OrgID:          run.OrgID,
@@ -592,10 +593,11 @@ func (s *PRService) CreatePR(ctx context.Context, run *models.Session, params ..
 		GitHubRepo:     repo.FullName,
 		Title:          title,
 		Body:           &body,
-		Status:         "open",
+		Status:         models.PullRequestStatusOpen,
 		ReviewStatus:   "pending",
 		AuthoredBy:     authoredBy,
 		HeadSHA:        &headSHA,
+		HeadRef:        &headRef,
 	}
 	if err := s.pullRequests.Create(ctx, pr); err != nil {
 		return nil, fmt.Errorf("store pull request: %w", err)
@@ -645,6 +647,155 @@ func (s *PRService) CreatePR(ctx context.Context, run *models.Session, params ..
 	}
 
 	return pr, nil
+}
+
+// ErrNoPullRequest is returned by PushChangesToPR when the session has no
+// associated PR row. The "Push changes" action is only meaningful when a PR
+// already exists; the caller should fall back to (or surface) Create PR.
+var ErrNoPullRequest = errors.New("no pull request exists for session")
+
+// ErrPRClosed is returned by PushChangesToPR when the session's PR is in a
+// terminal state (merged or closed) where pushing additional commits would not
+// take effect on the user's behalf. The caller should disable the button.
+var ErrPRClosed = errors.New("pull request is closed")
+
+// PushChangesToPR stages, commits, and pushes any uncommitted/unpushed changes
+// from the session's sandbox up to the existing PR's branch, then updates the
+// PR row's head_sha. Mirrors the push half of CreatePR (sandbox hydrate, git
+// script, snapshot capture, post-push snapshot upload) without re-running the
+// PR-row creation, content generation, label attachment, status transitions,
+// or Linear milestones — those side effects belong to PR creation only.
+//
+// Branch resolution: prefers the head_ref captured at PR-creation time so the
+// push always targets the same ref the original CreatePR landed on. Falls back
+// to recomputing via formatBranchName for PRs created before the head_ref
+// column was added (migration 107). This avoids a divergence where a session's
+// title or Linear identifier changes after CreatePR ran and a fresh
+// formatBranchName would point at a branch the PR doesn't track.
+//
+// Returns ErrNoPullRequest if the session has no PR row, ErrPRClosed if the
+// PR is merged/closed, ErrNoChanges when there is nothing to push, and the
+// same snapshot sentinels as CreatePR when the sandbox is unavailable.
+func (s *PRService) PushChangesToPR(ctx context.Context, run *models.Session, params ...CreatePRParams) (*models.PullRequest, error) {
+	pr, err := s.pullRequests.GetBySessionID(ctx, run.OrgID, run.ID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrNoPullRequest
+		}
+		return nil, fmt.Errorf("load pull request: %w", err)
+	}
+	if pr.Status != models.PullRequestStatusOpen {
+		return nil, ErrPRClosed
+	}
+
+	if s.sandboxProvider == nil || s.snapshots == nil {
+		return nil, fmt.Errorf("PRService: sandbox push dependencies not configured")
+	}
+	if run.SnapshotKey == nil || *run.SnapshotKey == "" {
+		return nil, ErrSnapshotNotCaptured
+	}
+	if run.PendingSnapshotKey != nil && *run.PendingSnapshotKey != "" {
+		return nil, agent.ErrSnapshotPending
+	}
+	if run.RepositoryID == nil {
+		return nil, fmt.Errorf("session %s has no repository", run.ID)
+	}
+
+	var issue *models.Issue
+	if run.PrimaryIssueID != nil {
+		i, lookupErr := s.issues.GetByID(ctx, run.OrgID, *run.PrimaryIssueID)
+		if lookupErr == nil {
+			issue = &i
+		} else {
+			s.logger.Warn().Err(lookupErr).Str("issue_id", run.PrimaryIssueID.String()).Msg("PushChangesToPR: failed to look up issue, proceeding without it")
+		}
+	}
+
+	repo, err := s.repos.GetByID(ctx, run.OrgID, *run.RepositoryID)
+	if err != nil {
+		return nil, fmt.Errorf("get repository: %w", err)
+	}
+
+	orgSettings := models.OrgSettings{PRAuthorship: models.PRAuthorshipUserPreferred}
+	if s.orgs != nil {
+		if org, orgErr := s.orgs.GetByID(ctx, run.OrgID); orgErr == nil {
+			if parsed, parseErr := models.ParseOrgSettings(org.Settings); parseErr == nil {
+				orgSettings = parsed
+			}
+		}
+	}
+
+	var opts CreatePRParams
+	for _, param := range params {
+		if param.Draft != nil {
+			opts.Draft = param.Draft
+		}
+		if param.AuthorMode != "" {
+			opts.AuthorMode = param.AuthorMode
+		}
+	}
+
+	resolution, err := s.resolveToken(ctx, run, &repo, orgSettings, opts.AuthorMode)
+	if err != nil {
+		return nil, fmt.Errorf("resolve token: %w", err)
+	}
+	token := resolution.Token
+
+	// Prefer the persisted head_ref so the push targets the exact branch the
+	// original CreatePR landed on. Fall back to recomputing for PRs created
+	// before head_ref was captured.
+	var branchName string
+	if pr.HeadRef != nil && *pr.HeadRef != "" {
+		branchName = *pr.HeadRef
+	} else {
+		branchName = formatBranchName(run, issue)
+	}
+	commitMsg := formatCommitMessage(run, issue)
+	authorName, authorEmail := identity.CommitIdentity(resolution)
+	if !resolution.IsUserToken() && run.TriggeredByUserID != nil && s.users != nil {
+		if user, userErr := s.users.GetByID(ctx, run.OrgID, *run.TriggeredByUserID); userErr == nil {
+			if trailer := identity.CoAuthorTrailer(&user); trailer != "" {
+				commitMsg += "\n\n" + trailer
+			}
+		}
+	}
+
+	pushed, err := s.pushSessionBranch(ctx, run, &repo, token, *run.SnapshotKey, branchName, commitMsg, authorName, authorEmail)
+	if err != nil {
+		return nil, err
+	}
+	// Mirror CreatePR's tempfile ownership invariant: the deferred Remove is a
+	// safety net for every error path between here and the snapshot-upload
+	// dispatch below; on success, dispatchPostPRSnapshotUpload zeroes
+	// CapturedSnapshotPath to transfer ownership to the goroutine.
+	defer func() {
+		if pushed != nil && pushed.CapturedSnapshotPath != "" {
+			_ = os.Remove(pushed.CapturedSnapshotPath)
+		}
+	}()
+
+	if err := s.pullRequests.UpdateHeadSHA(ctx, run.OrgID, pr.ID, pushed.HeadSHA); err != nil {
+		return nil, fmt.Errorf("update pull request head sha: %w", err)
+	}
+	pr.HeadSHA = &pushed.HeadSHA
+	s.enqueuePullRequestStateSync(ctx, pr)
+
+	if pushed.CapturedSnapshotErr != nil {
+		s.logger.Warn().
+			Err(pushed.CapturedSnapshotErr).
+			Str("session_id", run.ID.String()).
+			Msg("post-push sandbox snapshot capture failed; resume will see stale state")
+	} else if pushed.CapturedSnapshotPath != "" {
+		newSnapshotKey := fmt.Sprintf("snapshots/%s/%s/post-pr.tar.zst", run.OrgID, run.ID)
+		if setErr := s.sessions.SetPendingSnapshotKey(ctx, run.OrgID, run.ID, newSnapshotKey); setErr != nil {
+			s.logger.Warn().Err(setErr).Str("session_id", run.ID.String()).Msg("failed to set pending snapshot key")
+		} else {
+			s.dispatchPostPRSnapshotUpload(run.OrgID, run.ID, newSnapshotKey, pushed.CapturedSnapshotPath, pushed.CapturedSnapshotSize)
+			pushed.CapturedSnapshotPath = ""
+		}
+	}
+
+	return &pr, nil
 }
 
 // postPRSnapshotUploadTimeout bounds a single upload attempt. Deliberately

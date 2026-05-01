@@ -131,22 +131,31 @@ func (s *PRService) buildPullRequestHealthResponse(ctx context.Context, pr model
 
 	current, err := s.pullRequests.GetHealthCurrent(ctx, pr.OrgID, pr.ID)
 	if err == nil {
+		currentMatchesHead := pr.HealthVersion != 0 || resp.HeadSHA == "" || current.HeadSHA == resp.HeadSHA
 		var summary models.PullRequestHealthSummary
-		if unmarshalErr := json.Unmarshal(current.SummaryJSON, &summary); unmarshalErr == nil {
-			normalizeStoredCheckSummaries(&summary)
-			resp.MergeState = summary.MergeState
-			resp.HasConflicts = summary.HasConflicts
-			resp.FailingTestCount = summary.FailingTestCount
-			resp.NeedsAgentAction = summary.NeedsAgentAction
-			resp.Checks = summary.Checks
-			resp.HealthVersion = current.Version
-			resp.HeadSHA = current.HeadSHA
-			resp.BaseSHA = current.BaseSHA
-			resp.ChecksConfirmed = true
-			resp.EnrichmentStatus = current.EnrichmentStatus
-			resp.EnrichmentRequested = current.EnrichmentStatus == models.PullRequestHealthEnrichmentStatusPending
-			resp.EnrichmentReady = current.EnrichmentStatus == models.PullRequestHealthEnrichmentStatusReady
-			derivePullRequestRepairActions(resp)
+		if currentMatchesHead {
+			if unmarshalErr := json.Unmarshal(current.SummaryJSON, &summary); unmarshalErr == nil {
+				normalizeStoredCheckSummaries(&summary)
+				resp.MergeState = summary.MergeState
+				resp.HasConflicts = summary.HasConflicts
+				resp.FailingTestCount = summary.FailingTestCount
+				resp.NeedsAgentAction = summary.NeedsAgentAction
+				resp.Checks = summary.Checks
+				resp.HealthVersion = current.Version
+				resp.HeadSHA = current.HeadSHA
+				resp.BaseSHA = current.BaseSHA
+				resp.ChecksConfirmed = true
+				resp.EnrichmentStatus = current.EnrichmentStatus
+				resp.EnrichmentRequested = current.EnrichmentStatus == models.PullRequestHealthEnrichmentStatusPending
+				resp.EnrichmentReady = current.EnrichmentStatus == models.PullRequestHealthEnrichmentStatusReady
+				derivePullRequestRepairActions(resp)
+			}
+		} else {
+			s.logger.Info().
+				Str("pull_request_id", pr.ID.String()).
+				Str("pr_head_sha", resp.HeadSHA).
+				Str("health_head_sha", current.HeadSHA).
+				Msg("skipping stale pull request health summary for newer PR head")
 		}
 
 		if resp.EnrichmentReady {
