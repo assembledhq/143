@@ -560,18 +560,6 @@ func scanAutomationRun(row pgx.Row) (models.AutomationRun, error) {
 	return r, err
 }
 
-func scanAutomationRuns(rows pgx.Rows) ([]models.AutomationRun, error) {
-	var runs []models.AutomationRun
-	for rows.Next() {
-		r, err := scanAutomationRun(rows)
-		if err != nil {
-			return nil, err
-		}
-		runs = append(runs, r)
-	}
-	return runs, rows.Err()
-}
-
 // runInserter is the minimal QueryRow surface shared by pgxpool.Pool, pgx.Tx,
 // and pgxmock — all used here to insert automation runs. Unifying the pool and
 // tx paths through this interface lets CreateRun and CreateRunInTx delegate to
