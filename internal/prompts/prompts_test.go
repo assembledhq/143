@@ -166,6 +166,19 @@ func TestCodingTaskPreamble(t *testing.T) {
 	assert.Contains(t, result, "risk_factors")
 }
 
+func TestSessionTitlePrompt(t *testing.T) {
+	t.Parallel()
+
+	result := SessionTitlePrompt(SessionTitlePromptData{
+		CurrentTitle: "Fix checkout timeout",
+	})
+
+	require.Contains(t, result, "The current title is: Fix checkout timeout", "prompt should include the current title for stability decisions")
+	require.Contains(t, result, "Keep the original task as the main thing", "prompt should anchor the title to the original task")
+	require.Contains(t, result, "Ignore routine follow-ups", "prompt should instruct the model to ignore incidental workflow chatter")
+	require.Contains(t, result, "Only change the title if the conversation clearly shifted to a new primary topic", "prompt should only allow retitling on real topic changes")
+}
+
 func TestLinkedIssuesContext(t *testing.T) {
 	t.Parallel()
 
