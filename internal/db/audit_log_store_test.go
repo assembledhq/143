@@ -490,6 +490,24 @@ func TestAuditLogStore_CreateBatch(t *testing.T) {
 		require.NoError(t, mock.ExpectationsWereMet())
 	})
 
+	t.Run("single-entry batch rejects mismatched org", func(t *testing.T) {
+		t.Parallel()
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err, "pgxmock pool should initialize")
+		defer mock.Close()
+
+		entry := &models.AuditLog{
+			OrgID:        uuid.New(),
+			ActorType:    models.AuditActorUser,
+			ActorID:      uuid.NewString(),
+			Action:       models.AuditActionSessionCreated,
+			ResourceType: models.AuditResourceSession,
+		}
+		err = NewAuditLogStore(mock).CreateBatch(context.Background(), uuid.New(), []*models.AuditLog{entry})
+		require.Error(t, err, "single-entry batch should reject a mismatched org before insert")
+		require.NoError(t, mock.ExpectationsWereMet(), "mismatched single-entry batch should not query")
+	})
+
 	t.Run("multi-entry batch issues a single Exec with all rows", func(t *testing.T) {
 		t.Parallel()
 		mock, err := pgxmock.NewPool()

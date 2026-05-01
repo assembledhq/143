@@ -105,3 +105,24 @@ func TestAuditEmitter_EmitUserActionsEmptyIsNoop(t *testing.T) {
 	emitter.EmitUserActions(context.Background(), nil)
 	require.NoError(t, mock.ExpectationsWereMet(), "no DB call should be made for an empty params slice")
 }
+
+func TestAuditEmitter_EmitUserActionsLogsAndDropsBatchErrors(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should initialize")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	userID := uuid.New()
+	emitter := NewAuditEmitter(NewAuditLogStore(mock), zerolog.Nop())
+
+	emitter.EmitUserActions(context.Background(), []UserActionParams{{
+		OrgID:        orgID,
+		UserID:       userID,
+		Action:       "invalid-action",
+		ResourceType: models.AuditResourceSession,
+	}})
+
+	require.NoError(t, mock.ExpectationsWereMet(), "invalid batch should be dropped without a DB call")
+}

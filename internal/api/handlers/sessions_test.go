@@ -5275,6 +5275,27 @@ func TestSessionHandler_SendMessage_ResolvesReviewComments(t *testing.T) {
 		require.NoError(t, mock.ExpectationsWereMet())
 	})
 
+	t.Run("rejects resolve IDs when review comment store is not configured", func(t *testing.T) {
+		t.Parallel()
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err, "pgxmock pool should initialize")
+		defer mock.Close()
+
+		orgID := uuid.New()
+		sessionID := uuid.New()
+		userID := uuid.New()
+		commentID := uuid.New()
+		handler := newSessionHandler(t, mock)
+		handler.SetReviewCommentStore(nil)
+
+		req := newSendMessageRequest(sessionID, orgID, userID, fmt.Sprintf(`{"message":"hello","resolve_review_comment_ids":[%q]}`, commentID.String()))
+		w := httptest.NewRecorder()
+		handler.SendMessage(w, req)
+		require.Equal(t, http.StatusBadRequest, w.Code, "handler should reject resolve IDs when review comments are disabled")
+		require.Contains(t, w.Body.String(), "REVIEW_COMMENTS_NOT_CONFIGURED", "response should explain the missing review-comment store")
+		require.NoError(t, mock.ExpectationsWereMet(), "request should fail before DB access")
+	})
+
 	t.Run("rejects ID that does not belong to the session", func(t *testing.T) {
 		t.Parallel()
 		mock, err := pgxmock.NewPool()
@@ -5421,6 +5442,55 @@ func TestSessionHandler_SendMessage_ResolvesReviewComments(t *testing.T) {
 		require.NoError(t, mock.ExpectationsWereMet())
 	})
 
+	t.Run("deduplicates repeated IDs before lookup and resolve", func(t *testing.T) {
+		t.Parallel()
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err, "pgxmock pool should initialize")
+		defer mock.Close()
+
+		orgID := uuid.New()
+		sessionID := uuid.New()
+		userID := uuid.New()
+		commentUserID := uuid.New()
+		commentID := uuid.New()
+		handler := newSessionHandler(t, mock)
+		handler.audit = db.NewAuditEmitter(db.NewAuditLogStore(mock), zerolog.Nop())
+
+		mock.ExpectQuery("SELECT .+ FROM sessions WHERE").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnRows(idleSessionRow(pgxmock.NewRows(sessionColumns), sessionID, orgID, "running"))
+		mock.ExpectBegin()
+		mock.ExpectQuery("INSERT INTO session_messages").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(int64(4), now))
+		mock.ExpectQuery("SELECT .+ FROM session_review_comments WHERE id = ANY").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnRows(
+				pgxmock.NewRows(reviewCommentColumns).
+					AddRow(commentID, sessionID, orgID, commentUserID, "main.go",
+						9, "right", "dedupe me", false, (*time.Time)(nil), (*int)(nil),
+						1, now, now),
+			)
+		mock.ExpectQuery("UPDATE session_review_comments SET resolved = true").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnRows(
+				pgxmock.NewRows(reviewCommentColumns).
+					AddRow(commentID, sessionID, orgID, commentUserID, "main.go",
+						9, "right", "dedupe me", true, &now, srcIntPtr(1),
+						1, now, now),
+			)
+		mock.ExpectCommit()
+		mock.ExpectQuery("INSERT INTO audit_logs").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(int64(1), now))
+
+		req := newSendMessageRequest(sessionID, orgID, userID, fmt.Sprintf(`{"message":"dedupe","resolve_review_comment_ids":[%q,%q]}`, commentID.String(), commentID.String()))
+		w := httptest.NewRecorder()
+		handler.SendMessage(w, req)
+		require.Equal(t, http.StatusCreated, w.Code, "duplicate IDs should be resolved once without failing validation")
+		require.NoError(t, mock.ExpectationsWereMet(), "deduplicated request should issue one lookup and one resolve")
+	})
+
 	t.Run("rejects request that exceeds the per-message resolve cap", func(t *testing.T) {
 		t.Parallel()
 		mock, err := pgxmock.NewPool()
@@ -5562,6 +5632,174 @@ func TestSessionHandler_SendMessage_ResolvesReviewComments(t *testing.T) {
 		handler.SendMessage(w, req)
 		require.Equal(t, http.StatusCreated, w.Code, w.Body.String())
 		require.NoError(t, mock.ExpectationsWereMet())
+	})
+}
+
+func TestCurrentResolutionPass(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		session  *models.Session
+		expected int
+	}{
+		{name: "nil session defaults to first pass", session: nil, expected: 1},
+		{name: "zero current turn defaults to first pass", session: &models.Session{}, expected: 1},
+		{name: "nonzero current turn is preserved", session: &models.Session{CurrentTurn: 3}, expected: 3},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			got := currentResolutionPass(tt.session)
+			require.Equal(t, tt.expected, got, "currentResolutionPass should return the expected pass number")
+		})
+	}
+}
+
+func TestResolveCommentsError_Write(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		err        *resolveCommentsError
+		expectCode string
+	}{
+		{
+			name: "writes plain error",
+			err: &resolveCommentsError{
+				status: http.StatusBadRequest, code: "BAD_COMMENTS", message: "bad comments",
+			},
+			expectCode: "BAD_COMMENTS",
+		},
+		{
+			name: "writes underlying error",
+			err: &resolveCommentsError{
+				status: http.StatusInternalServerError, code: "COMMENT_LOOKUP_FAILED", message: "lookup failed", underlying: errors.New("db down"),
+			},
+			expectCode: "COMMENT_LOOKUP_FAILED",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			req := httptest.NewRequest(http.MethodPost, "/", nil)
+			w := httptest.NewRecorder()
+			tt.err.write(w, req)
+			require.Equal(t, tt.err.status, w.Code, "resolveCommentsError should write the configured HTTP status")
+			require.Contains(t, w.Body.String(), tt.expectCode, "response should include the configured error code")
+		})
+	}
+}
+
+func TestResolveSessionReviewComments(t *testing.T) {
+	t.Parallel()
+
+	t.Run("no-op for empty IDs or missing store", func(t *testing.T) {
+		t.Parallel()
+
+		orgID := uuid.New()
+		sessionID := uuid.New()
+		resolved, rerr := resolveSessionReviewComments(context.Background(), nil, orgID, sessionID, []uuid.UUID{uuid.New()}, 1)
+		require.Nil(t, rerr, "nil store should be a no-op")
+		require.Empty(t, resolved, "nil store should not resolve comments")
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err, "pgxmock pool should initialize")
+		defer mock.Close()
+
+		store := db.NewSessionReviewCommentStore(mock)
+		resolved, rerr = resolveSessionReviewComments(context.Background(), store, orgID, sessionID, nil, 1)
+		require.Nil(t, rerr, "empty ID list should be a no-op")
+		require.Empty(t, resolved, "empty ID list should not resolve comments")
+		require.NoError(t, mock.ExpectationsWereMet(), "empty ID list should not query the store")
+	})
+
+	t.Run("returns lookup errors", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err, "pgxmock pool should initialize")
+		defer mock.Close()
+
+		orgID := uuid.New()
+		sessionID := uuid.New()
+		commentID := uuid.New()
+		mock.ExpectQuery("SELECT .+ FROM session_review_comments WHERE id = ANY").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnError(errors.New("connection refused"))
+
+		resolved, rerr := resolveSessionReviewComments(context.Background(), db.NewSessionReviewCommentStore(mock), orgID, sessionID, []uuid.UUID{commentID}, 1)
+		require.Empty(t, resolved, "lookup failure should not return resolved comments")
+		require.NotNil(t, rerr, "lookup failure should return a structured error")
+		require.Equal(t, "REVIEW_COMMENT_LOOKUP_FAILED", rerr.code, "lookup failure should use the lookup error code")
+		require.NoError(t, mock.ExpectationsWereMet(), "all store expectations should be met")
+	})
+
+	t.Run("caps missing ID details", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err, "pgxmock pool should initialize")
+		defer mock.Close()
+
+		now := time.Now()
+		orgID := uuid.New()
+		sessionID := uuid.New()
+		userID := uuid.New()
+		ids := []uuid.UUID{uuid.New(), uuid.New(), uuid.New(), uuid.New(), uuid.New(), uuid.New(), uuid.New()}
+		mock.ExpectQuery("SELECT .+ FROM session_review_comments WHERE id = ANY").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnRows(
+				pgxmock.NewRows(reviewCommentColumns).
+					AddRow(ids[0], sessionID, orgID, userID, "main.go",
+						1, "right", "exists", false, (*time.Time)(nil), (*int)(nil),
+						1, now, now),
+			)
+
+		resolved, rerr := resolveSessionReviewComments(context.Background(), db.NewSessionReviewCommentStore(mock), orgID, sessionID, ids, 1)
+		require.Empty(t, resolved, "missing IDs should not resolve comments")
+		require.NotNil(t, rerr, "missing IDs should return a structured error")
+		require.Equal(t, "INVALID_REVIEW_COMMENT_IDS", rerr.code, "missing IDs should use the invalid IDs error code")
+		require.NotContains(t, rerr.message, ids[0].String(), "existing IDs should not be reported as missing")
+		require.Contains(t, rerr.message, ids[1].String(), "first missing ID should be reported")
+		require.Contains(t, rerr.message, ids[5].String(), "fifth missing ID should be reported")
+		require.NotContains(t, rerr.message, ids[6].String(), "missing ID details should be capped")
+		require.NoError(t, mock.ExpectationsWereMet(), "all store expectations should be met")
+	})
+
+	t.Run("returns resolve errors", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err, "pgxmock pool should initialize")
+		defer mock.Close()
+
+		now := time.Now()
+		orgID := uuid.New()
+		sessionID := uuid.New()
+		userID := uuid.New()
+		commentID := uuid.New()
+		mock.ExpectQuery("SELECT .+ FROM session_review_comments WHERE id = ANY").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnRows(
+				pgxmock.NewRows(reviewCommentColumns).
+					AddRow(commentID, sessionID, orgID, userID, "main.go",
+						1, "right", "exists", false, (*time.Time)(nil), (*int)(nil),
+						1, now, now),
+			)
+		mock.ExpectQuery("UPDATE session_review_comments SET resolved = true").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnError(errors.New("connection refused"))
+
+		resolved, rerr := resolveSessionReviewComments(context.Background(), db.NewSessionReviewCommentStore(mock), orgID, sessionID, []uuid.UUID{commentID}, 2)
+		require.Empty(t, resolved, "resolve failure should not return resolved comments")
+		require.NotNil(t, rerr, "resolve failure should return a structured error")
+		require.Equal(t, "REVIEW_COMMENT_RESOLVE_FAILED", rerr.code, "resolve failure should use the resolve error code")
+		require.NoError(t, mock.ExpectationsWereMet(), "all store expectations should be met")
 	})
 }
 
