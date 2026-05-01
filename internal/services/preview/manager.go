@@ -394,8 +394,13 @@ func (m *Manager) LaunchPreview(ctx context.Context, instance *models.PreviewIns
 		}
 	}
 
-	// Start the preview via the provider.
-	handle, err := m.provider.StartPreview(ctx, input.Sandbox, input.Config, m.platformEnv(instance.ID))
+	// Start the preview via the provider. The observer streams per-service
+	// Ready/Failed transitions into the DB as they happen, so the frontend's
+	// startup checklist sees progress instead of "all starting" until the
+	// whole launch returns. It also writes a preview_logs row with the tail
+	// of stdout/stderr when a service fails, so the user sees why.
+	observer := m.newServiceObserver(input.OrgID, instance.ID)
+	handle, err := m.provider.StartPreview(ctx, input.Sandbox, input.Config, m.platformEnv(instance.ID), observer)
 	if err != nil {
 		return nil, fmt.Errorf("provider start preview: %w", err)
 	}
@@ -546,6 +551,72 @@ func (m *Manager) AbortReservation(parentCtx context.Context, instance *models.P
 			Str("preview_id", instance.ID.String()).
 			Str("container_id", hydratedContainerID).
 			Msg("abort reservation: destroy failed; container orphaned on host")
+	}
+}
+
+// newServiceObserver returns a preview.ServiceObserver that pumps per-service
+// Ready/Failed transitions into the DB as they happen during StartPreview,
+// and writes a preview_logs row with the tail of stdout/stderr when a service
+// fails. It uses fresh background contexts for each DB write so observer
+// callbacks fired after StartPreview returns (progressive support services,
+// the startService goroutine catching a non-zero exit) still land in the DB
+// even if the request context has already been canceled.
+func (m *Manager) newServiceObserver(orgID, previewID uuid.UUID) ServiceObserver {
+	return &managerServiceObserver{manager: m, orgID: orgID, previewID: previewID}
+}
+
+type managerServiceObserver struct {
+	manager   *Manager
+	orgID     uuid.UUID
+	previewID uuid.UUID
+}
+
+const observerWriteTimeout = 5 * time.Second
+
+func (o *managerServiceObserver) OnServiceReady(name string, port, pid int) {
+	ctx, cancel := context.WithTimeout(context.Background(), observerWriteTimeout)
+	defer cancel()
+	if err := o.manager.store.UpdateServiceStatus(ctx, o.orgID, o.previewID, name, models.PreviewServiceStatusReady, ""); err != nil {
+		o.manager.logger.Warn().Err(err).
+			Str("preview_id", o.previewID.String()).
+			Str("service", name).
+			Msg("observer: failed to mark service ready")
+	}
+	if pid > 0 {
+		if err := o.manager.store.UpdateServicePID(ctx, o.orgID, o.previewID, name, pid); err != nil {
+			o.manager.logger.Warn().Err(err).
+				Str("preview_id", o.previewID.String()).
+				Str("service", name).
+				Msg("observer: failed to record service PID")
+		}
+	}
+}
+
+func (o *managerServiceObserver) OnServiceFailed(name, errMsg string, tail []string) {
+	ctx, cancel := context.WithTimeout(context.Background(), observerWriteTimeout)
+	defer cancel()
+	if err := o.manager.store.UpdateServiceStatus(ctx, o.orgID, o.previewID, name, models.PreviewServiceStatusFailed, errMsg); err != nil {
+		o.manager.logger.Warn().Err(err).
+			Str("preview_id", o.previewID.String()).
+			Str("service", name).
+			Msg("observer: failed to mark service failed")
+	}
+	msg := fmt.Sprintf("service %q failed: %s", name, errMsg)
+	if len(tail) > 0 {
+		msg += "\n--- last output ---\n" + strings.Join(tail, "\n")
+	}
+	logEntry := &models.PreviewLog{
+		PreviewInstanceID: o.previewID,
+		OrgID:             o.orgID,
+		Level:             "error",
+		Step:              models.PreviewLogStepStart,
+		Message:           msg,
+	}
+	if err := o.manager.store.CreatePreviewLog(ctx, logEntry); err != nil {
+		o.manager.logger.Warn().Err(err).
+			Str("preview_id", o.previewID.String()).
+			Str("service", name).
+			Msg("observer: failed to write preview log")
 	}
 }
 
@@ -1040,7 +1111,8 @@ func (m *Manager) RecyclePreview(ctx context.Context, orgID, previewID uuid.UUID
 
 	// Restart via provider with same sandbox and config. Use the existing
 	// instance ID so PREVIEW_ORIGIN stays stable across recycles.
-	handle, err := m.provider.StartPreview(ctx, input.Sandbox, input.Config, m.platformEnv(previewID))
+	observer := m.newServiceObserver(orgID, previewID)
+	handle, err := m.provider.StartPreview(ctx, input.Sandbox, input.Config, m.platformEnv(previewID), observer)
 	if err != nil {
 		if statusErr := m.store.UpdatePreviewStatus(ctx, orgID, previewID, models.PreviewStatusFailed, err.Error()); statusErr != nil {
 			m.logger.Warn().Err(statusErr).Msg("recycle: failed to set failed status")
