@@ -137,7 +137,7 @@ func TestLinearPrepareState_Validate(t *testing.T) {
 func TestLinearPrepareStateMigrationVocabularyMatchesGoEnum(t *testing.T) {
 	t.Parallel()
 
-	const migrationFile = "000104_linear_session_linking.up.sql"
+	const migrationFile = "000105_linear_session_linking.up.sql"
 	path := filepath.Join("..", "..", "migrations", migrationFile)
 	contents, err := os.ReadFile(path)
 	require.NoError(t, err, "migration file %s should be readable", migrationFile)
