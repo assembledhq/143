@@ -1,5 +1,5 @@
 import React from "react";
-import { describe, expect, it, vi, beforeEach } from "vitest";
+import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 import { fireEvent, renderWithProviders, screen, userEvent, waitFor } from "@/test/test-utils";
 import { ManualSessionCreatePageContent } from "./manual-session-create-page-content";
 
@@ -155,6 +155,10 @@ describe("ManualSessionCreatePageContent", () => {
     Object.values(mocks).forEach((m) => m.mockClear());
     mocks.searchParamGetMock.mockImplementation(() => null);
     window.sessionStorage.clear();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
   });
 
   it("renders the session creation form", async () => {
@@ -563,21 +567,49 @@ describe("ManualSessionCreatePageContent", () => {
       });
     });
 
-    it("writes the prompt to sessionStorage as the user types", async () => {
+    it("debounces prompt writes to sessionStorage while the user types", async () => {
       renderWithProviders(<ManualSessionCreatePageContent />);
 
       const textarea = await screen.findByPlaceholderText<HTMLTextAreaElement>(
         "Tell the agent what to do...",
       );
+
+      vi.useFakeTimers();
       fireEvent.change(textarea, { target: { value: "draft in progress" } });
 
-      await waitFor(() => {
-        const stored = window.sessionStorage.getItem(DRAFT_STORAGE_KEY);
-        expect(stored).not.toBeNull();
-        expect(JSON.parse(stored!)).toMatchObject({
-          __v: 2,
-          message: "draft in progress",
-        });
+      expect(window.sessionStorage.getItem(DRAFT_STORAGE_KEY)).toBeNull();
+
+      vi.advanceTimersByTime(399);
+      expect(window.sessionStorage.getItem(DRAFT_STORAGE_KEY)).toBeNull();
+
+      await vi.advanceTimersByTimeAsync(1);
+      const stored = window.sessionStorage.getItem(DRAFT_STORAGE_KEY);
+      expect(stored).not.toBeNull();
+      expect(JSON.parse(stored!)).toMatchObject({
+        __v: 2,
+        message: "draft in progress",
+      });
+    });
+
+    it("flushes the debounced draft immediately when the prompt blurs", async () => {
+      renderWithProviders(<ManualSessionCreatePageContent />);
+
+      const textarea = await screen.findByPlaceholderText<HTMLTextAreaElement>(
+        "Tell the agent what to do...",
+      );
+
+      vi.useFakeTimers();
+      fireEvent.change(textarea, { target: { value: "save on blur" } });
+
+      expect(window.sessionStorage.getItem(DRAFT_STORAGE_KEY)).toBeNull();
+
+      fireEvent.blur(textarea);
+
+      const stored = window.sessionStorage.getItem(DRAFT_STORAGE_KEY);
+      expect(stored).not.toBeNull();
+      expect(JSON.parse(stored!)).toMatchObject({
+        __v: 2,
+        message: "save on blur",
       });
     });
 
