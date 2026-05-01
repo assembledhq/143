@@ -76,6 +76,56 @@ describe("DiffLineRow", () => {
     expect(onAddComment).toHaveBeenCalled();
   });
 
+  it("calls onAddComment exactly once when + button is clicked (no double-fire via bubble)", async () => {
+    const onAddComment = vi.fn();
+    const user = userEvent.setup();
+    render(<DiffLineRow line={makeLine()} onAddComment={onAddComment} />);
+    await user.click(screen.getByTitle("Add comment"));
+    expect(onAddComment).toHaveBeenCalledTimes(1);
+  });
+
+  it("calls onAddComment when clicking on the line content (anywhere on the row)", async () => {
+    const onAddComment = vi.fn();
+    const user = userEvent.setup();
+    render(<DiffLineRow line={makeLine()} onAddComment={onAddComment} />);
+    await user.click(screen.getByText("const x = 1;"));
+    expect(onAddComment).toHaveBeenCalled();
+  });
+
+  it("calls onAddComment when pressing Enter on the focused row", async () => {
+    const onAddComment = vi.fn();
+    const user = userEvent.setup();
+    render(<DiffLineRow line={makeLine()} onAddComment={onAddComment} />);
+    const row = screen.getByRole("button", { name: /add comment on line/i });
+    row.focus();
+    await user.keyboard("{Enter}");
+    expect(onAddComment).toHaveBeenCalled();
+  });
+
+  it("calls onAddComment when pressing Space on the focused row", async () => {
+    const onAddComment = vi.fn();
+    const user = userEvent.setup();
+    render(<DiffLineRow line={makeLine()} onAddComment={onAddComment} />);
+    const row = screen.getByRole("button", { name: /add comment on line/i });
+    row.focus();
+    await user.keyboard(" ");
+    expect(onAddComment).toHaveBeenCalled();
+  });
+
+  it("renders the row with role=button and a tabIndex when onAddComment is provided", () => {
+    const { container } = render(
+      <DiffLineRow line={makeLine()} onAddComment={vi.fn()} />
+    );
+    const row = container.querySelector('[role="button"]');
+    expect(row).toBeInTheDocument();
+    expect(row).toHaveAttribute("tabindex", "0");
+  });
+
+  it("does not set role=button when onAddComment is absent", () => {
+    const { container } = render(<DiffLineRow line={makeLine()} />);
+    expect(container.querySelector('[role="button"]')).not.toBeInTheDocument();
+  });
+
   it("updates URL hash when line number is clicked", async () => {
     const user = userEvent.setup();
     const replaceStateSpy = vi.spyOn(window.history, "replaceState");
@@ -89,6 +139,42 @@ describe("DiffLineRow", () => {
     // First button is old line number "7", second is new line number "9"
     await user.click(screen.getByText("7"));
     expect(replaceStateSpy).toHaveBeenCalledWith(null, "", "#src/app.ts-L7");
+    replaceStateSpy.mockRestore();
+  });
+
+  it("does not add a comment when line number gutter is clicked", async () => {
+    const user = userEvent.setup();
+    const onAddComment = vi.fn();
+    const replaceStateSpy = vi.spyOn(window.history, "replaceState");
+    render(
+      <DiffLineRow
+        line={makeLine({ oldLineNumber: 7, newLineNumber: 9 })}
+        filePath="src/app.ts"
+        onAddComment={onAddComment}
+      />
+    );
+    await user.click(screen.getByText("7"));
+    expect(replaceStateSpy).toHaveBeenCalledWith(null, "", "#src/app.ts-L7");
+    expect(onAddComment).not.toHaveBeenCalled();
+    replaceStateSpy.mockRestore();
+  });
+
+  it("does not add a comment when Enter is pressed on a focused line number gutter", async () => {
+    const user = userEvent.setup();
+    const onAddComment = vi.fn();
+    const replaceStateSpy = vi.spyOn(window.history, "replaceState");
+    render(
+      <DiffLineRow
+        line={makeLine({ oldLineNumber: 7, newLineNumber: 9 })}
+        filePath="src/app.ts"
+        onAddComment={onAddComment}
+      />
+    );
+    const oldLineButton = screen.getByText("7");
+    oldLineButton.focus();
+    await user.keyboard("{Enter}");
+    expect(replaceStateSpy).toHaveBeenCalledWith(null, "", "#src/app.ts-L7");
+    expect(onAddComment).not.toHaveBeenCalled();
     replaceStateSpy.mockRestore();
   });
 
