@@ -78,6 +78,7 @@ func TestNewPRService(t *testing.T) {
 	svc := NewPRService(nil, nil, nil, nil, nil, nil, nil, nil, logger)
 	require.NotNil(t, svc, "NewPRService should return a non-nil service")
 	require.Equal(t, defaultGitHubAPI, svc.baseURL, "NewPRService should set the default GitHub API base URL")
+	require.Equal(t, defaultAppBaseURL, svc.appBaseURL, "NewPRService should set the default app base URL for session deep-links")
 	require.NotNil(t, svc.httpClient, "NewPRService should initialize an HTTP client")
 }
 
@@ -87,6 +88,14 @@ func TestSetBaseURL(t *testing.T) {
 	svc := &PRService{}
 	svc.SetBaseURL("https://custom.api.example.com")
 	require.Equal(t, "https://custom.api.example.com", svc.baseURL, "SetBaseURL should update the base URL")
+}
+
+func TestSetAppBaseURL(t *testing.T) {
+	t.Parallel()
+
+	svc := &PRService{}
+	svc.SetAppBaseURL("https://frontend.example.com/")
+	require.Equal(t, "https://frontend.example.com", svc.appBaseURL, "SetAppBaseURL should trim the trailing slash from the app base URL")
 }
 
 func TestSetReviewCommentStore(t *testing.T) {
