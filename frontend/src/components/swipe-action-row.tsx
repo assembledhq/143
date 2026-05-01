@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 
@@ -33,6 +33,20 @@ export function SwipeActionRow({
   const dragRef = useRef<DragState | null>(null);
   const [offset, setOffset] = useState(0);
   const [isDragging, setIsDragging] = useState(false);
+  // Default to true so SSR and test environments (no matchMedia) get the
+  // touch-friendly variant — non-touch desktops flip to false in the effect.
+  const [isTouchDevice, setIsTouchDevice] = useState(true);
+
+  useEffect(() => {
+    if (typeof window === "undefined" || typeof window.matchMedia !== "function") {
+      return;
+    }
+    const mql = window.matchMedia("(pointer: coarse)");
+    setIsTouchDevice(mql.matches);
+    const onChange = (event: MediaQueryListEvent) => setIsTouchDevice(event.matches);
+    mql.addEventListener("change", onChange);
+    return () => mql.removeEventListener("change", onChange);
+  }, []);
 
   const close = () => {
     setOffset(0);
@@ -93,7 +107,7 @@ export function SwipeActionRow({
     close();
   };
 
-  const state = offset > 0 ? "open" : "closed";
+  const state = isTouchDevice && offset > 0 ? "open" : "closed";
   const trailingActionHidden = state === "closed";
 
   return (
@@ -101,35 +115,38 @@ export function SwipeActionRow({
       className={cn("group relative overflow-hidden rounded-lg", className)}
       data-swipe-state={state}
     >
-      <div className="absolute inset-y-0 right-0 flex w-[92px] items-stretch justify-end">
-        <Button
-          aria-label={actionLabel}
-          aria-hidden={trailingActionHidden}
-          tabIndex={trailingActionHidden ? -1 : 0}
-          className="h-full w-full rounded-none rounded-r-lg bg-amber-500 px-0 text-white hover:bg-amber-600 active:bg-amber-600"
-          onClick={() => {
-            close();
-            onAction();
-          }}
-        >
-          <span className="flex flex-col items-center justify-center gap-1 text-xs font-medium">
-            {actionIcon}
-            <span>{actionText}</span>
-          </span>
-        </Button>
-      </div>
+      {isTouchDevice && (
+        <div className="absolute inset-y-0 right-0 flex w-[92px] items-stretch justify-end">
+          <Button
+            aria-label={actionLabel}
+            aria-hidden={trailingActionHidden}
+            tabIndex={trailingActionHidden ? -1 : 0}
+            className="h-full w-full rounded-none rounded-r-lg bg-amber-500 px-0 text-white hover:bg-amber-600 active:bg-amber-600"
+            onClick={() => {
+              close();
+              onAction();
+            }}
+          >
+            <span className="flex flex-col items-center justify-center gap-1 text-xs font-medium">
+              {actionIcon}
+              <span>{actionText}</span>
+            </span>
+          </Button>
+        </div>
+      )}
 
       <div
         data-swipe-surface="true"
         className={cn(
-          "relative z-10 touch-pan-y",
-          !isDragging && "transition-transform duration-200 ease-out",
+          "relative z-10",
+          isTouchDevice && "touch-pan-y",
+          isTouchDevice && !isDragging && "transition-transform duration-200 ease-out",
         )}
-        style={{ transform: `translateX(-${offset}px)` }}
-        onTouchStart={handleTouchStart}
-        onTouchMove={handleTouchMove}
-        onTouchEnd={handleTouchEnd}
-        onTouchCancel={handleTouchEnd}
+        style={isTouchDevice ? { transform: `translateX(-${offset}px)` } : undefined}
+        onTouchStart={isTouchDevice ? handleTouchStart : undefined}
+        onTouchMove={isTouchDevice ? handleTouchMove : undefined}
+        onTouchEnd={isTouchDevice ? handleTouchEnd : undefined}
+        onTouchCancel={isTouchDevice ? handleTouchEnd : undefined}
         onClickCapture={(event) => {
           if (offset === 0) return;
           event.preventDefault();
