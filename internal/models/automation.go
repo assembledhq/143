@@ -65,6 +65,39 @@ type AutomationRun struct {
 	ResultSummary     *string         `db:"result_summary"        json:"result_summary,omitempty"`
 	CreatedAt         time.Time       `db:"created_at"            json:"created_at"`
 	UpdatedAt         time.Time       `db:"updated_at"            json:"updated_at"`
+
+	// Session is a compact view of the session this run spawned, populated
+	// only by list/detail endpoints that join sessions (currently
+	// ListByAutomation). It is left nil by single-row fetches like GetByID
+	// and by writers (insertRun, scanAutomationRun for the bare table) so
+	// the on-the-wire shape stays additive: pre-existing consumers that
+	// don't read the field continue to work, and new consumers can rely on
+	// it to render row detail without an N+1.
+	Session *AutomationRunSession `json:"session,omitempty"`
+}
+
+// AutomationRunSession is the slice of the spawned session that the
+// automation runs list surfaces inline. Mirrors SessionListItem's PRSummary
+// pattern: a deliberately small projection so we can carry it on every
+// listed run without ballooning the payload during 10s polling.
+//
+// Fields here are read-only views of sessions / pull_requests rows; nothing
+// in this struct is persisted directly. The Session field on AutomationRun
+// is nil when no session has been spawned yet (pending/skipped runs).
+type AutomationRunSession struct {
+	ID                  uuid.UUID       `json:"id"`
+	Title               *string         `json:"title,omitempty"`
+	Status              string          `json:"status"`
+	DiffStats           json.RawMessage `json:"diff_stats,omitempty"`
+	FailureExplanation  *string         `json:"failure_explanation,omitempty"`
+	FailureCategory     *string         `json:"failure_category,omitempty"`
+	FailureNextSteps    []string        `json:"failure_next_steps,omitempty"`
+	FailureRetryAdvised bool            `json:"failure_retry_advised"`
+	PRCreationState     PRCreationState `json:"pr_creation_state"`
+	// PR is populated only when a PullRequest row exists for this session.
+	// Reuses models.PRSummary so the frontend can share rendering with the
+	// session list page.
+	PR *PRSummary `json:"pr,omitempty"`
 }
 
 // AutomationRunStatus constants.
