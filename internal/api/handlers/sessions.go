@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"regexp"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/assembledhq/143/internal/api/middleware"
@@ -19,6 +20,7 @@ import (
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/services"
 	ghservice "github.com/assembledhq/143/internal/services/github"
+	"github.com/assembledhq/143/internal/services/linear"
 	"github.com/assembledhq/143/internal/services/sessiontimeline"
 	"github.com/assembledhq/143/internal/services/storage"
 	"github.com/go-chi/chi/v5"
@@ -74,12 +76,157 @@ type SessionHandler struct {
 	prAuthSigningKey []byte
 	frontendURL      string
 	streams          *cache.SessionStreams
+	// linearLinker is wired at boot via SetLinearLinker (called from
+	// router.go after the SSE-aware Linear service is constructed). Held
+	// behind an atomic.Pointer holder so a request that lands during boot —
+	// before the setter returns — observes nil cleanly instead of racing
+	// on the interface-value assignment, which the race detector flags as
+	// undefined behavior on multi-word interface stores.
+	linearLinker atomic.Pointer[linearLinkerHolder]
 	// shutdownCh is closed on SIGTERM; see SetShutdownSignal.
 	shutdownCh <-chan struct{}
 }
 
+// linearLinkerHolder wraps the linearSessionLinker interface so the field
+// has a single concrete pointer type for atomic.Pointer to operate on.
+type linearLinkerHolder struct{ fn linearSessionLinker }
+
+// linearSessionLinker is the surface SessionHandler invokes on the Linear
+// service. The interface lives here (not in the linear package) so
+// SetLinearLinker can accept a stub in tests without bringing up the full
+// Linear stack. We do still depend on linear.CreateInput / linear.CreateResult
+// at the type level — those are pure value structs that the handler builds
+// anyway, and re-defining them locally would only add adapter code without
+// breaking the dependency.
+//
+// TeamKeyAllowlist is exposed so the MISSING_MESSAGE bypass can verify that
+// a bare-identifier reference actually maps to a known Linear team before
+// letting an empty-message session through. Without this check, any
+// "FOO-123"-shaped string in the references picker would bypass the
+// validation and produce a session with an empty user turn.
+type linearSessionLinker interface {
+	ResolveAndLinkAtCreate(ctx context.Context, in linear.CreateInput) (linear.CreateResult, error)
+	Enabled(ctx context.Context, orgID uuid.UUID) bool
+	TeamKeyAllowlist(ctx context.Context, orgID uuid.UUID) (map[string]bool, error)
+}
+
+// looksLikeLinearReference is the legacy regex-only hint, retained for the
+// no-linker path and for callers that don't yet have an org context. Cheap
+// pre-validation hint: when the user supplied no message text but the
+// references picker carries Linear-shaped content, allow CreateManual to
+// proceed and let the linker hydrate context from the issue alone
+// (design 62 §"Issue-only session start"). Detection runs again inside the
+// linker — we are not relaxing security here, only the message-required
+// check.
+//
+// Defers to linear.MightContainLinearRef so this hint stays in lockstep
+// with the actual detection regexes.
+func looksLikeLinearReference(refs []models.SessionInputReference) bool {
+	for _, r := range refs {
+		// Reference-picker entries can carry the Linear key in either Display
+		// (human-readable label) or ID (the picker's underlying value), so
+		// scan both. Without ID we'd miss pickers that put "ACS-1234" in the
+		// id field and a generic label like "Linear issue" in display.
+		if linear.MightContainLinearRef(r.Display) || linear.MightContainLinearRef(r.ID) {
+			return true
+		}
+	}
+	return false
+}
+
+// canBypassMissingMessageForLinear is the same check as looksLikeLinearReference
+// tightened with the team-key allowlist, so a malformed "FOO-123" can no
+// longer wave the request past MISSING_MESSAGE. URL refs always pass — a
+// linear.app URL is its own evidence and detection drops them via
+// ErrCrossWorkspace if the workspace doesn't match. Bare identifiers must
+// have their KEY prefix in the org's allowlist.
+//
+// Falls back to the regex-only hint when the linker isn't wired or the
+// allowlist lookup errors — this preserves the prior behavior in tests
+// that haven't installed the linker, and avoids hard-failing CreateManual
+// on a transient DB hiccup.
+func (h *SessionHandler) canBypassMissingMessageForLinear(ctx context.Context, orgID uuid.UUID, refs []models.SessionInputReference) bool {
+	linker := h.getLinearLinker()
+	if linker == nil {
+		return looksLikeLinearReference(refs)
+	}
+	if !linker.Enabled(ctx, orgID) {
+		return false
+	}
+	// URL hits short-circuit first: they don't depend on the allowlist and
+	// detection treats them as authoritative provenance.
+	for _, r := range refs {
+		if linearURLPattern.MatchString(r.Display) || linearURLPattern.MatchString(r.ID) {
+			return true
+		}
+	}
+	allow, err := linker.TeamKeyAllowlist(ctx, orgID)
+	if err != nil {
+		// Allowlist lookup failed; fall back to the laxer regex hint rather
+		// than hard-fail the request. Detection inside the linker re-checks
+		// before any side effects.
+		h.logger.Warn().Err(err).Str("org_id", orgID.String()).
+			Msg("MISSING_MESSAGE bypass: failed to load Linear team-key allowlist; falling back to regex-only hint")
+		return looksLikeLinearReference(refs)
+	}
+	for _, r := range refs {
+		for _, candidate := range []string{r.Display, r.ID} {
+			for _, m := range linearBareIdentifierAllPattern.FindAllStringSubmatch(candidate, -1) {
+				if len(m) < 2 {
+					continue
+				}
+				key := m[1]
+				idx := strings.IndexByte(key, '-')
+				if idx <= 0 {
+					continue
+				}
+				if allow[key[:idx]] {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// linearURLPattern / linearBareIdentifierAllPattern mirror the patterns
+// inside the linear package's detect.go but are re-declared here to keep
+// the handler from importing internal regex state. The two regexes must
+// stay in lockstep — a regression that drifts the handler-side regex
+// would silently widen or narrow the MISSING_MESSAGE bypass.
+var (
+	linearURLPattern               = regexp.MustCompile(`https?://linear\.app/[^/\s]+/issue/[A-Z][A-Z0-9_]{0,9}-[0-9]+`)
+	linearBareIdentifierAllPattern = regexp.MustCompile(`(?:^|[^A-Za-z0-9_/-])([A-Z][A-Z0-9_]{0,9}-[0-9]+)\b`)
+)
+
 func (h *SessionHandler) SetIssueLinkStore(store *db.SessionIssueLinkStore) {
 	h.linkStore = store
+}
+
+// SetLinearLinker injects the Linear session-linking service. When unset,
+// CreateManual treats Linear refs as opaque text — same behavior as when
+// the org has no Linear integration. This is the design 62 §"Path C" no-op.
+//
+// Safe to call after construction even if the HTTP server is already
+// serving requests: the atomic store lets a late-running test or a
+// reload-without-restart wire the linker without racing the read path.
+func (h *SessionHandler) SetLinearLinker(linker linearSessionLinker) {
+	if linker == nil {
+		h.linearLinker.Store(nil)
+		return
+	}
+	h.linearLinker.Store(&linearLinkerHolder{fn: linker})
+}
+
+// getLinearLinker returns the currently-wired linker (or nil if none).
+// Used by the read-path; tests should use this rather than reading
+// h.linearLinker directly so the atomic load is visible.
+func (h *SessionHandler) getLinearLinker() linearSessionLinker {
+	holder := h.linearLinker.Load()
+	if holder == nil {
+		return nil
+	}
+	return holder.fn
 }
 
 func (h *SessionHandler) SetIssueSnapshotStore(store *db.SessionTurnIssueSnapshotStore) {
@@ -1808,6 +1955,15 @@ func (h *SessionHandler) CreateManual(w http.ResponseWriter, r *http.Request) {
 		TokenMode       string                         `json:"token_mode"`
 		RepositoryID    string                         `json:"repository_id"`
 		Branch          string                         `json:"branch"`
+		// LinearPrivate suppresses every Linear write; the agent still gets
+		// linked-issue context locally. Frozen at session create.
+		LinearPrivate bool `json:"linear_private,omitempty"`
+		// LinearStateSyncDisabled gates only workflow-state transitions
+		// (issue moved to "In Progress" / "In Review" / "Done"). The
+		// attachment + rolling comment still post — they are visibility
+		// signals, not state mutation. Use LinearPrivate to suppress all
+		// Linear writes.
+		LinearStateSyncDisabled bool `json:"linear_state_sync_disabled,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeError(w, r, http.StatusBadRequest, "INVALID_BODY", "invalid request body")
@@ -1815,7 +1971,14 @@ func (h *SessionHandler) CreateManual(w http.ResponseWriter, r *http.Request) {
 	}
 
 	body.Message = strings.TrimSpace(body.Message)
-	if body.Message == "" {
+	// Empty message is allowed iff the user is starting from a linked
+	// Linear issue. Detection runs after the body validation, so we accept
+	// "looks like a Linear ref somewhere in the inputs" as the relaxation
+	// signal here. The check is tightened with the team-key allowlist so
+	// a "FOO-123"-shaped string for an unknown team no longer waves the
+	// request past — preventing sessions with an empty user turn that
+	// silently no-op inside the linker.
+	if body.Message == "" && !h.canBypassMissingMessageForLinear(r.Context(), orgID, body.References) {
 		writeError(w, r, http.StatusBadRequest, "MISSING_MESSAGE", "message is required")
 		return
 	}
@@ -1873,6 +2036,20 @@ func (h *SessionHandler) CreateManual(w http.ResponseWriter, r *http.Request) {
 	orgSettings, parseErr := models.ParseOrgSettings(org.Settings)
 	if parseErr != nil {
 		zerolog.Ctx(r.Context()).Warn().Err(parseErr).Msg("failed to parse org settings, using defaults")
+	}
+
+	// Admin gate on the per-session Linear policy flags. EffectiveAllow-
+	// PerSessionOverrides() resolves nil → true, so the gate is permissive
+	// by default: an org with no LinearAutomation settings (or with
+	// allow_per_session_overrides explicitly absent) lets users opt out of
+	// Linear writes on a per-session basis. Admins enforce "every session
+	// must sync to Linear" by setting allow_per_session_overrides=false
+	// explicitly — only that case rejects requests. Read the double-negative
+	// here as: "block if the user wants to silence writes AND the admin has
+	// explicitly forbidden per-session overrides."
+	if (body.LinearPrivate || body.LinearStateSyncDisabled) && !orgSettings.LinearAutomation.EffectiveAllowPerSessionOverrides() {
+		writeError(w, r, http.StatusForbidden, "LINEAR_PER_SESSION_OVERRIDES_DISABLED", "linear_private and linear_state_sync_disabled are not permitted for this organization")
+		return
 	}
 
 	agentType := models.AgentType(body.AgentType)
@@ -1947,21 +2124,23 @@ func (h *SessionHandler) CreateManual(w http.ResponseWriter, r *http.Request) {
 	}
 
 	session := &models.Session{
-		OrgID:             orgID,
-		Origin:            models.SessionOriginManual,
-		InteractionMode:   models.SessionInteractionModeInteractive,
-		ValidationPolicy:  models.SessionValidationPolicyOnSessionEnd,
-		AgentType:         agentType,
-		Status:            "pending",
-		AutonomyLevel:     autonomyLevel,
-		TokenMode:         tokenMode,
-		ModelOverride:     modelOverride,
-		ReasoningEffort:   reasoningOverride,
-		TriggeredByUserID: manualTriggeredByUserID,
-		Title:             &title,
-		PMApproach:        &title,
-		TargetBranch:      targetBranch,
-		RepositoryID:      repoID,
+		OrgID:                   orgID,
+		Origin:                  models.SessionOriginManual,
+		InteractionMode:         models.SessionInteractionModeInteractive,
+		ValidationPolicy:        models.SessionValidationPolicyOnSessionEnd,
+		AgentType:               agentType,
+		Status:                  "pending",
+		AutonomyLevel:           autonomyLevel,
+		TokenMode:               tokenMode,
+		ModelOverride:           modelOverride,
+		ReasoningEffort:         reasoningOverride,
+		TriggeredByUserID:       manualTriggeredByUserID,
+		Title:                   &title,
+		PMApproach:              &title,
+		TargetBranch:            targetBranch,
+		RepositoryID:            repoID,
+		LinearPrivate:           body.LinearPrivate,
+		LinearStateSyncDisabled: body.LinearStateSyncDisabled,
 	}
 	if err := h.runStore.Create(r.Context(), session); err != nil {
 		writeError(w, r, http.StatusInternalServerError, "CREATE_FAILED", "failed to create manual session", err)
@@ -1995,7 +2174,10 @@ func (h *SessionHandler) CreateManual(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Check concurrency before enqueuing so the user gets immediate feedback.
+	// Check concurrency before any Linear linking side effects. The session
+	// row and turn-0 message are already persisted to preserve historical
+	// CreateManual behavior, but we must not link or post to Linear for a run
+	// that will never be enqueued.
 	runningCount, err := h.runStore.CountRunningByOrg(r.Context(), orgID)
 	if err != nil {
 		writeError(w, r, http.StatusInternalServerError, "CONCURRENCY_CHECK_FAILED", "failed to check running sessions", err)
@@ -2011,6 +2193,113 @@ func (h *SessionHandler) CreateManual(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Resolve linked Linear issues before enqueueing the agent run. Per
+	// design 62 §"Pre-start preparation step", turn 1 cannot start until the
+	// primary Linear issue has its context snapshot captured — but the
+	// session-create response should still come back fast. The linker
+	// chooses inline vs queued based on a strict latency budget.
+	//
+	// Repo-less sessions (issue-only start, design 62 §"Issue-only session
+	// start") still get linked: SessionIssueLinkStore.CreateAllowingNullRepo
+	// already accepts a NULL repository on the link row when the underlying
+	// session has no repo, so we don't pre-filter on body.RepositoryID here.
+	linker := h.getLinearLinker()
+	if linker == nil && (body.LinearPrivate || body.LinearStateSyncDisabled) {
+		// User asked for Linear-aware behavior but no Linear integration is
+		// wired into this handler. The flags are persisted (so a later
+		// install backfills the right policy), but nothing will read them
+		// until then — surface this to dogfooders rather than failing silently.
+		//
+		// Intentionally NOT a 4xx: the design treats these flags as policy
+		// hints captured at the moment of intent. Rejecting the request when
+		// the integration is absent would push operators to either re-create
+		// sessions after install or pollute clients with feature-flag
+		// branching. A future cleanup pass that "fixes" this by returning
+		// 422 should not — the persisted flags are the contract.
+		h.logger.Warn().
+			Str("session_id", session.ID.String()).
+			Bool("linear_private", body.LinearPrivate).
+			Bool("linear_state_sync_disabled", body.LinearStateSyncDisabled).
+			Msg("linear policy flags set on session but no Linear integration is configured; flags persisted but currently unused")
+	}
+	if linker != nil {
+		userID := manualTriggeredByUserID
+		referenceText := ""
+		if len(body.References) > 0 {
+			var refDisplays []string
+			for _, ref := range body.References {
+				if ref.Display != "" {
+					refDisplays = append(refDisplays, ref.Display)
+				}
+				if ref.ID != "" && ref.ID != ref.Display {
+					refDisplays = append(refDisplays, ref.ID)
+				}
+			}
+			referenceText = strings.Join(refDisplays, "\n")
+		}
+		linearResult, linkErr := linker.ResolveAndLinkAtCreate(r.Context(), linear.CreateInput{
+			OrgID:                   orgID,
+			SessionID:               session.ID,
+			MessageBody:             body.Message,
+			SessionTitle:            title,
+			BranchName:              body.Branch,
+			ReferenceText:           referenceText,
+			UserID:                  userID,
+			LinearPrivate:           body.LinearPrivate,
+			LinearStateSyncDisabled: body.LinearStateSyncDisabled,
+		})
+		if linkErr != nil {
+			errMsg := "Linear context could not be prepared. Retry the session after the Linear integration recovers."
+			// Sidebar rendering contract: session-sidebar.tsx displays
+			// `session.failure_explanation || session.error` for any row
+			// with status="failed", and sessionTitle() falls back to
+			// "Session XXXXXXXX" when the title is empty. So an
+			// orphaned-failed Linear session — title set from
+			// manualSessionTitle, no agent run, this errMsg in
+			// SessionResult.Error — renders cleanly with both the title
+			// and the user-visible explanation. Don't change errMsg to a
+			// raw stack-trace shape without also updating that contract.
+			//
+			// Use a detached context for the failure write so a cancelled
+			// request context (client disconnect) doesn't leave the session
+			// stuck in "pending" forever — the agent run hasn't been
+			// enqueued yet, so without this transition the row is orphaned.
+			//
+			// Backstop: if this 5s detached write also fails (DB hiccup,
+			// process death), agent.SessionReaper Phase 0
+			// (FailureCategoryStuckPending, 10-minute cutoff) sweeps stale
+			// pending rows on its next tick. The detached write is the
+			// fast path that surfaces the failure to the user immediately;
+			// the reaper is the eventual-consistency safety net.
+			cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			if err := h.runStore.UpdateResult(cleanupCtx, orgID, session.ID, "failed", &models.SessionResult{Error: &errMsg}); err != nil {
+				h.logger.Error().Err(err).Str("session_id", session.ID.String()).Msg("failed to mark session failed after linear pre-start linking error; SessionReaper Phase 0 will reap the stuck-pending row within max_pending_age")
+			}
+			cancel()
+			h.logger.Warn().Err(linkErr).Str("session_id", session.ID.String()).Msg("linear pre-start linking failed; refusing to enqueue agent run")
+			writeError(w, r, http.StatusInternalServerError, "LINEAR_PREPARE_FAILED", "failed to prepare Linear context", linkErr)
+			return
+		}
+		if linearResult.PrimaryIdentifier != "" {
+			if err := h.runStore.SetLinearIdentifierHint(r.Context(), orgID, session.ID, linearResult.PrimaryIdentifier); err != nil {
+				h.logger.Warn().Err(err).Str("session_id", session.ID.String()).Str("identifier", linearResult.PrimaryIdentifier).Msg("failed to persist linear identifier hint; branch naming will fall back to non-linear slug")
+			} else {
+				session.LinearIdentifierHint = &linearResult.PrimaryIdentifier
+			}
+			// Use the Linear issue title as the session title when the user
+			// gave us nothing useful. Honors design 62 §"Issue-only session
+			// start".
+			if linearResult.PrimaryTitle != "" && shouldOverrideTitleWithLinearIssue(session.Title) {
+				newTitle := linearResult.PrimaryTitle
+				if err := h.runStore.UpdateTitle(r.Context(), orgID, session.ID, newTitle); err != nil {
+					h.logger.Warn().Err(err).Str("session_id", session.ID.String()).Msg("failed to override session title with linear issue title; keeping placeholder title")
+				} else {
+					session.Title = &newTitle
+				}
+			}
+		}
+	}
+
 	payload := map[string]string{
 		"session_id": session.ID.String(),
 		"org_id":     orgID.String(),
@@ -2022,7 +2311,7 @@ func (h *SessionHandler) CreateManual(w http.ResponseWriter, r *http.Request) {
 
 	// Generate a concise session title via LLM (with a short timeout so the
 	// request doesn't block for too long).
-	if h.llmClient != nil {
+	if h.llmClient != nil && body.Message != "" {
 		if err := h.generateSessionTitle(r.Context(), session, orgID, body.Message); err != nil {
 			writeError(w, r, http.StatusInternalServerError, "TITLE_GENERATION_FAILED", "failed to generate session title", err)
 			return
@@ -2090,10 +2379,24 @@ func buildManualSessionDescription(message string, images []string) string {
 	return strings.TrimSpace(b.String())
 }
 
+// defaultManualSessionTitle is the placeholder title we apply when a manual
+// session has no message body to derive a title from. The Linear-issue-only
+// fast path overwrites this with the linked issue's title, which means the
+// constant doubles as a sentinel — exposed for that comparison.
+//
+// CAUTION: shouldOverrideTitleWithLinearIssue compares trimmed titles to
+// this exact literal. Renaming the constant — including for i18n or copy
+// updates — silently changes which historical sessions are eligible for
+// Linear-title overwrite (every existing row whose title still equals the
+// old literal will stop matching). If this value ever needs to change,
+// migrate existing rows in the same change or switch to a non-displayable
+// sentinel column rather than a string compare.
+const defaultManualSessionTitle = "Manual Session"
+
 func manualSessionTitle(message string) string {
 	trimmed := strings.TrimSpace(message)
 	if trimmed == "" {
-		return "Manual Session"
+		return defaultManualSessionTitle
 	}
 
 	if idx := strings.Index(trimmed, "\n"); idx > 0 {
@@ -2105,6 +2408,21 @@ func manualSessionTitle(message string) string {
 	}
 
 	return strings.TrimSpace(trimmed[:120]) + "..."
+}
+
+// shouldOverrideTitleWithLinearIssue reports whether a Linear primary
+// resolution should overwrite the session title. We replace the title only
+// when the user gave us nothing useful — empty, whitespace, or the
+// default placeholder — never when the user typed a real subject line.
+func shouldOverrideTitleWithLinearIssue(current *string) bool {
+	if current == nil {
+		return true
+	}
+	trimmed := strings.TrimSpace(*current)
+	if trimmed == "" {
+		return true
+	}
+	return trimmed == defaultManualSessionTitle
 }
 
 // ArchiveSession marks a session as archived, hiding it from default list views.

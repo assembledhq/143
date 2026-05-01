@@ -271,7 +271,24 @@ type Session struct {
 	PRCreationError      *string         `db:"pr_creation_error" json:"pr_creation_error,omitempty"`
 	DiffCollectedAt      *time.Time      `db:"diff_collected_at" json:"diff_collected_at,omitempty"`
 	LatestDiffSnapshotID *uuid.UUID      `db:"latest_diff_snapshot_id" json:"latest_diff_snapshot_id,omitempty"`
-	DeletedAt            *time.Time      `db:"deleted_at" json:"-"`
+	// LinearPrivate suppresses every Linear write for this session. The agent
+	// still receives Linear context locally; nothing leaves 143. Frozen at
+	// session create — see design 62 §"Composer controls must express distinct
+	// semantics" for why post-hoc backfill would be confusing.
+	LinearPrivate bool `db:"linear_private" json:"linear_private"`
+	// LinearStateSyncDisabled keeps the attachment+rolling comment trail intact
+	// but blocks workflow-state automation. Distinct from LinearPrivate.
+	LinearStateSyncDisabled bool `db:"linear_state_sync_disabled" json:"linear_state_sync_disabled"`
+	// LinearIdentifierHint is the primary Linear key (e.g. "ACS-1234") captured
+	// when detection resolved. Read by the branch-naming logic so the working
+	// branch slug includes the identifier — Linear's GitHub integration matches
+	// branches with the key prefix independently of the PR title prefix.
+	LinearIdentifierHint *string `db:"linear_identifier_hint" json:"linear_identifier_hint,omitempty"`
+	// LinearPrepareState reflects the pre-start preparation step. "ready"
+	// gates turn 1 from starting until the primary Linear context snapshot
+	// has been captured.
+	LinearPrepareState LinearPrepareState `db:"linear_prepare_state" json:"linear_prepare_state"`
+	DeletedAt          *time.Time         `db:"deleted_at" json:"-"`
 	// GitIdentitySource records which token authority the agent used for
 	// git pushes ("user" — the triggering user's GitHub OAuth token; "app"
 	// — the GitHub App installation token). Stamped at session-start by
@@ -305,20 +322,51 @@ type SessionIssueLink struct {
 	Description   *string              `db:"description" json:"description,omitempty"`
 	RepositoryID  *uuid.UUID           `db:"repository_id" json:"repository_id,omitempty"`
 	IssueStatus   *string              `db:"issue_status" json:"issue_status,omitempty"`
+	// IssueWorkspaceSlug is left-joined off Linear's provider_state. The
+	// frontend uses it to render `linear.app/<slug>/issue/<KEY>` deep
+	// links instead of the universal redirect path. Nil for non-Linear
+	// links and Linear links written before workspace caching landed.
+	IssueWorkspaceSlug *string `db:"issue_workspace_slug" json:"issue_workspace_slug,omitempty"`
+	// RawLinearPrimarySnapshot is the JSONB primary_snapshot cached in
+	// session_issue_link_provider_state at link time. It is internal-only:
+	// the orchestrator decodes it into SessionIssueSnapshotEntry fields when
+	// creating the immutable per-turn issue snapshot.
+	RawLinearPrimarySnapshot json.RawMessage `db:"linear_primary_snapshot" json:"-"`
+}
+
+type SessionIssueSnapshotAttachment struct {
+	Title  string `json:"title,omitempty"`
+	URL    string `json:"url"`
+	Source string `json:"source,omitempty"`
+}
+
+type SessionIssueSnapshotComment struct {
+	Author    string    `json:"author,omitempty"`
+	Body      string    `json:"body"`
+	CreatedAt time.Time `json:"created_at,omitempty"`
 }
 
 // SessionIssueSnapshotEntry is the immutable execution-time issue context
 // captured for a specific session turn.
 type SessionIssueSnapshotEntry struct {
-	IssueID      uuid.UUID            `json:"issue_id"`
-	Role         SessionIssueLinkRole `json:"role"`
-	Position     int                  `json:"position"`
-	Title        string               `json:"title"`
-	ExternalID   string               `json:"external_id,omitempty"`
-	Source       IssueSource          `json:"source"`
-	Description  string               `json:"description,omitempty"`
-	RepositoryID *uuid.UUID           `json:"repository_id,omitempty"`
-	Status       string               `json:"status,omitempty"`
+	IssueID      uuid.UUID                        `json:"issue_id"`
+	Role         SessionIssueLinkRole             `json:"role"`
+	Position     int                              `json:"position"`
+	Title        string                           `json:"title"`
+	ExternalID   string                           `json:"external_id,omitempty"`
+	Source       IssueSource                      `json:"source"`
+	Description  string                           `json:"description,omitempty"`
+	RepositoryID *uuid.UUID                       `json:"repository_id,omitempty"`
+	Status       string                           `json:"status,omitempty"`
+	StateName    string                           `json:"state_name,omitempty"`
+	StateType    string                           `json:"state_type,omitempty"`
+	Priority     string                           `json:"priority,omitempty"`
+	AssigneeName string                           `json:"assignee_name,omitempty"`
+	TeamKey      string                           `json:"team_key,omitempty"`
+	TeamName     string                           `json:"team_name,omitempty"`
+	URL          string                           `json:"url,omitempty"`
+	Attachments  []SessionIssueSnapshotAttachment `json:"attachments,omitempty"`
+	Comments     []SessionIssueSnapshotComment    `json:"comments,omitempty"`
 }
 
 // SessionTurnIssueSnapshot is the authoritative resolved issue context used by

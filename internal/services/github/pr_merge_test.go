@@ -404,26 +404,17 @@ func TestPRServiceMergePullRequestRunsMergedFollowUps(t *testing.T) {
 			prID, orgID, int64(1), "head-merge", "base-merge", summaryJSON, summaryJSON, models.PullRequestHealthEnrichmentStatusNotRequested, (*time.Time)(nil), now, now,
 		))
 
+	sessionRow := newPRHealthSessionRow(sessionID, orgID, now, string(models.SessionStatusCompleted))
+	setPRHealthSessionRowValue(sessionRow, "primary_issue_id", &issueID)
+	setPRHealthSessionRowValue(sessionRow, "agent_type", "codex")
+	setPRHealthSessionRowValue(sessionRow, "autonomy_level", "full")
+	setPRHealthSessionRowValue(sessionRow, "sandbox_state", "snapshot")
+	setPRHealthSessionRowValue(sessionRow, "snapshot_key", &snapshotKey)
+
 	sessionMock.ExpectQuery("SELECT .+ FROM sessions WHERE id").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
-			pgxmock.NewRows(prHealthSessionColumns).AddRow(
-				sessionID, &issueID, orgID, "", "", "", "codex", "completed", "full", "low",
-				nil, nil, nil, nil,
-				nil, nil, false, nil, nil, nil,
-				nil, nil, nil, false,
-				nil, nil, nil, nil, nil,
-				nil, nil, nil, nil,
-				nil, nil, nil, nil,
-				nil, 0, now, "snapshot", &snapshotKey,
-				nil, // pending_snapshot_key
-				nil, // pending_snapshot_set_at
-				nil, nil, nil, "", "", 0, 0, "", nil,
-				nil, "", "", int64(0), nil,
-				"", nil, nil, 0,
-				nil, nil, nil, nil, nil, nil, nil, nil, nil, nil,
-				"idle", (*string)(nil), nil, nil, nil, nil, nil, now,
-			),
+			pgxmock.NewRows(prHealthSessionColumns).AddRow(sessionRow...),
 		)
 	issueMock.ExpectExec("UPDATE issues SET status").
 		WithArgs(pgx.NamedArgs{"id": issueID, "org_id": orgID, "status": "fixed"}).

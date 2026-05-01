@@ -151,7 +151,9 @@ var sessionColumns = []string{
 	"runtime_extension_count", "runtime_extension_seconds", "runtime_stop_reason", "runtime_graceful_stop_at",
 	"checkpointed_at", "checkpoint_kind", "checkpoint_capability", "checkpoint_size_bytes", "checkpoint_error",
 	"recovery_state", "recovery_queued_at", "recovery_started_at", "recovery_attempt_count",
-	"target_branch", "working_branch", "base_commit_sha", "repository_id", "diff_stats", "diff_history", "input_manifest", "archived_at", "archived_by_user_id", "automation_run_id", "pr_creation_state", "pr_creation_error", "diff_collected_at", "latest_diff_snapshot_id", "deleted_at", "git_identity_source", "git_identity_user_id", "created_at",
+	"target_branch", "working_branch", "base_commit_sha", "repository_id", "diff_stats", "diff_history", "input_manifest", "archived_at", "archived_by_user_id", "automation_run_id", "pr_creation_state", "pr_creation_error", "diff_collected_at", "latest_diff_snapshot_id",
+	"linear_private", "linear_state_sync_disabled", "linear_identifier_hint", "linear_prepare_state",
+	"deleted_at", "git_identity_source", "git_identity_user_id", "created_at",
 }
 
 func sessionTestRowWithPolicyDefaults(values []interface{}) []interface{} {
@@ -204,14 +206,6 @@ const (
 	legacySessionBaseCommitSHAIndex = 44
 	legacySessionDiffCollectedIndex = 54
 	legacySessionLatestDiffIndex    = 55
-
-	// preIdentitySessionColumnsLen is the column count before
-	// git_identity_source / git_identity_user_id were appended. The
-	// dispatch logic in sessionTestRow is calibrated to produce rows of
-	// this length; padSessionIdentityColumns fills in the missing 2 nils
-	// at the end so each test fixture doesn't need to know about the new
-	// columns.
-	preIdentitySessionColumnsLen = 74
 )
 
 const (
@@ -220,7 +214,61 @@ const (
 	sessionBaseCommitSHAIndex   = 62
 	sessionDiffCollectedAtIndex = 72
 	sessionLatestDiffIndex      = 73
+	// preLinearSessionColumnsLen is the size of sessionColumns *before*
+	// migrations 103 (linear_*) and 100 (git_identity_*) added their
+	// columns. Test fixtures authored against the pre-migration shape pass
+	// rows of this length (or shorter); the dispatch routes them to the
+	// right pad helper, then sessionTestRow pads the four trailing linear
+	// columns and the two trailing identity nils at the end.
+	preLinearSessionColumnsLen = 76
 )
+
+// TestPreLinearSessionColumnsLenStaysInSync trips when a future migration
+// changes the column count without bumping preLinearSessionColumnsLen.
+// Without this guard, every length-based dispatch case below would silently
+// route to the wrong padding helper.
+func TestPreLinearSessionColumnsLenStaysInSync(t *testing.T) {
+	t.Parallel()
+	const pendingSnapshotFieldsAdded = 2
+	const linearFieldsAdded = 4
+	const identityFieldsAdded = 2
+	require.Equal(t, preLinearSessionColumnsLen+pendingSnapshotFieldsAdded+linearFieldsAdded+identityFieldsAdded, len(sessionColumns),
+		"sessionColumns shifted; bump preLinearSessionColumnsLen, pendingSnapshotFieldsAdded, "+
+			"linearFieldsAdded, or identityFieldsAdded if a new migration added more session columns")
+}
+
+// linearSessionDefaults returns the placeholder values for the four
+// linear_* columns inserted by migration 103. Test rows that don't pass
+// values for these get them auto-padded by sessionTestRow (one of the
+// length-difference cases below).
+func linearSessionDefaults() []interface{} {
+	return []interface{}{
+		false,                                 // linear_private
+		false,                                 // linear_state_sync_disabled
+		(*string)(nil),                        // linear_identifier_hint
+		string(models.LinearPrepareStateNone), // linear_prepare_state
+	}
+}
+
+// padLinearFields injects the four linear_* defaults at the position right
+// before the trailing deleted_at/created_at columns when the row was built
+// without them. Called from sessionTestRow on each row regardless of the
+// branch that resolved its prior shape. Runs before padSessionIdentityColumns,
+// so the input still has only deleted_at + created_at at the tail.
+func padLinearFields(values []interface{}) []interface{} {
+	if len(values) >= len(sessionColumns)-2 {
+		return values
+	}
+	if len(values) < 2 {
+		return values
+	}
+	insertAt := len(values) - 2 // before deleted_at, created_at
+	row := make([]interface{}, 0, len(values)+4)
+	row = append(row, values[:insertAt]...)
+	row = append(row, linearSessionDefaults()...)
+	row = append(row, values[insertAt:]...)
+	return row
+}
 
 var sessionPullRequestColumns = []string{
 	"id", "session_id", "org_id", "github_pr_number", "github_pr_url", "github_repo",
@@ -378,30 +426,42 @@ func sessionRowLikelyOmitsWorkerNodeID(values []interface{}) bool {
 }
 
 func sessionTestRow(values ...interface{}) []interface{} {
-	return padSessionIdentityColumns(normalizeSessionRowPrimaryIssueID(sessionTestRowDispatch(values...)))
+	row := normalizeSessionRowPrimaryIssueID(sessionTestRowDispatch(values...))
+	// Dispatch returns the pre-Linear legacy shape (no pending_snapshot_*,
+	// no linear_*, no git_identity_*). Chain the pads so each fixture stays
+	// oblivious to the column-shaping migrations:
+	//   - padLinearFields adds the four linear_* defaults at the position
+	//     right before deleted_at/created_at (76 → 80).
+	//   - padSessionIdentityColumns splices pending_snapshot_* after
+	//     snapshot_key and the git_identity_* pair before created_at
+	//     (80 → 84).
+	if len(row) == preLinearSessionColumnsLen {
+		row = padLinearFields(row)
+	}
+	return padSessionIdentityColumns(row)
 }
 
 func sessionTestRowDispatch(values ...interface{}) []interface{} {
 	if sessionRowNeedsPolicyDefaults(values) {
 		values = normalizeSessionRowAgentType(values, 3)
 		switch len(values) {
-		case preIdentitySessionColumnsLen - 3:
+		case preLinearSessionColumnsLen - 3:
 			return sessionTestRowWithPolicyDefaults(values)
-		case preIdentitySessionColumnsLen - 4:
+		case preLinearSessionColumnsLen - 4:
 			if sessionRowLikelyOmitsWorkerNodeID(values) {
 				return sessionRowWithCurrentOptionalDefaults(sessionTestRowWithPolicyDefaults(values), false, true, false)
 			}
 			return sessionRowWithCurrentOptionalDefaults(sessionTestRowWithPolicyDefaults(values), true, false, false)
-		case preIdentitySessionColumnsLen - 5:
+		case preLinearSessionColumnsLen - 5:
 			return sessionRowWithCurrentOptionalDefaults(sessionTestRowWithPolicyDefaults(values), true, true, false)
-		case preIdentitySessionColumnsLen - 6:
+		case preLinearSessionColumnsLen - 6:
 			return sessionRowWithCurrentOptionalDefaults(sessionTestRowWithPolicyDefaults(values), false, false, true)
-		case preIdentitySessionColumnsLen - 7:
+		case preLinearSessionColumnsLen - 7:
 			if sessionRowLikelyOmitsWorkerNodeID(values) {
 				return sessionRowWithCurrentOptionalDefaults(sessionTestRowWithPolicyDefaults(values), false, true, true)
 			}
 			return sessionRowWithCurrentOptionalDefaults(sessionTestRowWithPolicyDefaults(values), true, false, true)
-		case preIdentitySessionColumnsLen - 8:
+		case preLinearSessionColumnsLen - 8:
 			return sessionRowWithCurrentOptionalDefaults(sessionTestRowWithPolicyDefaults(values), true, true, true)
 		case legacySessionColumnsLen - 3:
 			return expandLegacySessionRow(sessionTestRowWithPolicyDefaults(values))
@@ -426,7 +486,7 @@ func sessionTestRowDispatch(values ...interface{}) []interface{} {
 	values = normalizeSessionRowAgentType(values, 6)
 
 	switch len(values) {
-	case preIdentitySessionColumnsLen:
+	case preLinearSessionColumnsLen:
 		return values
 	case legacySessionColumnsLen:
 		return expandLegacySessionRow(values)
@@ -446,32 +506,32 @@ func sessionTestRowDispatch(values ...interface{}) []interface{} {
 		return expandLegacySessionRow(sessionRowWithLegacyOptionalDefaults(values, true, false, true))
 	case legacySessionColumnsLen - 5:
 		return expandLegacySessionRow(sessionRowWithLegacyOptionalDefaults(values, true, true, true))
-	case preIdentitySessionColumnsLen - 1:
+	case preLinearSessionColumnsLen - 1:
 		if sessionRowLikelyOmitsWorkerNodeID(values) {
 			return sessionRowWithCurrentOptionalDefaults(values, false, true, false)
 		}
 		return sessionRowWithCurrentOptionalDefaults(values, true, false, false)
-	case preIdentitySessionColumnsLen - 2:
+	case preLinearSessionColumnsLen - 2:
 		return sessionRowWithCurrentOptionalDefaults(values, true, true, false)
-	case preIdentitySessionColumnsLen - 4:
+	case preLinearSessionColumnsLen - 4:
 		return sessionRowWithCurrentOptionalDefaults(values, false, false, true)
-	case preIdentitySessionColumnsLen - 3:
+	case preLinearSessionColumnsLen - 3:
 		if sessionRowLikelyOmitsWorkerNodeID(values) {
 			return sessionRowWithCurrentOptionalDefaults(values, false, true, true)
 		}
 		return sessionRowWithCurrentOptionalDefaults(values, true, false, true)
-	case preIdentitySessionColumnsLen - 5:
+	case preLinearSessionColumnsLen - 5:
 		return sessionRowWithCurrentOptionalDefaults(values, true, true, true)
 	default:
 		panic(fmt.Sprintf(
 			"sessionTestRow received %d values, want %d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %d, or %d (plus policy-less variants)",
 			len(values),
-			preIdentitySessionColumnsLen,
-			preIdentitySessionColumnsLen-1,
-			preIdentitySessionColumnsLen-2,
-			preIdentitySessionColumnsLen-3,
-			preIdentitySessionColumnsLen-4,
-			preIdentitySessionColumnsLen-5,
+			preLinearSessionColumnsLen,
+			preLinearSessionColumnsLen-1,
+			preLinearSessionColumnsLen-2,
+			preLinearSessionColumnsLen-3,
+			preLinearSessionColumnsLen-4,
+			preLinearSessionColumnsLen-5,
 			legacySessionColumnsLen,
 			legacySessionColumnsLen-1,
 			legacySessionColumnsLen-2,
@@ -526,7 +586,7 @@ func sessionAnyArgs(count int) []interface{} {
 func expectManualSessionCreate(mock pgxmock.PgxPoolIface, runID uuid.UUID, now time.Time) {
 	mock.ExpectBegin()
 	mock.ExpectQuery("INSERT INTO sessions").
-		WithArgs(sessionAnyArgs(22)...).
+		WithArgs(sessionAnyArgs(26)...).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at", "last_activity_at"}).AddRow(runID, now, now))
 	mock.ExpectCommit()
 }
@@ -534,7 +594,7 @@ func expectManualSessionCreate(mock pgxmock.PgxPoolIface, runID uuid.UUID, now t
 func expectIssueSessionCreate(mock pgxmock.PgxPoolIface, runID uuid.UUID, now time.Time) {
 	mock.ExpectBegin()
 	mock.ExpectQuery("INSERT INTO sessions").
-		WithArgs(sessionAnyArgs(22)...).
+		WithArgs(sessionAnyArgs(26)...).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at", "last_activity_at"}).AddRow(runID, now, now))
 	mock.ExpectExec("INSERT INTO session_issue_links").
 		WithArgs(sessionAnyArgs(4)...).

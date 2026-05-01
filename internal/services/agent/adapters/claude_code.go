@@ -404,9 +404,29 @@ func buildSystemPrompt(input *agent.AgentInput) string {
 				Source:     string(linked.Source),
 				Title:      linked.Title,
 				ExternalID: linked.ExternalID,
+				StateName:  linked.StateName,
+				StateType:  linked.StateType,
+				Priority:   linked.Priority,
+				Assignee:   linked.AssigneeName,
+				TeamKey:    linked.TeamKey,
+				TeamName:   linked.TeamName,
+				URL:        linked.URL,
 			}
 			if linked.Role == models.SessionIssueLinkRolePrimary {
 				entry.Description = linked.Description
+			}
+			for _, attachment := range linked.Attachments {
+				entry.Attachments = append(entry.Attachments, prompts.LinkedIssueAttachment{
+					Title:  attachment.Title,
+					URL:    attachment.URL,
+					Source: attachment.Source,
+				})
+			}
+			for _, comment := range linked.Comments {
+				entry.Comments = append(entry.Comments, prompts.LinkedIssueComment{
+					Author: comment.Author,
+					Body:   comment.Body,
+				})
 			}
 			entries = append(entries, entry)
 		}
