@@ -29,6 +29,7 @@ type codingCredentialStore interface {
 	ListByScope(ctx context.Context, scope models.Scope) ([]models.DecryptedCodingCredential, error)
 	ListByProvider(ctx context.Context, scope models.Scope, provider models.ProviderName) ([]models.DecryptedCodingCredential, error)
 	ListResolvable(ctx context.Context, orgID uuid.UUID, userID *uuid.UUID, provider models.ProviderName) ([]models.DecryptedCodingCredential, error)
+	ListResolvableMulti(ctx context.Context, orgID uuid.UUID, userID *uuid.UUID, providers []models.ProviderName) (map[models.ProviderName][]models.DecryptedCodingCredential, error)
 	Create(ctx context.Context, scope models.Scope, label string, cfg models.ProviderConfig, opts db.CreateOpts) (*uuid.UUID, error)
 	Rename(ctx context.Context, scope models.Scope, id uuid.UUID, label string) error
 	UpdateStatus(ctx context.Context, scope models.Scope, id uuid.UUID, status string) error
@@ -143,16 +144,18 @@ func (h *CodingCredentialHandler) List(w http.ResponseWriter, r *http.Request) {
 // listResolved walks the personal-then-org resolved list across every coding
 // provider and returns the merged set tagged with scope. Used by the personal
 // settings page to render the "effective resolution" block under the personal
-// stack and the read-only org fallback section.
+// stack and the read-only org fallback section. Backed by ListResolvableMulti
+// so a cold cache costs two round trips total (one per scope half) regardless
+// of how many providers are checked.
 func (h *CodingCredentialHandler) listResolved(ctx context.Context, scope models.Scope) ([]models.CodingCredentialSummary, error) {
+	resolved, err := h.store.ListResolvableMulti(ctx, scope.OrgID, scope.UserID, models.CodingAgentProviders)
+	if err != nil {
+		return nil, err
+	}
 	seen := map[uuid.UUID]struct{}{}
 	out := make([]models.CodingCredentialSummary, 0)
 	for _, provider := range models.CodingAgentProviders {
-		creds, err := h.store.ListResolvable(ctx, scope.OrgID, scope.UserID, provider)
-		if err != nil {
-			return nil, err
-		}
-		for _, cred := range creds {
+		for _, cred := range resolved[provider] {
 			if _, dup := seen[cred.ID]; dup {
 				continue
 			}

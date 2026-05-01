@@ -408,6 +408,65 @@ func TestCodingCredentialStoreListResolvableAndPickRunnable(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+// TestListResolvableMulti_BulkFetchAndCacheReuse asserts that the bulk
+// resolver:
+//   - issues exactly one query per scope half (personal + org) regardless of
+//     how many providers are requested,
+//   - returns rows bucketed by provider with the personal half ordered
+//     before the org half within each bucket,
+//   - serves a subsequent multi-call entirely from the resolver cache.
+//
+// Together this is the regression guard that listResolved on the account
+// settings page does not regress to N round trips on a cold cache.
+func TestListResolvableMulti_BulkFetchAndCacheReuse(t *testing.T) {
+	t.Parallel()
+
+	store, mock := newMockCodingCredentialStore(t)
+	defer mock.Close()
+
+	orgID := uuid.New()
+	userID := uuid.New()
+	personalAnthropicID := uuid.New()
+	personalOpenAIID := uuid.New()
+	orgAnthropicID := uuid.New()
+	providers := []models.ProviderName{models.ProviderAnthropic, models.ProviderOpenAI}
+
+	personalRows := pgxmock.NewRows(codingCredentialTestColumns)
+	personalRows = addCodingCredentialRow(personalRows,
+		codingCredentialRow(t, store, orgID, &userID, personalAnthropicID, models.ProviderAnthropic, models.AnthropicConfig{APIKey: "sk-ant-personal-1234"}, 1, models.CodingCredentialStatusActive),
+	)
+	personalRows = addCodingCredentialRow(personalRows,
+		codingCredentialRow(t, store, orgID, &userID, personalOpenAIID, models.ProviderOpenAI, models.OpenAIConfig{APIKey: "sk-openai-personal"}, 1, models.CodingCredentialStatusActive),
+	)
+	orgRows := pgxmock.NewRows(codingCredentialTestColumns)
+	orgRows = addCodingCredentialRow(orgRows,
+		codingCredentialRow(t, store, orgID, nil, orgAnthropicID, models.ProviderAnthropic, models.AnthropicConfig{APIKey: "sk-ant-org-1234"}, 1, models.CodingCredentialStatusActive),
+	)
+
+	mock.ExpectQuery(`FROM coding_credentials`).
+		WithArgs(codingAnyArgs(3)...).
+		WillReturnRows(personalRows)
+	mock.ExpectQuery(`FROM coding_credentials`).
+		WithArgs(codingAnyArgs(2)...).
+		WillReturnRows(orgRows)
+
+	got, err := store.ListResolvableMulti(context.Background(), orgID, &userID, providers)
+	require.NoError(t, err, "ListResolvableMulti should fold per-scope queries into one each")
+	require.Len(t, got, 2, "ListResolvableMulti should return one bucket per requested provider")
+	require.Equal(t, []uuid.UUID{personalAnthropicID, orgAnthropicID},
+		[]uuid.UUID{got[models.ProviderAnthropic][0].ID, got[models.ProviderAnthropic][1].ID},
+		"anthropic bucket should be personal-then-org ordered")
+	require.Len(t, got[models.ProviderOpenAI], 1, "openai bucket should contain only the personal row")
+	require.Equal(t, personalOpenAIID, got[models.ProviderOpenAI][0].ID, "openai bucket should reflect the personal pick")
+
+	// Second call with overlapping providers must hit the resolver cache and
+	// issue zero additional queries — pgxmock would fail this if it did.
+	got2, err := store.ListResolvableMulti(context.Background(), orgID, &userID, providers)
+	require.NoError(t, err, "ListResolvableMulti second call should hit cache")
+	require.Len(t, got2[models.ProviderAnthropic], 2, "cache should preserve anthropic bucket length")
+	require.NoError(t, mock.ExpectationsWereMet(), "ListResolvableMulti must use a single query per scope half")
+}
+
 func TestCodingCredentialStoreOrgScopeBranches(t *testing.T) {
 	t.Parallel()
 
@@ -660,7 +719,7 @@ func TestCodingCredentialStoreReorderMoveAndJanitor(t *testing.T) {
 					WithArgs(codingAnyArgs(2)...).
 					WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(ids[0]).AddRow(ids[1]).AddRow(ids[2]))
 				mock.ExpectQuery("SELECT id, priority FROM coding_credentials").
-					WithArgs(codingAnyArgs(1)...).
+					WithArgs(codingAnyArgs(3)...).
 					WillReturnRows(pgxmock.NewRows([]string{"id", "priority"}).AddRow(ids[0], 1).AddRow(ids[1], 2).AddRow(ids[2], 3))
 				mock.ExpectExec("UPDATE coding_credentials SET priority").
 					WithArgs(codingAnyArgs(2)...).

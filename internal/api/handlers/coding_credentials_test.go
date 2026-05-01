@@ -21,16 +21,17 @@ import (
 )
 
 type mockCodingCredentialStore struct {
-	getFn          func(ctx context.Context, scope models.Scope, id uuid.UUID) (*models.DecryptedCodingCredential, error)
-	listByScopeFn  func(ctx context.Context, scope models.Scope) ([]models.DecryptedCodingCredential, error)
-	listProviderFn func(ctx context.Context, scope models.Scope, provider models.ProviderName) ([]models.DecryptedCodingCredential, error)
-	listResolveFn  func(ctx context.Context, orgID uuid.UUID, userID *uuid.UUID, provider models.ProviderName) ([]models.DecryptedCodingCredential, error)
-	createFn       func(ctx context.Context, scope models.Scope, label string, cfg models.ProviderConfig, opts db.CreateOpts) (*uuid.UUID, error)
-	renameFn       func(ctx context.Context, scope models.Scope, id uuid.UUID, label string) error
-	updateStatusFn func(ctx context.Context, scope models.Scope, id uuid.UUID, status string) error
-	disableFn      func(ctx context.Context, scope models.Scope, id uuid.UUID) error
-	moveFn         func(ctx context.Context, scope models.Scope, id uuid.UUID, pos models.MoveCodingCredentialInput) error
-	reorderFn      func(ctx context.Context, scope models.Scope, orderedIDs []uuid.UUID) error
+	getFn              func(ctx context.Context, scope models.Scope, id uuid.UUID) (*models.DecryptedCodingCredential, error)
+	listByScopeFn      func(ctx context.Context, scope models.Scope) ([]models.DecryptedCodingCredential, error)
+	listProviderFn     func(ctx context.Context, scope models.Scope, provider models.ProviderName) ([]models.DecryptedCodingCredential, error)
+	listResolveFn      func(ctx context.Context, orgID uuid.UUID, userID *uuid.UUID, provider models.ProviderName) ([]models.DecryptedCodingCredential, error)
+	listResolveMultiFn func(ctx context.Context, orgID uuid.UUID, userID *uuid.UUID, providers []models.ProviderName) (map[models.ProviderName][]models.DecryptedCodingCredential, error)
+	createFn           func(ctx context.Context, scope models.Scope, label string, cfg models.ProviderConfig, opts db.CreateOpts) (*uuid.UUID, error)
+	renameFn           func(ctx context.Context, scope models.Scope, id uuid.UUID, label string) error
+	updateStatusFn     func(ctx context.Context, scope models.Scope, id uuid.UUID, status string) error
+	disableFn          func(ctx context.Context, scope models.Scope, id uuid.UUID) error
+	moveFn             func(ctx context.Context, scope models.Scope, id uuid.UUID, pos models.MoveCodingCredentialInput) error
+	reorderFn          func(ctx context.Context, scope models.Scope, orderedIDs []uuid.UUID) error
 }
 
 type mockCodingCredentialOrgStore struct {
@@ -70,6 +71,23 @@ func (m *mockCodingCredentialStore) ListResolvable(ctx context.Context, orgID uu
 		return m.listResolveFn(ctx, orgID, userID, provider)
 	}
 	return nil, nil
+}
+
+func (m *mockCodingCredentialStore) ListResolvableMulti(ctx context.Context, orgID uuid.UUID, userID *uuid.UUID, providers []models.ProviderName) (map[models.ProviderName][]models.DecryptedCodingCredential, error) {
+	if m.listResolveMultiFn != nil {
+		return m.listResolveMultiFn(ctx, orgID, userID, providers)
+	}
+	// Default: fan out per provider via the per-provider hook so existing
+	// tests that only set listResolveFn keep working without rewrites.
+	out := make(map[models.ProviderName][]models.DecryptedCodingCredential, len(providers))
+	for _, p := range providers {
+		creds, err := m.ListResolvable(ctx, orgID, userID, p)
+		if err != nil {
+			return nil, err
+		}
+		out[p] = creds
+	}
+	return out, nil
 }
 
 func (m *mockCodingCredentialStore) Create(ctx context.Context, scope models.Scope, label string, cfg models.ProviderConfig, opts db.CreateOpts) (*uuid.UUID, error) {

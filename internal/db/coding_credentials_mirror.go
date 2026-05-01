@@ -114,13 +114,17 @@ func (s *CodingCredentialStore) MirrorUserCredential(ctx context.Context, row mo
 		return fmt.Errorf("mirror user credential: %w", err)
 	}
 
-	// is_team_default → org-scoped row (user_id = NULL). The label disambiguates
-	// the team-default row from a real org-scoped credential at the same provider.
+	// is_team_default → org-scoped row (user_id = NULL). The label
+	// disambiguates the team-default row from a real org-scoped credential at
+	// the same provider AND must match the migration SQL's label exactly so
+	// the natural-key conflict path (org_id, user_id, provider, label) lands
+	// on the same row instead of producing a duplicate. See migration step 3
+	// in 000107_copy_coding_credentials.up.sql.
 	var userID *uuid.UUID
 	label := ""
 	if row.IsTeamDefault {
 		userID = nil
-		label = "Team default (mirrored from " + row.UserID.String() + ")"
+		label = "Team default (migrated from " + row.UserID.String() + ")"
 	} else {
 		uid := row.UserID
 		userID = &uid

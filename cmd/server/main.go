@@ -161,6 +161,13 @@ func main() {
 			logger.Fatal().Err(err).Msg("failed to initialize crypto service")
 		}
 	}
+	// Refuse to serve traffic until the unified-coding-credentials post-step
+	// (Anthropic API-key/subscription split) has run. Fresh installs that have
+	// no anthropic rows pass the gate automatically.
+	if err := db.EnsureAnthropicSplitSentinel(ctx, pool); err != nil {
+		logger.Fatal().Err(err).Msg("coding-credentials migration gate failed; server refusing to start")
+	}
+
 	credentialStore := db.NewOrgCredentialStore(pool, cryptoSvc)
 	userCredentialStore := db.NewUserCredentialStore(pool, cryptoSvc)
 	codingCredentialStore := db.NewCodingCredentialStore(pool, cryptoSvc)

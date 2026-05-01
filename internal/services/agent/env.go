@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"path"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -51,7 +52,41 @@ type AgentEnv struct {
 	codexAuth         CodexAuthProvider
 	provider          SandboxProvider
 	logger            zerolog.Logger
+
+	// recentPicks remembers the credential id chosen for each (orgID, userID,
+	// provider) tuple by the most recent pickFromCodingProvider call. It feeds
+	// ShedRateLimited / ShedAuthRejected so the orchestrator can surface a
+	// 429/401 back to the unified store's in-process health cache without
+	// plumbing credential ids through every call site. The map is bounded by
+	// pickTrackerMax with simple time-based eviction; concurrent sessions for
+	// the same scope race to write the slot, which is acceptable per the
+	// design's eventual-consistency note (`docs/design/future/65-…` § health
+	// cache).
+	recentPicks   map[pickKey]pickRecord
+	recentPicksMu sync.Mutex
 }
+
+type pickKey struct {
+	orgID    uuid.UUID
+	userID   uuid.UUID // uuid.Nil for org-scope
+	provider models.ProviderName
+}
+
+type pickRecord struct {
+	credID uuid.UUID
+	at     time.Time
+}
+
+// pickTrackerTTL bounds how long after a pick a Shed call still applies.
+// Longer than the store's health-cache TTL because the latency between a
+// session start and the failure detection (token_expired retry, post-run
+// classification) can run minutes.
+const pickTrackerTTL = 5 * time.Minute
+
+// pickTrackerMax bounds the recentPicks map so it cannot grow unboundedly
+// under churn. When exceeded, expired entries are swept; if still over the
+// limit, the oldest record is dropped.
+const pickTrackerMax = 4096
 
 // AgentEnvDeps holds the dependencies for constructing an AgentEnv. Named
 // AgentEnvDeps (rather than AgentEnvConfig) to avoid confusion with
@@ -82,7 +117,139 @@ func NewAgentEnv(deps AgentEnvDeps) *AgentEnv {
 		codexAuth:         deps.CodexAuth,
 		provider:          deps.Provider,
 		logger:            deps.Logger,
+		recentPicks:       make(map[pickKey]pickRecord),
 	}
+}
+
+// CodingCredentialShedder is the subset of CodingCredentialStore the agent
+// runtime needs to surface 429/401 back into the in-process health cache.
+// Defined as an interface so env.go avoids a package import cycle and tests
+// can substitute a fake.
+type CodingCredentialShedder interface {
+	MarkRateLimited(id uuid.UUID)
+	MarkAuthRejected(id uuid.UUID)
+}
+
+// codingShedder type-asserts the configured CodingCredentialProvider into the
+// shed-capable interface. Returns nil when the provider does not implement
+// shedding (older test rigs), in which case the Shed* methods become no-ops.
+func (e *AgentEnv) codingShedder() CodingCredentialShedder {
+	if e == nil || e.codingCredentials == nil {
+		return nil
+	}
+	if shedder, ok := e.codingCredentials.(CodingCredentialShedder); ok {
+		return shedder
+	}
+	return nil
+}
+
+// recordPick stores the credential id chosen by a pickFromCodingProvider walk.
+// Callers are expected to invoke this once per successful pick. The stored
+// record is consulted by ShedRateLimited / ShedAuthRejected when the runtime
+// reports an upstream failure for that (orgID, userID, provider) tuple.
+func (e *AgentEnv) recordPick(orgID uuid.UUID, userID *uuid.UUID, provider models.ProviderName, credID uuid.UUID) {
+	if e == nil {
+		return
+	}
+	key := pickKey{orgID: orgID, provider: provider}
+	if userID != nil {
+		key.userID = *userID
+	}
+	e.recentPicksMu.Lock()
+	defer e.recentPicksMu.Unlock()
+	if e.recentPicks == nil {
+		e.recentPicks = make(map[pickKey]pickRecord)
+	}
+	if len(e.recentPicks) >= pickTrackerMax {
+		e.evictExpiredPicksLocked(time.Now())
+	}
+	if len(e.recentPicks) >= pickTrackerMax {
+		e.evictOldestPickLocked()
+	}
+	e.recentPicks[key] = pickRecord{credID: credID, at: time.Now()}
+}
+
+func (e *AgentEnv) lookupRecentPick(orgID uuid.UUID, userID *uuid.UUID, provider models.ProviderName) (uuid.UUID, bool) {
+	key := pickKey{orgID: orgID, provider: provider}
+	if userID != nil {
+		key.userID = *userID
+	}
+	e.recentPicksMu.Lock()
+	defer e.recentPicksMu.Unlock()
+	rec, ok := e.recentPicks[key]
+	if !ok {
+		return uuid.Nil, false
+	}
+	if time.Since(rec.at) > pickTrackerTTL {
+		delete(e.recentPicks, key)
+		return uuid.Nil, false
+	}
+	return rec.credID, true
+}
+
+func (e *AgentEnv) evictExpiredPicksLocked(now time.Time) {
+	for k, v := range e.recentPicks {
+		if now.Sub(v.at) > pickTrackerTTL {
+			delete(e.recentPicks, k)
+		}
+	}
+}
+
+func (e *AgentEnv) evictOldestPickLocked() {
+	var (
+		oldestKey pickKey
+		oldestAt  time.Time
+		first     = true
+	)
+	for k, v := range e.recentPicks {
+		if first || v.at.Before(oldestAt) {
+			oldestKey = k
+			oldestAt = v.at
+			first = false
+		}
+	}
+	if !first {
+		delete(e.recentPicks, oldestKey)
+	}
+}
+
+// ShedRateLimited surfaces a 429 from an upstream provider call back to the
+// unified store's in-process health cache. The orchestrator calls this when a
+// session run fails with rate-limit signals so the next pick within the TTL
+// window skips the just-throttled credential. Safe to call when the env was
+// constructed without a coding-credential store; in that case it is a no-op.
+//
+// userID may be nil for org-scope picks.
+func (e *AgentEnv) ShedRateLimited(orgID uuid.UUID, userID *uuid.UUID, provider models.ProviderName) {
+	shedder := e.codingShedder()
+	if shedder == nil {
+		return
+	}
+	credID, ok := e.lookupRecentPick(orgID, userID, provider)
+	if !ok {
+		return
+	}
+	shedder.MarkRateLimited(credID)
+}
+
+// ShedAuthRejected surfaces a 401 / token_expired from an upstream provider
+// call back to the unified store's in-process health cache. The orchestrator
+// calls this when a session run fails with auth signals after a refresh+retry
+// has already been attempted, indicating the credential is structurally
+// broken and should not be picked again until the cache TTL expires (and the
+// OAuth services flip the persisted status to invalid).
+//
+// userID may be nil for org-scope picks.
+func (e *AgentEnv) ShedAuthRejected(orgID uuid.UUID, userID *uuid.UUID, provider models.ProviderName) {
+	shedder := e.codingShedder()
+	if shedder == nil {
+		return
+	}
+	credID, ok := e.lookupRecentPick(orgID, userID, provider)
+	if !ok {
+		return
+	}
+	shedder.MarkAuthRejected(credID)
 }
 
 // integrationCredentials holds the resolved Sentry, Linear, and Notion configs for an org.
@@ -395,6 +562,7 @@ func (e *AgentEnv) pickFromCodingProvider(ctx context.Context, orgID uuid.UUID, 
 		// silently produce no auth. The subscription twin lookup separately
 		// finds the subscription flavor.
 		if cfg := compatibleCodingProviderConfig(provider, cred.Config); cfg != nil {
+			e.recordPick(orgID, userID, provider, cred.ID)
 			return cfg
 		}
 	}

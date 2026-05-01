@@ -1616,6 +1616,12 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 	// 10b. Retry once on token expiration for Codex agents.
 	result, err = o.retryOnTokenExpired(ctx, run.AgentType, run.OrgID, run.ID, nil, turnNumber, sandbox, adapter, execCtx, prompt, result, err, log)
 
+	// 10c. Shed the just-picked credential's in-process health-cache slot if
+	// the (possibly retried) result indicates a credential-level failure.
+	// No-ops cleanly for agent types whose auth flows do not pass through
+	// the unified resolver (e.g. Codex subscription via codexauth.Service).
+	o.shedOnRunResult(run.AgentType, run.OrgID, run.TriggeredByUserID, result, err, log)
+
 	// 11. Handle result.
 	stopReason := StopReasonNone
 	if o.cancels != nil {
@@ -2476,6 +2482,11 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 
 	// 6b. Retry once on token expiration for Codex agents.
 	result, err = o.retryOnTokenExpired(ctx, session.AgentType, session.OrgID, session.ID, threadID, turnNumber, sandbox, adapter, execCtx, prompt, result, err, log)
+
+	// 6c. Shed the just-picked credential when the (post-retry) result shows
+	// rate-limit or auth-rejected signals. Same semantics as the entry-turn
+	// path above; see shedOnRunResult.
+	o.shedOnRunResult(session.AgentType, session.OrgID, session.TriggeredByUserID, result, err, log)
 
 	stopReason := StopReasonNone
 	if o.cancels != nil {
@@ -3737,6 +3748,94 @@ func (o *Orchestrator) retryOnTokenExpired(
 
 	log.Info().Msg("codex CLI retry after token refresh completed")
 	return result, err
+}
+
+// shedOnRunResult forwards rate-limit / auth-rejected signals from a finished
+// run back into the unified credential store's in-process health cache so the
+// next pickFromCodingProvider walk for the same (orgID, userID, provider)
+// skips the just-failed credential until its TTL expires. The OAuth services
+// independently flip persisted credential status to "invalid" on hard auth
+// failures; this is the fast-path hint that prevents repeat picks before the
+// resolver cache refreshes.
+//
+// Provider mapping is intentionally limited to agent types whose auth flows
+// go through AgentEnv.pickFromCodingProvider (Anthropic API key, Gemini, Amp,
+// Pi, OpenAI API key). Codex subscription auth uses codexauth.Service's own
+// round-robin selector — shedding for that path lives separately and is a
+// silent no-op here.
+func (o *Orchestrator) shedOnRunResult(agentType models.AgentType, orgID uuid.UUID, userID *uuid.UUID, result *AgentResult, runErr error, log zerolog.Logger) {
+	if o.env == nil || result == nil {
+		return
+	}
+	provider := codingProviderForAgent(agentType)
+	if provider == "" {
+		return
+	}
+	errMsg := strings.ToLower(result.Error)
+	switch {
+	case isAuthRejectedError(errMsg):
+		log.Warn().
+			Str("agent_type", string(agentType)).
+			Str("provider", string(provider)).
+			Msg("shedding credential after auth-rejected signal in run result")
+		o.env.ShedAuthRejected(orgID, userID, provider)
+	case isRateLimitedError(errMsg):
+		log.Warn().
+			Str("agent_type", string(agentType)).
+			Str("provider", string(provider)).
+			Msg("shedding credential after rate-limit signal in run result")
+		o.env.ShedRateLimited(orgID, userID, provider)
+	}
+	_ = runErr // accepted for symmetry with the call sites; the result.Error string is the canonical signal today
+}
+
+// codingProviderForAgent maps an agent type to the unified provider name its
+// API-key auth uses. Agents whose primary auth is subscription-based (Codex
+// → ChatGPT OAuth) return "" because their pick path does not write the
+// recentPicks tracker.
+func codingProviderForAgent(agentType models.AgentType) models.ProviderName {
+	switch agentType {
+	case models.AgentTypeClaudeCode:
+		return models.ProviderAnthropic
+	case models.AgentTypeGeminiCLI:
+		return models.ProviderGemini
+	case models.AgentTypeAmp:
+		return models.ProviderAmp
+	case models.AgentTypePi:
+		return models.ProviderPi
+	default:
+		return ""
+	}
+}
+
+// isRateLimitedError matches the same surface as the failure classifier so
+// shedding stays consistent with the user-facing api_error category.
+func isRateLimitedError(errMsg string) bool {
+	if errMsg == "" {
+		return false
+	}
+	return strings.Contains(errMsg, "rate limit") ||
+		strings.Contains(errMsg, "rate_limit") ||
+		strings.Contains(errMsg, "429") ||
+		strings.Contains(errMsg, "too many requests")
+}
+
+// isAuthRejectedError detects 401-class signals indicating the credential is
+// structurally bad (expired refresh, revoked, invalid key). Token-expired
+// transients are excluded because retryOnTokenExpired already refreshed and
+// retried; if that retry succeeded the result is clean, and if it failed the
+// error text shifts to the strings matched here.
+func isAuthRejectedError(errMsg string) bool {
+	if errMsg == "" {
+		return false
+	}
+	return strings.Contains(errMsg, "refresh_token_reused") ||
+		strings.Contains(errMsg, "invalid_grant") ||
+		strings.Contains(errMsg, "invalid api key") ||
+		strings.Contains(errMsg, "invalid_api_key") ||
+		strings.Contains(errMsg, "401 unauthorized") ||
+		strings.Contains(errMsg, "401 unauthenticated") ||
+		strings.Contains(errMsg, "authentication_error")
 }
 
 // containerExitReason determines a granular exit reason for billing metadata

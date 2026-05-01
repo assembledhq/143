@@ -144,9 +144,10 @@ func (s *CodingCredentialStore) SetClock(now func() time.Time) {
 }
 
 // MarkRateLimited records a short-TTL "do not pick" marker for a credential.
-// Called by the agent runtime when an upstream call returns 429. The id is
-// already org-scoped because it can only be obtained through a prior scoped
-// PickRunnable; the in-process health cache keys by id alone.
+// Called by the agent runtime via AgentEnv.ShedRateLimited when a finished
+// run reports a 429-class signal in result.Error. The id is already org-scoped
+// because it can only be obtained through a prior scoped pick; the in-process
+// health cache keys by id alone.
 //
 // lint:allow-no-orgid reason="id was obtained from a scoped Pick; in-process cache keys by id only"
 func (s *CodingCredentialStore) MarkRateLimited(id uuid.UUID) {
@@ -154,9 +155,11 @@ func (s *CodingCredentialStore) MarkRateLimited(id uuid.UUID) {
 }
 
 // MarkAuthRejected records a "do not pick" marker following an auth failure.
-// In practice the runtime should also flip the credential's persisted status
-// to "invalid"; the in-memory marker prevents repeat picks before that write
-// reaches the cache layer.
+// Called by the agent runtime via AgentEnv.ShedAuthRejected when a finished
+// run reports a 401-class signal that the token-expired retry could not
+// recover from. The OAuth services independently flip the credential's
+// persisted status to "invalid"; the in-memory marker prevents repeat picks
+// before that write propagates through the resolver cache.
 //
 // lint:allow-no-orgid reason="id was obtained from a scoped Pick; in-process cache keys by id only"
 func (s *CodingCredentialStore) MarkAuthRejected(id uuid.UUID) {
@@ -294,6 +297,108 @@ func (s *CodingCredentialStore) ListResolvable(ctx context.Context, orgID uuid.U
 
 	s.resolverCache.put(orgID, userID, provider, resolved)
 	return resolved, nil
+}
+
+// ListResolvableMulti returns the resolver list for several providers in a
+// single round trip. Equivalent to calling ListResolvable per provider but
+// folds the per-provider partial-index seeks into one query each for the
+// personal and org halves, which matters on cold caches (e.g. the account
+// settings page renders the effective-resolution block across every coding
+// provider on first load).
+//
+// The returned map always contains an entry for every requested provider,
+// possibly with a nil slice. Cached entries are served from the resolver
+// cache without contributing to the round trip; uncached entries are queried
+// in bulk and cached on the way out.
+func (s *CodingCredentialStore) ListResolvableMulti(ctx context.Context, orgID uuid.UUID, userID *uuid.UUID, providers []models.ProviderName) (map[models.ProviderName][]models.DecryptedCodingCredential, error) {
+	out := make(map[models.ProviderName][]models.DecryptedCodingCredential, len(providers))
+	uncached := make([]models.ProviderName, 0, len(providers))
+	for _, p := range providers {
+		if cached, ok := s.resolverCache.get(orgID, userID, p); ok {
+			out[p] = cached
+			continue
+		}
+		out[p] = nil
+		uncached = append(uncached, p)
+	}
+	if len(uncached) == 0 {
+		return out, nil
+	}
+
+	// Issue one query per scope half for all uncached providers. Postgres
+	// can satisfy these from the same partial-resolver indexes used by the
+	// per-provider seek; the savings come from amortising round-trip and
+	// pgx allocation overhead across providers.
+	if userID != nil {
+		personal, err := s.queryResolverHalfMulti(ctx, orgID, userID, uncached)
+		if err != nil {
+			return nil, err
+		}
+		for p, rows := range personal {
+			out[p] = append(out[p], rows...)
+		}
+	}
+	org, err := s.queryResolverHalfMulti(ctx, orgID, nil, uncached)
+	if err != nil {
+		return nil, err
+	}
+	for p, rows := range org {
+		out[p] = append(out[p], rows...)
+	}
+
+	for _, p := range uncached {
+		s.resolverCache.put(orgID, userID, p, out[p])
+	}
+	return out, nil
+}
+
+// queryResolverHalfMulti is queryResolverHalf for a slice of providers, using
+// `provider = ANY(@providers)` in one statement. Returns a map keyed by
+// provider name with the rows pre-bucketed and sorted within each bucket by
+// (priority, created_at) — matching the contract of ListResolvable for a
+// single provider.
+func (s *CodingCredentialStore) queryResolverHalfMulti(ctx context.Context, orgID uuid.UUID, userID *uuid.UUID, providers []models.ProviderName) (map[models.ProviderName][]models.DecryptedCodingCredential, error) {
+	if len(providers) == 0 {
+		return nil, nil
+	}
+	providerStrs := make([]string, len(providers))
+	for i, p := range providers {
+		providerStrs[i] = string(p)
+	}
+	args := pgx.NamedArgs{"org_id": orgID, "providers": providerStrs}
+	var query string
+	if userID != nil {
+		args["user_id"] = *userID
+		query = `SELECT ` + codingCredentialsColumns + `
+			FROM coding_credentials
+			WHERE org_id = @org_id AND provider = ANY(@providers) AND user_id = @user_id AND status = 'active'
+			ORDER BY provider, priority, created_at`
+	} else {
+		query = `SELECT ` + codingCredentialsColumns + `
+			FROM coding_credentials
+			WHERE org_id = @org_id AND provider = ANY(@providers) AND user_id IS NULL AND status = 'active'
+			ORDER BY provider, priority, created_at`
+	}
+	rows, err := s.db.Query(ctx, query, args)
+	if err != nil {
+		return nil, fmt.Errorf("query resolver half multi: %w", err)
+	}
+	dbRows, err := pgx.CollectRows(rows, pgx.RowToStructByNameLax[models.CodingCredential])
+	if err != nil {
+		return nil, fmt.Errorf("collect resolver half multi: %w", err)
+	}
+	decrypted, err := s.decryptRows(dbRows)
+	if err != nil {
+		return nil, err
+	}
+	bucketed := make(map[models.ProviderName][]models.DecryptedCodingCredential, len(providers))
+	for _, p := range providers {
+		bucketed[p] = nil
+	}
+	for _, row := range decrypted {
+		bucketed[row.Provider] = append(bucketed[row.Provider], row)
+	}
+	return bucketed, nil
 }
 
 // queryResolverHalf hits the partial resolver index for one (scope, provider)
@@ -703,12 +808,26 @@ func (s *CodingCredentialStore) Move(ctx context.Context, scope models.Scope, id
 	// Apply the new priorities. Only rewrite rows whose priority actually
 	// changed — keeps writes proportional to the number of rows that moved
 	// rather than stack size.
+	//
+	// The id list comes from fetchStackTx (already scope-bounded one
+	// statement earlier) so it is safe by construction. We still re-anchor
+	// the read to the same scope as defense-in-depth — if a future refactor
+	// ever lets a non-scoped id slip into newOrder, this filter prevents the
+	// in-tx fetch from leaking another tenant's priority into the rewrite.
 	currentPriority := map[uuid.UUID]int{}
-	rows, err := tx.Query(ctx,
-		`SELECT id, priority FROM coding_credentials
-		 WHERE id = ANY(@ids) AND status != 'disabled'`,
-		pgx.NamedArgs{"ids": newOrder},
-	)
+	priorityArgs := pgx.NamedArgs{"ids": newOrder, "org_id": scope.OrgID}
+	var priorityQuery string
+	if scope.IsPersonal() {
+		priorityArgs["user_id"] = *scope.UserID
+		priorityQuery = `SELECT id, priority FROM coding_credentials
+			WHERE id = ANY(@ids) AND status != 'disabled'
+			  AND org_id = @org_id AND user_id = @user_id`
+	} else {
+		priorityQuery = `SELECT id, priority FROM coding_credentials
+			WHERE id = ANY(@ids) AND status != 'disabled'
+			  AND org_id = @org_id AND user_id IS NULL`
+	}
+	rows, err := tx.Query(ctx, priorityQuery, priorityArgs)
 	if err != nil {
 		return fmt.Errorf("fetch current priorities: %w", err)
 	}

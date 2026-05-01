@@ -66,8 +66,10 @@ func (m *envUserCredentialProvider) GetTeamDefault(_ context.Context, _ uuid.UUI
 }
 
 type envCodingCredentialProvider struct {
-	resolvable map[models.ProviderName][]models.DecryptedCodingCredential
-	errs       map[models.ProviderName]error
+	resolvable      map[models.ProviderName][]models.DecryptedCodingCredential
+	errs            map[models.ProviderName]error
+	rateLimitedIDs  []uuid.UUID
+	authRejectedIDs []uuid.UUID
 }
 
 func (m *envCodingCredentialProvider) ListResolvable(_ context.Context, _ uuid.UUID, _ *uuid.UUID, provider models.ProviderName) ([]models.DecryptedCodingCredential, error) {
@@ -78,6 +80,17 @@ func (m *envCodingCredentialProvider) ListResolvable(_ context.Context, _ uuid.U
 		return creds, nil
 	}
 	return nil, nil
+}
+
+// MarkRateLimited / MarkAuthRejected satisfy CodingCredentialShedder so the
+// env tests can assert that ShedRateLimited / ShedAuthRejected forward the
+// recorded credential id.
+func (m *envCodingCredentialProvider) MarkRateLimited(id uuid.UUID) {
+	m.rateLimitedIDs = append(m.rateLimitedIDs, id)
+}
+
+func (m *envCodingCredentialProvider) MarkAuthRejected(id uuid.UUID) {
+	m.authRejectedIDs = append(m.authRejectedIDs, id)
 }
 
 type envOrgStore struct {
@@ -676,6 +689,82 @@ func TestAgentEnvCheckAuth(t *testing.T) {
 	require.Contains(t, err.Error(), "PI_API_KEY", "CheckAuth should explain the missing Pi credential")
 
 	require.NoError(t, env.CheckAuth(models.AgentTypePi, map[string]string{"PI_API_KEY": "pi-key"}), "CheckAuth should accept Pi runs with PI_API_KEY configured")
+}
+
+// TestAgentEnvShedAfterPick verifies that the shed-on-failure wiring forwards
+// the picked credential id to the underlying CodingCredentialShedder.
+//
+// Resolution flow under test:
+//  1. resolveProviderConfig walks pickFromCodingProvider for ProviderAnthropic
+//     and chooses the only active row.
+//  2. recordPick stores credID under (orgID, userID, ProviderAnthropic).
+//  3. ShedRateLimited looks up the recent pick for that key and calls
+//     MarkRateLimited on the store with credID.
+//
+// The orchestrator path (shedOnRunResult) calls ShedRateLimited /
+// ShedAuthRejected after a failed run; this test exercises the env-level
+// plumbing in isolation.
+func TestAgentEnvShedAfterPick(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	orgID := uuid.New()
+	userID := uuid.New()
+	credID := uuid.New()
+
+	coding := &envCodingCredentialProvider{
+		resolvable: map[models.ProviderName][]models.DecryptedCodingCredential{
+			models.ProviderAnthropic: {
+				{
+					ID:       credID,
+					OrgID:    orgID,
+					UserID:   &userID,
+					Provider: models.ProviderAnthropic,
+					Status:   models.CodingCredentialStatusActive,
+					Config:   models.AnthropicConfig{APIKey: "sk-ant-test-credential"},
+				},
+			},
+		},
+	}
+
+	env := NewAgentEnv(AgentEnvDeps{
+		CodingCredentials: coding,
+		Provider:          &envSandboxProvider{},
+		Logger:            zerolog.Nop(),
+	})
+
+	cfg := env.resolveProviderConfig(ctx, orgID, &userID, models.ProviderAnthropic)
+	require.IsType(t, models.AnthropicConfig{}, cfg, "resolver should return the unified anthropic config")
+
+	env.ShedRateLimited(orgID, &userID, models.ProviderAnthropic)
+	require.Equal(t, []uuid.UUID{credID}, coding.rateLimitedIDs,
+		"ShedRateLimited should forward the just-picked credential id to the store")
+
+	env.ShedAuthRejected(orgID, &userID, models.ProviderAnthropic)
+	require.Equal(t, []uuid.UUID{credID}, coding.authRejectedIDs,
+		"ShedAuthRejected should forward the just-picked credential id to the store")
+}
+
+// TestAgentEnvShedNoopWhenNoRecentPick guards the unhappy paths: shedding for
+// a (orgID, userID, provider) that never went through pickFromCodingProvider
+// must be a silent no-op rather than a spurious shed of the wrong credential.
+func TestAgentEnvShedNoopWhenNoRecentPick(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	userID := uuid.New()
+	coding := &envCodingCredentialProvider{}
+
+	env := NewAgentEnv(AgentEnvDeps{
+		CodingCredentials: coding,
+		Provider:          &envSandboxProvider{},
+		Logger:            zerolog.Nop(),
+	})
+
+	env.ShedRateLimited(orgID, &userID, models.ProviderAnthropic)
+	env.ShedAuthRejected(orgID, &userID, models.ProviderGemini)
+	require.Empty(t, coding.rateLimitedIDs, "ShedRateLimited without a recorded pick should not call the store")
+	require.Empty(t, coding.authRejectedIDs, "ShedAuthRejected without a recorded pick should not call the store")
 }
 
 func TestAgentEnvInjectCodexAuth(t *testing.T) {

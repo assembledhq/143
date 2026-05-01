@@ -39,10 +39,11 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/assembledhq/143/internal/crypto"
+	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
 )
 
-const sentinelName = "anthropic_split"
+const sentinelName = db.AnthropicSplitSentinel
 
 func main() {
 	var (
@@ -259,6 +260,24 @@ func runBatch(
 		if cfg.Subscription == nil {
 			// Pure API-key row — leave alone.
 			continue
+		}
+
+		// Defensive: AnthropicConfig.Validate has rejected dual-set rows
+		// (APIKey != "" && Subscription != nil) since the validator
+		// landed, so this branch should be unreachable in healthy data.
+		// If we still find one (e.g. a row written by a buggy code path
+		// before validation, or hand-edited DB state), the rewrite below
+		// preserves the subscription half but drops the API-key half —
+		// the design splits each method into its own row, and writing a
+		// phantom API-key row the user never explicitly added would
+		// surprise the operator more than the drop. Log loudly so the
+		// drop is visible in deploy telemetry; an operator can recover
+		// the lost key from a backup if needed.
+		if cfg.APIKey != "" {
+			fmt.Fprintf(os.Stderr,
+				"[anthropic-split] WARNING: dual-set anthropic row %s carries both APIKey and Subscription; preserving subscription, dropping API key\n",
+				r.ID,
+			)
 		}
 
 		// Subscription row: rewrite provider+config in place.

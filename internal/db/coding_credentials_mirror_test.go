@@ -368,6 +368,74 @@ func TestCodingCredentialStore_MirrorUserCredential(t *testing.T) {
 	}
 }
 
+// TestMirrorUserCredential_TeamDefaultLabelMatchesMigration locks the
+// team-default label format the mirror writes to byte-for-byte equality with
+// the format used by `migrations/000107_copy_coding_credentials.up.sql`
+// step 3. If this assertion drifts, the SQL data-copy will create one row
+// for a logical team-default credential and the dual-write mirror will
+// create a second one at the same (org, provider) — instead of upserting via
+// the unique (org_id, user_id, provider, label) natural key. The duplicate
+// would surface as a duplicate row in /settings/account "Org fallback" and
+// quietly mis-bias the resolver toward whichever lands first.
+//
+// The migration writes:
+//
+//	'Team default (migrated from ' || uc.user_id::text || ')'
+//
+// The mirror writes the exact same shape via Go string concatenation. This
+// test captures the second positional argument to the mirror UPSERT (label)
+// and asserts byte-equality.
+func TestMirrorUserCredential_TeamDefaultLabelMatchesMigration(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := NewCodingCredentialStore(mock, nil)
+
+	userID := uuid.MustParse("11111111-1111-1111-1111-111111111111")
+	orgID := uuid.New()
+	row := models.UserCredential{
+		ID:            uuid.New(),
+		UserID:        userID,
+		OrgID:         orgID,
+		Provider:      models.ProviderAnthropic,
+		IsTeamDefault: true,
+		Status:        "active",
+		CreatedAt:     time.Now(),
+		UpdatedAt:     time.Now(),
+	}
+	cfg := models.AnthropicConfig{APIKey: "sk-ant-test-1234567890"}
+
+	// Positional arg order on the mirror UPSERT (see upsertMirroredRow):
+	//   id, org_id, user_id, provider, label, config, priority, status,
+	//   created_by, last_verified_at, created_at, updated_at
+	// We only constrain `label` (index 4); everything else is AnyArg.
+	wantLabel := "Team default (migrated from " + userID.String() + ")"
+	mock.ExpectExec(`(?s)INSERT INTO coding_credentials.*ON CONFLICT \(id\) DO UPDATE`).
+		WithArgs(
+			pgxmock.AnyArg(),
+			pgxmock.AnyArg(),
+			pgxmock.AnyArg(),
+			pgxmock.AnyArg(),
+			wantLabel,
+			pgxmock.AnyArg(),
+			pgxmock.AnyArg(),
+			pgxmock.AnyArg(),
+			pgxmock.AnyArg(),
+			pgxmock.AnyArg(),
+			pgxmock.AnyArg(),
+			pgxmock.AnyArg(),
+		).
+		WillReturnResult(pgxmock.NewResult("INSERT", 1))
+
+	require.NoError(t, store.MirrorUserCredential(context.Background(), row, cfg),
+		"MirrorUserCredential should accept the team-default row")
+	require.NoError(t, mock.ExpectationsWereMet(),
+		"team-default mirror must write the migration-aligned label format")
+}
+
 func TestMirrorProviderHelpers(t *testing.T) {
 	t.Parallel()
 
