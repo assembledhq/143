@@ -50,3 +50,79 @@ func TestAuditEmitter_EmitWebhookActionIncludesSessionAndProject(t *testing.T) {
 
 	require.NoError(t, mock.ExpectationsWereMet(), "webhook audit emit should persist session and project correlations")
 }
+
+func TestAuditEmitter_EmitUserActionsBatchesMultipleRows(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	emitter := NewAuditEmitter(NewAuditLogStore(mock), zerolog.Nop())
+
+	orgID := uuid.New()
+	userID := uuid.New()
+	sessionID := uuid.New()
+	const n = 4
+
+	paramsList := make([]UserActionParams, 0, n)
+	for i := 0; i < n; i++ {
+		resID := uuid.New().String()
+		sid := sessionID
+		paramsList = append(paramsList, UserActionParams{
+			OrgID:        orgID,
+			UserID:       userID,
+			Action:       models.AuditActionSessionReviewCommentUpdated,
+			ResourceType: models.AuditResourceSessionReviewComment,
+			ResourceID:   &resID,
+			SessionID:    &sid,
+			Details:      json.RawMessage(`{}`),
+		})
+	}
+
+	// 4 rows × 13 columns = 52 args, in a single Exec.
+	argMatchers := make([]any, 0, n*13)
+	for i := 0; i < n*13; i++ {
+		argMatchers = append(argMatchers, pgxmock.AnyArg())
+	}
+	mock.ExpectExec("INSERT INTO audit_logs").
+		WithArgs(argMatchers...).
+		WillReturnResult(pgxmock.NewResult("INSERT", n))
+
+	emitter.EmitUserActions(context.Background(), paramsList)
+	require.NoError(t, mock.ExpectationsWereMet(),
+		"N user-action audits must collapse to a single Exec via CreateBatch")
+}
+
+func TestAuditEmitter_EmitUserActionsEmptyIsNoop(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	emitter := NewAuditEmitter(NewAuditLogStore(mock), zerolog.Nop())
+	emitter.EmitUserActions(context.Background(), nil)
+	require.NoError(t, mock.ExpectationsWereMet(), "no DB call should be made for an empty params slice")
+}
+
+func TestAuditEmitter_EmitUserActionsLogsAndDropsBatchErrors(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should initialize")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	userID := uuid.New()
+	emitter := NewAuditEmitter(NewAuditLogStore(mock), zerolog.Nop())
+
+	emitter.EmitUserActions(context.Background(), []UserActionParams{{
+		OrgID:        orgID,
+		UserID:       userID,
+		Action:       "invalid-action",
+		ResourceType: models.AuditResourceSession,
+	}})
+
+	require.NoError(t, mock.ExpectationsWereMet(), "invalid batch should be dropped without a DB call")
+}

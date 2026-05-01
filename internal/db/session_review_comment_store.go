@@ -84,6 +84,63 @@ func (s *SessionReviewCommentStore) ListBySession(ctx context.Context, orgID, se
 	return pgx.CollectRows(rows, pgx.RowToStructByName[models.SessionReviewComment])
 }
 
+// ListByIDs returns comments matching the given IDs scoped to the org+session.
+// Used to validate that requested comment IDs all belong to the session before
+// performing batch operations. Results are unordered; callers should compare
+// the returned set against the requested IDs to detect missing rows.
+func (s *SessionReviewCommentStore) ListByIDs(ctx context.Context, orgID, sessionID uuid.UUID, ids []uuid.UUID) ([]models.SessionReviewComment, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	query := `
+		SELECT ` + sessionReviewCommentColumns + `
+		FROM session_review_comments
+		WHERE id = ANY(@ids) AND org_id = @org_id AND session_id = @session_id`
+
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
+		"ids":        ids,
+		"org_id":     orgID,
+		"session_id": sessionID,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("query session review comments by ids: %w", err)
+	}
+	return pgx.CollectRows(rows, pgx.RowToStructByName[models.SessionReviewComment])
+}
+
+// ResolveByIDs marks the listed comments as resolved if they aren't already,
+// returning the rows whose state actually changed. Already-resolved comments
+// are silently skipped, which makes the operation idempotent: callers can
+// retry without flipping resolution timestamps. Scoping by org+session
+// prevents cross-tenant resolution even if a foreign ID slips through.
+func (s *SessionReviewCommentStore) ResolveByIDs(ctx context.Context, orgID, sessionID uuid.UUID, ids []uuid.UUID, resolvedByPass int) ([]models.SessionReviewComment, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	query := `
+		UPDATE session_review_comments
+		SET resolved = true,
+		    resolved_at = now(),
+		    resolved_by_pass = @resolved_by_pass,
+		    updated_at = now()
+		WHERE id = ANY(@ids)
+		  AND org_id = @org_id
+		  AND session_id = @session_id
+		  AND resolved = false
+		RETURNING ` + sessionReviewCommentColumns
+
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
+		"ids":              ids,
+		"org_id":           orgID,
+		"session_id":       sessionID,
+		"resolved_by_pass": resolvedByPass,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("resolve session review comments: %w", err)
+	}
+	return pgx.CollectRows(rows, pgx.RowToStructByName[models.SessionReviewComment])
+}
+
 func (s *SessionReviewCommentStore) Update(ctx context.Context, orgID, sessionID, id uuid.UUID, body *string, resolved *bool, resolvedByPass *int) (models.SessionReviewComment, error) {
 	// Build dynamic SET clauses.
 	sets := "updated_at = now()"
