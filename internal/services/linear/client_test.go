@@ -373,6 +373,31 @@ func TestGraphQLClientWorkflowStateForType(t *testing.T) {
 	require.Error(t, err, "WorkflowStateForType should validate required inputs")
 }
 
+// TestGraphQLClientWorkflowStateForType_PositionOrderingDeterministic pins
+// the no-preferences fallback to "lowest position wins" regardless of the
+// order Linear returns the nodes. Without the client-side sort, a session
+// start could silently land on "In Review" instead of "In Progress" when
+// Linear's API reorders responses (the workflowStates query has no orderBy
+// argument, so server-side ordering is implementation-dependent).
+func TestGraphQLClientWorkflowStateForType_PositionOrderingDeterministic(t *testing.T) {
+	t.Parallel()
+
+	client := newGraphQLClientForTest(t, func(t *testing.T, req linearGraphQLRequest, w http.ResponseWriter) {
+		// Out-of-order on purpose: position-3 first, then position-2.
+		writeGraphQLResponse(t, w, `{
+			"data": {"workflowStates": {"nodes": [
+				{"id": "started-2", "name": "In Review", "type": "started", "position": 3},
+				{"id": "started-1", "name": "In Progress", "type": "started", "position": 2},
+				{"id": "backlog-1", "name": "Backlog", "type": "backlog", "position": 1}
+			]}}
+		}`)
+	})
+
+	got, err := client.WorkflowStateForType(context.Background(), "team-1", nil, "started")
+	require.NoError(t, err, "WorkflowStateForType should not error on unordered nodes")
+	require.Equal(t, &WorkflowState{ID: "started-1", Name: "In Progress", Type: "started"}, got, "no-preferences fallback must pick the lowest-position state of the requested type, regardless of API order")
+}
+
 func TestGraphQLClientIssueRecentHumanEdits(t *testing.T) {
 	t.Parallel()
 
