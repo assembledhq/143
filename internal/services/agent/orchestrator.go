@@ -1026,6 +1026,14 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 	if err := o.sessions.UpdateStatus(ctx, run.OrgID, run.ID, "running"); err != nil {
 		return fmt.Errorf("update run status to running: %w", err)
 	}
+	// Fire the Linear state-transition signal exactly once per session, when
+	// the session actually starts running. Linking alone (paste a `ACS-1234`
+	// into the textarea) no longer moves the issue — the issue only flips to
+	// "in progress" once the orchestrator picks the session up and runs it.
+	// The fire-once unique constraint on (session_id, issue_id, "started")
+	// makes a re-entry from a resumed/retried run a no-op, so this call is
+	// safe on every RunAgent invocation.
+	o.enqueueLinearMilestone(ctx, run, string(linear.MilestoneStarted))
 	// runStartedAt is captured AFTER UpdateStatus, so the elapsed reported on
 	// a timeout excludes concurrency check + status write but includes
 	// everything from issue fetch onward (sandbox create, credential inject,
