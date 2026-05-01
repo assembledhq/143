@@ -47,8 +47,11 @@ func (d *DockerProvider) Stats(ctx context.Context, sb *agent.Sandbox) (agent.Ru
 
 // memoryWorkingSet returns the working-set memory: usage minus the page cache
 // portion that the kernel can cheaply reclaim. This matches what `docker
-// stats` shows in the MEM USAGE column. Falls back to raw usage if neither
-// the cgroup-v2 ("inactive_file") nor cgroup-v1 ("cache") key is reported.
+// stats` shows in the MEM USAGE column. Tries cgroup v2's `inactive_file`
+// first, then cgroup v1's `total_inactive_file`, then a coarse `cache`
+// fallback. The `cache` branch over-subtracts (cache covers both active and
+// inactive page cache), so the result understates the true working set on
+// older runtimes that only report `cache`; treat it as a lower bound.
 func memoryWorkingSet(m container.MemoryStats) uint64 {
 	if m.Usage == 0 {
 		return 0

@@ -114,6 +114,8 @@ Workers emit OTel histograms (`container.memory.used`, `container.cpu.used`, `co
 
 **gVisor (runsc) caveat.** Production workers run gVisor by default. gVisor's stat surface is partial: `container.memory.used` is reported but with coarse granularity, and CPU throttling stats are zero. The histograms are still useful for relative comparison ("did p95 mem go up after the bucket bump?"), but treat absolute numbers as approximate. When in doubt, double-check on a runc dev worker.
 
+**Tick-budget caveat at high density.** The sampler fans out at most 8 concurrent stats calls per tick with a 5s per-call timeout, so a tick can take up to `ceil(WORKER_PROCESS_COUNT / 8) * 5s` worst-case (typical Docker `stats?stream=false` calls return in ~1s, well under that ceiling). On the largest bucket (`hcloud-ccx63`, 48 processes) the ceiling is exactly 30s — the same as the default `RUNTIME_STATS_INTERVAL`. If you provision dense nodes with `WORKER_PROCESS_COUNT > 40`, raise `RUNTIME_STATS_INTERVAL` to `60s` so a slow tick can't overrun the next one and silently drop samples.
+
 ## Migration notes
 
 The default `SANDBOX_MEMORY_LIMIT_MB` was lowered from `4096` to `3072` (paired with smaller tmpfs sizes so the agent's actual usable RAM went up, not down). Operators upgrading from earlier versions:

@@ -91,7 +91,7 @@ func (s *Service) runAgentInSandbox(ctx context.Context, params sandboxRunParams
 	}
 	cleanup := func() {
 		if s.usageTracker != nil {
-			s.usageTracker.ContainerStopped(ctx, params.orgID, uuid.Nil, usageEventID, containerStartedAt, exitReason)
+			s.usageTracker.ContainerStopped(ctx, params.orgID, uuid.Nil, usageEventID, sb.ID, containerStartedAt, exitReason)
 		}
 		if destroyErr := s.sandbox.Destroy(ctx, sb); destroyErr != nil {
 			s.logger.Warn().Err(destroyErr).Str("source", params.logName).Msg("failed to destroy sandbox")

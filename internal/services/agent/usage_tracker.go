@@ -110,8 +110,11 @@ func (t *UsageTracker) ContainerStarted(ctx context.Context, orgID, sessionID uu
 // ContainerStopped records that a container was destroyed. Must be called
 // exactly once per ContainerStarted call. sessionID is included in failure
 // logs so billing write failures can be traced back to the owning session
-// in Grafana.
-func (t *UsageTracker) ContainerStopped(ctx context.Context, orgID, sessionID uuid.UUID, eventID uuid.UUID, startedAt time.Time, exitReason string) {
+// in Grafana. containerID must match the sandbox.ID passed to ContainerStarted
+// so the in-memory sampler registry can drop the entry in O(1) without
+// iterating; pass "" if the caller no longer has it (the registry entry
+// will be reaped by Forget on the next failed Stats call).
+func (t *UsageTracker) ContainerStopped(ctx context.Context, orgID, sessionID uuid.UUID, eventID uuid.UUID, containerID string, startedAt time.Time, exitReason string) {
 	stoppedAt := time.Now()
 	orgIDStr := orgID.String()
 	durationSec := stoppedAt.Sub(startedAt).Seconds()
@@ -122,17 +125,14 @@ func (t *UsageTracker) ContainerStopped(ctx context.Context, orgID, sessionID uu
 		t.metrics.RecordStop(ctx, orgIDStr, exitReason, durationSec, durationMin)
 	}
 
-	// Remove from the in-memory registry. Iterate to find by event ID
-	// rather than container ID so callers don't need to thread the
-	// sandbox pointer through stop paths that already have eventID.
-	t.mu.Lock()
-	for id, ac := range t.active {
-		if ac.EventID == eventID {
-			delete(t.active, id)
-			break
-		}
+	// Remove from the in-memory registry. The map is keyed by container ID
+	// so this is an O(1) delete that's unambiguous even if RecordStart
+	// failure ever stops short-circuiting the registry insert.
+	if containerID != "" {
+		t.mu.Lock()
+		delete(t.active, containerID)
+		t.mu.Unlock()
 	}
-	t.mu.Unlock()
 
 	// DB persistence. Skip if eventID is Nil (start recording failed).
 	if t.store != nil && eventID != uuid.Nil {

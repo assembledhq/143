@@ -114,7 +114,7 @@ func TestRuntimeSampler_StoppedContainerIsNotSampled(t *testing.T) {
 
 	startedAt := time.Now()
 	eventID := tracker.ContainerStarted(context.Background(), orgID, sessionID, sb, cfg, startedAt)
-	tracker.ContainerStopped(context.Background(), orgID, sessionID, eventID, startedAt, "ok")
+	tracker.ContainerStopped(context.Background(), orgID, sessionID, eventID, sb.ID, startedAt, "ok")
 
 	require.Empty(t, tracker.Snapshot(), "stopped container must be removed from registry")
 
@@ -216,9 +216,9 @@ func TestRuntimeSampler_PanicInStatsDoesNotCrashWorker(t *testing.T) {
 func TestRuntimeSampler_NotFoundEvictsRegistryEntry(t *testing.T) {
 	t.Parallel()
 	tracker := agent.NewUsageTracker(nil, newMetrics(t), zerolog.Nop())
-	prov := &fakeStatsProvider{err: errors.New("wrap: " + agent.ErrSandboxNotFound.Error())}
-	// Use a real wrapping so errors.Is matches.
-	prov.err = wrapNotFound()
+	// Wrap ErrSandboxNotFound so errors.Is matches — same shape Stats()
+	// returns from real providers when Docker reports the container is gone.
+	prov := &fakeStatsProvider{err: wrapNotFound()}
 
 	orgID := uuid.New()
 	sessionID := uuid.New()
