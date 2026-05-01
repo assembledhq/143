@@ -201,6 +201,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	sessionHandler.SetViewStore(sessionViewStore)
 	sessionHandler.SetIssueLinkStore(sessionIssueLinkStore)
 	sessionHandler.SetIssueSnapshotStore(sessionIssueSnapshotStore)
+	sessionHandler.SetReviewCommentStore(sessionReviewCommentStore)
 
 	// Linear session-linking: detection, primary resolution + context
 	// snapshotting, attachment/comment writes, state-sync transitions —
