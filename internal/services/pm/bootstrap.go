@@ -91,7 +91,7 @@ func (s *Service) runAgentInSandbox(ctx context.Context, params sandboxRunParams
 	}
 	cleanup := func() {
 		if s.usageTracker != nil {
-			s.usageTracker.ContainerStopped(ctx, params.orgID, uuid.Nil, usageEventID, containerStartedAt, exitReason)
+			s.usageTracker.ContainerStopped(ctx, params.orgID, uuid.Nil, usageEventID, sb.ID, containerStartedAt, exitReason)
 		}
 		if destroyErr := s.sandbox.Destroy(ctx, sb); destroyErr != nil {
 			s.logger.Warn().Err(destroyErr).Str("source", params.logName).Msg("failed to destroy sandbox")
@@ -324,10 +324,13 @@ func (creds *integrationCredentials) connectedProviderNames() []string {
 }
 
 func bootstrapSandboxConfig() agent.SandboxConfig {
+	// Inherit SANDBOX_CPU_LIMIT / SANDBOX_MEMORY_LIMIT_MB from
+	// DefaultSandboxConfig so capacity-planning math (deploy/scripts/
+	// worker_buckets.sh) doesn't have to special-case bootstraps. Bootstrap
+	// only overrides the wall-clock timeout (repo clone + analysis is the
+	// long pole) and the network policy.
 	cfg := agent.DefaultSandboxConfig()
 	cfg.Timeout = 30 * time.Minute
-	cfg.CPULimit = 2
-	cfg.MemoryLimitMB = 4096
 	cfg.NetworkPolicy = "restricted"
 	return cfg
 }
