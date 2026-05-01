@@ -193,6 +193,33 @@ func (s PRCreationState) Validate() error {
 	}
 }
 
+// PRPushState mirrors PRCreationState but tracks the "Push changes" follow-up
+// action that pushes new commits to an already-open PR. Kept separate so the
+// two operations can be in flight independently and so the UI does not have to
+// disambiguate "succeeded" between "PR opened" and "changes pushed".
+type PRPushState string
+
+const (
+	PRPushStateIdle      PRPushState = "idle"
+	PRPushStateQueued    PRPushState = "queued"
+	PRPushStatePushing   PRPushState = "pushing"
+	PRPushStateSucceeded PRPushState = "succeeded"
+	PRPushStateFailed    PRPushState = "failed"
+)
+
+func (s PRPushState) Validate() error {
+	switch s {
+	case PRPushStateIdle,
+		PRPushStateQueued,
+		PRPushStatePushing,
+		PRPushStateSucceeded,
+		PRPushStateFailed:
+		return nil
+	default:
+		return fmt.Errorf("invalid PRPushState: %q", s)
+	}
+}
+
 // SandboxState tracks the lifecycle of a session's sandbox.
 type SandboxState string
 

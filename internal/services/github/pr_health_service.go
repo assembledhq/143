@@ -82,7 +82,7 @@ func (s *PRService) GetPullRequestHealth(ctx context.Context, orgID, pullRequest
 		return nil, err
 	}
 
-	if (pr.GitHubStateSyncedAt == nil || pr.HealthVersion == 0) && pr.Status == "open" {
+	if (pr.GitHubStateSyncedAt == nil || pr.HealthVersion == 0) && pr.Status == models.PullRequestStatusOpen {
 		if err := s.SyncPullRequestState(ctx, orgID, pullRequestID); err != nil {
 			s.logger.Warn().Err(err).Str("pull_request_id", pullRequestID.String()).Msg("failed to sync pull request health inline")
 		}
@@ -90,7 +90,7 @@ func (s *PRService) GetPullRequestHealth(ctx context.Context, orgID, pullRequest
 		if err != nil {
 			return nil, err
 		}
-	} else if pr.Status == "open" && pr.GitHubStateSyncedAt != nil && time.Since(*pr.GitHubStateSyncedAt) > prHealthStaleAfter {
+	} else if pr.Status == models.PullRequestStatusOpen && pr.GitHubStateSyncedAt != nil && time.Since(*pr.GitHubStateSyncedAt) > prHealthStaleAfter {
 		s.enqueuePullRequestStateSync(ctx, pr)
 	}
 
@@ -99,7 +99,7 @@ func (s *PRService) GetPullRequestHealth(ctx context.Context, orgID, pullRequest
 		return nil, err
 	}
 
-	if pr.Status == "open" && resp.FailingTestCount > 0 && !resp.EnrichmentReady && !resp.EnrichmentRequested {
+	if pr.Status == models.PullRequestStatusOpen && resp.FailingTestCount > 0 && !resp.EnrichmentReady && !resp.EnrichmentRequested {
 		s.enqueuePullRequestHealthEnrichment(ctx, pr, resp.HealthVersion)
 		resp.EnrichmentRequested = true
 	}
@@ -131,22 +131,40 @@ func (s *PRService) buildPullRequestHealthResponse(ctx context.Context, pr model
 
 	current, err := s.pullRequests.GetHealthCurrent(ctx, pr.OrgID, pr.ID)
 	if err == nil {
+		// currentMatchesHead suppresses the cached health summary when it
+		// describes a SHA the PR has already moved past (e.g. after a "Push
+		// changes" follow-up). The HealthVersion != 0 short-circuit relies
+		// on PullRequestStore.UpdateHeadSHA resetting health_version to 0
+		// on every push — if a future writer changes that invariant the
+		// SHA comparison must become unconditional, otherwise stale
+		// "Resolve conflicts"/"Fix tests" banners can survive a fresh push.
+		// resp.HeadSHA == "" preserves legacy behavior for PRs that never
+		// had a head SHA recorded; nothing to compare against.
+		currentMatchesHead := pr.HealthVersion != 0 || resp.HeadSHA == "" || current.HeadSHA == resp.HeadSHA
 		var summary models.PullRequestHealthSummary
-		if unmarshalErr := json.Unmarshal(current.SummaryJSON, &summary); unmarshalErr == nil {
-			normalizeStoredCheckSummaries(&summary)
-			resp.MergeState = summary.MergeState
-			resp.HasConflicts = summary.HasConflicts
-			resp.FailingTestCount = summary.FailingTestCount
-			resp.NeedsAgentAction = summary.NeedsAgentAction
-			resp.Checks = summary.Checks
-			resp.HealthVersion = current.Version
-			resp.HeadSHA = current.HeadSHA
-			resp.BaseSHA = current.BaseSHA
-			resp.ChecksConfirmed = true
-			resp.EnrichmentStatus = current.EnrichmentStatus
-			resp.EnrichmentRequested = current.EnrichmentStatus == models.PullRequestHealthEnrichmentStatusPending
-			resp.EnrichmentReady = current.EnrichmentStatus == models.PullRequestHealthEnrichmentStatusReady
-			derivePullRequestRepairActions(resp)
+		if currentMatchesHead {
+			if unmarshalErr := json.Unmarshal(current.SummaryJSON, &summary); unmarshalErr == nil {
+				normalizeStoredCheckSummaries(&summary)
+				resp.MergeState = summary.MergeState
+				resp.HasConflicts = summary.HasConflicts
+				resp.FailingTestCount = summary.FailingTestCount
+				resp.NeedsAgentAction = summary.NeedsAgentAction
+				resp.Checks = summary.Checks
+				resp.HealthVersion = current.Version
+				resp.HeadSHA = current.HeadSHA
+				resp.BaseSHA = current.BaseSHA
+				resp.ChecksConfirmed = true
+				resp.EnrichmentStatus = current.EnrichmentStatus
+				resp.EnrichmentRequested = current.EnrichmentStatus == models.PullRequestHealthEnrichmentStatusPending
+				resp.EnrichmentReady = current.EnrichmentStatus == models.PullRequestHealthEnrichmentStatusReady
+				derivePullRequestRepairActions(resp)
+			}
+		} else {
+			s.logger.Info().
+				Str("pull_request_id", pr.ID.String()).
+				Str("pr_head_sha", resp.HeadSHA).
+				Str("health_head_sha", current.HeadSHA).
+				Msg("skipping stale pull request health summary for newer PR head")
 		}
 
 		if resp.EnrichmentReady {
@@ -172,7 +190,7 @@ func derivePullRequestRepairActions(resp *models.PullRequestHealthResponse) {
 	// Once GitHub health has been loaded, zero checks means "no CI rules
 	// configured" and is mergeable. Before that health snapshot exists, zero
 	// checks remains ambiguous and we keep merge hidden.
-	resp.CanMerge = resp.Status == "open" &&
+	resp.CanMerge = resp.Status == models.PullRequestStatusOpen &&
 		resp.MergeState == models.PullRequestMergeStateClean &&
 		checksAllowMerge(resp.ChecksConfirmed, resp.Checks)
 }
@@ -215,7 +233,7 @@ func (s *PRService) SyncPullRequestState(ctx context.Context, orgID, pullRequest
 	// signature mismatch, app restart, etc.). Apply the same transition the
 	// webhook handler would have, then stop — a closed PR has no live health
 	// to track and re-running follow-ups would just churn idempotent work.
-	if strings.EqualFold(strings.TrimSpace(details.State), "closed") && pr.Status == "open" {
+	if strings.EqualFold(strings.TrimSpace(details.State), "closed") && pr.Status == models.PullRequestStatusOpen {
 		s.logger.Warn().
 			Str("pull_request_id", pullRequestID.String()).
 			Str("repo", pr.GitHubRepo).

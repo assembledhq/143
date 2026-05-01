@@ -317,6 +317,60 @@ func TestGitHubStatusHandler_HandleConnectCallback_RedirectsBackToSessionResume(
 	require.Equal(t, "/sessions/"+sessionID.String(), parsed.Path, "callback should return to the originating session page")
 	require.Equal(t, "connected", parsed.Query().Get("github_pr"), "redirect should note successful GitHub PR auth")
 	require.NotEmpty(t, parsed.Query().Get("resume_pr"), "redirect should carry resume token back to the frontend")
+	require.Empty(t, parsed.Query().Get("resume_action"), "redirect should omit resume_action for legacy tokens without an Action claim")
+}
+
+func TestGitHubStatusHandler_HandleConnectCallback_ForwardsResumeAction(t *testing.T) {
+	t.Parallel()
+
+	// When the resume token's claims record an originating action, the
+	// callback must forward it as a resume_action URL param so the frontend
+	// dispatches deterministically (push vs create) regardless of any PR
+	// state change during the OAuth round-trip.
+	orgID := uuid.New()
+	userID := uuid.New()
+	sessionID := uuid.New()
+	handler := NewGitHubStatusHandler(
+		&stubGHCredentialStore{}, &stubGHOrgReader{},
+		"test-client-id", "test-secret", "https://app.143.dev", "https://app.143.dev",
+	)
+	handler.SetPRAuthFlow("test-signing-key-32bytes-minimum-length")
+	handler.appUserAuth = &stubGitHubAppUserAuthService{
+		exchangeCodeFunc: func(context.Context, string) (*models.GitHubAppUserConfig, error) {
+			return &models.GitHubAppUserConfig{
+				AccessToken:           "ghu_test",
+				TokenType:             "bearer",
+				ExpiresAt:             time.Now().Add(time.Hour),
+				RefreshToken:          "ghr_test",
+				RefreshTokenExpiresAt: time.Now().Add(30 * 24 * time.Hour),
+			}, nil
+		},
+	}
+
+	resumeToken, err := signPRAuthResumeToken([]byte("test-signing-key-32bytes-minimum-length"), prAuthResumeClaims{
+		SessionID:  sessionID,
+		UserID:     userID,
+		OrgID:      orgID,
+		AuthorMode: "user",
+		Action:     string(prAuthActionPushChanges),
+		ExpiresAt:  time.Now().Add(5 * time.Minute).Unix(),
+	})
+	require.NoError(t, err, "resume token should sign")
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/users/me/github/callback?state=ok&code=abc", nil)
+	req.AddCookie(&http.Cookie{Name: githubPRConnectStateCookie, Value: "ok"})
+	req.AddCookie(&http.Cookie{Name: githubPRResumeCookiePrefix + "ok", Value: resumeToken})
+	ctx := middleware.WithUser(req.Context(), &models.User{ID: userID, OrgID: orgID})
+	ctx = middleware.WithOrgID(ctx, orgID)
+	req = req.WithContext(ctx)
+	rr := httptest.NewRecorder()
+
+	handler.HandleConnectCallback(rr, req)
+
+	require.Equal(t, http.StatusTemporaryRedirect, rr.Code, "callback should redirect back to the session page")
+	parsed, parseErr := url.Parse(rr.Header().Get("Location"))
+	require.NoError(t, parseErr, "redirect location should parse")
+	require.Equal(t, "push_changes", parsed.Query().Get("resume_action"), "callback should forward the action recorded in the signed claims")
 }
 
 func TestGitHubStatusHandler_HandleConnectCallback_UsesStateScopedResumeCookie(t *testing.T) {
