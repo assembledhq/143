@@ -238,6 +238,9 @@ func TestRunAuthToken_ErrorPaths(t *testing.T) {
 	for _, tt := range tests {
 		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
+			if tt.socketPath == "" {
+				t.Setenv(SocketEnvVar, "")
+			}
 			if tt.handler != nil {
 				tt.socketPath = startSocketServer(t, tt.handler)
 				t.Setenv(SocketEnvVar, tt.socketPath)
@@ -665,7 +668,6 @@ func TestInstallGHWrapper_ErrorsWhenBinPathCannotBeCreated(t *testing.T) {
 
 func TestCallHost_RequiresSocketEnv(t *testing.T) {
 	t.Setenv(SocketEnvVar, "")
-
 	resp, err := callHost(ActionPush)
 	require.Nil(t, resp, "callHost should not return a response without a socket path")
 	require.Error(t, err, "callHost should fail when the socket env var is missing")

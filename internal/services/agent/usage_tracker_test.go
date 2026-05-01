@@ -17,9 +17,10 @@ import (
 
 // mockContainerUsageStore records calls for verification.
 type mockContainerUsageStore struct {
-	startCalls    []models.ContainerUsageEvent
-	stopCalls     []stopCall
-	recordStopErr error
+	startCalls     []models.ContainerUsageEvent
+	recordStartErr error
+	stopCalls      []stopCall
+	recordStopErr  error
 }
 
 type stopCall struct {
@@ -30,7 +31,7 @@ type stopCall struct {
 
 func (m *mockContainerUsageStore) RecordStart(_ context.Context, event *models.ContainerUsageEvent) error {
 	m.startCalls = append(m.startCalls, *event)
-	return nil
+	return m.recordStartErr
 }
 
 func (m *mockContainerUsageStore) RecordStop(_ context.Context, eventID uuid.UUID, stoppedAt time.Time, exitReason string) error {
@@ -73,10 +74,11 @@ func TestUsageTracker_ContainerLifecycle(t *testing.T) {
 	require.Equal(t, 4096, store.startCalls[0].MemoryLimitMB)
 	require.Equal(t, startedAt, store.startCalls[0].StartedAt, "DB and caller should use the same timestamp")
 
-	tracker.ContainerStopped(context.Background(), orgID, sessionID, eventID, startedAt, "completed")
+	tracker.ContainerStopped(context.Background(), orgID, sessionID, eventID, sandbox.ID, startedAt, "completed")
 	require.Len(t, store.stopCalls, 1)
 	require.Equal(t, eventID, store.stopCalls[0].EventID)
 	require.Equal(t, "completed", store.stopCalls[0].ExitReason)
+	require.Empty(t, tracker.Snapshot(), "ContainerStopped must remove the entry from the sampler registry")
 }
 
 func TestUsageTracker_NilStoreAndMetrics(t *testing.T) {
@@ -92,7 +94,7 @@ func TestUsageTracker_NilStoreAndMetrics(t *testing.T) {
 
 	startedAt := time.Now()
 	eventID := tracker.ContainerStarted(context.Background(), orgID, sessionID, sandbox, cfg, startedAt)
-	tracker.ContainerStopped(context.Background(), orgID, sessionID, eventID, startedAt, "completed")
+	tracker.ContainerStopped(context.Background(), orgID, sessionID, eventID, sandbox.ID, startedAt, "completed")
 	// No panic = success.
 }
 
@@ -111,11 +113,11 @@ func TestUsageTracker_RecordStopFailureLogsSessionID(t *testing.T) {
 	startedAt := time.Now().Add(-time.Minute)
 
 	// Happy case: sessionID set — should include session_id in the error log.
-	tracker.ContainerStopped(context.Background(), orgID, sessionID, eventID, startedAt, "failed")
+	tracker.ContainerStopped(context.Background(), orgID, sessionID, eventID, "ctr-fail-1", startedAt, "failed")
 	require.Len(t, store.stopCalls, 1, "RecordStop should be invoked even when it errors")
 
 	// Nil-session guard: RecordStop still called but session_id field skipped.
-	tracker.ContainerStopped(context.Background(), orgID, uuid.Nil, eventID, startedAt, "failed")
+	tracker.ContainerStopped(context.Background(), orgID, uuid.Nil, eventID, "ctr-fail-2", startedAt, "failed")
 	require.Len(t, store.stopCalls, 2)
 }
 
@@ -127,6 +129,25 @@ func TestUsageTracker_RecordStopSkippedOnNilEventID(t *testing.T) {
 	store := &mockContainerUsageStore{recordStopErr: fmt.Errorf("should not be called")}
 	tracker := agent.NewUsageTracker(store, testBillingMetrics(t), zerolog.Nop())
 
-	tracker.ContainerStopped(context.Background(), uuid.New(), uuid.New(), uuid.Nil, time.Now(), "failed")
+	tracker.ContainerStopped(context.Background(), uuid.New(), uuid.New(), uuid.Nil, "ctr-nil-event", time.Now(), "failed")
 	require.Empty(t, store.stopCalls, "RecordStop should be skipped when eventID is Nil")
+}
+
+func TestUsageTracker_RecordStartFailureDoesNotLeaveActiveContainer(t *testing.T) {
+	t.Parallel()
+
+	store := &mockContainerUsageStore{recordStartErr: fmt.Errorf("db down")}
+	tracker := agent.NewUsageTracker(store, testBillingMetrics(t), zerolog.Nop())
+
+	eventID := tracker.ContainerStarted(
+		context.Background(),
+		uuid.New(),
+		uuid.New(),
+		&agent.Sandbox{ID: "ctr-start-failed", Provider: "docker", WorkDir: "/workspace"},
+		agent.DefaultSandboxConfig(),
+		time.Now(),
+	)
+
+	require.Equal(t, uuid.Nil, eventID, "ContainerStarted should return Nil when DB start recording fails")
+	require.Empty(t, tracker.Snapshot(), "failed start recording should not leave a container in the sampler registry")
 }

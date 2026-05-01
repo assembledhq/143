@@ -207,7 +207,7 @@ type JobStore interface {
 // UsageRecorder tracks container lifecycle events for billing.
 type UsageRecorder interface {
 	ContainerStarted(ctx context.Context, orgID, sessionID uuid.UUID, sandbox *Sandbox, cfg SandboxConfig, startedAt time.Time) uuid.UUID
-	ContainerStopped(ctx context.Context, orgID, sessionID uuid.UUID, eventID uuid.UUID, startedAt time.Time, exitReason string)
+	ContainerStopped(ctx context.Context, orgID, sessionID uuid.UUID, eventID uuid.UUID, containerID string, startedAt time.Time, exitReason string)
 }
 
 // MemoryService provides scored memory context for agent prompts.
@@ -1026,6 +1026,14 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 	if err := o.sessions.UpdateStatus(ctx, run.OrgID, run.ID, "running"); err != nil {
 		return fmt.Errorf("update run status to running: %w", err)
 	}
+	// Fire the Linear state-transition signal exactly once per session, when
+	// the session actually starts running. Linking alone (paste a `ACS-1234`
+	// into the textarea) no longer moves the issue — the issue only flips to
+	// "in progress" once the orchestrator picks the session up and runs it.
+	// The fire-once unique constraint on (session_id, issue_id, "started")
+	// makes a re-entry from a resumed/retried run a no-op, so this call is
+	// safe on every RunAgent invocation.
+	o.enqueueLinearMilestone(ctx, run, string(linear.MilestoneStarted))
 	// runStartedAt is captured AFTER UpdateStatus, so the elapsed reported on
 	// a timeout excludes concurrency check + status write but includes
 	// everything from issue fetch onward (sandbox create, credential inject,
@@ -1292,7 +1300,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 			// the parent ctx was cancelled (timeout, shutdown).
 			stopCtx, stopCancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer stopCancel()
-			o.usageTracker.ContainerStopped(stopCtx, run.OrgID, run.ID, usageEventID, containerStartedAt, exitReason)
+			o.usageTracker.ContainerStopped(stopCtx, run.OrgID, run.ID, usageEventID, sandbox.ID, containerStartedAt, exitReason)
 		}
 		// Use a background context for cleanup since the run context may be cancelled.
 		destroyCtx := context.Background()
@@ -2019,7 +2027,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		if o.usageTracker != nil {
 			stopCtx, stopCancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer stopCancel()
-			o.usageTracker.ContainerStopped(stopCtx, session.OrgID, session.ID, usageEventID, containerStartedAt, exitReason)
+			o.usageTracker.ContainerStopped(stopCtx, session.OrgID, session.ID, usageEventID, sandbox.ID, containerStartedAt, exitReason)
 		}
 		// Detached context so DB writes + destroy succeed even if ctx was
 		// cancelled (user cancel, timeout, shutdown).

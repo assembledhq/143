@@ -291,6 +291,9 @@ export function PreviewPanel({
     status === "partially_ready" ||
     status === "starting";
   const isReady = status === "ready" || status === "partially_ready";
+  const hasStartupRows = services.length > 0 || infrastructure.length > 0;
+  const showStartupProgress =
+    (isActive && !isReady) || (status === "failed" && hasStartupRows);
 
   // Start preview
   const startMutation = useMutation({
@@ -326,6 +329,25 @@ export function PreviewPanel({
       if (code === PREVIEW_ERROR_CODES.NO_SANDBOX) {
         setMutationError(
           "Preview is unavailable on this server (Docker not configured). Contact an admin."
+        );
+        return;
+      }
+      if (code === PREVIEW_ERROR_CODES.SANDBOX_BUSY) {
+        // The agent is using the sandbox right now (running a turn). The
+        // backend already destroyed our half-built container; the user just
+        // needs to wait a beat and click again.
+        setMutationError(
+          "The agent is currently using this session's sandbox. Wait for the current turn to finish, then try Start Preview again."
+        );
+        return;
+      }
+      if (code === PREVIEW_ERROR_CODES.WORKER_REQUEST_FAILED) {
+        // Connection to the preview worker dropped mid-request — typically
+        // a timeout or a worker restart. No response body means no real
+        // error code; suggest retry rather than burying the cause under the
+        // generic "Failed to start preview:" prefix.
+        setMutationError(
+          "Could not reach the preview worker (connection dropped). Try Start Preview again — if this keeps happening, the worker may be unhealthy."
         );
         return;
       }
@@ -509,10 +531,9 @@ export function PreviewPanel({
     startMutation.isPending ||
     stopMutation.isPending ||
     restartMutation.isPending;
-  const startupChecklist =
-    isActive && !isReady
-      ? buildStartupChecklist(status, services, infrastructure)
-      : [];
+  const startupChecklist = showStartupProgress
+    ? buildStartupChecklist(status, services, infrastructure)
+    : [];
 
   if (statusLoading) {
     return (
@@ -714,7 +735,7 @@ export function PreviewPanel({
       )}
 
       {/* Startup progress */}
-      {isActive && !isReady && (
+      {showStartupProgress && (
         <div className="space-y-2">
           <div className="rounded-lg border bg-muted/30 p-3">
             <p className="text-sm font-medium">Preview startup can take a few minutes.</p>

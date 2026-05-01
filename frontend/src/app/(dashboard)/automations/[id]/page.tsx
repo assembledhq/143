@@ -16,6 +16,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { MobileBackButton } from "@/components/mobile-back-button";
 import { PageContainer } from "@/components/page-container";
 import { PageHeader } from "@/components/page-header";
 import { BranchPicker } from "@/components/branch-picker";
@@ -253,8 +254,11 @@ export default function AutomationDetailPage() {
   if (isLoading) {
     return (
       <PageContainer size="default">
-        <div className="text-center py-12 text-sm text-muted-foreground">
-          Loading...
+        <div className="space-y-6">
+          <MobileBackButton to="/automations" label="Back to automations" />
+          <div className="text-center py-12 text-sm text-muted-foreground">
+            Loading...
+          </div>
         </div>
       </PageContainer>
     );
@@ -264,6 +268,7 @@ export default function AutomationDetailPage() {
     return (
       <PageContainer size="default">
         <div className="space-y-6">
+          <MobileBackButton to="/automations" label="Back to automations" />
           <PageHeader
             title="Automation not found"
             description="This automation does not exist or has been deleted."
@@ -298,6 +303,7 @@ export default function AutomationDetailPage() {
   return (
     <PageContainer size="default">
       <div className="space-y-6">
+        <MobileBackButton to="/automations" label="Back to automations" />
         <PageHeader
           title={automation.name}
           description={headerDescription}

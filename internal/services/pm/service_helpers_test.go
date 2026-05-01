@@ -49,7 +49,7 @@ func (helperUsageTracker) ContainerStarted(context.Context, uuid.UUID, uuid.UUID
 	return uuid.New()
 }
 
-func (helperUsageTracker) ContainerStopped(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, time.Time, string) {
+func (helperUsageTracker) ContainerStopped(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, string, time.Time, string) {
 }
 
 func TestResolveAgentType(t *testing.T) {

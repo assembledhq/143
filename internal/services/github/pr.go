@@ -33,6 +33,7 @@ import (
 
 const (
 	defaultGitHubAPI  = "https://api.github.com"
+	defaultAppBaseURL = "https://143.dev"
 	maxBranchSlugLen  = 60
 	maxLabelsToCreate = 5
 	maxPRTitleLen     = 120
@@ -80,6 +81,7 @@ type PRService struct {
 	snapshots        storage.SnapshotStore // used by the push-based PR flow
 	logger           zerolog.Logger
 	baseURL          string
+	appBaseURL       string
 	httpClient       *http.Client
 	linearMilestones LinearMilestoneEnqueuer // nil-safe: Linear writes disabled if nil
 
@@ -133,6 +135,7 @@ func NewPRService(
 		jobs:          jobs,
 		logger:        logger,
 		baseURL:       defaultGitHubAPI,
+		appBaseURL:    defaultAppBaseURL,
 		httpClient:    &http.Client{Timeout: 30 * time.Second},
 	}
 }
@@ -383,6 +386,19 @@ func (s *PRService) validateUserToken(ctx context.Context, token string) bool {
 func (s *PRService) SetBaseURL(url string) {
 	s.baseURL = url
 	s.invalidateResolver()
+}
+
+// SetAppBaseURL overrides the web app base URL used in generated PR session links.
+func (s *PRService) SetAppBaseURL(url string) {
+	s.appBaseURL = strings.TrimRight(url, "/")
+}
+
+func (s *PRService) sessionURL(sessionID uuid.UUID) string {
+	baseURL := strings.TrimRight(s.appBaseURL, "/")
+	if baseURL == "" {
+		baseURL = defaultAppBaseURL
+	}
+	return fmt.Sprintf("%s/sessions/%s", baseURL, sessionID.String())
 }
 
 // CreatePRParams holds optional parameters for PR creation that come from the
@@ -2456,7 +2472,7 @@ func (s *PRService) generatePRContent(ctx context.Context, token, owner, repoNam
 
 	// Append footer to body.
 	if result.Body != "" {
-		result.Body += "\n\n" + formatPRFooterLinks(run)
+		result.Body += "\n\n" + s.formatPRFooterLinks(run)
 	}
 
 	return result, nil
@@ -2605,13 +2621,13 @@ func (s *PRService) formatPRBody(ctx context.Context, run *models.Session, issue
 	}
 
 	b.WriteString("\n\n")
-	b.WriteString(formatPRFooterLinks(run))
+	b.WriteString(s.formatPRFooterLinks(run))
 
 	return b.String()
 }
 
-func formatPRFooterLinks(run *models.Session) string {
-	return fmt.Sprintf("[143.dev](https://143.dev) | [session %s](https://app.143.dev/sessions/%s)", run.ID.String()[:8], run.ID)
+func (s *PRService) formatPRFooterLinks(run *models.Session) string {
+	return fmt.Sprintf("[143.dev](https://143.dev) | [session %s](%s)", run.ID.String()[:8], s.sessionURL(run.ID))
 }
 
 func buildLabels(issue *models.Issue) []string {
