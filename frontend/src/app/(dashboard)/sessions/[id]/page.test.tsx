@@ -747,7 +747,7 @@ describe('SessionDetailPage', () => {
 
     renderWithProviders(<SessionDetailContent id={runningSession.id} />);
     expect(await screen.findByText('Agent is working...')).toBeInTheDocument();
-    expect(screen.getByPlaceholderText('Agent is responding...')).toBeDisabled();
+    expect(screen.getByPlaceholderText('Send a follow-up message...')).toBeEnabled();
   });
 
   it('disables input for pending session', async () => {
@@ -2411,7 +2411,52 @@ describe('SessionDetailPage', () => {
     renderWithProviders(<SessionDetailContent id={runningSession.id} />);
     await screen.findByText('Agent is working...');
     expect(screen.getByTitle('Cancel session')).toBeInTheDocument();
-    expect(screen.queryByTitle('Send message')).not.toBeInTheDocument();
+    expect(screen.getByTitle('Send message')).toBeInTheDocument();
+  });
+
+  it('keeps the composer enabled and sends follow-up messages while the session is running', async () => {
+    let postedMessage = '';
+    const runningSession: Session = {
+      ...mockSessions[0],
+      status: 'running',
+      completed_at: undefined,
+      current_turn: 1,
+      sandbox_state: 'running',
+    };
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({ data: runningSession } satisfies SingleResponse<Session>);
+      }),
+      http.post('/api/v1/sessions/:id/messages', async ({ request }) => {
+        const body = await request.json() as { message: string };
+        postedMessage = body.message;
+        return HttpResponse.json({
+          data: {
+            id: 99,
+            session_id: runningSession.id,
+            org_id: 'org-1',
+            user_id: 'user-1',
+            turn_number: 2,
+            role: 'user' as const,
+            content: body.message,
+            created_at: '2026-02-17T07:10:00Z',
+          },
+        } satisfies SingleResponse<SessionMessage>);
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id={runningSession.id} />);
+    const textarea = await screen.findByPlaceholderText('Send a follow-up message...');
+    expect(textarea).toBeEnabled();
+
+    const user = userEvent.setup();
+    await user.type(textarea, 'Queue this behind the current work');
+    await user.click(screen.getByTitle('Send message'));
+
+    await waitFor(() => {
+      expect(postedMessage).toBe('Queue this behind the current work');
+    });
   });
 
   it('shows send button instead of stop button when session is idle', async () => {
