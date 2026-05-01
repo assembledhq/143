@@ -189,11 +189,12 @@ type PRAuthInterceptDetails = {
 
 // PRAuthPromptState is a discriminated union so merge prompts don't carry
 // create-PR-only fields (connect_url, resume_token, can_fallback_to_app).
-// create_pr prompts come from the backend's auth interception payload; merge
-// prompts are always synthesized client-side and connect via the hardcoded
-// /github/connect endpoint with no resume token and no fallback.
+// create_pr and push_changes prompts come from the backend's auth interception
+// payload; merge prompts are always synthesized client-side and connect via
+// the hardcoded /github/connect endpoint with no resume token and no fallback.
 type PRAuthPromptState =
   | ({ purpose: "create_pr" } & PRAuthInterceptDetails)
+  | ({ purpose: "push_changes" } & PRAuthInterceptDetails)
   | { purpose: "merge_pr" };
 
 type PRActionErrorState = {
@@ -1671,6 +1672,7 @@ export function SessionDetailContent({ id }: { id: string }) {
   const [reviewParam, setReviewParam] = useQueryState("review");
   const [previewParam, setPreviewParam] = useQueryState("preview");
   const [resumePRParam, setResumePRParam] = useQueryState("resume_pr");
+  const [resumeActionParam, setResumeActionParam] = useQueryState("resume_action");
   const [githubPRParam, setGithubPRParam] = useQueryState("github_pr");
   const centerMode = reviewParam === "active" ? "review" : "chat";
   const [detailTab, setDetailTab] = useState<DetailTab>(
@@ -1746,6 +1748,8 @@ export function SessionDetailContent({ id }: { id: string }) {
   }, [centerMode, exitReview, setPreviewParam]);
   const [localPRState, setLocalPRState] = useState<"idle" | "submitting" | "queued">("idle");
   const [localPRActionError, setLocalPRActionError] = useState<PRActionErrorState | null>(null);
+  const [localPushState, setLocalPushState] = useState<"idle" | "submitting" | "queued">("idle");
+  const [localPushActionError, setLocalPushActionError] = useState<PRActionErrorState | null>(null);
   const [pendingPRAction, setPendingPRAction] = useState<"fix_tests" | "resolve_conflicts" | "merge" | null>(null);
   const [repairActionError, setRepairActionError] = useState<string | null>(null);
   const [prAuthPrompt, setPRAuthPrompt] = useState<PRAuthPromptState | null>(null);
@@ -1762,12 +1766,16 @@ export function SessionDetailContent({ id }: { id: string }) {
       const waitingForServer = localPRState !== "idle" &&
         s.pr_creation_state !== "failed" &&
         s.pr_creation_state !== "succeeded";
+      const pushInFlight = s.pr_push_state === "queued" || s.pr_push_state === "pushing";
+      const waitingForPushServer = localPushState !== "idle" &&
+        s.pr_push_state !== "failed" &&
+        s.pr_push_state !== "succeeded";
 
-      // Poll while PR creation is in flight so the state machine advances
-      // without waiting for the user to navigate. Keep polling during the
-      // optimistic local phases too, since the best-effort queued write can
-      // legitimately lag the 202 response.
-      return serverInFlight || waitingForServer ? 2000 : false;
+      // Poll while PR creation OR push-changes is in flight so the state
+      // machine advances without waiting for the user to navigate. Keep
+      // polling during the optimistic local phases too, since the best-effort
+      // queued write can legitimately lag the 202 response.
+      return serverInFlight || waitingForServer || pushInFlight || waitingForPushServer ? 2000 : false;
     },
   });
 
@@ -1883,6 +1891,34 @@ export function SessionDetailContent({ id }: { id: string }) {
     }
     prevPRUrlRef.current = prUrl;
   }, [localPRState, prUrl, session?.pr_creation_state]);
+
+  // React to pr_push_state transitions with toast feedback. Mirrors the
+  // pr_creation_state effect above; kept separate so the two operations'
+  // success/error messages don't collide when both fire on the same render.
+  // Also clears localPushState when the server transitions out of in-flight
+  // so the button returns to "Push changes" promptly without waiting for the
+  // next polling tick.
+  const prevPRPushStateRef = useRef<string | undefined>(undefined);
+  useEffect(() => {
+    const prev = prevPRPushStateRef.current;
+    const current = session?.pr_push_state;
+    if (prev && current && prev !== current) {
+      if (current === "succeeded") {
+        queryClient.invalidateQueries({ queryKey: ["session", id, "pr"] });
+        if (pullRequestId) {
+          queryClient.invalidateQueries({ queryKey: ["pull-request", pullRequestId, "health"] });
+        }
+        setLocalPushState("idle");
+        toast.success("Changes pushed to PR", prUrl ? {
+          action: { label: "View \u2197", onClick: () => window.open(prUrl, "_blank", "noopener,noreferrer") },
+        } : undefined);
+      } else if (current === "failed") {
+        setLocalPushState("idle");
+        toast.error(session?.pr_push_error || "Push to PR failed", { duration: PR_ERROR_TOAST_DURATION_MS });
+      }
+    }
+    prevPRPushStateRef.current = current;
+  }, [session?.pr_push_state, session?.pr_push_error, prUrl, queryClient, id, pullRequestId]);
   const startRepairMutation = useMutation({
     mutationFn: async (action: "fix_tests" | "resolve_conflicts") => {
       if (!pullRequestId) {
@@ -2045,10 +2081,11 @@ export function SessionDetailContent({ id }: { id: string }) {
 
   const clearPRResumeParams = useCallback(() => {
     void setResumePRParam(null);
+    void setResumeActionParam(null);
     if (githubPRParam === "connected") {
       void setGithubPRParam(null);
     }
-  }, [githubPRParam, setGithubPRParam, setResumePRParam]);
+  }, [githubPRParam, setGithubPRParam, setResumePRParam, setResumeActionParam]);
 
   const createPRMutation = useMutation({
     mutationFn: (options?: { draft?: boolean; authorMode?: PRAuthorMode; resumeToken?: string }) =>
@@ -2089,12 +2126,78 @@ export function SessionDetailContent({ id }: { id: string }) {
     },
   });
 
+  const pushChangesMutation = useMutation({
+    mutationFn: (options?: { authorMode?: PRAuthorMode; resumeToken?: string }) =>
+      api.sessions.pushChangesToPR(id, options),
+    onMutate: () => {
+      setLocalPushActionError(null);
+      setLocalPushState("submitting");
+    },
+    onSuccess: (_data, options) => {
+      setLocalPushActionError(null);
+      setLocalPushState("queued");
+      if (options?.resumeToken) {
+        clearPRResumeParams();
+      }
+      queryClient.invalidateQueries({ queryKey: ["session", id] });
+    },
+    onError: (err, options) => {
+      if (err instanceof ApiError &&
+        (err.code === "GITHUB_PR_AUTHORSHIP_REQUIRED" || err.code === "GITHUB_PR_AUTHORSHIP_REAUTH_REQUIRED") &&
+        isPRAuthInterceptDetails(err.details)) {
+        setLocalPushState("idle");
+        setLocalPushActionError(null);
+        setPRAuthPrompt({ ...err.details, purpose: "push_changes" });
+        clearPRResumeParams();
+        return;
+      }
+      setLocalPushState("idle");
+      const msg = err instanceof Error ? err.message : "Push to PR failed";
+      setLocalPushActionError({
+        code: err instanceof ApiError ? err.code : undefined,
+        message: msg,
+      });
+      if (options?.resumeToken) {
+        clearPRResumeParams();
+      }
+      toast.error(msg, { duration: PR_ERROR_TOAST_DURATION_MS });
+    },
+  });
+
   useEffect(() => {
-    if (!canCreatePR || !resumePRParam) return;
+    if (!resumePRParam) return;
     if (resumeAttemptRef.current === resumePRParam) return;
+    // Prefer the action recorded in the resume_action URL param: it was
+    // signed into the resume token at the originating endpoint and forwarded
+    // by the OAuth callback, so the replay is deterministic regardless of
+    // any state change during the GitHub round-trip (e.g. another tab
+    // creating the PR, or the PR getting closed). Fall back to the current
+    // PR state for legacy tokens that predate the resume_action param.
+    const action: "create_pr" | "push_changes" =
+      resumeActionParam === "push_changes"
+        ? "push_changes"
+        : resumeActionParam === "create_pr"
+          ? "create_pr"
+          : hasPR && prStatus === "open"
+            ? "push_changes"
+            : "create_pr";
+    if (action === "push_changes") {
+      // Mirror the canCreatePR gate on the create branch: don't fire the
+      // mutation until the session has a snapshot and isn't mid-turn.
+      // Without this, the OAuth callback firing while the session is still
+      // running would land an immediate 409 (or stale-snapshot error). The
+      // effect re-runs when these dependencies flip, so the replay still
+      // happens — just on the next tick when the session is actually ready.
+      const pushAvailable = hasPR && prStatus === "open";
+      if (!pushAvailable || !hasSnapshot || isRunning) return;
+      resumeAttemptRef.current = resumePRParam;
+      pushChangesMutation.mutate({ authorMode: "user", resumeToken: resumePRParam });
+      return;
+    }
+    if (!canCreatePR) return;
     resumeAttemptRef.current = resumePRParam;
     createPRMutation.mutate({ authorMode: "user", resumeToken: resumePRParam });
-  }, [canCreatePR, createPRMutation, resumePRParam]);
+  }, [canCreatePR, createPRMutation, hasPR, hasSnapshot, isRunning, prStatus, pushChangesMutation, resumeActionParam, resumePRParam]);
 
   const sessionDiff = session?.diff;
   const diffStats = useMemo(() => {
@@ -2442,6 +2545,52 @@ export function SessionDetailContent({ id }: { id: string }) {
     prActionTitle = "Connect your GitHub account to create PRs";
   }
 
+  // Push-changes button derived state. Mirrors the PR creation block above
+  // but operates on session.pr_push_state. Rendered inside the PR health
+  // banner alongside Resolve conflicts / Fix tests / Merge so all PR-level
+  // actions live in one place; the backend exits cleanly with "no changes"
+  // if there is nothing to push, so we don't gate on a frontend-side dirty
+  // check.
+  const pushAvailable = hasPR && prStatus === "open";
+  const pushState = session.pr_push_state;
+  const queueingPush = localPushState === "submitting";
+  const pushingChanges =
+    (localPushState === "queued" && pushState !== "failed" && pushState !== "succeeded") ||
+    pushState === "queued" ||
+    pushState === "pushing";
+  const canPushChanges = pushAvailable && hasSnapshot && !isRunning;
+  const showPushAction = pushAvailable && (canPushChanges || queueingPush || pushingChanges || pushState === "failed" || localPushActionError);
+  let pushActionLabel = "Push changes";
+  let pushActionSpinning = false;
+  let pushActionDisabled = false;
+  let pushActionTitle: string | undefined;
+  if (queueingPush) {
+    pushActionLabel = "Queueing…";
+    pushActionSpinning = true;
+    pushActionDisabled = true;
+    pushActionTitle = "Sending the push request to the queue";
+  } else if (pushingChanges) {
+    pushActionLabel = "Pushing…";
+    pushActionSpinning = true;
+    pushActionDisabled = true;
+    pushActionTitle = "Pushing changes to the PR branch";
+  } else if (snapshotUnavailable) {
+    pushActionDisabled = true;
+    pushActionTitle = snapshotMessage;
+  } else if (localPushActionError) {
+    pushActionLabel = "Retry";
+    pushActionTitle = localPushActionError.message;
+  } else if (pushState === "failed") {
+    pushActionLabel = "Retry";
+    pushActionTitle = session.pr_push_error || "Push to PR failed";
+  } else if (ghBlocked) {
+    pushActionDisabled = true;
+    pushActionTitle = "Connect your GitHub account to push changes";
+  } else if (isRunning) {
+    pushActionDisabled = true;
+    pushActionTitle = "Wait for the session to finish before pushing";
+  }
+
   function handleMergeAction() {
     if (ghBlocked) {
       setPRAuthPrompt({ purpose: "merge_pr" });
@@ -2586,6 +2735,14 @@ export function SessionDetailContent({ id }: { id: string }) {
                 onFixTests={() => startRepairMutation.mutate("fix_tests")}
                 onResolveConflicts={() => startRepairMutation.mutate("resolve_conflicts")}
                 onMerge={handleMergeAction}
+                pushChanges={showPushAction ? {
+                  label: pushActionLabel,
+                  disabled: pushActionDisabled,
+                  spinning: pushActionSpinning,
+                  showError: pushState === "failed" || !!localPushActionError,
+                  title: pushActionTitle,
+                  onClick: () => pushChangesMutation.mutate(undefined),
+                } : undefined}
               />
             ) : isPRHealthLoading ? (
               <Card className="border-border/60">
@@ -2900,12 +3057,16 @@ export function SessionDetailContent({ id }: { id: string }) {
             <AlertDialogTitle>
               {prAuthPrompt?.purpose === "merge_pr"
                 ? "Merge this pull request as yourself?"
-                : "Open this pull request as yourself?"}
+                : prAuthPrompt?.purpose === "push_changes"
+                  ? "Push these changes as yourself?"
+                  : "Open this pull request as yourself?"}
             </AlertDialogTitle>
             <AlertDialogDescription>
               {prAuthPrompt?.purpose === "merge_pr"
                 ? "Authorize GitHub once to merge pull requests as you."
-                : "Authorize GitHub once to open PRs as you. If you skip this, 143 can still open the PR as the app."}
+                : prAuthPrompt?.purpose === "push_changes"
+                  ? "Authorize GitHub once to push as you. If you skip this, 143 can still push the commits as the app."
+                  : "Authorize GitHub once to open PRs as you. If you skip this, 143 can still open the PR as the app."}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
@@ -2920,12 +3081,25 @@ export function SessionDetailContent({ id }: { id: string }) {
                 Create as 143
               </AlertDialogCancel>
             ) : null}
+            {prAuthPrompt?.purpose === "push_changes" && prAuthPrompt.can_fallback_to_app ? (
+              <AlertDialogCancel
+                onClick={(event) => {
+                  event.preventDefault();
+                  setPRAuthPrompt(null);
+                  pushChangesMutation.mutate({ authorMode: "app" });
+                }}
+              >
+                Push as 143
+              </AlertDialogCancel>
+            ) : null}
             <AlertDialogAction
               onClick={(event) => {
                 event.preventDefault();
                 if (!prAuthPrompt) return;
                 const resumeToken =
-                  prAuthPrompt.purpose === "create_pr" ? prAuthPrompt.resume_token : undefined;
+                  prAuthPrompt.purpose === "create_pr" || prAuthPrompt.purpose === "push_changes"
+                    ? prAuthPrompt.resume_token
+                    : undefined;
                 api.githubStatus.connect(resumeToken || undefined);
               }}
             >

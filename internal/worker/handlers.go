@@ -62,6 +62,7 @@ func RegisterHandlers(w *Worker, stores *Stores, services *Services, retentionCf
 		w.Register("continue_session", newContinueSessionHandler(stores, services, logger))
 		w.Register("validate", newValidateHandler(stores, services, logger))
 		w.Register("open_pr", newOpenPRHandler(stores, services, logger))
+		w.Register("push_pr_changes", newPushPRChangesHandler(stores, services, logger))
 		w.Register("sync_pull_request_state", newSyncPullRequestStateHandler(services, logger))
 		w.Register("reconcile_pull_request_state", newReconcilePullRequestStateHandler(services, logger))
 		w.Register("enrich_pull_request_health", newEnrichPullRequestHealthHandler(services, logger))
@@ -138,6 +139,7 @@ type MemoryReinforcer interface {
 
 type prCreator interface {
 	CreatePR(ctx context.Context, run *models.Session, params ...ghservice.CreatePRParams) (*models.PullRequest, error)
+	PushChangesToPR(ctx context.Context, run *models.Session, params ...ghservice.CreatePRParams) (*models.PullRequest, error)
 	SyncPullRequestState(ctx context.Context, orgID, pullRequestID uuid.UUID) error
 	ReconcilePullRequestState(ctx context.Context, orgID uuid.UUID, limit int) error
 	EnrichPullRequestHealth(ctx context.Context, orgID, pullRequestID uuid.UUID, version int64) error
@@ -1278,8 +1280,113 @@ func userFacingPRError(err error) string {
 		return ghservice.SnapshotUnavailablePRMessage
 	case errors.Is(err, ghservice.ErrNoChanges):
 		return "No changes to push."
+	case errors.Is(err, ghservice.ErrNoPullRequest):
+		return "No pull request exists for this session."
+	case errors.Is(err, ghservice.ErrPRClosed):
+		return "This pull request is no longer open."
+	case errors.Is(err, ghservice.ErrLegacyPRMissingHeadRef):
+		return "This PR predates branch tracking; create a new PR to push follow-up changes."
 	default:
 		return "Check GitHub access or repo permissions and try again."
+	}
+}
+
+// push_pr_changes handler pushes any uncommitted/unpushed sandbox changes up
+// to an existing PR's branch. Mirrors newOpenPRHandler but operates on a
+// session that already has a PR row — drives pr_push_state through pushing ->
+// succeeded/failed without touching pr_creation_state, and skips the Linear
+// "ended_no_pr" milestone (a PR already exists, so "no changes to push" is a
+// benign UI-only outcome).
+func newPushPRChangesHandler(stores *Stores, services *Services, logger zerolog.Logger) JobHandler {
+	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
+		var input struct {
+			SessionID  string `json:"session_id"`
+			OrgID      string `json:"org_id"`
+			AuthorMode string `json:"author_mode,omitempty"`
+		}
+		if err := json.Unmarshal(payload, &input); err != nil {
+			return fmt.Errorf("unmarshal push_pr_changes payload: %w", err)
+		}
+
+		orgID, err := parseOrgID(input.OrgID, ctx)
+		if err != nil {
+			return fmt.Errorf("parse org ID: %w", err)
+		}
+		runID, err := uuid.Parse(input.SessionID)
+		if err != nil {
+			return fmt.Errorf("parse session ID: %w", err)
+		}
+
+		run, err := stores.Sessions.GetByID(ctx, orgID, runID)
+		if err != nil {
+			return fmt.Errorf("fetch session: %w", err)
+		}
+		if run.PendingSnapshotKey != nil && *run.PendingSnapshotKey != "" {
+			logger.Info().
+				Str("session_id", runID.String()).
+				Str("pending_snapshot_key", *run.PendingSnapshotKey).
+				Msg("push_pr_changes waiting for post-PR snapshot upload to land")
+			return &RetryableError{Err: agent.ErrSnapshotPending}
+		}
+
+		if stores.SessionIssueLinks != nil {
+			links, err := stores.SessionIssueLinks.ListBySession(ctx, orgID, runID)
+			if err != nil {
+				return fmt.Errorf("hydrate linked issues for push_pr_changes: %w", err)
+			}
+			run.LinkedIssues = links
+		}
+
+		logger.Info().
+			Str("session_id", runID.String()).
+			Str("org_id", orgID.String()).
+			Msg("starting push_pr_changes job")
+
+		if err := stores.Sessions.UpdatePRPushState(ctx, orgID, runID, models.PRPushStatePushing, ""); err != nil {
+			logger.Error().Err(err).Msg("failed to mark PR push as pushing")
+		}
+
+		var params []ghservice.CreatePRParams
+		if input.AuthorMode != "" {
+			params = append(params, ghservice.CreatePRParams{AuthorMode: input.AuthorMode})
+		}
+
+		_, pushErr := services.PR.PushChangesToPR(ctx, &run, params...)
+		if pushErr != nil {
+			// ErrNoChanges is benign for push-changes: either the user clicked
+			// with a clean sandbox + nothing ahead of upstream, or this is a
+			// worker retry after a partial-success first attempt landed the
+			// push. In both cases the PR's branch already reflects the
+			// session's state, so mark succeeded rather than failed — pr_push_error
+			// stays empty and the head_sha on the PR row is the canonical
+			// source of truth. Distinguishes push from CreatePR, where
+			// ErrNoChanges is a real "nothing to ship" outcome with no PR row.
+			if errors.Is(pushErr, ghservice.ErrNoChanges) {
+				logger.Info().
+					Str("session_id", runID.String()).
+					Msg("push_pr_changes: nothing to push (already up to date)")
+				if stateErr := stores.Sessions.UpdatePRPushState(ctx, orgID, runID, models.PRPushStateSucceeded, ""); stateErr != nil {
+					logger.Error().Err(stateErr).Msg("failed to mark PR push as succeeded")
+				}
+				return nil
+			}
+			logger.Error().Err(pushErr).
+				Str("session_id", runID.String()).
+				Msg("push_pr_changes failed")
+			msg := userFacingPRError(pushErr)
+			if stateErr := stores.Sessions.UpdatePRPushState(ctx, orgID, runID, models.PRPushStateFailed, msg); stateErr != nil {
+				logger.Error().Err(stateErr).Msg("failed to mark PR push as failed")
+			}
+			if shouldDeadLetterPRError(pushErr) {
+				return &FatalError{Err: pushErr}
+			}
+			return pushErr
+		}
+
+		if stateErr := stores.Sessions.UpdatePRPushState(ctx, orgID, runID, models.PRPushStateSucceeded, ""); stateErr != nil {
+			logger.Error().Err(stateErr).Msg("failed to mark PR push as succeeded")
+		}
+		return nil
 	}
 }
 
@@ -1292,6 +1399,12 @@ func shouldDeadLetterPRError(err error) bool {
 	case errors.Is(err, ghservice.ErrSnapshotUnavailable):
 		return true
 	case errors.Is(err, ghservice.ErrNoChanges):
+		return true
+	case errors.Is(err, ghservice.ErrNoPullRequest):
+		return true
+	case errors.Is(err, ghservice.ErrPRClosed):
+		return true
+	case errors.Is(err, ghservice.ErrLegacyPRMissingHeadRef):
 		return true
 	default:
 		return false

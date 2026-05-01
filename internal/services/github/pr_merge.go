@@ -66,7 +66,7 @@ func (s *PRService) MergePullRequest(ctx context.Context, orgID, pullRequestID, 
 	if err != nil {
 		return nil, fmt.Errorf("load pull request: %w", err)
 	}
-	if pr.Status != "open" {
+	if pr.Status != models.PullRequestStatusOpen {
 		return nil, fmt.Errorf("%w: pull request status is %q", ErrPullRequestNotMergeable, pr.Status)
 	}
 
@@ -173,7 +173,7 @@ func (s *PRService) MergePullRequest(ctx context.Context, orgID, pullRequestID, 
 	// (deploys ON CONFLICT, set-to-merged status, set-to-fixed issue,
 	// dedupe-keyed evaluate_experiment job, snapshot cleanup, audit gated on
 	// archived=true), so the duplicate execution is intentional and safe.
-	if err := s.pullRequests.UpdateStatus(ctx, orgID, pullRequestID, "merged"); err != nil {
+	if err := s.pullRequests.UpdateStatus(ctx, orgID, pullRequestID, models.PullRequestStatusMerged); err != nil {
 		s.logger.Warn().Err(err).Str("pull_request_id", pullRequestID.String()).Msg("failed to persist merged status after successful merge")
 	}
 	s.runMergedPullRequestFollowUps(ctx, pr, mergeResp.SHA)

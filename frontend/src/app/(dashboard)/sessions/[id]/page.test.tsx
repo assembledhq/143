@@ -2091,6 +2091,137 @@ describe('SessionDetailPage', () => {
     });
   });
 
+  // Regression: when the OAuth callback signs an `Action` claim into the
+  // resume token, the redirect forwards it as resume_action. The frontend
+  // must dispatch the matching mutation (push vs create) deterministically,
+  // even when the current PR state would otherwise lead to the opposite
+  // branch — e.g. another tab created the PR during the OAuth round-trip,
+  // so by the time we replay there's a PR but the original click was
+  // "Create PR". We trust the signed action over the live state.
+  it('auto-resumes Push changes when resume_action=push_changes is in the URL', async () => {
+    const createBodies: unknown[] = [];
+    const pushBodies: unknown[] = [];
+
+    const sessionWithDiff: Session = {
+      ...mockSessions[0],
+      status: 'completed',
+      diff: '--- a/file.ts\n+++ b/file.ts\n@@ -1 +1 @@\n-old\n+new',
+      diff_stats: { added: 1, removed: 1, files_changed: 1 },
+      snapshot_key: 'snap-abc',
+      pr_creation_state: 'succeeded',
+      pr_push_state: 'idle',
+    };
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({ data: sessionWithDiff } satisfies SingleResponse<Session>);
+      }),
+      http.get('/api/v1/sessions/:id/pr', () => {
+        return HttpResponse.json({
+          data: {
+            id: 'pr-1',
+            session_id: 'session-abcdef12-3456-7890',
+            org_id: sessionWithDiff.org_id,
+            github_pr_number: 42,
+            github_pr_url: 'https://github.com/example/repo/pull/42',
+            github_repo: 'example/repo',
+            title: 'Fix bug',
+            status: 'open',
+            review_status: 'pending',
+            authored_by: 'app',
+            ci_status: 'pending',
+            created_at: new Date().toISOString(),
+            updated_at: new Date().toISOString(),
+          },
+        });
+      }),
+      http.get('/api/v1/users/me/github-status', () => {
+        return HttpResponse.json({
+          connected: true,
+          has_repo_scope: true,
+          github_login: 'alice',
+          pr_authorship_mode: 'user_preferred',
+          pr_draft_default: false,
+        });
+      }),
+      http.post('/api/v1/sessions/:id/pr', async ({ request }) => {
+        createBodies.push(await request.json().catch(() => undefined));
+        return HttpResponse.json({ status: 'queued' }, { status: 202 });
+      }),
+      http.post('/api/v1/sessions/:id/pr/push', async ({ request }) => {
+        pushBodies.push(await request.json().catch(() => undefined));
+        return HttpResponse.json({ status: 'queued' }, { status: 202 });
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />, {
+      searchParams: { github_pr: 'connected', resume_pr: 'resume-push-1', resume_action: 'push_changes' },
+    });
+    await screen.findAllByText('Fixed TypeError by adding null check');
+
+    await waitFor(() => {
+      expect(pushBodies).toEqual([{ author_mode: 'user', resume_token: 'resume-push-1' }]);
+    });
+    expect(createBodies).toEqual([]);
+  });
+
+  // Mirror of the push case: an explicit resume_action=create_pr must dispatch
+  // the create mutation even if a PR somehow appeared during the OAuth
+  // round-trip. The state-based fallback would route to push in that
+  // scenario; the signed action overrides.
+  it('auto-resumes Create PR when resume_action=create_pr is in the URL', async () => {
+    const createBodies: unknown[] = [];
+    const pushBodies: unknown[] = [];
+
+    const sessionWithDiff: Session = {
+      ...mockSessions[0],
+      status: 'completed',
+      diff: '--- a/file.ts\n+++ b/file.ts\n@@ -1 +1 @@\n-old\n+new',
+      diff_stats: { added: 1, removed: 1, files_changed: 1 },
+      snapshot_key: 'snap-abc',
+      pr_creation_state: 'idle',
+    };
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({ data: sessionWithDiff } satisfies SingleResponse<Session>);
+      }),
+      http.get('/api/v1/sessions/:id/pr', () => {
+        return HttpResponse.json(
+          { error: { code: 'NOT_FOUND', message: 'pull request not found' } },
+          { status: 404 },
+        );
+      }),
+      http.get('/api/v1/users/me/github-status', () => {
+        return HttpResponse.json({
+          connected: true,
+          has_repo_scope: true,
+          github_login: 'alice',
+          pr_authorship_mode: 'user_preferred',
+          pr_draft_default: false,
+        });
+      }),
+      http.post('/api/v1/sessions/:id/pr', async ({ request }) => {
+        createBodies.push(await request.json().catch(() => undefined));
+        return HttpResponse.json({ status: 'queued' }, { status: 202 });
+      }),
+      http.post('/api/v1/sessions/:id/pr/push', async ({ request }) => {
+        pushBodies.push(await request.json().catch(() => undefined));
+        return HttpResponse.json({ status: 'queued' }, { status: 202 });
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />, {
+      searchParams: { github_pr: 'connected', resume_pr: 'resume-create-1', resume_action: 'create_pr' },
+    });
+    await screen.findAllByText('Fixed TypeError by adding null check');
+
+    await waitFor(() => {
+      expect(createBodies).toEqual([{ author_mode: 'user', resume_token: 'resume-create-1' }]);
+    });
+    expect(pushBodies).toEqual([]);
+  });
+
   it('keeps a creating state until the pull request exists, then swaps to View PR', async () => {
     let sessionFetchCount = 0;
     const queuedSession: Session = {

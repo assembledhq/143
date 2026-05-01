@@ -34,7 +34,7 @@ var sessionTestColumns = []string{
 	"runtime_extension_count", "runtime_extension_seconds", "runtime_stop_reason", "runtime_graceful_stop_at",
 	"checkpointed_at", "checkpoint_kind", "checkpoint_capability", "checkpoint_size_bytes", "checkpoint_error",
 	"recovery_state", "recovery_queued_at", "recovery_started_at", "recovery_attempt_count",
-	"target_branch", "working_branch", "base_commit_sha", "repository_id", "diff_stats", "diff_history", "input_manifest", "archived_at", "archived_by_user_id", "automation_run_id", "pr_creation_state", "pr_creation_error", "diff_collected_at", "latest_diff_snapshot_id",
+	"target_branch", "working_branch", "base_commit_sha", "repository_id", "diff_stats", "diff_history", "input_manifest", "archived_at", "archived_by_user_id", "automation_run_id", "pr_creation_state", "pr_creation_error", "pr_push_state", "pr_push_error", "diff_collected_at", "latest_diff_snapshot_id",
 	"linear_private", "linear_state_sync_disabled", "linear_identifier_hint", "linear_prepare_state",
 	"deleted_at", "git_identity_source", "git_identity_user_id", "created_at",
 }
@@ -92,6 +92,8 @@ func newAgentSessionRow(sessionID, issueID, orgID uuid.UUID, now time.Time) []in
 		nil,            // automation_run_id
 		"idle",         // pr_creation_state
 		(*string)(nil), // pr_creation_error
+		"idle",         // pr_push_state
+		(*string)(nil), // pr_push_error
 		nil,            // diff_collected_at
 		nil,            // latest_diff_snapshot_id
 		false,          // linear_private
@@ -290,6 +292,52 @@ func TestSessionStore_UpdatePRCreationState(t *testing.T) {
 			}
 
 			require.NoError(t, err, "UpdatePRCreationState should persist valid state transitions")
+			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+		})
+	}
+}
+
+func TestSessionStore_TryMarkPRPushQueued(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name         string
+		rowsAffected int64
+		wantQueued   bool
+	}{
+		{
+			name:         "rows affected returns true",
+			rowsAffected: 1,
+			wantQueued:   true,
+		},
+		{
+			name:         "no rows affected returns false (concurrent winner)",
+			rowsAffected: 0,
+			wantQueued:   false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "should create mock pool")
+			defer mock.Close()
+
+			store := NewSessionStore(mock)
+			orgID := uuid.New()
+			sessionID := uuid.New()
+
+			// CAS update should pass exactly two args (id, org_id) and
+			// guard with a NOT IN ('queued','pushing') predicate.
+			mock.ExpectExec("UPDATE sessions[\\s\\S]*pr_push_state = 'queued'[\\s\\S]*pr_push_state NOT IN").
+				WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+				WillReturnResult(pgxmock.NewResult("UPDATE", tt.rowsAffected))
+
+			queued, err := store.TryMarkPRPushQueued(context.Background(), orgID, sessionID)
+			require.NoError(t, err, "TryMarkPRPushQueued should not error on a successful CAS attempt")
+			require.Equal(t, tt.wantQueued, queued, "TryMarkPRPushQueued should report whether the row transitioned")
 			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 		})
 	}

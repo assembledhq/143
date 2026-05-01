@@ -1354,80 +1354,21 @@ func (h *SessionHandler) CreatePR(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	user := middleware.UserFromContext(r.Context())
-	if shouldPromptForPRAuth(authorMode, orgSettings.PRAuthorship) &&
-		session.TriggeredByUserID != nil &&
-		user != nil &&
-		user.ID == *session.TriggeredByUserID {
-		if req.ResumeToken != "" {
-			if len(h.prAuthSigningKey) == 0 {
-				writeError(w, r, http.StatusInternalServerError, "INTERNAL_ERROR", "PR auth flow is not configured")
-				return
-			}
-			claims, tokenErr := parsePRAuthResumeToken(h.prAuthSigningKey, req.ResumeToken, time.Now())
-			if tokenErr != nil || claims.SessionID != sessionID || claims.UserID != user.ID || claims.OrgID != orgID {
-				writeJSON(w, http.StatusConflict, models.ErrorResponse{
-					Error: models.ErrorDetail{
-						Code:    "PR_RESUME_EXPIRED",
-						Message: "GitHub authorization completed, but the PR resume request expired. Please click Create PR again.",
-					},
-				})
-				return
-			}
-		}
-
-		hasCredential := false
-		authUnavailable := h.prAuthChecker == nil
-		if h.prAuthChecker != nil {
-			var checkErr error
-			hasCredential, checkErr = h.prAuthChecker.HasValidCredential(r.Context(), orgID, user.ID)
-			if checkErr != nil {
-				writeError(w, r, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to verify GitHub PR authorization", checkErr)
-				return
-			}
-		}
-		if authUnavailable && !hasCredential {
-			if orgSettings.PRAuthorship == models.PRAuthorshipUserRequired || authorMode == prAuthorModeUser {
-				writeError(w, r, http.StatusServiceUnavailable, "GITHUB_APP_USER_AUTH_NOT_CONFIGURED", "github app user auth is not configured")
-				return
-			}
-			goto enqueuePR
-		}
-		if !hasCredential {
-			if len(h.prAuthSigningKey) == 0 {
-				writeError(w, r, http.StatusInternalServerError, "INTERNAL_ERROR", "PR auth flow is not configured")
-				return
-			}
-			resumeToken, signErr := signPRAuthResumeToken(h.prAuthSigningKey, prAuthResumeClaims{
-				SessionID:  sessionID,
-				UserID:     user.ID,
-				OrgID:      orgID,
-				Draft:      req.Draft,
-				AuthorMode: string(prAuthorModeUser),
-				ExpiresAt:  time.Now().Add(prAuthResumeTokenTTL).Unix(),
-			})
-			if signErr != nil {
-				writeError(w, r, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to prepare GitHub PR authorization", signErr)
-				return
-			}
-			writeJSON(w, http.StatusConflict, models.ErrorResponse{
-				Error: models.ErrorDetail{
-					Code:    "GITHUB_PR_AUTHORSHIP_REQUIRED",
-					Message: "Authorize GitHub to create this pull request as you.",
-					Details: map[string]any{
-						"session_id":            sessionID.String(),
-						"connect_url":           "/api/v1/users/me/github/connect?flow=pr_authorship",
-						"resume_token":          resumeToken,
-						"can_fallback_to_app":   orgSettings.PRAuthorship != models.PRAuthorshipUserRequired,
-						"suggested_author_mode": string(prAuthorModeUser),
-					},
-				},
-			})
-			return
-		}
+	if !h.requirePRAuthOrIntercept(w, r, prAuthInterceptParams{
+		SessionID:            sessionID,
+		OrgID:                orgID,
+		Session:              &session,
+		OrgSettings:          orgSettings,
+		AuthorMode:           authorMode,
+		ResumeToken:          req.ResumeToken,
+		Action:               prAuthActionCreatePR,
+		ActionDescription:    "create this pull request",
+		ResumeExpiredMessage: "GitHub authorization completed, but the PR resume request expired. Please click Create PR again.",
+		Draft:                req.Draft,
+	}) {
+		return
 	}
 
-enqueuePR:
 	payload := map[string]any{
 		"session_id": sessionID.String(),
 		"org_id":     orgID.String(),
@@ -1459,6 +1400,154 @@ enqueuePR:
 	}
 	emitUserAuditWithSession(h.audit, r, models.AuditActionSessionPRRequested, models.AuditResourceSession, &sessionIDStr, &session.ID, nil,
 		marshalAuditDetails(h.logger, prDetails))
+	writeJSON(w, http.StatusAccepted, map[string]string{"status": "queued"})
+}
+
+// PushChangesToPR handles POST /sessions/{id}/pr/push — enqueues a job that
+// pushes any uncommitted/unpushed changes from the session sandbox up to the
+// existing PR's branch and updates the PR row's head_sha. The session must
+// have an open PR and a still-restorable snapshot. While a prior push attempt
+// is in flight (queued or pushing), returns 409 to prevent double-submits.
+//
+// Mirrors the validation, auth interception, and enqueue structure of CreatePR
+// so the two endpoints behave identically from a client perspective. The only
+// material differences are: (a) requires an existing PR (404 if none), (b)
+// rejects PRs that are not in the "open" state, and (c) the dedupe key,
+// queue/job names, and audit action are push-flavored.
+func (h *SessionHandler) PushChangesToPR(w http.ResponseWriter, r *http.Request) {
+	orgID := middleware.OrgIDFromContext(r.Context())
+	sessionID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid session ID")
+		return
+	}
+
+	session, err := h.runStore.GetByID(r.Context(), orgID, sessionID)
+	if err != nil {
+		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "session not found")
+		return
+	}
+
+	if session.SandboxState == string(models.SandboxStateDestroyed) {
+		writeError(w, r, http.StatusGone, "SNAPSHOT_EXPIRED", ghservice.SnapshotExpiredPRMessage)
+		return
+	}
+	if session.SnapshotKey == nil || *session.SnapshotKey == "" {
+		writeError(w, r, http.StatusConflict, "SNAPSHOT_NOT_CAPTURED", ghservice.SnapshotNotCapturedPRMessage)
+		return
+	}
+	if session.PendingSnapshotKey != nil && *session.PendingSnapshotKey != "" {
+		writeError(w, r, http.StatusConflict, "SNAPSHOT_PENDING", "a snapshot upload is still finishing; try again in a moment")
+		return
+	}
+	// Defense-in-depth against the frontend's isRunning gate: pushing while a
+	// turn is in flight would race the active sandbox and the snapshot we'd
+	// hydrate could be stale relative to commits the running turn is about
+	// to make. Reject server-side so a racing client (or a stale tab whose
+	// session.status hadn't refreshed) can't slip through.
+	if session.Status == string(models.SessionStatusRunning) {
+		writeError(w, r, http.StatusConflict, "SESSION_RUNNING", "wait for the session to finish before pushing")
+		return
+	}
+
+	switch session.PRPushState {
+	case models.PRPushStateQueued, models.PRPushStatePushing:
+		writeError(w, r, http.StatusConflict, "PR_PUSH_IN_FLIGHT", "a push to this PR is already in progress")
+		return
+	}
+
+	pr, prErr := h.pullRequestStore.GetBySessionID(r.Context(), orgID, sessionID)
+	if prErr != nil {
+		if errors.Is(prErr, pgx.ErrNoRows) {
+			writeError(w, r, http.StatusNotFound, "NO_PR", "this session has no pull request to push to; create one first")
+			return
+		}
+		writeError(w, r, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to load pull request", prErr)
+		return
+	}
+	if pr.Status != models.PullRequestStatusOpen {
+		writeError(w, r, http.StatusConflict, "PR_CLOSED", "this pull request is no longer open")
+		return
+	}
+
+	var req struct {
+		AuthorMode  string `json:"author_mode,omitempty"`
+		ResumeToken string `json:"resume_token,omitempty"`
+	}
+	if r.Body != nil && r.ContentLength != 0 {
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+			writeError(w, r, http.StatusBadRequest, "INVALID_BODY", "invalid request body")
+			return
+		}
+	}
+	authorMode, err := parsePRAuthorMode(req.AuthorMode)
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_BODY", "invalid request body", err)
+		return
+	}
+
+	orgSettings := models.OrgSettings{PRAuthorship: models.PRAuthorshipUserPreferred}
+	if h.orgStore != nil {
+		if org, orgErr := h.orgStore.GetByID(r.Context(), orgID); orgErr == nil {
+			if parsed, parseErr := models.ParseOrgSettings(org.Settings); parseErr == nil {
+				orgSettings = parsed
+			}
+		}
+	}
+
+	if !h.requirePRAuthOrIntercept(w, r, prAuthInterceptParams{
+		SessionID:   sessionID,
+		OrgID:       orgID,
+		Session:     &session,
+		OrgSettings: orgSettings,
+		AuthorMode:  authorMode,
+		ResumeToken: req.ResumeToken,
+		Action:      prAuthActionPushChanges,
+		// Draft is intentionally omitted: the push endpoint has no draft
+		// toggle, and the field has no meaning once the PR row already
+		// exists. Leaving it nil keeps the resume claim minimal.
+		ActionDescription:    "push these changes",
+		ResumeExpiredMessage: "GitHub authorization completed, but the resume request expired. Please click Push changes again.",
+	}) {
+		return
+	}
+
+	payload := map[string]any{
+		"session_id": sessionID.String(),
+		"org_id":     orgID.String(),
+	}
+	if authorMode != prAuthorModeAuto {
+		payload["author_mode"] = string(authorMode)
+	}
+	dedupeKey := fmt.Sprintf("push_pr:%s", sessionID)
+	if _, err := h.jobStore.Enqueue(r.Context(), orgID, "agent", "push_pr_changes", payload, 5, &dedupeKey); err != nil {
+		writeError(w, r, http.StatusInternalServerError, "ENQUEUE_FAILED", "failed to enqueue push job", err)
+		return
+	}
+
+	// Atomically transition pr_push_state from any non-in-flight state to
+	// 'queued'. The in-memory precheck above rejects the obvious case where
+	// the column is already queued/pushing, but two concurrent requests can
+	// both pass that check and reach this line. CAS resolves the race: the
+	// loser sees rows-affected=0 and returns 409 — the dedupeKey on the
+	// enqueue above already collapsed both requests onto a single worker
+	// job, so no duplicate work runs.
+	queued, err := h.runStore.TryMarkPRPushQueued(r.Context(), orgID, sessionID)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to mark PR push as queued", err)
+		return
+	}
+	if !queued {
+		writeError(w, r, http.StatusConflict, "PR_PUSH_IN_FLIGHT", "a push to this PR is already in progress")
+		return
+	}
+
+	sessionIDStr := sessionID.String()
+	pushDetails := sessionAuditSnapshot(&session, nil, map[string]any{
+		"job_type": "push_pr_changes",
+	})
+	emitUserAuditWithSession(h.audit, r, models.AuditActionSessionPRPushRequested, models.AuditResourceSession, &sessionIDStr, &session.ID, nil,
+		marshalAuditDetails(h.logger, pushDetails))
 	writeJSON(w, http.StatusAccepted, map[string]string{"status": "queued"})
 }
 
