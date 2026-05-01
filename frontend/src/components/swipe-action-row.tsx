@@ -14,7 +14,7 @@ const ACTION_WIDTH = 92;
 const OPEN_THRESHOLD = 44;
 const HORIZONTAL_LOCK_THRESHOLD = 12;
 const TOUCH_QUERY = "(pointer: coarse)";
-const COMMIT_THRESHOLD_RATIO = 0.5;
+const COMMIT_THRESHOLD_RATIO = 0.36;
 const MIN_COMMIT_THRESHOLD = 140;
 const COMMIT_ANIMATION_MS = 220;
 // Pre-measurement fallback when a gesture starts before the row has dimensions.
@@ -59,8 +59,8 @@ function vibrate(pattern: number | number[]) {
   if (typeof navigator.vibrate !== "function") return;
   try {
     navigator.vibrate(pattern);
-  } catch {
-    // ignore
+  } catch (error) {
+    console.error("Failed to trigger swipe haptic feedback", error);
   }
 }
 
@@ -89,6 +89,7 @@ export function SwipeActionRow({
   // Mirrors isCommitted for use inside touchmove handlers, where the rendered
   // closure can lag behind rapid state transitions.
   const committedRef = useRef(false);
+  const offsetRef = useRef(0);
   const [offset, setOffset] = useState(0);
   const [isDragging, setIsDragging] = useState(false);
   const [isCommitted, setIsCommitted] = useState(false);
@@ -107,6 +108,7 @@ export function SwipeActionRow({
   }, []);
 
   const close = () => {
+    offsetRef.current = 0;
     setOffset(0);
     setIsDragging(false);
     setIsCommitted(false);
@@ -115,6 +117,7 @@ export function SwipeActionRow({
   };
 
   const open = () => {
+    offsetRef.current = ACTION_WIDTH;
     setOffset(ACTION_WIDTH);
     setIsDragging(false);
     setIsCommitted(false);
@@ -127,6 +130,7 @@ export function SwipeActionRow({
   // timer. Fallback: caller keeps the row mounted, the timer snaps offset back.
   const commitAction = (width: number) => {
     setIsDragging(false);
+    offsetRef.current = width;
     setOffset(width);
     dragRef.current = null;
     committedRef.current = false;
@@ -136,6 +140,7 @@ export function SwipeActionRow({
       window.clearTimeout(commitTimerRef.current);
     }
     commitTimerRef.current = window.setTimeout(() => {
+      offsetRef.current = 0;
       setOffset(0);
       setIsCommitted(false);
       commitTimerRef.current = null;
@@ -184,7 +189,12 @@ export function SwipeActionRow({
 
     if (!drag.swiping) return;
 
+    if (event.cancelable) {
+      event.preventDefault();
+    }
+
     const nextOffset = Math.max(0, Math.min(drag.width, -deltaX));
+    offsetRef.current = nextOffset;
     setOffset(nextOffset);
 
     const willCommit = nextOffset >= commitThresholdFor(drag.width);
@@ -203,11 +213,12 @@ export function SwipeActionRow({
       dragRef.current?.width ??
       containerRef.current?.offsetWidth ??
       FALLBACK_ROW_WIDTH;
-    if (offset >= commitThresholdFor(width)) {
+    const latestOffset = offsetRef.current;
+    if (latestOffset >= commitThresholdFor(width)) {
       commitAction(width);
       return;
     }
-    if (offset >= OPEN_THRESHOLD) {
+    if (latestOffset >= OPEN_THRESHOLD) {
       open();
       return;
     }
@@ -231,6 +242,7 @@ export function SwipeActionRow({
     ? {
         className: cn(
           "relative z-10 touch-pan-y",
+          offset > 0 && "bg-background",
           !isDragging && "transition-transform duration-200 ease-out",
         ),
         style: { transform: `translateX(-${offset}px)` },
