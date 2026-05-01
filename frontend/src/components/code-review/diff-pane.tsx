@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useCallback, useImperativeHandle, forwardRef, useEffect } from "react";
+import { useRef, useCallback, useImperativeHandle, forwardRef, useEffect, useState } from "react";
 import type { DiffFile } from "@/lib/diff-parser";
 import type { SessionReviewComment } from "@/lib/types";
 import type { CommentLineKey } from "@/hooks/use-review-comments";
@@ -56,6 +56,21 @@ export const DiffPane = forwardRef<DiffPaneHandle, DiffPaneProps>(
     const containerRef = useRef<HTMLDivElement>(null);
     const fileRefs = useRef<Map<number, HTMLDivElement>>(new Map());
     const lastReportedActiveFileIndexRef = useRef<number | null>(activeFileIndex ?? null);
+
+    // Once any expander hits a NO_SANDBOX response, the session container is
+    // gone for good — flip every expander on this pane into the disabled state
+    // so the user gets clear feedback instead of repeating the failed click.
+    // Reset on sessionId change using the "adjust state during render" pattern
+    // (https://react.dev/reference/react/useState#storing-information-from-previous-renders).
+    const [contextUnavailable, setContextUnavailable] = useState(false);
+    const [trackedSessionId, setTrackedSessionId] = useState(sessionId);
+    if (trackedSessionId !== sessionId) {
+      setTrackedSessionId(sessionId);
+      setContextUnavailable(false);
+    }
+    const handleContextUnavailable = useCallback(() => {
+      setContextUnavailable(true);
+    }, []);
 
     const setFileRef = useCallback(
       (index: number) => (el: HTMLDivElement | null) => {
@@ -189,6 +204,8 @@ export const DiffPane = forwardRef<DiffPaneHandle, DiffPaneProps>(
             onUpdateComment={onUpdateComment}
             onDeleteComment={onDeleteComment}
             onBrowseFile={onBrowseFile}
+            contextUnavailable={contextUnavailable}
+            onContextUnavailable={handleContextUnavailable}
           />
         ))}
       </div>
