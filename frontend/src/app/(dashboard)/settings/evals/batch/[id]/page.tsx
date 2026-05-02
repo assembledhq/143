@@ -8,13 +8,13 @@ import { api } from "@/lib/api";
 import { queryKeys } from "@/lib/query-keys";
 import { getActiveOrgId } from "@/lib/active-org";
 import { buildEvalBatchStreamURL, SSE_EVENT } from "@/lib/sse";
-import { useEvalSSE } from "@/lib/use-eval-sse";
+import { shouldSubscribeToEvalBatchStream, useEvalSSE } from "@/lib/use-eval-sse";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { PageContainer } from "@/components/page-container";
 import { PageHeader } from "@/components/page-header";
 import { ArrowLeft, Loader2, RefreshCw } from "lucide-react";
-import type { EvalBatchDetail, EvalRun, EvalTask, ListResponse } from "@/lib/types";
+import type { EvalBatchDetail, EvalRun, EvalTask, ListResponse, SingleResponse } from "@/lib/types";
 import { evalRunStatusConfig } from "@/lib/types";
 
 // Slow polling backstop while SSE is the primary update channel. Keeps the
@@ -30,6 +30,9 @@ export default function BatchDetailPage() {
   const params = useParams();
   const batchId = params.id as string;
   const queryClient = useQueryClient();
+  const cachedBatch = queryClient.getQueryData<SingleResponse<EvalBatchDetail>>(
+    queryKeys.evals.batch(batchId),
+  )?.data;
 
   // Per-batch SSE subscription. Invalidates the detail query on each event
   // so React Query refetches the full EvalBatchDetail (batch + runs). The
@@ -37,10 +40,10 @@ export default function BatchDetailPage() {
   // partial state into the cache because the matrix needs the full runs
   // array — a single GET keeps the rendering path simple.
   const sseURL = useMemo(() => {
-    if (!batchId) return null;
+    if (!batchId || !shouldSubscribeToEvalBatchStream(cachedBatch?.status)) return null;
     const apiBase = process.env.NEXT_PUBLIC_API_URL || "";
     return buildEvalBatchStreamURL(apiBase, batchId, getActiveOrgId());
-  }, [batchId]);
+  }, [batchId, cachedBatch?.status]);
   const onBatchEvent = useCallback(() => {
     queryClient.invalidateQueries({ queryKey: queryKeys.evals.batch(batchId) });
   }, [queryClient, batchId]);

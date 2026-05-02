@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { addSSEListener, type SSEEventPayloads } from "./sse";
+import type { EvalBatchStatus, EvalBootstrapStatus } from "./types";
 
 // Connect cadence shared between the two eval SSE consumers (batch detail
 // page + bootstrap detail sheet). Capped exponential backoff (1s → 2s → 4s
@@ -11,6 +12,14 @@ import { addSSEListener, type SSEEventPayloads } from "./sse";
 const SSE_INITIAL_RECONNECT_DELAY_MS = 1_000;
 const SSE_MAX_RECONNECT_DELAY_MS = 15_000;
 const SSE_MAX_RECONNECT_ATTEMPTS = 5;
+
+export function shouldSubscribeToEvalBatchStream(status: EvalBatchStatus | undefined): boolean {
+  return status === "pending" || status === "running";
+}
+
+export function shouldSubscribeToEvalBootstrapStream(status: EvalBootstrapStatus | undefined): boolean {
+  return status === "pending" || status === "running";
+}
 
 export interface UseEvalSSEOptions<K extends keyof SSEEventPayloads> {
   /**

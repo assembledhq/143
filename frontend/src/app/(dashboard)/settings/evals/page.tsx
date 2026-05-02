@@ -36,10 +36,10 @@ import {
   SheetDescription,
 } from "@/components/ui/sheet";
 import { FlaskConical, Plus, Loader2, GitPullRequest, AlertTriangle, Layers, CheckCircle2, XCircle, Eye, RotateCw } from "lucide-react";
-import type { EvalTask, EvalBatch, EvalTaskSource, EvalBootstrapRun, EvalBootstrapStatus, ListResponse, Repository, SessionLog } from "@/lib/types";
+import type { EvalTask, EvalBatch, EvalTaskSource, EvalBootstrapRun, EvalBootstrapStatus, ListResponse, Repository, SessionLog, SingleResponse } from "@/lib/types";
 import { evalComplexityConfig, evalSourceConfig } from "@/lib/types";
 import { addSSEListener, SSE_EVENT, buildEvalBootstrapStreamURL, buildSessionLogsStreamURL } from "@/lib/sse";
-import { useEvalSSE } from "@/lib/use-eval-sse";
+import { shouldSubscribeToEvalBootstrapStream, useEvalSSE } from "@/lib/use-eval-sse";
 import { getActiveOrgId } from "@/lib/active-org";
 
 type SourceFilter = "all" | EvalTaskSource | "archived";
@@ -110,6 +110,9 @@ export default function EvalsSettingsPage() {
     return latest && isBootstrapActive(latest.status) ? latest.id : null;
   })();
   const effectiveBootstrapRunId = activeBootstrapRunId ?? latestActiveId;
+  const cachedBootstrap = queryClient.getQueryData<SingleResponse<EvalBootstrapRun>>(
+    queryKeys.evals.bootstrapRun(effectiveBootstrapRunId ?? ""),
+  )?.data;
 
   // SSE-driven bootstrap status with a polling backstop. The SSE wakes the
   // page on every state transition so the user sees progress within ms; the
@@ -117,10 +120,15 @@ export default function EvalsSettingsPage() {
   // briefly disconnected, in which case we fall back to the original 3s
   // cadence so the UI still updates while Redis is recovering.
   const bootstrapSSEURL = useMemo(() => {
-    if (!effectiveBootstrapRunId) return null;
+    if (
+      !effectiveBootstrapRunId ||
+      !shouldSubscribeToEvalBootstrapStream(cachedBootstrap?.status)
+    ) {
+      return null;
+    }
     const apiBase = process.env.NEXT_PUBLIC_API_URL || "";
     return buildEvalBootstrapStreamURL(apiBase, effectiveBootstrapRunId, getActiveOrgId());
-  }, [effectiveBootstrapRunId]);
+  }, [effectiveBootstrapRunId, cachedBootstrap?.status]);
   const onBootstrapEvent = useCallback(() => {
     if (!effectiveBootstrapRunId) return;
     queryClient.invalidateQueries({ queryKey: queryKeys.evals.bootstrapRun(effectiveBootstrapRunId) });
