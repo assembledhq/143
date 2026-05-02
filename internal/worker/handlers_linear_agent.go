@@ -528,27 +528,21 @@ func handleLinearAgentPrompted(ctx context.Context, deps LinearAgentEventHandler
 
 // fetchLinearComment pulls the body of a single Linear comment so we can
 // surface the user's follow-up message verbatim into the 143 session's
-// turn message. Falls back to nil + error on miss; callers handle that
-// by inserting a placeholder so the session still advances.
-//
-// Implemented as a free function rather than a Client method because (a)
-// it's only used by this handler, and (b) it dovetails into the existing
-// FetchIssue/comments query — the Linear client already pulls the most
-// recent 25 comments on FetchIssue, so we look for the matching id in
-// that response rather than issuing a separate single-comment query.
-func fetchLinearComment(ctx context.Context, client linear.Client, agentSessionID, commentID string) (string, error) {
+// turn message. Returns the comment body on success, an empty string on
+// any failure (caller falls back to a placeholder so the session still
+// advances).
+func fetchLinearComment(ctx context.Context, client linear.Client, _ string, commentID string) (string, error) {
 	if commentID == "" {
 		return "", errors.New("comment_id is empty")
 	}
-	// AgentSessionGet returns the comment id Linear has open as the
-	// "current" comment for this AgentSession. The body itself isn't
-	// surfaced through that API, so for now we return empty and let
-	// the caller fall back to the placeholder. A future iteration
-	// should add a dedicated comments(id) query to client.go; deferred
-	// because phase 3 is about wiring the trigger path, not perfect
-	// fidelity on the comment body.
-	_, _ = client, agentSessionID
-	return "", errors.New("comment body lookup not yet implemented")
+	comment, err := client.FetchComment(ctx, commentID)
+	if err != nil {
+		return "", err
+	}
+	if comment == nil {
+		return "", linear.ErrCommentNotFound
+	}
+	return comment.Body, nil
 }
 
 // enqueueContinueForLinearAgent fires continue_session for a follow-up

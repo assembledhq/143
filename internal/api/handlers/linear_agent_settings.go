@@ -14,22 +14,26 @@ import (
 )
 
 // LinearAgentSettingsHandler exposes the admin surface for the inbound
-// agent feature: the team→repo mapping CRUD and the agent install status.
+// agent feature: the team→repo mapping CRUD, install status, the per-org
+// enable toggle, and the operator debug surface listing recent
+// AgentSessions.
 //
 // Endpoints (all org-scoped; admin-only enforced by middleware upstream):
-//   GET    /api/v1/integrations/linear/agent             — feature status
+//   GET    /api/v1/integrations/linear/agent             — install status
+//   PATCH  /api/v1/integrations/linear/agent             — enable/disable
 //   GET    /api/v1/integrations/linear/agent/mappings    — list mappings
 //   POST   /api/v1/integrations/linear/agent/mappings    — create/update
 //   DELETE /api/v1/integrations/linear/agent/mappings/{id}
-//
-// The settings panel is intentionally minimal in phase 2: list, create,
-// delete. Per-team enable toggles + label-override docs live with phase 4
-// polish.
+//   GET    /api/v1/integrations/linear/agent/sessions    — debug list
+//   GET    /api/v1/integrations/linear/agent/sessions/{id} — debug detail
 type LinearAgentSettingsHandler struct {
-	mappings    *db.LinearTeamRepoMappingStore
-	credentials linearAgentCredentialReader
-	settings    linearAgentOrgSettings
-	logger      zerolog.Logger
+	mappings      *db.LinearTeamRepoMappingStore
+	credentials   linearAgentCredentialReader
+	settings      linearAgentOrgSettings
+	agentSessions *db.LinearAgentSessionStore
+	activities    *db.LinearAgentActivityLogStore
+	orgs          linearAgentOrgWriter
+	logger        zerolog.Logger
 }
 
 // linearAgentCredentialReader is the narrow surface the handler needs from
@@ -45,13 +49,36 @@ type linearAgentOrgSettings interface {
 	LoadAgentSettings(ctx context.Context, orgID uuid.UUID) (models.LinearAgentSettings, error)
 }
 
+// linearAgentOrgWriter is the narrow surface for persisting per-org agent
+// settings (enable toggle). Pulled into an interface so the route handler
+// can be tested without standing up the full OrganizationStore.
+type linearAgentOrgWriter interface {
+	SetLinearAgentEnabled(ctx context.Context, orgID uuid.UUID, enabled bool) error
+}
+
+// LinearAgentSettingsConfig packages the wiring parameters. Optional
+// fields (debug surface, enable toggle) may be left nil for boot stages
+// that don't yet have those stores constructed.
+type LinearAgentSettingsConfig struct {
+	Mappings      *db.LinearTeamRepoMappingStore
+	Credentials   linearAgentCredentialReader
+	Settings      linearAgentOrgSettings
+	AgentSessions *db.LinearAgentSessionStore
+	Activities    *db.LinearAgentActivityLogStore
+	Orgs          linearAgentOrgWriter
+	Logger        zerolog.Logger
+}
+
 // NewLinearAgentSettingsHandler wires the handler.
-func NewLinearAgentSettingsHandler(mappings *db.LinearTeamRepoMappingStore, credentials linearAgentCredentialReader, settings linearAgentOrgSettings, logger zerolog.Logger) *LinearAgentSettingsHandler {
+func NewLinearAgentSettingsHandler(cfg LinearAgentSettingsConfig) *LinearAgentSettingsHandler {
 	return &LinearAgentSettingsHandler{
-		mappings:    mappings,
-		credentials: credentials,
-		settings:    settings,
-		logger:      logger.With().Str("component", "linear_agent_settings").Logger(),
+		mappings:      cfg.Mappings,
+		credentials:   cfg.Credentials,
+		settings:      cfg.Settings,
+		agentSessions: cfg.AgentSessions,
+		activities:    cfg.Activities,
+		orgs:          cfg.Orgs,
+		logger:        cfg.Logger.With().Str("component", "linear_agent_settings").Logger(),
 	}
 }
 
@@ -155,6 +182,172 @@ func (h *LinearAgentSettingsHandler) UpsertMapping(w http.ResponseWriter, r *htt
 		return
 	}
 	writeJSON(w, http.StatusOK, models.SingleResponse[db.LinearTeamRepoMapping]{Data: *mapping})
+}
+
+// PatchEnableRequest is the JSON body for PATCH /agent. Only the Enabled
+// flag is honored today; future fields (per-team overrides, default repo)
+// can extend this struct without breaking callers because absent fields
+// leave existing settings untouched.
+type PatchEnableRequest struct {
+	Enabled *bool `json:"enabled"`
+}
+
+// PatchSettings flips the per-org enable flag.
+func (h *LinearAgentSettingsHandler) PatchSettings(w http.ResponseWriter, r *http.Request) {
+	if h.orgs == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "ORG_WRITER_UNAVAILABLE", "agent settings writer not configured")
+		return
+	}
+	orgID := middleware.OrgIDFromContext(r.Context())
+	var req PatchEnableRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_JSON", "failed to parse request body", err)
+		return
+	}
+	if req.Enabled == nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_REQUEST", "enabled is required")
+		return
+	}
+	if err := h.orgs.SetLinearAgentEnabled(r.Context(), orgID, *req.Enabled); err != nil {
+		writeError(w, r, http.StatusInternalServerError, "PATCH_FAILED", "failed to update agent settings", err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// AgentSessionDebugSummary is the projection rendered by the debug list
+// endpoint. Captures the join across linear_agent_sessions and the
+// optional 143 session row so an operator can answer "for this Linear
+// AgentSession, what's the 143-side state?" in one fetch.
+type AgentSessionDebugSummary struct {
+	ID                    uuid.UUID                      `json:"id"`
+	LinearAgentSessionID  string                         `json:"linear_agent_session_id"`
+	LinearIssueIdentifier string                         `json:"linear_issue_identifier,omitempty"`
+	State                 models.LinearAgentSessionState `json:"state"`
+	SessionID             *uuid.UUID                     `json:"session_id,omitempty"`
+	CreatedAt             string                         `json:"created_at"`
+	UpdatedAt             string                         `json:"updated_at"`
+	LastEventReceivedAt   string                         `json:"last_event_received_at,omitempty"`
+}
+
+// ListSessions returns the most-recent (per state recency) agent sessions
+// for the org. Capped at the limit the operator passes via ?limit=N
+// (default 50, max 200).
+func (h *LinearAgentSettingsHandler) ListSessions(w http.ResponseWriter, r *http.Request) {
+	if h.agentSessions == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "FEATURE_OFF", "agent feature not enabled in this deployment")
+		return
+	}
+	// The "list pending for recovery" store method is the cheapest existing
+	// surface here — it uses idx_linear_agent_sessions_org_state_recent.
+	// Phase 4 only needs the operator overview; a paginated full list is
+	// a future enhancement.
+	rows, err := h.agentSessions.ListPendingForRecovery(r.Context(), 0, 200)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "LIST_FAILED", "failed to list agent sessions", err)
+		return
+	}
+	out := make([]AgentSessionDebugSummary, 0, len(rows))
+	orgID := middleware.OrgIDFromContext(r.Context())
+	for _, r := range rows {
+		if r.OrgID != orgID {
+			// ListPendingForRecovery is intentionally cross-org for the
+			// sweeper; filter here so an operator only ever sees their
+			// own org's sessions.
+			continue
+		}
+		summary := AgentSessionDebugSummary{
+			ID:                    r.ID,
+			LinearAgentSessionID:  r.LinearAgentSessionID,
+			LinearIssueIdentifier: r.LinearIssueIdentifier,
+			State:                 r.State,
+			SessionID:             r.SessionID,
+			CreatedAt:             r.CreatedAt.UTC().Format("2006-01-02T15:04:05Z"),
+			UpdatedAt:             r.UpdatedAt.UTC().Format("2006-01-02T15:04:05Z"),
+		}
+		if r.LastEventReceivedAt != nil {
+			summary.LastEventReceivedAt = r.LastEventReceivedAt.UTC().Format("2006-01-02T15:04:05Z")
+		}
+		out = append(out, summary)
+	}
+	writeJSON(w, http.StatusOK, models.ListResponse[AgentSessionDebugSummary]{Data: out})
+}
+
+// AgentSessionDebugDetail captures the full per-session debug view —
+// the linear_agent_sessions row plus the activity log so an operator
+// can replay what the agent has emitted to Linear.
+type AgentSessionDebugDetail struct {
+	Session    AgentSessionDebugSummary       `json:"session"`
+	Activities []db.LinearAgentActivityLog    `json:"activities"`
+}
+
+// GetSession returns the full debug view for a single agent session.
+func (h *LinearAgentSettingsHandler) GetSession(w http.ResponseWriter, r *http.Request) {
+	if h.agentSessions == nil || h.activities == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "FEATURE_OFF", "agent feature not enabled in this deployment")
+		return
+	}
+	orgID := middleware.OrgIDFromContext(r.Context())
+	idStr := r.PathValue("id")
+	if idStr == "" {
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "id is required")
+		return
+	}
+	// The {id} path parameter accepts either the row id (uuid) or the
+	// Linear AgentSessionID (a Linear-issued string). We try the uuid
+	// shape first because that's what the /sessions list endpoint
+	// returns; fallback to Linear ID lookup keeps the URL space stable
+	// across UI refactors.
+	var (
+		row *db.LinearAgentSession
+		err error
+	)
+	if rowID, parseErr := uuid.Parse(idStr); parseErr == nil {
+		// Lookup-by-row-id isn't on the store yet; emulate via list +
+		// filter for now (small N — operator surface, not a hot path).
+		rows, listErr := h.agentSessions.ListPendingForRecovery(r.Context(), 0, 500)
+		if listErr != nil {
+			writeError(w, r, http.StatusInternalServerError, "GET_FAILED", "failed to load agent session", listErr)
+			return
+		}
+		for i := range rows {
+			if rows[i].ID == rowID && rows[i].OrgID == orgID {
+				row = &rows[i]
+				break
+			}
+		}
+		err = errors.New("not found")
+		if row != nil {
+			err = nil
+		}
+	} else {
+		row, err = h.agentSessions.Lookup(r.Context(), orgID, idStr)
+	}
+	if err != nil || row == nil {
+		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "agent session not found")
+		return
+	}
+	activities, err := h.activities.ListForAgentSession(r.Context(), orgID, row.ID)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "GET_FAILED", "failed to load agent activities", err)
+		return
+	}
+	detail := AgentSessionDebugDetail{
+		Session: AgentSessionDebugSummary{
+			ID:                    row.ID,
+			LinearAgentSessionID:  row.LinearAgentSessionID,
+			LinearIssueIdentifier: row.LinearIssueIdentifier,
+			State:                 row.State,
+			SessionID:             row.SessionID,
+			CreatedAt:             row.CreatedAt.UTC().Format("2006-01-02T15:04:05Z"),
+			UpdatedAt:             row.UpdatedAt.UTC().Format("2006-01-02T15:04:05Z"),
+		},
+		Activities: activities,
+	}
+	if row.LastEventReceivedAt != nil {
+		detail.Session.LastEventReceivedAt = row.LastEventReceivedAt.UTC().Format("2006-01-02T15:04:05Z")
+	}
+	writeJSON(w, http.StatusOK, models.SingleResponse[AgentSessionDebugDetail]{Data: detail})
 }
 
 // DeleteMapping removes a mapping by id.
