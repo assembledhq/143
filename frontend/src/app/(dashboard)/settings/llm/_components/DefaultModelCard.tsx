@@ -1,6 +1,6 @@
 "use client";
 
-import { AlertTriangle, Check, Info } from "lucide-react";
+import { AlertTriangle, Check } from "lucide-react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Label } from "@/components/ui/label";
 import {
@@ -74,19 +74,12 @@ export function DefaultModelCard({
               ownerName={ownerProvider && ownerConfigured ? ownerName : null}
               usesPlatformDefault={ownerUsesPlatformDefault}
             />
-            {ownerUsesPlatformDefault && ownerHasModelRestriction && (
-              <div className="flex items-start gap-1.5 rounded-md border border-amber-300/60 bg-amber-50 px-2.5 py-1.5 text-xs text-amber-800 dark:border-amber-700/40 dark:bg-amber-950/20 dark:text-amber-200">
-                <Info className="mt-0.5 h-3 w-3 shrink-0" />
-                <div className="space-y-1">
-                  <p>
-                    143&apos;s default key is capped at lower-cost models.
-                  </p>
-                </div>
-              </div>
-            )}
             <p className="text-xs text-muted-foreground">
               Used for organization-level LLM features, separate from the coding agents configured
               on the Agent settings page.
+              {ownerUsesPlatformDefault && ownerHasModelRestriction
+                ? " 143's default key is capped at lower-cost models."
+                : ""}
             </p>
           </div>
 
