@@ -284,4 +284,32 @@ describe("ChatTimeline", () => {
     expect(screen.getByText("No attachments")).toBeInTheDocument();
     expect(screen.queryByAltText("Attached image")).not.toBeInTheDocument();
   });
+
+  it("renders day separators inline instead of sticky", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-01-02T12:00:00Z"));
+
+    const entries: TimelineEntry[] = [
+      {
+        kind: "message",
+        data: makeMessage({ id: 15, created_at: "2026-01-01T08:00:00Z", content: "Yesterday message" }),
+      },
+      {
+        kind: "message",
+        data: makeMessage({ id: 16, created_at: "2026-01-02T08:00:00Z", content: "Today message" }),
+      },
+    ];
+
+    render(<ChatTimeline entries={entries} isRunning={false} />);
+
+    const yesterdayLabel = screen.getByText("Yesterday");
+    const todayLabel = screen.getByText("Today");
+
+    expect(yesterdayLabel).toBeInTheDocument();
+    expect(todayLabel).toBeInTheDocument();
+    expect(yesterdayLabel.parentElement?.parentElement).not.toHaveClass("sticky");
+    expect(yesterdayLabel.parentElement?.parentElement).not.toHaveClass("top-0");
+
+    vi.useRealTimers();
+  });
 });
