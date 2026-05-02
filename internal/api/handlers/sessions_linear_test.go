@@ -6,12 +6,14 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/assembledhq/143/internal/api/middleware"
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/services/linear"
+	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/pashagolub/pgxmock/v4"
 	"github.com/stretchr/testify/require"
@@ -33,6 +35,14 @@ type fakeLinearLinker struct {
 	// MISSING_MESSAGE bypass requires the bare-identifier prefix to be in
 	// the allowlist) continue to pass without each test having to wire it.
 	teamKeys map[string]bool
+	// midSessionMu guards the mid-session observation fields. SendMessage
+	// dispatches the linker call to a detached goroutine, so the test
+	// goroutine and the handler goroutine touch these concurrently — without
+	// the mutex the race detector flags every assertion.
+	midSessionMu     sync.Mutex
+	midSessionCalled int
+	midSessionGotIn  linear.MidSessionInput
+	midSessionErr    error
 }
 
 func (f *fakeLinearLinker) Enabled(context.Context, uuid.UUID) bool {
@@ -46,6 +56,22 @@ func (f *fakeLinearLinker) ResolveAndLinkAtCreate(_ context.Context, in linear.C
 		return linear.CreateResult{}, f.err
 	}
 	return f.result, nil
+}
+
+func (f *fakeLinearLinker) ResolveAndLinkMidSession(_ context.Context, in linear.MidSessionInput) error {
+	f.midSessionMu.Lock()
+	defer f.midSessionMu.Unlock()
+	f.midSessionCalled++
+	f.midSessionGotIn = in
+	return f.midSessionErr
+}
+
+// midSessionObservation snapshots the mid-session call counters under the
+// mutex so callers can assert without racing the handler goroutine.
+func (f *fakeLinearLinker) midSessionObservation() (int, linear.MidSessionInput) {
+	f.midSessionMu.Lock()
+	defer f.midSessionMu.Unlock()
+	return f.midSessionCalled, f.midSessionGotIn
 }
 
 func (f *fakeLinearLinker) TeamKeyAllowlist(_ context.Context, _ uuid.UUID) (map[string]bool, error) {
@@ -638,5 +664,163 @@ func TestSessionHandler_CreateManual_AllowsLinearOverridesByDefault(t *testing.T
 	handler.CreateManual(w, req)
 
 	require.Equal(t, http.StatusCreated, w.Code, "default settings must keep the per-session override path open")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+// TestSessionHandler_SendMessage_FiresMidSessionLinker pins the contract for
+// follow-up Linear linking. When a user posts a message into an existing
+// session and the body contains a Linear ref, the handler must hand it off to
+// the linker — otherwise the in-session "Link Linear issue" affordance is a
+// label without a backing action and the LinkedIssueChips list never updates.
+func TestSessionHandler_SendMessage_FiresMidSessionLinker(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	now := time.Now()
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	userID := uuid.New()
+
+	// Running-session fast path: no tx, no enqueue. We pin this branch
+	// because it's the leanest mock; the linker call site is shared across
+	// the other two branches and is exercised by the unit test above.
+	mock.ExpectQuery("SELECT .+ FROM sessions WHERE").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			addSessionRow(pgxmock.NewRows(sessionColumns),
+				sessionID, uuid.New(), orgID, "claude-code", "running", "semi", "low",
+				nil, nil, nil, nil,
+				nil, false, &now, nil, nil,
+				nil, nil, nil, false,
+				nil, nil, nil, nil, nil,
+				nil, nil, nil, nil,
+				nil, nil,
+				nil, // triggered_by_user_id
+				nil, 2, now, "running", nil,
+				nil,      // target_branch
+				nil,      // working_branch
+				nil,      // repository_id
+				nil,      // diff_stats
+				nil,      // diff_history
+				nil,      // input_manifest
+				nil, nil, // archived_at, archived_by_user_id
+				nil,            // automation_run_id
+				"idle",         // pr_creation_state
+				(*string)(nil), // pr_creation_error
+				nil,            // deleted_at
+				now,
+			),
+		)
+	mock.ExpectQuery("INSERT INTO session_messages").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(int64(1), now))
+
+	handler := newSessionHandler(t, mock)
+	linker := &fakeLinearLinker{}
+	handler.SetLinearLinker(linker)
+
+	body := `{"message":"Could you also look at https://linear.app/acme/issue/ACS-9?"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/"+sessionID.String()+"/messages", strings.NewReader(body))
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("id", sessionID.String())
+	ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
+	ctx = middleware.WithOrgID(ctx, orgID)
+	ctx = middleware.WithUser(ctx, &models.User{ID: userID, OrgID: orgID, Role: "member"})
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	handler.SendMessage(w, req)
+
+	require.Equal(t, http.StatusCreated, w.Code, "follow-up should still succeed")
+	// SendMessage dispatches the linker call to a detached goroutine so the
+	// running-session fast path doesn't pay the allowlist+enqueue latency.
+	// Wait for it before asserting — the assertion otherwise races the
+	// goroutine and flakes on slow CI.
+	require.Eventually(t, func() bool {
+		called, _ := linker.midSessionObservation()
+		return called == 1
+	}, time.Second, 5*time.Millisecond, "SendMessage must hand follow-up bodies to the mid-session linker so the in-session linking action backs onto a real link row")
+	called, gotIn := linker.midSessionObservation()
+	require.Equal(t, 1, called)
+	require.Equal(t, orgID, gotIn.OrgID, "mid-session call should preserve org scope")
+	require.Equal(t, sessionID, gotIn.SessionID, "mid-session call should target the receiving session")
+	require.Contains(t, gotIn.MessageBody, "ACS-9", "the linker should see the user-typed body so detection can find the Linear ref")
+	require.NotNil(t, gotIn.UserID, "linking attribution should carry the sender's user id")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+// TestSessionHandler_SendMessage_SwallowsMidSessionLinkerError is the fail-
+// soft contract: even if the linker returns an error (Linear API outage,
+// allowlist DB hiccup), the user's follow-up message must still succeed and
+// return 201. The linker's failure is logged but never bubbles into the
+// response — matching the design 62 "no Linear writes block the user".
+func TestSessionHandler_SendMessage_SwallowsMidSessionLinkerError(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	now := time.Now()
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	userID := uuid.New()
+
+	mock.ExpectQuery("SELECT .+ FROM sessions WHERE").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			addSessionRow(pgxmock.NewRows(sessionColumns),
+				sessionID, uuid.New(), orgID, "claude-code", "running", "semi", "low",
+				nil, nil, nil, nil,
+				nil, false, &now, nil, nil,
+				nil, nil, nil, false,
+				nil, nil, nil, nil, nil,
+				nil, nil, nil, nil,
+				nil, nil,
+				nil,
+				nil, 2, now, "running", nil,
+				nil, nil, nil, nil, nil, nil,
+				nil, nil,
+				nil,
+				"idle",
+				(*string)(nil),
+				nil,
+				now,
+			),
+		)
+	mock.ExpectQuery("INSERT INTO session_messages").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(int64(1), now))
+
+	handler := newSessionHandler(t, mock)
+	linker := &fakeLinearLinker{midSessionErr: errors.New("linear unreachable")}
+	handler.SetLinearLinker(linker)
+
+	body := `{"message":"see ACS-9"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/"+sessionID.String()+"/messages", strings.NewReader(body))
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("id", sessionID.String())
+	ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
+	ctx = middleware.WithOrgID(ctx, orgID)
+	ctx = middleware.WithUser(ctx, &models.User{ID: userID, OrgID: orgID, Role: "member"})
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	handler.SendMessage(w, req)
+
+	require.Equal(t, http.StatusCreated, w.Code, "linker errors must not surface to the user; the message itself succeeded")
+	// Async dispatch — wait before asserting that the linker was reached at
+	// all. The error path is still fail-soft: the goroutine logs and exits.
+	require.Eventually(t, func() bool {
+		called, _ := linker.midSessionObservation()
+		return called == 1
+	}, time.Second, 5*time.Millisecond)
 	require.NoError(t, mock.ExpectationsWereMet())
 }
