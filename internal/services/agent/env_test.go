@@ -202,8 +202,11 @@ func (m *envOrgStore) GetByID(_ context.Context, _ uuid.UUID) (models.Organizati
 }
 
 type envCodexAuthProvider struct {
-	token *models.OpenAIChatGPTConfig
-	err   error
+	token        *models.OpenAIChatGPTConfig
+	err          error
+	refreshToken *models.OpenAIChatGPTConfig
+	refreshErr   error
+	refreshIDs   []uuid.UUID
 }
 
 func (m envCodexAuthProvider) GetValidToken(_ context.Context, _ uuid.UUID) (*models.OpenAIChatGPTConfig, error) {
@@ -211,6 +214,14 @@ func (m envCodexAuthProvider) GetValidToken(_ context.Context, _ uuid.UUID) (*mo
 		return nil, m.err
 	}
 	return m.token, nil
+}
+
+func (m *envCodexAuthProvider) RefreshTokenByID(_ context.Context, _ uuid.UUID, credID uuid.UUID) (*models.OpenAIChatGPTConfig, error) {
+	m.refreshIDs = append(m.refreshIDs, credID)
+	if m.refreshErr != nil {
+		return nil, m.refreshErr
+	}
+	return m.refreshToken, nil
 }
 
 type envSandboxProvider struct {
@@ -1322,4 +1333,60 @@ func TestAgentEnvInjectCodexAuth(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestAgentEnvInjectCodexAuthForUser_RefreshesUnifiedSubscriptionByID(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	orgID := uuid.New()
+	userID := uuid.New()
+	credID := uuid.New()
+	sandbox := &Sandbox{HomeDir: "/home/test"}
+	provider := &envSandboxProvider{}
+	codexAuth := &envCodexAuthProvider{
+		refreshToken: &models.OpenAIChatGPTConfig{
+			AccessToken:  "fresh-access",
+			RefreshToken: "fresh-refresh",
+			IDToken:      "fresh-id",
+			ExpiresAt:    time.Now().Add(time.Hour),
+		},
+	}
+	env := NewAgentEnv(AgentEnvDeps{
+		CodingCredentials: &envCodingCredentialProvider{
+			resolvable: map[models.ProviderName][]models.DecryptedCodingCredential{
+				models.ProviderOpenAISubscription: {
+					{
+						ID:       credID,
+						OrgID:    orgID,
+						UserID:   &userID,
+						Provider: models.ProviderOpenAISubscription,
+						Status:   models.CodingCredentialStatusActive,
+						Config: models.OpenAISubscriptionConfig{
+							AccessToken:  "stale-access",
+							RefreshToken: "stale-refresh",
+							IDToken:      "stale-id",
+							ExpiresAt:    time.Now().Add(-time.Minute),
+						},
+					},
+				},
+			},
+		},
+		CodexAuth: codexAuth,
+		Provider:  provider,
+		Logger:    zerolog.Nop(),
+	})
+
+	injected, err := env.InjectCodexAuthForUser(ctx, orgID, &userID, sandbox)
+
+	require.NoError(t, err, "InjectCodexAuthForUser should refresh an expired unified subscription before writing auth.json")
+	require.True(t, injected, "InjectCodexAuthForUser should inject the refreshed subscription")
+	require.Equal(t, []uuid.UUID{credID}, codexAuth.refreshIDs, "InjectCodexAuthForUser should refresh the selected credential id")
+
+	var payload map[string]any
+	require.NoError(t, json.Unmarshal(provider.writes["/home/test/.codex/auth.json"], &payload), "auth.json should be valid JSON")
+	tokens, ok := payload["tokens"].(map[string]any)
+	require.True(t, ok, "auth.json should contain a tokens object")
+	require.Equal(t, "fresh-access", tokens["access_token"], "auth.json should use the refreshed access token")
+	require.Equal(t, "fresh-id", tokens["id_token"], "auth.json should use the refreshed ID token")
 }

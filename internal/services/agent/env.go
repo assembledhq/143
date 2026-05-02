@@ -93,6 +93,12 @@ const pickTrackerTTL = 5 * time.Minute
 // sweep on every insert would walk the whole map for every record.
 const pickTrackerMax = 4096
 
+// codexSubscriptionRefreshWindow mirrors codexauth.refreshWindow. The agent
+// package cannot import codexauth without creating a service-layer cycle, so
+// keep the value local to the injection path that handles unified subscription
+// rows.
+const codexSubscriptionRefreshWindow = 5 * time.Minute
+
 // AgentEnvDeps holds the dependencies for constructing an AgentEnv. Named
 // AgentEnvDeps (rather than AgentEnvConfig) to avoid confusion with
 // models.AgentEnvConfig, which is a per-org override map consumed by this
@@ -133,6 +139,14 @@ func NewAgentEnv(deps AgentEnvDeps) *AgentEnv {
 type CodingCredentialShedder interface {
 	MarkRateLimited(id uuid.UUID)
 	MarkAuthRejected(id uuid.UUID)
+}
+
+// CodexAuthRefresher is the optional capability implemented by the Codex auth
+// service. Unified subscription resolution chooses a concrete credential id;
+// this interface lets auth.json injection refresh that exact row before
+// writing an access token into the sandbox.
+type CodexAuthRefresher interface {
+	RefreshTokenByID(ctx context.Context, orgID uuid.UUID, credID uuid.UUID) (*models.OpenAIChatGPTConfig, error)
 }
 
 // CodingCredentialMultiPicker is implemented by the real unified store for
@@ -557,19 +571,19 @@ func (e *AgentEnv) resolveFromCodingCredentials(ctx context.Context, orgID uuid.
 	if twin := unifiedSubscriptionTwin(provider); twin != "" {
 		providers = append(providers, twin)
 	}
-	if cfg, sawRows := e.pickFromCodingProviderSet(ctx, orgID, userID, provider, providers); cfg != nil || sawRows {
+	if cfg, _, sawRows := e.pickFromCodingProviderSet(ctx, orgID, userID, provider, providers); cfg != nil || sawRows {
 		return cfg, sawRows
 	}
 	return nil, false
 }
 
-func (e *AgentEnv) pickFromCodingProviderSet(ctx context.Context, orgID uuid.UUID, userID *uuid.UUID, requestedProvider models.ProviderName, providers []models.ProviderName) (models.ProviderConfig, bool) {
+func (e *AgentEnv) pickFromCodingProviderSet(ctx context.Context, orgID uuid.UUID, userID *uuid.UUID, requestedProvider models.ProviderName, providers []models.ProviderName) (models.ProviderConfig, *models.DecryptedCodingCredential, bool) {
 	rowsByProvider, sawRows, ok := e.listCodingProviderRows(ctx, orgID, userID, providers)
 	if !ok {
-		return nil, true
+		return nil, nil, true
 	}
 	if !sawRows {
-		return nil, true
+		return nil, nil, true
 	}
 
 	if picker, ok := e.codingCredentials.(CodingCredentialMultiPicker); ok {
@@ -582,19 +596,19 @@ func (e *AgentEnv) pickFromCodingProviderSet(ctx context.Context, orgID uuid.UUI
 			// same way — the wrapped error makes the distinction visible in
 			// logs.
 			e.logger.Warn().Err(pickErr).Str("provider", string(requestedProvider)).Msg("coding credential picker found no eligible credential")
-			return nil, true
+			return nil, nil, true
 		}
 		if picked == nil {
-			return nil, true
+			return nil, nil, true
 		}
 		if cfg, ok := compatibleCodingProviderConfig(picked.Provider, picked.Config); ok {
 			e.recordPick(orgID, userID, picked.Provider, picked.ID)
 			if picked.Provider != requestedProvider {
 				e.recordPick(orgID, userID, requestedProvider, picked.ID)
 			}
-			return cfg, true
+			return cfg, picked, true
 		}
-		return nil, true
+		return nil, picked, true
 	}
 
 	creds := make([]models.DecryptedCodingCredential, 0)
@@ -611,10 +625,11 @@ func (e *AgentEnv) pickFromCodingProviderSet(ctx context.Context, orgID uuid.UUI
 			if cred.Provider != requestedProvider {
 				e.recordPick(orgID, userID, requestedProvider, cred.ID)
 			}
-			return cfg, true
+			picked := cred
+			return cfg, &picked, true
 		}
 	}
-	return nil, true
+	return nil, nil, true
 }
 
 func (e *AgentEnv) listCodingProviderRows(ctx context.Context, orgID uuid.UUID, userID *uuid.UUID, providers []models.ProviderName) (map[models.ProviderName][]models.DecryptedCodingCredential, bool, bool) {
@@ -844,9 +859,19 @@ func (e *AgentEnv) InjectCodexAuth(ctx context.Context, orgID uuid.UUID, sandbox
 
 func (e *AgentEnv) InjectCodexAuthForUser(ctx context.Context, orgID uuid.UUID, userID *uuid.UUID, sandbox *Sandbox) (bool, error) {
 	if e.codingCredentials != nil {
-		cfg, handled := e.resolveFromCodingCredentials(ctx, orgID, userID, models.ProviderOpenAI)
+		cfg, picked, handled := e.pickFromCodingProviderSet(ctx, orgID, userID, models.ProviderOpenAI, []models.ProviderName{
+			models.ProviderOpenAI,
+			models.ProviderOpenAISubscription,
+		})
 		if handled {
 			if chatGPT, ok := cfg.(models.OpenAIChatGPTConfig); ok {
+				if picked != nil && picked.Provider == models.ProviderOpenAISubscription {
+					refreshed, err := e.refreshCodexSubscriptionIfNeeded(ctx, orgID, picked.ID, chatGPT)
+					if err != nil {
+						return false, err
+					}
+					chatGPT = *refreshed
+				}
 				return e.writeCodexAuth(ctx, orgID, sandbox, chatGPT)
 			}
 			return false, nil
@@ -871,6 +896,45 @@ func (e *AgentEnv) InjectCodexAuthForUser(ctx context.Context, orgID uuid.UUID, 
 		return false, nil
 	}
 	return e.writeCodexAuth(ctx, orgID, sandbox, *cfg)
+}
+
+func (e *AgentEnv) refreshCodexSubscriptionIfNeeded(ctx context.Context, orgID uuid.UUID, credID uuid.UUID, cfg models.OpenAIChatGPTConfig) (*models.OpenAIChatGPTConfig, error) {
+	if !cfg.NeedsRefresh(codexSubscriptionRefreshWindow) {
+		return &cfg, nil
+	}
+
+	refresher, ok := e.codexAuth.(CodexAuthRefresher)
+	if !ok {
+		if !cfg.IsExpired() {
+			e.logger.Warn().
+				Str("cred_id", credID.String()).
+				Msg("codex subscription needs refresh but no refresher is configured; using cached token")
+			return &cfg, nil
+		}
+		return nil, fmt.Errorf("codex subscription %s is expired and no refresh provider is configured", credID)
+	}
+
+	refreshed, err := refresher.RefreshTokenByID(ctx, orgID, credID)
+	if err != nil {
+		if !cfg.IsExpired() {
+			e.logger.Warn().
+				Err(err).
+				Str("cred_id", credID.String()).
+				Msg("codex subscription refresh failed; using cached token")
+			return &cfg, nil
+		}
+		return nil, fmt.Errorf("refresh codex subscription %s: %w", credID, err)
+	}
+	if refreshed == nil {
+		if !cfg.IsExpired() {
+			e.logger.Warn().
+				Str("cred_id", credID.String()).
+				Msg("codex subscription refresh returned no token; using cached token")
+			return &cfg, nil
+		}
+		return nil, fmt.Errorf("refresh codex subscription %s returned no token", credID)
+	}
+	return refreshed, nil
 }
 
 func (e *AgentEnv) writeCodexAuth(ctx context.Context, orgID uuid.UUID, sandbox *Sandbox, cfg models.OpenAIChatGPTConfig) (bool, error) {

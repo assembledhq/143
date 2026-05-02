@@ -1614,7 +1614,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 	logWg.Wait()
 
 	// 10b. Retry once on token expiration for Codex agents.
-	result, err = o.retryOnTokenExpired(ctx, run.AgentType, run.OrgID, run.ID, nil, turnNumber, sandbox, adapter, execCtx, prompt, result, err, log)
+	result, err = o.retryOnTokenExpired(ctx, run.AgentType, run.OrgID, run.TriggeredByUserID, run.ID, nil, turnNumber, sandbox, adapter, execCtx, prompt, result, err, log)
 
 	// 10c. Shed the just-picked credential's in-process health-cache slot if
 	// the (possibly retried) result indicates a credential-level failure.
@@ -2481,7 +2481,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	logWg.Wait()
 
 	// 6b. Retry once on token expiration for Codex agents.
-	result, err = o.retryOnTokenExpired(ctx, session.AgentType, session.OrgID, session.ID, threadID, turnNumber, sandbox, adapter, execCtx, prompt, result, err, log)
+	result, err = o.retryOnTokenExpired(ctx, session.AgentType, session.OrgID, session.TriggeredByUserID, session.ID, threadID, turnNumber, sandbox, adapter, execCtx, prompt, result, err, log)
 
 	// 6c. Shed the just-picked credential when the (post-retry) result shows
 	// rate-limit or auth-rejected signals. Same semantics as the entry-turn
@@ -3718,6 +3718,7 @@ func (o *Orchestrator) retryOnTokenExpired(
 	ctx context.Context,
 	agentType models.AgentType,
 	orgID uuid.UUID,
+	userID *uuid.UUID,
 	sessionID uuid.UUID,
 	threadID *uuid.UUID,
 	turnNumber int,
@@ -3735,7 +3736,7 @@ func (o *Orchestrator) retryOnTokenExpired(
 
 	log.Warn().Msg("codex CLI hit token_expired, refreshing token and retrying")
 
-	reinjected, reinjectErr := o.env.InjectCodexAuth(ctx, orgID, sandbox)
+	reinjected, reinjectErr := o.env.InjectCodexAuthForUser(ctx, orgID, userID, sandbox)
 	if reinjectErr != nil {
 		log.Warn().Err(reinjectErr).Msg("failed to re-inject codex auth for retry")
 		return result, err

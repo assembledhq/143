@@ -94,8 +94,11 @@ func (m *mockGitHubTokenProvider) GetInstallationToken(ctx context.Context, inst
 
 // mockCodexAuthProvider implements agent.CodexAuthProvider.
 type mockCodexAuthProvider struct {
-	cfg *models.OpenAIChatGPTConfig
-	err error
+	cfg        *models.OpenAIChatGPTConfig
+	err        error
+	refreshCfg *models.OpenAIChatGPTConfig
+	refreshErr error
+	refreshIDs []uuid.UUID
 }
 
 func (m *mockCodexAuthProvider) GetValidToken(ctx context.Context, orgID uuid.UUID) (*models.OpenAIChatGPTConfig, error) {
@@ -105,14 +108,28 @@ func (m *mockCodexAuthProvider) GetValidToken(ctx context.Context, orgID uuid.UU
 	return m.cfg, nil
 }
 
+func (m *mockCodexAuthProvider) RefreshTokenByID(ctx context.Context, orgID uuid.UUID, credID uuid.UUID) (*models.OpenAIChatGPTConfig, error) {
+	m.refreshIDs = append(m.refreshIDs, credID)
+	if m.refreshErr != nil {
+		return nil, m.refreshErr
+	}
+	return m.refreshCfg, nil
+}
+
 type mockCodingCredentialProvider struct {
-	resolvable map[models.ProviderName][]models.DecryptedCodingCredential
-	err        error
+	resolvable     map[models.ProviderName][]models.DecryptedCodingCredential
+	err            error
+	requiredUserID *uuid.UUID
 }
 
 func (m *mockCodingCredentialProvider) ListResolvable(ctx context.Context, orgID uuid.UUID, userID *uuid.UUID, provider models.ProviderName) ([]models.DecryptedCodingCredential, error) {
 	if m.err != nil {
 		return nil, m.err
+	}
+	if m.requiredUserID != nil {
+		if userID == nil || *userID != *m.requiredUserID {
+			return nil, nil
+		}
 	}
 	if m.resolvable == nil {
 		return nil, nil
@@ -4787,6 +4804,70 @@ func TestRunAgent_CodexAuthInjectsTokenFromGetValidToken(t *testing.T) {
 	tokens, ok := authJSON["tokens"].(map[string]interface{})
 	require.True(t, ok, "auth.json should have tokens object")
 	require.Equal(t, "access-token", tokens["access_token"], "auth.json should contain the token from GetValidToken")
+}
+
+func TestRunAgent_CodexTokenExpiredRetryKeepsTriggeredUserScope(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	userID := uuid.New()
+	issue := testIssue(orgID)
+	run := testRun(orgID, issue.ID)
+	run.AgentType = models.AgentTypeCodex
+	run.TriggeredByUserID = &userID
+
+	d := defaultDeps()
+	d.adapter.name = models.AgentTypeCodex
+	d.codexAuth = nil
+	d.codingCreds = &mockCodingCredentialProvider{
+		requiredUserID: &userID,
+		resolvable: map[models.ProviderName][]models.DecryptedCodingCredential{
+			models.ProviderOpenAISubscription: {
+				{
+					ID:       uuid.New(),
+					OrgID:    orgID,
+					UserID:   &userID,
+					Provider: models.ProviderOpenAISubscription,
+					Priority: 1,
+					Status:   models.CodingCredentialStatusActive,
+					Config: models.OpenAISubscriptionConfig{
+						AccessToken:  "personal-access",
+						RefreshToken: "personal-refresh",
+						ExpiresAt:    time.Now().Add(time.Hour),
+					},
+				},
+			},
+		},
+	}
+
+	executeCalls := 0
+	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
+		executeCalls++
+		if executeCalls == 1 {
+			return &agent.AgentResult{
+				Error:           "codex CLI exited with code 1: auth error code: token_expired",
+				ExitCode:        1,
+				ConfidenceScore: 0.1,
+			}, nil
+		}
+		return &agent.AgentResult{
+			Summary:         "retry succeeded",
+			ConfidenceScore: 0.9,
+			ExitCode:        0,
+		}, nil
+	}
+
+	err := buildOrchestrator(d).RunAgent(context.Background(), run)
+
+	require.NoError(t, err, "RunAgent should recover from token_expired when the personal subscription is still resolvable")
+	require.Equal(t, 2, executeCalls, "RunAgent should execute a retry using the triggering user's credential scope")
+	authData, ok := d.provider.Files["/home/sandbox/.codex/auth.json"]
+	require.True(t, ok, "retry should keep writing Codex auth.json from the personal subscription")
+	var authJSON map[string]interface{}
+	require.NoError(t, json.Unmarshal(authData, &authJSON), "auth.json should remain valid after retry injection")
+	tokens, ok := authJSON["tokens"].(map[string]interface{})
+	require.True(t, ok, "auth.json should contain tokens after retry injection")
+	require.Equal(t, "personal-access", tokens["access_token"], "retry injection should use the triggering user's personal subscription")
 }
 
 func TestRunAgent_CancelReturnsToIdle(t *testing.T) {
