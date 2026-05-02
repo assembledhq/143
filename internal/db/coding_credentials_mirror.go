@@ -457,7 +457,11 @@ func (s *CodingCredentialStore) upsertMirroredRow(ctx context.Context, row mirro
 	// row already present at the same (scope, provider, label)), fall back to
 	// updating that row by natural key. The id divergence is acceptable
 	// during the migration window; the cleanup PR retires this fallback.
+	// Bump the counter so we can confirm the path is unused before deleting
+	// it — a non-zero MirrorNaturalKeyFallbackCount means an out-of-band
+	// writer (typically the SQL data-copy migration) landed first.
 	if isUniqueViolation(err) {
+		s.recordMirrorNaturalKeyFallback()
 		return s.updateMirroredRowByNaturalKey(ctx, row)
 	}
 	return fmt.Errorf("mirror upsert: %w", err)

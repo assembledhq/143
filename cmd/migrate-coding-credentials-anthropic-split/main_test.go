@@ -1,10 +1,14 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
+	"github.com/pashagolub/pgxmock/v4"
 	"github.com/stretchr/testify/require"
 
 	"github.com/assembledhq/143/internal/crypto"
@@ -110,5 +114,145 @@ func TestEvaluateRowForSplit(t *testing.T) {
 		_, err := evaluateRowForSplit(nil, bad)
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "unmarshal", "error must wrap the unmarshal step")
+	})
+}
+
+// dualSetCipher returns a dev-encrypted AnthropicConfig blob with both
+// APIKey and Subscription populated — the legacy malformed shape the
+// anthropic-split must refuse to silently rewrite without operator ack.
+func dualSetCipher(t *testing.T) []byte {
+	t.Helper()
+	plain, err := json.Marshal(models.AnthropicConfig{
+		APIKey: "sk-ant-leftover-1234567890",
+		Subscription: &models.AnthropicSubscription{
+			AccessToken:  "tok-access",
+			RefreshToken: "tok-refresh",
+			ExpiresAt:    time.Now().Add(time.Hour),
+			AccountType:  "claude_max",
+		},
+	})
+	require.NoError(t, err)
+	return crypto.DevEncrypt(plain)
+}
+
+// expectBatchHeader sets up the mock expectations for the per-batch
+// preamble: Begin → SET LOCAL statement_timeout → SELECT batch.
+// Returns nothing; the mock continues to track expectations on the next
+// call. When `rowToReturn` is non-empty, the SELECT returns that single
+// row in the column order runBatch scans.
+func expectBatchHeader(t *testing.T, mock pgxmock.PgxPoolIface, rowID, orgID uuid.UUID, cipher []byte) {
+	t.Helper()
+	mock.ExpectBegin()
+	mock.ExpectExec("SET LOCAL statement_timeout").
+		WillReturnResult(pgxmock.NewResult("SET", 0))
+	now := time.Now()
+	mock.ExpectQuery(`(?s)SELECT id, org_id, user_id, label, config.*FROM coding_credentials.*WHERE provider = 'anthropic'`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "org_id", "user_id", "label", "config", "priority", "status",
+			"created_by", "last_verified_at", "created_at", "updated_at",
+		}).AddRow(
+			rowID, orgID, (*uuid.UUID)(nil), "team", cipher, 100, "active",
+			(*uuid.UUID)(nil), (*time.Time)(nil), now, now,
+		))
+}
+
+// TestRunBatchDualSetGate locks the fail-closed contract on the
+// --allow-dual-set flag. Without the flag, a dual-set row must abort the
+// batch BEFORE any UPDATE is issued so the deferred Rollback reverts the
+// in-flight tx and no API key is silently dropped. With the flag, the
+// rewrite proceeds. Without this test the gate could regress to "warn and
+// proceed" without anyone noticing.
+func TestRunBatchDualSetGate(t *testing.T) {
+	t.Parallel()
+
+	t.Run("aborts before any UPDATE when --allow-dual-set is unset", func(t *testing.T) {
+		t.Parallel()
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err)
+		defer mock.Close()
+
+		rowID := uuid.New()
+		orgID := uuid.New()
+		expectBatchHeader(t, mock, rowID, orgID, dualSetCipher(t))
+		// Critical: NO ExpectExec for the UPDATE here. The deferred
+		// Rollback fires when runBatch returns the sentinel error.
+		mock.ExpectRollback()
+
+		_, _, dualSet, _, _, _, runErr := runBatch(
+			context.Background(),
+			mock,
+			nil, /* dev-mode crypto */
+			500, 5000,
+			false, /* dryRun */
+			false, /* allowDualSet */
+			time.Time{}, uuid.Nil,
+		)
+
+		require.Error(t, runErr, "dual-set without ack must surface an error")
+		require.True(t, errors.Is(runErr, errDualSetWithoutAck),
+			"err must be errDualSetWithoutAck so main.go can map it to exit 3; got %v", runErr)
+		require.Equal(t, 1, dualSet, "dual-set count must reflect the row we refused to rewrite")
+		require.NoError(t, mock.ExpectationsWereMet(),
+			"no UPDATE should fire when the gate trips; rollback must be the only post-query call")
+	})
+
+	t.Run("proceeds with rewrite when --allow-dual-set is set", func(t *testing.T) {
+		t.Parallel()
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err)
+		defer mock.Close()
+
+		rowID := uuid.New()
+		orgID := uuid.New()
+		expectBatchHeader(t, mock, rowID, orgID, dualSetCipher(t))
+		mock.ExpectExec(`(?s)UPDATE coding_credentials.*SET provider = 'anthropic_subscription'`).
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+		mock.ExpectCommit()
+
+		processed, splits, dualSet, skipped, _, _, runErr := runBatch(
+			context.Background(),
+			mock,
+			nil,
+			500, 5000,
+			false, /* dryRun */
+			true,  /* allowDualSet */
+			time.Time{}, uuid.Nil,
+		)
+
+		require.NoError(t, runErr, "with --allow-dual-set the rewrite must proceed cleanly")
+		require.Equal(t, 1, processed, "one row was processed")
+		require.Equal(t, 1, splits, "the dual-set row must still be split when ack'd")
+		require.Equal(t, 1, dualSet, "the dual-set count is bumped regardless of the gate")
+		require.Equal(t, 0, skipped, "no decrypt failure here")
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+
+	t.Run("dry-run also fails closed on dual-set without ack", func(t *testing.T) {
+		t.Parallel()
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err)
+		defer mock.Close()
+
+		rowID := uuid.New()
+		orgID := uuid.New()
+		expectBatchHeader(t, mock, rowID, orgID, dualSetCipher(t))
+		mock.ExpectRollback()
+
+		_, _, dualSet, _, _, _, runErr := runBatch(
+			context.Background(),
+			mock,
+			nil,
+			500, 5000,
+			true,  /* dryRun */
+			false, /* allowDualSet */
+			time.Time{}, uuid.Nil,
+		)
+
+		require.Error(t, runErr, "dry-run must report the gate trip rather than reporting a clean would-split count")
+		require.True(t, errors.Is(runErr, errDualSetWithoutAck))
+		require.Equal(t, 1, dualSet)
+		require.NoError(t, mock.ExpectationsWereMet())
 	})
 }

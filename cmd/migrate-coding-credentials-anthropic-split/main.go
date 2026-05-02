@@ -45,15 +45,27 @@ import (
 
 const sentinelName = db.AnthropicSplitSentinel
 
+// errDualSetWithoutAck signals that a batch encountered a dual-set Anthropic
+// row (both APIKey and Subscription set) but --allow-dual-set was not passed.
+// runBatch returns this before issuing any UPDATE so the deferred Rollback
+// reverts the in-flight tx; main.go translates it into exit code 3.
+var errDualSetWithoutAck = errors.New("dual-set anthropic row encountered without --allow-dual-set; aborting before any rewrite")
+
 func main() {
 	var (
-		batchSize int
-		dryRun    bool
-		stmtTOMs  int
+		batchSize    int
+		dryRun       bool
+		stmtTOMs     int
+		allowDualSet bool
 	)
 	flag.IntVar(&batchSize, "batch", 500, "rows per transaction")
 	flag.BoolVar(&dryRun, "dry-run", false, "decrypt and inspect rows without writing")
 	flag.IntVar(&stmtTOMs, "row-timeout-ms", 5000, "per-row statement_timeout in ms")
+	flag.BoolVar(&allowDualSet, "allow-dual-set", false,
+		"acknowledge that dual-set Anthropic rows (both APIKey and Subscription) "+
+			"will have their APIKey dropped during the split. Required when any "+
+			"such row is encountered; without it the migration aborts with exit 3 "+
+			"so the operator can decide explicitly.")
 	flag.Parse()
 
 	dbURL := os.Getenv("DATABASE_URL")
@@ -104,8 +116,14 @@ func main() {
 			return
 		default:
 		}
-		processed, splits, dualSet, skipped, lastCA, lastI, err := runBatch(ctx, pool, cryptoSvc, batchSize, stmtTOMs, dryRun, lastCreatedAt, lastID)
+		processed, splits, dualSet, skipped, lastCA, lastI, err := runBatch(ctx, pool, cryptoSvc, batchSize, stmtTOMs, dryRun, allowDualSet, lastCreatedAt, lastID)
 		if err != nil {
+			if errors.Is(err, errDualSetWithoutAck) {
+				fmt.Fprintf(os.Stderr, "[anthropic-split] %v\n", err)
+				fmt.Fprintf(os.Stderr, "[anthropic-split] no rewrites committed in the aborted batch; cumulative committed processed=%d split=%d dual_set=%d skipped=%d. Re-run with --allow-dual-set to acknowledge the API-key drop.\n",
+					totalProcessed, totalSplit, totalDualSet, totalSkipped)
+				os.Exit(3)
+			}
 			fail("batch: %v", err)
 		}
 		totalProcessed += processed
@@ -201,12 +219,20 @@ func writeSentinel(ctx context.Context, pool *pgxpool.Pool) error {
 // place for the operator to inspect; the cursor still advances past them so
 // later rows are not blocked, and the caller withholds the sentinel when
 // skipped > 0 so the boot gate stays closed until the operator acks.
+// txBeginner is the narrow interface runBatch needs from a pool. *pgxpool.Pool
+// satisfies it, and pgxmock.PgxPoolIface satisfies it in tests so the dual-set
+// gate can be exercised without a real database.
+type txBeginner interface {
+	Begin(ctx context.Context) (pgx.Tx, error)
+}
+
 func runBatch(
 	ctx context.Context,
-	pool *pgxpool.Pool,
+	pool txBeginner,
 	cryptoSvc *crypto.Service,
 	batchSize, stmtTOMs int,
 	dryRun bool,
+	allowDualSet bool,
 	createdAtCursor time.Time,
 	idCursor uuid.UUID,
 ) (int, int, int, int, time.Time, uuid.UUID, error) {
@@ -293,6 +319,16 @@ func runBatch(
 				"[anthropic-split] WARNING: dual-set anthropic row id=%s org_id=%s created_by=%s created_at=%s carries both APIKey and Subscription; preserving subscription, dropping API key\n",
 				r.ID, r.OrgID, formatPtrUUID(r.CreatedBy), r.CreatedAt.Format(time.RFC3339),
 			)
+			if !allowDualSet {
+				// Fail closed: abort before any UPDATE in this tx so the
+				// deferred Rollback reverts everything we did in this batch.
+				// Earlier batches already committed are kept as-is — the
+				// operator restarts with --allow-dual-set after deciding the
+				// API-key drop is acceptable. dryRun also gates here so the
+				// dry run reports the abort instead of advertising a clean
+				// split count that hides the dual-set problem.
+				return 0, 0, dualSet, skipped, createdAtCursor, idCursor, errDualSetWithoutAck
+			}
 		}
 
 		if dryRun {

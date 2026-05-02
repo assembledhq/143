@@ -116,8 +116,9 @@ type CodingCredentialStore struct {
 	// Persistent non-zero values mean the unified table is drifting from the
 	// legacy stores; the cleanup PR retires the mirror, so this signal only
 	// matters during the rollout window.
-	mirrorDriftTotal   atomic.Uint64
-	mirrorFailureTotal atomic.Uint64
+	mirrorDriftTotal              atomic.Uint64
+	mirrorFailureTotal            atomic.Uint64
+	mirrorNaturalKeyFallbackTotal atomic.Uint64
 }
 
 // SetMirrorLogger installs the structured-log hook used when the mirror
@@ -182,7 +183,51 @@ func (s *CodingCredentialStore) MirrorFailureCount() uint64 {
 	return s.mirrorFailureTotal.Load()
 }
 
+// recordMirrorNaturalKeyFallback increments when upsertMirroredRow's
+// insert-by-id collides with the (org_id, user_id, provider, label) unique
+// index and falls back to updating the existing natural-key row. The fallback
+// leaves legacy id and unified id divergent for that pair, so we want to
+// confirm the path is unused before the cleanup PR deletes it.
+func (s *CodingCredentialStore) recordMirrorNaturalKeyFallback() {
+	if s == nil {
+		return
+	}
+	s.mirrorNaturalKeyFallbackTotal.Add(1)
+}
+
+// MirrorNaturalKeyFallbackCount returns how many times the mirror has had to
+// reconcile a row by natural key instead of by id. Expected to stay at 0 in
+// production; a non-zero value means an out-of-band writer (e.g. the SQL
+// data-copy migration) landed at the same (scope, provider, label) before the
+// mirror caught up. Read this before retiring the fallback in the cleanup PR.
+//
+// lint:allow-no-orgid reason="process-wide observability counter; not tenant data"
+func (s *CodingCredentialStore) MirrorNaturalKeyFallbackCount() uint64 {
+	if s == nil {
+		return 0
+	}
+	return s.mirrorNaturalKeyFallbackTotal.Load()
+}
+
 // NewCodingCredentialStore constructs a store with default cache TTLs.
+//
+// Cache TTLs:
+//   - resolverCache (30s): caches the per-(scope, provider) candidate list so a
+//     burst of agent picks doesn't hammer the DB. Cap is short because new
+//     credentials and CRUD edits should be visible quickly.
+//   - health (75s): caches "do not pick" markers from upstream rate-limit /
+//     auth-rejected signals. Sized to outlast Anthropic's typical 60s rate-
+//     limit recovery window plus a small buffer; shorter values caused the
+//     same shed credential to be re-picked into the same upstream limit
+//     before it had cleared.
+//
+// The 75s > 30s skew is intentional. A user who manually fixes a shed
+// credential (e.g. rotates a key) will still wait out the remaining health-
+// cache TTL before that credential is picked again — a worst-case ~45s after
+// the resolver cache turns over. We accept that latency to keep the shed
+// signal effective; the alternative (aligning at 30s) would let a freshly
+// rate-limited credential be re-picked the moment the resolver cache flips,
+// nullifying the shed.
 func NewCodingCredentialStore(dbtx DBTX, cryptoSvc *crypto.Service) *CodingCredentialStore {
 	return &CodingCredentialStore{
 		db:            dbtx,

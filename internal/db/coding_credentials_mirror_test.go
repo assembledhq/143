@@ -664,6 +664,8 @@ func TestMirrorUpsertNaturalKeyFallback(t *testing.T) {
 	}
 	require.Equal(t, uint64(0), store.MirrorFailureCount(),
 		"natural-key fallback recovered cleanly; failure counter must stay zero")
+	require.Equal(t, uint64(1), store.MirrorNaturalKeyFallbackCount(),
+		"natural-key fallback must record exactly one observation so the cleanup PR can confirm the path is unused before deleting it")
 }
 
 // captureBytes returns a pgxmock argument matcher that records the bytes
