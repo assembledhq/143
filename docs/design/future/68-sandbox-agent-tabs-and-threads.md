@@ -1,6 +1,12 @@
 # Design: Sandbox Agent Tabs and Threads
 
-> **Status:** Not Started | **Last reviewed:** 2026-05-01
+> **Status:** Partially implemented | **Last reviewed:** 2026-05-01
+>
+> Implemented as of 2026-05-01: Phase 0 data model compatibility already
+> existed, and Phase 1 multiple blank tabs with one active thread at a time is
+> implemented. Phases 2-4 remain planned and require thread-scoped runtime
+> execution, process supervision, cancellation, file attribution, recovery, and
+> orchestration helpers.
 
 ## Summary
 
@@ -221,7 +227,7 @@ multi-tab model when it lands.
 
 - **Fix tests** — already implemented as a PR-health repair action that
   spawns a session-level fix when checks are failing (see
-  [implemented/61-pr-state-sync-and-repair-actions.md](../implemented/61-pr-state-sync-and-repair-actions.md)).
+  [implemented/61-pr-state-sync-and-repair-actions.md](61-pr-state-sync-and-repair-actions.md)).
   When multi-tab is available, the action should reuse the existing repair
   codepath and prompt template, but route the launch into a new tab inside
   the current sandbox rather than spawning a separate session operation.
@@ -781,35 +787,48 @@ shorter human supervision time for sessions where parallelism is appropriate.
 
 ## Rollout Plan
 
-### Phase 0: Data model and compatibility
+### Phase 0: Data model and compatibility — Completed
 
-- Add `session_threads`.
-- Backfill one default thread for existing sessions.
-- Add `thread_id` to session messages.
-- Keep existing single-thread APIs working.
+- Added `session_threads`.
+- Added `thread_id` to session messages and logs.
+- Kept existing single-thread APIs working.
+- Note: default-thread backfill for legacy sessions is not part of the current
+  Phase 1 UI path; sessions without explicit threads still fall back to the
+  existing session transcript/composer.
 
-### Phase 1: Multiple blank tabs, one running thread at a time
+### Phase 1: Multiple blank tabs, one running thread at a time — Completed
 
-- Let users create multiple blank tabs.
+- Users can create multiple blank tabs.
 - Creating a tab does not start execution.
+- First messages are routed through the selected thread.
+- Thread transcript and log views are scoped by `thread_id`.
+- The selected tab's agent/provider and model are used for execution.
 - Only one thread may be actively running.
 - This validates the UX, data model, message routing, and review filters without
   concurrent filesystem writes.
 
-### Phase 2: Concurrent tabs in one sandbox
+> **Phase 1 composer divergence:** the shared composer is sendable while a
+> non-thread session is running (follow-ups queue behind the in-flight turn).
+> When a thread is selected, the composer is locked while the thread is
+> `running` because admission goes through `ClaimIdleForSession`, which
+> requires the thread to be idle. Phase 2/3 should restore queueing parity by
+> introducing a thread-scoped pending-message queue or by relaxing claim
+> semantics; until then, this is the intentional Phase 1 trade-off.
+
+### Phase 2: Concurrent tabs in one sandbox — Planned
 
 - Allow multiple tabs to run in one sandbox.
 - Capture a thread-start checkpoint before each tab's first run.
 - Add file-touch attribution and overlap badges.
 - Add branch-level combined review filters.
 
-### Phase 3: Recovery and review polish
+### Phase 3: Recovery and review polish — Planned
 
 - Enforce per-session running-thread limits.
 - Add thread-scoped cancellation, cost budgets, and recovery UX.
 - Add split view and attribution filters.
 
-### Phase 4: Orchestration helpers
+### Phase 4: Orchestration helpers — Planned
 
 - Add "summarize all tabs."
 - Add "fork this tab into a separate sandbox" for risky divergent work.
