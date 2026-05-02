@@ -5,7 +5,7 @@ import { act } from '@testing-library/react';
 import { server } from '@/test/mocks/server';
 import { mockSessions, mockMembers, mockIssues, mockPRHealth } from '@/test/mocks/handlers';
 import { SessionDetailContent } from './session-detail-content';
-import type { Issue, Session, SessionMessage, SessionReviewComment, SessionTimelineEntry, User, SingleResponse, ListResponse } from '@/lib/types';
+import type { Issue, Session, SessionMessage, SessionReviewComment, SessionThread, SessionTimelineEntry, User, SingleResponse, ListResponse } from '@/lib/types';
 
 const { toast } = vi.hoisted(() => ({
   toast: {
@@ -43,14 +43,29 @@ class MockEventSource {
   onopen: ((ev: Event) => void) | null = null;
   onmessage: ((ev: MessageEvent) => void) | null = null;
   onerror: ((ev: Event) => void) | null = null;
+  private listeners = new Map<string, Array<(ev: MessageEvent) => void>>();
   constructor(url: string | URL) {
     this.url = String(url);
     MockEventSource.instances.push(this);
   }
-  addEventListener = vi.fn();
-  removeEventListener = vi.fn();
+  addEventListener = vi.fn((event: string, handler: EventListenerOrEventListenerObject) => {
+    const fn = typeof handler === 'function'
+      ? handler as (ev: MessageEvent) => void
+      : (ev: MessageEvent) => handler.handleEvent(ev);
+    this.listeners.set(event, [...(this.listeners.get(event) ?? []), fn]);
+  });
+  removeEventListener = vi.fn((event: string, handler: EventListenerOrEventListenerObject) => {
+    const existing = this.listeners.get(event) ?? [];
+    this.listeners.set(event, existing.filter((fn) => fn !== handler));
+  });
   close = vi.fn();
   dispatchEvent = vi.fn(() => true);
+  emit(event: string, data: unknown) {
+    const message = { data: JSON.stringify(data) } as MessageEvent;
+    for (const listener of this.listeners.get(event) ?? []) {
+      listener(message);
+    }
+  }
 }
 beforeAll(() => {
   global.EventSource = MockEventSource as unknown as typeof EventSource;
@@ -251,6 +266,202 @@ describe('SessionDetailPage', () => {
     expect(screen.getByRole('tab', { name: 'Overview' })).toBeInTheDocument();
     expect(screen.getByRole('tab', { name: 'Changes' })).toBeInTheDocument();
     expect(screen.getByRole('tab', { name: 'Validation' })).toBeInTheDocument();
+  });
+
+  it('switches between sandbox agent tabs and sends through the active thread', async () => {
+    const sessionId = 'session-abcdef12-3456-7890';
+    const threads: SessionThread[] = [
+      {
+        id: 'thread-codex',
+        session_id: sessionId,
+        org_id: 'org-1',
+        agent_type: 'codex',
+        label: 'Codex',
+        status: 'idle',
+        current_turn: 1,
+        created_at: '2026-02-17T07:00:00Z',
+      },
+      {
+        id: 'thread-claude',
+        session_id: sessionId,
+        org_id: 'org-1',
+        agent_type: 'claude_code',
+        label: 'Claude review',
+        status: 'running',
+        current_turn: 1,
+        created_at: '2026-02-17T07:01:00Z',
+      },
+    ];
+    const messagesByThread: Record<string, SessionMessage[]> = {
+      'thread-codex': [
+        {
+          id: 10,
+          session_id: sessionId,
+          org_id: 'org-1',
+          thread_id: 'thread-codex',
+          turn_number: 1,
+          role: 'assistant',
+          content: 'Codex implemented the export endpoint.',
+          created_at: '2026-02-17T07:02:00Z',
+        },
+      ],
+      'thread-claude': [
+        {
+          id: 11,
+          session_id: sessionId,
+          org_id: 'org-1',
+          thread_id: 'thread-claude',
+          turn_number: 1,
+          role: 'assistant',
+          content: 'Claude found a missing pagination cap.',
+          created_at: '2026-02-17T07:03:00Z',
+        },
+      ],
+    };
+    let createdThread = false;
+    let sessionMessagePosted = false;
+    let postedThreadID: string | null = null;
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({
+          data: {
+            ...mockSessions[0],
+            status: 'idle',
+            agent_type: 'codex',
+            sandbox_state: 'ready',
+            threads,
+          },
+        } satisfies SingleResponse<Session & { threads: SessionThread[] }>);
+      }),
+      http.post('/api/v1/sessions/:id/messages', () => {
+        sessionMessagePosted = true;
+        return HttpResponse.json({ data: {} });
+      }),
+      http.get('/api/v1/sessions/:id/threads/:threadId/messages', ({ params }) => {
+        return HttpResponse.json({
+          data: messagesByThread[params.threadId as string] ?? [],
+          meta: {},
+        } satisfies ListResponse<SessionMessage>);
+      }),
+      http.get('/api/v1/sessions/:id/threads/:threadId/logs', () => {
+        return HttpResponse.json({
+          data: [],
+          meta: {},
+        });
+      }),
+      http.post('/api/v1/sessions/:id/threads', async ({ request, params }) => {
+        const body = await request.json() as { label: string; agent_type: string };
+        createdThread = true;
+        const thread: SessionThread = {
+          id: 'thread-new',
+          session_id: params.id as string,
+          org_id: 'org-1',
+          agent_type: body.agent_type,
+          label: body.label,
+          status: 'idle',
+          current_turn: 0,
+          created_at: '2026-02-17T07:04:00Z',
+        };
+        threads.push(thread);
+        messagesByThread[thread.id] = [];
+        return HttpResponse.json({ data: thread } satisfies SingleResponse<SessionThread>, { status: 201 });
+      }),
+      http.post('/api/v1/sessions/:id/threads/:threadId/messages', async ({ request, params }) => {
+        const body = await request.json() as { message: string };
+        postedThreadID = params.threadId as string;
+        return HttpResponse.json({
+          data: {
+            id: 12,
+            session_id: sessionId,
+            org_id: 'org-1',
+            thread_id: params.threadId as string,
+            turn_number: 2,
+            role: 'user',
+            content: body.message,
+            created_at: '2026-02-17T07:05:00Z',
+          },
+        } satisfies SingleResponse<SessionMessage>, { status: 201 });
+      }),
+    );
+
+    const user = userEvent.setup();
+    renderWithProviders(<SessionDetailContent id={sessionId} />);
+
+    expect(await screen.findByText('Codex implemented the export endpoint.')).toBeInTheDocument();
+    expect(screen.getByRole('tab', { name: /Codex/ })).toBeInTheDocument();
+    await user.click(screen.getByRole('tab', { name: /Claude review/ }));
+    expect(await screen.findByText('Claude found a missing pagination cap.')).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: 'Add agent tab' }));
+    await user.type(screen.getByLabelText('Tab label'), 'Tests');
+    await user.click(screen.getByRole('button', { name: 'Create tab' }));
+
+    await waitFor(() => {
+      expect(createdThread).toBe(true);
+    });
+    expect(await screen.findByRole('tab', { name: /Tests/ })).toBeInTheDocument();
+    expect(screen.getByPlaceholderText('Send a message to Tests...')).toBeInTheDocument();
+
+    await user.type(screen.getByPlaceholderText('Send a message to Tests...'), 'Run the frontend checks.');
+    await user.click(screen.getByRole('button', { name: 'Send message' }));
+
+    await waitFor(() => {
+      expect(postedThreadID).toBe('thread-new');
+    });
+    expect(sessionMessagePosted).toBe(false);
+  });
+
+  it('preserves thread tabs when session status SSE payload omits thread detail', async () => {
+    const sessionId = 'session-abcdef12-3456-7890';
+    const thread: SessionThread = {
+      id: 'thread-codex',
+      session_id: sessionId,
+      org_id: 'org-1',
+      agent_type: 'codex',
+      label: 'Codex',
+      status: 'running',
+      current_turn: 1,
+      created_at: '2026-02-17T07:00:00Z',
+    };
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({
+          data: {
+            ...mockSessions[0],
+            id: sessionId,
+            status: 'running',
+            sandbox_state: 'running',
+            threads: [thread],
+          },
+        } satisfies SingleResponse<Session & { threads: SessionThread[] }>);
+      }),
+      http.get('/api/v1/sessions/:id/threads/:threadId/messages', () => {
+        return HttpResponse.json({ data: [], meta: {} } satisfies ListResponse<SessionMessage>);
+      }),
+      http.get('/api/v1/sessions/:id/threads/:threadId/logs', () => {
+        return HttpResponse.json({ data: [], meta: {} });
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id={sessionId} />);
+
+    expect(await screen.findByRole('tab', { name: /Codex/ })).toBeInTheDocument();
+    await waitFor(() => {
+      expect(MockEventSource.instances.length).toBeGreaterThan(0);
+    });
+
+    act(() => {
+      MockEventSource.instances[0].emit('status', {
+        ...mockSessions[0],
+        id: sessionId,
+        status: 'running',
+        sandbox_state: 'running',
+      });
+    });
+
+    expect(screen.getByRole('tab', { name: /Codex/ })).toBeInTheDocument();
   });
 
   it('does not hide vertical overflow on the detail tablist', async () => {

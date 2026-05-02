@@ -302,6 +302,7 @@ func main() {
 		pullRequestStore := db.NewPullRequestStore(pool)
 		deployStore := db.NewDeployStore(pool)
 		sessionMessageStore := db.NewSessionMessageStore(pool)
+		sessionThreadStore := db.NewSessionThreadStore(pool)
 		priorityScoreStore := db.NewPriorityScoreStore(pool)
 		complexityEstimateStore := db.NewComplexityEstimateStore(pool)
 		pmPlanStore := db.NewPMPlanStore(pool)
@@ -350,6 +351,7 @@ func main() {
 			EvalBootstraps:      db.NewEvalBootstrapStore(pool),
 			Repositories:        repoStore,
 			SessionMessages:     sessionMessageStore,
+			SessionThreads:      sessionThreadStore,
 			Automations:         automationStore,
 			AutomationRuns:      automationRunStore,
 			SessionIssueLinks:   db.NewSessionIssueLinkStore(pool),
