@@ -3442,19 +3442,23 @@ func TestContinueSession_ReusesExistingContainer(t *testing.T) {
 	require.GreaterOrEqual(t, d.sessions.releaseHoldCalls, 1)
 }
 
-// TestContinueSession_RestoresBaseCommitSHAOntoSandboxMetadata is the
+// TestContinueSession_RestoresDiffMetadataOntoSandboxMetadata is the
 // regression test for the "Changes tab goes blank after PR push / resolve
-// conflicts" bug. ContinueSession previously left sandbox.Metadata empty in
-// every setup branch (reuse / hydrate / fresh-clone), so sessiondiff.Collect
-// fell back to plain `git diff` and returned an empty string for any clean
-// working tree (post-push, post-merge). That empty diff overwrote the
-// authoritative session diff in the DB, blanking the Changes tab even
-// though the PR itself was healthy. With the fix, the orchestrator copies
-// session.BaseCommitSHA back onto sandbox.Metadata after every setup branch,
-// so the diff collector always has the immutable base SHA to compare
-// against. We exercise the reuse path here because it's the simplest setup
-// that goes through the post-switch metadata restore.
-func TestContinueSession_RestoresBaseCommitSHAOntoSandboxMetadata(t *testing.T) {
+// conflicts" and "Changes tab inflates with target-branch commits after
+// merging main" bugs. ContinueSession previously left sandbox.Metadata
+// empty in every setup branch (reuse / hydrate / fresh-clone), so
+// sessiondiff.Collect fell back to plain `git diff` and returned an empty
+// string for any clean working tree (post-push, post-merge). That empty
+// diff overwrote the authoritative session diff in the DB, blanking the
+// Changes tab even though the PR itself was healthy. With the fix, the
+// orchestrator copies session.BaseCommitSHA AND the resolved target branch
+// back onto sandbox.Metadata after every setup branch, so the diff
+// collector has both the immutable base SHA (fallback) and the target
+// branch (for the merge-base-style diff that excludes commits brought in
+// by integrating the target branch back into the working branch). We
+// exercise the reuse path here because it's the simplest setup that goes
+// through the post-switch metadata restore.
+func TestContinueSession_RestoresDiffMetadataOntoSandboxMetadata(t *testing.T) {
 	t.Parallel()
 
 	orgID := testOrg()
@@ -3487,10 +3491,11 @@ func TestContinueSession_RestoresBaseCommitSHAOntoSandboxMetadata(t *testing.T) 
 		},
 	}
 
-	var observedBaseSHA string
+	var observedBaseSHA, observedTargetBranch string
 	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
 		require.NotNil(t, sandbox.Metadata, "ContinueSession must populate sandbox.Metadata before the agent runs")
 		observedBaseSHA = sandbox.Metadata[agent.SandboxMetadataBaseCommitSHA]
+		observedTargetBranch = sandbox.Metadata[agent.SandboxMetadataTargetBranch]
 		return &agent.AgentResult{
 			Summary:         "done",
 			ConfidenceScore: 0.9,
@@ -3506,6 +3511,8 @@ func TestContinueSession_RestoresBaseCommitSHAOntoSandboxMetadata(t *testing.T) 
 
 	require.Equal(t, expectedBaseSHA, observedBaseSHA,
 		"ContinueSession must restore session.BaseCommitSHA onto sandbox.Metadata so sessiondiff.Collect can run `git diff <base> -- .` instead of falling back to plain `git diff`")
+	require.Equal(t, "main", observedTargetBranch,
+		"ContinueSession must stamp the resolved target branch onto sandbox.Metadata so sessiondiff.Collect can compute a merge-base diff against origin/<branch> instead of inflating the diff with target-branch changes after a merge")
 }
 
 // TestContinueSession_ReusedContainerReopensAuthListener locks in the
