@@ -117,6 +117,30 @@ func (h *CodingCredentialHandler) resolveScope(r *http.Request, orgID uuid.UUID,
 	}
 }
 
+// assertScopeMatchesContext is a defense-in-depth check on every mutation
+// path. resolveScope already coerces personal scope to the caller's user_id
+// from context, so this is a no-op on the happy path. It exists so that a
+// future refactor that ever lets a Scope flow into a mutation without
+// re-deriving from context (for example, a body field that smuggles a
+// user_id) cannot land silently — the assertion will surface the mismatch
+// as a 403 instead of a successful write against another user's stack.
+//
+// Org scope is unconditionally allowed: org rows are not user-owned and the
+// admin gate already ran in resolveScope.
+func (h *CodingCredentialHandler) assertScopeMatchesContext(r *http.Request, scope models.Scope) error {
+	if scope.UserID == nil {
+		return nil
+	}
+	user := middleware.UserFromContext(r.Context())
+	if user == nil {
+		return fmt.Errorf("unauthenticated")
+	}
+	if *scope.UserID != user.ID {
+		return fmt.Errorf("personal scope must match the authenticated user")
+	}
+	return nil
+}
+
 // List handles GET /api/v1/coding-credentials?scope=...
 //
 // scope=org → list every org row (admin or member can read; only admin mutates)
@@ -198,6 +222,10 @@ func (h *CodingCredentialHandler) Create(w http.ResponseWriter, r *http.Request)
 		writeError(w, r, http.StatusForbidden, "FORBIDDEN", err.Error())
 		return
 	}
+	if err := h.assertScopeMatchesContext(r, scope); err != nil {
+		writeError(w, r, http.StatusForbidden, "FORBIDDEN", err.Error())
+		return
+	}
 
 	cfg, _, err := codingCredentialConfigFromInput(input)
 	if err != nil {
@@ -272,6 +300,10 @@ func (h *CodingCredentialHandler) Update(w http.ResponseWriter, r *http.Request)
 		writeError(w, r, http.StatusForbidden, "FORBIDDEN", err.Error())
 		return
 	}
+	if err := h.assertScopeMatchesContext(r, scope); err != nil {
+		writeError(w, r, http.StatusForbidden, "FORBIDDEN", err.Error())
+		return
+	}
 
 	if input.Label != nil {
 		if err := h.store.Rename(r.Context(), scope, id, *input.Label); err != nil {
@@ -334,6 +366,10 @@ func (h *CodingCredentialHandler) Delete(w http.ResponseWriter, r *http.Request)
 		writeError(w, r, http.StatusForbidden, "FORBIDDEN", err.Error())
 		return
 	}
+	if err := h.assertScopeMatchesContext(r, scope); err != nil {
+		writeError(w, r, http.StatusForbidden, "FORBIDDEN", err.Error())
+		return
+	}
 	if err := h.store.Disable(r.Context(), scope, id); err != nil {
 		h.handleStoreError(w, r, err, "DELETE_FAILED")
 		return
@@ -363,6 +399,10 @@ func (h *CodingCredentialHandler) Move(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusForbidden, "FORBIDDEN", err.Error())
 		return
 	}
+	if err := h.assertScopeMatchesContext(r, scope); err != nil {
+		writeError(w, r, http.StatusForbidden, "FORBIDDEN", err.Error())
+		return
+	}
 	if err := h.store.Move(r.Context(), scope, id, input); err != nil {
 		h.handleStoreError(w, r, err, "MOVE_FAILED")
 		return
@@ -384,6 +424,10 @@ func (h *CodingCredentialHandler) Reorder(w http.ResponseWriter, r *http.Request
 	}
 	scope, err := h.resolveScope(r, orgID, input.Scope, true)
 	if err != nil {
+		writeError(w, r, http.StatusForbidden, "FORBIDDEN", err.Error())
+		return
+	}
+	if err := h.assertScopeMatchesContext(r, scope); err != nil {
 		writeError(w, r, http.StatusForbidden, "FORBIDDEN", err.Error())
 		return
 	}

@@ -148,11 +148,20 @@ func (s *CodingCredentialStore) MirrorUserCredential(ctx context.Context, row mo
 	// the natural-key conflict path (org_id, user_id, provider, label) lands
 	// on the same row instead of producing a duplicate. See migration step 3
 	// in 000110_copy_coding_credentials.up.sql.
+	//
+	// `originUserID` carries the marker column value: non-nil for team-default
+	// rows, nil for personal rows. Stamping it here keeps the mirror's row in
+	// lockstep with what the migration writes so the down-migration's marker
+	// check and the deleteTeamDefaultMirror cleanup both work without
+	// label-string heuristics.
 	var userID *uuid.UUID
+	var originUserID *uuid.UUID
 	label := ""
 	if row.IsTeamDefault {
 		userID = nil
 		label = "Team default (migrated from " + row.UserID.String() + ")"
+		uid := row.UserID
+		originUserID = &uid
 	} else {
 		uid := row.UserID
 		userID = &uid
@@ -163,20 +172,35 @@ func (s *CodingCredentialStore) MirrorUserCredential(ctx context.Context, row mo
 		priority = teamDefaultMirrorPriority
 	}
 
-	return s.upsertMirroredRow(ctx, mirroredRow{
-		ID:             row.ID,
-		OrgID:          row.OrgID,
-		UserID:         userID,
-		Provider:       provider,
-		Label:          label,
-		EncryptedCfg:   encrypted,
-		Priority:       priority,
-		Status:         row.Status,
-		CreatedBy:      &row.UserID,
-		LastVerifiedAt: row.LastVerifiedAt,
-		CreatedAt:      row.CreatedAt,
-		UpdatedAt:      row.UpdatedAt,
-	})
+	if err := s.upsertMirroredRow(ctx, mirroredRow{
+		ID:                      row.ID,
+		OrgID:                   row.OrgID,
+		UserID:                  userID,
+		Provider:                provider,
+		Label:                   label,
+		EncryptedCfg:            encrypted,
+		Priority:                priority,
+		Status:                  row.Status,
+		CreatedBy:               &row.UserID,
+		LastVerifiedAt:          row.LastVerifiedAt,
+		CreatedAt:               row.CreatedAt,
+		UpdatedAt:               row.UpdatedAt,
+		TeamDefaultOriginUserID: originUserID,
+	}); err != nil {
+		return err
+	}
+
+	// On a personal→team-default flip, ON CONFLICT (id) rewrites user_id to
+	// NULL. upsertMirroredRow only invalidates the new (org) scope, but the
+	// originating user's personal-scope cache may still hold the row's old
+	// representation as a personal entry. Wipe the personal scope too so the
+	// next resolver call re-fetches and sees the row in the org tail instead
+	// of stuck in the personal half.
+	if row.IsTeamDefault {
+		uid := row.UserID
+		s.invalidate(models.Scope{OrgID: row.OrgID, UserID: &uid}, provider)
+	}
+	return nil
 }
 
 // MirrorUserCredentialDelete removes a mirrored user credential by legacy id
@@ -224,17 +248,19 @@ func (s *CodingCredentialStore) mirrorFailureOnError(err *error) {
 	s.recordMirrorFailure()
 }
 
-// deleteTeamDefaultMirror drops any org-scoped mirror row whose deterministic
-// "Team default (migrated from <user_id>)" label was minted by the SQL
-// data-copy migration or by an earlier mirror call. Idempotent — no-op when
-// no such row exists. Invalidates the resolver cache for the affected
-// (org, provider) so a stale read does not survive the cleanup.
+// deleteTeamDefaultMirror drops any org-scoped mirror row that was minted by
+// the SQL data-copy migration or by an earlier mirror call to back the legacy
+// (orgID, originalUserID, provider) team-default credential. Keyed on the
+// `team_default_origin_user_id` marker column so a renamed label can't shield
+// the row from cleanup. Idempotent — no-op when no such row exists.
+// Invalidates the resolver cache for the affected (org, provider) so a stale
+// read does not survive the cleanup.
 func (s *CodingCredentialStore) deleteTeamDefaultMirror(ctx context.Context, orgID, originalUserID uuid.UUID, provider models.ProviderName) error {
-	label := "Team default (migrated from " + originalUserID.String() + ")"
 	tag, err := s.db.Exec(ctx,
 		`DELETE FROM coding_credentials
-		 WHERE org_id = @org_id AND user_id IS NULL AND provider = @provider AND label = @label`,
-		pgx.NamedArgs{"org_id": orgID, "provider": string(provider), "label": label},
+		 WHERE org_id = @org_id AND user_id IS NULL AND provider = @provider
+		   AND team_default_origin_user_id = @origin_user_id`,
+		pgx.NamedArgs{"org_id": orgID, "provider": string(provider), "origin_user_id": originalUserID},
 	)
 	if err != nil {
 		return fmt.Errorf("delete team default mirror: %w", err)
@@ -263,6 +289,10 @@ type mirroredRow struct {
 	LastVerifiedAt *time.Time
 	CreatedAt      time.Time
 	UpdatedAt      time.Time
+	// TeamDefaultOriginUserID stamps the marker column for org-scoped rows
+	// minted by a personal team-default credential. Non-nil only when the
+	// caller is mirroring a `is_team_default = true` user_credentials row.
+	TeamDefaultOriginUserID *uuid.UUID
 }
 
 // upsertMirroredRow inserts or updates a coding_credentials row preserving the
@@ -280,40 +310,47 @@ type mirroredRow struct {
 // and ParseCodingProviderConfig would fail at decrypt time.
 func (s *CodingCredentialStore) upsertMirroredRow(ctx context.Context, row mirroredRow) error {
 	args := pgx.NamedArgs{
-		"id":               row.ID,
-		"org_id":           row.OrgID,
-		"user_id":          row.UserID,
-		"provider":         string(row.Provider),
-		"label":            row.Label,
-		"config":           row.EncryptedCfg,
-		"priority":         row.Priority,
-		"status":           row.Status,
-		"created_by":       row.CreatedBy,
-		"last_verified_at": row.LastVerifiedAt,
-		"created_at":       row.CreatedAt,
-		"updated_at":       row.UpdatedAt,
+		"id":                          row.ID,
+		"org_id":                      row.OrgID,
+		"user_id":                     row.UserID,
+		"provider":                    string(row.Provider),
+		"label":                       row.Label,
+		"config":                      row.EncryptedCfg,
+		"priority":                    row.Priority,
+		"status":                      row.Status,
+		"created_by":                  row.CreatedBy,
+		"last_verified_at":            row.LastVerifiedAt,
+		"created_at":                  row.CreatedAt,
+		"updated_at":                  row.UpdatedAt,
+		"team_default_origin_user_id": row.TeamDefaultOriginUserID,
 	}
 
 	// Insert by id; on conflict, update the row in place. Scope (org_id +
 	// user_id) is immutable for a given legacy row; provider can flip during
 	// the api-key ↔ subscription split path so it is part of the refresh.
+	// `team_default_origin_user_id` is rewritten on every flip — set when a
+	// row toggles to is_team_default=true, cleared when it toggles back —
+	// keeping the marker column in lockstep with the legacy row's state.
 	_, err := s.db.Exec(ctx, `
 		INSERT INTO coding_credentials (
 			id, org_id, user_id, provider, label, config, priority, status,
-			created_by, last_verified_at, created_at, updated_at
+			created_by, last_verified_at, created_at, updated_at,
+			team_default_origin_user_id
 		) VALUES (
 			@id, @org_id, @user_id, @provider, @label, @config, @priority, @status,
-			@created_by, @last_verified_at, @created_at, @updated_at
+			@created_by, @last_verified_at, @created_at, @updated_at,
+			@team_default_origin_user_id
 		)
 		ON CONFLICT (id) DO UPDATE SET
-			user_id          = EXCLUDED.user_id,
-			provider         = EXCLUDED.provider,
-			label            = EXCLUDED.label,
-			config           = EXCLUDED.config,
-			priority         = EXCLUDED.priority,
-			status           = EXCLUDED.status,
-			last_verified_at = EXCLUDED.last_verified_at,
-			updated_at       = EXCLUDED.updated_at`,
+			user_id                     = EXCLUDED.user_id,
+			provider                    = EXCLUDED.provider,
+			label                       = EXCLUDED.label,
+			config                      = EXCLUDED.config,
+			priority                    = EXCLUDED.priority,
+			status                      = EXCLUDED.status,
+			last_verified_at            = EXCLUDED.last_verified_at,
+			updated_at                  = EXCLUDED.updated_at,
+			team_default_origin_user_id = EXCLUDED.team_default_origin_user_id`,
 		args,
 	)
 	if err == nil {
@@ -332,34 +369,37 @@ func (s *CodingCredentialStore) upsertMirroredRow(ctx context.Context, row mirro
 
 func (s *CodingCredentialStore) updateMirroredRowByNaturalKey(ctx context.Context, row mirroredRow) error {
 	args := pgx.NamedArgs{
-		"org_id":           row.OrgID,
-		"user_id":          row.UserID,
-		"provider":         string(row.Provider),
-		"label":            row.Label,
-		"config":           row.EncryptedCfg,
-		"priority":         row.Priority,
-		"status":           row.Status,
-		"last_verified_at": row.LastVerifiedAt,
-		"updated_at":       row.UpdatedAt,
+		"org_id":                      row.OrgID,
+		"user_id":                     row.UserID,
+		"provider":                    string(row.Provider),
+		"label":                       row.Label,
+		"config":                      row.EncryptedCfg,
+		"priority":                    row.Priority,
+		"status":                      row.Status,
+		"last_verified_at":            row.LastVerifiedAt,
+		"updated_at":                  row.UpdatedAt,
+		"team_default_origin_user_id": row.TeamDefaultOriginUserID,
 	}
 	var query string
 	if row.UserID != nil {
 		query = `
 			UPDATE coding_credentials SET
-				config           = @config,
-				priority         = @priority,
-				status           = @status,
-				last_verified_at = @last_verified_at,
-				updated_at       = @updated_at
+				config                      = @config,
+				priority                    = @priority,
+				status                      = @status,
+				last_verified_at            = @last_verified_at,
+				updated_at                  = @updated_at,
+				team_default_origin_user_id = @team_default_origin_user_id
 			WHERE org_id = @org_id AND user_id = @user_id AND provider = @provider AND label = @label`
 	} else {
 		query = `
 			UPDATE coding_credentials SET
-				config           = @config,
-				priority         = @priority,
-				status           = @status,
-				last_verified_at = @last_verified_at,
-				updated_at       = @updated_at
+				config                      = @config,
+				priority                    = @priority,
+				status                      = @status,
+				last_verified_at            = @last_verified_at,
+				updated_at                  = @updated_at,
+				team_default_origin_user_id = @team_default_origin_user_id
 			WHERE org_id = @org_id AND user_id IS NULL AND provider = @provider AND label = @label`
 	}
 	if _, err := s.db.Exec(ctx, query, args); err != nil {

@@ -28,8 +28,22 @@ CREATE TABLE coding_credentials (
     created_at       timestamptz NOT NULL DEFAULT now(),
     updated_at       timestamptz NOT NULL DEFAULT now(),
 
+    -- Marker for org-scoped rows that were minted from a personal team-default
+    -- credential (either by 000110 data-copy or by the dual-write mirror). When
+    -- non-NULL, holds the originating user_credentials.user_id. Used by the
+    -- mirror's natural-key cleanup and by the 000110 down migration to identify
+    -- rows safely without LIKE-matching the human-readable label. The cleanup
+    -- PR drops both the mirror and this column once the legacy stores retire.
+    team_default_origin_user_id uuid,
+
     CONSTRAINT chk_coding_credentials_status
-        CHECK (status IN ('active', 'disabled', 'pending_auth', 'invalid'))
+        CHECK (status IN ('active', 'disabled', 'pending_auth', 'invalid')),
+
+    -- The marker only ever applies to org-scoped rows. user_id IS NOT NULL
+    -- means the row is personal and cannot be a migrated team default; rejecting
+    -- the combination at the schema level keeps the natural-key cleanup honest.
+    CONSTRAINT chk_coding_credentials_team_default_marker
+        CHECK (team_default_origin_user_id IS NULL OR user_id IS NULL)
 );
 
 -- One credential per (scope, provider, label).
@@ -64,6 +78,14 @@ CREATE INDEX coding_credentials_org_idx
 CREATE INDEX coding_credentials_pending_auth_ttl_idx
     ON coding_credentials (created_at)
     WHERE status = 'pending_auth';
+
+-- Mirror cleanup seek: when MirrorUserCredential* needs to clear a stale
+-- team-default mirror row keyed on the originating user, this partial index
+-- makes the lookup an index-only seek instead of a scan + filter. Sized
+-- proportional to the team-default population, which is tiny.
+CREATE INDEX coding_credentials_team_default_origin_idx
+    ON coding_credentials (org_id, provider, team_default_origin_user_id)
+    WHERE team_default_origin_user_id IS NOT NULL;
 
 -- Sentinel table tracking one-shot data-fixup jobs whose completion gates
 -- application startup. The encrypted-blob Anthropic split is the first
