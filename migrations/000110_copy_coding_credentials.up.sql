@@ -49,6 +49,7 @@ SELECT
     last_verified_at, created_at, updated_at
 FROM user_credentials
 WHERE is_team_default = false
+  AND provider IN ('openai', 'anthropic', 'gemini', 'amp', 'pi', 'openrouter')
 ON CONFLICT (id) DO NOTHING;
 
 -- 3. Team-default rows become org-scoped rows. Use a deterministic label
@@ -92,6 +93,7 @@ SELECT
     uc.updated_at
 FROM user_credentials uc
 WHERE uc.is_team_default = true
+  AND uc.provider IN ('openai', 'anthropic', 'gemini', 'amp', 'pi', 'openrouter')
 -- Idempotency: skip rows already migrated by a prior run. Detected via the
 -- deterministic uuid-keyed label suffix.
 AND NOT EXISTS (

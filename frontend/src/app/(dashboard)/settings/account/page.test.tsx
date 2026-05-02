@@ -212,6 +212,7 @@ describe("Account settings page", () => {
 
     await user.click(screen.getByRole("button", { name: "Add auth" }));
     await user.click(await screen.findByLabelText("Claude Code"));
+    await user.type(screen.getByLabelText("Label"), "Personal Claude backup");
     // Use the input id directly — the visible label text is shared with the
     // help-tooltip button so getByLabelText("API key") would be ambiguous.
     await user.type(screen.getByPlaceholderText("sk-ant-..."), "sk-ant-test123");
@@ -222,6 +223,7 @@ describe("Account settings page", () => {
         scope: "personal",
         agent: "claude_code",
         auth_type: "api_key",
+        label: "Personal Claude backup",
         api_key: "sk-ant-test123",
       });
     });

@@ -105,6 +105,7 @@ export default function AccountPage() {
   const [addOpen, setAddOpen] = useState(false);
   const [provider, setProvider] = useState<PersonalProvider>("openai");
   const [apiKey, setApiKey] = useState("");
+  const [authLabel, setAuthLabel] = useState("");
   const [pendingReasoningDefaults, setPendingReasoningDefaults] = useState<UserSettingsUpdateRequest["coding_agent_reasoning_defaults"] | null>(null);
   const reasoningSaveInFlightRef = useRef(false);
   const queuedReasoningDefaultsRef = useRef<UserSettingsUpdateRequest["coding_agent_reasoning_defaults"] | null>(null);
@@ -143,6 +144,7 @@ export default function AccountPage() {
         scope: "personal",
         agent: personalProviderToAgent(provider),
         auth_type: "api_key",
+        label: authLabel.trim() || undefined,
         api_key: apiKey,
       }),
     onSuccess: () => {
@@ -153,6 +155,7 @@ export default function AccountPage() {
       void queryClient.invalidateQueries({ queryKey: ["user-credentials"] });
       void queryClient.invalidateQueries({ queryKey: ["credentials", "resolved"] });
       setApiKey("");
+      setAuthLabel("");
       setAddOpen(false);
       toast.success("Personal auth saved");
     },
@@ -394,7 +397,13 @@ export default function AccountPage() {
 
       <CodingAuthDialog
         open={addOpen}
-        onOpenChange={setAddOpen}
+        onOpenChange={(open) => {
+          setAddOpen(open);
+          if (!open) {
+            setApiKey("");
+            setAuthLabel("");
+          }
+        }}
         title="Add auth"
         description="Add a personal API key that will be tried before the organization fallback stack."
         providerOptions={PERSONAL_PROVIDER_OPTIONS}
@@ -403,8 +412,21 @@ export default function AccountPage() {
         primaryLabel="Save auth"
         onPrimary={() => createMutation.mutate()}
         primaryDisabled={!apiKey.trim()}
-        onCancel={() => setAddOpen(false)}
+        onCancel={() => {
+          setApiKey("");
+          setAuthLabel("");
+          setAddOpen(false);
+        }}
       >
+        <div className="space-y-2">
+          <Label htmlFor="personal-auth-label">Label</Label>
+          <Input
+            id="personal-auth-label"
+            value={authLabel}
+            onChange={(event) => setAuthLabel(event.target.value)}
+            placeholder={`${agentLabel(personalProviderToAgent(provider))} backup`}
+          />
+        </div>
         <div className="space-y-2">
           <Label htmlFor="personal-api-key" className="flex items-center gap-2">
             API key
