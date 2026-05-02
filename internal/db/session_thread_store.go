@@ -132,18 +132,20 @@ func (s *SessionThreadStore) UpdateStatus(ctx context.Context, orgID, threadID u
 // (thread-scoped runtime execution) will need to populate the thread's own
 // result columns — switch to UpdateTurnComplete on the thread store at that
 // point so per-thread review surfaces have data to show.
-func (s *SessionThreadStore) CompleteTurn(ctx context.Context, orgID, threadID uuid.UUID, turn int) error {
+func (s *SessionThreadStore) CompleteTurn(ctx context.Context, orgID, threadID uuid.UUID, turn int, agentSessionID string) error {
 	query := `
 		UPDATE session_threads
 		SET status = 'idle',
 		    current_turn = @current_turn,
-		    last_activity_at = now()
+		    last_activity_at = now(),
+		    agent_session_id = COALESCE(@agent_session_id, agent_session_id)
 		WHERE id = @id AND org_id = @org_id`
 
 	ct, err := s.db.Exec(ctx, query, pgx.NamedArgs{
-		"id":           threadID,
-		"org_id":       orgID,
-		"current_turn": turn,
+		"id":               threadID,
+		"org_id":           orgID,
+		"current_turn":     turn,
+		"agent_session_id": emptyStringNil(agentSessionID),
 	})
 	if err != nil {
 		return err
@@ -152,6 +154,13 @@ func (s *SessionThreadStore) CompleteTurn(ctx context.Context, orgID, threadID u
 		return fmt.Errorf("thread not found")
 	}
 	return nil
+}
+
+func emptyStringNil(value string) *string {
+	if value == "" {
+		return nil
+	}
+	return &value
 }
 
 // UpdateResult persists agent results on a thread.

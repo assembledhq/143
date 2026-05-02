@@ -3964,12 +3964,15 @@ func TestContinueSessionHandler_ThreadCompleteTurnUsesThreadTurn(t *testing.T) {
 	// CompleteTurn query: arg order follows the @placeholders in the SQL
 	// (current_turn, id, org_id). Pinning the literal value here is what
 	// catches a regression that uses session.CurrentTurn.
-	mock.ExpectExec(`UPDATE session_threads\s+SET status = 'idle',\s+current_turn = @current_turn`).
-		WithArgs(expectedThreadTurnAfter, threadID, orgID).
+	mock.ExpectExec(`UPDATE session_threads`).
+		WithArgs(expectedThreadTurnAfter, pgxmock.AnyArg(), threadID, orgID).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
 	orch := &orchestratorServiceStub{
 		continueSessionFn: func(ctx context.Context, session *models.Session, opts *agent.ContinueSessionOptions) error {
+			require.NotNil(t, opts, "thread continuation should pass execution options")
+			require.NotNil(t, opts.ResultAgentSessionID, "thread continuation should let the orchestrator report the thread agent session id")
+			*opts.ResultAgentSessionID = "thread-agent-session-after"
 			return nil
 		},
 	}

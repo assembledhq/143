@@ -66,7 +66,9 @@ func (m *mockThreadStore) UpdateStatus(ctx context.Context, orgID, threadID uuid
 }
 
 type mockSessionStoreForThread struct {
-	getByIDFn func(ctx context.Context, orgID, sessionID uuid.UUID) (models.Session, error)
+	getByIDFn      func(ctx context.Context, orgID, sessionID uuid.UUID) (models.Session, error)
+	claimIdleFn    func(ctx context.Context, orgID, sessionID uuid.UUID) (models.Session, error)
+	updateStatusFn func(ctx context.Context, orgID, sessionID uuid.UUID, status string) error
 }
 
 func (m *mockSessionStoreForThread) GetByID(ctx context.Context, orgID, sessionID uuid.UUID) (models.Session, error) {
@@ -74,6 +76,20 @@ func (m *mockSessionStoreForThread) GetByID(ctx context.Context, orgID, sessionI
 		return m.getByIDFn(ctx, orgID, sessionID)
 	}
 	return models.Session{}, fmt.Errorf("not found")
+}
+
+func (m *mockSessionStoreForThread) ClaimIdle(ctx context.Context, orgID, sessionID uuid.UUID) (models.Session, error) {
+	if m.claimIdleFn != nil {
+		return m.claimIdleFn(ctx, orgID, sessionID)
+	}
+	return models.Session{ID: sessionID, OrgID: orgID, Status: string(models.SessionStatusRunning)}, nil
+}
+
+func (m *mockSessionStoreForThread) UpdateStatus(ctx context.Context, orgID, sessionID uuid.UUID, status string) error {
+	if m.updateStatusFn != nil {
+		return m.updateStatusFn(ctx, orgID, sessionID, status)
+	}
+	return nil
 }
 
 type mockMessageStore struct {

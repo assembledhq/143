@@ -978,6 +978,7 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 		var threadTurnBefore int
 		var hasThread bool
 		var continueOpts *agent.ContinueSessionOptions
+		var resultAgentSessionID string
 		if input.ThreadID != "" && stores.SessionThreads != nil {
 			parsedThreadID, parseErr := uuid.Parse(input.ThreadID)
 			if parseErr != nil {
@@ -994,8 +995,10 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 				}
 				threadTurnBefore = thread.CurrentTurn
 				continueOpts = &agent.ContinueSessionOptions{
-					AgentType:     thread.AgentType,
-					ModelOverride: thread.ModelOverride,
+					AgentType:            thread.AgentType,
+					ModelOverride:        thread.ModelOverride,
+					ThreadAgentSessionID: thread.AgentSessionID,
+					ResultAgentSessionID: &resultAgentSessionID,
 				}
 			}
 		}
@@ -1023,7 +1026,7 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 			// thread's new current_turn is the same value once the assistant
 			// turn completes. The session's CurrentTurn is independent — it
 			// tracks the shared sandbox's total turns across all threads.
-			if err := stores.SessionThreads.CompleteTurn(ctx, orgID, threadID, threadTurnBefore+1); err != nil {
+			if err := stores.SessionThreads.CompleteTurn(ctx, orgID, threadID, threadTurnBefore+1, resultAgentSessionID); err != nil {
 				logger.Warn().Err(err).
 					Str("session_id", sessionID.String()).
 					Str("thread_id", threadID.String()).

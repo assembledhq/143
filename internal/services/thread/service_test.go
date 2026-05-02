@@ -59,7 +59,9 @@ func (m *mockThreadStore) UpdateStatus(ctx context.Context, orgID, threadID uuid
 }
 
 type mockSessionStore struct {
-	getByIDFn func(ctx context.Context, orgID, sessionID uuid.UUID) (models.Session, error)
+	getByIDFn      func(ctx context.Context, orgID, sessionID uuid.UUID) (models.Session, error)
+	claimIdleFn    func(ctx context.Context, orgID, sessionID uuid.UUID) (models.Session, error)
+	updateStatusFn func(ctx context.Context, orgID, sessionID uuid.UUID, status string) error
 }
 
 func (m *mockSessionStore) GetByID(ctx context.Context, orgID, sessionID uuid.UUID) (models.Session, error) {
@@ -67,6 +69,20 @@ func (m *mockSessionStore) GetByID(ctx context.Context, orgID, sessionID uuid.UU
 		return m.getByIDFn(ctx, orgID, sessionID)
 	}
 	return models.Session{}, fmt.Errorf("not found")
+}
+
+func (m *mockSessionStore) ClaimIdle(ctx context.Context, orgID, sessionID uuid.UUID) (models.Session, error) {
+	if m.claimIdleFn != nil {
+		return m.claimIdleFn(ctx, orgID, sessionID)
+	}
+	return models.Session{ID: sessionID, OrgID: orgID, Status: string(models.SessionStatusRunning)}, nil
+}
+
+func (m *mockSessionStore) UpdateStatus(ctx context.Context, orgID, sessionID uuid.UUID, status string) error {
+	if m.updateStatusFn != nil {
+		return m.updateStatusFn(ctx, orgID, sessionID, status)
+	}
+	return nil
 }
 
 type mockMessageStore struct {
@@ -489,6 +505,64 @@ func TestService_SendMessage(t *testing.T) {
 					return uuid.New(), nil
 				}
 			},
+		},
+		{
+			name: "claims parent session before creating thread message",
+			input: SendMessageInput{
+				SessionID: sessionID,
+				OrgID:     orgID,
+				ThreadID:  threadID,
+				Message:   "hi",
+			},
+			setupDeps: func(deps *testDeps) {
+				claimedSession := false
+				deps.threadStore.claimIdleFn = func(_ context.Context, _, _, _ uuid.UUID) (models.SessionThread, error) {
+					return models.SessionThread{ID: threadID, SessionID: sessionID, OrgID: orgID, CurrentTurn: 1, Status: models.ThreadStatusRunning}, nil
+				}
+				deps.sessionStore.claimIdleFn = func(_ context.Context, _, _ uuid.UUID) (models.Session, error) {
+					claimedSession = true
+					return models.Session{ID: sessionID, OrgID: orgID, Status: string(models.SessionStatusRunning)}, nil
+				}
+				deps.messageStore.createFn = func(_ context.Context, _ *models.SessionMessage) error {
+					require.True(t, claimedSession, "SendMessage should claim the parent session before creating the message")
+					return nil
+				}
+			},
+		},
+		{
+			name: "rejects when parent session is already active",
+			input: SendMessageInput{
+				SessionID: sessionID,
+				OrgID:     orgID,
+				ThreadID:  threadID,
+				Message:   "hi",
+			},
+			setupDeps: func(deps *testDeps) {
+				var revertedThread bool
+				deps.threadStore.claimIdleFn = func(_ context.Context, _, _, _ uuid.UUID) (models.SessionThread, error) {
+					return models.SessionThread{ID: threadID, SessionID: sessionID, OrgID: orgID, CurrentTurn: 1, Status: models.ThreadStatusRunning}, nil
+				}
+				deps.sessionStore.claimIdleFn = func(_ context.Context, _, _ uuid.UUID) (models.Session, error) {
+					return models.Session{}, fmt.Errorf("session already running")
+				}
+				deps.threadStore.updateStatusFn = func(_ context.Context, _, _ uuid.UUID, status models.ThreadStatus) error {
+					require.Equal(t, models.ThreadStatusIdle, status, "SendMessage should release the thread when parent session claim fails")
+					revertedThread = true
+					return nil
+				}
+				deps.messageStore.createFn = func(_ context.Context, _ *models.SessionMessage) error {
+					require.Fail(t, "SendMessage must not create a message when the parent session is active")
+					return nil
+				}
+				deps.jobStore.enqueueFn = func(_ context.Context, _ uuid.UUID, _, _ string, _ any, _ int, _ *string) (uuid.UUID, error) {
+					require.Fail(t, "SendMessage must not enqueue work when the parent session is active")
+					return uuid.Nil, nil
+				}
+				t.Cleanup(func() {
+					require.True(t, revertedThread, "SendMessage should revert the claimed thread")
+				})
+			},
+			expectErr: ErrActiveThreadExists,
 		},
 		{
 			name: "thread not found",

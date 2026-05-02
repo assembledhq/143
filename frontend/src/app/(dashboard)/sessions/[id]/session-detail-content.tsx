@@ -1607,6 +1607,22 @@ function ChatPanel({
     });
   }, []);
 
+  const mergeSessionStatusUpdate = useCallback((updated: Session) => {
+    queryClient.setQueryData<SingleResponse<SessionDetail>>(["session", sessionId], (existing) => {
+      if (!existing) {
+        return { data: { ...updated, threads: [] } };
+      }
+      return {
+        ...existing,
+        data: {
+          ...existing.data,
+          ...updated,
+          threads: updated.threads ?? existing.data.threads ?? [],
+        },
+      };
+    });
+  }, [queryClient, sessionId]);
+
   useEffect(() => {
     if (!isActive) return;
 
@@ -1632,7 +1648,7 @@ function ChatPanel({
       });
 
       addSSEListener(eventSource, SSE_EVENT.STATUS, (updated) => {
-        queryClient.setQueryData(["session", sessionId], { data: updated });
+        mergeSessionStatusUpdate(updated);
         // When the session transitions out of running (e.g. sandbox creation
         // failure reverts to idle), fetch the latest messages so any error
         // message posted by the backend is displayed immediately.
@@ -1646,7 +1662,7 @@ function ChatPanel({
       });
 
       addSSEListener(eventSource, SSE_EVENT.DONE, (updated) => {
-        queryClient.setQueryData(["session", sessionId], { data: updated });
+        mergeSessionStatusUpdate(updated);
         eventSource?.close();
         queryClient.invalidateQueries({ queryKey: ["session", sessionId, "timeline"] });
         if (activeThreadId) {
@@ -1682,7 +1698,7 @@ function ChatPanel({
         clearTimeout(reconnectTimer.current);
       }
     };
-  }, [sessionId, apiBase, isActive, mergeLogs, queryClient, activeThreadId]);
+  }, [sessionId, apiBase, isActive, mergeLogs, mergeSessionStatusUpdate, queryClient, activeThreadId]);
 
   // Track whether the user is scrolled near the bottom.
   const handleScroll = useCallback(() => {
@@ -2460,7 +2476,7 @@ export function SessionDetailContent({ id }: { id: string }) {
   const composerCanSendMessage = session?.status !== "skipped" &&
     session?.status !== "pending" &&
     session?.sandbox_state !== "destroyed" &&
-    (!activeThread || activeThread.status === "idle");
+    (!activeThread || (session?.status !== "running" && activeThread.status === "idle"));
   const composerIsRunning = activeThread ? activeThread.status === "running" : session?.status === "running";
   const composerIsSnapshotExpired = session?.sandbox_state === "destroyed";
   const composerAgentType = activeThread?.agent_type ?? session?.agent_type ?? "codex";

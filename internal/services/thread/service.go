@@ -29,6 +29,8 @@ var (
 // SessionStore defines the session DB operations needed by the thread service.
 type SessionStore interface {
 	GetByID(ctx context.Context, orgID, sessionID uuid.UUID) (models.Session, error)
+	ClaimIdle(ctx context.Context, orgID, sessionID uuid.UUID) (models.Session, error)
+	UpdateStatus(ctx context.Context, orgID, sessionID uuid.UUID, status string) error
 }
 
 // ThreadStore defines the thread DB operations needed by the thread service.
@@ -239,6 +241,13 @@ func (s *Service) SendMessage(ctx context.Context, input SendMessageInput) (*mod
 		return nil, ErrThreadNotFound
 	}
 
+	if _, err := s.sessionStore.ClaimIdle(ctx, input.OrgID, input.SessionID); err != nil {
+		if revertErr := s.threadStore.UpdateStatus(ctx, input.OrgID, input.ThreadID, models.ThreadStatusIdle); revertErr != nil {
+			s.logger.Error().Err(revertErr).Str("thread_id", input.ThreadID.String()).Msg("failed to revert thread to idle after parent session claim failure")
+		}
+		return nil, ErrActiveThreadExists
+	}
+
 	content := input.Message
 	if input.PlanMode {
 		content = "[PLAN_MODE]\n" + content
@@ -260,6 +269,9 @@ func (s *Service) SendMessage(ctx context.Context, input SendMessageInput) (*mod
 	}
 
 	if err := s.messageStore.Create(ctx, msg); err != nil {
+		if revertErr := s.sessionStore.UpdateStatus(ctx, input.OrgID, input.SessionID, string(models.SessionStatusIdle)); revertErr != nil {
+			s.logger.Error().Err(revertErr).Str("session_id", input.SessionID.String()).Msg("failed to revert session to idle after thread message creation failure")
+		}
 		if revertErr := s.threadStore.UpdateStatus(ctx, input.OrgID, input.ThreadID, models.ThreadStatusIdle); revertErr != nil {
 			s.logger.Error().Err(revertErr).Str("thread_id", input.ThreadID.String()).Msg("failed to revert thread to idle after message creation failure")
 		}
@@ -276,6 +288,9 @@ func (s *Service) SendMessage(ctx context.Context, input SendMessageInput) (*mod
 		"org_id":     input.OrgID.String(),
 	}
 	if _, err := s.jobStore.Enqueue(ctx, input.OrgID, "agent", "continue_session", payload, 5, nil); err != nil {
+		if revertErr := s.sessionStore.UpdateStatus(ctx, input.OrgID, input.SessionID, string(models.SessionStatusIdle)); revertErr != nil {
+			s.logger.Error().Err(revertErr).Str("session_id", input.SessionID.String()).Msg("failed to revert session to idle after thread enqueue failure")
+		}
 		if revertErr := s.threadStore.UpdateStatus(ctx, input.OrgID, input.ThreadID, models.ThreadStatusIdle); revertErr != nil {
 			s.logger.Error().Err(revertErr).Str("thread_id", input.ThreadID.String()).Msg("failed to revert thread to idle after enqueue failure")
 		}

@@ -292,8 +292,10 @@ type DurableCheckpoint struct {
 // turn. Threaded sessions use this to run a tab with its selected agent/model
 // while keeping the parent session row as the shared sandbox/session identity.
 type ContinueSessionOptions struct {
-	AgentType     models.AgentType
-	ModelOverride *string
+	AgentType            models.AgentType
+	ModelOverride        *string
+	ThreadAgentSessionID *string
+	ResultAgentSessionID *string
 }
 
 // OrchestratorConfig holds the dependencies for creating an Orchestrator.
@@ -1679,10 +1681,16 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		return ErrSnapshotPending
 	}
 
-	if opts != nil && opts.AgentType != "" {
+	parentAgentSessionID := ""
+	if session.AgentSessionID != nil {
+		parentAgentSessionID = *session.AgentSessionID
+	}
+	threadScopedExecution := opts != nil && opts.AgentType != ""
+	if threadScopedExecution {
 		executionSession := *session
 		executionSession.AgentType = opts.AgentType
 		executionSession.ModelOverride = opts.ModelOverride
+		executionSession.AgentSessionID = opts.ThreadAgentSessionID
 		session = &executionSession
 	}
 
@@ -2179,28 +2187,63 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 			o.runSandboxGitBootstrap(ctx, sandbox, sandboxCfg.WorkDir, log)
 		}
 
-		var resumeSessionID string
-		if session.AgentSessionID != nil {
-			resumeSessionID = *session.AgentSessionID
-		}
 		commands := canonicalCommands(latestMsg, session.AgentType)
-		// UserMessage carries the user's textarea content verbatim, including
-		// any visible /command tokens. Run it through the same slash-command
-		// repair helper used by adapter.PreparePrompt so reused/snapshot-backed
-		// continuation turns cannot silently drop stored commands when the
-		// textarea and commands[] payload disagree.
-		prompt = &AgentPrompt{
-			Continuation:    true,
-			ResumeSessionID: resumeSessionID,
-			UserMessage:     EnsureSlashCommandsInPrompt(userMessage, commands),
-			MaxTokens:       tokenLimitForMode(session.TokenMode),
-			ReasoningEffort: func() models.ReasoningEffort {
-				if session.ReasoningEffort == nil {
-					return ""
-				}
-				return *session.ReasoningEffort
-			}(),
-			RevisionContext: revisionContext,
+		hasThreadAgentSessionID := session.AgentSessionID != nil && *session.AgentSessionID != ""
+		if threadScopedExecution && !hasThreadAgentSessionID {
+			input := &AgentInput{
+				Issue:        promptIssue,
+				LinkedIssues: linkedIssues,
+				Manual:       session.Origin == models.SessionOriginManual,
+				UserMessage:  userMessage,
+				References: func() []models.SessionInputReference {
+					refs := canonicalReferences(latestMsg)
+					if len(refs) > 0 {
+						return refs
+					}
+					if promptIssue != nil {
+						return manualSessionReferences(promptIssue)
+					}
+					return nil
+				}(),
+				Commands: commands,
+				ReasoningEffort: func() models.ReasoningEffort {
+					if session.ReasoningEffort == nil {
+						return ""
+					}
+					return *session.ReasoningEffort
+				}(),
+				TokenMode:         session.TokenMode,
+				RevisionContext:   revisionContext,
+				IntegrationSkills: integrationSkills,
+			}
+			prompt, err = adapter.PreparePrompt(ctx, input)
+			if err != nil {
+				o.failRun(ctx, session, fmt.Sprintf("prepare prompt for thread: %s", err))
+				return fmt.Errorf("prepare prompt for thread: %w", err)
+			}
+		} else {
+			var resumeSessionID string
+			if hasThreadAgentSessionID {
+				resumeSessionID = *session.AgentSessionID
+			}
+			// UserMessage carries the user's textarea content verbatim, including
+			// any visible /command tokens. Run it through the same slash-command
+			// repair helper used by adapter.PreparePrompt so reused/snapshot-backed
+			// continuation turns cannot silently drop stored commands when the
+			// textarea and commands[] payload disagree.
+			prompt = &AgentPrompt{
+				Continuation:    true,
+				ResumeSessionID: resumeSessionID,
+				UserMessage:     EnsureSlashCommandsInPrompt(userMessage, commands),
+				MaxTokens:       tokenLimitForMode(session.TokenMode),
+				ReasoningEffort: func() models.ReasoningEffort {
+					if session.ReasoningEffort == nil {
+						return ""
+					}
+					return *session.ReasoningEffort
+				}(),
+				RevisionContext: revisionContext,
+			}
 		}
 
 		if reusedExisting {
@@ -2337,6 +2380,13 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	if err := o.createAssistantMessage(ctx, session.ID, session.OrgID, threadID, turnNumber, result); err != nil {
 		log.Warn().Err(err).Msg("failed to create assistant message")
 	}
+	if opts != nil && opts.ResultAgentSessionID != nil {
+		threadAgentSessionID := result.AgentSessionID
+		if threadAgentSessionID == "" && opts.ThreadAgentSessionID != nil {
+			threadAgentSessionID = *opts.ThreadAgentSessionID
+		}
+		*opts.ResultAgentSessionID = threadAgentSessionID
+	}
 
 	// 8. Snapshot again.
 	newSnapshotKey, snapshotSize, snapshotErr := o.snapshotSessionOnTurnSuccess(ctx, session, sandbox, result, log)
@@ -2352,7 +2402,9 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 
 	// 9. Update turn complete — sets status to idle.
 	agentSessionID := result.AgentSessionID
-	if agentSessionID == "" && session.AgentSessionID != nil {
+	if threadScopedExecution {
+		agentSessionID = parentAgentSessionID
+	} else if agentSessionID == "" && session.AgentSessionID != nil {
 		agentSessionID = *session.AgentSessionID
 	}
 	snapshotKey := newSnapshotKey

@@ -43,14 +43,29 @@ class MockEventSource {
   onopen: ((ev: Event) => void) | null = null;
   onmessage: ((ev: MessageEvent) => void) | null = null;
   onerror: ((ev: Event) => void) | null = null;
+  private listeners = new Map<string, Array<(ev: MessageEvent) => void>>();
   constructor(url: string | URL) {
     this.url = String(url);
     MockEventSource.instances.push(this);
   }
-  addEventListener = vi.fn();
-  removeEventListener = vi.fn();
+  addEventListener = vi.fn((event: string, handler: EventListenerOrEventListenerObject) => {
+    const fn = typeof handler === 'function'
+      ? handler as (ev: MessageEvent) => void
+      : (ev: MessageEvent) => handler.handleEvent(ev);
+    this.listeners.set(event, [...(this.listeners.get(event) ?? []), fn]);
+  });
+  removeEventListener = vi.fn((event: string, handler: EventListenerOrEventListenerObject) => {
+    const existing = this.listeners.get(event) ?? [];
+    this.listeners.set(event, existing.filter((fn) => fn !== handler));
+  });
   close = vi.fn();
   dispatchEvent = vi.fn(() => true);
+  emit(event: string, data: unknown) {
+    const message = { data: JSON.stringify(data) } as MessageEvent;
+    for (const listener of this.listeners.get(event) ?? []) {
+      listener(message);
+    }
+  }
 }
 beforeAll(() => {
   global.EventSource = MockEventSource as unknown as typeof EventSource;
@@ -395,6 +410,58 @@ describe('SessionDetailPage', () => {
       expect(postedThreadID).toBe('thread-new');
     });
     expect(sessionMessagePosted).toBe(false);
+  });
+
+  it('preserves thread tabs when session status SSE payload omits thread detail', async () => {
+    const sessionId = 'session-abcdef12-3456-7890';
+    const thread: SessionThread = {
+      id: 'thread-codex',
+      session_id: sessionId,
+      org_id: 'org-1',
+      agent_type: 'codex',
+      label: 'Codex',
+      status: 'running',
+      current_turn: 1,
+      created_at: '2026-02-17T07:00:00Z',
+    };
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({
+          data: {
+            ...mockSessions[0],
+            id: sessionId,
+            status: 'running',
+            sandbox_state: 'running',
+            threads: [thread],
+          },
+        } satisfies SingleResponse<Session & { threads: SessionThread[] }>);
+      }),
+      http.get('/api/v1/sessions/:id/threads/:threadId/messages', () => {
+        return HttpResponse.json({ data: [], meta: {} } satisfies ListResponse<SessionMessage>);
+      }),
+      http.get('/api/v1/sessions/:id/threads/:threadId/logs', () => {
+        return HttpResponse.json({ data: [], meta: {} });
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id={sessionId} />);
+
+    expect(await screen.findByRole('tab', { name: /Codex/ })).toBeInTheDocument();
+    await waitFor(() => {
+      expect(MockEventSource.instances.length).toBeGreaterThan(0);
+    });
+
+    act(() => {
+      MockEventSource.instances[0].emit('status', {
+        ...mockSessions[0],
+        id: sessionId,
+        status: 'running',
+        sandbox_state: 'running',
+      });
+    });
+
+    expect(screen.getByRole('tab', { name: /Codex/ })).toBeInTheDocument();
   });
 
   it('does not hide vertical overflow on the detail tablist', async () => {

@@ -2401,15 +2401,30 @@ func TestContinueSession_UsesThreadExecutionOptions(t *testing.T) {
 	session := testRun(orgID, issue.ID)
 	session.AgentType = models.AgentTypeClaudeCode
 	session.ModelOverride = strPtr("claude-sonnet-4-6")
+	session.AgentSessionID = strPtr("parent-claude-session")
 	session.Status = string(models.SessionStatusIdle)
 	session.CurrentTurn = 1
 	session.SnapshotKey = strPtr("snapshots/test/session.tar")
 
 	threadModel := "gemini-2.5-pro"
+	threadAgentSessionID := ""
 	var createdCfg agent.SandboxConfig
+	var promptSeen *agent.AgentPrompt
 
 	d := defaultDeps()
-	d.adapter = &mockAgentAdapter{name: models.AgentTypeGeminiCLI}
+	d.adapter = &mockAgentAdapter{
+		name: models.AgentTypeGeminiCLI,
+		executeFn: func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
+			promptSeen = prompt
+			return &agent.AgentResult{
+				Diff:            "--- a/file.go\n+++ b/file.go",
+				Summary:         "Thread result",
+				ConfidenceScore: 0.9,
+				AgentSessionID:  "thread-gemini-session",
+				ExitCode:        0,
+			}, nil
+		},
+	}
 	d.issues.issue = issue
 	d.messages.messages = []models.SessionMessage{{
 		ID:         1,
@@ -2436,12 +2451,21 @@ func TestContinueSession_UsesThreadExecutionOptions(t *testing.T) {
 	}
 
 	err := buildOrchestrator(d).ContinueSession(context.Background(), session, &agent.ContinueSessionOptions{
-		AgentType:     models.AgentTypeGeminiCLI,
-		ModelOverride: &threadModel,
+		AgentType:            models.AgentTypeGeminiCLI,
+		ModelOverride:        &threadModel,
+		ThreadAgentSessionID: nil,
+		ResultAgentSessionID: &threadAgentSessionID,
 	})
 	require.NoError(t, err, "ContinueSession should execute with the thread-selected adapter")
 	require.Equal(t, threadModel, createdCfg.Env["GEMINI_MODEL"], "ContinueSession should apply the thread model to the thread agent env")
 	require.NotContains(t, createdCfg.Env, "ANTHROPIC_MODEL", "ContinueSession should not apply the parent session model when a thread override is provided")
+	require.NotNil(t, promptSeen, "ContinueSession should execute the thread adapter")
+	require.False(t, promptSeen.Continuation, "first turn in a blank thread should start a fresh agent transcript")
+	require.Empty(t, promptSeen.ResumeSessionID, "blank thread should not resume the parent session's agent session id")
+	require.Equal(t, "thread-gemini-session", threadAgentSessionID, "ContinueSession should report the thread agent session id to the worker")
+	turnUpdates := d.sessions.getTurnUpdates()
+	require.Len(t, turnUpdates, 1, "ContinueSession should still complete the shared session turn")
+	require.Equal(t, "parent-claude-session", turnUpdates[0].agentSessionID, "thread execution should not overwrite the parent session agent_session_id")
 }
 
 func TestContinueSession_RepairedSlashCommandsOnReusePath(t *testing.T) {
