@@ -188,9 +188,7 @@ func (h *CodingCredentialHandler) listResolved(ctx context.Context, scope models
 	seen := map[uuid.UUID]struct{}{}
 	rows := make([]models.DecryptedCodingCredential, 0)
 	for _, provider := range models.CodingAgentProviders {
-		for _, cred := range resolved[provider] {
-			rows = append(rows, cred)
-		}
+		rows = append(rows, resolved[provider]...)
 	}
 	sortResolvedCodingRows(rows)
 
