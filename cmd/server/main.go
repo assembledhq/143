@@ -145,6 +145,13 @@ func main() {
 	}
 	sessionStreams := cache.NewSessionStreams(redisClient, logger, redisMetrics)
 	jobNotifier := cache.NewJobNotifier(redisClient, logger)
+	// Eval batch + bootstrap pub/sub fanout. Constructed once and shared
+	// between the API (for SSE handlers) and the worker (for publishing on
+	// state transitions) so a single connection pool drives both. nil-safe
+	// when redisClient is nil — the SSE returns 503 and the worker's
+	// publishEvalBatchSignal helper skips publish.
+	evalBatchStreams := cache.NewEvalBatchStreams(redisClient, logger)
+	evalBootstrapStreams := cache.NewEvalBootstrapStreams(redisClient, logger)
 
 	// Create codex auth service (shared between router and orchestrator).
 	var cryptoSvc *crypto.Service
@@ -370,6 +377,11 @@ func main() {
 				sessionMessageStore, automationRunStore, snapshotStore, billingMetrics, cancelRegistry, orgSettingsCache)
 			if services != nil {
 				sandboxAuthShutdown = services.SandboxAuthShutdown
+				// Wire eval pub/sub publishers so worker handlers can wake
+				// the API SSE subscribers on every state transition without
+				// the API having to poll Postgres.
+				services.EvalBatchStreams = evalBatchStreams
+				services.EvalBootstrapStreams = evalBootstrapStreams
 				workerServices = services
 			}
 		}

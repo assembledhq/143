@@ -3041,6 +3041,10 @@ func TestSessionHandler_StreamLogsViaPolling_ReplaysAndFinishes(t *testing.T) {
 	defer mock.Close()
 
 	handler := newSessionHandler(t, mock)
+	// Pin the polling interval so the test isn't sensitive to the jittered
+	// production range (2s–3.5s). Production uses jittered per-connection
+	// intervals to avoid a synchronized N-client dogpile when Redis recovers.
+	handler.SetPollIntervalForTest(20 * time.Millisecond)
 	orgID := uuid.New()
 	runID := uuid.New()
 	issueID := uuid.New()
@@ -3167,6 +3171,7 @@ func TestSessionHandler_StreamLogsViaPolling_ReloadFailureReturns(t *testing.T) 
 	defer mock.Close()
 
 	handler := newSessionHandler(t, mock)
+	handler.SetPollIntervalForTest(20 * time.Millisecond)
 	orgID := uuid.New()
 	runID := uuid.New()
 	issueID := uuid.New()
@@ -3275,6 +3280,7 @@ func TestSessionHandler_StreamLogsViaPolling_StatusAndDoneWriteFailures(t *testi
 				defer mock.Close()
 
 				handler := newSessionHandler(t, mock)
+				handler.SetPollIntervalForTest(20 * time.Millisecond)
 				orgID := uuid.New()
 				runID := uuid.New()
 				issueID := uuid.New()
@@ -3338,6 +3344,7 @@ func TestSessionHandler_StreamLogs_RedisFallbackToPolling(t *testing.T) {
 	issueID := uuid.New()
 	now := time.Now()
 	handler := newSessionHandler(t, mock)
+	handler.SetPollIntervalForTest(20 * time.Millisecond)
 	streams, _ := newSessionTestStreams(t)
 	handler.SetStreams(streams)
 	handler.SetShutdownSignal(make(chan struct{}))
@@ -3396,6 +3403,36 @@ func TestSessionHandler_StreamLogs_RedisFallbackToPolling(t *testing.T) {
 		t.Fatal("StreamLogs did not finish after falling back to polling")
 	}
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestSessionHandler_SSEFallbackJitterRange(t *testing.T) {
+	t.Parallel()
+
+	// Locks in the dogpile-mitigation contract: every sampled interval must
+	// fall inside the documented bracket so a future change can't silently
+	// regress the worst-case Postgres query rate during a Redis outage.
+	// The test override path is also verified — if SetPollIntervalForTest is
+	// ever broken, every other test in this file would still pass on luck
+	// because the production sampler returns timing in the seconds range.
+	h := &SessionHandler{}
+
+	for i := 0; i < 200; i++ {
+		got := h.sseFallbackPollInterval()
+		require.GreaterOrEqual(t, got, sseFallbackPollMin, "production poll interval must respect the lower bound")
+		require.LessOrEqual(t, got, sseFallbackPollMax, "production poll interval must respect the upper bound")
+		hb := h.sseFallbackHeartbeatInterval()
+		require.GreaterOrEqual(t, hb, sseFallbackHeartbeatMin, "production heartbeat interval must respect the lower bound")
+		require.LessOrEqual(t, hb, sseFallbackHeartbeatMax, "production heartbeat interval must respect the upper bound")
+	}
+
+	h.SetPollIntervalForTest(75 * time.Millisecond)
+	require.Equal(t, 75*time.Millisecond, h.sseFallbackPollInterval(), "test override should pin the poll interval to the requested value")
+	require.Equal(t, 5*75*time.Millisecond, h.sseFallbackHeartbeatInterval(), "test override should derive the heartbeat from the same scale")
+
+	h.SetPollIntervalForTest(0)
+	got := h.sseFallbackPollInterval()
+	require.GreaterOrEqual(t, got, sseFallbackPollMin, "passing 0 to the override should restore the default randomized sampler")
+	require.LessOrEqual(t, got, sseFallbackPollMax, "passing 0 to the override should restore the default randomized sampler")
 }
 
 func TestSessionHandler_CreateManual(t *testing.T) {
@@ -3908,9 +3945,9 @@ func TestSessionHandler_EndSession_ManualSkipsValidation(t *testing.T) {
 	mock.ExpectQuery("INSERT INTO jobs").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(jobID))
-	mock.ExpectExec("UPDATE sessions").
+	mock.ExpectQuery("UPDATE sessions").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+		WillReturnRows(pgxmock.NewRows(sessionColumns))
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/"+sessionID.String()+"/end", nil)
 	rctx := chi.NewRouteContext()
@@ -6053,9 +6090,9 @@ func TestSessionHandler_CreatePR_Success(t *testing.T) {
 	mock.ExpectQuery("INSERT INTO jobs").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(jobID))
-	mock.ExpectExec("UPDATE sessions").
+	mock.ExpectQuery("UPDATE sessions").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+		WillReturnRows(pgxmock.NewRows(sessionColumns))
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/"+sessionID.String()+"/pr", nil)
 	rctx := chi.NewRouteContext()
@@ -6123,9 +6160,9 @@ func TestSessionHandler_CreatePR_DedupeConflict(t *testing.T) {
 	mock.ExpectQuery("INSERT INTO jobs").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnError(pgx.ErrNoRows)
-	mock.ExpectExec("UPDATE sessions").
+	mock.ExpectQuery("UPDATE sessions").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+		WillReturnRows(pgxmock.NewRows(sessionColumns))
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/"+sessionID.String()+"/pr", nil)
 	rctx := chi.NewRouteContext()
@@ -6446,9 +6483,9 @@ func TestSessionHandler_CreatePR_AppAuthorModeBypassesAuthIntercept(t *testing.T
 	mock.ExpectQuery("INSERT INTO jobs").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(jobID))
-	mock.ExpectExec("UPDATE sessions").
+	mock.ExpectQuery("UPDATE sessions").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+		WillReturnRows(pgxmock.NewRows(sessionColumns))
 
 	body := strings.NewReader(`{"author_mode":"app"}`)
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/"+sessionID.String()+"/pr", body)
@@ -6597,9 +6634,9 @@ func TestSessionHandler_CreatePR_UserPreferredWithoutGitHubAppUserAuthFallsBackT
 	mock.ExpectQuery("INSERT INTO jobs").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(jobID))
-	mock.ExpectExec("UPDATE sessions").
+	mock.ExpectQuery("UPDATE sessions").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+		WillReturnRows(pgxmock.NewRows(sessionColumns))
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/"+sessionID.String()+"/pr", strings.NewReader(`{"author_mode":"auto"}`))
 	rctx := chi.NewRouteContext()
@@ -6974,7 +7011,7 @@ func TestSessionHandler_CreatePR_UpdateStateErrorStillAccepted(t *testing.T) {
 	mock.ExpectQuery("INSERT INTO jobs").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(jobID))
-	mock.ExpectExec("UPDATE sessions").
+	mock.ExpectQuery("UPDATE sessions").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnError(errors.New("write failed"))
 
@@ -7379,11 +7416,13 @@ func TestSessionHandler_PushChangesToPR_Success(t *testing.T) {
 	mock.ExpectQuery("INSERT INTO jobs").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(jobID))
-	// CAS update from TryMarkPRPushQueued — 2 args (id, org_id) and rows-
-	// affected=1 to indicate the racing-winner branch.
-	mock.ExpectExec("UPDATE sessions").
+	// CAS update from TryMarkPRPushQueued — 2 args (id, org_id). RETURNING +
+	// publishStatus replaced bare Exec so the SSE detail page sees the
+	// transition immediately; the test returns the post-CAS row (pr_push_state
+	// flipped to "queued") to mirror what Postgres would actually return.
+	mock.ExpectQuery("UPDATE sessions").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+		WillReturnRows(pushSessionRow(sessionID, issueID, orgID, now, pushSessionRowOpts{pushState: "queued"}))
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/"+sessionID.String()+"/pr/push", nil)
 	rctx := chi.NewRouteContext()
@@ -7436,10 +7475,11 @@ func TestSessionHandler_PushChangesToPR_CASLosesRaceReturnsConflict(t *testing.T
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(jobID))
 	// CAS UPDATE matches no rows because a concurrent winner already moved
-	// pr_push_state to 'queued'.
-	mock.ExpectExec("UPDATE sessions").
+	// pr_push_state to 'queued'. RETURNING with empty rows triggers
+	// pgx.ErrNoRows in TryMarkPRPushQueued, which surfaces as (false, nil).
+	mock.ExpectQuery("UPDATE sessions").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
+		WillReturnRows(pgxmock.NewRows(sessionColumns))
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/"+sessionID.String()+"/pr/push", nil)
 	rctx := chi.NewRouteContext()

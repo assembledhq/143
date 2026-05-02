@@ -1403,17 +1403,37 @@ func (s *SessionStore) UpdatePRCreationState(ctx context.Context, orgID, session
 	} else {
 		errArg = nil
 	}
+	// RETURNING + publishStatus replaces a prior frontend 2s poll on
+	// /sessions/{id}/pr that existed solely to observe this column's
+	// transitions. Detail page now relies on the session status SSE.
 	query := `UPDATE sessions
 		SET pr_creation_state = @state, pr_creation_error = @err
 		WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL
-		  AND pr_creation_state <> 'succeeded'`
-	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
+		  AND pr_creation_state <> 'succeeded'
+		RETURNING ` + sessionSelectColumns
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
 		"id":     sessionID,
 		"org_id": orgID,
 		"state":  string(state),
 		"err":    errArg,
 	})
-	return err
+	if err != nil {
+		return err
+	}
+	session, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.Session])
+	if err != nil {
+		// Pre-existing semantics: matching zero rows (e.g. the row is
+		// already in the terminal `succeeded` state) is a no-op, not an
+		// error. ErrNoRows here means the WHERE clause filtered the row
+		// out — surface no error and skip publishing since nothing changed.
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil
+		}
+		return err
+	}
+	hydrateSessionPolicy(&session)
+	s.publishStatus(ctx, &session)
+	return nil
 }
 
 // TryMarkPRPushQueued atomically transitions pr_push_state from any non-in-
@@ -1428,18 +1448,32 @@ func (s *SessionStore) UpdatePRCreationState(ctx context.Context, orgID, session
 // side the matching guarantee that exactly one of the racing requests
 // returns 202 and the other returns 409.
 func (s *SessionStore) TryMarkPRPushQueued(ctx context.Context, orgID, sessionID uuid.UUID) (bool, error) {
+	// RETURNING + publishStatus so the API call that flips this column
+	// surfaces immediately on the session status SSE — the detail-page
+	// Push button used to wait for the worker's first state transition
+	// (or a 1s polling fallback) to reflect the user's click.
 	query := `UPDATE sessions
 		SET pr_push_state = 'queued', pr_push_error = NULL
 		WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL
-		  AND pr_push_state NOT IN ('queued', 'pushing')`
-	res, err := s.db.Exec(ctx, query, pgx.NamedArgs{
+		  AND pr_push_state NOT IN ('queued', 'pushing')
+		RETURNING ` + sessionSelectColumns
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
 		"id":     sessionID,
 		"org_id": orgID,
 	})
 	if err != nil {
 		return false, err
 	}
-	return res.RowsAffected() > 0, nil
+	session, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.Session])
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return false, nil
+		}
+		return false, err
+	}
+	hydrateSessionPolicy(&session)
+	s.publishStatus(ctx, &session)
+	return true, nil
 }
 
 // UpdatePRPushState transitions pr_push_state and sets/clears pr_push_error
@@ -1462,16 +1496,31 @@ func (s *SessionStore) UpdatePRPushState(ctx context.Context, orgID, sessionID u
 	} else {
 		errArg = nil
 	}
+	// RETURNING + publishStatus so the detail-page Push button reflects
+	// transitions on the existing session status SSE without a separate poll.
 	query := `UPDATE sessions
 		SET pr_push_state = @state, pr_push_error = @err
-		WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL`
-	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
+		WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL
+		RETURNING ` + sessionSelectColumns
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
 		"id":     sessionID,
 		"org_id": orgID,
 		"state":  string(state),
 		"err":    errArg,
 	})
-	return err
+	if err != nil {
+		return err
+	}
+	session, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.Session])
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil
+		}
+		return err
+	}
+	hydrateSessionPolicy(&session)
+	s.publishStatus(ctx, &session)
+	return nil
 }
 
 // ClearSnapshotKey NULLs the snapshot_key column and transitions sandbox_state
