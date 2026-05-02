@@ -52,7 +52,7 @@ func TestParseOrgSettings_OverrideValues(t *testing.T) {
 		"agent_autonomy": "conservative",
 		"product_direction": "focus on billing",
 		"pm_schedule_hours": 6,
-		"pm_model": "sonnet",
+		"pm_model": "claude-sonnet-4-5",
 		"product_context": {
 			"philosophy": "Prefer minimal diffs",
 			"direction": "Harden billing",
@@ -77,7 +77,7 @@ func TestParseOrgSettings_OverrideValues(t *testing.T) {
 	require.Equal(t, 50.0, s.MinPriorityThreshold, "should override min_priority_threshold")
 	require.Equal(t, "focus on billing", s.ProductDirection, "should override product_direction")
 	require.Equal(t, 6, s.PMScheduleHours, "should override pm_schedule_hours")
-	require.Equal(t, "sonnet", s.PMModel, "should override pm_model")
+	require.Equal(t, "claude-sonnet-4-5", s.PMModel, "should override pm_model")
 	require.NotNil(t, s.ProductContext, "should parse product_context")
 	require.Equal(t, "Prefer minimal diffs", s.ProductContext.Philosophy, "should parse product_context.philosophy")
 	require.Equal(t, "Harden billing", s.ProductContext.Direction, "should parse product_context.direction")
@@ -124,7 +124,7 @@ func TestParseOrgSettings_AgentConfig(t *testing.T) {
 
 	raw := json.RawMessage(`{
 		"agent_config": {
-			"claude_code": {"ANTHROPIC_MODEL": "opus", "ANTHROPIC_API_KEY": "sk-ant-org"},
+			"claude_code": {"ANTHROPIC_MODEL": "claude-opus-4-7", "ANTHROPIC_API_KEY": "sk-ant-org"},
 			"gemini_cli": {"GEMINI_MODEL": "gemini-2.5-pro"}
 		}
 	}`)
@@ -133,7 +133,7 @@ func TestParseOrgSettings_AgentConfig(t *testing.T) {
 	require.NoError(t, err)
 
 	require.NotNil(t, s.AgentConfig, "should parse agent_config")
-	require.Equal(t, "opus", s.AgentConfig["claude_code"]["ANTHROPIC_MODEL"])
+	require.Equal(t, "claude-opus-4-7", s.AgentConfig["claude_code"]["ANTHROPIC_MODEL"])
 	require.Equal(t, "sk-ant-org", s.AgentConfig["claude_code"]["ANTHROPIC_API_KEY"])
 	require.Equal(t, "gemini-2.5-pro", s.AgentConfig["gemini_cli"]["GEMINI_MODEL"])
 	require.NotContains(t, s.AgentConfig, "codex", "codex should not be present when not configured")
