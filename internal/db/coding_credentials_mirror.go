@@ -147,7 +147,7 @@ func (s *CodingCredentialStore) MirrorUserCredential(ctx context.Context, row mo
 	// the same provider AND must match the migration SQL's label exactly so
 	// the natural-key conflict path (org_id, user_id, provider, label) lands
 	// on the same row instead of producing a duplicate. See migration step 3
-	// in 000109_copy_coding_credentials.up.sql.
+	// in 000110_copy_coding_credentials.up.sql.
 	var userID *uuid.UUID
 	label := ""
 	if row.IsTeamDefault {

@@ -5,8 +5,8 @@
 > **Implementation log (2026-04-27):**
 >
 > **PR 1 — schema & migration tooling (landed):**
-> - `migrations/000108_coding_credentials.{up,down}.sql` — unified table, four partial indexes, `coding_credentials_migrations` sentinel.
-> - `migrations/000109_copy_coding_credentials.{up,down}.sql` — idempotent SQL data copy from `org_credentials` (with `openai_chatgpt → openai_subscription` rename) and `user_credentials` (team-default rows promoted to org-scoped).
+> - `migrations/000109_coding_credentials.{up,down}.sql` — unified table, four partial indexes, `coding_credentials_migrations` sentinel.
+> - `migrations/000110_copy_coding_credentials.{up,down}.sql` — idempotent SQL data copy from `org_credentials` (with `openai_chatgpt → openai_subscription` rename) and `user_credentials` (team-default rows promoted to org-scoped).
 > - `cmd/migrate-coding-credentials-anthropic-split/` — standalone batched encrypted-blob post-step (cursor-paginated by `(created_at, id)`, per-row `statement_timeout`, dry-run flag, sentinel write on completion). `make migrate-coding-credentials-anthropic-split` target.
 >
 > **PR 2 — store, resolver, dual-write (landed):**
@@ -33,10 +33,10 @@
 > - Switch `/settings/agent` to the unified API and extract the shared add-auth dialog parameterised by scope.
 >
 > **Migration runbook for tomorrow's user switch:**
-> 1. Apply migrations `000108` and `000109`. The legacy tables are untouched.
+> 1. Apply migrations `000109` and `000110`. The legacy tables are untouched.
 > 2. Run `make migrate-coding-credentials-anthropic-split` (idempotent; writes the sentinel on completion). Use `--dry-run` first to inspect counts.
 > 3. Deploy the new server. The mirror is auto-installed (`SetCodingMirror`); the resolver flips to the unified table; legacy reads/writes continue to work because the mirror keeps both tables in lockstep.
-> 4. Rollback: `make migrate-down` reverses 000109 (deletes from `coding_credentials`) and 000108 (drops the table). Legacy data is intact.
+> 4. Rollback: `make migrate-down` reverses 000110 (deletes from `coding_credentials`) and 000109 (drops the table). Legacy data is intact.
 
 ## Problem
 

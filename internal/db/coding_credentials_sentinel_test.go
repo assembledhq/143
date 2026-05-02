@@ -90,8 +90,8 @@ func TestEnsureAnthropicSplitSentinel(t *testing.T) {
 		require.NoError(t, err)
 		defer mock.Close()
 
-		// Simulates the partial-migration state where 000108 has applied but
-		// 000109 has not (or failed mid-flight): coding_credentials is empty
+		// Simulates the partial-migration state where 000109 has applied but
+		// 000110 has not (or failed mid-flight): coding_credentials is empty
 		// but legacy tables still hold pre-split anthropic rows.
 		mock.ExpectQuery(`SELECT name FROM coding_credentials_migrations WHERE name = \$1`).
 			WithArgs(AnthropicSplitSentinel).
