@@ -67,6 +67,15 @@ type Config struct {
 	LinearOAuthClientID     string `env:"LINEAR_OAUTH_CLIENT_ID"`
 	LinearOAuthClientSecret string `env:"LINEAR_OAUTH_CLIENT_SECRET"`
 
+	// LinearAgentEnabled is a process-wide kill switch for the Linear agent
+	// feature (issue assignment / @-mention triggers a 143 session). When
+	// false, the dispatcher records the webhook delivery for audit and
+	// returns 200 immediately without doing any work — even if individual
+	// orgs have opted in via org_settings.linear_agent.enabled. Lets us
+	// disable the inbound path globally during incidents without poking
+	// every org's settings. Defaults to false so phase-1 ships dark.
+	LinearAgentEnabled bool `env:"LINEAR_AGENT_ENABLED" envDefault:"false"`
+
 	// Sentry OAuth
 	SentryOAuthClientID     string `env:"SENTRY_OAUTH_CLIENT_ID"`
 	SentryOAuthClientSecret string `env:"SENTRY_OAUTH_CLIENT_SECRET"`
