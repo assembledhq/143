@@ -589,6 +589,40 @@ describe('ManualSessionCreatePage', () => {
     expect(screen.getByPlaceholderText('https://example.com/screenshot.png')).toBeInTheDocument();
   });
 
+  it('appends a Linear URL to the prompt body via the Link Linear issue menu item', async () => {
+    const user = userEvent.setup();
+    renderWithProviders(<ManualSessionCreatePageContent />);
+
+    await user.click(screen.getByRole('button', { name: 'Add files or photos' }));
+    await user.click(screen.getByRole('menuitem', { name: 'Link Linear issue' }));
+
+    await user.type(screen.getByLabelText('Linear issue id or URL'), 'https://linear.app/acme/issue/ACS-1234');
+    await user.click(screen.getByRole('button', { name: 'Add' }));
+
+    // The linker on the backend (ResolveAndLinkAtCreate) scans the message
+    // body for Linear refs, so the URL must end up inside the textarea
+    // verbatim — anything else means the link won't fire on submit.
+    expect(screen.getByPlaceholderText('Tell the agent what to do...')).toHaveValue('https://linear.app/acme/issue/ACS-1234');
+    // The input pane should close after a successful add so the user can
+    // get back to typing their actual prompt.
+    expect(screen.queryByLabelText('Linear issue id or URL')).not.toBeInTheDocument();
+  });
+
+  it('rejects free-text input in the Linear add affordance with an inline error', async () => {
+    const user = userEvent.setup();
+    renderWithProviders(<ManualSessionCreatePageContent />);
+
+    await user.click(screen.getByRole('button', { name: 'Add files or photos' }));
+    await user.click(screen.getByRole('menuitem', { name: 'Link Linear issue' }));
+
+    await user.type(screen.getByLabelText('Linear issue id or URL'), 'just some text');
+    await user.click(screen.getByRole('button', { name: 'Add' }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(/Linear URL/);
+    expect(screen.getByLabelText('Linear issue id or URL')).toBeInTheDocument();
+    expect(screen.getByPlaceholderText('Tell the agent what to do...')).toHaveValue('');
+  });
+
   it('uploads a file via the upload endpoint and shows thumbnail', async () => {
     const user = userEvent.setup();
 
