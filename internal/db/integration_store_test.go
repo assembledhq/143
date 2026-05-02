@@ -213,6 +213,40 @@ func TestIntegrationStore_ListByOrg(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+func TestIntegrationStore_ListReusableForReconnect(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewIntegrationStore(mock)
+	orgID := uuid.New()
+	integrationID := uuid.New()
+	now := time.Now()
+
+	mock.ExpectQuery("SELECT .+ FROM integrations .+ status IN \\('active', 'error'\\)").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(integrationColumns).
+				AddRow(integrationID, orgID, "linear", json.RawMessage(`{}`), "error", nil, now),
+		)
+
+	integrations, err := store.ListReusableForReconnect(context.Background(), orgID, "linear")
+	require.NoError(t, err, "ListReusableForReconnect should not return an error")
+	require.Equal(t, []models.Integration{
+		{
+			ID:        integrationID,
+			OrgID:     orgID,
+			Provider:  models.IntegrationProviderLinear,
+			Config:    json.RawMessage(`{}`),
+			Status:    models.IntegrationStatusError,
+			CreatedAt: now,
+		},
+	}, integrations, "ListReusableForReconnect should return reusable active or errored integrations")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func TestIntegrationStore_UpdateLastSyncedAt(t *testing.T) {
 	t.Parallel()
 

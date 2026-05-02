@@ -92,6 +92,30 @@ func (s *IntegrationStore) ListByOrgAndProvider(ctx context.Context, orgID uuid.
 	return pgx.CollectRows(rows, pgx.RowToStructByName[models.Integration])
 }
 
+// ListReusableForReconnect returns rows for (org, provider) that the
+// OAuth reconnect path can reuse: active rows first, then rows the worker
+// flipped to error after a 401, so a reconnect converges back onto the
+// same row instead of creating a duplicate. Single round trip with the
+// ORDER BY pinned in SQL — callers can take the first row.
+func (s *IntegrationStore) ListReusableForReconnect(ctx context.Context, orgID uuid.UUID, provider string) ([]models.Integration, error) {
+	query := `
+		SELECT id, org_id, provider, config, status, last_synced_at, created_at
+		FROM integrations
+		WHERE org_id = @org_id
+		  AND provider = @provider
+		  AND status IN ('active', 'error')
+		ORDER BY (status = 'active') DESC, created_at DESC`
+
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
+		"org_id":   orgID,
+		"provider": provider,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("query reusable integrations by org and provider: %w", err)
+	}
+	return pgx.CollectRows(rows, pgx.RowToStructByName[models.Integration])
+}
+
 func (s *IntegrationStore) ListByOrg(ctx context.Context, orgID uuid.UUID) ([]models.Integration, error) {
 	query := `
 		SELECT id, org_id, provider, config, status, last_synced_at, created_at

@@ -1208,13 +1208,17 @@ func (h *IntegrationHandler) maybeEnqueuePMContext(ctx context.Context, orgID uu
 }
 
 func (h *IntegrationHandler) ensureIntegration(ctx context.Context, orgID uuid.UUID, provider models.IntegrationProvider) (models.Integration, bool, error) {
-	activeIntegrations, err := h.integrationStore.ListByOrgAndProvider(ctx, orgID, string(provider))
+	// One round trip: returns active rows first, then errored rows. Lets a
+	// reconnect after a 401-flip reuse the original row instead of leaving
+	// a stale errored row plus a fresh duplicate. Active-first ORDER BY in
+	// SQL keeps the existing "prefer active" precedence.
+	reusableIntegrations, err := h.integrationStore.ListReusableForReconnect(ctx, orgID, string(provider))
 	if err != nil {
 		return models.Integration{}, false, err
 	}
 
-	if len(activeIntegrations) > 0 {
-		integration := activeIntegrations[0]
+	if len(reusableIntegrations) > 0 {
+		integration := reusableIntegrations[0]
 		// A reconnect flow lands here: if the row is errored (most often
 		// from a prior 401 the worker stamped) restore it to active and
 		// strip the auth-error markers so the settings UI's Reconnect CTA

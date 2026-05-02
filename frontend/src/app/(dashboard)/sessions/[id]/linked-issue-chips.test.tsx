@@ -137,11 +137,12 @@ describe('LinkedIssueChips', () => {
     expect(screen.getByLabelText('NRE in foo (related)')).toBeInTheDocument();
   });
 
-  it('renders the prepare-failed warning chip with sr-only detail', () => {
+  it('renders the prepare-failed recovery chip as a link with sr-only detail', () => {
     const session = makeSession({ linear_prepare_state: 'failed' });
     render(<LinkedIssueChips session={session} />);
-    const chip = screen.getByRole('status');
+    const chip = screen.getByRole('link', { name: /Linear: prepare failed/i });
     expect(chip).toHaveTextContent(/Linear: prepare failed/);
+    expect(chip).toHaveAttribute('href', '/settings/integrations');
     // The detail element backs aria-describedby and must exist in the DOM
     // even though it's visually hidden.
     expect(chip).toHaveAttribute('aria-describedby', 'linear-prepare-failed-detail');
