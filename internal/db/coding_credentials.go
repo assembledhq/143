@@ -670,6 +670,7 @@ func (s *CodingCredentialStore) Create(ctx context.Context, scope models.Scope, 
 			ON CONFLICT (org_id, user_id, provider, label) DO UPDATE
 			SET config = EXCLUDED.config,
 			    status = EXCLUDED.status,
+			    last_verified_at = NULL,
 			    updated_at = now(),
 			    priority = CASE WHEN coding_credentials.status = 'disabled'
 			                    THEN EXCLUDED.priority
@@ -899,6 +900,14 @@ func (s *CodingCredentialStore) Reorder(ctx context.Context, scope models.Scope,
 
 	if err := s.acquireScopeLockTx(ctx, tx, scope); err != nil {
 		return err
+	}
+
+	stack, err := s.fetchStackTx(ctx, tx, scope)
+	if err != nil {
+		return err
+	}
+	if !sameUUIDSet(orderedIDs, stack) {
+		return fmt.Errorf("ordered_ids must exactly match the active credential stack for the requested scope")
 	}
 
 	for idx, id := range orderedIDs {
@@ -1197,6 +1206,26 @@ func (s *CodingCredentialStore) fetchStackTx(ctx context.Context, tx pgx.Tx, sco
 		out = append(out, id)
 	}
 	return out, nil
+}
+
+func sameUUIDSet(a, b []uuid.UUID) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	seen := make(map[uuid.UUID]int, len(a))
+	for _, id := range a {
+		seen[id]++
+	}
+	for _, id := range b {
+		if seen[id] == 0 {
+			return false
+		}
+		seen[id]--
+		if seen[id] == 0 {
+			delete(seen, id)
+		}
+	}
+	return len(seen) == 0
 }
 
 // withScopeLock acquires a per-scope advisory lock to serialize stack-priority

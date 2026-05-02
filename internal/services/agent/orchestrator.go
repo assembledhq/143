@@ -1585,11 +1585,11 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 	//      ANTHROPIC_API_KEY env var as the fallback.
 	switch run.AgentType {
 	case models.AgentTypeCodex:
-		if err := o.ensureCodexAuth(ctx, run, sandbox); err != nil {
+		if err := o.ensureCodexAuth(ctx, run, sandbox, sandboxCfg.Env); err != nil {
 			return err
 		}
 	case models.AgentTypeClaudeCode:
-		if err := o.ensureClaudeCodeAuth(ctx, run, sandbox); err != nil {
+		if err := o.ensureClaudeCodeAuth(ctx, run, sandbox, sandboxCfg.Env); err != nil {
 			return err
 		}
 	}
@@ -2322,11 +2322,11 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		// container without agent credentials).
 		switch session.AgentType {
 		case models.AgentTypeCodex:
-			if err := o.ensureCodexAuth(ctx, session, sandbox); err != nil {
+			if err := o.ensureCodexAuth(ctx, session, sandbox, sandboxCfg.Env); err != nil {
 				return err
 			}
 		case models.AgentTypeClaudeCode:
-			if err := o.ensureClaudeCodeAuth(ctx, session, sandbox); err != nil {
+			if err := o.ensureClaudeCodeAuth(ctx, session, sandbox, sandboxCfg.Env); err != nil {
 				return err
 			}
 		}
@@ -2637,7 +2637,7 @@ func (o *Orchestrator) setupFreshSandbox(ctx context.Context, session *models.Se
 			return models.Issue{}, "", fmt.Errorf("no credentials for codex agent")
 		}
 	case models.AgentTypeClaudeCode:
-		if err := o.ensureClaudeCodeAuth(ctx, session, sandbox); err != nil {
+		if err := o.ensureClaudeCodeAuth(ctx, session, sandbox, nil); err != nil {
 			return models.Issue{}, "", fmt.Errorf("claude code auth injection: %w", err)
 		}
 	}
@@ -3009,8 +3009,12 @@ func (o *Orchestrator) failTimedOutSession(run *models.Session, elapsed time.Dur
 
 // ensureCodexAuth injects Codex auth credentials into the sandbox, failing the
 // run with a codex_auth_expired category if injection fails or no creds exist.
-func (o *Orchestrator) ensureCodexAuth(ctx context.Context, run *models.Session, sandbox *Sandbox) error {
-	injected, err := o.env.InjectCodexAuth(ctx, run.OrgID, sandbox)
+func (o *Orchestrator) ensureCodexAuth(ctx context.Context, run *models.Session, sandbox *Sandbox, env map[string]string) error {
+	if env["OPENAI_API_KEY"] != "" && o.env != nil && o.env.unifiedCodingCredentialIsAPIKey(ctx, run.OrgID, run.TriggeredByUserID, models.ProviderOpenAI) {
+		return nil
+	}
+
+	injected, err := o.env.InjectCodexAuthForUser(ctx, run.OrgID, run.TriggeredByUserID, sandbox)
 	if err != nil {
 		o.failRunWithCategory(ctx, run,
 			fmt.Sprintf("codex auth injection failed: %s", err),
@@ -3205,9 +3209,15 @@ func (o *Orchestrator) injectClaudeCodeAuth(ctx context.Context, orgID uuid.UUID
 }
 
 // ensureClaudeCodeAuth guarantees that the Claude Code agent has at least one
-// credential path available in the sandbox. Priority is subscription file >
-// ANTHROPIC_API_KEY env var; the run only fails when neither is configured.
-func (o *Orchestrator) ensureClaudeCodeAuth(ctx context.Context, run *models.Session, sandbox *Sandbox) error {
+// credential path available in the sandbox. When the unified resolver selected
+// an API key, that key wins; otherwise subscription file injection is preferred
+// over the legacy ANTHROPIC_API_KEY fallback. The run only fails when neither
+// path is configured.
+func (o *Orchestrator) ensureClaudeCodeAuth(ctx context.Context, run *models.Session, sandbox *Sandbox, env map[string]string) error {
+	if env["ANTHROPIC_API_KEY"] != "" && o.env != nil && o.env.unifiedCodingCredentialIsAPIKey(ctx, run.OrgID, run.TriggeredByUserID, models.ProviderAnthropic) {
+		return nil
+	}
+
 	injected, err := o.injectClaudeCodeAuth(ctx, run.OrgID, sandbox)
 	if err != nil {
 		if fallbackErr := o.prepareClaudeCodeAPIKeyFallback(ctx, run, sandbox); fallbackErr == nil {

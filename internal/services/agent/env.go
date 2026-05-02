@@ -839,6 +839,20 @@ func compatibleCodingProviderConfig(provider models.ProviderName, cfg models.Pro
 // (true, nil) if auth was injected, (false, nil) if no OAuth token is
 // available, or (false, err) on failure.
 func (e *AgentEnv) InjectCodexAuth(ctx context.Context, orgID uuid.UUID, sandbox *Sandbox) (bool, error) {
+	return e.InjectCodexAuthForUser(ctx, orgID, nil, sandbox)
+}
+
+func (e *AgentEnv) InjectCodexAuthForUser(ctx context.Context, orgID uuid.UUID, userID *uuid.UUID, sandbox *Sandbox) (bool, error) {
+	if e.codingCredentials != nil {
+		cfg, handled := e.resolveFromCodingCredentials(ctx, orgID, userID, models.ProviderOpenAI)
+		if handled {
+			if chatGPT, ok := cfg.(models.OpenAIChatGPTConfig); ok {
+				return e.writeCodexAuth(ctx, orgID, sandbox, chatGPT)
+			}
+			return false, nil
+		}
+	}
+
 	if e.codexAuth == nil {
 		return false, nil
 	}
@@ -856,7 +870,10 @@ func (e *AgentEnv) InjectCodexAuth(ctx context.Context, orgID uuid.UUID, sandbox
 		// No OAuth token — not an error, agent will use API key.
 		return false, nil
 	}
+	return e.writeCodexAuth(ctx, orgID, sandbox, *cfg)
+}
 
+func (e *AgentEnv) writeCodexAuth(ctx context.Context, orgID uuid.UUID, sandbox *Sandbox, cfg models.OpenAIChatGPTConfig) (bool, error) {
 	// Omit the refresh_token from auth.json so the Codex CLI never attempts
 	// to refresh the token itself. If the CLI refreshes the token inside the
 	// sandbox, it consumes the refresh_token on OpenAI's servers, but the
@@ -913,4 +930,22 @@ func (e *AgentEnv) InjectCodexAuth(ctx context.Context, orgID uuid.UUID, sandbox
 		Msg("injected codex auth.json and config.toml into sandbox")
 
 	return true, nil
+}
+
+func (e *AgentEnv) unifiedCodingCredentialIsAPIKey(ctx context.Context, orgID uuid.UUID, userID *uuid.UUID, provider models.ProviderName) bool {
+	if e == nil || e.codingCredentials == nil {
+		return false
+	}
+	cfg, handled := e.resolveFromCodingCredentials(ctx, orgID, userID, provider)
+	if !handled {
+		return false
+	}
+	switch c := cfg.(type) {
+	case models.OpenAIConfig:
+		return c.APIKey != ""
+	case models.AnthropicConfig:
+		return c.APIKey != "" && c.Subscription == nil
+	default:
+		return false
+	}
 }

@@ -677,7 +677,7 @@ func TestCodingCredentialStoreMutations(t *testing.T) {
 				mock.ExpectQuery("SELECT COALESCE").
 					WithArgs(codingAnyArgs(2)...).
 					WillReturnRows(pgxmock.NewRows([]string{"next_priority"}).AddRow(1))
-				mock.ExpectQuery("INSERT INTO coding_credentials").
+				mock.ExpectQuery(`INSERT INTO coding_credentials[\s\S]+last_verified_at = NULL`).
 					WithArgs(codingAnyArgs(8)...).
 					WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(id))
 				mock.ExpectCommit()
@@ -848,6 +848,9 @@ func TestCodingCredentialStoreReorderMoveAndJanitor(t *testing.T) {
 				mock.ExpectExec("pg_advisory_xact_lock").
 					WithArgs(codingAnyArgs(1)...).
 					WillReturnResult(pgxmock.NewResult("SELECT", 1))
+				mock.ExpectQuery("SELECT id FROM coding_credentials").
+					WithArgs(codingAnyArgs(2)...).
+					WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(ids[0]).AddRow(ids[1]).AddRow(ids[2]))
 				for range ids {
 					mock.ExpectQuery("SELECT org_id, user_id, provider").
 						WithArgs(codingAnyArgs(3)...).
@@ -971,6 +974,34 @@ func TestCodingCredentialStoreReorderMoveAndJanitor(t *testing.T) {
 		require.Equal(t, int64(2), n, "janitor sweep should return rows affected")
 		require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 	})
+}
+
+func TestCodingCredentialStoreReorderRejectsPartialStack(t *testing.T) {
+	t.Parallel()
+
+	store, mock := newMockCodingCredentialStore(t)
+	defer mock.Close()
+
+	orgID := uuid.New()
+	userID := uuid.New()
+	scope := models.Scope{OrgID: orgID, UserID: &userID}
+	firstID := uuid.New()
+	secondID := uuid.New()
+
+	mock.ExpectBegin()
+	mock.ExpectExec("pg_advisory_xact_lock").
+		WithArgs(codingAnyArgs(1)...).
+		WillReturnResult(pgxmock.NewResult("SELECT", 1))
+	mock.ExpectQuery("SELECT id FROM coding_credentials").
+		WithArgs(codingAnyArgs(2)...).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(firstID).AddRow(secondID))
+	mock.ExpectRollback()
+
+	err := store.Reorder(context.Background(), scope, []uuid.UUID{secondID})
+
+	require.Error(t, err, "Reorder should reject a partial ordered_ids list")
+	require.Contains(t, err.Error(), "exactly match", "Reorder should explain that every active row must be included")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
 func expectScopedMutation(t *testing.T, mock pgxmock.PgxPoolIface, scope models.Scope, id uuid.UUID, provider models.ProviderName) {

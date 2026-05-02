@@ -105,6 +105,21 @@ func (m *mockCodexAuthProvider) GetValidToken(ctx context.Context, orgID uuid.UU
 	return m.cfg, nil
 }
 
+type mockCodingCredentialProvider struct {
+	resolvable map[models.ProviderName][]models.DecryptedCodingCredential
+	err        error
+}
+
+func (m *mockCodingCredentialProvider) ListResolvable(ctx context.Context, orgID uuid.UUID, userID *uuid.UUID, provider models.ProviderName) ([]models.DecryptedCodingCredential, error) {
+	if m.err != nil {
+		return nil, m.err
+	}
+	if m.resolvable == nil {
+		return nil, nil
+	}
+	return m.resolvable[provider], nil
+}
+
 // mockClaudeCodeAuthProvider implements agent.ClaudeCodeAuthProvider.
 type mockClaudeCodeAuthProvider struct {
 	sub       *models.AnthropicSubscription
@@ -909,6 +924,7 @@ type testDeps struct {
 	codexAuth        agent.CodexAuthProvider
 	claudeCodeAuth   agent.ClaudeCodeAuthProvider
 	creds            *mockCredentialProvider
+	codingCreds      agent.CodingCredentialProvider
 	snapshots        *mockSnapshotStore
 	cancels          *agent.CancelRegistry
 	nodeID           string
@@ -960,30 +976,31 @@ func buildOrchestrator(d testDeps) *agent.Orchestrator {
 		snapshotStore = d.snapshots
 	}
 	return agent.NewOrchestrator(agent.OrchestratorConfig{
-		Provider:         d.provider,
-		Adapters:         map[models.AgentType]agent.AgentAdapter{d.adapter.Name(): d.adapter},
-		Sessions:         d.sessions,
-		SessionLogs:      d.logs,
-		SessionQuestions: d.questions,
-		SessionMessages:  d.messages,
-		DecisionLog:      d.decisions,
-		ProjectTasks:     d.projects,
-		Issues:           d.issues,
-		Repositories:     d.repos,
-		Jobs:             d.jobs,
-		GitHub:           d.github,
-		CodexAuth:        d.codexAuth,
-		ClaudeCodeAuth:   d.claudeCodeAuth,
-		Credentials:      d.creds,
-		Snapshots:        snapshotStore,
-		Cancels:          d.cancels,
-		Orgs:             orgStore,
-		IdentityResolver: d.identityResolver,
-		SandboxAuth:      d.sandboxAuth,
-		Users:            d.users,
-		NodeID:           d.nodeID,
-		Logger:           zerolog.Nop(),
-		MaxConcurrent:    3,
+		Provider:          d.provider,
+		Adapters:          map[models.AgentType]agent.AgentAdapter{d.adapter.Name(): d.adapter},
+		Sessions:          d.sessions,
+		SessionLogs:       d.logs,
+		SessionQuestions:  d.questions,
+		SessionMessages:   d.messages,
+		DecisionLog:       d.decisions,
+		ProjectTasks:      d.projects,
+		Issues:            d.issues,
+		Repositories:      d.repos,
+		Jobs:              d.jobs,
+		GitHub:            d.github,
+		CodexAuth:         d.codexAuth,
+		ClaudeCodeAuth:    d.claudeCodeAuth,
+		Credentials:       d.creds,
+		CodingCredentials: d.codingCreds,
+		Snapshots:         snapshotStore,
+		Cancels:           d.cancels,
+		Orgs:              orgStore,
+		IdentityResolver:  d.identityResolver,
+		SandboxAuth:       d.sandboxAuth,
+		Users:             d.users,
+		NodeID:            d.nodeID,
+		Logger:            zerolog.Nop(),
+		MaxConcurrent:     3,
 	})
 }
 
@@ -2995,6 +3012,64 @@ func TestRunAgent_ClaudeSubscriptionInjectsCredentialsFile(t *testing.T) {
 		"should create ~/.claude and pre-create the credentials file with mode 0600 in a single command")
 }
 
+func TestRunAgent_ClaudeUnifiedAPIKeyIsNotOverriddenBySubscription(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	run := testRun(orgID, issue.ID)
+
+	d := defaultDeps()
+	d.claudeCodeAuth = &mockClaudeCodeAuthProvider{
+		hasSub: true,
+		sub: &models.AnthropicSubscription{
+			AccessToken:  "org-sub-access",
+			RefreshToken: "org-sub-refresh",
+			ExpiresAt:    time.Now().Add(time.Hour),
+		},
+	}
+	d.codingCreds = &mockCodingCredentialProvider{
+		resolvable: map[models.ProviderName][]models.DecryptedCodingCredential{
+			models.ProviderAnthropic: {
+				{
+					ID:       uuid.New(),
+					OrgID:    orgID,
+					Provider: models.ProviderAnthropic,
+					Priority: 1,
+					Status:   models.CodingCredentialStatusActive,
+					Config:   models.AnthropicConfig{APIKey: "sk-unified-ant-key"},
+				},
+			},
+			models.ProviderAnthropicSubscription: {
+				{
+					ID:       uuid.New(),
+					OrgID:    orgID,
+					Provider: models.ProviderAnthropicSubscription,
+					Priority: 2,
+					Status:   models.CodingCredentialStatusActive,
+					Config: models.AnthropicSubscriptionConfig{
+						AccessToken:  "lower-priority-sub",
+						RefreshToken: "lower-priority-refresh",
+						ExpiresAt:    time.Now().Add(time.Hour),
+					},
+				},
+			},
+		},
+	}
+
+	var capturedCfg agent.SandboxConfig
+	d.provider.CreateFn = func(ctx context.Context, cfg agent.SandboxConfig) (*agent.Sandbox, error) {
+		capturedCfg = cfg
+		return &agent.Sandbox{ID: "claude-api-key", Provider: "mock", WorkDir: cfg.WorkDir, HomeDir: cfg.HomeDir}, nil
+	}
+
+	orch := buildOrchestrator(d)
+	err := orch.RunAgent(context.Background(), run)
+	require.NoError(t, err, "run should succeed with the selected unified Anthropic API key")
+	require.Equal(t, "sk-unified-ant-key", capturedCfg.Env["ANTHROPIC_API_KEY"], "sandbox env should carry the selected Anthropic API key")
+	require.NotContains(t, d.provider.Files, "/home/sandbox/.claude/.credentials.json", "lower-priority subscription auth should not override the selected unified API key")
+}
+
 func TestRunAgent_ClaudeSubscriptionTokenFailureFallsBackToAPIKey(t *testing.T) {
 	t.Parallel()
 
@@ -3146,6 +3221,45 @@ func TestRunAgent_CodexOpenAIKeyAloneIsNotSufficient(t *testing.T) {
 	err := orch.RunAgent(context.Background(), run)
 	require.Error(t, err, "run should fail when only OpenAI API key exists (no ChatGPT OAuth)")
 	require.Contains(t, err.Error(), "no credentials", "error should mention missing credentials")
+}
+
+func TestRunAgent_CodexUnifiedOpenAIKeyDoesNotRequireOAuth(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	run := testRun(orgID, issue.ID)
+	run.AgentType = models.AgentTypeCodex
+
+	d := defaultDeps()
+	d.adapter.name = models.AgentTypeCodex
+	d.codexAuth = nil
+	d.codingCreds = &mockCodingCredentialProvider{
+		resolvable: map[models.ProviderName][]models.DecryptedCodingCredential{
+			models.ProviderOpenAI: {
+				{
+					ID:       uuid.New(),
+					OrgID:    orgID,
+					Provider: models.ProviderOpenAI,
+					Priority: 1,
+					Status:   models.CodingCredentialStatusActive,
+					Config:   models.OpenAIConfig{APIKey: "sk-unified-openai-key"},
+				},
+			},
+		},
+	}
+
+	var capturedCfg agent.SandboxConfig
+	d.provider.CreateFn = func(ctx context.Context, cfg agent.SandboxConfig) (*agent.Sandbox, error) {
+		capturedCfg = cfg
+		return &agent.Sandbox{ID: "codex-api-key", Provider: "mock", WorkDir: cfg.WorkDir, HomeDir: cfg.HomeDir}, nil
+	}
+
+	orch := buildOrchestrator(d)
+	err := orch.RunAgent(context.Background(), run)
+	require.NoError(t, err, "run should succeed when the unified resolver selected an OpenAI API key")
+	require.Equal(t, "sk-unified-openai-key", capturedCfg.Env["OPENAI_API_KEY"], "sandbox env should carry the selected OpenAI API key")
+	require.NotContains(t, d.provider.Files, "/home/sandbox/.codex/auth.json", "Codex OAuth auth.json should not be required when the selected unified credential is an API key")
 }
 
 func TestRunAgent_CodexAuthWritesToSandboxWorkdir(t *testing.T) {
