@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/assembledhq/143/internal/models"
+	"github.com/google/uuid"
 	"github.com/rs/zerolog"
 )
 
@@ -63,6 +64,35 @@ func clampListLimit(requested, defaultLimit, maxLimit int) int {
 		return maxLimit
 	}
 	return requested
+}
+
+func parseUUIDList(raw string) ([]uuid.UUID, error) {
+	if strings.TrimSpace(raw) == "" {
+		return nil, fmt.Errorf("no valid UUIDs provided")
+	}
+
+	parts := strings.Split(raw, ",")
+	ids := make([]uuid.UUID, 0, len(parts))
+	seen := make(map[uuid.UUID]struct{}, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		id, err := uuid.Parse(part)
+		if err != nil {
+			return nil, err
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		ids = append(ids, id)
+	}
+	if len(ids) == 0 {
+		return nil, fmt.Errorf("no valid UUIDs provided")
+	}
+	return ids, nil
 }
 
 func strPtr(s string) *string { return &s }

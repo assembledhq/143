@@ -266,7 +266,15 @@ func (h *SessionHandler) List(w http.ResponseWriter, r *http.Request) {
 		filters.RepositoryID = repoID
 	}
 
-	if userIDStr := r.URL.Query().Get("triggered_by_user_id"); userIDStr != "" {
+	if _, ok := r.URL.Query()["triggered_by_user_ids"]; ok {
+		userIDsStr := r.URL.Query().Get("triggered_by_user_ids")
+		userIDs, err := parseUUIDList(userIDsStr)
+		if err != nil {
+			writeError(w, r, http.StatusBadRequest, "INVALID_USER_ID", "invalid triggered_by_user_ids")
+			return
+		}
+		filters.TriggeredByUserIDs = userIDs
+	} else if userIDStr := r.URL.Query().Get("triggered_by_user_id"); userIDStr != "" {
 		userID, err := uuid.Parse(userIDStr)
 		if err != nil {
 			writeError(w, r, http.StatusBadRequest, "INVALID_USER_ID", "invalid triggered_by_user_id")
@@ -353,7 +361,15 @@ func (h *SessionHandler) Counts(w http.ResponseWriter, r *http.Request) {
 		filters.RepositoryID = repoID
 	}
 
-	if userIDStr := r.URL.Query().Get("triggered_by_user_id"); userIDStr != "" {
+	if _, ok := r.URL.Query()["triggered_by_user_ids"]; ok {
+		userIDsStr := r.URL.Query().Get("triggered_by_user_ids")
+		userIDs, err := parseUUIDList(userIDsStr)
+		if err != nil {
+			writeError(w, r, http.StatusBadRequest, "INVALID_USER_ID", "invalid triggered_by_user_ids")
+			return
+		}
+		filters.TriggeredByUserIDs = userIDs
+	} else if userIDStr := r.URL.Query().Get("triggered_by_user_id"); userIDStr != "" {
 		userID, err := uuid.Parse(userIDStr)
 		if err != nil {
 			writeError(w, r, http.StatusBadRequest, "INVALID_USER_ID", "invalid triggered_by_user_id")

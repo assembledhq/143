@@ -7,20 +7,19 @@ import Link from "next/link";
 import { useParams, usePathname } from "next/navigation";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useQueryState, parseAsString } from "nuqs";
+import { PeopleFilter } from "@/components/people-filter";
 import { cn, formatTimeAgo, sessionTitle } from "@/lib/utils";
 import { StatusDot } from "@/components/status-dot";
 import { AnimatedEllipsis } from "@/components/animated-ellipsis";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { api } from "@/lib/api";
-import { useSessionUserFilter } from "@/hooks/use-session-user-filter";
-import { useFilterSuffix } from "@/hooks/use-owner-scope-filter";
-import { SessionOwnerToggle } from "./session-owner-toggle";
+import { useFilterSuffix, usePeopleFilter } from "@/hooks/use-people-filter";
 import { queryKeys } from "@/lib/query-keys";
 import { useOptimisticSessions, type OptimisticSession } from "@/contexts/optimistic-sessions";
 import { DiffStatsBadge } from "@/components/code-review/diff-stats-badge";
 import { NoReposWarning } from "@/components/no-repos-warning";
-import type { SessionListItem } from "@/lib/types";
+import type { SessionListItem, User } from "@/lib/types";
 import { prMergedAccent } from "@/lib/pr-status-styles";
 import {
   workingSet,
@@ -160,7 +159,15 @@ export function SessionSidebar() {
   const params = useParams();
   const pathname = usePathname();
   const queryClient = useQueryClient();
-  const { currentUserFilter, triggeredByUserId, isResolved, setUserFilter } = useSessionUserFilter();
+  const {
+    mode,
+    selectedUserIDs,
+    scopedUserIDs,
+    serializedPeopleParam,
+    currentUser,
+    isResolved,
+    setPeopleFilter,
+  } = usePeopleFilter();
   const selectedId = params?.id as string | undefined;
   const [searchParam, setSearchParam] = useQueryState("search", parseAsString);
   const [search, setSearch] = useState(searchParam ?? "");
@@ -206,6 +213,11 @@ export function SessionSidebar() {
 
   const [activeFilter, setActiveFilter] = useQueryState("status", parseAsString);
   const [repo] = useQueryState("repo");
+  const { data: membersData } = useQuery({
+    queryKey: ["team", "members"],
+    queryFn: () => api.team.listMembers(),
+  });
+  const members = useMemo<User[]>(() => membersData?.data ?? [], [membersData?.data]);
 
   const { optimisticSessions, removeOptimisticSession } = useOptimisticSessions();
 
@@ -227,7 +239,7 @@ export function SessionSidebar() {
   // Reset pagination when the effective query scope changes. Adjusting state
   // during render (rather than in an effect) avoids cascading renders — see
   // https://react.dev/reference/react/useState#storing-information-from-previous-renders.
-  const scopeKey = `${repo ?? ""}|${triggeredByUserId ?? ""}|${currentFilter}|${trimmedSearch}`;
+  const scopeKey = `${repo ?? ""}|${serializedPeopleParam ?? "mine"}|${currentFilter}|${trimmedSearch}`;
   const [prevScopeKey, setPrevScopeKey] = useState(scopeKey);
   if (prevScopeKey !== scopeKey) {
     setPrevScopeKey(scopeKey);
@@ -238,16 +250,16 @@ export function SessionSidebar() {
     () => ({
       limit: 50,
       repository_id: repo ?? undefined,
-      triggered_by_user_id: triggeredByUserId,
+      triggered_by_user_ids: scopedUserIDs,
       search: trimmedSearch || undefined,
       ...(isArchivedView ? { only_archived: true } : {}),
       ...(!isArchivedView && statusParam ? { status: statusParam } : {}),
     }),
-    [repo, triggeredByUserId, trimmedSearch, isArchivedView, statusParam],
+    [repo, scopedUserIDs, trimmedSearch, isArchivedView, statusParam],
   );
 
   const { data: listData, isLoading } = useQuery({
-    queryKey: [...queryKeys.sessions.list(repo), "filtered", currentFilter, triggeredByUserId, trimmedSearch],
+    queryKey: [...queryKeys.sessions.list(repo), "filtered", currentFilter, serializedPeopleParam, trimmedSearch],
     queryFn: () => api.sessions.list(listParams),
     enabled: isResolved,
     refetchInterval: isPaginated ? false : 10000,
@@ -256,11 +268,11 @@ export function SessionSidebar() {
   // Tab badge counts. Search-independent so tabs reflect the scope totals, not
   // the current search result size.
   const { data: countsData } = useQuery({
-    queryKey: queryKeys.sessions.counts(repo, triggeredByUserId),
+    queryKey: queryKeys.sessions.counts(repo, serializedPeopleParam),
     queryFn: () =>
       api.sessions.counts({
         repository_id: repo ?? undefined,
-        triggered_by_user_id: triggeredByUserId,
+        triggered_by_user_ids: scopedUserIDs,
       }),
     enabled: isResolved,
     refetchInterval: 10000,
@@ -332,7 +344,7 @@ export function SessionSidebar() {
 
   // Carry the sidebar's filters into detail-page links so opening a session
   // doesn't reset the scope back to "Mine".
-  const filterSuffix = useFilterSuffix(currentUserFilter, activeFilter, repo, search || null);
+  const filterSuffix = useFilterSuffix(serializedPeopleParam, activeFilter, repo, search || null);
 
   const isNewSession = pathname === "/sessions/new";
   const showDefaultEmptyState =
@@ -361,9 +373,12 @@ export function SessionSidebar() {
               className="w-full h-8 pl-8 pr-3 rounded-md border border-border bg-background text-xs placeholder:text-muted-foreground/50 focus:outline-none focus:ring-1 focus:ring-ring"
             />
           </div>
-          <SessionOwnerToggle
-            currentUserFilter={currentUserFilter}
-            onFilterChange={setUserFilter}
+          <PeopleFilter
+            mode={mode}
+            selectedUserIDs={selectedUserIDs}
+            members={members}
+            currentUser={currentUser}
+            onFilterChange={setPeopleFilter}
             className="shrink-0"
           />
         </div>
