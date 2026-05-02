@@ -592,6 +592,293 @@ func (c *graphQLClient) HasGitHubIntegrationAttachment(ctx context.Context, issu
 	return false, nil
 }
 
+// ----------------------------------------------------------------------------
+// Linear Agent Interaction API
+// ----------------------------------------------------------------------------
+// The agent surface is a separate set of mutations Linear exposes for
+// AgentSession-aware integrations:
+//   * agentActivityCreate — emits one activity (thought/action/elicitation/
+//     response/error) into a tracked AgentSession. Activity stream is what
+//     Linear's UI renders as the live "thinking → running → final" view.
+//   * agentSessionUpdate — sets externalUrls (deep links to the 143 session
+//     and resulting PR) and optionally pins state.
+//   * agentSessionGet     — fetches the AgentSession by id; used by the
+//     dispatcher to confirm presence and recover the issue context after
+//     a worker restart.
+//
+// All three reuse the same `do` transport so 401/429 and GraphQL-error
+// shaping stay consistent with the rest of the client.
+
+// AgentActivityInput is the data the writer hands the client for one
+// AgentActivity emit. Fields map directly to Linear's
+// AgentActivityCreateInput.content.
+type AgentActivityInput struct {
+	// AgentSessionID is the Linear AgentSession id this activity belongs to.
+	// Required; the dispatcher persists it in linear_agent_sessions on the
+	// `created` event and threads it through every subsequent emit.
+	AgentSessionID string
+	// Type is the activity kind. Use the typed constants in
+	// internal/models/linear_agent_enums.go to avoid typos.
+	Type string
+	// Body is the human-visible message. For thought/action/response/error
+	// this is the rendered text; for elicitation it is the question.
+	Body string
+	// Action is the human-readable name of the tool the agent invoked.
+	// Only set on type=action; the GraphQL schema rejects it otherwise.
+	Action string
+	// Parameter is the action's input parameter, free-text. Optional; the
+	// writer leaves this empty for milestone-driven actions.
+	Parameter string
+	// Result is the action's output. Optional, only meaningful on
+	// type=action. Limit ~4KB — Linear truncates large bodies and the value
+	// is for human display, not machine consumption.
+	Result string
+	// Ephemeral marks the activity as transient (it scrolls out of the
+	// activity feed quickly). Linear only honors this for thought/action.
+	// The writer enforces this so we don't get a runtime GraphQL rejection.
+	Ephemeral bool
+}
+
+// AgentActivityResult captures the post-emit metadata callers persist.
+type AgentActivityResult struct {
+	// ActivityID is Linear's id for the emitted activity. Persisted in
+	// linear_agent_activity_log so a future replay can dedupe at the
+	// (agent_session, idem_key) granularity even if our row was lost.
+	ActivityID string
+}
+
+// AgentActivityCreate emits one activity into a Linear AgentSession.
+//
+// Per Linear's contract, only thought and action accept the ephemeral flag;
+// the writer normalizes Ephemeral to false for other types before reaching
+// here as a defense-in-depth (the upstream caller already enforces this via
+// LinearAgentActivityType.CanBeEphemeral).
+func (c *graphQLClient) AgentActivityCreate(ctx context.Context, in AgentActivityInput) (AgentActivityResult, error) {
+	if in.AgentSessionID == "" {
+		return AgentActivityResult{}, errors.New("agent_session_id is required")
+	}
+	if in.Type == "" {
+		return AgentActivityResult{}, errors.New("activity type is required")
+	}
+	// Linear's AgentActivityCreateInput models content as a discriminated
+	// union; we send a single content object whose shape varies by type.
+	// Building the variables explicitly (rather than via reflection) keeps
+	// the wire format obvious to a reader and lets us validate forbidden
+	// combinations (e.g. ephemeral on a non-thought activity) loudly.
+	content := map[string]any{
+		"type": in.Type,
+	}
+	switch in.Type {
+	case "thought", "response":
+		content["body"] = in.Body
+		if in.Type == "thought" && in.Ephemeral {
+			content["ephemeral"] = true
+		}
+	case "action":
+		// action is required by Linear; Body is optional human-readable
+		// description of the action.
+		if in.Action == "" {
+			return AgentActivityResult{}, errors.New("action.action is required")
+		}
+		content["action"] = in.Action
+		if in.Body != "" {
+			content["body"] = in.Body
+		}
+		if in.Parameter != "" {
+			content["parameter"] = in.Parameter
+		}
+		if in.Result != "" {
+			content["result"] = in.Result
+		}
+		if in.Ephemeral {
+			content["ephemeral"] = true
+		}
+	case "elicitation":
+		content["body"] = in.Body
+	case "error":
+		content["body"] = in.Body
+	default:
+		return AgentActivityResult{}, fmt.Errorf("unsupported agent activity type: %q", in.Type)
+	}
+
+	const query = `mutation AgentActivityCreate($input: AgentActivityCreateInput!) {
+		agentActivityCreate(input: $input) {
+			success
+			agentActivity { id }
+		}
+	}`
+	variables := map[string]any{
+		"input": map[string]any{
+			"agentSessionId": in.AgentSessionID,
+			"content":        content,
+		},
+	}
+	var result struct {
+		Data struct {
+			AgentActivityCreate struct {
+				Success       bool `json:"success"`
+				AgentActivity struct {
+					ID string `json:"id"`
+				} `json:"agentActivity"`
+			} `json:"agentActivityCreate"`
+		} `json:"data"`
+	}
+	if err := c.do(ctx, query, variables, &result); err != nil {
+		return AgentActivityResult{}, err
+	}
+	if !result.Data.AgentActivityCreate.Success {
+		return AgentActivityResult{}, errors.New("agent activity create returned success=false")
+	}
+	return AgentActivityResult{ActivityID: result.Data.AgentActivityCreate.AgentActivity.ID}, nil
+}
+
+// AgentSessionExternalURL is one entry in the externalUrls list Linear
+// surfaces under the AgentSession header. Two slots are conventional:
+// the 143 session URL and (after PR open) the GitHub PR URL.
+type AgentSessionExternalURL struct {
+	URL   string
+	Title string
+}
+
+// AgentSessionUpdateInput captures the fields the writer can set on an
+// existing AgentSession. State is optional — Linear computes it from the
+// activity stream by default; only set this when the writer wants to pin
+// the session into awaitingInput, complete, or error explicitly.
+type AgentSessionUpdateInput struct {
+	AgentSessionID string
+	ExternalURLs   []AgentSessionExternalURL
+	// State is one of "pending", "inProgress", "awaitingInput", "complete",
+	// "error" — Linear's vocabulary, not 143's. Empty string means "leave
+	// the existing state alone".
+	State string
+}
+
+// AgentSessionUpdate applies pinned fields to an existing AgentSession.
+// Idempotent on Linear's side: two writes with the same content collapse.
+func (c *graphQLClient) AgentSessionUpdate(ctx context.Context, in AgentSessionUpdateInput) error {
+	if in.AgentSessionID == "" {
+		return errors.New("agent_session_id is required")
+	}
+	if len(in.ExternalURLs) == 0 && in.State == "" {
+		// Nothing to write — Linear would reject the empty patch. Treat
+		// this as a no-op so callers can pass empty inputs without special
+		// casing.
+		return nil
+	}
+	input := map[string]any{
+		"id": in.AgentSessionID,
+	}
+	if len(in.ExternalURLs) > 0 {
+		urls := make([]map[string]string, 0, len(in.ExternalURLs))
+		for _, u := range in.ExternalURLs {
+			urls = append(urls, map[string]string{
+				"url":   u.URL,
+				"title": u.Title,
+			})
+		}
+		input["externalUrls"] = urls
+	}
+	if in.State != "" {
+		input["state"] = in.State
+	}
+	const query = `mutation AgentSessionUpdate($input: AgentSessionUpdateInput!) {
+		agentSessionUpdate(input: $input) {
+			success
+		}
+	}`
+	var result struct {
+		Data struct {
+			AgentSessionUpdate struct {
+				Success bool `json:"success"`
+			} `json:"agentSessionUpdate"`
+		} `json:"data"`
+	}
+	if err := c.do(ctx, query, map[string]any{"input": input}, &result); err != nil {
+		return err
+	}
+	if !result.Data.AgentSessionUpdate.Success {
+		return errors.New("agent session update returned success=false")
+	}
+	return nil
+}
+
+// FetchedAgentSession is the recovery snapshot used by the dispatcher when
+// a `prompted` event arrives but the local row was lost (e.g. DB restored
+// from backup). The fields mirror what we store in linear_agent_sessions
+// plus the most recent comment id (used as the parent for response
+// activities).
+type FetchedAgentSession struct {
+	ID          string
+	IssueID     string
+	IssueKey    string
+	State       string
+	CreatorID   string
+	CommentID   string
+	UpdatedAt   time.Time
+}
+
+// AgentSessionGet is the recovery hook. Returns ErrAgentSessionNotFound when
+// Linear no longer has the session (rare but possible if the workspace's
+// retention has elapsed).
+func (c *graphQLClient) AgentSessionGet(ctx context.Context, agentSessionID string) (*FetchedAgentSession, error) {
+	if agentSessionID == "" {
+		return nil, errors.New("agent_session_id is required")
+	}
+	const query = `query AgentSessionGet($id: String!) {
+		agentSession(id: $id) {
+			id state updatedAt
+			issue { id identifier }
+			comment { id }
+			creator { id }
+		}
+	}`
+	var result struct {
+		Data struct {
+			AgentSession *struct {
+				ID        string    `json:"id"`
+				State     string    `json:"state"`
+				UpdatedAt time.Time `json:"updatedAt"`
+				Issue     struct {
+					ID         string `json:"id"`
+					Identifier string `json:"identifier"`
+				} `json:"issue"`
+				Comment *struct {
+					ID string `json:"id"`
+				} `json:"comment"`
+				Creator *struct {
+					ID string `json:"id"`
+				} `json:"creator"`
+			} `json:"agentSession"`
+		} `json:"data"`
+	}
+	if err := c.do(ctx, query, map[string]any{"id": agentSessionID}, &result); err != nil {
+		return nil, err
+	}
+	if result.Data.AgentSession == nil {
+		return nil, ErrAgentSessionNotFound
+	}
+	out := &FetchedAgentSession{
+		ID:        result.Data.AgentSession.ID,
+		IssueID:   result.Data.AgentSession.Issue.ID,
+		IssueKey:  result.Data.AgentSession.Issue.Identifier,
+		State:     result.Data.AgentSession.State,
+		UpdatedAt: result.Data.AgentSession.UpdatedAt,
+	}
+	if result.Data.AgentSession.Comment != nil {
+		out.CommentID = result.Data.AgentSession.Comment.ID
+	}
+	if result.Data.AgentSession.Creator != nil {
+		out.CreatorID = result.Data.AgentSession.Creator.ID
+	}
+	return out, nil
+}
+
+// ErrAgentSessionNotFound is returned by AgentSessionGet when Linear has no
+// record of the requested AgentSession. Callers treat this as terminal —
+// the matching 143 session can be soft-completed because there is no Linear
+// surface left to stream into.
+var ErrAgentSessionNotFound = errors.New("linear agent session not found")
+
 // do is the GraphQL transport. Handles 200/non-200 + GraphQL errors. Note:
 // retries and rate-limit handling live in the worker layer (RetryableError),
 // not here, so the Client stays a thin transport.

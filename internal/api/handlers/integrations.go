@@ -77,7 +77,15 @@ type linearOrganization struct {
 }
 
 type linearViewer struct {
+	// Organization is the Linear workspace this token belongs to.
 	Organization linearOrganization `json:"organization"`
+	// ID and Name describe the *agent user* Linear provisioned at install
+	// time when the OAuth flow used actor=app. For a non-agent install
+	// these fields describe the human installer and we ignore them.
+	// Distinguishing the two cases happens upstream: HandleLinearOAuthCallback
+	// only stores AppUserID when AgentScopesGranted is true.
+	ID   string `json:"id"`
+	Name string `json:"name"`
 }
 
 type linearViewerData struct {
@@ -402,12 +410,26 @@ func (h *IntegrationHandler) StartLinearOAuth(w http.ResponseWriter, r *http.Req
 		return
 	}
 
+	// Single OAuth flow that grants both the legacy read/write scopes used
+	// by the existing session-linking write-back AND the agent scopes
+	// (app:assignable, app:mentionable) used by the inbound agent feature.
+	// Linear treats scopes additively, so this flow is a strict superset of
+	// the previous one — orgs that only ever use the outbound integration
+	// pay nothing for the agent scopes being granted.
+	//
+	// actor=app provisions a dedicated agent user (`@143`) in the workspace
+	// and ties subsequent token-authored writes to it. Workspace-admin
+	// privileges are required by Linear; the install copy in the frontend
+	// must reflect that. See docs/design/help-me-understand-what-melodic-bengio.md
+	// §"OAuth flow — single upgraded install" for the rationale on a single
+	// flow vs parallel flows.
 	params := url.Values{
 		"client_id":     {h.linearClientID},
 		"redirect_uri":  {h.linearRedirectURL()},
 		"response_type": {"code"},
-		"scope":         {"read,write"},
+		"scope":         {strings.Join(models.LinearAgentRequiredScopes, ",")},
 		"state":         {state},
+		"actor":         {"app"},
 	}
 
 	http.Redirect(w, r, linearAuthorizeURL+"?"+params.Encode(), http.StatusTemporaryRedirect)
@@ -425,7 +447,7 @@ func (h *IntegrationHandler) HandleLinearOAuthCallback(w http.ResponseWriter, r 
 		return
 	}
 
-	workspaceID, workspaceName, err := h.fetchLinearWorkspace(r.Context(), token.AccessToken)
+	viewer, err := h.fetchLinearViewer(r.Context(), token.AccessToken)
 	if err != nil {
 		writeError(w, r, http.StatusInternalServerError, "LINEAR_API_FAILED", "failed to fetch linear workspace", err)
 		return
@@ -438,12 +460,23 @@ func (h *IntegrationHandler) HandleLinearOAuthCallback(w http.ResponseWriter, r 
 		return
 	}
 
+	// Build the credential. AppUser* fields are recorded only when the
+	// returned token actually carries the agent scopes — installing through
+	// a third-party OAuth tool that strips actor=app will give us a legacy
+	// scope set even though the GraphQL viewer call returned *something*.
+	// Storing AppUserID in that case would lie to downstream code that
+	// uses "AppUserID != \"\"" as the "agent installed" predicate.
 	linearConfig := models.LinearConfig{
 		AccessToken:   token.AccessToken,
 		TokenType:     token.TokenType,
 		Scope:         token.Scope,
-		WorkspaceID:   workspaceID,
-		WorkspaceName: workspaceName,
+		WorkspaceID:   viewer.WorkspaceID,
+		WorkspaceName: viewer.WorkspaceName,
+	}
+	if linearConfig.HasAgentScopes() {
+		linearConfig.AppUserID = viewer.AppUserID
+		linearConfig.AppUserName = viewer.AppUserName
+		linearConfig.AgentScopesGranted = true
 	}
 	if err := h.credentialStore.Upsert(r.Context(), orgID, linearConfig); err != nil {
 		writeError(w, r, http.StatusInternalServerError, "SAVE_CREDENTIAL_FAILED", "failed to store linear credential", err)
@@ -1252,43 +1285,72 @@ func (h *IntegrationHandler) exchangeLinearCode(ctx context.Context, code string
 	return &token, nil
 }
 
-func (h *IntegrationHandler) fetchLinearWorkspace(ctx context.Context, accessToken string) (string, string, error) {
-	queryBody := map[string]string{"query": "query ViewerOrg { viewer { organization { id name } } }"}
+// linearViewerInfo packages the post-token-exchange viewer GraphQL result.
+// Returned by fetchLinearViewer so callers can persist all of workspace +
+// agent-user metadata in a single round trip.
+type linearViewerInfo struct {
+	WorkspaceID   string
+	WorkspaceName string
+	// AppUserID and AppUserName describe the agent user Linear provisioned
+	// when the OAuth completed with actor=app. Empty for legacy (read/write
+	// only) installs. The OAuth callback only persists these when the
+	// returned scope string includes the agent scopes; otherwise the token
+	// is just a regular user token even though the GraphQL `viewer` query
+	// happens to return *some* identity.
+	AppUserID   string
+	AppUserName string
+}
+
+func (h *IntegrationHandler) fetchLinearViewer(ctx context.Context, accessToken string) (*linearViewerInfo, error) {
+	queryBody := map[string]string{"query": "query ViewerOrg { viewer { id name organization { id name } } }"}
 	body, err := json.Marshal(queryBody)
 	if err != nil {
-		return "", "", fmt.Errorf("marshal linear viewer query: %w", err)
+		return nil, fmt.Errorf("marshal linear viewer query: %w", err)
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, linearGraphQLURL, bytes.NewBuffer(body))
 	if err != nil {
-		return "", "", fmt.Errorf("create linear viewer request: %w", err)
+		return nil, fmt.Errorf("create linear viewer request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+accessToken)
 
 	resp, err := h.client.Do(req)
 	if err != nil {
-		return "", "", fmt.Errorf("linear viewer request failed: %w", err)
+		return nil, fmt.Errorf("linear viewer request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
 		responseBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return "", "", fmt.Errorf("linear viewer request failed: status=%d body=%s", resp.StatusCode, string(responseBody))
+		return nil, fmt.Errorf("linear viewer request failed: status=%d body=%s", resp.StatusCode, string(responseBody))
 	}
 
 	var viewer linearViewerResponse
 	if err := json.NewDecoder(resp.Body).Decode(&viewer); err != nil {
-		return "", "", fmt.Errorf("decode linear viewer response: %w", err)
+		return nil, fmt.Errorf("decode linear viewer response: %w", err)
 	}
 
-	workspaceID := viewer.Data.Viewer.Organization.ID
-	workspaceName := viewer.Data.Viewer.Organization.Name
-	if workspaceID == "" {
-		return "", "", fmt.Errorf("linear viewer response missing organization id")
+	if viewer.Data.Viewer.Organization.ID == "" {
+		return nil, fmt.Errorf("linear viewer response missing organization id")
 	}
 
-	return workspaceID, workspaceName, nil
+	return &linearViewerInfo{
+		WorkspaceID:   viewer.Data.Viewer.Organization.ID,
+		WorkspaceName: viewer.Data.Viewer.Organization.Name,
+		AppUserID:     viewer.Data.Viewer.ID,
+		AppUserName:   viewer.Data.Viewer.Name,
+	}, nil
+}
+
+// fetchLinearWorkspace is preserved for callers that don't care about the
+// app-user fields. New code should call fetchLinearViewer directly.
+func (h *IntegrationHandler) fetchLinearWorkspace(ctx context.Context, accessToken string) (string, string, error) {
+	info, err := h.fetchLinearViewer(ctx, accessToken)
+	if err != nil {
+		return "", "", err
+	}
+	return info.WorkspaceID, info.WorkspaceName, nil
 }
 
 // --- Sentry token exchange ---
