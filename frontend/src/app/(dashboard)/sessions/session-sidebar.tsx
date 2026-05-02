@@ -478,10 +478,10 @@ export function SessionSidebar() {
               <Link
                 href={`/sessions/${session.id}${filterSuffix}`}
                 className={cn(
-                  "block rounded-lg bg-muted/30 px-3 py-2.5 transition-all duration-150",
+                  "block rounded-lg border border-border/50 bg-background px-3 py-2.5 shadow-sm transition-all duration-150 md:border-transparent md:bg-muted/30 md:shadow-none",
                   isSelected
-                    ? "bg-background shadow-sm border border-border/50"
-                    : "hover:bg-background/60"
+                    ? "border-border/60 bg-background shadow-sm"
+                    : "hover:border-border/60 hover:bg-background md:hover:border-transparent md:hover:bg-background/60"
                 )}
               >
                 <div className="flex items-start gap-2.5 min-w-0">

@@ -172,6 +172,23 @@ describe('SwipeActionRow', () => {
     expect(surface).toHaveClass('bg-background');
   });
 
+  it('keeps the touch surface opaque before any swipe begins', () => {
+    renderWithProviders(
+      <SwipeActionRow
+        actionLabel="Archive item"
+        actionText="Archive"
+        onAction={() => {}}
+      >
+        <div>Row content</div>
+      </SwipeActionRow>,
+    );
+
+    const surface = screen.getByText('Row content').closest('[data-swipe-surface="true"]');
+    expect(surface).not.toBeNull();
+
+    expect(surface).toHaveClass('bg-background');
+  });
+
   it('auto-fires on a deliberate mobile-width swipe before half-row travel', () => {
     const onAction = vi.fn();
 

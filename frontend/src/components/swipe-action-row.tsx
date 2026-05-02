@@ -250,8 +250,7 @@ export function SwipeActionRow({
   const swipeSurfaceProps = isTouchDevice
     ? {
         className: cn(
-          "relative z-10 touch-pan-y",
-          offset > 0 && "bg-background",
+          "relative z-10 bg-background touch-pan-y",
           !isDragging && "transition-transform duration-200 ease-out",
         ),
         style: { transform: `translateX(-${offset}px)` },
@@ -282,53 +281,45 @@ export function SwipeActionRow({
           <div
             aria-hidden="true"
             className={cn(
-              "absolute inset-y-0 right-0 transition-all duration-150 ease-out",
-              isCommitted ? "bg-amber-700" : "bg-amber-500/80",
+              "absolute inset-0 rounded-r-lg shadow-[inset_1px_0_0_rgba(255,255,255,0.18)] transition-colors duration-150 ease-out",
+              isCommitted ? "bg-amber-700" : "bg-amber-500",
+            )}
+          />
+          <div
+            aria-hidden="true"
+            className={cn(
+              "absolute inset-y-0 right-0 rounded-r-lg transition-all duration-150 ease-out",
+              isCommitted ? "bg-amber-800/90" : "bg-amber-600/88",
             )}
             style={{ width: `${progressFill * 100}%` }}
           />
           <Button
+            variant="ghost"
             aria-label={actionLabel}
             aria-hidden={trailingActionHidden}
             tabIndex={trailingActionHidden ? -1 : 0}
-            className={cn(
-              "relative h-full w-full rounded-none rounded-r-lg px-0 text-white transition-colors duration-150",
-              isCommitted
-                ? "bg-amber-600 hover:bg-amber-700 active:bg-amber-700"
-                : "bg-amber-500 hover:bg-amber-600 active:bg-amber-600",
-            )}
+            className="relative h-full w-full rounded-none rounded-r-lg bg-transparent px-0 text-white shadow-none hover:bg-transparent hover:text-white active:bg-transparent"
             onClick={() => {
               close();
               onAction();
             }}
           >
-            <span
-              aria-hidden="true"
-              className={cn(
-                "absolute inset-y-2 right-0 rounded-l-full bg-white/16 transition-all duration-150 ease-out",
-                isCommitted ? "bg-white/22" : "bg-white/14",
-              )}
-              style={{ width: `${Math.max(24, progressFill * 100)}%` }}
-            />
-            <span
-              className={cn(
-                "relative flex flex-col items-center justify-center gap-1 text-xs font-medium transition-transform duration-150",
-                isCommitted && "scale-110",
-              )}
-            >
+            <span className="relative flex h-full w-full flex-col items-center justify-center gap-1.5 px-4 text-center">
               <span
                 className={cn(
-                  "flex h-9 w-9 items-center justify-center rounded-full border border-white/20 bg-black/10 transition-all duration-150",
-                  isCommitted && "scale-110 bg-black/20",
+                  "flex h-10 w-10 items-center justify-center rounded-full border border-white/25 bg-white/10 shadow-[inset_0_1px_0_rgba(255,255,255,0.12)] transition-transform duration-150",
+                  isCommitted && "bg-white/14",
                 )}
                 style={{
-                  transform: `translateX(-${Math.round(swipeProgress * 12)}px) scale(${1 + swipeProgress * 0.08})`,
+                  transform: `scale(${1 + swipeProgress * 0.04})`,
                 }}
               >
                 {actionIcon}
               </span>
-              <span>{actionText}</span>
-              <span className="text-xs font-medium uppercase tracking-[0.14em] text-white/90">
+              <span className="text-sm font-semibold tracking-[0.01em] text-white">
+                {actionText}
+              </span>
+              <span className="min-h-[0.75rem] text-xs font-medium tracking-[0.06em] text-white/80">
                 {actionHint}
               </span>
             </span>
