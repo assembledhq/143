@@ -110,6 +110,44 @@ describe('SwipeActionRow', () => {
     expect(onAction).toHaveBeenCalledTimes(1);
   });
 
+  it('shows progressive feedback before and after the auto-archive threshold', () => {
+    renderWithProviders(
+      <SwipeActionRow
+        actionLabel="Archive item"
+        actionText="Archive"
+        onAction={() => {}}
+      >
+        <div>Row content</div>
+      </SwipeActionRow>,
+    );
+
+    const surface = screen.getByText('Row content').closest('[data-swipe-surface="true"]');
+    expect(surface).not.toBeNull();
+    const container = surface!.parentElement;
+    expect(container).not.toBeNull();
+    Object.defineProperty(container!, 'offsetWidth', {
+      configurable: true,
+      value: 390,
+    });
+
+    fireEvent.touchStart(surface!, {
+      touches: [{ clientX: 320, clientY: 20 }],
+    });
+    fireEvent.touchMove(surface!, {
+      touches: [{ clientX: 240, clientY: 24 }],
+    });
+
+    expect(screen.getByText('Keep swiping')).toBeInTheDocument();
+    expect(screen.queryByText('Release to archive')).not.toBeInTheDocument();
+
+    fireEvent.touchMove(surface!, {
+      touches: [{ clientX: 170, clientY: 24 }],
+    });
+
+    expect(screen.getByText('Release to archive')).toBeInTheDocument();
+    expect(container).toHaveAttribute('data-swipe-state', 'committed');
+  });
+
   it('keeps the moving row surface opaque while the action is revealed', () => {
     renderWithProviders(
       <SwipeActionRow
