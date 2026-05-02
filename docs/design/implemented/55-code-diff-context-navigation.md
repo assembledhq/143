@@ -1,10 +1,10 @@
 # Design: Accurate, Navigable Session Diffs
 
-> **Status:** Partially implemented | **Last reviewed:** 2026-05-01
+> **Status:** Implemented | **Last reviewed:** 2026-05-01
 
 > Unifies two gaps in the current review surface: GitHub-style movement through surrounding file context and diff snapshots that are explicitly tied to the immutable branch basis for the session.
 >
-> Phases 2–3 (directional middle-gap and top/bottom expansion) and Phase 6 (snapshot-backed file context for sessions whose sandbox container has been torn down) are live. Phase 1 (immutable diff provenance and typed snapshot history) is still outstanding. When neither a live container nor a usable snapshot is available, the diff still falls back to disabled expanders with explicit "Additional file context unavailable for this session" copy.
+> Phases 1–3 and Phase 6 are live. Phases 4–5 (richer diff-endpoint metadata, JSONB cleanup, and review-surface polish) are tracked below as deferred follow-ups — none of them gate a functioning feature; they are parked here so future work does not have to rediscover them. When neither a live container nor a usable snapshot is available, the diff still falls back to disabled expanders with explicit "Additional file context unavailable for this session" copy.
 
 ## Problem
 
@@ -439,7 +439,9 @@ Backend changes:
 - Extend the context API with range metadata or total line count.
 - Add handler and file reader tests for the new response fields.
 
-### Phase 4: Rich diff metadata and cleanup
+### Phase 4 (Deferred): Rich diff metadata and cleanup
+
+> **Status:** deferred — not required for a functioning feature. The data layer for this work is already in place (Phase 1 dual-writes to `session_diff_snapshots`); what is missing is a dedicated endpoint that surfaces it, a read-path migration off `diff_history` JSONB, and an abstraction cleanup. Cleared out of the critical path; documented here only so the cleanup is not forgotten if a future change makes it newly worthwhile.
 
 Scope:
 
@@ -467,7 +469,9 @@ Recommended response shape:
 }
 ```
 
-### Phase 5: Polish and scale
+### Phase 5 (Deferred): Polish and scale
+
+> **Status:** deferred — opportunistic polish, not required for a functioning feature. Pulled out of the critical path; left here as a parking spot for ideas worth picking up if reviewer load or large-file behavior justifies them.
 
 Scope:
 
@@ -542,7 +546,9 @@ Backend:
 - file-reader tests for start-of-file and end-of-file ranges
 - tests for very small files, large requested windows, and sessions where context expansion is unavailable because no sandbox can be read
 
-### Phase 4-5 ownership
+### Phase 4-5 ownership (deferred)
+
+Listed for future reference; no current owner. If the deferred work is picked back up:
 
 Backend:
 
@@ -609,5 +615,5 @@ The lowest-risk sequence is:
 1. Establish accurate cached diff provenance first so the review surface has one authoritative diff contract before new navigation behavior is layered on top.
 2. Rework middle-gap expansion to be directional and repeatable against that stable cached diff.
 3. Add top and bottom gaps with metadata support.
-4. Migrate richer metadata and cleanup paths after both provenance and navigation are stable.
-5. Add the snapshot-backed file-context reader (Phase 6) so that a session's review surface keeps working after its sandbox container is torn down — the most common state for a session under review.
+4. Add the snapshot-backed file-context reader (Phase 6) so that a session's review surface keeps working after its sandbox container is torn down — the most common state for a session under review.
+5. (Deferred) Migrate richer metadata, JSONB read paths, and reviewer polish later if the surface justifies it.
