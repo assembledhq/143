@@ -866,7 +866,7 @@ describe("PreviewPanel component", () => {
     ).not.toBeInTheDocument();
   });
 
-  it("shows the backend message verbatim (no 'Failed to start preview:' prefix) when no .143/preview.json is committed", async () => {
+  it("shows the backend message verbatim (no 'Failed to start preview:' prefix) when no .143/config.json is committed", async () => {
     const user = userEvent.setup();
     mockGet.mockResolvedValue(makePreviewStatus({ status: "stopped" }));
     const backendMessage =
