@@ -1383,7 +1383,7 @@ func TestCollectDiff(t *testing.T) {
 					"base_commit_sha": tt.baseCommitSHA,
 				},
 			}
-			diff, err := collectDiff(context.Background(), provider, sandbox)
+			diff, err := collectDiff(context.Background(), provider, sandbox, zerolog.Nop())
 			if tt.wantErr {
 				require.Error(t, err, "collectDiff should return an error")
 				return

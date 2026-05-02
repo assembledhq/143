@@ -1376,6 +1376,23 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 			}
 		}
 
+		// Stamp the resolved target branch (the branch we just cloned from —
+		// repo default unless the session overrode it) onto sandbox.Metadata
+		// so sessiondiff.Collect can compute a merge-base diff against
+		// origin/<branch>. Without this the diff is taken against the frozen
+		// baseCommitSHA, which inflates by the entire delta from base to HEAD
+		// whenever the user integrates the target branch back into the working
+		// branch (e.g. `git pull origin main` or merging main to resolve PR
+		// conflicts). Empty branch is unexpected in this path (we just cloned
+		// from it) but we guard anyway — Collect treats empty target branch
+		// as "fall back to baseCommitSHA".
+		if branch != "" {
+			if sandbox.Metadata == nil {
+				sandbox.Metadata = make(map[string]string)
+			}
+			sandbox.Metadata[SandboxMetadataTargetBranch] = branch
+		}
+
 		// 8b. Create a working branch so the agent operates on a separate
 		// branch from the start, keeping the base branch clean.
 		workingBranch := designatedWorkingBranch
@@ -1816,6 +1833,12 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	integrationSkills := o.BuildIntegrationSkills(ctx, session.OrgID)
 	var authState *sandboxGitHubAuthState
 	var authErr error
+	// continueTargetBranch is the resolved target branch (repo default,
+	// overridden by session.TargetBranch) — captured during the repo lookup
+	// below and stamped onto sandbox.Metadata after sandbox setup so
+	// sessiondiff.Collect can compute a merge-base diff against
+	// origin/<branch>. Mirrors the branch resolved in RunAgent.
+	var continueTargetBranch string
 
 	// Wire the per-session GitHub credential helper for both fresh and
 	// reused containers. For reused containers (preview is holding the
@@ -1854,6 +1877,10 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 				"sandbox github auth",
 			)
 			return fmt.Errorf("fetch repository for auth: %w", repoErr)
+		}
+		continueTargetBranch = repo.DefaultBranch
+		if session.TargetBranch != nil && *session.TargetBranch != "" {
+			continueTargetBranch = *session.TargetBranch
 		}
 		var fallbackToken string
 		if !reusedExisting {
@@ -1964,11 +1991,22 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	// has changes. RunAgent sets this on the initial clone; the three setup
 	// branches above (reuse, hydrate, fresh-clone-on-continue) all leave
 	// Metadata empty, so we fix it here once for every continue path.
+	//
+	// Also re-stamp the resolved target branch so Collect can compute a
+	// merge-base diff against origin/<branch>. Without this the post-merge
+	// diff includes every commit pulled in from the target branch, inflating
+	// the Changes tab from the actual PR delta to the full base..HEAD range.
 	if session.BaseCommitSHA != nil && *session.BaseCommitSHA != "" {
 		if sandbox.Metadata == nil {
 			sandbox.Metadata = make(map[string]string)
 		}
 		sandbox.Metadata[SandboxMetadataBaseCommitSHA] = *session.BaseCommitSHA
+	}
+	if continueTargetBranch != "" {
+		if sandbox.Metadata == nil {
+			sandbox.Metadata = make(map[string]string)
+		}
+		sandbox.Metadata[SandboxMetadataTargetBranch] = continueTargetBranch
 	}
 	// Record the turn hold. AcquireTurnHold uses COALESCE so it is idempotent
 	// when we reused a container (the row's container_id already matches our

@@ -405,6 +405,16 @@ type Sandbox struct {
 // sessiondiff already imports agent for SandboxProvider/Sandbox.
 const SandboxMetadataBaseCommitSHA = "base_commit_sha"
 
+// SandboxMetadataTargetBranch is the well-known sandbox.Metadata key under
+// which the orchestrator stashes the target branch (e.g. "main") for the
+// session — the branch the working branch will be PR'd into. sessiondiff.Collect
+// uses it to compute a dynamic merge-base diff (`origin/<target>...HEAD`) so
+// integrating the target branch back into the working branch (e.g.
+// `git pull origin main` or merging main to resolve PR conflicts) does not
+// inflate the diff with target-branch changes. Falls back to the immutable
+// base_commit_sha when missing or when the merge-base resolution fails.
+const SandboxMetadataTargetBranch = "target_branch"
+
 // SandboxConnectionInfo holds provider-specific connection details for local resume.
 type SandboxConnectionInfo struct {
 	Provider     string            // "docker" or "e2b"
