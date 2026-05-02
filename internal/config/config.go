@@ -164,6 +164,20 @@ type Config struct {
 	// lower value and logs a warning.
 	SessionMaxRunningAge time.Duration `env:"SESSION_MAX_RUNNING_AGE" envDefault:"150m"`
 
+	// SessionFilesCacheDir is where the file-context API stages extracted
+	// session workspace snapshots when a session's sandbox container has
+	// already been torn down. The first read for a given snapshot pays a
+	// download + extract; subsequent reads serve straight off this dir.
+	// Empty disables the snapshot fallback (file-context returns NO_SANDBOX
+	// the moment the container is gone, which is the pre-Phase-6 behavior).
+	SessionFilesCacheDir string `env:"SESSION_FILES_CACHE_DIR" envDefault:".data/session-files-cache"`
+
+	// SessionFilesCacheMaxBytes is the soft cap for the on-disk LRU. When
+	// total extracted bytes exceed this, the oldest entries are evicted.
+	// 5 GiB by default; raise on hosts that review many sessions in
+	// parallel and have spare disk.
+	SessionFilesCacheMaxBytes int64 `env:"SESSION_FILES_CACHE_MAX_BYTES" envDefault:"5368709120"`
+
 	// Preview system
 	ChromeWSURL             string `env:"CHROME_WS_URL"`                                                            // e.g. "ws://chrome:9222"
 	PreviewOriginTemplate   string `env:"PREVIEW_ORIGIN_TEMPLATE"  envDefault:"http://{id}.preview.localhost:9090"` // {id} replaced with preview ID

@@ -38,6 +38,7 @@ import (
 	"github.com/assembledhq/143/internal/services/sandbox"
 	"github.com/assembledhq/143/internal/services/storage"
 	threadservice "github.com/assembledhq/143/internal/services/thread"
+	"github.com/assembledhq/143/internal/services/workspace"
 )
 
 func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, sentryReporter observability.Reporter, codexAuthSvc *codexauth.Service, claudeCodeAuthSvc *claudecodeauth.Service, llmClient llm.Client, fileReader sandbox.FileReader, canceller handlers.SessionCanceller, previewProvider preview.PreviewCapableProvider, snapshotExecutor preview.SnapshotExecutor, sandboxProvider agent.SandboxProvider, snapshotStore storage.SnapshotStore, orgSettingsInvalidator handlers.OrgSettingsInvalidator, shutdownCh <-chan struct{}, redisClient *cache.Client, sessionStreams *cache.SessionStreams) (*chi.Mux, *http.Server, *preview.RecycleWorker, io.Closer, *preview.Manager, error) {
@@ -361,7 +362,20 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	sessionReviewCommentHandler := handlers.NewSessionReviewCommentHandler(sessionReviewCommentStore, sessionStore, logger)
 	sessionReviewCommentHandler.SetAuditEmitter(auditEmitter)
 	sessionReviewCommentHandler.SetMessageAndJobStores(sessionMessageStore, jobStore)
-	sessionFileHandler := handlers.NewSessionFileHandler(sessionStore, fileReader, logger)
+	// Initialize the session-files snapshot cache so that file-context reads
+	// keep working after the live container is torn down. The cache is
+	// best-effort: a build error here is logged and the handler falls back
+	// to its pre-Phase-6 behavior (NO_SANDBOX once the container is gone).
+	var sessionFilesSnapshotCache *workspace.SnapshotCache
+	if snapshotStore != nil && cfg.SessionFilesCacheDir != "" {
+		sc, scErr := workspace.NewSnapshotCache(snapshotStore, cfg.SessionFilesCacheDir, cfg.SessionFilesCacheMaxBytes, logger)
+		if scErr != nil {
+			logger.Warn().Err(scErr).Str("cache_dir", cfg.SessionFilesCacheDir).Msg("failed to initialize session-files snapshot cache — snapshot fallback disabled")
+		} else {
+			sessionFilesSnapshotCache = sc
+		}
+	}
+	sessionFileHandler := handlers.NewSessionFileHandler(sessionStore, repoStore, fileReader, sessionFilesSnapshotCache, logger)
 
 	// Preview system: inspector, snapshot cache, HMR watcher, manager, recycler, gateway.
 	var previewInspector preview.PreviewInspector

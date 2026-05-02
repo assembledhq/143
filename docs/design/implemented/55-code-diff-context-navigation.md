@@ -1,8 +1,10 @@
 # Design: Accurate, Navigable Session Diffs
 
-> **Status:** Implemented | **Last reviewed:** 2026-04-22
+> **Status:** Implemented | **Last reviewed:** 2026-05-01
 
 > Unifies two gaps in the current review surface: GitHub-style movement through surrounding file context and diff snapshots that are explicitly tied to the immutable branch basis for the session.
+>
+> Phases 1–3 and Phase 6 are live. Phases 4–5 (richer diff-endpoint metadata, JSONB cleanup, and review-surface polish) are tracked below as deferred follow-ups — none of them gate a functioning feature; they are parked here so future work does not have to rediscover them. When neither a live container nor a usable snapshot is available, the diff still falls back to disabled expanders with explicit "Additional file context unavailable for this session" copy.
 
 ## Problem
 
@@ -83,7 +85,7 @@ Current limitations:
 - Replacing the repo explorer.
 - Rendering entire large files by default.
 - Building a full editor with arbitrary scrolling through unchanged files.
-- Rehydrating or recreating expired session sandboxes purely to support context expansion.
+- Rehydrating or recreating expired session sandbox containers purely to support context expansion. Reading directly from the persisted workspace snapshot tar without a container is in scope (Phase 6).
 - Running a live `git diff` on every diff page render.
 - Reworking PR creation away from snapshot-backed workspace pushes.
 
@@ -113,7 +115,9 @@ Expected behavior:
 - After expanding part of a gap, keep controls visible until the gap is fully revealed.
 - Expanded context lines should render exactly like existing context lines in unified and split views, including line numbers and comment affordances.
 - Session detail should be able to expose, at minimum, the diff capture timestamp and the immutable base commit used to compute the cached patch.
-- If a session has no live sandbox or restorable snapshot, the diff should still render from cached patch data, provenance metadata should still be shown, and context expanders should render in a disabled state with explicit copy such as `Additional file context unavailable for this session`.
+- If a session has a live sandbox, file context should be served from the container as today.
+- If a session has no live sandbox but still has a stored workspace snapshot, file context should be served from the snapshot (see Phase 6). The reviewer should not be able to tell the difference apart from a small first-read latency for cold snapshots.
+- Only when a session has neither a live sandbox nor a usable snapshot should the diff fall back to cached patch data alone, with provenance metadata still shown and context expanders rendered in a disabled state with explicit copy such as `Additional file context unavailable for this session`.
 
 ## Recommended Technical Design
 
@@ -343,6 +347,45 @@ What should change over time is the abstraction boundary:
 - eventually move PR-side snapshot restore behind a higher-level workspace resolver rather than letting PR code own raw snapshot semantics
 - ensure both review diffs and PR pushes point back to the same immutable `base_commit_sha`
 
+### 10. Snapshot-backed file context when no container is alive
+
+The current file-context endpoint requires a live Docker container, which means the moment a session finishes and its sandbox is torn down, `Show 20 above` / `Show 20 below` stop working — even though the workspace state is already persisted as a snapshot tar in object storage and PR creation already reads from it. Reviewing a completed session is the most common reason to expand context, so this is the worst possible failure mode.
+
+GitHub does not run a sandbox to serve `Show more` clicks. It reads from a stored artifact (git objects). We should follow the same shape: read from the artifact we already have (`session.snapshot_key`), without rehydrating any container.
+
+Recommended shape:
+
+- Introduce a `WorkspaceReader` interface in `internal/services/sandbox/` (or a new `internal/services/workspace/` package) with a method comparable to today's `ReadFileContext(ctx, sessionID, path, line, above, below) (FileContextResult, error)`.
+- Two implementations:
+  - `liveContainerReader` — wraps the existing `sandbox.FileReader` Docker exec path.
+  - `snapshotReader` — fetches the session's snapshot tar from `storage.SnapshotStore.Load`, locates the entry at `<workdir>/<path>`, slices the requested line range, and computes `total_lines`, `has_more_above`, `has_more_below` from the file content.
+- `SessionFileHandler.GetFileContext` selection order:
+  1. live container (`session.ContainerID != nil`) → existing fast path
+  2. otherwise, persisted snapshot (`session.SnapshotKey != nil`) → snapshot reader
+  3. otherwise, return the existing `NO_SANDBOX` error so the disabled-expander UI still kicks in
+
+Caching:
+
+- The snapshot tar is immutable once a session's snapshot is finalized, so the read path can safely cache.
+- Recommended cache shape: extract the tar to a host-local LRU directory keyed by `snapshot_key` on first read, then serve subsequent reads of the same session as ordinary local-disk file reads.
+- Cap the cache by total disk size with simple LRU eviction. The cache is purely a performance accelerator; correctness must not depend on its presence.
+
+Cold-path latency:
+
+- First read after sandbox teardown pays a tar fetch from object storage. For typical session workspaces this is in the few-hundred-millisecond range, which is acceptable for a discrete user action like "Show 20 above".
+- Hot reads (same session, same or different file) are local-disk fast.
+
+Path safety:
+
+- Reuse the existing `validatePath` helper for query input.
+- Add a tar-entry whitelist that rejects absolute paths, `..` traversal, symlinks pointing outside the workdir, and entries above a per-file size cap. The container path already does the analogous checks via `resolvePathInWorkDir`; the snapshot path needs its own equivalent because tar archives can contain hostile entries.
+
+Out of scope for this section:
+
+- Rehydrating a Docker container for a completed session (still a non-goal).
+- Pushing every session's workspace to a git remote so that file content can be read via `git show` (the GitHub-style approach). That is a stronger model — it also gives blame and stable permalinks — but it is significantly bigger infra work, and our current snapshot already contains everything we need for read-only file navigation. Revisit if PR-style permalinks become a separate goal.
+- Backfilling snapshots for historical sessions that completed before snapshot-backed PR creation shipped. Those will keep the disabled-expander UX.
+
 ## Phased Plan
 
 ### Phase 1: Establish accurate cached diff provenance
@@ -396,7 +439,9 @@ Backend changes:
 - Extend the context API with range metadata or total line count.
 - Add handler and file reader tests for the new response fields.
 
-### Phase 4: Rich diff metadata and cleanup
+### Phase 4 (Deferred): Rich diff metadata and cleanup
+
+> **Status:** deferred — not required for a functioning feature. The data layer for this work is already in place (Phase 1 dual-writes to `session_diff_snapshots`); what is missing is a dedicated endpoint that surfaces it, a read-path migration off `diff_history` JSONB, and an abstraction cleanup. Cleared out of the critical path; documented here only so the cleanup is not forgotten if a future change makes it newly worthwhile.
 
 Scope:
 
@@ -424,7 +469,9 @@ Recommended response shape:
 }
 ```
 
-### Phase 5: Polish and scale
+### Phase 5 (Deferred): Polish and scale
+
+> **Status:** deferred — opportunistic polish, not required for a functioning feature. Pulled out of the critical path; left here as a parking spot for ideas worth picking up if reviewer load or large-file behavior justifies them.
 
 Scope:
 
@@ -438,6 +485,38 @@ Possible optimizations:
 - Highlight expanded lines in a subtler style than changed lines.
 - Add analytics for expansion usage to validate reviewer demand.
 - Optionally support explicit diff refresh for sessions with a live container.
+
+### Phase 6: Snapshot-backed file context for sessions without a live container
+
+Scope:
+
+- Stop returning `NO_SANDBOX` for any session that still has a usable workspace snapshot.
+- Serve `Show 20 above`, `Show 20 below`, and `Show all` from the persisted snapshot tar without restoring a Docker container.
+- Preserve today's behavior for sessions that have a live container (no regression on the hot path) and for sessions that have neither a container nor a snapshot (continue to render the disabled expander UI).
+
+Backend changes:
+
+- Introduce the `WorkspaceReader` interface and the two implementations described in technical design section 10.
+- Update `SessionFileHandler.GetFileContext` (and `GetFileContent` / `ListFiles` if we want symmetric coverage) to select between live and snapshot readers using `session.ContainerID` and `session.SnapshotKey`.
+- Add a host-side LRU cache for extracted snapshots, keyed by `snapshot_key`, with a configurable disk cap.
+- Add path-safety validation specific to tar entries (reject absolute paths, `..`, symlinks escaping the workdir, oversize entries).
+- Add a metric or log for "snapshot reader fallback used" so we can see how often live vs. snapshot reads happen and how often neither is available.
+
+Frontend changes:
+
+- None required for the happy path — the existing `getFileContext` API contract is unchanged.
+- Optional: stop eagerly flipping `contextUnavailable` after the very first 409, since most sessions will succeed via the snapshot reader. The lifted state we shipped in PR #679 still applies as the terminal fallback.
+
+Open questions:
+
+- Should the snapshot reader populate `is_live: false` (or a similar flag) on the response so the UI can subtly indicate "this content is from the saved workspace, not a live filesystem"? Probably yes once Phase 4 lands a richer response shape; not required for Phase 6 itself.
+- Does `ListFiles` (the repo explorer) deserve the same fallback? That gives reviewers a full read-only file tree of a finished session, which is high-value but also a bigger surface area. Defer until Phase 6 is in production for context expansion.
+
+Out of scope:
+
+- Rehydrating a sandbox container.
+- Pushing session state to a git remote so file content can be read via git plumbing (revisit if we want permalinks, blame, or external sharing).
+- Backfilling snapshots for sessions that finished before snapshot-backed PR creation shipped — those continue to fall through to the disabled-expander UI.
 
 ## Testing Requirements
 
@@ -467,7 +546,9 @@ Backend:
 - file-reader tests for start-of-file and end-of-file ranges
 - tests for very small files, large requested windows, and sessions where context expansion is unavailable because no sandbox can be read
 
-### Phase 4-5 ownership
+### Phase 4-5 ownership (deferred)
+
+Listed for future reference; no current owner. If the deferred work is picked back up:
 
 Backend:
 
@@ -478,6 +559,20 @@ Frontend:
 
 - tests for provenance metadata display
 - tests for disabled expander UX when only cached diff data is available
+
+### Phase 6 ownership
+
+Backend:
+
+- `snapshotReader` unit tests covering: a file at the requested line range, requests near start-of-file and end-of-file, requests beyond `total_lines`, missing files, and missing snapshots.
+- tar-safety tests: absolute paths, `..` traversal, symlinks pointing outside the workdir, oversize entries, and empty archives.
+- handler integration tests for `GetFileContext` selection order: live container present → live path; container gone but snapshot present → snapshot path; neither → `NO_SANDBOX`.
+- LRU cache tests covering eviction, concurrent reads of the same `snapshot_key`, and corrupted-cache recovery (cache corruption should not surface as a 500; the reader should re-fetch from object storage).
+
+Frontend:
+
+- regression tests confirming that a successful response served by the snapshot reader is rendered identically to a live-container response.
+- the existing `contextUnavailable` UX continues to work when the backend returns `NO_SANDBOX` (sessions with neither container nor snapshot).
 
 ## Risks
 
@@ -493,6 +588,22 @@ The current API cannot confidently tell the UI how much unchanged content remain
 
 It is tempting to keep patching `expandedGaps`, but that will make top/bottom support and repeated expansion brittle. This feature is the point where the diff renderer should adopt an explicit gap model.
 
+### 4. Snapshot reads can be slow on cold paths
+
+The first `Show 20 above` after a sandbox tear-down requires a tar fetch from object storage. For unusually large workspaces or remote object stores with high latency this can be visibly slower than a live read. Mitigations: per-snapshot LRU on host disk, prefetch on diff-page load, and a clear loading state. Watch for tail latency metrics after Phase 6 ships.
+
+### 5. Hostile tar entries
+
+Snapshots are produced by our own pipeline today, but the snapshot reader should still treat tar contents as untrusted input. A bug in the agent loop or a malicious workspace could write a tarball with absolute paths, `..` traversal, or oversized files. The path-safety checks in Phase 6 must run before any host-side filesystem write.
+
+### 6. Snapshot drift from cached diff
+
+The cached `sessions.diff` and the snapshot are written at slightly different points in the session lifecycle. If they disagree (e.g., the diff was captured at turn N and the snapshot at turn N+1), expanded context could show lines that don't match the diff hunks. Once Phase 1 lands and the snapshot has an explicit `head_commit_sha`, the snapshot reader should validate that the diff and the snapshot share a head commit, and fall back to disabled-expander UX if they drift.
+
+### 7. Snapshot prefix drift on repo rename
+
+The Phase 6 handler computes the in-tar workspace prefix from the *current* `repo.FullName` → `slug`. If a repository is renamed or transferred between snapshot capture and review, the recomputed slug no longer matches the prefix that was actually written into the tar, so `ListDir` / `ReadFileContext` surface FILE_NOT_FOUND even though the data is present at the legacy prefix. Phase 1 should store the in-tar prefix alongside `snapshot_key` on the session row so the reader uses the prefix that was actually written, not one inferred at read time. Until then, renames are rare enough that the failure mode (disabled-expander UI for renamed repos' historical sessions) is acceptable.
+
 ## Recommendation
 
 Build this as a targeted refactor of `FileDiffSection` and `ContextExpander`, not as a brand-new diff renderer.
@@ -504,4 +615,5 @@ The lowest-risk sequence is:
 1. Establish accurate cached diff provenance first so the review surface has one authoritative diff contract before new navigation behavior is layered on top.
 2. Rework middle-gap expansion to be directional and repeatable against that stable cached diff.
 3. Add top and bottom gaps with metadata support.
-4. Migrate richer metadata and cleanup paths after both provenance and navigation are stable.
+4. Add the snapshot-backed file-context reader (Phase 6) so that a session's review surface keeps working after its sandbox container is torn down — the most common state for a session under review.
+5. (Deferred) Migrate richer metadata, JSONB read paths, and reviewer polish later if the surface justifies it.
