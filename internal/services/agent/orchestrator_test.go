@@ -2178,6 +2178,70 @@ func TestRunAgent_CapturesAndPersistsBaseCommitSHA(t *testing.T) {
 	require.Equal(t, "abc123", *run.BaseCommitSHA, "RunAgent should store the captured base commit sha on the session")
 }
 
+func TestRunAgent_PersistsDiffHeadCommitSHAOnResult(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	run := testRun(orgID, issue.ID)
+
+	d := defaultDeps()
+	headCalls := 0
+	d.provider.ExecFn = func(ctx context.Context, sb *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
+		if cmd == "git rev-parse HEAD" {
+			headCalls++
+			if headCalls == 1 {
+				_, _ = io.WriteString(stdout, "base123\n")
+			} else {
+				_, _ = io.WriteString(stdout, "result456\n")
+			}
+		}
+		return 0, nil
+	}
+
+	err := buildOrchestrator(d).RunAgent(context.Background(), run)
+	require.NoError(t, err, "RunAgent should succeed")
+
+	results := d.sessions.getResultUpdates()
+	require.NotEmpty(t, results, "RunAgent should persist a final result update")
+	last := results[len(results)-1]
+	require.NotNil(t, last.result.DiffHeadCommitSHA, "RunAgent should persist the session HEAD SHA alongside the diff result")
+	require.Equal(t, "result456", *last.result.DiffHeadCommitSHA, "RunAgent should store the latest session HEAD SHA, not the initial base commit SHA")
+}
+
+func TestRunAgent_PersistsDiffWorkspaceDirtyOnResult(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	run := testRun(orgID, issue.ID)
+
+	d := defaultDeps()
+	headCalls := 0
+	d.provider.ExecFn = func(ctx context.Context, sb *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
+		switch cmd {
+		case "git rev-parse HEAD":
+			headCalls++
+			if headCalls == 1 {
+				_, _ = io.WriteString(stdout, "base123\n")
+			} else {
+				_, _ = io.WriteString(stdout, "result456\n")
+			}
+		case "git status --porcelain --untracked-files=all -- .":
+			_, _ = io.WriteString(stdout, " M app.go\n")
+		}
+		return 0, nil
+	}
+
+	err := buildOrchestrator(d).RunAgent(context.Background(), run)
+	require.NoError(t, err, "RunAgent should succeed")
+
+	results := d.sessions.getResultUpdates()
+	require.NotEmpty(t, results, "RunAgent should persist a final result update")
+	last := results[len(results)-1]
+	require.True(t, last.result.DiffWorkspaceDirty, "RunAgent should persist whether the session workspace still had uncommitted changes")
+}
+
 func TestRunAgent_UsesDesignatedWorkingBranchForSandboxAndSession(t *testing.T) {
 	t.Parallel()
 

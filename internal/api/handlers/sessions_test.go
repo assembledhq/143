@@ -157,6 +157,7 @@ var sessionColumns = []string{
 	"checkpointed_at", "checkpoint_kind", "checkpoint_capability", "checkpoint_size_bytes", "checkpoint_error",
 	"recovery_state", "recovery_queued_at", "recovery_started_at", "recovery_attempt_count",
 	"target_branch", "working_branch", "base_commit_sha", "repository_id", "diff_stats", "diff_history", "input_manifest", "archived_at", "archived_by_user_id", "automation_run_id", "pr_creation_state", "pr_creation_error", "pr_push_state", "pr_push_error", "diff_collected_at", "latest_diff_snapshot_id",
+	"has_unpushed_changes",
 	"linear_private", "linear_state_sync_disabled", "linear_identifier_hint", "linear_prepare_state",
 	"deleted_at", "git_identity_source", "git_identity_user_id", "created_at",
 }
@@ -235,20 +236,22 @@ const (
 func TestPreLinearSessionColumnsLenStaysInSync(t *testing.T) {
 	t.Parallel()
 	const pendingSnapshotFieldsAdded = 2
+	const unpushedChangesFieldAdded = 1
 	const linearFieldsAdded = 4
 	const identityFieldsAdded = 2
 	const prPushFieldsAdded = 2
-	require.Equal(t, preLinearSessionColumnsLen+pendingSnapshotFieldsAdded+linearFieldsAdded+identityFieldsAdded+prPushFieldsAdded, len(sessionColumns),
+	require.Equal(t, preLinearSessionColumnsLen+pendingSnapshotFieldsAdded+unpushedChangesFieldAdded+linearFieldsAdded+identityFieldsAdded+prPushFieldsAdded, len(sessionColumns),
 		"sessionColumns shifted; bump preLinearSessionColumnsLen, pendingSnapshotFieldsAdded, "+
-			"linearFieldsAdded, identityFieldsAdded, or prPushFieldsAdded if a new migration added more session columns")
+			"unpushedChangesFieldAdded, linearFieldsAdded, identityFieldsAdded, or prPushFieldsAdded if a new migration added more session columns")
 }
 
-// linearSessionDefaults returns the placeholder values for the four
-// linear_* columns inserted by migration 103. Test rows that don't pass
+// linearSessionDefaults returns the placeholder values for the derived
+// has_unpushed_changes field plus the four linear_* columns. Test rows that don't pass
 // values for these get them auto-padded by sessionTestRow (one of the
 // length-difference cases below).
 func linearSessionDefaults() []interface{} {
 	return []interface{}{
+		false,                                 // has_unpushed_changes
 		false,                                 // linear_private
 		false,                                 // linear_state_sync_disabled
 		(*string)(nil),                        // linear_identifier_hint
@@ -256,7 +259,7 @@ func linearSessionDefaults() []interface{} {
 	}
 }
 
-// padLinearFields injects the four linear_* defaults at the position right
+// padLinearFields injects has_unpushed_changes plus the linear_* defaults at the position right
 // before the trailing deleted_at/created_at columns when the row was built
 // without them. Called from sessionTestRow on each row regardless of the
 // branch that resolved its prior shape. Runs before padSessionIdentityColumns,
@@ -269,7 +272,7 @@ func padLinearFields(values []interface{}) []interface{} {
 		return values
 	}
 	insertAt := len(values) - 2 // before deleted_at, created_at
-	row := make([]interface{}, 0, len(values)+4)
+	row := make([]interface{}, 0, len(values)+5)
 	row = append(row, values[:insertAt]...)
 	row = append(row, linearSessionDefaults()...)
 	row = append(row, values[insertAt:]...)
@@ -7334,6 +7337,7 @@ func pushSessionRow(sessionID, issueID, orgID uuid.UUID, now time.Time, opts pus
 		"pr_push_error":                  (*string)(nil),
 		"diff_collected_at":              nil,
 		"latest_diff_snapshot_id":        nil,
+		"has_unpushed_changes":           false,
 		"linear_private":                 false,
 		"linear_state_sync_disabled":     false,
 		"linear_identifier_hint":         (*string)(nil),

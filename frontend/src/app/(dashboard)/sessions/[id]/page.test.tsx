@@ -1742,6 +1742,54 @@ describe('SessionDetailPage', () => {
     });
   });
 
+  it('shows Push changes only when the session has unpushed changes', async () => {
+    const sessionWithUnpushedChanges: Session = {
+      ...mockSessions[0],
+      status: 'completed',
+      diff: '--- a/file.ts\n+++ b/file.ts\n@@ -1 +1 @@\n-old\n+new',
+      diff_stats: { added: 1, removed: 1, files_changed: 1 },
+      snapshot_key: 'snap-abc',
+      has_unpushed_changes: true,
+      pr_push_state: 'idle',
+    };
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({ data: sessionWithUnpushedChanges } satisfies SingleResponse<Session>);
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+    await screen.findAllByText('Fixed TypeError by adding null check');
+
+    expect(await screen.findByRole('button', { name: 'Push changes' })).toBeInTheDocument();
+  });
+
+  it('hides Push changes when the PR already matches the latest session head', async () => {
+    const sessionWithoutUnpushedChanges: Session = {
+      ...mockSessions[0],
+      status: 'completed',
+      diff: '--- a/file.ts\n+++ b/file.ts\n@@ -1 +1 @@\n-old\n+new',
+      diff_stats: { added: 1, removed: 1, files_changed: 1 },
+      snapshot_key: 'snap-abc',
+      has_unpushed_changes: false,
+      pr_push_state: 'idle',
+    };
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({ data: sessionWithoutUnpushedChanges } satisfies SingleResponse<Session>);
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+    await screen.findAllByText('Fixed TypeError by adding null check');
+
+    await waitFor(() => {
+      expect(screen.queryByRole('button', { name: 'Push changes' })).not.toBeInTheDocument();
+    });
+  });
+
   it('does not show a PR snapshot error when the PR already exists', async () => {
     const sessionWithStalePRError: Session = {
       ...mockSessions[0],
@@ -2363,6 +2411,7 @@ describe('SessionDetailPage', () => {
       diff_stats: { added: 1, removed: 1, files_changed: 1 },
       snapshot_key: 'snap-abc',
       pr_creation_state: 'succeeded',
+      has_unpushed_changes: true,
       pr_push_state: 'idle',
     };
 

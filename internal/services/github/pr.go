@@ -602,6 +602,9 @@ func (s *PRService) CreatePR(ctx context.Context, run *models.Session, params ..
 	if err := s.pullRequests.Create(ctx, pr); err != nil {
 		return nil, fmt.Errorf("store pull request: %w", err)
 	}
+	if err := s.sessions.MarkLatestDiffSnapshotPushed(ctx, run.OrgID, run.ID, headSHA); err != nil {
+		s.logger.Warn().Err(err).Str("session_id", run.ID.String()).Msg("failed to mark latest diff snapshot as pushed after PR creation")
+	}
 
 	// Record the pending snapshot, then dispatch the upload. If capture
 	// failed in pushSessionBranch the path is empty — log and skip the
@@ -787,6 +790,9 @@ func (s *PRService) PushChangesToPR(ctx context.Context, run *models.Session, pa
 
 	if err := s.pullRequests.UpdateHeadSHA(ctx, run.OrgID, pr.ID, pushed.HeadSHA); err != nil {
 		return nil, fmt.Errorf("update pull request head sha: %w", err)
+	}
+	if err := s.sessions.MarkLatestDiffSnapshotPushed(ctx, run.OrgID, run.ID, pushed.HeadSHA); err != nil {
+		s.logger.Warn().Err(err).Str("session_id", run.ID.String()).Msg("failed to mark latest diff snapshot as pushed after PR push")
 	}
 	pr.HeadSHA = &pushed.HeadSHA
 	s.enqueuePullRequestStateSync(ctx, pr)

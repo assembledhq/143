@@ -108,6 +108,25 @@ const sessionPrimaryIssueIDColumn = `(SELECT sil.issue_id
 		WHERE sil.org_id = sessions.org_id AND sil.session_id = sessions.id AND sil.role = 'primary'
 		LIMIT 1) AS primary_issue_id`
 
+// hasUnpushedChangesColumn derives whether the session's latest persisted diff
+// snapshot still contains content not represented on the open PR branch. A
+// snapshot is considered pushable when it either captured a dirty worktree or
+// its recorded HEAD differs from the PR head SHA.
+const hasUnpushedChangesColumn = `EXISTS (
+		SELECT 1
+		FROM pull_requests pr
+		JOIN session_diff_snapshots sds
+		  ON sds.id = sessions.latest_diff_snapshot_id
+		 AND sds.org_id = sessions.org_id
+		WHERE pr.session_id = sessions.id
+		  AND pr.org_id = sessions.org_id
+		  AND pr.status = 'open'
+		  AND (
+		    sds.workspace_dirty
+		    OR (sds.head_commit_sha IS NOT NULL AND sds.head_commit_sha IS DISTINCT FROM pr.head_sha)
+		  )
+	) AS has_unpushed_changes`
+
 // sessionSelectColumns is used for single-session queries where we want all fields.
 const sessionSelectColumns = `id,
 	` + sessionPrimaryIssueIDColumn + `,
@@ -124,6 +143,7 @@ const sessionSelectColumns = `id,
 	checkpointed_at, checkpoint_kind, checkpoint_capability, checkpoint_size_bytes, checkpoint_error,
 	recovery_state, recovery_queued_at, recovery_started_at, recovery_attempt_count,
 	target_branch, working_branch, base_commit_sha, repository_id, diff_stats, diff_history, input_manifest, archived_at, archived_by_user_id, automation_run_id, pr_creation_state, pr_creation_error, pr_push_state, pr_push_error, diff_collected_at, latest_diff_snapshot_id,
+	` + hasUnpushedChangesColumn + `,
 	linear_private, linear_state_sync_disabled, linear_identifier_hint, linear_prepare_state,
 	deleted_at, git_identity_source, git_identity_user_id, created_at`
 
@@ -144,6 +164,7 @@ const sessionListColumns = `id,
 	checkpointed_at, checkpoint_kind, checkpoint_capability, checkpoint_size_bytes, checkpoint_error,
 	recovery_state, recovery_queued_at, recovery_started_at, recovery_attempt_count,
 	target_branch, working_branch, base_commit_sha, repository_id, diff_stats, NULL::jsonb AS diff_history, input_manifest, archived_at, archived_by_user_id, automation_run_id, pr_creation_state, pr_creation_error, pr_push_state, pr_push_error, diff_collected_at, latest_diff_snapshot_id,
+	` + hasUnpushedChangesColumn + `,
 	linear_private, linear_state_sync_disabled, linear_identifier_hint, linear_prepare_state,
 	deleted_at, git_identity_source, git_identity_user_id, created_at`
 
@@ -1267,12 +1288,12 @@ func (s *SessionStore) writeDiffSnapshot(ctx context.Context, db DBTX, orgID, se
 	insertQuery := `
 		INSERT INTO session_diff_snapshots (
 			session_id, org_id, turn_number, sequence_number, source,
-			base_commit_sha, head_commit_sha, working_branch, target_branch, diff,
+			base_commit_sha, head_commit_sha, workspace_dirty, working_branch, target_branch, diff,
 			files_changed, lines_added, lines_removed, captured_at
 		)
 		SELECT
 			@session_id, @org_id, @turn_number, 1, @source,
-			@base_commit_sha, @head_commit_sha, working_branch, target_branch, @diff,
+			@base_commit_sha, @head_commit_sha, @workspace_dirty, working_branch, target_branch, @diff,
 			@files_changed, @lines_added, @lines_removed, @captured_at
 		FROM sessions
 		WHERE id = @session_id AND org_id = @org_id
@@ -1285,6 +1306,7 @@ func (s *SessionStore) writeDiffSnapshot(ctx context.Context, db DBTX, orgID, se
 		"source":          source,
 		"base_commit_sha": *result.DiffBaseCommitSHA,
 		"head_commit_sha": result.DiffHeadCommitSHA,
+		"workspace_dirty": result.DiffWorkspaceDirty,
 		"diff":            *result.Diff,
 		"files_changed":   stats.FilesChanged,
 		"lines_added":     stats.Added,
@@ -1310,6 +1332,30 @@ func (s *SessionStore) writeDiffSnapshot(ctx context.Context, db DBTX, orgID, se
 		return fmt.Errorf("update session latest diff snapshot: %w", err)
 	}
 	return nil
+}
+
+// MarkLatestDiffSnapshotPushed normalizes the latest persisted diff snapshot
+// after a successful PR create/push so the read-model no longer treats that
+// snapshot as pending local work. This updates both the recorded head commit
+// and the dirty-worktree bit because the push flow stages/commits any
+// uncommitted changes before pushing.
+func (s *SessionStore) MarkLatestDiffSnapshotPushed(ctx context.Context, orgID, sessionID uuid.UUID, pushedHeadSHA string) error {
+	_, err := s.db.Exec(ctx, `
+		UPDATE session_diff_snapshots
+		SET head_commit_sha = @head_commit_sha,
+		    workspace_dirty = FALSE
+		WHERE id = (
+			SELECT latest_diff_snapshot_id
+			FROM sessions
+			WHERE id = @id AND org_id = @org_id
+		)
+		  AND org_id = @org_id
+	`, pgx.NamedArgs{
+		"id":              sessionID,
+		"org_id":          orgID,
+		"head_commit_sha": pushedHeadSHA,
+	})
+	return err
 }
 
 func (s *SessionStore) UpdateBaseCommitSHA(ctx context.Context, orgID, sessionID uuid.UUID, baseCommitSHA string) error {

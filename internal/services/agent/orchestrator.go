@@ -1560,7 +1560,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 	}
 
 	// Store the successful result.
-	runResult := o.buildRunResult(run, result)
+	runResult := o.buildRunResult(ctx, run, sandbox, result)
 	status := "completed"
 	isInteractive := run.IsInteractive() && snapshotKey != ""
 
@@ -2417,7 +2417,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	if snapshotKey == "" && session.SnapshotKey != nil {
 		snapshotKey = *session.SnapshotKey
 	}
-	if err := o.sessions.UpdateTurnComplete(ctx, session.OrgID, session.ID, turnNumber, o.buildRunResult(session, result), agentSessionID, snapshotKey); err != nil {
+	if err := o.sessions.UpdateTurnComplete(ctx, session.OrgID, session.ID, turnNumber, o.buildRunResult(ctx, session, sandbox, result), agentSessionID, snapshotKey); err != nil {
 		return fmt.Errorf("update turn complete: %w", err)
 	}
 
@@ -2887,12 +2887,15 @@ func (o *Orchestrator) ensureCodexAuth(ctx context.Context, run *models.Session,
 }
 
 // buildRunResult converts an AgentResult into the DB update struct.
-func (o *Orchestrator) buildRunResult(run *models.Session, result *AgentResult) *models.SessionResult {
+func (o *Orchestrator) buildRunResult(ctx context.Context, run *models.Session, sandbox *Sandbox, result *AgentResult) *models.SessionResult {
 	tokenUsage, err := json.Marshal(result.TokenUsage)
 	if err != nil {
 		o.logger.Warn().Err(err).Msg("failed to marshal token usage")
 		tokenUsage = nil
 	}
+
+	headSHA := o.captureCurrentHeadSHA(ctx, sandbox)
+	workspaceDirty := o.captureWorkspaceDirty(ctx, sandbox)
 
 	return &models.SessionResult{
 		ConfidenceScore:     &result.ConfidenceScore,
@@ -2903,9 +2906,49 @@ func (o *Orchestrator) buildRunResult(run *models.Session, result *AgentResult) 
 		Diff:                strPtr(result.Diff),
 		Error:               strPtr(result.Error),
 		DiffBaseCommitSHA:   run.BaseCommitSHA,
+		DiffHeadCommitSHA:   headSHA,
+		DiffWorkspaceDirty:  workspaceDirty,
 		DiffCollectedAt:     timePtr(time.Now().UTC()),
 		DiffSource:          "turn_complete",
 	}
+}
+
+func (o *Orchestrator) captureCurrentHeadSHA(ctx context.Context, sandbox *Sandbox) *string {
+	if sandbox == nil {
+		return nil
+	}
+	var stdout, stderr bytes.Buffer
+	exitCode, err := o.provider.Exec(ctx, sandbox, "git rev-parse HEAD", &stdout, &stderr)
+	if err != nil {
+		o.logger.Warn().Err(err).Msg("failed to capture current head sha")
+		return nil
+	}
+	if exitCode != 0 {
+		o.logger.Warn().Int("exit_code", exitCode).Str("stderr", stderr.String()).Msg("failed to capture current head sha")
+		return nil
+	}
+	headSHA := strings.TrimSpace(stdout.String())
+	if headSHA == "" {
+		return nil
+	}
+	return &headSHA
+}
+
+func (o *Orchestrator) captureWorkspaceDirty(ctx context.Context, sandbox *Sandbox) bool {
+	if sandbox == nil {
+		return false
+	}
+	var stdout, stderr bytes.Buffer
+	exitCode, err := o.provider.Exec(ctx, sandbox, "git status --porcelain --untracked-files=all -- .", &stdout, &stderr)
+	if err != nil {
+		o.logger.Warn().Err(err).Msg("failed to capture workspace dirty state")
+		return false
+	}
+	if exitCode != 0 {
+		o.logger.Warn().Int("exit_code", exitCode).Str("stderr", stderr.String()).Msg("failed to capture workspace dirty state")
+		return false
+	}
+	return strings.TrimSpace(stdout.String()) != ""
 }
 
 func (o *Orchestrator) captureBaseCommitSHA(ctx context.Context, sandbox *Sandbox) (string, error) {

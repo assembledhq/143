@@ -35,6 +35,7 @@ var sessionTestColumns = []string{
 	"checkpointed_at", "checkpoint_kind", "checkpoint_capability", "checkpoint_size_bytes", "checkpoint_error",
 	"recovery_state", "recovery_queued_at", "recovery_started_at", "recovery_attempt_count",
 	"target_branch", "working_branch", "base_commit_sha", "repository_id", "diff_stats", "diff_history", "input_manifest", "archived_at", "archived_by_user_id", "automation_run_id", "pr_creation_state", "pr_creation_error", "pr_push_state", "pr_push_error", "diff_collected_at", "latest_diff_snapshot_id",
+	"has_unpushed_changes",
 	"linear_private", "linear_state_sync_disabled", "linear_identifier_hint", "linear_prepare_state",
 	"deleted_at", "git_identity_source", "git_identity_user_id", "created_at",
 }
@@ -96,6 +97,7 @@ func newAgentSessionRow(sessionID, issueID, orgID uuid.UUID, now time.Time) []in
 		(*string)(nil), // pr_push_error
 		nil,            // diff_collected_at
 		nil,            // latest_diff_snapshot_id
+		false,          // has_unpushed_changes
 		false,          // linear_private
 		false,          // linear_state_sync_disabled
 		(*string)(nil), // linear_identifier_hint
@@ -170,6 +172,7 @@ func TestSessionStore_QueryColumnsStayInSyncWithSessionModel(t *testing.T) {
 		"base_commit_sha",
 		"diff_collected_at",
 		"latest_diff_snapshot_id",
+		"has_unpushed_changes",
 		"origin",
 		"interaction_mode",
 		"validation_policy",
