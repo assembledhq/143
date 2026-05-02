@@ -578,6 +578,10 @@ func TestMirrorUserCredentialDisableCascadesTeamDefault(t *testing.T) {
 	// team-default cleanup invalidates it.
 	store.resolverCache.put(orgID, nil, models.ProviderAnthropic, []models.DecryptedCodingCredential{{ID: uuid.New()}})
 
+	// The cascade now runs inside a single transaction so a partial failure
+	// cannot leave an orphan team-default row. The mock must see Begin →
+	// disable → cascade-delete → Commit in order.
+	mock.ExpectBegin()
 	// Step 1: id-keyed disable returns the row's scope/provider for cache
 	// invalidation.
 	mock.ExpectQuery(`UPDATE coding_credentials SET status = 'disabled'.*WHERE id = @id AND org_id = @org_id.*RETURNING`).
@@ -590,6 +594,7 @@ func TestMirrorUserCredentialDisableCascadesTeamDefault(t *testing.T) {
 	mock.ExpectExec(`DELETE FROM coding_credentials\s+WHERE org_id = @org_id AND user_id IS NULL AND provider = @provider\s+AND team_default_origin_user_id = @origin_user_id`).
 		WithArgs(codingAnyArgs(3)...).
 		WillReturnResult(pgxmock.NewResult("DELETE", 1))
+	mock.ExpectCommit()
 
 	require.NoError(t, store.MirrorUserCredentialDisable(context.Background(), id, orgID, userID, models.ProviderAnthropic))
 	require.NoError(t, mock.ExpectationsWereMet(), "disable must cascade to the team-default mirror row")

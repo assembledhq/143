@@ -575,6 +575,12 @@ func (e *AgentEnv) pickFromCodingProviderSet(ctx context.Context, orgID uuid.UUI
 	if picker, ok := e.codingCredentials.(CodingCredentialMultiPicker); ok {
 		picked, pickErr := picker.PickRunnableMulti(ctx, models.Scope{OrgID: orgID, UserID: userID}, providers)
 		if pickErr != nil {
+			// pickErr discriminates between "no candidate exists" (config
+			// error) and "every candidate is currently shed" (transient) via
+			// db.ErrCodingCredentialNotFound vs db.ErrAllCredentialsShed.
+			// The runtime has no retry hook today, so both fall through the
+			// same way — the wrapped error makes the distinction visible in
+			// logs.
 			e.logger.Warn().Err(pickErr).Str("provider", string(requestedProvider)).Msg("coding credential picker found no eligible credential")
 			return nil, true
 		}

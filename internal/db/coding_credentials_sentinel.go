@@ -75,14 +75,14 @@ func EnsureAnthropicSplitSentinel(ctx context.Context, dbtx DBTX) error {
 }
 
 // countAnthropicRows returns the number of provider='anthropic' rows in the
-// named table. Table name is interpolated rather than parameterised because
-// the SQL parser doesn't accept a placeholder in that position; the call sites
-// pass only fixed string literals.
+// named table. Table name is sanitized via pgx.Identifier rather than passed
+// as a parameter because the SQL parser doesn't accept a placeholder in that
+// position; the call sites pass only fixed string literals, but the explicit
+// quoting makes the intent visible to the next reader.
 func countAnthropicRows(ctx context.Context, dbtx DBTX, table string) (int, error) {
 	var count int
-	if err := dbtx.QueryRow(ctx,
-		`SELECT count(*) FROM `+table+` WHERE provider = 'anthropic'`,
-	).Scan(&count); err != nil {
+	q := `SELECT count(*) FROM ` + pgx.Identifier{table}.Sanitize() + ` WHERE provider = 'anthropic'`
+	if err := dbtx.QueryRow(ctx, q).Scan(&count); err != nil {
 		return 0, err
 	}
 	return count, nil

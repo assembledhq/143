@@ -46,11 +46,11 @@ func TestEnsureAnthropicSplitSentinel(t *testing.T) {
 		mock.ExpectQuery(`SELECT name FROM coding_credentials_migrations WHERE name = \$1`).
 			WithArgs(AnthropicSplitSentinel).
 			WillReturnError(pgx.ErrNoRows)
-		mock.ExpectQuery(`SELECT count\(\*\) FROM coding_credentials WHERE provider = 'anthropic'`).
+		mock.ExpectQuery(`SELECT count\(\*\) FROM "coding_credentials" WHERE provider = 'anthropic'`).
 			WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
-		mock.ExpectQuery(`SELECT count\(\*\) FROM org_credentials WHERE provider = 'anthropic'`).
+		mock.ExpectQuery(`SELECT count\(\*\) FROM "org_credentials" WHERE provider = 'anthropic'`).
 			WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
-		mock.ExpectQuery(`SELECT count\(\*\) FROM user_credentials WHERE provider = 'anthropic'`).
+		mock.ExpectQuery(`SELECT count\(\*\) FROM "user_credentials" WHERE provider = 'anthropic'`).
 			WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
 		mock.ExpectExec(`INSERT INTO coding_credentials_migrations`).
 			WithArgs(AnthropicSplitSentinel).
@@ -70,11 +70,11 @@ func TestEnsureAnthropicSplitSentinel(t *testing.T) {
 		mock.ExpectQuery(`SELECT name FROM coding_credentials_migrations WHERE name = \$1`).
 			WithArgs(AnthropicSplitSentinel).
 			WillReturnError(pgx.ErrNoRows)
-		mock.ExpectQuery(`SELECT count\(\*\) FROM coding_credentials WHERE provider = 'anthropic'`).
+		mock.ExpectQuery(`SELECT count\(\*\) FROM "coding_credentials" WHERE provider = 'anthropic'`).
 			WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(7))
-		mock.ExpectQuery(`SELECT count\(\*\) FROM org_credentials WHERE provider = 'anthropic'`).
+		mock.ExpectQuery(`SELECT count\(\*\) FROM "org_credentials" WHERE provider = 'anthropic'`).
 			WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
-		mock.ExpectQuery(`SELECT count\(\*\) FROM user_credentials WHERE provider = 'anthropic'`).
+		mock.ExpectQuery(`SELECT count\(\*\) FROM "user_credentials" WHERE provider = 'anthropic'`).
 			WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
 
 		err = EnsureAnthropicSplitSentinel(context.Background(), mock)
@@ -96,11 +96,11 @@ func TestEnsureAnthropicSplitSentinel(t *testing.T) {
 		mock.ExpectQuery(`SELECT name FROM coding_credentials_migrations WHERE name = \$1`).
 			WithArgs(AnthropicSplitSentinel).
 			WillReturnError(pgx.ErrNoRows)
-		mock.ExpectQuery(`SELECT count\(\*\) FROM coding_credentials WHERE provider = 'anthropic'`).
+		mock.ExpectQuery(`SELECT count\(\*\) FROM "coding_credentials" WHERE provider = 'anthropic'`).
 			WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
-		mock.ExpectQuery(`SELECT count\(\*\) FROM org_credentials WHERE provider = 'anthropic'`).
+		mock.ExpectQuery(`SELECT count\(\*\) FROM "org_credentials" WHERE provider = 'anthropic'`).
 			WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(3))
-		mock.ExpectQuery(`SELECT count\(\*\) FROM user_credentials WHERE provider = 'anthropic'`).
+		mock.ExpectQuery(`SELECT count\(\*\) FROM "user_credentials" WHERE provider = 'anthropic'`).
 			WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
 
 		err = EnsureAnthropicSplitSentinel(context.Background(), mock)
@@ -118,11 +118,11 @@ func TestEnsureAnthropicSplitSentinel(t *testing.T) {
 		mock.ExpectQuery(`SELECT name FROM coding_credentials_migrations WHERE name = \$1`).
 			WithArgs(AnthropicSplitSentinel).
 			WillReturnError(pgx.ErrNoRows)
-		mock.ExpectQuery(`SELECT count\(\*\) FROM coding_credentials WHERE provider = 'anthropic'`).
+		mock.ExpectQuery(`SELECT count\(\*\) FROM "coding_credentials" WHERE provider = 'anthropic'`).
 			WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
-		mock.ExpectQuery(`SELECT count\(\*\) FROM org_credentials WHERE provider = 'anthropic'`).
+		mock.ExpectQuery(`SELECT count\(\*\) FROM "org_credentials" WHERE provider = 'anthropic'`).
 			WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
-		mock.ExpectQuery(`SELECT count\(\*\) FROM user_credentials WHERE provider = 'anthropic'`).
+		mock.ExpectQuery(`SELECT count\(\*\) FROM "user_credentials" WHERE provider = 'anthropic'`).
 			WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(2))
 
 		err = EnsureAnthropicSplitSentinel(context.Background(), mock)
@@ -157,7 +157,7 @@ func TestEnsureAnthropicSplitSentinel(t *testing.T) {
 		mock.ExpectQuery(`SELECT name FROM coding_credentials_migrations WHERE name = \$1`).
 			WithArgs(AnthropicSplitSentinel).
 			WillReturnError(pgx.ErrNoRows)
-		mock.ExpectQuery(`SELECT count\(\*\) FROM coding_credentials WHERE provider = 'anthropic'`).
+		mock.ExpectQuery(`SELECT count\(\*\) FROM "coding_credentials" WHERE provider = 'anthropic'`).
 			WillReturnError(boom)
 
 		err = EnsureAnthropicSplitSentinel(context.Background(), mock)
@@ -175,11 +175,11 @@ func TestEnsureAnthropicSplitSentinel(t *testing.T) {
 		mock.ExpectQuery(`SELECT name FROM coding_credentials_migrations WHERE name = \$1`).
 			WithArgs(AnthropicSplitSentinel).
 			WillReturnError(pgx.ErrNoRows)
-		mock.ExpectQuery(`SELECT count\(\*\) FROM coding_credentials WHERE provider = 'anthropic'`).
+		mock.ExpectQuery(`SELECT count\(\*\) FROM "coding_credentials" WHERE provider = 'anthropic'`).
 			WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
-		mock.ExpectQuery(`SELECT count\(\*\) FROM org_credentials WHERE provider = 'anthropic'`).
+		mock.ExpectQuery(`SELECT count\(\*\) FROM "org_credentials" WHERE provider = 'anthropic'`).
 			WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
-		mock.ExpectQuery(`SELECT count\(\*\) FROM user_credentials WHERE provider = 'anthropic'`).
+		mock.ExpectQuery(`SELECT count\(\*\) FROM "user_credentials" WHERE provider = 'anthropic'`).
 			WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
 		mock.ExpectExec(`INSERT INTO coding_credentials_migrations`).
 			WithArgs(AnthropicSplitSentinel).
@@ -200,9 +200,9 @@ func TestEnsureAnthropicSplitSentinel(t *testing.T) {
 		mock.ExpectQuery(`SELECT name FROM coding_credentials_migrations WHERE name = \$1`).
 			WithArgs(AnthropicSplitSentinel).
 			WillReturnError(pgx.ErrNoRows)
-		mock.ExpectQuery(`SELECT count\(\*\) FROM coding_credentials WHERE provider = 'anthropic'`).
+		mock.ExpectQuery(`SELECT count\(\*\) FROM "coding_credentials" WHERE provider = 'anthropic'`).
 			WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
-		mock.ExpectQuery(`SELECT count\(\*\) FROM org_credentials WHERE provider = 'anthropic'`).
+		mock.ExpectQuery(`SELECT count\(\*\) FROM "org_credentials" WHERE provider = 'anthropic'`).
 			WillReturnError(boom)
 
 		err = EnsureAnthropicSplitSentinel(context.Background(), mock)
@@ -220,11 +220,11 @@ func TestEnsureAnthropicSplitSentinel(t *testing.T) {
 		mock.ExpectQuery(`SELECT name FROM coding_credentials_migrations WHERE name = \$1`).
 			WithArgs(AnthropicSplitSentinel).
 			WillReturnError(pgx.ErrNoRows)
-		mock.ExpectQuery(`SELECT count\(\*\) FROM coding_credentials WHERE provider = 'anthropic'`).
+		mock.ExpectQuery(`SELECT count\(\*\) FROM "coding_credentials" WHERE provider = 'anthropic'`).
 			WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
-		mock.ExpectQuery(`SELECT count\(\*\) FROM org_credentials WHERE provider = 'anthropic'`).
+		mock.ExpectQuery(`SELECT count\(\*\) FROM "org_credentials" WHERE provider = 'anthropic'`).
 			WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
-		mock.ExpectQuery(`SELECT count\(\*\) FROM user_credentials WHERE provider = 'anthropic'`).
+		mock.ExpectQuery(`SELECT count\(\*\) FROM "user_credentials" WHERE provider = 'anthropic'`).
 			WillReturnError(boom)
 
 		err = EnsureAnthropicSplitSentinel(context.Background(), mock)

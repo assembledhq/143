@@ -208,15 +208,24 @@ func (s *CodingCredentialStore) MirrorUserCredential(ctx context.Context, row mo
 // user. The migration SQL mints fresh uuids for team-default rows, so the
 // id-keyed delete alone leaves them orphaned — see § "Team-default cascade"
 // in the design doc.
+//
+// Both deletes run in the same transaction so a partial failure cannot leave
+// the legacy id-keyed row gone but the team-default cascade row still
+// present (or vice versa). Resolver-cache invalidation runs only after the
+// transaction commits — a rolled-back tx must not poison the cache.
 func (s *CodingCredentialStore) MirrorUserCredentialDelete(ctx context.Context, id, orgID, userID uuid.UUID, provider models.ProviderName) (err error) {
 	defer s.mirrorFailureOnError(&err)
-	if err := s.mirrorDelete(ctx, orgID, id); err != nil {
-		return err
-	}
-	if err := s.deleteTeamDefaultMirror(ctx, orgID, userID, provider); err != nil {
-		return fmt.Errorf("delete team default mirror: %w", err)
-	}
-	return nil
+	return s.runMirrorCascadeTx(ctx, func(dbtx DBTX) (mirrorInvalidations, error) {
+		idInval, err := s.mirrorDeleteTx(ctx, dbtx, orgID, id)
+		if err != nil {
+			return mirrorInvalidations{}, err
+		}
+		teamInval, err := s.deleteTeamDefaultMirrorTx(ctx, dbtx, orgID, userID, provider)
+		if err != nil {
+			return mirrorInvalidations{}, fmt.Errorf("delete team default mirror: %w", err)
+		}
+		return mirrorInvalidations{idInval, teamInval}, nil
+	})
 }
 
 // MirrorUserCredentialDisable disables a mirrored user credential by legacy id
@@ -224,15 +233,73 @@ func (s *CodingCredentialStore) MirrorUserCredentialDelete(ctx context.Context, 
 // migration. The team-default cleanup is a hard delete (not a status flip)
 // because a stale "Team default (migrated…)" row in 'disabled' state is just
 // noise — the legacy row is gone, the row should not be visible at all.
+//
+// Both writes run in the same transaction; cache invalidation is deferred
+// until commit. Same atomicity rationale as MirrorUserCredentialDelete.
 func (s *CodingCredentialStore) MirrorUserCredentialDisable(ctx context.Context, id, orgID, userID uuid.UUID, provider models.ProviderName) (err error) {
 	defer s.mirrorFailureOnError(&err)
-	if err := s.mirrorDisable(ctx, orgID, id); err != nil {
+	return s.runMirrorCascadeTx(ctx, func(dbtx DBTX) (mirrorInvalidations, error) {
+		idInval, err := s.mirrorDisableTx(ctx, dbtx, orgID, id)
+		if err != nil {
+			return mirrorInvalidations{}, err
+		}
+		teamInval, err := s.deleteTeamDefaultMirrorTx(ctx, dbtx, orgID, userID, provider)
+		if err != nil {
+			return mirrorInvalidations{}, fmt.Errorf("disable cascade: clear team default mirror: %w", err)
+		}
+		return mirrorInvalidations{idInval, teamInval}, nil
+	})
+}
+
+// mirrorInvalidation describes one cache key to wipe after a cascade tx
+// commits. nil means "no row was touched"; the caller skips invalidation.
+type mirrorInvalidation struct {
+	orgID    uuid.UUID
+	userID   *uuid.UUID
+	provider models.ProviderName
+}
+
+type mirrorInvalidations [2]*mirrorInvalidation
+
+// runMirrorCascadeTx runs `body` inside a tx and only triggers cache
+// invalidations after a successful commit. If the store's DBTX backing does
+// not support transactions (e.g. some test fixtures), falls back to running
+// `body` against the raw DBTX and invalidating immediately — the test path
+// has no rollback to worry about. pgx.Tx satisfies DBTX, so the body sees a
+// consistent interface either way.
+func (s *CodingCredentialStore) runMirrorCascadeTx(ctx context.Context, body func(dbtx DBTX) (mirrorInvalidations, error)) error {
+	starter, ok := s.db.(TxStarter)
+	if !ok {
+		invals, err := body(s.db)
+		if err != nil {
+			return err
+		}
+		s.applyMirrorInvalidations(invals)
+		return nil
+	}
+	tx, err := starter.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin mirror cascade tx: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck
+	invals, err := body(tx)
+	if err != nil {
 		return err
 	}
-	if err := s.deleteTeamDefaultMirror(ctx, orgID, userID, provider); err != nil {
-		return fmt.Errorf("disable cascade: clear team default mirror: %w", err)
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit mirror cascade tx: %w", err)
 	}
+	s.applyMirrorInvalidations(invals)
 	return nil
+}
+
+func (s *CodingCredentialStore) applyMirrorInvalidations(invals mirrorInvalidations) {
+	for _, inv := range invals {
+		if inv == nil {
+			continue
+		}
+		s.invalidate(models.Scope{OrgID: inv.orgID, UserID: inv.userID}, inv.provider)
+	}
 }
 
 // mirrorFailureOnError increments the mirror-failure counter when the supplied
@@ -256,19 +323,33 @@ func (s *CodingCredentialStore) mirrorFailureOnError(err *error) {
 // Invalidates the resolver cache for the affected (org, provider) so a stale
 // read does not survive the cleanup.
 func (s *CodingCredentialStore) deleteTeamDefaultMirror(ctx context.Context, orgID, originalUserID uuid.UUID, provider models.ProviderName) error {
-	tag, err := s.db.Exec(ctx,
+	inv, err := s.deleteTeamDefaultMirrorTx(ctx, s.db, orgID, originalUserID, provider)
+	if err != nil {
+		return err
+	}
+	if inv != nil {
+		s.invalidate(models.Scope{OrgID: inv.orgID, UserID: inv.userID}, inv.provider)
+	}
+	return nil
+}
+
+// deleteTeamDefaultMirrorTx runs the cleanup against the provided DBTX (a tx
+// or the pool) and returns the invalidation key the caller should apply on
+// commit. Returns nil when no row matched.
+func (s *CodingCredentialStore) deleteTeamDefaultMirrorTx(ctx context.Context, dbtx DBTX, orgID, originalUserID uuid.UUID, provider models.ProviderName) (*mirrorInvalidation, error) {
+	tag, err := dbtx.Exec(ctx,
 		`DELETE FROM coding_credentials
 		 WHERE org_id = @org_id AND user_id IS NULL AND provider = @provider
 		   AND team_default_origin_user_id = @origin_user_id`,
 		pgx.NamedArgs{"org_id": orgID, "provider": string(provider), "origin_user_id": originalUserID},
 	)
 	if err != nil {
-		return fmt.Errorf("delete team default mirror: %w", err)
+		return nil, fmt.Errorf("delete team default mirror: %w", err)
 	}
-	if tag.RowsAffected() > 0 {
-		s.invalidate(models.Scope{OrgID: orgID}, provider)
+	if tag.RowsAffected() == 0 {
+		return nil, nil
 	}
-	return nil
+	return &mirrorInvalidation{orgID: orgID, userID: nil, provider: provider}, nil
 }
 
 // teamDefaultMirrorPriority parks team-default mirrors at the bottom of the
@@ -443,10 +524,23 @@ func isUniqueViolation(err error) bool {
 // mirrored because it was a non-coding provider) we no-op silently — there
 // is nothing to invalidate either.
 func (s *CodingCredentialStore) mirrorDelete(ctx context.Context, scopedOrgID, id uuid.UUID) error {
+	inv, err := s.mirrorDeleteTx(ctx, s.db, scopedOrgID, id)
+	if err != nil {
+		return err
+	}
+	if inv != nil {
+		s.invalidate(models.Scope{OrgID: inv.orgID, UserID: inv.userID}, inv.provider)
+	}
+	return nil
+}
+
+// mirrorDeleteTx runs the delete against an explicit DBTX (tx or pool) and
+// returns the invalidation key the caller should apply on commit.
+func (s *CodingCredentialStore) mirrorDeleteTx(ctx context.Context, dbtx DBTX, scopedOrgID, id uuid.UUID) (*mirrorInvalidation, error) {
 	var orgID uuid.UUID
 	var userID *uuid.UUID
 	var provider string
-	err := s.db.QueryRow(ctx,
+	err := dbtx.QueryRow(ctx,
 		`DELETE FROM coding_credentials
 		 WHERE id = @id AND org_id = @org_id
 		 RETURNING org_id, user_id, provider`,
@@ -454,22 +548,33 @@ func (s *CodingCredentialStore) mirrorDelete(ctx context.Context, scopedOrgID, i
 	).Scan(&orgID, &userID, &provider)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return nil
+			return nil, nil
 		}
-		return fmt.Errorf("mirror delete: %w", err)
+		return nil, fmt.Errorf("mirror delete: %w", err)
 	}
-	s.invalidate(models.Scope{OrgID: orgID, UserID: userID}, models.ProviderName(provider))
-	return nil
+	return &mirrorInvalidation{orgID: orgID, userID: userID, provider: models.ProviderName(provider)}, nil
 }
 
 // mirrorDisable flips status to 'disabled' and invalidates the resolver
 // cache for the affected (scope, provider) key. Same RETURNING trick as
 // mirrorDelete keeps invalidation precise.
 func (s *CodingCredentialStore) mirrorDisable(ctx context.Context, scopedOrgID, id uuid.UUID) error {
+	inv, err := s.mirrorDisableTx(ctx, s.db, scopedOrgID, id)
+	if err != nil {
+		return err
+	}
+	if inv != nil {
+		s.invalidate(models.Scope{OrgID: inv.orgID, UserID: inv.userID}, inv.provider)
+	}
+	return nil
+}
+
+// mirrorDisableTx is the tx-aware variant of mirrorDisable.
+func (s *CodingCredentialStore) mirrorDisableTx(ctx context.Context, dbtx DBTX, scopedOrgID, id uuid.UUID) (*mirrorInvalidation, error) {
 	var orgID uuid.UUID
 	var userID *uuid.UUID
 	var provider string
-	err := s.db.QueryRow(ctx,
+	err := dbtx.QueryRow(ctx,
 		`UPDATE coding_credentials SET status = 'disabled', updated_at = now()
 		 WHERE id = @id AND org_id = @org_id
 		 RETURNING org_id, user_id, provider`,
@@ -477,12 +582,11 @@ func (s *CodingCredentialStore) mirrorDisable(ctx context.Context, scopedOrgID, 
 	).Scan(&orgID, &userID, &provider)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return nil
+			return nil, nil
 		}
-		return fmt.Errorf("mirror disable: %w", err)
+		return nil, fmt.Errorf("mirror disable: %w", err)
 	}
-	s.invalidate(models.Scope{OrgID: orgID, UserID: userID}, models.ProviderName(provider))
-	return nil
+	return &mirrorInvalidation{orgID: orgID, userID: userID, provider: models.ProviderName(provider)}, nil
 }
 
 // mirrorProviderForOrg decides which (provider, config) pair to write into the

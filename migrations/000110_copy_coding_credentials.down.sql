@@ -10,14 +10,34 @@
 -- Operators rolling back after live traffic must snapshot coding_credentials
 -- (or hand-roll a partial cleanup) before retrying.
 --
+-- Also refuses to run if the Anthropic split post-step has executed: the
+-- forward `migrate-coding-credentials-anthropic-split` rewrites a row with
+-- both APIKey and Subscription set to drop the API key (the design splits
+-- each method into its own row). That drop is not recoverable from this
+-- migration — the original encrypted blob is gone and the legacy row in
+-- org_credentials/user_credentials may have been mutated since. Operators
+-- rolling back after the split has run MUST restore from a backup taken
+-- before the split, then re-run this down migration on the restored DB.
+--
 -- The marker column is checked instead of a label LIKE pattern so a
 -- user-supplied label that happens to look like the migration's
 -- 'Team default (migrated from <uuid>)' string cannot fool the orphan
 -- detector into deleting live data.
 DO $$
 DECLARE
-    orphan_count integer;
+    orphan_count    integer;
+    split_marker    integer;
+    subscription_ct integer;
 BEGIN
+    SELECT count(*) INTO split_marker
+    FROM coding_credentials_migrations WHERE name = 'anthropic_split';
+    SELECT count(*) INTO subscription_ct
+    FROM coding_credentials WHERE provider = 'anthropic_subscription';
+    IF split_marker > 0 OR subscription_ct > 0 THEN
+        RAISE EXCEPTION 'anthropic_split post-step has run (sentinel=% subscription_rows=%); rolling back would silently lose any APIKey dropped from dual-set anthropic rows. Restore from a pre-split backup and re-run this migration there.',
+            split_marker, subscription_ct;
+    END IF;
+
     SELECT count(*) INTO orphan_count
     FROM coding_credentials cc
     WHERE NOT EXISTS (SELECT 1 FROM org_credentials  oc WHERE oc.id = cc.id)

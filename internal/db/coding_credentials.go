@@ -39,6 +39,15 @@ const codingCredentialsColumns = "id, org_id, user_id, provider, label, config, 
 // "exists in another user's stack" from "does not exist".
 var ErrCodingCredentialNotFound = errors.New("coding credential not found")
 
+// ErrAllCredentialsShed is returned by PickRunnable/PickRunnableMulti when
+// the resolver found candidates but every one of them is currently in the
+// in-process shed cache (rate-limited or auth-rejected within the health
+// TTL). Distinct from ErrCodingCredentialNotFound — callers that want to
+// distinguish "user has no creds" (config error: prompt to add one) from
+// "all creds are temporarily down" (transient: surface and let the caller
+// decide whether to retry) can errors.Is on this sentinel.
+var ErrAllCredentialsShed = errors.New("all eligible coding credentials are currently shed")
+
 // ErrCodingCredentialLabelTaken is returned when a row already exists at
 // (org_id, user_id, provider, label) and is not eligible to be overwritten
 // (i.e. it is active or invalid). The embedded ExistingStatus tells the
@@ -491,7 +500,9 @@ func (s *CodingCredentialStore) queryResolverHalf(ctx context.Context, orgID uui
 
 // PickRunnable is the runtime selection path. ListResolvable + tier-walking
 // + random-with-shedding within each tier (priority group). Returns
-// ErrCodingCredentialNotFound when no tier has any unsh-edged candidate.
+// ErrCodingCredentialNotFound when the resolver returned zero rows;
+// ErrAllCredentialsShed when rows existed but every tier was filtered out by
+// the in-process shed cache.
 //
 // Random selection avoids the per-(scope, provider, priority) hotspot that
 // strict round-robin would introduce — see design doc § "Same-priority
@@ -516,7 +527,7 @@ func (s *CodingCredentialStore) PickRunnable(ctx context.Context, scope models.S
 		picked := eligible[idx]
 		return &picked, nil
 	}
-	return nil, ErrCodingCredentialNotFound
+	return nil, ErrAllCredentialsShed
 }
 
 // PickRunnableMulti is PickRunnable across several provider names that all
@@ -568,7 +579,7 @@ func (s *CodingCredentialStore) PickRunnableMulti(ctx context.Context, scope mod
 		picked := eligible[idx]
 		return &picked, nil
 	}
-	return nil, ErrCodingCredentialNotFound
+	return nil, ErrAllCredentialsShed
 }
 
 func sortResolvedCredentialRows(creds []models.DecryptedCodingCredential) {
@@ -1424,7 +1435,14 @@ func (c *resolverCache) get(orgID uuid.UUID, userID *uuid.UUID, provider models.
 	if c.clock().After(entry.expiry) {
 		return nil, false
 	}
-	// Return a copy so callers cannot mutate cached state.
+	// Shallow copy: the slice header is fresh, but the
+	// DecryptedCodingCredential structs (and any pointer fields they hold —
+	// UserID, CreatedBy, LastVerifiedAt) still alias the cached entry.
+	// Callers MUST treat the return value as read-only; mutating a pointer
+	// field will corrupt the next cache hit. The runtime callers (resolver
+	// + Pick paths) only ever read, so this is sufficient and avoids the
+	// per-hit allocation cost of a deep copy on the hottest path in the
+	// store.
 	out := make([]models.DecryptedCodingCredential, len(entry.value))
 	copy(out, entry.value)
 	return out, true

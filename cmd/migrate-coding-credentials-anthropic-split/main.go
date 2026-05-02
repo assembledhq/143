@@ -94,7 +94,7 @@ func main() {
 		return
 	}
 
-	var totalProcessed, totalSplit, totalDualSet int
+	var totalProcessed, totalSplit, totalDualSet, totalSkipped int
 	var lastCreatedAt time.Time
 	var lastID uuid.UUID
 	for {
@@ -104,15 +104,16 @@ func main() {
 			return
 		default:
 		}
-		processed, splits, dualSet, lastCA, lastI, err := runBatch(ctx, pool, cryptoSvc, batchSize, stmtTOMs, dryRun, lastCreatedAt, lastID)
+		processed, splits, dualSet, skipped, lastCA, lastI, err := runBatch(ctx, pool, cryptoSvc, batchSize, stmtTOMs, dryRun, lastCreatedAt, lastID)
 		if err != nil {
 			fail("batch: %v", err)
 		}
 		totalProcessed += processed
 		totalSplit += splits
 		totalDualSet += dualSet
-		fmt.Printf("[anthropic-split] processed=%d split=%d dual_set=%d (cumulative processed=%d split=%d dual_set=%d)\n",
-			processed, splits, dualSet, totalProcessed, totalSplit, totalDualSet)
+		totalSkipped += skipped
+		fmt.Printf("[anthropic-split] processed=%d split=%d dual_set=%d skipped=%d (cumulative processed=%d split=%d dual_set=%d skipped=%d)\n",
+			processed, splits, dualSet, skipped, totalProcessed, totalSplit, totalDualSet, totalSkipped)
 		if processed == 0 {
 			break
 		}
@@ -120,8 +121,21 @@ func main() {
 	}
 
 	if dryRun {
-		fmt.Printf("[anthropic-split] dry-run complete; would split %d / %d rows (%d dual-set)\n", totalSplit, totalProcessed, totalDualSet)
+		fmt.Printf("[anthropic-split] dry-run complete; would split %d / %d rows (%d dual-set, %d skipped)\n", totalSplit, totalProcessed, totalDualSet, totalSkipped)
+		if totalSkipped > 0 {
+			os.Exit(2)
+		}
 		return
+	}
+
+	// Withhold the sentinel when any row was skipped: the post-step gate at
+	// app boot reads this sentinel as "every anthropic row is in the new
+	// shape", which is no longer true. The operator must inspect the skipped
+	// rows (decrypt/unmarshal failures logged per-row) and either fix them
+	// in-place or hand-write the sentinel after explicit acknowledgement.
+	if totalSkipped > 0 {
+		fmt.Fprintf(os.Stderr, "[anthropic-split] %d row(s) skipped due to per-row errors; sentinel NOT written. Inspect the per-row warnings above, fix the rows, and re-run. Exit 2.\n", totalSkipped)
+		os.Exit(2)
 	}
 
 	if err := writeSentinel(ctx, pool); err != nil {
@@ -180,11 +194,13 @@ func writeSentinel(ctx context.Context, pool *pgxpool.Pool) error {
 }
 
 // runBatch processes one batch of anthropic rows after the cursor
-// (createdAtCursor, idCursor). Returns (processed, splits, dualSet,
+// (createdAtCursor, idCursor). Returns (processed, splits, dualSet, skipped,
 // newLastCreatedAt, newLastID, error). dualSet counts rows that carried both
-// APIKey and Subscription — surfaced separately so the operator sees the
-// aggregate at the end of the run rather than having to grep per-row stderr
-// warnings.
+// APIKey and Subscription. skipped counts rows whose decrypt/unmarshal/encrypt
+// failed — they are logged per-row to stderr with row provenance and left in
+// place for the operator to inspect; the cursor still advances past them so
+// later rows are not blocked, and the caller withholds the sentinel when
+// skipped > 0 so the boot gate stays closed until the operator acks.
 func runBatch(
 	ctx context.Context,
 	pool *pgxpool.Pool,
@@ -193,15 +209,15 @@ func runBatch(
 	dryRun bool,
 	createdAtCursor time.Time,
 	idCursor uuid.UUID,
-) (int, int, int, time.Time, uuid.UUID, error) {
+) (int, int, int, int, time.Time, uuid.UUID, error) {
 	tx, err := pool.Begin(ctx)
 	if err != nil {
-		return 0, 0, 0, createdAtCursor, idCursor, fmt.Errorf("begin: %w", err)
+		return 0, 0, 0, 0, createdAtCursor, idCursor, fmt.Errorf("begin: %w", err)
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck
 
 	if _, err := tx.Exec(ctx, fmt.Sprintf("SET LOCAL statement_timeout = %d", stmtTOMs)); err != nil {
-		return 0, 0, 0, createdAtCursor, idCursor, fmt.Errorf("set statement_timeout: %w", err)
+		return 0, 0, 0, 0, createdAtCursor, idCursor, fmt.Errorf("set statement_timeout: %w", err)
 	}
 
 	// Cursor pagination: keyset on (created_at, id) so a single stuck row can
@@ -217,7 +233,7 @@ func runBatch(
 		createdAtCursor, idCursor, batchSize,
 	)
 	if err != nil {
-		return 0, 0, 0, createdAtCursor, idCursor, fmt.Errorf("query batch: %w", err)
+		return 0, 0, 0, 0, createdAtCursor, idCursor, fmt.Errorf("query batch: %w", err)
 	}
 
 	type batchRow struct {
@@ -238,24 +254,35 @@ func runBatch(
 		var r batchRow
 		if err := rows.Scan(&r.ID, &r.OrgID, &r.UserID, &r.Label, &r.Config, &r.Priority, &r.Status, &r.CreatedBy, &r.LastVerifiedAt, &r.CreatedAt, &r.UpdatedAt); err != nil {
 			rows.Close()
-			return 0, 0, 0, createdAtCursor, idCursor, fmt.Errorf("scan row: %w", err)
+			return 0, 0, 0, 0, createdAtCursor, idCursor, fmt.Errorf("scan row: %w", err)
 		}
 		batch = append(batch, r)
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
-		return 0, 0, 0, createdAtCursor, idCursor, err
+		return 0, 0, 0, 0, createdAtCursor, idCursor, err
 	}
 
 	if len(batch) == 0 {
-		return 0, 0, 0, createdAtCursor, idCursor, nil
+		return 0, 0, 0, 0, createdAtCursor, idCursor, nil
 	}
 
-	splits, dualSet := 0, 0
+	splits, dualSet, skipped := 0, 0, 0
 	for _, r := range batch {
 		outcome, err := evaluateRowForSplit(cryptoSvc, r.Config)
 		if err != nil {
-			return 0, 0, 0, createdAtCursor, idCursor, fmt.Errorf("%s: %w", r.ID, err)
+			// Per-row failure: log with provenance and continue. Without
+			// this the entire run aborts on a single decrypt failure (e.g.
+			// key-rotation skew) leaving the operator with no path forward
+			// short of hand-cursor manipulation. The sentinel is withheld
+			// at the top level when skipped > 0 so the boot gate keeps the
+			// app safely down until the row is fixed.
+			skipped++
+			fmt.Fprintf(os.Stderr,
+				"[anthropic-split] SKIP row id=%s org_id=%s created_by=%s created_at=%s: %v\n",
+				r.ID, r.OrgID, formatPtrUUID(r.CreatedBy), r.CreatedAt.Format(time.RFC3339), err,
+			)
+			continue
 		}
 		if outcome.Skip {
 			continue
@@ -263,8 +290,8 @@ func runBatch(
 		if outcome.HadDualSet {
 			dualSet++
 			fmt.Fprintf(os.Stderr,
-				"[anthropic-split] WARNING: dual-set anthropic row %s carries both APIKey and Subscription; preserving subscription, dropping API key\n",
-				r.ID,
+				"[anthropic-split] WARNING: dual-set anthropic row id=%s org_id=%s created_by=%s created_at=%s carries both APIKey and Subscription; preserving subscription, dropping API key\n",
+				r.ID, r.OrgID, formatPtrUUID(r.CreatedBy), r.CreatedAt.Format(time.RFC3339),
 			)
 		}
 
@@ -280,7 +307,7 @@ func runBatch(
 			outcome.NewCipher, r.ID,
 		)
 		if err != nil {
-			return 0, 0, 0, createdAtCursor, idCursor, fmt.Errorf("rewrite %s: %w", r.ID, err)
+			return 0, 0, 0, 0, createdAtCursor, idCursor, fmt.Errorf("rewrite %s: %w", r.ID, err)
 		}
 		if tag.RowsAffected() == 0 {
 			// Concurrent rewrite — skip without splitting.
@@ -290,11 +317,19 @@ func runBatch(
 	}
 
 	if err := tx.Commit(ctx); err != nil {
-		return 0, 0, 0, createdAtCursor, idCursor, fmt.Errorf("commit: %w", err)
+		return 0, 0, 0, 0, createdAtCursor, idCursor, fmt.Errorf("commit: %w", err)
 	}
 
 	last := batch[len(batch)-1]
-	return len(batch), splits, dualSet, last.CreatedAt, last.ID, nil
+	return len(batch), splits, dualSet, skipped, last.CreatedAt, last.ID, nil
+}
+
+// formatPtrUUID renders an optional uuid for log lines without crashing on nil.
+func formatPtrUUID(u *uuid.UUID) string {
+	if u == nil {
+		return "<nil>"
+	}
+	return u.String()
 }
 
 func decryptCfg(svc *crypto.Service, data []byte) ([]byte, error) {

@@ -502,6 +502,57 @@ func TestListResolvableMulti_BulkFetchAndCacheReuse(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "ListResolvableMulti must use a single query per scope half")
 }
 
+// TestListResolvableMulti_PerBucketPriorityOrder locks the contract that
+// rows within a single provider bucket are returned in (priority, created_at)
+// order. The SQL ORDER BY emits rows already sorted; the per-row append into
+// `bucketed[row.Provider]` preserves that order. This test guards against a
+// future refactor that batches/buckets rows out of SQL order (e.g. parallel
+// scope queries that interleave per-provider).
+func TestListResolvableMulti_PerBucketPriorityOrder(t *testing.T) {
+	t.Parallel()
+
+	store, mock := newMockCodingCredentialStore(t)
+	defer mock.Close()
+
+	orgID := uuid.New()
+	userID := uuid.New()
+	personalP1 := uuid.New()
+	personalP2 := uuid.New()
+	personalP3 := uuid.New()
+	providers := []models.ProviderName{models.ProviderAnthropic}
+
+	personalRows := pgxmock.NewRows(codingCredentialTestColumns)
+	// Add rows in the same order the SQL would, after ORDER BY priority,
+	// created_at. The bucketing must preserve this order in the returned
+	// slice — callers downstream (e.g. PickRunnableMulti's tier walker)
+	// depend on it to enforce priority semantics.
+	personalRows = addCodingCredentialRow(personalRows,
+		codingCredentialRow(t, store, orgID, &userID, personalP1, models.ProviderAnthropic, models.AnthropicConfig{APIKey: "sk-ant-p1"}, 1, models.CodingCredentialStatusActive),
+	)
+	personalRows = addCodingCredentialRow(personalRows,
+		codingCredentialRow(t, store, orgID, &userID, personalP2, models.ProviderAnthropic, models.AnthropicConfig{APIKey: "sk-ant-p2"}, 2, models.CodingCredentialStatusActive),
+	)
+	personalRows = addCodingCredentialRow(personalRows,
+		codingCredentialRow(t, store, orgID, &userID, personalP3, models.ProviderAnthropic, models.AnthropicConfig{APIKey: "sk-ant-p3"}, 3, models.CodingCredentialStatusActive),
+	)
+	orgRows := pgxmock.NewRows(codingCredentialTestColumns)
+
+	mock.ExpectQuery(`FROM coding_credentials`).
+		WithArgs(codingAnyArgs(3)...).
+		WillReturnRows(personalRows)
+	mock.ExpectQuery(`FROM coding_credentials`).
+		WithArgs(codingAnyArgs(2)...).
+		WillReturnRows(orgRows)
+
+	got, err := store.ListResolvableMulti(context.Background(), orgID, &userID, providers)
+	require.NoError(t, err)
+	require.Len(t, got[models.ProviderAnthropic], 3)
+	require.Equal(t,
+		[]uuid.UUID{personalP1, personalP2, personalP3},
+		[]uuid.UUID{got[models.ProviderAnthropic][0].ID, got[models.ProviderAnthropic][1].ID, got[models.ProviderAnthropic][2].ID},
+		"bucket must preserve SQL ORDER BY priority within a single provider")
+}
+
 func TestCodingCredentialStorePickRunnableMulti_MergesProvidersByScopeBeforeOrgFallback(t *testing.T) {
 	t.Parallel()
 
@@ -577,7 +628,7 @@ func TestCodingCredentialStoreOrgScopeBranches(t *testing.T) {
 
 	store.MarkAuthRejected(id)
 	_, err = store.PickRunnable(context.Background(), scope, provider)
-	require.ErrorIs(t, err, ErrCodingCredentialNotFound, "PickRunnable should return not found when every cached candidate is shed")
+	require.ErrorIs(t, err, ErrAllCredentialsShed, "PickRunnable should distinguish all-shed from not-found")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 

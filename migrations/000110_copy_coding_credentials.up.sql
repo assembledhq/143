@@ -73,9 +73,13 @@ ON CONFLICT (id) DO NOTHING;
 --    Priority is computed via a per-row subquery against the just-inserted
 --    coding_credentials rows from step 1. Postgres evaluates the subquery
 --    against the statement-start snapshot, so every team-default row in the
---    same org sees the same MAX and lands on the same priority slot.
---    Tie-break inside the resolver is `created_at`, which gives deterministic
---    ordering — acceptable for a one-shot migration.
+--    same org sees the same MAX and lands on the same priority slot —
+--    including team-default rows for *different* providers in the same org,
+--    which all collide on one priority value. The resolver only ever walks
+--    rows of the requested provider and tie-breaks within a tier on
+--    `created_at`, so the cross-provider collision is invisible at read time.
+--    Acceptable for a one-shot migration; not worth the complexity of a
+--    per-provider window allocator.
 INSERT INTO coding_credentials
     (org_id, user_id, provider, label, config, priority, status, created_by,
      last_verified_at, created_at, updated_at, team_default_origin_user_id)
