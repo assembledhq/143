@@ -730,6 +730,52 @@ func TestLinearJobHandlers(t *testing.T) {
 		require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 	})
 
+	t.Run("link_linear_issue_mid_session validates payloads", func(t *testing.T) {
+		t.Parallel()
+
+		handler := newLinkLinearIssueMidSessionHandler(linearservice.NewService(linearservice.Config{}), zerolog.Nop())
+		require.Error(t, handler(context.Background(), "link_linear_issue_mid_session", json.RawMessage(`{bad json`)), "link_linear_issue_mid_session should reject invalid JSON")
+		require.Error(t, handler(context.Background(), "link_linear_issue_mid_session", json.RawMessage(`{"org_id":"not-a-uuid","session_id":"`+uuid.NewString()+`"}`)), "link_linear_issue_mid_session should reject invalid org ids")
+		require.Error(t, handler(context.Background(), "link_linear_issue_mid_session", json.RawMessage(`{"org_id":"`+uuid.NewString()+`","session_id":"not-a-uuid"}`)), "link_linear_issue_mid_session should reject invalid session ids")
+	})
+
+	t.Run("link_linear_issue_mid_session no-ops when payload has no refs", func(t *testing.T) {
+		t.Parallel()
+
+		stores, mock := newTestStores(t)
+		defer mock.Close()
+
+		orgID := uuid.New()
+		sessionID := uuid.New()
+		userID := uuid.New()
+
+		svc := linearservice.NewService(linearservice.Config{Sessions: stores.Sessions, Logger: zerolog.Nop()})
+		handler := newLinkLinearIssueMidSessionHandler(svc, zerolog.Nop())
+		payload := json.RawMessage(`{"org_id":"` + orgID.String() + `","session_id":"` + sessionID.String() + `","identifiers":[],"user_id":"` + userID.String() + `"}`)
+
+		err := handler(context.Background(), "link_linear_issue_mid_session", payload)
+		require.NoError(t, err, "link_linear_issue_mid_session should silently no-op when no refs are present (e.g. payload was enqueued before allowlist filtered everything out)")
+		require.NoError(t, mock.ExpectationsWereMet(), "no database writes should fire on the empty-payload path")
+	})
+
+	t.Run("link_linear_issue_mid_session tolerates malformed user_id", func(t *testing.T) {
+		t.Parallel()
+
+		stores, mock := newTestStores(t)
+		defer mock.Close()
+
+		orgID := uuid.New()
+		sessionID := uuid.New()
+
+		svc := linearservice.NewService(linearservice.Config{Sessions: stores.Sessions, Logger: zerolog.Nop()})
+		handler := newLinkLinearIssueMidSessionHandler(svc, zerolog.Nop())
+		payload := json.RawMessage(`{"org_id":"` + orgID.String() + `","session_id":"` + sessionID.String() + `","identifiers":[],"user_id":"not-a-uuid"}`)
+
+		err := handler(context.Background(), "link_linear_issue_mid_session", payload)
+		require.NoError(t, err, "the mid-session handler must not fail the job for a malformed user_id; it should warn and proceed")
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+
 	t.Run("refresh_linear_team_keys validates payloads", func(t *testing.T) {
 		t.Parallel()
 

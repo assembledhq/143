@@ -33,6 +33,8 @@ import {
 } from "@/components/ui/sheet";
 import { Textarea } from "@/components/ui/textarea";
 import { BranchPicker } from "@/components/branch-picker";
+import { LinearIcon } from "@/components/linear-icon";
+import { looksLikeLinearRef } from "@/lib/linear-refs";
 import { PendingAttachmentStrip } from "@/components/pending-attachment-strip";
 import { SessionComposerTriggerPicker, flattenGroups, type TriggerPickerGroup, type TriggerPickerPosition } from "@/components/session-composer-trigger-picker";
 import { api } from "@/lib/api";
@@ -116,6 +118,20 @@ export function ManualSessionCreatePageContent() {
   const [isUploading, setIsUploading] = useState(false);
   const [showImageInput, setShowImageInput] = useState(false);
   const [imageURL, setImageURL] = useState("");
+  const [showLinearInput, setShowLinearInput] = useState(false);
+  const [linearInput, setLinearInput] = useState("");
+  const [linearInputError, setLinearInputError] = useState<string | null>(null);
+  const linearInputRef = useRef<HTMLInputElement>(null);
+
+  // Focus the Linear input the render after it mounts. Layout effect (vs.
+  // requestAnimationFrame inside the menu item's onClick) guarantees the
+  // input is committed to the DOM before we focus, so the first menu open
+  // doesn't race React's render and silently drop focus.
+  useEffect(() => {
+    if (showLinearInput) {
+      linearInputRef.current?.focus();
+    }
+  }, [showLinearInput]);
   const [selectedModel, setSelectedModel] = useState("");
   const [reasoningOverride, setReasoningOverride] = useState<CodingAgentReasoningEffort>("");
   const [userSelectedRepoId, setUserSelectedRepoId] = useState<string | null>(repoId ?? null);
@@ -796,6 +812,37 @@ export function ManualSessionCreatePageContent() {
     setShowImageInput(false);
   }
 
+  function addLinearLink() {
+    const trimmed = linearInput.trim();
+    if (!trimmed) {
+      return;
+    }
+    if (!looksLikeLinearRef(trimmed)) {
+      // UX-only validation. The backend ResolveAndLinkAtCreate re-validates
+      // with the org's team-key allowlist, so this catches obvious garbage
+      // (free text, typos) without claiming to be authoritative.
+      setLinearInputError("Enter a Linear URL (https://linear.app/...) or key like ACS-1234");
+      return;
+    }
+    // Append the URL or identifier to the message body. The Linear linker on
+    // the backend (ResolveAndLinkAtCreate) scans the message text for both
+    // linear.app URLs and bare identifiers like ACS-1234, so passing the
+    // user's input through verbatim is enough to wire the issue up.
+    setMessage((previous) => {
+      if (previous.length === 0) {
+        return trimmed;
+      }
+      const separator = previous.endsWith("\n") ? "" : previous.endsWith(" ") ? "" : " ";
+      return `${previous}${separator}${trimmed}`;
+    });
+    setLinearInput("");
+    setLinearInputError(null);
+    setShowLinearInput(false);
+    requestAnimationFrame(() => {
+      messageInputRef.current?.focus();
+    });
+  }
+
   function removeAttachment(value: string) {
     setAttachments((previous) => previous.filter((item) => item !== value));
   }
@@ -1145,6 +1192,44 @@ export function ManualSessionCreatePageContent() {
               </div>
             )}
 
+            {showLinearInput && (
+              <div className="flex flex-col gap-1 pb-3">
+                <div className="flex items-center gap-2">
+                  <LinearIcon className="h-4 w-4 shrink-0 text-muted-foreground" />
+                  <Input
+                    ref={linearInputRef}
+                    value={linearInput}
+                    onChange={(event) => {
+                      setLinearInput(event.target.value);
+                      if (linearInputError) {
+                        setLinearInputError(null);
+                      }
+                    }}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter") {
+                        event.preventDefault();
+                        addLinearLink();
+                      } else if (event.key === "Escape") {
+                        event.preventDefault();
+                        setLinearInput("");
+                        setLinearInputError(null);
+                        setShowLinearInput(false);
+                      }
+                    }}
+                    placeholder="ACS-1234 or https://linear.app/acme/issue/ACS-1234"
+                    aria-label="Linear issue id or URL"
+                    aria-invalid={linearInputError ? true : undefined}
+                  />
+                  <Button type="button" variant="outline" onClick={addLinearLink}>
+                    Add
+                  </Button>
+                </div>
+                {linearInputError && (
+                  <p role="alert" className="pl-6 text-xs text-destructive">{linearInputError}</p>
+                )}
+              </div>
+            )}
+
             <div className="pt-2">
               {isMobile ? (
                 <>
@@ -1163,6 +1248,10 @@ export function ManualSessionCreatePageContent() {
                         <DropdownMenuItem onClick={() => setShowImageInput(true)}>
                           <Link data-testid="add-image-url-link-icon" className="mr-2 h-4 w-4" />
                           Add image URL
+                        </DropdownMenuItem>
+                        <DropdownMenuItem onClick={() => setShowLinearInput(true)}>
+                          <LinearIcon className="mr-2 h-4 w-4" />
+                          Link Linear issue
                         </DropdownMenuItem>
                       </DropdownMenuContent>
                     </DropdownMenu>
@@ -1214,6 +1303,10 @@ export function ManualSessionCreatePageContent() {
                       <DropdownMenuItem onClick={() => setShowImageInput(true)}>
                         <Link data-testid="add-image-url-link-icon" className="mr-2 h-4 w-4" />
                         Add image URL
+                      </DropdownMenuItem>
+                      <DropdownMenuItem onClick={() => setShowLinearInput(true)}>
+                        <LinearIcon className="mr-2 h-4 w-4" />
+                        Link Linear issue
                       </DropdownMenuItem>
                     </DropdownMenuContent>
                   </DropdownMenu>

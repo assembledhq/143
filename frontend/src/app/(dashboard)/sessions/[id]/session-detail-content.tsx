@@ -30,6 +30,14 @@ import {
   Pencil,
   Plus,
 } from "lucide-react";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import { LinearIcon } from "@/components/linear-icon";
+import { looksLikeLinearRef } from "@/lib/linear-refs";
 import { notify as toast } from "@/lib/notify";
 import { Badge } from "@/components/ui/badge";
 import { MarkdownContent } from "@/components/markdown";
@@ -843,12 +851,59 @@ function SessionComposer({
 
   const composerCardRef = useRef<HTMLDivElement>(null);
   const composerInputSurfaceRef = useRef<HTMLDivElement>(null);
+  const linearInputRef = useRef<HTMLInputElement>(null);
   const [caretPosition, setCaretPosition] = useState(message.length);
   const [selectedTriggerIndex, setSelectedTriggerIndex] = useState(0);
   const [triggerDismissed, setTriggerDismissed] = useState(false);
   const [pickerPosition, setPickerPosition] = useState<TriggerPickerPosition | null>(null);
   const [mobileSettingsOpen, setMobileSettingsOpen] = useState(false);
   const isMobile = useMediaQuery("(max-width: 767px)");
+  const [showLinearInput, setShowLinearInput] = useState(false);
+  const [linearInput, setLinearInput] = useState("");
+  const [linearInputError, setLinearInputError] = useState<string | null>(null);
+
+  // Focus the Linear input the render after it mounts. Using a layout
+  // effect (rather than the previous requestAnimationFrame inside the menu
+  // item's onClick) guarantees the input is in the DOM before we focus —
+  // the rAF version raced React's commit and silently dropped focus on the
+  // first open in tight render budgets.
+  useEffect(() => {
+    if (showLinearInput) {
+      linearInputRef.current?.focus();
+    }
+  }, [showLinearInput]);
+
+  function addLinearLink() {
+    const trimmed = linearInput.trim();
+    if (!trimmed) {
+      return;
+    }
+    if (!looksLikeLinearRef(trimmed)) {
+      // Block obvious garbage at submit time. The backend re-validates with
+      // the org's team-key allowlist; this is a UX hint, not a security
+      // boundary, so the regex matches detect.go's lax shape and we leave
+      // the input open so the user can correct it.
+      setLinearInputError("Enter a Linear URL (https://linear.app/...) or key like ACS-1234");
+      return;
+    }
+    // Append the trimmed ref to the message body. SendMessage hands the body
+    // to ResolveAndLinkMidSession which scans it for Linear refs and creates
+    // the session_issue_link row asynchronously, so plain-text append is
+    // exactly what the backend expects.
+    const next = message.length === 0
+      ? trimmed
+      : `${message}${message.endsWith(" ") || message.endsWith("\n") ? "" : " "}${trimmed}`;
+    onMessageChange(next);
+    setLinearInput("");
+    setLinearInputError(null);
+    setShowLinearInput(false);
+    requestAnimationFrame(() => {
+      const el = textareaRef.current;
+      if (!el) return;
+      el.focus();
+      el.setSelectionRange(next.length, next.length);
+    });
+  }
 
   const activeTrigger = useMemo(
     () => findActiveTrigger(message, caretPosition, COMPOSER_TRIGGER_SPECS),
@@ -1299,22 +1354,78 @@ function SessionComposer({
             className="px-3 pb-2"
           />
 
+          {showLinearInput && (
+            <div className="flex flex-col gap-1 px-3 pb-2">
+              <div className="flex items-center gap-2">
+                <LinearIcon className="h-4 w-4 shrink-0 text-muted-foreground" />
+                <Input
+                  ref={linearInputRef}
+                  value={linearInput}
+                  onChange={(event) => {
+                    setLinearInput(event.target.value);
+                    if (linearInputError) {
+                      setLinearInputError(null);
+                    }
+                  }}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") {
+                      event.preventDefault();
+                      addLinearLink();
+                    } else if (event.key === "Escape") {
+                      event.preventDefault();
+                      setLinearInput("");
+                      setLinearInputError(null);
+                      setShowLinearInput(false);
+                    }
+                  }}
+                  placeholder="ACS-1234 or https://linear.app/acme/issue/ACS-1234"
+                  aria-label="Linear issue id or URL"
+                  aria-invalid={linearInputError ? true : undefined}
+                  className="h-8"
+                />
+                <Button type="button" variant="outline" size="sm" onClick={addLinearLink}>
+                  Add
+                </Button>
+              </div>
+              {linearInputError && (
+                <p role="alert" className="pl-6 text-xs text-destructive">{linearInputError}</p>
+              )}
+            </div>
+          )}
+
           <div className="px-2 pb-2">
             {isMobile ? (
               <>
                 <div className="flex items-center gap-2">
-                  <DisabledTooltip disabled={!canSendMessage || isUploading} content={attachDisabledReason}>
-                    <Button
-                      type="button"
-                      size="icon"
-                      variant="ghost"
-                      className="h-8 w-8 shrink-0 rounded-lg text-muted-foreground hover:text-foreground"
-                      title="Attach files or images"
-                      disabled={!canSendMessage || isUploading}
-                      onClick={() => uploadInputRef.current?.click()}
-                    >
-                      {isUploading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Paperclip className="h-4 w-4" />}
-                    </Button>
+                  <DisabledTooltip disabled={!canSendMessage} content={attachDisabledReason}>
+                    <DropdownMenu>
+                      <DropdownMenuTrigger asChild>
+                        <Button
+                          type="button"
+                          size="icon"
+                          variant="ghost"
+                          className="h-8 w-8 shrink-0 rounded-lg text-muted-foreground hover:text-foreground"
+                          title="Add files, photos, or a Linear issue"
+                          aria-label="Add files, photos, or a Linear issue"
+                          disabled={!canSendMessage}
+                        >
+                          {isUploading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4" />}
+                        </Button>
+                      </DropdownMenuTrigger>
+                      <DropdownMenuContent align="start">
+                        <DropdownMenuItem
+                          disabled={isUploading}
+                          onClick={() => uploadInputRef.current?.click()}
+                        >
+                          <Paperclip className="mr-2 h-4 w-4" />
+                          Upload files or photos
+                        </DropdownMenuItem>
+                        <DropdownMenuItem onClick={() => setShowLinearInput(true)}>
+                          <LinearIcon className="mr-2 h-4 w-4" />
+                          Link Linear issue
+                        </DropdownMenuItem>
+                      </DropdownMenuContent>
+                    </DropdownMenu>
                   </DisabledTooltip>
                   <Button
                     type="button"
@@ -1380,18 +1491,35 @@ function SessionComposer({
               </>
             ) : (
               <div className="flex items-center gap-1">
-                <DisabledTooltip disabled={!canSendMessage || isUploading} content={attachDisabledReason}>
-                  <Button
-                    type="button"
-                    size="icon"
-                    variant="ghost"
-                    className="h-8 w-8 shrink-0 rounded-lg text-muted-foreground hover:text-foreground"
-                    title="Attach files or images"
-                    disabled={!canSendMessage || isUploading}
-                    onClick={() => uploadInputRef.current?.click()}
-                  >
-                    {isUploading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Paperclip className="h-4 w-4" />}
-                  </Button>
+                <DisabledTooltip disabled={!canSendMessage} content={attachDisabledReason}>
+                  <DropdownMenu>
+                    <DropdownMenuTrigger asChild>
+                      <Button
+                        type="button"
+                        size="icon"
+                        variant="ghost"
+                        className="h-8 w-8 shrink-0 rounded-lg text-muted-foreground hover:text-foreground"
+                        title="Add files, photos, or a Linear issue"
+                        aria-label="Add files, photos, or a Linear issue"
+                        disabled={!canSendMessage}
+                      >
+                        {isUploading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4" />}
+                      </Button>
+                    </DropdownMenuTrigger>
+                    <DropdownMenuContent align="start">
+                      <DropdownMenuItem
+                        disabled={isUploading}
+                        onClick={() => uploadInputRef.current?.click()}
+                      >
+                        <Paperclip className="mr-2 h-4 w-4" />
+                        Upload files or photos
+                      </DropdownMenuItem>
+                      <DropdownMenuItem onClick={() => setShowLinearInput(true)}>
+                        <LinearIcon className="mr-2 h-4 w-4" />
+                        Link Linear issue
+                      </DropdownMenuItem>
+                    </DropdownMenuContent>
+                  </DropdownMenu>
                 </DisabledTooltip>
 
                 {availableModels.length > 0 && (
