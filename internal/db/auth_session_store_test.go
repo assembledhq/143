@@ -33,6 +33,7 @@ var sessionColumns = []string{
 	"base_commit_sha", "repository_id", "diff_stats", "diff_history", "input_manifest",
 	"archived_at", "archived_by_user_id", "automation_run_id",
 	"pr_creation_state", "pr_creation_error", "pr_push_state", "pr_push_error", "diff_collected_at", "latest_diff_snapshot_id",
+	"has_unpushed_changes",
 	"linear_private", "linear_state_sync_disabled", "linear_identifier_hint", "linear_prepare_state",
 	"deleted_at", "git_identity_source", "git_identity_user_id", "created_at",
 }
@@ -95,6 +96,7 @@ func newSessionRow(id, issueID, orgID uuid.UUID, now time.Time) []interface{} {
 		(*string)(nil), // pr_push_error
 		nil,            // diff_collected_at
 		nil,            // latest_diff_snapshot_id
+		false,          // has_unpushed_changes
 		false,          // linear_private
 		false,          // linear_state_sync_disabled
 		(*string)(nil), // linear_identifier_hint
@@ -256,9 +258,38 @@ func TestSessionStore_GetByID(t *testing.T) {
 			require.NotNil(t, run.PrimaryIssueID, "should populate the primary issue ID")
 			require.Equal(t, issueID, *run.PrimaryIssueID, "should return the correct issue ID")
 			require.Equal(t, models.AgentType("claude_code"), run.AgentType, "should return the correct agent type")
+			require.False(t, run.HasUnpushedChanges, "GetByID should default has_unpushed_changes to false when the derived column is false")
 			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 		})
 	}
+}
+
+func TestSessionStore_GetByID_WithUnpushedChanges(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewSessionStore(mock)
+	orgID := uuid.New()
+	runID := uuid.New()
+	issueID := uuid.New()
+	now := time.Now()
+	row := newSessionRow(runID, issueID, orgID, now)
+	row[78] = true // has_unpushed_changes
+
+	mock.ExpectQuery("SELECT .+ FROM sessions WHERE id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(sessionColumns).
+				AddRow(row...),
+		)
+
+	run, err := store.GetByID(context.Background(), orgID, runID)
+	require.NoError(t, err, "GetByID should not return an error when the session exists")
+	require.True(t, run.HasUnpushedChanges, "GetByID should surface the derived has_unpushed_changes flag")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
 func TestSessionStore_ListRecentByOrg(t *testing.T) {
