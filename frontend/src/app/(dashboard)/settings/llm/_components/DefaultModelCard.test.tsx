@@ -77,7 +77,7 @@ describe("DefaultModelCard", () => {
     expect(screen.getByRole("combobox", { name: /LLM Model/i })).toBeDisabled();
   });
 
-  it("labels the key as 143's default and shows the cost-cap callout when on platform default", () => {
+  it("labels the key as 143's default and folds the cost-cap note into the helper copy when on platform default", () => {
     renderWithProviders(
       <DefaultModelCard
         value="gpt-5.4-mini"
@@ -94,7 +94,11 @@ describe("DefaultModelCard", () => {
     );
     expect(screen.getByText(/Using 143's default OpenAI key/i)).toBeInTheDocument();
     expect(screen.queryByText(/Uses your OpenAI key/)).not.toBeInTheDocument();
-    expect(screen.getByText(/capped at lower-cost models/i)).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        /Used for organization-level LLM features, separate from the coding agents configured on the Agent settings page\. 143's default key is capped at lower-cost models\./i,
+      ),
+    ).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /Add your own OpenAI key/i })).not.toBeInTheDocument();
   });
 });

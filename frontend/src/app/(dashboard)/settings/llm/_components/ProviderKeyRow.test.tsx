@@ -49,7 +49,7 @@ describe("ProviderKeyRow", () => {
         onEdit={() => {}}
       />,
     );
-    expect(screen.getByText("current")).toBeInTheDocument();
+    expect(screen.getByText("Current")).toBeInTheDocument();
 
     rerender(
       <ProviderKeyRow
@@ -60,7 +60,7 @@ describe("ProviderKeyRow", () => {
         onEdit={() => {}}
       />,
     );
-    expect(screen.queryByText("current")).not.toBeInTheDocument();
+    expect(screen.queryByText("Current")).not.toBeInTheDocument();
   });
 
   it("shows 'Using 143's default key' when only the platform default is available", () => {
