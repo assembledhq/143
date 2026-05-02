@@ -3394,6 +3394,9 @@ func TestPushChangesToPR_EnqueuesHealthSyncAfterSuccessfulPush(t *testing.T) {
 	mock.ExpectExec("UPDATE pull_requests SET head_sha").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectExec("UPDATE session_diff_snapshots").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 	mock.ExpectQuery("INSERT INTO jobs").
 		WithArgs(pgx.NamedArgs{
 			"org_id":     orgID,
@@ -4280,6 +4283,9 @@ func TestCreatePR_SuccessPushesSnapshotBranchAndStoresPR(t *testing.T) {
 	mock.ExpectQuery("INSERT INTO pull_requests").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at", "updated_at"}).AddRow(uuid.New(), now, now))
+	mock.ExpectExec("UPDATE session_diff_snapshots").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 	mock.ExpectQuery("UPDATE sessions SET status").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
@@ -4426,6 +4432,9 @@ func TestCreatePR_SuccessDispatchesPostPRSnapshotUpload(t *testing.T) {
 	mock.ExpectQuery("INSERT INTO pull_requests").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at", "updated_at"}).AddRow(uuid.New(), now, now))
+	mock.ExpectExec("UPDATE session_diff_snapshots").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 	// SetPendingSnapshotKey: the synchronous write that records the
 	// post-PR upload in flight. pgx NamedArgs expand to positional args by
 	// @-placeholder order: SET pending_snapshot_key = @key first, then
