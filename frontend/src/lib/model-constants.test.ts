@@ -7,8 +7,7 @@ import {
   AVAILABLE_PM_MODELS,
   DEFAULT_PM_MODEL,
   DEFAULT_LLM_MODEL,
-  CLAUDE_CODE_MODEL_SONNET,
-  LEGACY_PM_ALIASES,
+  CODEX_MODEL_GPT_5_4,
   LLM_PROVIDER_INFO,
   PM_MODELS_BY_PROVIDER,
   LLM_MODELS_BY_PROVIDER,
@@ -16,13 +15,12 @@ import {
 } from "./model-constants";
 
 describe("model constants", () => {
-  it("uses claude-sonnet-4-5 as the PM default", () => {
-    expect(DEFAULT_PM_MODEL).toBe(CLAUDE_CODE_MODEL_SONNET);
+  it("uses gpt-5.4 as the PM default", () => {
+    expect(DEFAULT_PM_MODEL).toBe(CODEX_MODEL_GPT_5_4);
   });
 
-  it("includes legacy aliases and all provider models in AVAILABLE_PM_MODELS", () => {
+  it("includes all provider models in AVAILABLE_PM_MODELS", () => {
     expect(AVAILABLE_PM_MODELS).toEqual([
-      ...LEGACY_PM_ALIASES,
       ...AVAILABLE_CLAUDE_CODE_MODELS,
       ...AVAILABLE_GEMINI_CLI_MODELS,
       ...AVAILABLE_CODEX_MODELS,
@@ -38,6 +36,7 @@ describe("model constants", () => {
 
   it("includes latest Claude Code model aliases", () => {
     expect(AVAILABLE_CLAUDE_CODE_MODELS).toEqual([
+      "claude-opus-4-7",
       "claude-opus-4-6",
       "claude-sonnet-4-6",
       "claude-sonnet-4-5",
@@ -56,6 +55,7 @@ describe("model constants", () => {
 
   it("includes latest Codex models", () => {
     expect(AVAILABLE_CODEX_MODELS).toEqual([
+      "gpt-5.5",
       "gpt-5.4",
       "gpt-5.4-mini",
       "gpt-5.3-codex",

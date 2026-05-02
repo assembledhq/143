@@ -18,7 +18,7 @@ func TestParseRepoSettings_Empty(t *testing.T) {
 
 func TestParseRepoSettings_WithPM(t *testing.T) {
 	t.Parallel()
-	raw := json.RawMessage(`{"pm":{"pm_schedule_hours":2,"pm_model":"opus"}}`)
+	raw := json.RawMessage(`{"pm":{"pm_schedule_hours":2,"pm_model":"claude-opus-4-7"}}`)
 	s, err := ParseRepoSettings(raw)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -29,8 +29,8 @@ func TestParseRepoSettings_WithPM(t *testing.T) {
 	if *s.PM.PMScheduleHours != 2 {
 		t.Fatalf("expected pm_schedule_hours=2, got %d", *s.PM.PMScheduleHours)
 	}
-	if *s.PM.PMModel != "opus" {
-		t.Fatalf("expected pm_model=opus, got %s", *s.PM.PMModel)
+	if *s.PM.PMModel != "claude-opus-4-7" {
+		t.Fatalf("expected pm_model=claude-opus-4-7, got %s", *s.PM.PMModel)
 	}
 }
 
@@ -62,7 +62,7 @@ func TestMergeRepoPMSettings_Overrides(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	hours := 2
-	model := "opus"
+	model := "claude-opus-4-7"
 	threshold := 50.0
 	repo := RepoSettings{
 		PM: &RepoPMSettings{
@@ -81,8 +81,8 @@ func TestMergeRepoPMSettings_Overrides(t *testing.T) {
 	if merged.PMScheduleHours != 2 {
 		t.Fatalf("expected schedule hours=2, got %d", merged.PMScheduleHours)
 	}
-	if merged.PMModel != "opus" {
-		t.Fatalf("expected pm_model=opus, got %s", merged.PMModel)
+	if merged.PMModel != "claude-opus-4-7" {
+		t.Fatalf("expected pm_model=claude-opus-4-7, got %s", merged.PMModel)
 	}
 	if merged.MinPriorityThreshold != 50.0 {
 		t.Fatalf("expected threshold=50, got %f", merged.MinPriorityThreshold)
@@ -121,7 +121,7 @@ func TestMergeRepoPMSettings_PartialOverride(t *testing.T) {
 
 func TestValidateRepoPMSettings_ValidModel(t *testing.T) {
 	t.Parallel()
-	model := "opus"
+	model := "claude-opus-4-7"
 	pm := RepoPMSettings{PMModel: &model}
 	if err := ValidateRepoPMSettings(pm); err != nil {
 		t.Fatalf("expected valid, got: %v", err)
