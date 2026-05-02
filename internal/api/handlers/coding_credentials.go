@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"sort"
 	"strings"
 
 	"github.com/go-chi/chi/v5"
@@ -185,20 +186,43 @@ func (h *CodingCredentialHandler) listResolved(ctx context.Context, scope models
 		return nil, err
 	}
 	seen := map[uuid.UUID]struct{}{}
-	out := make([]models.CodingCredentialSummary, 0)
+	rows := make([]models.DecryptedCodingCredential, 0)
 	for _, provider := range models.CodingAgentProviders {
 		for _, cred := range resolved[provider] {
-			if _, dup := seen[cred.ID]; dup {
-				continue
-			}
-			seen[cred.ID] = struct{}{}
-			out = append(out, summaryFromDecryptedCoding(cred))
+			rows = append(rows, cred)
 		}
+	}
+	sortResolvedCodingRows(rows)
+
+	out := make([]models.CodingCredentialSummary, 0, len(rows))
+	for _, cred := range rows {
+		if _, dup := seen[cred.ID]; dup {
+			continue
+		}
+		seen[cred.ID] = struct{}{}
+		out = append(out, summaryFromDecryptedCoding(cred))
 	}
 	// Mark the first runnable in each (scope, agent) tier as default. The
 	// resolver picks tier-by-tier; the API hint mirrors that.
 	markDefaults(out)
 	return out, nil
+}
+
+func sortResolvedCodingRows(rows []models.DecryptedCodingCredential) {
+	sort.SliceStable(rows, func(i, j int) bool {
+		leftPersonal := rows[i].UserID != nil
+		rightPersonal := rows[j].UserID != nil
+		if leftPersonal != rightPersonal {
+			return leftPersonal
+		}
+		if rows[i].Priority != rows[j].Priority {
+			return rows[i].Priority < rows[j].Priority
+		}
+		if !rows[i].CreatedAt.Equal(rows[j].CreatedAt) {
+			return rows[i].CreatedAt.Before(rows[j].CreatedAt)
+		}
+		return false
+	})
 }
 
 // Create handles POST /api/v1/coding-credentials.
@@ -312,28 +336,14 @@ func (h *CodingCredentialHandler) Update(w http.ResponseWriter, r *http.Request)
 		}
 	}
 	if input.Status != nil {
-		// The handler whitelist deliberately excludes pending_auth and forbids
-		// promoting a pending row to active — that path lives in PromotePending,
-		// which is reachable only from the OAuth-completion services. Without
-		// this gate, a user could PATCH {"status":"active"} on their own
-		// pending_auth row and the resolver would start picking a credential
-		// that holds PKCE state instead of real tokens.
+		// The handler whitelist deliberately excludes active and pending_auth.
+		// Activation belongs to provider-specific verification/completion
+		// flows, never a generic PATCH, otherwise a user could mark an invalid
+		// or PKCE-only credential runnable without proving the secret works.
 		if !isAllowedHandlerStatus(*input.Status) {
 			writeError(w, r, http.StatusBadRequest, "INVALID_STATUS",
-				"status must be one of: active, disabled, invalid (pending_auth is set by the OAuth flow)")
+				"status must be one of: disabled, invalid (active and pending_auth are set by verification flows)")
 			return
-		}
-		if *input.Status == models.CodingCredentialStatusActive {
-			current, err := h.store.Get(r.Context(), scope, id)
-			if err != nil {
-				h.handleStoreError(w, r, err, "READ_BEFORE_STATUS_FAILED")
-				return
-			}
-			if current.Status == models.CodingCredentialStatusPendingAuth {
-				writeError(w, r, http.StatusBadRequest, "INVALID_STATUS",
-					"pending_auth credentials must be activated by completing the OAuth flow")
-				return
-			}
 		}
 		if err := h.store.UpdateStatus(r.Context(), scope, id, *input.Status); err != nil {
 			h.handleStoreError(w, r, err, "STATUS_FAILED")
@@ -499,13 +509,12 @@ func isRunnableCodingStatus(s models.CodingAuthStatus) bool {
 }
 
 // isAllowedHandlerStatus enumerates the status values the API surface accepts
-// from a client. pending_auth is intentionally excluded — it is set by the
-// OAuth-initiate endpoints and cleared by PromotePending; any other path that
-// flips a row to active is bypassing the OAuth completion check.
+// from a client. active and pending_auth are intentionally excluded — those
+// states are set by provider-specific verification/OAuth flows. Generic PATCH
+// can only remove a row from the runnable set or mark it invalid.
 func isAllowedHandlerStatus(s string) bool {
 	switch s {
-	case models.CodingCredentialStatusActive,
-		models.CodingCredentialStatusDisabled,
+	case models.CodingCredentialStatusDisabled,
 		models.CodingCredentialStatusInvalid:
 		return true
 	}

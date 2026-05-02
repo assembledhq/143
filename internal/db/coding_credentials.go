@@ -25,6 +25,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/assembledhq/143/internal/crypto"
 	"github.com/assembledhq/143/internal/models"
@@ -819,8 +820,8 @@ func (s *CodingCredentialStore) UpdateStatus(ctx context.Context, scope models.S
 		provider = rowProvider
 		tag, execErr := tx.Exec(ctx,
 			`UPDATE coding_credentials
-			 SET status = @status, last_verified_at = now(), updated_at = now()
-			 WHERE id = @id`,
+				 SET status = @status, updated_at = now()
+				 WHERE id = @id`,
 			pgx.NamedArgs{"id": id, "status": status},
 		)
 		if execErr != nil {
@@ -855,14 +856,15 @@ func (s *CodingCredentialStore) Reorder(ctx context.Context, scope models.Scope,
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck
 
+	if err := s.acquireScopeLockTx(ctx, tx, scope); err != nil {
+		return err
+	}
+
 	for idx, id := range orderedIDs {
 		if err := s.assertScopeAndProviderTx(ctx, tx, scope, id); err != nil {
 			return err
 		}
-		tag, execErr := tx.Exec(ctx,
-			`UPDATE coding_credentials SET priority = @priority, updated_at = now() WHERE id = @id`,
-			pgx.NamedArgs{"priority": idx + 1, "id": id},
-		)
+		tag, execErr := s.updatePriorityTx(ctx, tx, scope, id, idx+1)
 		if execErr != nil {
 			return fmt.Errorf("reorder credential %s: %w", id, execErr)
 		}
@@ -891,6 +893,10 @@ func (s *CodingCredentialStore) Move(ctx context.Context, scope models.Scope, id
 		return err
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck
+
+	if err := s.acquireScopeLockTx(ctx, tx, scope); err != nil {
+		return err
+	}
 
 	if err := s.assertScopeAndProviderTx(ctx, tx, scope, id); err != nil {
 		return err
@@ -977,16 +983,16 @@ func (s *CodingCredentialStore) Move(ctx context.Context, scope models.Scope, id
 		currentPriority[rid] = p
 	}
 	rows.Close()
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterate current priorities: %w", err)
+	}
 
 	for idx, rid := range newOrder {
 		newPriority := idx + 1
 		if currentPriority[rid] == newPriority {
 			continue
 		}
-		if _, execErr := tx.Exec(ctx,
-			`UPDATE coding_credentials SET priority = @priority, updated_at = now() WHERE id = @id`,
-			pgx.NamedArgs{"priority": newPriority, "id": rid},
-		); execErr != nil {
+		if _, execErr := s.updatePriorityTx(ctx, tx, scope, rid, newPriority); execErr != nil {
 			return fmt.Errorf("apply move priority: %w", execErr)
 		}
 	}
@@ -1137,11 +1143,11 @@ func (s *CodingCredentialStore) fetchStackTx(ctx context.Context, tx pgx.Tx, sco
 }
 
 // withScopeLock acquires a per-scope advisory lock to serialize stack-priority
-// updates inside the surrounding transaction. Without it, two concurrent
-// Create calls would read the same MAX(priority) and emit duplicate slot
-// numbers. Priority is per-stack (not per-provider), so the lock key omits
-// provider — two concurrent Creates for different providers in the same scope
-// must still serialize through the same lock.
+// updates inside the surrounding transaction. Without it, concurrent Create,
+// Reorder, and Move calls could compute from stale priorities and emit
+// duplicate slot numbers. Priority is per-stack (not per-provider), so the
+// lock key omits provider — concurrent writes for different providers in the
+// same scope must still serialize through the same lock.
 func (s *CodingCredentialStore) withScopeLock(ctx context.Context, scope models.Scope, fn func(tx pgx.Tx, nextPriority int) error) error {
 	tx, err := s.beginTx(ctx)
 	if err != nil {
@@ -1149,12 +1155,8 @@ func (s *CodingCredentialStore) withScopeLock(ctx context.Context, scope models.
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck
 
-	lockKey := fmt.Sprintf("coding_credentials:%s:%s", scope.OrgID, scopePtrKey(scope.UserID))
-	if _, err := tx.Exec(ctx,
-		`SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`,
-		lockKey,
-	); err != nil {
-		return fmt.Errorf("acquire scope lock: %w", err)
+	if err := s.acquireScopeLockTx(ctx, tx, scope); err != nil {
+		return err
 	}
 
 	args := pgx.NamedArgs{"org_id": scope.OrgID}
@@ -1176,6 +1178,36 @@ func (s *CodingCredentialStore) withScopeLock(ctx context.Context, scope models.
 		return err
 	}
 	return tx.Commit(ctx)
+}
+
+func (s *CodingCredentialStore) acquireScopeLockTx(ctx context.Context, tx pgx.Tx, scope models.Scope) error {
+	lockKey := fmt.Sprintf("coding_credentials:%s:%s", scope.OrgID, scopePtrKey(scope.UserID))
+	if _, err := tx.Exec(ctx,
+		`SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`,
+		lockKey,
+	); err != nil {
+		return fmt.Errorf("acquire scope lock: %w", err)
+	}
+	return nil
+}
+
+func (s *CodingCredentialStore) updatePriorityTx(ctx context.Context, tx pgx.Tx, scope models.Scope, id uuid.UUID, priority int) (pgconn.CommandTag, error) {
+	args := pgx.NamedArgs{"priority": priority, "id": id, "org_id": scope.OrgID}
+	if scope.IsPersonal() {
+		args["user_id"] = *scope.UserID
+		return tx.Exec(ctx,
+			`UPDATE coding_credentials
+			 SET priority = @priority, updated_at = now()
+			 WHERE id = @id AND org_id = @org_id AND user_id = @user_id`,
+			args,
+		)
+	}
+	return tx.Exec(ctx,
+		`UPDATE coding_credentials
+		 SET priority = @priority, updated_at = now()
+		 WHERE id = @id AND org_id = @org_id AND user_id IS NULL`,
+		args,
+	)
 }
 
 func scopePtrKey(u *uuid.UUID) string {

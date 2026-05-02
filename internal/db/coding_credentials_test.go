@@ -679,7 +679,7 @@ func TestCodingCredentialStoreMutations(t *testing.T) {
 			name: "update status",
 			setup: func(t *testing.T, mock pgxmock.PgxPoolIface, store *CodingCredentialStore, scope models.Scope, id uuid.UUID) {
 				expectScopedMutation(t, mock, scope, id, models.ProviderOpenAI)
-				mock.ExpectExec("UPDATE coding_credentials").
+				mock.ExpectExec(`UPDATE coding_credentials\s+SET status = @status, updated_at = now\(\)`).
 					WithArgs(codingAnyArgs(2)...).
 					WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 				mock.ExpectCommit()
@@ -692,7 +692,7 @@ func TestCodingCredentialStoreMutations(t *testing.T) {
 			name: "disable",
 			setup: func(t *testing.T, mock pgxmock.PgxPoolIface, store *CodingCredentialStore, scope models.Scope, id uuid.UUID) {
 				expectScopedMutation(t, mock, scope, id, models.ProviderOpenAI)
-				mock.ExpectExec("UPDATE coding_credentials").
+				mock.ExpectExec(`UPDATE coding_credentials\s+SET status = @status, updated_at = now\(\)`).
 					WithArgs(codingAnyArgs(2)...).
 					WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 				mock.ExpectCommit()
@@ -794,12 +794,15 @@ func TestCodingCredentialStoreReorderMoveAndJanitor(t *testing.T) {
 			name: "reorder updates each row",
 			setup: func(t *testing.T, mock pgxmock.PgxPoolIface, scope models.Scope, ids []uuid.UUID) {
 				mock.ExpectBegin()
+				mock.ExpectExec("pg_advisory_xact_lock").
+					WithArgs(codingAnyArgs(1)...).
+					WillReturnResult(pgxmock.NewResult("SELECT", 1))
 				for range ids {
 					mock.ExpectQuery("SELECT org_id, user_id, provider").
 						WithArgs(codingAnyArgs(1)...).
 						WillReturnRows(pgxmock.NewRows([]string{"org_id", "user_id", "provider"}).AddRow(scope.OrgID, scope.UserID, string(models.ProviderOpenAI)))
-					mock.ExpectExec("UPDATE coding_credentials SET priority").
-						WithArgs(codingAnyArgs(2)...).
+					mock.ExpectExec(`UPDATE coding_credentials\s+SET priority`).
+						WithArgs(codingAnyArgs(4)...).
 						WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 				}
 				mock.ExpectCommit()
@@ -812,6 +815,9 @@ func TestCodingCredentialStoreReorderMoveAndJanitor(t *testing.T) {
 			name: "move to top rewrites changed priorities",
 			setup: func(t *testing.T, mock pgxmock.PgxPoolIface, scope models.Scope, ids []uuid.UUID) {
 				mock.ExpectBegin()
+				mock.ExpectExec("pg_advisory_xact_lock").
+					WithArgs(codingAnyArgs(1)...).
+					WillReturnResult(pgxmock.NewResult("SELECT", 1))
 				mock.ExpectQuery("SELECT org_id, user_id, provider").
 					WithArgs(codingAnyArgs(1)...).
 					WillReturnRows(pgxmock.NewRows([]string{"org_id", "user_id", "provider"}).AddRow(scope.OrgID, scope.UserID, string(models.ProviderOpenAI)))
@@ -821,14 +827,14 @@ func TestCodingCredentialStoreReorderMoveAndJanitor(t *testing.T) {
 				mock.ExpectQuery("SELECT id, priority FROM coding_credentials").
 					WithArgs(codingAnyArgs(3)...).
 					WillReturnRows(pgxmock.NewRows([]string{"id", "priority"}).AddRow(ids[0], 1).AddRow(ids[1], 2).AddRow(ids[2], 3))
-				mock.ExpectExec("UPDATE coding_credentials SET priority").
-					WithArgs(codingAnyArgs(2)...).
+				mock.ExpectExec(`UPDATE coding_credentials\s+SET priority`).
+					WithArgs(codingAnyArgs(4)...).
 					WillReturnResult(pgxmock.NewResult("UPDATE", 1))
-				mock.ExpectExec("UPDATE coding_credentials SET priority").
-					WithArgs(codingAnyArgs(2)...).
+				mock.ExpectExec(`UPDATE coding_credentials\s+SET priority`).
+					WithArgs(codingAnyArgs(4)...).
 					WillReturnResult(pgxmock.NewResult("UPDATE", 1))
-				mock.ExpectExec("UPDATE coding_credentials SET priority").
-					WithArgs(codingAnyArgs(2)...).
+				mock.ExpectExec(`UPDATE coding_credentials\s+SET priority`).
+					WithArgs(codingAnyArgs(4)...).
 					WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 				mock.ExpectCommit()
 			},
@@ -876,6 +882,9 @@ func TestCodingCredentialStoreReorderMoveAndJanitor(t *testing.T) {
 
 		// 1. Begin + lockAndAssertScope on the moving id.
 		mock.ExpectBegin()
+		mock.ExpectExec("pg_advisory_xact_lock").
+			WithArgs(codingAnyArgs(1)...).
+			WillReturnResult(pgxmock.NewResult("SELECT", 1))
 		mock.ExpectQuery("SELECT org_id, user_id, provider").
 			WithArgs(codingAnyArgs(1)...).
 			WillReturnRows(pgxmock.NewRows([]string{"org_id", "user_id", "provider"}).

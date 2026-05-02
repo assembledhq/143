@@ -279,6 +279,84 @@ func TestCodingCredentialHandlerList(t *testing.T) {
 	}
 }
 
+func TestCodingCredentialHandlerListResolvedSortsLikeRuntimePicker(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	userID := uuid.New()
+	apiKeyID := uuid.New()
+	subscriptionID := uuid.New()
+	orgFallbackID := uuid.New()
+	now := time.Now().UTC()
+
+	store := &mockCodingCredentialStore{
+		listResolveMultiFn: func(_ context.Context, gotOrgID uuid.UUID, gotUserID *uuid.UUID, providers []models.ProviderName) (map[models.ProviderName][]models.DecryptedCodingCredential, error) {
+			require.Equal(t, orgID, gotOrgID, "List resolved should pass the active org to the bulk resolver")
+			require.NotNil(t, gotUserID, "List resolved should pass the current user to the bulk resolver")
+			require.Equal(t, userID, *gotUserID, "List resolved should pass the current user id")
+			require.Contains(t, providers, models.ProviderAnthropic, "bulk resolver should include Anthropic API-key provider")
+			require.Contains(t, providers, models.ProviderAnthropicSubscription, "bulk resolver should include Anthropic subscription provider")
+			return map[models.ProviderName][]models.DecryptedCodingCredential{
+				models.ProviderAnthropic: {
+					{
+						ID:        apiKeyID,
+						OrgID:     orgID,
+						UserID:    &userID,
+						Provider:  models.ProviderAnthropic,
+						Label:     "Claude API fallback",
+						Config:    models.AnthropicConfig{APIKey: "sk-ant"},
+						Priority:  2,
+						Status:    models.CodingCredentialStatusActive,
+						CreatedAt: now.Add(2 * time.Minute),
+						UpdatedAt: now,
+					},
+					{
+						ID:        orgFallbackID,
+						OrgID:     orgID,
+						Provider:  models.ProviderAnthropic,
+						Label:     "Org Claude",
+						Config:    models.AnthropicConfig{APIKey: "sk-ant-org"},
+						Priority:  1,
+						Status:    models.CodingCredentialStatusActive,
+						CreatedAt: now,
+						UpdatedAt: now,
+					},
+				},
+				models.ProviderAnthropicSubscription: {
+					{
+						ID:        subscriptionID,
+						OrgID:     orgID,
+						UserID:    &userID,
+						Provider:  models.ProviderAnthropicSubscription,
+						Label:     "Claude subscription",
+						Config:    models.AnthropicSubscriptionConfig{AccessToken: "tok", RefreshToken: "refresh"},
+						Priority:  1,
+						Status:    models.CodingCredentialStatusActive,
+						CreatedAt: now.Add(time.Minute),
+						UpdatedAt: now,
+					},
+				},
+			}, nil
+		},
+	}
+	handler := NewCodingCredentialHandler(store, nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/coding-credentials?scope=resolved", nil)
+	req = withAdminUser(req, userID, orgID)
+	rr := httptest.NewRecorder()
+
+	handler.List(rr, req)
+
+	require.Equal(t, http.StatusOK, rr.Code, "List should return success for resolved scope")
+	var resp models.ListResponse[models.CodingCredentialSummary]
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp), "List response should be valid JSON")
+	require.Equal(t, []uuid.UUID{subscriptionID, apiKeyID, orgFallbackID},
+		[]uuid.UUID{resp.Data[0].ID, resp.Data[1].ID, resp.Data[2].ID},
+		"resolved list should sort all provider buckets by runtime order before rendering defaults")
+	require.True(t, resp.Data[0].IsDefault, "first personal Claude row should be marked as default")
+	require.False(t, resp.Data[1].IsDefault, "lower-priority personal Claude row should not be marked as default")
+	require.True(t, resp.Data[2].IsDefault, "org fallback row should be marked as default within the org fallback scope")
+}
+
 func TestCodingCredentialHandlerCreate(t *testing.T) {
 	t.Parallel()
 
@@ -671,37 +749,21 @@ func TestCodingCredentialHandlerUpdateRejectsPendingAuthPromotion(t *testing.T) 
 	require.False(t, updateCalled, "Update should not write status when pending_auth promotion is rejected")
 }
 
-func TestCodingCredentialHandlerUpdateAllowsInvalidToActive(t *testing.T) {
+func TestCodingCredentialHandlerUpdateRejectsClientSideActiveStatus(t *testing.T) {
 	t.Parallel()
 
 	orgID := uuid.New()
 	userID := uuid.New()
 	rowID := uuid.New()
-	now := time.Now().UTC()
-	getCalls := 0
-	var statusWritten string
+	var storeCalled bool
 
 	store := &mockCodingCredentialStore{
 		getFn: func(_ context.Context, _ models.Scope, _ uuid.UUID) (*models.DecryptedCodingCredential, error) {
-			getCalls++
-			status := models.CodingCredentialStatusInvalid
-			if getCalls > 1 {
-				status = models.CodingCredentialStatusActive
-			}
-			return &models.DecryptedCodingCredential{
-				ID:        rowID,
-				OrgID:     orgID,
-				UserID:    &userID,
-				Provider:  models.ProviderAnthropic,
-				Label:     "Claude API key",
-				Config:    models.AnthropicConfig{APIKey: "sk-ant"},
-				Status:    status,
-				CreatedAt: now,
-				UpdatedAt: now,
-			}, nil
+			storeCalled = true
+			return nil, db.ErrCodingCredentialNotFound
 		},
 		updateStatusFn: func(_ context.Context, _ models.Scope, _ uuid.UUID, status string) error {
-			statusWritten = status
+			storeCalled = true
 			return nil
 		},
 	}
@@ -716,9 +778,9 @@ func TestCodingCredentialHandlerUpdateAllowsInvalidToActive(t *testing.T) {
 
 	handler.Update(rr, req)
 
-	require.Equal(t, http.StatusOK, rr.Code, "Update should allow active status for non-pending credentials")
-	require.Equal(t, models.CodingCredentialStatusActive, statusWritten, "Update should write the requested active status")
-	require.Equal(t, 2, getCalls, "Update should read before status validation and read back after the write")
+	require.Equal(t, http.StatusBadRequest, rr.Code, "Update should reject client-side active status changes")
+	require.Contains(t, rr.Body.String(), "INVALID_STATUS", "Update should return a stable invalid status error")
+	require.False(t, storeCalled, "Update should reject active status before touching the store")
 }
 
 func TestCodingCredentialHandlerUpdateBranches(t *testing.T) {
