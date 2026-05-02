@@ -88,8 +88,32 @@ func TestMaybeRegenerateTitle_RunsOnThirdTurn(t *testing.T) {
 
 	err := svc.MaybeRegenerateTitle(context.Background(), uuid.New(), uuid.New())
 	require.NoError(t, err)
-	assert.Equal(t, 1, llm.calls)
-	assert.Equal(t, "New title from LLM", sessions.updatedTitle)
+	require.Equal(t, 1, llm.calls, "should still consult the LLM on due turns for potential topic shifts")
+	require.Equal(t, "New title from LLM", sessions.updatedTitle, "should update the title when the model returns a new dominant topic")
+}
+
+func TestMaybeRegenerateTitle_FillsMissingTitleWhenDue(t *testing.T) {
+	t.Parallel()
+	llm := &mockLLM{response: "New title from LLM"}
+	sessions := &mockTitleSessionStore{
+		session: models.Session{CurrentTurn: 3},
+	}
+	messages := &mockTitleMessageStore{
+		messages: []models.SessionMessage{
+			{TurnNumber: 0, Role: models.MessageRoleUser, Content: "Fix the login bug"},
+			{TurnNumber: 0, Role: models.MessageRoleAssistant, Content: "I'll fix it"},
+			{TurnNumber: 1, Role: models.MessageRoleUser, Content: "Also update tests"},
+			{TurnNumber: 1, Role: models.MessageRoleAssistant, Content: "Done"},
+			{TurnNumber: 2, Role: models.MessageRoleUser, Content: "Now refactor auth"},
+			{TurnNumber: 2, Role: models.MessageRoleAssistant, Content: "Refactored"},
+		},
+	}
+	svc := NewSessionTitleService(llm, sessions, messages)
+
+	err := svc.MaybeRegenerateTitle(context.Background(), uuid.New(), uuid.New())
+	require.NoError(t, err, "missing titles should still be generated on regeneration turns")
+	require.Equal(t, 1, llm.calls, "should call LLM when session title is missing")
+	require.Equal(t, "New title from LLM", sessions.updatedTitle, "should persist the generated title when session title is missing")
 }
 
 func TestMaybeRegenerateTitle_SkipsUpdateWhenTitleUnchanged(t *testing.T) {
@@ -107,9 +131,9 @@ func TestMaybeRegenerateTitle_SkipsUpdateWhenTitleUnchanged(t *testing.T) {
 	svc := NewSessionTitleService(llm, sessions, messages)
 
 	err := svc.MaybeRegenerateTitle(context.Background(), uuid.New(), uuid.New())
-	require.NoError(t, err)
-	assert.Equal(t, 1, llm.calls)
-	assert.Empty(t, sessions.updatedTitle, "should not update when title unchanged")
+	require.NoError(t, err, "unchanged titles should be accepted without updating")
+	require.Equal(t, 1, llm.calls, "should ask the LLM whether the title still fits")
+	require.Empty(t, sessions.updatedTitle, "should not update when the LLM keeps the existing title")
 }
 
 func TestMaybeRegenerateTitle_SkipsEmptyOrTooLong(t *testing.T) {

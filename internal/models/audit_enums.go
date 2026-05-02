@@ -40,6 +40,7 @@ const (
 	AuditActionSessionReviewCommentUpdated AuditAction = "session.review_comment.updated"
 	AuditActionSessionReviewCommentDeleted AuditAction = "session.review_comment.deleted"
 	AuditActionSessionPRRequested          AuditAction = "session.pr_requested"
+	AuditActionSessionPRPushRequested      AuditAction = "session.pr_push_requested"
 	AuditActionSessionRetried              AuditAction = "session.retried"
 	AuditActionSessionArchived             AuditAction = "session.archived"
 	AuditActionSessionUnarchived           AuditAction = "session.unarchived"
@@ -50,6 +51,8 @@ const (
 	AuditActionProjectDeleted        AuditAction = "project.deleted"
 	AuditActionProjectStarted        AuditAction = "project.started"
 	AuditActionProjectCompleted      AuditAction = "project.completed"
+	AuditActionProjectArchived       AuditAction = "project.archived"
+	AuditActionProjectUnarchived     AuditAction = "project.unarchived"
 	AuditActionProjectRunTriggered   AuditAction = "project.run_triggered"
 	AuditActionProjectCycleCompleted AuditAction = "project.cycle_completed"
 	AuditActionProjectTaskCreated    AuditAction = "project.task.created"
@@ -120,10 +123,11 @@ func (a AuditAction) Validate() error {
 		AuditActionSessionFailed, AuditActionSessionCancelled, AuditActionSessionStatusChanged,
 		AuditActionSessionQuestionCreated, AuditActionSessionQuestionAnswered, AuditActionSessionResumedLocally,
 		AuditActionSessionReviewCommentCreated, AuditActionSessionReviewCommentUpdated, AuditActionSessionReviewCommentDeleted,
-		AuditActionSessionPRRequested, AuditActionSessionRetried,
+		AuditActionSessionPRRequested, AuditActionSessionPRPushRequested, AuditActionSessionRetried,
 		AuditActionSessionArchived, AuditActionSessionUnarchived,
 		AuditActionProjectCreated, AuditActionProjectUpdated, AuditActionProjectDeleted,
-		AuditActionProjectStarted, AuditActionProjectCompleted, AuditActionProjectRunTriggered,
+		AuditActionProjectStarted, AuditActionProjectCompleted, AuditActionProjectArchived,
+		AuditActionProjectUnarchived, AuditActionProjectRunTriggered,
 		AuditActionProjectCycleCompleted, AuditActionProjectTaskCreated, AuditActionProjectTaskUpdated,
 		AuditActionProjectTaskDeleted, AuditActionProjectTaskRetried,
 		AuditActionAutomationCreated, AuditActionAutomationUpdated, AuditActionAutomationDeleted,

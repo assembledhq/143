@@ -20,6 +20,7 @@ import (
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/services/github/identity"
 	"github.com/assembledhq/143/internal/services/integration"
+	"github.com/assembledhq/143/internal/services/linear"
 	"github.com/assembledhq/143/internal/services/mcp"
 	"github.com/assembledhq/143/internal/services/sandboxauth"
 	"github.com/assembledhq/143/internal/services/storage"
@@ -206,7 +207,7 @@ type JobStore interface {
 // UsageRecorder tracks container lifecycle events for billing.
 type UsageRecorder interface {
 	ContainerStarted(ctx context.Context, orgID, sessionID uuid.UUID, sandbox *Sandbox, cfg SandboxConfig, startedAt time.Time) uuid.UUID
-	ContainerStopped(ctx context.Context, orgID, sessionID uuid.UUID, eventID uuid.UUID, startedAt time.Time, exitReason string)
+	ContainerStopped(ctx context.Context, orgID, sessionID uuid.UUID, eventID uuid.UUID, containerID string, startedAt time.Time, exitReason string)
 }
 
 // MemoryService provides scored memory context for agent prompts.
@@ -285,6 +286,16 @@ type DurableCheckpoint struct {
 	Turn           int
 	SnapshotKey    string
 	AgentSessionID string
+}
+
+// ContinueSessionOptions carries execution-scoped overrides for a follow-up
+// turn. Threaded sessions use this to run a tab with its selected agent/model
+// while keeping the parent session row as the shared sandbox/session identity.
+type ContinueSessionOptions struct {
+	AgentType            models.AgentType
+	ModelOverride        *string
+	ThreadAgentSessionID *string
+	ResultAgentSessionID *string
 }
 
 // OrchestratorConfig holds the dependencies for creating an Orchestrator.
@@ -608,7 +619,7 @@ func (o *Orchestrator) RecoverSession(ctx context.Context, session *models.Sessi
 	}
 	event.Msg("recovering session from latest durable checkpoint")
 
-	return o.ContinueSession(ctx, session)
+	return o.ContinueSession(ctx, session, nil)
 }
 
 func (o *Orchestrator) beginRuntimeControl(ctx context.Context, controller *runtimeController, orgID, sessionID uuid.UUID, fallbackStatus string, capability models.CheckpointCapability, startedAt time.Time, log zerolog.Logger) error {
@@ -745,7 +756,7 @@ func primaryLinkedIssue(links []models.SessionIssueLink) *models.SessionIssueLin
 	return nil
 }
 
-func snapshotEntriesFromLinks(links []models.SessionIssueLink) []models.SessionIssueSnapshotEntry {
+func snapshotEntriesFromLinks(links []models.SessionIssueLink) ([]models.SessionIssueSnapshotEntry, error) {
 	entries := make([]models.SessionIssueSnapshotEntry, 0, len(links))
 	for _, link := range links {
 		entry := models.SessionIssueSnapshotEntry{
@@ -770,9 +781,59 @@ func snapshotEntriesFromLinks(links []models.SessionIssueLink) []models.SessionI
 		if link.IssueSource != nil {
 			entry.Source = *link.IssueSource
 		}
+		if err := applyLinearPrimarySnapshot(&entry, link.RawLinearPrimarySnapshot); err != nil {
+			return nil, fmt.Errorf("decode linear primary snapshot for link %s: %w", link.ID, err)
+		}
 		entries = append(entries, entry)
 	}
-	return entries
+	return entries, nil
+}
+
+func applyLinearPrimarySnapshot(entry *models.SessionIssueSnapshotEntry, raw json.RawMessage) error {
+	if entry == nil || len(raw) == 0 || string(raw) == "null" {
+		return nil
+	}
+	var snapshot linear.LinearTurnContext
+	if err := json.Unmarshal(raw, &snapshot); err != nil {
+		return err
+	}
+	if snapshot.Identifier != "" {
+		entry.ExternalID = snapshot.Identifier
+	}
+	if snapshot.Title != "" {
+		entry.Title = snapshot.Title
+	}
+	if snapshot.Description != "" {
+		entry.Description = snapshot.Description
+	}
+	entry.StateName = snapshot.StateName
+	entry.StateType = snapshot.StateType
+	entry.Priority = snapshot.Priority
+	entry.AssigneeName = snapshot.AssigneeName
+	entry.TeamKey = snapshot.TeamKey
+	entry.TeamName = snapshot.TeamName
+	entry.URL = snapshot.URL
+	if len(snapshot.Attachments) > 0 {
+		entry.Attachments = make([]models.SessionIssueSnapshotAttachment, 0, len(snapshot.Attachments))
+		for _, attachment := range snapshot.Attachments {
+			entry.Attachments = append(entry.Attachments, models.SessionIssueSnapshotAttachment{
+				Title:  attachment.Title,
+				URL:    attachment.URL,
+				Source: attachment.Source,
+			})
+		}
+	}
+	if len(snapshot.Comments) > 0 {
+		entry.Comments = make([]models.SessionIssueSnapshotComment, 0, len(snapshot.Comments))
+		for _, comment := range snapshot.Comments {
+			entry.Comments = append(entry.Comments, models.SessionIssueSnapshotComment{
+				Author:    comment.Author,
+				Body:      comment.Body,
+				CreatedAt: comment.CreatedAt,
+			})
+		}
+	}
+	return nil
 }
 
 func (o *Orchestrator) createIssueSnapshotForTurn(ctx context.Context, session *models.Session, turnNumber int) (*models.SessionTurnIssueSnapshot, error) {
@@ -786,11 +847,15 @@ func (o *Orchestrator) createIssueSnapshotForTurn(ctx context.Context, session *
 	if len(links) > 0 && primaryLinkedIssue(links) == nil {
 		return nil, fmt.Errorf("execution requires exactly one primary issue when links are present")
 	}
+	linkedIssues, err := snapshotEntriesFromLinks(links)
+	if err != nil {
+		return nil, err
+	}
 	snapshot := &models.SessionTurnIssueSnapshot{
 		OrgID:        session.OrgID,
 		SessionID:    session.ID,
 		TurnNumber:   turnNumber,
-		LinkedIssues: snapshotEntriesFromLinks(links),
+		LinkedIssues: linkedIssues,
 	}
 	if err := o.issueSnapshots.Create(ctx, snapshot); err != nil {
 		return nil, fmt.Errorf("create issue snapshot: %w", err)
@@ -971,6 +1036,14 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 	if err := o.sessions.UpdateStatus(ctx, run.OrgID, run.ID, "running"); err != nil {
 		return fmt.Errorf("update run status to running: %w", err)
 	}
+	// Fire the Linear state-transition signal exactly once per session, when
+	// the session actually starts running. Linking alone (paste a `ACS-1234`
+	// into the textarea) no longer moves the issue — the issue only flips to
+	// "in progress" once the orchestrator picks the session up and runs it.
+	// The fire-once unique constraint on (session_id, issue_id, "started")
+	// makes a re-entry from a resumed/retried run a no-op, so this call is
+	// safe on every RunAgent invocation.
+	o.enqueueLinearMilestone(ctx, run, string(linear.MilestoneStarted))
 	// runStartedAt is captured AFTER UpdateStatus, so the elapsed reported on
 	// a timeout excludes concurrency check + status write but includes
 	// everything from issue fetch onward (sandbox create, credential inject,
@@ -1237,7 +1310,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 			// the parent ctx was cancelled (timeout, shutdown).
 			stopCtx, stopCancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer stopCancel()
-			o.usageTracker.ContainerStopped(stopCtx, run.OrgID, run.ID, usageEventID, containerStartedAt, exitReason)
+			o.usageTracker.ContainerStopped(stopCtx, run.OrgID, run.ID, usageEventID, sandbox.ID, containerStartedAt, exitReason)
 		}
 		// Use a background context for cleanup since the run context may be cancelled.
 		destroyCtx := context.Background()
@@ -1306,11 +1379,28 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 			if sandbox.Metadata == nil {
 				sandbox.Metadata = make(map[string]string)
 			}
-			sandbox.Metadata["base_commit_sha"] = baseCommitSHA
+			sandbox.Metadata[SandboxMetadataBaseCommitSHA] = baseCommitSHA
 			run.BaseCommitSHA = &baseCommitSHA
 			if dbErr := o.sessions.UpdateBaseCommitSHA(ctx, run.OrgID, run.ID, baseCommitSHA); dbErr != nil {
 				log.Warn().Err(dbErr).Str("base_commit_sha", baseCommitSHA).Msg("failed to persist base commit sha")
 			}
+		}
+
+		// Stamp the resolved target branch (the branch we just cloned from —
+		// repo default unless the session overrode it) onto sandbox.Metadata
+		// so sessiondiff.Collect can compute a merge-base diff against
+		// origin/<branch>. Without this the diff is taken against the frozen
+		// baseCommitSHA, which inflates by the entire delta from base to HEAD
+		// whenever the user integrates the target branch back into the working
+		// branch (e.g. `git pull origin main` or merging main to resolve PR
+		// conflicts). Empty branch is unexpected in this path (we just cloned
+		// from it) but we guard anyway — Collect treats empty target branch
+		// as "fall back to baseCommitSHA".
+		if branch != "" {
+			if sandbox.Metadata == nil {
+				sandbox.Metadata = make(map[string]string)
+			}
+			sandbox.Metadata[SandboxMetadataTargetBranch] = branch
 		}
 
 		// 8b. Create a working branch so the agent operates on a separate
@@ -1564,8 +1654,8 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 //
 // Authorization: callers must verify the requesting user is authorized before
 // invoking this method. The SendMessage HTTP handler enforces this via org_id
-// scoping and ClaimIdle atomicity.
-func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Session) error {
+// scoping and ClaimIdleForSession atomicity.
+func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Session, opts *ContinueSessionOptions) error {
 	// Create a cancellable context. The cancel registry is populated later
 	// once the sandbox is available, so CancelSession can send SIGINT.
 	ctx, cancel := context.WithCancel(ctx)
@@ -1589,6 +1679,19 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	if session.PendingSnapshotKey != nil && *session.PendingSnapshotKey != "" {
 		log.Info().Str("pending_snapshot_key", *session.PendingSnapshotKey).Msg("continue_session waiting for post-PR snapshot upload to land")
 		return ErrSnapshotPending
+	}
+
+	parentAgentSessionID := ""
+	if session.AgentSessionID != nil {
+		parentAgentSessionID = *session.AgentSessionID
+	}
+	threadScopedExecution := opts != nil && opts.AgentType != ""
+	if threadScopedExecution {
+		executionSession := *session
+		executionSession.AgentType = opts.AgentType
+		executionSession.ModelOverride = opts.ModelOverride
+		executionSession.AgentSessionID = opts.ThreadAgentSessionID
+		session = &executionSession
 	}
 
 	// Determine whether we can restore from a snapshot or need a fresh start.
@@ -1753,6 +1856,12 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	integrationSkills := o.BuildIntegrationSkills(ctx, session.OrgID)
 	var authState *sandboxGitHubAuthState
 	var authErr error
+	// continueTargetBranch is the resolved target branch (repo default,
+	// overridden by session.TargetBranch) — captured during the repo lookup
+	// below and stamped onto sandbox.Metadata after sandbox setup so
+	// sessiondiff.Collect can compute a merge-base diff against
+	// origin/<branch>. Mirrors the branch resolved in RunAgent.
+	var continueTargetBranch string
 
 	// Wire the per-session GitHub credential helper for both fresh and
 	// reused containers. For reused containers (preview is holding the
@@ -1791,6 +1900,10 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 				"sandbox github auth",
 			)
 			return fmt.Errorf("fetch repository for auth: %w", repoErr)
+		}
+		continueTargetBranch = repo.DefaultBranch
+		if session.TargetBranch != nil && *session.TargetBranch != "" {
+			continueTargetBranch = *session.TargetBranch
 		}
 		var fallbackToken string
 		if !reusedExisting {
@@ -1891,6 +2004,33 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 			return fmt.Errorf("create sandbox: %w", err)
 		}
 	}
+	// Re-populate sandbox.Metadata["base_commit_sha"] from the DB so that
+	// sessiondiff.Collect can compute `git diff <base> -- .` (the cumulative
+	// session diff against the immutable base) instead of falling back to a
+	// plain `git diff` against the index. Without this, any continue turn
+	// run on a clean working tree (post-PR-push, post-merge) would collect
+	// an empty diff and overwrite the persisted authoritative diff, blanking
+	// out the Changes tab on the session page even though the PR clearly
+	// has changes. RunAgent sets this on the initial clone; the three setup
+	// branches above (reuse, hydrate, fresh-clone-on-continue) all leave
+	// Metadata empty, so we fix it here once for every continue path.
+	//
+	// Also re-stamp the resolved target branch so Collect can compute a
+	// merge-base diff against origin/<branch>. Without this the post-merge
+	// diff includes every commit pulled in from the target branch, inflating
+	// the Changes tab from the actual PR delta to the full base..HEAD range.
+	if session.BaseCommitSHA != nil && *session.BaseCommitSHA != "" {
+		if sandbox.Metadata == nil {
+			sandbox.Metadata = make(map[string]string)
+		}
+		sandbox.Metadata[SandboxMetadataBaseCommitSHA] = *session.BaseCommitSHA
+	}
+	if continueTargetBranch != "" {
+		if sandbox.Metadata == nil {
+			sandbox.Metadata = make(map[string]string)
+		}
+		sandbox.Metadata[SandboxMetadataTargetBranch] = continueTargetBranch
+	}
 	// Record the turn hold. AcquireTurnHold uses COALESCE so it is idempotent
 	// when we reused a container (the row's container_id already matches our
 	// sandbox.ID). When we freshly hydrated, a concurrent preview hydrate may
@@ -1964,7 +2104,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		if o.usageTracker != nil {
 			stopCtx, stopCancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer stopCancel()
-			o.usageTracker.ContainerStopped(stopCtx, session.OrgID, session.ID, usageEventID, containerStartedAt, exitReason)
+			o.usageTracker.ContainerStopped(stopCtx, session.OrgID, session.ID, usageEventID, sandbox.ID, containerStartedAt, exitReason)
 		}
 		// Detached context so DB writes + destroy succeed even if ctx was
 		// cancelled (user cancel, timeout, shutdown).
@@ -2047,28 +2187,63 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 			o.runSandboxGitBootstrap(ctx, sandbox, sandboxCfg.WorkDir, log)
 		}
 
-		var resumeSessionID string
-		if session.AgentSessionID != nil {
-			resumeSessionID = *session.AgentSessionID
-		}
 		commands := canonicalCommands(latestMsg, session.AgentType)
-		// UserMessage carries the user's textarea content verbatim, including
-		// any visible /command tokens. Run it through the same slash-command
-		// repair helper used by adapter.PreparePrompt so reused/snapshot-backed
-		// continuation turns cannot silently drop stored commands when the
-		// textarea and commands[] payload disagree.
-		prompt = &AgentPrompt{
-			Continuation:    true,
-			ResumeSessionID: resumeSessionID,
-			UserMessage:     EnsureSlashCommandsInPrompt(userMessage, commands),
-			MaxTokens:       tokenLimitForMode(session.TokenMode),
-			ReasoningEffort: func() models.ReasoningEffort {
-				if session.ReasoningEffort == nil {
-					return ""
-				}
-				return *session.ReasoningEffort
-			}(),
-			RevisionContext: revisionContext,
+		hasThreadAgentSessionID := session.AgentSessionID != nil && *session.AgentSessionID != ""
+		if threadScopedExecution && !hasThreadAgentSessionID {
+			input := &AgentInput{
+				Issue:        promptIssue,
+				LinkedIssues: linkedIssues,
+				Manual:       session.Origin == models.SessionOriginManual,
+				UserMessage:  userMessage,
+				References: func() []models.SessionInputReference {
+					refs := canonicalReferences(latestMsg)
+					if len(refs) > 0 {
+						return refs
+					}
+					if promptIssue != nil {
+						return manualSessionReferences(promptIssue)
+					}
+					return nil
+				}(),
+				Commands: commands,
+				ReasoningEffort: func() models.ReasoningEffort {
+					if session.ReasoningEffort == nil {
+						return ""
+					}
+					return *session.ReasoningEffort
+				}(),
+				TokenMode:         session.TokenMode,
+				RevisionContext:   revisionContext,
+				IntegrationSkills: integrationSkills,
+			}
+			prompt, err = adapter.PreparePrompt(ctx, input)
+			if err != nil {
+				o.failRun(ctx, session, fmt.Sprintf("prepare prompt for thread: %s", err))
+				return fmt.Errorf("prepare prompt for thread: %w", err)
+			}
+		} else {
+			var resumeSessionID string
+			if hasThreadAgentSessionID {
+				resumeSessionID = *session.AgentSessionID
+			}
+			// UserMessage carries the user's textarea content verbatim, including
+			// any visible /command tokens. Run it through the same slash-command
+			// repair helper used by adapter.PreparePrompt so reused/snapshot-backed
+			// continuation turns cannot silently drop stored commands when the
+			// textarea and commands[] payload disagree.
+			prompt = &AgentPrompt{
+				Continuation:    true,
+				ResumeSessionID: resumeSessionID,
+				UserMessage:     EnsureSlashCommandsInPrompt(userMessage, commands),
+				MaxTokens:       tokenLimitForMode(session.TokenMode),
+				ReasoningEffort: func() models.ReasoningEffort {
+					if session.ReasoningEffort == nil {
+						return ""
+					}
+					return *session.ReasoningEffort
+				}(),
+				RevisionContext: revisionContext,
+			}
 		}
 
 		if reusedExisting {
@@ -2205,6 +2380,13 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	if err := o.createAssistantMessage(ctx, session.ID, session.OrgID, threadID, turnNumber, result); err != nil {
 		log.Warn().Err(err).Msg("failed to create assistant message")
 	}
+	if opts != nil && opts.ResultAgentSessionID != nil {
+		threadAgentSessionID := result.AgentSessionID
+		if threadAgentSessionID == "" && opts.ThreadAgentSessionID != nil {
+			threadAgentSessionID = *opts.ThreadAgentSessionID
+		}
+		*opts.ResultAgentSessionID = threadAgentSessionID
+	}
 
 	// 8. Snapshot again.
 	newSnapshotKey, snapshotSize, snapshotErr := o.snapshotSessionOnTurnSuccess(ctx, session, sandbox, result, log)
@@ -2220,7 +2402,9 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 
 	// 9. Update turn complete — sets status to idle.
 	agentSessionID := result.AgentSessionID
-	if agentSessionID == "" && session.AgentSessionID != nil {
+	if threadScopedExecution {
+		agentSessionID = parentAgentSessionID
+	} else if agentSessionID == "" && session.AgentSessionID != nil {
 		agentSessionID = *session.AgentSessionID
 	}
 	snapshotKey := newSnapshotKey
@@ -2586,6 +2770,23 @@ func (o *Orchestrator) failRun(ctx context.Context, run *models.Session, errMsg 
 			o.logger.Warn().Err(err).Str("run_id", run.ID.String()).Msg("failed to update automation run on session failure")
 		}
 	}
+	o.enqueueLinearMilestone(ctx, run, "failed")
+}
+
+// enqueueLinearMilestone schedules a linear_milestone job for the terminal
+// session lifecycle states ("failed", "ended_no_pr"). The Linear linker is
+// the single owner of the attachment subtitle / rolling-comment / state
+// transition writes for these events; the orchestrator only fires the
+// signal. Best effort — a failed enqueue logs and moves on so terminal
+// session bookkeeping isn't held hostage by Linear-side hiccups.
+//
+// Routes through linear.EnqueueMilestone so the queue/priority/dedupe-key
+// shape stays consistent with the PR-event and no-changes paths.
+func (o *Orchestrator) enqueueLinearMilestone(ctx context.Context, run *models.Session, event string) {
+	if o == nil || run == nil {
+		return
+	}
+	linear.EnqueueMilestone(ctx, o.jobs, o.logger, run.OrgID, run.ID, event, 0)
 }
 
 // failRunWithCategory marks a run as failed with a structured failure category,

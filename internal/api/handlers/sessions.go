@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"regexp"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/assembledhq/143/internal/api/middleware"
@@ -19,6 +20,7 @@ import (
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/services"
 	ghservice "github.com/assembledhq/143/internal/services/github"
+	"github.com/assembledhq/143/internal/services/linear"
 	"github.com/assembledhq/143/internal/services/sessiontimeline"
 	"github.com/assembledhq/143/internal/services/storage"
 	"github.com/go-chi/chi/v5"
@@ -46,23 +48,24 @@ type sessionMembershipStore interface {
 }
 
 type SessionHandler struct {
-	runStore         *db.SessionStore
-	logStore         *db.SessionLogStore
-	questionStore    *db.SessionQuestionStore
-	validationStore  *db.ValidationStore
-	pullRequestStore *db.PullRequestStore
-	issueStore       *db.IssueStore
-	repoStore        *db.RepositoryStore
-	orgStore         *db.OrganizationStore
-	jobStore         *db.JobStore
-	messageStore     *db.SessionMessageStore
-	linkStore        *db.SessionIssueLinkStore
-	issueSnapshots   *db.SessionTurnIssueSnapshotStore
-	threadStore      *db.SessionThreadStore
-	viewStore        *db.SessionViewStore
-	memberships      sessionMembershipStore
-	prCredentials    githubStatusCredentialStore
-	prAuthChecker    interface {
+	runStore           *db.SessionStore
+	logStore           *db.SessionLogStore
+	questionStore      *db.SessionQuestionStore
+	validationStore    *db.ValidationStore
+	pullRequestStore   *db.PullRequestStore
+	issueStore         *db.IssueStore
+	repoStore          *db.RepositoryStore
+	orgStore           *db.OrganizationStore
+	jobStore           *db.JobStore
+	messageStore       *db.SessionMessageStore
+	reviewCommentStore *db.SessionReviewCommentStore
+	linkStore          *db.SessionIssueLinkStore
+	issueSnapshots     *db.SessionTurnIssueSnapshotStore
+	threadStore        *db.SessionThreadStore
+	viewStore          *db.SessionViewStore
+	memberships        sessionMembershipStore
+	prCredentials      githubStatusCredentialStore
+	prAuthChecker      interface {
 		HasValidCredential(ctx context.Context, orgID, userID uuid.UUID) (bool, error)
 	}
 	snapshotStore    storage.SnapshotStore // optional — enables snapshot cleanup on archive
@@ -74,12 +77,164 @@ type SessionHandler struct {
 	prAuthSigningKey []byte
 	frontendURL      string
 	streams          *cache.SessionStreams
+	// linearLinker is wired at boot via SetLinearLinker (called from
+	// router.go after the SSE-aware Linear service is constructed). Held
+	// behind an atomic.Pointer holder so a request that lands during boot —
+	// before the setter returns — observes nil cleanly instead of racing
+	// on the interface-value assignment, which the race detector flags as
+	// undefined behavior on multi-word interface stores.
+	linearLinker atomic.Pointer[linearLinkerHolder]
 	// shutdownCh is closed on SIGTERM; see SetShutdownSignal.
 	shutdownCh <-chan struct{}
 }
 
+// linearLinkerHolder wraps the linearSessionLinker interface so the field
+// has a single concrete pointer type for atomic.Pointer to operate on.
+type linearLinkerHolder struct{ fn linearSessionLinker }
+
+// linearSessionLinker is the surface SessionHandler invokes on the Linear
+// service. The interface lives here (not in the linear package) so
+// SetLinearLinker can accept a stub in tests without bringing up the full
+// Linear stack. We do still depend on linear.CreateInput / linear.CreateResult
+// at the type level — those are pure value structs that the handler builds
+// anyway, and re-defining them locally would only add adapter code without
+// breaking the dependency.
+//
+// TeamKeyAllowlist is exposed so the MISSING_MESSAGE bypass can verify that
+// a bare-identifier reference actually maps to a known Linear team before
+// letting an empty-message session through. Without this check, any
+// "FOO-123"-shaped string in the references picker would bypass the
+// validation and produce a session with an empty user turn.
+type linearSessionLinker interface {
+	ResolveAndLinkAtCreate(ctx context.Context, in linear.CreateInput) (linear.CreateResult, error)
+	Enabled(ctx context.Context, orgID uuid.UUID) bool
+	TeamKeyAllowlist(ctx context.Context, orgID uuid.UUID) (map[string]bool, error)
+}
+
+// looksLikeLinearReference is the legacy regex-only hint, retained for the
+// no-linker path and for callers that don't yet have an org context. Cheap
+// pre-validation hint: when the user supplied no message text but the
+// references picker carries Linear-shaped content, allow CreateManual to
+// proceed and let the linker hydrate context from the issue alone
+// (design 62 §"Issue-only session start"). Detection runs again inside the
+// linker — we are not relaxing security here, only the message-required
+// check.
+//
+// Defers to linear.MightContainLinearRef so this hint stays in lockstep
+// with the actual detection regexes.
+func looksLikeLinearReference(refs []models.SessionInputReference) bool {
+	for _, r := range refs {
+		// Reference-picker entries can carry the Linear key in either Display
+		// (human-readable label) or ID (the picker's underlying value), so
+		// scan both. Without ID we'd miss pickers that put "ACS-1234" in the
+		// id field and a generic label like "Linear issue" in display.
+		if linear.MightContainLinearRef(r.Display) || linear.MightContainLinearRef(r.ID) {
+			return true
+		}
+	}
+	return false
+}
+
+// canBypassMissingMessageForLinear is the same check as looksLikeLinearReference
+// tightened with the team-key allowlist, so a malformed "FOO-123" can no
+// longer wave the request past MISSING_MESSAGE. URL refs always pass — a
+// linear.app URL is its own evidence and detection drops them via
+// ErrCrossWorkspace if the workspace doesn't match. Bare identifiers must
+// have their KEY prefix in the org's allowlist.
+//
+// Falls back to the regex-only hint when the linker isn't wired or the
+// allowlist lookup errors — this preserves the prior behavior in tests
+// that haven't installed the linker, and avoids hard-failing CreateManual
+// on a transient DB hiccup.
+func (h *SessionHandler) canBypassMissingMessageForLinear(ctx context.Context, orgID uuid.UUID, refs []models.SessionInputReference) bool {
+	linker := h.getLinearLinker()
+	if linker == nil {
+		return looksLikeLinearReference(refs)
+	}
+	if !linker.Enabled(ctx, orgID) {
+		return false
+	}
+	// URL hits short-circuit first: they don't depend on the allowlist and
+	// detection treats them as authoritative provenance.
+	for _, r := range refs {
+		if linearURLPattern.MatchString(r.Display) || linearURLPattern.MatchString(r.ID) {
+			return true
+		}
+	}
+	allow, err := linker.TeamKeyAllowlist(ctx, orgID)
+	if err != nil {
+		// Allowlist lookup failed; fall back to the laxer regex hint rather
+		// than hard-fail the request. Detection inside the linker re-checks
+		// before any side effects.
+		h.logger.Warn().Err(err).Str("org_id", orgID.String()).
+			Msg("MISSING_MESSAGE bypass: failed to load Linear team-key allowlist; falling back to regex-only hint")
+		return looksLikeLinearReference(refs)
+	}
+	for _, r := range refs {
+		for _, candidate := range []string{r.Display, r.ID} {
+			for _, m := range linearBareIdentifierAllPattern.FindAllStringSubmatch(candidate, -1) {
+				if len(m) < 2 {
+					continue
+				}
+				key := m[1]
+				idx := strings.IndexByte(key, '-')
+				if idx <= 0 {
+					continue
+				}
+				if allow[key[:idx]] {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// linearURLPattern / linearBareIdentifierAllPattern mirror the patterns
+// inside the linear package's detect.go but are re-declared here to keep
+// the handler from importing internal regex state. The two regexes must
+// stay in lockstep — a regression that drifts the handler-side regex
+// would silently widen or narrow the MISSING_MESSAGE bypass.
+var (
+	linearURLPattern               = regexp.MustCompile(`https?://linear\.app/[^/\s]+/issue/[A-Z][A-Z0-9_]{0,9}-[0-9]+`)
+	linearBareIdentifierAllPattern = regexp.MustCompile(`(?:^|[^A-Za-z0-9_/-])([A-Z][A-Z0-9_]{0,9}-[0-9]+)\b`)
+)
+
 func (h *SessionHandler) SetIssueLinkStore(store *db.SessionIssueLinkStore) {
 	h.linkStore = store
+}
+
+// SetReviewCommentStore wires the review-comment store used by SendMessage to
+// resolve comments inline with the message create transaction. Optional: if
+// unset, requests with resolve_review_comment_ids are rejected with a 400.
+func (h *SessionHandler) SetReviewCommentStore(store *db.SessionReviewCommentStore) {
+	h.reviewCommentStore = store
+}
+
+// SetLinearLinker injects the Linear session-linking service. When unset,
+// CreateManual treats Linear refs as opaque text — same behavior as when
+// the org has no Linear integration. This is the design 62 §"Path C" no-op.
+//
+// Safe to call after construction even if the HTTP server is already
+// serving requests: the atomic store lets a late-running test or a
+// reload-without-restart wire the linker without racing the read path.
+func (h *SessionHandler) SetLinearLinker(linker linearSessionLinker) {
+	if linker == nil {
+		h.linearLinker.Store(nil)
+		return
+	}
+	h.linearLinker.Store(&linearLinkerHolder{fn: linker})
+}
+
+// getLinearLinker returns the currently-wired linker (or nil if none).
+// Used by the read-path; tests should use this rather than reading
+// h.linearLinker directly so the atomic load is visible.
+func (h *SessionHandler) getLinearLinker() linearSessionLinker {
+	holder := h.linearLinker.Load()
+	if holder == nil {
+		return nil
+	}
+	return holder.fn
 }
 
 func (h *SessionHandler) SetIssueSnapshotStore(store *db.SessionTurnIssueSnapshotStore) {
@@ -1199,80 +1354,21 @@ func (h *SessionHandler) CreatePR(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	user := middleware.UserFromContext(r.Context())
-	if shouldPromptForPRAuth(authorMode, orgSettings.PRAuthorship) &&
-		session.TriggeredByUserID != nil &&
-		user != nil &&
-		user.ID == *session.TriggeredByUserID {
-		if req.ResumeToken != "" {
-			if len(h.prAuthSigningKey) == 0 {
-				writeError(w, r, http.StatusInternalServerError, "INTERNAL_ERROR", "PR auth flow is not configured")
-				return
-			}
-			claims, tokenErr := parsePRAuthResumeToken(h.prAuthSigningKey, req.ResumeToken, time.Now())
-			if tokenErr != nil || claims.SessionID != sessionID || claims.UserID != user.ID || claims.OrgID != orgID {
-				writeJSON(w, http.StatusConflict, models.ErrorResponse{
-					Error: models.ErrorDetail{
-						Code:    "PR_RESUME_EXPIRED",
-						Message: "GitHub authorization completed, but the PR resume request expired. Please click Create PR again.",
-					},
-				})
-				return
-			}
-		}
-
-		hasCredential := false
-		authUnavailable := h.prAuthChecker == nil
-		if h.prAuthChecker != nil {
-			var checkErr error
-			hasCredential, checkErr = h.prAuthChecker.HasValidCredential(r.Context(), orgID, user.ID)
-			if checkErr != nil {
-				writeError(w, r, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to verify GitHub PR authorization", checkErr)
-				return
-			}
-		}
-		if authUnavailable && !hasCredential {
-			if orgSettings.PRAuthorship == models.PRAuthorshipUserRequired || authorMode == prAuthorModeUser {
-				writeError(w, r, http.StatusServiceUnavailable, "GITHUB_APP_USER_AUTH_NOT_CONFIGURED", "github app user auth is not configured")
-				return
-			}
-			goto enqueuePR
-		}
-		if !hasCredential {
-			if len(h.prAuthSigningKey) == 0 {
-				writeError(w, r, http.StatusInternalServerError, "INTERNAL_ERROR", "PR auth flow is not configured")
-				return
-			}
-			resumeToken, signErr := signPRAuthResumeToken(h.prAuthSigningKey, prAuthResumeClaims{
-				SessionID:  sessionID,
-				UserID:     user.ID,
-				OrgID:      orgID,
-				Draft:      req.Draft,
-				AuthorMode: string(prAuthorModeUser),
-				ExpiresAt:  time.Now().Add(prAuthResumeTokenTTL).Unix(),
-			})
-			if signErr != nil {
-				writeError(w, r, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to prepare GitHub PR authorization", signErr)
-				return
-			}
-			writeJSON(w, http.StatusConflict, models.ErrorResponse{
-				Error: models.ErrorDetail{
-					Code:    "GITHUB_PR_AUTHORSHIP_REQUIRED",
-					Message: "Authorize GitHub to create this pull request as you.",
-					Details: map[string]any{
-						"session_id":            sessionID.String(),
-						"connect_url":           "/api/v1/users/me/github/connect?flow=pr_authorship",
-						"resume_token":          resumeToken,
-						"can_fallback_to_app":   orgSettings.PRAuthorship != models.PRAuthorshipUserRequired,
-						"suggested_author_mode": string(prAuthorModeUser),
-					},
-				},
-			})
-			return
-		}
+	if !h.requirePRAuthOrIntercept(w, r, prAuthInterceptParams{
+		SessionID:            sessionID,
+		OrgID:                orgID,
+		Session:              &session,
+		OrgSettings:          orgSettings,
+		AuthorMode:           authorMode,
+		ResumeToken:          req.ResumeToken,
+		Action:               prAuthActionCreatePR,
+		ActionDescription:    "create this pull request",
+		ResumeExpiredMessage: "GitHub authorization completed, but the PR resume request expired. Please click Create PR again.",
+		Draft:                req.Draft,
+	}) {
+		return
 	}
 
-enqueuePR:
 	payload := map[string]any{
 		"session_id": sessionID.String(),
 		"org_id":     orgID.String(),
@@ -1304,6 +1400,154 @@ enqueuePR:
 	}
 	emitUserAuditWithSession(h.audit, r, models.AuditActionSessionPRRequested, models.AuditResourceSession, &sessionIDStr, &session.ID, nil,
 		marshalAuditDetails(h.logger, prDetails))
+	writeJSON(w, http.StatusAccepted, map[string]string{"status": "queued"})
+}
+
+// PushChangesToPR handles POST /sessions/{id}/pr/push — enqueues a job that
+// pushes any uncommitted/unpushed changes from the session sandbox up to the
+// existing PR's branch and updates the PR row's head_sha. The session must
+// have an open PR and a still-restorable snapshot. While a prior push attempt
+// is in flight (queued or pushing), returns 409 to prevent double-submits.
+//
+// Mirrors the validation, auth interception, and enqueue structure of CreatePR
+// so the two endpoints behave identically from a client perspective. The only
+// material differences are: (a) requires an existing PR (404 if none), (b)
+// rejects PRs that are not in the "open" state, and (c) the dedupe key,
+// queue/job names, and audit action are push-flavored.
+func (h *SessionHandler) PushChangesToPR(w http.ResponseWriter, r *http.Request) {
+	orgID := middleware.OrgIDFromContext(r.Context())
+	sessionID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid session ID")
+		return
+	}
+
+	session, err := h.runStore.GetByID(r.Context(), orgID, sessionID)
+	if err != nil {
+		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "session not found")
+		return
+	}
+
+	if session.SandboxState == string(models.SandboxStateDestroyed) {
+		writeError(w, r, http.StatusGone, "SNAPSHOT_EXPIRED", ghservice.SnapshotExpiredPRMessage)
+		return
+	}
+	if session.SnapshotKey == nil || *session.SnapshotKey == "" {
+		writeError(w, r, http.StatusConflict, "SNAPSHOT_NOT_CAPTURED", ghservice.SnapshotNotCapturedPRMessage)
+		return
+	}
+	if session.PendingSnapshotKey != nil && *session.PendingSnapshotKey != "" {
+		writeError(w, r, http.StatusConflict, "SNAPSHOT_PENDING", "a snapshot upload is still finishing; try again in a moment")
+		return
+	}
+	// Defense-in-depth against the frontend's isRunning gate: pushing while a
+	// turn is in flight would race the active sandbox and the snapshot we'd
+	// hydrate could be stale relative to commits the running turn is about
+	// to make. Reject server-side so a racing client (or a stale tab whose
+	// session.status hadn't refreshed) can't slip through.
+	if session.Status == string(models.SessionStatusRunning) {
+		writeError(w, r, http.StatusConflict, "SESSION_RUNNING", "wait for the session to finish before pushing")
+		return
+	}
+
+	switch session.PRPushState {
+	case models.PRPushStateQueued, models.PRPushStatePushing:
+		writeError(w, r, http.StatusConflict, "PR_PUSH_IN_FLIGHT", "a push to this PR is already in progress")
+		return
+	}
+
+	pr, prErr := h.pullRequestStore.GetBySessionID(r.Context(), orgID, sessionID)
+	if prErr != nil {
+		if errors.Is(prErr, pgx.ErrNoRows) {
+			writeError(w, r, http.StatusNotFound, "NO_PR", "this session has no pull request to push to; create one first")
+			return
+		}
+		writeError(w, r, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to load pull request", prErr)
+		return
+	}
+	if pr.Status != models.PullRequestStatusOpen {
+		writeError(w, r, http.StatusConflict, "PR_CLOSED", "this pull request is no longer open")
+		return
+	}
+
+	var req struct {
+		AuthorMode  string `json:"author_mode,omitempty"`
+		ResumeToken string `json:"resume_token,omitempty"`
+	}
+	if r.Body != nil && r.ContentLength != 0 {
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+			writeError(w, r, http.StatusBadRequest, "INVALID_BODY", "invalid request body")
+			return
+		}
+	}
+	authorMode, err := parsePRAuthorMode(req.AuthorMode)
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_BODY", "invalid request body", err)
+		return
+	}
+
+	orgSettings := models.OrgSettings{PRAuthorship: models.PRAuthorshipUserPreferred}
+	if h.orgStore != nil {
+		if org, orgErr := h.orgStore.GetByID(r.Context(), orgID); orgErr == nil {
+			if parsed, parseErr := models.ParseOrgSettings(org.Settings); parseErr == nil {
+				orgSettings = parsed
+			}
+		}
+	}
+
+	if !h.requirePRAuthOrIntercept(w, r, prAuthInterceptParams{
+		SessionID:   sessionID,
+		OrgID:       orgID,
+		Session:     &session,
+		OrgSettings: orgSettings,
+		AuthorMode:  authorMode,
+		ResumeToken: req.ResumeToken,
+		Action:      prAuthActionPushChanges,
+		// Draft is intentionally omitted: the push endpoint has no draft
+		// toggle, and the field has no meaning once the PR row already
+		// exists. Leaving it nil keeps the resume claim minimal.
+		ActionDescription:    "push these changes",
+		ResumeExpiredMessage: "GitHub authorization completed, but the resume request expired. Please click Push changes again.",
+	}) {
+		return
+	}
+
+	payload := map[string]any{
+		"session_id": sessionID.String(),
+		"org_id":     orgID.String(),
+	}
+	if authorMode != prAuthorModeAuto {
+		payload["author_mode"] = string(authorMode)
+	}
+	dedupeKey := fmt.Sprintf("push_pr:%s", sessionID)
+	if _, err := h.jobStore.Enqueue(r.Context(), orgID, "agent", "push_pr_changes", payload, 5, &dedupeKey); err != nil {
+		writeError(w, r, http.StatusInternalServerError, "ENQUEUE_FAILED", "failed to enqueue push job", err)
+		return
+	}
+
+	// Atomically transition pr_push_state from any non-in-flight state to
+	// 'queued'. The in-memory precheck above rejects the obvious case where
+	// the column is already queued/pushing, but two concurrent requests can
+	// both pass that check and reach this line. CAS resolves the race: the
+	// loser sees rows-affected=0 and returns 409 — the dedupeKey on the
+	// enqueue above already collapsed both requests onto a single worker
+	// job, so no duplicate work runs.
+	queued, err := h.runStore.TryMarkPRPushQueued(r.Context(), orgID, sessionID)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to mark PR push as queued", err)
+		return
+	}
+	if !queued {
+		writeError(w, r, http.StatusConflict, "PR_PUSH_IN_FLIGHT", "a push to this PR is already in progress")
+		return
+	}
+
+	sessionIDStr := sessionID.String()
+	pushDetails := sessionAuditSnapshot(&session, nil, map[string]any{
+		"job_type": "push_pr_changes",
+	})
+	emitUserAuditWithSession(h.audit, r, models.AuditActionSessionPRPushRequested, models.AuditResourceSession, &sessionIDStr, &session.ID, nil,
+		marshalAuditDetails(h.logger, pushDetails))
 	writeJSON(w, http.StatusAccepted, map[string]string{"status": "queued"})
 }
 
@@ -1390,6 +1634,12 @@ func (h *SessionHandler) AnswerQuestion(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, http.StatusOK, models.SingleResponse[models.SessionQuestion]{Data: question})
 }
 
+// maxReviewCommentResolveIDsPerMessage caps how many review comments a single
+// SendMessage call can resolve. Each resolved comment emits one audit row
+// after the tx commits, so the cap keeps the post-commit tail bounded even
+// under unusual client behavior. The realistic typical attached-count is 1–3.
+const maxReviewCommentResolveIDsPerMessage = 50
+
 // SendMessage handles POST /sessions/{id}/messages — sends a follow-up message
 // to an idle multi-turn session and enqueues a continue_session job.
 func (h *SessionHandler) SendMessage(w http.ResponseWriter, r *http.Request) {
@@ -1406,11 +1656,12 @@ func (h *SessionHandler) SendMessage(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var body struct {
-		Message    string                         `json:"message"`
-		Images     []string                       `json:"images"`
-		References []models.SessionInputReference `json:"references"`
-		Commands   []models.SessionInputCommand   `json:"commands"`
-		PlanMode   bool                           `json:"plan_mode"`
+		Message                 string                         `json:"message"`
+		Images                  []string                       `json:"images"`
+		References              []models.SessionInputReference `json:"references"`
+		Commands                []models.SessionInputCommand   `json:"commands"`
+		PlanMode                bool                           `json:"plan_mode"`
+		ResolveReviewCommentIDs []string                       `json:"resolve_review_comment_ids"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeError(w, r, http.StatusBadRequest, "INVALID_BODY", "invalid request body")
@@ -1431,6 +1682,43 @@ func (h *SessionHandler) SendMessage(w http.ResponseWriter, r *http.Request) {
 		if err := command.Validate(); err != nil {
 			writeError(w, r, http.StatusBadRequest, "INVALID_COMMANDS", err.Error())
 			return
+		}
+	}
+
+	// Parse and dedupe optional review-comment IDs to resolve atomically with
+	// the message create. Reject malformed UUIDs and overlong lists early so
+	// the SQL phase only sees clean input.
+	//
+	// Authorization: SendMessage allows resolving any comment in the session,
+	// regardless of authorship — the user is taking action on the comment by
+	// addressing it in their message. This intentionally diverges from PATCH
+	// /review-comments/{id}, which restricts edits to the comment's author.
+	// Both surfaces share the same audit action so a downstream consumer can
+	// still distinguish via the resolved_via_message flag in audit details.
+	var resolveCommentIDs []uuid.UUID
+	if len(body.ResolveReviewCommentIDs) > 0 {
+		if h.reviewCommentStore == nil {
+			writeError(w, r, http.StatusBadRequest, "REVIEW_COMMENTS_NOT_CONFIGURED", "review comment resolution is not configured for this server")
+			return
+		}
+		if len(body.ResolveReviewCommentIDs) > maxReviewCommentResolveIDsPerMessage {
+			writeError(w, r, http.StatusBadRequest, "TOO_MANY_REVIEW_COMMENT_IDS",
+				fmt.Sprintf("at most %d review comment ids may be resolved per message", maxReviewCommentResolveIDsPerMessage))
+			return
+		}
+		seen := make(map[uuid.UUID]struct{}, len(body.ResolveReviewCommentIDs))
+		resolveCommentIDs = make([]uuid.UUID, 0, len(body.ResolveReviewCommentIDs))
+		for _, raw := range body.ResolveReviewCommentIDs {
+			parsed, err := uuid.Parse(raw)
+			if err != nil {
+				writeError(w, r, http.StatusBadRequest, "INVALID_REVIEW_COMMENT_ID", "invalid review comment id: "+raw)
+				return
+			}
+			if _, dup := seen[parsed]; dup {
+				continue
+			}
+			seen[parsed] = struct{}{}
+			resolveCommentIDs = append(resolveCommentIDs, parsed)
 		}
 	}
 
@@ -1490,14 +1778,55 @@ func (h *SessionHandler) SendMessage(w http.ResponseWriter, r *http.Request) {
 		msg.Commands = body.Commands
 	}
 
-	// If the session is already running, just save the message — the coding
-	// agent will buffer it and process inline. No status change or job needed.
+	// Running-session fast path: no status change, no job, no question
+	// handling. When there are no review comments to resolve, skip the tx
+	// entirely so we don't take row locks on session_messages for the common
+	// follow-up case. When there ARE comments to resolve, wrap both the
+	// insert and the resolve in a tx so the two are atomic.
 	if session.Status == string(models.SessionStatusRunning) {
-		if err := h.messageStore.Create(r.Context(), msg); err != nil {
-			writeError(w, r, http.StatusInternalServerError, "CREATE_FAILED", "failed to create message", err)
+		if len(resolveCommentIDs) == 0 {
+			if err := h.messageStore.Create(r.Context(), msg); err != nil {
+				writeError(w, r, http.StatusInternalServerError, "CREATE_FAILED", "failed to create message", err)
+				return
+			}
+			writeJSON(w, http.StatusCreated, models.SingleResponse[models.SessionMessage]{Data: *msg})
 			return
 		}
 
+		tx, err := h.runStore.Begin(r.Context())
+		if err != nil {
+			writeError(w, r, http.StatusInternalServerError, "TX_BEGIN_FAILED", "failed to begin session transaction", err)
+			return
+		}
+		committed := false
+		defer func() {
+			if committed {
+				return
+			}
+			if rollbackErr := tx.Rollback(r.Context()); rollbackErr != nil {
+				zerolog.Ctx(r.Context()).Error().Err(rollbackErr).Str("session_id", sessionID.String()).Msg("failed to rollback send message transaction")
+			}
+		}()
+		txMessageStore := db.NewSessionMessageStore(tx)
+		txReviewCommentStore := db.NewSessionReviewCommentStore(tx)
+
+		if err := txMessageStore.Create(r.Context(), msg); err != nil {
+			writeError(w, r, http.StatusInternalServerError, "CREATE_FAILED", "failed to create message", err)
+			return
+		}
+		resolvedComments, rerr := resolveSessionReviewComments(
+			r.Context(), txReviewCommentStore, orgID, sessionID, resolveCommentIDs, currentResolutionPass(&session))
+		if rerr != nil {
+			rerr.write(w, r)
+			return
+		}
+		if err := tx.Commit(r.Context()); err != nil {
+			writeError(w, r, http.StatusInternalServerError, "TX_COMMIT_FAILED", "failed to commit session follow-up", err)
+			return
+		}
+		committed = true
+
+		h.emitReviewCommentResolutionAudits(r, sessionID, msg.ID, resolvedComments)
 		writeJSON(w, http.StatusCreated, models.SingleResponse[models.SessionMessage]{Data: *msg})
 		return
 	}
@@ -1517,8 +1846,13 @@ func (h *SessionHandler) SendMessage(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
-	txRunStore := db.NewSessionStore(tx)
 	txMessageStore := db.NewSessionMessageStore(tx)
+	var txReviewCommentStore *db.SessionReviewCommentStore
+	if len(resolveCommentIDs) > 0 {
+		txReviewCommentStore = db.NewSessionReviewCommentStore(tx)
+	}
+
+	txRunStore := db.NewSessionStore(tx)
 	txQuestionStore := db.NewSessionQuestionStore(tx)
 
 	// Try claiming an idle session first, then fall back to resuming a
@@ -1542,6 +1876,17 @@ func (h *SessionHandler) SendMessage(w http.ResponseWriter, r *http.Request) {
 	if err := txMessageStore.Create(r.Context(), msg); err != nil {
 		writeError(w, r, http.StatusInternalServerError, "CREATE_FAILED", "failed to create message", err)
 		return
+	}
+
+	var resolvedComments []models.SessionReviewComment
+	if txReviewCommentStore != nil {
+		var rerr *resolveCommentsError
+		resolvedComments, rerr = resolveSessionReviewComments(
+			r.Context(), txReviewCommentStore, orgID, sessionID, resolveCommentIDs, currentResolutionPass(&session))
+		if rerr != nil {
+			rerr.write(w, r)
+			return
+		}
 	}
 
 	// If the session was paused on a clarifying question, treat the follow-up
@@ -1594,8 +1939,145 @@ func (h *SessionHandler) SendMessage(w http.ResponseWriter, r *http.Request) {
 		emitUserAuditWithSession(h.audit, r, models.AuditActionSessionQuestionAnswered, models.AuditResourceSession, &qIDStr, &sessionID, nil,
 			marshalAuditDetails(h.logger, questionDetails))
 	}
+	h.emitReviewCommentResolutionAudits(r, sessionID, msg.ID, resolvedComments)
 
 	writeJSON(w, http.StatusCreated, models.SingleResponse[models.SessionMessage]{Data: *msg})
+}
+
+// currentResolutionPass returns the pass number to record on a comment that
+// is being resolved during the current request, matching the semantics used
+// by the PATCH /review-comments handler: the user's resolving action belongs
+// to the session's current turn (with a fallback to 1 for not-yet-started
+// sessions where CurrentTurn is still 0).
+func currentResolutionPass(session *models.Session) int {
+	if session == nil || session.CurrentTurn == 0 {
+		return 1
+	}
+	return session.CurrentTurn
+}
+
+// resolveCommentsError carries the HTTP shape of a failure inside the
+// resolve-comments helper, so the helper can stay pure (no http.ResponseWriter
+// dependency) and SendMessage controls when the response is written. underlying
+// is included only when there's a real error worth logging.
+type resolveCommentsError struct {
+	status     int
+	code       string
+	message    string
+	underlying error
+}
+
+func (e *resolveCommentsError) write(w http.ResponseWriter, r *http.Request) {
+	if e.underlying != nil {
+		writeError(w, r, e.status, e.code, e.message, e.underlying)
+		return
+	}
+	writeError(w, r, e.status, e.code, e.message)
+}
+
+// resolveSessionReviewComments validates that every requested ID belongs to
+// the session and resolves the still-open ones, returning the rows whose
+// state actually changed. Already-resolved IDs are silently skipped (the
+// underlying store filters on resolved=false). The helper is pure: it does
+// not write to the response, so the caller decides when (and whether) to
+// surface failures to the HTTP client and to abandon the surrounding tx.
+//
+// The store argument must already be tx-scoped — the validation lookup and
+// the resolve UPDATE share the same tx so other writers can't slip a comment
+// in between the existence check and the update.
+func resolveSessionReviewComments(
+	ctx context.Context,
+	store *db.SessionReviewCommentStore,
+	orgID, sessionID uuid.UUID,
+	ids []uuid.UUID,
+	resolvedByPass int,
+) ([]models.SessionReviewComment, *resolveCommentsError) {
+	if len(ids) == 0 || store == nil {
+		return nil, nil
+	}
+	existing, err := store.ListByIDs(ctx, orgID, sessionID, ids)
+	if err != nil {
+		return nil, &resolveCommentsError{
+			status: http.StatusInternalServerError, code: "REVIEW_COMMENT_LOOKUP_FAILED",
+			message: "failed to look up review comments", underlying: err,
+		}
+	}
+	if len(existing) != len(ids) {
+		// Surface the missing IDs (capped) so misbehaving clients can debug
+		// without leaking other tenants' data — IDs not scoped to this org+
+		// session are functionally indistinguishable from "doesn't exist".
+		found := make(map[uuid.UUID]struct{}, len(existing))
+		for _, c := range existing {
+			found[c.ID] = struct{}{}
+		}
+		const maxMissingInError = 5
+		missing := make([]string, 0, maxMissingInError)
+		for _, id := range ids {
+			if _, ok := found[id]; ok {
+				continue
+			}
+			if len(missing) == maxMissingInError {
+				break
+			}
+			missing = append(missing, id.String())
+		}
+		return nil, &resolveCommentsError{
+			status: http.StatusBadRequest, code: "INVALID_REVIEW_COMMENT_IDS",
+			message: "review comment ids do not belong to this session: " + strings.Join(missing, ", "),
+		}
+	}
+	resolved, err := store.ResolveByIDs(ctx, orgID, sessionID, ids, resolvedByPass)
+	if err != nil {
+		return nil, &resolveCommentsError{
+			status: http.StatusInternalServerError, code: "REVIEW_COMMENT_RESOLVE_FAILED",
+			message: "failed to resolve review comments", underlying: err,
+		}
+	}
+	return resolved, nil
+}
+
+// emitReviewCommentResolutionAudits records one audit row per comment whose
+// resolved state actually changed. Mirrors the audit shape emitted by the
+// direct PATCH /review-comments handler so audit consumers see consistent
+// before/after values regardless of which surface triggered the resolution.
+// The resolved_via_message flag lets consumers tell the two surfaces apart.
+func (h *SessionHandler) emitReviewCommentResolutionAudits(
+	r *http.Request,
+	sessionID uuid.UUID,
+	messageID int64,
+	resolved []models.SessionReviewComment,
+) {
+	if len(resolved) == 0 {
+		return
+	}
+	entries := make([]userAuditEntry, 0, len(resolved))
+	for _, c := range resolved {
+		resID := c.ID.String()
+		sid := sessionID
+		entries = append(entries, userAuditEntry{
+			Action:       models.AuditActionSessionReviewCommentUpdated,
+			ResourceType: models.AuditResourceSessionReviewComment,
+			ResourceID:   &resID,
+			SessionID:    &sid,
+			Details: marshalAuditDetails(h.logger, map[string]any{
+				"review_comment_id":    c.ID.String(),
+				"session_id":           sid.String(),
+				"file_path":            c.FilePath,
+				"line_number":          c.LineNumber,
+				"diff_side":            c.DiffSide,
+				"pass_number":          c.PassNumber,
+				"body_length":          len(c.Body),
+				"resolved_via_message": true,
+				"message_id":           messageID,
+				"changes": map[string]any{
+					"resolved": auditChange(false, true),
+				},
+			}),
+		})
+	}
+	// One INSERT regardless of N — keeps post-commit latency O(1) in the
+	// number of attached comments.
+	emitUserAuditsWithSession(h.audit, r, entries)
 }
 
 // ListMessages handles GET /sessions/{id}/messages — returns the conversation messages.
@@ -1808,6 +2290,15 @@ func (h *SessionHandler) CreateManual(w http.ResponseWriter, r *http.Request) {
 		TokenMode       string                         `json:"token_mode"`
 		RepositoryID    string                         `json:"repository_id"`
 		Branch          string                         `json:"branch"`
+		// LinearPrivate suppresses every Linear write; the agent still gets
+		// linked-issue context locally. Frozen at session create.
+		LinearPrivate bool `json:"linear_private,omitempty"`
+		// LinearStateSyncDisabled gates only workflow-state transitions
+		// (issue moved to "In Progress" / "In Review" / "Done"). The
+		// attachment + rolling comment still post — they are visibility
+		// signals, not state mutation. Use LinearPrivate to suppress all
+		// Linear writes.
+		LinearStateSyncDisabled bool `json:"linear_state_sync_disabled,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeError(w, r, http.StatusBadRequest, "INVALID_BODY", "invalid request body")
@@ -1815,7 +2306,14 @@ func (h *SessionHandler) CreateManual(w http.ResponseWriter, r *http.Request) {
 	}
 
 	body.Message = strings.TrimSpace(body.Message)
-	if body.Message == "" {
+	// Empty message is allowed iff the user is starting from a linked
+	// Linear issue. Detection runs after the body validation, so we accept
+	// "looks like a Linear ref somewhere in the inputs" as the relaxation
+	// signal here. The check is tightened with the team-key allowlist so
+	// a "FOO-123"-shaped string for an unknown team no longer waves the
+	// request past — preventing sessions with an empty user turn that
+	// silently no-op inside the linker.
+	if body.Message == "" && !h.canBypassMissingMessageForLinear(r.Context(), orgID, body.References) {
 		writeError(w, r, http.StatusBadRequest, "MISSING_MESSAGE", "message is required")
 		return
 	}
@@ -1873,6 +2371,20 @@ func (h *SessionHandler) CreateManual(w http.ResponseWriter, r *http.Request) {
 	orgSettings, parseErr := models.ParseOrgSettings(org.Settings)
 	if parseErr != nil {
 		zerolog.Ctx(r.Context()).Warn().Err(parseErr).Msg("failed to parse org settings, using defaults")
+	}
+
+	// Admin gate on the per-session Linear policy flags. EffectiveAllow-
+	// PerSessionOverrides() resolves nil → true, so the gate is permissive
+	// by default: an org with no LinearAutomation settings (or with
+	// allow_per_session_overrides explicitly absent) lets users opt out of
+	// Linear writes on a per-session basis. Admins enforce "every session
+	// must sync to Linear" by setting allow_per_session_overrides=false
+	// explicitly — only that case rejects requests. Read the double-negative
+	// here as: "block if the user wants to silence writes AND the admin has
+	// explicitly forbidden per-session overrides."
+	if (body.LinearPrivate || body.LinearStateSyncDisabled) && !orgSettings.LinearAutomation.EffectiveAllowPerSessionOverrides() {
+		writeError(w, r, http.StatusForbidden, "LINEAR_PER_SESSION_OVERRIDES_DISABLED", "linear_private and linear_state_sync_disabled are not permitted for this organization")
+		return
 	}
 
 	agentType := models.AgentType(body.AgentType)
@@ -1947,21 +2459,23 @@ func (h *SessionHandler) CreateManual(w http.ResponseWriter, r *http.Request) {
 	}
 
 	session := &models.Session{
-		OrgID:             orgID,
-		Origin:            models.SessionOriginManual,
-		InteractionMode:   models.SessionInteractionModeInteractive,
-		ValidationPolicy:  models.SessionValidationPolicyOnSessionEnd,
-		AgentType:         agentType,
-		Status:            "pending",
-		AutonomyLevel:     autonomyLevel,
-		TokenMode:         tokenMode,
-		ModelOverride:     modelOverride,
-		ReasoningEffort:   reasoningOverride,
-		TriggeredByUserID: manualTriggeredByUserID,
-		Title:             &title,
-		PMApproach:        &title,
-		TargetBranch:      targetBranch,
-		RepositoryID:      repoID,
+		OrgID:                   orgID,
+		Origin:                  models.SessionOriginManual,
+		InteractionMode:         models.SessionInteractionModeInteractive,
+		ValidationPolicy:        models.SessionValidationPolicyOnSessionEnd,
+		AgentType:               agentType,
+		Status:                  "pending",
+		AutonomyLevel:           autonomyLevel,
+		TokenMode:               tokenMode,
+		ModelOverride:           modelOverride,
+		ReasoningEffort:         reasoningOverride,
+		TriggeredByUserID:       manualTriggeredByUserID,
+		Title:                   &title,
+		PMApproach:              &title,
+		TargetBranch:            targetBranch,
+		RepositoryID:            repoID,
+		LinearPrivate:           body.LinearPrivate,
+		LinearStateSyncDisabled: body.LinearStateSyncDisabled,
 	}
 	if err := h.runStore.Create(r.Context(), session); err != nil {
 		writeError(w, r, http.StatusInternalServerError, "CREATE_FAILED", "failed to create manual session", err)
@@ -1995,7 +2509,10 @@ func (h *SessionHandler) CreateManual(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Check concurrency before enqueuing so the user gets immediate feedback.
+	// Check concurrency before any Linear linking side effects. The session
+	// row and turn-0 message are already persisted to preserve historical
+	// CreateManual behavior, but we must not link or post to Linear for a run
+	// that will never be enqueued.
 	runningCount, err := h.runStore.CountRunningByOrg(r.Context(), orgID)
 	if err != nil {
 		writeError(w, r, http.StatusInternalServerError, "CONCURRENCY_CHECK_FAILED", "failed to check running sessions", err)
@@ -2011,6 +2528,113 @@ func (h *SessionHandler) CreateManual(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Resolve linked Linear issues before enqueueing the agent run. Per
+	// design 62 §"Pre-start preparation step", turn 1 cannot start until the
+	// primary Linear issue has its context snapshot captured — but the
+	// session-create response should still come back fast. The linker
+	// chooses inline vs queued based on a strict latency budget.
+	//
+	// Repo-less sessions (issue-only start, design 62 §"Issue-only session
+	// start") still get linked: SessionIssueLinkStore.CreateAllowingNullRepo
+	// already accepts a NULL repository on the link row when the underlying
+	// session has no repo, so we don't pre-filter on body.RepositoryID here.
+	linker := h.getLinearLinker()
+	if linker == nil && (body.LinearPrivate || body.LinearStateSyncDisabled) {
+		// User asked for Linear-aware behavior but no Linear integration is
+		// wired into this handler. The flags are persisted (so a later
+		// install backfills the right policy), but nothing will read them
+		// until then — surface this to dogfooders rather than failing silently.
+		//
+		// Intentionally NOT a 4xx: the design treats these flags as policy
+		// hints captured at the moment of intent. Rejecting the request when
+		// the integration is absent would push operators to either re-create
+		// sessions after install or pollute clients with feature-flag
+		// branching. A future cleanup pass that "fixes" this by returning
+		// 422 should not — the persisted flags are the contract.
+		h.logger.Warn().
+			Str("session_id", session.ID.String()).
+			Bool("linear_private", body.LinearPrivate).
+			Bool("linear_state_sync_disabled", body.LinearStateSyncDisabled).
+			Msg("linear policy flags set on session but no Linear integration is configured; flags persisted but currently unused")
+	}
+	if linker != nil {
+		userID := manualTriggeredByUserID
+		referenceText := ""
+		if len(body.References) > 0 {
+			var refDisplays []string
+			for _, ref := range body.References {
+				if ref.Display != "" {
+					refDisplays = append(refDisplays, ref.Display)
+				}
+				if ref.ID != "" && ref.ID != ref.Display {
+					refDisplays = append(refDisplays, ref.ID)
+				}
+			}
+			referenceText = strings.Join(refDisplays, "\n")
+		}
+		linearResult, linkErr := linker.ResolveAndLinkAtCreate(r.Context(), linear.CreateInput{
+			OrgID:                   orgID,
+			SessionID:               session.ID,
+			MessageBody:             body.Message,
+			SessionTitle:            title,
+			BranchName:              body.Branch,
+			ReferenceText:           referenceText,
+			UserID:                  userID,
+			LinearPrivate:           body.LinearPrivate,
+			LinearStateSyncDisabled: body.LinearStateSyncDisabled,
+		})
+		if linkErr != nil {
+			errMsg := "Linear context could not be prepared. Retry the session after the Linear integration recovers."
+			// Sidebar rendering contract: session-sidebar.tsx displays
+			// `session.failure_explanation || session.error` for any row
+			// with status="failed", and sessionTitle() falls back to
+			// "Session XXXXXXXX" when the title is empty. So an
+			// orphaned-failed Linear session — title set from
+			// manualSessionTitle, no agent run, this errMsg in
+			// SessionResult.Error — renders cleanly with both the title
+			// and the user-visible explanation. Don't change errMsg to a
+			// raw stack-trace shape without also updating that contract.
+			//
+			// Use a detached context for the failure write so a cancelled
+			// request context (client disconnect) doesn't leave the session
+			// stuck in "pending" forever — the agent run hasn't been
+			// enqueued yet, so without this transition the row is orphaned.
+			//
+			// Backstop: if this 5s detached write also fails (DB hiccup,
+			// process death), agent.SessionReaper Phase 0
+			// (FailureCategoryStuckPending, 10-minute cutoff) sweeps stale
+			// pending rows on its next tick. The detached write is the
+			// fast path that surfaces the failure to the user immediately;
+			// the reaper is the eventual-consistency safety net.
+			cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			if err := h.runStore.UpdateResult(cleanupCtx, orgID, session.ID, "failed", &models.SessionResult{Error: &errMsg}); err != nil {
+				h.logger.Error().Err(err).Str("session_id", session.ID.String()).Msg("failed to mark session failed after linear pre-start linking error; SessionReaper Phase 0 will reap the stuck-pending row within max_pending_age")
+			}
+			cancel()
+			h.logger.Warn().Err(linkErr).Str("session_id", session.ID.String()).Msg("linear pre-start linking failed; refusing to enqueue agent run")
+			writeError(w, r, http.StatusInternalServerError, "LINEAR_PREPARE_FAILED", "failed to prepare Linear context", linkErr)
+			return
+		}
+		if linearResult.PrimaryIdentifier != "" {
+			if err := h.runStore.SetLinearIdentifierHint(r.Context(), orgID, session.ID, linearResult.PrimaryIdentifier); err != nil {
+				h.logger.Warn().Err(err).Str("session_id", session.ID.String()).Str("identifier", linearResult.PrimaryIdentifier).Msg("failed to persist linear identifier hint; branch naming will fall back to non-linear slug")
+			} else {
+				session.LinearIdentifierHint = &linearResult.PrimaryIdentifier
+			}
+			// Use the Linear issue title as the session title when the user
+			// gave us nothing useful. Honors design 62 §"Issue-only session
+			// start".
+			if linearResult.PrimaryTitle != "" && shouldOverrideTitleWithLinearIssue(session.Title) {
+				newTitle := linearResult.PrimaryTitle
+				if err := h.runStore.UpdateTitle(r.Context(), orgID, session.ID, newTitle); err != nil {
+					h.logger.Warn().Err(err).Str("session_id", session.ID.String()).Msg("failed to override session title with linear issue title; keeping placeholder title")
+				} else {
+					session.Title = &newTitle
+				}
+			}
+		}
+	}
+
 	payload := map[string]string{
 		"session_id": session.ID.String(),
 		"org_id":     orgID.String(),
@@ -2022,7 +2646,7 @@ func (h *SessionHandler) CreateManual(w http.ResponseWriter, r *http.Request) {
 
 	// Generate a concise session title via LLM (with a short timeout so the
 	// request doesn't block for too long).
-	if h.llmClient != nil {
+	if h.llmClient != nil && body.Message != "" {
 		if err := h.generateSessionTitle(r.Context(), session, orgID, body.Message); err != nil {
 			writeError(w, r, http.StatusInternalServerError, "TITLE_GENERATION_FAILED", "failed to generate session title", err)
 			return
@@ -2090,10 +2714,24 @@ func buildManualSessionDescription(message string, images []string) string {
 	return strings.TrimSpace(b.String())
 }
 
+// defaultManualSessionTitle is the placeholder title we apply when a manual
+// session has no message body to derive a title from. The Linear-issue-only
+// fast path overwrites this with the linked issue's title, which means the
+// constant doubles as a sentinel — exposed for that comparison.
+//
+// CAUTION: shouldOverrideTitleWithLinearIssue compares trimmed titles to
+// this exact literal. Renaming the constant — including for i18n or copy
+// updates — silently changes which historical sessions are eligible for
+// Linear-title overwrite (every existing row whose title still equals the
+// old literal will stop matching). If this value ever needs to change,
+// migrate existing rows in the same change or switch to a non-displayable
+// sentinel column rather than a string compare.
+const defaultManualSessionTitle = "Manual Session"
+
 func manualSessionTitle(message string) string {
 	trimmed := strings.TrimSpace(message)
 	if trimmed == "" {
-		return "Manual Session"
+		return defaultManualSessionTitle
 	}
 
 	if idx := strings.Index(trimmed, "\n"); idx > 0 {
@@ -2105,6 +2743,21 @@ func manualSessionTitle(message string) string {
 	}
 
 	return strings.TrimSpace(trimmed[:120]) + "..."
+}
+
+// shouldOverrideTitleWithLinearIssue reports whether a Linear primary
+// resolution should overwrite the session title. We replace the title only
+// when the user gave us nothing useful — empty, whitespace, or the
+// default placeholder — never when the user typed a real subject line.
+func shouldOverrideTitleWithLinearIssue(current *string) bool {
+	if current == nil {
+		return true
+	}
+	trimmed := strings.TrimSpace(*current)
+	if trimmed == "" {
+		return true
+	}
+	return trimmed == defaultManualSessionTitle
 }
 
 // ArchiveSession marks a session as archived, hiding it from default list views.

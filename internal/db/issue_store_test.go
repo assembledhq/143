@@ -185,6 +185,72 @@ func TestIssueStore_GetByID(t *testing.T) {
 	}
 }
 
+func TestIssueStore_LinearLookupAndRepositoryUpdate(t *testing.T) {
+	t.Parallel()
+
+	t.Run("gets issue by external id", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err, "should create mock pool")
+		defer mock.Close()
+
+		store := NewIssueStore(mock)
+		orgID := uuid.New()
+		issueID := uuid.New()
+		now := time.Now().UTC()
+
+		mock.ExpectQuery("SELECT id, org_id, external_id, source").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnRows(pgxmock.NewRows(issueColumns).AddRow(
+				issueID, orgID, "linear-issue-id", models.IssueSourceLinear, nil, nil,
+				"ACS-123", nil, json.RawMessage(`{}`), "open", now, now,
+				1, 0, "medium", []string{"team:ACS"}, "linear:linear-issue-id",
+				now, now, nil,
+			))
+
+		got, err := store.GetByOrgAndExternalID(context.Background(), orgID, models.IssueSourceLinear, "linear-issue-id")
+		require.NoError(t, err, "GetByOrgAndExternalID should return a matching issue")
+		require.Equal(t, issueID, got.ID, "GetByOrgAndExternalID should decode issue id")
+		require.Equal(t, "linear-issue-id", got.ExternalID, "GetByOrgAndExternalID should decode external id")
+		require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+	})
+
+	t.Run("wraps external id query errors", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err, "should create mock pool")
+		defer mock.Close()
+
+		mock.ExpectQuery("SELECT id, org_id, external_id, source").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnError(fmt.Errorf("db unavailable"))
+
+		_, err = NewIssueStore(mock).GetByOrgAndExternalID(context.Background(), uuid.New(), models.IssueSourceLinear, "linear-issue-id")
+		require.Error(t, err, "GetByOrgAndExternalID should return query errors")
+		require.Contains(t, err.Error(), "query issue by external id", "GetByOrgAndExternalID should wrap query errors")
+		require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+	})
+
+	t.Run("updates repository id", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err, "should create mock pool")
+		defer mock.Close()
+
+		repoID := uuid.New()
+		mock.ExpectExec("UPDATE issues SET repository_id").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+		err = NewIssueStore(mock).UpdateRepositoryID(context.Background(), uuid.New(), uuid.New(), &repoID)
+		require.NoError(t, err, "UpdateRepositoryID should update the issue repository")
+		require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+	})
+}
+
 func TestIssueStore_Upsert(t *testing.T) {
 	t.Parallel()
 

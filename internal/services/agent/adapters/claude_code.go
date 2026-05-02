@@ -243,7 +243,7 @@ func (a *ClaudeCodeAdapter) Execute(ctx context.Context, sandbox *agent.Sandbox,
 	}
 
 	// Collect the git diff from the sandbox.
-	diff, err := collectDiff(ctx, provider, sandbox)
+	diff, err := collectDiff(ctx, provider, sandbox, a.logger)
 	if err != nil {
 		a.logger.Warn().Err(err).Msg("failed to collect git diff")
 	} else {
@@ -404,9 +404,29 @@ func buildSystemPrompt(input *agent.AgentInput) string {
 				Source:     string(linked.Source),
 				Title:      linked.Title,
 				ExternalID: linked.ExternalID,
+				StateName:  linked.StateName,
+				StateType:  linked.StateType,
+				Priority:   linked.Priority,
+				Assignee:   linked.AssigneeName,
+				TeamKey:    linked.TeamKey,
+				TeamName:   linked.TeamName,
+				URL:        linked.URL,
 			}
 			if linked.Role == models.SessionIssueLinkRolePrimary {
 				entry.Description = linked.Description
+			}
+			for _, attachment := range linked.Attachments {
+				entry.Attachments = append(entry.Attachments, prompts.LinkedIssueAttachment{
+					Title:  attachment.Title,
+					URL:    attachment.URL,
+					Source: attachment.Source,
+				})
+			}
+			for _, comment := range linked.Comments {
+				entry.Comments = append(entry.Comments, prompts.LinkedIssueComment{
+					Author: comment.Author,
+					Body:   comment.Body,
+				})
 			}
 			entries = append(entries, entry)
 		}
@@ -772,6 +792,28 @@ func tryExtractConfidence(text string, result *agent.AgentResult) {
 // collectDiff runs git diff inside the sandbox to capture changes.
 // Returns an empty string (not an error) when the workspace is not a git repository,
 // which happens when no repository was configured for the issue.
-func collectDiff(ctx context.Context, provider agent.SandboxProvider, sandbox *agent.Sandbox) (string, error) {
-	return sessiondiff.Collect(ctx, provider, sandbox)
+//
+// The base commit SHA and target branch are read from sandbox.Metadata, which
+// the orchestrator is responsible for populating both on the initial clone
+// (RunAgent) and on every continue path (ContinueSession). The base SHA is the
+// immutable fallback; the target branch lets sessiondiff.Collect compute a
+// dynamic merge-base diff so integrating the target branch back into the
+// working branch (e.g. `git pull origin main` or merging main to resolve PR
+// conflicts) does not inflate the diff with target-branch changes. When the
+// base SHA is missing, sessiondiff.Collect returns ErrNoBaseCommitSHA —
+// adapters log and leave result.Diff unset so the persistence layer
+// preserves the previous diff rather than clobbering it with an empty string.
+//
+// logger is forwarded to Collect so merge-base fallbacks (transient fetch
+// failures, missing remote refs) show up in adapter-scoped logs at debug
+// level — making it diagnosable when a session's Changes tab silently
+// regresses to the inflated baseCommitSHA-snapshot view.
+func collectDiff(ctx context.Context, provider agent.SandboxProvider, sandbox *agent.Sandbox, logger zerolog.Logger) (string, error) {
+	baseCommitSHA := ""
+	targetBranch := ""
+	if sandbox != nil && sandbox.Metadata != nil {
+		baseCommitSHA = sandbox.Metadata[sessiondiff.SandboxMetadataBaseCommitSHA]
+		targetBranch = sandbox.Metadata[sessiondiff.SandboxMetadataTargetBranch]
+	}
+	return sessiondiff.Collect(ctx, provider, sandbox, baseCommitSHA, targetBranch, logger)
 }

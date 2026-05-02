@@ -67,6 +67,35 @@ func clampListLimit(requested, defaultLimit, maxLimit int) int {
 
 func strPtr(s string) *string { return &s }
 
+// clearWriteDeadline disables the global http.Server WriteTimeout for a
+// single in-flight request. Use it at the top of handlers whose work can
+// legitimately exceed the server-wide WriteTimeout — preview start in
+// particular blends snapshot restore (~10s), infra image pull (~30s), and
+// readiness probes (90s default), and the 15s server WriteTimeout will
+// otherwise drop the connection mid-handler. The dropped connection
+// surfaces to the API caller as `EOF` and to the user as a 502 with no
+// usable error code, hiding the real failure.
+//
+// Scoped per-response: Go's http.Server re-arms WriteTimeout on the next
+// request that arrives on the same keep-alive connection. The request
+// context's own deadline (driven by the client connection or the
+// worker_client's 10-minute timeout) still bounds the handler.
+//
+// Stop / StopActivePreviewForSession deliberately do NOT clear the
+// deadline: those paths only signal an existing container and complete
+// well within the 15s budget; keeping the default catches a genuinely
+// stuck stop instead of letting it hang the connection.
+//
+// Logs at Debug and returns silently on response writers that don't
+// support http.ResponseController — this is a perf/UX optimization, not
+// a correctness requirement, so degrading to the default WriteTimeout
+// is acceptable for those cases.
+func clearWriteDeadline(w http.ResponseWriter, r *http.Request) {
+	if err := http.NewResponseController(w).SetWriteDeadline(time.Time{}); err != nil {
+		zerolog.Ctx(r.Context()).Debug().Err(err).Msg("could not clear write deadline; continuing with server default")
+	}
+}
+
 func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)

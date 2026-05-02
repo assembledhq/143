@@ -8,6 +8,7 @@ import (
 
 	"github.com/assembledhq/143/internal/models"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/pashagolub/pgxmock/v4"
 	"github.com/stretchr/testify/require"
 )
@@ -17,6 +18,10 @@ var sessionIssueLinkTestColumns = []string{
 	"position", "added_by_user_id", "created_at",
 	"issue_title", "issue_source", "external_id", "description",
 	"repository_id", "issue_status",
+	// Migration 102 — Linear workspace slug is left-joined off
+	// session_issue_link_provider_state for deep-link rendering.
+	"issue_workspace_slug",
+	"linear_primary_snapshot",
 }
 
 func TestSessionIssueLinkStore_Create(t *testing.T) {
@@ -80,6 +85,61 @@ func TestSessionIssueLinkStore_Create(t *testing.T) {
 	}
 }
 
+func TestSessionIssueLinkStore_CreateAllowingNullRepo_AllowsRepoLessSessions(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewSessionIssueLinkStore(mock)
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	issueID := uuid.New()
+	linkID := uuid.New()
+
+	mock.ExpectQuery(`INSERT INTO session_issue_links[\s\S]+AND \(s\.repository_id IS NULL OR i\.repository_id IS NULL OR s\.repository_id = i\.repository_id\)`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(linkID))
+
+	got, err := store.CreateAllowingNullRepo(context.Background(), orgID, sessionID, issueID, models.SessionIssueLinkRolePrimary, 0, nil)
+	require.NoError(t, err, "CreateAllowingNullRepo should allow issue-only sessions with no repository")
+	require.Equal(t, linkID, got, "CreateAllowingNullRepo should return the inserted link id")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestSessionIssueLinkStore_CreateAllowingNullRepo_ReturnsExistingOnConflict(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewSessionIssueLinkStore(mock)
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	issueID := uuid.New()
+	existingID := uuid.New()
+
+	mock.ExpectQuery("INSERT INTO session_issue_links").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnError(pgx.ErrNoRows)
+	mock.ExpectQuery("SELECT id FROM session_issue_links").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(existingID))
+
+	got, err := store.CreateAllowingNullRepo(context.Background(), orgID, sessionID, issueID, models.SessionIssueLinkRolePrimary, 0, nil)
+	require.NoError(t, err, "CreateAllowingNullRepo should treat an existing link as idempotent success")
+	require.Equal(t, existingID, got, "CreateAllowingNullRepo should return the existing link id")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestSessionIssueLinkSelectColumns_UsesLinearIdentifierForExternalID(t *testing.T) {
+	t.Parallel()
+
+	require.Contains(t, sessionIssueLinkSelectColumns, "COALESCE(provider_state.state->>'identifier', i.external_id) AS external_id", "linked issue enrichment should expose the human Linear key when provider state has it")
+}
+
 func TestSessionIssueLinkStore_ListBySession(t *testing.T) {
 	t.Parallel()
 
@@ -108,6 +168,8 @@ func TestSessionIssueLinkStore_ListBySession(t *testing.T) {
 				0, &addedBy, now,
 				&title, &source, &externalID, &description,
 				&repoID, &status,
+				nil, // issue_workspace_slug
+				nil, // linear_primary_snapshot
 			),
 		)
 
@@ -136,6 +198,81 @@ func TestSessionIssueLinkStore_ListBySession_QueryError(t *testing.T) {
 	require.Error(t, err, "ListBySession should return query errors")
 	require.Contains(t, err.Error(), "query session issue links", "ListBySession should wrap query errors with context")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestSessionIssueLinkStore_GetByIDAndRemove(t *testing.T) {
+	t.Parallel()
+
+	t.Run("gets enriched link by id", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err, "should create mock pool")
+		defer mock.Close()
+
+		store := NewSessionIssueLinkStore(mock)
+		orgID := uuid.New()
+		sessionID := uuid.New()
+		issueID := uuid.New()
+		linkID := uuid.New()
+		now := time.Now().UTC()
+		title := "Fix session linking"
+		source := models.IssueSourceLinear
+		externalID := "ACS-123"
+		status := "open"
+		workspace := "acme"
+
+		mock.ExpectQuery("SELECT .+ FROM session_issue_links").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnRows(pgxmock.NewRows(sessionIssueLinkTestColumns).AddRow(
+				linkID, orgID, sessionID, issueID, string(models.SessionIssueLinkRolePrimary),
+				0, nil, now,
+				&title, &source, &externalID, nil,
+				nil, &status, &workspace, nil,
+			))
+
+		got, err := store.GetByID(context.Background(), orgID, linkID)
+		require.NoError(t, err, "GetByID should return the enriched link")
+		require.Equal(t, linkID, got.ID, "GetByID should decode the link id")
+		require.Equal(t, workspace, *got.IssueWorkspaceSlug, "GetByID should decode the Linear workspace slug")
+		require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+	})
+
+	t.Run("removes link and returns session id", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err, "should create mock pool")
+		defer mock.Close()
+
+		store := NewSessionIssueLinkStore(mock)
+		sessionID := uuid.New()
+		mock.ExpectQuery("DELETE FROM session_issue_links").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnRows(pgxmock.NewRows([]string{"session_id"}).AddRow(sessionID))
+
+		got, err := store.Remove(context.Background(), uuid.New(), uuid.New())
+		require.NoError(t, err, "Remove should delete the link")
+		require.Equal(t, sessionID, got, "Remove should return the owning session id")
+		require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+	})
+
+	t.Run("remove maps missing rows", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err, "should create mock pool")
+		defer mock.Close()
+
+		store := NewSessionIssueLinkStore(mock)
+		mock.ExpectQuery("DELETE FROM session_issue_links").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnError(pgx.ErrNoRows)
+
+		_, err = store.Remove(context.Background(), uuid.New(), uuid.New())
+		require.ErrorIs(t, err, ErrInvalidSessionIssueLink, "Remove should map missing rows to ErrInvalidSessionIssueLink")
+		require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+	})
 }
 
 func TestSessionIssueLinkStore_ListBySessionIDs(t *testing.T) {
@@ -173,9 +310,9 @@ func TestSessionIssueLinkStore_ListBySessionIDs(t *testing.T) {
 			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 			WillReturnRows(
 				pgxmock.NewRows(sessionIssueLinkTestColumns).
-					AddRow(uuid.New(), orgID, sessionA, uuid.New(), string(models.SessionIssueLinkRolePrimary), 0, nil, now, nil, nil, nil, nil, &repoID, nil).
-					AddRow(uuid.New(), orgID, sessionA, uuid.New(), string(models.SessionIssueLinkRoleRelated), 1, nil, now, nil, nil, nil, nil, &repoID, nil).
-					AddRow(uuid.New(), orgID, sessionB, uuid.New(), string(models.SessionIssueLinkRolePrimary), 0, nil, now, nil, nil, nil, nil, &repoID, nil),
+					AddRow(uuid.New(), orgID, sessionA, uuid.New(), string(models.SessionIssueLinkRolePrimary), 0, nil, now, nil, nil, nil, nil, &repoID, nil, nil, nil).
+					AddRow(uuid.New(), orgID, sessionA, uuid.New(), string(models.SessionIssueLinkRoleRelated), 1, nil, now, nil, nil, nil, nil, &repoID, nil, nil, nil).
+					AddRow(uuid.New(), orgID, sessionB, uuid.New(), string(models.SessionIssueLinkRolePrimary), 0, nil, now, nil, nil, nil, nil, &repoID, nil, nil, nil),
 			)
 
 		grouped, err := store.ListBySessionIDs(context.Background(), orgID, []uuid.UUID{sessionA, sessionB})
@@ -216,7 +353,7 @@ func TestSessionIssueLinkStore_ListBySessionIDs(t *testing.T) {
 			WillReturnRows(
 				pgxmock.NewRows(sessionIssueLinkTestColumns).AddRow(
 					"bad-uuid", uuid.New(), uuid.New(), uuid.New(), string(models.SessionIssueLinkRolePrimary),
-					0, nil, time.Now().UTC(), nil, nil, nil, nil, nil, nil,
+					0, nil, time.Now().UTC(), nil, nil, nil, nil, nil, nil, nil, nil,
 				),
 			)
 

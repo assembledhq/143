@@ -154,7 +154,7 @@ func (a *CodexAdapter) Execute(ctx context.Context, sandbox *agent.Sandbox, prom
 	}
 
 	// Collect the git diff from the sandbox.
-	diff, err := collectDiff(ctx, provider, sandbox)
+	diff, err := collectDiff(ctx, provider, sandbox, a.logger)
 	if err != nil {
 		a.logger.Warn().Err(err).Msg("failed to collect git diff")
 	} else {

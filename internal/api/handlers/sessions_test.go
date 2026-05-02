@@ -118,7 +118,7 @@ func (s *archiveTestSnapshotStore) Delete(_ context.Context, key string) error {
 
 func newSessionHandler(t *testing.T, mock pgxmock.PgxPoolIface) *SessionHandler {
 	t.Helper()
-	return NewSessionHandler(
+	h := NewSessionHandler(
 		db.NewSessionStore(mock),
 		db.NewSessionLogStore(mock),
 		db.NewSessionQuestionStore(mock),
@@ -133,6 +133,11 @@ func newSessionHandler(t *testing.T, mock pgxmock.PgxPoolIface) *SessionHandler 
 		nil, // llmClient — not needed in unit tests
 		zerolog.Nop(),
 	)
+	// SendMessage's optional resolve_review_comment_ids path requires the
+	// review-comment store. The store presence is just a feature gate; tx-
+	// scoped instances are created on demand inside the handler.
+	h.SetReviewCommentStore(db.NewSessionReviewCommentStore(mock))
+	return h
 }
 
 // sessionColumns is the standard column set for sessions queries.
@@ -151,7 +156,9 @@ var sessionColumns = []string{
 	"runtime_extension_count", "runtime_extension_seconds", "runtime_stop_reason", "runtime_graceful_stop_at",
 	"checkpointed_at", "checkpoint_kind", "checkpoint_capability", "checkpoint_size_bytes", "checkpoint_error",
 	"recovery_state", "recovery_queued_at", "recovery_started_at", "recovery_attempt_count",
-	"target_branch", "working_branch", "base_commit_sha", "repository_id", "diff_stats", "diff_history", "input_manifest", "archived_at", "archived_by_user_id", "automation_run_id", "pr_creation_state", "pr_creation_error", "diff_collected_at", "latest_diff_snapshot_id", "deleted_at", "git_identity_source", "git_identity_user_id", "created_at",
+	"target_branch", "working_branch", "base_commit_sha", "repository_id", "diff_stats", "diff_history", "input_manifest", "archived_at", "archived_by_user_id", "automation_run_id", "pr_creation_state", "pr_creation_error", "pr_push_state", "pr_push_error", "diff_collected_at", "latest_diff_snapshot_id",
+	"linear_private", "linear_state_sync_disabled", "linear_identifier_hint", "linear_prepare_state",
+	"deleted_at", "git_identity_source", "git_identity_user_id", "created_at",
 }
 
 func sessionTestRowWithPolicyDefaults(values []interface{}) []interface{} {
@@ -204,14 +211,6 @@ const (
 	legacySessionBaseCommitSHAIndex = 44
 	legacySessionDiffCollectedIndex = 54
 	legacySessionLatestDiffIndex    = 55
-
-	// preIdentitySessionColumnsLen is the column count before
-	// git_identity_source / git_identity_user_id were appended. The
-	// dispatch logic in sessionTestRow is calibrated to produce rows of
-	// this length; padSessionIdentityColumns fills in the missing 2 nils
-	// at the end so each test fixture doesn't need to know about the new
-	// columns.
-	preIdentitySessionColumnsLen = 74
 )
 
 const (
@@ -220,11 +219,66 @@ const (
 	sessionBaseCommitSHAIndex   = 62
 	sessionDiffCollectedAtIndex = 72
 	sessionLatestDiffIndex      = 73
+	// preLinearSessionColumnsLen is the size of sessionColumns *before*
+	// migrations 103 (linear_*) and 100 (git_identity_*) added their
+	// columns. Test fixtures authored against the pre-migration shape pass
+	// rows of this length (or shorter); the dispatch routes them to the
+	// right pad helper, then sessionTestRow pads the four trailing linear
+	// columns and the two trailing identity nils at the end.
+	preLinearSessionColumnsLen = 76
 )
+
+// TestPreLinearSessionColumnsLenStaysInSync trips when a future migration
+// changes the column count without bumping preLinearSessionColumnsLen.
+// Without this guard, every length-based dispatch case below would silently
+// route to the wrong padding helper.
+func TestPreLinearSessionColumnsLenStaysInSync(t *testing.T) {
+	t.Parallel()
+	const pendingSnapshotFieldsAdded = 2
+	const linearFieldsAdded = 4
+	const identityFieldsAdded = 2
+	const prPushFieldsAdded = 2
+	require.Equal(t, preLinearSessionColumnsLen+pendingSnapshotFieldsAdded+linearFieldsAdded+identityFieldsAdded+prPushFieldsAdded, len(sessionColumns),
+		"sessionColumns shifted; bump preLinearSessionColumnsLen, pendingSnapshotFieldsAdded, "+
+			"linearFieldsAdded, identityFieldsAdded, or prPushFieldsAdded if a new migration added more session columns")
+}
+
+// linearSessionDefaults returns the placeholder values for the four
+// linear_* columns inserted by migration 103. Test rows that don't pass
+// values for these get them auto-padded by sessionTestRow (one of the
+// length-difference cases below).
+func linearSessionDefaults() []interface{} {
+	return []interface{}{
+		false,                                 // linear_private
+		false,                                 // linear_state_sync_disabled
+		(*string)(nil),                        // linear_identifier_hint
+		string(models.LinearPrepareStateNone), // linear_prepare_state
+	}
+}
+
+// padLinearFields injects the four linear_* defaults at the position right
+// before the trailing deleted_at/created_at columns when the row was built
+// without them. Called from sessionTestRow on each row regardless of the
+// branch that resolved its prior shape. Runs before padSessionIdentityColumns,
+// so the input still has only deleted_at + created_at at the tail.
+func padLinearFields(values []interface{}) []interface{} {
+	if len(values) >= len(sessionColumns)-2 {
+		return values
+	}
+	if len(values) < 2 {
+		return values
+	}
+	insertAt := len(values) - 2 // before deleted_at, created_at
+	row := make([]interface{}, 0, len(values)+4)
+	row = append(row, values[:insertAt]...)
+	row = append(row, linearSessionDefaults()...)
+	row = append(row, values[insertAt:]...)
+	return row
+}
 
 var sessionPullRequestColumns = []string{
 	"id", "session_id", "org_id", "github_pr_number", "github_pr_url", "github_repo",
-	"title", "body", "status", "review_status", "authored_by", "ci_status", "head_sha", "base_sha",
+	"title", "body", "status", "review_status", "authored_by", "ci_status", "head_sha", "head_ref", "base_sha",
 	"merge_state", "has_conflicts", "failing_test_count", "needs_agent_action", "github_state_synced_at",
 	"health_version", "merged_at", "created_at", "updated_at",
 }
@@ -243,6 +297,7 @@ func sessionPullRequestRow(prID uuid.UUID, sessionID *uuid.UUID, orgID uuid.UUID
 		"pending",
 		"app",
 		"",
+		(*string)(nil),
 		(*string)(nil),
 		(*string)(nil),
 		models.PullRequestMergeStateUnknown,
@@ -378,30 +433,42 @@ func sessionRowLikelyOmitsWorkerNodeID(values []interface{}) bool {
 }
 
 func sessionTestRow(values ...interface{}) []interface{} {
-	return padSessionIdentityColumns(normalizeSessionRowPrimaryIssueID(sessionTestRowDispatch(values...)))
+	row := normalizeSessionRowPrimaryIssueID(sessionTestRowDispatch(values...))
+	// Dispatch returns the pre-Linear legacy shape (no pending_snapshot_*,
+	// no linear_*, no git_identity_*). Chain the pads so each fixture stays
+	// oblivious to the column-shaping migrations:
+	//   - padLinearFields adds the four linear_* defaults at the position
+	//     right before deleted_at/created_at (76 → 80).
+	//   - padSessionIdentityColumns splices pending_snapshot_* after
+	//     snapshot_key and the git_identity_* pair before created_at
+	//     (80 → 84).
+	if len(row) == preLinearSessionColumnsLen {
+		row = padLinearFields(row)
+	}
+	return padSessionIdentityColumns(row)
 }
 
 func sessionTestRowDispatch(values ...interface{}) []interface{} {
 	if sessionRowNeedsPolicyDefaults(values) {
 		values = normalizeSessionRowAgentType(values, 3)
 		switch len(values) {
-		case preIdentitySessionColumnsLen - 3:
+		case preLinearSessionColumnsLen - 3:
 			return sessionTestRowWithPolicyDefaults(values)
-		case preIdentitySessionColumnsLen - 4:
+		case preLinearSessionColumnsLen - 4:
 			if sessionRowLikelyOmitsWorkerNodeID(values) {
 				return sessionRowWithCurrentOptionalDefaults(sessionTestRowWithPolicyDefaults(values), false, true, false)
 			}
 			return sessionRowWithCurrentOptionalDefaults(sessionTestRowWithPolicyDefaults(values), true, false, false)
-		case preIdentitySessionColumnsLen - 5:
+		case preLinearSessionColumnsLen - 5:
 			return sessionRowWithCurrentOptionalDefaults(sessionTestRowWithPolicyDefaults(values), true, true, false)
-		case preIdentitySessionColumnsLen - 6:
+		case preLinearSessionColumnsLen - 6:
 			return sessionRowWithCurrentOptionalDefaults(sessionTestRowWithPolicyDefaults(values), false, false, true)
-		case preIdentitySessionColumnsLen - 7:
+		case preLinearSessionColumnsLen - 7:
 			if sessionRowLikelyOmitsWorkerNodeID(values) {
 				return sessionRowWithCurrentOptionalDefaults(sessionTestRowWithPolicyDefaults(values), false, true, true)
 			}
 			return sessionRowWithCurrentOptionalDefaults(sessionTestRowWithPolicyDefaults(values), true, false, true)
-		case preIdentitySessionColumnsLen - 8:
+		case preLinearSessionColumnsLen - 8:
 			return sessionRowWithCurrentOptionalDefaults(sessionTestRowWithPolicyDefaults(values), true, true, true)
 		case legacySessionColumnsLen - 3:
 			return expandLegacySessionRow(sessionTestRowWithPolicyDefaults(values))
@@ -426,7 +493,7 @@ func sessionTestRowDispatch(values ...interface{}) []interface{} {
 	values = normalizeSessionRowAgentType(values, 6)
 
 	switch len(values) {
-	case preIdentitySessionColumnsLen:
+	case preLinearSessionColumnsLen:
 		return values
 	case legacySessionColumnsLen:
 		return expandLegacySessionRow(values)
@@ -446,32 +513,32 @@ func sessionTestRowDispatch(values ...interface{}) []interface{} {
 		return expandLegacySessionRow(sessionRowWithLegacyOptionalDefaults(values, true, false, true))
 	case legacySessionColumnsLen - 5:
 		return expandLegacySessionRow(sessionRowWithLegacyOptionalDefaults(values, true, true, true))
-	case preIdentitySessionColumnsLen - 1:
+	case preLinearSessionColumnsLen - 1:
 		if sessionRowLikelyOmitsWorkerNodeID(values) {
 			return sessionRowWithCurrentOptionalDefaults(values, false, true, false)
 		}
 		return sessionRowWithCurrentOptionalDefaults(values, true, false, false)
-	case preIdentitySessionColumnsLen - 2:
+	case preLinearSessionColumnsLen - 2:
 		return sessionRowWithCurrentOptionalDefaults(values, true, true, false)
-	case preIdentitySessionColumnsLen - 4:
+	case preLinearSessionColumnsLen - 4:
 		return sessionRowWithCurrentOptionalDefaults(values, false, false, true)
-	case preIdentitySessionColumnsLen - 3:
+	case preLinearSessionColumnsLen - 3:
 		if sessionRowLikelyOmitsWorkerNodeID(values) {
 			return sessionRowWithCurrentOptionalDefaults(values, false, true, true)
 		}
 		return sessionRowWithCurrentOptionalDefaults(values, true, false, true)
-	case preIdentitySessionColumnsLen - 5:
+	case preLinearSessionColumnsLen - 5:
 		return sessionRowWithCurrentOptionalDefaults(values, true, true, true)
 	default:
 		panic(fmt.Sprintf(
 			"sessionTestRow received %d values, want %d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %d, or %d (plus policy-less variants)",
 			len(values),
-			preIdentitySessionColumnsLen,
-			preIdentitySessionColumnsLen-1,
-			preIdentitySessionColumnsLen-2,
-			preIdentitySessionColumnsLen-3,
-			preIdentitySessionColumnsLen-4,
-			preIdentitySessionColumnsLen-5,
+			preLinearSessionColumnsLen,
+			preLinearSessionColumnsLen-1,
+			preLinearSessionColumnsLen-2,
+			preLinearSessionColumnsLen-3,
+			preLinearSessionColumnsLen-4,
+			preLinearSessionColumnsLen-5,
 			legacySessionColumnsLen,
 			legacySessionColumnsLen-1,
 			legacySessionColumnsLen-2,
@@ -497,7 +564,7 @@ func padSessionIdentityColumns(row []interface{}) []interface{} {
 	if len(row) >= len(sessionColumns) {
 		return row
 	}
-	if len(row) != len(sessionColumns)-4 {
+	if len(row) != len(sessionColumns)-6 {
 		// Some other length we don't recognize — let the row through
 		// unchanged so the AddRow call surfaces the real mismatch.
 		return row
@@ -508,10 +575,23 @@ func padSessionIdentityColumns(row []interface{}) []interface{} {
 	withPending = append(withPending, nil, nil) // pending_snapshot_key, pending_snapshot_set_at
 	withPending = append(withPending, row[pendingSnapshotKeyIndex:]...)
 
+	// Insert the pr_push pair right after pr_creation_error (and before
+	// diff_collected_at). In the post-pending row, diff_collected_at sits
+	// at index 74 (the +2 shift from the pre-pending layout where it was at
+	// index 72). The pr_push pair lands immediately before it. Use "idle"
+	// (not nil) for pr_push_state because the model's field is a non-pointer
+	// PRPushState — a NULL would fail pgx scanning. The migration mirrors
+	// this with NOT NULL DEFAULT 'idle'.
+	const prPushStateIndex = 74
+	withPRPush := make([]interface{}, 0, len(withPending)+2)
+	withPRPush = append(withPRPush, withPending[:prPushStateIndex]...)
+	withPRPush = append(withPRPush, "idle", (*string)(nil)) // pr_push_state, pr_push_error
+	withPRPush = append(withPRPush, withPending[prPushStateIndex:]...)
+
 	padded := make([]interface{}, 0, len(sessionColumns))
-	padded = append(padded, withPending[:len(withPending)-1]...)
+	padded = append(padded, withPRPush[:len(withPRPush)-1]...)
 	padded = append(padded, nil, nil)
-	padded = append(padded, withPending[len(withPending)-1])
+	padded = append(padded, withPRPush[len(withPRPush)-1])
 	return padded
 }
 
@@ -526,7 +606,7 @@ func sessionAnyArgs(count int) []interface{} {
 func expectManualSessionCreate(mock pgxmock.PgxPoolIface, runID uuid.UUID, now time.Time) {
 	mock.ExpectBegin()
 	mock.ExpectQuery("INSERT INTO sessions").
-		WithArgs(sessionAnyArgs(22)...).
+		WithArgs(sessionAnyArgs(26)...).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at", "last_activity_at"}).AddRow(runID, now, now))
 	mock.ExpectCommit()
 }
@@ -534,7 +614,7 @@ func expectManualSessionCreate(mock pgxmock.PgxPoolIface, runID uuid.UUID, now t
 func expectIssueSessionCreate(mock pgxmock.PgxPoolIface, runID uuid.UUID, now time.Time) {
 	mock.ExpectBegin()
 	mock.ExpectQuery("INSERT INTO sessions").
-		WithArgs(sessionAnyArgs(22)...).
+		WithArgs(sessionAnyArgs(26)...).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at", "last_activity_at"}).AddRow(runID, now, now))
 	mock.ExpectExec("INSERT INTO session_issue_links").
 		WithArgs(sessionAnyArgs(4)...).
@@ -4214,7 +4294,9 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 							now,
 						),
 					)
-				// Create message — no ClaimIdle, no ClaimForResume, no Enqueue.
+				// Running session, no review-comment resolve requested:
+				// short-circuits to a single non-tx INSERT (no Begin, no
+				// Commit, no ClaimIdle, no ClaimForResume, no Enqueue).
 				mock.ExpectQuery("INSERT INTO session_messages").
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(int64(1), now))
@@ -4262,12 +4344,10 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 							now,
 						),
 					)
-				// Running session — the message gets created in-place; the
-				// references and commands columns receive the persisted JSON.
-				// Running session — message gets persisted in-place with the
-				// references and commands JSON columns populated. Exact JSON
-				// shape is covered by the model unit tests; here we only
-				// confirm the handler routes both fields to the store.
+				// Running session, no review-comment resolve requested:
+				// message gets persisted in-place via the non-tx fast path.
+				// Exact JSON shape is covered by the model unit tests; here
+				// we only confirm the handler routes both fields to the store.
 				mock.ExpectQuery("INSERT INTO session_messages").
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
@@ -5157,6 +5237,602 @@ func TestSessionHandler_SendMessage_InvalidID(t *testing.T) {
 	require.Equal(t, http.StatusBadRequest, w.Code, "should return 400 for invalid ID")
 	require.Contains(t, w.Body.String(), "INVALID_ID")
 }
+
+// TestSessionHandler_SendMessage_ResolvesReviewComments verifies that
+// resolve_review_comment_ids is honored end-to-end: malformed UUIDs and IDs
+// that don't belong to the session are rejected with descriptive 400s, and
+// valid IDs are looked up + flipped to resolved inside the same transaction
+// that creates the message — so a partial state ("message saved, comment
+// still open") is impossible.
+func TestSessionHandler_SendMessage_ResolvesReviewComments(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+
+	idleSessionRow := func(rows *pgxmock.Rows, sessionID, orgID uuid.UUID, status string) *pgxmock.Rows {
+		return addSessionRow(rows,
+			sessionID, uuid.New(), orgID, "claude-code", status, "semi", "low",
+			nil, nil, nil, nil,
+			nil, false, &now, nil, nil,
+			nil, nil, nil, false,
+			nil, nil, nil, nil, nil,
+			nil, nil, nil, nil,
+			nil, nil,
+			nil, // triggered_by_user_id
+			nil, 1, now, "snapshotted", stringPtr("snapshots/test"),
+			nil, nil, nil, nil, nil, nil,
+			nil, nil,
+			nil,
+			"idle",
+			(*string)(nil),
+			nil,
+			now,
+		)
+	}
+
+	t.Run("rejects malformed comment ID", func(t *testing.T) {
+		t.Parallel()
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err)
+		defer mock.Close()
+
+		orgID := uuid.New()
+		sessionID := uuid.New()
+		userID := uuid.New()
+		handler := newSessionHandler(t, mock)
+		// No DB calls expected — validation rejects before any query.
+
+		req := newSendMessageRequest(sessionID, orgID, userID, `{"message":"hello","resolve_review_comment_ids":["not-a-uuid"]}`)
+		w := httptest.NewRecorder()
+		handler.SendMessage(w, req)
+		require.Equal(t, http.StatusBadRequest, w.Code)
+		require.Contains(t, w.Body.String(), "INVALID_REVIEW_COMMENT_ID")
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+
+	t.Run("rejects resolve IDs when review comment store is not configured", func(t *testing.T) {
+		t.Parallel()
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err, "pgxmock pool should initialize")
+		defer mock.Close()
+
+		orgID := uuid.New()
+		sessionID := uuid.New()
+		userID := uuid.New()
+		commentID := uuid.New()
+		handler := newSessionHandler(t, mock)
+		handler.SetReviewCommentStore(nil)
+
+		req := newSendMessageRequest(sessionID, orgID, userID, fmt.Sprintf(`{"message":"hello","resolve_review_comment_ids":[%q]}`, commentID.String()))
+		w := httptest.NewRecorder()
+		handler.SendMessage(w, req)
+		require.Equal(t, http.StatusBadRequest, w.Code, "handler should reject resolve IDs when review comments are disabled")
+		require.Contains(t, w.Body.String(), "REVIEW_COMMENTS_NOT_CONFIGURED", "response should explain the missing review-comment store")
+		require.NoError(t, mock.ExpectationsWereMet(), "request should fail before DB access")
+	})
+
+	t.Run("rejects ID that does not belong to the session", func(t *testing.T) {
+		t.Parallel()
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err)
+		defer mock.Close()
+
+		orgID := uuid.New()
+		sessionID := uuid.New()
+		userID := uuid.New()
+		commentID := uuid.New()
+		handler := newSessionHandler(t, mock)
+		handler.audit = db.NewAuditEmitter(db.NewAuditLogStore(mock), zerolog.Nop())
+
+		// Session is idle, claim succeeds, message is created, then the lookup
+		// for the foreign comment ID returns zero rows → handler aborts the tx.
+		mock.ExpectQuery("SELECT .+ FROM sessions WHERE").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnRows(idleSessionRow(pgxmock.NewRows(sessionColumns), sessionID, orgID, "idle"))
+		mock.ExpectBegin()
+		mock.ExpectQuery("UPDATE sessions SET status").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnRows(idleSessionRow(pgxmock.NewRows(sessionColumns), sessionID, orgID, "running"))
+		mock.ExpectQuery("INSERT INTO session_messages").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(int64(1), now))
+		mock.ExpectQuery("SELECT .+ FROM session_review_comments WHERE id = ANY").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnRows(pgxmock.NewRows(reviewCommentColumns)) // no rows match → invalid
+		mock.ExpectRollback()
+
+		req := newSendMessageRequest(sessionID, orgID, userID, fmt.Sprintf(`{"message":"hello","resolve_review_comment_ids":[%q]}`, commentID.String()))
+		w := httptest.NewRecorder()
+		handler.SendMessage(w, req)
+		require.Equal(t, http.StatusBadRequest, w.Code)
+		require.Contains(t, w.Body.String(), "INVALID_REVIEW_COMMENT_IDS")
+		require.Contains(t, w.Body.String(), commentID.String(),
+			"error should name the offending IDs so client can debug without leaking other tenants' data")
+		require.NoError(t, mock.ExpectationsWereMet(),
+			"the message insert and comment lookup must roll back when validation fails")
+	})
+
+	t.Run("resolves comments inside the same tx for an idle session", func(t *testing.T) {
+		t.Parallel()
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err)
+		defer mock.Close()
+
+		orgID := uuid.New()
+		sessionID := uuid.New()
+		userID := uuid.New()
+		commentUserID := uuid.New()
+		commentID := uuid.New()
+		handler := newSessionHandler(t, mock)
+		handler.audit = db.NewAuditEmitter(db.NewAuditLogStore(mock), zerolog.Nop())
+
+		mock.ExpectQuery("SELECT .+ FROM sessions WHERE").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnRows(idleSessionRow(pgxmock.NewRows(sessionColumns), sessionID, orgID, "idle"))
+		mock.ExpectBegin()
+		mock.ExpectQuery("UPDATE sessions SET status").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnRows(idleSessionRow(pgxmock.NewRows(sessionColumns), sessionID, orgID, "running"))
+		mock.ExpectQuery("INSERT INTO session_messages").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(int64(1), now))
+		mock.ExpectQuery("SELECT .+ FROM session_review_comments WHERE id = ANY").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnRows(
+				pgxmock.NewRows(reviewCommentColumns).
+					AddRow(commentID, sessionID, orgID, commentUserID, "main.go",
+						42, "right", "fix this", false, (*time.Time)(nil), (*int)(nil),
+						1, now, now),
+			)
+		mock.ExpectQuery("UPDATE session_review_comments SET resolved = true").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnRows(
+				pgxmock.NewRows(reviewCommentColumns).
+					AddRow(commentID, sessionID, orgID, commentUserID, "main.go",
+						42, "right", "fix this", true, &now, srcIntPtr(2),
+						1, now, now),
+			)
+		mock.ExpectQuery("INSERT INTO jobs").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
+		mock.ExpectCommit()
+		// audit emitter writes one row for the resolved comment.
+		mock.ExpectQuery("INSERT INTO audit_logs").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(int64(1), now))
+
+		req := newSendMessageRequest(sessionID, orgID, userID, fmt.Sprintf(`{"message":"address review","resolve_review_comment_ids":[%q]}`, commentID.String()))
+		w := httptest.NewRecorder()
+		handler.SendMessage(w, req)
+		require.Equal(t, http.StatusCreated, w.Code, w.Body.String())
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+
+	t.Run("resolves comments inline for a running session without enqueuing a job", func(t *testing.T) {
+		t.Parallel()
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err)
+		defer mock.Close()
+
+		orgID := uuid.New()
+		sessionID := uuid.New()
+		userID := uuid.New()
+		commentUserID := uuid.New()
+		commentID := uuid.New()
+		handler := newSessionHandler(t, mock)
+		handler.audit = db.NewAuditEmitter(db.NewAuditLogStore(mock), zerolog.Nop())
+
+		mock.ExpectQuery("SELECT .+ FROM sessions WHERE").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnRows(idleSessionRow(pgxmock.NewRows(sessionColumns), sessionID, orgID, "running"))
+		mock.ExpectBegin()
+		mock.ExpectQuery("INSERT INTO session_messages").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(int64(2), now))
+		mock.ExpectQuery("SELECT .+ FROM session_review_comments WHERE id = ANY").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnRows(
+				pgxmock.NewRows(reviewCommentColumns).
+					AddRow(commentID, sessionID, orgID, commentUserID, "main.go",
+						5, "right", "consider X", false, (*time.Time)(nil), (*int)(nil),
+						1, now, now),
+			)
+		mock.ExpectQuery("UPDATE session_review_comments SET resolved = true").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnRows(
+				pgxmock.NewRows(reviewCommentColumns).
+					AddRow(commentID, sessionID, orgID, commentUserID, "main.go",
+						5, "right", "consider X", true, &now, srcIntPtr(2),
+						1, now, now),
+			)
+		mock.ExpectCommit()
+		mock.ExpectQuery("INSERT INTO audit_logs").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(int64(1), now))
+
+		req := newSendMessageRequest(sessionID, orgID, userID, fmt.Sprintf(`{"message":"thanks for the catch","resolve_review_comment_ids":[%q]}`, commentID.String()))
+		w := httptest.NewRecorder()
+		handler.SendMessage(w, req)
+		require.Equal(t, http.StatusCreated, w.Code, w.Body.String())
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+
+	t.Run("deduplicates repeated IDs before lookup and resolve", func(t *testing.T) {
+		t.Parallel()
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err, "pgxmock pool should initialize")
+		defer mock.Close()
+
+		orgID := uuid.New()
+		sessionID := uuid.New()
+		userID := uuid.New()
+		commentUserID := uuid.New()
+		commentID := uuid.New()
+		handler := newSessionHandler(t, mock)
+		handler.audit = db.NewAuditEmitter(db.NewAuditLogStore(mock), zerolog.Nop())
+
+		mock.ExpectQuery("SELECT .+ FROM sessions WHERE").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnRows(idleSessionRow(pgxmock.NewRows(sessionColumns), sessionID, orgID, "running"))
+		mock.ExpectBegin()
+		mock.ExpectQuery("INSERT INTO session_messages").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(int64(4), now))
+		mock.ExpectQuery("SELECT .+ FROM session_review_comments WHERE id = ANY").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnRows(
+				pgxmock.NewRows(reviewCommentColumns).
+					AddRow(commentID, sessionID, orgID, commentUserID, "main.go",
+						9, "right", "dedupe me", false, (*time.Time)(nil), (*int)(nil),
+						1, now, now),
+			)
+		mock.ExpectQuery("UPDATE session_review_comments SET resolved = true").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnRows(
+				pgxmock.NewRows(reviewCommentColumns).
+					AddRow(commentID, sessionID, orgID, commentUserID, "main.go",
+						9, "right", "dedupe me", true, &now, srcIntPtr(1),
+						1, now, now),
+			)
+		mock.ExpectCommit()
+		mock.ExpectQuery("INSERT INTO audit_logs").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(int64(1), now))
+
+		req := newSendMessageRequest(sessionID, orgID, userID, fmt.Sprintf(`{"message":"dedupe","resolve_review_comment_ids":[%q,%q]}`, commentID.String(), commentID.String()))
+		w := httptest.NewRecorder()
+		handler.SendMessage(w, req)
+		require.Equal(t, http.StatusCreated, w.Code, "duplicate IDs should be resolved once without failing validation")
+		require.NoError(t, mock.ExpectationsWereMet(), "deduplicated request should issue one lookup and one resolve")
+	})
+
+	t.Run("rejects request that exceeds the per-message resolve cap", func(t *testing.T) {
+		t.Parallel()
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err)
+		defer mock.Close()
+
+		orgID := uuid.New()
+		sessionID := uuid.New()
+		userID := uuid.New()
+		handler := newSessionHandler(t, mock)
+		// Build a list one over the cap. Validation should reject before any
+		// DB query — keeps audit + resolve work bounded under client misuse.
+		ids := make([]string, 0, maxReviewCommentResolveIDsPerMessage+1)
+		for i := 0; i <= maxReviewCommentResolveIDsPerMessage; i++ {
+			ids = append(ids, uuid.New().String())
+		}
+		idsJSON, jerr := json.Marshal(ids)
+		require.NoError(t, jerr)
+		body := fmt.Sprintf(`{"message":"hello","resolve_review_comment_ids":%s}`, string(idsJSON))
+
+		req := newSendMessageRequest(sessionID, orgID, userID, body)
+		w := httptest.NewRecorder()
+		handler.SendMessage(w, req)
+		require.Equal(t, http.StatusBadRequest, w.Code)
+		require.Contains(t, w.Body.String(), "TOO_MANY_REVIEW_COMMENT_IDS")
+		require.NoError(t, mock.ExpectationsWereMet(), "no DB queries should run when validation rejects upfront")
+	})
+
+	t.Run("batches audit emission into a single INSERT for many resolved comments", func(t *testing.T) {
+		t.Parallel()
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err)
+		defer mock.Close()
+
+		orgID := uuid.New()
+		sessionID := uuid.New()
+		userID := uuid.New()
+		commentUserID := uuid.New()
+		const n = 4
+		commentIDs := make([]uuid.UUID, n)
+		for i := range commentIDs {
+			commentIDs[i] = uuid.New()
+		}
+		handler := newSessionHandler(t, mock)
+		handler.audit = db.NewAuditEmitter(db.NewAuditLogStore(mock), zerolog.Nop())
+
+		// Build the SELECT response: every requested ID exists, all unresolved.
+		selectRows := pgxmock.NewRows(reviewCommentColumns)
+		for i, id := range commentIDs {
+			selectRows.AddRow(id, sessionID, orgID, commentUserID, "main.go",
+				10+i, "right", "comment body", false, (*time.Time)(nil), (*int)(nil),
+				1, now, now)
+		}
+		// Build the UPDATE RETURNING response: all flip to resolved.
+		updateRows := pgxmock.NewRows(reviewCommentColumns)
+		for i, id := range commentIDs {
+			updateRows.AddRow(id, sessionID, orgID, commentUserID, "main.go",
+				10+i, "right", "comment body", true, &now, srcIntPtr(1),
+				1, now, now)
+		}
+
+		mock.ExpectQuery("SELECT .+ FROM sessions WHERE").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnRows(idleSessionRow(pgxmock.NewRows(sessionColumns), sessionID, orgID, "running"))
+		mock.ExpectBegin()
+		mock.ExpectQuery("INSERT INTO session_messages").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(int64(7), now))
+		mock.ExpectQuery("SELECT .+ FROM session_review_comments WHERE id = ANY").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnRows(selectRows)
+		mock.ExpectQuery("UPDATE session_review_comments SET resolved = true").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnRows(updateRows)
+		mock.ExpectCommit()
+		// CRITICAL: a single batched audit INSERT (Exec, not Query — the
+		// batch path skips RETURNING). If this asserts N times instead of
+		// once, the N+1 has regressed.
+		auditArgs := make([]any, 0, n*13)
+		for i := 0; i < n*13; i++ {
+			auditArgs = append(auditArgs, pgxmock.AnyArg())
+		}
+		mock.ExpectExec("INSERT INTO audit_logs").
+			WithArgs(auditArgs...).
+			WillReturnResult(pgxmock.NewResult("INSERT", n))
+
+		idsJSON := make([]string, n)
+		for i, id := range commentIDs {
+			idsJSON[i] = `"` + id.String() + `"`
+		}
+		body := fmt.Sprintf(`{"message":"addressing all of these","resolve_review_comment_ids":[%s]}`, strings.Join(idsJSON, ","))
+		req := newSendMessageRequest(sessionID, orgID, userID, body)
+		w := httptest.NewRecorder()
+		handler.SendMessage(w, req)
+		require.Equal(t, http.StatusCreated, w.Code, w.Body.String())
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+
+	t.Run("idempotent: already-resolved IDs commit cleanly with no audit emission", func(t *testing.T) {
+		t.Parallel()
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err)
+		defer mock.Close()
+
+		orgID := uuid.New()
+		sessionID := uuid.New()
+		userID := uuid.New()
+		commentUserID := uuid.New()
+		commentID := uuid.New()
+		handler := newSessionHandler(t, mock)
+		handler.audit = db.NewAuditEmitter(db.NewAuditLogStore(mock), zerolog.Nop())
+
+		// Validation finds the comment (it exists), the resolve UPDATE
+		// returns zero rows because the comment is already resolved, and
+		// the request still succeeds — no audit emission, idempotent.
+		mock.ExpectQuery("SELECT .+ FROM sessions WHERE").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnRows(idleSessionRow(pgxmock.NewRows(sessionColumns), sessionID, orgID, "running"))
+		mock.ExpectBegin()
+		mock.ExpectQuery("INSERT INTO session_messages").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(int64(3), now))
+		mock.ExpectQuery("SELECT .+ FROM session_review_comments WHERE id = ANY").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnRows(
+				pgxmock.NewRows(reviewCommentColumns).
+					AddRow(commentID, sessionID, orgID, commentUserID, "main.go",
+						12, "right", "already addressed", true, &now, srcIntPtr(1),
+						1, now, now),
+			)
+		mock.ExpectQuery("UPDATE session_review_comments SET resolved = true").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnRows(pgxmock.NewRows(reviewCommentColumns)) // already resolved → no rows changed
+		mock.ExpectCommit()
+		// No ExpectQuery on audit_logs — idempotent path emits zero audit rows.
+
+		req := newSendMessageRequest(sessionID, orgID, userID, fmt.Sprintf(`{"message":"thanks","resolve_review_comment_ids":[%q]}`, commentID.String()))
+		w := httptest.NewRecorder()
+		handler.SendMessage(w, req)
+		require.Equal(t, http.StatusCreated, w.Code, w.Body.String())
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+}
+
+func TestCurrentResolutionPass(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		session  *models.Session
+		expected int
+	}{
+		{name: "nil session defaults to first pass", session: nil, expected: 1},
+		{name: "zero current turn defaults to first pass", session: &models.Session{}, expected: 1},
+		{name: "nonzero current turn is preserved", session: &models.Session{CurrentTurn: 3}, expected: 3},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			got := currentResolutionPass(tt.session)
+			require.Equal(t, tt.expected, got, "currentResolutionPass should return the expected pass number")
+		})
+	}
+}
+
+func TestResolveCommentsError_Write(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		err        *resolveCommentsError
+		expectCode string
+	}{
+		{
+			name: "writes plain error",
+			err: &resolveCommentsError{
+				status: http.StatusBadRequest, code: "BAD_COMMENTS", message: "bad comments",
+			},
+			expectCode: "BAD_COMMENTS",
+		},
+		{
+			name: "writes underlying error",
+			err: &resolveCommentsError{
+				status: http.StatusInternalServerError, code: "COMMENT_LOOKUP_FAILED", message: "lookup failed", underlying: errors.New("db down"),
+			},
+			expectCode: "COMMENT_LOOKUP_FAILED",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			req := httptest.NewRequest(http.MethodPost, "/", nil)
+			w := httptest.NewRecorder()
+			tt.err.write(w, req)
+			require.Equal(t, tt.err.status, w.Code, "resolveCommentsError should write the configured HTTP status")
+			require.Contains(t, w.Body.String(), tt.expectCode, "response should include the configured error code")
+		})
+	}
+}
+
+func TestResolveSessionReviewComments(t *testing.T) {
+	t.Parallel()
+
+	t.Run("no-op for empty IDs or missing store", func(t *testing.T) {
+		t.Parallel()
+
+		orgID := uuid.New()
+		sessionID := uuid.New()
+		resolved, rerr := resolveSessionReviewComments(context.Background(), nil, orgID, sessionID, []uuid.UUID{uuid.New()}, 1)
+		require.Nil(t, rerr, "nil store should be a no-op")
+		require.Empty(t, resolved, "nil store should not resolve comments")
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err, "pgxmock pool should initialize")
+		defer mock.Close()
+
+		store := db.NewSessionReviewCommentStore(mock)
+		resolved, rerr = resolveSessionReviewComments(context.Background(), store, orgID, sessionID, nil, 1)
+		require.Nil(t, rerr, "empty ID list should be a no-op")
+		require.Empty(t, resolved, "empty ID list should not resolve comments")
+		require.NoError(t, mock.ExpectationsWereMet(), "empty ID list should not query the store")
+	})
+
+	t.Run("returns lookup errors", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err, "pgxmock pool should initialize")
+		defer mock.Close()
+
+		orgID := uuid.New()
+		sessionID := uuid.New()
+		commentID := uuid.New()
+		mock.ExpectQuery("SELECT .+ FROM session_review_comments WHERE id = ANY").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnError(errors.New("connection refused"))
+
+		resolved, rerr := resolveSessionReviewComments(context.Background(), db.NewSessionReviewCommentStore(mock), orgID, sessionID, []uuid.UUID{commentID}, 1)
+		require.Empty(t, resolved, "lookup failure should not return resolved comments")
+		require.NotNil(t, rerr, "lookup failure should return a structured error")
+		require.Equal(t, "REVIEW_COMMENT_LOOKUP_FAILED", rerr.code, "lookup failure should use the lookup error code")
+		require.NoError(t, mock.ExpectationsWereMet(), "all store expectations should be met")
+	})
+
+	t.Run("caps missing ID details", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err, "pgxmock pool should initialize")
+		defer mock.Close()
+
+		now := time.Now()
+		orgID := uuid.New()
+		sessionID := uuid.New()
+		userID := uuid.New()
+		ids := []uuid.UUID{uuid.New(), uuid.New(), uuid.New(), uuid.New(), uuid.New(), uuid.New(), uuid.New()}
+		mock.ExpectQuery("SELECT .+ FROM session_review_comments WHERE id = ANY").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnRows(
+				pgxmock.NewRows(reviewCommentColumns).
+					AddRow(ids[0], sessionID, orgID, userID, "main.go",
+						1, "right", "exists", false, (*time.Time)(nil), (*int)(nil),
+						1, now, now),
+			)
+
+		resolved, rerr := resolveSessionReviewComments(context.Background(), db.NewSessionReviewCommentStore(mock), orgID, sessionID, ids, 1)
+		require.Empty(t, resolved, "missing IDs should not resolve comments")
+		require.NotNil(t, rerr, "missing IDs should return a structured error")
+		require.Equal(t, "INVALID_REVIEW_COMMENT_IDS", rerr.code, "missing IDs should use the invalid IDs error code")
+		require.NotContains(t, rerr.message, ids[0].String(), "existing IDs should not be reported as missing")
+		require.Contains(t, rerr.message, ids[1].String(), "first missing ID should be reported")
+		require.Contains(t, rerr.message, ids[5].String(), "fifth missing ID should be reported")
+		require.NotContains(t, rerr.message, ids[6].String(), "missing ID details should be capped")
+		require.NoError(t, mock.ExpectationsWereMet(), "all store expectations should be met")
+	})
+
+	t.Run("returns resolve errors", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err, "pgxmock pool should initialize")
+		defer mock.Close()
+
+		now := time.Now()
+		orgID := uuid.New()
+		sessionID := uuid.New()
+		userID := uuid.New()
+		commentID := uuid.New()
+		mock.ExpectQuery("SELECT .+ FROM session_review_comments WHERE id = ANY").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnRows(
+				pgxmock.NewRows(reviewCommentColumns).
+					AddRow(commentID, sessionID, orgID, userID, "main.go",
+						1, "right", "exists", false, (*time.Time)(nil), (*int)(nil),
+						1, now, now),
+			)
+		mock.ExpectQuery("UPDATE session_review_comments SET resolved = true").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnError(errors.New("connection refused"))
+
+		resolved, rerr := resolveSessionReviewComments(context.Background(), db.NewSessionReviewCommentStore(mock), orgID, sessionID, []uuid.UUID{commentID}, 2)
+		require.Empty(t, resolved, "resolve failure should not return resolved comments")
+		require.NotNil(t, rerr, "resolve failure should return a structured error")
+		require.Equal(t, "REVIEW_COMMENT_RESOLVE_FAILED", rerr.code, "resolve failure should use the resolve error code")
+		require.NoError(t, mock.ExpectationsWereMet(), "all store expectations should be met")
+	})
+}
+
+// newSendMessageRequest builds a *http.Request configured the way the chi
+// router does at runtime: URL params populated, org and user contexts set.
+func newSendMessageRequest(sessionID, orgID, userID uuid.UUID, body string) *http.Request {
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/"+sessionID.String()+"/messages", strings.NewReader(body))
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("id", sessionID.String())
+	ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
+	ctx = middleware.WithOrgID(ctx, orgID)
+	ctx = middleware.WithUser(ctx, &models.User{ID: userID, OrgID: orgID, Role: "member"})
+	return req.WithContext(ctx)
+}
+
+// srcIntPtr is mirrored from the db package's test helper since handlers_test
+// can't import it. Both produce a *int suitable for resolved_by_pass.
+func srcIntPtr(i int) *int { return &i }
 
 // mockLLMClient is a test double for llm.Client.
 // The WaitGroup lets the test verify that the handler waits for the LLM call
@@ -6531,6 +7207,560 @@ func TestSessionHandler_CreatePR_PRLookupDBError(t *testing.T) {
 	require.Equal(t, http.StatusInternalServerError, w.Code, "should return 500 on PR lookup DB error")
 	require.Contains(t, w.Body.String(), "INTERNAL_ERROR", "error code should indicate internal error")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+// pushSessionRowOpts customizes pushSessionRow's defaults. The zero value
+// produces a completed, snapshot-backed session whose pr_push_state is "idle"
+// — i.e., a session that's ready to accept a "Push changes" request.
+type pushSessionRowOpts struct {
+	snapshotKey        string // explicit key; empty means generate, unless nilSnapshot
+	pendingSnapshotKey string // explicit pending upload key; empty means NULL
+	nilSnapshot        bool   // if true, snapshot_key is NULL
+	sandboxState       string // defaults to "none"
+	pushState          string // defaults to "idle"
+	status             string // defaults to "completed"
+}
+
+// pushSessionRow builds a fully-padded session row (matching sessionColumns
+// in length and order) for push-changes handler tests. Built directly rather
+// than via addSessionRow because those test variants need to override
+// pr_push_state, which the auto-pad in padSessionIdentityColumns otherwise
+// forces to "idle" — and the dispatch by length doesn't have a slot for the
+// "explicit pr_push values" shape.
+func pushSessionRow(sessionID, issueID, orgID uuid.UUID, now time.Time, opts pushSessionRowOpts) *pgxmock.Rows {
+	snapshotKey := opts.snapshotKey
+	if snapshotKey == "" && !opts.nilSnapshot {
+		snapshotKey = "snap-push-" + sessionID.String()
+	}
+	var snapshotKeyArg any
+	if snapshotKey != "" {
+		snapshotKeyArg = &snapshotKey
+	} else {
+		snapshotKeyArg = nil
+	}
+	var pendingSnapshotKeyArg any
+	if opts.pendingSnapshotKey != "" {
+		pendingSnapshotKeyArg = &opts.pendingSnapshotKey
+	}
+	sandboxState := opts.sandboxState
+	if sandboxState == "" {
+		sandboxState = "none"
+	}
+	pushState := opts.pushState
+	if pushState == "" {
+		pushState = "idle"
+	}
+	status := opts.status
+	if status == "" {
+		status = "completed"
+	}
+	primaryIssueID := &issueID
+	values := map[string]any{
+		"id":                             sessionID,
+		"primary_issue_id":               primaryIssueID,
+		"org_id":                         orgID,
+		"origin":                         string(models.SessionOriginIssueTrigger),
+		"interaction_mode":               string(models.SessionInteractionModeSingleRun),
+		"validation_policy":              string(models.SessionValidationPolicyOnSessionEnd),
+		"agent_type":                     string(models.AgentTypeClaudeCode),
+		"status":                         status,
+		"autonomy_level":                 "semi",
+		"token_mode":                     "low",
+		"complexity_tier":                nil,
+		"confidence_score":               nil,
+		"confidence_reasoning":           nil,
+		"risk_factors":                   nil,
+		"container_id":                   nil,
+		"worker_node_id":                 nil,
+		"turn_holding_container":         false,
+		"started_at":                     &now,
+		"completed_at":                   &now,
+		"token_usage":                    nil,
+		"failure_explanation":            nil,
+		"failure_category":               nil,
+		"failure_next_steps":             nil,
+		"failure_retry_advised":          false,
+		"parent_session_id":              nil,
+		"revision_context":               nil,
+		"error":                          nil,
+		"result_summary":                 nil,
+		"diff":                           nil,
+		"pm_plan_id":                     nil,
+		"title":                          nil,
+		"pm_approach":                    nil,
+		"pm_reasoning":                   nil,
+		"project_task_id":                nil,
+		"model_override":                 nil,
+		"reasoning_effort":               nil,
+		"triggered_by_user_id":           nil,
+		"agent_session_id":               nil,
+		"current_turn":                   0,
+		"last_activity_at":               now,
+		"sandbox_state":                  sandboxState,
+		"snapshot_key":                   snapshotKeyArg,
+		"pending_snapshot_key":           pendingSnapshotKeyArg,
+		"pending_snapshot_set_at":        nil,
+		"runtime_soft_deadline_at":       nil,
+		"runtime_hard_deadline_at":       nil,
+		"runtime_last_progress_at":       nil,
+		"runtime_last_progress_type":     "",
+		"runtime_last_progress_strength": "",
+		"runtime_extension_count":        0,
+		"runtime_extension_seconds":      0,
+		"runtime_stop_reason":            "",
+		"runtime_graceful_stop_at":       nil,
+		"checkpointed_at":                nil,
+		"checkpoint_kind":                "",
+		"checkpoint_capability":          "",
+		"checkpoint_size_bytes":          int64(0),
+		"checkpoint_error":               nil,
+		"recovery_state":                 "",
+		"recovery_queued_at":             nil,
+		"recovery_started_at":            nil,
+		"recovery_attempt_count":         0,
+		"target_branch":                  nil,
+		"working_branch":                 nil,
+		"base_commit_sha":                nil,
+		"repository_id":                  nil,
+		"diff_stats":                     nil,
+		"diff_history":                   nil,
+		"input_manifest":                 nil,
+		"archived_at":                    nil,
+		"archived_by_user_id":            nil,
+		"automation_run_id":              nil,
+		"pr_creation_state":              "idle",
+		"pr_creation_error":              (*string)(nil),
+		"pr_push_state":                  pushState,
+		"pr_push_error":                  (*string)(nil),
+		"diff_collected_at":              nil,
+		"latest_diff_snapshot_id":        nil,
+		"linear_private":                 false,
+		"linear_state_sync_disabled":     false,
+		"linear_identifier_hint":         (*string)(nil),
+		"linear_prepare_state":           string(models.LinearPrepareStateNone),
+		"deleted_at":                     nil,
+		"git_identity_source":            nil,
+		"git_identity_user_id":           nil,
+		"created_at":                     now,
+	}
+	row := make([]any, len(sessionColumns))
+	for i, col := range sessionColumns {
+		row[i] = values[col]
+	}
+	return pgxmock.NewRows(sessionColumns).AddRow(row...)
+}
+
+func TestSessionHandler_PushChangesToPR_Success(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	now := time.Now()
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	issueID := uuid.New()
+	prID := uuid.New()
+	jobID := uuid.New()
+	handler := newSessionHandler(t, mock)
+
+	mock.ExpectQuery("SELECT .+ FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pushSessionRow(sessionID, issueID, orgID, now, pushSessionRowOpts{}))
+
+	mock.ExpectQuery("SELECT .+ FROM pull_requests").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(sessionPullRequestColumns).
+				AddRow(sessionPullRequestRow(prID, &sessionID, orgID, "owner/repo", now)...),
+		)
+
+	mock.ExpectQuery("INSERT INTO jobs").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(jobID))
+	// CAS update from TryMarkPRPushQueued — 2 args (id, org_id) and rows-
+	// affected=1 to indicate the racing-winner branch.
+	mock.ExpectExec("UPDATE sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/"+sessionID.String()+"/pr/push", nil)
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("id", sessionID.String())
+	ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
+	ctx = middleware.WithOrgID(ctx, orgID)
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	handler.PushChangesToPR(w, req)
+
+	require.Equal(t, http.StatusAccepted, w.Code, "should return 202 Accepted")
+	require.Contains(t, w.Body.String(), `"status":"queued"`, "response should indicate job was queued")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestSessionHandler_PushChangesToPR_CASLosesRaceReturnsConflict(t *testing.T) {
+	t.Parallel()
+
+	// Two concurrent submitters that both see pr_push_state='idle' will both
+	// pass the in-memory precheck. The CAS-on-mark-queued is the tiebreaker:
+	// the loser sees rows-affected=0 from TryMarkPRPushQueued and must
+	// return 409 PR_PUSH_IN_FLIGHT instead of 202. Simulate that by feeding
+	// the handler an idle row but mocking the UPDATE to affect zero rows.
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	now := time.Now()
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	issueID := uuid.New()
+	prID := uuid.New()
+	jobID := uuid.New()
+	handler := newSessionHandler(t, mock)
+
+	mock.ExpectQuery("SELECT .+ FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pushSessionRow(sessionID, issueID, orgID, now, pushSessionRowOpts{}))
+
+	mock.ExpectQuery("SELECT .+ FROM pull_requests").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(sessionPullRequestColumns).
+				AddRow(sessionPullRequestRow(prID, &sessionID, orgID, "owner/repo", now)...),
+		)
+
+	// The job enqueue still runs (deduped by dedupeKey on the worker side).
+	mock.ExpectQuery("INSERT INTO jobs").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(jobID))
+	// CAS UPDATE matches no rows because a concurrent winner already moved
+	// pr_push_state to 'queued'.
+	mock.ExpectExec("UPDATE sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/"+sessionID.String()+"/pr/push", nil)
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("id", sessionID.String())
+	ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
+	ctx = middleware.WithOrgID(ctx, orgID)
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	handler.PushChangesToPR(w, req)
+
+	require.Equal(t, http.StatusConflict, w.Code, "CAS losing the race should produce a 409")
+	require.Contains(t, w.Body.String(), "PR_PUSH_IN_FLIGHT", "loser of the CAS race should see the in-flight code")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestSessionHandler_PushChangesToPR_PendingSnapshotRejectsWithoutEnqueue(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	now := time.Now()
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	issueID := uuid.New()
+	handler := newSessionHandler(t, mock)
+
+	mock.ExpectQuery("SELECT .+ FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pushSessionRow(sessionID, issueID, orgID, now, pushSessionRowOpts{
+			pendingSnapshotKey: "snapshots/pending/post-pr.tar.zst",
+		}))
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/"+sessionID.String()+"/pr/push", nil)
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("id", sessionID.String())
+	ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
+	ctx = middleware.WithOrgID(ctx, orgID)
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	handler.PushChangesToPR(w, req)
+
+	require.Equal(t, http.StatusConflict, w.Code, "pending snapshot upload should block push enqueue")
+	require.Contains(t, w.Body.String(), `"code":"SNAPSHOT_PENDING"`, "response should expose a retryable pending-snapshot code")
+	require.NoError(t, mock.ExpectationsWereMet(), "handler should not query PRs or enqueue jobs while snapshot upload is pending")
+}
+
+func TestSessionHandler_PushChangesToPR_NoPR(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	now := time.Now()
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	issueID := uuid.New()
+	handler := newSessionHandler(t, mock)
+
+	mock.ExpectQuery("SELECT .+ FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pushSessionRow(sessionID, issueID, orgID, now, pushSessionRowOpts{}))
+
+	// PR lookup returns no rows — session has never had a PR opened.
+	mock.ExpectQuery("SELECT .+ FROM pull_requests").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(sessionPullRequestColumns))
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/"+sessionID.String()+"/pr/push", nil)
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("id", sessionID.String())
+	ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
+	ctx = middleware.WithOrgID(ctx, orgID)
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	handler.PushChangesToPR(w, req)
+
+	require.Equal(t, http.StatusNotFound, w.Code, "should return 404 when no PR exists for the session")
+	require.Contains(t, w.Body.String(), "NO_PR", "error code should distinguish missing-PR from session-not-found")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestSessionHandler_PushChangesToPR_PRClosed(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		prStatus  string
+		wantSlice string
+	}{
+		{name: "merged PR", prStatus: "merged", wantSlice: "PR_CLOSED"},
+		{name: "closed PR", prStatus: "closed", wantSlice: "PR_CLOSED"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "pgxmock pool should be created")
+			defer mock.Close()
+
+			now := time.Now()
+			orgID := uuid.New()
+			sessionID := uuid.New()
+			issueID := uuid.New()
+			prID := uuid.New()
+			handler := newSessionHandler(t, mock)
+
+			mock.ExpectQuery("SELECT .+ FROM sessions").
+				WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+				WillReturnRows(pushSessionRow(sessionID, issueID, orgID, now, pushSessionRowOpts{}))
+
+			row := sessionPullRequestRow(prID, &sessionID, orgID, "owner/repo", now)
+			row[8] = tt.prStatus // status column
+			mock.ExpectQuery("SELECT .+ FROM pull_requests").
+				WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+				WillReturnRows(pgxmock.NewRows(sessionPullRequestColumns).AddRow(row...))
+
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/"+sessionID.String()+"/pr/push", nil)
+			rctx := chi.NewRouteContext()
+			rctx.URLParams.Add("id", sessionID.String())
+			ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
+			ctx = middleware.WithOrgID(ctx, orgID)
+			req = req.WithContext(ctx)
+			w := httptest.NewRecorder()
+
+			handler.PushChangesToPR(w, req)
+
+			require.Equal(t, http.StatusConflict, w.Code, "should return 409 when PR is no longer open")
+			require.Contains(t, w.Body.String(), tt.wantSlice, "error code should indicate PR is closed/merged")
+			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+		})
+	}
+}
+
+func TestSessionHandler_PushChangesToPR_InFlightRejectsDuplicateSubmit(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		state string
+	}{
+		{name: "queued state rejects duplicate", state: "queued"},
+		{name: "pushing state rejects duplicate", state: "pushing"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "pgxmock pool should be created")
+			defer mock.Close()
+
+			now := time.Now()
+			orgID := uuid.New()
+			sessionID := uuid.New()
+			issueID := uuid.New()
+			handler := newSessionHandler(t, mock)
+
+			mock.ExpectQuery("SELECT .+ FROM sessions").
+				WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+				WillReturnRows(pushSessionRow(sessionID, issueID, orgID, now, pushSessionRowOpts{pushState: tt.state}))
+
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/"+sessionID.String()+"/pr/push", nil)
+			rctx := chi.NewRouteContext()
+			rctx.URLParams.Add("id", sessionID.String())
+			ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
+			ctx = middleware.WithOrgID(ctx, orgID)
+			req = req.WithContext(ctx)
+			w := httptest.NewRecorder()
+
+			handler.PushChangesToPR(w, req)
+
+			require.Equal(t, http.StatusConflict, w.Code, "in-flight push should reject duplicate submits")
+			require.Contains(t, w.Body.String(), "PR_PUSH_IN_FLIGHT", "error code should indicate an in-flight push")
+			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+		})
+	}
+}
+
+func TestSessionHandler_PushChangesToPR_SnapshotExpired(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	now := time.Now()
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	issueID := uuid.New()
+	handler := newSessionHandler(t, mock)
+
+	// Sandbox destroyed simulates true retention expiry. The PR row may still
+	// exist but pushing requires a hydratable sandbox.
+	mock.ExpectQuery("SELECT .+ FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pushSessionRow(sessionID, issueID, orgID, now, pushSessionRowOpts{
+			sandboxState: "destroyed",
+			nilSnapshot:  true,
+		}))
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/"+sessionID.String()+"/pr/push", nil)
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("id", sessionID.String())
+	ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
+	ctx = middleware.WithOrgID(ctx, orgID)
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	handler.PushChangesToPR(w, req)
+
+	require.Equal(t, http.StatusGone, w.Code, "should return 410 when snapshot retention has expired")
+	require.Contains(t, w.Body.String(), "SNAPSHOT_EXPIRED", "error code should indicate snapshot expiry")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestSessionHandler_PushChangesToPR_SnapshotNotCaptured(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	now := time.Now()
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	issueID := uuid.New()
+	handler := newSessionHandler(t, mock)
+
+	mock.ExpectQuery("SELECT .+ FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pushSessionRow(sessionID, issueID, orgID, now, pushSessionRowOpts{nilSnapshot: true}))
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/"+sessionID.String()+"/pr/push", nil)
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("id", sessionID.String())
+	ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
+	ctx = middleware.WithOrgID(ctx, orgID)
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	handler.PushChangesToPR(w, req)
+
+	require.Equal(t, http.StatusConflict, w.Code, "should return 409 when no snapshot was captured")
+	require.Contains(t, w.Body.String(), "SNAPSHOT_NOT_CAPTURED", "error code should indicate missing checkpoint")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestSessionHandler_PushChangesToPR_SessionNotFound(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	handler := newSessionHandler(t, mock)
+
+	mock.ExpectQuery("SELECT .+ FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnError(pgx.ErrNoRows)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/"+sessionID.String()+"/pr/push", nil)
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("id", sessionID.String())
+	ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
+	ctx = middleware.WithOrgID(ctx, orgID)
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	handler.PushChangesToPR(w, req)
+
+	require.Equal(t, http.StatusNotFound, w.Code, "should return 404 when session does not exist")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+// Defense-in-depth: the frontend gates the push button on isRunning, but a
+// stale tab or a racing client could still POST while the session is mid-turn.
+// The handler must reject it server-side so the worker doesn't hydrate a
+// snapshot the active turn is about to invalidate.
+func TestSessionHandler_PushChangesToPR_RejectsRunningSession(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	now := time.Now()
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	issueID := uuid.New()
+	handler := newSessionHandler(t, mock)
+
+	mock.ExpectQuery("SELECT .+ FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pushSessionRow(sessionID, issueID, orgID, now, pushSessionRowOpts{
+			status: string(models.SessionStatusRunning),
+		}))
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/"+sessionID.String()+"/pr/push", nil)
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("id", sessionID.String())
+	ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
+	ctx = middleware.WithOrgID(ctx, orgID)
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	handler.PushChangesToPR(w, req)
+
+	require.Equal(t, http.StatusConflict, w.Code, "should return 409 when session is currently running")
+	require.Contains(t, w.Body.String(), "SESSION_RUNNING", "error code should distinguish running-session from other in-flight states")
+	require.NoError(t, mock.ExpectationsWereMet(), "handler should not query PRs or enqueue jobs while session is running")
 }
 
 // mockCanceller implements SessionCanceller for testing.

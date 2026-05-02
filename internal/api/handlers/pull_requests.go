@@ -226,18 +226,18 @@ func (h *PullRequestHandler) Merge(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		switch {
 		case errors.Is(err, ghservice.ErrPullRequestNotMergeable):
-			writeError(w, r, http.StatusConflict, "PR_NOT_MERGEABLE", "pull request is not in a mergeable state", err)
+			writeError(w, r, http.StatusConflict, "PR_NOT_MERGEABLE", "Pull request is not in a mergeable state", err)
 		case errors.Is(err, ghservice.ErrNoMergeMethodAllowed):
-			writeError(w, r, http.StatusConflict, "NO_MERGE_METHOD_ALLOWED", "repository does not allow any merge method", err)
+			writeError(w, r, http.StatusConflict, "NO_MERGE_METHOD_ALLOWED", "Repository does not allow any merge method", err)
 		case errors.Is(err, ghservice.ErrGitHubUserAuthRequired):
-			writeError(w, r, http.StatusConflict, "GITHUB_USER_AUTH_REQUIRED", "connect your GitHub account to merge this pull request as yourself", err)
+			writeError(w, r, http.StatusConflict, "GITHUB_USER_AUTH_REQUIRED", "Connect your GitHub account to merge this pull request as yourself", err)
 		case errors.Is(err, ghservice.ErrGitHubUserAuthRepoAccessDenied):
 			writeError(w, r, http.StatusConflict, "GITHUB_USER_AUTH_REPO_ACCESS_DENIED", "your GitHub account cannot access this repository for merge", err)
 		case errors.Is(err, ghservice.ErrMergeStateRefreshFailed):
 			// Returned when GitHub or the DB couldn't be reached to confirm
 			// the PR is still in a mergeable state. 503 lets the UI prompt the
 			// user to retry rather than treating this as a permanent rejection.
-			writeError(w, r, http.StatusServiceUnavailable, "PR_MERGE_STATE_UNAVAILABLE", "could not confirm pull request is still mergeable; please retry", err)
+			writeError(w, r, http.StatusServiceUnavailable, "PR_MERGE_STATE_UNAVAILABLE", "Could not confirm pull request is still mergeable; please retry", err)
 		case errors.Is(err, ghservice.ErrGitHubMergeIncomplete):
 			// GitHub returned 200 but reported merged=false. Treat as a
 			// gateway-level failure so the UI prompts the user to retry.
@@ -251,7 +251,7 @@ func (h *PullRequestHandler) Merge(w http.ResponseWriter, r *http.Request) {
 				writeError(w, r, status, "PULL_REQUEST_MERGE_REJECTED", message, err)
 				return
 			}
-			writeError(w, r, http.StatusInternalServerError, "PULL_REQUEST_MERGE_FAILED", "failed to merge pull request", err)
+			writeError(w, r, http.StatusInternalServerError, "PULL_REQUEST_MERGE_FAILED", "Failed to merge pull request", err)
 		}
 		return
 	}

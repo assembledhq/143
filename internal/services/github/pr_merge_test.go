@@ -310,14 +310,14 @@ func TestPRServiceMergePullRequestRunsMergedFollowUps(t *testing.T) {
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(prTestPullRequestColumns).AddRow(
 			prID, &sessionID, orgID, 42, "https://github.com/assembledhq/143/pull/42", "assembledhq/143",
-			"Fix bug", (*string)(nil), "open", "pending", "app", "", nil, nil,
+			"Fix bug", (*string)(nil), "open", "pending", "app", "", nil, nil, nil,
 			models.PullRequestMergeStateUnknown, false, 0, false, (*time.Time)(nil), int64(0), (*time.Time)(nil), now, now,
 		))
 	prMock.ExpectQuery("SELECT .+ FROM pull_requests WHERE id").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(prTestPullRequestColumns).AddRow(
 			prID, &sessionID, orgID, 42, "https://github.com/assembledhq/143/pull/42", "assembledhq/143",
-			"Fix bug", (*string)(nil), "open", "pending", "app", "", nil, nil,
+			"Fix bug", (*string)(nil), "open", "pending", "app", "", nil, nil, nil,
 			models.PullRequestMergeStateUnknown, false, 0, false, (*time.Time)(nil), int64(0), (*time.Time)(nil), now, now,
 		))
 
@@ -382,7 +382,7 @@ func TestPRServiceMergePullRequestRunsMergedFollowUps(t *testing.T) {
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(prTestPullRequestColumns).AddRow(
 			prID, &sessionID, orgID, 42, "https://github.com/assembledhq/143/pull/42", "assembledhq/143",
-			"Fix bug", (*string)(nil), "open", "pending", "app", "success", &headSHA, &baseSHA,
+			"Fix bug", (*string)(nil), "open", "pending", "app", "success", &headSHA, nil, &baseSHA,
 			models.PullRequestMergeStateClean, false, 0, false, &now, int64(1), (*time.Time)(nil), now, now,
 		))
 	prMock.ExpectQuery("SELECT .+ FROM pull_request_health_current").
@@ -404,26 +404,17 @@ func TestPRServiceMergePullRequestRunsMergedFollowUps(t *testing.T) {
 			prID, orgID, int64(1), "head-merge", "base-merge", summaryJSON, summaryJSON, models.PullRequestHealthEnrichmentStatusNotRequested, (*time.Time)(nil), now, now,
 		))
 
+	sessionRow := newPRHealthSessionRow(sessionID, orgID, now, string(models.SessionStatusCompleted))
+	setPRHealthSessionRowValue(sessionRow, "primary_issue_id", &issueID)
+	setPRHealthSessionRowValue(sessionRow, "agent_type", "codex")
+	setPRHealthSessionRowValue(sessionRow, "autonomy_level", "full")
+	setPRHealthSessionRowValue(sessionRow, "sandbox_state", "snapshot")
+	setPRHealthSessionRowValue(sessionRow, "snapshot_key", &snapshotKey)
+
 	sessionMock.ExpectQuery("SELECT .+ FROM sessions WHERE id").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
-			pgxmock.NewRows(prHealthSessionColumns).AddRow(
-				sessionID, &issueID, orgID, "", "", "", "codex", "completed", "full", "low",
-				nil, nil, nil, nil,
-				nil, nil, false, nil, nil, nil,
-				nil, nil, nil, false,
-				nil, nil, nil, nil, nil,
-				nil, nil, nil, nil,
-				nil, nil, nil, nil,
-				nil, 0, now, "snapshot", &snapshotKey,
-				nil, // pending_snapshot_key
-				nil, // pending_snapshot_set_at
-				nil, nil, nil, "", "", 0, 0, "", nil,
-				nil, "", "", int64(0), nil,
-				"", nil, nil, 0,
-				nil, nil, nil, nil, nil, nil, nil, nil, nil, nil,
-				"idle", (*string)(nil), nil, nil, nil, nil, nil, now,
-			),
+			pgxmock.NewRows(prHealthSessionColumns).AddRow(sessionRow...),
 		)
 	issueMock.ExpectExec("UPDATE issues SET status").
 		WithArgs(pgx.NamedArgs{"id": issueID, "org_id": orgID, "status": "fixed"}).

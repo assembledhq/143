@@ -38,6 +38,18 @@ func (rw *responseWriter) Flush() {
 	}
 }
 
+// Unwrap exposes the underlying ResponseWriter so http.NewResponseController
+// can reach the raw net.Conn for SetWriteDeadline / SetReadDeadline. Without
+// this, clearWriteDeadline silently fails (Go's controller cannot punch
+// through a wrapper that doesn't implement Unwrap), and the server's 15s
+// WriteTimeout still drops long-running responses — preview start in
+// particular, where snapshot restore + readiness probes routinely run for
+// 60-100s. The downstream symptom is a 502 EOF at the API edge with the real
+// error code (PREVIEW_SERVICE_NOT_READY etc.) lost.
+func (rw *responseWriter) Unwrap() http.ResponseWriter {
+	return rw.ResponseWriter
+}
+
 func (rw *responseWriter) SetResolvedIdentity(orgID, userID uuid.UUID) {
 	rw.orgID = orgID
 	rw.userID = userID

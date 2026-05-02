@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"regexp"
 	"strings"
@@ -122,7 +123,9 @@ const sessionSelectColumns = `id,
 	runtime_extension_count, runtime_extension_seconds, runtime_stop_reason, runtime_graceful_stop_at,
 	checkpointed_at, checkpoint_kind, checkpoint_capability, checkpoint_size_bytes, checkpoint_error,
 	recovery_state, recovery_queued_at, recovery_started_at, recovery_attempt_count,
-	target_branch, working_branch, base_commit_sha, repository_id, diff_stats, diff_history, input_manifest, archived_at, archived_by_user_id, automation_run_id, pr_creation_state, pr_creation_error, diff_collected_at, latest_diff_snapshot_id, deleted_at, git_identity_source, git_identity_user_id, created_at`
+	target_branch, working_branch, base_commit_sha, repository_id, diff_stats, diff_history, input_manifest, archived_at, archived_by_user_id, automation_run_id, pr_creation_state, pr_creation_error, pr_push_state, pr_push_error, diff_collected_at, latest_diff_snapshot_id,
+	linear_private, linear_state_sync_disabled, linear_identifier_hint, linear_prepare_state,
+	deleted_at, git_identity_source, git_identity_user_id, created_at`
 
 // sessionListColumns excludes large JSONB blobs (diff_history) from list queries
 // to avoid returning multi-megabyte payloads when listing many sessions.
@@ -140,7 +143,9 @@ const sessionListColumns = `id,
 	runtime_extension_count, runtime_extension_seconds, runtime_stop_reason, runtime_graceful_stop_at,
 	checkpointed_at, checkpoint_kind, checkpoint_capability, checkpoint_size_bytes, checkpoint_error,
 	recovery_state, recovery_queued_at, recovery_started_at, recovery_attempt_count,
-	target_branch, working_branch, base_commit_sha, repository_id, diff_stats, NULL::jsonb AS diff_history, input_manifest, archived_at, archived_by_user_id, automation_run_id, pr_creation_state, pr_creation_error, diff_collected_at, latest_diff_snapshot_id, deleted_at, git_identity_source, git_identity_user_id, created_at`
+	target_branch, working_branch, base_commit_sha, repository_id, diff_stats, NULL::jsonb AS diff_history, input_manifest, archived_at, archived_by_user_id, automation_run_id, pr_creation_state, pr_creation_error, pr_push_state, pr_push_error, diff_collected_at, latest_diff_snapshot_id,
+	linear_private, linear_state_sync_disabled, linear_identifier_hint, linear_prepare_state,
+	deleted_at, git_identity_source, git_identity_user_id, created_at`
 
 // maxDiffHistoryEntries caps the number of entries kept in diff_history.
 // Older entries beyond this limit are pruned when a new entry is appended.
@@ -397,44 +402,53 @@ func (s *SessionStore) Create(ctx context.Context, run *models.Session) error {
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
+	if run.LinearPrepareState == "" {
+		run.LinearPrepareState = models.LinearPrepareStateNone
+	}
 	query := `
 		INSERT INTO sessions (
 			org_id, agent_type, status, autonomy_level, token_mode, complexity_tier,
 			parent_session_id, revision_context, pm_plan_id, title, pm_approach, pm_reasoning, project_task_id,
 			model_override, reasoning_effort, triggered_by_user_id, target_branch, repository_id, automation_run_id,
-			origin, interaction_mode, validation_policy
+			origin, interaction_mode, validation_policy,
+			linear_private, linear_state_sync_disabled, linear_identifier_hint, linear_prepare_state
 		)
 		VALUES (
 			@org_id, @agent_type, @status, @autonomy_level, @token_mode, @complexity_tier,
 			@parent_session_id, @revision_context, @pm_plan_id, @title, @pm_approach, @pm_reasoning, @project_task_id,
 			@model_override, @reasoning_effort, @triggered_by_user_id, @target_branch, @repository_id, @automation_run_id,
-			@origin, @interaction_mode, @validation_policy
+			@origin, @interaction_mode, @validation_policy,
+			@linear_private, @linear_state_sync_disabled, @linear_identifier_hint, @linear_prepare_state
 		)
 		RETURNING id, created_at, last_activity_at`
 
 	args := pgx.NamedArgs{
-		"org_id":               run.OrgID,
-		"agent_type":           run.AgentType,
-		"status":               run.Status,
-		"autonomy_level":       run.AutonomyLevel,
-		"token_mode":           run.TokenMode,
-		"complexity_tier":      run.ComplexityTier,
-		"parent_session_id":    run.ParentSessionID,
-		"revision_context":     run.RevisionContext,
-		"pm_plan_id":           run.PMPlanID,
-		"title":                run.Title,
-		"pm_approach":          run.PMApproach,
-		"pm_reasoning":         run.PMReasoning,
-		"project_task_id":      run.ProjectTaskID,
-		"model_override":       run.ModelOverride,
-		"reasoning_effort":     run.ReasoningEffort,
-		"triggered_by_user_id": run.TriggeredByUserID,
-		"target_branch":        run.TargetBranch,
-		"repository_id":        run.RepositoryID,
-		"automation_run_id":    run.AutomationRunID,
-		"origin":               run.Origin,
-		"interaction_mode":     run.InteractionMode,
-		"validation_policy":    run.ValidationPolicy,
+		"org_id":                     run.OrgID,
+		"agent_type":                 run.AgentType,
+		"status":                     run.Status,
+		"autonomy_level":             run.AutonomyLevel,
+		"token_mode":                 run.TokenMode,
+		"complexity_tier":            run.ComplexityTier,
+		"parent_session_id":          run.ParentSessionID,
+		"revision_context":           run.RevisionContext,
+		"pm_plan_id":                 run.PMPlanID,
+		"title":                      run.Title,
+		"pm_approach":                run.PMApproach,
+		"pm_reasoning":               run.PMReasoning,
+		"project_task_id":            run.ProjectTaskID,
+		"model_override":             run.ModelOverride,
+		"reasoning_effort":           run.ReasoningEffort,
+		"triggered_by_user_id":       run.TriggeredByUserID,
+		"target_branch":              run.TargetBranch,
+		"repository_id":              run.RepositoryID,
+		"automation_run_id":          run.AutomationRunID,
+		"origin":                     run.Origin,
+		"interaction_mode":           run.InteractionMode,
+		"validation_policy":          run.ValidationPolicy,
+		"linear_private":             run.LinearPrivate,
+		"linear_state_sync_disabled": run.LinearStateSyncDisabled,
+		"linear_identifier_hint":     run.LinearIdentifierHint,
+		"linear_prepare_state":       run.LinearPrepareState,
 	}
 
 	row := tx.QueryRow(ctx, query, args)
@@ -457,6 +471,86 @@ func (s *SessionStore) Create(ctx context.Context, run *models.Session) error {
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("commit session create transaction: %w", err)
+	}
+	return nil
+}
+
+// SetLinearPrepareState transitions the session's pre-start preparation
+// state. Used by the Linear linker to gate turn 1 against primary issue
+// resolution: the run_agent worker reads this and refuses to start until it
+// is "ready" or "none".
+//
+// Intentionally does *not* bump last_activity_at — the prepare-state
+// transition is internal infra, not user-visible activity. Bumping it here
+// would surface preparing sessions in the MRU sort while they are blocked
+// on a worker, confusing the sidebar.
+func (s *SessionStore) SetLinearPrepareState(ctx context.Context, orgID, sessionID uuid.UUID, state models.LinearPrepareState) error {
+	tag, err := s.db.Exec(ctx, `
+		UPDATE sessions
+		SET linear_prepare_state = @state
+		WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL`,
+		pgx.NamedArgs{
+			"id":     sessionID,
+			"org_id": orgID,
+			"state":  state,
+		})
+	if err != nil {
+		return fmt.Errorf("update linear prepare state: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("session not found")
+	}
+	return nil
+}
+
+// SetLinearPrepareStateIfNotReady writes state unless the row is already in
+// "ready" - the terminal-positive state. Used by the prepare-worker failure
+// paths so two distinct-hash workers racing on the same session can't have
+// one mark "failed" on top of the other's "ready" success. "ready" is
+// sticky once observed; "failed" -> "ready" is still allowed because a later
+// successful prepare should win over an earlier failure.
+//
+// Returns nil with zero rows affected when the row was already "ready" - the
+// no-op is intentional and not an error.
+func (s *SessionStore) SetLinearPrepareStateIfNotReady(ctx context.Context, orgID, sessionID uuid.UUID, state models.LinearPrepareState) error {
+	_, err := s.db.Exec(ctx, `
+		UPDATE sessions
+		SET linear_prepare_state = @state
+		WHERE id = @id
+		  AND org_id = @org_id
+		  AND deleted_at IS NULL
+		  AND linear_prepare_state <> @ready`,
+		pgx.NamedArgs{
+			"id":     sessionID,
+			"org_id": orgID,
+			"state":  state,
+			"ready":  models.LinearPrepareStateReady,
+		})
+	if err != nil {
+		return fmt.Errorf("update linear prepare state: %w", err)
+	}
+	return nil
+}
+
+// SetLinearIdentifierHint records the primary Linear identifier for a
+// session. The agent's branch-naming logic reads this so the working branch
+// includes the identifier — Linear's GitHub integration matches branch
+// prefixes independently of the PR title.
+func (s *SessionStore) SetLinearIdentifierHint(ctx context.Context, orgID, sessionID uuid.UUID, identifier string) error {
+	tag, err := s.db.Exec(ctx, `
+		UPDATE sessions
+		SET linear_identifier_hint = NULLIF(@identifier, '')
+		WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL`,
+		pgx.NamedArgs{
+			"id":         sessionID,
+			"org_id":     orgID,
+			"identifier": identifier,
+		})
+	if err != nil {
+		return fmt.Errorf("update linear identifier hint: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("session not found")
 	}
 	return nil
 }
@@ -723,6 +817,13 @@ func (s *SessionStore) UpdateResult(ctx context.Context, orgID, runID uuid.UUID,
 
 func (s *SessionStore) updateResultRow(ctx context.Context, db DBTX, orgID, runID uuid.UUID, status string, result *models.SessionResult, diffStats json.RawMessage) error {
 
+	// COALESCE on diff / diff_stats / diff_collected_at preserves the
+	// previously persisted authoritative diff when the current turn did not
+	// produce one (collection skipped or failed — sessiondiff.Collect returned
+	// ErrNoBaseCommitSHA, which the adapter logs and leaves result.Diff empty,
+	// which strPtr converts to nil here). Without this guard, an empty/NULL
+	// diff would overwrite the prior diff and blank out the Changes tab.
+	// diff_history's append SQL already no-ops when @diff IS NULL.
 	query := `
 		UPDATE sessions
 		SET status = @status,
@@ -734,10 +835,12 @@ func (s *SessionStore) updateResultRow(ctx context.Context, db DBTX, orgID, runI
 		    END,
 		    confidence_score = @confidence_score, confidence_reasoning = @confidence_reasoning,
 		    risk_factors = @risk_factors, token_usage = @token_usage,
-		    result_summary = @result_summary, diff = @diff, error = @error,
+		    result_summary = @result_summary,
+		    diff = COALESCE(@diff, diff),
+		    error = @error,
 		    base_commit_sha = COALESCE(@base_commit_sha, base_commit_sha),
-		    diff_collected_at = @diff_collected_at,
-		    diff_stats = @diff_stats,
+		    diff_collected_at = COALESCE(@diff_collected_at, diff_collected_at),
+		    diff_stats = COALESCE(@diff_stats, diff_stats),
 		    diff_history = ` + diffHistoryAppendSQL("COALESCE(current_turn, 0) + 1") + `
 		WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL`
 
@@ -1096,18 +1199,32 @@ func (s *SessionStore) UpdateTurnComplete(ctx context.Context, orgID, sessionID 
 
 func (s *SessionStore) updateTurnCompleteRow(ctx context.Context, db DBTX, orgID, sessionID uuid.UUID, turn int, result *models.SessionResult, agentSessionID, snapshotKey string, diffStats json.RawMessage) error {
 
+	// COALESCE on diff / diff_stats / diff_collected_at: see updateResultRow
+	// for the full rationale. Briefly: when sessiondiff.Collect returns
+	// ErrNoBaseCommitSHA (or the agent produces no changes against base), the
+	// adapter leaves result.Diff empty → strPtr returns nil → @diff is NULL
+	// here. Falling back to the previously persisted diff is strictly better
+	// than clobbering the Changes tab with a blank value.
 	query := `
 		UPDATE sessions
 		SET status = 'idle', current_turn = @current_turn, last_activity_at = now(),
 		    agent_session_id = @agent_session_id, snapshot_key = @snapshot_key,
 		    sandbox_state = 'snapshotted',
 		    pr_creation_state = 'idle', pr_creation_error = NULL,
+		    -- Only reset pr_push_state when no push is currently in flight.
+		    -- A concurrent turn-complete from the orchestrator must never
+		    -- silently overwrite an active push (the handler's in-flight 409
+		    -- guard relies on this column being authoritative).
+		    pr_push_state = CASE WHEN pr_push_state IN ('queued', 'pushing') THEN pr_push_state ELSE 'idle' END,
+		    pr_push_error = CASE WHEN pr_push_state IN ('queued', 'pushing') THEN pr_push_error ELSE NULL END,
 		    confidence_score = @confidence_score, confidence_reasoning = @confidence_reasoning,
 		    risk_factors = @risk_factors, token_usage = @token_usage,
-		    result_summary = @result_summary, diff = @diff, error = @error,
+		    result_summary = @result_summary,
+		    diff = COALESCE(@diff, diff),
+		    error = @error,
 		    base_commit_sha = COALESCE(@base_commit_sha, base_commit_sha),
-		    diff_collected_at = @diff_collected_at,
-		    diff_stats = @diff_stats,
+		    diff_collected_at = COALESCE(@diff_collected_at, diff_collected_at),
+		    diff_stats = COALESCE(@diff_stats, diff_stats),
 		    diff_history = ` + diffHistoryAppendSQL("@current_turn::int") + `
 		WHERE id = @id AND org_id = @org_id`
 
@@ -1290,6 +1407,64 @@ func (s *SessionStore) UpdatePRCreationState(ctx context.Context, orgID, session
 		SET pr_creation_state = @state, pr_creation_error = @err
 		WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL
 		  AND pr_creation_state <> 'succeeded'`
+	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
+		"id":     sessionID,
+		"org_id": orgID,
+		"state":  string(state),
+		"err":    errArg,
+	})
+	return err
+}
+
+// TryMarkPRPushQueued atomically transitions pr_push_state from any non-in-
+// flight state ('idle', 'succeeded', 'failed') to 'queued', clearing any
+// previous error. Returns (true, nil) when the row was updated, (false, nil)
+// when a concurrent request already moved the column to 'queued' or 'pushing'.
+//
+// The push handler uses this instead of UpdatePRPushState to start a push so
+// two concurrent API requests that both pass the in-memory precheck cannot
+// both transition the column to 'queued'. The handler's job-enqueue dedupe
+// key collapses the worker side onto a single job; this CAS gives the API
+// side the matching guarantee that exactly one of the racing requests
+// returns 202 and the other returns 409.
+func (s *SessionStore) TryMarkPRPushQueued(ctx context.Context, orgID, sessionID uuid.UUID) (bool, error) {
+	query := `UPDATE sessions
+		SET pr_push_state = 'queued', pr_push_error = NULL
+		WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL
+		  AND pr_push_state NOT IN ('queued', 'pushing')`
+	res, err := s.db.Exec(ctx, query, pgx.NamedArgs{
+		"id":     sessionID,
+		"org_id": orgID,
+	})
+	if err != nil {
+		return false, err
+	}
+	return res.RowsAffected() > 0, nil
+}
+
+// UpdatePRPushState transitions pr_push_state and sets/clears pr_push_error
+// atomically. Mirrors UpdatePRCreationState but does not treat `succeeded` as
+// terminal — a session can have its changes pushed multiple times across
+// follow-up turns, so the column must be free to cycle through the state
+// machine. Each new turn complete resets the column to `idle` separately.
+//
+// To start a new push (idle → queued) prefer TryMarkPRPushQueued, which
+// rejects races between concurrent submitters; this method is for downstream
+// transitions (queued → pushing → succeeded/failed) where the worker is the
+// sole writer.
+func (s *SessionStore) UpdatePRPushState(ctx context.Context, orgID, sessionID uuid.UUID, state models.PRPushState, errMsg string) error {
+	if err := state.Validate(); err != nil {
+		return err
+	}
+	var errArg any
+	if state == models.PRPushStateFailed && errMsg != "" {
+		errArg = errMsg
+	} else {
+		errArg = nil
+	}
+	query := `UPDATE sessions
+		SET pr_push_state = @state, pr_push_error = @err
+		WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL`
 	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
 		"id":     sessionID,
 		"org_id": orgID,
@@ -1492,6 +1667,32 @@ func (s *SessionStore) ReleaseTurnHold(ctx context.Context, orgID, sessionID uui
 		return false, "", fmt.Errorf("release turn hold: %w", err)
 	}
 	return cid != "" && !previewHolds, cid, nil
+}
+
+// PeekContainerID returns the session's current container_id (empty when
+// NULL) using a single-column lookup. It exists for the preview hydrate
+// race-detection peek, which only needs to know whether a peer has
+// published a container_id since the caller last read the row — fetching
+// the full Session struct via GetByID would pull ~30 columns and hydrate
+// the policy JSON for no benefit. Returns the empty string for both
+// "no row" and "NULL container_id"; the caller cannot distinguish those
+// cases, but neither outcome should change the hydrate path's behavior.
+func (s *SessionStore) PeekContainerID(ctx context.Context, orgID, sessionID uuid.UUID) (string, error) {
+	query := `SELECT COALESCE(container_id, '')
+		FROM sessions
+		WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL`
+	var containerID string
+	err := s.db.QueryRow(ctx, query, pgx.NamedArgs{
+		"id":     sessionID,
+		"org_id": orgID,
+	}).Scan(&containerID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return "", nil
+		}
+		return "", fmt.Errorf("peek container id: %w", err)
+	}
+	return containerID, nil
 }
 
 // PublishHydratedContainerID is the preview-hydrate CAS: a preview has just

@@ -26,6 +26,7 @@ describe("AutopilotSteeringSheet", () => {
     expect(screen.getByDisplayValue("Ship reliability first.")).toBeInTheDocument();
     expect(screen.getByDisplayValue("Payments hardening this quarter.")).toBeInTheDocument();
     expect(screen.getByDisplayValue("auth")).toBeInTheDocument();
+    expect(screen.getByLabelText("Suggest").parentElement).not.toHaveClass("rounded-lg", "border", "p-3");
   });
 
   it("autosaves the philosophy change with the merged product_context payload", async () => {

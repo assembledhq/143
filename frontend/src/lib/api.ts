@@ -334,14 +334,19 @@ export const api = {
         ...(options.authorMode ? { author_mode: options.authorMode } : {}),
         ...(options.resumeToken ? { resume_token: options.resumeToken } : {}),
       } : undefined),
+    pushChangesToPR: (sessionId: string, options?: { authorMode?: 'auto' | 'user' | 'app'; resumeToken?: string }) =>
+      post<{ status: string }>(`/api/v1/sessions/${sessionId}/pr/push`, options ? {
+        ...(options.authorMode ? { author_mode: options.authorMode } : {}),
+        ...(options.resumeToken ? { resume_token: options.resumeToken } : {}),
+      } : undefined),
     getQuestions: (sessionId: string) => get<import('./types').ListResponse<import('./types').SessionQuestion>>(`/api/v1/sessions/${sessionId}/questions`),
     answerQuestion: (sessionId: string, questionId: string, answer: string) =>
       post<import('./types').SingleResponse<import('./types').SessionQuestion>>(`/api/v1/sessions/${sessionId}/questions/${questionId}/answer`, { answer }),
-    createManual: (body: { message: string; images?: string[]; references?: import('./types').SessionInputReference[]; commands?: import('./types').SessionInputCommand[]; agent_type?: string; model?: string; reasoning_effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max'; autonomy_level?: string; token_mode?: string; repository_id?: string; branch?: string }) =>
+    createManual: (body: { message: string; images?: string[]; references?: import('./types').SessionInputReference[]; commands?: import('./types').SessionInputCommand[]; agent_type?: string; model?: string; reasoning_effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max'; autonomy_level?: string; token_mode?: string; repository_id?: string; branch?: string; linear_private?: boolean; linear_state_sync_disabled?: boolean }) =>
       post<import('./types').SingleResponse<import('./types').Session>>('/api/v1/sessions/manual', body),
     getMessages: (sessionId: string) =>
       get<import('./types').ListResponse<import('./types').SessionMessage>>(`/api/v1/sessions/${sessionId}/messages`),
-    sendMessage: (sessionId: string, body: { message: string; images?: string[]; references?: import('./types').SessionInputReference[]; commands?: import('./types').SessionInputCommand[]; planMode?: boolean; model?: string }) =>
+    sendMessage: (sessionId: string, body: { message: string; images?: string[]; references?: import('./types').SessionInputReference[]; commands?: import('./types').SessionInputCommand[]; planMode?: boolean; model?: string; resolveReviewCommentIDs?: string[] }) =>
       post<import('./types').SingleResponse<import('./types').SessionMessage>>(
         `/api/v1/sessions/${sessionId}/messages`,
         {
@@ -351,6 +356,7 @@ export const api = {
           commands: body.commands && body.commands.length > 0 ? body.commands : undefined,
           plan_mode: body.planMode || undefined,
           ...(body.model ? { model: body.model } : {}),
+          resolve_review_comment_ids: body.resolveReviewCommentIDs && body.resolveReviewCommentIDs.length > 0 ? body.resolveReviewCommentIDs : undefined,
         },
       ),
     endSession: (sessionId: string) =>
@@ -370,8 +376,17 @@ export const api = {
       get<import('./types').SingleResponse<import('./types').SessionThread>>(`/api/v1/sessions/${sessionId}/threads/${threadId}`),
     createThread: (sessionId: string, body: { agent_type?: string; model?: string; label: string; instructions?: string; file_scope?: string[] }) =>
       post<import('./types').SingleResponse<import('./types').SessionThread>>(`/api/v1/sessions/${sessionId}/threads`, body),
-    sendThreadMessage: (sessionId: string, threadId: string, message: string, images?: string[]) =>
-      post<import('./types').SingleResponse<import('./types').SessionMessage>>(`/api/v1/sessions/${sessionId}/threads/${threadId}/messages`, { message, images }),
+    sendThreadMessage: (sessionId: string, threadId: string, body: { message: string; images?: string[]; references?: import('./types').SessionInputReference[]; commands?: import('./types').SessionInputCommand[]; planMode?: boolean }) =>
+      post<import('./types').SingleResponse<import('./types').SessionMessage>>(
+        `/api/v1/sessions/${sessionId}/threads/${threadId}/messages`,
+        {
+          message: body.message,
+          images: body.images,
+          references: body.references && body.references.length > 0 ? body.references : undefined,
+          commands: body.commands && body.commands.length > 0 ? body.commands : undefined,
+          plan_mode: body.planMode || undefined,
+        },
+      ),
     endThread: (sessionId: string, threadId: string) =>
       post<import('./types').SingleResponse<import('./types').SessionThread>>(`/api/v1/sessions/${sessionId}/threads/${threadId}/end`),
     getThreadMessages: (sessionId: string, threadId: string) =>
@@ -607,7 +622,7 @@ export const api = {
       ),
   },
   projects: {
-    list: (params?: { status?: string; cursor?: string; limit?: number; repository_id?: string; search?: string; proposed_by_pm?: boolean; created_by?: string }) => {
+    list: (params?: { status?: string; cursor?: string; limit?: number; repository_id?: string; search?: string; proposed_by_pm?: boolean; created_by?: string; include_archived?: boolean; only_archived?: boolean }) => {
       const searchParams = new URLSearchParams();
       if (params?.status) searchParams.set('status', params.status);
       if (params?.cursor) searchParams.set('cursor', params.cursor);
@@ -616,6 +631,8 @@ export const api = {
       if (params?.search) searchParams.set('search', params.search);
       if (params?.proposed_by_pm !== undefined) searchParams.set('proposed_by_pm', String(params.proposed_by_pm));
       if (params?.created_by) searchParams.set('created_by', params.created_by);
+      if (params?.only_archived) searchParams.set('only_archived', 'true');
+      else if (params?.include_archived) searchParams.set('include_archived', 'true');
       const qs = searchParams.toString();
       return get<import('./types').ListResponse<import('./types').Project>>(`/api/v1/projects${qs ? `?${qs}` : ''}`);
     },
@@ -626,6 +643,10 @@ export const api = {
       patch<import('./types').SingleResponse<import('./types').Project>>(`/api/v1/projects/${id}`, body),
     del: (id: string) => del(`/api/v1/projects/${id}`),
     start: (id: string) => post(`/api/v1/projects/${id}/start`),
+    archive: (projectId: string) =>
+      post<{ status: string }>(`/api/v1/projects/${projectId}/archive`, {}),
+    unarchive: (projectId: string) =>
+      post<{ status: string }>(`/api/v1/projects/${projectId}/unarchive`, {}),
     proposalSummary: () =>
       get<import('./types').SingleResponse<import('./types').ProposalSummary>>('/api/v1/projects/proposals/summary'),
     runNow: (id: string) => post<import('./types').SingleResponse<{ job_id: string }>>(`/api/v1/projects/${id}/run`),

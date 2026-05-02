@@ -4,7 +4,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { NuqsTestingAdapter } from 'nuqs/adapters/testing';
 import React from 'react';
 import { parseAsString, useQueryState } from 'nuqs';
-import { renderWithProviders, screen, waitFor } from '@/test/test-utils';
+import { fireEvent, renderWithProviders, screen, waitFor } from '@/test/test-utils';
 import userEvent from '@testing-library/user-event';
 import { server } from '@/test/mocks/server';
 import { SessionSidebar } from './session-sidebar';
@@ -187,6 +187,34 @@ describe('SessionSidebar', () => {
       expect(screen.queryByText('Alpha fix')).not.toBeInTheDocument();
     });
     expect(screen.getByText('Beta update')).toBeInTheDocument();
+  });
+
+  it('archives a session from the swipe action', async () => {
+    let archiveCalls = 0;
+    serveSessions([
+      makeSession({ id: 's1', result_summary: 'Swipe me' }),
+    ]);
+    server.use(
+      http.post('/api/v1/sessions/s1/archive', () => {
+        archiveCalls += 1;
+        return HttpResponse.json({ status: 'archived' });
+      }),
+    );
+
+    renderWithProviders(<SessionSidebar />);
+    const row = await screen.findByText('Swipe me');
+    const surface = row.closest('[data-swipe-surface="true"]');
+    expect(surface).not.toBeNull();
+
+    fireEvent.touchStart(surface!, { touches: [{ clientX: 220, clientY: 24 }] });
+    fireEvent.touchMove(surface!, { touches: [{ clientX: 120, clientY: 26 }] });
+    fireEvent.touchEnd(surface!);
+
+    fireEvent.click(screen.getAllByRole('button', { name: 'Archive session' })[0]);
+
+    await waitFor(() => {
+      expect(archiveCalls).toBe(1);
+    });
   });
 
   it('clears search on Escape key', async () => {

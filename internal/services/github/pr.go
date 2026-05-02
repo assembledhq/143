@@ -32,11 +32,17 @@ import (
 )
 
 const (
-	defaultGitHubAPI   = "https://api.github.com"
-	maxBranchSlugLen   = 60
-	maxLabelsToCreate  = 5
-	maxPRTitleLen      = 120
-	prTemplateCacheTTL = 24 * time.Hour // re-fetch repo PR template after this duration
+	defaultGitHubAPI  = "https://api.github.com"
+	defaultAppBaseURL = "https://143.dev"
+	maxBranchSlugLen  = 60
+	maxLabelsToCreate = 5
+	maxPRTitleLen     = 120
+	// minPRTitleSubjectChars is the smallest descriptive subject we'll allow
+	// after Linear key prefixes are applied. Prefixes are trimmed (secondaries
+	// first) before the subject so a session linked to many issues can never
+	// produce a title that is just brackets with no human-readable content.
+	minPRTitleSubjectChars = 12
+	prTemplateCacheTTL     = 24 * time.Hour // re-fetch repo PR template after this duration
 )
 
 // PreviewStopper stops a running preview instance. Implemented by
@@ -63,19 +69,21 @@ type PRService struct {
 	appUserAuth     interface {
 		GetValidCredential(ctx context.Context, orgID, userID uuid.UUID) (*models.GitHubAppUserConfig, error)
 	}
-	users           *db.UserStore
-	orgs            *db.OrganizationStore
-	prTemplates     *db.PRTemplateStore
-	previews        *db.PreviewStore
-	previewStopper  PreviewStopper
-	prHealthStreams *cache.PullRequestStreams
-	llmClient       llm.Client
-	audit           *db.AuditEmitter
-	sandboxProvider agent.SandboxProvider // used by the push-based PR flow
-	snapshots       storage.SnapshotStore // used by the push-based PR flow
-	logger          zerolog.Logger
-	baseURL         string
-	httpClient      *http.Client
+	users            *db.UserStore
+	orgs             *db.OrganizationStore
+	prTemplates      *db.PRTemplateStore
+	previews         *db.PreviewStore
+	previewStopper   PreviewStopper
+	prHealthStreams  *cache.PullRequestStreams
+	llmClient        llm.Client
+	audit            *db.AuditEmitter
+	sandboxProvider  agent.SandboxProvider // used by the push-based PR flow
+	snapshots        storage.SnapshotStore // used by the push-based PR flow
+	logger           zerolog.Logger
+	baseURL          string
+	appBaseURL       string
+	httpClient       *http.Client
+	linearMilestones LinearMilestoneEnqueuer // nil-safe: Linear writes disabled if nil
 
 	// cachedResolverMu guards lazy construction of cachedResolver. The
 	// resolver is built from the currently-wired dependencies on first use
@@ -91,6 +99,18 @@ type PRService struct {
 	// callers don't need to wait — the goroutine self-completes and updates
 	// the session row atomically.
 	postPRSnapshotUploads sync.WaitGroup
+}
+
+// LinearMilestoneEnqueuer is the post-event hook that fires the Linear
+// attachment + comment + state-sync writes after a session reaches a
+// milestone (PR opened / PR merged / etc.). Held as a function so PRService
+// stays decoupled from the Linear package — the function lives in the
+// linker service and packages a worker enqueue + payload.
+type LinearMilestoneEnqueuer func(ctx context.Context, orgID, sessionID uuid.UUID, event string, prNumber int)
+
+// SetLinearMilestoneEnqueuer wires the Linear post-event hook.
+func (s *PRService) SetLinearMilestoneEnqueuer(enq LinearMilestoneEnqueuer) {
+	s.linearMilestones = enq
 }
 
 func NewPRService(
@@ -115,6 +135,7 @@ func NewPRService(
 		jobs:          jobs,
 		logger:        logger,
 		baseURL:       defaultGitHubAPI,
+		appBaseURL:    defaultAppBaseURL,
 		httpClient:    &http.Client{Timeout: 30 * time.Second},
 	}
 }
@@ -367,6 +388,19 @@ func (s *PRService) SetBaseURL(url string) {
 	s.invalidateResolver()
 }
 
+// SetAppBaseURL overrides the web app base URL used in generated PR session links.
+func (s *PRService) SetAppBaseURL(url string) {
+	s.appBaseURL = strings.TrimRight(url, "/")
+}
+
+func (s *PRService) sessionURL(sessionID uuid.UUID) string {
+	baseURL := strings.TrimRight(s.appBaseURL, "/")
+	if baseURL == "" {
+		baseURL = defaultAppBaseURL
+	}
+	return fmt.Sprintf("%s/sessions/%s", baseURL, sessionID.String())
+}
+
 // CreatePRParams holds optional parameters for PR creation that come from the
 // API request (as opposed to org-level defaults). Fields use pointers to
 // distinguish "caller explicitly set this" from "use org default".
@@ -550,6 +584,7 @@ func (s *PRService) CreatePR(ctx context.Context, run *models.Session, params ..
 
 	authoredBy := resolution.AuthoredBy()
 	headSHA := pushed.HeadSHA
+	headRef := branchName
 	pr := &models.PullRequest{
 		SessionID:      &run.ID,
 		OrgID:          run.OrgID,
@@ -558,10 +593,11 @@ func (s *PRService) CreatePR(ctx context.Context, run *models.Session, params ..
 		GitHubRepo:     repo.FullName,
 		Title:          title,
 		Body:           &body,
-		Status:         "open",
+		Status:         models.PullRequestStatusOpen,
 		ReviewStatus:   "pending",
 		AuthoredBy:     authoredBy,
 		HeadSHA:        &headSHA,
+		HeadRef:        &headRef,
 	}
 	if err := s.pullRequests.Create(ctx, pr); err != nil {
 		return nil, fmt.Errorf("store pull request: %w", err)
@@ -593,6 +629,13 @@ func (s *PRService) CreatePR(ctx context.Context, run *models.Session, params ..
 		}
 	}
 
+	// Fire the Linear PR-opened milestone (attachment subtitle update,
+	// rolling-comment refresh, optional workflow-state move under guards).
+	// nil-safe: when no Linear linker is wired, this is a no-op.
+	if s.linearMilestones != nil {
+		s.linearMilestones(ctx, run.OrgID, run.ID, "pr_opened", prNumber)
+	}
+
 	if err := s.sessions.UpdateStatus(ctx, run.OrgID, run.ID, "pr_created"); err != nil {
 		s.logger.Warn().Err(err).Str("run_id", run.ID.String()).Msg("failed to update agent run status")
 	}
@@ -604,6 +647,166 @@ func (s *PRService) CreatePR(ctx context.Context, run *models.Session, params ..
 	}
 
 	return pr, nil
+}
+
+// ErrNoPullRequest is returned by PushChangesToPR when the session has no
+// associated PR row. The "Push changes" action is only meaningful when a PR
+// already exists; the caller should fall back to (or surface) Create PR.
+var ErrNoPullRequest = errors.New("no pull request exists for session")
+
+// ErrPRClosed is returned by PushChangesToPR when the session's PR is in a
+// terminal state (merged or closed) where pushing additional commits would not
+// take effect on the user's behalf. The caller should disable the button.
+var ErrPRClosed = errors.New("pull request is closed")
+
+// ErrLegacyPRMissingHeadRef is returned by PushChangesToPR when the PR row was
+// created before migration 107 added the head_ref column and therefore has no
+// persisted branch name. We refuse to silently push to a recomputed branch
+// name because formatBranchName is sensitive to the session's title and
+// Linear identifier — both of which can drift after CreatePR runs — so a
+// fallback push could land on a branch the PR doesn't track and silently
+// orphan the user's commits. The user should re-create the PR (or wait for a
+// future backfill migration) instead.
+var ErrLegacyPRMissingHeadRef = errors.New("pull request was created before head_ref was tracked; cannot determine push branch")
+
+// PushChangesToPR stages, commits, and pushes any uncommitted/unpushed changes
+// from the session's sandbox up to the existing PR's branch, then updates the
+// PR row's head_sha. Mirrors the push half of CreatePR (sandbox hydrate, git
+// script, snapshot capture, post-push snapshot upload) without re-running the
+// PR-row creation, content generation, label attachment, status transitions,
+// or Linear milestones — those side effects belong to PR creation only.
+//
+// Branch resolution: requires the head_ref captured at PR-creation time so
+// the push always targets the same ref the original CreatePR landed on. PRs
+// created before migration 107 don't have head_ref persisted; in that case we
+// return ErrLegacyPRMissingHeadRef rather than recomputing via
+// formatBranchName, because the recomputed name is sensitive to the session's
+// title and Linear identifier (both of which can drift after CreatePR ran)
+// and a guess could silently push to a branch the PR doesn't track.
+//
+// Returns ErrNoPullRequest if the session has no PR row, ErrPRClosed if the
+// PR is merged/closed, ErrLegacyPRMissingHeadRef for legacy PRs without a
+// persisted branch name, ErrNoChanges when there is nothing to push, and the
+// same snapshot sentinels as CreatePR when the sandbox is unavailable.
+func (s *PRService) PushChangesToPR(ctx context.Context, run *models.Session, params ...CreatePRParams) (*models.PullRequest, error) {
+	pr, err := s.pullRequests.GetBySessionID(ctx, run.OrgID, run.ID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrNoPullRequest
+		}
+		return nil, fmt.Errorf("load pull request: %w", err)
+	}
+	if pr.Status != models.PullRequestStatusOpen {
+		return nil, ErrPRClosed
+	}
+	// Refuse legacy PRs early — before any sandbox hydrate or token resolution
+	// — so we don't burn work on a request that's guaranteed to fail.
+	if pr.HeadRef == nil || *pr.HeadRef == "" {
+		return nil, ErrLegacyPRMissingHeadRef
+	}
+
+	if s.sandboxProvider == nil || s.snapshots == nil {
+		return nil, fmt.Errorf("PRService: sandbox push dependencies not configured")
+	}
+	if run.SnapshotKey == nil || *run.SnapshotKey == "" {
+		return nil, ErrSnapshotNotCaptured
+	}
+	if run.PendingSnapshotKey != nil && *run.PendingSnapshotKey != "" {
+		return nil, agent.ErrSnapshotPending
+	}
+	if run.RepositoryID == nil {
+		return nil, fmt.Errorf("session %s has no repository", run.ID)
+	}
+
+	var issue *models.Issue
+	if run.PrimaryIssueID != nil {
+		i, lookupErr := s.issues.GetByID(ctx, run.OrgID, *run.PrimaryIssueID)
+		if lookupErr == nil {
+			issue = &i
+		} else {
+			s.logger.Warn().Err(lookupErr).Str("issue_id", run.PrimaryIssueID.String()).Msg("PushChangesToPR: failed to look up issue, proceeding without it")
+		}
+	}
+
+	repo, err := s.repos.GetByID(ctx, run.OrgID, *run.RepositoryID)
+	if err != nil {
+		return nil, fmt.Errorf("get repository: %w", err)
+	}
+
+	orgSettings := models.OrgSettings{PRAuthorship: models.PRAuthorshipUserPreferred}
+	if s.orgs != nil {
+		if org, orgErr := s.orgs.GetByID(ctx, run.OrgID); orgErr == nil {
+			if parsed, parseErr := models.ParseOrgSettings(org.Settings); parseErr == nil {
+				orgSettings = parsed
+			}
+		}
+	}
+
+	var opts CreatePRParams
+	for _, param := range params {
+		if param.Draft != nil {
+			opts.Draft = param.Draft
+		}
+		if param.AuthorMode != "" {
+			opts.AuthorMode = param.AuthorMode
+		}
+	}
+
+	resolution, err := s.resolveToken(ctx, run, &repo, orgSettings, opts.AuthorMode)
+	if err != nil {
+		return nil, fmt.Errorf("resolve token: %w", err)
+	}
+	token := resolution.Token
+
+	// Use the persisted head_ref captured at PR-creation time. Guarded by the
+	// ErrLegacyPRMissingHeadRef check above, so we know it's set here.
+	branchName := *pr.HeadRef
+	commitMsg := formatCommitMessage(run, issue)
+	authorName, authorEmail := identity.CommitIdentity(resolution)
+	if !resolution.IsUserToken() && run.TriggeredByUserID != nil && s.users != nil {
+		if user, userErr := s.users.GetByID(ctx, run.OrgID, *run.TriggeredByUserID); userErr == nil {
+			if trailer := identity.CoAuthorTrailer(&user); trailer != "" {
+				commitMsg += "\n\n" + trailer
+			}
+		}
+	}
+
+	pushed, err := s.pushSessionBranch(ctx, run, &repo, token, *run.SnapshotKey, branchName, commitMsg, authorName, authorEmail)
+	if err != nil {
+		return nil, err
+	}
+	// Mirror CreatePR's tempfile ownership invariant: the deferred Remove is a
+	// safety net for every error path between here and the snapshot-upload
+	// dispatch below; on success, dispatchPostPRSnapshotUpload zeroes
+	// CapturedSnapshotPath to transfer ownership to the goroutine.
+	defer func() {
+		if pushed != nil && pushed.CapturedSnapshotPath != "" {
+			_ = os.Remove(pushed.CapturedSnapshotPath)
+		}
+	}()
+
+	if err := s.pullRequests.UpdateHeadSHA(ctx, run.OrgID, pr.ID, pushed.HeadSHA); err != nil {
+		return nil, fmt.Errorf("update pull request head sha: %w", err)
+	}
+	pr.HeadSHA = &pushed.HeadSHA
+	s.enqueuePullRequestStateSync(ctx, pr)
+
+	if pushed.CapturedSnapshotErr != nil {
+		s.logger.Warn().
+			Err(pushed.CapturedSnapshotErr).
+			Str("session_id", run.ID.String()).
+			Msg("post-push sandbox snapshot capture failed; resume will see stale state")
+	} else if pushed.CapturedSnapshotPath != "" {
+		newSnapshotKey := fmt.Sprintf("snapshots/%s/%s/post-pr.tar.zst", run.OrgID, run.ID)
+		if setErr := s.sessions.SetPendingSnapshotKey(ctx, run.OrgID, run.ID, newSnapshotKey); setErr != nil {
+			s.logger.Warn().Err(setErr).Str("session_id", run.ID.String()).Msg("failed to set pending snapshot key")
+		} else {
+			s.dispatchPostPRSnapshotUpload(run.OrgID, run.ID, newSnapshotKey, pushed.CapturedSnapshotPath, pushed.CapturedSnapshotSize)
+			pushed.CapturedSnapshotPath = ""
+		}
+	}
+
+	return &pr, nil
 }
 
 // postPRSnapshotUploadTimeout bounds a single upload attempt. Deliberately
@@ -1039,7 +1242,7 @@ func (s *PRService) HandlePullRequestEvent(ctx context.Context, event PullReques
 // to head SHA when GitHub omits merge_commit_sha.
 func (s *PRService) applyClosedPRTransition(ctx context.Context, pr models.PullRequest, merged bool, mergeCommitSHA, headSHA string) error {
 	if merged {
-		if err := s.pullRequests.UpdateStatus(ctx, pr.OrgID, pr.ID, "merged"); err != nil {
+		if err := s.pullRequests.UpdateStatus(ctx, pr.OrgID, pr.ID, models.PullRequestStatusMerged); err != nil {
 			return fmt.Errorf("update PR status to merged: %w", err)
 		}
 		commitSHA := mergeCommitSHA
@@ -1050,8 +1253,17 @@ func (s *PRService) applyClosedPRTransition(ctx context.Context, pr models.PullR
 		return nil
 	}
 
-	if err := s.pullRequests.UpdateStatus(ctx, pr.OrgID, pr.ID, "closed"); err != nil {
+	if err := s.pullRequests.UpdateStatus(ctx, pr.OrgID, pr.ID, models.PullRequestStatusClosed); err != nil {
 		return fmt.Errorf("update PR status to closed: %w", err)
+	}
+	// Tell the Linear linker the session ended without a merge so the
+	// attachment subtitle stops saying "PR open" forever and the audit log
+	// records the terminal state. Coexistence + per-session disable guards
+	// inside the linker still apply. Event string must match
+	// linear.MilestoneEndedNoPR; we use a string literal to avoid importing
+	// the linear package and creating a cycle.
+	if pr.SessionID != nil && s.linearMilestones != nil {
+		s.linearMilestones(ctx, pr.OrgID, *pr.SessionID, "ended_no_pr", pr.GitHubPRNumber)
 	}
 	s.teardownPRPreview(ctx, pr, false)
 	s.maybeAutoArchiveSessionOnPRClose(ctx, pr, nil, false)
@@ -1059,6 +1271,13 @@ func (s *PRService) applyClosedPRTransition(ctx context.Context, pr models.PullR
 }
 
 func (s *PRService) runMergedPullRequestFollowUps(ctx context.Context, pr models.PullRequest, commitSHA string) {
+	// Fire the Linear PR-merged milestone. Coexistence guards inside the
+	// linker suppress this when Linear's GitHub integration is already
+	// active on the issue (avoiding double cycle/sprint membership).
+	if pr.SessionID != nil && s.linearMilestones != nil {
+		s.linearMilestones(ctx, pr.OrgID, *pr.SessionID, "pr_merged", pr.GitHubPRNumber)
+	}
+
 	var snapshotKey *string
 
 	if pr.SessionID != nil && s.sessions != nil {
@@ -1805,6 +2024,9 @@ func normalizePRTitleCandidate(s string) string {
 }
 
 func truncatePRTitle(s string, limit int) string {
+	if limit <= 0 {
+		return ""
+	}
 	if len(s) <= limit {
 		return s
 	}
@@ -1850,6 +2072,18 @@ func formatBranchName(session *models.Session, issue *models.Issue) string {
 	if slug == "" {
 		slug = "changes"
 	}
+	// Linear's GitHub integration matches branches with a key prefix
+	// independently of the PR title — see design 62 §"Branch naming hint".
+	// When the session has a primary Linear identifier hint, embed it in
+	// the slug so the integration can claim the branch even if the PR title
+	// path failed.
+	if session != nil && session.LinearIdentifierHint != nil && *session.LinearIdentifierHint != "" {
+		hint := strings.ToLower(*session.LinearIdentifierHint)
+		// Avoid double-embedding when the slug already contains the key.
+		if !strings.Contains(slug, hint) {
+			slug = hint + "-" + slug
+		}
+	}
 	return fmt.Sprintf("143/%s/%s", short, slug)
 }
 
@@ -1861,24 +2095,242 @@ func formatPRTitle(session *models.Session, issue *models.Issue) string {
 			if title == "" {
 				title = issue.Title
 			}
-			prefix := issue.ExternalID + ": "
-			return prefix + truncatePRTitle(title, maxPRTitleLen-len(prefix))
+			// Strip "ACS-1234: " preamble baked into the title — we add
+			// [ACS-1234] prefixes ourselves so the two formats don't
+			// double up.
+			title = stripLinearColonPrefix(title)
+			return applyLinearKeyPrefixes(session, title, issue)
 		default:
 			title := bestPRTitleSubject(session, issue.Title)
 			if strings.HasPrefix(strings.ToLower(title), "fix: ") {
-				return truncatePRTitle(title, maxPRTitleLen)
+				return applyLinearKeyPrefixes(session, truncatePRTitle(title, maxPRTitleLen), nil)
 			}
 			if title != "" {
-				return "fix: " + truncatePRTitle(title, maxPRTitleLen-len("fix: "))
+				return applyLinearKeyPrefixes(session, "fix: "+truncatePRTitle(title, maxPRTitleLen-len("fix: ")), nil)
 			}
-			return fmt.Sprintf("fix: Session %s", session.ID.String()[:8])
+			return applyLinearKeyPrefixes(session, fmt.Sprintf("fix: Session %s", session.ID.String()[:8]), nil)
 		}
 	}
 
 	if title := bestPRTitleSubject(session, ""); title != "" {
-		return title
+		return applyLinearKeyPrefixes(session, title, nil)
 	}
-	return fmt.Sprintf("Session %s", session.ID.String()[:8])
+	return applyLinearKeyPrefixes(session, fmt.Sprintf("Session %s", session.ID.String()[:8]), nil)
+}
+
+// stripLinearColonPrefix removes a leading "ACS-1234: " preamble from a
+// title so applyLinearKeyPrefixes can take over without duplicating the key.
+//
+// Linear enforces uppercase team keys at the workspace level (the team-key
+// editor in Linear's settings UI uppercases input on save), so a strictly
+// uppercase regex is sufficient. Any lowercase prefix here would be a
+// human-typed string Linear would not recognize as one of its keys, so we
+// deliberately leave it in place.
+var linearColonPrefixRE = regexp.MustCompile(`^[A-Z][A-Z0-9_]{0,9}-\d+\s*:\s*`)
+
+// linearKeyShapeRE matches a Linear human key like "ACS-1234". Used to gate
+// PR title prefixing — if a link's external_id is the Linear UUID (because
+// provider_state.identifier hasn't been written yet) we must not bake it
+// into the title; linearBracketPrefixRE only strips properly-shaped prefixes
+// on resync, so a UUID prefix would stick forever.
+//
+// Uppercase-only by design: Linear's team-key editor uppercases input on
+// save, so any lowercase value here is a human-typed string that Linear
+// would not recognize as one of its keys. applyLinearKeyPrefixes will
+// silently skip a lowercase external_id rather than fabricate a prefix
+// Linear cannot link back to. Mirrors the same constraint used by
+// linearColonPrefixRE / linearBracketPrefixRE just above.
+var linearKeyShapeRE = regexp.MustCompile(`^[A-Z][A-Z0-9_]{0,9}-[0-9]+$`)
+
+func stripLinearColonPrefix(s string) string {
+	return linearColonPrefixRE.ReplaceAllString(s, "")
+}
+
+// linearBracketPrefixRE matches a single leading "[KEY-N] " prefix; we use
+// it to strip stale prefixes from a title before re-prefixing on title
+// resync, so resync never double-prefixes (design 62 §"Title resync").
+var linearBracketPrefixRE = regexp.MustCompile(`^\[[A-Z][A-Z0-9_]{0,9}-[0-9]+\]\s+`)
+
+// stripLeadingBracketPrefixes removes every leading "[KEY-N] " from title.
+// Order matters: the loop trims one prefix at a time so a title like
+// "[ACS-1] [ACS-2] feat: x" returns "feat: x", not just "[ACS-2] feat: x".
+//
+// maxStripIterations is a defensive cap. Each iteration strictly shrinks
+// the string when ReplaceAllString matches, so the loop terminates on its
+// own — but a regex change (or a future caller) shouldn't be able to spin
+// us forever. Twenty iterations is well above any reasonable real PR title.
+func stripLeadingBracketPrefixes(s string) string {
+	const maxStripIterations = 20
+	for i := 0; i < maxStripIterations; i++ {
+		stripped := linearBracketPrefixRE.ReplaceAllString(s, "")
+		if stripped == s {
+			return s
+		}
+		s = stripped
+	}
+	return s
+}
+
+// conventionalCommitPrefixRE matches the leading conventional commit prefix
+// like `feat:`, `fix(scope):`, etc., capturing it as group 1 and the rest
+// of the title as group 2. Linear bracket prefixes go *after* this so the
+// PR title reads `feat: [ACS-1234] Add OAuth callback handler`.
+var conventionalCommitPrefixRE = regexp.MustCompile(`^([a-z]+(?:\([^)]*\))?:\s+)(.*)`)
+
+// applyLinearKeyPrefixes inserts one `[KEY-N] ` prefix per linked Linear
+// issue, ordered primary first then related by session-link order. Honors:
+//
+//   - Conventional commit prefix preserved (prefixes go after `feat:`).
+//   - Identifiers already present in the title are not double-prefixed.
+//   - Leading stale `[KEY-N] ` prefixes are stripped before re-prefixing.
+//   - Body truncation, never prefix truncation: if total length would
+//     exceed maxPRTitleLen we only clamp the trailing subject.
+//
+// primaryIssue may be nil — in that case the function reads identifiers
+// solely from session.LinkedIssues. When primaryIssue is non-nil and Linear-
+// sourced, its identifier is used as the primary key in case LinkedIssues
+// hasn't been hydrated yet.
+func applyLinearKeyPrefixes(session *models.Session, title string, primaryIssue *models.Issue) string {
+	identifiers := collectLinearIdentifiers(session, primaryIssue)
+	if len(identifiers) == 0 {
+		return truncatePRTitle(title, maxPRTitleLen)
+	}
+
+	// Strip stale `[KEY-N] ` prefixes left over from a prior resync so we
+	// never double-prefix.
+	title = stripLeadingBracketPrefixes(title)
+
+	// Drop identifiers that already appear inside the title — the user
+	// (or a manual edit) embedded them, no need for a duplicate. Compare
+	// case-insensitively: the canonical key is uppercase but a user who
+	// typed `acs-1234` in their commit subject still embedded the same
+	// reference, and double-prefixing would land us with both casings.
+	upperTitle := strings.ToUpper(title)
+	keep := identifiers[:0]
+	for _, id := range identifiers {
+		if !strings.Contains(upperTitle, strings.ToUpper(id)) {
+			keep = append(keep, id)
+		}
+	}
+	identifiers = keep
+	if len(identifiers) == 0 {
+		return truncatePRTitle(title, maxPRTitleLen)
+	}
+
+	// Conventional commit prefix preserved: place Linear prefixes after it.
+	var conv, subject string
+	if m := conventionalCommitPrefixRE.FindStringSubmatch(title); len(m) == 3 {
+		conv, subject = m[1], m[2]
+	} else {
+		subject = title
+	}
+
+	// Cap prefix consumption so a session linked to many Linear issues
+	// doesn't push the descriptive subject out of the title. The primary
+	// (identifiers[0]) is always kept — Linear's GitHub integration only
+	// needs that one to claim the PR — and additional related identifiers
+	// are appended only while the running prefix leaves at least
+	// minPRTitleSubjectChars for the descriptive subject. Identifiers that
+	// don't fit are dropped from the title; users still see the full link
+	// set in the session detail header chips.
+	const prefixBudget = maxPRTitleLen / 2
+	bracketPrefix := buildLinearBracketPrefix(identifiers, len(conv), prefixBudget)
+
+	fixed := conv + bracketPrefix
+	// If conv + primary identifier alone overflow the title, fall back to
+	// truncating the whole joined string — losing some prefix is better than
+	// emitting a title with no descriptive content. buildLinearBracketPrefix
+	// has already trimmed secondaries to leave subject room when possible,
+	// so this only fires for pathological inputs (e.g. an extremely long
+	// conventional commit scope).
+	joined := fixed + subject
+	if len(fixed) >= maxPRTitleLen {
+		return truncatePRTitle(strings.TrimSpace(joined), maxPRTitleLen)
+	}
+	if len(joined) <= maxPRTitleLen {
+		return joined
+	}
+	// Trim the subject, never the prefix. The budget is positive here
+	// (len(fixed) < maxPRTitleLen), so truncatePRTitle gets a positive limit.
+	return fixed + truncatePRTitle(subject, maxPRTitleLen-len(fixed))
+}
+
+// buildLinearBracketPrefix concatenates `[KEY-N] ` prefixes while honoring
+// two budgets:
+//
+//   - prefixBudget caps total bracket characters so the prefix can't dominate
+//     the title.
+//   - The combined `convLen + bracket length + minPRTitleSubjectChars` must
+//     fit in maxPRTitleLen, so a descriptive subject always survives.
+//
+// The primary identifier (identifiers[0]) is always emitted, even if doing
+// so violates the subject budget — Linear's GitHub integration needs it to
+// claim the PR. Secondaries are added only while both budgets allow.
+func buildLinearBracketPrefix(identifiers []string, convLen, prefixBudget int) string {
+	if len(identifiers) == 0 {
+		return ""
+	}
+	subjectBudget := maxPRTitleLen - convLen - minPRTitleSubjectChars
+	out := strings.Builder{}
+	for i, id := range identifiers {
+		next := "[" + id + "] "
+		if i > 0 {
+			if out.Len()+len(next) > prefixBudget {
+				break
+			}
+			if out.Len()+len(next) > subjectBudget {
+				break
+			}
+		}
+		out.WriteString(next)
+	}
+	return out.String()
+}
+
+// collectLinearIdentifiers returns the deterministically-ordered Linear
+// keys for a session: primary first, then related in session-link order.
+// primaryIssue is a fallback when LinkedIssues isn't populated.
+func collectLinearIdentifiers(session *models.Session, primaryIssue *models.Issue) []string {
+	if session == nil {
+		if primaryIssue != nil && primaryIssue.Source == models.IssueSourceLinear && linearKeyShapeRE.MatchString(primaryIssue.ExternalID) {
+			return []string{primaryIssue.ExternalID}
+		}
+		return nil
+	}
+	if len(session.LinkedIssues) > 0 {
+		seen := map[string]bool{}
+		out := make([]string, 0, len(session.LinkedIssues))
+		// LinkedIssues comes back ordered (primary first, then position).
+		for _, link := range session.LinkedIssues {
+			if link.IssueSource == nil || *link.IssueSource != models.IssueSourceLinear {
+				continue
+			}
+			if link.ExternalID == nil || *link.ExternalID == "" {
+				continue
+			}
+			id := *link.ExternalID
+			// Drop links whose external_id isn't the human Linear key. The
+			// COALESCE in sessionIssueLinkSelectColumns falls through to the
+			// Linear UUID when provider_state.identifier hasn't been written,
+			// and a UUID baked into the PR title sticks across resyncs
+			// (linearBracketPrefixRE only strips KEY-N shaped prefixes).
+			if !linearKeyShapeRE.MatchString(id) {
+				continue
+			}
+			if seen[id] {
+				continue
+			}
+			seen[id] = true
+			out = append(out, id)
+		}
+		if len(out) > 0 {
+			return out
+		}
+	}
+	if primaryIssue != nil && primaryIssue.Source == models.IssueSourceLinear && linearKeyShapeRE.MatchString(primaryIssue.ExternalID) {
+		return []string{primaryIssue.ExternalID}
+	}
+	return nil
 }
 
 func formatSyncedPRTitle(session *models.Session, issue *models.Issue) string {
@@ -1890,14 +2342,8 @@ func formatSyncedPRTitle(session *models.Session, issue *models.Issue) string {
 				title = issue.Title
 			}
 		}
-
-		prefix := strings.TrimSpace(issue.ExternalID)
-		if prefix == "" {
-			return truncatePRTitle(title, maxPRTitleLen)
-		}
-
-		prefix += ": "
-		return prefix + truncatePRTitle(title, maxPRTitleLen-len(prefix))
+		title = stripLinearColonPrefix(title)
+		return applyLinearKeyPrefixes(session, title, issue)
 	}
 
 	return formatPRTitle(session, issue)
@@ -2188,7 +2634,7 @@ func (s *PRService) generatePRContent(ctx context.Context, token, owner, repoNam
 
 	// Append footer to body.
 	if result.Body != "" {
-		result.Body += fmt.Sprintf("\n\n---\n*Generated by [143.dev](https://143.dev) — [session %s](https://app.143.dev/sessions/%s)*\n", run.ID.String()[:8], run.ID)
+		result.Body += "\n\n" + s.formatPRFooterLinks(run)
 	}
 
 	return result, nil
@@ -2336,10 +2782,14 @@ func (s *PRService) formatPRBody(ctx context.Context, run *models.Session, issue
 		b.WriteString("Validated by automated agent run.\n")
 	}
 
-	b.WriteString("\n---\n")
-	fmt.Fprintf(&b, "*Generated by [143.dev](https://143.dev) — [session %s](https://app.143.dev/sessions/%s)*\n", run.ID.String()[:8], run.ID)
+	b.WriteString("\n\n")
+	b.WriteString(s.formatPRFooterLinks(run))
 
 	return b.String()
+}
+
+func (s *PRService) formatPRFooterLinks(run *models.Session) string {
+	return fmt.Sprintf("[143.dev](https://143.dev) | [session %s](%s)", run.ID.String()[:8], s.sessionURL(run.ID))
 }
 
 func buildLabels(issue *models.Issue) []string {

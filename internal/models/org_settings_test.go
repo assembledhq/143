@@ -500,3 +500,38 @@ func TestParseOrgSettings_RuntimeBudgets_NegativeMaxAutomaticExtensionClampsToZe
 	require.Equal(t, 1200, s.RuntimeBudgets.AbsoluteRuntimeCeilingSeconds, "absolute runtime ceiling should preserve the configured value")
 	require.Equal(t, 0, s.RuntimeBudgets.MaxAutomaticExtensionSeconds, "negative max automatic extension should clamp to zero rather than defaulting positive")
 }
+
+func TestLinearAutomationSettingsEffectiveAccessors(t *testing.T) {
+	t.Parallel()
+
+	f := false
+	settings := LinearAutomationSettings{}
+	require.True(t, settings.EffectivePostSessionLinks(), "missing post-session-links flag should default true")
+	require.True(t, settings.EffectiveMoveWorkflowStates(), "missing move-workflow-states flag should default true")
+
+	settings = LinearAutomationSettings{
+		PostSessionLinks:   &f,
+		MoveWorkflowStates: &f,
+	}
+	require.False(t, settings.EffectivePostSessionLinks(), "explicit false post-session-links should be honored")
+	require.False(t, settings.EffectiveMoveWorkflowStates(), "explicit false move-workflow-states should be honored")
+}
+
+func TestLinearAutomationSettingsPerTeamOverrides(t *testing.T) {
+	t.Parallel()
+
+	f := false
+	settings := LinearAutomationSettings{
+		PerTeam: map[string]LinearTeamAutomationOverride{
+			"ACS": {
+				PostSessionLinks:   &f,
+				MoveWorkflowStates: &f,
+			},
+		},
+	}
+
+	require.False(t, settings.PostSessionLinksFor("ACS"), "team override should disable post-session links")
+	require.False(t, settings.MoveWorkflowStatesFor("ACS"), "team override should disable workflow moves")
+	require.True(t, settings.PostSessionLinksFor("ENG"), "missing team override should inherit org default")
+	require.True(t, settings.MoveWorkflowStatesFor("ENG"), "missing team override should inherit org default")
+}

@@ -359,10 +359,12 @@ func TestWorker_Poll_RunsDeadLetterHooksOnTerminalPaths(t *testing.T) {
 			lockToken := uuid.New()
 			orgID := uuid.New()
 			var fired int
+			var hookCtxErr error
 
 			w.Register("hook_job", func(ctx context.Context, jobType string, got json.RawMessage) error {
-				jobctx.RegisterDeadLetterHook(ctx, func(_ context.Context, err error) {
+				jobctx.RegisterDeadLetterHook(ctx, func(hookCtx context.Context, err error) {
 					fired++
+					hookCtxErr = hookCtx.Err()
 				})
 				return tt.handlerErr()
 			})
@@ -382,9 +384,41 @@ func TestWorker_Poll_RunsDeadLetterHooksOnTerminalPaths(t *testing.T) {
 			w.poll(context.Background())
 
 			require.Equal(t, tt.expectHooks, fired, "dead-letter hooks should fire only on terminal give-up paths")
+			if tt.expectHooks > 0 {
+				require.NoError(t, hookCtxErr, "dead-letter hooks should receive a live context for terminal cleanup writes")
+			}
 			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 		})
 	}
+}
+
+func TestWorker_Poll_DeadLetterHooksRunWithLiveContext(t *testing.T) {
+	t.Parallel()
+
+	w, mock := newTestWorker(t)
+	defer mock.Close()
+
+	jobID := uuid.New()
+	lockToken := uuid.New()
+	orgID := uuid.New()
+	var hookErr error
+
+	w.Register("hook_job", func(ctx context.Context, jobType string, got json.RawMessage) error {
+		jobctx.RegisterDeadLetterHook(ctx, func(hookCtx context.Context, err error) {
+			hookErr = hookCtx.Err()
+		})
+		return &FatalError{Err: errors.New("permanent failure")}
+	})
+
+	expectClaim(mock, jobID, orgID, "hook_job", json.RawMessage(`{}`), time.Now(), lockToken)
+	mock.ExpectExec("UPDATE jobs\\s+SET status = 'dead_letter'").
+		WithArgs(pgxmock.AnyArg(), jobID, lockToken).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	w.poll(context.Background())
+
+	require.NoError(t, hookErr, "dead-letter hooks should receive a live context for terminal cleanup writes")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
 func TestWorker_Poll_LostLeaseSkipsTerminalWrite(t *testing.T) {

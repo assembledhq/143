@@ -293,7 +293,7 @@ const HandlerCleanupBuffer = 2 * time.Minute
 type SandboxConfig struct {
 	Image         string            // base image with agent CLI tools pre-installed
 	CPULimit      float64           // CPU cores (default: 2)
-	MemoryLimitMB int               // memory in MB (default: 4096)
+	MemoryLimitMB int               // memory in MB (default: 3072)
 	Timeout       time.Duration     // max execution time (default: DefaultSandboxTimeout)
 	NetworkPolicy string            // "restricted" — allow only LLM API endpoints
 	WorkDir       string            // path to the repo checkout inside the sandbox (e.g. /home/sandbox/<repo>)
@@ -334,7 +334,7 @@ func DefaultSandboxConfig() SandboxConfig {
 			cpuLimit = parsed
 		}
 	}
-	memoryLimitMB := 4096
+	memoryLimitMB := 3072
 	if v := os.Getenv("SANDBOX_MEMORY_LIMIT_MB"); v != "" {
 		if parsed, err := strconv.Atoi(v); err == nil && parsed > 0 {
 			memoryLimitMB = parsed
@@ -396,6 +396,24 @@ type Sandbox struct {
 	OrgID     string
 	Purpose   string
 }
+
+// SandboxMetadataBaseCommitSHA is the well-known sandbox.Metadata key under
+// which the orchestrator stashes the immutable base commit captured at session
+// start. Adapters read it when collecting the authoritative session diff. The
+// constant lives in the agent package (rather than sessiondiff) so callers in
+// the agent package can reference it without creating an import cycle —
+// sessiondiff already imports agent for SandboxProvider/Sandbox.
+const SandboxMetadataBaseCommitSHA = "base_commit_sha"
+
+// SandboxMetadataTargetBranch is the well-known sandbox.Metadata key under
+// which the orchestrator stashes the target branch (e.g. "main") for the
+// session — the branch the working branch will be PR'd into. sessiondiff.Collect
+// uses it to compute a dynamic merge-base diff (`origin/<target>...HEAD`) so
+// integrating the target branch back into the working branch (e.g.
+// `git pull origin main` or merging main to resolve PR conflicts) does not
+// inflate the diff with target-branch changes. Falls back to the immutable
+// base_commit_sha when missing or when the merge-base resolution fails.
+const SandboxMetadataTargetBranch = "target_branch"
 
 // SandboxConnectionInfo holds provider-specific connection details for local resume.
 type SandboxConnectionInfo struct {

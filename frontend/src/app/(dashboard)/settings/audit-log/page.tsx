@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useQueryState, parseAsString } from "nuqs";
 import { api } from "@/lib/api";
@@ -10,7 +10,8 @@ import { PageContainer } from "@/components/page-container";
 import { AuditLogEntry } from "@/components/audit/audit-log-entry";
 import { AuditLogDetailDrawer } from "@/components/audit/audit-log-detail-drawer";
 import { EmptyState } from "@/components/empty-state";
-import { ScrollText } from "lucide-react";
+import { Badge } from "@/components/ui/badge";
+import { ScrollText, ArrowUp, History } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   Select,
@@ -20,6 +21,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import type { AuditLog, User, ListResponse } from "@/lib/types";
+import { useAuditLogFeed } from "@/components/audit/use-audit-log-feed";
 
 const resourceTypeOptions = [
   { value: "", label: "All resources" },
@@ -51,9 +53,8 @@ export default function AuditLogPage() {
   const [resourceType, setResourceType] = useQueryState("resource_type", parseAsString);
   const [actionPrefix, setActionPrefix] = useQueryState("action_prefix", parseAsString);
   const [userId, setUserId] = useQueryState("user_id", parseAsString);
-  const [cursors, setCursors] = useState<string[]>([]);
   const [selectedEntry, setSelectedEntry] = useState<AuditLog | null>(null);
-  const currentCursor = cursors[cursors.length - 1];
+  const topRef = useRef<HTMLDivElement | null>(null);
 
   const isAdmin = user?.role === "admin";
 
@@ -71,23 +72,23 @@ export default function AuditLogPage() {
   });
   const members = membersData?.data ?? [];
 
-  const { data, isLoading, error } = useQuery({
-    queryKey: ["audit-logs", "page", filters, currentCursor],
-    queryFn: () =>
-      api.auditLogs.list({
-        ...filters,
-        cursor: currentCursor,
-        limit: 25,
-      }),
+  const {
+    entries,
+    isLoading,
+    error,
+    fetchNextPage,
+    hasNextPage,
+    isFetchingNextPage,
+    hasLoadedHistory,
+  } = useAuditLogFeed({
+    filters,
+    pageSize: 25,
     enabled: isAdmin,
   });
 
   if (error) {
     console.error("Failed to load audit logs:", error);
   }
-
-  const entries: AuditLog[] = data?.data ?? [];
-  const nextCursor = data?.meta?.next_cursor;
 
   // Only admins can view audit logs
   if (!isAdmin) {
@@ -110,21 +111,17 @@ export default function AuditLogPage() {
     setResourceType(null);
     setActionPrefix(null);
     setUserId(null);
-    setCursors([]);
   }
 
   // Reset cursors when filters change
   function handleResourceTypeChange(value: string) {
     setResourceType(value === "_all" ? null : value);
-    setCursors([]);
   }
   function handleActionPrefixChange(value: string) {
     setActionPrefix(value === "_all" ? null : value);
-    setCursors([]);
   }
   function handleUserIdChange(value: string) {
     setUserId(value === "_all" ? null : value);
-    setCursors([]);
   }
 
   return (
@@ -186,15 +183,47 @@ export default function AuditLogPage() {
 
         {/* Entries */}
         <div className="rounded-lg border border-border bg-card shadow-sm">
+          <div
+            ref={topRef}
+            className="flex flex-col gap-3 border-b border-border/50 px-6 py-4 sm:flex-row sm:items-center sm:justify-between"
+          >
+            <div className="space-y-1">
+              <div className="flex flex-wrap items-center gap-2">
+                <Badge variant="secondary" className="rounded-full bg-muted/70 px-2.5 py-0.5 text-xs font-medium text-foreground">
+                  Latest first
+                </Badge>
+                <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                  <History className="h-3.5 w-3.5" />
+                  {entries.length} event{entries.length === 1 ? "" : "s"} loaded
+                </span>
+              </div>
+              <p className="text-xs text-muted-foreground">
+                {hasActiveFilters
+                  ? "Filtered activity stays anchored while you load older events."
+                  : "Browse recent activity first, then extend the timeline without losing your place."}
+              </p>
+            </div>
+            {hasLoadedHistory && (
+              <Button
+                variant="ghost"
+                size="sm"
+                className="h-8 gap-1.5 self-start rounded-full px-3 text-xs sm:self-auto"
+                onClick={() => topRef.current?.scrollIntoView({ behavior: "smooth", block: "start" })}
+              >
+                <ArrowUp className="h-3.5 w-3.5" />
+                Back to newest
+              </Button>
+            )}
+          </div>
           {error ? (
             <div className="rounded-md bg-destructive/10 px-3 py-2 text-xs text-destructive m-3">
               Failed to load audit logs.
             </div>
-          ) : isLoading && cursors.length === 0 ? (
+          ) : isLoading && entries.length === 0 ? (
             <div className="py-8 text-center text-sm text-muted-foreground">
               Loading audit logs...
             </div>
-          ) : entries.length === 0 && cursors.length === 0 ? (
+          ) : entries.length === 0 ? (
             <EmptyState
               icon={ScrollText}
               title="No audit log entries found"
@@ -212,31 +241,19 @@ export default function AuditLogPage() {
                   />
                 ))}
               </div>
-              <div className="flex items-center justify-between border-t border-border/50 px-6 py-2">
-                {cursors.length > 0 ? (
+              {hasNextPage && (
+                <div className="border-t border-border/50 px-6 py-3">
                   <Button
-                    variant="ghost"
+                    variant="outline"
                     size="sm"
-                    className="text-xs"
-                    onClick={() => setCursors((prev) => prev.slice(0, -1))}
+                    className="h-8 rounded-full px-3 text-xs"
+                    onClick={() => fetchNextPage()}
+                    disabled={isFetchingNextPage}
                   >
-                    Newer
+                    {isFetchingNextPage ? "Loading..." : "Load older"}
                   </Button>
-                ) : (
-                  <div />
-                )}
-                {nextCursor && (
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    className="text-xs"
-                    onClick={() => setCursors((prev) => [...prev, nextCursor])}
-                    disabled={isLoading}
-                  >
-                    {isLoading ? "Loading..." : "Older"}
-                  </Button>
-                )}
-              </div>
+                </div>
+              )}
             </>
           )}
         </div>

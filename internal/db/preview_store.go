@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"time"
 
@@ -1019,13 +1020,25 @@ func (s *PreviewStore) CreatePreviewLog(ctx context.Context, log *models.Preview
 		VALUES (@preview_instance_id, @org_id, @level, @step, @message, @metadata)
 		RETURNING %s`, previewLogColumns)
 
+	// metadata is NOT NULL in Postgres with a DEFAULT '{}'. Passing a nil
+	// or empty json.RawMessage binds explicit NULL — which trips the
+	// not-null constraint because the DEFAULT only applies when the column
+	// is omitted from the INSERT. OnServiceFailed callers in particular
+	// pass an unset Metadata, and that silently dropped service-exit logs
+	// in production. Treat a zero-length value (nil slice or empty slice)
+	// as "use the column default".
+	metadata := log.Metadata
+	if len(metadata) == 0 {
+		metadata = json.RawMessage(`{}`)
+	}
+
 	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
 		"preview_instance_id": log.PreviewInstanceID,
 		"org_id":              log.OrgID,
 		"level":               log.Level,
 		"step":                log.Step,
 		"message":             log.Message,
-		"metadata":            log.Metadata,
+		"metadata":            metadata,
 	})
 	if err != nil {
 		return fmt.Errorf("insert preview log: %w", err)
