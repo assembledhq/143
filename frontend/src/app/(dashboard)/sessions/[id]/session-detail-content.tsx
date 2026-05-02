@@ -2843,9 +2843,9 @@ export function SessionDetailContent({ id }: { id: string }) {
   });
   const revertThreadMutation = useMutation({
     mutationFn: (threadId: string) => api.sessions.revertThread(id, threadId),
-    onSuccess: () => {
+    onSuccess: (_data, threadId) => {
       toast.success("Revert prepared — see the tab transcript for the patch");
-      queryClient.invalidateQueries({ queryKey: queryKeys.sessions.threadMessages(id, "") });
+      queryClient.invalidateQueries({ queryKey: queryKeys.sessions.threadMessages(id, threadId) });
       queryClient.invalidateQueries({ queryKey: ["session", id] });
     },
     onError: (err) => {
@@ -3460,7 +3460,7 @@ export function SessionDetailContent({ id }: { id: string }) {
             onCancelThread={(tid) => cancelThreadMutation.mutate(tid)}
             onForkThread={(tid) => forkThreadMutation.mutate(tid)}
             onRevertThread={(tid) => revertThreadMutation.mutate(tid)}
-            cancelPendingThreadId={cancelThreadMutation.isPending ? (cancelThreadMutation.variables as string ?? null) : null}
+            cancelPendingThreadId={cancelThreadMutation.isPending ? cancelThreadMutation.variables ?? null : null}
           />
         ) : null}
         <SessionSummaryPanel sessionId={id} open={summaryOpen} onOpenChange={setSummaryOpen} />

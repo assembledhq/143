@@ -96,10 +96,14 @@ func (r *ThreadCancelRegistry) doCancel(threadID uuid.UUID, entry *threadCancelE
 	killCtx, killCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer killCancel()
 
-	// We match by exact process name so we don't kill a sibling tab's agent
-	// process running the same binary. When processName is empty we fall
-	// back to the multi-binary pkill pattern; a session with one running
-	// thread degrades cleanly to today's behavior.
+	// SIGINT the in-container agent binary. Caveat: pkill -x matches all
+	// processes with that exact name, so two tabs running the same agent
+	// type (e.g. two Codex tabs) cannot be cancelled independently — both
+	// receive SIGINT. Two tabs running *different* agents (Codex + Claude)
+	// can be. Tracking PIDs per tab to make this precise across the
+	// homogeneous case is a Phase 4.5 follow-up. When processName is empty
+	// we fall back to the legacy multi-binary pattern shared with the
+	// session-level CancelRegistry.
 	cmd := "pkill -INT -x 'claude|codex|gemini|amp|pi' 2>/dev/null; true"
 	if entry.processName != "" {
 		cmd = "pkill -INT -x " + shellQuote(entry.processName) + " 2>/dev/null; true"

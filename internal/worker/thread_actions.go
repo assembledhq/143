@@ -95,6 +95,10 @@ func newForkSessionThreadHandler(stores *Stores, services *Services, logger zero
 		// fork. The user sees this in the source tab so the action feels
 		// observable.
 		if stores.SessionMessages != nil {
+			branchHint := ""
+			if source.TargetBranch != nil && *source.TargetBranch != "" {
+				branchHint = fmt.Sprintf(" on the `%s` branch", *source.TargetBranch)
+			}
 			msg := &models.SessionMessage{
 				SessionID:  sessionID,
 				OrgID:      orgID,
@@ -103,9 +107,9 @@ func newForkSessionThreadHandler(stores *Stores, services *Services, logger zero
 				Role:       models.MessageRoleAssistant,
 				Content: fmt.Sprintf(
 					"Forked this tab into a new session: **%s**.\n\n"+
-						"The new session shares the same repository (`%s` branch) but starts with a fresh sandbox so risky divergent work doesn't touch this branch.",
+						"The new session shares the same repository%s but starts with a fresh sandbox so risky divergent work doesn't touch this branch.",
 					label,
-					branchOrDefault(source),
+					branchHint,
 				),
 			}
 			if err := stores.SessionMessages.Create(ctx, msg); err != nil {
@@ -196,13 +200,6 @@ func newRevertSessionThreadHandler(stores *Stores, services *Services, logger ze
 			Msg("revert thread artifact prepared")
 		return nil
 	}
-}
-
-func branchOrDefault(s models.Session) string {
-	if s.TargetBranch != nil && *s.TargetBranch != "" {
-		return *s.TargetBranch
-	}
-	return "default"
 }
 
 // truncateDiffForDisplay caps the inline patch posted into the chat so a

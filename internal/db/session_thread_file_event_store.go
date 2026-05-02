@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -26,56 +27,53 @@ func NewSessionThreadFileEventStore(db DBTX) *SessionThreadFileEventStore {
 
 const sessionThreadFileEventColumns = `id, org_id, session_id, thread_id, turn, path, event_type, before_hash, after_hash, observed_at`
 
+// appendBatchChunkSize bounds the per-statement INSERT row count so a turn
+// with thousands of touched paths (rare, but possible for a refactor) does
+// not push past Postgres's per-statement parameter limit (65535).
+const appendBatchChunkSize = 500
+
 // AppendBatch inserts a batch of file events in one round-trip. The orchestrator
-// emits these after each turn by diffing git status against the pre-turn
-// snapshot; passing the whole batch through one INSERT keeps the per-turn DB
-// cost flat regardless of how many files the tab touched.
+// emits these after each turn by parsing the agent's diff; passing the whole
+// batch through one statement keeps the per-turn DB cost flat regardless of
+// how many files the tab touched. Splits into chunks at appendBatchChunkSize
+// to stay under Postgres's per-statement parameter cap.
 func (s *SessionThreadFileEventStore) AppendBatch(ctx context.Context, events []models.SessionThreadFileEvent) error {
 	if len(events) == 0 {
 		return nil
 	}
-	orgIDs := make([]uuid.UUID, len(events))
-	sessionIDs := make([]uuid.UUID, len(events))
-	threadIDs := make([]*uuid.UUID, len(events))
-	turns := make([]int, len(events))
-	paths := make([]string, len(events))
-	eventTypes := make([]string, len(events))
-	beforeHashes := make([]*string, len(events))
-	afterHashes := make([]*string, len(events))
-	for i, e := range events {
-		orgIDs[i] = e.OrgID
-		sessionIDs[i] = e.SessionID
-		threadIDs[i] = e.ThreadID
-		turns[i] = e.Turn
-		paths[i] = e.Path
-		eventTypes[i] = e.EventType
-		beforeHashes[i] = e.BeforeHash
-		afterHashes[i] = e.AfterHash
+	for start := 0; start < len(events); start += appendBatchChunkSize {
+		end := start + appendBatchChunkSize
+		if end > len(events) {
+			end = len(events)
+		}
+		if err := s.appendChunk(ctx, events[start:end]); err != nil {
+			return err
+		}
 	}
-	_, err := s.db.Exec(ctx, `
-		INSERT INTO session_thread_file_events
-		    (org_id, session_id, thread_id, turn, path, event_type, before_hash, after_hash)
-		SELECT * FROM unnest(
-		    @org_ids::uuid[],
-		    @session_ids::uuid[],
-		    @thread_ids::uuid[],
-		    @turns::int[],
-		    @paths::text[],
-		    @event_types::text[],
-		    @before_hashes::text[],
-		    @after_hashes::text[]
-		)
-	`, pgx.NamedArgs{
-		"org_ids":       orgIDs,
-		"session_ids":   sessionIDs,
-		"thread_ids":    threadIDs,
-		"turns":         turns,
-		"paths":         paths,
-		"event_types":   eventTypes,
-		"before_hashes": beforeHashes,
-		"after_hashes":  afterHashes,
-	})
-	if err != nil {
+	return nil
+}
+
+// appendChunk is a single-statement multi-row INSERT. Built with explicit
+// $N placeholders rather than unnest() so nullable columns (thread_id,
+// before_hash, after_hash) round-trip via pgx's standard pointer codecs
+// instead of relying on nullable-array encoding, which is fragile in pgx v5.
+func (s *SessionThreadFileEventStore) appendChunk(ctx context.Context, events []models.SessionThreadFileEvent) error {
+	if len(events) == 0 {
+		return nil
+	}
+	const colsPerRow = 8
+	var b strings.Builder
+	b.WriteString("INSERT INTO session_thread_file_events (org_id, session_id, thread_id, turn, path, event_type, before_hash, after_hash) VALUES ")
+	args := make([]any, 0, len(events)*colsPerRow)
+	for i, e := range events {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		base := i * colsPerRow
+		fmt.Fprintf(&b, "($%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d)", base+1, base+2, base+3, base+4, base+5, base+6, base+7, base+8)
+		args = append(args, e.OrgID, e.SessionID, e.ThreadID, e.Turn, e.Path, e.EventType, e.BeforeHash, e.AfterHash)
+	}
+	if _, err := s.db.Exec(ctx, b.String(), args...); err != nil {
 		return fmt.Errorf("append thread file events: %w", err)
 	}
 	return nil

@@ -310,12 +310,17 @@ func (s *SessionThreadStore) ClaimIdleForSession(ctx context.Context, orgID, ses
 // claimable) but the session already has maxRunning sibling threads active.
 // Used by ClaimIdleForSession to differentiate "limit reached" from "thread
 // status changed under us" without holding the FOR UPDATE lock.
+//
+// Uses COALESCE on the target subquery so a deleted-out-from-under-us row
+// scans as the empty string instead of erroring on NULL → string. In that
+// case we report "not limited" — the caller will fall through to its
+// generic ErrNoRows path which the service maps to ErrThreadNotFound.
 func (s *SessionThreadStore) isAtRunningLimit(ctx context.Context, orgID, sessionID, threadID uuid.UUID, maxRunning int) (bool, error) {
 	var targetStatus string
 	var siblingActive int
 	err := s.db.QueryRow(ctx, `
 		SELECT
-		    (SELECT status FROM session_threads WHERE id = @id AND org_id = @org_id) AS target_status,
+		    COALESCE((SELECT status FROM session_threads WHERE id = @id AND org_id = @org_id), '') AS target_status,
 		    (SELECT count(*) FROM session_threads
 		        WHERE org_id = @org_id AND session_id = @session_id AND id <> @id
 		          AND status IN ('pending', 'running', 'awaiting_input')) AS sibling_active

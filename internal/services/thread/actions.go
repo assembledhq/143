@@ -101,10 +101,8 @@ func (s *Service) SummarizeSession(ctx context.Context, orgID, sessionID uuid.UU
 		return SessionSummary{}, fmt.Errorf("list threads: %w", err)
 	}
 
-	threadByID := make(map[uuid.UUID]models.SessionThread, len(threads))
 	threadTouched := make(map[uuid.UUID]map[string]struct{}, len(threads))
 	for _, t := range threads {
-		threadByID[t.ID] = t
 		threadTouched[t.ID] = map[string]struct{}{}
 	}
 

@@ -14,11 +14,17 @@ import type { SessionThread, SessionThreadFileEvent } from "@/lib/types";
 // ThreadAttributionFilterValue is the union of filter modes the user can pick
 // in the Changes view. Distinct strings (rather than enums) make the URL
 // query-string serialization in the future (see nuqs) trivial.
+//
+// "unattributed" is intentionally not exposed: with the current pipeline,
+// every file event carries a thread_id, so the only "unattributed" paths
+// are ones that show up in the workspace diff but were never recorded as a
+// thread edit (e.g. preview hydration touched them). Distinguishing those
+// from the diff alone needs the full diff file list — out of scope for the
+// filter component, which only sees the event timeline.
 export type ThreadAttributionFilterValue =
   | { kind: "all" }
   | { kind: "touched_by"; threadId: string }
-  | { kind: "overlap" }
-  | { kind: "unattributed" };
+  | { kind: "overlap" };
 
 interface ThreadAttributionFilterProps {
   threads: SessionThread[];
@@ -34,14 +40,13 @@ function toKey(v: ThreadAttributionFilterValue): string {
 function fromKey(key: string): ThreadAttributionFilterValue {
   if (key.startsWith("tab:")) return { kind: "touched_by", threadId: key.slice(4) };
   if (key === "overlap") return { kind: "overlap" };
-  if (key === "unattributed") return { kind: "unattributed" };
   return { kind: "all" };
 }
 
 // ThreadAttributionFilter renders a compact dropdown the user can use to
-// scope the Changes view to a single tab's outputs, the overlap between
-// tabs, or unattributed workspace edits. The filter is visual-only — it
-// returns paths the parent uses to gate the file list.
+// scope the Changes view to a single tab's outputs or the overlap between
+// tabs. The filter is visual-only — it returns paths the parent uses to
+// gate the file list.
 export function ThreadAttributionFilter({ threads, value, onChange }: ThreadAttributionFilterProps) {
   // Show the filter only when there is more than one tab, otherwise it is
   // noise — single-tab sessions have nothing to attribute.
@@ -54,7 +59,6 @@ export function ThreadAttributionFilter({ threads, value, onChange }: ThreadAttr
       <SelectContent align="end">
         <SelectItem value="all">All changes</SelectItem>
         <SelectItem value="overlap">Overlap with another tab</SelectItem>
-        <SelectItem value="unattributed">Unattributed</SelectItem>
         {threads.map((t) => (
           <SelectItem key={t.id} value={`tab:${t.id}`}>
             Touched by {t.label}
@@ -97,12 +101,6 @@ export function useAttributionAllowedPaths(
           break;
         case "overlap":
           if (ids.size >= 2) out.add(path);
-          break;
-        case "unattributed":
-          // A path with no owner thread events is treated as unattributed.
-          // Practically, unattributed paths show up only when something
-          // outside the agent (e.g. preview hydration) edited a file.
-          if (ids.size === 0) out.add(path);
           break;
       }
     }

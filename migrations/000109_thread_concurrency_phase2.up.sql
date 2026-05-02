@@ -17,6 +17,13 @@ ALTER TABLE session_threads
     ADD COLUMN pending_message_count integer NOT NULL DEFAULT 0,
     ADD COLUMN cancel_requested_at timestamptz;
 
+-- Bound the new counters so a logic bug cannot push the row into a state the
+-- UI cannot reason about (negative cost, negative queue depth). Mirrors the
+-- "validate at the boundary" pattern used elsewhere in the schema.
+ALTER TABLE session_threads
+    ADD CONSTRAINT chk_session_threads_cost_cents_nonneg CHECK (cost_cents >= 0),
+    ADD CONSTRAINT chk_session_threads_pending_messages_nonneg CHECK (pending_message_count >= 0);
+
 CREATE INDEX idx_session_threads_running
     ON session_threads (org_id, session_id)
     WHERE status IN ('pending', 'running', 'awaiting_input');
@@ -35,7 +42,8 @@ CREATE TABLE session_thread_file_events (
     event_type  text        NOT NULL,
     before_hash text,
     after_hash  text,
-    observed_at timestamptz NOT NULL DEFAULT now()
+    observed_at timestamptz NOT NULL DEFAULT now(),
+    CONSTRAINT chk_session_thread_file_events_event_type CHECK (event_type IN ('created', 'modified', 'deleted'))
 );
 
 CREATE INDEX idx_thread_file_events_session_path
