@@ -93,6 +93,7 @@ export function SwipeActionRow({
   const [offset, setOffset] = useState(0);
   const [isDragging, setIsDragging] = useState(false);
   const [isCommitted, setIsCommitted] = useState(false);
+  const [gestureWidth, setGestureWidth] = useState(FALLBACK_ROW_WIDTH);
   const isTouchDevice = useSyncExternalStore(
     subscribeTouchDevice,
     getTouchDeviceSnapshot,
@@ -156,10 +157,12 @@ export function SwipeActionRow({
       window.clearTimeout(commitTimerRef.current);
       commitTimerRef.current = null;
     }
+    const width = containerRef.current?.offsetWidth || FALLBACK_ROW_WIDTH;
+    setGestureWidth(width);
     dragRef.current = {
       startX: touch.clientX,
       startY: touch.clientY,
-      width: containerRef.current?.offsetWidth || FALLBACK_ROW_WIDTH,
+      width,
       swiping: false,
       locked: false,
     };
@@ -237,6 +240,12 @@ export function SwipeActionRow({
       : "closed";
   const trailingActionHidden = state === "closed";
   const actionAreaWidth = Math.max(ACTION_WIDTH, offset);
+  const commitThreshold = commitThresholdFor(gestureWidth);
+  const swipeProgress = Math.max(0, Math.min(1, offset / commitThreshold));
+  const progressFill = Math.max(0.18, swipeProgress);
+  const actionHint = isCommitted
+    ? `Release to ${actionText.toLowerCase()}`
+    : "Keep swiping";
 
   const swipeSurfaceProps = isTouchDevice
     ? {
@@ -267,15 +276,23 @@ export function SwipeActionRow({
     >
       {isTouchDevice && (
         <div
-          className="absolute inset-y-0 right-0"
+          className="absolute inset-y-0 right-0 overflow-hidden rounded-r-lg"
           style={{ width: `${actionAreaWidth}px` }}
         >
+          <div
+            aria-hidden="true"
+            className={cn(
+              "absolute inset-y-0 right-0 transition-all duration-150 ease-out",
+              isCommitted ? "bg-amber-700" : "bg-amber-500/80",
+            )}
+            style={{ width: `${progressFill * 100}%` }}
+          />
           <Button
             aria-label={actionLabel}
             aria-hidden={trailingActionHidden}
             tabIndex={trailingActionHidden ? -1 : 0}
             className={cn(
-              "h-full w-full rounded-none rounded-r-lg px-0 text-white transition-colors duration-150",
+              "relative h-full w-full rounded-none rounded-r-lg px-0 text-white transition-colors duration-150",
               isCommitted
                 ? "bg-amber-600 hover:bg-amber-700 active:bg-amber-700"
                 : "bg-amber-500 hover:bg-amber-600 active:bg-amber-600",
@@ -286,13 +303,34 @@ export function SwipeActionRow({
             }}
           >
             <span
+              aria-hidden="true"
               className={cn(
-                "flex flex-col items-center justify-center gap-1 text-xs font-medium transition-transform duration-150",
+                "absolute inset-y-2 right-0 rounded-l-full bg-white/16 transition-all duration-150 ease-out",
+                isCommitted ? "bg-white/22" : "bg-white/14",
+              )}
+              style={{ width: `${Math.max(24, progressFill * 100)}%` }}
+            />
+            <span
+              className={cn(
+                "relative flex flex-col items-center justify-center gap-1 text-xs font-medium transition-transform duration-150",
                 isCommitted && "scale-110",
               )}
             >
-              {actionIcon}
+              <span
+                className={cn(
+                  "flex h-9 w-9 items-center justify-center rounded-full border border-white/20 bg-black/10 transition-all duration-150",
+                  isCommitted && "scale-110 bg-black/20",
+                )}
+                style={{
+                  transform: `translateX(-${Math.round(swipeProgress * 12)}px) scale(${1 + swipeProgress * 0.08})`,
+                }}
+              >
+                {actionIcon}
+              </span>
               <span>{actionText}</span>
+              <span className="text-xs font-medium uppercase tracking-[0.14em] text-white/90">
+                {actionHint}
+              </span>
             </span>
           </Button>
         </div>
