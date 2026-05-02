@@ -144,6 +144,7 @@ func TestCodingCredentialHandlerList(t *testing.T) {
 	tests := []struct {
 		name           string
 		target         string
+		role           string
 		setupStore     func(t *testing.T) *mockCodingCredentialStore
 		expectedStatus int
 		expectedCount  int
@@ -174,6 +175,23 @@ func TestCodingCredentialHandlerList(t *testing.T) {
 			},
 			expectedStatus: http.StatusOK,
 			expectedCount:  1,
+		},
+		{
+			name:   "viewer can list personal scope",
+			target: "/api/v1/coding-credentials?scope=personal",
+			role:   "viewer",
+			setupStore: func(t *testing.T) *mockCodingCredentialStore {
+				return &mockCodingCredentialStore{
+					listByScopeFn: func(_ context.Context, scope models.Scope) ([]models.DecryptedCodingCredential, error) {
+						require.Equal(t, orgID, scope.OrgID, "List should scope viewer personal reads to the active org")
+						require.NotNil(t, scope.UserID, "List should scope viewer personal reads to the current user")
+						require.Equal(t, userID, *scope.UserID, "List should scope viewer personal reads to the current user id")
+						return []models.DecryptedCodingCredential{}, nil
+					},
+				}
+			},
+			expectedStatus: http.StatusOK,
+			expectedCount:  0,
 		},
 		{
 			name:   "lists resolved scope",
@@ -232,7 +250,11 @@ func TestCodingCredentialHandlerList(t *testing.T) {
 
 			handler := NewCodingCredentialHandler(tt.setupStore(t), nil)
 			req := httptest.NewRequest(http.MethodGet, tt.target, nil)
-			req = withAdminUser(req, userID, orgID)
+			role := tt.role
+			if role == "" {
+				role = "admin"
+			}
+			req = withUserAndOrg(req, userID, orgID, role)
 			rr := httptest.NewRecorder()
 
 			handler.List(rr, req)

@@ -717,6 +717,9 @@ func (s *CodingCredentialStore) Rename(ctx context.Context, scope models.Scope, 
 			pgx.NamedArgs{"id": id, "label": label},
 		)
 		if execErr != nil {
+			if isUniqueViolation(execErr) {
+				return &ErrCodingCredentialLabelTaken{Label: label}
+			}
 			return fmt.Errorf("rename credential: %w", execErr)
 		}
 		if tag.RowsAffected() == 0 {

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/pashagolub/pgxmock/v4"
 	"github.com/stretchr/testify/require"
 
@@ -713,6 +714,31 @@ func TestCodingCredentialStoreCreateLabelTaken(t *testing.T) {
 	var taken *ErrCodingCredentialLabelTaken
 	require.ErrorAs(t, err, &taken, "Create should return a typed label conflict")
 	require.Equal(t, models.CodingCredentialStatusActive, taken.ExistingStatus, "label conflict should expose the existing status")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestCodingCredentialStoreRenameLabelTaken(t *testing.T) {
+	t.Parallel()
+
+	store, mock := newMockCodingCredentialStore(t)
+	defer mock.Close()
+
+	orgID := uuid.New()
+	userID := uuid.New()
+	id := uuid.New()
+	scope := models.Scope{OrgID: orgID, UserID: &userID}
+
+	expectScopedMutation(t, mock, scope, id, models.ProviderOpenAI)
+	mock.ExpectExec("UPDATE coding_credentials SET label").
+		WithArgs(codingAnyArgs(2)...).
+		WillReturnError(&pgconn.PgError{Code: "23505"})
+	mock.ExpectRollback()
+
+	err := store.Rename(context.Background(), scope, id, "Taken")
+
+	var taken *ErrCodingCredentialLabelTaken
+	require.ErrorAs(t, err, &taken, "Rename should return a typed label conflict on unique violations")
+	require.Equal(t, "Taken", taken.Label, "Rename conflict should expose the requested label")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 

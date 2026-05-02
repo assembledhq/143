@@ -675,6 +675,11 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Get("/api/v1/settings/credentials/personal", userCredentialHandler.ListPersonal)
 				r.Get("/api/v1/settings/credentials/resolved", userCredentialHandler.ListResolved)
 				r.Get("/api/v1/settings/credentials/team", userCredentialHandler.ListTeamDefaults)
+				// Unified coding-credentials reads are safe for every org role:
+				// personal/resolved reads are scoped to the caller, and org rows
+				// are the same read-only fallback metadata already shown on
+				// settings pages.
+				r.Get("/api/v1/coding-credentials", codingCredentialHandler.List)
 
 				r.Get("/api/v1/repositories", repoHandler.List)
 				r.Get("/api/v1/repositories/summary", repoHandler.Summary)
@@ -772,15 +777,13 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Get("/api/v1/settings/codex-auth/subscriptions", codexAuthHandler.List)
 				r.Get("/api/v1/settings/claude-code-auth/subscriptions", claudeCodeAuthHandler.List)
 
-				// Unified coding-credentials API — personal stack reads, scope-aware
-				// mutations on the caller's own rows. Personal-scope mutations live in
+				// Unified coding-credentials writes. Personal-scope mutations live in
 				// this group because they target the requester's own credentials and
-				// do not require admin privileges. The handler enforces "admin only
-				// when scope=org" via resolveScopeFromBody; per-row Move and bulk
-				// Reorder both rely on that gate, so both can sit here without
-				// allowing members to reorder the org stack.
+				// do not require admin privileges for members. The handler enforces
+				// "admin only when scope=org" via resolveScopeFromBody; per-row Move
+				// and bulk Reorder both rely on that gate, so both can sit here
+				// without allowing members to reorder the org stack.
 				// See docs/design/future/65-unified-coding-credentials.md.
-				r.Get("/api/v1/coding-credentials", codingCredentialHandler.List)
 				r.Post("/api/v1/coding-credentials", codingCredentialHandler.Create)
 				r.Patch("/api/v1/coding-credentials/{id}", codingCredentialHandler.Update)
 				r.Delete("/api/v1/coding-credentials/{id}", codingCredentialHandler.Delete)
