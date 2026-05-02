@@ -156,7 +156,7 @@ func NewSnapshotCache(store storage.SnapshotStore, rootDir string, maxBytes int6
 	if rootDir == "" {
 		return nil, errors.New("snapshot cache root dir is required")
 	}
-	if err := os.MkdirAll(rootDir, 0o755); err != nil {
+	if err := os.MkdirAll(rootDir, 0o750); err != nil {
 		return nil, fmt.Errorf("mkdir snapshot cache root: %w", err)
 	}
 	return &SnapshotCache{
@@ -406,7 +406,7 @@ func (c *SnapshotCache) fetchAndExtract(ctx context.Context, key string) (*cache
 	if err := os.RemoveAll(stageDir); err != nil {
 		return nil, errors.Join(ErrSnapshotUnavailable, fmt.Errorf("clear stage dir: %w", err))
 	}
-	if err := os.MkdirAll(stageDir, 0o755); err != nil {
+	if err := os.MkdirAll(stageDir, 0o750); err != nil {
 		return nil, errors.Join(ErrSnapshotUnavailable, fmt.Errorf("mkdir stage dir: %w", err))
 	}
 	defer os.RemoveAll(stageDir)
@@ -415,9 +415,11 @@ func (c *SnapshotCache) fetchAndExtract(ctx context.Context, key string) (*cache
 	// the storage layer treats the bytes as opaque, and this staging file
 	// is purely a transient buffer between download and extraction. Naming
 	// it after a specific compression scheme would imply more guarantees
-	// than we make.
+	// than we make. The path is a join of the operator-configured rootDir
+	// and a SHA-256 of the snapshot key, so the filename component is
+	// fixed-format and cannot escape rootDir.
 	tarPath := filepath.Join(stageDir, "snapshot.tar")
-	tarFile, err := os.OpenFile(tarPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	tarFile, err := os.OpenFile(tarPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600) // #nosec G304 -- tarPath is rootDir + sha256(key); fixed filename, never user input
 	if err != nil {
 		return nil, errors.Join(ErrSnapshotUnavailable, fmt.Errorf("open stage tar: %w", err))
 	}
@@ -445,14 +447,14 @@ func (c *SnapshotCache) fetchAndExtract(ctx context.Context, key string) (*cache
 		return nil, errors.Join(ErrSnapshotUnavailable, err)
 	}
 
-	src, err := os.Open(tarPath)
+	src, err := os.Open(tarPath) // #nosec G304 -- tarPath is the same staging file we just wrote above; bounded under rootDir
 	if err != nil {
 		return nil, errors.Join(ErrSnapshotUnavailable, fmt.Errorf("reopen stage tar: %w", err))
 	}
 	defer src.Close()
 
 	extractStage := filepath.Join(stageDir, "extracted")
-	if err := os.MkdirAll(extractStage, 0o755); err != nil {
+	if err := os.MkdirAll(extractStage, 0o750); err != nil {
 		return nil, errors.Join(ErrSnapshotUnavailable, fmt.Errorf("mkdir extract stage: %w", err))
 	}
 
@@ -472,7 +474,7 @@ func (c *SnapshotCache) fetchAndExtract(ctx context.Context, key string) (*cache
 	if err := os.RemoveAll(finalDir); err != nil {
 		return nil, errors.Join(ErrSnapshotUnavailable, fmt.Errorf("clear final dir: %w", err))
 	}
-	if err := os.MkdirAll(filepath.Dir(finalDir), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(finalDir), 0o750); err != nil {
 		return nil, errors.Join(ErrSnapshotUnavailable, fmt.Errorf("mkdir final parent: %w", err))
 	}
 	if err := os.Rename(extractStage, finalDir); err != nil {

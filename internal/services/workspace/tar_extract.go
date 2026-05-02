@@ -57,7 +57,7 @@ var errOversize = errors.New("tar extraction exceeded size cap")
 // and total-payload caps would catch it. logger is used to emit debug
 // records for skipped entries; passing zerolog.Nop() is fine.
 func extractTarGz(src io.Reader, destDir string, logger zerolog.Logger) (int64, error) {
-	if err := os.MkdirAll(destDir, 0o755); err != nil {
+	if err := os.MkdirAll(destDir, 0o750); err != nil {
 		return 0, fmt.Errorf("mkdir dest: %w", err)
 	}
 
@@ -93,22 +93,24 @@ func extractTarGz(src io.Reader, destDir string, logger zerolog.Logger) (int64, 
 
 		switch hdr.Typeflag {
 		case tar.TypeDir:
-			if err := os.MkdirAll(dest, 0o755); err != nil {
+			if err := os.MkdirAll(dest, 0o750); err != nil {
 				return total, fmt.Errorf("mkdir %s: %w", clean, err)
 			}
 		case tar.TypeReg:
 			if hdr.Size > maxPerEntryBytes {
 				// Oversize single file — skip rather than abort the whole
 				// extraction, so one pathological file doesn't break review
-				// for the rest of the workspace.
+				// for the rest of the workspace. tar.Reader.Next discards
+				// any unread bytes from the current entry automatically,
+				// and the cappedReader bounds total decompressor output —
+				// so we don't need an explicit io.Copy here. (An explicit
+				// unbounded io.Copy on the tar reader would also trip
+				// gosec G110, since gosec can't see the cappedReader cap.)
 				logger.Debug().
 					Str("entry", clean).
 					Int64("size_bytes", hdr.Size).
 					Int64("cap", maxPerEntryBytes).
 					Msg("snapshot extract: skipping oversize file")
-				if _, err := io.Copy(io.Discard, tr); err != nil {
-					return total, fmt.Errorf("skip oversize entry %s: %w", clean, err)
-				}
 				continue
 			}
 			if total+hdr.Size > maxTotalExtractedBytes {
@@ -232,10 +234,13 @@ func safeTarEntryName(raw string) (string, bool) {
 // executable bits on host disk, since a reader that strays past the
 // workspace dir could otherwise hand the OS a runnable binary.
 func writeTarFile(r io.Reader, dest string) (int64, error) {
-	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(dest), 0o750); err != nil {
 		return 0, fmt.Errorf("mkdir parent of %s: %w", dest, err)
 	}
-	f, err := os.OpenFile(dest, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	// dest is filepath.Join(destDir, clean) where clean has been validated
+	// by safeTarEntryName to reject absolute paths, NUL bytes, and any ".."
+	// segments — so it cannot escape destDir.
+	f, err := os.OpenFile(dest, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600) // #nosec G304 -- dest is bounded under destDir; filename comes from safeTarEntryName
 	if err != nil {
 		return 0, fmt.Errorf("create %s: %w", dest, err)
 	}

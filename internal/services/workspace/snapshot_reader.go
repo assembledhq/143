@@ -98,7 +98,10 @@ func (r *snapshotReader) ReadFile(ctx context.Context, filePath string) (string,
 	}
 	defer entry.Close()
 
-	f, err := os.Open(abs)
+	// abs is the host path returned by r.resolve, which validates the
+	// caller-supplied path via safeWorkspaceJoin (rejects NUL, '..',
+	// and any input that would resolve outside the workspace root).
+	f, err := os.Open(abs) // #nosec G304 -- abs is bounded under the cache extraction root by safeWorkspaceJoin
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return "", false, fmt.Errorf("read file %s: %w", filePath, sandbox.ErrFileNotFound)
@@ -176,7 +179,9 @@ func (r *snapshotReader) ReadFileContext(ctx context.Context, filePath string, l
 // per-file memo to skip the full scan when the line count is already
 // known from a prior call.
 func (r *snapshotReader) readWindowAndCount(abs string, entry *SnapshotEntry, filePath string, line, startLine, endLine int) ([]sandbox.FileLine, int, error) {
-	f, err := os.Open(abs)
+	// abs has been validated by safeWorkspaceJoin in r.resolve before reaching
+	// this function — it cannot escape the cache extraction root.
+	f, err := os.Open(abs) // #nosec G304 -- abs is bounded under the cache extraction root by safeWorkspaceJoin
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return nil, 0, fmt.Errorf("read context %s:%d: %w", filePath, line, sandbox.ErrFileNotFound)
