@@ -353,6 +353,8 @@ The reviewer sees screencasts in the session timeline alongside static screensho
 
 ## Preview Lifecycle
 
+The session preview tab should stay preview-first while startup is in progress. The primary surface is a calm unavailable-preview canvas with one status line and a compact Provisioning → Starting → Opening rail. Per-service and infrastructure diagnostics remain available in collapsed details by default so operators can inspect progress without making the normal waiting state feel busy.
+
 ### Startup Phases
 
 Even in MVP, preview startup should be modeled as three phases:

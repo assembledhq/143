@@ -14,6 +14,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/assembledhq/143/internal/api/middleware"
 	"github.com/assembledhq/143/internal/models"
 )
 
@@ -31,13 +32,29 @@ const (
 	prAuthorModeApp  prAuthorMode = "app"
 )
 
+// prAuthAction identifies which endpoint signed a resume token. Encoded into
+// the signed claims and surfaced back to the frontend as a URL param after
+// the OAuth round-trip so the post-auth replay is deterministic — without it
+// the frontend would have to guess between "create PR" and "push changes"
+// based on current PR state, which can change during the handshake (tab/race).
+type prAuthAction string
+
+const (
+	prAuthActionCreatePR    prAuthAction = "create_pr"
+	prAuthActionPushChanges prAuthAction = "push_changes"
+)
+
 type prAuthResumeClaims struct {
 	SessionID  uuid.UUID `json:"session_id"`
 	UserID     uuid.UUID `json:"user_id"`
 	OrgID      uuid.UUID `json:"org_id"`
 	Draft      *bool     `json:"draft,omitempty"`
 	AuthorMode string    `json:"author_mode"`
-	ExpiresAt  int64     `json:"exp"`
+	// Action is the originating endpoint ("create_pr" or "push_changes").
+	// Empty for tokens signed before this field was added; readers should
+	// treat empty as "create_pr" for backward compatibility.
+	Action    string `json:"action,omitempty"`
+	ExpiresAt int64  `json:"exp"`
 }
 
 func parsePRAuthorMode(raw string) (prAuthorMode, error) {
@@ -103,6 +120,124 @@ func parsePRAuthResumeToken(key []byte, token string, now time.Time) (prAuthResu
 		return claims, errors.New("token expired")
 	}
 	return claims, nil
+}
+
+// prAuthInterceptParams bundles every input requirePRAuthOrIntercept needs.
+// SessionID/OrgID/Session/OrgSettings are session context; AuthorMode and
+// ResumeToken come from the request body; Action/ActionDescription/
+// ResumeExpiredMessage/Draft customize the user-facing copy and resume-claim
+// payload. Bundled into one struct because the helper otherwise grew a
+// nine-parameter signature that's hard to read at the call sites.
+//
+//   - Action identifies the calling endpoint and is signed into the resume
+//     claims so the OAuth callback can dispatch the correct replay action
+//     regardless of any state change during the handshake.
+//   - ActionDescription is interpolated into the "Authorize GitHub to
+//     <action> as you." message.
+//   - ResumeExpiredMessage is shown when the resume token decoded but
+//     expired (e.g. user took 10+ minutes to complete OAuth).
+//   - Draft is preserved in the resume claims so the original Draft choice
+//     survives the GitHub round-trip — leave nil for endpoints that don't
+//     expose a draft toggle.
+type prAuthInterceptParams struct {
+	SessionID            uuid.UUID
+	OrgID                uuid.UUID
+	Session              *models.Session
+	OrgSettings          models.OrgSettings
+	AuthorMode           prAuthorMode
+	ResumeToken          string
+	Action               prAuthAction
+	ActionDescription    string
+	ResumeExpiredMessage string
+	Draft                *bool
+}
+
+// requirePRAuthOrIntercept centralizes the GitHub user-auth interception that
+// CreatePR and PushChangesToPR share. Returns true if the caller should
+// proceed (auth not required, or the user is already authed); returns false if
+// a response was already written (auth required → 409 GITHUB_PR_AUTHORSHIP_REQUIRED,
+// resume token expired → 409 PR_RESUME_EXPIRED, app-user-auth not configured →
+// 503, or an internal error). Single-source-of-truth for the auth flow so a
+// fix to the credential check or token-signing path lands in both endpoints.
+func (h *SessionHandler) requirePRAuthOrIntercept(w http.ResponseWriter, r *http.Request, p prAuthInterceptParams) bool {
+	user := middleware.UserFromContext(r.Context())
+	if !shouldPromptForPRAuth(p.AuthorMode, p.OrgSettings.PRAuthorship) ||
+		p.Session.TriggeredByUserID == nil ||
+		user == nil ||
+		user.ID != *p.Session.TriggeredByUserID {
+		return true
+	}
+
+	if p.ResumeToken != "" {
+		if len(h.prAuthSigningKey) == 0 {
+			writeError(w, r, http.StatusInternalServerError, "INTERNAL_ERROR", "PR auth flow is not configured")
+			return false
+		}
+		claims, tokenErr := parsePRAuthResumeToken(h.prAuthSigningKey, p.ResumeToken, time.Now())
+		if tokenErr != nil || claims.SessionID != p.SessionID || claims.UserID != user.ID || claims.OrgID != p.OrgID {
+			writeJSON(w, http.StatusConflict, models.ErrorResponse{
+				Error: models.ErrorDetail{
+					Code:    "PR_RESUME_EXPIRED",
+					Message: p.ResumeExpiredMessage,
+				},
+			})
+			return false
+		}
+	}
+
+	hasCredential := false
+	authUnavailable := h.prAuthChecker == nil
+	if h.prAuthChecker != nil {
+		var checkErr error
+		hasCredential, checkErr = h.prAuthChecker.HasValidCredential(r.Context(), p.OrgID, user.ID)
+		if checkErr != nil {
+			writeError(w, r, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to verify GitHub PR authorization", checkErr)
+			return false
+		}
+	}
+	if authUnavailable && !hasCredential {
+		if p.OrgSettings.PRAuthorship == models.PRAuthorshipUserRequired || p.AuthorMode == prAuthorModeUser {
+			writeError(w, r, http.StatusServiceUnavailable, "GITHUB_APP_USER_AUTH_NOT_CONFIGURED", "github app user auth is not configured")
+			return false
+		}
+		// App-token fallback is allowed; let the caller proceed.
+		return true
+	}
+	if hasCredential {
+		return true
+	}
+
+	if len(h.prAuthSigningKey) == 0 {
+		writeError(w, r, http.StatusInternalServerError, "INTERNAL_ERROR", "PR auth flow is not configured")
+		return false
+	}
+	signedToken, signErr := signPRAuthResumeToken(h.prAuthSigningKey, prAuthResumeClaims{
+		SessionID:  p.SessionID,
+		UserID:     user.ID,
+		OrgID:      p.OrgID,
+		Draft:      p.Draft,
+		AuthorMode: string(prAuthorModeUser),
+		Action:     string(p.Action),
+		ExpiresAt:  time.Now().Add(prAuthResumeTokenTTL).Unix(),
+	})
+	if signErr != nil {
+		writeError(w, r, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to prepare GitHub PR authorization", signErr)
+		return false
+	}
+	writeJSON(w, http.StatusConflict, models.ErrorResponse{
+		Error: models.ErrorDetail{
+			Code:    "GITHUB_PR_AUTHORSHIP_REQUIRED",
+			Message: fmt.Sprintf("Authorize GitHub to %s as you.", p.ActionDescription),
+			Details: map[string]any{
+				"session_id":            p.SessionID.String(),
+				"connect_url":           "/api/v1/users/me/github/connect?flow=pr_authorship",
+				"resume_token":          signedToken,
+				"can_fallback_to_app":   p.OrgSettings.PRAuthorship != models.PRAuthorshipUserRequired,
+				"suggested_author_mode": string(prAuthorModeUser),
+			},
+		},
+	})
+	return false
 }
 
 func clearCookie(w http.ResponseWriter, r *http.Request, name string) {

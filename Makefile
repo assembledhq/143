@@ -2,7 +2,7 @@
 SANDBOX_STAMP := sandbox/.build-stamp
 SANDBOX_SOURCES := sandbox/Dockerfile sandbox/versions.json
 
-.PHONY: dev dev-ngrok dev-local dev-frontend-only setup test test-race test-coverage test-pr test-coverage-diff test-main migrate-up migrate-down build frontend-dev frontend-lint frontend-typecheck frontend-check lint lint-bootstrap lint-schema lint-stores lint-tenancy hooks-install hooks-uninstall secrets-setup secrets-encrypt secrets-decrypt secrets-edit secrets-rotate provision-app provision-worker provision-db provision-logging provision-redis deploy deploy-app deploy-worker deploy-db deploy-logging deploy-fleet logs logs-query setup-readonly-user db-psql db-query
+.PHONY: dev dev-ngrok dev-local dev-frontend-only setup test test-race test-coverage test-pr test-coverage-diff test-main test-integration migrate-up migrate-down build frontend-dev frontend-lint frontend-typecheck frontend-check lint lint-bootstrap lint-schema lint-stores lint-tenancy hooks-install hooks-uninstall secrets-setup secrets-encrypt secrets-decrypt secrets-edit secrets-rotate provision-app provision-worker provision-db provision-logging provision-redis deploy deploy-app deploy-worker deploy-db deploy-logging deploy-fleet logs logs-query setup-readonly-user db-psql db-query
 
 GOLANGCI_LINT_VERSION ?= v2.10.1
 GOLANGCI_LINT_BIN := $(CURDIR)/bin/golangci-lint
@@ -133,6 +133,14 @@ test-coverage-diff: test-pr
 test-main:
 	go test ./internal/... -coverprofile=coverage.out -covermode=atomic -race -timeout=180s
 	go tool cover -func=coverage.out
+
+# Integration tests against a real Postgres. Gated behind the `integration`
+# build tag so `make test` and `go test ./...` stay fast. Reuses DATABASE_URL
+# (the same env CI's backend-test job already exports), so locally:
+#   docker compose up -d postgres && make migrate-up && make test-integration
+test-integration:
+	INTEGRATION_DATABASE_URL=$${INTEGRATION_DATABASE_URL:-$$DATABASE_URL} \
+	go test -tags=integration -timeout=120s ./internal/integration/...
 
 migrate-up:
 	go run cmd/migrate/main.go up

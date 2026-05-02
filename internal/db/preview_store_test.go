@@ -1046,6 +1046,54 @@ func TestPreviewStore_CreatePreviewLog(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
+// TestPreviewStore_CreatePreviewLog_NilMetadataDefaultsToEmptyObject is the
+// regression guard for the production bug where OnServiceFailed silently
+// dropped service-exit logs because Metadata was unset → bound as SQL NULL →
+// rejected by the NOT NULL constraint on preview_logs.metadata. The store
+// must coerce a nil Metadata into a JSON empty-object so the column's DEFAULT
+// '{}' isn't bypassed.
+func TestPreviewStore_CreatePreviewLog_NilMetadataDefaultsToEmptyObject(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := NewPreviewStore(mock)
+	now := time.Now()
+	generatedID := uuid.New()
+	previewID := uuid.New()
+	orgID := uuid.New()
+
+	logEntry := &models.PreviewLog{
+		PreviewInstanceID: previewID,
+		OrgID:             orgID,
+		Level:             "error",
+		Step:              models.PreviewLogStepStart,
+		Message:           "service \"frontend\" failed",
+		// Metadata intentionally unset — mirrors managerServiceObserver.OnServiceFailed.
+	}
+
+	mock.ExpectQuery("INSERT INTO preview_logs").
+		WithArgs(
+			previewID,
+			orgID,
+			"error",
+			models.PreviewLogStepStart,
+			"service \"frontend\" failed",
+			json.RawMessage(`{}`),
+		).
+		WillReturnRows(
+			pgxmock.NewRows(previewLogTestCols).
+				AddRow(generatedID, previewID, orgID, "error", "start", "service \"frontend\" failed",
+					json.RawMessage(`{}`), now),
+		)
+
+	require.NoError(t, store.CreatePreviewLog(context.Background(), logEntry))
+	require.Equal(t, generatedID, logEntry.ID)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
 func TestPreviewStore_ListLogsByPreview(t *testing.T) {
 	t.Parallel()
 

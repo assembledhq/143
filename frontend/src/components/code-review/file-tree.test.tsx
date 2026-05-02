@@ -21,6 +21,29 @@ const files: DiffFile[] = [
 ];
 
 describe("FileTree", () => {
+  it("keeps root files and directories in the incoming order", () => {
+    const orderedFiles: DiffFile[] = [
+      makeDiffFile("README.md", 1, 0),
+      makeDiffFile("src/first.ts", 1, 0),
+      makeDiffFile("docs/guide.md", 1, 0),
+    ];
+
+    render(
+      <FileTree files={orderedFiles} activeFileIndex={0} onFileSelect={vi.fn()} />
+    );
+
+    const readmeFile = screen.getByText("README.md");
+    const srcDirectory = screen.getByText("src/");
+    const docsDirectory = screen.getByText("docs/");
+
+    expect(
+      readmeFile.compareDocumentPosition(srcDirectory) & Node.DOCUMENT_POSITION_FOLLOWING
+    ).toBeTruthy();
+    expect(
+      srcDirectory.compareDocumentPosition(docsDirectory) & Node.DOCUMENT_POSITION_FOLLOWING
+    ).toBeTruthy();
+  });
+
   it("preserves incoming file order so the sidebar matches the diff detail view", () => {
     const orderedFiles: DiffFile[] = [
       makeDiffFile("src/first.ts", 1, 0),

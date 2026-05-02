@@ -22,6 +22,7 @@ type MilestoneEvent string
 
 const (
 	MilestoneLinked    MilestoneEvent = "linked"
+	MilestoneStarted   MilestoneEvent = "started"
 	MilestonePROpened  MilestoneEvent = "pr_opened"
 	MilestonePRMerged  MilestoneEvent = "pr_merged"
 	MilestoneEndedNoPR MilestoneEvent = "ended_no_pr"
@@ -50,7 +51,7 @@ type MilestoneInput struct {
 // installer's account on most Linear plans (no true bot identity yet — see
 // design 62 §"Authoring identity"), so readers need an unambiguous "this is
 // a bot voice" marker. Required by design.
-const botCommentPrefix = "🤖 143 automated update —"
+const botCommentPrefix = "🤖 143 automated update"
 
 // HandleMilestone idempotently writes the durable attachment and the single
 // rolling comment for the given milestone. Skipped silently when:
@@ -93,6 +94,13 @@ const botCommentPrefix = "🤖 143 automated update —"
 func (s *Service) HandleMilestone(ctx context.Context, in MilestoneInput) error {
 	if in.Session == nil {
 		return fmt.Errorf("nil session")
+	}
+	if in.Event == MilestoneStarted {
+		// `started` is the session-runtime trigger for HandleStateTransition
+		// only — the link-time `linked` milestone has already created the
+		// durable attachment and rolling comment, so re-touching them here
+		// would just churn the Linear UI on every session start.
+		return nil
 	}
 	if in.Link.Role != models.SessionIssueLinkRolePrimary {
 		// Related issues never get attachments or comments in v1.
@@ -815,8 +823,8 @@ func (s *Service) recordSkip(ctx context.Context, in MilestoneInput, kind db.Lin
 
 func stateEventKindFor(event MilestoneEvent) db.LinearStateEventKind {
 	switch event {
-	case MilestoneLinked:
-		return db.LinearStateEventLinked
+	case MilestoneStarted:
+		return db.LinearStateEventStarted
 	case MilestonePROpened:
 		return db.LinearStateEventPROpened
 	case MilestonePRMerged:
@@ -827,7 +835,7 @@ func stateEventKindFor(event MilestoneEvent) db.LinearStateEventKind {
 
 func stateTypeFor(event MilestoneEvent) string {
 	switch event {
-	case MilestoneLinked:
+	case MilestoneStarted:
 		return "started"
 	case MilestonePROpened:
 		return "started" // review states are typed `started` in Linear

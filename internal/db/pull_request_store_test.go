@@ -13,7 +13,7 @@ import (
 
 var prColumns = []string{
 	"id", "session_id", "org_id", "github_pr_number", "github_pr_url", "github_repo",
-	"title", "body", "status", "review_status", "authored_by", "ci_status", "head_sha", "base_sha",
+	"title", "body", "status", "review_status", "authored_by", "ci_status", "head_sha", "head_ref", "base_sha",
 	"merge_state", "has_conflicts", "failing_test_count", "needs_agent_action", "github_state_synced_at",
 	"health_version", "merged_at", "created_at", "updated_at",
 }
@@ -21,7 +21,7 @@ var prColumns = []string{
 func newPRRow(id, sessionID, orgID uuid.UUID, now time.Time) []any {
 	return []any{
 		id, &sessionID, orgID, 42, "https://github.com/org/repo/pull/42", "org/repo",
-		"Fix bug", (*string)(nil), "open", "pending", "app", "", (*string)(nil), (*string)(nil),
+		"Fix bug", (*string)(nil), "open", "pending", "app", "", (*string)(nil), (*string)(nil), (*string)(nil),
 		models.PullRequestMergeStateUnknown, false, 0, false, (*time.Time)(nil), int64(0), (*time.Time)(nil), now, now,
 	}
 }
@@ -51,7 +51,7 @@ func TestPullRequestStore_Create_Success(t *testing.T) {
 	mock.ExpectQuery("INSERT INTO pull_requests").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows([]string{"id", "created_at", "updated_at"}).
 				AddRow(generatedID, now, now),

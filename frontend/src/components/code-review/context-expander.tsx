@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { ChevronDown, Loader2 } from "lucide-react";
-import { api } from "@/lib/api";
+import { ApiError, api } from "@/lib/api";
 import type { FileLine } from "@/lib/types";
 import { Button } from "@/components/ui/button";
 
@@ -28,6 +28,10 @@ interface ContextExpanderProps {
   visibleEnd?: number;
   /** Callback when context lines are fetched */
   onExpand?: (direction: "above" | "below" | "all", lines: FileLine[], meta: ContextExpandResult) => void;
+  /** When true, disables expansion controls and shows an explicit unavailable message. */
+  contextUnavailable?: boolean;
+  /** Called when a fetch fails because the session has no live sandbox. */
+  onContextUnavailable?: () => void;
 }
 
 /**
@@ -44,12 +48,14 @@ export function ContextExpander({
   visibleStart,
   visibleEnd,
   onExpand,
+  contextUnavailable = false,
+  onContextUnavailable,
 }: ContextExpanderProps) {
   const [loading, setLoading] = useState(false);
 
   if (hiddenLineCount <= 0) return null;
 
-  const canExpand = sessionId && filePath && onExpand;
+  const canExpand = !contextUnavailable && sessionId && filePath && onExpand;
   const canExpandAbove = canExpand && (visibleStart == null || visibleStart > hiddenStart);
   const canExpandBelow = canExpand && (visibleEnd == null || visibleEnd < hiddenEnd);
   const canExpandAll = canExpand && (visibleStart !== hiddenStart || visibleEnd !== hiddenEnd);
@@ -96,17 +102,36 @@ export function ContextExpander({
           totalLines: resp.data.total_lines,
         });
       }
-    } catch {
-      // If context fetch fails (e.g., sandbox not running), silently ignore
+    } catch (err) {
+      // The session container is gone (completed sessions tear down their
+      // sandbox). Lift this signal so all expanders flip to the disabled
+      // state instead of silently swallowing repeated clicks.
+      if (err instanceof ApiError && err.code === "NO_SANDBOX") {
+        onContextUnavailable?.();
+      }
     } finally {
       setLoading(false);
     }
   }
 
+  const trailingText = contextUnavailable
+    ? "Additional file context unavailable for this session"
+    : kind === "top"
+    ? "Before change"
+    : kind === "bottom"
+    ? "After change"
+    : `Show ${hiddenLineCount} hidden lines`;
+
+  const titleText = contextUnavailable
+    ? "Additional file context unavailable for this session"
+    : canExpand
+    ? `Show ${hiddenLineCount} hidden lines`
+    : "Context expansion unavailable (sandbox not running)";
+
   return (
     <div
       className="flex items-center justify-center gap-2 px-3 py-2 text-xs text-muted-foreground/80 border-y border-border/40 bg-muted/15"
-      title={canExpand ? `Show ${hiddenLineCount} hidden lines` : "Context expansion unavailable (sandbox not running)"}
+      title={titleText}
     >
       {loading ? <Loader2 className="h-3 w-3 animate-spin" /> : <ChevronDown className="h-3 w-3" />}
       <Button
@@ -142,9 +167,7 @@ export function ContextExpander({
       >
         Show all
       </Button>
-      <span aria-label={`Show ${hiddenLineCount} hidden lines`}>
-        {kind === "top" ? "Before change" : kind === "bottom" ? "After change" : `Show ${hiddenLineCount} hidden lines`}
-      </span>
+      <span aria-label={trailingText}>{trailingText}</span>
     </div>
   );
 }

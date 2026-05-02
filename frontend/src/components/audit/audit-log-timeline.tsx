@@ -1,13 +1,13 @@
 "use client";
 
-import { useQuery } from "@tanstack/react-query";
-import { api } from "@/lib/api";
-import type { AuditLog, User } from "@/lib/types";
+import { useRef } from "react";
+import type { User } from "@/lib/types";
 import { AuditLogEntry } from "./audit-log-entry";
 import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
 import { EmptyState } from "@/components/empty-state";
-import { Clock } from "lucide-react";
-import { useState } from "react";
+import { Clock, ArrowUp, History } from "lucide-react";
+import { useAuditLogFeed } from "./use-audit-log-feed";
 
 interface AuditLogTimelineProps {
   /** Pre-set filters for scoped views (e.g., session_id, project_id). */
@@ -23,23 +23,21 @@ export function AuditLogTimeline({
   pageSize = 10,
   members,
 }: AuditLogTimelineProps) {
-  const [cursors, setCursors] = useState<string[]>([]);
-  const currentCursor = cursors[cursors.length - 1];
-
-  const { data, isLoading, error } = useQuery({
-    queryKey: ["audit-logs", filters, currentCursor, pageSize],
-    queryFn: () =>
-      api.auditLogs.list({
-        ...filters,
-        cursor: currentCursor,
-        limit: pageSize,
-      }),
+  const topRef = useRef<HTMLDivElement | null>(null);
+  const {
+    entries,
+    isLoading,
+    error,
+    fetchNextPage,
+    hasNextPage,
+    isFetchingNextPage,
+    hasLoadedHistory,
+  } = useAuditLogFeed({
+    filters,
+    pageSize,
   });
 
-  const entries: AuditLog[] = data?.data ?? [];
-  const nextCursor = data?.meta?.next_cursor;
-
-  if (isLoading && cursors.length === 0) {
+  if (isLoading && entries.length === 0) {
     return (
       <div className="py-6 text-center text-sm text-muted-foreground">
         Loading activity...
@@ -55,7 +53,7 @@ export function AuditLogTimeline({
     );
   }
 
-  if (entries.length === 0 && cursors.length === 0) {
+  if (entries.length === 0) {
     return (
       <EmptyState
         icon={Clock}
@@ -67,32 +65,43 @@ export function AuditLogTimeline({
 
   return (
     <div>
+      <div ref={topRef} className="flex items-center justify-between gap-3 border-b border-border/50 px-6 py-3">
+        <div className="flex items-center gap-2 text-xs text-muted-foreground">
+          <Badge variant="secondary" className="rounded-full bg-muted/70 px-2.5 py-0.5 text-xs font-medium text-foreground">
+            Latest first
+          </Badge>
+          <span className="flex items-center gap-1.5">
+            <History className="h-3.5 w-3.5" />
+            {entries.length} event{entries.length === 1 ? "" : "s"} loaded
+          </span>
+        </div>
+        {hasLoadedHistory && (
+          <Button
+            variant="ghost"
+            size="sm"
+            className="h-7 gap-1.5 rounded-full px-2.5 text-xs"
+            onClick={() => topRef.current?.scrollIntoView({ behavior: "smooth", block: "start" })}
+          >
+            <ArrowUp className="h-3.5 w-3.5" />
+            Back to newest
+          </Button>
+        )}
+      </div>
       <div className="divide-y-0">
         {entries.map((entry) => (
           <AuditLogEntry key={entry.id} entry={entry} members={members} />
         ))}
       </div>
-      <div className="flex items-center justify-between px-6 py-2">
-        {cursors.length > 0 && (
+      <div className="border-t border-border/50 px-6 py-3">
+        {hasNextPage && (
           <Button
-            variant="ghost"
+            variant="outline"
             size="sm"
-            className="text-xs"
-            onClick={() => setCursors((prev) => prev.slice(0, -1))}
+            className="h-8 rounded-full px-3 text-xs"
+            onClick={() => fetchNextPage()}
+            disabled={isFetchingNextPage}
           >
-            Newer
-          </Button>
-        )}
-        <div className="flex-1" />
-        {nextCursor && (
-          <Button
-            variant="ghost"
-            size="sm"
-            className="text-xs"
-            onClick={() => setCursors((prev) => [...prev, nextCursor])}
-            disabled={isLoading}
-          >
-            {isLoading ? "Loading..." : "Older"}
+            {isFetchingNextPage ? "Loading..." : "Load older"}
           </Button>
         )}
       </div>

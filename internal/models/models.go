@@ -267,10 +267,15 @@ type Session struct {
 	// PRCreationState drives the Create PR button's state machine. It is
 	// orthogonal to Status — a session can be `completed` with pr_creation_state
 	// `idle` (ready for user to click Create PR), `pushing` (in flight), etc.
-	PRCreationState      PRCreationState `db:"pr_creation_state" json:"pr_creation_state"`
-	PRCreationError      *string         `db:"pr_creation_error" json:"pr_creation_error,omitempty"`
-	DiffCollectedAt      *time.Time      `db:"diff_collected_at" json:"diff_collected_at,omitempty"`
-	LatestDiffSnapshotID *uuid.UUID      `db:"latest_diff_snapshot_id" json:"latest_diff_snapshot_id,omitempty"`
+	PRCreationState PRCreationState `db:"pr_creation_state" json:"pr_creation_state"`
+	PRCreationError *string         `db:"pr_creation_error" json:"pr_creation_error,omitempty"`
+	// PRPushState drives the "Push changes" button's state machine for sessions
+	// that already have an open PR. Independent from PRCreationState so a single
+	// session can show "PR opened" while a follow-up push is mid-flight.
+	PRPushState          PRPushState `db:"pr_push_state" json:"pr_push_state"`
+	PRPushError          *string     `db:"pr_push_error" json:"pr_push_error,omitempty"`
+	DiffCollectedAt      *time.Time  `db:"diff_collected_at" json:"diff_collected_at,omitempty"`
+	LatestDiffSnapshotID *uuid.UUID  `db:"latest_diff_snapshot_id" json:"latest_diff_snapshot_id,omitempty"`
 	// LinearPrivate suppresses every Linear write for this session. The agent
 	// still receives Linear context locally; nothing leaves 143. Frozen at
 	// session create — see design 62 §"Composer controls must express distinct
@@ -505,23 +510,40 @@ type Validation struct {
 	CreatedAt           time.Time       `db:"created_at" json:"created_at"`
 }
 
+// PullRequest.Status values. Stored as a free-form string for historical
+// reasons (the webhook used to forward GitHub's raw state field). New code
+// should compare against these constants rather than literal strings so
+// renames stay grep-friendly.
+const (
+	PullRequestStatusOpen   = "open"
+	PullRequestStatusClosed = "closed"
+	PullRequestStatusMerged = "merged"
+)
+
 // PullRequest represents a GitHub PR created by an agent run.
 // NOTE: SessionID is nullable (*uuid.UUID) because PRs can be created manually
 // without an associated session. API consumers should handle null session_id.
 type PullRequest struct {
-	ID                  uuid.UUID             `db:"id" json:"id"`
-	SessionID           *uuid.UUID            `db:"session_id" json:"session_id,omitempty"`
-	OrgID               uuid.UUID             `db:"org_id" json:"org_id"`
-	GitHubPRNumber      int                   `db:"github_pr_number" json:"github_pr_number"`
-	GitHubPRURL         string                `db:"github_pr_url" json:"github_pr_url"`
-	GitHubRepo          string                `db:"github_repo" json:"github_repo"`
-	Title               string                `db:"title" json:"title"`
-	Body                *string               `db:"body" json:"body,omitempty"`
-	Status              string                `db:"status" json:"status"`
-	ReviewStatus        string                `db:"review_status" json:"review_status"`
-	AuthoredBy          string                `db:"authored_by" json:"authored_by"`
-	CIStatus            string                `db:"ci_status" json:"ci_status"`
-	HeadSHA             *string               `db:"head_sha" json:"head_sha,omitempty"`
+	ID             uuid.UUID  `db:"id" json:"id"`
+	SessionID      *uuid.UUID `db:"session_id" json:"session_id,omitempty"`
+	OrgID          uuid.UUID  `db:"org_id" json:"org_id"`
+	GitHubPRNumber int        `db:"github_pr_number" json:"github_pr_number"`
+	GitHubPRURL    string     `db:"github_pr_url" json:"github_pr_url"`
+	GitHubRepo     string     `db:"github_repo" json:"github_repo"`
+	Title          string     `db:"title" json:"title"`
+	Body           *string    `db:"body" json:"body,omitempty"`
+	Status         string     `db:"status" json:"status"`
+	ReviewStatus   string     `db:"review_status" json:"review_status"`
+	AuthoredBy     string     `db:"authored_by" json:"authored_by"`
+	CIStatus       string     `db:"ci_status" json:"ci_status"`
+	HeadSHA        *string    `db:"head_sha" json:"head_sha,omitempty"`
+	// HeadRef is the branch name on GitHub the PR tracks. Captured at
+	// PR-creation time so the "Push changes" follow-up always targets the
+	// same ref even if the session's title or Linear identifier (which feed
+	// into formatBranchName) change later. Nullable for PRs created before
+	// migration 107 added the column — the push code falls back to
+	// recomputing in that case.
+	HeadRef             *string               `db:"head_ref" json:"head_ref,omitempty"`
 	BaseSHA             *string               `db:"base_sha" json:"base_sha,omitempty"`
 	MergeState          PullRequestMergeState `db:"merge_state" json:"merge_state"`
 	HasConflicts        bool                  `db:"has_conflicts" json:"has_conflicts"`

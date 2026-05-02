@@ -138,6 +138,20 @@ type serviceState struct {
 // service exits non-zero.
 const serviceTailLines = 200
 
+// serviceExitTailLines is the number of trailing non-blank stdout/stderr
+// lines folded into the user-visible exit error from formatServiceExitError.
+// Three is enough to capture a typical shell error like "/bin/sh: 1: npm:
+// not found" plus one or two contextual lines, while staying short enough
+// not to crowd the rest of the launch error in a UI banner.
+const serviceExitTailLines = 3
+
+// serviceExitTailRunes caps the rune length of the joined tail rendered
+// into a service-exit error so a runaway log line (a stack trace, a
+// minified JSON dump) cannot inflate the API response. Sized to leave
+// room for the wrapping "preview service did not pass its readiness probe…"
+// chrome that classifyLaunchError prepends.
+const serviceExitTailRunes = 200
+
 // DockerPreviewOption configures a DockerPreviewProvider.
 type DockerPreviewOption func(*DockerPreviewProvider)
 
@@ -867,6 +881,66 @@ func notifyServiceFailed(observer preview.ServiceObserver, name, errMsg string, 
 	observer.OnServiceFailed(name, errMsg, tail)
 }
 
+// formatServiceExitError builds a human-readable exit message from a service's
+// exit code plus the last few lines of its stdout/stderr. Bare "exited with
+// code N" — especially the POSIX "command not found" code 127 — leaves the
+// user staring at a number without any of the context the shell already
+// printed to stderr (e.g. "/bin/sh: 1: npm: not found"). Surfacing the tail
+// here lets that output reach the launch error returned to the API, not just
+// the preview_logs row.
+func formatServiceExitError(exitCode int, outputTail []string) string {
+	hint := ""
+	if exitCode == 127 {
+		hint = " (command not found — check that the executable exists on the sandbox's $PATH or use an absolute path in .143/preview.json)"
+	}
+	base := fmt.Sprintf("exited with code %d%s", exitCode, hint)
+	tail := truncatedTail(outputTail, serviceExitTailLines, serviceExitTailRunes)
+	if tail == "" {
+		return base
+	}
+	return base + "; last output: " + tail
+}
+
+// truncatedTail returns up to the last maxLines non-blank lines of
+// outputTail joined into a single string, capped at maxRunes runes with an
+// ellipsis so a runaway log line can't blow up the surfacing error message.
+// Returns "" when outputTail has no usable content.
+//
+// Walks from the newest line back so trailing blank lines (a service that
+// ends with a flush of "\n\n" or pads its readiness logs with separators)
+// don't degrade the message into a useless tail. We still bound the scan at
+// the full ring buffer length, so an O(serviceTailLines) walk is the
+// worst case.
+func truncatedTail(outputTail []string, maxLines, maxRunes int) string {
+	if len(outputTail) == 0 || maxLines <= 0 {
+		return ""
+	}
+	parts := make([]string, 0, maxLines)
+	for i := len(outputTail) - 1; i >= 0 && len(parts) < maxLines; i-- {
+		trimmed := strings.TrimSpace(strings.TrimRight(outputTail[i], "\r\n"))
+		if trimmed == "" {
+			continue
+		}
+		parts = append(parts, trimmed)
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	// parts is newest-first from the reverse walk; flip to chronological so
+	// the joined message reads in the order the service actually printed.
+	for lo, hi := 0, len(parts)-1; lo < hi; lo, hi = lo+1, hi-1 {
+		parts[lo], parts[hi] = parts[hi], parts[lo]
+	}
+	joined := strings.Join(parts, " | ")
+	if maxRunes > 0 {
+		runes := []rune(joined)
+		if len(runes) > maxRunes {
+			joined = string(runes[:maxRunes]) + "…"
+		}
+	}
+	return joined
+}
+
 func (d *DockerPreviewProvider) startService(
 	ctx context.Context,
 	state *previewState,
@@ -960,7 +1034,7 @@ func (d *DockerPreviewProvider) startService(
 			if err != nil {
 				ss.err = err.Error()
 			} else {
-				ss.err = fmt.Sprintf("exited with code %d", exitCode)
+				ss.err = formatServiceExitError(exitCode, ss.outputTail)
 			}
 			tail = append([]string(nil), ss.outputTail...)
 		} else {
@@ -993,8 +1067,8 @@ func (d *DockerPreviewProvider) startService(
 const readinessProbeAttemptTimeout = 5 * time.Second
 
 func (d *DockerPreviewProvider) waitForReadiness(ctx context.Context, state *previewState, name string, port int, httpPath string, timeout time.Duration) error {
-	deadline := time.NewTimer(timeout)
-	defer deadline.Stop()
+	overallCtx, cancelOverall := context.WithTimeout(ctx, timeout)
+	defer cancelOverall()
 	tick := time.NewTicker(time.Second)
 	defer tick.Stop()
 
@@ -1025,17 +1099,31 @@ func (d *DockerPreviewProvider) waitForReadiness(ctx context.Context, state *pre
 		return nil
 	}
 
+	// timeoutErr maps overallCtx.Err() back to a caller-friendly error,
+	// distinguishing a parent-ctx cancellation from our own deadline.
+	timeoutErr := func() error {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		return fmt.Errorf("readiness probe timed out after %s", timeout)
+	}
+
 	for {
 		if err := checkExited(); err != nil {
 			return err
 		}
+		// Check overall deadline before re-entering select: if a hung Exec
+		// just returned because per-attempt timeout cancelled it, both
+		// tick.C and overallCtx.Done() may be ready and select would pick
+		// uniformly at random. We want the deadline to win deterministically.
+		if overallCtx.Err() != nil {
+			return timeoutErr()
+		}
 		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-deadline.C:
-			return fmt.Errorf("readiness probe timed out after %s", timeout)
+		case <-overallCtx.Done():
+			return timeoutErr()
 		case <-tick.C:
-			execCtx, cancel := context.WithTimeout(ctx, readinessProbeAttemptTimeout)
+			execCtx, cancel := context.WithTimeout(overallCtx, readinessProbeAttemptTimeout)
 			exitCode, _ := d.executor.Exec(execCtx, state.sandbox, cmd, io.Discard, io.Discard)
 			cancel()
 			if exitCode == 0 {

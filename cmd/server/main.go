@@ -302,6 +302,7 @@ func main() {
 		pullRequestStore := db.NewPullRequestStore(pool)
 		deployStore := db.NewDeployStore(pool)
 		sessionMessageStore := db.NewSessionMessageStore(pool)
+		sessionThreadStore := db.NewSessionThreadStore(pool)
 		priorityScoreStore := db.NewPriorityScoreStore(pool)
 		complexityEstimateStore := db.NewComplexityEstimateStore(pool)
 		pmPlanStore := db.NewPMPlanStore(pool)
@@ -350,6 +351,7 @@ func main() {
 			EvalBootstraps:      db.NewEvalBootstrapStore(pool),
 			Repositories:        repoStore,
 			SessionMessages:     sessionMessageStore,
+			SessionThreads:      sessionThreadStore,
 			Automations:         automationStore,
 			AutomationRuns:      automationRunStore,
 			SessionIssueLinks:   db.NewSessionIssueLinkStore(pool),
@@ -462,6 +464,14 @@ func main() {
 		}
 		reaper := agent.NewSessionReaper(sessionStore, snapshotStore, cfg.SessionMaxIdleAge, cfg.SessionMaxSnapshotAge, cfg.SessionReaperInterval, logger, reaperOpts...)
 		go reaper.Run(ctx)
+
+		// Runtime resource sampler — emits live memory/CPU histograms per
+		// running sandbox so operators can size SANDBOX_* limits against
+		// actual usage. nil when sampling is disabled (interval <= 0) or
+		// the provider doesn't expose stats.
+		if workerServices != nil && workerServices.RuntimeSampler != nil {
+			go workerServices.RuntimeSampler.Run(ctx)
+		}
 
 		// Upload reaper: clean up old uploaded files (local mode only; use S3 lifecycle rules for S3).
 		uploadStore := storage.NewFileUploadStore(cfg.UploadStorageDir, "")
@@ -1011,6 +1021,22 @@ func buildServices(
 	})
 	prService.SetLinearMilestoneEnqueuer(linear.MilestoneEnqueuerFor(jobStore, logger))
 
+	// Runtime resource sampler. Optional capability — only providers that
+	// implement RuntimeStatsProvider produce samples. Disabled when the
+	// interval is non-positive (operators can switch this off if the OTel
+	// pipeline isn't wired up yet). The runtime type assertion goes
+	// through an explicit any() conversion because Go only allows type
+	// assertions on interface static types, and sandboxProvider's static
+	// type is the concrete *DockerProvider here.
+	var runtimeSampler *agent.RuntimeSampler
+	if cfg.RuntimeStatsInterval > 0 {
+		if statsProvider, ok := any(sandboxProvider).(agent.RuntimeStatsProvider); ok {
+			runtimeSampler = agent.NewRuntimeSampler(usageTracker, statsProvider, billingMetrics, cfg.RuntimeStatsInterval, logger)
+		} else {
+			logger.Info().Msg("sandbox provider does not implement RuntimeStatsProvider; runtime sampler disabled")
+		}
+	}
+
 	svc := &worker.Services{
 		Orchestrator:    orchestrator,
 		Validation:      validationSvc,
@@ -1024,6 +1050,7 @@ func buildServices(
 		GitHub:          ghSvc,
 		TitleService:    titleService,
 		Linear:          linearService,
+		RuntimeSampler:  runtimeSampler,
 	}
 	if sandboxAuthServer != nil {
 		// Capture by value: the closure outlives buildServices, but the

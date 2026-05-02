@@ -917,7 +917,7 @@ var sessionRowColumns = []string{
 	"target_branch", "working_branch",
 	"base_commit_sha", "repository_id", "diff_stats", "diff_history", "input_manifest",
 	"archived_at", "archived_by_user_id", "automation_run_id",
-	"pr_creation_state", "pr_creation_error", "diff_collected_at", "latest_diff_snapshot_id",
+	"pr_creation_state", "pr_creation_error", "pr_push_state", "pr_push_error", "diff_collected_at", "latest_diff_snapshot_id",
 	"linear_private", "linear_state_sync_disabled", "linear_identifier_hint", "linear_prepare_state",
 	"deleted_at", "git_identity_source", "git_identity_user_id", "created_at",
 }
@@ -958,6 +958,8 @@ func previewSessionRow(id, orgID uuid.UUID, containerID *string, snapshotKey *st
 		"recovery_attempt_count":         0,
 		"pr_creation_state":              "idle",
 		"pr_creation_error":              (*string)(nil),
+		"pr_push_state":                  "idle",
+		"pr_push_error":                  (*string)(nil),
 		"linear_private":                 false,
 		"linear_state_sync_disabled":     false,
 		"linear_identifier_hint":         (*string)(nil),
@@ -1013,8 +1015,9 @@ func sessionRowForHydrate(id, orgID uuid.UUID, snapshotKey *string, sandboxState
 // fakeHydrateSnapshotStore is a minimal SnapshotStore that writes a canned
 // payload on Load.
 type fakeHydrateSnapshotStore struct {
-	payload []byte
-	loadErr error
+	payload   []byte
+	loadErr   error
+	loadCalls int
 }
 
 func (f *fakeHydrateSnapshotStore) Save(context.Context, string, io.Reader) error {
@@ -1022,6 +1025,7 @@ func (f *fakeHydrateSnapshotStore) Save(context.Context, string, io.Reader) erro
 }
 
 func (f *fakeHydrateSnapshotStore) Load(_ context.Context, _ string, w io.Writer) error {
+	f.loadCalls++
 	if f.loadErr != nil {
 		return f.loadErr
 	}
@@ -1640,9 +1644,11 @@ func TestPreviewHandler_StartPreview_PublishContainerIDFails(t *testing.T) {
 }
 
 // TestPreviewHandler_StartPreview_PublishLosesRace covers the CAS-loss branch
-// of PublishHydratedContainerID: a concurrent orchestrator already published
-// a different container_id, so the preview must destroy its local sandbox and
-// surface a NO_SANDBOX error instructing the caller to retry.
+// of PublishHydratedContainerID: a concurrent orchestrator publishes a
+// different container_id while we're mid-restore (after our pre-hydrate peek
+// found the row clear), so the CAS detects the loss and the preview must
+// destroy its local sandbox and surface a SANDBOX_BUSY error instructing the
+// caller to retry.
 func TestPreviewHandler_StartPreview_PublishLosesRace(t *testing.T) {
 	t.Parallel()
 
@@ -1662,8 +1668,13 @@ func TestPreviewHandler_StartPreview_PublishLosesRace(t *testing.T) {
 				AddRow(sessionRowForHydrate(sessionID, orgID, &key, "snapshotted")...),
 		)
 	expectReserveSuccess(mock, sessionID, orgID, userID)
+	// Pre-hydrate peek (single-column COALESCE) finds container_id still NULL
+	// (the orchestrator hasn't published yet) — hydrate proceeds.
+	mock.ExpectQuery("SELECT COALESCE\\(container_id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"container_id"}).AddRow(""))
 	// COALESCE returns the orchestrator's pre-existing ID, proving our preview
-	// lost the race.
+	// lost the race during the snapshot restore window.
 	mock.ExpectQuery("UPDATE sessions\\s+SET container_id = COALESCE").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"coalesce"}).AddRow("orch-winner"))
@@ -1688,8 +1699,66 @@ func TestPreviewHandler_StartPreview_PublishLosesRace(t *testing.T) {
 	h.StartPreview(w, req)
 
 	require.Equal(t, http.StatusConflict, w.Code)
-	require.Contains(t, w.Body.String(), "NO_SANDBOX")
+	require.Contains(t, w.Body.String(), "SANDBOX_BUSY")
 	require.Equal(t, 1, sp.GetDestroyCalls(), "local container must be destroyed on race loss")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+// TestPreviewHandler_StartPreview_PrehydratePeekShortCircuit covers the fast
+// path of race detection: the peer (typically a continue_session turn)
+// publishes container_id between our initial session read and the start of
+// hydrate. The pre-hydrate peek finds the row populated and returns
+// SANDBOX_BUSY without ever touching the snapshot store or sandbox provider.
+//
+// This avoids the historical failure where full restore + container create
+// (~20s) blew past the HTTP server's 15s WriteTimeout, surfacing as a 502
+// EOF on the API instead of a clean 409 SANDBOX_BUSY.
+func TestPreviewHandler_StartPreview_PrehydratePeekShortCircuit(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	orgID := uuid.New()
+	userID := uuid.New()
+	sessionID := uuid.New()
+	key := "snap-key"
+
+	mock.ExpectQuery("SELECT .+ FROM sessions WHERE id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(sessionRowColumns).
+				AddRow(sessionRowForHydrate(sessionID, orgID, &key, "snapshotted")...),
+		)
+	expectReserveSuccess(mock, sessionID, orgID, userID)
+	// Pre-hydrate peek (single-column COALESCE) finds container_id has been
+	// published since our first read — short-circuit out without restoring
+	// or creating a container.
+	mock.ExpectQuery("SELECT COALESCE\\(container_id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"container_id"}).AddRow("orch-winner"))
+	// hydratedID="" because we never created a container.
+	expectAbortReservationNoDestroy(mock)
+
+	h := newPreviewHandlerWithMock(mock)
+	h.sessionStore = db.NewSessionStore(mock)
+	sp := testutil.NewMockSandboxProvider()
+	h.sandboxProvider = sp
+	// Snapshot store presence required so we don't trip the NO_SANDBOX guard.
+	snaps := &fakeHydrateSnapshotStore{payload: []byte("snap")}
+	h.snapshots = snaps
+
+	req := httptest.NewRequest(http.MethodPost, "/preview", strings.NewReader(""))
+	req = previewTestContextWithIDs(req, orgID, userID, sessionID.String())
+	w := httptest.NewRecorder()
+
+	h.StartPreview(w, req)
+
+	require.Equal(t, http.StatusConflict, w.Code)
+	require.Contains(t, w.Body.String(), "SANDBOX_BUSY")
+	require.Equal(t, 0, snaps.loadCalls, "must not load the snapshot when peek detects the race")
+	require.Equal(t, 0, sp.GetDestroyCalls(), "no container to destroy when peek short-circuits")
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
