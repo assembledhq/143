@@ -1,6 +1,6 @@
 # Design: 143.dev
 
-> **Status:** Partially Implemented | **Last reviewed:** 2026-05-01
+> **Status:** Partially Implemented | **Last reviewed:** 2026-05-02
 
 [143.dev](http://143.dev) is an open-source platform that turns customer pain and production errors into safe, validated code fixes that ship automatically.
 
@@ -46,7 +46,7 @@ The system aggregates issues from support, Sentry, and Linear, prioritizes them 
     - The admins can specify product context (philosophy + direction + focus/avoid areas) to steer prioritization.
     - A **PM agent** now runs on a batch cadence, clusters related issues, produces a prioritized plan, and can propose new **repo-scoped projects** for human review when it finds a strategic opportunity (replacing per-issue auto-triggering for automation).
     - **Projects** are the primary long-term control surface. The canonical review surface for PM-proposed projects lives in `Projects`, while `Autopilot` shows lightweight PM proposal summaries and links users into that review flow. Each project can be `finite` (completes) or `evergreen` (continuous maintenance) with optional cadence-based execution and project-scoped quick actions.
-    - Session and project sidebars should feel native on phones: a left swipe reveals an archive action beneath the row, with an iOS-style icon-led affordance and tap-to-close behavior when the row is already open.
+    - Session and project sidebars should feel native on phones: a left swipe reveals an archive action beneath the row, with an iOS-style icon-led affordance, progressive fill/ready-state feedback as the user approaches the auto-archive threshold, and tap-to-close behavior when the row is already open.
 - Step 3: Execute a coding agent
     - Admins set a **confidence threshold** that controls which issues the system will auto-attempt. Issues below the threshold require manual triggering.
     - Recurring team automations should start from a **structured template library** rather than bare one-line prompts. The default templates are frontend-defined issue-style prompts with explicit sections for task framing, output requirements, and verification, plus a deeper `/automations/templates` browse page for less common workflows.
