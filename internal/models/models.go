@@ -71,9 +71,24 @@ type Integration struct {
 	Provider           IntegrationProvider `db:"provider" json:"provider"`
 	Config             json.RawMessage     `db:"config" json:"-"` // never expose config in JSON (contains secrets)
 	GitHubAppInstalled *bool               `db:"-" json:"github_app_installed,omitempty"`
-	Status             IntegrationStatus   `db:"status" json:"status"`
-	LastSyncedAt       *time.Time          `db:"last_synced_at" json:"last_synced_at,omitempty"`
-	CreatedAt          time.Time           `db:"created_at" json:"created_at"`
+	// AuthError is a derived view of the auth-failure markers stamped into
+	// config jsonb when a provider rejects our access token (currently only
+	// Linear). Populated by ListIntegrations / Get* paths via deriveIntegrationStatus
+	// so the integrations settings UI can render a "Reconnect" CTA without
+	// leaking the rest of config (which contains secrets — see json:"-" above).
+	AuthError    *IntegrationAuthError `db:"-" json:"auth_error,omitempty"`
+	Status       IntegrationStatus     `db:"status" json:"status"`
+	LastSyncedAt *time.Time            `db:"last_synced_at" json:"last_synced_at,omitempty"`
+	CreatedAt    time.Time             `db:"created_at" json:"created_at"`
+}
+
+// IntegrationAuthError is the user-facing shape of an auth failure: a
+// short reason string and the timestamp the failure was last observed.
+// SECURITY: must not include raw provider responses or tokens — the
+// reason field is set to a controlled string at the call site.
+type IntegrationAuthError struct {
+	Reason string    `json:"reason"`
+	At     time.Time `json:"at"`
 }
 
 type Repository struct {

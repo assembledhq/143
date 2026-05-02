@@ -291,6 +291,69 @@ describe("integration connection cards", () => {
     expect(screen.getByText("Failed to disconnect.")).toBeInTheDocument();
   });
 
+  it("renders the auth-error banner and folds Reconnect into the row's primary CTA", async () => {
+    const user = userEvent.setup();
+    const onConnectLinear = vi.fn();
+
+    renderWithProviders(
+      <AdditionalIntegrationCards
+        sentryConnected={false}
+        linearConnected={false}
+        linearLoading={false}
+        linearAuthError={{
+          reason: "Linear rejected the access token (HTTP 401). Reconnect to continue syncing.",
+          at: "2026-05-02T20:02:11Z",
+        }}
+        slackConnected={false}
+        notionConnected={false}
+        onConnectSentry={vi.fn()}
+        onConnectLinear={onConnectLinear}
+        onConnectSlack={vi.fn()}
+        onConnectNotion={vi.fn()}
+      />
+    );
+
+    // Reason banner present.
+    expect(screen.getByText("Reconnect required")).toBeInTheDocument();
+    expect(screen.getByText(/Linear rejected the access token/)).toBeInTheDocument();
+
+    // Single CTA on the row — not duplicated inside the banner.
+    const reconnectButtons = screen.getAllByRole("button", { name: "Reconnect Linear" });
+    expect(reconnectButtons).toHaveLength(1);
+
+    // Generic "Connect Linear" affordance is suppressed when authErrored.
+    expect(screen.queryByRole("button", { name: "Connect Linear" })).not.toBeInTheDocument();
+
+    await user.click(reconnectButtons[0]);
+    expect(onConnectLinear).toHaveBeenCalledTimes(1);
+  });
+
+  it("readOnly auth-errored row shows a 'Reconnect required' badge and no buttons", () => {
+    renderWithProviders(
+      <AdditionalIntegrationCards
+        sentryConnected={false}
+        linearConnected={false}
+        linearLoading={false}
+        linearAuthError={{
+          reason: "Linear rejected the access token (HTTP 401). Reconnect to continue syncing.",
+          at: "2026-05-02T20:02:11Z",
+        }}
+        slackConnected={false}
+        notionConnected={false}
+        onConnectSentry={vi.fn()}
+        onConnectLinear={vi.fn()}
+        onConnectSlack={vi.fn()}
+        onConnectNotion={vi.fn()}
+        readOnly
+      />
+    );
+
+    // Two "Reconnect required" elements expected: the alert title above the
+    // row and the read-only status badge in the action slot.
+    expect(screen.getAllByText("Reconnect required")).toHaveLength(2);
+    expect(screen.queryByRole("button", { name: "Reconnect Linear" })).not.toBeInTheDocument();
+  });
+
   it("readOnly hides connect/disconnect buttons and per-repo controls; shows status badges instead", () => {
     renderWithProviders(
       <AllIntegrationCards

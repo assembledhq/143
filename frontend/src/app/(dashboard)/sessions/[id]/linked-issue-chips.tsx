@@ -27,22 +27,29 @@ export function LinkedIssueChips({ session }: { session: Session }) {
   return (
     <div className="flex flex-wrap items-center gap-1 ml-2 shrink-0">
       {prepareFailed && (
-        <span
+        // Clickable link rather than a plain status chip: the most common
+        // root cause we've seen for prepare-failed is a revoked Linear OAuth
+        // token, and the integrations settings page now surfaces the
+        // specific reason + a Reconnect CTA. Sending the user there beats
+        // a dead-end "prepare failed" badge with no path forward.
+        <a
           key="linear-prepare-failed"
+          href="/settings/integrations"
           role="status"
-          className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium bg-amber-500/10 text-amber-700 dark:text-amber-300 border border-amber-500/30"
+          className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium bg-amber-500/10 text-amber-700 dark:text-amber-300 border border-amber-500/30 hover:bg-amber-500/20"
           aria-describedby="linear-prepare-failed-detail"
         >
-          Linear: prepare failed
+          Linear: prepare failed — fix
           {/* sr-only sibling instead of `title=…`: most screen readers ignore
               title attributes, so the detail goes through aria-describedby. */}
           <span id="linear-prepare-failed-detail" className="sr-only">
             Linear context preparation failed; turn 1 ran without the primary
-            issue snapshot. Re-paste the Linear URL in a follow-up message
-            to re-trigger detection, or contact an operator to inspect the
-            session&apos;s debug surface.
+            issue snapshot. The most common cause is a revoked or expired
+            Linear access token — open Settings → Integrations to verify the
+            connection, or re-paste the Linear URL in a follow-up message
+            to re-trigger detection.
           </span>
-        </span>
+        </a>
       )}
       {links.map((link) => {
         const isLinear = link.issue_source === "linear";

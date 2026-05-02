@@ -84,6 +84,17 @@ export interface Integration {
   org_id: string;
   provider: string;
   github_app_installed?: boolean;
+  /**
+   * Surfaced by the backend when a provider rejects our access token (e.g.
+   * Linear returns 401). Populated by deriveIntegrationStatus on the server
+   * — when present, the integrations settings card renders an amber banner
+   * with a Reconnect CTA. The reason field is a controlled string from the
+   * backend; never render arbitrary provider responses through this surface.
+   */
+  auth_error?: {
+    reason: string;
+    at: string;
+  };
   status: string;
   last_synced_at?: string;
   created_at: string;

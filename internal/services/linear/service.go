@@ -2,6 +2,7 @@ package linear
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -55,16 +56,17 @@ import (
 type Service struct {
 	logger zerolog.Logger
 
-	integrations      IntegrationReader
-	credentials       CredentialReader
-	issues            *db.IssueStore
-	links             *db.SessionIssueLinkStore
-	teamKeys          *db.LinearTeamKeyStore
-	providerState     providerStateStore
-	stateEvents       stateEventStore
-	sessions          *db.SessionStore
-	clientFactory     ClientFactory
-	orgSettingsLoader OrgSettingsLoader
+	integrations       IntegrationReader
+	integrationsWriter IntegrationWriter
+	credentials        CredentialReader
+	issues             *db.IssueStore
+	links              *db.SessionIssueLinkStore
+	teamKeys           *db.LinearTeamKeyStore
+	providerState      providerStateStore
+	stateEvents        stateEventStore
+	sessions           *db.SessionStore
+	clientFactory      ClientFactory
+	orgSettingsLoader  OrgSettingsLoader
 	// jobEnqueuer / linksChanged are populated by the boot-time wiring in
 	// router.go and cmd/server/main.go *after* NewService returns: the SSE
 	// streams aren't constructed until later, and the JobStore comes from a
@@ -167,6 +169,15 @@ type LinksChangedNotifier func(ctx context.Context, orgID, sessionID uuid.UUID, 
 // integration status for an org.
 type IntegrationReader interface {
 	GetByOrgAndProvider(ctx context.Context, orgID uuid.UUID, provider string) (models.Integration, error)
+}
+
+// IntegrationWriter is the optional surface used by Mark/ClearIntegration*
+// to flip status and patch config when the service observes auth failures
+// or a successful probe. Optional and nil-safe so test harnesses (and any
+// wiring path that doesn't need write access) can stay minimal.
+type IntegrationWriter interface {
+	UpdateStatus(ctx context.Context, orgID, id uuid.UUID, status string) error
+	UpdateConfig(ctx context.Context, orgID, integrationID uuid.UUID, config json.RawMessage) error
 }
 
 // CredentialReader is the narrow surface the service needs to resolve a
@@ -283,17 +294,18 @@ type WorkflowState struct {
 // Config packages constructor dependencies. Using a config struct keeps the
 // constructor signature stable as we add more stores over time.
 type Config struct {
-	Logger            zerolog.Logger
-	Integrations      IntegrationReader
-	Credentials       CredentialReader
-	Issues            *db.IssueStore
-	Links             *db.SessionIssueLinkStore
-	TeamKeys          *db.LinearTeamKeyStore
-	ProviderState     *db.LinearProviderStateStore
-	StateEvents       *db.LinearStateEventStore
-	Sessions          *db.SessionStore
-	ClientFactory     ClientFactory
-	OrgSettingsLoader OrgSettingsLoader
+	Logger             zerolog.Logger
+	Integrations       IntegrationReader
+	IntegrationsWriter IntegrationWriter
+	Credentials        CredentialReader
+	Issues             *db.IssueStore
+	Links              *db.SessionIssueLinkStore
+	TeamKeys           *db.LinearTeamKeyStore
+	ProviderState      *db.LinearProviderStateStore
+	StateEvents        *db.LinearStateEventStore
+	Sessions           *db.SessionStore
+	ClientFactory      ClientFactory
+	OrgSettingsLoader  OrgSettingsLoader
 	// Pool is used by HandleMilestone / HandleStateTransition to begin a tx
 	// for SELECT ... FOR UPDATE on the provider-state row, so two concurrent
 	// milestone events for the same link can't both create a rolling
@@ -320,20 +332,21 @@ func NewService(cfg Config) *Service {
 		cache = &teamKeyAllowlistCache{}
 	}
 	return &Service{
-		teamKeyCache:      cache,
-		logger:            cfg.Logger,
-		integrations:      cfg.Integrations,
-		credentials:       cfg.Credentials,
-		issues:            cfg.Issues,
-		links:             cfg.Links,
-		teamKeys:          cfg.TeamKeys,
-		providerState:     cfg.ProviderState,
-		stateEvents:       cfg.StateEvents,
-		sessions:          cfg.Sessions,
-		clientFactory:     cfg.ClientFactory,
-		orgSettingsLoader: cfg.OrgSettingsLoader,
-		pool:              cfg.Pool,
-		appBaseURL:        strings.TrimRight(cfg.AppBaseURL, "/"),
+		teamKeyCache:       cache,
+		logger:             cfg.Logger,
+		integrations:       cfg.Integrations,
+		integrationsWriter: cfg.IntegrationsWriter,
+		credentials:        cfg.Credentials,
+		issues:             cfg.Issues,
+		links:              cfg.Links,
+		teamKeys:           cfg.TeamKeys,
+		providerState:      cfg.ProviderState,
+		stateEvents:        cfg.StateEvents,
+		sessions:           cfg.Sessions,
+		clientFactory:      cfg.ClientFactory,
+		orgSettingsLoader:  cfg.OrgSettingsLoader,
+		pool:               cfg.Pool,
+		appBaseURL:         strings.TrimRight(cfg.AppBaseURL, "/"),
 	}
 }
 

@@ -308,7 +308,19 @@ func (h *IntegrationHandler) ListIntegrations(w http.ResponseWriter, r *http.Req
 }
 
 func (h *IntegrationHandler) deriveIntegrationStatus(ctx context.Context, integration *models.Integration) {
-	if integration == nil || integration.Provider != models.IntegrationProviderGitHub {
+	if integration == nil {
+		return
+	}
+
+	// Auth-error surfacing is provider-agnostic: the linear service stamps
+	// the markers, but the UI can render the same banner for any provider
+	// that adopts the convention later. Read-only — never echo the rest of
+	// config (which holds tokens).
+	if authErr := readAuthErrorFromConfig(integration.Config); authErr != nil {
+		integration.AuthError = authErr
+	}
+
+	if integration.Provider != models.IntegrationProviderGitHub {
 		return
 	}
 
@@ -325,6 +337,31 @@ func (h *IntegrationHandler) deriveIntegrationStatus(ctx context.Context, integr
 		}
 	}
 	integration.GitHubAppInstalled = &installed
+}
+
+// readAuthErrorFromConfig extracts the {last_auth_error, last_auth_error_at}
+// pair the linear service stamps when it sees a 401. Returns nil when
+// either key is missing or the timestamp doesn't parse — partial markers
+// are treated as absent so a malformed jsonb doesn't render an empty banner.
+func readAuthErrorFromConfig(raw json.RawMessage) *models.IntegrationAuthError {
+	if len(raw) == 0 {
+		return nil
+	}
+	var cfg struct {
+		LastAuthError   string `json:"last_auth_error"`
+		LastAuthErrorAt string `json:"last_auth_error_at"`
+	}
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		return nil
+	}
+	if cfg.LastAuthError == "" || cfg.LastAuthErrorAt == "" {
+		return nil
+	}
+	at, err := time.Parse(time.RFC3339, cfg.LastAuthErrorAt)
+	if err != nil {
+		return nil
+	}
+	return &models.IntegrationAuthError{Reason: cfg.LastAuthError, At: at}
 }
 
 // DisconnectIntegration sets the integration status to inactive for a given provider.
@@ -1177,7 +1214,26 @@ func (h *IntegrationHandler) ensureIntegration(ctx context.Context, orgID uuid.U
 	}
 
 	if len(activeIntegrations) > 0 {
-		return activeIntegrations[0], false, nil
+		integration := activeIntegrations[0]
+		// A reconnect flow lands here: if the row is errored (most often
+		// from a prior 401 the worker stamped) restore it to active and
+		// strip the auth-error markers so the settings UI's Reconnect CTA
+		// goes away immediately. Best-effort — failures here don't prevent
+		// the OAuth flow from completing because the credential write has
+		// already succeeded; the next successful Linear API call will
+		// invoke ClearIntegrationUnauthorized and converge state anyway.
+		clearedConfig, configChanged := stripAuthErrorMarkers(integration.Config)
+		if configChanged {
+			if err := h.integrationStore.UpdateConfig(ctx, orgID, integration.ID, clearedConfig); err == nil {
+				integration.Config = clearedConfig
+			}
+		}
+		if integration.Status == models.IntegrationStatusError {
+			if err := h.integrationStore.UpdateStatus(ctx, orgID, integration.ID, string(models.IntegrationStatusActive)); err == nil {
+				integration.Status = models.IntegrationStatusActive
+			}
+		}
+		return integration, false, nil
 	}
 
 	integration := &models.Integration{
@@ -1193,6 +1249,40 @@ func (h *IntegrationHandler) ensureIntegration(ctx context.Context, orgID uuid.U
 	h.maybeEnqueuePMContext(ctx, orgID)
 
 	return *integration, true, nil
+}
+
+// stripAuthErrorMarkers removes the auth-error keys the linear service
+// stamps into integrations.config when it observes a 401. Returns the
+// (possibly unchanged) jsonb and a flag indicating whether any keys were
+// dropped — the caller skips the UPDATE when nothing changed to avoid
+// pointless updated_at churn on the integrations row.
+//
+// Defined here (in the integrations handler package) so the OAuth reconnect
+// path doesn't need to import internal/services/linear and so the key names
+// stay private to the linear service. We accept the small string-literal
+// duplication ("last_auth_error", "last_auth_error_at") in exchange for a
+// clean dependency direction; if more providers grow auth-error markers
+// later, lift this to a shared helper.
+func stripAuthErrorMarkers(raw json.RawMessage) (json.RawMessage, bool) {
+	if len(raw) == 0 {
+		return raw, false
+	}
+	cfg := map[string]any{}
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		return raw, false
+	}
+	_, hadErr := cfg["last_auth_error"]
+	_, hadAt := cfg["last_auth_error_at"]
+	if !hadErr && !hadAt {
+		return raw, false
+	}
+	delete(cfg, "last_auth_error")
+	delete(cfg, "last_auth_error_at")
+	out, err := json.Marshal(cfg)
+	if err != nil {
+		return raw, false
+	}
+	return out, true
 }
 
 // --- Redirect URLs ---
