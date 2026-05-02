@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"path"
+	"sort"
 	"sync"
 	"time"
 
@@ -130,11 +131,12 @@ type CodingCredentialShedder interface {
 	MarkAuthRejected(id uuid.UUID)
 }
 
-// CodingCredentialPicker is implemented by the real unified store. It applies
-// the store's in-process health cache, so AgentEnv uses it when available
-// instead of walking ListResolvable directly.
-type CodingCredentialPicker interface {
-	PickRunnable(ctx context.Context, scope models.Scope, provider models.ProviderName) (*models.DecryptedCodingCredential, error)
+// CodingCredentialMultiPicker is implemented by the real unified store for
+// agent requests that can be satisfied by multiple provider rows, such as an
+// API key provider plus its subscription twin. It merges those providers
+// before selection so personal rows always outrank org fallback rows.
+type CodingCredentialMultiPicker interface {
+	PickRunnableMulti(ctx context.Context, scope models.Scope, providers []models.ProviderName) (*models.DecryptedCodingCredential, error)
 }
 
 // codingShedder type-asserts the configured CodingCredentialProvider into the
@@ -540,65 +542,96 @@ func (e *AgentEnv) resolveFromCodingCredentials(ctx context.Context, orgID uuid.
 		return nil, false
 	}
 
-	sawUnifiedRows := false
-	if cfg, sawRows := e.pickFromCodingProvider(ctx, orgID, userID, provider); cfg != nil {
-		return cfg, true
-	} else if sawRows {
-		sawUnifiedRows = true
-	}
+	providers := []models.ProviderName{provider}
 	if twin := unifiedSubscriptionTwin(provider); twin != "" {
-		if cfg, sawRows := e.pickFromCodingProvider(ctx, orgID, userID, twin); cfg != nil {
-			return cfg, true
-		} else if sawRows {
-			sawUnifiedRows = true
-		}
+		providers = append(providers, twin)
 	}
-	return nil, sawUnifiedRows
+	if cfg, sawRows := e.pickFromCodingProviderSet(ctx, orgID, userID, provider, providers); cfg != nil || sawRows {
+		return cfg, sawRows
+	}
+	return nil, false
 }
 
-func (e *AgentEnv) pickFromCodingProvider(ctx context.Context, orgID uuid.UUID, userID *uuid.UUID, provider models.ProviderName) (models.ProviderConfig, bool) {
-	creds, err := e.codingCredentials.ListResolvable(ctx, orgID, userID, provider)
-	if err != nil {
-		e.logger.Warn().Err(err).Str("provider", string(provider)).Msg("coding credential resolver lookup failed; falling back to legacy")
+func (e *AgentEnv) pickFromCodingProviderSet(ctx context.Context, orgID uuid.UUID, userID *uuid.UUID, requestedProvider models.ProviderName, providers []models.ProviderName) (models.ProviderConfig, bool) {
+	rowsByProvider, sawRows, ok := e.listCodingProviderRows(ctx, orgID, userID, providers)
+	if !ok {
 		return nil, false
 	}
-	if len(creds) == 0 {
+	if !sawRows {
 		return nil, false
 	}
 
-	if picker, ok := e.codingCredentials.(CodingCredentialPicker); ok {
-		picked, pickErr := picker.PickRunnable(ctx, models.Scope{OrgID: orgID, UserID: userID}, provider)
+	if picker, ok := e.codingCredentials.(CodingCredentialMultiPicker); ok {
+		picked, pickErr := picker.PickRunnableMulti(ctx, models.Scope{OrgID: orgID, UserID: userID}, providers)
 		if pickErr != nil {
-			e.logger.Warn().Err(pickErr).Str("provider", string(provider)).Msg("coding credential picker found no eligible credential")
+			e.logger.Warn().Err(pickErr).Str("provider", string(requestedProvider)).Msg("coding credential picker found no eligible credential")
 			return nil, true
 		}
 		if picked == nil {
 			return nil, true
 		}
-		if cfg := compatibleCodingProviderConfig(provider, picked.Config); cfg != nil {
-			e.recordPick(orgID, userID, provider, picked.ID)
+		if cfg := compatibleCodingProviderConfig(picked.Provider, picked.Config); cfg != nil {
+			e.recordPick(orgID, userID, picked.Provider, picked.ID)
+			if picked.Provider != requestedProvider {
+				e.recordPick(orgID, userID, requestedProvider, picked.ID)
+			}
 			return cfg, true
 		}
 		return nil, true
 	}
 
+	creds := make([]models.DecryptedCodingCredential, 0)
+	for _, provider := range providers {
+		creds = append(creds, rowsByProvider[provider]...)
+	}
+	sortCodingCredentialResolutionRows(creds)
 	for _, cred := range creds {
 		if cred.Status != models.CodingCredentialStatusActive {
 			continue
 		}
-		// Skip rows whose decrypted config is unusable for this provider —
-		// e.g. a legacy AnthropicConfig with Subscription set but APIKey ==
-		// "" is a subscription-only row that the API-key resolver path
-		// can't consume. Without this gate, the unified resolver would
-		// short-circuit the legacy fallback and the env-var path would
-		// silently produce no auth. The subscription twin lookup separately
-		// finds the subscription flavor.
-		if cfg := compatibleCodingProviderConfig(provider, cred.Config); cfg != nil {
-			e.recordPick(orgID, userID, provider, cred.ID)
+		if cfg := compatibleCodingProviderConfig(cred.Provider, cred.Config); cfg != nil {
+			e.recordPick(orgID, userID, cred.Provider, cred.ID)
+			if cred.Provider != requestedProvider {
+				e.recordPick(orgID, userID, requestedProvider, cred.ID)
+			}
 			return cfg, true
 		}
 	}
-	return nil, false
+	return nil, true
+}
+
+func (e *AgentEnv) listCodingProviderRows(ctx context.Context, orgID uuid.UUID, userID *uuid.UUID, providers []models.ProviderName) (map[models.ProviderName][]models.DecryptedCodingCredential, bool, bool) {
+	rowsByProvider := make(map[models.ProviderName][]models.DecryptedCodingCredential, len(providers))
+	sawRows := false
+	for _, provider := range providers {
+		creds, err := e.codingCredentials.ListResolvable(ctx, orgID, userID, provider)
+		if err != nil {
+			e.logger.Warn().Err(err).Str("provider", string(provider)).Msg("coding credential resolver lookup failed; falling back to legacy")
+			return nil, false, false
+		}
+		if len(creds) > 0 {
+			sawRows = true
+		}
+		rowsByProvider[provider] = creds
+	}
+	return rowsByProvider, sawRows, true
+}
+
+func sortCodingCredentialResolutionRows(creds []models.DecryptedCodingCredential) {
+	sort.SliceStable(creds, func(i, j int) bool {
+		leftPersonal := creds[i].UserID != nil
+		rightPersonal := creds[j].UserID != nil
+		if leftPersonal != rightPersonal {
+			return leftPersonal
+		}
+		if creds[i].Priority != creds[j].Priority {
+			return creds[i].Priority < creds[j].Priority
+		}
+		if !creds[i].CreatedAt.Equal(creds[j].CreatedAt) {
+			return creds[i].CreatedAt.Before(creds[j].CreatedAt)
+		}
+		return false
+	})
 }
 
 // unifiedSubscriptionTwin returns the new subscription provider name for an

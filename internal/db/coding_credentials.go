@@ -18,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 	"math/rand/v2"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -515,6 +516,75 @@ func (s *CodingCredentialStore) PickRunnable(ctx context.Context, scope models.S
 		return &picked, nil
 	}
 	return nil, ErrCodingCredentialNotFound
+}
+
+// PickRunnableMulti is PickRunnable across several provider names that all
+// satisfy the same agent request (for example Anthropic API-key rows plus
+// Anthropic subscription rows). It preserves the resolver invariant that every
+// personal candidate is tried before any org fallback, then orders by the
+// shared stack priority inside each scope.
+func (s *CodingCredentialStore) PickRunnableMulti(ctx context.Context, scope models.Scope, providers []models.ProviderName) (*models.DecryptedCodingCredential, error) {
+	if len(providers) == 0 {
+		return nil, ErrCodingCredentialNotFound
+	}
+	uniqueProviders := make([]models.ProviderName, 0, len(providers))
+	seenProviders := make(map[models.ProviderName]struct{}, len(providers))
+	for _, provider := range providers {
+		if provider == "" {
+			continue
+		}
+		if _, ok := seenProviders[provider]; ok {
+			continue
+		}
+		seenProviders[provider] = struct{}{}
+		uniqueProviders = append(uniqueProviders, provider)
+	}
+	if len(uniqueProviders) == 0 {
+		return nil, ErrCodingCredentialNotFound
+	}
+
+	resolvedByProvider, err := s.ListResolvableMulti(ctx, scope.OrgID, scope.UserID, uniqueProviders)
+	if err != nil {
+		return nil, err
+	}
+	creds := make([]models.DecryptedCodingCredential, 0)
+	for _, provider := range uniqueProviders {
+		creds = append(creds, resolvedByProvider[provider]...)
+	}
+	if len(creds) == 0 {
+		return nil, ErrCodingCredentialNotFound
+	}
+	sortResolvedCredentialRows(creds)
+
+	for _, tier := range groupByPriorityAndScope(creds) {
+		eligible := s.health.filter(tier)
+		if len(eligible) == 0 {
+			continue
+		}
+		s.rngMu.Lock()
+		idx := s.rng.IntN(len(eligible))
+		s.rngMu.Unlock()
+		picked := eligible[idx]
+		return &picked, nil
+	}
+	return nil, ErrCodingCredentialNotFound
+}
+
+func sortResolvedCredentialRows(creds []models.DecryptedCodingCredential) {
+	sort.SliceStable(creds, func(i, j int) bool {
+		leftPersonal := creds[i].UserID != nil
+		rightPersonal := creds[j].UserID != nil
+		if leftPersonal != rightPersonal {
+			return leftPersonal
+		}
+		if creds[i].Priority != creds[j].Priority {
+			return creds[i].Priority < creds[j].Priority
+		}
+		if !creds[i].CreatedAt.Equal(creds[j].CreatedAt) {
+			return creds[i].CreatedAt.Before(creds[j].CreatedAt)
+		}
+		return false
+	})
 }
 
 // groupByPriorityAndScope walks an already-sorted ListResolvable result and

@@ -502,6 +502,46 @@ func TestListResolvableMulti_BulkFetchAndCacheReuse(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "ListResolvableMulti must use a single query per scope half")
 }
 
+func TestCodingCredentialStorePickRunnableMulti_MergesProvidersByScopeBeforeOrgFallback(t *testing.T) {
+	t.Parallel()
+
+	store, mock := newMockCodingCredentialStore(t)
+	defer mock.Close()
+
+	orgID := uuid.New()
+	userID := uuid.New()
+	personalSubID := uuid.New()
+	orgAPIKeyID := uuid.New()
+	scope := models.Scope{OrgID: orgID, UserID: &userID}
+	providers := []models.ProviderName{models.ProviderAnthropic, models.ProviderAnthropicSubscription}
+
+	personalRows := pgxmock.NewRows(codingCredentialTestColumns)
+	personalRows = addCodingCredentialRow(personalRows,
+		codingCredentialRow(t, store, orgID, &userID, personalSubID, models.ProviderAnthropicSubscription, models.AnthropicSubscriptionConfig{AccessToken: "personal-token", RefreshToken: "personal-refresh"}, 10, models.CodingCredentialStatusActive),
+	)
+	orgRows := pgxmock.NewRows(codingCredentialTestColumns)
+	orgRows = addCodingCredentialRow(orgRows,
+		codingCredentialRow(t, store, orgID, nil, orgAPIKeyID, models.ProviderAnthropic, models.AnthropicConfig{APIKey: "org-api-key"}, 1, models.CodingCredentialStatusActive),
+	)
+
+	mock.ExpectQuery(`FROM coding_credentials`).
+		WithArgs(codingAnyArgs(3)...).
+		WillReturnRows(personalRows)
+	mock.ExpectQuery(`FROM coding_credentials`).
+		WithArgs(codingAnyArgs(2)...).
+		WillReturnRows(orgRows)
+
+	picked, err := store.PickRunnableMulti(context.Background(), scope, providers)
+	require.NoError(t, err, "PickRunnableMulti should pick a credential from the merged provider set")
+	require.Equal(t, personalSubID, picked.ID, "PickRunnableMulti should choose a personal subscription before an org API-key fallback")
+
+	store.MarkRateLimited(personalSubID)
+	picked, err = store.PickRunnableMulti(context.Background(), scope, providers)
+	require.NoError(t, err, "PickRunnableMulti should continue to org fallback after the personal candidate is shed")
+	require.Equal(t, orgAPIKeyID, picked.ID, "PickRunnableMulti should fall back to the org API key only after personal rows are ineligible")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func TestCodingCredentialStoreOrgScopeBranches(t *testing.T) {
 	t.Parallel()
 

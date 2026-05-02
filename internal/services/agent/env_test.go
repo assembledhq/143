@@ -143,6 +143,28 @@ func (m *envCodingCredentialProvider) PickRunnable(_ context.Context, _ models.S
 	return nil, errEnvCodingCredentialNotFound
 }
 
+func (m *envCodingCredentialProvider) PickRunnableMulti(_ context.Context, _ models.Scope, providers []models.ProviderName) (*models.DecryptedCodingCredential, error) {
+	creds := make([]models.DecryptedCodingCredential, 0)
+	for _, provider := range providers {
+		if err, ok := m.errs[provider]; ok {
+			return nil, err
+		}
+		creds = append(creds, m.resolvable[provider]...)
+	}
+	sortCodingCredentialResolutionRows(creds)
+	for _, cred := range creds {
+		if cred.Status != models.CodingCredentialStatusActive {
+			continue
+		}
+		if containsUUID(m.rateLimitedIDs, cred.ID) || containsUUID(m.authRejectedIDs, cred.ID) {
+			continue
+		}
+		picked := cred
+		return &picked, nil
+	}
+	return nil, errEnvCodingCredentialNotFound
+}
+
 var errEnvCodingCredentialNotFound = errors.New("coding credential not found")
 
 func containsUUID(ids []uuid.UUID, id uuid.UUID) bool {
@@ -681,6 +703,114 @@ func TestAgentEnvResolveProviderConfig_UsesUnifiedSubscriptionTwin(t *testing.T)
 	}
 }
 
+func TestAgentEnvResolveProviderConfig_UnifiedPersonalRowsBeatOrgRowsAcrossAuthTypes(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	orgID := uuid.New()
+	userID := uuid.New()
+	expiresAt := time.Now().Add(time.Hour)
+
+	tests := []struct {
+		name     string
+		provider models.ProviderName
+		rows     map[models.ProviderName][]models.DecryptedCodingCredential
+		assert   func(t *testing.T, cfg models.ProviderConfig)
+	}{
+		{
+			name:     "personal subscription beats org api key",
+			provider: models.ProviderAnthropic,
+			rows: map[models.ProviderName][]models.DecryptedCodingCredential{
+				models.ProviderAnthropic: {
+					{
+						ID:       uuid.New(),
+						OrgID:    orgID,
+						Provider: models.ProviderAnthropic,
+						Status:   models.CodingCredentialStatusActive,
+						Priority: 1,
+						Config:   models.AnthropicConfig{APIKey: "org-api-key"},
+					},
+				},
+				models.ProviderAnthropicSubscription: {
+					{
+						ID:       uuid.New(),
+						OrgID:    orgID,
+						UserID:   &userID,
+						Provider: models.ProviderAnthropicSubscription,
+						Status:   models.CodingCredentialStatusActive,
+						Priority: 10,
+						Config: models.AnthropicSubscriptionConfig{
+							AccessToken:  "personal-sub-token",
+							RefreshToken: "personal-sub-refresh",
+							ExpiresAt:    expiresAt,
+						},
+					},
+				},
+			},
+			assert: func(t *testing.T, cfg models.ProviderConfig) {
+				t.Helper()
+				require.IsType(t, models.AnthropicConfig{}, cfg, "resolver should return the Claude runtime config shape")
+				sub := cfg.(models.AnthropicConfig).Subscription
+				require.NotNil(t, sub, "resolver should choose the personal subscription before org fallback")
+				require.Equal(t, "personal-sub-token", sub.AccessToken, "resolver should use the personal subscription token")
+			},
+		},
+		{
+			name:     "personal api key beats org subscription",
+			provider: models.ProviderOpenAI,
+			rows: map[models.ProviderName][]models.DecryptedCodingCredential{
+				models.ProviderOpenAI: {
+					{
+						ID:       uuid.New(),
+						OrgID:    orgID,
+						UserID:   &userID,
+						Provider: models.ProviderOpenAI,
+						Status:   models.CodingCredentialStatusActive,
+						Priority: 10,
+						Config:   models.OpenAIConfig{APIKey: "personal-openai-key"},
+					},
+				},
+				models.ProviderOpenAISubscription: {
+					{
+						ID:       uuid.New(),
+						OrgID:    orgID,
+						Provider: models.ProviderOpenAISubscription,
+						Status:   models.CodingCredentialStatusActive,
+						Priority: 1,
+						Config: models.OpenAISubscriptionConfig{
+							AccessToken:  "org-sub-token",
+							RefreshToken: "org-sub-refresh",
+							ExpiresAt:    expiresAt,
+						},
+					},
+				},
+			},
+			assert: func(t *testing.T, cfg models.ProviderConfig) {
+				t.Helper()
+				require.IsType(t, models.OpenAIConfig{}, cfg, "resolver should keep personal API keys ahead of org subscription fallback")
+				require.Equal(t, "personal-openai-key", cfg.(models.OpenAIConfig).APIKey, "resolver should use the personal OpenAI API key")
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			env := NewAgentEnv(AgentEnvDeps{
+				CodingCredentials: &envCodingCredentialProvider{resolvable: tt.rows},
+				Provider:          &envSandboxProvider{},
+				Logger:            zerolog.Nop(),
+			})
+
+			cfg := env.resolveProviderConfig(ctx, orgID, &userID, tt.provider)
+
+			tt.assert(t, cfg)
+		})
+	}
+}
+
 func TestAgentEnvResolveOrgProviderConfigAndCompatibility(t *testing.T) {
 	t.Parallel()
 
@@ -817,6 +947,51 @@ func TestAgentEnvShedAfterPick(t *testing.T) {
 	env.ShedAuthRejected(orgID, &userID, models.ProviderAnthropic)
 	require.Equal(t, []uuid.UUID{credID}, coding.authRejectedIDs,
 		"ShedAuthRejected should forward the just-picked credential id to the store")
+}
+
+func TestAgentEnvShedAfterSubscriptionPickUsesAgentProviderAlias(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	orgID := uuid.New()
+	userID := uuid.New()
+	credID := uuid.New()
+
+	coding := &envCodingCredentialProvider{
+		resolvable: map[models.ProviderName][]models.DecryptedCodingCredential{
+			models.ProviderAnthropicSubscription: {
+				{
+					ID:       credID,
+					OrgID:    orgID,
+					UserID:   &userID,
+					Provider: models.ProviderAnthropicSubscription,
+					Status:   models.CodingCredentialStatusActive,
+					Config: models.AnthropicSubscriptionConfig{
+						AccessToken:  "claude-token",
+						RefreshToken: "claude-refresh",
+						ExpiresAt:    time.Now().Add(time.Hour),
+					},
+				},
+			},
+		},
+	}
+
+	env := NewAgentEnv(AgentEnvDeps{
+		CodingCredentials: coding,
+		Provider:          &envSandboxProvider{},
+		Logger:            zerolog.Nop(),
+	})
+
+	cfg := env.resolveProviderConfig(ctx, orgID, &userID, models.ProviderAnthropic)
+	require.IsType(t, models.AnthropicConfig{}, cfg, "resolver should return the Claude runtime config shape for subscription rows")
+
+	env.ShedRateLimited(orgID, &userID, models.ProviderAnthropic)
+	require.Equal(t, []uuid.UUID{credID}, coding.rateLimitedIDs,
+		"ShedRateLimited should forward a subscription pick when called with the agent API-key provider")
+
+	env.ShedAuthRejected(orgID, &userID, models.ProviderAnthropic)
+	require.Equal(t, []uuid.UUID{credID}, coding.authRejectedIDs,
+		"ShedAuthRejected should forward a subscription pick when called with the agent API-key provider")
 }
 
 func TestAgentEnvShedCredentialIsSkippedOnNextResolution(t *testing.T) {
