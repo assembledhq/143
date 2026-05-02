@@ -137,6 +137,11 @@ func (h *SessionHandler) sseFallbackPollInterval() time.Duration {
 		return override
 	}
 	span := int64(sseFallbackPollMax - sseFallbackPollMin)
+	// #nosec G404 -- jitter is a load-shedding mechanism (decorrelate per-
+	// connection Postgres polling so an outage doesn't cause an N-client
+	// dogpile), not a security primitive. An attacker who could predict
+	// the interval gains nothing useful; crypto/rand would just burn
+	// entropy and CPU on a hot path.
 	return sseFallbackPollMin + time.Duration(rand.Int64N(span+1))
 }
 
@@ -152,6 +157,7 @@ func (h *SessionHandler) sseFallbackHeartbeatInterval() time.Duration {
 		return override * 5
 	}
 	span := int64(sseFallbackHeartbeatMax - sseFallbackHeartbeatMin)
+	// #nosec G404 -- non-security jitter; see sseFallbackPollInterval above.
 	return sseFallbackHeartbeatMin + time.Duration(rand.Int64N(span+1))
 }
 
