@@ -115,6 +115,7 @@ var sessionColumnsForFiles = []string{
 	"checkpointed_at", "checkpoint_kind", "checkpoint_capability", "checkpoint_size_bytes", "checkpoint_error",
 	"recovery_state", "recovery_queued_at", "recovery_started_at", "recovery_attempt_count",
 	"target_branch", "working_branch", "base_commit_sha", "repository_id", "diff_stats", "diff_history", "input_manifest", "archived_at", "archived_by_user_id", "automation_run_id", "pr_creation_state", "pr_creation_error", "pr_push_state", "pr_push_error", "diff_collected_at", "latest_diff_snapshot_id",
+	"has_unpushed_changes",
 	"linear_private", "linear_state_sync_disabled", "linear_identifier_hint", "linear_prepare_state",
 	"deleted_at", "git_identity_source", "git_identity_user_id", "created_at",
 }
@@ -127,6 +128,8 @@ func sessionFileTestRow(values ...interface{}) []interface{} {
 	//   - 2 nils right after snapshot_key (pending_snapshot_key, pending_snapshot_set_at)
 	//   - 4 linear_* defaults (migration 000103) just before deleted_at
 	//   - 2 git_identity nils between deleted_at and created_at
+	// Callers already supply has_unpushed_changes, so this helper only backfills
+	// policy, pending_snapshot_*, linear_*, and git_identity_*.
 	if len(values) == len(sessionColumnsForFiles)-3-2-4-2 {
 		row := make([]interface{}, 0, len(values)+11)
 		row = append(row, values[:3]...)
@@ -201,6 +204,7 @@ func setupSessionMockFull(mock pgxmock.PgxPoolIface, orgID, sessionID uuid.UUID,
 				(*string)(nil), // pr_push_error
 				nil,            // diff_collected_at
 				nil,            // latest_diff_snapshot_id
+				false,          // has_unpushed_changes
 				nil,            // deleted_at
 				now,            // created_at
 			)...),

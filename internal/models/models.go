@@ -276,6 +276,10 @@ type Session struct {
 	PRPushError          *string     `db:"pr_push_error" json:"pr_push_error,omitempty"`
 	DiffCollectedAt      *time.Time  `db:"diff_collected_at" json:"diff_collected_at,omitempty"`
 	LatestDiffSnapshotID *uuid.UUID  `db:"latest_diff_snapshot_id" json:"latest_diff_snapshot_id,omitempty"`
+	// HasUnpushedChanges is a derived read-model field: true when the most
+	// recent persisted session HEAD differs from the open PR's tracked head
+	// commit, which means "Push changes" is actionable.
+	HasUnpushedChanges bool `db:"has_unpushed_changes" json:"has_unpushed_changes"`
 	// LinearPrivate suppresses every Linear write for this session. The agent
 	// still receives Linear context locally; nothing leaves 143. Frozen at
 	// session create — see design 62 §"Composer controls must express distinct
@@ -469,6 +473,7 @@ type SessionResult struct {
 	FailureCategory     *string         `json:"failure_category,omitempty"`
 	DiffBaseCommitSHA   *string         `json:"-"`
 	DiffHeadCommitSHA   *string         `json:"-"`
+	DiffWorkspaceDirty  bool            `json:"-"`
 	DiffCollectedAt     *time.Time      `json:"-"`
 	DiffSource          string          `json:"-"`
 }
@@ -482,6 +487,7 @@ type SessionDiffSnapshot struct {
 	Source         string    `db:"source" json:"source"`
 	BaseCommitSHA  string    `db:"base_commit_sha" json:"base_commit_sha"`
 	HeadCommitSHA  *string   `db:"head_commit_sha" json:"head_commit_sha,omitempty"`
+	WorkspaceDirty bool      `db:"workspace_dirty" json:"workspace_dirty"`
 	WorkingBranch  *string   `db:"working_branch" json:"working_branch,omitempty"`
 	TargetBranch   *string   `db:"target_branch" json:"target_branch,omitempty"`
 	Diff           string    `db:"diff" json:"diff"`

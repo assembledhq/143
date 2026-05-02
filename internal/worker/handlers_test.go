@@ -62,6 +62,7 @@ var workerSessionColumns = []string{
 	"recovery_state", "recovery_queued_at", "recovery_started_at", "recovery_attempt_count",
 	"target_branch", "working_branch", "base_commit_sha", "repository_id", "diff_stats", "diff_history", "input_manifest",
 	"archived_at", "archived_by_user_id", "automation_run_id", "pr_creation_state", "pr_creation_error", "pr_push_state", "pr_push_error", "diff_collected_at", "latest_diff_snapshot_id",
+	"has_unpushed_changes",
 	"linear_private", "linear_state_sync_disabled", "linear_identifier_hint", "linear_prepare_state",
 	"deleted_at", "git_identity_source", "git_identity_user_id", "created_at",
 }
@@ -194,13 +195,15 @@ func expandLegacyWorkerSessionRow(values []any) []any {
 }
 
 // preLinearWorkerSessionColumnsLen is len(workerSessionColumns) before
-// migration 103 added the four linear_* fields. Test rows authored before
-// that migration produce dispatch output that's exactly 4 short of the
+// the has_unpushed_changes read-model field and migration 103 added the
+// linear_* fields. Test rows authored before that migration produce
+// dispatch output that's exactly 5 short of the
 // current sessionColumns; we pad after dispatch so the shape matches.
 const preLinearWorkerSessionColumnsLen = 76
 
 func workerLinearSessionDefaults() []any {
 	return []any{
+		false,          // has_unpushed_changes
 		false,          // linear_private
 		false,          // linear_state_sync_disabled
 		(*string)(nil), // linear_identifier_hint
@@ -208,7 +211,8 @@ func workerLinearSessionDefaults() []any {
 	}
 }
 
-// padWorkerLinearFields injects the four linear_* defaults at the position
+// padWorkerLinearFields injects has_unpushed_changes plus the linear_*
+// defaults at the position
 // right before the trailing deleted_at/created_at columns when a row was
 // built without them.
 func padWorkerLinearFields(values []any) []any {
@@ -219,7 +223,7 @@ func padWorkerLinearFields(values []any) []any {
 		return values
 	}
 	insertAt := len(values) - 2 // before deleted_at, created_at
-	row := make([]any, 0, len(values)+4)
+	row := make([]any, 0, len(values)+5)
 	row = append(row, values[:insertAt]...)
 	row = append(row, workerLinearSessionDefaults()...)
 	row = append(row, values[insertAt:]...)

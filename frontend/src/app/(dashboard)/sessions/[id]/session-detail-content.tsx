@@ -2630,7 +2630,7 @@ export function SessionDetailContent({ id }: { id: string }) {
         ? "push_changes"
         : resumeActionParam === "create_pr"
           ? "create_pr"
-          : hasPR && prStatus === "open"
+          : hasPR && prStatus === "open" && !!session?.has_unpushed_changes
             ? "push_changes"
             : "create_pr";
     if (action === "push_changes") {
@@ -2640,7 +2640,7 @@ export function SessionDetailContent({ id }: { id: string }) {
       // running would land an immediate 409 (or stale-snapshot error). The
       // effect re-runs when these dependencies flip, so the replay still
       // happens — just on the next tick when the session is actually ready.
-      const pushAvailable = hasPR && prStatus === "open";
+      const pushAvailable = hasPR && prStatus === "open" && !!session?.has_unpushed_changes;
       if (!pushAvailable || !hasSnapshot || isRunning) return;
       resumeAttemptRef.current = resumePRParam;
       pushChangesMutation.mutate({ authorMode: "user", resumeToken: resumePRParam });
@@ -2649,7 +2649,7 @@ export function SessionDetailContent({ id }: { id: string }) {
     if (!canCreatePR) return;
     resumeAttemptRef.current = resumePRParam;
     createPRMutation.mutate({ authorMode: "user", resumeToken: resumePRParam });
-  }, [canCreatePR, createPRMutation, hasPR, hasSnapshot, isRunning, prStatus, pushChangesMutation, resumeActionParam, resumePRParam]);
+  }, [canCreatePR, createPRMutation, hasPR, hasSnapshot, isRunning, prStatus, pushChangesMutation, resumeActionParam, resumePRParam, session?.has_unpushed_changes]);
 
   const sessionDiff = session?.diff;
   const diffStats = useMemo(() => {
@@ -3059,12 +3059,12 @@ export function SessionDetailContent({ id }: { id: string }) {
   }
 
   // Push-changes button derived state. Mirrors the PR creation block above
-  // but operates on session.pr_push_state. Rendered inside the PR health
-  // banner alongside Resolve conflicts / Fix tests / Merge so all PR-level
-  // actions live in one place; the backend exits cleanly with "no changes"
-  // if there is nothing to push, so we don't gate on a frontend-side dirty
-  // check.
-  const pushAvailable = hasPR && prStatus === "open";
+  // but operates on session.pr_push_state and the backend-derived
+  // has_unpushed_changes signal. Rendered inside the PR health banner
+  // alongside Resolve conflicts / Fix tests / Merge so all PR-level
+  // actions live in one place, while still hiding Push changes when the
+  // latest session head already matches the remote PR branch.
+  const pushAvailable = hasPR && prStatus === "open" && !!session.has_unpushed_changes;
   const pushState = session.pr_push_state;
   const queueingPush = localPushState === "submitting";
   const pushingChanges =
