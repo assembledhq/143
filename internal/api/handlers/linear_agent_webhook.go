@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
+	"strings"
 
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
@@ -192,14 +192,8 @@ func (d *LinearAgentDispatcher) Dispatch(ctx context.Context, integration *model
 
 	action := linearAgentEventAction(env.Action)
 	if action != linearAgentActionCreated && action != linearAgentActionPrompted {
-		// Linear may add new actions in the future. Phase 2 only handles
-		// `created`; `prompted` arrives in phase 3.
-		return DispatchResult{Status: "ignored"}
-	}
-	if action == linearAgentActionPrompted {
-		// Phase 3 will dispatch this onto the existing session. Phase 2
-		// returns ignored so the webhook delivery is recorded but no
-		// duplicate session is created.
+		// Linear may add new actions in the future. Both `created` and
+		// `prompted` are handled below; anything else logs and skips.
 		return DispatchResult{Status: "ignored"}
 	}
 	if env.Payload.AgentSession.ID == "" || env.Payload.AgentSession.IssueID == "" {
@@ -226,23 +220,51 @@ func (d *LinearAgentDispatcher) Dispatch(ctx context.Context, integration *model
 		}
 	}
 
-	// 1. Idempotent upsert. Re-deliveries collide on UNIQUE (org_id,
-	// linear_agent_session_id) and the row's session_id (if any) is
-	// preserved so the worker can recover the prior 143 session.
-	row, created, err := d.agentSessions.UpsertOnCreated(ctx, integration.OrgID, db.UpsertOnCreatedInput{
-		OrgID:                 integration.OrgID,
-		IntegrationID:         integration.ID,
-		LinearAgentSessionID:  env.Payload.AgentSession.ID,
-		LinearIssueID:         env.Payload.AgentSession.IssueID,
-		LinearIssueIdentifier: env.Payload.AgentSession.Issue.Identifier,
-		LinearAppUserID:       env.AppUserID,
-		LinearCreatorUserID:   env.Payload.AgentSession.Creator.ID,
-	})
-	if err != nil {
-		d.logger.Error().Err(err).
-			Str("agent_session_id", env.Payload.AgentSession.ID).
-			Msg("failed to upsert linear_agent_sessions; ignoring event")
-		return DispatchResult{Status: "ignored"}
+	var (
+		row     *db.LinearAgentSession
+		created bool
+		err     error
+	)
+	if action == linearAgentActionCreated {
+		// 1a. Idempotent upsert. Re-deliveries collide on UNIQUE
+		// (org_id, linear_agent_session_id) and the row's session_id (if
+		// any) is preserved so the worker can recover the prior 143
+		// session.
+		row, created, err = d.agentSessions.UpsertOnCreated(ctx, integration.OrgID, db.UpsertOnCreatedInput{
+			OrgID:                 integration.OrgID,
+			IntegrationID:         integration.ID,
+			LinearAgentSessionID:  env.Payload.AgentSession.ID,
+			LinearIssueID:         env.Payload.AgentSession.IssueID,
+			LinearIssueIdentifier: env.Payload.AgentSession.Issue.Identifier,
+			LinearAppUserID:       env.AppUserID,
+			LinearCreatorUserID:   env.Payload.AgentSession.Creator.ID,
+		})
+		if err != nil {
+			d.logger.Error().Err(err).
+				Str("agent_session_id", env.Payload.AgentSession.ID).
+				Msg("failed to upsert linear_agent_sessions; ignoring event")
+			return DispatchResult{Status: "ignored"}
+		}
+	} else {
+		// 1b. Prompted event: lookup-only. The corresponding `created`
+		// already created the row + 143 session. If we don't have a
+		// row, this `prompted` is racing the `created` (Linear can
+		// deliver out of order under recovery). Return ignored;
+		// Linear's webhook retry will re-deliver after `created`
+		// lands.
+		row, err = d.agentSessions.Lookup(ctx, integration.OrgID, env.Payload.AgentSession.ID)
+		if err != nil {
+			if errors.Is(err, db.ErrLinearAgentSessionNotFound) {
+				d.logger.Warn().
+					Str("agent_session_id", env.Payload.AgentSession.ID).
+					Msg("prompted event arrived before created; ignoring (Linear retry will re-deliver)")
+				return DispatchResult{Status: "ignored"}
+			}
+			d.logger.Error().Err(err).
+				Str("agent_session_id", env.Payload.AgentSession.ID).
+				Msg("failed to lookup linear_agent_sessions; ignoring prompted event")
+			return DispatchResult{Status: "ignored"}
+		}
 	}
 
 	result := DispatchResult{
@@ -250,13 +272,11 @@ func (d *LinearAgentDispatcher) Dispatch(ctx context.Context, integration *model
 		AgentSessionID:    row.LinearAgentSessionID,
 	}
 
-	// 2. Best-effort bootstrap thought. Emit *before* the worker enqueue
-	// so the 10s first-activity SLA is satisfied even when run_agent
-	// queues behind a concurrency cap. The activity log's UNIQUE on
-	// (agent_session_row_id, idem_key) prevents a duplicate emit if the
-	// worker also tries to emit the same key on its first run.
-	bootstrap := linear.BootstrapActivity(env.Payload.AgentSession.Issue.Identifier)
-	if d.emitter != nil {
+	// 2. Best-effort bootstrap thought (created only). Skip on prompted
+	// because the AgentSession is already alive and Linear's UI doesn't
+	// need a "Reading…" thought for follow-ups.
+	if action == linearAgentActionCreated && d.emitter != nil {
+		bootstrap := linear.BootstrapActivity(env.Payload.AgentSession.Issue.Identifier)
 		emitRes, emitErr := d.emitter.Emit(ctx, linear.EmitInput{
 			OrgID:             integration.OrgID,
 			AgentSessionRowID: row.ID,
@@ -272,10 +292,14 @@ func (d *LinearAgentDispatcher) Dispatch(ctx context.Context, integration *model
 	}
 
 	// 3. Enqueue the worker job. Dedupe on (agent_session_id, action) so
-	// re-deliveries collapse — the worker handler's own idempotency uses
-	// the linear_agent_sessions row's session_id field as the post-create
-	// guard.
-	dedupe := fmt.Sprintf("linear_agent_event:%s:%s", row.LinearAgentSessionID, action)
+	// re-deliveries collapse. For prompted events the dedupe also
+	// includes the comment id (when present) so a different follow-up
+	// comment doesn't collapse onto a previous prompted job.
+	dedupeParts := []string{"linear_agent_event", row.LinearAgentSessionID, string(action)}
+	if action == linearAgentActionPrompted && env.Payload.AgentSession.CommentID != "" {
+		dedupeParts = append(dedupeParts, env.Payload.AgentSession.CommentID)
+	}
+	dedupe := strings.Join(dedupeParts, ":")
 	jobPayload := map[string]any{
 		"action":                  string(action),
 		"org_id":                  integration.OrgID.String(),
@@ -286,6 +310,7 @@ func (d *LinearAgentDispatcher) Dispatch(ctx context.Context, integration *model
 		"linear_issue_team_id":    env.Payload.AgentSession.Issue.TeamID,
 		"linear_issue_project_id": env.Payload.AgentSession.Issue.ProjectID,
 		"linear_creator_user_id":  env.Payload.AgentSession.Creator.ID,
+		"linear_comment_id":       env.Payload.AgentSession.CommentID,
 	}
 	jobID, err := d.jobs.Enqueue(ctx, integration.OrgID, "linear", "linear_agent_event", jobPayload, 5, &dedupe)
 	if err != nil {
@@ -299,6 +324,7 @@ func (d *LinearAgentDispatcher) Dispatch(ctx context.Context, integration *model
 	result.Status = "agent_dispatched"
 	d.logger.Info().
 		Str("agent_session_id", row.LinearAgentSessionID).
+		Str("action", string(action)).
 		Str("job_id", jobID.String()).
 		Bool("created_row", created).
 		Bool("bootstrap_emit_skipped", result.BootstrapEmitSkipped).

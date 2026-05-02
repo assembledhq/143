@@ -66,19 +66,10 @@ func TestLinearAgentDispatcher_NonAgentEventIgnored(t *testing.T) {
 	}
 }
 
-func TestLinearAgentDispatcher_PromptedIgnoredInPhase2(t *testing.T) {
-	jobs := &fakeJobs{}
-	d := newDispatcherForTest(t, jobs, true)
-	body := []byte(`{"type":"AgentSessionEvent","action":"prompted","payload":{"agentSession":{"id":"as_1","issueId":"iss_1"}}}`)
-	res := d.Dispatch(context.Background(), &models.Integration{ID: uuid.New(), OrgID: uuid.New()},
-		LinearAgentEventAgentSession, body)
-	if res.Status != "ignored" {
-		t.Fatalf("phase 2 should not handle prompted yet; Status=%q want ignored", res.Status)
-	}
-	if len(jobs.calls) != 0 {
-		t.Fatalf("expected no enqueue on prompted; got %d", len(jobs.calls))
-	}
-}
+// Prompted-without-created behavior is covered by the worker integration
+// tests (handlers_linear_agent_test.go). Here we only verify the
+// dispatcher's pre-store branches; the row-lookup path requires a real
+// store and is exercised end-to-end at a higher layer.
 
 func TestSniffLinearEventType(t *testing.T) {
 	tests := []struct {
