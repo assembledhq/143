@@ -12,6 +12,22 @@ vi.mock("next/navigation", () => ({
   useSearchParams: () => new URLSearchParams(),
 }));
 
+function setMobileViewport(matches: boolean) {
+  Object.defineProperty(window, "matchMedia", {
+    writable: true,
+    value: vi.fn().mockImplementation((query: string) => ({
+      matches: query === "(max-width: 767px)" ? matches : false,
+      media: query,
+      onchange: null,
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      dispatchEvent: vi.fn(),
+    })),
+  });
+}
+
 function setupManualSessionHandler() {
   server.use(
     http.post("/api/v1/sessions/manual", () => {
@@ -69,6 +85,7 @@ describe("CreateSessionDialog", () => {
   beforeEach(() => {
     onOpenChange = vi.fn<(open: boolean) => void>();
     window.localStorage.clear();
+    setMobileViewport(false);
   });
 
   it("renders dialog with title when open", () => {
@@ -188,6 +205,31 @@ describe("CreateSessionDialog", () => {
     );
 
     expect(screen.getByRole("combobox", { name: /Model/ })).toBeInTheDocument();
+  });
+
+  it("uses a mobile settings sheet instead of inline repo and model controls on small screens", async () => {
+    const user = userEvent.setup();
+    setMobileViewport(true);
+    setupRepoHandlers();
+
+    renderWithProviders(
+      <CreateSessionDialog open onOpenChange={onOpenChange} />,
+    );
+
+    expect(await screen.findByRole("button", { name: "Session settings" })).toBeInTheDocument();
+    await waitFor(() => {
+      expect(screen.getByText("api-server")).toBeInTheDocument();
+      expect(screen.getByText("main")).toBeInTheDocument();
+      expect(screen.getByText("Default model")).toBeInTheDocument();
+      expect(screen.getByText("Default reasoning")).toBeInTheDocument();
+    });
+    expect(screen.queryByRole("combobox", { name: /Model override/i })).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Session settings" }));
+
+    expect(await screen.findByRole("dialog", { name: "Session settings" })).toBeInTheDocument();
+    expect(screen.getByRole("combobox", { name: /Model override/i })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Target branch/ })).toBeInTheDocument();
   });
 
   it("shows attachment button", () => {
