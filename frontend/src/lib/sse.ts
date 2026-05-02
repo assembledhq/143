@@ -1,4 +1,10 @@
-import type { PullRequestUpdatedEvent, Session, SessionLog } from "./types";
+import type {
+  EvalBatchUpdatedEvent,
+  EvalBootstrapUpdatedEvent,
+  PullRequestUpdatedEvent,
+  Session,
+  SessionLog,
+} from "./types";
 import { captureError } from "./errors";
 
 // EventSource cannot send custom headers like X-Active-Org-ID. The backend
@@ -35,6 +41,36 @@ export function buildPullRequestStreamURL(
   return `${apiBase}/api/v1/pull-requests/stream${qs ? `?${qs}` : ""}`;
 }
 
+// Per-batch SSE that wakes whenever an eval batch or one of its runs flips
+// state. Replaces the prior 5s React Query poll on /evals/batch/{id}.
+export function buildEvalBatchStreamURL(
+  apiBase: string,
+  batchId: string,
+  activeOrgId: string | null,
+): string {
+  const searchParams = new URLSearchParams();
+  if (activeOrgId) {
+    searchParams.set("org_id", activeOrgId);
+  }
+  const qs = searchParams.toString();
+  return `${apiBase}/api/v1/evals/batch/${batchId}/stream${qs ? `?${qs}` : ""}`;
+}
+
+// Per-bootstrap-run SSE that wakes whenever a bootstrap run flips state.
+// Replaces the prior 3s React Query poll on /evals/bootstrap/candidates.
+export function buildEvalBootstrapStreamURL(
+  apiBase: string,
+  runId: string,
+  activeOrgId: string | null,
+): string {
+  const searchParams = new URLSearchParams();
+  if (activeOrgId) {
+    searchParams.set("org_id", activeOrgId);
+  }
+  const qs = searchParams.toString();
+  return `${apiBase}/api/v1/evals/bootstrap/${runId}/stream${qs ? `?${qs}` : ""}`;
+}
+
 /**
  * SSE event types emitted by the session log stream.
  * Must stay in sync with the backend sse.EventType constants.
@@ -48,6 +84,10 @@ export const SSE_EVENT = {
   DONE: "done",
   /** Sent when a pull request health snapshot is updated. */
   PULL_REQUEST_UPDATED: "pull_request.updated",
+  /** Sent when an eval batch or one of its runs changes state. */
+  EVAL_BATCH_UPDATED: "eval_batch.updated",
+  /** Sent when an eval bootstrap run changes state. */
+  EVAL_BOOTSTRAP_UPDATED: "eval_bootstrap.updated",
 } as const;
 
 export type SSEEventType = (typeof SSE_EVENT)[keyof typeof SSE_EVENT];
@@ -58,6 +98,8 @@ export interface SSEEventPayloads {
   [SSE_EVENT.STATUS]: Session;
   [SSE_EVENT.DONE]: Session;
   [SSE_EVENT.PULL_REQUEST_UPDATED]: PullRequestUpdatedEvent;
+  [SSE_EVENT.EVAL_BATCH_UPDATED]: EvalBatchUpdatedEvent;
+  [SSE_EVENT.EVAL_BOOTSTRAP_UPDATED]: EvalBootstrapUpdatedEvent;
 }
 
 /** Type-safe event listener adder for session SSE streams. */

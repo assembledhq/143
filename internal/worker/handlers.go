@@ -17,6 +17,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/rs/zerolog"
 
+	"github.com/assembledhq/143/internal/cache"
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/jobctx"
 	"github.com/assembledhq/143/internal/models"
@@ -168,6 +169,15 @@ type Services struct {
 	GitHub          agent.GitHubTokenProvider     // nil-safe: needed for eval repo cloning
 	TitleService    *services.SessionTitleService // nil-safe: session title regeneration
 	Linear          *linear.Service               // nil-safe: Linear session-linking disabled if nil
+	// EvalBatchStreams publishes lightweight pub/sub signals on every batch
+	// or run state transition so the eval-batch detail page can replace its
+	// 5s poll with a Redis-backed SSE. nil-safe: best-effort publish, the
+	// row is the source of truth and the page falls back to polling if SSE
+	// cannot be established.
+	EvalBatchStreams *cache.EvalBatchStreams
+	// EvalBootstrapStreams is the bootstrap (PR-history scan) counterpart to
+	// EvalBatchStreams; same nil-safety semantics.
+	EvalBootstrapStreams *cache.EvalBootstrapStreams
 	// SandboxAuthShutdown drains the per-session GitHub credential socket
 	// listeners. nil when no SandboxAuthSocketDir is configured (local
 	// dev). Called from cmd/server graceful shutdown after the API drains
@@ -1747,6 +1757,46 @@ func parseOrgID(orgIDFromPayload string, ctx context.Context) (uuid.UUID, error)
 	return orgID, nil
 }
 
+// publishEvalBatchSignal best-effort publishes an EvalBatchUpdatedEvent over
+// Redis pub/sub so the eval-batch detail page's SSE wakes immediately. The
+// event is intentionally minimal — clients re-fetch the full EvalBatchDetail
+// via the existing GET handler on receipt — so this stays cheap to fan out
+// even when many runs in the same batch finish in quick succession. Errors
+// are logged at warn and swallowed: the database row is the source of truth
+// and the page falls back to polling if SSE is unavailable. batchID may be
+// the zero UUID when called from a code path with no batch context, in which
+// case this is a no-op. The published channel is keyed on batchID so
+// unrelated batch viewers don't fan out.
+func publishEvalBatchSignal(ctx context.Context, services *Services, orgID, batchID uuid.UUID, status models.EvalBatchStatus, logger zerolog.Logger) {
+	if services == nil || services.EvalBatchStreams == nil || batchID == uuid.Nil {
+		return
+	}
+	if err := services.EvalBatchStreams.PublishUpdated(ctx, models.EvalBatchUpdatedEvent{
+		BatchID:   batchID,
+		OrgID:     orgID,
+		Status:    status,
+		UpdatedAt: time.Now().UTC(),
+	}); err != nil {
+		logger.Warn().Err(err).Str("batch_id", batchID.String()).Msg("failed to publish eval batch update event")
+	}
+}
+
+// publishEvalBootstrapSignal mirrors publishEvalBatchSignal for bootstrap runs.
+func publishEvalBootstrapSignal(ctx context.Context, services *Services, orgID, bootstrapRunID uuid.UUID, status models.EvalBootstrapStatus, sessionID *uuid.UUID, logger zerolog.Logger) {
+	if services == nil || services.EvalBootstrapStreams == nil || bootstrapRunID == uuid.Nil {
+		return
+	}
+	if err := services.EvalBootstrapStreams.PublishUpdated(ctx, models.EvalBootstrapUpdatedEvent{
+		BootstrapRunID: bootstrapRunID,
+		OrgID:          orgID,
+		Status:         status,
+		SessionID:      sessionID,
+		UpdatedAt:      time.Now().UTC(),
+	}); err != nil {
+		logger.Warn().Err(err).Str("bootstrap_run_id", bootstrapRunID.String()).Msg("failed to publish eval bootstrap update event")
+	}
+}
+
 // run_eval handler executes a single eval run: clones repo, runs agent, scores output.
 func newRunEvalHandler(stores *Stores, services *Services, logger zerolog.Logger) JobHandler {
 	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
@@ -1789,6 +1839,13 @@ func newRunEvalHandler(stores *Stores, services *Services, logger zerolog.Logger
 		if err := stores.EvalRuns.UpdateStatus(ctx, orgID, runID, models.EvalRunStatusRunning); err != nil {
 			return fmt.Errorf("update eval run status to running: %w", err)
 		}
+		// Wake any batch detail SSE subscribers so the matrix flips this
+		// run's tile to "running" without a polling round-trip. Batch
+		// itself stays "running"; we surface the parent batch's status
+		// rather than the run's so subscribers can ignore stale runs.
+		if run.BatchID != nil {
+			publishEvalBatchSignal(ctx, services, orgID, *run.BatchID, models.EvalBatchStatusRunning, logger)
+		}
 
 		startTime := time.Now()
 
@@ -1818,6 +1875,30 @@ func newRunEvalHandler(stores *Stores, services *Services, logger zerolog.Logger
 			if err := stores.EvalBatches.CompleteBatchIfDone(ctx, orgID, *run.BatchID); err != nil {
 				logger.Warn().Err(err).Str("batch_id", run.BatchID.String()).Msg("failed to check/complete batch")
 			}
+			// Re-fetch so the published event carries the post-CompleteBatchIfDone
+			// status. CompleteBatchIfDone only flips the batch when all runs are
+			// terminal, so most signals here will still be `running` — that's
+			// fine: the event is a "something changed" wake, the client fetches
+			// the full detail to see which run completed.
+			//
+			// Concurrency note: Redis pub/sub is at-most-once and unordered.
+			// Two runs in the same batch finishing nearly simultaneously can
+			// publish their "running" / "completed" events out of order — A
+			// re-reads `running`, B then flips to `completed` and publishes,
+			// A's earlier `running` arrives last. Subscribers must NOT read
+			// the Status field from the event; the event is a wake signal
+			// and the canonical state lives in Postgres. The frontend
+			// invalidate-and-refetch pattern in batch/[id]/page.tsx is what
+			// makes this self-healing — every event triggers a fresh GET on
+			// /evals/batch/{id}, so the worst case is one extra round-trip
+			// before the UI converges.
+			batchStatus := models.EvalBatchStatusRunning
+			if batch, err := stores.EvalBatches.GetByID(ctx, orgID, *run.BatchID); err == nil {
+				batchStatus = batch.Status
+			} else {
+				logger.Warn().Err(err).Str("batch_id", run.BatchID.String()).Msg("failed to re-read batch after run completion; publishing with running status")
+			}
+			publishEvalBatchSignal(ctx, services, orgID, *run.BatchID, batchStatus, logger)
 		}
 
 		logger.Info().
@@ -2391,6 +2472,7 @@ func newRunEvalBootstrapHandler(stores *Stores, services *Services, logger zerol
 		if err := stores.EvalBootstraps.UpdateStatus(ctx, orgID, bootstrapRunID, models.EvalBootstrapStatusRunning, sessionIDPtr); err != nil {
 			return fmt.Errorf("update bootstrap status to running: %w", err)
 		}
+		publishEvalBootstrapSignal(ctx, services, orgID, bootstrapRunID, models.EvalBootstrapStatusRunning, sessionIDPtr, logger)
 
 		logWriter := &bootstrapLogWriter{
 			store:     stores.SessionLogs,
@@ -2410,6 +2492,7 @@ func newRunEvalBootstrapHandler(stores *Stores, services *Services, logger zerol
 				models.EvalBootstrapStatusFailed, nil, &errMsg); updateErr != nil {
 				logger.Warn().Err(updateErr).Msg("failed to update bootstrap run with error")
 			}
+			publishEvalBootstrapSignal(ctx, services, orgID, bootstrapRunID, models.EvalBootstrapStatusFailed, sessionIDPtr, logger)
 			return fmt.Errorf("bootstrap scan failed: %w", scanErr)
 		}
 
@@ -2418,6 +2501,7 @@ func newRunEvalBootstrapHandler(stores *Stores, services *Services, logger zerol
 			models.EvalBootstrapStatusCompleted, candidatesJSON, nil); err != nil {
 			return fmt.Errorf("update bootstrap result: %w", err)
 		}
+		publishEvalBootstrapSignal(ctx, services, orgID, bootstrapRunID, models.EvalBootstrapStatusCompleted, sessionIDPtr, logger)
 
 		logWriter.log(ctx, "info", fmt.Sprintf("Bootstrap scan completed successfully. Found %d candidates.", len(candidates)))
 		if session.ID != uuid.Nil {

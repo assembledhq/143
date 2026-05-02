@@ -358,6 +358,14 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	pmDocumentHandler.SetAuditEmitter(auditEmitter)
 	evalHandler := handlers.NewEvalHandler(evalTaskStore, evalRunStore, evalBatchStore, evalBootstrapStore, jobStore, pool)
 	evalHandler.SetAuditEmitter(auditEmitter)
+	// Redis-backed pub/sub for the eval batch + bootstrap detail SSEs. nil
+	// when redisClient is nil — handlers will return 503 and the frontend
+	// will continue to fall back to its existing polling path.
+	evalBatchStreams := cache.NewEvalBatchStreams(redisClient, logger)
+	evalBootstrapStreams := cache.NewEvalBootstrapStreams(redisClient, logger)
+	evalHandler.SetBatchStreams(evalBatchStreams)
+	evalHandler.SetBootstrapStreams(evalBootstrapStreams)
+	evalHandler.SetMembershipStore(membershipStore)
 	auditLogHandler := handlers.NewAuditLogHandler(auditLogStore)
 	sessionReviewCommentHandler := handlers.NewSessionReviewCommentHandler(sessionReviewCommentStore, sessionStore, logger)
 	sessionReviewCommentHandler.SetAuditEmitter(auditEmitter)
@@ -758,7 +766,9 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Get("/api/v1/evals/runs/{runId}", evalHandler.GetRun)
 				r.Get("/api/v1/evals/batch", evalHandler.ListBatches)
 				r.Get("/api/v1/evals/batch/{batchId}", evalHandler.GetBatch)
+				r.Get("/api/v1/evals/batch/{batchId}/stream", evalHandler.StreamBatchUpdates)
 				r.Get("/api/v1/evals/bootstrap/candidates", evalHandler.GetBootstrapCandidates)
+				r.Get("/api/v1/evals/bootstrap/{runId}/stream", evalHandler.StreamBootstrapUpdates)
 
 				// Personal credential management
 				r.Put("/api/v1/settings/credentials/personal/{provider}", userCredentialHandler.UpsertPersonal)
