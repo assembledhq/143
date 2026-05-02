@@ -3758,11 +3758,11 @@ func (o *Orchestrator) retryOnTokenExpired(
 // failures; this is the fast-path hint that prevents repeat picks before the
 // resolver cache refreshes.
 //
-// Provider mapping is intentionally limited to agent types whose auth flows
-// go through AgentEnv.pickFromCodingProvider (Anthropic API key, Gemini, Amp,
-// Pi, OpenAI API key). Codex subscription auth uses codexauth.Service's own
-// round-robin selector — shedding for that path lives separately and is a
-// silent no-op here.
+// Provider mapping is intentionally limited to agent types whose API-key auth
+// flows go through AgentEnv.pickFromCodingProvider. Codex subscription auth
+// uses codexauth.Service's own selector; because that path records no
+// ProviderOpenAI pick, the shed call below remains a no-op for subscription
+// runs.
 func (o *Orchestrator) shedOnRunResult(agentType models.AgentType, orgID uuid.UUID, userID *uuid.UUID, result *AgentResult, runErr error, log zerolog.Logger) {
 	if o.env == nil || result == nil {
 		return
@@ -3790,13 +3790,14 @@ func (o *Orchestrator) shedOnRunResult(agentType models.AgentType, orgID uuid.UU
 }
 
 // codingProviderForAgent maps an agent type to the unified provider name its
-// API-key auth uses. Agents whose primary auth is subscription-based (Codex
-// → ChatGPT OAuth) return "" because their pick path does not write the
-// recentPicks tracker.
+// API-key auth uses. Subscription picks are intentionally not represented
+// here; they do not write the recentPicks tracker under these providers.
 func codingProviderForAgent(agentType models.AgentType) models.ProviderName {
 	switch agentType {
 	case models.AgentTypeClaudeCode:
 		return models.ProviderAnthropic
+	case models.AgentTypeCodex:
+		return models.ProviderOpenAI
 	case models.AgentTypeGeminiCLI:
 		return models.ProviderGemini
 	case models.AgentTypeAmp:

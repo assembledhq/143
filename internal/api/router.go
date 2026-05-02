@@ -357,6 +357,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	if orgSettingsInvalidator != nil {
 		settingsHandler.SetOrgSettingsInvalidator(orgSettingsInvalidator)
 		codingAuthHandler.SetOrgSettingsInvalidator(orgSettingsInvalidator)
+		codingCredentialHandler.SetOrgSettingsInvalidator(orgSettingsInvalidator)
 	}
 	credentialHandler.SetAuditEmitter(auditEmitter)
 	projectHandler.SetAuditEmitter(auditEmitter)

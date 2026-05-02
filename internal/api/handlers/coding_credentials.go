@@ -40,13 +40,21 @@ type codingCredentialStore interface {
 
 // CodingCredentialHandler exposes the unified API.
 type CodingCredentialHandler struct {
-	store    codingCredentialStore
-	orgStore codingAuthOrgStore // reused: invalidates org-settings on agent_config writes
+	store       codingCredentialStore
+	orgStore    codingAuthOrgStore
+	invalidator OrgSettingsInvalidator
 }
 
 // NewCodingCredentialHandler constructs the handler.
 func NewCodingCredentialHandler(store codingCredentialStore, orgStore codingAuthOrgStore) *CodingCredentialHandler {
 	return &CodingCredentialHandler{store: store, orgStore: orgStore}
+}
+
+// SetOrgSettingsInvalidator injects the org-settings cache invalidator. When
+// org-scoped agent_defaults are updated, Create calls InvalidateOrg after the
+// write succeeds so subsequent agent starts see the new defaults immediately.
+func (h *CodingCredentialHandler) SetOrgSettingsInvalidator(invalidator OrgSettingsInvalidator) {
+	h.invalidator = invalidator
 }
 
 // resolveScopeFromQuery decides which scope to operate on based on the `scope`
@@ -223,8 +231,14 @@ func (h *CodingCredentialHandler) Create(w http.ResponseWriter, r *http.Request)
 	// model). Skipped for personal scope — there is no per-user agent_config.
 	if scope.IsOrg() && len(input.AgentDefaults) > 0 && h.orgStore != nil {
 		if err := h.orgStore.MergeCodingAgentDefaults(r.Context(), scope.OrgID, input.Agent, input.AgentDefaults); err != nil {
+			if rollbackErr := h.store.Disable(r.Context(), scope, *id); rollbackErr != nil {
+				err = fmt.Errorf("merge agent defaults: %w; rollback credential disable: %v", err, rollbackErr)
+			}
 			writeError(w, r, http.StatusInternalServerError, "AGENT_DEFAULTS_FAILED", "failed to merge agent defaults", err)
 			return
+		}
+		if h.invalidator != nil {
+			h.invalidator.InvalidateOrg(scope.OrgID)
 		}
 	}
 

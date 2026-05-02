@@ -38,6 +38,16 @@ type mockCodingCredentialOrgStore struct {
 	mergeFn func(ctx context.Context, orgID uuid.UUID, agent models.AgentType, defaults map[string]string) error
 }
 
+type mockCodingCredentialInvalidator struct {
+	invalidateFn func(orgID uuid.UUID)
+}
+
+func (m *mockCodingCredentialInvalidator) InvalidateOrg(orgID uuid.UUID) {
+	if m.invalidateFn != nil {
+		m.invalidateFn(orgID)
+	}
+}
+
 func (m *mockCodingCredentialOrgStore) MergeCodingAgentDefaults(ctx context.Context, orgID uuid.UUID, agent models.AgentType, defaults map[string]string) error {
 	if m.mergeFn != nil {
 		return m.mergeFn(ctx, orgID, agent, defaults)
@@ -278,12 +288,13 @@ func TestCodingCredentialHandlerCreate(t *testing.T) {
 	now := time.Now().UTC()
 
 	tests := []struct {
-		name           string
-		body           string
-		role           string
-		setupStore     func(t *testing.T) *mockCodingCredentialStore
-		setupOrgStore  func(t *testing.T) codingAuthOrgStore
-		expectedStatus int
+		name             string
+		body             string
+		role             string
+		setupStore       func(t *testing.T) *mockCodingCredentialStore
+		setupOrgStore    func(t *testing.T) codingAuthOrgStore
+		setupInvalidator func(t *testing.T) OrgSettingsInvalidator
+		expectedStatus   int
 	}{
 		{
 			name: "creates personal api key",
@@ -349,7 +360,45 @@ func TestCodingCredentialHandlerCreate(t *testing.T) {
 					},
 				}
 			},
+			setupInvalidator: func(t *testing.T) OrgSettingsInvalidator {
+				return &mockCodingCredentialInvalidator{
+					invalidateFn: func(gotOrgID uuid.UUID) {
+						require.Equal(t, orgID, gotOrgID, "Create should invalidate cached org settings after defaults change")
+					},
+				}
+			},
 			expectedStatus: http.StatusCreated,
+		},
+		{
+			name: "rolls back created credential when defaults merge fails",
+			body: `{"scope":"org","agent":"pi","auth_type":"api_key","api_key":"pi-token","agent_defaults":{"PI_MODEL":"openai/gpt-5.4"}}`,
+			role: "admin",
+			setupStore: func(t *testing.T) *mockCodingCredentialStore {
+				return &mockCodingCredentialStore{
+					createFn: func(_ context.Context, scope models.Scope, label string, cfg models.ProviderConfig, _ db.CreateOpts) (*uuid.UUID, error) {
+						require.True(t, scope.IsOrg(), "Create should use org scope before merging defaults")
+						require.Equal(t, "Pi API key", label, "Create should apply the pi default label")
+						require.Equal(t, models.ProviderPi, cfg.Provider(), "Create should map pi api_key to pi provider config")
+						return &createdID, nil
+					},
+					disableFn: func(_ context.Context, scope models.Scope, id uuid.UUID) error {
+						require.True(t, scope.IsOrg(), "Create rollback should disable the org-scoped row")
+						require.Equal(t, createdID, id, "Create rollback should target the credential created by the failed request")
+						return nil
+					},
+				}
+			},
+			setupOrgStore: func(t *testing.T) codingAuthOrgStore {
+				return &mockCodingCredentialOrgStore{
+					mergeFn: func(_ context.Context, gotOrgID uuid.UUID, agent models.AgentType, defaults map[string]string) error {
+						require.Equal(t, orgID, gotOrgID, "Create should attempt to merge defaults before rolling back")
+						require.Equal(t, models.AgentTypePi, agent, "Create should merge defaults for the requested agent")
+						require.Equal(t, "openai/gpt-5.4", defaults["PI_MODEL"], "Create should pass agent defaults through")
+						return errors.New("settings write failed")
+					},
+				}
+			},
+			expectedStatus: http.StatusInternalServerError,
 		},
 		{
 			name: "rejects member org mutation",
@@ -402,6 +451,9 @@ func TestCodingCredentialHandlerCreate(t *testing.T) {
 				orgStore = tt.setupOrgStore(t)
 			}
 			handler := NewCodingCredentialHandler(tt.setupStore(t), orgStore)
+			if tt.setupInvalidator != nil {
+				handler.SetOrgSettingsInvalidator(tt.setupInvalidator(t))
+			}
 			req := httptest.NewRequest(http.MethodPost, "/api/v1/coding-credentials", bytes.NewBufferString(tt.body))
 			req = withUserAndOrg(req, userID, orgID, tt.role)
 			rr := httptest.NewRecorder()

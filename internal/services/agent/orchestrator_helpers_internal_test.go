@@ -728,10 +728,10 @@ func TestShedOnRunResultDispatch(t *testing.T) {
 			wantAuthRejected: false,
 		},
 		{
-			name:             "codex agent type bypasses shedding even on rate limit",
+			name:             "codex api key rate limit error sheds rate limited",
 			agentType:        models.AgentTypeCodex,
 			result:           &AgentResult{Error: "rate limit hit"},
-			wantRateLimited:  false,
+			wantRateLimited:  true,
 			wantAuthRejected: false,
 		},
 		{
@@ -748,29 +748,34 @@ func TestShedOnRunResultDispatch(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			coding := &envCodingCredentialProvider{
-				resolvable: map[models.ProviderName][]models.DecryptedCodingCredential{
-					models.ProviderAnthropic: {
-						{
-							ID:       credID,
-							OrgID:    orgID,
-							UserID:   &userID,
-							Provider: models.ProviderAnthropic,
-							Status:   models.CodingCredentialStatusActive,
-							Config:   models.AnthropicConfig{APIKey: "sk-ant-test-1234"},
-						},
+			provider := codingProviderForAgent(tc.agentType)
+			resolvable := map[models.ProviderName][]models.DecryptedCodingCredential{}
+			if provider != "" {
+				resolvable[provider] = []models.DecryptedCodingCredential{
+					{
+						ID:       credID,
+						OrgID:    orgID,
+						UserID:   &userID,
+						Provider: provider,
+						Status:   models.CodingCredentialStatusActive,
+						Config:   testConfigForShedProvider(provider),
 					},
-				},
+				}
+			}
+			coding := &envCodingCredentialProvider{
+				resolvable: resolvable,
 			}
 			env := NewAgentEnv(AgentEnvDeps{
 				CodingCredentials: coding,
 				Provider:          &envSandboxProvider{},
 				Logger:            zerolog.Nop(),
 			})
-			// Seed recentPicks for the (orgID, userID, anthropic) key so the
-			// shed lookup resolves to credID. For the Codex case the lookup
-			// never runs because codingProviderForAgent returns "".
-			_ = env.resolveProviderConfig(context.Background(), orgID, &userID, models.ProviderAnthropic)
+			// Seed recentPicks for the provider key so the shed lookup resolves
+			// to credID. Unknown agent types return an empty provider and skip
+			// the seed path.
+			if provider != "" {
+				_ = env.resolveProviderConfig(context.Background(), orgID, &userID, provider)
+			}
 
 			o := &Orchestrator{env: env, logger: zerolog.Nop()}
 			o.shedOnRunResult(tc.agentType, orgID, &userID, tc.result, tc.runErr, zerolog.Nop())
@@ -788,6 +793,23 @@ func TestShedOnRunResultDispatch(t *testing.T) {
 					"shed call must target the just-picked credential")
 			}
 		})
+	}
+}
+
+func testConfigForShedProvider(provider models.ProviderName) models.ProviderConfig {
+	switch provider {
+	case models.ProviderAnthropic:
+		return models.AnthropicConfig{APIKey: "sk-ant-test-1234"}
+	case models.ProviderOpenAI:
+		return models.OpenAIConfig{APIKey: "sk-openai-test-1234"}
+	case models.ProviderGemini:
+		return models.GeminiConfig{APIKey: "gemini-test-1234"}
+	case models.ProviderAmp:
+		return models.AmpConfig{APIKey: "amp-test-1234"}
+	case models.ProviderPi:
+		return models.PiConfig{APIKey: "pi-test-1234"}
+	default:
+		return nil
 	}
 }
 
@@ -849,8 +871,8 @@ func TestIsAuthRejectedError(t *testing.T) {
 }
 
 // TestCodingProviderForAgent locks the agent-type → provider mapping the
-// shed dispatcher uses. Codex and unknown agent types must return "" so the
-// dispatcher silently skips agents whose auth path bypasses recordPick.
+// shed dispatcher uses. Codex maps to OpenAI for API-key auth; subscription
+// auth has no recent pick under that provider and remains a no-op.
 func TestCodingProviderForAgent(t *testing.T) {
 	t.Parallel()
 
@@ -863,7 +885,7 @@ func TestCodingProviderForAgent(t *testing.T) {
 		{"gemini cli maps to gemini", models.AgentTypeGeminiCLI, models.ProviderGemini},
 		{"amp maps to amp", models.AgentTypeAmp, models.ProviderAmp},
 		{"pi maps to pi", models.AgentTypePi, models.ProviderPi},
-		{"codex returns empty so subscription auth is skipped", models.AgentTypeCodex, ""},
+		{"codex maps to openai api key", models.AgentTypeCodex, models.ProviderOpenAI},
 		{"unknown agent type returns empty", models.AgentType("unknown"), ""},
 	}
 	for _, tc := range cases {
