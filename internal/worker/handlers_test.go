@@ -1432,12 +1432,12 @@ func TestPushPRChangesHandler_SuccessMarksPushingAndSucceeded(t *testing.T) {
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(newWorkerSessionRow(sessionID, orgID, now, &snapshotKey)...))
 	// Two state-machine writes: pushing → succeeded.
-	mock.ExpectExec("UPDATE sessions").
+	mock.ExpectQuery("UPDATE sessions").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
-	mock.ExpectExec("UPDATE sessions").
+		WillReturnRows(pgxmock.NewRows(workerSessionColumns))
+	mock.ExpectQuery("UPDATE sessions").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+		WillReturnRows(pgxmock.NewRows(workerSessionColumns))
 
 	called := false
 	services := &Services{
@@ -1522,12 +1522,12 @@ func TestPushPRChangesHandler_NoChangesIsTreatedAsSuccess(t *testing.T) {
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(newWorkerSessionRow(sessionID, orgID, now, &snapshotKey)...))
 	// pushing → succeeded (NOT failed, despite the error from the service).
-	mock.ExpectExec("UPDATE sessions").
+	mock.ExpectQuery("UPDATE sessions").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
-	mock.ExpectExec("UPDATE sessions").
+		WillReturnRows(pgxmock.NewRows(workerSessionColumns))
+	mock.ExpectQuery("UPDATE sessions").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+		WillReturnRows(pgxmock.NewRows(workerSessionColumns))
 
 	services := &Services{
 		PR: &stubPRService{
@@ -1575,13 +1575,17 @@ func TestPushPRChangesHandler_TerminalErrorBecomesFatal(t *testing.T) {
 			mock.ExpectQuery("SELECT .* FROM sessions").
 				WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 				WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(newWorkerSessionRow(sessionID, orgID, now, &snapshotKey)...))
-			// pushing → failed.
-			mock.ExpectExec("UPDATE sessions").
+			// idle → pushing, then pushing → failed. Both UpdatePRPushState
+			// calls now use RETURNING + publishStatus instead of bare Exec
+			// so the SSE detail page sees the transition without a poll;
+			// stub returning rows so the publish path stays no-op (streams
+			// are nil).
+			mock.ExpectQuery("UPDATE sessions[\\s\\S]*pr_push_state[\\s\\S]*RETURNING").
 				WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-				WillReturnResult(pgxmock.NewResult("UPDATE", 1))
-			mock.ExpectExec("UPDATE sessions").
+				WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(newWorkerSessionRow(sessionID, orgID, now, &snapshotKey)...))
+			mock.ExpectQuery("UPDATE sessions[\\s\\S]*pr_push_state[\\s\\S]*RETURNING").
 				WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-				WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+				WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(newWorkerSessionRow(sessionID, orgID, now, &snapshotKey)...))
 
 			services := &Services{
 				PR: &stubPRService{
@@ -1617,12 +1621,12 @@ func TestOpenPRHandler_TerminalPRErrorsBecomeFatal(t *testing.T) {
 	mock.ExpectQuery("SELECT .* FROM sessions").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(newWorkerSessionRow(sessionID, orgID, now, &snapshotKey)...))
-	mock.ExpectExec("UPDATE sessions").
+	mock.ExpectQuery("UPDATE sessions").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
-	mock.ExpectExec("UPDATE sessions").
+		WillReturnRows(pgxmock.NewRows(workerSessionColumns))
+	mock.ExpectQuery("UPDATE sessions").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+		WillReturnRows(pgxmock.NewRows(workerSessionColumns))
 
 	services := &Services{
 		PR: &stubPRService{
@@ -1822,12 +1826,12 @@ func TestOpenPRHandler_SuccessMarksPushingAndSucceeded(t *testing.T) {
 	mock.ExpectQuery("SELECT .* FROM sessions").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(newWorkerSessionRow(sessionID, orgID, now, &snapshotKey)...))
-	mock.ExpectExec("UPDATE sessions").
+	mock.ExpectQuery("UPDATE sessions").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
-	mock.ExpectExec("UPDATE sessions").
+		WillReturnRows(pgxmock.NewRows(workerSessionColumns))
+	mock.ExpectQuery("UPDATE sessions").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+		WillReturnRows(pgxmock.NewRows(workerSessionColumns))
 
 	services := &Services{
 		PR: &stubPRService{
@@ -1875,12 +1879,12 @@ func TestOpenPRHandler_HydratesLinkedIssuesBeforeCreatePR(t *testing.T) {
 			linkID, orgID, sessionID, issueID, string(models.SessionIssueLinkRolePrimary), 0, nil, now,
 			&title, &source, &externalID, nil, nil, &status, nil, nil,
 		))
-	mock.ExpectExec("UPDATE sessions").
+	mock.ExpectQuery("UPDATE sessions").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
-	mock.ExpectExec("UPDATE sessions").
+		WillReturnRows(pgxmock.NewRows(workerSessionColumns))
+	mock.ExpectQuery("UPDATE sessions").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+		WillReturnRows(pgxmock.NewRows(workerSessionColumns))
 
 	services := &Services{
 		PR: &stubPRService{
@@ -1927,12 +1931,12 @@ func TestOpenPRHandler_ForwardsAuthorModeToPRService(t *testing.T) {
 	mock.ExpectQuery("SELECT .* FROM sessions").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(newWorkerSessionRow(sessionID, orgID, now, &snapshotKey)...))
-	mock.ExpectExec("UPDATE sessions").
+	mock.ExpectQuery("UPDATE sessions").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
-	mock.ExpectExec("UPDATE sessions").
+		WillReturnRows(pgxmock.NewRows(workerSessionColumns))
+	mock.ExpectQuery("UPDATE sessions").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+		WillReturnRows(pgxmock.NewRows(workerSessionColumns))
 
 	services := &Services{
 		PR: &stubPRService{
@@ -1966,12 +1970,12 @@ func TestOpenPRHandler_NonTerminalPRErrorsMarkFailedAndRetry(t *testing.T) {
 	mock.ExpectQuery("SELECT .* FROM sessions").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(newWorkerSessionRow(sessionID, orgID, now, &snapshotKey)...))
-	mock.ExpectExec("UPDATE sessions").
+	mock.ExpectQuery("UPDATE sessions").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
-	mock.ExpectExec("UPDATE sessions").
+		WillReturnRows(pgxmock.NewRows(workerSessionColumns))
+	mock.ExpectQuery("UPDATE sessions").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+		WillReturnRows(pgxmock.NewRows(workerSessionColumns))
 
 	retryErr := errors.New("github timed out")
 	services := &Services{
@@ -3505,12 +3509,12 @@ func TestOpenPRHandler_UsesSnapshotPrimaryIssueFromPayload(t *testing.T) {
 			pgxmock.NewRows([]string{"id", "org_id", "session_id", "turn_number", "linked_issues", "created_at"}).
 				AddRow(snapshotID, orgID, sessionID, 1, []byte(`[{"issue_id":"`+primaryIssueID.String()+`","role":"primary","position":0,"title":"Fix checkout timeout","source":"linear"}]`), now),
 		)
-	mock.ExpectExec("UPDATE sessions").
+	mock.ExpectQuery("UPDATE sessions").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
-	mock.ExpectExec("UPDATE sessions").
+		WillReturnRows(pgxmock.NewRows(workerSessionColumns))
+	mock.ExpectQuery("UPDATE sessions").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+		WillReturnRows(pgxmock.NewRows(workerSessionColumns))
 
 	services := &Services{
 		PR: &stubPRService{
@@ -3621,12 +3625,12 @@ func TestOpenPRHandler_IssueSnapshotErrors(t *testing.T) {
 				pgxmock.NewRows([]string{"id", "org_id", "session_id", "turn_number", "linked_issues", "created_at"}).
 					AddRow(uuid.New(), orgID, sessionID, 2, []byte(`[{"issue_id":"`+primaryIssueID.String()+`","role":"primary","position":0,"title":"Fix checkout timeout","source":"linear"}]`), now),
 			)
-		mock.ExpectExec("UPDATE sessions").
+		mock.ExpectQuery("UPDATE sessions").
 			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-			WillReturnResult(pgxmock.NewResult("UPDATE", 1))
-		mock.ExpectExec("UPDATE sessions").
+			WillReturnRows(pgxmock.NewRows(workerSessionColumns))
+		mock.ExpectQuery("UPDATE sessions").
 			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-			WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+			WillReturnRows(pgxmock.NewRows(workerSessionColumns))
 
 		handler := newOpenPRHandler(stores, &Services{
 			PR: &stubPRService{

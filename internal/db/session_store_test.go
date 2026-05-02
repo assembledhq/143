@@ -275,13 +275,16 @@ func TestSessionStore_UpdatePRCreationState(t *testing.T) {
 			defer mock.Close()
 
 			store := NewSessionStore(mock)
+			store.SetLogger(zerolog.Nop())
+			store.SetStreams(nil)
 			orgID := uuid.New()
 			sessionID := uuid.New()
+			now := time.Now()
 
 			if !tt.expectErr {
-				mock.ExpectExec("UPDATE sessions").
+				mock.ExpectQuery("UPDATE sessions[\\s\\S]*pr_creation_state[\\s\\S]*RETURNING").
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-					WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+					WillReturnRows(pgxmock.NewRows(sessionTestColumns).AddRow(newAgentSessionRow(sessionID, uuid.New(), orgID, now)...))
 			}
 
 			err = store.UpdatePRCreationState(context.Background(), orgID, sessionID, tt.state, tt.errMsg)
@@ -297,23 +300,91 @@ func TestSessionStore_UpdatePRCreationState(t *testing.T) {
 	}
 }
 
+func TestSessionStore_UpdatePRCreationState_PublishesSessionStatus(t *testing.T) {
+	t.Parallel()
+
+	// The frontend session-detail page now relies on the session status SSE
+	// (Redis stream `143:stream:{ses:ID}:status`) to observe pr_creation_state
+	// transitions in lieu of a 2s poll on /sessions/{id}/pr. This test locks
+	// in the publishStatus call by reading the miniredis stream after the
+	// transition and asserting the entry exists.
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewSessionStore(mock)
+	store.SetLogger(zerolog.Nop())
+
+	mr := miniredis.RunT(t)
+	client := cache.New(cache.Config{Topology: "standalone", URL: "redis://" + mr.Addr()}, zerolog.Nop(), nil)
+	require.NotNil(t, client, "Redis client should initialize")
+	defer client.Close()
+	streams := cache.NewSessionStreams(client, zerolog.Nop(), nil)
+	require.NotNil(t, streams, "session streams helper should initialize")
+	store.SetStreams(streams)
+
+	now := time.Now()
+	sessionID := uuid.New()
+	issueID := uuid.New()
+	orgID := uuid.New()
+
+	mock.ExpectQuery("UPDATE sessions[\\s\\S]*pr_creation_state[\\s\\S]*RETURNING").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(sessionTestColumns).AddRow(newAgentSessionRow(sessionID, issueID, orgID, now)...))
+
+	require.NoError(t, store.UpdatePRCreationState(context.Background(), orgID, sessionID, models.PRCreationStateSucceeded, ""), "UpdatePRCreationState should succeed")
+
+	streamKey := "143:stream:{ses:" + sessionID.String() + "}:status"
+	entries, err := mr.Stream(streamKey)
+	require.NoError(t, err, "miniredis should know about the status stream key after publish")
+	require.Len(t, entries, 1, "status stream should contain exactly one entry from the published transition")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestSessionStore_UpdatePRCreationState_NoMatchingRowIsNoOp(t *testing.T) {
+	t.Parallel()
+
+	// Pre-existing semantics: the "AND pr_creation_state <> 'succeeded'" guard
+	// makes the terminal state sticky. When the WHERE clause filters the row
+	// out (already-succeeded session), the call must succeed without error and
+	// without publishing a stale status — preserving the prior Exec-based
+	// no-op behavior even after switching to RETURNING.
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewSessionStore(mock)
+	store.SetLogger(zerolog.Nop())
+	store.SetStreams(nil)
+	orgID := uuid.New()
+	sessionID := uuid.New()
+
+	mock.ExpectQuery("UPDATE sessions[\\s\\S]*pr_creation_state[\\s\\S]*RETURNING").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(sessionTestColumns))
+
+	err = store.UpdatePRCreationState(context.Background(), orgID, sessionID, models.PRCreationStateQueued, "")
+	require.NoError(t, err, "no-rows-affected should not surface as an error so callers stay idempotent")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func TestSessionStore_TryMarkPRPushQueued(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name         string
-		rowsAffected int64
-		wantQueued   bool
+		name       string
+		returnRow  bool
+		wantQueued bool
 	}{
 		{
-			name:         "rows affected returns true",
-			rowsAffected: 1,
-			wantQueued:   true,
+			name:       "row returned signals successful CAS",
+			returnRow:  true,
+			wantQueued: true,
 		},
 		{
-			name:         "no rows affected returns false (concurrent winner)",
-			rowsAffected: 0,
-			wantQueued:   false,
+			name:       "no row returned signals concurrent winner",
+			returnRow:  false,
+			wantQueued: false,
 		},
 	}
 
@@ -326,14 +397,21 @@ func TestSessionStore_TryMarkPRPushQueued(t *testing.T) {
 			defer mock.Close()
 
 			store := NewSessionStore(mock)
+			store.SetLogger(zerolog.Nop())
+			store.SetStreams(nil)
 			orgID := uuid.New()
 			sessionID := uuid.New()
+			now := time.Now()
 
 			// CAS update should pass exactly two args (id, org_id) and
 			// guard with a NOT IN ('queued','pushing') predicate.
-			mock.ExpectExec("UPDATE sessions[\\s\\S]*pr_push_state = 'queued'[\\s\\S]*pr_push_state NOT IN").
-				WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-				WillReturnResult(pgxmock.NewResult("UPDATE", tt.rowsAffected))
+			expect := mock.ExpectQuery("UPDATE sessions[\\s\\S]*pr_push_state = 'queued'[\\s\\S]*pr_push_state NOT IN[\\s\\S]*RETURNING").
+				WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg())
+			if tt.returnRow {
+				expect.WillReturnRows(pgxmock.NewRows(sessionTestColumns).AddRow(newAgentSessionRow(sessionID, uuid.New(), orgID, now)...))
+			} else {
+				expect.WillReturnRows(pgxmock.NewRows(sessionTestColumns))
+			}
 
 			queued, err := store.TryMarkPRPushQueued(context.Background(), orgID, sessionID)
 			require.NoError(t, err, "TryMarkPRPushQueued should not error on a successful CAS attempt")

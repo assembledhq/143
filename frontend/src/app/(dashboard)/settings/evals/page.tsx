@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useMemo, useRef, useCallback } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import Link from "next/link";
 import { api } from "@/lib/api";
@@ -38,7 +38,8 @@ import {
 import { FlaskConical, Plus, Loader2, GitPullRequest, AlertTriangle, Layers, CheckCircle2, XCircle, Eye, RotateCw } from "lucide-react";
 import type { EvalTask, EvalBatch, EvalTaskSource, EvalBootstrapRun, EvalBootstrapStatus, ListResponse, Repository, SessionLog } from "@/lib/types";
 import { evalComplexityConfig, evalSourceConfig } from "@/lib/types";
-import { addSSEListener, SSE_EVENT, buildSessionLogsStreamURL } from "@/lib/sse";
+import { addSSEListener, SSE_EVENT, buildEvalBootstrapStreamURL, buildSessionLogsStreamURL } from "@/lib/sse";
+import { useEvalSSE } from "@/lib/use-eval-sse";
 import { getActiveOrgId } from "@/lib/active-org";
 
 type SourceFilter = "all" | EvalTaskSource | "archived";
@@ -110,14 +111,35 @@ export default function EvalsSettingsPage() {
   })();
   const effectiveBootstrapRunId = activeBootstrapRunId ?? latestActiveId;
 
-  // Poll for active bootstrap run status.
+  // SSE-driven bootstrap status with a polling backstop. The SSE wakes the
+  // page on every state transition so the user sees progress within ms; the
+  // backstop only fires when SSE itself is unavailable (Redis down) or has
+  // briefly disconnected, in which case we fall back to the original 3s
+  // cadence so the UI still updates while Redis is recovering.
+  const bootstrapSSEURL = useMemo(() => {
+    if (!effectiveBootstrapRunId) return null;
+    const apiBase = process.env.NEXT_PUBLIC_API_URL || "";
+    return buildEvalBootstrapStreamURL(apiBase, effectiveBootstrapRunId, getActiveOrgId());
+  }, [effectiveBootstrapRunId]);
+  const onBootstrapEvent = useCallback(() => {
+    if (!effectiveBootstrapRunId) return;
+    queryClient.invalidateQueries({ queryKey: queryKeys.evals.bootstrapRun(effectiveBootstrapRunId) });
+  }, [queryClient, effectiveBootstrapRunId]);
+  const { healthy: bootstrapStreamHealthy } = useEvalSSE({
+    url: bootstrapSSEURL,
+    event: SSE_EVENT.EVAL_BOOTSTRAP_UPDATED,
+    onEvent: onBootstrapEvent,
+  });
+
   const { data: activeBootstrapResponse } = useQuery({
     queryKey: queryKeys.evals.bootstrapRun(effectiveBootstrapRunId ?? ""),
     queryFn: () => api.evals.getBootstrapCandidates({ bootstrap_run_id: effectiveBootstrapRunId! }),
     enabled: !!effectiveBootstrapRunId,
     refetchInterval: (query) => {
       const status = query.state.data?.data?.status;
-      return status && isBootstrapActive(status) ? 3000 : false;
+      if (!status || !isBootstrapActive(status)) return false;
+      // 30s backstop while SSE is healthy; 3s when SSE is down.
+      return bootstrapStreamHealthy ? 30_000 : 3_000;
     },
   });
   const activeBootstrap = activeBootstrapResponse?.data;

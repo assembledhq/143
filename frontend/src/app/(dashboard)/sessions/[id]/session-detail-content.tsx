@@ -1993,22 +1993,17 @@ export function SessionDetailContent({ id }: { id: string }) {
     },
   });
 
-  // PR state for the detail-panel header button
+  // PR state for the detail-panel header button. Refetched on demand by the
+  // pr_creation_state and pr_push_state effects below when the session SSE
+  // reports a transition to `succeeded` (worker has written the PR row) or
+  // `failed`. The session status stream is the source of truth for the state
+  // machine, so a separate poll on this endpoint would just duplicate load on
+  // Postgres without any latency win — Redis pub/sub already pushes the
+  // transition within milliseconds, and the SSE polling fallback re-reads the
+  // session row on a 1s tick when Redis is unavailable.
   const { data: prData } = useQuery({
     queryKey: ["session", id, "pr"],
     queryFn: () => api.sessions.getPR(id),
-    refetchInterval: (q) => {
-      const serverState = data?.data?.pr_creation_state;
-      const optimisticWaitingForPR =
-        localPRState !== "idle" && serverState !== "failed" && serverState !== "succeeded";
-      const waitingForPR =
-        optimisticWaitingForPR ||
-        serverState === "queued" ||
-        serverState === "pushing" ||
-        serverState === "succeeded";
-
-      return waitingForPR && !q.state.data?.data ? 2000 : false;
-    },
   });
   const pullRequestId = prData?.data?.id;
   const { data: prHealthData, isLoading: isPRHealthLoading } = useQuery({
