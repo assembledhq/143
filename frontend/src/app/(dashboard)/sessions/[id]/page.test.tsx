@@ -268,6 +268,43 @@ describe('SessionDetailPage', () => {
     expect(screen.getByRole('tab', { name: 'Validation' })).toBeInTheDocument();
   });
 
+  it('uses a dedicated mobile close button that does not compete with PR actions', async () => {
+    vi.mocked(window.matchMedia).mockImplementation((query: string) => ({
+      matches: query === '(max-width: 767px)',
+      media: query,
+      onchange: null,
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      dispatchEvent: vi.fn(),
+    }));
+
+    const user = userEvent.setup();
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+
+    await screen.findAllByText('Fixed TypeError by adding null check');
+    await user.click(screen.getByRole('button', { name: 'Open details' }));
+
+    // panelTabsEl is rendered both inline (desktop) and inside the Sheet
+    // (mobile), so we scope to the dialog Radix opens for the sheet to
+    // assert on the mobile-visible instance specifically.
+    const sheet = await screen.findByRole('dialog');
+    const closeBtn = within(sheet).getByRole('button', { name: 'Close details' });
+    expect(closeBtn).toBeInTheDocument();
+    const viewPRButton = within(sheet).getByRole('button', { name: 'View PR' });
+    expect(viewPRButton).toBeInTheDocument();
+    expect(viewPRButton.className).not.toContain('w-full');
+    expect(viewPRButton.closest('a')?.className ?? '').not.toContain('w-full');
+    expect(within(sheet).queryByRole('button', { name: 'Close' })).not.toBeInTheDocument();
+
+    await user.click(closeBtn);
+
+    await waitFor(() => {
+      expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    });
+  });
+
   it('switches between sandbox agent tabs and sends through the active thread', async () => {
     const sessionId = 'session-abcdef12-3456-7890';
     const threads: SessionThread[] = [

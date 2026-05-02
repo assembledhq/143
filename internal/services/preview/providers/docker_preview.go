@@ -1067,8 +1067,8 @@ func (d *DockerPreviewProvider) startService(
 const readinessProbeAttemptTimeout = 5 * time.Second
 
 func (d *DockerPreviewProvider) waitForReadiness(ctx context.Context, state *previewState, name string, port int, httpPath string, timeout time.Duration) error {
-	deadline := time.NewTimer(timeout)
-	defer deadline.Stop()
+	overallCtx, cancelOverall := context.WithTimeout(ctx, timeout)
+	defer cancelOverall()
 	tick := time.NewTicker(time.Second)
 	defer tick.Stop()
 
@@ -1099,17 +1099,31 @@ func (d *DockerPreviewProvider) waitForReadiness(ctx context.Context, state *pre
 		return nil
 	}
 
+	// timeoutErr maps overallCtx.Err() back to a caller-friendly error,
+	// distinguishing a parent-ctx cancellation from our own deadline.
+	timeoutErr := func() error {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		return fmt.Errorf("readiness probe timed out after %s", timeout)
+	}
+
 	for {
 		if err := checkExited(); err != nil {
 			return err
 		}
+		// Check overall deadline before re-entering select: if a hung Exec
+		// just returned because per-attempt timeout cancelled it, both
+		// tick.C and overallCtx.Done() may be ready and select would pick
+		// uniformly at random. We want the deadline to win deterministically.
+		if overallCtx.Err() != nil {
+			return timeoutErr()
+		}
 		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-deadline.C:
-			return fmt.Errorf("readiness probe timed out after %s", timeout)
+		case <-overallCtx.Done():
+			return timeoutErr()
 		case <-tick.C:
-			execCtx, cancel := context.WithTimeout(ctx, readinessProbeAttemptTimeout)
+			execCtx, cancel := context.WithTimeout(overallCtx, readinessProbeAttemptTimeout)
 			exitCode, _ := d.executor.Exec(execCtx, state.sandbox, cmd, io.Discard, io.Discard)
 			cancel()
 			if exitCode == 0 {
