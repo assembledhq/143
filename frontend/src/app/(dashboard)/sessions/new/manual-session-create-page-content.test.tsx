@@ -186,9 +186,21 @@ describe("ManualSessionCreatePageContent", () => {
     });
 
     expect(
-      screen.getByText("Start a manual session with text, files, photos, dictation, or a screenshot anywhere here."),
+      screen.getByText("Start a manual session with text, files, photos, or a screenshot anywhere here."),
     ).toBeInTheDocument();
     expect(screen.queryByText("Drop a screenshot anywhere here, or use +")).not.toBeInTheDocument();
+  });
+
+  it("does not render dictation controls on desktop or mobile", async () => {
+    const { unmount } = renderWithProviders(<ManualSessionCreatePageContent />);
+
+    expect(screen.queryByRole("button", { name: "Dictate" })).not.toBeInTheDocument();
+
+    unmount();
+    setMobileViewport(true);
+    renderWithProviders(<ManualSessionCreatePageContent />);
+
+    expect(screen.queryByRole("button", { name: "Dictate" })).not.toBeInTheDocument();
   });
 
   it("shows repository selection", async () => {
