@@ -19,7 +19,7 @@ type mockThreadStore struct {
 	createFn        func(ctx context.Context, t *models.SessionThread, max int) error
 	getByIDFn       func(ctx context.Context, orgID, threadID uuid.UUID) (models.SessionThread, error)
 	listBySessionFn func(ctx context.Context, orgID, sessionID uuid.UUID) ([]models.SessionThread, error)
-	claimIdleFn     func(ctx context.Context, orgID, threadID uuid.UUID) (models.SessionThread, error)
+	claimIdleFn     func(ctx context.Context, orgID, sessionID, threadID uuid.UUID) (models.SessionThread, error)
 	updateStatusFn  func(ctx context.Context, orgID, threadID uuid.UUID, status models.ThreadStatus) error
 }
 
@@ -44,9 +44,9 @@ func (m *mockThreadStore) ListBySession(ctx context.Context, orgID, sessionID uu
 	return nil, nil
 }
 
-func (m *mockThreadStore) ClaimIdle(ctx context.Context, orgID, threadID uuid.UUID) (models.SessionThread, error) {
+func (m *mockThreadStore) ClaimIdleForSession(ctx context.Context, orgID, sessionID, threadID uuid.UUID) (models.SessionThread, error) {
 	if m.claimIdleFn != nil {
-		return m.claimIdleFn(ctx, orgID, threadID)
+		return m.claimIdleFn(ctx, orgID, sessionID, threadID)
 	}
 	return models.SessionThread{}, fmt.Errorf("not idle")
 }
@@ -245,7 +245,7 @@ func TestService_CreateThread(t *testing.T) {
 			expectErr: db.ErrThreadLimitReached,
 		},
 		{
-			name: "enqueue failure",
+			name: "creates idle blank thread without enqueueing work",
 			input: CreateThreadInput{
 				SessionID: sessionID,
 				OrgID:     orgID,
@@ -255,16 +255,17 @@ func TestService_CreateThread(t *testing.T) {
 				deps.sessionStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.Session, error) {
 					return models.Session{ID: sessionID, OrgID: orgID, Status: "running", AgentType: models.AgentTypeClaudeCode}, nil
 				}
-				deps.threadStore.createFn = func(_ context.Context, t *models.SessionThread, _ int) error {
-					t.ID = threadID
-					t.CreatedAt = now
+				deps.threadStore.createFn = func(_ context.Context, thread *models.SessionThread, _ int) error {
+					require.Equal(t, models.ThreadStatusIdle, thread.Status, "new tabs should start idle")
+					thread.ID = threadID
+					thread.CreatedAt = now
 					return nil
 				}
 				deps.jobStore.enqueueFn = func(_ context.Context, _ uuid.UUID, _, _ string, _ any, _ int, _ *string) (uuid.UUID, error) {
-					return uuid.Nil, fmt.Errorf("queue down")
+					require.Fail(t, "creating a blank tab should not enqueue an agent job")
+					return uuid.Nil, nil
 				}
 			},
-			expectErr: ErrEnqueueFailed,
 		},
 	}
 
@@ -285,8 +286,39 @@ func TestService_CreateThread(t *testing.T) {
 			require.NotNil(t, result, "should return a thread")
 			require.Equal(t, threadID, result.ID, "should set the thread ID")
 			require.Equal(t, tt.input.Label, result.Label, "should set the label")
+			require.Equal(t, models.ThreadStatusIdle, result.Status, "new tab should wait for first user message")
 		})
 	}
+}
+
+func TestService_CreateThreadDoesNotEnqueueOnCreate(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+
+	svc, deps := newTestService(t)
+	deps.sessionStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.Session, error) {
+		return models.Session{ID: sessionID, OrgID: orgID, Status: "running", AgentType: models.AgentTypeClaudeCode}, nil
+	}
+	deps.threadStore.createFn = func(_ context.Context, thread *models.SessionThread, _ int) error {
+		thread.ID = uuid.New()
+		thread.CreatedAt = time.Now()
+		return nil
+	}
+	deps.jobStore.enqueueFn = func(_ context.Context, _ uuid.UUID, _, _ string, _ any, _ int, _ *string) (uuid.UUID, error) {
+		require.Fail(t, "CreateThread should not enqueue a job")
+		return uuid.Nil, nil
+	}
+
+	result, err := svc.CreateThread(context.Background(), CreateThreadInput{
+		SessionID: sessionID,
+		OrgID:     orgID,
+		Label:     "Reviewer",
+	})
+
+	require.NoError(t, err, "CreateThread should create a blank tab")
+	require.Equal(t, models.ThreadStatusIdle, result.Status, "blank tab should be idle")
 }
 
 func TestService_ListThreads(t *testing.T) {
@@ -441,13 +473,20 @@ func TestService_SendMessage(t *testing.T) {
 				Images:    []string{"img1.png"},
 			},
 			setupDeps: func(deps *testDeps) {
-				deps.threadStore.claimIdleFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
+				deps.threadStore.claimIdleFn = func(_ context.Context, _, _, _ uuid.UUID) (models.SessionThread, error) {
 					return models.SessionThread{ID: threadID, SessionID: sessionID, OrgID: orgID, CurrentTurn: 1, Status: models.ThreadStatusRunning}, nil
 				}
 				deps.messageStore.createFn = func(_ context.Context, msg *models.SessionMessage) error {
 					msg.ID = 42
 					msg.CreatedAt = time.Now()
 					return nil
+				}
+				deps.jobStore.enqueueFn = func(_ context.Context, _ uuid.UUID, queue, jobType string, payload any, _ int, _ *string) (uuid.UUID, error) {
+					require.Equal(t, "agent", queue, "thread messages should use the agent queue")
+					require.Equal(t, "continue_session", jobType, "thread messages should reuse the continue-session worker")
+					require.IsType(t, map[string]string{}, payload, "thread message payload should be string keyed")
+					require.Equal(t, threadID.String(), payload.(map[string]string)["thread_id"], "thread id should be included for worker attribution")
+					return uuid.New(), nil
 				}
 			},
 		},
@@ -460,7 +499,7 @@ func TestService_SendMessage(t *testing.T) {
 				Message:   "hi",
 			},
 			setupDeps: func(deps *testDeps) {
-				deps.threadStore.claimIdleFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
+				deps.threadStore.claimIdleFn = func(_ context.Context, _, _, _ uuid.UUID) (models.SessionThread, error) {
 					return models.SessionThread{}, fmt.Errorf("no rows")
 				}
 				deps.threadStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
@@ -478,7 +517,7 @@ func TestService_SendMessage(t *testing.T) {
 				Message:   "hi",
 			},
 			setupDeps: func(deps *testDeps) {
-				deps.threadStore.claimIdleFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
+				deps.threadStore.claimIdleFn = func(_ context.Context, _, _, _ uuid.UUID) (models.SessionThread, error) {
 					return models.SessionThread{}, fmt.Errorf("no rows")
 				}
 				deps.threadStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
@@ -486,6 +525,30 @@ func TestService_SendMessage(t *testing.T) {
 				}
 			},
 			expectErr: ErrThreadNotIdle,
+		},
+		{
+			name: "another thread already active",
+			input: SendMessageInput{
+				SessionID: sessionID,
+				OrgID:     orgID,
+				ThreadID:  threadID,
+				Message:   "hi",
+			},
+			setupDeps: func(deps *testDeps) {
+				deps.threadStore.claimIdleFn = func(_ context.Context, _, _, _ uuid.UUID) (models.SessionThread, error) {
+					return models.SessionThread{}, fmt.Errorf("active sibling")
+				}
+				deps.threadStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
+					return models.SessionThread{ID: threadID, SessionID: sessionID, OrgID: orgID, Status: models.ThreadStatusIdle}, nil
+				}
+				deps.threadStore.listBySessionFn = func(_ context.Context, _, _ uuid.UUID) ([]models.SessionThread, error) {
+					return []models.SessionThread{
+						{ID: threadID, SessionID: sessionID, OrgID: orgID, Status: models.ThreadStatusIdle},
+						{ID: uuid.New(), SessionID: sessionID, OrgID: orgID, Status: models.ThreadStatusRunning},
+					}, nil
+				}
+			},
+			expectErr: ErrActiveThreadExists,
 		},
 		{
 			name: "session mismatch reverts to idle",
@@ -496,7 +559,7 @@ func TestService_SendMessage(t *testing.T) {
 				Message:   "hi",
 			},
 			setupDeps: func(deps *testDeps) {
-				deps.threadStore.claimIdleFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
+				deps.threadStore.claimIdleFn = func(_ context.Context, _, _, _ uuid.UUID) (models.SessionThread, error) {
 					return models.SessionThread{ID: threadID, SessionID: uuid.New(), OrgID: orgID, Status: models.ThreadStatusRunning}, nil
 				}
 			},
@@ -511,7 +574,7 @@ func TestService_SendMessage(t *testing.T) {
 				Message:   "hi",
 			},
 			setupDeps: func(deps *testDeps) {
-				deps.threadStore.claimIdleFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
+				deps.threadStore.claimIdleFn = func(_ context.Context, _, _, _ uuid.UUID) (models.SessionThread, error) {
 					return models.SessionThread{ID: threadID, SessionID: sessionID, OrgID: orgID, CurrentTurn: 1}, nil
 				}
 				deps.messageStore.createFn = func(_ context.Context, _ *models.SessionMessage) error {
@@ -528,7 +591,7 @@ func TestService_SendMessage(t *testing.T) {
 				Message:   "hi",
 			},
 			setupDeps: func(deps *testDeps) {
-				deps.threadStore.claimIdleFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
+				deps.threadStore.claimIdleFn = func(_ context.Context, _, _, _ uuid.UUID) (models.SessionThread, error) {
 					return models.SessionThread{ID: threadID, SessionID: sessionID, OrgID: orgID, CurrentTurn: 1}, nil
 				}
 				deps.messageStore.createFn = func(_ context.Context, msg *models.SessionMessage) error {

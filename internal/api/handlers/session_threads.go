@@ -83,8 +83,6 @@ func (h *SessionThreadHandler) CreateThread(w http.ResponseWriter, r *http.Reque
 			writeError(w, r, http.StatusBadRequest, "INVALID_AGENT_TYPE", err.Error())
 		case errors.Is(err, thread.ErrInvalidModel):
 			writeError(w, r, http.StatusBadRequest, "INVALID_MODEL", err.Error())
-		case errors.Is(err, thread.ErrEnqueueFailed):
-			writeError(w, r, http.StatusInternalServerError, "ENQUEUE_FAILED", "failed to enqueue thread agent job", err)
 		default:
 			writeError(w, r, http.StatusInternalServerError, "CREATE_FAILED", "failed to create thread", err)
 		}
@@ -158,8 +156,11 @@ func (h *SessionThreadHandler) SendThreadMessage(w http.ResponseWriter, r *http.
 	}
 
 	var body struct {
-		Message string   `json:"message"`
-		Images  []string `json:"images"`
+		Message    string                        `json:"message"`
+		Images     []string                      `json:"images"`
+		References models.SessionInputReferences `json:"references"`
+		Commands   models.SessionInputCommands   `json:"commands"`
+		PlanMode   bool                          `json:"plan_mode"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeError(w, r, http.StatusBadRequest, "INVALID_BODY", "invalid request body")
@@ -178,12 +179,15 @@ func (h *SessionThreadHandler) SendThreadMessage(w http.ResponseWriter, r *http.
 	}
 
 	msg, err := h.svc.SendMessage(r.Context(), thread.SendMessageInput{
-		SessionID: sessionID,
-		OrgID:     orgID,
-		ThreadID:  threadID,
-		UserID:    userID,
-		Message:   body.Message,
-		Images:    body.Images,
+		SessionID:  sessionID,
+		OrgID:      orgID,
+		ThreadID:   threadID,
+		UserID:     userID,
+		Message:    body.Message,
+		Images:     body.Images,
+		References: body.References,
+		Commands:   body.Commands,
+		PlanMode:   body.PlanMode,
 	})
 	if err != nil {
 		switch {
@@ -191,8 +195,10 @@ func (h *SessionThreadHandler) SendThreadMessage(w http.ResponseWriter, r *http.
 			writeError(w, r, http.StatusNotFound, "NOT_FOUND", "thread not found")
 		case errors.Is(err, thread.ErrThreadNotIdle):
 			writeError(w, r, http.StatusConflict, "NOT_IDLE", "thread must be idle to send a message")
+		case errors.Is(err, thread.ErrActiveThreadExists):
+			writeError(w, r, http.StatusConflict, "ACTIVE_THREAD_EXISTS", "another tab is already running in this sandbox")
 		case errors.Is(err, thread.ErrEnqueueFailed):
-			writeError(w, r, http.StatusInternalServerError, "ENQUEUE_FAILED", "failed to enqueue continue_thread job", err)
+			writeError(w, r, http.StatusInternalServerError, "ENQUEUE_FAILED", "failed to enqueue continue_session job", err)
 		default:
 			writeError(w, r, http.StatusInternalServerError, "CREATE_FAILED", "failed to create message", err)
 		}

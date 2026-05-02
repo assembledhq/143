@@ -349,6 +349,37 @@ func TestSessionThreadStore_ClaimIdle(t *testing.T) {
 	}
 }
 
+func TestSessionThreadStore_ClaimIdleForSessionLocksSiblings(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewSessionThreadStore(mock)
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	threadID := uuid.New()
+	now := time.Now()
+	row := newSessionThreadRow(threadID, sessionID, orgID, "Backend", now)
+	row[8] = models.ThreadStatusRunning
+	row[11] = &now
+	row[17] = &now
+
+	// Pin the guard explicitly so a regression that drops the idle check or
+	// reverses the sibling check cannot pass: we need the eligible CTE to
+	// require target.status = 'idle' AND a NOT EXISTS over active siblings.
+	mock.ExpectQuery(`(?s)WITH locked_threads AS.*FOR UPDATE.*target\.status\s*=\s*'idle'.*NOT EXISTS.*sibling\.id\s*<>\s*@id.*sibling\.status IN\s*\(\s*'pending',\s*'running',\s*'awaiting_input'\s*\).*UPDATE session_threads\s+SET status = 'running'.*EXISTS\s*\(\s*SELECT 1 FROM eligible\s*\).*RETURNING`).
+		WithArgs(anyArgs(3)...).
+		WillReturnRows(pgxmock.NewRows(sessionThreadTestColumns).AddRow(row...))
+
+	thread, err := store.ClaimIdleForSession(context.Background(), orgID, sessionID, threadID)
+	require.NoError(t, err, "ClaimIdleForSession should claim an eligible idle thread")
+	require.Equal(t, threadID, thread.ID, "ClaimIdleForSession should return the claimed thread")
+	require.Equal(t, models.ThreadStatusRunning, thread.Status, "ClaimIdleForSession should return the running status")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func TestSessionThreadStore_UpdateResult(t *testing.T) {
 	t.Parallel()
 

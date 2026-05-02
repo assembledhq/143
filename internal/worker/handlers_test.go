@@ -66,6 +66,24 @@ var workerSessionColumns = []string{
 	"deleted_at", "git_identity_source", "git_identity_user_id", "created_at",
 }
 
+var workerSessionThreadColumns = []string{
+	"id", "session_id", "org_id", "agent_type", "model_override",
+	"label", "instructions", "file_scope", "status", "agent_session_id", "current_turn", "last_activity_at",
+	"confidence_score", "result_summary", "diff", "failure_explanation", "failure_category",
+	"started_at", "completed_at", "created_at",
+}
+
+func workerSessionThreadRow(threadID, sessionID, orgID uuid.UUID, agentType models.AgentType, modelOverride *string, status models.ThreadStatus) []any {
+	now := time.Now()
+	nowPtr := &now
+	return []any{
+		threadID, sessionID, orgID, agentType, modelOverride,
+		"Thread", nil, []string{}, status, nil, 1, nowPtr,
+		nil, nil, nil, nil, nil,
+		nowPtr, nil, now,
+	}
+}
+
 const (
 	workerSessionWorkerNodeIndex      = 15
 	workerSessionReasoningIndex       = 35
@@ -368,7 +386,7 @@ type orchestratorServiceStub struct {
 	continueSessionCalls int
 	recoverSessionCalls  int
 	runAgentFn           func(ctx context.Context, run *models.Session) error
-	continueSessionFn    func(ctx context.Context, session *models.Session) error
+	continueSessionFn    func(ctx context.Context, session *models.Session, opts *agent.ContinueSessionOptions) error
 	recoverSessionFn     func(ctx context.Context, session *models.Session) error
 	sessionTimeout       time.Duration
 	runtimeCeiling       time.Duration
@@ -382,10 +400,10 @@ func (s *orchestratorServiceStub) RunAgent(ctx context.Context, run *models.Sess
 	return nil
 }
 
-func (s *orchestratorServiceStub) ContinueSession(ctx context.Context, session *models.Session) error {
+func (s *orchestratorServiceStub) ContinueSession(ctx context.Context, session *models.Session, opts *agent.ContinueSessionOptions) error {
 	s.continueSessionCalls++
 	if s.continueSessionFn != nil {
-		return s.continueSessionFn(ctx, session)
+		return s.continueSessionFn(ctx, session, opts)
 	}
 	return nil
 }
@@ -3803,7 +3821,7 @@ func TestContinueSessionHandler_UsesRuntimeCeilingDeadline(t *testing.T) {
 	orch := &orchestratorServiceStub{
 		sessionTimeout: sessionTimeout,
 		runtimeCeiling: runtimeCeiling,
-		continueSessionFn: func(ctx context.Context, session *models.Session) error {
+		continueSessionFn: func(ctx context.Context, session *models.Session, opts *agent.ContinueSessionOptions) error {
 			deadline, ok := ctx.Deadline()
 			require.True(t, ok, "continue_session should apply a handler deadline")
 			remaining := time.Until(deadline)
@@ -3847,7 +3865,7 @@ func TestContinueSessionHandler_WrapsSnapshotPendingAsRetryable(t *testing.T) {
 		)
 
 	orch := &orchestratorServiceStub{
-		continueSessionFn: func(ctx context.Context, session *models.Session) error {
+		continueSessionFn: func(ctx context.Context, session *models.Session, opts *agent.ContinueSessionOptions) error {
 			return agent.ErrSnapshotPending
 		},
 	}
@@ -3860,6 +3878,108 @@ func TestContinueSessionHandler_WrapsSnapshotPendingAsRetryable(t *testing.T) {
 	require.ErrorAs(t, err, &retryable, "ErrSnapshotPending must be wrapped as RetryableError so the worker requeues without consuming an attempt")
 	require.ErrorIs(t, retryable.Err, agent.ErrSnapshotPending, "the wrapped error must preserve the ErrSnapshotPending sentinel")
 	require.Equal(t, 1, orch.continueSessionCalls, "continue_session should call the orchestrator once before bailing")
+}
+
+func TestContinueSessionHandler_ReleasesThreadOnContinuationFailure(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+	stores.SessionThreads = db.NewSessionThreadStore(mock)
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	threadID := uuid.New()
+	issueID := uuid.New()
+	threadModel := "gemini-2.5-pro"
+	continuationErr := errors.New("sandbox hydrate failed")
+
+	mock.ExpectQuery("SELECT .* FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(workerSessionColumns).AddRow(
+				workerSessionRow(sessionID, issueID, orgID, string(models.SessionStatusIdle), 2, nil, nil)...,
+			),
+		)
+	mock.ExpectQuery("SELECT .* FROM session_threads").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(workerSessionThreadColumns).AddRow(
+			workerSessionThreadRow(threadID, sessionID, orgID, models.AgentTypeGeminiCLI, &threadModel, models.ThreadStatusRunning)...,
+		))
+	mock.ExpectExec("UPDATE session_threads SET status = @status").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	orch := &orchestratorServiceStub{
+		continueSessionFn: func(ctx context.Context, session *models.Session, opts *agent.ContinueSessionOptions) error {
+			require.NotNil(t, opts, "continue_session should pass thread execution options to the orchestrator")
+			require.Equal(t, models.AgentTypeGeminiCLI, opts.AgentType, "thread execution should use the thread agent type")
+			require.NotNil(t, opts.ModelOverride, "thread execution should include the thread model override")
+			require.Equal(t, threadModel, *opts.ModelOverride, "thread execution should use the thread model")
+			return continuationErr
+		},
+	}
+	handler := newContinueSessionHandler(stores, &Services{Orchestrator: orch}, zerolog.Nop())
+	payload := json.RawMessage(`{"session_id":"` + sessionID.String() + `","org_id":"` + orgID.String() + `","thread_id":"` + threadID.String() + `"}`)
+
+	err := handler(context.Background(), "continue_session", payload)
+	require.ErrorIs(t, err, continuationErr, "continue_session should preserve the orchestrator failure")
+	require.Equal(t, 1, orch.continueSessionCalls, "continue_session should invoke the orchestrator once")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+// TestContinueSessionHandler_ThreadCompleteTurnUsesThreadTurn pins the
+// thread-side current_turn advancement to the thread's own counter, not the
+// session's. With multiple tabs in one sandbox, session.CurrentTurn is the
+// shared total across threads — using it would leak sibling-thread turns into
+// every thread's row.
+func TestContinueSessionHandler_ThreadCompleteTurnUsesThreadTurn(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+	stores.SessionThreads = db.NewSessionThreadStore(mock)
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	threadID := uuid.New()
+	issueID := uuid.New()
+	threadModel := "gemini-2.5-pro"
+
+	const sessionTurnBefore = 5
+	const expectedThreadTurnAfter = 2 // workerSessionThreadRow seeds current_turn=1, so +1=2.
+
+	mock.ExpectQuery("SELECT .* FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(workerSessionColumns).AddRow(
+				workerSessionRow(sessionID, issueID, orgID, string(models.SessionStatusIdle), sessionTurnBefore, nil, nil)...,
+			),
+		)
+	mock.ExpectQuery("SELECT .* FROM session_threads").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(workerSessionThreadColumns).AddRow(
+			workerSessionThreadRow(threadID, sessionID, orgID, models.AgentTypeGeminiCLI, &threadModel, models.ThreadStatusRunning)...,
+		))
+	// CompleteTurn query: arg order follows the @placeholders in the SQL
+	// (current_turn, id, org_id). Pinning the literal value here is what
+	// catches a regression that uses session.CurrentTurn.
+	mock.ExpectExec(`UPDATE session_threads\s+SET status = 'idle',\s+current_turn = @current_turn`).
+		WithArgs(expectedThreadTurnAfter, threadID, orgID).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	orch := &orchestratorServiceStub{
+		continueSessionFn: func(ctx context.Context, session *models.Session, opts *agent.ContinueSessionOptions) error {
+			return nil
+		},
+	}
+	handler := newContinueSessionHandler(stores, &Services{Orchestrator: orch}, zerolog.Nop())
+	payload := json.RawMessage(`{"session_id":"` + sessionID.String() + `","org_id":"` + orgID.String() + `","thread_id":"` + threadID.String() + `"}`)
+
+	err := handler(context.Background(), "continue_session", payload)
+	require.NoError(t, err, "continue_session should succeed when the orchestrator returns nil")
+	require.Equal(t, 1, orch.continueSessionCalls, "continue_session should invoke the orchestrator once")
+	require.NoError(t, mock.ExpectationsWereMet(), "thread current_turn must come from the thread's own counter, not the session's")
 }
 
 // ---------------------------------------------------------------------------

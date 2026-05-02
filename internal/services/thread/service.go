@@ -22,6 +22,7 @@ var (
 	ErrEnqueueFailed       = errors.New("enqueue failed")
 	ErrThreadNotFound      = errors.New("thread not found")
 	ErrThreadNotIdle       = errors.New("thread must be idle to send a message")
+	ErrActiveThreadExists  = errors.New("another thread is already active")
 	ErrThreadCannotBeEnded = errors.New("thread cannot be ended in its current state")
 )
 
@@ -35,7 +36,7 @@ type ThreadStore interface {
 	Create(ctx context.Context, thread *models.SessionThread, maxThreads int) error
 	GetByID(ctx context.Context, orgID, threadID uuid.UUID) (models.SessionThread, error)
 	ListBySession(ctx context.Context, orgID, sessionID uuid.UUID) ([]models.SessionThread, error)
-	ClaimIdle(ctx context.Context, orgID, threadID uuid.UUID) (models.SessionThread, error)
+	ClaimIdleForSession(ctx context.Context, orgID, sessionID, threadID uuid.UUID) (models.SessionThread, error)
 	UpdateStatus(ctx context.Context, orgID, threadID uuid.UUID, status models.ThreadStatus) error
 }
 
@@ -68,12 +69,15 @@ type CreateThreadInput struct {
 
 // SendMessageInput holds the input for sending a message to a thread.
 type SendMessageInput struct {
-	SessionID uuid.UUID
-	OrgID     uuid.UUID
-	ThreadID  uuid.UUID
-	UserID    *uuid.UUID
-	Message   string
-	Images    []string
+	SessionID  uuid.UUID
+	OrgID      uuid.UUID
+	ThreadID   uuid.UUID
+	UserID     *uuid.UUID
+	Message    string
+	Images     []string
+	References models.SessionInputReferences
+	Commands   models.SessionInputCommands
+	PlanMode   bool
 }
 
 // Service handles thread business logic.
@@ -113,7 +117,7 @@ func isTerminalStatus(status string) bool {
 	return false
 }
 
-// CreateThread validates inputs, creates a thread, and enqueues a run_thread job.
+// CreateThread validates inputs and creates a blank idle thread.
 func (s *Service) CreateThread(ctx context.Context, input CreateThreadInput) (*models.SessionThread, error) {
 	// Verify session exists and belongs to org.
 	session, err := s.sessionStore.GetByID(ctx, input.OrgID, input.SessionID)
@@ -156,7 +160,7 @@ func (s *Service) CreateThread(ctx context.Context, input CreateThreadInput) (*m
 		Label:         input.Label,
 		Instructions:  instructions,
 		FileScope:     input.FileScope,
-		Status:        models.ThreadStatusPending,
+		Status:        models.ThreadStatusIdle,
 	}
 
 	if err := s.threadStore.Create(ctx, thread, models.MaxThreadsPerSession); err != nil {
@@ -164,17 +168,6 @@ func (s *Service) CreateThread(ctx context.Context, input CreateThreadInput) (*m
 			return nil, db.ErrThreadLimitReached
 		}
 		return nil, fmt.Errorf("create thread: %w", err)
-	}
-
-	// Enqueue a run_thread job so the agent process starts.
-	payload := map[string]string{
-		"session_id": input.SessionID.String(),
-		"thread_id":  thread.ID.String(),
-		"org_id":     input.OrgID.String(),
-	}
-	if _, err := s.jobStore.Enqueue(ctx, input.OrgID, "agent", "run_thread", payload, 5, nil); err != nil {
-		s.logger.Error().Err(err).Str("thread_id", thread.ID.String()).Msg("failed to enqueue run_thread job")
-		return nil, fmt.Errorf("%w: %w", ErrEnqueueFailed, err)
 	}
 
 	return thread, nil
@@ -206,20 +199,34 @@ func (s *Service) GetThread(ctx context.Context, orgID, sessionID, threadID uuid
 	return thread, nil
 }
 
-// SendMessage claims an idle thread, creates a message, and enqueues a continue_thread job.
+// SendMessage claims an idle thread, creates a message, and enqueues a continue_session job.
 //
-// Race condition note: ClaimIdle atomically sets the thread to "running". If the
-// subsequent message creation or job enqueue fails, we best-effort revert the
-// thread to "idle". Between ClaimIdle and the revert, concurrent callers will
-// see the thread as "running" and be rejected. This is acceptable because the
-// revert window is short and the alternative (a distributed transaction) adds
-// significant complexity for minimal benefit.
+// ClaimIdleForSession serializes sibling-thread admission in the database. If
+// the subsequent message creation or job enqueue fails, we best-effort revert
+// the thread to "idle".
 func (s *Service) SendMessage(ctx context.Context, input SendMessageInput) (*models.SessionMessage, error) {
-	thread, err := s.threadStore.ClaimIdle(ctx, input.OrgID, input.ThreadID)
+	thread, err := s.threadStore.ClaimIdleForSession(ctx, input.OrgID, input.SessionID, input.ThreadID)
 	if err != nil {
 		// Check if thread exists at all to provide a better error.
-		if _, lookupErr := s.threadStore.GetByID(ctx, input.OrgID, input.ThreadID); lookupErr != nil {
+		existing, lookupErr := s.threadStore.GetByID(ctx, input.OrgID, input.ThreadID)
+		if lookupErr != nil {
 			return nil, fmt.Errorf("%w: %w", ErrThreadNotFound, lookupErr)
+		}
+		if existing.SessionID != input.SessionID {
+			return nil, ErrThreadNotFound
+		}
+		threads, listErr := s.threadStore.ListBySession(ctx, input.OrgID, input.SessionID)
+		if listErr != nil {
+			return nil, fmt.Errorf("list sibling threads: %w", listErr)
+		}
+		for _, sibling := range threads {
+			if sibling.ID == input.ThreadID {
+				continue
+			}
+			switch sibling.Status {
+			case models.ThreadStatusPending, models.ThreadStatusRunning, models.ThreadStatusAwaitingInput:
+				return nil, ErrActiveThreadExists
+			}
 		}
 		return nil, ErrThreadNotIdle
 	}
@@ -232,6 +239,11 @@ func (s *Service) SendMessage(ctx context.Context, input SendMessageInput) (*mod
 		return nil, ErrThreadNotFound
 	}
 
+	content := input.Message
+	if input.PlanMode {
+		content = "[PLAN_MODE]\n" + content
+	}
+
 	msg := &models.SessionMessage{
 		SessionID:  thread.SessionID,
 		OrgID:      input.OrgID,
@@ -239,7 +251,9 @@ func (s *Service) SendMessage(ctx context.Context, input SendMessageInput) (*mod
 		UserID:     input.UserID,
 		TurnNumber: thread.CurrentTurn + 1,
 		Role:       models.MessageRoleUser,
-		Content:    input.Message,
+		Content:    content,
+		References: input.References,
+		Commands:   input.Commands,
 	}
 	if len(input.Images) > 0 {
 		msg.Attachments = input.Images
@@ -252,13 +266,16 @@ func (s *Service) SendMessage(ctx context.Context, input SendMessageInput) (*mod
 		return nil, fmt.Errorf("create message: %w", err)
 	}
 
-	// Enqueue continue_thread job.
+	// Reuse the session continuation worker for phase 1. The latest user
+	// message carries thread_id, so the orchestrator attributes assistant
+	// messages and streamed logs back to this tab while still operating on the
+	// single shared sandbox.
 	payload := map[string]string{
 		"session_id": thread.SessionID.String(),
 		"thread_id":  input.ThreadID.String(),
 		"org_id":     input.OrgID.String(),
 	}
-	if _, err := s.jobStore.Enqueue(ctx, input.OrgID, "agent", "continue_thread", payload, 5, nil); err != nil {
+	if _, err := s.jobStore.Enqueue(ctx, input.OrgID, "agent", "continue_session", payload, 5, nil); err != nil {
 		if revertErr := s.threadStore.UpdateStatus(ctx, input.OrgID, input.ThreadID, models.ThreadStatusIdle); revertErr != nil {
 			s.logger.Error().Err(revertErr).Str("thread_id", input.ThreadID.String()).Msg("failed to revert thread to idle after enqueue failure")
 		}

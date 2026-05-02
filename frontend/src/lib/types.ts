@@ -187,6 +187,7 @@ export interface Session {
   diff?: string;
   diff_stats?: { added: number; removed: number; files_changed: number };
   diff_history?: Array<{ pass: number; diff: string; diff_stats: { added: number; removed: number; files_changed: number }; created_at: string }>;
+  threads?: SessionThread[];
   archived_at?: string;
   archived_by_user_id?: string;
   created_at: string;

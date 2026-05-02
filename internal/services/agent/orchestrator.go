@@ -288,6 +288,14 @@ type DurableCheckpoint struct {
 	AgentSessionID string
 }
 
+// ContinueSessionOptions carries execution-scoped overrides for a follow-up
+// turn. Threaded sessions use this to run a tab with its selected agent/model
+// while keeping the parent session row as the shared sandbox/session identity.
+type ContinueSessionOptions struct {
+	AgentType     models.AgentType
+	ModelOverride *string
+}
+
 // OrchestratorConfig holds the dependencies for creating an Orchestrator.
 type OrchestratorConfig struct {
 	Provider          SandboxProvider
@@ -609,7 +617,7 @@ func (o *Orchestrator) RecoverSession(ctx context.Context, session *models.Sessi
 	}
 	event.Msg("recovering session from latest durable checkpoint")
 
-	return o.ContinueSession(ctx, session)
+	return o.ContinueSession(ctx, session, nil)
 }
 
 func (o *Orchestrator) beginRuntimeControl(ctx context.Context, controller *runtimeController, orgID, sessionID uuid.UUID, fallbackStatus string, capability models.CheckpointCapability, startedAt time.Time, log zerolog.Logger) error {
@@ -1644,8 +1652,8 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 //
 // Authorization: callers must verify the requesting user is authorized before
 // invoking this method. The SendMessage HTTP handler enforces this via org_id
-// scoping and ClaimIdle atomicity.
-func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Session) error {
+// scoping and ClaimIdleForSession atomicity.
+func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Session, opts *ContinueSessionOptions) error {
 	// Create a cancellable context. The cancel registry is populated later
 	// once the sandbox is available, so CancelSession can send SIGINT.
 	ctx, cancel := context.WithCancel(ctx)
@@ -1669,6 +1677,13 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	if session.PendingSnapshotKey != nil && *session.PendingSnapshotKey != "" {
 		log.Info().Str("pending_snapshot_key", *session.PendingSnapshotKey).Msg("continue_session waiting for post-PR snapshot upload to land")
 		return ErrSnapshotPending
+	}
+
+	if opts != nil && opts.AgentType != "" {
+		executionSession := *session
+		executionSession.AgentType = opts.AgentType
+		executionSession.ModelOverride = opts.ModelOverride
+		session = &executionSession
 	}
 
 	// Determine whether we can restore from a snapshot or need a fresh start.

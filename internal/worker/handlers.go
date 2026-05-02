@@ -125,6 +125,7 @@ type Stores struct {
 	EvalBootstraps      *db.EvalBootstrapStore  // nil-safe: eval bootstrap feature
 	Repositories        *db.RepositoryStore     // nil-safe: needed for eval repo lookup
 	SessionMessages     *db.SessionMessageStore // nil-safe: needed for title regeneration
+	SessionThreads      *db.SessionThreadStore  // nil-safe: needed for thread-scoped continuation status
 	IssueSnapshots      *db.SessionTurnIssueSnapshotStore
 	Automations         *db.AutomationStore       // nil-safe: automations feature disabled if nil
 	AutomationRuns      *db.AutomationRunStore    // nil-safe: automations feature disabled if nil
@@ -189,7 +190,7 @@ type Services struct {
 
 type orchestratorService interface {
 	RunAgent(ctx context.Context, run *models.Session) error
-	ContinueSession(ctx context.Context, session *models.Session) error
+	ContinueSession(ctx context.Context, session *models.Session, opts *agent.ContinueSessionOptions) error
 	RecoverSession(ctx context.Context, session *models.Session) error
 	ResolveSessionTimeout(ctx context.Context, orgID uuid.UUID) time.Duration
 	ResolveAbsoluteRuntimeCeiling(ctx context.Context, orgID uuid.UUID) time.Duration
@@ -937,6 +938,7 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 		var input struct {
 			SessionID string `json:"session_id"`
 			OrgID     string `json:"org_id"`
+			ThreadID  string `json:"thread_id"`
 		}
 		if err := json.Unmarshal(payload, &input); err != nil {
 			return fmt.Errorf("unmarshal continue_session payload: %w", err)
@@ -972,14 +974,61 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 			Dur("runtime_ceiling", runtimeCeiling).
 			Msg("starting continue_session job")
 
-		if err := services.Orchestrator.ContinueSession(jobCtx, &session); err != nil {
+		var threadID uuid.UUID
+		var threadTurnBefore int
+		var hasThread bool
+		var continueOpts *agent.ContinueSessionOptions
+		if input.ThreadID != "" && stores.SessionThreads != nil {
+			parsedThreadID, parseErr := uuid.Parse(input.ThreadID)
+			if parseErr != nil {
+				logger.Warn().Err(parseErr).Str("thread_id", input.ThreadID).Msg("invalid thread_id in continue_session payload")
+			} else {
+				threadID = parsedThreadID
+				hasThread = true
+				thread, threadErr := stores.SessionThreads.GetByID(ctx, orgID, threadID)
+				if threadErr != nil {
+					return fmt.Errorf("fetch session thread: %w", threadErr)
+				}
+				if thread.SessionID != sessionID {
+					return fmt.Errorf("session thread %s does not belong to session %s", threadID, sessionID)
+				}
+				threadTurnBefore = thread.CurrentTurn
+				continueOpts = &agent.ContinueSessionOptions{
+					AgentType:     thread.AgentType,
+					ModelOverride: thread.ModelOverride,
+				}
+			}
+		}
+
+		if err := services.Orchestrator.ContinueSession(jobCtx, &session, continueOpts); err != nil {
 			// A pending post-PR snapshot upload is a transient state — wrap
 			// in RetryableError so the job is requeued without consuming an
 			// attempt. The session row is unchanged at this point.
 			if errors.Is(err, agent.ErrSnapshotPending) {
 				return &RetryableError{Err: err}
 			}
+			if hasThread {
+				if statusErr := stores.SessionThreads.UpdateStatus(ctx, orgID, threadID, models.ThreadStatusIdle); statusErr != nil {
+					logger.Warn().Err(statusErr).
+						Str("session_id", sessionID.String()).
+						Str("thread_id", threadID.String()).
+						Msg("failed to release session thread after continue_session failure")
+				}
+			}
 			return err
+		}
+
+		if hasThread {
+			// The user message was inserted at thread.CurrentTurn + 1, so the
+			// thread's new current_turn is the same value once the assistant
+			// turn completes. The session's CurrentTurn is independent — it
+			// tracks the shared sandbox's total turns across all threads.
+			if err := stores.SessionThreads.CompleteTurn(ctx, orgID, threadID, threadTurnBefore+1); err != nil {
+				logger.Warn().Err(err).
+					Str("session_id", sessionID.String()).
+					Str("thread_id", threadID.String()).
+					Msg("failed to mark session thread turn complete")
+			}
 		}
 
 		// Regenerate title if due (every 3 turns). Non-fatal — log and continue.
