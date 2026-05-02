@@ -34,7 +34,7 @@ describe("model constants", () => {
     expect(PM_MODELS_BY_PROVIDER.codex.models).toEqual(AVAILABLE_CODEX_MODELS);
   });
 
-  it("includes latest Claude Code model aliases", () => {
+  it("includes latest Claude Code models", () => {
     expect(AVAILABLE_CLAUDE_CODE_MODELS).toEqual([
       "claude-opus-4-7",
       "claude-opus-4-6",

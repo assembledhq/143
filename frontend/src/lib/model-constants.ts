@@ -1,15 +1,15 @@
 export const CLAUDE_CODE_MODEL_OPUS_47 = "claude-opus-4-7";
-export const CLAUDE_CODE_MODEL_OPUS = "claude-opus-4-6";
+export const CLAUDE_CODE_MODEL_OPUS_46 = "claude-opus-4-6";
 export const CLAUDE_CODE_MODEL_SONNET_46 = "claude-sonnet-4-6";
-export const CLAUDE_CODE_MODEL_SONNET = "claude-sonnet-4-5";
-export const CLAUDE_CODE_MODEL_HAIKU = "claude-haiku-4-5";
+export const CLAUDE_CODE_MODEL_SONNET_45 = "claude-sonnet-4-5";
+export const CLAUDE_CODE_MODEL_HAIKU_45 = "claude-haiku-4-5";
 
 export const AVAILABLE_CLAUDE_CODE_MODELS = [
   CLAUDE_CODE_MODEL_OPUS_47,
-  CLAUDE_CODE_MODEL_OPUS,
+  CLAUDE_CODE_MODEL_OPUS_46,
   CLAUDE_CODE_MODEL_SONNET_46,
-  CLAUDE_CODE_MODEL_SONNET,
-  CLAUDE_CODE_MODEL_HAIKU,
+  CLAUDE_CODE_MODEL_SONNET_45,
+  CLAUDE_CODE_MODEL_HAIKU_45,
 ] as const;
 
 export const GEMINI_CLI_MODEL_GEMINI_3_1_PRO_PREVIEW = "gemini-3.1-pro-preview";
