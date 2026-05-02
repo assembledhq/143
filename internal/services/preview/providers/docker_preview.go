@@ -867,6 +867,60 @@ func notifyServiceFailed(observer preview.ServiceObserver, name, errMsg string, 
 	observer.OnServiceFailed(name, errMsg, tail)
 }
 
+// formatServiceExitError builds a human-readable exit message from a service's
+// exit code plus the last few lines of its stdout/stderr. Bare "exited with
+// code N" — especially the POSIX "command not found" code 127 — leaves the
+// user staring at a number without any of the context the shell already
+// printed to stderr (e.g. "/bin/sh: 1: npm: not found"). Surfacing the tail
+// here lets that output reach the launch error returned to the API, not just
+// the preview_logs row.
+func formatServiceExitError(exitCode int, outputTail []string) string {
+	hint := ""
+	if exitCode == 127 {
+		hint = " (command not found — check that the executable exists on the sandbox's $PATH or use an absolute path in .143/preview.json)"
+	}
+	base := fmt.Sprintf("exited with code %d%s", exitCode, hint)
+	tail := truncatedTail(outputTail, 3, 200)
+	if tail == "" {
+		return base
+	}
+	return base + "; last output: " + tail
+}
+
+// truncatedTail joins the final maxLines of outputTail into a single
+// space-separated string, trimming each line and capping the joined result at
+// maxRunes runes so an unbounded log line can't blow up the surfacing error
+// message. Returns "" when outputTail has no usable content.
+func truncatedTail(outputTail []string, maxLines, maxRunes int) string {
+	if len(outputTail) == 0 || maxLines <= 0 {
+		return ""
+	}
+	start := len(outputTail) - maxLines
+	if start < 0 {
+		start = 0
+	}
+	parts := make([]string, 0, len(outputTail)-start)
+	for _, line := range outputTail[start:] {
+		trimmed := strings.TrimRight(line, "\r\n")
+		trimmed = strings.TrimSpace(trimmed)
+		if trimmed == "" {
+			continue
+		}
+		parts = append(parts, trimmed)
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	joined := strings.Join(parts, " | ")
+	if maxRunes > 0 {
+		runes := []rune(joined)
+		if len(runes) > maxRunes {
+			joined = string(runes[:maxRunes]) + "…"
+		}
+	}
+	return joined
+}
+
 func (d *DockerPreviewProvider) startService(
 	ctx context.Context,
 	state *previewState,
@@ -960,7 +1014,7 @@ func (d *DockerPreviewProvider) startService(
 			if err != nil {
 				ss.err = err.Error()
 			} else {
-				ss.err = fmt.Sprintf("exited with code %d", exitCode)
+				ss.err = formatServiceExitError(exitCode, ss.outputTail)
 			}
 			tail = append([]string(nil), ss.outputTail...)
 		} else {

@@ -806,6 +806,121 @@ func TestStartService_TailRingBufferBoundedAtServiceTailLines(t *testing.T) {
 	require.Equal(t, fmt.Sprintf("line-%d", totalLines-1), failed[0].tail[len(failed[0].tail)-1])
 }
 
+// TestFormatServiceExitError covers the user-visible error built from a
+// service's non-zero exit. The bare exit number is opaque (especially the
+// POSIX 127 "command not found"), so the formatted message has to:
+//   - Decode 127 to a hint about $PATH / absolute paths in .143/preview.json.
+//   - Append the captured stdout/stderr tail so the user sees the real reason
+//     (e.g. "/bin/sh: 1: npm: not found") in the API response, not just an
+//     exit code.
+func TestFormatServiceExitError(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name     string
+		exitCode int
+		tail     []string
+		want     []string // substrings we require to appear
+		notWant  []string // substrings we require to be absent
+	}{
+		{
+			name:     "code_127_includes_command_not_found_hint",
+			exitCode: 127,
+			tail:     []string{"/bin/sh: 1: npm: not found"},
+			want:     []string{"127", "command not found", "$PATH", "npm: not found"},
+		},
+		{
+			name:     "non_127_exit_omits_command_not_found_hint",
+			exitCode: 1,
+			tail:     []string{"crash boom"},
+			want:     []string{"exited with code 1", "crash boom"},
+			notWant:  []string{"command not found"},
+		},
+		{
+			name:     "no_tail_keeps_message_terse",
+			exitCode: 137,
+			tail:     nil,
+			want:     []string{"exited with code 137"},
+			notWant:  []string{"last output"},
+		},
+		{
+			name:     "tail_caps_to_last_three_lines",
+			exitCode: 1,
+			tail:     []string{"line-1", "line-2", "line-3", "line-4", "line-5"},
+			want:     []string{"line-3", "line-4", "line-5"},
+			notWant:  []string{"line-1", "line-2"},
+		},
+		{
+			name:     "blank_tail_lines_filtered",
+			exitCode: 1,
+			tail:     []string{"", "  ", "real error"},
+			want:     []string{"real error"},
+			notWant:  []string{"last output:  "},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := formatServiceExitError(tc.exitCode, tc.tail)
+			for _, s := range tc.want {
+				require.Contains(t, got, s, "want substring missing from %q", got)
+			}
+			for _, s := range tc.notWant {
+				require.NotContains(t, got, s, "unwanted substring present in %q", got)
+			}
+		})
+	}
+}
+
+// TestTruncatedTail_RuneCap guards the rune-based truncation: a single output
+// line longer than maxRunes should be cut down with an ellipsis instead of
+// flowing into the surfacing error message at full length, where it would
+// crowd out the rest of the message in a constrained UI banner.
+func TestTruncatedTail_RuneCap(t *testing.T) {
+	t.Parallel()
+	long := strings.Repeat("x", 500)
+	got := truncatedTail([]string{long}, 3, 200)
+	runes := []rune(got)
+	require.LessOrEqual(t, len(runes), 201, "truncatedTail must respect maxRunes")
+	require.Contains(t, got, "…", "truncated tail should end with an ellipsis")
+}
+
+// TestStartService_Code127IncludesCommandNotFoundHint is the integration-level
+// regression guard: a service that exits 127 (the case that motivated this
+// change) must surface a hint about $PATH and the captured stderr tail
+// through the observer, so the user-visible launch error explains *why*
+// instead of stopping at "exited with code 127".
+func TestStartService_Code127IncludesCommandNotFoundHint(t *testing.T) {
+	t.Parallel()
+
+	exec := &fakeServiceExecutor{
+		execFn: func(_ context.Context, _ string) (int, error) { return 1, nil },
+		execStreamFn: func(_ context.Context, _ string, onLine func([]byte)) (int, error) {
+			onLine([]byte("/bin/sh: 1: npm: not found"))
+			return 127, nil
+		},
+	}
+	d := NewDockerPreviewProvider(&mockDockerPreviewClient{}, exec, zerolog.Nop())
+	obs := &recordingObserver{}
+	state := &previewState{
+		sandbox:  &agent.Sandbox{ID: "sb"},
+		services: map[string]*serviceState{},
+		cancelFn: func() {},
+	}
+
+	require.NoError(t, d.startService(
+		context.Background(), state, "frontend",
+		models.ServiceConfig{Command: []string{"npm", "run", "dev"}, Port: 3000},
+		nil, obs,
+	))
+	state.wg.Wait()
+
+	failed := obs.failed()
+	require.Len(t, failed, 1)
+	require.Contains(t, failed[0].errMsg, "127")
+	require.Contains(t, failed[0].errMsg, "command not found")
+	require.Contains(t, failed[0].errMsg, "npm: not found")
+}
+
 // TestWaitForReadiness_FailsFastWhenServiceStopped covers the second branch
 // of checkExited: a service that exited cleanly (Stopped, not Failed) before
 // becoming ready also short-circuits the loop.

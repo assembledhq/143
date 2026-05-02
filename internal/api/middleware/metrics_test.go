@@ -90,3 +90,19 @@ func TestStatusWriter(t *testing.T) {
 		})
 	}
 }
+
+// TestStatusWriter_Unwrap is the regression guard for the production EOF that
+// surfaced as 502 PREVIEW_WORKER_REQUEST_FAILED on long preview starts: when
+// this wrapper does not implement Unwrap(), http.NewResponseController cannot
+// see the underlying conn, so handlers calling SetWriteDeadline silently
+// no-op and the server's 15s WriteTimeout drops the connection mid-handler.
+// The same wrapper sits in the middleware chain in front of every preview
+// route, so this test pins the contract.
+func TestStatusWriter_Unwrap(t *testing.T) {
+	t.Parallel()
+	inner := httptest.NewRecorder()
+	sw := &statusWriter{ResponseWriter: inner, status: http.StatusOK}
+	unwrapper, ok := any(sw).(interface{ Unwrap() http.ResponseWriter })
+	require.True(t, ok, "statusWriter must implement Unwrap so http.NewResponseController can reach the underlying conn")
+	require.Equal(t, http.ResponseWriter(inner), unwrapper.Unwrap(), "Unwrap must return the wrapped ResponseWriter")
+}

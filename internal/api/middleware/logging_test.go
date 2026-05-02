@@ -337,6 +337,22 @@ func TestRoutePattern_FallsBackToPathWhenUnavailable(t *testing.T) {
 	}
 }
 
+// TestResponseWriter_Unwrap is the regression guard for the production EOF
+// that surfaced as 502 PREVIEW_WORKER_REQUEST_FAILED on long preview starts:
+// when this wrapper does not implement Unwrap(), http.NewResponseController
+// cannot reach the underlying conn, so handlers calling SetWriteDeadline
+// silently no-op and the server's 15s WriteTimeout drops the connection
+// mid-handler. Logging is the outermost server-mounted middleware, so the
+// preview-start handler always sees this wrapper at the top of the stack.
+func TestResponseWriter_Unwrap(t *testing.T) {
+	t.Parallel()
+	inner := httptest.NewRecorder()
+	rw := &responseWriter{ResponseWriter: inner, status: http.StatusOK}
+	unwrapper, ok := any(rw).(interface{ Unwrap() http.ResponseWriter })
+	require.True(t, ok, "responseWriter must implement Unwrap so http.NewResponseController can reach the underlying conn")
+	require.Equal(t, http.ResponseWriter(inner), unwrapper.Unwrap(), "Unwrap must return the wrapped ResponseWriter")
+}
+
 type capturingReporter struct {
 	requestErrors []observability.RequestErrorEvent
 	panicEvents   []panicEvent

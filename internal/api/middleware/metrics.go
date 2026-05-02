@@ -78,3 +78,11 @@ func (w *statusWriter) Flush() {
 		f.Flush()
 	}
 }
+
+// Unwrap exposes the underlying ResponseWriter to http.NewResponseController.
+// See logging.responseWriter.Unwrap for the rationale: without it, handlers
+// calling SetWriteDeadline (e.g. clearWriteDeadline for preview start) silently
+// no-op when this middleware sits between the chi router and the handler.
+func (w *statusWriter) Unwrap() http.ResponseWriter {
+	return w.ResponseWriter
+}
