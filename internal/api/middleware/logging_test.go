@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -351,6 +352,56 @@ func TestResponseWriter_Unwrap(t *testing.T) {
 	unwrapper, ok := any(rw).(interface{ Unwrap() http.ResponseWriter })
 	require.True(t, ok, "responseWriter must implement Unwrap so http.NewResponseController can reach the underlying conn")
 	require.Equal(t, http.ResponseWriter(inner), unwrapper.Unwrap(), "Unwrap must return the wrapped ResponseWriter")
+}
+
+// TestMiddlewareChain_SetWriteDeadlineEscapesServerWriteTimeout is the
+// end-to-end regression guard for the prod incident: a real http.Server
+// with a tight WriteTimeout, the actual middleware chain (Logging wrapping
+// Metrics) in front of a slow handler that calls SetWriteDeadline. Without
+// Unwrap on both wrappers, http.NewResponseController would fail silently,
+// the server's WriteTimeout would still fire while the handler slept, and
+// the client would see a torn connection. With Unwrap in place, the
+// SetWriteDeadline reaches the underlying conn, the timeout is suppressed,
+// and the full response makes it back.
+func TestMiddlewareChain_SetWriteDeadlineEscapesServerWriteTimeout(t *testing.T) {
+	t.Parallel()
+
+	const (
+		writeTimeout = 100 * time.Millisecond
+		handlerSleep = 400 * time.Millisecond
+	)
+
+	slowHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Mirror handlers/helpers.go's clearWriteDeadline. If Unwrap is
+		// missing on either Logging or Metrics, http.NewResponseController
+		// returns ErrNotSupported and the handler keeps running with the
+		// server's WriteTimeout still armed.
+		require.NoError(t,
+			http.NewResponseController(w).SetWriteDeadline(time.Time{}),
+			"SetWriteDeadline must reach underlying conn through middleware chain",
+		)
+		time.Sleep(handlerSleep)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	})
+
+	chain := Logging(zerolog.Nop(), nil)(Metrics(slowHandler))
+	srv := httptest.NewUnstartedServer(chain)
+	srv.Config.WriteTimeout = writeTimeout
+	srv.Start()
+	defer srv.Close()
+
+	// Generous client timeout so the test fails on the server-side timeout
+	// (the bug we're guarding against) and not on a client-side cutoff.
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Get(srv.URL)
+	require.NoError(t, err, "client request should complete despite handler outliving WriteTimeout")
+	defer resp.Body.Close()
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	require.Equal(t, `{"ok":true}`, string(body))
 }
 
 type capturingReporter struct {

@@ -138,6 +138,20 @@ type serviceState struct {
 // service exits non-zero.
 const serviceTailLines = 200
 
+// serviceExitTailLines is the number of trailing non-blank stdout/stderr
+// lines folded into the user-visible exit error from formatServiceExitError.
+// Three is enough to capture a typical shell error like "/bin/sh: 1: npm:
+// not found" plus one or two contextual lines, while staying short enough
+// not to crowd the rest of the launch error in a UI banner.
+const serviceExitTailLines = 3
+
+// serviceExitTailRunes caps the rune length of the joined tail rendered
+// into a service-exit error so a runaway log line (a stack trace, a
+// minified JSON dump) cannot inflate the API response. Sized to leave
+// room for the wrapping "preview service did not pass its readiness probe…"
+// chrome that classifyLaunchError prepends.
+const serviceExitTailRunes = 200
+
 // DockerPreviewOption configures a DockerPreviewProvider.
 type DockerPreviewOption func(*DockerPreviewProvider)
 
@@ -880,29 +894,30 @@ func formatServiceExitError(exitCode int, outputTail []string) string {
 		hint = " (command not found — check that the executable exists on the sandbox's $PATH or use an absolute path in .143/preview.json)"
 	}
 	base := fmt.Sprintf("exited with code %d%s", exitCode, hint)
-	tail := truncatedTail(outputTail, 3, 200)
+	tail := truncatedTail(outputTail, serviceExitTailLines, serviceExitTailRunes)
 	if tail == "" {
 		return base
 	}
 	return base + "; last output: " + tail
 }
 
-// truncatedTail joins the final maxLines of outputTail into a single
-// space-separated string, trimming each line and capping the joined result at
-// maxRunes runes so an unbounded log line can't blow up the surfacing error
-// message. Returns "" when outputTail has no usable content.
+// truncatedTail returns up to the last maxLines non-blank lines of
+// outputTail joined into a single string, capped at maxRunes runes with an
+// ellipsis so a runaway log line can't blow up the surfacing error message.
+// Returns "" when outputTail has no usable content.
+//
+// Walks from the newest line back so trailing blank lines (a service that
+// ends with a flush of "\n\n" or pads its readiness logs with separators)
+// don't degrade the message into a useless tail. We still bound the scan at
+// the full ring buffer length, so an O(serviceTailLines) walk is the
+// worst case.
 func truncatedTail(outputTail []string, maxLines, maxRunes int) string {
 	if len(outputTail) == 0 || maxLines <= 0 {
 		return ""
 	}
-	start := len(outputTail) - maxLines
-	if start < 0 {
-		start = 0
-	}
-	parts := make([]string, 0, len(outputTail)-start)
-	for _, line := range outputTail[start:] {
-		trimmed := strings.TrimRight(line, "\r\n")
-		trimmed = strings.TrimSpace(trimmed)
+	parts := make([]string, 0, maxLines)
+	for i := len(outputTail) - 1; i >= 0 && len(parts) < maxLines; i-- {
+		trimmed := strings.TrimSpace(strings.TrimRight(outputTail[i], "\r\n"))
 		if trimmed == "" {
 			continue
 		}
@@ -910,6 +925,11 @@ func truncatedTail(outputTail []string, maxLines, maxRunes int) string {
 	}
 	if len(parts) == 0 {
 		return ""
+	}
+	// parts is newest-first from the reverse walk; flip to chronological so
+	// the joined message reads in the order the service actually printed.
+	for lo, hi := 0, len(parts)-1; lo < hi; lo, hi = lo+1, hi-1 {
+		parts[lo], parts[hi] = parts[hi], parts[lo]
 	}
 	joined := strings.Join(parts, " | ")
 	if maxRunes > 0 {

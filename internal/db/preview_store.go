@@ -1021,10 +1021,12 @@ func (s *PreviewStore) CreatePreviewLog(ctx context.Context, log *models.Preview
 		RETURNING %s`, previewLogColumns)
 
 	// metadata is NOT NULL in Postgres with a DEFAULT '{}'. Passing a nil
-	// json.RawMessage binds explicit NULL — which trips the not-null
-	// constraint because the DEFAULT only applies when the column is omitted
-	// from the INSERT. OnServiceFailed callers in particular pass an unset
-	// Metadata, and that silently dropped service-exit logs in production.
+	// or empty json.RawMessage binds explicit NULL — which trips the
+	// not-null constraint because the DEFAULT only applies when the column
+	// is omitted from the INSERT. OnServiceFailed callers in particular
+	// pass an unset Metadata, and that silently dropped service-exit logs
+	// in production. Treat a zero-length value (nil slice or empty slice)
+	// as "use the column default".
 	metadata := log.Metadata
 	if len(metadata) == 0 {
 		metadata = json.RawMessage(`{}`)

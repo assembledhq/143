@@ -856,6 +856,17 @@ func TestFormatServiceExitError(t *testing.T) {
 			want:     []string{"real error"},
 			notWant:  []string{"last output:  "},
 		},
+		{
+			// Trailing blanks must not degrade the surfacing error to a
+			// bare "exited with code N" — services that pad readiness
+			// output with blank-line separators (or end with a flushed
+			// "\n\n") still need to expose their last real lines.
+			name:     "trailing_blanks_look_back_for_real_content",
+			exitCode: 1,
+			tail:     []string{"line-A", "line-B", "real error", "", ""},
+			want:     []string{"line-A", "line-B", "real error"},
+			notWant:  []string{"last output: |"},
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
