@@ -211,8 +211,8 @@ func TestOrgCredentialStore_MirrorDisableInvalidatesCache(t *testing.T) {
 	mock.ExpectExec(`UPDATE org_credentials SET status = 'disabled'.*WHERE id = @id`).
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
-	mock.ExpectQuery(`UPDATE coding_credentials SET status = 'disabled'.*WHERE id = @id RETURNING org_id, user_id, provider`).
-		WithArgs(rowID).
+	mock.ExpectQuery(`UPDATE coding_credentials SET status = 'disabled'.*WHERE id = @id AND org_id = @org_id.*RETURNING org_id, user_id, provider`).
+		WithArgs(rowID, orgID).
 		WillReturnRows(pgxmock.NewRows([]string{"org_id", "user_id", "provider"}).
 			AddRow(orgID, (*uuid.UUID)(nil), string(models.ProviderAnthropic)))
 
@@ -249,8 +249,8 @@ func TestOrgCredentialStore_MirrorDeleteInvalidatesCache(t *testing.T) {
 	mock.ExpectExec(`DELETE FROM org_credentials`).
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("DELETE", 1))
-	mock.ExpectQuery(`DELETE FROM coding_credentials WHERE id = @id RETURNING org_id, user_id, provider`).
-		WithArgs(rowID).
+	mock.ExpectQuery(`DELETE FROM coding_credentials\s+WHERE id = @id AND org_id = @org_id\s+RETURNING org_id, user_id, provider`).
+		WithArgs(rowID, orgID).
 		WillReturnRows(pgxmock.NewRows([]string{"org_id", "user_id", "provider"}).
 			AddRow(orgID, &userID, string(models.ProviderAnthropic)))
 
@@ -286,8 +286,8 @@ func TestOrgCredentialStore_MirrorDisableMissingRowIsNoop(t *testing.T) {
 	mock.ExpectExec(`UPDATE org_credentials SET status = 'disabled'`).
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
-	mock.ExpectQuery(`UPDATE coding_credentials SET status = 'disabled'.*WHERE id = @id RETURNING`).
-		WithArgs(rowID).
+	mock.ExpectQuery(`UPDATE coding_credentials SET status = 'disabled'.*WHERE id = @id AND org_id = @org_id.*RETURNING`).
+		WithArgs(rowID, orgID).
 		WillReturnError(pgx.ErrNoRows)
 
 	require.NoError(t, legacy.DisableByID(context.Background(), orgID, rowID))
@@ -483,8 +483,8 @@ func TestMirrorProviderHelpers(t *testing.T) {
 	require.False(t, ok, "mirrorProviderForUser should skip non-coding providers")
 
 	require.NoError(t, NoopMirror().MirrorOrgCredential(context.Background(), models.OrgCredential{}, models.OpenAIConfig{}), "noop mirror should ignore org upsert")
-	require.NoError(t, NoopMirror().MirrorOrgCredentialDelete(context.Background(), uuid.New()), "noop mirror should ignore org delete")
-	require.NoError(t, NoopMirror().MirrorOrgCredentialDisable(context.Background(), uuid.New()), "noop mirror should ignore org disable")
+	require.NoError(t, NoopMirror().MirrorOrgCredentialDelete(context.Background(), uuid.New(), uuid.New()), "noop mirror should ignore org delete")
+	require.NoError(t, NoopMirror().MirrorOrgCredentialDisable(context.Background(), uuid.New(), uuid.New()), "noop mirror should ignore org disable")
 	require.NoError(t, NoopMirror().MirrorUserCredential(context.Background(), models.UserCredential{}, models.OpenAIConfig{}), "noop mirror should ignore user upsert")
 	require.NoError(t, NoopMirror().MirrorUserCredentialDelete(context.Background(), uuid.New(), uuid.New(), uuid.New(), models.ProviderOpenAI), "noop mirror should ignore user delete")
 	require.NoError(t, NoopMirror().MirrorUserCredentialDisable(context.Background(), uuid.New(), uuid.New(), uuid.New(), models.ProviderOpenAI), "noop mirror should ignore user disable")
@@ -580,8 +580,8 @@ func TestMirrorUserCredentialDisableCascadesTeamDefault(t *testing.T) {
 
 	// Step 1: id-keyed disable returns the row's scope/provider for cache
 	// invalidation.
-	mock.ExpectQuery(`UPDATE coding_credentials SET status = 'disabled'.*WHERE id = @id RETURNING`).
-		WithArgs(id).
+	mock.ExpectQuery(`UPDATE coding_credentials SET status = 'disabled'.*WHERE id = @id AND org_id = @org_id.*RETURNING`).
+		WithArgs(id, orgID).
 		WillReturnRows(pgxmock.NewRows([]string{"org_id", "user_id", "provider"}).
 			AddRow(orgID, &userID, string(models.ProviderAnthropic)))
 

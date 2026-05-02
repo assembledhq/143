@@ -517,12 +517,10 @@ func (e *AgentEnv) loadAgentConfig(ctx context.Context, orgID uuid.UUID, agentTy
 // list (personal-then-org, priority-within-scope) covering both API-key and
 // subscription rows. If that returns a runnable row, we use it.
 //
-// Fallback: if CodingCredentials is unwired (older test rigs) OR returns
-// nothing for an api-key provider AND a subscription has been set up under
-// the legacy split provider name, we fall through to the legacy 3-step
-// cascade. This fallback is here for migration safety only — the cleanup PR
-// will delete it once we've confirmed no traffic resolves through the
-// legacy path.
+// Fallback: if CodingCredentials is unwired (older test rigs), we fall
+// through to the legacy 3-step cascade. Once the unified store is wired it is
+// authoritative even when it returns no active rows; otherwise disabling the
+// last migrated row would silently revive the still-present legacy row.
 func (e *AgentEnv) resolveProviderConfig(ctx context.Context, orgID uuid.UUID, userID *uuid.UUID, provider models.ProviderName) models.ProviderConfig {
 	if cfg, handled := e.resolveFromCodingCredentials(ctx, orgID, userID, provider); cfg != nil || handled {
 		return cfg
@@ -555,10 +553,10 @@ func (e *AgentEnv) resolveFromCodingCredentials(ctx context.Context, orgID uuid.
 func (e *AgentEnv) pickFromCodingProviderSet(ctx context.Context, orgID uuid.UUID, userID *uuid.UUID, requestedProvider models.ProviderName, providers []models.ProviderName) (models.ProviderConfig, bool) {
 	rowsByProvider, sawRows, ok := e.listCodingProviderRows(ctx, orgID, userID, providers)
 	if !ok {
-		return nil, false
+		return nil, true
 	}
 	if !sawRows {
-		return nil, false
+		return nil, true
 	}
 
 	if picker, ok := e.codingCredentials.(CodingCredentialMultiPicker); ok {
@@ -606,7 +604,7 @@ func (e *AgentEnv) listCodingProviderRows(ctx context.Context, orgID uuid.UUID, 
 	for _, provider := range providers {
 		creds, err := e.codingCredentials.ListResolvable(ctx, orgID, userID, provider)
 		if err != nil {
-			e.logger.Warn().Err(err).Str("provider", string(provider)).Msg("coding credential resolver lookup failed; falling back to legacy")
+			e.logger.Warn().Err(err).Str("provider", string(provider)).Msg("coding credential resolver lookup failed")
 			return nil, false, false
 		}
 		if len(creds) > 0 {

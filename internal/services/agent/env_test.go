@@ -1143,13 +1143,7 @@ func TestAgentEnvLegacyFallbackSkipsInactiveRows(t *testing.T) {
 	}
 }
 
-// TestAgentEnvLegacyFallbackRecordsPickForShed locks in the integration of
-// shed signals with the legacy fallback path. Without this, a 429 on a
-// legacy-resolved credential would be a silent no-op (no recorded pick →
-// lookupRecentPick returns false → MarkRateLimited never fires) and the
-// health cache would never learn about legacy upstream failures during the
-// dual-write window.
-func TestAgentEnvLegacyFallbackRecordsPickForShed(t *testing.T) {
+func TestAgentEnvUnifiedResolverEmptyDoesNotFallbackToLegacy(t *testing.T) {
 	t.Parallel()
 
 	ctx := context.Background()
@@ -1157,10 +1151,14 @@ func TestAgentEnvLegacyFallbackRecordsPickForShed(t *testing.T) {
 	userID := uuid.New()
 	legacyCredID := uuid.New()
 
-	coding := &envCodingCredentialProvider{} // unified returns nothing → legacy is consulted
+	coding := &envCodingCredentialProvider{}
 	userCred := &envUserCredentialProvider{
 		personal: map[models.ProviderName]*models.DecryptedUserCredential{
-			models.ProviderAnthropic: {ID: legacyCredID, Status: models.CodingCredentialStatusActive, Config: models.AnthropicConfig{APIKey: "legacy-key"}},
+			models.ProviderAnthropic: {
+				ID:     legacyCredID,
+				Status: models.CodingCredentialStatusActive,
+				Config: models.AnthropicConfig{APIKey: "legacy-key"},
+			},
 		},
 	}
 
@@ -1172,12 +1170,35 @@ func TestAgentEnvLegacyFallbackRecordsPickForShed(t *testing.T) {
 	})
 
 	cfg := env.resolveProviderConfig(ctx, orgID, &userID, models.ProviderAnthropic)
-	require.IsType(t, models.AnthropicConfig{}, cfg, "legacy fallback should return an AnthropicConfig")
-	require.Equal(t, "legacy-key", cfg.(models.AnthropicConfig).APIKey)
+	require.Nil(t, cfg, "wired unified credentials should be authoritative even when no active unified row exists")
 
 	env.ShedRateLimited(orgID, &userID, models.ProviderAnthropic)
-	require.Equal(t, []uuid.UUID{legacyCredID}, coding.rateLimitedIDs,
-		"legacy-path picks must record the legacy id so Shed* reaches the unified store's health cache (legacy and unified ids agree during the mirror window)")
+	require.Empty(t, coding.rateLimitedIDs, "no legacy pick should be recorded when unified resolver handles the lookup")
+}
+
+func TestAgentEnvLegacyFallbackWhenUnifiedUnwired(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	orgID := uuid.New()
+	userID := uuid.New()
+	legacyCredID := uuid.New()
+
+	userCred := &envUserCredentialProvider{
+		personal: map[models.ProviderName]*models.DecryptedUserCredential{
+			models.ProviderAnthropic: {ID: legacyCredID, Status: models.CodingCredentialStatusActive, Config: models.AnthropicConfig{APIKey: "legacy-key"}},
+		},
+	}
+
+	env := NewAgentEnv(AgentEnvDeps{
+		UserCredentials: userCred,
+		Provider:        &envSandboxProvider{},
+		Logger:          zerolog.Nop(),
+	})
+
+	cfg := env.resolveProviderConfig(ctx, orgID, &userID, models.ProviderAnthropic)
+	require.IsType(t, models.AnthropicConfig{}, cfg, "legacy fallback should return an AnthropicConfig")
+	require.Equal(t, "legacy-key", cfg.(models.AnthropicConfig).APIKey)
 }
 
 func TestAgentEnvInjectCodexAuth(t *testing.T) {

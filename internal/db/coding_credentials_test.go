@@ -317,7 +317,7 @@ func TestCodingCredentialStoreLookupMethods(t *testing.T) {
 	}{
 		{
 			name:     "get",
-			argCount: 1,
+			argCount: 3,
 			call: func(ctx context.Context, store *CodingCredentialStore, scope models.Scope, provider models.ProviderName, id uuid.UUID) ([]models.DecryptedCodingCredential, error) {
 				got, err := store.Get(ctx, scope, id)
 				if err != nil {
@@ -641,7 +641,7 @@ func TestCodingCredentialStoreMutations(t *testing.T) {
 			setup: func(t *testing.T, mock pgxmock.PgxPoolIface, store *CodingCredentialStore, scope models.Scope, id uuid.UUID) {
 				expectScopedMutation(t, mock, scope, id, models.ProviderOpenAI)
 				mock.ExpectExec("UPDATE coding_credentials").
-					WithArgs(codingAnyArgs(2)...).
+					WithArgs(codingAnyArgs(4)...).
 					WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 				mock.ExpectCommit()
 			},
@@ -654,7 +654,7 @@ func TestCodingCredentialStoreMutations(t *testing.T) {
 			setup: func(t *testing.T, mock pgxmock.PgxPoolIface, store *CodingCredentialStore, scope models.Scope, id uuid.UUID) {
 				expectScopedMutation(t, mock, scope, id, models.ProviderOpenAI)
 				mock.ExpectExec("UPDATE coding_credentials").
-					WithArgs(codingAnyArgs(2)...).
+					WithArgs(codingAnyArgs(4)...).
 					WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 				mock.ExpectCommit()
 			},
@@ -667,7 +667,7 @@ func TestCodingCredentialStoreMutations(t *testing.T) {
 			setup: func(t *testing.T, mock pgxmock.PgxPoolIface, store *CodingCredentialStore, scope models.Scope, id uuid.UUID) {
 				expectScopedMutation(t, mock, scope, id, models.ProviderOpenAI)
 				mock.ExpectExec("UPDATE coding_credentials").
-					WithArgs(codingAnyArgs(2)...).
+					WithArgs(codingAnyArgs(4)...).
 					WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 				mock.ExpectCommit()
 			},
@@ -680,7 +680,7 @@ func TestCodingCredentialStoreMutations(t *testing.T) {
 			setup: func(t *testing.T, mock pgxmock.PgxPoolIface, store *CodingCredentialStore, scope models.Scope, id uuid.UUID) {
 				expectScopedMutation(t, mock, scope, id, models.ProviderOpenAI)
 				mock.ExpectExec(`UPDATE coding_credentials\s+SET status = @status, updated_at = now\(\)`).
-					WithArgs(codingAnyArgs(2)...).
+					WithArgs(codingAnyArgs(4)...).
 					WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 				mock.ExpectCommit()
 			},
@@ -693,7 +693,7 @@ func TestCodingCredentialStoreMutations(t *testing.T) {
 			setup: func(t *testing.T, mock pgxmock.PgxPoolIface, store *CodingCredentialStore, scope models.Scope, id uuid.UUID) {
 				expectScopedMutation(t, mock, scope, id, models.ProviderOpenAI)
 				mock.ExpectExec(`UPDATE coding_credentials\s+SET status = @status, updated_at = now\(\)`).
-					WithArgs(codingAnyArgs(2)...).
+					WithArgs(codingAnyArgs(4)...).
 					WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 				mock.ExpectCommit()
 			},
@@ -770,7 +770,7 @@ func TestCodingCredentialStoreRenameLabelTaken(t *testing.T) {
 
 	expectScopedMutation(t, mock, scope, id, models.ProviderOpenAI)
 	mock.ExpectExec("UPDATE coding_credentials SET label").
-		WithArgs(codingAnyArgs(2)...).
+		WithArgs(codingAnyArgs(4)...).
 		WillReturnError(&pgconn.PgError{Code: "23505"})
 	mock.ExpectRollback()
 
@@ -799,7 +799,7 @@ func TestCodingCredentialStoreReorderMoveAndJanitor(t *testing.T) {
 					WillReturnResult(pgxmock.NewResult("SELECT", 1))
 				for range ids {
 					mock.ExpectQuery("SELECT org_id, user_id, provider").
-						WithArgs(codingAnyArgs(1)...).
+						WithArgs(codingAnyArgs(3)...).
 						WillReturnRows(pgxmock.NewRows([]string{"org_id", "user_id", "provider"}).AddRow(scope.OrgID, scope.UserID, string(models.ProviderOpenAI)))
 					mock.ExpectExec(`UPDATE coding_credentials\s+SET priority`).
 						WithArgs(codingAnyArgs(4)...).
@@ -819,7 +819,7 @@ func TestCodingCredentialStoreReorderMoveAndJanitor(t *testing.T) {
 					WithArgs(codingAnyArgs(1)...).
 					WillReturnResult(pgxmock.NewResult("SELECT", 1))
 				mock.ExpectQuery("SELECT org_id, user_id, provider").
-					WithArgs(codingAnyArgs(1)...).
+					WithArgs(codingAnyArgs(3)...).
 					WillReturnRows(pgxmock.NewRows([]string{"org_id", "user_id", "provider"}).AddRow(scope.OrgID, scope.UserID, string(models.ProviderOpenAI)))
 				mock.ExpectQuery("SELECT id FROM coding_credentials").
 					WithArgs(codingAnyArgs(2)...).
@@ -886,7 +886,7 @@ func TestCodingCredentialStoreReorderMoveAndJanitor(t *testing.T) {
 			WithArgs(codingAnyArgs(1)...).
 			WillReturnResult(pgxmock.NewResult("SELECT", 1))
 		mock.ExpectQuery("SELECT org_id, user_id, provider").
-			WithArgs(codingAnyArgs(1)...).
+			WithArgs(codingAnyArgs(3)...).
 			WillReturnRows(pgxmock.NewRows([]string{"org_id", "user_id", "provider"}).
 				AddRow(orgID, &userID, string(models.ProviderOpenAI)))
 		// 2. fetchStackTx returns only ids that belong to scope. foreignID is
@@ -927,7 +927,7 @@ func expectScopedMutation(t *testing.T, mock pgxmock.PgxPoolIface, scope models.
 
 	mock.ExpectBegin()
 	mock.ExpectQuery("SELECT org_id, user_id, provider").
-		WithArgs(codingAnyArgs(1)...).
+		WithArgs(codingAnyArgs(3)...).
 		WillReturnRows(pgxmock.NewRows([]string{"org_id", "user_id", "provider"}).AddRow(scope.OrgID, scope.UserID, string(provider)))
 }
 

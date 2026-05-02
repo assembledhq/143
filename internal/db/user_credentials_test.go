@@ -20,10 +20,10 @@ type recordingCodingCredentialMirror struct {
 func (m *recordingCodingCredentialMirror) MirrorOrgCredential(context.Context, models.OrgCredential, models.ProviderConfig) error {
 	return nil
 }
-func (m *recordingCodingCredentialMirror) MirrorOrgCredentialDelete(context.Context, uuid.UUID) error {
+func (m *recordingCodingCredentialMirror) MirrorOrgCredentialDelete(context.Context, uuid.UUID, uuid.UUID) error {
 	return nil
 }
-func (m *recordingCodingCredentialMirror) MirrorOrgCredentialDisable(context.Context, uuid.UUID) error {
+func (m *recordingCodingCredentialMirror) MirrorOrgCredentialDisable(context.Context, uuid.UUID, uuid.UUID) error {
 	return nil
 }
 func (m *recordingCodingCredentialMirror) MirrorUserCredential(_ context.Context, row models.UserCredential, _ models.ProviderConfig) error {

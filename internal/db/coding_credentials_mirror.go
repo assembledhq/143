@@ -39,10 +39,10 @@ type CodingCredentialMirror interface {
 	MirrorOrgCredential(ctx context.Context, row models.OrgCredential, decryptedCfg models.ProviderConfig) error
 
 	// MirrorOrgCredentialDelete removes the unified row matching the legacy id.
-	MirrorOrgCredentialDelete(ctx context.Context, id uuid.UUID) error
+	MirrorOrgCredentialDelete(ctx context.Context, orgID, id uuid.UUID) error
 
 	// MirrorOrgCredentialDisable flips status to 'disabled' on the unified row.
-	MirrorOrgCredentialDisable(ctx context.Context, id uuid.UUID) error
+	MirrorOrgCredentialDisable(ctx context.Context, orgID, id uuid.UUID) error
 
 	// MirrorUserCredential reflects a row from `user_credentials` into
 	// `coding_credentials`. is_team_default = true → org-scoped row;
@@ -106,17 +106,17 @@ func (s *CodingCredentialStore) MirrorOrgCredential(ctx context.Context, row mod
 // MirrorOrgCredentialDelete removes a mirrored org credential by legacy id.
 //
 // lint:allow-no-orgid reason="legacy id was already scope-checked by the calling OrgCredentialStore method; mirror loads scope back via RETURNING for cache invalidation"
-func (s *CodingCredentialStore) MirrorOrgCredentialDelete(ctx context.Context, id uuid.UUID) (err error) {
+func (s *CodingCredentialStore) MirrorOrgCredentialDelete(ctx context.Context, orgID, id uuid.UUID) (err error) {
 	defer s.mirrorFailureOnError(&err)
-	return s.mirrorDelete(ctx, id)
+	return s.mirrorDelete(ctx, orgID, id)
 }
 
 // MirrorOrgCredentialDisable disables a mirrored org credential by legacy id.
 //
 // lint:allow-no-orgid reason="legacy id was already scope-checked by the calling OrgCredentialStore method; mirror loads scope back via RETURNING for cache invalidation"
-func (s *CodingCredentialStore) MirrorOrgCredentialDisable(ctx context.Context, id uuid.UUID) (err error) {
+func (s *CodingCredentialStore) MirrorOrgCredentialDisable(ctx context.Context, orgID, id uuid.UUID) (err error) {
 	defer s.mirrorFailureOnError(&err)
-	return s.mirrorDisable(ctx, id)
+	return s.mirrorDisable(ctx, orgID, id)
 }
 
 func (s *CodingCredentialStore) MirrorUserCredential(ctx context.Context, row models.UserCredential, decryptedCfg models.ProviderConfig) (err error) {
@@ -210,7 +210,7 @@ func (s *CodingCredentialStore) MirrorUserCredential(ctx context.Context, row mo
 // in the design doc.
 func (s *CodingCredentialStore) MirrorUserCredentialDelete(ctx context.Context, id, orgID, userID uuid.UUID, provider models.ProviderName) (err error) {
 	defer s.mirrorFailureOnError(&err)
-	if err := s.mirrorDelete(ctx, id); err != nil {
+	if err := s.mirrorDelete(ctx, orgID, id); err != nil {
 		return err
 	}
 	if err := s.deleteTeamDefaultMirror(ctx, orgID, userID, provider); err != nil {
@@ -226,7 +226,7 @@ func (s *CodingCredentialStore) MirrorUserCredentialDelete(ctx context.Context, 
 // noise — the legacy row is gone, the row should not be visible at all.
 func (s *CodingCredentialStore) MirrorUserCredentialDisable(ctx context.Context, id, orgID, userID uuid.UUID, provider models.ProviderName) (err error) {
 	defer s.mirrorFailureOnError(&err)
-	if err := s.mirrorDisable(ctx, id); err != nil {
+	if err := s.mirrorDisable(ctx, orgID, id); err != nil {
 		return err
 	}
 	if err := s.deleteTeamDefaultMirror(ctx, orgID, userID, provider); err != nil {
@@ -427,13 +427,15 @@ func isUniqueViolation(err error) bool {
 // row participated in. If the row didn't exist (already deleted, or never
 // mirrored because it was a non-coding provider) we no-op silently — there
 // is nothing to invalidate either.
-func (s *CodingCredentialStore) mirrorDelete(ctx context.Context, id uuid.UUID) error {
+func (s *CodingCredentialStore) mirrorDelete(ctx context.Context, scopedOrgID, id uuid.UUID) error {
 	var orgID uuid.UUID
 	var userID *uuid.UUID
 	var provider string
 	err := s.db.QueryRow(ctx,
-		`DELETE FROM coding_credentials WHERE id = @id RETURNING org_id, user_id, provider`,
-		pgx.NamedArgs{"id": id},
+		`DELETE FROM coding_credentials
+		 WHERE id = @id AND org_id = @org_id
+		 RETURNING org_id, user_id, provider`,
+		pgx.NamedArgs{"id": id, "org_id": scopedOrgID},
 	).Scan(&orgID, &userID, &provider)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -448,14 +450,15 @@ func (s *CodingCredentialStore) mirrorDelete(ctx context.Context, id uuid.UUID) 
 // mirrorDisable flips status to 'disabled' and invalidates the resolver
 // cache for the affected (scope, provider) key. Same RETURNING trick as
 // mirrorDelete keeps invalidation precise.
-func (s *CodingCredentialStore) mirrorDisable(ctx context.Context, id uuid.UUID) error {
+func (s *CodingCredentialStore) mirrorDisable(ctx context.Context, scopedOrgID, id uuid.UUID) error {
 	var orgID uuid.UUID
 	var userID *uuid.UUID
 	var provider string
 	err := s.db.QueryRow(ctx,
 		`UPDATE coding_credentials SET status = 'disabled', updated_at = now()
-		 WHERE id = @id RETURNING org_id, user_id, provider`,
-		pgx.NamedArgs{"id": id},
+		 WHERE id = @id AND org_id = @org_id
+		 RETURNING org_id, user_id, provider`,
+		pgx.NamedArgs{"id": id, "org_id": scopedOrgID},
 	).Scan(&orgID, &userID, &provider)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -527,8 +530,8 @@ type noopMirror struct{}
 func (noopMirror) MirrorOrgCredential(context.Context, models.OrgCredential, models.ProviderConfig) error {
 	return nil
 }
-func (noopMirror) MirrorOrgCredentialDelete(context.Context, uuid.UUID) error  { return nil }
-func (noopMirror) MirrorOrgCredentialDisable(context.Context, uuid.UUID) error { return nil }
+func (noopMirror) MirrorOrgCredentialDelete(context.Context, uuid.UUID, uuid.UUID) error  { return nil }
+func (noopMirror) MirrorOrgCredentialDisable(context.Context, uuid.UUID, uuid.UUID) error { return nil }
 func (noopMirror) MirrorUserCredential(context.Context, models.UserCredential, models.ProviderConfig) error {
 	return nil
 }

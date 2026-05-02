@@ -726,12 +726,19 @@ func (s *CodingCredentialStore) PromotePending(ctx context.Context, scope models
 			return fmt.Errorf("provider mismatch: row is %q, config is %q", rowProvider, cfg.Provider())
 		}
 		provider = rowProvider
-		tag, execErr := tx.Exec(ctx,
-			`UPDATE coding_credentials
+		args := pgx.NamedArgs{"id": id, "config": encrypted, "org_id": scope.OrgID}
+		var query string
+		if scope.IsPersonal() {
+			args["user_id"] = *scope.UserID
+			query = `UPDATE coding_credentials
 			 SET config = @config, status = 'active', last_verified_at = now(), updated_at = now()
-			 WHERE id = @id`,
-			pgx.NamedArgs{"id": id, "config": encrypted},
-		)
+			 WHERE id = @id AND org_id = @org_id AND user_id = @user_id`
+		} else {
+			query = `UPDATE coding_credentials
+			 SET config = @config, status = 'active', last_verified_at = now(), updated_at = now()
+			 WHERE id = @id AND org_id = @org_id AND user_id IS NULL`
+		}
+		tag, execErr := tx.Exec(ctx, query, args)
 		if execErr != nil {
 			return fmt.Errorf("promote pending: %w", execErr)
 		}
@@ -758,12 +765,19 @@ func (s *CodingCredentialStore) UpdateConfig(ctx context.Context, scope models.S
 			return fmt.Errorf("provider mismatch: row is %q, config is %q", rowProvider, cfg.Provider())
 		}
 		provider = rowProvider
-		tag, execErr := tx.Exec(ctx,
-			`UPDATE coding_credentials
+		args := pgx.NamedArgs{"id": id, "config": encrypted, "org_id": scope.OrgID}
+		var query string
+		if scope.IsPersonal() {
+			args["user_id"] = *scope.UserID
+			query = `UPDATE coding_credentials
 			 SET config = @config, status = 'active', updated_at = now()
-			 WHERE id = @id AND status != 'disabled'`,
-			pgx.NamedArgs{"id": id, "config": encrypted},
-		)
+			 WHERE id = @id AND org_id = @org_id AND user_id = @user_id AND status != 'disabled'`
+		} else {
+			query = `UPDATE coding_credentials
+			 SET config = @config, status = 'active', updated_at = now()
+			 WHERE id = @id AND org_id = @org_id AND user_id IS NULL AND status != 'disabled'`
+		}
+		tag, execErr := tx.Exec(ctx, query, args)
 		if execErr != nil {
 			return fmt.Errorf("update config: %w", execErr)
 		}
@@ -783,10 +797,19 @@ func (s *CodingCredentialStore) Rename(ctx context.Context, scope models.Scope, 
 	var provider models.ProviderName
 	if err := s.withScopedRowTx(ctx, scope, id, func(tx pgx.Tx, rowProvider models.ProviderName) error {
 		provider = rowProvider
-		tag, execErr := tx.Exec(ctx,
-			`UPDATE coding_credentials SET label = @label, updated_at = now() WHERE id = @id`,
-			pgx.NamedArgs{"id": id, "label": label},
-		)
+		args := pgx.NamedArgs{"id": id, "label": label, "org_id": scope.OrgID}
+		var query string
+		if scope.IsPersonal() {
+			args["user_id"] = *scope.UserID
+			query = `UPDATE coding_credentials
+			 SET label = @label, updated_at = now()
+			 WHERE id = @id AND org_id = @org_id AND user_id = @user_id`
+		} else {
+			query = `UPDATE coding_credentials
+			 SET label = @label, updated_at = now()
+			 WHERE id = @id AND org_id = @org_id AND user_id IS NULL`
+		}
+		tag, execErr := tx.Exec(ctx, query, args)
 		if execErr != nil {
 			if isUniqueViolation(execErr) {
 				return &ErrCodingCredentialLabelTaken{Label: label}
@@ -818,12 +841,19 @@ func (s *CodingCredentialStore) UpdateStatus(ctx context.Context, scope models.S
 	var provider models.ProviderName
 	if err := s.withScopedRowTx(ctx, scope, id, func(tx pgx.Tx, rowProvider models.ProviderName) error {
 		provider = rowProvider
-		tag, execErr := tx.Exec(ctx,
-			`UPDATE coding_credentials
+		args := pgx.NamedArgs{"id": id, "status": status, "org_id": scope.OrgID}
+		var query string
+		if scope.IsPersonal() {
+			args["user_id"] = *scope.UserID
+			query = `UPDATE coding_credentials
 				 SET status = @status, updated_at = now()
-				 WHERE id = @id`,
-			pgx.NamedArgs{"id": id, "status": status},
-		)
+				 WHERE id = @id AND org_id = @org_id AND user_id = @user_id`
+		} else {
+			query = `UPDATE coding_credentials
+				 SET status = @status, updated_at = now()
+				 WHERE id = @id AND org_id = @org_id AND user_id IS NULL`
+		}
+		tag, execErr := tx.Exec(ctx, query, args)
 		if execErr != nil {
 			return fmt.Errorf("update status: %w", execErr)
 		}
@@ -1055,10 +1085,19 @@ func (s *CodingCredentialStore) lockAndAssertScope(ctx context.Context, tx pgx.T
 	var orgID uuid.UUID
 	var userID *uuid.UUID
 	var provider string
-	err := tx.QueryRow(ctx,
-		`SELECT org_id, user_id, provider FROM coding_credentials WHERE id = @id FOR UPDATE`,
-		pgx.NamedArgs{"id": id},
-	).Scan(&orgID, &userID, &provider)
+	args := pgx.NamedArgs{"id": id, "org_id": scope.OrgID}
+	var query string
+	if scope.IsPersonal() {
+		args["user_id"] = *scope.UserID
+		query = `SELECT org_id, user_id, provider FROM coding_credentials
+			WHERE id = @id AND org_id = @org_id AND user_id = @user_id
+			FOR UPDATE`
+	} else {
+		query = `SELECT org_id, user_id, provider FROM coding_credentials
+			WHERE id = @id AND org_id = @org_id AND user_id IS NULL
+			FOR UPDATE`
+	}
+	err := tx.QueryRow(ctx, query, args).Scan(&orgID, &userID, &provider)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return "", ErrCodingCredentialNotFound
@@ -1090,10 +1129,17 @@ func sameUserPointer(a, b *uuid.UUID) bool {
 }
 
 func (s *CodingCredentialStore) fetchRowByID(ctx context.Context, scope models.Scope, id uuid.UUID) (*models.CodingCredential, error) {
-	rows, err := s.db.Query(ctx,
-		`SELECT `+codingCredentialsColumns+` FROM coding_credentials WHERE id = @id`,
-		pgx.NamedArgs{"id": id},
-	)
+	args := pgx.NamedArgs{"id": id, "org_id": scope.OrgID}
+	var query string
+	if scope.IsPersonal() {
+		args["user_id"] = *scope.UserID
+		query = `SELECT ` + codingCredentialsColumns + ` FROM coding_credentials
+			WHERE id = @id AND org_id = @org_id AND user_id = @user_id`
+	} else {
+		query = `SELECT ` + codingCredentialsColumns + ` FROM coding_credentials
+			WHERE id = @id AND org_id = @org_id AND user_id IS NULL`
+	}
+	rows, err := s.db.Query(ctx, query, args)
 	if err != nil {
 		return nil, fmt.Errorf("query credential: %w", err)
 	}

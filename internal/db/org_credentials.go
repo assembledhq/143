@@ -635,7 +635,7 @@ func (s *OrgCredentialStore) Disable(ctx context.Context, orgID uuid.UUID, provi
 		return err
 	}
 	for _, id := range mirrorIDs {
-		if mirrErr := s.codingMirror.MirrorOrgCredentialDisable(ctx, id); mirrErr != nil {
+		if mirrErr := s.codingMirror.MirrorOrgCredentialDisable(ctx, orgID, id); mirrErr != nil {
 			s.logMirrorFailure("disable", id, mirrErr)
 		}
 	}
@@ -698,7 +698,7 @@ func (s *OrgCredentialStore) DisableLabeled(ctx context.Context, orgID uuid.UUID
 		return err
 	}
 	for _, id := range mirrorIDs {
-		if mirrErr := s.codingMirror.MirrorOrgCredentialDisable(ctx, id); mirrErr != nil {
+		if mirrErr := s.codingMirror.MirrorOrgCredentialDisable(ctx, orgID, id); mirrErr != nil {
 			s.logMirrorFailure("disable-labeled", id, mirrErr)
 		}
 	}
@@ -713,7 +713,7 @@ func (s *OrgCredentialStore) DisableByID(ctx context.Context, orgID uuid.UUID, i
 		"org_id": orgID,
 	})
 	if err == nil {
-		if mirrErr := s.codingMirror.MirrorOrgCredentialDisable(ctx, id); mirrErr != nil {
+		if mirrErr := s.codingMirror.MirrorOrgCredentialDisable(ctx, orgID, id); mirrErr != nil {
 			s.logMirrorFailure("disable-by-id", id, mirrErr)
 		}
 	}
@@ -1079,7 +1079,7 @@ func (s *OrgCredentialStore) DisableCodingAuth(ctx context.Context, orgID uuid.U
 	if err != nil {
 		return fmt.Errorf("disable coding auth: %w", err)
 	}
-	if mirrErr := s.codingMirror.MirrorOrgCredentialDisable(ctx, id); mirrErr != nil {
+	if mirrErr := s.codingMirror.MirrorOrgCredentialDisable(ctx, orgID, id); mirrErr != nil {
 		s.logMirrorFailure("disable-coding-auth", id, mirrErr)
 	}
 	return nil
@@ -1093,7 +1093,7 @@ func (s *OrgCredentialStore) DeleteCodingAuth(ctx context.Context, orgID uuid.UU
 	if err != nil {
 		return fmt.Errorf("delete coding auth: %w", err)
 	}
-	if mirrErr := s.codingMirror.MirrorOrgCredentialDelete(ctx, id); mirrErr != nil {
+	if mirrErr := s.codingMirror.MirrorOrgCredentialDelete(ctx, orgID, id); mirrErr != nil {
 		s.logMirrorFailure("delete-coding-auth", id, mirrErr)
 	}
 	return nil
