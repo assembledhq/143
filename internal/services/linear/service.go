@@ -105,6 +105,18 @@ type Service struct {
 	// self-healing within the TTL and the alternative (LISTEN/NOTIFY for
 	// cross-pod invalidation) wasn't worth the wiring for a 60s ceiling.
 	teamKeyCache *teamKeyAllowlistCache
+
+	// agentSessions is the bridge from a 143 sessions row to the Linear
+	// AgentSession that triggered it (when applicable). Populated by phase
+	// 1 of the inbound agent feature; nil when the feature is dark.
+	// HandleMilestone consults it inside the locked tx to decide whether
+	// to fan out an AgentActivity emit alongside the durable attachment +
+	// rolling comment writes. nil-safe: when unset the agent fan-out is
+	// silently skipped.
+	agentSessions *db.LinearAgentSessionStore
+	// agentActivities backs the at-most-once activity log used by the
+	// AgentActivityWriter. Same nil-safety contract as agentSessions.
+	agentActivities *db.LinearAgentActivityLogStore
 }
 
 // jobEnqueuerHolder / linksChangedHolder wrap the function values stored in
@@ -320,6 +332,13 @@ type Config struct {
 	// allocates a fresh cache local to the Service — fine for tests and for
 	// MODE=api / MODE=worker single-Service processes.
 	TeamKeyCache *teamKeyAllowlistCache
+
+	// AgentSessions and AgentActivities wire the inbound agent feature.
+	// Both nil ↔ feature-flag-off / dark launch — the milestone fan-out
+	// silently no-ops, the dispatcher refuses to construct, and the
+	// existing outbound flow stays unaffected.
+	AgentSessions   *db.LinearAgentSessionStore
+	AgentActivities *db.LinearAgentActivityLogStore
 }
 
 func NewService(cfg Config) *Service {
@@ -342,7 +361,22 @@ func NewService(cfg Config) *Service {
 		orgSettingsLoader: cfg.OrgSettingsLoader,
 		pool:              cfg.Pool,
 		appBaseURL:        strings.TrimRight(cfg.AppBaseURL, "/"),
+		agentSessions:     cfg.AgentSessions,
+		agentActivities:   cfg.AgentActivities,
 	}
+}
+
+// AgentSessionStore exposes the agent-session store so handlers and worker
+// glue can construct the dispatcher / repo resolver without re-deriving
+// the wiring path. Returns nil when the agent feature is dark.
+func (s *Service) AgentSessionStore() *db.LinearAgentSessionStore {
+	return s.agentSessions
+}
+
+// AgentActivityStore exposes the activity log store. Same nil contract as
+// AgentSessionStore.
+func (s *Service) AgentActivityStore() *db.LinearAgentActivityLogStore {
+	return s.agentActivities
 }
 
 // maxProviderStateLockedDuration bounds how long a single milestone or
@@ -501,6 +535,22 @@ func (s *Service) Enabled(ctx context.Context, orgID uuid.UUID) bool {
 // integrationFor returns the integration row + linear access token for an
 // org. Both must be present for any read/write to Linear; if either is
 // missing, callers should treat it as a silent no-op.
+// ClientForOrg returns a fully-resolved Linear API client backed by the
+// org's stored credential. Public so the inbound-agent dispatcher and
+// the settings loader can build clients without re-deriving the token
+// resolution logic. Returns an error when no integration / credential
+// is configured.
+func (s *Service) ClientForOrg(ctx context.Context, orgID uuid.UUID) (Client, error) {
+	if s == nil {
+		return nil, errors.New("linear service unavailable")
+	}
+	_, token, err := s.integrationFor(ctx, orgID)
+	if err != nil {
+		return nil, err
+	}
+	return s.clientFactory(ctx, token)
+}
+
 func (s *Service) integrationFor(ctx context.Context, orgID uuid.UUID) (models.Integration, string, error) {
 	integration, err := s.integrations.GetByOrgAndProvider(ctx, orgID, "linear")
 	if err != nil {

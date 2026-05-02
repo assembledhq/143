@@ -31,6 +31,13 @@ type IngestionWebhookHandler struct {
 	credStore        webhookSecretLookup
 	ingestionSvc     *ingestion.Service
 	logger           zerolog.Logger
+
+	// linearAgent is the optional inbound-agent dispatcher. When set, the
+	// Linear webhook handler branches on Linear-Event header and routes
+	// AgentSessionEvent payloads through the agent path *before* the
+	// existing ingestion adapter sees them. nil-safe: when unset, the
+	// existing ingestion behavior is preserved exactly.
+	linearAgent *LinearAgentDispatcher
 }
 
 func NewIngestionWebhookHandler(
@@ -47,6 +54,16 @@ func NewIngestionWebhookHandler(
 		ingestionSvc:     ingestionSvc,
 		logger:           logger,
 	}
+}
+
+// SetLinearAgentDispatcher wires the inbound-agent dispatcher
+// post-construction. Separated from the constructor because the
+// dispatcher's wiring depends on the JobStore + agent-side stores which
+// the boot sequence resolves later. Safe to call at any boot stage; if
+// never called, the agent path stays dark and Linear webhooks fall
+// through to the existing ingestion code.
+func (h *IngestionWebhookHandler) SetLinearAgentDispatcher(d *LinearAgentDispatcher) {
+	h.linearAgent = d
 }
 
 func (h *IngestionWebhookHandler) HandleSentry(w http.ResponseWriter, r *http.Request) {
@@ -109,6 +126,35 @@ func (h *IngestionWebhookHandler) handleProvider(w http.ResponseWriter, r *http.
 		zerolog.Ctx(r.Context()).Error().Err(err).Msg("failed to record webhook delivery")
 	}
 
+	// Linear inbound-agent branch. Linear sends AgentSessionEvent payloads
+	// to the same webhook URL as the legacy ingestion stream; we
+	// distinguish via the `Linear-Event` header (or the envelope's `type`
+	// field as a defensive fallback). When the dispatcher is wired and the
+	// header indicates an agent event, route through the agent path
+	// *before* the ingestion adapter so we don't double-process the body.
+	//
+	// 5s SLA: Dispatch is ack-fast — it does an idempotent INSERT, an
+	// optional best-effort bootstrap-thought emit, and a job enqueue.
+	// Total budget well under 1s under normal load.
+	if provider == "linear" && h.linearAgent != nil {
+		eventType := LinearAgentEventType(r.Header.Get("Linear-Event"))
+		if eventType == "" {
+			eventType = sniffLinearEventType(body)
+		}
+		if eventType == LinearAgentEventAgentSession || eventType == LinearAgentEventAppUserNotification {
+			result := h.linearAgent.Dispatch(r.Context(), &integration, eventType, body)
+			if err := h.webhookStore.MarkProcessed(r.Context(), delivery, nil); err != nil {
+				zerolog.Ctx(r.Context()).Warn().Err(err).Msg("failed to mark webhook processed")
+			}
+			writeJSON(w, http.StatusOK, map[string]any{
+				"status":            result.Status,
+				"agent_session_id":  result.AgentSessionID,
+				"job_id":            result.JobID,
+			})
+			return
+		}
+	}
+
 	// Parse and ingest
 	var normalized *ingestion.NormalizedIssue
 	switch provider {
@@ -152,6 +198,35 @@ func (h *IngestionWebhookHandler) handleProvider(w http.ResponseWriter, r *http.
 		zerolog.Ctx(r.Context()).Warn().Err(err).Msg("failed to mark webhook processed")
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "processed"})
+}
+
+// sniffLinearEventType inspects the JSON envelope's top-level `type` field
+// to decide whether this is an agent event when the `Linear-Event` header
+// is missing. Bounded to the first 256 bytes — Linear puts `type` at the
+// top of the document, so a small read avoids parsing the whole payload
+// twice. Returns "" when the type can't be determined; the caller falls
+// through to ingestion.
+func sniffLinearEventType(body []byte) LinearAgentEventType {
+	const maxScan = 256
+	scan := body
+	if len(scan) > maxScan {
+		scan = scan[:maxScan]
+	}
+	var head struct {
+		Type string `json:"type"`
+	}
+	if err := json.Unmarshal(scan, &head); err != nil {
+		// Truncated body may not parse cleanly; that's fine, fall back
+		// to a full unmarshal of the original payload.
+		if err := json.Unmarshal(body, &head); err != nil {
+			return ""
+		}
+	}
+	switch LinearAgentEventType(head.Type) {
+	case LinearAgentEventAgentSession, LinearAgentEventAppUserNotification:
+		return LinearAgentEventType(head.Type)
+	}
+	return ""
 }
 
 // verifyProviderSignature looks up the per-org webhook secret from the DB and
