@@ -1215,6 +1215,27 @@ export interface EvalBootstrapRun {
   error_message?: string;
 }
 
+// Lightweight signal arriving over the per-batch SSE stream. Mirrors
+// models.EvalBatchUpdatedEvent. Consumers refetch the full EvalBatchDetail on
+// receipt rather than reading fields from the event itself, so payload size
+// stays bounded for large batches.
+export interface EvalBatchUpdatedEvent {
+  batch_id: string;
+  org_id: string;
+  status: EvalBatchStatus;
+  updated_at: string;
+}
+
+// Lightweight signal arriving over the per-bootstrap-run SSE stream. Mirrors
+// models.EvalBootstrapUpdatedEvent.
+export interface EvalBootstrapUpdatedEvent {
+  bootstrap_run_id: string;
+  org_id: string;
+  status: EvalBootstrapStatus;
+  session_id?: string;
+  updated_at: string;
+}
+
 export const evalComplexityConfig: Record<EvalComplexity, { color: string; label: string }> = {
   trivial: { color: "bg-muted text-muted-foreground", label: "Trivial" },
   simple: { color: "bg-emerald-500/10 text-emerald-700 dark:text-emerald-400", label: "Simple" },

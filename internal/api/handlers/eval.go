@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,6 +11,8 @@ import (
 	"time"
 
 	"github.com/assembledhq/143/internal/api/middleware"
+	"github.com/assembledhq/143/internal/api/sse"
+	"github.com/assembledhq/143/internal/cache"
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
 	"github.com/go-chi/chi/v5"
@@ -18,14 +21,32 @@ import (
 	"github.com/rs/zerolog"
 )
 
+// evalMembershipStore is the org-membership lookup the eval SSE handlers use
+// to validate explicit ?org_id= query params from EventSource clients (which
+// can't send custom request headers). Mirrors pullRequestMembershipStore in
+// pull_requests.go — kept as a local interface so tests can stub it without
+// pulling in a full membership store implementation.
+type evalMembershipStore interface {
+	Get(ctx context.Context, userID, orgID uuid.UUID) (models.OrganizationMembership, error)
+}
+
+var (
+	errEvalStreamOrgInvalid   = errors.New("invalid eval stream org")
+	errEvalStreamOrgForbidden = errors.New("forbidden eval stream org")
+	errEvalStreamUnauthorized = errors.New("unauthorized eval stream request")
+)
+
 type EvalHandler struct {
-	taskStore      *db.EvalTaskStore
-	runStore       *db.EvalRunStore
-	batchStore     *db.EvalBatchStore
-	bootstrapStore *db.EvalBootstrapStore
-	jobStore       *db.JobStore
-	txStarter      db.TxStarter
-	audit          *db.AuditEmitter
+	taskStore        *db.EvalTaskStore
+	runStore         *db.EvalRunStore
+	batchStore       *db.EvalBatchStore
+	bootstrapStore   *db.EvalBootstrapStore
+	jobStore         *db.JobStore
+	txStarter        db.TxStarter
+	audit            *db.AuditEmitter
+	batchStreams     *cache.EvalBatchStreams
+	bootstrapStreams *cache.EvalBootstrapStreams
+	memberships      evalMembershipStore
 }
 
 func NewEvalHandler(taskStore *db.EvalTaskStore, runStore *db.EvalRunStore, batchStore *db.EvalBatchStore, bootstrapStore *db.EvalBootstrapStore, jobStore *db.JobStore, txStarter db.TxStarter) *EvalHandler {
@@ -41,6 +62,99 @@ func NewEvalHandler(taskStore *db.EvalTaskStore, runStore *db.EvalRunStore, batc
 
 func (h *EvalHandler) SetAuditEmitter(audit *db.AuditEmitter) {
 	h.audit = audit
+}
+
+// SetBatchStreams wires the Redis-backed batch update fanout. Setting nil
+// (or never calling this) disables the SSE endpoint and forces clients to
+// fall back to the existing polling path.
+func (h *EvalHandler) SetBatchStreams(streams *cache.EvalBatchStreams) {
+	h.batchStreams = streams
+}
+
+// SetBootstrapStreams is the bootstrap (PR-history scan) counterpart to
+// SetBatchStreams.
+func (h *EvalHandler) SetBootstrapStreams(streams *cache.EvalBootstrapStreams) {
+	h.bootstrapStreams = streams
+}
+
+// SetMembershipStore wires the org-membership store used by the SSE handlers
+// to validate explicit ?org_id= query params for multi-org users on
+// EventSource (which can't send X-Active-Org-ID).
+func (h *EvalHandler) SetMembershipStore(store evalMembershipStore) {
+	h.memberships = store
+}
+
+// publishBatchSignal exists separately from the worker's identical helper
+// because the API and the worker live in different packages and pass
+// different services structs through their call stacks. The worker uses
+// publishEvalBatchSignal in worker/handlers.go; this handler-side variant
+// fires from the StartBatch HTTP path so the user lands on the detail page
+// with an event already in flight rather than waiting for the first run
+// transition.
+func (h *EvalHandler) publishBatchSignal(ctx context.Context, orgID, batchID uuid.UUID, status models.EvalBatchStatus) {
+	if h.batchStreams == nil || batchID == uuid.Nil {
+		return
+	}
+	if err := h.batchStreams.PublishUpdated(ctx, models.EvalBatchUpdatedEvent{
+		BatchID:   batchID,
+		OrgID:     orgID,
+		Status:    status,
+		UpdatedAt: time.Now().UTC(),
+	}); err != nil {
+		zerolog.Ctx(ctx).Warn().Err(err).Str("batch_id", batchID.String()).Msg("failed to publish eval batch update event")
+	}
+}
+
+func (h *EvalHandler) publishBootstrapSignal(ctx context.Context, orgID, runID uuid.UUID, status models.EvalBootstrapStatus, sessionID *uuid.UUID) {
+	if h.bootstrapStreams == nil || runID == uuid.Nil {
+		return
+	}
+	if err := h.bootstrapStreams.PublishUpdated(ctx, models.EvalBootstrapUpdatedEvent{
+		BootstrapRunID: runID,
+		OrgID:          orgID,
+		Status:         status,
+		SessionID:      sessionID,
+		UpdatedAt:      time.Now().UTC(),
+	}); err != nil {
+		zerolog.Ctx(ctx).Warn().Err(err).Str("bootstrap_run_id", runID.String()).Msg("failed to publish eval bootstrap update event")
+	}
+}
+
+// streamOrgIDFromRequest mirrors pull_requests.go:streamOrgIDFromRequest.
+// EventSource clients can't send X-Active-Org-ID headers, so multi-org users
+// pass ?org_id= as a query string and we membership-check it here. Without
+// this, a user whose session-hint last_org_id differs from their actively-
+// viewed org would 404 on the SSE handshake.
+func (h *EvalHandler) streamOrgIDFromRequest(r *http.Request) (uuid.UUID, error) {
+	orgID := middleware.OrgIDFromContext(r.Context())
+	requestedRaw := strings.TrimSpace(r.URL.Query().Get("org_id"))
+	if requestedRaw == "" {
+		return orgID, nil
+	}
+
+	requestedOrgID, err := uuid.Parse(requestedRaw)
+	if err != nil {
+		return uuid.Nil, errEvalStreamOrgInvalid
+	}
+	if requestedOrgID == orgID {
+		return requestedOrgID, nil
+	}
+
+	user := middleware.UserFromContext(r.Context())
+	if user == nil {
+		return uuid.Nil, errEvalStreamUnauthorized
+	}
+	if h.memberships == nil {
+		return uuid.Nil, errors.New("membership store not configured")
+	}
+	if _, err := h.memberships.Get(r.Context(), user.ID, requestedOrgID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return uuid.Nil, errEvalStreamOrgForbidden
+		}
+		return uuid.Nil, err
+	}
+
+	return requestedOrgID, nil
 }
 
 // validGitSHA matches a hex string of 4-40 characters (short or full SHA).
@@ -737,6 +851,11 @@ func (h *EvalHandler) StartBatch(w http.ResponseWriter, r *http.Request) {
 			marshalAuditDetails(*zerolog.Ctx(r.Context()), evalBatchAuditDetails(&batch, req.TaskIDs, len(req.Configs))))
 	}
 
+	// Wake any in-flight detail-page SSE subscribers (e.g. the user who just
+	// hit "Start batch" and is being redirected) so they don't have to wait
+	// for the first run state transition before seeing the new batch.
+	h.publishBatchSignal(r.Context(), orgID, batch.ID, batch.Status)
+
 	writeJSON(w, http.StatusCreated, models.SingleResponse[models.EvalBatch]{Data: batch})
 }
 
@@ -791,6 +910,117 @@ func (h *EvalHandler) GetBatch(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, models.SingleResponse[models.EvalBatchDetail]{Data: detail})
 }
 
+// StreamBatchUpdates serves a per-batch SSE stream that emits an event each
+// time an EvalBatchUpdatedEvent for this batch arrives over Redis pub/sub.
+// The frontend uses this to replace the prior 5s React Query poll on
+// /evals/batch/{batchId}; on receipt of an event the client invalidates its
+// detail-query cache, which fetches the full EvalBatchDetail (batch + runs).
+//
+// Authorization: the request goes through the org-scoped middleware chain.
+// EventSource clients can't send X-Active-Org-ID, so multi-org users pass
+// ?org_id= and we membership-check it via streamOrgIDFromRequest (mirrors
+// pull_requests.go). The batch is then verified to belong to the resolved
+// org via batchStore.GetByID before the SSE handshake completes — failing
+// fast keeps the error path symmetric with the REST GET handler and prevents
+// callers from probing other orgs' batch IDs over the SSE channel.
+//
+// Channel scoping: the Redis pub/sub channel is keyed per batch
+// (`{batch:UUID}:eval_batches`), so the subscription only receives events
+// for the batch this client is watching — no server-side filter required
+// and no cross-batch fanout cost.
+//
+// Connection lifetime: the auth check is one-shot at handshake. If the
+// batch is deleted mid-stream the connection stays open and the per-batch
+// pub/sub channel simply goes silent until the request context is canceled
+// (browser navigation, logout, or proxy idle timeout). Mirrors the pull-
+// request stream's behavior; revisit if/when batch deletion becomes a
+// surfaced UX action.
+//
+// Degraded mode: if streams are not configured (no Redis) or the circuit
+// breaker is open, this returns 503. The frontend treats 503 as "fall back
+// to polling" rather than a fatal error so the user still sees progress
+// while Redis is recovering.
+func (h *EvalHandler) StreamBatchUpdates(w http.ResponseWriter, r *http.Request) {
+	if h.batchStreams == nil || !h.batchStreams.Available() {
+		http.Error(w, "eval batch streams unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	// Satisfy the org-scoping lint (org_id_lint_test.go) — the real
+	// resolution happens inside streamOrgIDFromRequest below, which can
+	// promote a query-string ?org_id= for multi-org users on EventSource.
+	_ = middleware.OrgIDFromContext(r.Context())
+
+	batchID, err := uuid.Parse(chi.URLParam(r, "batchId"))
+	if err != nil {
+		http.Error(w, "invalid batch ID", http.StatusBadRequest)
+		return
+	}
+
+	orgID, err := h.streamOrgIDFromRequest(r)
+	if err != nil {
+		switch {
+		case errors.Is(err, errEvalStreamOrgInvalid):
+			http.Error(w, "invalid eval stream org", http.StatusBadRequest)
+		case errors.Is(err, errEvalStreamOrgForbidden):
+			http.Error(w, "forbidden eval stream org", http.StatusForbidden)
+		case errors.Is(err, errEvalStreamUnauthorized):
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+		default:
+			http.Error(w, "failed to authorize eval stream", http.StatusInternalServerError)
+		}
+		return
+	}
+
+	if _, err := h.batchStore.GetByID(r.Context(), orgID, batchID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			http.Error(w, "eval batch not found", http.StatusNotFound)
+			return
+		}
+		http.Error(w, "failed to load eval batch", http.StatusInternalServerError)
+		return
+	}
+
+	sw := sse.NewWriter(w)
+	if sw == nil {
+		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
+		return
+	}
+
+	sub, err := h.batchStreams.Subscribe(batchID)
+	if err != nil {
+		http.Error(w, "eval batch streams unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	defer sub.Close()
+
+	logger := zerolog.Ctx(r.Context())
+	heartbeat := time.NewTicker(15 * time.Second)
+	defer heartbeat.Stop()
+
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case <-heartbeat.C:
+			if err := sw.WriteHeartbeat(); err != nil {
+				logger.Warn().Err(err).Msg("failed to write eval batch stream heartbeat")
+				return
+			}
+			sw.Flush()
+		case event, ok := <-sub.C:
+			if !ok {
+				logger.Warn().Str("reason", sub.CloseReason()).Msg("eval batch update subscription closed")
+				return
+			}
+			if err := sw.WriteEvent(sse.EventType("eval_batch.updated"), event); err != nil {
+				logger.Warn().Err(err).Str("batch_id", event.BatchID.String()).Msg("failed to write eval batch update event")
+				return
+			}
+			sw.Flush()
+		}
+	}
+}
+
 // --- Bootstrap ---
 
 // Bootstrap triggers a PR history scan to discover eval task candidates.
@@ -831,6 +1061,10 @@ func (h *EvalHandler) Bootstrap(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusInternalServerError, "ENQUEUE_FAILED", "failed to enqueue bootstrap job", err)
 		return
 	}
+
+	// Publish the initial pending event so the bootstrap detail sheet can
+	// render an empty-but-active state without polling for the first signal.
+	h.publishBootstrapSignal(r.Context(), orgID, run.ID, run.Status, run.SessionID)
 
 	writeJSON(w, http.StatusAccepted, models.SingleResponse[models.EvalBootstrapRun]{Data: run})
 }
@@ -880,6 +1114,90 @@ func (h *EvalHandler) GetBootstrapCandidates(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	writeJSON(w, http.StatusOK, models.SingleResponse[models.EvalBootstrapRun]{Data: run})
+}
+
+// StreamBootstrapUpdates serves a per-bootstrap-run SSE stream that wakes
+// whenever an EvalBootstrapUpdatedEvent for this run arrives over Redis
+// pub/sub. Replaces the prior 3s React Query poll on the bootstrap detail
+// sheet. Same authorization, channel-scoping, lifetime, and degraded-mode
+// semantics as StreamBatchUpdates above.
+func (h *EvalHandler) StreamBootstrapUpdates(w http.ResponseWriter, r *http.Request) {
+	if h.bootstrapStreams == nil || !h.bootstrapStreams.Available() {
+		http.Error(w, "eval bootstrap streams unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	// See StreamBatchUpdates — same lint-satisfying pattern.
+	_ = middleware.OrgIDFromContext(r.Context())
+
+	runID, err := uuid.Parse(chi.URLParam(r, "runId"))
+	if err != nil {
+		http.Error(w, "invalid bootstrap run ID", http.StatusBadRequest)
+		return
+	}
+
+	orgID, err := h.streamOrgIDFromRequest(r)
+	if err != nil {
+		switch {
+		case errors.Is(err, errEvalStreamOrgInvalid):
+			http.Error(w, "invalid eval stream org", http.StatusBadRequest)
+		case errors.Is(err, errEvalStreamOrgForbidden):
+			http.Error(w, "forbidden eval stream org", http.StatusForbidden)
+		case errors.Is(err, errEvalStreamUnauthorized):
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+		default:
+			http.Error(w, "failed to authorize eval stream", http.StatusInternalServerError)
+		}
+		return
+	}
+
+	if _, err := h.bootstrapStore.GetByID(r.Context(), orgID, runID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			http.Error(w, "bootstrap run not found", http.StatusNotFound)
+			return
+		}
+		http.Error(w, "failed to load bootstrap run", http.StatusInternalServerError)
+		return
+	}
+
+	sw := sse.NewWriter(w)
+	if sw == nil {
+		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
+		return
+	}
+
+	sub, err := h.bootstrapStreams.Subscribe(runID)
+	if err != nil {
+		http.Error(w, "eval bootstrap streams unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	defer sub.Close()
+
+	logger := zerolog.Ctx(r.Context())
+	heartbeat := time.NewTicker(15 * time.Second)
+	defer heartbeat.Stop()
+
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case <-heartbeat.C:
+			if err := sw.WriteHeartbeat(); err != nil {
+				logger.Warn().Err(err).Msg("failed to write eval bootstrap stream heartbeat")
+				return
+			}
+			sw.Flush()
+		case event, ok := <-sub.C:
+			if !ok {
+				logger.Warn().Str("reason", sub.CloseReason()).Msg("eval bootstrap update subscription closed")
+				return
+			}
+			if err := sw.WriteEvent(sse.EventType("eval_bootstrap.updated"), event); err != nil {
+				logger.Warn().Err(err).Str("bootstrap_run_id", event.BootstrapRunID.String()).Msg("failed to write eval bootstrap update event")
+				return
+			}
+			sw.Flush()
+		}
+	}
 }
 
 // AcceptBootstrapCandidates creates eval tasks from selected bootstrap candidates.

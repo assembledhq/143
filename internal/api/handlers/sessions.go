@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/rand/v2"
 	"net/http"
 	"regexp"
 	"strings"
@@ -86,6 +87,90 @@ type SessionHandler struct {
 	linearLinker atomic.Pointer[linearLinkerHolder]
 	// shutdownCh is closed on SIGTERM; see SetShutdownSignal.
 	shutdownCh <-chan struct{}
+	// pollOverride is non-zero in tests to lock the SSE polling fallback to
+	// a predictable interval. Production leaves it at zero so the per-
+	// connection interval is sampled from sseFallbackPoll{Min,Max} for
+	// every reconnect, which staggers Postgres queries across clients and
+	// avoids the synchronized N-client dogpile that follows a Redis outage
+	// when many SSE connections fail over at once. See SetPollIntervalForTest.
+	//
+	// Stored as nanoseconds in atomic.Int64 (not a plain time.Duration field)
+	// because parallel tests share the SessionHandler instance via
+	// newSessionHandler(t, mock) and read this field from request-serving
+	// goroutines while another test goroutine may still be calling the
+	// setter — the race detector would (correctly) flag a plain field even
+	// though the setter is conventionally called once per test before any
+	// requests fire.
+	pollOverrideNanos atomic.Int64
+}
+
+const (
+	// sseFallbackPollMin/Max bracket the per-connection polling interval used
+	// when the Redis-backed log stream is unavailable and we must serve
+	// updates from Postgres. The 1.0s value used here previously translated
+	// into N concurrent SSE clients × 1 query/sec on the runs+logs tables —
+	// fine for steady-state, problematic when a Redis outage drops every
+	// client onto this path simultaneously and they then reconnect in
+	// lockstep when Redis comes back. The min/max bracket plus
+	// sseFallbackPollInterval's uniform sample give each connection an
+	// independent phase, capping the worst-case query rate at ~0.5 N/sec
+	// while keeping the median responsiveness well under the 5s SLA the
+	// frontend's reconnect logic expects.
+	sseFallbackPollMin = 2000 * time.Millisecond
+	sseFallbackPollMax = 3500 * time.Millisecond
+	// sseFallbackHeartbeatMin/Max jitter the SSE keepalive interval for the
+	// same reason — synchronized heartbeats from many connections produce
+	// brief CPU/syscall spikes that don't matter at small N but do at large
+	// N. The 12-18s window stays well under typical proxy idle timeouts (30
+	// or 60s) and the 2× ratio between min and max is enough to break
+	// alignment after a few minutes of running connections.
+	sseFallbackHeartbeatMin = 12 * time.Second
+	sseFallbackHeartbeatMax = 18 * time.Second
+)
+
+// sseFallbackPollInterval returns a per-connection randomized polling interval
+// in [sseFallbackPollMin, sseFallbackPollMax]. The override path is reserved
+// for tests that need a sub-second interval to keep wall-clock test time
+// reasonable; production code never sets it.
+func (h *SessionHandler) sseFallbackPollInterval() time.Duration {
+	if override := time.Duration(h.pollOverrideNanos.Load()); override > 0 {
+		return override
+	}
+	span := int64(sseFallbackPollMax - sseFallbackPollMin)
+	// #nosec G404 -- jitter is a load-shedding mechanism (decorrelate per-
+	// connection Postgres polling so an outage doesn't cause an N-client
+	// dogpile), not a security primitive. An attacker who could predict
+	// the interval gains nothing useful; crypto/rand would just burn
+	// entropy and CPU on a hot path.
+	return sseFallbackPollMin + time.Duration(rand.Int64N(span+1))
+}
+
+// sseFallbackHeartbeatInterval returns a per-connection randomized heartbeat
+// interval in [sseFallbackHeartbeatMin, sseFallbackHeartbeatMax]. Same
+// override-for-tests semantics as sseFallbackPollInterval.
+func (h *SessionHandler) sseFallbackHeartbeatInterval() time.Duration {
+	if override := time.Duration(h.pollOverrideNanos.Load()); override > 0 {
+		// In test mode, scale the heartbeat down proportionally so tests that
+		// exercise the heartbeat branch don't have to wait the production
+		// floor. 5x the poll interval is enough to keep the heartbeat from
+		// firing on every poll tick.
+		return override * 5
+	}
+	span := int64(sseFallbackHeartbeatMax - sseFallbackHeartbeatMin)
+	// #nosec G404 -- non-security jitter; see sseFallbackPollInterval above.
+	return sseFallbackHeartbeatMin + time.Duration(rand.Int64N(span+1))
+}
+
+// SetPollIntervalForTest pins the SSE polling-fallback interval for tests
+// that need deterministic, fast iteration. Calling with d <= 0 restores the
+// default randomized behavior. Safe to call concurrently with request-
+// serving goroutines via the underlying atomic store.
+func (h *SessionHandler) SetPollIntervalForTest(d time.Duration) {
+	if d <= 0 {
+		h.pollOverrideNanos.Store(0)
+		return
+	}
+	h.pollOverrideNanos.Store(int64(d))
 }
 
 // linearLinkerHolder wraps the linearSessionLinker interface so the field
@@ -1012,9 +1097,13 @@ func (h *SessionHandler) streamLogsViaPolling(ctx context.Context, sw *sse.Write
 	}
 	sw.Flush()
 
-	ticker := time.NewTicker(1 * time.Second)
+	// Per-connection randomized intervals — see the comment block above
+	// sseFallbackPollMin for why this isn't a fixed 1s anymore.
+	pollInterval := h.sseFallbackPollInterval()
+	heartbeatInterval := h.sseFallbackHeartbeatInterval()
+	ticker := time.NewTicker(pollInterval)
 	defer ticker.Stop()
-	heartbeat := time.NewTicker(15 * time.Second)
+	heartbeat := time.NewTicker(heartbeatInterval)
 	defer heartbeat.Stop()
 	shutdownCh := h.shutdownCh
 
