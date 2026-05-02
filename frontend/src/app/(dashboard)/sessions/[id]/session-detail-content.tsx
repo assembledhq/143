@@ -2000,7 +2000,7 @@ function ChatPanel({
       if (saveScrollTimerRef.current) {
         clearTimeout(saveScrollTimerRef.current);
       }
-      if (currentScrollEl) {
+      if (currentScrollEl && initialAnchorAppliedRef.current) {
         persistScrollPosition(currentScrollEl.scrollTop);
       }
     };
