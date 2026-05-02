@@ -984,6 +984,42 @@ describe('SessionDetailPage', () => {
     });
   });
 
+  it('does not persist a top-of-page scroll position when leaving before the initial anchor resolves', async () => {
+    const idleSession: Session = {
+      ...mockSessions[0],
+      id: 'session-scroll-early-exit',
+      status: 'idle',
+      completed_at: undefined,
+      current_turn: 2,
+      sandbox_state: 'snapshotted',
+    };
+
+    let releaseTimeline = () => {};
+    const timelineBlocked = new Promise<void>((resolve) => {
+      releaseTimeline = resolve;
+    });
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({ data: idleSession } satisfies SingleResponse<Session>);
+      }),
+      http.get('/api/v1/sessions/:id/timeline', async () => {
+        await timelineBlocked;
+        return HttpResponse.json({ data: [] as SessionTimelineEntry[], meta: {} } satisfies ListResponse<SessionTimelineEntry>);
+      }),
+    );
+
+    const { container, unmount } = renderWithProviders(<SessionDetailContent id={idleSession.id} />);
+    await screen.findByRole('heading', { name: 'Fixed TypeError by adding null check' });
+    expect(getChatScroller(container).scrollTop).toBe(0);
+
+    unmount();
+
+    expect(window.localStorage.getItem(`session-scroll-position:org-1:user-1:${idleSession.id}`)).toBeNull();
+
+    releaseTimeline();
+  });
+
   it('shows running indicator for running session', async () => {
     const runningSession: Session = {
       ...mockSessions[0],
