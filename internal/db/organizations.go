@@ -70,6 +70,25 @@ func (s *OrganizationStore) Update(ctx context.Context, org *models.Organization
 	return row.Scan(&org.UpdatedAt)
 }
 
+// UpdateSettings replaces the org's settings JSONB blob. Caller is
+// responsible for read-modify-write semantics — this method simply
+// overwrites whatever is there. Used by admin endpoints that own a
+// well-defined sub-section of the settings (e.g. LinearAgent.Enabled)
+// and have already constructed the merged document.
+func (s *OrganizationStore) UpdateSettings(ctx context.Context, orgID uuid.UUID, settings []byte) error {
+	tag, err := s.db.Exec(ctx, `
+		UPDATE organizations SET settings = @settings, updated_at = now()
+		WHERE id = @id`,
+		pgx.NamedArgs{"id": orgID, "settings": settings})
+	if err != nil {
+		return fmt.Errorf("update organization settings: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("organization not found")
+	}
+	return nil
+}
+
 // MergeCodingAgentDefaults merges non-secret Amp/Pi defaults into
 // settings.agent_config.<agent> without replacing unrelated settings keys.
 // lint:allow-no-orgid reason="organizations is the root tenant table; orgID IS the org"

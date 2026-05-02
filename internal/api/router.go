@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net"
@@ -302,12 +303,15 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 
 	// Linear agent settings handler — exposes the team→repo mapping CRUD
 	// and install-status surfaces consumed by the settings UI.
-	linearAgentSettingsHandler := handlers.NewLinearAgentSettingsHandler(
-		db.NewLinearTeamRepoMappingStore(pool),
-		credentialStore,
-		linearAgentSettingsLoader{orgStore: orgStore},
-		logger,
-	)
+	linearAgentSettingsHandler := handlers.NewLinearAgentSettingsHandler(handlers.LinearAgentSettingsConfig{
+		Mappings:      db.NewLinearTeamRepoMappingStore(pool),
+		Credentials:   credentialStore,
+		Settings:      linearAgentSettingsLoader{orgStore: orgStore},
+		AgentSessions: linearService.AgentSessionStore(),
+		Activities:    linearService.AgentActivityStore(),
+		Orgs:          linearAgentOrgWriterAdapter{orgs: orgStore},
+		Logger:        logger,
+	})
 	credentialHandler := handlers.NewCredentialHandler(credentialStore)
 	credentialHandler.SetSelfHeal(orgStore, cfg.SafeLLMEnv())
 	memoryHandler := handlers.NewMemoryHandler(memoryStore, reviewCommentStore)
@@ -952,9 +956,15 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				// Linear agent settings: install status + team→repo mappings.
 				// Admin-only enforced by the surrounding middleware tier.
 				r.Get("/api/v1/integrations/linear/agent", linearAgentSettingsHandler.GetStatus)
+				r.Patch("/api/v1/integrations/linear/agent", linearAgentSettingsHandler.PatchSettings)
 				r.Get("/api/v1/integrations/linear/agent/mappings", linearAgentSettingsHandler.ListMappings)
 				r.Post("/api/v1/integrations/linear/agent/mappings", linearAgentSettingsHandler.UpsertMapping)
 				r.Delete("/api/v1/integrations/linear/agent/mappings/{id}", linearAgentSettingsHandler.DeleteMapping)
+				// Operator debug surface — read-only listings of the
+				// inbound agent rows + activity log so an admin can
+				// answer "what did we send for AgentSession X".
+				r.Get("/api/v1/integrations/linear/agent/sessions", linearAgentSettingsHandler.ListSessions)
+				r.Get("/api/v1/integrations/linear/agent/sessions/{id}", linearAgentSettingsHandler.GetSession)
 				r.Get("/api/v1/integrations/sentry/login", integrationHandler.StartSentryOAuth)
 				r.Get("/api/v1/integrations/sentry/callback", integrationHandler.HandleSentryOAuthCallback)
 				r.Post("/api/v1/integrations/sentry/connect", integrationHandler.ConnectSentry)
@@ -1014,4 +1024,33 @@ func (l linearAgentSettingsLoader) LoadAgentSettings(ctx context.Context, orgID 
 		return models.LinearAgentSettings{}, err
 	}
 	return parsed.LinearAgent, nil
+}
+
+// linearAgentOrgWriterAdapter persists the per-org Enabled flag by
+// loading the existing settings, mutating only the LinearAgent.Enabled
+// field, and writing back the merged JSON. Read-modify-write is fine
+// here because the org settings JSONB is a low-write-volume blob and
+// any concurrent admin edits would land seconds apart at worst.
+type linearAgentOrgWriterAdapter struct {
+	orgs *db.OrganizationStore
+}
+
+func (a linearAgentOrgWriterAdapter) SetLinearAgentEnabled(ctx context.Context, orgID uuid.UUID, enabled bool) error {
+	if a.orgs == nil {
+		return fmt.Errorf("organization store unavailable")
+	}
+	org, err := a.orgs.GetByID(ctx, orgID)
+	if err != nil {
+		return fmt.Errorf("load org: %w", err)
+	}
+	parsed, err := models.ParseOrgSettings(org.Settings)
+	if err != nil {
+		return fmt.Errorf("parse org settings: %w", err)
+	}
+	parsed.LinearAgent.Enabled = &enabled
+	encoded, err := json.Marshal(parsed)
+	if err != nil {
+		return fmt.Errorf("encode org settings: %w", err)
+	}
+	return a.orgs.UpdateSettings(ctx, orgID, encoded)
 }

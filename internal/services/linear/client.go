@@ -817,6 +817,57 @@ type FetchedAgentSession struct {
 	UpdatedAt   time.Time
 }
 
+// FetchComment resolves a single comment by id. Used by the prompted
+// worker handler to read the user's follow-up message verbatim.
+//
+// Returns ErrCommentNotFound when Linear has no record of the id (rare
+// — Linear preserves comments on issue lifecycle changes — but possible
+// if the comment was deleted between dispatch and worker execution).
+func (c *graphQLClient) FetchComment(ctx context.Context, commentID string) (*FetchedComment, error) {
+	if commentID == "" {
+		return nil, errors.New("comment_id is required")
+	}
+	const query = `query CommentGet($id: String!) {
+		comment(id: $id) {
+			id body createdAt
+			user { name }
+			issue { id }
+		}
+	}`
+	var result struct {
+		Data struct {
+			Comment *struct {
+				ID        string    `json:"id"`
+				Body      string    `json:"body"`
+				CreatedAt time.Time `json:"createdAt"`
+				User      struct {
+					Name string `json:"name"`
+				} `json:"user"`
+				Issue struct {
+					ID string `json:"id"`
+				} `json:"issue"`
+			} `json:"comment"`
+		} `json:"data"`
+	}
+	if err := c.do(ctx, query, map[string]any{"id": commentID}, &result); err != nil {
+		return nil, err
+	}
+	if result.Data.Comment == nil {
+		return nil, ErrCommentNotFound
+	}
+	return &FetchedComment{
+		ID:        result.Data.Comment.ID,
+		Body:      result.Data.Comment.Body,
+		Author:    result.Data.Comment.User.Name,
+		IssueID:   result.Data.Comment.Issue.ID,
+		CreatedAt: result.Data.Comment.CreatedAt,
+	}, nil
+}
+
+// ErrCommentNotFound is returned by FetchComment when Linear cannot
+// resolve the requested comment id.
+var ErrCommentNotFound = errors.New("linear comment not found")
+
 // AgentSessionGet is the recovery hook. Returns ErrAgentSessionNotFound when
 // Linear no longer has the session (rare but possible if the workspace's
 // retention has elapsed).

@@ -80,6 +80,10 @@ func (c createPathClient) AgentSessionGet(context.Context, string) (*FetchedAgen
 	return nil, errors.New("AgentSessionGet not used")
 }
 
+func (c createPathClient) FetchComment(context.Context, string) (*FetchedComment, error) {
+	return nil, errors.New("FetchComment not used")
+}
+
 type createPathIntegrationReader struct {
 	integration models.Integration
 	err         error
