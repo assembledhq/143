@@ -192,6 +192,7 @@ type linearLinkerHolder struct{ fn linearSessionLinker }
 // validation and produce a session with an empty user turn.
 type linearSessionLinker interface {
 	ResolveAndLinkAtCreate(ctx context.Context, in linear.CreateInput) (linear.CreateResult, error)
+	ResolveAndLinkMidSession(ctx context.Context, in linear.MidSessionInput) error
 	Enabled(ctx context.Context, orgID uuid.UUID) bool
 	TeamKeyAllowlist(ctx context.Context, orgID uuid.UUID) (map[string]bool, error)
 }
@@ -1878,6 +1879,7 @@ func (h *SessionHandler) SendMessage(w http.ResponseWriter, r *http.Request) {
 				writeError(w, r, http.StatusInternalServerError, "CREATE_FAILED", "failed to create message", err)
 				return
 			}
+			h.maybeLinkLinearMidSession(r.Context(), orgID, sessionID, body.Message, userID)
 			writeJSON(w, http.StatusCreated, models.SingleResponse[models.SessionMessage]{Data: *msg})
 			return
 		}
@@ -1916,6 +1918,7 @@ func (h *SessionHandler) SendMessage(w http.ResponseWriter, r *http.Request) {
 		committed = true
 
 		h.emitReviewCommentResolutionAudits(r, sessionID, msg.ID, resolvedComments)
+		h.maybeLinkLinearMidSession(r.Context(), orgID, sessionID, body.Message, userID)
 		writeJSON(w, http.StatusCreated, models.SingleResponse[models.SessionMessage]{Data: *msg})
 		return
 	}
@@ -2029,8 +2032,46 @@ func (h *SessionHandler) SendMessage(w http.ResponseWriter, r *http.Request) {
 			marshalAuditDetails(h.logger, questionDetails))
 	}
 	h.emitReviewCommentResolutionAudits(r, sessionID, msg.ID, resolvedComments)
+	h.maybeLinkLinearMidSession(r.Context(), orgID, sessionID, body.Message, userID)
 
 	writeJSON(w, http.StatusCreated, models.SingleResponse[models.SessionMessage]{Data: *msg})
+}
+
+// midSessionLinkTimeout caps the detached-context window we give the
+// fire-and-forget mid-session linker. Detached from the request context so a
+// user closing their browser tab between SendMessage's writeJSON and the
+// allowlist+enqueue calls doesn't cancel the link work; bounded so a wedged
+// DB connection can't hold the goroutine forever.
+const midSessionLinkTimeout = 30 * time.Second
+
+// maybeLinkLinearMidSession kicks off detection + async enqueue for a
+// follow-up message body in a detached goroutine. It runs off the request
+// path so SendMessage's running-session fast path stays free of the extra
+// allowlist read and job-insert it would otherwise add to user-perceived
+// latency. Failures are logged but never surface to the caller — the message
+// has already been committed and the agent will see Linear refs as text
+// regardless of whether the side-band link row gets created. This mirrors the
+// design 62 fail-soft contract on the async post-create catch-up path.
+func (h *SessionHandler) maybeLinkLinearMidSession(ctx context.Context, orgID, sessionID uuid.UUID, messageBody string, userID *uuid.UUID) {
+	linker := h.getLinearLinker()
+	if linker == nil {
+		return
+	}
+	detached := context.WithoutCancel(ctx)
+	go func() {
+		bgCtx, cancel := context.WithTimeout(detached, midSessionLinkTimeout)
+		defer cancel()
+		if err := linker.ResolveAndLinkMidSession(bgCtx, linear.MidSessionInput{
+			OrgID:       orgID,
+			SessionID:   sessionID,
+			MessageBody: messageBody,
+			UserID:      userID,
+		}); err != nil {
+			h.logger.Warn().Err(err).
+				Str("session_id", sessionID.String()).
+				Msg("mid-session linear linking failed; follow-up message was sent but no link row was created")
+		}
+	}()
 }
 
 // currentResolutionPass returns the pass number to record on a comment that

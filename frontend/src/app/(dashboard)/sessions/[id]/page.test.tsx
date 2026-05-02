@@ -3937,8 +3937,8 @@ describe('SessionDetailPage', () => {
 
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
     await screen.findByPlaceholderText('Send a follow-up message...');
-    expect(screen.getByTitle('Attach files or images')).toBeInTheDocument();
-    expect(screen.getByTitle('Attach files or images')).not.toBeDisabled();
+    expect(screen.getByTitle('Add files, photos, or a Linear issue')).toBeInTheDocument();
+    expect(screen.getByTitle('Add files, photos, or a Linear issue')).not.toBeDisabled();
   });
 
   it('shows Codex agent type label', async () => {
@@ -3963,7 +3963,73 @@ describe('SessionDetailPage', () => {
 
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
     await screen.findByPlaceholderText('Session is not active');
-    expect(screen.getByTitle('Attach files or images')).toBeDisabled();
+    expect(screen.getByTitle('Add files, photos, or a Linear issue')).toBeDisabled();
+  });
+
+  it('appends a Linear identifier to the follow-up message via the dropdown', async () => {
+    const idleSession: Session = {
+      ...mockSessions[0],
+      status: 'idle',
+      current_turn: 1,
+      sandbox_state: 'snapshotted',
+      snapshot_key: 'snapshot/test',
+    };
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({ data: idleSession } satisfies SingleResponse<Session>);
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+    const composer = await screen.findByPlaceholderText('Send a follow-up message...');
+    const user = userEvent.setup();
+
+    await user.click(screen.getByTitle('Add files, photos, or a Linear issue'));
+    await user.click(await screen.findByRole('menuitem', { name: 'Link Linear issue' }));
+
+    const linearInput = await screen.findByLabelText('Linear issue id or URL');
+    await user.type(linearInput, 'ACS-1234');
+    await user.click(screen.getByRole('button', { name: 'Add' }));
+
+    expect(composer).toHaveValue('ACS-1234');
+    // Submitting the ref must close the input so the user can keep typing
+    // their message in the textarea — leaving it open would steal the next
+    // keystroke.
+    expect(screen.queryByLabelText('Linear issue id or URL')).not.toBeInTheDocument();
+  });
+
+  it('shows an inline error and keeps the input open when the Linear ref is malformed', async () => {
+    const idleSession: Session = {
+      ...mockSessions[0],
+      status: 'idle',
+      current_turn: 1,
+      sandbox_state: 'snapshotted',
+      snapshot_key: 'snapshot/test',
+    };
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({ data: idleSession } satisfies SingleResponse<Session>);
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+    const composer = await screen.findByPlaceholderText('Send a follow-up message...');
+    const user = userEvent.setup();
+
+    await user.click(screen.getByTitle('Add files, photos, or a Linear issue'));
+    await user.click(await screen.findByRole('menuitem', { name: 'Link Linear issue' }));
+
+    const linearInput = await screen.findByLabelText('Linear issue id or URL');
+    await user.type(linearInput, 'fix the bug');
+    await user.click(screen.getByRole('button', { name: 'Add' }));
+
+    // The ref-validation error must surface so the user knows why nothing
+    // happened; without this, an invalid input silently swallowed the click.
+    expect(await screen.findByRole('alert')).toHaveTextContent(/Linear URL/);
+    expect(screen.getByLabelText('Linear issue id or URL')).toBeInTheDocument();
+    expect(composer).toHaveValue('');
   });
 
   it('enters review mode and shows review diff view with file tree', async () => {
@@ -4198,7 +4264,7 @@ describe('SessionDetailPage', () => {
 
     await screen.findByPlaceholderText('Session environment has expired and can no longer be continued');
 
-    const attachButton = container.querySelector('button[title="Attach files or images"]') as HTMLButtonElement | null;
+    const attachButton = container.querySelector('button[title="Add files, photos, or a Linear issue"]') as HTMLButtonElement | null;
     expect(attachButton).not.toBeNull();
     expect(attachButton).toBeDisabled();
     await user.hover(attachButton?.parentElement as HTMLElement);

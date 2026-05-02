@@ -83,6 +83,7 @@ func RegisterHandlers(w *Worker, stores *Stores, services *Services, retentionCf
 	if services != nil && services.Linear != nil {
 		w.Register("prepare_linear_primary", newPrepareLinearPrimaryHandler(services.Linear, logger))
 		w.Register("link_linear_issue", newLinkLinearIssueHandler(services.Linear, logger))
+		w.Register("link_linear_issue_mid_session", newLinkLinearIssueMidSessionHandler(services.Linear, logger))
 		w.Register("refresh_linear_team_keys", newRefreshLinearTeamKeysHandler(services.Linear, logger))
 		w.Register("linear_milestone", newLinearMilestoneHandler(stores, services.Linear, logger))
 	}
@@ -2730,6 +2731,56 @@ func newLinkLinearIssueHandler(svc *linear.Service, logger zerolog.Logger) JobHa
 		}
 		if err := svc.LinkRelatedLinearRefs(ctx, orgID, sessionID, refs, userID); err != nil {
 			logger.Warn().Err(err).Str("session_id", sessionID.String()).Msg("link_linear_issue failed")
+			return &RetryableError{Err: err}
+		}
+		return nil
+	}
+}
+
+// link_linear_issue_mid_session handler links Linear refs detected in a
+// follow-up message body. Distinct from link_linear_issue because the
+// post-create catch-up path treats refs[0] as the already-linked primary; the
+// mid-session path has no such primary in the payload, so all refs are
+// candidate related links.
+func newLinkLinearIssueMidSessionHandler(svc *linear.Service, logger zerolog.Logger) JobHandler {
+	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
+		var input struct {
+			OrgID       string           `json:"org_id"`
+			SessionID   string           `json:"session_id"`
+			Identifiers []string         `json:"identifiers"`
+			Refs        []linear.LinkRef `json:"refs,omitempty"`
+			UserID      string           `json:"user_id,omitempty"`
+		}
+		if err := json.Unmarshal(payload, &input); err != nil {
+			return fmt.Errorf("unmarshal link_linear_issue_mid_session payload: %w", err)
+		}
+		orgID, err := parseOrgID(input.OrgID, ctx)
+		if err != nil {
+			return err
+		}
+		sessionID, err := uuid.Parse(input.SessionID)
+		if err != nil {
+			return fmt.Errorf("parse session ID: %w", err)
+		}
+		var userID *uuid.UUID
+		if input.UserID != "" {
+			if parsed, err := uuid.Parse(input.UserID); err == nil {
+				userID = &parsed
+			} else {
+				// See prepare_linear_primary handler for the rationale on
+				// logging instead of failing — same trade-off applies here.
+				logger.Warn().Err(err).
+					Str("session_id", sessionID.String()).
+					Str("user_id_raw", input.UserID).
+					Msg("link_linear_issue_mid_session: malformed user_id in payload; proceeding with nil attribution")
+			}
+		}
+		refs := input.Refs
+		if len(refs) == 0 {
+			refs = linearRefsFromIdentifiers(input.Identifiers)
+		}
+		if err := svc.LinkMidSessionRefs(ctx, orgID, sessionID, refs, userID); err != nil {
+			logger.Warn().Err(err).Str("session_id", sessionID.String()).Msg("link_linear_issue_mid_session failed")
 			return &RetryableError{Err: err}
 		}
 		return nil
