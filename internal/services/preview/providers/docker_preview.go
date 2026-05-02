@@ -891,7 +891,7 @@ func notifyServiceFailed(observer preview.ServiceObserver, name, errMsg string, 
 func formatServiceExitError(exitCode int, outputTail []string) string {
 	hint := ""
 	if exitCode == 127 {
-		hint = " (command not found — check that the executable exists on the sandbox's $PATH or use an absolute path in .143/preview.json)"
+		hint = " (command not found — check that the executable exists on the sandbox's $PATH or use an absolute path in .143/config.json)"
 	}
 	base := fmt.Sprintf("exited with code %d%s", exitCode, hint)
 	tail := truncatedTail(outputTail, serviceExitTailLines, serviceExitTailRunes)

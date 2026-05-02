@@ -809,7 +809,7 @@ func TestStartService_TailRingBufferBoundedAtServiceTailLines(t *testing.T) {
 // TestFormatServiceExitError covers the user-visible error built from a
 // service's non-zero exit. The bare exit number is opaque (especially the
 // POSIX 127 "command not found"), so the formatted message has to:
-//   - Decode 127 to a hint about $PATH / absolute paths in .143/preview.json.
+//   - Decode 127 to a hint about $PATH / absolute paths in .143/config.json.
 //   - Append the captured stdout/stderr tail so the user sees the real reason
 //     (e.g. "/bin/sh: 1: npm: not found") in the API response, not just an
 //     exit code.
