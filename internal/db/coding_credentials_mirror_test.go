@@ -8,6 +8,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/pashagolub/pgxmock/v4"
 	"github.com/stretchr/testify/require"
 
@@ -565,6 +566,66 @@ func TestMirrorUserCredentialDisableCascadesTeamDefault(t *testing.T) {
 	if _, hit := store.resolverCache.get(orgID, nil, models.ProviderAnthropic); hit {
 		t.Fatalf("team-default cascade should invalidate the org-scoped resolver cache")
 	}
+}
+
+// TestMirrorUpsertNaturalKeyFallback exercises the rare path where the
+// id-keyed INSERT trips on the (org_id, user_id, provider, label) unique
+// index — e.g. an out-of-band row already present at the same natural key.
+// upsertMirroredRow must catch the 23505 unique_violation, fall back to an
+// UPDATE keyed by the natural key, and still invalidate the resolver cache.
+// Without this fallback the legacy write would surface as a mirror failure
+// every time, even though the unified table has a perfectly serviceable row.
+func TestMirrorUpsertNaturalKeyFallback(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := NewCodingCredentialStore(mock, nil)
+
+	orgID := uuid.New()
+	rowID := uuid.New()
+
+	// Seed the resolver cache so the test can assert the fallback path still
+	// invalidates — same observable behaviour as the happy path.
+	store.resolverCache.put(orgID, nil, models.ProviderAnthropic, []models.DecryptedCodingCredential{{ID: uuid.New()}})
+
+	// 1. Id-keyed INSERT fails with 23505. isUniqueViolation matches by
+	//    SQLState, so a *pgconn.PgError with Code "23505" is enough.
+	mock.ExpectExec(`(?s)INSERT INTO coding_credentials.*ON CONFLICT \(id\) DO UPDATE`).
+		WithArgs(codingAnyArgs(12)...).
+		WillReturnError(&pgconn.PgError{Code: "23505"})
+
+	// 2. Fallback UPDATE keys by (org_id, user_id IS NULL, provider, label).
+	//    Org-scoped row uses the user_id IS NULL branch, so @user_id is not
+	//    referenced in the SQL — pgx only binds the 8 named args that the
+	//    query actually mentions (org_id, provider, label, config, priority,
+	//    status, last_verified_at, updated_at).
+	mock.ExpectExec(`(?s)UPDATE coding_credentials SET.*WHERE org_id = @org_id AND user_id IS NULL AND provider = @provider AND label = @label`).
+		WithArgs(codingAnyArgs(8)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	org := models.OrgCredential{
+		ID:        rowID,
+		OrgID:     orgID,
+		Provider:  models.ProviderAnthropic,
+		Status:    "active",
+		Label:     "team",
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+	}
+	cfg := models.AnthropicConfig{APIKey: "sk-ant-test-1234567890"}
+
+	require.NoError(t, store.MirrorOrgCredential(context.Background(), org, cfg),
+		"natural-key fallback should swallow the 23505 and update by (org_id, user_id, provider, label)")
+	require.NoError(t, mock.ExpectationsWereMet())
+
+	if _, hit := store.resolverCache.get(orgID, nil, models.ProviderAnthropic); hit {
+		t.Fatalf("natural-key fallback must invalidate the resolver cache for the affected (org, provider) key")
+	}
+	require.Equal(t, uint64(0), store.MirrorFailureCount(),
+		"natural-key fallback recovered cleanly; failure counter must stay zero")
 }
 
 // captureBytes returns a pgxmock argument matcher that records the bytes

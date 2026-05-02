@@ -187,6 +187,14 @@ func main() {
 	credentialStore.SetMirrorLogger(mirrorLog)
 	userCredentialStore.SetMirrorLogger(mirrorLog)
 	codingCredentialStore.SetMirrorLogger(mirrorLog)
+	// Expose the mirror's drift / failure counters through OTel so the
+	// dual-write rollout has a dashboard signal when the unified table is
+	// drifting from the legacy stores. Cleaned up alongside the mirror itself.
+	if _, err := metrics.NewMirrorMetrics(func() (uint64, uint64) {
+		return codingCredentialStore.MirrorDriftCount(), codingCredentialStore.MirrorFailureCount()
+	}); err != nil {
+		logger.Fatal().Err(err).Msg("failed to initialize coding-credentials mirror metrics")
+	}
 	codexAuthSvc := codexauth.NewService(credentialStore, logger)
 	claudeCodeAuthSvc := claudecodeauth.NewService(credentialStore, logger)
 
