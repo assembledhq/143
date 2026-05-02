@@ -4,7 +4,7 @@ How-tos for people using 143 to act on their repos. These apply whether you're u
 
 ## Guides
 
-- **[Preview environments](previews.md)** — configure `.143/preview.json` so 143 can serve a live iframed preview of your app from inside a session.
+- **[Preview environments](previews.md)** — configure `.143/config.json` so 143 can serve a live iframed preview of your app from inside a session.
 
 ---
 

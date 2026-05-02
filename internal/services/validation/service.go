@@ -14,6 +14,7 @@ import (
 	llmpkg "github.com/assembledhq/143/internal/llm"
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/prompts"
+	"github.com/assembledhq/143/internal/repoconfig"
 	"github.com/assembledhq/143/internal/sanitize"
 	"github.com/assembledhq/143/internal/services/agent"
 )
@@ -450,27 +451,70 @@ func (s *Service) checkCI(ctx context.Context, sandbox *agent.Sandbox) (string, 
 			continue
 		}
 
-		var stdout, stderr bytes.Buffer
-		exitCode, err := s.provider.Exec(ctx, sandbox, ci.command, &stdout, &stderr)
+		repoCommands, err := s.repoCICommands(ctx, sandbox)
 		if err != nil {
-			return "fail", fmt.Sprintf("error running %q: %s", ci.command, err.Error()), nil
+			return "fail", err.Error(), nil
 		}
 
-		if exitCode != 0 {
-			output := stderr.String()
-			if output == "" {
-				output = stdout.String()
+		commands := make([]string, 0, len(repoCommands.bootstrap)+1+len(repoCommands.validation))
+		commands = append(commands, repoCommands.bootstrap...)
+		commands = append(commands, ci.command)
+		commands = append(commands, repoCommands.validation...)
+		for _, command := range commands {
+			if result, details, ok := s.runCICommand(ctx, sandbox, command); !ok {
+				return "fail", details, nil
+			} else if result == "fail" {
+				return result, details, nil
 			}
-			if len(output) > 2000 {
-				output = output[:2000] + "\n... (truncated)"
-			}
-			return "fail", fmt.Sprintf("tests failed (exit code %d): %s", exitCode, output), nil
 		}
 
-		return "pass", fmt.Sprintf("tests passed: %s", ci.command), nil
+		return "pass", fmt.Sprintf("CI commands passed: %s", strings.Join(commands, ", ")), nil
 	}
 
 	return "pass", "no recognized project type, skipping CI", nil
+}
+
+type repoCICommands struct {
+	bootstrap  []string
+	validation []string
+}
+
+func (s *Service) repoCICommands(ctx context.Context, sandbox *agent.Sandbox) (repoCICommands, error) {
+	configBytes, err := s.provider.ReadFile(ctx, sandbox, repoconfig.ConfigPath)
+	if err != nil {
+		return repoCICommands{}, nil
+	}
+
+	config, err := repoconfig.Parse(configBytes)
+	if err != nil {
+		return repoCICommands{}, fmt.Errorf("invalid %s: %w", repoconfig.ConfigPath, err)
+	}
+
+	return repoCICommands{
+		bootstrap:  config.Bootstrap.Commands,
+		validation: config.Validation.Commands,
+	}, nil
+}
+
+func (s *Service) runCICommand(ctx context.Context, sandbox *agent.Sandbox, command string) (string, string, bool) {
+	var stdout, stderr bytes.Buffer
+	exitCode, err := s.provider.Exec(ctx, sandbox, command, &stdout, &stderr)
+	if err != nil {
+		return "fail", fmt.Sprintf("error running %q: %s", command, err.Error()), false
+	}
+
+	if exitCode != 0 {
+		output := stderr.String()
+		if output == "" {
+			output = stdout.String()
+		}
+		if len(output) > 2000 {
+			output = output[:2000] + "\n... (truncated)"
+		}
+		return "fail", fmt.Sprintf("tests failed while running %q (exit code %d): %s", command, exitCode, output), true
+	}
+
+	return "pass", "", true
 }
 
 const diffSizeWarnThreshold = 200
