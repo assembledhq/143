@@ -701,8 +701,10 @@ func (m *mockProjectTaskUpdater) getStatuses() []string {
 
 // mockIssueStore implements agent.IssueStore.
 type mockIssueStore struct {
-	issue models.Issue
-	err   error
+	mu            sync.Mutex
+	issue         models.Issue
+	err           error
+	statusUpdates []string
 }
 
 func (m *mockIssueStore) GetByID(ctx context.Context, orgID, issueID uuid.UUID) (models.Issue, error) {
@@ -710,6 +712,24 @@ func (m *mockIssueStore) GetByID(ctx context.Context, orgID, issueID uuid.UUID) 
 		return models.Issue{}, m.err
 	}
 	return m.issue, nil
+}
+
+func (m *mockIssueStore) UpdateStatus(ctx context.Context, orgID, issueID uuid.UUID, status string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.err != nil {
+		return m.err
+	}
+	m.statusUpdates = append(m.statusUpdates, status)
+	return nil
+}
+
+func (m *mockIssueStore) getStatusUpdates() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]string, len(m.statusUpdates))
+	copy(out, m.statusUpdates)
+	return out
 }
 
 // mockRepositoryStore implements agent.RepositoryStore.
@@ -955,6 +975,7 @@ func TestRunAgent_SuccessfulRun(t *testing.T) {
 	// Status should have been set to "running".
 	statuses := d.sessions.getStatusUpdates()
 	require.Contains(t, statuses, "running")
+	require.Contains(t, d.issues.getStatusUpdates(), "in_progress", "RunAgent should mark the primary issue in progress when execution starts")
 
 	// Result should be "completed" with high confidence.
 	results := d.sessions.getResultUpdates()

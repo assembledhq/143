@@ -56,6 +56,10 @@ func (s *helperIssueStore) GetByID(context.Context, uuid.UUID, uuid.UUID) (model
 	return s.issue, nil
 }
 
+func (s *helperIssueStore) UpdateStatus(context.Context, uuid.UUID, uuid.UUID, string) error {
+	return s.err
+}
+
 func TestLatestUserMessage(t *testing.T) {
 	t.Parallel()
 
