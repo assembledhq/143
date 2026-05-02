@@ -236,7 +236,7 @@ Attachment title/subtitle update across the lifecycle:
 
 Posting separate comments for "started", "PR opened", and "PR merged" would create adoption-breaking notification volume. Instead, create one comment on link-create, persist its ID, and update it in place via `commentUpdate` for milestones. This also dedupes worker replays: if `provider_state.comment_id` is set, update; otherwise create.
 
-The comment body is mandatory-prefixed `🤖 143 automated update —` so readers can immediately distinguish bot voice from human voice (relevant because the comment is authored by the integration installer's account; see below).
+The comment body is mandatory-prefixed `🤖 143 automated update` so readers can immediately distinguish bot voice from human voice (relevant because the comment is authored by the integration installer's account; see below).
 
 ### Authoring identity
 
@@ -467,7 +467,7 @@ Each phase ships independently. Phase 4 is gated on phase 2 dogfooding outcomes;
 | Misdetection links wrong issue | Team-key cache prunes false positives; `GetTask` confirms; explicit "remove link" UI; audit log on every link write. |
 | Notification fatigue in Linear | Single live comment (not per-event); transitions debounced 30s; per-team disable; per-session disable; private mode. |
 | Linear rate limits cascade to session-create | Detection runs post-commit (or fast-path with strict budget); per-integration token bucket; retryable backoff. |
-| Authoring identity awkwardness | Bot identity prereq for phase 2; mandatory `🤖 143 automated update —` prefix in copy; advisory in install flow. |
+| Authoring identity awkwardness | Bot identity prereq for phase 2; mandatory `🤖 143 automated update` prefix in copy; advisory in install flow. |
 | Linear's GitHub integration double-writes | Coexistence guard suppresses our merge-time writes when their attachments present. |
 | Repo invariant carve-out drift | Lazy webhook-driven re-validation; `stale` UI state with one-click repair. |
 | Provider-specific schema bloat | All Linear-only fields live in `session_issue_link_provider_state.state` jsonb. |
