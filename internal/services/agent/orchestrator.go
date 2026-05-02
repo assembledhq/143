@@ -191,6 +191,7 @@ type OrgStore interface {
 // IssueStore defines the issue read operations.
 type IssueStore interface {
 	GetByID(ctx context.Context, orgID, issueID uuid.UUID) (models.Issue, error)
+	UpdateStatus(ctx context.Context, orgID, issueID uuid.UUID, status string) error
 }
 
 // RepositoryStore defines the repository read operations.
@@ -1035,6 +1036,11 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 	// populated by the caller.
 	if err := o.sessions.UpdateStatus(ctx, run.OrgID, run.ID, "running"); err != nil {
 		return fmt.Errorf("update run status to running: %w", err)
+	}
+	if run.PrimaryIssueID != nil && o.issues != nil {
+		if err := o.issues.UpdateStatus(ctx, run.OrgID, *run.PrimaryIssueID, "in_progress"); err != nil {
+			log.Warn().Err(err).Str("issue_id", run.PrimaryIssueID.String()).Msg("failed to update primary issue status to in_progress")
+		}
 	}
 	// Fire the Linear state-transition signal exactly once per session, when
 	// the session actually starts running. Linking alone (paste a `ACS-1234`
