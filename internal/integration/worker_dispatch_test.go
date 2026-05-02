@@ -101,10 +101,11 @@ func TestIntegration_WorkerDispatch_PicksUpAndCallsHandler(t *testing.T) {
 		t.Fatal("worker did not dispatch the job within 5s — claim or wake path is broken")
 	}
 
-	// After dispatch returns nil, the worker writes status=success on the
-	// job row asynchronously. Poll briefly for the terminal state — the
-	// alternative (an unconditional time.Sleep) is the kind of test
-	// flakiness this whole suite is supposed to prevent.
+	// After dispatch returns nil, the worker writes status='succeeded' on
+	// the job row asynchronously (see MarkSucceededWithLease in jobs.go).
+	// Poll briefly for the terminal state — the alternative (an
+	// unconditional time.Sleep) is the kind of test flakiness this whole
+	// suite is supposed to prevent.
 	require.Eventually(t, func() bool {
 		var status string
 		err := pool.QueryRow(context.Background(),
@@ -112,8 +113,8 @@ func TestIntegration_WorkerDispatch_PicksUpAndCallsHandler(t *testing.T) {
 		if err != nil {
 			return false
 		}
-		return status == "success"
-	}, 3*time.Second, 25*time.Millisecond, "job did not transition to success after handler returned nil — ack/lease path is broken")
+		return status == "succeeded"
+	}, 3*time.Second, 25*time.Millisecond, "job did not transition to succeeded after handler returned nil — ack/lease path is broken")
 }
 
 // TestIntegration_WorkerDispatch_UnknownJobTypeDeadLetters covers the
