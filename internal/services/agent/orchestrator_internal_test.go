@@ -85,6 +85,10 @@ func (s testInternalIssueStore) GetByID(context.Context, uuid.UUID, uuid.UUID) (
 	return s.issue, nil
 }
 
+func (s testInternalIssueStore) UpdateStatus(context.Context, uuid.UUID, uuid.UUID, string) error {
+	return s.err
+}
+
 type testInternalRepoStore struct {
 	repo models.Repository
 	err  error
