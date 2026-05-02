@@ -6,21 +6,11 @@ import (
 	"strings"
 )
 
-// Legacy PM model aliases (kept for backward compatibility).
-const (
-	PMModelOpus   = "opus"
-	PMModelSonnet = "sonnet"
-	PMModelHaiku  = "haiku"
-)
-
-var legacyPMAliases = []string{PMModelOpus, PMModelSonnet, PMModelHaiku}
-
-// AvailablePMModels includes all models from every provider plus legacy aliases.
+// AvailablePMModels includes all models from every provider.
 // The PM agent can use any model from any configured provider.
 var AvailablePMModels []string
 
 func init() {
-	AvailablePMModels = append(AvailablePMModels, legacyPMAliases...)
 	AvailablePMModels = append(AvailablePMModels, AvailableClaudeCodeModels...)
 	AvailablePMModels = append(AvailablePMModels, AvailableGeminiCLIModels...)
 	AvailablePMModels = append(AvailablePMModels, AvailableCodexModels...)
@@ -58,13 +48,14 @@ var AvailablePiModels = []string{
 }
 
 const (
-	ClaudeCodeModelOpus     = "claude-opus-4-6"
+	ClaudeCodeModelOpus47   = "claude-opus-4-7"
+	ClaudeCodeModelOpus46   = "claude-opus-4-6"
 	ClaudeCodeModelSonnet46 = "claude-sonnet-4-6"
-	ClaudeCodeModelSonnet   = "claude-sonnet-4-5"
-	ClaudeCodeModelHaiku    = "claude-haiku-4-5"
+	ClaudeCodeModelSonnet45 = "claude-sonnet-4-5"
+	ClaudeCodeModelHaiku45  = "claude-haiku-4-5"
 )
 
-var AvailableClaudeCodeModels = []string{ClaudeCodeModelOpus, ClaudeCodeModelSonnet46, ClaudeCodeModelSonnet, ClaudeCodeModelHaiku}
+var AvailableClaudeCodeModels = []string{ClaudeCodeModelOpus47, ClaudeCodeModelOpus46, ClaudeCodeModelSonnet46, ClaudeCodeModelSonnet45, ClaudeCodeModelHaiku45}
 
 const (
 	GeminiCLIModelGemini31ProPreview  = "gemini-3.1-pro-preview"
@@ -81,6 +72,7 @@ var AvailableGeminiCLIModels = []string{
 }
 
 const (
+	CodexModelGPT55           = "gpt-5.5"
 	CodexModelGPT54           = "gpt-5.4"
 	CodexModelGPT54Mini       = "gpt-5.4-mini"
 	CodexModelGPT53Codex      = "gpt-5.3-codex"
@@ -90,6 +82,7 @@ const (
 )
 
 var AvailableCodexModels = []string{
+	CodexModelGPT55,
 	CodexModelGPT54,
 	CodexModelGPT54Mini,
 	CodexModelGPT53Codex,
@@ -108,12 +101,6 @@ func IsSupportedPMModel(model string) bool {
 }
 
 func IsSupportedClaudeCodeModel(model string) bool {
-	// Accept legacy PM aliases (opus, sonnet, haiku) for Claude Code.
-	for _, alias := range legacyPMAliases {
-		if model == alias {
-			return true
-		}
-	}
 	for _, supportedModel := range AvailableClaudeCodeModels {
 		if model == supportedModel {
 			return true
@@ -412,7 +399,7 @@ func ValidateSettingsModels(settings OrgSettings) error {
 		case AgentTypeClaudeCode:
 			model := envVars["ANTHROPIC_MODEL"]
 			if model != "" && !IsSupportedClaudeCodeModel(model) {
-				return fmt.Errorf("agent_config.claude_code.ANTHROPIC_MODEL must be one of: %v or %v", legacyPMAliases, AvailableClaudeCodeModels)
+				return fmt.Errorf("agent_config.claude_code.ANTHROPIC_MODEL must be one of: %v", AvailableClaudeCodeModels)
 			}
 		case AgentTypeGeminiCLI:
 			model := envVars["GEMINI_MODEL"]
