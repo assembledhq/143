@@ -10,7 +10,7 @@ import (
 func TestSettingsAuditDiff_NoChange(t *testing.T) {
 	t.Parallel()
 
-	raw := json.RawMessage(`{"pm_model":"sonnet","max_concurrent_runs":10}`)
+	raw := json.RawMessage(`{"pm_model":"claude-sonnet-4-5","max_concurrent_runs":10}`)
 	changes := settingsAuditDiff(raw, raw)
 	require.Empty(t, changes, "identical blobs must not produce changes")
 }
@@ -18,11 +18,11 @@ func TestSettingsAuditDiff_NoChange(t *testing.T) {
 func TestSettingsAuditDiff_ScalarChange(t *testing.T) {
 	t.Parallel()
 
-	old := json.RawMessage(`{"pm_model":"sonnet"}`)
-	new_ := json.RawMessage(`{"pm_model":"opus"}`)
+	old := json.RawMessage(`{"pm_model":"claude-sonnet-4-5"}`)
+	new_ := json.RawMessage(`{"pm_model":"claude-opus-4-7"}`)
 	changes := settingsAuditDiff(old, new_)
 	require.Len(t, changes, 1)
-	require.Equal(t, map[string]any{"before": "sonnet", "after": "opus"}, changes["pm_model"])
+	require.Equal(t, map[string]any{"before": "claude-sonnet-4-5", "after": "claude-opus-4-7"}, changes["pm_model"])
 }
 
 func TestSettingsAuditDiff_NestedChangeFlattened(t *testing.T) {
@@ -41,8 +41,8 @@ func TestSettingsAuditDiff_NestedChangeFlattened(t *testing.T) {
 func TestSettingsAuditDiff_KeyAdded(t *testing.T) {
 	t.Parallel()
 
-	old := json.RawMessage(`{"pm_model":"sonnet"}`)
-	new_ := json.RawMessage(`{"pm_model":"sonnet","llm_model":"gpt-5.4-mini"}`)
+	old := json.RawMessage(`{"pm_model":"claude-sonnet-4-5"}`)
+	new_ := json.RawMessage(`{"pm_model":"claude-sonnet-4-5","llm_model":"gpt-5.4-mini"}`)
 	changes := settingsAuditDiff(old, new_)
 	require.Len(t, changes, 1)
 	entry, ok := changes["llm_model"].(map[string]any)
@@ -54,8 +54,8 @@ func TestSettingsAuditDiff_KeyAdded(t *testing.T) {
 func TestSettingsAuditDiff_KeyRemoved(t *testing.T) {
 	t.Parallel()
 
-	old := json.RawMessage(`{"pm_model":"sonnet","llm_model":"gpt-5.4-mini"}`)
-	new_ := json.RawMessage(`{"pm_model":"sonnet"}`)
+	old := json.RawMessage(`{"pm_model":"claude-sonnet-4-5","llm_model":"gpt-5.4-mini"}`)
+	new_ := json.RawMessage(`{"pm_model":"claude-sonnet-4-5"}`)
 	changes := settingsAuditDiff(old, new_)
 	require.Len(t, changes, 1)
 	entry, ok := changes["llm_model"].(map[string]any)
@@ -69,12 +69,12 @@ func TestSettingsAuditDiff_EmptyOldBlob(t *testing.T) {
 
 	// First-ever settings write: every incoming key is a change.
 	old := json.RawMessage(nil)
-	new_ := json.RawMessage(`{"pm_model":"sonnet"}`)
+	new_ := json.RawMessage(`{"pm_model":"claude-sonnet-4-5"}`)
 	changes := settingsAuditDiff(old, new_)
 	require.Len(t, changes, 1)
 	entry := changes["pm_model"].(map[string]any)
 	require.Nil(t, entry["before"])
-	require.Equal(t, "sonnet", entry["after"])
+	require.Equal(t, "claude-sonnet-4-5", entry["after"])
 }
 
 func TestSettingsAuditDiff_DeeplyNestedAgentConfig(t *testing.T) {
