@@ -159,7 +159,7 @@ func (s *CodingCredentialStore) MirrorUserCredential(ctx context.Context, row mo
 	label := ""
 	if row.IsTeamDefault {
 		userID = nil
-		label = "Team default (migrated from " + row.UserID.String() + ")"
+		label = teamDefaultMirrorLabel(row.UserID)
 		uid := row.UserID
 		originUserID = &uid
 	} else {
@@ -275,6 +275,21 @@ func (s *CodingCredentialStore) deleteTeamDefaultMirror(ctx context.Context, org
 // org stack so explicit org rows still win the resolver. Tunable; mirrors a
 // rare path so contention with normal CRUD is negligible.
 const teamDefaultMirrorPriority = 9000
+
+// teamDefaultMirrorLabelPrefix and the format produced by
+// teamDefaultMirrorLabel must match the SQL data-copy migration in
+// migrations/000110_copy_coding_credentials.up.sql exactly. The format is
+// load-bearing for the natural-key conflict path
+// `(org_id, user_id, provider, label)` — both writers must produce the same
+// label so a row written by the migration and a row written by the mirror
+// land on the same slot. The marker column `team_default_origin_user_id`
+// guards row identity for cleanup; the label is for human readability and
+// natural-key alignment with the migration.
+const teamDefaultMirrorLabelPrefix = "Team default (migrated from "
+
+func teamDefaultMirrorLabel(originUserID uuid.UUID) string {
+	return teamDefaultMirrorLabelPrefix + originUserID.String() + ")"
+}
 
 type mirroredRow struct {
 	ID             uuid.UUID

@@ -423,7 +423,7 @@ func TestMirrorUserCredential_TeamDefaultLabelMatchesMigration(t *testing.T) {
 	//   created_by, last_verified_at, created_at, updated_at,
 	//   team_default_origin_user_id
 	// We only constrain `label` (index 4); everything else is AnyArg.
-	wantLabel := "Team default (migrated from " + userID.String() + ")"
+	wantLabel := teamDefaultMirrorLabel(userID)
 	mock.ExpectExec(`(?s)INSERT INTO coding_credentials.*ON CONFLICT \(id\) DO UPDATE`).
 		WithArgs(
 			pgxmock.AnyArg(),

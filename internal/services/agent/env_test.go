@@ -858,19 +858,32 @@ func TestAgentEnvResolveOrgProviderConfigAndCompatibility(t *testing.T) {
 	t.Run("filters incompatible coding provider configs", func(t *testing.T) {
 		t.Parallel()
 
-		require.Nil(t, compatibleCodingProviderConfig(models.ProviderAnthropic, models.AnthropicConfig{Subscription: &models.AnthropicSubscription{AccessToken: "sub", RefreshToken: "refresh"}}), "compatibleCodingProviderConfig should reject Anthropic subscriptions for API-key env injection")
-		require.NotNil(t, compatibleCodingProviderConfig(models.ProviderAnthropicSubscription, models.AnthropicSubscriptionConfig{AccessToken: "sub", RefreshToken: "refresh"}), "compatibleCodingProviderConfig should accept Anthropic subscription rows for the subscription twin")
-		require.NotNil(t, compatibleCodingProviderConfig(models.ProviderOpenAISubscription, models.OpenAISubscriptionConfig{AccessToken: "openai-sub", RefreshToken: "openai-refresh"}), "compatibleCodingProviderConfig should accept OpenAI subscription rows for the subscription twin")
-		require.NotNil(t, compatibleCodingProviderConfig(models.ProviderAnthropic, models.AnthropicConfig{APIKey: "sk-ant"}), "compatibleCodingProviderConfig should accept Anthropic API keys")
-		require.NotNil(t, compatibleCodingProviderConfig(models.ProviderOpenAI, models.OpenAIConfig{APIKey: "sk-openai"}), "compatibleCodingProviderConfig should accept OpenAI API keys")
-		require.NotNil(t, compatibleCodingProviderConfig(models.ProviderGemini, models.GeminiConfig{APIKey: "gem-key"}), "compatibleCodingProviderConfig should accept Gemini API keys")
-		require.NotNil(t, compatibleCodingProviderConfig(models.ProviderOpenRouter, models.OpenRouterConfig{APIKey: "sk-or"}), "compatibleCodingProviderConfig should accept OpenRouter API keys")
-		require.NotNil(t, compatibleCodingProviderConfig(models.ProviderAmp, models.AmpConfig{APIKey: "amp-key"}), "compatibleCodingProviderConfig should accept Amp API keys")
-		require.NotNil(t, compatibleCodingProviderConfig(models.ProviderPi, models.PiConfig{APIKey: "pi-key"}), "compatibleCodingProviderConfig should accept Pi API keys")
-		require.Nil(t, compatibleCodingProviderConfig(models.ProviderAmp, models.OpenAIConfig{APIKey: "sk-openai"}), "compatibleCodingProviderConfig should reject non-Amp configs for the Amp provider")
-		require.Nil(t, compatibleCodingProviderConfig(models.ProviderPi, models.OpenAIConfig{APIKey: "sk-openai"}), "compatibleCodingProviderConfig should reject non-Pi configs for the Pi provider")
-		require.Nil(t, compatibleCodingProviderConfig(models.ProviderOpenRouter, models.OpenRouterConfig{}), "compatibleCodingProviderConfig should reject empty OpenRouter configs")
-		require.Nil(t, compatibleCodingProviderConfig(models.ProviderName("unknown"), models.OpenAIConfig{APIKey: "sk"}), "compatibleCodingProviderConfig should reject unknown providers")
+		assertCompatible := func(provider models.ProviderName, cfg models.ProviderConfig, msg string) {
+			t.Helper()
+			out, ok := compatibleCodingProviderConfig(provider, cfg)
+			require.True(t, ok, msg)
+			require.NotNil(t, out, msg)
+		}
+		assertIncompatible := func(provider models.ProviderName, cfg models.ProviderConfig, msg string) {
+			t.Helper()
+			out, ok := compatibleCodingProviderConfig(provider, cfg)
+			require.False(t, ok, msg)
+			require.Nil(t, out, msg)
+		}
+
+		assertIncompatible(models.ProviderAnthropic, models.AnthropicConfig{Subscription: &models.AnthropicSubscription{AccessToken: "sub", RefreshToken: "refresh"}}, "compatibleCodingProviderConfig should reject Anthropic subscriptions for API-key env injection")
+		assertCompatible(models.ProviderAnthropicSubscription, models.AnthropicSubscriptionConfig{AccessToken: "sub", RefreshToken: "refresh"}, "compatibleCodingProviderConfig should accept Anthropic subscription rows for the subscription twin")
+		assertCompatible(models.ProviderOpenAISubscription, models.OpenAISubscriptionConfig{AccessToken: "openai-sub", RefreshToken: "openai-refresh"}, "compatibleCodingProviderConfig should accept OpenAI subscription rows for the subscription twin")
+		assertCompatible(models.ProviderAnthropic, models.AnthropicConfig{APIKey: "sk-ant"}, "compatibleCodingProviderConfig should accept Anthropic API keys")
+		assertCompatible(models.ProviderOpenAI, models.OpenAIConfig{APIKey: "sk-openai"}, "compatibleCodingProviderConfig should accept OpenAI API keys")
+		assertCompatible(models.ProviderGemini, models.GeminiConfig{APIKey: "gem-key"}, "compatibleCodingProviderConfig should accept Gemini API keys")
+		assertCompatible(models.ProviderOpenRouter, models.OpenRouterConfig{APIKey: "sk-or"}, "compatibleCodingProviderConfig should accept OpenRouter API keys")
+		assertCompatible(models.ProviderAmp, models.AmpConfig{APIKey: "amp-key"}, "compatibleCodingProviderConfig should accept Amp API keys")
+		assertCompatible(models.ProviderPi, models.PiConfig{APIKey: "pi-key"}, "compatibleCodingProviderConfig should accept Pi API keys")
+		assertIncompatible(models.ProviderAmp, models.OpenAIConfig{APIKey: "sk-openai"}, "compatibleCodingProviderConfig should reject non-Amp configs for the Amp provider")
+		assertIncompatible(models.ProviderPi, models.OpenAIConfig{APIKey: "sk-openai"}, "compatibleCodingProviderConfig should reject non-Pi configs for the Pi provider")
+		assertIncompatible(models.ProviderOpenRouter, models.OpenRouterConfig{}, "compatibleCodingProviderConfig should reject empty OpenRouter configs")
+		assertIncompatible(models.ProviderName("unknown"), models.OpenAIConfig{APIKey: "sk"}, "compatibleCodingProviderConfig should reject unknown providers")
 	})
 }
 

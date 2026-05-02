@@ -85,8 +85,12 @@ type pickRecord struct {
 const pickTrackerTTL = 5 * time.Minute
 
 // pickTrackerMax bounds the recentPicks map so it cannot grow unboundedly
-// under churn. When exceeded, expired entries are swept; if still over the
-// limit, the oldest record is dropped.
+// under churn. When exceeded, fully-expired (>pickTrackerTTL old) entries
+// are swept; if still over the limit, half-aged (>pickTrackerTTL/2) entries
+// are swept too; a single-oldest backstop runs only if both passes left the
+// map full. Batch eviction keeps recordPick amortized cheap under sustained
+// load on >4096 distinct (org, user, provider) tuples — a single-oldest
+// sweep on every insert would walk the whole map for every record.
 const pickTrackerMax = 4096
 
 // AgentEnvDeps holds the dependencies for constructing an AgentEnv. Named
@@ -169,13 +173,17 @@ func (e *AgentEnv) recordPick(orgID uuid.UUID, userID *uuid.UUID, provider model
 	if e.recentPicks == nil {
 		e.recentPicks = make(map[pickKey]pickRecord)
 	}
+	now := time.Now()
 	if len(e.recentPicks) >= pickTrackerMax {
-		e.evictExpiredPicksLocked(time.Now())
+		e.evictAgedPicksLocked(now, pickTrackerTTL)
+	}
+	if len(e.recentPicks) >= pickTrackerMax {
+		e.evictAgedPicksLocked(now, pickTrackerTTL/2)
 	}
 	if len(e.recentPicks) >= pickTrackerMax {
 		e.evictOldestPickLocked()
 	}
-	e.recentPicks[key] = pickRecord{credID: credID, at: time.Now()}
+	e.recentPicks[key] = pickRecord{credID: credID, at: now}
 }
 
 func (e *AgentEnv) lookupRecentPick(orgID uuid.UUID, userID *uuid.UUID, provider models.ProviderName) (uuid.UUID, bool) {
@@ -196,9 +204,14 @@ func (e *AgentEnv) lookupRecentPick(orgID uuid.UUID, userID *uuid.UUID, provider
 	return rec.credID, true
 }
 
-func (e *AgentEnv) evictExpiredPicksLocked(now time.Time) {
+// evictAgedPicksLocked drops every entry older than the supplied threshold.
+// recordPick first calls this with the full TTL (drops expired entries that
+// can never be picked again), then under continued pressure with TTL/2 to
+// shed half-aged entries — far cheaper than calling evictOldestPickLocked
+// per insert, which walks the whole map to drop a single record.
+func (e *AgentEnv) evictAgedPicksLocked(now time.Time, olderThan time.Duration) {
 	for k, v := range e.recentPicks {
-		if now.Sub(v.at) > pickTrackerTTL {
+		if now.Sub(v.at) > olderThan {
 			delete(e.recentPicks, k)
 		}
 	}
@@ -568,7 +581,7 @@ func (e *AgentEnv) pickFromCodingProviderSet(ctx context.Context, orgID uuid.UUI
 		if picked == nil {
 			return nil, true
 		}
-		if cfg := compatibleCodingProviderConfig(picked.Provider, picked.Config); cfg != nil {
+		if cfg, ok := compatibleCodingProviderConfig(picked.Provider, picked.Config); ok {
 			e.recordPick(orgID, userID, picked.Provider, picked.ID)
 			if picked.Provider != requestedProvider {
 				e.recordPick(orgID, userID, requestedProvider, picked.ID)
@@ -587,7 +600,7 @@ func (e *AgentEnv) pickFromCodingProviderSet(ctx context.Context, orgID uuid.UUI
 		if cred.Status != models.CodingCredentialStatusActive {
 			continue
 		}
-		if cfg := compatibleCodingProviderConfig(cred.Provider, cred.Config); cfg != nil {
+		if cfg, ok := compatibleCodingProviderConfig(cred.Provider, cred.Config); ok {
 			e.recordPick(orgID, userID, cred.Provider, cred.ID)
 			if cred.Provider != requestedProvider {
 				e.recordPick(orgID, userID, requestedProvider, cred.ID)
@@ -706,7 +719,7 @@ func (e *AgentEnv) resolveOrgProviderConfig(ctx context.Context, orgID uuid.UUID
 				if !legacyStatusActive(cred.Status) {
 					continue
 				}
-				if cfg := compatibleCodingProviderConfig(provider, cred.Config); cfg != nil {
+				if cfg, ok := compatibleCodingProviderConfig(provider, cred.Config); ok {
 					return cfg, cred.ID, true
 				}
 			}
@@ -715,7 +728,7 @@ func (e *AgentEnv) resolveOrgProviderConfig(ctx context.Context, orgID uuid.UUID
 
 	if cred, err := e.credentials.Get(ctx, orgID, provider); err == nil && cred != nil && legacyStatusActive(cred.Status) {
 		if provider.IsCodingAgentProvider() {
-			if cfg := compatibleCodingProviderConfig(provider, cred.Config); cfg != nil {
+			if cfg, ok := compatibleCodingProviderConfig(provider, cred.Config); ok {
 				return cfg, cred.ID, true
 			}
 			return nil, uuid.Nil, false
@@ -726,24 +739,32 @@ func (e *AgentEnv) resolveOrgProviderConfig(ctx context.Context, orgID uuid.UUID
 	return nil, uuid.Nil, false
 }
 
-func compatibleCodingProviderConfig(provider models.ProviderName, cfg models.ProviderConfig) models.ProviderConfig {
+// compatibleCodingProviderConfig returns the runtime ProviderConfig that
+// matches the given (provider, stored config) pair, or (nil, false) when the
+// pair is not usable: the provider is unknown, the type assertion fails, the
+// blob is missing required credentials, or the row is structurally
+// incompatible (e.g. an Anthropic API-key row with a Subscription set).
+//
+// The explicit `ok` return makes the unknown-provider case impossible to
+// confuse with the "valid provider but empty config" case at call sites.
+func compatibleCodingProviderConfig(provider models.ProviderName, cfg models.ProviderConfig) (models.ProviderConfig, bool) {
 	switch provider {
 	case models.ProviderAnthropic:
 		anthropic, ok := cfg.(models.AnthropicConfig)
 		if !ok || anthropic.APIKey == "" || anthropic.Subscription != nil {
-			return nil
+			return nil, false
 		}
-		return anthropic
+		return anthropic, true
 	case models.ProviderOpenAI:
 		openAI, ok := cfg.(models.OpenAIConfig)
 		if !ok || openAI.APIKey == "" {
-			return nil
+			return nil, false
 		}
-		return openAI
+		return openAI, true
 	case models.ProviderAnthropicSubscription:
 		sub, ok := cfg.(models.AnthropicSubscriptionConfig)
 		if !ok || sub.AccessToken == "" || sub.RefreshToken == "" {
-			return nil
+			return nil, false
 		}
 		// Drop PKCE-only fields (State, CodeVerifier, AuthorizeURL) when
 		// constructing the runtime config. They are pre-completion artifacts;
@@ -757,11 +778,11 @@ func compatibleCodingProviderConfig(provider models.ProviderName, cfg models.Pro
 			AccountType:   sub.AccountType,
 			RateLimitTier: sub.RateLimitTier,
 			Scopes:        sub.Scopes,
-		}}
+		}}, true
 	case models.ProviderOpenAISubscription:
 		sub, ok := cfg.(models.OpenAISubscriptionConfig)
 		if !ok || sub.AccessToken == "" || sub.RefreshToken == "" {
-			return nil
+			return nil, false
 		}
 		// Strip device-code pending fields (DeviceAuthID, UserCode,
 		// VerificationURI, PollInterval) when constructing the runtime
@@ -775,33 +796,33 @@ func compatibleCodingProviderConfig(provider models.ProviderName, cfg models.Pro
 			IDToken:      sub.IDToken,
 			ExpiresAt:    sub.ExpiresAt,
 			AccountType:  sub.AccountType,
-		}
+		}, true
 	case models.ProviderGemini:
 		gemini, ok := cfg.(models.GeminiConfig)
 		if !ok || gemini.APIKey == "" {
-			return nil
+			return nil, false
 		}
-		return gemini
+		return gemini, true
 	case models.ProviderOpenRouter:
 		openRouter, ok := cfg.(models.OpenRouterConfig)
 		if !ok || openRouter.APIKey == "" {
-			return nil
+			return nil, false
 		}
-		return openRouter
+		return openRouter, true
 	case models.ProviderAmp:
 		amp, ok := cfg.(models.AmpConfig)
 		if !ok || amp.APIKey == "" {
-			return nil
+			return nil, false
 		}
-		return amp
+		return amp, true
 	case models.ProviderPi:
 		pi, ok := cfg.(models.PiConfig)
 		if !ok || pi.APIKey == "" {
-			return nil
+			return nil, false
 		}
-		return pi
+		return pi, true
 	default:
-		return nil
+		return nil, false
 	}
 }
 
