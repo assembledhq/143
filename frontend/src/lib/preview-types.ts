@@ -41,7 +41,8 @@ export const PREVIEW_ERROR_CODES = {
   // 500 — internal failure while hydrating (restore error, provider
   // outage, DB write failure). Generic; details in the underlying message.
   HYDRATE_FAILED: "PREVIEW_HYDRATE_FAILED",
-  // 422 — the repo has no committed .143/preview.json and the client
+  // 422 — the repo has no committed .143/config.json with a preview
+  // section and the client
   // didn't supply an explicit config, so the backend has nothing to launch.
   // User fix is to commit the config file (see docs/guides/previews.md).
   NO_CONFIG: "PREVIEW_NO_CONFIG",
@@ -62,7 +63,7 @@ export const PREVIEW_ERROR_CODES = {
   // 422 — an application service was launched but its readiness probe
   // never passed within the configured timeout. The service likely
   // crashed at boot or is bound to a different port than it declares in
-  // .143/preview.json.
+  // .143/config.json.
   SERVICE_NOT_READY: "PREVIEW_SERVICE_NOT_READY",
 } as const;
 
