@@ -4,8 +4,7 @@
     "primary": "frontend",
     "services": {
       "frontend": {
-        "command": ["npm", "run", "dev"],
-        "cwd": "frontend",
+        "command": ["sh", ".143/preview-frontend.sh"],
         "port": 3000,
         "env": {
           "API_PROXY_TARGET": "http://localhost:8080",
