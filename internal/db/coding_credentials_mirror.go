@@ -60,7 +60,15 @@ type CodingCredentialMirror interface {
 }
 
 // MirrorOrgCredential implements CodingCredentialMirror against the unified store.
-func (s *CodingCredentialStore) MirrorOrgCredential(ctx context.Context, row models.OrgCredential, decryptedCfg models.ProviderConfig) error {
+//
+// Failure counting: every public Mirror* method increments mirrorFailureTotal
+// exactly once when the returned error is non-nil, via a deferred check on the
+// named return value. This keeps `MirrorFailureCount` symmetric across the org
+// and user surfaces — and it leaves the package-private helpers
+// (mirrorDelete/mirrorDisable/upsertMirroredRow/deleteTeamDefaultMirror) free
+// to return errors without each remembering to bump the counter.
+func (s *CodingCredentialStore) MirrorOrgCredential(ctx context.Context, row models.OrgCredential, decryptedCfg models.ProviderConfig) (err error) {
+	defer s.mirrorFailureOnError(&err)
 	// Surface dual-set Anthropic rows so a malformed migration row doesn't
 	// silently lose its API-key half. AnthropicConfig.Validate enforces
 	// mutual exclusion at the write path, but rows present from earlier
@@ -98,33 +106,27 @@ func (s *CodingCredentialStore) MirrorOrgCredential(ctx context.Context, row mod
 // MirrorOrgCredentialDelete removes a mirrored org credential by legacy id.
 //
 // lint:allow-no-orgid reason="legacy id was already scope-checked by the calling OrgCredentialStore method; mirror loads scope back via RETURNING for cache invalidation"
-func (s *CodingCredentialStore) MirrorOrgCredentialDelete(ctx context.Context, id uuid.UUID) error {
-	if err := s.mirrorDelete(ctx, id); err != nil {
-		s.recordMirrorFailure()
-		return err
-	}
-	return nil
+func (s *CodingCredentialStore) MirrorOrgCredentialDelete(ctx context.Context, id uuid.UUID) (err error) {
+	defer s.mirrorFailureOnError(&err)
+	return s.mirrorDelete(ctx, id)
 }
 
 // MirrorOrgCredentialDisable disables a mirrored org credential by legacy id.
 //
 // lint:allow-no-orgid reason="legacy id was already scope-checked by the calling OrgCredentialStore method; mirror loads scope back via RETURNING for cache invalidation"
-func (s *CodingCredentialStore) MirrorOrgCredentialDisable(ctx context.Context, id uuid.UUID) error {
-	if err := s.mirrorDisable(ctx, id); err != nil {
-		s.recordMirrorFailure()
-		return err
-	}
-	return nil
+func (s *CodingCredentialStore) MirrorOrgCredentialDisable(ctx context.Context, id uuid.UUID) (err error) {
+	defer s.mirrorFailureOnError(&err)
+	return s.mirrorDisable(ctx, id)
 }
 
-func (s *CodingCredentialStore) MirrorUserCredential(ctx context.Context, row models.UserCredential, decryptedCfg models.ProviderConfig) error {
+func (s *CodingCredentialStore) MirrorUserCredential(ctx context.Context, row models.UserCredential, decryptedCfg models.ProviderConfig) (err error) {
+	defer s.mirrorFailureOnError(&err)
 	provider, cfg, ok := mirrorProviderForUser(row.Provider, decryptedCfg)
 	if !ok {
 		return nil // not a coding provider
 	}
 	encrypted, err := s.marshalAndEncrypt(cfg)
 	if err != nil {
-		s.recordMirrorFailure()
 		return fmt.Errorf("mirror user credential: %w", err)
 	}
 
@@ -136,7 +138,6 @@ func (s *CodingCredentialStore) MirrorUserCredential(ctx context.Context, row mo
 	// row in coding_credentials.
 	if !row.IsTeamDefault {
 		if err := s.deleteTeamDefaultMirror(ctx, row.OrgID, row.UserID, provider); err != nil {
-			s.recordMirrorFailure()
 			return fmt.Errorf("clear stale team default mirror: %w", err)
 		}
 	}
@@ -162,7 +163,7 @@ func (s *CodingCredentialStore) MirrorUserCredential(ctx context.Context, row mo
 		priority = teamDefaultMirrorPriority
 	}
 
-	if err := s.upsertMirroredRow(ctx, mirroredRow{
+	return s.upsertMirroredRow(ctx, mirroredRow{
 		ID:             row.ID,
 		OrgID:          row.OrgID,
 		UserID:         userID,
@@ -175,11 +176,7 @@ func (s *CodingCredentialStore) MirrorUserCredential(ctx context.Context, row mo
 		LastVerifiedAt: row.LastVerifiedAt,
 		CreatedAt:      row.CreatedAt,
 		UpdatedAt:      row.UpdatedAt,
-	}); err != nil {
-		s.recordMirrorFailure()
-		return err
-	}
-	return nil
+	})
 }
 
 // MirrorUserCredentialDelete removes a mirrored user credential by legacy id
@@ -187,13 +184,12 @@ func (s *CodingCredentialStore) MirrorUserCredential(ctx context.Context, row mo
 // user. The migration SQL mints fresh uuids for team-default rows, so the
 // id-keyed delete alone leaves them orphaned — see § "Team-default cascade"
 // in the design doc.
-func (s *CodingCredentialStore) MirrorUserCredentialDelete(ctx context.Context, id, orgID, userID uuid.UUID, provider models.ProviderName) error {
+func (s *CodingCredentialStore) MirrorUserCredentialDelete(ctx context.Context, id, orgID, userID uuid.UUID, provider models.ProviderName) (err error) {
+	defer s.mirrorFailureOnError(&err)
 	if err := s.mirrorDelete(ctx, id); err != nil {
-		s.recordMirrorFailure()
 		return err
 	}
 	if err := s.deleteTeamDefaultMirror(ctx, orgID, userID, provider); err != nil {
-		s.recordMirrorFailure()
 		return fmt.Errorf("delete team default mirror: %w", err)
 	}
 	return nil
@@ -204,16 +200,28 @@ func (s *CodingCredentialStore) MirrorUserCredentialDelete(ctx context.Context, 
 // migration. The team-default cleanup is a hard delete (not a status flip)
 // because a stale "Team default (migrated…)" row in 'disabled' state is just
 // noise — the legacy row is gone, the row should not be visible at all.
-func (s *CodingCredentialStore) MirrorUserCredentialDisable(ctx context.Context, id, orgID, userID uuid.UUID, provider models.ProviderName) error {
+func (s *CodingCredentialStore) MirrorUserCredentialDisable(ctx context.Context, id, orgID, userID uuid.UUID, provider models.ProviderName) (err error) {
+	defer s.mirrorFailureOnError(&err)
 	if err := s.mirrorDisable(ctx, id); err != nil {
-		s.recordMirrorFailure()
 		return err
 	}
 	if err := s.deleteTeamDefaultMirror(ctx, orgID, userID, provider); err != nil {
-		s.recordMirrorFailure()
 		return fmt.Errorf("disable cascade: clear team default mirror: %w", err)
 	}
 	return nil
+}
+
+// mirrorFailureOnError increments the mirror-failure counter when the supplied
+// error pointer references a non-nil error at function exit. Wired via defer
+// at the top of every public Mirror* method so each call records exactly one
+// failure on any error path — moving the count into a single named-return
+// hook avoids the historical bug where one branch (e.g. marshalAndEncrypt
+// failure inside MirrorOrgCredential) silently skipped the increment.
+func (s *CodingCredentialStore) mirrorFailureOnError(err *error) {
+	if err == nil || *err == nil {
+		return
+	}
+	s.recordMirrorFailure()
 }
 
 // deleteTeamDefaultMirror drops any org-scoped mirror row whose deterministic

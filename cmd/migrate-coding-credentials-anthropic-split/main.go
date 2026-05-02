@@ -249,46 +249,18 @@ func runBatch(
 
 	splits := 0
 	for _, r := range batch {
-		plaintext, err := decryptCfg(cryptoSvc, r.Config)
+		outcome, err := evaluateRowForSplit(cryptoSvc, r.Config)
 		if err != nil {
-			return 0, 0, createdAtCursor, idCursor, fmt.Errorf("decrypt %s: %w", r.ID, err)
+			return 0, 0, createdAtCursor, idCursor, fmt.Errorf("%s: %w", r.ID, err)
 		}
-		var cfg models.AnthropicConfig
-		if err := json.Unmarshal(plaintext, &cfg); err != nil {
-			return 0, 0, createdAtCursor, idCursor, fmt.Errorf("unmarshal %s: %w", r.ID, err)
-		}
-		if cfg.Subscription == nil {
-			// Pure API-key row — leave alone.
+		if outcome.Skip {
 			continue
 		}
-
-		// Defensive: AnthropicConfig.Validate has rejected dual-set rows
-		// (APIKey != "" && Subscription != nil) since the validator
-		// landed, so this branch should be unreachable in healthy data.
-		// If we still find one (e.g. a row written by a buggy code path
-		// before validation, or hand-edited DB state), the rewrite below
-		// preserves the subscription half but drops the API-key half —
-		// the design splits each method into its own row, and writing a
-		// phantom API-key row the user never explicitly added would
-		// surprise the operator more than the drop. Log loudly so the
-		// drop is visible in deploy telemetry; an operator can recover
-		// the lost key from a backup if needed.
-		if cfg.APIKey != "" {
+		if outcome.HadDualSet {
 			fmt.Fprintf(os.Stderr,
 				"[anthropic-split] WARNING: dual-set anthropic row %s carries both APIKey and Subscription; preserving subscription, dropping API key\n",
 				r.ID,
 			)
-		}
-
-		// Subscription row: rewrite provider+config in place.
-		newCfg := models.FromAnthropicSubscription(*cfg.Subscription)
-		newPlain, err := json.Marshal(newCfg)
-		if err != nil {
-			return 0, 0, createdAtCursor, idCursor, fmt.Errorf("marshal split %s: %w", r.ID, err)
-		}
-		newCipher, err := encryptCfg(cryptoSvc, newPlain)
-		if err != nil {
-			return 0, 0, createdAtCursor, idCursor, fmt.Errorf("encrypt split %s: %w", r.ID, err)
 		}
 
 		if dryRun {
@@ -300,7 +272,7 @@ func runBatch(
 			`UPDATE coding_credentials
 			 SET provider = 'anthropic_subscription', config = $1, updated_at = now()
 			 WHERE id = $2 AND provider = 'anthropic'`,
-			newCipher, r.ID,
+			outcome.NewCipher, r.ID,
 		)
 		if err != nil {
 			return 0, 0, createdAtCursor, idCursor, fmt.Errorf("rewrite %s: %w", r.ID, err)
@@ -332,4 +304,59 @@ func encryptCfg(svc *crypto.Service, data []byte) ([]byte, error) {
 		return svc.Encrypt(data)
 	}
 	return crypto.DevEncrypt(data), nil
+}
+
+// splitOutcome describes what runBatch should do with a single row's
+// encrypted config. Decoupling the decision from the DB write keeps the
+// per-row JSON / dual-set logic unit-testable without a database.
+type splitOutcome struct {
+	// Skip is true for pure API-key rows that don't need rewriting. NewCipher
+	// and HadDualSet are zero-valued in that case.
+	Skip bool
+	// NewCipher is the re-encrypted AnthropicSubscriptionConfig payload that
+	// replaces the legacy AnthropicConfig blob on a subscription row.
+	NewCipher []byte
+	// HadDualSet flags rows that carried both APIKey and Subscription. The
+	// rewrite preserves the subscription and drops the key; runBatch logs a
+	// warning so the drop is visible in deploy telemetry.
+	HadDualSet bool
+}
+
+// evaluateRowForSplit decides what to do with one anthropic row's blob.
+// Pure over (cryptoSvc, config bytes); returns the outcome the caller should
+// apply. Errors wrap the underlying decrypt / unmarshal / re-encrypt failure.
+func evaluateRowForSplit(cryptoSvc *crypto.Service, config []byte) (splitOutcome, error) {
+	plaintext, err := decryptCfg(cryptoSvc, config)
+	if err != nil {
+		return splitOutcome{}, fmt.Errorf("decrypt: %w", err)
+	}
+	var cfg models.AnthropicConfig
+	if err := json.Unmarshal(plaintext, &cfg); err != nil {
+		return splitOutcome{}, fmt.Errorf("unmarshal: %w", err)
+	}
+	if cfg.Subscription == nil {
+		// Pure API-key row — leave alone.
+		return splitOutcome{Skip: true}, nil
+	}
+	// Defensive: AnthropicConfig.Validate has rejected dual-set rows
+	// (APIKey != "" && Subscription != nil) since the validator landed, so
+	// this branch should be unreachable in healthy data. If we still find
+	// one (e.g. a row written by a buggy code path before validation, or
+	// hand-edited DB state), the rewrite preserves the subscription half but
+	// drops the API-key half — the design splits each method into its own
+	// row, and writing a phantom API-key row the user never explicitly
+	// added would surprise the operator more than the drop. The caller logs
+	// loudly so the drop is visible in deploy telemetry; an operator can
+	// recover the lost key from a backup if needed.
+	hadDualSet := cfg.APIKey != ""
+	newCfg := models.FromAnthropicSubscription(*cfg.Subscription)
+	newPlain, err := json.Marshal(newCfg)
+	if err != nil {
+		return splitOutcome{}, fmt.Errorf("marshal split: %w", err)
+	}
+	newCipher, err := encryptCfg(cryptoSvc, newPlain)
+	if err != nil {
+		return splitOutcome{}, fmt.Errorf("encrypt split: %w", err)
+	}
+	return splitOutcome{NewCipher: newCipher, HadDualSet: hadDualSet}, nil
 }

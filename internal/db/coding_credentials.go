@@ -1188,6 +1188,13 @@ func (s *CodingCredentialStore) invalidate(scope models.Scope, provider models.P
 	// An org-row mutation can affect every personal user's resolved view.
 	// We don't track individual user_ids in the cache key for invalidation,
 	// so a coarse scope-level wipe is the safe thing to do for org changes.
+	//
+	// The personal branch only invalidates the creating user's key on purpose:
+	// a personal-scoped row is never visible to another user's resolver, so
+	// no broader wipe is needed. If a future change ever lets one user's
+	// personal row affect another user's resolution (e.g. introducing a
+	// "team default" flag on the personal table), this invalidate must also
+	// fan out — otherwise stale cached resolutions outlive the write.
 	if scope.IsOrg() {
 		s.resolverCache.invalidateOrg(scope.OrgID, provider)
 	}

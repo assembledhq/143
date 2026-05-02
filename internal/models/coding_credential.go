@@ -1,7 +1,6 @@
 package models
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -393,20 +392,27 @@ func FromAnthropicSubscription(s AnthropicSubscription) AnthropicSubscriptionCon
 // accepts only the providers the unified coding_credentials table stores.
 // Returns an error for non-coding-agent providers (GitHub/Sentry/Linear/etc.)
 // — those still live in org_credentials and are read through the legacy path.
+//
+// The allowlist is the load-bearing part: the unified table's CHECK constraint
+// is on `status`, not `provider`, so an out-of-band INSERT under a stray
+// provider name (e.g. 'sentry') would otherwise round-trip silently through
+// decryptRow → ParseProviderConfig → typed config. Gating reads to the
+// known coding-provider set turns that into a typed error instead.
+//
+// ProviderOpenAIChatGPT is intentionally excluded: the SQL data-copy migration
+// renames it to ProviderOpenAISubscription on insert, so coding_credentials
+// rows must never carry the legacy spelling.
 func ParseCodingProviderConfig(provider ProviderName, data []byte) (ProviderConfig, error) {
 	switch provider {
-	case ProviderAnthropicSubscription:
-		var cfg AnthropicSubscriptionConfig
-		if err := json.Unmarshal(data, &cfg); err != nil {
-			return nil, fmt.Errorf("invalid anthropic_subscription config: %w", err)
-		}
-		return cfg, nil
-	case ProviderOpenAISubscription:
-		var cfg OpenAISubscriptionConfig
-		if err := json.Unmarshal(data, &cfg); err != nil {
-			return nil, fmt.Errorf("invalid openai_subscription config: %w", err)
-		}
-		return cfg, nil
+	case ProviderAnthropic,
+		ProviderAnthropicSubscription,
+		ProviderOpenAI,
+		ProviderOpenAISubscription,
+		ProviderGemini,
+		ProviderAmp,
+		ProviderPi,
+		ProviderOpenRouter:
+		return ParseProviderConfig(provider, data)
 	}
-	return ParseProviderConfig(provider, data)
+	return nil, fmt.Errorf("provider %q is not a coding-credential provider", provider)
 }

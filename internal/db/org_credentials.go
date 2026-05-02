@@ -625,7 +625,7 @@ func (s *OrgCredentialStore) Disable(ctx context.Context, orgID uuid.UUID, provi
 	// is consistent: a concurrent insert at this label will not appear in our
 	// snapshot, but any newly-inserted row is already mirrored by its own write
 	// path, so the mirror does not need to know about it here.
-	mirrorIDs := s.findOrgCredentialIDsForMirror(ctx, orgID, provider, "", false)
+	mirrorIDs := s.findOrgCredentialIDsForMirror(ctx, orgID, provider, false)
 	query := `UPDATE org_credentials SET status = 'disabled', updated_at = now() WHERE org_id = @org_id AND provider = @provider AND label = ''`
 	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
 		"org_id":   orgID,
@@ -643,10 +643,10 @@ func (s *OrgCredentialStore) Disable(ctx context.Context, orgID uuid.UUID, provi
 }
 
 // findOrgCredentialIDsForMirror returns the ids that match the given (provider,
-// label-shape) so the caller can mirror a bulk operation. labelEmpty=true means
-// "label = ”"; labelEmpty=false means "label != ”". Errors are swallowed —
-// the mirror is best-effort.
-func (s *OrgCredentialStore) findOrgCredentialIDsForMirror(ctx context.Context, orgID uuid.UUID, provider models.ProviderName, _ string, labelNotEmpty bool) []uuid.UUID {
+// label-shape) so the caller can mirror a bulk operation. labelNotEmpty=false
+// means "label = ”"; labelNotEmpty=true means "label != ”". Errors are
+// swallowed — the mirror is best-effort.
+func (s *OrgCredentialStore) findOrgCredentialIDsForMirror(ctx context.Context, orgID uuid.UUID, provider models.ProviderName, labelNotEmpty bool) []uuid.UUID {
 	clause := "label = ''"
 	if labelNotEmpty {
 		clause = "label != ''"
@@ -688,7 +688,7 @@ func (s *OrgCredentialStore) HasActiveLabeled(ctx context.Context, orgID uuid.UU
 // an API-key row (label=”) with subscription rows (label!=”) and the
 // caller wants to clear only the subscriptions.
 func (s *OrgCredentialStore) DisableLabeled(ctx context.Context, orgID uuid.UUID, provider models.ProviderName) error {
-	mirrorIDs := s.findOrgCredentialIDsForMirror(ctx, orgID, provider, "", true)
+	mirrorIDs := s.findOrgCredentialIDsForMirror(ctx, orgID, provider, true)
 	query := `UPDATE org_credentials SET status = 'disabled', updated_at = now() WHERE org_id = @org_id AND provider = @provider AND label != ''`
 	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
 		"org_id":   orgID,

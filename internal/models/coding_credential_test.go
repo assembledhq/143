@@ -199,10 +199,11 @@ func TestParseCodingProviderConfig(t *testing.T) {
 		}
 	})
 
-	t.Run("falls back to ParseProviderConfig for non-coding", func(t *testing.T) {
+	t.Run("anthropic api key still parses through coding allowlist", func(t *testing.T) {
 		t.Parallel()
 
-		// Anthropic API key path through the legacy struct still works via fallback.
+		// ProviderAnthropic is a coding provider (carries either an API key or
+		// the embedded Subscription), so the strict path still accepts it.
 		original := AnthropicConfig{APIKey: "sk-ant-1234567890"}
 		data, _ := json.Marshal(original)
 		got, err := ParseCodingProviderConfig(ProviderAnthropic, data)
@@ -211,6 +212,34 @@ func TestParseCodingProviderConfig(t *testing.T) {
 		}
 		if _, ok := got.(AnthropicConfig); !ok {
 			t.Fatalf("expected AnthropicConfig, got %T", got)
+		}
+	})
+
+	t.Run("rejects non-coding providers", func(t *testing.T) {
+		t.Parallel()
+
+		// coding_credentials must never carry GitHub/Sentry/Linear/etc rows —
+		// those live in org_credentials. The unified table's CHECK is on
+		// status only, so this allowlist is the only thing that catches a
+		// stray non-coding INSERT at read time.
+		nonCoding := []ProviderName{
+			ProviderGitHubApp,
+			ProviderGitHubAppUser,
+			ProviderGitHubOAuth,
+			ProviderSentry,
+			ProviderLinear,
+			ProviderSlack,
+			ProviderNotion,
+			// ProviderOpenAIChatGPT is renamed to ProviderOpenAISubscription
+			// by the SQL data-copy migration, so it must never appear in a
+			// coding_credentials row either.
+			ProviderOpenAIChatGPT,
+		}
+		for _, p := range nonCoding {
+			_, err := ParseCodingProviderConfig(p, []byte("{}"))
+			if err == nil {
+				t.Fatalf("ParseCodingProviderConfig should reject non-coding provider %q", p)
+			}
 		}
 	})
 }
