@@ -84,6 +84,17 @@ func RegisterHandlers(w *Worker, stores *Stores, services *Services, retentionCf
 		w.Register("link_linear_issue", newLinkLinearIssueHandler(services.Linear, logger))
 		w.Register("refresh_linear_team_keys", newRefreshLinearTeamKeysHandler(services.Linear, logger))
 		w.Register("linear_milestone", newLinearMilestoneHandler(stores, services.Linear, logger))
+		// linear_agent_event handler — wires the inbound agent path
+		// (assign / @-mention triggers a 143 session). Returns nil when
+		// the agent stores aren't wired or required services are missing,
+		// in which case the registration is a silent no-op (the
+		// dispatcher won't even produce these jobs without the same
+		// stores being wired upstream).
+		if services.LinearAgentDeps != nil {
+			if h := newLinearAgentEventHandler(*services.LinearAgentDeps); h != nil {
+				w.Register("linear_agent_event", h)
+			}
+		}
 	}
 	if stores.EvalRuns != nil && stores.EvalTasks != nil {
 		w.Register("run_eval", newRunEvalHandler(stores, services, logger))
@@ -167,6 +178,11 @@ type Services struct {
 	GitHub          agent.GitHubTokenProvider     // nil-safe: needed for eval repo cloning
 	TitleService    *services.SessionTitleService // nil-safe: session title regeneration
 	Linear          *linear.Service               // nil-safe: Linear session-linking disabled if nil
+	// LinearAgentDeps wires the inbound agent feature (assign / @-mention
+	// triggers a 143 session). Nil when the feature flag is off or the
+	// agent stores aren't constructed; the worker simply won't register
+	// the linear_agent_event handler in that case.
+	LinearAgentDeps *LinearAgentEventHandlerDeps
 	// SandboxAuthShutdown drains the per-session GitHub credential socket
 	// listeners. nil when no SandboxAuthSocketDir is configured (local
 	// dev). Called from cmd/server graceful shutdown after the API drains
@@ -2709,6 +2725,15 @@ func newLinearMilestoneHandler(stores *Stores, svc *linear.Service, logger zerol
 			if retry := mapLinearWriteErrorToRetry(err); retry != nil {
 				return retry
 			}
+		}
+		// HandleAgentMilestone is a no-op for sessions not triggered through
+		// the inbound agent path. It's deliberately last + best-effort: the
+		// durable handles (attachment + rolling comment) are what
+		// HandleMilestone wrote above, and an agent-stream emit failure
+		// must not retry-cascade the milestone job and risk re-firing the
+		// idempotent-but-not-free attachment update.
+		if err := svc.HandleAgentMilestone(ctx, in); err != nil {
+			logger.Warn().Err(err).Str("session_id", sessionID.String()).Msg("HandleAgentMilestone failed")
 		}
 		return nil
 	}

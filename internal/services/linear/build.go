@@ -133,6 +133,8 @@ func Build(deps BuildDeps) *Service {
 		Pool:              deps.Pool,
 		AppBaseURL:        deps.AppBaseURL,
 		TeamKeyCache:      teamKeyCache,
+		AgentSessions:     db.NewLinearAgentSessionStore(deps.Pool),
+		AgentActivities:   db.NewLinearAgentActivityLogStore(deps.Pool),
 	})
 
 	if deps.Jobs != nil {

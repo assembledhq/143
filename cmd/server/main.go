@@ -12,6 +12,7 @@ import (
 	"time"
 
 	dockerclient "github.com/docker/docker/client"
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/rs/zerolog"
 
@@ -24,6 +25,7 @@ import (
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/llm"
 	"github.com/assembledhq/143/internal/logging"
+	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/metrics"
 	"github.com/assembledhq/143/internal/observability"
 	"github.com/assembledhq/143/internal/services"
@@ -49,6 +51,29 @@ import (
 	"github.com/assembledhq/143/internal/version"
 	"github.com/assembledhq/143/internal/worker"
 )
+
+// linearAgentSettingsLoader adapts an OrganizationStore into the narrow
+// settings-loader interface used by linear.NewAgentRepoResolver. Mirrors
+// the same adapter in internal/api/router.go — separate copies because
+// each package wires its own dependency tree.
+type linearAgentSettingsLoader struct {
+	orgs *db.OrganizationStore
+}
+
+func (l linearAgentSettingsLoader) LoadAgentSettings(ctx context.Context, orgID uuid.UUID) (models.LinearAgentSettings, error) {
+	if l.orgs == nil {
+		return models.LinearAgentSettings{}, nil
+	}
+	org, err := l.orgs.GetByID(ctx, orgID)
+	if err != nil {
+		return models.LinearAgentSettings{}, err
+	}
+	parsed, err := models.ParseOrgSettings(org.Settings)
+	if err != nil {
+		return models.LinearAgentSettings{}, err
+	}
+	return parsed.LinearAgent, nil
+}
 
 func main() {
 	cfg := config.Load()
@@ -426,6 +451,16 @@ func main() {
 				}
 				rehydrateCancel()
 			}
+		}
+
+		// Plumb stores into LinearAgentDeps now that the Stores struct is
+		// fully constructed. buildServices runs before stores is built, so
+		// the deps struct it produces leaves Stores nil; setting it here
+		// closes the loop without forcing buildServices to take stores as
+		// an argument (which would entangle two otherwise-independent
+		// build phases).
+		if services.LinearAgentDeps != nil {
+			services.LinearAgentDeps.Stores = stores
 		}
 
 		processWorkers = startProcessWorkers(
@@ -1049,6 +1084,39 @@ func buildServices(
 		TitleService:    titleService,
 		Linear:          linearService,
 		RuntimeSampler:  runtimeSampler,
+	}
+
+	// Linear inbound-agent worker wiring. Only constructs deps when the
+	// agent feature flag is on — the registration site short-circuits if
+	// the deps are nil, keeping the worker registration list clean for
+	// orgs that don't use the inbound agent path.
+	if cfg.LinearAgentEnabled {
+		repoResolver := linear.NewAgentRepoResolver(
+			db.NewLinearTeamRepoMappingStore(pool),
+			linearAgentSettingsLoader{orgs: orgStore},
+			repoStore,
+		)
+		svc.LinearAgentDeps = &worker.LinearAgentEventHandlerDeps{
+			Stores: nil, // populated below in BuildStores
+			Linear: linearService,
+			RepoResolver:  repoResolver,
+			ProviderState: db.NewLinearProviderStateStore(pool),
+			SettingsLoader: func(ctx context.Context, orgID uuid.UUID) (models.LinearAgentSettings, error) {
+				org, err := orgStore.GetByID(ctx, orgID)
+				if err != nil {
+					return models.LinearAgentSettings{}, err
+				}
+				parsed, err := models.ParseOrgSettings(org.Settings)
+				if err != nil {
+					return models.LinearAgentSettings{}, err
+				}
+				return parsed.LinearAgent, nil
+			},
+			ClientForOrg: func(ctx context.Context, orgID uuid.UUID) (linear.Client, error) {
+				return linearService.ClientForOrg(ctx, orgID)
+			},
+			Logger: logger,
+		}
 	}
 	if sandboxAuthServer != nil {
 		// Capture by value: the closure outlives buildServices, but the

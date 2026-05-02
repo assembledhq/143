@@ -26,6 +26,7 @@ import (
 	"github.com/assembledhq/143/internal/crypto"
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/llm"
+	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/observability"
 	"github.com/assembledhq/143/internal/services/agent"
 	"github.com/assembledhq/143/internal/services/claudecodeauth"
@@ -266,6 +267,47 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	pmHandler := handlers.NewPMHandler(pmPlanStore, pmDecisionLogStore, jobStore, orgStore)
 	priorityHandler := handlers.NewPriorityHandler(priorityScoreStore, complexityEstimateStore, jobStore)
 	ingestionWebhookHandler := handlers.NewIngestionWebhookHandler(webhookDeliveryStore, integrationStore, credentialStore, ingestionSvc, logger)
+
+	// Linear inbound-agent dispatcher. Wired here so HandleLinear can branch
+	// AgentSessionEvent webhooks into the agent path. Behind the feature
+	// flag — see cfg.LinearAgentEnabled. Settings loader resolves
+	// org_settings.linear_agent.enabled per-org so a single org can opt
+	// in even before the org-level default flips. ClientForOrg uses the
+	// existing linear.Service credential resolution so the agent path
+	// uses the same actor=app token the rest of the writes do.
+	linearAgentDispatcher := handlers.NewLinearAgentDispatcher(handlers.LinearAgentDispatcherConfig{
+		Logger:         logger,
+		AgentSessions:  linearService.AgentSessionStore(),
+		Activities:     linearService.AgentActivityStore(),
+		Jobs:           jobStore,
+		FeatureEnabled: cfg.LinearAgentEnabled,
+		SettingsLoader: func(ctx context.Context, orgID uuid.UUID) (models.LinearAgentSettings, error) {
+			org, err := orgStore.GetByID(ctx, orgID)
+			if err != nil {
+				return models.LinearAgentSettings{}, err
+			}
+			parsed, err := models.ParseOrgSettings(org.Settings)
+			if err != nil {
+				return models.LinearAgentSettings{}, err
+			}
+			return parsed.LinearAgent, nil
+		},
+		ClientForOrg: func(ctx context.Context, orgID uuid.UUID) (linear.Client, error) {
+			return linearService.ClientForOrg(ctx, orgID)
+		},
+	})
+	if linearAgentDispatcher != nil {
+		ingestionWebhookHandler.SetLinearAgentDispatcher(linearAgentDispatcher)
+	}
+
+	// Linear agent settings handler — exposes the team→repo mapping CRUD
+	// and install-status surfaces consumed by the settings UI.
+	linearAgentSettingsHandler := handlers.NewLinearAgentSettingsHandler(
+		db.NewLinearTeamRepoMappingStore(pool),
+		credentialStore,
+		linearAgentSettingsLoader{orgStore: orgStore},
+		logger,
+	)
 	credentialHandler := handlers.NewCredentialHandler(credentialStore)
 	credentialHandler.SetSelfHeal(orgStore, cfg.SafeLLMEnv())
 	memoryHandler := handlers.NewMemoryHandler(memoryStore, reviewCommentStore)
@@ -907,6 +949,12 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Get("/api/v1/integrations/linear/login", integrationHandler.StartLinearOAuth)
 				r.Get("/api/v1/integrations/linear/callback", integrationHandler.HandleLinearOAuthCallback)
 				r.Post("/api/v1/integrations/linear/connect", integrationHandler.ConnectLinear)
+				// Linear agent settings: install status + team→repo mappings.
+				// Admin-only enforced by the surrounding middleware tier.
+				r.Get("/api/v1/integrations/linear/agent", linearAgentSettingsHandler.GetStatus)
+				r.Get("/api/v1/integrations/linear/agent/mappings", linearAgentSettingsHandler.ListMappings)
+				r.Post("/api/v1/integrations/linear/agent/mappings", linearAgentSettingsHandler.UpsertMapping)
+				r.Delete("/api/v1/integrations/linear/agent/mappings/{id}", linearAgentSettingsHandler.DeleteMapping)
 				r.Get("/api/v1/integrations/sentry/login", integrationHandler.StartSentryOAuth)
 				r.Get("/api/v1/integrations/sentry/callback", integrationHandler.HandleSentryOAuthCallback)
 				r.Post("/api/v1/integrations/sentry/connect", integrationHandler.ConnectSentry)
@@ -942,4 +990,28 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	r.Mount("/", apiRoutes)
 
 	return r, gwSrv, recycleWorker, inspectorCloser, previewManager, nil
+}
+
+// linearAgentSettingsLoader adapts an OrganizationStore into the narrow
+// settings-loader interface the linear-agent dispatcher and settings
+// handler expect. Pulled out here rather than into a separate file
+// because it's pure router-side wiring; nothing else in the codebase
+// needs to construct one.
+type linearAgentSettingsLoader struct {
+	orgStore *db.OrganizationStore
+}
+
+func (l linearAgentSettingsLoader) LoadAgentSettings(ctx context.Context, orgID uuid.UUID) (models.LinearAgentSettings, error) {
+	if l.orgStore == nil {
+		return models.LinearAgentSettings{}, nil
+	}
+	org, err := l.orgStore.GetByID(ctx, orgID)
+	if err != nil {
+		return models.LinearAgentSettings{}, err
+	}
+	parsed, err := models.ParseOrgSettings(org.Settings)
+	if err != nil {
+		return models.LinearAgentSettings{}, err
+	}
+	return parsed.LinearAgent, nil
 }
