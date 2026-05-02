@@ -2,7 +2,7 @@
 
 import { useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowUp, Mic, Plus, Link, Paperclip, GitBranch, ChevronDown, FileCode2, FolderTree, Slash, X } from "lucide-react";
+import { ArrowUp, Mic, Plus, Link, Paperclip, GitBranch, ChevronDown, FileCode2, FolderTree, Slash, X, SlidersHorizontal } from "lucide-react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -14,6 +14,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import {
   Select,
   SelectContent,
@@ -23,6 +24,13 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import {
+  Sheet,
+  SheetContent,
+  SheetDescription,
+  SheetHeader,
+  SheetTitle,
+} from "@/components/ui/sheet";
 import { Textarea } from "@/components/ui/textarea";
 import { BranchPicker } from "@/components/branch-picker";
 import { PendingAttachmentStrip } from "@/components/pending-attachment-strip";
@@ -54,6 +62,7 @@ import { useOptimisticSessions } from "@/contexts/optimistic-sessions";
 import { useAuth } from "@/hooks/use-auth";
 import { buildFilterSuffix } from "@/hooks/use-owner-scope-filter";
 import { MobileBackButton } from "@/components/mobile-back-button";
+import { useMediaQuery } from "@/hooks/use-media-query";
 import {
   type CodingAgentReasoningEffort,
   getDefaultCodingAgentReasoningForAgent,
@@ -142,6 +151,7 @@ export function ManualSessionCreatePageContent() {
   const [pickerPosition, setPickerPosition] = useState<ComposerPickerPosition | null>(null);
   const [isDragActive, setIsDragActive] = useState(false);
   const [dragMessage, setDragMessage] = useState<string | null>(null);
+  const [mobileSettingsOpen, setMobileSettingsOpen] = useState(false);
   // Gates the persist effect until after hydration so we never overwrite a
   // stored draft with the component's initial (empty) state on first mount.
   const [draftHydrated, setDraftHydrated] = useState(false);
@@ -149,6 +159,7 @@ export function ManualSessionCreatePageContent() {
   const dragDepthRef = useRef(0);
 
   const { addOptimisticSession, removeOptimisticSession, markOptimisticResolved } = useOptimisticSessions();
+  const isMobile = useMediaQuery("(max-width: 767px)");
 
   function projectCommandsOnly(items: SessionInputCommand[]): SessionInputCommand[] {
     return items.filter((command) => command.source === "project");
@@ -813,6 +824,101 @@ export function ManualSessionCreatePageContent() {
     setAttachments((previous) => previous.filter((item) => item !== value));
   }
 
+  const repoSummary = selectedRepo ? selectedRepo.full_name.split("/").pop() ?? selectedRepo.full_name : "No repo";
+  const modelSummary = selectedModel || "Default model";
+  const reasoningSummary = effectiveReasoningEffort || "Default reasoning";
+
+  const settingsControls = (
+    <div className="space-y-4">
+      {repositories.length > 0 && (
+        <div className="space-y-2">
+          <Label className="text-xs uppercase tracking-[0.14em] text-muted-foreground">Repository</Label>
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button variant="outline" className="h-11 w-full justify-between rounded-xl border-border/70 bg-background px-3 text-left">
+                <span className="flex items-center gap-2 overflow-hidden">
+                  <GitBranch className="h-4 w-4 shrink-0 text-muted-foreground" />
+                  <span className="truncate">{selectedRepo ? selectedRepo.full_name : "Select repository"}</span>
+                </span>
+                <ChevronDown className="h-4 w-4 shrink-0 text-muted-foreground" />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="start" className="w-72">
+              {repositories.map((repo) => (
+                <DropdownMenuItem
+                  key={repo.id}
+                  onClick={() => setSelectedRepoId(repo.id)}
+                  className={selectedRepoId === repo.id ? "font-medium" : ""}
+                >
+                  <GitBranch className="mr-2 h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                  <span className="truncate">{repo.full_name}</span>
+                </DropdownMenuItem>
+              ))}
+            </DropdownMenuContent>
+          </DropdownMenu>
+        </div>
+      )}
+
+      {selectedRepo && (
+        <div className="space-y-2">
+          <Label className="text-xs uppercase tracking-[0.14em] text-muted-foreground">Branch</Label>
+          <BranchPicker
+            repositoryId={selectedRepoId}
+            value={selectedBranch}
+            defaultBranch={selectedRepo.default_branch}
+            onValueChange={setSelectedBranch}
+            label="Target branch"
+            buttonClassName="h-11 w-full justify-between rounded-xl border border-border/70 bg-background px-3 text-left text-sm shadow-none hover:bg-accent/60"
+            contentClassName="w-72"
+          />
+        </div>
+      )}
+
+      <div className="space-y-2">
+        <Label className="text-xs uppercase tracking-[0.14em] text-muted-foreground">Model</Label>
+        <Select value={selectedModel} onValueChange={(v) => setSelectedModel(v === "__default__" ? "" : v)}>
+          <SelectTrigger className="h-11 rounded-xl border-border/70 bg-background text-sm" aria-label="Model override">
+            <SelectValue placeholder="Default model" />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="__default__">Default model</SelectItem>
+            {modelGroups.map((group) => (
+              <SelectGroup key={group.key}>
+                <SelectLabel>{group.label}</SelectLabel>
+                {group.models.map((model) => (
+                  <SelectItem key={model} value={model}>
+                    {model}
+                  </SelectItem>
+                ))}
+              </SelectGroup>
+            ))}
+          </SelectContent>
+        </Select>
+      </div>
+
+      {showReasoningSelector ? (
+        <div className="space-y-2">
+          <Label className="text-xs uppercase tracking-[0.14em] text-muted-foreground">Reasoning</Label>
+          <Select value={effectiveReasoningOverride || "__default__"} onValueChange={(v) => setReasoningOverride(v === "__default__" ? "" : toCodingAgentReasoningEffort(v))}>
+            <SelectTrigger className="h-11 rounded-xl border-border/70 bg-background text-sm" aria-label="Reasoning override">
+              <SelectValue placeholder="Default reasoning" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="__default__">
+                {defaultReasoningEffort ? `Default (${defaultReasoningEffort})` : "Default"}
+              </SelectItem>
+              {reasoningOptions.map((option) => (
+                <SelectItem key={option.value} value={option.value}>
+                  {option.label}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+      ) : null}
+    </div>
+  );
+
   function getSpeechRecognitionCtor(): SpeechRecognitionCtor | null {
     const browserWindow = window as Window & {
       SpeechRecognition?: SpeechRecognitionCtor;
@@ -1109,24 +1215,192 @@ export function ManualSessionCreatePageContent() {
               </div>
             )}
 
-            <div className="flex items-center gap-1 pt-2">
-              <DropdownMenu>
-                <DropdownMenuTrigger asChild>
-                  <Button variant="ghost" size="icon" aria-label="Add files or photos" className="h-8 w-8 rounded-full text-muted-foreground hover:text-foreground">
-                    <Plus className="h-5 w-5" />
-                  </Button>
-                </DropdownMenuTrigger>
-                <DropdownMenuContent align="start">
-                  <DropdownMenuItem onClick={() => uploadInputRef.current?.click()}>
-                    <Paperclip className="mr-2 h-4 w-4" />
-                    Upload files or photos
-                  </DropdownMenuItem>
-                  <DropdownMenuItem onClick={() => setShowImageInput(true)}>
-                    <Link data-testid="add-image-url-link-icon" className="mr-2 h-4 w-4" />
-                    Add image URL
-                  </DropdownMenuItem>
-                </DropdownMenuContent>
-              </DropdownMenu>
+            <div className="pt-2">
+              {isMobile ? (
+                <>
+                  <div className="flex items-center gap-2">
+                    <DropdownMenu>
+                      <DropdownMenuTrigger asChild>
+                        <Button variant="ghost" size="icon" aria-label="Add files or photos" className="h-8 w-8 rounded-full text-muted-foreground hover:text-foreground">
+                          <Plus className="h-5 w-5" />
+                        </Button>
+                      </DropdownMenuTrigger>
+                      <DropdownMenuContent align="start">
+                        <DropdownMenuItem onClick={() => uploadInputRef.current?.click()}>
+                          <Paperclip className="mr-2 h-4 w-4" />
+                          Upload files or photos
+                        </DropdownMenuItem>
+                        <DropdownMenuItem onClick={() => setShowImageInput(true)}>
+                          <Link data-testid="add-image-url-link-icon" className="mr-2 h-4 w-4" />
+                          Add image URL
+                        </DropdownMenuItem>
+                      </DropdownMenuContent>
+                    </DropdownMenu>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      aria-label="Session settings"
+                      className="h-8 rounded-full border border-border/60 bg-muted/40 px-3 text-xs text-foreground shadow-sm hover:bg-accent/70"
+                      onClick={() => setMobileSettingsOpen(true)}
+                    >
+                      <SlidersHorizontal className="mr-1.5 h-3.5 w-3.5" />
+                      Settings
+                    </Button>
+                    <div className="ml-auto flex items-center gap-1">
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="icon"
+                        onClick={toggleDictation}
+                        className="h-8 w-8 rounded-full text-muted-foreground hover:text-foreground"
+                        aria-label="Dictate"
+                      >
+                        <Mic className={`h-[18px] w-[18px] ${isDictating ? "text-primary" : ""}`} />
+                      </Button>
+                      <Button
+                        type="button"
+                        size="icon"
+                        onClick={submitManualSession}
+                        disabled={message.trim().length === 0 || createManualSessionMutation.isPending}
+                        className="h-8 w-8 rounded-full"
+                        aria-label="Start session"
+                      >
+                        <ArrowUp className="h-4 w-4" />
+                      </Button>
+                    </div>
+                  </div>
+                  <div className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
+                    <span className="truncate font-medium text-foreground">{repoSummary}</span>
+                    <span aria-hidden="true">•</span>
+                    <span>{selectedBranch || "No branch"}</span>
+                    <span aria-hidden="true">•</span>
+                    <span>{modelSummary}</span>
+                    <span aria-hidden="true">•</span>
+                    <span>{reasoningSummary}</span>
+                  </div>
+                </>
+              ) : (
+                <div className="flex items-center gap-1">
+                  <DropdownMenu>
+                    <DropdownMenuTrigger asChild>
+                      <Button variant="ghost" size="icon" aria-label="Add files or photos" className="h-8 w-8 rounded-full text-muted-foreground hover:text-foreground">
+                        <Plus className="h-5 w-5" />
+                      </Button>
+                    </DropdownMenuTrigger>
+                    <DropdownMenuContent align="start">
+                      <DropdownMenuItem onClick={() => uploadInputRef.current?.click()}>
+                        <Paperclip className="mr-2 h-4 w-4" />
+                        Upload files or photos
+                      </DropdownMenuItem>
+                      <DropdownMenuItem onClick={() => setShowImageInput(true)}>
+                        <Link data-testid="add-image-url-link-icon" className="mr-2 h-4 w-4" />
+                        Add image URL
+                      </DropdownMenuItem>
+                    </DropdownMenuContent>
+                  </DropdownMenu>
+
+                  {repositories.length > 0 && (
+                    <DropdownMenu>
+                      <DropdownMenuTrigger asChild>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="h-8 gap-1.5 rounded-full px-3 text-xs text-muted-foreground hover:text-foreground"
+                        >
+                          <GitBranch className="h-3.5 w-3.5" />
+                          <span>{selectedRepo ? selectedRepo.full_name.split("/").pop() : "Select repo"}</span>
+                          <ChevronDown className="h-3 w-3 opacity-50" />
+                        </Button>
+                      </DropdownMenuTrigger>
+                      <DropdownMenuContent align="start" className="w-72">
+                        {repositories.map((repo) => (
+                          <DropdownMenuItem
+                            key={repo.id}
+                            onClick={() => setSelectedRepoId(repo.id)}
+                            className={selectedRepoId === repo.id ? "font-medium" : ""}
+                          >
+                            <GitBranch className="mr-2 h-3.5 w-3.5 text-muted-foreground shrink-0" />
+                            <span className="truncate">{repo.full_name}</span>
+                          </DropdownMenuItem>
+                        ))}
+                      </DropdownMenuContent>
+                    </DropdownMenu>
+                  )}
+
+                  {selectedRepo && (
+                    <BranchPicker
+                      repositoryId={selectedRepoId}
+                      value={selectedBranch}
+                      defaultBranch={selectedRepo.default_branch}
+                      onValueChange={setSelectedBranch}
+                      label="Target branch"
+                      buttonClassName="h-8 rounded-full border-none bg-transparent px-3 text-xs text-muted-foreground shadow-none hover:bg-accent hover:text-foreground"
+                      contentClassName="w-72"
+                    />
+                  )}
+
+                  <Select value={selectedModel} onValueChange={(v) => setSelectedModel(v === "__default__" ? "" : v)}>
+                    <SelectTrigger className="h-8 w-auto gap-1.5 border-none bg-transparent px-2 text-xs text-muted-foreground shadow-none hover:text-foreground focus:ring-0" aria-label="Model override">
+                      <SelectValue placeholder="Default model" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="__default__">Default model</SelectItem>
+                      {modelGroups.map((group) => (
+                        <SelectGroup key={group.key}>
+                          <SelectLabel>{group.label}</SelectLabel>
+                          {group.models.map((model) => (
+                            <SelectItem key={model} value={model}>
+                              {model}
+                            </SelectItem>
+                          ))}
+                        </SelectGroup>
+                      ))}
+                    </SelectContent>
+                  </Select>
+
+                  {showReasoningSelector ? (
+                    <Select value={effectiveReasoningOverride || "__default__"} onValueChange={(v) => setReasoningOverride(v === "__default__" ? "" : toCodingAgentReasoningEffort(v))}>
+                      <SelectTrigger className="h-8 w-auto gap-1.5 border-none bg-transparent px-2 text-xs text-muted-foreground shadow-none hover:text-foreground focus:ring-0" aria-label="Reasoning override">
+                        <SelectValue placeholder="Reasoning" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="__default__">
+                          {defaultReasoningEffort ? `Default (${defaultReasoningEffort})` : "Default"}
+                        </SelectItem>
+                        {reasoningOptions.map((option) => (
+                          <SelectItem key={option.value} value={option.value}>
+                            {option.label}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  ) : null}
+
+                  <div className="ml-auto flex items-center gap-1">
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon"
+                      onClick={toggleDictation}
+                      className="h-8 w-8 rounded-full text-muted-foreground hover:text-foreground"
+                      aria-label="Dictate"
+                    >
+                      <Mic className={`h-[18px] w-[18px] ${isDictating ? "text-primary" : ""}`} />
+                    </Button>
+                    <Button
+                      type="button"
+                      size="icon"
+                      onClick={submitManualSession}
+                      disabled={message.trim().length === 0 || createManualSessionMutation.isPending}
+                      className="h-8 w-8 rounded-full"
+                      aria-label="Start session"
+                    >
+                      <ArrowUp className="h-4 w-4" />
+                    </Button>
+                  </div>
+                </div>
+              )}
               <Input
                 ref={uploadInputRef}
                 type="file"
@@ -1135,106 +1409,6 @@ export function ManualSessionCreatePageContent() {
                 className="hidden"
                 onChange={onUploadChange}
               />
-
-              {repositories.length > 0 && (
-                <DropdownMenu>
-                  <DropdownMenuTrigger asChild>
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      className="h-8 gap-1.5 rounded-full px-3 text-xs text-muted-foreground hover:text-foreground"
-                    >
-                      <GitBranch className="h-3.5 w-3.5" />
-                      <span>{selectedRepo ? selectedRepo.full_name.split("/").pop() : "Select repo"}</span>
-                      <ChevronDown className="h-3 w-3 opacity-50" />
-                    </Button>
-                  </DropdownMenuTrigger>
-                  <DropdownMenuContent align="start" className="w-72">
-                    {repositories.map((repo) => (
-                      <DropdownMenuItem
-                        key={repo.id}
-                        onClick={() => setSelectedRepoId(repo.id)}
-                        className={selectedRepoId === repo.id ? "font-medium" : ""}
-                      >
-                        <GitBranch className="mr-2 h-3.5 w-3.5 text-muted-foreground shrink-0" />
-                        <span className="truncate">{repo.full_name}</span>
-                      </DropdownMenuItem>
-                    ))}
-                  </DropdownMenuContent>
-                </DropdownMenu>
-              )}
-
-              {selectedRepo && (
-                <BranchPicker
-                  repositoryId={selectedRepoId}
-                  value={selectedBranch}
-                  defaultBranch={selectedRepo.default_branch}
-                  onValueChange={setSelectedBranch}
-                  label="Target branch"
-                  buttonClassName="h-8 rounded-full border-none bg-transparent px-3 text-xs text-muted-foreground shadow-none hover:bg-accent hover:text-foreground"
-                  contentClassName="w-72"
-                />
-              )}
-
-              <Select value={selectedModel} onValueChange={(v) => setSelectedModel(v === "__default__" ? "" : v)}>
-                <SelectTrigger className="h-8 w-auto gap-1.5 border-none bg-transparent px-2 text-xs text-muted-foreground shadow-none hover:text-foreground focus:ring-0" aria-label="Model override">
-                  <SelectValue placeholder="Default model" />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="__default__">Default model</SelectItem>
-                  {modelGroups.map((group) => (
-                    <SelectGroup key={group.key}>
-                      <SelectLabel>{group.label}</SelectLabel>
-                      {group.models.map((model) => (
-                        <SelectItem key={model} value={model}>
-                          {model}
-                        </SelectItem>
-                      ))}
-                    </SelectGroup>
-                  ))}
-                </SelectContent>
-              </Select>
-
-              {showReasoningSelector ? (
-                <Select value={effectiveReasoningOverride || "__default__"} onValueChange={(v) => setReasoningOverride(v === "__default__" ? "" : toCodingAgentReasoningEffort(v))}>
-                  <SelectTrigger className="h-8 w-auto gap-1.5 border-none bg-transparent px-2 text-xs text-muted-foreground shadow-none hover:text-foreground focus:ring-0" aria-label="Reasoning override">
-                    <SelectValue placeholder="Reasoning" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="__default__">
-                      {defaultReasoningEffort ? `Default (${defaultReasoningEffort})` : "Default"}
-                    </SelectItem>
-                    {reasoningOptions.map((option) => (
-                      <SelectItem key={option.value} value={option.value}>
-                        {option.label}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              ) : null}
-
-              <div className="ml-auto flex items-center gap-1">
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="icon"
-                  onClick={toggleDictation}
-                  className="h-8 w-8 rounded-full text-muted-foreground hover:text-foreground"
-                  aria-label="Dictate"
-                >
-                  <Mic className={`h-[18px] w-[18px] ${isDictating ? "text-primary" : ""}`} />
-                </Button>
-                <Button
-                  type="button"
-                  size="icon"
-                  onClick={submitManualSession}
-                  disabled={message.trim().length === 0 || createManualSessionMutation.isPending}
-                  className="h-8 w-8 rounded-full"
-                  aria-label="Start session"
-                >
-                  <ArrowUp className="h-4 w-4" />
-                </Button>
-              </div>
             </div>
 
             {dictationError && (
@@ -1243,6 +1417,22 @@ export function ManualSessionCreatePageContent() {
             {creationError && (
               <p className="pt-2 text-xs text-destructive">{creationError}</p>
             )}
+            <Sheet open={isMobile && mobileSettingsOpen} onOpenChange={setMobileSettingsOpen}>
+              <SheetContent
+                side="bottom"
+                hideCloseButton
+                className="rounded-t-[1.75rem] border-border/70 px-4 pb-6 pt-5 sm:max-w-none"
+              >
+                <SheetHeader className="mb-4">
+                  <SheetTitle className="text-base">Session settings</SheetTitle>
+                  <SheetDescription>Pick the repo, branch, model, and reasoning for this run.</SheetDescription>
+                </SheetHeader>
+                {settingsControls}
+                <Button type="button" className="mt-5 h-11 w-full rounded-xl" onClick={() => setMobileSettingsOpen(false)}>
+                  Done
+                </Button>
+              </SheetContent>
+            </Sheet>
             </CardContent>
           </Card>
             </div>

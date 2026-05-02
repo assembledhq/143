@@ -150,11 +150,28 @@ vi.mock("@/contexts/optimistic-sessions", () => ({
   OptimisticSessionsProvider: ({ children }: { children: React.ReactNode }) => children,
 }));
 
+function setMobileViewport(matches: boolean) {
+  Object.defineProperty(window, "matchMedia", {
+    writable: true,
+    value: vi.fn().mockImplementation((query: string) => ({
+      matches: query === "(max-width: 767px)" ? matches : false,
+      media: query,
+      onchange: null,
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      dispatchEvent: vi.fn(),
+    })),
+  });
+}
+
 describe("ManualSessionCreatePageContent", () => {
   beforeEach(() => {
     Object.values(mocks).forEach((m) => m.mockClear());
     mocks.searchParamGetMock.mockImplementation(() => null);
     window.sessionStorage.clear();
+    setMobileViewport(false);
   });
 
   afterEach(() => {
@@ -180,6 +197,28 @@ describe("ManualSessionCreatePageContent", () => {
     await waitFor(() => {
       expect(mocks.settingsGetMock).toHaveBeenCalled();
     });
+  });
+
+  it("uses a mobile settings sheet instead of inline repo and model controls on small screens", async () => {
+    const user = userEvent.setup();
+    setMobileViewport(true);
+
+    renderWithProviders(<ManualSessionCreatePageContent />);
+
+    expect(await screen.findByRole("button", { name: "Session settings" })).toBeInTheDocument();
+    await waitFor(() => {
+      expect(screen.getByText("test-repo")).toBeInTheDocument();
+      expect(screen.getByText("main")).toBeInTheDocument();
+      expect(screen.getByText("Default model")).toBeInTheDocument();
+      expect(screen.getByText("Default reasoning")).toBeInTheDocument();
+    });
+    expect(screen.queryByRole("combobox", { name: /Model override/i })).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Session settings" }));
+
+    expect(await screen.findByRole("dialog", { name: "Session settings" })).toBeInTheDocument();
+    expect(screen.getByRole("combobox", { name: /Model override/i })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Target branch/ })).toBeInTheDocument();
   });
 
   it("renders the message input area", async () => {
