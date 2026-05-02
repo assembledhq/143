@@ -2,7 +2,7 @@
 
 import { useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowUp, Mic, Plus, Link, Paperclip, GitBranch, ChevronDown, FileCode2, FolderTree, Slash, X, SlidersHorizontal } from "lucide-react";
+import { ArrowUp, Plus, Link, Paperclip, GitBranch, ChevronDown, FileCode2, FolderTree, Slash, X, SlidersHorizontal } from "lucide-react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -79,27 +79,6 @@ const triggerPickerIconClassName = "h-4 w-4 shrink-0";
 const directoryTriggerIcon = <FolderTree className={triggerPickerIconClassName} />;
 const fileTriggerIcon = <FileCode2 className={triggerPickerIconClassName} />;
 
-type DictationResult = {
-  transcript: string;
-};
-
-type DictationEvent = {
-  results: DictationResult[][];
-};
-
-type BrowserSpeechRecognition = {
-  continuous: boolean;
-  interimResults: boolean;
-  lang: string;
-  onresult: ((event: DictationEvent) => void) | null;
-  onerror: (() => void) | null;
-  onend: (() => void) | null;
-  start: () => void;
-  stop: () => void;
-};
-
-type SpeechRecognitionCtor = new () => BrowserSpeechRecognition;
-
 type ComposerPickerPosition = TriggerPickerPosition;
 
 export function ManualSessionCreatePageContent() {
@@ -110,7 +89,6 @@ export function ManualSessionCreatePageContent() {
   const uploadInputRef = useRef<HTMLInputElement>(null);
   const messageInputRef = useRef<HTMLTextAreaElement>(null);
   const composerCardRef = useRef<HTMLDivElement>(null);
-  const recognitionRef = useRef<BrowserSpeechRecognition | null>(null);
   const draftSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pendingDraftRef = useRef<Parameters<typeof saveDraft>[0] | null>(null);
   const resizeFrameRef = useRef<number | null>(null);
@@ -138,8 +116,6 @@ export function ManualSessionCreatePageContent() {
   const [isUploading, setIsUploading] = useState(false);
   const [showImageInput, setShowImageInput] = useState(false);
   const [imageURL, setImageURL] = useState("");
-  const [isDictating, setIsDictating] = useState(false);
-  const [dictationError, setDictationError] = useState<string | null>(null);
   const [selectedModel, setSelectedModel] = useState("");
   const [reasoningOverride, setReasoningOverride] = useState<CodingAgentReasoningEffort>("");
   const [userSelectedRepoId, setUserSelectedRepoId] = useState<string | null>(repoId ?? null);
@@ -226,7 +202,7 @@ export function ManualSessionCreatePageContent() {
   }, []);
 
   // Persist the serializable slice of form state on every change. Pure UI
-  // state (caret, dictation, mention picker, errors, upload-in-flight flag)
+  // state (caret, mention picker, errors, upload-in-flight flag)
   // is deliberately excluded — restoring it on reload would be meaningless or
   // confusing.
   useEffect(() => {
@@ -919,52 +895,6 @@ export function ManualSessionCreatePageContent() {
     </div>
   );
 
-  function getSpeechRecognitionCtor(): SpeechRecognitionCtor | null {
-    const browserWindow = window as Window & {
-      SpeechRecognition?: SpeechRecognitionCtor;
-      webkitSpeechRecognition?: SpeechRecognitionCtor;
-    };
-    return browserWindow.SpeechRecognition || browserWindow.webkitSpeechRecognition || null;
-  }
-
-  function toggleDictation() {
-    setDictationError(null);
-
-    if (isDictating && recognitionRef.current) {
-      recognitionRef.current.stop();
-      return;
-    }
-
-    const Ctor = getSpeechRecognitionCtor();
-    if (!Ctor) {
-      setDictationError("Dictation is not supported in this browser.");
-      return;
-    }
-
-    const recognition = new Ctor();
-    recognition.continuous = false;
-    recognition.interimResults = false;
-    recognition.lang = "en-US";
-    recognition.onresult = (event) => {
-      const transcript = event.results?.[0]?.[0]?.transcript?.trim();
-      if (!transcript) {
-        return;
-      }
-      setMessage((previous) => (previous ? `${previous} ${transcript}` : transcript));
-    };
-    recognition.onerror = () => {
-      setDictationError("Dictation failed. Please type your request.");
-    };
-    recognition.onend = () => {
-      setIsDictating(false);
-      recognitionRef.current = null;
-    };
-
-    recognitionRef.current = recognition;
-    setIsDictating(true);
-    recognition.start();
-  }
-
   return (
     <div className="flex flex-col h-full">
       <div className="md:hidden flex items-center px-2 pt-2">
@@ -1024,7 +954,7 @@ export function ManualSessionCreatePageContent() {
               >
                 {isDragActive
                   ? (dragMessage ?? "Drop images to attach")
-                  : "Start a manual session with text, files, photos, dictation, or a screenshot anywhere here."}
+                  : "Start a manual session with text, files, photos, or a screenshot anywhere here."}
               </p>
             </div>
           </div>
@@ -1247,28 +1177,16 @@ export function ManualSessionCreatePageContent() {
                       <SlidersHorizontal className="mr-1.5 h-3.5 w-3.5" />
                       Settings
                     </Button>
-                    <div className="ml-auto flex items-center gap-1">
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        size="icon"
-                        onClick={toggleDictation}
-                        className="h-8 w-8 rounded-full text-muted-foreground hover:text-foreground"
-                        aria-label="Dictate"
-                      >
-                        <Mic className={`h-[18px] w-[18px] ${isDictating ? "text-primary" : ""}`} />
-                      </Button>
-                      <Button
-                        type="button"
-                        size="icon"
-                        onClick={submitManualSession}
-                        disabled={message.trim().length === 0 || createManualSessionMutation.isPending}
-                        className="h-8 w-8 rounded-full"
-                        aria-label="Start session"
-                      >
-                        <ArrowUp className="h-4 w-4" />
-                      </Button>
-                    </div>
+                    <Button
+                      type="button"
+                      size="icon"
+                      onClick={submitManualSession}
+                      disabled={message.trim().length === 0 || createManualSessionMutation.isPending}
+                      className="ml-auto h-8 w-8 rounded-full"
+                      aria-label="Start session"
+                    >
+                      <ArrowUp className="h-4 w-4" />
+                    </Button>
                   </div>
                   <div className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
                     <span className="truncate font-medium text-foreground">{repoSummary}</span>
@@ -1377,28 +1295,16 @@ export function ManualSessionCreatePageContent() {
                     </Select>
                   ) : null}
 
-                  <div className="ml-auto flex items-center gap-1">
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="icon"
-                      onClick={toggleDictation}
-                      className="h-8 w-8 rounded-full text-muted-foreground hover:text-foreground"
-                      aria-label="Dictate"
-                    >
-                      <Mic className={`h-[18px] w-[18px] ${isDictating ? "text-primary" : ""}`} />
-                    </Button>
-                    <Button
-                      type="button"
-                      size="icon"
-                      onClick={submitManualSession}
-                      disabled={message.trim().length === 0 || createManualSessionMutation.isPending}
-                      className="h-8 w-8 rounded-full"
-                      aria-label="Start session"
-                    >
-                      <ArrowUp className="h-4 w-4" />
-                    </Button>
-                  </div>
+                  <Button
+                    type="button"
+                    size="icon"
+                    onClick={submitManualSession}
+                    disabled={message.trim().length === 0 || createManualSessionMutation.isPending}
+                    className="ml-auto h-8 w-8 rounded-full"
+                    aria-label="Start session"
+                  >
+                    <ArrowUp className="h-4 w-4" />
+                  </Button>
                 </div>
               )}
               <Input
@@ -1411,9 +1317,6 @@ export function ManualSessionCreatePageContent() {
               />
             </div>
 
-            {dictationError && (
-              <p className="pt-2 text-xs text-destructive">{dictationError}</p>
-            )}
             {creationError && (
               <p className="pt-2 text-xs text-destructive">{creationError}</p>
             )}
