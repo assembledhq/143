@@ -214,6 +214,7 @@ type Client interface {
 	AgentActivityCreate(ctx context.Context, in AgentActivityInput) (AgentActivityResult, error)
 	AgentSessionUpdate(ctx context.Context, in AgentSessionUpdateInput) error
 	AgentSessionGet(ctx context.Context, agentSessionID string) (*FetchedAgentSession, error)
+	FetchComment(ctx context.Context, commentID string) (*FetchedComment, error)
 }
 
 // ClientFactory creates a per-org Linear API client from an access token
@@ -248,8 +249,15 @@ type FetchedIssue struct {
 }
 
 // FetchedComment is a single Linear comment trimmed to fields the agent
-// context package and operator UI need.
+// context package and operator UI need. Used both by FetchIssue (which
+// returns recent comments inline) and by FetchComment (single-id
+// resolver) — the same shape works for both because the agent path
+// only cares about author + body + when.
 type FetchedComment struct {
+	// ID is set on FetchComment results; FetchIssue's inline comments
+	// leave it empty for backwards compatibility.
+	ID        string    `json:"id,omitempty"`
+	IssueID   string    `json:"issue_id,omitempty"`
 	Author    string    `json:"author"`
 	Body      string    `json:"body"`
 	CreatedAt time.Time `json:"created_at"`

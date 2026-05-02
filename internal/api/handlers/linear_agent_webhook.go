@@ -180,7 +180,15 @@ func (d *LinearAgentDispatcher) Dispatch(ctx context.Context, integration *model
 		return DispatchResult{Status: "feature_off"}
 	}
 	if eventType != LinearAgentEventAgentSession {
-		// AppUserNotification fallback handler is phase-4 work.
+		// AppUserNotification is the legacy envelope — we recognize it
+		// for audit completeness but don't act on it. Modern Linear
+		// installs subscribe to Agent session events which carry the
+		// promptContext we need; a workspace whose webhook config still
+		// points to AppUserNotification should be migrated.
+		d.logger.Info().
+			Str("integration_id", integration.ID.String()).
+			Str("event_type", string(eventType)).
+			Msg("agent dispatcher: AppUserNotification received; subscribe to Agent session events on the Linear OAuth app to enable inbound agent triggering")
 		return DispatchResult{Status: "ignored"}
 	}
 

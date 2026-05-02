@@ -204,6 +204,10 @@ func (f *fakeLinearClient) AgentSessionGet(context.Context, string) (*FetchedAge
 	return nil, ErrAgentSessionNotFound
 }
 
+func (f *fakeLinearClient) FetchComment(context.Context, string) (*FetchedComment, error) {
+	return nil, ErrCommentNotFound
+}
+
 // fakeIntegrationReader / fakeCredentialReader return a stable "Linear is
 // active" combo so HandleMilestone reaches the API call path. Both are
 // intentionally minimal — the LinearPrivate short-circuit in HandleMilestone
