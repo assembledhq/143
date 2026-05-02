@@ -515,12 +515,40 @@ func TestMirrorUpsertIncludesProviderInOnConflict(t *testing.T) {
 		WillReturnResult(pgxmock.NewResult("DELETE", 0))
 	// The upsert SQL must include `provider = EXCLUDED.provider` in the SET
 	// list. We assert that with a regex on the rendered SQL.
-	mock.ExpectExec(`(?s)ON CONFLICT \(id\) DO UPDATE SET\s+provider\s*=\s*EXCLUDED\.provider`).
+	mock.ExpectExec(`(?s)ON CONFLICT \(id\) DO UPDATE SET.*provider\s*=\s*EXCLUDED\.provider`).
 		WithArgs(codingAnyArgs(12)...).
 		WillReturnResult(pgxmock.NewResult("INSERT", 1))
 
 	require.NoError(t, store.MirrorUserCredential(context.Background(), row, models.AnthropicConfig{APIKey: "sk-ant-test"}))
 	require.NoError(t, mock.ExpectationsWereMet(), "ON CONFLICT SET must include provider so subscription↔key transitions stay consistent")
+}
+
+// TestMirrorUpsertReparentsUserCredentialOnIDConflict locks in the
+// personal↔team-default transition. A legacy user_credentials row keeps the
+// same id when is_team_default flips, so the mirror must update user_id on
+// ON CONFLICT (id); otherwise the unified row remains personal-scoped and
+// never becomes an org fallback.
+func TestMirrorUpsertReparentsUserCredentialOnIDConflict(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create pgx mock pool")
+	defer mock.Close()
+
+	store := NewCodingCredentialStore(mock, nil)
+	row := models.UserCredential{
+		ID: uuid.New(), UserID: uuid.New(), OrgID: uuid.New(),
+		Provider: models.ProviderAnthropic, IsTeamDefault: true, Status: "active",
+		CreatedAt: time.Now(), UpdatedAt: time.Now(),
+	}
+
+	mock.ExpectExec(`(?s)ON CONFLICT \(id\) DO UPDATE SET.*user_id\s*=\s*EXCLUDED\.user_id`).
+		WithArgs(codingAnyArgs(12)...).
+		WillReturnResult(pgxmock.NewResult("INSERT", 1))
+
+	require.NoError(t, store.MirrorUserCredential(context.Background(), row, models.AnthropicConfig{APIKey: "sk-ant-test"}),
+		"team-default mirror should update the existing unified row's scope")
+	require.NoError(t, mock.ExpectationsWereMet(), "mirror upsert should reparent rows on id conflict")
 }
 
 // TestMirrorUserCredentialDisableCascadesTeamDefault locks in the fix where

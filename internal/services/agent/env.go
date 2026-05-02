@@ -130,6 +130,13 @@ type CodingCredentialShedder interface {
 	MarkAuthRejected(id uuid.UUID)
 }
 
+// CodingCredentialPicker is implemented by the real unified store. It applies
+// the store's in-process health cache, so AgentEnv uses it when available
+// instead of walking ListResolvable directly.
+type CodingCredentialPicker interface {
+	PickRunnable(ctx context.Context, scope models.Scope, provider models.ProviderName) (*models.DecryptedCodingCredential, error)
+}
+
 // codingShedder type-asserts the configured CodingCredentialProvider into the
 // shed-capable interface. Returns nil when the provider does not implement
 // shedding (older test rigs), in which case the Shed* methods become no-ops.
@@ -515,7 +522,7 @@ func (e *AgentEnv) loadAgentConfig(ctx context.Context, orgID uuid.UUID, agentTy
 // will delete it once we've confirmed no traffic resolves through the
 // legacy path.
 func (e *AgentEnv) resolveProviderConfig(ctx context.Context, orgID uuid.UUID, userID *uuid.UUID, provider models.ProviderName) models.ProviderConfig {
-	if cfg := e.resolveFromCodingCredentials(ctx, orgID, userID, provider); cfg != nil {
+	if cfg, handled := e.resolveFromCodingCredentials(ctx, orgID, userID, provider); cfg != nil || handled {
 		return cfg
 	}
 	return e.resolveFromLegacy(ctx, orgID, userID, provider)
@@ -528,28 +535,53 @@ func (e *AgentEnv) resolveProviderConfig(ctx context.Context, orgID uuid.UUID, u
 // ProviderAnthropic — the legacy code matched by ProviderAnthropic and
 // inferred subscription status from the embedded field; the unified shape
 // uses two distinct provider names.
-func (e *AgentEnv) resolveFromCodingCredentials(ctx context.Context, orgID uuid.UUID, userID *uuid.UUID, provider models.ProviderName) models.ProviderConfig {
+func (e *AgentEnv) resolveFromCodingCredentials(ctx context.Context, orgID uuid.UUID, userID *uuid.UUID, provider models.ProviderName) (models.ProviderConfig, bool) {
 	if e.codingCredentials == nil {
-		return nil
+		return nil, false
 	}
 
-	if cfg := e.pickFromCodingProvider(ctx, orgID, userID, provider); cfg != nil {
-		return cfg
+	sawUnifiedRows := false
+	if cfg, sawRows := e.pickFromCodingProvider(ctx, orgID, userID, provider); cfg != nil {
+		return cfg, true
+	} else if sawRows {
+		sawUnifiedRows = true
 	}
 	if twin := unifiedSubscriptionTwin(provider); twin != "" {
-		if cfg := e.pickFromCodingProvider(ctx, orgID, userID, twin); cfg != nil {
-			return cfg
+		if cfg, sawRows := e.pickFromCodingProvider(ctx, orgID, userID, twin); cfg != nil {
+			return cfg, true
+		} else if sawRows {
+			sawUnifiedRows = true
 		}
 	}
-	return nil
+	return nil, sawUnifiedRows
 }
 
-func (e *AgentEnv) pickFromCodingProvider(ctx context.Context, orgID uuid.UUID, userID *uuid.UUID, provider models.ProviderName) models.ProviderConfig {
+func (e *AgentEnv) pickFromCodingProvider(ctx context.Context, orgID uuid.UUID, userID *uuid.UUID, provider models.ProviderName) (models.ProviderConfig, bool) {
 	creds, err := e.codingCredentials.ListResolvable(ctx, orgID, userID, provider)
 	if err != nil {
 		e.logger.Warn().Err(err).Str("provider", string(provider)).Msg("coding credential resolver lookup failed; falling back to legacy")
-		return nil
+		return nil, false
 	}
+	if len(creds) == 0 {
+		return nil, false
+	}
+
+	if picker, ok := e.codingCredentials.(CodingCredentialPicker); ok {
+		picked, pickErr := picker.PickRunnable(ctx, models.Scope{OrgID: orgID, UserID: userID}, provider)
+		if pickErr != nil {
+			e.logger.Warn().Err(pickErr).Str("provider", string(provider)).Msg("coding credential picker found no eligible credential")
+			return nil, true
+		}
+		if picked == nil {
+			return nil, true
+		}
+		if cfg := compatibleCodingProviderConfig(provider, picked.Config); cfg != nil {
+			e.recordPick(orgID, userID, provider, picked.ID)
+			return cfg, true
+		}
+		return nil, true
+	}
+
 	for _, cred := range creds {
 		if cred.Status != models.CodingCredentialStatusActive {
 			continue
@@ -563,10 +595,10 @@ func (e *AgentEnv) pickFromCodingProvider(ctx context.Context, orgID uuid.UUID, 
 		// finds the subscription flavor.
 		if cfg := compatibleCodingProviderConfig(provider, cred.Config); cfg != nil {
 			e.recordPick(orgID, userID, provider, cred.ID)
-			return cfg
+			return cfg, true
 		}
 	}
-	return nil
+	return nil, false
 }
 
 // unifiedSubscriptionTwin returns the new subscription provider name for an

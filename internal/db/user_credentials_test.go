@@ -13,6 +13,30 @@ import (
 	"github.com/assembledhq/143/internal/models"
 )
 
+type recordingCodingCredentialMirror struct {
+	userRows []models.UserCredential
+}
+
+func (m *recordingCodingCredentialMirror) MirrorOrgCredential(context.Context, models.OrgCredential, models.ProviderConfig) error {
+	return nil
+}
+func (m *recordingCodingCredentialMirror) MirrorOrgCredentialDelete(context.Context, uuid.UUID) error {
+	return nil
+}
+func (m *recordingCodingCredentialMirror) MirrorOrgCredentialDisable(context.Context, uuid.UUID) error {
+	return nil
+}
+func (m *recordingCodingCredentialMirror) MirrorUserCredential(_ context.Context, row models.UserCredential, _ models.ProviderConfig) error {
+	m.userRows = append(m.userRows, row)
+	return nil
+}
+func (m *recordingCodingCredentialMirror) MirrorUserCredentialDelete(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, models.ProviderName) error {
+	return nil
+}
+func (m *recordingCodingCredentialMirror) MirrorUserCredentialDisable(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, models.ProviderName) error {
+	return nil
+}
+
 var userCredentialTestColumns = []string{
 	"id", "user_id", "org_id", "provider", "config", "is_team_default", "status", "last_verified_at", "created_at", "updated_at",
 }
@@ -217,9 +241,9 @@ func TestUserCredentialStoreMutations(t *testing.T) {
 			name: "set team default",
 			setup: func(mock pgxmock.PgxPoolIface, id uuid.UUID) {
 				mock.ExpectBegin()
-				mock.ExpectExec("UPDATE user_credentials").
+				mock.ExpectQuery("UPDATE user_credentials").
 					WithArgs(codingAnyArgs(2)...).
-					WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+					WillReturnRows(pgxmock.NewRows([]string{"id"}))
 				mock.ExpectQuery("UPDATE user_credentials").
 					WithArgs(codingAnyArgs(3)...).
 					WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(id))
@@ -260,6 +284,52 @@ func TestUserCredentialStoreMutations(t *testing.T) {
 			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 		})
 	}
+}
+
+func TestUserCredentialStoreSetTeamDefaultMirrorsClearedDefault(t *testing.T) {
+	t.Parallel()
+
+	store, mock := newMockUserCredentialStore(t)
+	defer mock.Close()
+
+	mirror := &recordingCodingCredentialMirror{}
+	store.SetCodingMirror(mirror)
+
+	ctx := context.Background()
+	orgID := uuid.New()
+	oldUserID := uuid.New()
+	newUserID := uuid.New()
+	oldID := uuid.New()
+	newID := uuid.New()
+	provider := models.ProviderOpenAI
+	cfg := models.OpenAIConfig{APIKey: "sk-openai-test"}
+
+	mock.ExpectBegin()
+	mock.ExpectQuery("UPDATE user_credentials").
+		WithArgs(codingAnyArgs(2)...).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(oldID))
+	mock.ExpectQuery("UPDATE user_credentials").
+		WithArgs(codingAnyArgs(3)...).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(newID))
+	mock.ExpectCommit()
+	mock.ExpectQuery("SELECT id, user_id, org_id, provider, config, is_team_default, status, last_verified_at, created_at, updated_at").
+		WithArgs(oldID).
+		WillReturnRows(pgxmock.NewRows(userCredentialTestColumns).
+			AddRow(userCredentialRow(t, store, orgID, oldUserID, oldID, provider, cfg, false)...))
+	mock.ExpectQuery("SELECT id, user_id, org_id, provider, config, is_team_default, status, last_verified_at, created_at, updated_at").
+		WithArgs(newID).
+		WillReturnRows(pgxmock.NewRows(userCredentialTestColumns).
+			AddRow(userCredentialRow(t, store, orgID, newUserID, newID, provider, cfg, true)...))
+
+	err := store.SetTeamDefault(ctx, orgID, newUserID, provider)
+
+	require.NoError(t, err, "SetTeamDefault should succeed")
+	require.Len(t, mirror.userRows, 2, "SetTeamDefault should mirror both the cleared and newly-set defaults")
+	require.Equal(t, oldID, mirror.userRows[0].ID, "first mirrored row should be the previously-cleared default")
+	require.False(t, mirror.userRows[0].IsTeamDefault, "cleared default should be mirrored as personal-scoped again")
+	require.Equal(t, newID, mirror.userRows[1].ID, "second mirrored row should be the newly-set default")
+	require.True(t, mirror.userRows[1].IsTeamDefault, "new default should be mirrored as org-scoped")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
 type assertErr string

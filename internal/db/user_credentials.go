@@ -298,14 +298,20 @@ func (s *UserCredentialStore) SetTeamDefault(ctx context.Context, orgID, userID 
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck
 
-	// Clear existing team default within the transaction.
-	clearQuery := `UPDATE user_credentials SET is_team_default = false, updated_at = now() WHERE org_id = @org_id AND provider = @provider AND is_team_default = true`
-	if _, err := tx.Exec(ctx, clearQuery, pgx.NamedArgs{
+	// Clear existing team default within the transaction and keep the affected
+	// ids so the post-commit mirror can re-parent those unified rows back to
+	// personal scope.
+	clearQuery := `UPDATE user_credentials SET is_team_default = false, updated_at = now()
+		WHERE org_id = @org_id AND provider = @provider AND is_team_default = true
+		RETURNING id`
+	clearRows, err := tx.Query(ctx, clearQuery, pgx.NamedArgs{
 		"org_id":   orgID,
 		"provider": string(provider),
-	}); err != nil {
+	})
+	if err != nil {
 		return fmt.Errorf("clear team default: %w", err)
 	}
+	clearedIDs := collectMirrorIDs(clearRows)
 
 	// Set the new team default. RETURNING surfaces the affected id so the
 	// mirror can flip its scope from personal → org.
@@ -326,6 +332,9 @@ func (s *UserCredentialStore) SetTeamDefault(ctx context.Context, orgID, userID 
 
 	if err := tx.Commit(ctx); err != nil {
 		return err
+	}
+	for _, clearedID := range clearedIDs {
+		s.reflectUserCredentialByID(ctx, clearedID)
 	}
 	s.reflectUserCredentialByID(ctx, setID)
 	return nil

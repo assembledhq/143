@@ -126,6 +126,34 @@ func (m *envCodingCredentialProvider) ListResolvable(_ context.Context, _ uuid.U
 	return nil, nil
 }
 
+func (m *envCodingCredentialProvider) PickRunnable(_ context.Context, _ models.Scope, provider models.ProviderName) (*models.DecryptedCodingCredential, error) {
+	if err, ok := m.errs[provider]; ok {
+		return nil, err
+	}
+	for _, cred := range m.resolvable[provider] {
+		if cred.Status != models.CodingCredentialStatusActive {
+			continue
+		}
+		if containsUUID(m.rateLimitedIDs, cred.ID) || containsUUID(m.authRejectedIDs, cred.ID) {
+			continue
+		}
+		picked := cred
+		return &picked, nil
+	}
+	return nil, errEnvCodingCredentialNotFound
+}
+
+var errEnvCodingCredentialNotFound = errors.New("coding credential not found")
+
+func containsUUID(ids []uuid.UUID, id uuid.UUID) bool {
+	for _, existing := range ids {
+		if existing == id {
+			return true
+		}
+	}
+	return false
+}
+
 // MarkRateLimited / MarkAuthRejected satisfy CodingCredentialShedder so the
 // env tests can assert that ShedRateLimited / ShedAuthRejected forward the
 // recorded credential id.
@@ -789,6 +817,53 @@ func TestAgentEnvShedAfterPick(t *testing.T) {
 	env.ShedAuthRejected(orgID, &userID, models.ProviderAnthropic)
 	require.Equal(t, []uuid.UUID{credID}, coding.authRejectedIDs,
 		"ShedAuthRejected should forward the just-picked credential id to the store")
+}
+
+func TestAgentEnvShedCredentialIsSkippedOnNextResolution(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	orgID := uuid.New()
+	userID := uuid.New()
+	firstID := uuid.New()
+	secondID := uuid.New()
+
+	coding := &envCodingCredentialProvider{
+		resolvable: map[models.ProviderName][]models.DecryptedCodingCredential{
+			models.ProviderAnthropic: {
+				{
+					ID:       firstID,
+					OrgID:    orgID,
+					UserID:   &userID,
+					Provider: models.ProviderAnthropic,
+					Status:   models.CodingCredentialStatusActive,
+					Config:   models.AnthropicConfig{APIKey: "sk-ant-first"},
+				},
+				{
+					ID:       secondID,
+					OrgID:    orgID,
+					UserID:   &userID,
+					Provider: models.ProviderAnthropic,
+					Status:   models.CodingCredentialStatusActive,
+					Config:   models.AnthropicConfig{APIKey: "sk-ant-second"},
+				},
+			},
+		},
+	}
+
+	env := NewAgentEnv(AgentEnvDeps{
+		CodingCredentials: coding,
+		Provider:          &envSandboxProvider{},
+		Logger:            zerolog.Nop(),
+	})
+
+	first := env.resolveProviderConfig(ctx, orgID, &userID, models.ProviderAnthropic)
+	require.Equal(t, "sk-ant-first", first.(models.AnthropicConfig).APIKey, "first resolution should pick the top credential")
+
+	env.ShedRateLimited(orgID, &userID, models.ProviderAnthropic)
+
+	second := env.resolveProviderConfig(ctx, orgID, &userID, models.ProviderAnthropic)
+	require.Equal(t, "sk-ant-second", second.(models.AnthropicConfig).APIKey, "second resolution should skip the shed credential")
 }
 
 // TestAgentEnvShedNoopWhenNoRecentPick guards the unhappy paths: shedding for

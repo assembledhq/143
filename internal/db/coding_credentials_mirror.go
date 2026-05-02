@@ -306,6 +306,7 @@ func (s *CodingCredentialStore) upsertMirroredRow(ctx context.Context, row mirro
 			@created_by, @last_verified_at, @created_at, @updated_at
 		)
 		ON CONFLICT (id) DO UPDATE SET
+			user_id          = EXCLUDED.user_id,
 			provider         = EXCLUDED.provider,
 			label            = EXCLUDED.label,
 			config           = EXCLUDED.config,
