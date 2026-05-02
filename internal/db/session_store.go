@@ -123,7 +123,7 @@ const sessionSelectColumns = `id,
 	runtime_extension_count, runtime_extension_seconds, runtime_stop_reason, runtime_graceful_stop_at,
 	checkpointed_at, checkpoint_kind, checkpoint_capability, checkpoint_size_bytes, checkpoint_error,
 	recovery_state, recovery_queued_at, recovery_started_at, recovery_attempt_count,
-	target_branch, working_branch, base_commit_sha, repository_id, diff_stats, diff_history, input_manifest, archived_at, archived_by_user_id, automation_run_id, pr_creation_state, pr_creation_error, diff_collected_at, latest_diff_snapshot_id,
+	target_branch, working_branch, base_commit_sha, repository_id, diff_stats, diff_history, input_manifest, archived_at, archived_by_user_id, automation_run_id, pr_creation_state, pr_creation_error, pr_push_state, pr_push_error, diff_collected_at, latest_diff_snapshot_id,
 	linear_private, linear_state_sync_disabled, linear_identifier_hint, linear_prepare_state,
 	deleted_at, git_identity_source, git_identity_user_id, created_at`
 
@@ -143,7 +143,7 @@ const sessionListColumns = `id,
 	runtime_extension_count, runtime_extension_seconds, runtime_stop_reason, runtime_graceful_stop_at,
 	checkpointed_at, checkpoint_kind, checkpoint_capability, checkpoint_size_bytes, checkpoint_error,
 	recovery_state, recovery_queued_at, recovery_started_at, recovery_attempt_count,
-	target_branch, working_branch, base_commit_sha, repository_id, diff_stats, NULL::jsonb AS diff_history, input_manifest, archived_at, archived_by_user_id, automation_run_id, pr_creation_state, pr_creation_error, diff_collected_at, latest_diff_snapshot_id,
+	target_branch, working_branch, base_commit_sha, repository_id, diff_stats, NULL::jsonb AS diff_history, input_manifest, archived_at, archived_by_user_id, automation_run_id, pr_creation_state, pr_creation_error, pr_push_state, pr_push_error, diff_collected_at, latest_diff_snapshot_id,
 	linear_private, linear_state_sync_disabled, linear_identifier_hint, linear_prepare_state,
 	deleted_at, git_identity_source, git_identity_user_id, created_at`
 
@@ -817,6 +817,13 @@ func (s *SessionStore) UpdateResult(ctx context.Context, orgID, runID uuid.UUID,
 
 func (s *SessionStore) updateResultRow(ctx context.Context, db DBTX, orgID, runID uuid.UUID, status string, result *models.SessionResult, diffStats json.RawMessage) error {
 
+	// COALESCE on diff / diff_stats / diff_collected_at preserves the
+	// previously persisted authoritative diff when the current turn did not
+	// produce one (collection skipped or failed — sessiondiff.Collect returned
+	// ErrNoBaseCommitSHA, which the adapter logs and leaves result.Diff empty,
+	// which strPtr converts to nil here). Without this guard, an empty/NULL
+	// diff would overwrite the prior diff and blank out the Changes tab.
+	// diff_history's append SQL already no-ops when @diff IS NULL.
 	query := `
 		UPDATE sessions
 		SET status = @status,
@@ -828,10 +835,12 @@ func (s *SessionStore) updateResultRow(ctx context.Context, db DBTX, orgID, runI
 		    END,
 		    confidence_score = @confidence_score, confidence_reasoning = @confidence_reasoning,
 		    risk_factors = @risk_factors, token_usage = @token_usage,
-		    result_summary = @result_summary, diff = @diff, error = @error,
+		    result_summary = @result_summary,
+		    diff = COALESCE(@diff, diff),
+		    error = @error,
 		    base_commit_sha = COALESCE(@base_commit_sha, base_commit_sha),
-		    diff_collected_at = @diff_collected_at,
-		    diff_stats = @diff_stats,
+		    diff_collected_at = COALESCE(@diff_collected_at, diff_collected_at),
+		    diff_stats = COALESCE(@diff_stats, diff_stats),
 		    diff_history = ` + diffHistoryAppendSQL("COALESCE(current_turn, 0) + 1") + `
 		WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL`
 
@@ -1190,18 +1199,32 @@ func (s *SessionStore) UpdateTurnComplete(ctx context.Context, orgID, sessionID 
 
 func (s *SessionStore) updateTurnCompleteRow(ctx context.Context, db DBTX, orgID, sessionID uuid.UUID, turn int, result *models.SessionResult, agentSessionID, snapshotKey string, diffStats json.RawMessage) error {
 
+	// COALESCE on diff / diff_stats / diff_collected_at: see updateResultRow
+	// for the full rationale. Briefly: when sessiondiff.Collect returns
+	// ErrNoBaseCommitSHA (or the agent produces no changes against base), the
+	// adapter leaves result.Diff empty → strPtr returns nil → @diff is NULL
+	// here. Falling back to the previously persisted diff is strictly better
+	// than clobbering the Changes tab with a blank value.
 	query := `
 		UPDATE sessions
 		SET status = 'idle', current_turn = @current_turn, last_activity_at = now(),
 		    agent_session_id = @agent_session_id, snapshot_key = @snapshot_key,
 		    sandbox_state = 'snapshotted',
 		    pr_creation_state = 'idle', pr_creation_error = NULL,
+		    -- Only reset pr_push_state when no push is currently in flight.
+		    -- A concurrent turn-complete from the orchestrator must never
+		    -- silently overwrite an active push (the handler's in-flight 409
+		    -- guard relies on this column being authoritative).
+		    pr_push_state = CASE WHEN pr_push_state IN ('queued', 'pushing') THEN pr_push_state ELSE 'idle' END,
+		    pr_push_error = CASE WHEN pr_push_state IN ('queued', 'pushing') THEN pr_push_error ELSE NULL END,
 		    confidence_score = @confidence_score, confidence_reasoning = @confidence_reasoning,
 		    risk_factors = @risk_factors, token_usage = @token_usage,
-		    result_summary = @result_summary, diff = @diff, error = @error,
+		    result_summary = @result_summary,
+		    diff = COALESCE(@diff, diff),
+		    error = @error,
 		    base_commit_sha = COALESCE(@base_commit_sha, base_commit_sha),
-		    diff_collected_at = @diff_collected_at,
-		    diff_stats = @diff_stats,
+		    diff_collected_at = COALESCE(@diff_collected_at, diff_collected_at),
+		    diff_stats = COALESCE(@diff_stats, diff_stats),
 		    diff_history = ` + diffHistoryAppendSQL("@current_turn::int") + `
 		WHERE id = @id AND org_id = @org_id`
 
@@ -1384,6 +1407,64 @@ func (s *SessionStore) UpdatePRCreationState(ctx context.Context, orgID, session
 		SET pr_creation_state = @state, pr_creation_error = @err
 		WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL
 		  AND pr_creation_state <> 'succeeded'`
+	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
+		"id":     sessionID,
+		"org_id": orgID,
+		"state":  string(state),
+		"err":    errArg,
+	})
+	return err
+}
+
+// TryMarkPRPushQueued atomically transitions pr_push_state from any non-in-
+// flight state ('idle', 'succeeded', 'failed') to 'queued', clearing any
+// previous error. Returns (true, nil) when the row was updated, (false, nil)
+// when a concurrent request already moved the column to 'queued' or 'pushing'.
+//
+// The push handler uses this instead of UpdatePRPushState to start a push so
+// two concurrent API requests that both pass the in-memory precheck cannot
+// both transition the column to 'queued'. The handler's job-enqueue dedupe
+// key collapses the worker side onto a single job; this CAS gives the API
+// side the matching guarantee that exactly one of the racing requests
+// returns 202 and the other returns 409.
+func (s *SessionStore) TryMarkPRPushQueued(ctx context.Context, orgID, sessionID uuid.UUID) (bool, error) {
+	query := `UPDATE sessions
+		SET pr_push_state = 'queued', pr_push_error = NULL
+		WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL
+		  AND pr_push_state NOT IN ('queued', 'pushing')`
+	res, err := s.db.Exec(ctx, query, pgx.NamedArgs{
+		"id":     sessionID,
+		"org_id": orgID,
+	})
+	if err != nil {
+		return false, err
+	}
+	return res.RowsAffected() > 0, nil
+}
+
+// UpdatePRPushState transitions pr_push_state and sets/clears pr_push_error
+// atomically. Mirrors UpdatePRCreationState but does not treat `succeeded` as
+// terminal — a session can have its changes pushed multiple times across
+// follow-up turns, so the column must be free to cycle through the state
+// machine. Each new turn complete resets the column to `idle` separately.
+//
+// To start a new push (idle → queued) prefer TryMarkPRPushQueued, which
+// rejects races between concurrent submitters; this method is for downstream
+// transitions (queued → pushing → succeeded/failed) where the worker is the
+// sole writer.
+func (s *SessionStore) UpdatePRPushState(ctx context.Context, orgID, sessionID uuid.UUID, state models.PRPushState, errMsg string) error {
+	if err := state.Validate(); err != nil {
+		return err
+	}
+	var errArg any
+	if state == models.PRPushStateFailed && errMsg != "" {
+		errArg = errMsg
+	} else {
+		errArg = nil
+	}
+	query := `UPDATE sessions
+		SET pr_push_state = @state, pr_push_error = @err
+		WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL`
 	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
 		"id":     sessionID,
 		"org_id": orgID,

@@ -288,6 +288,16 @@ type DurableCheckpoint struct {
 	AgentSessionID string
 }
 
+// ContinueSessionOptions carries execution-scoped overrides for a follow-up
+// turn. Threaded sessions use this to run a tab with its selected agent/model
+// while keeping the parent session row as the shared sandbox/session identity.
+type ContinueSessionOptions struct {
+	AgentType            models.AgentType
+	ModelOverride        *string
+	ThreadAgentSessionID *string
+	ResultAgentSessionID *string
+}
+
 // OrchestratorConfig holds the dependencies for creating an Orchestrator.
 type OrchestratorConfig struct {
 	Provider          SandboxProvider
@@ -609,7 +619,7 @@ func (o *Orchestrator) RecoverSession(ctx context.Context, session *models.Sessi
 	}
 	event.Msg("recovering session from latest durable checkpoint")
 
-	return o.ContinueSession(ctx, session)
+	return o.ContinueSession(ctx, session, nil)
 }
 
 func (o *Orchestrator) beginRuntimeControl(ctx context.Context, controller *runtimeController, orgID, sessionID uuid.UUID, fallbackStatus string, capability models.CheckpointCapability, startedAt time.Time, log zerolog.Logger) error {
@@ -1369,11 +1379,28 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 			if sandbox.Metadata == nil {
 				sandbox.Metadata = make(map[string]string)
 			}
-			sandbox.Metadata["base_commit_sha"] = baseCommitSHA
+			sandbox.Metadata[SandboxMetadataBaseCommitSHA] = baseCommitSHA
 			run.BaseCommitSHA = &baseCommitSHA
 			if dbErr := o.sessions.UpdateBaseCommitSHA(ctx, run.OrgID, run.ID, baseCommitSHA); dbErr != nil {
 				log.Warn().Err(dbErr).Str("base_commit_sha", baseCommitSHA).Msg("failed to persist base commit sha")
 			}
+		}
+
+		// Stamp the resolved target branch (the branch we just cloned from —
+		// repo default unless the session overrode it) onto sandbox.Metadata
+		// so sessiondiff.Collect can compute a merge-base diff against
+		// origin/<branch>. Without this the diff is taken against the frozen
+		// baseCommitSHA, which inflates by the entire delta from base to HEAD
+		// whenever the user integrates the target branch back into the working
+		// branch (e.g. `git pull origin main` or merging main to resolve PR
+		// conflicts). Empty branch is unexpected in this path (we just cloned
+		// from it) but we guard anyway — Collect treats empty target branch
+		// as "fall back to baseCommitSHA".
+		if branch != "" {
+			if sandbox.Metadata == nil {
+				sandbox.Metadata = make(map[string]string)
+			}
+			sandbox.Metadata[SandboxMetadataTargetBranch] = branch
 		}
 
 		// 8b. Create a working branch so the agent operates on a separate
@@ -1627,8 +1654,8 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 //
 // Authorization: callers must verify the requesting user is authorized before
 // invoking this method. The SendMessage HTTP handler enforces this via org_id
-// scoping and ClaimIdle atomicity.
-func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Session) error {
+// scoping and ClaimIdleForSession atomicity.
+func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Session, opts *ContinueSessionOptions) error {
 	// Create a cancellable context. The cancel registry is populated later
 	// once the sandbox is available, so CancelSession can send SIGINT.
 	ctx, cancel := context.WithCancel(ctx)
@@ -1652,6 +1679,19 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	if session.PendingSnapshotKey != nil && *session.PendingSnapshotKey != "" {
 		log.Info().Str("pending_snapshot_key", *session.PendingSnapshotKey).Msg("continue_session waiting for post-PR snapshot upload to land")
 		return ErrSnapshotPending
+	}
+
+	parentAgentSessionID := ""
+	if session.AgentSessionID != nil {
+		parentAgentSessionID = *session.AgentSessionID
+	}
+	threadScopedExecution := opts != nil && opts.AgentType != ""
+	if threadScopedExecution {
+		executionSession := *session
+		executionSession.AgentType = opts.AgentType
+		executionSession.ModelOverride = opts.ModelOverride
+		executionSession.AgentSessionID = opts.ThreadAgentSessionID
+		session = &executionSession
 	}
 
 	// Determine whether we can restore from a snapshot or need a fresh start.
@@ -1816,6 +1856,12 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	integrationSkills := o.BuildIntegrationSkills(ctx, session.OrgID)
 	var authState *sandboxGitHubAuthState
 	var authErr error
+	// continueTargetBranch is the resolved target branch (repo default,
+	// overridden by session.TargetBranch) — captured during the repo lookup
+	// below and stamped onto sandbox.Metadata after sandbox setup so
+	// sessiondiff.Collect can compute a merge-base diff against
+	// origin/<branch>. Mirrors the branch resolved in RunAgent.
+	var continueTargetBranch string
 
 	// Wire the per-session GitHub credential helper for both fresh and
 	// reused containers. For reused containers (preview is holding the
@@ -1854,6 +1900,10 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 				"sandbox github auth",
 			)
 			return fmt.Errorf("fetch repository for auth: %w", repoErr)
+		}
+		continueTargetBranch = repo.DefaultBranch
+		if session.TargetBranch != nil && *session.TargetBranch != "" {
+			continueTargetBranch = *session.TargetBranch
 		}
 		var fallbackToken string
 		if !reusedExisting {
@@ -1953,6 +2003,33 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 			)
 			return fmt.Errorf("create sandbox: %w", err)
 		}
+	}
+	// Re-populate sandbox.Metadata["base_commit_sha"] from the DB so that
+	// sessiondiff.Collect can compute `git diff <base> -- .` (the cumulative
+	// session diff against the immutable base) instead of falling back to a
+	// plain `git diff` against the index. Without this, any continue turn
+	// run on a clean working tree (post-PR-push, post-merge) would collect
+	// an empty diff and overwrite the persisted authoritative diff, blanking
+	// out the Changes tab on the session page even though the PR clearly
+	// has changes. RunAgent sets this on the initial clone; the three setup
+	// branches above (reuse, hydrate, fresh-clone-on-continue) all leave
+	// Metadata empty, so we fix it here once for every continue path.
+	//
+	// Also re-stamp the resolved target branch so Collect can compute a
+	// merge-base diff against origin/<branch>. Without this the post-merge
+	// diff includes every commit pulled in from the target branch, inflating
+	// the Changes tab from the actual PR delta to the full base..HEAD range.
+	if session.BaseCommitSHA != nil && *session.BaseCommitSHA != "" {
+		if sandbox.Metadata == nil {
+			sandbox.Metadata = make(map[string]string)
+		}
+		sandbox.Metadata[SandboxMetadataBaseCommitSHA] = *session.BaseCommitSHA
+	}
+	if continueTargetBranch != "" {
+		if sandbox.Metadata == nil {
+			sandbox.Metadata = make(map[string]string)
+		}
+		sandbox.Metadata[SandboxMetadataTargetBranch] = continueTargetBranch
 	}
 	// Record the turn hold. AcquireTurnHold uses COALESCE so it is idempotent
 	// when we reused a container (the row's container_id already matches our
@@ -2110,28 +2187,63 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 			o.runSandboxGitBootstrap(ctx, sandbox, sandboxCfg.WorkDir, log)
 		}
 
-		var resumeSessionID string
-		if session.AgentSessionID != nil {
-			resumeSessionID = *session.AgentSessionID
-		}
 		commands := canonicalCommands(latestMsg, session.AgentType)
-		// UserMessage carries the user's textarea content verbatim, including
-		// any visible /command tokens. Run it through the same slash-command
-		// repair helper used by adapter.PreparePrompt so reused/snapshot-backed
-		// continuation turns cannot silently drop stored commands when the
-		// textarea and commands[] payload disagree.
-		prompt = &AgentPrompt{
-			Continuation:    true,
-			ResumeSessionID: resumeSessionID,
-			UserMessage:     EnsureSlashCommandsInPrompt(userMessage, commands),
-			MaxTokens:       tokenLimitForMode(session.TokenMode),
-			ReasoningEffort: func() models.ReasoningEffort {
-				if session.ReasoningEffort == nil {
-					return ""
-				}
-				return *session.ReasoningEffort
-			}(),
-			RevisionContext: revisionContext,
+		hasThreadAgentSessionID := session.AgentSessionID != nil && *session.AgentSessionID != ""
+		if threadScopedExecution && !hasThreadAgentSessionID {
+			input := &AgentInput{
+				Issue:        promptIssue,
+				LinkedIssues: linkedIssues,
+				Manual:       session.Origin == models.SessionOriginManual,
+				UserMessage:  userMessage,
+				References: func() []models.SessionInputReference {
+					refs := canonicalReferences(latestMsg)
+					if len(refs) > 0 {
+						return refs
+					}
+					if promptIssue != nil {
+						return manualSessionReferences(promptIssue)
+					}
+					return nil
+				}(),
+				Commands: commands,
+				ReasoningEffort: func() models.ReasoningEffort {
+					if session.ReasoningEffort == nil {
+						return ""
+					}
+					return *session.ReasoningEffort
+				}(),
+				TokenMode:         session.TokenMode,
+				RevisionContext:   revisionContext,
+				IntegrationSkills: integrationSkills,
+			}
+			prompt, err = adapter.PreparePrompt(ctx, input)
+			if err != nil {
+				o.failRun(ctx, session, fmt.Sprintf("prepare prompt for thread: %s", err))
+				return fmt.Errorf("prepare prompt for thread: %w", err)
+			}
+		} else {
+			var resumeSessionID string
+			if hasThreadAgentSessionID {
+				resumeSessionID = *session.AgentSessionID
+			}
+			// UserMessage carries the user's textarea content verbatim, including
+			// any visible /command tokens. Run it through the same slash-command
+			// repair helper used by adapter.PreparePrompt so reused/snapshot-backed
+			// continuation turns cannot silently drop stored commands when the
+			// textarea and commands[] payload disagree.
+			prompt = &AgentPrompt{
+				Continuation:    true,
+				ResumeSessionID: resumeSessionID,
+				UserMessage:     EnsureSlashCommandsInPrompt(userMessage, commands),
+				MaxTokens:       tokenLimitForMode(session.TokenMode),
+				ReasoningEffort: func() models.ReasoningEffort {
+					if session.ReasoningEffort == nil {
+						return ""
+					}
+					return *session.ReasoningEffort
+				}(),
+				RevisionContext: revisionContext,
+			}
 		}
 
 		if reusedExisting {
@@ -2268,6 +2380,13 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	if err := o.createAssistantMessage(ctx, session.ID, session.OrgID, threadID, turnNumber, result); err != nil {
 		log.Warn().Err(err).Msg("failed to create assistant message")
 	}
+	if opts != nil && opts.ResultAgentSessionID != nil {
+		threadAgentSessionID := result.AgentSessionID
+		if threadAgentSessionID == "" && opts.ThreadAgentSessionID != nil {
+			threadAgentSessionID = *opts.ThreadAgentSessionID
+		}
+		*opts.ResultAgentSessionID = threadAgentSessionID
+	}
 
 	// 8. Snapshot again.
 	newSnapshotKey, snapshotSize, snapshotErr := o.snapshotSessionOnTurnSuccess(ctx, session, sandbox, result, log)
@@ -2283,7 +2402,9 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 
 	// 9. Update turn complete — sets status to idle.
 	agentSessionID := result.AgentSessionID
-	if agentSessionID == "" && session.AgentSessionID != nil {
+	if threadScopedExecution {
+		agentSessionID = parentAgentSessionID
+	} else if agentSessionID == "" && session.AgentSessionID != nil {
 		agentSessionID = *session.AgentSessionID
 	}
 	snapshotKey := newSnapshotKey

@@ -28,6 +28,7 @@ import {
   MessageSquare,
   Paperclip,
   Pencil,
+  Plus,
 } from "lucide-react";
 import { notify as toast } from "@/lib/notify";
 import { Badge } from "@/components/ui/badge";
@@ -49,6 +50,14 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from "@/components/ui/table";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import {
   Select,
   SelectContent,
   SelectItem,
@@ -62,6 +71,7 @@ import {
   SheetTitle,
 } from "@/components/ui/sheet";
 import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { ChatTimeline } from "@/components/chat-timeline";
 import { SessionComposerTriggerPicker, flattenGroups, type TriggerPickerGroup, type TriggerPickerPosition } from "@/components/session-composer-trigger-picker";
@@ -95,7 +105,7 @@ import {
   resolveInitialSessionAnchor,
   writeStoredSessionScrollPosition,
 } from "@/lib/session-open-position";
-import type { ListResponse, Session, SessionDetail, SessionInputCommand, SessionInputReference, SessionLog, SessionMessage, SessionReviewComment, User, Validation, CodexAuthStatus, PullRequestHealthResponse, SingleResponse } from "@/lib/types";
+import type { ListResponse, Session, SessionDetail, SessionInputCommand, SessionInputReference, SessionLog, SessionMessage, SessionReviewComment, SessionThread, User, Validation, CodexAuthStatus, PullRequestHealthResponse, SingleResponse } from "@/lib/types";
 import { AuditLogTrigger } from "@/components/audit/audit-log-trigger";
 import { ResizeHandle } from "@/components/resize-handle";
 import { DiffStatsBadge, FileTree, SessionFooter, CommentsSummary, ReviewDiffView, PassSelector, type DiffPassEntry, type PassRange } from "@/components/code-review";
@@ -174,6 +184,99 @@ function checkResultBadge(result: string | null) {
   return <Badge variant="secondary" className="text-xs">{result}</Badge>;
 }
 
+function threadStatusLabel(status: string): string {
+  return statusConfig[status]?.label ?? status.replace(/_/g, " ");
+}
+
+function threadStatusDotClass(status: string): string {
+  switch (status) {
+    case "running":
+      return "bg-primary";
+    case "pending":
+      return "bg-muted-foreground";
+    case "awaiting_input":
+      return "bg-amber-500";
+    case "failed":
+      return "bg-destructive";
+    case "completed":
+      return "bg-emerald-500";
+    case "cancelled":
+      return "bg-muted-foreground/60";
+    default:
+      return "bg-sky-500";
+  }
+}
+
+function AgentThreadTabs({
+  threads,
+  activeThreadId,
+  onActiveThreadChange,
+  onAddTab,
+}: {
+  threads: SessionThread[];
+  activeThreadId: string | null;
+  onActiveThreadChange: (threadId: string) => void;
+  onAddTab: () => void;
+}) {
+  if (threads.length === 0 || !activeThreadId) {
+    return null;
+  }
+
+  return (
+    <div className="border-b border-border bg-background px-3 py-2 shrink-0">
+      <div className="flex items-center gap-2 min-w-0">
+        <Tabs value={activeThreadId} onValueChange={onActiveThreadChange} className="min-w-0 flex-1">
+          <TabsList
+            variant={threads.length > 1 ? "default" : "line"}
+            size="sm"
+            aria-label="Agent tabs"
+            className={cn(
+              "h-auto max-w-full justify-start gap-1 overflow-x-auto overflow-y-hidden",
+              threads.length === 1 ? "border-b-0 bg-transparent p-0" : "bg-muted/60 p-1",
+            )}
+          >
+            {threads.map((thread) => {
+              const agent = AGENTS_BY_KEY[thread.agent_type];
+              const agentLabel = agent?.label ?? thread.agent_type;
+              const statusLabel = threadStatusLabel(thread.status);
+              const needsAttention = thread.status === "awaiting_input" || thread.status === "failed";
+              return (
+                <TabsTrigger
+                  key={thread.id}
+                  value={thread.id}
+                  className={cn(
+                    "h-8 max-w-[15rem] gap-1.5 rounded-md px-2 text-xs",
+                    threads.length === 1 && "data-[state=active]:bg-transparent data-[state=active]:shadow-none",
+                  )}
+                  title={`${thread.label} — ${agentLabel} — ${statusLabel}`}
+                >
+                  <span className={cn("h-2 w-2 shrink-0 rounded-full", threadStatusDotClass(thread.status), thread.status === "running" && "animate-pulse")} />
+                  <span className="truncate">{thread.label}</span>
+                  <span className="hidden sm:inline text-muted-foreground">{"— "}{statusLabel.toLowerCase()}</span>
+                  {needsAttention && (
+                    <span className="h-1.5 w-1.5 rounded-full bg-amber-500" aria-label="Needs attention" />
+                  )}
+                </TabsTrigger>
+              );
+            })}
+          </TabsList>
+        </Tabs>
+        <Button
+          type="button"
+          size="icon"
+          variant="ghost"
+          className="h-8 w-8 shrink-0"
+          aria-label="Add agent tab"
+          title="Add agent tab"
+          onClick={onAddTab}
+        >
+          <Plus className="h-4 w-4" />
+        </Button>
+      </div>
+    </div>
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Detail panel tabs (shown in right sidebar)
 // ---------------------------------------------------------------------------
@@ -189,11 +292,12 @@ type PRAuthInterceptDetails = {
 
 // PRAuthPromptState is a discriminated union so merge prompts don't carry
 // create-PR-only fields (connect_url, resume_token, can_fallback_to_app).
-// create_pr prompts come from the backend's auth interception payload; merge
-// prompts are always synthesized client-side and connect via the hardcoded
-// /github/connect endpoint with no resume token and no fallback.
+// create_pr and push_changes prompts come from the backend's auth interception
+// payload; merge prompts are always synthesized client-side and connect via
+// the hardcoded /github/connect endpoint with no resume token and no fallback.
 type PRAuthPromptState =
   | ({ purpose: "create_pr" } & PRAuthInterceptDetails)
+  | ({ purpose: "push_changes" } & PRAuthInterceptDetails)
   | { purpose: "merge_pr" };
 
 type PRActionErrorState = {
@@ -693,6 +797,7 @@ function SessionComposer({
   repositoryId,
   branch,
   agentType,
+  targetLabel,
 }: {
   message: string;
   onMessageChange: (value: string) => void;
@@ -725,6 +830,7 @@ function SessionComposer({
   repositoryId?: string;
   branch?: string;
   agentType: string;
+  targetLabel?: string;
 }) {
   useEffect(() => {
     const el = textareaRef.current;
@@ -1065,7 +1171,9 @@ function SessionComposer({
                   ? "Session is not active"
                   : planMode
                     ? "Describe what you want to plan..."
-                    : "Send a follow-up message..."
+                    : targetLabel
+                      ? `Send a message to ${targetLabel}...`
+                      : "Send a follow-up message..."
             }
             disabled={!canSendMessage || sendPending}
             className="min-h-[44px] max-h-[200px] resize-none border-none bg-transparent shadow-none focus-visible:ring-0"
@@ -1291,6 +1399,7 @@ function SessionTimelineSkeleton() {
 function ChatPanel({
   session,
   sessionId,
+  activeThread,
   isActive,
   onDiffClick,
   onApprovePlan,
@@ -1299,6 +1408,7 @@ function ChatPanel({
 }: {
   session: Session;
   sessionId: string;
+  activeThread?: SessionThread;
   isActive: boolean;
   onDiffClick?: () => void;
   onApprovePlan?: () => void;
@@ -1322,14 +1432,30 @@ function ChatPanel({
     [user],
   );
 
-  const isRunning = session.status === "running";
+  const activeThreadId = activeThread?.id;
+  const isRunning = activeThread ? activeThread.status === "running" : session.status === "running";
   const isSnapshotExpired = session.sandbox_state === "destroyed";
   const canSendMessage = session.status !== "skipped" && session.status !== "pending" && !isSnapshotExpired;
 
   const timelineQuery = useQuery({
     queryKey: ["session", sessionId, "timeline"],
     queryFn: () => api.sessions.getTimeline(sessionId),
-    refetchInterval: isActive ? 3000 : false,
+    enabled: !activeThreadId,
+    refetchInterval: isActive && !activeThreadId ? 3000 : false,
+  });
+
+  const threadMessagesQuery = useQuery({
+    queryKey: activeThreadId ? queryKeys.sessions.threadMessages(sessionId, activeThreadId) : ["session", sessionId, "thread", "none", "messages"],
+    queryFn: () => api.sessions.getThreadMessages(sessionId, activeThreadId!),
+    enabled: !!activeThreadId,
+    refetchInterval: activeThread && ["pending", "running", "awaiting_input"].includes(activeThread.status) ? 3000 : false,
+  });
+
+  const threadLogsQuery = useQuery({
+    queryKey: activeThreadId ? queryKeys.sessions.threadLogs(sessionId, activeThreadId) : ["session", sessionId, "thread", "none", "logs"],
+    queryFn: () => api.sessions.getThreadLogs(sessionId, activeThreadId!),
+    enabled: !!activeThreadId,
+    refetchInterval: activeThread && ["pending", "running", "awaiting_input"].includes(activeThread.status) ? 3000 : false,
   });
 
   // Fetch the linked primary issue to display its description as the initial prompt.
@@ -1338,10 +1464,13 @@ function ChatPanel({
   const issueQuery = useQuery({
     queryKey: ["issue", primaryIssueId],
     queryFn: () => api.issues.get(primaryIssueId!),
-    enabled: hasIssue,
+    enabled: hasIssue && !activeThreadId,
   });
 
   const baseTimelineEntries = useMemo(() => {
+    if (activeThreadId) {
+      return buildTimeline(threadMessagesQuery.data?.data ?? [], threadLogsQuery.data?.data ?? []);
+    }
     const entries = buildTimelineFromResponse(timelineQuery.data?.data || []);
     const issueDescription = issueQuery.data?.data?.description;
     if (!issueDescription) return entries;
@@ -1357,7 +1486,7 @@ function ChatPanel({
       created_at: session.created_at,
     };
     return [{ kind: "message" as const, data: syntheticMsg }, ...entries];
-  }, [timelineQuery.data?.data, issueQuery.data?.data?.description, sessionId, session.org_id, session.created_at]);
+  }, [activeThreadId, threadMessagesQuery.data?.data, threadLogsQuery.data?.data, timelineQuery.data?.data, issueQuery.data?.data?.description, sessionId, session.org_id, session.created_at]);
 
   const timelineEntries = useMemo(() => {
     const fetchedLogIds = new Set<number>();
@@ -1416,7 +1545,9 @@ function ChatPanel({
     const overlayEntries = buildTimeline(planModeSeedMessages, overlayLogs).filter((entry) => entry.kind !== "message");
     return [...baseTimelineEntries, ...overlayEntries];
   }, [baseTimelineEntries, streamedLogs]);
-  const hasLoadedTimelineInputs = timelineQuery.isFetched && (!hasIssue || issueQuery.isFetched);
+  const hasLoadedTimelineInputs = activeThreadId
+    ? threadMessagesQuery.isFetched && threadLogsQuery.isFetched
+    : timelineQuery.isFetched && (!hasIssue || issueQuery.isFetched);
   // Skeleton only while we'd reasonably expect content: timeline still loading,
   // or session is active. Terminal sessions with empty timelines must not shimmer forever.
   const showLoadingSkeleton =
@@ -1476,6 +1607,22 @@ function ChatPanel({
     });
   }, []);
 
+  const mergeSessionStatusUpdate = useCallback((updated: Session) => {
+    queryClient.setQueryData<SingleResponse<SessionDetail>>(["session", sessionId], (existing) => {
+      if (!existing) {
+        return { data: { ...updated, threads: [] } };
+      }
+      return {
+        ...existing,
+        data: {
+          ...existing.data,
+          ...updated,
+          threads: updated.threads ?? existing.data.threads ?? [],
+        },
+      };
+    });
+  }, [queryClient, sessionId]);
+
   useEffect(() => {
     if (!isActive) return;
 
@@ -1495,28 +1642,42 @@ function ChatPanel({
       };
 
       addSSEListener(eventSource, SSE_EVENT.LOG, (log) => {
-        mergeLogs([log]);
+        if (!activeThreadId || log.thread_id === activeThreadId) {
+          mergeLogs([log]);
+        }
       });
 
       addSSEListener(eventSource, SSE_EVENT.STATUS, (updated) => {
-        queryClient.setQueryData(["session", sessionId], { data: updated });
+        mergeSessionStatusUpdate(updated);
         // When the session transitions out of running (e.g. sandbox creation
         // failure reverts to idle), fetch the latest messages so any error
         // message posted by the backend is displayed immediately.
         if (updated.status !== "running") {
           queryClient.invalidateQueries({ queryKey: ["session", sessionId, "timeline"] });
+          if (activeThreadId) {
+            queryClient.invalidateQueries({ queryKey: queryKeys.sessions.threadMessages(sessionId, activeThreadId) });
+            queryClient.invalidateQueries({ queryKey: queryKeys.sessions.threadLogs(sessionId, activeThreadId) });
+          }
         }
       });
 
       addSSEListener(eventSource, SSE_EVENT.DONE, (updated) => {
-        queryClient.setQueryData(["session", sessionId], { data: updated });
+        mergeSessionStatusUpdate(updated);
         eventSource?.close();
         queryClient.invalidateQueries({ queryKey: ["session", sessionId, "timeline"] });
+        if (activeThreadId) {
+          queryClient.invalidateQueries({ queryKey: queryKeys.sessions.threadMessages(sessionId, activeThreadId) });
+          queryClient.invalidateQueries({ queryKey: queryKeys.sessions.threadLogs(sessionId, activeThreadId) });
+        }
       });
 
       eventSource.onerror = () => {
         eventSource?.close();
         queryClient.invalidateQueries({ queryKey: ["session", sessionId, "timeline"] });
+        if (activeThreadId) {
+          queryClient.invalidateQueries({ queryKey: queryKeys.sessions.threadMessages(sessionId, activeThreadId) });
+          queryClient.invalidateQueries({ queryKey: queryKeys.sessions.threadLogs(sessionId, activeThreadId) });
+        }
 
         if (!cancelled && reconnectAttempts.current < MAX_SSE_RECONNECT_ATTEMPTS) {
           const delay =
@@ -1537,7 +1698,7 @@ function ChatPanel({
         clearTimeout(reconnectTimer.current);
       }
     };
-  }, [sessionId, apiBase, isActive, mergeLogs, queryClient]);
+  }, [sessionId, apiBase, isActive, mergeLogs, mergeSessionStatusUpdate, queryClient, activeThreadId]);
 
   // Track whether the user is scrolled near the bottom.
   const handleScroll = useCallback(() => {
@@ -1642,7 +1803,7 @@ function ChatPanel({
             }
           />
         )}
-        {session.status === "pending" && (
+        {(activeThread?.status === "pending" || (!activeThread && session.status === "pending")) && (
           <div className="flex items-center justify-center py-12">
             <div className="text-center space-y-2 max-w-[280px]">
               <Loader2 className="h-8 w-8 text-muted-foreground/40 mx-auto animate-spin" />
@@ -1671,6 +1832,7 @@ export function SessionDetailContent({ id }: { id: string }) {
   const [reviewParam, setReviewParam] = useQueryState("review");
   const [previewParam, setPreviewParam] = useQueryState("preview");
   const [resumePRParam, setResumePRParam] = useQueryState("resume_pr");
+  const [resumeActionParam, setResumeActionParam] = useQueryState("resume_action");
   const [githubPRParam, setGithubPRParam] = useQueryState("github_pr");
   const centerMode = reviewParam === "active" ? "review" : "chat";
   const [detailTab, setDetailTab] = useState<DetailTab>(
@@ -1746,6 +1908,8 @@ export function SessionDetailContent({ id }: { id: string }) {
   }, [centerMode, exitReview, setPreviewParam]);
   const [localPRState, setLocalPRState] = useState<"idle" | "submitting" | "queued">("idle");
   const [localPRActionError, setLocalPRActionError] = useState<PRActionErrorState | null>(null);
+  const [localPushState, setLocalPushState] = useState<"idle" | "submitting" | "queued">("idle");
+  const [localPushActionError, setLocalPushActionError] = useState<PRActionErrorState | null>(null);
   const [pendingPRAction, setPendingPRAction] = useState<"fix_tests" | "resolve_conflicts" | "merge" | null>(null);
   const [repairActionError, setRepairActionError] = useState<string | null>(null);
   const [prAuthPrompt, setPRAuthPrompt] = useState<PRAuthPromptState | null>(null);
@@ -1762,12 +1926,16 @@ export function SessionDetailContent({ id }: { id: string }) {
       const waitingForServer = localPRState !== "idle" &&
         s.pr_creation_state !== "failed" &&
         s.pr_creation_state !== "succeeded";
+      const pushInFlight = s.pr_push_state === "queued" || s.pr_push_state === "pushing";
+      const waitingForPushServer = localPushState !== "idle" &&
+        s.pr_push_state !== "failed" &&
+        s.pr_push_state !== "succeeded";
 
-      // Poll while PR creation is in flight so the state machine advances
-      // without waiting for the user to navigate. Keep polling during the
-      // optimistic local phases too, since the best-effort queued write can
-      // legitimately lag the 202 response.
-      return serverInFlight || waitingForServer ? 2000 : false;
+      // Poll while PR creation OR push-changes is in flight so the state
+      // machine advances without waiting for the user to navigate. Keep
+      // polling during the optimistic local phases too, since the best-effort
+      // queued write can legitimately lag the 202 response.
+      return serverInFlight || waitingForServer || pushInFlight || waitingForPushServer ? 2000 : false;
     },
   });
 
@@ -1778,11 +1946,26 @@ export function SessionDetailContent({ id }: { id: string }) {
 
   const session = data?.data;
   const members = membersData?.data ?? [];
+  const threads = useMemo(() => session?.threads ?? [], [session?.threads]);
+  const [activeThreadId, setActiveThreadId] = useState<string | null>(null);
+  const activeThread = threads.find((thread) => thread.id === activeThreadId) ?? threads[0];
   const isActive = session ? !terminalStatuses.has(session.status) : false;
   const isRunning = session?.status === "running";
   const currentTitle = session ? sessionTitle(session) : "";
 
   const queryClient = useQueryClient();
+
+  useEffect(() => {
+    if (threads.length === 0) {
+      if (activeThreadId !== null) {
+        setActiveThreadId(null);
+      }
+      return;
+    }
+    if (!activeThreadId || !threads.some((thread) => thread.id === activeThreadId)) {
+      setActiveThreadId(threads[0].id);
+    }
+  }, [activeThreadId, threads]);
 
   const updateSessionMutation = useMutation({
     mutationFn: (title: string) => api.sessions.update(id, { title }),
@@ -1883,6 +2066,34 @@ export function SessionDetailContent({ id }: { id: string }) {
     }
     prevPRUrlRef.current = prUrl;
   }, [localPRState, prUrl, session?.pr_creation_state]);
+
+  // React to pr_push_state transitions with toast feedback. Mirrors the
+  // pr_creation_state effect above; kept separate so the two operations'
+  // success/error messages don't collide when both fire on the same render.
+  // Also clears localPushState when the server transitions out of in-flight
+  // so the button returns to "Push changes" promptly without waiting for the
+  // next polling tick.
+  const prevPRPushStateRef = useRef<string | undefined>(undefined);
+  useEffect(() => {
+    const prev = prevPRPushStateRef.current;
+    const current = session?.pr_push_state;
+    if (prev && current && prev !== current) {
+      if (current === "succeeded") {
+        queryClient.invalidateQueries({ queryKey: ["session", id, "pr"] });
+        if (pullRequestId) {
+          queryClient.invalidateQueries({ queryKey: ["pull-request", pullRequestId, "health"] });
+        }
+        setLocalPushState("idle");
+        toast.success("Changes pushed to PR", prUrl ? {
+          action: { label: "View \u2197", onClick: () => window.open(prUrl, "_blank", "noopener,noreferrer") },
+        } : undefined);
+      } else if (current === "failed") {
+        setLocalPushState("idle");
+        toast.error(session?.pr_push_error || "Push to PR failed", { duration: PR_ERROR_TOAST_DURATION_MS });
+      }
+    }
+    prevPRPushStateRef.current = current;
+  }, [session?.pr_push_state, session?.pr_push_error, prUrl, queryClient, id, pullRequestId]);
   const startRepairMutation = useMutation({
     mutationFn: async (action: "fix_tests" | "resolve_conflicts") => {
       if (!pullRequestId) {
@@ -2045,10 +2256,11 @@ export function SessionDetailContent({ id }: { id: string }) {
 
   const clearPRResumeParams = useCallback(() => {
     void setResumePRParam(null);
+    void setResumeActionParam(null);
     if (githubPRParam === "connected") {
       void setGithubPRParam(null);
     }
-  }, [githubPRParam, setGithubPRParam, setResumePRParam]);
+  }, [githubPRParam, setGithubPRParam, setResumePRParam, setResumeActionParam]);
 
   const createPRMutation = useMutation({
     mutationFn: (options?: { draft?: boolean; authorMode?: PRAuthorMode; resumeToken?: string }) =>
@@ -2089,12 +2301,78 @@ export function SessionDetailContent({ id }: { id: string }) {
     },
   });
 
+  const pushChangesMutation = useMutation({
+    mutationFn: (options?: { authorMode?: PRAuthorMode; resumeToken?: string }) =>
+      api.sessions.pushChangesToPR(id, options),
+    onMutate: () => {
+      setLocalPushActionError(null);
+      setLocalPushState("submitting");
+    },
+    onSuccess: (_data, options) => {
+      setLocalPushActionError(null);
+      setLocalPushState("queued");
+      if (options?.resumeToken) {
+        clearPRResumeParams();
+      }
+      queryClient.invalidateQueries({ queryKey: ["session", id] });
+    },
+    onError: (err, options) => {
+      if (err instanceof ApiError &&
+        (err.code === "GITHUB_PR_AUTHORSHIP_REQUIRED" || err.code === "GITHUB_PR_AUTHORSHIP_REAUTH_REQUIRED") &&
+        isPRAuthInterceptDetails(err.details)) {
+        setLocalPushState("idle");
+        setLocalPushActionError(null);
+        setPRAuthPrompt({ ...err.details, purpose: "push_changes" });
+        clearPRResumeParams();
+        return;
+      }
+      setLocalPushState("idle");
+      const msg = err instanceof Error ? err.message : "Push to PR failed";
+      setLocalPushActionError({
+        code: err instanceof ApiError ? err.code : undefined,
+        message: msg,
+      });
+      if (options?.resumeToken) {
+        clearPRResumeParams();
+      }
+      toast.error(msg, { duration: PR_ERROR_TOAST_DURATION_MS });
+    },
+  });
+
   useEffect(() => {
-    if (!canCreatePR || !resumePRParam) return;
+    if (!resumePRParam) return;
     if (resumeAttemptRef.current === resumePRParam) return;
+    // Prefer the action recorded in the resume_action URL param: it was
+    // signed into the resume token at the originating endpoint and forwarded
+    // by the OAuth callback, so the replay is deterministic regardless of
+    // any state change during the GitHub round-trip (e.g. another tab
+    // creating the PR, or the PR getting closed). Fall back to the current
+    // PR state for legacy tokens that predate the resume_action param.
+    const action: "create_pr" | "push_changes" =
+      resumeActionParam === "push_changes"
+        ? "push_changes"
+        : resumeActionParam === "create_pr"
+          ? "create_pr"
+          : hasPR && prStatus === "open"
+            ? "push_changes"
+            : "create_pr";
+    if (action === "push_changes") {
+      // Mirror the canCreatePR gate on the create branch: don't fire the
+      // mutation until the session has a snapshot and isn't mid-turn.
+      // Without this, the OAuth callback firing while the session is still
+      // running would land an immediate 409 (or stale-snapshot error). The
+      // effect re-runs when these dependencies flip, so the replay still
+      // happens — just on the next tick when the session is actually ready.
+      const pushAvailable = hasPR && prStatus === "open";
+      if (!pushAvailable || !hasSnapshot || isRunning) return;
+      resumeAttemptRef.current = resumePRParam;
+      pushChangesMutation.mutate({ authorMode: "user", resumeToken: resumePRParam });
+      return;
+    }
+    if (!canCreatePR) return;
     resumeAttemptRef.current = resumePRParam;
     createPRMutation.mutate({ authorMode: "user", resumeToken: resumePRParam });
-  }, [canCreatePR, createPRMutation, resumePRParam]);
+  }, [canCreatePR, createPRMutation, hasPR, hasSnapshot, isRunning, prStatus, pushChangesMutation, resumeActionParam, resumePRParam]);
 
   const sessionDiff = session?.diff;
   const diffStats = useMemo(() => {
@@ -2179,6 +2457,10 @@ export function SessionDetailContent({ id }: { id: string }) {
   const [composerCommands, setComposerCommands] = useState<SessionInputCommand[]>([]);
   const [composerIsUploading, setComposerIsUploading] = useState(false);
   const [composerUploadError, setComposerUploadError] = useState<string | null>(null);
+  const [addThreadOpen, setAddThreadOpen] = useState(false);
+  const [newThreadAgentType, setNewThreadAgentType] = useState("codex");
+  const [newThreadModel, setNewThreadModel] = useState("");
+  const [newThreadLabel, setNewThreadLabel] = useState("");
   const composerTextareaRef = useRef<HTMLTextAreaElement>(null);
   const composerUploadInputRef = useRef<HTMLInputElement>(null);
   const chatPanelScrollToLiveEdgeRef = useRef<(() => void) | null>(null);
@@ -2191,18 +2473,25 @@ export function SessionDetailContent({ id }: { id: string }) {
     () => comments.filter((comment) => !comment.resolved).slice(0, MAX_RESOLVE_REVIEW_COMMENTS_PER_MESSAGE),
     [comments],
   );
-  const composerCanSendMessage = session?.status !== "skipped" && session?.status !== "pending" && session?.sandbox_state !== "destroyed";
-  const composerIsRunning = session?.status === "running";
+  const composerCanSendMessage = session?.status !== "skipped" &&
+    session?.status !== "pending" &&
+    session?.sandbox_state !== "destroyed" &&
+    (!activeThread || (session?.status !== "running" && activeThread.status === "idle"));
+  const composerIsRunning = activeThread ? activeThread.status === "running" : session?.status === "running";
   const composerIsSnapshotExpired = session?.sandbox_state === "destroyed";
-  const composerIsClaudeCode = session?.agent_type === "claude_code";
-  const composerLacksHeadlessResume = session ? (AGENTS_BY_KEY[session.agent_type]?.lacksHeadlessResume ?? false) : false;
+  const composerAgentType = activeThread?.agent_type ?? session?.agent_type ?? "codex";
+  const composerIsClaudeCode = composerAgentType === "claude_code";
+  const composerLacksHeadlessResume = AGENTS_BY_KEY[composerAgentType]?.lacksHeadlessResume ?? false;
   const composerAvailableModels = useMemo(() => {
     if (!session) {
       return [];
     }
-    const agentType = AGENTS.find((agent) => agent.key === session.agent_type);
+    const agentType = AGENTS.find((agent) => agent.key === composerAgentType);
     return agentType?.models ?? [];
-  }, [session]);
+  }, [composerAgentType, session]);
+  const activeThreadLabel = activeThread?.label ?? (session ? AGENTS_BY_KEY[session.agent_type]?.label ?? session.agent_type : "agent");
+  const selectedNewThreadAgent = AGENTS_BY_KEY[newThreadAgentType] ?? AGENTS[0];
+  const selectedNewThreadModels = selectedNewThreadAgent?.models ?? [];
 
   async function handleComposerUpload(event: React.ChangeEvent<HTMLInputElement>) {
     const fileList = event.target.files;
@@ -2243,12 +2532,21 @@ export function SessionDetailContent({ id }: { id: string }) {
       const isPlanRequest = opts.planMode ?? composerPlanMode;
       const resolveReviewCommentIDs = attachedReviewComments.map((comment) => comment.id);
 
-      return api.sessions.sendMessage(id, {
+      const body = {
         message: formattedMessage,
         images: composerAttachments.length > 0 ? composerAttachments : undefined,
         references: composerReferences.length > 0 ? composerReferences : undefined,
         commands: composerCommands.length > 0 ? composerCommands : undefined,
         planMode: isPlanRequest,
+      };
+
+      if (activeThread) {
+        return api.sessions.sendThreadMessage(id, activeThread.id, body)
+          .then((response) => ({ response, resolvedIDs: resolveReviewCommentIDs }));
+      }
+
+      return api.sessions.sendMessage(id, {
+        ...body,
         model: composerSelectedModel || undefined,
         resolveReviewCommentIDs: resolveReviewCommentIDs.length > 0 ? resolveReviewCommentIDs : undefined,
       }).then((response) => ({ response, resolvedIDs: resolveReviewCommentIDs }));
@@ -2268,6 +2566,10 @@ export function SessionDetailContent({ id }: { id: string }) {
       chatPanelScrollToLiveEdgeRef.current?.();
       queryClient.invalidateQueries({ queryKey: ["session", id] });
       queryClient.invalidateQueries({ queryKey: ["session", id, "timeline"] });
+      if (activeThread) {
+        queryClient.invalidateQueries({ queryKey: queryKeys.sessions.threadMessages(id, activeThread.id) });
+        queryClient.invalidateQueries({ queryKey: queryKeys.sessions.threadLogs(id, activeThread.id) });
+      }
       // Backend resolved the attached review comments inside the same tx as
       // the message. Optimistically flip them to resolved=true in the cache
       // so the "N comments attached" banner disappears immediately, then
@@ -2297,6 +2599,43 @@ export function SessionDetailContent({ id }: { id: string }) {
       queryClient.invalidateQueries({ queryKey: ["session", id] });
     },
   });
+
+  const createThreadMutation = useMutation({
+    mutationFn: () => {
+      const agent = AGENTS_BY_KEY[newThreadAgentType] ?? AGENTS[0];
+      const label = newThreadLabel.trim() || `${agent.label} ${threads.length + 1}`;
+      return api.sessions.createThread(id, {
+        agent_type: agent.key,
+        model: newThreadModel || undefined,
+        label,
+      });
+    },
+    onSuccess: (response) => {
+      queryClient.setQueryData<SingleResponse<SessionDetail>>(["session", id], (existing) => {
+        if (!existing) return existing;
+        const existingThreads = existing.data.threads ?? [];
+        return {
+          ...existing,
+          data: {
+            ...existing.data,
+            threads: [...existingThreads.filter((thread) => thread.id !== response.data.id), response.data],
+          },
+        };
+      });
+      setActiveThreadId(response.data.id);
+      setAddThreadOpen(false);
+      setNewThreadLabel("");
+      setNewThreadModel("");
+      queryClient.invalidateQueries({ queryKey: ["session", id] });
+    },
+    onError: (err) => {
+      toast.error(err instanceof Error ? err.message : "Failed to create tab");
+    },
+  });
+
+  useEffect(() => {
+    setNewThreadModel("");
+  }, [newThreadAgentType]);
 
   const handleApprovePlan = useCallback(() => {
     if (!composerCanSendMessage || sendMutation.isPending) return;
@@ -2440,6 +2779,52 @@ export function SessionDetailContent({ id }: { id: string }) {
   } else if (ghBlocked) {
     prActionDisabled = true;
     prActionTitle = "Connect your GitHub account to create PRs";
+  }
+
+  // Push-changes button derived state. Mirrors the PR creation block above
+  // but operates on session.pr_push_state. Rendered inside the PR health
+  // banner alongside Resolve conflicts / Fix tests / Merge so all PR-level
+  // actions live in one place; the backend exits cleanly with "no changes"
+  // if there is nothing to push, so we don't gate on a frontend-side dirty
+  // check.
+  const pushAvailable = hasPR && prStatus === "open";
+  const pushState = session.pr_push_state;
+  const queueingPush = localPushState === "submitting";
+  const pushingChanges =
+    (localPushState === "queued" && pushState !== "failed" && pushState !== "succeeded") ||
+    pushState === "queued" ||
+    pushState === "pushing";
+  const canPushChanges = pushAvailable && hasSnapshot && !isRunning;
+  const showPushAction = pushAvailable && (canPushChanges || queueingPush || pushingChanges || pushState === "failed" || localPushActionError);
+  let pushActionLabel = "Push changes";
+  let pushActionSpinning = false;
+  let pushActionDisabled = false;
+  let pushActionTitle: string | undefined;
+  if (queueingPush) {
+    pushActionLabel = "Queueing…";
+    pushActionSpinning = true;
+    pushActionDisabled = true;
+    pushActionTitle = "Sending the push request to the queue";
+  } else if (pushingChanges) {
+    pushActionLabel = "Pushing…";
+    pushActionSpinning = true;
+    pushActionDisabled = true;
+    pushActionTitle = "Pushing changes to the PR branch";
+  } else if (snapshotUnavailable) {
+    pushActionDisabled = true;
+    pushActionTitle = snapshotMessage;
+  } else if (localPushActionError) {
+    pushActionLabel = "Retry";
+    pushActionTitle = localPushActionError.message;
+  } else if (pushState === "failed") {
+    pushActionLabel = "Retry";
+    pushActionTitle = session.pr_push_error || "Push to PR failed";
+  } else if (ghBlocked) {
+    pushActionDisabled = true;
+    pushActionTitle = "Connect your GitHub account to push changes";
+  } else if (isRunning) {
+    pushActionDisabled = true;
+    pushActionTitle = "Wait for the session to finish before pushing";
   }
 
   function handleMergeAction() {
@@ -2595,6 +2980,14 @@ export function SessionDetailContent({ id }: { id: string }) {
                 onFixTests={() => startRepairMutation.mutate("fix_tests")}
                 onResolveConflicts={() => startRepairMutation.mutate("resolve_conflicts")}
                 onMerge={handleMergeAction}
+                pushChanges={showPushAction ? {
+                  label: pushActionLabel,
+                  disabled: pushActionDisabled,
+                  spinning: pushActionSpinning,
+                  showError: pushState === "failed" || !!localPushActionError,
+                  title: pushActionTitle,
+                  onClick: () => pushChangesMutation.mutate(undefined),
+                } : undefined}
               />
             ) : isPRHealthLoading ? (
               <Card className="border-border/60">
@@ -2760,14 +3153,27 @@ export function SessionDetailContent({ id }: { id: string }) {
           </Button>
         </div>
 
+        <AgentThreadTabs
+          threads={threads}
+          activeThreadId={activeThread?.id ?? null}
+          onActiveThreadChange={setActiveThreadId}
+          onAddTab={() => {
+            setNewThreadAgentType(session.agent_type || "codex");
+            setNewThreadModel("");
+            setNewThreadLabel("");
+            setAddThreadOpen(true);
+          }}
+        />
+
         {/* Center content — either chat or diff review */}
         <div className="flex-1 min-h-0 relative">
           {/* Chat panel — always mounted to preserve scroll, SSE connections, etc. */}
           <div className={cn("h-full", centerMode !== "chat" && "hidden")}>
             <ChatPanel
-              key={id}
+              key={activeThread ? `${id}:${activeThread.id}` : id}
               session={session}
               sessionId={id}
+              activeThread={activeThread}
               isActive={isActive}
               onDiffClick={() => openReview()}
               onApprovePlan={handleApprovePlan}
@@ -2854,7 +3260,8 @@ export function SessionDetailContent({ id }: { id: string }) {
               onCommandsChange={setComposerCommands}
               repositoryId={session.repository_id}
               branch={session.target_branch}
-              agentType={session.agent_type}
+              agentType={composerAgentType}
+              targetLabel={activeThread ? activeThreadLabel : undefined}
             />
           </>
         )}
@@ -2899,6 +3306,79 @@ export function SessionDetailContent({ id }: { id: string }) {
           {panelTabsEl}
         </SheetContent>
       </Sheet>
+      <Dialog open={addThreadOpen} onOpenChange={setAddThreadOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Add agent tab</DialogTitle>
+            <DialogDescription>
+              Create a blank tab in this sandbox. It will not run until you send the first message.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4">
+            <div className="space-y-2">
+              <Label className="text-xs" htmlFor="new-thread-agent">Agent</Label>
+              <Select value={newThreadAgentType} onValueChange={setNewThreadAgentType}>
+                <SelectTrigger id="new-thread-agent" aria-label="Agent">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {AGENTS.map((agent) => (
+                    <SelectItem key={agent.key} value={agent.key}>
+                      {agent.label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            {selectedNewThreadModels.length > 0 && (
+              <div className="space-y-2">
+                <Label className="text-xs" htmlFor="new-thread-model">Model</Label>
+                <Select value={newThreadModel || "__default"} onValueChange={(value) => setNewThreadModel(value === "__default" ? "" : value)}>
+                  <SelectTrigger id="new-thread-model" aria-label="Model">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="__default">Default model</SelectItem>
+                    {selectedNewThreadModels.map((model) => (
+                      <SelectItem key={model} value={model}>
+                        {model}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+            )}
+            <div className="space-y-2">
+              <Label className="text-xs" htmlFor="new-thread-label">Tab label</Label>
+              <Input
+                id="new-thread-label"
+                aria-label="Tab label"
+                value={newThreadLabel}
+                onChange={(event) => setNewThreadLabel(event.target.value)}
+                placeholder={`${selectedNewThreadAgent?.label ?? "Agent"} ${threads.length + 1}`}
+              />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => setAddThreadOpen(false)}
+              disabled={createThreadMutation.isPending}
+            >
+              Cancel
+            </Button>
+            <Button
+              type="button"
+              onClick={() => createThreadMutation.mutate()}
+              disabled={createThreadMutation.isPending}
+            >
+              {createThreadMutation.isPending && <Loader2 className="h-4 w-4 animate-spin" />}
+              Create tab
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
       <AlertDialog
         open={!!prAuthPrompt}
         onOpenChange={(open) => {
@@ -2910,12 +3390,16 @@ export function SessionDetailContent({ id }: { id: string }) {
             <AlertDialogTitle>
               {prAuthPrompt?.purpose === "merge_pr"
                 ? "Merge this pull request as yourself?"
-                : "Open this pull request as yourself?"}
+                : prAuthPrompt?.purpose === "push_changes"
+                  ? "Push these changes as yourself?"
+                  : "Open this pull request as yourself?"}
             </AlertDialogTitle>
             <AlertDialogDescription>
               {prAuthPrompt?.purpose === "merge_pr"
                 ? "Authorize GitHub once to merge pull requests as you."
-                : "Authorize GitHub once to open PRs as you. If you skip this, 143 can still open the PR as the app."}
+                : prAuthPrompt?.purpose === "push_changes"
+                  ? "Authorize GitHub once to push as you. If you skip this, 143 can still push the commits as the app."
+                  : "Authorize GitHub once to open PRs as you. If you skip this, 143 can still open the PR as the app."}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
@@ -2930,12 +3414,25 @@ export function SessionDetailContent({ id }: { id: string }) {
                 Create as 143
               </AlertDialogCancel>
             ) : null}
+            {prAuthPrompt?.purpose === "push_changes" && prAuthPrompt.can_fallback_to_app ? (
+              <AlertDialogCancel
+                onClick={(event) => {
+                  event.preventDefault();
+                  setPRAuthPrompt(null);
+                  pushChangesMutation.mutate({ authorMode: "app" });
+                }}
+              >
+                Push as 143
+              </AlertDialogCancel>
+            ) : null}
             <AlertDialogAction
               onClick={(event) => {
                 event.preventDefault();
                 if (!prAuthPrompt) return;
                 const resumeToken =
-                  prAuthPrompt.purpose === "create_pr" ? prAuthPrompt.resume_token : undefined;
+                  prAuthPrompt.purpose === "create_pr" || prAuthPrompt.purpose === "push_changes"
+                    ? prAuthPrompt.resume_token
+                    : undefined;
                 api.githubStatus.connect(resumeToken || undefined);
               }}
             >

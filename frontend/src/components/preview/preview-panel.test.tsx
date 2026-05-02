@@ -174,35 +174,67 @@ describe("PreviewPanel component", () => {
 
   /* ---------- Starting status ---------- */
 
-  it("shows Stop and Restart buttons and Building badge during starting status", async () => {
-    mockGet.mockResolvedValue(makePreviewStatus({ status: "starting" }));
+  it("shows preview-first startup canvas and subtle controls during starting status", async () => {
+    mockGet.mockResolvedValue(
+      makePreviewStatus(
+        { status: "starting" },
+        [],
+        [
+          {
+            id: "infra-1",
+            preview_instance_id: "prev-1",
+            infra_name: "postgres",
+            template: "postgres",
+            container_id: "ctr-1",
+            status: "provisioning",
+            host: "postgres",
+            port: 5432,
+            created_at: "2026-01-01T00:00:00Z",
+          },
+        ],
+      ),
+    );
 
     renderWithProviders(<PreviewPanel {...DEFAULT_PROPS} />);
 
     await waitFor(() => {
-      // "Building" appears in both badge and progress label, use getAllByText
-      expect(screen.getAllByText("Starting").length).toBeGreaterThanOrEqual(1);
+      expect(screen.getByText("Preparing preview")).toBeInTheDocument();
     });
 
-    expect(screen.getByText("Stop")).toBeInTheDocument();
-    expect(screen.getByText("Restart")).toBeInTheDocument();
-    // Start button should NOT be visible
+    expect(screen.getByText("Provisioning postgres")).toBeInTheDocument();
+    expect(screen.getByText("Provisioning")).toBeInTheDocument();
+    expect(screen.getByText("Starting")).toBeInTheDocument();
+    expect(screen.getByText("Opening")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Stop preview" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Restart preview" })).toBeInTheDocument();
     expect(screen.queryByText("Start Preview")).not.toBeInTheDocument();
   });
 
-  it("renders progress bar status labels during starting status", async () => {
+  it("hides the Provisioning rail tile when the preview has no infrastructure", async () => {
     mockGet.mockResolvedValue(makePreviewStatus({ status: "starting" }));
 
     renderWithProviders(<PreviewPanel {...DEFAULT_PROPS} />);
 
     await waitFor(() => {
-      expect(screen.getAllByText("Starting").length).toBeGreaterThanOrEqual(1);
+      expect(screen.getByText("Preparing preview")).toBeInTheDocument();
     });
 
-    // Progress bar shows status labels from STATUS_ORDER
-    expect(screen.getAllByText("Starting").length).toBeGreaterThanOrEqual(1);
-    // "Ready" appears in the progress bar status labels
-    expect(screen.getByText("Ready")).toBeInTheDocument();
+    expect(screen.queryByText("Provisioning")).not.toBeInTheDocument();
+    expect(screen.getByText("Starting")).toBeInTheDocument();
+    expect(screen.getByText("Opening")).toBeInTheDocument();
+  });
+
+  it("does not show duplicated startup guidance or checklist by default", async () => {
+    mockGet.mockResolvedValue(makePreviewStatus({ status: "starting" }));
+
+    renderWithProviders(<PreviewPanel {...DEFAULT_PROPS} />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Preparing preview")).toBeInTheDocument();
+    });
+
+    expect(screen.queryByText("Preview startup can take a few minutes.")).not.toBeInTheDocument();
+    expect(screen.queryByText("Startup checklist")).not.toBeInTheDocument();
   });
 
   /* ---------- Starting status (active controls) ---------- */
@@ -213,12 +245,11 @@ describe("PreviewPanel component", () => {
     renderWithProviders(<PreviewPanel {...DEFAULT_PROPS} />);
 
     await waitFor(() => {
-      // "Pending" appears in both badge and progress bar
-      expect(screen.getAllByText("Starting").length).toBeGreaterThanOrEqual(1);
+      expect(screen.getByText("Preparing preview")).toBeInTheDocument();
     });
 
-    expect(screen.getByText("Stop")).toBeInTheDocument();
-    expect(screen.getByText("Restart")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Stop preview" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Restart preview" })).toBeInTheDocument();
   });
 
   /* ---------- Ready phase ---------- */
@@ -306,6 +337,23 @@ describe("PreviewPanel component", () => {
     });
 
     expect(screen.getByTitle("Preview")).toBeInTheDocument();
+  });
+
+  it("unmounts the startup canvas and restores top controls in partially_ready state", async () => {
+    mockGet.mockResolvedValue(
+      makePreviewStatus({ status: "partially_ready", id: "prev-1" }),
+    );
+
+    renderWithProviders(<PreviewPanel {...DEFAULT_PROPS} />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Partially Ready")).toBeInTheDocument();
+    });
+
+    expect(screen.queryByText("Preparing preview")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Stop preview" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Stop/ })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Restart/ })).toBeInTheDocument();
   });
 
   /* ---------- Failed phase ---------- */
@@ -465,22 +513,16 @@ describe("PreviewPanel component", () => {
     expect(badge.className).toContain("text-destructive");
   });
 
-  it("applies primary color class for starting status badge", async () => {
+  it("uses one primary starting label in the startup canvas", async () => {
     mockGet.mockResolvedValue(makePreviewStatus({ status: "starting" }));
 
     renderWithProviders(<PreviewPanel {...DEFAULT_PROPS} />);
 
     await waitFor(() => {
-      expect(screen.getAllByText("Starting").length).toBeGreaterThanOrEqual(1);
+      expect(screen.getByText("Preparing preview")).toBeInTheDocument();
     });
 
-    // The badge is inside a span with data-slot="badge"
-    const badges = screen.getAllByText("Starting");
-    const badgeEl = badges
-      .map((el) => el.closest("[data-slot='badge']"))
-      .find(Boolean);
-    expect(badgeEl).toBeTruthy();
-    expect(badgeEl!.className).toContain("text-primary");
+    expect(screen.getAllByText("Starting")).toHaveLength(1);
   });
 
   it("applies amber color class for partially_ready phase badge", async () => {
@@ -496,26 +538,6 @@ describe("PreviewPanel component", () => {
 
     const badge = screen.getByText("Partially Ready").closest("[class]")!;
     expect(badge.className).toContain("text-amber-600");
-  });
-
-  /* ---------- Progress bar values via style width ---------- */
-
-  it("renders progress bar at 50% for starting status", async () => {
-    mockGet.mockResolvedValue(makePreviewStatus({ status: "starting" }));
-
-    const { container } = renderWithProviders(
-      <PreviewPanel {...DEFAULT_PROPS} />,
-    );
-
-    await waitFor(() => {
-      expect(screen.getAllByText("Starting").length).toBeGreaterThanOrEqual(1);
-    });
-
-    // STATUS_ORDER = ["starting", "partially_ready", "ready"], so starting = (1/3)*100
-    const progressBar = container.querySelector(
-      ".bg-primary.rounded-full.transition-all",
-    );
-    expect(progressBar).toHaveStyle({ width: `${(1 / 3) * 100}%` });
   });
 
   /* ---------- Start mutation ---------- */
@@ -561,21 +583,8 @@ describe("PreviewPanel component", () => {
     expect(button.querySelector("svg.lucide-play")).not.toBeInTheDocument();
   });
 
-  it("shows startup guidance while the preview is being created", async () => {
-    mockGet.mockResolvedValue(makePreviewStatus({ status: "starting" }));
-
-    renderWithProviders(<PreviewPanel {...DEFAULT_PROPS} />);
-
-    await waitFor(() => {
-      expect(screen.getByText("Preview startup can take a few minutes.")).toBeInTheDocument();
-    });
-
-    expect(
-      screen.getByText("You can stay here while we spin up the environment and bring services online."),
-    ).toBeInTheDocument();
-  });
-
-  it("renders a startup checklist from infrastructure and service state", async () => {
+  it("keeps infrastructure and service details collapsed until requested", async () => {
+    const user = userEvent.setup();
     mockGet.mockResolvedValue(
       makePreviewStatus(
         { status: "starting" },
@@ -611,8 +620,13 @@ describe("PreviewPanel component", () => {
     renderWithProviders(<PreviewPanel {...DEFAULT_PROPS} />);
 
     await waitFor(() => {
-      expect(screen.getByText("Startup checklist")).toBeInTheDocument();
+      expect(screen.getByText("Preparing preview")).toBeInTheDocument();
     });
+
+    expect(screen.queryByText("postgres is provisioning")).not.toBeInTheDocument();
+    expect(screen.queryByText("web is starting")).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Details" }));
 
     expect(screen.getByText("Spin up infrastructure")).toBeInTheDocument();
     expect(screen.getByText("postgres is provisioning")).toBeInTheDocument();
@@ -622,6 +636,7 @@ describe("PreviewPanel component", () => {
   });
 
   it("renders orphaned pending children as terminal when the parent preview failed", async () => {
+    const user = userEvent.setup();
     mockGet.mockResolvedValue(
       makePreviewStatus(
         { status: "failed", error: "provider start preview failed" },
@@ -657,8 +672,10 @@ describe("PreviewPanel component", () => {
     renderWithProviders(<PreviewPanel {...DEFAULT_PROPS} />);
 
     await waitFor(() => {
-      expect(screen.getByText("Startup checklist")).toBeInTheDocument();
+      expect(screen.getByText("Preview failed to start")).toBeInTheDocument();
     });
+
+    await user.click(screen.getByRole("button", { name: /Details/ }));
 
     expect(screen.getByText("postgres did not finish provisioning")).toBeInTheDocument();
     expect(screen.getByText("web did not finish starting")).toBeInTheDocument();
@@ -685,6 +702,23 @@ describe("PreviewPanel component", () => {
     });
   });
 
+  it("calls stop mutation from the starting preview canvas", async () => {
+    const user = userEvent.setup();
+    mockGet.mockResolvedValue(makePreviewStatus({ status: "starting" }));
+
+    renderWithProviders(<PreviewPanel {...DEFAULT_PROPS} />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Stop preview" })).toBeInTheDocument();
+    });
+
+    await user.click(screen.getByRole("button", { name: "Stop preview" }));
+
+    await waitFor(() => {
+      expect(mockStop).toHaveBeenCalledWith("sess-1");
+    });
+  });
+
   /* ---------- Restart mutation ---------- */
 
   it("calls restart mutation when Restart button is clicked", async () => {
@@ -698,6 +732,23 @@ describe("PreviewPanel component", () => {
     });
 
     await user.click(screen.getByText("Restart"));
+
+    await waitFor(() => {
+      expect(mockRestart).toHaveBeenCalledWith("sess-1");
+    });
+  });
+
+  it("calls restart mutation from the starting preview canvas", async () => {
+    const user = userEvent.setup();
+    mockGet.mockResolvedValue(makePreviewStatus({ status: "starting" }));
+
+    renderWithProviders(<PreviewPanel {...DEFAULT_PROPS} />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Restart preview" })).toBeInTheDocument();
+    });
+
+    await user.click(screen.getByRole("button", { name: "Restart preview" }));
 
     await waitFor(() => {
       expect(mockRestart).toHaveBeenCalledWith("sess-1");

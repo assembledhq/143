@@ -61,9 +61,27 @@ var workerSessionColumns = []string{
 	"checkpointed_at", "checkpoint_kind", "checkpoint_capability", "checkpoint_size_bytes", "checkpoint_error",
 	"recovery_state", "recovery_queued_at", "recovery_started_at", "recovery_attempt_count",
 	"target_branch", "working_branch", "base_commit_sha", "repository_id", "diff_stats", "diff_history", "input_manifest",
-	"archived_at", "archived_by_user_id", "automation_run_id", "pr_creation_state", "pr_creation_error", "diff_collected_at", "latest_diff_snapshot_id",
+	"archived_at", "archived_by_user_id", "automation_run_id", "pr_creation_state", "pr_creation_error", "pr_push_state", "pr_push_error", "diff_collected_at", "latest_diff_snapshot_id",
 	"linear_private", "linear_state_sync_disabled", "linear_identifier_hint", "linear_prepare_state",
 	"deleted_at", "git_identity_source", "git_identity_user_id", "created_at",
+}
+
+var workerSessionThreadColumns = []string{
+	"id", "session_id", "org_id", "agent_type", "model_override",
+	"label", "instructions", "file_scope", "status", "agent_session_id", "current_turn", "last_activity_at",
+	"confidence_score", "result_summary", "diff", "failure_explanation", "failure_category",
+	"started_at", "completed_at", "created_at",
+}
+
+func workerSessionThreadRow(threadID, sessionID, orgID uuid.UUID, agentType models.AgentType, modelOverride *string, status models.ThreadStatus) []any {
+	now := time.Now()
+	nowPtr := &now
+	return []any{
+		threadID, sessionID, orgID, agentType, modelOverride,
+		"Thread", nil, []string{}, status, nil, 1, nowPtr,
+		nil, nil, nil, nil, nil,
+		nowPtr, nil, now,
+	}
 }
 
 const (
@@ -227,15 +245,17 @@ func workerSessionTestRow(values ...any) []any {
 // workerSessionTestRowDispatch with nil values for columns added after the
 // fixture conventions were settled: the pending-snapshot pair
 // (pending_snapshot_key + pending_snapshot_set_at, between snapshot_key and
-// runtime_soft_deadline_at) and the trailing git_identity_source /
-// git_identity_user_id pair (immediately before created_at). Existing
-// fixtures emit a "pre-pending, pre-identity" row; we pad it to the
-// current layout without touching every call site.
+// runtime_soft_deadline_at), the pr_push pair (pr_push_state + pr_push_error,
+// between pr_creation_error and diff_collected_at), and the trailing
+// git_identity_source / git_identity_user_id pair (immediately before
+// created_at). Existing fixtures emit a "pre-pending, pre-pr_push,
+// pre-identity" row; we pad it to the current layout without touching every
+// call site.
 func padWorkerIdentityNils(row []any) []any {
 	if len(row) >= len(workerSessionColumns) {
 		return row
 	}
-	if len(row) != len(workerSessionColumns)-4 {
+	if len(row) != len(workerSessionColumns)-6 {
 		return row
 	}
 	const pendingSnapshotKeyIndex = 42
@@ -244,10 +264,23 @@ func padWorkerIdentityNils(row []any) []any {
 	withPending = append(withPending, nil, nil) // pending_snapshot_key, pending_snapshot_set_at
 	withPending = append(withPending, row[pendingSnapshotKeyIndex:]...)
 
+	// Insert the pr_push pair right after pr_creation_error (and before
+	// diff_collected_at). In the post-pending row, diff_collected_at sits at
+	// index 74 (the +2 shift from the pre-pending layout where it was at 72).
+	// The pr_push pair lands immediately before it. Use "idle" (not nil) for
+	// pr_push_state because the model's field is a non-pointer PRPushState —
+	// a NULL would fail pgx scanning. The migration mirrors this with NOT
+	// NULL DEFAULT 'idle'.
+	const prPushStateIndex = 74
+	withPRPush := make([]any, 0, len(withPending)+2)
+	withPRPush = append(withPRPush, withPending[:prPushStateIndex]...)
+	withPRPush = append(withPRPush, "idle", (*string)(nil)) // pr_push_state, pr_push_error
+	withPRPush = append(withPRPush, withPending[prPushStateIndex:]...)
+
 	padded := make([]any, 0, len(workerSessionColumns))
-	padded = append(padded, withPending[:len(withPending)-1]...)
+	padded = append(padded, withPRPush[:len(withPRPush)-1]...)
 	padded = append(padded, nil, nil)
-	padded = append(padded, withPending[len(withPending)-1])
+	padded = append(padded, withPRPush[len(withPRPush)-1])
 	return padded
 }
 
@@ -353,7 +386,7 @@ type orchestratorServiceStub struct {
 	continueSessionCalls int
 	recoverSessionCalls  int
 	runAgentFn           func(ctx context.Context, run *models.Session) error
-	continueSessionFn    func(ctx context.Context, session *models.Session) error
+	continueSessionFn    func(ctx context.Context, session *models.Session, opts *agent.ContinueSessionOptions) error
 	recoverSessionFn     func(ctx context.Context, session *models.Session) error
 	sessionTimeout       time.Duration
 	runtimeCeiling       time.Duration
@@ -367,10 +400,10 @@ func (s *orchestratorServiceStub) RunAgent(ctx context.Context, run *models.Sess
 	return nil
 }
 
-func (s *orchestratorServiceStub) ContinueSession(ctx context.Context, session *models.Session) error {
+func (s *orchestratorServiceStub) ContinueSession(ctx context.Context, session *models.Session, opts *agent.ContinueSessionOptions) error {
 	s.continueSessionCalls++
 	if s.continueSessionFn != nil {
-		return s.continueSessionFn(ctx, session)
+		return s.continueSessionFn(ctx, session, opts)
 	}
 	return nil
 }
@@ -1312,6 +1345,7 @@ type mockPMService struct {
 
 type stubPRService struct {
 	createPRFn                func(ctx context.Context, run *models.Session, params ...ghservice.CreatePRParams) (*models.PullRequest, error)
+	pushChangesToPRFn         func(ctx context.Context, run *models.Session, params ...ghservice.CreatePRParams) (*models.PullRequest, error)
 	syncPullRequestStateFn    func(context.Context, uuid.UUID, uuid.UUID) error
 	reconcilePullRequestFn    func(context.Context, uuid.UUID, int) error
 	enrichPullRequestHealthFn func(context.Context, uuid.UUID, uuid.UUID, int64) error
@@ -1320,6 +1354,13 @@ type stubPRService struct {
 func (s *stubPRService) CreatePR(ctx context.Context, run *models.Session, params ...ghservice.CreatePRParams) (*models.PullRequest, error) {
 	if s.createPRFn != nil {
 		return s.createPRFn(ctx, run, params...)
+	}
+	return nil, nil
+}
+
+func (s *stubPRService) PushChangesToPR(ctx context.Context, run *models.Session, params ...ghservice.CreatePRParams) (*models.PullRequest, error) {
+	if s.pushChangesToPRFn != nil {
+		return s.pushChangesToPRFn(ctx, run, params...)
 	}
 	return nil, nil
 }
@@ -1374,6 +1415,192 @@ func newWorkerSessionRow(sessionID, orgID uuid.UUID, now time.Time, snapshotKey 
 		nil, nil, nil, nil, nil, nil, nil,
 		nil, nil, nil, "queued", (*string)(nil), nil, nil, nil, now,
 	)
+}
+
+func TestPushPRChangesHandler_SuccessMarksPushingAndSucceeded(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	now := time.Now()
+	snapshotKey := "snap-push-pr-success"
+
+	mock.ExpectQuery("SELECT .* FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(newWorkerSessionRow(sessionID, orgID, now, &snapshotKey)...))
+	// Two state-machine writes: pushing → succeeded.
+	mock.ExpectExec("UPDATE sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectExec("UPDATE sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	called := false
+	services := &Services{
+		PR: &stubPRService{
+			pushChangesToPRFn: func(ctx context.Context, run *models.Session, params ...ghservice.CreatePRParams) (*models.PullRequest, error) {
+				called = true
+				return &models.PullRequest{ID: uuid.New(), OrgID: orgID}, nil
+			},
+		},
+	}
+
+	handler := newPushPRChangesHandler(stores, services, zerolog.Nop())
+	payload := json.RawMessage(`{"session_id":"` + sessionID.String() + `","org_id":"` + orgID.String() + `"}`)
+	err := handler(context.Background(), "push_pr_changes", payload)
+
+	require.NoError(t, err, "push_pr_changes handler should succeed when PR push succeeds")
+	require.True(t, called, "push_pr_changes handler should invoke PRService.PushChangesToPR")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestPushPRChangesHandler_PendingSnapshotRetriesWithoutMarkingPushing(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	now := time.Now()
+	snapshotKey := "snap-push-pr-pending"
+	pendingSnapshotKey := "snapshots/session/post-pr.tar.zst"
+	row := newWorkerSessionRow(sessionID, orgID, now, &snapshotKey)
+	for i, col := range workerSessionColumns {
+		if col == "pending_snapshot_key" {
+			row[i] = &pendingSnapshotKey
+			break
+		}
+	}
+
+	mock.ExpectQuery("SELECT .* FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(row...))
+
+	called := false
+	services := &Services{
+		PR: &stubPRService{
+			pushChangesToPRFn: func(ctx context.Context, run *models.Session, params ...ghservice.CreatePRParams) (*models.PullRequest, error) {
+				called = true
+				return nil, nil
+			},
+		},
+	}
+
+	handler := newPushPRChangesHandler(stores, services, zerolog.Nop())
+	payload := json.RawMessage(`{"session_id":"` + sessionID.String() + `","org_id":"` + orgID.String() + `"}`)
+	err := handler(context.Background(), "push_pr_changes", payload)
+
+	var retryable *RetryableError
+	require.ErrorAs(t, err, &retryable, "pending snapshot should requeue push_pr_changes without consuming an attempt")
+	require.ErrorIs(t, retryable.Err, agent.ErrSnapshotPending, "retryable error should preserve the pending-snapshot sentinel")
+	require.False(t, called, "push_pr_changes handler should not invoke PRService while snapshot upload is pending")
+	require.NoError(t, mock.ExpectationsWereMet(), "handler should not write pushing state while snapshot upload is pending")
+}
+
+// Regression: a worker retry of a push that already landed re-runs the push
+// script which exits cleanly with ErrNoChanges (HEAD is ancestor of @{u}). The
+// handler must mark the operation succeeded so the user doesn't see a
+// misleading "failed" toast — pr_push_state = succeeded reflects the truth
+// that the PR's branch already has the session's commits.
+func TestPushPRChangesHandler_NoChangesIsTreatedAsSuccess(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	now := time.Now()
+	snapshotKey := "snap-push-pr-no-changes"
+
+	mock.ExpectQuery("SELECT .* FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(newWorkerSessionRow(sessionID, orgID, now, &snapshotKey)...))
+	// pushing → succeeded (NOT failed, despite the error from the service).
+	mock.ExpectExec("UPDATE sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectExec("UPDATE sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	services := &Services{
+		PR: &stubPRService{
+			pushChangesToPRFn: func(ctx context.Context, run *models.Session, params ...ghservice.CreatePRParams) (*models.PullRequest, error) {
+				return nil, ghservice.ErrNoChanges
+			},
+		},
+	}
+
+	handler := newPushPRChangesHandler(stores, services, zerolog.Nop())
+	payload := json.RawMessage(`{"session_id":"` + sessionID.String() + `","org_id":"` + orgID.String() + `"}`)
+	err := handler(context.Background(), "push_pr_changes", payload)
+
+	require.NoError(t, err, "push_pr_changes handler should swallow ErrNoChanges as a benign no-op")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met (succeeded write must fire, not failed)")
+}
+
+func TestPushPRChangesHandler_TerminalErrorBecomesFatal(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		err  error
+	}{
+		{name: "snapshot expired", err: ghservice.ErrSnapshotExpired},
+		// Legacy PRs can never succeed at push time — no head_ref means we
+		// can't safely identify the branch — so the worker must dead-letter
+		// rather than retry forever. The user-facing message tells the user
+		// to create a new PR.
+		{name: "legacy PR missing head_ref", err: ghservice.ErrLegacyPRMissingHeadRef},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			stores, mock := newTestStores(t)
+			defer mock.Close()
+
+			orgID := uuid.New()
+			sessionID := uuid.New()
+			now := time.Now()
+			snapshotKey := "snap-push-pr-fatal-" + tt.name
+
+			mock.ExpectQuery("SELECT .* FROM sessions").
+				WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+				WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(newWorkerSessionRow(sessionID, orgID, now, &snapshotKey)...))
+			// pushing → failed.
+			mock.ExpectExec("UPDATE sessions").
+				WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+				WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+			mock.ExpectExec("UPDATE sessions").
+				WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+				WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+			services := &Services{
+				PR: &stubPRService{
+					pushChangesToPRFn: func(ctx context.Context, run *models.Session, params ...ghservice.CreatePRParams) (*models.PullRequest, error) {
+						return nil, tt.err
+					},
+				},
+			}
+
+			handler := newPushPRChangesHandler(stores, services, zerolog.Nop())
+			payload := json.RawMessage(`{"session_id":"` + sessionID.String() + `","org_id":"` + orgID.String() + `"}`)
+			err := handler(context.Background(), "push_pr_changes", payload)
+
+			var fatalErr *FatalError
+			require.ErrorAs(t, err, &fatalErr, "push_pr_changes should dead-letter terminal errors instead of retrying")
+			require.ErrorIs(t, fatalErr, tt.err, "push_pr_changes should preserve the underlying terminal error")
+			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+		})
+	}
 }
 
 func TestOpenPRHandler_TerminalPRErrorsBecomeFatal(t *testing.T) {
@@ -3594,7 +3821,7 @@ func TestContinueSessionHandler_UsesRuntimeCeilingDeadline(t *testing.T) {
 	orch := &orchestratorServiceStub{
 		sessionTimeout: sessionTimeout,
 		runtimeCeiling: runtimeCeiling,
-		continueSessionFn: func(ctx context.Context, session *models.Session) error {
+		continueSessionFn: func(ctx context.Context, session *models.Session, opts *agent.ContinueSessionOptions) error {
 			deadline, ok := ctx.Deadline()
 			require.True(t, ok, "continue_session should apply a handler deadline")
 			remaining := time.Until(deadline)
@@ -3638,7 +3865,7 @@ func TestContinueSessionHandler_WrapsSnapshotPendingAsRetryable(t *testing.T) {
 		)
 
 	orch := &orchestratorServiceStub{
-		continueSessionFn: func(ctx context.Context, session *models.Session) error {
+		continueSessionFn: func(ctx context.Context, session *models.Session, opts *agent.ContinueSessionOptions) error {
 			return agent.ErrSnapshotPending
 		},
 	}
@@ -3651,6 +3878,111 @@ func TestContinueSessionHandler_WrapsSnapshotPendingAsRetryable(t *testing.T) {
 	require.ErrorAs(t, err, &retryable, "ErrSnapshotPending must be wrapped as RetryableError so the worker requeues without consuming an attempt")
 	require.ErrorIs(t, retryable.Err, agent.ErrSnapshotPending, "the wrapped error must preserve the ErrSnapshotPending sentinel")
 	require.Equal(t, 1, orch.continueSessionCalls, "continue_session should call the orchestrator once before bailing")
+}
+
+func TestContinueSessionHandler_ReleasesThreadOnContinuationFailure(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+	stores.SessionThreads = db.NewSessionThreadStore(mock)
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	threadID := uuid.New()
+	issueID := uuid.New()
+	threadModel := "gemini-2.5-pro"
+	continuationErr := errors.New("sandbox hydrate failed")
+
+	mock.ExpectQuery("SELECT .* FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(workerSessionColumns).AddRow(
+				workerSessionRow(sessionID, issueID, orgID, string(models.SessionStatusIdle), 2, nil, nil)...,
+			),
+		)
+	mock.ExpectQuery("SELECT .* FROM session_threads").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(workerSessionThreadColumns).AddRow(
+			workerSessionThreadRow(threadID, sessionID, orgID, models.AgentTypeGeminiCLI, &threadModel, models.ThreadStatusRunning)...,
+		))
+	mock.ExpectExec("UPDATE session_threads SET status = @status").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	orch := &orchestratorServiceStub{
+		continueSessionFn: func(ctx context.Context, session *models.Session, opts *agent.ContinueSessionOptions) error {
+			require.NotNil(t, opts, "continue_session should pass thread execution options to the orchestrator")
+			require.Equal(t, models.AgentTypeGeminiCLI, opts.AgentType, "thread execution should use the thread agent type")
+			require.NotNil(t, opts.ModelOverride, "thread execution should include the thread model override")
+			require.Equal(t, threadModel, *opts.ModelOverride, "thread execution should use the thread model")
+			return continuationErr
+		},
+	}
+	handler := newContinueSessionHandler(stores, &Services{Orchestrator: orch}, zerolog.Nop())
+	payload := json.RawMessage(`{"session_id":"` + sessionID.String() + `","org_id":"` + orgID.String() + `","thread_id":"` + threadID.String() + `"}`)
+
+	err := handler(context.Background(), "continue_session", payload)
+	require.ErrorIs(t, err, continuationErr, "continue_session should preserve the orchestrator failure")
+	require.Equal(t, 1, orch.continueSessionCalls, "continue_session should invoke the orchestrator once")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+// TestContinueSessionHandler_ThreadCompleteTurnUsesThreadTurn pins the
+// thread-side current_turn advancement to the thread's own counter, not the
+// session's. With multiple tabs in one sandbox, session.CurrentTurn is the
+// shared total across threads — using it would leak sibling-thread turns into
+// every thread's row.
+func TestContinueSessionHandler_ThreadCompleteTurnUsesThreadTurn(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+	stores.SessionThreads = db.NewSessionThreadStore(mock)
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	threadID := uuid.New()
+	issueID := uuid.New()
+	threadModel := "gemini-2.5-pro"
+
+	const sessionTurnBefore = 5
+	const expectedThreadTurnAfter = 2 // workerSessionThreadRow seeds current_turn=1, so +1=2.
+
+	mock.ExpectQuery("SELECT .* FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(workerSessionColumns).AddRow(
+				workerSessionRow(sessionID, issueID, orgID, string(models.SessionStatusIdle), sessionTurnBefore, nil, nil)...,
+			),
+		)
+	mock.ExpectQuery("SELECT .* FROM session_threads").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(workerSessionThreadColumns).AddRow(
+			workerSessionThreadRow(threadID, sessionID, orgID, models.AgentTypeGeminiCLI, &threadModel, models.ThreadStatusRunning)...,
+		))
+	// CompleteTurn query: arg order follows the @placeholders in the SQL
+	// (current_turn, id, org_id). Pinning the literal value here is what
+	// catches a regression that uses session.CurrentTurn.
+	mock.ExpectExec(`UPDATE session_threads`).
+		WithArgs(expectedThreadTurnAfter, pgxmock.AnyArg(), threadID, orgID).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	orch := &orchestratorServiceStub{
+		continueSessionFn: func(ctx context.Context, session *models.Session, opts *agent.ContinueSessionOptions) error {
+			require.NotNil(t, opts, "thread continuation should pass execution options")
+			require.NotNil(t, opts.ResultAgentSessionID, "thread continuation should let the orchestrator report the thread agent session id")
+			*opts.ResultAgentSessionID = "thread-agent-session-after"
+			return nil
+		},
+	}
+	handler := newContinueSessionHandler(stores, &Services{Orchestrator: orch}, zerolog.Nop())
+	payload := json.RawMessage(`{"session_id":"` + sessionID.String() + `","org_id":"` + orgID.String() + `","thread_id":"` + threadID.String() + `"}`)
+
+	err := handler(context.Background(), "continue_session", payload)
+	require.NoError(t, err, "continue_session should succeed when the orchestrator returns nil")
+	require.Equal(t, 1, orch.continueSessionCalls, "continue_session should invoke the orchestrator once")
+	require.NoError(t, mock.ExpectationsWereMet(), "thread current_turn must come from the thread's own counter, not the session's")
 }
 
 // ---------------------------------------------------------------------------

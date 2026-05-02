@@ -112,6 +112,13 @@ services:
   # Lightweight disk usage monitor. Emits JSON to stdout every 5 minutes,
   # which Vector (on this same host or externally) can pick up via docker_logs.
   # Grafana alert query: service:disk-monitor AND disk_used_pct:range(80, Inf)
+  #
+  # PID 1 is `sh` running `sleep 300`, which doesn't propagate SIGTERM — so a
+  # default `docker stop` hangs the full 10s grace period before SIGKILL. During
+  # `compose up --force-recreate` that 10s window races the rename/create flow
+  # and the new container fails with a name conflict on `143-disk-monitor-1`.
+  # The monitor is stateless, so SIGKILL with a 1s grace is safe and eliminates
+  # the race.
   disk-monitor:
     image: alpine:3.21
     volumes:
@@ -124,6 +131,8 @@ services:
           echo "{\"level\":\"info\",\"service\":\"disk-monitor\",\"disk_used_pct\":$$PCT,\"message\":\"disk usage check\"}"
           sleep 300
         done
+    stop_signal: SIGKILL
+    stop_grace_period: 1s
     restart: unless-stopped
 
 volumes:

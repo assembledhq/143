@@ -125,7 +125,49 @@ func (s *SessionThreadStore) UpdateStatus(ctx context.Context, orgID, threadID u
 	return nil
 }
 
+// CompleteTurn marks the thread idle and advances its current_turn. It is the
+// Phase 1 success path: the shared session UpdateTurnComplete already records
+// confidence_score, result_summary, and diff at the session level, so this
+// method intentionally does not duplicate them on the thread row. Phase 2
+// (thread-scoped runtime execution) will need to populate the thread's own
+// result columns — switch to UpdateTurnComplete on the thread store at that
+// point so per-thread review surfaces have data to show.
+func (s *SessionThreadStore) CompleteTurn(ctx context.Context, orgID, threadID uuid.UUID, turn int, agentSessionID string) error {
+	query := `
+		UPDATE session_threads
+		SET status = 'idle',
+		    current_turn = @current_turn,
+		    last_activity_at = now(),
+		    agent_session_id = COALESCE(@agent_session_id, agent_session_id)
+		WHERE id = @id AND org_id = @org_id`
+
+	ct, err := s.db.Exec(ctx, query, pgx.NamedArgs{
+		"id":               threadID,
+		"org_id":           orgID,
+		"current_turn":     turn,
+		"agent_session_id": emptyStringNil(agentSessionID),
+	})
+	if err != nil {
+		return err
+	}
+	if ct.RowsAffected() == 0 {
+		return fmt.Errorf("thread not found")
+	}
+	return nil
+}
+
+func emptyStringNil(value string) *string {
+	if value == "" {
+		return nil
+	}
+	return &value
+}
+
 // UpdateResult persists agent results on a thread.
+//
+// COALESCE on diff preserves the prior thread diff when the current turn did
+// not produce one — same rationale as the session-level update; see
+// session_store.go updateResultRow for full details.
 func (s *SessionThreadStore) UpdateResult(ctx context.Context, orgID, threadID uuid.UUID, status models.ThreadStatus, result *models.SessionResult) error {
 	query := `
 		UPDATE session_threads
@@ -137,7 +179,7 @@ func (s *SessionThreadStore) UpdateResult(ctx context.Context, orgID, threadID u
 		    END,
 		    confidence_score = @confidence_score,
 		    result_summary = @result_summary,
-		    diff = @diff,
+		    diff = COALESCE(@diff, diff),
 		    failure_explanation = @failure_explanation,
 		    failure_category = @failure_category
 		WHERE id = @id AND org_id = @org_id`
@@ -185,14 +227,60 @@ func (s *SessionThreadStore) ClaimIdle(ctx context.Context, orgID, threadID uuid
 	return pgx.CollectOneRow(rows, pgx.RowToStructByName[models.SessionThread])
 }
 
+// ClaimIdleForSession atomically transitions an idle thread to running only
+// when no sibling thread for the same session is active. The CTE locks every
+// thread row in the session before evaluating active siblings so concurrent
+// sends to different idle tabs serialize on the database row locks.
+func (s *SessionThreadStore) ClaimIdleForSession(ctx context.Context, orgID, sessionID, threadID uuid.UUID) (models.SessionThread, error) {
+	query := `
+		WITH locked_threads AS (
+			SELECT id, status
+			FROM session_threads
+			WHERE org_id = @org_id AND session_id = @session_id
+			FOR UPDATE
+		), eligible AS (
+			SELECT 1
+			FROM locked_threads target
+			WHERE target.id = @id
+			  AND target.status = 'idle'
+			  AND NOT EXISTS (
+			      SELECT 1
+			      FROM locked_threads sibling
+			      WHERE sibling.id <> @id
+			        AND sibling.status IN ('pending', 'running', 'awaiting_input')
+			  )
+		)
+		UPDATE session_threads
+		SET status = 'running',
+		    started_at = now(),
+		    last_activity_at = now()
+		WHERE id = @id
+		  AND org_id = @org_id
+		  AND session_id = @session_id
+		  AND EXISTS (SELECT 1 FROM eligible)
+		RETURNING ` + sessionThreadSelectColumns
+
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
+		"id":         threadID,
+		"org_id":     orgID,
+		"session_id": sessionID,
+	})
+	if err != nil {
+		return models.SessionThread{}, fmt.Errorf("claim idle session thread: %w", err)
+	}
+	return pgx.CollectOneRow(rows, pgx.RowToStructByName[models.SessionThread])
+}
+
 // UpdateTurnComplete sets the thread to idle and persists turn metadata.
+// COALESCE on diff: see UpdateResult above.
 func (s *SessionThreadStore) UpdateTurnComplete(ctx context.Context, orgID, threadID uuid.UUID, turn int, result *models.SessionResult, agentSessionID string) error {
 	query := `
 		UPDATE session_threads
 		SET status = 'idle', current_turn = @current_turn, last_activity_at = now(),
 		    agent_session_id = @agent_session_id,
 		    confidence_score = @confidence_score,
-		    result_summary = @result_summary, diff = @diff
+		    result_summary = @result_summary,
+		    diff = COALESCE(@diff, diff)
 		WHERE id = @id AND org_id = @org_id`
 
 	ct, err := s.db.Exec(ctx, query, pgx.NamedArgs{
