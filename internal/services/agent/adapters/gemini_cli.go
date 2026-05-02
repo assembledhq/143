@@ -137,7 +137,7 @@ func (a *GeminiCLIAdapter) Execute(ctx context.Context, sandbox *agent.Sandbox, 
 	}
 
 	// Collect the git diff from the sandbox.
-	diff, err := collectDiff(ctx, provider, sandbox)
+	diff, err := collectDiff(ctx, provider, sandbox, a.logger)
 	if err != nil {
 		a.logger.Warn().Err(err).Msg("failed to collect git diff")
 	} else {

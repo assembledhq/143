@@ -303,7 +303,7 @@ func runStreamingAgent(
 		}
 	}
 
-	diff, err := collectDiff(ctx, provider, sandbox)
+	diff, err := collectDiff(ctx, provider, sandbox, logger)
 	if err != nil {
 		logger.Warn().Err(err).Msg("failed to collect git diff")
 	} else {
