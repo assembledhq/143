@@ -402,8 +402,20 @@ type Orchestrator struct {
 	logger            zerolog.Logger
 	maxConcurrent     int
 	cancels           *CancelRegistry
+	threadCancels     *ThreadCancelRegistry // optional — enables per-tab SIGINT
 	nodeID            string
 	isDraining        func() bool
+}
+
+// CancelThreadByID asks the thread-scoped cancel registry to SIGINT the
+// in-flight agent for the given thread. Returns false when no live entry
+// exists (the run already finished). Safe to call without a registry; just
+// returns false.
+func (o *Orchestrator) CancelThreadByID(threadID uuid.UUID) bool {
+	if o.threadCancels == nil {
+		return false
+	}
+	return o.threadCancels.CancelThread(threadID)
 }
 
 // DurableCheckpoint is the latest fully committed resume boundary for a
@@ -423,6 +435,19 @@ type ContinueSessionOptions struct {
 	ModelOverride        *string
 	ThreadAgentSessionID *string
 	ResultAgentSessionID *string
+
+	// ThreadID, when set, identifies the agent tab this turn belongs to.
+	// The orchestrator passes it to the thread cancel registry so a
+	// per-tab Cancel can SIGINT only the matching agent process. nil
+	// disables thread-scoped cancel and falls back to the legacy
+	// session-level CancelRegistry behavior.
+	ThreadID *uuid.UUID
+
+	// OnTurnComplete fires after a successful turn with the per-turn diff
+	// and the agent-reported cost in USD. The thread continuation handler
+	// uses this to emit file-attribution events. Errors are swallowed by
+	// the orchestrator: file attribution is operational, not critical.
+	OnTurnComplete func(diff string, costUSD float64)
 }
 
 // OrchestratorConfig holds the dependencies for creating an Orchestrator.
@@ -452,6 +477,7 @@ type OrchestratorConfig struct {
 	Snapshots         storage.SnapshotStore    // optional — enables multi-turn snapshot/restore
 	UsageTracker      UsageRecorder            // optional — enables billing observability
 	Cancels           *CancelRegistry          // optional — enables session cancellation from API
+	ThreadCancels     *ThreadCancelRegistry    // optional — enables per-tab cancellation from API
 	OrgSettingsCache  *OrgSettingsCache        // optional — caches Amp/Pi agent_config lookups across session starts
 	// Env owns env resolution + auth pre-flight + Codex auth injection,
 	// shared with the PM service. Optional: when nil, NewOrchestrator
@@ -533,6 +559,7 @@ func NewOrchestrator(cfg OrchestratorConfig) *Orchestrator {
 		sandboxAuth:       cfg.SandboxAuth,
 		users:             cfg.Users,
 		cancels:           cfg.Cancels,
+		threadCancels:     cfg.ThreadCancels,
 		logger:            cfg.Logger,
 		maxConcurrent:     maxConcurrent,
 		nodeID:            cfg.NodeID,
@@ -2310,6 +2337,14 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	if o.cancels != nil {
 		o.cancels.Register(session.ID, sandbox, o.provider, cancel)
 	}
+	// Mirror the registration on the thread-scoped registry so a per-tab
+	// cancel can SIGINT just this thread's agent process. The session-level
+	// registry remains the legacy path for whole-sandbox cancels.
+	if o.threadCancels != nil && opts != nil && opts.ThreadID != nil {
+		processName := agentProcessName(session.AgentType)
+		o.threadCancels.Register(*opts.ThreadID, sandbox, o.provider, processName, cancel)
+		defer o.threadCancels.Deregister(*opts.ThreadID)
+	}
 
 	// 5. Set up the workspace. Three paths:
 	//   - Reuse: the container is already live (preview hydrated it); just
@@ -2542,6 +2577,23 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 			threadAgentSessionID = *opts.ThreadAgentSessionID
 		}
 		*opts.ResultAgentSessionID = threadAgentSessionID
+	}
+	// Fire the thread-scoped turn-complete hook before snapshotting so the
+	// caller's bookkeeping (file attribution, cost accumulation) lands in
+	// one logical transaction with the assistant message and turn-complete
+	// row update. Hook is intentionally fire-and-forget from the
+	// orchestrator's perspective; failures inside the callback must not
+	// abort the turn. Diff is taken straight from the agent result so we
+	// never re-shell into the sandbox.
+	if opts != nil && opts.OnTurnComplete != nil && result != nil {
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					log.Warn().Interface("panic", r).Msg("OnTurnComplete callback panicked")
+				}
+			}()
+			opts.OnTurnComplete(result.Diff, result.TokenUsage.TotalCostUSD)
+		}()
 	}
 
 	// 8. Snapshot again.

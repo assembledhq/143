@@ -68,6 +68,8 @@ func RegisterHandlers(w *Worker, stores *Stores, services *Services, retentionCf
 		w.Register("reconcile_pull_request_state", newReconcilePullRequestStateHandler(services, logger))
 		w.Register("enrich_pull_request_health", newEnrichPullRequestHealthHandler(services, logger))
 		w.Register("analyze_failure", newAnalyzeFailureHandler(stores, services, logger))
+		w.Register("fork_session_thread", newForkSessionThreadHandler(stores, services, logger))
+		w.Register("revert_session_thread", newRevertSessionThreadHandler(stores, services, logger))
 	}
 	if services != nil && services.Feedback != nil {
 		w.Register("process_review_comment", newProcessReviewCommentHandler(services, logger))
@@ -128,6 +130,7 @@ type Stores struct {
 	Repositories        *db.RepositoryStore     // nil-safe: needed for eval repo lookup
 	SessionMessages     *db.SessionMessageStore // nil-safe: needed for title regeneration
 	SessionThreads      *db.SessionThreadStore  // nil-safe: needed for thread-scoped continuation status
+	ThreadFileEvents    *db.SessionThreadFileEventStore // nil-safe: tab-level file write attribution
 	IssueSnapshots      *db.SessionTurnIssueSnapshotStore
 	Automations         *db.AutomationStore       // nil-safe: automations feature disabled if nil
 	AutomationRuns      *db.AutomationRunStore    // nil-safe: automations feature disabled if nil
@@ -1052,11 +1055,31 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 					return fmt.Errorf("session thread %s does not belong to session %s", threadID, sessionID)
 				}
 				threadTurnBefore = thread.CurrentTurn
+
+				// Phase 2: stamp the thread-start checkpoint before the first
+				// agent turn. The session's current SnapshotKey is the
+				// pre-thread-edit state from the user's perspective; using
+				// it as the thread's recovery baseline lets a "revert this
+				// tab" action restore the workspace to that point even if
+				// later sibling-tab turns overwrite session.SnapshotKey.
+				if thread.CurrentTurn == 0 && thread.BaseSnapshotKey == nil && session.SnapshotKey != nil && *session.SnapshotKey != "" {
+					if err := stores.SessionThreads.SetBaseSnapshot(ctx, orgID, threadID, *session.SnapshotKey); err != nil {
+						logger.Warn().Err(err).
+							Str("thread_id", threadID.String()).
+							Msg("failed to stamp thread-start checkpoint")
+					}
+				}
+
+				threadIDLocal := threadID
 				continueOpts = &agent.ContinueSessionOptions{
 					AgentType:            thread.AgentType,
 					ModelOverride:        thread.ModelOverride,
 					ThreadAgentSessionID: thread.AgentSessionID,
 					ResultAgentSessionID: &resultAgentSessionID,
+					ThreadID:             &threadIDLocal,
+					OnTurnComplete: func(diff string, costUSD float64) {
+						emitThreadAttribution(ctx, stores, orgID, sessionID, threadIDLocal, threadTurnBefore+1, diff, costUSD, logger)
+					},
 				}
 			}
 		}
