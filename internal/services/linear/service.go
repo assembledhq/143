@@ -194,6 +194,14 @@ type Client interface {
 	UpdateIssueState(ctx context.Context, issueID, stateID string) error
 	IssueRecentHumanEdits(ctx context.Context, issueID string, since time.Time) (bool, error)
 	HasGitHubIntegrationAttachment(ctx context.Context, issueID string) (bool, error)
+
+	// Linear Agent Interaction surface — only used by sessions whose origin
+	// is an inbound Linear assignment / @-mention. The same Client
+	// implementation backs both flows; tests that don't exercise the agent
+	// path can return canned errors from these methods.
+	AgentActivityCreate(ctx context.Context, in AgentActivityInput) (AgentActivityResult, error)
+	AgentSessionUpdate(ctx context.Context, in AgentSessionUpdateInput) error
+	AgentSessionGet(ctx context.Context, agentSessionID string) (*FetchedAgentSession, error)
 }
 
 // ClientFactory creates a per-org Linear API client from an access token

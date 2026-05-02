@@ -188,6 +188,22 @@ func (f *fakeLinearClient) HasGitHubIntegrationAttachment(context.Context, strin
 	return f.hasGitHubAttachment, f.hasGitHubErr
 }
 
+// AgentActivityCreate / AgentSessionUpdate / AgentSessionGet are the agent
+// surface added in phase 1 of the linear-agent rollout. The milestone tests
+// don't exercise the inbound agent path; these stubs satisfy the interface
+// without doing useful work.
+func (f *fakeLinearClient) AgentActivityCreate(context.Context, AgentActivityInput) (AgentActivityResult, error) {
+	return AgentActivityResult{}, nil
+}
+
+func (f *fakeLinearClient) AgentSessionUpdate(context.Context, AgentSessionUpdateInput) error {
+	return nil
+}
+
+func (f *fakeLinearClient) AgentSessionGet(context.Context, string) (*FetchedAgentSession, error) {
+	return nil, ErrAgentSessionNotFound
+}
+
 // fakeIntegrationReader / fakeCredentialReader return a stable "Linear is
 // active" combo so HandleMilestone reaches the API call path. Both are
 // intentionally minimal — the LinearPrivate short-circuit in HandleMilestone

@@ -91,6 +91,13 @@ type LinearProviderState struct {
 	// read. Stored as RawMessage to keep this package free of any
 	// services/linear import; consumers re-decode into LinearTurnContext.
 	PrimarySnapshot json.RawMessage `json:"primary_snapshot,omitempty"`
+	// AgentSessionID is the Linear AgentSession id (set when this 143 session
+	// was triggered by an assignment or @-mention to the @143 agent user, as
+	// opposed to a user pasting a Linear ref into the composer). When set,
+	// HandleMilestone fans out to AgentActivityWriter alongside its existing
+	// attachment/comment/state writes so progress streams into Linear's
+	// AgentSession UI. Empty for sessions created the manual way.
+	AgentSessionID string `json:"agent_session_id,omitempty"`
 }
 
 // LinearAttachmentMetadata is the stable schema we send in attachment
@@ -354,6 +361,9 @@ func MergeLinearProviderState(current, patch LinearProviderState) LinearProvider
 	}
 	if len(patch.PrimarySnapshot) > 0 {
 		current.PrimarySnapshot = patch.PrimarySnapshot
+	}
+	if patch.AgentSessionID != "" {
+		current.AgentSessionID = patch.AgentSessionID
 	}
 	return current
 }
