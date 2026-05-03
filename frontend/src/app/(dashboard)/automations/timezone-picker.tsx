@@ -93,10 +93,10 @@ export function TimezonePicker({
           aria-expanded={open}
           // Match the sibling SelectTrigger (h-9 / text-sm) so the trio in
           // the schedule row lines up visually.
-          className={cn("h-9 justify-between font-normal", className)}
+          className={cn("h-9 min-w-0 justify-between font-normal", className)}
           title={value}
         >
-          <span className="max-w-[180px] truncate">{value}</span>
+          <span className="min-w-0 max-w-[180px] truncate">{value}</span>
           <ChevronDown className="ml-2 h-3.5 w-3.5 shrink-0 opacity-60" />
         </Button>
       </PopoverTrigger>
