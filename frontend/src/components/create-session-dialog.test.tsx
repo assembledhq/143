@@ -232,6 +232,23 @@ describe("CreateSessionDialog", () => {
     expect(screen.getByRole("button", { name: /Target branch/ })).toBeInTheDocument();
   });
 
+  it("renders the mobile dialog as a full-screen scrollable composer", () => {
+    setMobileViewport(true);
+
+    renderWithProviders(
+      <CreateSessionDialog open onOpenChange={onOpenChange} />,
+    );
+
+    const dialog = screen.getByRole("dialog", { name: "New session" });
+    const textarea = screen.getByRole("textbox", { name: "Session prompt" });
+
+    expect(dialog).toHaveClass("inset-0");
+    expect(dialog).toHaveClass("h-dvh");
+    expect(dialog).toHaveClass("max-w-none");
+    expect(dialog).toHaveClass("overflow-y-auto");
+    expect(textarea).toHaveClass("text-base");
+  });
+
   it("shows attachment button", () => {
     renderWithProviders(
       <CreateSessionDialog open onOpenChange={onOpenChange} />,
