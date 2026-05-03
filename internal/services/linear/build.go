@@ -16,18 +16,19 @@ import (
 // stores) the Linear service needs. Pulling this out of router.go and
 // cmd/server/main.go avoids two diverging copies of identical wiring.
 type BuildDeps struct {
-	Pool          *pgxpool.Pool
-	Logger        zerolog.Logger
-	Integrations  IntegrationReader
-	Credentials   CredentialReader
-	Issues        *db.IssueStore
-	Sessions      *db.SessionStore
-	IssueLinks    *db.SessionIssueLinkStore
-	Orgs          *db.OrganizationStore
-	Jobs          *db.JobStore
-	JobQueueName  string
-	JobPriority   int
-	ClientFactory ClientFactory
+	Pool               *pgxpool.Pool
+	Logger             zerolog.Logger
+	Integrations       IntegrationReader
+	IntegrationsWriter IntegrationWriter
+	Credentials        CredentialReader
+	Issues             *db.IssueStore
+	Sessions           *db.SessionStore
+	IssueLinks         *db.SessionIssueLinkStore
+	Orgs               *db.OrganizationStore
+	Jobs               *db.JobStore
+	JobQueueName       string
+	JobPriority        int
+	ClientFactory      ClientFactory
 	// AppBaseURL is the absolute origin (e.g. cfg.FrontendURL) we send to
 	// Linear inside attachment URLs and comment bodies. Empty falls back to
 	// a relative path which Linear renders as plain text — production
@@ -119,20 +120,21 @@ func Build(deps BuildDeps) *Service {
 	}
 
 	svc := NewService(Config{
-		Logger:            deps.Logger,
-		Integrations:      deps.Integrations,
-		Credentials:       deps.Credentials,
-		Issues:            deps.Issues,
-		Links:             deps.IssueLinks,
-		TeamKeys:          db.NewLinearTeamKeyStore(deps.Pool),
-		ProviderState:     db.NewLinearProviderStateStore(deps.Pool),
-		StateEvents:       db.NewLinearStateEventStore(deps.Pool),
-		Sessions:          deps.Sessions,
-		ClientFactory:     clientFactory,
-		OrgSettingsLoader: loader,
-		Pool:              deps.Pool,
-		AppBaseURL:        deps.AppBaseURL,
-		TeamKeyCache:      teamKeyCache,
+		Logger:             deps.Logger,
+		Integrations:       deps.Integrations,
+		IntegrationsWriter: deps.IntegrationsWriter,
+		Credentials:        deps.Credentials,
+		Issues:             deps.Issues,
+		Links:              deps.IssueLinks,
+		TeamKeys:           db.NewLinearTeamKeyStore(deps.Pool),
+		ProviderState:      db.NewLinearProviderStateStore(deps.Pool),
+		StateEvents:        db.NewLinearStateEventStore(deps.Pool),
+		Sessions:           deps.Sessions,
+		ClientFactory:      clientFactory,
+		OrgSettingsLoader:  loader,
+		Pool:               deps.Pool,
+		AppBaseURL:         deps.AppBaseURL,
+		TeamKeyCache:       teamKeyCache,
 	})
 
 	if deps.Jobs != nil {

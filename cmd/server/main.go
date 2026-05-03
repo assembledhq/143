@@ -1020,16 +1020,17 @@ func buildServices(
 	// the shared Build helper so the API server (router.go) and the worker
 	// (here) wire the service identically.
 	linearService := linear.Build(linear.BuildDeps{
-		Pool:         pool,
-		Logger:       logger,
-		Integrations: integrationStore,
-		Credentials:  credentialStore,
-		Issues:       issueStore,
-		Sessions:     sessionStore,
-		IssueLinks:   db.NewSessionIssueLinkStore(pool),
-		Orgs:         orgStore,
-		Jobs:         jobStore,
-		AppBaseURL:   cfg.FrontendURL,
+		Pool:               pool,
+		Logger:             logger,
+		Integrations:       integrationStore,
+		IntegrationsWriter: integrationStore,
+		Credentials:        credentialStore,
+		Issues:             issueStore,
+		Sessions:           sessionStore,
+		IssueLinks:         db.NewSessionIssueLinkStore(pool),
+		Orgs:               orgStore,
+		Jobs:               jobStore,
+		AppBaseURL:         cfg.FrontendURL,
 	})
 	prService.SetLinearMilestoneEnqueuer(linear.MilestoneEnqueuerFor(jobStore, logger))
 
