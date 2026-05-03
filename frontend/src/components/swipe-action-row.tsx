@@ -17,6 +17,8 @@ const TOUCH_QUERY = "(pointer: coarse)";
 const COMMIT_THRESHOLD_RATIO = 0.36;
 const MIN_COMMIT_THRESHOLD = 140;
 const COMMIT_ANIMATION_MS = 220;
+const READY_HAPTIC_MS = 10;
+const COMMIT_HAPTIC_PATTERN = [16, 24, 40];
 // Pre-measurement fallback when a gesture starts before the row has dimensions.
 // Real width is captured from offsetWidth at touchstart.
 const FALLBACK_ROW_WIDTH = ACTION_WIDTH * 4;
@@ -24,6 +26,7 @@ const FALLBACK_ROW_WIDTH = ACTION_WIDTH * 4;
 type DragState = {
   startX: number;
   startY: number;
+  startOffset: number;
   width: number;
   swiping: boolean;
   locked: boolean;
@@ -86,6 +89,7 @@ export function SwipeActionRow({
   const containerRef = useRef<HTMLDivElement | null>(null);
   const dragRef = useRef<DragState | null>(null);
   const commitTimerRef = useRef<number | null>(null);
+  const readyHapticPlayedRef = useRef(false);
   // Mirrors isCommitted for use inside touchmove handlers, where the rendered
   // closure can lag behind rapid state transitions.
   const committedRef = useRef(false);
@@ -114,6 +118,7 @@ export function SwipeActionRow({
     setIsDragging(false);
     setIsCommitted(false);
     committedRef.current = false;
+    readyHapticPlayedRef.current = false;
     dragRef.current = null;
   };
 
@@ -123,6 +128,7 @@ export function SwipeActionRow({
     setIsDragging(false);
     setIsCommitted(false);
     committedRef.current = false;
+    readyHapticPlayedRef.current = false;
     dragRef.current = null;
   };
 
@@ -135,7 +141,8 @@ export function SwipeActionRow({
     setOffset(width);
     dragRef.current = null;
     committedRef.current = false;
-    vibrate([15, 30, 40]);
+    readyHapticPlayedRef.current = false;
+    vibrate(COMMIT_HAPTIC_PATTERN);
     onAction();
     if (commitTimerRef.current !== null) {
       window.clearTimeout(commitTimerRef.current);
@@ -162,10 +169,12 @@ export function SwipeActionRow({
     dragRef.current = {
       startX: touch.clientX,
       startY: touch.clientY,
+      startOffset: offsetRef.current,
       width,
       swiping: false,
       locked: false,
     };
+    readyHapticPlayedRef.current = false;
     setIsDragging(true);
   };
 
@@ -196,7 +205,7 @@ export function SwipeActionRow({
       event.preventDefault();
     }
 
-    const nextOffset = Math.max(0, Math.min(drag.width, -deltaX));
+    const nextOffset = Math.max(0, Math.min(drag.width, drag.startOffset - deltaX));
     offsetRef.current = nextOffset;
     setOffset(nextOffset);
 
@@ -204,19 +213,26 @@ export function SwipeActionRow({
     if (willCommit !== committedRef.current) {
       committedRef.current = willCommit;
       setIsCommitted(willCommit);
-      if (willCommit) {
-        // Light tick when the user crosses into the auto-commit zone.
-        vibrate(8);
+      if (willCommit && !readyHapticPlayedRef.current) {
+        // One light pulse signals that release will archive; avoid replaying it
+        // if the user scrubs back and forth near the threshold.
+        readyHapticPlayedRef.current = true;
+        vibrate(READY_HAPTIC_MS);
       }
     }
   };
 
   const handleTouchEnd = () => {
+    const drag = dragRef.current;
     const width =
-      dragRef.current?.width ??
+      drag?.width ??
       containerRef.current?.offsetWidth ??
       FALLBACK_ROW_WIDTH;
     const latestOffset = offsetRef.current;
+    if (drag && !drag.locked && drag.startOffset >= OPEN_THRESHOLD) {
+      close();
+      return;
+    }
     if (latestOffset >= commitThresholdFor(width)) {
       commitAction(width);
       return;
