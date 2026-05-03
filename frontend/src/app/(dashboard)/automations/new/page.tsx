@@ -295,7 +295,7 @@ export default function NewAutomationPage() {
                   </SelectContent>
                 </Select>
               </div>
-              <div className="flex items-center gap-2">
+              <div className="flex flex-wrap items-start gap-2 sm:items-center">
                 <span className="text-sm text-muted-foreground">At</span>
                 <Select value={intervalRunHour} onValueChange={setIntervalRunHour}>
                   <SelectTrigger className="w-20" aria-label="Run at hour">
@@ -326,6 +326,7 @@ export default function NewAutomationPage() {
                   value={timezone}
                   onChange={setTimezone}
                   detected={detectedTimezone}
+                  className="w-full sm:w-auto"
                 />
               </div>
             </div>
