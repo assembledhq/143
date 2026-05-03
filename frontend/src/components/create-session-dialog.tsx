@@ -55,6 +55,7 @@ import {
 } from "@/lib/coding-agent-reasoning";
 import { useOptimisticSessionsSafe } from "@/contexts/optimistic-sessions";
 import type { OrgSettings, Organization, Repository, SingleResponse, ListResponse } from "@/lib/types";
+import { cn } from "@/lib/utils";
 
 const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10 MB
 
@@ -359,10 +360,15 @@ export function CreateSessionDialog({ open, onOpenChange }: CreateSessionDialogP
     </div>
   );
 
+  const dialogContentClassName = cn(
+    "p-0 gap-0 overflow-hidden sm:max-w-[560px]",
+    isMobile && "inset-0 h-dvh max-h-dvh max-w-none translate-x-0 translate-y-0 rounded-none border-0 flex flex-col overflow-y-auto",
+  );
+
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-[560px] p-0 gap-0 overflow-hidden" showCloseButton={false}>
-        <DialogHeader className="px-5 pt-5 pb-3">
+      <DialogContent className={dialogContentClassName} showCloseButton={false}>
+        <DialogHeader className={cn("px-5 pt-5 pb-3", isMobile && "shrink-0")}>
           <DialogTitle className="text-base font-semibold">New session</DialogTitle>
           <DialogDescription className="sr-only">Create a new coding agent session</DialogDescription>
         </DialogHeader>
@@ -383,7 +389,7 @@ export function CreateSessionDialog({ open, onOpenChange }: CreateSessionDialogP
             }}
             placeholder="Tell the agent what to do..."
             rows={3}
-            className="min-h-[80px] resize-none border-none bg-muted/40 rounded-lg px-3 py-2.5 text-sm shadow-none placeholder:text-muted-foreground/50 focus-visible:ring-1 focus-visible:ring-ring"
+            className="min-h-[80px] resize-none border-none bg-muted/40 rounded-lg px-3 py-2.5 text-base sm:text-sm shadow-none placeholder:text-muted-foreground/50 focus-visible:ring-1 focus-visible:ring-ring"
             aria-label="Session prompt"
           />
         </div>
@@ -409,7 +415,12 @@ export function CreateSessionDialog({ open, onOpenChange }: CreateSessionDialogP
           </div>
         )}
 
-        <div className="border-t border-border bg-muted/30 px-4 py-3">
+        <div
+          className={cn(
+            "border-t border-border bg-muted/30 px-4 py-3",
+            isMobile && "mt-auto pb-[max(0.75rem,env(safe-area-inset-bottom))]",
+          )}
+        >
           {isMobile ? (
             <>
               <div className="flex items-center gap-2">
