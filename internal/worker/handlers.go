@@ -2683,6 +2683,15 @@ func newPrepareLinearPrimaryHandler(svc *linear.Service, logger zerolog.Logger) 
 		})
 		if err := svc.PrepareLinearPrimaryRefs(ctx, orgID, sessionID, refs, userID); err != nil {
 			logger.Warn().Err(err).Str("session_id", sessionID.String()).Msg("prepare_linear_primary failed")
+			if errors.Is(err, linear.ErrUnauthorized) {
+				// Flip the integration to errored on the very first 401 so the
+				// settings UI shows a Reconnect CTA without waiting for retry
+				// exhaustion. Doing this inside the retry loop (vs only the
+				// dead-letter hook) is intentional: retries are 5s apart and
+				// exhaustion takes minutes, but the user is staring at the
+				// session-detail page waiting for context to load.
+				svc.MarkIntegrationUnauthorized(ctx, orgID)
+			}
 			return &RetryableError{Err: err}
 		}
 		return nil
@@ -2886,6 +2895,9 @@ func newLinearMilestoneHandler(stores *Stores, svc *linear.Service, logger zerol
 		}
 		if err := svc.HandleMilestone(ctx, in); err != nil {
 			logger.Warn().Err(err).Str("session_id", sessionID.String()).Msg("HandleMilestone failed")
+			if errors.Is(err, linear.ErrUnauthorized) {
+				svc.MarkIntegrationUnauthorized(ctx, orgID)
+			}
 			return mapLinearWriteErrorToRetry(err)
 		}
 		if err := svc.HandleStateTransition(ctx, in); err != nil {
@@ -2893,6 +2905,9 @@ func newLinearMilestoneHandler(stores *Stores, svc *linear.Service, logger zerol
 			// State transitions are recorded in the event log even when
 			// they skip; rate limits are the one case we *do* want to
 			// retry, otherwise the audit trail says "skipped" forever.
+			if errors.Is(err, linear.ErrUnauthorized) {
+				svc.MarkIntegrationUnauthorized(ctx, orgID)
+			}
 			if retry := mapLinearWriteErrorToRetry(err); retry != nil {
 				return retry
 			}
@@ -2904,6 +2919,10 @@ func newLinearMilestoneHandler(stores *Stores, svc *linear.Service, logger zerol
 // mapLinearWriteErrorToRetry returns a RetryableError with a Retry-After
 // hint when the underlying Linear API call hit a 429 rate limit. All other
 // errors return as-is (worker will use default exponential backoff).
+//
+// On ErrUnauthorized the caller is responsible for invoking
+// svc.MarkIntegrationUnauthorized — done at each call site rather than here
+// so this helper stays a pure error-classifier without the orgID dependency.
 func mapLinearWriteErrorToRetry(err error) error {
 	var rate *linear.RateLimitError
 	if errors.As(err, &rate) {
@@ -2914,8 +2933,9 @@ func mapLinearWriteErrorToRetry(err error) error {
 		return &RetryableError{Err: err, RetryAfter: &delay}
 	}
 	if errors.Is(err, linear.ErrUnauthorized) {
-		// Token expired — let the retry happen at default backoff so the
-		// integration health check has time to refresh.
+		// Token expired/revoked — let the retry happen at default backoff
+		// while the user reconnects. The status flip happens at the call
+		// site; here we only classify the retry shape.
 		return &RetryableError{Err: err}
 	}
 	return &RetryableError{Err: err}
@@ -2923,6 +2943,11 @@ func mapLinearWriteErrorToRetry(err error) error {
 
 // refresh_linear_team_keys handler refreshes the per-org team-key cache.
 // Scheduled every 24h and after OAuth install. Idempotent.
+//
+// Doubles as the periodic Linear health probe the codebase has been
+// missing: a successful refresh clears any stale "needs reauth" banner; a
+// 401 flips the integration to errored so the settings UI surfaces a
+// Reconnect CTA without waiting for the next session create to fail.
 func newRefreshLinearTeamKeysHandler(svc *linear.Service, logger zerolog.Logger) JobHandler {
 	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
 		var input struct {
@@ -2937,8 +2962,14 @@ func newRefreshLinearTeamKeysHandler(svc *linear.Service, logger zerolog.Logger)
 		}
 		if err := svc.RefreshTeamKeys(ctx, orgID); err != nil {
 			logger.Warn().Err(err).Str("org_id", orgID.String()).Msg("refresh_linear_team_keys failed")
+			if errors.Is(err, linear.ErrUnauthorized) {
+				svc.MarkIntegrationUnauthorized(ctx, orgID)
+			}
 			return &RetryableError{Err: err}
 		}
+		// Refresh succeeded — token works. Clear any stale auth-error
+		// banner. No-op when the row is already healthy.
+		svc.ClearIntegrationUnauthorized(ctx, orgID)
 		return nil
 	}
 }
