@@ -288,6 +288,26 @@ func TestIntegrationStore_UpdateStatus(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+func TestIntegrationStore_UpdateStatusAndConfig(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewIntegrationStore(mock)
+	orgID := uuid.New()
+	integrationID := uuid.New()
+
+	mock.ExpectExec("UPDATE integrations SET status = @status, config = @config").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	err = store.UpdateStatusAndConfig(context.Background(), orgID, integrationID, "active", json.RawMessage(`{"workspace_id":"wks-1"}`))
+	require.NoError(t, err, "UpdateStatusAndConfig should not return an error")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func TestIntegrationStore_ListOrgsWithActiveIntegrations(t *testing.T) {
 	t.Parallel()
 

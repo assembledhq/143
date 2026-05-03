@@ -178,6 +178,9 @@ type IntegrationReader interface {
 type IntegrationWriter interface {
 	UpdateStatus(ctx context.Context, orgID, id uuid.UUID, status string) error
 	UpdateConfig(ctx context.Context, orgID, integrationID uuid.UUID, config json.RawMessage) error
+	// UpdateStatusAndConfig is used by Mark/ClearIntegration* when both
+	// fields need to change so the row can't be observed mid-flip.
+	UpdateStatusAndConfig(ctx context.Context, orgID, integrationID uuid.UUID, status string, config json.RawMessage) error
 }
 
 // CredentialReader is the narrow surface the service needs to resolve a

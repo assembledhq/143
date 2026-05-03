@@ -214,14 +214,25 @@ function ConnectedReposList({
 // (IntegrationAction with authErrored=true) so there's a single CTA per
 // row instead of two.
 function IntegrationAuthErrorAlert({ info }: { info: IntegrationAuthErrorInfo }) {
-  // Render the absolute timestamp; "ago" math without a real date library
-  // would drift across renders and the absolute timestamp is precise enough
-  // for an operator-facing settings page.
+  // Render the absolute timestamp in an unambiguous, locale-stable format
+  // (YYYY-MM-DD HH:MM:SS in the viewer's local timezone) so operators
+  // helping each other across regions can compare notes without
+  // 5/2/2026-vs-02/05/2026 confusion. Local time still — the user is
+  // already implicitly in their tz when they read the page.
   let observedAt = info.at;
   try {
     const d = new Date(info.at);
     if (!Number.isNaN(d.getTime())) {
-      observedAt = d.toLocaleString();
+      const fmt = new Intl.DateTimeFormat("sv-SE", {
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+        hour: "2-digit",
+        minute: "2-digit",
+        second: "2-digit",
+        hour12: false,
+      });
+      observedAt = fmt.format(d);
     }
   } catch {
     // fall back to the raw string

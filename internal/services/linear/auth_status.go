@@ -16,16 +16,6 @@ import (
 // keep it terse and operator-actionable rather than dropping the raw error.
 const authErrorReasonUnauthorized = "Linear rejected the access token (HTTP 401). Reconnect to continue syncing."
 
-// configAuthErrorKey / configAuthErrorAtKey are the jsonb keys we stamp on
-// integrations.config. We keep them inline (rather than introducing a new
-// column) per design call: zero migration, and the only consumer is the
-// integrations settings page which already deserializes config to display
-// workspace metadata.
-const (
-	configAuthErrorKey   = "last_auth_error"
-	configAuthErrorAtKey = "last_auth_error_at"
-)
-
 // MarkIntegrationUnauthorized flips the org's Linear integration row to
 // IntegrationStatusError and stamps an auth-error reason + timestamp into
 // the existing config jsonb. Best-effort: every step logs and swallows on
@@ -38,6 +28,10 @@ const (
 // 401 anywhere becomes the probe. Combined with ClearIntegrationUnauthorized
 // from a successful call, the credential status reflects reality within
 // one Linear API round-trip.
+//
+// Status + config are written in a single SQL statement so a failure can't
+// leave the row half-updated (config stamped but status still active, or
+// vice versa).
 //
 // Nil-safe in three layers: nil receiver, nil writer (tests / api-only mode
 // without write surface), and "integration row not found" (org never
@@ -60,8 +54,8 @@ func (s *Service) MarkIntegrationUnauthorized(ctx context.Context, orgID uuid.UU
 	if integration.Status == models.IntegrationStatusError && hasRecentAuthError(cfg) {
 		return
 	}
-	cfg[configAuthErrorKey] = authErrorReasonUnauthorized
-	cfg[configAuthErrorAtKey] = time.Now().UTC().Format(time.RFC3339)
+	cfg[models.IntegrationConfigAuthErrorKey] = authErrorReasonUnauthorized
+	cfg[models.IntegrationConfigAuthErrorAtKey] = time.Now().UTC().Format(time.RFC3339)
 	raw, err := json.Marshal(cfg)
 	if err != nil {
 		s.logger.Warn().Err(err).
@@ -69,17 +63,11 @@ func (s *Service) MarkIntegrationUnauthorized(ctx context.Context, orgID uuid.UU
 			Msg("MarkIntegrationUnauthorized: marshal config failed; status flip skipped")
 		return
 	}
-	if err := s.integrationsWriter.UpdateConfig(ctx, orgID, integration.ID, raw); err != nil {
+	if err := s.integrationsWriter.UpdateStatusAndConfig(ctx, orgID, integration.ID, string(models.IntegrationStatusError), raw); err != nil {
 		s.logger.Warn().Err(err).
 			Str("org_id", orgID.String()).
 			Str("integration_id", integration.ID.String()).
-			Msg("MarkIntegrationUnauthorized: persist config patch failed")
-	}
-	if err := s.integrationsWriter.UpdateStatus(ctx, orgID, integration.ID, string(models.IntegrationStatusError)); err != nil {
-		s.logger.Warn().Err(err).
-			Str("org_id", orgID.String()).
-			Str("integration_id", integration.ID.String()).
-			Msg("MarkIntegrationUnauthorized: persist status flip failed")
+			Msg("MarkIntegrationUnauthorized: persist status+config failed")
 		return
 	}
 	s.logger.Warn().
@@ -93,7 +81,10 @@ func (s *Service) MarkIntegrationUnauthorized(ctx context.Context, orgID uuid.UU
 // from any successful Linear API path so a reconnect (or a transient blip
 // resolving on its own) un-sticks the banner without operator intervention.
 //
-// No-op when the row is already active and free of stale markers.
+// No-op when the row is already active and free of stale markers. When
+// both pieces of state need to change they're written atomically; when
+// only one needs to change we use the narrower update so unaffected
+// columns don't churn updated_at.
 func (s *Service) ClearIntegrationUnauthorized(ctx context.Context, orgID uuid.UUID) {
 	if s == nil || s.integrationsWriter == nil || s.integrations == nil {
 		return
@@ -108,20 +99,41 @@ func (s *Service) ClearIntegrationUnauthorized(ctx context.Context, orgID uuid.U
 	if !hadError && !statusErrored {
 		return
 	}
+
+	var clearedRaw json.RawMessage
 	if hadError {
-		delete(cfg, configAuthErrorKey)
-		delete(cfg, configAuthErrorAtKey)
+		delete(cfg, models.IntegrationConfigAuthErrorKey)
+		delete(cfg, models.IntegrationConfigAuthErrorAtKey)
 		raw, err := json.Marshal(cfg)
-		if err == nil {
-			if err := s.integrationsWriter.UpdateConfig(ctx, orgID, integration.ID, raw); err != nil {
-				s.logger.Warn().Err(err).
-					Str("org_id", orgID.String()).
-					Str("integration_id", integration.ID.String()).
-					Msg("ClearIntegrationUnauthorized: clear config failed; banner may persist")
-			}
+		if err != nil {
+			s.logger.Warn().Err(err).
+				Str("org_id", orgID.String()).
+				Str("integration_id", integration.ID.String()).
+				Msg("ClearIntegrationUnauthorized: marshal cleared config failed; banner may persist")
+			// Fall through and at least flip status if needed.
+		} else {
+			clearedRaw = raw
 		}
 	}
-	if statusErrored {
+
+	switch {
+	case clearedRaw != nil && statusErrored:
+		if err := s.integrationsWriter.UpdateStatusAndConfig(ctx, orgID, integration.ID, string(models.IntegrationStatusActive), clearedRaw); err != nil {
+			s.logger.Warn().Err(err).
+				Str("org_id", orgID.String()).
+				Str("integration_id", integration.ID.String()).
+				Msg("ClearIntegrationUnauthorized: status+config flip failed")
+			return
+		}
+	case clearedRaw != nil:
+		if err := s.integrationsWriter.UpdateConfig(ctx, orgID, integration.ID, clearedRaw); err != nil {
+			s.logger.Warn().Err(err).
+				Str("org_id", orgID.String()).
+				Str("integration_id", integration.ID.String()).
+				Msg("ClearIntegrationUnauthorized: clear config failed; banner may persist")
+			return
+		}
+	case statusErrored:
 		if err := s.integrationsWriter.UpdateStatus(ctx, orgID, integration.ID, string(models.IntegrationStatusActive)); err != nil {
 			s.logger.Warn().Err(err).
 				Str("org_id", orgID.String()).
@@ -129,6 +141,9 @@ func (s *Service) ClearIntegrationUnauthorized(ctx context.Context, orgID uuid.U
 				Msg("ClearIntegrationUnauthorized: status flip back to active failed")
 			return
 		}
+	}
+
+	if statusErrored {
 		s.logger.Info().
 			Str("org_id", orgID.String()).
 			Str("integration_id", integration.ID.String()).
@@ -146,7 +161,7 @@ func decodeIntegrationConfig(raw json.RawMessage) map[string]any {
 }
 
 func configHasAuthError(cfg map[string]any) bool {
-	_, ok := cfg[configAuthErrorKey]
+	_, ok := cfg[models.IntegrationConfigAuthErrorKey]
 	return ok
 }
 
@@ -155,7 +170,7 @@ func configHasAuthError(cfg map[string]any) bool {
 // re-stamped so the timestamp surfaced in the UI tracks the most recent
 // failure rather than the first one in a long error streak.
 func hasRecentAuthError(cfg map[string]any) bool {
-	v, ok := cfg[configAuthErrorAtKey]
+	v, ok := cfg[models.IntegrationConfigAuthErrorAtKey]
 	if !ok {
 		return false
 	}

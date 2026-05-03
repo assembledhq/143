@@ -620,11 +620,10 @@ func TestIntegrationHandler_ConnectLinear_ReactivatesErroredIntegration(t *testi
 				AddRow(integrationID, orgID, "linear", json.RawMessage(`{"workspace_id":"wks-1","last_auth_error":"prior","last_auth_error_at":"2026-05-02T20:02:11Z"}`), "error", nil, now),
 		)
 
-	mock.ExpectExec("UPDATE integrations SET config").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
-	mock.ExpectExec("UPDATE integrations SET status").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+	// Single atomic UPDATE: status and config flip together so the row
+	// can't be observed mid-flip.
+	mock.ExpectExec("UPDATE integrations SET status = @status, config = @config").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/integrations/linear/connect", nil)

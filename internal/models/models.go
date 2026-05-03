@@ -91,6 +91,16 @@ type IntegrationAuthError struct {
 	At     time.Time `json:"at"`
 }
 
+// IntegrationConfigAuthErrorKey / IntegrationConfigAuthErrorAtKey are the
+// jsonb keys used to stamp an auth-error reason and timestamp into
+// integrations.config. Defined here so the writer (linear service) and
+// readers (api/handlers) share a single source of truth without forcing
+// a dependency edge between those packages.
+const (
+	IntegrationConfigAuthErrorKey   = "last_auth_error"
+	IntegrationConfigAuthErrorAtKey = "last_auth_error_at"
+)
+
 type Repository struct {
 	ID             uuid.UUID       `db:"id" json:"id"`
 	OrgID          uuid.UUID       `db:"org_id" json:"org_id"`

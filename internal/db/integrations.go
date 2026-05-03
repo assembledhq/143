@@ -161,6 +161,20 @@ func (s *IntegrationStore) UpdateConfig(ctx context.Context, orgID, integrationI
 	return err
 }
 
+// UpdateStatusAndConfig flips status and rewrites config in a single SQL
+// statement so the auth-error mark / clear paths can't observe a partial
+// state where one field updated and the other didn't.
+func (s *IntegrationStore) UpdateStatusAndConfig(ctx context.Context, orgID, integrationID uuid.UUID, status string, config json.RawMessage) error {
+	query := `UPDATE integrations SET status = @status, config = @config, updated_at = now() WHERE org_id = @org_id AND id = @id`
+	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
+		"id":     integrationID,
+		"org_id": orgID,
+		"status": status,
+		"config": config,
+	})
+	return err
+}
+
 // GetByGitHubInstallationID returns the active GitHub integration for the
 // given installation id, used by webhook dispatch to map an event to an org.
 // lint:allow-no-orgid reason="GitHub webhook lookup by installation ID; no org context available pre-auth"
