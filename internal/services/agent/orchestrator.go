@@ -2404,7 +2404,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		// reconstruct the prior state.
 		log.Info().Msg("continuing session without snapshot, starting fresh")
 
-		issue, repoFullName, err := o.setupFreshSandbox(ctx, session, sandbox)
+		issue, repoFullName, err := o.setupFreshSandbox(ctx, session, sandbox, sandboxCfg.Env)
 		if err != nil {
 			o.failRun(ctx, session, fmt.Sprintf("setup fresh sandbox: %s", err))
 			return fmt.Errorf("setup fresh sandbox: %w", err)
@@ -2574,7 +2574,9 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 // setupFreshSandbox clones the session's repository into the sandbox when no
 // snapshot is available. Returns the issue (for prompt building) and the repo
 // full name (for memory lookup). Handles sessions with or without a repository.
-func (o *Orchestrator) setupFreshSandbox(ctx context.Context, session *models.Session, sandbox *Sandbox) (models.Issue, string, error) {
+// The resolved env is passed in from the caller so auth injection honors the
+// exact credential selection already baked into SandboxConfig.
+func (o *Orchestrator) setupFreshSandbox(ctx context.Context, session *models.Session, sandbox *Sandbox, env map[string]string) (models.Issue, string, error) {
 	var issue models.Issue
 	if session.PrimaryIssueID != nil {
 		fetched, err := o.issues.GetByID(ctx, session.OrgID, *session.PrimaryIssueID)
@@ -2629,15 +2631,11 @@ func (o *Orchestrator) setupFreshSandbox(ctx context.Context, session *models.Se
 	// Inject auth credentials into the sandbox.
 	switch session.AgentType {
 	case models.AgentTypeCodex:
-		injected, err := o.env.InjectCodexAuth(ctx, session.OrgID, sandbox)
-		if err != nil {
+		if err := o.ensureCodexAuth(ctx, session, sandbox, env); err != nil {
 			return models.Issue{}, "", fmt.Errorf("codex auth injection: %w", err)
 		}
-		if !injected {
-			return models.Issue{}, "", fmt.Errorf("no credentials for codex agent")
-		}
 	case models.AgentTypeClaudeCode:
-		if err := o.ensureClaudeCodeAuth(ctx, session, sandbox, nil); err != nil {
+		if err := o.ensureClaudeCodeAuth(ctx, session, sandbox, env); err != nil {
 			return models.Issue{}, "", fmt.Errorf("claude code auth injection: %w", err)
 		}
 	}

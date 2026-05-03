@@ -118,6 +118,7 @@ type testInternalSandboxProvider struct {
 	execErr    error
 	execStderr string
 	execCalls  []string
+	writes     map[string][]byte
 }
 
 func (p *testInternalSandboxProvider) Name() string { return "test" }
@@ -142,7 +143,11 @@ func (p *testInternalSandboxProvider) ReadFile(context.Context, *Sandbox, string
 	return nil, nil
 }
 
-func (p *testInternalSandboxProvider) WriteFile(context.Context, *Sandbox, string, []byte) error {
+func (p *testInternalSandboxProvider) WriteFile(_ context.Context, _ *Sandbox, path string, data []byte) error {
+	if p.writes == nil {
+		p.writes = make(map[string][]byte)
+	}
+	p.writes[path] = append([]byte(nil), data...)
 	return nil
 }
 
@@ -168,6 +173,147 @@ func (p *testInternalSandboxProvider) Restore(context.Context, *Sandbox, io.Read
 
 func (p *testInternalSandboxProvider) ExecStream(context.Context, *Sandbox, string, func([]byte), io.Writer) (int, error) {
 	return 0, nil
+}
+
+type testInternalCodingCredentialProvider struct {
+	resolvable map[models.ProviderName][]models.DecryptedCodingCredential
+}
+
+func (p testInternalCodingCredentialProvider) ListResolvable(_ context.Context, _ uuid.UUID, _ *uuid.UUID, provider models.ProviderName) ([]models.DecryptedCodingCredential, error) {
+	return p.resolvable[provider], nil
+}
+
+type testInternalClaudeCodeAuthProvider struct {
+	sub *models.AnthropicSubscription
+	id  uuid.UUID
+}
+
+func (p testInternalClaudeCodeAuthProvider) HasActiveSubscription(context.Context, uuid.UUID) (bool, error) {
+	return p.sub != nil, nil
+}
+
+func (p testInternalClaudeCodeAuthProvider) GetValidToken(context.Context, uuid.UUID) (*models.AnthropicSubscription, *uuid.UUID, error) {
+	if p.sub == nil {
+		return nil, nil, nil
+	}
+	id := p.id
+	return p.sub, &id, nil
+}
+
+func TestSetupFreshSandbox_CodexAPIKeyUsesResolvedEnv(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.MustParse("11111111-1111-1111-1111-111111111111")
+	userID := uuid.MustParse("22222222-2222-2222-2222-222222222222")
+	credID := uuid.MustParse("33333333-3333-3333-3333-333333333333")
+	provider := &testInternalSandboxProvider{}
+	env := NewAgentEnv(AgentEnvDeps{
+		CodingCredentials: testInternalCodingCredentialProvider{
+			resolvable: map[models.ProviderName][]models.DecryptedCodingCredential{
+				models.ProviderOpenAI: {
+					{
+						ID:       credID,
+						OrgID:    orgID,
+						UserID:   &userID,
+						Provider: models.ProviderOpenAI,
+						Priority: 1,
+						Status:   models.CodingCredentialStatusActive,
+						Config:   models.OpenAIConfig{APIKey: "sk-openai"},
+					},
+				},
+			},
+		},
+		Provider: provider,
+		Logger:   zerolog.Nop(),
+	})
+	orch := &Orchestrator{
+		env:      env,
+		provider: provider,
+		logger:   zerolog.Nop(),
+	}
+	session := &models.Session{
+		ID:                uuid.MustParse("44444444-4444-4444-4444-444444444444"),
+		OrgID:             orgID,
+		AgentType:         models.AgentTypeCodex,
+		TriggeredByUserID: &userID,
+	}
+
+	_, _, err := orch.setupFreshSandbox(context.Background(), session, &Sandbox{ID: "sandbox-1", HomeDir: "/home/sandbox", WorkDir: "/home/sandbox/work"}, map[string]string{
+		"OPENAI_API_KEY": "sk-openai",
+	})
+
+	require.NoError(t, err, "setupFreshSandbox should accept the already-resolved Codex API key")
+	require.NotContains(t, provider.writes, "/home/sandbox/.codex/auth.json", "setupFreshSandbox should not require Codex auth.json when the selected unified credential is an API key")
+}
+
+func TestSetupFreshSandbox_ClaudeAPIKeyDoesNotInjectLowerPrioritySubscription(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.MustParse("55555555-5555-5555-5555-555555555555")
+	userID := uuid.MustParse("66666666-6666-6666-6666-666666666666")
+	apiKeyID := uuid.MustParse("77777777-7777-7777-7777-777777777777")
+	subID := uuid.MustParse("88888888-8888-8888-8888-888888888888")
+	provider := &testInternalSandboxProvider{}
+	env := NewAgentEnv(AgentEnvDeps{
+		CodingCredentials: testInternalCodingCredentialProvider{
+			resolvable: map[models.ProviderName][]models.DecryptedCodingCredential{
+				models.ProviderAnthropic: {
+					{
+						ID:       apiKeyID,
+						OrgID:    orgID,
+						UserID:   &userID,
+						Provider: models.ProviderAnthropic,
+						Priority: 1,
+						Status:   models.CodingCredentialStatusActive,
+						Config:   models.AnthropicConfig{APIKey: "sk-ant-api-key"},
+					},
+				},
+				models.ProviderAnthropicSubscription: {
+					{
+						ID:       subID,
+						OrgID:    orgID,
+						UserID:   &userID,
+						Provider: models.ProviderAnthropicSubscription,
+						Priority: 2,
+						Status:   models.CodingCredentialStatusActive,
+						Config: models.AnthropicSubscriptionConfig{
+							AccessToken:  "lower-priority-access",
+							RefreshToken: "lower-priority-refresh",
+							ExpiresAt:    time.Now().Add(time.Hour),
+						},
+					},
+				},
+			},
+		},
+		Provider: provider,
+		Logger:   zerolog.Nop(),
+	})
+	orch := &Orchestrator{
+		env:      env,
+		provider: provider,
+		logger:   zerolog.Nop(),
+		claudeCodeAuth: testInternalClaudeCodeAuthProvider{
+			id: subID,
+			sub: &models.AnthropicSubscription{
+				AccessToken:  "lower-priority-access",
+				RefreshToken: "lower-priority-refresh",
+				ExpiresAt:    time.Now().Add(time.Hour),
+			},
+		},
+	}
+	session := &models.Session{
+		ID:                uuid.MustParse("99999999-9999-9999-9999-999999999999"),
+		OrgID:             orgID,
+		AgentType:         models.AgentTypeClaudeCode,
+		TriggeredByUserID: &userID,
+	}
+
+	_, _, err := orch.setupFreshSandbox(context.Background(), session, &Sandbox{ID: "sandbox-1", HomeDir: "/home/sandbox", WorkDir: "/home/sandbox/work"}, map[string]string{
+		"ANTHROPIC_API_KEY": "sk-ant-api-key",
+	})
+
+	require.NoError(t, err, "setupFreshSandbox should accept the already-resolved Claude API key")
+	require.NotContains(t, provider.writes, "/home/sandbox/.claude/.credentials.json", "setupFreshSandbox should not inject a lower-priority Claude subscription over the selected API key")
 }
 
 func TestCreateAssistantMessage_CarriesThreadID(t *testing.T) {
@@ -407,7 +553,7 @@ func TestSetupFreshSandbox_WorkingBranchCheckoutFailures(t *testing.T) {
 				logger:       zerolog.Nop(),
 			}
 
-			_, _, err := orch.setupFreshSandbox(context.Background(), session, &Sandbox{ID: "sandbox-1", WorkDir: "/home/sandbox/backend", HomeDir: "/home/sandbox"})
+			_, _, err := orch.setupFreshSandbox(context.Background(), session, &Sandbox{ID: "sandbox-1", WorkDir: "/home/sandbox/backend", HomeDir: "/home/sandbox"}, nil)
 			require.Error(t, err, "setupFreshSandbox should fail when the working branch cannot be created")
 			require.Contains(t, err.Error(), tt.wantErr, "setupFreshSandbox should surface the working-branch checkout failure")
 		})
