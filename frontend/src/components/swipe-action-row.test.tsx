@@ -80,6 +80,84 @@ describe('SwipeActionRow', () => {
     expect(onAction).toHaveBeenCalledTimes(1);
   });
 
+  it('continues from the revealed position on a follow-up swipe and auto-fires', () => {
+    const onAction = vi.fn();
+
+    renderWithProviders(
+      <SwipeActionRow
+        actionLabel="Archive item"
+        actionText="Archive"
+        onAction={onAction}
+      >
+        <div>Row content</div>
+      </SwipeActionRow>,
+    );
+
+    const surface = screen.getByText('Row content').closest('[data-swipe-surface="true"]');
+    expect(surface).not.toBeNull();
+    const container = surface!.parentElement;
+    expect(container).not.toBeNull();
+    Object.defineProperty(container!, 'offsetWidth', {
+      configurable: true,
+      value: 390,
+    });
+
+    fireEvent.touchStart(surface!, {
+      touches: [{ clientX: 320, clientY: 20 }],
+    });
+    fireEvent.touchMove(surface!, {
+      touches: [{ clientX: 240, clientY: 24 }],
+    });
+    fireEvent.touchEnd(surface!);
+
+    expect(container).toHaveAttribute('data-swipe-state', 'open');
+    expect(onAction).not.toHaveBeenCalled();
+
+    fireEvent.touchStart(surface!, {
+      touches: [{ clientX: 240, clientY: 24 }],
+    });
+    fireEvent.touchMove(surface!, {
+      touches: [{ clientX: 170, clientY: 28 }],
+    });
+    fireEvent.touchEnd(surface!);
+
+    expect(onAction).toHaveBeenCalledTimes(1);
+  });
+
+  it('closes an open row on a tap without needing a synthetic click', () => {
+    renderWithProviders(
+      <SwipeActionRow
+        actionLabel="Archive item"
+        actionText="Archive"
+        onAction={() => {}}
+      >
+        <div>Row content</div>
+      </SwipeActionRow>,
+    );
+
+    const surface = screen.getByText('Row content').closest('[data-swipe-surface="true"]');
+    expect(surface).not.toBeNull();
+    const container = surface!.parentElement;
+    expect(container).not.toBeNull();
+
+    fireEvent.touchStart(surface!, {
+      touches: [{ clientX: 220, clientY: 20 }],
+    });
+    fireEvent.touchMove(surface!, {
+      touches: [{ clientX: 120, clientY: 24 }],
+    });
+    fireEvent.touchEnd(surface!);
+
+    expect(container).toHaveAttribute('data-swipe-state', 'open');
+
+    fireEvent.touchStart(surface!, {
+      touches: [{ clientX: 120, clientY: 24 }],
+    });
+    fireEvent.touchEnd(surface!);
+
+    expect(container).toHaveAttribute('data-swipe-state', 'closed');
+  });
+
   it('auto-fires the action when released past the commit threshold', () => {
     const onAction = vi.fn();
 
@@ -320,6 +398,116 @@ describe('SwipeActionRow', () => {
       );
     } finally {
       console.error = originalConsoleError;
+      if (originalVibrate) {
+        Object.defineProperty(navigator, 'vibrate', {
+          configurable: true,
+          value: originalVibrate,
+        });
+      } else {
+        Reflect.deleteProperty(navigator, 'vibrate');
+      }
+    }
+  });
+
+  it('only emits the ready haptic once per gesture even if the swipe crosses the threshold multiple times', () => {
+    const onAction = vi.fn();
+    const originalVibrate = navigator.vibrate;
+    const vibrate = vi.fn();
+    Object.defineProperty(navigator, 'vibrate', {
+      configurable: true,
+      value: vibrate,
+    });
+
+    try {
+      renderWithProviders(
+        <SwipeActionRow
+          actionLabel="Archive item"
+          actionText="Archive"
+          onAction={onAction}
+        >
+          <div>Row content</div>
+        </SwipeActionRow>,
+      );
+
+      const surface = screen.getByText('Row content').closest('[data-swipe-surface="true"]');
+      expect(surface).not.toBeNull();
+      const container = surface!.parentElement;
+      expect(container).not.toBeNull();
+      Object.defineProperty(container!, 'offsetWidth', {
+        configurable: true,
+        value: 390,
+      });
+
+      fireEvent.touchStart(surface!, {
+        touches: [{ clientX: 320, clientY: 20 }],
+      });
+      fireEvent.touchMove(surface!, {
+        touches: [{ clientX: 170, clientY: 24 }],
+      });
+      fireEvent.touchMove(surface!, {
+        touches: [{ clientX: 230, clientY: 24 }],
+      });
+      fireEvent.touchMove(surface!, {
+        touches: [{ clientX: 150, clientY: 24 }],
+      });
+
+      expect(vibrate).toHaveBeenCalledTimes(1);
+      expect(vibrate).toHaveBeenNthCalledWith(1, 10);
+      expect(onAction).not.toHaveBeenCalled();
+    } finally {
+      if (originalVibrate) {
+        Object.defineProperty(navigator, 'vibrate', {
+          configurable: true,
+          value: originalVibrate,
+        });
+      } else {
+        Reflect.deleteProperty(navigator, 'vibrate');
+      }
+    }
+  });
+
+  it('uses a distinct confirmation haptic when the archive commits on release', () => {
+    const onAction = vi.fn();
+    const originalVibrate = navigator.vibrate;
+    const vibrate = vi.fn();
+    Object.defineProperty(navigator, 'vibrate', {
+      configurable: true,
+      value: vibrate,
+    });
+
+    try {
+      renderWithProviders(
+        <SwipeActionRow
+          actionLabel="Archive item"
+          actionText="Archive"
+          onAction={onAction}
+        >
+          <div>Row content</div>
+        </SwipeActionRow>,
+      );
+
+      const surface = screen.getByText('Row content').closest('[data-swipe-surface="true"]');
+      expect(surface).not.toBeNull();
+      const container = surface!.parentElement;
+      expect(container).not.toBeNull();
+      Object.defineProperty(container!, 'offsetWidth', {
+        configurable: true,
+        value: 390,
+      });
+
+      fireEvent.touchStart(surface!, {
+        touches: [{ clientX: 320, clientY: 20 }],
+      });
+      fireEvent.touchMove(surface!, {
+        touches: [{ clientX: 170, clientY: 24 }],
+      });
+      fireEvent.touchEnd(surface!);
+
+      expect(onAction).toHaveBeenCalledTimes(1);
+      expect(vibrate).toHaveBeenCalledTimes(2);
+      expect(vibrate).toHaveBeenNthCalledWith(1, 10);
+      expect(vibrate).toHaveBeenNthCalledWith(2, [16, 24, 40]);
+    } finally {
       if (originalVibrate) {
         Object.defineProperty(navigator, 'vibrate', {
           configurable: true,
