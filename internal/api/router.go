@@ -211,16 +211,17 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	// worker gets its own instance via buildServices in cmd/server/main.go.
 	// Both call linear.Build so wiring stays in lockstep.
 	linearService := linear.Build(linear.BuildDeps{
-		Pool:         pool,
-		Logger:       logger,
-		Integrations: integrationStore,
-		Credentials:  credentialStore,
-		Issues:       issueStore,
-		Sessions:     sessionStore,
-		IssueLinks:   sessionIssueLinkStore,
-		Orgs:         orgStore,
-		Jobs:         jobStore,
-		AppBaseURL:   cfg.FrontendURL,
+		Pool:               pool,
+		Logger:             logger,
+		Integrations:       integrationStore,
+		IntegrationsWriter: integrationStore,
+		Credentials:        credentialStore,
+		Issues:             issueStore,
+		Sessions:           sessionStore,
+		IssueLinks:         sessionIssueLinkStore,
+		Orgs:               orgStore,
+		Jobs:               jobStore,
+		AppBaseURL:         cfg.FrontendURL,
 	})
 	if sessionStreams != nil {
 		// Republish session status on every link change so the detail view
