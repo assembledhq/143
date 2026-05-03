@@ -189,6 +189,27 @@ describe('SwipeActionRow', () => {
     expect(surface).toHaveClass('bg-background');
   });
 
+  it('keeps the trailing action tray collapsed while closed', () => {
+    renderWithProviders(
+      <SwipeActionRow
+        actionLabel="Archive item"
+        actionText="Archive"
+        onAction={() => {}}
+      >
+        <div>Row content</div>
+      </SwipeActionRow>,
+    );
+
+    const surface = screen.getByText('Row content').closest('[data-swipe-surface="true"]');
+    expect(surface).not.toBeNull();
+    const container = surface!.parentElement;
+    expect(container).not.toBeNull();
+
+    const actionTray = container!.querySelector('[aria-hidden="true"]')?.parentElement as HTMLElement | null;
+    expect(actionTray).not.toBeNull();
+    expect(actionTray?.style.width).toBe('0px');
+  });
+
   it('auto-fires on a deliberate mobile-width swipe before half-row travel', () => {
     const onAction = vi.fn();
 

@@ -239,10 +239,10 @@ export function SwipeActionRow({
         : "open"
       : "closed";
   const trailingActionHidden = state === "closed";
-  const actionAreaWidth = Math.max(ACTION_WIDTH, offset);
+  const actionAreaWidth = trailingActionHidden ? 0 : Math.max(ACTION_WIDTH, offset);
   const commitThreshold = commitThresholdFor(gestureWidth);
   const swipeProgress = Math.max(0, Math.min(1, offset / commitThreshold));
-  const progressFill = Math.max(0.18, swipeProgress);
+  const progressFill = trailingActionHidden ? 0 : Math.max(0.18, swipeProgress);
   const actionHint = isCommitted
     ? `Release to ${actionText.toLowerCase()}`
     : "Keep swiping";
