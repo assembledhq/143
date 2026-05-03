@@ -73,25 +73,11 @@ export const AVAILABLE_PI_MODELS = [
   PI_MODEL_GEMINI_2_5_PRO,
 ] as const;
 
-// PM model configuration: maps each provider to its available models and API key env var.
-export const PM_MODELS_BY_PROVIDER: Record<string, { label: string; models: readonly string[]; apiKeyVar: string }> = {
-  claude_code: { label: "Claude Code", models: AVAILABLE_CLAUDE_CODE_MODELS, apiKeyVar: "ANTHROPIC_API_KEY" },
-  gemini_cli: { label: "Gemini CLI", models: AVAILABLE_GEMINI_CLI_MODELS, apiKeyVar: "GEMINI_API_KEY" },
-  codex: { label: "Codex", models: AVAILABLE_CODEX_MODELS, apiKeyVar: "OPENAI_API_KEY" },
-};
-
 export const DEFAULT_PM_MODEL = CODEX_MODEL_GPT_5_4;
 
-// Agent type options for session/project creation forms live on the AGENTS
-// registry in @/lib/agents. Import AGENTS (and agentTypeForModel) from there —
-// keeping a second list here would drift.
-
-// All PM models across every provider (for validation).
-export const AVAILABLE_PM_MODELS = [
-  ...AVAILABLE_CLAUDE_CODE_MODELS,
-  ...AVAILABLE_GEMINI_CLI_MODELS,
-  ...AVAILABLE_CODEX_MODELS,
-] as const;
+// PM and session model dropdowns are both built from the AGENTS registry in
+// @/lib/agents (see availableAgentModelGroups). Keeping a second PM-only list
+// here would drift away from the session picker.
 
 // General-purpose LLM models (used by validation, prioritization, PM services).
 // NOTE: This is a static fallback. The frontend should prefer fetching models

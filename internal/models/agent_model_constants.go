@@ -6,14 +6,19 @@ import (
 	"strings"
 )
 
-// AvailablePMModels includes all models from every provider.
-// The PM agent can use any model from any configured provider.
+// AvailablePMModels is the union of every coding-agent's model list. It mirrors
+// the model set the session picker offers (frontend lib/agents.ts AGENTS) so
+// admins can pick any model the org could otherwise spin up a session with —
+// including Amp modes ("smart"/"deep"/...) and Pi's curated provider/model
+// strings.
 var AvailablePMModels []string
 
 func init() {
 	AvailablePMModels = append(AvailablePMModels, AvailableClaudeCodeModels...)
 	AvailablePMModels = append(AvailablePMModels, AvailableGeminiCLIModels...)
 	AvailablePMModels = append(AvailablePMModels, AvailableCodexModels...)
+	AvailablePMModels = append(AvailablePMModels, AvailableAmpModes...)
+	AvailablePMModels = append(AvailablePMModels, AvailablePiModels...)
 }
 
 // Amp uses agent "modes" (not models) to select model + system prompt + tools.
@@ -91,13 +96,65 @@ var AvailableCodexModels = []string{
 	CodexModelGPT53CodexSpark,
 }
 
-func IsSupportedPMModel(model string) bool {
-	for _, supportedModel := range AvailablePMModels {
-		if model == supportedModel {
-			return true
+// AgentTypeForModel returns the AgentType whose curated model list contains
+// the given model. The curated lookup runs first so an entry like
+// "openai/gpt-5.4" resolves to AgentTypePi (its native registry) rather than
+// being misread by the slash heuristic — only after every list misses do we
+// fall back to AgentTypePi for unknown "provider/model"-shaped strings, since
+// Pi accepts arbitrary provider/model overrides at run time. Returns an empty
+// AgentType when no agent owns the model.
+//
+// Mirrors the frontend agentTypeForModel helper in lib/agents.ts so PM and
+// session pickers route through the same agent-resolution rules.
+func AgentTypeForModel(model string) AgentType {
+	if model == "" {
+		return ""
+	}
+	for _, m := range AvailableCodexModels {
+		if m == model {
+			return AgentTypeCodex
 		}
 	}
-	return false
+	for _, m := range AvailableClaudeCodeModels {
+		if m == model {
+			return AgentTypeClaudeCode
+		}
+	}
+	for _, m := range AvailableGeminiCLIModels {
+		if m == model {
+			return AgentTypeGeminiCLI
+		}
+	}
+	for _, m := range AvailableAmpModes {
+		if m == model {
+			return AgentTypeAmp
+		}
+	}
+	for _, m := range AvailablePiModels {
+		if m == model {
+			return AgentTypePi
+		}
+	}
+	if strings.Contains(model, "/") {
+		return AgentTypePi
+	}
+	return ""
+}
+
+// ValidatePMModel validates a pm_model setting using the same rules as
+// session model validation. It resolves the model's agent type via
+// AgentTypeForModel and delegates to ValidateModelForAgentType, so PM
+// accepts every model the session picker accepts — including Pi's
+// arbitrary "provider/model" overrides.
+func ValidatePMModel(model string) error {
+	if model == "" {
+		return nil
+	}
+	agentType := AgentTypeForModel(model)
+	if agentType == "" {
+		return fmt.Errorf("pm_model %q is not recognized — pick a model from any configured coding agent", model)
+	}
+	return ValidateModelForAgentType(agentType, model)
 }
 
 func IsSupportedClaudeCodeModel(model string) bool {
@@ -377,8 +434,8 @@ func ValidateSettingsModels(settings OrgSettings) error {
 	if err := settings.LLMReasoningEffort.Validate(); err != nil {
 		return err
 	}
-	if settings.PMModel != "" && !IsSupportedPMModel(settings.PMModel) {
-		return fmt.Errorf("pm_model must be one of: %v", AvailablePMModels)
+	if err := ValidatePMModel(settings.PMModel); err != nil {
+		return err
 	}
 
 	for agentTypeStr, envVars := range settings.AgentConfig {

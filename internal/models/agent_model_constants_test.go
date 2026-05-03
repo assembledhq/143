@@ -11,12 +11,15 @@ func TestPMModelConstants(t *testing.T) {
 
 	require.Equal(t, CodexModelGPT54, DefaultPMModel, "DefaultPMModel should use CodexModelGPT54")
 
-	// AvailablePMModels should include all provider models.
+	// AvailablePMModels mirrors the union of every coding agent's model list,
+	// matching the session picker (frontend availableAgentModelGroups).
 	var expected []string
 	expected = append(expected, AvailableClaudeCodeModels...)
 	expected = append(expected, AvailableGeminiCLIModels...)
 	expected = append(expected, AvailableCodexModels...)
-	require.Equal(t, expected, AvailablePMModels, "AvailablePMModels should include all provider models")
+	expected = append(expected, AvailableAmpModes...)
+	expected = append(expected, AvailablePiModels...)
+	require.Equal(t, expected, AvailablePMModels, "AvailablePMModels should include every agent's models")
 }
 
 func TestClaudeCodeModelConstants(t *testing.T) {
@@ -173,6 +176,47 @@ func TestIsSupportedPiModel(t *testing.T) {
 	require.False(t, IsSupportedPiModel(""), "empty Pi model should be rejected")
 }
 
+func TestAgentTypeForModel(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		model string
+		want  AgentType
+	}{
+		{"", ""},
+		{CodexModelGPT54, AgentTypeCodex},
+		{ClaudeCodeModelOpus47, AgentTypeClaudeCode},
+		{GeminiCLIModelGemini25Pro, AgentTypeGeminiCLI},
+		{AmpModeSmart, AgentTypeAmp},
+		// Curated Pi entry contains "/" — must resolve to Pi via the curated
+		// lookup (not the slash heuristic) so we keep precedence stable if a
+		// non-Pi agent later registers a slash-shaped model.
+		{PiModelClaudeOpus47, AgentTypePi},
+		// Slash heuristic only fires after every curated list misses.
+		{"moonshot/kimi-k2", AgentTypePi},
+		{"unknown-model", ""},
+	}
+	for _, tc := range cases {
+		require.Equalf(t, tc.want, AgentTypeForModel(tc.model), "AgentTypeForModel(%q)", tc.model)
+	}
+}
+
+func TestValidatePMModel(t *testing.T) {
+	t.Parallel()
+
+	require.NoError(t, ValidatePMModel(""), "empty pm_model is allowed (caller falls back to default)")
+	require.NoError(t, ValidatePMModel(CodexModelGPT54))
+	require.NoError(t, ValidatePMModel(ClaudeCodeModelOpus47))
+	require.NoError(t, ValidatePMModel(AmpModeSmart))
+	require.NoError(t, ValidatePMModel(PiModelClaudeOpus47))
+	// Custom Pi provider/model — accepted with parity to ValidateModelForAgentType.
+	require.NoError(t, ValidatePMModel("moonshot/kimi-k2"))
+
+	err := ValidatePMModel("not-a-model")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), `"not-a-model"`)
+}
+
 func TestValidateSettingsModels(t *testing.T) {
 	t.Parallel()
 
@@ -208,6 +252,24 @@ func TestValidateSettingsModels(t *testing.T) {
 			name: "accepts codex model as pm model",
 			settings: OrgSettings{
 				PMModel: CodexModelGPT53Codex,
+			},
+		},
+		{
+			name: "accepts amp mode as pm model",
+			settings: OrgSettings{
+				PMModel: AmpModeSmart,
+			},
+		},
+		{
+			name: "accepts pi model as pm model",
+			settings: OrgSettings{
+				PMModel: PiModelClaudeOpus47,
+			},
+		},
+		{
+			name: "accepts custom pi provider/model as pm model (parity with sessions)",
+			settings: OrgSettings{
+				PMModel: "moonshot/kimi-k2",
 			},
 		},
 		{

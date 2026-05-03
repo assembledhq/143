@@ -174,3 +174,59 @@ export function isAgentAvailable(
     (row) => row.agent === agentType && codingAuthStatusAllowsSelection(row.status),
   );
 }
+
+export interface AgentModelGroup {
+  key: string;
+  label: string;
+  models: readonly string[];
+}
+
+export interface AvailableAgentModelGroupsOptions {
+  // orgAgentConfig: when provided, agents whose sensitive env var (the API key)
+  // is set in the org-level agent_config also pass the availability filter.
+  // PM dropdowns pass this because the PM runs server-side using org keys —
+  // an admin without personal credentials should still see provider groups
+  // the org has configured. The session picker omits this since sessions run
+  // under the user's own credentials.
+  orgAgentConfig?: Record<string, Record<string, string>>;
+}
+
+// availableAgentModelGroups returns model groups suitable for the session and
+// PM model dropdowns. An agent passes the availability filter when any of:
+//   1. isAgentAvailable returns true (user has resolved creds / Codex OAuth /
+//      coding auth for this agent),
+//   2. orgAgentConfig has the agent's API key set (PM-only, see options),
+//   3. it is the default agent (always retained so the dropdown is never empty).
+// Groups are sorted with the default agent first; Amp's label is rewritten to
+// "Amp modes" so users can see those rows are agent modes, not model IDs.
+export function availableAgentModelGroups(
+  resolvedCredentials: readonly ResolvedCredential[],
+  codexAuthStatus: CodexAuthStatus | null | undefined,
+  codingAuths: readonly CodingAuth[],
+  defaultAgentType: string,
+  options: AvailableAgentModelGroupsOptions = {},
+): AgentModelGroup[] {
+  const orgAgentConfig = options.orgAgentConfig;
+  const orgConfiguredAgent = (agent: AgentMeta): boolean => {
+    if (!orgAgentConfig) return false;
+    const apiKeyVar = agent.envVars.find((v) => v.sensitive)?.name;
+    if (!apiKeyVar) return false;
+    return Boolean(orgAgentConfig[agent.key]?.[apiKeyVar]);
+  };
+  const filtered = AGENTS.filter(
+    (agent) =>
+      isAgentAvailable(agent.key, resolvedCredentials, codexAuthStatus, codingAuths) ||
+      orgConfiguredAgent(agent) ||
+      agent.key === defaultAgentType,
+  );
+  filtered.sort((a, b) => {
+    if (a.key === defaultAgentType) return -1;
+    if (b.key === defaultAgentType) return 1;
+    return AGENTS.indexOf(a) - AGENTS.indexOf(b);
+  });
+  return filtered.map((agent) => ({
+    key: agent.key,
+    label: agent.key === "amp" ? `${agent.label} modes` : agent.label,
+    models: agent.models,
+  }));
+}
