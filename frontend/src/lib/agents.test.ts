@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
-import { availableAgentModelGroups } from "./agents";
-import type { CodingAuth, ResolvedCredential } from "./types";
+import { availableAgentModelGroups, pmUsableResolvedCredentials } from "./agents";
+import type { CodingAuth, ResolvedCredential, UserCredentialSummary } from "./types";
 
 const codexCred: ResolvedCredential = {
   provider: "openai",
@@ -80,5 +80,45 @@ describe("availableAgentModelGroups", () => {
       },
     );
     expect(groups.map((g) => g.key)).toEqual(["codex"]);
+  });
+});
+
+describe("pmUsableResolvedCredentials", () => {
+  it("excludes personal-only credentials because PM runs without a user id", () => {
+    const credentials = pmUsableResolvedCredentials([claudeCred], []);
+    const groups = availableAgentModelGroups(credentials, null, [], "codex");
+
+    expect(credentials).toEqual([]);
+    expect(groups.map((g) => g.key)).toEqual(["codex"]);
+  });
+
+  it("retains org and team-default resolved credentials for PM runs", () => {
+    const credentials = pmUsableResolvedCredentials(
+      [
+        { provider: "anthropic", source: "org", masked_key: "sk-ant-org-***" },
+        { provider: "gemini", source: "team_default", masked_key: "gemini-team-***" },
+      ],
+      [],
+    );
+    const groups = availableAgentModelGroups(credentials, null, [], "codex");
+
+    expect(groups.map((g) => g.key)).toEqual(["codex", "claude_code", "gemini_cli"]);
+  });
+
+  it("adds team defaults even when a personal credential shadows them in resolved credentials", () => {
+    const teamDefault: UserCredentialSummary = {
+      provider: "anthropic",
+      configured: true,
+      is_team_default: true,
+      masked_key: "sk-ant-team-***",
+    };
+
+    const credentials = pmUsableResolvedCredentials([claudeCred], [teamDefault]);
+    const groups = availableAgentModelGroups(credentials, null, [], "codex");
+
+    expect(credentials).toEqual([
+      { provider: "anthropic", source: "team_default", masked_key: "sk-ant-team-***" },
+    ]);
+    expect(groups.map((g) => g.key)).toEqual(["codex", "claude_code"]);
   });
 });

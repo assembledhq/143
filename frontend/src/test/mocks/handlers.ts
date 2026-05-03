@@ -722,6 +722,13 @@ export const handlers = [
     });
   }),
 
+  http.get('/api/v1/settings/credentials/team', () => {
+    return HttpResponse.json({
+      data: [],
+      meta: {},
+    });
+  }),
+
   http.get('/api/v1/settings/coding-auths', () => {
     return HttpResponse.json({
       data: [],

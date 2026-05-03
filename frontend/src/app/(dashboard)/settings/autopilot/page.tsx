@@ -23,7 +23,7 @@ import { PageContainer } from "@/components/page-container";
 import { PageHeader } from "@/components/page-header";
 import { useAutosave } from "@/hooks/useAutosave";
 import { useAutosaveNumericField } from "@/hooks/useAutosaveNumericField";
-import { availableAgentModelGroups } from "@/lib/agents";
+import { availableAgentModelGroups, pmUsableResolvedCredentials } from "@/lib/agents";
 import { DEFAULT_PM_MODEL } from "@/lib/model-constants";
 import { queryKeys } from "@/lib/query-keys";
 import {
@@ -38,7 +38,7 @@ import {
   PM_SCHEDULE_MAX_HOURS,
   clampNumber,
 } from "@/lib/settings-constants";
-import type { CodingAuth, ListResponse, Organization, OrgSettings, RepoSettings, Repository, ResolvedCredential, SingleResponse } from "@/lib/types";
+import type { CodingAuth, ListResponse, Organization, OrgSettings, RepoSettings, Repository, ResolvedCredential, SingleResponse, UserCredentialSummary } from "@/lib/types";
 
 export default function AutopilotSettingsPage() {
   const { user } = useAuth();
@@ -57,6 +57,11 @@ export default function AutopilotSettingsPage() {
   const { data: resolvedCredsResponse } = useQuery<ListResponse<ResolvedCredential>>({
     queryKey: queryKeys.credentials.resolved,
     queryFn: () => api.userCredentials.listResolved(),
+    enabled: isAdmin,
+  });
+  const { data: teamDefaultsResponse } = useQuery<ListResponse<UserCredentialSummary>>({
+    queryKey: queryKeys.credentials.teamDefaults,
+    queryFn: () => api.userCredentials.listTeamDefaults(),
     enabled: isAdmin,
   });
   const { data: codexAuthResponse } = useQuery({
@@ -85,16 +90,20 @@ export default function AutopilotSettingsPage() {
     [codingAuthsResponse],
   );
   const codexAuthStatus = codexAuthResponse?.data;
+  const pmResolvedCredentials = useMemo(
+    () => pmUsableResolvedCredentials(resolvedCredentials, teamDefaultsResponse?.data ?? []),
+    [resolvedCredentials, teamDefaultsResponse],
+  );
 
   const pmModelGroups = useMemo(() => {
     return availableAgentModelGroups(
-      resolvedCredentials,
+      pmResolvedCredentials,
       codexAuthStatus,
       codingAuths,
       settings.default_agent_type || "codex",
       { orgAgentConfig: settings.agent_config },
     );
-  }, [resolvedCredentials, codexAuthStatus, codingAuths, settings.default_agent_type, settings.agent_config]);
+  }, [pmResolvedCredentials, codexAuthStatus, codingAuths, settings.default_agent_type, settings.agent_config]);
 
   const scheduleHoursServer = settings.pm_schedule_hours ?? 24;
   const pmModel = settings.pm_model ?? DEFAULT_PM_MODEL;

@@ -22,7 +22,7 @@ import {
 import { X } from "lucide-react";
 import { useAutosave } from "@/hooks/useAutosave";
 import { useAutosaveNumericField } from "@/hooks/useAutosaveNumericField";
-import { availableAgentModelGroups } from "@/lib/agents";
+import { availableAgentModelGroups, pmUsableResolvedCredentials } from "@/lib/agents";
 import { queryKeys } from "@/lib/query-keys";
 import type {
   CodingAuth,
@@ -34,6 +34,7 @@ import type {
   Repository,
   ResolvedCredential,
   SingleResponse,
+  UserCredentialSummary,
 } from "@/lib/types";
 import { DEFAULT_PM_MODEL } from "@/lib/model-constants";
 
@@ -88,6 +89,10 @@ export function RepoPMSettingsEditor({ repository }: RepoPMSettingsProps) {
     queryKey: queryKeys.credentials.resolved,
     queryFn: () => api.userCredentials.listResolved(),
   });
+  const { data: teamDefaultsResponse } = useQuery<ListResponse<UserCredentialSummary>>({
+    queryKey: queryKeys.credentials.teamDefaults,
+    queryFn: () => api.userCredentials.listTeamDefaults(),
+  });
   const { data: codexAuthResponse } = useQuery({
     queryKey: queryKeys.codexAuth.status,
     queryFn: () => api.codexAuth.status(),
@@ -137,19 +142,23 @@ export function RepoPMSettingsEditor({ repository }: RepoPMSettingsProps) {
     [codingAuthsResponse],
   );
   const codexAuthStatus = codexAuthResponse?.data;
+  const pmResolvedCredentials = useMemo(
+    () => pmUsableResolvedCredentials(resolvedCredentials, teamDefaultsResponse?.data ?? []),
+    [resolvedCredentials, teamDefaultsResponse],
+  );
 
   const pmModelGroups = useMemo(() => {
     return availableAgentModelGroups(
-      resolvedCredentials,
+      pmResolvedCredentials,
       codexAuthStatus,
       codingAuths,
       orgSettings.default_agent_type || "codex",
       { orgAgentConfig: orgSettings.agent_config },
     );
-  }, [resolvedCredentials, codexAuthStatus, codingAuths, orgSettings.default_agent_type, orgSettings.agent_config]);
+  }, [pmResolvedCredentials, codexAuthStatus, codingAuths, orgSettings.default_agent_type, orgSettings.agent_config]);
 
   const credentialsLoaded = Boolean(
-    resolvedCredsResponse && codexAuthResponse && codingAuthsResponse,
+    resolvedCredsResponse && teamDefaultsResponse && codexAuthResponse && codingAuthsResponse,
   );
 
   const autosave = useAutosave<RepoPatch>({

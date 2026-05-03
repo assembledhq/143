@@ -10,7 +10,7 @@ import {
   AVAILABLE_GEMINI_CLI_MODELS,
   AVAILABLE_PI_MODELS,
 } from "@/lib/model-constants";
-import type { CodexAuthStatus, CodingAuth, ResolvedCredential } from "@/lib/types";
+import type { CodexAuthStatus, CodingAuth, ResolvedCredential, UserCredentialSummary } from "@/lib/types";
 
 export interface AgentEnvVar {
   name: string;
@@ -229,4 +229,36 @@ export function availableAgentModelGroups(
     label: agent.key === "amp" ? `${agent.label} modes` : agent.label,
     models: agent.models,
   }));
+}
+
+// PM jobs run server-side without a user id, so they cannot use the current
+// admin's personal credentials. Keep org/team-default resolved credentials,
+// then add explicit team defaults because the resolved endpoint reports only
+// the first source for a provider and a personal credential can shadow a
+// PM-usable team default.
+export function pmUsableResolvedCredentials(
+  resolvedCredentials: readonly ResolvedCredential[],
+  teamDefaults: readonly UserCredentialSummary[],
+): ResolvedCredential[] {
+  const byProvider = new Map<string, ResolvedCredential>();
+
+  for (const credential of resolvedCredentials) {
+    if (credential.source !== "org" && credential.source !== "team_default") {
+      continue;
+    }
+    byProvider.set(credential.provider, credential);
+  }
+
+  for (const credential of teamDefaults) {
+    if (!credential.configured || !credential.is_team_default) {
+      continue;
+    }
+    byProvider.set(credential.provider, {
+      provider: credential.provider,
+      source: "team_default",
+      masked_key: credential.masked_key,
+    });
+  }
+
+  return Array.from(byProvider.values());
 }
