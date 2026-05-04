@@ -181,6 +181,9 @@ export interface Session {
     // Linear workspace slug (e.g. "acs"). Used to build deep links to
     // linear.app/<slug>/issue/<KEY>. Empty/undefined for non-Linear links.
     issue_workspace_slug?: string;
+    // Latest backend-recorded reason a Linear state sync was skipped for
+    // this link (if any). Used by the session detail debug chip.
+    linear_last_skipped_reason?: string;
   }>;
   // Linear-specific session policy flags. Frozen at session create.
   linear_private?: boolean;
