@@ -185,30 +185,6 @@ function CredentialList({
   );
 }
 
-// effectiveResolutionLine renders the ordered list as a one-line "Personal #1
-// → Personal #2 → Org #1" string. Mirrors the design doc's "Effective
-// resolution for you" hint and is the single most-asked support question, so
-// surfacing it ambient on the page eliminates the round-trip.
-//
-// `rows` comes from /api/v1/coding-credentials?scope=resolved, which is
-// backed by ListResolvable (status='active' rows only). Counting is
-// therefore safe: every row counted is one the resolver would actually walk.
-function effectiveResolutionLine(rows: CodingCredentialSummary[]): string {
-  const personalCount = rows.filter((r) => r.scope === "personal").length;
-  const orgCount = rows.filter((r) => r.scope === "org").length;
-  const segments: string[] = [];
-  for (let i = 0; i < personalCount; i++) {
-    segments.push(`Personal #${i + 1}`);
-  }
-  for (let i = 0; i < orgCount; i++) {
-    segments.push(`Org #${i + 1}`);
-  }
-  if (segments.length === 0) {
-    return "No credentials configured.";
-  }
-  return segments.join(" → ");
-}
-
 // Auth type for the personal Add-auth modal. Mirrors the org-side flow in
 // /settings/agent: subscription auth runs the OAuth handshake against the
 // upstream provider; api_key takes a static key. The modal exposes the

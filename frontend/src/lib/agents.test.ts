@@ -40,7 +40,7 @@ const personalClaudeSubscription: CodingCredentialSummary = {
   auth_type: "subscription",
   provider: "anthropic_subscription",
   label: "Personal Claude",
-  status: "never_verified",
+  status: "healthy",
   is_default: true,
   created_at: "2026-03-20T00:00:00Z",
   updated_at: "2026-03-20T00:00:00Z",
