@@ -3,6 +3,7 @@ package pm
 import (
 	"context"
 
+	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
 	"github.com/google/uuid"
 )
@@ -84,11 +85,12 @@ func (s *Service) executePlan(ctx context.Context, orgID uuid.UUID, plan *Plan, 
 			}
 		}
 
+		dedupeKey := db.RunAgentDedupeKey(run.ID)
 		payload := map[string]string{
 			"session_id": run.ID.String(),
 			"org_id":     orgID.String(),
 		}
-		if _, err := s.jobs.Enqueue(ctx, orgID, "agent", "run_agent", payload, 5, nil); err != nil {
+		if _, err := s.jobs.Enqueue(ctx, orgID, "agent", "run_agent", payload, 5, &dedupeKey); err != nil {
 			s.logger.Error().Err(err).Str("session_id", run.ID.String()).Msg("failed to enqueue agent run job")
 			task.Status = models.PMTaskStatusSkippedCapacity
 			continue

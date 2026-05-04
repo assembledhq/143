@@ -49,10 +49,109 @@ var ErrSessionTimedOut = errors.New("session timed out")
 // job is requeued without consuming an attempt.
 var ErrSnapshotPending = errors.New("snapshot upload pending")
 
+// ErrSandboxRaceLoser is returned from RunAgent / ContinueSession when
+// AcquireTurnHold's COALESCE reveals that another holder published a
+// container_id first AND that container is alive — i.e. a duplicate
+// run_agent / continue_session job is concurrently running the same turn.
+// The "winner" owns the session row and will update its result; the loser
+// must NOT call failRun (that would race the winner's terminal write and
+// corrupt the row) and must NOT have its job retried (every retry would
+// lose the same race). Worker handlers recognize this error and convert it
+// to a FatalError so the duplicate job dead-letters silently without
+// surfacing a user-visible failure.
+var ErrSandboxRaceLoser = errors.New("sandbox race: another holder attached first")
+
+// ErrStaleSandboxIDCleared is returned from RunAgent / ContinueSession when
+// AcquireTurnHold reports a different container_id but an IsAlive probe
+// reveals that the "winner" container is dead — a stale orphan from a
+// crashed worker that the startup reconciler hasn't reaped yet. The loser
+// CAS-clears container_id via ClearContainerID and signals retry: the next
+// attempt will see a clean row and create a fresh sandbox. Worker handlers
+// convert this to a RetryableError with a short backoff so the retry happens
+// without consuming an attempt counter.
+var ErrStaleSandboxIDCleared = errors.New("sandbox race: cleared stale orphan container_id, retry")
+
+// ErrSandboxPreviewRace is returned from RunAgent / ContinueSession when
+// AcquireTurnHold reports a different live container_id, but holder-state
+// inspection shows the live container belongs to a preview hydrate rather
+// than another agent turn. There is no "winning" agent job to publish the
+// user's turn result, so the worker must retry instead of silently
+// dead-lettering as a duplicate.
+var ErrSandboxPreviewRace = errors.New("sandbox race: preview holder attached first, retry")
+
 // canonicalTimeoutLogMessage is the single log phrase emitted whenever a
 // session hits its configured deadline. Kept deliberately narrow so
 // Grafana alerts can key off one string across RunAgent and ContinueSession.
 const canonicalTimeoutLogMessage = "session exceeded configured timeout"
+
+// sandboxRaceProbeTimeout bounds the IsAlive probe at the AcquireTurnHold
+// race-loss diagnosis site. Short enough that a docker-daemon hiccup can't
+// stall the loser's cleanup, long enough that a healthy IsAlive (typically
+// sub-100ms) succeeds with margin.
+const sandboxRaceProbeTimeout = 3 * time.Second
+
+// diagnoseAcquireHoldRaceLoss decides whether a lost AcquireTurnHold is a
+// genuine duplicate run (winner is alive) or a stale orphan from a crashed
+// prior worker (winner is dead, never released). It probes IsAlive on
+// actualContainerID and, if dead, CAS-clears the row so the caller's retry
+// re-enters against a clean session row. Returns ErrSandboxRaceLoser for
+// genuine duplicates (worker dead-letters silently) or ErrStaleSandboxIDCleared
+// for stale orphans (worker requeues without consuming an attempt). Probe
+// or clear errors are intentionally conservative — they fall back to
+// ErrSandboxRaceLoser to avoid clobbering a real active turn on a transient
+// docker / DB hiccup; the startup reconciler remains the safety net.
+func (o *Orchestrator) diagnoseAcquireHoldRaceLoss(
+	ctx context.Context,
+	orgID, sessionID uuid.UUID,
+	actualContainerID string,
+	log zerolog.Logger,
+) error {
+	aliveCtx, cancel := context.WithTimeout(ctx, sandboxRaceProbeTimeout)
+	defer cancel()
+	alive, aliveErr := o.provider.IsAlive(aliveCtx, &Sandbox{ID: actualContainerID, Provider: "docker"})
+	if aliveErr != nil {
+		log.Warn().Err(aliveErr).
+			Str("winning_container_id", actualContainerID).
+			Msg("IsAlive probe failed during sandbox race-loss diagnosis; assuming alive winner and dead-lettering this duplicate")
+		return ErrSandboxRaceLoser
+	}
+	if alive {
+		turnHolds, previewHolds, stateErr := o.sessions.ContainerHoldState(ctx, orgID, sessionID, actualContainerID)
+		if stateErr != nil {
+			log.Warn().Err(stateErr).
+				Str("winning_container_id", actualContainerID).
+				Msg("holder-state probe failed during sandbox race-loss diagnosis; assuming alive turn winner and dead-lettering this duplicate")
+			return ErrSandboxRaceLoser
+		}
+		if turnHolds {
+			return ErrSandboxRaceLoser
+		}
+		if previewHolds {
+			return ErrSandboxPreviewRace
+		}
+		log.Warn().
+			Str("winning_container_id", actualContainerID).
+			Msg("live container has no recorded turn or preview holder during race-loss diagnosis; assuming alive winner and dead-lettering this duplicate")
+		return ErrSandboxRaceLoser
+	}
+	cleared, clearErr := o.sessions.ClearContainerID(ctx, orgID, sessionID, actualContainerID)
+	if clearErr != nil {
+		log.Warn().Err(clearErr).
+			Str("winning_container_id", actualContainerID).
+			Msg("ClearContainerID failed during sandbox race-loss diagnosis; falling back to silent dead-letter so a transient DB error doesn't trigger a tight retry loop")
+		return ErrSandboxRaceLoser
+	}
+	if !cleared {
+		log.Info().
+			Str("winning_container_id", actualContainerID).
+			Msg("ClearContainerID CAS lost during race-loss diagnosis (a new holder acquired between IsAlive and Clear); dead-lettering this duplicate")
+		return ErrSandboxRaceLoser
+	}
+	log.Warn().
+		Str("stale_container_id", actualContainerID).
+		Msg("cleared stale orphan container_id from a crashed prior turn; signaling retry to re-enter against the clean row")
+	return ErrStaleSandboxIDCleared
+}
 
 // GitHubTokenProvider abstracts retrieving a GitHub App installation token.
 type GitHubTokenProvider interface {
@@ -151,6 +250,19 @@ type SessionStore interface {
 	// caller owns the destroy, false when a new holder acquired in the gap
 	// (caller must leave the container alone).
 	FinalizeContainerDestroy(ctx context.Context, orgID, sessionID uuid.UUID, expectedContainerID string) (cleared bool, err error)
+	// ClearContainerID is the CAS-safe orphan reset: it nulls container_id
+	// and clears the stuck turn_holding_container flag, but only when the
+	// expected ID still matches AND no preview hold has appeared. Used by
+	// the AcquireTurnHold race-loss path to recover from a stale orphan
+	// container_id (worker crashed mid-turn, never released): the loser
+	// probes IsAlive on actualContainerID, and if dead, calls ClearContainerID
+	// so the retry can re-enter against a clean row.
+	ClearContainerID(ctx context.Context, orgID, sessionID uuid.UUID, expectedContainerID string) (cleared bool, err error)
+	// ContainerHoldState returns whether the expected live container is held
+	// by an agent turn, by a preview, or both. Used after an AcquireTurnHold
+	// COALESCE loss so an alive preview hydrate is retried rather than
+	// misclassified as a duplicate agent job.
+	ContainerHoldState(ctx context.Context, orgID, sessionID uuid.UUID, expectedContainerID string) (turnHolds bool, previewHolds bool, err error)
 }
 
 // SessionLogStore defines the log persistence operations.
@@ -1302,12 +1414,24 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 		if sandboxCfg.AuthSocketPath != "" {
 			o.closeSandboxAuth(run.ID, log)
 		}
+		// Self-heal: ask the diagnosis helper whether the "winner" is alive
+		// (real duplicate → dead-letter via ErrSandboxRaceLoser), an alive
+		// preview holder (retry), or a stale orphan (worker crashed mid-turn
+		// → CAS-clear and signal retry via ErrStaleSandboxIDCleared). Either
+		// way, do NOT failRun — the winner (if any) owns the session row, and
+		// the orphan path leaves the row pending for the retry to re-enter
+		// cleanly.
 		log.Warn().
 			Str("winning_container_id", actualContainerID).
 			Str("losing_container_id", sandbox.ID).
-			Msg("another holder published container_id first; aborting turn so the user can retry against the winning container")
-		o.failRun(ctx, run, "sandbox race: another holder attached first, please retry")
-		return fmt.Errorf("sandbox race: actual container %s != created %s", actualContainerID, sandbox.ID)
+			Msg("another holder published container_id first; diagnosing whether the winner is alive or a stale orphan")
+		diagErr := o.diagnoseAcquireHoldRaceLoss(ctx, run.OrgID, run.ID, actualContainerID, log)
+		if errors.Is(diagErr, ErrSandboxPreviewRace) {
+			if revertErr := o.sessions.UpdateStatus(ctx, run.OrgID, run.ID, string(models.SessionStatusPending)); revertErr != nil {
+				log.Error().Err(revertErr).Msg("failed to revert session to pending after preview won sandbox race")
+			}
+		}
+		return fmt.Errorf("%w: actual container %s != created %s", diagErr, actualContainerID, sandbox.ID)
 	}
 	defer func() {
 		exitReason := containerExitReason(ctx, err)
@@ -2075,8 +2199,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		// true, sandbox.ID came from the row's existing container_id and
 		// belongs to whoever set it — tearing it down here would kill a
 		// container another holder is still using. On the losing-race path
-		// we instead leave it alone; the caller's retry will attach to
-		// actualContainerID via the reuse path.
+		// we instead leave it alone; the winner is using actualContainerID.
 		if !reusedExisting {
 			if destroyErr := o.provider.Destroy(destroyCtx, sandbox); destroyErr != nil {
 				log.Error().Err(destroyErr).Str("losing_container_id", sandbox.ID).Msg("failed to destroy sandbox after losing hydrate race")
@@ -2088,17 +2211,17 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		log.Warn().
 			Str("winning_container_id", actualContainerID).
 			Str("losing_container_id", sandbox.ID).
-			Msg("another holder published container_id first; aborting turn so the user can retry against the winning container")
-		if revertErr := o.sessions.UpdateStatus(ctx, session.OrgID, session.ID, string(models.SessionStatusIdle)); revertErr != nil {
-			log.Error().Err(revertErr).Msg("failed to revert session to idle after losing hydrate race")
+			Msg("another holder published container_id first; diagnosing whether the winner is alive or a stale orphan")
+		// Self-heal: see RunAgent's symmetrical site for rationale. The
+		// diagnosis helper either dead-letters this duplicate (real winner
+		// active) or CAS-clears a stale orphan and signals retry.
+		diagErr := o.diagnoseAcquireHoldRaceLoss(ctx, session.OrgID, session.ID, actualContainerID, log)
+		if errors.Is(diagErr, ErrSandboxPreviewRace) {
+			if revertErr := o.sessions.UpdateStatus(ctx, session.OrgID, session.ID, string(models.SessionStatusIdle)); revertErr != nil {
+				log.Error().Err(revertErr).Msg("failed to revert session to idle after preview won sandbox race")
+			}
 		}
-		o.registerSandboxFailureMessage(
-			ctx,
-			session,
-			"Another session activity was starting at the same time. Please try again.",
-			"sandbox race",
-		)
-		return fmt.Errorf("sandbox race: actual container %s != local %s", actualContainerID, sandbox.ID)
+		return fmt.Errorf("%w: actual container %s != local %s", diagErr, actualContainerID, sandbox.ID)
 	}
 	containerStartedAt := time.Now()
 	var usageEventID uuid.UUID
