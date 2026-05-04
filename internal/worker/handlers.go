@@ -1430,6 +1430,8 @@ func userFacingPRError(err error) string {
 		return "This pull request is no longer open."
 	case errors.Is(err, ghservice.ErrLegacyPRMissingHeadRef):
 		return "This PR predates branch tracking; create a new PR to push follow-up changes."
+	case errors.Is(err, ghservice.ErrPushRejected):
+		return ghservice.PushRejectedPRMessage
 	default:
 		return "Check GitHub access or repo permissions and try again."
 	}
