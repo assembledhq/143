@@ -194,14 +194,11 @@ jobs:
           PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
           PR_BASE_REF: ${{ github.event.pull_request.base.ref }}
         run: |
-          if ! git rev-parse --verify "${PR_BASE_SHA}^{commit}"; then
-            git fetch --no-tags origin "${PR_BASE_REF}:refs/remotes/origin/${PR_BASE_REF}"
-          fi
-
           if git rev-parse --verify "${PR_BASE_SHA}^{commit}"; then
             git branch -f pr-base "${PR_BASE_SHA}"
           else
-            git branch -f pr-base "refs/remotes/origin/${PR_BASE_REF}"
+            git fetch --no-tags origin "${PR_BASE_REF}"
+            git branch -f pr-base FETCH_HEAD
           fi
 
       - name: Install diff-cover (PR only)
