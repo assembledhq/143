@@ -298,10 +298,9 @@ describe('SessionDetailPage', () => {
     const sheet = await screen.findByRole('dialog');
     const closeBtn = within(sheet).getByRole('button', { name: 'Close details' });
     expect(closeBtn).toBeInTheDocument();
-    const viewPRButton = within(sheet).getByRole('button', { name: 'View PR' });
-    expect(viewPRButton).toBeInTheDocument();
-    expect(viewPRButton.className).not.toContain('w-full');
-    expect(viewPRButton.closest('a')?.className ?? '').not.toContain('w-full');
+    const viewPRLink = within(sheet).getByRole('link', { name: 'View PR' });
+    expect(viewPRLink).toBeInTheDocument();
+    expect(viewPRLink.className).not.toContain('w-full');
     expect(within(sheet).queryByRole('button', { name: 'Close' })).not.toBeInTheDocument();
 
     await user.click(closeBtn);
@@ -1253,6 +1252,17 @@ describe('SessionDetailPage', () => {
     expect(await screen.findByText('View PR')).toBeInTheDocument();
   });
 
+  it('renders View PR as a real link instead of nesting a button inside a link', async () => {
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+
+    const viewPRLink = await screen.findByRole('link', { name: 'View PR' });
+
+    expect(viewPRLink).toHaveAttribute('href', 'https://github.com/example/repo/pull/42');
+    expect(viewPRLink).toHaveAttribute('target', '_blank');
+    expect(viewPRLink).toHaveAttribute('rel', expect.stringContaining('noopener'));
+    expect(within(viewPRLink).queryByRole('button')).not.toBeInTheDocument();
+  });
+
   it('keeps the tab rail scrollable while separating top-right actions', async () => {
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
 
@@ -1263,7 +1273,7 @@ describe('SessionDetailPage', () => {
 	expect(tabRail).toHaveClass('scrollbar-hide');
 	expect(tabRail).toHaveClass('min-w-0');
 	expect(actions).toHaveClass('shrink-0');
-    expect(within(actions).getByRole('button', { name: 'View PR' })).toBeInTheDocument();
+    expect(within(actions).getByRole('link', { name: 'View PR' })).toBeInTheDocument();
   });
 
   it('shows the horizontal tab scrollbar only when tabs run into the action buttons', async () => {
@@ -1345,7 +1355,7 @@ describe('SessionDetailPage', () => {
 
     expect((await screen.findAllByText('PR closed')).length).toBeGreaterThanOrEqual(2);
     expect(screen.getByText('PR #42 was closed without merging.')).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'View PR' })).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'View PR' })).toBeInTheDocument();
     expect(screen.queryByText('PR health')).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Resolve conflicts' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Fix tests' })).not.toBeInTheDocument();
@@ -1466,7 +1476,7 @@ describe('SessionDetailPage', () => {
     expect(screen.queryAllByText('PR merged')).toHaveLength(1);
     expect(screen.getByText('PR #42 was merged successfully.')).toHaveClass('text-xs');
     expect(screen.getByText('This change has landed. Open a follow-up session if you need to make another revision.')).toHaveClass('text-xs');
-    expect(screen.getByRole('button', { name: 'View PR' })).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'View PR' })).toBeInTheDocument();
     expect(screen.getByLabelText('Merged PR status')).toHaveClass('text-violet-700', 'dark:text-violet-400');
     expect(screen.queryByText('PR health')).not.toBeInTheDocument();
   });
@@ -1846,7 +1856,7 @@ describe('SessionDetailPage', () => {
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
     await screen.findAllByText('Fixed TypeError by adding null check');
 
-    expect(screen.getByRole('button', { name: /View PR/ })).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: /View PR/ })).toBeInTheDocument();
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
   });
 
@@ -2636,7 +2646,7 @@ describe('SessionDetailPage', () => {
 
     await waitFor(
       async () => {
-        expect(await screen.findByRole('button', { name: /View PR/ })).toBeInTheDocument();
+        expect(await screen.findByRole('link', { name: /View PR/ })).toBeInTheDocument();
       },
       { timeout: 12000 },
     );
