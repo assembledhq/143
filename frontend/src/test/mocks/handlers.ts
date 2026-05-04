@@ -392,6 +392,8 @@ export const handlers = [
         status: 'idle',
         current_turn: 0,
         created_at: '2026-02-17T07:12:00Z',
+        cost_cents: 0,
+        pending_message_count: 0,
       },
     } satisfies SingleResponse<SessionThread>, { status: 201 });
   }),

@@ -41,7 +41,7 @@ import (
 	"github.com/assembledhq/143/internal/services/workspace"
 )
 
-func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, sentryReporter observability.Reporter, codexAuthSvc *codexauth.Service, claudeCodeAuthSvc *claudecodeauth.Service, llmClient llm.Client, fileReader sandbox.FileReader, canceller handlers.SessionCanceller, previewProvider preview.PreviewCapableProvider, snapshotExecutor preview.SnapshotExecutor, sandboxProvider agent.SandboxProvider, snapshotStore storage.SnapshotStore, orgSettingsInvalidator handlers.OrgSettingsInvalidator, shutdownCh <-chan struct{}, redisClient *cache.Client, sessionStreams *cache.SessionStreams, sharedCodingCredentialStore ...*db.CodingCredentialStore) (*chi.Mux, *http.Server, *preview.RecycleWorker, io.Closer, *preview.Manager, error) {
+func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, sentryReporter observability.Reporter, codexAuthSvc *codexauth.Service, claudeCodeAuthSvc *claudecodeauth.Service, llmClient llm.Client, fileReader sandbox.FileReader, canceller handlers.SessionCanceller, threadCanceller *agent.ThreadCancelRegistry, previewProvider preview.PreviewCapableProvider, snapshotExecutor preview.SnapshotExecutor, sandboxProvider agent.SandboxProvider, snapshotStore storage.SnapshotStore, orgSettingsInvalidator handlers.OrgSettingsInvalidator, shutdownCh <-chan struct{}, redisClient *cache.Client, sessionStreams *cache.SessionStreams, sharedCodingCredentialStore ...*db.CodingCredentialStore) (*chi.Mux, *http.Server, *preview.RecycleWorker, io.Closer, *preview.Manager, error) {
 	// Create stores
 	orgStore := db.NewOrganizationStore(pool)
 	userStore := db.NewUserStore(pool)
@@ -193,6 +193,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	issueHandler := handlers.NewIssueHandler(issueStore)
 	sessionMessageStore := db.NewSessionMessageStore(pool)
 	sessionThreadStore := db.NewSessionThreadStore(pool)
+	sessionThreadFileEventStore := db.NewSessionThreadFileEventStore(pool)
 	sessionViewStore := db.NewSessionViewStore(pool)
 	sessionComposerHandler := handlers.NewSessionComposerHandler(repoStore, prService)
 	pullRequestHandler := handlers.NewPullRequestHandler(prService)
@@ -276,6 +277,10 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 		jobStore,
 		logger,
 	)
+	threadSvc.SetFileEventStore(sessionThreadFileEventStore)
+	if threadCanceller != nil {
+		threadSvc.SetCanceller(threadCanceller)
+	}
 	sessionThreadHandler := handlers.NewSessionThreadHandler(threadSvc)
 	pmHandler := handlers.NewPMHandler(pmPlanStore, pmDecisionLogStore, jobStore, orgStore)
 	priorityHandler := handlers.NewPriorityHandler(priorityScoreStore, complexityEstimateStore, jobStore)
@@ -712,6 +717,8 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Get("/api/v1/sessions/{id}/threads/{tid}", sessionThreadHandler.GetThread)
 				r.Get("/api/v1/sessions/{id}/threads/{tid}/messages", sessionThreadHandler.GetThreadMessages)
 				r.Get("/api/v1/sessions/{id}/threads/{tid}/logs", sessionThreadHandler.GetThreadLogs)
+				r.Get("/api/v1/sessions/{id}/summary", sessionThreadHandler.SummarizeSession)
+				r.Get("/api/v1/sessions/{id}/thread-file-events", sessionThreadHandler.ListThreadFileEvents)
 				r.Get("/api/v1/sessions/{id}/review-comments", sessionReviewCommentHandler.List)
 				r.Get("/api/v1/sessions/{id}/usage", usageHandler.ListBySession)
 				r.Get("/api/v1/usage", usageHandler.GetSummary)
@@ -834,6 +841,9 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Post("/api/v1/sessions/{id}/threads", sessionThreadHandler.CreateThread)
 				r.Post("/api/v1/sessions/{id}/threads/{tid}/messages", sessionThreadHandler.SendThreadMessage)
 				r.Post("/api/v1/sessions/{id}/threads/{tid}/end", sessionThreadHandler.EndThread)
+				r.Post("/api/v1/sessions/{id}/threads/{tid}/cancel", sessionThreadHandler.CancelThread)
+				r.Post("/api/v1/sessions/{id}/threads/{tid}/fork", sessionThreadHandler.ForkThread)
+				r.Post("/api/v1/sessions/{id}/threads/{tid}/revert", sessionThreadHandler.RevertThread)
 				r.Post("/api/v1/sessions/{id}/review-comments", sessionReviewCommentHandler.Create)
 				r.Post("/api/v1/sessions/{id}/preview", previewHandler.StartPreview)
 				r.Delete("/api/v1/sessions/{id}/preview", previewHandler.StopPreview)

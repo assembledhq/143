@@ -646,26 +646,47 @@ type SessionMessage struct {
 // Each thread is one agent doing one piece of work. All threads in a session
 // share the same container and filesystem.
 type SessionThread struct {
-	ID                 uuid.UUID    `db:"id" json:"id"`
-	SessionID          uuid.UUID    `db:"session_id" json:"session_id"`
-	OrgID              uuid.UUID    `db:"org_id" json:"org_id"`
-	AgentType          AgentType    `db:"agent_type" json:"agent_type"`
-	ModelOverride      *string      `db:"model_override" json:"model_override,omitempty"`
-	Label              string       `db:"label" json:"label"`
-	Instructions       *string      `db:"instructions" json:"instructions,omitempty"`
-	FileScope          []string     `db:"file_scope" json:"file_scope,omitempty"`
-	Status             ThreadStatus `db:"status" json:"status"`
-	AgentSessionID     *string      `db:"agent_session_id" json:"agent_session_id,omitempty"`
-	CurrentTurn        int          `db:"current_turn" json:"current_turn"`
-	LastActivityAt     *time.Time   `db:"last_activity_at" json:"last_activity_at,omitempty"`
-	ConfidenceScore    *float64     `db:"confidence_score" json:"confidence_score,omitempty"`
-	ResultSummary      *string      `db:"result_summary" json:"result_summary,omitempty"`
-	Diff               *string      `db:"diff" json:"diff,omitempty"`
-	FailureExplanation *string      `db:"failure_explanation" json:"failure_explanation,omitempty"`
-	FailureCategory    *string      `db:"failure_category" json:"failure_category,omitempty"`
-	StartedAt          *time.Time   `db:"started_at" json:"started_at,omitempty"`
-	CompletedAt        *time.Time   `db:"completed_at" json:"completed_at,omitempty"`
-	CreatedAt          time.Time    `db:"created_at" json:"created_at"`
+	ID                  uuid.UUID    `db:"id" json:"id"`
+	SessionID           uuid.UUID    `db:"session_id" json:"session_id"`
+	OrgID               uuid.UUID    `db:"org_id" json:"org_id"`
+	AgentType           AgentType    `db:"agent_type" json:"agent_type"`
+	ModelOverride       *string      `db:"model_override" json:"model_override,omitempty"`
+	Label               string       `db:"label" json:"label"`
+	Instructions        *string      `db:"instructions" json:"instructions,omitempty"`
+	FileScope           []string     `db:"file_scope" json:"file_scope,omitempty"`
+	Status              ThreadStatus `db:"status" json:"status"`
+	AgentSessionID      *string      `db:"agent_session_id" json:"agent_session_id,omitempty"`
+	CurrentTurn         int          `db:"current_turn" json:"current_turn"`
+	LastActivityAt      *time.Time   `db:"last_activity_at" json:"last_activity_at,omitempty"`
+	ConfidenceScore     *float64     `db:"confidence_score" json:"confidence_score,omitempty"`
+	ResultSummary       *string      `db:"result_summary" json:"result_summary,omitempty"`
+	Diff                *string      `db:"diff" json:"diff,omitempty"`
+	FailureExplanation  *string      `db:"failure_explanation" json:"failure_explanation,omitempty"`
+	FailureCategory     *string      `db:"failure_category" json:"failure_category,omitempty"`
+	StartedAt           *time.Time   `db:"started_at" json:"started_at,omitempty"`
+	CompletedAt         *time.Time   `db:"completed_at" json:"completed_at,omitempty"`
+	CreatedAt           time.Time    `db:"created_at" json:"created_at"`
+	BaseSnapshotKey     *string      `db:"base_snapshot_key" json:"base_snapshot_key,omitempty"`
+	CostCents           float64      `db:"cost_cents" json:"cost_cents"`
+	PendingMessageCount int          `db:"pending_message_count" json:"pending_message_count"`
+	CancelRequestedAt   *time.Time   `db:"cancel_requested_at" json:"cancel_requested_at,omitempty"`
+}
+
+// SessionThreadFileEvent is operational write attribution: which thread
+// touched which path, with optional git blob hashes before/after. Used to
+// power overlap badges in the tab strip and the "Touched by tab" / "Overlap
+// with another tab" filters in the Changes view. Not security attribution.
+type SessionThreadFileEvent struct {
+	ID         int64      `db:"id" json:"id"`
+	OrgID      uuid.UUID  `db:"org_id" json:"org_id"`
+	SessionID  uuid.UUID  `db:"session_id" json:"session_id"`
+	ThreadID   *uuid.UUID `db:"thread_id" json:"thread_id,omitempty"`
+	Turn       int        `db:"turn" json:"turn"`
+	Path       string     `db:"path" json:"path"`
+	EventType  string     `db:"event_type" json:"event_type"`
+	BeforeHash *string    `db:"before_hash" json:"before_hash,omitempty"`
+	AfterHash  *string    `db:"after_hash" json:"after_hash,omitempty"`
+	ObservedAt time.Time  `db:"observed_at" json:"observed_at"`
 }
 
 // SessionQuestion represents a question the agent asks a human during a run.
