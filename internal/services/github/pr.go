@@ -1067,6 +1067,29 @@ func (s *PRService) pushSessionBranch(
 	if execErr != nil {
 		return nil, fmt.Errorf("exec push script: %w", execErr)
 	}
+
+	// One internal retry on a server-side rejection. The script is
+	// idempotent: the second run finds the index clean (already committed),
+	// skips the commit branch, re-reads the remote SHA via ls-remote, and
+	// retries the push with a fresh --force-with-lease. This collapses the
+	// race window between our first ls-remote and our first push (the only
+	// case --force-with-lease can fail when 143 owns the branch namespace)
+	// into self-healing instead of surfacing ErrPushRejected. A persistent
+	// rejection on the second attempt still bubbles up.
+	if exitCode != 0 && exitCode != pushExitNoChanges && isPushRejection(stderr.String()) {
+		s.logger.Info().
+			Str("session_id", run.ID.String()).
+			Str("branch", branchName).
+			Str("stderr", strings.TrimSpace(stderr.String())).
+			Msg("push rejected on first attempt; retrying once with fresh lease")
+		stdout.Reset()
+		stderr.Reset()
+		exitCode, execErr = s.sandboxProvider.Exec(ctx, sandbox, script, &stdout, &stderr)
+		if execErr != nil {
+			return nil, fmt.Errorf("exec push script (retry): %w", execErr)
+		}
+	}
+
 	switch exitCode {
 	case 0:
 		// Continue to HeadSHA parse + snapshot capture below.

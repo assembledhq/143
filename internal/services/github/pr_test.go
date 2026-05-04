@@ -123,19 +123,33 @@ func (s *prTestSnapshotStore) Delete(_ context.Context, key string) error {
 }
 
 type prTestSandboxProvider struct {
-	lastConfig  agent.SandboxConfig
-	lastExecCmd string
-	writes      map[string][]byte
-	execExit    int
-	execErr     error
-	execStderr  string
-	execStdout  string
-	createErr   error
-	restoreErr  error
-	writeErrs   map[string]error
-	destroyErr  error
-	destroyed   int
-	snapshotErr error
+	lastConfig    agent.SandboxConfig
+	lastExecCmd   string
+	writes        map[string][]byte
+	execExit      int
+	execErr       error
+	execStderr    string
+	execStdout    string
+	execSequence  []prTestExecResponse
+	execCallCount int
+	createErr     error
+	restoreErr    error
+	writeErrs     map[string]error
+	destroyErr    error
+	destroyed     int
+	snapshotErr   error
+}
+
+// prTestExecResponse drives a multi-call Exec sequence: each provider Exec()
+// pops the next response (capped at the slice length, after which the static
+// execExit/execStdout/execStderr/execErr fields take over). Lets tests assert
+// behavior that depends on the order of two or more sandbox executions —
+// e.g. "first push attempt is rejected, second succeeds".
+type prTestExecResponse struct {
+	exit   int
+	stdout string
+	stderr string
+	err    error
 }
 
 func (p *prTestSandboxProvider) Name() string { return "test" }
@@ -154,6 +168,18 @@ func (p *prTestSandboxProvider) CloneRepo(context.Context, *agent.Sandbox, strin
 
 func (p *prTestSandboxProvider) Exec(_ context.Context, _ *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
 	p.lastExecCmd = cmd
+	idx := p.execCallCount
+	p.execCallCount++
+	if idx < len(p.execSequence) {
+		r := p.execSequence[idx]
+		if r.stdout != "" {
+			_, _ = io.WriteString(stdout, r.stdout)
+		}
+		if r.stderr != "" {
+			_, _ = io.WriteString(stderr, r.stderr)
+		}
+		return r.exit, r.err
+	}
 	if p.execStdout != "" {
 		_, _ = io.WriteString(stdout, p.execStdout)
 	}
@@ -3992,6 +4018,118 @@ func (f *fakeSandboxAuth) Listen(_ context.Context, sessionID uuid.UUID, _ *mode
 
 func (f *fakeSandboxAuth) Close(_ uuid.UUID) {
 	f.closeCount++
+}
+
+// TestPushSessionBranch_RetryOnRejection_Succeeds locks in the self-healing
+// behavior: if the first push attempt is rejected (race between our
+// ls-remote and our push, only failure mode --force-with-lease can
+// surface when 143 owns the branch namespace), the service runs the
+// idempotent push script a second time, picks up the new remote SHA,
+// and succeeds — without surfacing ErrPushRejected.
+func TestPushSessionBranch_RetryOnRejection_Succeeds(t *testing.T) {
+	t.Parallel()
+
+	const headSHA = "abc1234567890abcdef1234567890abcdef12345"
+	provider := &prTestSandboxProvider{
+		execSequence: []prTestExecResponse{
+			{exit: 1, stderr: "! [rejected]   HEAD -> b (stale info)\nerror: failed to push some refs"},
+			{exit: 0, stdout: pushHeadSHASentinel + headSHA + "\n"},
+		},
+	}
+	svc := &PRService{
+		sandboxProvider: provider,
+		snapshots:       &prTestSnapshotStore{payload: []byte("snapshot")},
+		sandboxAuth:     &fakeSandboxAuth{socketPath: "/tmp/fake.sock"},
+		logger:          zerolog.Nop(),
+	}
+	run := &models.Session{ID: uuid.New(), OrgID: uuid.New()}
+	repo := &models.Repository{FullName: "owner/repo"}
+
+	result, err := svc.pushSessionBranch(
+		context.Background(),
+		run,
+		repo,
+		models.OrgSettings{},
+		"snapshots/key.tar",
+		"143/abc/fix",
+		"commit message",
+		"Bot",
+		"bot@example.com",
+	)
+	t.Cleanup(func() {
+		if result != nil && result.CapturedSnapshotPath != "" {
+			_ = os.Remove(result.CapturedSnapshotPath)
+		}
+	})
+
+	require.NoError(t, err, "self-heal: a single rejection followed by success must NOT surface ErrPushRejected")
+	require.Equal(t, headSHA, result.HeadSHA)
+	require.Equal(t, 2, provider.execCallCount, "pushSessionBranch must execute the script exactly twice — once rejected, once retried")
+}
+
+// TestPushSessionBranch_RetryOnRejection_PersistentRejection asserts the
+// retry is one-shot: a second rejection bubbles up as ErrPushRejected so
+// the worker can surface it (instead of looping silently).
+func TestPushSessionBranch_RetryOnRejection_PersistentRejection(t *testing.T) {
+	t.Parallel()
+
+	rejectStderr := "! [rejected]   HEAD -> b (non-fast-forward)\nerror: failed to push some refs"
+	provider := &prTestSandboxProvider{
+		execSequence: []prTestExecResponse{
+			{exit: 1, stderr: rejectStderr},
+			{exit: 1, stderr: rejectStderr},
+		},
+	}
+	svc := &PRService{
+		sandboxProvider: provider,
+		snapshots:       &prTestSnapshotStore{payload: []byte("snapshot")},
+		sandboxAuth:     &fakeSandboxAuth{socketPath: "/tmp/fake.sock"},
+		logger:          zerolog.Nop(),
+	}
+
+	_, err := svc.pushSessionBranch(
+		context.Background(),
+		&models.Session{ID: uuid.New(), OrgID: uuid.New()},
+		&models.Repository{FullName: "owner/repo"},
+		models.OrgSettings{},
+		"snapshots/key.tar",
+		"143/abc/fix",
+		"commit message",
+		"Bot",
+		"bot@example.com",
+	)
+	require.ErrorIs(t, err, ErrPushRejected, "persistent rejection must still surface ErrPushRejected")
+	require.Equal(t, 2, provider.execCallCount, "retry budget is one — at most two total attempts")
+}
+
+// TestPushSessionBranch_NoRetryOnNonRejection asserts the retry is gated
+// on isPushRejection: non-rejection failures (e.g. exec errors, network)
+// are NOT retried, since they aren't the race --force-with-lease detects.
+func TestPushSessionBranch_NoRetryOnNonRejection(t *testing.T) {
+	t.Parallel()
+
+	provider := &prTestSandboxProvider{execExit: 1, execStderr: "fatal: unable to access remote"}
+	svc := &PRService{
+		sandboxProvider: provider,
+		snapshots:       &prTestSnapshotStore{payload: []byte("snapshot")},
+		sandboxAuth:     &fakeSandboxAuth{socketPath: "/tmp/fake.sock"},
+		logger:          zerolog.Nop(),
+	}
+
+	_, err := svc.pushSessionBranch(
+		context.Background(),
+		&models.Session{ID: uuid.New(), OrgID: uuid.New()},
+		&models.Repository{FullName: "owner/repo"},
+		models.OrgSettings{},
+		"snapshots/key.tar",
+		"143/abc/fix",
+		"commit message",
+		"Bot",
+		"bot@example.com",
+	)
+	require.Error(t, err)
+	require.NotErrorIs(t, err, ErrPushRejected)
+	require.Equal(t, 1, provider.execCallCount, "non-rejection failure must NOT be retried")
 }
 
 // TestPushSessionBranch_AuthSocketWired locks in the regression fix: the
