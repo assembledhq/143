@@ -25,6 +25,7 @@ import (
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/services/agent"
+	"github.com/assembledhq/143/internal/services/sandboxauth"
 	"github.com/assembledhq/143/internal/services/storage"
 )
 
@@ -3425,6 +3426,7 @@ func TestPushChangesToPR_EnqueuesHealthSyncAfterSuccessfulPush(t *testing.T) {
 		jobs:            db.NewJobStore(mock),
 		sandboxProvider: provider,
 		snapshots:       &prTestSnapshotStore{payload: []byte("snapshot")},
+		sandboxAuth:     &fakeSandboxAuth{socketPath: "/tmp/fake.sock"},
 		logger:          zerolog.Nop(),
 	}
 
@@ -3590,13 +3592,12 @@ func TestBuildPushScript_Structure(t *testing.T) {
 		"Test User",
 		"test@example.com",
 		"143/abc123/fix-typo",
-		"https://x-access-token@github.com/owner/repo.git",
+		"https://github.com/owner/repo.git",
 	)
 
-	// Input path, helper path, and commit-msg path must appear in the
-	// cleanup function so files are removed on exit. The helper must live
-	// outside /tmp because sandbox containers mount /tmp as noexec.
-	require.Contains(t, script, "cleanup() { rm -f '/tmp/143-pr-commit-msg' '/tmp/143-pr-input' '/var/tmp/143-pr-helper.sh'; }")
+	// Only the commit-msg file is created by the script; auth comes from
+	// the per-push credential socket, so there's nothing else to clean up.
+	require.Contains(t, script, "cleanup() { rm -f '/tmp/143-pr-commit-msg'; }")
 	require.Contains(t, script, "trap cleanup EXIT")
 
 	// Author identity is set via git config with quoted values.
@@ -3609,17 +3610,19 @@ func TestBuildPushScript_Structure(t *testing.T) {
 	// Commit message is read from file (not argv).
 	require.Contains(t, script, "git commit -F '/tmp/143-pr-commit-msg'")
 
-	// Push uses askpass + disables terminal prompt; branch and URL are quoted.
-	require.Contains(t, script, "GIT_ASKPASS='/var/tmp/143-pr-helper.sh' GIT_TERMINAL_PROMPT=0")
-	require.Contains(t, script, "'https://x-access-token@github.com/owner/repo.git'")
-	require.Contains(t, script, "HEAD:refs/heads/'143/abc123/fix-typo'")
+	// Push goes to a credential-free URL — auth flows through
+	// credential.helper=!143-tools git-credential talking to the
+	// per-push host socket.
+	require.Contains(t, script, "git push 'https://github.com/owner/repo.git' HEAD:refs/heads/'143/abc123/fix-typo'")
 
 	// No-changes sentinel exit code is present in the upstream-ancestor branch.
 	require.Contains(t, script, "exit 77")
 
-	// Critically: script must NOT contain a secret-looking userinfo pattern,
-	// because tokens are passed via GIT_ASKPASS, not in the URL.
-	require.NotContains(t, script, "x-access-token:")
+	// Defense in depth: the script must not embed userinfo in the URL or
+	// reference any GIT_ASKPASS-style helper. Both auth mechanisms are gone.
+	require.NotContains(t, script, "x-access-token")
+	require.NotContains(t, script, "GIT_ASKPASS")
+	require.NotContains(t, script, "GIT_TERMINAL_PROMPT")
 }
 
 func TestBuildPushScript_QuotesHostileBranchName(t *testing.T) {
@@ -3632,7 +3635,7 @@ func TestBuildPushScript_QuotesHostileBranchName(t *testing.T) {
 		"Bot",
 		"bot@example.com",
 		"143/abc/it's-fine",
-		"https://x-access-token@github.com/o/r.git",
+		"https://github.com/o/r.git",
 	)
 	require.Contains(t, script, `HEAD:refs/heads/'143/abc/it'\''s-fine'`)
 }
@@ -3797,13 +3800,6 @@ func TestPushSessionBranch(t *testing.T) {
 			wantDestroyCnt: 1,
 		},
 		{
-			name:           "write helper failure returns error",
-			snapshots:      &prTestSnapshotStore{payload: []byte("snapshot")},
-			provider:       &prTestSandboxProvider{writeErrs: map[string]error{pushHelperPath: errors.New("chmod failed")}},
-			wantErrSubstr:  "write push helper to sandbox",
-			wantDestroyCnt: 1,
-		},
-		{
 			name:           "exec failure returns error",
 			snapshots:      &prTestSnapshotStore{payload: []byte("snapshot")},
 			provider:       &prTestSandboxProvider{execErr: errors.New("sandbox exec failed")},
@@ -3818,10 +3814,10 @@ func TestPushSessionBranch(t *testing.T) {
 			wantDestroyCnt: 1,
 		},
 		{
-			name:           "nonzero exit scrubs token from stderr",
+			name:           "nonzero exit surfaces stderr",
 			snapshots:      &prTestSnapshotStore{payload: []byte("snapshot")},
-			provider:       &prTestSandboxProvider{execExit: 12, execStderr: "token leaked: secret-token"},
-			wantErrSubstr:  "git push failed (exit 12): token leaked: ***",
+			provider:       &prTestSandboxProvider{execExit: 12, execStderr: "remote: rejected"},
+			wantErrSubstr:  "git push failed (exit 12): remote: rejected",
 			wantDestroyCnt: 1,
 		},
 		{
@@ -3853,9 +3849,11 @@ func TestPushSessionBranch(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
+			auth := &fakeSandboxAuth{socketPath: "/tmp/fake.sock"}
 			svc := &PRService{
 				sandboxProvider: tt.provider,
 				snapshots:       tt.snapshots,
+				sandboxAuth:     auth,
 				logger:          zerolog.Nop(),
 			}
 			run := &models.Session{ID: uuid.New(), OrgID: uuid.New()}
@@ -3865,7 +3863,7 @@ func TestPushSessionBranch(t *testing.T) {
 				context.Background(),
 				run,
 				repo,
-				"secret-token",
+				models.OrgSettings{},
 				"snapshots/key.tar",
 				"143/abc123/fix",
 				"commit message",
@@ -3887,9 +3885,8 @@ func TestPushSessionBranch(t *testing.T) {
 				require.NoError(t, err, "pushSessionBranch should succeed")
 				require.NotNil(t, result, "pushSessionBranch should return a non-nil result on success")
 				require.Equal(t, []byte("commit message"), tt.provider.writes[pushCommitMsgPath], "pushSessionBranch should write the commit message file")
-				require.Equal(t, []byte("secret-token"), tt.provider.writes[pushInputPath], "pushSessionBranch should write the credential input file")
-				require.Contains(t, string(tt.provider.writes[pushHelperPath]), pushInputPath, "pushSessionBranch should write a helper script that reads the credential input file")
-				require.Contains(t, tt.provider.lastExecCmd, "GIT_ASKPASS", "pushSessionBranch should run git push through the helper script")
+				require.NotContains(t, tt.provider.lastExecCmd, "GIT_ASKPASS", "pushSessionBranch should auth via the credential socket, not askpass")
+				require.NotContains(t, tt.provider.lastExecCmd, "x-access-token", "pushSessionBranch should not embed credentials in the push URL")
 				require.Equal(t, tt.wantHeadSHA, result.HeadSHA, "pushSessionBranch should return the parsed HEAD SHA")
 				if tt.wantSnapshotCaptured {
 					require.NotEmpty(t, result.CapturedSnapshotPath, "pushSessionBranch should spool the post-push snapshot to a temp file")
@@ -3902,8 +3899,108 @@ func TestPushSessionBranch(t *testing.T) {
 			}
 
 			require.Equal(t, tt.wantDestroyCnt, tt.provider.destroyed, "pushSessionBranch should always destroy the hydrated sandbox")
+			// Whatever the outcome, the per-push auth listener must be closed
+			// — leaking it would strand the listener until orchestrator shutdown.
+			require.Equal(t, 1, auth.listenCount, "pushSessionBranch should open exactly one auth listener")
+			require.Equal(t, 1, auth.closeCount, "pushSessionBranch should close the auth listener on every exit path")
 		})
 	}
+}
+
+// fakeSandboxAuth records Listen/Close calls so pushSessionBranch tests can
+// assert the per-push listener is opened and closed exactly once across every
+// success and failure path.
+type fakeSandboxAuth struct {
+	socketPath    string
+	listenErr     error
+	listenCount   int
+	closeCount    int
+	lastListenKey uuid.UUID
+}
+
+func (f *fakeSandboxAuth) Listen(_ context.Context, sessionID uuid.UUID, _ *models.Session, _ *models.Repository, _ models.OrgSettings) (string, error) {
+	f.listenCount++
+	f.lastListenKey = sessionID
+	if f.listenErr != nil {
+		return "", f.listenErr
+	}
+	return f.socketPath, nil
+}
+
+func (f *fakeSandboxAuth) Close(_ uuid.UUID) {
+	f.closeCount++
+}
+
+// TestPushSessionBranch_AuthSocketWired locks in the regression fix: the
+// pr_push sandbox MUST get a credential socket wired before HydrateSandboxFromSnapshot
+// runs, otherwise the snapshot's baked-in `credential.helper=!143-tools git-credential`
+// will exit non-zero with `_143_AUTH_SOCK is not set` and the push fails.
+func TestPushSessionBranch_AuthSocketWired(t *testing.T) {
+	t.Parallel()
+
+	provider := &prTestSandboxProvider{execStdout: pushHeadSHASentinel + "abc1234567890abcdef1234567890abcdef12345\n"}
+	auth := &fakeSandboxAuth{socketPath: "/host/socket-dir/sock"}
+	svc := &PRService{
+		sandboxProvider: provider,
+		snapshots:       &prTestSnapshotStore{payload: []byte("snapshot")},
+		sandboxAuth:     auth,
+		logger:          zerolog.Nop(),
+	}
+	run := &models.Session{ID: uuid.New(), OrgID: uuid.New()}
+	repo := &models.Repository{FullName: "owner/repo"}
+
+	result, err := svc.pushSessionBranch(
+		context.Background(),
+		run,
+		repo,
+		models.OrgSettings{},
+		"snapshots/key.tar",
+		"143/abc/fix",
+		"commit message",
+		"Bot",
+		"bot@example.com",
+	)
+	t.Cleanup(func() {
+		if result != nil && result.CapturedSnapshotPath != "" {
+			_ = os.Remove(result.CapturedSnapshotPath)
+		}
+	})
+	require.NoError(t, err)
+
+	// Listener keyed by a fresh per-push UUID, NOT the session ID — that's
+	// what keeps a still-active agent listener (e.g. preview holding the
+	// agent container alive) from being yanked.
+	require.Equal(t, 1, auth.listenCount)
+	require.NotEqual(t, run.ID, auth.lastListenKey, "auth listener must be keyed by a per-push UUID, not the session ID")
+
+	// The sandbox config the provider saw must carry the host socket path
+	// + the in-container env var that 143-tools git-credential reads.
+	require.Equal(t, "/host/socket-dir/sock", provider.lastConfig.AuthSocketPath)
+	require.Equal(t, sandboxauth.SandboxSocketPath, provider.lastConfig.Env[sandboxauth.SocketEnvVar])
+	// GitNameEnvVar / GitEmailEnvVar are deliberately absent: they're
+	// consumed only by `143-tools git-bootstrap`, which the pr_push sandbox
+	// never runs. The push script sets identity directly via `git config`.
+	require.NotContains(t, provider.lastConfig.Env, sandboxauth.GitNameEnvVar)
+	require.NotContains(t, provider.lastConfig.Env, sandboxauth.GitEmailEnvVar)
+}
+
+func TestPushSessionBranch_RequiresSandboxAuth(t *testing.T) {
+	t.Parallel()
+
+	svc := &PRService{
+		sandboxProvider: &prTestSandboxProvider{},
+		snapshots:       &prTestSnapshotStore{},
+		logger:          zerolog.Nop(),
+	}
+	_, err := svc.pushSessionBranch(
+		context.Background(),
+		&models.Session{ID: uuid.New(), OrgID: uuid.New()},
+		&models.Repository{FullName: "o/r"},
+		models.OrgSettings{},
+		"k", "b", "m", "n", "e@x",
+	)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "sandbox auth socket not configured")
 }
 
 func TestParsePushHeadSHA(t *testing.T) {
@@ -4339,6 +4436,7 @@ func TestCreatePR_SuccessPushesSnapshotBranchAndStoresPR(t *testing.T) {
 		orgs:            db.NewOrganizationStore(mock),
 		sandboxProvider: provider,
 		snapshots:       &prTestSnapshotStore{payload: []byte("snapshot")},
+		sandboxAuth:     &fakeSandboxAuth{socketPath: "/tmp/fake.sock"},
 		baseURL:         server.URL,
 		httpClient:      server.Client(),
 		logger:          zerolog.Nop(),
@@ -4494,6 +4592,7 @@ func TestCreatePR_SuccessDispatchesPostPRSnapshotUpload(t *testing.T) {
 		orgs:            db.NewOrganizationStore(mock),
 		sandboxProvider: provider,
 		snapshots:       &prTestSnapshotStore{payload: []byte("snapshot")},
+		sandboxAuth:     &fakeSandboxAuth{socketPath: "/tmp/fake.sock"},
 		baseURL:         server.URL,
 		httpClient:      server.Client(),
 		logger:          zerolog.Nop(),
@@ -4564,10 +4663,11 @@ func TestCreatePR_NoCommitsBetweenMapsToErrNoChanges(t *testing.T) {
 		sandboxProvider: &prTestSandboxProvider{
 			execStdout: pushHeadSHASentinel + "abc1234567890abcdef1234567890abcdef12345\n",
 		},
-		snapshots:  &prTestSnapshotStore{payload: []byte("snapshot")},
-		baseURL:    server.URL,
-		httpClient: server.Client(),
-		logger:     zerolog.Nop(),
+		snapshots:   &prTestSnapshotStore{payload: []byte("snapshot")},
+		sandboxAuth: &fakeSandboxAuth{socketPath: "/tmp/fake.sock"},
+		baseURL:     server.URL,
+		httpClient:  server.Client(),
+		logger:      zerolog.Nop(),
 	}
 
 	run := &models.Session{
