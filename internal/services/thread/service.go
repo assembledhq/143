@@ -118,7 +118,7 @@ type Service struct {
 	messageStore MessageStore
 	logStore     LogStore
 	jobStore     JobStore
-	fileEvents   FileEventStore // optional — enables overlap and attribution surfaces
+	fileEvents   FileEventStore  // optional — enables overlap and attribution surfaces
 	canceller    ThreadCanceller // optional — enables in-flight SIGINT
 	logger       zerolog.Logger
 }

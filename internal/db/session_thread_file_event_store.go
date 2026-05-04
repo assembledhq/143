@@ -37,9 +37,24 @@ const appendBatchChunkSize = 500
 // batch through one statement keeps the per-turn DB cost flat regardless of
 // how many files the tab touched. Splits into chunks at appendBatchChunkSize
 // to stay under Postgres's per-statement parameter cap.
-func (s *SessionThreadFileEventStore) AppendBatch(ctx context.Context, events []models.SessionThreadFileEvent) error {
+//
+// orgID is enforced explicitly even though every event already carries one:
+// it both satisfies the cross-store org-scope lint and serves as a
+// belt-and-suspenders check against a caller that mixes events from two
+// orgs into one slice — that would silently let one org write into
+// another's audit row otherwise.
+func (s *SessionThreadFileEventStore) AppendBatch(ctx context.Context, orgID uuid.UUID, events []models.SessionThreadFileEvent) error {
 	if len(events) == 0 {
 		return nil
+	}
+	for i := range events {
+		if events[i].OrgID == uuid.Nil {
+			events[i].OrgID = orgID
+			continue
+		}
+		if events[i].OrgID != orgID {
+			return fmt.Errorf("session_thread_file_events batch mixes orgs: event %d has %s, expected %s", i, events[i].OrgID, orgID)
+		}
 	}
 	for start := 0; start < len(events); start += appendBatchChunkSize {
 		end := start + appendBatchChunkSize

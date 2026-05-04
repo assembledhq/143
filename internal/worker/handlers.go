@@ -117,19 +117,19 @@ type Stores struct {
 	Webhooks            *db.WebhookDeliveryStore
 	PriorityScores      *db.PriorityScoreStore
 	ComplexityEstimates *db.ComplexityEstimateStore
-	Projects            *db.ProjectStore        // nil-safe: projects feature disabled if nil
-	ProjectTasks        *db.ProjectTaskStore    // nil-safe
-	Credentials         *db.OrgCredentialStore  // nil-safe: needed for sync_slack
-	AuditLogs           *db.AuditLogStore       // nil-safe: audit retention cleanup
-	Organizations       *db.OrganizationStore   // nil-safe: needed for audit retention
-	SessionLogs         *db.SessionLogStore     // nil-safe: data retention cleanup
-	EvalTasks           *db.EvalTaskStore       // nil-safe: eval feature
-	EvalRuns            *db.EvalRunStore        // nil-safe: eval feature
-	EvalBatches         *db.EvalBatchStore      // nil-safe: eval feature
-	EvalBootstraps      *db.EvalBootstrapStore  // nil-safe: eval bootstrap feature
-	Repositories        *db.RepositoryStore     // nil-safe: needed for eval repo lookup
-	SessionMessages     *db.SessionMessageStore // nil-safe: needed for title regeneration
-	SessionThreads      *db.SessionThreadStore  // nil-safe: needed for thread-scoped continuation status
+	Projects            *db.ProjectStore                // nil-safe: projects feature disabled if nil
+	ProjectTasks        *db.ProjectTaskStore            // nil-safe
+	Credentials         *db.OrgCredentialStore          // nil-safe: needed for sync_slack
+	AuditLogs           *db.AuditLogStore               // nil-safe: audit retention cleanup
+	Organizations       *db.OrganizationStore           // nil-safe: needed for audit retention
+	SessionLogs         *db.SessionLogStore             // nil-safe: data retention cleanup
+	EvalTasks           *db.EvalTaskStore               // nil-safe: eval feature
+	EvalRuns            *db.EvalRunStore                // nil-safe: eval feature
+	EvalBatches         *db.EvalBatchStore              // nil-safe: eval feature
+	EvalBootstraps      *db.EvalBootstrapStore          // nil-safe: eval bootstrap feature
+	Repositories        *db.RepositoryStore             // nil-safe: needed for eval repo lookup
+	SessionMessages     *db.SessionMessageStore         // nil-safe: needed for title regeneration
+	SessionThreads      *db.SessionThreadStore          // nil-safe: needed for thread-scoped continuation status
 	ThreadFileEvents    *db.SessionThreadFileEventStore // nil-safe: tab-level file write attribution
 	IssueSnapshots      *db.SessionTurnIssueSnapshotStore
 	Automations         *db.AutomationStore       // nil-safe: automations feature disabled if nil

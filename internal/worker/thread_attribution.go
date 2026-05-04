@@ -47,7 +47,7 @@ func emitThreadAttribution(
 		events[i].ThreadID = &threadIDCopy
 		events[i].Turn = turn
 	}
-	if err := stores.ThreadFileEvents.AppendBatch(ctx, events); err != nil {
+	if err := stores.ThreadFileEvents.AppendBatch(ctx, orgID, events); err != nil {
 		logger.Warn().Err(err).Str("thread_id", threadID.String()).Int("event_count", len(events)).Msg("failed to record thread file events")
 	}
 }
