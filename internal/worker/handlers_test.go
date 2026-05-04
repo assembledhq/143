@@ -2533,14 +2533,18 @@ func TestAutomationRunHandler_HappyPath(t *testing.T) {
 	// 4. Create the session. automation_run_id is the 19th arg — asserting
 	// that specific value here is what proves the handler actually linked the
 	// session back to the run it's servicing (without it, audit+stats joins
-	// on sessions.automation_run_id would silently miss every row). The
-	// trailing four AnyArgs are the linear_* policy columns added by
-	// migration 103.
+	// on sessions.automation_run_id would silently miss every row).
+	// pm_approach is the 11th arg and must carry the run's goal_snapshot —
+	// without that, promptSeedForSession synthesizes an empty "Session task"
+	// seed and the agent silently ignores everything the user wrote in the
+	// automation goal. The trailing four AnyArgs are the linear_* policy
+	// columns added by migration 103.
+	expectedGoal := "goal"
 	mock.ExpectBegin()
 	mock.ExpectQuery(`INSERT INTO sessions`).
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), &expectedGoal, pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), &runID,
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
