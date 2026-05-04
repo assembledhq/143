@@ -3,6 +3,26 @@ export type ModalProvider = StackAgent;
 export type ApiKeyProvider = StackAgent;
 export type PersonalProvider = "openai" | "anthropic" | "gemini" | "amp" | "pi";
 
+// PERSONAL_PROVIDER_TO_AGENT is the single source of truth for the personal
+// page's provider → agent mapping. Typed as Record<PersonalProvider, StackAgent>
+// so TypeScript fails to compile when PersonalProvider grows (or shrinks) and
+// this map does not — preventing the historical drift between the dialog's
+// provider keys and the unified API's agent field.
+export const PERSONAL_PROVIDER_TO_AGENT: Record<PersonalProvider, StackAgent> = {
+  openai: "codex",
+  anthropic: "claude_code",
+  gemini: "gemini_cli",
+  amp: "amp",
+  pi: "pi",
+};
+
+// personalProviderToAgent exposes the registry as a function for callers that
+// prefer the historical helper shape. The TypeScript signature still enforces
+// exhaustiveness via the Record above.
+export function personalProviderToAgent(provider: PersonalProvider): StackAgent {
+  return PERSONAL_PROVIDER_TO_AGENT[provider];
+}
+
 export const ORG_PROVIDER_OPTIONS: Array<{
   key: ModalProvider;
   label: string;

@@ -12,6 +12,7 @@ import (
 
 	"github.com/assembledhq/143/internal/cache"
 	"github.com/assembledhq/143/internal/config"
+	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/services/claudecodeauth"
 	"github.com/assembledhq/143/internal/services/codexauth"
 	"github.com/rs/zerolog"
@@ -97,6 +98,23 @@ func TestNewRouter_WithRedisWiringBuildsRouter(t *testing.T) {
 	router, _, _, _, _, err := NewRouter(cfg, nil, zerolog.Nop(), nil, codexSvc, claudeSvc, nil, nil, nil, nil, nil, nil, nil, nil, nil, &cache.Client{}, &cache.SessionStreams{})
 	require.NoError(t, err, "router construction should accept optional Redis dependencies")
 	require.NotNil(t, router, "router should still be constructed with Redis wiring enabled")
+}
+
+func TestResolveRouterCodingCredentialStoreUsesSharedStore(t *testing.T) {
+	t.Parallel()
+
+	shared := db.NewCodingCredentialStore(nil, nil)
+	got := resolveRouterCodingCredentialStore(nil, nil, shared)
+
+	require.Same(t, shared, got, "router should reuse the process-level coding credential store when one is supplied")
+}
+
+func TestResolveRouterCodingCredentialStoreCreatesFallback(t *testing.T) {
+	t.Parallel()
+
+	got := resolveRouterCodingCredentialStore(nil, nil, nil)
+
+	require.NotNil(t, got, "router should create a coding credential store when no shared store is supplied")
 }
 
 func TestNewRouter_BuildsWithoutOptionalReviewWiring(t *testing.T) {

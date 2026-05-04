@@ -810,6 +810,33 @@ export interface CodingAuth {
   updated_at: string;
 }
 
+// CodingCredentialScope is the scope dimension of the unified
+// coding-credentials API: "org" rows are visible to every member of the org as
+// a fallback; "personal" rows belong to the requesting user only and run ahead
+// of any org row in the resolver.
+export type CodingCredentialScope = "org" | "personal";
+
+// CodingCredentialSummary is the on-the-wire representation of a row from the
+// unified coding_credentials table. Mirrors models.CodingCredentialSummary.
+export interface CodingCredentialSummary {
+  id: string;
+  org_id: string;
+  user_id?: string;
+  scope: CodingCredentialScope;
+  priority: number;
+  agent: CodingAuthAgent;
+  auth_type: CodingAuthType;
+  provider: string;
+  label: string;
+  status: CodingAuthStatus;
+  is_default: boolean;
+  usage_note?: string;
+  last_verified_at?: string;
+  created_by?: string;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface RepoSummary {
   repository_id: string;
   full_name: string;
