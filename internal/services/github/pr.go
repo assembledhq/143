@@ -770,12 +770,11 @@ func (s *PRService) PushChangesToPR(ctx context.Context, run *models.Session, pa
 	}
 
 	// Resolve identity for the commit name/email and the co-author trailer.
-	// The push token itself is supplied to git inside the sandbox by the
-	// per-session credential socket (see pushSessionBranch); we only need
-	// resolution.Token here for the GitHub REST calls below — none in this
-	// flow, but PushChangesToPR resolves anyway so the resolver's user-token
-	// validation runs (and returns a clear error to the UI) before we open
-	// a sandbox.
+	// The push token itself flows via the per-session credential socket (see
+	// pushSessionBranch), so resolution.Token isn't read here — we resolve
+	// purely to run the resolver's user-token validation before opening a
+	// sandbox, so a revoked grant surfaces as a clear UI error rather than a
+	// helper-side ECONNREFUSED.
 	resolution, err := s.resolveToken(ctx, run, &repo, orgSettings, opts.AuthorMode)
 	if err != nil {
 		return nil, fmt.Errorf("resolve token: %w", err)
@@ -1016,8 +1015,10 @@ func (s *PRService) pushSessionBranch(
 	defer s.sandboxAuth.Close(pushID)
 	cfg.AuthSocketPath = socketPath
 	cfg.Env[sandboxauth.SocketEnvVar] = sandboxauth.SandboxSocketPath
-	cfg.Env[sandboxauth.GitNameEnvVar] = authorName
-	cfg.Env[sandboxauth.GitEmailEnvVar] = authorEmail
+	// GitNameEnvVar / GitEmailEnvVar are intentionally NOT set: those are
+	// consumed by `143-tools git-bootstrap`, which the pr_push sandbox never
+	// runs (the snapshot already has user.name/email configured, and the
+	// push script re-sets them via `git config` from the resolved identity).
 
 	sandbox, err := agent.HydrateSandboxFromSnapshot(ctx, s.sandboxProvider, s.snapshots, snapshotKey, cfg)
 	if err != nil {

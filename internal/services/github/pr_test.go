@@ -3911,16 +3911,16 @@ func TestPushSessionBranch(t *testing.T) {
 // assert the per-push listener is opened and closed exactly once across every
 // success and failure path.
 type fakeSandboxAuth struct {
-	socketPath  string
-	listenErr   error
-	listenCount int
-	closeCount  int
-	lastSession uuid.UUID
+	socketPath    string
+	listenErr     error
+	listenCount   int
+	closeCount    int
+	lastListenKey uuid.UUID
 }
 
 func (f *fakeSandboxAuth) Listen(_ context.Context, sessionID uuid.UUID, _ *models.Session, _ *models.Repository, _ models.OrgSettings) (string, error) {
 	f.listenCount++
-	f.lastSession = sessionID
+	f.lastListenKey = sessionID
 	if f.listenErr != nil {
 		return "", f.listenErr
 	}
@@ -3971,14 +3971,17 @@ func TestPushSessionBranch_AuthSocketWired(t *testing.T) {
 	// what keeps a still-active agent listener (e.g. preview holding the
 	// agent container alive) from being yanked.
 	require.Equal(t, 1, auth.listenCount)
-	require.NotEqual(t, run.ID, auth.lastSession, "auth listener must be keyed by a per-push UUID, not the session ID")
+	require.NotEqual(t, run.ID, auth.lastListenKey, "auth listener must be keyed by a per-push UUID, not the session ID")
 
 	// The sandbox config the provider saw must carry the host socket path
 	// + the in-container env var that 143-tools git-credential reads.
 	require.Equal(t, "/host/socket-dir/sock", provider.lastConfig.AuthSocketPath)
 	require.Equal(t, sandboxauth.SandboxSocketPath, provider.lastConfig.Env[sandboxauth.SocketEnvVar])
-	require.Equal(t, "Bot", provider.lastConfig.Env[sandboxauth.GitNameEnvVar])
-	require.Equal(t, "bot@example.com", provider.lastConfig.Env[sandboxauth.GitEmailEnvVar])
+	// GitNameEnvVar / GitEmailEnvVar are deliberately absent: they're
+	// consumed only by `143-tools git-bootstrap`, which the pr_push sandbox
+	// never runs. The push script sets identity directly via `git config`.
+	require.NotContains(t, provider.lastConfig.Env, sandboxauth.GitNameEnvVar)
+	require.NotContains(t, provider.lastConfig.Env, sandboxauth.GitEmailEnvVar)
 }
 
 func TestPushSessionBranch_RequiresSandboxAuth(t *testing.T) {
