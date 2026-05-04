@@ -17,7 +17,7 @@ function emptyCodingCredentialsHandlers() {
 }
 
 describe("Account settings page", () => {
-  it("renders the personal stack and surfaces the effective resolution line", async () => {
+  it("renders the personal stack alongside the org fallback", async () => {
     server.use(
       http.get("/api/v1/coding-credentials", ({ request }) => {
         const scope = new URL(request.url).searchParams.get("scope");
@@ -97,14 +97,14 @@ describe("Account settings page", () => {
 
     expect(screen.getByText("My settings")).toBeInTheDocument();
     expect(await screen.findByText("My coding agents")).toBeInTheDocument();
+    // Both the user-set label and the auto-generated usage note render so
+    // multiple rows of the same agent/auth-type can still be told apart.
+    expect(await screen.findByText("Claude Code API key")).toBeInTheDocument();
     expect(await screen.findByText("sk-ant...5678")).toBeInTheDocument();
+    expect(await screen.findByText("Codex API key")).toBeInTheDocument();
     expect(await screen.findByText("sk-open...1234")).toBeInTheDocument();
     expect(await screen.findByText("Org fallback")).toBeInTheDocument();
     expect(await screen.findByText("Team seat A")).toBeInTheDocument();
-    // The resolution line is rendered as a single block with the label and the
-    // ordered list. We assert on a substring match because the runtime is free
-    // to format the separator however it likes.
-    expect(await screen.findByText(/Personal #1.*Personal #2.*Org #1/)).toBeInTheDocument();
   });
 
   it("renders the org fallback section even when the personal stack is empty", async () => {
@@ -150,13 +150,9 @@ describe("Account settings page", () => {
 
     // Personal stack should show the empty-state copy.
     expect(await screen.findByText(/No personal auth configured/)).toBeInTheDocument();
-    // Org fallback should still render. Notes column prefers usage_note over
-    // label, so we look for the masked-key style hint.
+    // Org fallback should still render with both the label and the masked key.
+    expect(await screen.findByText("Org Claude key")).toBeInTheDocument();
     expect(await screen.findByText("sk-ant...team")).toBeInTheDocument();
-    // Effective resolution should be Org #1 only — no Personal segments.
-    const resolutionLine = await screen.findByText(/Effective resolution for you/);
-    expect(resolutionLine.parentElement?.textContent).toMatch(/Org #1/);
-    expect(resolutionLine.parentElement?.textContent).not.toMatch(/Personal #/);
   });
 
   it("uses the shared provider-card modal with Gemini, Amp, and Pi support", async () => {
