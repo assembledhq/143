@@ -147,6 +147,11 @@ vi.mock("@/contexts/optimistic-sessions", () => ({
     removeOptimisticSession: vi.fn(),
     markOptimisticResolved: vi.fn(),
   }),
+  useOptimisticSessionsSafe: () => ({
+    addOptimisticSession: vi.fn(),
+    removeOptimisticSession: vi.fn(),
+    markOptimisticResolved: vi.fn(),
+  }),
   OptimisticSessionsProvider: ({ children }: { children: React.ReactNode }) => children,
 }));
 
@@ -246,7 +251,7 @@ describe("ManualSessionCreatePageContent", () => {
   it("keeps the main message textarea at 16px on mobile", async () => {
     renderWithProviders(<ManualSessionCreatePageContent />);
 
-    const textarea = await screen.findByRole("textbox", { name: "Manual session prompt" });
+    const textarea = await screen.findByRole("textbox", { name: "Session prompt" });
     expect(textarea).toHaveClass("text-base");
     expect(textarea).toHaveClass("sm:text-xs");
   });
