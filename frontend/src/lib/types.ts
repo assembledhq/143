@@ -161,7 +161,6 @@ export interface Session {
   last_activity_at: string;
   sandbox_state: string;
   snapshot_key?: string;
-  has_unpushed_changes?: boolean;
   pr_creation_state?: "idle" | "queued" | "pushing" | "succeeded" | "failed";
   pr_creation_error?: string;
   pr_push_state?: "idle" | "queued" | "pushing" | "succeeded" | "failed";
