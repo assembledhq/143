@@ -4022,6 +4022,42 @@ func TestContinueSessionHandler_WrapsSnapshotPendingAsRetryable(t *testing.T) {
 	require.Equal(t, 1, orch.continueSessionCalls, "continue_session should call the orchestrator once before bailing")
 }
 
+func TestContinueSessionHandler_WrapsPreviewRaceAsRetryable(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	issueID := uuid.New()
+
+	mock.ExpectQuery("SELECT .* FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(workerSessionColumns).AddRow(
+				workerSessionRow(sessionID, issueID, orgID, string(models.SessionStatusIdle), 2, nil, nil)...,
+			),
+		)
+
+	orch := &orchestratorServiceStub{
+		continueSessionFn: func(ctx context.Context, session *models.Session, opts *agent.ContinueSessionOptions) error {
+			return fmt.Errorf("preview published first: %w", agent.ErrSandboxPreviewRace)
+		},
+	}
+	handler := newContinueSessionHandler(stores, &Services{Orchestrator: orch}, zerolog.Nop())
+	payload := json.RawMessage(`{"session_id":"` + sessionID.String() + `","org_id":"` + orgID.String() + `"}`)
+
+	err := handler(context.Background(), "continue_session", payload)
+	require.Error(t, err, "continue_session should propagate the preview race signal")
+	var retryable *RetryableError
+	require.ErrorAs(t, err, &retryable, "ErrSandboxPreviewRace must be wrapped as RetryableError so the worker retries against the preview container")
+	require.NotNil(t, retryable.RetryAfter, "preview race retries should use a short deliberate backoff")
+	require.ErrorIs(t, retryable.Err, agent.ErrSandboxPreviewRace, "the wrapped error must preserve the ErrSandboxPreviewRace sentinel")
+	require.Equal(t, 1, orch.continueSessionCalls, "continue_session should call the orchestrator once before returning the retry")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func TestContinueSessionHandler_ReleasesThreadOnContinuationFailure(t *testing.T) {
 	t.Parallel()
 

@@ -922,6 +922,17 @@ func newRunAgentHandler(stores *Stores, services *Services, logger zerolog.Logge
 					Msg("run_agent cleared stale orphan container_id; retrying against the clean row")
 				return &RetryableError{Err: err, RetryAfter: &retryAfter}
 			}
+			if errors.Is(err, agent.ErrSandboxPreviewRace) {
+				// A preview hydrate published the live container first. There is
+				// no winning agent job to publish a terminal result, so retry
+				// after the orchestrator reverted the session back to pending.
+				retryAfter := 2 * time.Second
+				logger.Info().
+					Str("session_id", runID.String()).
+					Err(err).
+					Msg("run_agent lost sandbox publish race to preview; retrying against session state")
+				return &RetryableError{Err: err, RetryAfter: &retryAfter}
+			}
 			if errors.Is(err, agent.ErrSandboxRaceLoser) {
 				// A duplicate run_agent job lost the AcquireTurnHold race to
 				// the winner that owns the session row. The winner will
@@ -1054,6 +1065,17 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 					Str("session_id", sessionID.String()).
 					Err(err).
 					Msg("continue_session cleared stale orphan container_id; retrying against the clean row")
+				return &RetryableError{Err: err, RetryAfter: &retryAfter}
+			}
+			if errors.Is(err, agent.ErrSandboxPreviewRace) {
+				// A preview hydrate published the live container first. Retry
+				// so the next attempt fetches the updated session row and
+				// attaches to that preview-held container via the reuse path.
+				retryAfter := 2 * time.Second
+				logger.Info().
+					Str("session_id", sessionID.String()).
+					Err(err).
+					Msg("continue_session lost sandbox publish race to preview; retrying against the preview container")
 				return &RetryableError{Err: err, RetryAfter: &retryAfter}
 			}
 			if errors.Is(err, agent.ErrSandboxRaceLoser) {

@@ -175,10 +175,12 @@ type mockSessionStore struct {
 	releaseHoldFn          func() (bool, string, error)
 	finalizeFn             func(expectedContainerID string) (bool, error)
 	clearContainerIDFn     func(expectedContainerID string) (bool, error)
+	containerHoldStateFn   func(expectedContainerID string) (bool, bool, error)
 	acquireHoldCalls       int
 	releaseHoldCalls       int
 	finalizeCalls          int
 	clearContainerIDCalls  int
+	containerStateCalls    int
 
 	// Programmable response for the rehydrate-pass query. Each call returns
 	// the next page; the field is used only by orchestrator-wrapper tests in
@@ -463,6 +465,18 @@ func (m *mockSessionStore) ClearContainerID(ctx context.Context, orgID, sessionI
 	}
 	// Default: CAS succeeds.
 	return true, nil
+}
+
+func (m *mockSessionStore) ContainerHoldState(ctx context.Context, orgID, sessionID uuid.UUID, expectedContainerID string) (bool, bool, error) {
+	m.mu.Lock()
+	m.containerStateCalls++
+	fn := m.containerHoldStateFn
+	m.mu.Unlock()
+	if fn != nil {
+		return fn(expectedContainerID)
+	}
+	// Default: the live winner is another turn holder.
+	return true, false, nil
 }
 
 // ListContainerHoldingSessions returns the next pre-canned page from
@@ -4045,6 +4059,65 @@ func TestContinueSession_AcquireHoldLosesRaceClearsStaleOrphan(t *testing.T) {
 	require.ErrorIs(t, err, agent.ErrStaleSandboxIDCleared, "ContinueSession stale-orphan path must surface ErrStaleSandboxIDCleared")
 	require.Equal(t, 1, d.sessions.clearContainerIDCalls)
 	require.Equal(t, "stale-orphan-container", clearedID)
+}
+
+// TestContinueSession_AcquireHoldLosesRaceToPreviewRetries covers the case
+// where a preview hydrate published container_id first. The container is
+// alive, but no agent turn owns it yet; the continuation must not dead-letter
+// silently as a duplicate job because there is no winning agent job to finish
+// the user's turn. Instead it reverts the session to idle and returns a
+// retryable preview-race sentinel so the next job attempt can attach to the
+// preview container through the normal reuse path.
+func TestContinueSession_AcquireHoldLosesRaceToPreviewRetries(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	issue.Source = models.IssueSourceManual
+	session := testRun(orgID, issue.ID)
+	session.Origin = models.SessionOriginManual
+	session.InteractionMode = models.SessionInteractionModeInteractive
+	session.ValidationPolicy = models.SessionValidationPolicyOnSessionEnd
+	session.Status = string(models.SessionStatusIdle)
+	session.CurrentTurn = 1
+
+	d := defaultDeps()
+	d.creds = &mockCredentialProvider{
+		byProvider: map[models.ProviderName]*models.DecryptedCredential{
+			models.ProviderAnthropic: {
+				Provider: models.ProviderAnthropic,
+				Config:   models.AnthropicConfig{APIKey: "sk-ant-test"},
+			},
+		},
+	}
+	d.orgs = &mockOrgStore{org: models.Organization{ID: orgID}}
+	d.identityResolver = identity.NewResolver(d.github, zerolog.Nop())
+	d.users = fakeUserStore{}
+	d.issues.issue = issue
+	d.messages.messages = []models.SessionMessage{
+		{ID: 1, SessionID: session.ID, OrgID: orgID, TurnNumber: 2, Role: models.MessageRoleUser, Content: "follow up"},
+	}
+	d.sessions.acquireHoldFn = func(proposed string) (string, error) {
+		return "preview-container", nil
+	}
+	d.provider.IsAliveFn = func(ctx context.Context, sb *agent.Sandbox) (bool, error) {
+		return true, nil
+	}
+	d.sessions.containerHoldStateFn = func(expected string) (bool, bool, error) {
+		require.Equal(t, "preview-container", expected, "holder-state probe should inspect the winning container")
+		return false, true, nil
+	}
+
+	orch := buildOrchestrator(d)
+	err := orch.ContinueSession(context.Background(), session, nil)
+	require.Error(t, err, "ContinueSession should return the preview race for the worker to retry")
+	require.ErrorIs(t, err, agent.ErrSandboxPreviewRace, "preview-held containers should be retried, not dead-lettered as duplicate agent jobs")
+	require.NotErrorIs(t, err, agent.ErrSandboxRaceLoser, "preview-held containers should not be classified as duplicate agent jobs")
+	require.Contains(t, d.sessions.statusUpdates, string(models.SessionStatusIdle), "preview race should revert session status so retry re-enters cleanly")
+	require.Equal(t, 0, d.sessions.clearContainerIDCalls, "alive preview container must not be cleared")
+	for _, ru := range d.sessions.resultUpdates {
+		require.NotEqual(t, "failed", ru.status, "preview race should not mark the session failed")
+	}
 }
 
 // TestContinueSession_AuthSocketClosedOnHydrateFailure verifies that the

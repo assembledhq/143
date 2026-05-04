@@ -145,6 +145,10 @@ func (s *runtimeTestSessionStore) ClearContainerID(context.Context, uuid.UUID, u
 	return true, nil
 }
 
+func (s *runtimeTestSessionStore) ContainerHoldState(context.Context, uuid.UUID, uuid.UUID, string) (bool, bool, error) {
+	return true, false, nil
+}
+
 type runtimeTestJobStore struct{}
 
 func (s *runtimeTestJobStore) Enqueue(context.Context, uuid.UUID, string, string, any, int, *string) (uuid.UUID, error) {
