@@ -184,7 +184,7 @@ export default function AgentPage() {
   const reorderMutation = useMutation({
     mutationFn: async (nextRows: CodingAuth[]) => {
       await api.codingAuths.reorder(nextRows.map((row) => row.id));
-      const nextDefault = nextRows.find((row) => row.status === "healthy" || row.status === "never_verified") ?? nextRows[0];
+      const nextDefault = nextRows.find((row) => row.status === "healthy") ?? nextRows[0];
       if (nextDefault && settings.default_agent_type !== nextDefault.agent) {
         await api.settings.update({ settings: { default_agent_type: nextDefault.agent } });
       }
