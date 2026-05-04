@@ -589,36 +589,59 @@ describe('ManualSessionCreatePage', () => {
     expect(screen.getByPlaceholderText('https://example.com/screenshot.png')).toBeInTheDocument();
   });
 
-  it('appends a Linear URL to the prompt body via the Link Linear issue menu item', async () => {
+  it('adds a linked Linear issue as a chip via the Add linear issue menu item', async () => {
     const user = userEvent.setup();
+    server.use(
+      http.get('/api/v1/integrations', () => HttpResponse.json({
+        data: [
+          {
+            id: 'integration-linear',
+            provider: 'linear',
+            status: 'active',
+          },
+        ],
+        meta: {},
+      })),
+    );
     renderWithProviders(<ManualSessionCreatePageContent />);
 
     await user.click(screen.getByRole('button', { name: 'Add files or photos' }));
-    await user.click(screen.getByRole('menuitem', { name: 'Link Linear issue' }));
+    await user.click(screen.getByRole('menuitem', { name: 'Add linear issue' }));
 
     await user.type(screen.getByLabelText('Linear issue id or URL'), 'https://linear.app/acme/issue/ACS-1234');
     await user.click(screen.getByRole('button', { name: 'Add' }));
 
-    // The linker on the backend (ResolveAndLinkAtCreate) scans the message
-    // body for Linear refs, so the URL must end up inside the textarea
-    // verbatim — anything else means the link won't fire on submit.
-    expect(screen.getByPlaceholderText('Tell the agent what to do...')).toHaveValue('https://linear.app/acme/issue/ACS-1234');
-    // The input pane should close after a successful add so the user can
-    // get back to typing their actual prompt.
+    expect(screen.getByText('ACS-1234')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Remove ACS-1234' })).toBeInTheDocument();
+    expect(screen.getByPlaceholderText('Tell the agent what to do...')).toHaveValue('');
     expect(screen.queryByLabelText('Linear issue id or URL')).not.toBeInTheDocument();
   });
 
   it('rejects free-text input in the Linear add affordance with an inline error', async () => {
     const user = userEvent.setup();
+    server.use(
+      http.get('/api/v1/integrations', () => HttpResponse.json({
+        data: [
+          {
+            id: 'integration-linear',
+            provider: 'linear',
+            status: 'active',
+          },
+        ],
+        meta: {},
+      })),
+    );
     renderWithProviders(<ManualSessionCreatePageContent />);
 
     await user.click(screen.getByRole('button', { name: 'Add files or photos' }));
-    await user.click(screen.getByRole('menuitem', { name: 'Link Linear issue' }));
+    await user.click(screen.getByRole('menuitem', { name: 'Add linear issue' }));
 
     await user.type(screen.getByLabelText('Linear issue id or URL'), 'just some text');
     await user.click(screen.getByRole('button', { name: 'Add' }));
 
-    expect(await screen.findByRole('alert')).toHaveTextContent(/Linear URL/);
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'Enter a Linear URL (https://linear.app/...) or key like ACS-1234',
+    );
     expect(screen.getByLabelText('Linear issue id or URL')).toBeInTheDocument();
     expect(screen.getByPlaceholderText('Tell the agent what to do...')).toHaveValue('');
   });
