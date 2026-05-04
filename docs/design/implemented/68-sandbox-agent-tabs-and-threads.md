@@ -1,12 +1,22 @@
 # Design: Sandbox Agent Tabs and Threads
 
-> **Status:** Partially implemented | **Last reviewed:** 2026-05-01
+> **Status:** Implemented | **Last reviewed:** 2026-05-02
 >
-> Implemented as of 2026-05-01: Phase 0 data model compatibility already
-> existed, and Phase 1 multiple blank tabs with one active thread at a time is
-> implemented. Phases 2-4 remain planned and require thread-scoped runtime
-> execution, process supervision, cancellation, file attribution, recovery, and
-> orchestration helpers.
+> Phases 0-4 are implemented. Phase 0 data model compatibility and Phase 1
+> single-running-thread tab UX shipped previously. Phase 2 added concurrent
+> threads in one sandbox (relaxed `ClaimIdleForSession` admission with a
+> per-session running cap of 3, thread-start checkpoint stamping via
+> `base_snapshot_key`, file-touch attribution via `session_thread_file_events`,
+> and overlap badges in the tab strip). Phase 3 added thread-scoped
+> cancellation (`ThreadCancelRegistry` + per-tab `pkill -INT` of the agent
+> binary), per-tab cost accounting (`cost_cents`), the `Touched by tab` /
+> `Overlap` filter in the Changes view, and a queued-message counter
+> (`pending_message_count`). Phase 4 added "Summarize all tabs" (a side panel
+> that rolls up status + result_summary + touched files + overlap), "Fork this
+> tab into a separate sandbox" (enqueues `fork_session_thread`), and "Revert
+> this tab's changes" (enqueues `revert_session_thread`). The legacy
+> single-thread API stays as a compatibility alias; the new endpoints are
+> additive.
 
 ## Summary
 

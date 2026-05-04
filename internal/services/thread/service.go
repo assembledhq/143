@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/rs/zerolog"
@@ -24,6 +25,16 @@ var (
 	ErrThreadNotIdle       = errors.New("thread must be idle to send a message")
 	ErrActiveThreadExists  = errors.New("another thread is already active")
 	ErrThreadCannotBeEnded = errors.New("thread cannot be ended in its current state")
+	// ErrRunningLimitReached is returned when sending to an idle tab would
+	// exceed the per-session running-thread cap. The composer should fall
+	// back to queueing the message for delivery once an active sibling
+	// frees a slot.
+	ErrRunningLimitReached = errors.New("session running thread limit reached")
+	// ErrThreadNotCancellable is returned when a thread is not in a state
+	// where SIGINT is meaningful (e.g. it is already idle, completed, or
+	// failed). Surfaced to clients so the cancel button can be hidden when
+	// it would do nothing.
+	ErrThreadNotCancellable = errors.New("thread is not cancellable")
 )
 
 // SessionStore defines the session DB operations needed by the thread service.
@@ -38,8 +49,25 @@ type ThreadStore interface {
 	Create(ctx context.Context, thread *models.SessionThread, maxThreads int) error
 	GetByID(ctx context.Context, orgID, threadID uuid.UUID) (models.SessionThread, error)
 	ListBySession(ctx context.Context, orgID, sessionID uuid.UUID) ([]models.SessionThread, error)
-	ClaimIdleForSession(ctx context.Context, orgID, sessionID, threadID uuid.UUID) (models.SessionThread, error)
+	ClaimIdleForSession(ctx context.Context, orgID, sessionID, threadID uuid.UUID, maxRunning int) (models.SessionThread, error)
 	UpdateStatus(ctx context.Context, orgID, threadID uuid.UUID, status models.ThreadStatus) error
+	IncrementPendingMessages(ctx context.Context, orgID, threadID uuid.UUID) error
+	MarkCancelRequested(ctx context.Context, orgID, threadID uuid.UUID) error
+}
+
+// FileEventStore defines the operations the thread service needs for the
+// file-attribution surfaces (overlap detection, Changes-view filters).
+type FileEventStore interface {
+	ListBySession(ctx context.Context, orgID, sessionID uuid.UUID, since *time.Time) ([]models.SessionThreadFileEvent, error)
+}
+
+// ThreadCanceller cancels a thread's in-flight agent run. Implemented by the
+// orchestrator's thread-scoped cancel registry. Optional: when nil, cancel
+// requests still flip the thread's cancel_requested_at timestamp so the
+// orchestrator picks up the intent on its next checkpoint, but no SIGINT is
+// sent to the agent process.
+type ThreadCanceller interface {
+	CancelThread(threadID uuid.UUID) bool
 }
 
 // MessageStore defines the message DB operations needed by the thread service.
@@ -89,10 +117,15 @@ type Service struct {
 	messageStore MessageStore
 	logStore     LogStore
 	jobStore     JobStore
+	fileEvents   FileEventStore  // optional — enables overlap and attribution surfaces
+	canceller    ThreadCanceller // optional — enables in-flight SIGINT
 	logger       zerolog.Logger
 }
 
-// NewService creates a new thread service.
+// NewService creates a new thread service. fileEvents and canceller are
+// optional: passing nil disables the surfaces that depend on them but keeps
+// the rest of the service functional. Tests typically wire only the stores
+// they exercise.
 func NewService(
 	threadStore ThreadStore,
 	sessionStore SessionStore,
@@ -109,6 +142,32 @@ func NewService(
 		jobStore:     jobStore,
 		logger:       logger,
 	}
+}
+
+// SetFileEventStore wires the optional file-event store post-construction.
+// Kept separate so the existing NewService signature does not change and so
+// tests can omit it.
+func (s *Service) SetFileEventStore(store FileEventStore) {
+	s.fileEvents = store
+}
+
+// SetCanceller wires the optional thread canceller. Provided by the agent
+// orchestrator's thread-scoped cancel registry once it is constructed.
+func (s *Service) SetCanceller(c ThreadCanceller) {
+	s.canceller = c
+}
+
+// isSessionAlreadyRunning is the fallback predicate used by SendMessage when
+// a session-level ClaimIdle fails: if the session is already in 'running'
+// state because another tab is mid-turn, the new tab does not need to claim.
+// Returns true on the happy path; on any error we err on the side of caution
+// and propagate the original claim failure.
+func isSessionAlreadyRunning(ctx context.Context, store SessionStore, orgID, sessionID uuid.UUID) bool {
+	session, err := store.GetByID(ctx, orgID, sessionID)
+	if err != nil {
+		return false
+	}
+	return session.Status == string(models.SessionStatusRunning)
 }
 
 func isTerminalStatus(status string) bool {
@@ -201,14 +260,21 @@ func (s *Service) GetThread(ctx context.Context, orgID, sessionID, threadID uuid
 	return thread, nil
 }
 
-// SendMessage claims an idle thread, creates a message, and enqueues a continue_session job.
+// SendMessage claims an idle thread, creates a message, and enqueues a
+// continue_session job.
 //
-// ClaimIdleForSession serializes sibling-thread admission in the database. If
-// the subsequent message creation or job enqueue fails, we best-effort revert
-// the thread to "idle".
+// ClaimIdleForSession serializes sibling-thread admission in the database
+// while allowing up to MaxRunningThreadsPerSession concurrent tabs. The
+// session-level ClaimIdle is best-effort: when another tab is already
+// running, the session is already in 'running' state and the orchestrator's
+// idempotent UpdateStatus("running") handles the rest. If subsequent message
+// creation or job enqueue fails we best-effort revert the thread to idle.
 func (s *Service) SendMessage(ctx context.Context, input SendMessageInput) (*models.SessionMessage, error) {
-	thread, err := s.threadStore.ClaimIdleForSession(ctx, input.OrgID, input.SessionID, input.ThreadID)
+	thread, err := s.threadStore.ClaimIdleForSession(ctx, input.OrgID, input.SessionID, input.ThreadID, models.MaxRunningThreadsPerSession)
 	if err != nil {
+		if errors.Is(err, db.ErrThreadRunningLimitReached) {
+			return nil, ErrRunningLimitReached
+		}
 		// Check if thread exists at all to provide a better error.
 		existing, lookupErr := s.threadStore.GetByID(ctx, input.OrgID, input.ThreadID)
 		if lookupErr != nil {
@@ -217,19 +283,9 @@ func (s *Service) SendMessage(ctx context.Context, input SendMessageInput) (*mod
 		if existing.SessionID != input.SessionID {
 			return nil, ErrThreadNotFound
 		}
-		threads, listErr := s.threadStore.ListBySession(ctx, input.OrgID, input.SessionID)
-		if listErr != nil {
-			return nil, fmt.Errorf("list sibling threads: %w", listErr)
-		}
-		for _, sibling := range threads {
-			if sibling.ID == input.ThreadID {
-				continue
-			}
-			switch sibling.Status {
-			case models.ThreadStatusPending, models.ThreadStatusRunning, models.ThreadStatusAwaitingInput:
-				return nil, ErrActiveThreadExists
-			}
-		}
+		// The target tab itself is busy with its own turn. The composer
+		// should fall back to queueing — we cannot interleave two turns on
+		// one thread.
 		return nil, ErrThreadNotIdle
 	}
 
@@ -241,11 +297,22 @@ func (s *Service) SendMessage(ctx context.Context, input SendMessageInput) (*mod
 		return nil, ErrThreadNotFound
 	}
 
-	if _, err := s.sessionStore.ClaimIdle(ctx, input.OrgID, input.SessionID); err != nil {
-		if revertErr := s.threadStore.UpdateStatus(ctx, input.OrgID, input.ThreadID, models.ThreadStatusIdle); revertErr != nil {
-			s.logger.Error().Err(revertErr).Str("thread_id", input.ThreadID.String()).Msg("failed to revert thread to idle after parent session claim failure")
+	// Best-effort session-level claim. Treat ErrNoRows-style failures as
+	// "already running due to a sibling tab" and proceed — the session
+	// state machine is idempotent at running. Any other error reverts the
+	// claim and propagates.
+	if _, claimErr := s.sessionStore.ClaimIdle(ctx, input.OrgID, input.SessionID); claimErr != nil {
+		if isSessionAlreadyRunning(ctx, s.sessionStore, input.OrgID, input.SessionID) {
+			s.logger.Debug().
+				Str("session_id", input.SessionID.String()).
+				Str("thread_id", input.ThreadID.String()).
+				Msg("session already running due to sibling thread; proceeding without re-claim")
+		} else {
+			if revertErr := s.threadStore.UpdateStatus(ctx, input.OrgID, input.ThreadID, models.ThreadStatusIdle); revertErr != nil {
+				s.logger.Error().Err(revertErr).Str("thread_id", input.ThreadID.String()).Msg("failed to revert thread to idle after parent session claim failure")
+			}
+			return nil, fmt.Errorf("claim parent session: %w", claimErr)
 		}
-		return nil, ErrActiveThreadExists
 	}
 
 	content := input.Message

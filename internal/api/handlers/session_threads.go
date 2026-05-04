@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/assembledhq/143/internal/api/middleware"
 	"github.com/assembledhq/143/internal/db"
@@ -24,6 +25,11 @@ type ThreadService interface {
 	EndThread(ctx context.Context, orgID, sessionID, threadID uuid.UUID) (models.SessionThread, error)
 	GetMessages(ctx context.Context, orgID, sessionID, threadID uuid.UUID) ([]models.SessionMessage, error)
 	GetLogs(ctx context.Context, orgID, sessionID, threadID uuid.UUID) ([]models.SessionLog, error)
+	CancelThread(ctx context.Context, orgID, sessionID, threadID uuid.UUID) (models.SessionThread, error)
+	SummarizeSession(ctx context.Context, orgID, sessionID uuid.UUID) (thread.SessionSummary, error)
+	ListFileEvents(ctx context.Context, orgID, sessionID uuid.UUID, since *time.Time) ([]models.SessionThreadFileEvent, error)
+	ForkThread(ctx context.Context, input thread.ForkInput) (thread.ForkResult, error)
+	RevertThread(ctx context.Context, orgID, sessionID, threadID uuid.UUID, userID *uuid.UUID) (thread.ForkResult, error)
 }
 
 type SessionThreadHandler struct {
@@ -195,6 +201,8 @@ func (h *SessionThreadHandler) SendThreadMessage(w http.ResponseWriter, r *http.
 			writeError(w, r, http.StatusNotFound, "NOT_FOUND", "thread not found")
 		case errors.Is(err, thread.ErrThreadNotIdle):
 			writeError(w, r, http.StatusConflict, "NOT_IDLE", "thread must be idle to send a message")
+		case errors.Is(err, thread.ErrRunningLimitReached):
+			writeError(w, r, http.StatusConflict, "RUNNING_LIMIT", "this session already has the maximum number of tabs running concurrently")
 		case errors.Is(err, thread.ErrActiveThreadExists):
 			writeError(w, r, http.StatusConflict, "ACTIVE_THREAD_EXISTS", "another tab is already running in this sandbox")
 		case errors.Is(err, thread.ErrEnqueueFailed):

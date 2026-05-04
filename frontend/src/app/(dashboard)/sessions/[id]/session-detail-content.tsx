@@ -115,6 +115,13 @@ import {
   writeStoredSessionScrollPosition,
 } from "@/lib/session-open-position";
 import type { ListResponse, Session, SessionDetail, SessionInputCommand, SessionInputReference, SessionLog, SessionMessage, SessionReviewComment, SessionThread, User, Validation, CodexAuthStatus, PullRequestHealthResponse, SingleResponse } from "@/lib/types";
+import { AgentTabStrip, computeThreadOverlap } from "./agent-tab-strip";
+import { SessionSummaryPanel, SummarizeButton } from "./session-summary-panel";
+import {
+  ThreadAttributionFilter,
+  useAttributionAllowedPaths,
+  type ThreadAttributionFilterValue,
+} from "./thread-attribution-filter";
 import { AuditLogTrigger } from "@/components/audit/audit-log-trigger";
 import { ResizeHandle } from "@/components/resize-handle";
 import { DiffStatsBadge, FileTree, SessionFooter, CommentsSummary, ReviewDiffView, PassSelector, type DiffPassEntry, type PassRange } from "@/components/code-review";
@@ -194,98 +201,10 @@ function checkResultBadge(result: string | null) {
   return <Badge variant="secondary" className="text-xs">{result}</Badge>;
 }
 
-function threadStatusLabel(status: string): string {
-  return statusConfig[status]?.label ?? status.replace(/_/g, " ");
-}
-
-function threadStatusDotClass(status: string): string {
-  switch (status) {
-    case "running":
-      return "bg-primary";
-    case "pending":
-      return "bg-muted-foreground";
-    case "awaiting_input":
-      return "bg-amber-500";
-    case "failed":
-      return "bg-destructive";
-    case "completed":
-      return "bg-emerald-500";
-    case "cancelled":
-      return "bg-muted-foreground/60";
-    default:
-      return "bg-sky-500";
-  }
-}
-
-function AgentThreadTabs({
-  threads,
-  activeThreadId,
-  onActiveThreadChange,
-  onAddTab,
-}: {
-  threads: SessionThread[];
-  activeThreadId: string | null;
-  onActiveThreadChange: (threadId: string) => void;
-  onAddTab: () => void;
-}) {
-  if (threads.length === 0 || !activeThreadId) {
-    return null;
-  }
-
-  return (
-    <div className="border-b border-border bg-background px-3 py-2 shrink-0">
-      <div className="flex items-center gap-2 min-w-0">
-        <Tabs value={activeThreadId} onValueChange={onActiveThreadChange} className="min-w-0 flex-1">
-          <TabsList
-            variant={threads.length > 1 ? "default" : "line"}
-            size="sm"
-            aria-label="Agent tabs"
-            className={cn(
-              "h-auto max-w-full justify-start gap-1 overflow-x-auto overflow-y-hidden",
-              threads.length === 1 ? "border-b-0 bg-transparent p-0" : "bg-muted/60 p-1",
-            )}
-          >
-            {threads.map((thread) => {
-              const agent = AGENTS_BY_KEY[thread.agent_type];
-              const agentLabel = agent?.label ?? thread.agent_type;
-              const statusLabel = threadStatusLabel(thread.status);
-              const needsAttention = thread.status === "awaiting_input" || thread.status === "failed";
-              return (
-                <TabsTrigger
-                  key={thread.id}
-                  value={thread.id}
-                  className={cn(
-                    "h-8 max-w-[15rem] gap-1.5 rounded-md px-2 text-xs",
-                    threads.length === 1 && "data-[state=active]:bg-transparent data-[state=active]:shadow-none",
-                  )}
-                  title={`${thread.label} — ${agentLabel} — ${statusLabel}`}
-                >
-                  <span className={cn("h-2 w-2 shrink-0 rounded-full", threadStatusDotClass(thread.status), thread.status === "running" && "animate-pulse")} />
-                  <span className="truncate">{thread.label}</span>
-                  <span className="hidden sm:inline text-muted-foreground">{"— "}{statusLabel.toLowerCase()}</span>
-                  {needsAttention && (
-                    <span className="h-1.5 w-1.5 rounded-full bg-amber-500" aria-label="Needs attention" />
-                  )}
-                </TabsTrigger>
-              );
-            })}
-          </TabsList>
-        </Tabs>
-        <Button
-          type="button"
-          size="icon"
-          variant="ghost"
-          className="h-8 w-8 shrink-0"
-          aria-label="Add agent tab"
-          title="Add agent tab"
-          onClick={onAddTab}
-        >
-          <Plus className="h-4 w-4" />
-        </Button>
-      </div>
-    </div>
-  );
-}
+// AgentThreadTabs lived here in Phase 1. The replacement now lives in
+// agent-tab-strip.tsx (AgentTabStrip) and adds overlap badges, tab actions,
+// and cost surfacing. Status helpers moved with it; the statusConfig table
+// is still owned by this file and passed in as a prop.
 
 // ---------------------------------------------------------------------------
 // Detail panel tabs (shown in right sidebar)
@@ -689,6 +608,9 @@ function ChangesTab({
   onPassRangeChange,
   emptyStatusText,
   isMobile,
+  threads,
+  attributionFilter,
+  onAttributionFilterChange,
 }: {
   filteredFiles: DiffFile[];
   activeFileIndex: number;
@@ -701,6 +623,9 @@ function ChangesTab({
   onPassRangeChange: (range: PassRange | null) => void;
   emptyStatusText: string;
   isMobile: boolean;
+  threads: SessionThread[];
+  attributionFilter: ThreadAttributionFilterValue;
+  onAttributionFilterChange: (next: ThreadAttributionFilterValue) => void;
 }) {
   const hasDiff = filteredFiles.length > 0;
 
@@ -721,6 +646,20 @@ function ChangesTab({
             passes={passes}
             selectedRange={passRange}
             onRangeChange={onPassRangeChange}
+          />
+        </div>
+      )}
+
+      {/* Tab attribution filter — visible only when the session has more
+          than one tab. Lets the user scope the diff to one tab's outputs,
+          the overlap, or unattributed paths. */}
+      {threads.length > 1 && (
+        <div className="flex items-center justify-end gap-2 px-4 py-2 border-b border-border">
+          <span className="text-xs text-muted-foreground">Filter by tab:</span>
+          <ThreadAttributionFilter
+            threads={threads}
+            value={attributionFilter}
+            onChange={onAttributionFilterChange}
           />
         </div>
       )}
@@ -2880,6 +2819,60 @@ export function SessionDetailContent({ id }: { id: string }) {
     },
   });
 
+  // Thread-scoped mutations for Phase 3/4 actions. Kept as separate
+  // mutations rather than one polymorphic call so React Query can scope
+  // pending state per-action, which the menu reads to show a spinner only
+  // on the in-flight item.
+  const cancelThreadMutation = useMutation({
+    mutationFn: (threadId: string) => api.sessions.cancelThread(id, threadId),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["session", id] });
+    },
+    onError: (err) => {
+      toast.error(err instanceof Error ? err.message : "Failed to cancel tab");
+    },
+  });
+  const forkThreadMutation = useMutation({
+    mutationFn: (threadId: string) => api.sessions.forkThread(id, threadId),
+    onSuccess: () => {
+      toast.success("Fork queued — new session will appear in your list shortly");
+      queryClient.invalidateQueries({ queryKey: ["sessions"] });
+    },
+    onError: (err) => {
+      toast.error(err instanceof Error ? err.message : "Failed to fork tab");
+    },
+  });
+  const revertThreadMutation = useMutation({
+    mutationFn: (threadId: string) => api.sessions.revertThread(id, threadId),
+    onSuccess: (_data, threadId) => {
+      toast.success("Revert prepared — see the tab transcript for the patch");
+      queryClient.invalidateQueries({ queryKey: queryKeys.sessions.threadMessages(id, threadId) });
+      queryClient.invalidateQueries({ queryKey: ["session", id] });
+    },
+    onError: (err) => {
+      toast.error(err instanceof Error ? err.message : "Failed to prepare revert");
+    },
+  });
+
+  // Session-wide file event timeline powers the tab-strip overlap badges and
+  // the Changes-view attribution filters. Polled at the same cadence as the
+  // session detail so a user-perceptible "tab touched a file" lands within
+  // one polling cycle.
+  const fileEventsQuery = useQuery({
+    queryKey: queryKeys.sessions.threadFileEvents(id),
+    queryFn: () => api.sessions.listThreadFileEvents(id),
+    enabled: threads.length > 0,
+    refetchInterval: threads.some((t) => t.status === "running" || t.status === "pending") ? 5000 : false,
+    staleTime: 2_000,
+  });
+  const overlapsByThreadId = useMemo(
+    () => computeThreadOverlap(threads, fileEventsQuery.data?.data ?? []),
+    [threads, fileEventsQuery.data?.data],
+  );
+  const [summaryOpen, setSummaryOpen] = useState(false);
+  const [attributionFilter, setAttributionFilter] = useState<ThreadAttributionFilterValue>({ kind: "all" });
+  const attributionAllowedPaths = useAttributionAllowedPaths(attributionFilter, fileEventsQuery.data?.data);
+
   const createThreadMutation = useMutation({
     mutationFn: () => {
       const agent = AGENTS_BY_KEY[newThreadAgentType] ?? AGENTS[0];
@@ -3238,7 +3231,11 @@ export function SessionDetailContent({ id }: { id: string }) {
 
       <TabsContent value="changes" className="flex-1 min-h-0">
         <ChangesTab
-          filteredFiles={filteredFiles}
+          filteredFiles={
+            attributionAllowedPaths == null
+              ? filteredFiles
+              : filteredFiles.filter((f) => attributionAllowedPaths.has(f.newPath) || attributionAllowedPaths.has(f.oldPath))
+          }
           activeFileIndex={activeFileIndex}
           onFileSelect={setActiveFileIndex}
           onOpenReview={openReview}
@@ -3253,6 +3250,9 @@ export function SessionDetailContent({ id }: { id: string }) {
               : "This session did not produce any file changes."
           }
           isMobile={isMobileReviewViewport}
+          threads={threads}
+          attributionFilter={attributionFilter}
+          onAttributionFilterChange={setAttributionFilter}
         />
       </TabsContent>
       <TabsContent value="overview" className="flex-1 overflow-y-auto scrollbar-hide p-4">
@@ -3413,6 +3413,10 @@ export function SessionDetailContent({ id }: { id: string }) {
             )}
             <LinkedIssueChips session={session} />
           </div>
+          {/* Summarize tabs trigger — only meaningful when there is more than one tab. */}
+          {threads.length > 1 && (
+            <SummarizeButton onClick={() => setSummaryOpen(true)} />
+          )}
           {/* Desktop toggle: hides/shows the inline right panel. */}
           <DisabledTooltip disabled={centerMode === "review" && showDetailPanel} content={detailToggleTitle}>
             <Button
@@ -3442,18 +3446,25 @@ export function SessionDetailContent({ id }: { id: string }) {
         ) : null}
 
         {!isDedicatedMobileReview ? (
-        <AgentThreadTabs
-          threads={threads}
-          activeThreadId={activeThread?.id ?? null}
-          onActiveThreadChange={setActiveThreadId}
-          onAddTab={() => {
-            setNewThreadAgentType(session.agent_type || "codex");
-            setNewThreadModel("");
-            setNewThreadLabel("");
-            setAddThreadOpen(true);
-          }}
-        />
+          <AgentTabStrip
+            threads={threads}
+            activeThreadId={activeThread?.id ?? null}
+            overlapsByThreadId={overlapsByThreadId}
+            statusConfig={statusConfig}
+            onActiveThreadChange={setActiveThreadId}
+            onAddTab={() => {
+              setNewThreadAgentType(session.agent_type || "codex");
+              setNewThreadModel("");
+              setNewThreadLabel("");
+              setAddThreadOpen(true);
+            }}
+            onCancelThread={(tid) => cancelThreadMutation.mutate(tid)}
+            onForkThread={(tid) => forkThreadMutation.mutate(tid)}
+            onRevertThread={(tid) => revertThreadMutation.mutate(tid)}
+            cancelPendingThreadId={cancelThreadMutation.isPending ? cancelThreadMutation.variables ?? null : null}
+          />
         ) : null}
+        <SessionSummaryPanel sessionId={id} open={summaryOpen} onOpenChange={setSummaryOpen} />
 
         {/* Center content — either chat or diff review */}
         <div className="flex-1 min-h-0 relative">

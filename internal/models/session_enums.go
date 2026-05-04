@@ -309,6 +309,24 @@ func (s ThreadStatus) Validate() error {
 // MaxThreadsPerSession is the maximum number of threads allowed in a single session.
 const MaxThreadsPerSession = 4
 
+// MaxRunningThreadsPerSession caps how many threads inside one sandbox can be
+// in an active state (pending/running/awaiting_input) at the same time. Lower
+// than MaxThreadsPerSession so a user can keep idle "lanes" parked while
+// limiting concurrent filesystem writers and live cost burn. Mirrors the
+// "max running threads per session: 3" guidance in
+// docs/design/68-sandbox-agent-tabs-and-threads.md.
+const MaxRunningThreadsPerSession = 3
+
+// FileEventTypeCreated, FileEventTypeModified, FileEventTypeDeleted are the
+// canonical event_type values for session_thread_file_events. The orchestrator
+// classifies git status output into these three buckets. Renames are recorded
+// as a delete + create pair so each path's history is independent.
+const (
+	FileEventTypeCreated  = "created"
+	FileEventTypeModified = "modified"
+	FileEventTypeDeleted  = "deleted"
+)
+
 // MessageRole identifies who sent a session message.
 type MessageRole string
 
