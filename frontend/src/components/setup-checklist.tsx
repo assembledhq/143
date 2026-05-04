@@ -17,7 +17,7 @@ import { CodexDeviceCodeModal } from "@/components/codex-device-code-modal";
 import { useDisconnectIntegration } from "@/hooks/use-disconnect-integration";
 import { useGitHubRepoSync } from "@/hooks/use-github-repo-sync";
 import { queryKeys } from "@/lib/query-keys";
-import { AGENTS_BY_KEY, isAgentConnected } from "@/lib/agents";
+import { AGENTS_BY_KEY, isAgentAvailable } from "@/lib/agents";
 import {
   Select,
   SelectContent,
@@ -25,7 +25,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import type { OrgSettings } from "@/lib/types";
+import type { CodingCredentialSummary, ListResponse, OrgSettings } from "@/lib/types";
 
 function StepSection({
   step,
@@ -109,8 +109,8 @@ function AgentSelectionSection({ onConnectedChange }: { onConnectedChange?: (con
   const [selectedAgentTypeOverride, setSelectedAgentType] = useState<AgentType | null>(null);
 
   const { data: codexAuthResponse } = useQuery({
-    queryKey: queryKeys.codexAuth.status,
-    queryFn: () => api.codexAuth.status(),
+    queryKey: [...queryKeys.codexAuth.status, "personal"],
+    queryFn: () => api.codexAuth.status(undefined, "personal"),
   });
   const { data: settingsResponse } = useQuery({
     queryKey: queryKeys.settings.all,
@@ -120,12 +120,22 @@ function AgentSelectionSection({ onConnectedChange }: { onConnectedChange?: (con
     queryKey: queryKeys.credentials.resolved,
     queryFn: () => api.userCredentials.listResolved(),
   });
+  const { data: resolvedCodingCredentialsResponse } = useQuery<ListResponse<CodingCredentialSummary>>({
+    queryKey: ["coding-credentials", "resolved"],
+    queryFn: () => api.codingCredentials.list("resolved"),
+  });
   const settings = settingsResponse?.data?.settings as OrgSettings | undefined;
   const resolvedCredentials = resolvedCredsResponse?.data ?? [];
+  const resolvedCodingCredentials = resolvedCodingCredentialsResponse?.data ?? [];
 
   const selectedAgentType: AgentType = selectedAgentTypeOverride ?? settings?.default_agent_type ?? "codex";
 
-  const isSelectedAgentConnected = isAgentConnected(selectedAgentType, resolvedCredentials, codexAuthResponse?.data);
+  const isSelectedAgentConnected = isAgentAvailable(
+    selectedAgentType,
+    resolvedCredentials,
+    codexAuthResponse?.data,
+    resolvedCodingCredentials,
+  );
 
   const selectedAgent = agentOptions.find((agent) => agent.value === selectedAgentType) ?? agentOptions[0];
 
@@ -175,6 +185,7 @@ function AgentSelectionSection({ onConnectedChange }: { onConnectedChange?: (con
 
       {showDeviceCodeModal && (
         <CodexDeviceCodeModal
+          scope="personal"
           onClose={() => setShowDeviceCodeModal(false)}
           onConnected={() => {
             setShowDeviceCodeModal(false);

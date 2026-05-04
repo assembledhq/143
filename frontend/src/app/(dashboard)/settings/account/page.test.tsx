@@ -208,6 +208,7 @@ describe("Account settings page", () => {
 
     await user.click(screen.getByRole("button", { name: "Add auth" }));
     await user.click(await screen.findByLabelText("Claude Code"));
+    await user.click(screen.getByRole("radio", { name: /API key/i }));
     await user.type(screen.getByLabelText("Label"), "Personal Claude backup");
     // Use the input id directly — the visible label text is shared with the
     // help-tooltip button so getByLabelText("API key") would be ambiguous.

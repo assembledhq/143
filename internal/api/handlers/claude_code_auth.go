@@ -33,6 +33,11 @@ const claudeCodePasteMax = 2048
 // authorization-code + PKCE flow rather than device-code, so the endpoint
 // shape differs: /initiate returns an authorize URL, and the user pastes the
 // final code back via /complete (no polling).
+//
+// Every endpoint accepts an optional `scope` query param (or body field for
+// POSTs). Org scope (the default) requires admin role; personal scope is
+// available to any authenticated user and operates on the caller's own
+// credential rows.
 type ClaudeCodeAuthHandler struct {
 	svc    *claudecodeauth.Service
 	logger zerolog.Logger
@@ -43,19 +48,19 @@ func NewClaudeCodeAuthHandler(svc *claudecodeauth.Service, logger zerolog.Logger
 	return &ClaudeCodeAuthHandler{svc: svc, logger: logger}
 }
 
-// Initiate starts a new PKCE auth flow for a Claude subscription and returns
+// Initiate starts a new PKCE auth flow at the requested scope and returns
 // the authorize URL the user should open in a browser.
 func (h *ClaudeCodeAuthHandler) Initiate(w http.ResponseWriter, r *http.Request) {
 	orgID := middleware.OrgIDFromContext(r.Context())
-
-	var createdBy *uuid.UUID
-	if user := middleware.UserFromContext(r.Context()); user != nil {
-		id := user.ID
-		createdBy = &id
+	user := middleware.UserFromContext(r.Context())
+	if user == nil {
+		writeError(w, r, http.StatusUnauthorized, "UNAUTHENTICATED", "unauthenticated", nil)
+		return
 	}
 
 	var body struct {
 		Label string `json:"label"`
+		Scope string `json:"scope"`
 	}
 	if r.Body != nil && r.ContentLength != 0 {
 		dec := json.NewDecoder(r.Body)
@@ -76,11 +81,29 @@ func (h *ClaudeCodeAuthHandler) Initiate(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	resp, err := h.svc.InitiateOAuth(r.Context(), orgID, createdBy, body.Label)
+	scope, err := resolveOAuthScope(
+		orgID,
+		user.ID,
+		middleware.ActiveRoleFromContext(r.Context()),
+		strings.ToLower(strings.TrimSpace(body.Scope)),
+	)
+	if err != nil {
+		writeAuthScopeError(w, r, err)
+		return
+	}
+
+	createdBy := user.ID
+
+	resp, err := h.svc.InitiateOAuth(r.Context(), scope, &createdBy, body.Label)
 	if err != nil {
 		var labelErr *db.ErrCredentialLabelTaken
 		if errors.As(err, &labelErr) {
 			writeError(w, r, http.StatusConflict, "LABEL_TAKEN", labelErr.Error(), err)
+			return
+		}
+		var labelErr2 *db.ErrCodingCredentialLabelTaken
+		if errors.As(err, &labelErr2) {
+			writeError(w, r, http.StatusConflict, "LABEL_TAKEN", labelErr2.Error(), err)
 			return
 		}
 		writeError(w, r, http.StatusInternalServerError, "AUTH_INITIATE_FAILED", "failed to initiate Claude OAuth", err)
@@ -94,10 +117,16 @@ func (h *ClaudeCodeAuthHandler) Initiate(w http.ResponseWriter, r *http.Request)
 // subscription tokens and promotes the pending row to active.
 func (h *ClaudeCodeAuthHandler) Complete(w http.ResponseWriter, r *http.Request) {
 	orgID := middleware.OrgIDFromContext(r.Context())
+	user := middleware.UserFromContext(r.Context())
+	if user == nil {
+		writeError(w, r, http.StatusUnauthorized, "UNAUTHENTICATED", "unauthenticated", nil)
+		return
+	}
 
 	var body struct {
 		Label string `json:"label"`
 		Code  string `json:"code"`
+		Scope string `json:"scope"`
 	}
 	if r.Body == nil || r.ContentLength == 0 {
 		writeError(w, r, http.StatusBadRequest, "INVALID_REQUEST", "request body is required", nil)
@@ -130,7 +159,18 @@ func (h *ClaudeCodeAuthHandler) Complete(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	resp, err := h.svc.CompleteOAuth(r.Context(), orgID, body.Label, body.Code)
+	scope, err := resolveOAuthScope(
+		orgID,
+		user.ID,
+		middleware.ActiveRoleFromContext(r.Context()),
+		strings.ToLower(strings.TrimSpace(body.Scope)),
+	)
+	if err != nil {
+		writeAuthScopeError(w, r, err)
+		return
+	}
+
+	resp, err := h.svc.CompleteOAuth(r.Context(), scope, body.Label, body.Code)
 	if err != nil {
 		switch {
 		case errors.Is(err, claudecodeauth.ErrPendingAuthNotFound):
@@ -148,11 +188,24 @@ func (h *ClaudeCodeAuthHandler) Complete(w http.ResponseWriter, r *http.Request)
 	writeJSON(w, http.StatusOK, models.SingleResponse[claudecodeauth.CompleteResponse]{Data: *resp})
 }
 
-// List returns all connected Claude subscriptions for the org.
+// List returns all connected Claude subscriptions at the requested scope.
+//
+// Available to any authenticated user — see CodexAuthHandler.List for the
+// rationale. Mutations keep the admin gate on org scope.
 func (h *ClaudeCodeAuthHandler) List(w http.ResponseWriter, r *http.Request) {
 	orgID := middleware.OrgIDFromContext(r.Context())
+	user := middleware.UserFromContext(r.Context())
+	if user == nil {
+		writeError(w, r, http.StatusUnauthorized, "UNAUTHENTICATED", "unauthenticated", nil)
+		return
+	}
+	scope := models.Scope{OrgID: orgID}
+	if strings.ToLower(strings.TrimSpace(r.URL.Query().Get("scope"))) == models.CodingCredentialScopePersonal {
+		uid := user.ID
+		scope = models.Scope{OrgID: orgID, UserID: &uid}
+	}
 
-	subs, err := h.svc.ListSubscriptions(r.Context(), orgID)
+	subs, err := h.svc.ListSubscriptions(r.Context(), scope)
 	if err != nil {
 		writeError(w, r, http.StatusInternalServerError, "AUTH_LIST_FAILED", "failed to list subscriptions", err)
 		return
@@ -168,6 +221,11 @@ func (h *ClaudeCodeAuthHandler) List(w http.ResponseWriter, r *http.Request) {
 // DisconnectByPath removes a specific Claude subscription by path param ID.
 func (h *ClaudeCodeAuthHandler) DisconnectByPath(w http.ResponseWriter, r *http.Request) {
 	orgID := middleware.OrgIDFromContext(r.Context())
+	user := middleware.UserFromContext(r.Context())
+	if user == nil {
+		writeError(w, r, http.StatusUnauthorized, "UNAUTHENTICATED", "unauthenticated", nil)
+		return
+	}
 	idStr := chi.URLParam(r, "id")
 	credID, err := uuid.Parse(idStr)
 	if err != nil {
@@ -175,7 +233,18 @@ func (h *ClaudeCodeAuthHandler) DisconnectByPath(w http.ResponseWriter, r *http.
 		return
 	}
 
-	if err := h.svc.DisconnectForOrg(r.Context(), orgID, credID); err != nil {
+	scope, err := resolveOAuthScope(
+		orgID,
+		user.ID,
+		middleware.ActiveRoleFromContext(r.Context()),
+		strings.ToLower(strings.TrimSpace(r.URL.Query().Get("scope"))),
+	)
+	if err != nil {
+		writeAuthScopeError(w, r, err)
+		return
+	}
+
+	if err := h.svc.DisconnectForOrg(r.Context(), scope, credID); err != nil {
 		if errors.Is(err, claudecodeauth.ErrCredentialNotFound) {
 			writeError(w, r, http.StatusNotFound, "NOT_FOUND", "credential not found", nil)
 			return
@@ -189,12 +258,28 @@ func (h *ClaudeCodeAuthHandler) DisconnectByPath(w http.ResponseWriter, r *http.
 	})
 }
 
-// DisconnectAll removes every Claude subscription for the org. Preserves any
-// Anthropic API-key credential (label="") so fallback auth keeps working.
+// DisconnectAll removes every Claude subscription at the requested scope.
+// Preserves any Anthropic API-key credential (label="") so fallback auth
+// keeps working.
 func (h *ClaudeCodeAuthHandler) DisconnectAll(w http.ResponseWriter, r *http.Request) {
 	orgID := middleware.OrgIDFromContext(r.Context())
+	user := middleware.UserFromContext(r.Context())
+	if user == nil {
+		writeError(w, r, http.StatusUnauthorized, "UNAUTHENTICATED", "unauthenticated", nil)
+		return
+	}
+	scope, err := resolveOAuthScope(
+		orgID,
+		user.ID,
+		middleware.ActiveRoleFromContext(r.Context()),
+		strings.ToLower(strings.TrimSpace(r.URL.Query().Get("scope"))),
+	)
+	if err != nil {
+		writeAuthScopeError(w, r, err)
+		return
+	}
 
-	if err := h.svc.DisconnectAll(r.Context(), orgID); err != nil {
+	if err := h.svc.DisconnectAll(r.Context(), scope); err != nil {
 		writeError(w, r, http.StatusInternalServerError, "AUTH_DISCONNECT_FAILED", "failed to disconnect Claude subscriptions", err)
 		return
 	}

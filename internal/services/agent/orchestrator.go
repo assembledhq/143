@@ -172,8 +172,15 @@ type ClaudeCodeAuthProvider interface {
 	GetValidToken(ctx context.Context, orgID uuid.UUID) (*models.AnthropicSubscription, *uuid.UUID, error)
 }
 
+// ClaudeCodeAuthRefresher rotates an expired Claude subscription token by
+// credential id. The scope must match the credential's owner: personal
+// subscriptions live in coding_credentials with user_id set, and the
+// underlying lookup filters on (org_id, user_id) — passing org scope for a
+// personal credential would mis-route the lookup and surface as
+// "credential not found", silently dropping personal subscriptions back
+// to the org fallback after their first 8h of token life.
 type ClaudeCodeAuthRefresher interface {
-	RefreshTokenByID(ctx context.Context, orgID uuid.UUID, credID uuid.UUID) (*models.AnthropicSubscription, error)
+	RefreshTokenByID(ctx context.Context, scope models.Scope, credID uuid.UUID) (*models.AnthropicSubscription, error)
 }
 
 // CredentialProvider abstracts retrieving org-scoped provider credentials.
@@ -3304,7 +3311,12 @@ func (o *Orchestrator) injectPickedUnifiedClaudeCodeAuth(ctx context.Context, or
 	if sub.NeedsRefresh(codexSubscriptionRefreshWindow) {
 		refresher, ok := o.claudeCodeAuth.(ClaudeCodeAuthRefresher)
 		if ok {
-			refreshed, err := refresher.RefreshTokenByID(ctx, orgID, picked.ID)
+			// Build scope from the picked row's UserID. Personal credentials
+			// (UserID != nil) require their scope on the lookup; passing
+			// org scope would miss them in coding_credentials and surface
+			// as "credential not found".
+			scope := models.Scope{OrgID: orgID, UserID: picked.UserID}
+			refreshed, err := refresher.RefreshTokenByID(ctx, scope, picked.ID)
 			if err == nil && refreshed != nil {
 				sub = *refreshed
 			} else if sub.IsExpired() {

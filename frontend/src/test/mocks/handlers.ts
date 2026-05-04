@@ -738,6 +738,13 @@ export const handlers = [
     });
   }),
 
+  http.get('/api/v1/coding-credentials', () => {
+    return HttpResponse.json({
+      data: [],
+      meta: {},
+    });
+  }),
+
   http.get('/api/v1/sessions/:id/files/context', () => {
     return HttpResponse.json({
       data: {
