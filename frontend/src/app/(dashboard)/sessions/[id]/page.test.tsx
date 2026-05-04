@@ -1,10 +1,11 @@
 import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
 import { http, HttpResponse } from 'msw';
-import { renderWithProviders, screen, userEvent, waitFor, within } from '@/test/test-utils';
+import { fireEvent, renderWithProviders, screen, userEvent, waitFor, within } from '@/test/test-utils';
 import { act } from '@testing-library/react';
 import { server } from '@/test/mocks/server';
 import { mockSessions, mockMembers, mockIssues, mockPRHealth } from '@/test/mocks/handlers';
 import { SessionDetailContent } from './session-detail-content';
+import { api } from '@/lib/api';
 import type { Issue, Session, SessionMessage, SessionReviewComment, SessionThread, SessionTimelineEntry, User, SingleResponse, ListResponse } from '@/lib/types';
 
 const { toast } = vi.hoisted(() => ({
@@ -4063,6 +4064,45 @@ describe('SessionDetailPage', () => {
     await screen.findByPlaceholderText('Send a follow-up message...');
     expect(screen.getByTitle('Add files, photos, or a Linear issue')).toBeInTheDocument();
     expect(screen.getByTitle('Add files, photos, or a Linear issue')).not.toBeDisabled();
+  });
+
+  it('uploads an image pasted into the follow-up prompt and shows it in the attachment strip', async () => {
+    const idleSession: Session = {
+      ...mockSessions[0],
+      status: 'idle',
+      completed_at: undefined,
+      current_turn: 1,
+      sandbox_state: 'snapshotted',
+    };
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({ data: idleSession } satisfies SingleResponse<Session>);
+      }),
+    );
+
+    const uploadSpy = vi.spyOn(api.uploads, 'upload').mockResolvedValue({
+      url: 'https://example.com/pasted-follow-up.png',
+      file_name: 'pasted-follow-up.png',
+      content_type: 'image/png',
+    });
+
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+    const textarea = await screen.findByPlaceholderText('Send a follow-up message...');
+    const file = new File(['image-bytes'], 'pasted-follow-up.png', { type: 'image/png' });
+
+    fireEvent.paste(textarea, {
+      clipboardData: {
+        files: [file],
+        items: [{ kind: 'file', type: 'image/png', getAsFile: () => file }],
+        types: ['Files'],
+      },
+    });
+
+    await waitFor(() => {
+      expect(uploadSpy).toHaveBeenCalledWith(file);
+    });
+    expect(await screen.findByRole('button', { name: 'Preview pasted-follow-up.png' })).toBeInTheDocument();
   });
 
   it('shows Codex agent type label', async () => {
