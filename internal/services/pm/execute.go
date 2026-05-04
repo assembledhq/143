@@ -60,12 +60,16 @@ func (s *Service) executePlan(ctx context.Context, orgID uuid.UUID, plan *Plan, 
 			repoID = primaryIssue.RepositoryID
 		}
 
+		// Session.autonomy_level is a per-run knob (full|semi|supervised),
+		// not the org-level automation policy (manual|auto_simple|auto_all).
+		// Default PM-spawned runs to "semi", matching the API session-create
+		// default in internal/api/handlers/sessions.go.
 		run := &models.Session{
 			PrimaryIssueID: &primaryIssueID,
 			OrgID:          orgID,
 			AgentType:      agentType,
 			Status:         "pending",
-			AutonomyLevel:  string(settings.AutonomyLevel),
+			AutonomyLevel:  "semi",
 			TokenMode:      tokenModeFromComplexity(task.Complexity),
 			PMPlanID:       &plan.ID,
 			Title:          &task.Title,
