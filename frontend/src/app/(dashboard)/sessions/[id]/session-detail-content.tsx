@@ -3178,12 +3178,12 @@ export function SessionDetailContent({ id }: { id: string }) {
                     PR closed
                   </Badge>
                 )}
-                <a href={prData.data.github_pr_url} target="_blank" rel="noopener noreferrer">
-                  <Button variant="outline" size="sm" className="h-7 text-xs gap-1.5">
+                <Button asChild variant="outline" size="sm" className="h-7 text-xs gap-1.5">
+                  <a href={prData.data.github_pr_url} target="_blank" rel="noopener noreferrer">
                     <ExternalLink className="h-3 w-3" />
                     View PR
-                  </Button>
-                </a>
+                  </a>
+                </Button>
               </>
             ) : showPRAction && !prErrorNotice ? (
               <DisabledTooltip disabled={prActionDisabled} content={prActionTitle}>
