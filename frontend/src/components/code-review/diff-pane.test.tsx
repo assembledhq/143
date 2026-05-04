@@ -229,4 +229,30 @@ describe("DiffPane", () => {
 
     expect(onActiveFileChange).toHaveBeenCalledWith(1);
   });
+
+  it("replaces the scroll container when resetScrollKey changes so mobile file switches do not keep a stale offset", () => {
+    const { container, rerender } = render(
+      <DiffPane
+        files={[makeDiffFile("a.ts")]}
+        viewMode="unified"
+        resetScrollKey="a.ts"
+      />
+    );
+
+    const firstScrollContainer = container.firstElementChild as HTMLDivElement;
+    firstScrollContainer.scrollTop = 480;
+
+    rerender(
+      <DiffPane
+        files={[makeDiffFile("b.ts")]}
+        viewMode="unified"
+        resetScrollKey="b.ts"
+      />
+    );
+
+    const secondScrollContainer = container.firstElementChild as HTMLDivElement;
+
+    expect(secondScrollContainer).not.toBe(firstScrollContainer);
+    expect(secondScrollContainer.scrollTop).toBe(0);
+  });
 });
