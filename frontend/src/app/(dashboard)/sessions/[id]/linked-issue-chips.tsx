@@ -2,6 +2,35 @@
 
 import type { Session } from "@/lib/types";
 
+function linearSkipReasonDetail(reason: string): string {
+  switch (reason) {
+    case "disabled_by_user":
+      return "This session was created with Linear workflow-state sync disabled.";
+    case "per_team_disabled":
+      return "Workflow state sync is disabled by org or team Linear automation settings.";
+    case "user_recent_edit":
+      return "143 skipped the state move because someone recently edited the issue's workflow state in Linear.";
+    case "linear_github_integration_active":
+      return "Linear's native GitHub integration is already handling PR-driven workflow transitions for this issue.";
+    case "already_in_target_state":
+      return "The issue was already in the target Linear workflow state when 143 evaluated the transition.";
+    case "already_past_target":
+      return "The issue was already past the target workflow state, so 143 refused to move it backwards.";
+    case "workspace_mismatch":
+      return "The linked issue's workspace no longer matches the connected Linear workspace.";
+    case "no_target_state":
+      return "The linked Linear team has no matching target workflow state for this milestone.";
+    case "private_session":
+      return "This session is private, so 143 does not sync Linear state changes.";
+    case "not_primary":
+      return "Only the primary linked Linear issue drives workflow-state sync.";
+    case "debounced":
+      return "143 intentionally debounced a duplicate Linear state transition attempt.";
+    default:
+      return `143 skipped a Linear workflow-state update: ${reason}.`;
+  }
+}
+
 // LinkedIssueChips renders a compact chip per linked issue in the session
 // header. Primary issue first, related issues after, ordered by position.
 //
@@ -71,6 +100,10 @@ export function LinkedIssueChips({ session }: { session: Session }) {
         const chipClasses = isPrimary
           ? "inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium bg-blue-500/10 text-blue-700 dark:text-blue-300 border border-blue-500/30"
           : "inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium bg-muted text-muted-foreground border border-border";
+        const linearSkipDetail =
+          isLinear && isPrimary && link.linear_last_skipped_reason
+            ? linearSkipReasonDetail(link.linear_last_skipped_reason)
+            : "";
 
         if (isLinear && link.external_id) {
           // Prefer the workspace-qualified URL when we cached the slug;
@@ -90,16 +123,26 @@ export function LinkedIssueChips({ session }: { session: Session }) {
           // readers to read the title instead of the identifier on each
           // chip in a long list.
           return (
-            <a
-              key={link.id}
-              href={url}
-              target="_blank"
-              rel="noopener noreferrer"
-              className={chipClasses}
-              title={tooltip}
-            >
-              {ident}
-            </a>
+            <div key={link.id} className="inline-flex items-center gap-1">
+              <a
+                href={url}
+                target="_blank"
+                rel="noopener noreferrer"
+                className={chipClasses}
+                title={tooltip}
+              >
+                {ident}
+              </a>
+              {linearSkipDetail && (
+                <span
+                  className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium bg-amber-500/10 text-amber-700 dark:text-amber-300 border border-amber-500/30"
+                  title={linearSkipDetail}
+                  aria-label={linearSkipDetail}
+                >
+                  Linear sync skipped
+                </span>
+              )}
+            </div>
           );
         }
 
@@ -107,14 +150,24 @@ export function LinkedIssueChips({ session }: { session: Session }) {
         // non-link/non-button elements, so mirror the tooltip into
         // aria-label so SR users get the issue title + role context.
         return (
-          <span
-            key={link.id}
-            className={chipClasses}
-            title={tooltip}
-            aria-label={tooltip}
-          >
-            {ident}
-          </span>
+          <div key={link.id} className="inline-flex items-center gap-1">
+            <span
+              className={chipClasses}
+              title={tooltip}
+              aria-label={tooltip}
+            >
+              {ident}
+            </span>
+            {linearSkipDetail && (
+              <span
+                className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium bg-amber-500/10 text-amber-700 dark:text-amber-300 border border-amber-500/30"
+                title={linearSkipDetail}
+                aria-label={linearSkipDetail}
+              >
+                Linear sync skipped
+              </span>
+            )}
+          </div>
         );
       })}
     </div>
