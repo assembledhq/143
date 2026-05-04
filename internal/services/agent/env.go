@@ -146,8 +146,15 @@ type CodingCredentialShedder interface {
 // service. Unified subscription resolution chooses a concrete credential id;
 // this interface lets auth.json injection refresh that exact row before
 // writing an access token into the sandbox.
+//
+// The scope must match the credential's owner: personal subscriptions live
+// in coding_credentials with user_id set, and the underlying lookup filters
+// on (org_id, user_id). Passing org scope for a personal credential would
+// mis-route the lookup and surface as "credential not found", silently
+// dropping personal subscriptions back to the org fallback after their
+// first 8h of token life.
 type CodexAuthRefresher interface {
-	RefreshTokenByID(ctx context.Context, orgID uuid.UUID, credID uuid.UUID) (*models.OpenAIChatGPTConfig, error)
+	RefreshTokenByID(ctx context.Context, scope models.Scope, credID uuid.UUID) (*models.OpenAIChatGPTConfig, error)
 }
 
 // CodingCredentialMultiPicker is implemented by the real unified store for
@@ -901,7 +908,9 @@ func (e *AgentEnv) InjectCodexAuthForUser(ctx context.Context, orgID uuid.UUID, 
 		if picked, ok := e.lookupRecentCredential(orgID, userID, models.ProviderOpenAI); ok {
 			if chatGPT, ok := codexChatGPTConfigFromPicked(picked); ok {
 				if picked.Provider == models.ProviderOpenAISubscription {
-					refreshed, err := e.refreshCodexSubscriptionIfNeeded(ctx, orgID, picked.ID, chatGPT)
+					// Refresh against the picked row's actual scope —
+					// personal credentials carry UserID, org rows do not.
+					refreshed, err := e.refreshCodexSubscriptionIfNeeded(ctx, models.Scope{OrgID: orgID, UserID: picked.UserID}, picked.ID, chatGPT)
 					if err != nil {
 						return false, err
 					}
@@ -918,7 +927,7 @@ func (e *AgentEnv) InjectCodexAuthForUser(ctx context.Context, orgID uuid.UUID, 
 		if handled {
 			if chatGPT, ok := cfg.(models.OpenAIChatGPTConfig); ok {
 				if picked != nil && picked.Provider == models.ProviderOpenAISubscription {
-					refreshed, err := e.refreshCodexSubscriptionIfNeeded(ctx, orgID, picked.ID, chatGPT)
+					refreshed, err := e.refreshCodexSubscriptionIfNeeded(ctx, models.Scope{OrgID: orgID, UserID: picked.UserID}, picked.ID, chatGPT)
 					if err != nil {
 						return false, err
 					}
@@ -959,7 +968,7 @@ func codexChatGPTConfigFromPicked(picked models.DecryptedCodingCredential) (mode
 	return chatGPT, ok
 }
 
-func (e *AgentEnv) refreshCodexSubscriptionIfNeeded(ctx context.Context, orgID uuid.UUID, credID uuid.UUID, cfg models.OpenAIChatGPTConfig) (*models.OpenAIChatGPTConfig, error) {
+func (e *AgentEnv) refreshCodexSubscriptionIfNeeded(ctx context.Context, scope models.Scope, credID uuid.UUID, cfg models.OpenAIChatGPTConfig) (*models.OpenAIChatGPTConfig, error) {
 	if !cfg.NeedsRefresh(codexSubscriptionRefreshWindow) {
 		return &cfg, nil
 	}
@@ -975,7 +984,7 @@ func (e *AgentEnv) refreshCodexSubscriptionIfNeeded(ctx context.Context, orgID u
 		return nil, fmt.Errorf("codex subscription %s is expired and no refresh provider is configured", credID)
 	}
 
-	refreshed, err := refresher.RefreshTokenByID(ctx, orgID, credID)
+	refreshed, err := refresher.RefreshTokenByID(ctx, scope, credID)
 	if err != nil {
 		if !cfg.IsExpired() {
 			e.logger.Warn().

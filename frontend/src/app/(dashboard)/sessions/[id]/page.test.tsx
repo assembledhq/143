@@ -3289,20 +3289,40 @@ describe('SessionDetailPage', () => {
       failure_explanation: 'Codex token expired',
       agent_type: 'codex',
     };
+    let statusScope: string | null = null;
+    let initiateBody: Record<string, unknown> | null = null;
 
     server.use(
       http.get('/api/v1/sessions/:id', () => {
         return HttpResponse.json({ data: codexAuthSession } satisfies SingleResponse<Session>);
       }),
-      http.get('/api/v1/settings/codex-auth/status', () => {
+      http.get('/api/v1/settings/codex-auth/status', ({ request }) => {
+        statusScope = new URL(request.url).searchParams.get('scope');
         return HttpResponse.json({ data: { status: 'none' } });
+      }),
+      http.post('/api/v1/settings/codex-auth/initiate', async ({ request }) => {
+        initiateBody = await request.json() as Record<string, unknown>;
+        return HttpResponse.json({
+          data: {
+            user_code: 'TEST-CODE',
+            verification_uri: 'https://auth.openai.com/codex/device',
+            expires_in: 900,
+          },
+        });
       }),
     );
 
     renderWithProviders(<SessionDetailContent id="session-98765432-abcd-ef01" />);
     await screen.findByText('Failure details');
     expect(screen.getByText('codex_auth_expired')).toBeInTheDocument();
-    expect(screen.getByText('Re-authenticate with ChatGPT')).toBeInTheDocument();
+    await waitFor(() => {
+      expect(statusScope).toBe('personal');
+    });
+    const user = userEvent.setup();
+    await user.click(screen.getByText('Re-authenticate with ChatGPT'));
+    await waitFor(() => {
+      expect(initiateBody).toMatchObject({ scope: 'personal' });
+    });
     // Should NOT show failure_next_steps for codex auth failures
     expect(screen.queryByText('Next steps')).not.toBeInTheDocument();
   });
@@ -3319,7 +3339,8 @@ describe('SessionDetailPage', () => {
       http.get('/api/v1/sessions/:id', () => {
         return HttpResponse.json({ data: codexAuthSession } satisfies SingleResponse<Session>);
       }),
-      http.get('/api/v1/settings/codex-auth/status', () => {
+      http.get('/api/v1/settings/codex-auth/status', ({ request }) => {
+        expect(new URL(request.url).searchParams.get('scope')).toBe('personal');
         return HttpResponse.json({ data: { status: 'completed' } });
       }),
     );

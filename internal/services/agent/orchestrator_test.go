@@ -108,7 +108,7 @@ func (m *mockCodexAuthProvider) GetValidToken(ctx context.Context, orgID uuid.UU
 	return m.cfg, nil
 }
 
-func (m *mockCodexAuthProvider) RefreshTokenByID(ctx context.Context, orgID uuid.UUID, credID uuid.UUID) (*models.OpenAIChatGPTConfig, error) {
+func (m *mockCodexAuthProvider) RefreshTokenByID(_ context.Context, _ models.Scope, credID uuid.UUID) (*models.OpenAIChatGPTConfig, error) {
 	m.refreshIDs = append(m.refreshIDs, credID)
 	if m.refreshErr != nil {
 		return nil, m.refreshErr

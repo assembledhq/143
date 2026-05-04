@@ -202,11 +202,12 @@ func (m *envOrgStore) GetByID(_ context.Context, _ uuid.UUID) (models.Organizati
 }
 
 type envCodexAuthProvider struct {
-	token        *models.OpenAIChatGPTConfig
-	err          error
-	refreshToken *models.OpenAIChatGPTConfig
-	refreshErr   error
-	refreshIDs   []uuid.UUID
+	token         *models.OpenAIChatGPTConfig
+	err           error
+	refreshToken  *models.OpenAIChatGPTConfig
+	refreshErr    error
+	refreshIDs    []uuid.UUID
+	refreshScopes []models.Scope
 }
 
 func (m envCodexAuthProvider) GetValidToken(_ context.Context, _ uuid.UUID) (*models.OpenAIChatGPTConfig, error) {
@@ -216,8 +217,9 @@ func (m envCodexAuthProvider) GetValidToken(_ context.Context, _ uuid.UUID) (*mo
 	return m.token, nil
 }
 
-func (m *envCodexAuthProvider) RefreshTokenByID(_ context.Context, _ uuid.UUID, credID uuid.UUID) (*models.OpenAIChatGPTConfig, error) {
+func (m *envCodexAuthProvider) RefreshTokenByID(_ context.Context, scope models.Scope, credID uuid.UUID) (*models.OpenAIChatGPTConfig, error) {
 	m.refreshIDs = append(m.refreshIDs, credID)
+	m.refreshScopes = append(m.refreshScopes, scope)
 	if m.refreshErr != nil {
 		return nil, m.refreshErr
 	}
@@ -1421,6 +1423,16 @@ func TestAgentEnvInjectCodexAuthForUser_RefreshesUnifiedSubscriptionByID(t *test
 	require.NoError(t, err, "InjectCodexAuthForUser should refresh an expired unified subscription before writing auth.json")
 	require.True(t, injected, "InjectCodexAuthForUser should inject the refreshed subscription")
 	require.Equal(t, []uuid.UUID{credID}, codexAuth.refreshIDs, "InjectCodexAuthForUser should refresh the selected credential id")
+
+	// The refresher must receive the picked credential's actual scope so
+	// the underlying coding_credentials lookup matches on (org_id, user_id).
+	// Passing org scope for a personal credential would silently miss the
+	// row and surface as "credential not found" once the access token
+	// expires (~8h after issuance).
+	require.Len(t, codexAuth.refreshScopes, 1, "refresh should be called exactly once")
+	require.Equal(t, orgID, codexAuth.refreshScopes[0].OrgID, "scope should carry the request org id")
+	require.NotNil(t, codexAuth.refreshScopes[0].UserID, "personal subscription must refresh under personal scope")
+	require.Equal(t, userID, *codexAuth.refreshScopes[0].UserID, "scope must carry the picked credential's user id")
 
 	var payload map[string]any
 	require.NoError(t, json.Unmarshal(provider.writes["/home/test/.codex/auth.json"], &payload), "auth.json should be valid JSON")

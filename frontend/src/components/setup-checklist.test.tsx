@@ -1,5 +1,5 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
-import { renderWithProviders, screen, waitFor } from "@/test/test-utils";
+import { renderWithProviders, screen, userEvent, waitFor } from "@/test/test-utils";
 import { SetupChecklist } from "./setup-checklist";
 
 const mocks = vi.hoisted(() => ({
@@ -15,6 +15,12 @@ const mocks = vi.hoisted(() => ({
   codexAuthMock: vi.fn().mockResolvedValue({ data: { status: "pending" } }),
   integrationsListMock: vi.fn().mockResolvedValue({ data: [] }),
   repositoriesListMock: vi.fn().mockResolvedValue({ data: [] }),
+  userCredentialsListResolvedMock: vi.fn().mockResolvedValue({ data: [] }),
+  codingCredentialsListMock: vi.fn().mockResolvedValue({ data: [] }),
+  codexModalMock: vi.fn((props: unknown) => {
+    void props;
+    return <div data-testid="codex-device-code-modal" />;
+  }),
   sourceControlCardMock: vi.fn((props: unknown) => {
     void props;
     return <div data-testid="source-control-card" />;
@@ -30,6 +36,12 @@ vi.mock("@/lib/api", () => ({
     codexAuth: {
       status: mocks.codexAuthMock,
       start: vi.fn().mockResolvedValue({ data: {} }),
+    },
+    userCredentials: {
+      listResolved: mocks.userCredentialsListResolvedMock,
+    },
+    codingCredentials: {
+      list: mocks.codingCredentialsListMock,
     },
     integrations: {
       list: mocks.integrationsListMock,
@@ -55,7 +67,7 @@ vi.mock("@/hooks/use-github-repo-sync", () => ({
 }));
 
 vi.mock("@/components/codex-device-code-modal", () => ({
-  CodexDeviceCodeModal: () => null,
+  CodexDeviceCodeModal: (props: unknown) => mocks.codexModalMock(props),
 }));
 
 vi.mock("@/components/no-repos-warning", () => ({
@@ -97,6 +109,22 @@ describe("SetupChecklist", () => {
     await waitFor(() => {
       expect(screen.getByText("Codex")).toBeInTheDocument();
     });
+  });
+
+  it("checks and opens Codex auth in personal scope", async () => {
+    const user = userEvent.setup();
+
+    renderWithProviders(<SetupChecklist />);
+
+    await waitFor(() => {
+      expect(mocks.codexAuthMock).toHaveBeenCalledWith(undefined, "personal");
+    });
+
+    await user.click(await screen.findByRole("button", { name: "Sign in with ChatGPT" }));
+
+    expect(mocks.codexModalMock).toHaveBeenLastCalledWith(
+      expect.objectContaining({ scope: "personal" }),
+    );
   });
 
   it("treats oauth-only github integrations as connected", async () => {
