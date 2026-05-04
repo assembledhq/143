@@ -97,7 +97,7 @@ func seedSession(t *testing.T, pool *pgxpool.Pool, orgID uuid.UUID, opts session
 		OrgID:            orgID,
 		AgentType:        opts.AgentType,
 		Status:           opts.Status,
-		AutonomyLevel:    "semi",
+		AutonomyLevel:    string(models.DefaultSessionAutonomy),
 		TokenMode:        "low",
 		Origin:           opts.Origin,
 		InteractionMode:  opts.Interaction,

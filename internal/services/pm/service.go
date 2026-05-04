@@ -325,7 +325,7 @@ func (s *Service) Analyze(ctx context.Context, orgID uuid.UUID, trigger models.P
 		Status:        "running",
 		Title:         strPtr("PM Analysis"),
 		RepositoryID:  &repo.ID,
-		AutonomyLevel: "full",
+		AutonomyLevel: string(models.SessionAutonomyFull),
 		TokenMode:     "high",
 	}
 	if err := s.sessions.Create(ctx, pmSession); err != nil {
