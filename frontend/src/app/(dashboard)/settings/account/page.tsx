@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useRef, useState } from "react";
+import { useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Plus, Trash2 } from "lucide-react";
 import { notify as toast } from "@/lib/notify";
@@ -73,30 +73,6 @@ function statusLabel(status: CodingAuthStatus | string | undefined) {
   }
 }
 
-// effectiveResolutionLine renders the ordered list as a one-line "Personal #1
-// → Personal #2 → Org #1" string. Mirrors the design doc's "Effective
-// resolution for you" hint and is the single most-asked support question, so
-// surfacing it ambient on the page eliminates the round-trip.
-//
-// `rows` comes from /api/v1/coding-credentials?scope=resolved, which is
-// backed by ListResolvable (status='active' rows only). Counting is
-// therefore safe: every row counted is one the resolver would actually walk.
-function effectiveResolutionLine(rows: CodingCredentialSummary[]): string {
-  const personalCount = rows.filter((r) => r.scope === "personal").length;
-  const orgCount = rows.filter((r) => r.scope === "org").length;
-  const segments: string[] = [];
-  for (let i = 0; i < personalCount; i++) {
-    segments.push(`Personal #${i + 1}`);
-  }
-  for (let i = 0; i < orgCount; i++) {
-    segments.push(`Org #${i + 1}`);
-  }
-  if (segments.length === 0) {
-    return "No credentials configured.";
-  }
-  return segments.join(" → ");
-}
-
 export default function AccountPage() {
   const { user } = useAuth();
   const queryClient = useQueryClient();
@@ -118,20 +94,9 @@ export default function AccountPage() {
     queryKey: ["coding-credentials", "org"],
     queryFn: () => api.codingCredentials.list("org"),
   });
-  // Resolved — the merged ordered list (personal-then-org) the runtime uses.
-  // Drives the "Effective resolution" line at the bottom of the page.
-  const { data: resolvedResp } = useQuery<ListResponse<CodingCredentialSummary>>({
-    queryKey: ["coding-credentials", "resolved"],
-    queryFn: () => api.codingCredentials.list("resolved"),
-  });
 
   const personalRows = personalResp?.data ?? [];
   const orgRows = orgResp?.data ?? [];
-
-  const resolutionLine = useMemo(
-    () => effectiveResolutionLine(resolvedResp?.data ?? []),
-    [resolvedResp?.data],
-  );
 
   const storedReasoningDefaults = getCodingAgentReasoningDefaultsFromSettings(user?.settings);
   const effectiveReasoningDefaults = pendingReasoningDefaults ?? storedReasoningDefaults;
@@ -268,7 +233,12 @@ export default function AccountPage() {
                       ) : null}
                     </TableCell>
                     <TableCell>{authTypeLabel(row.auth_type)}</TableCell>
-                    <TableCell>{row.usage_note ?? row.label}</TableCell>
+                    <TableCell>
+                      <div>{row.label}</div>
+                      {row.usage_note && row.usage_note !== row.label ? (
+                        <div className="text-xs text-muted-foreground">{row.usage_note}</div>
+                      ) : null}
+                    </TableCell>
                     <TableCell>
                       <Badge variant="outline">{statusLabel(row.status)}</Badge>
                     </TableCell>
@@ -315,7 +285,12 @@ export default function AccountPage() {
                     <TableCell className="text-muted-foreground">{idx + 1}</TableCell>
                     <TableCell>{agentLabel(row.agent)}</TableCell>
                     <TableCell>{authTypeLabel(row.auth_type)}</TableCell>
-                    <TableCell>{row.usage_note ?? row.label}</TableCell>
+                    <TableCell>
+                      <div>{row.label}</div>
+                      {row.usage_note && row.usage_note !== row.label ? (
+                        <div className="text-xs text-muted-foreground">{row.usage_note}</div>
+                      ) : null}
+                    </TableCell>
                     <TableCell>
                       <Badge variant="outline">{statusLabel(row.status)}</Badge>
                     </TableCell>
@@ -329,10 +304,6 @@ export default function AccountPage() {
                 )}
               </TableBody>
             </Table>
-            <div className="mt-4 rounded-md border border-dashed border-muted bg-muted/30 px-4 py-3 text-sm text-muted-foreground">
-              <span className="font-medium text-foreground">Effective resolution for you:</span>{" "}
-              {resolutionLine}
-            </div>
           </CardContent>
         </Card>
 
