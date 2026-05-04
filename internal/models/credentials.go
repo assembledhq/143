@@ -771,16 +771,15 @@ func (t CodingAuthType) Validate() error {
 type CodingAuthStatus string
 
 const (
-	CodingAuthStatusHealthy       CodingAuthStatus = "healthy"
-	CodingAuthStatusRateLimited   CodingAuthStatus = "rate_limited"
-	CodingAuthStatusNeedsReauth   CodingAuthStatus = "needs_reauth"
-	CodingAuthStatusInvalid       CodingAuthStatus = "invalid"
-	CodingAuthStatusNeverVerified CodingAuthStatus = "never_verified"
+	CodingAuthStatusHealthy     CodingAuthStatus = "healthy"
+	CodingAuthStatusRateLimited CodingAuthStatus = "rate_limited"
+	CodingAuthStatusNeedsReauth CodingAuthStatus = "needs_reauth"
+	CodingAuthStatusInvalid     CodingAuthStatus = "invalid"
 )
 
 func (s CodingAuthStatus) Validate() error {
 	switch s {
-	case CodingAuthStatusHealthy, CodingAuthStatusRateLimited, CodingAuthStatusNeedsReauth, CodingAuthStatusInvalid, CodingAuthStatusNeverVerified:
+	case CodingAuthStatusHealthy, CodingAuthStatusRateLimited, CodingAuthStatusNeedsReauth, CodingAuthStatusInvalid:
 		return nil
 	default:
 		return fmt.Errorf("unknown coding auth status: %s", s)

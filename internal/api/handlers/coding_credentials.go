@@ -504,7 +504,7 @@ func markDefaults(rows []models.CodingCredentialSummary) {
 }
 
 func isRunnableCodingStatus(s models.CodingAuthStatus) bool {
-	return s == models.CodingAuthStatusHealthy || s == models.CodingAuthStatusNeverVerified
+	return s == models.CodingAuthStatusHealthy
 }
 
 // isAllowedHandlerStatus enumerates the status values the API surface accepts
@@ -586,9 +586,6 @@ func codingStatusFor(cred models.DecryptedCodingCredential) models.CodingAuthSta
 	case models.CodingCredentialStatusPendingAuth:
 		return models.CodingAuthStatusNeedsReauth
 	case models.CodingCredentialStatusActive:
-		if cred.LastVerifiedAt == nil {
-			return models.CodingAuthStatusNeverVerified
-		}
 		return models.CodingAuthStatusHealthy
 	default:
 		return models.CodingAuthStatusNeedsReauth
