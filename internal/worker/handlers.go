@@ -2753,6 +2753,13 @@ func newPrepareLinearPrimaryHandler(svc *linear.Service, logger zerolog.Logger) 
 		})
 		if err := svc.PrepareLinearPrimaryRefs(ctx, orgID, sessionID, refs, userID); err != nil {
 			logger.Warn().Err(err).Str("session_id", sessionID.String()).Msg("prepare_linear_primary failed")
+			if errors.Is(err, linear.ErrIntegrationNotFound) {
+				// Integration was disconnected/removed between enqueue and
+				// pickup. Retrying for 8 minutes won't make the row appear;
+				// dead-letter immediately so the prepare-state hook can
+				// unblock run_agent.
+				return &FatalError{Err: err}
+			}
 			if errors.Is(err, linear.ErrUnauthorized) {
 				// Flip the integration to errored on the very first 401 so the
 				// settings UI shows a Reconnect CTA without waiting for retry
@@ -2761,6 +2768,10 @@ func newPrepareLinearPrimaryHandler(svc *linear.Service, logger zerolog.Logger) 
 				// exhaustion takes minutes, but the user is staring at the
 				// session-detail page waiting for context to load.
 				svc.MarkIntegrationUnauthorized(ctx, orgID)
+				// Token won't fix itself in 8 minutes — dead-letter so we
+				// don't fire the dead-letter hook minutes after the user
+				// already saw "Reconnect" in settings.
+				return &FatalError{Err: err}
 			}
 			return &RetryableError{Err: err}
 		}
@@ -2810,6 +2821,11 @@ func newLinkLinearIssueHandler(svc *linear.Service, logger zerolog.Logger) JobHa
 		}
 		if err := svc.LinkRelatedLinearRefs(ctx, orgID, sessionID, refs, userID); err != nil {
 			logger.Warn().Err(err).Str("session_id", sessionID.String()).Msg("link_linear_issue failed")
+			// linkRelatedRefs (the inner loop) swallows per-ref ResolvePrimary
+			// errors with Warn().continue, so ErrIntegrationNotFound /
+			// ErrUnauthorized never reach this caller. Any error here is
+			// pre-loop wiring (e.g. missing service deps) — let the worker
+			// retry under the default backoff.
 			return &RetryableError{Err: err}
 		}
 		return nil
@@ -2860,6 +2876,9 @@ func newLinkLinearIssueMidSessionHandler(svc *linear.Service, logger zerolog.Log
 		}
 		if err := svc.LinkMidSessionRefs(ctx, orgID, sessionID, refs, userID); err != nil {
 			logger.Warn().Err(err).Str("session_id", sessionID.String()).Msg("link_linear_issue_mid_session failed")
+			// LinkMidSessionRefs runs through linkRelatedRefs which swallows
+			// per-ref errors; reaching this branch means a pre-loop wiring
+			// failure that's worth retrying.
 			return &RetryableError{Err: err}
 		}
 		return nil
@@ -2972,23 +2991,21 @@ func newLinearMilestoneHandler(stores *Stores, svc *linear.Service, logger zerol
 		}
 		if err := svc.HandleStateTransition(ctx, in); err != nil {
 			logger.Warn().Err(err).Str("session_id", sessionID.String()).Msg("HandleStateTransition failed")
-			// State transitions are recorded in the event log even when
-			// they skip; rate limits are the one case we *do* want to
-			// retry, otherwise the audit trail says "skipped" forever.
 			if errors.Is(err, linear.ErrUnauthorized) {
 				svc.MarkIntegrationUnauthorized(ctx, orgID)
 			}
-			if retry := mapLinearWriteErrorToRetry(err); retry != nil {
-				return retry
-			}
+			return mapLinearWriteErrorToRetry(err)
 		}
 		return nil
 	}
 }
 
-// mapLinearWriteErrorToRetry returns a RetryableError with a Retry-After
-// hint when the underlying Linear API call hit a 429 rate limit. All other
-// errors return as-is (worker will use default exponential backoff).
+// mapLinearWriteErrorToRetry classifies a Linear write error into the
+// FatalError / RetryableError shape the worker expects. 429s carry a
+// Retry-After hint; integration-not-found and unauthorized are fatal because
+// retrying for the 8-minute max duration won't bring the row back or
+// re-grant the token; everything else falls through to default exponential
+// backoff.
 //
 // On ErrUnauthorized the caller is responsible for invoking
 // svc.MarkIntegrationUnauthorized — done at each call site rather than here
@@ -3002,11 +3019,8 @@ func mapLinearWriteErrorToRetry(err error) error {
 		}
 		return &RetryableError{Err: err, RetryAfter: &delay}
 	}
-	if errors.Is(err, linear.ErrUnauthorized) {
-		// Token expired/revoked — let the retry happen at default backoff
-		// while the user reconnects. The status flip happens at the call
-		// site; here we only classify the retry shape.
-		return &RetryableError{Err: err}
+	if errors.Is(err, linear.ErrIntegrationNotFound) || errors.Is(err, linear.ErrUnauthorized) {
+		return &FatalError{Err: err}
 	}
 	return &RetryableError{Err: err}
 }
@@ -3032,8 +3046,19 @@ func newRefreshLinearTeamKeysHandler(svc *linear.Service, logger zerolog.Logger)
 		}
 		if err := svc.RefreshTeamKeys(ctx, orgID); err != nil {
 			logger.Warn().Err(err).Str("org_id", orgID.String()).Msg("refresh_linear_team_keys failed")
+			if errors.Is(err, linear.ErrIntegrationNotFound) {
+				// Org disconnected Linear after the 24h cron tick was
+				// scheduled. Retrying for 8 minutes won't bring the row
+				// back; dead-letter so the cron can re-arm cleanly the
+				// next time an install enqueues this job.
+				return &FatalError{Err: err}
+			}
 			if errors.Is(err, linear.ErrUnauthorized) {
 				svc.MarkIntegrationUnauthorized(ctx, orgID)
+				// Token won't recover in 8 minutes. The MarkIntegrationUnauthorized
+				// call above already surfaced the Reconnect CTA in settings;
+				// dead-letter immediately rather than burning retries.
+				return &FatalError{Err: err}
 			}
 			return &RetryableError{Err: err}
 		}

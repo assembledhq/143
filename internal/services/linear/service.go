@@ -506,12 +506,23 @@ func (s *Service) Enabled(ctx context.Context, orgID uuid.UUID) bool {
 	return integration.Status == "active"
 }
 
+// ErrIntegrationNotFound is returned by integrationFor when the org has no
+// linear integration row at all. Workers should treat this as fatal/skip
+// rather than a retryable error: the row will not appear by retrying, and
+// the typical cause is an integration that was disconnected after the job
+// was enqueued. Bare `errors.Is(err, ErrIntegrationNotFound)` works through
+// the wrap added by integrationFor.
+var ErrIntegrationNotFound = errors.New("linear integration not found")
+
 // integrationFor returns the integration row + linear access token for an
 // org. Both must be present for any read/write to Linear; if either is
 // missing, callers should treat it as a silent no-op.
 func (s *Service) integrationFor(ctx context.Context, orgID uuid.UUID) (models.Integration, string, error) {
 	integration, err := s.integrations.GetByOrgAndProvider(ctx, orgID, "linear")
 	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return models.Integration{}, "", fmt.Errorf("lookup linear integration: %w", ErrIntegrationNotFound)
+		}
 		return models.Integration{}, "", fmt.Errorf("lookup linear integration: %w", err)
 	}
 	cred, err := s.credentials.Get(ctx, orgID, models.ProviderLinear)
