@@ -28,6 +28,7 @@ import {
   MessageSquare,
   Paperclip,
   Pencil,
+  Plus,
 } from "lucide-react";
 import {
   DropdownMenu,
