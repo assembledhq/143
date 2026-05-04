@@ -19,13 +19,20 @@ export function ClaudeCodeAuthModal({
   onClose,
   onConnected,
   label,
+  scope,
 }: {
   onClose: () => void;
   onConnected?: () => void;
   label: string;
+  // scope routes the pending-auth row into either the org or the caller's
+  // personal credential stack. Defaults to org for backwards compatibility
+  // with the admin /settings/agent flow.
+  scope?: 'org' | 'personal';
 }) {
-  // Capture the label at mount time so it stays stable throughout the auth flow.
+  // Capture the label + scope at mount time so they stay stable throughout
+  // the auth flow.
   const [stableLabel] = useState(() => label);
+  const [stableScope] = useState(() => scope);
   const connectedTimerRef = useRef<ReturnType<typeof setTimeout>>(null);
   const [initiated, setInitiated] = useState<ClaudeCodeInitiateResponse | null>(null);
   const [status, setStatus] = useState<
@@ -39,7 +46,7 @@ export function ClaudeCodeAuthModal({
       setStatus("initiating");
       setError("");
       setCode("");
-      const resp = await api.claudeCodeAuth.initiate(stableLabel);
+      const resp = await api.claudeCodeAuth.initiate(stableLabel, stableScope);
       setInitiated(resp.data);
       setStatus("awaiting_paste");
     } catch (err) {
@@ -49,7 +56,7 @@ export function ClaudeCodeAuthModal({
       setError(message);
       setStatus("error");
     }
-  }, [stableLabel]);
+  }, [stableLabel, stableScope]);
 
   useEffect(() => {
     const id = setTimeout(() => {
@@ -84,7 +91,7 @@ export function ClaudeCodeAuthModal({
     try {
       setStatus("exchanging");
       setError("");
-      await api.claudeCodeAuth.complete(stableLabel, trimmed);
+      await api.claudeCodeAuth.complete(stableLabel, trimmed, stableScope);
       setStatus("completed");
       connectedTimerRef.current = setTimeout(() => {
         onConnected?.();
@@ -98,7 +105,7 @@ export function ClaudeCodeAuthModal({
       setError(message);
       setStatus("awaiting_paste");
     }
-  }, [code, stableLabel, onConnected]);
+  }, [code, stableLabel, stableScope, onConnected]);
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">

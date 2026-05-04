@@ -195,8 +195,13 @@ func main() {
 	}); err != nil {
 		logger.Fatal().Err(err).Msg("failed to initialize coding-credentials mirror metrics")
 	}
-	codexAuthSvc := codexauth.NewService(credentialStore, logger)
-	claudeCodeAuthSvc := claudecodeauth.NewService(credentialStore, logger)
+	// Both OAuth services depend on a scope-aware credential surface. The
+	// adapter routes org-scope traffic to the legacy OrgCredentialStore
+	// (mirrored to coding_credentials) and personal-scope traffic to the
+	// unified CodingCredentialStore directly — see internal/db/scoped_credential_store.go.
+	scopedCredentialStore := db.NewScopedCredentialStore(credentialStore, codingCredentialStore)
+	codexAuthSvc := codexauth.NewService(scopedCredentialStore, logger)
+	claudeCodeAuthSvc := claudecodeauth.NewService(scopedCredentialStore, logger)
 
 	// Platform LLM client for internal features (titles, PR descriptions, project
 	// generation, validation, prioritization). Uses the cheap PLATFORM_LLM_MODEL.

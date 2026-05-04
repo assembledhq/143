@@ -568,8 +568,23 @@ export const api = {
     syncGitHub: () => post<{ data: { repos_synced: number; errors: number } }>('/api/v1/integrations/github/sync'),
   },
   codexAuth: {
-    initiate: (label?: string) => post<import('./types').SingleResponse<import('./types').CodexDeviceAuth>>('/api/v1/settings/codex-auth/initiate', { label: label ?? '' }),
-    status: (label?: string) => get<import('./types').SingleResponse<import('./types').CodexAuthStatus>>(`/api/v1/settings/codex-auth/status${label ? `?label=${encodeURIComponent(label)}` : ''}`),
+    // `scope` defaults to "org" on the server; pass "personal" to write the
+    // pending-auth row against the caller's user_id in coding_credentials so
+    // the resulting subscription appears in the user's personal stack.
+    initiate: (label?: string, scope?: 'org' | 'personal') =>
+      post<import('./types').SingleResponse<import('./types').CodexDeviceAuth>>(
+        '/api/v1/settings/codex-auth/initiate',
+        { label: label ?? '', ...(scope ? { scope } : {}) },
+      ),
+    status: (label?: string, scope?: 'org' | 'personal') => {
+      const params = new URLSearchParams();
+      if (label) params.set('label', label);
+      if (scope) params.set('scope', scope);
+      const qs = params.toString();
+      return get<import('./types').SingleResponse<import('./types').CodexAuthStatus>>(
+        `/api/v1/settings/codex-auth/status${qs ? `?${qs}` : ''}`,
+      );
+    },
     listSubscriptions: () => get<import('./types').ListResponse<import('./types').CodexSubscription>>('/api/v1/settings/codex-auth/subscriptions'),
     removeSubscription: (id: string) => del(`/api/v1/settings/codex-auth/subscriptions/${id}`),
     // Disconnects every ChatGPT subscription for the org. Used by the
@@ -580,9 +595,19 @@ export const api = {
   claudeCodeAuth: {
     // Starts a PKCE auth flow. The response's authorize_url is opened in the
     // user's browser; after logging in the user pastes `<code>#<state>` back
-    // and the caller invokes complete() with it.
-    initiate: (label: string) => post<import('./types').SingleResponse<import('./types').ClaudeCodeInitiateResponse>>('/api/v1/settings/claude-code-auth/initiate', { label }),
-    complete: (label: string, code: string) => post<import('./types').SingleResponse<import('./types').ClaudeCodeCompleteResponse>>('/api/v1/settings/claude-code-auth/complete', { label, code }),
+    // and the caller invokes complete() with it. `scope` defaults to "org"
+    // on the server; "personal" routes the pending row into the caller's
+    // own user-scoped credential stack.
+    initiate: (label: string, scope?: 'org' | 'personal') =>
+      post<import('./types').SingleResponse<import('./types').ClaudeCodeInitiateResponse>>(
+        '/api/v1/settings/claude-code-auth/initiate',
+        { label, ...(scope ? { scope } : {}) },
+      ),
+    complete: (label: string, code: string, scope?: 'org' | 'personal') =>
+      post<import('./types').SingleResponse<import('./types').ClaudeCodeCompleteResponse>>(
+        '/api/v1/settings/claude-code-auth/complete',
+        { label, code, ...(scope ? { scope } : {}) },
+      ),
     listSubscriptions: () => get<import('./types').ListResponse<import('./types').ClaudeCodeSubscription>>('/api/v1/settings/claude-code-auth/subscriptions'),
     removeSubscription: (id: string) => del(`/api/v1/settings/claude-code-auth/subscriptions/${id}`),
     // Disconnects every Claude subscription for the org while leaving any

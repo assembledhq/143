@@ -399,8 +399,8 @@ function OverviewTab({ session, members }: { session: Session; members: User[] }
   const isCodexAuthFailure = session.failure_category === FAILURE_CATEGORY_CODEX_AUTH;
 
   const { data: codexAuthResponse } = useQuery<SingleResponse<CodexAuthStatus>>({
-    queryKey: ["codex-auth-status"],
-    queryFn: () => api.codexAuth.status(),
+    queryKey: ["codex-auth-status", "personal"],
+    queryFn: () => api.codexAuth.status(undefined, "personal"),
     enabled: isCodexAuthFailure,
   });
   const isCodexAuthenticated = codexAuthResponse?.data?.status === "completed";
@@ -504,6 +504,7 @@ function OverviewTab({ session, members }: { session: Session; members: User[] }
       )}
       {showDeviceCodeModal && (
         <CodexDeviceCodeModal
+          scope="personal"
           onClose={() => setShowDeviceCodeModal(false)}
           onConnected={() => {
             setShowDeviceCodeModal(false);

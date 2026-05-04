@@ -12,6 +12,8 @@ import {
 } from "@/lib/model-constants";
 import type { CodexAuthStatus, CodingAuth, ResolvedCredential, UserCredentialSummary } from "@/lib/types";
 
+type CodingAuthAvailability = Pick<CodingAuth, "agent" | "status">;
+
 export interface AgentEnvVar {
   name: string;
   label: string;
@@ -167,7 +169,7 @@ export function isAgentAvailable(
   agentType: string,
   resolvedCredentials: readonly ResolvedCredential[],
   codexAuthStatus?: CodexAuthStatus | null,
-  codingAuths: readonly CodingAuth[] = [],
+  codingAuths: readonly CodingAuthAvailability[] = [],
 ): boolean {
   if (isAgentConnected(agentType, resolvedCredentials, codexAuthStatus)) return true;
   return codingAuths.some(
@@ -202,7 +204,7 @@ export interface AvailableAgentModelGroupsOptions {
 export function availableAgentModelGroups(
   resolvedCredentials: readonly ResolvedCredential[],
   codexAuthStatus: CodexAuthStatus | null | undefined,
-  codingAuths: readonly CodingAuth[],
+  codingAuths: readonly CodingAuthAvailability[],
   defaultAgentType: string,
   options: AvailableAgentModelGroupsOptions = {},
 ): AgentModelGroup[] {
