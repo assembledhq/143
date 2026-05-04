@@ -281,13 +281,16 @@ func (s *Service) SendMessage(ctx context.Context, input SendMessageInput) (*mod
 	// Reuse the session continuation worker for phase 1. The latest user
 	// message carries thread_id, so the orchestrator attributes assistant
 	// messages and streamed logs back to this tab while still operating on the
-	// single shared sandbox.
+	// single shared sandbox. Dedupe at the session level — only one
+	// continue_session can hold the shared sandbox at a time, regardless of
+	// which thread fired it.
+	dedupeKey := db.ContinueSessionDedupeKey(thread.SessionID)
 	payload := map[string]string{
 		"session_id": thread.SessionID.String(),
 		"thread_id":  input.ThreadID.String(),
 		"org_id":     input.OrgID.String(),
 	}
-	if _, err := s.jobStore.Enqueue(ctx, input.OrgID, "agent", "continue_session", payload, 5, nil); err != nil {
+	if _, err := s.jobStore.Enqueue(ctx, input.OrgID, "agent", "continue_session", payload, 5, &dedupeKey); err != nil {
 		if revertErr := s.sessionStore.UpdateStatus(ctx, input.OrgID, input.SessionID, string(models.SessionStatusIdle)); revertErr != nil {
 			s.logger.Error().Err(revertErr).Str("session_id", input.SessionID.String()).Msg("failed to revert session to idle after thread enqueue failure")
 		}

@@ -1822,6 +1822,34 @@ func (s *SessionStore) PublishHydratedContainerID(ctx context.Context, orgID, se
 	return actualContainerID, nil
 }
 
+// ContainerHoldState returns whether the expected container is currently held
+// by an agent turn, by a preview, or both. It is intentionally pinned to
+// container_id = @expected so callers diagnosing a race do not accidentally
+// read holder state for a newer container published after their liveness probe.
+func (s *SessionStore) ContainerHoldState(ctx context.Context, orgID, sessionID uuid.UUID, expectedContainerID string) (turnHolds bool, previewHolds bool, err error) {
+	query := `SELECT
+			COALESCE(s.turn_holding_container, FALSE) AS turn_holds,
+			EXISTS (
+				SELECT 1
+				FROM preview_instances p
+				WHERE p.session_id = s.id
+				  AND p.org_id = s.org_id
+				  AND p.preview_holding_container = TRUE
+			) AS preview_holds
+		FROM sessions s
+		WHERE s.id = @id
+		  AND s.org_id = @org_id
+		  AND s.container_id = @expected`
+	if err := s.db.QueryRow(ctx, query, pgx.NamedArgs{
+		"id":       sessionID,
+		"org_id":   orgID,
+		"expected": expectedContainerID,
+	}).Scan(&turnHolds, &previewHolds); err != nil {
+		return false, false, fmt.Errorf("container hold state: %w", err)
+	}
+	return turnHolds, previewHolds, nil
+}
+
 // SetWorkerNodeIDForContainer records the worker node currently owning the
 // session's live container. The update is CAS-scoped to the expected
 // container_id so callers do not accidentally stamp ownership onto a newer

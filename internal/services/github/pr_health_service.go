@@ -577,11 +577,12 @@ func (s *PRService) resumeRepairSession(ctx context.Context, pr models.PullReque
 	if err := txMessages.Create(ctx, msg); err != nil {
 		return nil, err
 	}
+	continueDedupeKey := db.ContinueSessionDedupeKey(claimed.ID)
 	payload := map[string]string{
 		"session_id": claimed.ID.String(),
 		"org_id":     pr.OrgID.String(),
 	}
-	if _, err := s.jobs.EnqueueInTx(ctx, tx, pr.OrgID, "agent", "continue_session", payload, 5, nil); err != nil {
+	if _, err := s.jobs.EnqueueInTx(ctx, tx, pr.OrgID, "agent", "continue_session", payload, 5, &continueDedupeKey); err != nil {
 		return nil, err
 	}
 	repairRun := &models.PullRequestRepairRun{
@@ -671,11 +672,12 @@ func (s *PRService) createRepairRevisionSession(ctx context.Context, pr models.P
 	if err := txMessages.Create(ctx, msg); err != nil {
 		return nil, err
 	}
+	dedupeKey := db.RunAgentDedupeKey(session.ID)
 	payload := map[string]string{
 		"session_id": session.ID.String(),
 		"org_id":     session.OrgID.String(),
 	}
-	if _, err := s.jobs.EnqueueInTx(ctx, tx, session.OrgID, "agent", "run_agent", payload, 5, nil); err != nil {
+	if _, err := s.jobs.EnqueueInTx(ctx, tx, session.OrgID, "agent", "run_agent", payload, 5, &dedupeKey); err != nil {
 		return nil, err
 	}
 	repairRun := &models.PullRequestRepairRun{
