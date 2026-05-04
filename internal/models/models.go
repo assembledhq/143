@@ -361,6 +361,10 @@ type SessionIssueLink struct {
 	// links instead of the universal redirect path. Nil for non-Linear
 	// links and Linear links written before workspace caching landed.
 	IssueWorkspaceSlug *string `db:"issue_workspace_slug" json:"issue_workspace_slug,omitempty"`
+	// LinearLastSkippedReason is the latest state-sync skip reason from
+	// provider_state. Exposed so the session detail view can explain why a
+	// linked Linear issue did not move workflow state.
+	LinearLastSkippedReason *string `db:"linear_last_skipped_reason" json:"linear_last_skipped_reason,omitempty"`
 	// RawLinearPrimarySnapshot is the JSONB primary_snapshot cached in
 	// session_issue_link_provider_state at link time. It is internal-only:
 	// the orchestrator decodes it into SessionIssueSnapshotEntry fields when
