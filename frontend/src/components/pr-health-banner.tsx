@@ -113,14 +113,14 @@ export function PRHealthBanner({
                                   <ExternalLink aria-hidden="true" className="h-3 w-3 shrink-0 text-muted-foreground" />
                                 </div>
                                 <Badge variant="secondary" className={cn("shrink-0 text-xs", checkStatusBadgeClassName(check.status))}>
-                                  {check.status}
+                                  {checkStatusLabel(check.status)}
                                 </Badge>
                               </a>
                             ) : (
                               <div key={`${check.name}-${check.status}`} className="flex items-center justify-between gap-3 px-1 py-1">
                                 <div className="min-w-0 text-xs text-foreground truncate">{check.name}</div>
                                 <Badge variant="secondary" className={cn("shrink-0 text-xs", checkStatusBadgeClassName(check.status))}>
-                                  {check.status}
+                                  {checkStatusLabel(check.status)}
                                 </Badge>
                               </div>
                             )
@@ -264,6 +264,17 @@ function checksAllowMerge(
   return checks.length === 0
     ? checksConfirmed
     : checks.every((check) => check.status === "passed");
+}
+
+function checkStatusLabel(status: PullRequestCheckStatus) {
+  switch (status) {
+    case "failed":
+      return "Failed";
+    case "pending":
+      return "Pending";
+    case "passed":
+      return "Passed";
+  }
 }
 
 function checkStatusBadgeClassName(status: PullRequestCheckStatus) {
