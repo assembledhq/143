@@ -870,7 +870,7 @@ describe("PreviewPanel component", () => {
     const user = userEvent.setup();
     mockGet.mockResolvedValue(makePreviewStatus({ status: "stopped" }));
     const backendMessage =
-      "this repo has no .143/config.json committed with a preview section. Add one (see docs/guides/previews.md) so the preview knows what command to run.";
+      "This repo has no .143/config.json committed with a preview section. Add one (see docs/guides/previews.md) so the preview knows what command to run.";
     const err = new Error(backendMessage);
     (err as Error & { code?: string }).code = "PREVIEW_NO_CONFIG";
     mockStart.mockRejectedValueOnce(err);
