@@ -1,8 +1,10 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { renderWithProviders, screen, userEvent, waitFor } from "@/test/test-utils";
+import { fireEvent, renderWithProviders, screen, userEvent, waitFor } from "@/test/test-utils";
 import { CreateSessionDialog } from "./create-session-dialog";
 import { http, HttpResponse } from "msw";
 import { server } from "@/test/mocks/server";
+
+const DRAFT_STORAGE_KEY = "143:new-session-draft";
 
 vi.mock("next/navigation", () => ({
   useRouter: () => ({
@@ -85,6 +87,7 @@ describe("CreateSessionDialog", () => {
   beforeEach(() => {
     onOpenChange = vi.fn<(open: boolean) => void>();
     window.localStorage.clear();
+    window.sessionStorage.clear();
     setMobileViewport(false);
   });
 
@@ -156,6 +159,31 @@ describe("CreateSessionDialog", () => {
     await waitFor(() => {
       expect(onOpenChange).toHaveBeenCalledWith(false);
     });
+  });
+
+  it("does not restore the submitted prompt after closing before the draft debounce fires", async () => {
+    setupManualSessionHandler();
+
+    const { rerender } = renderWithProviders(
+      <CreateSessionDialog open onOpenChange={onOpenChange} />,
+    );
+
+    const textarea = screen.getByPlaceholderText("Tell the agent what to do...");
+    fireEvent.change(textarea, { target: { value: "Fix stale draft" } });
+
+    fireEvent.click(screen.getByRole("button", { name: "Start session" }));
+
+    await waitFor(() => {
+      expect(onOpenChange).toHaveBeenCalledWith(false);
+    });
+
+    rerender(<CreateSessionDialog open={false} onOpenChange={onOpenChange} />);
+
+    expect(window.sessionStorage.getItem(DRAFT_STORAGE_KEY)).toBeNull();
+
+    rerender(<CreateSessionDialog open onOpenChange={onOpenChange} />);
+
+    expect(screen.getByPlaceholderText<HTMLTextAreaElement>("Tell the agent what to do...").value).toBe("");
   });
 
   it("shows error message when session creation fails", async () => {

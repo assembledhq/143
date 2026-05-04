@@ -328,6 +328,16 @@ export function ManualSessionComposer({
     pendingDraftRef.current = null;
   }
 
+  function discardDraftSave() {
+    if (!enableDrafts) return;
+    if (draftSaveTimerRef.current) {
+      clearTimeout(draftSaveTimerRef.current);
+      draftSaveTimerRef.current = null;
+    }
+    pendingDraftRef.current = null;
+    clearDraft();
+  }
+
   useEffect(() => {
     return () => {
       flushDraftSave();
@@ -550,7 +560,7 @@ export function ManualSessionComposer({
       if (selectedRepoId) {
         try { localStorage.setItem("143:lastUsedRepoId", selectedRepoId); } catch {}
       }
-      if (enableDrafts) clearDraft();
+      discardDraftSave();
       // Keep the optimistic row visible — the sidebar swaps it for the real
       // session once the refetch lands. See OptimisticSession.resolvedId.
       markOptimisticResolved(context.optimisticId, response.data.id);
