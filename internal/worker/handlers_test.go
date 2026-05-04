@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"strings"
 	"testing"
@@ -3850,6 +3851,93 @@ func TestRunAgentHandler_PropagatesRunErrors(t *testing.T) {
 	require.Error(t, err, "run_agent should propagate orchestrator failures")
 	require.Contains(t, err.Error(), "execute failed", "run_agent should preserve the orchestrator error")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+// TestRunAgentHandler_StaleSandboxIDClearedRetries locks the recovery
+// contract for the stale-orphan path: when the orchestrator returns
+// ErrStaleSandboxIDCleared (the "winning" container_id was a stale orphan
+// from a crashed prior worker, now CAS-cleared), the handler must requeue
+// via RetryableError so the next attempt re-enters against the clean row.
+// Crucially, this must NOT consume an attempt counter and must NOT mutate
+// the session row.
+func TestRunAgentHandler_StaleSandboxIDClearedRetries(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+
+	orgID := uuid.New()
+	runID := uuid.New()
+	issueID := uuid.New()
+
+	mock.ExpectQuery("SELECT .* FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(workerSessionColumns).AddRow(
+				workerSessionRow(runID, issueID, orgID, string(models.SessionStatusPending), 0, nil, nil)...,
+			),
+		)
+	// No UPDATE expectations: the orchestrator clears container_id internally
+	// via ClearContainerID, but the handler itself must not touch the row.
+
+	orch := &orchestratorServiceStub{
+		runAgentFn: func(ctx context.Context, run *models.Session) error {
+			return fmt.Errorf("stale orphan: %w", agent.ErrStaleSandboxIDCleared)
+		},
+	}
+	handler := newRunAgentHandler(stores, &Services{Orchestrator: orch}, zerolog.Nop())
+	payload := json.RawMessage(`{"session_id":"` + runID.String() + `","org_id":"` + orgID.String() + `"}`)
+
+	err := handler(context.Background(), "run_agent", payload)
+	require.Error(t, err, "run_agent must return an error so the queue requeues the job")
+	var retryable *RetryableError
+	require.ErrorAs(t, err, &retryable, "ErrStaleSandboxIDCleared must surface as a RetryableError so the attempt counter isn't consumed")
+	require.NotNil(t, retryable.RetryAfter, "RetryAfter must be set so the requeue uses a deliberate backoff, not the queue default")
+	require.ErrorIs(t, err, agent.ErrStaleSandboxIDCleared, "handler must preserve the underlying sentinel for telemetry")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met (handler must not mutate the row)")
+}
+
+// TestRunAgentHandler_SandboxRaceLoserDeadLetters locks the self-heal contract
+// for duplicate run_agent jobs: when the orchestrator returns
+// ErrSandboxRaceLoser (this duplicate lost AcquireTurnHold to a winner that
+// owns the session row), the handler must dead-letter the job via FatalError
+// without retries and without touching the session row — the winner will
+// publish the authoritative result.
+func TestRunAgentHandler_SandboxRaceLoserDeadLetters(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+
+	orgID := uuid.New()
+	runID := uuid.New()
+	issueID := uuid.New()
+
+	mock.ExpectQuery("SELECT .* FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(workerSessionColumns).AddRow(
+				workerSessionRow(runID, issueID, orgID, string(models.SessionStatusPending), 0, nil, nil)...,
+			),
+		)
+	// Deliberately register no UPDATE expectations: the loser must not write
+	// to the session row. pgxmock's strict matching will fail the test if the
+	// handler issues any unexpected query.
+
+	orch := &orchestratorServiceStub{
+		runAgentFn: func(ctx context.Context, run *models.Session) error {
+			return fmt.Errorf("loser: %w", agent.ErrSandboxRaceLoser)
+		},
+	}
+	handler := newRunAgentHandler(stores, &Services{Orchestrator: orch}, zerolog.Nop())
+	payload := json.RawMessage(`{"session_id":"` + runID.String() + `","org_id":"` + orgID.String() + `"}`)
+
+	err := handler(context.Background(), "run_agent", payload)
+	require.Error(t, err, "run_agent must surface a fatal error when it lost the AcquireTurnHold race")
+	var fatal *FatalError
+	require.ErrorAs(t, err, &fatal, "ErrSandboxRaceLoser must dead-letter the duplicate job")
+	require.ErrorIs(t, err, agent.ErrSandboxRaceLoser, "handler must preserve the underlying race-loser error for telemetry")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met (loser must not mutate the row)")
 }
 
 func TestContinueSessionHandler_UsesRuntimeCeilingDeadline(t *testing.T) {
