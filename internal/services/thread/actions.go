@@ -190,14 +190,20 @@ func (s *Service) SummarizeSession(ctx context.Context, orgID, sessionID uuid.UU
 // the Changes view to power the "Touched by tab" / "Overlap" filters. We
 // expose the timeline (not a pre-rolled view) so the frontend can switch
 // between filter shapes without round-tripping for each.
-func (s *Service) ListFileEvents(ctx context.Context, orgID, sessionID uuid.UUID) ([]models.SessionThreadFileEvent, error) {
+//
+// since, when non-nil, scopes the result to events observed at-or-after
+// that time. Frontend polling passes the most recent observed_at it has
+// seen so a long-lived session does not re-fetch the entire history every
+// 5 seconds. Server-side filter is preferred over client-side trimming so
+// the network/DB cost stays bounded.
+func (s *Service) ListFileEvents(ctx context.Context, orgID, sessionID uuid.UUID, since *time.Time) ([]models.SessionThreadFileEvent, error) {
 	if s.fileEvents == nil {
 		return []models.SessionThreadFileEvent{}, nil
 	}
 	if _, err := s.sessionStore.GetByID(ctx, orgID, sessionID); err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrSessionNotFound, err)
 	}
-	return s.fileEvents.ListBySession(ctx, orgID, sessionID, nil)
+	return s.fileEvents.ListBySession(ctx, orgID, sessionID, since)
 }
 
 // ForkInput captures the parameters for forking a tab into its own session.

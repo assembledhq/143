@@ -115,18 +115,3 @@ func (s *SessionThreadFileEventStore) ListBySession(ctx context.Context, orgID, 
 	return pgx.CollectRows(rows, pgx.RowToStructByName[models.SessionThreadFileEvent])
 }
 
-// ListByThread returns the file events attributed to one tab, newest first.
-// Used by the per-thread Changes filter.
-func (s *SessionThreadFileEventStore) ListByThread(ctx context.Context, orgID, threadID uuid.UUID) ([]models.SessionThreadFileEvent, error) {
-	rows, err := s.db.Query(ctx, `
-		SELECT `+sessionThreadFileEventColumns+`
-		FROM session_thread_file_events
-		WHERE org_id = @org_id AND thread_id = @thread_id
-		ORDER BY observed_at DESC, id DESC`,
-		pgx.NamedArgs{"org_id": orgID, "thread_id": threadID},
-	)
-	if err != nil {
-		return nil, fmt.Errorf("query thread file events by thread: %w", err)
-	}
-	return pgx.CollectRows(rows, pgx.RowToStructByName[models.SessionThreadFileEvent])
-}

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/assembledhq/143/internal/api/middleware"
 	"github.com/assembledhq/143/internal/db"
@@ -26,7 +27,7 @@ type ThreadService interface {
 	GetLogs(ctx context.Context, orgID, sessionID, threadID uuid.UUID) ([]models.SessionLog, error)
 	CancelThread(ctx context.Context, orgID, sessionID, threadID uuid.UUID) (models.SessionThread, error)
 	SummarizeSession(ctx context.Context, orgID, sessionID uuid.UUID) (thread.SessionSummary, error)
-	ListFileEvents(ctx context.Context, orgID, sessionID uuid.UUID) ([]models.SessionThreadFileEvent, error)
+	ListFileEvents(ctx context.Context, orgID, sessionID uuid.UUID, since *time.Time) ([]models.SessionThreadFileEvent, error)
 	ForkThread(ctx context.Context, input thread.ForkInput) (thread.ForkResult, error)
 	RevertThread(ctx context.Context, orgID, sessionID, threadID uuid.UUID, userID *uuid.UUID) (thread.ForkResult, error)
 }

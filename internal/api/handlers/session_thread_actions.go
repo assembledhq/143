@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
@@ -68,6 +69,12 @@ func (h *SessionThreadHandler) SummarizeSession(w http.ResponseWriter, r *http.R
 // ListThreadFileEvents handles GET /sessions/{id}/thread-file-events — the
 // raw timeline of "tab T touched path P at turn N". The frontend rolls this
 // up into "Touched by tab" and "Overlap" filters in the Changes view.
+//
+// Accepts an optional `?since=<RFC3339>` query parameter. The frontend
+// passes the most recent observed_at it has cached so polling on a long
+// session does not re-transfer the entire timeline every cycle. Bad
+// timestamps fall back to "no filter" rather than 400 — partial data is
+// better than a hard error for an advisory feed.
 func (h *SessionThreadHandler) ListThreadFileEvents(w http.ResponseWriter, r *http.Request) {
 	orgID := middleware.OrgIDFromContext(r.Context())
 	sessionID, err := uuid.Parse(chi.URLParam(r, "id"))
@@ -75,7 +82,13 @@ func (h *SessionThreadHandler) ListThreadFileEvents(w http.ResponseWriter, r *ht
 		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid session ID")
 		return
 	}
-	events, err := h.svc.ListFileEvents(r.Context(), orgID, sessionID)
+	var since *time.Time
+	if raw := strings.TrimSpace(r.URL.Query().Get("since")); raw != "" {
+		if parsed, parseErr := time.Parse(time.RFC3339Nano, raw); parseErr == nil {
+			since = &parsed
+		}
+	}
+	events, err := h.svc.ListFileEvents(r.Context(), orgID, sessionID, since)
 	if err != nil {
 		if errors.Is(err, thread.ErrSessionNotFound) {
 			writeError(w, r, http.StatusNotFound, "NOT_FOUND", "session not found")

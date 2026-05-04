@@ -59,7 +59,6 @@ type ThreadStore interface {
 // file-attribution surfaces (overlap detection, Changes-view filters).
 type FileEventStore interface {
 	ListBySession(ctx context.Context, orgID, sessionID uuid.UUID, since *time.Time) ([]models.SessionThreadFileEvent, error)
-	ListByThread(ctx context.Context, orgID, threadID uuid.UUID) ([]models.SessionThreadFileEvent, error)
 }
 
 // ThreadCanceller cancels a thread's in-flight agent run. Implemented by the

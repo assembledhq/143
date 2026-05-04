@@ -29,11 +29,16 @@ type forkSessionThreadInput struct {
 // source thread's transcript — the design doc is explicit that a fresh tab
 // starts blank, and a fork inherits the same property.
 //
-// Implementation note: we create the new session row and post an assistant
-// message into the source thread that links to the fork. Cloning the source
-// snapshot into the new session's sandbox happens lazily on the new
-// session's first user message (the existing run_agent path handles the
-// hydrate). This keeps the fork operation cheap and recoverable.
+// Snapshot policy: the forked session does NOT inherit the source's
+// snapshot_key. The first turn on the fork runs through the standard
+// run_agent path which clones the repo at HEAD of the target branch. This
+// makes fork ownership of storage objects unambiguous (each session owns
+// its own snapshots) at the cost of losing in-progress edits that hadn't
+// been committed in the source. Fork is the right primitive for "diverge
+// safely from this branch state"; it is not a rollback or a checkpoint
+// share. If the source session has a SnapshotKey we record it as the
+// fork's base_snapshot_key on its first thread so a future revert in the
+// fork can still trace back, but we do not hydrate from it.
 func newForkSessionThreadHandler(stores *Stores, services *Services, logger zerolog.Logger) JobHandler {
 	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
 		var input forkSessionThreadInput
@@ -100,10 +105,15 @@ func newForkSessionThreadHandler(stores *Stores, services *Services, logger zero
 				branchHint = fmt.Sprintf(" on the `%s` branch", *source.TargetBranch)
 			}
 			msg := &models.SessionMessage{
-				SessionID:  sessionID,
-				OrgID:      orgID,
-				ThreadID:   &threadID,
-				TurnNumber: thread.CurrentTurn,
+				SessionID: sessionID,
+				OrgID:     orgID,
+				ThreadID:  &threadID,
+				// Stamp the next-turn number so the confirmation lands
+				// AFTER the user's most recent message in the timeline,
+				// not interleaved with it. timeline order is (turn_number,
+				// id) so a fork message at turn N+1 sits cleanly at the
+				// end of the thread's history.
+				TurnNumber: thread.CurrentTurn + 1,
 				Role:       models.MessageRoleAssistant,
 				Content: fmt.Sprintf(
 					"Forked this tab into a new session: **%s**.\n\n"+
@@ -178,14 +188,21 @@ func newRevertSessionThreadHandler(stores *Stores, services *Services, logger ze
 		// user-facing artifact is durable today.
 		if stores.SessionMessages != nil {
 			msg := &models.SessionMessage{
-				SessionID:  sessionID,
-				OrgID:      orgID,
-				ThreadID:   &threadID,
-				TurnNumber: thread.CurrentTurn,
+				SessionID: sessionID,
+				OrgID:     orgID,
+				ThreadID:  &threadID,
+				// Same next-turn rationale as the fork confirmation: keep
+				// the assistant message ordered after the user's last
+				// message in the thread timeline.
+				TurnNumber: thread.CurrentTurn + 1,
 				Role:       models.MessageRoleAssistant,
+				// Use a 4-backtick fence so a diff that itself contains a
+				// triple-backtick line (e.g. an MD edit) doesn't break the
+				// outer fence. CommonMark requires the opening run to
+				// match-or-shorter than the closing run.
 				Content: fmt.Sprintf(
 					"Revert prepared. Apply this patch in reverse to undo this tab's changes:\n\n"+
-						"```diff\n%s\n```\n\n"+
+						"````diff\n%s\n````\n\n"+
 						"Tip: `git apply -R` against this patch from the workspace root will roll back the listed paths.",
 					truncateDiffForDisplay(*thread.Diff),
 				),
@@ -205,10 +222,15 @@ func newRevertSessionThreadHandler(stores *Stores, services *Services, logger ze
 // truncateDiffForDisplay caps the inline patch posted into the chat so a
 // large diff doesn't blow up the message column. The full diff remains on
 // the thread row for download.
+// revertDiffDisplayLimit caps how many bytes of a thread's diff we inline
+// into the revert-confirmation chat message. A larger diff gets truncated
+// with a pointer back to the full patch on the tab's diff view; this keeps
+// the chat column readable while preserving the full artifact elsewhere.
+const revertDiffDisplayLimit = 12_000
+
 func truncateDiffForDisplay(diff string) string {
-	const limit = 12_000
-	if len(diff) <= limit {
+	if len(diff) <= revertDiffDisplayLimit {
 		return diff
 	}
-	return diff[:limit] + "\n…\n[diff truncated for display — full patch is available on the tab's diff view]"
+	return diff[:revertDiffDisplayLimit] + "\n…\n[diff truncated for display — full patch is available on the tab's diff view]"
 }

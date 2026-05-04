@@ -403,8 +403,10 @@ export const api = {
       get<import('./types').ListResponse<import('./types').SessionLog>>(`/api/v1/sessions/${sessionId}/threads/${threadId}/logs`),
     summarizeSession: (sessionId: string) =>
       get<import('./types').SingleResponse<import('./types').SessionSummary>>(`/api/v1/sessions/${sessionId}/summary`),
-    listThreadFileEvents: (sessionId: string) =>
-      get<import('./types').ListResponse<import('./types').SessionThreadFileEvent>>(`/api/v1/sessions/${sessionId}/thread-file-events`),
+    listThreadFileEvents: (sessionId: string, since?: string) => {
+      const qs = since ? `?since=${encodeURIComponent(since)}` : '';
+      return get<import('./types').ListResponse<import('./types').SessionThreadFileEvent>>(`/api/v1/sessions/${sessionId}/thread-file-events${qs}`);
+    },
     listReviewComments: (sessionId: string) =>
       get<import('./types').ListResponse<import('./types').SessionReviewComment>>(`/api/v1/sessions/${sessionId}/review-comments`),
     createReviewComment: (sessionId: string, body: { file_path: string; line_number: number; side?: string; body: string }) =>
