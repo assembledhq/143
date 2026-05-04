@@ -52,7 +52,7 @@ describe("ClaudeCodeAuthModal", () => {
     render(<ClaudeCodeAuthModal label="team-a" onClose={onClose} />);
 
     await waitFor(() => {
-      expect(initiateMock).toHaveBeenCalledWith("team-a");
+      expect(initiateMock).toHaveBeenCalledWith("team-a", undefined);
     });
 
     await user.keyboard("{Escape}");
@@ -79,7 +79,7 @@ describe("ClaudeCodeAuthModal", () => {
       await Promise.resolve();
       await Promise.resolve();
     });
-    expect(completeMock).toHaveBeenCalledWith("team-a", "abc123#state456");
+    expect(completeMock).toHaveBeenCalledWith("team-a", "abc123#state456", undefined);
     expect(screen.getByText("Connected successfully!")).toBeInTheDocument();
 
     unmount();

@@ -3,8 +3,8 @@
 import { useQuery } from "@tanstack/react-query";
 import { api } from "@/lib/api";
 import { queryKeys } from "@/lib/query-keys";
-import { isAgentConnected } from "@/lib/agents";
-import type { OrgSettings, Integration, Repository, ListResponse, Organization, SingleResponse } from "@/lib/types";
+import { isAgentAvailable } from "@/lib/agents";
+import type { CodingCredentialSummary, OrgSettings, Integration, Repository, ListResponse, Organization, SingleResponse } from "@/lib/types";
 
 export function useSetupStatus() {
   const { data: settingsResponse, isLoading: settingsLoading } = useQuery<SingleResponse<Organization>>({
@@ -13,12 +13,16 @@ export function useSetupStatus() {
   });
 
   const { data: codexAuthStatusResponse, isLoading: codexAuthLoading } = useQuery({
-    queryKey: queryKeys.codexAuth.status,
-    queryFn: () => api.codexAuth.status(),
+    queryKey: [...queryKeys.codexAuth.status, "personal"],
+    queryFn: () => api.codexAuth.status(undefined, "personal"),
   });
   const { data: resolvedCredsResponse, isLoading: resolvedCredsLoading } = useQuery({
     queryKey: queryKeys.credentials.resolved,
     queryFn: () => api.userCredentials.listResolved(),
+  });
+  const { data: resolvedCodingCredentialsResponse, isLoading: resolvedCodingCredentialsLoading } = useQuery<ListResponse<CodingCredentialSummary>>({
+    queryKey: ["coding-credentials", "resolved"],
+    queryFn: () => api.codingCredentials.list("resolved"),
   });
 
   const { data: integrationsResponse, isLoading: integrationsLoading } = useQuery<ListResponse<Integration>>({
@@ -34,15 +38,21 @@ export function useSetupStatus() {
   const rawSettings = settingsResponse?.data?.settings as OrgSettings | undefined;
   const defaultAgent = rawSettings?.default_agent_type ?? "codex";
   const resolvedCredentials = resolvedCredsResponse?.data ?? [];
+  const resolvedCodingCredentials = resolvedCodingCredentialsResponse?.data ?? [];
 
-  const agentConnected = isAgentConnected(defaultAgent, resolvedCredentials, codexAuthStatusResponse?.data);
+  const agentConnected = isAgentAvailable(
+    defaultAgent,
+    resolvedCredentials,
+    codexAuthStatusResponse?.data,
+    resolvedCodingCredentials,
+  );
 
   const integrations = integrationsResponse?.data ?? [];
   const repositories = repositoriesResponse?.data ?? [];
   const githubReady = integrations.some((i) => i.provider === "github" && i.status === "active")
     && repositories.length > 0;
 
-  const isLoading = settingsLoading || codexAuthLoading || resolvedCredsLoading || integrationsLoading || repositoriesLoading;
+  const isLoading = settingsLoading || codexAuthLoading || resolvedCredsLoading || resolvedCodingCredentialsLoading || integrationsLoading || repositoriesLoading;
   const isSetupComplete = agentConnected && githubReady;
 
   return {

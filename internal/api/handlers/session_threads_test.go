@@ -51,7 +51,7 @@ func (m *mockThreadStore) ListBySession(ctx context.Context, orgID, sessionID uu
 	return nil, nil
 }
 
-func (m *mockThreadStore) ClaimIdleForSession(ctx context.Context, orgID, sessionID, threadID uuid.UUID) (models.SessionThread, error) {
+func (m *mockThreadStore) ClaimIdleForSession(ctx context.Context, orgID, sessionID, threadID uuid.UUID, _ int) (models.SessionThread, error) {
 	if m.claimIdleFn != nil {
 		return m.claimIdleFn(ctx, orgID, sessionID, threadID)
 	}
@@ -62,6 +62,14 @@ func (m *mockThreadStore) UpdateStatus(ctx context.Context, orgID, threadID uuid
 	if m.updateStatusFn != nil {
 		return m.updateStatusFn(ctx, orgID, threadID, status)
 	}
+	return nil
+}
+
+func (m *mockThreadStore) IncrementPendingMessages(ctx context.Context, orgID, threadID uuid.UUID) error {
+	return nil
+}
+
+func (m *mockThreadStore) MarkCancelRequested(ctx context.Context, orgID, threadID uuid.UUID) error {
 	return nil
 }
 

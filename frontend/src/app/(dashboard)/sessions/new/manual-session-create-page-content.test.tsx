@@ -72,6 +72,9 @@ const mocks = vi.hoisted(() => ({
   codingAuthsListMock: vi.fn().mockResolvedValue({
     data: [],
   }),
+  codingCredentialsListMock: vi.fn().mockResolvedValue({
+    data: [],
+  }),
   codexAuthStatusMock: vi.fn().mockResolvedValue({ data: { status: "completed" } }),
   authMeMock: vi.fn().mockResolvedValue({
     data: {
@@ -110,6 +113,9 @@ vi.mock("@/lib/api", () => ({
     codingAuths: {
       list: mocks.codingAuthsListMock,
     },
+    codingCredentials: {
+      list: mocks.codingCredentialsListMock,
+    },
     codexAuth: {
       status: mocks.codexAuthStatusMock,
     },
@@ -143,6 +149,11 @@ vi.mock("@/components/no-repos-warning", () => ({
 
 vi.mock("@/contexts/optimistic-sessions", () => ({
   useOptimisticSessions: () => ({
+    addOptimisticSession: vi.fn(),
+    removeOptimisticSession: vi.fn(),
+    markOptimisticResolved: vi.fn(),
+  }),
+  useOptimisticSessionsSafe: () => ({
     addOptimisticSession: vi.fn(),
     removeOptimisticSession: vi.fn(),
     markOptimisticResolved: vi.fn(),
@@ -246,7 +257,7 @@ describe("ManualSessionCreatePageContent", () => {
   it("keeps the main message textarea at 16px on mobile", async () => {
     renderWithProviders(<ManualSessionCreatePageContent />);
 
-    const textarea = await screen.findByRole("textbox", { name: "Manual session prompt" });
+    const textarea = await screen.findByRole("textbox", { name: "Session prompt" });
     expect(textarea).toHaveClass("text-base");
     expect(textarea).toHaveClass("sm:text-xs");
   });
@@ -377,6 +388,26 @@ describe("ManualSessionCreatePageContent", () => {
     expect(await screen.findByRole("button", { name: "Preview uploaded-shot.png" })).toBeInTheDocument();
   });
 
+  it("uploads an image pasted into the prompt and shows it in the attachment strip", async () => {
+    renderWithProviders(<ManualSessionCreatePageContent />);
+
+    const textarea = await screen.findByPlaceholderText("Tell the agent what to do...");
+    const file = new File(["image-bytes"], "pasted-shot.png", { type: "image/png" });
+
+    fireEvent.paste(textarea, {
+      clipboardData: {
+        files: [file],
+        items: [{ kind: "file", type: "image/png", getAsFile: () => file }],
+        types: ["Files"],
+      },
+    });
+
+    await waitFor(() => {
+      expect(mocks.uploadMock).toHaveBeenCalledWith(file);
+    });
+    expect(await screen.findByRole("button", { name: "Preview uploaded-shot.png" })).toBeInTheDocument();
+  });
+
   it("shows slash command suggestions when the user types a slash trigger", async () => {
     const user = userEvent.setup();
     renderWithProviders(<ManualSessionCreatePageContent />);
@@ -430,6 +461,26 @@ describe("ManualSessionCreatePageContent", () => {
 
     await waitFor(() => {
       expect(screen.getByText("File too large (max 10 MB): too-large.png")).toBeInTheDocument();
+    });
+    expect(mocks.uploadMock).not.toHaveBeenCalled();
+  });
+
+  it("shows an inline validation error when a pasted file exceeds the size limit", async () => {
+    renderWithProviders(<ManualSessionCreatePageContent />);
+
+    const oversizedFile = new File([new Uint8Array(10 * 1024 * 1024 + 1)], "too-large-paste.png", { type: "image/png" });
+    const textarea = await screen.findByPlaceholderText("Tell the agent what to do...");
+
+    fireEvent.paste(textarea, {
+      clipboardData: {
+        files: [oversizedFile],
+        items: [{ kind: "file", type: "image/png", getAsFile: () => oversizedFile }],
+        types: ["Files"],
+      },
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText("File too large (max 10 MB): too-large-paste.png")).toBeInTheDocument();
     });
     expect(mocks.uploadMock).not.toHaveBeenCalled();
   });

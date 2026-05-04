@@ -49,10 +49,109 @@ var ErrSessionTimedOut = errors.New("session timed out")
 // job is requeued without consuming an attempt.
 var ErrSnapshotPending = errors.New("snapshot upload pending")
 
+// ErrSandboxRaceLoser is returned from RunAgent / ContinueSession when
+// AcquireTurnHold's COALESCE reveals that another holder published a
+// container_id first AND that container is alive — i.e. a duplicate
+// run_agent / continue_session job is concurrently running the same turn.
+// The "winner" owns the session row and will update its result; the loser
+// must NOT call failRun (that would race the winner's terminal write and
+// corrupt the row) and must NOT have its job retried (every retry would
+// lose the same race). Worker handlers recognize this error and convert it
+// to a FatalError so the duplicate job dead-letters silently without
+// surfacing a user-visible failure.
+var ErrSandboxRaceLoser = errors.New("sandbox race: another holder attached first")
+
+// ErrStaleSandboxIDCleared is returned from RunAgent / ContinueSession when
+// AcquireTurnHold reports a different container_id but an IsAlive probe
+// reveals that the "winner" container is dead — a stale orphan from a
+// crashed worker that the startup reconciler hasn't reaped yet. The loser
+// CAS-clears container_id via ClearContainerID and signals retry: the next
+// attempt will see a clean row and create a fresh sandbox. Worker handlers
+// convert this to a RetryableError with a short backoff so the retry happens
+// without consuming an attempt counter.
+var ErrStaleSandboxIDCleared = errors.New("sandbox race: cleared stale orphan container_id, retry")
+
+// ErrSandboxPreviewRace is returned from RunAgent / ContinueSession when
+// AcquireTurnHold reports a different live container_id, but holder-state
+// inspection shows the live container belongs to a preview hydrate rather
+// than another agent turn. There is no "winning" agent job to publish the
+// user's turn result, so the worker must retry instead of silently
+// dead-lettering as a duplicate.
+var ErrSandboxPreviewRace = errors.New("sandbox race: preview holder attached first, retry")
+
 // canonicalTimeoutLogMessage is the single log phrase emitted whenever a
 // session hits its configured deadline. Kept deliberately narrow so
 // Grafana alerts can key off one string across RunAgent and ContinueSession.
 const canonicalTimeoutLogMessage = "session exceeded configured timeout"
+
+// sandboxRaceProbeTimeout bounds the IsAlive probe at the AcquireTurnHold
+// race-loss diagnosis site. Short enough that a docker-daemon hiccup can't
+// stall the loser's cleanup, long enough that a healthy IsAlive (typically
+// sub-100ms) succeeds with margin.
+const sandboxRaceProbeTimeout = 3 * time.Second
+
+// diagnoseAcquireHoldRaceLoss decides whether a lost AcquireTurnHold is a
+// genuine duplicate run (winner is alive) or a stale orphan from a crashed
+// prior worker (winner is dead, never released). It probes IsAlive on
+// actualContainerID and, if dead, CAS-clears the row so the caller's retry
+// re-enters against a clean session row. Returns ErrSandboxRaceLoser for
+// genuine duplicates (worker dead-letters silently) or ErrStaleSandboxIDCleared
+// for stale orphans (worker requeues without consuming an attempt). Probe
+// or clear errors are intentionally conservative — they fall back to
+// ErrSandboxRaceLoser to avoid clobbering a real active turn on a transient
+// docker / DB hiccup; the startup reconciler remains the safety net.
+func (o *Orchestrator) diagnoseAcquireHoldRaceLoss(
+	ctx context.Context,
+	orgID, sessionID uuid.UUID,
+	actualContainerID string,
+	log zerolog.Logger,
+) error {
+	aliveCtx, cancel := context.WithTimeout(ctx, sandboxRaceProbeTimeout)
+	defer cancel()
+	alive, aliveErr := o.provider.IsAlive(aliveCtx, &Sandbox{ID: actualContainerID, Provider: "docker"})
+	if aliveErr != nil {
+		log.Warn().Err(aliveErr).
+			Str("winning_container_id", actualContainerID).
+			Msg("IsAlive probe failed during sandbox race-loss diagnosis; assuming alive winner and dead-lettering this duplicate")
+		return ErrSandboxRaceLoser
+	}
+	if alive {
+		turnHolds, previewHolds, stateErr := o.sessions.ContainerHoldState(ctx, orgID, sessionID, actualContainerID)
+		if stateErr != nil {
+			log.Warn().Err(stateErr).
+				Str("winning_container_id", actualContainerID).
+				Msg("holder-state probe failed during sandbox race-loss diagnosis; assuming alive turn winner and dead-lettering this duplicate")
+			return ErrSandboxRaceLoser
+		}
+		if turnHolds {
+			return ErrSandboxRaceLoser
+		}
+		if previewHolds {
+			return ErrSandboxPreviewRace
+		}
+		log.Warn().
+			Str("winning_container_id", actualContainerID).
+			Msg("live container has no recorded turn or preview holder during race-loss diagnosis; assuming alive winner and dead-lettering this duplicate")
+		return ErrSandboxRaceLoser
+	}
+	cleared, clearErr := o.sessions.ClearContainerID(ctx, orgID, sessionID, actualContainerID)
+	if clearErr != nil {
+		log.Warn().Err(clearErr).
+			Str("winning_container_id", actualContainerID).
+			Msg("ClearContainerID failed during sandbox race-loss diagnosis; falling back to silent dead-letter so a transient DB error doesn't trigger a tight retry loop")
+		return ErrSandboxRaceLoser
+	}
+	if !cleared {
+		log.Info().
+			Str("winning_container_id", actualContainerID).
+			Msg("ClearContainerID CAS lost during race-loss diagnosis (a new holder acquired between IsAlive and Clear); dead-lettering this duplicate")
+		return ErrSandboxRaceLoser
+	}
+	log.Warn().
+		Str("stale_container_id", actualContainerID).
+		Msg("cleared stale orphan container_id from a crashed prior turn; signaling retry to re-enter against the clean row")
+	return ErrStaleSandboxIDCleared
+}
 
 // GitHubTokenProvider abstracts retrieving a GitHub App installation token.
 type GitHubTokenProvider interface {
@@ -73,6 +172,17 @@ type ClaudeCodeAuthProvider interface {
 	GetValidToken(ctx context.Context, orgID uuid.UUID) (*models.AnthropicSubscription, *uuid.UUID, error)
 }
 
+// ClaudeCodeAuthRefresher rotates an expired Claude subscription token by
+// credential id. The scope must match the credential's owner: personal
+// subscriptions live in coding_credentials with user_id set, and the
+// underlying lookup filters on (org_id, user_id) — passing org scope for a
+// personal credential would mis-route the lookup and surface as
+// "credential not found", silently dropping personal subscriptions back
+// to the org fallback after their first 8h of token life.
+type ClaudeCodeAuthRefresher interface {
+	RefreshTokenByID(ctx context.Context, scope models.Scope, credID uuid.UUID) (*models.AnthropicSubscription, error)
+}
+
 // CredentialProvider abstracts retrieving org-scoped provider credentials.
 type CredentialProvider interface {
 	Get(ctx context.Context, orgID uuid.UUID, provider models.ProviderName) (*models.DecryptedCredential, error)
@@ -83,6 +193,16 @@ type CredentialProvider interface {
 type UserCredentialProvider interface {
 	GetForUser(ctx context.Context, orgID, userID uuid.UUID, provider models.ProviderName) (*models.DecryptedUserCredential, error)
 	GetTeamDefault(ctx context.Context, orgID uuid.UUID, provider models.ProviderName) (*models.DecryptedUserCredential, error)
+}
+
+// CodingCredentialProvider abstracts the unified coding-credentials resolver.
+// Returns the ordered (personal-then-org, priority-within-scope) list of
+// runnable credentials for a (orgID, userID, provider) triple. The unified
+// store is the source of truth post-migration; AgentEnv.resolveProviderConfig
+// prefers this when wired, falling back to the legacy 3-step cascade only if
+// nothing comes back.
+type CodingCredentialProvider interface {
+	ListResolvable(ctx context.Context, orgID uuid.UUID, userID *uuid.UUID, provider models.ProviderName) ([]models.DecryptedCodingCredential, error)
 }
 
 // UserLookup fetches a user record. Used by the orchestrator to materialize
@@ -151,6 +271,19 @@ type SessionStore interface {
 	// caller owns the destroy, false when a new holder acquired in the gap
 	// (caller must leave the container alone).
 	FinalizeContainerDestroy(ctx context.Context, orgID, sessionID uuid.UUID, expectedContainerID string) (cleared bool, err error)
+	// ClearContainerID is the CAS-safe orphan reset: it nulls container_id
+	// and clears the stuck turn_holding_container flag, but only when the
+	// expected ID still matches AND no preview hold has appeared. Used by
+	// the AcquireTurnHold race-loss path to recover from a stale orphan
+	// container_id (worker crashed mid-turn, never released): the loser
+	// probes IsAlive on actualContainerID, and if dead, calls ClearContainerID
+	// so the retry can re-enter against a clean row.
+	ClearContainerID(ctx context.Context, orgID, sessionID uuid.UUID, expectedContainerID string) (cleared bool, err error)
+	// ContainerHoldState returns whether the expected live container is held
+	// by an agent turn, by a preview, or both. Used after an AcquireTurnHold
+	// COALESCE loss so an alive preview hydrate is retried rather than
+	// misclassified as a duplicate agent job.
+	ContainerHoldState(ctx context.Context, orgID, sessionID uuid.UUID, expectedContainerID string) (turnHolds bool, previewHolds bool, err error)
 }
 
 // SessionLogStore defines the log persistence operations.
@@ -276,8 +409,20 @@ type Orchestrator struct {
 	logger            zerolog.Logger
 	maxConcurrent     int
 	cancels           *CancelRegistry
+	threadCancels     *ThreadCancelRegistry // optional — enables per-tab SIGINT
 	nodeID            string
 	isDraining        func() bool
+}
+
+// CancelThreadByID asks the thread-scoped cancel registry to SIGINT the
+// in-flight agent for the given thread. Returns false when no live entry
+// exists (the run already finished). Safe to call without a registry; just
+// returns false.
+func (o *Orchestrator) CancelThreadByID(threadID uuid.UUID) bool {
+	if o.threadCancels == nil {
+		return false
+	}
+	return o.threadCancels.CancelThread(threadID)
 }
 
 // DurableCheckpoint is the latest fully committed resume boundary for a
@@ -297,6 +442,19 @@ type ContinueSessionOptions struct {
 	ModelOverride        *string
 	ThreadAgentSessionID *string
 	ResultAgentSessionID *string
+
+	// ThreadID, when set, identifies the agent tab this turn belongs to.
+	// The orchestrator passes it to the thread cancel registry so a
+	// per-tab Cancel can SIGINT only the matching agent process. nil
+	// disables thread-scoped cancel and falls back to the legacy
+	// session-level CancelRegistry behavior.
+	ThreadID *uuid.UUID
+
+	// OnTurnComplete fires after a successful turn with the per-turn diff
+	// and the agent-reported cost in USD. The thread continuation handler
+	// uses this to emit file-attribution events. Errors are swallowed by
+	// the orchestrator: file attribution is operational, not critical.
+	OnTurnComplete func(diff string, costUSD float64)
 }
 
 // OrchestratorConfig holds the dependencies for creating an Orchestrator.
@@ -320,12 +478,14 @@ type OrchestratorConfig struct {
 	CodexAuth         CodexAuthProvider      // optional — enables ChatGPT OAuth for Codex agent
 	ClaudeCodeAuth    ClaudeCodeAuthProvider // optional — enables Claude subscription OAuth for Claude Code agent
 	Credentials       CredentialProvider
-	Memory            MemoryService          // optional — injects learned memories into agent prompts
-	UserCredentials   UserCredentialProvider // optional — enables personal/team credential resolution
-	Snapshots         storage.SnapshotStore  // optional — enables multi-turn snapshot/restore
-	UsageTracker      UsageRecorder          // optional — enables billing observability
-	Cancels           *CancelRegistry        // optional — enables session cancellation from API
-	OrgSettingsCache  *OrgSettingsCache      // optional — caches Amp/Pi agent_config lookups across session starts
+	Memory            MemoryService            // optional — injects learned memories into agent prompts
+	UserCredentials   UserCredentialProvider   // optional — enables legacy personal/team credential resolution
+	CodingCredentials CodingCredentialProvider // optional — preferred unified resolver; consulted before the legacy cascade
+	Snapshots         storage.SnapshotStore    // optional — enables multi-turn snapshot/restore
+	UsageTracker      UsageRecorder            // optional — enables billing observability
+	Cancels           *CancelRegistry          // optional — enables session cancellation from API
+	ThreadCancels     *ThreadCancelRegistry    // optional — enables per-tab cancellation from API
+	OrgSettingsCache  *OrgSettingsCache        // optional — caches Amp/Pi agent_config lookups across session starts
 	// Env owns env resolution + auth pre-flight + Codex auth injection,
 	// shared with the PM service. Optional: when nil, NewOrchestrator
 	// constructs an AgentEnv from the other OrchestratorConfig fields so
@@ -368,13 +528,14 @@ func NewOrchestrator(cfg OrchestratorConfig) *Orchestrator {
 	env := cfg.Env
 	if env == nil {
 		env = NewAgentEnv(AgentEnvDeps{
-			Credentials:      cfg.Credentials,
-			UserCredentials:  cfg.UserCredentials,
-			Orgs:             cfg.Orgs,
-			OrgSettingsCache: cfg.OrgSettingsCache,
-			CodexAuth:        cfg.CodexAuth,
-			Provider:         cfg.Provider,
-			Logger:           cfg.Logger,
+			Credentials:       cfg.Credentials,
+			UserCredentials:   cfg.UserCredentials,
+			CodingCredentials: cfg.CodingCredentials,
+			Orgs:              cfg.Orgs,
+			OrgSettingsCache:  cfg.OrgSettingsCache,
+			CodexAuth:         cfg.CodexAuth,
+			Provider:          cfg.Provider,
+			Logger:            cfg.Logger,
 		})
 	}
 
@@ -405,6 +566,7 @@ func NewOrchestrator(cfg OrchestratorConfig) *Orchestrator {
 		sandboxAuth:       cfg.SandboxAuth,
 		users:             cfg.Users,
 		cancels:           cfg.Cancels,
+		threadCancels:     cfg.ThreadCancels,
 		logger:            cfg.Logger,
 		maxConcurrent:     maxConcurrent,
 		nodeID:            cfg.NodeID,
@@ -1302,12 +1464,24 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 		if sandboxCfg.AuthSocketPath != "" {
 			o.closeSandboxAuth(run.ID, log)
 		}
+		// Self-heal: ask the diagnosis helper whether the "winner" is alive
+		// (real duplicate → dead-letter via ErrSandboxRaceLoser), an alive
+		// preview holder (retry), or a stale orphan (worker crashed mid-turn
+		// → CAS-clear and signal retry via ErrStaleSandboxIDCleared). Either
+		// way, do NOT failRun — the winner (if any) owns the session row, and
+		// the orphan path leaves the row pending for the retry to re-enter
+		// cleanly.
 		log.Warn().
 			Str("winning_container_id", actualContainerID).
 			Str("losing_container_id", sandbox.ID).
-			Msg("another holder published container_id first; aborting turn so the user can retry against the winning container")
-		o.failRun(ctx, run, "sandbox race: another holder attached first, please retry")
-		return fmt.Errorf("sandbox race: actual container %s != created %s", actualContainerID, sandbox.ID)
+			Msg("another holder published container_id first; diagnosing whether the winner is alive or a stale orphan")
+		diagErr := o.diagnoseAcquireHoldRaceLoss(ctx, run.OrgID, run.ID, actualContainerID, log)
+		if errors.Is(diagErr, ErrSandboxPreviewRace) {
+			if revertErr := o.sessions.UpdateStatus(ctx, run.OrgID, run.ID, string(models.SessionStatusPending)); revertErr != nil {
+				log.Error().Err(revertErr).Msg("failed to revert session to pending after preview won sandbox race")
+			}
+		}
+		return fmt.Errorf("%w: actual container %s != created %s", diagErr, actualContainerID, sandbox.ID)
 	}
 	defer func() {
 		exitReason := containerExitReason(ctx, err)
@@ -1449,11 +1623,11 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 	//      ANTHROPIC_API_KEY env var as the fallback.
 	switch run.AgentType {
 	case models.AgentTypeCodex:
-		if err := o.ensureCodexAuth(ctx, run, sandbox); err != nil {
+		if err := o.ensureCodexAuth(ctx, run, sandbox, sandboxCfg.Env); err != nil {
 			return err
 		}
 	case models.AgentTypeClaudeCode:
-		if err := o.ensureClaudeCodeAuth(ctx, run, sandbox); err != nil {
+		if err := o.ensureClaudeCodeAuth(ctx, run, sandbox, sandboxCfg.Env); err != nil {
 			return err
 		}
 	}
@@ -1478,7 +1652,13 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 	logWg.Wait()
 
 	// 10b. Retry once on token expiration for Codex agents.
-	result, err = o.retryOnTokenExpired(ctx, run.AgentType, run.OrgID, run.ID, nil, turnNumber, sandbox, adapter, execCtx, prompt, result, err, log)
+	result, err = o.retryOnTokenExpired(ctx, run.AgentType, run.OrgID, run.TriggeredByUserID, run.ID, nil, turnNumber, sandbox, adapter, execCtx, prompt, result, err, log)
+
+	// 10c. Shed the just-picked credential's in-process health-cache slot if
+	// the (possibly retried) result indicates a credential-level failure.
+	// No-ops cleanly for agent types whose auth flows do not pass through
+	// the unified resolver (e.g. Codex subscription via codexauth.Service).
+	o.shedOnRunResult(run.AgentType, run.OrgID, run.TriggeredByUserID, result, err, log)
 
 	// 11. Handle result.
 	stopReason := StopReasonNone
@@ -2075,8 +2255,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		// true, sandbox.ID came from the row's existing container_id and
 		// belongs to whoever set it — tearing it down here would kill a
 		// container another holder is still using. On the losing-race path
-		// we instead leave it alone; the caller's retry will attach to
-		// actualContainerID via the reuse path.
+		// we instead leave it alone; the winner is using actualContainerID.
 		if !reusedExisting {
 			if destroyErr := o.provider.Destroy(destroyCtx, sandbox); destroyErr != nil {
 				log.Error().Err(destroyErr).Str("losing_container_id", sandbox.ID).Msg("failed to destroy sandbox after losing hydrate race")
@@ -2088,17 +2267,17 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		log.Warn().
 			Str("winning_container_id", actualContainerID).
 			Str("losing_container_id", sandbox.ID).
-			Msg("another holder published container_id first; aborting turn so the user can retry against the winning container")
-		if revertErr := o.sessions.UpdateStatus(ctx, session.OrgID, session.ID, string(models.SessionStatusIdle)); revertErr != nil {
-			log.Error().Err(revertErr).Msg("failed to revert session to idle after losing hydrate race")
+			Msg("another holder published container_id first; diagnosing whether the winner is alive or a stale orphan")
+		// Self-heal: see RunAgent's symmetrical site for rationale. The
+		// diagnosis helper either dead-letters this duplicate (real winner
+		// active) or CAS-clears a stale orphan and signals retry.
+		diagErr := o.diagnoseAcquireHoldRaceLoss(ctx, session.OrgID, session.ID, actualContainerID, log)
+		if errors.Is(diagErr, ErrSandboxPreviewRace) {
+			if revertErr := o.sessions.UpdateStatus(ctx, session.OrgID, session.ID, string(models.SessionStatusIdle)); revertErr != nil {
+				log.Error().Err(revertErr).Msg("failed to revert session to idle after preview won sandbox race")
+			}
 		}
-		o.registerSandboxFailureMessage(
-			ctx,
-			session,
-			"Another session activity was starting at the same time. Please try again.",
-			"sandbox race",
-		)
-		return fmt.Errorf("sandbox race: actual container %s != local %s", actualContainerID, sandbox.ID)
+		return fmt.Errorf("%w: actual container %s != local %s", diagErr, actualContainerID, sandbox.ID)
 	}
 	containerStartedAt := time.Now()
 	var usageEventID uuid.UUID
@@ -2165,6 +2344,14 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	if o.cancels != nil {
 		o.cancels.Register(session.ID, sandbox, o.provider, cancel)
 	}
+	// Mirror the registration on the thread-scoped registry so a per-tab
+	// cancel can SIGINT just this thread's agent process. The session-level
+	// registry remains the legacy path for whole-sandbox cancels.
+	if o.threadCancels != nil && opts != nil && opts.ThreadID != nil {
+		processName := agentProcessName(session.AgentType)
+		o.threadCancels.Register(*opts.ThreadID, sandbox, o.provider, processName, cancel)
+		defer o.threadCancels.Deregister(*opts.ThreadID)
+	}
 
 	// 5. Set up the workspace. Three paths:
 	//   - Reuse: the container is already live (preview hydrated it); just
@@ -2181,11 +2368,11 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		// container without agent credentials).
 		switch session.AgentType {
 		case models.AgentTypeCodex:
-			if err := o.ensureCodexAuth(ctx, session, sandbox); err != nil {
+			if err := o.ensureCodexAuth(ctx, session, sandbox, sandboxCfg.Env); err != nil {
 				return err
 			}
 		case models.AgentTypeClaudeCode:
-			if err := o.ensureClaudeCodeAuth(ctx, session, sandbox); err != nil {
+			if err := o.ensureClaudeCodeAuth(ctx, session, sandbox, sandboxCfg.Env); err != nil {
 				return err
 			}
 		}
@@ -2263,7 +2450,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		// reconstruct the prior state.
 		log.Info().Msg("continuing session without snapshot, starting fresh")
 
-		issue, repoFullName, err := o.setupFreshSandbox(ctx, session, sandbox)
+		issue, repoFullName, err := o.setupFreshSandbox(ctx, session, sandbox, sandboxCfg.Env)
 		if err != nil {
 			o.failRun(ctx, session, fmt.Sprintf("setup fresh sandbox: %s", err))
 			return fmt.Errorf("setup fresh sandbox: %w", err)
@@ -2340,7 +2527,12 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	logWg.Wait()
 
 	// 6b. Retry once on token expiration for Codex agents.
-	result, err = o.retryOnTokenExpired(ctx, session.AgentType, session.OrgID, session.ID, threadID, turnNumber, sandbox, adapter, execCtx, prompt, result, err, log)
+	result, err = o.retryOnTokenExpired(ctx, session.AgentType, session.OrgID, session.TriggeredByUserID, session.ID, threadID, turnNumber, sandbox, adapter, execCtx, prompt, result, err, log)
+
+	// 6c. Shed the just-picked credential when the (post-retry) result shows
+	// rate-limit or auth-rejected signals. Same semantics as the entry-turn
+	// path above; see shedOnRunResult.
+	o.shedOnRunResult(session.AgentType, session.OrgID, session.TriggeredByUserID, result, err, log)
 
 	stopReason := StopReasonNone
 	if o.cancels != nil {
@@ -2393,6 +2585,23 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		}
 		*opts.ResultAgentSessionID = threadAgentSessionID
 	}
+	// Fire the thread-scoped turn-complete hook before snapshotting so the
+	// caller's bookkeeping (file attribution, cost accumulation) lands in
+	// one logical transaction with the assistant message and turn-complete
+	// row update. Hook is intentionally fire-and-forget from the
+	// orchestrator's perspective; failures inside the callback must not
+	// abort the turn. Diff is taken straight from the agent result so we
+	// never re-shell into the sandbox.
+	if opts != nil && opts.OnTurnComplete != nil && result != nil {
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					log.Warn().Interface("panic", r).Msg("OnTurnComplete callback panicked")
+				}
+			}()
+			opts.OnTurnComplete(result.Diff, result.TokenUsage.TotalCostUSD)
+		}()
+	}
 
 	// 8. Snapshot again.
 	newSnapshotKey, snapshotSize, snapshotErr := o.snapshotSessionOnTurnSuccess(ctx, session, sandbox, result, log)
@@ -2428,7 +2637,9 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 // setupFreshSandbox clones the session's repository into the sandbox when no
 // snapshot is available. Returns the issue (for prompt building) and the repo
 // full name (for memory lookup). Handles sessions with or without a repository.
-func (o *Orchestrator) setupFreshSandbox(ctx context.Context, session *models.Session, sandbox *Sandbox) (models.Issue, string, error) {
+// The resolved env is passed in from the caller so auth injection honors the
+// exact credential selection already baked into SandboxConfig.
+func (o *Orchestrator) setupFreshSandbox(ctx context.Context, session *models.Session, sandbox *Sandbox, env map[string]string) (models.Issue, string, error) {
 	var issue models.Issue
 	if session.PrimaryIssueID != nil {
 		fetched, err := o.issues.GetByID(ctx, session.OrgID, *session.PrimaryIssueID)
@@ -2483,15 +2694,11 @@ func (o *Orchestrator) setupFreshSandbox(ctx context.Context, session *models.Se
 	// Inject auth credentials into the sandbox.
 	switch session.AgentType {
 	case models.AgentTypeCodex:
-		injected, err := o.env.InjectCodexAuth(ctx, session.OrgID, sandbox)
-		if err != nil {
+		if err := o.ensureCodexAuth(ctx, session, sandbox, env); err != nil {
 			return models.Issue{}, "", fmt.Errorf("codex auth injection: %w", err)
 		}
-		if !injected {
-			return models.Issue{}, "", fmt.Errorf("no credentials for codex agent")
-		}
 	case models.AgentTypeClaudeCode:
-		if err := o.ensureClaudeCodeAuth(ctx, session, sandbox); err != nil {
+		if err := o.ensureClaudeCodeAuth(ctx, session, sandbox, env); err != nil {
 			return models.Issue{}, "", fmt.Errorf("claude code auth injection: %w", err)
 		}
 	}
@@ -2863,8 +3070,12 @@ func (o *Orchestrator) failTimedOutSession(run *models.Session, elapsed time.Dur
 
 // ensureCodexAuth injects Codex auth credentials into the sandbox, failing the
 // run with a codex_auth_expired category if injection fails or no creds exist.
-func (o *Orchestrator) ensureCodexAuth(ctx context.Context, run *models.Session, sandbox *Sandbox) error {
-	injected, err := o.env.InjectCodexAuth(ctx, run.OrgID, sandbox)
+func (o *Orchestrator) ensureCodexAuth(ctx context.Context, run *models.Session, sandbox *Sandbox, env map[string]string) error {
+	if env["OPENAI_API_KEY"] != "" && o.env != nil && o.env.unifiedCodingCredentialIsAPIKey(ctx, run.OrgID, run.TriggeredByUserID, models.ProviderOpenAI) {
+		return nil
+	}
+
+	injected, err := o.env.InjectCodexAuthForUser(ctx, run.OrgID, run.TriggeredByUserID, sandbox)
 	if err != nil {
 		o.failRunWithCategory(ctx, run,
 			fmt.Sprintf("codex auth injection failed: %s", err),
@@ -3001,6 +3212,10 @@ func (o *Orchestrator) injectClaudeCodeAuth(ctx context.Context, orgID uuid.UUID
 		return false, nil
 	}
 
+	return o.writeClaudeCodeAuth(ctx, orgID, sandbox, *sub)
+}
+
+func (o *Orchestrator) writeClaudeCodeAuth(ctx context.Context, orgID uuid.UUID, sandbox *Sandbox, sub models.AnthropicSubscription) (bool, error) {
 	oauthPayload := map[string]interface{}{
 		"accessToken":  sub.AccessToken,
 		"refreshToken": sub.RefreshToken,
@@ -3058,13 +3273,105 @@ func (o *Orchestrator) injectClaudeCodeAuth(ctx context.Context, orgID uuid.UUID
 	return true, nil
 }
 
+func (o *Orchestrator) injectUnifiedClaudeCodeAuth(ctx context.Context, orgID uuid.UUID, userID *uuid.UUID, sandbox *Sandbox) (bool, error) {
+	if o.env == nil || o.env.codingCredentials == nil {
+		return false, nil
+	}
+
+	if picked, ok := o.env.lookupRecentCredential(orgID, userID, models.ProviderAnthropic); ok {
+		return o.injectPickedUnifiedClaudeCodeAuth(ctx, orgID, sandbox, picked)
+	}
+
+	_, picked, handled := o.env.pickFromCodingProviderSet(ctx, orgID, userID, models.ProviderAnthropic, []models.ProviderName{
+		models.ProviderAnthropic,
+		models.ProviderAnthropicSubscription,
+	})
+	if !handled || picked == nil {
+		return false, nil
+	}
+	return o.injectPickedUnifiedClaudeCodeAuth(ctx, orgID, sandbox, *picked)
+}
+
+func (o *Orchestrator) injectPickedUnifiedClaudeCodeAuth(ctx context.Context, orgID uuid.UUID, sandbox *Sandbox, picked models.DecryptedCodingCredential) (bool, error) {
+	if picked.Provider != models.ProviderAnthropicSubscription {
+		return false, nil
+	}
+	cfg, ok := picked.Config.(models.AnthropicSubscriptionConfig)
+	if !ok || cfg.AccessToken == "" || cfg.RefreshToken == "" {
+		return false, nil
+	}
+	sub := models.AnthropicSubscription{
+		AccessToken:   cfg.AccessToken,
+		RefreshToken:  cfg.RefreshToken,
+		ExpiresAt:     cfg.ExpiresAt,
+		AccountType:   cfg.AccountType,
+		RateLimitTier: cfg.RateLimitTier,
+		Scopes:        cfg.Scopes,
+	}
+	if sub.NeedsRefresh(codexSubscriptionRefreshWindow) {
+		refresher, ok := o.claudeCodeAuth.(ClaudeCodeAuthRefresher)
+		if ok {
+			// Build scope from the picked row's UserID. Personal credentials
+			// (UserID != nil) require their scope on the lookup; passing
+			// org scope would miss them in coding_credentials and surface
+			// as "credential not found".
+			scope := models.Scope{OrgID: orgID, UserID: picked.UserID}
+			refreshed, err := refresher.RefreshTokenByID(ctx, scope, picked.ID)
+			if err == nil && refreshed != nil {
+				sub = *refreshed
+			} else if sub.IsExpired() {
+				if err != nil {
+					return false, fmt.Errorf("refresh unified claude subscription %s: %w", picked.ID, err)
+				}
+				return false, fmt.Errorf("refresh unified claude subscription %s returned no token", picked.ID)
+			} else if err != nil {
+				o.logger.Warn().
+					Err(err).
+					Str("cred_id", picked.ID.String()).
+					Msg("unified claude subscription refresh failed; using cached token")
+			}
+		} else if sub.IsExpired() {
+			return false, fmt.Errorf("unified claude subscription %s is expired and no refresh provider is configured", picked.ID)
+		}
+	}
+	return o.writeClaudeCodeAuth(ctx, orgID, sandbox, sub)
+}
+
 // ensureClaudeCodeAuth guarantees that the Claude Code agent has at least one
-// credential path available in the sandbox. Priority is subscription file >
-// ANTHROPIC_API_KEY env var; the run only fails when neither is configured.
-func (o *Orchestrator) ensureClaudeCodeAuth(ctx context.Context, run *models.Session, sandbox *Sandbox) error {
-	injected, err := o.injectClaudeCodeAuth(ctx, run.OrgID, sandbox)
+// credential path available in the sandbox. When the unified resolver selected
+// an API key, that key wins; otherwise subscription file injection is preferred
+// over the legacy ANTHROPIC_API_KEY fallback. The run only fails when neither
+// path is configured.
+func (o *Orchestrator) ensureClaudeCodeAuth(ctx context.Context, run *models.Session, sandbox *Sandbox, env map[string]string) error {
+	if env["ANTHROPIC_API_KEY"] != "" && o.env != nil && o.env.unifiedCodingCredentialIsAPIKey(ctx, run.OrgID, run.TriggeredByUserID, models.ProviderAnthropic) {
+		return nil
+	}
+
+	injected, err := o.injectUnifiedClaudeCodeAuth(ctx, run.OrgID, run.TriggeredByUserID, sandbox)
 	if err != nil {
-		if fallbackErr := o.prepareClaudeCodeAPIKeyFallback(ctx, run, sandbox); fallbackErr == nil {
+		if fallbackErr := o.prepareClaudeCodeAPIKeyFallback(ctx, run, sandbox, env); fallbackErr == nil {
+			o.logger.Warn().
+				Err(err).
+				Str("org_id", run.OrgID.String()).
+				Str("session_id", run.ID.String()).
+				Msg("unified claude subscription injection failed; continuing with Anthropic API-key fallback")
+			return nil
+		}
+		o.failRunWithCategory(ctx, run,
+			fmt.Sprintf("unified claude subscription injection failed: %s", err),
+			FailureCategoryClaudeCodeAuth,
+			"Your Claude subscription token could not be injected into the sandbox. The token may have been revoked or the refresh failed.",
+			[]string{"Re-connect your Claude subscription from the Agent settings page"},
+		)
+		return fmt.Errorf("unified claude code auth injection: %w", err)
+	}
+	if injected {
+		return nil
+	}
+
+	injected, err = o.injectClaudeCodeAuth(ctx, run.OrgID, sandbox)
+	if err != nil {
+		if fallbackErr := o.prepareClaudeCodeAPIKeyFallback(ctx, run, sandbox, env); fallbackErr == nil {
 			o.logger.Warn().
 				Err(err).
 				Str("org_id", run.OrgID.String()).
@@ -3095,7 +3402,7 @@ func (o *Orchestrator) ensureClaudeCodeAuth(ctx context.Context, run *models.Ses
 	// No subscription — check for an Anthropic API-key fallback. The env var
 	// was already baked into sandboxCfg.Env by resolveAgentEnv, so if the
 	// credential exists the sandbox is already configured.
-	if fallbackErr := o.prepareClaudeCodeAPIKeyFallback(ctx, run, sandbox); fallbackErr == nil {
+	if fallbackErr := o.prepareClaudeCodeAPIKeyFallback(ctx, run, sandbox, env); fallbackErr == nil {
 		return nil
 	} else if !errors.Is(fallbackErr, errClaudeCodeFallbackUnavailable) {
 		o.failRunWithCategory(ctx, run,
@@ -3121,10 +3428,8 @@ func (o *Orchestrator) ensureClaudeCodeAuth(ctx context.Context, run *models.Ses
 
 var errClaudeCodeFallbackUnavailable = errors.New("claude code API-key fallback unavailable")
 
-func (o *Orchestrator) prepareClaudeCodeAPIKeyFallback(ctx context.Context, run *models.Session, sandbox *Sandbox) error {
-	cfg := o.env.resolveProviderConfig(ctx, run.OrgID, run.TriggeredByUserID, models.ProviderAnthropic)
-	ac, ok := cfg.(models.AnthropicConfig)
-	if !ok || ac.APIKey == "" {
+func (o *Orchestrator) prepareClaudeCodeAPIKeyFallback(ctx context.Context, run *models.Session, sandbox *Sandbox, env map[string]string) error {
+	if env["ANTHROPIC_API_KEY"] == "" {
 		return errClaudeCodeFallbackUnavailable
 	}
 
@@ -3562,6 +3867,7 @@ func (o *Orchestrator) retryOnTokenExpired(
 	ctx context.Context,
 	agentType models.AgentType,
 	orgID uuid.UUID,
+	userID *uuid.UUID,
 	sessionID uuid.UUID,
 	threadID *uuid.UUID,
 	turnNumber int,
@@ -3579,7 +3885,7 @@ func (o *Orchestrator) retryOnTokenExpired(
 
 	log.Warn().Msg("codex CLI hit token_expired, refreshing token and retrying")
 
-	reinjected, reinjectErr := o.env.InjectCodexAuth(ctx, orgID, sandbox)
+	reinjected, reinjectErr := o.env.InjectCodexAuthForUser(ctx, orgID, userID, sandbox)
 	if reinjectErr != nil {
 		log.Warn().Err(reinjectErr).Msg("failed to re-inject codex auth for retry")
 		return result, err
@@ -3602,6 +3908,95 @@ func (o *Orchestrator) retryOnTokenExpired(
 
 	log.Info().Msg("codex CLI retry after token refresh completed")
 	return result, err
+}
+
+// shedOnRunResult forwards rate-limit / auth-rejected signals from a finished
+// run back into the unified credential store's in-process health cache so the
+// next pickFromCodingProvider walk for the same (orgID, userID, provider)
+// skips the just-failed credential until its TTL expires. The OAuth services
+// independently flip persisted credential status to "invalid" on hard auth
+// failures; this is the fast-path hint that prevents repeat picks before the
+// resolver cache refreshes.
+//
+// Provider mapping is intentionally limited to agent types whose API-key auth
+// flows go through AgentEnv.pickFromCodingProvider. Codex subscription auth
+// uses codexauth.Service's own selector; because that path records no
+// ProviderOpenAI pick, the shed call below remains a no-op for subscription
+// runs.
+func (o *Orchestrator) shedOnRunResult(agentType models.AgentType, orgID uuid.UUID, userID *uuid.UUID, result *AgentResult, runErr error, log zerolog.Logger) {
+	if o.env == nil || result == nil {
+		return
+	}
+	provider := codingProviderForAgent(agentType)
+	if provider == "" {
+		return
+	}
+	errMsg := strings.ToLower(result.Error)
+	switch {
+	case isAuthRejectedError(errMsg):
+		log.Warn().
+			Str("agent_type", string(agentType)).
+			Str("provider", string(provider)).
+			Msg("shedding credential after auth-rejected signal in run result")
+		o.env.ShedAuthRejected(orgID, userID, provider)
+	case isRateLimitedError(errMsg):
+		log.Warn().
+			Str("agent_type", string(agentType)).
+			Str("provider", string(provider)).
+			Msg("shedding credential after rate-limit signal in run result")
+		o.env.ShedRateLimited(orgID, userID, provider)
+	}
+	_ = runErr // accepted for symmetry with the call sites; the result.Error string is the canonical signal today
+}
+
+// codingProviderForAgent maps an agent type to the unified provider name its
+// API-key auth uses. Subscription picks are intentionally not represented
+// here; they do not write the recentPicks tracker under these providers.
+func codingProviderForAgent(agentType models.AgentType) models.ProviderName {
+	switch agentType {
+	case models.AgentTypeClaudeCode:
+		return models.ProviderAnthropic
+	case models.AgentTypeCodex:
+		return models.ProviderOpenAI
+	case models.AgentTypeGeminiCLI:
+		return models.ProviderGemini
+	case models.AgentTypeAmp:
+		return models.ProviderAmp
+	case models.AgentTypePi:
+		return models.ProviderPi
+	default:
+		return ""
+	}
+}
+
+// isRateLimitedError matches the same surface as the failure classifier so
+// shedding stays consistent with the user-facing api_error category.
+func isRateLimitedError(errMsg string) bool {
+	if errMsg == "" {
+		return false
+	}
+	return strings.Contains(errMsg, "rate limit") ||
+		strings.Contains(errMsg, "rate_limit") ||
+		strings.Contains(errMsg, "429") ||
+		strings.Contains(errMsg, "too many requests")
+}
+
+// isAuthRejectedError detects 401-class signals indicating the credential is
+// structurally bad (expired refresh, revoked, invalid key). Token-expired
+// transients are excluded because retryOnTokenExpired already refreshed and
+// retried; if that retry succeeded the result is clean, and if it failed the
+// error text shifts to the strings matched here.
+func isAuthRejectedError(errMsg string) bool {
+	if errMsg == "" {
+		return false
+	}
+	return strings.Contains(errMsg, "refresh_token_reused") ||
+		strings.Contains(errMsg, "invalid_grant") ||
+		strings.Contains(errMsg, "invalid api key") ||
+		strings.Contains(errMsg, "invalid_api_key") ||
+		strings.Contains(errMsg, "401 unauthorized") ||
+		strings.Contains(errMsg, "401 unauthenticated") ||
+		strings.Contains(errMsg, "authentication_error")
 }
 
 // containerExitReason determines a granular exit reason for billing metadata

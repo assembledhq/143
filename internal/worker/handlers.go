@@ -68,6 +68,8 @@ func RegisterHandlers(w *Worker, stores *Stores, services *Services, retentionCf
 		w.Register("reconcile_pull_request_state", newReconcilePullRequestStateHandler(services, logger))
 		w.Register("enrich_pull_request_health", newEnrichPullRequestHealthHandler(services, logger))
 		w.Register("analyze_failure", newAnalyzeFailureHandler(stores, services, logger))
+		w.Register("fork_session_thread", newForkSessionThreadHandler(stores, services, logger))
+		w.Register("revert_session_thread", newRevertSessionThreadHandler(stores, services, logger))
 	}
 	if services != nil && services.Feedback != nil {
 		w.Register("process_review_comment", newProcessReviewCommentHandler(services, logger))
@@ -115,19 +117,20 @@ type Stores struct {
 	Webhooks            *db.WebhookDeliveryStore
 	PriorityScores      *db.PriorityScoreStore
 	ComplexityEstimates *db.ComplexityEstimateStore
-	Projects            *db.ProjectStore        // nil-safe: projects feature disabled if nil
-	ProjectTasks        *db.ProjectTaskStore    // nil-safe
-	Credentials         *db.OrgCredentialStore  // nil-safe: needed for sync_slack
-	AuditLogs           *db.AuditLogStore       // nil-safe: audit retention cleanup
-	Organizations       *db.OrganizationStore   // nil-safe: needed for audit retention
-	SessionLogs         *db.SessionLogStore     // nil-safe: data retention cleanup
-	EvalTasks           *db.EvalTaskStore       // nil-safe: eval feature
-	EvalRuns            *db.EvalRunStore        // nil-safe: eval feature
-	EvalBatches         *db.EvalBatchStore      // nil-safe: eval feature
-	EvalBootstraps      *db.EvalBootstrapStore  // nil-safe: eval bootstrap feature
-	Repositories        *db.RepositoryStore     // nil-safe: needed for eval repo lookup
-	SessionMessages     *db.SessionMessageStore // nil-safe: needed for title regeneration
-	SessionThreads      *db.SessionThreadStore  // nil-safe: needed for thread-scoped continuation status
+	Projects            *db.ProjectStore                // nil-safe: projects feature disabled if nil
+	ProjectTasks        *db.ProjectTaskStore            // nil-safe
+	Credentials         *db.OrgCredentialStore          // nil-safe: needed for sync_slack
+	AuditLogs           *db.AuditLogStore               // nil-safe: audit retention cleanup
+	Organizations       *db.OrganizationStore           // nil-safe: needed for audit retention
+	SessionLogs         *db.SessionLogStore             // nil-safe: data retention cleanup
+	EvalTasks           *db.EvalTaskStore               // nil-safe: eval feature
+	EvalRuns            *db.EvalRunStore                // nil-safe: eval feature
+	EvalBatches         *db.EvalBatchStore              // nil-safe: eval feature
+	EvalBootstraps      *db.EvalBootstrapStore          // nil-safe: eval bootstrap feature
+	Repositories        *db.RepositoryStore             // nil-safe: needed for eval repo lookup
+	SessionMessages     *db.SessionMessageStore         // nil-safe: needed for title regeneration
+	SessionThreads      *db.SessionThreadStore          // nil-safe: needed for thread-scoped continuation status
+	ThreadFileEvents    *db.SessionThreadFileEventStore // nil-safe: tab-level file write attribution
 	IssueSnapshots      *db.SessionTurnIssueSnapshotStore
 	Automations         *db.AutomationStore       // nil-safe: automations feature disabled if nil
 	AutomationRuns      *db.AutomationRunStore    // nil-safe: automations feature disabled if nil
@@ -498,17 +501,28 @@ func newAutomationRunHandler(stores *Stores, services *Services, logger zerolog.
 			targetBranch = &b
 		}
 
+		// Carry the run's GoalSnapshot into PMApproach so promptSeedForSession
+		// surfaces it as the synthesized issue's description. Without this the
+		// agent receives an empty "Session task" seed and silently ignores any
+		// conditions or invariants the user wrote in the automation goal.
+		var goalSeed *string
+		if strings.TrimSpace(run.GoalSnapshot) != "" {
+			g := run.GoalSnapshot
+			goalSeed = &g
+		}
+
 		session := &models.Session{
 			OrgID:             orgID,
 			AgentType:         agentType,
 			Status:            "pending",
-			AutonomyLevel:     "semi",
+			AutonomyLevel:     string(models.DefaultSessionAutonomy),
 			TokenMode:         "low",
 			ModelOverride:     automation.ModelOverride,
 			TriggeredByUserID: run.TriggeredByUserID,
 			TargetBranch:      targetBranch,
 			RepositoryID:      automation.RepositoryID,
 			AutomationRunID:   &runID,
+			PMApproach:        goalSeed,
 		}
 		if err := stores.Sessions.Create(ctx, session); err != nil {
 			// Session creation failed after we claimed the row — flip
@@ -529,7 +543,7 @@ func newAutomationRunHandler(stores *Stores, services *Services, logger zerolog.
 		// transition above somehow returned true twice — defense in depth),
 		// the job store rejects the second insert and the second handler
 		// returns cleanly without a duplicate agent run.
-		dedupeKey := fmt.Sprintf("run_agent:%s", session.ID.String())
+		dedupeKey := db.RunAgentDedupeKey(session.ID)
 		agentPayload := map[string]string{
 			"session_id": session.ID.String(),
 			"org_id":     orgID.String(),
@@ -909,6 +923,42 @@ func newRunAgentHandler(stores *Stores, services *Services, logger zerolog.Logge
 			runErr = services.Orchestrator.RunAgent(jobCtx, &run)
 		}
 		if err := runErr; err != nil {
+			if errors.Is(err, agent.ErrStaleSandboxIDCleared) {
+				// The orchestrator detected a stale orphan container_id from
+				// a crashed prior worker, CAS-cleared it, and signaled retry.
+				// Requeue without consuming an attempt — the next attempt
+				// sees a clean row and creates a fresh sandbox. A short
+				// backoff lets any in-flight cleanup settle.
+				retryAfter := 2 * time.Second
+				logger.Info().
+					Str("session_id", runID.String()).
+					Err(err).
+					Msg("run_agent cleared stale orphan container_id; retrying against the clean row")
+				return &RetryableError{Err: err, RetryAfter: &retryAfter}
+			}
+			if errors.Is(err, agent.ErrSandboxPreviewRace) {
+				// A preview hydrate published the live container first. There is
+				// no winning agent job to publish a terminal result, so retry
+				// after the orchestrator reverted the session back to pending.
+				retryAfter := 2 * time.Second
+				logger.Info().
+					Str("session_id", runID.String()).
+					Err(err).
+					Msg("run_agent lost sandbox publish race to preview; retrying against session state")
+				return &RetryableError{Err: err, RetryAfter: &retryAfter}
+			}
+			if errors.Is(err, agent.ErrSandboxRaceLoser) {
+				// A duplicate run_agent job lost the AcquireTurnHold race to
+				// the winner that owns the session row. The winner will
+				// publish the authoritative result; this duplicate must
+				// dead-letter immediately (every retry would lose the same
+				// race) without surfacing a user-visible failure.
+				logger.Info().
+					Str("session_id", runID.String()).
+					Err(err).
+					Msg("duplicate run_agent job lost sandbox-hold race; dead-lettering silently — winner retains the session row")
+				return &FatalError{Err: err}
+			}
 			if errors.Is(err, agent.ErrConcurrencyLimit) {
 				// If the session has been pending for too long, fail it
 				// instead of retrying indefinitely.
@@ -1005,11 +1055,31 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 					return fmt.Errorf("session thread %s does not belong to session %s", threadID, sessionID)
 				}
 				threadTurnBefore = thread.CurrentTurn
+
+				// Phase 2: stamp the thread-start checkpoint before the first
+				// agent turn. The session's current SnapshotKey is the
+				// pre-thread-edit state from the user's perspective; using
+				// it as the thread's recovery baseline lets a "revert this
+				// tab" action restore the workspace to that point even if
+				// later sibling-tab turns overwrite session.SnapshotKey.
+				if thread.CurrentTurn == 0 && thread.BaseSnapshotKey == nil && session.SnapshotKey != nil && *session.SnapshotKey != "" {
+					if err := stores.SessionThreads.SetBaseSnapshot(ctx, orgID, threadID, *session.SnapshotKey); err != nil {
+						logger.Warn().Err(err).
+							Str("thread_id", threadID.String()).
+							Msg("failed to stamp thread-start checkpoint")
+					}
+				}
+
+				threadIDLocal := threadID
 				continueOpts = &agent.ContinueSessionOptions{
 					AgentType:            thread.AgentType,
 					ModelOverride:        thread.ModelOverride,
 					ThreadAgentSessionID: thread.AgentSessionID,
 					ResultAgentSessionID: &resultAgentSessionID,
+					ThreadID:             &threadIDLocal,
+					OnTurnComplete: func(diff string, costUSD float64) {
+						emitThreadAttribution(ctx, stores, orgID, sessionID, threadIDLocal, threadTurnBefore+1, diff, costUSD, logger)
+					},
 				}
 			}
 		}
@@ -1020,6 +1090,40 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 			// attempt. The session row is unchanged at this point.
 			if errors.Is(err, agent.ErrSnapshotPending) {
 				return &RetryableError{Err: err}
+			}
+			if errors.Is(err, agent.ErrStaleSandboxIDCleared) {
+				// Stale orphan container_id cleared; retry against the clean
+				// row. See newRunAgentHandler for full rationale.
+				retryAfter := 2 * time.Second
+				logger.Info().
+					Str("session_id", sessionID.String()).
+					Err(err).
+					Msg("continue_session cleared stale orphan container_id; retrying against the clean row")
+				return &RetryableError{Err: err, RetryAfter: &retryAfter}
+			}
+			if errors.Is(err, agent.ErrSandboxPreviewRace) {
+				// A preview hydrate published the live container first. Retry
+				// so the next attempt fetches the updated session row and
+				// attaches to that preview-held container via the reuse path.
+				retryAfter := 2 * time.Second
+				logger.Info().
+					Str("session_id", sessionID.String()).
+					Err(err).
+					Msg("continue_session lost sandbox publish race to preview; retrying against the preview container")
+				return &RetryableError{Err: err, RetryAfter: &retryAfter}
+			}
+			if errors.Is(err, agent.ErrSandboxRaceLoser) {
+				// A duplicate continue_session job lost the AcquireTurnHold
+				// race to the winner. Dead-letter immediately without
+				// retries (every retry would lose the same race) and
+				// without touching the session row — the winner owns it.
+				// The thread is left as the orchestrator left it; the
+				// winner's success/failure path will release it.
+				logger.Info().
+					Str("session_id", sessionID.String()).
+					Err(err).
+					Msg("duplicate continue_session job lost sandbox-hold race; dead-lettering silently — winner retains the session row")
+				return &FatalError{Err: err}
 			}
 			if hasThread {
 				if statusErr := stores.SessionThreads.UpdateStatus(ctx, orgID, threadID, models.ThreadStatusIdle); statusErr != nil {
@@ -1349,6 +1453,8 @@ func userFacingPRError(err error) string {
 		return "This pull request is no longer open."
 	case errors.Is(err, ghservice.ErrLegacyPRMissingHeadRef):
 		return "This PR predates branch tracking; create a new PR to push follow-up changes."
+	case errors.Is(err, ghservice.ErrPushRejected):
+		return ghservice.PushRejectedPRMessage
 	default:
 		return "Check GitHub access or repo permissions and try again."
 	}
@@ -2456,7 +2562,7 @@ func newRunEvalBootstrapHandler(stores *Stores, services *Services, logger zerol
 			OrgID:         orgID,
 			AgentType:     models.AgentTypeClaudeCode,
 			Status:        "running",
-			AutonomyLevel: "full",
+			AutonomyLevel: string(models.SessionAutonomyFull),
 			TokenMode:     "low",
 			Title:         &title,
 			RepositoryID:  &repoID,
@@ -2683,6 +2789,13 @@ func newPrepareLinearPrimaryHandler(svc *linear.Service, logger zerolog.Logger) 
 		})
 		if err := svc.PrepareLinearPrimaryRefs(ctx, orgID, sessionID, refs, userID); err != nil {
 			logger.Warn().Err(err).Str("session_id", sessionID.String()).Msg("prepare_linear_primary failed")
+			if errors.Is(err, linear.ErrIntegrationNotFound) {
+				// Integration was disconnected/removed between enqueue and
+				// pickup. Retrying for 8 minutes won't make the row appear;
+				// dead-letter immediately so the prepare-state hook can
+				// unblock run_agent.
+				return &FatalError{Err: err}
+			}
 			if errors.Is(err, linear.ErrUnauthorized) {
 				// Flip the integration to errored on the very first 401 so the
 				// settings UI shows a Reconnect CTA without waiting for retry
@@ -2691,6 +2804,10 @@ func newPrepareLinearPrimaryHandler(svc *linear.Service, logger zerolog.Logger) 
 				// exhaustion takes minutes, but the user is staring at the
 				// session-detail page waiting for context to load.
 				svc.MarkIntegrationUnauthorized(ctx, orgID)
+				// Token won't fix itself in 8 minutes — dead-letter so we
+				// don't fire the dead-letter hook minutes after the user
+				// already saw "Reconnect" in settings.
+				return &FatalError{Err: err}
 			}
 			return &RetryableError{Err: err}
 		}
@@ -2740,6 +2857,11 @@ func newLinkLinearIssueHandler(svc *linear.Service, logger zerolog.Logger) JobHa
 		}
 		if err := svc.LinkRelatedLinearRefs(ctx, orgID, sessionID, refs, userID); err != nil {
 			logger.Warn().Err(err).Str("session_id", sessionID.String()).Msg("link_linear_issue failed")
+			// linkRelatedRefs (the inner loop) swallows per-ref ResolvePrimary
+			// errors with Warn().continue, so ErrIntegrationNotFound /
+			// ErrUnauthorized never reach this caller. Any error here is
+			// pre-loop wiring (e.g. missing service deps) — let the worker
+			// retry under the default backoff.
 			return &RetryableError{Err: err}
 		}
 		return nil
@@ -2790,6 +2912,9 @@ func newLinkLinearIssueMidSessionHandler(svc *linear.Service, logger zerolog.Log
 		}
 		if err := svc.LinkMidSessionRefs(ctx, orgID, sessionID, refs, userID); err != nil {
 			logger.Warn().Err(err).Str("session_id", sessionID.String()).Msg("link_linear_issue_mid_session failed")
+			// LinkMidSessionRefs runs through linkRelatedRefs which swallows
+			// per-ref errors; reaching this branch means a pre-loop wiring
+			// failure that's worth retrying.
 			return &RetryableError{Err: err}
 		}
 		return nil
@@ -2902,23 +3027,21 @@ func newLinearMilestoneHandler(stores *Stores, svc *linear.Service, logger zerol
 		}
 		if err := svc.HandleStateTransition(ctx, in); err != nil {
 			logger.Warn().Err(err).Str("session_id", sessionID.String()).Msg("HandleStateTransition failed")
-			// State transitions are recorded in the event log even when
-			// they skip; rate limits are the one case we *do* want to
-			// retry, otherwise the audit trail says "skipped" forever.
 			if errors.Is(err, linear.ErrUnauthorized) {
 				svc.MarkIntegrationUnauthorized(ctx, orgID)
 			}
-			if retry := mapLinearWriteErrorToRetry(err); retry != nil {
-				return retry
-			}
+			return mapLinearWriteErrorToRetry(err)
 		}
 		return nil
 	}
 }
 
-// mapLinearWriteErrorToRetry returns a RetryableError with a Retry-After
-// hint when the underlying Linear API call hit a 429 rate limit. All other
-// errors return as-is (worker will use default exponential backoff).
+// mapLinearWriteErrorToRetry classifies a Linear write error into the
+// FatalError / RetryableError shape the worker expects. 429s carry a
+// Retry-After hint; integration-not-found and unauthorized are fatal because
+// retrying for the 8-minute max duration won't bring the row back or
+// re-grant the token; everything else falls through to default exponential
+// backoff.
 //
 // On ErrUnauthorized the caller is responsible for invoking
 // svc.MarkIntegrationUnauthorized — done at each call site rather than here
@@ -2932,11 +3055,8 @@ func mapLinearWriteErrorToRetry(err error) error {
 		}
 		return &RetryableError{Err: err, RetryAfter: &delay}
 	}
-	if errors.Is(err, linear.ErrUnauthorized) {
-		// Token expired/revoked — let the retry happen at default backoff
-		// while the user reconnects. The status flip happens at the call
-		// site; here we only classify the retry shape.
-		return &RetryableError{Err: err}
+	if errors.Is(err, linear.ErrIntegrationNotFound) || errors.Is(err, linear.ErrUnauthorized) {
+		return &FatalError{Err: err}
 	}
 	return &RetryableError{Err: err}
 }
@@ -2962,8 +3082,19 @@ func newRefreshLinearTeamKeysHandler(svc *linear.Service, logger zerolog.Logger)
 		}
 		if err := svc.RefreshTeamKeys(ctx, orgID); err != nil {
 			logger.Warn().Err(err).Str("org_id", orgID.String()).Msg("refresh_linear_team_keys failed")
+			if errors.Is(err, linear.ErrIntegrationNotFound) {
+				// Org disconnected Linear after the 24h cron tick was
+				// scheduled. Retrying for 8 minutes won't bring the row
+				// back; dead-letter so the cron can re-arm cleanly the
+				// next time an install enqueues this job.
+				return &FatalError{Err: err}
+			}
 			if errors.Is(err, linear.ErrUnauthorized) {
 				svc.MarkIntegrationUnauthorized(ctx, orgID)
+				// Token won't recover in 8 minutes. The MarkIntegrationUnauthorized
+				// call above already surfaced the Reconnect CTA in settings;
+				// dead-letter immediately rather than burning retries.
+				return &FatalError{Err: err}
 			}
 			return &RetryableError{Err: err}
 		}

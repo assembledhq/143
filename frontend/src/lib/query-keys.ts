@@ -11,8 +11,8 @@ export const queryKeys = {
   sessions: {
     all: ["sessions"] as const,
     list: (repo?: string | null) => ["sessions", repo] as const,
-    counts: (repo?: string | null, triggeredByUserId?: string) =>
-      ["sessions", "counts", repo, triggeredByUserId] as const,
+    counts: (repo?: string | null, peopleKey?: string | null) =>
+      ["sessions", "counts", repo, peopleKey] as const,
     detail: (id: string) => ["session", id] as const,
     timeline: (id: string) => ["session", id, "timeline"] as const,
     validation: (id: string) => ["session", id, "validation"] as const,
@@ -22,6 +22,8 @@ export const queryKeys = {
     threadDetail: (sessionId: string, threadId: string) => ["session", sessionId, "thread", threadId] as const,
     threadMessages: (sessionId: string, threadId: string) => ["session", sessionId, "thread", threadId, "messages"] as const,
     threadLogs: (sessionId: string, threadId: string) => ["session", sessionId, "thread", threadId, "logs"] as const,
+    summary: (id: string) => ["session", id, "summary"] as const,
+    threadFileEvents: (id: string) => ["session", id, "thread-file-events"] as const,
   },
   repositories: {
     all: ["repositories"] as const,

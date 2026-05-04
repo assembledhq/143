@@ -4,50 +4,160 @@ import { renderWithProviders, screen, userEvent, waitFor } from "@/test/test-uti
 import { server } from "@/test/mocks/server";
 import AccountPage from "./page";
 
+// Helper that returns a stable handler set for the unified coding-credentials
+// endpoints. Each test overrides only the calls it cares about.
+function emptyCodingCredentialsHandlers() {
+  return [
+    http.get("/api/v1/coding-credentials", ({ request }) => {
+      // Echo scope back as `meta` so failing tests are easier to diagnose.
+      const url = new URL(request.url);
+      return HttpResponse.json({ data: [], meta: { scope: url.searchParams.get("scope") } });
+    }),
+  ];
+}
+
 describe("Account settings page", () => {
-  it("renders configured personal auths without inventing a fallback order", async () => {
+  it("renders the personal stack alongside the org fallback", async () => {
     server.use(
-      http.get("/api/v1/settings/credentials/personal", () =>
-        HttpResponse.json({
+      http.get("/api/v1/coding-credentials", ({ request }) => {
+        const scope = new URL(request.url).searchParams.get("scope");
+        if (scope === "personal") {
+          return HttpResponse.json({
+            data: [
+              {
+                id: "p1",
+                org_id: "org-1",
+                user_id: "user-1",
+                scope: "personal",
+                priority: 1,
+                agent: "claude_code",
+                auth_type: "api_key",
+                provider: "anthropic",
+                label: "Claude Code API key",
+                status: "healthy",
+                is_default: true,
+                usage_note: "sk-ant...5678",
+                created_at: "2026-01-01T00:00:00Z",
+                updated_at: "2026-01-01T00:00:00Z",
+              },
+              {
+                id: "p2",
+                org_id: "org-1",
+                user_id: "user-1",
+                scope: "personal",
+                priority: 2,
+                agent: "codex",
+                auth_type: "api_key",
+                provider: "openai",
+                label: "Codex API key",
+                status: "healthy",
+                is_default: false,
+                usage_note: "sk-open...1234",
+                created_at: "2026-01-01T00:00:00Z",
+                updated_at: "2026-01-01T00:00:00Z",
+              },
+            ],
+            meta: {},
+          });
+        }
+        if (scope === "org") {
+          return HttpResponse.json({
+            data: [
+              {
+                id: "o1",
+                org_id: "org-1",
+                scope: "org",
+                priority: 1,
+                agent: "codex",
+                auth_type: "subscription",
+                provider: "openai_subscription",
+                label: "Team seat A",
+                status: "healthy",
+                is_default: true,
+                created_at: "2026-01-01T00:00:00Z",
+                updated_at: "2026-01-01T00:00:00Z",
+              },
+            ],
+            meta: {},
+          });
+        }
+        // resolved
+        return HttpResponse.json({
           data: [
-            {
-              provider: "anthropic",
-              configured: true,
-              is_team_default: false,
-              masked_key: "sk-ant...5678",
-              status: "active",
-            },
-            {
-              provider: "openai",
-              configured: true,
-              is_team_default: false,
-              masked_key: "sk-open...1234",
-              status: "active",
-            },
+            { id: "p1", scope: "personal", agent: "claude_code", auth_type: "api_key", provider: "anthropic", label: "p1", status: "healthy", is_default: true, priority: 1, org_id: "org-1", created_at: "x", updated_at: "x" },
+            { id: "p2", scope: "personal", agent: "codex", auth_type: "api_key", provider: "openai", label: "p2", status: "healthy", is_default: false, priority: 2, org_id: "org-1", created_at: "x", updated_at: "x" },
+            { id: "o1", scope: "org", agent: "codex", auth_type: "subscription", provider: "openai_subscription", label: "o1", status: "healthy", is_default: true, priority: 1, org_id: "org-1", created_at: "x", updated_at: "x" },
           ],
           meta: {},
-        }),
-      ),
+        });
+      }),
     );
 
     renderWithProviders(<AccountPage />);
 
     expect(screen.getByText("My settings")).toBeInTheDocument();
-    expect(await screen.findByText("Configured personal auths")).toBeInTheDocument();
-    expect(await screen.findByText("sk-ant...5678")).toBeInTheDocument();
-    expect(await screen.findByText("sk-open...1234")).toBeInTheDocument();
-    expect(screen.queryByText("Default auth")).not.toBeInTheDocument();
-    expect(screen.queryByText("Backups in fallback order")).not.toBeInTheDocument();
-    expect(screen.queryByText(/Effective resolution:/)).not.toBeInTheDocument();
+    expect(await screen.findByText("My coding agents")).toBeInTheDocument();
+    // Both the user-set label and the auto-generated usage note render so
+    // multiple rows of the same agent/auth-type can still be told apart.
+    expect((await screen.findAllByText("Claude Code API key")).length).toBeGreaterThan(0);
+    expect((await screen.findAllByText("sk-ant...5678")).length).toBeGreaterThan(0);
+    expect((await screen.findAllByText("Codex API key")).length).toBeGreaterThan(0);
+    expect((await screen.findAllByText("sk-open...1234")).length).toBeGreaterThan(0);
+    expect(await screen.findByText("Org fallback")).toBeInTheDocument();
+    expect((await screen.findAllByText("Team seat A")).length).toBeGreaterThan(0);
+  });
+
+  it("renders the org fallback section even when the personal stack is empty", async () => {
+    server.use(
+      http.get("/api/v1/coding-credentials", ({ request }) => {
+        const scope = new URL(request.url).searchParams.get("scope");
+        if (scope === "personal") {
+          return HttpResponse.json({ data: [], meta: {} });
+        }
+        if (scope === "org") {
+          return HttpResponse.json({
+            data: [
+              {
+                id: "o1",
+                org_id: "org-1",
+                scope: "org",
+                priority: 1,
+                agent: "claude_code",
+                auth_type: "api_key",
+                provider: "anthropic",
+                label: "Org Claude key",
+                status: "healthy",
+                is_default: true,
+                usage_note: "sk-ant...team",
+                created_at: "2026-01-01T00:00:00Z",
+                updated_at: "2026-01-01T00:00:00Z",
+              },
+            ],
+            meta: {},
+          });
+        }
+        // resolved: org-only
+        return HttpResponse.json({
+          data: [
+            { id: "o1", scope: "org", agent: "claude_code", auth_type: "api_key", provider: "anthropic", label: "o1", status: "healthy", is_default: true, priority: 1, org_id: "org-1", created_at: "x", updated_at: "x" },
+          ],
+          meta: {},
+        });
+      }),
+    );
+
+    renderWithProviders(<AccountPage />);
+
+    // Personal stack should show the empty-state copy.
+    expect(await screen.findByText(/No personal auth configured/)).toBeInTheDocument();
+    // Org fallback should still render with both the label and the masked key.
+    expect((await screen.findAllByText("Org Claude key")).length).toBeGreaterThan(0);
+    expect((await screen.findAllByText("sk-ant...team")).length).toBeGreaterThan(0);
   });
 
   it("uses the shared provider-card modal with Gemini, Amp, and Pi support", async () => {
     const user = userEvent.setup();
-    server.use(
-      http.get("/api/v1/settings/credentials/personal", () =>
-        HttpResponse.json({ data: [], meta: {} }),
-      ),
-    );
+    server.use(...emptyCodingCredentialsHandlers());
 
     renderWithProviders(<AccountPage />);
 
@@ -69,13 +179,58 @@ describe("Account settings page", () => {
     expect(screen.getByPlaceholderText("pi_...")).toBeInTheDocument();
   });
 
+  it("posts new personal auths against the unified API with scope=personal", async () => {
+    const user = userEvent.setup();
+    let createBody: Record<string, unknown> | null = null;
+    server.use(
+      ...emptyCodingCredentialsHandlers(),
+      http.post("/api/v1/coding-credentials", async ({ request }) => {
+        createBody = await request.json() as Record<string, unknown>;
+        return HttpResponse.json({
+          id: "p1",
+          org_id: "org-1",
+          user_id: "user-1",
+          scope: "personal",
+          priority: 1,
+          agent: "claude_code",
+          auth_type: "api_key",
+          provider: "anthropic",
+          label: "Claude Code API key",
+          status: "healthy",
+          is_default: true,
+          created_at: "2026-01-01T00:00:00Z",
+          updated_at: "2026-01-01T00:00:00Z",
+        });
+      }),
+    );
+
+    renderWithProviders(<AccountPage />);
+
+    await user.click(screen.getByRole("button", { name: "Add auth" }));
+    await user.click(await screen.findByLabelText("Claude Code"));
+    await user.click(screen.getByRole("radio", { name: /API key/i }));
+    await user.type(screen.getByLabelText("Label"), "Personal Claude backup");
+    // Use the input id directly — the visible label text is shared with the
+    // help-tooltip button so getByLabelText("API key") would be ambiguous.
+    await user.type(screen.getByPlaceholderText("sk-ant-..."), "sk-ant-test123");
+    await user.click(screen.getByRole("button", { name: "Save auth" }));
+
+    await waitFor(() => {
+      expect(createBody).toEqual({
+        scope: "personal",
+        agent: "claude_code",
+        auth_type: "api_key",
+        label: "Personal Claude backup",
+        api_key: "sk-ant-test123",
+      });
+    });
+  });
+
   it("stores a default coding-agent reasoning preference", async () => {
     const user = userEvent.setup();
     let requestBody: Record<string, unknown> | null = null;
     server.use(
-      http.get("/api/v1/settings/credentials/personal", () =>
-        HttpResponse.json({ data: [], meta: {} }),
-      ),
+      ...emptyCodingCredentialsHandlers(),
       http.patch("/api/v1/auth/me/settings", async ({ request }) => {
         requestBody = await request.json() as Record<string, unknown>;
         return HttpResponse.json({
@@ -114,9 +269,7 @@ describe("Account settings page", () => {
     let resolveFirstRequest: (() => void) | undefined;
 
     server.use(
-      http.get("/api/v1/settings/credentials/personal", () =>
-        HttpResponse.json({ data: [], meta: {} }),
-      ),
+      ...emptyCodingCredentialsHandlers(),
       http.patch("/api/v1/auth/me/settings", async ({ request }) => {
         const body = await request.json() as Record<string, unknown>;
         requestBodies.push(body);
@@ -202,9 +355,7 @@ describe("Account settings page", () => {
     let resolveFirstRequest: (() => void) | undefined;
 
     server.use(
-      http.get("/api/v1/settings/credentials/personal", () =>
-        HttpResponse.json({ data: [], meta: {} }),
-      ),
+      ...emptyCodingCredentialsHandlers(),
       http.patch("/api/v1/auth/me/settings", async ({ request }) => {
         const body = await request.json() as Record<string, unknown>;
         requestBodies.push(body);

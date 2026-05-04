@@ -310,10 +310,49 @@ func TestIntegrationHandler_StartLinearOAuth_RedirectsToLinearAuthorize(t *testi
 	require.Equal(t, "linear-client-id", parsed.Query().Get("client_id"), "redirect should include configured client id")
 	require.Equal(t, "code", parsed.Query().Get("response_type"), "redirect should request auth code flow")
 	require.Equal(t, "http://localhost:8080/api/v1/integrations/linear/callback", parsed.Query().Get("redirect_uri"), "redirect should include API callback URL")
+	require.Equal(t, "read,write", parsed.Query().Get("scope"), "redirect should request Linear read and write scopes")
 	require.NotEmpty(t, parsed.Query().Get("state"), "redirect should include oauth state")
 
 	setCookie := w.Result().Header.Get("Set-Cookie")
 	require.Contains(t, setCookie, "linear_integration_oauth_state=", "StartLinearOAuth should set linear oauth state cookie")
+}
+
+func TestIntegrationHandler_ExchangeLinearCode_UsesFormEncodedBody(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := db.NewIntegrationStore(mock)
+	handler := NewIntegrationHandler(store, nil, "linear-client-id", "linear-client-secret", "http://localhost:8080", "http://localhost:3000")
+	handler.client = &http.Client{
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			require.Equal(t, http.MethodPost, req.Method, "exchangeLinearCode should POST to Linear")
+			require.Equal(t, "application/x-www-form-urlencoded", req.Header.Get("Content-Type"), "exchangeLinearCode should use Linear's required form content type")
+
+			body, readErr := io.ReadAll(req.Body)
+			require.NoError(t, readErr, "exchangeLinearCode request body should be readable")
+			values, parseErr := url.ParseQuery(string(body))
+			require.NoError(t, parseErr, "exchangeLinearCode should send a URL-encoded body")
+			require.Equal(t, "authorization_code", values.Get("grant_type"), "exchangeLinearCode should send the authorization_code grant")
+			require.Equal(t, "linear-code", values.Get("code"), "exchangeLinearCode should include the callback code")
+			require.Equal(t, "http://localhost:8080/api/v1/integrations/linear/callback", values.Get("redirect_uri"), "exchangeLinearCode should include the callback URL")
+			require.Equal(t, "linear-client-id", values.Get("client_id"), "exchangeLinearCode should include the client id")
+			require.Equal(t, "linear-client-secret", values.Get("client_secret"), "exchangeLinearCode should include the client secret")
+
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(bytes.NewBufferString(`{"access_token":"linear-token","token_type":"Bearer","expires_in":86400,"scope":"read write","refresh_token":"linear-refresh"}`)),
+			}, nil
+		}),
+	}
+
+	token, err := handler.exchangeLinearCode(context.Background(), "linear-code")
+
+	require.NoError(t, err, "exchangeLinearCode should parse a successful token response")
+	require.Equal(t, "linear-token", token.AccessToken, "exchangeLinearCode should return the access token")
 }
 
 func TestIntegrationHandler_StartLinearOAuth_NotConfigured(t *testing.T) {

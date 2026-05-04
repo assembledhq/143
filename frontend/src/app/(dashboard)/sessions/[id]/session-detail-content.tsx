@@ -38,6 +38,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { LinearIcon } from "@/components/linear-icon";
 import { looksLikeLinearRef } from "@/lib/linear-refs";
+import { getClipboardFiles } from "@/lib/clipboard-files";
 import { notify as toast } from "@/lib/notify";
 import { Badge } from "@/components/ui/badge";
 import { MarkdownContent } from "@/components/markdown";
@@ -115,6 +116,13 @@ import {
   writeStoredSessionScrollPosition,
 } from "@/lib/session-open-position";
 import type { ListResponse, Session, SessionDetail, SessionInputCommand, SessionInputReference, SessionLog, SessionMessage, SessionReviewComment, SessionThread, SessionTimelineEntry, User, Validation, CodexAuthStatus, PullRequestHealthResponse, SingleResponse } from "@/lib/types";
+import { AgentTabStrip, computeThreadOverlap } from "./agent-tab-strip";
+import { SessionSummaryPanel, SummarizeButton } from "./session-summary-panel";
+import {
+  ThreadAttributionFilter,
+  useAttributionAllowedPaths,
+  type ThreadAttributionFilterValue,
+} from "./thread-attribution-filter";
 import { AuditLogTrigger } from "@/components/audit/audit-log-trigger";
 import { ResizeHandle } from "@/components/resize-handle";
 import { DiffStatsBadge, FileTree, SessionFooter, CommentsSummary, ReviewDiffView, PassSelector, type DiffPassEntry, type PassRange } from "@/components/code-review";
@@ -198,98 +206,10 @@ function checkResultBadge(result: string | null) {
   return <Badge variant="secondary" className="text-xs">{result}</Badge>;
 }
 
-function threadStatusLabel(status: string): string {
-  return statusConfig[status]?.label ?? status.replace(/_/g, " ");
-}
-
-function threadStatusDotClass(status: string): string {
-  switch (status) {
-    case "running":
-      return "bg-primary";
-    case "pending":
-      return "bg-muted-foreground";
-    case "awaiting_input":
-      return "bg-amber-500";
-    case "failed":
-      return "bg-destructive";
-    case "completed":
-      return "bg-emerald-500";
-    case "cancelled":
-      return "bg-muted-foreground/60";
-    default:
-      return "bg-sky-500";
-  }
-}
-
-function AgentThreadTabs({
-  threads,
-  activeThreadId,
-  onActiveThreadChange,
-  onAddTab,
-}: {
-  threads: SessionThread[];
-  activeThreadId: string | null;
-  onActiveThreadChange: (threadId: string) => void;
-  onAddTab: () => void;
-}) {
-  if (threads.length === 0 || !activeThreadId) {
-    return null;
-  }
-
-  return (
-    <div className="border-b border-border bg-background px-3 py-2 shrink-0">
-      <div className="flex items-center gap-2 min-w-0">
-        <Tabs value={activeThreadId} onValueChange={onActiveThreadChange} className="min-w-0 flex-1">
-          <TabsList
-            variant={threads.length > 1 ? "default" : "line"}
-            size="sm"
-            aria-label="Agent tabs"
-            className={cn(
-              "h-auto max-w-full justify-start gap-1 overflow-x-auto overflow-y-hidden",
-              threads.length === 1 ? "border-b-0 bg-transparent p-0" : "bg-muted/60 p-1",
-            )}
-          >
-            {threads.map((thread) => {
-              const agent = AGENTS_BY_KEY[thread.agent_type];
-              const agentLabel = agent?.label ?? thread.agent_type;
-              const statusLabel = threadStatusLabel(thread.status);
-              const needsAttention = thread.status === "awaiting_input" || thread.status === "failed";
-              return (
-                <TabsTrigger
-                  key={thread.id}
-                  value={thread.id}
-                  className={cn(
-                    "h-8 max-w-[15rem] gap-1.5 rounded-md px-2 text-xs",
-                    threads.length === 1 && "data-[state=active]:bg-transparent data-[state=active]:shadow-none",
-                  )}
-                  title={`${thread.label} — ${agentLabel} — ${statusLabel}`}
-                >
-                  <span className={cn("h-2 w-2 shrink-0 rounded-full", threadStatusDotClass(thread.status), thread.status === "running" && "animate-pulse")} />
-                  <span className="truncate">{thread.label}</span>
-                  <span className="hidden sm:inline text-muted-foreground">{"— "}{statusLabel.toLowerCase()}</span>
-                  {needsAttention && (
-                    <span className="h-1.5 w-1.5 rounded-full bg-amber-500" aria-label="Needs attention" />
-                  )}
-                </TabsTrigger>
-              );
-            })}
-          </TabsList>
-        </Tabs>
-        <Button
-          type="button"
-          size="icon"
-          variant="ghost"
-          className="h-8 w-8 shrink-0"
-          aria-label="Add agent tab"
-          title="Add agent tab"
-          onClick={onAddTab}
-        >
-          <Plus className="h-4 w-4" />
-        </Button>
-      </div>
-    </div>
-  );
-}
+// AgentThreadTabs lived here in Phase 1. The replacement now lives in
+// agent-tab-strip.tsx (AgentTabStrip) and adds overlap badges, tab actions,
+// and cost surfacing. Status helpers moved with it; the statusConfig table
+// is still owned by this file and passed in as a prop.
 
 // ---------------------------------------------------------------------------
 // Detail panel tabs (shown in right sidebar)
@@ -438,8 +358,8 @@ function OverviewTab({ session, members }: { session: Session; members: User[] }
   const isCodexAuthFailure = session.failure_category === FAILURE_CATEGORY_CODEX_AUTH;
 
   const { data: codexAuthResponse } = useQuery<SingleResponse<CodexAuthStatus>>({
-    queryKey: ["codex-auth-status"],
-    queryFn: () => api.codexAuth.status(),
+    queryKey: ["codex-auth-status", "personal"],
+    queryFn: () => api.codexAuth.status(undefined, "personal"),
     enabled: isCodexAuthFailure,
   });
   const isCodexAuthenticated = codexAuthResponse?.data?.status === "completed";
@@ -543,6 +463,7 @@ function OverviewTab({ session, members }: { session: Session; members: User[] }
       )}
       {showDeviceCodeModal && (
         <CodexDeviceCodeModal
+          scope="personal"
           onClose={() => setShowDeviceCodeModal(false)}
           onConnected={() => {
             setShowDeviceCodeModal(false);
@@ -727,6 +648,10 @@ function ChangesTab({
   passRange,
   onPassRangeChange,
   emptyStatusText,
+  isMobile,
+  threads,
+  attributionFilter,
+  onAttributionFilterChange,
 }: {
   filteredFiles: DiffFile[];
   activeFileIndex: number;
@@ -738,6 +663,10 @@ function ChangesTab({
   passRange: PassRange | null;
   onPassRangeChange: (range: PassRange | null) => void;
   emptyStatusText: string;
+  isMobile: boolean;
+  threads: SessionThread[];
+  attributionFilter: ThreadAttributionFilterValue;
+  onAttributionFilterChange: (next: ThreadAttributionFilterValue) => void;
 }) {
   const hasDiff = filteredFiles.length > 0;
 
@@ -762,6 +691,20 @@ function ChangesTab({
         </div>
       )}
 
+      {/* Tab attribution filter — visible only when the session has more
+          than one tab. Lets the user scope the diff to one tab's outputs,
+          the overlap, or unattributed paths. */}
+      {threads.length > 1 && (
+        <div className="flex items-center justify-end gap-2 px-4 py-2 border-b border-border">
+          <span className="text-xs text-muted-foreground">Filter by tab:</span>
+          <ThreadAttributionFilter
+            threads={threads}
+            value={attributionFilter}
+            onChange={onAttributionFilterChange}
+          />
+        </div>
+      )}
+
       {/* Comments summary */}
       {comments.length > 0 && (
         <CommentsSummary
@@ -773,23 +716,23 @@ function ChangesTab({
       {/* Main content: file tree or empty state */}
       {hasDiff ? (
         <div className="flex flex-col flex-1 min-h-0">
-          {/* Review all button */}
-          <div className="px-4 py-3">
-            <button
-              onClick={() => onOpenReview()}
-              className="w-full flex items-center justify-center gap-2 px-3 py-2 rounded-md border border-border bg-background text-xs font-medium text-foreground hover:bg-muted/50 transition-colors"
-            >
-              <FileCode2 className="h-3.5 w-3.5" />
-              Review {filteredFiles.length} {filteredFiles.length === 1 ? "file" : "files"}
-            </button>
-          </div>
-
-          {/* File tree — always visible, it's the sidebar's purpose */}
+          {!isMobile ? (
+            <div className="px-4 py-3">
+              <button
+                onClick={() => onOpenReview()}
+                className="w-full flex items-center justify-center gap-2 px-3 py-2 rounded-md border border-border bg-background text-xs font-medium text-foreground hover:bg-muted/50 transition-colors"
+              >
+                <FileCode2 className="h-3.5 w-3.5" />
+                Review {filteredFiles.length} {filteredFiles.length === 1 ? "file" : "files"}
+              </button>
+            </div>
+          ) : null}
           <div className="flex-1 overflow-hidden">
             <FileTree
               files={filteredFiles}
               activeFileIndex={activeFileIndex}
               onFileSelect={handleFileClick}
+              variant={isMobile ? "sheet" : "sidebar"}
             />
           </div>
         </div>
@@ -824,6 +767,7 @@ function SessionComposer({
   attachments,
   isUploading,
   onUpload,
+  onPasteFiles,
   onRemoveAttachment,
   openComments,
   availableModels,
@@ -857,6 +801,7 @@ function SessionComposer({
   attachments: string[];
   isUploading: boolean;
   onUpload: (event: React.ChangeEvent<HTMLInputElement>) => void;
+  onPasteFiles: (files: File[]) => Promise<void>;
   onRemoveAttachment: (url: string) => void;
   openComments: SessionReviewComment[];
   availableModels: readonly string[];
@@ -1165,6 +1110,21 @@ function SessionComposer({
     }
   }
 
+  async function handlePaste(event: React.ClipboardEvent<HTMLTextAreaElement>) {
+    const files = getClipboardFiles(event.clipboardData);
+    if (files.length === 0) {
+      return;
+    }
+
+    event.preventDefault();
+    await onPasteFiles(files);
+    requestAnimationFrame(() => {
+      const el = textareaRef.current;
+      if (!el) return;
+      el.focus();
+    });
+  }
+
   const firstError = uploadError || sendError;
   const errorMessage = typeof firstError === "string"
     ? firstError
@@ -1309,6 +1269,7 @@ function SessionComposer({
             ref={textareaRef}
             value={message}
             onChange={(e) => handleMessageChange(e.target.value, e.target.selectionStart ?? e.target.value.length)}
+            onPaste={handlePaste}
             onKeyDown={handleKeyDown}
             onClick={(e) => setCaretPosition(e.currentTarget.selectionStart ?? message.length)}
             onKeyUp={(e) => setCaretPosition(e.currentTarget.selectionStart ?? message.length)}
@@ -2176,6 +2137,7 @@ export function SessionDetailContent({ id }: { id: string }) {
   // default open while the mobile sheet defaults closed (no SSR-unsafe
   // matchMedia needed).
   const [mobileDetailOpen, setMobileDetailOpen] = useState(false);
+  const [mobileReviewComposerOpen, setMobileReviewComposerOpen] = useState(false);
   const [detailWidth, setDetailWidth] = useState(DEFAULT_DETAIL);
   const [activeFileIndex, setActiveFileIndex] = useState(0);
   const [isEditingTitle, setIsEditingTitle] = useState(false);
@@ -2849,15 +2811,12 @@ export function SessionDetailContent({ id }: { id: string }) {
   const selectedNewThreadAgent = AGENTS_BY_KEY[newThreadAgentType] ?? AGENTS[0];
   const selectedNewThreadModels = selectedNewThreadAgent?.models ?? [];
 
-  async function handleComposerUpload(event: React.ChangeEvent<HTMLInputElement>) {
-    const fileList = event.target.files;
-    if (!fileList || fileList.length === 0) return;
+  async function uploadComposerFiles(files: File[]) {
+    if (files.length === 0) return;
 
-    const files = Array.from(fileList);
     const oversized = files.filter((file) => file.size > MAX_FILE_SIZE);
     if (oversized.length > 0) {
       setComposerUploadError(`File${oversized.length > 1 ? "s" : ""} too large (max 10 MB): ${oversized.map((file) => file.name).join(", ")}`);
-      event.target.value = "";
       return;
     }
 
@@ -2870,8 +2829,15 @@ export function SessionDetailContent({ id }: { id: string }) {
       setComposerUploadError(err instanceof Error ? err.message : "Upload failed");
     } finally {
       setComposerIsUploading(false);
-      event.target.value = "";
     }
+  }
+
+  async function handleComposerUpload(event: React.ChangeEvent<HTMLInputElement>) {
+    const fileList = event.target.files;
+    if (!fileList || fileList.length === 0) return;
+
+    await uploadComposerFiles(Array.from(fileList));
+    event.target.value = "";
   }
 
   const handleRemoveComposerAttachment = useCallback((url: string) => {
@@ -3063,6 +3029,60 @@ export function SessionDetailContent({ id }: { id: string }) {
     },
   });
 
+  // Thread-scoped mutations for Phase 3/4 actions. Kept as separate
+  // mutations rather than one polymorphic call so React Query can scope
+  // pending state per-action, which the menu reads to show a spinner only
+  // on the in-flight item.
+  const cancelThreadMutation = useMutation({
+    mutationFn: (threadId: string) => api.sessions.cancelThread(id, threadId),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["session", id] });
+    },
+    onError: (err) => {
+      toast.error(err instanceof Error ? err.message : "Failed to cancel tab");
+    },
+  });
+  const forkThreadMutation = useMutation({
+    mutationFn: (threadId: string) => api.sessions.forkThread(id, threadId),
+    onSuccess: () => {
+      toast.success("Fork queued — new session will appear in your list shortly");
+      queryClient.invalidateQueries({ queryKey: ["sessions"] });
+    },
+    onError: (err) => {
+      toast.error(err instanceof Error ? err.message : "Failed to fork tab");
+    },
+  });
+  const revertThreadMutation = useMutation({
+    mutationFn: (threadId: string) => api.sessions.revertThread(id, threadId),
+    onSuccess: (_data, threadId) => {
+      toast.success("Revert prepared — see the tab transcript for the patch");
+      queryClient.invalidateQueries({ queryKey: queryKeys.sessions.threadMessages(id, threadId) });
+      queryClient.invalidateQueries({ queryKey: ["session", id] });
+    },
+    onError: (err) => {
+      toast.error(err instanceof Error ? err.message : "Failed to prepare revert");
+    },
+  });
+
+  // Session-wide file event timeline powers the tab-strip overlap badges and
+  // the Changes-view attribution filters. Polled at the same cadence as the
+  // session detail so a user-perceptible "tab touched a file" lands within
+  // one polling cycle.
+  const fileEventsQuery = useQuery({
+    queryKey: queryKeys.sessions.threadFileEvents(id),
+    queryFn: () => api.sessions.listThreadFileEvents(id),
+    enabled: threads.length > 0,
+    refetchInterval: threads.some((t) => t.status === "running" || t.status === "pending") ? 5000 : false,
+    staleTime: 2_000,
+  });
+  const overlapsByThreadId = useMemo(
+    () => computeThreadOverlap(threads, fileEventsQuery.data?.data ?? []),
+    [threads, fileEventsQuery.data?.data],
+  );
+  const [summaryOpen, setSummaryOpen] = useState(false);
+  const [attributionFilter, setAttributionFilter] = useState<ThreadAttributionFilterValue>({ kind: "all" });
+  const attributionAllowedPaths = useAttributionAllowedPaths(attributionFilter, fileEventsQuery.data?.data);
+
   const createThreadMutation = useMutation({
     mutationFn: () => {
       const agent = AGENTS_BY_KEY[newThreadAgentType] ?? AGENTS[0];
@@ -3157,6 +3177,13 @@ export function SessionDetailContent({ id }: { id: string }) {
     session?.pr_creation_state,
     showValidationTab,
   ]);
+  const isDedicatedMobileReview = centerMode === "review" && isMobileReviewViewport;
+
+  useEffect(() => {
+    if (!isDedicatedMobileReview) {
+      setMobileReviewComposerOpen(false);
+    }
+  }, [isDedicatedMobileReview]);
 
   if (isLoading) {
     return (
@@ -3321,7 +3348,6 @@ export function SessionDetailContent({ id }: { id: string }) {
     : showDetailPanel
       ? "Hide details"
       : "Show details";
-
   // Right-panel content. Rendered inline on desktop and inside a bottom sheet
   // on mobile — the same JSX in both places so tab state stays consistent.
   const panelTabsEl = (
@@ -3415,7 +3441,11 @@ export function SessionDetailContent({ id }: { id: string }) {
 
       <TabsContent value="changes" className="flex-1 min-h-0">
         <ChangesTab
-          filteredFiles={filteredFiles}
+          filteredFiles={
+            attributionAllowedPaths == null
+              ? filteredFiles
+              : filteredFiles.filter((f) => attributionAllowedPaths.has(f.newPath) || attributionAllowedPaths.has(f.oldPath))
+          }
           activeFileIndex={activeFileIndex}
           onFileSelect={setActiveFileIndex}
           onOpenReview={openReview}
@@ -3429,6 +3459,10 @@ export function SessionDetailContent({ id }: { id: string }) {
               ? "Changes will appear here as the agent modifies files."
               : "This session did not produce any file changes."
           }
+          isMobile={isMobileReviewViewport}
+          threads={threads}
+          attributionFilter={attributionFilter}
+          onAttributionFilterChange={setAttributionFilter}
         />
       </TabsContent>
       <TabsContent value="overview" className="flex-1 overflow-y-auto scrollbar-hide p-4">
@@ -3518,7 +3552,7 @@ export function SessionDetailContent({ id }: { id: string }) {
     <div className="flex h-full">
       {/* Center area: chat or review diff view */}
       <div className="flex-1 min-w-0 flex flex-col">
-        {/* Session header bar */}
+        {!isDedicatedMobileReview ? (
         <div className="border-b border-border px-4 py-3 bg-background flex items-center justify-between shrink-0">
           <div className="min-w-0 flex-1 flex items-center gap-2">
             <MobileBackButton to="/sessions" label="Back to sessions" />
@@ -3589,6 +3623,10 @@ export function SessionDetailContent({ id }: { id: string }) {
             )}
             <LinkedIssueChips session={session} />
           </div>
+          {/* Summarize tabs trigger — only meaningful when there is more than one tab. */}
+          {threads.length > 1 && (
+            <SummarizeButton onClick={() => setSummaryOpen(true)} />
+          )}
           {/* Desktop toggle: hides/shows the inline right panel. */}
           <DisabledTooltip disabled={centerMode === "review" && showDetailPanel} content={detailToggleTitle}>
             <Button
@@ -3615,18 +3653,28 @@ export function SessionDetailContent({ id }: { id: string }) {
             <PanelBottomOpen className="h-5 w-5" />
           </Button>
         </div>
+        ) : null}
 
-        <AgentThreadTabs
-          threads={threads}
-          activeThreadId={activeThread?.id ?? null}
-          onActiveThreadChange={setActiveThreadId}
-          onAddTab={() => {
-            setNewThreadAgentType(session.agent_type || "codex");
-            setNewThreadModel("");
-            setNewThreadLabel("");
-            setAddThreadOpen(true);
-          }}
-        />
+        {!isDedicatedMobileReview ? (
+          <AgentTabStrip
+            threads={threads}
+            activeThreadId={activeThread?.id ?? null}
+            overlapsByThreadId={overlapsByThreadId}
+            statusConfig={statusConfig}
+            onActiveThreadChange={setActiveThreadId}
+            onAddTab={() => {
+              setNewThreadAgentType(session.agent_type || "codex");
+              setNewThreadModel("");
+              setNewThreadLabel("");
+              setAddThreadOpen(true);
+            }}
+            onCancelThread={(tid) => cancelThreadMutation.mutate(tid)}
+            onForkThread={(tid) => forkThreadMutation.mutate(tid)}
+            onRevertThread={(tid) => revertThreadMutation.mutate(tid)}
+            cancelPendingThreadId={cancelThreadMutation.isPending ? cancelThreadMutation.variables ?? null : null}
+          />
+        ) : null}
+        <SessionSummaryPanel sessionId={id} open={summaryOpen} onOpenChange={setSummaryOpen} />
 
         {/* Center content — either chat or diff review */}
         <div className="flex-1 min-h-0 relative">
@@ -3660,6 +3708,7 @@ export function SessionDetailContent({ id }: { id: string }) {
                   onBack={exitReview}
                   isMobile={isMobileReviewViewport}
                   onOpenFileList={openMobileFilesList}
+                  onOpenComposer={session.agent_type !== "pm_agent" ? () => setMobileReviewComposerOpen(true) : undefined}
                   commentsByLine={commentsByLine}
                   activeCommentLine={activeCommentLine}
                   onAddComment={handleAddComment}
@@ -3675,7 +3724,7 @@ export function SessionDetailContent({ id }: { id: string }) {
           )}
         </div>
 
-        {session.agent_type !== "pm_agent" && (
+        {session.agent_type !== "pm_agent" && !isDedicatedMobileReview && (
           <>
             {composerIsSnapshotExpired && (
               <div className="flex items-center gap-2 px-4 py-2.5 text-xs border-t bg-amber-50 dark:bg-amber-950/20 border-amber-200 dark:border-amber-800/40 text-amber-800 dark:text-amber-300">
@@ -3703,6 +3752,7 @@ export function SessionDetailContent({ id }: { id: string }) {
               attachments={composerAttachments}
               isUploading={composerIsUploading}
               onUpload={handleComposerUpload}
+              onPasteFiles={uploadComposerFiles}
               onRemoveAttachment={handleRemoveComposerAttachment}
               openComments={attachedReviewComments}
               availableModels={composerAvailableModels}
@@ -3730,7 +3780,7 @@ export function SessionDetailContent({ id }: { id: string }) {
           </>
         )}
 
-        {/* Session footer bar */}
+        {!isDedicatedMobileReview ? (
         <SessionFooter
           status={session.status}
           currentTurn={session.current_turn}
@@ -3739,6 +3789,7 @@ export function SessionDetailContent({ id }: { id: string }) {
           openCommentCount={footerOpenCommentCount}
           onCommentsClick={centerMode === "review" ? undefined : () => openReview()}
         />
+        ) : null}
       </div>
 
       {/* Detail panel — inline on desktop, hidden on mobile (rendered as a
@@ -3770,6 +3821,72 @@ export function SessionDetailContent({ id }: { id: string }) {
           {panelTabsEl}
         </SheetContent>
       </Sheet>
+      {session.agent_type !== "pm_agent" ? (
+        <Sheet open={mobileReviewComposerOpen} onOpenChange={setMobileReviewComposerOpen}>
+          <SheetContent
+            side="bottom"
+            className="max-h-[85vh] overflow-y-auto rounded-t-2xl p-0"
+          >
+            <SheetHeader className="border-b border-border px-4 py-4 text-left">
+              <SheetTitle>Message agent</SheetTitle>
+              <SheetDescription>
+                Send follow-up guidance without leaving the mobile diff reader.
+              </SheetDescription>
+            </SheetHeader>
+            {composerIsSnapshotExpired ? (
+              <div className="flex items-center gap-2 px-4 py-3 text-xs border-b bg-amber-50 dark:bg-amber-950/20 border-amber-200 dark:border-amber-800/40 text-amber-800 dark:text-amber-300">
+                <Clock className="h-3.5 w-3.5 shrink-0" />
+                <span>
+                  This session&apos;s environment has expired. Sessions can be continued for up to 30 days after their last activity. To make further changes, please start a new session.
+                </span>
+              </div>
+            ) : null}
+            {composerLacksHeadlessResume && composerCanSendMessage && !composerIsSnapshotExpired ? (
+              <div className="flex items-center gap-2 px-4 py-3 text-xs border-b bg-sky-50 dark:bg-sky-950/20 border-sky-200 dark:border-sky-800/40 text-sky-800 dark:text-sky-300">
+                <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+                <span>
+                  {AGENTS_BY_KEY[session.agent_type]?.label ?? session.agent_type} doesn&apos;t support headless conversation resume. Follow-up messages run against the restored filesystem, but earlier chat context is not replayed — include anything you need the agent to remember.
+                </span>
+              </div>
+            ) : null}
+            <SessionComposer
+              message={composerMessage}
+              onMessageChange={setComposerMessage}
+              planMode={composerPlanMode}
+              onPlanModeChange={setComposerPlanMode}
+              selectedModel={composerSelectedModel}
+              onSelectedModelChange={setComposerSelectedModel}
+              attachments={composerAttachments}
+              isUploading={composerIsUploading}
+              onUpload={handleComposerUpload}
+              onPasteFiles={uploadComposerFiles}
+              onRemoveAttachment={handleRemoveComposerAttachment}
+              openComments={attachedReviewComments}
+              availableModels={composerAvailableModels}
+              canSendMessage={composerCanSendMessage}
+              isRunning={composerIsRunning}
+              isSnapshotExpired={composerIsSnapshotExpired}
+              isClaudeCode={composerIsClaudeCode}
+              sendPending={sendMutation.isPending}
+              sendError={sendMutation.error}
+              cancelPending={cancelMutation.isPending}
+              uploadError={composerUploadError}
+              onCancelSession={() => cancelMutation.mutate()}
+              onSend={() => queueSend()}
+              textareaRef={composerTextareaRef}
+              uploadInputRef={composerUploadInputRef}
+              references={composerReferences}
+              onReferencesChange={setComposerReferences}
+              commands={composerCommands}
+              onCommandsChange={setComposerCommands}
+              repositoryId={session.repository_id}
+              branch={session.target_branch}
+              agentType={composerAgentType}
+              targetLabel={activeThread ? activeThreadLabel : undefined}
+            />
+          </SheetContent>
+        </Sheet>
+      ) : null}
       <Dialog open={addThreadOpen} onOpenChange={setAddThreadOpen}>
         <DialogContent>
           <DialogHeader>

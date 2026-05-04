@@ -5,17 +5,20 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Plus, Trash2 } from "lucide-react";
 import { notify as toast } from "@/lib/notify";
 import { api } from "@/lib/api";
-import { apiKeyHelp, PERSONAL_PROVIDER_OPTIONS, type PersonalProvider } from "@/lib/coding-auth-metadata";
+import { apiKeyHelp, PERSONAL_PROVIDER_OPTIONS, personalProviderToAgent, type PersonalProvider } from "@/lib/coding-auth-metadata";
 import { captureError } from "@/lib/errors";
 import { APIKeyHelpTooltip } from "@/components/api-key-help-tooltip";
+import { ClaudeCodeAuthModal } from "@/components/claude-code-auth-modal";
+import { CodexDeviceCodeModal } from "@/components/codex-device-code-modal";
 import { CodingAuthDialog } from "@/components/coding-auth-dialog";
 import { PageContainer } from "@/components/page-container";
 import { PageHeader } from "@/components/page-header";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { ThemeSelect } from "@/components/theme-select";
@@ -25,65 +28,222 @@ import {
   getCodingAgentReasoningDefaultsFromSettings,
   toCodingAgentReasoningEffort,
 } from "@/lib/coding-agent-reasoning";
-import type { ListResponse, UserCredentialSummary, UserSettingsUpdateRequest } from "@/lib/types";
+import type {
+  CodingAuthAgent,
+  CodingAuthStatus,
+  CodingCredentialSummary,
+  ListResponse,
+  UserSettingsUpdateRequest,
+} from "@/lib/types";
 
-function providerLabel(provider: string) {
-  switch (provider) {
-    case "openai":
+// agentLabel renders the human-readable agent name. The unified API exposes
+// rows tagged by agent (codex / claude_code / gemini_cli / amp / pi) so the
+// translation from provider strings the legacy personal page used is no
+// longer needed.
+function agentLabel(agent: CodingAuthAgent | string) {
+  switch (agent) {
+    case "codex":
       return "Codex";
-    case "anthropic":
+    case "claude_code":
       return "Claude Code";
-    case "gemini":
+    case "gemini_cli":
       return "Gemini CLI";
     case "amp":
       return "Amp";
     case "pi":
       return "Pi";
-    case "openrouter":
-      return "OpenRouter";
     default:
-      return provider;
+      return agent;
   }
 }
 
-function statusLabel(status?: string) {
+function authTypeLabel(authType: string) {
+  return authType === "subscription" ? "Subscription" : "API key";
+}
+
+function statusLabel(status: CodingAuthStatus | string | undefined) {
   switch (status) {
-    case "active":
+    case "healthy":
       return "Healthy";
+    case "rate_limited":
+      return "Rate limited";
+    case "needs_reauth":
+      return "Needs reauth";
     case "invalid":
       return "Invalid";
-    case "pending_auth":
-      return "Needs reauth";
     default:
-      return "Never verified";
+      return "Unknown";
   }
 }
+
+function CredentialList({
+  rows,
+  emptyMessage,
+  readOnly = false,
+  onDelete,
+}: {
+  rows: CodingCredentialSummary[];
+  emptyMessage: string;
+  readOnly?: boolean;
+  onDelete?: (id: string) => void;
+}) {
+  if (rows.length === 0) {
+    return (
+      <div className="px-4 py-4 text-xs text-muted-foreground">
+        {emptyMessage}
+      </div>
+    );
+  }
+
+  return (
+    <div className="divide-y divide-border/60">
+      {rows.map((row, idx) => (
+        <div key={row.id} className="space-y-3 px-4 py-4 md:hidden">
+          <div className="flex items-start justify-between gap-3">
+            <div className="min-w-0 space-y-1">
+              <div className="text-xs font-medium text-foreground">
+                {agentLabel(row.agent)}
+                {row.is_default ? (
+                  <Badge variant="secondary" className="ml-2">Default</Badge>
+                ) : null}
+              </div>
+              <div className="text-xs text-muted-foreground">{row.label}</div>
+            </div>
+            <Badge variant="outline">{statusLabel(row.status)}</Badge>
+          </div>
+          <dl className="grid grid-cols-2 gap-3 text-xs">
+            <div className="space-y-1">
+              <dt className="font-medium text-muted-foreground">Priority</dt>
+              <dd>{idx + 1}</dd>
+            </div>
+            <div className="space-y-1">
+              <dt className="font-medium text-muted-foreground">Auth type</dt>
+              <dd>{authTypeLabel(row.auth_type)}</dd>
+            </div>
+          </dl>
+          {row.usage_note && row.usage_note !== row.label ? (
+            <div className="space-y-1">
+              <div className="text-xs font-medium text-muted-foreground">Notes</div>
+              <div className="text-xs text-muted-foreground">{row.usage_note}</div>
+            </div>
+          ) : null}
+          {!readOnly && onDelete ? (
+            <Button variant="ghost" size="sm" onClick={() => onDelete(row.id)}>
+              <Trash2 className="mr-2 h-4 w-4" />
+              Disable
+            </Button>
+          ) : null}
+        </div>
+      ))}
+
+      <div className="hidden md:block">
+        <Table>
+          <TableHeader>
+            <TableRow>
+              <TableHead className="w-12">#</TableHead>
+              <TableHead>Agent</TableHead>
+              <TableHead>Auth type</TableHead>
+              <TableHead>Notes</TableHead>
+              <TableHead>Status</TableHead>
+              {!readOnly ? <TableHead className="w-24 text-right">Action</TableHead> : null}
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {rows.map((row, idx) => (
+              <TableRow key={row.id}>
+                <TableCell className="text-muted-foreground">{idx + 1}</TableCell>
+                <TableCell>
+                  {agentLabel(row.agent)}
+                  {row.is_default ? (
+                    <Badge variant="secondary" className="ml-2">Default</Badge>
+                  ) : null}
+                </TableCell>
+                <TableCell>{authTypeLabel(row.auth_type)}</TableCell>
+                <TableCell>
+                  <div>{row.label}</div>
+                  {row.usage_note && row.usage_note !== row.label ? (
+                    <div className="text-xs text-muted-foreground">{row.usage_note}</div>
+                  ) : null}
+                </TableCell>
+                <TableCell>
+                  <Badge variant="outline">{statusLabel(row.status)}</Badge>
+                </TableCell>
+                {!readOnly ? (
+                  <TableCell className="text-right">
+                    <Button variant="ghost" size="sm" onClick={() => onDelete?.(row.id)}>
+                      <Trash2 className="mr-2 h-4 w-4" />
+                      Disable
+                    </Button>
+                  </TableCell>
+                ) : null}
+              </TableRow>
+            ))}
+          </TableBody>
+        </Table>
+      </div>
+    </div>
+  );
+}
+
+// Auth type for the personal Add-auth modal. Mirrors the org-side flow in
+// /settings/agent: subscription auth runs the OAuth handshake against the
+// upstream provider; api_key takes a static key. The modal exposes the
+// selector only when the chosen provider's supportsSubscription is true
+// (Codex + Claude Code today).
+type PersonalAuthType = "subscription" | "api_key";
 
 export default function AccountPage() {
   const { user } = useAuth();
   const queryClient = useQueryClient();
   const [addOpen, setAddOpen] = useState(false);
   const [provider, setProvider] = useState<PersonalProvider>("openai");
+  const [authType, setAuthType] = useState<PersonalAuthType>("subscription");
   const [apiKey, setApiKey] = useState("");
+  const [authLabel, setAuthLabel] = useState("");
+  // Subscription OAuth modal dispatch — only one is open at a time.
+  // The dialog itself closes when these open so the OAuth modal owns the
+  // user's attention during the device-code or paste-back flow.
+  const [showCodexModal, setShowCodexModal] = useState(false);
+  const [showClaudeModal, setShowClaudeModal] = useState(false);
   const [pendingReasoningDefaults, setPendingReasoningDefaults] = useState<UserSettingsUpdateRequest["coding_agent_reasoning_defaults"] | null>(null);
   const reasoningSaveInFlightRef = useRef(false);
   const queuedReasoningDefaultsRef = useRef<UserSettingsUpdateRequest["coding_agent_reasoning_defaults"] | null>(null);
 
-  const { data: personalResp } = useQuery<ListResponse<UserCredentialSummary>>({
-    queryKey: ["user-credentials", "personal"],
-    queryFn: () => api.userCredentials.listPersonal(),
+  // Personal stack — the user's own credentials, ordered by priority.
+  const { data: personalResp } = useQuery<ListResponse<CodingCredentialSummary>>({
+    queryKey: ["coding-credentials", "personal"],
+    queryFn: () => api.codingCredentials.list("personal"),
   });
-  const personalCreds = personalResp?.data ?? [];
-  const personalRows = personalCreds.filter((row) => row.configured);
+  // Org fallback — read-only here; the admin manages it on /settings/agent.
+  const { data: orgResp } = useQuery<ListResponse<CodingCredentialSummary>>({
+    queryKey: ["coding-credentials", "org"],
+    queryFn: () => api.codingCredentials.list("org"),
+  });
+
+  const personalRows = personalResp?.data ?? [];
+  const orgRows = orgResp?.data ?? [];
+
   const storedReasoningDefaults = getCodingAgentReasoningDefaultsFromSettings(user?.settings);
   const effectiveReasoningDefaults = pendingReasoningDefaults ?? storedReasoningDefaults;
 
   const createMutation = useMutation({
-    mutationFn: () => api.userCredentials.upsertPersonal(provider, { api_key: apiKey }),
+    mutationFn: () =>
+      api.codingCredentials.create({
+        scope: "personal",
+        agent: personalProviderToAgent(provider),
+        auth_type: "api_key",
+        label: authLabel.trim() || undefined,
+        api_key: apiKey,
+      }),
     onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["coding-credentials"] });
+      // TODO(unified-credentials cleanup PR): drop the legacy invalidations
+      // once /settings/agent and other surfaces stop reading user-credentials
+      // / credentials.resolved.
       void queryClient.invalidateQueries({ queryKey: ["user-credentials"] });
       void queryClient.invalidateQueries({ queryKey: ["credentials", "resolved"] });
       setApiKey("");
+      setAuthLabel("");
       setAddOpen(false);
       toast.success("Personal auth saved");
     },
@@ -94,14 +254,20 @@ export default function AccountPage() {
   });
 
   const deleteMutation = useMutation({
-    mutationFn: (targetProvider: string) => api.userCredentials.deletePersonal(targetProvider),
+    mutationFn: (id: string) => api.codingCredentials.delete(id, "personal"),
     onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["coding-credentials"] });
+      // TODO(unified-credentials cleanup PR): drop the legacy invalidations.
       void queryClient.invalidateQueries({ queryKey: ["user-credentials"] });
       void queryClient.invalidateQueries({ queryKey: ["credentials", "resolved"] });
       toast.success("Personal auth removed");
     },
     onError: (error) => {
       captureError(error, { feature: "personal-coding-auth-delete" });
+      // Force a refetch so any divergence between the cached list and the
+      // server's actual state (e.g. a concurrent disable from another tab)
+      // is reconciled instead of silently persisting until the next nav.
+      void queryClient.invalidateQueries({ queryKey: ["coding-credentials"] });
       toast.error("Could not remove personal auth");
     },
   });
@@ -148,12 +314,68 @@ export default function AccountPage() {
     updateReasoningDefaultsMutation.mutate(defaults);
   }
 
+  // The selected provider's metadata drives whether the auth-type selector
+  // is visible. For providers that don't ship a subscription OAuth flow
+  // (Gemini CLI / Amp / Pi), we coerce auth_type to "api_key" so the modal
+  // doesn't render a dead radio group.
+  const selectedProviderOption = PERSONAL_PROVIDER_OPTIONS.find((o) => o.key === provider) ?? PERSONAL_PROVIDER_OPTIONS[0];
+  const showAuthTypeSelector = selectedProviderOption.supportsSubscription;
+  const effectiveAuthType: PersonalAuthType = showAuthTypeSelector ? authType : "api_key";
+
+  // Default label shown as the modal placeholder. Mirrors the admin
+  // /settings/agent generated-label format ("Codex subscription" /
+  // "Claude Code API key" / etc) so the two flows feel consistent.
+  function defaultLabelFor(p: PersonalProvider, type: PersonalAuthType): string {
+    const agent = personalProviderToAgent(p);
+    const base = agent === "codex" ? "Codex"
+      : agent === "claude_code" ? "Claude Code"
+      : agent === "gemini_cli" ? "Gemini CLI"
+      : agent === "amp" ? "Amp"
+      : agent === "pi" ? "Pi"
+      : agent;
+    return type === "subscription" ? `${base} subscription` : `${base} API key`;
+  }
+  const generatedLabel = authLabel.trim() || defaultLabelFor(provider, effectiveAuthType);
+
+  function resetModalState() {
+    setApiKey("");
+    setAuthLabel("");
+    setProvider("openai");
+    setAuthType("subscription");
+  }
+
+  function closeAddModal() {
+    setAddOpen(false);
+    resetModalState();
+  }
+
+  // handlePrimary routes the modal's primary action to either the API-key
+  // POST or the subscription OAuth modal, depending on the selected
+  // auth_type. The OAuth modals invalidate query caches on success so the
+  // personal stack table refreshes once the subscription is active.
+  function handlePrimary() {
+    if (effectiveAuthType === "subscription") {
+      const agent = personalProviderToAgent(provider);
+      if (agent === "codex") {
+        setShowCodexModal(true);
+        setAddOpen(false);
+        return;
+      }
+      if (agent === "claude_code") {
+        setShowClaudeModal(true);
+        setAddOpen(false);
+        return;
+      }
+    }
+    createMutation.mutate();
+  }
+
   return (
     <PageContainer>
       <div className="space-y-8 pt-2">
         <PageHeader
           title="My settings"
-          description="Manage your personal coding agent auths and appearance."
+          description="Manage your personal coding agent auths and appearance. Personal auths run before any organization fallback."
           action={(
             <Button onClick={() => setAddOpen(true)}>
               <Plus className="mr-2 h-4 w-4" />
@@ -164,44 +386,33 @@ export default function AccountPage() {
 
         <Card>
           <CardHeader>
-            <CardTitle>Configured personal auths</CardTitle>
+            <CardTitle>My coding agents</CardTitle>
+            <CardDescription>
+              Your personal stack runs ahead of any organization fallback. Add as many as you need — the resolver picks the highest-priority active row.
+            </CardDescription>
           </CardHeader>
-          <CardContent className="pb-6">
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>Agent</TableHead>
-                  <TableHead>Auth type</TableHead>
-                  <TableHead>Notes</TableHead>
-                  <TableHead>Status</TableHead>
-                  <TableHead className="w-24 text-right">Action</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {personalRows.length > 0 ? personalRows.map((row) => (
-                  <TableRow key={row.provider}>
-                    <TableCell>{providerLabel(row.provider)}</TableCell>
-                    <TableCell>API key</TableCell>
-                    <TableCell>{row.masked_key ?? "Masked key unavailable"}</TableCell>
-                    <TableCell>
-                      <Badge variant="outline">{statusLabel(row.status)}</Badge>
-                    </TableCell>
-                    <TableCell className="text-right">
-                      <Button variant="ghost" size="sm" onClick={() => deleteMutation.mutate(row.provider)}>
-                        <Trash2 className="mr-2 h-4 w-4" />
-                        Disable
-                      </Button>
-                    </TableCell>
-                  </TableRow>
-                )) : (
-                  <TableRow>
-                    <TableCell colSpan={5} className="text-muted-foreground">
-                      No personal auth configured. Click &ldquo;Add auth&rdquo; above to enable sessions to use your own subscription. Org-wide credentials are used as a fallback.
-                    </TableCell>
-                  </TableRow>
-                )}
-              </TableBody>
-            </Table>
+          <CardContent className="px-0 pb-6">
+            <CredentialList
+              rows={personalRows}
+              emptyMessage={'No personal auth configured. Click "Add auth" above to enable sessions to use your own subscription. Org-wide credentials are used as a fallback.'}
+              onDelete={(id) => deleteMutation.mutate(id)}
+            />
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <CardTitle>Org fallback</CardTitle>
+            <CardDescription>
+              Read-only. Contact an admin to change org auths.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="px-0 pb-6">
+            <CredentialList
+              rows={orgRows}
+              emptyMessage="No org-level fallback configured."
+              readOnly
+            />
           </CardContent>
         </Card>
 
@@ -230,7 +441,11 @@ export default function AccountPage() {
                         saveReasoningDefaults(nextDefaults);
                       }}
                     >
-                      <SelectTrigger id={`default-coding-agent-reasoning-${agentType}`} aria-label={`${config.label} default coding-agent reasoning`} className="w-[220px]">
+                      <SelectTrigger
+                        id={`default-coding-agent-reasoning-${agentType}`}
+                        aria-label={`${config.label} default coding-agent reasoning`}
+                        className="w-full sm:w-[220px]"
+                      >
                         <SelectValue placeholder="Default" />
                       </SelectTrigger>
                       <SelectContent>
@@ -264,46 +479,143 @@ export default function AccountPage() {
 
       <CodingAuthDialog
         open={addOpen}
-        onOpenChange={setAddOpen}
+        onOpenChange={(open) => {
+          if (!open) closeAddModal();
+          else setAddOpen(true);
+        }}
         title="Add auth"
-        description="Add a personal API key that will be tried before the organization fallback stack."
+        description="Add a personal subscription or API key — your personal stack runs ahead of the organization fallback."
         providerOptions={PERSONAL_PROVIDER_OPTIONS}
         provider={provider}
-        onProviderChange={setProvider}
-        primaryLabel="Save auth"
-        onPrimary={() => createMutation.mutate()}
-        primaryDisabled={!apiKey.trim()}
-        onCancel={() => setAddOpen(false)}
+        onProviderChange={(value) => {
+          const next = value as PersonalProvider;
+          setProvider(next);
+          // When switching to a provider that doesn't support subscription
+          // auth, reset the radio so the modal doesn't carry a dead value.
+          const opt = PERSONAL_PROVIDER_OPTIONS.find((o) => o.key === next);
+          if (!opt?.supportsSubscription) {
+            setAuthType("api_key");
+          } else {
+            setAuthType("subscription");
+          }
+        }}
+        primaryLabel={effectiveAuthType === "subscription" ? "Continue" : "Save auth"}
+        onPrimary={handlePrimary}
+        primaryDisabled={effectiveAuthType === "api_key" && !apiKey.trim()}
+        onCancel={closeAddModal}
       >
+        {showAuthTypeSelector ? (
+          <div className="space-y-2">
+            <Label>Auth type</Label>
+            <RadioGroup
+              value={effectiveAuthType}
+              onValueChange={(value) => setAuthType(value as PersonalAuthType)}
+              className="grid gap-3 md:grid-cols-2"
+            >
+              <Label htmlFor="personal-auth-subscription" className="flex cursor-pointer items-start gap-3 rounded-xl border border-border p-4">
+                <RadioGroupItem value="subscription" id="personal-auth-subscription" />
+                <div className="space-y-1">
+                  <div className="font-medium text-sm">Subscription</div>
+                  <p className="text-xs text-muted-foreground">
+                    Sign in to your existing Codex or Claude subscription.
+                  </p>
+                </div>
+              </Label>
+              <Label htmlFor="personal-auth-api-key" className="flex cursor-pointer items-start gap-3 rounded-xl border border-border p-4">
+                <RadioGroupItem value="api_key" id="personal-auth-api-key" />
+                <div className="space-y-1">
+                  <div className="font-medium text-sm">API key</div>
+                  <p className="text-xs text-muted-foreground">
+                    Paste a key for pay-as-you-go billing or service accounts.
+                  </p>
+                </div>
+              </Label>
+            </RadioGroup>
+          </div>
+        ) : null}
+
         <div className="space-y-2">
-          <Label htmlFor="personal-api-key" className="flex items-center gap-2">
-            API key
-            <APIKeyHelpTooltip
-              ariaLabel={`Where to get a ${apiKeyHelp(provider).label} API key`}
-              description={apiKeyHelp(provider).description}
-              href={apiKeyHelp(provider).href}
-              linkLabel={apiKeyHelp(provider).linkLabel}
-            />
-          </Label>
+          <Label htmlFor="personal-auth-label">Label</Label>
           <Input
-            id="personal-api-key"
-            type="password"
-            value={apiKey}
-            onChange={(event) => setApiKey(event.target.value)}
-            placeholder={
-              provider === "anthropic"
-                ? "sk-ant-..."
-                : provider === "gemini"
-                  ? "AIza..."
-                  : provider === "amp"
-                    ? "amp_..."
-                    : provider === "pi"
-                      ? "pi_..."
-                      : "sk-..."
-            }
+            id="personal-auth-label"
+            value={authLabel}
+            onChange={(event) => setAuthLabel(event.target.value)}
+            placeholder={`Optional — defaults to "${defaultLabelFor(provider, effectiveAuthType)}"`}
           />
         </div>
+
+        {effectiveAuthType === "api_key" ? (
+          <div className="space-y-2">
+            <Label htmlFor="personal-api-key" className="flex items-center gap-2">
+              API key
+              <APIKeyHelpTooltip
+                ariaLabel={`Where to get a ${apiKeyHelp(provider).label} API key`}
+                description={apiKeyHelp(provider).description}
+                href={apiKeyHelp(provider).href}
+                linkLabel={apiKeyHelp(provider).linkLabel}
+              />
+            </Label>
+            <Input
+              id="personal-api-key"
+              type="password"
+              value={apiKey}
+              onChange={(event) => setApiKey(event.target.value)}
+              placeholder={
+                provider === "anthropic"
+                  ? "sk-ant-..."
+                  : provider === "gemini"
+                    ? "AIza..."
+                    : provider === "amp"
+                      ? "amp_..."
+                      : provider === "pi"
+                        ? "pi_..."
+                        : "sk-..."
+              }
+            />
+          </div>
+        ) : null}
       </CodingAuthDialog>
+
+      {showCodexModal ? (
+        <CodexDeviceCodeModal
+          label={generatedLabel}
+          scope="personal"
+          onClose={() => {
+            setShowCodexModal(false);
+            resetModalState();
+          }}
+          onConnected={() => {
+            setShowCodexModal(false);
+            resetModalState();
+            // Invalidate the personal stack so the new subscription appears.
+            void queryClient.invalidateQueries({ queryKey: ["coding-credentials"] });
+            // Legacy keys that still feed parts of the UI during the
+            // unified-credentials migration window.
+            void queryClient.invalidateQueries({ queryKey: ["user-credentials"] });
+            void queryClient.invalidateQueries({ queryKey: ["credentials", "resolved"] });
+            toast.success("Personal subscription connected");
+          }}
+        />
+      ) : null}
+
+      {showClaudeModal ? (
+        <ClaudeCodeAuthModal
+          label={generatedLabel}
+          scope="personal"
+          onClose={() => {
+            setShowClaudeModal(false);
+            resetModalState();
+          }}
+          onConnected={() => {
+            setShowClaudeModal(false);
+            resetModalState();
+            void queryClient.invalidateQueries({ queryKey: ["coding-credentials"] });
+            void queryClient.invalidateQueries({ queryKey: ["user-credentials"] });
+            void queryClient.invalidateQueries({ queryKey: ["credentials", "resolved"] });
+            toast.success("Personal subscription connected");
+          }}
+        />
+      ) : null}
     </PageContainer>
   );
 }

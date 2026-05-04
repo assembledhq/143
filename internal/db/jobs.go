@@ -16,6 +16,25 @@ import (
 	"github.com/rs/zerolog"
 )
 
+// RunAgentDedupeKey returns the dedupe key used for run_agent enqueues. The
+// partial unique index on (queue, dedupe_key) WHERE status IN
+// ('pending','running') collapses concurrent run_agent enqueues for the same
+// session into one — preventing the COALESCE race at AcquireTurnHold that
+// surfaced as "sandbox race: another holder attached first" in production.
+// Terminal-status rows (succeeded/failed/dead_letter) don't conflict, so a
+// legitimate retry after the prior job finishes still goes through.
+func RunAgentDedupeKey(sessionID uuid.UUID) string {
+	return "run_agent:" + sessionID.String()
+}
+
+// ContinueSessionDedupeKey returns the dedupe key used for continue_session
+// enqueues. Session-level (not thread-level) because the underlying sandbox
+// container is shared across threads — only one continue_session can hold
+// the turn at a time. See RunAgentDedupeKey for the partial-index rationale.
+func ContinueSessionDedupeKey(sessionID uuid.UUID) string {
+	return "continue_session:" + sessionID.String()
+}
+
 type JobStore struct {
 	db       DBTX
 	notifier *cache.JobNotifier

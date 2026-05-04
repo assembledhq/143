@@ -507,7 +507,15 @@ func (h *SessionHandler) List(w http.ResponseWriter, r *http.Request) {
 		filters.RepositoryID = repoID
 	}
 
-	if userIDStr := r.URL.Query().Get("triggered_by_user_id"); userIDStr != "" {
+	if _, ok := r.URL.Query()["triggered_by_user_ids"]; ok {
+		userIDsStr := r.URL.Query().Get("triggered_by_user_ids")
+		userIDs, err := parseUUIDList(userIDsStr)
+		if err != nil {
+			writeError(w, r, http.StatusBadRequest, "INVALID_USER_ID", "invalid triggered_by_user_ids")
+			return
+		}
+		filters.TriggeredByUserIDs = userIDs
+	} else if userIDStr := r.URL.Query().Get("triggered_by_user_id"); userIDStr != "" {
 		userID, err := uuid.Parse(userIDStr)
 		if err != nil {
 			writeError(w, r, http.StatusBadRequest, "INVALID_USER_ID", "invalid triggered_by_user_id")
@@ -594,7 +602,15 @@ func (h *SessionHandler) Counts(w http.ResponseWriter, r *http.Request) {
 		filters.RepositoryID = repoID
 	}
 
-	if userIDStr := r.URL.Query().Get("triggered_by_user_id"); userIDStr != "" {
+	if _, ok := r.URL.Query()["triggered_by_user_ids"]; ok {
+		userIDsStr := r.URL.Query().Get("triggered_by_user_ids")
+		userIDs, err := parseUUIDList(userIDsStr)
+		if err != nil {
+			writeError(w, r, http.StatusBadRequest, "INVALID_USER_ID", "invalid triggered_by_user_ids")
+			return
+		}
+		filters.TriggeredByUserIDs = userIDs
+	} else if userIDStr := r.URL.Query().Get("triggered_by_user_id"); userIDStr != "" {
 		userID, err := uuid.Parse(userIDStr)
 		if err != nil {
 			writeError(w, r, http.StatusBadRequest, "INVALID_USER_ID", "invalid triggered_by_user_id")
@@ -774,11 +790,9 @@ func (h *SessionHandler) TriggerFix(w http.ResponseWriter, r *http.Request) {
 
 	autonomyLevel := body.AutonomyLevel
 	if autonomyLevel == "" {
-		autonomyLevel = "semi"
+		autonomyLevel = string(models.DefaultSessionAutonomy)
 	}
-	// These values are enforced by chk_sessions_autonomy_level CHECK constraint.
-	validAutonomyLevels := map[string]bool{"full": true, "semi": true, "supervised": true}
-	if !validAutonomyLevels[autonomyLevel] {
+	if err := models.SessionAutonomy(autonomyLevel).Validate(); err != nil {
 		writeError(w, r, http.StatusBadRequest, "INVALID_AUTONOMY_LEVEL", "autonomy_level must be one of: full, semi, supervised")
 		return
 	}
@@ -835,12 +849,16 @@ func (h *SessionHandler) TriggerFix(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Enqueue the run_agent job.
+	// Enqueue the run_agent job. Dedupe by session ID so a double-clicked
+	// submit (or any other transient retry path) cannot land two run_agent
+	// rows for the same session — the second insert would race the first at
+	// AcquireTurnHold and surface "sandbox race" to the user.
+	dedupeKey := db.RunAgentDedupeKey(run.ID)
 	payload := map[string]string{
 		"session_id": run.ID.String(),
 		"org_id":     orgID.String(),
 	}
-	if _, err := h.jobStore.Enqueue(r.Context(), orgID, "agent", "run_agent", payload, 5, nil); err != nil {
+	if _, err := h.jobStore.Enqueue(r.Context(), orgID, "agent", "run_agent", payload, 5, &dedupeKey); err != nil {
 		writeError(w, r, http.StatusInternalServerError, "ENQUEUE_FAILED", "failed to enqueue agent run job", err)
 		return
 	}
@@ -881,12 +899,17 @@ func (h *SessionHandler) RetrySession(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Re-enqueue the run_agent job. If this fails, roll back the session status
-	// so it doesn't get stuck in pending with no job to pick it up.
+	// so it doesn't get stuck in pending with no job to pick it up. Dedupe by
+	// session ID so a Retry can never land alongside an in-flight run_agent
+	// for the same session — the partial unique index on (queue, dedupe_key)
+	// only covers pending|running, so legitimate retries after the prior job
+	// reaches a terminal state still go through.
+	dedupeKey := db.RunAgentDedupeKey(sessionID)
 	payload := map[string]string{
 		"session_id": sessionID.String(),
 		"org_id":     orgID.String(),
 	}
-	if _, err := h.jobStore.Enqueue(r.Context(), orgID, "agent", "run_agent", payload, 5, nil); err != nil {
+	if _, err := h.jobStore.Enqueue(r.Context(), orgID, "agent", "run_agent", payload, 5, &dedupeKey); err != nil {
 		if undoErr := h.runStore.UndoResetForRetry(r.Context(), orgID, sessionID, "Retry failed: could not enqueue job", ""); undoErr != nil {
 			h.logger.Error().Err(undoErr).Str("session_id", sessionID.String()).Msg("failed to undo retry reset after enqueue failure")
 		}
@@ -1998,12 +2021,16 @@ func (h *SessionHandler) SendMessage(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Enqueue continue_session job.
+	// Enqueue continue_session job. Dedupe at the session level — only one
+	// continue_session can hold the shared sandbox at a time, so a duplicate
+	// would race AcquireTurnHold and dead-letter via the orchestrator's
+	// self-heal path.
+	dedupeKey := db.ContinueSessionDedupeKey(sessionID)
 	payload := map[string]string{
 		"session_id": sessionID.String(),
 		"org_id":     orgID.String(),
 	}
-	if _, err := h.jobStore.EnqueueInTx(r.Context(), tx, orgID, "agent", "continue_session", payload, 5, nil); err != nil {
+	if _, err := h.jobStore.EnqueueInTx(r.Context(), tx, orgID, "agent", "continue_session", payload, 5, &dedupeKey); err != nil {
 		writeError(w, r, http.StatusInternalServerError, "ENQUEUE_FAILED", "failed to enqueue continue_session job", err)
 		return
 	}
@@ -2562,11 +2589,9 @@ func (h *SessionHandler) CreateManual(w http.ResponseWriter, r *http.Request) {
 
 	autonomyLevel := body.AutonomyLevel
 	if autonomyLevel == "" {
-		autonomyLevel = "semi"
+		autonomyLevel = string(models.DefaultSessionAutonomy)
 	}
-	// These values are enforced by chk_sessions_autonomy_level CHECK constraint.
-	validAutonomyLevels := map[string]bool{"full": true, "semi": true, "supervised": true}
-	if !validAutonomyLevels[autonomyLevel] {
+	if err := models.SessionAutonomy(autonomyLevel).Validate(); err != nil {
 		writeError(w, r, http.StatusBadRequest, "INVALID_AUTONOMY_LEVEL", "autonomy_level must be one of: full, semi, supervised")
 		return
 	}
@@ -2765,11 +2790,12 @@ func (h *SessionHandler) CreateManual(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	dedupeKey := db.RunAgentDedupeKey(session.ID)
 	payload := map[string]string{
 		"session_id": session.ID.String(),
 		"org_id":     orgID.String(),
 	}
-	if _, err := h.jobStore.Enqueue(r.Context(), orgID, "agent", "run_agent", payload, 5, nil); err != nil {
+	if _, err := h.jobStore.Enqueue(r.Context(), orgID, "agent", "run_agent", payload, 5, &dedupeKey); err != nil {
 		writeError(w, r, http.StatusInternalServerError, "ENQUEUE_FAILED", "failed to enqueue manual session", err)
 		return
 	}

@@ -68,6 +68,7 @@ type SessionFilters struct {
 	AdHocOnly         bool      // When true, only return runs where pm_plan_id IS NULL (not linked to a PM plan).
 	RepositoryID      uuid.UUID // When non-zero, filter sessions by repository via issues table.
 	TriggeredByUserID uuid.UUID // When non-zero, filter sessions to those triggered by this user.
+	TriggeredByUserIDs []uuid.UUID
 	Search            string    // When non-empty, filter sessions by title (case-insensitive prefix/substring match).
 	IncludeArchived   bool      // When true, include archived sessions in the results.
 	OnlyArchived      bool      // When true, return only archived sessions.
@@ -79,6 +80,7 @@ type SessionFilters struct {
 type SessionCountsFilters struct {
 	RepositoryID      uuid.UUID
 	TriggeredByUserID uuid.UUID
+	TriggeredByUserIDs []uuid.UUID
 }
 
 // sessionCountsCap bounds each count subquery so a single user with millions
@@ -288,7 +290,10 @@ func (s *SessionStore) ListByOrg(ctx context.Context, orgID uuid.UUID, filters S
 		query += ` AND status = ANY(@statuses)`
 		args["statuses"] = statusStrings
 	}
-	if filters.TriggeredByUserID != uuid.Nil {
+	if len(filters.TriggeredByUserIDs) > 0 {
+		query += ` AND triggered_by_user_id = ANY(@triggered_by_user_ids)`
+		args["triggered_by_user_ids"] = filters.TriggeredByUserIDs
+	} else if filters.TriggeredByUserID != uuid.Nil {
 		query += ` AND triggered_by_user_id = @triggered_by_user_id`
 		args["triggered_by_user_id"] = filters.TriggeredByUserID
 	}
@@ -348,7 +353,10 @@ func (s *SessionStore) CountsByOrg(ctx context.Context, orgID uuid.UUID, filters
 		scope += " AND repository_id = @repository_id"
 		args["repository_id"] = filters.RepositoryID
 	}
-	if filters.TriggeredByUserID != uuid.Nil {
+	if len(filters.TriggeredByUserIDs) > 0 {
+		scope += " AND triggered_by_user_id = ANY(@triggered_by_user_ids)"
+		args["triggered_by_user_ids"] = filters.TriggeredByUserIDs
+	} else if filters.TriggeredByUserID != uuid.Nil {
 		scope += " AND triggered_by_user_id = @triggered_by_user_id"
 		args["triggered_by_user_id"] = filters.TriggeredByUserID
 	}
@@ -1820,6 +1828,34 @@ func (s *SessionStore) PublishHydratedContainerID(ctx context.Context, orgID, se
 		return "", fmt.Errorf("publish hydrated container id: %w", err)
 	}
 	return actualContainerID, nil
+}
+
+// ContainerHoldState returns whether the expected container is currently held
+// by an agent turn, by a preview, or both. It is intentionally pinned to
+// container_id = @expected so callers diagnosing a race do not accidentally
+// read holder state for a newer container published after their liveness probe.
+func (s *SessionStore) ContainerHoldState(ctx context.Context, orgID, sessionID uuid.UUID, expectedContainerID string) (turnHolds bool, previewHolds bool, err error) {
+	query := `SELECT
+			COALESCE(s.turn_holding_container, FALSE) AS turn_holds,
+			EXISTS (
+				SELECT 1
+				FROM preview_instances p
+				WHERE p.session_id = s.id
+				  AND p.org_id = s.org_id
+				  AND p.preview_holding_container = TRUE
+			) AS preview_holds
+		FROM sessions s
+		WHERE s.id = @id
+		  AND s.org_id = @org_id
+		  AND s.container_id = @expected`
+	if err := s.db.QueryRow(ctx, query, pgx.NamedArgs{
+		"id":       sessionID,
+		"org_id":   orgID,
+		"expected": expectedContainerID,
+	}).Scan(&turnHolds, &previewHolds); err != nil {
+		return false, false, fmt.Errorf("container hold state: %w", err)
+	}
+	return turnHolds, previewHolds, nil
 }
 
 // SetWorkerNodeIDForContainer records the worker node currently owning the

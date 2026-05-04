@@ -184,7 +184,7 @@ export default function AgentPage() {
   const reorderMutation = useMutation({
     mutationFn: async (nextRows: CodingAuth[]) => {
       await api.codingAuths.reorder(nextRows.map((row) => row.id));
-      const nextDefault = nextRows.find((row) => row.status === "healthy" || row.status === "never_verified") ?? nextRows[0];
+      const nextDefault = nextRows.find((row) => row.status === "healthy") ?? nextRows[0];
       if (nextDefault && settings.default_agent_type !== nextDefault.agent) {
         await api.settings.update({ settings: { default_agent_type: nextDefault.agent } });
       }
@@ -390,7 +390,7 @@ export default function AgentPage() {
           title="Coding agents"
           description="Control which auths the org can use, how fallback works, and the execution limits for coding sessions."
           action={(
-            <div className="flex items-center gap-3">
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
               <AutosaveIndicator status={autosave.status} />
               <Button onClick={() => openAddModal("codex")}>
                 <Plus className="mr-2 h-4 w-4" />

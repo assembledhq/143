@@ -61,7 +61,7 @@ describe("Agent settings page", () => {
     renderWithProviders(<AgentPage />);
 
     expect(screen.getByText("Coding agents")).toBeInTheDocument();
-    expect(await screen.findByText("Team seat A")).toBeInTheDocument();
+    expect((await screen.findAllByText("Team seat A")).length).toBeGreaterThan(0);
     expect(screen.getByText("The stack runs from top to bottom. Move the auth you want to prefer higher in the list.")).toBeInTheDocument();
     expect(screen.getByLabelText("Max concurrent sessions")).toHaveValue(5);
     expect(screen.getByLabelText("Session max time (minutes)")).toHaveValue(25);
@@ -73,7 +73,7 @@ describe("Agent settings page", () => {
 
     renderWithProviders(<AgentPage />);
 
-    await user.click(await screen.findByRole("button", { name: "Team seat A" }));
+    await user.click((await screen.findAllByRole("button", { name: "Team seat A" }))[0]);
     expect(screen.getByText("Usage note")).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "Close" }));
@@ -147,7 +147,7 @@ describe("Agent settings page", () => {
             label: "Amp API key",
             scope: "organization",
             provider: "amp",
-            status: "never_verified",
+            status: "healthy",
             is_default: false,
             created_at: "2026-04-22T10:00:00Z",
             updated_at: "2026-04-22T10:00:00Z",

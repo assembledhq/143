@@ -261,6 +261,56 @@ export interface SessionThread {
   started_at?: string;
   completed_at?: string;
   created_at: string;
+  base_snapshot_key?: string;
+  cost_cents: number;
+  pending_message_count: number;
+  cancel_requested_at?: string;
+}
+
+export interface SessionThreadFileEvent {
+  id: number;
+  org_id: string;
+  session_id: string;
+  thread_id?: string;
+  turn: number;
+  path: string;
+  event_type: 'created' | 'modified' | 'deleted';
+  before_hash?: string;
+  after_hash?: string;
+  observed_at: string;
+}
+
+export interface ThreadSummary {
+  id: string;
+  label: string;
+  agent_type: string;
+  status: string;
+  current_turn: number;
+  result_summary?: string;
+  confidence_score?: number;
+  cost_cents: number;
+  started_at?: string;
+  last_activity_at?: string;
+  touched_paths?: string[];
+}
+
+export interface TouchedFileRoll {
+  path: string;
+  last_event_type: 'created' | 'modified' | 'deleted';
+  last_observed_at: string;
+  owner_thread_ids: string[];
+}
+
+export interface SessionSummary {
+  session_id: string;
+  generated_at: string;
+  active_count: number;
+  threads: ThreadSummary[];
+  touched_files: TouchedFileRoll[];
+}
+
+export interface ForkResult {
+  job_id: string;
 }
 
 export interface SessionDetail extends Session {
@@ -789,7 +839,7 @@ export interface ResolvedCredential {
 
 export type CodingAuthAgent = "codex" | "claude_code" | "gemini_cli" | "amp" | "pi";
 export type CodingAuthType = "subscription" | "api_key";
-export type CodingAuthStatus = "healthy" | "rate_limited" | "needs_reauth" | "invalid" | "never_verified";
+export type CodingAuthStatus = "healthy" | "rate_limited" | "needs_reauth" | "invalid";
 
 export interface CodingAuth {
   id: string;
@@ -805,6 +855,33 @@ export interface CodingAuth {
   last_verified_at?: string;
   last_used_at?: string;
   usage_note?: string;
+  created_by?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+// CodingCredentialScope is the scope dimension of the unified
+// coding-credentials API: "org" rows are visible to every member of the org as
+// a fallback; "personal" rows belong to the requesting user only and run ahead
+// of any org row in the resolver.
+export type CodingCredentialScope = "org" | "personal";
+
+// CodingCredentialSummary is the on-the-wire representation of a row from the
+// unified coding_credentials table. Mirrors models.CodingCredentialSummary.
+export interface CodingCredentialSummary {
+  id: string;
+  org_id: string;
+  user_id?: string;
+  scope: CodingCredentialScope;
+  priority: number;
+  agent: CodingAuthAgent;
+  auth_type: CodingAuthType;
+  provider: string;
+  label: string;
+  status: CodingAuthStatus;
+  is_default: boolean;
+  usage_note?: string;
+  last_verified_at?: string;
   created_by?: string;
   created_at: string;
   updated_at: string;

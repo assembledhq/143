@@ -175,6 +175,33 @@ func TestProjectHandler_List_WithCreatedBy(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+func TestProjectHandler_List_WithCreatedByIDs(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	handler := NewProjectHandler(db.NewProjectStore(mock), nil, nil, nil, nil)
+	orgID := uuid.New()
+	userID1 := uuid.New()
+	userID2 := uuid.New()
+
+	mock.ExpectQuery(`SELECT .+ FROM projects WHERE org_id .+ AND created_by = ANY`).
+		WithArgs(pgxmock.AnyArg(), []uuid.UUID{userID1, userID2}).
+		WillReturnRows(pgxmock.NewRows(projectColumns()))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/projects?created_by_ids="+userID1.String()+","+userID2.String(), nil)
+	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+	rr := httptest.NewRecorder()
+
+	handler.List(rr, req)
+
+	require.Equal(t, http.StatusOK, rr.Code, "List should accept created_by_ids filter")
+	require.Contains(t, rr.Body.String(), `"data":[]`, "List should return an empty list response")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func TestProjectHandler_List_InvalidCreatedBy(t *testing.T) {
 	t.Parallel()
 
@@ -189,6 +216,70 @@ func TestProjectHandler_List_InvalidCreatedBy(t *testing.T) {
 
 	require.Equal(t, http.StatusBadRequest, rr.Code, "List should reject an invalid created_by filter")
 	require.Contains(t, rr.Body.String(), "INVALID_USER_ID", "List should surface the created_by validation error")
+}
+
+func TestProjectHandler_List_InvalidCreatedByIDs(t *testing.T) {
+	t.Parallel()
+
+	handler := NewProjectHandler(nil, nil, nil, nil, nil)
+	orgID := uuid.New()
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/projects?created_by_ids=not-a-uuid", nil)
+	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+	rr := httptest.NewRecorder()
+
+	handler.List(rr, req)
+
+	require.Equal(t, http.StatusBadRequest, rr.Code, "List should reject an invalid created_by_ids filter")
+	require.Contains(t, rr.Body.String(), "INVALID_USER_ID", "List should surface the created_by_ids validation error")
+}
+
+func TestProjectHandler_List_BlankCreatedByIDs(t *testing.T) {
+	t.Parallel()
+
+	handler := NewProjectHandler(nil, nil, nil, nil, nil)
+	orgID := uuid.New()
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/projects?created_by_ids=,,,", nil)
+	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+	rr := httptest.NewRecorder()
+
+	handler.List(rr, req)
+
+	require.Equal(t, http.StatusBadRequest, rr.Code, "List should reject blank created_by_ids filter")
+	require.Contains(t, rr.Body.String(), "INVALID_USER_ID", "List should surface the blank created_by_ids validation error")
+}
+
+func TestProjectHandler_List_EmptyCreatedByIDs(t *testing.T) {
+	t.Parallel()
+
+	handler := NewProjectHandler(nil, nil, nil, nil, nil)
+	orgID := uuid.New()
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/projects?created_by_ids=", nil)
+	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+	rr := httptest.NewRecorder()
+
+	handler.List(rr, req)
+
+	require.Equal(t, http.StatusBadRequest, rr.Code, "List should reject empty created_by_ids filter")
+	require.Contains(t, rr.Body.String(), "INVALID_USER_ID", "List should surface the empty created_by_ids validation error")
+}
+
+func TestProjectHandler_List_WhitespaceCreatedByIDs(t *testing.T) {
+	t.Parallel()
+
+	handler := NewProjectHandler(nil, nil, nil, nil, nil)
+	orgID := uuid.New()
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/projects?created_by_ids=%20", nil)
+	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+	rr := httptest.NewRecorder()
+
+	handler.List(rr, req)
+
+	require.Equal(t, http.StatusBadRequest, rr.Code, "List should reject whitespace created_by_ids filter")
+	require.Contains(t, rr.Body.String(), "INVALID_USER_ID", "List should surface the whitespace created_by_ids validation error")
 }
 
 func TestProjectHandler_List_WithOnlyArchived(t *testing.T) {

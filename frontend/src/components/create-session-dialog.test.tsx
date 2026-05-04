@@ -1,8 +1,10 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { renderWithProviders, screen, userEvent, waitFor } from "@/test/test-utils";
+import { fireEvent, renderWithProviders, screen, userEvent, waitFor } from "@/test/test-utils";
 import { CreateSessionDialog } from "./create-session-dialog";
 import { http, HttpResponse } from "msw";
 import { server } from "@/test/mocks/server";
+
+const DRAFT_STORAGE_KEY = "143:new-session-draft";
 
 vi.mock("next/navigation", () => ({
   useRouter: () => ({
@@ -85,6 +87,7 @@ describe("CreateSessionDialog", () => {
   beforeEach(() => {
     onOpenChange = vi.fn<(open: boolean) => void>();
     window.localStorage.clear();
+    window.sessionStorage.clear();
     setMobileViewport(false);
   });
 
@@ -115,15 +118,15 @@ describe("CreateSessionDialog", () => {
     ).toBeInTheDocument();
   });
 
-  it("disables Create button when textarea is empty", () => {
+  it("disables Start session button when textarea is empty", () => {
     renderWithProviders(
       <CreateSessionDialog open onOpenChange={onOpenChange} />,
     );
 
-    expect(screen.getByRole("button", { name: /Create/ })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Start session" })).toBeDisabled();
   });
 
-  it("enables Create button when textarea has text", async () => {
+  it("enables Start session button when textarea has text", async () => {
     const user = userEvent.setup();
 
     renderWithProviders(
@@ -135,7 +138,7 @@ describe("CreateSessionDialog", () => {
       "Fix the login bug",
     );
 
-    expect(screen.getByRole("button", { name: /Create/ })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Start session" })).toBeEnabled();
   });
 
   it("calls onOpenChange(false) on successful submission", async () => {
@@ -151,11 +154,36 @@ describe("CreateSessionDialog", () => {
       "Fix the login bug",
     );
 
-    await user.click(screen.getByRole("button", { name: /Create/ }));
+    await user.click(screen.getByRole("button", { name: "Start session" }));
 
     await waitFor(() => {
       expect(onOpenChange).toHaveBeenCalledWith(false);
     });
+  });
+
+  it("does not restore the submitted prompt after closing before the draft debounce fires", async () => {
+    setupManualSessionHandler();
+
+    const { rerender } = renderWithProviders(
+      <CreateSessionDialog open onOpenChange={onOpenChange} />,
+    );
+
+    const textarea = screen.getByPlaceholderText("Tell the agent what to do...");
+    fireEvent.change(textarea, { target: { value: "Fix stale draft" } });
+
+    fireEvent.click(screen.getByRole("button", { name: "Start session" }));
+
+    await waitFor(() => {
+      expect(onOpenChange).toHaveBeenCalledWith(false);
+    });
+
+    rerender(<CreateSessionDialog open={false} onOpenChange={onOpenChange} />);
+
+    expect(window.sessionStorage.getItem(DRAFT_STORAGE_KEY)).toBeNull();
+
+    rerender(<CreateSessionDialog open onOpenChange={onOpenChange} />);
+
+    expect(screen.getByPlaceholderText<HTMLTextAreaElement>("Tell the agent what to do...").value).toBe("");
   });
 
   it("shows error message when session creation fails", async () => {
@@ -179,7 +207,7 @@ describe("CreateSessionDialog", () => {
       "Fix the login bug",
     );
 
-    await user.click(screen.getByRole("button", { name: /Create/ }));
+    await user.click(screen.getByRole("button", { name: "Start session" }));
 
     await waitFor(() => {
       expect(screen.getByText(/Something went wrong/)).toBeInTheDocument();
@@ -531,7 +559,7 @@ describe("CreateSessionDialog", () => {
       });
 
       // Submit
-      await user.click(screen.getByRole("button", { name: /Create/ }));
+      await user.click(screen.getByRole("button", { name: "Start session" }));
 
       await waitFor(() => {
         expect(onOpenChange).toHaveBeenCalledWith(false);
@@ -563,6 +591,14 @@ describe("CreateSessionDialog", () => {
           },
         });
       }),
+      // Gemini must be available in the model picker for this test to be able
+      // to select "gemini-2.5-pro"; the composer hides agents the user has no
+      // credentials for.
+      http.get("/api/v1/settings/credentials/resolved", () => {
+        return HttpResponse.json({
+          data: [{ provider: "gemini", source: "personal" }],
+        });
+      }),
       http.post("/api/v1/sessions/manual", async ({ request }) => {
         requestBody = await request.json() as Record<string, unknown>;
         return HttpResponse.json({
@@ -586,7 +622,7 @@ describe("CreateSessionDialog", () => {
       screen.getByPlaceholderText("Tell the agent what to do..."),
       "Fix the login bug",
     );
-    await user.click(screen.getByRole("button", { name: /Create/ }));
+    await user.click(screen.getByRole("button", { name: "Start session" }));
 
     await waitFor(() => {
       expect(onOpenChange).toHaveBeenCalledWith(false);

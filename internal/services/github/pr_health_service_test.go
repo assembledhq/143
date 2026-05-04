@@ -959,7 +959,7 @@ func TestPRServiceCreateRepairRevisionSessionAndResumeRepairSession(t *testing.T
 						"job_type":   "run_agent",
 						"payload":    pgxmock.AnyArg(),
 						"priority":   5,
-						"dedupe_key": (*string)(nil),
+						"dedupe_key": pgxmock.AnyArg(),
 					}).
 					WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
 				mock.ExpectQuery("INSERT INTO pull_request_repair_runs").
@@ -1008,7 +1008,7 @@ func TestPRServiceCreateRepairRevisionSessionAndResumeRepairSession(t *testing.T
 						"job_type":   "continue_session",
 						"payload":    pgxmock.AnyArg(),
 						"priority":   5,
-						"dedupe_key": (*string)(nil),
+						"dedupe_key": pgxmock.AnyArg(),
 					}).
 					WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
 				mock.ExpectQuery("INSERT INTO pull_request_repair_runs").

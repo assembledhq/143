@@ -161,10 +161,47 @@ func main() {
 			logger.Fatal().Err(err).Msg("failed to initialize crypto service")
 		}
 	}
+	// Refuse to serve traffic until the unified-coding-credentials post-step
+	// (Anthropic API-key/subscription split) has run. Fresh installs that have
+	// no anthropic rows pass the gate automatically.
+	if err := db.EnsureAnthropicSplitSentinel(ctx, pool); err != nil {
+		logger.Fatal().Err(err).Msg("coding-credentials migration gate failed; server refusing to start")
+	}
+
 	credentialStore := db.NewOrgCredentialStore(pool, cryptoSvc)
 	userCredentialStore := db.NewUserCredentialStore(pool, cryptoSvc)
-	codexAuthSvc := codexauth.NewService(credentialStore, logger)
-	claudeCodeAuthSvc := claudecodeauth.NewService(credentialStore, logger)
+	codingCredentialStore := db.NewCodingCredentialStore(pool, cryptoSvc)
+	// Wire the unified coding-credentials mirror into both legacy stores so
+	// every existing write path (OAuth services, /settings/coding-auths,
+	// /settings/credentials/personal, /settings/credentials/team) lands in
+	// `coding_credentials` as well as the legacy table. Reads come from the
+	// unified store via AgentEnv.CodingCredentials. The mirror is removed in
+	// the unified-credentials cleanup PR.
+	credentialStore.SetCodingMirror(codingCredentialStore)
+	userCredentialStore.SetCodingMirror(codingCredentialStore)
+	// Pipe mirror failures into the application logger so a drift between
+	// the legacy and unified tables is visible in production telemetry.
+	mirrorLog := func(format string, args ...any) {
+		logger.Warn().Msgf(format, args...)
+	}
+	credentialStore.SetMirrorLogger(mirrorLog)
+	userCredentialStore.SetMirrorLogger(mirrorLog)
+	codingCredentialStore.SetMirrorLogger(mirrorLog)
+	// Expose the mirror's drift / failure counters through OTel so the
+	// dual-write rollout has a dashboard signal when the unified table is
+	// drifting from the legacy stores. Cleaned up alongside the mirror itself.
+	if _, err := metrics.NewMirrorMetrics(func() (uint64, uint64) {
+		return codingCredentialStore.MirrorDriftCount(), codingCredentialStore.MirrorFailureCount()
+	}); err != nil {
+		logger.Fatal().Err(err).Msg("failed to initialize coding-credentials mirror metrics")
+	}
+	// Both OAuth services depend on a scope-aware credential surface. The
+	// adapter routes org-scope traffic to the legacy OrgCredentialStore
+	// (mirrored to coding_credentials) and personal-scope traffic to the
+	// unified CodingCredentialStore directly — see internal/db/scoped_credential_store.go.
+	scopedCredentialStore := db.NewScopedCredentialStore(credentialStore, codingCredentialStore)
+	codexAuthSvc := codexauth.NewService(scopedCredentialStore, logger)
+	claudeCodeAuthSvc := claudecodeauth.NewService(scopedCredentialStore, logger)
 
 	// Platform LLM client for internal features (titles, PR descriptions, project
 	// generation, validation, prioritization). Uses the cheap PLATFORM_LLM_MODEL.
@@ -246,6 +283,7 @@ func main() {
 	snapshotLog.Msg("snapshot store configured")
 
 	cancelRegistry := agent.NewCancelRegistry(logger)
+	threadCancelRegistry := agent.NewThreadCancelRegistry(logger)
 	// Shared org-settings cache: the settings handler invalidates it on write,
 	// the orchestrator reads it when resolving Amp/Pi agent_config. In single-
 	// process deployments (MODE=all), the router and worker share this instance
@@ -266,7 +304,7 @@ func main() {
 	// Closed when the process receives SIGTERM so long-lived handlers (SSE
 	// streams, etc.) can end their loops cleanly during graceful shutdown.
 	shutdownCh := make(chan struct{})
-	router, gwSrv, recycleWorker, inspectorCloser, previewManager, err := api.NewRouter(cfg, pool, logger, sentryReporter, codexAuthSvc, claudeCodeAuthSvc, llmClient, fileReader, cancelRegistry, pvProvider, snapshotExec, apiSandboxProvider, apiSnapshotStore, orgSettingsCache, shutdownCh, redisClient, sessionStreams)
+	router, gwSrv, recycleWorker, inspectorCloser, previewManager, err := api.NewRouter(cfg, pool, logger, sentryReporter, codexAuthSvc, claudeCodeAuthSvc, llmClient, fileReader, cancelRegistry, threadCancelRegistry, pvProvider, snapshotExec, apiSandboxProvider, apiSnapshotStore, orgSettingsCache, shutdownCh, redisClient, sessionStreams, codingCredentialStore)
 	if err != nil {
 		logger.Fatal().Err(err).Msg("failed to initialize API router")
 	}
@@ -359,6 +397,7 @@ func main() {
 			Repositories:        repoStore,
 			SessionMessages:     sessionMessageStore,
 			SessionThreads:      sessionThreadStore,
+			ThreadFileEvents:    db.NewSessionThreadFileEventStore(pool),
 			Automations:         automationStore,
 			AutomationRuns:      automationRunStore,
 			SessionIssueLinks:   db.NewSessionIssueLinkStore(pool),
@@ -370,11 +409,11 @@ func main() {
 		// workerServices.PR.WaitForPostPRSnapshotUploads().
 		var services *worker.Services
 		if canBuildServices(cfg, logger) {
-			services = buildServices(cfg, pool, logger, codexAuthSvc, claudeCodeAuthSvc, credentialStore, userCredentialStore, issueStore, sessionStore,
+			services = buildServices(cfg, pool, logger, codexAuthSvc, claudeCodeAuthSvc, credentialStore, userCredentialStore, codingCredentialStore, issueStore, sessionStore,
 				jobStore, orgStore, repoStore, validationStore, pullRequestStore,
 				deployStore, priorityScoreStore, complexityEstimateStore, pmPlanStore, pmDecisionLogStore,
 				projectStore, projectTaskStore, projectCycleStore, pmDocumentStore, integrationStore,
-				sessionMessageStore, automationRunStore, snapshotStore, billingMetrics, cancelRegistry, orgSettingsCache)
+				sessionMessageStore, automationRunStore, snapshotStore, billingMetrics, cancelRegistry, threadCancelRegistry, orgSettingsCache)
 			if services != nil {
 				sandboxAuthShutdown = services.SandboxAuthShutdown
 				// Wire eval pub/sub publishers so worker handlers can wake
@@ -781,6 +820,7 @@ func buildServices(
 	claudeCodeAuthSvc *claudecodeauth.Service,
 	credentialStore *db.OrgCredentialStore,
 	userCredentialStore *db.UserCredentialStore,
+	codingCredentialStore *db.CodingCredentialStore,
 	issueStore *db.IssueStore,
 	sessionStore *db.SessionStore,
 	jobStore *db.JobStore,
@@ -803,6 +843,7 @@ func buildServices(
 	snapshotStore storage.SnapshotStore,
 	billingMetrics *metrics.BillingMetrics,
 	cancelRegistry *agent.CancelRegistry,
+	threadCancelRegistry *agent.ThreadCancelRegistry,
 	orgSettingsCache *agent.OrgSettingsCache,
 ) *worker.Services {
 	// GitHub App service (for installation tokens, PR creation).
@@ -867,13 +908,14 @@ func buildServices(
 	// and the PM service so both paths resolve provider credentials, Codex
 	// auth.json, and agent_config overrides through a single code path.
 	agentEnv := agent.NewAgentEnv(agent.AgentEnvDeps{
-		Credentials:      credentialStore,
-		UserCredentials:  userCredentialStore,
-		Orgs:             orgStore,
-		OrgSettingsCache: orgSettingsCache,
-		CodexAuth:        codexAuthSvc,
-		Provider:         sandboxProvider,
-		Logger:           logger,
+		Credentials:       credentialStore,
+		UserCredentials:   userCredentialStore,
+		CodingCredentials: codingCredentialStore,
+		Orgs:              orgStore,
+		OrgSettingsCache:  orgSettingsCache,
+		CodexAuth:         codexAuthSvc,
+		Provider:          sandboxProvider,
+		Logger:            logger,
 	})
 
 	// Orchestrator.
@@ -930,9 +972,11 @@ func buildServices(
 		ClaudeCodeAuth:    claudeCodeAuthSvc,
 		Credentials:       credentialStore,
 		UserCredentials:   userCredentialStore,
+		CodingCredentials: codingCredentialStore,
 		Snapshots:         snapshotStore,
 		UsageTracker:      usageTracker,
 		Cancels:           cancelRegistry,
+		ThreadCancels:     threadCancelRegistry,
 		OrgSettingsCache:  orgSettingsCache,
 		IdentityResolver:  identityResolver,
 		SandboxAuth:       sandboxAuthServer,
@@ -956,6 +1000,7 @@ func buildServices(
 		prService,
 		sandboxProvider,
 		snapshotStore,
+		sandboxAuthServer,
 		integrationStore,
 		userCredentialStore,
 		appUserAuthSvc,
@@ -1079,6 +1124,7 @@ func wireWorkerPRService(
 	prService *ghservice.PRService,
 	sandboxProvider agent.SandboxProvider,
 	snapshotStore storage.SnapshotStore,
+	sandboxAuthServer agent.SandboxAuthServer,
 	integrationStore *db.IntegrationStore,
 	userCredentialStore *db.UserCredentialStore,
 	appUserAuthSvc *ghservice.AppUserAuthService,
@@ -1091,6 +1137,7 @@ func wireWorkerPRService(
 		return
 	}
 	prService.SetSandboxPushDeps(sandboxProvider, snapshotStore)
+	prService.SetSandboxAuth(sandboxAuthServer)
 	prService.SetIntegrationStore(integrationStore)
 	prService.SetUserCredentialStore(userCredentialStore)
 	prService.SetAppUserAuth(appUserAuthSvc)

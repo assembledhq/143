@@ -684,6 +684,35 @@ func TestSessionStore_CountsByOrg_WithScopeFilters(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+func TestSessionStore_CountsByOrg_WithTriggeredByUserIDs(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewSessionStore(mock)
+	orgID := uuid.New()
+	userID1 := uuid.New()
+	userID2 := uuid.New()
+
+	mock.ExpectQuery(`(?s)SELECT.*triggered_by_user_id = ANY`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows([]string{"all_count", "active_count", "archived_count"}).
+				AddRow(4, 2, 1),
+		)
+
+	counts, err := store.CountsByOrg(context.Background(), orgID, SessionCountsFilters{
+		TriggeredByUserIDs: []uuid.UUID{userID1, userID2},
+	})
+	require.NoError(t, err, "CountsByOrg with TriggeredByUserIDs should not return an error")
+	require.Equal(t, 4, counts.All, "all count should reflect the scoped users")
+	require.Equal(t, 2, counts.Active, "active count should reflect the scoped users")
+	require.Equal(t, 1, counts.Archived, "archived count should reflect the scoped users")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func TestSessionStore_UpdateTitle(t *testing.T) {
 	t.Parallel()
 
@@ -1814,6 +1843,72 @@ func TestSessionStore_PublishHydratedContainerID_DBError(t *testing.T) {
 	_, err = store.PublishHydratedContainerID(context.Background(), uuid.New(), uuid.New(), "c1")
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "publish hydrated container id")
+}
+
+func TestSessionStore_ContainerHoldState(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name         string
+		turnHolds    bool
+		previewHolds bool
+		expectedTurn bool
+		expectedPrev bool
+	}{
+		{
+			name:         "turn holder owns container",
+			turnHolds:    true,
+			previewHolds: false,
+			expectedTurn: true,
+			expectedPrev: false,
+		},
+		{
+			name:         "preview holder owns container",
+			turnHolds:    false,
+			previewHolds: true,
+			expectedTurn: false,
+			expectedPrev: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "pgxmock pool should be created")
+			defer mock.Close()
+
+			store := NewSessionStore(mock)
+			mock.ExpectQuery(`SELECT\s+COALESCE\(s\.turn_holding_container, FALSE\) AS turn_holds`).
+				WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+				WillReturnRows(pgxmock.NewRows([]string{"turn_holds", "preview_holds"}).AddRow(tt.turnHolds, tt.previewHolds))
+
+			gotTurn, gotPreview, err := store.ContainerHoldState(context.Background(), uuid.New(), uuid.New(), "container-1")
+			require.NoError(t, err, "ContainerHoldState should read holder state")
+			require.Equal(t, tt.expectedTurn, gotTurn, "ContainerHoldState should return the exact turn holder flag")
+			require.Equal(t, tt.expectedPrev, gotPreview, "ContainerHoldState should return the exact preview holder flag")
+			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+		})
+	}
+}
+
+func TestSessionStore_ContainerHoldState_DBError(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	store := NewSessionStore(mock)
+	mock.ExpectQuery(`SELECT\s+COALESCE\(s\.turn_holding_container, FALSE\) AS turn_holds`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnError(errors.New("boom"))
+
+	_, _, err = store.ContainerHoldState(context.Background(), uuid.New(), uuid.New(), "container-1")
+	require.Error(t, err, "ContainerHoldState should return database errors")
+	require.Contains(t, err.Error(), "container hold state", "ContainerHoldState should wrap the database error")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
 func TestSessionStore_FinalizeContainerDestroy(t *testing.T) {
