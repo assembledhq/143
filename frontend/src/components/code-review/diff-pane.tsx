@@ -184,6 +184,7 @@ export const DiffPane = forwardRef<DiffPaneHandle, DiffPaneProps>(
 
     return (
       <div
+        key={resetScrollKey ?? "all-files"}
         ref={containerRef}
         onScroll={reportVisibleActiveFile}
         className="flex-1 overflow-y-auto p-4 space-y-4"
