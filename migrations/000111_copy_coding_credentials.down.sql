@@ -6,7 +6,7 @@
 --
 -- Refuses to run if coding_credentials contains any other rows: those would
 -- have been created via the new `/api/v1/coding-credentials` endpoints after
--- 000110 was applied, and a blanket DELETE would silently drop user data.
+-- 000111 was applied, and a blanket DELETE would silently drop user data.
 -- Operators rolling back after live traffic must snapshot coding_credentials
 -- (or hand-roll a partial cleanup) before retrying.
 --

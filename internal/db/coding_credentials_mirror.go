@@ -147,7 +147,7 @@ func (s *CodingCredentialStore) MirrorUserCredential(ctx context.Context, row mo
 	// the same provider AND must match the migration SQL's label exactly so
 	// the natural-key conflict path (org_id, user_id, provider, label) lands
 	// on the same row instead of producing a duplicate. See migration step 3
-	// in 000110_copy_coding_credentials.up.sql.
+	// in 000111_copy_coding_credentials.up.sql.
 	//
 	// `originUserID` carries the marker column value: non-nil for team-default
 	// rows, nil for personal rows. Stamping it here keeps the mirror's row in
@@ -359,7 +359,7 @@ const teamDefaultMirrorPriority = 9000
 
 // teamDefaultMirrorLabelPrefix and the format produced by
 // teamDefaultMirrorLabel must match the SQL data-copy migration in
-// migrations/000110_copy_coding_credentials.up.sql exactly. The format is
+// migrations/000111_copy_coding_credentials.up.sql exactly. The format is
 // load-bearing for the natural-key conflict path
 // `(org_id, user_id, provider, label)` — both writers must produce the same
 // label so a row written by the migration and a row written by the mirror

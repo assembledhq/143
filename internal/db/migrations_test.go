@@ -10,7 +10,7 @@ import (
 func TestCopyCodingCredentialsMigrationFiltersUserCredentialProviders(t *testing.T) {
 	t.Parallel()
 
-	body, err := os.ReadFile("../../migrations/000110_copy_coding_credentials.up.sql")
+	body, err := os.ReadFile("../../migrations/000111_copy_coding_credentials.up.sql")
 	require.NoError(t, err, "test should read the coding credential copy migration")
 
 	sql := string(body)
@@ -33,7 +33,7 @@ func TestCopyCodingCredentialsMigrationFiltersUserCredentialProviders(t *testing
 func TestCopyCodingCredentialsMigrationStampsTeamDefaultMarker(t *testing.T) {
 	t.Parallel()
 
-	body, err := os.ReadFile("../../migrations/000110_copy_coding_credentials.up.sql")
+	body, err := os.ReadFile("../../migrations/000111_copy_coding_credentials.up.sql")
 	require.NoError(t, err, "test should read the coding credential copy migration")
 
 	sql := string(body)
@@ -48,12 +48,12 @@ func TestCopyCodingCredentialsMigrationStampsTeamDefaultMarker(t *testing.T) {
 // migration's pre-check that aborts when coding_credentials contains rows
 // with no legacy counterpart and no team-default marker — the only kind of
 // row that could only have been created by /api/v1/coding-credentials after
-// 000110 ran. A blanket DELETE that ignored those rows would silently drop
+// 000111 ran. A blanket DELETE that ignored those rows would silently drop
 // live user data.
 func TestCopyCodingCredentialsDownMigrationRefusesOrphans(t *testing.T) {
 	t.Parallel()
 
-	body, err := os.ReadFile("../../migrations/000110_copy_coding_credentials.down.sql")
+	body, err := os.ReadFile("../../migrations/000111_copy_coding_credentials.down.sql")
 	require.NoError(t, err, "test should read the coding credential copy down migration")
 
 	sql := string(body)
@@ -67,12 +67,12 @@ func TestCopyCodingCredentialsDownMigrationRefusesOrphans(t *testing.T) {
 
 // TestCodingCredentialsSchemaDeclaresTeamDefaultMarker pins the marker
 // column and its CHECK constraint to the schema migration so the cross-file
-// invariant (mirror + 000110 + down migration all read this column) cannot
+// invariant (mirror + 000111 + down migration all read this column) cannot
 // drift with a future schema rewrite that renames or drops it.
 func TestCodingCredentialsSchemaDeclaresTeamDefaultMarker(t *testing.T) {
 	t.Parallel()
 
-	body, err := os.ReadFile("../../migrations/000109_coding_credentials.up.sql")
+	body, err := os.ReadFile("../../migrations/000110_coding_credentials.up.sql")
 	require.NoError(t, err, "test should read the coding credential schema migration")
 
 	sql := string(body)

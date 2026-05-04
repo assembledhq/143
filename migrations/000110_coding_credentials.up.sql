@@ -29,9 +29,9 @@ CREATE TABLE coding_credentials (
     updated_at       timestamptz NOT NULL DEFAULT now(),
 
     -- Marker for org-scoped rows that were minted from a personal team-default
-    -- credential (either by 000110 data-copy or by the dual-write mirror). When
+    -- credential (either by 000111 data-copy or by the dual-write mirror). When
     -- non-NULL, holds the originating user_credentials.user_id. Used by the
-    -- mirror's natural-key cleanup and by the 000110 down migration to identify
+    -- mirror's natural-key cleanup and by the 000111 down migration to identify
     -- rows safely without LIKE-matching the human-readable label. The cleanup
     -- PR drops both the mirror and this column once the legacy stores retire.
     team_default_origin_user_id uuid,
