@@ -68,8 +68,6 @@ function statusLabel(status: CodingAuthStatus | string | undefined) {
       return "Needs reauth";
     case "invalid":
       return "Invalid";
-    case "never_verified":
-      return "Never verified";
     default:
       return "Unknown";
   }

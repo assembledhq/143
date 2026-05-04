@@ -789,7 +789,7 @@ export interface ResolvedCredential {
 
 export type CodingAuthAgent = "codex" | "claude_code" | "gemini_cli" | "amp" | "pi";
 export type CodingAuthType = "subscription" | "api_key";
-export type CodingAuthStatus = "healthy" | "rate_limited" | "needs_reauth" | "invalid" | "never_verified";
+export type CodingAuthStatus = "healthy" | "rate_limited" | "needs_reauth" | "invalid";
 
 export interface CodingAuth {
   id: string;
