@@ -152,7 +152,7 @@ func (s *IntegrationStore) UpdateStatus(ctx context.Context, orgID, id uuid.UUID
 }
 
 func (s *IntegrationStore) UpdateConfig(ctx context.Context, orgID, integrationID uuid.UUID, config json.RawMessage) error {
-	query := `UPDATE integrations SET config = @config, updated_at = now() WHERE org_id = @org_id AND id = @id`
+	query := `UPDATE integrations SET config = @config WHERE org_id = @org_id AND id = @id`
 	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
 		"id":     integrationID,
 		"org_id": orgID,
@@ -165,7 +165,7 @@ func (s *IntegrationStore) UpdateConfig(ctx context.Context, orgID, integrationI
 // statement so the auth-error mark / clear paths can't observe a partial
 // state where one field updated and the other didn't.
 func (s *IntegrationStore) UpdateStatusAndConfig(ctx context.Context, orgID, integrationID uuid.UUID, status string, config json.RawMessage) error {
-	query := `UPDATE integrations SET status = @status, config = @config, updated_at = now() WHERE org_id = @org_id AND id = @id`
+	query := `UPDATE integrations SET status = @status, config = @config WHERE org_id = @org_id AND id = @id`
 	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
 		"id":     integrationID,
 		"org_id": orgID,
