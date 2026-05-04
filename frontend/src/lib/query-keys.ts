@@ -43,6 +43,7 @@ export const queryKeys = {
   credentials: {
     all: ["credentials"] as const,
     resolved: ["credentials", "resolved"] as const,
+    teamDefaults: ["credentials", "team-defaults"] as const,
   },
   codexAuth: {
     status: ["codex-auth-status"] as const,
