@@ -32,7 +32,7 @@ func TestBuildAgentSession(t *testing.T) {
 	}
 	repo := linear.AgentRepoResolveResult{RepositoryID: repoID, Source: "team_default_mapping"}
 
-	session := buildAgentSession(orgID, repo, issue, fetched, "as_1")
+	session := buildAgentSession(orgID, repo, issue, fetched)
 	require.Equal(t, orgID, session.OrgID, "session inherits org from caller, not from the issue (defense against cross-org bugs)")
 	require.Equal(t, models.SessionOriginIssueTrigger, session.Origin,
 		"origin must mark this as an inbound trigger, not a manual session — drives downstream PM/automation behavior")
@@ -60,7 +60,7 @@ func TestBuildAgentSession_FallsBackToIdentifierWhenTitleEmpty(t *testing.T) {
 		Identifier: "ACS-42",
 		// Title intentionally empty
 	}
-	session := buildAgentSession(orgID, linear.AgentRepoResolveResult{RepositoryID: uuid.New()}, issue, fetched, "as_1")
+	session := buildAgentSession(orgID, linear.AgentRepoResolveResult{RepositoryID: uuid.New()}, issue, fetched)
 	require.NotNil(t, session.Title)
 	require.Equal(t, "ACS-42", *session.Title,
 		"empty title falls back to identifier so the sessions list never shows a blank row")

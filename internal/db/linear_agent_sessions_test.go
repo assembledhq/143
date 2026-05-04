@@ -96,17 +96,25 @@ func TestLinearAgentSessionStore_UpsertOnCreated(t *testing.T) {
 		require.NoError(t, mock.ExpectationsWereMet())
 	})
 
-	t.Run("validates input", func(t *testing.T) {
+	t.Run("rejects missing required fields before hitting DB", func(t *testing.T) {
 		t.Parallel()
 		mock, err := pgxmock.NewPool()
 		require.NoError(t, err)
 		defer mock.Close()
+		// Intentionally no ExpectQuery — validation must short-circuit
+		// before any SQL fires. mock.ExpectationsWereMet at the end of
+		// the subtest catches a regression that lets a malformed input
+		// reach the DB.
 
 		store := NewLinearAgentSessionStore(mock)
+		// in.OrgID matches the argument so the org-mismatch check
+		// passes; what trips the validation is the missing
+		// IntegrationID + LinearAgentSessionID + LinearIssueID.
 		_, _, err = store.UpsertOnCreated(context.Background(), orgID, UpsertOnCreatedInput{
-			// no OrgID / IntegrationID / LinearAgentSessionID / LinearIssueID
+			OrgID: orgID,
 		})
 		require.Error(t, err, "missing required fields should fail before reaching DB")
+		require.NoError(t, mock.ExpectationsWereMet(), "validation must short-circuit before any SQL fires")
 	})
 
 	t.Run("rejects org_id mismatch", func(t *testing.T) {
@@ -229,29 +237,79 @@ func TestLinearAgentSessionStore_ListByOrg(t *testing.T) {
 	orgID := uuid.New()
 	now := time.Now().UTC()
 
-	mock, err := pgxmock.NewPool()
-	require.NoError(t, err)
-	defer mock.Close()
+	t.Run("returns rows in updated_at DESC order", func(t *testing.T) {
+		t.Parallel()
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err)
+		defer mock.Close()
 
-	mock.ExpectQuery("SELECT id, org_id").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnRows(pgxmock.NewRows([]string{
-			"id", "org_id", "integration_id", "linear_agent_session_id",
-			"linear_issue_id", "linear_issue_identifier",
-			"linear_app_user_id", "linear_creator_user_id",
-			"session_id", "state", "last_event_received_at",
-			"created_at", "updated_at",
-		}).AddRow(
-			uuid.New(), orgID, uuid.New(), "as_1",
-			"iss_1", "ACS-1",
-			"app_1", "user_1",
-			nil, "pending", &now,
-			now, now,
-		))
+		mock.ExpectQuery("SELECT id, org_id").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnRows(pgxmock.NewRows([]string{
+				"id", "org_id", "integration_id", "linear_agent_session_id",
+				"linear_issue_id", "linear_issue_identifier",
+				"linear_app_user_id", "linear_creator_user_id",
+				"session_id", "state", "last_event_received_at",
+				"created_at", "updated_at",
+			}).AddRow(
+				uuid.New(), orgID, uuid.New(), "as_1",
+				"iss_1", "ACS-1",
+				"app_1", "user_1",
+				nil, "pending", &now,
+				now, now,
+			))
 
-	store := NewLinearAgentSessionStore(mock)
-	rows, err := store.ListByOrg(context.Background(), orgID, 0)
-	require.NoError(t, err)
-	require.Len(t, rows, 1)
-	require.NoError(t, mock.ExpectationsWereMet())
+		store := NewLinearAgentSessionStore(mock)
+		rows, err := store.ListByOrg(context.Background(), orgID, 0)
+		require.NoError(t, err)
+		require.Len(t, rows, 1)
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+
+	t.Run("empty result returns empty slice without error", func(t *testing.T) {
+		t.Parallel()
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err)
+		defer mock.Close()
+
+		mock.ExpectQuery("SELECT id, org_id").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnRows(pgxmock.NewRows([]string{
+				"id", "org_id", "integration_id", "linear_agent_session_id",
+				"linear_issue_id", "linear_issue_identifier",
+				"linear_app_user_id", "linear_creator_user_id",
+				"session_id", "state", "last_event_received_at",
+				"created_at", "updated_at",
+			}))
+
+		store := NewLinearAgentSessionStore(mock)
+		rows, err := store.ListByOrg(context.Background(), orgID, 0)
+		require.NoError(t, err, "empty result is the expected steady state for a brand-new org; must not surface as error")
+		require.Empty(t, rows, "no agent sessions yet → empty slice")
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+
+	t.Run("uses default limit when caller passes 0", func(t *testing.T) {
+		t.Parallel()
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err)
+		defer mock.Close()
+
+		// Match the default limit of 50 — store guards against limit<=0.
+		mock.ExpectQuery("SELECT id, org_id").
+			WithArgs(orgID, 50).
+			WillReturnRows(pgxmock.NewRows([]string{
+				"id", "org_id", "integration_id", "linear_agent_session_id",
+				"linear_issue_id", "linear_issue_identifier",
+				"linear_app_user_id", "linear_creator_user_id",
+				"session_id", "state", "last_event_received_at",
+				"created_at", "updated_at",
+			}))
+
+		store := NewLinearAgentSessionStore(mock)
+		_, err = store.ListByOrg(context.Background(), orgID, 0)
+		require.NoError(t, err)
+		require.NoError(t, mock.ExpectationsWereMet(),
+			"limit=0 must be replaced with the documented default; otherwise an unbounded scan slips through")
+	})
 }

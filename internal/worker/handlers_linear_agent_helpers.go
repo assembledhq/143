@@ -49,7 +49,13 @@ func upsertLinearIssueForAgent(ctx context.Context, stores *Stores, orgID uuid.U
 // buildAgentSession assembles the session row written by the worker. The
 // PMApproach carries the issue body so run_agent has all the context it
 // needs without re-fetching Linear data.
-func buildAgentSession(orgID uuid.UUID, repo linear.AgentRepoResolveResult, issue *models.Issue, fetched *linear.FetchedIssue, _ string) *models.Session {
+//
+// The Linear AgentSessionID is intentionally NOT a parameter here — it
+// lives on session_issue_link_provider_state.AgentSessionID (written by
+// writeAgentProviderState after Create) rather than on the session row,
+// because not all sessions are agent-triggered and we don't want to pay
+// schema cost on the hot sessions table for a provider-specific field.
+func buildAgentSession(orgID uuid.UUID, repo linear.AgentRepoResolveResult, issue *models.Issue, fetched *linear.FetchedIssue) *models.Session {
 	primaryIssueID := issue.ID
 	repoID := repo.RepositoryID
 	identifier := fetched.Identifier

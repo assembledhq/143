@@ -180,6 +180,13 @@ type DispatchResult struct {
 // fidelity; ack first, log loudly, work asynchronously.
 func (d *LinearAgentDispatcher) Dispatch(ctx context.Context, integration *models.Integration, eventType LinearAgentEventType, body []byte) (result DispatchResult) {
 	if d == nil {
+		// Nil-receiver short-circuit. We intentionally return *before*
+		// registering the deferred metrics record below — d.metrics
+		// would deref nil. A "feature_off" outcome on this path only
+		// happens when the dispatcher itself was never wired (boot-
+		// time mis-configuration), which is rare enough that losing
+		// the metric is acceptable; the operator already sees a
+		// configuration warning at boot.
 		return DispatchResult{Status: "feature_off"}
 	}
 	// Named return so the deferred metrics record sees the final outcome
