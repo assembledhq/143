@@ -1092,6 +1092,36 @@ func TestSessionHandler_Counts_WithScopeFilters(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+func TestSessionHandler_Counts_WithTriggeredByUserIDs(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create pgxmock pool without error")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	userID1 := uuid.New()
+	userID2 := uuid.New()
+	handler := newSessionHandler(t, mock)
+
+	mock.ExpectQuery(`(?s)SELECT.*triggered_by_user_id = ANY`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows([]string{"all_count", "active_count", "archived_count"}).
+				AddRow(5, 2, 1),
+		)
+
+	req := httptest.NewRequest(http.MethodGet,
+		"/api/v1/sessions/counts?triggered_by_user_ids="+userID1.String()+","+userID2.String(), nil)
+	ctx := middleware.WithOrgID(req.Context(), orgID)
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	handler.Counts(w, req)
+	require.Equal(t, http.StatusOK, w.Code, "should return 200 with triggered_by_user_ids")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func TestSessionHandler_Counts_InvalidRepositoryID(t *testing.T) {
 	t.Parallel()
 
@@ -1129,6 +1159,86 @@ func TestSessionHandler_Counts_InvalidUserID(t *testing.T) {
 
 	handler.Counts(w, req)
 	require.Equal(t, http.StatusBadRequest, w.Code, "should reject invalid triggered_by_user_id")
+	require.Contains(t, w.Body.String(), "INVALID_USER_ID")
+}
+
+func TestSessionHandler_Counts_InvalidUserIDs(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create pgxmock pool without error")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	handler := newSessionHandler(t, mock)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/sessions/counts?triggered_by_user_ids=bad", nil)
+	ctx := middleware.WithOrgID(req.Context(), orgID)
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	handler.Counts(w, req)
+	require.Equal(t, http.StatusBadRequest, w.Code, "should reject invalid triggered_by_user_ids")
+	require.Contains(t, w.Body.String(), "INVALID_USER_ID")
+}
+
+func TestSessionHandler_Counts_BlankUserIDs(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create pgxmock pool without error")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	handler := newSessionHandler(t, mock)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/sessions/counts?triggered_by_user_ids=,,,", nil)
+	ctx := middleware.WithOrgID(req.Context(), orgID)
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	handler.Counts(w, req)
+	require.Equal(t, http.StatusBadRequest, w.Code, "should reject blank triggered_by_user_ids")
+	require.Contains(t, w.Body.String(), "INVALID_USER_ID")
+}
+
+func TestSessionHandler_Counts_EmptyUserIDs(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create pgxmock pool without error")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	handler := newSessionHandler(t, mock)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/sessions/counts?triggered_by_user_ids=", nil)
+	ctx := middleware.WithOrgID(req.Context(), orgID)
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	handler.Counts(w, req)
+	require.Equal(t, http.StatusBadRequest, w.Code, "should reject empty triggered_by_user_ids")
+	require.Contains(t, w.Body.String(), "INVALID_USER_ID")
+}
+
+func TestSessionHandler_Counts_WhitespaceUserIDs(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create pgxmock pool without error")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	handler := newSessionHandler(t, mock)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/sessions/counts?triggered_by_user_ids=%20", nil)
+	ctx := middleware.WithOrgID(req.Context(), orgID)
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	handler.Counts(w, req)
+	require.Equal(t, http.StatusBadRequest, w.Code, "should reject whitespace triggered_by_user_ids")
 	require.Contains(t, w.Body.String(), "INVALID_USER_ID")
 }
 
