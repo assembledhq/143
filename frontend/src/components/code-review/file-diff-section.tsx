@@ -34,6 +34,8 @@ interface FileDiffSectionProps {
   onBrowseFile?: (filePath: string) => void;
   contextUnavailable?: boolean;
   onContextUnavailable?: () => void;
+  showInlineCommentComposer?: boolean;
+  onRequestEditComment?: (comment: SessionReviewComment) => void;
 }
 
 type GapKind = "top" | "middle" | "bottom";
@@ -105,6 +107,8 @@ export const FileDiffSection = forwardRef<HTMLDivElement, FileDiffSectionProps>(
     onBrowseFile,
     contextUnavailable,
     onContextUnavailable,
+    showInlineCommentComposer = true,
+    onRequestEditComment,
   }, ref) {
     // Collect all line contents across hunks for a single batch highlight call
     const allLineContents = useMemo(() => {
@@ -193,7 +197,9 @@ export const FileDiffSection = forwardRef<HTMLDivElement, FileDiffSectionProps>(
       onCancelComment,
       onUpdateComment,
       onDeleteComment,
-    }), [file.newPath, commentsByLine, activeCommentLine, onAddComment, handleAddComment, onSubmitComment, onCancelComment, onUpdateComment, onDeleteComment]);
+      showInlineCommentComposer,
+      onRequestEditComment,
+    }), [file.newPath, commentsByLine, activeCommentLine, onAddComment, handleAddComment, onSubmitComment, onCancelComment, onUpdateComment, onDeleteComment, showInlineCommentComposer, onRequestEditComment]);
 
     const renderGap = useCallback((gap: ContextGapState) => {
       const gapState = gapStates.get(gap.key) ?? gap;

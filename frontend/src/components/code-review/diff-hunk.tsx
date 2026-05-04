@@ -23,6 +23,8 @@ interface DiffHunkProps {
   onCancelComment?: () => void;
   onUpdateComment?: (commentId: string, data: { body?: string; resolved?: boolean }) => void;
   onDeleteComment?: (commentId: string) => void;
+  showInlineCommentComposer?: boolean;
+  onRequestEditComment?: (comment: SessionReviewComment) => void;
 }
 
 export function DiffHunk({
@@ -36,6 +38,8 @@ export function DiffHunk({
   onCancelComment,
   onUpdateComment,
   onDeleteComment,
+  showInlineCommentComposer = true,
+  onRequestEditComment,
 }: DiffHunkProps) {
   return (
     <div>
@@ -88,11 +92,12 @@ export function DiffHunk({
                   onUpdate={onUpdateComment}
                   onDelete={onDeleteComment}
                   className="max-w-[min(42rem,calc(100cqw-10rem))]"
+                  onRequestEdit={onRequestEditComment}
                 />
               </div>
             )}
             {/* New comment input */}
-            {isActiveCommentLine && onSubmitComment && onCancelComment && (
+            {showInlineCommentComposer && isActiveCommentLine && onSubmitComment && onCancelComment && (
               <div
                 data-testid="inline-comment-composer-anchor"
                 className="sticky left-0 pl-[120px] pr-2"

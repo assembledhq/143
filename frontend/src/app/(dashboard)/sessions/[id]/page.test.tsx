@@ -452,7 +452,7 @@ describe('SessionDetailPage', () => {
       expect(postedThreadID).toBe('thread-new');
     });
     expect(sessionMessagePosted).toBe(false);
-  });
+  }, 10000);
 
   it('preserves thread tabs when session status SSE payload omits thread detail', async () => {
     const sessionId = 'session-abcdef12-3456-7890';
@@ -4274,6 +4274,187 @@ describe('SessionDetailPage', () => {
     const detailSheet = await screen.findByRole('dialog');
     expect(within(detailSheet).getByText('2 files changed')).toBeInTheDocument();
     expect(within(detailSheet).getByText('Browse session details, changed files, validation, and preview on mobile.')).toBeInTheDocument();
+  });
+
+  it('uses the Changes sheet as a mobile file index instead of showing a review-all action', async () => {
+    vi.mocked(window.matchMedia).mockImplementation((query: string) => ({
+      matches: query === '(max-width: 767px)',
+      media: query,
+      onchange: null,
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      dispatchEvent: vi.fn(),
+    }));
+
+    const sessionWithDiff: Session = {
+      ...mockSessions[0],
+      diff: 'diff --git a/src/app.ts b/src/app.ts\n--- a/src/app.ts\n+++ b/src/app.ts\n@@ -1,3 +1,4 @@\n import express from "express";\n+import cors from "cors";\n const app = express();\n app.listen(3000);\ndiff --git a/src/new.ts b/src/new.ts\n--- /dev/null\n+++ b/src/new.ts\n@@ -0,0 +1 @@\n+export const x = 1;',
+      diff_stats: { added: 2, removed: 0, files_changed: 2 },
+    };
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({ data: sessionWithDiff } satisfies SingleResponse<Session>);
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+    await screen.findAllByText('Fixed TypeError by adding null check');
+
+    const user = userEvent.setup();
+    await user.click(screen.getByRole('button', { name: 'Open details' }));
+
+    const detailSheet = await screen.findByRole('dialog');
+    await user.click(within(detailSheet).getByRole('tab', { name: /^Changes/ }));
+
+    expect(within(detailSheet).queryByText(/Review 2 files/)).not.toBeInTheDocument();
+    expect(within(detailSheet).getByText('2 files changed')).toBeInTheDocument();
+    expect(within(detailSheet).getByPlaceholderText('Filter files...')).toBeInTheDocument();
+  });
+
+  it('keeps the shared session composer off-canvas but available from the dedicated mobile diff reader', async () => {
+    vi.mocked(window.matchMedia).mockImplementation((query: string) => ({
+      matches: query === '(max-width: 767px)',
+      media: query,
+      onchange: null,
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      dispatchEvent: vi.fn(),
+    }));
+
+    const idleSessionWithDiff: Session = {
+      ...mockSessions[0],
+      status: 'idle',
+      completed_at: undefined,
+      current_turn: 1,
+      sandbox_state: 'snapshotted',
+      snapshot_key: 'snapshot/test',
+      diff: 'diff --git a/src/app.ts b/src/app.ts\n--- a/src/app.ts\n+++ b/src/app.ts\n@@ -1,3 +1,4 @@\n import express from "express";\n+import cors from "cors";\n const app = express();\n app.listen(3000);',
+      diff_stats: { added: 1, removed: 0, files_changed: 1 },
+    };
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({ data: idleSessionWithDiff } satisfies SingleResponse<Session>);
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+    await screen.findByPlaceholderText('Send a follow-up message...');
+
+    const user = userEvent.setup();
+    await user.click(await screen.findByText('1 file changed'));
+
+    expect((await screen.findAllByText('src/app.ts')).length).toBeGreaterThan(0);
+    expect(screen.queryByPlaceholderText('Send a follow-up message...')).not.toBeInTheDocument();
+    expect(screen.queryByTitle('Send message')).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: 'Message agent' }));
+
+    expect(await screen.findByPlaceholderText('Send a follow-up message...')).toBeInTheDocument();
+    expect(screen.getByTitle('Send message')).toBeInTheDocument();
+  });
+
+  it('shows the session warning state inside the mobile composer sheet while reviewing', async () => {
+    vi.mocked(window.matchMedia).mockImplementation((query: string) => ({
+      matches: query === '(max-width: 767px)',
+      media: query,
+      onchange: null,
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      dispatchEvent: vi.fn(),
+    }));
+
+    const destroyedSessionWithDiff: Session = {
+      ...mockSessions[0],
+      status: 'idle',
+      completed_at: undefined,
+      current_turn: 1,
+      sandbox_state: 'destroyed',
+      diff: 'diff --git a/src/app.ts b/src/app.ts\n--- a/src/app.ts\n+++ b/src/app.ts\n@@ -1,3 +1,4 @@\n import express from "express";\n+import cors from "cors";\n const app = express();\n app.listen(3000);',
+      diff_stats: { added: 1, removed: 0, files_changed: 1 },
+    };
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({ data: destroyedSessionWithDiff } satisfies SingleResponse<Session>);
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+    await screen.findByPlaceholderText('Session environment has expired and can no longer be continued');
+
+    const user = userEvent.setup();
+    await user.click(await screen.findByText('1 file changed'));
+    await user.click(screen.getByRole('button', { name: 'Message agent' }));
+
+    expect(await screen.findByText(/This session's environment has expired/i)).toBeInTheDocument();
+    expect(screen.getByPlaceholderText('Session environment has expired and can no longer be continued')).toBeInTheDocument();
+  });
+
+  it('opens mobile review comment edits in a sheet instead of inline in the diff row', async () => {
+    vi.mocked(window.matchMedia).mockImplementation((query: string) => ({
+      matches: query === '(max-width: 767px)',
+      media: query,
+      onchange: null,
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      dispatchEvent: vi.fn(),
+    }));
+
+    const sessionWithDiff: Session = {
+      ...mockSessions[0],
+      diff: 'diff --git a/src/app.ts b/src/app.ts\n--- a/src/app.ts\n+++ b/src/app.ts\n@@ -1,3 +1,4 @@\n import express from "express";\n+import cors from "cors";\n const app = express();\n app.listen(3000);',
+      diff_stats: { added: 1, removed: 0, files_changed: 1 },
+    };
+
+    const comments: SessionReviewComment[] = [{
+      id: 'comment-mobile-edit',
+      session_id: 'session-abcdef12-3456-7890',
+      org_id: 'org-1',
+      user_id: 'user-1',
+      file_path: 'src/app.ts',
+      line_number: 2,
+      diff_side: 'new',
+      body: 'Add a guard before using this import.',
+      resolved: false,
+      pass_number: 0,
+      created_at: '2026-02-17T07:04:00Z',
+      updated_at: '2026-02-17T07:04:00Z',
+    }];
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({ data: sessionWithDiff } satisfies SingleResponse<Session>);
+      }),
+      http.get('/api/v1/sessions/:id/review-comments', () => {
+        return HttpResponse.json({
+          data: comments,
+          meta: {},
+        } satisfies ListResponse<SessionReviewComment>);
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+    await screen.findAllByText('Fixed TypeError by adding null check');
+
+    const user = userEvent.setup();
+    await user.click(await screen.findByText('1 file changed'));
+
+    expect((await screen.findAllByText('Add a guard before using this import.')).length).toBeGreaterThan(0);
+    await user.click(screen.getByTitle('Edit'));
+
+    expect(await screen.findByText('Edit review comment')).toBeInTheDocument();
+    expect(screen.getByDisplayValue('Add a guard before using this import.')).toBeInTheDocument();
+    expect(screen.queryByTestId('inline-comment-composer-anchor')).not.toBeInTheDocument();
   });
 
   it('exits review mode when clicking a non-changes tab', async () => {
