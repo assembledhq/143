@@ -47,6 +47,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { BranchPicker } from "@/components/branch-picker";
 import { LinearIcon } from "@/components/linear-icon";
 import { looksLikeLinearRef } from "@/lib/linear-refs";
+import { getClipboardFiles } from "@/lib/clipboard-files";
 import { PendingAttachmentStrip } from "@/components/pending-attachment-strip";
 import {
   SessionComposerTriggerPicker,
@@ -869,6 +870,19 @@ export function ManualSessionComposer({
     });
   }
 
+  async function handlePaste(event: React.ClipboardEvent<HTMLTextAreaElement>) {
+    const files = getClipboardFiles(event.clipboardData);
+    if (files.length === 0) {
+      return;
+    }
+
+    event.preventDefault();
+    await uploadFiles(files);
+    requestAnimationFrame(() => {
+      messageInputRef.current?.focus();
+    });
+  }
+
   function addImageURL() {
     const trimmed = imageURL.trim();
     if (!trimmed) {
@@ -1100,6 +1114,7 @@ export function ManualSessionComposer({
                 onChange={(event) => {
                   updateMessage(event.target.value, event.target.selectionStart ?? event.target.value.length);
                 }}
+                onPaste={handlePaste}
                 onBlur={flushDraftSave}
                 onClick={(event) => setCaretPosition(event.currentTarget.selectionStart ?? message.length)}
                 onKeyUp={(event) => setCaretPosition(event.currentTarget.selectionStart ?? message.length)}
