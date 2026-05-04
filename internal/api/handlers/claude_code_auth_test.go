@@ -28,6 +28,12 @@ func claudeTestLogger() zerolog.Logger {
 func claudeAddOrgContext(r *http.Request) *http.Request {
 	orgID := uuid.MustParse("00000000-0000-0000-0000-000000000001")
 	ctx := middleware.WithOrgID(r.Context(), orgID)
+	// Handlers now require a user + active role on the context: scope
+	// resolution defaults to org scope, which is admin-gated. Inject a stub
+	// admin user so the existing tests behave the same way they did before
+	// scope resolution was added.
+	ctx = middleware.WithUser(ctx, &models.User{ID: uuid.MustParse("00000000-0000-0000-0000-0000000000a1")})
+	ctx = middleware.WithActiveRole(ctx, "admin")
 	return r.WithContext(ctx)
 }
 
@@ -42,20 +48,17 @@ type claudeStoreStub struct {
 	getByIDCredential           *models.DecryptedCredential
 }
 
-func (s *claudeStoreStub) Get(context.Context, uuid.UUID, models.ProviderName) (*models.DecryptedCredential, error) {
-	return nil, errors.New("not found")
-}
-func (s *claudeStoreStub) UpsertWithLabel(context.Context, uuid.UUID, *uuid.UUID, string, models.ProviderConfig) (*uuid.UUID, error) {
+func (s *claudeStoreStub) UpsertWithLabel(context.Context, models.Scope, *uuid.UUID, string, models.ProviderConfig) (*uuid.UUID, error) {
 	return nil, errors.New("not implemented")
 }
-func (s *claudeStoreStub) InsertPendingAuth(context.Context, uuid.UUID, *uuid.UUID, string, models.ProviderConfig) (*uuid.UUID, error) {
+func (s *claudeStoreStub) InsertPendingAuth(context.Context, models.Scope, *uuid.UUID, string, models.ProviderConfig) (*uuid.UUID, error) {
 	if s.insertPendingAuthErr != nil {
 		return nil, s.insertPendingAuthErr
 	}
 	id := uuid.New()
 	return &id, nil
 }
-func (s *claudeStoreStub) GetByID(context.Context, uuid.UUID, uuid.UUID) (*models.DecryptedCredential, error) {
+func (s *claudeStoreStub) GetByID(context.Context, models.Scope, uuid.UUID) (*models.DecryptedCredential, error) {
 	if s.getByIDCredential != nil {
 		return s.getByIDCredential, nil
 	}
@@ -76,39 +79,39 @@ func (s *claudeStoreStub) GetByID(context.Context, uuid.UUID, uuid.UUID) (*model
 	}
 	return nil, claudecodeauth.ErrCredentialNotFound
 }
-func (s *claudeStoreStub) GetByProviderAndLabel(context.Context, uuid.UUID, models.ProviderName, string) (*models.DecryptedCredential, error) {
+func (s *claudeStoreStub) GetByProviderAndLabel(context.Context, models.Scope, models.ProviderName, string) (*models.DecryptedCredential, error) {
 	// Use the sentinel the service understands so CompleteOAuth maps it to
 	// ErrPendingAuthNotFound (404); a plain errors.New would now be treated
 	// as a real DB failure and surface as a 500.
 	return nil, claudecodeauth.ErrCredentialNotFound
 }
-func (s *claudeStoreStub) ListByProvider(context.Context, uuid.UUID, models.ProviderName) ([]models.DecryptedCredential, error) {
+func (s *claudeStoreStub) ListByProvider(context.Context, models.Scope, models.ProviderName) ([]models.DecryptedCredential, error) {
 	return nil, nil
 }
-func (s *claudeStoreStub) ClaimNextLabeledRoundRobin(context.Context, uuid.UUID, models.ProviderName) (*models.DecryptedCredential, error) {
+func (s *claudeStoreStub) ClaimNextLabeledRoundRobin(context.Context, models.Scope, models.ProviderName) (*models.DecryptedCredential, error) {
 	return nil, claudecodeauth.ErrCredentialNotFound
 }
-func (s *claudeStoreStub) DisableByID(context.Context, uuid.UUID, uuid.UUID) error {
+func (s *claudeStoreStub) DisableByID(context.Context, models.Scope, uuid.UUID) error {
 	if s.disableErr != nil {
 		return s.disableErr
 	}
 	s.disabled = true
 	return nil
 }
-func (s *claudeStoreStub) UpdateStatusByID(context.Context, uuid.UUID, uuid.UUID, string) error {
+func (s *claudeStoreStub) UpdateStatusByID(context.Context, models.Scope, uuid.UUID, string) error {
 	return nil
 }
-func (s *claudeStoreStub) UpsertByID(context.Context, uuid.UUID, uuid.UUID, models.ProviderConfig) error {
+func (s *claudeStoreStub) UpsertByID(context.Context, models.Scope, uuid.UUID, models.ProviderConfig) error {
 	return nil
 }
-func (s *claudeStoreStub) ExistsForProviderByID(context.Context, uuid.UUID, uuid.UUID, models.ProviderName) (bool, error) {
+func (s *claudeStoreStub) ExistsForProviderByID(context.Context, models.Scope, uuid.UUID, models.ProviderName) (bool, error) {
 	return s.existsForProviderByIDResult, nil
 }
-func (s *claudeStoreStub) DisableLabeled(context.Context, uuid.UUID, models.ProviderName) error {
+func (s *claudeStoreStub) DisableLabeled(context.Context, models.Scope, models.ProviderName) error {
 	s.disabled = true
 	return nil
 }
-func (s *claudeStoreStub) HasActiveLabeled(context.Context, uuid.UUID, models.ProviderName) (bool, error) {
+func (s *claudeStoreStub) HasActiveLabeled(context.Context, models.Scope, models.ProviderName) (bool, error) {
 	return false, nil
 }
 

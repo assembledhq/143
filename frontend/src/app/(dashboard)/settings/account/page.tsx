@@ -8,6 +8,8 @@ import { api } from "@/lib/api";
 import { apiKeyHelp, PERSONAL_PROVIDER_OPTIONS, personalProviderToAgent, type PersonalProvider } from "@/lib/coding-auth-metadata";
 import { captureError } from "@/lib/errors";
 import { APIKeyHelpTooltip } from "@/components/api-key-help-tooltip";
+import { ClaudeCodeAuthModal } from "@/components/claude-code-auth-modal";
+import { CodexDeviceCodeModal } from "@/components/codex-device-code-modal";
 import { CodingAuthDialog } from "@/components/coding-auth-dialog";
 import { PageContainer } from "@/components/page-container";
 import { PageHeader } from "@/components/page-header";
@@ -16,6 +18,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { ThemeSelect } from "@/components/theme-select";
@@ -182,13 +185,26 @@ function CredentialList({
   );
 }
 
+// Auth type for the personal Add-auth modal. Mirrors the org-side flow in
+// /settings/agent: subscription auth runs the OAuth handshake against the
+// upstream provider; api_key takes a static key. The modal exposes the
+// selector only when the chosen provider's supportsSubscription is true
+// (Codex + Claude Code today).
+type PersonalAuthType = "subscription" | "api_key";
+
 export default function AccountPage() {
   const { user } = useAuth();
   const queryClient = useQueryClient();
   const [addOpen, setAddOpen] = useState(false);
   const [provider, setProvider] = useState<PersonalProvider>("openai");
+  const [authType, setAuthType] = useState<PersonalAuthType>("subscription");
   const [apiKey, setApiKey] = useState("");
   const [authLabel, setAuthLabel] = useState("");
+  // Subscription OAuth modal dispatch — only one is open at a time.
+  // The dialog itself closes when these open so the OAuth modal owns the
+  // user's attention during the device-code or paste-back flow.
+  const [showCodexModal, setShowCodexModal] = useState(false);
+  const [showClaudeModal, setShowClaudeModal] = useState(false);
   const [pendingReasoningDefaults, setPendingReasoningDefaults] = useState<UserSettingsUpdateRequest["coding_agent_reasoning_defaults"] | null>(null);
   const reasoningSaveInFlightRef = useRef(false);
   const queuedReasoningDefaultsRef = useRef<UserSettingsUpdateRequest["coding_agent_reasoning_defaults"] | null>(null);
@@ -296,6 +312,62 @@ export default function AccountPage() {
       return;
     }
     updateReasoningDefaultsMutation.mutate(defaults);
+  }
+
+  // The selected provider's metadata drives whether the auth-type selector
+  // is visible. For providers that don't ship a subscription OAuth flow
+  // (Gemini CLI / Amp / Pi), we coerce auth_type to "api_key" so the modal
+  // doesn't render a dead radio group.
+  const selectedProviderOption = PERSONAL_PROVIDER_OPTIONS.find((o) => o.key === provider) ?? PERSONAL_PROVIDER_OPTIONS[0];
+  const showAuthTypeSelector = selectedProviderOption.supportsSubscription;
+  const effectiveAuthType: PersonalAuthType = showAuthTypeSelector ? authType : "api_key";
+
+  // Default label shown as the modal placeholder. Mirrors the admin
+  // /settings/agent generated-label format ("Codex subscription" /
+  // "Claude Code API key" / etc) so the two flows feel consistent.
+  function defaultLabelFor(p: PersonalProvider, type: PersonalAuthType): string {
+    const agent = personalProviderToAgent(p);
+    const base = agent === "codex" ? "Codex"
+      : agent === "claude_code" ? "Claude Code"
+      : agent === "gemini_cli" ? "Gemini CLI"
+      : agent === "amp" ? "Amp"
+      : agent === "pi" ? "Pi"
+      : agent;
+    return type === "subscription" ? `${base} subscription` : `${base} API key`;
+  }
+  const generatedLabel = authLabel.trim() || defaultLabelFor(provider, effectiveAuthType);
+
+  function resetModalState() {
+    setApiKey("");
+    setAuthLabel("");
+    setProvider("openai");
+    setAuthType("subscription");
+  }
+
+  function closeAddModal() {
+    setAddOpen(false);
+    resetModalState();
+  }
+
+  // handlePrimary routes the modal's primary action to either the API-key
+  // POST or the subscription OAuth modal, depending on the selected
+  // auth_type. The OAuth modals invalidate query caches on success so the
+  // personal stack table refreshes once the subscription is active.
+  function handlePrimary() {
+    if (effectiveAuthType === "subscription") {
+      const agent = personalProviderToAgent(provider);
+      if (agent === "codex") {
+        setShowCodexModal(true);
+        setAddOpen(false);
+        return;
+      }
+      if (agent === "claude_code") {
+        setShowClaudeModal(true);
+        setAddOpen(false);
+        return;
+      }
+    }
+    createMutation.mutate();
   }
 
   return (
@@ -408,64 +480,142 @@ export default function AccountPage() {
       <CodingAuthDialog
         open={addOpen}
         onOpenChange={(open) => {
-          setAddOpen(open);
-          if (!open) {
-            setApiKey("");
-            setAuthLabel("");
-          }
+          if (!open) closeAddModal();
+          else setAddOpen(true);
         }}
         title="Add auth"
-        description="Add a personal API key that will be tried before the organization fallback stack."
+        description="Add a personal subscription or API key — your personal stack runs ahead of the organization fallback."
         providerOptions={PERSONAL_PROVIDER_OPTIONS}
         provider={provider}
-        onProviderChange={setProvider}
-        primaryLabel="Save auth"
-        onPrimary={() => createMutation.mutate()}
-        primaryDisabled={!apiKey.trim()}
-        onCancel={() => {
-          setApiKey("");
-          setAuthLabel("");
-          setAddOpen(false);
+        onProviderChange={(value) => {
+          const next = value as PersonalProvider;
+          setProvider(next);
+          // When switching to a provider that doesn't support subscription
+          // auth, reset the radio so the modal doesn't carry a dead value.
+          const opt = PERSONAL_PROVIDER_OPTIONS.find((o) => o.key === next);
+          if (!opt?.supportsSubscription) {
+            setAuthType("api_key");
+          } else {
+            setAuthType("subscription");
+          }
         }}
+        primaryLabel={effectiveAuthType === "subscription" ? "Continue" : "Save auth"}
+        onPrimary={handlePrimary}
+        primaryDisabled={effectiveAuthType === "api_key" && !apiKey.trim()}
+        onCancel={closeAddModal}
       >
+        {showAuthTypeSelector ? (
+          <div className="space-y-2">
+            <Label>Auth type</Label>
+            <RadioGroup
+              value={effectiveAuthType}
+              onValueChange={(value) => setAuthType(value as PersonalAuthType)}
+              className="grid gap-3 md:grid-cols-2"
+            >
+              <Label htmlFor="personal-auth-subscription" className="flex cursor-pointer items-start gap-3 rounded-xl border border-border p-4">
+                <RadioGroupItem value="subscription" id="personal-auth-subscription" />
+                <div className="space-y-1">
+                  <div className="font-medium text-sm">Subscription</div>
+                  <p className="text-xs text-muted-foreground">
+                    Sign in to your existing Codex or Claude subscription.
+                  </p>
+                </div>
+              </Label>
+              <Label htmlFor="personal-auth-api-key" className="flex cursor-pointer items-start gap-3 rounded-xl border border-border p-4">
+                <RadioGroupItem value="api_key" id="personal-auth-api-key" />
+                <div className="space-y-1">
+                  <div className="font-medium text-sm">API key</div>
+                  <p className="text-xs text-muted-foreground">
+                    Paste a key for pay-as-you-go billing or service accounts.
+                  </p>
+                </div>
+              </Label>
+            </RadioGroup>
+          </div>
+        ) : null}
+
         <div className="space-y-2">
           <Label htmlFor="personal-auth-label">Label</Label>
           <Input
             id="personal-auth-label"
             value={authLabel}
             onChange={(event) => setAuthLabel(event.target.value)}
-            placeholder={`${agentLabel(personalProviderToAgent(provider))} backup`}
+            placeholder={`Optional — defaults to "${defaultLabelFor(provider, effectiveAuthType)}"`}
           />
         </div>
-        <div className="space-y-2">
-          <Label htmlFor="personal-api-key" className="flex items-center gap-2">
-            API key
-            <APIKeyHelpTooltip
-              ariaLabel={`Where to get a ${apiKeyHelp(provider).label} API key`}
-              description={apiKeyHelp(provider).description}
-              href={apiKeyHelp(provider).href}
-              linkLabel={apiKeyHelp(provider).linkLabel}
+
+        {effectiveAuthType === "api_key" ? (
+          <div className="space-y-2">
+            <Label htmlFor="personal-api-key" className="flex items-center gap-2">
+              API key
+              <APIKeyHelpTooltip
+                ariaLabel={`Where to get a ${apiKeyHelp(provider).label} API key`}
+                description={apiKeyHelp(provider).description}
+                href={apiKeyHelp(provider).href}
+                linkLabel={apiKeyHelp(provider).linkLabel}
+              />
+            </Label>
+            <Input
+              id="personal-api-key"
+              type="password"
+              value={apiKey}
+              onChange={(event) => setApiKey(event.target.value)}
+              placeholder={
+                provider === "anthropic"
+                  ? "sk-ant-..."
+                  : provider === "gemini"
+                    ? "AIza..."
+                    : provider === "amp"
+                      ? "amp_..."
+                      : provider === "pi"
+                        ? "pi_..."
+                        : "sk-..."
+              }
             />
-          </Label>
-          <Input
-            id="personal-api-key"
-            type="password"
-            value={apiKey}
-            onChange={(event) => setApiKey(event.target.value)}
-            placeholder={
-              provider === "anthropic"
-                ? "sk-ant-..."
-                : provider === "gemini"
-                  ? "AIza..."
-                  : provider === "amp"
-                    ? "amp_..."
-                    : provider === "pi"
-                      ? "pi_..."
-                      : "sk-..."
-            }
-          />
-        </div>
+          </div>
+        ) : null}
       </CodingAuthDialog>
+
+      {showCodexModal ? (
+        <CodexDeviceCodeModal
+          label={generatedLabel}
+          scope="personal"
+          onClose={() => {
+            setShowCodexModal(false);
+            resetModalState();
+          }}
+          onConnected={() => {
+            setShowCodexModal(false);
+            resetModalState();
+            // Invalidate the personal stack so the new subscription appears.
+            void queryClient.invalidateQueries({ queryKey: ["coding-credentials"] });
+            // Legacy keys that still feed parts of the UI during the
+            // unified-credentials migration window.
+            void queryClient.invalidateQueries({ queryKey: ["user-credentials"] });
+            void queryClient.invalidateQueries({ queryKey: ["credentials", "resolved"] });
+            toast.success("Personal subscription connected");
+          }}
+        />
+      ) : null}
+
+      {showClaudeModal ? (
+        <ClaudeCodeAuthModal
+          label={generatedLabel}
+          scope="personal"
+          onClose={() => {
+            setShowClaudeModal(false);
+            resetModalState();
+          }}
+          onConnected={() => {
+            setShowClaudeModal(false);
+            resetModalState();
+            void queryClient.invalidateQueries({ queryKey: ["coding-credentials"] });
+            void queryClient.invalidateQueries({ queryKey: ["user-credentials"] });
+            void queryClient.invalidateQueries({ queryKey: ["credentials", "resolved"] });
+            toast.success("Personal subscription connected");
+          }}
+        />
+      ) : null}
     </PageContainer>
   );
 }

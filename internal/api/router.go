@@ -785,6 +785,22 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Get("/api/v1/settings/codex-auth/subscriptions", codexAuthHandler.List)
 				r.Get("/api/v1/settings/claude-code-auth/subscriptions", claudeCodeAuthHandler.List)
 
+				// Codex / Claude OAuth subscription flows. Org-scope writes are
+				// admin-gated inside each handler (see resolveOAuthScope);
+				// personal-scope writes are available to any member because they
+				// target the caller's own credential rows. Routing both into the
+				// admin+member group lets a single endpoint serve both cases —
+				// the handler decides based on the request's scope param.
+				r.Post("/api/v1/settings/codex-auth/initiate", codexAuthHandler.Initiate)
+				r.Get("/api/v1/settings/codex-auth/status", codexAuthHandler.Status)
+				r.Post("/api/v1/settings/codex-auth/disconnect", codexAuthHandler.DisconnectAll) // legacy compat
+				r.Delete("/api/v1/settings/codex-auth/subscriptions/{id}", codexAuthHandler.DisconnectByPath)
+
+				r.Post("/api/v1/settings/claude-code-auth/initiate", claudeCodeAuthHandler.Initiate)
+				r.Post("/api/v1/settings/claude-code-auth/complete", claudeCodeAuthHandler.Complete)
+				r.Post("/api/v1/settings/claude-code-auth/disconnect", claudeCodeAuthHandler.DisconnectAll) // legacy compat
+				r.Delete("/api/v1/settings/claude-code-auth/subscriptions/{id}", claudeCodeAuthHandler.DisconnectByPath)
+
 				// Unified coding-credentials writes. Personal-scope mutations live in
 				// this group because they target the requester's own credentials and
 				// do not require admin privileges for members. The handler enforces
@@ -931,23 +947,11 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Put("/api/v1/settings/credentials/team/{provider}", userCredentialHandler.SetTeamDefault)
 				r.Delete("/api/v1/settings/credentials/team/{provider}", userCredentialHandler.DeleteTeamDefault)
 
-				// Codex (ChatGPT) OAuth device code auth. Subscription List is
-				// registered in the admin+member group so members can see which
-				// subscriptions are configured; everything else is admin-only.
-				r.Post("/api/v1/settings/codex-auth/initiate", codexAuthHandler.Initiate)
-				r.Get("/api/v1/settings/codex-auth/status", codexAuthHandler.Status)
-				r.Post("/api/v1/settings/codex-auth/disconnect", codexAuthHandler.DisconnectAll) // legacy compat
-				r.Delete("/api/v1/settings/codex-auth/subscriptions/{id}", codexAuthHandler.DisconnectByPath)
-
-				// Claude Code (Anthropic subscription) OAuth — PKCE authorization-code
-				// flow: initiate returns an authorize URL, user pastes back
-				// `<code>#<state>` which /complete exchanges for tokens. Subscription
-				// List sits in the admin+member group; everything else stays
-				// admin-only.
-				r.Post("/api/v1/settings/claude-code-auth/initiate", claudeCodeAuthHandler.Initiate)
-				r.Post("/api/v1/settings/claude-code-auth/complete", claudeCodeAuthHandler.Complete)
-				r.Post("/api/v1/settings/claude-code-auth/disconnect", claudeCodeAuthHandler.DisconnectAll) // legacy compat
-				r.Delete("/api/v1/settings/claude-code-auth/subscriptions/{id}", claudeCodeAuthHandler.DisconnectByPath)
+				// Codex / Claude OAuth subscription endpoints moved to the
+				// admin+member group above. The handlers' resolveOAuthScope
+				// keeps the admin gate on org-scope traffic, so members
+				// disconnecting their own personal subscription doesn't
+				// require elevating them to admin.
 
 				// Usage timeseries, breakdown, and export (admin-only)
 				r.Get("/api/v1/usage/timeseries", usageHandler.GetTimeseries)
