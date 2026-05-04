@@ -660,7 +660,7 @@ func (h *PreviewHandler) startPreviewLocal(ctx context.Context, orgID, userID, s
 			return nil, newPreviewHTTPError(
 				http.StatusUnprocessableEntity,
 				"PREVIEW_NO_CONFIG",
-				"this repo has no .143/config.json committed with a preview section. Add one (see docs/guides/previews.md) so the preview knows what command to run.",
+				"This repo has no .143/config.json committed with a preview section. Add one (see docs/guides/previews.md) so the preview knows what command to run.",
 				nil,
 			)
 		}
