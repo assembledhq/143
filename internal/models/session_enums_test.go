@@ -177,6 +177,65 @@ func parseLinearPrepareStateList(t *testing.T, raw string) []string {
 	return out
 }
 
+func TestSessionAutonomy_Validate(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		value     SessionAutonomy
+		expectErr bool
+	}{
+		{name: "full", value: SessionAutonomyFull},
+		{name: "semi", value: SessionAutonomySemi},
+		{name: "supervised", value: SessionAutonomySupervised},
+		{name: "invalid", value: SessionAutonomy("auto_all"), expectErr: true},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			err := tt.value.Validate()
+			if tt.expectErr {
+				require.Error(t, err, "Validate should reject unknown session autonomies")
+				return
+			}
+			require.NoError(t, err, "Validate should accept known session autonomies")
+		})
+	}
+}
+
+// TestSessionAutonomyMigrationVocabularyMatchesGoEnum pins the
+// chk_sessions_autonomy_level CHECK constraint in the migration to
+// AllSessionAutonomies. Adding a value in Go without updating the migration
+// would otherwise blow up at runtime with a constraint violation and
+// vice-versa; failing here flags the drift before merge.
+func TestSessionAutonomyMigrationVocabularyMatchesGoEnum(t *testing.T) {
+	t.Parallel()
+
+	const migrationFile = "000035_check_constraints.up.sql"
+	path := filepath.Join("..", "..", "migrations", migrationFile)
+	contents, err := os.ReadFile(path)
+	require.NoError(t, err, "migration file %s should be readable", migrationFile)
+
+	re := regexp.MustCompile(`(?s)CONSTRAINT\s+chk_sessions_autonomy_level\s+` +
+		`CHECK\s*\(\s*autonomy_level\s+IN\s*\(([^)]*)\)\s*\)`)
+	match := re.FindStringSubmatch(string(contents))
+	require.Len(t, match, 2, "migration must declare chk_sessions_autonomy_level with an IN-list")
+
+	migrationValues := parseLinearPrepareStateList(t, match[1])
+	goValues := make([]string, 0, len(AllSessionAutonomies()))
+	for _, a := range AllSessionAutonomies() {
+		goValues = append(goValues, string(a))
+	}
+	sort.Strings(migrationValues)
+	sort.Strings(goValues)
+	require.Equal(t, goValues, migrationValues,
+		"chk_sessions_autonomy_level values must match AllSessionAutonomies; "+
+			"add the missing value to whichever side is behind")
+}
+
 func TestSessionIssueLinkRole_Validate(t *testing.T) {
 	t.Parallel()
 
