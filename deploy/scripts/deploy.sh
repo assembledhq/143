@@ -165,7 +165,7 @@ if [ "$ROLE" = "worker" ]; then
   # `sudo sandbox-firewall.sh` exec if anything still holds the old inode
   # open for write (lingering sftp-server FD, ssh ControlMaster, or a
   # concurrent run). rename(2) gives the new contents a fresh inode.
-  if ! scp "${SCP_OPTS[@]}" "$PROJECT_DIR/deploy/scripts/sandbox-firewall.sh" \
+  if ! scp -p "${SCP_OPTS[@]}" "$PROJECT_DIR/deploy/scripts/sandbox-firewall.sh" \
       deploy@"$HOST":/opt/143/deploy/scripts/sandbox-firewall.sh.new; then
     echo "ERROR: scp of sandbox-firewall.sh failed."
     echo "  Hint: the worker likely has root-owned files under /opt/143/deploy/scripts AND"
@@ -178,8 +178,8 @@ if [ "$ROLE" = "worker" ]; then
     exit 1
   fi
   ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
-    "chmod +x /opt/143/deploy/scripts/sandbox-firewall.sh.new && \
-     mv /opt/143/deploy/scripts/sandbox-firewall.sh.new /opt/143/deploy/scripts/sandbox-firewall.sh"
+    "mv /opt/143/deploy/scripts/sandbox-firewall.sh.new /opt/143/deploy/scripts/sandbox-firewall.sh \
+     || { rm -f /opt/143/deploy/scripts/sandbox-firewall.sh.new; exit 1; }"
 fi
 
 ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
