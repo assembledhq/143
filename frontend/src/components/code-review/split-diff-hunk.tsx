@@ -25,6 +25,8 @@ interface SplitDiffHunkProps {
   onCancelComment?: () => void;
   onUpdateComment?: (commentId: string, data: { body?: string; resolved?: boolean }) => void;
   onDeleteComment?: (commentId: string) => void;
+  showInlineCommentComposer?: boolean;
+  onRequestEditComment?: (comment: SessionReviewComment) => void;
 }
 
 interface SplitRow {
@@ -221,6 +223,8 @@ export function SplitDiffHunk({
   onCancelComment,
   onUpdateComment,
   onDeleteComment,
+  showInlineCommentComposer = true,
+  onRequestEditComment,
 }: SplitDiffHunkProps) {
   const rows = useMemo(
     () => buildSplitRows(hunk.lines, highlightedLines),
@@ -311,6 +315,7 @@ export function SplitDiffHunk({
                             onUpdate={onUpdateComment}
                             onDelete={onDeleteComment}
                             className="max-w-[min(36rem,calc(50cqw-1rem))]"
+                            onRequestEdit={onRequestEditComment}
                           />
                         ) : null}
                       </div>
@@ -324,12 +329,13 @@ export function SplitDiffHunk({
                             onUpdate={onUpdateComment}
                             onDelete={onDeleteComment}
                             className="max-w-[min(36rem,calc(50cqw-1rem))]"
+                            onRequestEdit={onRequestEditComment}
                           />
                         ) : null}
                       </div>
                     </div>
                   )}
-                {(isLeftActive || isRightActive) && onSubmitComment && onCancelComment && (
+                {showInlineCommentComposer && (isLeftActive || isRightActive) && onSubmitComment && onCancelComment && (
                   <div className="flex divide-x divide-border/50">
                     <div
                       data-testid="left-comment-composer-slot"
