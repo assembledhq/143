@@ -684,6 +684,35 @@ func TestSessionStore_CountsByOrg_WithScopeFilters(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+func TestSessionStore_CountsByOrg_WithTriggeredByUserIDs(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewSessionStore(mock)
+	orgID := uuid.New()
+	userID1 := uuid.New()
+	userID2 := uuid.New()
+
+	mock.ExpectQuery(`(?s)SELECT.*triggered_by_user_id = ANY`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows([]string{"all_count", "active_count", "archived_count"}).
+				AddRow(4, 2, 1),
+		)
+
+	counts, err := store.CountsByOrg(context.Background(), orgID, SessionCountsFilters{
+		TriggeredByUserIDs: []uuid.UUID{userID1, userID2},
+	})
+	require.NoError(t, err, "CountsByOrg with TriggeredByUserIDs should not return an error")
+	require.Equal(t, 4, counts.All, "all count should reflect the scoped users")
+	require.Equal(t, 2, counts.Active, "active count should reflect the scoped users")
+	require.Equal(t, 1, counts.Archived, "archived count should reflect the scoped users")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func TestSessionStore_UpdateTitle(t *testing.T) {
 	t.Parallel()
 
