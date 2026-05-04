@@ -280,6 +280,14 @@ const (
 	// SnapshotUnavailablePRMessage is shown when the DB points at a checkpoint
 	// that is no longer present in storage.
 	SnapshotUnavailablePRMessage = "This session had a saved checkpoint, but it is no longer available in storage. Send a new message to rebuild the sandbox, then create the PR again."
+	// PushRejectedPRMessage is shown when `git push` was rejected because the
+	// remote branch advanced (or appeared) outside this session — typically a
+	// stale tip from a prior partial-success attempt or a manual push. The
+	// session's working branch embeds the session UUID so 143 owns the
+	// namespace; the script uses --force-with-lease to recover automatically,
+	// and this error fires when even the lease check fails (a true concurrent
+	// write between ls-remote and push).
+	PushRejectedPRMessage = "GitHub rejected the push because the remote branch changed during the attempt. Try again, or delete the branch on GitHub if it was created outside this session."
 )
 
 // WaitForPostPRSnapshotUploads blocks until every in-flight post-PR snapshot
@@ -325,6 +333,13 @@ var (
 // uncommitted changes relative to the base branch — there's nothing to push.
 // This typically means the diff was reverted or the session produced no edits.
 var ErrNoChanges = errors.New("no changes to push")
+
+// ErrPushRejected is returned by pushSessionBranch when `git push` exits
+// non-zero with a rejection (non-fast-forward, stale info from
+// --force-with-lease, "failed to push some refs"). Distinct from generic exec
+// failures so the worker can surface a targeted user-facing message instead
+// of the catch-all "Check GitHub access or repo permissions" fallback.
+var ErrPushRejected = errors.New("git push rejected by remote")
 
 // identityResolver returns a resolver wired with the PRService's current
 // dependencies. Lazily built on first use and cached; any Set* mutator
@@ -1062,6 +1077,9 @@ func (s *PRService) pushSessionBranch(
 		if msg == "" {
 			msg = "(no stderr)"
 		}
+		if isPushRejection(msg) {
+			return nil, fmt.Errorf("%w (exit %d): %s", ErrPushRejected, exitCode, msg)
+		}
 		return nil, fmt.Errorf("git push failed (exit %d): %s", exitCode, msg)
 	}
 
@@ -1176,6 +1194,22 @@ const pushHeadSHASentinel = "__143_HEAD_SHA="
 // `__143_HEAD_SHA=<sha>` so the caller can persist the just-pushed commit
 // onto the PullRequest row without a second GitHub round-trip. The line is
 // only emitted on the success branch — the no-changes contract is unchanged.
+//
+// Push uses --force-with-lease keyed on the SHA we just observed via
+// ls-remote. Rationale:
+//   - The session's working branch embeds the session UUID, so 143 owns the
+//     namespace and is the only legitimate writer.
+//   - Snapshot restores rebuild the local commit with fresh metadata, so a
+//     second attempt produces a different SHA than a prior partial-success
+//     push left on the remote — a plain push would fail non-fast-forward
+//     forever. The lease lets us recover from that state automatically.
+//   - The lease still aborts if a third party raced us between ls-remote and
+//     push, which is the only case this scheme can't (and shouldn't) recover
+//     from silently — surface ErrPushRejected so the UI says so.
+//
+// When the remote branch does not exist, ls-remote prints nothing,
+// remote_sha is empty, and `--force-with-lease=<ref>:` resolves to "expect
+// the ref to not exist" — a safe creation push.
 const pushScriptTemplate = `set -eu
 cleanup() { rm -f %[1]s; }
 trap cleanup EXIT
@@ -1191,7 +1225,8 @@ if git rev-parse --abbrev-ref --symbolic-full-name @{u} >/dev/null 2>&1; then
         exit %[5]d
     fi
 fi
-git push %[6]s HEAD:refs/heads/%[7]s
+remote_sha=$(git ls-remote %[6]s refs/heads/%[7]s | awk 'NR==1 {print $1}')
+git push --force-with-lease=refs/heads/%[7]s:"${remote_sha}" %[6]s HEAD:refs/heads/%[7]s
 echo "%[8]s$(git rev-parse HEAD)"
 `
 
@@ -1215,6 +1250,30 @@ func buildPushScript(workDir, authorName, authorEmail, branchName, pushURL strin
 		// sentinel to include shell metacharacters MUST add quoting here.
 		pushHeadSHASentinel,
 	)
+}
+
+// isPushRejection inspects git's stderr from a failed `git push` and reports
+// whether the failure was a server-side rejection (non-fast-forward, stale
+// info from --force-with-lease, generic "failed to push some refs"). Used to
+// promote those cases to ErrPushRejected so the worker can render a
+// targeted user-facing message instead of the catch-all permissions fallback.
+//
+// Match is substring-based and case-insensitive: git's wording is stable
+// enough across versions that anchoring on these phrases is safer than
+// trying to parse exit codes (always 1) or structured output (none).
+func isPushRejection(stderr string) bool {
+	lc := strings.ToLower(stderr)
+	for _, marker := range []string{
+		"non-fast-forward",
+		"stale info",
+		"failed to push some refs",
+		"rejected",
+	} {
+		if strings.Contains(lc, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 // shellQuote single-quotes s for safe interpolation into a POSIX shell.

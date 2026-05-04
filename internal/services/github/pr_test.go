@@ -3610,10 +3610,12 @@ func TestBuildPushScript_Structure(t *testing.T) {
 	// Commit message is read from file (not argv).
 	require.Contains(t, script, "git commit -F '/tmp/143-pr-commit-msg'")
 
-	// Push goes to a credential-free URL — auth flows through
-	// credential.helper=!143-tools git-credential talking to the
-	// per-push host socket.
-	require.Contains(t, script, "git push 'https://github.com/owner/repo.git' HEAD:refs/heads/'143/abc123/fix-typo'")
+	// Push uses --force-with-lease keyed on the remote SHA we just observed
+	// via ls-remote. Auth flows through credential.helper=!143-tools
+	// git-credential talking to the per-push host socket — no userinfo in
+	// the URL.
+	require.Contains(t, script, "git ls-remote 'https://github.com/owner/repo.git' refs/heads/'143/abc123/fix-typo'")
+	require.Contains(t, script, `git push --force-with-lease=refs/heads/'143/abc123/fix-typo':"${remote_sha}" 'https://github.com/owner/repo.git' HEAD:refs/heads/'143/abc123/fix-typo'`)
 
 	// No-changes sentinel exit code is present in the upstream-ancestor branch.
 	require.Contains(t, script, "exit 77")
@@ -3638,6 +3640,53 @@ func TestBuildPushScript_QuotesHostileBranchName(t *testing.T) {
 		"https://github.com/o/r.git",
 	)
 	require.Contains(t, script, `HEAD:refs/heads/'143/abc/it'\''s-fine'`)
+	// The branch is interpolated three times now (ls-remote, lease ref, push
+	// ref); each must round-trip through shellQuote so the embedded quote
+	// can't break out and corrupt the script.
+	require.Contains(t, script, `git ls-remote 'https://github.com/o/r.git' refs/heads/'143/abc/it'\''s-fine'`)
+	require.Contains(t, script, `--force-with-lease=refs/heads/'143/abc/it'\''s-fine':"${remote_sha}"`)
+}
+
+func TestIsPushRejection(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name string
+		in   string
+		want bool
+	}{
+		{
+			name: "non-fast-forward",
+			in:   "To https://github.com/o/r.git\n ! [rejected]   HEAD -> b (non-fast-forward)\nerror: failed to push some refs",
+			want: true,
+		},
+		{
+			name: "stale info from force-with-lease",
+			in:   " ! [rejected]   HEAD -> b (stale info)\nerror: failed to push some refs to 'https://github.com/o/r.git'",
+			want: true,
+		},
+		{
+			name: "uppercase still matches",
+			in:   "REJECTED",
+			want: true,
+		},
+		{
+			name: "unrelated network error",
+			in:   "fatal: unable to access 'https://github.com/o/r.git/': Could not resolve host",
+			want: false,
+		},
+		{
+			name: "empty stderr",
+			in:   "",
+			want: false,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			require.Equal(t, c.want, isPushRejection(c.in))
+		})
+	}
 }
 
 func TestFormatBranchName_PrefersSessionWorkingBranch(t *testing.T) {
@@ -3814,10 +3863,24 @@ func TestPushSessionBranch(t *testing.T) {
 			wantDestroyCnt: 1,
 		},
 		{
-			name:           "nonzero exit surfaces stderr",
+			name:           "nonzero exit with non-rejection stderr surfaces raw error",
 			snapshots:      &prTestSnapshotStore{payload: []byte("snapshot")},
-			provider:       &prTestSandboxProvider{execExit: 12, execStderr: "remote: rejected"},
-			wantErrSubstr:  "git push failed (exit 12): remote: rejected",
+			provider:       &prTestSandboxProvider{execExit: 12, execStderr: "fatal: unable to access remote"},
+			wantErrSubstr:  "git push failed (exit 12): fatal: unable to access remote",
+			wantDestroyCnt: 1,
+		},
+		{
+			name:           "non-fast-forward rejection maps to ErrPushRejected",
+			snapshots:      &prTestSnapshotStore{payload: []byte("snapshot")},
+			provider:       &prTestSandboxProvider{execExit: 1, execStderr: "! [rejected]   HEAD -> b (non-fast-forward)\nerror: failed to push some refs"},
+			wantErrIs:      ErrPushRejected,
+			wantDestroyCnt: 1,
+		},
+		{
+			name:           "stale info from force-with-lease maps to ErrPushRejected",
+			snapshots:      &prTestSnapshotStore{payload: []byte("snapshot")},
+			provider:       &prTestSandboxProvider{execExit: 1, execStderr: "! [rejected]   HEAD -> b (stale info)"},
+			wantErrIs:      ErrPushRejected,
 			wantDestroyCnt: 1,
 		},
 		{
