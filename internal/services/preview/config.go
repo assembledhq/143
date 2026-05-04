@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/assembledhq/143/internal/models"
+	"github.com/assembledhq/143/internal/repoconfig"
 )
 
 // =============================================================================
@@ -71,10 +72,12 @@ const (
 )
 
 // =============================================================================
-// Raw config (direct JSON unmarshal of .143/preview.json)
+// Raw preview config (direct JSON unmarshal of the nested "preview" section in
+// .143/config.json).
 // =============================================================================
 
-// rawPreviewConfig is the direct JSON representation of .143/preview.json.
+// rawPreviewConfig is the direct JSON representation of the nested preview
+// section inside .143/config.json.
 // It supports both single-service (top-level command/port) and multi-service
 // (services map) formats.
 type rawPreviewConfig struct {
@@ -110,11 +113,16 @@ func (r *rawPreviewConfig) hasBothFormats() bool {
 // ParseConfig
 // =============================================================================
 
-// ParseConfig parses a .143/preview.json file and normalizes single-service
-// configs to the multi-service format.
+// ParseConfig parses the nested preview section from .143/config.json and
+// normalizes single-service configs to the multi-service format.
 func ParseConfig(data []byte) (*models.PreviewConfig, error) {
+	previewData, err := extractPreviewSection(data)
+	if err != nil {
+		return nil, err
+	}
+
 	var raw rawPreviewConfig
-	if err := json.Unmarshal(data, &raw); err != nil {
+	if err := json.Unmarshal(previewData, &raw); err != nil {
 		return nil, fmt.Errorf("parse preview config: %w", err)
 	}
 
@@ -161,6 +169,36 @@ func ParseConfig(data []byte) (*models.PreviewConfig, error) {
 	}
 
 	return cfg, nil
+}
+
+func extractPreviewSection(data []byte) ([]byte, error) {
+	var probe map[string]json.RawMessage
+	if err := json.Unmarshal(data, &probe); err != nil {
+		return data, nil
+	}
+	_, hasPreview := probe["preview"]
+	_, hasBootstrap := probe["bootstrap"]
+	_, hasValidation := probe["validation"]
+	if !hasPreview && !hasBootstrap && !hasValidation {
+		return data, nil
+	}
+	if _, hasLegacyPreviewFields := probe["services"]; hasLegacyPreviewFields {
+		return data, nil
+	}
+	if _, hasLegacyPreviewFields := probe["command"]; hasLegacyPreviewFields {
+		return data, nil
+	}
+	if !hasPreview {
+		return nil, fmt.Errorf("parse preview config: missing preview section in %s", repoconfig.ConfigPath)
+	}
+	cfg, err := repoconfig.Parse(data)
+	if err != nil || len(cfg.Preview) == 0 {
+		if err != nil {
+			return nil, fmt.Errorf("parse preview config: %w", err)
+		}
+		return nil, fmt.Errorf("parse preview config: missing preview section in %s", repoconfig.ConfigPath)
+	}
+	return cfg.Preview, nil
 }
 
 // =============================================================================

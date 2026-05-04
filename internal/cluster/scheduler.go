@@ -292,6 +292,38 @@ func (s *Scheduler) runOnce(ctx context.Context) {
 	// session. Idempotent across schedulers — concurrent reapers update the
 	// same rows with the same NULL value.
 	s.reapStrandedPendingSnapshots(ctx, now)
+
+	// Seventh pass: refresh per-org Linear team-key allowlist once per UTC
+	// day so bare-identifier detection (e.g. "ACS-1234") picks up new teams
+	// created post-install. The OAuth callback enqueues an immediate refresh,
+	// so this cron is the long-term safety net for teams added later. The
+	// integration's settings UI does not surface a manual refresh, so this is
+	// the only path that reconciles the cache against Linear's source of
+	// truth.
+	s.scheduleLinearTeamKeyRefresh(ctx, orgIDs, now)
+}
+
+// scheduleLinearTeamKeyRefresh enqueues a per-org refresh_linear_team_keys
+// job once per UTC day. The job's handler is idempotent (it replaces the
+// linear_team_keys rows for the org's integration); deduping per day keeps
+// the scheduler's 10-minute tick from queueing 144 redundant jobs/day.
+//
+// Org-scoping piggybacks on the upstream ListOrgsWithActiveIntegrations call
+// — orgs without a Linear integration won't appear here, so the worker never
+// sees a no-op dispatch. The job itself rechecks the integration row before
+// hitting Linear so a torn-down integration after enqueue still results in a
+// graceful skip.
+func (s *Scheduler) scheduleLinearTeamKeyRefresh(ctx context.Context, orgIDs []uuid.UUID, now time.Time) {
+	dateKey := now.UTC().Format("2006-01-02")
+	for _, orgID := range orgIDs {
+		dedupeKey := fmt.Sprintf("refresh_linear_team_keys:%s:%s", orgID.String(), dateKey)
+		payload := map[string]string{"org_id": orgID.String()}
+		if _, err := s.jobs.Enqueue(ctx, orgID, "linear", "refresh_linear_team_keys", payload, 5, &dedupeKey); err != nil {
+			s.logger.Warn().Err(err).
+				Str("org_id", orgID.String()).
+				Msg("failed to enqueue refresh_linear_team_keys cron job")
+		}
+	}
 }
 
 func (s *Scheduler) scheduleAuditRetentionCleanup(ctx context.Context, orgIDs []uuid.UUID, now time.Time) {

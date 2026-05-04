@@ -159,6 +159,38 @@ type IntegrationHandler struct {
 	pmAutoTriggerJobs   pmAutoTriggerJobStore
 	pmAutoTriggerDocs   pmAutoTriggerDocStore
 	pmAutoTriggerLogger zerolog.Logger
+
+	// Linear post-install hooks (nil-safe).
+	linearJobStore                *db.JobStore
+	linearTeamKeyRefresher        func(ctx context.Context, orgID uuid.UUID) error
+	linearTeamKeyCacheInvalidator func(orgID uuid.UUID)
+}
+
+// SetLinearJobStore wires a JobStore so the OAuth callback can enqueue an
+// initial refresh_linear_team_keys job. Without this hook, the team-key
+// allowlist stays empty until the next 24h cron, which means bare-identifier
+// detection won't work right after install.
+func (h *IntegrationHandler) SetLinearJobStore(jobs *db.JobStore) {
+	h.linearJobStore = jobs
+}
+
+// SetLinearTeamKeyRefresher wires an inline refresh hook (typically
+// linear.Service.RefreshTeamKeys) the OAuth callback runs under a short
+// budget before falling back to the worker enqueue. The inline path is
+// best-effort — if it fails or times out, the enqueue still fires so the
+// allowlist eventually populates; if both fail, the 24h cron is the last
+// line of defense.
+func (h *IntegrationHandler) SetLinearTeamKeyRefresher(fn func(ctx context.Context, orgID uuid.UUID) error) {
+	h.linearTeamKeyRefresher = fn
+}
+
+// SetLinearTeamKeyCacheInvalidator wires the cache-invalidation hook
+// (typically linear.Service.InvalidateTeamKeyCache) so DisconnectIntegration
+// can drop the in-process team-key allowlist entry for the org as soon as
+// the integration goes inactive. Nil-safe: when unset, the cache TTL
+// (60s) bounds the worst-case staleness window on its own.
+func (h *IntegrationHandler) SetLinearTeamKeyCacheInvalidator(fn func(orgID uuid.UUID)) {
+	h.linearTeamKeyCacheInvalidator = fn
 }
 
 // IntegrationOAuthConfig holds all integration OAuth credentials.
@@ -341,6 +373,16 @@ func (h *IntegrationHandler) DisconnectIntegration(w http.ResponseWriter, r *htt
 		}
 	}
 
+	// Drop the Linear team-key allowlist cache for this org so a session
+	// created right after disconnect doesn't admit bare-identifier matches
+	// against a workspace whose integration just went inactive. The DB-side
+	// linear_team_keys.ListByOrg already filters on `integrations.status =
+	// 'active'`, so this only addresses the in-process cache. Best-effort
+	// and nil-safe.
+	if provider == models.IntegrationProviderLinear && h.linearTeamKeyCacheInvalidator != nil {
+		h.linearTeamKeyCacheInvalidator(orgID)
+	}
+
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -411,6 +453,45 @@ func (h *IntegrationHandler) HandleLinearOAuthCallback(w http.ResponseWriter, r 
 	if _, _, err := h.ensureIntegration(r.Context(), orgID, models.IntegrationProviderLinear); err != nil {
 		writeError(w, r, http.StatusInternalServerError, "CONNECT_LINEAR_FAILED", "failed to connect linear integration", err)
 		return
+	}
+
+	// Trigger an initial team-key refresh so detection's bare-identifier
+	// branch works on the very next session. Three-tier strategy:
+	//  1. Detached-context background refresh kicked off here so the OAuth
+	//     redirect returns immediately — under typical load Linear's teams
+	//     query lands well inside the cache TTL window before the user
+	//     creates their next session.
+	//  2. Worker enqueue is fired in parallel as the durable fallback so
+	//     a slow/failed inline path still has a guaranteed retry path.
+	//     Both paths dedupe on the same job key, so we don't over-charge
+	//     the worker queue.
+	//  3. The 24h scheduler pass (Scheduler.scheduleLinearTeamKeyRefresh)
+	//     is the last line of defense after that.
+	// All paths are nil-safe so test harnesses without these hooks still
+	// complete the OAuth flow normally.
+	logger := zerolog.Ctx(r.Context())
+	if h.linearTeamKeyRefresher != nil {
+		// context.WithoutCancel: a cancelled request context (the user
+		// closing the browser tab post-redirect) must not abort the
+		// refresh. The 3s cap here is just defense against a wedged
+		// Linear API hold of an internal goroutine.
+		bgCtx, bgCancel := context.WithTimeout(context.WithoutCancel(r.Context()), 3*time.Second)
+		go func() {
+			defer bgCancel()
+			if err := h.linearTeamKeyRefresher(bgCtx, orgID); err != nil {
+				logger.Warn().Err(err).
+					Str("org_id", orgID.String()).
+					Msg("background refresh_linear_team_keys after install failed; worker fallback or 24h cron will retry")
+			}
+		}()
+	}
+	if h.linearJobStore != nil {
+		dedupe := "refresh_linear_team_keys:" + orgID.String()
+		if _, err := h.linearJobStore.Enqueue(r.Context(), orgID, "linear", "refresh_linear_team_keys", map[string]any{
+			"org_id": orgID.String(),
+		}, 5, &dedupe); err != nil {
+			logger.Warn().Err(err).Msg("failed to enqueue refresh_linear_team_keys after install")
+		}
 	}
 
 	http.Redirect(w, r, h.frontendURL+"/integrations?linear=connected", http.StatusTemporaryRedirect)

@@ -651,7 +651,7 @@ func TestCodexAdapter_Execute(t *testing.T) {
 			}
 
 			adapter := NewCodexAdapter(zerolog.Nop())
-			sandbox := &agent.Sandbox{ID: "test-sandbox", WorkDir: "/workspace", HomeDir: "/home/sandbox"}
+			sandbox := &agent.Sandbox{ID: "test-sandbox", WorkDir: "/workspace", HomeDir: "/home/sandbox", Metadata: map[string]string{agent.SandboxMetadataBaseCommitSHA: "abc123"}}
 			prompt := &agent.AgentPrompt{
 				SystemPrompt: "Fix the bug.",
 				UserPrompt:   "Null pointer error.",
@@ -697,7 +697,7 @@ func TestCodexAdapter_Execute_ExecError(t *testing.T) {
 	}
 
 	adapter := NewCodexAdapter(zerolog.Nop())
-	sandbox := &agent.Sandbox{ID: "test", WorkDir: "/workspace", HomeDir: "/home/sandbox"}
+	sandbox := &agent.Sandbox{ID: "test", WorkDir: "/workspace", HomeDir: "/home/sandbox", Metadata: map[string]string{agent.SandboxMetadataBaseCommitSHA: "abc123"}}
 	prompt := &agent.AgentPrompt{SystemPrompt: "test", UserPrompt: "test", MaxTokens: 50_000}
 	logCh := make(chan agent.LogEntry, 10)
 	ctx := WithSandboxProvider(context.Background(), provider)
@@ -717,7 +717,7 @@ func TestCodexAdapter_Execute_WriteFileError(t *testing.T) {
 	}
 
 	adapter := NewCodexAdapter(zerolog.Nop())
-	sandbox := &agent.Sandbox{ID: "test", WorkDir: "/workspace", HomeDir: "/home/sandbox"}
+	sandbox := &agent.Sandbox{ID: "test", WorkDir: "/workspace", HomeDir: "/home/sandbox", Metadata: map[string]string{agent.SandboxMetadataBaseCommitSHA: "abc123"}}
 	prompt := &agent.AgentPrompt{SystemPrompt: "test", UserPrompt: "test", MaxTokens: 50_000}
 	logCh := make(chan agent.LogEntry, 10)
 	ctx := WithSandboxProvider(context.Background(), provider)
@@ -732,7 +732,7 @@ func TestCodexAdapter_Execute_MissingSandboxProvider(t *testing.T) {
 	t.Parallel()
 
 	adapter := NewCodexAdapter(zerolog.Nop())
-	sandbox := &agent.Sandbox{ID: "test", WorkDir: "/workspace", HomeDir: "/home/sandbox"}
+	sandbox := &agent.Sandbox{ID: "test", WorkDir: "/workspace", HomeDir: "/home/sandbox", Metadata: map[string]string{agent.SandboxMetadataBaseCommitSHA: "abc123"}}
 	prompt := &agent.AgentPrompt{SystemPrompt: "test", UserPrompt: "test", MaxTokens: 50_000}
 	logCh := make(chan agent.LogEntry, 10)
 
@@ -763,7 +763,7 @@ func TestCodexAdapter_Execute_ContinuationWithoutSessionIDUsesResumeLast(t *test
 	}
 
 	adapter := NewCodexAdapter(zerolog.Nop())
-	sandbox := &agent.Sandbox{ID: "test", WorkDir: "/workspace", HomeDir: "/home/sandbox"}
+	sandbox := &agent.Sandbox{ID: "test", WorkDir: "/workspace", HomeDir: "/home/sandbox", Metadata: map[string]string{agent.SandboxMetadataBaseCommitSHA: "abc123"}}
 	prompt := &agent.AgentPrompt{
 		UserMessage:  "Please tighten the test case.",
 		MaxTokens:    50_000,
@@ -800,7 +800,7 @@ func TestCodexAdapter_Execute_IncludesReasoningEffortOverride(t *testing.T) {
 	}
 
 	adapter := NewCodexAdapter(zerolog.Nop())
-	sandbox := &agent.Sandbox{ID: "test", WorkDir: "/workspace", HomeDir: "/home/sandbox"}
+	sandbox := &agent.Sandbox{ID: "test", WorkDir: "/workspace", HomeDir: "/home/sandbox", Metadata: map[string]string{agent.SandboxMetadataBaseCommitSHA: "abc123"}}
 	prompt := &agent.AgentPrompt{
 		SystemPrompt:    "test",
 		UserPrompt:      "test",
@@ -837,7 +837,7 @@ func TestCodexAdapter_Execute_ContinuationWithResumeSessionIDIncludesReasoningEf
 	}
 
 	adapter := NewCodexAdapter(zerolog.Nop())
-	sandbox := &agent.Sandbox{ID: "test", WorkDir: "/workspace", HomeDir: "/home/sandbox"}
+	sandbox := &agent.Sandbox{ID: "test", WorkDir: "/workspace", HomeDir: "/home/sandbox", Metadata: map[string]string{agent.SandboxMetadataBaseCommitSHA: "abc123"}}
 	prompt := &agent.AgentPrompt{
 		UserMessage:     "Please continue.",
 		MaxTokens:       50_000,

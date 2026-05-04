@@ -146,10 +146,12 @@ type PRPreviewState struct {
 }
 
 // =============================================================================
-// Preview configuration types (parsed from .143/preview.json)
+// Preview configuration types (parsed from the nested preview section in
+// .143/config.json)
 // =============================================================================
 
-// PreviewConfig is the parsed representation of a .143/preview.json file.
+// PreviewConfig is the parsed representation of the preview section in
+// .143/config.json.
 // Internally, single-service configs are normalized to multi-service format.
 type PreviewConfig struct {
 	Version        string                          `json:"version"`

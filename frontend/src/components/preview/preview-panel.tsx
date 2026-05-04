@@ -18,9 +18,15 @@ import {
   Palette,
   RefreshCw,
   X,
+  ChevronDown,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from "@/components/ui/collapsible";
 import {
   Tooltip,
   TooltipContent,
@@ -69,17 +75,7 @@ const STATUS_LABELS: Record<PreviewStatus, string> = {
   expired: "Expired",
 };
 
-const STATUS_ORDER: PreviewStatus[] = [
-  "starting",
-  "partially_ready",
-  "ready",
-];
-
-function statusProgress(status: PreviewStatus): number {
-  const idx = STATUS_ORDER.indexOf(status);
-  if (idx === -1) return 0;
-  return ((idx + 1) / STATUS_ORDER.length) * 100;
-}
+const STARTUP_PHASES = ["Provisioning", "Starting", "Opening"] as const;
 
 function statusColor(status: PreviewStatus): string {
   switch (status) {
@@ -244,6 +240,60 @@ function startupStepIcon(state: StartupChecklistStepState) {
   }
 }
 
+function getStartupSubtitle(
+  status: PreviewStatus | undefined,
+  services: PreviewService[],
+  infrastructure: PreviewInfrastructure[],
+): string {
+  const provisioning = infrastructure.find(
+    (item) => item.status === "provisioning",
+  );
+  if (provisioning) return `Provisioning ${provisioning.infra_name}`;
+
+  const starting = services.find((service) => service.status === "starting");
+  if (starting) return `Starting ${starting.service_name}`;
+
+  if (status === "partially_ready") {
+    return "Opening preview";
+  }
+
+  return "Starting services";
+}
+
+function startupPhaseState(
+  phase: (typeof STARTUP_PHASES)[number],
+  services: PreviewService[],
+  infrastructure: PreviewInfrastructure[],
+): StartupChecklistStepState {
+  const hasInfrastructure = infrastructure.length > 0;
+  const allInfrastructureHealthy =
+    hasInfrastructure && infrastructure.every((item) => item.status === "healthy");
+  const provisioning = infrastructure.some((item) => item.status === "provisioning");
+  const anyServiceReady = services.some((service) => service.status === "ready");
+  const anyServiceStarting = services.some((service) => service.status === "starting");
+  const allServicesReady =
+    services.length > 0 && services.every((service) => service.status === "ready");
+
+  if (phase === "Provisioning") {
+    if (!hasInfrastructure || allInfrastructureHealthy) return "complete";
+    if (provisioning) return "active";
+    return "pending";
+  }
+
+  if (phase === "Starting") {
+    if (allServicesReady) return "complete";
+    if (!hasInfrastructure || allInfrastructureHealthy || anyServiceStarting || anyServiceReady) {
+      return "active";
+    }
+    return "pending";
+  }
+
+  // "Opening" has no `complete` state inside this canvas — completion is
+  // signalled by the canvas unmounting once the parent transitions to
+  // partially_ready or ready.
+  if (allServicesReady) return "active";
+  return "pending";
+}
 
 export function PreviewPanel({
   sessionId,
@@ -283,14 +333,23 @@ export function PreviewPanel({
   });
 
   const instance = previewStatus?.instance;
-  const services = previewStatus?.services ?? [];
-  const infrastructure = previewStatus?.infrastructure ?? [];
+  const services = useMemo(
+    () => previewStatus?.services ?? [],
+    [previewStatus?.services],
+  );
+  const infrastructure = useMemo(
+    () => previewStatus?.infrastructure ?? [],
+    [previewStatus?.infrastructure],
+  );
   const status = instance?.status;
   const isActive =
     status === "ready" ||
     status === "partially_ready" ||
     status === "starting";
   const isReady = status === "ready" || status === "partially_ready";
+  const hasStartupRows = services.length > 0 || infrastructure.length > 0;
+  const showStartupProgress =
+    (isActive && !isReady) || (status === "failed" && hasStartupRows);
 
   // Start preview
   const startMutation = useMutation({
@@ -326,6 +385,25 @@ export function PreviewPanel({
       if (code === PREVIEW_ERROR_CODES.NO_SANDBOX) {
         setMutationError(
           "Preview is unavailable on this server (Docker not configured). Contact an admin."
+        );
+        return;
+      }
+      if (code === PREVIEW_ERROR_CODES.SANDBOX_BUSY) {
+        // The agent is using the sandbox right now (running a turn). The
+        // backend already destroyed our half-built container; the user just
+        // needs to wait a beat and click again.
+        setMutationError(
+          "The agent is currently using this session's sandbox. Wait for the current turn to finish, then try Start Preview again."
+        );
+        return;
+      }
+      if (code === PREVIEW_ERROR_CODES.WORKER_REQUEST_FAILED) {
+        // Connection to the preview worker dropped mid-request — typically
+        // a timeout or a worker restart. No response body means no real
+        // error code; suggest retry rather than burying the cause under the
+        // generic "Failed to start preview:" prefix.
+        setMutationError(
+          "Could not reach the preview worker (connection dropped). Try Start Preview again — if this keeps happening, the worker may be unhealthy."
         );
         return;
       }
@@ -509,10 +587,19 @@ export function PreviewPanel({
     startMutation.isPending ||
     stopMutation.isPending ||
     restartMutation.isPending;
-  const startupChecklist =
-    isActive && !isReady
-      ? buildStartupChecklist(status, services, infrastructure)
-      : [];
+  const showStartupCanvas = isActive && !isReady;
+  const startupChecklist = useMemo(
+    () =>
+      showStartupProgress
+        ? buildStartupChecklist(status, services, infrastructure)
+        : [],
+    [showStartupProgress, status, services, infrastructure],
+  );
+  const startupSubtitle = getStartupSubtitle(status, services, infrastructure);
+  const showTopControls = status !== "starting";
+  const visibleStartupPhases = STARTUP_PHASES.filter(
+    (phase) => phase !== "Provisioning" || infrastructure.length > 0,
+  );
 
   if (statusLoading) {
     return (
@@ -528,6 +615,7 @@ export function PreviewPanel({
   return (
     <div className="flex flex-col gap-3">
       {/* Controls bar */}
+      {showTopControls && (
       <div className="flex items-center gap-2 flex-wrap">
         {/* Start / Stop / Restart */}
         <div className="flex items-center gap-1">
@@ -560,9 +648,6 @@ export function PreviewPanel({
         {/* Status badge */}
         {status && (
           <Badge variant="secondary" className={cn(statusColor(status))}>
-            {status === "starting" && (
-              <Loader2 className="size-3 animate-spin" />
-            )}
             {status === "ready" && <CheckCircle2 className="size-3" />}
             {(status === "failed" || status === "unhealthy") && <AlertTriangle className="size-3" />}
             {STATUS_LABELS[status]}
@@ -573,7 +658,7 @@ export function PreviewPanel({
         {isReady && <ConsoleBadge sessionId={sessionId} />}
 
         {/* TTL Warning */}
-        {instance?.expires_at && isActive && (
+        {instance?.expires_at && isReady && (
           <TTLWarning
             expiresAt={instance.expires_at}
             sessionId={sessionId}
@@ -658,6 +743,7 @@ export function PreviewPanel({
           </TooltipProvider>
         )}
       </div>
+      )}
 
       {/* Mutation error banner */}
       {mutationError && (
@@ -697,7 +783,7 @@ export function PreviewPanel({
       )}
 
       {/* Service status indicators */}
-      {services.length > 1 && isActive && (
+      {services.length > 1 && isReady && (
         <div className="flex items-center gap-3 text-xs text-muted-foreground">
           {services.map((svc) => (
             <div key={svc.service_name} className="flex items-center gap-1">
@@ -714,72 +800,114 @@ export function PreviewPanel({
       )}
 
       {/* Startup progress */}
-      {isActive && !isReady && (
-        <div className="space-y-2">
-          <div className="rounded-lg border bg-muted/30 p-3">
-            <p className="text-sm font-medium">Preview startup can take a few minutes.</p>
-            <p className="mt-1 text-xs text-muted-foreground">
-              You can stay here while we spin up the environment and bring services online.
-            </p>
-          </div>
-          <div className="flex items-center gap-2 text-xs text-muted-foreground">
-            {STATUS_ORDER.map((p, i) => {
-              const currentIdx = STATUS_ORDER.indexOf(
-                status as PreviewStatus
-              );
-              const isDone = i < currentIdx;
-              const isCurrent = i === currentIdx;
-              return (
-                <div
-                  key={p}
-                  className={cn(
-                    "flex items-center gap-1",
-                    isDone && "text-emerald-600 dark:text-emerald-400",
-                    isCurrent && "text-primary font-medium"
-                  )}
-                >
-                  {isDone ? (
-                    <CheckCircle2 className="size-3" />
-                  ) : isCurrent ? (
-                    <Loader2 className="size-3 animate-spin" />
-                  ) : (
-                    <Circle className="size-3" />
-                  )}
-                  {STATUS_LABELS[p]}
-                  {i < STATUS_ORDER.length - 1 && (
-                    <span className="text-muted-foreground/50 mx-1">
-                      &rarr;
-                    </span>
-                  )}
-                </div>
-              );
-            })}
-          </div>
-          <div className="h-1 rounded-full bg-muted overflow-hidden">
-            <div
-              className="h-full bg-primary rounded-full transition-all duration-500"
-              style={{ width: `${statusProgress(status as PreviewStatus)}%` }}
-            />
-          </div>
-          <div className="rounded-lg border bg-background/70 p-3">
-            <div className="mb-2 text-xs font-medium uppercase tracking-[0.16em] text-muted-foreground">
-              Startup checklist
+      {showStartupCanvas && (
+        <div className="rounded-lg border bg-muted/20 overflow-hidden">
+          <div className="relative bg-background">
+            <div className="absolute right-3 top-3 z-10 flex items-center gap-1">
+              <TooltipProvider>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button
+                      size="icon-sm"
+                      variant="ghost"
+                      aria-label="Stop preview"
+                      onClick={() => stopMutation.mutate()}
+                      disabled={isMutating}
+                      loading={stopMutation.isPending}
+                    >
+                      {!stopMutation.isPending && <Square className="size-3.5" />}
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent>Stop preview</TooltipContent>
+                </Tooltip>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button
+                      size="icon-sm"
+                      variant="ghost"
+                      aria-label="Restart preview"
+                      onClick={() => restartMutation.mutate()}
+                      disabled={isMutating}
+                      loading={restartMutation.isPending}
+                    >
+                      {!restartMutation.isPending && <RotateCw className="size-3.5" />}
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent>Restart preview</TooltipContent>
+                </Tooltip>
+              </TooltipProvider>
             </div>
-            <div className="space-y-2">
-              {startupChecklist.map((step) => (
-                <div
-                  key={step.title}
-                  className="flex items-start gap-2 rounded-md border border-border/60 bg-muted/20 px-2.5 py-2"
-                >
-                  <div className="mt-0.5">{startupStepIcon(step.state)}</div>
-                  <div className="min-w-0">
-                    <div className="text-sm font-medium">{step.title}</div>
-                    <div className="text-xs text-muted-foreground">{step.detail}</div>
-                  </div>
-                </div>
-              ))}
+            <div className="flex min-h-[360px] flex-col items-center justify-center px-6 py-14 text-center">
+              <div className="mb-4 rounded-full border bg-card p-3 shadow-sm">
+                <Loader2 className="size-5 animate-spin text-primary" />
+              </div>
+              <div className="space-y-1">
+                <p className="text-lg font-semibold text-foreground">Preparing preview</p>
+                <p className="text-sm text-muted-foreground">{startupSubtitle}</p>
+              </div>
+              <div
+                className={cn(
+                  "mt-8 grid w-full max-w-md gap-3",
+                  visibleStartupPhases.length === 3 ? "grid-cols-3" : "grid-cols-2",
+                )}
+              >
+                {visibleStartupPhases.map((phase) => {
+                  const phaseState = startupPhaseState(phase, services, infrastructure);
+                  return (
+                    <div
+                      key={phase}
+                      className={cn(
+                        "flex flex-col items-center gap-2 rounded-lg border bg-card/70 px-3 py-2.5 text-xs text-muted-foreground",
+                        phaseState === "active" && "border-primary/30 text-foreground shadow-sm",
+                        phaseState === "complete" && "text-emerald-600 dark:text-emerald-400",
+                      )}
+                    >
+                      {phaseState === "complete" ? (
+                        <CheckCircle2 className="size-3.5" />
+                      ) : phaseState === "active" ? (
+                        <Loader2 className="size-3.5 animate-spin text-primary" />
+                      ) : (
+                        <Circle className="size-3.5" />
+                      )}
+                      <span className={phaseState === "active" ? "font-medium" : undefined}>
+                        {phase}
+                      </span>
+                    </div>
+                  );
+                })}
+              </div>
             </div>
           </div>
+          <Collapsible>
+            <div className="border-t bg-card/60 px-3 py-2">
+              <CollapsibleTrigger asChild>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="group h-7 px-2 text-xs text-muted-foreground"
+                >
+                  Details
+                  <ChevronDown className="size-3.5 transition-transform duration-200 group-data-[state=open]:rotate-180" />
+                </Button>
+              </CollapsibleTrigger>
+              <CollapsibleContent className="pt-2 pb-1">
+                <div className="space-y-1.5">
+                  {startupChecklist.map((step) => (
+                    <div
+                      key={step.title}
+                      className="flex items-start gap-2 rounded-md px-2 py-1.5 text-sm"
+                    >
+                      <div className="mt-0.5">{startupStepIcon(step.state)}</div>
+                      <div className="min-w-0">
+                        <div className="font-medium text-foreground">{step.title}</div>
+                        <div className="text-xs text-muted-foreground">{step.detail}</div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </CollapsibleContent>
+            </div>
+          </Collapsible>
         </div>
       )}
 
@@ -803,6 +931,36 @@ export function PreviewPanel({
             <RefreshCw className="size-3.5" />
             Try Again
           </Button>
+          {hasStartupRows && (
+            <Collapsible>
+              <CollapsibleTrigger asChild>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="group h-7 px-2 text-xs text-muted-foreground"
+                >
+                  Details
+                  <ChevronDown className="size-3.5 transition-transform duration-200 group-data-[state=open]:rotate-180" />
+                </Button>
+              </CollapsibleTrigger>
+              <CollapsibleContent className="pt-2 pb-1">
+                <div className="space-y-1.5">
+                  {startupChecklist.map((step) => (
+                    <div
+                      key={step.title}
+                      className="flex items-start gap-2 rounded-md px-2 py-1.5 text-sm"
+                    >
+                      <div className="mt-0.5">{startupStepIcon(step.state)}</div>
+                      <div className="min-w-0">
+                        <div className="font-medium text-foreground">{step.title}</div>
+                        <div className="text-xs text-muted-foreground">{step.detail}</div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </CollapsibleContent>
+            </Collapsible>
+          )}
         </div>
       )}
 

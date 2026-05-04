@@ -85,9 +85,11 @@ func (h *ProjectHandler) List(w http.ResponseWriter, r *http.Request) {
 
 	limit := queryInt(r, "limit", 50)
 	filters := db.ProjectFilters{
-		Status: r.URL.Query().Get("status"),
-		Limit:  limit,
-		Cursor: r.URL.Query().Get("cursor"),
+		Status:          r.URL.Query().Get("status"),
+		Limit:           limit,
+		Cursor:          r.URL.Query().Get("cursor"),
+		IncludeArchived: r.URL.Query().Get("include_archived") == "true",
+		OnlyArchived:    r.URL.Query().Get("only_archived") == "true",
 	}
 
 	if search := r.URL.Query().Get("search"); search != "" {
@@ -467,6 +469,64 @@ func (h *ProjectHandler) Delete(w http.ResponseWriter, r *http.Request) {
 
 func (h *ProjectHandler) Start(w http.ResponseWriter, r *http.Request) {
 	h.transitionStatus(w, r, models.ProjectStatusActive)
+}
+
+func (h *ProjectHandler) Archive(w http.ResponseWriter, r *http.Request) {
+	orgID := middleware.OrgIDFromContext(r.Context())
+	projectID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid project ID")
+		return
+	}
+
+	project, err := h.projectStore.GetByID(r.Context(), orgID, projectID)
+	if err != nil {
+		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "project not found")
+		return
+	}
+
+	if err := h.projectStore.Archive(r.Context(), orgID, projectID); err != nil {
+		writeError(w, r, http.StatusConflict, "ARCHIVE_FAILED", "failed to archive project", err)
+		return
+	}
+
+	projectIDStr := projectID.String()
+	details := projectAuditSnapshot(&project)
+	details["changes"] = map[string]any{
+		"archived_at": auditChange(nil, "set"),
+	}
+	emitUserAuditWithSession(h.audit, r, models.AuditActionProjectArchived, models.AuditResourceProject, &projectIDStr, nil, &projectID,
+		marshalAuditDetails(*zerolog.Ctx(r.Context()), details))
+	writeJSON(w, http.StatusOK, map[string]string{"status": "archived"})
+}
+
+func (h *ProjectHandler) Unarchive(w http.ResponseWriter, r *http.Request) {
+	orgID := middleware.OrgIDFromContext(r.Context())
+	projectID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid project ID")
+		return
+	}
+
+	project, err := h.projectStore.GetByID(r.Context(), orgID, projectID)
+	if err != nil {
+		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "project not found")
+		return
+	}
+
+	if err := h.projectStore.Unarchive(r.Context(), orgID, projectID); err != nil {
+		writeError(w, r, http.StatusConflict, "UNARCHIVE_FAILED", "failed to unarchive project", err)
+		return
+	}
+
+	projectIDStr := projectID.String()
+	details := projectAuditSnapshot(&project)
+	details["changes"] = map[string]any{
+		"archived_at": auditChange("set", nil),
+	}
+	emitUserAuditWithSession(h.audit, r, models.AuditActionProjectUnarchived, models.AuditResourceProject, &projectIDStr, nil, &projectID,
+		marshalAuditDetails(*zerolog.Ctx(r.Context()), details))
+	writeJSON(w, http.StatusOK, map[string]string{"status": string(project.Status)})
 }
 
 // RunNow enqueues an immediate project_cycle job for the project.

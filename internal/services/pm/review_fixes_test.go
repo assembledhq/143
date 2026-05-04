@@ -107,7 +107,7 @@ func (r *reviewUsageRecorder) ContainerStarted(_ context.Context, orgID, session
 	return uuid.New()
 }
 
-func (r *reviewUsageRecorder) ContainerStopped(_ context.Context, orgID, sessionID uuid.UUID, _ uuid.UUID, _ time.Time, exitReason string) {
+func (r *reviewUsageRecorder) ContainerStopped(_ context.Context, orgID, sessionID uuid.UUID, _ uuid.UUID, _ string, _ time.Time, exitReason string) {
 	r.stopped = append(r.stopped, reviewUsageStopped{orgID: orgID, sessionID: sessionID, exitReason: exitReason})
 }
 

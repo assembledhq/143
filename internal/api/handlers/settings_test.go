@@ -245,6 +245,15 @@ func TestSettingsHandler_Update(t *testing.T) {
 			expectedBody: "INVALID_SETTINGS",
 		},
 		{
+			name: "returns bad request when platform default caps llm_model",
+			body: `{"settings":{"llm_model":"gpt-5.4"}}`,
+			setupMock: func(mock pgxmock.PgxPoolIface, orgID uuid.UUID) {
+				// no DB calls expected
+			},
+			expectedCode: http.StatusBadRequest,
+			expectedBody: "INVALID_SETTINGS",
+		},
+		{
 			name: "accepts valid llm_model",
 			body: `{"settings":{"llm_model":"gpt-5.4-mini"}}`,
 			setupMock: func(mock pgxmock.PgxPoolIface, orgID uuid.UUID) {
@@ -328,7 +337,7 @@ func TestSettingsHandler_Update(t *testing.T) {
 
 			orgID := uuid.New()
 			store := db.NewOrganizationStore(mock)
-			handler := NewSettingsHandler(store, nil)
+			handler := NewSettingsHandler(store, map[string]string{"openai": "sk-...platform"})
 
 			tt.setupMock(mock, orgID)
 
@@ -343,6 +352,27 @@ func TestSettingsHandler_Update(t *testing.T) {
 			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 		})
 	}
+}
+
+func TestSettingsHandler_Update_BlocksCappedPlatformModelWithOrgCredential(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create pgxmock pool without error")
+	defer mock.Close()
+
+	orgID := uuid.New()
+
+	handler := NewSettingsHandler(db.NewOrganizationStore(mock), map[string]string{"openai": "sk-...platform"})
+	req := httptest.NewRequest(http.MethodPatch, "/api/v1/settings", strings.NewReader(`{"settings":{"llm_model":"gpt-5.4"}}`))
+	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+	w := httptest.NewRecorder()
+
+	handler.Update(w, req)
+
+	require.Equal(t, http.StatusBadRequest, w.Code, "org-owned OpenAI keys should not unlock models while runtime uses platform defaults")
+	require.Contains(t, w.Body.String(), "capped", "response should explain the platform default model cap")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
 func TestSettingsHandler_Update_SkipsNoOpPatch(t *testing.T) {

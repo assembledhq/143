@@ -16,6 +16,7 @@ import (
 	"github.com/assembledhq/143/internal/api/middleware"
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
+	"github.com/assembledhq/143/internal/repoconfig"
 	"github.com/assembledhq/143/internal/services/agent"
 	"github.com/assembledhq/143/internal/services/preview"
 	"github.com/assembledhq/143/internal/services/sandbox"
@@ -146,7 +147,7 @@ func TestPreviewHandler_ReservationPlaceholderConfig(t *testing.T) {
 
 	// reservationPlaceholderConfig only has to satisfy ValidateConfig so the
 	// reservation row is creatable when the client doesn't supply a config.
-	// The real config (workspace .143/preview.json) is loaded post-hydrate;
+	// The real config (workspace .143/config.json) is loaded post-hydrate;
 	// this placeholder is never executed.
 	cfg := reservationPlaceholderConfig()
 
@@ -387,7 +388,7 @@ type mockPreviewProvider struct {
 	startConfig *models.PreviewConfig
 }
 
-func (m *mockPreviewProvider) StartPreview(_ context.Context, _ *agent.Sandbox, cfg *models.PreviewConfig, _ map[string]string) (*preview.PreviewHandle, error) {
+func (m *mockPreviewProvider) StartPreview(_ context.Context, _ *agent.Sandbox, cfg *models.PreviewConfig, _ map[string]string, _ preview.ServiceObserver) (*preview.PreviewHandle, error) {
 	m.startConfig = cfg
 	if m.startHandle != nil {
 		return m.startHandle, nil
@@ -421,7 +422,7 @@ func newPreviewHandlerWithMock(mock pgxmock.PgxPoolIface) *PreviewHandler {
 	}
 }
 
-// validWorkspaceConfigJSON is a minimal but well-formed .143/preview.json,
+// validWorkspaceConfigJSON is a minimal but well-formed .143/config.json,
 // used by tests that need StartPreview to traverse past the post-hydrate
 // auto-detect step (PREVIEW_NO_CONFIG) and exercise the actual launch path.
 const validWorkspaceConfigJSON = `{
@@ -705,7 +706,7 @@ func TestResolveSandboxWorkDir_LookupSuccess(t *testing.T) {
 	})
 	// Slug for "assembledhq/143" is "143"; default HomeDir is "/home/sandbox".
 	// Must match orchestrator.go's per-session WorkDir derivation so
-	// readWorkspacePreviewConfig finds .143/preview.json on disk.
+	// readWorkspacePreviewConfig finds .143/config.json on disk.
 	require.Equal(t, "/home/sandbox/143", got)
 	require.NoError(t, mock.ExpectationsWereMet())
 }
@@ -747,18 +748,25 @@ func TestResolveSandboxWorkDir_LookupError(t *testing.T) {
 // most recent ReadFile call so tests can assert that the handler is asking the
 // reader to look in the right repo-rooted path (not the legacy /workspace).
 type fakeFileReader struct {
-	content     string
-	err         error
-	lastWorkDir *string
+	content        string
+	err            error
+	contentsByPath map[string]string
+	errorsByPath   map[string]error
+	lastWorkDir    *string
 }
 
 func (f *fakeFileReader) ListDir(context.Context, string, string, string) ([]sandbox.FileEntry, error) {
 	panic("not used")
 }
 
-func (f *fakeFileReader) ReadFile(_ context.Context, _, workDir, _ string) (string, bool, error) {
+func (f *fakeFileReader) ReadFile(_ context.Context, _, workDir, path string) (string, bool, error) {
 	if f.lastWorkDir != nil {
 		*f.lastWorkDir = workDir
+	}
+	if f.contentsByPath != nil || f.errorsByPath != nil {
+		content := f.contentsByPath[path]
+		err := f.errorsByPath[path]
+		return content, false, err
 	}
 	return f.content, false, f.err
 }
@@ -779,12 +787,14 @@ func TestReadWorkspacePreviewConfig_NilReader(t *testing.T) {
 func TestReadWorkspacePreviewConfig_FileNotFound(t *testing.T) {
 	t.Parallel()
 
-	// The common "no .143/preview.json committed" case: the underlying FileReader
+	// The common "no .143/config.json committed" case: the underlying FileReader
 	// returns sandbox.ErrFileNotFound (wrapped). Must NOT bubble up — caller
 	// falls back to built-in defaults.
 	h := &PreviewHandler{
-		fileReader: &fakeFileReader{err: fmt.Errorf("read file .143/preview.json: %w", sandbox.ErrFileNotFound)},
-		logger:     zerolog.Nop(),
+		fileReader: &fakeFileReader{errorsByPath: map[string]error{
+			repoconfig.ConfigPath: fmt.Errorf("read file %s: %w", repoconfig.ConfigPath, sandbox.ErrFileNotFound),
+		}},
+		logger: zerolog.Nop(),
 	}
 	cfg, err := h.readWorkspacePreviewConfig(context.Background(), &agent.Sandbox{ID: "c1", WorkDir: "/workspace"}, uuid.New())
 	require.NoError(t, err, "ENOENT is expected absence, not an error to surface")
@@ -801,8 +811,10 @@ func TestReadWorkspacePreviewConfig_UnexpectedReadError(t *testing.T) {
 	// PREVIEW_NO_CONFIG, not 500).
 	wantErr := errors.New("docker exec failed: container not running")
 	h := &PreviewHandler{
-		fileReader: &fakeFileReader{err: wantErr},
-		logger:     zerolog.Nop(),
+		fileReader: &fakeFileReader{errorsByPath: map[string]error{
+			repoconfig.ConfigPath: wantErr,
+		}},
+		logger: zerolog.Nop(),
 	}
 	cfg, err := h.readWorkspacePreviewConfig(context.Background(), &agent.Sandbox{ID: "c1", WorkDir: "/workspace"}, uuid.New())
 	require.Error(t, err, "non-ENOENT read errors must surface so the caller returns 500")
@@ -816,7 +828,7 @@ func TestReadWorkspacePreviewConfig_ParseError(t *testing.T) {
 	// Parse errors are a user authoring problem, not infrastructure. Returning
 	// (nil, nil) keeps the response shape identical to "file not present", so
 	// the caller surfaces PREVIEW_NO_CONFIG (the user fix is the same: commit
-	// a valid .143/preview.json) instead of a misleading 500. The Warn log
+	// a valid .143/config.json) instead of a misleading 500. The Warn log
 	// emitted by readWorkspacePreviewConfig is the operator-side breadcrumb.
 	h := &PreviewHandler{
 		fileReader: &fakeFileReader{content: "{not valid json"},
@@ -856,6 +868,35 @@ func TestReadWorkspacePreviewConfig_ValidConfig(t *testing.T) {
 	require.Equal(t, 3000, cfg.Services["web"].Port)
 }
 
+func TestReadWorkspacePreviewConfig_PrefersConfigJSON(t *testing.T) {
+	t.Parallel()
+
+	raw := `{
+		"preview": {
+			"name": "dogfood",
+			"primary": "web",
+			"services": {
+				"web": {
+					"command": ["npm", "run", "dev"],
+					"port": 3000,
+					"ready": {"http_path": "/"}
+				}
+			},
+			"credentials": {"mode": "none"},
+			"network": {"mode": "managed"}
+		}
+	}`
+
+	h := &PreviewHandler{
+		fileReader: &fakeFileReader{content: raw},
+		logger:     zerolog.Nop(),
+	}
+	cfg, err := h.readWorkspacePreviewConfig(context.Background(), &agent.Sandbox{ID: "c1", WorkDir: "/workspace"}, uuid.New())
+	require.NoError(t, err, "readWorkspacePreviewConfig should accept .143/config.json with a nested preview section")
+	require.NotNil(t, cfg, "readWorkspacePreviewConfig should return parsed preview config from .143/config.json")
+	require.Equal(t, "web", cfg.Primary, "readWorkspacePreviewConfig should parse the nested preview section from .143/config.json")
+}
+
 // sessionRowColumns mirrors db.sessionSelectColumns. Kept inline so a
 // schema change in one file flips this test red instead of silently
 // returning the wrong shape from pgxmock.
@@ -876,64 +917,70 @@ var sessionRowColumns = []string{
 	"target_branch", "working_branch",
 	"base_commit_sha", "repository_id", "diff_stats", "diff_history", "input_manifest",
 	"archived_at", "archived_by_user_id", "automation_run_id",
-	"pr_creation_state", "pr_creation_error", "diff_collected_at", "latest_diff_snapshot_id",
+	"pr_creation_state", "pr_creation_error", "pr_push_state", "pr_push_error", "diff_collected_at", "latest_diff_snapshot_id",
+	"linear_private", "linear_state_sync_disabled", "linear_identifier_hint", "linear_prepare_state",
 	"deleted_at", "git_identity_source", "git_identity_user_id", "created_at",
 }
 
-func previewSessionRow(values ...interface{}) []interface{} {
-	if len(values) == len(sessionRowColumns)-3 {
-		row := make([]interface{}, 0, len(values)+3)
-		row = append(row, values[:3]...)
-		row = append(
-			row,
-			"",
-			"",
-			"",
-		)
-		row = append(row, values[3:]...)
-		return row
+func previewSessionRow(id, orgID uuid.UUID, containerID *string, snapshotKey *string, sandboxState string) []interface{} {
+	now := time.Now()
+	byColumn := map[string]interface{}{
+		"id":                             id,
+		"primary_issue_id":               nil,
+		"org_id":                         orgID,
+		"origin":                         string(models.SessionOriginManual),
+		"interaction_mode":               string(models.SessionInteractionModeInteractive),
+		"validation_policy":              string(models.SessionValidationPolicyOnTurnComplete),
+		"agent_type":                     "claude_code",
+		"status":                         "running",
+		"autonomy_level":                 "supervised",
+		"token_mode":                     "low",
+		"risk_factors":                   []string{},
+		"container_id":                   containerID,
+		"turn_holding_container":         false,
+		"token_usage":                    json.RawMessage(`{}`),
+		"failure_next_steps":             []string{},
+		"failure_retry_advised":          false,
+		"revision_context":               json.RawMessage(`{}`),
+		"current_turn":                   0,
+		"last_activity_at":               now,
+		"sandbox_state":                  sandboxState,
+		"snapshot_key":                   snapshotKey,
+		"runtime_last_progress_type":     "",
+		"runtime_last_progress_strength": "",
+		"runtime_extension_count":        0,
+		"runtime_extension_seconds":      0,
+		"runtime_stop_reason":            "",
+		"checkpoint_kind":                "",
+		"checkpoint_capability":          "",
+		"checkpoint_size_bytes":          int64(0),
+		"recovery_state":                 "",
+		"recovery_attempt_count":         0,
+		"pr_creation_state":              "idle",
+		"pr_creation_error":              (*string)(nil),
+		"pr_push_state":                  "idle",
+		"pr_push_error":                  (*string)(nil),
+		"linear_private":                 false,
+		"linear_state_sync_disabled":     false,
+		"linear_identifier_hint":         (*string)(nil),
+		"linear_prepare_state":           string(models.LinearPrepareStateNone),
+		"deleted_at":                     nil,
+		"git_identity_source":            nil,
+		"git_identity_user_id":           nil,
+		"created_at":                     now,
 	}
-	return values
+	row := make([]interface{}, len(sessionRowColumns))
+	for i, col := range sessionRowColumns {
+		row[i] = byColumn[col]
+	}
+	return row
 }
 
 func sessionRowWithContainer(id, orgID uuid.UUID, containerID string) []interface{} {
-	return previewSessionRow(
-		id, nil, orgID, "claude_code", "running", "supervised", "low",
-		nil, nil, nil, []string{},
-		&containerID, nil, false, nil, nil, json.RawMessage(`{}`),
-		nil, nil, []string{}, false,
-		nil, json.RawMessage(`{}`), nil, nil, nil,
-		nil, nil, nil, nil,
-		nil, nil, nil, nil, nil,
-		0, time.Now(),
-		// sandbox_state must be "running" for the reuse branch of
-		// acquireSandbox to attach to the lingering container_id; otherwise
-		// the stale-ID guard falls through to hydrate/expired.
-		"running", nil,
-		nil,      // pending_snapshot_key
-		nil,      // pending_snapshot_set_at
-		nil,      // runtime_soft_deadline_at
-		nil,      // runtime_hard_deadline_at
-		nil,      // runtime_last_progress_at
-		"",       // runtime_last_progress_type
-		"",       // runtime_last_progress_strength
-		0,        // runtime_extension_count
-		0,        // runtime_extension_seconds
-		"",       // runtime_stop_reason
-		nil,      // runtime_graceful_stop_at
-		nil,      // checkpointed_at
-		"",       // checkpoint_kind
-		"",       // checkpoint_capability
-		int64(0), // checkpoint_size_bytes
-		nil,      // checkpoint_error
-		"",       // recovery_state
-		nil,      // recovery_queued_at
-		nil,      // recovery_started_at
-		0,        // recovery_attempt_count
-		nil, nil,
-		nil, nil, nil, nil, nil,
-		nil, nil, nil, "idle", (*string)(nil), nil, nil, nil, nil, nil, time.Now(),
-	)
+	// sandbox_state must be "running" for the reuse branch of acquireSandbox
+	// to attach to the lingering container_id; otherwise the stale-ID guard
+	// falls through to hydrate/expired.
+	return previewSessionRow(id, orgID, &containerID, nil, "running")
 }
 
 // sessionRowWithContainerAndRepo is sessionRowWithContainer plus a non-nil
@@ -955,87 +1002,22 @@ func sessionRowWithContainerAndRepo(id, orgID, repoID uuid.UUID, containerID str
 // fallback precondition (snapshot_key set). Used by the zombie-reuse tests
 // where IsAlive decides which branch the handler takes.
 func sessionRowReuseWithSnapshot(id, orgID uuid.UUID, containerID string, snapshotKey *string) []interface{} {
-	return previewSessionRow(
-		id, nil, orgID, "claude_code", "running", "supervised", "low",
-		nil, nil, nil, []string{},
-		&containerID, nil, false, nil, nil, json.RawMessage(`{}`),
-		nil, nil, []string{}, false,
-		nil, json.RawMessage(`{}`), nil, nil, nil,
-		nil, nil, nil, nil,
-		nil, nil, nil, nil, nil,
-		0, time.Now(),
-		"running", snapshotKey,
-		nil,      // pending_snapshot_key
-		nil,      // pending_snapshot_set_at
-		nil,      // runtime_soft_deadline_at
-		nil,      // runtime_hard_deadline_at
-		nil,      // runtime_last_progress_at
-		"",       // runtime_last_progress_type
-		"",       // runtime_last_progress_strength
-		0,        // runtime_extension_count
-		0,        // runtime_extension_seconds
-		"",       // runtime_stop_reason
-		nil,      // runtime_graceful_stop_at
-		nil,      // checkpointed_at
-		"",       // checkpoint_kind
-		"",       // checkpoint_capability
-		int64(0), // checkpoint_size_bytes
-		nil,      // checkpoint_error
-		"",       // recovery_state
-		nil,      // recovery_queued_at
-		nil,      // recovery_started_at
-		0,        // recovery_attempt_count
-		nil, nil,
-		nil, nil, nil, nil, nil,
-		nil, nil, nil, "idle", (*string)(nil), nil, nil, nil, nil, nil, time.Now(),
-	)
+	return previewSessionRow(id, orgID, &containerID, snapshotKey, "running")
 }
 
 // sessionRowForHydrate builds a session row with no live container but a
 // configurable snapshot key and sandbox state — used to exercise the three
 // acquireSandbox branches (SNAPSHOT_EXPIRED, hydrate, NO_SANDBOX).
 func sessionRowForHydrate(id, orgID uuid.UUID, snapshotKey *string, sandboxState string) []interface{} {
-	return previewSessionRow(
-		id, nil, orgID, "claude_code", "running", "supervised", "low",
-		nil, nil, nil, []string{},
-		nil, nil, false, nil, nil, json.RawMessage(`{}`),
-		nil, nil, []string{}, false,
-		nil, json.RawMessage(`{}`), nil, nil, nil,
-		nil, nil, nil, nil,
-		nil, nil, nil, nil, nil,
-		0, time.Now(),
-		sandboxState, snapshotKey,
-		nil,      // pending_snapshot_key
-		nil,      // pending_snapshot_set_at
-		nil,      // runtime_soft_deadline_at
-		nil,      // runtime_hard_deadline_at
-		nil,      // runtime_last_progress_at
-		"",       // runtime_last_progress_type
-		"",       // runtime_last_progress_strength
-		0,        // runtime_extension_count
-		0,        // runtime_extension_seconds
-		"",       // runtime_stop_reason
-		nil,      // runtime_graceful_stop_at
-		nil,      // checkpointed_at
-		"",       // checkpoint_kind
-		"",       // checkpoint_capability
-		int64(0), // checkpoint_size_bytes
-		nil,      // checkpoint_error
-		"",       // recovery_state
-		nil,      // recovery_queued_at
-		nil,      // recovery_started_at
-		0,        // recovery_attempt_count
-		nil, nil,
-		nil, nil, nil, nil, nil,
-		nil, nil, nil, "idle", (*string)(nil), nil, nil, nil, nil, nil, time.Now(),
-	)
+	return previewSessionRow(id, orgID, nil, snapshotKey, sandboxState)
 }
 
 // fakeHydrateSnapshotStore is a minimal SnapshotStore that writes a canned
 // payload on Load.
 type fakeHydrateSnapshotStore struct {
-	payload []byte
-	loadErr error
+	payload   []byte
+	loadErr   error
+	loadCalls int
 }
 
 func (f *fakeHydrateSnapshotStore) Save(context.Context, string, io.Reader) error {
@@ -1043,6 +1025,7 @@ func (f *fakeHydrateSnapshotStore) Save(context.Context, string, io.Reader) erro
 }
 
 func (f *fakeHydrateSnapshotStore) Load(_ context.Context, _ string, w io.Writer) error {
+	f.loadCalls++
 	if f.loadErr != nil {
 		return f.loadErr
 	}
@@ -1053,7 +1036,7 @@ func (f *fakeHydrateSnapshotStore) Load(_ context.Context, _ string, w io.Writer
 func (f *fakeHydrateSnapshotStore) Delete(context.Context, string) error { return nil }
 
 // TestPreviewHandler_StartPreview_NoWorkspaceConfig covers the common path where
-// the user clicks Start Preview on a repo that has no .143/preview.json
+// the user clicks Start Preview on a repo that has no .143/config.json
 // committed and supplies no explicit config. The handler must abort the
 // reservation and surface PREVIEW_NO_CONFIG (422) — there is no longer a silent
 // "npm start on :3000" fallback that wastes ~90s on a doomed readiness probe.
@@ -1081,7 +1064,9 @@ func TestPreviewHandler_StartPreview_NoWorkspaceConfig(t *testing.T) {
 
 	h := newPreviewHandlerWithMock(mock)
 	h.sessionStore = db.NewSessionStore(mock)
-	h.fileReader = &fakeFileReader{err: fmt.Errorf("read .143/preview.json: %w", sandbox.ErrFileNotFound)}
+	h.fileReader = &fakeFileReader{errorsByPath: map[string]error{
+		repoconfig.ConfigPath: fmt.Errorf("read %s: %w", repoconfig.ConfigPath, sandbox.ErrFileNotFound),
+	}}
 
 	req := httptest.NewRequest(http.MethodPost, "/preview", strings.NewReader(""))
 	req = previewTestContextWithIDs(req, orgID, userID, sessionID.String())
@@ -1094,7 +1079,7 @@ func TestPreviewHandler_StartPreview_NoWorkspaceConfig(t *testing.T) {
 	var resp models.ErrorResponse
 	require.NoError(t, json.NewDecoder(w.Body).Decode(&resp))
 	require.Equal(t, "PREVIEW_NO_CONFIG", resp.Error.Code)
-	require.Contains(t, resp.Error.Message, ".143/preview.json", "user-facing message should name the file they need to add")
+	require.Contains(t, resp.Error.Message, ".143/config.json", "user-facing message should name the preferred config file to add")
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
@@ -1142,7 +1127,9 @@ func TestPreviewHandler_StartPreview_AutoDetectUsesRepoSlugWorkDir(t *testing.T)
 	h.sessionStore = db.NewSessionStore(mock)
 	h.repoStore = db.NewRepositoryStore(mock)
 	h.fileReader = &fakeFileReader{
-		err:         fmt.Errorf("read .143/preview.json: %w", sandbox.ErrFileNotFound),
+		errorsByPath: map[string]error{
+			repoconfig.ConfigPath: fmt.Errorf("read %s: %w", repoconfig.ConfigPath, sandbox.ErrFileNotFound),
+		},
 		lastWorkDir: &capturedWorkDir,
 	}
 
@@ -1189,7 +1176,9 @@ func TestPreviewHandler_StartPreview_AutoDetectInfraError(t *testing.T) {
 
 	h := newPreviewHandlerWithMock(mock)
 	h.sessionStore = db.NewSessionStore(mock)
-	h.fileReader = &fakeFileReader{err: errors.New("docker exec failed: container not running")}
+	h.fileReader = &fakeFileReader{errorsByPath: map[string]error{
+		repoconfig.ConfigPath: errors.New("docker exec failed: container not running"),
+	}}
 
 	req := httptest.NewRequest(http.MethodPost, "/preview", strings.NewReader(""))
 	req = previewTestContextWithIDs(req, orgID, userID, sessionID.String())
@@ -1655,9 +1644,11 @@ func TestPreviewHandler_StartPreview_PublishContainerIDFails(t *testing.T) {
 }
 
 // TestPreviewHandler_StartPreview_PublishLosesRace covers the CAS-loss branch
-// of PublishHydratedContainerID: a concurrent orchestrator already published
-// a different container_id, so the preview must destroy its local sandbox and
-// surface a NO_SANDBOX error instructing the caller to retry.
+// of PublishHydratedContainerID: a concurrent orchestrator publishes a
+// different container_id while we're mid-restore (after our pre-hydrate peek
+// found the row clear), so the CAS detects the loss and the preview must
+// destroy its local sandbox and surface a SANDBOX_BUSY error instructing the
+// caller to retry.
 func TestPreviewHandler_StartPreview_PublishLosesRace(t *testing.T) {
 	t.Parallel()
 
@@ -1677,8 +1668,13 @@ func TestPreviewHandler_StartPreview_PublishLosesRace(t *testing.T) {
 				AddRow(sessionRowForHydrate(sessionID, orgID, &key, "snapshotted")...),
 		)
 	expectReserveSuccess(mock, sessionID, orgID, userID)
+	// Pre-hydrate peek (single-column COALESCE) finds container_id still NULL
+	// (the orchestrator hasn't published yet) — hydrate proceeds.
+	mock.ExpectQuery("SELECT COALESCE\\(container_id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"container_id"}).AddRow(""))
 	// COALESCE returns the orchestrator's pre-existing ID, proving our preview
-	// lost the race.
+	// lost the race during the snapshot restore window.
 	mock.ExpectQuery("UPDATE sessions\\s+SET container_id = COALESCE").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"coalesce"}).AddRow("orch-winner"))
@@ -1703,8 +1699,66 @@ func TestPreviewHandler_StartPreview_PublishLosesRace(t *testing.T) {
 	h.StartPreview(w, req)
 
 	require.Equal(t, http.StatusConflict, w.Code)
-	require.Contains(t, w.Body.String(), "NO_SANDBOX")
+	require.Contains(t, w.Body.String(), "SANDBOX_BUSY")
 	require.Equal(t, 1, sp.GetDestroyCalls(), "local container must be destroyed on race loss")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+// TestPreviewHandler_StartPreview_PrehydratePeekShortCircuit covers the fast
+// path of race detection: the peer (typically a continue_session turn)
+// publishes container_id between our initial session read and the start of
+// hydrate. The pre-hydrate peek finds the row populated and returns
+// SANDBOX_BUSY without ever touching the snapshot store or sandbox provider.
+//
+// This avoids the historical failure where full restore + container create
+// (~20s) blew past the HTTP server's 15s WriteTimeout, surfacing as a 502
+// EOF on the API instead of a clean 409 SANDBOX_BUSY.
+func TestPreviewHandler_StartPreview_PrehydratePeekShortCircuit(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	orgID := uuid.New()
+	userID := uuid.New()
+	sessionID := uuid.New()
+	key := "snap-key"
+
+	mock.ExpectQuery("SELECT .+ FROM sessions WHERE id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(sessionRowColumns).
+				AddRow(sessionRowForHydrate(sessionID, orgID, &key, "snapshotted")...),
+		)
+	expectReserveSuccess(mock, sessionID, orgID, userID)
+	// Pre-hydrate peek (single-column COALESCE) finds container_id has been
+	// published since our first read — short-circuit out without restoring
+	// or creating a container.
+	mock.ExpectQuery("SELECT COALESCE\\(container_id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"container_id"}).AddRow("orch-winner"))
+	// hydratedID="" because we never created a container.
+	expectAbortReservationNoDestroy(mock)
+
+	h := newPreviewHandlerWithMock(mock)
+	h.sessionStore = db.NewSessionStore(mock)
+	sp := testutil.NewMockSandboxProvider()
+	h.sandboxProvider = sp
+	// Snapshot store presence required so we don't trip the NO_SANDBOX guard.
+	snaps := &fakeHydrateSnapshotStore{payload: []byte("snap")}
+	h.snapshots = snaps
+
+	req := httptest.NewRequest(http.MethodPost, "/preview", strings.NewReader(""))
+	req = previewTestContextWithIDs(req, orgID, userID, sessionID.String())
+	w := httptest.NewRecorder()
+
+	h.StartPreview(w, req)
+
+	require.Equal(t, http.StatusConflict, w.Code)
+	require.Contains(t, w.Body.String(), "SANDBOX_BUSY")
+	require.Equal(t, 0, snaps.loadCalls, "must not load the snapshot when peek detects the race")
+	require.Equal(t, 0, sp.GetDestroyCalls(), "no container to destroy when peek short-circuits")
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 

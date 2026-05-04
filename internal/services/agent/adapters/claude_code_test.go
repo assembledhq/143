@@ -216,7 +216,7 @@ func TestClaudeCodeAdapter_Execute(t *testing.T) {
 			}
 
 			adapter := NewClaudeCodeAdapter(zerolog.Nop())
-			sandbox := &agent.Sandbox{ID: "test-sandbox", WorkDir: "/workspace", HomeDir: "/home/sandbox"}
+			sandbox := &agent.Sandbox{ID: "test-sandbox", WorkDir: "/workspace", HomeDir: "/home/sandbox", Metadata: map[string]string{agent.SandboxMetadataBaseCommitSHA: "abc123"}}
 			prompt := &agent.AgentPrompt{
 				SystemPrompt: "Fix the bug.",
 				UserPrompt:   "Null pointer error.",
@@ -262,7 +262,7 @@ func TestClaudeCodeAdapter_Execute_ExecError(t *testing.T) {
 	}
 
 	adapter := NewClaudeCodeAdapter(zerolog.Nop())
-	sandbox := &agent.Sandbox{ID: "test", WorkDir: "/workspace", HomeDir: "/home/sandbox"}
+	sandbox := &agent.Sandbox{ID: "test", WorkDir: "/workspace", HomeDir: "/home/sandbox", Metadata: map[string]string{agent.SandboxMetadataBaseCommitSHA: "abc123"}}
 	prompt := &agent.AgentPrompt{SystemPrompt: "test", UserPrompt: "test", MaxTokens: 50_000}
 	logCh := make(chan agent.LogEntry, 10)
 	ctx := WithSandboxProvider(context.Background(), provider)
@@ -282,7 +282,7 @@ func TestClaudeCodeAdapter_Execute_WriteFileError(t *testing.T) {
 	}
 
 	adapter := NewClaudeCodeAdapter(zerolog.Nop())
-	sandbox := &agent.Sandbox{ID: "test", WorkDir: "/workspace", HomeDir: "/home/sandbox"}
+	sandbox := &agent.Sandbox{ID: "test", WorkDir: "/workspace", HomeDir: "/home/sandbox", Metadata: map[string]string{agent.SandboxMetadataBaseCommitSHA: "abc123"}}
 	prompt := &agent.AgentPrompt{SystemPrompt: "test", UserPrompt: "test", MaxTokens: 50_000}
 	logCh := make(chan agent.LogEntry, 10)
 	ctx := WithSandboxProvider(context.Background(), provider)
@@ -297,7 +297,7 @@ func TestClaudeCodeAdapter_Execute_MissingSandboxProvider(t *testing.T) {
 	t.Parallel()
 
 	adapter := NewClaudeCodeAdapter(zerolog.Nop())
-	sandbox := &agent.Sandbox{ID: "test", WorkDir: "/workspace", HomeDir: "/home/sandbox"}
+	sandbox := &agent.Sandbox{ID: "test", WorkDir: "/workspace", HomeDir: "/home/sandbox", Metadata: map[string]string{agent.SandboxMetadataBaseCommitSHA: "abc123"}}
 	prompt := &agent.AgentPrompt{SystemPrompt: "test", UserPrompt: "test", MaxTokens: 50_000}
 	logCh := make(chan agent.LogEntry, 10)
 
@@ -328,7 +328,7 @@ func TestClaudeCodeAdapter_Execute_ContinuationUsesContinueMode(t *testing.T) {
 	}
 
 	adapter := NewClaudeCodeAdapter(zerolog.Nop())
-	sandbox := &agent.Sandbox{ID: "test", WorkDir: "/workspace", HomeDir: "/home/sandbox"}
+	sandbox := &agent.Sandbox{ID: "test", WorkDir: "/workspace", HomeDir: "/home/sandbox", Metadata: map[string]string{agent.SandboxMetadataBaseCommitSHA: "abc123"}}
 	prompt := &agent.AgentPrompt{
 		UserMessage:  "Please tighten the guard clause.",
 		MaxTokens:    50_000,
@@ -365,7 +365,7 @@ func TestClaudeCodeAdapter_Execute_IncludesReasoningEffortOverride(t *testing.T)
 	}
 
 	adapter := NewClaudeCodeAdapter(zerolog.Nop())
-	sandbox := &agent.Sandbox{ID: "test", WorkDir: "/workspace", HomeDir: "/home/sandbox"}
+	sandbox := &agent.Sandbox{ID: "test", WorkDir: "/workspace", HomeDir: "/home/sandbox", Metadata: map[string]string{agent.SandboxMetadataBaseCommitSHA: "abc123"}}
 	prompt := &agent.AgentPrompt{
 		SystemPrompt:    "test",
 		UserPrompt:      "test",
@@ -672,11 +672,21 @@ func TestBuildSystemPrompt_IncludesLinkedIssuesContext(t *testing.T) {
 		Issue: &models.Issue{Title: "Bug"},
 		LinkedIssues: []models.SessionIssueSnapshotEntry{
 			{
-				Role:        models.SessionIssueLinkRolePrimary,
-				Source:      models.IssueSourceLinear,
-				Title:       "Fix checkout timeout",
-				ExternalID:  "ENG-123",
-				Description: "Customers hit a timeout after payment authorization.",
+				Role:         models.SessionIssueLinkRolePrimary,
+				Source:       models.IssueSourceLinear,
+				Title:        "Fix checkout timeout",
+				ExternalID:   "ENG-123",
+				Description:  "Customers hit a timeout after payment authorization.",
+				Priority:     "high",
+				AssigneeName: "Ada Lovelace",
+				TeamKey:      "ENG",
+				URL:          "https://linear.app/acme/issue/ENG-123",
+				Attachments: []models.SessionIssueSnapshotAttachment{
+					{Title: "Trace", URL: "https://example.com/trace", Source: "sentry"},
+				},
+				Comments: []models.SessionIssueSnapshotComment{
+					{Author: "Grace", Body: "Please include the edge case."},
+				},
 			},
 			{
 				Role:        models.SessionIssueLinkRoleRelated,
@@ -692,7 +702,39 @@ func TestBuildSystemPrompt_IncludesLinkedIssuesContext(t *testing.T) {
 	require.Contains(t, prompt, "Linked Issues Context", "buildSystemPrompt should include the linked issue context header")
 	require.Contains(t, prompt, "<external_id>ENG-123</external_id>", "buildSystemPrompt should include external ids for linked issues")
 	require.Contains(t, prompt, "<description>Customers hit a timeout after payment authorization.</description>", "buildSystemPrompt should include descriptions for primary linked issues")
+	require.Contains(t, prompt, "<priority>high</priority>", "buildSystemPrompt should include Linear priority metadata")
+	require.Contains(t, prompt, "<assignee>Ada Lovelace</assignee>", "buildSystemPrompt should include Linear assignee metadata")
+	require.Contains(t, prompt, "<attachment", "buildSystemPrompt should include Linear attachment metadata")
+	require.Contains(t, prompt, "Please include the edge case.", "buildSystemPrompt should include bounded Linear comments")
 	require.NotContains(t, prompt, "This description should not be copied for related issues.", "buildSystemPrompt should omit descriptions for related linked issues")
+}
+
+// Manual sessions skip the coding-task preamble (which carries the
+// "untrusted external content" warning) but can still be linked to Linear
+// issues whose titles/descriptions/comments are attacker-controllable. The
+// fence has to live inside the linked-issues block so it travels with the
+// data regardless of caller — see linked_issues_context.template.
+func TestBuildSystemPrompt_ManualSessionLinkedIssuesCarryTrustFence(t *testing.T) {
+	t.Parallel()
+
+	input := &agent.AgentInput{
+		Issue:  &models.Issue{Title: "help me refactor", Source: models.IssueSourceManual},
+		Manual: true,
+		LinkedIssues: []models.SessionIssueSnapshotEntry{
+			{
+				Role:        models.SessionIssueLinkRolePrimary,
+				Source:      models.IssueSourceLinear,
+				Title:       "Fix checkout timeout",
+				ExternalID:  "ENG-123",
+				Description: "Customers hit a timeout after payment authorization.",
+			},
+		},
+	}
+
+	prompt := buildSystemPrompt(input)
+	require.NotContains(t, prompt, "untrusted external content (e.g. from issue trackers)", "manual sessions correctly skip the coding-task preamble fence")
+	require.Contains(t, prompt, "<trust_warning>", "linked-issues block must carry its own untrusted-content fence even on manual sessions")
+	require.Contains(t, prompt, "untrusted external content", "trust_warning must call out untrusted external content")
 }
 
 // ---------------------------------------------------------------------------
@@ -1341,7 +1383,7 @@ func TestCollectDiff(t *testing.T) {
 					"base_commit_sha": tt.baseCommitSHA,
 				},
 			}
-			diff, err := collectDiff(context.Background(), provider, sandbox)
+			diff, err := collectDiff(context.Background(), provider, sandbox, zerolog.Nop())
 			if tt.wantErr {
 				require.Error(t, err, "collectDiff should return an error")
 				return

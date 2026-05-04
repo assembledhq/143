@@ -25,14 +25,24 @@ export const PREVIEW_ERROR_CODES = {
   // 409 — the session is not expired, but there is no restorable snapshot
   // available (for example snapshot persistence failed on the worker).
   SNAPSHOT_UNAVAILABLE: "SNAPSHOT_UNAVAILABLE",
-  // 409 — this worker has no sandbox provider / snapshot store wired, or
-  // a concurrent hydrate won the publish race. A retry may resolve the
-  // race-loss case; configuration needs admin attention.
+  // 409 — this worker has no sandbox provider / snapshot store wired.
+  // Configuration issue; needs admin attention.
   NO_SANDBOX: "NO_SANDBOX",
+  // 409 — a concurrent hydrate (typically a continue_session turn) won the
+  // sandbox attach race. Transient; a retry once the turn finishes
+  // resolves it.
+  SANDBOX_BUSY: "SANDBOX_BUSY",
+  // 502 — the API could not complete its RPC to the worker (EOF, network
+  // partition, or worker WriteTimeout overrun). Distinct from the worker
+  // returning a structured error: here we never got a response body, so
+  // there's no underlying code to surface — but the failure is transient
+  // and a retry will usually succeed.
+  WORKER_REQUEST_FAILED: "PREVIEW_WORKER_REQUEST_FAILED",
   // 500 — internal failure while hydrating (restore error, provider
   // outage, DB write failure). Generic; details in the underlying message.
   HYDRATE_FAILED: "PREVIEW_HYDRATE_FAILED",
-  // 422 — the repo has no committed .143/preview.json and the client
+  // 422 — the repo has no committed .143/config.json with a preview
+  // section and the client
   // didn't supply an explicit config, so the backend has nothing to launch.
   // User fix is to commit the config file (see docs/guides/previews.md).
   NO_CONFIG: "PREVIEW_NO_CONFIG",
@@ -53,7 +63,7 @@ export const PREVIEW_ERROR_CODES = {
   // 422 — an application service was launched but its readiness probe
   // never passed within the configured timeout. The service likely
   // crashed at boot or is bound to a different port than it declares in
-  // .143/preview.json.
+  // .143/config.json.
   SERVICE_NOT_READY: "PREVIEW_SERVICE_NOT_READY",
 } as const;
 

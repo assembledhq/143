@@ -36,6 +36,7 @@ import (
 	ghservice "github.com/assembledhq/143/internal/services/github"
 	"github.com/assembledhq/143/internal/services/github/identity"
 	"github.com/assembledhq/143/internal/services/ingestion"
+	"github.com/assembledhq/143/internal/services/linear"
 	"github.com/assembledhq/143/internal/services/pm"
 	"github.com/assembledhq/143/internal/services/preview"
 	previewproviders "github.com/assembledhq/143/internal/services/preview/providers"
@@ -301,6 +302,7 @@ func main() {
 		pullRequestStore := db.NewPullRequestStore(pool)
 		deployStore := db.NewDeployStore(pool)
 		sessionMessageStore := db.NewSessionMessageStore(pool)
+		sessionThreadStore := db.NewSessionThreadStore(pool)
 		priorityScoreStore := db.NewPriorityScoreStore(pool)
 		complexityEstimateStore := db.NewComplexityEstimateStore(pool)
 		pmPlanStore := db.NewPMPlanStore(pool)
@@ -349,8 +351,10 @@ func main() {
 			EvalBootstraps:      db.NewEvalBootstrapStore(pool),
 			Repositories:        repoStore,
 			SessionMessages:     sessionMessageStore,
+			SessionThreads:      sessionThreadStore,
 			Automations:         automationStore,
 			AutomationRuns:      automationRunStore,
+			SessionIssueLinks:   db.NewSessionIssueLinkStore(pool),
 		}
 
 		// Build Phase 3+ services if runtime dependencies are available.
@@ -460,6 +464,14 @@ func main() {
 		}
 		reaper := agent.NewSessionReaper(sessionStore, snapshotStore, cfg.SessionMaxIdleAge, cfg.SessionMaxSnapshotAge, cfg.SessionReaperInterval, logger, reaperOpts...)
 		go reaper.Run(ctx)
+
+		// Runtime resource sampler — emits live memory/CPU histograms per
+		// running sandbox so operators can size SANDBOX_* limits against
+		// actual usage. nil when sampling is disabled (interval <= 0) or
+		// the provider doesn't expose stats.
+		if workerServices != nil && workerServices.RuntimeSampler != nil {
+			go workerServices.RuntimeSampler.Run(ctx)
+		}
 
 		// Upload reaper: clean up old uploaded files (local mode only; use S3 lifecycle rules for S3).
 		uploadStore := storage.NewFileUploadStore(cfg.UploadStorageDir, "")
@@ -885,34 +897,36 @@ func buildServices(
 	}
 
 	orchestrator := agent.NewOrchestrator(agent.OrchestratorConfig{
-		Provider:         sandboxProvider,
-		Adapters:         agentAdapters,
-		Env:              agentEnv,
-		Sessions:         sessionStore,
-		SessionLogs:      sessionLogStore,
-		SessionQuestions: sessionQuestionStore,
-		SessionMessages:  sessionMessageStore,
-		DecisionLog:      pmDecisionLogStore,
-		ProjectTasks:     projectTaskUpdater,
-		AutomationRuns:   automationRunUpdater,
-		Issues:           issueStore,
-		Repositories:     repoStore,
-		Orgs:             orgStore,
-		Jobs:             jobStore,
-		GitHub:           ghSvc,
-		CodexAuth:        codexAuthSvc,
-		ClaudeCodeAuth:   claudeCodeAuthSvc,
-		Credentials:      credentialStore,
-		UserCredentials:  userCredentialStore,
-		Snapshots:        snapshotStore,
-		UsageTracker:     usageTracker,
-		Cancels:          cancelRegistry,
-		OrgSettingsCache: orgSettingsCache,
-		IdentityResolver: identityResolver,
-		SandboxAuth:      sandboxAuthServer,
-		Users:            userStore,
-		NodeID:           cfg.NodeID,
-		Logger:           logger,
+		Provider:          sandboxProvider,
+		Adapters:          agentAdapters,
+		Env:               agentEnv,
+		Sessions:          sessionStore,
+		SessionLogs:       sessionLogStore,
+		SessionQuestions:  sessionQuestionStore,
+		SessionMessages:   sessionMessageStore,
+		SessionIssueLinks: db.NewSessionIssueLinkStore(pool),
+		IssueSnapshots:    db.NewSessionTurnIssueSnapshotStore(pool),
+		DecisionLog:       pmDecisionLogStore,
+		ProjectTasks:      projectTaskUpdater,
+		AutomationRuns:    automationRunUpdater,
+		Issues:            issueStore,
+		Repositories:      repoStore,
+		Orgs:              orgStore,
+		Jobs:              jobStore,
+		GitHub:            ghSvc,
+		CodexAuth:         codexAuthSvc,
+		ClaudeCodeAuth:    claudeCodeAuthSvc,
+		Credentials:       credentialStore,
+		UserCredentials:   userCredentialStore,
+		Snapshots:         snapshotStore,
+		UsageTracker:      usageTracker,
+		Cancels:           cancelRegistry,
+		OrgSettingsCache:  orgSettingsCache,
+		IdentityResolver:  identityResolver,
+		SandboxAuth:       sandboxAuthServer,
+		Users:             userStore,
+		NodeID:            cfg.NodeID,
+		Logger:            logger,
 	})
 
 	// Validation service.
@@ -988,6 +1002,41 @@ func buildServices(
 		titleService = services.NewSessionTitleService(llmClient, sessionStore, sessionMessageStore)
 	}
 
+	// Linear session-linking service. Drives prepare_linear_primary,
+	// link_linear_issue, refresh_linear_team_keys workers and handles the
+	// post-link milestones (PR open / PR merged / etc.). Constructed via
+	// the shared Build helper so the API server (router.go) and the worker
+	// (here) wire the service identically.
+	linearService := linear.Build(linear.BuildDeps{
+		Pool:         pool,
+		Logger:       logger,
+		Integrations: integrationStore,
+		Credentials:  credentialStore,
+		Issues:       issueStore,
+		Sessions:     sessionStore,
+		IssueLinks:   db.NewSessionIssueLinkStore(pool),
+		Orgs:         orgStore,
+		Jobs:         jobStore,
+		AppBaseURL:   cfg.FrontendURL,
+	})
+	prService.SetLinearMilestoneEnqueuer(linear.MilestoneEnqueuerFor(jobStore, logger))
+
+	// Runtime resource sampler. Optional capability — only providers that
+	// implement RuntimeStatsProvider produce samples. Disabled when the
+	// interval is non-positive (operators can switch this off if the OTel
+	// pipeline isn't wired up yet). The runtime type assertion goes
+	// through an explicit any() conversion because Go only allows type
+	// assertions on interface static types, and sandboxProvider's static
+	// type is the concrete *DockerProvider here.
+	var runtimeSampler *agent.RuntimeSampler
+	if cfg.RuntimeStatsInterval > 0 {
+		if statsProvider, ok := any(sandboxProvider).(agent.RuntimeStatsProvider); ok {
+			runtimeSampler = agent.NewRuntimeSampler(usageTracker, statsProvider, billingMetrics, cfg.RuntimeStatsInterval, logger)
+		} else {
+			logger.Info().Msg("sandbox provider does not implement RuntimeStatsProvider; runtime sampler disabled")
+		}
+	}
+
 	svc := &worker.Services{
 		Orchestrator:    orchestrator,
 		Validation:      validationSvc,
@@ -1000,6 +1049,8 @@ func buildServices(
 		LLM:             llmClient,
 		GitHub:          ghSvc,
 		TitleService:    titleService,
+		Linear:          linearService,
+		RuntimeSampler:  runtimeSampler,
 	}
 	if sandboxAuthServer != nil {
 		// Capture by value: the closure outlives buildServices, but the

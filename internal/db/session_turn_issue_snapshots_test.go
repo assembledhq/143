@@ -50,6 +50,68 @@ func TestSessionTurnIssueSnapshotStore_Create(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+// TestSessionTurnIssueSnapshotStore_Create_UpsertsOnTurnConflict guards the
+// regression that wedged sessions whose first turn attempt failed after the
+// snapshot insert but before UpdateTurnComplete bumped current_turn — every
+// retry then computed the same turn_number and tripped the unique constraint
+// on (session_id, turn_number) inside resolve issue context. Create must now
+// upsert: same id/created_at, refreshed linked_issues.
+func TestSessionTurnIssueSnapshotStore_Create_UpsertsOnTurnConflict(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewSessionTurnIssueSnapshotStore(mock)
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	snapshotID := uuid.New()
+	createdAt := time.Now().UTC()
+
+	firstAttempt := &models.SessionTurnIssueSnapshot{
+		OrgID:      orgID,
+		SessionID:  sessionID,
+		TurnNumber: 3,
+		LinkedIssues: []models.SessionIssueSnapshotEntry{
+			{IssueID: uuid.New(), Role: models.SessionIssueLinkRolePrimary, Title: "first attempt"},
+		},
+	}
+	secondAttempt := &models.SessionTurnIssueSnapshot{
+		OrgID:      orgID,
+		SessionID:  sessionID,
+		TurnNumber: 3,
+		LinkedIssues: []models.SessionIssueSnapshotEntry{
+			{IssueID: uuid.New(), Role: models.SessionIssueLinkRolePrimary, Title: "retry with edited links"},
+		},
+	}
+
+	// The query must declare ON CONFLICT (session_id, turn_number) DO UPDATE so
+	// retries of an unfinished turn don't fail with SQLSTATE 23505.
+	upsertPattern := `(?s)INSERT INTO session_turn_issue_snapshots.+ON CONFLICT \(session_id, turn_number\) DO UPDATE.+SET linked_issues = EXCLUDED\.linked_issues`
+
+	mock.ExpectQuery(upsertPattern).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(snapshotID, createdAt))
+	require.NoError(t, store.Create(context.Background(), firstAttempt), "first attempt should insert successfully")
+	require.Equal(t, snapshotID, firstAttempt.ID, "first attempt should populate id from RETURNING")
+
+	// Simulating retry of the same turn: ON CONFLICT path returns the original
+	// row's id and created_at via RETURNING. linked_issues on the row is now
+	// the second attempt's payload.
+	mock.ExpectQuery(upsertPattern).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(snapshotID, createdAt))
+	require.NoError(t, store.Create(context.Background(), secondAttempt), "retry must not return a unique-violation error")
+	require.Equal(t, snapshotID, secondAttempt.ID, "retry should resolve to the same row id (first-wins identity)")
+	require.Equal(t, createdAt, secondAttempt.CreatedAt, "retry should preserve the original created_at")
+
+	require.Contains(t, string(secondAttempt.RawLinkedIssues), "retry with edited links", "retry should persist the latest linked-issue payload (last-wins content)")
+	require.NotContains(t, string(secondAttempt.RawLinkedIssues), "first attempt", "retry should overwrite stale linked-issue payload")
+
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func TestSessionTurnIssueSnapshotStore_Create_QueryError(t *testing.T) {
 	t.Parallel()
 

@@ -13,6 +13,7 @@ import (
 
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
+	"github.com/assembledhq/143/internal/services/agent"
 )
 
 // --- mock pmDocumentStore ---
@@ -331,7 +332,11 @@ func TestBootstrapSandboxConfig(t *testing.T) {
 
 	cfg := bootstrapSandboxConfig()
 	require.Equal(t, 30*time.Minute, cfg.Timeout)
-	require.Equal(t, float64(2), cfg.CPULimit)
-	require.Equal(t, 4096, cfg.MemoryLimitMB)
 	require.Equal(t, "restricted", cfg.NetworkPolicy)
+	// CPULimit and MemoryLimitMB inherit from DefaultSandboxConfig so a
+	// single SANDBOX_* env-var change tunes both regular sessions and PM
+	// bootstraps. Pin to the same defaults DefaultSandboxConfig promises.
+	defaults := agent.DefaultSandboxConfig()
+	require.Equal(t, defaults.CPULimit, cfg.CPULimit)
+	require.Equal(t, defaults.MemoryLimitMB, cfg.MemoryLimitMB)
 }

@@ -193,28 +193,35 @@ export default function AutopilotSettingsPage() {
                       },
                     })
                   }
+                  className="gap-4"
                 >
-                  <label className="flex items-center gap-3 rounded-lg border p-3">
-                    <RadioGroupItem value="manual" aria-label="Suggest" />
-                    <div>
-                      <span className="text-xs font-medium">Suggest</span>
-                      <p className="text-xs text-muted-foreground">Autopilot recommends, you decide.</p>
-                    </div>
-                  </label>
-                  <label className="flex items-center gap-3 rounded-lg border p-3">
-                    <RadioGroupItem value="auto_simple" aria-label="Act on low-risk" />
-                    <div>
-                      <span className="text-xs font-medium">Act on low-risk</span>
-                      <p className="text-xs text-muted-foreground">Auto-create sessions for bounded work.</p>
-                    </div>
-                  </label>
-                  <label className="flex items-center gap-3 rounded-lg border p-3">
-                    <RadioGroupItem value="auto_all" aria-label="Operate broadly" />
-                    <div>
-                      <span className="text-xs font-medium">Operate broadly</span>
-                      <p className="text-xs text-muted-foreground">Autopilot runs automatically on eligible work.</p>
-                    </div>
-                  </label>
+                  <div className="flex items-start gap-3">
+                    <RadioGroupItem value="manual" id="autonomy-manual" aria-label="Suggest" className="mt-0.5" />
+                    <Label htmlFor="autonomy-manual" className="items-start gap-0">
+                      <div>
+                        <span className="text-xs font-medium">Suggest</span>
+                        <p className="text-xs text-muted-foreground">Autopilot recommends, you decide.</p>
+                      </div>
+                    </Label>
+                  </div>
+                  <div className="flex items-start gap-3">
+                    <RadioGroupItem value="auto_simple" id="autonomy-auto-simple" aria-label="Act on low-risk" className="mt-0.5" />
+                    <Label htmlFor="autonomy-auto-simple" className="items-start gap-0">
+                      <div>
+                        <span className="text-xs font-medium">Act on low-risk</span>
+                        <p className="text-xs text-muted-foreground">Auto-create sessions for bounded work.</p>
+                      </div>
+                    </Label>
+                  </div>
+                  <div className="flex items-start gap-3">
+                    <RadioGroupItem value="auto_all" id="autonomy-auto-all" aria-label="Operate broadly" className="mt-0.5" />
+                    <Label htmlFor="autonomy-auto-all" className="items-start gap-0">
+                      <div>
+                        <span className="text-xs font-medium">Operate broadly</span>
+                        <p className="text-xs text-muted-foreground">Autopilot runs automatically on eligible work.</p>
+                      </div>
+                    </Label>
+                  </div>
                 </RadioGroup>
               </div>
               <div className="space-y-2">
@@ -229,35 +236,44 @@ export default function AutopilotSettingsPage() {
                       settings: { execution_aggressiveness: parseInt(value, 10) },
                     })
                   }
+                  className="gap-4"
                 >
-                  <label className="flex items-center gap-3 rounded-lg border p-3">
-                    <RadioGroupItem value="1" aria-label="Conservative" />
-                    <div>
-                      <span className="text-xs font-medium">Conservative</span>
-                      <p className="text-xs text-muted-foreground">Prefer smaller, lower-risk edits.</p>
-                    </div>
-                  </label>
-                  <label className="flex items-center gap-3 rounded-lg border p-3">
-                    <RadioGroupItem value="2" aria-label="Moderate" />
-                    <div>
-                      <span className="text-xs font-medium">Moderate</span>
-                      <p className="text-xs text-muted-foreground">Balance scope and caution.</p>
-                    </div>
-                  </label>
-                  <label className="flex items-center gap-3 rounded-lg border p-3">
-                    <RadioGroupItem value="3" aria-label="Aggressive" />
-                    <div>
-                      <span className="text-xs font-medium">Aggressive</span>
-                      <p className="text-xs text-muted-foreground">Allow broader changes when they stay coherent.</p>
-                    </div>
-                  </label>
-                  <label className="flex items-center gap-3 rounded-lg border p-3">
-                    <RadioGroupItem value="4" aria-label="Maximum" />
-                    <div>
-                      <span className="text-xs font-medium">Maximum</span>
-                      <p className="text-xs text-muted-foreground">Optimize for throughput over caution.</p>
-                    </div>
-                  </label>
+                  <div className="flex items-start gap-3">
+                    <RadioGroupItem value="1" id="execution-aggressiveness-1" aria-label="Conservative" className="mt-0.5" />
+                    <Label htmlFor="execution-aggressiveness-1" className="items-start gap-0">
+                      <div>
+                        <span className="text-xs font-medium">Conservative</span>
+                        <p className="text-xs text-muted-foreground">Prefer smaller, lower-risk edits.</p>
+                      </div>
+                    </Label>
+                  </div>
+                  <div className="flex items-start gap-3">
+                    <RadioGroupItem value="2" id="execution-aggressiveness-2" aria-label="Moderate" className="mt-0.5" />
+                    <Label htmlFor="execution-aggressiveness-2" className="items-start gap-0">
+                      <div>
+                        <span className="text-xs font-medium">Moderate</span>
+                        <p className="text-xs text-muted-foreground">Balance scope and caution.</p>
+                      </div>
+                    </Label>
+                  </div>
+                  <div className="flex items-start gap-3">
+                    <RadioGroupItem value="3" id="execution-aggressiveness-3" aria-label="Aggressive" className="mt-0.5" />
+                    <Label htmlFor="execution-aggressiveness-3" className="items-start gap-0">
+                      <div>
+                        <span className="text-xs font-medium">Aggressive</span>
+                        <p className="text-xs text-muted-foreground">Allow broader changes when they stay coherent.</p>
+                      </div>
+                    </Label>
+                  </div>
+                  <div className="flex items-start gap-3">
+                    <RadioGroupItem value="4" id="execution-aggressiveness-4" aria-label="Maximum" className="mt-0.5" />
+                    <Label htmlFor="execution-aggressiveness-4" className="items-start gap-0">
+                      <div>
+                        <span className="text-xs font-medium">Maximum</span>
+                        <p className="text-xs text-muted-foreground">Optimize for throughput over caution.</p>
+                      </div>
+                    </Label>
+                  </div>
                 </RadioGroup>
               </div>
               <div className="space-y-2">

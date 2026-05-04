@@ -13,6 +13,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/go-chi/chi/v5"
 	chiMiddleware "github.com/go-chi/chi/v5/middleware"
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/rs/zerolog"
@@ -32,10 +33,12 @@ import (
 	"github.com/assembledhq/143/internal/services/email"
 	ghservice "github.com/assembledhq/143/internal/services/github"
 	"github.com/assembledhq/143/internal/services/ingestion"
+	"github.com/assembledhq/143/internal/services/linear"
 	"github.com/assembledhq/143/internal/services/preview"
 	"github.com/assembledhq/143/internal/services/sandbox"
 	"github.com/assembledhq/143/internal/services/storage"
 	threadservice "github.com/assembledhq/143/internal/services/thread"
+	"github.com/assembledhq/143/internal/services/workspace"
 )
 
 func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, sentryReporter observability.Reporter, codexAuthSvc *codexauth.Service, claudeCodeAuthSvc *claudecodeauth.Service, llmClient llm.Client, fileReader sandbox.FileReader, canceller handlers.SessionCanceller, previewProvider preview.PreviewCapableProvider, snapshotExecutor preview.SnapshotExecutor, sandboxProvider agent.SandboxProvider, snapshotStore storage.SnapshotStore, orgSettingsInvalidator handlers.OrgSettingsInvalidator, shutdownCh <-chan struct{}, redisClient *cache.Client, sessionStreams *cache.SessionStreams) (*chi.Mux, *http.Server, *preview.RecycleWorker, io.Closer, *preview.Manager, error) {
@@ -118,9 +121,12 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				ghSvc, pullRequestStore, sessionStore, issueStore,
 				deployStore, validationStore, repoStore, jobStore, logger,
 			)
+			prService.SetAppBaseURL(cfg.FrontendURL)
 			prService.SetReviewCommentStore(reviewCommentStore)
 			prService.SetIntegrationStore(integrationStore)
 			prService.SetSandboxPushDeps(sandboxProvider, snapshotStore)
+			// Linear milestone enqueuer fires post-PR-event Linear writes.
+			prService.SetLinearMilestoneEnqueuer(linear.MilestoneEnqueuerFor(jobStore, logger))
 		}
 	}
 	if cfg.GitHubAppClientID != "" && cfg.GitHubAppClientSecret != "" {
@@ -162,6 +168,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 		cfg.FrontendURL,
 		integrationOpts...,
 	)
+	integrationHandler.SetLinearJobStore(jobStore)
 	webhookHandler := handlers.NewWebhookHandler(cfg, orgStore, userStore, repoStore, integrationStore, prService)
 	containerUsageStore := db.NewContainerUsageStore(pool)
 	usageRollupStore := db.NewUsageRollupStore(pool)
@@ -196,6 +203,46 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	sessionHandler.SetViewStore(sessionViewStore)
 	sessionHandler.SetIssueLinkStore(sessionIssueLinkStore)
 	sessionHandler.SetIssueSnapshotStore(sessionIssueSnapshotStore)
+	sessionHandler.SetReviewCommentStore(sessionReviewCommentStore)
+
+	// Linear session-linking: detection, primary resolution + context
+	// snapshotting, attachment/comment writes, state-sync transitions —
+	// see design 62. Wired here so it's available to CreateManual; the
+	// worker gets its own instance via buildServices in cmd/server/main.go.
+	// Both call linear.Build so wiring stays in lockstep.
+	linearService := linear.Build(linear.BuildDeps{
+		Pool:         pool,
+		Logger:       logger,
+		Integrations: integrationStore,
+		Credentials:  credentialStore,
+		Issues:       issueStore,
+		Sessions:     sessionStore,
+		IssueLinks:   sessionIssueLinkStore,
+		Orgs:         orgStore,
+		Jobs:         jobStore,
+		AppBaseURL:   cfg.FrontendURL,
+	})
+	if sessionStreams != nil {
+		// Republish session status on every link change so the detail view
+		// re-fetches the enriched LinkedIssues without a manual reload.
+		linearService.SetLinksChangedNotifier(func(ctx context.Context, orgID, sessionID uuid.UUID, _ string) {
+			session, err := sessionStore.GetByID(ctx, orgID, sessionID)
+			if err != nil {
+				return
+			}
+			_ = sessionStreams.PublishStatus(ctx, &session)
+		})
+	}
+	sessionHandler.SetLinearLinker(linearService)
+	// Wire the inline team-key refresh hook so the Linear OAuth callback
+	// can populate the allowlist synchronously before falling back to the
+	// worker enqueue. See HandleLinearOAuthCallback for the two-tier
+	// strategy.
+	integrationHandler.SetLinearTeamKeyRefresher(linearService.RefreshTeamKeys)
+	// Drop the in-process team-key cache as soon as the integration is
+	// disconnected so post-disconnect session creates can't admit
+	// bare-identifier matches via a stale cache.
+	integrationHandler.SetLinearTeamKeyCacheInvalidator(linearService.InvalidateTeamKeyCache)
 	sessionHandler.SetShutdownSignal(shutdownCh)
 	sessionHandler.SetSnapshotStore(snapshotStore)
 	sessionHandler.SetPRCredentialStore(userCredentialStore)
@@ -315,7 +362,20 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	sessionReviewCommentHandler := handlers.NewSessionReviewCommentHandler(sessionReviewCommentStore, sessionStore, logger)
 	sessionReviewCommentHandler.SetAuditEmitter(auditEmitter)
 	sessionReviewCommentHandler.SetMessageAndJobStores(sessionMessageStore, jobStore)
-	sessionFileHandler := handlers.NewSessionFileHandler(sessionStore, fileReader, logger)
+	// Initialize the session-files snapshot cache so that file-context reads
+	// keep working after the live container is torn down. The cache is
+	// best-effort: a build error here is logged and the handler falls back
+	// to its pre-Phase-6 behavior (NO_SANDBOX once the container is gone).
+	var sessionFilesSnapshotCache *workspace.SnapshotCache
+	if snapshotStore != nil && cfg.SessionFilesCacheDir != "" {
+		sc, scErr := workspace.NewSnapshotCache(snapshotStore, cfg.SessionFilesCacheDir, cfg.SessionFilesCacheMaxBytes, logger)
+		if scErr != nil {
+			logger.Warn().Err(scErr).Str("cache_dir", cfg.SessionFilesCacheDir).Msg("failed to initialize session-files snapshot cache — snapshot fallback disabled")
+		} else {
+			sessionFilesSnapshotCache = sc
+		}
+	}
+	sessionFileHandler := handlers.NewSessionFileHandler(sessionStore, repoStore, fileReader, sessionFilesSnapshotCache, logger)
 
 	// Preview system: inspector, snapshot cache, HMR watcher, manager, recycler, gateway.
 	var previewInspector preview.PreviewInspector
@@ -723,6 +783,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Post("/api/v1/sessions/{id}/archive", sessionHandler.ArchiveSession)
 				r.Post("/api/v1/sessions/{id}/unarchive", sessionHandler.UnarchiveSession)
 				r.Post("/api/v1/sessions/{id}/pr", sessionHandler.CreatePR)
+				r.Post("/api/v1/sessions/{id}/pr/push", sessionHandler.PushChangesToPR)
 				r.Post("/api/v1/pull-requests/{id}/repair/fix-tests", pullRequestHandler.FixTests)
 				r.Post("/api/v1/pull-requests/{id}/repair/resolve-conflicts", pullRequestHandler.ResolveConflicts)
 				r.Post("/api/v1/pull-requests/{id}/merge", pullRequestHandler.Merge)
@@ -758,6 +819,8 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Patch("/api/v1/projects/{id}", projectHandler.Update)
 				r.Delete("/api/v1/projects/{id}", projectHandler.Delete)
 				r.Post("/api/v1/projects/{id}/start", projectHandler.Start)
+				r.Post("/api/v1/projects/{id}/archive", projectHandler.Archive)
+				r.Post("/api/v1/projects/{id}/unarchive", projectHandler.Unarchive)
 				r.Post("/api/v1/projects/{id}/run", projectHandler.RunNow)
 				r.Post("/api/v1/projects/{id}/tasks", projectHandler.CreateTask)
 				r.Patch("/api/v1/projects/{id}/tasks/{taskId}", projectHandler.UpdateTask)

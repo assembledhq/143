@@ -65,6 +65,7 @@ import {
 import type { CodingAuth, OrgSettings, Organization, Repository, SingleResponse, ListResponse, ResolvedCredential, SessionInputCommand, SessionInputReference } from "@/lib/types";
 
 const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10 MB
+const DRAFT_SAVE_DEBOUNCE_MS = 400;
 const triggerPickerIconClassName = "h-4 w-4 shrink-0";
 const directoryTriggerIcon = <FolderTree className={triggerPickerIconClassName} />;
 const fileTriggerIcon = <FileCode2 className={triggerPickerIconClassName} />;
@@ -101,6 +102,9 @@ export function ManualSessionCreatePageContent() {
   const messageInputRef = useRef<HTMLTextAreaElement>(null);
   const composerCardRef = useRef<HTMLDivElement>(null);
   const recognitionRef = useRef<BrowserSpeechRecognition | null>(null);
+  const draftSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pendingDraftRef = useRef<Parameters<typeof saveDraft>[0] | null>(null);
+  const resizeFrameRef = useRef<number | null>(null);
   // Synchronous guard: React Query's isPending flips on the next render, so
   // rapid Enter presses can all pass the isPending check in the same tick.
   const submittingRef = useRef(false);
@@ -216,7 +220,7 @@ export function ManualSessionCreatePageContent() {
   // confusing.
   useEffect(() => {
     if (!draftHydrated) return;
-    saveDraft({
+    const nextDraft = {
       message,
       attachments,
       references,
@@ -227,7 +231,18 @@ export function ManualSessionCreatePageContent() {
       branchByRepoId,
       showImageInput,
       imageURL,
-    });
+    };
+
+    pendingDraftRef.current = nextDraft;
+    if (draftSaveTimerRef.current) {
+      clearTimeout(draftSaveTimerRef.current);
+    }
+    draftSaveTimerRef.current = setTimeout(() => {
+      if (!pendingDraftRef.current) return;
+      saveDraft(pendingDraftRef.current);
+      pendingDraftRef.current = null;
+      draftSaveTimerRef.current = null;
+    }, DRAFT_SAVE_DEBOUNCE_MS);
   }, [
     draftHydrated,
     message,
@@ -241,6 +256,27 @@ export function ManualSessionCreatePageContent() {
     showImageInput,
     imageURL,
   ]);
+
+  function flushDraftSave() {
+    if (draftSaveTimerRef.current) {
+      clearTimeout(draftSaveTimerRef.current);
+      draftSaveTimerRef.current = null;
+    }
+    if (!pendingDraftRef.current) {
+      return;
+    }
+    saveDraft(pendingDraftRef.current);
+    pendingDraftRef.current = null;
+  }
+
+  useEffect(() => {
+    return () => {
+      flushDraftSave();
+      if (resizeFrameRef.current !== null) {
+        cancelAnimationFrame(resizeFrameRef.current);
+      }
+    };
+  }, []);
 
   const { data: settingsResponse } = useQuery<SingleResponse<Organization>>({
     queryKey: queryKeys.settings.all,
@@ -482,16 +518,23 @@ export function ManualSessionCreatePageContent() {
   }
 
   function resizeMessageInput() {
-    const element = messageInputRef.current;
-    if (!element) {
-      return;
+    if (resizeFrameRef.current !== null) {
+      cancelAnimationFrame(resizeFrameRef.current);
     }
 
-    const maxHeight = 240;
-    element.style.height = "auto";
-    const nextHeight = Math.min(element.scrollHeight, maxHeight);
-    element.style.height = `${nextHeight}px`;
-    element.style.overflowY = element.scrollHeight > maxHeight ? "auto" : "hidden";
+    resizeFrameRef.current = requestAnimationFrame(() => {
+      resizeFrameRef.current = null;
+      const element = messageInputRef.current;
+      if (!element) {
+        return;
+      }
+
+      const maxHeight = 240;
+      element.style.height = "auto";
+      const nextHeight = Math.min(element.scrollHeight, maxHeight);
+      element.style.height = `${nextHeight}px`;
+      element.style.overflowY = element.scrollHeight > maxHeight ? "auto" : "hidden";
+    });
   }
 
   useEffect(() => {
@@ -938,8 +981,8 @@ export function ManualSessionCreatePageContent() {
                 autoFocus
                 onChange={(event) => {
                   updateMessage(event.target.value, event.target.selectionStart ?? event.target.value.length);
-                  resizeMessageInput();
                 }}
+                onBlur={flushDraftSave}
                 onClick={(event) => setCaretPosition(event.currentTarget.selectionStart ?? message.length)}
                 onKeyUp={(event) => setCaretPosition(event.currentTarget.selectionStart ?? message.length)}
                 onSelect={(event) => setCaretPosition(event.currentTarget.selectionStart ?? message.length)}

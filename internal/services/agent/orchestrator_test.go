@@ -1721,7 +1721,7 @@ func TestContinueSession_FreshResumeWiresSandboxAuth(t *testing.T) {
 		}, nil
 	}
 
-	err := buildOrchestrator(d).ContinueSession(context.Background(), session)
+	err := buildOrchestrator(d).ContinueSession(context.Background(), session, nil)
 	require.NoError(t, err, "ContinueSession should succeed on a fresh resume")
 	require.Equal(t, 1, authStub.listenCalls, "ContinueSession should open a sandbox auth socket for fresh sandboxes")
 	require.Equal(t, "/tmp/fake.sock", createdCfg.AuthSocketPath, "ContinueSession should bind-mount the per-session auth socket into fresh containers")
@@ -1771,7 +1771,7 @@ func TestContinueSession_FreshResumeLegacyGitHubAuthStillBootstrapsBranchGuard(t
 		}, nil
 	}
 
-	err := buildOrchestrator(d).ContinueSession(context.Background(), session)
+	err := buildOrchestrator(d).ContinueSession(context.Background(), session, nil)
 	require.NoError(t, err, "ContinueSession should succeed on a fresh legacy-auth resume")
 	require.Empty(t, createdCfg.AuthSocketPath, "legacy github auth should not mount the sandbox auth socket")
 	require.Equal(t, "ghp_test123", createdCfg.Env["GITHUB_TOKEN"], "legacy github auth should still expose the fallback token")
@@ -2322,7 +2322,7 @@ func TestContinueSession_GatesOnPendingSnapshotKey(t *testing.T) {
 	d.snapshots.data = nil
 
 	orch := buildOrchestrator(d)
-	err := orch.ContinueSession(context.Background(), session)
+	err := orch.ContinueSession(context.Background(), session, nil)
 	require.ErrorIs(t, err, agent.ErrSnapshotPending, "ContinueSession should bail with ErrSnapshotPending when PendingSnapshotKey is set")
 	require.Empty(t, d.sessions.getStatusUpdates(), "ContinueSession must not mutate session state before the gate fires")
 }
@@ -2379,7 +2379,7 @@ func TestContinueSession_UsesBuildRunResultInUpdateTurnComplete(t *testing.T) {
 	}
 
 	orch := buildOrchestrator(d)
-	err := orch.ContinueSession(context.Background(), session)
+	err := orch.ContinueSession(context.Background(), session, nil)
 	require.NoError(t, err, "ContinueSession should succeed")
 
 	updates := d.sessions.getTurnUpdates()
@@ -2389,6 +2389,83 @@ func TestContinueSession_UsesBuildRunResultInUpdateTurnComplete(t *testing.T) {
 	require.NotEmpty(t, updates[0].snapshotKey, "ContinueSession should persist a snapshot key")
 	require.NotNil(t, updates[0].result, "ContinueSession should build a session result for UpdateTurnComplete")
 	require.NotNil(t, updates[0].result.Diff, "ContinueSession should pass the diff through to UpdateTurnComplete")
+}
+
+func TestContinueSession_UsesThreadExecutionOptions(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	threadID := uuid.New()
+	issue := testIssue(orgID)
+	issue.Source = models.IssueSourceManual
+	session := testRun(orgID, issue.ID)
+	session.AgentType = models.AgentTypeClaudeCode
+	session.ModelOverride = strPtr("claude-sonnet-4-6")
+	session.AgentSessionID = strPtr("parent-claude-session")
+	session.Status = string(models.SessionStatusIdle)
+	session.CurrentTurn = 1
+	session.SnapshotKey = strPtr("snapshots/test/session.tar")
+
+	threadModel := "gemini-2.5-pro"
+	threadAgentSessionID := ""
+	var createdCfg agent.SandboxConfig
+	var promptSeen *agent.AgentPrompt
+
+	d := defaultDeps()
+	d.adapter = &mockAgentAdapter{
+		name: models.AgentTypeGeminiCLI,
+		executeFn: func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
+			promptSeen = prompt
+			return &agent.AgentResult{
+				Diff:            "--- a/file.go\n+++ b/file.go",
+				Summary:         "Thread result",
+				ConfidenceScore: 0.9,
+				AgentSessionID:  "thread-gemini-session",
+				ExitCode:        0,
+			}, nil
+		},
+	}
+	d.issues.issue = issue
+	d.messages.messages = []models.SessionMessage{{
+		ID:         1,
+		SessionID:  session.ID,
+		OrgID:      orgID,
+		ThreadID:   &threadID,
+		TurnNumber: 2,
+		Role:       models.MessageRoleUser,
+		Content:    "Continue in the Gemini tab.",
+	}}
+	d.provider.CreateFn = func(ctx context.Context, cfg agent.SandboxConfig) (*agent.Sandbox, error) {
+		createdCfg = cfg
+		return &agent.Sandbox{ID: "gemini-thread-sandbox", Provider: "mock", WorkDir: cfg.WorkDir, HomeDir: cfg.HomeDir}, nil
+	}
+	d.provider.RestoreFn = func(ctx context.Context, sb *agent.Sandbox, reader io.Reader) error {
+		_, err := io.ReadAll(reader)
+		return err
+	}
+	d.provider.SnapshotFn = func(ctx context.Context, sb *agent.Sandbox) (io.ReadCloser, error) {
+		return io.NopCloser(bytes.NewReader([]byte("next-snapshot"))), nil
+	}
+	d.snapshots.data = map[string][]byte{
+		*session.SnapshotKey: []byte("restored-snapshot"),
+	}
+
+	err := buildOrchestrator(d).ContinueSession(context.Background(), session, &agent.ContinueSessionOptions{
+		AgentType:            models.AgentTypeGeminiCLI,
+		ModelOverride:        &threadModel,
+		ThreadAgentSessionID: nil,
+		ResultAgentSessionID: &threadAgentSessionID,
+	})
+	require.NoError(t, err, "ContinueSession should execute with the thread-selected adapter")
+	require.Equal(t, threadModel, createdCfg.Env["GEMINI_MODEL"], "ContinueSession should apply the thread model to the thread agent env")
+	require.NotContains(t, createdCfg.Env, "ANTHROPIC_MODEL", "ContinueSession should not apply the parent session model when a thread override is provided")
+	require.NotNil(t, promptSeen, "ContinueSession should execute the thread adapter")
+	require.False(t, promptSeen.Continuation, "first turn in a blank thread should start a fresh agent transcript")
+	require.Empty(t, promptSeen.ResumeSessionID, "blank thread should not resume the parent session's agent session id")
+	require.Equal(t, "thread-gemini-session", threadAgentSessionID, "ContinueSession should report the thread agent session id to the worker")
+	turnUpdates := d.sessions.getTurnUpdates()
+	require.Len(t, turnUpdates, 1, "ContinueSession should still complete the shared session turn")
+	require.Equal(t, "parent-claude-session", turnUpdates[0].agentSessionID, "thread execution should not overwrite the parent session agent_session_id")
 }
 
 func TestContinueSession_RepairedSlashCommandsOnReusePath(t *testing.T) {
@@ -2454,7 +2531,7 @@ func TestContinueSession_RepairedSlashCommandsOnReusePath(t *testing.T) {
 	}
 
 	orch := buildOrchestrator(d)
-	err := orch.ContinueSession(context.Background(), session)
+	err := orch.ContinueSession(context.Background(), session, nil)
 	require.NoError(t, err, "ContinueSession should succeed on the reuse path when slash commands need repair")
 }
 
@@ -3065,7 +3142,7 @@ func TestContinueSession_PersistsTurnResultAndReturnsToIdle(t *testing.T) {
 	}
 
 	orch := buildOrchestrator(d)
-	err := orch.ContinueSession(context.Background(), session)
+	err := orch.ContinueSession(context.Background(), session, nil)
 	require.NoError(t, err, "continue_session should succeed")
 
 	turnUpdates := d.sessions.getTurnUpdates()
@@ -3137,7 +3214,7 @@ func TestContinueSession_FreshResumeClaudeTokenFailureFallsBackToAPIKey(t *testi
 	}
 
 	orch := buildOrchestrator(d)
-	err := orch.ContinueSession(context.Background(), session)
+	err := orch.ContinueSession(context.Background(), session, nil)
 	require.NoError(t, err, "fresh resume should fall back to the Anthropic API key when Claude token refresh fails")
 	require.Len(t, d.sessions.getFailureUpdates(), 0, "API-key fallback should not mark the resumed session as failed")
 	_, wroteCredsFile := d.provider.Files["/home/sandbox/.claude/.credentials.json"]
@@ -3209,7 +3286,7 @@ func TestContinueSession_OmitsReasoningEffortWhenUnset(t *testing.T) {
 		*session.SnapshotKey: []byte("restored-snapshot"),
 	}
 
-	err := buildOrchestrator(d).ContinueSession(context.Background(), session)
+	err := buildOrchestrator(d).ContinueSession(context.Background(), session, nil)
 	require.NoError(t, err, "ContinueSession should succeed without a reasoning override")
 }
 
@@ -3270,7 +3347,7 @@ func TestContinueSession_ClaudeTokenFailureRemovesStaleCredentialsBeforeAPIKeyFa
 	}
 
 	orch := buildOrchestrator(d)
-	err := orch.ContinueSession(context.Background(), session)
+	err := orch.ContinueSession(context.Background(), session, nil)
 	require.NoError(t, err, "snapshot resume should fall back to API key after removing stale Claude credentials")
 	require.Contains(t, d.provider.ExecCalls, "rm -f '/home/sandbox/.claude/.credentials.json'", "fallback should delete stale Claude credentials before relying on the API key")
 	_, credsStillPresent := d.provider.Files["/home/sandbox/.claude/.credentials.json"]
@@ -3325,7 +3402,7 @@ func TestContinueSession_AppendsNonReviewRevisionContextToUserMessage(t *testing
 	}
 	d.sessions.releaseHoldFn = func() (bool, string, error) { return false, existing, nil }
 
-	err = buildOrchestrator(d).ContinueSession(context.Background(), session)
+	err = buildOrchestrator(d).ContinueSession(context.Background(), session, nil)
 	require.NoError(t, err, "ContinueSession should preserve the normal continuation path for non-review revision metadata")
 	require.NotNil(t, promptSeen, "ContinueSession should execute the adapter for resumable sessions")
 	require.Contains(t, promptSeen.UserMessage, "## Revision context", "ContinueSession should append formatted revision context to the user's continuation message")
@@ -3366,7 +3443,7 @@ func TestContinueSession_IgnoresMalformedRevisionContext(t *testing.T) {
 	}
 	d.sessions.releaseHoldFn = func() (bool, string, error) { return false, existing, nil }
 
-	err := buildOrchestrator(d).ContinueSession(context.Background(), session)
+	err := buildOrchestrator(d).ContinueSession(context.Background(), session, nil)
 	require.NoError(t, err, "ContinueSession should keep running even when the persisted revision context is malformed")
 	require.NotNil(t, promptSeen, "ContinueSession should still invoke the adapter after discarding malformed revision context")
 	require.Nil(t, promptSeen.RevisionContext, "ContinueSession should drop malformed revision context instead of propagating corrupt JSON into the adapter")
@@ -3434,12 +3511,85 @@ func TestContinueSession_ReusesExistingContainer(t *testing.T) {
 	}
 
 	orch := buildOrchestrator(d)
-	require.NoError(t, orch.ContinueSession(context.Background(), session))
+	require.NoError(t, orch.ContinueSession(context.Background(), session, nil))
 
 	require.Equal(t, 0, d.provider.GetDestroyCalls(), "sandbox must stay alive while preview holds it")
 	require.Equal(t, 0, d.sessions.finalizeCalls, "FinalizeContainerDestroy must not run while preview holds")
 	require.GreaterOrEqual(t, d.sessions.acquireHoldCalls, 1)
 	require.GreaterOrEqual(t, d.sessions.releaseHoldCalls, 1)
+}
+
+// TestContinueSession_RestoresDiffMetadataOntoSandboxMetadata is the
+// regression test for the "Changes tab goes blank after PR push / resolve
+// conflicts" and "Changes tab inflates with target-branch commits after
+// merging main" bugs. ContinueSession previously left sandbox.Metadata
+// empty in every setup branch (reuse / hydrate / fresh-clone), so
+// sessiondiff.Collect fell back to plain `git diff` and returned an empty
+// string for any clean working tree (post-push, post-merge). That empty
+// diff overwrote the authoritative session diff in the DB, blanking the
+// Changes tab even though the PR itself was healthy. With the fix, the
+// orchestrator copies session.BaseCommitSHA AND the resolved target branch
+// back onto sandbox.Metadata after every setup branch, so the diff
+// collector has both the immutable base SHA (fallback) and the target
+// branch (for the merge-base-style diff that excludes commits brought in
+// by integrating the target branch back into the working branch). We
+// exercise the reuse path here because it's the simplest setup that goes
+// through the post-switch metadata restore.
+func TestContinueSession_RestoresDiffMetadataOntoSandboxMetadata(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	issue.Source = models.IssueSourceManual
+	session := testRun(orgID, issue.ID)
+	session.Origin = models.SessionOriginManual
+	session.InteractionMode = models.SessionInteractionModeInteractive
+	session.ValidationPolicy = models.SessionValidationPolicyOnSessionEnd
+	session.Status = string(models.SessionStatusIdle)
+	session.CurrentTurn = 1
+	existing := "preview-container-base-sha"
+	session.ContainerID = &existing
+	session.SandboxState = string(models.SandboxStateRunning)
+
+	const expectedBaseSHA = "feedfacecafe1234"
+	baseSHA := expectedBaseSHA
+	session.BaseCommitSHA = &baseSHA
+
+	d := defaultDeps()
+	d.issues.issue = issue
+	d.messages.messages = []models.SessionMessage{
+		{
+			ID:         1,
+			SessionID:  session.ID,
+			OrgID:      orgID,
+			TurnNumber: 2,
+			Role:       models.MessageRoleUser,
+			Content:    "follow-up after PR push",
+		},
+	}
+
+	var observedBaseSHA, observedTargetBranch string
+	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
+		require.NotNil(t, sandbox.Metadata, "ContinueSession must populate sandbox.Metadata before the agent runs")
+		observedBaseSHA = sandbox.Metadata[agent.SandboxMetadataBaseCommitSHA]
+		observedTargetBranch = sandbox.Metadata[agent.SandboxMetadataTargetBranch]
+		return &agent.AgentResult{
+			Summary:         "done",
+			ConfidenceScore: 0.9,
+			ExitCode:        0,
+		}, nil
+	}
+	d.provider.SnapshotFn = func(ctx context.Context, sb *agent.Sandbox) (io.ReadCloser, error) {
+		return io.NopCloser(bytes.NewReader([]byte("snap"))), nil
+	}
+
+	orch := buildOrchestrator(d)
+	require.NoError(t, orch.ContinueSession(context.Background(), session, nil))
+
+	require.Equal(t, expectedBaseSHA, observedBaseSHA,
+		"ContinueSession must restore session.BaseCommitSHA onto sandbox.Metadata so sessiondiff.Collect can run `git diff <base> -- .` instead of falling back to plain `git diff`")
+	require.Equal(t, "main", observedTargetBranch,
+		"ContinueSession must stamp the resolved target branch onto sandbox.Metadata so sessiondiff.Collect can compute a merge-base diff against origin/<branch> instead of inflating the diff with target-branch changes after a merge")
 }
 
 // TestContinueSession_ReusedContainerReopensAuthListener locks in the
@@ -3508,7 +3658,7 @@ func TestContinueSession_ReusedContainerReopensAuthListener(t *testing.T) {
 	}
 
 	orch := buildOrchestrator(d)
-	require.NoError(t, orch.ContinueSession(context.Background(), session))
+	require.NoError(t, orch.ContinueSession(context.Background(), session, nil))
 
 	require.Equal(t, 1, authStub.listenCalls,
 		"ContinueSession on a reused container must reopen the per-session auth listener so post-restart resumes can still dial it")
@@ -3572,7 +3722,7 @@ func TestContinueSession_AuthSocketClosedOnAcquireHoldError(t *testing.T) {
 	d.sessions.acquireHoldErr = errors.New("db write failed")
 
 	orch := buildOrchestrator(d)
-	err := orch.ContinueSession(context.Background(), session)
+	err := orch.ContinueSession(context.Background(), session, nil)
 	require.Error(t, err, "ContinueSession should propagate the acquire-hold failure")
 	require.Contains(t, err.Error(), "acquire turn hold", "ContinueSession should surface the acquire-hold failure")
 
@@ -3631,7 +3781,7 @@ func TestContinueSession_AuthSocketClosedOnHydrateFailure(t *testing.T) {
 	}
 
 	orch := buildOrchestrator(d)
-	err := orch.ContinueSession(context.Background(), session)
+	err := orch.ContinueSession(context.Background(), session, nil)
 	require.Error(t, err, "ContinueSession should propagate the hydrate failure")
 	require.Contains(t, err.Error(), "hydrate sandbox", "ContinueSession should surface the hydrate failure")
 
@@ -3666,7 +3816,7 @@ func TestContinueSession_AcquireHoldErrorFailsTurn(t *testing.T) {
 	d.sessions.acquireHoldErr = errors.New("db write failed")
 
 	orch := buildOrchestrator(d)
-	err := orch.ContinueSession(context.Background(), session)
+	err := orch.ContinueSession(context.Background(), session, nil)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "acquire turn hold")
 
@@ -3698,7 +3848,7 @@ func TestContinueSession_SetWorkerNodeIDFailureFailsTurn(t *testing.T) {
 	}
 
 	orch := buildOrchestrator(d)
-	err := orch.ContinueSession(context.Background(), session)
+	err := orch.ContinueSession(context.Background(), session, nil)
 	require.Error(t, err, "ContinueSession should fail when session worker ownership cannot be persisted")
 	require.Contains(t, err.Error(), "persist session worker ownership", "ContinueSession should surface the worker ownership persistence failure")
 	require.Equal(t, 1, d.provider.GetDestroyCalls(), "ContinueSession should destroy the sandbox when worker ownership persistence fails")
@@ -3795,7 +3945,7 @@ func TestContinueSession_SessionRepoSlug(t *testing.T) {
 			}
 
 			orch := buildOrchestrator(d)
-			err := orch.ContinueSession(context.Background(), session)
+			err := orch.ContinueSession(context.Background(), session, nil)
 			require.Error(t, err)
 			require.Contains(t, err.Error(), c.wantErrMatch)
 			if c.wantWorkDir == "" {
@@ -3922,7 +4072,7 @@ func TestContinueSession_ErrorMessageDeferredToDeadLetterHook(t *testing.T) {
 			}
 
 			orch := buildOrchestrator(d)
-			err := orch.ContinueSession(ctx, session)
+			err := orch.ContinueSession(ctx, session, nil)
 			require.Error(t, err)
 			require.Contains(t, err.Error(), c.wantErrMatch)
 
@@ -3980,7 +4130,7 @@ func TestContinueSession_DeadLetterHookIdempotent(t *testing.T) {
 
 	ctx := jobctx.WithDeadLetterHooks(context.Background())
 	orch := buildOrchestrator(d)
-	err := orch.ContinueSession(ctx, session)
+	err := orch.ContinueSession(ctx, session, nil)
 	require.Error(t, err)
 
 	jobctx.RunDeadLetterHooks(ctx, err)
@@ -4087,7 +4237,7 @@ func TestContinueSession_InjectsSandboxProviderIntoContext(t *testing.T) {
 	}
 
 	orch := buildOrchestrator(d)
-	err := orch.ContinueSession(context.Background(), session)
+	err := orch.ContinueSession(context.Background(), session, nil)
 	require.NoError(t, err)
 }
 
@@ -4464,7 +4614,7 @@ func TestContinueSession_DeadlineExceededClassifiesAsTimeout(t *testing.T) {
 	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-1*time.Second))
 	defer cancel()
 
-	err := orch.ContinueSession(ctx, session)
+	err := orch.ContinueSession(ctx, session, nil)
 	require.Error(t, err)
 	require.ErrorIs(t, err, agent.ErrSessionTimedOut)
 
@@ -5127,7 +5277,7 @@ func TestContinueSession_AmpMissingAPIKeyFailsFast(t *testing.T) {
 	}
 
 	orch := buildOrchestrator(d)
-	err := orch.ContinueSession(context.Background(), session)
+	err := orch.ContinueSession(context.Background(), session, nil)
 	require.Error(t, err, "ContinueSession must fail when AMP_API_KEY is missing")
 	require.Contains(t, err.Error(), "AMP_API_KEY",
 		"error should name the missing credential")

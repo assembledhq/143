@@ -1,12 +1,14 @@
 "use client";
 
-import { useQuery } from "@tanstack/react-query";
-import { FolderKanban, Plus, Search } from "lucide-react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { notify as toast } from "@/lib/notify";
+import { Archive, ArchiveRestore, FolderKanban, Plus, Search } from "lucide-react";
 import Link from "next/link";
 import { useParams, usePathname } from "next/navigation";
 import { useEffect, useMemo, useState } from "react";
 import { useQueryState, parseAsString } from "nuqs";
 import { PeopleFilter } from "@/components/people-filter";
+import { SwipeActionRow } from "@/components/swipe-action-row";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { cn, formatTimeAgo } from "@/lib/utils";
@@ -21,10 +23,11 @@ const filterTabs = [
   { value: "active", label: "Active" },
   { value: "draft", label: "Draft" },
   { value: "completed", label: "Done" },
+  { value: "archived", label: "Archived" },
 ];
 
 function filterProjects(projects: Project[], filter: string | null): Project[] {
-  if (!filter || filter === "all") return projects;
+  if (!filter || filter === "all" || filter === "archived") return projects;
   return projects.filter((p) => p.status === filter);
 }
 
@@ -49,6 +52,7 @@ export function ProjectSidebar() {
   const [search, setSearch] = useState(searchParam ?? "");
   const [activeFilter, setActiveFilter] = useQueryState("status", parseAsString);
   const [repo] = useQueryState("repo");
+  const queryClient = useQueryClient();
   useEffect(() => {
     const nextSearch = searchParam ?? "";
     // Sync the local input from the URL when navigation/back/forward changes
@@ -73,9 +77,34 @@ export function ProjectSidebar() {
 
   const { data, isLoading } = useQuery({
     queryKey: ["projects", activeFilter, repo, serializedPeopleParam],
-    queryFn: () => api.projects.list({ limit: 50, repository_id: repo ?? undefined, created_by_ids: scopedUserIDs }),
+    queryFn: () => api.projects.list({
+      limit: 50,
+      repository_id: repo ?? undefined,
+      created_by_ids: scopedUserIDs,
+      ...(activeFilter === "archived" ? { only_archived: true } : {}),
+    }),
     enabled: isResolved,
     refetchInterval: 10000,
+  });
+
+  const invalidateProjects = () => {
+    queryClient.invalidateQueries({ queryKey: ["projects"] });
+  };
+
+  const archiveMutation = useMutation({
+    mutationFn: (projectId: string) => api.projects.archive(projectId),
+    onSuccess: invalidateProjects,
+    onError: () => {
+      toast.error("Failed to archive project");
+    },
+  });
+
+  const unarchiveMutation = useMutation({
+    mutationFn: (projectId: string) => api.projects.unarchive(projectId),
+    onSuccess: invalidateProjects,
+    onError: () => {
+      toast.error("Failed to unarchive project");
+    },
   });
 
   const allProjects = useMemo(() => data?.data ?? [], [data?.data]);
@@ -218,60 +247,72 @@ export function ProjectSidebar() {
           const pct = project.total_tasks > 0
             ? Math.round((project.completed_tasks / project.total_tasks) * 100)
             : 0;
+          const isArchived = !!project.archived_at;
 
           return (
-            <Link
+            <SwipeActionRow
               key={project.id}
-              href={`/projects/${project.id}${filterSuffix}`}
-              className={cn(
-                "block rounded-lg px-3 py-2.5 mb-0.5 transition-all duration-150",
-                isSelected
-                  ? "bg-background shadow-sm border border-border/50"
-                  : "hover:bg-background/60"
-              )}
+              className="mb-0.5"
+              actionLabel={isArchived ? "Unarchive project" : "Archive project"}
+              actionText={isArchived ? "Restore" : "Archive"}
+              actionIcon={isArchived ? <ArchiveRestore className="h-4 w-4" /> : <Archive className="h-4 w-4" />}
+              onAction={() => {
+                if (isArchived) {
+                  unarchiveMutation.mutate(project.id);
+                } else {
+                  archiveMutation.mutate(project.id);
+                }
+              }}
             >
-              <div className="flex items-start gap-2.5 min-w-0">
-                {/* Status dot */}
-                <div className="mt-1.5 shrink-0">
-                  {isActiveProject ? (
-                    <StatusDot animate color="bg-blue-500" pingColor="bg-blue-400/60" />
-                  ) : (
-                    <StatusDot color={projectStatusDotColor[project.status] || "bg-muted-foreground/50"} />
-                  )}
-                </div>
-
-                {/* Content */}
-                <div className="min-w-0 flex-1">
-                  <p className="text-xs font-medium text-foreground truncate leading-snug">
-                    {project.title}
-                  </p>
-
-                  <div className="flex items-center gap-3 mt-0.5">
-                    <span className="text-xs text-muted-foreground shrink-0">
-                      {cfg.label}
-                    </span>
-                    <span className="text-xs text-muted-foreground/50 truncate">
-                      {formatTimeAgo(ts)}
-                    </span>
+              <Link
+                href={`/projects/${project.id}${filterSuffix}`}
+                className={cn(
+                  "block rounded-lg bg-muted/30 px-3 py-2.5 transition-all duration-150",
+                  isSelected
+                    ? "bg-background shadow-sm border border-border/50"
+                    : "hover:bg-background/60"
+                )}
+              >
+                <div className="flex items-start gap-2.5 min-w-0">
+                  <div className="mt-1.5 shrink-0">
+                    {isActiveProject ? (
+                      <StatusDot animate color="bg-blue-500" pingColor="bg-blue-400/60" />
+                    ) : (
+                      <StatusDot color={projectStatusDotColor[project.status] || "bg-muted-foreground/50"} />
+                    )}
                   </div>
 
-                  {/* Mini progress bar */}
-                  {project.total_tasks > 0 && (
-                    <div className="flex items-center gap-2 mt-1.5">
-                      <div className="h-1 flex-1 rounded-full bg-muted overflow-hidden">
-                        <div
-                          className="h-full rounded-full bg-[image:var(--gradient-primary)] transition-all"
-                          style={{ width: `${pct}%` }}
-                        />
-                      </div>
-                      <span className="text-xs text-muted-foreground/60 tabular-nums">
-                        {project.completed_tasks}/{project.total_tasks}
+                  <div className="min-w-0 flex-1">
+                    <p className="text-xs font-medium text-foreground truncate leading-snug">
+                      {project.title}
+                    </p>
+
+                    <div className="flex items-center gap-3 mt-0.5">
+                      <span className="text-xs text-muted-foreground shrink-0">
+                        {cfg.label}
+                      </span>
+                      <span className="text-xs text-muted-foreground/50 truncate">
+                        {formatTimeAgo(ts)}
                       </span>
                     </div>
-                  )}
+
+                    {project.total_tasks > 0 && (
+                      <div className="mt-1.5 flex items-center gap-2">
+                        <div className="h-1 flex-1 overflow-hidden rounded-full bg-muted">
+                          <div
+                            className="h-full rounded-full bg-[image:var(--gradient-primary)] transition-all"
+                            style={{ width: `${pct}%` }}
+                          />
+                        </div>
+                        <span className="text-xs text-muted-foreground/60 tabular-nums">
+                          {project.completed_tasks}/{project.total_tasks}
+                        </span>
+                      </div>
+                    )}
+                  </div>
                 </div>
-              </div>
-            </Link>
+              </Link>
+            </SwipeActionRow>
           );
         })}
       </div>

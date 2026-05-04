@@ -316,4 +316,83 @@ describe("PRHealthBanner", () => {
     expect(screen.getByRole("button", { name: "Resolve conflicts" })).toBeInTheDocument();
     expect(screen.queryByText(/^conflicts$/)).toBeNull();
   });
+
+  it("renders a Push changes button when pushChanges is provided and triggers onClick", async () => {
+    const onClick = vi.fn();
+    renderWithProviders(
+      <PRHealthBanner
+        health={baseHealth}
+        pendingAction={null}
+        repairError={null}
+        mergeAuthRequired={false}
+        onFixTests={vi.fn()}
+        onResolveConflicts={vi.fn()}
+        onMerge={vi.fn()}
+        pushChanges={{
+          label: "Push changes",
+          disabled: false,
+          spinning: false,
+          showError: false,
+          onClick,
+        }}
+      />,
+    );
+
+    const button = screen.getByRole("button", { name: "Push changes" });
+    expect(button).toBeEnabled();
+    await userEvent.click(button);
+    expect(onClick).toHaveBeenCalledTimes(1);
+  });
+
+  it("disables the Push changes button while another action is pending", () => {
+    renderWithProviders(
+      <PRHealthBanner
+        health={{
+          ...baseHealth,
+          can_resolve_conflicts: true,
+        }}
+        pendingAction="resolve_conflicts"
+        repairError={null}
+        mergeAuthRequired={false}
+        onFixTests={vi.fn()}
+        onResolveConflicts={vi.fn()}
+        onMerge={vi.fn()}
+        pushChanges={{
+          label: "Push changes",
+          disabled: false,
+          spinning: false,
+          showError: false,
+          onClick: vi.fn(),
+        }}
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: "Push changes" })).toBeDisabled();
+  });
+
+  it("renders the Push changes button in spinning/Pushing state and disables it", () => {
+    renderWithProviders(
+      <PRHealthBanner
+        health={baseHealth}
+        pendingAction={null}
+        repairError={null}
+        mergeAuthRequired={false}
+        onFixTests={vi.fn()}
+        onResolveConflicts={vi.fn()}
+        onMerge={vi.fn()}
+        pushChanges={{
+          label: "Pushing…",
+          disabled: true,
+          spinning: true,
+          showError: false,
+          onClick: vi.fn(),
+          title: "Pushing changes to the PR branch",
+        }}
+      />,
+    );
+
+    const button = screen.getByRole("button", { name: /Pushing/ });
+    expect(button).toBeDisabled();
+    expect(button).toHaveAttribute("title", "Pushing changes to the PR branch");
+  });
 });

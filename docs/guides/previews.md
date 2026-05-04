@@ -6,7 +6,7 @@ This guide covers how to add preview support to a repo. For the underlying archi
 
 ## Dogfood preview
 
-143 ships its own `.143/preview.json`, `.143/preview-start.sh`, and `.143/seed.sql` so a reviewer can spin up 143 inside 143 to click through the UI. This is the environment exposed at `143.dev`.
+143 ships its own `.143/config.json`, `.143/preview-start.sh`, and `.143/seed.sql` so a reviewer can spin up 143 inside 143 to click through the UI. This is the environment exposed at `143.dev`.
 
 **How to launch it locally:**
 
@@ -41,7 +41,7 @@ Set `DEMO_MODE=true` on the server when launching a dogfood environment. This en
 
 ## Quickstart
 
-Add `.143/preview.json` at the root of your repo:
+Add `.143/config.json` at the root of your repo:
 
 ```json
 {
@@ -65,7 +65,7 @@ That's it. Open a session against the repo, click **Start Preview**, and the pan
 
 When you click Start Preview on a session:
 
-1. The preview manager loads the repo's `.143/preview.json`.
+1. The preview manager loads the repo's `.143/config.json`.
 2. It provisions any declared [infrastructure](#infrastructure) (Postgres, Redis, MySQL) as sidecar containers.
 3. It starts each declared service inside the sandbox as an OS process, in dependency order.
 4. Each service must pass its readiness probe before the next starts.
@@ -279,7 +279,7 @@ Practical implication: if you want the agent to be able to iterate on `command`/
 
 **Can I add a custom infrastructure image?** Not in MVP. Use a managed destination to reach an external staging instance, or stick to the platform templates.
 
-**How do I test config changes?** Commit `.143/preview.json` and start a new session. There's no dry-run yet — invalid configs surface as a `PREVIEW_START_FAILED` error with the validation message.
+**How do I test config changes?** Commit `.143/config.json` and start a new session. There's no dry-run yet — invalid configs surface as a `PREVIEW_START_FAILED` error with the validation message.
 
 **Does the preview use my production secrets?** No. Secrets come from admin-configured credential sets, never from the repo or agent. Without a `credentials` block, the preview has no secrets at all.
 

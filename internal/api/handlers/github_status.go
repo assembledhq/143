@@ -230,7 +230,15 @@ func (h *GitHubStatusHandler) HandleConnectCallback(w http.ResponseWriter, r *ht
 	resumeCookieName := githubPRResumeCookiePrefix + r.URL.Query().Get("state")
 	if resumeCookie, err := r.Cookie(resumeCookieName); err == nil && resumeCookie.Value != "" && len(h.signingKey) > 0 {
 		if claims, tokenErr := parsePRAuthResumeToken(h.signingKey, resumeCookie.Value, time.Now()); tokenErr == nil {
+			// Forward the originating action ("create_pr" or "push_changes")
+			// the signed claim recorded so the frontend can dispatch the
+			// correct mutation deterministically. Older tokens without an
+			// action just omit the param; the frontend falls back to a
+			// state-based heuristic in that case.
 			redirectURL = fmt.Sprintf("%s/sessions/%s?github_pr=connected&resume_pr=%s", h.frontendURL, claims.SessionID, url.QueryEscape(resumeCookie.Value))
+			if claims.Action != "" {
+				redirectURL += "&resume_action=" + url.QueryEscape(claims.Action)
+			}
 		}
 	}
 	clearCookie(w, r, resumeCookieName)

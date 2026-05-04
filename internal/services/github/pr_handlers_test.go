@@ -27,7 +27,7 @@ import (
 // If the store query changes its SELECT list, update this slice to match.
 var handlerPRColumns = []string{
 	"id", "session_id", "org_id", "github_pr_number", "github_pr_url", "github_repo",
-	"title", "body", "status", "review_status", "authored_by", "ci_status", "head_sha", "base_sha",
+	"title", "body", "status", "review_status", "authored_by", "ci_status", "head_sha", "head_ref", "base_sha",
 	"merge_state", "has_conflicts", "failing_test_count", "needs_agent_action", "github_state_synced_at",
 	"health_version", "merged_at", "created_at", "updated_at",
 }
@@ -49,7 +49,9 @@ var sessionColumns = []string{
 	"runtime_extension_count", "runtime_extension_seconds", "runtime_stop_reason", "runtime_graceful_stop_at",
 	"checkpointed_at", "checkpoint_kind", "checkpoint_capability", "checkpoint_size_bytes", "checkpoint_error",
 	"recovery_state", "recovery_queued_at", "recovery_started_at", "recovery_attempt_count",
-	"target_branch", "working_branch", "base_commit_sha", "repository_id", "diff_stats", "diff_history", "input_manifest", "archived_at", "archived_by_user_id", "automation_run_id", "pr_creation_state", "pr_creation_error", "diff_collected_at", "latest_diff_snapshot_id", "deleted_at", "git_identity_source", "git_identity_user_id", "created_at",
+	"target_branch", "working_branch", "base_commit_sha", "repository_id", "diff_stats", "diff_history", "input_manifest", "archived_at", "archived_by_user_id", "automation_run_id", "pr_creation_state", "pr_creation_error", "pr_push_state", "pr_push_error", "diff_collected_at", "latest_diff_snapshot_id",
+	"linear_private", "linear_state_sync_disabled", "linear_identifier_hint", "linear_prepare_state",
+	"deleted_at", "git_identity_source", "git_identity_user_id", "created_at",
 }
 
 // newMockPool creates a pgxmock pool and returns it with a cleanup.
@@ -64,7 +66,7 @@ func newMockPool(t *testing.T) pgxmock.PgxPoolIface {
 func handlerPRRow(prID uuid.UUID, sessionID *uuid.UUID, orgID uuid.UUID, repo string, now time.Time) []any {
 	return []any{
 		prID, sessionID, orgID, 42, "https://github.com/" + repo + "/pull/42", repo,
-		"Fix bug", (*string)(nil), "open", "pending", "app", "", nil, nil,
+		"Fix bug", (*string)(nil), "open", "pending", "app", "", nil, nil, nil,
 		models.PullRequestMergeStateUnknown, false, 0, false, nil, int64(0), (*time.Time)(nil), now, now,
 	}
 }
@@ -76,6 +78,7 @@ func TestNewPRService(t *testing.T) {
 	svc := NewPRService(nil, nil, nil, nil, nil, nil, nil, nil, logger)
 	require.NotNil(t, svc, "NewPRService should return a non-nil service")
 	require.Equal(t, defaultGitHubAPI, svc.baseURL, "NewPRService should set the default GitHub API base URL")
+	require.Equal(t, defaultAppBaseURL, svc.appBaseURL, "NewPRService should set the default app base URL for session deep-links")
 	require.NotNil(t, svc.httpClient, "NewPRService should initialize an HTTP client")
 }
 
@@ -85,6 +88,14 @@ func TestSetBaseURL(t *testing.T) {
 	svc := &PRService{}
 	svc.SetBaseURL("https://custom.api.example.com")
 	require.Equal(t, "https://custom.api.example.com", svc.baseURL, "SetBaseURL should update the base URL")
+}
+
+func TestSetAppBaseURL(t *testing.T) {
+	t.Parallel()
+
+	svc := &PRService{}
+	svc.SetAppBaseURL("https://frontend.example.com/")
+	require.Equal(t, "https://frontend.example.com", svc.appBaseURL, "SetAppBaseURL should trim the trailing slash from the app base URL")
 }
 
 func TestSetReviewCommentStore(t *testing.T) {
@@ -197,14 +208,20 @@ func TestHandlePullRequestEvent_MergedFlow(t *testing.T) {
 					nil,      // diff_history
 					nil,      // input_manifest
 					nil, nil, // archived_at, archived_by_user_id
-					nil,            // automation_run_id
-					"idle",         // pr_creation_state
-					(*string)(nil), // pr_creation_error
-					nil,            // diff_collected_at
-					nil,            // latest_diff_snapshot_id
-					nil,            // deleted_at
-					nil,            // git_identity_source
-					nil,            // git_identity_user_id
+					nil,                           // automation_run_id
+					"idle",                        // pr_creation_state
+					(*string)(nil),                // pr_creation_error
+					"idle",                        // pr_push_state
+					(*string)(nil),                // pr_push_error
+					nil,                           // diff_collected_at
+					nil,                           // latest_diff_snapshot_id
+					false,                         // linear_private
+					false,                         // linear_state_sync_disabled
+					(*string)(nil),                // linear_identifier_hint
+					models.LinearPrepareStateNone, // linear_prepare_state
+					nil,                           // deleted_at
+					nil,                           // git_identity_source
+					nil,                           // git_identity_user_id
 					now),
 		)
 
@@ -759,7 +776,7 @@ func TestPRServiceMaybeAutoArchiveSessionOnPRCloseHandlesSnapshotFailures(t *tes
 			setupSession: func(mock pgxmock.PgxPoolIface) {
 				snapshotKey := "snap-key"
 				row := newPRHealthSessionRow(sessionID, orgID, now, string(models.SessionStatusCompleted))
-				row[42] = &snapshotKey
+				setPRHealthSessionRowValue(row, "snapshot_key", &snapshotKey)
 
 				mock.ExpectExec("UPDATE sessions SET archived_at = now\\(\\), archived_by_user_id = NULL").
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
@@ -841,58 +858,17 @@ func TestPRServiceRunMergedPullRequestFollowUpsHandlesWarningPaths(t *testing.T)
 			setupSession: func(mock pgxmock.PgxPoolIface) {
 				issueID := uuid.New()
 				snapshotKey := "snap-key"
+				sessionRow := newPRHealthSessionRow(sessionID, orgID, now, string(models.SessionStatusCompleted))
+				setPRHealthSessionRowValue(sessionRow, "primary_issue_id", &issueID)
+				setPRHealthSessionRowValue(sessionRow, "agent_type", "claude-code")
+				setPRHealthSessionRowValue(sessionRow, "autonomy_level", "full")
+				setPRHealthSessionRowValue(sessionRow, "sandbox_state", "snapshot")
+				setPRHealthSessionRowValue(sessionRow, "snapshot_key", &snapshotKey)
+
 				mock.ExpectQuery("SELECT .+ FROM sessions WHERE id").
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(
-						pgxmock.NewRows(sessionColumns).AddRow(
-							sessionID, &issueID, orgID, "", "", "", "claude-code", "completed", "full", "low",
-							nil, nil, nil, nil,
-							nil, nil, false, nil, nil, nil,
-							nil, nil, nil, false,
-							nil, nil, nil, nil, nil,
-							nil, nil, nil, nil, nil,
-							nil,
-							nil,
-							nil,
-							nil, 0, now, "snapshot", &snapshotKey,
-							nil, // pending_snapshot_key
-							nil, // pending_snapshot_set_at
-							nil,
-							nil,
-							nil,
-							"",
-							"",
-							0,
-							0,
-							"",
-							nil,
-							nil,
-							"",
-							"",
-							int64(0),
-							nil,
-							"",
-							nil,
-							nil,
-							0,
-							nil,
-							nil,
-							nil,
-							nil,
-							nil,
-							nil,
-							nil,
-							nil, nil,
-							nil,
-							"idle",
-							(*string)(nil),
-							nil,
-							nil,
-							nil,
-							nil,
-							nil,
-							now,
-						),
+						pgxmock.NewRows(sessionColumns).AddRow(sessionRow...),
 					)
 			},
 			setupIssue: func(mock pgxmock.PgxPoolIface) {

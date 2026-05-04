@@ -21,14 +21,16 @@ func NewProjectStore(db TxStarter) *ProjectStore {
 }
 
 type ProjectFilters struct {
-	Status       string
-	Limit        int
-	Cursor       string
-	RepositoryID uuid.UUID
-	CreatedBy    uuid.UUID
-	CreatedByIDs []uuid.UUID
-	Search       string // When non-empty, filter projects by title or goal (case-insensitive substring match).
-	ProposedByPM *bool  // When non-nil, filter by proposed_by_pm flag.
+	Status          string
+	Limit           int
+	Cursor          string
+	RepositoryID    uuid.UUID
+	CreatedBy       uuid.UUID
+	CreatedByIDs    []uuid.UUID
+	Search          string // When non-empty, filter projects by title or goal (case-insensitive substring match).
+	ProposedByPM    *bool  // When non-nil, filter by proposed_by_pm flag.
+	IncludeArchived bool
+	OnlyArchived    bool
 }
 
 // projectColumns is the column list shared across all project queries.
@@ -38,7 +40,7 @@ const projectColumns = `id, org_id, repository_id, title, goal, scope, completio
 	total_tasks, completed_tasks, failed_tasks,
 	proposed_by_pm, source_issue_ids, proposal_reasoning, similar_projects,
 	agent_type, model_override,
-	created_by, deleted_at, created_at, updated_at, completed_at`
+	created_by, deleted_at, created_at, updated_at, completed_at, archived_at`
 
 func scanProject(row pgx.Row) (models.Project, error) {
 	var p models.Project
@@ -52,7 +54,7 @@ func scanProject(row pgx.Row) (models.Project, error) {
 		&p.TotalTasks, &p.CompletedTasks, &p.FailedTasks,
 		&p.ProposedByPM, &sourceIssueIDs, &p.ProposalReasoning, &p.SimilarProjects,
 		&p.AgentType, &p.ModelOverride,
-		&p.CreatedBy, &p.DeletedAt, &p.CreatedAt, &p.UpdatedAt, &p.CompletedAt,
+		&p.CreatedBy, &p.DeletedAt, &p.CreatedAt, &p.UpdatedAt, &p.CompletedAt, &p.ArchivedAt,
 	)
 	if err != nil {
 		return models.Project{}, err
@@ -87,7 +89,7 @@ func scanProjects(rows pgx.Rows) ([]models.Project, error) {
 			&p.TotalTasks, &p.CompletedTasks, &p.FailedTasks,
 			&p.ProposedByPM, &sourceIssueIDs, &p.ProposalReasoning, &p.SimilarProjects,
 			&p.AgentType, &p.ModelOverride,
-			&p.CreatedBy, &p.DeletedAt, &p.CreatedAt, &p.UpdatedAt, &p.CompletedAt,
+			&p.CreatedBy, &p.DeletedAt, &p.CreatedAt, &p.UpdatedAt, &p.CompletedAt, &p.ArchivedAt,
 		)
 		if err != nil {
 			return nil, err
@@ -233,6 +235,11 @@ func applyProjectFilters(query string, args pgx.NamedArgs, filters ProjectFilter
 func (s *ProjectStore) ListByOrg(ctx context.Context, orgID uuid.UUID, filters ProjectFilters) ([]models.Project, error) {
 	query := fmt.Sprintf(`SELECT %s FROM projects WHERE org_id = @org_id AND deleted_at IS NULL`, projectColumns)
 	args := pgx.NamedArgs{"org_id": orgID}
+	if filters.OnlyArchived {
+		query += ` AND archived_at IS NOT NULL`
+	} else if !filters.IncludeArchived {
+		query += ` AND archived_at IS NULL`
+	}
 
 	query = applyProjectFilters(query, args, filters)
 	if filters.Cursor != "" {
@@ -357,6 +364,11 @@ func (s *ProjectStore) UpdateStatus(ctx context.Context, orgID, projectID uuid.U
 func (s *ProjectStore) Count(ctx context.Context, orgID uuid.UUID, filters ProjectFilters) (int, error) {
 	query := `SELECT count(*) FROM projects WHERE org_id = @org_id AND deleted_at IS NULL`
 	args := pgx.NamedArgs{"org_id": orgID}
+	if filters.OnlyArchived {
+		query += ` AND archived_at IS NOT NULL`
+	} else if !filters.IncludeArchived {
+		query += ` AND archived_at IS NULL`
+	}
 	query = applyProjectFilters(query, args, filters)
 
 	var count int
@@ -392,6 +404,36 @@ func (s *ProjectStore) SoftDelete(ctx context.Context, orgID, projectID uuid.UUI
 	}
 	if tag.RowsAffected() == 0 {
 		return fmt.Errorf("project not found or already deleted")
+	}
+	return nil
+}
+
+func (s *ProjectStore) Archive(ctx context.Context, orgID, projectID uuid.UUID) error {
+	query := `UPDATE projects SET archived_at = now(), updated_at = now() WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL AND archived_at IS NULL`
+	tag, err := s.db.Exec(ctx, query, pgx.NamedArgs{
+		"id":     projectID,
+		"org_id": orgID,
+	})
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("project not found or already archived")
+	}
+	return nil
+}
+
+func (s *ProjectStore) Unarchive(ctx context.Context, orgID, projectID uuid.UUID) error {
+	query := `UPDATE projects SET archived_at = NULL, updated_at = now() WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL AND archived_at IS NOT NULL`
+	tag, err := s.db.Exec(ctx, query, pgx.NamedArgs{
+		"id":     projectID,
+		"org_id": orgID,
+	})
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("project not found or not archived")
 	}
 	return nil
 }

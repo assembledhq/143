@@ -34,7 +34,9 @@ var sessionTestColumns = []string{
 	"runtime_extension_count", "runtime_extension_seconds", "runtime_stop_reason", "runtime_graceful_stop_at",
 	"checkpointed_at", "checkpoint_kind", "checkpoint_capability", "checkpoint_size_bytes", "checkpoint_error",
 	"recovery_state", "recovery_queued_at", "recovery_started_at", "recovery_attempt_count",
-	"target_branch", "working_branch", "base_commit_sha", "repository_id", "diff_stats", "diff_history", "input_manifest", "archived_at", "archived_by_user_id", "automation_run_id", "pr_creation_state", "pr_creation_error", "diff_collected_at", "latest_diff_snapshot_id", "deleted_at", "git_identity_source", "git_identity_user_id", "created_at",
+	"target_branch", "working_branch", "base_commit_sha", "repository_id", "diff_stats", "diff_history", "input_manifest", "archived_at", "archived_by_user_id", "automation_run_id", "pr_creation_state", "pr_creation_error", "pr_push_state", "pr_push_error", "diff_collected_at", "latest_diff_snapshot_id",
+	"linear_private", "linear_state_sync_disabled", "linear_identifier_hint", "linear_prepare_state",
+	"deleted_at", "git_identity_source", "git_identity_user_id", "created_at",
 }
 
 // newAgentSessionRow returns a completed-session row for mock queries. The
@@ -90,8 +92,14 @@ func newAgentSessionRow(sessionID, issueID, orgID uuid.UUID, now time.Time) []in
 		nil,            // automation_run_id
 		"idle",         // pr_creation_state
 		(*string)(nil), // pr_creation_error
+		"idle",         // pr_push_state
+		(*string)(nil), // pr_push_error
 		nil,            // diff_collected_at
 		nil,            // latest_diff_snapshot_id
+		false,          // linear_private
+		false,          // linear_state_sync_disabled
+		(*string)(nil), // linear_identifier_hint
+		"none",         // linear_prepare_state
 		nil,            // deleted_at
 		nil,            // git_identity_source
 		nil,            // git_identity_user_id
@@ -165,6 +173,14 @@ func TestSessionStore_QueryColumnsStayInSyncWithSessionModel(t *testing.T) {
 		"origin",
 		"interaction_mode",
 		"validation_policy",
+		// Migration 102 — Linear session linking. Locked here so a future
+		// migration that drops a column from the SELECT lists (or this
+		// test fixture) trips immediately rather than silently corrupting
+		// pgx.RowToStructByName[models.Session].
+		"linear_private",
+		"linear_state_sync_disabled",
+		"linear_identifier_hint",
+		"linear_prepare_state",
 	}
 
 	for _, tt := range []struct {
@@ -276,6 +292,52 @@ func TestSessionStore_UpdatePRCreationState(t *testing.T) {
 			}
 
 			require.NoError(t, err, "UpdatePRCreationState should persist valid state transitions")
+			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+		})
+	}
+}
+
+func TestSessionStore_TryMarkPRPushQueued(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name         string
+		rowsAffected int64
+		wantQueued   bool
+	}{
+		{
+			name:         "rows affected returns true",
+			rowsAffected: 1,
+			wantQueued:   true,
+		},
+		{
+			name:         "no rows affected returns false (concurrent winner)",
+			rowsAffected: 0,
+			wantQueued:   false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "should create mock pool")
+			defer mock.Close()
+
+			store := NewSessionStore(mock)
+			orgID := uuid.New()
+			sessionID := uuid.New()
+
+			// CAS update should pass exactly two args (id, org_id) and
+			// guard with a NOT IN ('queued','pushing') predicate.
+			mock.ExpectExec("UPDATE sessions[\\s\\S]*pr_push_state = 'queued'[\\s\\S]*pr_push_state NOT IN").
+				WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+				WillReturnResult(pgxmock.NewResult("UPDATE", tt.rowsAffected))
+
+			queued, err := store.TryMarkPRPushQueued(context.Background(), orgID, sessionID)
+			require.NoError(t, err, "TryMarkPRPushQueued should not error on a successful CAS attempt")
+			require.Equal(t, tt.wantQueued, queued, "TryMarkPRPushQueued should report whether the row transitioned")
 			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 		})
 	}
@@ -2021,4 +2083,135 @@ func TestSessionStore_BeginRuntime_PreservesRecoveringState(t *testing.T) {
 	)
 	require.NoError(t, err, "BeginRuntime should not clear recovering state when resuming from a checkpoint")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestSessionStore_LinearSessionFields(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		call      func(store *SessionStore, orgID, sessionID uuid.UUID) error
+		sql       string
+		rows      int64
+		errText   string
+		expectErr bool
+	}{
+		{
+			name: "sets prepare state",
+			call: func(store *SessionStore, orgID, sessionID uuid.UUID) error {
+				return store.SetLinearPrepareState(context.Background(), orgID, sessionID, models.LinearPrepareStateReady)
+			},
+			sql:  "UPDATE sessions[\\s\\S]+SET linear_prepare_state",
+			rows: 1,
+		},
+		{
+			name: "prepare state missing session",
+			call: func(store *SessionStore, orgID, sessionID uuid.UUID) error {
+				return store.SetLinearPrepareState(context.Background(), orgID, sessionID, models.LinearPrepareStateReady)
+			},
+			sql:       "UPDATE sessions[\\s\\S]+SET linear_prepare_state",
+			rows:      0,
+			errText:   "session not found",
+			expectErr: true,
+		},
+		{
+			name: "sets identifier hint",
+			call: func(store *SessionStore, orgID, sessionID uuid.UUID) error {
+				return store.SetLinearIdentifierHint(context.Background(), orgID, sessionID, "ACS-123")
+			},
+			sql:  "UPDATE sessions[\\s\\S]+SET linear_identifier_hint",
+			rows: 1,
+		},
+		{
+			name: "identifier hint missing session",
+			call: func(store *SessionStore, orgID, sessionID uuid.UUID) error {
+				return store.SetLinearIdentifierHint(context.Background(), orgID, sessionID, "ACS-123")
+			},
+			sql:       "UPDATE sessions[\\s\\S]+SET linear_identifier_hint",
+			rows:      0,
+			errText:   "session not found",
+			expectErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "should create mock pool")
+			defer mock.Close()
+
+			mock.ExpectExec(tt.sql).
+				WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+				WillReturnResult(pgxmock.NewResult("UPDATE", tt.rows))
+
+			err = tt.call(NewSessionStore(mock), uuid.New(), uuid.New())
+			if tt.expectErr {
+				require.Error(t, err, "linear session field update should return expected error")
+				require.Contains(t, err.Error(), tt.errText, "linear session field update should include expected context")
+			} else {
+				require.NoError(t, err, "linear session field update should succeed")
+			}
+			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+		})
+	}
+}
+
+// TestSessionStore_SetLinearPrepareStateIfNotReady locks the guarded-write
+// contract that protects "ready" from being clobbered by a concurrent
+// prepare-worker failure path. The unguarded SetLinearPrepareState would let
+// a sibling worker mark "failed" on top of an earlier worker's "ready",
+// dead-lettering a usable session for no reason.
+func TestSessionStore_SetLinearPrepareStateIfNotReady(t *testing.T) {
+	t.Parallel()
+
+	t.Run("writes when not ready", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err, "should create mock pool")
+		defer mock.Close()
+
+		mock.ExpectExec("UPDATE sessions[\\s\\S]+SET linear_prepare_state[\\s\\S]+linear_prepare_state <>").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+		err = NewSessionStore(mock).SetLinearPrepareStateIfNotReady(context.Background(), uuid.New(), uuid.New(), models.LinearPrepareStateFailed)
+		require.NoError(t, err, "guarded write should succeed when current state is not ready")
+		require.NoError(t, mock.ExpectationsWereMet(), "guarded write should issue the conditional UPDATE")
+	})
+
+	t.Run("zero rows is not an error", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err, "should create mock pool")
+		defer mock.Close()
+
+		mock.ExpectExec("UPDATE sessions[\\s\\S]+SET linear_prepare_state[\\s\\S]+linear_prepare_state <>").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnResult(pgxmock.NewResult("UPDATE", 0))
+
+		err = NewSessionStore(mock).SetLinearPrepareStateIfNotReady(context.Background(), uuid.New(), uuid.New(), models.LinearPrepareStateFailed)
+		require.NoError(t, err, "guarded write should treat already-ready rows as an intentional no-op")
+		require.NoError(t, mock.ExpectationsWereMet(), "guarded write should issue the conditional UPDATE even when no rows match")
+	})
+
+	t.Run("wraps db errors", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err, "should create mock pool")
+		defer mock.Close()
+
+		mock.ExpectExec("UPDATE sessions[\\s\\S]+SET linear_prepare_state[\\s\\S]+linear_prepare_state <>").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnError(errors.New("db unavailable"))
+
+		err = NewSessionStore(mock).SetLinearPrepareStateIfNotReady(context.Background(), uuid.New(), uuid.New(), models.LinearPrepareStateFailed)
+		require.Error(t, err, "guarded write should surface database errors")
+		require.Contains(t, err.Error(), "update linear prepare state", "guarded write should wrap database errors with context")
+	})
 }

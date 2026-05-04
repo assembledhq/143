@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/assembledhq/143/internal/models"
+	"github.com/stretchr/testify/require"
 )
 
 func TestParseConfig_SingleService(t *testing.T) {
@@ -125,6 +126,47 @@ func TestParseConfig_WithInfrastructure(t *testing.T) {
 	if db.InitScript != "db/seed.sql" {
 		t.Errorf("InitScript = %q, want %q", db.InitScript, "db/seed.sql")
 	}
+}
+
+func TestParseConfig_FromRepoConfigPreviewSection(t *testing.T) {
+	t.Parallel()
+
+	raw := `{
+		"preview": {
+			"version": "3",
+			"name": "dogfood",
+			"primary": "web",
+			"services": {
+				"web": {
+					"command": ["npm", "run", "dev"],
+					"port": 3000,
+					"ready": {"http_path": "/"}
+				}
+			},
+			"credentials": {"mode": "none"},
+			"network": {"mode": "managed"}
+		},
+		"validation": {
+			"commands": ["npm run lint:js"]
+		}
+	}`
+
+	cfg, err := ParseConfig([]byte(raw))
+	require.NoError(t, err, "ParseConfig should accept nested preview config inside .143/config.json")
+	require.Equal(t, "web", cfg.Primary, "ParseConfig should parse the nested preview section")
+	require.Contains(t, cfg.Services, "web", "ParseConfig should preserve services from the nested preview section")
+}
+
+func TestParseConfig_RepoConfigWithoutPreviewSection(t *testing.T) {
+	t.Parallel()
+
+	_, err := ParseConfig([]byte(`{
+		"validation": {
+			"commands": ["npm run lint:js"]
+		}
+	}`))
+	require.Error(t, err, "ParseConfig should reject .143/config.json files that omit the preview section")
+	require.Contains(t, err.Error(), "missing preview section", "ParseConfig should explain that .143/config.json requires a preview section for preview parsing")
 }
 
 func TestParseConfig_InvalidJSON(t *testing.T) {
@@ -722,7 +764,7 @@ func TestParseConfig_RoundTrip(t *testing.T) {
 }
 
 // TestParseConfig_CommittedDogfoodConfig guards against silent regressions
-// in the committed `.143/preview.json` at the repo root. The dogfood config
+// in the committed repo preview config at the repo root. The dogfood config
 // is the configuration used when a 143 session on this very repo clicks
 // "Start Preview", so a broken file manifests as a broken developer loop.
 func TestParseConfig_CommittedDogfoodConfig(t *testing.T) {
@@ -734,20 +776,20 @@ func TestParseConfig_CommittedDogfoodConfig(t *testing.T) {
 		t.Fatalf("getwd: %v", err)
 	}
 	for {
-		candidate := filepath.Join(dir, ".143", "preview.json")
+		candidate := filepath.Join(dir, ".143", "config.json")
 		if _, err := os.Stat(candidate); err == nil {
 			raw, err := os.ReadFile(candidate)
 			if err != nil {
 				t.Fatalf("read %s: %v", candidate, err)
 			}
 			if _, err := ParseConfig(raw); err != nil {
-				t.Fatalf("committed .143/preview.json failed to parse: %v", err)
+				t.Fatalf("committed .143/config.json failed to parse: %v", err)
 			}
 			return
 		}
 		parent := filepath.Dir(dir)
 		if parent == dir {
-			t.Skip("repo root .143/preview.json not found from test working directory")
+			t.Skip("repo root .143/config.json not found from test working directory")
 		}
 		dir = parent
 	}

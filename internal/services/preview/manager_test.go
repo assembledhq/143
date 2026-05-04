@@ -32,7 +32,7 @@ type mockProvider struct {
 	statusErr   error
 }
 
-func (m *mockProvider) StartPreview(_ context.Context, _ *agent.Sandbox, _ *models.PreviewConfig, _ map[string]string) (*PreviewHandle, error) {
+func (m *mockProvider) StartPreview(_ context.Context, _ *agent.Sandbox, _ *models.PreviewConfig, _ map[string]string, _ ServiceObserver) (*PreviewHandle, error) {
 	if m.startErr != nil {
 		return nil, m.startErr
 	}
@@ -157,25 +157,12 @@ var sessionTestCols = []string{
 	"recovery_state", "recovery_queued_at", "recovery_started_at", "recovery_attempt_count",
 	"target_branch", "working_branch", "base_commit_sha", "repository_id", "diff_stats", "diff_history", "input_manifest",
 	"archived_at", "archived_by_user_id", "automation_run_id",
-	"pr_creation_state", "pr_creation_error", "diff_collected_at", "latest_diff_snapshot_id",
+	"pr_creation_state", "pr_creation_error", "pr_push_state", "pr_push_error", "diff_collected_at", "latest_diff_snapshot_id",
+	// Migration 102 — Linear session-linking columns. Migration 100 — git
+	// identity audit columns. Mocks must include both so SessionStore.GetByID's
+	// row decode finds every selected field.
+	"linear_private", "linear_state_sync_disabled", "linear_identifier_hint", "linear_prepare_state",
 	"deleted_at", "git_identity_source", "git_identity_user_id", "created_at",
-}
-
-func previewManagerSessionRow(values ...any) []any {
-	// Tests written before the git_identity_source / git_identity_user_id
-	// columns existed pass values whose count is two short of the new
-	// schema. Inject the missing nils right before created_at so each
-	// fixture call site doesn't need to know about the new columns.
-	if len(values) == len(sessionTestCols)-3-2 {
-		row := make([]any, 0, len(values)+5)
-		row = append(row, values[:3]...)
-		row = append(row, "", "", "")
-		row = append(row, values[3:len(values)-1]...)
-		row = append(row, nil, nil)
-		row = append(row, values[len(values)-1])
-		return row
-	}
-	return values
 }
 
 func newPreviewInstanceRow(id, sessionID, orgID, userID uuid.UUID, status models.PreviewStatus, handle string, now time.Time) []any {
@@ -197,38 +184,52 @@ func newAccessSessionRow(id, orgID, userID, previewID uuid.UUID, tokenHash strin
 
 func newSessionRow(sessionID, orgID uuid.UUID, containerID *string, now time.Time) []any {
 	issueID := uuid.New()
-	return previewManagerSessionRow(
-		sessionID, &issueID, orgID, "claude-code", "running", "supervised", "low",
-		nil, nil, nil, nil,
-		containerID, nil, false, &now, nil, nil,
-		nil, nil, nil, false,
-		nil, nil, nil, nil, nil,
-		nil, nil, nil, nil,
-		nil, nil, nil, nil,
-		nil, 0, now, "running", nil,
-		nil,      // pending_snapshot_key
-		nil,      // pending_snapshot_set_at
-		nil,      // runtime_soft_deadline_at
-		nil,      // runtime_hard_deadline_at
-		nil,      // runtime_last_progress_at
-		"",       // runtime_last_progress_type
-		"",       // runtime_last_progress_strength
-		0,        // runtime_extension_count
-		0,        // runtime_extension_seconds
-		"",       // runtime_stop_reason
-		nil,      // runtime_graceful_stop_at
-		nil,      // checkpointed_at
-		"",       // checkpoint_kind
-		"",       // checkpoint_capability
-		int64(0), // checkpoint_size_bytes
-		nil,      // checkpoint_error
-		"",       // recovery_state
-		nil,      // recovery_queued_at
-		nil,      // recovery_started_at
-		0,        // recovery_attempt_count
-		nil, nil, nil, nil, nil, nil, nil,
-		nil, nil, nil, "idle", (*string)(nil), nil, nil, nil, now,
-	)
+	byColumn := map[string]any{
+		"id":                             sessionID,
+		"primary_issue_id":               &issueID,
+		"org_id":                         orgID,
+		"origin":                         string(models.SessionOriginManual),
+		"interaction_mode":               string(models.SessionInteractionModeInteractive),
+		"validation_policy":              string(models.SessionValidationPolicyOnTurnComplete),
+		"agent_type":                     "claude-code",
+		"status":                         "running",
+		"autonomy_level":                 "supervised",
+		"token_mode":                     "low",
+		"container_id":                   containerID,
+		"turn_holding_container":         false,
+		"started_at":                     &now,
+		"failure_retry_advised":          false,
+		"current_turn":                   0,
+		"last_activity_at":               now,
+		"sandbox_state":                  "running",
+		"runtime_last_progress_type":     "",
+		"runtime_last_progress_strength": "",
+		"runtime_extension_count":        0,
+		"runtime_extension_seconds":      0,
+		"runtime_stop_reason":            "",
+		"checkpoint_kind":                "",
+		"checkpoint_capability":          "",
+		"checkpoint_size_bytes":          int64(0),
+		"recovery_state":                 "",
+		"recovery_attempt_count":         0,
+		"pr_creation_state":              "idle",
+		"pr_creation_error":              (*string)(nil),
+		"pr_push_state":                  "idle",
+		"pr_push_error":                  (*string)(nil),
+		"linear_private":                 false,
+		"linear_state_sync_disabled":     false,
+		"linear_identifier_hint":         (*string)(nil),
+		"linear_prepare_state":           string(models.LinearPrepareStateNone),
+		"deleted_at":                     nil,
+		"git_identity_source":            nil,
+		"git_identity_user_id":           nil,
+		"created_at":                     now,
+	}
+	row := make([]any, len(sessionTestCols))
+	for i, col := range sessionTestCols {
+		row[i] = byColumn[col]
+	}
+	return row
 }
 
 func newTestManager(mock pgxmock.PgxPoolIface, provider PreviewCapableProvider) *Manager {
@@ -2675,4 +2676,155 @@ func TestManager_HMRWatcherGetter(t *testing.T) {
 	watcher := &HMRWatcher{}
 	manager.hmrWatcher = watcher
 	require.Equal(t, watcher, manager.HMRWatcher(), "HMRWatcher should return the configured watcher")
+}
+
+// =============================================================================
+// managerServiceObserver tests
+//
+// The observer streams per-service Ready/Failed transitions into the DB while
+// StartPreview is still running, so the frontend's startup checklist sees
+// progress live. These tests exercise both methods including the PID-write
+// branch, the failure-path tail handling, and the warn-and-continue paths
+// when DB writes themselves fail.
+// =============================================================================
+
+func TestManagerServiceObserver_OnServiceReady_WithPID(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	mgr := newTestManager(mock, &mockProvider{})
+	orgID := uuid.New()
+	previewID := uuid.New()
+	obs := mgr.newServiceObserver(orgID, previewID).(*managerServiceObserver)
+
+	mock.ExpectExec("UPDATE preview_services SET status").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectExec("UPDATE preview_services SET pid").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	obs.OnServiceReady("web", 3000, 12345)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestManagerServiceObserver_OnServiceReady_NoPID(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	mgr := newTestManager(mock, &mockProvider{})
+	obs := mgr.newServiceObserver(uuid.New(), uuid.New()).(*managerServiceObserver)
+
+	// pid=0 must skip the second exec — the readiness probe runs before the
+	// PID-detection goroutine has had a chance to populate ss.pid for some
+	// services, and we don't want to clobber the column with 0.
+	mock.ExpectExec("UPDATE preview_services SET status").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	obs.OnServiceReady("web", 3000, 0)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestManagerServiceObserver_OnServiceReady_DBErrorsLogged(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	mgr := newTestManager(mock, &mockProvider{})
+	obs := mgr.newServiceObserver(uuid.New(), uuid.New()).(*managerServiceObserver)
+
+	mock.ExpectExec("UPDATE preview_services SET status").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnError(fmt.Errorf("status update boom"))
+	mock.ExpectExec("UPDATE preview_services SET pid").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnError(fmt.Errorf("pid update boom"))
+
+	require.NotPanics(t, func() { obs.OnServiceReady("web", 3000, 99) })
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestManagerServiceObserver_OnServiceFailed_WithTail(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	mgr := newTestManager(mock, &mockProvider{})
+	orgID := uuid.New()
+	previewID := uuid.New()
+	obs := mgr.newServiceObserver(orgID, previewID).(*managerServiceObserver)
+
+	mock.ExpectExec("UPDATE preview_services SET status").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	logID := uuid.New()
+	mock.ExpectQuery("INSERT INTO preview_logs").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "preview_instance_id", "org_id", "level", "step", "message", "metadata", "created_at",
+		}).AddRow(logID, previewID, orgID, "error", "start", "msg", json.RawMessage(`null`), time.Now()))
+
+	tail := []string{"line one", "line two: permission denied"}
+	obs.OnServiceFailed("server", "exited with code 126", tail)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestManagerServiceObserver_OnServiceFailed_NoTail(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	mgr := newTestManager(mock, &mockProvider{})
+	orgID := uuid.New()
+	previewID := uuid.New()
+	obs := mgr.newServiceObserver(orgID, previewID).(*managerServiceObserver)
+
+	mock.ExpectExec("UPDATE preview_services SET status").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	logID := uuid.New()
+	mock.ExpectQuery("INSERT INTO preview_logs").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "preview_instance_id", "org_id", "level", "step", "message", "metadata", "created_at",
+		}).AddRow(logID, previewID, orgID, "error", "start", "msg", json.RawMessage(`null`), time.Now()))
+
+	obs.OnServiceFailed("web", "boom", nil)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestManagerServiceObserver_OnServiceFailed_DBErrorsLogged(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	mgr := newTestManager(mock, &mockProvider{})
+	obs := mgr.newServiceObserver(uuid.New(), uuid.New()).(*managerServiceObserver)
+
+	// Both DB writes fail; the observer must log and return without panicking
+	// so a flaky DB doesn't crash the worker mid-launch.
+	mock.ExpectExec("UPDATE preview_services SET status").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnError(fmt.Errorf("status boom"))
+	mock.ExpectQuery("INSERT INTO preview_logs").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnError(fmt.Errorf("log boom"))
+
+	require.NotPanics(t, func() { obs.OnServiceFailed("web", "boom", []string{"line"}) })
+	require.NoError(t, mock.ExpectationsWereMet())
 }
