@@ -688,6 +688,7 @@ function ChangesTab({
   passRange,
   onPassRangeChange,
   emptyStatusText,
+  isMobile,
 }: {
   filteredFiles: DiffFile[];
   activeFileIndex: number;
@@ -699,6 +700,7 @@ function ChangesTab({
   passRange: PassRange | null;
   onPassRangeChange: (range: PassRange | null) => void;
   emptyStatusText: string;
+  isMobile: boolean;
 }) {
   const hasDiff = filteredFiles.length > 0;
 
@@ -734,23 +736,23 @@ function ChangesTab({
       {/* Main content: file tree or empty state */}
       {hasDiff ? (
         <div className="flex flex-col flex-1 min-h-0">
-          {/* Review all button */}
-          <div className="px-4 py-3">
-            <button
-              onClick={() => onOpenReview()}
-              className="w-full flex items-center justify-center gap-2 px-3 py-2 rounded-md border border-border bg-background text-xs font-medium text-foreground hover:bg-muted/50 transition-colors"
-            >
-              <FileCode2 className="h-3.5 w-3.5" />
-              Review {filteredFiles.length} {filteredFiles.length === 1 ? "file" : "files"}
-            </button>
-          </div>
-
-          {/* File tree — always visible, it's the sidebar's purpose */}
+          {!isMobile ? (
+            <div className="px-4 py-3">
+              <button
+                onClick={() => onOpenReview()}
+                className="w-full flex items-center justify-center gap-2 px-3 py-2 rounded-md border border-border bg-background text-xs font-medium text-foreground hover:bg-muted/50 transition-colors"
+              >
+                <FileCode2 className="h-3.5 w-3.5" />
+                Review {filteredFiles.length} {filteredFiles.length === 1 ? "file" : "files"}
+              </button>
+            </div>
+          ) : null}
           <div className="flex-1 overflow-hidden">
             <FileTree
               files={filteredFiles}
               activeFileIndex={activeFileIndex}
               onFileSelect={handleFileClick}
+              variant={isMobile ? "sheet" : "sidebar"}
             />
           </div>
         </div>
@@ -2125,6 +2127,7 @@ export function SessionDetailContent({ id }: { id: string }) {
   // default open while the mobile sheet defaults closed (no SSR-unsafe
   // matchMedia needed).
   const [mobileDetailOpen, setMobileDetailOpen] = useState(false);
+  const [mobileReviewComposerOpen, setMobileReviewComposerOpen] = useState(false);
   const [detailWidth, setDetailWidth] = useState(DEFAULT_DETAIL);
   const [activeFileIndex, setActiveFileIndex] = useState(0);
   const [isEditingTitle, setIsEditingTitle] = useState(false);
@@ -2971,6 +2974,13 @@ export function SessionDetailContent({ id }: { id: string }) {
     session?.pr_creation_state,
     showValidationTab,
   ]);
+  const isDedicatedMobileReview = centerMode === "review" && isMobileReviewViewport;
+
+  useEffect(() => {
+    if (!isDedicatedMobileReview) {
+      setMobileReviewComposerOpen(false);
+    }
+  }, [isDedicatedMobileReview]);
 
   if (isLoading) {
     return (
@@ -3135,7 +3145,6 @@ export function SessionDetailContent({ id }: { id: string }) {
     : showDetailPanel
       ? "Hide details"
       : "Show details";
-
   // Right-panel content. Rendered inline on desktop and inside a bottom sheet
   // on mobile — the same JSX in both places so tab state stays consistent.
   const panelTabsEl = (
@@ -3243,6 +3252,7 @@ export function SessionDetailContent({ id }: { id: string }) {
               ? "Changes will appear here as the agent modifies files."
               : "This session did not produce any file changes."
           }
+          isMobile={isMobileReviewViewport}
         />
       </TabsContent>
       <TabsContent value="overview" className="flex-1 overflow-y-auto scrollbar-hide p-4">
@@ -3332,7 +3342,7 @@ export function SessionDetailContent({ id }: { id: string }) {
     <div className="flex h-full">
       {/* Center area: chat or review diff view */}
       <div className="flex-1 min-w-0 flex flex-col">
-        {/* Session header bar */}
+        {!isDedicatedMobileReview ? (
         <div className="border-b border-border px-4 py-3 bg-background flex items-center justify-between shrink-0">
           <div className="min-w-0 flex-1 flex items-center gap-2">
             <MobileBackButton to="/sessions" label="Back to sessions" />
@@ -3429,7 +3439,9 @@ export function SessionDetailContent({ id }: { id: string }) {
             <PanelBottomOpen className="h-5 w-5" />
           </Button>
         </div>
+        ) : null}
 
+        {!isDedicatedMobileReview ? (
         <AgentThreadTabs
           threads={threads}
           activeThreadId={activeThread?.id ?? null}
@@ -3441,6 +3453,7 @@ export function SessionDetailContent({ id }: { id: string }) {
             setAddThreadOpen(true);
           }}
         />
+        ) : null}
 
         {/* Center content — either chat or diff review */}
         <div className="flex-1 min-h-0 relative">
@@ -3473,6 +3486,7 @@ export function SessionDetailContent({ id }: { id: string }) {
                   onBack={exitReview}
                   isMobile={isMobileReviewViewport}
                   onOpenFileList={openMobileFilesList}
+                  onOpenComposer={session.agent_type !== "pm_agent" ? () => setMobileReviewComposerOpen(true) : undefined}
                   commentsByLine={commentsByLine}
                   activeCommentLine={activeCommentLine}
                   onAddComment={handleAddComment}
@@ -3488,7 +3502,7 @@ export function SessionDetailContent({ id }: { id: string }) {
           )}
         </div>
 
-        {session.agent_type !== "pm_agent" && (
+        {session.agent_type !== "pm_agent" && !isDedicatedMobileReview && (
           <>
             {composerIsSnapshotExpired && (
               <div className="flex items-center gap-2 px-4 py-2.5 text-xs border-t bg-amber-50 dark:bg-amber-950/20 border-amber-200 dark:border-amber-800/40 text-amber-800 dark:text-amber-300">
@@ -3543,7 +3557,7 @@ export function SessionDetailContent({ id }: { id: string }) {
           </>
         )}
 
-        {/* Session footer bar */}
+        {!isDedicatedMobileReview ? (
         <SessionFooter
           status={session.status}
           currentTurn={session.current_turn}
@@ -3552,6 +3566,7 @@ export function SessionDetailContent({ id }: { id: string }) {
           openCommentCount={footerOpenCommentCount}
           onCommentsClick={centerMode === "review" ? undefined : () => openReview()}
         />
+        ) : null}
       </div>
 
       {/* Detail panel — inline on desktop, hidden on mobile (rendered as a
@@ -3583,6 +3598,71 @@ export function SessionDetailContent({ id }: { id: string }) {
           {panelTabsEl}
         </SheetContent>
       </Sheet>
+      {session.agent_type !== "pm_agent" ? (
+        <Sheet open={mobileReviewComposerOpen} onOpenChange={setMobileReviewComposerOpen}>
+          <SheetContent
+            side="bottom"
+            className="max-h-[85vh] overflow-y-auto rounded-t-2xl p-0"
+          >
+            <SheetHeader className="border-b border-border px-4 py-4 text-left">
+              <SheetTitle>Message agent</SheetTitle>
+              <SheetDescription>
+                Send follow-up guidance without leaving the mobile diff reader.
+              </SheetDescription>
+            </SheetHeader>
+            {composerIsSnapshotExpired ? (
+              <div className="flex items-center gap-2 px-4 py-3 text-xs border-b bg-amber-50 dark:bg-amber-950/20 border-amber-200 dark:border-amber-800/40 text-amber-800 dark:text-amber-300">
+                <Clock className="h-3.5 w-3.5 shrink-0" />
+                <span>
+                  This session&apos;s environment has expired. Sessions can be continued for up to 30 days after their last activity. To make further changes, please start a new session.
+                </span>
+              </div>
+            ) : null}
+            {composerLacksHeadlessResume && composerCanSendMessage && !composerIsSnapshotExpired ? (
+              <div className="flex items-center gap-2 px-4 py-3 text-xs border-b bg-sky-50 dark:bg-sky-950/20 border-sky-200 dark:border-sky-800/40 text-sky-800 dark:text-sky-300">
+                <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+                <span>
+                  {AGENTS_BY_KEY[session.agent_type]?.label ?? session.agent_type} doesn&apos;t support headless conversation resume. Follow-up messages run against the restored filesystem, but earlier chat context is not replayed — include anything you need the agent to remember.
+                </span>
+              </div>
+            ) : null}
+            <SessionComposer
+              message={composerMessage}
+              onMessageChange={setComposerMessage}
+              planMode={composerPlanMode}
+              onPlanModeChange={setComposerPlanMode}
+              selectedModel={composerSelectedModel}
+              onSelectedModelChange={setComposerSelectedModel}
+              attachments={composerAttachments}
+              isUploading={composerIsUploading}
+              onUpload={handleComposerUpload}
+              onRemoveAttachment={handleRemoveComposerAttachment}
+              openComments={attachedReviewComments}
+              availableModels={composerAvailableModels}
+              canSendMessage={composerCanSendMessage}
+              isRunning={composerIsRunning}
+              isSnapshotExpired={composerIsSnapshotExpired}
+              isClaudeCode={composerIsClaudeCode}
+              sendPending={sendMutation.isPending}
+              sendError={sendMutation.error}
+              cancelPending={cancelMutation.isPending}
+              uploadError={composerUploadError}
+              onCancelSession={() => cancelMutation.mutate()}
+              onSend={() => sendMutation.mutate({})}
+              textareaRef={composerTextareaRef}
+              uploadInputRef={composerUploadInputRef}
+              references={composerReferences}
+              onReferencesChange={setComposerReferences}
+              commands={composerCommands}
+              onCommandsChange={setComposerCommands}
+              repositoryId={session.repository_id}
+              branch={session.target_branch}
+              agentType={composerAgentType}
+              targetLabel={activeThread ? activeThreadLabel : undefined}
+            />
+          </SheetContent>
+        </Sheet>
+      ) : null}
       <Dialog open={addThreadOpen} onOpenChange={setAddThreadOpen}>
         <DialogContent>
           <DialogHeader>

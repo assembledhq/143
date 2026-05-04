@@ -1,8 +1,9 @@
 "use client";
 
 import { useState, useRef, useEffect } from "react";
-import { ArrowLeft, ChevronLeft, ChevronRight, Columns2, FolderSearch, Rows3, Search, X, Files } from "lucide-react";
+import { ArrowLeft, ChevronLeft, ChevronRight, Columns2, FolderSearch, Rows3, Search, X, Files, MessageSquare } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
 import type { ViewMode } from "./review-toolbar";
 
@@ -21,6 +22,8 @@ interface DiffToolbarProps {
   onNextFile?: () => void;
   canGoPrev?: boolean;
   canGoNext?: boolean;
+  mobileChromeCollapsed?: boolean;
+  onOpenComposer?: () => void;
 }
 
 export function DiffToolbar({
@@ -38,6 +41,8 @@ export function DiffToolbar({
   onNextFile,
   canGoPrev = false,
   canGoNext = false,
+  mobileChromeCollapsed = false,
+  onOpenComposer,
 }: DiffToolbarProps) {
   const [showSearch, setShowSearch] = useState(false);
   const searchInputRef = useRef<HTMLInputElement>(null);
@@ -50,70 +55,63 @@ export function DiffToolbar({
 
   if (isMobile) {
     return (
-      <div className="flex flex-col border-b border-border bg-background shrink-0">
-        <div className="flex items-start gap-2 px-3 py-2">
+      <div
+        className={cn(
+          "sticky top-0 z-20 shrink-0 border-b border-border/70 bg-background/95 backdrop-blur transition-all duration-200",
+          mobileChromeCollapsed && !showSearch && "shadow-sm"
+        )}
+      >
+        <div className="flex items-center gap-1.5 px-2 py-2">
           <Button
             variant="ghost"
             size="sm"
-            className="h-8 shrink-0 gap-1.5 px-2 text-xs text-muted-foreground hover:text-foreground"
+            className="h-8 w-8 shrink-0 px-0 text-muted-foreground hover:text-foreground"
             onClick={onBack}
+            aria-label="Back to conversation"
           >
             <ArrowLeft className="h-3.5 w-3.5" />
-            Back
           </Button>
           <div className="min-w-0 flex-1">
             <div className="truncate font-mono text-xs font-medium text-foreground">
               {filePath || "Changed file"}
             </div>
             {filePositionLabel ? (
-              <div className="text-xs text-muted-foreground">
+              <div
+                className={cn(
+                  "text-xs text-muted-foreground transition-all duration-200",
+                  mobileChromeCollapsed && "max-h-0 overflow-hidden opacity-0"
+                )}
+              >
                 {filePositionLabel}
               </div>
             ) : null}
           </div>
-          {onOpenFileList ? (
+          <div className="ml-auto flex items-center gap-0.5">
             <Button
-              variant="outline"
+              variant="ghost"
               size="sm"
-              className="h-8 shrink-0 gap-1.5 px-2 text-xs"
-              onClick={onOpenFileList}
-              aria-label="Open files list"
+              className="h-8 w-8 shrink-0 px-0"
+              onClick={onPrevFile}
+              disabled={!canGoPrev}
+              aria-label="Previous file"
             >
-              <Files className="h-3.5 w-3.5" />
-              Files
+              <ChevronLeft className="h-3.5 w-3.5" />
             </Button>
-          ) : null}
-        </div>
-
-        <div className="flex items-center gap-1 border-t border-border/50 px-3 py-2">
-          <Button
-            variant="ghost"
-            size="sm"
-            className="h-8 gap-1 px-2 text-xs"
-            onClick={onPrevFile}
-            disabled={!canGoPrev}
-            aria-label="Previous file"
-          >
-            <ChevronLeft className="h-3.5 w-3.5" />
-            Prev
-          </Button>
-          <Button
-            variant="ghost"
-            size="sm"
-            className="h-8 gap-1 px-2 text-xs"
-            onClick={onNextFile}
-            disabled={!canGoNext}
-            aria-label="Next file"
-          >
-            Next
-            <ChevronRight className="h-3.5 w-3.5" />
-          </Button>
-          <div className="ml-auto flex items-center gap-1">
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-8 w-8 shrink-0 px-0"
+              onClick={onNextFile}
+              disabled={!canGoNext}
+              aria-label="Next file"
+            >
+              <ChevronRight className="h-3.5 w-3.5" />
+            </Button>
             {onSearchChange ? (
               <Button
                 variant="ghost"
                 size="sm"
-                className={cn("h-8 w-8 p-0", showSearch && "text-primary")}
+                className={cn("h-8 w-8 shrink-0 px-0", showSearch && "text-primary")}
                 onClick={() => {
                   setShowSearch((v) => !v);
                   if (showSearch) {
@@ -121,31 +119,53 @@ export function DiffToolbar({
                   }
                 }}
                 title="Search in diff"
+                aria-label="Search in diff"
               >
                 <Search className="h-3.5 w-3.5" />
+              </Button>
+            ) : null}
+            {onOpenFileList ? (
+              <Button
+                variant="ghost"
+                size="sm"
+                className="h-8 w-8 shrink-0 px-0"
+                onClick={onOpenFileList}
+                aria-label="Open files list"
+              >
+                <Files className="h-3.5 w-3.5" />
+              </Button>
+            ) : null}
+            {onOpenComposer ? (
+              <Button
+                variant="ghost"
+                size="sm"
+                className="h-8 w-8 shrink-0 px-0"
+                onClick={onOpenComposer}
+                aria-label="Message agent"
+              >
+                <MessageSquare className="h-3.5 w-3.5" />
               </Button>
             ) : null}
             {onBrowseRepo ? (
               <Button
                 variant="ghost"
                 size="sm"
-                className="h-8 gap-1 px-2 text-xs"
+                className="h-8 w-8 shrink-0 px-0"
                 onClick={onBrowseRepo}
                 title="Browse repository"
+                aria-label="Browse repository"
               >
                 <FolderSearch className="h-3.5 w-3.5" />
-                Browse
               </Button>
             ) : null}
           </div>
         </div>
 
         {showSearch && onSearchChange ? (
-          <div className="flex items-center gap-2 border-t border-border/50 bg-muted/20 px-3 py-1.5">
+          <div className="flex items-center gap-2 border-t border-border/50 bg-muted/20 px-2 py-2">
             <Search className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-            <input
+            <Input
               ref={searchInputRef}
-              type="text"
               value={searchQuery ?? ""}
               onChange={(e) => onSearchChange(e.target.value)}
               onKeyDown={(e) => {
@@ -155,15 +175,17 @@ export function DiffToolbar({
                 }
               }}
               placeholder="Search in diff..."
-              className="flex-1 bg-transparent text-xs text-foreground placeholder:text-muted-foreground/60 outline-none"
+              className="h-8 border-border/60 bg-background text-xs placeholder:text-muted-foreground/60"
             />
             {searchQuery ? (
-              <button
+              <Button
+                variant="ghost"
+                size="sm"
                 onClick={() => onSearchChange("")}
-                className="text-muted-foreground hover:text-foreground"
+                className="h-8 w-8 px-0 text-muted-foreground hover:text-foreground"
               >
                 <X className="h-3 w-3" />
-              </button>
+              </Button>
             ) : null}
           </div>
         ) : null}
@@ -249,9 +271,8 @@ export function DiffToolbar({
       {showSearch && onSearchChange && (
         <div className="flex items-center gap-2 px-3 py-1.5 border-t border-border/50 bg-muted/20">
           <Search className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
-          <input
+          <Input
             ref={searchInputRef}
-            type="text"
             value={searchQuery ?? ""}
             onChange={(e) => onSearchChange(e.target.value)}
             onKeyDown={(e) => {
@@ -261,7 +282,7 @@ export function DiffToolbar({
               }
             }}
             placeholder="Search in diff..."
-            className="flex-1 bg-transparent text-xs text-foreground placeholder:text-muted-foreground/60 outline-none"
+            className="h-8 flex-1 border-border/60 bg-background text-xs placeholder:text-muted-foreground/60"
           />
           {searchQuery && (
             <button

@@ -103,4 +103,36 @@ describe("DiffToolbar", () => {
     expect(screen.getByRole("button", { name: "Open files list" })).toBeInTheDocument();
     expect(screen.queryByText("Split")).not.toBeInTheDocument();
   });
+
+  it("keeps mobile controls icon-first and does not render desktop-style text actions", () => {
+    renderToolbar({
+      isMobile: true,
+      filePath: "src/mobile.ts",
+      filePositionLabel: "2 of 5",
+      onOpenFileList: vi.fn(),
+      onPrevFile: vi.fn(),
+      onNextFile: vi.fn(),
+      canGoPrev: true,
+      canGoNext: true,
+    });
+
+    expect(screen.queryByText("Back to conversation")).not.toBeInTheDocument();
+    expect(screen.queryByText("Unified")).not.toBeInTheDocument();
+    expect(screen.queryByText("Split")).not.toBeInTheDocument();
+  });
+
+  it("does not render a dead mobile search control when search is unavailable", () => {
+    renderToolbar({
+      isMobile: true,
+      filePath: "src/mobile.ts",
+      filePositionLabel: "2 of 5",
+      onOpenFileList: vi.fn(),
+      onPrevFile: vi.fn(),
+      onNextFile: vi.fn(),
+      canGoPrev: true,
+      canGoNext: true,
+    });
+
+    expect(screen.queryByRole("button", { name: "Search in diff" })).not.toBeInTheDocument();
+  });
 });
