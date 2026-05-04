@@ -28,8 +28,12 @@ export GOCACHE
 mkdir -p "$GOCACHE"
 
 echo '[143-preview] building binaries...'
-go build -o /tmp/143-migrate ./cmd/migrate
-go build -o /tmp/143-server ./cmd/server
+# Merge stderr into stdout so `go build` compile errors are captured by the
+# preview executor's output tail and surfaced in the launch error. Without
+# this, the executor discards stderr (see docker_preview.go) and the user
+# only sees the "building binaries..." line followed by "exited with code 1".
+go build -o /tmp/143-migrate ./cmd/migrate 2>&1
+go build -o /tmp/143-server ./cmd/server 2>&1
 
 echo '[143-preview] running migrations...'
 /tmp/143-migrate up
