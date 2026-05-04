@@ -382,6 +382,26 @@ describe("ManualSessionCreatePageContent", () => {
     expect(await screen.findByRole("button", { name: "Preview uploaded-shot.png" })).toBeInTheDocument();
   });
 
+  it("uploads an image pasted into the prompt and shows it in the attachment strip", async () => {
+    renderWithProviders(<ManualSessionCreatePageContent />);
+
+    const textarea = await screen.findByPlaceholderText("Tell the agent what to do...");
+    const file = new File(["image-bytes"], "pasted-shot.png", { type: "image/png" });
+
+    fireEvent.paste(textarea, {
+      clipboardData: {
+        files: [file],
+        items: [{ kind: "file", type: "image/png", getAsFile: () => file }],
+        types: ["Files"],
+      },
+    });
+
+    await waitFor(() => {
+      expect(mocks.uploadMock).toHaveBeenCalledWith(file);
+    });
+    expect(await screen.findByRole("button", { name: "Preview uploaded-shot.png" })).toBeInTheDocument();
+  });
+
   it("shows slash command suggestions when the user types a slash trigger", async () => {
     const user = userEvent.setup();
     renderWithProviders(<ManualSessionCreatePageContent />);
@@ -435,6 +455,26 @@ describe("ManualSessionCreatePageContent", () => {
 
     await waitFor(() => {
       expect(screen.getByText("File too large (max 10 MB): too-large.png")).toBeInTheDocument();
+    });
+    expect(mocks.uploadMock).not.toHaveBeenCalled();
+  });
+
+  it("shows an inline validation error when a pasted file exceeds the size limit", async () => {
+    renderWithProviders(<ManualSessionCreatePageContent />);
+
+    const oversizedFile = new File([new Uint8Array(10 * 1024 * 1024 + 1)], "too-large-paste.png", { type: "image/png" });
+    const textarea = await screen.findByPlaceholderText("Tell the agent what to do...");
+
+    fireEvent.paste(textarea, {
+      clipboardData: {
+        files: [oversizedFile],
+        items: [{ kind: "file", type: "image/png", getAsFile: () => oversizedFile }],
+        types: ["Files"],
+      },
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText("File too large (max 10 MB): too-large-paste.png")).toBeInTheDocument();
     });
     expect(mocks.uploadMock).not.toHaveBeenCalled();
   });

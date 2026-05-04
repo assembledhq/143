@@ -38,6 +38,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { LinearIcon } from "@/components/linear-icon";
 import { looksLikeLinearRef } from "@/lib/linear-refs";
+import { getClipboardFiles } from "@/lib/clipboard-files";
 import { notify as toast } from "@/lib/notify";
 import { Badge } from "@/components/ui/badge";
 import { MarkdownContent } from "@/components/markdown";
@@ -787,6 +788,7 @@ function SessionComposer({
   attachments,
   isUploading,
   onUpload,
+  onPasteFiles,
   onRemoveAttachment,
   openComments,
   availableModels,
@@ -820,6 +822,7 @@ function SessionComposer({
   attachments: string[];
   isUploading: boolean;
   onUpload: (event: React.ChangeEvent<HTMLInputElement>) => void;
+  onPasteFiles: (files: File[]) => Promise<void>;
   onRemoveAttachment: (url: string) => void;
   openComments: SessionReviewComment[];
   availableModels: readonly string[];
@@ -1128,6 +1131,21 @@ function SessionComposer({
     }
   }
 
+  async function handlePaste(event: React.ClipboardEvent<HTMLTextAreaElement>) {
+    const files = getClipboardFiles(event.clipboardData);
+    if (files.length === 0) {
+      return;
+    }
+
+    event.preventDefault();
+    await onPasteFiles(files);
+    requestAnimationFrame(() => {
+      const el = textareaRef.current;
+      if (!el) return;
+      el.focus();
+    });
+  }
+
   const firstError = uploadError || sendError;
   const errorMessage = typeof firstError === "string"
     ? firstError
@@ -1272,6 +1290,7 @@ function SessionComposer({
             ref={textareaRef}
             value={message}
             onChange={(e) => handleMessageChange(e.target.value, e.target.selectionStart ?? e.target.value.length)}
+            onPaste={handlePaste}
             onKeyDown={handleKeyDown}
             onClick={(e) => setCaretPosition(e.currentTarget.selectionStart ?? message.length)}
             onKeyUp={(e) => setCaretPosition(e.currentTarget.selectionStart ?? message.length)}
@@ -2773,15 +2792,12 @@ export function SessionDetailContent({ id }: { id: string }) {
   const selectedNewThreadAgent = AGENTS_BY_KEY[newThreadAgentType] ?? AGENTS[0];
   const selectedNewThreadModels = selectedNewThreadAgent?.models ?? [];
 
-  async function handleComposerUpload(event: React.ChangeEvent<HTMLInputElement>) {
-    const fileList = event.target.files;
-    if (!fileList || fileList.length === 0) return;
+  async function uploadComposerFiles(files: File[]) {
+    if (files.length === 0) return;
 
-    const files = Array.from(fileList);
     const oversized = files.filter((file) => file.size > MAX_FILE_SIZE);
     if (oversized.length > 0) {
       setComposerUploadError(`File${oversized.length > 1 ? "s" : ""} too large (max 10 MB): ${oversized.map((file) => file.name).join(", ")}`);
-      event.target.value = "";
       return;
     }
 
@@ -2794,8 +2810,15 @@ export function SessionDetailContent({ id }: { id: string }) {
       setComposerUploadError(err instanceof Error ? err.message : "Upload failed");
     } finally {
       setComposerIsUploading(false);
-      event.target.value = "";
     }
+  }
+
+  async function handleComposerUpload(event: React.ChangeEvent<HTMLInputElement>) {
+    const fileList = event.target.files;
+    if (!fileList || fileList.length === 0) return;
+
+    await uploadComposerFiles(Array.from(fileList));
+    event.target.value = "";
   }
 
   const handleRemoveComposerAttachment = useCallback((url: string) => {
@@ -3530,6 +3553,7 @@ export function SessionDetailContent({ id }: { id: string }) {
               attachments={composerAttachments}
               isUploading={composerIsUploading}
               onUpload={handleComposerUpload}
+              onPasteFiles={uploadComposerFiles}
               onRemoveAttachment={handleRemoveComposerAttachment}
               openComments={attachedReviewComments}
               availableModels={composerAvailableModels}
@@ -3636,6 +3660,7 @@ export function SessionDetailContent({ id }: { id: string }) {
               attachments={composerAttachments}
               isUploading={composerIsUploading}
               onUpload={handleComposerUpload}
+              onPasteFiles={uploadComposerFiles}
               onRemoveAttachment={handleRemoveComposerAttachment}
               openComments={attachedReviewComments}
               availableModels={composerAvailableModels}
