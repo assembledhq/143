@@ -27,6 +27,7 @@ import (
 	"github.com/assembledhq/143/internal/crypto"
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/llm"
+	"github.com/assembledhq/143/internal/metrics"
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/observability"
 	"github.com/assembledhq/143/internal/services/agent"
@@ -206,6 +207,15 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	sessionHandler.SetIssueSnapshotStore(sessionIssueSnapshotStore)
 	sessionHandler.SetReviewCommentStore(sessionReviewCommentStore)
 
+	// Inbound-agent metrics. Constructed once and shared between the
+	// linear.Service (so HandleAgentMilestone records milestone emits)
+	// and the dispatcher (so webhook deliveries record). Failure here is
+	// non-fatal; nil-safe RecordX helpers degrade to no-ops.
+	linearAgentMetrics, err := metrics.NewLinearAgentMetrics()
+	if err != nil {
+		logger.Warn().Err(err).Msg("failed to register linear_agent metrics; continuing without dispatcher/writer metrics")
+	}
+
 	// Linear session-linking: detection, primary resolution + context
 	// snapshotting, attachment/comment writes, state-sync transitions —
 	// see design 62. Wired here so it's available to CreateManual; the
@@ -222,6 +232,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 		Orgs:         orgStore,
 		Jobs:         jobStore,
 		AppBaseURL:   cfg.FrontendURL,
+		AgentMetrics: linearAgentMetrics,
 	})
 	if sessionStreams != nil {
 		// Republish session status on every link change so the detail view
@@ -275,12 +286,15 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	// org_settings.linear_agent.enabled per-org so a single org can opt
 	// in even before the org-level default flips. ClientForOrg uses the
 	// existing linear.Service credential resolution so the agent path
-	// uses the same actor=app token the rest of the writes do.
+	// uses the same actor=app token the rest of the writes do. Metrics
+	// recorder is shared with linearService.HandleAgentMilestone so a
+	// single OTel meter sees both inbound dispatches and outbound emits.
 	linearAgentDispatcher := handlers.NewLinearAgentDispatcher(handlers.LinearAgentDispatcherConfig{
 		Logger:         logger,
 		AgentSessions:  linearService.AgentSessionStore(),
 		Activities:     linearService.AgentActivityStore(),
 		Jobs:           jobStore,
+		Metrics:        linearAgentMetrics,
 		FeatureEnabled: cfg.LinearAgentEnabled,
 		SettingsLoader: func(ctx context.Context, orgID uuid.UUID) (models.LinearAgentSettings, error) {
 			org, err := orgStore.GetByID(ctx, orgID)

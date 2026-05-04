@@ -33,17 +33,30 @@ import (
 type AgentActivityWriter struct {
 	client     Client
 	activities *db.LinearAgentActivityLogStore
+	metrics    AgentActivityMetricsRecorder
 	logger     zerolog.Logger
+}
+
+// AgentActivityMetricsRecorder is the narrow surface the writer needs to
+// record per-emit observability. The metrics package's
+// LinearAgentMetrics.RecordActivityEmitted method satisfies this; tests
+// can pass a stub. nil means "no metrics", honored by the writer.
+type AgentActivityMetricsRecorder interface {
+	RecordActivityEmitted(ctx context.Context, activityType string, skipped bool)
 }
 
 // NewAgentActivityWriter wires the writer. Pass a fully-resolved Client
 // (built with the org's actor=app token); the writer does not handle
 // token resolution itself — that lives one layer up so the same writer
 // instance can serve concurrent emits across orgs by varying the Client.
-func NewAgentActivityWriter(client Client, activities *db.LinearAgentActivityLogStore, logger zerolog.Logger) *AgentActivityWriter {
+//
+// metrics may be nil for tests / boot stages that haven't constructed
+// the metrics package; emits silently skip the record call in that case.
+func NewAgentActivityWriter(client Client, activities *db.LinearAgentActivityLogStore, metrics AgentActivityMetricsRecorder, logger zerolog.Logger) *AgentActivityWriter {
 	return &AgentActivityWriter{
 		client:     client,
 		activities: activities,
+		metrics:    metrics,
 		logger:     logger.With().Str("component", "linear_agent_activity_writer").Logger(),
 	}
 }
@@ -103,6 +116,7 @@ func (w *AgentActivityWriter) Emit(ctx context.Context, in EmitInput) (EmitResul
 		// duplicates. Operators investigating "why did my activity not
 		// appear" can check linear_activity_id IS NULL on the row to
 		// distinguish the two cases.
+		w.recordEmit(ctx, in.Activity.Type, true /*skipped*/)
 		return EmitResult{Skipped: true}, nil
 	}
 
@@ -127,6 +141,7 @@ func (w *AgentActivityWriter) Emit(ctx context.Context, in EmitInput) (EmitResul
 		return EmitResult{}, fmt.Errorf("agent activity create: %w", err)
 	}
 
+	w.recordEmit(ctx, in.Activity.Type, false /*skipped*/)
 	if completeErr := w.activities.Complete(ctx, in.OrgID, res.RowID, apiResult.ActivityID); completeErr != nil {
 		// Linear got the activity but we failed to record the id. Log
 		// loudly — replays will short-circuit (correct), but the missing
@@ -189,6 +204,15 @@ func (w *AgentActivityWriter) EmitOrDiscard(ctx context.Context, in EmitInput) (
 	return res, err
 }
 
+// recordEmit is the nil-safe wrapper around the metrics recorder.
+// Centralizes the nil check so callers don't have to repeat it.
+func (w *AgentActivityWriter) recordEmit(ctx context.Context, activityType models.LinearAgentActivityType, skipped bool) {
+	if w.metrics == nil {
+		return
+	}
+	w.metrics.RecordActivityEmitted(ctx, string(activityType), skipped)
+}
+
 // discardReservation deletes the in-flight reservation row for an
 // (agent_session, idem_key) pair when its linear_activity_id is still
 // NULL. Race-safe: a concurrent successful emit will have completed first,
@@ -205,9 +229,3 @@ func (w *AgentActivityWriter) discardReservation(ctx context.Context, orgID, age
 	}
 	return nil
 }
-
-// _ unused-import suppressor for models — we reference the package via
-// AgentMilestoneActivity.Type which lives in agent_state.go in the same
-// package. Touching the import prevents accidental dead-import on a
-// future refactor that drops the agent_state.go dependency.
-var _ = models.LinearAgentActivityThought

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strconv"
 
 	"github.com/assembledhq/143/internal/api/middleware"
 	"github.com/assembledhq/143/internal/db"
@@ -230,47 +231,57 @@ type AgentSessionDebugSummary struct {
 	LastEventReceivedAt   string                         `json:"last_event_received_at,omitempty"`
 }
 
-// ListSessions returns the most-recent (per state recency) agent sessions
-// for the org. Capped at the limit the operator passes via ?limit=N
-// (default 50, max 200).
+// ListSessions returns the most-recently-updated agent sessions for the
+// org. Capped at the limit the operator passes via ?limit=N (default 50,
+// max 200). Uses ListByOrg for an org-scoped indexed scan rather than
+// scanning the cross-org pending-recovery list.
 func (h *LinearAgentSettingsHandler) ListSessions(w http.ResponseWriter, r *http.Request) {
 	if h.agentSessions == nil {
 		writeError(w, r, http.StatusServiceUnavailable, "FEATURE_OFF", "agent feature not enabled in this deployment")
 		return
 	}
-	// The "list pending for recovery" store method is the cheapest existing
-	// surface here — it uses idx_linear_agent_sessions_org_state_recent.
-	// Phase 4 only needs the operator overview; a paginated full list is
-	// a future enhancement.
-	rows, err := h.agentSessions.ListPendingForRecovery(r.Context(), 0, 200)
+	orgID := middleware.OrgIDFromContext(r.Context())
+	limit := parseLimitParam(r, 50, 200)
+	rows, err := h.agentSessions.ListByOrg(r.Context(), orgID, limit)
 	if err != nil {
 		writeError(w, r, http.StatusInternalServerError, "LIST_FAILED", "failed to list agent sessions", err)
 		return
 	}
 	out := make([]AgentSessionDebugSummary, 0, len(rows))
-	orgID := middleware.OrgIDFromContext(r.Context())
-	for _, r := range rows {
-		if r.OrgID != orgID {
-			// ListPendingForRecovery is intentionally cross-org for the
-			// sweeper; filter here so an operator only ever sees their
-			// own org's sessions.
-			continue
-		}
+	for _, row := range rows {
 		summary := AgentSessionDebugSummary{
-			ID:                    r.ID,
-			LinearAgentSessionID:  r.LinearAgentSessionID,
-			LinearIssueIdentifier: r.LinearIssueIdentifier,
-			State:                 r.State,
-			SessionID:             r.SessionID,
-			CreatedAt:             r.CreatedAt.UTC().Format("2006-01-02T15:04:05Z"),
-			UpdatedAt:             r.UpdatedAt.UTC().Format("2006-01-02T15:04:05Z"),
+			ID:                    row.ID,
+			LinearAgentSessionID:  row.LinearAgentSessionID,
+			LinearIssueIdentifier: row.LinearIssueIdentifier,
+			State:                 row.State,
+			SessionID:             row.SessionID,
+			CreatedAt:             row.CreatedAt.UTC().Format("2006-01-02T15:04:05Z"),
+			UpdatedAt:             row.UpdatedAt.UTC().Format("2006-01-02T15:04:05Z"),
 		}
-		if r.LastEventReceivedAt != nil {
-			summary.LastEventReceivedAt = r.LastEventReceivedAt.UTC().Format("2006-01-02T15:04:05Z")
+		if row.LastEventReceivedAt != nil {
+			summary.LastEventReceivedAt = row.LastEventReceivedAt.UTC().Format("2006-01-02T15:04:05Z")
 		}
 		out = append(out, summary)
 	}
 	writeJSON(w, http.StatusOK, models.ListResponse[AgentSessionDebugSummary]{Data: out})
+}
+
+// parseLimitParam parses ?limit=N from the request, clamped to
+// [1, max]. Falls back to dflt when the param is absent or unparsable.
+// Centralized so future debug endpoints can share the same conventions.
+func parseLimitParam(r *http.Request, dflt, max int) int {
+	raw := r.URL.Query().Get("limit")
+	if raw == "" {
+		return dflt
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n <= 0 {
+		return dflt
+	}
+	if n > max {
+		return max
+	}
+	return n
 }
 
 // AgentSessionDebugDetail captures the full per-session debug view —
@@ -303,15 +314,17 @@ func (h *LinearAgentSettingsHandler) GetSession(w http.ResponseWriter, r *http.R
 		err error
 	)
 	if rowID, parseErr := uuid.Parse(idStr); parseErr == nil {
-		// Lookup-by-row-id isn't on the store yet; emulate via list +
-		// filter for now (small N — operator surface, not a hot path).
-		rows, listErr := h.agentSessions.ListPendingForRecovery(r.Context(), 0, 500)
+		// Lookup-by-row-id: scan a bounded org page and filter. Bounded
+		// because the operator surface only exposes recently-updated
+		// rows; older sessions are accessed by Linear AgentSessionID
+		// from logs, which routes through the second branch below.
+		rows, listErr := h.agentSessions.ListByOrg(r.Context(), orgID, 200)
 		if listErr != nil {
 			writeError(w, r, http.StatusInternalServerError, "GET_FAILED", "failed to load agent session", listErr)
 			return
 		}
 		for i := range rows {
-			if rows[i].ID == rowID && rows[i].OrgID == orgID {
+			if rows[i].ID == rowID {
 				row = &rows[i]
 				break
 			}

@@ -49,7 +49,12 @@ type AgentMilestoneActivity struct {
 // activity feed readable. Permanent surface (the durable attachment + the
 // rolling comment) carries the comprehensive log; activities are the
 // "what's happening right now" stream.
-func MilestoneActivity(event MilestoneEvent, prNumber int, sessionURL string) (AgentMilestoneActivity, bool) {
+//
+// The session URL is *not* threaded into the activity body — Linear renders
+// it via agentSessionUpdate.externalUrls (set by HandleAgentMilestone on
+// MilestonePROpened), which produces a clickable header chip rather than
+// inline text. Kept as a separate concern so milestone bodies stay terse.
+func MilestoneActivity(event MilestoneEvent, prNumber int) (AgentMilestoneActivity, bool) {
 	switch event {
 	case MilestoneLinked:
 		// Suppressed — the dispatcher already emitted a "Reading

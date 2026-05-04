@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"strings"
+	"time"
 
 	"github.com/assembledhq/143/internal/db"
+	"github.com/assembledhq/143/internal/metrics"
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/services/linear"
 	"github.com/google/uuid"
@@ -108,6 +110,11 @@ type LinearAgentDispatcher struct {
 	activities    *db.LinearAgentActivityLogStore
 	settingsLoader func(ctx context.Context, orgID uuid.UUID) (models.LinearAgentSettings, error)
 	clientForOrg  func(ctx context.Context, orgID uuid.UUID) (linear.Client, error)
+	// metrics records dispatch-side observability. Optional — nil falls
+	// back to no-op counters via the nil-safe RecordX helpers, so a boot
+	// stage that hasn't constructed the metrics package can still wire
+	// the dispatcher.
+	metrics *metrics.LinearAgentMetrics
 	// featureEnabled gates the entire path — when false, every Dispatch
 	// returns immediately without doing any work. Process-wide kill switch
 	// lifted from cfg.LinearAgentEnabled.
@@ -125,6 +132,7 @@ type LinearAgentDispatcherConfig struct {
 	Jobs           linearAgentJobEnqueuer
 	SettingsLoader func(ctx context.Context, orgID uuid.UUID) (models.LinearAgentSettings, error)
 	ClientForOrg   func(ctx context.Context, orgID uuid.UUID) (linear.Client, error)
+	Metrics        *metrics.LinearAgentMetrics
 	FeatureEnabled bool
 }
 
@@ -142,6 +150,7 @@ func NewLinearAgentDispatcher(cfg LinearAgentDispatcherConfig) *LinearAgentDispa
 		jobs:           cfg.Jobs,
 		settingsLoader: cfg.SettingsLoader,
 		clientForOrg:   cfg.ClientForOrg,
+		metrics:        cfg.Metrics,
 		featureEnabled: cfg.FeatureEnabled,
 	}
 }
@@ -169,10 +178,19 @@ type DispatchResult struct {
 // to a 200 OK with an explanatory status string in DispatchResult.Status.
 // The 5s Linear SLA for ack is much tighter than 200 vs 4xx semantic
 // fidelity; ack first, log loudly, work asynchronously.
-func (d *LinearAgentDispatcher) Dispatch(ctx context.Context, integration *models.Integration, eventType LinearAgentEventType, body []byte) DispatchResult {
+func (d *LinearAgentDispatcher) Dispatch(ctx context.Context, integration *models.Integration, eventType LinearAgentEventType, body []byte) (result DispatchResult) {
 	if d == nil {
 		return DispatchResult{Status: "feature_off"}
 	}
+	// Named return so the deferred metrics record sees the final outcome
+	// regardless of which branch returned it. action is the parsed
+	// envelope action; for outcomes recorded before we've parsed
+	// (feature_off / unsupported event_type), the empty string is the
+	// right cardinality-bounded label.
+	var action linearAgentEventAction
+	defer func() {
+		d.metrics.RecordEvent(ctx, string(eventType), string(action), result.Status)
+	}()
 	if !d.featureEnabled {
 		d.logger.Debug().
 			Str("integration_id", integration.ID.String()).
@@ -198,7 +216,7 @@ func (d *LinearAgentDispatcher) Dispatch(ctx context.Context, integration *model
 		return DispatchResult{Status: "ignored"}
 	}
 
-	action := linearAgentEventAction(env.Action)
+	action = linearAgentEventAction(env.Action)
 	if action != linearAgentActionCreated && action != linearAgentActionPrompted {
 		// Linear may add new actions in the future. Both `created` and
 		// `prompted` are handled below; anything else logs and skips.
@@ -275,7 +293,7 @@ func (d *LinearAgentDispatcher) Dispatch(ctx context.Context, integration *model
 		}
 	}
 
-	result := DispatchResult{
+	result = DispatchResult{
 		AgentSessionRowID: row.ID,
 		AgentSessionID:    row.LinearAgentSessionID,
 	}
@@ -285,12 +303,19 @@ func (d *LinearAgentDispatcher) Dispatch(ctx context.Context, integration *model
 	// need a "Reading…" thought for follow-ups.
 	if action == linearAgentActionCreated && d.emitter != nil {
 		bootstrap := linear.BootstrapActivity(env.Payload.AgentSession.Issue.Identifier)
+		bootstrapStart := time.Now()
 		emitRes, emitErr := d.emitter.Emit(ctx, linear.EmitInput{
 			OrgID:             integration.OrgID,
 			AgentSessionRowID: row.ID,
 			AgentSessionID:    row.LinearAgentSessionID,
 			Activity:          bootstrap,
 		})
+		// Latency includes the Reserve INSERT + the GraphQL emit. Tracked
+		// here (rather than inside the writer) because the dispatcher
+		// owns the 10s SLA contract and the latency budget is
+		// dispatcher-anchored.
+		d.metrics.RecordBootstrapLatency(ctx, float64(time.Since(bootstrapStart).Milliseconds()))
+		d.metrics.RecordActivityEmitted(ctx, string(bootstrap.Type), emitRes.Skipped)
 		if emitErr != nil {
 			d.logger.Warn().Err(emitErr).
 				Str("agent_session_id", row.LinearAgentSessionID).

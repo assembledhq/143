@@ -55,6 +55,10 @@ func (c *graphQLClient) FetchIssue(ctx context.Context, identifier string) (*Fet
 			priority
 			assignee { name }
 			team { id key name organization { urlKey } }
+			project { id }
+			labels(first: 50) {
+				nodes { name }
+			}
 			comments(first: 25) {
 				nodes { body user { name } createdAt }
 			}
@@ -88,6 +92,14 @@ func (c *graphQLClient) FetchIssue(ctx context.Context, identifier string) (*Fet
 						URLKey string `json:"urlKey"`
 					} `json:"organization"`
 				} `json:"team"`
+				Project *struct {
+					ID string `json:"id"`
+				} `json:"project"`
+				Labels struct {
+					Nodes []struct {
+						Name string `json:"name"`
+					} `json:"nodes"`
+				} `json:"labels"`
 				Comments struct {
 					Nodes []struct {
 						Body string `json:"body"`
@@ -133,6 +145,22 @@ func (c *graphQLClient) FetchIssue(ctx context.Context, identifier string) (*Fet
 			Source: a.SourceType,
 		})
 	}
+	// Stay nil when no labels are present so existing test expectations
+	// and JSON consumers see the same `omitempty` behavior the rest of
+	// FetchedIssue follows.
+	var labels []string
+	if len(issue.Labels.Nodes) > 0 {
+		labels = make([]string, 0, len(issue.Labels.Nodes))
+		for _, l := range issue.Labels.Nodes {
+			if l.Name != "" {
+				labels = append(labels, l.Name)
+			}
+		}
+	}
+	projectID := ""
+	if issue.Project != nil {
+		projectID = issue.Project.ID
+	}
 
 	return &FetchedIssue{
 		ID:            issue.ID,
@@ -149,6 +177,8 @@ func (c *graphQLClient) FetchIssue(ctx context.Context, identifier string) (*Fet
 		TeamKey:       issue.Team.Key,
 		TeamName:      issue.Team.Name,
 		WorkspaceSlug: issue.Team.Organization.URLKey,
+		ProjectID:     projectID,
+		Labels:        labels,
 		Comments:      comments,
 		Attachments:   attachments,
 	}, nil
