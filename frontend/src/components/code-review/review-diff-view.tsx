@@ -5,12 +5,14 @@ import { FileCode2 } from "lucide-react";
 import type { DiffFile } from "@/lib/diff-parser";
 import type { SessionReviewComment } from "@/lib/types";
 import type { CommentLineKey } from "@/hooks/use-review-comments";
+import { Sheet, SheetContent, SheetDescription, SheetTitle } from "@/components/ui/sheet";
 import { DiffToolbar } from "./diff-toolbar";
 import { DiffPane, type DiffPaneHandle } from "./diff-pane";
 import { RepoExplorer } from "./repo-explorer";
 import { KeyboardHelpOverlay } from "./keyboard-help-overlay";
 import { useDiffKeyboardNav } from "@/hooks/use-diff-keyboard-nav";
 import type { ViewMode } from "./review-toolbar";
+import { CommentInput } from "./comment-input";
 
 interface ReviewDiffViewProps {
   sessionId: string;
@@ -21,6 +23,7 @@ interface ReviewDiffViewProps {
   onBack: () => void;
   isMobile?: boolean;
   onOpenFileList?: () => void;
+  onOpenComposer?: () => void;
   commentsByLine: Map<CommentLineKey, SessionReviewComment[]>;
   activeCommentLine: {
     filePath: string;
@@ -55,12 +58,15 @@ export function ReviewDiffView({
   onDiffSearchChange,
   isMobile = false,
   onOpenFileList,
+  onOpenComposer,
 }: ReviewDiffViewProps) {
   const diffPaneRef = useRef<DiffPaneHandle>(null);
   const skipNextScrollToFileRef = useRef(false);
   const [showKeyboardHelp, setShowKeyboardHelp] = useState(false);
   const [explorerMode, setExplorerMode] = useState(false);
   const [explorerInitialPath, setExplorerInitialPath] = useState<string | undefined>(undefined);
+  const [mobileChromeCollapsed, setMobileChromeCollapsed] = useState(false);
+  const [editingComment, setEditingComment] = useState<SessionReviewComment | null>(null);
   const [viewMode, setViewMode] = useState<ViewMode>(() => {
     if (typeof window !== "undefined") {
       return (localStorage.getItem("diff-view-mode") as ViewMode) || "unified";
@@ -73,6 +79,11 @@ export function ReviewDiffView({
     files.length > 0 && activeFile
       ? `${activeFileIndex + 1} of ${files.length}`
       : "";
+  const activeCommentLabel = activeCommentLine
+    ? `${activeCommentLine.filePath}:${activeCommentLine.lineNumber}`
+    : editingComment
+      ? `${editingComment.file_path}:${editingComment.line_number}`
+      : null;
 
   // Escape key exits review mode (when not in an input, comment, or explorer).
   // Check e.defaultPrevented to avoid conflicts with KeyboardHelpOverlay's own
@@ -214,6 +225,26 @@ export function ReviewDiffView({
     enabled: activeCommentLine === null && !explorerMode,
   });
 
+  const effectiveViewMode: ViewMode = isMobile ? "unified" : viewMode;
+  const handleRequestEditComment = useCallback((comment: SessionReviewComment) => {
+    setEditingComment(comment);
+  }, []);
+  const handleScrollMetricsChange = useCallback(
+    ({ scrollTop, direction }: { scrollTop: number; direction: "up" | "down" | "idle" }) => {
+      if (!isMobile) return;
+      if (activeCommentLine || editingComment || showKeyboardHelp || scrollTop < 32) {
+        setMobileChromeCollapsed(false);
+        return;
+      }
+      if (direction === "down") {
+        setMobileChromeCollapsed(true);
+      } else if (direction === "up") {
+        setMobileChromeCollapsed(false);
+      }
+    },
+    [activeCommentLine, editingComment, isMobile, showKeyboardHelp]
+  );
+
   // Explorer mode takes over
   if (explorerMode) {
     return (
@@ -228,8 +259,6 @@ export function ReviewDiffView({
     );
   }
 
-  const effectiveViewMode: ViewMode = isMobile ? "unified" : viewMode;
-
   if (files.length === 0) {
     return (
       <div className="flex flex-col h-full">
@@ -238,6 +267,7 @@ export function ReviewDiffView({
           viewMode={effectiveViewMode}
           onViewModeChange={handleViewModeChange}
           isMobile={isMobile}
+          mobileChromeCollapsed={mobileChromeCollapsed}
         />
         <div className="flex-1 flex items-center justify-center py-12">
           <div className="text-center space-y-2 max-w-[280px]">
@@ -267,10 +297,12 @@ export function ReviewDiffView({
         filePath={activeFile?.newPath}
         filePositionLabel={filePositionLabel}
         onOpenFileList={isMobile ? onOpenFileList : undefined}
+        onOpenComposer={isMobile ? onOpenComposer : undefined}
         onPrevFile={isMobile ? handlePrevFile : undefined}
         onNextFile={isMobile ? handleNextFile : undefined}
         canGoPrev={isMobile && activeFileIndex > 0}
         canGoNext={isMobile && activeFileIndex < files.length - 1}
+        mobileChromeCollapsed={mobileChromeCollapsed}
       />
       <DiffPane
         ref={diffPaneRef}
@@ -279,6 +311,7 @@ export function ReviewDiffView({
         sessionId={sessionId}
         activeFileIndex={isMobile ? undefined : activeFileIndex}
         onActiveFileChange={isMobile ? undefined : handleVisibleFileChange}
+        onScrollMetricsChange={handleScrollMetricsChange}
         commentsByLine={commentsByLine}
         activeCommentLine={activeCommentLine}
         onAddComment={onAddComment}
@@ -288,7 +321,54 @@ export function ReviewDiffView({
         onDeleteComment={onDeleteComment}
         onBrowseFile={handleBrowseFile}
         resetScrollKey={isMobile ? activeFile?.newPath : undefined}
+        showInlineCommentComposer={!isMobile}
+        onRequestEditComment={isMobile ? handleRequestEditComment : undefined}
       />
+      {isMobile && (activeCommentLine || editingComment) ? (
+        <Sheet
+          open
+          onOpenChange={(open) => {
+            if (!open) {
+              if (editingComment) {
+                setEditingComment(null);
+              } else {
+                onCancelComment();
+              }
+            }
+          }}
+        >
+          <SheetContent side="bottom" className="rounded-t-2xl px-0 pb-0 pt-4">
+            <SheetTitle className="px-4 text-sm">
+              {editingComment ? "Edit review comment" : "Add review comment"}
+            </SheetTitle>
+            <SheetDescription className="px-4 pb-3 text-xs">
+              {activeCommentLabel ? `Comment on ${activeCommentLabel}` : "Comment on the selected diff line."}
+            </SheetDescription>
+            <div className="border-t border-border/60 bg-muted/10 px-3 py-3">
+              <CommentInput
+                className="mx-0"
+                initialValue={editingComment?.body ?? ""}
+                submitLabel={editingComment ? "Save" : "Add comment"}
+                onSubmit={(body) => {
+                  if (editingComment) {
+                    onUpdateComment(editingComment.id, { body });
+                    setEditingComment(null);
+                    return;
+                  }
+                  onSubmitComment(body);
+                }}
+                onCancel={() => {
+                  if (editingComment) {
+                    setEditingComment(null);
+                    return;
+                  }
+                  onCancelComment();
+                }}
+              />
+            </div>
+          </SheetContent>
+        </Sheet>
+      ) : null}
       <KeyboardHelpOverlay open={showKeyboardHelp} onClose={toggleShowHelp} />
     </div>
   );
