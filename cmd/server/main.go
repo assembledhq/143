@@ -991,6 +991,7 @@ func buildServices(
 		prService,
 		sandboxProvider,
 		snapshotStore,
+		sandboxAuthServer,
 		integrationStore,
 		userCredentialStore,
 		appUserAuthSvc,
@@ -1114,6 +1115,7 @@ func wireWorkerPRService(
 	prService *ghservice.PRService,
 	sandboxProvider agent.SandboxProvider,
 	snapshotStore storage.SnapshotStore,
+	sandboxAuthServer agent.SandboxAuthServer,
 	integrationStore *db.IntegrationStore,
 	userCredentialStore *db.UserCredentialStore,
 	appUserAuthSvc *ghservice.AppUserAuthService,
@@ -1126,6 +1128,7 @@ func wireWorkerPRService(
 		return
 	}
 	prService.SetSandboxPushDeps(sandboxProvider, snapshotStore)
+	prService.SetSandboxAuth(sandboxAuthServer)
 	prService.SetIntegrationStore(integrationStore)
 	prService.SetUserCredentialStore(userCredentialStore)
 	prService.SetAppUserAuth(appUserAuthSvc)
