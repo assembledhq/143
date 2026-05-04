@@ -261,6 +261,56 @@ export interface SessionThread {
   started_at?: string;
   completed_at?: string;
   created_at: string;
+  base_snapshot_key?: string;
+  cost_cents: number;
+  pending_message_count: number;
+  cancel_requested_at?: string;
+}
+
+export interface SessionThreadFileEvent {
+  id: number;
+  org_id: string;
+  session_id: string;
+  thread_id?: string;
+  turn: number;
+  path: string;
+  event_type: 'created' | 'modified' | 'deleted';
+  before_hash?: string;
+  after_hash?: string;
+  observed_at: string;
+}
+
+export interface ThreadSummary {
+  id: string;
+  label: string;
+  agent_type: string;
+  status: string;
+  current_turn: number;
+  result_summary?: string;
+  confidence_score?: number;
+  cost_cents: number;
+  started_at?: string;
+  last_activity_at?: string;
+  touched_paths?: string[];
+}
+
+export interface TouchedFileRoll {
+  path: string;
+  last_event_type: 'created' | 'modified' | 'deleted';
+  last_observed_at: string;
+  owner_thread_ids: string[];
+}
+
+export interface SessionSummary {
+  session_id: string;
+  generated_at: string;
+  active_count: number;
+  threads: ThreadSummary[];
+  touched_files: TouchedFileRoll[];
+}
+
+export interface ForkResult {
+  job_id: string;
 }
 
 export interface SessionDetail extends Session {

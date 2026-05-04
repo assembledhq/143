@@ -19,6 +19,7 @@ var sessionThreadTestColumns = []string{
 	"current_turn", "last_activity_at",
 	"confidence_score", "result_summary", "diff", "failure_explanation", "failure_category",
 	"started_at", "completed_at", "created_at",
+	"base_snapshot_key", "cost_cents", "pending_message_count", "cancel_requested_at",
 }
 
 func newSessionThreadRow(threadID, sessionID, orgID uuid.UUID, label string, now time.Time) []interface{} {
@@ -28,6 +29,7 @@ func newSessionThreadRow(threadID, sessionID, orgID uuid.UUID, label string, now
 		0, nil,
 		nil, nil, nil, nil, nil,
 		nil, nil, now,
+		nil, float64(0), 0, nil,
 	}
 }
 
@@ -366,14 +368,15 @@ func TestSessionThreadStore_ClaimIdleForSessionLocksSiblings(t *testing.T) {
 	row[11] = &now
 	row[17] = &now
 
-	// Pin the guard explicitly so a regression that drops the idle check or
-	// reverses the sibling check cannot pass: we need the eligible CTE to
-	// require target.status = 'idle' AND a NOT EXISTS over active siblings.
-	mock.ExpectQuery(`(?s)WITH locked_threads AS.*FOR UPDATE.*target\.status\s*=\s*'idle'.*NOT EXISTS.*sibling\.id\s*<>\s*@id.*sibling\.status IN\s*\(\s*'pending',\s*'running',\s*'awaiting_input'\s*\).*UPDATE session_threads\s+SET status = 'running'.*EXISTS\s*\(\s*SELECT 1 FROM eligible\s*\).*RETURNING`).
-		WithArgs(anyArgs(3)...).
+	// Pin the guard explicitly: the CTE locks every session_threads row,
+	// requires target.status = 'idle', counts active siblings, and admits
+	// only when the cap is not yet reached. A regression that drops the
+	// idle check or reverses the cap inequality must not pass.
+	mock.ExpectQuery(`(?s)WITH locked_threads AS.*FOR UPDATE.*target_idle.*status\s*=\s*'idle'.*running_count.*id\s*<>\s*@id.*'pending',\s*'running',\s*'awaiting_input'.*eligible.*running_count\.n\s*<\s*@max_running.*UPDATE session_threads\s+SET status = 'running'.*EXISTS\s*\(\s*SELECT 1 FROM eligible\s*\).*RETURNING`).
+		WithArgs(anyArgs(4)...).
 		WillReturnRows(pgxmock.NewRows(sessionThreadTestColumns).AddRow(row...))
 
-	thread, err := store.ClaimIdleForSession(context.Background(), orgID, sessionID, threadID)
+	thread, err := store.ClaimIdleForSession(context.Background(), orgID, sessionID, threadID, models.MaxRunningThreadsPerSession)
 	require.NoError(t, err, "ClaimIdleForSession should claim an eligible idle thread")
 	require.Equal(t, threadID, thread.ID, "ClaimIdleForSession should return the claimed thread")
 	require.Equal(t, models.ThreadStatusRunning, thread.Status, "ClaimIdleForSession should return the running status")

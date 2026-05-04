@@ -322,6 +322,8 @@ describe('SessionDetailPage', () => {
         status: 'idle',
         current_turn: 1,
         created_at: '2026-02-17T07:00:00Z',
+        cost_cents: 0,
+        pending_message_count: 0,
       },
       {
         id: 'thread-claude',
@@ -332,6 +334,8 @@ describe('SessionDetailPage', () => {
         status: 'running',
         current_turn: 1,
         created_at: '2026-02-17T07:01:00Z',
+        cost_cents: 0,
+        pending_message_count: 0,
       },
     ];
     const messagesByThread: Record<string, SessionMessage[]> = {
@@ -404,6 +408,8 @@ describe('SessionDetailPage', () => {
           status: 'idle',
           current_turn: 0,
           created_at: '2026-02-17T07:04:00Z',
+          cost_cents: 0,
+          pending_message_count: 0,
         };
         threads.push(thread);
         messagesByThread[thread.id] = [];
@@ -465,6 +471,8 @@ describe('SessionDetailPage', () => {
       status: 'running',
       current_turn: 1,
       created_at: '2026-02-17T07:00:00Z',
+      cost_cents: 0,
+      pending_message_count: 0,
     };
 
     server.use(

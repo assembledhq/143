@@ -44,7 +44,7 @@ func (m *mockThreadStore) ListBySession(ctx context.Context, orgID, sessionID uu
 	return nil, nil
 }
 
-func (m *mockThreadStore) ClaimIdleForSession(ctx context.Context, orgID, sessionID, threadID uuid.UUID) (models.SessionThread, error) {
+func (m *mockThreadStore) ClaimIdleForSession(ctx context.Context, orgID, sessionID, threadID uuid.UUID, _ int) (models.SessionThread, error) {
 	if m.claimIdleFn != nil {
 		return m.claimIdleFn(ctx, orgID, sessionID, threadID)
 	}
@@ -55,6 +55,14 @@ func (m *mockThreadStore) UpdateStatus(ctx context.Context, orgID, threadID uuid
 	if m.updateStatusFn != nil {
 		return m.updateStatusFn(ctx, orgID, threadID, status)
 	}
+	return nil
+}
+
+func (m *mockThreadStore) IncrementPendingMessages(ctx context.Context, orgID, threadID uuid.UUID) error {
+	return nil
+}
+
+func (m *mockThreadStore) MarkCancelRequested(ctx context.Context, orgID, threadID uuid.UUID) error {
 	return nil
 }
 
@@ -530,7 +538,7 @@ func TestService_SendMessage(t *testing.T) {
 			},
 		},
 		{
-			name: "rejects when parent session is already active",
+			name: "proceeds when parent session is already running due to sibling",
 			input: SendMessageInput{
 				SessionID: sessionID,
 				OrgID:     orgID,
@@ -538,31 +546,28 @@ func TestService_SendMessage(t *testing.T) {
 				Message:   "hi",
 			},
 			setupDeps: func(deps *testDeps) {
-				var revertedThread bool
 				deps.threadStore.claimIdleFn = func(_ context.Context, _, _, _ uuid.UUID) (models.SessionThread, error) {
 					return models.SessionThread{ID: threadID, SessionID: sessionID, OrgID: orgID, CurrentTurn: 1, Status: models.ThreadStatusRunning}, nil
 				}
+				// Phase 2: parent session ClaimIdle fails because a sibling
+				// tab already moved the session into running state. The
+				// service should treat this as a no-op and proceed instead
+				// of failing the user's send.
 				deps.sessionStore.claimIdleFn = func(_ context.Context, _, _ uuid.UUID) (models.Session, error) {
 					return models.Session{}, fmt.Errorf("session already running")
 				}
-				deps.threadStore.updateStatusFn = func(_ context.Context, _, _ uuid.UUID, status models.ThreadStatus) error {
-					require.Equal(t, models.ThreadStatusIdle, status, "SendMessage should release the thread when parent session claim fails")
-					revertedThread = true
-					return nil
+				deps.sessionStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.Session, error) {
+					return models.Session{ID: sessionID, OrgID: orgID, Status: string(models.SessionStatusRunning)}, nil
 				}
-				deps.messageStore.createFn = func(_ context.Context, _ *models.SessionMessage) error {
-					require.Fail(t, "SendMessage must not create a message when the parent session is active")
+				deps.messageStore.createFn = func(_ context.Context, msg *models.SessionMessage) error {
+					msg.ID = 99
 					return nil
 				}
 				deps.jobStore.enqueueFn = func(_ context.Context, _ uuid.UUID, _, _ string, _ any, _ int, _ *string) (uuid.UUID, error) {
-					require.Fail(t, "SendMessage must not enqueue work when the parent session is active")
-					return uuid.Nil, nil
+					return uuid.New(), nil
 				}
-				t.Cleanup(func() {
-					require.True(t, revertedThread, "SendMessage should revert the claimed thread")
-				})
 			},
-			expectErr: ErrActiveThreadExists,
+			expectErr: nil,
 		},
 		{
 			name: "thread not found",
@@ -601,7 +606,7 @@ func TestService_SendMessage(t *testing.T) {
 			expectErr: ErrThreadNotIdle,
 		},
 		{
-			name: "another thread already active",
+			name: "running limit reached",
 			input: SendMessageInput{
 				SessionID: sessionID,
 				OrgID:     orgID,
@@ -609,20 +614,15 @@ func TestService_SendMessage(t *testing.T) {
 				Message:   "hi",
 			},
 			setupDeps: func(deps *testDeps) {
+				// Phase 2: when the DB-level CTE rejects the claim because
+				// the per-session running cap is full, surface a
+				// distinguishable error so the composer can offer to queue
+				// the message instead of telling the user they failed.
 				deps.threadStore.claimIdleFn = func(_ context.Context, _, _, _ uuid.UUID) (models.SessionThread, error) {
-					return models.SessionThread{}, fmt.Errorf("active sibling")
-				}
-				deps.threadStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
-					return models.SessionThread{ID: threadID, SessionID: sessionID, OrgID: orgID, Status: models.ThreadStatusIdle}, nil
-				}
-				deps.threadStore.listBySessionFn = func(_ context.Context, _, _ uuid.UUID) ([]models.SessionThread, error) {
-					return []models.SessionThread{
-						{ID: threadID, SessionID: sessionID, OrgID: orgID, Status: models.ThreadStatusIdle},
-						{ID: uuid.New(), SessionID: sessionID, OrgID: orgID, Status: models.ThreadStatusRunning},
-					}, nil
+					return models.SessionThread{}, db.ErrThreadRunningLimitReached
 				}
 			},
-			expectErr: ErrActiveThreadExists,
+			expectErr: ErrRunningLimitReached,
 		},
 		{
 			name: "session mismatch reverts to idle",

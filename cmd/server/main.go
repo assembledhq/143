@@ -278,6 +278,7 @@ func main() {
 	snapshotLog.Msg("snapshot store configured")
 
 	cancelRegistry := agent.NewCancelRegistry(logger)
+	threadCancelRegistry := agent.NewThreadCancelRegistry(logger)
 	// Shared org-settings cache: the settings handler invalidates it on write,
 	// the orchestrator reads it when resolving Amp/Pi agent_config. In single-
 	// process deployments (MODE=all), the router and worker share this instance
@@ -298,7 +299,7 @@ func main() {
 	// Closed when the process receives SIGTERM so long-lived handlers (SSE
 	// streams, etc.) can end their loops cleanly during graceful shutdown.
 	shutdownCh := make(chan struct{})
-	router, gwSrv, recycleWorker, inspectorCloser, previewManager, err := api.NewRouter(cfg, pool, logger, sentryReporter, codexAuthSvc, claudeCodeAuthSvc, llmClient, fileReader, cancelRegistry, pvProvider, snapshotExec, apiSandboxProvider, apiSnapshotStore, orgSettingsCache, shutdownCh, redisClient, sessionStreams, codingCredentialStore)
+	router, gwSrv, recycleWorker, inspectorCloser, previewManager, err := api.NewRouter(cfg, pool, logger, sentryReporter, codexAuthSvc, claudeCodeAuthSvc, llmClient, fileReader, cancelRegistry, threadCancelRegistry, pvProvider, snapshotExec, apiSandboxProvider, apiSnapshotStore, orgSettingsCache, shutdownCh, redisClient, sessionStreams, codingCredentialStore)
 	if err != nil {
 		logger.Fatal().Err(err).Msg("failed to initialize API router")
 	}
@@ -391,6 +392,7 @@ func main() {
 			Repositories:        repoStore,
 			SessionMessages:     sessionMessageStore,
 			SessionThreads:      sessionThreadStore,
+			ThreadFileEvents:    db.NewSessionThreadFileEventStore(pool),
 			Automations:         automationStore,
 			AutomationRuns:      automationRunStore,
 			SessionIssueLinks:   db.NewSessionIssueLinkStore(pool),
@@ -406,7 +408,7 @@ func main() {
 				jobStore, orgStore, repoStore, validationStore, pullRequestStore,
 				deployStore, priorityScoreStore, complexityEstimateStore, pmPlanStore, pmDecisionLogStore,
 				projectStore, projectTaskStore, projectCycleStore, pmDocumentStore, integrationStore,
-				sessionMessageStore, automationRunStore, snapshotStore, billingMetrics, cancelRegistry, orgSettingsCache)
+				sessionMessageStore, automationRunStore, snapshotStore, billingMetrics, cancelRegistry, threadCancelRegistry, orgSettingsCache)
 			if services != nil {
 				sandboxAuthShutdown = services.SandboxAuthShutdown
 				// Wire eval pub/sub publishers so worker handlers can wake
@@ -836,6 +838,7 @@ func buildServices(
 	snapshotStore storage.SnapshotStore,
 	billingMetrics *metrics.BillingMetrics,
 	cancelRegistry *agent.CancelRegistry,
+	threadCancelRegistry *agent.ThreadCancelRegistry,
 	orgSettingsCache *agent.OrgSettingsCache,
 ) *worker.Services {
 	// GitHub App service (for installation tokens, PR creation).
@@ -968,6 +971,7 @@ func buildServices(
 		Snapshots:         snapshotStore,
 		UsageTracker:      usageTracker,
 		Cancels:           cancelRegistry,
+		ThreadCancels:     threadCancelRegistry,
 		OrgSettingsCache:  orgSettingsCache,
 		IdentityResolver:  identityResolver,
 		SandboxAuth:       sandboxAuthServer,
