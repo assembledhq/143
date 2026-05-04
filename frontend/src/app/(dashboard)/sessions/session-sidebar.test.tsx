@@ -18,7 +18,7 @@ vi.mock('next/link', () => ({
 }));
 
 let mockPathname = '/sessions';
-let mockParams: Record<string, string> = {};
+let mockSelectedSegment: string | null = null;
 const mockAuthState: {
   isAuthenticated: boolean;
   user: { id: string } | null;
@@ -35,7 +35,7 @@ vi.mock('next/navigation', () => ({
   useRouter: () => ({ push: vi.fn(), replace: vi.fn(), back: vi.fn() }),
   useSearchParams: () => new URLSearchParams(),
   usePathname: () => mockPathname,
-  useParams: () => mockParams,
+  useSelectedLayoutSegment: () => mockSelectedSegment,
 }));
 
 vi.mock('@/hooks/use-auth', () => ({
@@ -120,7 +120,7 @@ function renderSidebarWithMutableSearchParams(initialSearchParams: Record<string
 describe('SessionSidebar', () => {
   beforeEach(() => {
     mockPathname = '/sessions';
-    mockParams = {};
+    mockSelectedSegment = null;
     mockOptimisticSessions.length = 0;
     mockAuthState.isAuthenticated = true;
     mockAuthState.user = { id: 'user-1' };
@@ -617,7 +617,7 @@ describe('SessionSidebar', () => {
   // -----------------------------------------------------------------------
 
   it('highlights the selected session', async () => {
-    mockParams = { id: 's1' };
+    mockSelectedSegment = 's1';
     serveSessions([
       makeSession({ id: 's1', result_summary: 'Selected session' }),
       makeSession({ id: 's2', result_summary: 'Other session' }),
@@ -627,6 +627,22 @@ describe('SessionSidebar', () => {
     await screen.findByText('Selected session');
 
     const selectedLink = screen.getByText('Selected session').closest('a');
+    expect(selectedLink?.className).toContain('bg-background');
+    expect(selectedLink?.className).toContain('shadow-sm');
+  });
+
+  it('highlights the selected session from the active layout segment', async () => {
+    mockPathname = '/sessions/s1';
+    mockSelectedSegment = 's1';
+    serveSessions([
+      makeSession({ id: 's1', result_summary: 'Selected via pathname' }),
+      makeSession({ id: 's2', result_summary: 'Other session' }),
+    ]);
+
+    renderWithProviders(<SessionSidebar />);
+    await screen.findByText('Selected via pathname');
+
+    const selectedLink = screen.getByText('Selected via pathname').closest('a');
     expect(selectedLink?.className).toContain('bg-background');
     expect(selectedLink?.className).toContain('shadow-sm');
   });
