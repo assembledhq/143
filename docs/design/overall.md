@@ -21,6 +21,7 @@ The system aggregates issues from support, Sentry, and Linear, prioritizes them 
 - Audit log browsing should behave like a stable event feed rather than page-replacement pagination. The primary interaction is newest-first cursor pagination with inline `Load older` append behavior, optional time-range narrowing, and a non-jarring "new events" banner when fresh activity arrives while the operator is inspecting older history. Detailed design: [future/67-audit-log-feed-pagination.md](future/67-audit-log-feed-pagination.md).
 - Toast notifications should behave like platform-owned status surfaces rather than skinned third-party banners: success toasts are compact and auto-dismissing by default, error toasts align with the shared recoverable-error visual language, and dismiss controls only appear when needed in the top-right instead of the main content flow. Detailed design: [55-toast-notifications.md](55-toast-notifications.md).
 - Free-form form fields that can receive focus on phones, especially multi-line composers and settings textareas, must compute to at least `16px` on small screens to prevent iOS Safari auto-zoom while preserving denser desktop typography.
+- Session follow-up messages should render optimistically in the transcript as soon as the user sends them. Persistence, sandbox resume, and downstream agent/backend work happen after that local echo; the UI must not wait for the POST round-trip before showing the user's own message.
 
 ## Autopilot workspace UX
 
