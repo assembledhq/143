@@ -68,6 +68,7 @@ type SessionFilters struct {
 	AdHocOnly         bool      // When true, only return runs where pm_plan_id IS NULL (not linked to a PM plan).
 	RepositoryID      uuid.UUID // When non-zero, filter sessions by repository via issues table.
 	TriggeredByUserID uuid.UUID // When non-zero, filter sessions to those triggered by this user.
+	TriggeredByUserIDs []uuid.UUID
 	Search            string    // When non-empty, filter sessions by title (case-insensitive prefix/substring match).
 	IncludeArchived   bool      // When true, include archived sessions in the results.
 	OnlyArchived      bool      // When true, return only archived sessions.
@@ -79,6 +80,7 @@ type SessionFilters struct {
 type SessionCountsFilters struct {
 	RepositoryID      uuid.UUID
 	TriggeredByUserID uuid.UUID
+	TriggeredByUserIDs []uuid.UUID
 }
 
 // sessionCountsCap bounds each count subquery so a single user with millions
@@ -288,7 +290,10 @@ func (s *SessionStore) ListByOrg(ctx context.Context, orgID uuid.UUID, filters S
 		query += ` AND status = ANY(@statuses)`
 		args["statuses"] = statusStrings
 	}
-	if filters.TriggeredByUserID != uuid.Nil {
+	if len(filters.TriggeredByUserIDs) > 0 {
+		query += ` AND triggered_by_user_id = ANY(@triggered_by_user_ids)`
+		args["triggered_by_user_ids"] = filters.TriggeredByUserIDs
+	} else if filters.TriggeredByUserID != uuid.Nil {
 		query += ` AND triggered_by_user_id = @triggered_by_user_id`
 		args["triggered_by_user_id"] = filters.TriggeredByUserID
 	}
@@ -348,7 +353,10 @@ func (s *SessionStore) CountsByOrg(ctx context.Context, orgID uuid.UUID, filters
 		scope += " AND repository_id = @repository_id"
 		args["repository_id"] = filters.RepositoryID
 	}
-	if filters.TriggeredByUserID != uuid.Nil {
+	if len(filters.TriggeredByUserIDs) > 0 {
+		scope += " AND triggered_by_user_id = ANY(@triggered_by_user_ids)"
+		args["triggered_by_user_ids"] = filters.TriggeredByUserIDs
+	} else if filters.TriggeredByUserID != uuid.Nil {
 		scope += " AND triggered_by_user_id = @triggered_by_user_id"
 		args["triggered_by_user_id"] = filters.TriggeredByUserID
 	}
