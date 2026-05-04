@@ -1189,10 +1189,13 @@ describe('SessionDetailPage', () => {
     renderWithProviders(<SessionDetailContent id={runningSession.id} />);
 
     expect(await screen.findByText('Agent is working...')).toBeInTheDocument();
-    expect(MockEventSource.instances).toHaveLength(1);
+    const sessionStream = MockEventSource.instances.find((instance) =>
+      instance.url.includes(`/api/v1/sessions/${runningSession.id}/logs/stream`),
+    );
+    expect(sessionStream).toBeDefined();
 
     await act(async () => {
-      MockEventSource.instances[0].onmessage?.(
+      sessionStream?.onmessage?.(
         new MessageEvent('message', {
           data: JSON.stringify({
             id: 501,
@@ -3605,6 +3608,200 @@ describe('SessionDetailPage', () => {
     await waitFor(() => {
       expect(messageSent).toBe(true);
     });
+  });
+
+  it('renders a follow-up message in the transcript immediately before the backend responds', async () => {
+    const idleSession: Session = {
+      ...mockSessions[0],
+      status: 'idle',
+      completed_at: undefined,
+      current_turn: 1,
+      sandbox_state: 'snapshotted',
+    };
+    let releaseResponse!: () => void;
+    const responseReleased = new Promise<void>((resolve) => {
+      releaseResponse = resolve;
+    });
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({ data: idleSession } satisfies SingleResponse<Session>);
+      }),
+      http.post('/api/v1/sessions/:id/messages', async ({ request }) => {
+        const body = await request.json() as { message: string };
+        await responseReleased;
+        return HttpResponse.json({
+          data: {
+            id: 99,
+            session_id: idleSession.id,
+            org_id: 'org-1',
+            user_id: 'user-1',
+            turn_number: 2,
+            role: 'user' as const,
+            content: body.message,
+            created_at: '2026-02-17T07:10:00Z',
+          },
+        } satisfies SingleResponse<SessionMessage>);
+      }),
+    );
+
+    const user = userEvent.setup();
+    renderWithProviders(<SessionDetailContent id={idleSession.id} />);
+
+    const textarea = await screen.findByPlaceholderText('Send a follow-up message...');
+    await user.type(textarea, 'Show this immediately');
+    await user.keyboard('{Enter}');
+
+    expect(await screen.findByText('Show this immediately')).toBeInTheDocument();
+    expect(textarea).toHaveValue('');
+
+    releaseResponse();
+
+    await waitFor(() => {
+      expect(screen.getByText('Show this immediately')).toBeInTheDocument();
+    });
+  });
+
+  it('does not double-render a follow-up when the timeline poll sees the real message before POST resolves', async () => {
+    const idleSession: Session = {
+      ...mockSessions[0],
+      status: 'idle',
+      completed_at: undefined,
+      current_turn: 1,
+      sandbox_state: 'snapshotted',
+    };
+    let timelineEntries: SessionTimelineEntry[] = [];
+    let timelineFetchCount = 0;
+    let releaseResponse!: () => void;
+    const responseReleased = new Promise<void>((resolve) => {
+      releaseResponse = resolve;
+    });
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({ data: idleSession } satisfies SingleResponse<Session>);
+      }),
+      http.get('/api/v1/sessions/:id/timeline', () => {
+        timelineFetchCount += 1;
+        return HttpResponse.json({
+          data: timelineEntries,
+          meta: {},
+        } satisfies ListResponse<SessionTimelineEntry>);
+      }),
+      http.post('/api/v1/sessions/:id/messages', async ({ request }) => {
+        const body = await request.json() as { message: string };
+        const realMessage: SessionMessage = {
+          id: 99,
+          session_id: idleSession.id,
+          org_id: 'org-1',
+          user_id: 'user-1',
+          turn_number: 2,
+          role: 'user',
+          content: body.message,
+          created_at: '2026-02-17T07:10:00Z',
+        };
+        timelineEntries = [
+          {
+            kind: 'message',
+            created_at: '2026-02-17T07:10:00Z',
+            message: realMessage,
+          },
+        ];
+        await responseReleased;
+        return HttpResponse.json({
+          data: realMessage,
+        } satisfies SingleResponse<SessionMessage>);
+      }),
+    );
+
+    const user = userEvent.setup();
+    renderWithProviders(<SessionDetailContent id={idleSession.id} />);
+
+    const textarea = await screen.findByPlaceholderText('Send a follow-up message...');
+    await user.type(textarea, 'Show once');
+    await user.keyboard('{Enter}');
+
+    expect(await screen.findByText('Show once')).toBeInTheDocument();
+
+    await waitFor(() => {
+      expect(timelineFetchCount).toBeGreaterThanOrEqual(2);
+    }, { timeout: 4500 });
+
+    expect(screen.getAllByText('Show once')).toHaveLength(1);
+
+    releaseResponse();
+  });
+
+  it('treats an optimistic plan-mode follow-up as a plan turn for streamed output', async () => {
+    const idleSession: Session = {
+      ...mockSessions[0],
+      agent_type: 'claude_code',
+      status: 'idle',
+      completed_at: undefined,
+      current_turn: 1,
+      sandbox_state: 'snapshotted',
+    };
+    let releaseResponse!: () => void;
+    const responseReleased = new Promise<void>((resolve) => {
+      releaseResponse = resolve;
+    });
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({ data: idleSession } satisfies SingleResponse<Session>);
+      }),
+      http.post('/api/v1/sessions/:id/messages', async ({ request }) => {
+        const body = await request.json() as { message: string; plan_mode?: boolean };
+        await responseReleased;
+        return HttpResponse.json({
+          data: {
+            id: 100,
+            session_id: idleSession.id,
+            org_id: 'org-1',
+            user_id: 'user-1',
+            turn_number: 2,
+            role: 'user' as const,
+            content: body.plan_mode ? `[PLAN_MODE]\n${body.message}` : body.message,
+            created_at: '2026-02-17T07:10:00Z',
+          },
+        } satisfies SingleResponse<SessionMessage>);
+      }),
+    );
+
+    const user = userEvent.setup();
+    renderWithProviders(<SessionDetailContent id={idleSession.id} />);
+
+    const textarea = await screen.findByPlaceholderText('Send a follow-up message...');
+    await user.click(screen.getByTitle('Switch to plan mode (Shift+Tab)'));
+    await user.type(screen.getByPlaceholderText('Describe what you want to plan...'), 'Plan this change');
+    await user.keyboard('{Enter}');
+
+    const sessionStream = MockEventSource.instances.find((instance) =>
+      instance.url.includes(`/api/v1/sessions/${idleSession.id}/logs/stream`),
+    );
+    expect(sessionStream).toBeDefined();
+
+    await act(async () => {
+      sessionStream?.onmessage?.(
+        new MessageEvent('message', {
+          data: JSON.stringify({
+            id: 501,
+            session_id: idleSession.id,
+            level: 'output',
+            message: 'Plan step 1',
+            metadata: null,
+            turn_number: 2,
+            created_at: '2026-02-17T07:10:30Z',
+          }),
+        }),
+      );
+    });
+
+    expect(await screen.findByText('Implementation Plan')).toBeInTheDocument();
+    expect(screen.getByText('Plan step 1')).toBeInTheDocument();
+    expect(textarea).toHaveValue('');
+
+    releaseResponse();
   });
 
   it('clears attached review comments after sending them to the agent', async () => {

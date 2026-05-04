@@ -107,7 +107,7 @@ import {
   buildPullRequestStreamURL,
   buildSessionLogsStreamURL,
 } from "@/lib/sse";
-import { buildTimeline, buildTimelineFromResponse } from "@/lib/timeline";
+import { applyPlanModePrefix, buildTimeline, flattenTimelineResponse, sortTimelineEntries } from "@/lib/timeline";
 import { parseDiffStats, type DiffFile } from "@/lib/diff-parser";
 import { formatReviewMessage } from "@/lib/format-review-message";
 import {
@@ -115,7 +115,7 @@ import {
   resolveInitialSessionAnchor,
   writeStoredSessionScrollPosition,
 } from "@/lib/session-open-position";
-import type { ListResponse, Session, SessionDetail, SessionInputCommand, SessionInputReference, SessionLog, SessionMessage, SessionReviewComment, SessionThread, User, Validation, CodexAuthStatus, PullRequestHealthResponse, SingleResponse } from "@/lib/types";
+import type { ListResponse, Session, SessionDetail, SessionInputCommand, SessionInputReference, SessionLog, SessionMessage, SessionReviewComment, SessionThread, SessionTimelineEntry, User, Validation, CodexAuthStatus, PullRequestHealthResponse, SingleResponse } from "@/lib/types";
 import { AgentTabStrip, computeThreadOverlap } from "./agent-tab-strip";
 import { SessionSummaryPanel, SummarizeButton } from "./session-summary-panel";
 import {
@@ -149,6 +149,10 @@ const FAILURE_CATEGORY_CODEX_AUTH = "codex_auth_expired";
 const PR_ERROR_TOAST_DURATION_MS = 10_000;
 const PR_ERROR_TOAST_MESSAGE = "PR creation failed";
 const MAX_RESOLVE_REVIEW_COMMENTS_PER_MESSAGE = 50;
+
+type PendingFollowUpMessage = SessionMessage & {
+  client_id: number;
+};
 
 const statusConfig: Record<string, { color: string; label: string }> = {
   pending: { color: "bg-muted text-muted-foreground", label: "Pending" },
@@ -238,6 +242,41 @@ type PRActionErrorState = {
 const terminalSessionStatuses = new Set(["completed", "pr_created", "failed", "cancelled", "skipped"]);
 const SNAPSHOT_EXPIRED_PR_MESSAGE =
   "This session snapshot expired before a PR could be created. Send a new message to rebuild the sandbox, then create the PR again.";
+
+function mergePendingMessages(
+  baseMessages: SessionMessage[],
+  pendingMessages: SessionMessage[],
+): SessionMessage[] {
+  if (pendingMessages.length === 0) {
+    return baseMessages;
+  }
+
+  const merged = [...baseMessages];
+  const seenIDs = new Set(baseMessages.map((message) => message.id));
+  const seenKeys = new Set(baseMessages.map(messageReconciliationKey));
+  for (const message of pendingMessages) {
+    if (seenIDs.has(message.id) || seenKeys.has(messageReconciliationKey(message))) {
+      continue;
+    }
+    merged.push(message);
+    seenIDs.add(message.id);
+    seenKeys.add(messageReconciliationKey(message));
+  }
+  return merged;
+}
+
+function messageReconciliationKey(message: SessionMessage): string {
+  return JSON.stringify({
+    session_id: message.session_id,
+    thread_id: message.thread_id ?? null,
+    turn_number: message.turn_number,
+    role: message.role,
+    content: message.content,
+    attachments: message.attachments ?? [],
+    references: message.references ?? [],
+    commands: message.commands ?? [],
+  });
+}
 const SNAPSHOT_NOT_CAPTURED_PR_MESSAGE =
   "This session finished without saving a reusable checkpoint for PR creation. Send a new message to rebuild the sandbox, then create the PR again.";
 const SNAPSHOT_UNAVAILABLE_PR_MESSAGE =
@@ -1644,6 +1683,7 @@ function ChatPanel({
   sessionId,
   activeThread,
   isActive,
+  optimisticMessages,
   onDiffClick,
   onApprovePlan,
   onAdjustPlan,
@@ -1653,6 +1693,7 @@ function ChatPanel({
   sessionId: string;
   activeThread?: SessionThread;
   isActive: boolean;
+  optimisticMessages: SessionMessage[];
   onDiffClick?: () => void;
   onApprovePlan?: () => void;
   onAdjustPlan?: () => void;
@@ -1711,10 +1752,20 @@ function ChatPanel({
   });
 
   const baseTimelineEntries = useMemo(() => {
+    const optimisticForCurrentView = optimisticMessages.filter((message) =>
+      activeThreadId ? message.thread_id === activeThreadId : !message.thread_id
+    );
     if (activeThreadId) {
-      return buildTimeline(threadMessagesQuery.data?.data ?? [], threadLogsQuery.data?.data ?? []);
+      return buildTimeline(
+        mergePendingMessages(threadMessagesQuery.data?.data ?? [], optimisticForCurrentView),
+        threadLogsQuery.data?.data ?? [],
+      );
     }
-    const entries = buildTimelineFromResponse(timelineQuery.data?.data || []);
+    const flattenedTimeline = flattenTimelineResponse(timelineQuery.data?.data ?? []);
+    const entries = buildTimeline(
+      mergePendingMessages(flattenedTimeline.messages, optimisticForCurrentView),
+      flattenedTimeline.logs,
+    );
     const issueDescription = issueQuery.data?.data?.description;
     if (!issueDescription) return entries;
     const hasTurn0UserMsg = entries.some((entry) => entry.kind === "message" && entry.data.role === "user" && entry.data.turn_number === 0);
@@ -1729,7 +1780,7 @@ function ChatPanel({
       created_at: session.created_at,
     };
     return [{ kind: "message" as const, data: syntheticMsg }, ...entries];
-  }, [activeThreadId, threadMessagesQuery.data?.data, threadLogsQuery.data?.data, timelineQuery.data?.data, issueQuery.data?.data?.description, sessionId, session.org_id, session.created_at]);
+  }, [activeThreadId, optimisticMessages, threadMessagesQuery.data?.data, threadLogsQuery.data?.data, timelineQuery.data?.data, issueQuery.data?.data?.description, sessionId, session.org_id, session.created_at]);
 
   const timelineEntries = useMemo(() => {
     const fetchedLogIds = new Set<number>();
@@ -1786,7 +1837,7 @@ function ChatPanel({
 
     if (overlayLogs.length === 0) return baseTimelineEntries;
     const overlayEntries = buildTimeline(planModeSeedMessages, overlayLogs).filter((entry) => entry.kind !== "message");
-    return [...baseTimelineEntries, ...overlayEntries];
+    return sortTimelineEntries([...baseTimelineEntries, ...overlayEntries]);
   }, [baseTimelineEntries, streamedLogs]);
   const hasLoadedTimelineInputs = activeThreadId
     ? threadMessagesQuery.isFetched && threadLogsQuery.isFetched
@@ -2198,6 +2249,8 @@ export function SessionDetailContent({ id }: { id: string }) {
   const currentTitle = session ? sessionTitle(session) : "";
 
   const queryClient = useQueryClient();
+  const optimisticMessageIDRef = useRef(-1_000_000);
+  const [optimisticMessages, setOptimisticMessages] = useState<PendingFollowUpMessage[]>([]);
 
   useEffect(() => {
     if (threads.length === 0) {
@@ -2210,6 +2263,32 @@ export function SessionDetailContent({ id }: { id: string }) {
       setActiveThreadId(threads[0].id);
     }
   }, [activeThreadId, threads]);
+
+  useEffect(() => {
+    setOptimisticMessages([]);
+  }, [id]);
+
+  type SendMutationArgs = {
+    activeThreadId?: string;
+    body: {
+      message: string;
+      images?: string[];
+      references?: SessionInputReference[];
+      commands?: SessionInputCommand[];
+      planMode?: boolean;
+    };
+    model?: string;
+    resolvedIDs: string[];
+    optimisticMessage: PendingFollowUpMessage;
+    composerSnapshot: {
+      message: string;
+      attachments: string[];
+      references: SessionInputReference[];
+      commands: SessionInputCommand[];
+      planMode: boolean;
+      selectedModel: string;
+    };
+  };
 
   const updateSessionMutation = useMutation({
     mutationFn: (title: string) => api.sessions.update(id, { title }),
@@ -2766,35 +2845,21 @@ export function SessionDetailContent({ id }: { id: string }) {
   }, []);
 
   const sendMutation = useMutation({
-    mutationFn: (opts: { planMode?: boolean; overrideMessage?: string } = {}) => {
-      setComposerUploadError(null);
-      const draftMessage = opts.overrideMessage ?? composerMessage;
-      const formattedMessage = attachedReviewComments.length > 0
-        ? formatReviewMessage(attachedReviewComments, filteredFiles, draftMessage)
-        : draftMessage;
-      const isPlanRequest = opts.planMode ?? composerPlanMode;
-      const resolveReviewCommentIDs = attachedReviewComments.map((comment) => comment.id);
-
-      const body = {
-        message: formattedMessage,
-        images: composerAttachments.length > 0 ? composerAttachments : undefined,
-        references: composerReferences.length > 0 ? composerReferences : undefined,
-        commands: composerCommands.length > 0 ? composerCommands : undefined,
-        planMode: isPlanRequest,
-      };
-
-      if (activeThread) {
-        return api.sessions.sendThreadMessage(id, activeThread.id, body)
-          .then((response) => ({ response, resolvedIDs: resolveReviewCommentIDs }));
+    mutationFn: (vars: SendMutationArgs) => {
+      if (vars.activeThreadId) {
+        return api.sessions.sendThreadMessage(id, vars.activeThreadId, vars.body)
+          .then((response) => ({ response, resolvedIDs: vars.resolvedIDs }));
       }
 
       return api.sessions.sendMessage(id, {
-        ...body,
-        model: composerSelectedModel || undefined,
-        resolveReviewCommentIDs: resolveReviewCommentIDs.length > 0 ? resolveReviewCommentIDs : undefined,
-      }).then((response) => ({ response, resolvedIDs: resolveReviewCommentIDs }));
+        ...vars.body,
+        model: vars.model,
+        resolveReviewCommentIDs: vars.resolvedIDs.length > 0 ? vars.resolvedIDs : undefined,
+      }).then((response) => ({ response, resolvedIDs: vars.resolvedIDs }));
     },
-    onSuccess: ({ resolvedIDs }) => {
+    onMutate: (vars) => {
+      setComposerUploadError(null);
+      setOptimisticMessages((previous) => [...previous, vars.optimisticMessage]);
       setComposerMessage("");
       setComposerAttachments([]);
       setComposerReferences([]);
@@ -2807,11 +2872,60 @@ export function SessionDetailContent({ id }: { id: string }) {
         composerTextareaRef.current.style.height = "auto";
       }
       chatPanelScrollToLiveEdgeRef.current?.();
+      return {
+        optimisticMessageID: vars.optimisticMessage.client_id,
+        composerSnapshot: vars.composerSnapshot,
+      };
+    },
+    onSuccess: ({ response, resolvedIDs }, vars, context) => {
+      setOptimisticMessages((previous) => previous.filter((message) => message.client_id !== context?.optimisticMessageID));
+      if (vars.activeThreadId) {
+        queryClient.setQueryData<ListResponse<SessionMessage>>(
+          queryKeys.sessions.threadMessages(id, vars.activeThreadId),
+          (previous) => {
+            const existing = previous?.data ?? [];
+            const responseKey = messageReconciliationKey(response.data);
+            const withoutDuplicate = existing.filter((message) =>
+              message.id !== response.data.id && messageReconciliationKey(message) !== responseKey
+            );
+            return {
+              data: [...withoutDuplicate, response.data],
+              meta: previous?.meta ?? {},
+            };
+          },
+        );
+      } else {
+        queryClient.setQueryData<ListResponse<SessionTimelineEntry>>(
+          queryKeys.sessions.timeline(id),
+          (previous) => {
+            const existing = previous?.data ?? [];
+            const responseKey = messageReconciliationKey(response.data);
+            const withoutDuplicate = existing.filter((entry) =>
+              entry.kind !== "message" ||
+              (
+                entry.message?.id !== response.data.id &&
+                messageReconciliationKey(entry.message!) !== responseKey
+              )
+            );
+            return {
+              data: [
+                ...withoutDuplicate,
+                {
+                  kind: "message",
+                  created_at: response.data.created_at,
+                  message: response.data,
+                },
+              ],
+              meta: previous?.meta ?? {},
+            };
+          },
+        );
+      }
       queryClient.invalidateQueries({ queryKey: ["session", id] });
       queryClient.invalidateQueries({ queryKey: ["session", id, "timeline"] });
-      if (activeThread) {
-        queryClient.invalidateQueries({ queryKey: queryKeys.sessions.threadMessages(id, activeThread.id) });
-        queryClient.invalidateQueries({ queryKey: queryKeys.sessions.threadLogs(id, activeThread.id) });
+      if (vars.activeThreadId) {
+        queryClient.invalidateQueries({ queryKey: queryKeys.sessions.threadMessages(id, vars.activeThreadId) });
+        queryClient.invalidateQueries({ queryKey: queryKeys.sessions.threadLogs(id, vars.activeThreadId) });
       }
       // Backend resolved the attached review comments inside the same tx as
       // the message. Optimistically flip them to resolved=true in the cache
@@ -2834,7 +2948,79 @@ export function SessionDetailContent({ id }: { id: string }) {
       }
       queryClient.invalidateQueries({ queryKey: ["session", id, "review-comments"] });
     },
+    onError: (_err, _vars, context) => {
+      setOptimisticMessages((previous) => previous.filter((message) => message.client_id !== context?.optimisticMessageID));
+      if (!context) return;
+      setComposerMessage(context.composerSnapshot.message);
+      setComposerAttachments(context.composerSnapshot.attachments);
+      setComposerReferences(context.composerSnapshot.references);
+      setComposerCommands(context.composerSnapshot.commands);
+      setComposerPlanMode(context.composerSnapshot.planMode);
+      setComposerSelectedModel(context.composerSnapshot.selectedModel);
+    },
   });
+
+  const queueSend = useCallback((opts: { planMode?: boolean; overrideMessage?: string } = {}) => {
+    if (!session) return;
+
+    const draftMessage = opts.overrideMessage ?? composerMessage;
+    const userFacingMessage = attachedReviewComments.length > 0
+      ? formatReviewMessage(attachedReviewComments, filteredFiles, draftMessage)
+      : draftMessage;
+    const isPlanRequest = opts.planMode ?? composerPlanMode;
+    const formattedMessage = applyPlanModePrefix(userFacingMessage, isPlanRequest);
+    const resolvedIDs = attachedReviewComments.map((comment) => comment.id);
+    const optimisticID = optimisticMessageIDRef.current;
+    optimisticMessageIDRef.current -= 1;
+
+    sendMutation.mutate({
+      activeThreadId: activeThread?.id,
+      body: {
+        message: userFacingMessage,
+        images: composerAttachments.length > 0 ? composerAttachments : undefined,
+        references: composerReferences.length > 0 ? composerReferences : undefined,
+        commands: composerCommands.length > 0 ? composerCommands : undefined,
+        planMode: isPlanRequest,
+      },
+      model: composerSelectedModel || undefined,
+      resolvedIDs,
+      optimisticMessage: {
+        client_id: optimisticID,
+        id: optimisticID,
+        session_id: id,
+        org_id: session.org_id,
+        thread_id: activeThread?.id,
+        turn_number: (activeThread?.current_turn ?? session.current_turn ?? 0) + 1,
+        role: "user",
+        content: formattedMessage,
+        attachments: composerAttachments.length > 0 ? composerAttachments : undefined,
+        references: composerReferences.length > 0 ? composerReferences : undefined,
+        commands: composerCommands.length > 0 ? composerCommands : undefined,
+        created_at: new Date().toISOString(),
+      },
+      composerSnapshot: {
+        message: composerMessage,
+        attachments: composerAttachments,
+        references: composerReferences,
+        commands: composerCommands,
+        planMode: composerPlanMode,
+        selectedModel: composerSelectedModel,
+      },
+    });
+  }, [
+    activeThread,
+    attachedReviewComments,
+    composerAttachments,
+    composerCommands,
+    composerMessage,
+    composerPlanMode,
+    composerReferences,
+    composerSelectedModel,
+    filteredFiles,
+    id,
+    session,
+    sendMutation,
+  ]);
 
   const cancelMutation = useMutation({
     mutationFn: () => api.sessions.cancelSession(id),
@@ -2936,11 +3122,11 @@ export function SessionDetailContent({ id }: { id: string }) {
 
   const handleApprovePlan = useCallback(() => {
     if (!composerCanSendMessage || sendMutation.isPending) return;
-    sendMutation.mutate({
+    queueSend({
       planMode: false,
       overrideMessage: "The plan looks good. Please proceed with executing the implementation plan above. Make all the changes as described.",
     });
-  }, [composerCanSendMessage, sendMutation]);
+  }, [composerCanSendMessage, queueSend, sendMutation.isPending]);
 
   const handleAdjustPlan = useCallback(() => {
     setComposerMessage("Please adjust the plan: ");
@@ -3500,6 +3686,7 @@ export function SessionDetailContent({ id }: { id: string }) {
               sessionId={id}
               activeThread={activeThread}
               isActive={isActive}
+              optimisticMessages={optimisticMessages}
               onDiffClick={() => openReview()}
               onApprovePlan={handleApprovePlan}
               onAdjustPlan={handleAdjustPlan}
@@ -3578,7 +3765,7 @@ export function SessionDetailContent({ id }: { id: string }) {
               cancelPending={cancelMutation.isPending}
               uploadError={composerUploadError}
               onCancelSession={() => cancelMutation.mutate()}
-              onSend={() => sendMutation.mutate({})}
+              onSend={() => queueSend()}
               textareaRef={composerTextareaRef}
               uploadInputRef={composerUploadInputRef}
               references={composerReferences}
@@ -3685,7 +3872,7 @@ export function SessionDetailContent({ id }: { id: string }) {
               cancelPending={cancelMutation.isPending}
               uploadError={composerUploadError}
               onCancelSession={() => cancelMutation.mutate()}
-              onSend={() => sendMutation.mutate({})}
+              onSend={() => queueSend()}
               textareaRef={composerTextareaRef}
               uploadInputRef={composerUploadInputRef}
               references={composerReferences}
