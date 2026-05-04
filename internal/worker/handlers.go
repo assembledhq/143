@@ -498,6 +498,16 @@ func newAutomationRunHandler(stores *Stores, services *Services, logger zerolog.
 			targetBranch = &b
 		}
 
+		// Carry the run's GoalSnapshot into PMApproach so promptSeedForSession
+		// surfaces it as the synthesized issue's description. Without this the
+		// agent receives an empty "Session task" seed and silently ignores any
+		// conditions or invariants the user wrote in the automation goal.
+		var goalSeed *string
+		if strings.TrimSpace(run.GoalSnapshot) != "" {
+			g := run.GoalSnapshot
+			goalSeed = &g
+		}
+
 		session := &models.Session{
 			OrgID:             orgID,
 			AgentType:         agentType,
@@ -509,6 +519,7 @@ func newAutomationRunHandler(stores *Stores, services *Services, logger zerolog.
 			TargetBranch:      targetBranch,
 			RepositoryID:      automation.RepositoryID,
 			AutomationRunID:   &runID,
+			PMApproach:        goalSeed,
 		}
 		if err := stores.Sessions.Create(ctx, session); err != nil {
 			// Session creation failed after we claimed the row — flip
