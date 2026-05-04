@@ -73,6 +73,115 @@ function statusLabel(status: CodingAuthStatus | string | undefined) {
   }
 }
 
+function CredentialList({
+  rows,
+  emptyMessage,
+  readOnly = false,
+  onDelete,
+}: {
+  rows: CodingCredentialSummary[];
+  emptyMessage: string;
+  readOnly?: boolean;
+  onDelete?: (id: string) => void;
+}) {
+  if (rows.length === 0) {
+    return (
+      <div className="px-4 py-4 text-xs text-muted-foreground">
+        {emptyMessage}
+      </div>
+    );
+  }
+
+  return (
+    <div className="divide-y divide-border/60">
+      {rows.map((row, idx) => (
+        <div key={row.id} className="space-y-3 px-4 py-4 md:hidden">
+          <div className="flex items-start justify-between gap-3">
+            <div className="min-w-0 space-y-1">
+              <div className="text-xs font-medium text-foreground">
+                {agentLabel(row.agent)}
+                {row.is_default ? (
+                  <Badge variant="secondary" className="ml-2">Default</Badge>
+                ) : null}
+              </div>
+              <div className="text-xs text-muted-foreground">{row.label}</div>
+            </div>
+            <Badge variant="outline">{statusLabel(row.status)}</Badge>
+          </div>
+          <dl className="grid grid-cols-2 gap-3 text-xs">
+            <div className="space-y-1">
+              <dt className="font-medium text-muted-foreground">Priority</dt>
+              <dd>{idx + 1}</dd>
+            </div>
+            <div className="space-y-1">
+              <dt className="font-medium text-muted-foreground">Auth type</dt>
+              <dd>{authTypeLabel(row.auth_type)}</dd>
+            </div>
+          </dl>
+          {row.usage_note && row.usage_note !== row.label ? (
+            <div className="space-y-1">
+              <div className="text-xs font-medium text-muted-foreground">Notes</div>
+              <div className="text-xs text-muted-foreground">{row.usage_note}</div>
+            </div>
+          ) : null}
+          {!readOnly && onDelete ? (
+            <Button variant="ghost" size="sm" onClick={() => onDelete(row.id)}>
+              <Trash2 className="mr-2 h-4 w-4" />
+              Disable
+            </Button>
+          ) : null}
+        </div>
+      ))}
+
+      <div className="hidden md:block">
+        <Table>
+          <TableHeader>
+            <TableRow>
+              <TableHead className="w-12">#</TableHead>
+              <TableHead>Agent</TableHead>
+              <TableHead>Auth type</TableHead>
+              <TableHead>Notes</TableHead>
+              <TableHead>Status</TableHead>
+              {!readOnly ? <TableHead className="w-24 text-right">Action</TableHead> : null}
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {rows.map((row, idx) => (
+              <TableRow key={row.id}>
+                <TableCell className="text-muted-foreground">{idx + 1}</TableCell>
+                <TableCell>
+                  {agentLabel(row.agent)}
+                  {row.is_default ? (
+                    <Badge variant="secondary" className="ml-2">Default</Badge>
+                  ) : null}
+                </TableCell>
+                <TableCell>{authTypeLabel(row.auth_type)}</TableCell>
+                <TableCell>
+                  <div>{row.label}</div>
+                  {row.usage_note && row.usage_note !== row.label ? (
+                    <div className="text-xs text-muted-foreground">{row.usage_note}</div>
+                  ) : null}
+                </TableCell>
+                <TableCell>
+                  <Badge variant="outline">{statusLabel(row.status)}</Badge>
+                </TableCell>
+                {!readOnly ? (
+                  <TableCell className="text-right">
+                    <Button variant="ghost" size="sm" onClick={() => onDelete?.(row.id)}>
+                      <Trash2 className="mr-2 h-4 w-4" />
+                      Disable
+                    </Button>
+                  </TableCell>
+                ) : null}
+              </TableRow>
+            ))}
+          </TableBody>
+        </Table>
+      </div>
+    </div>
+  );
+}
+
 export default function AccountPage() {
   const { user } = useAuth();
   const queryClient = useQueryClient();
@@ -210,54 +319,12 @@ export default function AccountPage() {
               Your personal stack runs ahead of any organization fallback. Add as many as you need — the resolver picks the highest-priority active row.
             </CardDescription>
           </CardHeader>
-          <CardContent className="pb-6">
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead className="w-12">#</TableHead>
-                  <TableHead>Agent</TableHead>
-                  <TableHead>Auth type</TableHead>
-                  <TableHead>Notes</TableHead>
-                  <TableHead>Status</TableHead>
-                  <TableHead className="w-24 text-right">Action</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {personalRows.length > 0 ? personalRows.map((row, idx) => (
-                  <TableRow key={row.id}>
-                    <TableCell className="text-muted-foreground">{idx + 1}</TableCell>
-                    <TableCell>
-                      {agentLabel(row.agent)}
-                      {row.is_default ? (
-                        <Badge variant="secondary" className="ml-2">Default</Badge>
-                      ) : null}
-                    </TableCell>
-                    <TableCell>{authTypeLabel(row.auth_type)}</TableCell>
-                    <TableCell>
-                      <div>{row.label}</div>
-                      {row.usage_note && row.usage_note !== row.label ? (
-                        <div className="text-xs text-muted-foreground">{row.usage_note}</div>
-                      ) : null}
-                    </TableCell>
-                    <TableCell>
-                      <Badge variant="outline">{statusLabel(row.status)}</Badge>
-                    </TableCell>
-                    <TableCell className="text-right">
-                      <Button variant="ghost" size="sm" onClick={() => deleteMutation.mutate(row.id)}>
-                        <Trash2 className="mr-2 h-4 w-4" />
-                        Disable
-                      </Button>
-                    </TableCell>
-                  </TableRow>
-                )) : (
-                  <TableRow>
-                    <TableCell colSpan={6} className="text-muted-foreground">
-                      No personal auth configured. Click &ldquo;Add auth&rdquo; above to enable sessions to use your own subscription. Org-wide credentials are used as a fallback.
-                    </TableCell>
-                  </TableRow>
-                )}
-              </TableBody>
-            </Table>
+          <CardContent className="px-0 pb-6">
+            <CredentialList
+              rows={personalRows}
+              emptyMessage={'No personal auth configured. Click "Add auth" above to enable sessions to use your own subscription. Org-wide credentials are used as a fallback.'}
+              onDelete={(id) => deleteMutation.mutate(id)}
+            />
           </CardContent>
         </Card>
 
@@ -268,42 +335,12 @@ export default function AccountPage() {
               Read-only. Contact an admin to change org auths.
             </CardDescription>
           </CardHeader>
-          <CardContent className="pb-6">
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead className="w-12">#</TableHead>
-                  <TableHead>Agent</TableHead>
-                  <TableHead>Auth type</TableHead>
-                  <TableHead>Notes</TableHead>
-                  <TableHead>Status</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {orgRows.length > 0 ? orgRows.map((row, idx) => (
-                  <TableRow key={row.id}>
-                    <TableCell className="text-muted-foreground">{idx + 1}</TableCell>
-                    <TableCell>{agentLabel(row.agent)}</TableCell>
-                    <TableCell>{authTypeLabel(row.auth_type)}</TableCell>
-                    <TableCell>
-                      <div>{row.label}</div>
-                      {row.usage_note && row.usage_note !== row.label ? (
-                        <div className="text-xs text-muted-foreground">{row.usage_note}</div>
-                      ) : null}
-                    </TableCell>
-                    <TableCell>
-                      <Badge variant="outline">{statusLabel(row.status)}</Badge>
-                    </TableCell>
-                  </TableRow>
-                )) : (
-                  <TableRow>
-                    <TableCell colSpan={5} className="text-muted-foreground">
-                      No org-level fallback configured.
-                    </TableCell>
-                  </TableRow>
-                )}
-              </TableBody>
-            </Table>
+          <CardContent className="px-0 pb-6">
+            <CredentialList
+              rows={orgRows}
+              emptyMessage="No org-level fallback configured."
+              readOnly
+            />
           </CardContent>
         </Card>
 
@@ -332,7 +369,11 @@ export default function AccountPage() {
                         saveReasoningDefaults(nextDefaults);
                       }}
                     >
-                      <SelectTrigger id={`default-coding-agent-reasoning-${agentType}`} aria-label={`${config.label} default coding-agent reasoning`} className="w-[220px]">
+                      <SelectTrigger
+                        id={`default-coding-agent-reasoning-${agentType}`}
+                        aria-label={`${config.label} default coding-agent reasoning`}
+                        className="w-full sm:w-[220px]"
+                      >
                         <SelectValue placeholder="Default" />
                       </SelectTrigger>
                       <SelectContent>

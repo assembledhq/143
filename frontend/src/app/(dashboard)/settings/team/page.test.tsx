@@ -128,10 +128,10 @@ describe('TeamSettingsPage', () => {
     expect(membersSection).not.toBeNull();
 
     const membersQueries = within(membersSection!);
-    expect(membersQueries.getByText('Name', { selector: 'div' })).toBeInTheDocument();
-    expect(membersQueries.getByText('Email', { selector: 'div' })).toBeInTheDocument();
-    expect(membersQueries.getByText('Role', { selector: 'div' })).toBeInTheDocument();
-    expect(membersQueries.getByText('Actions', { selector: 'div' })).toBeInTheDocument();
+    expect(membersQueries.getAllByText('Name', { selector: 'div' }).length).toBeGreaterThan(0);
+    expect(membersQueries.getAllByText('Email', { selector: 'div' }).length).toBeGreaterThan(0);
+    expect(membersQueries.getAllByText('Role', { selector: 'div' }).length).toBeGreaterThan(0);
+    expect(membersQueries.getAllByText('Actions', { selector: 'div' }).length).toBeGreaterThan(0);
   });
 
   it('shows (you) label for the current user', async () => {
@@ -189,6 +189,18 @@ describe('TeamSettingsPage', () => {
 
     expect(screen.getByText('new@example.com')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Revoke' })).toBeInTheDocument();
+  });
+
+  it('renders compact member metadata labels for mobile layouts', async () => {
+    renderWithProviders(<TeamSettingsPage />);
+
+    await waitFor(() => {
+      expect(screen.getByText('Admin User')).toBeInTheDocument();
+    });
+
+    expect(screen.getAllByText('Email').length).toBeGreaterThan(0);
+    expect(screen.getAllByText('Role').length).toBeGreaterThan(0);
+    expect(screen.getAllByText('Actions').length).toBeGreaterThan(0);
   });
 
   it('adds an email invite draft before submission', async () => {

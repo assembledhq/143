@@ -22,6 +22,7 @@ The system aggregates issues from support, Sentry, and Linear, prioritizes them 
 - Toast notifications should behave like platform-owned status surfaces rather than skinned third-party banners: success toasts are compact and auto-dismissing by default, error toasts align with the shared recoverable-error visual language, and dismiss controls only appear when needed in the top-right instead of the main content flow. Detailed design: [55-toast-notifications.md](55-toast-notifications.md).
 - Free-form form fields that can receive focus on phones, especially multi-line composers and settings textareas, must compute to at least `16px` on small screens to prevent iOS Safari auto-zoom while preserving denser desktop typography.
 - Session composers should treat pasted clipboard images the same as dropped or picker-selected uploads so screenshots can be attached directly from the textarea in both new-session and follow-up flows.
+- Settings pages should not rely on desktop-only table layouts on phones. Shared headers should give actions a full-width mobile lane, and dense settings lists should collapse into stacked rows/cards with inline labels instead of forcing horizontal scanning.
 
 ## Autopilot workspace UX
 
