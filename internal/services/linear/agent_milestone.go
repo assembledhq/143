@@ -92,22 +92,21 @@ func (s *Service) HandleAgentMilestone(ctx context.Context, in MilestoneInput) e
 		return nil
 	}
 
-	// On PR open, also pin externalUrls so Linear's AgentSession header
-	// links to both the 143 session and the PR. Best-effort like the rest
-	// of this method — the activity body already contains the PR URL, so
-	// the externalUrl pin is purely a header-level UX nicety.
+	// On PR open, pin externalUrls so Linear's AgentSession header
+	// deep-links to the 143 session. Best-effort like the rest of this
+	// method — the activity body already contains the PR URL, so the
+	// externalUrl pin is purely a header-level UX nicety.
+	//
+	// We only ship the 143 session URL today; the PR URL itself is in
+	// the activity body. A future iteration can resolve the GitHub PR
+	// URL via the PR store and add it here as a second entry, at which
+	// point the set genuinely deserves the slice shape.
 	if in.Event == MilestonePROpened && in.PRNumber > 0 {
-		urls := []AgentSessionExternalURL{
-			{URL: s.SessionURL(in.Session.ID), Title: "143 session"},
-		}
-		// Linear renders externalUrls verbatim; if a PR URL hint exists
-		// we add it. Fetching the live URL is a future enhancement —
-		// for v1 the PR number is in the comment body and externalUrls
-		// just deep-links to 143.
-		_ = urls
 		_ = client.AgentSessionUpdate(ctx, AgentSessionUpdateInput{
 			AgentSessionID: row.LinearAgentSessionID,
-			ExternalURLs:   urls,
+			ExternalURLs: []AgentSessionExternalURL{
+				{URL: s.SessionURL(in.Session.ID), Title: "143 session"},
+			},
 		})
 	}
 

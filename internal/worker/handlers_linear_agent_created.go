@@ -153,7 +153,7 @@ func handleLinearAgentCreated(
 	// hooks know it's an external trigger, not a user-initiated run.
 	// PMApproach carries the issue body so run_agent has all the
 	// context it needs without re-fetching Linear data.
-	session := buildAgentSession(orgID, repoResult, issue, fetched, payload.LinearAgentSessionID)
+	session := buildAgentSession(orgID, repoResult, issue, fetched)
 	if err := deps.Stores.Sessions.Create(ctx, session); err != nil {
 		return fmt.Errorf("create session: %w", err)
 	}

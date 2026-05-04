@@ -22,7 +22,11 @@ import (
 type agentWriterFake struct {
 	*fakeLinearClient
 
-	mu               sync.Mutex
+	// agentMu guards the agent-specific counters below. Named to avoid
+	// shadowing fakeLinearClient.mu (which the embedded type uses for
+	// its own counters); a future test that locks the wrong mutex would
+	// otherwise produce a confusing race.
+	agentMu          sync.Mutex
 	agentCreateCalls int
 	agentCreateErr   error
 	agentCreateRet   AgentActivityResult
@@ -38,8 +42,8 @@ func newAgentWriterFake() *agentWriterFake {
 }
 
 func (f *agentWriterFake) AgentActivityCreate(_ context.Context, _ AgentActivityInput) (AgentActivityResult, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
+	f.agentMu.Lock()
+	defer f.agentMu.Unlock()
 	f.agentCreateCalls++
 	if f.agentCreateErr != nil {
 		return AgentActivityResult{}, f.agentCreateErr
@@ -48,8 +52,8 @@ func (f *agentWriterFake) AgentActivityCreate(_ context.Context, _ AgentActivity
 }
 
 func (f *agentWriterFake) AgentSessionUpdate(_ context.Context, in AgentSessionUpdateInput) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
+	f.agentMu.Lock()
+	defer f.agentMu.Unlock()
 	f.stateUpdateCalls++
 	f.stateUpdateLast = in
 	return nil
