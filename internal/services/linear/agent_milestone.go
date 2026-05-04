@@ -54,7 +54,7 @@ func (s *Service) HandleAgentMilestone(ctx context.Context, in MilestoneInput) e
 		return nil
 	}
 
-	activity, ok := MilestoneActivity(in.Event, in.PRNumber, s.SessionURL(in.Session.ID))
+	activity, ok := MilestoneActivity(in.Event, in.PRNumber)
 	if !ok {
 		// This milestone has no agent-side echo (e.g. MilestoneLinked,
 		// which is suppressed because the dispatcher already emitted a
@@ -77,7 +77,7 @@ func (s *Service) HandleAgentMilestone(ctx context.Context, in MilestoneInput) e
 		return nil
 	}
 
-	writer := NewAgentActivityWriter(client, s.agentActivities, s.logger)
+	writer := NewAgentActivityWriter(client, s.agentActivities, s.agentMetrics, s.logger)
 	if _, err := writer.Emit(ctx, EmitInput{
 		OrgID:             in.Session.OrgID,
 		AgentSessionRowID: row.ID,

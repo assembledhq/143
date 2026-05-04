@@ -40,6 +40,10 @@ type BuildDeps struct {
 	// invalidates the API-side lookup). Leave nil when only one Build call
 	// runs in the process — NewService will allocate a per-Service cache.
 	TeamKeyCache *TeamKeyCache
+	// AgentMetrics is the per-emit metrics recorder shared with the
+	// inbound dispatcher. Optional. Threaded through Build so the API
+	// router and worker bundle agree on a single recorder per process.
+	AgentMetrics AgentActivityMetricsRecorder
 }
 
 // TeamKeyCache exposes the concrete cache type so cmd/server/main.go can
@@ -135,6 +139,7 @@ func Build(deps BuildDeps) *Service {
 		TeamKeyCache:      teamKeyCache,
 		AgentSessions:     db.NewLinearAgentSessionStore(deps.Pool),
 		AgentActivities:   db.NewLinearAgentActivityLogStore(deps.Pool),
+		AgentMetrics:      deps.AgentMetrics,
 	})
 
 	if deps.Jobs != nil {

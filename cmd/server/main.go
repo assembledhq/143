@@ -1040,6 +1040,15 @@ func buildServices(
 	// post-link milestones (PR open / PR merged / etc.). Constructed via
 	// the shared Build helper so the API server (router.go) and the worker
 	// (here) wire the service identically.
+	//
+	// Inbound-agent metrics shared between Service.HandleAgentMilestone
+	// and (in MODE=all) the API router's dispatcher. Failure to register
+	// the OTel instruments is non-fatal — nil-safe RecordX helpers
+	// degrade to no-ops.
+	workerLinearAgentMetrics, mErr := metrics.NewLinearAgentMetrics()
+	if mErr != nil {
+		logger.Warn().Err(mErr).Msg("failed to register linear_agent metrics in worker; milestone emits will not record")
+	}
 	linearService := linear.Build(linear.BuildDeps{
 		Pool:         pool,
 		Logger:       logger,
@@ -1051,6 +1060,7 @@ func buildServices(
 		Orgs:         orgStore,
 		Jobs:         jobStore,
 		AppBaseURL:   cfg.FrontendURL,
+		AgentMetrics: workerLinearAgentMetrics,
 	})
 	prService.SetLinearMilestoneEnqueuer(linear.MilestoneEnqueuerFor(jobStore, logger))
 
@@ -1115,7 +1125,8 @@ func buildServices(
 			ClientForOrg: func(ctx context.Context, orgID uuid.UUID) (linear.Client, error) {
 				return linearService.ClientForOrg(ctx, orgID)
 			},
-			Logger: logger,
+			Metrics: workerLinearAgentMetrics,
+			Logger:  logger,
 		}
 	}
 	if sandboxAuthServer != nil {

@@ -63,7 +63,7 @@ func TestMilestoneActivity(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			activity, ok := MilestoneActivity(tc.event, tc.prNumber, "https://app.143.dev/sessions/abc")
+			activity, ok := MilestoneActivity(tc.event, tc.prNumber)
 			if ok != tc.wantOK {
 				t.Fatalf("MilestoneActivity ok=%v, want %v", ok, tc.wantOK)
 			}
