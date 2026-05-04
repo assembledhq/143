@@ -117,6 +117,11 @@ type Service struct {
 	// agentActivities backs the at-most-once activity log used by the
 	// AgentActivityWriter. Same nil-safety contract as agentSessions.
 	agentActivities *db.LinearAgentActivityLogStore
+	// agentMetrics is the per-emit observability recorder. Optional —
+	// nil means "no metrics", and the writer's nil-safe recordEmit
+	// silently no-ops. Threaded through the Service so HandleAgentMilestone
+	// and the worker handler share a single recorder per process.
+	agentMetrics AgentActivityMetricsRecorder
 }
 
 // jobEnqueuerHolder / linksChangedHolder wrap the function values stored in
@@ -241,6 +246,15 @@ type FetchedIssue struct {
 	TeamKey          string
 	TeamName         string
 	WorkspaceSlug    string
+	// ProjectID is the Linear project id when the issue belongs to one.
+	// Empty when the issue is not in a project. Used by the inbound agent
+	// repo resolver to pick a per-project mapping over the team default.
+	ProjectID string
+	// Labels is the issue's full label set (verbatim names; case
+	// preserved). Powers the `repo:<full-name>` override in the inbound
+	// agent resolver. Bounded to 50 by the GraphQL query — issues with
+	// more labels than that are not a realistic use case.
+	Labels           []string
 	RepositoryID     *uuid.UUID
 	Comments         []FetchedComment
 	Attachments      []FetchedAttachment
@@ -347,6 +361,9 @@ type Config struct {
 	// existing outbound flow stays unaffected.
 	AgentSessions   *db.LinearAgentSessionStore
 	AgentActivities *db.LinearAgentActivityLogStore
+	// AgentMetrics is the per-emit observability recorder shared with
+	// the inbound dispatcher. Optional; nil means "no metrics".
+	AgentMetrics AgentActivityMetricsRecorder
 }
 
 func NewService(cfg Config) *Service {
@@ -371,6 +388,7 @@ func NewService(cfg Config) *Service {
 		appBaseURL:        strings.TrimRight(cfg.AppBaseURL, "/"),
 		agentSessions:     cfg.AgentSessions,
 		agentActivities:   cfg.AgentActivities,
+		agentMetrics:      cfg.AgentMetrics,
 	}
 }
 

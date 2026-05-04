@@ -277,6 +277,35 @@ func (s *LinearAgentSessionStore) SetState(ctx context.Context, orgID, agentSess
 	return nil
 }
 
+// ListByOrg returns the most-recently-updated agent sessions for one org,
+// bounded by limit. The operator debug surface uses this rather than the
+// cross-org ListPendingForRecovery path so a busy multi-tenant deploy
+// doesn't pay to scan rows for unrelated orgs.
+//
+// Uses idx_linear_agent_sessions_org_state_recent for the org-scoped scan;
+// the index includes `state` so a future filter ("only show in_progress
+// sessions") stays cheap.
+func (s *LinearAgentSessionStore) ListByOrg(ctx context.Context, orgID uuid.UUID, limit int) ([]LinearAgentSession, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	rows, err := s.db.Query(ctx, `
+		SELECT id, org_id, integration_id, linear_agent_session_id,
+		       linear_issue_id, linear_issue_identifier,
+		       linear_app_user_id, linear_creator_user_id,
+		       session_id, state, last_event_received_at,
+		       created_at, updated_at
+		FROM linear_agent_sessions
+		WHERE org_id = @org_id
+		ORDER BY updated_at DESC
+		LIMIT @limit`,
+		pgx.NamedArgs{"org_id": orgID, "limit": limit})
+	if err != nil {
+		return nil, fmt.Errorf("list linear_agent_sessions by org: %w", err)
+	}
+	return pgx.CollectRows(rows, pgx.RowToStructByName[LinearAgentSession])
+}
+
 // ListPendingForRecovery returns rows whose state is pending or in_progress
 // and that haven't been touched in the given window. Used by the recovery
 // sweeper to find AgentSessions whose worker job died mid-flight (e.g. a
