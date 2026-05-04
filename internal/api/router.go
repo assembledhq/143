@@ -41,7 +41,7 @@ import (
 	"github.com/assembledhq/143/internal/services/workspace"
 )
 
-func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, sentryReporter observability.Reporter, codexAuthSvc *codexauth.Service, claudeCodeAuthSvc *claudecodeauth.Service, llmClient llm.Client, fileReader sandbox.FileReader, canceller handlers.SessionCanceller, previewProvider preview.PreviewCapableProvider, snapshotExecutor preview.SnapshotExecutor, sandboxProvider agent.SandboxProvider, snapshotStore storage.SnapshotStore, orgSettingsInvalidator handlers.OrgSettingsInvalidator, shutdownCh <-chan struct{}, redisClient *cache.Client, sessionStreams *cache.SessionStreams) (*chi.Mux, *http.Server, *preview.RecycleWorker, io.Closer, *preview.Manager, error) {
+func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, sentryReporter observability.Reporter, codexAuthSvc *codexauth.Service, claudeCodeAuthSvc *claudecodeauth.Service, llmClient llm.Client, fileReader sandbox.FileReader, canceller handlers.SessionCanceller, previewProvider preview.PreviewCapableProvider, snapshotExecutor preview.SnapshotExecutor, sandboxProvider agent.SandboxProvider, snapshotStore storage.SnapshotStore, orgSettingsInvalidator handlers.OrgSettingsInvalidator, shutdownCh <-chan struct{}, redisClient *cache.Client, sessionStreams *cache.SessionStreams, sharedCodingCredentialStore ...*db.CodingCredentialStore) (*chi.Mux, *http.Server, *preview.RecycleWorker, io.Closer, *preview.Manager, error) {
 	// Create stores
 	orgStore := db.NewOrganizationStore(pool)
 	userStore := db.NewUserStore(pool)
@@ -105,7 +105,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	}
 	credentialStore := db.NewOrgCredentialStore(pool, cryptoSvc)
 	userCredentialStore := db.NewUserCredentialStore(pool, cryptoSvc)
-	codingCredentialStore := db.NewCodingCredentialStore(pool, cryptoSvc)
+	codingCredentialStore := resolveRouterCodingCredentialStore(pool, cryptoSvc, sharedCodingCredentialStore...)
 	// Mirror legacy writes into the unified `coding_credentials` table during the
 	// migration window. Removed in the cleanup PR. See
 	// docs/design/future/65-unified-coding-credentials.md.
@@ -1000,4 +1000,11 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	r.Mount("/", apiRoutes)
 
 	return r, gwSrv, recycleWorker, inspectorCloser, previewManager, nil
+}
+
+func resolveRouterCodingCredentialStore(pool *pgxpool.Pool, cryptoSvc *crypto.Service, shared ...*db.CodingCredentialStore) *db.CodingCredentialStore {
+	if len(shared) > 0 && shared[0] != nil {
+		return shared[0]
+	}
+	return db.NewCodingCredentialStore(pool, cryptoSvc)
 }

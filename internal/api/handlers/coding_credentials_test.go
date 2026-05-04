@@ -783,6 +783,36 @@ func TestCodingCredentialHandlerUpdateRejectsClientSideActiveStatus(t *testing.T
 	require.False(t, storeCalled, "Update should reject active status before touching the store")
 }
 
+func TestCodingCredentialHandlerUpdateRejectsInvalidStatusBeforeRename(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	userID := uuid.New()
+	rowID := uuid.New()
+	var renameCalled bool
+
+	store := &mockCodingCredentialStore{
+		renameFn: func(context.Context, models.Scope, uuid.UUID, string) error {
+			renameCalled = true
+			return nil
+		},
+	}
+	handler := NewCodingCredentialHandler(store, nil)
+
+	req := httptest.NewRequest(http.MethodPatch, "/api/v1/coding-credentials/"+rowID.String(), bytes.NewBufferString(`{"scope":"personal","label":"Renamed","status":"pending_auth"}`))
+	req = withAdminUser(req, userID, orgID)
+	routeCtx := chi.NewRouteContext()
+	routeCtx.URLParams.Add("id", rowID.String())
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, routeCtx))
+	rr := httptest.NewRecorder()
+
+	handler.Update(rr, req)
+
+	require.Equal(t, http.StatusBadRequest, rr.Code, "Update should reject invalid status values")
+	require.Contains(t, rr.Body.String(), "INVALID_STATUS", "Update should return a stable invalid status error")
+	require.False(t, renameCalled, "Update should not rename when the same request has an invalid status")
+}
+
 func TestCodingCredentialHandlerUpdateBranches(t *testing.T) {
 	t.Parallel()
 

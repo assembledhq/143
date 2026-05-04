@@ -298,7 +298,7 @@ func main() {
 	// Closed when the process receives SIGTERM so long-lived handlers (SSE
 	// streams, etc.) can end their loops cleanly during graceful shutdown.
 	shutdownCh := make(chan struct{})
-	router, gwSrv, recycleWorker, inspectorCloser, previewManager, err := api.NewRouter(cfg, pool, logger, sentryReporter, codexAuthSvc, claudeCodeAuthSvc, llmClient, fileReader, cancelRegistry, pvProvider, snapshotExec, apiSandboxProvider, apiSnapshotStore, orgSettingsCache, shutdownCh, redisClient, sessionStreams)
+	router, gwSrv, recycleWorker, inspectorCloser, previewManager, err := api.NewRouter(cfg, pool, logger, sentryReporter, codexAuthSvc, claudeCodeAuthSvc, llmClient, fileReader, cancelRegistry, pvProvider, snapshotExec, apiSandboxProvider, apiSnapshotStore, orgSettingsCache, shutdownCh, redisClient, sessionStreams, codingCredentialStore)
 	if err != nil {
 		logger.Fatal().Err(err).Msg("failed to initialize API router")
 	}

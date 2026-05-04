@@ -327,6 +327,12 @@ func (h *CodingCredentialHandler) Update(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	if input.Status != nil && !isAllowedHandlerStatus(*input.Status) {
+		writeError(w, r, http.StatusBadRequest, "INVALID_STATUS",
+			"status must be one of: disabled, invalid (active and pending_auth are set by verification flows)")
+		return
+	}
+
 	if input.Label != nil {
 		if err := h.store.Rename(r.Context(), scope, id, *input.Label); err != nil {
 			h.handleStoreError(w, r, err, "RENAME_FAILED")
@@ -338,11 +344,6 @@ func (h *CodingCredentialHandler) Update(w http.ResponseWriter, r *http.Request)
 		// Activation belongs to provider-specific verification/completion
 		// flows, never a generic PATCH, otherwise a user could mark an invalid
 		// or PKCE-only credential runnable without proving the secret works.
-		if !isAllowedHandlerStatus(*input.Status) {
-			writeError(w, r, http.StatusBadRequest, "INVALID_STATUS",
-				"status must be one of: disabled, invalid (active and pending_auth are set by verification flows)")
-			return
-		}
 		if err := h.store.UpdateStatus(r.Context(), scope, id, *input.Status); err != nil {
 			h.handleStoreError(w, r, err, "STATUS_FAILED")
 			return

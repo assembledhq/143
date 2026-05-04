@@ -160,6 +160,7 @@ LDFLAGS := -X github.com/assembledhq/143/internal/version.BuildSHA=$(BUILD_SHA)
 build:
 	go build -ldflags "$(LDFLAGS)" -o bin/server ./cmd/server
 	go build -o bin/migrate ./cmd/migrate
+	go build -o bin/migrate-coding-credentials-anthropic-split ./cmd/migrate-coding-credentials-anthropic-split
 
 frontend-dev:
 	cd frontend && npm run dev
