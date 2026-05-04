@@ -28,6 +28,7 @@ import (
 	"github.com/assembledhq/143/internal/prompts"
 	"github.com/assembledhq/143/internal/services/agent"
 	"github.com/assembledhq/143/internal/services/github/identity"
+	"github.com/assembledhq/143/internal/services/sandboxauth"
 	"github.com/assembledhq/143/internal/services/storage"
 )
 
@@ -77,8 +78,9 @@ type PRService struct {
 	prHealthStreams  *cache.PullRequestStreams
 	llmClient        llm.Client
 	audit            *db.AuditEmitter
-	sandboxProvider  agent.SandboxProvider // used by the push-based PR flow
-	snapshots        storage.SnapshotStore // used by the push-based PR flow
+	sandboxProvider  agent.SandboxProvider   // used by the push-based PR flow
+	snapshots        storage.SnapshotStore   // used by the push-based PR flow
+	sandboxAuth      agent.SandboxAuthServer // per-push GitHub credential socket; required for the push-based PR flow
 	logger           zerolog.Logger
 	baseURL          string
 	appBaseURL       string
@@ -240,6 +242,18 @@ func (s *PRService) SetPreviewTeardown(previews *db.PreviewStore, stopper Previe
 func (s *PRService) SetSandboxPushDeps(provider agent.SandboxProvider, snapshots storage.SnapshotStore) {
 	s.sandboxProvider = provider
 	s.snapshots = snapshots
+}
+
+// SetSandboxAuth wires the per-session credential socket bridge used to
+// authenticate `git push` from the pr_push sandbox. The push sandbox is
+// hydrated from a snapshot whose .git/config carries
+// `credential.helper=!143-tools git-credential` (set by git-bootstrap during
+// the original agent run); the helper expects _143_AUTH_SOCK to point at a
+// listening socket. Without one wired here, the helper exits non-zero and the
+// push fails. Required for CreatePR / PushChangesToPR; if nil, both return a
+// configuration error.
+func (s *PRService) SetSandboxAuth(server agent.SandboxAuthServer) {
+	s.sandboxAuth = server
 }
 
 func (s *PRService) SetPullRequestStreams(streams *cache.PullRequestStreams) {
@@ -522,7 +536,7 @@ func (s *PRService) CreatePR(ctx context.Context, run *models.Session, params ..
 		}
 	}
 
-	pushed, err := s.pushSessionBranch(ctx, run, &repo, token, *run.SnapshotKey, branchName, commitMsg, authorName, authorEmail)
+	pushed, err := s.pushSessionBranch(ctx, run, &repo, orgSettings, *run.SnapshotKey, branchName, commitMsg, authorName, authorEmail)
 	if err != nil {
 		return nil, err
 	}
@@ -755,11 +769,17 @@ func (s *PRService) PushChangesToPR(ctx context.Context, run *models.Session, pa
 		}
 	}
 
+	// Resolve identity for the commit name/email and the co-author trailer.
+	// The push token itself is supplied to git inside the sandbox by the
+	// per-session credential socket (see pushSessionBranch); we only need
+	// resolution.Token here for the GitHub REST calls below — none in this
+	// flow, but PushChangesToPR resolves anyway so the resolver's user-token
+	// validation runs (and returns a clear error to the UI) before we open
+	// a sandbox.
 	resolution, err := s.resolveToken(ctx, run, &repo, orgSettings, opts.AuthorMode)
 	if err != nil {
 		return nil, fmt.Errorf("resolve token: %w", err)
 	}
-	token := resolution.Token
 
 	// Use the persisted head_ref captured at PR-creation time. Guarded by the
 	// ErrLegacyPRMissingHeadRef check above, so we know it's set here.
@@ -774,7 +794,7 @@ func (s *PRService) PushChangesToPR(ctx context.Context, run *models.Session, pa
 		}
 	}
 
-	pushed, err := s.pushSessionBranch(ctx, run, &repo, token, *run.SnapshotKey, branchName, commitMsg, authorName, authorEmail)
+	pushed, err := s.pushSessionBranch(ctx, run, &repo, orgSettings, *run.SnapshotKey, branchName, commitMsg, authorName, authorEmail)
 	if err != nil {
 		return nil, err
 	}
@@ -938,9 +958,15 @@ func (s *PRService) SyncSessionTitle(ctx context.Context, session *models.Sessio
 // container, stages + commits any uncommitted changes, and pushes HEAD to a
 // new remote branch. The sandbox is always destroyed on return.
 //
-// The GitHub token is never passed via argv or URL. It's written to a file
-// inside the sandbox and read by a GIT_ASKPASS helper, so `ps` inside the
-// container shows only a plain https URL with no credentials.
+// Authentication comes from the per-session credential socket, not from argv
+// or URL. The sandbox snapshot already has
+// `credential.helper=!143-tools git-credential` baked into .git/config (set by
+// git-bootstrap during the original agent run); we open a fresh listener
+// keyed by a per-push UUID and bind-mount it into the container so the helper
+// resolves to a live token. Using a per-push UUID (rather than the session
+// ID) avoids kicking the agent run's listener — important when a preview
+// hold is keeping the agent's container alive across turns.
+//
 // pushResult captures what pushSessionBranch produced on a successful push:
 // the new HEAD SHA from the remote (parsed from the script's stdout sentinel),
 // and an optional snapshot of the post-push sandbox spooled to a local temp
@@ -959,17 +985,39 @@ func (s *PRService) pushSessionBranch(
 	ctx context.Context,
 	run *models.Session,
 	repo *models.Repository,
-	token, snapshotKey, branchName, commitMsg, authorName, authorEmail string,
+	orgSettings models.OrgSettings,
+	snapshotKey, branchName, commitMsg, authorName, authorEmail string,
 ) (*pushResult, error) {
+	if s.sandboxAuth == nil {
+		return nil, fmt.Errorf("PRService: sandbox auth socket not configured")
+	}
+
 	cfg := agent.DefaultSandboxConfig()
 	cfg.SessionID = run.ID.String()
 	cfg.OrgID = run.OrgID.String()
 	cfg.Purpose = "pr_push"
+	if cfg.Env == nil {
+		cfg.Env = map[string]string{}
+	}
 	// Mirror the workspace layout used at session start so restore overlays
 	// the snapshot onto the path git already has recorded in .git/config.
 	if slug := agent.SlugForRepo(repo.FullName); slug != "" {
 		cfg.WorkDir = fmt.Sprintf("%s/%s", cfg.HomeDir, slug)
 	}
+
+	// Open a per-push credential listener. Keyed by a fresh UUID so it can't
+	// collide with the agent run's listener (still active when a preview is
+	// holding the original container alive across turns).
+	pushID := uuid.New()
+	socketPath, err := s.sandboxAuth.Listen(ctx, pushID, run, repo, orgSettings)
+	if err != nil {
+		return nil, fmt.Errorf("open sandbox auth socket: %w", err)
+	}
+	defer s.sandboxAuth.Close(pushID)
+	cfg.AuthSocketPath = socketPath
+	cfg.Env[sandboxauth.SocketEnvVar] = sandboxauth.SandboxSocketPath
+	cfg.Env[sandboxauth.GitNameEnvVar] = authorName
+	cfg.Env[sandboxauth.GitEmailEnvVar] = authorEmail
 
 	sandbox, err := agent.HydrateSandboxFromSnapshot(ctx, s.sandboxProvider, s.snapshots, snapshotKey, cfg)
 	if err != nil {
@@ -988,20 +1036,14 @@ func (s *PRService) pushSessionBranch(
 		}
 	}()
 
-	// Write the commit message, credential, and askpass helper to files.
-	// Passing the credential via file keeps it out of argv and shell history.
+	// Commit message goes to a file so multi-line / hostile content can't
+	// leak through argv. Token goes via the helper socket — no token files,
+	// no askpass shell stub.
 	if err := s.sandboxProvider.WriteFile(ctx, sandbox, pushCommitMsgPath, []byte(commitMsg)); err != nil {
 		return nil, fmt.Errorf("write commit message to sandbox: %w", err)
 	}
-	if err := s.sandboxProvider.WriteFile(ctx, sandbox, pushInputPath, []byte(token)); err != nil {
-		return nil, fmt.Errorf("write credential to sandbox: %w", err)
-	}
-	helperScript := "#!/bin/sh\nexec cat " + shellQuote(pushInputPath) + "\n"
-	if err := s.sandboxProvider.WriteFile(ctx, sandbox, pushHelperPath, []byte(helperScript)); err != nil {
-		return nil, fmt.Errorf("write push helper to sandbox: %w", err)
-	}
 
-	pushURL := fmt.Sprintf("https://x-access-token@github.com/%s.git", repo.FullName)
+	pushURL := fmt.Sprintf("https://github.com/%s.git", repo.FullName)
 	script := buildPushScript(sandbox.WorkDir, authorName, authorEmail, branchName, pushURL)
 
 	var stdout, stderr bytes.Buffer
@@ -1016,9 +1058,6 @@ func (s *PRService) pushSessionBranch(
 		return nil, ErrNoChanges
 	default:
 		msg := strings.TrimSpace(stderr.String())
-		// Defense in depth: if the token ever leaks into stderr (e.g. via a
-		// future code path that reintroduces it), scrub before returning.
-		msg = strings.ReplaceAll(msg, token, "***")
 		if msg == "" {
 			msg = "(no stderr)"
 		}
@@ -1109,16 +1148,10 @@ func (s *PRService) captureSandboxSnapshot(ctx context.Context, sandbox *agent.S
 	return path, size, nil
 }
 
-// Sandbox-internal paths used by the push flow. Under /tmp so they're
-// auto-cleaned on sandbox destroy; the trap inside the script also removes
-// them explicitly on exit for defense in depth.
-const (
-	pushCommitMsgPath = "/tmp/143-pr-commit-msg"
-	pushInputPath     = "/tmp/143-pr-input"
-	// /tmp is mounted noexec in sandbox containers; the askpass helper must
-	// live on the exec-allowed scratch tmpfs so git can invoke it.
-	pushHelperPath = "/var/tmp/143-pr-helper.sh"
-)
+// pushCommitMsgPath is the in-sandbox file the script reads `git commit -F`
+// from. Under /tmp so it's auto-cleaned on sandbox destroy; the trap inside
+// the script also removes it explicitly on exit for defense in depth.
+const pushCommitMsgPath = "/tmp/143-pr-commit-msg"
 
 // pushExitNoChanges is the sentinel exit code the push script uses when the
 // restored working tree has no uncommitted changes AND no commits ahead of
@@ -1133,36 +1166,32 @@ const pushHeadSHASentinel = "__143_HEAD_SHA="
 
 // pushScriptTemplate is the shell script executed inside the restored
 // sandbox. All variable interpolations are pre-quoted by the caller (see
-// buildPushScript) so they're safe to embed directly. The credential is read
-// by the `GIT_ASKPASS` helper from pushInputPath — it never appears in argv.
-//
-// The cleanup function is hoisted into a shell function rather than inlined
-// in the trap because `trap 'rm -f %[1]s ...'` would interleave single-
-// quoted strings in a way that works but is fragile to reason about.
+// buildPushScript) so they're safe to embed directly. Authentication comes
+// from credential.helper=!143-tools git-credential (already in the snapshot's
+// .git/config) talking to the per-push host socket bridge — no token files,
+// no GIT_ASKPASS, no userinfo in the URL.
 //
 // On the success branch (push lands), the script prints
 // `__143_HEAD_SHA=<sha>` so the caller can persist the just-pushed commit
 // onto the PullRequest row without a second GitHub round-trip. The line is
-// only emitted on the success branch — the `exit %[7]d` no-changes contract
-// is unchanged.
+// only emitted on the success branch — the no-changes contract is unchanged.
 const pushScriptTemplate = `set -eu
-cleanup() { rm -f %[1]s %[2]s %[3]s; }
+cleanup() { rm -f %[1]s; }
 trap cleanup EXIT
-cd %[4]s
-git config user.name %[5]s
-git config user.email %[6]s
+cd %[2]s
+git config user.name %[3]s
+git config user.email %[4]s
 git add -A
 if ! git diff --cached --quiet; then
     git commit -F %[1]s
 fi
 if git rev-parse --abbrev-ref --symbolic-full-name @{u} >/dev/null 2>&1; then
     if git merge-base --is-ancestor HEAD @{u}; then
-        exit %[7]d
+        exit %[5]d
     fi
 fi
-chmod +x %[3]s
-GIT_ASKPASS=%[3]s GIT_TERMINAL_PROMPT=0 git push %[8]s HEAD:refs/heads/%[9]s
-echo "%[10]s$(git rev-parse HEAD)"
+git push %[6]s HEAD:refs/heads/%[7]s
+echo "%[8]s$(git rev-parse HEAD)"
 `
 
 // buildPushScript renders pushScriptTemplate with caller-supplied values.
@@ -1173,8 +1202,6 @@ func buildPushScript(workDir, authorName, authorEmail, branchName, pushURL strin
 	return fmt.Sprintf(
 		pushScriptTemplate,
 		shellQuote(pushCommitMsgPath),
-		shellQuote(pushInputPath),
-		shellQuote(pushHelperPath),
 		shellQuote(workDir),
 		shellQuote(authorName),
 		shellQuote(authorEmail),
