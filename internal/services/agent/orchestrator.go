@@ -172,6 +172,10 @@ type ClaudeCodeAuthProvider interface {
 	GetValidToken(ctx context.Context, orgID uuid.UUID) (*models.AnthropicSubscription, *uuid.UUID, error)
 }
 
+type ClaudeCodeAuthRefresher interface {
+	RefreshTokenByID(ctx context.Context, orgID uuid.UUID, credID uuid.UUID) (*models.AnthropicSubscription, error)
+}
+
 // CredentialProvider abstracts retrieving org-scoped provider credentials.
 type CredentialProvider interface {
 	Get(ctx context.Context, orgID uuid.UUID, provider models.ProviderName) (*models.DecryptedCredential, error)
@@ -182,6 +186,16 @@ type CredentialProvider interface {
 type UserCredentialProvider interface {
 	GetForUser(ctx context.Context, orgID, userID uuid.UUID, provider models.ProviderName) (*models.DecryptedUserCredential, error)
 	GetTeamDefault(ctx context.Context, orgID uuid.UUID, provider models.ProviderName) (*models.DecryptedUserCredential, error)
+}
+
+// CodingCredentialProvider abstracts the unified coding-credentials resolver.
+// Returns the ordered (personal-then-org, priority-within-scope) list of
+// runnable credentials for a (orgID, userID, provider) triple. The unified
+// store is the source of truth post-migration; AgentEnv.resolveProviderConfig
+// prefers this when wired, falling back to the legacy 3-step cascade only if
+// nothing comes back.
+type CodingCredentialProvider interface {
+	ListResolvable(ctx context.Context, orgID uuid.UUID, userID *uuid.UUID, provider models.ProviderName) ([]models.DecryptedCodingCredential, error)
 }
 
 // UserLookup fetches a user record. Used by the orchestrator to materialize
@@ -432,12 +446,13 @@ type OrchestratorConfig struct {
 	CodexAuth         CodexAuthProvider      // optional — enables ChatGPT OAuth for Codex agent
 	ClaudeCodeAuth    ClaudeCodeAuthProvider // optional — enables Claude subscription OAuth for Claude Code agent
 	Credentials       CredentialProvider
-	Memory            MemoryService          // optional — injects learned memories into agent prompts
-	UserCredentials   UserCredentialProvider // optional — enables personal/team credential resolution
-	Snapshots         storage.SnapshotStore  // optional — enables multi-turn snapshot/restore
-	UsageTracker      UsageRecorder          // optional — enables billing observability
-	Cancels           *CancelRegistry        // optional — enables session cancellation from API
-	OrgSettingsCache  *OrgSettingsCache      // optional — caches Amp/Pi agent_config lookups across session starts
+	Memory            MemoryService            // optional — injects learned memories into agent prompts
+	UserCredentials   UserCredentialProvider   // optional — enables legacy personal/team credential resolution
+	CodingCredentials CodingCredentialProvider // optional — preferred unified resolver; consulted before the legacy cascade
+	Snapshots         storage.SnapshotStore    // optional — enables multi-turn snapshot/restore
+	UsageTracker      UsageRecorder            // optional — enables billing observability
+	Cancels           *CancelRegistry          // optional — enables session cancellation from API
+	OrgSettingsCache  *OrgSettingsCache        // optional — caches Amp/Pi agent_config lookups across session starts
 	// Env owns env resolution + auth pre-flight + Codex auth injection,
 	// shared with the PM service. Optional: when nil, NewOrchestrator
 	// constructs an AgentEnv from the other OrchestratorConfig fields so
@@ -480,13 +495,14 @@ func NewOrchestrator(cfg OrchestratorConfig) *Orchestrator {
 	env := cfg.Env
 	if env == nil {
 		env = NewAgentEnv(AgentEnvDeps{
-			Credentials:      cfg.Credentials,
-			UserCredentials:  cfg.UserCredentials,
-			Orgs:             cfg.Orgs,
-			OrgSettingsCache: cfg.OrgSettingsCache,
-			CodexAuth:        cfg.CodexAuth,
-			Provider:         cfg.Provider,
-			Logger:           cfg.Logger,
+			Credentials:       cfg.Credentials,
+			UserCredentials:   cfg.UserCredentials,
+			CodingCredentials: cfg.CodingCredentials,
+			Orgs:              cfg.Orgs,
+			OrgSettingsCache:  cfg.OrgSettingsCache,
+			CodexAuth:         cfg.CodexAuth,
+			Provider:          cfg.Provider,
+			Logger:            cfg.Logger,
 		})
 	}
 
@@ -1573,11 +1589,11 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 	//      ANTHROPIC_API_KEY env var as the fallback.
 	switch run.AgentType {
 	case models.AgentTypeCodex:
-		if err := o.ensureCodexAuth(ctx, run, sandbox); err != nil {
+		if err := o.ensureCodexAuth(ctx, run, sandbox, sandboxCfg.Env); err != nil {
 			return err
 		}
 	case models.AgentTypeClaudeCode:
-		if err := o.ensureClaudeCodeAuth(ctx, run, sandbox); err != nil {
+		if err := o.ensureClaudeCodeAuth(ctx, run, sandbox, sandboxCfg.Env); err != nil {
 			return err
 		}
 	}
@@ -1602,7 +1618,13 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 	logWg.Wait()
 
 	// 10b. Retry once on token expiration for Codex agents.
-	result, err = o.retryOnTokenExpired(ctx, run.AgentType, run.OrgID, run.ID, nil, turnNumber, sandbox, adapter, execCtx, prompt, result, err, log)
+	result, err = o.retryOnTokenExpired(ctx, run.AgentType, run.OrgID, run.TriggeredByUserID, run.ID, nil, turnNumber, sandbox, adapter, execCtx, prompt, result, err, log)
+
+	// 10c. Shed the just-picked credential's in-process health-cache slot if
+	// the (possibly retried) result indicates a credential-level failure.
+	// No-ops cleanly for agent types whose auth flows do not pass through
+	// the unified resolver (e.g. Codex subscription via codexauth.Service).
+	o.shedOnRunResult(run.AgentType, run.OrgID, run.TriggeredByUserID, result, err, log)
 
 	// 11. Handle result.
 	stopReason := StopReasonNone
@@ -2304,11 +2326,11 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		// container without agent credentials).
 		switch session.AgentType {
 		case models.AgentTypeCodex:
-			if err := o.ensureCodexAuth(ctx, session, sandbox); err != nil {
+			if err := o.ensureCodexAuth(ctx, session, sandbox, sandboxCfg.Env); err != nil {
 				return err
 			}
 		case models.AgentTypeClaudeCode:
-			if err := o.ensureClaudeCodeAuth(ctx, session, sandbox); err != nil {
+			if err := o.ensureClaudeCodeAuth(ctx, session, sandbox, sandboxCfg.Env); err != nil {
 				return err
 			}
 		}
@@ -2386,7 +2408,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		// reconstruct the prior state.
 		log.Info().Msg("continuing session without snapshot, starting fresh")
 
-		issue, repoFullName, err := o.setupFreshSandbox(ctx, session, sandbox)
+		issue, repoFullName, err := o.setupFreshSandbox(ctx, session, sandbox, sandboxCfg.Env)
 		if err != nil {
 			o.failRun(ctx, session, fmt.Sprintf("setup fresh sandbox: %s", err))
 			return fmt.Errorf("setup fresh sandbox: %w", err)
@@ -2463,7 +2485,12 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	logWg.Wait()
 
 	// 6b. Retry once on token expiration for Codex agents.
-	result, err = o.retryOnTokenExpired(ctx, session.AgentType, session.OrgID, session.ID, threadID, turnNumber, sandbox, adapter, execCtx, prompt, result, err, log)
+	result, err = o.retryOnTokenExpired(ctx, session.AgentType, session.OrgID, session.TriggeredByUserID, session.ID, threadID, turnNumber, sandbox, adapter, execCtx, prompt, result, err, log)
+
+	// 6c. Shed the just-picked credential when the (post-retry) result shows
+	// rate-limit or auth-rejected signals. Same semantics as the entry-turn
+	// path above; see shedOnRunResult.
+	o.shedOnRunResult(session.AgentType, session.OrgID, session.TriggeredByUserID, result, err, log)
 
 	stopReason := StopReasonNone
 	if o.cancels != nil {
@@ -2551,7 +2578,9 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 // setupFreshSandbox clones the session's repository into the sandbox when no
 // snapshot is available. Returns the issue (for prompt building) and the repo
 // full name (for memory lookup). Handles sessions with or without a repository.
-func (o *Orchestrator) setupFreshSandbox(ctx context.Context, session *models.Session, sandbox *Sandbox) (models.Issue, string, error) {
+// The resolved env is passed in from the caller so auth injection honors the
+// exact credential selection already baked into SandboxConfig.
+func (o *Orchestrator) setupFreshSandbox(ctx context.Context, session *models.Session, sandbox *Sandbox, env map[string]string) (models.Issue, string, error) {
 	var issue models.Issue
 	if session.PrimaryIssueID != nil {
 		fetched, err := o.issues.GetByID(ctx, session.OrgID, *session.PrimaryIssueID)
@@ -2606,15 +2635,11 @@ func (o *Orchestrator) setupFreshSandbox(ctx context.Context, session *models.Se
 	// Inject auth credentials into the sandbox.
 	switch session.AgentType {
 	case models.AgentTypeCodex:
-		injected, err := o.env.InjectCodexAuth(ctx, session.OrgID, sandbox)
-		if err != nil {
+		if err := o.ensureCodexAuth(ctx, session, sandbox, env); err != nil {
 			return models.Issue{}, "", fmt.Errorf("codex auth injection: %w", err)
 		}
-		if !injected {
-			return models.Issue{}, "", fmt.Errorf("no credentials for codex agent")
-		}
 	case models.AgentTypeClaudeCode:
-		if err := o.ensureClaudeCodeAuth(ctx, session, sandbox); err != nil {
+		if err := o.ensureClaudeCodeAuth(ctx, session, sandbox, env); err != nil {
 			return models.Issue{}, "", fmt.Errorf("claude code auth injection: %w", err)
 		}
 	}
@@ -2986,8 +3011,12 @@ func (o *Orchestrator) failTimedOutSession(run *models.Session, elapsed time.Dur
 
 // ensureCodexAuth injects Codex auth credentials into the sandbox, failing the
 // run with a codex_auth_expired category if injection fails or no creds exist.
-func (o *Orchestrator) ensureCodexAuth(ctx context.Context, run *models.Session, sandbox *Sandbox) error {
-	injected, err := o.env.InjectCodexAuth(ctx, run.OrgID, sandbox)
+func (o *Orchestrator) ensureCodexAuth(ctx context.Context, run *models.Session, sandbox *Sandbox, env map[string]string) error {
+	if env["OPENAI_API_KEY"] != "" && o.env != nil && o.env.unifiedCodingCredentialIsAPIKey(ctx, run.OrgID, run.TriggeredByUserID, models.ProviderOpenAI) {
+		return nil
+	}
+
+	injected, err := o.env.InjectCodexAuthForUser(ctx, run.OrgID, run.TriggeredByUserID, sandbox)
 	if err != nil {
 		o.failRunWithCategory(ctx, run,
 			fmt.Sprintf("codex auth injection failed: %s", err),
@@ -3124,6 +3153,10 @@ func (o *Orchestrator) injectClaudeCodeAuth(ctx context.Context, orgID uuid.UUID
 		return false, nil
 	}
 
+	return o.writeClaudeCodeAuth(ctx, orgID, sandbox, *sub)
+}
+
+func (o *Orchestrator) writeClaudeCodeAuth(ctx context.Context, orgID uuid.UUID, sandbox *Sandbox, sub models.AnthropicSubscription) (bool, error) {
 	oauthPayload := map[string]interface{}{
 		"accessToken":  sub.AccessToken,
 		"refreshToken": sub.RefreshToken,
@@ -3181,13 +3214,100 @@ func (o *Orchestrator) injectClaudeCodeAuth(ctx context.Context, orgID uuid.UUID
 	return true, nil
 }
 
+func (o *Orchestrator) injectUnifiedClaudeCodeAuth(ctx context.Context, orgID uuid.UUID, userID *uuid.UUID, sandbox *Sandbox) (bool, error) {
+	if o.env == nil || o.env.codingCredentials == nil {
+		return false, nil
+	}
+
+	if picked, ok := o.env.lookupRecentCredential(orgID, userID, models.ProviderAnthropic); ok {
+		return o.injectPickedUnifiedClaudeCodeAuth(ctx, orgID, sandbox, picked)
+	}
+
+	_, picked, handled := o.env.pickFromCodingProviderSet(ctx, orgID, userID, models.ProviderAnthropic, []models.ProviderName{
+		models.ProviderAnthropic,
+		models.ProviderAnthropicSubscription,
+	})
+	if !handled || picked == nil {
+		return false, nil
+	}
+	return o.injectPickedUnifiedClaudeCodeAuth(ctx, orgID, sandbox, *picked)
+}
+
+func (o *Orchestrator) injectPickedUnifiedClaudeCodeAuth(ctx context.Context, orgID uuid.UUID, sandbox *Sandbox, picked models.DecryptedCodingCredential) (bool, error) {
+	if picked.Provider != models.ProviderAnthropicSubscription {
+		return false, nil
+	}
+	cfg, ok := picked.Config.(models.AnthropicSubscriptionConfig)
+	if !ok || cfg.AccessToken == "" || cfg.RefreshToken == "" {
+		return false, nil
+	}
+	sub := models.AnthropicSubscription{
+		AccessToken:   cfg.AccessToken,
+		RefreshToken:  cfg.RefreshToken,
+		ExpiresAt:     cfg.ExpiresAt,
+		AccountType:   cfg.AccountType,
+		RateLimitTier: cfg.RateLimitTier,
+		Scopes:        cfg.Scopes,
+	}
+	if sub.NeedsRefresh(codexSubscriptionRefreshWindow) {
+		refresher, ok := o.claudeCodeAuth.(ClaudeCodeAuthRefresher)
+		if ok {
+			refreshed, err := refresher.RefreshTokenByID(ctx, orgID, picked.ID)
+			if err == nil && refreshed != nil {
+				sub = *refreshed
+			} else if sub.IsExpired() {
+				if err != nil {
+					return false, fmt.Errorf("refresh unified claude subscription %s: %w", picked.ID, err)
+				}
+				return false, fmt.Errorf("refresh unified claude subscription %s returned no token", picked.ID)
+			} else if err != nil {
+				o.logger.Warn().
+					Err(err).
+					Str("cred_id", picked.ID.String()).
+					Msg("unified claude subscription refresh failed; using cached token")
+			}
+		} else if sub.IsExpired() {
+			return false, fmt.Errorf("unified claude subscription %s is expired and no refresh provider is configured", picked.ID)
+		}
+	}
+	return o.writeClaudeCodeAuth(ctx, orgID, sandbox, sub)
+}
+
 // ensureClaudeCodeAuth guarantees that the Claude Code agent has at least one
-// credential path available in the sandbox. Priority is subscription file >
-// ANTHROPIC_API_KEY env var; the run only fails when neither is configured.
-func (o *Orchestrator) ensureClaudeCodeAuth(ctx context.Context, run *models.Session, sandbox *Sandbox) error {
-	injected, err := o.injectClaudeCodeAuth(ctx, run.OrgID, sandbox)
+// credential path available in the sandbox. When the unified resolver selected
+// an API key, that key wins; otherwise subscription file injection is preferred
+// over the legacy ANTHROPIC_API_KEY fallback. The run only fails when neither
+// path is configured.
+func (o *Orchestrator) ensureClaudeCodeAuth(ctx context.Context, run *models.Session, sandbox *Sandbox, env map[string]string) error {
+	if env["ANTHROPIC_API_KEY"] != "" && o.env != nil && o.env.unifiedCodingCredentialIsAPIKey(ctx, run.OrgID, run.TriggeredByUserID, models.ProviderAnthropic) {
+		return nil
+	}
+
+	injected, err := o.injectUnifiedClaudeCodeAuth(ctx, run.OrgID, run.TriggeredByUserID, sandbox)
 	if err != nil {
-		if fallbackErr := o.prepareClaudeCodeAPIKeyFallback(ctx, run, sandbox); fallbackErr == nil {
+		if fallbackErr := o.prepareClaudeCodeAPIKeyFallback(ctx, run, sandbox, env); fallbackErr == nil {
+			o.logger.Warn().
+				Err(err).
+				Str("org_id", run.OrgID.String()).
+				Str("session_id", run.ID.String()).
+				Msg("unified claude subscription injection failed; continuing with Anthropic API-key fallback")
+			return nil
+		}
+		o.failRunWithCategory(ctx, run,
+			fmt.Sprintf("unified claude subscription injection failed: %s", err),
+			FailureCategoryClaudeCodeAuth,
+			"Your Claude subscription token could not be injected into the sandbox. The token may have been revoked or the refresh failed.",
+			[]string{"Re-connect your Claude subscription from the Agent settings page"},
+		)
+		return fmt.Errorf("unified claude code auth injection: %w", err)
+	}
+	if injected {
+		return nil
+	}
+
+	injected, err = o.injectClaudeCodeAuth(ctx, run.OrgID, sandbox)
+	if err != nil {
+		if fallbackErr := o.prepareClaudeCodeAPIKeyFallback(ctx, run, sandbox, env); fallbackErr == nil {
 			o.logger.Warn().
 				Err(err).
 				Str("org_id", run.OrgID.String()).
@@ -3218,7 +3338,7 @@ func (o *Orchestrator) ensureClaudeCodeAuth(ctx context.Context, run *models.Ses
 	// No subscription — check for an Anthropic API-key fallback. The env var
 	// was already baked into sandboxCfg.Env by resolveAgentEnv, so if the
 	// credential exists the sandbox is already configured.
-	if fallbackErr := o.prepareClaudeCodeAPIKeyFallback(ctx, run, sandbox); fallbackErr == nil {
+	if fallbackErr := o.prepareClaudeCodeAPIKeyFallback(ctx, run, sandbox, env); fallbackErr == nil {
 		return nil
 	} else if !errors.Is(fallbackErr, errClaudeCodeFallbackUnavailable) {
 		o.failRunWithCategory(ctx, run,
@@ -3244,10 +3364,8 @@ func (o *Orchestrator) ensureClaudeCodeAuth(ctx context.Context, run *models.Ses
 
 var errClaudeCodeFallbackUnavailable = errors.New("claude code API-key fallback unavailable")
 
-func (o *Orchestrator) prepareClaudeCodeAPIKeyFallback(ctx context.Context, run *models.Session, sandbox *Sandbox) error {
-	cfg := o.env.resolveProviderConfig(ctx, run.OrgID, run.TriggeredByUserID, models.ProviderAnthropic)
-	ac, ok := cfg.(models.AnthropicConfig)
-	if !ok || ac.APIKey == "" {
+func (o *Orchestrator) prepareClaudeCodeAPIKeyFallback(ctx context.Context, run *models.Session, sandbox *Sandbox, env map[string]string) error {
+	if env["ANTHROPIC_API_KEY"] == "" {
 		return errClaudeCodeFallbackUnavailable
 	}
 
@@ -3685,6 +3803,7 @@ func (o *Orchestrator) retryOnTokenExpired(
 	ctx context.Context,
 	agentType models.AgentType,
 	orgID uuid.UUID,
+	userID *uuid.UUID,
 	sessionID uuid.UUID,
 	threadID *uuid.UUID,
 	turnNumber int,
@@ -3702,7 +3821,7 @@ func (o *Orchestrator) retryOnTokenExpired(
 
 	log.Warn().Msg("codex CLI hit token_expired, refreshing token and retrying")
 
-	reinjected, reinjectErr := o.env.InjectCodexAuth(ctx, orgID, sandbox)
+	reinjected, reinjectErr := o.env.InjectCodexAuthForUser(ctx, orgID, userID, sandbox)
 	if reinjectErr != nil {
 		log.Warn().Err(reinjectErr).Msg("failed to re-inject codex auth for retry")
 		return result, err
@@ -3725,6 +3844,95 @@ func (o *Orchestrator) retryOnTokenExpired(
 
 	log.Info().Msg("codex CLI retry after token refresh completed")
 	return result, err
+}
+
+// shedOnRunResult forwards rate-limit / auth-rejected signals from a finished
+// run back into the unified credential store's in-process health cache so the
+// next pickFromCodingProvider walk for the same (orgID, userID, provider)
+// skips the just-failed credential until its TTL expires. The OAuth services
+// independently flip persisted credential status to "invalid" on hard auth
+// failures; this is the fast-path hint that prevents repeat picks before the
+// resolver cache refreshes.
+//
+// Provider mapping is intentionally limited to agent types whose API-key auth
+// flows go through AgentEnv.pickFromCodingProvider. Codex subscription auth
+// uses codexauth.Service's own selector; because that path records no
+// ProviderOpenAI pick, the shed call below remains a no-op for subscription
+// runs.
+func (o *Orchestrator) shedOnRunResult(agentType models.AgentType, orgID uuid.UUID, userID *uuid.UUID, result *AgentResult, runErr error, log zerolog.Logger) {
+	if o.env == nil || result == nil {
+		return
+	}
+	provider := codingProviderForAgent(agentType)
+	if provider == "" {
+		return
+	}
+	errMsg := strings.ToLower(result.Error)
+	switch {
+	case isAuthRejectedError(errMsg):
+		log.Warn().
+			Str("agent_type", string(agentType)).
+			Str("provider", string(provider)).
+			Msg("shedding credential after auth-rejected signal in run result")
+		o.env.ShedAuthRejected(orgID, userID, provider)
+	case isRateLimitedError(errMsg):
+		log.Warn().
+			Str("agent_type", string(agentType)).
+			Str("provider", string(provider)).
+			Msg("shedding credential after rate-limit signal in run result")
+		o.env.ShedRateLimited(orgID, userID, provider)
+	}
+	_ = runErr // accepted for symmetry with the call sites; the result.Error string is the canonical signal today
+}
+
+// codingProviderForAgent maps an agent type to the unified provider name its
+// API-key auth uses. Subscription picks are intentionally not represented
+// here; they do not write the recentPicks tracker under these providers.
+func codingProviderForAgent(agentType models.AgentType) models.ProviderName {
+	switch agentType {
+	case models.AgentTypeClaudeCode:
+		return models.ProviderAnthropic
+	case models.AgentTypeCodex:
+		return models.ProviderOpenAI
+	case models.AgentTypeGeminiCLI:
+		return models.ProviderGemini
+	case models.AgentTypeAmp:
+		return models.ProviderAmp
+	case models.AgentTypePi:
+		return models.ProviderPi
+	default:
+		return ""
+	}
+}
+
+// isRateLimitedError matches the same surface as the failure classifier so
+// shedding stays consistent with the user-facing api_error category.
+func isRateLimitedError(errMsg string) bool {
+	if errMsg == "" {
+		return false
+	}
+	return strings.Contains(errMsg, "rate limit") ||
+		strings.Contains(errMsg, "rate_limit") ||
+		strings.Contains(errMsg, "429") ||
+		strings.Contains(errMsg, "too many requests")
+}
+
+// isAuthRejectedError detects 401-class signals indicating the credential is
+// structurally bad (expired refresh, revoked, invalid key). Token-expired
+// transients are excluded because retryOnTokenExpired already refreshed and
+// retried; if that retry succeeded the result is clean, and if it failed the
+// error text shifts to the strings matched here.
+func isAuthRejectedError(errMsg string) bool {
+	if errMsg == "" {
+		return false
+	}
+	return strings.Contains(errMsg, "refresh_token_reused") ||
+		strings.Contains(errMsg, "invalid_grant") ||
+		strings.Contains(errMsg, "invalid api key") ||
+		strings.Contains(errMsg, "invalid_api_key") ||
+		strings.Contains(errMsg, "401 unauthorized") ||
+		strings.Contains(errMsg, "401 unauthenticated") ||
+		strings.Contains(errMsg, "authentication_error")
 }
 
 // containerExitReason determines a granular exit reason for billing metadata

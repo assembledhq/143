@@ -19,19 +19,32 @@ const (
 	ProviderAmp           ProviderName = "amp"
 	ProviderPi            ProviderName = "pi"
 	ProviderOpenAIChatGPT ProviderName = "openai_chatgpt"
-	ProviderOpenRouter    ProviderName = "openrouter"
-	ProviderGitHubApp     ProviderName = "github_app"
-	ProviderGitHubAppUser ProviderName = "github_app_user"
-	ProviderGitHubOAuth   ProviderName = "github_oauth"
-	ProviderSentry        ProviderName = "sentry"
-	ProviderLinear        ProviderName = "linear"
-	ProviderSlack         ProviderName = "slack"
-	ProviderNotion        ProviderName = "notion"
+	// ProviderOpenAISubscription is the canonical name for Codex subscription
+	// credentials on the unified coding_credentials table. ProviderOpenAIChatGPT
+	// is the legacy spelling used by the org_credentials table; it is kept until
+	// the cleanup PR drops it.
+	ProviderOpenAISubscription ProviderName = "openai_subscription"
+	// ProviderAnthropicSubscription is the canonical name for Claude Code
+	// subscription credentials on the unified coding_credentials table.
+	// Subscription tokens used to live inside AnthropicConfig.Subscription
+	// alongside ProviderAnthropic API keys; the unified table splits them into
+	// their own provider with a dedicated config struct.
+	ProviderAnthropicSubscription ProviderName = "anthropic_subscription"
+	ProviderOpenRouter            ProviderName = "openrouter"
+	ProviderGitHubApp             ProviderName = "github_app"
+	ProviderGitHubAppUser         ProviderName = "github_app_user"
+	ProviderGitHubOAuth           ProviderName = "github_oauth"
+	ProviderSentry                ProviderName = "sentry"
+	ProviderLinear                ProviderName = "linear"
+	ProviderSlack                 ProviderName = "slack"
+	ProviderNotion                ProviderName = "notion"
 )
 
 // AllProviders is the canonical list of credential providers.
 var AllProviders = []ProviderName{
-	ProviderAnthropic, ProviderOpenAI, ProviderGemini, ProviderAmp, ProviderPi, ProviderOpenAIChatGPT, ProviderOpenRouter,
+	ProviderAnthropic, ProviderAnthropicSubscription,
+	ProviderOpenAI, ProviderOpenAIChatGPT, ProviderOpenAISubscription,
+	ProviderGemini, ProviderAmp, ProviderPi, ProviderOpenRouter,
 	ProviderGitHubApp, ProviderGitHubAppUser, ProviderGitHubOAuth,
 	ProviderSentry, ProviderLinear, ProviderSlack, ProviderNotion,
 }
@@ -613,6 +626,18 @@ func ParseProviderConfig(provider ProviderName, data []byte) (ProviderConfig, er
 			return nil, fmt.Errorf("invalid openai_chatgpt config: %w", err)
 		}
 		return cfg, nil
+	case ProviderOpenAISubscription:
+		var cfg OpenAISubscriptionConfig
+		if err := json.Unmarshal(data, &cfg); err != nil {
+			return nil, fmt.Errorf("invalid openai_subscription config: %w", err)
+		}
+		return cfg, nil
+	case ProviderAnthropicSubscription:
+		var cfg AnthropicSubscriptionConfig
+		if err := json.Unmarshal(data, &cfg); err != nil {
+			return nil, fmt.Errorf("invalid anthropic_subscription config: %w", err)
+		}
+		return cfg, nil
 	case ProviderSlack:
 		var cfg SlackConfig
 		if err := json.Unmarshal(data, &cfg); err != nil {
@@ -823,9 +848,16 @@ type UpdateCodingAuthInput struct {
 	Label *string `json:"label,omitempty"`
 }
 
-// CodingAgentProviders lists the LLM providers used as coding agent credentials.
+// CodingAgentProviders lists the providers that can store a coding-agent
+// credential on the unified coding_credentials table. Every (agent, auth_type)
+// pair maps to exactly one entry: the API-key flavor and the subscription
+// flavor are distinct providers, never an optional embedded field on a shared
+// struct. Adding a new subscription provider is one append here plus one
+// ProviderConfig struct — no changes to stores, resolvers, or the generic UI.
 var CodingAgentProviders = []ProviderName{
-	ProviderAnthropic, ProviderOpenAI, ProviderGemini, ProviderAmp, ProviderPi, ProviderOpenRouter,
+	ProviderAnthropic, ProviderAnthropicSubscription,
+	ProviderOpenAI, ProviderOpenAISubscription,
+	ProviderGemini, ProviderAmp, ProviderPi, ProviderOpenRouter,
 }
 
 // MaskKey preserves the first 6 and last 4 characters of a key.
