@@ -123,4 +123,27 @@ func TestParseAndFormatRevisionContext(t *testing.T) {
 	require.Equal(t, "", FormatRevisionContextForContinuation(nil), "FormatRevisionContextForContinuation should return an empty string for nil input")
 	require.Equal(t, "", FormatRevisionContextForContinuation(&RevisionContext{}), "FormatRevisionContextForContinuation should return an empty string for empty revision context")
 	require.Equal(t, models.PullRequestRepairActionTypeFixTests, parsed.RepairAction, "ParseRevisionContext should decode the repair action type")
+
+	require.NotContains(t, formatted, "Conflict resolution guidance", "FormatRevisionContextForContinuation should not inject conflict guidance for fix_tests repair runs")
+}
+
+func TestFormatRevisionContextForContinuation_ResolveConflictsGuidance(t *testing.T) {
+	t.Parallel()
+
+	ctx := &RevisionContext{
+		RepairAction: models.PullRequestRepairActionTypeResolveConflicts,
+		RepairContext: &PullRequestRepairContext{
+			PullRequestNumber: 7,
+			Repository:        "assembledhq/143",
+			HeadSHA:           "headsha",
+			BaseSHA:           "basesha",
+			MergeState:        models.PullRequestMergeStateConflicted,
+			HasConflicts:      true,
+		},
+	}
+
+	formatted := FormatRevisionContextForContinuation(ctx)
+	require.Contains(t, formatted, "Conflict resolution guidance", "resolve_conflicts continuation should include the conflict guidance header")
+	require.Contains(t, formatted, "merge index", "resolve_conflicts continuation should warn that mid-merge git diff/status reflects the merge index")
+	require.Contains(t, formatted, "git diff basesha...HEAD", "resolve_conflicts continuation should reference the base SHA when verifying the net delta")
 }

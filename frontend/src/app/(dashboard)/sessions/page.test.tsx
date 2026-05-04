@@ -15,18 +15,20 @@ vi.mock('next/link', () => ({
 }));
 
 let mockPathname = '/sessions';
+let mockSelectedSegment: string | null = null;
 
 // Mock next/navigation
 vi.mock('next/navigation', () => ({
   useRouter: () => ({ push: vi.fn(), replace: vi.fn(), back: vi.fn() }),
   useSearchParams: () => new URLSearchParams(),
   usePathname: () => mockPathname,
-  useParams: () => ({}),
+  useSelectedLayoutSegment: () => mockSelectedSegment,
 }));
 
 describe('SessionSidebar', () => {
   beforeEach(() => {
     mockPathname = '/sessions';
+    mockSelectedSegment = null;
   });
 
   it('shows loading state initially', () => {
@@ -103,6 +105,7 @@ describe('SessionSidebar', () => {
 
   it('shows ghost New session entry when on /sessions/new', async () => {
     mockPathname = '/sessions/new';
+    mockSelectedSegment = 'new';
 
     renderWithProviders(<SessionSidebar />);
 

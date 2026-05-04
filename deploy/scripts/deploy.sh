@@ -160,8 +160,13 @@ if [ "$ROLE" = "worker" ]; then
   # hanging waiting for a password that CI can't provide.
   ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
     "sudo -n chown -R deploy:deploy /opt/143/deploy/scripts 2>&1 | sed 's/^/  chown: /' || true"
-  if ! scp "${SCP_OPTS[@]}" "$PROJECT_DIR/deploy/scripts/sandbox-firewall.sh" \
-      deploy@"$HOST":/opt/143/deploy/scripts/; then
+  # Stage to a .new path and atomically rename. Writing in place reuses the
+  # existing inode, which can yield ETXTBSY ("Text file busy") on the later
+  # `sudo sandbox-firewall.sh` exec if anything still holds the old inode
+  # open for write (lingering sftp-server FD, ssh ControlMaster, or a
+  # concurrent run). rename(2) gives the new contents a fresh inode.
+  if ! scp -p "${SCP_OPTS[@]}" "$PROJECT_DIR/deploy/scripts/sandbox-firewall.sh" \
+      deploy@"$HOST":/opt/143/deploy/scripts/sandbox-firewall.sh.new; then
     echo "ERROR: scp of sandbox-firewall.sh failed."
     echo "  Hint: the worker likely has root-owned files under /opt/143/deploy/scripts AND"
     echo "  the 'deploy' user lacks NOPASSWD sudo. One-time fix on the worker host:"
@@ -172,7 +177,9 @@ if [ "$ROLE" = "worker" ]; then
     echo "    2) Re-run the deploy."
     exit 1
   fi
-  ssh "${SSH_OPTS[@]}" deploy@"$HOST" "chmod +x /opt/143/deploy/scripts/sandbox-firewall.sh"
+  ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
+    "mv /opt/143/deploy/scripts/sandbox-firewall.sh.new /opt/143/deploy/scripts/sandbox-firewall.sh \
+     || { rm -f /opt/143/deploy/scripts/sandbox-firewall.sh.new; exit 1; }"
 fi
 
 ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
@@ -450,6 +457,8 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
   if [ "$ROLE" = "app" ]; then
     echo "Running database migrations..."
     docker compose -f "$COMPOSE_FILE" run --rm -T --no-deps api /bin/migrate up < /dev/null
+    echo "Running coding-credentials Anthropic split post-step..."
+    docker compose -f "$COMPOSE_FILE" run --rm -T --no-deps api /bin/migrate-coding-credentials-anthropic-split --allow-dual-set < /dev/null
   fi
 
   # Recreate out-of-band containers (vector, etc.) BEFORE the rolling deploy.

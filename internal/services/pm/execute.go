@@ -60,12 +60,14 @@ func (s *Service) executePlan(ctx context.Context, orgID uuid.UUID, plan *Plan, 
 			repoID = primaryIssue.RepositoryID
 		}
 
+		// SessionAutonomy is a per-run knob distinct from the org-level
+		// AutonomyLevel automation policy; see models.SessionAutonomy doc.
 		run := &models.Session{
 			PrimaryIssueID: &primaryIssueID,
 			OrgID:          orgID,
 			AgentType:      agentType,
 			Status:         "pending",
-			AutonomyLevel:  string(settings.AutonomyLevel),
+			AutonomyLevel:  string(models.DefaultSessionAutonomy),
 			TokenMode:      tokenModeFromComplexity(task.Complexity),
 			PMPlanID:       &plan.ID,
 			Title:          &task.Title,

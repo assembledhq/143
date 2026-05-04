@@ -147,7 +147,7 @@ describe("Agent settings page", () => {
             label: "Amp API key",
             scope: "organization",
             provider: "amp",
-            status: "never_verified",
+            status: "healthy",
             is_default: false,
             created_at: "2026-04-22T10:00:00Z",
             updated_at: "2026-04-22T10:00:00Z",

@@ -41,7 +41,7 @@ import (
 	"github.com/assembledhq/143/internal/services/workspace"
 )
 
-func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, sentryReporter observability.Reporter, codexAuthSvc *codexauth.Service, claudeCodeAuthSvc *claudecodeauth.Service, llmClient llm.Client, fileReader sandbox.FileReader, canceller handlers.SessionCanceller, previewProvider preview.PreviewCapableProvider, snapshotExecutor preview.SnapshotExecutor, sandboxProvider agent.SandboxProvider, snapshotStore storage.SnapshotStore, orgSettingsInvalidator handlers.OrgSettingsInvalidator, shutdownCh <-chan struct{}, redisClient *cache.Client, sessionStreams *cache.SessionStreams) (*chi.Mux, *http.Server, *preview.RecycleWorker, io.Closer, *preview.Manager, error) {
+func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, sentryReporter observability.Reporter, codexAuthSvc *codexauth.Service, claudeCodeAuthSvc *claudecodeauth.Service, llmClient llm.Client, fileReader sandbox.FileReader, canceller handlers.SessionCanceller, previewProvider preview.PreviewCapableProvider, snapshotExecutor preview.SnapshotExecutor, sandboxProvider agent.SandboxProvider, snapshotStore storage.SnapshotStore, orgSettingsInvalidator handlers.OrgSettingsInvalidator, shutdownCh <-chan struct{}, redisClient *cache.Client, sessionStreams *cache.SessionStreams, sharedCodingCredentialStore ...*db.CodingCredentialStore) (*chi.Mux, *http.Server, *preview.RecycleWorker, io.Closer, *preview.Manager, error) {
 	// Create stores
 	orgStore := db.NewOrganizationStore(pool)
 	userStore := db.NewUserStore(pool)
@@ -105,6 +105,18 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	}
 	credentialStore := db.NewOrgCredentialStore(pool, cryptoSvc)
 	userCredentialStore := db.NewUserCredentialStore(pool, cryptoSvc)
+	codingCredentialStore := resolveRouterCodingCredentialStore(pool, cryptoSvc, sharedCodingCredentialStore...)
+	// Mirror legacy writes into the unified `coding_credentials` table during the
+	// migration window. Removed in the cleanup PR. See
+	// docs/design/future/65-unified-coding-credentials.md.
+	credentialStore.SetCodingMirror(codingCredentialStore)
+	userCredentialStore.SetCodingMirror(codingCredentialStore)
+	mirrorLog := func(format string, args ...any) {
+		logger.Warn().Msgf(format, args...)
+	}
+	credentialStore.SetMirrorLogger(mirrorLog)
+	userCredentialStore.SetMirrorLogger(mirrorLog)
+	codingCredentialStore.SetMirrorLogger(mirrorLog)
 
 	// Create services
 	ingestionSvc := ingestion.NewService(issueStore, webhookDeliveryStore, jobStore, logger)
@@ -273,6 +285,8 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	memoryHandler := handlers.NewMemoryHandler(memoryStore, reviewCommentStore)
 	userCredentialHandler := handlers.NewUserCredentialHandler(userCredentialStore, credentialStore, userStore)
 	codingAuthHandler := handlers.NewCodingAuthHandler(credentialStore, orgStore)
+	// Unified coding-credentials handler — see docs/design/future/65-unified-coding-credentials.md.
+	codingCredentialHandler := handlers.NewCodingCredentialHandler(codingCredentialStore, orgStore)
 	var emailSender email.Sender
 	if cfg.SMTPHost != "" && cfg.SMTPFrom != "" {
 		emailSender = email.NewSMTPSender(email.SMTPConfig{
@@ -343,6 +357,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	if orgSettingsInvalidator != nil {
 		settingsHandler.SetOrgSettingsInvalidator(orgSettingsInvalidator)
 		codingAuthHandler.SetOrgSettingsInvalidator(orgSettingsInvalidator)
+		codingCredentialHandler.SetOrgSettingsInvalidator(orgSettingsInvalidator)
 	}
 	credentialHandler.SetAuditEmitter(auditEmitter)
 	projectHandler.SetAuditEmitter(auditEmitter)
@@ -661,6 +676,11 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Get("/api/v1/settings/credentials/personal", userCredentialHandler.ListPersonal)
 				r.Get("/api/v1/settings/credentials/resolved", userCredentialHandler.ListResolved)
 				r.Get("/api/v1/settings/credentials/team", userCredentialHandler.ListTeamDefaults)
+				// Unified coding-credentials reads are safe for every org role:
+				// personal/resolved reads are scoped to the caller, and org rows
+				// are the same read-only fallback metadata already shown on
+				// settings pages.
+				r.Get("/api/v1/coding-credentials", codingCredentialHandler.List)
 
 				r.Get("/api/v1/repositories", repoHandler.List)
 				r.Get("/api/v1/repositories/summary", repoHandler.Summary)
@@ -757,6 +777,19 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Get("/api/v1/settings/coding-auths", codingAuthHandler.List)
 				r.Get("/api/v1/settings/codex-auth/subscriptions", codexAuthHandler.List)
 				r.Get("/api/v1/settings/claude-code-auth/subscriptions", claudeCodeAuthHandler.List)
+
+				// Unified coding-credentials writes. Personal-scope mutations live in
+				// this group because they target the requester's own credentials and
+				// do not require admin privileges for members. The handler enforces
+				// "admin only when scope=org" via resolveScopeFromBody; per-row Move
+				// and bulk Reorder both rely on that gate, so both can sit here
+				// without allowing members to reorder the org stack.
+				// See docs/design/future/65-unified-coding-credentials.md.
+				r.Post("/api/v1/coding-credentials", codingCredentialHandler.Create)
+				r.Patch("/api/v1/coding-credentials/{id}", codingCredentialHandler.Update)
+				r.Delete("/api/v1/coding-credentials/{id}", codingCredentialHandler.Delete)
+				r.Patch("/api/v1/coding-credentials/{id}/move", codingCredentialHandler.Move)
+				r.Patch("/api/v1/coding-credentials/reorder", codingCredentialHandler.Reorder)
 
 				// Eval reads — admin+member only so viewers cannot enumerate eval
 				// tasks or runs. Eval writes are gated even more tightly (admin-only)
@@ -967,4 +1000,11 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	r.Mount("/", apiRoutes)
 
 	return r, gwSrv, recycleWorker, inspectorCloser, previewManager, nil
+}
+
+func resolveRouterCodingCredentialStore(pool *pgxpool.Pool, cryptoSvc *crypto.Service, shared ...*db.CodingCredentialStore) *db.CodingCredentialStore {
+	if len(shared) > 0 && shared[0] != nil {
+		return shared[0]
+	}
+	return db.NewCodingCredentialStore(pool, cryptoSvc)
 }

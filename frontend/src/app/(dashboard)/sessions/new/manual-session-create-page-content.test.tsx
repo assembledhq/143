@@ -159,6 +159,11 @@ vi.mock("@/contexts/optimistic-sessions", () => ({
     removeOptimisticSession: vi.fn(),
     markOptimisticResolved: vi.fn(),
   }),
+  useOptimisticSessionsSafe: () => ({
+    addOptimisticSession: vi.fn(),
+    removeOptimisticSession: vi.fn(),
+    markOptimisticResolved: vi.fn(),
+  }),
   OptimisticSessionsProvider: ({ children }: { children: React.ReactNode }) => children,
 }));
 

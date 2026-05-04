@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 
 	"github.com/google/uuid"
@@ -13,14 +14,86 @@ import (
 )
 
 // UserCredentialStore handles encrypted per-user credential storage.
+//
+// Like OrgCredentialStore, every coding-provider write is mirrored into the
+// unified `coding_credentials` table during the migration window so the
+// resolver can read from a single source of truth. SetCodingMirror installs
+// the mirror after construction; the cleanup PR removes the mirror entirely.
 type UserCredentialStore struct {
-	db     DBTX
-	crypto *crypto.Service
+	db           DBTX
+	crypto       *crypto.Service
+	codingMirror CodingCredentialMirror
+	mirrorLogf   func(format string, args ...any)
 }
 
 // NewUserCredentialStore creates a new user credential store.
 func NewUserCredentialStore(db DBTX, cryptoSvc *crypto.Service) *UserCredentialStore {
-	return &UserCredentialStore{db: db, crypto: cryptoSvc}
+	return &UserCredentialStore{db: db, crypto: cryptoSvc, codingMirror: NoopMirror()}
+}
+
+// SetCodingMirror installs the unified-credentials mirror.
+//
+// lint:allow-no-orgid reason="process-wide mirror configuration; not tenant data"
+func (s *UserCredentialStore) SetCodingMirror(m CodingCredentialMirror) {
+	if m == nil {
+		s.codingMirror = NoopMirror()
+		return
+	}
+	s.codingMirror = m
+}
+
+// SetMirrorLogger installs a logger hook for mirror failures.
+//
+// lint:allow-no-orgid reason="process-wide logger configuration; not tenant data"
+func (s *UserCredentialStore) SetMirrorLogger(logf func(format string, args ...any)) {
+	s.mirrorLogf = logf
+}
+
+func (s *UserCredentialStore) logMirrorFailure(action string, id uuid.UUID, err error) {
+	if s.mirrorLogf == nil || err == nil {
+		return
+	}
+	s.mirrorLogf("coding_credentials user mirror %s id=%s err=%v", action, id, err)
+}
+
+// reflectUserCredentialByID re-loads a user_credentials row and asks the
+// mirror to reflect it. Same pattern as OrgCredentialStore.reflectOrgCredentialByID.
+func (s *UserCredentialStore) reflectUserCredentialByID(ctx context.Context, id uuid.UUID) {
+	if s.codingMirror == nil {
+		return
+	}
+	row, cfg, err := s.loadUserCredentialByID(ctx, id)
+	if err != nil {
+		s.logMirrorFailure("load-by-id", id, err)
+		return
+	}
+	if mirrErr := s.codingMirror.MirrorUserCredential(ctx, row, cfg); mirrErr != nil {
+		s.logMirrorFailure("upsert", id, mirrErr)
+	}
+}
+
+func (s *UserCredentialStore) loadUserCredentialByID(ctx context.Context, id uuid.UUID) (models.UserCredential, models.ProviderConfig, error) {
+	rows, err := s.db.Query(ctx,
+		`SELECT id, user_id, org_id, provider, config, is_team_default, status, last_verified_at, created_at, updated_at
+		 FROM user_credentials WHERE id = @id`,
+		pgx.NamedArgs{"id": id},
+	)
+	if err != nil {
+		return models.UserCredential{}, nil, fmt.Errorf("load user credential: %w", err)
+	}
+	row, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.UserCredential])
+	if err != nil {
+		return models.UserCredential{}, nil, fmt.Errorf("load user credential row: %w", err)
+	}
+	plaintext, err := s.decrypt(row.Config)
+	if err != nil {
+		return row, nil, fmt.Errorf("decrypt for mirror: %w", err)
+	}
+	cfg, err := jsonDecodeProvider(row.Provider, plaintext)
+	if err != nil {
+		return row, nil, err
+	}
+	return row, cfg, nil
 }
 
 // Upsert encrypts and stores a user credential.
@@ -58,6 +131,7 @@ func (s *UserCredentialStore) Upsert(ctx context.Context, userID, orgID uuid.UUI
 	if err != nil {
 		return fmt.Errorf("upsert user %s credential: %w", provider, err)
 	}
+	s.reflectUserCredentialByID(ctx, id)
 	return nil
 }
 
@@ -168,23 +242,45 @@ func (s *UserCredentialStore) ListTeamDefaults(ctx context.Context, orgID uuid.U
 
 // Disable soft-deletes a user credential, also clearing is_team_default.
 func (s *UserCredentialStore) Disable(ctx context.Context, orgID, userID uuid.UUID, provider models.ProviderName) error {
-	query := `UPDATE user_credentials SET status = 'disabled', is_team_default = false, updated_at = now() WHERE org_id = @org_id AND user_id = @user_id AND provider = @provider`
-	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
-		"org_id":   orgID,
-		"user_id":  userID,
-		"provider": string(provider),
-	})
-	return err
+	rows, err := s.db.Query(ctx,
+		`UPDATE user_credentials SET status = 'disabled', is_team_default = false, updated_at = now()
+		 WHERE org_id = @org_id AND user_id = @user_id AND provider = @provider
+		 RETURNING id`,
+		pgx.NamedArgs{"org_id": orgID, "user_id": userID, "provider": string(provider)},
+	)
+	if err != nil {
+		return err
+	}
+	// Pass orgID/userID/provider so the mirror can also clean up any
+	// team-default row minted by the SQL data-copy migration (which uses a
+	// fresh uuid, not the legacy id) — without that cascade the team-default
+	// row in coding_credentials would outlive the disabled legacy row.
+	for _, id := range collectMirrorIDs(rows) {
+		if mirrErr := s.codingMirror.MirrorUserCredentialDisable(ctx, id, orgID, userID, provider); mirrErr != nil {
+			s.logMirrorFailure("disable", id, mirrErr)
+		}
+	}
+	return nil
 }
 
 // ClearTeamDefault unsets is_team_default for a provider across all users in the org.
 func (s *UserCredentialStore) ClearTeamDefault(ctx context.Context, orgID uuid.UUID, provider models.ProviderName) error {
-	query := `UPDATE user_credentials SET is_team_default = false, updated_at = now() WHERE org_id = @org_id AND provider = @provider AND is_team_default = true`
-	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
-		"org_id":   orgID,
-		"provider": string(provider),
-	})
-	return err
+	rows, err := s.db.Query(ctx,
+		`UPDATE user_credentials SET is_team_default = false, updated_at = now()
+		 WHERE org_id = @org_id AND provider = @provider AND is_team_default = true
+		 RETURNING id`,
+		pgx.NamedArgs{"org_id": orgID, "provider": string(provider)},
+	)
+	if err != nil {
+		return err
+	}
+	// Was a team-default mirror (org-scoped row in coding_credentials); reflect
+	// the new is_team_default=false state so the mirror flips it back to a
+	// personal row.
+	for _, id := range collectMirrorIDs(rows) {
+		s.reflectUserCredentialByID(ctx, id)
+	}
+	return nil
 }
 
 // SetTeamDefault sets a user's credential as the team default for a provider,
@@ -202,30 +298,46 @@ func (s *UserCredentialStore) SetTeamDefault(ctx context.Context, orgID, userID 
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck
 
-	// Clear existing team default within the transaction.
-	clearQuery := `UPDATE user_credentials SET is_team_default = false, updated_at = now() WHERE org_id = @org_id AND provider = @provider AND is_team_default = true`
-	if _, err := tx.Exec(ctx, clearQuery, pgx.NamedArgs{
+	// Clear existing team default within the transaction and keep the affected
+	// ids so the post-commit mirror can re-parent those unified rows back to
+	// personal scope.
+	clearQuery := `UPDATE user_credentials SET is_team_default = false, updated_at = now()
+		WHERE org_id = @org_id AND provider = @provider AND is_team_default = true
+		RETURNING id`
+	clearRows, err := tx.Query(ctx, clearQuery, pgx.NamedArgs{
 		"org_id":   orgID,
-		"provider": string(provider),
-	}); err != nil {
-		return fmt.Errorf("clear team default: %w", err)
-	}
-
-	// Set the new team default.
-	setQuery := `UPDATE user_credentials SET is_team_default = true, updated_at = now() WHERE org_id = @org_id AND user_id = @user_id AND provider = @provider AND status = 'active'`
-	tag, err := tx.Exec(ctx, setQuery, pgx.NamedArgs{
-		"org_id":   orgID,
-		"user_id":  userID,
 		"provider": string(provider),
 	})
 	if err != nil {
-		return fmt.Errorf("set team default: %w", err)
+		return fmt.Errorf("clear team default: %w", err)
 	}
-	if tag.RowsAffected() == 0 {
-		return fmt.Errorf("no active %s credential found for user", provider)
+	clearedIDs := collectMirrorIDs(clearRows)
+
+	// Set the new team default. RETURNING surfaces the affected id so the
+	// mirror can flip its scope from personal → org.
+	setQuery := `UPDATE user_credentials SET is_team_default = true, updated_at = now()
+		WHERE org_id = @org_id AND user_id = @user_id AND provider = @provider AND status = 'active'
+		RETURNING id`
+	var setID uuid.UUID
+	if scanErr := tx.QueryRow(ctx, setQuery, pgx.NamedArgs{
+		"org_id":   orgID,
+		"user_id":  userID,
+		"provider": string(provider),
+	}).Scan(&setID); scanErr != nil {
+		if errors.Is(scanErr, pgx.ErrNoRows) {
+			return fmt.Errorf("no active %s credential found for user", provider)
+		}
+		return fmt.Errorf("set team default: %w", scanErr)
 	}
 
-	return tx.Commit(ctx)
+	if err := tx.Commit(ctx); err != nil {
+		return err
+	}
+	for _, clearedID := range clearedIDs {
+		s.reflectUserCredentialByID(ctx, clearedID)
+	}
+	s.reflectUserCredentialByID(ctx, setID)
+	return nil
 }
 
 // RemoveTeamDefault removes the team default for a provider in an org.

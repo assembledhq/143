@@ -160,7 +160,7 @@ export function isAgentConnected(
 }
 
 function codingAuthStatusAllowsSelection(status: CodingAuth["status"]): boolean {
-  return status === "healthy" || status === "never_verified" || status === "rate_limited";
+  return status === "healthy" || status === "rate_limited";
 }
 
 export function isAgentAvailable(

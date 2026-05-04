@@ -214,12 +214,14 @@ func (s *Service) dispatchProjectTasks(ctx context.Context, orgID uuid.UUID, pro
 			reasoning = *task.Reasoning
 		}
 
+		// See models.SessionAutonomy doc for why this is not the
+		// org-level AutonomyLevel automation policy.
 		run := &models.Session{
 			OrgID:          orgID,
 			PrimaryIssueID: task.IssueID,
 			AgentType:      agentType,
 			Status:         string(models.SessionStatusPending),
-			AutonomyLevel:  string(settings.AutonomyLevel),
+			AutonomyLevel:  string(models.DefaultSessionAutonomy),
 			TokenMode:      tokenModeFromTaskComplexity(task.Complexity),
 			PMPlanID:       &planID,
 			Title:          &task.Title,

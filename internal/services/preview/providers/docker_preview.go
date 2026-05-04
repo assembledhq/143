@@ -1156,6 +1156,7 @@ const readinessProbeAttemptTimeout = 5 * time.Second
 func (d *DockerPreviewProvider) waitForReadiness(ctx context.Context, state *previewState, name string, port int, httpPath string, timeout time.Duration) error {
 	overallCtx, cancelOverall := context.WithTimeout(ctx, timeout)
 	defer cancelOverall()
+	deadline := time.Now().Add(timeout)
 	tick := time.NewTicker(time.Second)
 	defer tick.Stop()
 
@@ -1196,6 +1197,16 @@ func (d *DockerPreviewProvider) waitForReadiness(ctx context.Context, state *pre
 	}
 
 	for {
+		// Check the wall-clock deadline first, before re-entering select. A
+		// time.NewTimer + select on deadline.C used to handle this, but when
+		// a hung Exec returned at the same instant as a buffered tick.C and
+		// a buffered deadline.C, Go's select picked pseudo-randomly between
+		// the two and a string of unlucky picks could stretch the loop far
+		// past `timeout`. Wall-clock check makes the deadline deterministic.
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return timeoutErr()
+		}
 		if err := checkExited(); err != nil {
 			return err
 		}
@@ -1206,11 +1217,18 @@ func (d *DockerPreviewProvider) waitForReadiness(ctx context.Context, state *pre
 		if overallCtx.Err() != nil {
 			return timeoutErr()
 		}
+		// Cap the per-attempt timeout at the remaining budget so a wedged
+		// docker daemon cannot stretch the loop beyond `timeout` by even one
+		// attempt's worth of time.
+		attemptTimeout := readinessProbeAttemptTimeout
+		if remaining < attemptTimeout {
+			attemptTimeout = remaining
+		}
 		select {
 		case <-overallCtx.Done():
 			return timeoutErr()
 		case <-tick.C:
-			execCtx, cancel := context.WithTimeout(overallCtx, readinessProbeAttemptTimeout)
+			execCtx, cancel := context.WithTimeout(overallCtx, attemptTimeout)
 			exitCode, _ := d.executor.Exec(execCtx, state.sandbox, cmd, io.Discard, io.Discard)
 			cancel()
 			if exitCode == 0 {
