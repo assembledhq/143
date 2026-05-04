@@ -1044,6 +1044,8 @@ func (f *fakeHydrateSnapshotStore) Delete(context.Context, string) error { retur
 func TestPreviewHandler_StartPreview_NoWorkspaceConfig(t *testing.T) {
 	t.Parallel()
 
+	expectedMessage := "This repo has no .143/config.json committed with a preview section. Add one (see docs/guides/previews.md) so the preview knows what command to run."
+
 	mock, err := pgxmock.NewPool()
 	require.NoError(t, err)
 	defer mock.Close()
@@ -1079,8 +1081,8 @@ func TestPreviewHandler_StartPreview_NoWorkspaceConfig(t *testing.T) {
 
 	var resp models.ErrorResponse
 	require.NoError(t, json.NewDecoder(w.Body).Decode(&resp))
-	require.Equal(t, "PREVIEW_NO_CONFIG", resp.Error.Code)
-	require.Contains(t, resp.Error.Message, ".143/config.json", "user-facing message should name the preferred config file to add")
+	require.Equal(t, "PREVIEW_NO_CONFIG", resp.Error.Code, "missing workspace config should use the stable no-config error code")
+	require.Equal(t, expectedMessage, resp.Error.Message, "missing workspace config should return the capitalized user-facing guidance")
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 

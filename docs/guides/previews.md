@@ -41,21 +41,23 @@ Set `DEMO_MODE=true` on the server when launching a dogfood environment. This en
 
 ## Quickstart
 
-Add `.143/config.json` at the root of your repo:
+Add `.143/config.json` at the root of your repo. Preview config lives under the top-level `preview` key because this file also carries other repo-level settings:
 
 ```json
 {
-  "name": "my-app",
-  "primary": "app",
-  "services": {
-    "app": {
-      "command": ["npm", "run", "dev"],
-      "port": 3000,
-      "ready": { "http_path": "/" }
-    }
-  },
-  "credentials": { "mode": "none" },
-  "network": { "mode": "managed" }
+  "preview": {
+    "name": "my-app",
+    "primary": "app",
+    "services": {
+      "app": {
+        "command": ["npm", "run", "dev"],
+        "port": 3000,
+        "ready": { "http_path": "/" }
+      }
+    },
+    "credentials": { "mode": "none" },
+    "network": { "mode": "managed" }
+  }
 }
 ```
 
@@ -65,7 +67,7 @@ That's it. Open a session against the repo, click **Start Preview**, and the pan
 
 When you click Start Preview on a session:
 
-1. The preview manager loads the repo's `.143/config.json`.
+1. The preview manager loads the repo's `.143/config.json` and reads its `preview` section.
 2. It provisions any declared [infrastructure](#infrastructure) (Postgres, Redis, MySQL) as sidecar containers.
 3. It starts each declared service inside the sandbox as an OS process, in dependency order.
 4. Each service must pass its readiness probe before the next starts.
@@ -75,16 +77,16 @@ Services share the sandbox's filesystem and `localhost` network namespace, so th
 
 ## Config Reference
 
-### Top-level fields
+### Preview section fields
 
 | Field | Required | Notes |
 |-------|----------|-------|
-| `name` | yes | Human label shown in the UI |
-| `primary` | yes | Key from `services` that the gateway proxies browser traffic to |
-| `services` | yes | Map of service name → [service config](#services) |
-| `infrastructure` | no | Map of infra name → [infrastructure config](#infrastructure). Max 2. |
-| `credentials` | yes | [Credential config](#credentials). Use `{"mode": "none"}` if no secrets needed. |
-| `network` | yes | [Network config](#network). Use `{"mode": "managed"}` for the default sandbox egress policy. |
+| `preview.name` | yes | Human label shown in the UI |
+| `preview.primary` | yes | Key from `preview.services` that the gateway proxies browser traffic to |
+| `preview.services` | yes | Map of service name → [service config](#services) |
+| `preview.infrastructure` | no | Map of infra name → [infrastructure config](#infrastructure). Max 2. |
+| `preview.credentials` | yes | [Credential config](#credentials). Use `{"mode": "none"}` if no secrets needed. |
+| `preview.network` | yes | [Network config](#network). Use `{"mode": "managed"}` for the default sandbox egress policy. |
 
 ### Services
 
@@ -111,14 +113,18 @@ Constraints:
 Platform-managed sidecar containers for databases/caches. Ephemeral — provisioned when the preview starts, destroyed when it stops.
 
 ```json
-"infrastructure": {
-  "db": {
-    "template": "postgres-17",
-    "init_script": "db/seed.sql",
-    "inject_env": {
-      "DATABASE_URL": "postgres://{{username}}:{{password}}@{{host}}:{{port}}/{{database}}?sslmode=disable"
-    },
-    "inject_into": ["server"]
+{
+  "preview": {
+    "infrastructure": {
+      "db": {
+        "template": "postgres-17",
+        "init_script": "db/seed.sql",
+        "inject_env": {
+          "DATABASE_URL": "postgres://{{username}}:{{password}}@{{host}}:{{port}}/{{database}}?sslmode=disable"
+        },
+        "inject_into": ["server"]
+      }
+    }
   }
 }
 ```
@@ -145,16 +151,20 @@ Credentials are auto-generated per preview and never stored. The sidecar is only
 
 ### Credentials
 
-Use `credentials.mode: "none"` unless the app needs secrets (API keys, staging DB URLs).
+Use `preview.credentials.mode: "none"` unless the app needs secrets (API keys, staging DB URLs).
 
-Non-secret env vars belong in `services.<svc>.env`. For secrets, an org admin creates a named **credential set** in 143's admin UI and the repo config references it:
+Non-secret env vars belong in `preview.services.<svc>.env`. For secrets, an org admin creates a named **credential set** in 143's admin UI and the repo config references it:
 
 ```json
-"credentials": {
-  "mode": "managed_env",
-  "credential_set": "repo-staging",
-  "env": ["DATABASE_URL", "STRIPE_KEY"],
-  "inject_into": ["server"]
+{
+  "preview": {
+    "credentials": {
+      "mode": "managed_env",
+      "credential_set": "repo-staging",
+      "env": ["DATABASE_URL", "STRIPE_KEY"],
+      "inject_into": ["server"]
+    }
+  }
 }
 ```
 
@@ -166,17 +176,21 @@ The repo never contains secret values. Agents never see them — the platform in
 
 ### Network
 
-`network.mode` controls sandbox egress.
+`preview.network.mode` controls sandbox egress.
 
 - `"managed"` (default) — Only platform-approved destinations are reachable.
 - `""` — Same as `"managed"`.
 
-`network.destinations` lists named managed destinations the preview may reach (e.g., a staging Postgres or a partner API). Admins configure what each name resolves to.
+`preview.network.destinations` lists named managed destinations the preview may reach (e.g., a staging Postgres or a partner API). Admins configure what each name resolves to.
 
 ```json
-"network": {
-  "mode": "managed",
-  "destinations": ["staging_db", "stripe_api"]
+{
+  "preview": {
+    "network": {
+      "mode": "managed",
+      "destinations": ["staging_db", "stripe_api"]
+    }
+  }
 }
 ```
 
@@ -186,35 +200,37 @@ Any service using a destination or `credentials.mode != "none"` makes the previe
 
 ```json
 {
-  "name": "Full Stack",
-  "primary": "frontend",
-  "services": {
-    "frontend": {
-      "command": ["npm", "run", "dev"],
-      "cwd": "frontend",
-      "port": 3000,
-      "env": { "API_URL": "http://localhost:8080" },
-      "ready": { "http_path": "/", "timeout_seconds": 120 }
-    },
-    "server": {
-      "command": ["sh", "-c", "./bin/migrate up && ./bin/server"],
-      "port": 8080,
-      "env": { "LOG_LEVEL": "info" },
-      "ready": { "http_path": "/health", "timeout_seconds": 90 }
-    }
-  },
-  "infrastructure": {
-    "db": {
-      "template": "postgres-17",
-      "init_script": "db/seed.sql",
-      "inject_env": {
-        "DATABASE_URL": "postgres://{{username}}:{{password}}@{{host}}:{{port}}/{{database}}?sslmode=disable"
+  "preview": {
+    "name": "Full Stack",
+    "primary": "frontend",
+    "services": {
+      "frontend": {
+        "command": ["npm", "run", "dev"],
+        "cwd": "frontend",
+        "port": 3000,
+        "env": { "API_URL": "http://localhost:8080" },
+        "ready": { "http_path": "/", "timeout_seconds": 120 }
       },
-      "inject_into": ["server"]
-    }
-  },
-  "credentials": { "mode": "none" },
-  "network": { "mode": "managed" }
+      "server": {
+        "command": ["sh", "-c", "./bin/migrate up && ./bin/server"],
+        "port": 8080,
+        "env": { "LOG_LEVEL": "info" },
+        "ready": { "http_path": "/health", "timeout_seconds": 90 }
+      }
+    },
+    "infrastructure": {
+      "db": {
+        "template": "postgres-17",
+        "init_script": "db/seed.sql",
+        "inject_env": {
+          "DATABASE_URL": "postgres://{{username}}:{{password}}@{{host}}:{{port}}/{{database}}?sslmode=disable"
+        },
+        "inject_into": ["server"]
+      }
+    },
+    "credentials": { "mode": "none" },
+    "network": { "mode": "managed" }
+  }
 }
 ```
 
