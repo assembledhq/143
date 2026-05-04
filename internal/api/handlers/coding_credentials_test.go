@@ -1079,3 +1079,70 @@ func TestCodingCredentialHandlerDeleteMoveReorderErrorBranches(t *testing.T) {
 		})
 	}
 }
+
+func TestAuthTypeForProvider(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		provider models.ProviderName
+		cfg      models.ProviderConfig
+		want     models.CodingAuthType
+	}{
+		{
+			name:     "anthropic api key",
+			provider: models.ProviderAnthropic,
+			cfg:      models.AnthropicConfig{APIKey: "sk-ant-1"},
+			want:     models.CodingAuthTypeAPIKey,
+		},
+		{
+			// During the dual-write window a legacy mirrored row can still
+			// arrive with provider=anthropic and a non-nil Subscription
+			// embedded (the post-step migration is what later rewrites it
+			// to anthropic_subscription). The auth_type response field must
+			// agree with usageNoteFor's view of the same row.
+			name:     "anthropic with embedded subscription is reported as subscription",
+			provider: models.ProviderAnthropic,
+			cfg: models.AnthropicConfig{
+				Subscription: &models.AnthropicSubscription{
+					AccessToken:  "tok",
+					RefreshToken: "ref",
+					AccountType:  "claude_pro",
+				},
+			},
+			want: models.CodingAuthTypeSubscription,
+		},
+		{
+			name:     "anthropic_subscription provider",
+			provider: models.ProviderAnthropicSubscription,
+			cfg:      models.AnthropicSubscriptionConfig{AccessToken: "tok"},
+			want:     models.CodingAuthTypeSubscription,
+		},
+		{
+			name:     "openai api key",
+			provider: models.ProviderOpenAI,
+			cfg:      models.OpenAIConfig{APIKey: "sk-openai"},
+			want:     models.CodingAuthTypeAPIKey,
+		},
+		{
+			name:     "openai_subscription provider",
+			provider: models.ProviderOpenAISubscription,
+			cfg:      models.OpenAISubscriptionConfig{AccessToken: "tok"},
+			want:     models.CodingAuthTypeSubscription,
+		},
+		{
+			name:     "legacy openai_chatgpt provider",
+			provider: models.ProviderOpenAIChatGPT,
+			cfg:      models.OpenAIChatGPTConfig{AccessToken: "tok"},
+			want:     models.CodingAuthTypeSubscription,
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			require.Equal(t, tt.want, authTypeForProvider(tt.provider, tt.cfg))
+		})
+	}
+}

@@ -562,13 +562,20 @@ func codingAgentForProvider(p models.ProviderName) models.AgentType {
 	}
 }
 
-func authTypeForProvider(p models.ProviderName, _ models.ProviderConfig) models.CodingAuthType {
+func authTypeForProvider(p models.ProviderName, cfg models.ProviderConfig) models.CodingAuthType {
 	switch p {
 	case models.ProviderAnthropicSubscription, models.ProviderOpenAISubscription, models.ProviderOpenAIChatGPT:
 		return models.CodingAuthTypeSubscription
-	default:
-		return models.CodingAuthTypeAPIKey
 	}
+	// During the dual-write window a legacy mirrored row can land here with
+	// provider=anthropic and a non-nil Subscription embedded (the post-step
+	// migration is what later rewrites it to anthropic_subscription). Mirror
+	// the type-switch logic in usageNoteFor so the auth_type response field
+	// agrees with the usage note for those transitional rows.
+	if anth, ok := cfg.(models.AnthropicConfig); ok && anth.Subscription != nil {
+		return models.CodingAuthTypeSubscription
+	}
+	return models.CodingAuthTypeAPIKey
 }
 
 func codingStatusFor(cred models.DecryptedCodingCredential) models.CodingAuthStatus {

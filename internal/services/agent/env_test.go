@@ -1200,6 +1200,45 @@ func TestAgentEnvUnifiedResolverEmptyDoesNotFallbackToLegacy(t *testing.T) {
 	require.Empty(t, coding.rateLimitedIDs, "no legacy pick should be recorded when unified resolver handles the lookup")
 }
 
+func TestAgentEnvUnifiedListErrorFallsBackToLegacy(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	orgID := uuid.New()
+	userID := uuid.New()
+	legacyCredID := uuid.New()
+
+	// Unified resolver returns a transient error for the queried provider and
+	// its subscription twin. The legacy fallback must serve traffic instead of
+	// the resolver short-circuiting as "unified authoritative with no rows".
+	coding := &envCodingCredentialProvider{
+		errs: map[models.ProviderName]error{
+			models.ProviderAnthropic:             errors.New("transient pgx error"),
+			models.ProviderAnthropicSubscription: errors.New("transient pgx error"),
+		},
+	}
+	userCred := &envUserCredentialProvider{
+		personal: map[models.ProviderName]*models.DecryptedUserCredential{
+			models.ProviderAnthropic: {
+				ID:     legacyCredID,
+				Status: models.CodingCredentialStatusActive,
+				Config: models.AnthropicConfig{APIKey: "legacy-key"},
+			},
+		},
+	}
+
+	env := NewAgentEnv(AgentEnvDeps{
+		CodingCredentials: coding,
+		UserCredentials:   userCred,
+		Provider:          &envSandboxProvider{},
+		Logger:            zerolog.Nop(),
+	})
+
+	cfg := env.resolveProviderConfig(ctx, orgID, &userID, models.ProviderAnthropic)
+	require.IsType(t, models.AnthropicConfig{}, cfg, "transient unified-resolver error must yield to legacy fallback")
+	require.Equal(t, "legacy-key", cfg.(models.AnthropicConfig).APIKey, "legacy credential should be served when unified ListResolvable errors")
+}
+
 func TestAgentEnvLegacyFallbackWhenUnifiedUnwired(t *testing.T) {
 	t.Parallel()
 

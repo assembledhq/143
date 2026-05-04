@@ -606,7 +606,12 @@ func (e *AgentEnv) resolveFromCodingCredentials(ctx context.Context, orgID uuid.
 func (e *AgentEnv) pickFromCodingProviderSet(ctx context.Context, orgID uuid.UUID, userID *uuid.UUID, requestedProvider models.ProviderName, providers []models.ProviderName) (models.ProviderConfig, *models.DecryptedCodingCredential, bool) {
 	rowsByProvider, sawRows, ok := e.listCodingProviderRows(ctx, orgID, userID, providers)
 	if !ok {
-		return nil, nil, true
+		// Lookup errored. Yield to the legacy fallback rather than
+		// short-circuiting as "unified authoritative with zero rows" — during
+		// the dual-write window the legacy stores still hold authoritative
+		// data, so a transient pgx error on the unified table must not bypass
+		// it.
+		return nil, nil, false
 	}
 	if !sawRows {
 		return nil, nil, true
@@ -720,8 +725,16 @@ func unifiedSubscriptionTwin(provider models.ProviderName) models.ProviderName {
 //
 // Shed integration: legacy-path picks call recordPick under the legacy id.
 // During the dual-write window the mirror reuses legacy ids as the unified
-// row's id, so a shed marker keyed by legacy id correctly poisons the
-// matching unified row's health-cache entry.
+// row's id for personal and direct-org rows, so a shed marker keyed by
+// legacy id correctly poisons the matching unified row's health-cache
+// entry. Team-default rows are an exception: migration 000111 mints a
+// fresh UUID for those (the legacy user_credentials.id could collide with
+// an org_credentials id), so a shed marker recorded under the legacy id
+// will NOT poison the unified row served by ListResolvable. Sustained
+// shedding still works because repeated legacy fallbacks share the legacy
+// id; the brief staleness window only opens when unified flips from
+// erroring back to healthy and starts returning the unified team-default
+// row again, at which point the next 429 will re-poison the correct id.
 func (e *AgentEnv) resolveFromLegacy(ctx context.Context, orgID uuid.UUID, userID *uuid.UUID, provider models.ProviderName) models.ProviderConfig {
 	if userID != nil && e.userCredentials != nil {
 		if cred, err := e.userCredentials.GetForUser(ctx, orgID, *userID, provider); err == nil && cred != nil && legacyStatusActive(cred.Status) {
