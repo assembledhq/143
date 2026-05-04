@@ -60,8 +60,10 @@ func MergeRepoPMSettings(org OrgSettings, repo RepoSettings) OrgSettings {
 
 // ValidateRepoPMSettings validates the model references in repo PM settings.
 func ValidateRepoPMSettings(pm RepoPMSettings) error {
-	if pm.PMModel != nil && *pm.PMModel != "" && !IsSupportedPMModel(*pm.PMModel) {
-		return fmt.Errorf("pm.pm_model must be one of: %v", AvailablePMModels)
+	if pm.PMModel != nil {
+		if err := ValidatePMModel(*pm.PMModel); err != nil {
+			return fmt.Errorf("pm.pm_model: %w", err)
+		}
 	}
 	return nil
 }

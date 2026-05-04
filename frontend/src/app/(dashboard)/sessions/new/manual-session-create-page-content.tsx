@@ -54,8 +54,8 @@ import { clearDraft, loadDraft, saveDraft } from "@/lib/session-draft";
 import { queryKeys } from "@/lib/query-keys";
 import { cn } from "@/lib/utils";
 import {
-  AGENTS,
   agentTypeForModel,
+  availableAgentModelGroups,
   isAgentAvailable,
 } from "@/lib/agents";
 import { NoReposWarning } from "@/components/no-repos-warning";
@@ -375,19 +375,19 @@ export function ManualSessionCreatePageContent() {
 
   const codexAuthStatus = codexAuthResponse?.data;
   const codingAuths = useMemo(() => codingAuthsResponse?.data ?? [], [codingAuthsResponse]);
-  const modelGroups = useMemo(() => {
-    // Show agents available from either the user-resolved credential path or
-    // the org coding-auth stack so the picker reflects both scopes.
-    const availableAgents = AGENTS.filter((agent) =>
-      isAgentAvailable(agent.key, resolvedCredentials, codexAuthStatus, codingAuths),
-    );
-    // Sort so the default agent type appears first, preserve original order otherwise.
-    return [...availableAgents].sort((a, b) => {
-      if (a.key === defaultAgentType) return -1;
-      if (b.key === defaultAgentType) return 1;
-      return AGENTS.indexOf(a) - AGENTS.indexOf(b);
-    });
-  }, [codingAuths, defaultAgentType, resolvedCredentials, codexAuthStatus]);
+  // Sessions run under the user's own credentials, so we don't pass
+  // orgAgentConfig — agents the org has keys for but the user doesn't are
+  // intentionally hidden from the picker.
+  const modelGroups = useMemo(
+    () =>
+      availableAgentModelGroups(
+        resolvedCredentials,
+        codexAuthStatus,
+        codingAuths,
+        defaultAgentType,
+      ),
+    [codingAuths, defaultAgentType, resolvedCredentials, codexAuthStatus],
+  );
 
   // Drop a previously selected model (from React state or restored draft) when
   // its agent is no longer integrated — keeps the picker value consistent with
