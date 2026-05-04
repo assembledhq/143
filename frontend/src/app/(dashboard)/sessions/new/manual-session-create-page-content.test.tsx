@@ -87,6 +87,15 @@ const mocks = vi.hoisted(() => ({
       created_at: "2026-01-01T00:00:00Z",
     },
   }),
+  integrationsListMock: vi.fn().mockResolvedValue({
+    data: [
+      {
+        id: "integration-linear",
+        provider: "linear",
+        status: "active",
+      },
+    ],
+  }),
   searchParamGetMock: vi.fn<(key: string) => string | null>().mockImplementation(() => null),
 }));
 
@@ -121,6 +130,9 @@ vi.mock("@/lib/api", () => ({
     },
     auth: {
       me: mocks.authMeMock,
+    },
+    integrations: {
+      list: mocks.integrationsListMock,
     },
     sessions: {
       createManual: mocks.createSessionMock,
@@ -257,7 +269,7 @@ describe("ManualSessionCreatePageContent", () => {
   it("keeps the main message textarea at 16px on mobile", async () => {
     renderWithProviders(<ManualSessionCreatePageContent />);
 
-    const textarea = await screen.findByRole("textbox", { name: "Session prompt" });
+    const textarea = await screen.findByRole("textbox", { name: "Manual session prompt" });
     expect(textarea).toHaveClass("text-base");
     expect(textarea).toHaveClass("sm:text-xs");
   });
@@ -420,6 +432,93 @@ describe("ManualSessionCreatePageContent", () => {
     });
     expect(await screen.findByText("/review")).toBeInTheDocument();
     expect(screen.getByText("Review pending changes")).toBeInTheDocument();
+  });
+
+  it("only shows the add linear issue action when Linear is integrated", async () => {
+    const user = userEvent.setup();
+    mocks.integrationsListMock.mockResolvedValueOnce({ data: [] });
+    renderWithProviders(<ManualSessionCreatePageContent />);
+
+    await user.click(await screen.findByRole("button", { name: "Add files or photos" }));
+
+    expect(screen.queryByRole("menuitem", { name: "Add linear issue" })).not.toBeInTheDocument();
+  });
+
+  it("adds a linked Linear issue as a chip instead of moving it into the prompt text", async () => {
+    const user = userEvent.setup();
+    renderWithProviders(<ManualSessionCreatePageContent />);
+
+    await user.click(await screen.findByRole("button", { name: "Add files or photos" }));
+    await user.click(await screen.findByRole("menuitem", { name: "Add linear issue" }));
+
+    const linearInput = await screen.findByRole("textbox", { name: "Linear issue id or URL" });
+    await user.type(linearInput, "ACS-1234");
+    await user.click(screen.getByRole("button", { name: "Add" }));
+
+    expect(await screen.findByText("ACS-1234")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Remove ACS-1234" })).toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "Manual session prompt" })).toHaveValue("");
+  });
+
+  it("submits the linked Linear issue as a structured reference", async () => {
+    const user = userEvent.setup();
+    renderWithProviders(<ManualSessionCreatePageContent />);
+
+    const textarea = await screen.findByRole("textbox", { name: "Manual session prompt" });
+    await user.type(textarea, "Investigate the rollout issue");
+    await user.click(screen.getByRole("button", { name: "Add files or photos" }));
+    await user.click(await screen.findByRole("menuitem", { name: "Add linear issue" }));
+
+    const linearInput = await screen.findByRole("textbox", { name: "Linear issue id or URL" });
+    await user.type(linearInput, "ACS-1234");
+    await user.click(screen.getByRole("button", { name: "Add" }));
+    await user.click((await screen.findAllByRole("button", { name: "Start session" }))[0]);
+
+    await waitFor(() => {
+      expect(mocks.createSessionMock).toHaveBeenCalledWith(
+        expect.objectContaining({
+          message: "Investigate the rollout issue",
+          references: [
+            {
+              kind: "app",
+              id: "ACS-1234",
+              display: "ACS-1234",
+            },
+          ],
+        }),
+      );
+    });
+  });
+
+  it("allows starting a session with only a linked Linear issue", async () => {
+    const user = userEvent.setup();
+    renderWithProviders(<ManualSessionCreatePageContent />);
+
+    await user.click(await screen.findByRole("button", { name: "Add files or photos" }));
+    await user.click(await screen.findByRole("menuitem", { name: "Add linear issue" }));
+
+    const linearInput = await screen.findByRole("textbox", { name: "Linear issue id or URL" });
+    await user.type(linearInput, "ACS-1234");
+    await user.click(screen.getByRole("button", { name: "Add" }));
+
+    const startButtons = await screen.findAllByRole("button", { name: "Start session" });
+    expect(startButtons[0]).toBeEnabled();
+    await user.click(startButtons[0]);
+
+    await waitFor(() => {
+      expect(mocks.createSessionMock).toHaveBeenCalledWith(
+        expect.objectContaining({
+          message: "",
+          references: [
+            {
+              kind: "app",
+              id: "ACS-1234",
+              display: "ACS-1234",
+            },
+          ],
+        }),
+      );
+    });
   });
 
   it("returns focus to the prompt after a dropped image finishes uploading", async () => {
@@ -795,6 +894,41 @@ describe("ManualSessionCreatePageContent", () => {
 
       await waitFor(() => {
         expect(modelSelect).toHaveTextContent("gpt-5.4");
+      });
+    });
+
+    it("preserves detached Linear issue chips when a repo query param conflicts with the saved draft", async () => {
+      mocks.searchParamGetMock.mockImplementation((key) => {
+        if (key === "repo") return "repo-1";
+        return null;
+      });
+      window.sessionStorage.setItem(
+        DRAFT_STORAGE_KEY,
+        JSON.stringify({
+          __v: 2,
+          message: "Previously typed prompt",
+          attachments: [],
+          references: [
+            {
+              kind: "app",
+              id: "ACS-1234",
+              display: "ACS-1234",
+            },
+          ],
+          commands: [],
+          selectedModel: "",
+          userSelectedRepoId: "repo-2",
+          branchByRepoId: {},
+          showImageInput: false,
+          imageURL: "",
+        }),
+      );
+
+      renderWithProviders(<ManualSessionCreatePageContent />);
+
+      expect(await screen.findByText("ACS-1234")).toBeInTheDocument();
+      await waitFor(() => {
+        expect(screen.getByRole("textbox", { name: "Manual session prompt" })).toHaveValue("Previously typed prompt");
       });
     });
 
