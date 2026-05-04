@@ -214,14 +214,14 @@ func (s *Service) dispatchProjectTasks(ctx context.Context, orgID uuid.UUID, pro
 			reasoning = *task.Reasoning
 		}
 
-		// See note in executePlan: this column is the per-session knob
-		// (full|semi|supervised), not the org-level automation policy.
+		// See models.SessionAutonomy doc for why this is not the
+		// org-level AutonomyLevel automation policy.
 		run := &models.Session{
 			OrgID:          orgID,
 			PrimaryIssueID: task.IssueID,
 			AgentType:      agentType,
 			Status:         string(models.SessionStatusPending),
-			AutonomyLevel:  "semi",
+			AutonomyLevel:  string(models.DefaultSessionAutonomy),
 			TokenMode:      tokenModeFromTaskComplexity(task.Complexity),
 			PMPlanID:       &planID,
 			Title:          &task.Title,
