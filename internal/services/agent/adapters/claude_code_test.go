@@ -618,6 +618,31 @@ func TestBuildSystemPrompt_IncludesRepairContext(t *testing.T) {
 	require.Contains(t, prompt, "PR #184", "system prompt should include the PR number")
 	require.Contains(t, prompt, "unit tests / api", "system prompt should include failing check names")
 	require.Contains(t, prompt, "token expiry assertion failed", "system prompt should include check annotations")
+	require.NotContains(t, prompt, "Conflict resolution guidance", "system prompt should not include conflict guidance for fix_tests repair runs")
+}
+
+func TestBuildSystemPrompt_IncludesResolveConflictsGuidance(t *testing.T) {
+	t.Parallel()
+
+	input := &agent.AgentInput{
+		Issue: &models.Issue{Title: "Merge conflict"},
+		RevisionContext: &agent.RevisionContext{
+			RepairAction: models.PullRequestRepairActionTypeResolveConflicts,
+			RepairContext: &agent.PullRequestRepairContext{
+				PullRequestNumber: 99,
+				Repository:        "org/repo",
+				HeadSHA:           "headsha",
+				BaseSHA:           "basesha",
+				MergeState:        models.PullRequestMergeStateConflicted,
+				HasConflicts:      true,
+			},
+		},
+	}
+
+	prompt := buildSystemPrompt(input)
+	require.Contains(t, prompt, "Conflict resolution guidance", "system prompt should include the conflict guidance header for resolve_conflicts repair runs")
+	require.Contains(t, prompt, "merge index", "system prompt should warn that mid-merge git diff/status reflects the merge index, not the PR's net delta")
+	require.Contains(t, prompt, "git diff basesha...HEAD", "system prompt should reference the supplied base SHA when describing how to verify the net delta")
 }
 
 func TestBuildSystemPrompt_IncludesContextDocs(t *testing.T) {

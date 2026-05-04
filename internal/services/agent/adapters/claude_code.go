@@ -326,6 +326,11 @@ func buildSystemPrompt(input *agent.AgentInput) string {
 			b.WriteString(fmt.Sprintf("- head SHA: `%s`\n", input.RevisionContext.RepairContext.HeadSHA))
 			b.WriteString(fmt.Sprintf("- base SHA: `%s`\n", input.RevisionContext.RepairContext.BaseSHA))
 			b.WriteString(fmt.Sprintf("- merge state: `%s`\n", input.RevisionContext.RepairContext.MergeState))
+			if input.RevisionContext.RepairAction == models.PullRequestRepairActionTypeResolveConflicts {
+				b.WriteString("\n")
+				b.WriteString(agent.ResolveConflictsGuidance(input.RevisionContext.RepairContext.BaseSHA, input.RevisionContext.RepairContext.HeadSHA))
+				b.WriteString("\n")
+			}
 			if len(input.RevisionContext.RepairContext.FailingChecks) > 0 {
 				b.WriteString("\nFailed checks:\n")
 				for _, check := range input.RevisionContext.RepairContext.FailingChecks {
