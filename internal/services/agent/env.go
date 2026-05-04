@@ -74,8 +74,9 @@ type pickKey struct {
 }
 
 type pickRecord struct {
-	credID uuid.UUID
-	at     time.Time
+	credID     uuid.UUID
+	credential *models.DecryptedCodingCredential
+	at         time.Time
 }
 
 // pickTrackerTTL bounds how long after a pick a Shed call still applies.
@@ -175,6 +176,15 @@ func (e *AgentEnv) codingShedder() CodingCredentialShedder {
 // record is consulted by ShedRateLimited / ShedAuthRejected when the runtime
 // reports an upstream failure for that (orgID, userID, provider) tuple.
 func (e *AgentEnv) recordPick(orgID uuid.UUID, userID *uuid.UUID, provider models.ProviderName, credID uuid.UUID) {
+	e.recordPickWithCredential(orgID, userID, provider, credID, nil)
+}
+
+func (e *AgentEnv) recordCredentialPick(orgID uuid.UUID, userID *uuid.UUID, provider models.ProviderName, cred models.DecryptedCodingCredential) {
+	copied := cred
+	e.recordPickWithCredential(orgID, userID, provider, cred.ID, &copied)
+}
+
+func (e *AgentEnv) recordPickWithCredential(orgID uuid.UUID, userID *uuid.UUID, provider models.ProviderName, credID uuid.UUID, cred *models.DecryptedCodingCredential) {
 	if e == nil {
 		return
 	}
@@ -197,10 +207,26 @@ func (e *AgentEnv) recordPick(orgID uuid.UUID, userID *uuid.UUID, provider model
 	if len(e.recentPicks) >= pickTrackerMax {
 		e.evictOldestPickLocked()
 	}
-	e.recentPicks[key] = pickRecord{credID: credID, at: now}
+	e.recentPicks[key] = pickRecord{credID: credID, credential: cred, at: now}
 }
 
 func (e *AgentEnv) lookupRecentPick(orgID uuid.UUID, userID *uuid.UUID, provider models.ProviderName) (uuid.UUID, bool) {
+	rec, ok := e.lookupRecentPickRecord(orgID, userID, provider)
+	if !ok {
+		return uuid.Nil, false
+	}
+	return rec.credID, true
+}
+
+func (e *AgentEnv) lookupRecentCredential(orgID uuid.UUID, userID *uuid.UUID, provider models.ProviderName) (models.DecryptedCodingCredential, bool) {
+	rec, ok := e.lookupRecentPickRecord(orgID, userID, provider)
+	if !ok || rec.credential == nil {
+		return models.DecryptedCodingCredential{}, false
+	}
+	return *rec.credential, true
+}
+
+func (e *AgentEnv) lookupRecentPickRecord(orgID uuid.UUID, userID *uuid.UUID, provider models.ProviderName) (pickRecord, bool) {
 	key := pickKey{orgID: orgID, provider: provider}
 	if userID != nil {
 		key.userID = *userID
@@ -209,13 +235,13 @@ func (e *AgentEnv) lookupRecentPick(orgID uuid.UUID, userID *uuid.UUID, provider
 	defer e.recentPicksMu.Unlock()
 	rec, ok := e.recentPicks[key]
 	if !ok {
-		return uuid.Nil, false
+		return pickRecord{}, false
 	}
 	if time.Since(rec.at) > pickTrackerTTL {
 		delete(e.recentPicks, key)
-		return uuid.Nil, false
+		return pickRecord{}, false
 	}
-	return rec.credID, true
+	return rec, true
 }
 
 // evictAgedPicksLocked drops every entry older than the supplied threshold.
@@ -602,9 +628,9 @@ func (e *AgentEnv) pickFromCodingProviderSet(ctx context.Context, orgID uuid.UUI
 			return nil, nil, true
 		}
 		if cfg, ok := compatibleCodingProviderConfig(picked.Provider, picked.Config); ok {
-			e.recordPick(orgID, userID, picked.Provider, picked.ID)
+			e.recordCredentialPick(orgID, userID, picked.Provider, *picked)
 			if picked.Provider != requestedProvider {
-				e.recordPick(orgID, userID, requestedProvider, picked.ID)
+				e.recordCredentialPick(orgID, userID, requestedProvider, *picked)
 			}
 			return cfg, picked, true
 		}
@@ -621,9 +647,9 @@ func (e *AgentEnv) pickFromCodingProviderSet(ctx context.Context, orgID uuid.UUI
 			continue
 		}
 		if cfg, ok := compatibleCodingProviderConfig(cred.Provider, cred.Config); ok {
-			e.recordPick(orgID, userID, cred.Provider, cred.ID)
+			e.recordCredentialPick(orgID, userID, cred.Provider, cred)
 			if cred.Provider != requestedProvider {
-				e.recordPick(orgID, userID, requestedProvider, cred.ID)
+				e.recordCredentialPick(orgID, userID, requestedProvider, cred)
 			}
 			picked := cred
 			return cfg, &picked, true
@@ -859,6 +885,19 @@ func (e *AgentEnv) InjectCodexAuth(ctx context.Context, orgID uuid.UUID, sandbox
 
 func (e *AgentEnv) InjectCodexAuthForUser(ctx context.Context, orgID uuid.UUID, userID *uuid.UUID, sandbox *Sandbox) (bool, error) {
 	if e.codingCredentials != nil {
+		if picked, ok := e.lookupRecentCredential(orgID, userID, models.ProviderOpenAI); ok {
+			if chatGPT, ok := codexChatGPTConfigFromPicked(picked); ok {
+				if picked.Provider == models.ProviderOpenAISubscription {
+					refreshed, err := e.refreshCodexSubscriptionIfNeeded(ctx, orgID, picked.ID, chatGPT)
+					if err != nil {
+						return false, err
+					}
+					chatGPT = *refreshed
+				}
+				return e.writeCodexAuth(ctx, orgID, sandbox, chatGPT)
+			}
+			return false, nil
+		}
 		cfg, picked, handled := e.pickFromCodingProviderSet(ctx, orgID, userID, models.ProviderOpenAI, []models.ProviderName{
 			models.ProviderOpenAI,
 			models.ProviderOpenAISubscription,
@@ -896,6 +935,15 @@ func (e *AgentEnv) InjectCodexAuthForUser(ctx context.Context, orgID uuid.UUID, 
 		return false, nil
 	}
 	return e.writeCodexAuth(ctx, orgID, sandbox, *cfg)
+}
+
+func codexChatGPTConfigFromPicked(picked models.DecryptedCodingCredential) (models.OpenAIChatGPTConfig, bool) {
+	cfg, ok := compatibleCodingProviderConfig(picked.Provider, picked.Config)
+	if !ok {
+		return models.OpenAIChatGPTConfig{}, false
+	}
+	chatGPT, ok := cfg.(models.OpenAIChatGPTConfig)
+	return chatGPT, ok
 }
 
 func (e *AgentEnv) refreshCodexSubscriptionIfNeeded(ctx context.Context, orgID uuid.UUID, credID uuid.UUID, cfg models.OpenAIChatGPTConfig) (*models.OpenAIChatGPTConfig, error) {
@@ -1000,10 +1048,21 @@ func (e *AgentEnv) unifiedCodingCredentialIsAPIKey(ctx context.Context, orgID uu
 	if e == nil || e.codingCredentials == nil {
 		return false
 	}
+	if picked, ok := e.lookupRecentCredential(orgID, userID, provider); ok {
+		cfg, compatible := compatibleCodingProviderConfig(picked.Provider, picked.Config)
+		if !compatible {
+			return false
+		}
+		return codingProviderConfigIsAPIKey(cfg)
+	}
 	cfg, handled := e.resolveFromCodingCredentials(ctx, orgID, userID, provider)
 	if !handled {
 		return false
 	}
+	return codingProviderConfigIsAPIKey(cfg)
+}
+
+func codingProviderConfigIsAPIKey(cfg models.ProviderConfig) bool {
 	switch c := cfg.(type) {
 	case models.OpenAIConfig:
 		return c.APIKey != ""

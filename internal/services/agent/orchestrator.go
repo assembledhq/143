@@ -172,6 +172,10 @@ type ClaudeCodeAuthProvider interface {
 	GetValidToken(ctx context.Context, orgID uuid.UUID) (*models.AnthropicSubscription, *uuid.UUID, error)
 }
 
+type ClaudeCodeAuthRefresher interface {
+	RefreshTokenByID(ctx context.Context, orgID uuid.UUID, credID uuid.UUID) (*models.AnthropicSubscription, error)
+}
+
 // CredentialProvider abstracts retrieving org-scoped provider credentials.
 type CredentialProvider interface {
 	Get(ctx context.Context, orgID uuid.UUID, provider models.ProviderName) (*models.DecryptedCredential, error)
@@ -3149,6 +3153,10 @@ func (o *Orchestrator) injectClaudeCodeAuth(ctx context.Context, orgID uuid.UUID
 		return false, nil
 	}
 
+	return o.writeClaudeCodeAuth(ctx, orgID, sandbox, *sub)
+}
+
+func (o *Orchestrator) writeClaudeCodeAuth(ctx context.Context, orgID uuid.UUID, sandbox *Sandbox, sub models.AnthropicSubscription) (bool, error) {
 	oauthPayload := map[string]interface{}{
 		"accessToken":  sub.AccessToken,
 		"refreshToken": sub.RefreshToken,
@@ -3206,6 +3214,65 @@ func (o *Orchestrator) injectClaudeCodeAuth(ctx context.Context, orgID uuid.UUID
 	return true, nil
 }
 
+func (o *Orchestrator) injectUnifiedClaudeCodeAuth(ctx context.Context, orgID uuid.UUID, userID *uuid.UUID, sandbox *Sandbox) (bool, error) {
+	if o.env == nil || o.env.codingCredentials == nil {
+		return false, nil
+	}
+
+	if picked, ok := o.env.lookupRecentCredential(orgID, userID, models.ProviderAnthropic); ok {
+		return o.injectPickedUnifiedClaudeCodeAuth(ctx, orgID, sandbox, picked)
+	}
+
+	_, picked, handled := o.env.pickFromCodingProviderSet(ctx, orgID, userID, models.ProviderAnthropic, []models.ProviderName{
+		models.ProviderAnthropic,
+		models.ProviderAnthropicSubscription,
+	})
+	if !handled || picked == nil {
+		return false, nil
+	}
+	return o.injectPickedUnifiedClaudeCodeAuth(ctx, orgID, sandbox, *picked)
+}
+
+func (o *Orchestrator) injectPickedUnifiedClaudeCodeAuth(ctx context.Context, orgID uuid.UUID, sandbox *Sandbox, picked models.DecryptedCodingCredential) (bool, error) {
+	if picked.Provider != models.ProviderAnthropicSubscription {
+		return false, nil
+	}
+	cfg, ok := picked.Config.(models.AnthropicSubscriptionConfig)
+	if !ok || cfg.AccessToken == "" || cfg.RefreshToken == "" {
+		return false, nil
+	}
+	sub := models.AnthropicSubscription{
+		AccessToken:   cfg.AccessToken,
+		RefreshToken:  cfg.RefreshToken,
+		ExpiresAt:     cfg.ExpiresAt,
+		AccountType:   cfg.AccountType,
+		RateLimitTier: cfg.RateLimitTier,
+		Scopes:        cfg.Scopes,
+	}
+	if sub.NeedsRefresh(codexSubscriptionRefreshWindow) {
+		refresher, ok := o.claudeCodeAuth.(ClaudeCodeAuthRefresher)
+		if ok {
+			refreshed, err := refresher.RefreshTokenByID(ctx, orgID, picked.ID)
+			if err == nil && refreshed != nil {
+				sub = *refreshed
+			} else if sub.IsExpired() {
+				if err != nil {
+					return false, fmt.Errorf("refresh unified claude subscription %s: %w", picked.ID, err)
+				}
+				return false, fmt.Errorf("refresh unified claude subscription %s returned no token", picked.ID)
+			} else if err != nil {
+				o.logger.Warn().
+					Err(err).
+					Str("cred_id", picked.ID.String()).
+					Msg("unified claude subscription refresh failed; using cached token")
+			}
+		} else if sub.IsExpired() {
+			return false, fmt.Errorf("unified claude subscription %s is expired and no refresh provider is configured", picked.ID)
+		}
+	}
+	return o.writeClaudeCodeAuth(ctx, orgID, sandbox, sub)
+}
+
 // ensureClaudeCodeAuth guarantees that the Claude Code agent has at least one
 // credential path available in the sandbox. When the unified resolver selected
 // an API key, that key wins; otherwise subscription file injection is preferred
@@ -3216,9 +3283,31 @@ func (o *Orchestrator) ensureClaudeCodeAuth(ctx context.Context, run *models.Ses
 		return nil
 	}
 
-	injected, err := o.injectClaudeCodeAuth(ctx, run.OrgID, sandbox)
+	injected, err := o.injectUnifiedClaudeCodeAuth(ctx, run.OrgID, run.TriggeredByUserID, sandbox)
 	if err != nil {
-		if fallbackErr := o.prepareClaudeCodeAPIKeyFallback(ctx, run, sandbox); fallbackErr == nil {
+		if fallbackErr := o.prepareClaudeCodeAPIKeyFallback(ctx, run, sandbox, env); fallbackErr == nil {
+			o.logger.Warn().
+				Err(err).
+				Str("org_id", run.OrgID.String()).
+				Str("session_id", run.ID.String()).
+				Msg("unified claude subscription injection failed; continuing with Anthropic API-key fallback")
+			return nil
+		}
+		o.failRunWithCategory(ctx, run,
+			fmt.Sprintf("unified claude subscription injection failed: %s", err),
+			FailureCategoryClaudeCodeAuth,
+			"Your Claude subscription token could not be injected into the sandbox. The token may have been revoked or the refresh failed.",
+			[]string{"Re-connect your Claude subscription from the Agent settings page"},
+		)
+		return fmt.Errorf("unified claude code auth injection: %w", err)
+	}
+	if injected {
+		return nil
+	}
+
+	injected, err = o.injectClaudeCodeAuth(ctx, run.OrgID, sandbox)
+	if err != nil {
+		if fallbackErr := o.prepareClaudeCodeAPIKeyFallback(ctx, run, sandbox, env); fallbackErr == nil {
 			o.logger.Warn().
 				Err(err).
 				Str("org_id", run.OrgID.String()).
@@ -3249,7 +3338,7 @@ func (o *Orchestrator) ensureClaudeCodeAuth(ctx context.Context, run *models.Ses
 	// No subscription — check for an Anthropic API-key fallback. The env var
 	// was already baked into sandboxCfg.Env by resolveAgentEnv, so if the
 	// credential exists the sandbox is already configured.
-	if fallbackErr := o.prepareClaudeCodeAPIKeyFallback(ctx, run, sandbox); fallbackErr == nil {
+	if fallbackErr := o.prepareClaudeCodeAPIKeyFallback(ctx, run, sandbox, env); fallbackErr == nil {
 		return nil
 	} else if !errors.Is(fallbackErr, errClaudeCodeFallbackUnavailable) {
 		o.failRunWithCategory(ctx, run,
@@ -3275,10 +3364,8 @@ func (o *Orchestrator) ensureClaudeCodeAuth(ctx context.Context, run *models.Ses
 
 var errClaudeCodeFallbackUnavailable = errors.New("claude code API-key fallback unavailable")
 
-func (o *Orchestrator) prepareClaudeCodeAPIKeyFallback(ctx context.Context, run *models.Session, sandbox *Sandbox) error {
-	cfg := o.env.resolveProviderConfig(ctx, run.OrgID, run.TriggeredByUserID, models.ProviderAnthropic)
-	ac, ok := cfg.(models.AnthropicConfig)
-	if !ok || ac.APIKey == "" {
+func (o *Orchestrator) prepareClaudeCodeAPIKeyFallback(ctx context.Context, run *models.Session, sandbox *Sandbox, env map[string]string) error {
+	if env["ANTHROPIC_API_KEY"] == "" {
 		return errClaudeCodeFallbackUnavailable
 	}
 
