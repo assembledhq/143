@@ -2238,6 +2238,16 @@ func TestUserFacingPRError(t *testing.T) {
 			want: "No changes to push.",
 		},
 		{
+			name: "push rejected",
+			err:  ghservice.ErrPushRejected,
+			want: "GitHub rejected the push because the remote branch changed during the attempt. Try again, or delete the branch on GitHub if it was created outside this session.",
+		},
+		{
+			name: "wrapped push rejected",
+			err:  fmt.Errorf("git push failed: %w (stale info)", ghservice.ErrPushRejected),
+			want: "GitHub rejected the push because the remote branch changed during the attempt. Try again, or delete the branch on GitHub if it was created outside this session.",
+		},
+		{
 			name: "generic fallback",
 			err:  errors.New("boom"),
 			want: "Check GitHub access or repo permissions and try again.",
