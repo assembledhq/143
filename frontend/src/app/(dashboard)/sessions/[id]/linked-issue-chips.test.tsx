@@ -204,4 +204,26 @@ describe('LinkedIssueChips', () => {
     const links = screen.getAllByRole('link');
     expect(links.map((a) => a.textContent)).toEqual(['ACS-1', 'ACS-2']);
   });
+
+  it('renders a visible sync-skipped chip for a primary Linear issue with a last skip reason', () => {
+    const session = makeSession({
+      linked_issues: [
+        {
+          id: 'link-1',
+          session_id: 'sess-1',
+          issue_id: 'issue-1',
+          role: 'primary',
+          position: 0,
+          issue_source: 'linear',
+          external_id: 'ACS-1',
+          linear_last_skipped_reason: 'per_team_disabled',
+        },
+      ],
+    });
+
+    render(<LinkedIssueChips session={session} />);
+
+    expect(screen.getByText('Linear sync skipped')).toBeInTheDocument();
+    expect(screen.getByLabelText(/workflow state sync is disabled/i)).toBeInTheDocument();
+  });
 });
