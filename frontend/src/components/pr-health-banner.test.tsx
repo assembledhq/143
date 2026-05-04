@@ -226,9 +226,9 @@ describe("PRHealthBanner", () => {
     expect(screen.getByText("Unit tests")).toBeInTheDocument();
     expect(screen.getByText("E2E tests")).toBeInTheDocument();
     expect(screen.getByText("Lint")).toBeInTheDocument();
-    expect(screen.getAllByText("failed").length).toBeGreaterThan(0);
-    expect(screen.getAllByText("pending").length).toBeGreaterThan(0);
-    expect(screen.getAllByText("passed").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Failed").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Pending").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Passed").length).toBeGreaterThan(0);
   });
 
   it("renders each hover-card check as an external link when details URLs are available", async () => {
@@ -291,7 +291,7 @@ describe("PRHealthBanner", () => {
 
     expect(await screen.findByText("CI jobs")).toBeInTheDocument();
     expect(screen.getByText("Legacy check")).toBeInTheDocument();
-    expect(screen.getAllByText("pending").length).toBeGreaterThanOrEqual(2);
+    expect(screen.getAllByText("Pending").length).toBeGreaterThanOrEqual(2);
   });
 
   it("does not render a separate conflicts badge when the summary already covers merge conflicts", () => {
