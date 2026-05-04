@@ -28,7 +28,7 @@ const rows: CodingAuth[] = [
     label: "Pi backup",
     scope: "organization",
     provider: "pi",
-    status: "never_verified",
+    status: "invalid",
     is_default: false,
     usage_note: "pi_12...cdef",
     created_at: "2026-04-22T10:00:00Z",
@@ -50,7 +50,7 @@ describe("CodingAuthStack", () => {
 
     expect(screen.getByText("Team seat A")).toBeInTheDocument();
     expect(screen.getByText("Default")).toBeInTheDocument();
-    expect(screen.getByText("Never verified")).toBeInTheDocument();
+    expect(screen.getByText("Invalid")).toBeInTheDocument();
     expect(screen.getByText("Pi")).toBeInTheDocument();
   });
 

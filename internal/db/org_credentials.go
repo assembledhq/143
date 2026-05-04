@@ -1219,9 +1219,6 @@ func inferCodingAuthStatus(cred models.DecryptedCredential) models.CodingAuthSta
 	case "pending_auth":
 		return models.CodingAuthStatusNeedsReauth
 	case "active":
-		if cred.LastVerifiedAt == nil {
-			return models.CodingAuthStatusNeverVerified
-		}
 		return models.CodingAuthStatusHealthy
 	default:
 		return models.CodingAuthStatusNeedsReauth
@@ -1229,7 +1226,7 @@ func inferCodingAuthStatus(cred models.DecryptedCredential) models.CodingAuthSta
 }
 
 func isRunnableCodingAuthStatus(status models.CodingAuthStatus) bool {
-	return status == models.CodingAuthStatusHealthy || status == models.CodingAuthStatusNeverVerified
+	return status == models.CodingAuthStatusHealthy
 }
 
 func codingAuthUsageNote(cred models.DecryptedCredential) string {

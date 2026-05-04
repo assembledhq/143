@@ -200,7 +200,7 @@ describe("Account settings page", () => {
           auth_type: "api_key",
           provider: "anthropic",
           label: "Claude Code API key",
-          status: "never_verified",
+          status: "healthy",
           is_default: true,
           created_at: "2026-01-01T00:00:00Z",
           updated_at: "2026-01-01T00:00:00Z",

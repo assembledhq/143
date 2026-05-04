@@ -30,8 +30,6 @@ function statusLabel(status: CodingAuth["status"]) {
       return "Needs reauth";
     case "invalid":
       return "Invalid";
-    case "never_verified":
-      return "Never verified";
     default:
       return status;
   }
@@ -46,8 +44,6 @@ function statusBadgeClass(status: CodingAuth["status"]) {
     case "needs_reauth":
     case "invalid":
       return "border-red-500/30 bg-red-500/10 text-red-700";
-    case "never_verified":
-      return "border-slate-500/30 bg-slate-500/10 text-slate-700";
     default:
       return "";
   }
