@@ -896,6 +896,26 @@ func (d *DockerProvider) ExecStream(ctx context.Context, sb *agent.Sandbox, cmd 
 	}
 	defer attachResp.Close()
 
+	// StdCopy reads from a hijacked TCP connection that does NOT observe
+	// ctx cancellation — once the connection is upgraded, the docker client
+	// detaches it from the http transport's normal cancellation. Without
+	// this watcher a long-running command (a preview service like
+	// `npm run dev`, an interactive shell, anything that does not exit on
+	// its own) blocks here forever after the caller cancels, deadlocking
+	// preview StopPreview at state.wg.Wait() and stranding the sandbox.
+	// Closing the hijacked connection from under StdCopy unblocks it with
+	// a read error; the caller can disambiguate via ctx.Err().
+	done := make(chan struct{})
+	defer close(done)
+	go func() {
+		select {
+		case <-ctx.Done():
+			// Close is idempotent with the deferred Close above.
+			attachResp.Close()
+		case <-done:
+		}
+	}()
+
 	// Use StdCopy with a line-splitting writer for stdout so onLine is
 	// called for each complete line as it arrives from Docker's stream.
 	lineWriter := &lineSplitter{onLine: onLine}

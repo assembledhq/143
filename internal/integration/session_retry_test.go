@@ -76,6 +76,20 @@ func TestIntegration_RetrySession_ResetsAndReenqueues(t *testing.T) {
 	require.Equal(t, "pending", job.Status)
 	require.Equal(t, session.ID.String(), payloadField(t, job.Payload, "session_id"))
 	require.Equal(t, orgID.String(), payloadField(t, job.Payload, "org_id"))
+
+	// 3. The dedupe_key must be set so that a duplicate retry (or any other
+	// run_agent enqueue path) is collapsed by the partial unique index on
+	// (queue, dedupe_key) WHERE status IN ('pending','running'). Verified via
+	// a direct query because listJobs hides this column. Regression guard:
+	// the prod incident at session f996f0e1 was caused by retry passing
+	// dedupe_key=NULL, letting a stale pending run_agent and the retry's new
+	// run_agent both fire and race AcquireTurnHold.
+	var dedupeKey *string
+	err = pool.QueryRow(context.Background(),
+		`SELECT dedupe_key FROM jobs WHERE id = $1`, job.ID).Scan(&dedupeKey)
+	require.NoError(t, err)
+	require.NotNil(t, dedupeKey, "retry's run_agent enqueue must set a dedupe_key to suppress duplicate jobs")
+	require.Equal(t, "run_agent:"+session.ID.String(), *dedupeKey, "dedupe key must follow the canonical run_agent:<sessionID> format from db.RunAgentDedupeKey")
 }
 
 // TestIntegration_RetrySession_RejectsNonFailedSession guards the inverse:

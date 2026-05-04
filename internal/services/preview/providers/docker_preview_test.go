@@ -686,6 +686,33 @@ func (f *fakeServiceExecutor) ReadFile(_ context.Context, _ *agent.Sandbox, _ st
 	return nil, nil
 }
 
+type recordingStopExecutor struct {
+	mu        sync.Mutex
+	execCalls []string
+}
+
+func (r *recordingStopExecutor) ExecStream(ctx context.Context, _ *agent.Sandbox, _ string, _ func(line []byte), _ io.Writer) (int, error) {
+	<-ctx.Done()
+	return -1, ctx.Err()
+}
+
+func (r *recordingStopExecutor) Exec(_ context.Context, _ *agent.Sandbox, cmd string, _, _ io.Writer) (int, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.execCalls = append(r.execCalls, cmd)
+	return 0, nil
+}
+
+func (r *recordingStopExecutor) ReadFile(_ context.Context, _ *agent.Sandbox, _ string) ([]byte, error) {
+	return nil, nil
+}
+
+func (r *recordingStopExecutor) calls() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]string(nil), r.execCalls...)
+}
+
 // TestNotifyService_NilSafe verifies the helper functions tolerate a nil
 // observer — providers must work both when StartPreview is called from the
 // manager (with an observer) and when it's called from a context that
@@ -1110,6 +1137,47 @@ func TestStartPreview_NilObserver_DoesNotPanic(t *testing.T) {
 
 	close(release)
 	require.NoError(t, d.StopPreview(context.Background(), handle.Handle))
+}
+
+func TestStopPreview_TerminatesServiceProcessesBeforeCleanup(t *testing.T) {
+	t.Parallel()
+
+	exec := &recordingStopExecutor{}
+	d := NewDockerPreviewProvider(&mockDockerPreviewClient{}, exec, zerolog.Nop())
+	handle := "preview-stop-test"
+	cancelled := make(chan struct{})
+	d.previews[handle] = &previewState{
+		handle:   handle,
+		sandbox:  &agent.Sandbox{ID: "sb"},
+		infra:    map[string]*preview.InfraHandle{},
+		services: map[string]*serviceState{},
+		cancelFn: func() { close(cancelled) },
+	}
+	d.previews[handle].services["web"] = &serviceState{
+		name:   "web",
+		pid:    4242,
+		port:   3000,
+		status: models.PreviewServiceStatusReady,
+	}
+	d.previews[handle].services["worker"] = &serviceState{
+		name:   "worker",
+		port:   9000,
+		status: models.PreviewServiceStatusReady,
+	}
+
+	err := d.StopPreview(context.Background(), handle)
+
+	require.NoError(t, err, "StopPreview should complete service cleanup")
+	select {
+	case <-cancelled:
+	default:
+		require.Fail(t, "StopPreview should cancel service goroutines before cleanup")
+	}
+	calls := exec.calls()
+	require.Len(t, calls, 2, "StopPreview should issue one termination command per service")
+	require.Contains(t, strings.Join(calls, "\n"), "4242", "termination command should target the recorded service PID")
+	require.Contains(t, strings.Join(calls, "\n"), ":3000", "termination command should target the ready service port")
+	require.Contains(t, strings.Join(calls, "\n"), ":9000", "termination command should still use the port when PID detection has not populated")
 }
 
 // TestWaitForReadiness_FailsFastWhenServiceExited verifies that the readiness

@@ -94,8 +94,11 @@ func (m *mockGitHubTokenProvider) GetInstallationToken(ctx context.Context, inst
 
 // mockCodexAuthProvider implements agent.CodexAuthProvider.
 type mockCodexAuthProvider struct {
-	cfg *models.OpenAIChatGPTConfig
-	err error
+	cfg        *models.OpenAIChatGPTConfig
+	err        error
+	refreshCfg *models.OpenAIChatGPTConfig
+	refreshErr error
+	refreshIDs []uuid.UUID
 }
 
 func (m *mockCodexAuthProvider) GetValidToken(ctx context.Context, orgID uuid.UUID) (*models.OpenAIChatGPTConfig, error) {
@@ -103,6 +106,35 @@ func (m *mockCodexAuthProvider) GetValidToken(ctx context.Context, orgID uuid.UU
 		return nil, m.err
 	}
 	return m.cfg, nil
+}
+
+func (m *mockCodexAuthProvider) RefreshTokenByID(ctx context.Context, orgID uuid.UUID, credID uuid.UUID) (*models.OpenAIChatGPTConfig, error) {
+	m.refreshIDs = append(m.refreshIDs, credID)
+	if m.refreshErr != nil {
+		return nil, m.refreshErr
+	}
+	return m.refreshCfg, nil
+}
+
+type mockCodingCredentialProvider struct {
+	resolvable     map[models.ProviderName][]models.DecryptedCodingCredential
+	err            error
+	requiredUserID *uuid.UUID
+}
+
+func (m *mockCodingCredentialProvider) ListResolvable(ctx context.Context, orgID uuid.UUID, userID *uuid.UUID, provider models.ProviderName) ([]models.DecryptedCodingCredential, error) {
+	if m.err != nil {
+		return nil, m.err
+	}
+	if m.requiredUserID != nil {
+		if userID == nil || *userID != *m.requiredUserID {
+			return nil, nil
+		}
+	}
+	if m.resolvable == nil {
+		return nil, nil
+	}
+	return m.resolvable[provider], nil
 }
 
 // mockClaudeCodeAuthProvider implements agent.ClaudeCodeAuthProvider.
@@ -130,6 +162,19 @@ type mockCredentialProvider struct {
 	err        error
 }
 
+// withDefaultStatus applies Status="active" when the test fixture didn't set
+// one. The legacy fallback resolver filters by Status, and the orchestrator
+// tests pre-date that filter — every fixture would otherwise need to repeat
+// `Status: "active"` for behavior that's already production reality.
+func (m *mockCredentialProvider) withDefaultStatus(cred *models.DecryptedCredential) *models.DecryptedCredential {
+	if cred == nil || cred.Status != "" {
+		return cred
+	}
+	copy := *cred
+	copy.Status = models.CodingCredentialStatusActive
+	return &copy
+}
+
 func (m *mockCredentialProvider) Get(ctx context.Context, orgID uuid.UUID, provider models.ProviderName) (*models.DecryptedCredential, error) {
 	if m.err != nil {
 		return nil, m.err
@@ -137,7 +182,7 @@ func (m *mockCredentialProvider) Get(ctx context.Context, orgID uuid.UUID, provi
 	if m.byProvider == nil {
 		return nil, nil
 	}
-	return m.byProvider[provider], nil
+	return m.withDefaultStatus(m.byProvider[provider]), nil
 }
 
 func (m *mockCredentialProvider) ListByProvider(ctx context.Context, orgID uuid.UUID, provider models.ProviderName) ([]models.DecryptedCredential, error) {
@@ -174,9 +219,13 @@ type mockSessionStore struct {
 	setWorkerNodeErr       error
 	releaseHoldFn          func() (bool, string, error)
 	finalizeFn             func(expectedContainerID string) (bool, error)
+	clearContainerIDFn     func(expectedContainerID string) (bool, error)
+	containerHoldStateFn   func(expectedContainerID string) (bool, bool, error)
 	acquireHoldCalls       int
 	releaseHoldCalls       int
 	finalizeCalls          int
+	clearContainerIDCalls  int
+	containerStateCalls    int
 
 	// Programmable response for the rehydrate-pass query. Each call returns
 	// the next page; the field is used only by orchestrator-wrapper tests in
@@ -449,6 +498,30 @@ func (m *mockSessionStore) FinalizeContainerDestroy(ctx context.Context, orgID, 
 	}
 	// Default: CAS succeeds.
 	return true, nil
+}
+
+func (m *mockSessionStore) ClearContainerID(ctx context.Context, orgID, sessionID uuid.UUID, expectedContainerID string) (bool, error) {
+	m.mu.Lock()
+	m.clearContainerIDCalls++
+	fn := m.clearContainerIDFn
+	m.mu.Unlock()
+	if fn != nil {
+		return fn(expectedContainerID)
+	}
+	// Default: CAS succeeds.
+	return true, nil
+}
+
+func (m *mockSessionStore) ContainerHoldState(ctx context.Context, orgID, sessionID uuid.UUID, expectedContainerID string) (bool, bool, error) {
+	m.mu.Lock()
+	m.containerStateCalls++
+	fn := m.containerHoldStateFn
+	m.mu.Unlock()
+	if fn != nil {
+		return fn(expectedContainerID)
+	}
+	// Default: the live winner is another turn holder.
+	return true, false, nil
 }
 
 // ListContainerHoldingSessions returns the next pre-canned page from
@@ -868,6 +941,7 @@ type testDeps struct {
 	codexAuth        agent.CodexAuthProvider
 	claudeCodeAuth   agent.ClaudeCodeAuthProvider
 	creds            *mockCredentialProvider
+	codingCreds      agent.CodingCredentialProvider
 	snapshots        *mockSnapshotStore
 	cancels          *agent.CancelRegistry
 	nodeID           string
@@ -919,30 +993,31 @@ func buildOrchestrator(d testDeps) *agent.Orchestrator {
 		snapshotStore = d.snapshots
 	}
 	return agent.NewOrchestrator(agent.OrchestratorConfig{
-		Provider:         d.provider,
-		Adapters:         map[models.AgentType]agent.AgentAdapter{d.adapter.Name(): d.adapter},
-		Sessions:         d.sessions,
-		SessionLogs:      d.logs,
-		SessionQuestions: d.questions,
-		SessionMessages:  d.messages,
-		DecisionLog:      d.decisions,
-		ProjectTasks:     d.projects,
-		Issues:           d.issues,
-		Repositories:     d.repos,
-		Jobs:             d.jobs,
-		GitHub:           d.github,
-		CodexAuth:        d.codexAuth,
-		ClaudeCodeAuth:   d.claudeCodeAuth,
-		Credentials:      d.creds,
-		Snapshots:        snapshotStore,
-		Cancels:          d.cancels,
-		Orgs:             orgStore,
-		IdentityResolver: d.identityResolver,
-		SandboxAuth:      d.sandboxAuth,
-		Users:            d.users,
-		NodeID:           d.nodeID,
-		Logger:           zerolog.Nop(),
-		MaxConcurrent:    3,
+		Provider:          d.provider,
+		Adapters:          map[models.AgentType]agent.AgentAdapter{d.adapter.Name(): d.adapter},
+		Sessions:          d.sessions,
+		SessionLogs:       d.logs,
+		SessionQuestions:  d.questions,
+		SessionMessages:   d.messages,
+		DecisionLog:       d.decisions,
+		ProjectTasks:      d.projects,
+		Issues:            d.issues,
+		Repositories:      d.repos,
+		Jobs:              d.jobs,
+		GitHub:            d.github,
+		CodexAuth:         d.codexAuth,
+		ClaudeCodeAuth:    d.claudeCodeAuth,
+		Credentials:       d.creds,
+		CodingCredentials: d.codingCreds,
+		Snapshots:         snapshotStore,
+		Cancels:           d.cancels,
+		Orgs:              orgStore,
+		IdentityResolver:  d.identityResolver,
+		SandboxAuth:       d.sandboxAuth,
+		Users:             d.users,
+		NodeID:            d.nodeID,
+		Logger:            zerolog.Nop(),
+		MaxConcurrent:     3,
 	})
 }
 
@@ -1367,11 +1442,14 @@ func TestRunAgent_AcquireHoldErrorFailsRun(t *testing.T) {
 	require.Equal(t, 0, d.sessions.finalizeCalls)
 }
 
-// TestRunAgent_AcquireHoldLosesRaceFailsRun covers the branch where
-// AcquireTurnHold succeeds but returns a different container_id (another
-// holder published first). We must destroy our local sandbox and fail the
-// run so the retry picks up the winning container via the reuse path.
-func TestRunAgent_AcquireHoldLosesRaceFailsRun(t *testing.T) {
+// TestRunAgent_AcquireHoldLosesRaceSelfHeals covers the branch where
+// AcquireTurnHold succeeds but returns a different container_id and the
+// winning container is alive (real concurrent duplicate). The loser must
+// destroy its local sandbox and return ErrSandboxRaceLoser WITHOUT touching
+// the session row — the winner owns the row and will publish the
+// authoritative result. The worker handler converts ErrSandboxRaceLoser into
+// a FatalError so the duplicate job dead-letters silently.
+func TestRunAgent_AcquireHoldLosesRaceSelfHeals(t *testing.T) {
 	t.Parallel()
 
 	orgID := testOrg()
@@ -1382,16 +1460,122 @@ func TestRunAgent_AcquireHoldLosesRaceFailsRun(t *testing.T) {
 	d.sessions.acquireHoldFn = func(proposed string) (string, error) {
 		return "winner-container", nil
 	}
+	// Default IsAlive=true; explicit here for readability — the alive branch
+	// is what distinguishes "real winner" from "stale orphan".
+	d.provider.IsAliveFn = func(ctx context.Context, sb *agent.Sandbox) (bool, error) {
+		return true, nil
+	}
 
 	orch := buildOrchestrator(d)
 	err := orch.RunAgent(context.Background(), run)
 	require.Error(t, err)
+	require.ErrorIs(t, err, agent.ErrSandboxRaceLoser, "loser must surface ErrSandboxRaceLoser so the worker can dead-letter")
 	require.Contains(t, err.Error(), "sandbox race")
 
 	require.Equal(t, 1, d.sessions.acquireHoldCalls)
 	require.Equal(t, 1, d.provider.GetDestroyCalls(), "must destroy the losing sandbox")
 	require.Equal(t, 0, d.sessions.releaseHoldCalls, "no release — we never held")
 	require.Equal(t, 0, d.sessions.finalizeCalls)
+	require.Equal(t, 0, d.sessions.clearContainerIDCalls, "alive winner — must NOT clear container_id (would kill the active turn)")
+	for _, ru := range d.sessions.resultUpdates {
+		require.NotEqual(t, "failed", ru.status, "loser must not mark the session failed — winner owns the row")
+	}
+}
+
+// TestRunAgent_AcquireHoldLosesRaceClearsStaleOrphan covers the recovery
+// branch where the "winning" container_id is actually a stale orphan from a
+// crashed prior worker. The orchestrator must CAS-clear the row via
+// ClearContainerID and return ErrStaleSandboxIDCleared so the worker
+// requeues against a clean row.
+func TestRunAgent_AcquireHoldLosesRaceClearsStaleOrphan(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	run := testRun(orgID, issue.ID)
+
+	d := defaultDeps()
+	d.sessions.acquireHoldFn = func(proposed string) (string, error) {
+		return "stale-orphan-container", nil
+	}
+	d.provider.IsAliveFn = func(ctx context.Context, sb *agent.Sandbox) (bool, error) {
+		return false, nil
+	}
+	var clearedID string
+	d.sessions.clearContainerIDFn = func(expected string) (bool, error) {
+		clearedID = expected
+		return true, nil
+	}
+
+	orch := buildOrchestrator(d)
+	err := orch.RunAgent(context.Background(), run)
+	require.Error(t, err)
+	require.ErrorIs(t, err, agent.ErrStaleSandboxIDCleared, "stale orphan path must surface ErrStaleSandboxIDCleared so the worker requeues")
+	require.NotErrorIs(t, err, agent.ErrSandboxRaceLoser, "stale orphan must not be misdiagnosed as a real race loss")
+
+	require.Equal(t, 1, d.sessions.clearContainerIDCalls, "must CAS-clear the stale orphan")
+	require.Equal(t, "stale-orphan-container", clearedID, "must clear the exact ID returned by AcquireTurnHold")
+	require.Equal(t, 1, d.provider.GetDestroyCalls(), "must still destroy the losing sandbox")
+	for _, ru := range d.sessions.resultUpdates {
+		require.NotEqual(t, "failed", ru.status, "stale-orphan path must not mark the session failed")
+	}
+}
+
+// TestRunAgent_AcquireHoldLosesRaceFallsBackOnIsAliveError verifies the
+// conservative fallback: when the IsAlive probe errors (e.g. transient
+// docker hiccup), we must NOT clear the row (could kill an active turn).
+// Instead, fall through to ErrSandboxRaceLoser; the startup reconciler is
+// the safety net for true orphans.
+func TestRunAgent_AcquireHoldLosesRaceFallsBackOnIsAliveError(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	run := testRun(orgID, issue.ID)
+
+	d := defaultDeps()
+	d.sessions.acquireHoldFn = func(proposed string) (string, error) {
+		return "winner-container", nil
+	}
+	d.provider.IsAliveFn = func(ctx context.Context, sb *agent.Sandbox) (bool, error) {
+		return false, errors.New("docker daemon hiccup")
+	}
+
+	orch := buildOrchestrator(d)
+	err := orch.RunAgent(context.Background(), run)
+	require.Error(t, err)
+	require.ErrorIs(t, err, agent.ErrSandboxRaceLoser, "transient IsAlive error must NOT trigger the orphan-clear path")
+	require.Equal(t, 0, d.sessions.clearContainerIDCalls, "must not clear container_id when liveness is unknown")
+}
+
+// TestRunAgent_AcquireHoldLosesRaceSkipsClearWhenCASLost covers the
+// TOCTOU-safe behavior: ClearContainerID returning cleared=false (a new
+// holder acquired between the IsAlive probe and the CAS) must fall through
+// to ErrSandboxRaceLoser rather than ErrStaleSandboxIDCleared. Otherwise we
+// would request a retry against a row that's actually busy.
+func TestRunAgent_AcquireHoldLosesRaceSkipsClearWhenCASLost(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	run := testRun(orgID, issue.ID)
+
+	d := defaultDeps()
+	d.sessions.acquireHoldFn = func(proposed string) (string, error) {
+		return "winner-container", nil
+	}
+	d.provider.IsAliveFn = func(ctx context.Context, sb *agent.Sandbox) (bool, error) {
+		return false, nil
+	}
+	d.sessions.clearContainerIDFn = func(expected string) (bool, error) {
+		return false, nil
+	}
+
+	orch := buildOrchestrator(d)
+	err := orch.RunAgent(context.Background(), run)
+	require.Error(t, err)
+	require.ErrorIs(t, err, agent.ErrSandboxRaceLoser, "CAS-lost clear must dead-letter, not retry")
+	require.Equal(t, 1, d.sessions.clearContainerIDCalls, "must have attempted the clear")
 }
 
 func TestRunAgent_SetWorkerNodeIDFailureFailsRun(t *testing.T) {
@@ -1640,8 +1824,9 @@ func TestRunAgent_AuthSocketClosedOnHydrateRaceLoss(t *testing.T) {
 
 	orch := buildOrchestrator(d)
 	err := orch.RunAgent(context.Background(), run)
-	require.Error(t, err, "RunAgent should fail when AcquireTurnHold reports a different container_id")
-	require.Contains(t, err.Error(), "sandbox race", "RunAgent should surface the sandbox-race condition")
+	require.Error(t, err, "RunAgent should return an error when AcquireTurnHold reports a different container_id")
+	require.ErrorIs(t, err, agent.ErrSandboxRaceLoser, "RunAgent should surface ErrSandboxRaceLoser on the lost hydrate race")
+	require.Contains(t, err.Error(), "sandbox race")
 
 	require.Equal(t, 1, authStub.listenCalls, "auth socket must be opened before the race is detected")
 	require.Equal(t, 1, authStub.closeCalls, "auth socket must be closed when the local sandbox is destroyed after losing the hydrate race")
@@ -2844,6 +3029,64 @@ func TestRunAgent_ClaudeSubscriptionInjectsCredentialsFile(t *testing.T) {
 		"should create ~/.claude and pre-create the credentials file with mode 0600 in a single command")
 }
 
+func TestRunAgent_ClaudeUnifiedAPIKeyIsNotOverriddenBySubscription(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	run := testRun(orgID, issue.ID)
+
+	d := defaultDeps()
+	d.claudeCodeAuth = &mockClaudeCodeAuthProvider{
+		hasSub: true,
+		sub: &models.AnthropicSubscription{
+			AccessToken:  "org-sub-access",
+			RefreshToken: "org-sub-refresh",
+			ExpiresAt:    time.Now().Add(time.Hour),
+		},
+	}
+	d.codingCreds = &mockCodingCredentialProvider{
+		resolvable: map[models.ProviderName][]models.DecryptedCodingCredential{
+			models.ProviderAnthropic: {
+				{
+					ID:       uuid.New(),
+					OrgID:    orgID,
+					Provider: models.ProviderAnthropic,
+					Priority: 1,
+					Status:   models.CodingCredentialStatusActive,
+					Config:   models.AnthropicConfig{APIKey: "sk-unified-ant-key"},
+				},
+			},
+			models.ProviderAnthropicSubscription: {
+				{
+					ID:       uuid.New(),
+					OrgID:    orgID,
+					Provider: models.ProviderAnthropicSubscription,
+					Priority: 2,
+					Status:   models.CodingCredentialStatusActive,
+					Config: models.AnthropicSubscriptionConfig{
+						AccessToken:  "lower-priority-sub",
+						RefreshToken: "lower-priority-refresh",
+						ExpiresAt:    time.Now().Add(time.Hour),
+					},
+				},
+			},
+		},
+	}
+
+	var capturedCfg agent.SandboxConfig
+	d.provider.CreateFn = func(ctx context.Context, cfg agent.SandboxConfig) (*agent.Sandbox, error) {
+		capturedCfg = cfg
+		return &agent.Sandbox{ID: "claude-api-key", Provider: "mock", WorkDir: cfg.WorkDir, HomeDir: cfg.HomeDir}, nil
+	}
+
+	orch := buildOrchestrator(d)
+	err := orch.RunAgent(context.Background(), run)
+	require.NoError(t, err, "run should succeed with the selected unified Anthropic API key")
+	require.Equal(t, "sk-unified-ant-key", capturedCfg.Env["ANTHROPIC_API_KEY"], "sandbox env should carry the selected Anthropic API key")
+	require.NotContains(t, d.provider.Files, "/home/sandbox/.claude/.credentials.json", "lower-priority subscription auth should not override the selected unified API key")
+}
+
 func TestRunAgent_ClaudeSubscriptionTokenFailureFallsBackToAPIKey(t *testing.T) {
 	t.Parallel()
 
@@ -2995,6 +3238,45 @@ func TestRunAgent_CodexOpenAIKeyAloneIsNotSufficient(t *testing.T) {
 	err := orch.RunAgent(context.Background(), run)
 	require.Error(t, err, "run should fail when only OpenAI API key exists (no ChatGPT OAuth)")
 	require.Contains(t, err.Error(), "no credentials", "error should mention missing credentials")
+}
+
+func TestRunAgent_CodexUnifiedOpenAIKeyDoesNotRequireOAuth(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	run := testRun(orgID, issue.ID)
+	run.AgentType = models.AgentTypeCodex
+
+	d := defaultDeps()
+	d.adapter.name = models.AgentTypeCodex
+	d.codexAuth = nil
+	d.codingCreds = &mockCodingCredentialProvider{
+		resolvable: map[models.ProviderName][]models.DecryptedCodingCredential{
+			models.ProviderOpenAI: {
+				{
+					ID:       uuid.New(),
+					OrgID:    orgID,
+					Provider: models.ProviderOpenAI,
+					Priority: 1,
+					Status:   models.CodingCredentialStatusActive,
+					Config:   models.OpenAIConfig{APIKey: "sk-unified-openai-key"},
+				},
+			},
+		},
+	}
+
+	var capturedCfg agent.SandboxConfig
+	d.provider.CreateFn = func(ctx context.Context, cfg agent.SandboxConfig) (*agent.Sandbox, error) {
+		capturedCfg = cfg
+		return &agent.Sandbox{ID: "codex-api-key", Provider: "mock", WorkDir: cfg.WorkDir, HomeDir: cfg.HomeDir}, nil
+	}
+
+	orch := buildOrchestrator(d)
+	err := orch.RunAgent(context.Background(), run)
+	require.NoError(t, err, "run should succeed when the unified resolver selected an OpenAI API key")
+	require.Equal(t, "sk-unified-openai-key", capturedCfg.Env["OPENAI_API_KEY"], "sandbox env should carry the selected OpenAI API key")
+	require.NotContains(t, d.provider.Files, "/home/sandbox/.codex/auth.json", "Codex OAuth auth.json should not be required when the selected unified credential is an API key")
 }
 
 func TestRunAgent_CodexAuthWritesToSandboxWorkdir(t *testing.T) {
@@ -3815,6 +4097,173 @@ func TestContinueSession_AuthSocketClosedOnAcquireHoldError(t *testing.T) {
 	require.Equal(t, 1, authStub.closeCalls, "auth socket must be closed when acquire-hold fails after the listener was opened")
 }
 
+// TestContinueSession_AcquireHoldLosesRaceSelfHeals is the ContinueSession
+// parity for TestRunAgent_AcquireHoldLosesRaceSelfHeals: when AcquireTurnHold
+// reports a different (alive) container_id, ContinueSession must surface
+// ErrSandboxRaceLoser without touching the session row, leaving the winner's
+// terminal write authoritative.
+func TestContinueSession_AcquireHoldLosesRaceSelfHeals(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	issue.Source = models.IssueSourceManual
+	session := testRun(orgID, issue.ID)
+	session.Origin = models.SessionOriginManual
+	session.InteractionMode = models.SessionInteractionModeInteractive
+	session.ValidationPolicy = models.SessionValidationPolicyOnSessionEnd
+	session.Status = string(models.SessionStatusIdle)
+	session.CurrentTurn = 1
+
+	d := defaultDeps()
+	d.creds = &mockCredentialProvider{
+		byProvider: map[models.ProviderName]*models.DecryptedCredential{
+			models.ProviderAnthropic: {
+				Provider: models.ProviderAnthropic,
+				Config:   models.AnthropicConfig{APIKey: "sk-ant-test"},
+			},
+		},
+	}
+	d.orgs = &mockOrgStore{org: models.Organization{ID: orgID}}
+	d.identityResolver = identity.NewResolver(d.github, zerolog.Nop())
+	d.users = fakeUserStore{}
+	d.issues.issue = issue
+	d.messages.messages = []models.SessionMessage{
+		{ID: 1, SessionID: session.ID, OrgID: orgID, TurnNumber: 2, Role: models.MessageRoleUser, Content: "follow up"},
+	}
+	d.sessions.acquireHoldFn = func(proposed string) (string, error) {
+		return "winner-container", nil
+	}
+	d.provider.IsAliveFn = func(ctx context.Context, sb *agent.Sandbox) (bool, error) {
+		return true, nil
+	}
+
+	orch := buildOrchestrator(d)
+	err := orch.ContinueSession(context.Background(), session, nil)
+	require.Error(t, err)
+	require.ErrorIs(t, err, agent.ErrSandboxRaceLoser, "ContinueSession loser must surface ErrSandboxRaceLoser")
+	require.Contains(t, err.Error(), "sandbox race")
+
+	require.Equal(t, 0, d.sessions.clearContainerIDCalls, "alive winner — must not clear container_id")
+	for _, ru := range d.sessions.resultUpdates {
+		require.NotEqual(t, "failed", ru.status, "ContinueSession loser must not mark the session failed — winner owns the row")
+	}
+	for _, status := range d.sessions.statusUpdates {
+		require.NotEqual(t, string(models.SessionStatusIdle), status, "loser must not flip the session back to idle — winner is mid-turn")
+	}
+}
+
+// TestContinueSession_AcquireHoldLosesRaceClearsStaleOrphan covers the
+// ContinueSession recovery branch: stale orphan container_id from a crashed
+// prior worker must be CAS-cleared so the worker requeues.
+func TestContinueSession_AcquireHoldLosesRaceClearsStaleOrphan(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	issue.Source = models.IssueSourceManual
+	session := testRun(orgID, issue.ID)
+	session.Origin = models.SessionOriginManual
+	session.InteractionMode = models.SessionInteractionModeInteractive
+	session.ValidationPolicy = models.SessionValidationPolicyOnSessionEnd
+	session.Status = string(models.SessionStatusIdle)
+	session.CurrentTurn = 1
+
+	d := defaultDeps()
+	d.creds = &mockCredentialProvider{
+		byProvider: map[models.ProviderName]*models.DecryptedCredential{
+			models.ProviderAnthropic: {
+				Provider: models.ProviderAnthropic,
+				Config:   models.AnthropicConfig{APIKey: "sk-ant-test"},
+			},
+		},
+	}
+	d.orgs = &mockOrgStore{org: models.Organization{ID: orgID}}
+	d.identityResolver = identity.NewResolver(d.github, zerolog.Nop())
+	d.users = fakeUserStore{}
+	d.issues.issue = issue
+	d.messages.messages = []models.SessionMessage{
+		{ID: 1, SessionID: session.ID, OrgID: orgID, TurnNumber: 2, Role: models.MessageRoleUser, Content: "follow up"},
+	}
+	d.sessions.acquireHoldFn = func(proposed string) (string, error) {
+		return "stale-orphan-container", nil
+	}
+	d.provider.IsAliveFn = func(ctx context.Context, sb *agent.Sandbox) (bool, error) {
+		return false, nil
+	}
+	var clearedID string
+	d.sessions.clearContainerIDFn = func(expected string) (bool, error) {
+		clearedID = expected
+		return true, nil
+	}
+
+	orch := buildOrchestrator(d)
+	err := orch.ContinueSession(context.Background(), session, nil)
+	require.Error(t, err)
+	require.ErrorIs(t, err, agent.ErrStaleSandboxIDCleared, "ContinueSession stale-orphan path must surface ErrStaleSandboxIDCleared")
+	require.Equal(t, 1, d.sessions.clearContainerIDCalls)
+	require.Equal(t, "stale-orphan-container", clearedID)
+}
+
+// TestContinueSession_AcquireHoldLosesRaceToPreviewRetries covers the case
+// where a preview hydrate published container_id first. The container is
+// alive, but no agent turn owns it yet; the continuation must not dead-letter
+// silently as a duplicate job because there is no winning agent job to finish
+// the user's turn. Instead it reverts the session to idle and returns a
+// retryable preview-race sentinel so the next job attempt can attach to the
+// preview container through the normal reuse path.
+func TestContinueSession_AcquireHoldLosesRaceToPreviewRetries(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	issue.Source = models.IssueSourceManual
+	session := testRun(orgID, issue.ID)
+	session.Origin = models.SessionOriginManual
+	session.InteractionMode = models.SessionInteractionModeInteractive
+	session.ValidationPolicy = models.SessionValidationPolicyOnSessionEnd
+	session.Status = string(models.SessionStatusIdle)
+	session.CurrentTurn = 1
+
+	d := defaultDeps()
+	d.creds = &mockCredentialProvider{
+		byProvider: map[models.ProviderName]*models.DecryptedCredential{
+			models.ProviderAnthropic: {
+				Provider: models.ProviderAnthropic,
+				Config:   models.AnthropicConfig{APIKey: "sk-ant-test"},
+			},
+		},
+	}
+	d.orgs = &mockOrgStore{org: models.Organization{ID: orgID}}
+	d.identityResolver = identity.NewResolver(d.github, zerolog.Nop())
+	d.users = fakeUserStore{}
+	d.issues.issue = issue
+	d.messages.messages = []models.SessionMessage{
+		{ID: 1, SessionID: session.ID, OrgID: orgID, TurnNumber: 2, Role: models.MessageRoleUser, Content: "follow up"},
+	}
+	d.sessions.acquireHoldFn = func(proposed string) (string, error) {
+		return "preview-container", nil
+	}
+	d.provider.IsAliveFn = func(ctx context.Context, sb *agent.Sandbox) (bool, error) {
+		return true, nil
+	}
+	d.sessions.containerHoldStateFn = func(expected string) (bool, bool, error) {
+		require.Equal(t, "preview-container", expected, "holder-state probe should inspect the winning container")
+		return false, true, nil
+	}
+
+	orch := buildOrchestrator(d)
+	err := orch.ContinueSession(context.Background(), session, nil)
+	require.Error(t, err, "ContinueSession should return the preview race for the worker to retry")
+	require.ErrorIs(t, err, agent.ErrSandboxPreviewRace, "preview-held containers should be retried, not dead-lettered as duplicate agent jobs")
+	require.NotErrorIs(t, err, agent.ErrSandboxRaceLoser, "preview-held containers should not be classified as duplicate agent jobs")
+	require.Contains(t, d.sessions.statusUpdates, string(models.SessionStatusIdle), "preview race should revert session status so retry re-enters cleanly")
+	require.Equal(t, 0, d.sessions.clearContainerIDCalls, "alive preview container must not be cleared")
+	for _, ru := range d.sessions.resultUpdates {
+		require.NotEqual(t, "failed", ru.status, "preview race should not mark the session failed")
+	}
+}
+
 // TestContinueSession_AuthSocketClosedOnHydrateFailure verifies that the
 // hydrate-failure branch in ContinueSession also tears down the listener.
 // prepareSandboxGitHubAuth opens the listener before HydrateSandboxFromSnapshot
@@ -4355,6 +4804,70 @@ func TestRunAgent_CodexAuthInjectsTokenFromGetValidToken(t *testing.T) {
 	tokens, ok := authJSON["tokens"].(map[string]interface{})
 	require.True(t, ok, "auth.json should have tokens object")
 	require.Equal(t, "access-token", tokens["access_token"], "auth.json should contain the token from GetValidToken")
+}
+
+func TestRunAgent_CodexTokenExpiredRetryKeepsTriggeredUserScope(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	userID := uuid.New()
+	issue := testIssue(orgID)
+	run := testRun(orgID, issue.ID)
+	run.AgentType = models.AgentTypeCodex
+	run.TriggeredByUserID = &userID
+
+	d := defaultDeps()
+	d.adapter.name = models.AgentTypeCodex
+	d.codexAuth = nil
+	d.codingCreds = &mockCodingCredentialProvider{
+		requiredUserID: &userID,
+		resolvable: map[models.ProviderName][]models.DecryptedCodingCredential{
+			models.ProviderOpenAISubscription: {
+				{
+					ID:       uuid.New(),
+					OrgID:    orgID,
+					UserID:   &userID,
+					Provider: models.ProviderOpenAISubscription,
+					Priority: 1,
+					Status:   models.CodingCredentialStatusActive,
+					Config: models.OpenAISubscriptionConfig{
+						AccessToken:  "personal-access",
+						RefreshToken: "personal-refresh",
+						ExpiresAt:    time.Now().Add(time.Hour),
+					},
+				},
+			},
+		},
+	}
+
+	executeCalls := 0
+	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
+		executeCalls++
+		if executeCalls == 1 {
+			return &agent.AgentResult{
+				Error:           "codex CLI exited with code 1: auth error code: token_expired",
+				ExitCode:        1,
+				ConfidenceScore: 0.1,
+			}, nil
+		}
+		return &agent.AgentResult{
+			Summary:         "retry succeeded",
+			ConfidenceScore: 0.9,
+			ExitCode:        0,
+		}, nil
+	}
+
+	err := buildOrchestrator(d).RunAgent(context.Background(), run)
+
+	require.NoError(t, err, "RunAgent should recover from token_expired when the personal subscription is still resolvable")
+	require.Equal(t, 2, executeCalls, "RunAgent should execute a retry using the triggering user's credential scope")
+	authData, ok := d.provider.Files["/home/sandbox/.codex/auth.json"]
+	require.True(t, ok, "retry should keep writing Codex auth.json from the personal subscription")
+	var authJSON map[string]interface{}
+	require.NoError(t, json.Unmarshal(authData, &authJSON), "auth.json should remain valid after retry injection")
+	tokens, ok := authJSON["tokens"].(map[string]interface{})
+	require.True(t, ok, "auth.json should contain tokens after retry injection")
+	require.Equal(t, "personal-access", tokens["access_token"], "retry injection should use the triggering user's personal subscription")
 }
 
 func TestRunAgent_CancelReturnsToIdle(t *testing.T) {

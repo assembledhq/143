@@ -401,11 +401,12 @@ func (h *SessionReviewCommentHandler) SendToAgent(w http.ResponseWriter, r *http
 			return
 		}
 
+		dedupeKey := db.ContinueSessionDedupeKey(sessionID)
 		payload := map[string]string{
 			"session_id": sessionID.String(),
 			"org_id":     orgID.String(),
 		}
-		if _, err := h.jobStore.Enqueue(r.Context(), orgID, "agent", "continue_session", payload, 5, nil); err != nil {
+		if _, err := h.jobStore.Enqueue(r.Context(), orgID, "agent", "continue_session", payload, 5, &dedupeKey); err != nil {
 			// Delete the orphaned message and revert session status.
 			if msg.ID != 0 {
 				if delErr := h.messageStore.Delete(r.Context(), msg.ID); delErr != nil {

@@ -62,7 +62,7 @@ import { NoReposWarning } from "@/components/no-repos-warning";
 import { AgentKeyRequiredBanner } from "@/components/agent-key-required-banner";
 import { useOptimisticSessions } from "@/contexts/optimistic-sessions";
 import { useAuth } from "@/hooks/use-auth";
-import { buildFilterSuffix } from "@/hooks/use-owner-scope-filter";
+import { buildFilterSuffix } from "@/hooks/use-people-filter";
 import { MobileBackButton } from "@/components/mobile-back-button";
 import { useMediaQuery } from "@/hooks/use-media-query";
 import {
@@ -103,7 +103,7 @@ export function ManualSessionCreatePageContent() {
   const repoId = searchParams.get("repo") ?? undefined;
   const filterSuffix = useMemo(
     () => buildFilterSuffix(
-      searchParams.get("user") ?? "mine",
+      searchParams.get("people") ?? searchParams.get("user"),
       searchParams.get("status"),
       searchParams.get("repo"),
       searchParams.get("search"),

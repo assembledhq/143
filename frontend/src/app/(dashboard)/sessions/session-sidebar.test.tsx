@@ -128,18 +128,18 @@ describe('SessionSidebar', () => {
     mockAuthState.logout = vi.fn();
   });
 
-  it('defaults the owner scope to Mine', async () => {
+  it('defaults the people scope to Mine', async () => {
     let capturedUserId: string | null = null;
     server.use(
       http.get('/api/v1/sessions', ({ request }) => {
-        capturedUserId = new URL(request.url).searchParams.get('triggered_by_user_id');
+        capturedUserId = new URL(request.url).searchParams.get('triggered_by_user_ids');
         return HttpResponse.json({ data: [], meta: {} });
       }),
     );
 
     renderWithProviders(<SessionSidebar />);
 
-    await screen.findByRole('radio', { name: 'Mine' });
+    await screen.findByRole('button', { name: /Mine/ });
     expect(capturedUserId).toBe('user-1');
   });
 
@@ -245,7 +245,7 @@ describe('SessionSidebar', () => {
     ]);
 
     renderWithProviders(<SessionSidebar />, {
-      searchParams: { user: 'all', search: 'Beta' },
+      searchParams: { people: 'all', search: 'Beta' },
     });
 
     const input = await screen.findByPlaceholderText('Search sessions...');
@@ -253,7 +253,7 @@ describe('SessionSidebar', () => {
     expect(screen.queryByText('Alpha fix')).not.toBeInTheDocument();
     expect((await screen.findByText('Beta update')).closest('a')).toHaveAttribute(
       'href',
-      '/sessions/s2?user=all&search=Beta',
+      '/sessions/s2?people=all&search=Beta',
     );
   });
 
@@ -274,8 +274,8 @@ describe('SessionSidebar', () => {
 
     await waitFor(() => {
       expect(input).toHaveValue('');
+      expect(screen.getByText('Alpha fix')).toBeInTheDocument();
     });
-    expect(screen.getByText('Alpha fix')).toBeInTheDocument();
   });
 
   // -----------------------------------------------------------------------
@@ -657,14 +657,14 @@ describe('SessionSidebar', () => {
     ]);
 
     renderWithProviders(<SessionSidebar />, {
-      searchParams: { user: 'all', status: 'active', repo: 'repo-1' },
+      searchParams: { people: 'all', status: 'active', repo: 'repo-1' },
     });
     await screen.findByText('Linked session');
 
     const link = screen.getByText('Linked session').closest('a');
     expect(link).toHaveAttribute(
       'href',
-      '/sessions/s1?user=all&status=active&repo=repo-1',
+      '/sessions/s1?people=all&status=active&repo=repo-1',
     );
   });
 
@@ -674,29 +674,29 @@ describe('SessionSidebar', () => {
     ]);
 
     renderWithProviders(<SessionSidebar />, {
-      searchParams: { user: 'all', status: 'active', repo: 'repo-1', search: 'Linked' },
+      searchParams: { people: 'all', status: 'active', repo: 'repo-1', search: 'Linked' },
     });
     await screen.findByText('Linked session');
 
     const link = screen.getByText('Linked session').closest('a');
     expect(link).toHaveAttribute(
       'href',
-      '/sessions/s1?user=all&status=active&repo=repo-1&search=Linked',
+      '/sessions/s1?people=all&status=active&repo=repo-1&search=Linked',
     );
   });
 
-  it('preserves a member-id user filter (not just "all")', async () => {
+  it('preserves explicit people selections', async () => {
     serveSessions([
       makeSession({ id: 's1', result_summary: 'Member-scoped session' }),
     ]);
 
     renderWithProviders(<SessionSidebar />, {
-      searchParams: { user: 'user-2' },
+      searchParams: { people: 'user-2,user-3' },
     });
     await screen.findByText('Member-scoped session');
 
     const link = screen.getByText('Member-scoped session').closest('a');
-    expect(link).toHaveAttribute('href', '/sessions/s1?user=user-2');
+    expect(link).toHaveAttribute('href', '/sessions/s1?people=user-2%2Cuser-3');
   });
 
   it('only serializes the filters that are actually set', async () => {
@@ -731,15 +731,34 @@ describe('SessionSidebar', () => {
     ]);
 
     renderWithProviders(<SessionSidebar />, {
-      searchParams: { user: 'all', status: 'active', repo: 'repo-1', search: 'Linked' },
+      searchParams: { people: 'all', status: 'active', repo: 'repo-1', search: 'Linked' },
     });
     const input = await screen.findByPlaceholderText('Search sessions...');
     expect(input).toHaveValue('Linked');
 
     expect(screen.getByRole('link', { name: 'New session' })).toHaveAttribute(
       'href',
-      '/sessions/new?user=all&status=active&repo=repo-1&search=Linked',
+      '/sessions/new?people=all&status=active&repo=repo-1&search=Linked',
     );
+  });
+
+  it('defaults the people scope to Mine for session requests', async () => {
+    const capturedPeople: string[] = [];
+    server.use(
+      http.get('*/api/v1/sessions', ({ request }) => {
+        capturedPeople.push(new URL(request.url).searchParams.get('triggered_by_user_ids') ?? '');
+        return HttpResponse.json({ data: [], meta: {} });
+      }),
+      http.get('*/api/v1/sessions/counts', ({ request }) => {
+        capturedPeople.push(new URL(request.url).searchParams.get('triggered_by_user_ids') ?? '');
+        return HttpResponse.json({ data: { all: 0, active: 0, archived: 0, cap: 100 } });
+      }),
+    );
+
+    renderWithProviders(<SessionSidebar />);
+    await screen.findByRole('button', { name: /Mine/ });
+
+    expect(capturedPeople).toContain('user-1');
   });
 
 });

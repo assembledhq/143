@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"strings"
 	"testing"
@@ -41,10 +42,47 @@ func (workerLinearIntegrationReader) GetByOrgAndProvider(context.Context, uuid.U
 	return models.Integration{ID: uuid.New(), Provider: "linear", Status: "active"}, nil
 }
 
+// workerLinearMissingIntegrationReader simulates the org-disconnected-Linear
+// case: the GetByOrgAndProvider lookup returns pgx.ErrNoRows, which
+// integrationFor maps to linear.ErrIntegrationNotFound for worker handlers
+// to dead-letter on.
+type workerLinearMissingIntegrationReader struct{}
+
+func (workerLinearMissingIntegrationReader) GetByOrgAndProvider(context.Context, uuid.UUID, string) (models.Integration, error) {
+	return models.Integration{}, pgx.ErrNoRows
+}
+
 type workerLinearCredentialReader struct{}
 
 func (workerLinearCredentialReader) Get(context.Context, uuid.UUID, models.ProviderName) (*models.DecryptedCredential, error) {
 	return &models.DecryptedCredential{Config: models.LinearConfig{AccessToken: "linear-token"}}, nil
+}
+
+// workerLinearIntegrationRecorder doubles as IntegrationReader and
+// IntegrationWriter so unauthorized-flow tests can both feed an active row
+// to MarkIntegrationUnauthorized's pre-write lookup and assert the resulting
+// status flip.
+type workerLinearIntegrationRecorder struct {
+	row             models.Integration
+	statusCfgWrites []string
+}
+
+func (r *workerLinearIntegrationRecorder) GetByOrgAndProvider(context.Context, uuid.UUID, string) (models.Integration, error) {
+	return r.row, nil
+}
+
+func (r *workerLinearIntegrationRecorder) UpdateStatus(_ context.Context, _, _ uuid.UUID, status string) error {
+	r.statusCfgWrites = append(r.statusCfgWrites, status)
+	return nil
+}
+
+func (r *workerLinearIntegrationRecorder) UpdateConfig(_ context.Context, _, _ uuid.UUID, _ json.RawMessage) error {
+	return nil
+}
+
+func (r *workerLinearIntegrationRecorder) UpdateStatusAndConfig(_ context.Context, _, _ uuid.UUID, status string, _ json.RawMessage) error {
+	r.statusCfgWrites = append(r.statusCfgWrites, status)
+	return nil
 }
 
 var workerSessionColumns = []string{
@@ -645,6 +683,74 @@ func TestLinearJobHandlers(t *testing.T) {
 		require.NoError(t, mock.ExpectationsWereMet(), "dead-letter hook should mark prepare state failed after retries exhaust")
 	})
 
+	t.Run("prepare_linear_primary dead-letters fatally on missing integration", func(t *testing.T) {
+		t.Parallel()
+		// When an org disconnects Linear after the prepare job is enqueued the
+		// integration row vanishes. Pre-fix this burned the 8-minute retryable
+		// window before dead-lettering; the handler must now return *FatalError
+		// so the dead-letter hook fires immediately and run_agent unblocks.
+		stores, mock := newTestStores(t)
+		defer mock.Close()
+
+		orgID := uuid.New()
+		sessionID := uuid.New()
+		svc := linearservice.NewService(linearservice.Config{
+			Sessions:     stores.Sessions,
+			Integrations: workerLinearMissingIntegrationReader{},
+			Credentials:  workerLinearCredentialReader{},
+			Logger:       zerolog.Nop(),
+		})
+		handler := newPrepareLinearPrimaryHandler(svc, zerolog.Nop())
+		payload := json.RawMessage(`{"org_id":"` + orgID.String() + `","session_id":"` + sessionID.String() + `","identifiers":["ACS-123"]}`)
+
+		err := handler(context.Background(), "prepare_linear_primary", payload)
+		require.Error(t, err, "missing integration should surface as a handler error")
+		var fatal *FatalError
+		require.ErrorAs(t, err, &fatal, "missing integration must dead-letter, not retry to exhaustion")
+		require.ErrorIs(t, err, linearservice.ErrIntegrationNotFound, "fatal wrapper should preserve the integration-not-found sentinel")
+		var retryable *RetryableError
+		require.False(t, errors.As(err, &retryable), "missing integration must not be classified as retryable")
+		require.NoError(t, mock.ExpectationsWereMet(), "fatal-on-lookup must not write to sessions before the dead-letter hook")
+	})
+
+	t.Run("prepare_linear_primary dead-letters fatally on linear unauthorized", func(t *testing.T) {
+		t.Parallel()
+		// 401 from Linear is terminal until the user reconnects. Handler must
+		// (a) flip the integration row to errored so the settings UI shows
+		// Reconnect and (b) return *FatalError so we don't grind retries while
+		// the user is staring at the prepare-state spinner.
+		stores, mock := newTestStores(t)
+		defer mock.Close()
+
+		orgID := uuid.New()
+		sessionID := uuid.New()
+		recorder := &workerLinearIntegrationRecorder{row: models.Integration{
+			ID:     uuid.New(),
+			Status: models.IntegrationStatusActive,
+			Config: json.RawMessage(`{"workspace_id":"wks-1"}`),
+		}}
+		svc := linearservice.NewService(linearservice.Config{
+			Sessions:           stores.Sessions,
+			Integrations:       recorder,
+			IntegrationsWriter: recorder,
+			Credentials:        workerLinearCredentialReader{},
+			ClientFactory: func(context.Context, string) (linearservice.Client, error) {
+				return nil, linearservice.ErrUnauthorized
+			},
+			Logger: zerolog.Nop(),
+		})
+		handler := newPrepareLinearPrimaryHandler(svc, zerolog.Nop())
+		payload := json.RawMessage(`{"org_id":"` + orgID.String() + `","session_id":"` + sessionID.String() + `","identifiers":["ACS-123"]}`)
+
+		err := handler(context.Background(), "prepare_linear_primary", payload)
+		require.Error(t, err, "unauthorized linear access should surface as a handler error")
+		var fatal *FatalError
+		require.ErrorAs(t, err, &fatal, "unauthorized must dead-letter, not retry to exhaustion")
+		require.ErrorIs(t, err, linearservice.ErrUnauthorized, "fatal wrapper should preserve the unauthorized sentinel")
+		require.Equal(t, []string{string(models.IntegrationStatusError)}, recorder.statusCfgWrites, "handler must mark the integration errored before dead-lettering so the UI shows Reconnect")
+		require.NoError(t, mock.ExpectationsWereMet(), "fatal-on-unauthorized must not write to sessions before the dead-letter hook")
+	})
+
 	t.Run("prepare_linear_primary forwards a valid user_id", func(t *testing.T) {
 		t.Parallel()
 
@@ -808,6 +914,52 @@ func TestLinearJobHandlers(t *testing.T) {
 		require.ErrorAs(t, err, &retryable, "refresh_linear_team_keys should return a retryable error so transient outages don't drop the cron run")
 	})
 
+	t.Run("refresh_linear_team_keys dead-letters fatally on missing integration", func(t *testing.T) {
+		t.Parallel()
+		// 24h cron tick after a disconnect: the integration row is gone.
+		// Retrying for 8 minutes can't bring it back; dead-letter immediately.
+		svc := linearservice.NewService(linearservice.Config{
+			Integrations: workerLinearMissingIntegrationReader{},
+			Credentials:  workerLinearCredentialReader{},
+			Logger:       zerolog.Nop(),
+		})
+		handler := newRefreshLinearTeamKeysHandler(svc, zerolog.Nop())
+		payload := json.RawMessage(`{"org_id":"` + uuid.NewString() + `"}`)
+
+		err := handler(context.Background(), "refresh_linear_team_keys", payload)
+		require.Error(t, err, "missing integration should surface as a handler error")
+		var fatal *FatalError
+		require.ErrorAs(t, err, &fatal, "missing integration must dead-letter the cron job, not retry to exhaustion")
+		require.ErrorIs(t, err, linearservice.ErrIntegrationNotFound, "fatal wrapper should preserve the integration-not-found sentinel")
+	})
+
+	t.Run("refresh_linear_team_keys dead-letters fatally on linear unauthorized", func(t *testing.T) {
+		t.Parallel()
+		recorder := &workerLinearIntegrationRecorder{row: models.Integration{
+			ID:     uuid.New(),
+			Status: models.IntegrationStatusActive,
+			Config: json.RawMessage(`{"workspace_id":"wks-1"}`),
+		}}
+		svc := linearservice.NewService(linearservice.Config{
+			Integrations:       recorder,
+			IntegrationsWriter: recorder,
+			Credentials:        workerLinearCredentialReader{},
+			ClientFactory: func(context.Context, string) (linearservice.Client, error) {
+				return nil, linearservice.ErrUnauthorized
+			},
+			Logger: zerolog.Nop(),
+		})
+		handler := newRefreshLinearTeamKeysHandler(svc, zerolog.Nop())
+		payload := json.RawMessage(`{"org_id":"` + uuid.NewString() + `"}`)
+
+		err := handler(context.Background(), "refresh_linear_team_keys", payload)
+		require.Error(t, err, "unauthorized linear access should surface as a handler error")
+		var fatal *FatalError
+		require.ErrorAs(t, err, &fatal, "unauthorized must dead-letter the cron job, not retry for 8 minutes")
+		require.ErrorIs(t, err, linearservice.ErrUnauthorized, "fatal wrapper should preserve the unauthorized sentinel")
+		require.Equal(t, []string{string(models.IntegrationStatusError)}, recorder.statusCfgWrites, "handler must mark the integration errored so the UI shows Reconnect")
+	})
+
 	t.Run("linear_milestone skips sessions without primary link", func(t *testing.T) {
 		t.Parallel()
 
@@ -941,6 +1093,7 @@ func TestMapLinearWriteErrorToRetry(t *testing.T) {
 		name          string
 		err           error
 		expectedDelay *time.Duration
+		expectFatal   bool
 	}{
 		{
 			name:          "rate limit uses retry after header",
@@ -953,8 +1106,14 @@ func TestMapLinearWriteErrorToRetry(t *testing.T) {
 			expectedDelay: &defaultRetryDelay,
 		},
 		{
-			name: "unauthorized retries with default backoff",
-			err:  linearservice.ErrUnauthorized,
+			name:        "unauthorized dead-letters without retry",
+			err:         linearservice.ErrUnauthorized,
+			expectFatal: true,
+		},
+		{
+			name:        "integration-not-found dead-letters without retry",
+			err:         linearservice.ErrIntegrationNotFound,
+			expectFatal: true,
 		},
 		{
 			name: "generic errors retry with default backoff",
@@ -967,8 +1126,14 @@ func TestMapLinearWriteErrorToRetry(t *testing.T) {
 			t.Parallel()
 
 			err := mapLinearWriteErrorToRetry(tt.err)
+			if tt.expectFatal {
+				var fatal *FatalError
+				require.ErrorAs(t, err, &fatal, "mapLinearWriteErrorToRetry should return FatalError for terminal classes")
+				require.ErrorIs(t, fatal.Err, tt.err, "fatal wrapper should preserve the original error")
+				return
+			}
 			var retryable *RetryableError
-			require.ErrorAs(t, err, &retryable, "mapLinearWriteErrorToRetry should always return a retryable wrapper")
+			require.ErrorAs(t, err, &retryable, "mapLinearWriteErrorToRetry should return a retryable wrapper")
 			require.ErrorIs(t, retryable.Err, tt.err, "retryable wrapper should preserve the original error")
 			if tt.expectedDelay == nil {
 				require.Nil(t, retryable.RetryAfter, "retryable wrapper should fall through to exponential backoff")
@@ -3852,6 +4017,93 @@ func TestRunAgentHandler_PropagatesRunErrors(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+// TestRunAgentHandler_StaleSandboxIDClearedRetries locks the recovery
+// contract for the stale-orphan path: when the orchestrator returns
+// ErrStaleSandboxIDCleared (the "winning" container_id was a stale orphan
+// from a crashed prior worker, now CAS-cleared), the handler must requeue
+// via RetryableError so the next attempt re-enters against the clean row.
+// Crucially, this must NOT consume an attempt counter and must NOT mutate
+// the session row.
+func TestRunAgentHandler_StaleSandboxIDClearedRetries(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+
+	orgID := uuid.New()
+	runID := uuid.New()
+	issueID := uuid.New()
+
+	mock.ExpectQuery("SELECT .* FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(workerSessionColumns).AddRow(
+				workerSessionRow(runID, issueID, orgID, string(models.SessionStatusPending), 0, nil, nil)...,
+			),
+		)
+	// No UPDATE expectations: the orchestrator clears container_id internally
+	// via ClearContainerID, but the handler itself must not touch the row.
+
+	orch := &orchestratorServiceStub{
+		runAgentFn: func(ctx context.Context, run *models.Session) error {
+			return fmt.Errorf("stale orphan: %w", agent.ErrStaleSandboxIDCleared)
+		},
+	}
+	handler := newRunAgentHandler(stores, &Services{Orchestrator: orch}, zerolog.Nop())
+	payload := json.RawMessage(`{"session_id":"` + runID.String() + `","org_id":"` + orgID.String() + `"}`)
+
+	err := handler(context.Background(), "run_agent", payload)
+	require.Error(t, err, "run_agent must return an error so the queue requeues the job")
+	var retryable *RetryableError
+	require.ErrorAs(t, err, &retryable, "ErrStaleSandboxIDCleared must surface as a RetryableError so the attempt counter isn't consumed")
+	require.NotNil(t, retryable.RetryAfter, "RetryAfter must be set so the requeue uses a deliberate backoff, not the queue default")
+	require.ErrorIs(t, err, agent.ErrStaleSandboxIDCleared, "handler must preserve the underlying sentinel for telemetry")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met (handler must not mutate the row)")
+}
+
+// TestRunAgentHandler_SandboxRaceLoserDeadLetters locks the self-heal contract
+// for duplicate run_agent jobs: when the orchestrator returns
+// ErrSandboxRaceLoser (this duplicate lost AcquireTurnHold to a winner that
+// owns the session row), the handler must dead-letter the job via FatalError
+// without retries and without touching the session row — the winner will
+// publish the authoritative result.
+func TestRunAgentHandler_SandboxRaceLoserDeadLetters(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+
+	orgID := uuid.New()
+	runID := uuid.New()
+	issueID := uuid.New()
+
+	mock.ExpectQuery("SELECT .* FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(workerSessionColumns).AddRow(
+				workerSessionRow(runID, issueID, orgID, string(models.SessionStatusPending), 0, nil, nil)...,
+			),
+		)
+	// Deliberately register no UPDATE expectations: the loser must not write
+	// to the session row. pgxmock's strict matching will fail the test if the
+	// handler issues any unexpected query.
+
+	orch := &orchestratorServiceStub{
+		runAgentFn: func(ctx context.Context, run *models.Session) error {
+			return fmt.Errorf("loser: %w", agent.ErrSandboxRaceLoser)
+		},
+	}
+	handler := newRunAgentHandler(stores, &Services{Orchestrator: orch}, zerolog.Nop())
+	payload := json.RawMessage(`{"session_id":"` + runID.String() + `","org_id":"` + orgID.String() + `"}`)
+
+	err := handler(context.Background(), "run_agent", payload)
+	require.Error(t, err, "run_agent must surface a fatal error when it lost the AcquireTurnHold race")
+	var fatal *FatalError
+	require.ErrorAs(t, err, &fatal, "ErrSandboxRaceLoser must dead-letter the duplicate job")
+	require.ErrorIs(t, err, agent.ErrSandboxRaceLoser, "handler must preserve the underlying race-loser error for telemetry")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met (loser must not mutate the row)")
+}
+
 func TestContinueSessionHandler_UsesRuntimeCeilingDeadline(t *testing.T) {
 	t.Parallel()
 
@@ -3932,6 +4184,42 @@ func TestContinueSessionHandler_WrapsSnapshotPendingAsRetryable(t *testing.T) {
 	require.ErrorAs(t, err, &retryable, "ErrSnapshotPending must be wrapped as RetryableError so the worker requeues without consuming an attempt")
 	require.ErrorIs(t, retryable.Err, agent.ErrSnapshotPending, "the wrapped error must preserve the ErrSnapshotPending sentinel")
 	require.Equal(t, 1, orch.continueSessionCalls, "continue_session should call the orchestrator once before bailing")
+}
+
+func TestContinueSessionHandler_WrapsPreviewRaceAsRetryable(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	issueID := uuid.New()
+
+	mock.ExpectQuery("SELECT .* FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(workerSessionColumns).AddRow(
+				workerSessionRow(sessionID, issueID, orgID, string(models.SessionStatusIdle), 2, nil, nil)...,
+			),
+		)
+
+	orch := &orchestratorServiceStub{
+		continueSessionFn: func(ctx context.Context, session *models.Session, opts *agent.ContinueSessionOptions) error {
+			return fmt.Errorf("preview published first: %w", agent.ErrSandboxPreviewRace)
+		},
+	}
+	handler := newContinueSessionHandler(stores, &Services{Orchestrator: orch}, zerolog.Nop())
+	payload := json.RawMessage(`{"session_id":"` + sessionID.String() + `","org_id":"` + orgID.String() + `"}`)
+
+	err := handler(context.Background(), "continue_session", payload)
+	require.Error(t, err, "continue_session should propagate the preview race signal")
+	var retryable *RetryableError
+	require.ErrorAs(t, err, &retryable, "ErrSandboxPreviewRace must be wrapped as RetryableError so the worker retries against the preview container")
+	require.NotNil(t, retryable.RetryAfter, "preview race retries should use a short deliberate backoff")
+	require.ErrorIs(t, retryable.Err, agent.ErrSandboxPreviewRace, "the wrapped error must preserve the ErrSandboxPreviewRace sentinel")
+	require.Equal(t, 1, orch.continueSessionCalls, "continue_session should call the orchestrator once before returning the retry")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
 func TestContinueSessionHandler_ReleasesThreadOnContinuationFailure(t *testing.T) {
