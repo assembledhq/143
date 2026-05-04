@@ -3,6 +3,13 @@ import type { SessionMessage, SessionLog, SessionTimelineEntry as SessionTimelin
 /** Prefix added by the backend when a message is sent in plan mode. */
 export const PLAN_MODE_PREFIX = "[PLAN_MODE]\n";
 
+export function applyPlanModePrefix(content: string, planMode: boolean): string {
+  if (!planMode || content.startsWith(PLAN_MODE_PREFIX)) {
+    return content;
+  }
+  return `${PLAN_MODE_PREFIX}${content}`;
+}
+
 export type TimelineEntry =
   | { kind: "message"; data: SessionMessage }
   | { kind: "assistant_output"; data: SessionLog }
@@ -184,4 +191,59 @@ export function timelineEntryFromResponse(entry: SessionTimelineResponseEntry): 
 
 export function buildTimelineFromResponse(entries: SessionTimelineResponseEntry[]): TimelineEntry[] {
   return entries.map(timelineEntryFromResponse);
+}
+
+export function timelineEntryCreatedAt(entry: TimelineEntry): string {
+  switch (entry.kind) {
+    case "tool_group":
+      return entry.toolUse.created_at;
+    case "message":
+    case "assistant_output":
+    case "error":
+    case "log":
+    case "plan_output":
+    case "plan_message":
+      return entry.data.created_at;
+  }
+}
+
+export function sortTimelineEntries(entries: TimelineEntry[]): TimelineEntry[] {
+  return [...entries].sort((a, b) => timelineEntryCreatedAt(a).localeCompare(timelineEntryCreatedAt(b)));
+}
+
+export function flattenTimelineResponse(entries: SessionTimelineResponseEntry[]): {
+  messages: SessionMessage[];
+  logs: SessionLog[];
+} {
+  const messages: SessionMessage[] = [];
+  const logs: SessionLog[] = [];
+
+  for (const entry of entries) {
+    switch (entry.kind) {
+      case "message":
+      case "plan_message":
+        if (entry.message) {
+          messages.push(entry.message);
+        }
+        break;
+      case "assistant_output":
+      case "error":
+      case "log":
+      case "plan_output":
+        if (entry.log) {
+          logs.push(entry.log);
+        }
+        break;
+      case "tool_group":
+        if (entry.tool_use) {
+          logs.push(entry.tool_use);
+        }
+        if (entry.tool_result) {
+          logs.push(entry.tool_result);
+        }
+        break;
+    }
+  }
+
+  return { messages, logs };
 }
