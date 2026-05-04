@@ -4,12 +4,10 @@ import {
   AVAILABLE_CODEX_MODELS,
   AVAILABLE_CLAUDE_CODE_MODELS,
   AVAILABLE_GEMINI_CLI_MODELS,
-  AVAILABLE_PM_MODELS,
   DEFAULT_PM_MODEL,
   DEFAULT_LLM_MODEL,
   CODEX_MODEL_GPT_5_4,
   LLM_PROVIDER_INFO,
-  PM_MODELS_BY_PROVIDER,
   LLM_MODELS_BY_PROVIDER,
   ownerProviderForModel,
 } from "./model-constants";
@@ -17,21 +15,6 @@ import {
 describe("model constants", () => {
   it("uses gpt-5.4 as the PM default", () => {
     expect(DEFAULT_PM_MODEL).toBe(CODEX_MODEL_GPT_5_4);
-  });
-
-  it("includes all provider models in AVAILABLE_PM_MODELS", () => {
-    expect(AVAILABLE_PM_MODELS).toEqual([
-      ...AVAILABLE_CLAUDE_CODE_MODELS,
-      ...AVAILABLE_GEMINI_CLI_MODELS,
-      ...AVAILABLE_CODEX_MODELS,
-    ]);
-  });
-
-  it("PM_MODELS_BY_PROVIDER maps each provider to its models and api key", () => {
-    expect(Object.keys(PM_MODELS_BY_PROVIDER)).toEqual(["claude_code", "gemini_cli", "codex"]);
-    expect(PM_MODELS_BY_PROVIDER.claude_code.models).toEqual(AVAILABLE_CLAUDE_CODE_MODELS);
-    expect(PM_MODELS_BY_PROVIDER.gemini_cli.models).toEqual(AVAILABLE_GEMINI_CLI_MODELS);
-    expect(PM_MODELS_BY_PROVIDER.codex.models).toEqual(AVAILABLE_CODEX_MODELS);
   });
 
   it("includes latest Claude Code models", () => {
