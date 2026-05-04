@@ -4,7 +4,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { notify as toast } from "@/lib/notify";
 import { Archive, ArchiveRestore, FolderKanban, Plus, Search } from "lucide-react";
 import Link from "next/link";
-import { useParams, usePathname } from "next/navigation";
+import { usePathname, useSelectedLayoutSegment } from "next/navigation";
 import { useEffect, useMemo, useState } from "react";
 import { useQueryState, parseAsString } from "nuqs";
 import { OwnerScopeToggle } from "@/components/owner-scope-toggle";
@@ -37,9 +37,9 @@ function filterProjects(projects: Project[], filter: string | null): Project[] {
 // ---------------------------------------------------------------------------
 
 export function ProjectSidebar() {
-  const params = useParams();
   const pathname = usePathname();
-  const selectedId = params?.id as string | undefined;
+  const selectedSegment = useSelectedLayoutSegment();
+  const selectedId = selectedSegment && selectedSegment !== "new" ? selectedSegment : undefined;
   const { currentUserFilter, createdByUserId, isResolved, setUserFilter } = useProjectUserFilter();
   const [searchParam, setSearchParam] = useQueryState("search", parseAsString);
   const [search, setSearch] = useState(searchParam ?? "");

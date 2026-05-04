@@ -17,6 +17,7 @@ vi.mock('next/link', () => ({
 }));
 
 let mockPathname = '/projects';
+let mockSelectedSegment: string | null = null;
 const mockAuthState: {
   isAuthenticated: boolean;
   user: { id: string } | null;
@@ -33,7 +34,7 @@ vi.mock('next/navigation', () => ({
   useRouter: () => ({ push: vi.fn(), replace: vi.fn(), back: vi.fn() }),
   useSearchParams: () => new URLSearchParams(),
   usePathname: () => mockPathname,
-  useParams: () => ({}),
+  useSelectedLayoutSegment: () => mockSelectedSegment,
 }));
 
 vi.mock('@/hooks/use-auth', () => ({
@@ -49,6 +50,7 @@ vi.mock('@/lib/notify', () => ({
 describe('ProjectSidebar', () => {
   beforeEach(() => {
     mockPathname = '/projects';
+    mockSelectedSegment = null;
     mockAuthState.isAuthenticated = true;
     mockAuthState.user = { id: 'user-1' };
     mockAuthState.isLoading = false;
@@ -286,6 +288,7 @@ describe('ProjectSidebar', () => {
 
   it('shows ghost New project entry when on /projects/new', async () => {
     mockPathname = '/projects/new';
+    mockSelectedSegment = 'new';
 
     renderWithProviders(<ProjectSidebar />);
     await screen.findByText('Test Project');
@@ -293,6 +296,19 @@ describe('ProjectSidebar', () => {
     const newProjectTexts = screen.getAllByText('New project');
     // At least 2: the top "+ New project" link + the ghost entry
     expect(newProjectTexts.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it('highlights the selected project from the active layout segment', async () => {
+    mockPathname = '/projects/proj-1';
+    mockSelectedSegment = 'proj-1';
+
+    renderWithProviders(<ProjectSidebar />);
+    await screen.findByText('Test Project');
+
+    const selectedLink = screen.getByText('Test Project').closest('a');
+    expect(selectedLink?.className).toContain('bg-background');
+    expect(selectedLink?.className).toContain('shadow-sm');
+    expect(selectedLink?.className).toContain('border');
   });
 
   it('preserves the user/status/repo filters in project detail links', async () => {

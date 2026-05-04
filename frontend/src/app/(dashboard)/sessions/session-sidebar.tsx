@@ -4,7 +4,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { notify as toast } from "@/lib/notify";
 import { Archive, ArchiveRestore, Plus, Search } from "lucide-react";
 import Link from "next/link";
-import { useParams, usePathname } from "next/navigation";
+import { usePathname, useSelectedLayoutSegment } from "next/navigation";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useQueryState, parseAsString } from "nuqs";
 import { cn, formatTimeAgo, sessionTitle } from "@/lib/utils";
@@ -159,11 +159,11 @@ function OptimisticSessionRow({ session }: { session: OptimisticSession }) {
 // ---------------------------------------------------------------------------
 
 export function SessionSidebar() {
-  const params = useParams();
   const pathname = usePathname();
+  const selectedSegment = useSelectedLayoutSegment();
   const queryClient = useQueryClient();
   const { currentUserFilter, triggeredByUserId, isResolved, setUserFilter } = useSessionUserFilter();
-  const selectedId = params?.id as string | undefined;
+  const selectedId = selectedSegment && selectedSegment !== "new" ? selectedSegment : undefined;
   const [searchParam, setSearchParam] = useQueryState("search", parseAsString);
   const [search, setSearch] = useState(searchParam ?? "");
   const searchRef = useRef(search);
