@@ -255,6 +255,7 @@ export function ProjectSidebar() {
               className="mb-0.5"
               actionLabel={isArchived ? "Unarchive project" : "Archive project"}
               actionText={isArchived ? "Restore" : "Archive"}
+              desktopActionVisibility="hover"
               actionIcon={isArchived ? <ArchiveRestore className="h-4 w-4" /> : <Archive className="h-4 w-4" />}
               onAction={() => {
                 if (isArchived) {

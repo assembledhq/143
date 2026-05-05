@@ -2,7 +2,7 @@
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { notify as toast } from "@/lib/notify";
-import { Archive, ArchiveRestore, PanelRightOpen, Plus, Search } from "lucide-react";
+import { Archive, ArchiveRestore, Plus, Search } from "lucide-react";
 import Link from "next/link";
 import { usePathname, useRouter, useSelectedLayoutSegment } from "next/navigation";
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -509,7 +509,7 @@ export function SessionSidebar() {
             >
               <div
                 className={cn(
-                  "flex min-w-0 items-stretch gap-1.5 rounded-xl border border-transparent p-1 transition-all duration-150",
+                  "flex min-w-0 rounded-xl border border-transparent p-1 transition-all duration-150",
                   isSelected && "cursor-pointer border-primary/20 bg-background shadow-sm ring-1 ring-primary/10",
                 )}
                 onClick={(event) => {
@@ -588,23 +588,6 @@ export function SessionSidebar() {
                     </div>
                   </div>
                 </Link>
-                <Button
-                  asChild
-                  variant="ghost"
-                  size="icon-sm"
-                  className={cn(
-                    "shrink-0 self-center rounded-lg border border-border/50 bg-background text-muted-foreground shadow-sm hover:text-foreground md:border-transparent md:bg-muted/30 md:shadow-none md:self-start",
-                    isSelected && "border-transparent bg-primary/5 text-foreground shadow-none ring-0 md:border-transparent md:bg-primary/5 md:shadow-none",
-                  )}
-                >
-                  <Link
-                    href={sessionHref}
-                    aria-label={`Open session details for ${title}`}
-                    title="Open session details"
-                  >
-                    <PanelRightOpen className="h-4 w-4" />
-                  </Link>
-                </Button>
               </div>
             </SwipeActionRow>
           );
