@@ -407,10 +407,24 @@ func callHost(action Action) (*Response, error) {
 func runGit(workdir string, args ...string) error {
 	full := append([]string{"-C", workdir}, args...)
 	cmd := exec.Command("git", full...) // #nosec G204,G702 -- exec.Command does not invoke a shell; args come from fixed internal callsites and rooted repo paths
+	cmd.Env = appendGitEnv(os.Environ())
 	var stderr strings.Builder
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("git %s: %w (%s)", strings.Join(full, " "), err, strings.TrimSpace(stderr.String()))
 	}
 	return nil
+}
+
+func appendGitEnv(base []string) []string {
+	env := make([]string, 0, len(base)+2)
+	for _, entry := range base {
+		if strings.HasPrefix(entry, "GIT_CONFIG_GLOBAL=") || strings.HasPrefix(entry, "GIT_CONFIG_NOSYSTEM=") {
+			continue
+		}
+		env = append(env, entry)
+	}
+	env = append(env, "GIT_CONFIG_GLOBAL="+os.DevNull)
+	env = append(env, "GIT_CONFIG_NOSYSTEM=1")
+	return env
 }

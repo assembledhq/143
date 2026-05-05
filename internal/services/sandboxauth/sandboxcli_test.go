@@ -682,6 +682,26 @@ func TestRunGit_ReturnsCommandError(t *testing.T) {
 	require.Contains(t, err.Error(), "git -C", "runGit should include the failing git invocation in the error")
 }
 
+func TestRunGit_IgnoresBrokenAmbientGitConfig(t *testing.T) {
+	if !gitAvailable() {
+		t.Skip("git not available on this runner")
+	}
+
+	workdir := t.TempDir()
+	require.NoError(t, gitInit(workdir), "git init should prepare a repo for local config writes")
+
+	badGlobal := filepath.Join(t.TempDir(), "bad.gitconfig")
+	require.NoError(t, os.WriteFile(badGlobal, []byte("this is not valid git config\n"), 0o600), "test should create an invalid global git config")
+	t.Setenv("GIT_CONFIG_GLOBAL", badGlobal)
+
+	err := runGit(workdir, "config", "user.name", "Alice Example")
+	require.NoError(t, err, "runGit should ignore invalid ambient global git config when writing repo-local settings")
+
+	configBytes, readErr := os.ReadFile(filepath.Join(workdir, ".git", "config"))
+	require.NoError(t, readErr, "test should read the repo-local git config after runGit succeeds")
+	require.Contains(t, string(configBytes), "Alice Example", "runGit should still write the requested repo-local config entry")
+}
+
 func TestHandleSubcommand_GitBootstrapDispatches(t *testing.T) {
 	t.Parallel()
 
