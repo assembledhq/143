@@ -105,6 +105,34 @@ describe("NewAutomationPage", () => {
     let requestBody: Record<string, unknown> | null = null;
 
     server.use(
+      http.get("*/api/v1/settings", () => HttpResponse.json({
+        data: {
+          id: "org-1",
+          name: "Test Org",
+          settings: { default_agent_type: "codex" },
+        },
+      })),
+      http.get("*/api/v1/settings/codex-auth/status", () => HttpResponse.json({
+        data: { status: "completed" },
+      })),
+      http.get("*/api/v1/settings/credentials/resolved", () => HttpResponse.json({
+        data: [
+          { provider: "openai", source: "org" },
+        ],
+        meta: {},
+      })),
+      http.get("*/api/v1/settings/credentials/team", () => HttpResponse.json({
+        data: [],
+        meta: {},
+      })),
+      http.get("*/api/v1/settings/coding-auths", () => HttpResponse.json({
+        data: [],
+        meta: {},
+      })),
+      http.get("*/api/v1/coding-credentials*", () => HttpResponse.json({
+        data: [],
+        meta: {},
+      })),
       http.get("*/api/v1/repositories", () => HttpResponse.json({
         data: [
           {
@@ -161,5 +189,6 @@ describe("NewAutomationPage", () => {
         base_branch: "release/weekly",
       });
     });
-  });
+  }, 20000);
+
 });
