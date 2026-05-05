@@ -144,7 +144,7 @@ These are the first Grafana-managed alert rules 143.dev should create.
 **Signal**
 
 - Log-derived count from VictoriaLogs
-- Query shape: `service:api AND level:error AND _msg:"request failed" AND status:[500,599] AND _time:[now-5m,now]`
+- Query shape: `service:api AND level:error AND _msg:"request failed" AND status:range[500,599] AND _time:[now-5m,now]`
 
 **Initial threshold**
 
@@ -239,7 +239,7 @@ This is user-visible but usually not page-worthy unless it becomes sustained and
 
 ## How to Create the Grafana Alerts
 
-1. Confirm the VictoriaLogs datasource in Grafana sees the extracted fields `service`, `level`, `path`, `status`, `error_code`, and `error_message`.
+1. Confirm the VictoriaLogs datasource in Grafana sees the extracted fields `service`, `level`, `path`, `status`, `status_class`, `duration_ms`, `error_code`, and `error_message`.
 2. Build a small dashboard first in Explore to validate each query against recent data.
 3. For log-derived alerts, keep the rule definitions in version-controlled `vmalert` YAML instead of Grafana-managed rules. The current VictoriaLogs Grafana datasource is excellent for querying and dashboards, but it is not a dependable source of truth for provisioning Grafana-managed log alerts end to end.
 4. Use Alertmanager as the runtime notification router for `vmalert` rules. Grafana remains the operator UI via a provisioned Alertmanager datasource.
@@ -257,8 +257,12 @@ This is user-visible but usually not page-worthy unless it becomes sustained and
 The initial repo-owned files for this live in:
 
 - `deploy/grafana/provisioning/datasources/alertmanager.yml`
+- `deploy/grafana/provisioning/dashboards/errors.json`
+- `deploy/grafana/provisioning/dashboards/platform-health.json`
 - `deploy/vmalert/rules/production-alerts.yml`
-- `docker-compose.logging.yml` for the `vmalert` + Alertmanager runtime wiring
+- `docker-compose.logging.yml` for the `vmalert`, Alertmanager, Grafana, VictoriaLogs, and logging-node Vector runtime wiring
+
+`deploy-logging` is the source-of-truth path for these files: it syncs Grafana provisioning, vmalert rules, the shared Vector compose include, and Vector config to `/opt/143` on the logging node, then recreates the logging stack so rules reload reliably. Grafana also watches the provisioned dashboard directory and removes dashboards whose JSON files have been deleted from the repo.
 
 ## Automation Policy for Backend Sentry
 

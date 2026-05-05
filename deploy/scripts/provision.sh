@@ -239,7 +239,7 @@ fi
 # Step 2: Copy compose file and deploy configs
 echo "--- Step 2/5: Copying config files ---"
 scp "${SCP_OPTS[@]}" "$PROJECT_DIR/$COMPOSE_FILE" root@"$HOST":/opt/143/
-if [ "$ROLE" = "app" ] || [ "$ROLE" = "worker" ]; then
+if [ "$ROLE" = "app" ] || [ "$ROLE" = "worker" ] || [ "$ROLE" = "logging" ]; then
   # Vector collector is included from the main compose file
   scp "${SCP_OPTS[@]}" "$PROJECT_DIR/docker-compose.vector.yml" root@"$HOST":/opt/143/
 fi
@@ -259,8 +259,8 @@ fi
 echo "--- Step 3/5: Writing secrets ---"
 if [ "$ROLE" = "logging" ]; then
   # Logging nodes need the Grafana admin password and the private IP for binding VictoriaLogs
-  printf 'GRAFANA_ADMIN_PASSWORD=%s\nVICTORIALOGS_HOST=%s\nGRAFANA_ALERTS_WARNING_WEBHOOK_URL=%s\nGRAFANA_ALERTS_CRITICAL_WEBHOOK_URL=%s\n' \
-    "$GRAFANA_ADMIN_PASSWORD" "$VICTORIALOGS_HOST" "$GRAFANA_ALERTS_WARNING_WEBHOOK_URL" "$GRAFANA_ALERTS_CRITICAL_WEBHOOK_URL" \
+  printf 'GRAFANA_ADMIN_PASSWORD=%s\nVICTORIALOGS_HOST=%s\nSERVER_ROLE=%s\nGRAFANA_ALERTS_WARNING_WEBHOOK_URL=%s\nGRAFANA_ALERTS_CRITICAL_WEBHOOK_URL=%s\n' \
+    "$GRAFANA_ADMIN_PASSWORD" "$VICTORIALOGS_HOST" "logging" "$GRAFANA_ALERTS_WARNING_WEBHOOK_URL" "$GRAFANA_ALERTS_CRITICAL_WEBHOOK_URL" \
     | ssh "${SSH_OPTS[@]}" root@"$HOST" 'cat > /opt/143/.env && chown deploy:deploy /opt/143/.env && chmod 600 /opt/143/.env'
 elif [ "$ROLE" = "db" ]; then
   printf 'DB_PASSWORD=%s\n' "$DB_PASSWORD" \
