@@ -415,6 +415,43 @@ func TestPromptSeedForSession(t *testing.T) {
 		require.Contains(t, *issue.Description, reasoning, "promptSeedForSession should preserve the PM reasoning in the description")
 		require.Empty(t, gotLinkedIssues, "promptSeedForSession should not synthesize linked issues when no snapshot exists")
 	})
+
+	t.Run("uses pm approach as the synthetic issue title when the session title is missing", func(t *testing.T) {
+		t.Parallel()
+
+		approach := "Inspect the retry path"
+		reasoning := "Timeouts started after the last deploy."
+		orchestrator := &Orchestrator{}
+		issue, gotLinkedIssues := orchestrator.promptSeedForSession(
+			&models.Session{
+				PMApproach:  &approach,
+				PMReasoning: &reasoning,
+			},
+			nil,
+			nil,
+		)
+
+		require.NotNil(t, issue, "promptSeedForSession should synthesize an issue when PM context exists without a title")
+		require.Equal(t, approach, issue.Title, "promptSeedForSession should derive the synthetic issue title from the PM approach before falling back to a placeholder")
+		require.NotNil(t, issue.Description, "promptSeedForSession should still include PM details in the description")
+		require.Empty(t, gotLinkedIssues, "promptSeedForSession should not synthesize linked issues when no snapshot exists")
+	})
+
+	t.Run("uses the latest message as the synthetic issue title when the session title is missing", func(t *testing.T) {
+		t.Parallel()
+
+		orchestrator := &Orchestrator{}
+		issue, gotLinkedIssues := orchestrator.promptSeedForSession(
+			&models.Session{Origin: models.SessionOriginRevision},
+			&models.SessionMessage{Content: "Rework the flaky checkout retry logic\nKeep the current API shape."},
+			nil,
+		)
+
+		require.NotNil(t, issue, "promptSeedForSession should synthesize an issue when a non-manual session has a latest message")
+		require.Equal(t, "Rework the flaky checkout retry logic", issue.Title, "promptSeedForSession should derive the synthetic issue title from the latest message before falling back to a placeholder")
+		require.Nil(t, issue.Description, "promptSeedForSession should not invent a description when only a follow-up message is available")
+		require.Empty(t, gotLinkedIssues, "promptSeedForSession should not synthesize linked issues when no snapshot exists")
+	})
 }
 
 func TestResolvePromptSeed_FallsBackToPrimaryIssueStore(t *testing.T) {
