@@ -90,6 +90,21 @@ jobs:
           echo "${{ secrets.SOPS_AGE_KEY }}" > ~/.config/sops/age/keys.txt
           chmod 600 ~/.config/sops/age/keys.txt
 
+      - name: Decrypt FLEET_HOSTS
+        # Decrypt once and propagate to later steps via $GITHUB_ENV so both
+        # `Deploy fleet` (deploy-fleet.sh accepts FLEET_HOSTS from env) and
+        # `Verify worker rollover` skip the SOPS round-trip.
+        run: |
+          set -euo pipefail
+          fleet_hosts="$(SOPS_AGE_KEY_FILE=~/.config/sops/age/keys.txt \
+            sops --decrypt --input-type dotenv --output-type dotenv .env.production.enc \
+            | grep '^FLEET_HOSTS=' | cut -d= -f2-)"
+          if [ -z "$fleet_hosts" ]; then
+            echo "ERROR: FLEET_HOSTS not present in .env.production.enc"
+            exit 1
+          fi
+          echo "FLEET_HOSTS=$fleet_hosts" >> "$GITHUB_ENV"
+
       - name: Deploy fleet
         # WORKER_DEPLOY_DETACH=1 makes deploy.sh kick off the worker rollover
         # as a host-side background process and return immediately, so the
@@ -107,20 +122,24 @@ jobs:
         # with content "ok" on success or "fail: ..." on failure. Poll each
         # worker host until we see one of those, or until the budget expires.
         #
-        # Budget: the worker process drains for up to 45 minutes before
-        # recreate/healthcheck starts. Keep the workflow concurrency lock
-        # until the detached host-side rollover reaches a terminal status;
-        # otherwise a later deploy can race the first background rollover.
+        # Budget breakdown (must stay ≥ in-process WORKER_DRAIN_TIMEOUT in
+        # internal/config/config.go, currently 45m):
+        #   45m drain + ~1m recreate + 2m healthcheck + polling overhead
+        # 4200s (70m) gives a comfortable margin. If you bump
+        # WORKER_DRAIN_TIMEOUT, bump this too.
+        #
+        # Timeout vs host state: a verify timeout fails the workflow run,
+        # but the detached host-side rollover keeps going and may still
+        # succeed afterwards. The next deploy queues on the workflow
+        # concurrency lock either way. After a red verify, check
+        # `make deploy-worker-status` before re-running.
         env:
           DEPLOY_SHA: ${{ github.sha }}
-          VERIFY_TIMEOUT_SECONDS: "3300"
+          VERIFY_TIMEOUT_SECONDS: "4200"
           POLL_INTERVAL_SECONDS: "15"
         run: |
           set -euo pipefail
 
-          FLEET_HOSTS="$(SOPS_AGE_KEY_FILE=~/.config/sops/age/keys.txt \
-            sops --decrypt --input-type dotenv --output-type dotenv .env.production.enc \
-            | grep '^FLEET_HOSTS=' | cut -d= -f2-)"
           WORKERS="$(echo "$FLEET_HOSTS" | tr ',' '\n' | grep '^worker:' | cut -d: -f2 || true)"
           if [ -z "$WORKERS" ]; then
             echo "no worker hosts in fleet — nothing to verify"

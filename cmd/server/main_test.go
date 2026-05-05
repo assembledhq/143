@@ -199,8 +199,8 @@ func TestDeployWorkflowWaitsForWorkerRolloverTerminalStatus(t *testing.T) {
 	require.NoError(t, err, "deploy workflow should be readable for worker rollover regression test")
 
 	body := string(src)
-	require.Contains(t, body, `VERIFY_TIMEOUT_SECONDS: "3300"`,
-		"worker rollover verification should cover the full 45m drain plus recreate/healthcheck")
+	require.Contains(t, body, `VERIFY_TIMEOUT_SECONDS: "4200"`,
+		"worker rollover verification should cover the full 45m drain plus recreate/healthcheck with margin")
 	require.Contains(t, body, `outcome="timeout"`,
 		"worker rollover timeout should be reported as timeout, not successful in_progress")
 	require.Contains(t, body, "overall_rc=1",

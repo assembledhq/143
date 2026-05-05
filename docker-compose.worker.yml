@@ -95,12 +95,14 @@ services:
       timeout: 5s
       retries: 3
       start_period: 60s
-    # Must be ≥ WORKER_DRAIN_TIMEOUT (default 45m) so Docker doesn't SIGKILL
-    # the process while it's still draining in-flight coding turns. The
-    # rolling-deploy path (drain_worker_service in deploy/scripts/deploy.sh)
-    # waits for clean exit before --force-recreate, so this only kicks in on
-    # plain `docker stop` / `docker compose restart` paths — but those will
-    # land hard without it.
+    # Must be ≥ in-process WORKER_DRAIN_TIMEOUT (internal/config/config.go,
+    # default 45m) so Docker doesn't SIGKILL the process while it's still
+    # draining in-flight coding turns. This is the binding outer cap — both
+    # the rolling-deploy path's `--force-recreate` and any plain `docker
+    # stop` / `docker compose restart` go through stop_grace_period.
+    # deploy/scripts/deploy.sh's WORKER_DRAIN_TIMEOUT (default 7200s) is a
+    # polling ceiling for the SIGTERM-then-wait loop, not a separate drain
+    # budget — once we recreate, this 50m is what holds.
     stop_grace_period: 50m
     restart: unless-stopped
     deploy:

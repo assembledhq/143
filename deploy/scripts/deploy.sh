@@ -531,9 +531,9 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
       log_file="/var/log/143/deploy-worker-$(date -u +%Y%m%dT%H%M%SZ)-${sha_short}.log"
       # Predictable status filename (one per SHA) so CI can poll for it
       # deterministically. "ok" on success, "fail: <reason>" otherwise.
+      # Cleared inside the flocked block below so a same-SHA redeploy
+      # can't wipe a still-running prior deploy's status file.
       status_file="/var/log/143/deploy-worker-${sha_short}.status"
-      # Clear any prior status from a re-deploy of the same SHA.
-      rm -f "$status_file"
       rollover_script="$(mktemp /tmp/143-rollover-worker-XXXXXX.sh)"
       # Bake the helpers + bound vars into a self-contained script. $(declare
       # -f ...) and "$VAR" expand at heredoc time (remote bash); \$ inside is
@@ -555,6 +555,11 @@ on_exit() {
   fi
 }
 trap on_exit EXIT
+
+# Clear any stale status from a previous deploy of this same SHA. Done
+# here (inside the flock) rather than from the parent shell so a
+# concurrent same-SHA redeploy can't wipe an in-flight deploy's status.
+rm -f "\$STATUS_FILE"
 
 cd /opt/143
 echo "[\$(date -u -Iseconds)] starting detached worker rollover (tag=$IMAGE_TAG)"
