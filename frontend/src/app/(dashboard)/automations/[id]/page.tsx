@@ -20,6 +20,7 @@ import { MobileBackButton } from "@/components/mobile-back-button";
 import { PageContainer } from "@/components/page-container";
 import { PageHeader } from "@/components/page-header";
 import { BranchPicker } from "@/components/branch-picker";
+import { AutomationModelSelect } from "@/components/automation-model-select";
 import { api } from "@/lib/api";
 import type { Automation } from "@/lib/types";
 import { AutomationStatsCard } from "./automation-stats-card";
@@ -63,6 +64,7 @@ function SettingsTab({ automation }: { automation: Automation }) {
   // TimezonePicker's `detected` prop from changing identity.
   const detectedTimezone = useMemo(() => browserTimezone(), []);
   const [baseBranch, setBaseBranch] = useState(automation.base_branch);
+  const [model, setModel] = useState<string | undefined>(automation.model_override);
 
   const updateMutation = useMutation({
     mutationFn: () =>
@@ -74,6 +76,7 @@ function SettingsTab({ automation }: { automation: Automation }) {
         interval_unit: intervalUnit,
         interval_run_at: `${intervalRunHour}:${intervalRunMinute}`,
         timezone,
+        model: model ?? "",
         base_branch: baseBranch.trim() || undefined,
       }),
     onSuccess: () => {
@@ -171,6 +174,18 @@ function SettingsTab({ automation }: { automation: Automation }) {
         </div>
         <p className="text-xs text-muted-foreground">
           Run time is in {timezone}, selectable in 5-minute increments.
+        </p>
+      </div>
+      <div className="space-y-1.5">
+        <Label htmlFor="automation-model">Model</Label>
+        <AutomationModelSelect
+          id="automation-model"
+          ariaLabel="Model"
+          value={model}
+          onValueChange={setModel}
+        />
+        <p className="text-xs text-muted-foreground">
+          Auto uses your default automation agent. Choosing a model pins runs to that model&apos;s agent.
         </p>
       </div>
       <div className="space-y-1.5">

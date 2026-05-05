@@ -321,6 +321,11 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	automationHandler := handlers.NewAutomationHandler(automationStore, automationRunStore)
 	automationHandler.SetJobStore(jobStore)
 	automationHandler.SetRepositoryStore(repoStore)
+	automationHandler.SetOrgStore(orgStore)
+	automationHandler.SetOrgCredentialStore(credentialStore)
+	automationHandler.SetUserCredentialStore(userCredentialStore)
+	automationHandler.SetCodingAuthStore(credentialStore)
+	automationHandler.SetCodingCredentialStore(codingCredentialStore)
 	automationHandler.SetPool(pool)
 	automationHandler.SetLogger(logger)
 
