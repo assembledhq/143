@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -207,6 +208,35 @@ func (s *SessionThreadStore) UpdateResult(ctx context.Context, orgID, threadID u
 		return fmt.Errorf("thread not found")
 	}
 	return nil
+}
+
+// ListStuckRunningThreads returns threads stuck in status='running' whose
+// started_at is older than the given cutoff. The reaper uses this to fail
+// rows the orchestrator/handler couldn't reset themselves — typically when
+// a continue_session job dead-letters during a rolling deploy and the
+// thread reset writes can't reach the DB before the worker process exits.
+//
+// Mirrors ListStaleRunningSessions in shape and intent: cross-org scan,
+// LIMIT 100 to bound a single tick, started_at-based cutoff.
+//
+// lint:allow-no-orgid reason="cross-org reaper scan for stuck running threads"
+func (s *SessionThreadStore) ListStuckRunningThreads(ctx context.Context, startedBefore time.Time) ([]models.SessionThread, error) {
+	query := `
+		SELECT ` + sessionThreadSelectColumns + `
+		FROM session_threads
+		WHERE status = 'running'
+		  AND started_at IS NOT NULL
+		  AND started_at < @started_before
+		ORDER BY started_at ASC
+		LIMIT 100`
+
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
+		"started_before": startedBefore,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("query stuck running threads: %w", err)
+	}
+	return pgx.CollectRows(rows, pgx.RowToStructByName[models.SessionThread])
 }
 
 // ClaimIdle atomically transitions an idle thread to running. Used when a user
