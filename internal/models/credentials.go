@@ -204,11 +204,41 @@ type SentryConfig struct {
 
 type LinearConfig struct {
 	WebhookSecret string `json:"webhook_secret,omitempty"`
-	AccessToken   string `json:"access_token,omitempty"` // #nosec G117 -- JSON config field
-	TokenType     string `json:"token_type,omitempty"`
-	Scope         string `json:"scope,omitempty"`
-	WorkspaceID   string `json:"workspace_id,omitempty"`
-	WorkspaceName string `json:"workspace_name,omitempty"`
+	AccessToken   string `json:"access_token,omitempty"`  // #nosec G117 -- JSON config field
+	RefreshToken  string `json:"refresh_token,omitempty"` // #nosec G117 -- JSON config field
+	// ExpiresAt is the absolute expiry of AccessToken. Zero value means
+	// "unknown TTL" — applies to legacy connections created before Linear's
+	// refresh-token rollout, where we stored only an access token with no
+	// expires_in. IsExpired / NeedsRefresh treat zero as "never
+	// expires" so legacy rows continue to work until the user reconnects.
+	ExpiresAt     time.Time `json:"expires_at,omitempty"`
+	TokenType     string    `json:"token_type,omitempty"`
+	Scope         string    `json:"scope,omitempty"`
+	WorkspaceID   string    `json:"workspace_id,omitempty"`
+	WorkspaceName string    `json:"workspace_name,omitempty"`
+}
+
+// IsExpired returns true if the access token has a known expiry that has
+// already passed. Connections without expiry info (legacy rows where Linear
+// did not return expires_in) report false so existing tokens keep working
+// until they hit a real 401.
+func (c LinearConfig) IsExpired() bool {
+	if c.ExpiresAt.IsZero() {
+		return false
+	}
+	return time.Now().After(c.ExpiresAt)
+}
+
+// NeedsRefresh returns true if the access token has a known expiry within the
+// given window. Connections with no expiry are legacy "use until 401" rows and
+// do not proactively refresh. A known-expiring row without a refresh token
+// still reports true so callers can force the reconnect path instead of
+// returning a token they know is stale or about to go stale.
+func (c LinearConfig) NeedsRefresh(window time.Duration) bool {
+	if c.ExpiresAt.IsZero() {
+		return false
+	}
+	return time.Now().Add(window).After(c.ExpiresAt)
 }
 
 type SlackConfig struct {
