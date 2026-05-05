@@ -237,6 +237,10 @@ type mockSessionStore struct {
 	containerHoldingPages [][]models.Session
 	containerHoldingErr   error
 	containerHoldingCalls int
+
+	// getByIDFn lets individual tests stub the session row that drain and
+	// other helpers query for status. Defaults to an empty Session when nil.
+	getByIDFn func(orgID, sessionID uuid.UUID) (models.Session, error)
 }
 
 type failureUpdate struct {
@@ -447,6 +451,11 @@ func (m *mockSessionStore) UpdateFailure(ctx context.Context, orgID, runID uuid.
 }
 
 func (m *mockSessionStore) GetByID(ctx context.Context, orgID, sessionID uuid.UUID) (models.Session, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.getByIDFn != nil {
+		return m.getByIDFn(orgID, sessionID)
+	}
 	return models.Session{}, nil
 }
 
@@ -980,6 +989,10 @@ func (m *mockSessionThreadStore) CompleteTurn(_ context.Context, _, _ uuid.UUID,
 }
 
 func (m *mockSessionThreadStore) UpdateResult(_ context.Context, _, _ uuid.UUID, _ models.ThreadStatus, _ *models.SessionResult) error {
+	return nil
+}
+
+func (m *mockSessionThreadStore) ClearPendingMessages(_ context.Context, _, _ uuid.UUID) error {
 	return nil
 }
 

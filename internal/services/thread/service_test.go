@@ -18,11 +18,12 @@ import (
 // --- Mock stores ---
 
 type mockThreadStore struct {
-	createFn        func(ctx context.Context, t *models.SessionThread, max int) error
-	getByIDFn       func(ctx context.Context, orgID, threadID uuid.UUID) (models.SessionThread, error)
-	listBySessionFn func(ctx context.Context, orgID, sessionID uuid.UUID) ([]models.SessionThread, error)
-	claimIdleFn     func(ctx context.Context, orgID, sessionID, threadID uuid.UUID) (models.SessionThread, error)
-	updateStatusFn  func(ctx context.Context, orgID, threadID uuid.UUID, status models.ThreadStatus) error
+	createFn           func(ctx context.Context, t *models.SessionThread, max int) error
+	getByIDFn          func(ctx context.Context, orgID, threadID uuid.UUID) (models.SessionThread, error)
+	listBySessionFn    func(ctx context.Context, orgID, sessionID uuid.UUID) ([]models.SessionThread, error)
+	claimIdleFn        func(ctx context.Context, orgID, sessionID, threadID uuid.UUID) (models.SessionThread, error)
+	updateStatusFn     func(ctx context.Context, orgID, threadID uuid.UUID, status models.ThreadStatus) error
+	incrementPendingFn func(ctx context.Context, orgID, threadID uuid.UUID) error
 }
 
 func (m *mockThreadStore) Create(ctx context.Context, t *models.SessionThread, max int) error {
@@ -61,6 +62,9 @@ func (m *mockThreadStore) UpdateStatus(ctx context.Context, orgID, threadID uuid
 }
 
 func (m *mockThreadStore) IncrementPendingMessages(ctx context.Context, orgID, threadID uuid.UUID) error {
+	if m.incrementPendingFn != nil {
+		return m.incrementPendingFn(ctx, orgID, threadID)
+	}
 	return nil
 }
 
@@ -598,12 +602,56 @@ func TestService_SendMessage(t *testing.T) {
 			expectErr: ErrThreadNotFound,
 		},
 		{
-			name: "thread not idle",
+			// When the target thread is mid-turn, SendMessage queues the
+			// message (creates the row + bumps pending_message_count) instead
+			// of rejecting. The orchestrator drains the queue when the
+			// in-flight turn completes.
+			name: "thread busy queues message",
 			input: SendMessageInput{
 				SessionID: sessionID,
 				OrgID:     orgID,
 				ThreadID:  threadID,
-				Message:   "hi",
+				Message:   "queued",
+			},
+			setupDeps: func(deps *testDeps) {
+				deps.threadStore.claimIdleFn = func(_ context.Context, _, _, _ uuid.UUID) (models.SessionThread, error) {
+					return models.SessionThread{}, fmt.Errorf("no rows")
+				}
+				deps.threadStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
+					return models.SessionThread{ID: threadID, SessionID: sessionID, OrgID: orgID, CurrentTurn: 3, Status: models.ThreadStatusRunning}, nil
+				}
+				deps.messageStore.createFn = func(_ context.Context, msg *models.SessionMessage) error {
+					require.Equal(t, "queued", msg.Content)
+					require.Equal(t, 5, msg.TurnNumber, "queued message belongs to the turn after the in-flight one")
+					msg.ID = 7
+					return nil
+				}
+				deps.threadStore.incrementPendingFn = func(_ context.Context, _, tid uuid.UUID) error {
+					require.Equal(t, threadID, tid)
+					return nil
+				}
+				deps.jobStore.enqueueFn = func(_ context.Context, _ uuid.UUID, _, _ string, _ any, _ int, _ *string) (uuid.UUID, error) {
+					t.Fatalf("queue-only path must not enqueue a continue_session job")
+					return uuid.UUID{}, nil
+				}
+				deps.sessionStore.claimIdleFn = func(_ context.Context, _, _ uuid.UUID) (models.Session, error) {
+					t.Fatalf("queue-only path must not re-claim the parent session")
+					return models.Session{}, nil
+				}
+			},
+		},
+		{
+			// Resolving review comments on a queued send is rejected: the
+			// resolution pass is keyed on the in-flight turn and we cannot
+			// atomically commit it alongside a message that won't be
+			// consumed until a later turn.
+			name: "thread busy with comment resolution rejected",
+			input: SendMessageInput{
+				SessionID:               sessionID,
+				OrgID:                   orgID,
+				ThreadID:                threadID,
+				Message:                 "addressed comments",
+				ResolveReviewCommentIDs: []uuid.UUID{uuid.New()},
 			},
 			setupDeps: func(deps *testDeps) {
 				deps.threadStore.claimIdleFn = func(_ context.Context, _, _, _ uuid.UUID) (models.SessionThread, error) {
@@ -611,6 +659,32 @@ func TestService_SendMessage(t *testing.T) {
 				}
 				deps.threadStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
 					return models.SessionThread{ID: threadID, SessionID: sessionID, OrgID: orgID, Status: models.ThreadStatusRunning}, nil
+				}
+			},
+			expectErr: ErrReviewCommentsNotConfigured,
+		},
+		{
+			name: "completed thread rejected instead of queued",
+			input: SendMessageInput{
+				SessionID: sessionID,
+				OrgID:     orgID,
+				ThreadID:  threadID,
+				Message:   "queued",
+			},
+			setupDeps: func(deps *testDeps) {
+				deps.threadStore.claimIdleFn = func(_ context.Context, _, _, _ uuid.UUID) (models.SessionThread, error) {
+					return models.SessionThread{}, fmt.Errorf("no rows")
+				}
+				deps.threadStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
+					return models.SessionThread{ID: threadID, SessionID: sessionID, OrgID: orgID, CurrentTurn: 3, Status: models.ThreadStatusCompleted}, nil
+				}
+				deps.messageStore.createFn = func(_ context.Context, _ *models.SessionMessage) error {
+					t.Fatalf("terminal threads must not create queued messages")
+					return nil
+				}
+				deps.threadStore.incrementPendingFn = func(_ context.Context, _, _ uuid.UUID) error {
+					t.Fatalf("terminal threads must not bump pending_message_count")
+					return nil
 				}
 			},
 			expectErr: ErrThreadNotIdle,

@@ -2867,16 +2867,14 @@ export function SessionDetailContent({ id }: { id: string }) {
     () => comments.filter((comment) => !comment.resolved).slice(0, MAX_RESOLVE_REVIEW_COMMENTS_PER_MESSAGE),
     [comments],
   );
-  // Composer gating: per the design (docs/design/implemented/68-sandbox-agent-tabs-and-threads.md),
-  // Phase 2 supports concurrent threads in one sandbox. The composer is locked
-  // only while the *selected* thread is running — sibling threads being active
-  // (which makes session.status === "running") must not block sending into an
-  // idle thread, since the backend admits concurrent sends up to the per-session
-  // running cap. Pending/skipped/destroyed at the session level still block.
+  // Composer gating: messages may be sent at any point while the session or
+  // thread is running. The backend queues mid-turn sends and the orchestrator
+  // drains the queue once the in-flight turn completes. Pending/skipped at
+  // the session level and a destroyed sandbox still block — those are
+  // genuinely unrecoverable, not just busy.
   const composerCanSendMessage = session?.status !== "skipped" &&
     session?.status !== "pending" &&
-    session?.sandbox_state !== "destroyed" &&
-    (!activeThread || activeThread.status === "idle");
+    session?.sandbox_state !== "destroyed";
   const composerIsRunning = activeThread ? activeThread.status === "running" : session?.status === "running";
   const composerIsSnapshotExpired = session?.sandbox_state === "destroyed";
   const composerAgentType = activeThread?.agent_type ?? session?.agent_type ?? "codex";
