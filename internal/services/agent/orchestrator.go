@@ -1106,10 +1106,7 @@ func (o *Orchestrator) promptSeedForSession(session *models.Session, latestMessa
 		return issue, linkedIssues
 	}
 
-	title := "Session task"
-	if session.Title != nil && strings.TrimSpace(*session.Title) != "" {
-		title = *session.Title
-	}
+	title := syntheticIssueTitleForSession(session, latestMessage)
 	var descriptionParts []string
 	if session.PMApproach != nil && strings.TrimSpace(*session.PMApproach) != "" {
 		descriptionParts = append(descriptionParts, *session.PMApproach)
@@ -1127,6 +1124,42 @@ func (o *Orchestrator) promptSeedForSession(session *models.Session, latestMessa
 		issue.Description = &description
 	}
 	return issue, linkedIssues
+}
+
+func syntheticIssueTitleForSession(session *models.Session, latestMessage *models.SessionMessage) string {
+	if session.Title != nil && strings.TrimSpace(*session.Title) != "" {
+		return strings.TrimSpace(*session.Title)
+	}
+	if latestMessage != nil {
+		if title := syntheticIssueTitleFragment(latestMessage.Content); title != "" {
+			return title
+		}
+	}
+	if session.PMApproach != nil {
+		if title := syntheticIssueTitleFragment(*session.PMApproach); title != "" {
+			return title
+		}
+	}
+	if session.PMReasoning != nil {
+		if title := syntheticIssueTitleFragment(*session.PMReasoning); title != "" {
+			return title
+		}
+	}
+	return "Session"
+}
+
+func syntheticIssueTitleFragment(value string) string {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return ""
+	}
+	if idx := strings.Index(trimmed, "\n"); idx >= 0 {
+		trimmed = strings.TrimSpace(trimmed[:idx])
+	}
+	if len(trimmed) <= 120 {
+		return trimmed
+	}
+	return strings.TrimSpace(trimmed[:120]) + "..."
 }
 
 func issueSnapshotEntriesFromIssue(issue *models.Issue) []models.SessionIssueSnapshotEntry {
