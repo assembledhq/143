@@ -355,49 +355,6 @@ func TestEnsureImage_SingleflightDedupes(t *testing.T) {
 	require.Equal(t, 1, cli.imagePullCalls, "%d concurrent ensureImage callers should share a single underlying pull", callers)
 }
 
-// TestEnsureInfraImages_PullsAllSupported verifies the worker-boot
-// pre-pull pass invokes the registry once per supported template image,
-// so the first preview start is a fast inspect rather than a multi-minute
-// cold pull that would blow through the HTTP server's WriteTimeout.
-func TestEnsureInfraImages_PullsAllSupported(t *testing.T) {
-	t.Parallel()
-
-	cli := &mockDockerPreviewClient{
-		imagesPresent:      map[string]bool{},
-		imagePullPopulates: true,
-	}
-	provider := NewDockerPreviewProvider(cli, &noopSandboxExecutor{}, zerolog.Nop())
-
-	provider.EnsureInfraImages(context.Background())
-
-	require.Equal(t, len(preview.AllInfraImages()), cli.imagePullCalls, "every supported infra image should be pre-pulled")
-
-	// Second call is a no-op: every image is already present, so we hit
-	// the fast inspect path.
-	cli.imagePullCalls = 0
-	provider.EnsureInfraImages(context.Background())
-	require.Zero(t, cli.imagePullCalls, "second pass must not re-pull images that are already present")
-}
-
-// TestEnsureInfraImages_LogsAndContinuesOnFailure verifies that pre-pull
-// is best-effort: a registry failure for one image does not propagate up
-// or stop the others (and definitely doesn't block server boot). The
-// lazy-pull path stays as a safety net for whatever didn't pre-pull.
-func TestEnsureInfraImages_LogsAndContinuesOnFailure(t *testing.T) {
-	t.Parallel()
-
-	cli := &mockDockerPreviewClient{
-		imagesPresent: map[string]bool{},
-		imagePullErr:  errors.New("registry unreachable"),
-	}
-	provider := NewDockerPreviewProvider(cli, &noopSandboxExecutor{}, zerolog.Nop())
-
-	// Should not panic, should not block, should not return.
-	provider.EnsureInfraImages(context.Background())
-
-	require.Equal(t, len(preview.AllInfraImages()), cli.imagePullCalls, "every image should still be attempted even when the first one fails")
-}
-
 func TestBuildInfraEnv_Redis(t *testing.T) {
 	t.Parallel()
 	d := &DockerPreviewProvider{}

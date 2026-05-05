@@ -758,39 +758,6 @@ func scanPullStreamForError(r io.Reader) error {
 	return firstErr
 }
 
-// EnsureInfraImages pre-pulls every supported infrastructure template image
-// in parallel, deduplicating via the same singleflight group as the
-// on-demand path. Best-effort: failures are logged but not returned, so a
-// transient registry hiccup doesn't block server startup. Worker boot calls
-// this in a background goroutine so the first preview that needs e.g.
-// postgres:17-alpine usually finds the image already on disk and answers
-// the HTTP request well within the server's WriteTimeout.
-//
-// Safe to call multiple times (singleflight collapses to one inspect each
-// after the first run).
-func (d *DockerPreviewProvider) EnsureInfraImages(ctx context.Context) {
-	images := preview.AllInfraImages()
-	if len(images) == 0 {
-		return
-	}
-	d.logger.Info().Strs("images", images).Msg("pre-pulling preview infra images in background")
-
-	var wg sync.WaitGroup
-	for _, ref := range images {
-		ref := ref
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			if err := d.ensureImage(ctx, ref); err != nil {
-				d.logger.Warn().Err(err).Str("image", ref).Msg("preview infra image pre-pull failed; will retry on first preview start")
-				return
-			}
-		}()
-	}
-	wg.Wait()
-	d.logger.Info().Msg("preview infra image pre-pull pass complete")
-}
-
 func (d *DockerPreviewProvider) buildInfraEnv(template string, cred preview.InfraCredential) []string {
 	switch {
 	case strings.HasPrefix(template, "postgres"):
