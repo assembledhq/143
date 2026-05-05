@@ -43,7 +43,7 @@ export function SessionSummaryPanel({ sessionId, open, onOpenChange }: SessionSu
             Session summary
           </SheetTitle>
           <SheetDescription>
-            One-glance view of every tab in this sandbox: status, latest result, cost, and file overlap.
+            One-glance view of every tab in this sandbox: status, latest result, and file overlap.
           </SheetDescription>
         </SheetHeader>
         <div className="mt-4 space-y-4 px-4 pb-4">
@@ -78,9 +78,6 @@ function SummaryBody({ summary }: { summary: SessionSummary }) {
               </header>
               <div className="mt-1 text-xs text-muted-foreground">
                 {AGENTS_BY_KEY[tab.agent_type]?.label ?? tab.agent_type} · turn {tab.current_turn}
-                {tab.cost_cents > 0 && (
-                  <> · ${(tab.cost_cents / 100).toFixed(2)}</>
-                )}
               </div>
               {tab.result_summary && (
                 <p className="mt-2 text-sm leading-snug whitespace-pre-wrap">{tab.result_summary}</p>
