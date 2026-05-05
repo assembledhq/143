@@ -5331,6 +5331,64 @@ describe('SessionDetailPage', () => {
     expect(screen.getByLabelText('Model override')).toBeInTheDocument();
   });
 
+  it('hides the session footer on mobile conversation view', async () => {
+    const idleSession: Session = {
+      ...mockSessions[0],
+      status: 'idle',
+      completed_at: undefined,
+      current_turn: 3,
+      sandbox_state: 'snapshotted',
+      diff: 'diff --git a/src/app.ts b/src/app.ts\n--- a/src/app.ts\n+++ b/src/app.ts\n@@ -1,3 +1,4 @@\n import express from "express";\n+import cors from "cors";\n const app = express();\n app.listen(3000);',
+      diff_stats: { added: 1, removed: 0, files_changed: 1 },
+    };
+
+    setMobileViewport(true);
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({ data: idleSession } satisfies SingleResponse<Session>);
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id="session-mobile-footer-hidden" />);
+    await screen.findByPlaceholderText('Send a follow-up message...');
+
+    expect(screen.queryByTestId('session-footer')).not.toBeInTheDocument();
+  });
+
+  it('keeps the mobile follow-up textarea collapsed until focused', async () => {
+    const idleSession: Session = {
+      ...mockSessions[0],
+      status: 'idle',
+      completed_at: undefined,
+      current_turn: 1,
+      sandbox_state: 'snapshotted',
+    };
+
+    setMobileViewport(true);
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({ data: idleSession } satisfies SingleResponse<Session>);
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id="session-mobile-composer-height" />);
+    const textarea = await screen.findByPlaceholderText('Send a follow-up message...');
+
+    expect(textarea).toHaveAttribute('data-mobile-composer-state', 'collapsed');
+    expect(textarea).toHaveAttribute('rows', '1');
+
+    const user = userEvent.setup();
+    await user.click(textarea);
+
+    expect(textarea).toHaveAttribute('data-mobile-composer-state', 'expanded');
+
+    fireEvent.blur(textarea);
+
+    await waitFor(() => {
+      expect(textarea).toHaveAttribute('data-mobile-composer-state', 'collapsed');
+    });
+  });
+
   it('matches both trigger menus to the continue-session input width', async () => {
     const resumableSession: Session = {
       ...mockSessions[0],
@@ -5594,6 +5652,7 @@ describe('SessionDetailPage', () => {
 
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
     await screen.findByPlaceholderText('Send a follow-up message...');
+    expect(screen.getByTestId('session-footer')).toBeInTheDocument();
     // Turn indicator and diff stats should appear in footer
     const turnElements = screen.getAllByText(/Turn 3/);
     expect(turnElements.length).toBeGreaterThanOrEqual(1);
