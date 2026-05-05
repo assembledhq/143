@@ -23,6 +23,7 @@ import {
   CollapsibleTrigger,
 } from "@/components/ui/collapsible";
 import { api } from "@/lib/api";
+import { agentTypeForModel } from "@/lib/agents";
 import { BranchPicker } from "@/components/branch-picker";
 import { AutomationModelSelect } from "@/components/automation-model-select";
 import { NoReposWarning } from "@/components/no-repos-warning";
@@ -34,6 +35,12 @@ import {
   featuredAutomationTemplateIDs,
   getAutomationTemplate,
 } from "@/lib/automation-templates";
+import {
+  getCodingAgentReasoningOptions,
+  supportsReasoningEffort,
+  toCodingAgentReasoningEffort,
+  type CodingAgentReasoningEffort,
+} from "@/lib/coding-agent-reasoning";
 import {
   browserTimezone,
   hourOptions,
@@ -64,8 +71,15 @@ export default function NewAutomationPage() {
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [baseBranchByRepoId, setBaseBranchByRepoId] = useState<Record<string, string>>({});
   const [model, setModel] = useState<string | undefined>(undefined);
+  const [reasoningEffort, setReasoningEffort] = useState<CodingAgentReasoningEffort>("");
   const [priority, setPriority] = useState(50);
   const [redirecting, setRedirecting] = useState(false);
+
+  const { data: settingsResponse } = useQuery({
+    queryKey: ["settings"],
+    queryFn: () => api.settings.get(),
+  });
+  const settings = (settingsResponse?.data?.settings ?? {}) as { default_agent_type?: string };
 
   // Load repos
   const { data: reposData } = useQuery({
@@ -81,6 +95,10 @@ export default function NewAutomationPage() {
   const selectedBaseBranch = repoId
     ? baseBranchByRepoId[repoId] ?? selectedRepo?.default_branch ?? ""
     : "";
+  const defaultAgentType = settings.default_agent_type ?? "codex";
+  const effectiveAgentType = model ? agentTypeForModel(model) ?? defaultAgentType : defaultAgentType;
+  const showReasoningSelector = supportsReasoningEffort(effectiveAgentType);
+  const reasoningOptions = getCodingAgentReasoningOptions(effectiveAgentType);
 
   const applyTemplate = (templateId: string) => {
     const t = getAutomationTemplate(templateId);
@@ -103,6 +121,7 @@ export default function NewAutomationPage() {
         interval_run_at: `${intervalRunHour}:${intervalRunMinute}`,
         timezone,
         model,
+        ...(showReasoningSelector && reasoningEffort ? { reasoning_effort: reasoningEffort } : {}),
         base_branch: selectedBaseBranch.trim() || undefined,
         priority,
       }),
@@ -377,6 +396,27 @@ export default function NewAutomationPage() {
                   Auto uses your default automation agent. Choosing a model pins runs to that model&apos;s agent.
                 </p>
               </div>
+              {showReasoningSelector ? (
+                <div className="space-y-1.5">
+                  <Label htmlFor="automation-reasoning">Reasoning</Label>
+                  <Select
+                    value={reasoningEffort || "__default__"}
+                    onValueChange={(value) => setReasoningEffort(value === "__default__" ? "" : toCodingAgentReasoningEffort(value))}
+                  >
+                    <SelectTrigger id="automation-reasoning" aria-label="Reasoning">
+                      <SelectValue placeholder="Default reasoning" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="__default__">Default reasoning</SelectItem>
+                      {reasoningOptions.map((option) => (
+                        <SelectItem key={option.value} value={option.value}>
+                          {option.label}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+              ) : null}
               <div className="space-y-1.5">
                 <Label>Priority</Label>
                 <Select

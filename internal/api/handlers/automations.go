@@ -37,18 +37,18 @@ const (
 )
 
 type AutomationHandler struct {
-	automationStore    *db.AutomationStore
-	automationRunStore *db.AutomationRunStore
-	repoStore          automationRepoLookup
-	orgStore           automationOrgLookup
-	orgCredentialStore automationOrgCredentialLookup
-	userCredentialStore automationUserCredentialLookup
-	codingAuthStore    automationCodingAuthLookup
+	automationStore       *db.AutomationStore
+	automationRunStore    *db.AutomationRunStore
+	repoStore             automationRepoLookup
+	orgStore              automationOrgLookup
+	orgCredentialStore    automationOrgCredentialLookup
+	userCredentialStore   automationUserCredentialLookup
+	codingAuthStore       automationCodingAuthLookup
 	codingCredentialStore automationCodingCredentialLookup
-	jobStore           *db.JobStore
-	audit              *db.AuditEmitter
-	pool               db.TxStarter // needed for transactional RunNow
-	logger             zerolog.Logger
+	jobStore              *db.JobStore
+	audit                 *db.AuditEmitter
+	pool                  db.TxStarter // needed for transactional RunNow
+	logger                zerolog.Logger
 }
 
 // automationRepoLookup is the slice of *db.RepositoryStore needed to verify
@@ -189,22 +189,23 @@ func (h *AutomationHandler) Create(w http.ResponseWriter, r *http.Request) {
 	user := middleware.UserFromContext(r.Context())
 
 	var req struct {
-		Name           string  `json:"name"`
-		Goal           string  `json:"goal"`
-		RepositoryID   string  `json:"repository_id"`
-		Scope          *string `json:"scope"`
-		AgentType      *string `json:"agent_type"`
-		Model          *string `json:"model"`
-		ExecutionMode  *string `json:"execution_mode"`
-		MaxConcurrent  *int    `json:"max_concurrent"`
-		BaseBranch     *string `json:"base_branch"`
-		ScheduleType   *string `json:"schedule_type"`
-		IntervalValue  *int    `json:"interval_value"`
-		IntervalUnit   *string `json:"interval_unit"`
-		IntervalRunAt  *string `json:"interval_run_at"`
-		CronExpression *string `json:"cron_expression"`
-		Timezone       *string `json:"timezone"`
-		Priority       *int    `json:"priority"`
+		Name            string  `json:"name"`
+		Goal            string  `json:"goal"`
+		RepositoryID    string  `json:"repository_id"`
+		Scope           *string `json:"scope"`
+		AgentType       *string `json:"agent_type"`
+		Model           *string `json:"model"`
+		ReasoningEffort string  `json:"reasoning_effort"`
+		ExecutionMode   *string `json:"execution_mode"`
+		MaxConcurrent   *int    `json:"max_concurrent"`
+		BaseBranch      *string `json:"base_branch"`
+		ScheduleType    *string `json:"schedule_type"`
+		IntervalValue   *int    `json:"interval_value"`
+		IntervalUnit    *string `json:"interval_unit"`
+		IntervalRunAt   *string `json:"interval_run_at"`
+		CronExpression  *string `json:"cron_expression"`
+		Timezone        *string `json:"timezone"`
+		Priority        *int    `json:"priority"`
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -245,6 +246,16 @@ func (h *AutomationHandler) Create(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := h.validateAutomationModelAvailability(r.Context(), orgID, agentType, modelOverride); err != nil {
 		writeError(w, r, http.StatusBadRequest, "INVALID_MODEL", err.Error())
+		return
+	}
+	effectiveAgentType, err := h.defaultAutomationAgentType(r.Context(), orgID, agentType)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "DEFAULT_AGENT_LOOKUP_FAILED", "failed to load organization settings", err)
+		return
+	}
+	reasoningOverride, err := parseReasoningEffortForAgent(effectiveAgentType, req.ReasoningEffort)
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_REASONING_EFFORT", err.Error())
 		return
 	}
 
@@ -364,25 +375,26 @@ func (h *AutomationHandler) Create(w http.ResponseWriter, r *http.Request) {
 	}
 
 	automation := models.Automation{
-		OrgID:          orgID,
-		RepositoryID:   repoID,
-		Name:           name,
-		Goal:           goal,
-		Scope:          req.Scope,
-		AgentType:      agentType,
-		ModelOverride:  modelOverride,
-		ExecutionMode:  execMode,
-		MaxConcurrent:  maxConcurrent,
-		BaseBranch:     baseBranch,
-		ScheduleType:   scheduleType,
-		IntervalValue:  intervalValuePtr,
-		IntervalUnit:   intervalUnitPtr,
-		IntervalRunAt:  intervalRunAtPtr,
-		CronExpression: cronExpressionPtr,
-		Timezone:       timezone,
-		Enabled:        true,
-		CreatedBy:      &user.ID,
-		Priority:       priority,
+		OrgID:           orgID,
+		RepositoryID:    repoID,
+		Name:            name,
+		Goal:            goal,
+		Scope:           req.Scope,
+		AgentType:       agentType,
+		ModelOverride:   modelOverride,
+		ReasoningEffort: reasoningOverride,
+		ExecutionMode:   execMode,
+		MaxConcurrent:   maxConcurrent,
+		BaseBranch:      baseBranch,
+		ScheduleType:    scheduleType,
+		IntervalValue:   intervalValuePtr,
+		IntervalUnit:    intervalUnitPtr,
+		IntervalRunAt:   intervalRunAtPtr,
+		CronExpression:  cronExpressionPtr,
+		Timezone:        timezone,
+		Enabled:         true,
+		CreatedBy:       &user.ID,
+		Priority:        priority,
 	}
 
 	// Centralise schedule branching in ComputeNextRunAt so a new schedule kind
@@ -425,22 +437,23 @@ func (h *AutomationHandler) Update(w http.ResponseWriter, r *http.Request) {
 	before := automation
 
 	var req struct {
-		Name           *string `json:"name"`
-		Goal           *string `json:"goal"`
-		Scope          *string `json:"scope"`
-		RepositoryID   *string `json:"repository_id"`
-		AgentType      *string `json:"agent_type"`
-		Model          *string `json:"model"`
-		ExecutionMode  *string `json:"execution_mode"`
-		MaxConcurrent  *int    `json:"max_concurrent"`
-		BaseBranch     *string `json:"base_branch"`
-		ScheduleType   *string `json:"schedule_type"`
-		IntervalValue  *int    `json:"interval_value"`
-		IntervalUnit   *string `json:"interval_unit"`
-		IntervalRunAt  *string `json:"interval_run_at"`
-		CronExpression *string `json:"cron_expression"`
-		Timezone       *string `json:"timezone"`
-		Priority       *int    `json:"priority"`
+		Name            *string `json:"name"`
+		Goal            *string `json:"goal"`
+		Scope           *string `json:"scope"`
+		RepositoryID    *string `json:"repository_id"`
+		AgentType       *string `json:"agent_type"`
+		Model           *string `json:"model"`
+		ReasoningEffort *string `json:"reasoning_effort"`
+		ExecutionMode   *string `json:"execution_mode"`
+		MaxConcurrent   *int    `json:"max_concurrent"`
+		BaseBranch      *string `json:"base_branch"`
+		ScheduleType    *string `json:"schedule_type"`
+		IntervalValue   *int    `json:"interval_value"`
+		IntervalUnit    *string `json:"interval_unit"`
+		IntervalRunAt   *string `json:"interval_run_at"`
+		CronExpression  *string `json:"cron_expression"`
+		Timezone        *string `json:"timezone"`
+		Priority        *int    `json:"priority"`
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -505,6 +518,25 @@ func (h *AutomationHandler) Update(w http.ResponseWriter, r *http.Request) {
 			writeError(w, r, http.StatusBadRequest, "INVALID_MODEL", err.Error())
 			return
 		}
+	}
+	if req.AgentType != nil || req.Model != nil || req.ReasoningEffort != nil {
+		effectiveAgentType, err := h.defaultAutomationAgentType(r.Context(), orgID, automation.AgentType)
+		if err != nil {
+			writeError(w, r, http.StatusInternalServerError, "DEFAULT_AGENT_LOOKUP_FAILED", "failed to load organization settings", err)
+			return
+		}
+		raw := ""
+		if req.ReasoningEffort != nil {
+			raw = *req.ReasoningEffort
+		} else if automation.ReasoningEffort != nil {
+			raw = string(*automation.ReasoningEffort)
+		}
+		reasoningOverride, err := parseReasoningEffortForAgent(effectiveAgentType, raw)
+		if err != nil {
+			writeError(w, r, http.StatusBadRequest, "INVALID_REASONING_EFFORT", err.Error())
+			return
+		}
+		automation.ReasoningEffort = reasoningOverride
 	}
 	if req.ExecutionMode != nil {
 		if !validExecutionModes[*req.ExecutionMode] {

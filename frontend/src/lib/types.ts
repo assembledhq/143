@@ -1418,6 +1418,7 @@ export interface Automation {
   scope?: string;
   agent_type?: string;
   model_override?: string;
+  reasoning_effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max';
   execution_mode: string;
   max_concurrent: number;
   base_branch: string;

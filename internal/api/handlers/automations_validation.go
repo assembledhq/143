@@ -165,6 +165,27 @@ func (h *AutomationHandler) validateAutomationModelAvailability(ctx context.Cont
 	return fmt.Errorf("model %q is not available for agent %q; configure a team-usable credential first", *modelOverride, *agentType)
 }
 
+func (h *AutomationHandler) defaultAutomationAgentType(ctx context.Context, orgID uuid.UUID, explicit *string) (models.AgentType, error) {
+	if explicit != nil && strings.TrimSpace(*explicit) != "" {
+		return models.AgentType(strings.TrimSpace(*explicit)), nil
+	}
+	if h.orgStore != nil {
+		org, err := h.orgStore.GetByID(ctx, orgID)
+		if err != nil {
+			return "", fmt.Errorf("load organization settings: %w", err)
+		}
+		settings, err := models.ParseOrgSettings(org.Settings)
+		if err != nil {
+			h.logger.Warn().Err(err).Str("org_id", orgID.String()).Msg("failed to parse org settings for automation default agent; falling back to default")
+			return models.DefaultDefaultAgentType, nil
+		}
+		if settings.DefaultAgentType != "" {
+			return settings.DefaultAgentType, nil
+		}
+	}
+	return models.DefaultDefaultAgentType, nil
+}
+
 func (h *AutomationHandler) isAutomationAgentAvailable(ctx context.Context, orgID uuid.UUID, agentType models.AgentType) (bool, error) {
 	if agentType == "" {
 		return false, nil
