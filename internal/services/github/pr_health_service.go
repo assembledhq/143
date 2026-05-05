@@ -664,6 +664,7 @@ func (s *PRService) createRepairRevisionSession(ctx context.Context, pr models.P
 	msg := &models.SessionMessage{
 		SessionID:  session.ID,
 		OrgID:      session.OrgID,
+		ThreadID:   session.PrimaryThreadID,
 		UserID:     &userID,
 		TurnNumber: 0,
 		Role:       models.MessageRoleUser,
@@ -673,10 +674,7 @@ func (s *PRService) createRepairRevisionSession(ctx context.Context, pr models.P
 		return nil, err
 	}
 	dedupeKey := db.RunAgentDedupeKey(session.ID)
-	payload := map[string]string{
-		"session_id": session.ID.String(),
-		"org_id":     session.OrgID.String(),
-	}
+	payload := db.RunAgentPayload(session)
 	if _, err := s.jobs.EnqueueInTx(ctx, tx, session.OrgID, "agent", "run_agent", payload, 5, &dedupeKey); err != nil {
 		return nil, err
 	}

@@ -802,9 +802,10 @@ shorter human supervision time for sessions where parallelism is appropriate.
 - Added `session_threads`.
 - Added `thread_id` to session messages and logs.
 - Kept existing single-thread APIs working.
-- Note: default-thread backfill for legacy sessions is not part of the current
-  Phase 1 UI path; sessions without explicit threads still fall back to the
-  existing session transcript/composer.
+- Added a primary-thread invariant: every non-deleted session has a seeded
+  `Main` thread. Legacy NULL-thread messages/logs are attributed to that row
+  when the mapping is unambiguous, and new first-turn execution is attributed
+  to the seeded primary thread.
 
 ### Phase 1: Multiple blank tabs, one running thread at a time — Completed
 
