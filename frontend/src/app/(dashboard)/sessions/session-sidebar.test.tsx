@@ -629,6 +629,10 @@ describe('SessionSidebar', () => {
     const selectedLink = screen.getByText('Selected session').closest('a');
     expect(selectedLink?.className).toContain('bg-background');
     expect(selectedLink?.className).toContain('shadow-sm');
+    expect(selectedLink?.className).toContain('md:bg-background');
+    expect(selectedLink?.className).toContain('md:shadow-sm');
+    expect(selectedLink?.className).toContain('md:border-border/60');
+    expect(selectedLink).toHaveAttribute('aria-current', 'page');
   });
 
   it('highlights the selected session from the active layout segment', async () => {
@@ -645,6 +649,10 @@ describe('SessionSidebar', () => {
     const selectedLink = screen.getByText('Selected via pathname').closest('a');
     expect(selectedLink?.className).toContain('bg-background');
     expect(selectedLink?.className).toContain('shadow-sm');
+    expect(selectedLink?.className).toContain('md:bg-background');
+    expect(selectedLink?.className).toContain('md:shadow-sm');
+    expect(selectedLink?.className).toContain('md:border-border/60');
+    expect(selectedLink).toHaveAttribute('aria-current', 'page');
   });
 
   // -----------------------------------------------------------------------
