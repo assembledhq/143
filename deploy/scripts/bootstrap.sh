@@ -29,6 +29,8 @@ usermod -aG docker deploy
 cat > /etc/sudoers.d/99-deploy <<'SUDOERS'
 Cmnd_Alias DEPLOY_CMDS = \
     /usr/bin/chown -R deploy\:deploy /opt/143/deploy/scripts, \
+    /usr/bin/chown -R deploy\:deploy /opt/143/deploy/vmalert, \
+    /usr/bin/chown -R deploy\:deploy /opt/143/deploy/grafana, \
     /usr/bin/runsc install -- --ignore-cgroups --host-uds=open, \
     /usr/bin/systemctl restart docker, \
     /usr/bin/apt-get install -y --no-install-recommends iptables-persistent, \
