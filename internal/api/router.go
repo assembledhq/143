@@ -395,7 +395,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	auditLogHandler := handlers.NewAuditLogHandler(auditLogStore)
 	sessionReviewCommentHandler := handlers.NewSessionReviewCommentHandler(sessionReviewCommentStore, sessionStore, logger)
 	sessionReviewCommentHandler.SetAuditEmitter(auditEmitter)
-	sessionReviewCommentHandler.SetMessageAndJobStores(sessionMessageStore, jobStore)
+	sessionReviewCommentHandler.SetMessageAndJobStores(sessionMessageStore, sessionThreadStore, jobStore)
 	// Initialize the session-files snapshot cache so that file-context reads
 	// keep working after the live container is torn down. The cache is
 	// best-effort: a build error here is logged and the handler falls back

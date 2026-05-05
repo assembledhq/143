@@ -2440,6 +2440,18 @@ export function SessionDetailContent({ id }: { id: string }) {
 
       if (response.data.session_id !== id) {
         router.push(`/sessions/${response.data.session_id}`);
+        return;
+      }
+      // Same-session response: without explicit feedback the click looks
+      // dead. Reused-in-flight is the common case (repair already running on
+      // this session and the failing-tests count hasn't dropped yet, so the
+      // button is still rendered) — surface a toast so the user knows the
+      // request was handled.
+      if (response.data.reused_in_flight) {
+        const label = response.data.repair_action_type === "fix_tests"
+          ? "Fix tests session is already in progress"
+          : "Resolve conflicts session is already in progress";
+        toast.info(label);
       }
     },
     onError: (err) => {
