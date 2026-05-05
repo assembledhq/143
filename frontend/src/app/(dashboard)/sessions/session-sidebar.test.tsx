@@ -627,12 +627,17 @@ describe('SessionSidebar', () => {
     await screen.findByText('Selected session');
 
     const selectedLink = screen.getByText('Selected session').closest('a');
-    expect(selectedLink?.className).toContain('bg-background');
+    const unselectedLink = screen.getByText('Other session').closest('a');
+    expect(selectedLink?.className).toContain('bg-primary/5');
+    expect(selectedLink?.className).toContain('border-primary/20');
+    expect(selectedLink?.className).toContain('ring-1');
+    expect(selectedLink?.className).toContain('ring-primary/15');
     expect(selectedLink?.className).toContain('shadow-sm');
-    expect(selectedLink?.className).toContain('md:bg-background');
+    expect(selectedLink?.className).toContain('md:bg-primary/5');
     expect(selectedLink?.className).toContain('md:shadow-sm');
-    expect(selectedLink?.className).toContain('md:border-border/60');
+    expect(selectedLink?.className).toContain('md:border-primary/20');
     expect(selectedLink).toHaveAttribute('aria-current', 'page');
+    expect(unselectedLink?.className).not.toContain('bg-primary/5');
   });
 
   it('highlights the selected session from the active layout segment', async () => {
@@ -647,11 +652,14 @@ describe('SessionSidebar', () => {
     await screen.findByText('Selected via pathname');
 
     const selectedLink = screen.getByText('Selected via pathname').closest('a');
-    expect(selectedLink?.className).toContain('bg-background');
+    expect(selectedLink?.className).toContain('bg-primary/5');
+    expect(selectedLink?.className).toContain('border-primary/20');
+    expect(selectedLink?.className).toContain('ring-1');
+    expect(selectedLink?.className).toContain('ring-primary/15');
     expect(selectedLink?.className).toContain('shadow-sm');
-    expect(selectedLink?.className).toContain('md:bg-background');
+    expect(selectedLink?.className).toContain('md:bg-primary/5');
     expect(selectedLink?.className).toContain('md:shadow-sm');
-    expect(selectedLink?.className).toContain('md:border-border/60');
+    expect(selectedLink?.className).toContain('md:border-primary/20');
     expect(selectedLink).toHaveAttribute('aria-current', 'page');
   });
 
