@@ -19,6 +19,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"sync"
@@ -105,23 +106,40 @@ func runInteractiveCommand(ctx context.Context, sandbox *agent.Sandbox, spec Int
 		return InteractiveRunResult{}, fmt.Errorf("start interactive command: %w", err)
 	}
 
-	// Bind the handle to the session-scoped cancel entry. The orchestrator
-	// installs the attacher before adapter.Execute so RequestStop can deliver
-	// graceful interrupts through the live handle. No-op when an adapter is
-	// driven outside the orchestrator (most unit tests).
+	// Defer order matters here. Defers run LIFO, so on return:
+	//
+	//   1. handle.Close() — releases the hijacked connection first so the
+	//      demux goroutine exits and any in-flight Interrupt/Kill on the
+	//      handle becomes a no-op.
+	//   2. attacher.Detach() — only after the handle is dead, so the cancel
+	//      registry never sees a "detached but still attempting work"
+	//      handle.
+	//
+	// Reordering would let RequestStop call Interrupt on a closed handle
+	// briefly, which is safe but noisy in logs.
+	defer handle.Close()
 	if attacher := agent.InteractiveHandleAttacherFromContext(ctx); attacher != nil {
 		attacher.Attach(handle)
 		defer attacher.Detach()
 	}
-	defer handle.Close()
 
-	var stderrBuf bytes.Buffer
-	var wg sync.WaitGroup
+	var (
+		stderrBuf     bytes.Buffer
+		stdoutScanErr error
+		stderrScanErr error
+		stdoutScanMu  sync.Mutex
+		stderrScanMu  sync.Mutex
+		wg            sync.WaitGroup
+	)
 
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		streamLines(handle.Stdout(), spec.OnStdout)
+		if err := streamLines(handle.Stdout(), spec.OnStdout); err != nil {
+			stdoutScanMu.Lock()
+			stdoutScanErr = err
+			stdoutScanMu.Unlock()
+		}
 	}()
 
 	if !spec.Profile.RequiresTTY {
@@ -129,7 +147,11 @@ func runInteractiveCommand(ctx context.Context, sandbox *agent.Sandbox, spec Int
 		go func() {
 			defer wg.Done()
 			if spec.OnStderr != nil {
-				streamLines(handle.Stderr(), spec.OnStderr)
+				if err := streamLines(handle.Stderr(), spec.OnStderr); err != nil {
+					stderrScanMu.Lock()
+					stderrScanErr = err
+					stderrScanMu.Unlock()
+				}
 				return
 			}
 			_, _ = io.Copy(&stderrBuf, handle.Stderr())
@@ -137,32 +159,45 @@ func runInteractiveCommand(ctx context.Context, sandbox *agent.Sandbox, spec Int
 	}
 
 	exitCode, waitErr := handle.Wait(ctx)
-	// Reading from the pipes is what unblocks Wait when the connection
-	// drops; the goroutines above are still draining trailing bytes after
-	// Wait returns. Closing the handle will close the pipes.
+	// Wait returns when the connection drops; the streaming goroutines
+	// finish draining trailing bytes shortly after. We must wait on them
+	// before returning so callers see the full stderr buffer and any
+	// scanner error.
 	wg.Wait()
 
-	if waitErr != nil {
-		return InteractiveRunResult{ExitCode: exitCode, Stderr: stderrBuf.Bytes()}, waitErr
+	result := InteractiveRunResult{ExitCode: exitCode, Stderr: stderrBuf.Bytes()}
+	switch {
+	case waitErr != nil:
+		return result, waitErr
+	case stdoutScanErr != nil:
+		return result, fmt.Errorf("read agent stdout: %w", stdoutScanErr)
+	case stderrScanErr != nil:
+		return result, fmt.Errorf("read agent stderr: %w", stderrScanErr)
 	}
-	return InteractiveRunResult{ExitCode: exitCode, Stderr: stderrBuf.Bytes()}, nil
+	return result, nil
 }
 
 // streamLines reads from r and invokes handler for each newline-delimited
 // line. Empty lines are skipped. The trailing partial line (no newline) is
-// flushed once the reader hits EOF.
+// flushed once the reader hits EOF. Returns any scanner error so callers
+// can distinguish a clean EOF from a truncated stream (e.g. the 1 MiB line
+// ceiling being exceeded by a runaway tool output).
 //
 // Buffer policy: bufio.Scanner's default 64 KiB ceiling truncates legitimate
 // agent output (stream-JSON events with large tool inputs/outputs routinely
 // exceed that). 1 MiB matches the previous lineSplitter ceiling used by the
 // docker provider and is small enough to bound runaway memory.
-func streamLines(r io.Reader, handler LineHandler) {
-	if r == nil || handler == nil {
+func streamLines(r io.Reader, handler LineHandler) error {
+	if r == nil {
+		return nil
+	}
+	if handler == nil {
 		// Drain so the writer end can EOF.
-		if r != nil {
-			_, _ = io.Copy(io.Discard, r)
+		_, err := io.Copy(io.Discard, r)
+		if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrClosedPipe) {
+			return err
 		}
-		return
+		return nil
 	}
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
@@ -177,4 +212,5 @@ func streamLines(r io.Reader, handler LineHandler) {
 		copy(buf, line)
 		handler(buf)
 	}
+	return scanner.Err()
 }

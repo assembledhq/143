@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -1342,7 +1343,8 @@ func TestDockerHandle_StartInteractiveCommand_NoTTY_WrapsWithSignalShim(t *testi
 	require.NotNil(t, handle)
 	require.Contains(t, capturedCmd, "echo hi", "user command should be embedded verbatim")
 	require.Contains(t, capturedCmd, "& __143_pid=$!", "non-TTY ctrl_c handles wrap with the internal signal shim")
-	require.Contains(t, capturedCmd, "/home/sandbox/.143-runtime.pid", "shim records PID under HomeDir")
+	require.Contains(t, capturedCmd, "/home/sandbox/.143-runtime-", "shim records PID under HomeDir with a per-handle suffix")
+	require.Contains(t, capturedCmd, ".pid", "shim path ends in .pid")
 	_ = handle.Close()
 }
 
@@ -1382,8 +1384,9 @@ func TestDockerHandle_Interrupt_NoTTY_DeliversSIGINT(t *testing.T) {
 	mu.Lock()
 	defer mu.Unlock()
 	require.GreaterOrEqual(t, len(execCmds), 2, "Interrupt should run an additional exec to send SIGINT")
-	require.Contains(t, execCmds[len(execCmds)-1], "kill -INT", "Interrupt(ctrl_c) on non-TTY handle should exec-send SIGINT")
-	require.Contains(t, execCmds[len(execCmds)-1], "/home/sandbox/.143-runtime.pid", "kill should target the pidfile written by the shim")
+	last := execCmds[len(execCmds)-1]
+	require.Contains(t, last, "kill -INT", "Interrupt(ctrl_c) on non-TTY handle should exec-send SIGINT")
+	require.Contains(t, last, "/home/sandbox/.143-runtime-", "kill should target the per-handle pidfile written by the shim")
 }
 
 // TestDockerHandle_StartInteractiveCommand_TTY_AllocatesTTY ensures that
@@ -1419,6 +1422,218 @@ func TestDockerHandle_StartInteractiveCommand_TTY_AllocatesTTY(t *testing.T) {
 	defer handle.Close()
 	require.True(t, sawTTY, "TTY=true spec should allocate a real TTY")
 	require.True(t, sawStdin, "OpenStdin=true spec should attach stdin")
+}
+
+// TestDockerHandle_PerHandlePIDFile verifies that two handles in the same
+// sandbox get distinct pidfile paths so a stale pidfile from a previous turn
+// can never be mistaken for the current one.
+func TestDockerHandle_PerHandlePIDFile(t *testing.T) {
+	t.Parallel()
+
+	// Only collect the shim commands (exec creations from StartInteractiveCommand).
+	// Close() also schedules an `rm -f` exec for cleanup; that's not what we
+	// want to compare here.
+	var shimCmds []string
+	var mu sync.Mutex
+	mock := &mockDockerClient{}
+	mock.containerExecCreateFn = func(ctx context.Context, containerID string, config container.ExecOptions) (container.ExecCreateResponse, error) {
+		if strings.Contains(config.Cmd[2], "__143_pid=$!") {
+			mu.Lock()
+			shimCmds = append(shimCmds, config.Cmd[2])
+			mu.Unlock()
+		}
+		return container.ExecCreateResponse{ID: "exec-x"}, nil
+	}
+	mock.containerExecAttachFn = func(ctx context.Context, execID string, config container.ExecAttachOptions) (types.HijackedResponse, error) {
+		return newMockHijackedResponse(""), nil
+	}
+	mock.containerExecInspectFn = func(ctx context.Context, execID string) (container.ExecInspect, error) {
+		return container.ExecInspect{ExitCode: 0}, nil
+	}
+
+	p := NewDockerProvider(mock, newTestLogger())
+	sb := &agent.Sandbox{ID: "c1", Provider: "docker", WorkDir: "/workspace", HomeDir: "/home/sandbox"}
+
+	for i := 0; i < 2; i++ {
+		h, err := p.StartInteractiveCommand(context.Background(), sb, agent.InteractiveCommandSpec{
+			Cmd:              "agent",
+			CancellationSpec: agent.DefaultCancellationSpec,
+		})
+		require.NoError(t, err)
+		_ = h.Close()
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	require.Len(t, shimCmds, 2, "each StartInteractiveCommand should produce one shim-wrapped exec")
+	require.NotEqual(t, shimCmds[0], shimCmds[1],
+		"each handle should get a unique pidfile suffix so multi-turn sessions never reuse a stale PID")
+}
+
+// TestDockerHandle_Wait_ReturnsInspectedExitCode covers the post-stream
+// branch where Wait queries Docker for the exec exit code.
+func TestDockerHandle_Wait_ReturnsInspectedExitCode(t *testing.T) {
+	t.Parallel()
+
+	mock := &mockDockerClient{}
+	mock.containerExecCreateFn = func(ctx context.Context, containerID string, config container.ExecOptions) (container.ExecCreateResponse, error) {
+		return container.ExecCreateResponse{ID: "exec-1"}, nil
+	}
+	mock.containerExecAttachFn = func(ctx context.Context, execID string, config container.ExecAttachOptions) (types.HijackedResponse, error) {
+		return newMockHijackedResponse(""), nil
+	}
+	mock.containerExecInspectFn = func(ctx context.Context, execID string) (container.ExecInspect, error) {
+		return container.ExecInspect{ExitCode: 42}, nil
+	}
+
+	p := NewDockerProvider(mock, newTestLogger())
+	sb := &agent.Sandbox{ID: "c1", Provider: "docker", WorkDir: "/workspace", HomeDir: "/home/sandbox"}
+
+	h, err := p.StartInteractiveCommand(context.Background(), sb, agent.InteractiveCommandSpec{
+		Cmd:              "agent",
+		CancellationSpec: agent.DefaultCancellationSpec,
+	})
+	require.NoError(t, err)
+	defer h.Close()
+
+	exit, err := h.Wait(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, 42, exit, "Wait should return the exit code reported by ContainerExecInspect")
+
+	// Cached on second call.
+	exit2, err := h.Wait(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, 42, exit2, "subsequent Wait calls should return the cached exit code")
+}
+
+// TestDockerHandle_Close_Idempotent ensures Close can be called repeatedly
+// without panicking or double-closing the connection.
+func TestDockerHandle_Close_Idempotent(t *testing.T) {
+	t.Parallel()
+
+	mock := &mockDockerClient{}
+	mock.containerExecCreateFn = func(ctx context.Context, containerID string, config container.ExecOptions) (container.ExecCreateResponse, error) {
+		return container.ExecCreateResponse{ID: "exec-1"}, nil
+	}
+	mock.containerExecAttachFn = func(ctx context.Context, execID string, config container.ExecAttachOptions) (types.HijackedResponse, error) {
+		return newMockHijackedResponse(""), nil
+	}
+	mock.containerExecInspectFn = func(ctx context.Context, execID string) (container.ExecInspect, error) {
+		return container.ExecInspect{ExitCode: 0}, nil
+	}
+
+	p := NewDockerProvider(mock, newTestLogger())
+	sb := &agent.Sandbox{ID: "c1", Provider: "docker", WorkDir: "/workspace", HomeDir: "/home/sandbox"}
+
+	h, err := p.StartInteractiveCommand(context.Background(), sb, agent.InteractiveCommandSpec{
+		Cmd:              "agent",
+		CancellationSpec: agent.DefaultCancellationSpec,
+	})
+	require.NoError(t, err)
+	require.NoError(t, h.Close())
+	require.NoError(t, h.Close(), "Close must be idempotent — second call is a no-op")
+	require.NoError(t, h.Close(), "third Close must still be a no-op")
+}
+
+// TestDockerHandle_WriteInput_ErrInputNotOpen ensures handles started without
+// OpenStdin reject WriteInput cleanly.
+func TestDockerHandle_WriteInput_ErrInputNotOpen(t *testing.T) {
+	t.Parallel()
+
+	mock := &mockDockerClient{}
+	mock.containerExecCreateFn = func(ctx context.Context, containerID string, config container.ExecOptions) (container.ExecCreateResponse, error) {
+		return container.ExecCreateResponse{ID: "exec-1"}, nil
+	}
+	mock.containerExecAttachFn = func(ctx context.Context, execID string, config container.ExecAttachOptions) (types.HijackedResponse, error) {
+		return newMockHijackedResponse(""), nil
+	}
+
+	p := NewDockerProvider(mock, newTestLogger())
+	sb := &agent.Sandbox{ID: "c1", Provider: "docker", WorkDir: "/workspace", HomeDir: "/home/sandbox"}
+
+	h, err := p.StartInteractiveCommand(context.Background(), sb, agent.InteractiveCommandSpec{
+		Cmd:              "agent",
+		CancellationSpec: agent.DefaultCancellationSpec,
+	})
+	require.NoError(t, err)
+	defer h.Close()
+
+	err = h.WriteInput(context.Background(), []byte{0x03})
+	require.ErrorIs(t, err, agent.ErrInputNotOpen,
+		"WriteInput on a handle without OpenStdin must return ErrInputNotOpen")
+}
+
+// TestDockerHandle_StartInteractiveCommand_AttachFailureSurfacesError
+// verifies that a failing ContainerExecAttach is surfaced rather than
+// silently leaving a half-built handle dangling.
+func TestDockerHandle_StartInteractiveCommand_AttachFailureSurfacesError(t *testing.T) {
+	t.Parallel()
+
+	mock := &mockDockerClient{}
+	mock.containerExecCreateFn = func(ctx context.Context, containerID string, config container.ExecOptions) (container.ExecCreateResponse, error) {
+		return container.ExecCreateResponse{ID: "exec-1"}, nil
+	}
+	mock.containerExecAttachFn = func(ctx context.Context, execID string, config container.ExecAttachOptions) (types.HijackedResponse, error) {
+		return types.HijackedResponse{}, errors.New("attach refused: daemon unhealthy")
+	}
+
+	p := NewDockerProvider(mock, newTestLogger())
+	sb := &agent.Sandbox{ID: "c1", Provider: "docker", WorkDir: "/workspace", HomeDir: "/home/sandbox"}
+
+	h, err := p.StartInteractiveCommand(context.Background(), sb, agent.InteractiveCommandSpec{
+		Cmd:              "agent",
+		CancellationSpec: agent.DefaultCancellationSpec,
+	})
+	require.Error(t, err, "attach failure must be surfaced")
+	require.Nil(t, h, "no handle should be returned on attach failure")
+	require.Contains(t, err.Error(), "attach interactive exec",
+		"attach error should be wrapped with attribution")
+}
+
+// TestDockerHandle_Kill_ShimSendsSIGKILL covers the Kill escalation path:
+// after Interrupt's grace window, Kill must exec-send SIGKILL to the
+// pidfile-tracked child rather than only closing the local connection.
+func TestDockerHandle_Kill_ShimSendsSIGKILL(t *testing.T) {
+	t.Parallel()
+
+	var execCmds []string
+	var mu sync.Mutex
+	mock := &mockDockerClient{}
+	mock.containerExecCreateFn = func(ctx context.Context, containerID string, config container.ExecOptions) (container.ExecCreateResponse, error) {
+		mu.Lock()
+		execCmds = append(execCmds, config.Cmd[2])
+		mu.Unlock()
+		return container.ExecCreateResponse{ID: "exec-1"}, nil
+	}
+	mock.containerExecAttachFn = func(ctx context.Context, execID string, config container.ExecAttachOptions) (types.HijackedResponse, error) {
+		return newMockHijackedResponse(""), nil
+	}
+	mock.containerExecInspectFn = func(ctx context.Context, execID string) (container.ExecInspect, error) {
+		return container.ExecInspect{ExitCode: 0}, nil
+	}
+
+	p := NewDockerProvider(mock, newTestLogger())
+	sb := &agent.Sandbox{ID: "c1", Provider: "docker", WorkDir: "/workspace", HomeDir: "/home/sandbox"}
+
+	h, err := p.StartInteractiveCommand(context.Background(), sb, agent.InteractiveCommandSpec{
+		Cmd:              "agent",
+		CancellationSpec: agent.DefaultCancellationSpec,
+	})
+	require.NoError(t, err)
+
+	require.NoError(t, h.Kill(context.Background()))
+
+	mu.Lock()
+	defer mu.Unlock()
+	var sawSIGKILL bool
+	for _, cmd := range execCmds {
+		if strings.Contains(cmd, "kill -KILL") {
+			sawSIGKILL = true
+			break
+		}
+	}
+	require.True(t, sawSIGKILL,
+		"Kill on a shim handle must exec-send SIGKILL to the pidfile-tracked child, not just close the connection")
 }
 
 func TestDockerProvider_ConnectionInfo(t *testing.T) {

@@ -1,6 +1,7 @@
 package agent_test
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -31,8 +32,8 @@ func newFakeHandle() *fakeHandle {
 }
 
 func (h *fakeHandle) ID() string                               { return "fake-handle" }
-func (h *fakeHandle) Stdout() io.Reader                        { return io.LimitReader(nil, 0) }
-func (h *fakeHandle) Stderr() io.Reader                        { return io.LimitReader(nil, 0) }
+func (h *fakeHandle) Stdout() io.Reader                        { return bytes.NewReader(nil) }
+func (h *fakeHandle) Stderr() io.Reader                        { return bytes.NewReader(nil) }
 func (h *fakeHandle) WriteInput(context.Context, []byte) error { return nil }
 func (h *fakeHandle) CloseInput(context.Context) error         { return nil }
 
@@ -237,6 +238,5 @@ func TestCancelRegistry_HandleAttacher_AttachAndDetach(t *testing.T) {
 	}, 2*time.Second, 10*time.Millisecond)
 }
 
-// Compile-time guard so the deprecated provider Exec path stays test-importable
-// alongside the handle-based registry.
-var _ = io.Discard
+// Compile-time check that fakeHandle satisfies the public handle contract.
+var _ agent.InteractiveCommandHandle = (*fakeHandle)(nil)

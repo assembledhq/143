@@ -58,6 +58,30 @@ func TestResolveCancellationSpec_RuntimeProfileWins(t *testing.T) {
 	require.Equal(t, agent.CancellationMethodEscape, spec.Method, "ResolveCancellationSpec should honor RuntimeProfileProvider")
 }
 
+// testAdapterBothProviders implements both RuntimeProfileProvider and the
+// older CancellationSpecProvider with conflicting values. The new path must
+// win so adapters can express cancellation once via their full runtime
+// profile without legacy hooks shadowing it.
+type testAdapterBothProviders struct{ testAdapterDefaultCancel }
+
+func (testAdapterBothProviders) RuntimeProfile() agent.AgentRuntimeProfile {
+	return agent.AgentRuntimeProfile{
+		Cancellation: agent.CancellationSpec{Method: agent.CancellationMethodEscape},
+	}
+}
+
+func (testAdapterBothProviders) CancellationSpec() agent.CancellationSpec {
+	return agent.CancellationSpec{Method: agent.CancellationMethodCtrlC}
+}
+
+func TestResolveCancellationSpec_RuntimeProfileBeatsLegacyProvider(t *testing.T) {
+	t.Parallel()
+
+	spec := agent.ResolveCancellationSpec(testAdapterBothProviders{})
+	require.Equal(t, agent.CancellationMethodEscape, spec.Method,
+		"RuntimeProfileProvider must win over the legacy CancellationSpecProvider when both are implemented")
+}
+
 func TestResolveRuntimeProfile_DefaultsToCtrlCNoTTY(t *testing.T) {
 	t.Parallel()
 
