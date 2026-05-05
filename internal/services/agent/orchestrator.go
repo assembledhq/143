@@ -1608,6 +1608,10 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 	}()
 	if o.nodeID != "" {
 		if err := o.sessions.SetWorkerNodeIDForContainer(ctx, run.OrgID, run.ID, sandbox.ID, o.nodeID); err != nil {
+			log.Error().Err(err).
+				Str("container_id", sandbox.ID).
+				Str("worker_node_id", o.nodeID).
+				Msg("persist session worker ownership: CAS failed (container_id moved or worker_node_id held by another worker)")
 			o.failRun(ctx, run, fmt.Sprintf("persist session worker ownership: %s", err))
 			return fmt.Errorf("persist session worker ownership: %w", err)
 		}
@@ -2435,6 +2439,10 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	}()
 	if o.nodeID != "" {
 		if err := o.sessions.SetWorkerNodeIDForContainer(ctx, session.OrgID, session.ID, sandbox.ID, o.nodeID); err != nil {
+			log.Error().Err(err).
+				Str("container_id", sandbox.ID).
+				Str("worker_node_id", o.nodeID).
+				Msg("persist session worker ownership: CAS failed (container_id moved or worker_node_id held by another worker)")
 			if revertErr := o.sessions.UpdateStatus(ctx, session.OrgID, session.ID, string(models.SessionStatusIdle)); revertErr != nil {
 				log.Error().Err(revertErr).Msg("failed to revert session to idle after worker ownership persistence failure")
 			}
