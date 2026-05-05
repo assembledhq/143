@@ -145,6 +145,14 @@ if [ "$ROLE" = "app" ] || [ "$ROLE" = "worker" ] || [ "$ROLE" = "logging" ]; the
   scp "${SCP_OPTS[@]}" "$PROJECT_DIR/deploy/vector.yaml" deploy@"$HOST":/opt/143/deploy/
 fi
 if [ "$ROLE" = "logging" ]; then
+  # Older logging hosts may have root-owned vmalert/grafana dirs from a prior
+  # provision step; without ownership the deploy user can't unlink the entries
+  # in `rm -rf` below. Mirror the worker pattern: try a non-interactive sudo
+  # chown (narrowly granted in deploy/scripts/bootstrap.sh), tolerate failure
+  # so the rm still runs on hosts where files are already deploy-owned.
+  ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
+    "sudo -n chown -R deploy:deploy /opt/143/deploy/vmalert 2>&1 | sed 's/^/  chown: /' || true; \
+     sudo -n chown -R deploy:deploy /opt/143/deploy/grafana 2>&1 | sed 's/^/  chown: /' || true"
   ssh "${SSH_OPTS[@]}" deploy@"$HOST" "rm -rf /opt/143/deploy/grafana/provisioning /opt/143/deploy/vmalert/rules && mkdir -p /opt/143/deploy/grafana /opt/143/deploy/vmalert"
   scp -r "${SCP_OPTS[@]}" "$PROJECT_DIR/deploy/grafana/provisioning" deploy@"$HOST":/opt/143/deploy/grafana/
   scp -r "${SCP_OPTS[@]}" "$PROJECT_DIR/deploy/vmalert/rules" deploy@"$HOST":/opt/143/deploy/vmalert/
