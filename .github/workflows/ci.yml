@@ -99,6 +99,9 @@ jobs:
         with:
           go-version: ${{ env.GO_VERSION }}
 
+      - name: Download Go modules
+        run: go mod download
+
       - name: Run go vet and migrations
         run: |
           go run cmd/migrate/main.go up
