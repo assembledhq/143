@@ -50,7 +50,7 @@ import { getCountForTab, renderCount } from "@/lib/session-counts";
 const statusConfig: Record<string, { dot: string; text: string; bg: string; label: string }> = {
   pending: { dot: "bg-muted-foreground/50", text: "text-muted-foreground", bg: "bg-muted", label: "Pending" },
   running: { dot: "bg-primary", text: "text-primary", bg: "bg-primary/10", label: "Running" },
-  idle: { dot: "bg-sky-500", text: "text-sky-700 dark:text-sky-400", bg: "bg-sky-50 dark:bg-sky-950/30", label: "Idle" },
+  idle: { dot: "bg-primary", text: "text-primary", bg: "bg-primary/10", label: "Idle" },
   awaiting_input: { dot: "bg-amber-500", text: "text-amber-700 dark:text-amber-400", bg: "bg-amber-50 dark:bg-amber-950/30", label: "Awaiting input" },
   needs_human_guidance: { dot: "bg-orange-500", text: "text-orange-700 dark:text-orange-400", bg: "bg-orange-50 dark:bg-orange-950/30", label: "Needs guidance" },
   completed: { dot: "bg-emerald-500", text: "text-emerald-700 dark:text-emerald-400", bg: "bg-emerald-50 dark:bg-emerald-950/30", label: "Completed" },
