@@ -693,7 +693,7 @@ describe('SessionSidebar', () => {
     );
   });
 
-  it('keeps the session details button pinned on the right and makes left-side pills horizontally scrollable', async () => {
+  it('uses the full row width for the session link and keeps the metadata pills horizontally scrollable', async () => {
     serveSessions([
       makeSession({
         id: 's1',
@@ -712,10 +712,12 @@ describe('SessionSidebar', () => {
 
     await screen.findByText('Overflow session');
 
-    const detailsButton = screen.getByRole('link', { name: 'Open session details for Overflow session' });
-    expect(detailsButton.className).toContain('shrink-0');
-    expect(detailsButton.className).toContain('self-center');
-    expect(detailsButton).toHaveAttribute(
+    expect(screen.queryByRole('link', { name: 'Open session details for Overflow session' })).not.toBeInTheDocument();
+
+    const rowLink = screen.getByText('Overflow session').closest('a');
+    expect(rowLink).not.toBeNull();
+    expect(rowLink).toHaveClass('flex-1');
+    expect(rowLink).toHaveAttribute(
       'href',
       '/sessions/s1?people=all&status=active&repo=repo-1&search=Overflow',
     );

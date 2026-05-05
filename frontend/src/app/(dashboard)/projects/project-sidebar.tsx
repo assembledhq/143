@@ -258,9 +258,9 @@ export function ProjectSidebar() {
               actionIcon={isArchived ? <ArchiveRestore className="h-4 w-4" /> : <Archive className="h-4 w-4" />}
               onAction={() => {
                 if (isArchived) {
-                  unarchiveMutation.mutate(project.id);
+                  return unarchiveMutation.mutateAsync(project.id);
                 } else {
-                  archiveMutation.mutate(project.id);
+                  return archiveMutation.mutateAsync(project.id);
                 }
               }}
             >

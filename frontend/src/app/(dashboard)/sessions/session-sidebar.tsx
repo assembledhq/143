@@ -2,7 +2,7 @@
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { notify as toast } from "@/lib/notify";
-import { Archive, ArchiveRestore, PanelRightOpen, Plus, Search } from "lucide-react";
+import { Archive, ArchiveRestore, Plus, Search } from "lucide-react";
 import Link from "next/link";
 import { usePathname, useSelectedLayoutSegment } from "next/navigation";
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -499,24 +499,23 @@ export function SessionSidebar() {
               actionIcon={isArchived ? <ArchiveRestore className="h-4 w-4" /> : <Archive className="h-4 w-4" />}
               onAction={() => {
                 if (isArchived) {
-                  unarchiveMutation.mutate(session.id);
+                  return unarchiveMutation.mutateAsync(session.id);
                 } else {
-                  archiveMutation.mutate(session.id);
+                  return archiveMutation.mutateAsync(session.id);
                 }
               }}
             >
-              <div className="flex items-stretch gap-1.5 min-w-0">
-                <Link
-                  href={sessionHref}
-                  aria-current={isSelected ? "page" : undefined}
-                  className={cn(
-                    "block min-w-0 flex-1 rounded-lg border border-border/50 bg-background px-3 py-2.5 shadow-sm transition-all duration-150 md:border-transparent md:bg-muted/30 md:shadow-none",
-                    isSelected
-                      ? "border-border/60 bg-background shadow-sm md:border-border/60 md:bg-background md:shadow-sm"
-                      : "hover:border-border/60 hover:bg-background md:hover:border-transparent md:hover:bg-background/60"
-                  )}
-                >
-                  <div className="flex items-start gap-2.5 min-w-0">
+              <Link
+                href={sessionHref}
+                aria-current={isSelected ? "page" : undefined}
+                className={cn(
+                  "block min-w-0 flex-1 rounded-lg border border-border/50 bg-background px-3 py-2.5 shadow-sm transition-all duration-150 md:border-transparent md:bg-muted/30 md:shadow-none",
+                  isSelected
+                    ? "border-border/60 bg-background shadow-sm md:border-border/60 md:bg-background md:shadow-sm"
+                    : "hover:border-border/60 hover:bg-background md:hover:border-transparent md:hover:bg-background/60"
+                )}
+              >
+                <div className="flex items-start gap-2.5 min-w-0">
                   {/* Unread / working indicator */}
                   <div className="mt-1.5 shrink-0">
                     {isWorkingSession ? (
@@ -568,26 +567,8 @@ export function SessionSidebar() {
                       </p>
                     )}
                   </div>
-                  </div>
-                </Link>
-                <Button
-                  asChild
-                  variant="ghost"
-                  size="icon-sm"
-                  className={cn(
-                    "shrink-0 self-center rounded-lg border border-border/50 bg-background text-muted-foreground shadow-sm hover:text-foreground md:border-transparent md:bg-muted/30 md:shadow-none md:self-start",
-                    isSelected && "border-border/60 bg-background text-foreground md:border-border/60 md:bg-background md:shadow-sm",
-                  )}
-                >
-                  <Link
-                    href={sessionHref}
-                    aria-label={`Open session details for ${title}`}
-                    title="Open session details"
-                  >
-                    <PanelRightOpen className="h-4 w-4" />
-                  </Link>
-                </Button>
-              </div>
+                </div>
+              </Link>
             </SwipeActionRow>
           );
         })}
