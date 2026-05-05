@@ -19,6 +19,7 @@ vi.mock('next/link', () => ({
 
 let mockPathname = '/sessions';
 let mockSelectedSegment: string | null = null;
+const mockRouterPush = vi.fn();
 const mockAuthState: {
   isAuthenticated: boolean;
   user: { id: string } | null;
@@ -32,7 +33,7 @@ const mockAuthState: {
 };
 
 vi.mock('next/navigation', () => ({
-  useRouter: () => ({ push: vi.fn(), replace: vi.fn(), back: vi.fn() }),
+  useRouter: () => ({ push: mockRouterPush, replace: vi.fn(), back: vi.fn() }),
   useSearchParams: () => new URLSearchParams(),
   usePathname: () => mockPathname,
   useSelectedLayoutSegment: () => mockSelectedSegment,
@@ -121,6 +122,7 @@ describe('SessionSidebar', () => {
   beforeEach(() => {
     mockPathname = '/sessions';
     mockSelectedSegment = null;
+    mockRouterPush.mockReset();
     mockOptimisticSessions.length = 0;
     mockAuthState.isAuthenticated = true;
     mockAuthState.user = { id: 'user-1' };
@@ -230,6 +232,30 @@ describe('SessionSidebar', () => {
       'md:group-hover:opacity-100',
       'md:focus-visible:opacity-100',
     );
+  });
+
+  it('navigates when the selected row shell is tapped', async () => {
+    mockSelectedSegment = 's1';
+    serveSessions([
+      makeSession({ id: 's1', result_summary: 'Selected session' }),
+    ]);
+
+    renderWithProviders(<SessionSidebar />);
+
+    await screen.findByText('Selected session');
+    const selectedLink = document.querySelector('a[aria-current="page"]') as HTMLAnchorElement | null;
+    expect(selectedLink).not.toBeNull();
+    if (!selectedLink) {
+      throw new Error('expected selected session link to be present');
+    }
+    const selectedRow = selectedLink.parentElement;
+
+    expect(selectedLink).toHaveAttribute('aria-current', 'page');
+    expect(selectedRow).toHaveClass('rounded-xl', 'border', 'border-primary/20', 'bg-background', 'shadow-sm');
+
+    fireEvent.click(selectedRow!);
+
+    expect(mockRouterPush).toHaveBeenCalledWith('/sessions/s1');
   });
 
   it('clears search on Escape key', async () => {
@@ -643,16 +669,37 @@ describe('SessionSidebar', () => {
 
     const selectedLink = screen.getByText('Selected session').closest('a');
     const unselectedLink = screen.getByText('Other session').closest('a');
+    const selectedRow = selectedLink?.parentElement;
     expect(selectedLink?.className).toContain('bg-primary/5');
-    expect(selectedLink?.className).toContain('border-primary/20');
-    expect(selectedLink?.className).toContain('ring-1');
-    expect(selectedLink?.className).toContain('ring-primary/15');
-    expect(selectedLink?.className).toContain('shadow-sm');
     expect(selectedLink?.className).toContain('md:bg-primary/5');
-    expect(selectedLink?.className).toContain('md:shadow-sm');
-    expect(selectedLink?.className).toContain('md:border-primary/20');
+    expect(selectedLink?.className).toContain('border-transparent');
+    expect(selectedLink?.className).toContain('shadow-none');
+    expect(selectedLink?.className).toContain('ring-0');
+    expect(selectedRow?.className).toContain('rounded-xl');
+    expect(selectedRow?.className).toContain('border-primary/20');
+    expect(selectedRow?.className).toContain('ring-1');
+    expect(selectedRow?.className).toContain('ring-primary/10');
+    expect(selectedRow?.className).toContain('shadow-sm');
     expect(selectedLink).toHaveAttribute('aria-current', 'page');
     expect(unselectedLink?.className).not.toContain('bg-primary/5');
+  });
+
+  it('reserves the same selected-shell layout for unselected rows', async () => {
+    mockSelectedSegment = 's1';
+    serveSessions([
+      makeSession({ id: 's1', result_summary: 'Selected session' }),
+      makeSession({ id: 's2', result_summary: 'Other session' }),
+    ]);
+
+    renderWithProviders(<SessionSidebar />);
+    await screen.findByText('Selected session');
+
+    const selectedRow = screen.getByText('Selected session').closest('a')?.parentElement;
+    const unselectedRow = screen.getByText('Other session').closest('a')?.parentElement;
+
+    expect(selectedRow).toHaveClass('border', 'p-1', 'gap-1.5');
+    expect(selectedRow).toHaveClass('border-primary/20');
+    expect(unselectedRow).toHaveClass('border', 'border-transparent', 'p-1', 'gap-1.5');
   });
 
   it('highlights the selected session from the active layout segment', async () => {
@@ -667,14 +714,17 @@ describe('SessionSidebar', () => {
     await screen.findByText('Selected via pathname');
 
     const selectedLink = screen.getByText('Selected via pathname').closest('a');
+    const selectedRow = selectedLink?.parentElement;
     expect(selectedLink?.className).toContain('bg-primary/5');
-    expect(selectedLink?.className).toContain('border-primary/20');
-    expect(selectedLink?.className).toContain('ring-1');
-    expect(selectedLink?.className).toContain('ring-primary/15');
-    expect(selectedLink?.className).toContain('shadow-sm');
     expect(selectedLink?.className).toContain('md:bg-primary/5');
-    expect(selectedLink?.className).toContain('md:shadow-sm');
-    expect(selectedLink?.className).toContain('md:border-primary/20');
+    expect(selectedLink?.className).toContain('border-transparent');
+    expect(selectedLink?.className).toContain('shadow-none');
+    expect(selectedLink?.className).toContain('ring-0');
+    expect(selectedRow?.className).toContain('rounded-xl');
+    expect(selectedRow?.className).toContain('border-primary/20');
+    expect(selectedRow?.className).toContain('ring-1');
+    expect(selectedRow?.className).toContain('ring-primary/10');
+    expect(selectedRow?.className).toContain('shadow-sm');
     expect(selectedLink).toHaveAttribute('aria-current', 'page');
   });
 

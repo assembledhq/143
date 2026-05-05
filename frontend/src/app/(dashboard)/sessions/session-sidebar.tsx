@@ -4,7 +4,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { notify as toast } from "@/lib/notify";
 import { Archive, ArchiveRestore, PanelRightOpen, Plus, Search } from "lucide-react";
 import Link from "next/link";
-import { usePathname, useSelectedLayoutSegment } from "next/navigation";
+import { usePathname, useRouter, useSelectedLayoutSegment } from "next/navigation";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useQueryState, parseAsString } from "nuqs";
 import { PeopleFilter } from "@/components/people-filter";
@@ -171,6 +171,7 @@ function OptimisticSessionRow({ session }: { session: OptimisticSession }) {
 // ---------------------------------------------------------------------------
 
 export function SessionSidebar() {
+  const router = useRouter();
   const pathname = usePathname();
   const selectedSegment = useSelectedLayoutSegment();
   const queryClient = useQueryClient();
@@ -506,14 +507,25 @@ export function SessionSidebar() {
                 }
               }}
             >
-              <div className="flex items-stretch gap-1.5 min-w-0">
+              <div
+                className={cn(
+                  "flex min-w-0 items-stretch gap-1.5 rounded-xl border border-transparent p-1 transition-all duration-150",
+                  isSelected && "cursor-pointer border-primary/20 bg-background shadow-sm ring-1 ring-primary/10",
+                )}
+                onClick={(event) => {
+                  if (!isSelected || event.defaultPrevented || event.target !== event.currentTarget) {
+                    return;
+                  }
+                  router.push(sessionHref);
+                }}
+              >
                 <Link
                   href={sessionHref}
                   aria-current={isSelected ? "page" : undefined}
                   className={cn(
                     "relative block min-w-0 flex-1 overflow-hidden rounded-lg border border-border/50 bg-background px-3 py-2.5 shadow-sm transition-all duration-150 md:border-transparent md:bg-muted/30 md:shadow-none",
                     isSelected
-                      ? "border-primary/20 bg-primary/5 ring-1 ring-primary/15 shadow-sm md:border-primary/20 md:bg-primary/5 md:shadow-sm"
+                      ? "border-transparent bg-primary/5 shadow-none ring-0 md:border-transparent md:bg-primary/5 md:shadow-none"
                       : "hover:border-border/60 hover:bg-background md:hover:border-transparent md:hover:bg-background/60"
                   )}
                 >
@@ -584,7 +596,7 @@ export function SessionSidebar() {
                   size="icon-sm"
                   className={cn(
                     "shrink-0 self-center rounded-lg border border-border/50 bg-background text-muted-foreground shadow-sm hover:text-foreground md:border-transparent md:bg-muted/30 md:shadow-none md:self-start",
-                    isSelected && "border-primary/20 bg-primary/5 text-foreground ring-1 ring-primary/15 md:border-primary/20 md:bg-primary/5 md:shadow-sm",
+                    isSelected && "border-transparent bg-primary/5 text-foreground shadow-none ring-0 md:border-transparent md:bg-primary/5 md:shadow-none",
                   )}
                 >
                   <Link
