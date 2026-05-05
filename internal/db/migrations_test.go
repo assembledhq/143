@@ -81,3 +81,23 @@ func TestCodingCredentialsSchemaDeclaresTeamDefaultMarker(t *testing.T) {
 	require.Contains(t, sql, "chk_coding_credentials_team_default_marker",
 		"schema must constrain the marker column to org-scoped rows")
 }
+
+func TestAutomationsGoalLengthMigrationRaisesConstraint(t *testing.T) {
+	t.Parallel()
+
+	body, err := os.ReadFile("../../migrations/000114_automation_goal_length.down.sql")
+	require.NoError(t, err, "test should read the automation goal length down migration")
+	downSQL := string(body)
+	require.Contains(t, downSQL, "DROP CONSTRAINT IF EXISTS chk_automations_goal_length",
+		"down migration should remove the current goal-length check before restoring the old one")
+	require.Contains(t, downSQL, "char_length(goal) BETWEEN 1 AND 4000",
+		"down migration should restore the previous 4000-character cap")
+
+	body, err = os.ReadFile("../../migrations/000114_automation_goal_length.up.sql")
+	require.NoError(t, err, "test should read the automation goal length up migration")
+	upSQL := string(body)
+	require.Contains(t, upSQL, "DROP CONSTRAINT IF EXISTS chk_automations_goal_length",
+		"up migration should replace the old goal-length check rather than stack another one")
+	require.Contains(t, upSQL, "char_length(goal) BETWEEN 1 AND 8000",
+		"up migration should raise the automation goal cap to 8000 characters")
+}

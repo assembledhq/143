@@ -22,7 +22,9 @@ import { PageHeader } from "@/components/page-header";
 import { BranchPicker } from "@/components/branch-picker";
 import { AutomationModelSelect } from "@/components/automation-model-select";
 import { api } from "@/lib/api";
+import { AUTOMATION_GOAL_MAX_LENGTH, automationGoalLengthState } from "@/lib/automation-validation";
 import type { Automation } from "@/lib/types";
+import { cn } from "@/lib/utils";
 import { AutomationStatsCard } from "./automation-stats-card";
 import { RunsTab } from "./runs-tab";
 import {
@@ -65,6 +67,7 @@ function SettingsTab({ automation }: { automation: Automation }) {
   const detectedTimezone = useMemo(() => browserTimezone(), []);
   const [baseBranch, setBaseBranch] = useState(automation.base_branch);
   const [model, setModel] = useState<string | undefined>(automation.model_override);
+  const goalLength = automationGoalLengthState(goal);
 
   const updateMutation = useMutation({
     mutationFn: () =>
@@ -91,8 +94,28 @@ function SettingsTab({ automation }: { automation: Automation }) {
         <Input id="name" value={name} onChange={(e) => setName(e.target.value)} />
       </div>
       <div className="space-y-1.5">
-        <Label htmlFor="goal">Goal</Label>
-        <Textarea id="goal" value={goal} onChange={(e) => setGoal(e.target.value)} rows={3} />
+        <div className="flex items-center justify-between gap-3">
+          <Label htmlFor="goal">Goal</Label>
+          <span
+            className={cn(
+              "text-xs tabular-nums",
+              goalLength.isTooLong ? "text-destructive" : "text-muted-foreground",
+            )}
+          >
+            {goalLength.countText}
+          </span>
+        </div>
+        <Textarea
+          id="goal"
+          value={goal}
+          onChange={(e) => setGoal(e.target.value)}
+          rows={3}
+          maxLength={AUTOMATION_GOAL_MAX_LENGTH}
+          aria-invalid={goalLength.isTooLong}
+        />
+        <p className={cn("text-xs", goalLength.isTooLong ? "text-destructive" : "text-muted-foreground")}>
+          {goalLength.message ?? `Up to ${AUTOMATION_GOAL_MAX_LENGTH} characters.`}
+        </p>
       </div>
       <div className="space-y-1.5">
         <Label htmlFor="scope">
@@ -200,7 +223,7 @@ function SettingsTab({ automation }: { automation: Automation }) {
       <div className="flex items-center gap-3 pt-2">
         <Button
           onClick={() => updateMutation.mutate()}
-          disabled={updateMutation.isPending}
+          disabled={updateMutation.isPending || goalLength.isTooLong}
         >
           {updateMutation.isPending && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
           Save changes
