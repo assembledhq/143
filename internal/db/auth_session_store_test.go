@@ -330,13 +330,16 @@ func TestSessionStore_Create(t *testing.T) {
 	generatedID := uuid.New()
 
 	issueID := uuid.New()
+	orgID := uuid.New()
+	modelOverride := "opus-4-7"
 	run := &models.Session{
 		PrimaryIssueID: &issueID,
-		OrgID:          uuid.New(),
+		OrgID:          orgID,
 		AgentType:      "claude_code",
 		Status:         "pending",
 		AutonomyLevel:  "supervised",
 		TokenMode:      "low",
+		ModelOverride:  &modelOverride,
 	}
 
 	mock.ExpectBegin()
@@ -352,6 +355,14 @@ func TestSessionStore_Create(t *testing.T) {
 			pgxmock.NewRows([]string{"id", "created_at", "last_activity_at"}).
 				AddRow(generatedID, now, now),
 		)
+	// Pin the seeded primary thread's args so a regression that swaps fields
+	// (e.g. status defaulted to 'pending', or label hard-coded to the agent
+	// name) is caught by this test instead of slipping through under
+	// AnyArg() matchers. Order mirrors the named-args block in
+	// SessionStore.Create.
+	mock.ExpectExec("INSERT INTO session_threads").
+		WithArgs(generatedID, orgID, models.AgentType("claude_code"), &modelOverride, "Main", models.ThreadStatusIdle).
+		WillReturnResult(pgxmock.NewResult("INSERT", 1))
 	mock.ExpectExec("INSERT INTO session_issue_links").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("INSERT", 1))
@@ -399,6 +410,9 @@ func TestSessionStore_Create_AllowsNilIssueID(t *testing.T) {
 			pgxmock.NewRows([]string{"id", "created_at", "last_activity_at"}).
 				AddRow(generatedID, now, now),
 		)
+	mock.ExpectExec("INSERT INTO session_threads").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("INSERT", 1))
 	mock.ExpectCommit()
 
 	err = store.Create(context.Background(), run)
@@ -443,6 +457,9 @@ func TestSessionStore_Create_RollsBackWhenPrimaryLinkInsertFails(t *testing.T) {
 			pgxmock.NewRows([]string{"id", "created_at", "last_activity_at"}).
 				AddRow(generatedID, now, now),
 		)
+	mock.ExpectExec("INSERT INTO session_threads").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("INSERT", 1))
 	mock.ExpectExec("INSERT INTO session_issue_links").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnError(context.DeadlineExceeded)
