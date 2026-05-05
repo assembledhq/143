@@ -1,4 +1,9 @@
 apiVersion: 1
+
+deleteDatasources:
+  - name: VictoriaLogs
+    orgId: 1
+
 datasources:
   - name: VictoriaLogs
     uid: victorialogs
