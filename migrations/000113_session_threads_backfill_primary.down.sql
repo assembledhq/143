@@ -4,6 +4,12 @@
 -- alone, since deleting "Main" out from under them would orphan transcript
 -- and file-event rows that point at this thread_id.
 --
+-- FK behaviour: session_messages.thread_id and session_logs.thread_id are
+-- both `ON DELETE SET NULL` (migration 000045_fk_cascade_and_nullable), so
+-- the rows the up migration reattributed to the seeded primary will revert
+-- to NULL thread_id — i.e. exactly the legacy state from before the up
+-- migration ran. No transcript or log rows are deleted.
+--
 -- Caveat: the Add-Tab dialog lets users override the auto-generated label,
 -- so a user-created tab labeled "Main" on a single-tab session would be
 -- swept up by this DELETE. This is a deliberate trade-off for migration

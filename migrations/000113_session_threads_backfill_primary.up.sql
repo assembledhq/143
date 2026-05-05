@@ -12,6 +12,14 @@
 -- The seeded row mirrors the session's agent_type and model_override so the
 -- "primary" tab matches the agent the session was started under. Status is
 -- 'idle' to match migration 108's default for never-run threads.
+--
+-- Rolling-deploy note: during the window where this migration has run but
+-- the matching app change has not, an old app pod can still create a
+-- thread-less session. That degrades gracefully — the worker run_agent
+-- handler falls back to ListBySession() and runs the session with NULL
+-- thread attribution (the pre-PR behaviour). New pods enforce the
+-- invariant; any leftover thread-less sessions can be cleaned up by
+-- re-running the INSERT below after the deploy settles.
 
 INSERT INTO session_threads (session_id, org_id, agent_type, model_override, label, status, current_turn, last_activity_at, started_at, completed_at)
 SELECT

@@ -1776,11 +1776,9 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 		}
 		o.failRun(ctx, run, err.Error())
 		logAgentRunFailed(log, run, err, "failed", runStartedAt, nil)
-		if primaryThreadID != nil && o.sessionThreads != nil {
-			if threadErr := o.sessionThreads.UpdateStatus(ctx, run.OrgID, *primaryThreadID, models.ThreadStatusFailed); threadErr != nil {
-				log.Warn().Err(threadErr).Str("thread_id", primaryThreadID.String()).Msg("failed to mark primary thread failed")
-			}
-		}
+		o.updatePrimaryThreadTerminal(ctx, run, models.ThreadStatusFailed, &models.SessionResult{
+			Error: strPtr(err.Error()),
+		}, log)
 		o.enqueueJob(ctx, run.OrgID, "agent", "analyze_failure", map[string]interface{}{
 			"session_id": run.ID.String(),
 			"org_id":     run.OrgID.String(),
@@ -3185,6 +3183,10 @@ func (o *Orchestrator) failTimedOutSession(run *models.Session, elapsed time.Dur
 			"Retry the session — transient slowness (LLM latency, git clone) may have pushed the run over the edge",
 		},
 	)
+	o.updatePrimaryThreadTerminal(cleanupCtx, run, models.ThreadStatusFailed, &models.SessionResult{
+		Error:           &explanation,
+		FailureCategory: strPtr(FailureCategoryTimeout),
+	}, log)
 }
 
 // ensureCodexAuth injects Codex auth credentials into the sandbox, failing the
@@ -3666,11 +3668,18 @@ func (o *Orchestrator) handleCancelledSession(ctx context.Context, session *mode
 		if err := o.sessions.UpdateTurnComplete(bgCtx, session.OrgID, session.ID, turnNumber, nil, agentSessionID, snapshotKey); err != nil {
 			log.Warn().Err(err).Msg("failed to return cancelled session to idle")
 			_ = o.sessions.UpdateStatus(bgCtx, session.OrgID, session.ID, string(models.SessionStatusCancelled))
+			o.updatePrimaryThreadTerminal(bgCtx, session, models.ThreadStatusCancelled, nil, log)
 		} else {
 			log.Info().Int("turn", turnNumber).Msg("cancelled session returned to idle")
+			if o.sessionThreads != nil && session.PrimaryThreadID != nil && *session.PrimaryThreadID != uuid.Nil {
+				if threadErr := o.sessionThreads.CompleteTurn(bgCtx, session.OrgID, *session.PrimaryThreadID, turnNumber, agentSessionID); threadErr != nil {
+					log.Warn().Err(threadErr).Str("thread_id", session.PrimaryThreadID.String()).Msg("failed to return primary thread to idle after cancel")
+				}
+			}
 		}
 	} else {
 		_ = o.sessions.UpdateStatus(bgCtx, session.OrgID, session.ID, string(models.SessionStatusCancelled))
+		o.updatePrimaryThreadTerminal(bgCtx, session, models.ThreadStatusCancelled, nil, log)
 	}
 }
 
@@ -3786,6 +3795,10 @@ func (o *Orchestrator) handlePolicyStoppedSession(ctx context.Context, session *
 
 	errMsg, explanation, nextSteps := gracefulStopFailure(reason, snapshotKey != "", session.SnapshotKey != nil && *session.SnapshotKey != "")
 	o.failRunWithCategory(bgCtx, session, errMsg, FailureCategoryTimeout, explanation, nextSteps)
+	o.updatePrimaryThreadTerminal(bgCtx, session, models.ThreadStatusFailed, &models.SessionResult{
+		Error:           &explanation,
+		FailureCategory: strPtr(FailureCategoryTimeout),
+	}, log)
 }
 
 func gracefulStopFailure(reason StopReason, checkpointedThisTurn, hadPriorCheckpoint bool) (string, string, []string) {
@@ -3884,6 +3897,32 @@ func strPtr(s string) *string {
 		return nil
 	}
 	return &s
+}
+
+// updatePrimaryThreadTerminal mirrors a session-level terminal transition onto
+// the seeded primary thread row. When result is non-nil, it persists the same
+// failure_explanation / failure_category / result_summary / diff the session
+// got so per-thread review surfaces (Phase 2) have data to display; when nil,
+// it just transitions the status (e.g. cancel without a result payload). All
+// errors are logged best-effort because this is bookkeeping — a failure here
+// must not abort the surrounding session-level cleanup.
+func (o *Orchestrator) updatePrimaryThreadTerminal(ctx context.Context, run *models.Session, status models.ThreadStatus, result *models.SessionResult, log zerolog.Logger) {
+	if o.sessionThreads == nil || run == nil || run.PrimaryThreadID == nil || *run.PrimaryThreadID == uuid.Nil {
+		return
+	}
+	threadID := *run.PrimaryThreadID
+	var err error
+	if result != nil {
+		err = o.sessionThreads.UpdateResult(ctx, run.OrgID, threadID, status, result)
+	} else {
+		err = o.sessionThreads.UpdateStatus(ctx, run.OrgID, threadID, status)
+	}
+	if err != nil {
+		log.Warn().Err(err).
+			Str("thread_id", threadID.String()).
+			Str("status", string(status)).
+			Msg("failed to update primary thread terminal status")
+	}
 }
 
 func timePtr(t time.Time) *time.Time {

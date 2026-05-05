@@ -391,9 +391,10 @@ func TestSessionStore_Create_AllowsNilIssueID(t *testing.T) {
 	store := NewSessionStore(mock)
 	now := time.Now()
 	generatedID := uuid.New()
+	orgID := uuid.New()
 
 	run := &models.Session{
-		OrgID:         uuid.New(),
+		OrgID:         orgID,
 		AgentType:     "claude_code",
 		Status:        "pending",
 		AutonomyLevel: "supervised",
@@ -413,8 +414,12 @@ func TestSessionStore_Create_AllowsNilIssueID(t *testing.T) {
 			pgxmock.NewRows([]string{"id", "created_at", "last_activity_at"}).
 				AddRow(generatedID, now, now),
 		)
+	// Pin the seeded primary thread args (label "Main", idle status, agent
+	// mirrored from the session, no model override) so a regression that
+	// changes any of these defaults is caught here as well as in the
+	// happy-path Create test.
 	mock.ExpectQuery("INSERT INTO session_threads").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WithArgs(generatedID, orgID, models.AgentType("claude_code"), (*string)(nil), "Main", models.ThreadStatusIdle).
 		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
 	mock.ExpectCommit()
 
@@ -437,10 +442,11 @@ func TestSessionStore_Create_RollsBackWhenPrimaryLinkInsertFails(t *testing.T) {
 	now := time.Now()
 	generatedID := uuid.New()
 	issueID := uuid.New()
+	orgID := uuid.New()
 
 	run := &models.Session{
 		PrimaryIssueID: &issueID,
-		OrgID:          uuid.New(),
+		OrgID:          orgID,
 		AgentType:      "claude_code",
 		Status:         "pending",
 		AutonomyLevel:  "supervised",
@@ -460,8 +466,11 @@ func TestSessionStore_Create_RollsBackWhenPrimaryLinkInsertFails(t *testing.T) {
 			pgxmock.NewRows([]string{"id", "created_at", "last_activity_at"}).
 				AddRow(generatedID, now, now),
 		)
+	// Pin the seeded primary thread args so a rollback regression that
+	// also corrupts the thread INSERT's defaults (label, status, mirrored
+	// agent_type) is caught here.
 	mock.ExpectQuery("INSERT INTO session_threads").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WithArgs(generatedID, orgID, models.AgentType("claude_code"), (*string)(nil), "Main", models.ThreadStatusIdle).
 		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
 	mock.ExpectExec("INSERT INTO session_issue_links").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
