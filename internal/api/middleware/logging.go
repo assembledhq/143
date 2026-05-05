@@ -3,6 +3,7 @@ package middleware
 import (
 	"encoding/json"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/assembledhq/143/internal/models"
@@ -74,6 +75,7 @@ func Logging(logger zerolog.Logger, reporter observability.Reporter) func(http.H
 			start := time.Now()
 			rw := &responseWriter{ResponseWriter: w, status: http.StatusOK}
 			next.ServeHTTP(rw, r)
+			duration := time.Since(start)
 
 			logEvent := logger.Info()
 			if rw.status >= http.StatusInternalServerError {
@@ -87,7 +89,9 @@ func Logging(logger zerolog.Logger, reporter observability.Reporter) func(http.H
 				Str("path", r.URL.Path).
 				Str("request_id", chiMiddleware.GetReqID(r.Context())).
 				Int("status", rw.status).
-				Dur("duration", time.Since(start))
+				Str("status_class", strconv.Itoa(rw.status/100)+"xx").
+				Dur("duration", duration).
+				Float64("duration_ms", observability.DurationMillis(duration))
 
 			if rw.status >= http.StatusBadRequest {
 				if rw.errorResponse != nil && rw.errorResponse.Error.Code != "" {

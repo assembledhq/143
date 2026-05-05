@@ -499,6 +499,7 @@ func main() {
 
 		recoveryLoop := cluster.NewRecoveryLoop(nodeManager, jobStore, logger, 90*time.Second, 100)
 		go recoveryLoop.Start(ctx, 30*time.Second)
+		go worker.RunQueueHealthSampler(ctx, jobStore, logger, time.Minute)
 
 		usageRollupStore := db.NewUsageRollupStore(pool)
 		reaperOpts := []agent.SessionReaperOption{
