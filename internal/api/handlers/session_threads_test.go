@@ -634,25 +634,37 @@ func TestSessionThreadHandler_SendThreadMessage(t *testing.T) {
 			expectedError: "NOT_FOUND",
 		},
 		{
-			name:           "thread not idle",
+			// Sending to a thread that is mid-turn now succeeds: the message
+			// is queued (created + pending_message_count incremented) and
+			// will be picked up when the in-flight turn completes. The
+			// composer never sees a NOT_IDLE bounce.
+			name:           "thread busy queues without enqueue",
 			sessionIDParam: sessionID.String(),
 			threadIDParam:  threadID.String(),
-			body:           `{"message":"continue"}`,
+			body:           `{"message":"please continue"}`,
 			setupDeps: func(deps *threadTestDeps) {
 				deps.threadStore.claimIdleFn = func(_ context.Context, _, _, _ uuid.UUID) (models.SessionThread, error) {
 					return models.SessionThread{}, fmt.Errorf("no rows")
 				}
 				deps.threadStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
 					return models.SessionThread{
-						ID:        threadID,
-						SessionID: sessionID,
-						OrgID:     orgID,
-						Status:    models.ThreadStatusRunning,
+						ID:          threadID,
+						SessionID:   sessionID,
+						OrgID:       orgID,
+						Status:      models.ThreadStatusRunning,
+						CurrentTurn: 1,
 					}, nil
 				}
+				deps.messageStore.createFn = func(_ context.Context, msg *models.SessionMessage) error {
+					msg.ID = 42
+					return nil
+				}
+				deps.jobStore.enqueueFn = func(_ context.Context, _ uuid.UUID, _, _ string, _ any, _ int, _ *string) (uuid.UUID, error) {
+					t.Fatalf("queue-only path must not enqueue")
+					return uuid.UUID{}, nil
+				}
 			},
-			expectedCode:  http.StatusConflict,
-			expectedError: "NOT_IDLE",
+			expectedCode: http.StatusCreated,
 		},
 		{
 			name:           "enqueue failure",
