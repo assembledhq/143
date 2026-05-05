@@ -217,6 +217,21 @@ describe('SessionSidebar', () => {
     });
   });
 
+  it('keeps the desktop archive action de-emphasized until hover or focus', async () => {
+    serveSessions([
+      makeSession({ id: 's1', result_summary: 'Full-width session row' }),
+    ]);
+
+    renderWithProviders(<SessionSidebar />);
+    await screen.findByText('Full-width session row');
+
+    expect(screen.getByRole('button', { name: 'Archive session' })).toHaveClass(
+      'md:opacity-0',
+      'md:group-hover:opacity-100',
+      'md:focus-visible:opacity-100',
+    );
+  });
+
   it('clears search on Escape key', async () => {
     serveSessions([
       makeSession({ id: 's1', result_summary: 'Alpha fix' }),

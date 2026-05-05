@@ -78,6 +78,7 @@ export function SwipeActionRow({
   onAction,
   children,
   className,
+  desktopActionVisibility = "always",
 }: {
   actionLabel: string;
   actionText: string;
@@ -85,6 +86,7 @@ export function SwipeActionRow({
   onAction: () => void;
   children: ReactNode;
   className?: string;
+  desktopActionVisibility?: "always" | "hover";
 }) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const dragRef = useRef<DragState | null>(null);
@@ -353,7 +355,11 @@ export function SwipeActionRow({
         size="icon-xs"
         aria-label={actionLabel}
         title={actionLabel}
-        className="absolute right-2 top-2 z-20 hidden border border-border/60 bg-background text-muted-foreground shadow-sm hover:text-foreground md:inline-flex"
+        className={cn(
+          "absolute right-2 top-2 z-20 hidden border border-border/60 bg-background text-muted-foreground shadow-sm hover:text-foreground md:inline-flex",
+          desktopActionVisibility === "hover" &&
+            "md:opacity-0 md:transition-opacity md:duration-150 md:group-hover:opacity-100 md:focus-visible:opacity-100",
+        )}
         onClick={(event) => {
           event.preventDefault();
           event.stopPropagation();
