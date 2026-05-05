@@ -392,9 +392,6 @@ export default function NewAutomationPage() {
                   value={model}
                   onValueChange={setModel}
                 />
-                <p className="text-xs text-muted-foreground">
-                  Auto uses your default automation agent. Choosing a model pins runs to that model&apos;s agent.
-                </p>
               </div>
               {showReasoningSelector ? (
                 <div className="space-y-1.5">

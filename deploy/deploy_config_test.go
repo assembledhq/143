@@ -1,7 +1,9 @@
 package deploy_test
 
 import (
+	"encoding/json"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -88,4 +90,114 @@ func TestWorkerProvisioningHandlesAddressingEdgeCases(t *testing.T) {
 	require.Contains(t, string(provisionScript), `worker-${WORKER_PRIVATE_IP//./-}`, "provision.sh's NODE_ID default should use the full dotted-to-dash IP so workers across multiple /24s don't collide on \"worker-<last-octet>\"")
 	require.NotContains(t, string(provisionScript), `worker-${WORKER_PRIVATE_IP##*.}`, "provision.sh should not fall back to the last-octet-only default — it collides across /24s")
 	require.Contains(t, string(provisionScript), "private IPv4 addresses on real interfaces", "provision.sh should detect multi-homed hosts and require the operator to set WORKER_PRIVATE_IP explicitly rather than silently picking a NIC")
+}
+
+func TestGrafanaProvisionedDashboardsUseValidDatasourcesAndRangeQueries(t *testing.T) {
+	t.Parallel()
+
+	dashboardFiles, err := os.ReadDir("../deploy/grafana/provisioning/dashboards")
+	require.NoError(t, err, "test should read provisioned dashboard directory")
+	dashboardNames := make(map[string]bool, len(dashboardFiles))
+	for _, dashboardFile := range dashboardFiles {
+		dashboardNames[dashboardFile.Name()] = true
+	}
+	require.True(t, dashboardNames["platform-health.json"], "platform health dashboard should be provisioned from the repo")
+
+	for _, dashboardFile := range dashboardFiles {
+		if dashboardFile.IsDir() || !strings.HasSuffix(dashboardFile.Name(), ".json") {
+			continue
+		}
+		rawDashboard, err := os.ReadFile("../deploy/grafana/provisioning/dashboards/" + dashboardFile.Name())
+		require.NoError(t, err, "test should read each provisioned dashboard")
+
+		var dashboard struct {
+			UID    string `json:"uid"`
+			Title  string `json:"title"`
+			Panels []struct {
+				Type       string `json:"type"`
+				Title      string `json:"title"`
+				Datasource *struct {
+					UID string `json:"uid"`
+				} `json:"datasource"`
+				Targets []struct {
+					QueryType  string `json:"queryType"`
+					Expr       string `json:"expr"`
+					Datasource *struct {
+						UID string `json:"uid"`
+					} `json:"datasource"`
+				} `json:"targets"`
+			} `json:"panels"`
+		}
+		require.NoError(t, json.Unmarshal(rawDashboard, &dashboard), "provisioned dashboard %s should be valid JSON", dashboardFile.Name())
+		require.NotEmpty(t, dashboard.UID, "provisioned dashboard %s should declare a stable UID", dashboardFile.Name())
+		require.NotEmpty(t, dashboard.Title, "provisioned dashboard %s should declare a title", dashboardFile.Name())
+
+		for _, panel := range dashboard.Panels {
+			if panel.Datasource != nil && panel.Datasource.UID != "" && panel.Datasource.UID != "-- Grafana --" {
+				require.Equal(t, "victorialogs", panel.Datasource.UID, "dashboard %s panel %q should use the provisioned VictoriaLogs datasource UID", dashboardFile.Name(), panel.Title)
+			}
+			for _, target := range panel.Targets {
+				if target.Datasource != nil && target.Datasource.UID != "" {
+					require.Equal(t, "victorialogs", target.Datasource.UID, "dashboard %s panel %q target should use the provisioned VictoriaLogs datasource UID", dashboardFile.Name(), panel.Title)
+				}
+				if panel.Type != "timeseries" || !strings.Contains(target.Expr, "| stats") {
+					if dashboardFile.Name() == "platform-health.json" && panel.Type == "stat" && strings.Contains(target.Expr, "pending_runnable") {
+						require.Equal(t, "statsRange", target.QueryType, "platform health stat panel %q should use a range query so Grafana can reduce the latest bucket", panel.Title)
+					}
+					continue
+				}
+				require.Equal(t, "statsRange", target.QueryType, "time-series stats panel %q in dashboard %s should use the VictoriaLogs range query type", panel.Title, dashboardFile.Name())
+			}
+		}
+	}
+}
+
+func TestProductionAlertsUseValidLogsQLRangeFilters(t *testing.T) {
+	t.Parallel()
+
+	alerts, err := os.ReadFile("../deploy/vmalert/rules/production-alerts.yml")
+	require.NoError(t, err, "test should read production vmalert rules")
+
+	alertConfig := string(alerts)
+	require.NotContains(t, alertConfig, "status:[", "VictoriaLogs numeric ranges should use field:range[...] syntax so vmalert can parse the rules")
+	require.GreaterOrEqual(t, strings.Count(alertConfig, "status:range[500,599]"), 3, "API 5xx alert rules should filter inclusive 500-599 statuses with valid LogsQL range syntax")
+}
+
+func TestLoggingDesignDocsTrackProvisionedDashboardsAndAlerts(t *testing.T) {
+	t.Parallel()
+
+	design, err := os.ReadFile("../docs/design/47-logging-victorialogs.md")
+	require.NoError(t, err, "test should read the VictoriaLogs design doc")
+
+	designText := string(design)
+	require.NotContains(t, designText, "Dashboard and alert curation remain follow-up operational work.", "logging design doc should not describe provisioned dashboards and alerts as future work")
+	require.Contains(t, designText, "deploy/grafana/provisioning/dashboards/errors.json", "logging design doc should track the provisioned error dashboard")
+	require.Contains(t, designText, "deploy/vmalert/rules/production-alerts.yml", "logging design doc should track repo-owned alert rules")
+}
+
+func TestLoggingDeploySyncsProvisionedObservabilityConfig(t *testing.T) {
+	t.Parallel()
+
+	deployScript, err := os.ReadFile("../deploy/scripts/deploy.sh")
+	require.NoError(t, err, "test should read deploy script")
+	deployText := string(deployScript)
+
+	require.Contains(t, deployText, `"$ROLE" = "logging"`, "deploy script should have logging-role handling")
+	require.Contains(t, deployText, "docker-compose.vector.yml", "logging deploy should sync the shared Vector compose include")
+	require.Contains(t, deployText, "deploy/vector.yaml", "logging deploy should sync Vector config for the logging node")
+	require.Contains(t, deployText, "deploy/grafana/provisioning", "logging deploy should sync Grafana provisioning files")
+	require.Contains(t, deployText, "deploy/vmalert/rules", "logging deploy should sync vmalert rules")
+	require.Contains(t, deployText, "rm -rf /opt/143/deploy/grafana/provisioning /opt/143/deploy/vmalert/rules", "logging deploy should remove stale provisioned dashboards and rules before syncing repo-owned config")
+
+	compose, err := os.ReadFile("../docker-compose.logging.yml")
+	require.NoError(t, err, "test should read logging compose file")
+	composeText := string(compose)
+	require.Contains(t, composeText, "docker-compose.vector.yml", "logging compose should include the shared Vector collector")
+	require.Contains(t, deployText, "SERVER_ROLE=%s", "logging deploy should write SERVER_ROLE=logging for Vector")
+	vectorCheck := deployText[strings.Index(deployText, "# Verify Vector is running"):]
+	require.Contains(t, vectorCheck, `"$ROLE" = "logging"`, "logging deploy should verify the logging-node Vector collector after stack recreation")
+
+	dashboardProvider, err := os.ReadFile("../deploy/grafana/provisioning/dashboards/dashboards.yml")
+	require.NoError(t, err, "test should read Grafana dashboard provider config")
+	require.Contains(t, string(dashboardProvider), "disableDeletion: false", "Grafana dashboard provisioning should remove dashboards deleted from the repo")
 }

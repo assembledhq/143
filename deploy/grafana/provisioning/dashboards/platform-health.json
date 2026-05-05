@@ -1,0 +1,246 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": { "type": "grafana", "uid": "-- Grafana --" },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "description": "Platform health dashboard: queue pressure, agent/session outcomes, API traffic and latency, and sandbox/runtime health. All panels query VictoriaLogs.",
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "id": null,
+  "links": [],
+  "liveNow": false,
+  "panels": [
+    {
+      "type": "row",
+      "id": 100,
+      "title": "Job queue health",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "type": "stat",
+      "id": 1,
+      "title": "Runnable jobs",
+      "datasource": { "type": "victoriametrics-logs-datasource", "uid": "victorialogs" },
+      "gridPos": { "h": 5, "w": 6, "x": 0, "y": 1 },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "orientation": "auto", "textMode": "auto", "colorMode": "background", "graphMode": "area", "justifyMode": "auto" },
+      "fieldConfig": { "defaults": { "unit": "short", "color": { "mode": "thresholds" }, "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "yellow", "value": 5 }, { "color": "red", "value": 20 }] } }, "overrides": [] },
+      "targets": [{ "refId": "A", "queryType": "statsRange", "expr": "_msg:\"platform health: job queue sample\" | stats sum(pending_runnable) as runnable", "step": "$__interval" }]
+    },
+    {
+      "type": "stat",
+      "id": 2,
+      "title": "Oldest runnable job",
+      "datasource": { "type": "victoriametrics-logs-datasource", "uid": "victorialogs" },
+      "gridPos": { "h": 5, "w": 6, "x": 6, "y": 1 },
+      "options": { "reduceOptions": { "calcs": ["max"], "fields": "", "values": false }, "orientation": "auto", "textMode": "auto", "colorMode": "background", "graphMode": "area", "justifyMode": "auto" },
+      "fieldConfig": { "defaults": { "unit": "s", "color": { "mode": "thresholds" }, "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "yellow", "value": 60 }, { "color": "red", "value": 300 }] } }, "overrides": [] },
+      "targets": [{ "refId": "A", "queryType": "statsRange", "expr": "_msg:\"platform health: job queue sample\" | stats max(oldest_runnable_age_seconds) as oldest_seconds", "step": "$__interval" }]
+    },
+    {
+      "type": "timeseries",
+      "id": 3,
+      "title": "Runnable jobs by type",
+      "datasource": { "type": "victoriametrics-logs-datasource", "uid": "victorialogs" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 6 },
+      "fieldConfig": { "defaults": { "unit": "short", "color": { "mode": "palette-classic" }, "custom": { "drawStyle": "line", "fillOpacity": 10, "lineInterpolation": "linear", "lineWidth": 1, "pointSize": 5, "showPoints": "never", "stacking": { "group": "A", "mode": "none" } } }, "overrides": [] },
+      "options": { "legend": { "calcs": ["lastNotNull"], "displayMode": "list", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [{ "refId": "A", "queryType": "statsRange", "expr": "_msg:\"platform health: job queue sample\" | stats by (job_type) max(pending_runnable) as runnable", "step": "$__interval" }]
+    },
+    {
+      "type": "timeseries",
+      "id": 4,
+      "title": "Oldest runnable age by type",
+      "datasource": { "type": "victoriametrics-logs-datasource", "uid": "victorialogs" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 6 },
+      "fieldConfig": { "defaults": { "unit": "s", "color": { "mode": "palette-classic" }, "custom": { "drawStyle": "line", "fillOpacity": 10, "lineInterpolation": "linear", "lineWidth": 1, "pointSize": 5, "showPoints": "never", "stacking": { "group": "A", "mode": "none" } } }, "overrides": [] },
+      "options": { "legend": { "calcs": ["max"], "displayMode": "list", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [{ "refId": "A", "queryType": "statsRange", "expr": "_msg:\"platform health: job queue sample\" | stats by (job_type) max(oldest_runnable_age_seconds) as oldest_seconds", "step": "$__interval" }]
+    },
+    {
+      "type": "table",
+      "id": 5,
+      "title": "Queue snapshot by job type",
+      "datasource": { "type": "victoriametrics-logs-datasource", "uid": "victorialogs" },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 14 },
+      "options": { "showHeader": true },
+      "fieldConfig": { "defaults": { "custom": { "align": "auto", "displayMode": "auto" } }, "overrides": [] },
+      "targets": [{ "refId": "A", "queryType": "stats", "expr": "_msg:\"platform health: job queue sample\" | stats by (queue, job_type) max(pending_runnable) as pending_runnable, max(pending_deferred) as pending_deferred, max(running) as running, max(dead_letter) as dead_letter, max(oldest_runnable_age_seconds) as oldest_runnable_age_seconds | sort by (pending_runnable desc)" }]
+    },
+    {
+      "type": "row",
+      "id": 200,
+      "title": "Session and agent outcomes",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 22 },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "id": 20,
+      "title": "Agent starts and finishes",
+      "datasource": { "type": "victoriametrics-logs-datasource", "uid": "victorialogs" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 23 },
+      "fieldConfig": { "defaults": { "unit": "short", "color": { "mode": "palette-classic" }, "custom": { "drawStyle": "bars", "fillOpacity": 45, "lineInterpolation": "linear", "lineWidth": 1, "pointSize": 5, "showPoints": "never", "stacking": { "group": "A", "mode": "none" } } }, "overrides": [] },
+      "options": { "legend": { "calcs": ["sum"], "displayMode": "list", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [
+        { "refId": "A", "queryType": "statsRange", "expr": "_msg:\"starting run_agent job\" | stats count() as starts", "step": "$__interval" },
+        { "refId": "B", "queryType": "statsRange", "expr": "_msg:\"agent run finished\" | stats count() as finishes", "step": "$__interval" }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "id": 21,
+      "title": "Agent outcomes by type",
+      "datasource": { "type": "victoriametrics-logs-datasource", "uid": "victorialogs" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 23 },
+      "fieldConfig": { "defaults": { "unit": "short", "color": { "mode": "palette-classic" }, "custom": { "drawStyle": "bars", "fillOpacity": 45, "lineInterpolation": "linear", "lineWidth": 1, "pointSize": 5, "showPoints": "never", "stacking": { "group": "A", "mode": "normal" } } }, "overrides": [] },
+      "options": { "legend": { "calcs": ["sum"], "displayMode": "list", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [{ "refId": "A", "queryType": "statsRange", "expr": "(_msg:\"agent run finished\" OR _msg:\"agent run failed\") | stats by (agent_type, outcome) count() as sessions", "step": "$__interval" }]
+    },
+    {
+      "type": "timeseries",
+      "id": 22,
+      "title": "Agent p95 duration by type",
+      "datasource": { "type": "victoriametrics-logs-datasource", "uid": "victorialogs" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 31 },
+      "fieldConfig": { "defaults": { "unit": "ms", "color": { "mode": "palette-classic" }, "custom": { "drawStyle": "line", "fillOpacity": 10, "lineInterpolation": "linear", "lineWidth": 1, "pointSize": 5, "showPoints": "never", "stacking": { "group": "A", "mode": "none" } } }, "overrides": [] },
+      "options": { "legend": { "calcs": ["lastNotNull"], "displayMode": "list", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [{ "refId": "A", "queryType": "statsRange", "expr": "_msg:\"agent run finished\" | stats by (agent_type) quantile(0.95, duration_ms) as p95_ms", "step": "$__interval" }]
+    },
+    {
+      "type": "table",
+      "id": 23,
+      "title": "Failure and timeout reasons",
+      "datasource": { "type": "victoriametrics-logs-datasource", "uid": "victorialogs" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 31 },
+      "options": { "showHeader": true },
+      "fieldConfig": { "defaults": { "custom": { "align": "auto", "displayMode": "auto" } }, "overrides": [] },
+      "targets": [{ "refId": "A", "queryType": "stats", "expr": "(_msg:\"agent run failed\" OR _msg:\"session exceeded configured timeout\") | stats by (agent_type, outcome, stop_reason, error) count() as count | sort by (count desc) | limit 25" }]
+    },
+    {
+      "type": "row",
+      "id": 300,
+      "title": "API latency and traffic",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 39 },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "id": 30,
+      "title": "Request rate by status",
+      "datasource": { "type": "victoriametrics-logs-datasource", "uid": "victorialogs" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 40 },
+      "fieldConfig": { "defaults": { "unit": "short", "color": { "mode": "palette-classic" }, "custom": { "drawStyle": "bars", "fillOpacity": 35, "lineInterpolation": "linear", "lineWidth": 1, "pointSize": 5, "showPoints": "never", "stacking": { "group": "A", "mode": "normal" } } }, "overrides": [] },
+      "options": { "legend": { "calcs": ["sum"], "displayMode": "list", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [{ "refId": "A", "queryType": "statsRange", "expr": "service:api AND (_msg:\"request\" OR _msg:\"request failed\") | stats by (status_class) count() as requests", "step": "$__interval" }]
+    },
+    {
+      "type": "timeseries",
+      "id": 31,
+      "title": "API p95 / p99 duration",
+      "datasource": { "type": "victoriametrics-logs-datasource", "uid": "victorialogs" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 40 },
+      "fieldConfig": { "defaults": { "unit": "ms", "color": { "mode": "palette-classic" }, "custom": { "drawStyle": "line", "fillOpacity": 10, "lineInterpolation": "linear", "lineWidth": 1, "pointSize": 5, "showPoints": "never", "stacking": { "group": "A", "mode": "none" } } }, "overrides": [] },
+      "options": { "legend": { "calcs": ["lastNotNull"], "displayMode": "list", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [
+        { "refId": "A", "queryType": "statsRange", "expr": "service:api AND (_msg:\"request\" OR _msg:\"request failed\") | stats quantile(0.95, duration_ms) as p95_ms", "step": "$__interval" },
+        { "refId": "B", "queryType": "statsRange", "expr": "service:api AND (_msg:\"request\" OR _msg:\"request failed\") | stats quantile(0.99, duration_ms) as p99_ms", "step": "$__interval" }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "id": 32,
+      "title": "API 5xx rate",
+      "datasource": { "type": "victoriametrics-logs-datasource", "uid": "victorialogs" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 48 },
+      "fieldConfig": { "defaults": { "unit": "short", "color": { "mode": "palette-classic" }, "custom": { "drawStyle": "bars", "fillOpacity": 45, "lineInterpolation": "linear", "lineWidth": 1, "pointSize": 5, "showPoints": "never", "stacking": { "group": "A", "mode": "none" } } }, "overrides": [] },
+      "options": { "legend": { "calcs": ["sum"], "displayMode": "list", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "single", "sort": "none" } },
+      "targets": [{ "refId": "A", "queryType": "statsRange", "expr": "service:api AND level:error AND _msg:\"request failed\" AND status:range[500,599] | stats count() as errors", "step": "$__interval" }]
+    },
+    {
+      "type": "table",
+      "id": 33,
+      "title": "Slowest endpoints",
+      "datasource": { "type": "victoriametrics-logs-datasource", "uid": "victorialogs" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 48 },
+      "options": { "showHeader": true },
+      "fieldConfig": { "defaults": { "custom": { "align": "auto", "displayMode": "auto" } }, "overrides": [] },
+      "targets": [{ "refId": "A", "queryType": "stats", "expr": "service:api AND (_msg:\"request\" OR _msg:\"request failed\") | stats by (method, path) quantile(0.95, duration_ms) as p95_ms, count() as requests | sort by (p95_ms desc) | limit 25" }]
+    },
+    {
+      "type": "row",
+      "id": 400,
+      "title": "Sandbox and runtime health",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 56 },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "id": 40,
+      "title": "Sandbox failure signals",
+      "datasource": { "type": "victoriametrics-logs-datasource", "uid": "victorialogs" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 57 },
+      "fieldConfig": { "defaults": { "unit": "short", "color": { "mode": "palette-classic" }, "custom": { "drawStyle": "bars", "fillOpacity": 45, "lineInterpolation": "linear", "lineWidth": 1, "pointSize": 5, "showPoints": "never", "stacking": { "group": "A", "mode": "normal" } } }, "overrides": [] },
+      "options": { "legend": { "calcs": ["sum"], "displayMode": "list", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [{ "refId": "A", "queryType": "statsRange", "expr": "level:error AND (_msg:\"sandbox creation failed during continue_session\" OR _msg:\"sandbox hydrate failed during continue_session\" OR _msg:\"failed to destroy sandbox\" OR _msg:\"failed to snapshot session, session will not support follow-up turns\") | stats by (_msg) count() as failures", "step": "$__interval" }]
+    },
+    {
+      "type": "timeseries",
+      "id": 41,
+      "title": "Runtime utilization maxima",
+      "datasource": { "type": "victoriametrics-logs-datasource", "uid": "victorialogs" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 57 },
+      "fieldConfig": { "defaults": { "unit": "percentunit", "color": { "mode": "palette-classic" }, "custom": { "drawStyle": "line", "fillOpacity": 10, "lineInterpolation": "linear", "lineWidth": 1, "pointSize": 5, "showPoints": "never", "stacking": { "group": "A", "mode": "none" } } }, "overrides": [] },
+      "options": { "legend": { "calcs": ["max"], "displayMode": "list", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [
+        { "refId": "A", "queryType": "statsRange", "expr": "_msg:\"platform health: runtime sample\" | stats max(max_memory_util) as max_memory_util", "step": "$__interval" },
+        { "refId": "B", "queryType": "statsRange", "expr": "_msg:\"platform health: runtime sample\" | stats max(max_cpu_util) as max_cpu_util", "step": "$__interval" }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "id": 42,
+      "title": "Runtime sampler failures",
+      "datasource": { "type": "victoriametrics-logs-datasource", "uid": "victorialogs" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 65 },
+      "fieldConfig": { "defaults": { "unit": "short", "color": { "mode": "palette-classic" }, "custom": { "drawStyle": "bars", "fillOpacity": 45, "lineInterpolation": "linear", "lineWidth": 1, "pointSize": 5, "showPoints": "never", "stacking": { "group": "A", "mode": "none" } } }, "overrides": [] },
+      "options": { "legend": { "calcs": ["sum"], "displayMode": "list", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "single", "sort": "none" } },
+      "targets": [{ "refId": "A", "queryType": "statsRange", "expr": "_msg:\"platform health: runtime sample\" | stats sum(sample_failures) as sample_failures", "step": "$__interval" }]
+    },
+    {
+      "type": "table",
+      "id": 43,
+      "title": "Sandbox auth and credential wiring failures",
+      "datasource": { "type": "victoriametrics-logs-datasource", "uid": "victorialogs" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 65 },
+      "options": { "showHeader": true },
+      "fieldConfig": { "defaults": { "custom": { "align": "auto", "displayMode": "auto" } }, "overrides": [] },
+      "targets": [{ "refId": "A", "queryType": "stats", "expr": "(level:error OR level:warn) AND (_msg:~\"sandbox auth\" OR _msg:~\"auth wiring\" OR _msg:~\"credential\" OR _msg:~\"installation token\") | stats by (_msg) count() as count | sort by (count desc) | limit 25" }]
+    }
+  ],
+  "refresh": "1m",
+  "schemaVersion": 39,
+  "tags": ["143", "health", "operations"],
+  "templating": { "list": [] },
+  "time": { "from": "now-6h", "to": "now" },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "143 - Platform Health",
+  "uid": "platform-health",
+  "version": 1,
+  "weekStart": ""
+}

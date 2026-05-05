@@ -26,13 +26,6 @@ const (
 	automationGoalMaxLength = 4000
 )
 
-// validExecutionModes mirrors the chk_automations_execution_mode CHECK constraint.
-var validExecutionModes = map[string]bool{
-	"sequential":       true,
-	"parallel":         true,
-	"dependency_graph": true,
-}
-
 func validateAutomationNameAndGoal(name, goal string) error {
 	if len(name) > automationNameMaxLength {
 		return fmt.Errorf("name must be at most %d characters", automationNameMaxLength)

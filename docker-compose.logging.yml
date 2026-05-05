@@ -3,6 +3,9 @@
 # Access Grafana via SSH tunnel: make logs SSH_KEY=~/.ssh/143-deploy
 # See docs/design/47-logging-victorialogs.md
 
+include:
+  - docker-compose.vector.yml
+
 services:
   victorialogs:
     image: victoriametrics/victoria-logs:v1.50.0

@@ -78,10 +78,18 @@ func (s *RuntimeSampler) Run(ctx context.Context) {
 func (s *RuntimeSampler) tick(ctx context.Context) {
 	active := s.tracker.Snapshot()
 	if len(active) == 0 {
+		s.logAggregateHealthSample(0, 0, runtimeSampleAggregate{})
 		return
 	}
 
 	sem := make(chan struct{}, runtimeSamplerMaxConcurrency)
+	// Each goroutine sends exactly one runtimeSampleResult: either the
+	// normal return value of sampleOne, or — if sampleOne panics before
+	// returning — a sampleFailed result from the deferred recovery. The
+	// channel is therefore buffered to exactly len(active) and closed
+	// after wg.Wait, so the aggregation loop terminates cleanly without
+	// blocking on a missing send.
+	results := make(chan runtimeSampleResult, len(active))
 	var wg sync.WaitGroup
 	for _, c := range active {
 		wg.Add(1)
@@ -99,15 +107,70 @@ func (s *RuntimeSampler) tick(ctx context.Context) {
 						Str("container_id", c.Sandbox.ID).
 						Bytes("stack", debug.Stack()).
 						Msg("runtime stats sample panicked")
+					results <- runtimeSampleResult{sampleFailed: true}
 				}
 			}()
-			s.sampleOne(ctx, c)
+			results <- s.sampleOne(ctx, c)
 		}(c)
 	}
 	wg.Wait()
+	close(results)
+
+	var sampleFailures int
+	var agg runtimeSampleAggregate
+	var observed int
+	for result := range results {
+		if result.sampleFailed {
+			sampleFailures++
+			continue
+		}
+		observed++
+		agg.memorySum += result.memoryUtil
+		agg.cpuSum += result.cpuUtil
+		if result.memoryUtil > agg.maxMemoryUtil {
+			agg.maxMemoryUtil = result.memoryUtil
+		}
+		if result.cpuUtil > agg.maxCPUUtil {
+			agg.maxCPUUtil = result.cpuUtil
+		}
+	}
+	if observed > 0 {
+		agg.meanMemoryUtil = agg.memorySum / float64(observed)
+		agg.meanCPUUtil = agg.cpuSum / float64(observed)
+	}
+	s.logAggregateHealthSample(len(active), sampleFailures, agg)
 }
 
-func (s *RuntimeSampler) sampleOne(ctx context.Context, c ActiveContainer) {
+// runtimeSampleAggregate carries the rollup statistics emitted on each tick.
+// Mean is included alongside max so a dashboard can tell "one container at
+// 95%" from "every container at 95%" — the max collapses both cases otherwise.
+type runtimeSampleAggregate struct {
+	maxMemoryUtil  float64
+	maxCPUUtil     float64
+	meanMemoryUtil float64
+	meanCPUUtil    float64
+	memorySum      float64
+	cpuSum         float64
+}
+
+func (s *RuntimeSampler) logAggregateHealthSample(activeContainers, sampleFailures int, agg runtimeSampleAggregate) {
+	s.logger.Info().
+		Int("active_containers", activeContainers).
+		Int("sample_failures", sampleFailures).
+		Float64("max_memory_util", agg.maxMemoryUtil).
+		Float64("max_cpu_util", agg.maxCPUUtil).
+		Float64("mean_memory_util", agg.meanMemoryUtil).
+		Float64("mean_cpu_util", agg.meanCPUUtil).
+		Msg("platform health: runtime sample")
+}
+
+type runtimeSampleResult struct {
+	sampleFailed bool
+	memoryUtil   float64
+	cpuUtil      float64
+}
+
+func (s *RuntimeSampler) sampleOne(ctx context.Context, c ActiveContainer) runtimeSampleResult {
 	sampleCtx, cancel := context.WithTimeout(ctx, runtimeSampleTimeout)
 	defer cancel()
 
@@ -124,7 +187,7 @@ func (s *RuntimeSampler) sampleOne(ctx context.Context, c ActiveContainer) {
 		s.logger.Debug().Err(err).
 			Str("container_id", c.Sandbox.ID).
 			Msg("runtime stats sample failed")
-		return
+		return runtimeSampleResult{sampleFailed: !errors.Is(err, ErrSandboxNotFound)}
 	}
 
 	memMiB := float64(stats.MemoryBytes) / (1024 * 1024)
@@ -137,6 +200,7 @@ func (s *RuntimeSampler) sampleOne(ctx context.Context, c ActiveContainer) {
 		cpuUtil = clamp01(stats.CPUCores / c.CPULimit)
 	}
 	s.metrics.RecordSample(ctx, c.Sandbox.OrgID, memMiB, stats.CPUCores, memUtil, cpuUtil)
+	return runtimeSampleResult{memoryUtil: memUtil, cpuUtil: cpuUtil}
 }
 
 func clamp01(v float64) float64 {

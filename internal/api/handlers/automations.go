@@ -189,23 +189,23 @@ func (h *AutomationHandler) Create(w http.ResponseWriter, r *http.Request) {
 	user := middleware.UserFromContext(r.Context())
 
 	var req struct {
-		Name            string  `json:"name"`
-		Goal            string  `json:"goal"`
-		RepositoryID    string  `json:"repository_id"`
-		Scope           *string `json:"scope"`
-		AgentType       *string `json:"agent_type"`
-		Model           *string `json:"model"`
-		ReasoningEffort string  `json:"reasoning_effort"`
-		ExecutionMode   *string `json:"execution_mode"`
-		MaxConcurrent   *int    `json:"max_concurrent"`
-		BaseBranch      *string `json:"base_branch"`
-		ScheduleType    *string `json:"schedule_type"`
-		IntervalValue   *int    `json:"interval_value"`
-		IntervalUnit    *string `json:"interval_unit"`
-		IntervalRunAt   *string `json:"interval_run_at"`
-		CronExpression  *string `json:"cron_expression"`
-		Timezone        *string `json:"timezone"`
-		Priority        *int    `json:"priority"`
+		Name            string                  `json:"name"`
+		Goal            string                  `json:"goal"`
+		RepositoryID    string                  `json:"repository_id"`
+		Scope           *string                 `json:"scope"`
+		AgentType       *models.AgentType       `json:"agent_type"`
+		Model           *string                 `json:"model"`
+		ReasoningEffort models.ReasoningEffort  `json:"reasoning_effort"`
+		ExecutionMode   *models.ProjectExecMode `json:"execution_mode"`
+		MaxConcurrent   *int                    `json:"max_concurrent"`
+		BaseBranch      *string                 `json:"base_branch"`
+		ScheduleType    *string                 `json:"schedule_type"`
+		IntervalValue   *int                    `json:"interval_value"`
+		IntervalUnit    *models.ScheduleUnit    `json:"interval_unit"`
+		IntervalRunAt   *string                 `json:"interval_run_at"`
+		CronExpression  *string                 `json:"cron_expression"`
+		Timezone        *string                 `json:"timezone"`
+		Priority        *int                    `json:"priority"`
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -234,7 +234,12 @@ func (h *AutomationHandler) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	agentType, modelOverride, err := resolveAutomationAgentAndModel(nil, nil, req.AgentType, req.Model)
+	var reqAgentType *string
+	if req.AgentType != nil {
+		agentTypeString := string(*req.AgentType)
+		reqAgentType = &agentTypeString
+	}
+	agentType, modelOverride, err := resolveAutomationAgentAndModel(nil, nil, reqAgentType, req.Model)
 	if err != nil {
 		switch {
 		case strings.Contains(err.Error(), "model"):
@@ -253,7 +258,7 @@ func (h *AutomationHandler) Create(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusInternalServerError, "DEFAULT_AGENT_LOOKUP_FAILED", "failed to load organization settings", err)
 		return
 	}
-	reasoningOverride, err := parseReasoningEffortForAgent(effectiveAgentType, req.ReasoningEffort)
+	reasoningOverride, err := parseReasoningEffortForAgent(effectiveAgentType, string(req.ReasoningEffort))
 	if err != nil {
 		writeError(w, r, http.StatusBadRequest, "INVALID_REASONING_EFFORT", err.Error())
 		return
@@ -297,11 +302,11 @@ func (h *AutomationHandler) Create(w http.ResponseWriter, r *http.Request) {
 			intervalValue = *req.IntervalValue
 		}
 		if req.IntervalUnit != nil && *req.IntervalUnit != "" {
-			if err := models.ScheduleUnit(*req.IntervalUnit).Validate(); err != nil {
+			if err := req.IntervalUnit.Validate(); err != nil {
 				writeError(w, r, http.StatusBadRequest, "INVALID_INTERVAL_UNIT", err.Error())
 				return
 			}
-			intervalUnit = *req.IntervalUnit
+			intervalUnit = string(*req.IntervalUnit)
 		}
 		intervalValuePtr = &intervalValue
 		intervalUnitPtr = &intervalUnit
@@ -331,11 +336,11 @@ func (h *AutomationHandler) Create(w http.ResponseWriter, r *http.Request) {
 
 	execMode := "sequential"
 	if req.ExecutionMode != nil && *req.ExecutionMode != "" {
-		if !validExecutionModes[*req.ExecutionMode] {
-			writeError(w, r, http.StatusBadRequest, "INVALID_EXECUTION_MODE", "execution_mode must be sequential, parallel, or dependency_graph")
+		if err := req.ExecutionMode.Validate(); err != nil {
+			writeError(w, r, http.StatusBadRequest, "INVALID_EXECUTION_MODE", err.Error())
 			return
 		}
-		execMode = *req.ExecutionMode
+		execMode = string(*req.ExecutionMode)
 	}
 
 	maxConcurrent := 1
@@ -437,23 +442,23 @@ func (h *AutomationHandler) Update(w http.ResponseWriter, r *http.Request) {
 	before := automation
 
 	var req struct {
-		Name            *string `json:"name"`
-		Goal            *string `json:"goal"`
-		Scope           *string `json:"scope"`
-		RepositoryID    *string `json:"repository_id"`
-		AgentType       *string `json:"agent_type"`
-		Model           *string `json:"model"`
-		ReasoningEffort *string `json:"reasoning_effort"`
-		ExecutionMode   *string `json:"execution_mode"`
-		MaxConcurrent   *int    `json:"max_concurrent"`
-		BaseBranch      *string `json:"base_branch"`
-		ScheduleType    *string `json:"schedule_type"`
-		IntervalValue   *int    `json:"interval_value"`
-		IntervalUnit    *string `json:"interval_unit"`
-		IntervalRunAt   *string `json:"interval_run_at"`
-		CronExpression  *string `json:"cron_expression"`
-		Timezone        *string `json:"timezone"`
-		Priority        *int    `json:"priority"`
+		Name            *string                 `json:"name"`
+		Goal            *string                 `json:"goal"`
+		Scope           *string                 `json:"scope"`
+		RepositoryID    *string                 `json:"repository_id"`
+		AgentType       *models.AgentType       `json:"agent_type"`
+		Model           *string                 `json:"model"`
+		ReasoningEffort *models.ReasoningEffort `json:"reasoning_effort"`
+		ExecutionMode   *models.ProjectExecMode `json:"execution_mode"`
+		MaxConcurrent   *int                    `json:"max_concurrent"`
+		BaseBranch      *string                 `json:"base_branch"`
+		ScheduleType    *string                 `json:"schedule_type"`
+		IntervalValue   *int                    `json:"interval_value"`
+		IntervalUnit    *models.ScheduleUnit    `json:"interval_unit"`
+		IntervalRunAt   *string                 `json:"interval_run_at"`
+		CronExpression  *string                 `json:"cron_expression"`
+		Timezone        *string                 `json:"timezone"`
+		Priority        *int                    `json:"priority"`
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -502,7 +507,12 @@ func (h *AutomationHandler) Update(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if req.AgentType != nil || req.Model != nil {
-		agentType, modelOverride, err := resolveAutomationAgentAndModel(automation.AgentType, automation.ModelOverride, req.AgentType, req.Model)
+		var reqAgentType *string
+		if req.AgentType != nil {
+			agentTypeString := string(*req.AgentType)
+			reqAgentType = &agentTypeString
+		}
+		agentType, modelOverride, err := resolveAutomationAgentAndModel(automation.AgentType, automation.ModelOverride, reqAgentType, req.Model)
 		if err != nil {
 			switch {
 			case strings.Contains(err.Error(), "model"):
@@ -527,7 +537,7 @@ func (h *AutomationHandler) Update(w http.ResponseWriter, r *http.Request) {
 		}
 		raw := ""
 		if req.ReasoningEffort != nil {
-			raw = *req.ReasoningEffort
+			raw = string(*req.ReasoningEffort)
 		} else if automation.ReasoningEffort != nil {
 			raw = string(*automation.ReasoningEffort)
 		}
@@ -539,11 +549,11 @@ func (h *AutomationHandler) Update(w http.ResponseWriter, r *http.Request) {
 		automation.ReasoningEffort = reasoningOverride
 	}
 	if req.ExecutionMode != nil {
-		if !validExecutionModes[*req.ExecutionMode] {
-			writeError(w, r, http.StatusBadRequest, "INVALID_EXECUTION_MODE", "execution_mode must be sequential, parallel, or dependency_graph")
+		if err := req.ExecutionMode.Validate(); err != nil {
+			writeError(w, r, http.StatusBadRequest, "INVALID_EXECUTION_MODE", err.Error())
 			return
 		}
-		automation.ExecutionMode = *req.ExecutionMode
+		automation.ExecutionMode = string(*req.ExecutionMode)
 	}
 	if req.MaxConcurrent != nil {
 		if *req.MaxConcurrent <= 0 || *req.MaxConcurrent > 100 {
@@ -639,11 +649,12 @@ func (h *AutomationHandler) Update(w http.ResponseWriter, r *http.Request) {
 		scheduleChanged = true
 	}
 	if req.IntervalUnit != nil {
-		if err := models.ScheduleUnit(*req.IntervalUnit).Validate(); err != nil {
+		if err := req.IntervalUnit.Validate(); err != nil {
 			writeError(w, r, http.StatusBadRequest, "INVALID_INTERVAL_UNIT", err.Error())
 			return
 		}
-		automation.IntervalUnit = req.IntervalUnit
+		intervalUnit := string(*req.IntervalUnit)
+		automation.IntervalUnit = &intervalUnit
 		scheduleChanged = true
 	}
 	if req.IntervalRunAt != nil {
