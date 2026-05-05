@@ -34,6 +34,11 @@ func (a *PiAdapter) Name() models.AgentType {
 	return models.AgentTypePi
 }
 
+// CancellationSpec declares Pi's preferred graceful-stop behavior.
+func (a *PiAdapter) CancellationSpec() agent.CancellationSpec {
+	return agent.CancellationSpec{Method: agent.CancellationMethodEscape}
+}
+
 // PreparePrompt constructs the prompts for Pi based on the issue context.
 func (a *PiAdapter) PreparePrompt(ctx context.Context, input *agent.AgentInput) (*agent.AgentPrompt, error) {
 	if input == nil {
@@ -81,4 +86,5 @@ var piStreamingConfig = streamingAgentConfig{
 		DoneAsResult:       true,
 		CaptureToolModel:   true,
 	},
+	CancellationSpec: agent.CancellationSpec{Method: agent.CancellationMethodEscape},
 }

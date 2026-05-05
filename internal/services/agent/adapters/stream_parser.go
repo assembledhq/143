@@ -200,10 +200,11 @@ func parseAgentStreamLine(
 // streamingAgentConfig drives runStreamingAgent. BuildCmd receives the already
 // shell-escaped prompt file path and returns the full command line.
 type streamingAgentConfig struct {
-	DisplayName string // "Amp" / "Pi" — used in start/completion log messages.
-	CLIName     string // "amp" / "pi" — used in the exec error message.
-	BuildCmd    func(escapedPromptPath string) string
-	ParseConfig streamParseConfig
+	DisplayName      string // "Amp" / "Pi" — used in start/completion log messages.
+	CLIName          string // "amp" / "pi" — used in the exec error message.
+	BuildCmd         func(escapedPromptPath string) string
+	ParseConfig      streamParseConfig
+	CancellationSpec agent.CancellationSpec
 }
 
 // runStreamingAgent implements the shared Execute flow for agents that (a)
@@ -248,6 +249,7 @@ func runStreamingAgent(
 	}
 
 	cmd := cfg.BuildCmd(shellEscapeSingle(promptPath))
+	cmd = wrapCommandForInterruptTracking(sandbox.HomeDir, cfg.CancellationSpec, cmd)
 
 	logCh <- agent.LogEntry{
 		Timestamp: time.Now(),
@@ -298,8 +300,18 @@ func runStreamingAgent(
 
 	if exitCode != 0 {
 		result.Error = fmt.Sprintf("%s CLI exited with code %d", cfg.CLIName, exitCode)
-		if stderr.Len() > 0 {
-			result.Error += ": " + stderr.String()
+		errorDetail := strings.TrimSpace(stderr.String())
+		if errorDetail == "" {
+			// PTY-backed wrappers collapse stderr into the visible output stream,
+			// so preserve the last visible line as the best-effort failure detail.
+			if len(summaryParts) > 0 {
+				errorDetail = strings.TrimSpace(summaryParts[len(summaryParts)-1])
+			} else if lastAssistantContent != "" {
+				errorDetail = strings.TrimSpace(lastAssistantContent)
+			}
+		}
+		if errorDetail != "" {
+			result.Error += ": " + errorDetail
 		}
 	}
 

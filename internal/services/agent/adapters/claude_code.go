@@ -117,6 +117,7 @@ func (a *ClaudeCodeAdapter) Execute(ctx context.Context, sandbox *agent.Sandbox,
 			promptPath,
 		)
 	}
+	cmd = wrapCommandForInterruptTracking(sandbox.HomeDir, agent.DefaultCancellationSpec, cmd)
 
 	logCh <- agent.LogEntry{
 		Timestamp: time.Now(),

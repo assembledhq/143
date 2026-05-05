@@ -49,7 +49,9 @@ func TestPiAdapter_Execute_StreamJSON(t *testing.T) {
 
 	provider := newMockProvider()
 	provider.ExecStreamFn = func(ctx context.Context, sb *agent.Sandbox, cmd string, onLine func(line []byte), stderr io.Writer) (int, error) {
-		require.True(t, strings.HasPrefix(cmd, "pi "), "command should invoke pi CLI, got: %s", cmd)
+		require.Contains(t, cmd, ".143-agent.pid", "pi command should register the agent pid for graceful interrupt")
+		require.Contains(t, cmd, ".143-agent.tty", "pi command should register the tty path for ESC delivery")
+		require.Contains(t, cmd, "python3 -c", "pi command should launch through the PTY wrapper for ESC delivery")
 		require.Contains(t, cmd, "--mode json")
 		require.Contains(t, cmd, "--api-key")
 		require.Contains(t, cmd, "PI_API_KEY", "must inject the dedicated Pi API key")
@@ -135,11 +137,39 @@ func TestPiAdapter_Execute_NonZeroExit(t *testing.T) {
 	require.Contains(t, result.Error, "provider auth failed")
 }
 
+func TestPiAdapter_Execute_NonZeroExit_IncludesMergedOutputWhenStderrEmpty(t *testing.T) {
+	t.Parallel()
+
+	provider := newMockProvider()
+	provider.ExecStreamFn = func(ctx context.Context, sb *agent.Sandbox, cmd string, onLine func(line []byte), stderr io.Writer) (int, error) {
+		onLine([]byte("pi: provider auth failed"))
+		return 2, nil
+	}
+
+	adapter := NewPiAdapter(zerolog.Nop())
+	logCh := make(chan agent.LogEntry, 10)
+	ctx := WithSandboxProvider(context.Background(), provider)
+
+	result, err := adapter.Execute(ctx, &agent.Sandbox{ID: "t", WorkDir: "/workspace", HomeDir: "/home/sandbox", Metadata: map[string]string{agent.SandboxMetadataBaseCommitSHA: "abc123"}}, &agent.AgentPrompt{
+		SystemPrompt: "x",
+		UserPrompt:   "y",
+		MaxTokens:    50_000,
+	}, logCh)
+	require.NoError(t, err)
+	require.Equal(t, 2, result.ExitCode)
+	require.Contains(t, result.Error, "exited with code 2", "non-zero exits should still surface the exit code")
+	require.Contains(t, result.Error, "provider auth failed",
+		"non-zero exits should preserve failure detail even when the wrapper only exposes it on the merged output stream")
+}
+
 func TestPiAdapter_Execute_ContinuationUsesUserMessage(t *testing.T) {
 	t.Parallel()
 
 	provider := newMockProvider()
 	provider.ExecStreamFn = func(ctx context.Context, sb *agent.Sandbox, cmd string, onLine func(line []byte), stderr io.Writer) (int, error) {
+		require.Contains(t, cmd, ".143-agent.pid", "pi continuation should register the agent pid for graceful interrupt")
+		require.Contains(t, cmd, ".143-agent.tty", "pi continuation should register the tty path for ESC delivery")
+		require.Contains(t, cmd, "python3 -c", "pi continuation should launch through the PTY wrapper for ESC delivery")
 		return 0, nil
 	}
 	provider.ExecFn = func(ctx context.Context, sb *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {

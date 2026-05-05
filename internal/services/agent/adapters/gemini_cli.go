@@ -90,6 +90,7 @@ func (a *GeminiCLIAdapter) Execute(ctx context.Context, sandbox *agent.Sandbox, 
 			shellEscapeSingle(promptPath),
 		)
 	}
+	cmd = wrapCommandForInterruptTracking(sandbox.HomeDir, agent.DefaultCancellationSpec, cmd)
 
 	logCh <- agent.LogEntry{
 		Timestamp: time.Now(),

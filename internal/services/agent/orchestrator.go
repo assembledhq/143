@@ -1506,7 +1506,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 
 	// Register sandbox with cancel registry so CancelSession can send SIGINT.
 	if o.cancels != nil {
-		o.cancels.Register(run.ID, sandbox, o.provider, cancel)
+		o.cancels.Register(run.ID, sandbox, o.provider, cancel, ResolveCancellationSpec(adapter))
 	}
 
 	// 8. Clone repo into sandbox. This must happen before auth injection
@@ -2308,7 +2308,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 
 	// Register sandbox with cancel registry so CancelSession can send SIGINT.
 	if o.cancels != nil {
-		o.cancels.Register(session.ID, sandbox, o.provider, cancel)
+		o.cancels.Register(session.ID, sandbox, o.provider, cancel, ResolveCancellationSpec(adapter))
 	}
 
 	// 5. Set up the workspace. Three paths:

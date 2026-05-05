@@ -1309,6 +1309,59 @@ func TestDockerProvider_Exec(t *testing.T) {
 	})
 }
 
+func TestDockerProvider_Interrupt_NonZeroExitReturnsError(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		req     agent.InterruptRequest
+		wantCmd string
+	}{
+		{
+			name: "ctrl c interrupt",
+			req: agent.InterruptRequest{
+				Method:      agent.CancellationMethodCtrlC,
+				PIDFilePath: "/home/sandbox/.143-agent.pid",
+			},
+			wantCmd: "kill -INT",
+		},
+		{
+			name: "escape interrupt",
+			req: agent.InterruptRequest{
+				Method:      agent.CancellationMethodEscape,
+				TTYFilePath: "/home/sandbox/.143-agent.tty",
+			},
+			wantCmd: "printf '\\033'",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mock := &mockDockerClient{}
+			mock.containerExecCreateFn = func(ctx context.Context, containerID string, config container.ExecOptions) (container.ExecCreateResponse, error) {
+				require.Equal(t, []string{"sh", "-c"}, config.Cmd[:2], "interrupts should run through the sandbox shell")
+				require.Contains(t, config.Cmd[2], tt.wantCmd, "interrupt should execute the expected shell command")
+				return container.ExecCreateResponse{ID: "test-exec-id"}, nil
+			}
+			mock.containerExecAttachFn = func(ctx context.Context, execID string, config container.ExecAttachOptions) (types.HijackedResponse, error) {
+				return newMockHijackedResponse(""), nil
+			}
+			mock.containerExecInspectFn = func(ctx context.Context, execID string) (container.ExecInspect, error) {
+				return container.ExecInspect{ExitCode: 1}, nil
+			}
+
+			p := NewDockerProvider(mock, newTestLogger())
+			sb := &agent.Sandbox{ID: "test-container", Provider: "docker", WorkDir: "/workspace"}
+
+			err := p.Interrupt(context.Background(), sb, tt.req)
+			require.Error(t, err, "non-zero interrupt command exits should be treated as failures")
+			require.Contains(t, err.Error(), "code 1", "interrupt failure should preserve the shell exit code")
+		})
+	}
+}
+
 func TestDockerProvider_ConnectionInfo(t *testing.T) {
 	t.Parallel()
 

@@ -87,4 +87,5 @@ var ampStreamingConfig = streamingAgentConfig{
 		// session row with the upstream Amp run when debugging.
 		CaptureSessionID: true,
 	},
+	CancellationSpec: agent.DefaultCancellationSpec,
 }

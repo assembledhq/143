@@ -197,7 +197,7 @@ func TestGeminiCLIAdapter_Execute(t *testing.T) {
 
 			provider := newMockProvider()
 			provider.ExecFn = func(ctx context.Context, sb *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
-				if strings.HasPrefix(cmd, "gemini") {
+				if strings.Contains(cmd, "gemini ") {
 					_, _ = stdout.Write([]byte(tt.geminiOutput))
 					return tt.geminiExitCode, nil
 				}
@@ -249,6 +249,8 @@ func TestGeminiCLIAdapter_Execute(t *testing.T) {
 			promptData, exists := provider.Files["/home/sandbox/.143-prompt.md"]
 			require.True(t, exists, "prompt file should have been written")
 			require.Contains(t, string(promptData), "Fix the bug.", "prompt file should contain system prompt")
+			require.Contains(t, provider.ExecCalls[0], ".143-agent.pid", "gemini command should register the agent pid for graceful interrupt")
+			require.Contains(t, provider.ExecCalls[0], "& pid=$!", "gemini command should track the child pid without replacing the invoking shell")
 		})
 	}
 }
@@ -278,7 +280,7 @@ func TestGeminiCLIAdapter_Execute_ExecError(t *testing.T) {
 
 	provider := newMockProvider()
 	provider.ExecFn = func(ctx context.Context, sb *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
-		if strings.HasPrefix(cmd, "gemini") {
+		if strings.Contains(cmd, "gemini ") {
 			return 0, context.DeadlineExceeded
 		}
 		return 0, nil
@@ -635,7 +637,7 @@ func TestGeminiCLIAdapter_Execute_StreamingOutput(t *testing.T) {
 
 	provider := newMockProvider()
 	provider.ExecFn = func(ctx context.Context, sb *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
-		if strings.HasPrefix(cmd, "gemini") {
+		if strings.Contains(cmd, "gemini ") {
 			_, _ = stdout.Write([]byte(streamOutput))
 			return 0, nil
 		}
@@ -685,7 +687,7 @@ func TestGeminiCLIAdapter_Execute_ContinuationWithoutSessionIDUsesResumeMode(t *
 
 	provider := newMockProvider()
 	provider.ExecFn = func(ctx context.Context, sb *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
-		if strings.HasPrefix(cmd, "gemini --resume") {
+		if strings.Contains(cmd, "gemini --resume") {
 			_, _ = stdout.Write([]byte(`{"type":"text","content":"continuing gemini session"}`))
 			return 0, nil
 		}

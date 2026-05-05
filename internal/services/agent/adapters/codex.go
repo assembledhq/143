@@ -101,6 +101,7 @@ func (a *CodexAdapter) Execute(ctx context.Context, sandbox *agent.Sandbox, prom
 			shellEscapeCodex(promptPath),
 		)
 	}
+	cmd = wrapCommandForInterruptTracking(sandbox.HomeDir, agent.DefaultCancellationSpec, cmd)
 
 	logCh <- agent.LogEntry{
 		Timestamp: time.Now(),
