@@ -2703,19 +2703,15 @@ export function SessionDetailContent({ id }: { id: string }) {
   // Hooks can't be called conditionally, so provide a stub when session hasn't loaded yet.
   // useDiffViewState only reads `diff` and `diff_history` — the stub satisfies that contract.
   const diffViewState = useDiffViewState(session ?? { diff: null, diff_history: [] } as unknown as Session);
-  const { files: allDiffFiles, filteredFiles, passes, passRange, setPassRange, diffSearchQuery, setDiffSearchQuery } = diffViewState;
-
-  useEffect(() => {
-    if (filteredFiles.length === 0) {
-      if (activeFileIndex !== 0) {
-        setActiveFileIndex(0);
-      }
-      return;
-    }
-    if (activeFileIndex >= filteredFiles.length) {
-      setActiveFileIndex(filteredFiles.length - 1);
-    }
-  }, [activeFileIndex, filteredFiles.length]);
+  const {
+    files: diffFiles,
+    filteredFiles,
+    passes,
+    passRange,
+    setPassRange,
+    diffSearchQuery,
+    setDiffSearchQuery,
+  } = diffViewState;
 
   const {
     comments,
@@ -3082,6 +3078,32 @@ export function SessionDetailContent({ id }: { id: string }) {
   const [summaryOpen, setSummaryOpen] = useState(false);
   const [attributionFilter, setAttributionFilter] = useState<ThreadAttributionFilterValue>({ kind: "all" });
   const attributionAllowedPaths = useAttributionAllowedPaths(attributionFilter, fileEventsQuery.data?.data);
+  const visibleDiffFiles = useMemo(
+    () =>
+      attributionAllowedPaths == null
+        ? diffFiles
+        : diffFiles.filter((f) => attributionAllowedPaths.has(f.newPath) || attributionAllowedPaths.has(f.oldPath)),
+    [attributionAllowedPaths, diffFiles],
+  );
+  const visibleFilteredFiles = useMemo(
+    () =>
+      attributionAllowedPaths == null
+        ? filteredFiles
+        : filteredFiles.filter((f) => attributionAllowedPaths.has(f.newPath) || attributionAllowedPaths.has(f.oldPath)),
+    [attributionAllowedPaths, filteredFiles],
+  );
+
+  useEffect(() => {
+    if (visibleFilteredFiles.length === 0) {
+      if (activeFileIndex !== 0) {
+        setActiveFileIndex(0);
+      }
+      return;
+    }
+    if (activeFileIndex >= visibleFilteredFiles.length) {
+      setActiveFileIndex(visibleFilteredFiles.length - 1);
+    }
+  }, [activeFileIndex, visibleFilteredFiles.length]);
 
   const createThreadMutation = useMutation({
     mutationFn: () => {
@@ -3441,11 +3463,7 @@ export function SessionDetailContent({ id }: { id: string }) {
 
       <TabsContent value="changes" className="flex-1 min-h-0">
         <ChangesTab
-          filteredFiles={
-            attributionAllowedPaths == null
-              ? filteredFiles
-              : filteredFiles.filter((f) => attributionAllowedPaths.has(f.newPath) || attributionAllowedPaths.has(f.oldPath))
-          }
+          filteredFiles={visibleFilteredFiles}
           activeFileIndex={activeFileIndex}
           onFileSelect={setActiveFileIndex}
           onOpenReview={openReview}
@@ -3701,8 +3719,8 @@ export function SessionDetailContent({ id }: { id: string }) {
               <div className="flex-1 min-h-0">
                 <ReviewDiffView
                   sessionId={id}
-                  files={filteredFiles}
-                  allFiles={allDiffFiles}
+                  files={visibleFilteredFiles}
+                  allFiles={visibleDiffFiles}
                   activeFileIndex={activeFileIndex}
                   onFileChange={setActiveFileIndex}
                   onBack={exitReview}

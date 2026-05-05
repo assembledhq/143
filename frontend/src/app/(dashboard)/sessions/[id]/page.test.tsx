@@ -5002,6 +5002,143 @@ describe('SessionDetailPage', () => {
     expect(await screen.findByText(/Review 2 files/)).toBeInTheDocument();
   });
 
+  it('keeps the review diff file set aligned with the Changes tab attribution filter', async () => {
+    const sessionId = 'session-abcdef12-3456-7890';
+    const codexThread: SessionThread = {
+      id: 'thread-codex',
+      session_id: sessionId,
+      org_id: 'org-1',
+      agent_type: 'codex',
+      label: 'Codex',
+      status: 'completed',
+      current_turn: 1,
+      created_at: '2026-02-17T07:00:00Z',
+      cost_cents: 0,
+      pending_message_count: 0,
+    };
+    const claudeThread: SessionThread = {
+      id: 'thread-claude',
+      session_id: sessionId,
+      org_id: 'org-1',
+      agent_type: 'claude_code',
+      label: 'Claude review',
+      status: 'completed',
+      current_turn: 1,
+      created_at: '2026-02-17T07:01:00Z',
+      cost_cents: 0,
+      pending_message_count: 0,
+    };
+    const sessionWithThreadsAndDiff: Session = {
+      ...mockSessions[0],
+      id: sessionId,
+      threads: [codexThread, claudeThread],
+      diff: [
+        'diff --git a/frontend/src/app.ts b/frontend/src/app.ts',
+        '--- a/frontend/src/app.ts',
+        '+++ b/frontend/src/app.ts',
+        '@@ -1 +1,2 @@',
+        ' export const app = true;',
+        '+export const codex = true;',
+        'diff --git a/frontend/src/lib/helpers.ts b/frontend/src/lib/helpers.ts',
+        '--- a/frontend/src/lib/helpers.ts',
+        '+++ b/frontend/src/lib/helpers.ts',
+        '@@ -1 +1,2 @@',
+        ' export const helper = true;',
+        '+export const shared = true;',
+        'diff --git a/frontend/src/components/automation-model-select.tsx b/frontend/src/components/automation-model-select.tsx',
+        '--- a/frontend/src/components/automation-model-select.tsx',
+        '+++ b/frontend/src/components/automation-model-select.tsx',
+        '@@ -1 +1,2 @@',
+        ' export function AutomationModelSelect() {',
+        '+  return null;',
+        ' }',
+      ].join('\n'),
+      diff_stats: { added: 3, removed: 0, files_changed: 3 },
+    };
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({
+          data: sessionWithThreadsAndDiff,
+        } satisfies SingleResponse<Session>);
+      }),
+      http.get('/api/v1/sessions/:id/thread-file-events', () => {
+        return HttpResponse.json({
+          data: [
+            {
+              id: 1,
+              org_id: 'org-1',
+              session_id: sessionId,
+              thread_id: codexThread.id,
+              turn: 1,
+              path: 'frontend/src/app.ts',
+              event_type: 'modified',
+              observed_at: '2026-02-17T07:02:00Z',
+            },
+            {
+              id: 2,
+              org_id: 'org-1',
+              session_id: sessionId,
+              thread_id: codexThread.id,
+              turn: 1,
+              path: 'frontend/src/lib/helpers.ts',
+              event_type: 'modified',
+              observed_at: '2026-02-17T07:02:30Z',
+            },
+            {
+              id: 3,
+              org_id: 'org-1',
+              session_id: sessionId,
+              thread_id: claudeThread.id,
+              turn: 1,
+              path: 'frontend/src/lib/helpers.ts',
+              event_type: 'modified',
+              observed_at: '2026-02-17T07:03:00Z',
+            },
+            {
+              id: 4,
+              org_id: 'org-1',
+              session_id: sessionId,
+              thread_id: claudeThread.id,
+              turn: 1,
+              path: 'frontend/src/components/automation-model-select.tsx',
+              event_type: 'modified',
+              observed_at: '2026-02-17T07:03:30Z',
+            },
+          ],
+          meta: {},
+        } satisfies ListResponse<import('@/lib/types').SessionThreadFileEvent>);
+      }),
+      http.get('/api/v1/sessions/:id/threads/:threadId/messages', () => {
+        return HttpResponse.json({ data: [] as SessionMessage[], meta: {} } satisfies ListResponse<SessionMessage>);
+      }),
+      http.get('/api/v1/sessions/:id/threads/:threadId/logs', () => {
+        return HttpResponse.json({ data: [], meta: {} });
+      }),
+    );
+
+    const user = userEvent.setup();
+    renderWithProviders(<SessionDetailContent id={sessionId} />);
+
+    await screen.findAllByText('Fixed TypeError by adding null check');
+    await user.click(screen.getByRole('tab', { name: /^Changes/ }));
+
+    const changesPanel = screen.getByRole('tabpanel', { name: /^Changes/ });
+    await user.click(within(changesPanel).getByRole('combobox'));
+    await user.click(await screen.findByRole('option', { name: 'Touched by Codex' }));
+
+    expect(await screen.findByText('Review 2 files')).toBeInTheDocument();
+    expect(screen.queryByText(/^automation-model-select\.tsx$/)).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: 'Review 2 files' }));
+
+    expect(await screen.findByText('frontend/src/app.ts')).toBeInTheDocument();
+    expect(screen.getByText('frontend/src/lib/helpers.ts')).toBeInTheDocument();
+    expect(
+      screen.queryByText('frontend/src/components/automation-model-select.tsx')
+    ).not.toBeInTheDocument();
+  });
+
   it('shows model selector for agents with available models', async () => {
     const idleSession: Session = {
       ...mockSessions[0],
