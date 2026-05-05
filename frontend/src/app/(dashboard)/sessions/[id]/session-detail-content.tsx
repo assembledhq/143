@@ -138,7 +138,7 @@ import { useAuth } from "@/hooks/use-auth";
 import { useMediaQuery } from "@/hooks/use-media-query";
 import { prMergedAccent } from "@/lib/pr-status-styles";
 import { cn, sessionTitle, formatTimeAgo } from "@/lib/utils";
-import { activeSet } from "@/lib/session-status-groups";
+import { activeSet, workingStatusesSet } from "@/lib/session-status-groups";
 
 const PREVIEW_ORIGIN_TEMPLATE =
   process.env.NEXT_PUBLIC_PREVIEW_ORIGIN_TEMPLATE ||
@@ -1731,14 +1731,14 @@ function ChatPanel({
     queryKey: activeThreadId ? queryKeys.sessions.threadMessages(sessionId, activeThreadId) : ["session", sessionId, "thread", "none", "messages"],
     queryFn: () => api.sessions.getThreadMessages(sessionId, activeThreadId!),
     enabled: !!activeThreadId,
-    refetchInterval: activeThread && ["pending", "running", "awaiting_input"].includes(activeThread.status) ? 3000 : false,
+    refetchInterval: activeThread && workingStatusesSet.has(activeThread.status) ? 3000 : false,
   });
 
   const threadLogsQuery = useQuery({
     queryKey: activeThreadId ? queryKeys.sessions.threadLogs(sessionId, activeThreadId) : ["session", sessionId, "thread", "none", "logs"],
     queryFn: () => api.sessions.getThreadLogs(sessionId, activeThreadId!),
     enabled: !!activeThreadId,
-    refetchInterval: activeThread && ["pending", "running", "awaiting_input"].includes(activeThread.status) ? 3000 : false,
+    refetchInterval: activeThread && workingStatusesSet.has(activeThread.status) ? 3000 : false,
   });
 
   // Fetch the linked primary issue to display its description as the initial prompt.
@@ -1841,12 +1841,19 @@ function ChatPanel({
   const hasLoadedTimelineInputs = activeThreadId
     ? threadMessagesQuery.isFetched && threadLogsQuery.isFetched
     : timelineQuery.isFetched && (!hasIssue || issueQuery.isFetched);
-  // Skeleton only while we'd reasonably expect content: timeline still loading,
-  // or session is active. Terminal sessions with empty timelines must not shimmer forever.
+  // Skeleton only while we'd reasonably expect content: data still loading, or
+  // the relevant scope is actively working. For a thread-scoped view, "working"
+  // is the selected thread's status — a freshly-created idle thread on an
+  // otherwise-running session must show its empty-state composer, not a
+  // perpetual skeleton. Terminal sessions with empty timelines must not
+  // shimmer forever either.
+  const expectingMoreContent = activeThread
+    ? workingStatusesSet.has(activeThread.status)
+    : activeSet.has(session.status);
   const showLoadingSkeleton =
     timelineEntries.length === 0 &&
     session.status !== "pending" &&
-    (!hasLoadedTimelineInputs || activeSet.has(session.status));
+    (!hasLoadedTimelineInputs || expectingMoreContent);
 
   const persistScrollPosition = useCallback((scrollTop: number) => {
     if (typeof window === "undefined" || !viewerScope) return;
@@ -2786,10 +2793,16 @@ export function SessionDetailContent({ id }: { id: string }) {
     () => comments.filter((comment) => !comment.resolved).slice(0, MAX_RESOLVE_REVIEW_COMMENTS_PER_MESSAGE),
     [comments],
   );
+  // Composer gating: per the design (docs/design/implemented/68-sandbox-agent-tabs-and-threads.md),
+  // Phase 2 supports concurrent threads in one sandbox. The composer is locked
+  // only while the *selected* thread is running — sibling threads being active
+  // (which makes session.status === "running") must not block sending into an
+  // idle thread, since the backend admits concurrent sends up to the per-session
+  // running cap. Pending/skipped/destroyed at the session level still block.
   const composerCanSendMessage = session?.status !== "skipped" &&
     session?.status !== "pending" &&
     session?.sandbox_state !== "destroyed" &&
-    (!activeThread || (session?.status !== "running" && activeThread.status === "idle"));
+    (!activeThread || activeThread.status === "idle");
   const composerIsRunning = activeThread ? activeThread.status === "running" : session?.status === "running";
   const composerIsSnapshotExpired = session?.sandbox_state === "destroyed";
   const composerAgentType = activeThread?.agent_type ?? session?.agent_type ?? "codex";
