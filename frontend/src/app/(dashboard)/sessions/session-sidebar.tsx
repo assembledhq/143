@@ -492,10 +492,11 @@ export function SessionSidebar() {
             >
               <Link
                 href={`/sessions/${session.id}${filterSuffix}`}
+                aria-current={isSelected ? "page" : undefined}
                 className={cn(
                   "block rounded-lg border border-border/50 bg-background px-3 py-2.5 shadow-sm transition-all duration-150 md:border-transparent md:bg-muted/30 md:shadow-none",
                   isSelected
-                    ? "border-border/60 bg-background shadow-sm"
+                    ? "border-border/60 bg-background shadow-sm md:border-border/60 md:bg-background md:shadow-sm"
                     : "hover:border-border/60 hover:bg-background md:hover:border-transparent md:hover:bg-background/60"
                 )}
               >
