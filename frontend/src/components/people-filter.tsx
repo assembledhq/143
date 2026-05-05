@@ -1,15 +1,15 @@
 "use client";
 
-import { Check, ChevronDown, Users } from "lucide-react";
+import { ChevronDown, Users } from "lucide-react";
 import { useMemo, useState } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
   Command,
+  CommandCheckItem,
   CommandEmpty,
   CommandGroup,
   CommandInput,
-  CommandItem,
   CommandList,
 } from "@/components/ui/command";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
@@ -147,26 +147,20 @@ export function PeopleFilter({
                       : false;
 
                   return (
-                    <CommandItem
+                    <CommandCheckItem
                       key={member.id}
+                      checked={isChecked}
                       value={`${member.name} ${member.email}`}
                       onSelect={() => toggleMember(member.id)}
-                      className="flex items-center gap-2"
+                      className="flex items-center"
                     >
-                      <span className={cn(
-                        "flex h-4 w-4 items-center justify-center rounded-sm border border-border",
-                        isChecked && "bg-primary text-primary-foreground border-primary",
-                      )}
-                      >
-                        {isChecked && <Check className="h-3 w-3" />}
-                      </span>
                       <span className="min-w-0 flex-1 truncate text-sm">
                         {member.name}
                         {member.id === currentUser?.id && (
                           <span className="ml-1 text-xs text-muted-foreground">(you)</span>
                         )}
                       </span>
-                    </CommandItem>
+                    </CommandCheckItem>
                   );
                 })}
               </CommandGroup>
