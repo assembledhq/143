@@ -500,9 +500,9 @@ export function SessionSidebar() {
               actionIcon={isArchived ? <ArchiveRestore className="h-4 w-4" /> : <Archive className="h-4 w-4" />}
               onAction={() => {
                 if (isArchived) {
-                  unarchiveMutation.mutate(session.id);
+                  return unarchiveMutation.mutateAsync(session.id);
                 } else {
-                  archiveMutation.mutate(session.id);
+                  return archiveMutation.mutateAsync(session.id);
                 }
               }}
             >
@@ -525,57 +525,55 @@ export function SessionSidebar() {
                     )}
                   />
                   <div className="flex items-start gap-2.5 min-w-0">
-                  {/* Unread / working indicator */}
-                  <div className="mt-1.5 shrink-0">
-                    {isWorkingSession ? (
-                      <StatusDot animate color="bg-primary" pingColor="bg-primary/60" />
-                    ) : hasUnread ? (
-                      <StatusDot color="bg-primary" />
-                    ) : (
-                      <span className="inline-flex rounded-full h-2 w-2" />
-                    )}
-                  </div>
-
-                  {/* Content */}
-                  <div className="min-w-0 flex-1">
-                    <div className="flex items-start justify-between gap-2">
-                      <p className={cn(
-                        "text-xs font-medium truncate leading-snug",
-                        hasUnread || isWorkingSession ? "text-foreground" : "text-muted-foreground"
-                      )}>
-                        {title}
-                      </p>
+                    <div className="mt-1.5 shrink-0">
+                      {isWorkingSession ? (
+                        <StatusDot animate color="bg-primary" pingColor="bg-primary/60" />
+                      ) : hasUnread ? (
+                        <StatusDot color="bg-primary" />
+                      ) : (
+                        <span className="inline-flex rounded-full h-2 w-2" />
+                      )}
                     </div>
-                    <div className="mt-0.5 flex min-w-0 items-center gap-2">
-                      <div
-                        data-testid={`session-row-meta-scroll-${session.id}`}
-                        className="min-w-0 flex-1 overflow-x-auto overflow-y-hidden scrollbar-hide"
-                      >
-                        <div className="flex min-w-max items-center gap-1.5 pr-1">
-                          <span className="text-xs text-muted-foreground shrink-0">
-                            <span>{cfg.label}</span>
-                            {isWorkingSession && <AnimatedEllipsis />}
-                          </span>
-                          {session.pm_plan_id && !session.triggered_by_user_id && (
-                            <span className="inline-flex items-center rounded-full bg-primary/10 px-1.5 py-0.5 text-xs font-medium text-primary shrink-0">
-                              PM
+
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-start justify-between gap-2">
+                        <p className={cn(
+                          "text-xs font-medium truncate leading-snug",
+                          hasUnread || isWorkingSession ? "text-foreground" : "text-muted-foreground"
+                        )}>
+                          {title}
+                        </p>
+                      </div>
+                      <div className="mt-0.5 flex min-w-0 items-center gap-2">
+                        <div
+                          data-testid={`session-row-meta-scroll-${session.id}`}
+                          className="min-w-0 flex-1 overflow-x-auto overflow-y-hidden scrollbar-hide"
+                        >
+                          <div className="flex min-w-max items-center gap-1.5 pr-1">
+                            <span className="text-xs text-muted-foreground shrink-0">
+                              <span>{cfg.label}</span>
+                              {isWorkingSession && <AnimatedEllipsis />}
                             </span>
-                          )}
-                          <SessionLinearBadge session={session} />
-                          <span className="text-xs text-muted-foreground/50 shrink-0">
-                            {formatTimeAgo(ts)}
-                          </span>
-                          <PRStatusBadge prSummary={session.pr_summary} />
-                          <SessionDiffBadge diffStats={session.diff_stats} />
+                            {session.pm_plan_id && !session.triggered_by_user_id && (
+                              <span className="inline-flex items-center rounded-full bg-primary/10 px-1.5 py-0.5 text-xs font-medium text-primary shrink-0">
+                                PM
+                              </span>
+                            )}
+                            <SessionLinearBadge session={session} />
+                            <span className="text-xs text-muted-foreground/50 shrink-0">
+                              {formatTimeAgo(ts)}
+                            </span>
+                            <PRStatusBadge prSummary={session.pr_summary} />
+                            <SessionDiffBadge diffStats={session.diff_stats} />
+                          </div>
                         </div>
                       </div>
+                      {session.status === "failed" && (session.failure_explanation || session.error) && (
+                        <p className="text-xs text-destructive/70 truncate mt-0.5">
+                          {session.failure_explanation || session.error}
+                        </p>
+                      )}
                     </div>
-                    {session.status === "failed" && (session.failure_explanation || session.error) && (
-                      <p className="text-xs text-destructive/70 truncate mt-0.5">
-                        {session.failure_explanation || session.error}
-                      </p>
-                    )}
-                  </div>
                   </div>
                 </Link>
                 <Button
