@@ -95,7 +95,7 @@ export function PeopleFilter({
     <div className={cn("min-w-0", className)}>
       <Popover open={open} onOpenChange={setOpen}>
         <PopoverTrigger asChild>
-          <Button variant="outline" size="sm" className="h-8 gap-1.5 bg-background min-w-0">
+          <Button variant="outline" className="bg-background min-w-0">
             <Users className="h-3.5 w-3.5 text-muted-foreground" />
             <span className="truncate">{label}</span>
             <ChevronDown className="h-3 w-3 text-muted-foreground" />
