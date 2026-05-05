@@ -234,6 +234,17 @@ describe('SessionSidebar', () => {
     );
   });
 
+  it('does not render a separate open-details icon for session rows', async () => {
+    serveSessions([
+      makeSession({ id: 's1', result_summary: 'No extra open button' }),
+    ]);
+
+    renderWithProviders(<SessionSidebar />);
+    await screen.findByText('No extra open button');
+
+    expect(screen.queryByRole('link', { name: 'Open session details for No extra open button' })).not.toBeInTheDocument();
+  });
+
   it('navigates when the selected row shell is tapped', async () => {
     mockSelectedSegment = 's1';
     serveSessions([
@@ -697,9 +708,9 @@ describe('SessionSidebar', () => {
     const selectedRow = screen.getByText('Selected session').closest('a')?.parentElement;
     const unselectedRow = screen.getByText('Other session').closest('a')?.parentElement;
 
-    expect(selectedRow).toHaveClass('border', 'p-1', 'gap-1.5');
+    expect(selectedRow).toHaveClass('border', 'p-1');
     expect(selectedRow).toHaveClass('border-primary/20');
-    expect(unselectedRow).toHaveClass('border', 'border-transparent', 'p-1', 'gap-1.5');
+    expect(unselectedRow).toHaveClass('border', 'border-transparent', 'p-1');
   });
 
   it('highlights the selected session from the active layout segment', async () => {
@@ -785,10 +796,8 @@ describe('SessionSidebar', () => {
 
     await screen.findByText('Overflow session');
 
-    const detailsButton = screen.getByRole('link', { name: 'Open session details for Overflow session' });
-    expect(detailsButton.className).toContain('shrink-0');
-    expect(detailsButton.className).toContain('self-center');
-    expect(detailsButton).toHaveAttribute(
+    const sessionLink = screen.getByText('Overflow session').closest('a');
+    expect(sessionLink).toHaveAttribute(
       'href',
       '/sessions/s1?people=all&status=active&repo=repo-1&search=Overflow',
     );
