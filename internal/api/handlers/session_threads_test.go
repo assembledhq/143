@@ -681,6 +681,41 @@ func TestSessionThreadHandler_SendThreadMessage(t *testing.T) {
 			expectedCode:   http.StatusBadRequest,
 			expectedError:  "INVALID_BODY",
 		},
+		{
+			// Malformed comment IDs are caught at the wire-level parser
+			// before any service work happens — same shape session-level
+			// SendMessage uses, so the two surfaces stay consistent.
+			name:           "malformed comment ID rejected by parser",
+			sessionIDParam: sessionID.String(),
+			threadIDParam:  threadID.String(),
+			body:           `{"message":"hi","resolve_review_comment_ids":["not-a-uuid"]}`,
+			setupDeps:      func(deps *threadTestDeps) {},
+			expectedCode:   http.StatusBadRequest,
+			expectedError:  "INVALID_REVIEW_COMMENT_ID",
+		},
+		{
+			// When the service is wired without a resolver but the client
+			// sends comment IDs, surface a 400 with REVIEW_COMMENTS_NOT_CONFIGURED
+			// so the client can disable the feature flag rather than retrying.
+			// The default newThreadHandler does not call SetReviewCommentResolver.
+			name:           "resolve IDs rejected when resolver not wired",
+			sessionIDParam: sessionID.String(),
+			threadIDParam:  threadID.String(),
+			body:           `{"message":"hi","resolve_review_comment_ids":["00000000-0000-4000-8000-000000000000"]}`,
+			setupDeps: func(deps *threadTestDeps) {
+				deps.threadStore.claimIdleFn = func(_ context.Context, _, _, _ uuid.UUID) (models.SessionThread, error) {
+					return models.SessionThread{
+						ID:          threadID,
+						SessionID:   sessionID,
+						OrgID:       orgID,
+						Status:      models.ThreadStatusRunning,
+						CurrentTurn: 1,
+					}, nil
+				}
+			},
+			expectedCode:  http.StatusBadRequest,
+			expectedError: "REVIEW_COMMENTS_NOT_CONFIGURED",
+		},
 	}
 
 	for _, tt := range tests {

@@ -2564,6 +2564,9 @@ func TestAutomationRunHandler_HappyPath(t *testing.T) {
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at", "last_activity_at"}).AddRow(sessionID, now, now))
+	mock.ExpectQuery(`INSERT INTO session_threads`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
 	mock.ExpectCommit()
 
 	// 5. Enqueue run_agent (with dedupe key on the session ID).
@@ -3969,6 +3972,41 @@ func TestRunAgentHandler_PendingSessionUsesFreshRunPath(t *testing.T) {
 	require.NoError(t, err, "run_agent should succeed for a pending session")
 	require.Equal(t, 1, orch.runAgentCalls, "pending run_agent jobs should execute a fresh run")
 	require.Equal(t, 0, orch.recoverSessionCalls, "pending run_agent jobs should not enter recovery mode")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestRunAgentHandler_PassesPrimaryThreadIDFromPayload(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+
+	orgID := uuid.New()
+	runID := uuid.New()
+	threadID := uuid.New()
+	issueID := uuid.New()
+
+	mock.ExpectQuery("SELECT .* FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(workerSessionColumns).AddRow(
+				workerSessionRow(runID, issueID, orgID, string(models.SessionStatusPending), 0, nil, nil)...,
+			),
+		)
+
+	orch := &orchestratorServiceStub{
+		runAgentFn: func(_ context.Context, run *models.Session) error {
+			require.NotNil(t, run.PrimaryThreadID, "run_agent should set the primary thread ID on the orchestrator session")
+			require.Equal(t, threadID, *run.PrimaryThreadID, "run_agent should pass the primary thread ID to the orchestrator")
+			return nil
+		},
+	}
+	handler := newRunAgentHandler(stores, &Services{Orchestrator: orch}, zerolog.Nop())
+	payload := json.RawMessage(`{"session_id":"` + runID.String() + `","org_id":"` + orgID.String() + `","thread_id":"` + threadID.String() + `"}`)
+
+	err := handler(context.Background(), "run_agent", payload)
+	require.NoError(t, err, "run_agent should accept a primary thread ID payload")
+	require.Equal(t, 1, orch.runAgentCalls, "pending run_agent jobs should execute a fresh run")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 

@@ -611,6 +611,9 @@ func expectManualSessionCreate(mock pgxmock.PgxPoolIface, runID uuid.UUID, now t
 	mock.ExpectQuery("INSERT INTO sessions").
 		WithArgs(sessionAnyArgs(26)...).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at", "last_activity_at"}).AddRow(runID, now, now))
+	mock.ExpectQuery("INSERT INTO session_threads").
+		WithArgs(sessionAnyArgs(6)...).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
 	mock.ExpectCommit()
 }
 
@@ -619,6 +622,9 @@ func expectIssueSessionCreate(mock pgxmock.PgxPoolIface, runID uuid.UUID, now ti
 	mock.ExpectQuery("INSERT INTO sessions").
 		WithArgs(sessionAnyArgs(26)...).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at", "last_activity_at"}).AddRow(runID, now, now))
+	mock.ExpectQuery("INSERT INTO session_threads").
+		WithArgs(sessionAnyArgs(6)...).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
 	mock.ExpectExec("INSERT INTO session_issue_links").
 		WithArgs(sessionAnyArgs(4)...).
 		WillReturnResult(pgxmock.NewResult("INSERT", 1))
@@ -5823,148 +5829,85 @@ func TestCurrentResolutionPass(t *testing.T) {
 	}
 }
 
-func TestResolveCommentsError_Write(t *testing.T) {
+// TestParseAndDedupeReviewCommentIDs covers the shared helper used by both
+// session-level SendMessage and thread-level SendThreadMessage. The
+// behaviors under test (cap, dedupe, malformed UUID rejection) are uniform
+// across both surfaces; the deeper validate-and-resolve tests live in the db
+// package against ValidateAndResolveByIDs.
+func TestParseAndDedupeReviewCommentIDs(t *testing.T) {
 	t.Parallel()
 
-	tests := []struct {
-		name       string
-		err        *resolveCommentsError
-		expectCode string
-	}{
-		{
-			name: "writes plain error",
-			err: &resolveCommentsError{
-				status: http.StatusBadRequest, code: "BAD_COMMENTS", message: "bad comments",
-			},
-			expectCode: "BAD_COMMENTS",
-		},
-		{
-			name: "writes underlying error",
-			err: &resolveCommentsError{
-				status: http.StatusInternalServerError, code: "COMMENT_LOOKUP_FAILED", message: "lookup failed", underlying: errors.New("db down"),
-			},
-			expectCode: "COMMENT_LOOKUP_FAILED",
-		},
-	}
+	t.Run("returns nil for empty input", func(t *testing.T) {
+		t.Parallel()
+		out, perr := parseAndDedupeReviewCommentIDs(nil)
+		require.Nil(t, perr)
+		require.Nil(t, out)
+	})
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
+	t.Run("rejects malformed UUID before any work", func(t *testing.T) {
+		t.Parallel()
+		out, perr := parseAndDedupeReviewCommentIDs([]string{"not-a-uuid"})
+		require.NotNil(t, perr)
+		require.Equal(t, "INVALID_REVIEW_COMMENT_ID", perr.code)
+		require.Equal(t, http.StatusBadRequest, perr.status)
+		require.Empty(t, out)
+	})
 
-			req := httptest.NewRequest(http.MethodPost, "/", nil)
-			w := httptest.NewRecorder()
-			tt.err.write(w, req)
-			require.Equal(t, tt.err.status, w.Code, "resolveCommentsError should write the configured HTTP status")
-			require.Contains(t, w.Body.String(), tt.expectCode, "response should include the configured error code")
-		})
-	}
+	t.Run("rejects too many IDs", func(t *testing.T) {
+		t.Parallel()
+		raw := make([]string, maxReviewCommentResolveIDsPerMessage+1)
+		for i := range raw {
+			raw[i] = uuid.New().String()
+		}
+		out, perr := parseAndDedupeReviewCommentIDs(raw)
+		require.NotNil(t, perr)
+		require.Equal(t, "TOO_MANY_REVIEW_COMMENT_IDS", perr.code)
+		require.Equal(t, http.StatusBadRequest, perr.status)
+		require.Empty(t, out)
+	})
+
+	t.Run("dedupes preserving first occurrence", func(t *testing.T) {
+		t.Parallel()
+		a := uuid.New()
+		b := uuid.New()
+		out, perr := parseAndDedupeReviewCommentIDs([]string{a.String(), b.String(), a.String()})
+		require.Nil(t, perr)
+		require.Equal(t, []uuid.UUID{a, b}, out)
+	})
 }
 
-func TestResolveSessionReviewComments(t *testing.T) {
+func TestRenderReviewCommentResolveError(t *testing.T) {
 	t.Parallel()
 
-	t.Run("no-op for empty IDs or missing store", func(t *testing.T) {
+	t.Run("returns false for nil error", func(t *testing.T) {
 		t.Parallel()
-
-		orgID := uuid.New()
-		sessionID := uuid.New()
-		resolved, rerr := resolveSessionReviewComments(context.Background(), nil, orgID, sessionID, []uuid.UUID{uuid.New()}, 1)
-		require.Nil(t, rerr, "nil store should be a no-op")
-		require.Empty(t, resolved, "nil store should not resolve comments")
-
-		mock, err := pgxmock.NewPool()
-		require.NoError(t, err, "pgxmock pool should initialize")
-		defer mock.Close()
-
-		store := db.NewSessionReviewCommentStore(mock)
-		resolved, rerr = resolveSessionReviewComments(context.Background(), store, orgID, sessionID, nil, 1)
-		require.Nil(t, rerr, "empty ID list should be a no-op")
-		require.Empty(t, resolved, "empty ID list should not resolve comments")
-		require.NoError(t, mock.ExpectationsWereMet(), "empty ID list should not query the store")
+		w := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/", nil)
+		require.False(t, renderReviewCommentResolveError(w, req, nil))
+		require.Equal(t, http.StatusOK, w.Code, "no body should be written")
 	})
 
-	t.Run("returns lookup errors", func(t *testing.T) {
+	t.Run("returns false for unrelated errors", func(t *testing.T) {
 		t.Parallel()
-
-		mock, err := pgxmock.NewPool()
-		require.NoError(t, err, "pgxmock pool should initialize")
-		defer mock.Close()
-
-		orgID := uuid.New()
-		sessionID := uuid.New()
-		commentID := uuid.New()
-		mock.ExpectQuery("SELECT .+ FROM session_review_comments WHERE id = ANY").
-			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-			WillReturnError(errors.New("connection refused"))
-
-		resolved, rerr := resolveSessionReviewComments(context.Background(), db.NewSessionReviewCommentStore(mock), orgID, sessionID, []uuid.UUID{commentID}, 1)
-		require.Empty(t, resolved, "lookup failure should not return resolved comments")
-		require.NotNil(t, rerr, "lookup failure should return a structured error")
-		require.Equal(t, "REVIEW_COMMENT_LOOKUP_FAILED", rerr.code, "lookup failure should use the lookup error code")
-		require.NoError(t, mock.ExpectationsWereMet(), "all store expectations should be met")
+		w := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/", nil)
+		require.False(t, renderReviewCommentResolveError(w, req, errors.New("connection refused")))
+		require.Equal(t, http.StatusOK, w.Code, "unrelated errors should not be written by this helper")
 	})
 
-	t.Run("caps missing ID details", func(t *testing.T) {
+	t.Run("renders ErrReviewCommentsNotInSession with capped IDs", func(t *testing.T) {
 		t.Parallel()
-
-		mock, err := pgxmock.NewPool()
-		require.NoError(t, err, "pgxmock pool should initialize")
-		defer mock.Close()
-
-		now := time.Now()
-		orgID := uuid.New()
-		sessionID := uuid.New()
-		userID := uuid.New()
 		ids := []uuid.UUID{uuid.New(), uuid.New(), uuid.New(), uuid.New(), uuid.New(), uuid.New(), uuid.New()}
-		mock.ExpectQuery("SELECT .+ FROM session_review_comments WHERE id = ANY").
-			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-			WillReturnRows(
-				pgxmock.NewRows(reviewCommentColumns).
-					AddRow(ids[0], sessionID, orgID, userID, "main.go",
-						1, "right", "exists", false, (*time.Time)(nil), (*int)(nil),
-						1, now, now),
-			)
-
-		resolved, rerr := resolveSessionReviewComments(context.Background(), db.NewSessionReviewCommentStore(mock), orgID, sessionID, ids, 1)
-		require.Empty(t, resolved, "missing IDs should not resolve comments")
-		require.NotNil(t, rerr, "missing IDs should return a structured error")
-		require.Equal(t, "INVALID_REVIEW_COMMENT_IDS", rerr.code, "missing IDs should use the invalid IDs error code")
-		require.NotContains(t, rerr.message, ids[0].String(), "existing IDs should not be reported as missing")
-		require.Contains(t, rerr.message, ids[1].String(), "first missing ID should be reported")
-		require.Contains(t, rerr.message, ids[5].String(), "fifth missing ID should be reported")
-		require.NotContains(t, rerr.message, ids[6].String(), "missing ID details should be capped")
-		require.NoError(t, mock.ExpectationsWereMet(), "all store expectations should be met")
-	})
-
-	t.Run("returns resolve errors", func(t *testing.T) {
-		t.Parallel()
-
-		mock, err := pgxmock.NewPool()
-		require.NoError(t, err, "pgxmock pool should initialize")
-		defer mock.Close()
-
-		now := time.Now()
-		orgID := uuid.New()
-		sessionID := uuid.New()
-		userID := uuid.New()
-		commentID := uuid.New()
-		mock.ExpectQuery("SELECT .+ FROM session_review_comments WHERE id = ANY").
-			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-			WillReturnRows(
-				pgxmock.NewRows(reviewCommentColumns).
-					AddRow(commentID, sessionID, orgID, userID, "main.go",
-						1, "right", "exists", false, (*time.Time)(nil), (*int)(nil),
-						1, now, now),
-			)
-		mock.ExpectQuery("UPDATE session_review_comments SET resolved = true").
-			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-			WillReturnError(errors.New("connection refused"))
-
-		resolved, rerr := resolveSessionReviewComments(context.Background(), db.NewSessionReviewCommentStore(mock), orgID, sessionID, []uuid.UUID{commentID}, 2)
-		require.Empty(t, resolved, "resolve failure should not return resolved comments")
-		require.NotNil(t, rerr, "resolve failure should return a structured error")
-		require.Equal(t, "REVIEW_COMMENT_RESOLVE_FAILED", rerr.code, "resolve failure should use the resolve error code")
-		require.NoError(t, mock.ExpectationsWereMet(), "all store expectations should be met")
+		w := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/", nil)
+		require.True(t, renderReviewCommentResolveError(w, req, &db.ErrReviewCommentsNotInSession{Missing: ids}))
+		require.Equal(t, http.StatusBadRequest, w.Code)
+		body := w.Body.String()
+		require.Contains(t, body, "INVALID_REVIEW_COMMENT_IDS")
+		require.Contains(t, body, ids[0].String(), "first missing ID should appear")
+		require.Contains(t, body, ids[4].String(), "fifth missing ID should appear")
+		require.NotContains(t, body, ids[5].String(), "missing ID details should be capped at 5")
+		require.NotContains(t, body, ids[6].String(), "missing ID details should be capped at 5")
 	})
 }
 

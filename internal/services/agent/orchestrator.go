@@ -325,6 +325,12 @@ type SessionMessageStore interface {
 	ListBySession(ctx context.Context, orgID, sessionID uuid.UUID) ([]models.SessionMessage, error)
 }
 
+type SessionThreadStore interface {
+	UpdateStatus(ctx context.Context, orgID, threadID uuid.UUID, status models.ThreadStatus) error
+	CompleteTurn(ctx context.Context, orgID, threadID uuid.UUID, turnNumber int, agentSessionID string) error
+	UpdateResult(ctx context.Context, orgID, threadID uuid.UUID, status models.ThreadStatus, result *models.SessionResult) error
+}
+
 type SessionIssueLinkStore interface {
 	ListBySession(ctx context.Context, orgID, sessionID uuid.UUID) ([]models.SessionIssueLink, error)
 }
@@ -410,6 +416,7 @@ type Orchestrator struct {
 	agentRunLogs      SessionLogStore
 	agentRunQuestions SessionQuestionStore
 	sessionMessages   SessionMessageStore
+	sessionThreads    SessionThreadStore
 	sessionIssueLinks SessionIssueLinkStore
 	issueSnapshots    SessionIssueSnapshotStore
 	decisionLog       DecisionLogStore
@@ -488,6 +495,7 @@ type OrchestratorConfig struct {
 	SessionLogs       SessionLogStore
 	SessionQuestions  SessionQuestionStore
 	SessionMessages   SessionMessageStore
+	SessionThreads    SessionThreadStore
 	SessionIssueLinks SessionIssueLinkStore
 	IssueSnapshots    SessionIssueSnapshotStore
 	DecisionLog       DecisionLogStore
@@ -569,6 +577,7 @@ func NewOrchestrator(cfg OrchestratorConfig) *Orchestrator {
 		agentRunLogs:      cfg.SessionLogs,
 		agentRunQuestions: cfg.SessionQuestions,
 		sessionMessages:   cfg.SessionMessages,
+		sessionThreads:    cfg.SessionThreads,
 		sessionIssueLinks: cfg.SessionIssueLinks,
 		issueSnapshots:    cfg.IssueSnapshots,
 		decisionLog:       cfg.DecisionLog,
@@ -1255,6 +1264,16 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 	if err := o.sessions.UpdateStatus(ctx, run.OrgID, run.ID, "running"); err != nil {
 		return fmt.Errorf("update run status to running: %w", err)
 	}
+	var primaryThreadID *uuid.UUID
+	if run.PrimaryThreadID != nil && *run.PrimaryThreadID != uuid.Nil {
+		threadID := *run.PrimaryThreadID
+		primaryThreadID = &threadID
+		if o.sessionThreads != nil {
+			if err := o.sessionThreads.UpdateStatus(ctx, run.OrgID, threadID, models.ThreadStatusRunning); err != nil {
+				log.Warn().Err(err).Str("thread_id", threadID.String()).Msg("failed to mark primary thread running")
+			}
+		}
+	}
 	if run.PrimaryIssueID != nil && o.issues != nil {
 		if err := o.issues.UpdateStatus(ctx, run.OrgID, *run.PrimaryIssueID, "in_progress"); err != nil {
 			log.Warn().Err(err).Str("issue_id", run.PrimaryIssueID.String()).Msg("failed to update primary issue status to in_progress")
@@ -1589,6 +1608,10 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 	}()
 	if o.nodeID != "" {
 		if err := o.sessions.SetWorkerNodeIDForContainer(ctx, run.OrgID, run.ID, sandbox.ID, o.nodeID); err != nil {
+			log.Error().Err(err).
+				Str("container_id", sandbox.ID).
+				Str("worker_node_id", o.nodeID).
+				Msg("persist session worker ownership: CAS failed (container_id moved or worker_node_id held by another worker)")
 			o.failRun(ctx, run, fmt.Sprintf("persist session worker ownership: %s", err))
 			return fmt.Errorf("persist session worker ownership: %w", err)
 		}
@@ -1699,7 +1722,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 	logWg.Add(1)
 	go func() {
 		defer logWg.Done()
-		o.streamLogs(ctx, run.ID, run.OrgID, nil, turnNumber, logCh, runtimeTracker)
+		o.streamLogs(ctx, run.ID, run.OrgID, primaryThreadID, turnNumber, logCh, runtimeTracker)
 	}()
 
 	execCtx := WithSandboxProvider(ctx, o.provider)
@@ -1708,7 +1731,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 	logWg.Wait()
 
 	// 10b. Retry once on token expiration for Codex agents.
-	result, err = o.retryOnTokenExpired(ctx, run.AgentType, run.OrgID, run.TriggeredByUserID, run.ID, nil, turnNumber, sandbox, adapter, execCtx, prompt, result, err, log)
+	result, err = o.retryOnTokenExpired(ctx, run.AgentType, run.OrgID, run.TriggeredByUserID, run.ID, primaryThreadID, turnNumber, sandbox, adapter, execCtx, prompt, result, err, log)
 
 	// 10c. Shed the just-picked credential's in-process health-cache slot if
 	// the (possibly retried) result indicates a credential-level failure.
@@ -1757,6 +1780,9 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 		}
 		o.failRun(ctx, run, err.Error())
 		logAgentRunFailed(log, run, err, "failed", runStartedAt, nil)
+		o.updatePrimaryThreadTerminal(ctx, run, models.ThreadStatusFailed, &models.SessionResult{
+			Error: strPtr(err.Error()),
+		}, log)
 		o.enqueueJob(ctx, run.OrgID, "agent", "analyze_failure", map[string]interface{}{
 			"session_id": run.ID.String(),
 			"org_id":     run.OrgID.String(),
@@ -1820,7 +1846,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 
 	if isInteractive {
 		turnNumber := run.CurrentTurn + 1
-		if err := o.createAssistantMessage(ctx, run.ID, run.OrgID, nil, turnNumber, result); err != nil {
+		if err := o.createAssistantMessage(ctx, run.ID, run.OrgID, primaryThreadID, turnNumber, result); err != nil {
 			log.Warn().Err(err).Msg("failed to persist assistant message for interactive turn")
 		}
 
@@ -1830,6 +1856,11 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 		}
 		if err := o.sessions.UpdateTurnComplete(ctx, run.OrgID, run.ID, turnNumber, runResult, agentSessionID, snapshotKey); err != nil {
 			return fmt.Errorf("update interactive turn result: %w", err)
+		}
+		if primaryThreadID != nil && o.sessionThreads != nil {
+			if err := o.sessionThreads.CompleteTurn(ctx, run.OrgID, *primaryThreadID, turnNumber, agentSessionID); err != nil {
+				log.Warn().Err(err).Str("thread_id", primaryThreadID.String()).Msg("failed to mark primary thread turn complete")
+			}
 		}
 
 		log.Info().
@@ -1846,6 +1877,11 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 
 	if err := o.sessions.UpdateResult(ctx, run.OrgID, run.ID, status, runResult); err != nil {
 		return fmt.Errorf("update run result: %w", err)
+	}
+	if primaryThreadID != nil && o.sessionThreads != nil {
+		if err := o.sessionThreads.UpdateResult(ctx, run.OrgID, *primaryThreadID, models.ThreadStatusCompleted, runResult); err != nil {
+			log.Warn().Err(err).Str("thread_id", primaryThreadID.String()).Msg("failed to persist primary thread result")
+		}
 	}
 
 	// Persist snapshot metadata so the session can be continued later.
@@ -2403,6 +2439,10 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	}()
 	if o.nodeID != "" {
 		if err := o.sessions.SetWorkerNodeIDForContainer(ctx, session.OrgID, session.ID, sandbox.ID, o.nodeID); err != nil {
+			log.Error().Err(err).
+				Str("container_id", sandbox.ID).
+				Str("worker_node_id", o.nodeID).
+				Msg("persist session worker ownership: CAS failed (container_id moved or worker_node_id held by another worker)")
 			if revertErr := o.sessions.UpdateStatus(ctx, session.OrgID, session.ID, string(models.SessionStatusIdle)); revertErr != nil {
 				log.Error().Err(revertErr).Msg("failed to revert session to idle after worker ownership persistence failure")
 			}
@@ -3151,6 +3191,10 @@ func (o *Orchestrator) failTimedOutSession(run *models.Session, elapsed time.Dur
 			"Retry the session — transient slowness (LLM latency, git clone) may have pushed the run over the edge",
 		},
 	)
+	o.updatePrimaryThreadTerminal(cleanupCtx, run, models.ThreadStatusFailed, &models.SessionResult{
+		Error:           &explanation,
+		FailureCategory: strPtr(FailureCategoryTimeout),
+	}, log)
 }
 
 // ensureCodexAuth injects Codex auth credentials into the sandbox, failing the
@@ -3632,11 +3676,18 @@ func (o *Orchestrator) handleCancelledSession(ctx context.Context, session *mode
 		if err := o.sessions.UpdateTurnComplete(bgCtx, session.OrgID, session.ID, turnNumber, nil, agentSessionID, snapshotKey); err != nil {
 			log.Warn().Err(err).Msg("failed to return cancelled session to idle")
 			_ = o.sessions.UpdateStatus(bgCtx, session.OrgID, session.ID, string(models.SessionStatusCancelled))
+			o.updatePrimaryThreadTerminal(bgCtx, session, models.ThreadStatusCancelled, nil, log)
 		} else {
 			log.Info().Int("turn", turnNumber).Msg("cancelled session returned to idle")
+			if o.sessionThreads != nil && session.PrimaryThreadID != nil && *session.PrimaryThreadID != uuid.Nil {
+				if threadErr := o.sessionThreads.CompleteTurn(bgCtx, session.OrgID, *session.PrimaryThreadID, turnNumber, agentSessionID); threadErr != nil {
+					log.Warn().Err(threadErr).Str("thread_id", session.PrimaryThreadID.String()).Msg("failed to return primary thread to idle after cancel")
+				}
+			}
 		}
 	} else {
 		_ = o.sessions.UpdateStatus(bgCtx, session.OrgID, session.ID, string(models.SessionStatusCancelled))
+		o.updatePrimaryThreadTerminal(bgCtx, session, models.ThreadStatusCancelled, nil, log)
 	}
 }
 
@@ -3752,6 +3803,10 @@ func (o *Orchestrator) handlePolicyStoppedSession(ctx context.Context, session *
 
 	errMsg, explanation, nextSteps := gracefulStopFailure(reason, snapshotKey != "", session.SnapshotKey != nil && *session.SnapshotKey != "")
 	o.failRunWithCategory(bgCtx, session, errMsg, FailureCategoryTimeout, explanation, nextSteps)
+	o.updatePrimaryThreadTerminal(bgCtx, session, models.ThreadStatusFailed, &models.SessionResult{
+		Error:           &explanation,
+		FailureCategory: strPtr(FailureCategoryTimeout),
+	}, log)
 }
 
 func gracefulStopFailure(reason StopReason, checkpointedThisTurn, hadPriorCheckpoint bool) (string, string, []string) {
@@ -3850,6 +3905,32 @@ func strPtr(s string) *string {
 		return nil
 	}
 	return &s
+}
+
+// updatePrimaryThreadTerminal mirrors a session-level terminal transition onto
+// the seeded primary thread row. When result is non-nil, it persists the same
+// failure_explanation / failure_category / result_summary / diff the session
+// got so per-thread review surfaces (Phase 2) have data to display; when nil,
+// it just transitions the status (e.g. cancel without a result payload). All
+// errors are logged best-effort because this is bookkeeping — a failure here
+// must not abort the surrounding session-level cleanup.
+func (o *Orchestrator) updatePrimaryThreadTerminal(ctx context.Context, run *models.Session, status models.ThreadStatus, result *models.SessionResult, log zerolog.Logger) {
+	if o.sessionThreads == nil || run == nil || run.PrimaryThreadID == nil || *run.PrimaryThreadID == uuid.Nil {
+		return
+	}
+	threadID := *run.PrimaryThreadID
+	var err error
+	if result != nil {
+		err = o.sessionThreads.UpdateResult(ctx, run.OrgID, threadID, status, result)
+	} else {
+		err = o.sessionThreads.UpdateStatus(ctx, run.OrgID, threadID, status)
+	}
+	if err != nil {
+		log.Warn().Err(err).
+			Str("thread_id", threadID.String()).
+			Str("status", string(status)).
+			Msg("failed to update primary thread terminal status")
+	}
 }
 
 func timePtr(t time.Time) *time.Time {

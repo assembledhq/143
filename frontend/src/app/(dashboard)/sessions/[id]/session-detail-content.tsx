@@ -117,7 +117,6 @@ import {
 } from "@/lib/session-open-position";
 import type { ListResponse, Session, SessionDetail, SessionInputCommand, SessionInputReference, SessionLog, SessionMessage, SessionReviewComment, SessionThread, SessionTimelineEntry, User, Validation, CodexAuthStatus, PullRequestHealthResponse, SingleResponse } from "@/lib/types";
 import { AgentTabStrip, computeThreadOverlap } from "./agent-tab-strip";
-import { SessionSummaryPanel, SummarizeButton } from "./session-summary-panel";
 import {
   ThreadAttributionFilter,
   useAttributionAllowedPaths,
@@ -139,7 +138,7 @@ import { useAuth } from "@/hooks/use-auth";
 import { useMediaQuery } from "@/hooks/use-media-query";
 import { prMergedAccent } from "@/lib/pr-status-styles";
 import { cn, sessionTitle, formatTimeAgo } from "@/lib/utils";
-import { activeSet } from "@/lib/session-status-groups";
+import { activeSet, workingStatusesSet } from "@/lib/session-status-groups";
 
 const PREVIEW_ORIGIN_TEMPLATE =
   process.env.NEXT_PUBLIC_PREVIEW_ORIGIN_TEMPLATE ||
@@ -157,7 +156,7 @@ type PendingFollowUpMessage = SessionMessage & {
 const statusConfig: Record<string, { color: string; label: string }> = {
   pending: { color: "bg-muted text-muted-foreground", label: "Pending" },
   running: { color: "bg-primary/10 text-primary", label: "Running" },
-  idle: { color: "bg-sky-50 text-sky-700 dark:bg-sky-950/30 dark:text-sky-400", label: "Idle" },
+  idle: { color: "bg-primary/10 text-primary", label: "Idle" },
   awaiting_input: { color: "bg-amber-50 text-amber-700 dark:bg-amber-950/30 dark:text-amber-400", label: "Awaiting input" },
   needs_human_guidance: { color: "bg-orange-50 text-orange-700 dark:bg-orange-950/30 dark:text-orange-400", label: "Needs guidance" },
   completed: { color: "bg-emerald-50 text-emerald-700 dark:bg-emerald-950/30 dark:text-emerald-400", label: "Completed" },
@@ -1732,14 +1731,14 @@ function ChatPanel({
     queryKey: activeThreadId ? queryKeys.sessions.threadMessages(sessionId, activeThreadId) : ["session", sessionId, "thread", "none", "messages"],
     queryFn: () => api.sessions.getThreadMessages(sessionId, activeThreadId!),
     enabled: !!activeThreadId,
-    refetchInterval: activeThread && ["pending", "running", "awaiting_input"].includes(activeThread.status) ? 3000 : false,
+    refetchInterval: activeThread && workingStatusesSet.has(activeThread.status) ? 3000 : false,
   });
 
   const threadLogsQuery = useQuery({
     queryKey: activeThreadId ? queryKeys.sessions.threadLogs(sessionId, activeThreadId) : ["session", sessionId, "thread", "none", "logs"],
     queryFn: () => api.sessions.getThreadLogs(sessionId, activeThreadId!),
     enabled: !!activeThreadId,
-    refetchInterval: activeThread && ["pending", "running", "awaiting_input"].includes(activeThread.status) ? 3000 : false,
+    refetchInterval: activeThread && workingStatusesSet.has(activeThread.status) ? 3000 : false,
   });
 
   // Fetch the linked primary issue to display its description as the initial prompt.
@@ -1842,12 +1841,19 @@ function ChatPanel({
   const hasLoadedTimelineInputs = activeThreadId
     ? threadMessagesQuery.isFetched && threadLogsQuery.isFetched
     : timelineQuery.isFetched && (!hasIssue || issueQuery.isFetched);
-  // Skeleton only while we'd reasonably expect content: timeline still loading,
-  // or session is active. Terminal sessions with empty timelines must not shimmer forever.
+  // Skeleton only while we'd reasonably expect content: data still loading, or
+  // the relevant scope is actively working. For a thread-scoped view, "working"
+  // is the selected thread's status — a freshly-created idle thread on an
+  // otherwise-running session must show its empty-state composer, not a
+  // perpetual skeleton. Terminal sessions with empty timelines must not
+  // shimmer forever either.
+  const expectingMoreContent = activeThread
+    ? workingStatusesSet.has(activeThread.status)
+    : activeSet.has(session.status);
   const showLoadingSkeleton =
     timelineEntries.length === 0 &&
     session.status !== "pending" &&
-    (!hasLoadedTimelineInputs || activeSet.has(session.status));
+    (!hasLoadedTimelineInputs || expectingMoreContent);
 
   const persistScrollPosition = useCallback((scrollTop: number) => {
     if (typeof window === "undefined" || !viewerScope) return;
@@ -2434,6 +2440,18 @@ export function SessionDetailContent({ id }: { id: string }) {
 
       if (response.data.session_id !== id) {
         router.push(`/sessions/${response.data.session_id}`);
+        return;
+      }
+      // Same-session response: without explicit feedback the click looks
+      // dead. Reused-in-flight is the common case (repair already running on
+      // this session and the failing-tests count hasn't dropped yet, so the
+      // button is still rendered) — surface a toast so the user knows the
+      // request was handled.
+      if (response.data.reused_in_flight) {
+        const label = response.data.repair_action_type === "fix_tests"
+          ? "Fix tests session is already in progress"
+          : "Resolve conflicts session is already in progress";
+        toast.info(label);
       }
     },
     onError: (err) => {
@@ -2703,19 +2721,15 @@ export function SessionDetailContent({ id }: { id: string }) {
   // Hooks can't be called conditionally, so provide a stub when session hasn't loaded yet.
   // useDiffViewState only reads `diff` and `diff_history` — the stub satisfies that contract.
   const diffViewState = useDiffViewState(session ?? { diff: null, diff_history: [] } as unknown as Session);
-  const { files: allDiffFiles, filteredFiles, passes, passRange, setPassRange, diffSearchQuery, setDiffSearchQuery } = diffViewState;
-
-  useEffect(() => {
-    if (filteredFiles.length === 0) {
-      if (activeFileIndex !== 0) {
-        setActiveFileIndex(0);
-      }
-      return;
-    }
-    if (activeFileIndex >= filteredFiles.length) {
-      setActiveFileIndex(filteredFiles.length - 1);
-    }
-  }, [activeFileIndex, filteredFiles.length]);
+  const {
+    files: diffFiles,
+    filteredFiles,
+    passes,
+    passRange,
+    setPassRange,
+    diffSearchQuery,
+    setDiffSearchQuery,
+  } = diffViewState;
 
   const {
     comments,
@@ -2791,10 +2805,16 @@ export function SessionDetailContent({ id }: { id: string }) {
     () => comments.filter((comment) => !comment.resolved).slice(0, MAX_RESOLVE_REVIEW_COMMENTS_PER_MESSAGE),
     [comments],
   );
+  // Composer gating: per the design (docs/design/implemented/68-sandbox-agent-tabs-and-threads.md),
+  // Phase 2 supports concurrent threads in one sandbox. The composer is locked
+  // only while the *selected* thread is running — sibling threads being active
+  // (which makes session.status === "running") must not block sending into an
+  // idle thread, since the backend admits concurrent sends up to the per-session
+  // running cap. Pending/skipped/destroyed at the session level still block.
   const composerCanSendMessage = session?.status !== "skipped" &&
     session?.status !== "pending" &&
     session?.sandbox_state !== "destroyed" &&
-    (!activeThread || (session?.status !== "running" && activeThread.status === "idle"));
+    (!activeThread || activeThread.status === "idle");
   const composerIsRunning = activeThread ? activeThread.status === "running" : session?.status === "running";
   const composerIsSnapshotExpired = session?.sandbox_state === "destroyed";
   const composerAgentType = activeThread?.agent_type ?? session?.agent_type ?? "codex";
@@ -2847,7 +2867,10 @@ export function SessionDetailContent({ id }: { id: string }) {
   const sendMutation = useMutation({
     mutationFn: (vars: SendMutationArgs) => {
       if (vars.activeThreadId) {
-        return api.sessions.sendThreadMessage(id, vars.activeThreadId, vars.body)
+        return api.sessions.sendThreadMessage(id, vars.activeThreadId, {
+          ...vars.body,
+          resolveReviewCommentIDs: vars.resolvedIDs.length > 0 ? vars.resolvedIDs : undefined,
+        })
           .then((response) => ({ response, resolvedIDs: vars.resolvedIDs }));
       }
 
@@ -3079,9 +3102,34 @@ export function SessionDetailContent({ id }: { id: string }) {
     () => computeThreadOverlap(threads, fileEventsQuery.data?.data ?? []),
     [threads, fileEventsQuery.data?.data],
   );
-  const [summaryOpen, setSummaryOpen] = useState(false);
   const [attributionFilter, setAttributionFilter] = useState<ThreadAttributionFilterValue>({ kind: "all" });
   const attributionAllowedPaths = useAttributionAllowedPaths(attributionFilter, fileEventsQuery.data?.data);
+  const visibleDiffFiles = useMemo(
+    () =>
+      attributionAllowedPaths == null
+        ? diffFiles
+        : diffFiles.filter((f) => attributionAllowedPaths.has(f.newPath) || attributionAllowedPaths.has(f.oldPath)),
+    [attributionAllowedPaths, diffFiles],
+  );
+  const visibleFilteredFiles = useMemo(
+    () =>
+      attributionAllowedPaths == null
+        ? filteredFiles
+        : filteredFiles.filter((f) => attributionAllowedPaths.has(f.newPath) || attributionAllowedPaths.has(f.oldPath)),
+    [attributionAllowedPaths, filteredFiles],
+  );
+
+  useEffect(() => {
+    if (visibleFilteredFiles.length === 0) {
+      if (activeFileIndex !== 0) {
+        setActiveFileIndex(0);
+      }
+      return;
+    }
+    if (activeFileIndex >= visibleFilteredFiles.length) {
+      setActiveFileIndex(visibleFilteredFiles.length - 1);
+    }
+  }, [activeFileIndex, visibleFilteredFiles.length]);
 
   const createThreadMutation = useMutation({
     mutationFn: () => {
@@ -3441,11 +3489,7 @@ export function SessionDetailContent({ id }: { id: string }) {
 
       <TabsContent value="changes" className="flex-1 min-h-0">
         <ChangesTab
-          filteredFiles={
-            attributionAllowedPaths == null
-              ? filteredFiles
-              : filteredFiles.filter((f) => attributionAllowedPaths.has(f.newPath) || attributionAllowedPaths.has(f.oldPath))
-          }
+          filteredFiles={visibleFilteredFiles}
           activeFileIndex={activeFileIndex}
           onFileSelect={setActiveFileIndex}
           onOpenReview={openReview}
@@ -3623,10 +3667,6 @@ export function SessionDetailContent({ id }: { id: string }) {
             )}
             <LinkedIssueChips session={session} />
           </div>
-          {/* Summarize tabs trigger — only meaningful when there is more than one tab. */}
-          {threads.length > 1 && (
-            <SummarizeButton onClick={() => setSummaryOpen(true)} />
-          )}
           {/* Desktop toggle: hides/shows the inline right panel. */}
           <DisabledTooltip disabled={centerMode === "review" && showDetailPanel} content={detailToggleTitle}>
             <Button
@@ -3674,8 +3714,6 @@ export function SessionDetailContent({ id }: { id: string }) {
             cancelPendingThreadId={cancelThreadMutation.isPending ? cancelThreadMutation.variables ?? null : null}
           />
         ) : null}
-        <SessionSummaryPanel sessionId={id} open={summaryOpen} onOpenChange={setSummaryOpen} />
-
         {/* Center content — either chat or diff review */}
         <div className="flex-1 min-h-0 relative">
           {/* Chat panel — always mounted to preserve scroll, SSE connections, etc. */}
@@ -3701,8 +3739,8 @@ export function SessionDetailContent({ id }: { id: string }) {
               <div className="flex-1 min-h-0">
                 <ReviewDiffView
                   sessionId={id}
-                  files={filteredFiles}
-                  allFiles={allDiffFiles}
+                  files={visibleFilteredFiles}
+                  allFiles={visibleDiffFiles}
                   activeFileIndex={activeFileIndex}
                   onFileChange={setActiveFileIndex}
                   onBack={exitReview}

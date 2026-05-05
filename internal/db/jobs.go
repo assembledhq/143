@@ -27,6 +27,17 @@ func RunAgentDedupeKey(sessionID uuid.UUID) string {
 	return "run_agent:" + sessionID.String()
 }
 
+func RunAgentPayload(run *models.Session) map[string]string {
+	payload := map[string]string{
+		"session_id": run.ID.String(),
+		"org_id":     run.OrgID.String(),
+	}
+	if run.PrimaryThreadID != nil && *run.PrimaryThreadID != uuid.Nil {
+		payload["thread_id"] = run.PrimaryThreadID.String()
+	}
+	return payload
+}
+
 // ContinueSessionDedupeKey returns the dedupe key used for continue_session
 // enqueues. Session-level (not thread-level) because the underlying sandbox
 // container is shared across threads — only one continue_session can hold

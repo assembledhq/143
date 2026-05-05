@@ -554,10 +554,7 @@ func newAutomationRunHandler(stores *Stores, services *Services, logger zerolog.
 		// the job store rejects the second insert and the second handler
 		// returns cleanly without a duplicate agent run.
 		dedupeKey := db.RunAgentDedupeKey(session.ID)
-		agentPayload := map[string]string{
-			"session_id": session.ID.String(),
-			"org_id":     orgID.String(),
-		}
+		agentPayload := db.RunAgentPayload(session)
 		if _, err := stores.Jobs.Enqueue(ctx, orgID, "agent", "run_agent", agentPayload, 5, &dedupeKey); err != nil {
 			return fmt.Errorf("enqueue run_agent: %w", err)
 		}
@@ -865,6 +862,7 @@ func newRunAgentHandler(stores *Stores, services *Services, logger zerolog.Logge
 		var input struct {
 			SessionID string `json:"session_id"`
 			OrgID     string `json:"org_id"`
+			ThreadID  string `json:"thread_id"`
 		}
 		if err := json.Unmarshal(payload, &input); err != nil {
 			return fmt.Errorf("unmarshal run_agent payload: %w", err)
@@ -882,6 +880,22 @@ func newRunAgentHandler(stores *Stores, services *Services, logger zerolog.Logge
 		run, err := stores.Sessions.GetByID(ctx, orgID, runID)
 		if err != nil {
 			return fmt.Errorf("fetch agent run: %w", err)
+		}
+		if input.ThreadID != "" {
+			threadID, parseErr := uuid.Parse(input.ThreadID)
+			if parseErr != nil {
+				logger.Warn().Err(parseErr).Str("thread_id", input.ThreadID).Msg("invalid thread_id in run_agent payload")
+			} else {
+				run.PrimaryThreadID = &threadID
+			}
+		} else if stores.SessionThreads != nil {
+			threads, listErr := stores.SessionThreads.ListBySession(ctx, orgID, runID)
+			if listErr != nil {
+				logger.Warn().Err(listErr).Str("session_id", runID.String()).Msg("failed to load primary thread for run_agent")
+			} else if len(threads) > 0 {
+				threadID := threads[0].ID
+				run.PrimaryThreadID = &threadID
+			}
 		}
 
 		// Gate turn 1 on Linear pre-start preparation. If a session linked a

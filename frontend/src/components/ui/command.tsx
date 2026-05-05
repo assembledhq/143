@@ -2,7 +2,7 @@
 
 import * as React from "react"
 import { Command as CommandPrimitive } from "cmdk"
-import { SearchIcon } from "lucide-react"
+import { CheckIcon, SearchIcon } from "lucide-react"
 
 import { cn } from "@/lib/utils"
 import {
@@ -155,6 +155,36 @@ function CommandItem({
   )
 }
 
+function CommandCheckItem({
+  className,
+  children,
+  checked,
+  indicatorClassName,
+  ...props
+}: React.ComponentProps<typeof CommandPrimitive.Item> & {
+  checked: boolean
+  indicatorClassName?: string
+}) {
+  return (
+    <CommandItem className={cn("gap-3", className)} {...props}>
+      <span
+        data-slot="command-item-indicator"
+        aria-hidden="true"
+        className={cn(
+          "flex size-4 shrink-0 items-center justify-center rounded-sm border transition-colors",
+          checked
+            ? "border-primary bg-primary text-primary-foreground"
+            : "border-border bg-background text-transparent",
+          indicatorClassName
+        )}
+      >
+        <CheckIcon className={cn("size-3", checked ? "text-primary-foreground" : "text-transparent")} />
+      </span>
+      {children}
+    </CommandItem>
+  )
+}
+
 function CommandShortcut({
   className,
   ...props
@@ -179,6 +209,7 @@ export {
   CommandEmpty,
   CommandGroup,
   CommandItem,
+  CommandCheckItem,
   CommandShortcut,
   CommandSeparator,
 }

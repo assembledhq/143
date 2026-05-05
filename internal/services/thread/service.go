@@ -35,6 +35,12 @@ var (
 	// failed). Surfaced to clients so the cancel button can be hidden when
 	// it would do nothing.
 	ErrThreadNotCancellable = errors.New("thread is not cancellable")
+	// ErrReviewCommentsNotConfigured is returned when SendMessage is called
+	// with ResolveReviewCommentIDs but the service was constructed without
+	// the review-comment plumbing (txStarter + reviewCommentStore). Handlers
+	// should surface this as a 400 — the client requested a feature the
+	// server isn't running.
+	ErrReviewCommentsNotConfigured = errors.New("review comment resolution is not configured")
 )
 
 // SessionStore defines the session DB operations needed by the thread service.
@@ -98,28 +104,49 @@ type CreateThreadInput struct {
 }
 
 // SendMessageInput holds the input for sending a message to a thread.
+//
+// ResolveReviewCommentIDs, when non-empty, are validated and flipped to
+// resolved=true atomically with the message create — preserving the
+// "addressing comments" → "send follow-up" → "comments resolved" invariant
+// that the session-level SendMessage already guarantees. Requires the
+// service to be wired with SetTxStarter and SetReviewCommentStore; handler
+// layers should reject the request with a 400 when those are absent.
 type SendMessageInput struct {
-	SessionID  uuid.UUID
-	OrgID      uuid.UUID
-	ThreadID   uuid.UUID
-	UserID     *uuid.UUID
-	Message    string
-	Images     []string
-	References models.SessionInputReferences
-	Commands   models.SessionInputCommands
-	PlanMode   bool
+	SessionID               uuid.UUID
+	OrgID                   uuid.UUID
+	ThreadID                uuid.UUID
+	UserID                  *uuid.UUID
+	Message                 string
+	Images                  []string
+	References              models.SessionInputReferences
+	Commands                models.SessionInputCommands
+	PlanMode                bool
+	ResolveReviewCommentIDs []uuid.UUID
+}
+
+// SendMessageResult carries everything callers need to finish handling a
+// successful thread-message send: the created message, plus any review
+// comments that were resolved as part of the same transaction. The handler
+// uses ResolvedComments to emit one audit row per resolved comment after
+// the tx commits — matching the post-commit audit pattern of session-level
+// SendMessage.
+type SendMessageResult struct {
+	Message          *models.SessionMessage
+	ResolvedComments []models.SessionReviewComment
 }
 
 // Service handles thread business logic.
 type Service struct {
-	threadStore  ThreadStore
-	sessionStore SessionStore
-	messageStore MessageStore
-	logStore     LogStore
-	jobStore     JobStore
-	fileEvents   FileEventStore  // optional — enables overlap and attribution surfaces
-	canceller    ThreadCanceller // optional — enables in-flight SIGINT
-	logger       zerolog.Logger
+	threadStore        ThreadStore
+	sessionStore       SessionStore
+	messageStore       MessageStore
+	logStore           LogStore
+	jobStore           JobStore
+	fileEvents         FileEventStore                // optional — enables overlap and attribution surfaces
+	canceller          ThreadCanceller               // optional — enables in-flight SIGINT
+	txStarter          db.TxStarter                  // optional — required for SendMessage with ResolveReviewCommentIDs
+	reviewCommentStore *db.SessionReviewCommentStore // optional — required for SendMessage with ResolveReviewCommentIDs
+	logger             zerolog.Logger
 }
 
 // NewService creates a new thread service. fileEvents and canceller are
@@ -155,6 +182,18 @@ func (s *Service) SetFileEventStore(store FileEventStore) {
 // orchestrator's thread-scoped cancel registry once it is constructed.
 func (s *Service) SetCanceller(c ThreadCanceller) {
 	s.canceller = c
+}
+
+// SetReviewCommentResolver wires the plumbing required to resolve review
+// comments atomically with a thread-scoped message send. Both arguments must
+// be non-nil for SendMessage to honor ResolveReviewCommentIDs; if either is
+// missing, SendMessage rejects requests carrying comment IDs with
+// ErrReviewCommentsNotConfigured. Kept as a single setter so the
+// "configured" predicate is unambiguous (versus two independently-nilable
+// fields).
+func (s *Service) SetReviewCommentResolver(txStarter db.TxStarter, store *db.SessionReviewCommentStore) {
+	s.txStarter = txStarter
+	s.reviewCommentStore = store
 }
 
 // isSessionAlreadyRunning is the fallback predicate used by SendMessage when
@@ -261,7 +300,11 @@ func (s *Service) GetThread(ctx context.Context, orgID, sessionID, threadID uuid
 }
 
 // SendMessage claims an idle thread, creates a message, and enqueues a
-// continue_session job.
+// continue_session job. When ResolveReviewCommentIDs is non-empty, the
+// message create and the comment resolution share a single transaction so
+// the user-visible invariant — "submitted comments disappear once the
+// follow-up message is sent" — holds even if the request fails partway
+// through.
 //
 // ClaimIdleForSession serializes sibling-thread admission in the database
 // while allowing up to MaxRunningThreadsPerSession concurrent tabs. The
@@ -269,7 +312,16 @@ func (s *Service) GetThread(ctx context.Context, orgID, sessionID, threadID uuid
 // running, the session is already in 'running' state and the orchestrator's
 // idempotent UpdateStatus("running") handles the rest. If subsequent message
 // creation or job enqueue fails we best-effort revert the thread to idle.
-func (s *Service) SendMessage(ctx context.Context, input SendMessageInput) (*models.SessionMessage, error) {
+func (s *Service) SendMessage(ctx context.Context, input SendMessageInput) (*SendMessageResult, error) {
+	// Reject early — before any state mutation — when the caller asked to
+	// resolve comments but the service was constructed without the plumbing
+	// to do so. Pushing this check above the claim avoids leaving the thread
+	// stuck in 'running' if the configuration is wrong.
+	resolvingComments := len(input.ResolveReviewCommentIDs) > 0
+	if resolvingComments && (s.txStarter == nil || s.reviewCommentStore == nil) {
+		return nil, ErrReviewCommentsNotConfigured
+	}
+
 	thread, err := s.threadStore.ClaimIdleForSession(ctx, input.OrgID, input.SessionID, input.ThreadID, models.MaxRunningThreadsPerSession)
 	if err != nil {
 		if errors.Is(err, db.ErrThreadRunningLimitReached) {
@@ -335,12 +387,21 @@ func (s *Service) SendMessage(ctx context.Context, input SendMessageInput) (*mod
 		msg.Attachments = input.Images
 	}
 
-	if err := s.messageStore.Create(ctx, msg); err != nil {
-		if revertErr := s.sessionStore.UpdateStatus(ctx, input.OrgID, input.SessionID, string(models.SessionStatusIdle)); revertErr != nil {
-			s.logger.Error().Err(revertErr).Str("session_id", input.SessionID.String()).Msg("failed to revert session to idle after thread message creation failure")
-		}
-		if revertErr := s.threadStore.UpdateStatus(ctx, input.OrgID, input.ThreadID, models.ThreadStatusIdle); revertErr != nil {
-			s.logger.Error().Err(revertErr).Str("thread_id", input.ThreadID.String()).Msg("failed to revert thread to idle after message creation failure")
+	var resolvedComments []models.SessionReviewComment
+	if resolvingComments {
+		resolvedComments, err = s.createMessageWithResolvedComments(ctx, msg, input)
+	} else {
+		err = s.messageStore.Create(ctx, msg)
+	}
+	if err != nil {
+		s.revertAfterSendFailure(ctx, input.OrgID, input.SessionID, input.ThreadID, "message creation failure")
+		// Comment-validation errors are surfaced verbatim so the handler can
+		// match on *db.ErrReviewCommentsNotInSession; everything else gets
+		// wrapped with a "create message" prefix to preserve historical log
+		// shape for the no-comments path.
+		var notInSession *db.ErrReviewCommentsNotInSession
+		if errors.As(err, &notInSession) {
+			return nil, err
 		}
 		return nil, fmt.Errorf("create message: %w", err)
 	}
@@ -358,16 +419,108 @@ func (s *Service) SendMessage(ctx context.Context, input SendMessageInput) (*mod
 		"org_id":     input.OrgID.String(),
 	}
 	if _, err := s.jobStore.Enqueue(ctx, input.OrgID, "agent", "continue_session", payload, 5, &dedupeKey); err != nil {
-		if revertErr := s.sessionStore.UpdateStatus(ctx, input.OrgID, input.SessionID, string(models.SessionStatusIdle)); revertErr != nil {
-			s.logger.Error().Err(revertErr).Str("session_id", input.SessionID.String()).Msg("failed to revert session to idle after thread enqueue failure")
-		}
-		if revertErr := s.threadStore.UpdateStatus(ctx, input.OrgID, input.ThreadID, models.ThreadStatusIdle); revertErr != nil {
-			s.logger.Error().Err(revertErr).Str("thread_id", input.ThreadID.String()).Msg("failed to revert thread to idle after enqueue failure")
-		}
+		// Note: we do NOT roll back the resolved comments here. The message
+		// has been committed and is durably in the timeline; the orchestrator
+		// will retry the enqueue on the next dedupe-eligible event. Reverting
+		// the resolved comments would create a worse inconsistency where the
+		// user sees their addressed comments re-appear despite the message
+		// already being in the conversation.
+		s.revertAfterSendFailure(ctx, input.OrgID, input.SessionID, input.ThreadID, "enqueue failure")
 		return nil, fmt.Errorf("%w: %w", ErrEnqueueFailed, err)
 	}
 
-	return msg, nil
+	return &SendMessageResult{
+		Message:          msg,
+		ResolvedComments: resolvedComments,
+	}, nil
+}
+
+// createMessageWithResolvedComments wraps the message insert and the
+// review-comment resolution in a single transaction so the
+// "addressing-comments → message-sent → comments-resolved" invariant cannot
+// be violated by a partial failure between the two writes.
+//
+// Pre-condition: caller has already verified s.txStarter and
+// s.reviewCommentStore are non-nil (via the ErrReviewCommentsNotConfigured
+// guard at the top of SendMessage).
+func (s *Service) createMessageWithResolvedComments(
+	ctx context.Context,
+	msg *models.SessionMessage,
+	input SendMessageInput,
+) ([]models.SessionReviewComment, error) {
+	// Fetch the session inside the same critical section to read CurrentTurn
+	// for the resolution pass. We use the post-claim session state (the
+	// ClaimIdle above already moved it to 'running' if it was idle), so the
+	// recorded pass matches what session-level SendMessage records on the
+	// same path.
+	session, err := s.sessionStore.GetByID(ctx, input.OrgID, input.SessionID)
+	if err != nil {
+		return nil, fmt.Errorf("get session for resolution pass: %w", err)
+	}
+
+	tx, err := s.txStarter.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("begin tx: %w", err)
+	}
+	committed := false
+	defer func() {
+		if committed {
+			return
+		}
+		if rollbackErr := tx.Rollback(ctx); rollbackErr != nil {
+			s.logger.Error().Err(rollbackErr).
+				Str("session_id", input.SessionID.String()).
+				Str("thread_id", input.ThreadID.String()).
+				Msg("failed to rollback thread send-message transaction")
+		}
+	}()
+
+	txMessageStore := db.NewSessionMessageStore(tx)
+	txCommentStore := db.NewSessionReviewCommentStore(tx)
+
+	if err := txMessageStore.Create(ctx, msg); err != nil {
+		return nil, err
+	}
+	resolved, err := txCommentStore.ValidateAndResolveByIDs(
+		ctx, input.OrgID, input.SessionID, input.ResolveReviewCommentIDs, resolutionPass(&session))
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit tx: %w", err)
+	}
+	committed = true
+	return resolved, nil
+}
+
+// revertAfterSendFailure puts the session and thread back to idle on a
+// best-effort basis after a SendMessage failure. Logs each revert error
+// individually so partial reverts are debuggable, but never returns —
+// callers always have a primary error to surface.
+func (s *Service) revertAfterSendFailure(ctx context.Context, orgID, sessionID, threadID uuid.UUID, reason string) {
+	if revertErr := s.sessionStore.UpdateStatus(ctx, orgID, sessionID, string(models.SessionStatusIdle)); revertErr != nil {
+		s.logger.Error().Err(revertErr).
+			Str("session_id", sessionID.String()).
+			Str("reason", reason).
+			Msg("failed to revert session to idle after thread send failure")
+	}
+	if revertErr := s.threadStore.UpdateStatus(ctx, orgID, threadID, models.ThreadStatusIdle); revertErr != nil {
+		s.logger.Error().Err(revertErr).
+			Str("thread_id", threadID.String()).
+			Str("reason", reason).
+			Msg("failed to revert thread to idle after send failure")
+	}
+}
+
+// resolutionPass mirrors handlers.currentResolutionPass: the comment is
+// being addressed during the current session turn (with a fallback to 1 for
+// not-yet-started sessions). Kept in this package to avoid an import cycle
+// with handlers; the two functions intentionally stay in lockstep.
+func resolutionPass(session *models.Session) int {
+	if session == nil || session.CurrentTurn == 0 {
+		return 1
+	}
+	return session.CurrentTurn
 }
 
 // EndThread transitions an active thread to completed.

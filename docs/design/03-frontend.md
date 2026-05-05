@@ -184,6 +184,8 @@ frontend/
 └── components.json                   # shadcn/ui config
 ```
 
+Command-style popover pickers that support search and single- or multi-select should share a common checked-row primitive in `components/ui/command.tsx` rather than reimplementing their own checkmark colors or spacing per screen. This keeps checked-state contrast consistent across people, branch, timezone, and similar pickers.
+
 ## Key Libraries
 
 | Library | Purpose |

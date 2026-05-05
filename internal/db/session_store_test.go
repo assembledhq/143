@@ -2034,9 +2034,10 @@ func TestSessionStore_ClearContainerID_CAS_Clears(t *testing.T) {
 
 	store := NewSessionStore(mock)
 	// WHERE clause must pin container_id = @expected AND no preview hold,
-	// and the SET must also reset turn_holding_container=FALSE so a
-	// crashed-turn flag doesn't get stranded.
-	mock.ExpectExec(`UPDATE sessions\s+SET container_id = NULL,\s+turn_holding_container = FALSE\s+WHERE id = @id\s+AND org_id = @org_id\s+AND container_id = @expected\s+AND NOT EXISTS`).
+	// and the SET must reset turn_holding_container=FALSE so a crashed-turn
+	// flag doesn't get stranded AND null worker_node_id so the next turn's
+	// SetWorkerNodeIDForContainer CAS isn't rejected by a stale owner.
+	mock.ExpectExec(`UPDATE sessions\s+SET container_id = NULL,\s+worker_node_id = NULL,\s+turn_holding_container = FALSE\s+WHERE id = @id\s+AND org_id = @org_id\s+AND container_id = @expected\s+AND NOT EXISTS`).
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
@@ -2079,6 +2080,52 @@ func TestSessionStore_ClearContainerID_DBError(t *testing.T) {
 	_, err = store.ClearContainerID(context.Background(), uuid.New(), uuid.New(), "abc")
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "clear container id")
+}
+
+// TestSessionStore_ClearContainerID_UnsticksStaleWorkerOwnership locks in the
+// invariant fixed by 000114_session_worker_node_id_unstuck: ClearContainerID
+// MUST null worker_node_id along with container_id, so the next turn (on a
+// possibly different worker) can stamp ownership without being rejected by a
+// stale value.
+//
+// The bug: pre-fix, ClearContainerID nulled container_id but left worker_node_id
+// pointing at the dead worker. The next ContinueSession's SetWorkerNodeIDForContainer
+// CAS — which requires worker_node_id IS NULL/empty OR equal to ours — failed
+// with "session container ownership changed before worker ownership could be
+// recorded", and the user-facing turn failed.
+//
+// If a future cleanup drops the worker_node_id null in ClearContainerID, this
+// test fails because the second ExpectExec's regex no longer matches the SQL.
+func TestSessionStore_ClearContainerID_UnsticksStaleWorkerOwnership(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := NewSessionStore(mock)
+	orgID := uuid.New()
+	sessionID := uuid.New()
+
+	// Step 1: orphan reconciler clears the row left behind by a crashed worker.
+	// The SQL must null both container_id and worker_node_id.
+	mock.ExpectExec(`UPDATE sessions\s+SET container_id = NULL,\s+worker_node_id = NULL,\s+turn_holding_container = FALSE`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	cleared, err := store.ClearContainerID(context.Background(), orgID, sessionID, "container-from-dead-worker")
+	require.NoError(t, err)
+	require.True(t, cleared)
+
+	// Step 2: a new turn on a *different* worker stamps fresh ownership.
+	// CAS predicate is `worker_node_id IS NULL/'' OR equal to ours` — the
+	// preceding clear set it to NULL, so this matches the row.
+	mock.ExpectExec(`UPDATE sessions\s+SET worker_node_id = @worker_node_id`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	err = store.SetWorkerNodeIDForContainer(context.Background(), orgID, sessionID, "container-on-new-worker", "worker-new")
+	require.NoError(t, err, "SetWorkerNodeIDForContainer must succeed for a new worker after ClearContainerID")
+
+	require.NoError(t, mock.ExpectationsWereMet())
 }
 
 func TestSessionStore_ListOrphanedContainers(t *testing.T) {

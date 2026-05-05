@@ -181,6 +181,7 @@ type Issue struct {
 // issue linked (zero-issue sessions are a first-class execution path).
 type Session struct {
 	ID                  uuid.UUID               `db:"id" json:"id"`
+	PrimaryThreadID     *uuid.UUID              `db:"-" json:"-"`
 	PrimaryIssueID      *uuid.UUID              `db:"primary_issue_id" json:"primary_issue_id"`
 	OrgID               uuid.UUID               `db:"org_id" json:"org_id"`
 	Origin              SessionOrigin           `db:"origin" json:"origin"`
