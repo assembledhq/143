@@ -543,7 +543,7 @@ func (d *DockerPreviewProvider) PreviewStatus(ctx context.Context, handle string
 	for name, ih := range state.infra {
 		infraList = append(infraList, infraInfo{
 			name: name, template: ih.Template, containerID: ih.ContainerID,
-			host: ih.Host, port: ih.Port,
+			host: ih.Credential.Host, port: ih.Credential.Port,
 		})
 	}
 	d.mu.RUnlock()
@@ -588,15 +588,15 @@ func (d *DockerPreviewProvider) provisionInfra(
 		return nil, fmt.Errorf("resolve sandbox network: %w", err)
 	}
 
-	cred, err := generateInfraCredential(infraName)
-	if err != nil {
-		return nil, fmt.Errorf("generate credential for %q: %w", infraName, err)
-	}
 	handlePrefix := previewHandle
 	if len(handlePrefix) > 12 {
 		handlePrefix = handlePrefix[:12]
 	}
 	containerName := fmt.Sprintf("preview-%s-%s", infraName, handlePrefix)
+	cred, err := buildInfraCredential(infraName, containerName, tmpl.DefaultPort)
+	if err != nil {
+		return nil, fmt.Errorf("generate credential for %q: %w", infraName, err)
+	}
 
 	// Ensure the image is on the host before asking Docker to create the
 	// container. Worker hosts only pre-pull the 143-server / 143-sandbox /
@@ -650,8 +650,6 @@ func (d *DockerPreviewProvider) provisionInfra(
 		InfraName:   infraName,
 		Template:    infraCfg.Template,
 		ContainerID: resp.ID,
-		Host:        containerName,
-		Port:        tmpl.DefaultPort,
 		Credential:  cred,
 	}, nil
 }
@@ -1312,12 +1310,19 @@ func resolveCredentialTemplate(template string, cred preview.InfraCredential) st
 	return r.Replace(template)
 }
 
-func generateInfraCredential(infraName string) (preview.InfraCredential, error) {
+// buildInfraCredential constructs a fully-populated InfraCredential. All five
+// fields (Host, Port, Username, Password, Database) must be set on the
+// returned value — resolveCredentialTemplate substitutes every one of them
+// into the inject_env DSN and a zero Host/Port silently produces a broken URL
+// that the consuming service tries to dial against localhost.
+func buildInfraCredential(infraName, host string, port int) (preview.InfraCredential, error) {
 	password, err := preview.RandomHex(16)
 	if err != nil {
 		return preview.InfraCredential{}, fmt.Errorf("generate infra credential password: %w", err)
 	}
 	return preview.InfraCredential{
+		Host:     host,
+		Port:     port,
 		Username: fmt.Sprintf("preview_%s", infraName),
 		Password: password,
 		Database: "preview_db",
