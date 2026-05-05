@@ -204,6 +204,8 @@ func TestDeployConfiguresDockerLogRotation(t *testing.T) {
 	require.Contains(t, deployText, `db) LOG_MAX_SIZE="500m"`, "deploy.sh should give the db role a larger log cap — postgres logging is verbose and the db host has no Vector log shipping, so the local docker log is the only copy")
 	require.Contains(t, deployText, `*)  LOG_MAX_SIZE="100m"`, "deploy.sh should default non-db roles to a 100m cap")
 	require.Contains(t, deployText, "sudo -n /opt/143/deploy/scripts/install-log-rotation.sh", "deploy.sh should invoke install-log-rotation.sh via deploy+sudo (not root SSH) — matches the sandbox-firewall.sh pattern and avoids depending on root SSH at routine deploy time")
+	require.Contains(t, deployText, "repair-deploy-sudoers.sh", "deploy.sh should try the narrow root repair path when a legacy host is missing the deploy sudoers entry")
+	require.Contains(t, deployText, "Retrying docker log rotation after sudoers repair", "deploy.sh should retry install-log-rotation.sh after repairing sudoers so a single deploy can recover legacy hosts")
 
 	bootstrap, err := os.ReadFile("../deploy/scripts/bootstrap.sh")
 	require.NoError(t, err, "test should read bootstrap.sh")
@@ -213,10 +215,26 @@ func TestDeployConfiguresDockerLogRotation(t *testing.T) {
 	require.NoError(t, err, "test should read provision.sh")
 	provisionText := string(provision)
 	require.Contains(t, provisionText, "install-log-rotation.sh", "provision.sh should invoke install-log-rotation.sh after staging deploy/ so newly-provisioned hosts have rotation in place before services start (closes the provision-to-first-deploy unbounded-growth window)")
+	require.GreaterOrEqual(t, strings.Count(provisionText, "/usr/bin/chown -R deploy\\:deploy /opt/143/deploy/scripts"), 3, "provision.sh inline bootstraps for db, logging, and redis must allow deploy to fix root-owned deploy/scripts before syncing helpers")
 	// db/logging/redis bootstraps don't run bootstrap.sh, so each must
 	// install its own /etc/sudoers.d/99-deploy or the deploy+sudo path
 	// breaks on those roles.
 	require.GreaterOrEqual(t, strings.Count(provisionText, "/opt/143/deploy/scripts/install-log-rotation.sh *"), 3, "provision.sh inline bootstraps for db, logging, and redis must each grant deploy NOPASSWD sudo for install-log-rotation.sh")
+
+	repair, err := os.ReadFile("../deploy/scripts/repair-deploy-sudoers.sh")
+	require.NoError(t, err, "repair-deploy-sudoers.sh should exist for legacy hosts that are missing the deploy sudoers entry")
+	repairText := string(repair)
+	require.Contains(t, repairText, "/etc/sudoers.d/99-deploy", "repair-deploy-sudoers.sh should update the deploy sudoers file")
+	require.Contains(t, repairText, "mktemp /etc/sudoers.d/99-deploy", "repair-deploy-sudoers.sh should stage sudoers in the target directory before replacing the live file")
+	require.Contains(t, repairText, "visudo -cf \"$TMP\"", "repair-deploy-sudoers.sh should validate the staged sudoers file before installing it")
+	require.Contains(t, repairText, "mv \"$TMP\" /etc/sudoers.d/99-deploy", "repair-deploy-sudoers.sh should atomically replace sudoers only after validation succeeds")
+	require.NotContains(t, repairText, "cat > /etc/sudoers.d/99-deploy", "repair-deploy-sudoers.sh must not write directly to the live sudoers file")
+	require.Contains(t, repairText, "deploy ALL=(root) NOPASSWD: DEPLOY_CMDS", "repair-deploy-sudoers.sh should install the same narrow command alias used by provisioning")
+	require.NotContains(t, repairText, "NOPASSWD:ALL", "repair-deploy-sudoers.sh must not repair legacy hosts by granting blanket passwordless sudo")
+
+	makefile, err := os.ReadFile("../Makefile")
+	require.NoError(t, err, "test should read Makefile")
+	require.Contains(t, string(makefile), "repair-deploy-sudoers:", "Makefile should expose the no-teardown sudoers repair as an operator target")
 }
 
 func TestLoggingDeploySyncsProvisionedObservabilityConfig(t *testing.T) {

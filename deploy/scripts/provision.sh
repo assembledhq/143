@@ -202,6 +202,7 @@ if [ "$ROLE" = "db" ]; then
     # extra root SSH hop.
     cat > /etc/sudoers.d/99-deploy <<'SUDOERS'
 Cmnd_Alias DEPLOY_CMDS = \
+    /usr/bin/chown -R deploy\:deploy /opt/143/deploy/scripts, \
     /usr/bin/systemctl restart docker, \
     /opt/143/deploy/scripts/install-log-rotation.sh *
 
@@ -234,6 +235,7 @@ elif [ "$ROLE" = "logging" ]; then
     # sync with bootstrap.sh.
     cat > /etc/sudoers.d/99-deploy <<'SUDOERS'
 Cmnd_Alias DEPLOY_CMDS = \
+    /usr/bin/chown -R deploy\:deploy /opt/143/deploy/scripts, \
     /usr/bin/chown -R deploy\:deploy /opt/143/deploy/vmalert, \
     /usr/bin/chown -R deploy\:deploy /opt/143/deploy/grafana, \
     /usr/bin/systemctl restart docker, \
@@ -260,6 +262,7 @@ elif [ "$ROLE" = "redis" ]; then
     # can cap docker container log files without an extra root SSH hop.
     cat > /etc/sudoers.d/99-deploy <<'SUDOERS'
 Cmnd_Alias DEPLOY_CMDS = \
+    /usr/bin/chown -R deploy\:deploy /opt/143/deploy/scripts, \
     /usr/bin/systemctl restart docker, \
     /opt/143/deploy/scripts/install-log-rotation.sh *
 
