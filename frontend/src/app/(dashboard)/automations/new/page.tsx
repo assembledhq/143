@@ -24,6 +24,7 @@ import {
 } from "@/components/ui/collapsible";
 import { api } from "@/lib/api";
 import { BranchPicker } from "@/components/branch-picker";
+import { AutomationModelSelect } from "@/components/automation-model-select";
 import { NoReposWarning } from "@/components/no-repos-warning";
 import { PageContainer } from "@/components/page-container";
 import { PageHeader } from "@/components/page-header";
@@ -62,6 +63,7 @@ export default function NewAutomationPage() {
   const [timezone, setTimezone] = useState<string>(detectedTimezone);
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [baseBranchByRepoId, setBaseBranchByRepoId] = useState<Record<string, string>>({});
+  const [model, setModel] = useState<string | undefined>(undefined);
   const [priority, setPriority] = useState(50);
   const [redirecting, setRedirecting] = useState(false);
 
@@ -100,6 +102,7 @@ export default function NewAutomationPage() {
         interval_unit: intervalUnit,
         interval_run_at: `${intervalRunHour}:${intervalRunMinute}`,
         timezone,
+        model,
         base_branch: selectedBaseBranch.trim() || undefined,
         priority,
       }),
@@ -361,6 +364,18 @@ export default function NewAutomationPage() {
                   buttonClassName="w-full justify-between"
                   contentClassName="w-[var(--radix-popover-trigger-width)]"
                 />
+              </div>
+              <div className="space-y-1.5">
+                <Label htmlFor="automation-model">Model</Label>
+                <AutomationModelSelect
+                  id="automation-model"
+                  ariaLabel="Model"
+                  value={model}
+                  onValueChange={setModel}
+                />
+                <p className="text-xs text-muted-foreground">
+                  Auto uses your default automation agent. Choosing a model pins runs to that model&apos;s agent.
+                </p>
               </div>
               <div className="space-y-1.5">
                 <Label>Priority</Label>
