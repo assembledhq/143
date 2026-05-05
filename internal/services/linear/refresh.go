@@ -823,13 +823,16 @@ func (s *Service) markRefreshTokenRevoked(ctx context.Context, orgID uuid.UUID, 
 	if s.credentialsWriter != nil {
 		zeroed := current
 		zeroed.RefreshToken = ""
-		zeroed.ExpiresAt = time.Time{}
+		if zeroed.ExpiresAt.IsZero() {
+			zeroed.ExpiresAt = time.Now().Add(-time.Second)
+		}
 		// We intentionally leave AccessToken in place so worker handlers
 		// that hold an in-memory client built from this config can still
 		// surface the more-specific 401 path themselves rather than
-		// failing earlier with "empty access token". The integration is
-		// already being flipped to errored below, so the banner appears
-		// either way.
+		// failing earlier with "empty access token". We also preserve a
+		// known expiry (or stamp one in the past for unusual zero-expiry
+		// rows) so subsequent GetValidToken calls do not mistake the
+		// revoked row for a legacy use-until-401 credential.
 		if err := s.credentialsWriter.Upsert(ctx, orgID, zeroed); err != nil {
 			s.logger.Warn().Err(err).
 				Str("org_id", orgID.String()).

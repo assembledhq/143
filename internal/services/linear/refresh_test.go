@@ -348,6 +348,10 @@ func TestGetValidToken_RefreshTokenRevoked(t *testing.T) {
 
 	require.NotEmpty(t, intg.statusCfgCalls, "MarkIntegrationUnauthorized should fire so the UI shows the reconnect banner")
 	require.Equal(t, string(models.IntegrationStatusError), intg.statusCfgCalls[0].status)
+
+	_, token, err := svc.GetValidToken(context.Background(), orgID)
+	require.ErrorIs(t, err, ErrNoRefreshToken, "subsequent calls after revocation should stay in the reconnect path")
+	require.Empty(t, token, "subsequent calls after revocation must not return the stale access token")
 }
 
 // TestGetValidToken_RefreshFailureWithValidCachedTokenFallsBack asserts
