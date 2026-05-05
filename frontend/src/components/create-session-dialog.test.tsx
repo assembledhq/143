@@ -355,6 +355,30 @@ describe("CreateSessionDialog", () => {
     expect(screen.getByRole("button", { name: /Remove screenshot.png/ })).toBeInTheDocument();
   });
 
+  it("allows starting a mobile dialog session with only an attachment", async () => {
+    const user = userEvent.setup();
+    setMobileViewport(true);
+    setupManualSessionHandler();
+
+    renderWithProviders(
+      <CreateSessionDialog open onOpenChange={onOpenChange} />,
+    );
+
+    await user.click(await screen.findByRole("button", { name: "Add files or photos" }));
+    await user.click(screen.getByRole("menuitem", { name: "Add image URL" }));
+    await user.type(screen.getByLabelText("Image URL"), "https://example.com/mobile-attachment.png");
+    await user.click(screen.getByRole("button", { name: "Add" }));
+
+    const startButton = screen.getByRole("button", { name: "Start session" });
+    expect(startButton).toBeEnabled();
+
+    await user.click(startButton);
+
+    await waitFor(() => {
+      expect(onOpenChange).toHaveBeenCalledWith(false);
+    });
+  });
+
   it("opens an image lightbox from the dialog attachment thumbnail", async () => {
     const user = userEvent.setup();
 

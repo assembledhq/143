@@ -23,6 +23,7 @@ The system aggregates issues from support, Sentry, and Linear, prioritizes them 
 - Free-form form fields that can receive focus on phones, especially multi-line composers and settings textareas, must compute to at least `16px` on small screens to prevent iOS Safari auto-zoom while preserving denser desktop typography.
 - Session follow-up messages should render optimistically in the transcript as soon as the user sends them. Persistence, sandbox resume, and downstream agent/backend work happen after that local echo; the UI must not wait for the POST round-trip before showing the user's own message.
 - Session composers should treat pasted clipboard images the same as dropped or picker-selected uploads so screenshots can be attached directly from the textarea in both new-session and follow-up flows.
+- Manual session creation should accept attachments-only starts. If the user uploads screenshots, photos, or files without typing prompt text, the create action stays enabled, the initial turn persists those attachments, and the session can begin with a placeholder title until the agent or user adds more text.
 - Settings pages should not rely on desktop-only table layouts on phones. Shared headers should give actions a full-width mobile lane, and dense settings lists should collapse into stacked rows/cards with inline labels instead of forcing horizontal scanning.
 
 ## Autopilot workspace UX
