@@ -122,8 +122,8 @@ func TestRuntimeSampler_LogsAggregateHealthSample(t *testing.T) {
 	sb := &agent.Sandbox{ID: "ctr-health", Provider: "docker", OrgID: orgID.String()}
 	tracker.ContainerStarted(context.Background(), orgID, sessionID, sb, cfg, time.Now())
 
-	var logs bytes.Buffer
-	s := agent.NewRuntimeSampler(tracker, prov, newMetrics(t), 10*time.Millisecond, zerolog.New(&logs))
+	logs := &syncBuffer{}
+	s := agent.NewRuntimeSampler(tracker, prov, newMetrics(t), 10*time.Millisecond, zerolog.New(logs))
 	ctx, cancel := context.WithCancel(context.Background())
 	go s.Run(ctx)
 	require.Eventually(t, func() bool {
@@ -155,8 +155,8 @@ func TestRuntimeSampler_LogsAggregateHealthSampleWhenIdle(t *testing.T) {
 	tracker := agent.NewUsageTracker(nil, newMetrics(t), zerolog.Nop())
 	prov := &fakeStatsProvider{}
 
-	var logs bytes.Buffer
-	s := agent.NewRuntimeSampler(tracker, prov, newMetrics(t), 10*time.Millisecond, zerolog.New(&logs))
+	logs := &syncBuffer{}
+	s := agent.NewRuntimeSampler(tracker, prov, newMetrics(t), 10*time.Millisecond, zerolog.New(logs))
 	ctx, cancel := context.WithCancel(context.Background())
 	go s.Run(ctx)
 	require.Eventually(t, func() bool {
@@ -332,6 +332,31 @@ type wrappedErr struct {
 
 func (w *wrappedErr) Error() string { return w.prefix + ": " + w.err.Error() }
 func (w *wrappedErr) Unwrap() error { return w.err }
+
+// syncBuffer is a thread-safe bytes.Buffer wrapper for capturing zerolog output
+// when a writer goroutine and an Eventually reader goroutine touch the same buffer.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (s *syncBuffer) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.buf.Write(p)
+}
+
+func (s *syncBuffer) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.buf.String()
+}
+
+func (s *syncBuffer) Bytes() []byte {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]byte(nil), s.buf.Bytes()...)
+}
 
 func TestUsageTrackerSnapshot_IsCopy(t *testing.T) {
 	t.Parallel()
