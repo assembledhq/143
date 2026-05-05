@@ -49,6 +49,10 @@ echo "Deploying role=$ROLE tag=$TAG to $HOST..."
 SSH_OPTS=(-o StrictHostKeyChecking=accept-new -i "$SSH_KEY")
 SCP_OPTS=(-o StrictHostKeyChecking=accept-new -i "$SSH_KEY")
 
+repair_deploy_sudoers() {
+  bash "$SCRIPT_DIR/repair-deploy-sudoers.sh" "$ROLE" "$HOST" "$SSH_KEY"
+}
+
 # --- Refresh secrets from .env.production.enc ---
 if [ -z "${SOPS_AGE_KEY:-}" ]; then
   AGE_KEY_FILE="${SOPS_AGE_KEY_FILE:-$HOME/.config/sops/age/keys.txt}"
@@ -180,15 +184,19 @@ if [ "$ROLE" = "worker" ]; then
   # concurrent run). rename(2) gives the new contents a fresh inode.
   if ! scp -p "${SCP_OPTS[@]}" "$PROJECT_DIR/deploy/scripts/sandbox-firewall.sh" \
       deploy@"$HOST":/opt/143/deploy/scripts/sandbox-firewall.sh.new; then
-    echo "ERROR: scp of sandbox-firewall.sh failed."
-    echo "  Hint: the worker likely has root-owned files under /opt/143/deploy/scripts AND"
-    echo "  the 'deploy' user lacks NOPASSWD sudo. One-time fix on the worker host:"
-    echo "    1) Log in as root (provider console) and run:"
-    echo "       echo 'deploy ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/99-deploy"
-    echo "       chmod 440 /etc/sudoers.d/99-deploy"
-    echo "       chown -R deploy:deploy /opt/143/deploy"
-    echo "    2) Re-run the deploy."
-    exit 1
+    echo "sandbox-firewall.sh sync failed; trying no-teardown deploy sudoers repair..."
+    if repair_deploy_sudoers; then
+      ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
+        "sudo -n chown -R deploy:deploy /opt/143/deploy/scripts 2>&1 | sed 's/^/  chown: /' || true"
+      scp -p "${SCP_OPTS[@]}" "$PROJECT_DIR/deploy/scripts/sandbox-firewall.sh" \
+        deploy@"$HOST":/opt/143/deploy/scripts/sandbox-firewall.sh.new
+    else
+      echo "ERROR: scp of sandbox-firewall.sh failed and sudoers repair via root SSH did not complete."
+      echo "  Run once from a machine with root SSH access:"
+      echo "    make repair-deploy-sudoers ROLE=$ROLE HOST=$HOST SSH_KEY=$SSH_KEY"
+      echo "  Then re-run the deploy."
+      exit 1
+    fi
   fi
   ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
     "mv /opt/143/deploy/scripts/sandbox-firewall.sh.new /opt/143/deploy/scripts/sandbox-firewall.sh \
@@ -221,9 +229,19 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
   "sudo -n chown -R deploy:deploy /opt/143/deploy/scripts 2>&1 | sed 's/^/  chown: /' || true"
 if ! scp -p "${SCP_OPTS[@]}" "$PROJECT_DIR/deploy/scripts/install-log-rotation.sh" \
     deploy@"$HOST":/opt/143/deploy/scripts/install-log-rotation.sh.new; then
-  echo "ERROR: scp of install-log-rotation.sh failed."
-  echo "  Hint: same root-owned-files issue as sandbox-firewall.sh; fix per above."
-  exit 1
+  echo "install-log-rotation.sh sync failed; trying no-teardown deploy sudoers repair..."
+  if repair_deploy_sudoers; then
+    ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
+      "sudo -n chown -R deploy:deploy /opt/143/deploy/scripts 2>&1 | sed 's/^/  chown: /' || true"
+    scp -p "${SCP_OPTS[@]}" "$PROJECT_DIR/deploy/scripts/install-log-rotation.sh" \
+      deploy@"$HOST":/opt/143/deploy/scripts/install-log-rotation.sh.new
+  else
+    echo "ERROR: scp of install-log-rotation.sh failed and sudoers repair via root SSH did not complete."
+    echo "  Run once from a machine with root SSH access:"
+    echo "    make repair-deploy-sudoers ROLE=$ROLE HOST=$HOST SSH_KEY=$SSH_KEY"
+    echo "  Then re-run the deploy."
+    exit 1
+  fi
 fi
 ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
   "mv /opt/143/deploy/scripts/install-log-rotation.sh.new /opt/143/deploy/scripts/install-log-rotation.sh \
@@ -233,17 +251,26 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
 echo "Ensuring docker log rotation (max-size=$LOG_MAX_SIZE, max-file=$LOG_MAX_FILE)..."
 # `sudo -n` so missing-sudoers fails fast instead of hanging on a password
 # prompt CI can't satisfy. The error path tells the operator how to fix.
-if ! ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
-    "sudo -n /opt/143/deploy/scripts/install-log-rotation.sh $LOG_MAX_SIZE $LOG_MAX_FILE"; then
-  echo "ERROR: install-log-rotation.sh failed under deploy+sudo."
-  echo "  If this host was provisioned before the install-log-rotation.sh sudoers"
-  echo "  entry was added, the fix is one of:"
-  echo "    a) re-run \`make provision-$ROLE HOST=$HOST REPROVISION=true\` to refresh sudoers"
-  echo "       (heavy: tears down containers), or"
-  echo "    b) SSH as root once and append the entry to /etc/sudoers.d/99-deploy:"
-  echo "         /opt/143/deploy/scripts/install-log-rotation.sh *"
-  echo "       then re-run visudo -cf /etc/sudoers.d/99-deploy and re-run this deploy."
-  exit 1
+run_log_rotation() {
+  ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
+    "sudo -n /opt/143/deploy/scripts/install-log-rotation.sh $LOG_MAX_SIZE $LOG_MAX_FILE"
+}
+if ! run_log_rotation; then
+  echo "install-log-rotation.sh failed under deploy+sudo; trying no-teardown deploy sudoers repair..."
+  if repair_deploy_sudoers; then
+    echo "Retrying docker log rotation after sudoers repair..."
+    if ! run_log_rotation; then
+      echo "ERROR: install-log-rotation.sh still failed after repairing deploy sudoers."
+      exit 1
+    fi
+  else
+    echo "ERROR: install-log-rotation.sh failed and sudoers repair via root SSH did not complete."
+    echo "  This host likely predates the deploy sudoers entry."
+    echo "  Run once from a machine with root SSH access:"
+    echo "    make repair-deploy-sudoers ROLE=$ROLE HOST=$HOST SSH_KEY=$SSH_KEY"
+    echo "  Then re-run the deploy."
+    exit 1
+  fi
 fi
 
 ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
