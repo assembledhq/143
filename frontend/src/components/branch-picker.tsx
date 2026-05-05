@@ -2,15 +2,15 @@
 
 import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { Check, ChevronsUpDown, GitBranch } from "lucide-react";
+import { ChevronsUpDown, GitBranch } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import {
   Command,
+  CommandCheckItem,
   CommandEmpty,
   CommandGroup,
   CommandInput,
-  CommandItem,
   CommandList,
 } from "@/components/ui/command";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
@@ -106,8 +106,9 @@ export function BranchPicker({
             {!isLoading && !isError && branches.length > 0 && (
               <CommandGroup>
                 {branches.map((branch) => (
-                  <CommandItem
+                  <CommandCheckItem
                     key={branch.name}
+                    checked={selectedBranch === branch.name}
                     value={branch.name}
                     keywords={branch.protected ? ["protected"] : undefined}
                     onSelect={() => {
@@ -115,14 +116,8 @@ export function BranchPicker({
                       setOpen(false);
                     }}
                   >
-                    <Check
-                      className={cn(
-                        "h-4 w-4",
-                        selectedBranch === branch.name ? "opacity-100" : "opacity-0",
-                      )}
-                    />
                     <span className="truncate">{branch.name}</span>
-                  </CommandItem>
+                  </CommandCheckItem>
                 ))}
               </CommandGroup>
             )}
