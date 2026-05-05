@@ -742,12 +742,12 @@ func TestCodexAdapter_Execute_MissingSandboxProvider(t *testing.T) {
 	require.Contains(t, err.Error(), "sandbox provider not found")
 }
 
-func TestCodexAdapter_Execute_ContinuationWithoutSessionIDUsesResumeLast(t *testing.T) {
+func TestCodexAdapter_Execute_ContinuationWithoutSessionIDFallsBackToFreshExec(t *testing.T) {
 	t.Parallel()
 
 	provider := testutil.NewMockSandboxProvider()
 	provider.ExecFn = func(ctx context.Context, sb *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
-		if strings.HasPrefix(cmd, "codex exec resume") {
+		if strings.HasPrefix(cmd, "codex exec ") {
 			_, _ = stdout.Write([]byte(`{"type":"message","content":"continuing prior session"}`))
 			return 0, nil
 		}
@@ -765,6 +765,8 @@ func TestCodexAdapter_Execute_ContinuationWithoutSessionIDUsesResumeLast(t *test
 	adapter := NewCodexAdapter(zerolog.Nop())
 	sandbox := &agent.Sandbox{ID: "test", WorkDir: "/workspace", HomeDir: "/home/sandbox", Metadata: map[string]string{agent.SandboxMetadataBaseCommitSHA: "abc123"}}
 	prompt := &agent.AgentPrompt{
+		SystemPrompt: "system",
+		UserPrompt:   "history-embedded user prompt",
 		UserMessage:  "Please tighten the test case.",
 		MaxTokens:    50_000,
 		Continuation: true,
@@ -773,11 +775,42 @@ func TestCodexAdapter_Execute_ContinuationWithoutSessionIDUsesResumeLast(t *test
 	ctx := WithSandboxProvider(context.Background(), provider)
 
 	result, err := adapter.Execute(ctx, sandbox, prompt, logCh)
-	require.NoError(t, err, "continuation should succeed without an explicit session ID")
+	require.NoError(t, err, "continuation should succeed when falling back to fresh exec")
 	require.NotNil(t, result, "continuation should return a result")
-	require.Contains(t, provider.ExecCalls[0], "codex exec resume --last --dangerously-bypass-approvals-and-sandbox", "continuation without a session ID should resume the latest restored Codex session")
-	_, exists := provider.Files["/home/sandbox/.143-prompt.md"]
-	require.False(t, exists, "continuation should not write a fresh prompt file")
+	require.NotContains(t, provider.ExecCalls[0], "codex exec resume", "continuation without a session ID must not use the non-deterministic resume path")
+	require.NotContains(t, provider.ExecCalls[0], "--last", "the --last fallback must not be used")
+	require.Contains(t, provider.ExecCalls[0], "codex exec --dangerously-bypass-approvals-and-sandbox", "continuation without a session ID should run a fresh codex exec")
+	contents, exists := provider.Files["/home/sandbox/.143-prompt.md"]
+	require.True(t, exists, "fresh exec must write the system+user prompt to a file")
+	require.Contains(t, string(contents), "history-embedded user prompt", "prompt file should carry the orchestrator-provided history-embedded user prompt")
+}
+
+func TestCodexAdapter_ParseStreamLine_CapturesThreadStartedSessionID(t *testing.T) {
+	t.Parallel()
+
+	result := &agent.AgentResult{}
+	logCh := make(chan agent.LogEntry, 4)
+	var summaryParts []string
+	lastByType := make(map[string]string)
+	lastAssistant := ""
+
+	parseCodexStreamLine(
+		[]byte(`{"type":"thread.started","thread_id":"019d049e-f7f8-7b71-bb08-e174ba50c73c"}`),
+		result,
+		logCh,
+		&summaryParts,
+		lastByType,
+		&lastAssistant,
+	)
+
+	require.Equal(t, "019d049e-f7f8-7b71-bb08-e174ba50c73c", result.AgentSessionID, "thread.started should populate AgentSessionID for downstream resume")
+}
+
+func TestCodexAdapter_ResumeMode(t *testing.T) {
+	t.Parallel()
+
+	adapter := NewCodexAdapter(zerolog.Nop())
+	require.Equal(t, agent.ResumeBySessionID, adapter.ResumeMode())
 }
 
 func TestCodexAdapter_Execute_IncludesReasoningEffortOverride(t *testing.T) {

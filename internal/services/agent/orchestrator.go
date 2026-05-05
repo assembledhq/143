@@ -2520,8 +2520,19 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 
 		commands := canonicalCommands(latestMsg, session.AgentType)
 		hasThreadAgentSessionID := session.AgentSessionID != nil && *session.AgentSessionID != ""
-		if threadScopedExecution && !hasThreadAgentSessionID {
-			input := &AgentInput{
+		resumeMode := adapter.ResumeMode()
+		// missingResumeID covers the case where the adapter resumes by
+		// session id but no id was captured from a prior turn — e.g. the
+		// session predates session-id capture, or capture failed. Without
+		// the id, the adapter falls back to a fresh exec, so we must embed
+		// the conversation history into the prompt or the agent loses
+		// context. Threaded first turns are handled by the next branch.
+		missingResumeID := resumeMode == ResumeBySessionID && !hasThreadAgentSessionID && !threadScopedExecution
+		// Both snapshot-path branches that go through PreparePrompt feed it
+		// the same context; capture once here so a future field addition
+		// can't drift between the two callers.
+		buildSnapshotContinueInput := func() *AgentInput {
+			return &AgentInput{
 				Issue:        promptIssue,
 				LinkedIssues: linkedIssues,
 				Manual:       session.Origin == models.SessionOriginManual,
@@ -2547,11 +2558,28 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 				RevisionContext:   revisionContext,
 				IntegrationSkills: integrationSkills,
 			}
-			prompt, err = adapter.PreparePrompt(ctx, input)
+		}
+		if threadScopedExecution && !hasThreadAgentSessionID {
+			prompt, err = adapter.PreparePrompt(ctx, buildSnapshotContinueInput())
 			if err != nil {
 				o.failRun(ctx, session, fmt.Sprintf("prepare prompt for thread: %s", err))
 				return fmt.Errorf("prepare prompt for thread: %w", err)
 			}
+		} else if missingResumeID {
+			basePrompt, err := adapter.PreparePrompt(ctx, buildSnapshotContinueInput())
+			if err != nil {
+				o.failRun(ctx, session, fmt.Sprintf("prepare prompt for resume fallback: %s", err))
+				return fmt.Errorf("prepare prompt for resume fallback: %w", err)
+			}
+			// Override UserPrompt with conversation history so the agent has
+			// prior context when running a fresh exec. The snapshot already
+			// restored the workspace, so do not ask the agent to re-apply the
+			// stored diff.
+			basePrompt.UserPrompt = o.buildRestoredWorkspaceResumeContext(session, promptIssue, messages, userMessage)
+			basePrompt.Continuation = false
+			basePrompt.RevisionContext = revisionContext
+			prompt = basePrompt
+			log.Info().Msg("continuing session with embedded history (no captured agent session id)")
 		} else {
 			var resumeSessionID string
 			if hasThreadAgentSessionID {
@@ -2915,27 +2943,7 @@ func (o *Orchestrator) buildResumeContext(session *models.Session, issue *models
 
 	b.WriteString("This is a continuation of a previous session. The previous workspace state is not available, so you are starting from a fresh clone.\n\n")
 
-	// Include the original issue description for context (especially
-	// important for non-manual sessions that may have no prior messages).
-	if issue != nil && issue.Description != nil && *issue.Description != "" {
-		b.WriteString("## Original issue\n\n**")
-		b.WriteString(issue.Title)
-		b.WriteString("**\n\n")
-		b.WriteString(*issue.Description)
-		b.WriteString("\n\n")
-	}
-
-	// Include conversation history if available.
-	if len(messages) > 1 { // >1 because the latest user message is always present
-		b.WriteString("## Previous conversation history\n\n")
-		for _, msg := range messages[:len(messages)-1] {
-			role := "User"
-			if msg.Role == models.MessageRoleAssistant {
-				role = "Assistant"
-			}
-			b.WriteString(fmt.Sprintf("**%s:** %s\n\n", role, msg.Content))
-		}
-	}
+	writeResumeIssueAndHistory(&b, issue, messages)
 
 	// Include the stored diff if available, truncating if very large.
 	if session.Diff != nil && *session.Diff != "" {
@@ -2965,6 +2973,53 @@ func (o *Orchestrator) buildResumeContext(session *models.Session, issue *models
 	b.WriteString(latestUserMessage)
 
 	return b.String()
+}
+
+// buildRestoredWorkspaceResumeContext constructs the user prompt for a
+// snapshot-backed continuation where the agent CLI cannot resume by session ID.
+// The workspace already contains the previous turn's files, so it includes
+// conversation context without asking the agent to re-apply the stored diff.
+func (o *Orchestrator) buildRestoredWorkspaceResumeContext(session *models.Session, issue *models.Issue, messages []models.SessionMessage, latestUserMessage string) string {
+	var b bytes.Buffer
+
+	b.WriteString("This is a continuation of a previous session. The previous workspace state has been restored from the last saved snapshot, so treat the files on disk as the current state.\n\n")
+
+	writeResumeIssueAndHistory(&b, issue, messages)
+
+	if session.ResultSummary != nil && *session.ResultSummary != "" {
+		b.WriteString("## Previous session summary\n\n")
+		b.WriteString(*session.ResultSummary)
+		b.WriteString("\n\n")
+	}
+
+	b.WriteString("## New message\n\n")
+	b.WriteString(latestUserMessage)
+
+	return b.String()
+}
+
+func writeResumeIssueAndHistory(b *bytes.Buffer, issue *models.Issue, messages []models.SessionMessage) {
+	// Include the original issue description for context (especially
+	// important for non-manual sessions that may have no prior messages).
+	if issue != nil && issue.Description != nil && *issue.Description != "" {
+		b.WriteString("## Original issue\n\n**")
+		b.WriteString(issue.Title)
+		b.WriteString("**\n\n")
+		b.WriteString(*issue.Description)
+		b.WriteString("\n\n")
+	}
+
+	// Include conversation history if available.
+	if len(messages) > 1 { // >1 because the latest user message is always present
+		b.WriteString("## Previous conversation history\n\n")
+		for _, msg := range messages[:len(messages)-1] {
+			role := "User"
+			if msg.Role == models.MessageRoleAssistant {
+				role = "Assistant"
+			}
+			b.WriteString(fmt.Sprintf("**%s:** %s\n\n", role, msg.Content))
+		}
+	}
 }
 
 func manualSessionReferences(issue *models.Issue) []models.SessionInputReference {
