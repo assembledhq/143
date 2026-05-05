@@ -99,11 +99,13 @@ jobs:
         with:
           go-version: ${{ env.GO_VERSION }}
 
+      - name: Download Go modules
+        run: go mod download
+
       - name: Run go vet and migrations
         run: |
-          go vet ./... &
           go run cmd/migrate/main.go up
-          wait
+          go vet ./...
 
       - name: Run tests (PR — no race)
         if: github.event_name == 'pull_request'
