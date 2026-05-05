@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -107,6 +109,34 @@ type Service struct {
 	// self-healing within the TTL and the alternative (LISTEN/NOTIFY for
 	// cross-pod invalidation) wasn't worth the wiring for a 60s ceiling.
 	teamKeyCache *teamKeyAllowlistCache
+
+	// credentialsWriter persists rotated tokens after a successful refresh.
+	// Optional: when nil, GetValidToken still refreshes in-memory but logs a
+	// warning that the new token will not survive the process. Production
+	// always wires *db.OrgCredentialStore via Build; tests that don't
+	// exercise refresh can leave it nil.
+	credentialsWriter CredentialWriter
+	// oauthClient holds LINEAR_OAUTH_CLIENT_ID / LINEAR_OAUTH_CLIENT_SECRET.
+	// Required for the refresh-token path; without these, GetValidToken on a
+	// credential that needs refreshing returns ErrOAuthClientNotConfigured.
+	oauthClient OAuthClientCreds
+	// refreshHTTPClient is the HTTP client used for the /oauth/token POST.
+	// Tests inject a stubbed transport; production uses an http.Client with
+	// refreshHTTPTimeout.
+	refreshHTTPClient *http.Client
+	// refreshMuRegistry holds per-org sync.Mutex values keyed by orgID
+	// string. Wrapped in atomic.Pointer so direct &Service{} construction
+	// (used widely in tests) stays race-free without forcing every test
+	// to remember to allocate a sync.Map. NewService eagerly populates
+	// the pointer; orgRefreshMu falls back to a CAS-installed registry
+	// when the pointer is nil. A prior sync.Once-based lazy init was
+	// race-prone: goroutines that observed a non-nil registry skipped
+	// the Once.Do call entirely, losing the happens-before relationship
+	// that makes Once safe.
+	//
+	// Growth: bounded by the working set of orgs that refresh; entries
+	// are *sync.Mutex (tiny). No eviction needed at any realistic scale.
+	refreshMuRegistry atomic.Pointer[sync.Map]
 }
 
 // jobEnqueuerHolder / linksChangedHolder wrap the function values stored in
@@ -301,14 +331,31 @@ type Config struct {
 	Integrations       IntegrationReader
 	IntegrationsWriter IntegrationWriter
 	Credentials        CredentialReader
-	Issues             *db.IssueStore
-	Links              *db.SessionIssueLinkStore
-	TeamKeys           *db.LinearTeamKeyStore
-	ProviderState      *db.LinearProviderStateStore
-	StateEvents        *db.LinearStateEventStore
-	Sessions           *db.SessionStore
-	ClientFactory      ClientFactory
-	OrgSettingsLoader  OrgSettingsLoader
+	// CredentialsWriter persists rotated OAuth tokens after a successful
+	// refresh. Optional in tests; production must always wire one (Build
+	// passes *db.OrgCredentialStore here) or refreshed tokens will live
+	// only inside the calling process.
+	CredentialsWriter CredentialWriter
+	Issues            *db.IssueStore
+	Links             *db.SessionIssueLinkStore
+	TeamKeys          *db.LinearTeamKeyStore
+	ProviderState     *db.LinearProviderStateStore
+	StateEvents       *db.LinearStateEventStore
+	Sessions          *db.SessionStore
+	ClientFactory     ClientFactory
+	OrgSettingsLoader OrgSettingsLoader
+	// OAuthClient is required when callers expect refresh-on-expiry to work:
+	// without ClientID + ClientSecret, GetValidToken returns
+	// ErrOAuthClientNotConfigured for any credential that has reached the
+	// refresh window. Tests that never exercise refresh can leave both
+	// fields zero; production must always populate from
+	// LINEAR_OAUTH_CLIENT_ID / LINEAR_OAUTH_CLIENT_SECRET.
+	OAuthClient OAuthClientCreds
+	// RefreshHTTPClient overrides the default HTTP client used for the
+	// /oauth/token POST. Tests inject a stubbed transport; production
+	// callers can leave nil to get the package default with
+	// refreshHTTPTimeout.
+	RefreshHTTPClient *http.Client
 	// Pool is used by HandleMilestone / HandleStateTransition to begin a tx
 	// for SELECT ... FOR UPDATE on the provider-state row, so two concurrent
 	// milestone events for the same link can't both create a rolling
@@ -334,12 +381,23 @@ func NewService(cfg Config) *Service {
 	if cache == nil {
 		cache = &teamKeyAllowlistCache{}
 	}
-	return &Service{
+	httpClient := cfg.RefreshHTTPClient
+	if httpClient == nil {
+		// Per-call timeout context wraps each request inside postLinearRefresh,
+		// so the http.Client itself doesn't need a global Timeout. Leaving
+		// Timeout zero lets the per-call deadline be the single source of
+		// truth and avoids a confusing "two timeouts compete" interaction.
+		httpClient = &http.Client{}
+	}
+	svc := &Service{
 		teamKeyCache:       cache,
 		logger:             cfg.Logger,
 		integrations:       cfg.Integrations,
 		integrationsWriter: cfg.IntegrationsWriter,
 		credentials:        cfg.Credentials,
+		credentialsWriter:  cfg.CredentialsWriter,
+		oauthClient:        cfg.OAuthClient,
+		refreshHTTPClient:  httpClient,
 		issues:             cfg.Issues,
 		links:              cfg.Links,
 		teamKeys:           cfg.TeamKeys,
@@ -351,6 +409,8 @@ func NewService(cfg Config) *Service {
 		pool:               cfg.Pool,
 		appBaseURL:         strings.TrimRight(cfg.AppBaseURL, "/"),
 	}
+	svc.refreshMuRegistry.Store(&sync.Map{})
+	return svc
 }
 
 // maxProviderStateLockedDuration bounds how long a single milestone or
@@ -514,33 +574,31 @@ func (s *Service) Enabled(ctx context.Context, orgID uuid.UUID) bool {
 // the wrap added by integrationFor.
 var ErrIntegrationNotFound = errors.New("linear integration not found")
 
-// integrationFor returns the integration row + linear access token for an
-// org. Both must be present for any read/write to Linear; if either is
-// missing, callers should treat it as a silent no-op.
+// integrationFor returns the integration row + a Linear access token that is
+// valid right now. It delegates to GetValidToken, which transparently
+// rotates the access token via the refresh-token flow when the cached token
+// is within refreshWindow of expiry.
+//
+// This is the single read-plus-refresh entry point that every service-layer
+// caller (RefreshTeamKeys, ResolvePrimary, mid-session linking, the
+// session-create inline path) routes through, so there is exactly one place
+// in the code where stale tokens become fresh tokens.
+//
+// Behavior on edge cases:
+//
+//   - Missing integration row: returns ErrIntegrationNotFound (wrapped).
+//   - Legacy connection without refresh-token fields: returns the cached token
+//     unchanged. The token works until Linear revokes it, at which point
+//     the caller's 401 path triggers MarkIntegrationUnauthorized and the
+//     user reconnects; the new connection captures a refresh token.
+//   - Refresh-token revoked: the refresh path zeroes the row's refresh
+//     token and flips the integration to errored, then returns
+//     ErrRefreshTokenRevoked. Callers should not retry.
+//   - Transient refresh failure (network blip, 5xx): returns the cached
+//     token if still inside its validity window; otherwise propagates the
+//     error so the caller can decide whether to retry.
 func (s *Service) integrationFor(ctx context.Context, orgID uuid.UUID) (models.Integration, string, error) {
-	integration, err := s.integrations.GetByOrgAndProvider(ctx, orgID, "linear")
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return models.Integration{}, "", fmt.Errorf("lookup linear integration: %w", ErrIntegrationNotFound)
-		}
-		return models.Integration{}, "", fmt.Errorf("lookup linear integration: %w", err)
-	}
-	cred, err := s.credentials.Get(ctx, orgID, models.ProviderLinear)
-	if err != nil {
-		return integration, "", fmt.Errorf("lookup linear credential: %w", err)
-	}
-	if cred == nil {
-		return integration, "", fmt.Errorf("linear credential not found")
-	}
-	cfg, ok := cred.Config.(models.LinearConfig)
-	if !ok {
-		// Include the observed concrete type so operators chasing this
-		// don't have to repro to find out what we got. Most common cause
-		// is a credential row that was written through the wrong provider
-		// path (e.g. GitHub config saved under a Linear credential).
-		return integration, "", fmt.Errorf("linear credential config is wrong type: got %T", cred.Config)
-	}
-	return integration, cfg.AccessToken, nil
+	return s.GetValidToken(ctx, orgID)
 }
 
 // TeamKeyAllowlist returns the org's cached team-key allowlist as a map for
@@ -615,19 +673,32 @@ func (s *Service) InvalidateTeamKeyCache(orgID uuid.UUID) {
 
 // RefreshTeamKeys pulls the team list from Linear and replaces the cache.
 // Called after OAuth install and on a 24h cron. Idempotent.
+//
+// The Linear-side read goes through withRefreshableClient so an expired
+// token rotates transparently and a 401 mid-call triggers exactly one
+// force-refresh + retry. The integration row is read up front (before
+// withRefreshableClient) because we need the integration ID to scope the
+// team-key replace; that read goes through GetValidToken too so a missing
+// integration short-circuits cleanly.
 func (s *Service) RefreshTeamKeys(ctx context.Context, orgID uuid.UUID) error {
-	integration, token, err := s.integrationFor(ctx, orgID)
+	integration, _, err := s.GetValidToken(ctx, orgID)
 	if err != nil {
 		return err
 	}
-	client, err := s.clientFactory(ctx, token)
+
+	var teams []TeamKeyInfo
+	err = s.withRefreshableClient(ctx, orgID, func(client Client) error {
+		got, listErr := client.ListTeamKeys(ctx)
+		if listErr != nil {
+			return fmt.Errorf("list linear team keys: %w", listErr)
+		}
+		teams = got
+		return nil
+	})
 	if err != nil {
-		return fmt.Errorf("build linear client: %w", err)
+		return err
 	}
-	teams, err := client.ListTeamKeys(ctx)
-	if err != nil {
-		return fmt.Errorf("list linear team keys: %w", err)
-	}
+
 	rows := make([]db.LinearTeamKey, 0, len(teams))
 	workspaceID := ""
 	for _, t := range teams {
@@ -672,18 +743,21 @@ func (s *Service) RefreshTeamKeys(ctx context.Context, orgID uuid.UUID) error {
 // a different workspace should expect URL-based detection to break for
 // historical references. Slug changes warrant an integration health note.
 func (s *Service) ResolvePrimary(ctx context.Context, orgID uuid.UUID, hit Detected) (*ResolvedIssue, error) {
-	integration, token, err := s.integrationFor(ctx, orgID)
+	integration, _, err := s.GetValidToken(ctx, orgID)
 	if err != nil {
 		return nil, err
 	}
-	client, err := s.clientFactory(ctx, token)
-	if err != nil {
-		return nil, fmt.Errorf("build linear client: %w", err)
-	}
 
-	fetched, err := client.FetchIssue(ctx, hit.Identifier)
-	if err != nil {
-		return nil, fmt.Errorf("fetch linear issue %q: %w", hit.Identifier, err)
+	var fetched *FetchedIssue
+	if err := s.withRefreshableClient(ctx, orgID, func(client Client) error {
+		got, fetchErr := client.FetchIssue(ctx, hit.Identifier)
+		if fetchErr != nil {
+			return fmt.Errorf("fetch linear issue %q: %w", hit.Identifier, fetchErr)
+		}
+		fetched = got
+		return nil
+	}); err != nil {
+		return nil, err
 	}
 
 	if hit.Workspace != "" && fetched.WorkspaceSlug != "" && !strings.EqualFold(hit.Workspace, fetched.WorkspaceSlug) {

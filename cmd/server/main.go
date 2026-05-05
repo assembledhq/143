@@ -1069,14 +1069,28 @@ func buildServices(
 		Integrations:       integrationStore,
 		IntegrationsWriter: integrationStore,
 		Credentials:        credentialStore,
+		CredentialsWriter:  credentialStore,
 		Issues:             issueStore,
 		Sessions:           sessionStore,
 		IssueLinks:         db.NewSessionIssueLinkStore(pool),
 		Orgs:               orgStore,
 		Jobs:               jobStore,
-		AppBaseURL:         cfg.FrontendURL,
+		OAuthClient: linear.OAuthClientCreds{
+			ClientID:     cfg.LinearOAuthClientID,
+			ClientSecret: cfg.LinearOAuthClientSecret,
+		},
+		AppBaseURL: cfg.FrontendURL,
 	})
 	prService.SetLinearMilestoneEnqueuer(linear.MilestoneEnqueuerFor(jobStore, logger))
+	// Wire the linear service into the agent env so sandbox-bound
+	// LINEAR_ACCESS_TOKEN is resolved through the refresh path. Without
+	// this, sessions that start within the refresh window of a token's
+	// expiry would inject a soon-to-be-stale token and the agent's
+	// 143-tools would 401 mid-turn. SetLinearTokens is a no-op when called
+	// before linearService is built, but the orchestrator construction
+	// happens on the same goroutine after linear.Build returns, so this
+	// ordering is deterministic.
+	agentEnv.SetLinearTokens(linearService)
 
 	// Runtime resource sampler. Optional capability — only providers that
 	// implement RuntimeStatsProvider produce samples. Disabled when the
