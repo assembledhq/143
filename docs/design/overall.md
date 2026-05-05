@@ -325,7 +325,7 @@ Single system of record. Bundled in Docker Compose for local dev, swappable to m
 
 ## Logging & Monitoring
 
-- **VictoriaLogs + Grafana**: Primary centralized logging and operational alerting. Structured JSON logs are shipped by Vector and queried in Grafana. The logging stack tolerates missing warning/critical webhook URLs by falling back to disabled local sinks so observability deploys do not block on notification wiring. This is the current production observability backbone.
+- **VictoriaLogs + Grafana**: Primary centralized logging, provisioned dashboards, and operational alerting. Structured JSON logs are shipped by Vector and queried in Grafana. Repo-owned dashboards and `vmalert` rules are synced by `deploy-logging` so observability config changes apply with normal logging-node deploys. The logging stack tolerates missing warning/critical webhook URLs by falling back to disabled local sinks so observability deploys do not block on notification wiring. This is the current production observability backbone.
 - **Sentry**: Primary exception monitoring and developer-facing error triage. Frontend SDKs are already configured; backend exception capture should be added so Sentry becomes the system of record for application errors.
 - **Alerting model**: Page on aggregated service symptoms in Grafana; send exception issues from Sentry primarily to Slack unless they meet a paging threshold. See [54-production-alerting.md](54-production-alerting.md).
 

@@ -1366,11 +1366,21 @@ func newOpenPRHandler(stores *Stores, services *Services, logger zerolog.Logger)
 
 		_, createErr := services.PR.CreatePR(ctx, &run, params...)
 		if createErr != nil {
-			// Always log the raw error — only a curated subset is shown in
-			// the UI, so the worker log is the source of truth for ops.
-			logger.Error().Err(createErr).
-				Str("session_id", runID.String()).
-				Msg("open_pr failed")
+			// ErrNoChanges is a benign terminal outcome (session ran fine
+			// but produced no diff), so log at info to keep `open_pr failed`
+			// a real-error signal that dashboards/alerts can key off without
+			// false positives.
+			if errors.Is(createErr, ghservice.ErrNoChanges) {
+				logger.Info().
+					Str("session_id", runID.String()).
+					Msg("open_pr: no changes to push")
+			} else {
+				// Always log the raw error — only a curated subset is shown in
+				// the UI, so the worker log is the source of truth for ops.
+				logger.Error().Err(createErr).
+					Str("session_id", runID.String()).
+					Msg("open_pr failed")
+			}
 			msg := userFacingPRError(createErr)
 			if stateErr := stores.Sessions.UpdatePRCreationState(ctx, orgID, runID, models.PRCreationStateFailed, msg); stateErr != nil {
 				logger.Error().Err(stateErr).Msg("failed to mark PR creation as failed")

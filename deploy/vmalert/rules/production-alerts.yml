@@ -4,7 +4,7 @@ groups:
     interval: 1m
     rules:
       - alert: API5xxBurstWarning
-        expr: '_time:5m service:api AND level:error AND _msg:"request failed" AND status:[500,599] | stats count() as errors | filter errors:>9'
+        expr: '_time:5m service:api AND level:error AND _msg:"request failed" AND status:range[500,599] | stats count() as errors | filter errors:>9'
         for: 1m
         labels:
           service: api
@@ -14,9 +14,9 @@ groups:
         annotations:
           summary: 'API 5xx burst warning'
           description: 'The API emitted {{ $value }} server-error responses in the last 5 minutes.'
-          runbook: 'Check VictoriaLogs for service=api level=error _msg="request failed" status:[500,599].'
+          runbook: 'Check VictoriaLogs for service=api level=error _msg="request failed" status:range[500,599].'
       - alert: API5xxBurstCritical
-        expr: '_time:5m service:api AND level:error AND _msg:"request failed" AND status:[500,599] | stats count() as errors | filter errors:>24'
+        expr: '_time:5m service:api AND level:error AND _msg:"request failed" AND status:range[500,599] | stats count() as errors | filter errors:>24'
         for: 1m
         labels:
           service: api
@@ -26,9 +26,9 @@ groups:
         annotations:
           summary: 'API 5xx burst critical'
           description: 'The API emitted {{ $value }} server-error responses in the last 5 minutes.'
-          runbook: 'Check VictoriaLogs for service=api level=error _msg="request failed" status:[500,599].'
+          runbook: 'Check VictoriaLogs for service=api level=error _msg="request failed" status:range[500,599].'
       - alert: EndpointFailureBurst
-        expr: '_time:10m service:api AND level:error AND _msg:"request failed" AND status:[500,599] | stats by (path) count() as errors | filter errors:>4 | fields path, errors'
+        expr: '_time:10m service:api AND level:error AND _msg:"request failed" AND status:range[500,599] | stats by (path) count() as errors | filter errors:>4 | fields path, errors'
         for: 1m
         labels:
           service: api
@@ -92,6 +92,64 @@ groups:
           summary: 'Worker fatal failures critical'
           description: 'Workers logged {{ $value }} fatal job failures in the last 10 minutes.'
           runbook: 'Treat this as an async pipeline incident and inspect worker logs, job backlog, and DB health.'
+
+  - name: pr-pipeline-errors
+    type: vlogs
+    interval: 1m
+    rules:
+      - alert: PRCreationErrorBurst
+        expr: '_time:15m service:worker AND level:error AND _msg:"open_pr failed" | stats count() as failures | filter failures:>4'
+        for: 1m
+        labels:
+          service: worker
+          severity: warning
+          team: platform
+          signal: logs
+        annotations:
+          summary: 'PR creation failures elevated'
+          description: 'Workers logged {{ $value }} `open_pr failed` errors in the last 15 minutes.'
+          runbook: 'Filter VictoriaLogs for service=worker _msg="open_pr failed". Check the wrapped error for git/GitHub auth, sandbox push, or createPullRequest API issues.'
+      - alert: PRPushErrorBurst
+        expr: '_time:15m service:worker AND level:error AND _msg:"push_pr_changes failed" | stats count() as failures | filter failures:>4'
+        for: 1m
+        labels:
+          service: worker
+          severity: warning
+          team: platform
+          signal: logs
+        annotations:
+          summary: 'PR push (push_pr_changes) failures elevated'
+          description: 'Workers logged {{ $value }} `push_pr_changes failed` errors in the last 15 minutes.'
+          runbook: 'Filter VictoriaLogs for service=worker _msg="push_pr_changes failed". Common causes: snapshot hydration, git push (token / branch protection), or sandbox creation.'
+
+  - name: session-problems
+    type: vlogs
+    interval: 1m
+    rules:
+      - alert: SessionTimeoutBurst
+        expr: '_time:30m level:error AND _msg:"session exceeded configured timeout" | stats count() as timeouts | filter timeouts:>9'
+        for: 1m
+        labels:
+          service: worker
+          severity: warning
+          team: platform
+          signal: logs
+        annotations:
+          summary: 'Session timeouts elevated'
+          description: '{{ $value }} sessions hit the configured wall-clock timeout in the last 30 minutes.'
+          runbook: 'Inspect orchestrator logs for stuck adapters, sandbox exec hangs, or misconfigured per-session deadlines.'
+      - alert: ReaperErrorBurst
+        expr: '_time:15m level:error AND _msg:~"^reaper:" | stats count() as errors | filter errors:>4'
+        for: 1m
+        labels:
+          service: worker
+          severity: warning
+          team: platform
+          signal: logs
+        annotations:
+          summary: 'Session reaper errors elevated'
+          description: 'The session reaper logged {{ $value }} errors in the last 15 minutes.'
+          runbook: 'Reaper errors usually indicate DB pressure or stale rows it cannot reconcile. Check DB health and recent reaper code paths.'
 
 # Scheduler heartbeat and queue backlog alerts are intentionally not yet
 # encoded here. The current system does not emit a dedicated scheduler
