@@ -281,7 +281,15 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	if threadCanceller != nil {
 		threadSvc.SetCanceller(threadCanceller)
 	}
+	// Wire review-comment resolution so SendThreadMessage can resolve
+	// comments atomically with the message create — same invariant the
+	// session-level SendMessage already enforces. Without this, the
+	// "submitted comments stick around for the next turn" bug surfaces on
+	// any session whose follow-up flows through a thread tab.
+	threadSvc.SetReviewCommentResolver(pool, sessionReviewCommentStore)
 	sessionThreadHandler := handlers.NewSessionThreadHandler(threadSvc)
+	sessionThreadHandler.SetAuditEmitter(auditEmitter)
+	sessionThreadHandler.SetLogger(logger)
 	pmHandler := handlers.NewPMHandler(pmPlanStore, pmDecisionLogStore, jobStore, orgStore)
 	priorityHandler := handlers.NewPriorityHandler(priorityScoreStore, complexityEstimateStore, jobStore)
 	ingestionWebhookHandler := handlers.NewIngestionWebhookHandler(webhookDeliveryStore, integrationStore, credentialStore, ingestionSvc, logger)
