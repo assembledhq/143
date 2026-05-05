@@ -31,9 +31,12 @@ echo "Repairing deploy sudoers for role=$ROLE on $HOST via root SSH..."
 ssh "${SSH_OPTS[@]}" root@"$HOST" "ROLE=$ROLE" bash <<'REMOTE'
 set -euo pipefail
 
+TMP="$(mktemp /etc/sudoers.d/99-deploy.XXXXXX)"
+trap 'rm -f "$TMP"' EXIT
+
 case "$ROLE" in
   app|worker)
-    cat > /etc/sudoers.d/99-deploy <<'SUDOERS'
+    cat > "$TMP" <<'SUDOERS'
 Cmnd_Alias DEPLOY_CMDS = \
     /usr/bin/chown -R deploy\:deploy /opt/143/deploy/scripts, \
     /usr/bin/chown -R deploy\:deploy /opt/143/deploy/vmalert, \
@@ -48,7 +51,7 @@ deploy ALL=(root) NOPASSWD: DEPLOY_CMDS
 SUDOERS
     ;;
   logging)
-    cat > /etc/sudoers.d/99-deploy <<'SUDOERS'
+    cat > "$TMP" <<'SUDOERS'
 Cmnd_Alias DEPLOY_CMDS = \
     /usr/bin/chown -R deploy\:deploy /opt/143/deploy/scripts, \
     /usr/bin/chown -R deploy\:deploy /opt/143/deploy/vmalert, \
@@ -60,7 +63,7 @@ deploy ALL=(root) NOPASSWD: DEPLOY_CMDS
 SUDOERS
     ;;
   db|redis)
-    cat > /etc/sudoers.d/99-deploy <<'SUDOERS'
+    cat > "$TMP" <<'SUDOERS'
 Cmnd_Alias DEPLOY_CMDS = \
     /usr/bin/chown -R deploy\:deploy /opt/143/deploy/scripts, \
     /usr/bin/systemctl restart docker, \
@@ -71,8 +74,10 @@ SUDOERS
     ;;
 esac
 
-chmod 440 /etc/sudoers.d/99-deploy
-visudo -cf /etc/sudoers.d/99-deploy
+chmod 440 "$TMP"
+visudo -cf "$TMP"
+mv "$TMP" /etc/sudoers.d/99-deploy
+trap - EXIT
 
 if id deploy >/dev/null 2>&1; then
   for path in \
