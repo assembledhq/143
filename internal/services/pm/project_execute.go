@@ -248,10 +248,7 @@ func (s *Service) dispatchProjectTasks(ctx context.Context, orgID uuid.UUID, pro
 
 		// Enqueue the agent run job.
 		dedupeKey := db.RunAgentDedupeKey(run.ID)
-		payload := map[string]string{
-			"session_id": run.ID.String(),
-			"org_id":     orgID.String(),
-		}
+		payload := db.RunAgentPayload(run)
 		if _, err := s.jobs.Enqueue(ctx, orgID, "agent", "run_agent", payload, 5, &dedupeKey); err != nil {
 			s.logger.Error().Err(err).Str("session_id", run.ID.String()).Msg("failed to enqueue project agent run")
 			continue

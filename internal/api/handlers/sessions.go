@@ -854,10 +854,7 @@ func (h *SessionHandler) TriggerFix(w http.ResponseWriter, r *http.Request) {
 	// rows for the same session — the second insert would race the first at
 	// AcquireTurnHold and surface "sandbox race" to the user.
 	dedupeKey := db.RunAgentDedupeKey(run.ID)
-	payload := map[string]string{
-		"session_id": run.ID.String(),
-		"org_id":     orgID.String(),
-	}
+	payload := db.RunAgentPayload(run)
 	if _, err := h.jobStore.Enqueue(r.Context(), orgID, "agent", "run_agent", payload, 5, &dedupeKey); err != nil {
 		writeError(w, r, http.StatusInternalServerError, "ENQUEUE_FAILED", "failed to enqueue agent run job", err)
 		return
@@ -2643,6 +2640,7 @@ func (h *SessionHandler) CreateManual(w http.ResponseWriter, r *http.Request) {
 		initMsg := &models.SessionMessage{
 			SessionID:  session.ID,
 			OrgID:      orgID,
+			ThreadID:   session.PrimaryThreadID,
 			TurnNumber: 0,
 			Role:       models.MessageRoleUser,
 			Content:    body.Message,
@@ -2791,10 +2789,7 @@ func (h *SessionHandler) CreateManual(w http.ResponseWriter, r *http.Request) {
 	}
 
 	dedupeKey := db.RunAgentDedupeKey(session.ID)
-	payload := map[string]string{
-		"session_id": session.ID.String(),
-		"org_id":     orgID.String(),
-	}
+	payload := db.RunAgentPayload(session)
 	if _, err := h.jobStore.Enqueue(r.Context(), orgID, "agent", "run_agent", payload, 5, &dedupeKey); err != nil {
 		writeError(w, r, http.StatusInternalServerError, "ENQUEUE_FAILED", "failed to enqueue manual session", err)
 		return
