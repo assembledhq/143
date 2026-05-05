@@ -922,6 +922,7 @@ func buildServices(
 	// Orchestrator.
 	sessionLogStore := db.NewSessionLogStore(pool)
 	sessionQuestionStore := db.NewSessionQuestionStore(pool)
+	sessionThreadStore := db.NewSessionThreadStore(pool)
 	projectTaskUpdater := pm.NewProjectHooks(projectTaskStore, projectStore, logger)
 	automationRunUpdater := automations.NewAutomationHooks(automationRunStore, logger)
 	containerUsageStore := db.NewContainerUsageStore(pool)
@@ -959,6 +960,7 @@ func buildServices(
 		SessionLogs:       sessionLogStore,
 		SessionQuestions:  sessionQuestionStore,
 		SessionMessages:   sessionMessageStore,
+		SessionThreads:    sessionThreadStore,
 		SessionIssueLinks: db.NewSessionIssueLinkStore(pool),
 		IssueSnapshots:    db.NewSessionTurnIssueSnapshotStore(pool),
 		DecisionLog:       pmDecisionLogStore,
