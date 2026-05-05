@@ -329,7 +329,7 @@ func TestRunGitBootstrap_Idempotent(t *testing.T) {
 	// globally, which would otherwise leak in). The credential helper key
 	// must appear exactly once even after multiple bootstraps; a
 	// regression to `--add` would surface here as duplicate entries.
-	out, err := exec.Command("git", "-C", workdir, "config", "--local", "--get-all", "credential.helper").Output()
+	out, err := testGitCommand(workdir, "config", "--local", "--get-all", "credential.helper").Output()
 	require.NoError(t, err)
 	helpers := strings.Split(strings.TrimSpace(string(out)), "\n")
 	require.Len(t, helpers, 1, "credential.helper must have exactly one value after repeated bootstraps, got %v", helpers)
@@ -408,8 +408,8 @@ func TestRunGitBootstrap_PrePushHookRejectsWrongBranchOrRemote(t *testing.T) {
 	code := runGitBootstrap([]string{"--workdir=" + workdir}, &stderr)
 	require.Equal(t, 0, code, "stderr: %s", stderr.String())
 
-	require.NoError(t, exec.Command("git", "-C", workdir, "commit", "--allow-empty", "-m", "init").Run(), "test repo should create an initial commit before branch switching")
-	require.NoError(t, exec.Command("git", "-C", workdir, "checkout", "-b", "143/abc123/fix-typo").Run(), "test repo should create the designated branch")
+	require.NoError(t, testGitCommand(workdir, "commit", "--allow-empty", "-m", "init").Run(), "test repo should create an initial commit before branch switching")
+	require.NoError(t, testGitCommand(workdir, "checkout", "-b", "143/abc123/fix-typo").Run(), "test repo should create the designated branch")
 	hookPath := filepath.Join(workdir, ".git", "hooks", "pre-push")
 
 	cmd := exec.Command("sh", hookPath, "origin", "https://github.com/owner/repo.git")
@@ -418,7 +418,7 @@ func TestRunGitBootstrap_PrePushHookRejectsWrongBranchOrRemote(t *testing.T) {
 	out, err := cmd.CombinedOutput()
 	require.NoError(t, err, "pre-push should allow pushes from the designated branch to the designated remote ref: %s", string(out))
 
-	require.NoError(t, exec.Command("git", "-C", workdir, "checkout", "-B", "main").Run(), "test repo should switch to a non-designated branch")
+	require.NoError(t, testGitCommand(workdir, "checkout", "-B", "main").Run(), "test repo should switch to a non-designated branch")
 	cmd = exec.Command("sh", hookPath, "origin", "https://github.com/owner/repo.git")
 	cmd.Dir = workdir
 	cmd.Stdin = strings.NewReader("refs/heads/main abc refs/heads/143/abc123/fix-typo def\n")
@@ -426,7 +426,7 @@ func TestRunGitBootstrap_PrePushHookRejectsWrongBranchOrRemote(t *testing.T) {
 	require.Error(t, err, "pre-push should reject pushes from the wrong local branch")
 	require.Contains(t, string(out), "refusing push from branch 'main'; expected '143/abc123/fix-typo'")
 
-	require.NoError(t, exec.Command("git", "-C", workdir, "checkout", "143/abc123/fix-typo").Run(), "test repo should switch back to the designated branch")
+	require.NoError(t, testGitCommand(workdir, "checkout", "143/abc123/fix-typo").Run(), "test repo should switch back to the designated branch")
 	cmd = exec.Command("sh", hookPath, "origin", "https://github.com/owner/repo.git")
 	cmd.Dir = workdir
 	cmd.Stdin = strings.NewReader("refs/heads/143/abc123/fix-typo abc refs/heads/main def\n")
@@ -460,8 +460,8 @@ func TestRunGitBootstrap_PreservesExistingPrePushHook(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, originalHook, string(preserved), "git-bootstrap should preserve the original pre-push hook")
 
-	require.NoError(t, exec.Command("git", "-C", workdir, "commit", "--allow-empty", "-m", "init").Run(), "test repo should create an initial commit before branch switching")
-	require.NoError(t, exec.Command("git", "-C", workdir, "checkout", "-b", "143/abc123/fix-typo").Run(), "test repo should create the designated branch")
+	require.NoError(t, testGitCommand(workdir, "commit", "--allow-empty", "-m", "init").Run(), "test repo should create an initial commit before branch switching")
+	require.NoError(t, testGitCommand(workdir, "checkout", "-b", "143/abc123/fix-typo").Run(), "test repo should create the designated branch")
 
 	cmd := exec.Command("sh", hookPath, "origin", "https://github.com/owner/repo.git")
 	cmd.Dir = workdir
@@ -727,14 +727,21 @@ func TestHandleSubcommand_NoArgsFallsThrough(t *testing.T) {
 // --- helpers ---
 
 func gitInit(workdir string) error {
-	return exec.Command("git", "-C", workdir, "init", "--quiet").Run()
+	return testGitCommand(workdir, "init", "--quiet").Run()
 }
 
 func readGitConfig(t *testing.T, workdir string) string {
 	t.Helper()
-	out, err := exec.Command("git", "-C", workdir, "config", "--list", "--local").Output()
+	out, err := testGitCommand(workdir, "config", "--list", "--local").Output()
 	require.NoError(t, err)
 	return string(out)
+}
+
+func testGitCommand(workdir string, args ...string) *exec.Cmd {
+	full := append([]string{"-C", workdir}, args...)
+	cmd := exec.Command("git", full...) // #nosec G204,G702 -- test helper executes fixed git invocations against temp repos
+	cmd.Env = appendGitEnv(os.Environ())
+	return cmd
 }
 
 func fakeGitPath(t *testing.T, script string) string {
