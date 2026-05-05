@@ -53,6 +53,13 @@ repair_deploy_sudoers() {
   bash "$SCRIPT_DIR/repair-deploy-sudoers.sh" "$ROLE" "$HOST" "$SSH_KEY"
 }
 
+warn_log_rotation_skipped() {
+  echo "WARNING: docker log rotation was not updated on this deploy; continuing."
+  echo "  The service deploy will continue, but local Docker json-file logs may remain unbounded."
+  echo "  To repair the host when root SSH is available, run:"
+  echo "    make repair-deploy-sudoers ROLE=$ROLE HOST=$HOST SSH_KEY=$SSH_KEY"
+}
+
 # --- Refresh secrets from .env.production.enc ---
 if [ -z "${SOPS_AGE_KEY:-}" ]; then
   AGE_KEY_FILE="${SOPS_AGE_KEY_FILE:-$HOME/.config/sops/age/keys.txt}"
@@ -221,6 +228,7 @@ case "$ROLE" in
   *)  LOG_MAX_SIZE="100m" ;;
 esac
 LOG_MAX_FILE="5"
+LOG_ROTATION_READY=1
 
 # Sync install-log-rotation.sh: stage to .new, atomic rename. Same ETXTBSY
 # avoidance as sandbox-firewall.sh — a lingering FD on the old inode would
@@ -236,40 +244,40 @@ if ! scp -p "${SCP_OPTS[@]}" "$PROJECT_DIR/deploy/scripts/install-log-rotation.s
     scp -p "${SCP_OPTS[@]}" "$PROJECT_DIR/deploy/scripts/install-log-rotation.sh" \
       deploy@"$HOST":/opt/143/deploy/scripts/install-log-rotation.sh.new
   else
-    echo "ERROR: scp of install-log-rotation.sh failed and sudoers repair via root SSH did not complete."
-    echo "  Run once from a machine with root SSH access:"
-    echo "    make repair-deploy-sudoers ROLE=$ROLE HOST=$HOST SSH_KEY=$SSH_KEY"
-    echo "  Then re-run the deploy."
-    exit 1
+    warn_log_rotation_skipped
+    LOG_ROTATION_READY=0
   fi
 fi
-ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
-  "mv /opt/143/deploy/scripts/install-log-rotation.sh.new /opt/143/deploy/scripts/install-log-rotation.sh \
-   && chmod +x /opt/143/deploy/scripts/install-log-rotation.sh \
-   || { rm -f /opt/143/deploy/scripts/install-log-rotation.sh.new; exit 1; }"
+if [ "$LOG_ROTATION_READY" -eq 1 ]; then
+  if ! ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
+    "mv /opt/143/deploy/scripts/install-log-rotation.sh.new /opt/143/deploy/scripts/install-log-rotation.sh \
+     && chmod +x /opt/143/deploy/scripts/install-log-rotation.sh \
+     || { rm -f /opt/143/deploy/scripts/install-log-rotation.sh.new; exit 1; }"; then
+    warn_log_rotation_skipped
+    LOG_ROTATION_READY=0
+  fi
+fi
 
-echo "Ensuring docker log rotation (max-size=$LOG_MAX_SIZE, max-file=$LOG_MAX_FILE)..."
-# `sudo -n` so missing-sudoers fails fast instead of hanging on a password
-# prompt CI can't satisfy. The error path tells the operator how to fix.
-run_log_rotation() {
-  ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
-    "sudo -n /opt/143/deploy/scripts/install-log-rotation.sh $LOG_MAX_SIZE $LOG_MAX_FILE"
-}
-if ! run_log_rotation; then
-  echo "install-log-rotation.sh failed under deploy+sudo; trying no-teardown deploy sudoers repair..."
-  if repair_deploy_sudoers; then
-    echo "Retrying docker log rotation after sudoers repair..."
-    if ! run_log_rotation; then
-      echo "ERROR: install-log-rotation.sh still failed after repairing deploy sudoers."
-      exit 1
+if [ "$LOG_ROTATION_READY" -eq 1 ]; then
+  echo "Ensuring docker log rotation (max-size=$LOG_MAX_SIZE, max-file=$LOG_MAX_FILE)..."
+  # `sudo -n` so missing-sudoers fails fast instead of hanging on a password
+  # prompt CI can't satisfy. If the repair path also isn't available, keep the
+  # deploy moving: log rotation is an operational hardening step, not the app
+  # or database rollout itself.
+  run_log_rotation() {
+    ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
+      "sudo -n /opt/143/deploy/scripts/install-log-rotation.sh $LOG_MAX_SIZE $LOG_MAX_FILE"
+  }
+  if ! run_log_rotation; then
+    echo "install-log-rotation.sh failed under deploy+sudo; trying no-teardown deploy sudoers repair..."
+    if repair_deploy_sudoers; then
+      echo "Retrying docker log rotation after sudoers repair..."
+      if ! run_log_rotation; then
+        warn_log_rotation_skipped
+      fi
+    else
+      warn_log_rotation_skipped
     fi
-  else
-    echo "ERROR: install-log-rotation.sh failed and sudoers repair via root SSH did not complete."
-    echo "  This host likely predates the deploy sudoers entry."
-    echo "  Run once from a machine with root SSH access:"
-    echo "    make repair-deploy-sudoers ROLE=$ROLE HOST=$HOST SSH_KEY=$SSH_KEY"
-    echo "  Then re-run the deploy."
-    exit 1
   fi
 fi
 

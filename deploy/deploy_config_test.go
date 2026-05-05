@@ -206,6 +206,8 @@ func TestDeployConfiguresDockerLogRotation(t *testing.T) {
 	require.Contains(t, deployText, "sudo -n /opt/143/deploy/scripts/install-log-rotation.sh", "deploy.sh should invoke install-log-rotation.sh via deploy+sudo (not root SSH) — matches the sandbox-firewall.sh pattern and avoids depending on root SSH at routine deploy time")
 	require.Contains(t, deployText, "repair-deploy-sudoers.sh", "deploy.sh should try the narrow root repair path when a legacy host is missing the deploy sudoers entry")
 	require.Contains(t, deployText, "Retrying docker log rotation after sudoers repair", "deploy.sh should retry install-log-rotation.sh after repairing sudoers so a single deploy can recover legacy hosts")
+	require.Contains(t, deployText, "WARNING: docker log rotation was not updated on this deploy; continuing.", "deploy.sh should keep routine deploys moving when a legacy host cannot be sudoers-repaired from CI")
+	require.NotContains(t, deployText, "ERROR: install-log-rotation.sh failed and sudoers repair via root SSH did not complete.", "deploy.sh should not fail the whole deploy solely because optional log-rotation repair is unavailable")
 
 	bootstrap, err := os.ReadFile("../deploy/scripts/bootstrap.sh")
 	require.NoError(t, err, "test should read bootstrap.sh")

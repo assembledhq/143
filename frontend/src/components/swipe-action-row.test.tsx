@@ -59,6 +59,25 @@ describe('SwipeActionRow', () => {
     expect(screen.getAllByRole('button', { name: 'Archive item' })).toHaveLength(1);
   });
 
+  it('can de-emphasize the desktop action button until hover or focus', () => {
+    renderWithProviders(
+      <SwipeActionRow
+        actionLabel="Archive item"
+        actionText="Archive"
+        desktopActionVisibility="hover"
+        onAction={() => {}}
+      >
+        <div>Row content</div>
+      </SwipeActionRow>,
+    );
+
+    expect(screen.getByRole('button', { name: 'Archive item' })).toHaveClass(
+      'md:opacity-0',
+      'md:group-hover:opacity-100',
+      'md:focus-visible:opacity-100',
+    );
+  });
+
   it('reveals the trailing action after a left swipe and invokes it', async () => {
     const onAction = vi.fn();
 

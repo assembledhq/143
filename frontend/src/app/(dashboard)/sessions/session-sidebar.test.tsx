@@ -217,6 +217,21 @@ describe('SessionSidebar', () => {
     });
   });
 
+  it('keeps the desktop archive action de-emphasized until hover or focus', async () => {
+    serveSessions([
+      makeSession({ id: 's1', result_summary: 'Full-width session row' }),
+    ]);
+
+    renderWithProviders(<SessionSidebar />);
+    await screen.findByText('Full-width session row');
+
+    expect(screen.getByRole('button', { name: 'Archive session' })).toHaveClass(
+      'md:opacity-0',
+      'md:group-hover:opacity-100',
+      'md:focus-visible:opacity-100',
+    );
+  });
+
   it('clears search on Escape key', async () => {
     serveSessions([
       makeSession({ id: 's1', result_summary: 'Alpha fix' }),
@@ -627,12 +642,17 @@ describe('SessionSidebar', () => {
     await screen.findByText('Selected session');
 
     const selectedLink = screen.getByText('Selected session').closest('a');
-    expect(selectedLink?.className).toContain('bg-background');
+    const unselectedLink = screen.getByText('Other session').closest('a');
+    expect(selectedLink?.className).toContain('bg-primary/5');
+    expect(selectedLink?.className).toContain('border-primary/20');
+    expect(selectedLink?.className).toContain('ring-1');
+    expect(selectedLink?.className).toContain('ring-primary/15');
     expect(selectedLink?.className).toContain('shadow-sm');
-    expect(selectedLink?.className).toContain('md:bg-background');
+    expect(selectedLink?.className).toContain('md:bg-primary/5');
     expect(selectedLink?.className).toContain('md:shadow-sm');
-    expect(selectedLink?.className).toContain('md:border-border/60');
+    expect(selectedLink?.className).toContain('md:border-primary/20');
     expect(selectedLink).toHaveAttribute('aria-current', 'page');
+    expect(unselectedLink?.className).not.toContain('bg-primary/5');
   });
 
   it('highlights the selected session from the active layout segment', async () => {
@@ -647,11 +667,14 @@ describe('SessionSidebar', () => {
     await screen.findByText('Selected via pathname');
 
     const selectedLink = screen.getByText('Selected via pathname').closest('a');
-    expect(selectedLink?.className).toContain('bg-background');
+    expect(selectedLink?.className).toContain('bg-primary/5');
+    expect(selectedLink?.className).toContain('border-primary/20');
+    expect(selectedLink?.className).toContain('ring-1');
+    expect(selectedLink?.className).toContain('ring-primary/15');
     expect(selectedLink?.className).toContain('shadow-sm');
-    expect(selectedLink?.className).toContain('md:bg-background');
+    expect(selectedLink?.className).toContain('md:bg-primary/5');
     expect(selectedLink?.className).toContain('md:shadow-sm');
-    expect(selectedLink?.className).toContain('md:border-border/60');
+    expect(selectedLink?.className).toContain('md:border-primary/20');
     expect(selectedLink).toHaveAttribute('aria-current', 'page');
   });
 
@@ -712,12 +735,10 @@ describe('SessionSidebar', () => {
 
     await screen.findByText('Overflow session');
 
-    expect(screen.queryByRole('link', { name: 'Open session details for Overflow session' })).not.toBeInTheDocument();
-
-    const rowLink = screen.getByText('Overflow session').closest('a');
-    expect(rowLink).not.toBeNull();
-    expect(rowLink).toHaveClass('flex-1');
-    expect(rowLink).toHaveAttribute(
+    const detailsButton = screen.getByRole('link', { name: 'Open session details for Overflow session' });
+    expect(detailsButton.className).toContain('shrink-0');
+    expect(detailsButton.className).toContain('self-center');
+    expect(detailsButton).toHaveAttribute(
       'href',
       '/sessions/s1?people=all&status=active&repo=repo-1&search=Overflow',
     );
