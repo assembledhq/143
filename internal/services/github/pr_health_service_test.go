@@ -939,6 +939,12 @@ func TestPRServiceCreateRepairRevisionSessionAndResumeRepairSession(t *testing.T
 						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 					).
 					WillReturnRows(pgxmock.NewRows([]string{"id", "created_at", "last_activity_at"}).AddRow(uuid.New(), now, now))
+				mock.ExpectExec("INSERT INTO session_threads").
+					WithArgs(
+						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+						pgxmock.AnyArg(), pgxmock.AnyArg(),
+					).
+					WillReturnResult(pgxmock.NewResult("INSERT", 1))
 				mock.ExpectExec("INSERT INTO session_issue_links").
 					WithArgs(
 						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
