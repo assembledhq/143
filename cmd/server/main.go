@@ -50,6 +50,8 @@ import (
 	"github.com/assembledhq/143/internal/worker"
 )
 
+const nodeDrainMarkTimeout = 5 * time.Second
+
 func main() {
 	cfg := config.Load()
 	logger := logging.NewLogger(cfg.LogLevel, cfg.Env)
@@ -493,6 +495,10 @@ func main() {
 			agent.WithOrphanCloser(db.NewContainerUsageStore(pool)),
 			agent.WithUsageRoller(usageRollupStore),
 			agent.WithMaxRunningAge(cfg.SessionMaxRunningAge),
+			// Phase 0.5b safety net: fails session_threads stuck in 'running'
+			// past maxRunningAge. Catches orphans the orchestrator/handler
+			// thread.status reset paths couldn't unwind themselves.
+			agent.WithStuckThreadLister(sessionThreadStore),
 		}
 		if previewManager != nil {
 			previewStore := db.NewPreviewStore(pool)
@@ -542,12 +548,18 @@ func main() {
 
 	// Graceful shutdown.
 	//
-	// Ordering matters here. docker-compose.app.yml sets stop_grace_period to
-	// 120s; we must finish shutting down before Docker SIGKILLs us. The total
-	// budget spent below is:
-	//   - SSE drain + http.Server.Shutdown:  up to 110s
-	//   - preview gateway.Shutdown:          up to 60s (parallel with above)
-	// leaving a safety margin under the 120s SIGKILL deadline.
+	// Two independent budgets:
+	//   - Worker job drain:    cfg.WorkerDrainTimeout (default 45m). Long
+	//     enough to let in-flight coding turns finish; cancelling them
+	//     mid-execution produces orphaned thread rows when partial DB state
+	//     lands during the orchestrator's cleanup defers. The matching outer
+	//     bound is docker-compose.worker.yml stop_grace_period.
+	//   - HTTP API drain:      110s. Bounded by docker-compose.app.yml
+	//     stop_grace_period=120s with a 10s SIGKILL safety margin. Only
+	//     load-bearing on api/all modes.
+	//   - Preview gateway:     60s, in parallel with HTTP drain.
+	// On worker-only nodes the HTTP drain is a no-op (no traffic) so the
+	// long worker budget is the only thing the deploy actually waits on.
 	go func() {
 		sigCh := make(chan os.Signal, 1)
 		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
@@ -557,10 +569,12 @@ func main() {
 		for _, w := range processWorkers {
 			w.RequestDrain()
 		}
-		drainCtx, drainCancel := context.WithTimeout(context.Background(), 110*time.Second)
-		if err := nodeManager.RequestDrain(drainCtx, time.Now()); err != nil {
+		nodeDrainCtx, nodeDrainCancel := context.WithTimeout(context.Background(), nodeDrainMarkTimeout)
+		if err := nodeManager.RequestDrain(nodeDrainCtx, time.Now()); err != nil {
 			logger.Warn().Err(err).Msg("failed to mark node draining")
 		}
+		nodeDrainCancel()
+		drainCtx, drainCancel := context.WithTimeout(context.Background(), cfg.WorkerDrainTimeout)
 		for {
 			activeJobs := 0
 			for _, w := range processWorkers {
@@ -583,17 +597,12 @@ func main() {
 		// session is stuck with pending_snapshot_key set with no in-flight
 		// uploader to clear it.
 		//
-		// This drain is best-effort by design: the shared 110s drainCtx is
-		// well below postPRSnapshotUploadTimeout (6 minutes), so a real
-		// upload that has only just started at shutdown will not finish
-		// within budget. That is acceptable — cluster.Scheduler's
-		// reapStrandedPendingSnapshots pass clears stranded rows on the
-		// next tick (within strandedPendingSnapshotThreshold = 15m), so
-		// the worst-case outcome is a delayed resume rather than a
-		// permanently stuck row. The drain still pays for itself when
-		// uploads happen to be near completion (the common case under
-		// light load), and gives the goroutines a chance to call
-		// Promote/Clear before the process exits.
+		// This drain is best-effort by design: drainCtx may have been
+		// largely consumed by the worker drain above. cluster.Scheduler's
+		// reapStrandedPendingSnapshots pass clears any rows the upload
+		// goroutines didn't get to (within strandedPendingSnapshotThreshold
+		// = 15m), so the worst-case outcome is a delayed resume rather than
+		// a permanently stuck row.
 		drainPostPRUploads(drainCtx, resolvePostPRSnapshotDrainer(workerServices), logger)
 	drained:
 		drainCancel()

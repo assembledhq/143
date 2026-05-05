@@ -275,6 +275,7 @@ fi
 
 ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
   "COMPOSE_FILE=$COMPOSE_FILE" "HEALTH_SERVICE=$HEALTH_SERVICE" "ROLE=$ROLE" "IMAGE_TAG=$TAG" \
+  "WORKER_DEPLOY_DETACH=${WORKER_DEPLOY_DETACH:-}" \
   bash << 'REMOTE'
   set -euo pipefail
   cd /opt/143
@@ -593,20 +594,92 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
     fi
 
   elif [ "$ROLE" = "worker" ]; then
-    # Workers remain single-replica, but we now drain the old replica before
-    # replacement so accepted long-running sessions are not interrupted by a
-    # routine deploy.
-    drain_worker_service "$HEALTH_SERVICE"
-    docker compose -f "$COMPOSE_FILE" up -d --no-deps --force-recreate "$HEALTH_SERVICE"
+    # Workers remain single-replica, but we drain the old replica before
+    # replacement so accepted long-running sessions are not interrupted.
+    #
+    # Worker drain can take up to WORKER_DRAIN_TIMEOUT (default 45m in the
+    # process, capped by docker stop_grace_period). Holding an SSH session
+    # — and therefore a CI runner minute — open that long is wasteful, so
+    # CI sets WORKER_DEPLOY_DETACH=1 to spawn the rollover as a backgrounded
+    # host-side process and return immediately. Manual deploys leave it
+    # unset to keep the synchronous "did it work?" feedback loop.
+    if [ -n "${WORKER_DEPLOY_DETACH:-}" ]; then
+      mkdir -p /var/log/143
+      sha_short="${IMAGE_TAG:0:7}"
+      log_file="/var/log/143/deploy-worker-$(date -u +%Y%m%dT%H%M%SZ)-${sha_short}.log"
+      # Predictable status filename (one per SHA) so CI can poll for it
+      # deterministically. "ok" on success, "fail: <reason>" otherwise.
+      # Cleared inside the flocked block below so a same-SHA redeploy
+      # can't wipe a still-running prior deploy's status file.
+      status_file="/var/log/143/deploy-worker-${sha_short}.status"
+      rollover_script="$(mktemp /tmp/143-rollover-worker-XXXXXX.sh)"
+      # Bake the helpers + bound vars into a self-contained script. $(declare
+      # -f ...) and "$VAR" expand at heredoc time (remote bash); \$ inside is
+      # preserved for runtime.
+      cat > "$rollover_script" <<EOS
+#!/bin/bash
+set -euo pipefail
+$(declare -f drain_worker_service wait_container_healthy dump_diagnostics)
+COMPOSE_FILE='$COMPOSE_FILE'
+HEALTH_SERVICE='$HEALTH_SERVICE'
+STATUS_FILE='$status_file'
 
-    CONTAINER_ID="$(docker compose -f "$COMPOSE_FILE" ps -q "$HEALTH_SERVICE" | head -1)"
-    if [ -n "$CONTAINER_ID" ]; then
-      if ! wait_container_healthy "$CONTAINER_ID" 120; then
-        echo "ERROR: new worker failed health check"
-        exit 1
+# Always write a status file so the verify step has a deterministic signal.
+# If we exit before the success line writes "ok", the trap leaves "fail".
+on_exit() {
+  rc=\$?
+  if [ ! -s "\$STATUS_FILE" ] || ! grep -q '^ok' "\$STATUS_FILE"; then
+    echo "fail: exit \$rc at \$(date -u -Iseconds)" > "\$STATUS_FILE"
+  fi
+}
+trap on_exit EXIT
+
+# Clear any stale status from a previous deploy of this same SHA. Done
+# here (inside the flock) rather than from the parent shell so a
+# concurrent same-SHA redeploy can't wipe an in-flight deploy's status.
+rm -f "\$STATUS_FILE"
+
+cd /opt/143
+echo "[\$(date -u -Iseconds)] starting detached worker rollover (tag=$IMAGE_TAG)"
+drain_worker_service "\$HEALTH_SERVICE"
+docker compose -f "\$COMPOSE_FILE" up -d --no-deps --force-recreate "\$HEALTH_SERVICE"
+cid="\$(docker compose -f "\$COMPOSE_FILE" ps -q "\$HEALTH_SERVICE" | head -1)"
+if [ -n "\$cid" ]; then
+  wait_container_healthy "\$cid" 120 || { echo "[\$(date -u -Iseconds)] HEALTH CHECK FAILED"; exit 1; }
+fi
+echo "[\$(date -u -Iseconds)] rollover succeeded"
+echo "ok" > "\$STATUS_FILE"
+EOS
+      chmod 700 "$rollover_script"
+
+      # setsid: new session, detached from the SSH controlling tty so the
+      #   child survives session end (no SIGHUP).
+      # flock: serialize against any prior detached deploy on this host so
+      #   back-to-back commits can't race on docker.
+      # </dev/null + redirect: nothing tied back to the SSH stdio so SSH can
+      #   close cleanly.
+      setsid bash -c "
+        flock -x /tmp/143-deploy-worker.lock '$rollover_script' >>'$log_file' 2>&1
+        rm -f '$rollover_script'
+      " </dev/null >/dev/null 2>&1 &
+      disown
+      echo "Detached worker rollover launched."
+      echo "  log:    $log_file"
+      echo "  status: $status_file (poll for 'ok' / 'fail')"
+      echo "  follow: ssh deploy@<host> tail -f $log_file"
+    else
+      drain_worker_service "$HEALTH_SERVICE"
+      docker compose -f "$COMPOSE_FILE" up -d --no-deps --force-recreate "$HEALTH_SERVICE"
+
+      CONTAINER_ID="$(docker compose -f "$COMPOSE_FILE" ps -q "$HEALTH_SERVICE" | head -1)"
+      if [ -n "$CONTAINER_ID" ]; then
+        if ! wait_container_healthy "$CONTAINER_ID" 120; then
+          echo "ERROR: new worker failed health check"
+          exit 1
+        fi
       fi
+      echo "$HEALTH_SERVICE restarted successfully."
     fi
-    echo "$HEALTH_SERVICE restarted successfully."
 
   else
     # Non-rolling roles (db, logging) — just recreate everything.

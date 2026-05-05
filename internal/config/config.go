@@ -53,6 +53,22 @@ type Config struct {
 	// server process when MODE is "worker" or "all". Increase this on larger
 	// hosts to process more jobs/sandboxes in parallel.
 	WorkerProcessCount int `env:"WORKER_PROCESS_COUNT" envDefault:"2"`
+	// WorkerDrainTimeout is how long graceful shutdown waits for in-flight
+	// worker jobs to finish before cancelling the worker context. Coding
+	// turns routinely run 5–15 minutes (per-org cap is even higher), so a
+	// short window cuts them off mid-execution and produces orphaned thread
+	// rows when partial DB state lands.
+	//
+	// Outer caps (must be ≥ this value):
+	//   - docker-compose.worker.yml stop_grace_period (50m) — binding
+	//     SIGKILL deadline once Docker issues `docker stop`; this is the
+	//     real ceiling on a deploy.
+	//   - deploy/scripts/deploy.sh drain_worker_service polls for up to
+	//     WORKER_DRAIN_TIMEOUT seconds (default 7200s) waiting for the
+	//     SIGTERM'd container to exit, but `--force-recreate` afterwards
+	//     hits stop_grace_period anyway, so the polling ceiling is only a
+	//     safety upper bound, not the effective drain duration.
+	WorkerDrainTimeout time.Duration `env:"WORKER_DRAIN_TIMEOUT" envDefault:"45m"`
 
 	// GitHub OAuth
 	GitHubOAuthClientID     string `env:"GITHUB_OAUTH_CLIENT_ID"`

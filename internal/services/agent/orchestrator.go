@@ -2443,8 +2443,30 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 				Str("container_id", sandbox.ID).
 				Str("worker_node_id", o.nodeID).
 				Msg("persist session worker ownership: CAS failed (container_id moved or worker_node_id held by another worker)")
-			if revertErr := o.sessions.UpdateStatus(ctx, session.OrgID, session.ID, string(models.SessionStatusIdle)); revertErr != nil {
+			// Detached context for the cleanup writes: this site fires when
+			// a CAS conflict means another worker already owns the row, and
+			// also during rolling-deploy ctx cancellation. Both cases need
+			// the revert to land. Without WithoutCancel, a cancelled ctx
+			// silently fails the UpdateStatus and leaves session.status =
+			// 'running' / thread.status = 'running' permanently — that's
+			// the orphan that produces "Session is not active" +
+			// "Agent is working..." in the UI at the same time.
+			cleanupCtx, cleanupCancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+			defer cleanupCancel()
+			if revertErr := o.sessions.UpdateStatus(cleanupCtx, session.OrgID, session.ID, string(models.SessionStatusIdle)); revertErr != nil {
 				log.Error().Err(revertErr).Msg("failed to revert session to idle after worker ownership persistence failure")
+			}
+			// Mirror the session revert onto the active thread. The handler
+			// also resets thread.status on error, but it can miss when its
+			// own ctx is cancelled mid-shutdown (the exact scenario this
+			// failure path tends to fire in). Belt-and-suspenders here is
+			// what unblocks the UI for the user that just sent a message.
+			if opts != nil && opts.ThreadID != nil && o.sessionThreads != nil {
+				if revertErr := o.sessionThreads.UpdateStatus(cleanupCtx, session.OrgID, *opts.ThreadID, models.ThreadStatusIdle); revertErr != nil {
+					log.Error().Err(revertErr).
+						Str("thread_id", opts.ThreadID.String()).
+						Msg("failed to revert thread to idle after worker ownership persistence failure")
+				}
 			}
 			o.registerSandboxFailureMessage(
 				ctx,

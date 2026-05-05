@@ -456,6 +456,26 @@ deploy-worker:
 	$(check-ssh-key)
 	@$(call resolve-host,worker)
 
+# Tail the latest detached worker rollover log on each worker host.
+# Useful after a CI deploy (which runs with WORKER_DEPLOY_DETACH=1) to see
+# whether the rollover finished, or after `make deploy-worker WORKER_DEPLOY_DETACH=1`.
+# Pass FOLLOW=1 to `tail -f` the most recent log instead of dumping the tail.
+deploy-worker-status:
+	$(check-ssh-key)
+	@$(read-fleet-hosts); \
+	HOSTS="$$(echo "$$FLEET" | tr ',' '\n' | grep '^worker:' | cut -d: -f2)"; \
+	if [ -z "$$HOSTS" ]; then \
+		echo "ERROR: no worker host in FLEET_HOSTS"; exit 1; \
+	fi; \
+	for h in $$HOSTS; do \
+		echo "=== worker $$h ==="; \
+		if [ -n "$(FOLLOW)" ]; then \
+			ssh -i $(SSH_KEY) -t deploy@$$h 'f=$$(ls -1t /var/log/143/deploy-worker-*.log 2>/dev/null | head -1); [ -n "$$f" ] && { echo "tailing $$f"; exec tail -f "$$f"; } || echo "no detached deploy logs found"'; \
+		else \
+			ssh -i $(SSH_KEY) deploy@$$h 'ls -1t /var/log/143/deploy-worker-*.log 2>/dev/null | head -3 | while read f; do echo "--- $$f ---"; tail -30 "$$f"; done || echo "no detached deploy logs found"'; \
+		fi; \
+	done
+
 deploy-db:
 	$(check-ssh-key)
 	@$(call resolve-host,db)
