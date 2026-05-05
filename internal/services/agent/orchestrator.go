@@ -329,6 +329,10 @@ type SessionThreadStore interface {
 	UpdateStatus(ctx context.Context, orgID, threadID uuid.UUID, status models.ThreadStatus) error
 	CompleteTurn(ctx context.Context, orgID, threadID uuid.UUID, turnNumber int, agentSessionID string) error
 	UpdateResult(ctx context.Context, orgID, threadID uuid.UUID, status models.ThreadStatus, result *models.SessionResult) error
+	// ClearPendingMessages resets the queued-message counter once the
+	// orchestrator has re-enqueued a continue_session to drain the queue.
+	// Called from drainQueuedMessages after the in-flight turn completes.
+	ClearPendingMessages(ctx context.Context, orgID, threadID uuid.UUID) error
 }
 
 type SessionIssueLinkStore interface {
@@ -849,6 +853,53 @@ func latestUserMessage(messages []models.SessionMessage) *models.SessionMessage 
 		}
 	}
 	return nil
+}
+
+// unprocessedUserMessages returns the consecutive trailing user messages for
+// a given thread scope — i.e. all user messages after the most recent
+// in-scope assistant message. When threadID is nil the scope is the
+// session-level conversation (messages with no thread); when threadID is
+// non-nil the scope is that specific thread.
+//
+// Used by ContinueSession to bundle rapid-fire mid-turn user sends into a
+// single agent invocation. Without this, the orchestrator processes only
+// the very latest user message and silently drops earlier queued ones.
+// Returned messages are in oldest-first order.
+func unprocessedUserMessages(messages []models.SessionMessage, threadID *uuid.UUID) []models.SessionMessage {
+	return unprocessedUserMessagesThrough(messages, threadID, 1<<63-1)
+}
+
+// unprocessedUserMessagesThrough is the boundary-aware form used when a later
+// assistant message may already exist in the timeline. Mid-turn queued user
+// rows are inserted before the in-flight turn's assistant row; when the drain
+// job starts, that assistant must not hide the queued users.
+func unprocessedUserMessagesThrough(messages []models.SessionMessage, threadID *uuid.UUID, latestUserMessageID int64) []models.SessionMessage {
+	matchesScope := func(m models.SessionMessage) bool {
+		if threadID == nil {
+			return m.ThreadID == nil
+		}
+		return m.ThreadID != nil && *m.ThreadID == *threadID
+	}
+	var pending []models.SessionMessage
+	for i := len(messages) - 1; i >= 0; i-- {
+		m := messages[i]
+		if m.ID > latestUserMessageID {
+			continue
+		}
+		if !matchesScope(m) {
+			continue
+		}
+		if m.Role == models.MessageRoleAssistant {
+			break
+		}
+		if m.Role == models.MessageRoleUser {
+			pending = append(pending, m)
+		}
+	}
+	for i, j := 0, len(pending)-1; i < j; i, j = i+1, j-1 {
+		pending[i], pending[j] = pending[j], pending[i]
+	}
+	return pending
 }
 
 func canonicalReferences(message *models.SessionMessage) []models.SessionInputReference {
@@ -2043,14 +2094,29 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		return fmt.Errorf("no user message found")
 	}
 	threadID := latestMsg.ThreadID
-	userMessage := latestMsg.Content
-	var planMode bool
-
-	// Detect plan mode prefix and strip it, wrapping with plan instructions.
+	// Bundle every trailing user message in scope into the prompt seed so
+	// rapid mid-turn sends are all delivered to the agent. The latest
+	// message remains the "carrier" for thread_id, references, and
+	// plan-mode detection — earlier queued messages contribute only their
+	// text content. When only a single user message is unprocessed, this
+	// reduces to the legacy single-message behavior.
 	const planModePrefix = "[PLAN_MODE]\n"
-	if strings.HasPrefix(userMessage, planModePrefix) {
-		planMode = true
-		originalMessage := strings.TrimPrefix(userMessage, planModePrefix)
+	pendingMsgs := unprocessedUserMessagesThrough(messages, threadID, latestMsg.ID)
+	planMode := strings.HasPrefix(latestMsg.Content, planModePrefix)
+	var userMessage string
+	if len(pendingMsgs) <= 1 {
+		userMessage = strings.TrimPrefix(latestMsg.Content, planModePrefix)
+	} else {
+		var sb strings.Builder
+		for i, m := range pendingMsgs {
+			if i > 0 {
+				sb.WriteString("\n\n---\n\n")
+			}
+			sb.WriteString(strings.TrimPrefix(m.Content, planModePrefix))
+		}
+		userMessage = sb.String()
+	}
+	if planMode {
 		userMessage = "You are in PLAN MODE. Instead of making changes directly, create a detailed implementation plan for the following request. Describe:\n" +
 			"1. What files need to be changed and why\n" +
 			"2. What specific changes are needed in each file\n" +
@@ -2058,7 +2124,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 			"4. Any potential risks or considerations\n\n" +
 			"Do NOT make any file changes or use any tools that modify files. Only output the plan as a structured markdown response. " +
 			"The user will review the plan and either approve it or request adjustments before you proceed.\n\n" +
-			"User's request:\n" + originalMessage
+			"User's request:\n" + userMessage
 	}
 	_ = planMode // used by adapters that support explicit plan mode
 	revisionContext, revErr := ParseRevisionContext(session.RevisionContext)
@@ -2396,6 +2462,15 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	if o.usageTracker != nil {
 		usageEventID = o.usageTracker.ContainerStarted(ctx, session.OrgID, session.ID, sandbox, sandboxCfg, containerStartedAt)
 	}
+	drainAfterRelease := false
+	defer func() {
+		if !drainAfterRelease {
+			return
+		}
+		drainCtx, drainCancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+		defer drainCancel()
+		o.drainQueuedMessages(drainCtx, session, latestMsg, threadID, log)
+	}()
 	defer func() {
 		exitReason := containerExitReason(ctx, err)
 		if o.usageTracker != nil {
@@ -2684,6 +2759,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		if wasCancelled || (stopReason == StopReasonNone && errors.Is(ctx.Err(), context.Canceled)) {
 			log.Info().Msg("session cancelled by user during continue")
 			o.handleCancelledSession(ctx, session, sandbox, result, turnNumber, log)
+			drainAfterRelease = true
 			return fmt.Errorf("session cancelled: %w", ctx.Err())
 		}
 		if stopReason != StopReasonNone {
@@ -2704,6 +2780,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	if wasCancelled {
 		log.Info().Msg("agent exited after cancel during continue, returning to idle")
 		o.handleCancelledSession(ctx, session, sandbox, result, turnNumber, log)
+		drainAfterRelease = true
 		return nil
 	}
 	if stopReason != StopReasonNone {
@@ -2768,8 +2845,119 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		return fmt.Errorf("update turn complete: %w", err)
 	}
 
+	drainAfterRelease = true
+
 	log.Info().Int("turn", turnNumber).Msg("session turn completed, now idle")
 	return nil
+}
+
+// drainQueuedMessages re-enqueues a continue_session when a user message
+// arrived during the just-completed turn. Mid-turn sends are accepted by
+// both the session-level fast path (sessions.go) and the thread service's
+// queue-only path (thread/service.go); without this drain those messages
+// would sit in the database with no agent picking them up.
+//
+// Called from both the success path and the cancel-back-to-idle path of
+// ContinueSession. The session's current status is re-fetched so a drain
+// from the cancel path that ended up terminal (snapshot failed → cancelled)
+// does not enqueue a job the worker would just refuse. All failure modes
+// are logged-only because the next user-triggered send will pick up the
+// queued message anyway.
+func (o *Orchestrator) drainQueuedMessages(ctx context.Context, session *models.Session, processed *models.SessionMessage, threadID *uuid.UUID, log zerolog.Logger) {
+	if processed == nil || o.jobs == nil || o.sessionMessages == nil {
+		return
+	}
+	messages, err := o.sessionMessages.ListBySession(ctx, session.OrgID, session.ID)
+	if err != nil {
+		log.Warn().Err(err).Msg("failed to fetch messages for post-turn queue drain")
+		return
+	}
+	hasQueued := false
+	for _, m := range messages {
+		if m.Role != models.MessageRoleUser || m.ID <= processed.ID {
+			continue
+		}
+		// On the thread path, a queued message is bound to the same thread —
+		// we drain only the matching thread's queue. On the session path
+		// threadID is nil and we accept any user message that matches the
+		// session-level scope (no thread).
+		if threadID != nil {
+			if m.ThreadID == nil || *m.ThreadID != *threadID {
+				continue
+			}
+		} else if m.ThreadID != nil {
+			continue
+		}
+		hasQueued = true
+		break
+	}
+	if !hasQueued {
+		return
+	}
+
+	// Confirm the session is in a state that can accept another turn before
+	// enqueueing. Skipping the GetByID would still be safe (the worker would
+	// refuse a job for a terminal session), but it would create a noisy
+	// dead-letter trail on every cancelled run that left the session marked
+	// failed/cancelled.
+	current, getErr := o.sessions.GetByID(ctx, session.OrgID, session.ID)
+	if getErr != nil {
+		log.Warn().Err(getErr).Msg("failed to fetch session for queue drain status check")
+		return
+	}
+	if !drainAcceptableStatus(current.Status) {
+		return
+	}
+
+	if threadID != nil && o.sessionThreads != nil {
+		if err := o.sessionThreads.ClearPendingMessages(ctx, session.OrgID, *threadID); err != nil {
+			log.Warn().Err(err).Str("thread_id", threadID.String()).Msg("failed to clear pending_message_count after drain")
+		}
+	}
+	payload := map[string]string{
+		"session_id": session.ID.String(),
+		"org_id":     session.OrgID.String(),
+	}
+	if threadID != nil {
+		payload["thread_id"] = threadID.String()
+	}
+	dedupeKey := continueSessionDrainDedupeKey(session.ID, processed.ID)
+	if _, err := o.jobs.Enqueue(ctx, session.OrgID, "agent", "continue_session", payload, 5, &dedupeKey); err != nil {
+		log.Warn().Err(err).Msg("failed to enqueue continue_session for queued messages")
+	}
+}
+
+// drainAcceptableStatus returns true for session states that can absorb
+// another continue_session turn: running (the in-flight job will pick the
+// queued message up via latest-message reads) and idle (a fresh
+// continue_session can claim it). Terminal states are skipped — a queued
+// message after a failed/cancelled session waits for the user to take an
+// explicit action.
+func drainAcceptableStatus(status string) bool {
+	switch status {
+	case string(models.SessionStatusIdle),
+		string(models.SessionStatusRunning),
+		string(models.SessionStatusAwaitingInput),
+		string(models.SessionStatusNeedsHumanGuidance):
+		return true
+	}
+	return false
+}
+
+// continueSessionDedupeKey mirrors db.ContinueSessionDedupeKey. The agent
+// package deliberately avoids importing the db package; this helper keeps
+// the dedupe-key shape in lockstep without taking on the dependency. Keep
+// these two definitions identical or the dedupe will silently break.
+func continueSessionDedupeKey(sessionID uuid.UUID) string {
+	return "continue_session:" + sessionID.String()
+}
+
+// continueSessionDrainDedupeKey intentionally differs from
+// continueSessionDedupeKey because drainQueuedMessages runs while the current
+// continue_session job is still in status='running'. Reusing the active key
+// would hit the jobs dedupe index and turn the enqueue into a no-op.
+func continueSessionDrainDedupeKey(sessionID uuid.UUID, processedMessageID int64) string {
+	return fmt.Sprintf("continue_session_drain:%s:%d", sessionID.String(), processedMessageID)
 }
 
 // setupFreshSandbox clones the session's repository into the sandbox when no

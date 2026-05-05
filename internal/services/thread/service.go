@@ -357,6 +357,7 @@ func (s *Service) SendMessage(ctx context.Context, input SendMessageInput) (*Sen
 	}
 
 	thread, err := s.threadStore.ClaimIdleForSession(ctx, input.OrgID, input.SessionID, input.ThreadID, models.MaxRunningThreadsPerSession)
+	queueOnly := false
 	if err != nil {
 		if errors.Is(err, db.ErrThreadRunningLimitReached) {
 			return nil, ErrRunningLimitReached
@@ -369,16 +370,29 @@ func (s *Service) SendMessage(ctx context.Context, input SendMessageInput) (*Sen
 		if existing.SessionID != input.SessionID {
 			return nil, ErrThreadNotFound
 		}
-		// The target tab itself is busy with its own turn. The composer
-		// should fall back to queueing — we cannot interleave two turns on
-		// one thread.
-		return nil, ErrThreadNotIdle
+		// The thread itself is busy with its own turn. Queue the message
+		// against the busy thread; the orchestrator drains pending messages
+		// when the in-flight turn completes (see ContinueSession). Resolving
+		// review comments while the thread is mid-turn is not supported —
+		// the resolution pass is keyed on the in-flight turn's pass number,
+		// and we cannot atomically commit it alongside a queued message
+		// that will not be consumed until a later turn.
+		if resolvingComments {
+			return nil, ErrThreadNotIdle
+		}
+		if !threadStatusCanQueue(existing.Status) {
+			return nil, ErrThreadNotIdle
+		}
+		thread = existing
+		queueOnly = true
 	}
 
 	// Verify thread belongs to the session.
 	if thread.SessionID != input.SessionID {
-		if revertErr := s.threadStore.UpdateStatus(ctx, input.OrgID, input.ThreadID, models.ThreadStatusIdle); revertErr != nil {
-			s.logger.Error().Err(revertErr).Str("thread_id", input.ThreadID.String()).Msg("failed to revert thread to idle after session mismatch")
+		if !queueOnly {
+			if revertErr := s.threadStore.UpdateStatus(ctx, input.OrgID, input.ThreadID, models.ThreadStatusIdle); revertErr != nil {
+				s.logger.Error().Err(revertErr).Str("thread_id", input.ThreadID.String()).Msg("failed to revert thread to idle after session mismatch")
+			}
 		}
 		return nil, ErrThreadNotFound
 	}
@@ -388,12 +402,19 @@ func (s *Service) SendMessage(ctx context.Context, input SendMessageInput) (*Sen
 	// records the pre-claim status so revertAfterSendFailure can put the
 	// session back exactly where it was; an empty string signals "do not
 	// touch the session" (sibling-running case).
-	claimedSession, revertStatus, claimErr := s.claimSessionForSend(ctx, input.OrgID, input.SessionID)
-	if claimErr != nil {
-		if revertErr := s.threadStore.UpdateStatus(ctx, input.OrgID, input.ThreadID, models.ThreadStatusIdle); revertErr != nil {
-			s.logger.Error().Err(revertErr).Str("thread_id", input.ThreadID.String()).Msg("failed to revert thread to idle after parent session claim failure")
+	// Skipped on the queue-only path: the thread is already running, which
+	// already implies the session is running.
+	var claimedSession models.Session
+	revertStatus := ""
+	if !queueOnly {
+		var claimErr error
+		claimedSession, revertStatus, claimErr = s.claimSessionForSend(ctx, input.OrgID, input.SessionID)
+		if claimErr != nil {
+			if revertErr := s.threadStore.UpdateStatus(ctx, input.OrgID, input.ThreadID, models.ThreadStatusIdle); revertErr != nil {
+				s.logger.Error().Err(revertErr).Str("thread_id", input.ThreadID.String()).Msg("failed to revert thread to idle after parent session claim failure")
+			}
+			return nil, claimErr
 		}
-		return nil, claimErr
 	}
 
 	content := input.Message
@@ -401,12 +422,21 @@ func (s *Service) SendMessage(ctx context.Context, input SendMessageInput) (*Sen
 		content = "[PLAN_MODE]\n" + content
 	}
 
+	// On the queue-only path the thread is mid-turn, so its in-flight turn is
+	// CurrentTurn+1 and the queued message belongs to the turn after that
+	// (CurrentTurn+2). For the normal claim path, the thread just transitioned
+	// to running and this turn is CurrentTurn+1.
+	turnNumber := thread.CurrentTurn + 1
+	if queueOnly {
+		turnNumber = thread.CurrentTurn + 2
+	}
+
 	msg := &models.SessionMessage{
 		SessionID:  thread.SessionID,
 		OrgID:      input.OrgID,
 		ThreadID:   &input.ThreadID,
 		UserID:     input.UserID,
-		TurnNumber: thread.CurrentTurn + 1,
+		TurnNumber: turnNumber,
 		Role:       models.MessageRoleUser,
 		Content:    content,
 		References: input.References,
@@ -432,7 +462,9 @@ func (s *Service) SendMessage(ctx context.Context, input SendMessageInput) (*Sen
 		err = s.messageStore.Create(ctx, msg)
 	}
 	if err != nil {
-		s.revertAfterSendFailure(ctx, input.OrgID, input.SessionID, input.ThreadID, revertStatus, "message creation failure")
+		if !queueOnly {
+			s.revertAfterSendFailure(ctx, input.OrgID, input.SessionID, input.ThreadID, revertStatus, "message creation failure")
+		}
 		// Comment-validation errors are surfaced verbatim so the handler can
 		// match on *db.ErrReviewCommentsNotInSession; everything else gets
 		// wrapped with a "create message" prefix to preserve historical log
@@ -442,6 +474,22 @@ func (s *Service) SendMessage(ctx context.Context, input SendMessageInput) (*Sen
 			return nil, err
 		}
 		return nil, fmt.Errorf("create message: %w", err)
+	}
+
+	// Queue-only path: bump pending_message_count so the UI's "queued (N)"
+	// affordance reflects the buildup, then return without enqueueing a new
+	// continue_session — the in-flight job will drain the queue when it
+	// finishes (see ContinueSession's post-turn drain).
+	if queueOnly {
+		if incErr := s.threadStore.IncrementPendingMessages(ctx, input.OrgID, input.ThreadID); incErr != nil {
+			s.logger.Warn().Err(incErr).
+				Str("thread_id", input.ThreadID.String()).
+				Msg("failed to increment pending_message_count for queued message")
+		}
+		return &SendMessageResult{
+			Message:          msg,
+			ResolvedComments: resolvedComments,
+		}, nil
 	}
 
 	// Reuse the session continuation worker for phase 1. The latest user
@@ -473,6 +521,15 @@ func (s *Service) SendMessage(ctx context.Context, input SendMessageInput) (*Sen
 		ResolvedComments: resolvedComments,
 		AnsweredQuestion: answeredQuestion,
 	}, nil
+}
+
+func threadStatusCanQueue(status models.ThreadStatus) bool {
+	switch status {
+	case models.ThreadStatusPending, models.ThreadStatusRunning:
+		return true
+	default:
+		return false
+	}
 }
 
 // claimSessionForSend mirrors the ClaimIdle → ClaimForResume → fail ordering
