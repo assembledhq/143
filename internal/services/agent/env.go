@@ -51,8 +51,15 @@ type AgentEnv struct {
 	orgs              OrgStore
 	orgSettingsCache  *OrgSettingsCache
 	codexAuth         CodexAuthProvider
-	provider          SandboxProvider
-	logger            zerolog.Logger
+	// linearTokens, when set, supplies the LINEAR_ACCESS_TOKEN env var via a
+	// refresh-aware resolver. Without it, the sandbox falls back to reading
+	// the raw credential row (legacy path; the access token may have aged
+	// out by the time the sandbox runs). Production wiring always sets this
+	// to *linear.Service so the orchestrator gets the same refresh-on-expiry
+	// guarantee that worker handlers do.
+	linearTokens LinearTokenResolver
+	provider     SandboxProvider
+	logger       zerolog.Logger
 
 	// recentPicks remembers the credential id chosen for each (orgID, userID,
 	// provider) tuple by the most recent pickFromCodingProvider call. It feeds
@@ -111,8 +118,24 @@ type AgentEnvDeps struct {
 	Orgs              OrgStore                 // optional — enables agent_config overrides
 	OrgSettingsCache  *OrgSettingsCache        // optional — caches agent_config lookups
 	CodexAuth         CodexAuthProvider        // optional — enables ChatGPT OAuth for Codex
-	Provider          SandboxProvider          // required for InjectCodexAuth
-	Logger            zerolog.Logger
+	// LinearTokens optionally supplies a refresh-aware Linear access token
+	// for the sandbox env. When set, the orchestrator injects the result of
+	// GetValidAccessToken (rotating expired tokens transparently). Without
+	// it, the sandbox falls back to the raw credential read — fine for
+	// tests and pre-refresh-flow installs, but those env vars can be stale
+	// for any session that starts within refreshWindow of expiry.
+	LinearTokens LinearTokenResolver
+	Provider     SandboxProvider // required for InjectCodexAuth
+	Logger       zerolog.Logger
+}
+
+// LinearTokenResolver is the narrow surface AgentEnv needs from the Linear
+// service to inject a fresh access token into the sandbox. The signature
+// returns "" with nil error to mean "this org has no Linear integration
+// installed" so env.go can distinguish that from "we tried to refresh and
+// it failed" without importing Linear-specific sentinels.
+type LinearTokenResolver interface {
+	GetValidAccessToken(ctx context.Context, orgID uuid.UUID) (string, error)
 }
 
 // NewAgentEnv constructs an AgentEnv. The Provider is required; all other
@@ -127,10 +150,25 @@ func NewAgentEnv(deps AgentEnvDeps) *AgentEnv {
 		orgs:              deps.Orgs,
 		orgSettingsCache:  deps.OrgSettingsCache,
 		codexAuth:         deps.CodexAuth,
+		linearTokens:      deps.LinearTokens,
 		provider:          deps.Provider,
 		logger:            deps.Logger,
 		recentPicks:       make(map[pickKey]pickRecord),
 	}
+}
+
+// SetLinearTokens installs (or replaces) the Linear refresh-aware token
+// resolver after construction. NewAgentEnv is called early during process
+// boot (before stores like *db.SessionIssueLinkStore exist), but the
+// linear service depends on those stores, so it is built later. Rather
+// than deferring NewAgentEnv to the latest possible moment, the
+// orchestrator wiring calls SetLinearTokens once linear.Build has
+// returned. Safe to call with nil to detach the resolver in tests.
+func (e *AgentEnv) SetLinearTokens(r LinearTokenResolver) {
+	if e == nil {
+		return
+	}
+	e.linearTokens = r
 }
 
 // CodingCredentialShedder is the subset of CodingCredentialStore the agent
@@ -440,10 +478,31 @@ func (e *AgentEnv) Resolve(ctx context.Context, orgID uuid.UUID, agentType model
 			merged["SENTRY_ORG_SLUG"] = ic.Sentry.OrgSlug
 		}
 	}
-	if ic.Linear != nil {
-		if ic.Linear.AccessToken != "" {
-			merged["LINEAR_ACCESS_TOKEN"] = ic.Linear.AccessToken
+	// Linear access token injection. The refresh-aware resolver is preferred:
+	// it rotates a near-expiring token before sandbox-start so the agent
+	// can run a multi-minute turn without crossing the access-token expiry
+	// boundary. The raw fetchIntegrationCredentials read is the fallback
+	// for test wiring that doesn't supply a resolver — those callers
+	// accept that the env var may be stale.
+	//
+	// Hard refresh failures (revoked refresh token, missing OAuth client
+	// config) deliberately leave LINEAR_ACCESS_TOKEN unset rather than
+	// injecting a known-bad token: a missing env var causes the agent's
+	// 143-tools to report "linear not configured", which is more honest
+	// than a 401 from inside the agent's tool call.
+	switch {
+	case e.linearTokens != nil:
+		token, err := e.linearTokens.GetValidAccessToken(ctx, orgID)
+		switch {
+		case err != nil:
+			e.logger.Warn().Err(err).
+				Str("org_id", orgID.String()).
+				Msg("env: linear token resolution failed; sandbox will run without LINEAR_ACCESS_TOKEN until next reconnect")
+		case token != "":
+			merged["LINEAR_ACCESS_TOKEN"] = token
 		}
+	case ic.Linear != nil && ic.Linear.AccessToken != "":
+		merged["LINEAR_ACCESS_TOKEN"] = ic.Linear.AccessToken
 	}
 	if ic.Notion != nil {
 		if ic.Notion.AccessToken != "" {

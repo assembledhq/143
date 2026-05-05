@@ -229,12 +229,17 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 		Integrations:       integrationStore,
 		IntegrationsWriter: integrationStore,
 		Credentials:        credentialStore,
+		CredentialsWriter:  credentialStore,
 		Issues:             issueStore,
 		Sessions:           sessionStore,
 		IssueLinks:         sessionIssueLinkStore,
 		Orgs:               orgStore,
 		Jobs:               jobStore,
-		AppBaseURL:         cfg.FrontendURL,
+		OAuthClient: linear.OAuthClientCreds{
+			ClientID:     cfg.LinearOAuthClientID,
+			ClientSecret: cfg.LinearOAuthClientSecret,
+		},
+		AppBaseURL: cfg.FrontendURL,
 	})
 	if sessionStreams != nil {
 		// Republish session status on every link change so the detail view
