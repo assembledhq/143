@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"testing"
 	"time"
@@ -649,6 +650,136 @@ func TestSessionReviewCommentStore_ResolveByIDs(t *testing.T) {
 
 		_, err = store.ResolveByIDs(context.Background(), orgID, sessionID, []uuid.UUID{id1}, 1)
 		require.Error(t, err, "should propagate db errors")
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+}
+
+func TestSessionReviewCommentStore_ValidateAndResolveByIDs(t *testing.T) {
+	t.Parallel()
+
+	t.Run("no-op for empty IDs", func(t *testing.T) {
+		t.Parallel()
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err)
+		defer mock.Close()
+
+		store := NewSessionReviewCommentStore(mock)
+		resolved, err := store.ValidateAndResolveByIDs(context.Background(), uuid.New(), uuid.New(), nil, 1)
+		require.NoError(t, err, "empty ID list should be a no-op")
+		require.Empty(t, resolved, "empty ID list should not resolve comments")
+		require.NoError(t, mock.ExpectationsWereMet(), "empty ID list should not query the store")
+	})
+
+	t.Run("propagates lookup errors", func(t *testing.T) {
+		t.Parallel()
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err)
+		defer mock.Close()
+
+		mock.ExpectQuery("SELECT .+ FROM session_review_comments WHERE id = ANY").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnError(errors.New("connection refused"))
+
+		store := NewSessionReviewCommentStore(mock)
+		resolved, err := store.ValidateAndResolveByIDs(context.Background(), uuid.New(), uuid.New(), []uuid.UUID{uuid.New()}, 1)
+		require.Error(t, err, "lookup failure should surface")
+		require.Empty(t, resolved, "lookup failure should not return resolved comments")
+		var notInSession *ErrReviewCommentsNotInSession
+		require.False(t, errors.As(err, &notInSession), "lookup error should NOT be classified as not-in-session")
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+
+	t.Run("returns ErrReviewCommentsNotInSession for foreign IDs", func(t *testing.T) {
+		t.Parallel()
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err)
+		defer mock.Close()
+
+		now := time.Now()
+		orgID := uuid.New()
+		sessionID := uuid.New()
+		userID := uuid.New()
+		// Caller asks about three IDs but only two belong to the session.
+		ids := []uuid.UUID{uuid.New(), uuid.New(), uuid.New()}
+		mock.ExpectQuery("SELECT .+ FROM session_review_comments WHERE id = ANY").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnRows(
+				pgxmock.NewRows(srcColumns).
+					AddRow(ids[0], sessionID, orgID, userID, "main.go", 1, "right", "first", false, (*time.Time)(nil), (*int)(nil), 1, now, now).
+					AddRow(ids[1], sessionID, orgID, userID, "main.go", 2, "right", "second", false, (*time.Time)(nil), (*int)(nil), 1, now, now),
+			)
+		// No UPDATE expected: validation fails before the resolve runs.
+
+		store := NewSessionReviewCommentStore(mock)
+		resolved, err := store.ValidateAndResolveByIDs(context.Background(), orgID, sessionID, ids, 1)
+		require.Error(t, err)
+		require.Empty(t, resolved)
+		var notInSession *ErrReviewCommentsNotInSession
+		require.True(t, errors.As(err, &notInSession), "foreign ID should produce ErrReviewCommentsNotInSession")
+		require.Equal(t, []uuid.UUID{ids[2]}, notInSession.Missing, "missing IDs should be reported in input order")
+		require.NoError(t, mock.ExpectationsWereMet(), "resolve UPDATE must not run when validation fails")
+	})
+
+	t.Run("resolves valid IDs and returns rows that flipped", func(t *testing.T) {
+		t.Parallel()
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err)
+		defer mock.Close()
+
+		now := time.Now()
+		orgID := uuid.New()
+		sessionID := uuid.New()
+		userID := uuid.New()
+		commentID := uuid.New()
+		mock.ExpectQuery("SELECT .+ FROM session_review_comments WHERE id = ANY").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnRows(
+				pgxmock.NewRows(srcColumns).
+					AddRow(commentID, sessionID, orgID, userID, "main.go", 1, "right", "fix this", false, (*time.Time)(nil), (*int)(nil), 1, now, now),
+			)
+		mock.ExpectQuery("UPDATE session_review_comments SET resolved = true").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnRows(
+				pgxmock.NewRows(srcColumns).
+					AddRow(commentID, sessionID, orgID, userID, "main.go", 1, "right", "fix this", true, &now, srcIntPtr(2), 1, now, now),
+			)
+
+		store := NewSessionReviewCommentStore(mock)
+		resolved, err := store.ValidateAndResolveByIDs(context.Background(), orgID, sessionID, []uuid.UUID{commentID}, 2)
+		require.NoError(t, err)
+		require.Len(t, resolved, 1, "the one valid+open comment should be returned as resolved")
+		require.Equal(t, commentID, resolved[0].ID)
+		require.True(t, resolved[0].Resolved)
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+
+	t.Run("propagates resolve errors", func(t *testing.T) {
+		t.Parallel()
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err)
+		defer mock.Close()
+
+		now := time.Now()
+		orgID := uuid.New()
+		sessionID := uuid.New()
+		userID := uuid.New()
+		commentID := uuid.New()
+		mock.ExpectQuery("SELECT .+ FROM session_review_comments WHERE id = ANY").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnRows(
+				pgxmock.NewRows(srcColumns).
+					AddRow(commentID, sessionID, orgID, userID, "main.go", 1, "right", "fix this", false, (*time.Time)(nil), (*int)(nil), 1, now, now),
+			)
+		mock.ExpectQuery("UPDATE session_review_comments SET resolved = true").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnError(errors.New("connection refused"))
+
+		store := NewSessionReviewCommentStore(mock)
+		resolved, err := store.ValidateAndResolveByIDs(context.Background(), orgID, sessionID, []uuid.UUID{commentID}, 1)
+		require.Error(t, err)
+		require.Empty(t, resolved)
+		var notInSession *ErrReviewCommentsNotInSession
+		require.False(t, errors.As(err, &notInSession), "DB-level resolve error should NOT be classified as not-in-session")
 		require.NoError(t, mock.ExpectationsWereMet())
 	})
 }

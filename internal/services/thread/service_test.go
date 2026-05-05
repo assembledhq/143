@@ -2,6 +2,7 @@ package thread
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"testing"
 	"time"
@@ -9,6 +10,7 @@ import (
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
 	"github.com/google/uuid"
+	"github.com/pashagolub/pgxmock/v4"
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 )
@@ -687,10 +689,10 @@ func TestService_SendMessage(t *testing.T) {
 			svc, deps := newTestService(t)
 			tt.setupDeps(deps)
 
-			msg, err := svc.SendMessage(context.Background(), tt.input)
+			result, err := svc.SendMessage(context.Background(), tt.input)
 			if tt.expectErr != nil {
 				require.ErrorIs(t, err, tt.expectErr, "should return expected error")
-				require.Nil(t, msg, "should not return a message on error")
+				require.Nil(t, result, "should not return a result on error")
 				return
 			}
 			if tt.name == "message creation failure reverts to idle" {
@@ -698,10 +700,160 @@ func TestService_SendMessage(t *testing.T) {
 				return
 			}
 			require.NoError(t, err, "should not return an error")
-			require.NotNil(t, msg, "should return a message")
-			require.Equal(t, models.MessageRoleUser, msg.Role, "should set role to user")
+			require.NotNil(t, result, "should return a result")
+			require.NotNil(t, result.Message, "should return a message")
+			require.Equal(t, models.MessageRoleUser, result.Message.Role, "should set role to user")
 		})
 	}
+}
+
+// TestService_SendMessage_ResolvesReviewComments exercises the
+// comment-resolution path end-to-end against a real tx, using pgxmock as
+// the txStarter and a real db.SessionReviewCommentStore so the SQL
+// invariants (INSERT message → SELECT comments → UPDATE comments → COMMIT)
+// run inside a single transaction. Mirrors the session-level
+// TestSessionHandler_SendMessage_ResolvesReviewComments coverage so the
+// thread send path inherits the same atomic guarantee.
+func TestService_SendMessage_ResolvesReviewComments(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	threadID := uuid.New()
+	now := time.Now()
+
+	commentRowColumns := []string{
+		"id", "session_id", "org_id", "user_id", "file_path",
+		"line_number", "diff_side", "body", "resolved", "resolved_at", "resolved_by_pass",
+		"pass_number", "created_at", "updated_at",
+	}
+
+	primeClaim := func(deps *testDeps) {
+		deps.threadStore.claimIdleFn = func(_ context.Context, _, _, _ uuid.UUID) (models.SessionThread, error) {
+			return models.SessionThread{ID: threadID, SessionID: sessionID, OrgID: orgID, CurrentTurn: 1, Status: models.ThreadStatusRunning}, nil
+		}
+		// GetByID is called once per resolution path to pick up CurrentTurn
+		// for the resolution pass; CurrentTurn=2 → resolved_by_pass=2.
+		deps.sessionStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.Session, error) {
+			return models.Session{ID: sessionID, OrgID: orgID, Status: string(models.SessionStatusRunning), CurrentTurn: 2}, nil
+		}
+	}
+
+	t.Run("rejects when resolver is not configured", func(t *testing.T) {
+		t.Parallel()
+		svc, deps := newTestService(t)
+		primeClaim(deps)
+		// No SetReviewCommentResolver — the service should fail-fast before
+		// claiming any state.
+		_, err := svc.SendMessage(context.Background(), SendMessageInput{
+			SessionID:               sessionID,
+			OrgID:                   orgID,
+			ThreadID:                threadID,
+			Message:                 "hi",
+			ResolveReviewCommentIDs: []uuid.UUID{uuid.New()},
+		})
+		require.ErrorIs(t, err, ErrReviewCommentsNotConfigured, "missing plumbing should be a configuration error, not a 500")
+	})
+
+	t.Run("commits message and resolution in the same tx", func(t *testing.T) {
+		t.Parallel()
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err)
+		defer mock.Close()
+
+		commentID := uuid.New()
+		commentUserID := uuid.New()
+
+		// Tx-bracketed SQL: BEGIN → INSERT message → SELECT comments → UPDATE
+		// comments → COMMIT. Any reordering breaks the atomic guarantee, so
+		// pgxmock's default in-order matching is exactly the contract we want.
+		mock.ExpectBegin()
+		mock.ExpectQuery("INSERT INTO session_messages").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+				pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+				pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(int64(7), now))
+		mock.ExpectQuery("SELECT .+ FROM session_review_comments WHERE id = ANY").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnRows(
+				pgxmock.NewRows(commentRowColumns).
+					AddRow(commentID, sessionID, orgID, commentUserID, "main.go",
+						42, "right", "fix this", false, (*time.Time)(nil), (*int)(nil),
+						1, now, now),
+			)
+		resolvedAt := now
+		resolvedByPass := 2
+		mock.ExpectQuery("UPDATE session_review_comments SET resolved = true").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnRows(
+				pgxmock.NewRows(commentRowColumns).
+					AddRow(commentID, sessionID, orgID, commentUserID, "main.go",
+						42, "right", "fix this", true, &resolvedAt, &resolvedByPass,
+						1, now, now),
+			)
+		mock.ExpectCommit()
+
+		svc, deps := newTestService(t)
+		primeClaim(deps)
+		svc.SetReviewCommentResolver(mock, db.NewSessionReviewCommentStore(mock))
+
+		result, err := svc.SendMessage(context.Background(), SendMessageInput{
+			SessionID:               sessionID,
+			OrgID:                   orgID,
+			ThreadID:                threadID,
+			Message:                 "address review",
+			ResolveReviewCommentIDs: []uuid.UUID{commentID},
+		})
+		require.NoError(t, err)
+		require.NotNil(t, result)
+		require.Equal(t, int64(7), result.Message.ID)
+		require.Len(t, result.ResolvedComments, 1, "the resolved comment should come back so the handler can audit it")
+		require.Equal(t, commentID, result.ResolvedComments[0].ID)
+		require.True(t, result.ResolvedComments[0].Resolved)
+		require.Equal(t, 2, *result.ResolvedComments[0].ResolvedByPass, "pass should match session.CurrentTurn at send time")
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+
+	t.Run("rolls back when a comment ID is not in the session", func(t *testing.T) {
+		t.Parallel()
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err)
+		defer mock.Close()
+
+		commentID := uuid.New()
+
+		// BEGIN → INSERT message → SELECT (returns 0 rows → validation fails)
+		// → ROLLBACK. The insert MUST be rolled back even though it succeeded
+		// at the SQL level — that's the whole point of the atomic guarantee.
+		mock.ExpectBegin()
+		mock.ExpectQuery("INSERT INTO session_messages").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+				pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+				pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(int64(7), now))
+		mock.ExpectQuery("SELECT .+ FROM session_review_comments WHERE id = ANY").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnRows(pgxmock.NewRows(commentRowColumns)) // no rows match
+		mock.ExpectRollback()
+
+		svc, deps := newTestService(t)
+		primeClaim(deps)
+		svc.SetReviewCommentResolver(mock, db.NewSessionReviewCommentStore(mock))
+
+		result, err := svc.SendMessage(context.Background(), SendMessageInput{
+			SessionID:               sessionID,
+			OrgID:                   orgID,
+			ThreadID:                threadID,
+			Message:                 "address review",
+			ResolveReviewCommentIDs: []uuid.UUID{commentID},
+		})
+		require.Nil(t, result)
+		require.Error(t, err)
+		var notInSession *db.ErrReviewCommentsNotInSession
+		require.True(t, errors.As(err, &notInSession), "validation error should surface unwrapped so the handler can render the missing IDs")
+		require.Equal(t, []uuid.UUID{commentID}, notInSession.Missing)
+		require.NoError(t, mock.ExpectationsWereMet(), "the message insert MUST be rolled back when validation fails")
+	})
 }
 
 func TestService_EndThread(t *testing.T) {
