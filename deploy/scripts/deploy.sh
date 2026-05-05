@@ -195,6 +195,57 @@ if [ "$ROLE" = "worker" ]; then
      || { rm -f /opt/143/deploy/scripts/sandbox-firewall.sh.new; exit 1; }"
 fi
 
+# --- Docker log rotation (idempotent) ---
+# Cap container log file growth so a chatty container can't fill the disk.
+# Docker's default json-file driver has no size limit. Logs ship to
+# VictoriaLogs (Vector → 30d retention) on app/worker/logging hosts; the
+# local file is just a buffer plus a crash-recovery window. db and redis
+# hosts have no Vector — the local file is the only copy — so db gets a
+# larger cap because postgresql.conf logs every connection, every query
+# >500ms, and every lock wait, and the entire trail is local-only.
+#
+# Sync the helper, then call it via deploy+sudo (matches sandbox-firewall.sh
+# pattern). The script is idempotent and only restarts docker when the
+# content of /etc/docker/daemon.json actually changes, so steady-state
+# deploys cost nothing.
+case "$ROLE" in
+  db) LOG_MAX_SIZE="500m" ;;  # postgres logs are verbose AND local-only
+  *)  LOG_MAX_SIZE="100m" ;;
+esac
+LOG_MAX_FILE="5"
+
+# Sync install-log-rotation.sh: stage to .new, atomic rename. Same ETXTBSY
+# avoidance as sandbox-firewall.sh — a lingering FD on the old inode would
+# break the subsequent `sudo install-log-rotation.sh` exec.
+ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
+  "sudo -n chown -R deploy:deploy /opt/143/deploy/scripts 2>&1 | sed 's/^/  chown: /' || true"
+if ! scp -p "${SCP_OPTS[@]}" "$PROJECT_DIR/deploy/scripts/install-log-rotation.sh" \
+    deploy@"$HOST":/opt/143/deploy/scripts/install-log-rotation.sh.new; then
+  echo "ERROR: scp of install-log-rotation.sh failed."
+  echo "  Hint: same root-owned-files issue as sandbox-firewall.sh; fix per above."
+  exit 1
+fi
+ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
+  "mv /opt/143/deploy/scripts/install-log-rotation.sh.new /opt/143/deploy/scripts/install-log-rotation.sh \
+   && chmod +x /opt/143/deploy/scripts/install-log-rotation.sh \
+   || { rm -f /opt/143/deploy/scripts/install-log-rotation.sh.new; exit 1; }"
+
+echo "Ensuring docker log rotation (max-size=$LOG_MAX_SIZE, max-file=$LOG_MAX_FILE)..."
+# `sudo -n` so missing-sudoers fails fast instead of hanging on a password
+# prompt CI can't satisfy. The error path tells the operator how to fix.
+if ! ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
+    "sudo -n /opt/143/deploy/scripts/install-log-rotation.sh $LOG_MAX_SIZE $LOG_MAX_FILE"; then
+  echo "ERROR: install-log-rotation.sh failed under deploy+sudo."
+  echo "  If this host was provisioned before the install-log-rotation.sh sudoers"
+  echo "  entry was added, the fix is one of:"
+  echo "    a) re-run \`make provision-$ROLE HOST=$HOST REPROVISION=true\` to refresh sudoers"
+  echo "       (heavy: tears down containers), or"
+  echo "    b) SSH as root once and append the entry to /etc/sudoers.d/99-deploy:"
+  echo "         /opt/143/deploy/scripts/install-log-rotation.sh *"
+  echo "       then re-run visudo -cf /etc/sudoers.d/99-deploy and re-run this deploy."
+  exit 1
+fi
+
 ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
   "COMPOSE_FILE=$COMPOSE_FILE" "HEALTH_SERVICE=$HEALTH_SERVICE" "ROLE=$ROLE" "IMAGE_TAG=$TAG" \
   bash << 'REMOTE'
