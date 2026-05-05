@@ -17,6 +17,32 @@ import (
 	"github.com/assembledhq/143/internal/models"
 )
 
+// SessionResumeMode declares how an adapter handles continuation turns. The
+// orchestrator reads this to decide whether to ship a bare follow-up message
+// (and let the agent CLI load its own conversation history) or to embed
+// conversation history in the prompt itself.
+type SessionResumeMode int
+
+const (
+	// ResumeUnsupported: adapter has no headless resume mechanism. Continuation
+	// turns rely on the restored sandbox filesystem state. Adapters in this
+	// mode may set result.AgentSessionID for observability, but the value is
+	// never fed back into the CLI.
+	ResumeUnsupported SessionResumeMode = iota
+
+	// ResumeBySessionID: adapter resumes a specific prior session by ID
+	// captured from that session's stream output. Adapters in this mode MUST:
+	//   1. Set result.AgentSessionID from a stream event during Execute().
+	//   2. When prompt.Continuation && prompt.ResumeSessionID != "", construct
+	//      a deterministic resume command using that ID.
+	//   3. When prompt.Continuation && prompt.ResumeSessionID == "", run a
+	//      fresh exec from prompt.SystemPrompt + prompt.UserPrompt. Adapters
+	//      MUST NOT fall back to non-deterministic flags like --last,
+	//      --continue, or --resume latest, which pick up whatever session
+	//      happens to be newest in the local agent storage.
+	ResumeBySessionID
+)
+
 // AgentAdapter is the contract that all coding agent integrations implement.
 // Each adapter knows how to prepare a prompt and execute a specific agent CLI
 // (e.g., Claude Code, Codex) inside a sandbox.
@@ -31,6 +57,10 @@ type AgentAdapter interface {
 	// Execute runs the agent inside the provided sandbox and streams log
 	// entries to logCh. The channel is closed by the caller after Execute returns.
 	Execute(ctx context.Context, sandbox *Sandbox, prompt *AgentPrompt, logCh chan<- LogEntry) (*AgentResult, error)
+
+	// ResumeMode declares how this adapter handles continuation turns. See
+	// SessionResumeMode for the per-mode contract.
+	ResumeMode() SessionResumeMode
 }
 
 // AgentInput contains everything the agent needs to understand and fix an issue.

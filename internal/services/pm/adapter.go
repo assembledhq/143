@@ -45,3 +45,10 @@ func (a *PMAdapter) PreparePrompt(ctx context.Context, input *agent.AgentInput) 
 func (a *PMAdapter) Execute(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
 	return a.inner.Execute(ctx, sandbox, prompt, logCh)
 }
+
+// ResumeMode delegates to the inner adapter — PM runs are scheduled on top of
+// whichever coding agent the org configured, and resume capability is a
+// property of that underlying CLI.
+func (a *PMAdapter) ResumeMode() agent.SessionResumeMode {
+	return a.inner.ResumeMode()
+}
