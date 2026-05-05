@@ -4,6 +4,16 @@ on:
   push:
     branches: [main]
 
+# A worker drain can hold a deploy job for up to ~45 minutes while in-flight
+# coding turns finish. Queue overlapping deploys instead of running them in
+# parallel — two concurrent deploys would race on `docker compose up
+# --force-recreate` against the same fleet hosts. cancel-in-progress is false
+# because deploy.sh isn't safe to interrupt mid-flight (it would leave a
+# half-rolled host).
+concurrency:
+  group: deploy-fleet
+  cancel-in-progress: false
+
 env:
   REGISTRY: ghcr.io
 
@@ -51,8 +61,14 @@ jobs:
             ${{ matrix.image }}:${{ github.sha }}
           build-args: |
             BUILD_SHA=${{ github.sha }}
-          cache-from: type=gha,scope=${{ matrix.name }}
-          cache-to: type=gha,mode=max,scope=${{ matrix.name }}
+          # Registry cache instead of type=gha. The 10 GB GHA cache ceiling
+          # was constantly evicting our ~200 MB-per-image layer blobs across
+          # the three matrix builds, busting the apt-install layer in
+          # sandbox/Dockerfile and adding ~9 minutes to deploys. GHCR has
+          # no size cap and persists until manually deleted; the cache lives
+          # at <image>:buildcache alongside :latest and :<sha>.
+          cache-from: type=registry,ref=${{ matrix.image }}:buildcache
+          cache-to: type=registry,ref=${{ matrix.image }}:buildcache,mode=max
 
   deploy:
     needs: build
@@ -74,7 +90,110 @@ jobs:
           echo "${{ secrets.SOPS_AGE_KEY }}" > ~/.config/sops/age/keys.txt
           chmod 600 ~/.config/sops/age/keys.txt
 
+      - name: Decrypt FLEET_HOSTS
+        # Decrypt once and propagate to later steps via $GITHUB_ENV so both
+        # `Deploy fleet` (deploy-fleet.sh accepts FLEET_HOSTS from env) and
+        # `Verify worker rollover` skip the SOPS round-trip.
+        run: |
+          set -euo pipefail
+          fleet_hosts="$(SOPS_AGE_KEY_FILE=~/.config/sops/age/keys.txt \
+            sops --decrypt --input-type dotenv --output-type dotenv .env.production.enc \
+            | grep '^FLEET_HOSTS=' | cut -d= -f2-)"
+          if [ -z "$fleet_hosts" ]; then
+            echo "ERROR: FLEET_HOSTS not present in .env.production.enc"
+            exit 1
+          fi
+          echo "FLEET_HOSTS=$fleet_hosts" >> "$GITHUB_ENV"
+
       - name: Deploy fleet
+        # WORKER_DEPLOY_DETACH=1 makes deploy.sh kick off the worker rollover
+        # as a host-side background process and return immediately, so the
+        # SSH session (= a billed CI minute) doesn't sit idle for the up-to-
+        # 45m drain. Rollover progress is logged to /var/log/143/deploy-worker-*.log
+        # on the host; the verify step below polls the status file.
+        env:
+          WORKER_DEPLOY_DETACH: "1"
         run: |
           chmod +x deploy/scripts/deploy.sh deploy/scripts/deploy-fleet.sh
           ./deploy/scripts/deploy-fleet.sh ~/.ssh/deploy-key "${{ github.sha }}"
+
+      - name: Verify worker rollover
+        # The detached rollover writes /var/log/143/deploy-worker-<sha>.status
+        # with content "ok" on success or "fail: ..." on failure. Poll each
+        # worker host until we see one of those, or until the budget expires.
+        #
+        # Budget breakdown (must stay ≥ in-process WORKER_DRAIN_TIMEOUT in
+        # internal/config/config.go, currently 45m):
+        #   45m drain + ~1m recreate + 2m healthcheck + polling overhead
+        # 4200s (70m) gives a comfortable margin. If you bump
+        # WORKER_DRAIN_TIMEOUT, bump this too.
+        #
+        # Timeout vs host state: a verify timeout fails the workflow run,
+        # but the detached host-side rollover keeps going and may still
+        # succeed afterwards. The next deploy queues on the workflow
+        # concurrency lock either way. After a red verify, check
+        # `make deploy-worker-status` before re-running.
+        env:
+          DEPLOY_SHA: ${{ github.sha }}
+          VERIFY_TIMEOUT_SECONDS: "4200"
+          POLL_INTERVAL_SECONDS: "15"
+        run: |
+          set -euo pipefail
+
+          WORKERS="$(echo "$FLEET_HOSTS" | tr ',' '\n' | grep '^worker:' | cut -d: -f2 || true)"
+          if [ -z "$WORKERS" ]; then
+            echo "no worker hosts in fleet — nothing to verify"
+            exit 0
+          fi
+
+          short_sha="${DEPLOY_SHA:0:7}"
+          status_path="/var/log/143/deploy-worker-${short_sha}.status"
+          ssh_opts=(-o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 -i ~/.ssh/deploy-key)
+
+          overall_rc=0
+          for host in $WORKERS; do
+            echo "::group::verify worker $host"
+            deadline=$(( $(date +%s) + VERIFY_TIMEOUT_SECONDS ))
+            outcome=""
+            while :; do
+              status="$(ssh "${ssh_opts[@]}" deploy@"$host" "cat '$status_path' 2>/dev/null || true")"
+              case "$status" in
+                ok)
+                  echo "✓ worker $host: rollover succeeded"
+                  outcome="ok"
+                  break
+                  ;;
+                fail*)
+                  echo "✗ worker $host: rollover FAILED"
+                  echo "--- last 100 log lines ---"
+                  ssh "${ssh_opts[@]}" deploy@"$host" \
+                    "ls -1t /var/log/143/deploy-worker-*-${short_sha}.log 2>/dev/null | head -1 | xargs -r tail -100" || true
+                  echo "--- status file contents ---"
+                  echo "$status"
+                  outcome="fail"
+                  overall_rc=1
+                  break
+                  ;;
+                "")
+                  if [ "$(date +%s)" -ge "$deadline" ]; then
+                    echo "✗ worker $host: rollover did not finish after ${VERIFY_TIMEOUT_SECONDS}s"
+                    echo "  follow up with: make deploy-worker-status"
+                    outcome="timeout"
+                    overall_rc=1
+                    break
+                  fi
+                  sleep "$POLL_INTERVAL_SECONDS"
+                  ;;
+                *)
+                  echo "⚠ worker $host: unexpected status: $status"
+                  outcome="unknown"
+                  overall_rc=1
+                  break
+                  ;;
+              esac
+            done
+            echo "::endgroup::"
+            echo "worker $host: $outcome"
+          done
+
+          exit $overall_rc
