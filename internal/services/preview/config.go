@@ -38,28 +38,6 @@ func LookupInfraTemplate(name string) (InfraTemplate, bool) {
 	return t, ok
 }
 
-// AllInfraImages returns the deduplicated set of Docker images used by every
-// supported infrastructure template. Worker boot calls this to pre-pull
-// images in the background, so the first preview that needs e.g.
-// postgres:17-alpine doesn't have to pay the cold-pull latency inside the
-// HTTP request handler (the server's WriteTimeout is far shorter than a
-// large image pull).
-func AllInfraImages() []string {
-	seen := make(map[string]struct{}, len(supportedTemplates))
-	out := make([]string, 0, len(supportedTemplates))
-	for _, t := range supportedTemplates {
-		if t.Image == "" {
-			continue
-		}
-		if _, ok := seen[t.Image]; ok {
-			continue
-		}
-		seen[t.Image] = struct{}{}
-		out = append(out, t.Image)
-	}
-	return out
-}
-
 // =============================================================================
 // Constraints
 // =============================================================================
