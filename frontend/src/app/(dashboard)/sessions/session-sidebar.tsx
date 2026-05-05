@@ -2,7 +2,7 @@
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { notify as toast } from "@/lib/notify";
-import { Archive, ArchiveRestore, Plus, Search } from "lucide-react";
+import { Archive, ArchiveRestore, PanelRightOpen, Plus, Search } from "lucide-react";
 import Link from "next/link";
 import { usePathname, useSelectedLayoutSegment } from "next/navigation";
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -117,6 +117,19 @@ function SessionDiffBadge({ diffStats }: { diffStats?: { added: number; removed:
   return (
     <span className="inline-flex shrink-0 rounded-md border border-border/60 bg-muted/50 px-1.5 py-0.5">
       <DiffStatsBadge added={diffStats.added} removed={diffStats.removed} className="text-xs" />
+    </span>
+  );
+}
+
+function SessionLinearBadge({ session }: { session: SessionListItem }) {
+  const linearLabel =
+    session.linear_identifier_hint ??
+    session.linked_issues?.find((issue) => issue.issue_source === "linear")?.external_id;
+  if (!linearLabel) return null;
+
+  return (
+    <span className="inline-flex shrink-0 rounded-md border border-border/60 bg-muted/50 px-1.5 py-0.5 text-xs text-muted-foreground">
+      {linearLabel}
     </span>
   );
 }
@@ -474,6 +487,8 @@ export function SessionSidebar() {
           const hasUnread = isUnread(session);
           const ts = session.completed_at || session.started_at || session.created_at;
           const isArchived = !!session.archived_at;
+          const title = sessionTitle(session);
+          const sessionHref = `/sessions/${session.id}${filterSuffix}`;
 
           return (
             <SwipeActionRow
@@ -490,17 +505,18 @@ export function SessionSidebar() {
                 }
               }}
             >
-              <Link
-                href={`/sessions/${session.id}${filterSuffix}`}
-                aria-current={isSelected ? "page" : undefined}
-                className={cn(
-                  "block rounded-lg border border-border/50 bg-background px-3 py-2.5 shadow-sm transition-all duration-150 md:border-transparent md:bg-muted/30 md:shadow-none",
-                  isSelected
-                    ? "border-border/60 bg-background shadow-sm md:border-border/60 md:bg-background md:shadow-sm"
-                    : "hover:border-border/60 hover:bg-background md:hover:border-transparent md:hover:bg-background/60"
-                )}
-              >
-                <div className="flex items-start gap-2.5 min-w-0">
+              <div className="flex items-stretch gap-1.5 min-w-0">
+                <Link
+                  href={sessionHref}
+                  aria-current={isSelected ? "page" : undefined}
+                  className={cn(
+                    "block min-w-0 flex-1 rounded-lg border border-border/50 bg-background px-3 py-2.5 shadow-sm transition-all duration-150 md:border-transparent md:bg-muted/30 md:shadow-none",
+                    isSelected
+                      ? "border-border/60 bg-background shadow-sm md:border-border/60 md:bg-background md:shadow-sm"
+                      : "hover:border-border/60 hover:bg-background md:hover:border-transparent md:hover:bg-background/60"
+                  )}
+                >
+                  <div className="flex items-start gap-2.5 min-w-0">
                   {/* Unread / working indicator */}
                   <div className="mt-1.5 shrink-0">
                     {isWorkingSession ? (
@@ -512,44 +528,66 @@ export function SessionSidebar() {
                     )}
                   </div>
 
-                {/* Content */}
-                <div className="min-w-0 flex-1">
-                  <div className="flex items-start justify-between gap-2">
-                    <p className={cn(
-                      "text-xs font-medium truncate leading-snug",
-                      hasUnread || isWorkingSession ? "text-foreground" : "text-muted-foreground"
-                    )}>
-                      {sessionTitle(session)}
-                    </p>
-                  </div>
-                  <div className="flex items-center justify-between mt-0.5">
-                    <div className="flex items-center gap-3 min-w-0">
-                      <span className="text-xs text-muted-foreground shrink-0">
-                        <span>{cfg.label}</span>
-                        {isWorkingSession && <AnimatedEllipsis />}
-                      </span>
-                      {session.pm_plan_id && !session.triggered_by_user_id && (
-                        <span className="inline-flex items-center rounded-full bg-primary/10 px-1.5 py-0.5 text-xs font-medium text-primary shrink-0">
-                          PM
-                        </span>
-                      )}
-                      <span className="text-xs text-muted-foreground/50 truncate">
-                        {formatTimeAgo(ts)}
-                      </span>
+                  {/* Content */}
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-start justify-between gap-2">
+                      <p className={cn(
+                        "text-xs font-medium truncate leading-snug",
+                        hasUnread || isWorkingSession ? "text-foreground" : "text-muted-foreground"
+                      )}>
+                        {title}
+                      </p>
                     </div>
-                    <div className="flex items-center gap-1.5 shrink-0">
-                      <PRStatusBadge prSummary={session.pr_summary} />
-                      <SessionDiffBadge diffStats={session.diff_stats} />
+                    <div className="mt-0.5 flex min-w-0 items-center gap-2">
+                      <div
+                        data-testid={`session-row-meta-scroll-${session.id}`}
+                        className="min-w-0 flex-1 overflow-x-auto overflow-y-hidden scrollbar-hide"
+                      >
+                        <div className="flex min-w-max items-center gap-1.5 pr-1">
+                          <span className="text-xs text-muted-foreground shrink-0">
+                            <span>{cfg.label}</span>
+                            {isWorkingSession && <AnimatedEllipsis />}
+                          </span>
+                          {session.pm_plan_id && !session.triggered_by_user_id && (
+                            <span className="inline-flex items-center rounded-full bg-primary/10 px-1.5 py-0.5 text-xs font-medium text-primary shrink-0">
+                              PM
+                            </span>
+                          )}
+                          <SessionLinearBadge session={session} />
+                          <span className="text-xs text-muted-foreground/50 shrink-0">
+                            {formatTimeAgo(ts)}
+                          </span>
+                          <PRStatusBadge prSummary={session.pr_summary} />
+                          <SessionDiffBadge diffStats={session.diff_stats} />
+                        </div>
+                      </div>
                     </div>
+                    {session.status === "failed" && (session.failure_explanation || session.error) && (
+                      <p className="text-xs text-destructive/70 truncate mt-0.5">
+                        {session.failure_explanation || session.error}
+                      </p>
+                    )}
                   </div>
-                  {session.status === "failed" && (session.failure_explanation || session.error) && (
-                    <p className="text-xs text-destructive/70 truncate mt-0.5">
-                      {session.failure_explanation || session.error}
-                    </p>
+                  </div>
+                </Link>
+                <Button
+                  asChild
+                  variant="ghost"
+                  size="icon-sm"
+                  className={cn(
+                    "shrink-0 self-center rounded-lg border border-border/50 bg-background text-muted-foreground shadow-sm hover:text-foreground md:border-transparent md:bg-muted/30 md:shadow-none md:self-start",
+                    isSelected && "border-border/60 bg-background text-foreground md:border-border/60 md:bg-background md:shadow-sm",
                   )}
-                </div>
-                </div>
-              </Link>
+                >
+                  <Link
+                    href={sessionHref}
+                    aria-label={`Open session details for ${title}`}
+                    title="Open session details"
+                  >
+                    <PanelRightOpen className="h-4 w-4" />
+                  </Link>
+                </Button>
+              </div>
             </SwipeActionRow>
           );
         })}
