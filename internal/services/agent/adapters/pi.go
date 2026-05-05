@@ -34,9 +34,15 @@ func (a *PiAdapter) Name() models.AgentType {
 	return models.AgentTypePi
 }
 
-// CancellationSpec declares Pi's preferred graceful-stop behavior.
-func (a *PiAdapter) CancellationSpec() agent.CancellationSpec {
-	return agent.CancellationSpec{Method: agent.CancellationMethodEscape}
+// RuntimeProfile declares Pi's interactive runtime requirements. Pi only
+// honors Esc as a cancel signal under raw-mode TTY input, so the runtime
+// must allocate a TTY and keep stdin open for byte-level delivery.
+func (a *PiAdapter) RuntimeProfile() agent.AgentRuntimeProfile {
+	return agent.AgentRuntimeProfile{
+		Cancellation:      agent.CancellationSpec{Method: agent.CancellationMethodEscape},
+		RequiresTTY:       true,
+		RequiresOpenStdin: true,
+	}
 }
 
 // PreparePrompt constructs the prompts for Pi based on the issue context.
@@ -86,5 +92,9 @@ var piStreamingConfig = streamingAgentConfig{
 		DoneAsResult:       true,
 		CaptureToolModel:   true,
 	},
-	CancellationSpec: agent.CancellationSpec{Method: agent.CancellationMethodEscape},
+	Profile: agent.AgentRuntimeProfile{
+		Cancellation:      agent.CancellationSpec{Method: agent.CancellationMethodEscape},
+		RequiresTTY:       true,
+		RequiresOpenStdin: true,
+	},
 }

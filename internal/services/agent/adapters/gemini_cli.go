@@ -54,6 +54,17 @@ func (a *GeminiCLIAdapter) PreparePrompt(ctx context.Context, input *agent.Agent
 	}, nil
 }
 
+// geminiRuntimeProfile captures Gemini CLI's interactive runtime needs.
+var geminiRuntimeProfile = agent.AgentRuntimeProfile{
+	Cancellation:      agent.DefaultCancellationSpec,
+	PreferSplitOutput: true,
+}
+
+// RuntimeProfile declares Gemini's interactive runtime requirements.
+func (a *GeminiCLIAdapter) RuntimeProfile() agent.AgentRuntimeProfile {
+	return geminiRuntimeProfile
+}
+
 // Execute runs the Gemini CLI inside the sandbox and streams output.
 func (a *GeminiCLIAdapter) Execute(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
 	provider := agent.SandboxProviderFromContext(ctx)
@@ -63,7 +74,6 @@ func (a *GeminiCLIAdapter) Execute(ctx context.Context, sandbox *agent.Sandbox, 
 
 	var cmd string
 	if prompt.Continuation {
-		// Subsequent turn: resume the latest restored session state.
 		msg := shellEscapeDouble(prompt.UserMessage)
 		if prompt.ResumeSessionID != "" {
 			cmd = fmt.Sprintf(
@@ -78,8 +88,6 @@ func (a *GeminiCLIAdapter) Execute(ctx context.Context, sandbox *agent.Sandbox, 
 			)
 		}
 	} else {
-		// First turn: write prompt file and run fresh. Put it under $HOME
-		// (not WorkDir) so it doesn't pollute the cloned repo's git status.
 		promptContent := fmt.Sprintf("%s\n\n---\n\n%s", prompt.SystemPrompt, prompt.UserPrompt)
 		promptPath := fmt.Sprintf("%s/.143-prompt.md", sandbox.HomeDir)
 		if err := provider.WriteFile(ctx, sandbox, promptPath, []byte(promptContent)); err != nil {
@@ -90,7 +98,6 @@ func (a *GeminiCLIAdapter) Execute(ctx context.Context, sandbox *agent.Sandbox, 
 			shellEscapeSingle(promptPath),
 		)
 	}
-	cmd = wrapCommandForInterruptTracking(sandbox.HomeDir, agent.DefaultCancellationSpec, cmd)
 
 	logCh <- agent.LogEntry{
 		Timestamp: time.Now(),
@@ -99,22 +106,23 @@ func (a *GeminiCLIAdapter) Execute(ctx context.Context, sandbox *agent.Sandbox, 
 		Metadata:  map[string]interface{}{"max_tokens": prompt.MaxTokens, "resume": prompt.Continuation},
 	}
 
-	// Execute with real-time streaming.
 	result := &agent.AgentResult{}
-	var stderr bytes.Buffer
 	var summaryParts []string
 	var lastAssistantContent string
 
-	exitCode, err := provider.ExecStream(ctx, sandbox, cmd, func(line []byte) {
-		if len(bytes.TrimSpace(line)) == 0 {
-			return
-		}
-		parseGeminiStreamLine(line, result, logCh, &summaryParts, &lastAssistantContent)
-	}, &stderr)
+	runResult, err := runInteractiveCommand(ctx, sandbox, InteractiveRunSpec{
+		Cmd:     cmd,
+		Profile: geminiRuntimeProfile,
+		OnStdout: func(line []byte) {
+			parseGeminiStreamLine(line, result, logCh, &summaryParts, &lastAssistantContent)
+		},
+	})
 	if err != nil {
 		return nil, fmt.Errorf("exec gemini CLI: %w", err)
 	}
 
+	exitCode := runResult.ExitCode
+	stderr := runResult.Stderr
 	result.ExitCode = exitCode
 	if len(summaryParts) > 0 {
 		result.Summary = strings.Join(summaryParts, "\n")
@@ -122,18 +130,18 @@ func (a *GeminiCLIAdapter) Execute(ctx context.Context, sandbox *agent.Sandbox, 
 		result.Summary = lastAssistantContent
 	}
 
-	if stderr.Len() > 0 {
+	if len(stderr) > 0 {
 		logCh <- agent.LogEntry{
 			Timestamp: time.Now(),
 			Level:     "error",
-			Message:   stderr.String(),
+			Message:   string(stderr),
 		}
 	}
 
 	if exitCode != 0 {
 		result.Error = fmt.Sprintf("gemini CLI exited with code %d", exitCode)
-		if stderr.Len() > 0 {
-			result.Error += ": " + stderr.String()
+		if len(stderr) > 0 {
+			result.Error += ": " + string(stderr)
 		}
 	}
 

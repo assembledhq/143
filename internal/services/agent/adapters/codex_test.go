@@ -681,8 +681,8 @@ func TestCodexAdapter_Execute(t *testing.T) {
 			promptData, exists := provider.Files["/home/sandbox/.143-prompt.md"]
 			require.True(t, exists, "prompt file should have been written")
 			require.Contains(t, string(promptData), "Fix the bug.")
-			require.Contains(t, provider.ExecCalls[0], ".143-agent.pid", "codex command should register the agent pid for graceful interrupt")
-			require.Contains(t, provider.ExecCalls[0], "& pid=$!", "codex command should track the child pid without replacing the invoking shell")
+			require.NotContains(t, provider.ExecCalls[0], ".143-agent.pid", "codex adapter must not embed pidfile scaffolding (provider internal)")
+			require.NotContains(t, provider.ExecCalls[0], "& pid=$!", "codex adapter must not embed shell-shim wrapping (provider internal)")
 		})
 	}
 }

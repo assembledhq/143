@@ -27,6 +27,16 @@ func (testAdapterEscapeCancel) CancellationSpec() agent.CancellationSpec {
 	return agent.CancellationSpec{Method: agent.CancellationMethodEscape}
 }
 
+type testAdapterRuntimeProfile struct{ testAdapterDefaultCancel }
+
+func (testAdapterRuntimeProfile) RuntimeProfile() agent.AgentRuntimeProfile {
+	return agent.AgentRuntimeProfile{
+		Cancellation:      agent.CancellationSpec{Method: agent.CancellationMethodEscape},
+		RequiresTTY:       true,
+		RequiresOpenStdin: true,
+	}
+}
+
 func TestResolveCancellationSpec_DefaultsToCtrlC(t *testing.T) {
 	t.Parallel()
 
@@ -41,24 +51,32 @@ func TestResolveCancellationSpec_UsesExplicitOverride(t *testing.T) {
 	require.Equal(t, agent.CancellationMethodEscape, spec.Method, "adapters should be able to override the default cancellation method")
 }
 
-func TestBuildCtrlCInterruptCommand_UsesPIDFile(t *testing.T) {
+func TestResolveCancellationSpec_RuntimeProfileWins(t *testing.T) {
 	t.Parallel()
 
-	cmd := agent.BuildCtrlCInterruptCommand("/tmp/agent.pid")
-	require.Contains(t, cmd, "kill -INT", "Ctrl+C interrupt command should send SIGINT to the tracked pid")
-	require.Contains(t, cmd, "/tmp/agent.pid", "Ctrl+C interrupt command should reference the pid file path")
-	require.NotContains(t, cmd, "pkill -INT", "Ctrl+C interrupt command should not depend on a hard-coded process allowlist")
+	spec := agent.ResolveCancellationSpec(testAdapterRuntimeProfile{})
+	require.Equal(t, agent.CancellationMethodEscape, spec.Method, "ResolveCancellationSpec should honor RuntimeProfileProvider")
 }
 
-func TestBuildEscapeInterruptCommand_UsesTTYFile(t *testing.T) {
+func TestResolveRuntimeProfile_DefaultsToCtrlCNoTTY(t *testing.T) {
 	t.Parallel()
 
-	cmd := agent.BuildEscapeInterruptCommand("/tmp/agent.tty")
-	require.Contains(t, cmd, "printf '\\033'", "escape interrupt command should write an ESC byte")
-	require.Contains(t, cmd, "/tmp/agent.tty", "escape interrupt command should reference the tty file path")
+	profile := agent.ResolveRuntimeProfile(testAdapterDefaultCancel{})
+	require.Equal(t, agent.CancellationMethodCtrlC, profile.Cancellation.Method, "default profile should be Ctrl+C")
+	require.False(t, profile.RequiresTTY, "default profile should not require a TTY")
+	require.False(t, profile.RequiresOpenStdin, "default profile should not require open stdin")
 }
 
-func TestNewCancelRegistry_DefaultSpecRemainsCtrlC(t *testing.T) {
+func TestResolveRuntimeProfile_HonorsAdapterDeclaration(t *testing.T) {
+	t.Parallel()
+
+	profile := agent.ResolveRuntimeProfile(testAdapterRuntimeProfile{})
+	require.True(t, profile.RequiresTTY, "TTY-requiring adapters should propagate that bit")
+	require.True(t, profile.RequiresOpenStdin)
+	require.Equal(t, agent.CancellationMethodEscape, profile.Cancellation.Method)
+}
+
+func TestNewCancelRegistry_Constructs(t *testing.T) {
 	t.Parallel()
 
 	reg := agent.NewCancelRegistry(zerolog.Nop())

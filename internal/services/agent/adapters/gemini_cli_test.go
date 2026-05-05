@@ -249,8 +249,8 @@ func TestGeminiCLIAdapter_Execute(t *testing.T) {
 			promptData, exists := provider.Files["/home/sandbox/.143-prompt.md"]
 			require.True(t, exists, "prompt file should have been written")
 			require.Contains(t, string(promptData), "Fix the bug.", "prompt file should contain system prompt")
-			require.Contains(t, provider.ExecCalls[0], ".143-agent.pid", "gemini command should register the agent pid for graceful interrupt")
-			require.Contains(t, provider.ExecCalls[0], "& pid=$!", "gemini command should track the child pid without replacing the invoking shell")
+			require.NotContains(t, provider.ExecCalls[0], ".143-agent.pid", "gemini adapter must not embed pidfile scaffolding (provider internal)")
+			require.NotContains(t, provider.ExecCalls[0], "& pid=$!", "gemini adapter must not embed shell-shim wrapping (provider internal)")
 		})
 	}
 }

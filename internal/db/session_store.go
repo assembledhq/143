@@ -63,23 +63,23 @@ type SessionFilters struct {
 	// the cursor). The inverse — a duplicate reappearing on an earlier page —
 	// only happens if the same page is re-fetched. The frontend dedupes by id,
 	// so this manifests as occasional reordering, not data loss.
-	CursorTime        *time.Time
-	CursorID          *uuid.UUID
-	AdHocOnly         bool      // When true, only return runs where pm_plan_id IS NULL (not linked to a PM plan).
-	RepositoryID      uuid.UUID // When non-zero, filter sessions by repository via issues table.
-	TriggeredByUserID uuid.UUID // When non-zero, filter sessions to those triggered by this user.
+	CursorTime         *time.Time
+	CursorID           *uuid.UUID
+	AdHocOnly          bool      // When true, only return runs where pm_plan_id IS NULL (not linked to a PM plan).
+	RepositoryID       uuid.UUID // When non-zero, filter sessions by repository via issues table.
+	TriggeredByUserID  uuid.UUID // When non-zero, filter sessions to those triggered by this user.
 	TriggeredByUserIDs []uuid.UUID
-	Search            string    // When non-empty, filter sessions by title (case-insensitive prefix/substring match).
-	IncludeArchived   bool      // When true, include archived sessions in the results.
-	OnlyArchived      bool      // When true, return only archived sessions.
+	Search             string // When non-empty, filter sessions by title (case-insensitive prefix/substring match).
+	IncludeArchived    bool   // When true, include archived sessions in the results.
+	OnlyArchived       bool   // When true, return only archived sessions.
 }
 
 // SessionCountsFilters scopes CountsByOrg to a subset of sessions.
 // Status, archived, and search are not accepted — the counts endpoint
 // always returns totals for the all/active/archived buckets.
 type SessionCountsFilters struct {
-	RepositoryID      uuid.UUID
-	TriggeredByUserID uuid.UUID
+	RepositoryID       uuid.UUID
+	TriggeredByUserID  uuid.UUID
 	TriggeredByUserIDs []uuid.UUID
 }
 

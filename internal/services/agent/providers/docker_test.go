@@ -1309,57 +1309,116 @@ func TestDockerProvider_Exec(t *testing.T) {
 	})
 }
 
-func TestDockerProvider_Interrupt_NonZeroExitReturnsError(t *testing.T) {
+// TestDockerHandle_StartInteractiveCommand_NoTTY_WrapsWithSignalShim verifies
+// that the provider wraps non-TTY commands with the internal pidfile shim so
+// Interrupt(ctrl_c) has a tracked child PID to signal. The wrapping is
+// provider-internal — adapters never see it.
+func TestDockerHandle_StartInteractiveCommand_NoTTY_WrapsWithSignalShim(t *testing.T) {
 	t.Parallel()
 
-	tests := []struct {
-		name    string
-		req     agent.InterruptRequest
-		wantCmd string
-	}{
-		{
-			name: "ctrl c interrupt",
-			req: agent.InterruptRequest{
-				Method:      agent.CancellationMethodCtrlC,
-				PIDFilePath: "/home/sandbox/.143-agent.pid",
-			},
-			wantCmd: "kill -INT",
-		},
-		{
-			name: "escape interrupt",
-			req: agent.InterruptRequest{
-				Method:      agent.CancellationMethodEscape,
-				TTYFilePath: "/home/sandbox/.143-agent.tty",
-			},
-			wantCmd: "printf '\\033'",
-		},
+	var capturedCmd string
+	mock := &mockDockerClient{}
+	mock.containerExecCreateFn = func(ctx context.Context, containerID string, config container.ExecOptions) (container.ExecCreateResponse, error) {
+		require.Equal(t, []string{"sh", "-c"}, config.Cmd[:2])
+		capturedCmd = config.Cmd[2]
+		require.False(t, config.Tty, "non-TTY spec should not allocate a TTY")
+		return container.ExecCreateResponse{ID: "exec-1"}, nil
+	}
+	mock.containerExecAttachFn = func(ctx context.Context, execID string, config container.ExecAttachOptions) (types.HijackedResponse, error) {
+		return newMockHijackedResponse(""), nil
+	}
+	mock.containerExecInspectFn = func(ctx context.Context, execID string) (container.ExecInspect, error) {
+		return container.ExecInspect{ExitCode: 0}, nil
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
+	p := NewDockerProvider(mock, newTestLogger())
+	sb := &agent.Sandbox{ID: "c1", Provider: "docker", WorkDir: "/workspace", HomeDir: "/home/sandbox"}
 
-			mock := &mockDockerClient{}
-			mock.containerExecCreateFn = func(ctx context.Context, containerID string, config container.ExecOptions) (container.ExecCreateResponse, error) {
-				require.Equal(t, []string{"sh", "-c"}, config.Cmd[:2], "interrupts should run through the sandbox shell")
-				require.Contains(t, config.Cmd[2], tt.wantCmd, "interrupt should execute the expected shell command")
-				return container.ExecCreateResponse{ID: "test-exec-id"}, nil
-			}
-			mock.containerExecAttachFn = func(ctx context.Context, execID string, config container.ExecAttachOptions) (types.HijackedResponse, error) {
-				return newMockHijackedResponse(""), nil
-			}
-			mock.containerExecInspectFn = func(ctx context.Context, execID string) (container.ExecInspect, error) {
-				return container.ExecInspect{ExitCode: 1}, nil
-			}
+	handle, err := p.StartInteractiveCommand(context.Background(), sb, agent.InteractiveCommandSpec{
+		Cmd:              "echo hi",
+		CancellationSpec: agent.DefaultCancellationSpec,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, handle)
+	require.Contains(t, capturedCmd, "echo hi", "user command should be embedded verbatim")
+	require.Contains(t, capturedCmd, "& __143_pid=$!", "non-TTY ctrl_c handles wrap with the internal signal shim")
+	require.Contains(t, capturedCmd, "/home/sandbox/.143-runtime.pid", "shim records PID under HomeDir")
+	_ = handle.Close()
+}
 
-			p := NewDockerProvider(mock, newTestLogger())
-			sb := &agent.Sandbox{ID: "test-container", Provider: "docker", WorkDir: "/workspace"}
+// TestDockerHandle_Interrupt_NoTTY_DeliversSIGINT verifies that Interrupt
+// (ctrl_c) on a non-TTY handle exec-sends SIGINT to the pidfile-tracked child.
+func TestDockerHandle_Interrupt_NoTTY_DeliversSIGINT(t *testing.T) {
+	t.Parallel()
 
-			err := p.Interrupt(context.Background(), sb, tt.req)
-			require.Error(t, err, "non-zero interrupt command exits should be treated as failures")
-			require.Contains(t, err.Error(), "code 1", "interrupt failure should preserve the shell exit code")
-		})
+	var execCmds []string
+	var mu sync.Mutex
+	mock := &mockDockerClient{}
+	mock.containerExecCreateFn = func(ctx context.Context, containerID string, config container.ExecOptions) (container.ExecCreateResponse, error) {
+		mu.Lock()
+		execCmds = append(execCmds, config.Cmd[2])
+		mu.Unlock()
+		return container.ExecCreateResponse{ID: "exec-1"}, nil
 	}
+	mock.containerExecAttachFn = func(ctx context.Context, execID string, config container.ExecAttachOptions) (types.HijackedResponse, error) {
+		return newMockHijackedResponse(""), nil
+	}
+	mock.containerExecInspectFn = func(ctx context.Context, execID string) (container.ExecInspect, error) {
+		return container.ExecInspect{ExitCode: 0}, nil
+	}
+
+	p := NewDockerProvider(mock, newTestLogger())
+	sb := &agent.Sandbox{ID: "c1", Provider: "docker", WorkDir: "/workspace", HomeDir: "/home/sandbox"}
+
+	handle, err := p.StartInteractiveCommand(context.Background(), sb, agent.InteractiveCommandSpec{
+		Cmd:              "agent",
+		CancellationSpec: agent.DefaultCancellationSpec,
+	})
+	require.NoError(t, err)
+	defer handle.Close()
+
+	require.NoError(t, handle.Interrupt(context.Background(), agent.DefaultCancellationSpec))
+
+	mu.Lock()
+	defer mu.Unlock()
+	require.GreaterOrEqual(t, len(execCmds), 2, "Interrupt should run an additional exec to send SIGINT")
+	require.Contains(t, execCmds[len(execCmds)-1], "kill -INT", "Interrupt(ctrl_c) on non-TTY handle should exec-send SIGINT")
+	require.Contains(t, execCmds[len(execCmds)-1], "/home/sandbox/.143-runtime.pid", "kill should target the pidfile written by the shim")
+}
+
+// TestDockerHandle_StartInteractiveCommand_TTY_AllocatesTTY ensures that
+// adapters that declare RequiresTTY (e.g. Pi) get a real TTY and stdin path.
+func TestDockerHandle_StartInteractiveCommand_TTY_AllocatesTTY(t *testing.T) {
+	t.Parallel()
+
+	var sawTTY bool
+	var sawStdin bool
+	mock := &mockDockerClient{}
+	mock.containerExecCreateFn = func(ctx context.Context, containerID string, config container.ExecOptions) (container.ExecCreateResponse, error) {
+		sawTTY = config.Tty
+		sawStdin = config.AttachStdin
+		return container.ExecCreateResponse{ID: "exec-tty"}, nil
+	}
+	mock.containerExecAttachFn = func(ctx context.Context, execID string, config container.ExecAttachOptions) (types.HijackedResponse, error) {
+		return newMockHijackedResponse(""), nil
+	}
+	mock.containerExecInspectFn = func(ctx context.Context, execID string) (container.ExecInspect, error) {
+		return container.ExecInspect{ExitCode: 0}, nil
+	}
+
+	p := NewDockerProvider(mock, newTestLogger())
+	sb := &agent.Sandbox{ID: "c1", Provider: "docker", WorkDir: "/workspace", HomeDir: "/home/sandbox"}
+
+	handle, err := p.StartInteractiveCommand(context.Background(), sb, agent.InteractiveCommandSpec{
+		Cmd:              "pi",
+		TTY:              true,
+		OpenStdin:        true,
+		CancellationSpec: agent.CancellationSpec{Method: agent.CancellationMethodEscape},
+	})
+	require.NoError(t, err)
+	defer handle.Close()
+	require.True(t, sawTTY, "TTY=true spec should allocate a real TTY")
+	require.True(t, sawStdin, "OpenStdin=true spec should attach stdin")
 }
 
 func TestDockerProvider_ConnectionInfo(t *testing.T) {

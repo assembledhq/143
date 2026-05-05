@@ -49,9 +49,12 @@ func TestPiAdapter_Execute_StreamJSON(t *testing.T) {
 
 	provider := newMockProvider()
 	provider.ExecStreamFn = func(ctx context.Context, sb *agent.Sandbox, cmd string, onLine func(line []byte), stderr io.Writer) (int, error) {
-		require.Contains(t, cmd, ".143-agent.pid", "pi command should register the agent pid for graceful interrupt")
-		require.Contains(t, cmd, ".143-agent.tty", "pi command should register the tty path for ESC delivery")
-		require.Contains(t, cmd, "python3 -c", "pi command should launch through the PTY wrapper for ESC delivery")
+		// Adapters no longer hand-roll PTY/pidfile glue — that lives in the
+		// provider-internal interactive handle. The adapter command is the
+		// raw CLI invocation only.
+		require.NotContains(t, cmd, ".143-agent.pid", "pi adapter must not embed pidfile scaffolding (provider internal)")
+		require.NotContains(t, cmd, ".143-agent.tty", "pi adapter must not embed ttyfile scaffolding (provider internal)")
+		require.NotContains(t, cmd, "python3 -c", "pi adapter must not embed PTY shim (provider internal)")
 		require.Contains(t, cmd, "--mode json")
 		require.Contains(t, cmd, "--api-key")
 		require.Contains(t, cmd, "PI_API_KEY", "must inject the dedicated Pi API key")
@@ -116,9 +119,14 @@ func TestPiAdapter_Execute_StreamJSON(t *testing.T) {
 func TestPiAdapter_Execute_NonZeroExit(t *testing.T) {
 	t.Parallel()
 
+	// Pi runs under a TTY, so stderr is merged into the visible stdout
+	// stream by the transport itself. The adapter is expected to surface
+	// the last visible line as the failure detail when the CLI exits
+	// non-zero — this test asserts that contract through the new handle
+	// transport (no wrapper-side PTY, no separate stderr writer).
 	provider := newMockProvider()
 	provider.ExecStreamFn = func(ctx context.Context, sb *agent.Sandbox, cmd string, onLine func(line []byte), stderr io.Writer) (int, error) {
-		_, _ = stderr.Write([]byte("pi: provider auth failed"))
+		onLine([]byte("pi: provider auth failed"))
 		return 2, nil
 	}
 
@@ -167,9 +175,9 @@ func TestPiAdapter_Execute_ContinuationUsesUserMessage(t *testing.T) {
 
 	provider := newMockProvider()
 	provider.ExecStreamFn = func(ctx context.Context, sb *agent.Sandbox, cmd string, onLine func(line []byte), stderr io.Writer) (int, error) {
-		require.Contains(t, cmd, ".143-agent.pid", "pi continuation should register the agent pid for graceful interrupt")
-		require.Contains(t, cmd, ".143-agent.tty", "pi continuation should register the tty path for ESC delivery")
-		require.Contains(t, cmd, "python3 -c", "pi continuation should launch through the PTY wrapper for ESC delivery")
+		require.NotContains(t, cmd, ".143-agent.pid", "pi continuation must not embed pidfile scaffolding (provider internal)")
+		require.NotContains(t, cmd, ".143-agent.tty", "pi continuation must not embed ttyfile scaffolding (provider internal)")
+		require.NotContains(t, cmd, "python3 -c", "pi continuation must not embed PTY shim (provider internal)")
 		return 0, nil
 	}
 	provider.ExecFn = func(ctx context.Context, sb *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {

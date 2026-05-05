@@ -26,7 +26,7 @@ import (
 
 // Compile-time check that DockerProvider implements agent.SandboxProvider.
 var _ agent.SandboxProvider = (*DockerProvider)(nil)
-var _ agent.SandboxInterruptor = (*DockerProvider)(nil)
+var _ agent.InteractiveSandboxProvider = (*DockerProvider)(nil)
 
 // defaultScratchDir is the exec-allowed scratch dir injected as $TMPDIR (and
 // $GOTMPDIR) for sandbox containers. /tmp is mounted noexec for defense in
@@ -61,30 +61,6 @@ type DockerProvider struct {
 	network    string // pre-created Docker network with egress restrictions
 	resolvConf string // host path bind-mounted at /etc/resolv.conf in sandboxes
 	logger     zerolog.Logger
-}
-
-// Interrupt delivers a graceful interrupt to the running agent process when
-// the provider knows how to do so.
-func (d *DockerProvider) Interrupt(ctx context.Context, sb *agent.Sandbox, req agent.InterruptRequest) error {
-	switch req.Method {
-	case agent.CancellationMethodCtrlC:
-		return d.runInterruptCommand(ctx, sb, agent.BuildCtrlCInterruptCommand(req.PIDFilePath))
-	case agent.CancellationMethodEscape:
-		return d.runInterruptCommand(ctx, sb, agent.BuildEscapeInterruptCommand(req.TTYFilePath))
-	default:
-		return agent.ErrUnsupportedInterruptMethod
-	}
-}
-
-func (d *DockerProvider) runInterruptCommand(ctx context.Context, sb *agent.Sandbox, cmd string) error {
-	exitCode, err := d.Exec(ctx, sb, cmd, io.Discard, io.Discard)
-	if err != nil {
-		return err
-	}
-	if exitCode != 0 {
-		return fmt.Errorf("interrupt command exited with code %d", exitCode)
-	}
-	return nil
 }
 
 // DockerProviderOption configures a DockerProvider.

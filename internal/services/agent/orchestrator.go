@@ -1504,9 +1504,13 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 		}
 	}
 
-	// Register sandbox with cancel registry so CancelSession can send SIGINT.
+	// Register the session with the cancel registry so RequestStop can
+	// deliver a graceful interrupt. The actual interactive command handle
+	// is attached lazily once the adapter starts it (see runInteractiveAgent
+	// in the adapters package); until that point CancelSession falls back
+	// to context cancellation.
 	if o.cancels != nil {
-		o.cancels.Register(run.ID, sandbox, o.provider, cancel, ResolveCancellationSpec(adapter))
+		o.cancels.Register(run.ID, cancel, ResolveCancellationSpec(adapter))
 	}
 
 	// 8. Clone repo into sandbox. This must happen before auth injection
@@ -1613,6 +1617,9 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 	}()
 
 	execCtx := WithSandboxProvider(ctx, o.provider)
+	if o.cancels != nil {
+		execCtx = WithInteractiveHandleAttacher(execCtx, o.cancels.HandleAttacher(run.ID))
+	}
 	result, err := adapter.Execute(execCtx, sandbox, prompt, logCh)
 	close(logCh)
 	logWg.Wait()
@@ -2306,9 +2313,10 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		}
 	}
 
-	// Register sandbox with cancel registry so CancelSession can send SIGINT.
+	// Register the session with the cancel registry. The interactive
+	// command handle is attached lazily by the adapter's runtime helper.
 	if o.cancels != nil {
-		o.cancels.Register(session.ID, sandbox, o.provider, cancel, ResolveCancellationSpec(adapter))
+		o.cancels.Register(session.ID, cancel, ResolveCancellationSpec(adapter))
 	}
 
 	// 5. Set up the workspace. Three paths:
@@ -2480,6 +2488,9 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	}()
 
 	execCtx := WithSandboxProvider(ctx, o.provider)
+	if o.cancels != nil {
+		execCtx = WithInteractiveHandleAttacher(execCtx, o.cancels.HandleAttacher(session.ID))
+	}
 	result, err := adapter.Execute(execCtx, sandbox, prompt, logCh)
 	close(logCh)
 	logWg.Wait()
