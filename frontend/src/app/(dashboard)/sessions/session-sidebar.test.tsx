@@ -693,6 +693,43 @@ describe('SessionSidebar', () => {
     );
   });
 
+  it('keeps the session details button pinned on the right and makes left-side pills horizontally scrollable', async () => {
+    serveSessions([
+      makeSession({
+        id: 's1',
+        result_summary: 'Overflow session',
+        pm_plan_id: 'plan-123',
+        triggered_by_user_id: undefined,
+        linear_identifier_hint: 'ENG-1234',
+        pr_summary: { status: 'merged', ci_status: '', number: 9, url: '#' },
+        diff_stats: { added: 10, removed: 3, files_changed: 2 },
+      }),
+    ]);
+
+    renderWithProviders(<SessionSidebar />, {
+      searchParams: { people: 'all', status: 'active', repo: 'repo-1', search: 'Overflow' },
+    });
+
+    await screen.findByText('Overflow session');
+
+    const detailsButton = screen.getByRole('link', { name: 'Open session details for Overflow session' });
+    expect(detailsButton.className).toContain('shrink-0');
+    expect(detailsButton.className).toContain('self-center');
+    expect(detailsButton).toHaveAttribute(
+      'href',
+      '/sessions/s1?people=all&status=active&repo=repo-1&search=Overflow',
+    );
+
+    const pillsScroller = screen.getByTestId('session-row-meta-scroll-s1');
+    expect(pillsScroller.className).toContain('overflow-x-auto');
+    expect(pillsScroller.className).toContain('scrollbar-hide');
+
+    expect(screen.getByText('ENG-1234')).toBeInTheDocument();
+    expect(screen.getByText('PM')).toBeInTheDocument();
+    expect(screen.getByText('PR')).toBeInTheDocument();
+    expect(screen.getByText('+10')).toBeInTheDocument();
+  });
+
   it('preserves explicit people selections', async () => {
     serveSessions([
       makeSession({ id: 's1', result_summary: 'Member-scoped session' }),
