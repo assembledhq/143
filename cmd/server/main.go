@@ -50,6 +50,8 @@ import (
 	"github.com/assembledhq/143/internal/worker"
 )
 
+const nodeDrainMarkTimeout = 5 * time.Second
+
 func main() {
 	cfg := config.Load()
 	logger := logging.NewLogger(cfg.LogLevel, cfg.Env)
@@ -580,10 +582,12 @@ func main() {
 		for _, w := range processWorkers {
 			w.RequestDrain()
 		}
-		drainCtx, drainCancel := context.WithTimeout(context.Background(), cfg.WorkerDrainTimeout)
-		if err := nodeManager.RequestDrain(drainCtx, time.Now()); err != nil {
+		nodeDrainCtx, nodeDrainCancel := context.WithTimeout(context.Background(), nodeDrainMarkTimeout)
+		if err := nodeManager.RequestDrain(nodeDrainCtx, time.Now()); err != nil {
 			logger.Warn().Err(err).Msg("failed to mark node draining")
 		}
+		nodeDrainCancel()
+		drainCtx, drainCancel := context.WithTimeout(context.Background(), cfg.WorkerDrainTimeout)
 		for {
 			activeJobs := 0
 			for _, w := range processWorkers {

@@ -101,15 +101,13 @@ jobs:
         # with content "ok" on success or "fail: ..." on failure. Poll each
         # worker host until we see one of those, or until the budget expires.
         #
-        # Budget trade-off: a busy worker can drain for up to 45 minutes
-        # before recreate even starts, and we don't want to burn CI minutes
-        # waiting that out. With VERIFY_TIMEOUT_SECONDS=300 we catch the
-        # common failure modes (bad image, missing env, healthcheck failure
-        # on a fresh container) while letting genuinely-slow drains complete
-        # off-CI. Run `make deploy-worker-status` to follow up after.
+        # Budget: the worker process drains for up to 45 minutes before
+        # recreate/healthcheck starts. Keep the workflow concurrency lock
+        # until the detached host-side rollover reaches a terminal status;
+        # otherwise a later deploy can race the first background rollover.
         env:
           DEPLOY_SHA: ${{ github.sha }}
-          VERIFY_TIMEOUT_SECONDS: "300"
+          VERIFY_TIMEOUT_SECONDS: "3300"
           POLL_INTERVAL_SECONDS: "15"
         run: |
           set -euo pipefail
@@ -153,10 +151,10 @@ jobs:
                   ;;
                 "")
                   if [ "$(date +%s)" -ge "$deadline" ]; then
-                    echo "⚠ worker $host: rollover still in progress after ${VERIFY_TIMEOUT_SECONDS}s"
-                    echo "  the drain phase can legitimately take much longer on a busy worker"
+                    echo "✗ worker $host: rollover did not finish after ${VERIFY_TIMEOUT_SECONDS}s"
                     echo "  follow up with: make deploy-worker-status"
-                    outcome="in_progress"
+                    outcome="timeout"
+                    overall_rc=1
                     break
                   fi
                   sleep "$POLL_INTERVAL_SECONDS"
