@@ -2906,11 +2906,11 @@ func TestNormalizePRTitleCandidate_TruncatesLongTitle(t *testing.T) {
 	require.Len(t, result, 120, "normalizePRTitleCandidate should cap PR titles at 120 chars")
 }
 
-func TestHydrateLinearIssueIdentifier_CopiesPrimaryHumanKey(t *testing.T) {
+func TestIssueWithLinearHumanKey_ReturnsCopyWithHumanKey(t *testing.T) {
 	t.Parallel()
 	source := models.IssueSourceLinear
 	humanKey := "VIR-75"
-	issue := &models.Issue{
+	original := &models.Issue{
 		Source:     models.IssueSourceLinear,
 		ExternalID: "321100d2-6427-4026-b163-625d953798a6",
 	}
@@ -2919,15 +2919,35 @@ func TestHydrateLinearIssueIdentifier_CopiesPrimaryHumanKey(t *testing.T) {
 		IssueSource: &source,
 		ExternalID:  &humanKey,
 	}}
-	hydrateLinearIssueIdentifier(issue, links)
-	require.Equal(t, "VIR-75", issue.ExternalID, "issue.ExternalID should be replaced with the human Linear key from the primary link")
+	got := issueWithLinearHumanKey(original, links)
+	require.Equal(t, "VIR-75", got.ExternalID, "returned issue should carry the human Linear key from the primary link")
+	require.Equal(t, "321100d2-6427-4026-b163-625d953798a6", original.ExternalID, "original issue's canonical UUID must be preserved — Linear API writes still need it")
+	require.NotSame(t, original, got, "should return a fresh issue rather than mutating the input when a rewrite happens")
 }
 
-func TestHydrateLinearIssueIdentifier_LeavesUUIDAloneWhenLinkAlsoUUID(t *testing.T) {
+func TestIssueWithLinearHumanKey_Idempotent(t *testing.T) {
+	t.Parallel()
+	source := models.IssueSourceLinear
+	humanKey := "VIR-75"
+	links := []models.SessionIssueLink{{
+		Role:        models.SessionIssueLinkRolePrimary,
+		IssueSource: &source,
+		ExternalID:  &humanKey,
+	}}
+	first := issueWithLinearHumanKey(&models.Issue{
+		Source:     models.IssueSourceLinear,
+		ExternalID: "321100d2-6427-4026-b163-625d953798a6",
+	}, links)
+	second := issueWithLinearHumanKey(first, links)
+	require.Same(t, first, second, "calling on a result that already carries the human key should short-circuit without allocating")
+	require.Equal(t, "VIR-75", second.ExternalID)
+}
+
+func TestIssueWithLinearHumanKey_ReturnsInputWhenLinkAlsoUUID(t *testing.T) {
 	t.Parallel()
 	source := models.IssueSourceLinear
 	uuidStr := "321100d2-6427-4026-b163-625d953798a6"
-	issue := &models.Issue{
+	original := &models.Issue{
 		Source:     models.IssueSourceLinear,
 		ExternalID: uuidStr,
 	}
@@ -2936,15 +2956,15 @@ func TestHydrateLinearIssueIdentifier_LeavesUUIDAloneWhenLinkAlsoUUID(t *testing
 		IssueSource: &source,
 		ExternalID:  &uuidStr,
 	}}
-	hydrateLinearIssueIdentifier(issue, links)
-	require.Equal(t, uuidStr, issue.ExternalID, "should not overwrite when the link also lacks the human key (provider_state.identifier not yet written)")
+	got := issueWithLinearHumanKey(original, links)
+	require.Same(t, original, got, "should return the original pointer unchanged when no link carries the human key (provider_state.identifier not yet written)")
 }
 
-func TestHydrateLinearIssueIdentifier_SkipsRelatedLinks(t *testing.T) {
+func TestIssueWithLinearHumanKey_SkipsRelatedLinks(t *testing.T) {
 	t.Parallel()
 	source := models.IssueSourceLinear
 	relatedKey := "VIR-99"
-	issue := &models.Issue{
+	original := &models.Issue{
 		Source:     models.IssueSourceLinear,
 		ExternalID: "321100d2-6427-4026-b163-625d953798a6",
 	}
@@ -2953,15 +2973,15 @@ func TestHydrateLinearIssueIdentifier_SkipsRelatedLinks(t *testing.T) {
 		IssueSource: &source,
 		ExternalID:  &relatedKey,
 	}}
-	hydrateLinearIssueIdentifier(issue, links)
-	require.Equal(t, "321100d2-6427-4026-b163-625d953798a6", issue.ExternalID, "related links must not seed the primary identifier — only the primary link's key belongs in the title prefix anchor position")
+	got := issueWithLinearHumanKey(original, links)
+	require.Same(t, original, got, "related links must not seed the primary identifier — only the primary link's key belongs in the title prefix anchor position")
 }
 
-func TestHydrateLinearIssueIdentifier_NoOpForNonLinearIssue(t *testing.T) {
+func TestIssueWithLinearHumanKey_NoOpForNonLinearIssue(t *testing.T) {
 	t.Parallel()
 	source := models.IssueSourceLinear
 	humanKey := "VIR-75"
-	issue := &models.Issue{
+	original := &models.Issue{
 		Source:     models.IssueSourceSentry,
 		ExternalID: "sentry-event-1",
 	}
@@ -2970,14 +2990,15 @@ func TestHydrateLinearIssueIdentifier_NoOpForNonLinearIssue(t *testing.T) {
 		IssueSource: &source,
 		ExternalID:  &humanKey,
 	}}
-	hydrateLinearIssueIdentifier(issue, links)
-	require.Equal(t, "sentry-event-1", issue.ExternalID, "non-Linear issues must not be touched")
+	got := issueWithLinearHumanKey(original, links)
+	require.Same(t, original, got, "non-Linear issues must not be touched")
 }
 
-func TestHydrateLinearIssueIdentifier_NilIssueIsSafe(t *testing.T) {
+func TestIssueWithLinearHumanKey_NilIssueIsSafe(t *testing.T) {
 	t.Parallel()
 	require.NotPanics(t, func() {
-		hydrateLinearIssueIdentifier(nil, nil)
+		got := issueWithLinearHumanKey(nil, nil)
+		require.Nil(t, got)
 	})
 }
 

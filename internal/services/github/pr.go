@@ -500,11 +500,14 @@ func (s *PRService) CreatePR(ctx context.Context, run *models.Session, params ..
 	// for writes), but PR title prefixing wants the human key like "VIR-75".
 	// session_issue_links carries that human key via the COALESCE in
 	// sessionIssueLinkSelectColumns once provider_state.identifier has been
-	// written by LinkResolved. Copy it onto the in-memory issue so both the
-	// LLM-prefixing and static-fallback paths see "[VIR-75]" instead of
-	// silently dropping the identifier when collectLinearIdentifiers' UUID
-	// shape check fails on the bare issues row.
-	hydrateLinearIssueIdentifier(issue, run.LinkedIssues)
+	// written by LinkResolved. Build a sibling issue carrying the human key
+	// so both the LLM-prefixing and static-fallback paths see "[VIR-75]"
+	// instead of silently dropping the identifier when
+	// collectLinearIdentifiers' UUID shape check fails on the bare issues
+	// row. Returns a fresh copy rather than mutating `issue`, so the
+	// canonical UUID stays intact for any code path that still needs it
+	// (e.g. Linear API writes keyed off issues.external_id).
+	issue = issueWithLinearHumanKey(issue, run.LinkedIssues)
 
 	// Resolve repository. sessions.repository_id is the canonical source of
 	// truth — session creation copies issue.repository_id into it up front.
@@ -2250,23 +2253,28 @@ func formatPRTitle(session *models.Session, issue *models.Issue) string {
 	return applyLinearKeyPrefixes(session, fmt.Sprintf("Session %s", session.ID.String()[:8]), nil)
 }
 
-// hydrateLinearIssueIdentifier copies the human Linear key (e.g. "VIR-75")
-// from the session's primary Linear link onto the in-memory issue, so callers
-// like applyLinearKeyPrefixes that rely on issues.external_id can find a
-// key-shaped identifier even though issues.external_id is the canonical
-// Linear UUID. Mirrors the COALESCE in sessionIssueLinkSelectColumns: if
-// LinkResolved persisted Identifier into provider_state, ListBySession
+// issueWithLinearHumanKey returns the input issue when no rewrite is needed,
+// or a shallow copy with ExternalID set to the primary Linear link's human
+// key (e.g. "VIR-75"). Mirrors the COALESCE in sessionIssueLinkSelectColumns:
+// if LinkResolved persisted Identifier into provider_state, ListBySession
 // returns the human key on link.ExternalID.
 //
-// No-op when issue is nil, when issue is not Linear-sourced, when no primary
-// Linear link is hydrated, or when the link's ExternalID isn't key-shaped
-// (e.g. the link was loaded before provider_state.identifier was written, in
-// which case ExternalID is still the UUID — leaving issue.ExternalID alone
-// keeps the existing UUID-shaped value rather than overwriting with another
-// UUID).
-func hydrateLinearIssueIdentifier(issue *models.Issue, links []models.SessionIssueLink) {
+// Idempotent — calling on the result returns the same pointer because the
+// second call sees the human key already on issue.ExternalID and short-
+// circuits before allocating. Non-mutating so the canonical issues.external_id
+// (the Linear UUID) stays intact on the caller's struct for any code path
+// that still needs it (Linear API writes are keyed off the UUID).
+//
+// Returns the original pointer unchanged when issue is nil, when issue is
+// not Linear-sourced, when no primary Linear link with a key-shaped
+// ExternalID is hydrated, or when issue.ExternalID is already the key-shaped
+// value (idempotency).
+func issueWithLinearHumanKey(issue *models.Issue, links []models.SessionIssueLink) *models.Issue {
 	if issue == nil || issue.Source != models.IssueSourceLinear {
-		return
+		return issue
+	}
+	if linearKeyShapeRE.MatchString(issue.ExternalID) {
+		return issue
 	}
 	for _, link := range links {
 		if link.Role != models.SessionIssueLinkRolePrimary {
@@ -2281,9 +2289,11 @@ func hydrateLinearIssueIdentifier(issue *models.Issue, links []models.SessionIss
 		if !linearKeyShapeRE.MatchString(*link.ExternalID) {
 			continue
 		}
-		issue.ExternalID = *link.ExternalID
-		return
+		copyIssue := *issue
+		copyIssue.ExternalID = *link.ExternalID
+		return &copyIssue
 	}
+	return issue
 }
 
 // stripLinearColonPrefix removes a leading "ACS-1234: " preamble from a
