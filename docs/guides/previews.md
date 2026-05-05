@@ -145,7 +145,7 @@ Placeholders supported in `inject_env` values (double braces): `{{username}}`, `
 | `postgres-17` | `postgres:17-alpine` | 5432 |
 | `postgres-16` | `postgres:16-alpine` | 5432 |
 | `redis-7` | `redis:7-alpine` | 6379 |
-| `mysql-8` | `mysql:8-lts` | 3306 |
+| `mysql-8` | `mysql:8.4` | 3306 |
 
 Credentials are auto-generated per preview and never stored. The sidecar is only reachable from the sandbox — no external network access, no mount into the repo.
 

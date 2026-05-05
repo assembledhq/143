@@ -662,7 +662,7 @@ Platform infrastructure templates are maintained by 143 and versioned independen
 | `postgres-17` | `postgres:17-alpine` | 5432 | Auto-creates a database named `preview` |
 | `postgres-16` | `postgres:16-alpine` | 5432 | Auto-creates a database named `preview` |
 | `redis-7` | `redis:7-alpine` | 6379 | No auth by default |
-| `mysql-8` | `mysql:8-lts` | 3306 | Auto-creates a database named `preview` |
+| `mysql-8` | `mysql:8.4` | 3306 | Auto-creates a database named `preview` |
 
 Templates are not user-extensible in MVP. Custom infrastructure requires managed destinations pointing at external services.
 
