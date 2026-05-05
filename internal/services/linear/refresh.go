@@ -90,6 +90,11 @@ type refreshMetrics struct {
 // is package-level (not per-Service) because OTel instruments are
 // per-process; per-Service init would re-register on every test that
 // constructs a fresh Service.
+//
+// Test note: the cached counter binds to whatever MeterProvider was
+// installed on first use. Tests that swap MeterProviders mid-run will
+// keep recording into the original meter — acceptable because metrics
+// are best-effort observability and not asserted on by tests.
 var (
 	metricsOnce sync.Once
 	metrics     *refreshMetrics
@@ -433,6 +438,15 @@ func (s *Service) refreshLinearToken(ctx context.Context, orgID uuid.UUID, obser
 		s.observeRefreshOutcome(refreshOutcomeRotatedByPeer)
 		return latest, nil
 	}
+	// Even on the force-refresh path (skipFreshCheck), if the re-read shows
+	// a different access token than the caller observed, a peer already
+	// rotated under the lock. POSTing our (now-stale) refresh token would
+	// just consume Linear's freshly-issued refresh token and yield a third
+	// rotation. Use the peer's token instead.
+	if skipFreshCheck && latest.AccessToken != "" && latest.AccessToken != observed.AccessToken && !latest.IsExpired() {
+		s.observeRefreshOutcome(refreshOutcomeRotatedByPeer)
+		return latest, nil
+	}
 	if latest.RefreshToken == "" {
 		// Another goroutine zeroed the refresh token (likely after detecting
 		// revocation). Nothing useful we can do here.
@@ -762,11 +776,10 @@ func (s *Service) ForceRefreshToken(ctx context.Context, orgID uuid.UUID) (strin
 // expiring token serialize through one refresh rather than fanning out
 // N refresh requests at Linear.
 func (s *Service) withRefreshableClient(ctx context.Context, orgID uuid.UUID, fn func(Client) error) error {
-	integration, token, err := s.GetValidToken(ctx, orgID)
+	_, token, err := s.GetValidToken(ctx, orgID)
 	if err != nil {
 		return err
 	}
-	_ = integration
 
 	client, err := s.clientFactory(ctx, token)
 	if err != nil {
@@ -824,15 +837,20 @@ func (s *Service) markRefreshTokenRevoked(ctx context.Context, orgID uuid.UUID, 
 		zeroed := current
 		zeroed.RefreshToken = ""
 		if zeroed.ExpiresAt.IsZero() {
+			// A revoked row with zero ExpiresAt would be misclassified as
+			// a legacy "use until 401" credential by NeedsRefresh, masking
+			// the revocation. Stamp a past expiry so the typed-revocation
+			// signal — RefreshToken="" + ExpiresAt!=0 — survives the next
+			// GetValidToken call and routes through ErrNoRefreshToken.
+			// The integration row's status (set by MarkIntegrationUnauthorized
+			// below) is what the UI surfaces; ExpiresAt here is purely
+			// internal classification.
 			zeroed.ExpiresAt = time.Now().Add(-time.Second)
 		}
-		// We intentionally leave AccessToken in place so worker handlers
-		// that hold an in-memory client built from this config can still
-		// surface the more-specific 401 path themselves rather than
-		// failing earlier with "empty access token". We also preserve a
-		// known expiry (or stamp one in the past for unusual zero-expiry
-		// rows) so subsequent GetValidToken calls do not mistake the
-		// revoked row for a legacy use-until-401 credential.
+		// AccessToken is left in place so worker handlers that hold an
+		// in-memory client built from this config still surface the
+		// more-specific 401 path rather than failing earlier with
+		// "empty access token".
 		if err := s.credentialsWriter.Upsert(ctx, orgID, zeroed); err != nil {
 			s.logger.Warn().Err(err).
 				Str("org_id", orgID.String()).

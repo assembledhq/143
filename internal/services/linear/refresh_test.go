@@ -538,6 +538,50 @@ func TestForceRefreshToken_AlwaysAttemptsRefresh(t *testing.T) {
 	require.EqualValues(t, 1, stub.calls.Load())
 }
 
+// TestForceRefreshToken_SkipsPOSTWhenPeerAlreadyRotated covers the
+// efficiency fix: if the in-lock re-read shows the access token already
+// changed under us (peer node rotated between our 401 and our lock
+// acquisition), we should use the peer's token instead of POSTing our
+// stale refresh token. POSTing would consume Linear's freshly-issued
+// refresh token for a redundant third rotation.
+func TestForceRefreshToken_SkipsPOSTWhenPeerAlreadyRotated(t *testing.T) {
+	t.Parallel()
+	orgID := uuid.New()
+	intg := newActiveLinearIntegrationStore(orgID)
+	creds := newFakeCredentialStore()
+	// The caller observed AccessToken "lin_at_caller_saw" before getting
+	// a 401. By the time refreshLinearToken acquires the per-org lock and
+	// re-reads, the store reflects a peer-node rotation to "lin_at_peer".
+	creds.configs[orgID] = models.LinearConfig{
+		AccessToken:  "lin_at_peer",
+		RefreshToken: "lin_rt_peer",
+		ExpiresAt:    time.Now().Add(2 * time.Hour),
+	}
+	stub := &stubLinearOAuthServer{respond: func(form url.Values) (int, string) {
+		t.Fatal("must not POST when the in-lock re-read shows a peer-rotated token")
+		return 0, ""
+	}}
+	svc := newRefreshTestService(t, intg, creds, stub)
+
+	// Drive refreshLinearToken directly through ForceRefreshToken, but
+	// pre-load `observed` with the caller's pre-rotation view so the
+	// in-lock re-read genuinely diverges. ForceRefreshToken's first
+	// loadLinearCredential currently sees the post-rotation row, so
+	// observed.AccessToken == latest.AccessToken and the new branch
+	// wouldn't fire — to actually exercise the new path we drop one
+	// level and call refreshLinearToken with skipFreshCheck=true and
+	// the older `observed` config.
+	older := models.LinearConfig{
+		AccessToken:  "lin_at_caller_saw",
+		RefreshToken: "lin_rt_caller_saw",
+		ExpiresAt:    time.Now().Add(-1 * time.Minute),
+	}
+	got, err := svc.refreshLinearToken(context.Background(), orgID, older, true /* skipFreshCheck */)
+	require.NoError(t, err)
+	require.Equal(t, "lin_at_peer", got.AccessToken, "must use the peer-rotated token, not POST our stale refresh token")
+	require.Zero(t, stub.calls.Load(), "no /oauth/token request expected when peer already rotated")
+}
+
 // TestWithRefreshableClient_RetriesOnce_SucceedsOnSecondTry is the
 // integration test for the on-401 retry loop in withRefreshableClient.
 // First call returns ErrUnauthorized, force-refresh runs, second call
