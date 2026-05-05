@@ -62,12 +62,12 @@ func TestSessionStore_UpdateResult_WithDiffSnapshot(t *testing.T) {
 	headSHA := "head123"
 	baseSHA := "base123"
 	result := &models.SessionResult{
-		Diff:              &diff,
-		DiffBaseCommitSHA: &baseSHA,
-		DiffHeadCommitSHA: &headSHA,
+		Diff:               &diff,
+		DiffBaseCommitSHA:  &baseSHA,
+		DiffHeadCommitSHA:  &headSHA,
 		DiffWorkspaceDirty: true,
-		DiffCollectedAt:   &collectedAt,
-		DiffSource:        "review",
+		DiffCollectedAt:    &collectedAt,
+		DiffSource:         "review",
 	}
 
 	mock.ExpectBegin()
@@ -102,8 +102,8 @@ func TestSessionStore_UpdateResult_WithDiffSnapshotBeginFailure(t *testing.T) {
 	diff := "diff"
 	baseSHA := "base123"
 	result := &models.SessionResult{
-		Diff:              &diff,
-		DiffBaseCommitSHA: &baseSHA,
+		Diff:               &diff,
+		DiffBaseCommitSHA:  &baseSHA,
 		DiffWorkspaceDirty: true,
 	}
 
@@ -126,8 +126,8 @@ func TestSessionStore_UpdateTurnComplete_WithDiffSnapshot(t *testing.T) {
 	diff := "--- a/a.go\n+++ b/a.go\n"
 	baseSHA := "base123"
 	result := &models.SessionResult{
-		Diff:              &diff,
-		DiffBaseCommitSHA: &baseSHA,
+		Diff:               &diff,
+		DiffBaseCommitSHA:  &baseSHA,
 		DiffWorkspaceDirty: true,
 	}
 

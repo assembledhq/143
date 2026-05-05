@@ -28,11 +28,12 @@ func RunAgentDedupeKey(sessionID uuid.UUID) string {
 }
 
 // ContinueSessionDedupeKey returns the dedupe key used for continue_session
-// enqueues. Session-level (not thread-level) because the underlying sandbox
-// container is shared across threads — only one continue_session can hold
-// the turn at a time. See RunAgentDedupeKey for the partial-index rationale.
-func ContinueSessionDedupeKey(sessionID uuid.UUID) string {
-	return "continue_session:" + sessionID.String()
+// enqueues. Thread-level because concurrent tabs are allowed to queue follow-up
+// turns independently; worker-side locking still serializes actual shared-
+// sandbox execution when needed. See RunAgentDedupeKey for the partial-index
+// rationale.
+func ContinueSessionDedupeKey(threadID uuid.UUID) string {
+	return "continue_session:" + threadID.String()
 }
 
 type JobStore struct {
