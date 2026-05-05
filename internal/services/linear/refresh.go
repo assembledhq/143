@@ -198,6 +198,15 @@ type CredentialWriter interface {
 	Upsert(ctx context.Context, orgID uuid.UUID, cfg models.ProviderConfig) error
 }
 
+// CredentialCASWriter is the production-safe refresh persistence surface.
+// It updates the Linear credential only if the stored refresh token still
+// matches the token we just redeemed. A mismatch means a user reconnect or
+// another process has already written a newer token chain, and the refresh
+// path must use that current row rather than overwriting it.
+type CredentialCASWriter interface {
+	UpdateLinearConfigIfRefreshTokenMatches(ctx context.Context, orgID uuid.UUID, expectedRefreshToken string, cfg models.LinearConfig) (models.LinearConfig, bool, error)
+}
+
 // OAuthClientCreds holds the client credentials Linear requires to redeem a
 // refresh token at /oauth/token. They are the same values used by the
 // authorization-code exchange in the API handlers (LINEAR_OAUTH_CLIENT_ID /
@@ -281,6 +290,9 @@ func (s *Service) loadLinearCredential(ctx context.Context, orgID uuid.UUID) (mo
 			return models.Integration{}, models.LinearConfig{}, fmt.Errorf("lookup linear integration: %w", ErrIntegrationNotFound)
 		}
 		return models.Integration{}, models.LinearConfig{}, fmt.Errorf("lookup linear integration: %w", err)
+	}
+	if integration.Status != models.IntegrationStatusActive && integration.Status != models.IntegrationStatusError {
+		return models.Integration{}, models.LinearConfig{}, fmt.Errorf("lookup linear integration: %w", ErrIntegrationNotFound)
 	}
 	if s.credentials == nil {
 		return models.Integration{}, models.LinearConfig{}, fmt.Errorf("lookup linear credential: credentials store not wired")
@@ -511,7 +523,16 @@ func (s *Service) refreshLinearToken(ctx context.Context, orgID uuid.UUID, obser
 		s.observeRefreshOutcome(refreshOutcomeRefreshed)
 		return merged, nil
 	}
-	if err := s.credentialsWriter.Upsert(ctx, orgID, merged); err != nil {
+	casWriter, ok := s.credentialsWriter.(CredentialCASWriter)
+	if !ok {
+		s.logger.Error().
+			Str("org_id", orgID.String()).
+			Msg("linear: credentialsWriter does not support compare-and-swap refresh persistence")
+		s.observeRefreshOutcome(refreshOutcomeTransientFailure)
+		return latest, fmt.Errorf("persist refreshed linear credential: credentials writer does not support compare-and-swap")
+	}
+	current, updated, err := casWriter.UpdateLinearConfigIfRefreshTokenMatches(ctx, orgID, latest.RefreshToken, merged)
+	if err != nil {
 		// The refresh succeeded at Linear (the old refresh token has been
 		// consumed and a new pair issued), but we couldn't persist. The
 		// new refresh token is now lost — the next call will try to use
@@ -525,6 +546,17 @@ func (s *Service) refreshLinearToken(ctx context.Context, orgID uuid.UUID, obser
 			Msg("linear: refresh succeeded at Linear but persisting the rotated tokens failed; the row's refresh token is now stale and will hit invalid_grant on next call")
 		s.observeRefreshOutcome(refreshOutcomeTransientFailure)
 		return latest, fmt.Errorf("persist refreshed linear credential: %w", err)
+	}
+	if !updated {
+		if current.AccessToken != "" && !current.IsExpired() {
+			s.logger.Info().
+				Str("org_id", orgID.String()).
+				Msg("linear: refresh raced with a newer credential write; using current token without overwriting it")
+			s.observeRefreshOutcome(refreshOutcomeRotatedByPeer)
+			return current, nil
+		}
+		s.observeRefreshOutcome(refreshOutcomeTransientFailure)
+		return latest, fmt.Errorf("persist refreshed linear credential: stored refresh token changed before write")
 	}
 
 	// A successful refresh implies the integration is healthy again. Clear

@@ -72,6 +72,21 @@ func (f *fakeCredentialStore) Upsert(_ context.Context, orgID uuid.UUID, cfg mod
 	return nil
 }
 
+func (f *fakeCredentialStore) UpdateLinearConfigIfRefreshTokenMatches(_ context.Context, orgID uuid.UUID, expectedRefreshToken string, cfg models.LinearConfig) (models.LinearConfig, bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.upsertHits = append(f.upsertHits, cfg)
+	if f.upsertErr != nil {
+		return models.LinearConfig{}, false, f.upsertErr
+	}
+	current := f.configs[orgID]
+	if current.RefreshToken != expectedRefreshToken {
+		return current, false, nil
+	}
+	f.configs[orgID] = cfg
+	return cfg, true, nil
+}
+
 func (f *fakeCredentialStore) snapshot(orgID uuid.UUID) models.LinearConfig {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -464,6 +479,39 @@ func TestGetValidAccessToken_MissingIntegrationReturnsEmptyNilForEnvInjection(t 
 	token, err := svc.GetValidAccessToken(context.Background(), orgID)
 	require.NoError(t, err)
 	require.Empty(t, token, `"" + nil signals "no Linear installed" so env.go skips the env var`)
+}
+
+// TestGetValidAccessToken_InactiveIntegrationReturnsEmptyNilForEnvInjection
+// covers the disconnect path: DisconnectIntegration leaves the credential row
+// in place and flips the integration row to inactive. Env injection must treat
+// that exactly like "not installed" so a user-initiated disconnect cannot keep
+// refreshing and injecting LINEAR_ACCESS_TOKEN into new sandboxes.
+func TestGetValidAccessToken_InactiveIntegrationReturnsEmptyNilForEnvInjection(t *testing.T) {
+	t.Parallel()
+	orgID := uuid.New()
+	intg := &fakeIntegrationStore{
+		row: models.Integration{
+			ID:     uuid.New(),
+			OrgID:  orgID,
+			Status: models.IntegrationStatusInactive,
+		},
+	}
+	creds := newFakeCredentialStore()
+	creds.configs[orgID] = models.LinearConfig{
+		AccessToken:  "lin_at_disconnected",
+		RefreshToken: "lin_rt_disconnected",
+		ExpiresAt:    time.Now().Add(1 * time.Minute),
+	}
+	stub := &stubLinearOAuthServer{respond: func(form url.Values) (int, string) {
+		t.Fatal("inactive integrations must not refresh or inject Linear tokens")
+		return 0, ""
+	}}
+	svc := newRefreshTestService(t, intg, creds, stub)
+
+	token, err := svc.GetValidAccessToken(context.Background(), orgID)
+	require.NoError(t, err, "inactive integration should be suppressed for env injection")
+	require.Empty(t, token, "inactive integration should not produce LINEAR_ACCESS_TOKEN")
+	require.Zero(t, stub.calls.Load(), "inactive integration should not call Linear's refresh endpoint")
 }
 
 // TestGetValidToken_RaceLossesUseRotatedToken simulates the multi-node
@@ -875,6 +923,49 @@ func TestGetValidToken_RefreshSucceeded_PersistFails_FallsBackToCachedToken(t *t
 	require.NoError(t, err, "transient persist failure with valid cached token should fall back, not propagate")
 	require.Equal(t, "lin_at_old", token, "cached token returned because the rotated one couldn't be persisted")
 	require.Equal(t, 1, creds.upsertCount(), "exactly one persist attempt expected (so the failure is observable in metrics/logs)")
+}
+
+// TestGetValidToken_RefreshSucceeded_DoesNotOverwriteReconnectedCredential
+// pins the compare-and-swap requirement for refresh persistence. If a user
+// reconnects Linear while this goroutine is waiting on /oauth/token, the
+// refreshed pair derived from the old refresh token must not overwrite the
+// newer reconnect credential.
+func TestGetValidToken_RefreshSucceeded_DoesNotOverwriteReconnectedCredential(t *testing.T) {
+	t.Parallel()
+	orgID := uuid.New()
+	intg := newActiveLinearIntegrationStore(orgID)
+	creds := newFakeCredentialStore()
+	creds.configs[orgID] = models.LinearConfig{
+		AccessToken:   "lin_at_old",
+		RefreshToken:  "lin_rt_old",
+		ExpiresAt:     time.Now().Add(1 * time.Minute),
+		WorkspaceID:   "wks-old",
+		WorkspaceName: "Old Workspace",
+	}
+	stub := &stubLinearOAuthServer{respond: func(form url.Values) (int, string) {
+		require.Equal(t, "lin_rt_old", form.Get("refresh_token"), "refresh should start from the originally observed refresh token")
+		creds.mu.Lock()
+		creds.configs[orgID] = models.LinearConfig{
+			AccessToken:   "lin_at_reconnected",
+			RefreshToken:  "lin_rt_reconnected",
+			ExpiresAt:     time.Now().Add(2 * time.Hour),
+			WorkspaceID:   "wks-new",
+			WorkspaceName: "Reconnected Workspace",
+		}
+		creds.mu.Unlock()
+		return http.StatusOK, `{"access_token":"lin_at_from_old_chain","refresh_token":"lin_rt_from_old_chain","expires_in":7200}`
+	}}
+	svc := newRefreshTestService(t, intg, creds, stub)
+
+	_, token, err := svc.GetValidToken(context.Background(), orgID)
+	require.NoError(t, err, "refresh race with reconnect should recover by using the current row")
+	require.Equal(t, "lin_at_reconnected", token, "caller should receive the newer reconnected token, not the old token chain")
+
+	persisted := creds.snapshot(orgID)
+	require.Equal(t, "lin_at_reconnected", persisted.AccessToken, "refresh must not overwrite a reconnected access token")
+	require.Equal(t, "lin_rt_reconnected", persisted.RefreshToken, "refresh must not overwrite a reconnected refresh token")
+	require.Equal(t, "wks-new", persisted.WorkspaceID, "refresh must not restore stale workspace metadata")
+	require.Equal(t, 1, creds.upsertCount(), "refresh should attempt one guarded persistence")
 }
 
 // TestMarkRefreshTokenRevoked_PersistFailureStillFlipsIntegration
