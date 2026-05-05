@@ -63,23 +63,23 @@ type SessionFilters struct {
 	// the cursor). The inverse — a duplicate reappearing on an earlier page —
 	// only happens if the same page is re-fetched. The frontend dedupes by id,
 	// so this manifests as occasional reordering, not data loss.
-	CursorTime        *time.Time
-	CursorID          *uuid.UUID
-	AdHocOnly         bool      // When true, only return runs where pm_plan_id IS NULL (not linked to a PM plan).
-	RepositoryID      uuid.UUID // When non-zero, filter sessions by repository via issues table.
-	TriggeredByUserID uuid.UUID // When non-zero, filter sessions to those triggered by this user.
+	CursorTime         *time.Time
+	CursorID           *uuid.UUID
+	AdHocOnly          bool      // When true, only return runs where pm_plan_id IS NULL (not linked to a PM plan).
+	RepositoryID       uuid.UUID // When non-zero, filter sessions by repository via issues table.
+	TriggeredByUserID  uuid.UUID // When non-zero, filter sessions to those triggered by this user.
 	TriggeredByUserIDs []uuid.UUID
-	Search            string    // When non-empty, filter sessions by title (case-insensitive prefix/substring match).
-	IncludeArchived   bool      // When true, include archived sessions in the results.
-	OnlyArchived      bool      // When true, return only archived sessions.
+	Search             string // When non-empty, filter sessions by title (case-insensitive prefix/substring match).
+	IncludeArchived    bool   // When true, include archived sessions in the results.
+	OnlyArchived       bool   // When true, return only archived sessions.
 }
 
 // SessionCountsFilters scopes CountsByOrg to a subset of sessions.
 // Status, archived, and search are not accepted — the counts endpoint
 // always returns totals for the all/active/archived buckets.
 type SessionCountsFilters struct {
-	RepositoryID      uuid.UUID
-	TriggeredByUserID uuid.UUID
+	RepositoryID       uuid.UUID
+	TriggeredByUserID  uuid.UUID
 	TriggeredByUserIDs []uuid.UUID
 }
 
@@ -1417,6 +1417,32 @@ func (s *SessionStore) UpdateSnapshotInfo(ctx context.Context, orgID, sessionID 
 		"org_id":           orgID,
 		"agent_session_id": agentSessionID,
 		"snapshot_key":     snapshotKey,
+	})
+	return err
+}
+
+// UpdateWorkspaceSnapshot persists a refreshed snapshot key plus diff metadata
+// for workspace-mutating actions that are not agent turns, such as "revert this
+// tab". Unlike UpdateTurnComplete, this intentionally leaves status, current
+// turn, summary, and confidence untouched.
+func (s *SessionStore) UpdateWorkspaceSnapshot(ctx context.Context, orgID, sessionID uuid.UUID, snapshotKey string, result *models.SessionResult) error {
+	query := `
+		UPDATE sessions
+		SET snapshot_key = @snapshot_key,
+		    sandbox_state = 'snapshotted',
+		    last_activity_at = now(),
+		    diff = COALESCE(@diff, diff),
+		    base_commit_sha = COALESCE(@base_commit_sha, base_commit_sha),
+		    diff_collected_at = COALESCE(@diff_collected_at, diff_collected_at)
+		WHERE id = @id AND org_id = @org_id`
+
+	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
+		"id":                sessionID,
+		"org_id":            orgID,
+		"snapshot_key":      snapshotKey,
+		"diff":              result.Diff,
+		"base_commit_sha":   result.DiffBaseCommitSHA,
+		"diff_collected_at": result.DiffCollectedAt,
 	})
 	return err
 }

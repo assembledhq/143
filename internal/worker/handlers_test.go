@@ -431,6 +431,7 @@ type orchestratorServiceStub struct {
 	recoverSessionCalls  int
 	runAgentFn           func(ctx context.Context, run *models.Session) error
 	continueSessionFn    func(ctx context.Context, session *models.Session, opts *agent.ContinueSessionOptions) error
+	revertThreadFn       func(ctx context.Context, session *models.Session, thread *models.SessionThread) error
 	recoverSessionFn     func(ctx context.Context, session *models.Session) error
 	sessionTimeout       time.Duration
 	runtimeCeiling       time.Duration
@@ -448,6 +449,13 @@ func (s *orchestratorServiceStub) ContinueSession(ctx context.Context, session *
 	s.continueSessionCalls++
 	if s.continueSessionFn != nil {
 		return s.continueSessionFn(ctx, session, opts)
+	}
+	return nil
+}
+
+func (s *orchestratorServiceStub) RevertThread(ctx context.Context, session *models.Session, thread *models.SessionThread) error {
+	if s.revertThreadFn != nil {
+		return s.revertThreadFn(ctx, session, thread)
 	}
 	return nil
 }

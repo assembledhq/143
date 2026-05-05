@@ -273,7 +273,7 @@ func (s *Service) SendMessage(ctx context.Context, input SendMessageInput) (*mod
 	thread, err := s.threadStore.ClaimIdleForSession(ctx, input.OrgID, input.SessionID, input.ThreadID, models.MaxRunningThreadsPerSession)
 	if err != nil {
 		if errors.Is(err, db.ErrThreadRunningLimitReached) {
-			return nil, ErrRunningLimitReached
+			return s.queueMessageOnIdleThread(ctx, input)
 		}
 		// Check if thread exists at all to provide a better error.
 		existing, lookupErr := s.threadStore.GetByID(ctx, input.OrgID, input.ThreadID)
@@ -297,6 +297,7 @@ func (s *Service) SendMessage(ctx context.Context, input SendMessageInput) (*mod
 		return nil, ErrThreadNotFound
 	}
 
+	sessionClaimed := false
 	// Best-effort session-level claim. Treat ErrNoRows-style failures as
 	// "already running due to a sibling tab" and proceed — the session
 	// state machine is idempotent at running. Any other error reverts the
@@ -313,8 +314,55 @@ func (s *Service) SendMessage(ctx context.Context, input SendMessageInput) (*mod
 			}
 			return nil, fmt.Errorf("claim parent session: %w", claimErr)
 		}
+	} else {
+		sessionClaimed = true
 	}
 
+	msg := buildThreadUserMessage(thread, input)
+	if len(input.Images) > 0 {
+		msg.Attachments = input.Images
+	}
+
+	if err := s.messageStore.Create(ctx, msg); err != nil {
+		if sessionClaimed {
+			if revertErr := s.sessionStore.UpdateStatus(ctx, input.OrgID, input.SessionID, string(models.SessionStatusIdle)); revertErr != nil {
+				s.logger.Error().Err(revertErr).Str("session_id", input.SessionID.String()).Msg("failed to revert session to idle after thread message creation failure")
+			}
+		}
+		if revertErr := s.threadStore.UpdateStatus(ctx, input.OrgID, input.ThreadID, models.ThreadStatusIdle); revertErr != nil {
+			s.logger.Error().Err(revertErr).Str("thread_id", input.ThreadID.String()).Msg("failed to revert thread to idle after message creation failure")
+		}
+		return nil, fmt.Errorf("create message: %w", err)
+	}
+
+	// Reuse the session continuation worker for phase 1. The latest user
+	// message carries thread_id, so the orchestrator attributes assistant
+	// messages and streamed logs back to this tab while still operating on the
+	// single shared sandbox. Dedupe at the thread level so concurrent tabs
+	// each retain their own queued follow-up turn; worker-side locking still
+	// serializes shared-sandbox execution where needed.
+	dedupeKey := db.ContinueSessionDedupeKey(input.ThreadID)
+	payload := map[string]string{
+		"session_id": thread.SessionID.String(),
+		"thread_id":  input.ThreadID.String(),
+		"org_id":     input.OrgID.String(),
+	}
+	if _, err := s.jobStore.Enqueue(ctx, input.OrgID, "agent", "continue_session", payload, 5, &dedupeKey); err != nil {
+		if sessionClaimed {
+			if revertErr := s.sessionStore.UpdateStatus(ctx, input.OrgID, input.SessionID, string(models.SessionStatusIdle)); revertErr != nil {
+				s.logger.Error().Err(revertErr).Str("session_id", input.SessionID.String()).Msg("failed to revert session to idle after thread enqueue failure")
+			}
+		}
+		if revertErr := s.threadStore.UpdateStatus(ctx, input.OrgID, input.ThreadID, models.ThreadStatusIdle); revertErr != nil {
+			s.logger.Error().Err(revertErr).Str("thread_id", input.ThreadID.String()).Msg("failed to revert thread to idle after enqueue failure")
+		}
+		return nil, fmt.Errorf("%w: %w", ErrEnqueueFailed, err)
+	}
+
+	return msg, nil
+}
+
+func buildThreadUserMessage(thread models.SessionThread, input SendMessageInput) *models.SessionMessage {
 	content := input.Message
 	if input.PlanMode {
 		content = "[PLAN_MODE]\n" + content
@@ -334,39 +382,28 @@ func (s *Service) SendMessage(ctx context.Context, input SendMessageInput) (*mod
 	if len(input.Images) > 0 {
 		msg.Attachments = input.Images
 	}
+	return msg
+}
 
+func (s *Service) queueMessageOnIdleThread(ctx context.Context, input SendMessageInput) (*models.SessionMessage, error) {
+	thread, err := s.threadStore.GetByID(ctx, input.OrgID, input.ThreadID)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrThreadNotFound, err)
+	}
+	if thread.SessionID != input.SessionID {
+		return nil, ErrThreadNotFound
+	}
+	if thread.Status != models.ThreadStatusIdle {
+		return nil, ErrThreadNotIdle
+	}
+
+	msg := buildThreadUserMessage(thread, input)
 	if err := s.messageStore.Create(ctx, msg); err != nil {
-		if revertErr := s.sessionStore.UpdateStatus(ctx, input.OrgID, input.SessionID, string(models.SessionStatusIdle)); revertErr != nil {
-			s.logger.Error().Err(revertErr).Str("session_id", input.SessionID.String()).Msg("failed to revert session to idle after thread message creation failure")
-		}
-		if revertErr := s.threadStore.UpdateStatus(ctx, input.OrgID, input.ThreadID, models.ThreadStatusIdle); revertErr != nil {
-			s.logger.Error().Err(revertErr).Str("thread_id", input.ThreadID.String()).Msg("failed to revert thread to idle after message creation failure")
-		}
-		return nil, fmt.Errorf("create message: %w", err)
+		return nil, fmt.Errorf("create queued message: %w", err)
 	}
-
-	// Reuse the session continuation worker for phase 1. The latest user
-	// message carries thread_id, so the orchestrator attributes assistant
-	// messages and streamed logs back to this tab while still operating on the
-	// single shared sandbox. Dedupe at the session level — only one
-	// continue_session can hold the shared sandbox at a time, regardless of
-	// which thread fired it.
-	dedupeKey := db.ContinueSessionDedupeKey(thread.SessionID)
-	payload := map[string]string{
-		"session_id": thread.SessionID.String(),
-		"thread_id":  input.ThreadID.String(),
-		"org_id":     input.OrgID.String(),
+	if err := s.threadStore.IncrementPendingMessages(ctx, input.OrgID, input.ThreadID); err != nil {
+		return nil, fmt.Errorf("increment queued message count: %w", err)
 	}
-	if _, err := s.jobStore.Enqueue(ctx, input.OrgID, "agent", "continue_session", payload, 5, &dedupeKey); err != nil {
-		if revertErr := s.sessionStore.UpdateStatus(ctx, input.OrgID, input.SessionID, string(models.SessionStatusIdle)); revertErr != nil {
-			s.logger.Error().Err(revertErr).Str("session_id", input.SessionID.String()).Msg("failed to revert session to idle after thread enqueue failure")
-		}
-		if revertErr := s.threadStore.UpdateStatus(ctx, input.OrgID, input.ThreadID, models.ThreadStatusIdle); revertErr != nil {
-			s.logger.Error().Err(revertErr).Str("thread_id", input.ThreadID.String()).Msg("failed to revert thread to idle after enqueue failure")
-		}
-		return nil, fmt.Errorf("%w: %w", ErrEnqueueFailed, err)
-	}
-
 	return msg, nil
 }
 
