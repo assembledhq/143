@@ -175,6 +175,50 @@ func TestLoggingDesignDocsTrackProvisionedDashboardsAndAlerts(t *testing.T) {
 	require.Contains(t, designText, "deploy/vmalert/rules/production-alerts.yml", "logging design doc should track repo-owned alert rules")
 }
 
+// Docker's json-file driver grows unbounded by default, so a chatty
+// container will fill the disk on its own. The fix: install-log-rotation.sh
+// merges log-driver/log-opts into /etc/docker/daemon.json (preserving any
+// gVisor runtimes block on workers) and restarts docker only when the
+// content actually changes. Pin the wiring here so a future refactor
+// doesn't silently strip it off and leave us in the unbounded-growth
+// state. db keeps its own larger cap because the db host is the only
+// role without Vector log shipping (postgres logs are local-only) AND
+// postgresql.conf logs every connection, every query >500ms, and every
+// lock wait — a smaller cap would lose the forensic trail during an
+// incident.
+func TestDeployConfiguresDockerLogRotation(t *testing.T) {
+	t.Parallel()
+
+	helper, err := os.ReadFile("../deploy/scripts/install-log-rotation.sh")
+	require.NoError(t, err, "install-log-rotation.sh should exist as the single source of truth for daemon.json log-rotation logic")
+	helperText := string(helper)
+	require.Contains(t, helperText, "/etc/docker/daemon.json", "install-log-rotation.sh should target daemon.json (not a per-container override) so dynamically-spawned sandbox containers also inherit the cap")
+	require.Contains(t, helperText, `"log-driver"`, "install-log-rotation.sh should write the json-file log-driver into daemon.json")
+	require.Contains(t, helperText, "systemctl restart docker", "install-log-rotation.sh must restart docker on change — log-driver/log-opts only take effect for newly created containers, so existing services need to inherit the cap on the next recreate")
+	require.Contains(t, helperText, "mv ", "install-log-rotation.sh should write atomically (tempfile + rename) — a SIGKILL between truncate and write under a plain `>` would leave a zero-byte daemon.json that docker rejects")
+
+	deployScript, err := os.ReadFile("../deploy/scripts/deploy.sh")
+	require.NoError(t, err, "test should read deploy script")
+	deployText := string(deployScript)
+	require.Contains(t, deployText, "install-log-rotation.sh", "deploy.sh should sync and invoke the install-log-rotation.sh helper on every deploy")
+	require.Contains(t, deployText, `db) LOG_MAX_SIZE="500m"`, "deploy.sh should give the db role a larger log cap — postgres logging is verbose and the db host has no Vector log shipping, so the local docker log is the only copy")
+	require.Contains(t, deployText, `*)  LOG_MAX_SIZE="100m"`, "deploy.sh should default non-db roles to a 100m cap")
+	require.Contains(t, deployText, "sudo -n /opt/143/deploy/scripts/install-log-rotation.sh", "deploy.sh should invoke install-log-rotation.sh via deploy+sudo (not root SSH) — matches the sandbox-firewall.sh pattern and avoids depending on root SSH at routine deploy time")
+
+	bootstrap, err := os.ReadFile("../deploy/scripts/bootstrap.sh")
+	require.NoError(t, err, "test should read bootstrap.sh")
+	require.Contains(t, string(bootstrap), "/opt/143/deploy/scripts/install-log-rotation.sh *", "bootstrap.sh sudoers Cmnd_Alias must allow install-log-rotation.sh — without it the deploy+sudo path in deploy.sh fails on app/worker hosts")
+
+	provision, err := os.ReadFile("../deploy/scripts/provision.sh")
+	require.NoError(t, err, "test should read provision.sh")
+	provisionText := string(provision)
+	require.Contains(t, provisionText, "install-log-rotation.sh", "provision.sh should invoke install-log-rotation.sh after staging deploy/ so newly-provisioned hosts have rotation in place before services start (closes the provision-to-first-deploy unbounded-growth window)")
+	// db/logging/redis bootstraps don't run bootstrap.sh, so each must
+	// install its own /etc/sudoers.d/99-deploy or the deploy+sudo path
+	// breaks on those roles.
+	require.GreaterOrEqual(t, strings.Count(provisionText, "/opt/143/deploy/scripts/install-log-rotation.sh *"), 3, "provision.sh inline bootstraps for db, logging, and redis must each grant deploy NOPASSWD sudo for install-log-rotation.sh")
+}
+
 func TestLoggingDeploySyncsProvisionedObservabilityConfig(t *testing.T) {
 	t.Parallel()
 
