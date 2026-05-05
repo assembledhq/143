@@ -496,6 +496,16 @@ func (s *PRService) CreatePR(ctx context.Context, run *models.Session, params ..
 		}
 	}
 
+	// issues.external_id is the canonical Linear UUID (Linear's API needs it
+	// for writes), but PR title prefixing wants the human key like "VIR-75".
+	// session_issue_links carries that human key via the COALESCE in
+	// sessionIssueLinkSelectColumns once provider_state.identifier has been
+	// written by LinkResolved. Copy it onto the in-memory issue so both the
+	// LLM-prefixing and static-fallback paths see "[VIR-75]" instead of
+	// silently dropping the identifier when collectLinearIdentifiers' UUID
+	// shape check fails on the bare issues row.
+	hydrateLinearIssueIdentifier(issue, run.LinkedIssues)
+
 	// Resolve repository. sessions.repository_id is the canonical source of
 	// truth — session creation copies issue.repository_id into it up front.
 	if run.RepositoryID == nil {
@@ -571,7 +581,13 @@ func (s *PRService) CreatePR(ctx context.Context, run *models.Session, params ..
 
 	var title, body string
 	if generated, genErr := s.generatePRContent(ctx, token, owner, repoName, defaultBranch, *run.RepositoryID, run.OrgID, run, issue); genErr == nil {
-		title = generated.Title
+		// The LLM prompt does not instruct the model to embed a "[KEY-N]"
+		// Linear key in the title — only formatPRTitle/formatSyncedPRTitle
+		// did, so the LLM-generated path was silently shipping unprefixed
+		// titles whenever the LLM call succeeded. Route the LLM title
+		// through the same prefixer so Linear's GitHub integration can
+		// claim the PR.
+		title = applyLinearKeyPrefixes(run, generated.Title, issue)
 		body = generated.Body
 	} else {
 		s.logger.Warn().Err(genErr).Msg("LLM PR content generation failed, falling back to static")
@@ -2232,6 +2248,42 @@ func formatPRTitle(session *models.Session, issue *models.Issue) string {
 		return applyLinearKeyPrefixes(session, title, nil)
 	}
 	return applyLinearKeyPrefixes(session, fmt.Sprintf("Session %s", session.ID.String()[:8]), nil)
+}
+
+// hydrateLinearIssueIdentifier copies the human Linear key (e.g. "VIR-75")
+// from the session's primary Linear link onto the in-memory issue, so callers
+// like applyLinearKeyPrefixes that rely on issues.external_id can find a
+// key-shaped identifier even though issues.external_id is the canonical
+// Linear UUID. Mirrors the COALESCE in sessionIssueLinkSelectColumns: if
+// LinkResolved persisted Identifier into provider_state, ListBySession
+// returns the human key on link.ExternalID.
+//
+// No-op when issue is nil, when issue is not Linear-sourced, when no primary
+// Linear link is hydrated, or when the link's ExternalID isn't key-shaped
+// (e.g. the link was loaded before provider_state.identifier was written, in
+// which case ExternalID is still the UUID — leaving issue.ExternalID alone
+// keeps the existing UUID-shaped value rather than overwriting with another
+// UUID).
+func hydrateLinearIssueIdentifier(issue *models.Issue, links []models.SessionIssueLink) {
+	if issue == nil || issue.Source != models.IssueSourceLinear {
+		return
+	}
+	for _, link := range links {
+		if link.Role != models.SessionIssueLinkRolePrimary {
+			continue
+		}
+		if link.IssueSource == nil || *link.IssueSource != models.IssueSourceLinear {
+			continue
+		}
+		if link.ExternalID == nil {
+			continue
+		}
+		if !linearKeyShapeRE.MatchString(*link.ExternalID) {
+			continue
+		}
+		issue.ExternalID = *link.ExternalID
+		return
+	}
 }
 
 // stripLinearColonPrefix removes a leading "ACS-1234: " preamble from a

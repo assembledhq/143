@@ -2906,6 +2906,81 @@ func TestNormalizePRTitleCandidate_TruncatesLongTitle(t *testing.T) {
 	require.Len(t, result, 120, "normalizePRTitleCandidate should cap PR titles at 120 chars")
 }
 
+func TestHydrateLinearIssueIdentifier_CopiesPrimaryHumanKey(t *testing.T) {
+	t.Parallel()
+	source := models.IssueSourceLinear
+	humanKey := "VIR-75"
+	issue := &models.Issue{
+		Source:     models.IssueSourceLinear,
+		ExternalID: "321100d2-6427-4026-b163-625d953798a6",
+	}
+	links := []models.SessionIssueLink{{
+		Role:        models.SessionIssueLinkRolePrimary,
+		IssueSource: &source,
+		ExternalID:  &humanKey,
+	}}
+	hydrateLinearIssueIdentifier(issue, links)
+	require.Equal(t, "VIR-75", issue.ExternalID, "issue.ExternalID should be replaced with the human Linear key from the primary link")
+}
+
+func TestHydrateLinearIssueIdentifier_LeavesUUIDAloneWhenLinkAlsoUUID(t *testing.T) {
+	t.Parallel()
+	source := models.IssueSourceLinear
+	uuidStr := "321100d2-6427-4026-b163-625d953798a6"
+	issue := &models.Issue{
+		Source:     models.IssueSourceLinear,
+		ExternalID: uuidStr,
+	}
+	links := []models.SessionIssueLink{{
+		Role:        models.SessionIssueLinkRolePrimary,
+		IssueSource: &source,
+		ExternalID:  &uuidStr,
+	}}
+	hydrateLinearIssueIdentifier(issue, links)
+	require.Equal(t, uuidStr, issue.ExternalID, "should not overwrite when the link also lacks the human key (provider_state.identifier not yet written)")
+}
+
+func TestHydrateLinearIssueIdentifier_SkipsRelatedLinks(t *testing.T) {
+	t.Parallel()
+	source := models.IssueSourceLinear
+	relatedKey := "VIR-99"
+	issue := &models.Issue{
+		Source:     models.IssueSourceLinear,
+		ExternalID: "321100d2-6427-4026-b163-625d953798a6",
+	}
+	links := []models.SessionIssueLink{{
+		Role:        models.SessionIssueLinkRoleRelated,
+		IssueSource: &source,
+		ExternalID:  &relatedKey,
+	}}
+	hydrateLinearIssueIdentifier(issue, links)
+	require.Equal(t, "321100d2-6427-4026-b163-625d953798a6", issue.ExternalID, "related links must not seed the primary identifier — only the primary link's key belongs in the title prefix anchor position")
+}
+
+func TestHydrateLinearIssueIdentifier_NoOpForNonLinearIssue(t *testing.T) {
+	t.Parallel()
+	source := models.IssueSourceLinear
+	humanKey := "VIR-75"
+	issue := &models.Issue{
+		Source:     models.IssueSourceSentry,
+		ExternalID: "sentry-event-1",
+	}
+	links := []models.SessionIssueLink{{
+		Role:        models.SessionIssueLinkRolePrimary,
+		IssueSource: &source,
+		ExternalID:  &humanKey,
+	}}
+	hydrateLinearIssueIdentifier(issue, links)
+	require.Equal(t, "sentry-event-1", issue.ExternalID, "non-Linear issues must not be touched")
+}
+
+func TestHydrateLinearIssueIdentifier_NilIssueIsSafe(t *testing.T) {
+	t.Parallel()
+	require.NotPanics(t, func() {
+		hydrateLinearIssueIdentifier(nil, nil)
+	})
+}
+
 func TestApplyLinearKeyPrefixes_SinglePrimary(t *testing.T) {
 	t.Parallel()
 	source := models.IssueSourceLinear
