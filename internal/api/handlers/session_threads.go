@@ -26,7 +26,6 @@ type ThreadService interface {
 	GetMessages(ctx context.Context, orgID, sessionID, threadID uuid.UUID) ([]models.SessionMessage, error)
 	GetLogs(ctx context.Context, orgID, sessionID, threadID uuid.UUID) ([]models.SessionLog, error)
 	CancelThread(ctx context.Context, orgID, sessionID, threadID uuid.UUID) (models.SessionThread, error)
-	SummarizeSession(ctx context.Context, orgID, sessionID uuid.UUID) (thread.SessionSummary, error)
 	ListFileEvents(ctx context.Context, orgID, sessionID uuid.UUID, since *time.Time) ([]models.SessionThreadFileEvent, error)
 	ForkThread(ctx context.Context, input thread.ForkInput) (thread.ForkResult, error)
 	RevertThread(ctx context.Context, orgID, sessionID, threadID uuid.UUID, userID *uuid.UUID) (thread.ForkResult, error)

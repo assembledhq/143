@@ -2,7 +2,6 @@ package handlers
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -33,8 +32,8 @@ func (m *mockFileEventStoreForHandlers) ListBySession(ctx context.Context, orgID
 }
 
 // newThreadHandlerWithFileEvents builds a handler with the optional
-// file-event store wired. Tests for SummarizeSession and
-// ListThreadFileEvents need it; tests for cancel / fork / revert do not.
+// file-event store wired. ListThreadFileEvents tests need it; tests for
+// cancel / fork / revert do not.
 func newThreadHandlerWithFileEvents(t *testing.T) (*SessionThreadHandler, *threadTestDeps, *mockFileEventStoreForHandlers) {
 	t.Helper()
 	deps := &threadTestDeps{
@@ -134,67 +133,6 @@ func TestSessionThreadHandler_CancelThread(t *testing.T) {
 			}
 		})
 	}
-}
-
-// ----------------------------------------------------------------------------
-// SummarizeSession
-// ----------------------------------------------------------------------------
-
-func TestSessionThreadHandler_SummarizeSession(t *testing.T) {
-	t.Parallel()
-
-	orgID := uuid.New()
-	sessionID := uuid.New()
-	threadID := uuid.New()
-
-	h, deps, fileEvents := newThreadHandlerWithFileEvents(t)
-	deps.sessionStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.Session, error) {
-		return models.Session{ID: sessionID, OrgID: orgID}, nil
-	}
-	deps.threadStore.listBySessionFn = func(_ context.Context, _, _ uuid.UUID) ([]models.SessionThread, error) {
-		return []models.SessionThread{
-			{ID: threadID, SessionID: sessionID, OrgID: orgID, Label: "Codex", AgentType: models.AgentTypeCodex, Status: models.ThreadStatusRunning, CurrentTurn: 1},
-		}, nil
-	}
-	fileEvents.listBySessionFn = func(_ context.Context, _, _ uuid.UUID, _ *time.Time) ([]models.SessionThreadFileEvent, error) {
-		return []models.SessionThreadFileEvent{
-			{OrgID: orgID, SessionID: sessionID, ThreadID: &threadID, Path: "foo.go", EventType: models.FileEventTypeModified, ObservedAt: time.Now()},
-		}, nil
-	}
-
-	r := threadRequest(http.MethodGet, "/api/v1/sessions/"+sessionID.String()+"/summary", "", orgID, map[string]string{
-		"id": sessionID.String(),
-	})
-	w := httptest.NewRecorder()
-	h.SummarizeSession(w, r)
-	require.Equal(t, http.StatusOK, w.Code)
-
-	var resp struct {
-		Data thread.SessionSummary `json:"data"`
-	}
-	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
-	require.Equal(t, sessionID, resp.Data.SessionID)
-	require.Equal(t, 1, resp.Data.ActiveCount)
-	require.Len(t, resp.Data.Threads, 1)
-	require.Equal(t, threadID, resp.Data.Threads[0].ID)
-}
-
-func TestSessionThreadHandler_SummarizeSession_SessionNotFound(t *testing.T) {
-	t.Parallel()
-
-	orgID := uuid.New()
-	sessionID := uuid.New()
-
-	h, deps, _ := newThreadHandlerWithFileEvents(t)
-	deps.sessionStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.Session, error) {
-		return models.Session{}, errors.New("missing")
-	}
-	r := threadRequest(http.MethodGet, "/api/v1/sessions/"+sessionID.String()+"/summary", "", orgID, map[string]string{
-		"id": sessionID.String(),
-	})
-	w := httptest.NewRecorder()
-	h.SummarizeSession(w, r)
-	require.Equal(t, http.StatusNotFound, w.Code)
 }
 
 // ----------------------------------------------------------------------------
@@ -467,7 +405,6 @@ func TestSessionThreadHandler_InvalidUUIDsReturn400(t *testing.T) {
 		{"cancel-bad-thread", h.CancelThread, map[string]string{"id": uuid.New().String(), "tid": "not-a-uuid"}},
 		{"fork-bad-session", h.ForkThread, map[string]string{"id": "not-a-uuid", "tid": uuid.New().String()}},
 		{"revert-bad-thread", h.RevertThread, map[string]string{"id": uuid.New().String(), "tid": "not-a-uuid"}},
-		{"summary-bad-session", h.SummarizeSession, map[string]string{"id": "not-a-uuid"}},
 		{"file-events-bad-session", h.ListThreadFileEvents, map[string]string{"id": "not-a-uuid"}},
 	}
 	for _, e := range endpoints {
