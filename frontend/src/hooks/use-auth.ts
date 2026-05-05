@@ -44,7 +44,7 @@ export function useAuth() {
   const logout = async () => {
     await api.auth.logout();
     queryClient.clear();
-    window.location.href = "/login";
+    window.location.href = "/";
   };
 
   return {
