@@ -69,9 +69,10 @@ func (m *mockThreadStore) MarkCancelRequested(ctx context.Context, orgID, thread
 }
 
 type mockSessionStore struct {
-	getByIDFn      func(ctx context.Context, orgID, sessionID uuid.UUID) (models.Session, error)
-	claimIdleFn    func(ctx context.Context, orgID, sessionID uuid.UUID) (models.Session, error)
-	updateStatusFn func(ctx context.Context, orgID, sessionID uuid.UUID, status string) error
+	getByIDFn        func(ctx context.Context, orgID, sessionID uuid.UUID) (models.Session, error)
+	claimIdleFn      func(ctx context.Context, orgID, sessionID uuid.UUID) (models.Session, error)
+	claimForResumeFn func(ctx context.Context, orgID, sessionID uuid.UUID) (models.Session, error)
+	updateStatusFn   func(ctx context.Context, orgID, sessionID uuid.UUID, status string) error
 }
 
 func (m *mockSessionStore) GetByID(ctx context.Context, orgID, sessionID uuid.UUID) (models.Session, error) {
@@ -86,6 +87,13 @@ func (m *mockSessionStore) ClaimIdle(ctx context.Context, orgID, sessionID uuid.
 		return m.claimIdleFn(ctx, orgID, sessionID)
 	}
 	return models.Session{ID: sessionID, OrgID: orgID, Status: string(models.SessionStatusRunning)}, nil
+}
+
+func (m *mockSessionStore) ClaimForResume(ctx context.Context, orgID, sessionID uuid.UUID) (models.Session, error) {
+	if m.claimForResumeFn != nil {
+		return m.claimForResumeFn(ctx, orgID, sessionID)
+	}
+	return models.Session{}, fmt.Errorf("no rows")
 }
 
 func (m *mockSessionStore) UpdateStatus(ctx context.Context, orgID, sessionID uuid.UUID, status string) error {
@@ -680,6 +688,185 @@ func TestService_SendMessage(t *testing.T) {
 			},
 			expectErr: ErrEnqueueFailed,
 		},
+		{
+			name: "resumes a completed session via ClaimForResume",
+			input: SendMessageInput{
+				SessionID: sessionID,
+				OrgID:     orgID,
+				ThreadID:  threadID,
+				Message:   "hi",
+			},
+			setupDeps: func(deps *testDeps) {
+				// Mirrors sessions.go:1953-1963. The original "failed to
+				// create message" bug fired when a thread tab tried to send
+				// to a completed session — ClaimIdle returned no rows and
+				// the service had no fallback. With ClaimForResume wired,
+				// the same flow now succeeds for any resumable status.
+				deps.threadStore.claimIdleFn = func(_ context.Context, _, _, _ uuid.UUID) (models.SessionThread, error) {
+					return models.SessionThread{ID: threadID, SessionID: sessionID, OrgID: orgID, CurrentTurn: 4, Status: models.ThreadStatusRunning}, nil
+				}
+				deps.sessionStore.claimIdleFn = func(_ context.Context, _, _ uuid.UUID) (models.Session, error) {
+					return models.Session{}, fmt.Errorf("no rows in result set")
+				}
+				deps.sessionStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.Session, error) {
+					return models.Session{ID: sessionID, OrgID: orgID, Status: string(models.SessionStatusCompleted), CurrentTurn: 4}, nil
+				}
+				resumed := false
+				deps.sessionStore.claimForResumeFn = func(_ context.Context, _, _ uuid.UUID) (models.Session, error) {
+					resumed = true
+					return models.Session{ID: sessionID, OrgID: orgID, Status: string(models.SessionStatusRunning), CurrentTurn: 4}, nil
+				}
+				deps.messageStore.createFn = func(_ context.Context, msg *models.SessionMessage) error {
+					require.True(t, resumed, "ClaimForResume should fire before message create when ClaimIdle returns no rows")
+					msg.ID = 7
+					return nil
+				}
+				deps.jobStore.enqueueFn = func(_ context.Context, _ uuid.UUID, _, _ string, _ any, _ int, _ *string) (uuid.UUID, error) {
+					return uuid.New(), nil
+				}
+			},
+		},
+		{
+			name: "returns ErrSessionNotResumable when ClaimForResume returns no rows",
+			input: SendMessageInput{
+				SessionID: sessionID,
+				OrgID:     orgID,
+				ThreadID:  threadID,
+				Message:   "hi",
+			},
+			setupDeps: func(deps *testDeps) {
+				// Race window: the session was 'completed' when GetByID
+				// read it but transitioned to a non-resumable state by the
+				// time ClaimForResume ran (e.g. another caller already
+				// resumed it and a worker re-completed it). The handler
+				// surfaces this as 409 NOT_RESUMABLE.
+				deps.threadStore.claimIdleFn = func(_ context.Context, _, _, _ uuid.UUID) (models.SessionThread, error) {
+					return models.SessionThread{ID: threadID, SessionID: sessionID, OrgID: orgID, Status: models.ThreadStatusRunning}, nil
+				}
+				deps.sessionStore.claimIdleFn = func(_ context.Context, _, _ uuid.UUID) (models.Session, error) {
+					return models.Session{}, fmt.Errorf("no rows")
+				}
+				deps.sessionStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.Session, error) {
+					return models.Session{ID: sessionID, OrgID: orgID, Status: string(models.SessionStatusCompleted)}, nil
+				}
+				deps.sessionStore.claimForResumeFn = func(_ context.Context, _, _ uuid.UUID) (models.Session, error) {
+					return models.Session{}, fmt.Errorf("no rows")
+				}
+				revertedThread := false
+				deps.threadStore.updateStatusFn = func(_ context.Context, _, _ uuid.UUID, status models.ThreadStatus) error {
+					if status == models.ThreadStatusIdle {
+						revertedThread = true
+					}
+					return nil
+				}
+				t.Cleanup(func() {
+					require.True(t, revertedThread, "thread must be reverted to idle when neither claim succeeds")
+				})
+			},
+			expectErr: ErrSessionNotResumable,
+		},
+		{
+			name: "returns ErrSessionSnapshotExpired when sandbox is destroyed",
+			input: SendMessageInput{
+				SessionID: sessionID,
+				OrgID:     orgID,
+				ThreadID:  threadID,
+				Message:   "hi",
+			},
+			setupDeps: func(deps *testDeps) {
+				// Snapshots expire after 30 days. Mirrors sessions.go:1835:
+				// surface a distinct sentinel so the handler can render
+				// 410 Gone instead of 409, telling the user this session
+				// can never be resumed (vs. a transient state issue).
+				deps.threadStore.claimIdleFn = func(_ context.Context, _, _, _ uuid.UUID) (models.SessionThread, error) {
+					return models.SessionThread{ID: threadID, SessionID: sessionID, OrgID: orgID, Status: models.ThreadStatusRunning}, nil
+				}
+				deps.sessionStore.claimIdleFn = func(_ context.Context, _, _ uuid.UUID) (models.Session, error) {
+					return models.Session{}, fmt.Errorf("no rows")
+				}
+				deps.sessionStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.Session, error) {
+					return models.Session{ID: sessionID, OrgID: orgID, Status: string(models.SessionStatusCompleted), SandboxState: string(models.SandboxStateDestroyed)}, nil
+				}
+				deps.sessionStore.claimForResumeFn = func(_ context.Context, _, _ uuid.UUID) (models.Session, error) {
+					t.Errorf("ClaimForResume must not be called when the sandbox is destroyed")
+					return models.Session{}, nil
+				}
+			},
+			expectErr: ErrSessionSnapshotExpired,
+		},
+		{
+			name: "preserves original status on message create failure after resume",
+			input: SendMessageInput{
+				SessionID: sessionID,
+				OrgID:     orgID,
+				ThreadID:  threadID,
+				Message:   "hi",
+			},
+			setupDeps: func(deps *testDeps) {
+				// After ClaimForResume moves a 'completed' session to
+				// 'running' and the message create then fails, the revert
+				// must put the session back to 'completed' (not 'idle').
+				// Otherwise a transient DB error would silently re-arm a
+				// finished session as a new task in the user's idle list.
+				deps.threadStore.claimIdleFn = func(_ context.Context, _, _, _ uuid.UUID) (models.SessionThread, error) {
+					return models.SessionThread{ID: threadID, SessionID: sessionID, OrgID: orgID, CurrentTurn: 1, Status: models.ThreadStatusRunning}, nil
+				}
+				deps.sessionStore.claimIdleFn = func(_ context.Context, _, _ uuid.UUID) (models.Session, error) {
+					return models.Session{}, fmt.Errorf("no rows")
+				}
+				deps.sessionStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.Session, error) {
+					return models.Session{ID: sessionID, OrgID: orgID, Status: string(models.SessionStatusCompleted)}, nil
+				}
+				deps.sessionStore.claimForResumeFn = func(_ context.Context, _, _ uuid.UUID) (models.Session, error) {
+					return models.Session{ID: sessionID, OrgID: orgID, Status: string(models.SessionStatusRunning)}, nil
+				}
+				deps.messageStore.createFn = func(_ context.Context, _ *models.SessionMessage) error {
+					return fmt.Errorf("db error")
+				}
+				revertedToOriginal := false
+				deps.sessionStore.updateStatusFn = func(_ context.Context, _, _ uuid.UUID, status string) error {
+					if status == string(models.SessionStatusCompleted) {
+						revertedToOriginal = true
+					}
+					return nil
+				}
+				t.Cleanup(func() {
+					require.True(t, revertedToOriginal, "session must revert to its pre-claim status (completed) on send failure, not idle")
+				})
+			},
+		},
+		{
+			name: "skips session revert when sibling tab is mid-turn",
+			input: SendMessageInput{
+				SessionID: sessionID,
+				OrgID:     orgID,
+				ThreadID:  threadID,
+				Message:   "hi",
+			},
+			setupDeps: func(deps *testDeps) {
+				// Sibling-running case: ClaimIdle fails, GetByID returns
+				// running, no claim is taken. If message create then fails,
+				// reverting the session to idle would yank the running
+				// sibling — so the revert must skip the session entirely
+				// and only put the thread back to idle.
+				deps.threadStore.claimIdleFn = func(_ context.Context, _, _, _ uuid.UUID) (models.SessionThread, error) {
+					return models.SessionThread{ID: threadID, SessionID: sessionID, OrgID: orgID, CurrentTurn: 1, Status: models.ThreadStatusRunning}, nil
+				}
+				deps.sessionStore.claimIdleFn = func(_ context.Context, _, _ uuid.UUID) (models.Session, error) {
+					return models.Session{}, fmt.Errorf("no rows")
+				}
+				deps.sessionStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.Session, error) {
+					return models.Session{ID: sessionID, OrgID: orgID, Status: string(models.SessionStatusRunning)}, nil
+				}
+				deps.messageStore.createFn = func(_ context.Context, _ *models.SessionMessage) error {
+					return fmt.Errorf("db error")
+				}
+				deps.sessionStore.updateStatusFn = func(_ context.Context, _, _ uuid.UUID, _ string) error {
+					t.Errorf("session UpdateStatus must not be called when sibling is mid-turn")
+					return nil
+				}
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -695,7 +882,10 @@ func TestService_SendMessage(t *testing.T) {
 				require.Nil(t, result, "should not return a result on error")
 				return
 			}
-			if tt.name == "message creation failure reverts to idle" {
+			switch tt.name {
+			case "message creation failure reverts to idle",
+				"preserves original status on message create failure after resume",
+				"skips session revert when sibling tab is mid-turn":
 				require.Error(t, err, "should return error on message creation failure")
 				return
 			}
@@ -811,6 +1001,76 @@ func TestService_SendMessage_ResolvesReviewComments(t *testing.T) {
 		require.Equal(t, commentID, result.ResolvedComments[0].ID)
 		require.True(t, result.ResolvedComments[0].Resolved)
 		require.Equal(t, 2, *result.ResolvedComments[0].ResolvedByPass, "pass should match session.CurrentTurn at send time")
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+
+	t.Run("answers latest pending question when resuming awaiting_input", func(t *testing.T) {
+		t.Parallel()
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err)
+		defer mock.Close()
+
+		userID := uuid.New()
+		questionID := uuid.New()
+
+		// Tx-bracketed SQL for the awaiting_input resume path: BEGIN →
+		// INSERT message → UPDATE the latest pending question to 'answered'
+		// → COMMIT. Mirrors the session-level handler's tx shape so the
+		// "follow-up message implicitly answers the open question"
+		// invariant survives a partial failure.
+		mock.ExpectBegin()
+		mock.ExpectQuery("INSERT INTO session_messages").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+				pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+				pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(int64(11), now))
+		answeredAt := now
+		answerText := "yes go"
+		mock.ExpectQuery("UPDATE session_questions").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnRows(
+				pgxmock.NewRows([]string{
+					"id", "session_id", "org_id", "question_text", "options", "context",
+					"blocks_phase", "answer_text", "answered_by", "answered_at", "status", "created_at",
+				}).AddRow(questionID, sessionID, orgID, "are you sure?", []string{"yes go", "abort"}, (*string)(nil),
+					(*string)(nil), &answerText, &userID, &answeredAt, "answered", now),
+			)
+		mock.ExpectCommit()
+
+		svc, deps := newTestService(t)
+		// Resume from awaiting_input via the ClaimForResume fallback; this
+		// is what sets revertStatus to awaiting_input and triggers the
+		// question-answer branch inside createMessageInTx.
+		deps.threadStore.claimIdleFn = func(_ context.Context, _, _, _ uuid.UUID) (models.SessionThread, error) {
+			return models.SessionThread{ID: threadID, SessionID: sessionID, OrgID: orgID, CurrentTurn: 1, Status: models.ThreadStatusRunning}, nil
+		}
+		deps.sessionStore.claimIdleFn = func(_ context.Context, _, _ uuid.UUID) (models.Session, error) {
+			return models.Session{}, fmt.Errorf("no rows")
+		}
+		deps.sessionStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.Session, error) {
+			return models.Session{ID: sessionID, OrgID: orgID, Status: string(models.SessionStatusAwaitingInput), CurrentTurn: 2}, nil
+		}
+		deps.sessionStore.claimForResumeFn = func(_ context.Context, _, _ uuid.UUID) (models.Session, error) {
+			return models.Session{ID: sessionID, OrgID: orgID, Status: string(models.SessionStatusRunning), CurrentTurn: 2}, nil
+		}
+		deps.jobStore.enqueueFn = func(_ context.Context, _ uuid.UUID, _, _ string, _ any, _ int, _ *string) (uuid.UUID, error) {
+			return uuid.New(), nil
+		}
+		svc.SetReviewCommentResolver(mock, db.NewSessionReviewCommentStore(mock))
+		svc.SetQuestionStore(db.NewSessionQuestionStore(mock))
+
+		result, err := svc.SendMessage(context.Background(), SendMessageInput{
+			SessionID: sessionID,
+			OrgID:     orgID,
+			ThreadID:  threadID,
+			UserID:    &userID,
+			Message:   "yes go",
+		})
+		require.NoError(t, err)
+		require.NotNil(t, result)
+		require.NotNil(t, result.AnsweredQuestion, "the answered question should come back so the handler can audit it")
+		require.Equal(t, questionID, result.AnsweredQuestion.ID)
+		require.Equal(t, "answered", result.AnsweredQuestion.Status)
 		require.NoError(t, mock.ExpectationsWereMet())
 	})
 
