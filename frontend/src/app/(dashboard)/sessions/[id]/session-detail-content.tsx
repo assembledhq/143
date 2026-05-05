@@ -825,12 +825,26 @@ function SessionComposer({
   agentType: string;
   targetLabel?: string;
 }) {
+  const isMobile = useMediaQuery("(max-width: 767px)");
+  const [isTextareaFocused, setIsTextareaFocused] = useState(false);
+  const mobileComposerExpanded = !isMobile
+    || isTextareaFocused
+    || message.length > 0
+    || attachments.length > 0
+    || openComments.length > 0
+    || references.length > 0
+    || commands.length > 0;
+
   useEffect(() => {
     const el = textareaRef.current;
     if (!el) return;
+    if (!mobileComposerExpanded) {
+      el.style.height = "44px";
+      return;
+    }
     el.style.height = "auto";
     el.style.height = `${Math.min(el.scrollHeight, 200)}px`;
-  }, [message, textareaRef]);
+  }, [message, textareaRef, mobileComposerExpanded]);
 
   const composerCardRef = useRef<HTMLDivElement>(null);
   const composerInputSurfaceRef = useRef<HTMLDivElement>(null);
@@ -840,7 +854,6 @@ function SessionComposer({
   const [triggerDismissed, setTriggerDismissed] = useState(false);
   const [pickerPosition, setPickerPosition] = useState<TriggerPickerPosition | null>(null);
   const [mobileSettingsOpen, setMobileSettingsOpen] = useState(false);
-  const isMobile = useMediaQuery("(max-width: 767px)");
   const [showLinearInput, setShowLinearInput] = useState(false);
   const [linearInput, setLinearInput] = useState("");
   const [linearInputError, setLinearInputError] = useState<string | null>(null);
@@ -1270,6 +1283,8 @@ function SessionComposer({
             onChange={(e) => handleMessageChange(e.target.value, e.target.selectionStart ?? e.target.value.length)}
             onPaste={handlePaste}
             onKeyDown={handleKeyDown}
+            onFocus={() => setIsTextareaFocused(true)}
+            onBlur={() => setIsTextareaFocused(false)}
             onClick={(e) => setCaretPosition(e.currentTarget.selectionStart ?? message.length)}
             onKeyUp={(e) => setCaretPosition(e.currentTarget.selectionStart ?? message.length)}
             onSelect={(e) => setCaretPosition(e.currentTarget.selectionStart ?? message.length)}
@@ -1285,7 +1300,16 @@ function SessionComposer({
                       : "Send a follow-up message..."
             }
             disabled={!canSendMessage || sendPending}
-            className="min-h-[44px] max-h-[200px] resize-none border-none bg-transparent shadow-none focus-visible:ring-0"
+            rows={isMobile ? 1 : undefined}
+            data-mobile-composer-state={isMobile ? (mobileComposerExpanded ? "expanded" : "collapsed") : undefined}
+            className={cn(
+              "max-h-[200px] resize-none border-none bg-transparent shadow-none focus-visible:ring-0",
+              isMobile
+                ? mobileComposerExpanded
+                  ? "min-h-[96px]"
+                  : "min-h-[44px] overflow-hidden"
+                : "min-h-[44px]",
+            )}
           />
 
           {(references.length > 0 || commands.length > 0) && (
@@ -3818,7 +3842,7 @@ export function SessionDetailContent({ id }: { id: string }) {
           </>
         )}
 
-        {!isDedicatedMobileReview ? (
+        {!isDedicatedMobileReview && !isMobileReviewViewport ? (
         <SessionFooter
           status={session.status}
           currentTurn={session.current_turn}
