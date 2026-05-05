@@ -1,5 +1,7 @@
 "use client";
 
+import { LinearIcon } from "@/components/linear-icon";
+import { Badge } from "@/components/ui/badge";
 import type { Session } from "@/lib/types";
 
 function linearSkipReasonDetail(reason: string): string {
@@ -97,13 +99,23 @@ export function LinkedIssueChips({ session }: { session: Session }) {
           (isPrimary ? " (primary)" : " (related)") +
           (link.issue_status ? ` · ${link.issue_status}` : "");
 
-        const chipClasses = isPrimary
-          ? "inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium bg-blue-500/10 text-blue-700 dark:text-blue-300 border border-blue-500/30"
-          : "inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium bg-muted text-muted-foreground border border-border";
+        const chipClasses = isLinear
+          ? isPrimary
+            ? "bg-muted/80 text-foreground border-border/70 [a&]:hover:bg-accent/80"
+            : "bg-muted/60 text-muted-foreground border-border/60 [a&]:hover:bg-accent/70 [a&]:hover:text-foreground"
+          : isPrimary
+            ? "bg-blue-500/10 text-blue-700 dark:text-blue-300 border-blue-500/30"
+            : "bg-muted text-muted-foreground border-border";
         const linearSkipDetail =
           isLinear && isPrimary && link.linear_last_skipped_reason
             ? linearSkipReasonDetail(link.linear_last_skipped_reason)
             : "";
+        const chipContent = (
+          <>
+            {isLinear ? <LinearIcon className="h-3 w-3 opacity-70" /> : null}
+            <span>{ident}</span>
+          </>
+        );
 
         if (isLinear && link.external_id) {
           // Prefer the workspace-qualified URL when we cached the slug;
@@ -124,15 +136,16 @@ export function LinkedIssueChips({ session }: { session: Session }) {
           // chip in a long list.
           return (
             <div key={link.id} className="inline-flex items-center gap-1">
-              <a
-                href={url}
-                target="_blank"
-                rel="noopener noreferrer"
-                className={chipClasses}
-                title={tooltip}
-              >
-                {ident}
-              </a>
+              <Badge asChild variant="secondary" className={chipClasses}>
+                <a
+                  href={url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  title={tooltip}
+                >
+                  {chipContent}
+                </a>
+              </Badge>
               {linearSkipDetail && (
                 <span
                   className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium bg-amber-500/10 text-amber-700 dark:text-amber-300 border border-amber-500/30"
@@ -151,13 +164,14 @@ export function LinkedIssueChips({ session }: { session: Session }) {
         // aria-label so SR users get the issue title + role context.
         return (
           <div key={link.id} className="inline-flex items-center gap-1">
-            <span
+            <Badge
+              variant="secondary"
               className={chipClasses}
               title={tooltip}
               aria-label={tooltip}
             >
-              {ident}
-            </span>
+              {chipContent}
+            </Badge>
             {linearSkipDetail && (
               <span
                 className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium bg-amber-500/10 text-amber-700 dark:text-amber-300 border border-amber-500/30"
