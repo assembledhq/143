@@ -78,7 +78,7 @@ func TestHandlersMustUseOrgIDFromContext(t *testing.T) {
 		"SessionFileHandler.GetFileContext":        "delegates to getSessionContainer which uses OrgIDFromContext",
 		"SessionComposerHandler.ListSlashCommands": "built-in catalog is not org-scoped; project discovery branch delegates to buildProjectSlashCommandGroup which uses OrgIDFromContext",
 		"SessionHandler.StreamLogs":                "EventSource cannot send X-Active-Org-ID; delegates to streamOrgID which calls OrgIDFromContext and additionally honours a membership-validated ?org_id= query fallback",
-		"resolveCommentsError.write":               "internal error-rendering helper; org scoping happens upstream in SendMessage where the error was produced",
+		"parseReviewCommentIDsError.write":         "internal error-rendering helper; org scoping happens upstream in SendMessage where the error was produced",
 		"UploadHandler.ServeUpload":                "<img>/<a> tag fetches cannot send X-Active-Org-ID; authorizes off the path-encoded org-id + UserFromContext membership check rather than active-org context",
 		"UsageHandler.ExportCSV":                   "window.open downloads cannot send X-Active-Org-ID; delegates to exportOrgID which calls OrgIDFromContext and additionally honours a membership-validated ?org_id= query fallback",
 

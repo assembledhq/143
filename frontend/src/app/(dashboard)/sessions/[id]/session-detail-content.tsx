@@ -2855,7 +2855,10 @@ export function SessionDetailContent({ id }: { id: string }) {
   const sendMutation = useMutation({
     mutationFn: (vars: SendMutationArgs) => {
       if (vars.activeThreadId) {
-        return api.sessions.sendThreadMessage(id, vars.activeThreadId, vars.body)
+        return api.sessions.sendThreadMessage(id, vars.activeThreadId, {
+          ...vars.body,
+          resolveReviewCommentIDs: vars.resolvedIDs.length > 0 ? vars.resolvedIDs : undefined,
+        })
           .then((response) => ({ response, resolvedIDs: vars.resolvedIDs }));
       }
 
