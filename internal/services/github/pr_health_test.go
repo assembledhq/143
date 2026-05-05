@@ -308,6 +308,73 @@ func TestClassifyCheckRunCategory(t *testing.T) {
 	}
 }
 
+func TestDedupeCheckRunsByName(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		input    []gitHubCheckRun
+		expected []gitHubCheckRun
+	}{
+		{
+			name:     "empty input",
+			input:    nil,
+			expected: nil,
+		},
+		{
+			name:     "single check passes through",
+			input:    []gitHubCheckRun{{ID: 1, Name: "Backend Test"}},
+			expected: []gitHubCheckRun{{ID: 1, Name: "Backend Test"}},
+		},
+		{
+			name: "parallel pull_request and push runs collapse to newer ID",
+			input: []gitHubCheckRun{
+				{ID: 100, Name: "Backend Test", Status: "completed", Conclusion: "failure"},
+				{ID: 101, Name: "Backend Test", Status: "in_progress"},
+				{ID: 102, Name: "Frontend Test", Status: "completed", Conclusion: "success"},
+				{ID: 103, Name: "Frontend Test", Status: "in_progress"},
+				{ID: 104, Name: "Detect Changes", Status: "completed", Conclusion: "success"},
+			},
+			expected: []gitHubCheckRun{
+				{ID: 101, Name: "Backend Test", Status: "in_progress"},
+				{ID: 103, Name: "Frontend Test", Status: "in_progress"},
+				{ID: 104, Name: "Detect Changes", Status: "completed", Conclusion: "success"},
+			},
+		},
+		{
+			name: "name match is case- and whitespace-insensitive",
+			input: []gitHubCheckRun{
+				{ID: 10, Name: "  Backend Test "},
+				{ID: 11, Name: "backend test"},
+			},
+			expected: []gitHubCheckRun{{ID: 11, Name: "backend test"}},
+		},
+		{
+			name: "winners appear in input order",
+			input: []gitHubCheckRun{
+				{ID: 5, Name: "Lint"},
+				{ID: 6, Name: "Build"},
+				{ID: 7, Name: "Lint"},
+				{ID: 4, Name: "Test"},
+			},
+			expected: []gitHubCheckRun{
+				{ID: 6, Name: "Build"},
+				{ID: 7, Name: "Lint"},
+				{ID: 4, Name: "Test"},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			got := dedupeCheckRunsByName(tt.input)
+			require.Equal(t, tt.expected, got, "dedupeCheckRunsByName should keep highest-ID check per name")
+		})
+	}
+}
+
 func TestBuildPRHealthSummaryText(t *testing.T) {
 	t.Parallel()
 
