@@ -178,7 +178,7 @@ function CommandCheckItem({
           indicatorClassName
         )}
       >
-        <CheckIcon className="size-3" />
+        <CheckIcon className={cn("size-3", checked ? "text-primary-foreground" : "text-transparent")} />
       </span>
       {children}
     </CommandItem>

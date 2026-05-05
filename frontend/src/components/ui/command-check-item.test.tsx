@@ -23,6 +23,7 @@ describe("CommandCheckItem", () => {
     expect(indicator).toHaveClass("border-primary");
     expect(indicator).toHaveClass("bg-primary");
     expect(indicator).toHaveClass("text-primary-foreground");
+    expect(indicator?.querySelector("svg")).toHaveClass("text-primary-foreground");
   });
 
   it("renders an unselected indicator with a visible outline", () => {
@@ -45,5 +46,6 @@ describe("CommandCheckItem", () => {
     expect(indicator).toHaveClass("border-border");
     expect(indicator).toHaveClass("bg-background");
     expect(indicator).toHaveClass("text-transparent");
+    expect(indicator?.querySelector("svg")).toHaveClass("text-transparent");
   });
 });
