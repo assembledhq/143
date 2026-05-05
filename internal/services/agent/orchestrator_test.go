@@ -108,7 +108,7 @@ func (m *mockCodexAuthProvider) GetValidToken(ctx context.Context, orgID uuid.UU
 	return m.cfg, nil
 }
 
-func (m *mockCodexAuthProvider) RefreshTokenByID(ctx context.Context, orgID uuid.UUID, credID uuid.UUID) (*models.OpenAIChatGPTConfig, error) {
+func (m *mockCodexAuthProvider) RefreshTokenByID(_ context.Context, _ models.Scope, credID uuid.UUID) (*models.OpenAIChatGPTConfig, error) {
 	m.refreshIDs = append(m.refreshIDs, credID)
 	if m.refreshErr != nil {
 		return nil, m.refreshErr
@@ -973,6 +973,7 @@ type testDeps struct {
 	identityResolver *identity.Resolver
 	sandboxAuth      agent.SandboxAuthServer
 	users            agent.UserLookup
+	logger           *zerolog.Logger
 }
 
 func defaultDeps() testDeps {
@@ -1016,6 +1017,10 @@ func buildOrchestrator(d testDeps) *agent.Orchestrator {
 	if d.snapshots != nil {
 		snapshotStore = d.snapshots
 	}
+	logger := zerolog.Nop()
+	if d.logger != nil {
+		logger = *d.logger
+	}
 	return agent.NewOrchestrator(agent.OrchestratorConfig{
 		Provider:          d.provider,
 		Adapters:          map[models.AgentType]agent.AgentAdapter{d.adapter.Name(): d.adapter},
@@ -1040,9 +1045,24 @@ func buildOrchestrator(d testDeps) *agent.Orchestrator {
 		SandboxAuth:       d.sandboxAuth,
 		Users:             d.users,
 		NodeID:            d.nodeID,
-		Logger:            zerolog.Nop(),
+		Logger:            logger,
 		MaxConcurrent:     3,
 	})
+}
+
+func findLogEvent(t *testing.T, logs *bytes.Buffer, message string) map[string]any {
+	t.Helper()
+	for _, line := range bytes.Split(bytes.TrimSpace(logs.Bytes()), []byte("\n")) {
+		if len(bytes.TrimSpace(line)) == 0 {
+			continue
+		}
+		var event map[string]any
+		require.NoError(t, json.Unmarshal(line, &event), "RunAgent should emit JSON logs")
+		if event["message"] == message {
+			return event
+		}
+	}
+	return nil
 }
 
 // --- Tests ---
@@ -1095,6 +1115,72 @@ func TestRunAgent_SuccessfulRun(t *testing.T) {
 
 	// Sandbox should be destroyed.
 	require.Equal(t, 1, d.provider.GetDestroyCalls())
+}
+
+func TestRunAgent_SuccessLogIncludesPlatformHealthFields(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	run := testRun(orgID, issue.ID)
+
+	var logs bytes.Buffer
+	logger := zerolog.New(&logs)
+	d := defaultDeps()
+	d.logger = &logger
+
+	orch := buildOrchestrator(d)
+	err := orch.RunAgent(context.Background(), run)
+	require.NoError(t, err, "RunAgent should complete successfully")
+
+	completion := findLogEvent(t, &logs, "agent run finished")
+	require.NotNil(t, completion, "RunAgent should emit agent run finished log")
+	require.Equal(t, string(models.AgentTypeClaudeCode), completion["agent_type"], "completion log should include agent type")
+	require.Equal(t, "completed", completion["outcome"], "completion log should include platform outcome")
+	durationMS, ok := completion["duration_ms"].(float64)
+	require.True(t, ok, "completion log should include numeric duration_ms")
+	require.GreaterOrEqual(t, durationMS, float64(0), "completion duration should be non-negative")
+}
+
+func TestRunAgent_InteractiveSuccessLogIncludesPlatformHealthFields(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	issue.Source = models.IssueSourceManual
+	run := testRun(orgID, issue.ID)
+	run.Origin = models.SessionOriginManual
+	run.InteractionMode = models.SessionInteractionModeInteractive
+	run.ValidationPolicy = models.SessionValidationPolicyOnSessionEnd
+
+	var logs bytes.Buffer
+	logger := zerolog.New(&logs)
+	d := defaultDeps()
+	d.logger = &logger
+	d.issues.issue = issue
+	d.provider.SnapshotFn = func(ctx context.Context, sb *agent.Sandbox) (io.ReadCloser, error) {
+		return io.NopCloser(bytes.NewReader([]byte("snapshot-bytes"))), nil
+	}
+	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
+		return &agent.AgentResult{
+			Summary:         "Initial manual turn complete",
+			ConfidenceScore: 0.92,
+			ExitCode:        0,
+		}, nil
+	}
+
+	orch := buildOrchestrator(d)
+	err := orch.RunAgent(context.Background(), run)
+	require.NoError(t, err, "interactive RunAgent should complete successfully")
+
+	completion := findLogEvent(t, &logs, "agent run finished")
+	require.NotNil(t, completion, "interactive RunAgent should emit agent run finished log")
+	require.Equal(t, string(models.AgentTypeClaudeCode), completion["agent_type"], "interactive completion log should include agent type")
+	require.Equal(t, "idle", completion["outcome"], "interactive completion log should include idle outcome")
+	require.Equal(t, "idle", completion["status"], "interactive completion log should include idle status")
+	durationMS, ok := completion["duration_ms"].(float64)
+	require.True(t, ok, "interactive completion log should include numeric duration_ms")
+	require.GreaterOrEqual(t, durationMS, float64(0), "interactive completion duration should be non-negative")
 }
 
 func TestRunAgent_MarksFinalOutputLogAsTranscriptDuplicate(t *testing.T) {
@@ -2225,6 +2311,34 @@ func TestRunAgent_FailedExecution(t *testing.T) {
 	require.Equal(t, 1, d.provider.GetDestroyCalls())
 }
 
+func TestRunAgent_FailureLogIncludesPlatformHealthFields(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	run := testRun(orgID, issue.ID)
+
+	var logs bytes.Buffer
+	logger := zerolog.New(&logs)
+	d := defaultDeps()
+	d.logger = &logger
+	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
+		return nil, errors.New("agent crashed: OOM killed")
+	}
+
+	orch := buildOrchestrator(d)
+	err := orch.RunAgent(context.Background(), run)
+	require.Error(t, err, "RunAgent should fail when the adapter fails")
+
+	failure := findLogEvent(t, &logs, "agent run failed")
+	require.NotNil(t, failure, "RunAgent should emit agent run failed log")
+	require.Equal(t, string(models.AgentTypeClaudeCode), failure["agent_type"], "failure log should include agent type")
+	require.Equal(t, "failed", failure["outcome"], "failure log should include platform outcome")
+	durationMS, ok := failure["duration_ms"].(float64)
+	require.True(t, ok, "failure log should include numeric duration_ms")
+	require.GreaterOrEqual(t, durationMS, float64(0), "failure duration should be non-negative")
+}
+
 func TestRunAgent_LowConfidence(t *testing.T) {
 	t.Parallel()
 
@@ -2638,6 +2752,13 @@ func TestRevertThread_UpdatesWorkspaceSnapshot(t *testing.T) {
 		},
 	}
 	provider := testutil.NewMockSandboxProvider()
+	provider.RestoreFn = func(ctx context.Context, sb *agent.Sandbox, reader io.Reader) error {
+		_, err := io.ReadAll(reader)
+		return err
+	}
+	provider.SnapshotFn = func(ctx context.Context, sb *agent.Sandbox) (io.ReadCloser, error) {
+		return io.NopCloser(bytes.NewReader([]byte("post-revert-snapshot"))), nil
+	}
 	var appliedReversePatch bool
 	provider.ExecFn = func(ctx context.Context, sb *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
 		switch {
@@ -4980,7 +5101,10 @@ func TestRunAgent_CancelReturnsToIdle(t *testing.T) {
 
 	cancelReg := agent.NewCancelRegistry(zerolog.Nop())
 
+	var logs bytes.Buffer
+	logger := zerolog.New(&logs)
 	d := defaultDeps()
+	d.logger = &logger
 	d.cancels = cancelReg
 	d.provider.SnapshotFn = func(ctx context.Context, sb *agent.Sandbox) (io.ReadCloser, error) {
 		return io.NopCloser(bytes.NewReader([]byte("cancel-snapshot"))), nil
@@ -5028,6 +5152,11 @@ func TestRunAgent_CancelReturnsToIdle(t *testing.T) {
 
 	// Sandbox should be destroyed.
 	require.Equal(t, 1, d.provider.GetDestroyCalls())
+
+	completion := findLogEvent(t, &logs, "agent run finished")
+	require.NotNil(t, completion, "cancelled RunAgent should emit agent run finished log")
+	require.Equal(t, "cancelled", completion["outcome"], "cancelled completion log should include cancelled outcome")
+	require.Equal(t, string(models.RuntimeStopReasonUserCancel), completion["stop_reason"], "cancelled completion log should include user cancel stop reason")
 }
 
 func TestRunAgent_CancelWithoutSnapshotMarksCancelled(t *testing.T) {
@@ -5218,6 +5347,46 @@ func TestResolveSessionTimeout_FallsBackWhenOrgStoreNil(t *testing.T) {
 
 // --- DeadlineExceeded handling in RunAgent / ContinueSession ---
 
+func TestRunAgent_TimeoutLogIncludesPlatformHealthFields(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	run := testRun(orgID, issue.ID)
+	startedAt := time.Now().Add(-10 * time.Minute)
+	run.StartedAt = &startedAt
+
+	var logs bytes.Buffer
+	logger := zerolog.New(&logs)
+	d := defaultDeps()
+	d.logger = &logger
+	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
+		return nil, context.DeadlineExceeded
+	}
+
+	orch := buildOrchestrator(d)
+
+	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-1*time.Second))
+	defer cancel()
+
+	err := orch.RunAgent(ctx, run)
+	require.Error(t, err)
+	require.ErrorIs(t, err, agent.ErrSessionTimedOut)
+
+	timeout := findLogEvent(t, &logs, "session exceeded configured timeout")
+	require.NotNil(t, timeout, "timeout RunAgent should emit the canonical timeout log line")
+	require.Equal(t, string(models.AgentTypeClaudeCode), timeout["agent_type"], "timeout log should include agent type")
+	require.Equal(t, "timeout", timeout["outcome"], "timeout log should include platform outcome")
+	durationMS, ok := timeout["duration_ms"].(float64)
+	require.True(t, ok, "timeout log should include numeric duration_ms")
+	require.GreaterOrEqual(t, durationMS, float64(0), "timeout duration should be non-negative")
+
+	// The canonical timeout log is the only failure event emitted on this
+	// path. Emitting a second "agent run failed" log would double-count
+	// timeouts in dashboards/alerts that key off either message.
+	require.Nil(t, findLogEvent(t, &logs, "agent run failed"), "timeout path should not also emit agent run failed log")
+}
+
 func TestRunAgent_DeadlineExceededClassifiesAsTimeout(t *testing.T) {
 	t.Parallel()
 
@@ -5347,7 +5516,10 @@ func TestRunAgent_GracefullyStopsAndPreservesCheckpointOnNoProgress(t *testing.T
 
 	cancelReg := agent.NewCancelRegistry(zerolog.Nop())
 
+	var logs bytes.Buffer
+	logger := zerolog.New(&logs)
 	d := defaultDeps()
+	d.logger = &logger
 	d.orgs = &mockOrgStore{org: models.Organization{ID: orgID, Settings: settings}}
 	d.cancels = cancelReg
 	d.provider.SnapshotFn = func(ctx context.Context, sb *agent.Sandbox) (io.ReadCloser, error) {
@@ -5382,6 +5554,11 @@ func TestRunAgent_GracefullyStopsAndPreservesCheckpointOnNoProgress(t *testing.T
 	require.Len(t, failures, 1, "policy stop should persist a structured failure explanation")
 	require.Equal(t, agent.FailureCategoryTimeout, failures[0].category, "policy stop should use the timeout family category")
 	require.Contains(t, failures[0].explanation, "saved a resumable checkpoint", "policy stop should explain that the latest state was preserved")
+
+	completion := findLogEvent(t, &logs, "agent run finished")
+	require.NotNil(t, completion, "policy-stopped RunAgent should emit agent run finished log")
+	require.Equal(t, "runtime_policy_stopped", completion["outcome"], "policy stop completion log should include policy outcome")
+	require.Equal(t, string(models.RuntimeStopReasonNoProgress), completion["stop_reason"], "policy stop completion log should include runtime stop reason")
 }
 
 func TestRunAgent_DoesNotPublishCheckpointWithoutSnapshotStore(t *testing.T) {

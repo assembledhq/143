@@ -99,12 +99,12 @@ describe("Account settings page", () => {
     expect(await screen.findByText("My coding agents")).toBeInTheDocument();
     // Both the user-set label and the auto-generated usage note render so
     // multiple rows of the same agent/auth-type can still be told apart.
-    expect(await screen.findByText("Claude Code API key")).toBeInTheDocument();
-    expect(await screen.findByText("sk-ant...5678")).toBeInTheDocument();
-    expect(await screen.findByText("Codex API key")).toBeInTheDocument();
-    expect(await screen.findByText("sk-open...1234")).toBeInTheDocument();
+    expect((await screen.findAllByText("Claude Code API key")).length).toBeGreaterThan(0);
+    expect((await screen.findAllByText("sk-ant...5678")).length).toBeGreaterThan(0);
+    expect((await screen.findAllByText("Codex API key")).length).toBeGreaterThan(0);
+    expect((await screen.findAllByText("sk-open...1234")).length).toBeGreaterThan(0);
     expect(await screen.findByText("Org fallback")).toBeInTheDocument();
-    expect(await screen.findByText("Team seat A")).toBeInTheDocument();
+    expect((await screen.findAllByText("Team seat A")).length).toBeGreaterThan(0);
   });
 
   it("renders the org fallback section even when the personal stack is empty", async () => {
@@ -151,8 +151,8 @@ describe("Account settings page", () => {
     // Personal stack should show the empty-state copy.
     expect(await screen.findByText(/No personal auth configured/)).toBeInTheDocument();
     // Org fallback should still render with both the label and the masked key.
-    expect(await screen.findByText("Org Claude key")).toBeInTheDocument();
-    expect(await screen.findByText("sk-ant...team")).toBeInTheDocument();
+    expect((await screen.findAllByText("Org Claude key")).length).toBeGreaterThan(0);
+    expect((await screen.findAllByText("sk-ant...team")).length).toBeGreaterThan(0);
   });
 
   it("uses the shared provider-card modal with Gemini, Amp, and Pi support", async () => {
@@ -208,6 +208,7 @@ describe("Account settings page", () => {
 
     await user.click(screen.getByRole("button", { name: "Add auth" }));
     await user.click(await screen.findByLabelText("Claude Code"));
+    await user.click(screen.getByRole("radio", { name: /API key/i }));
     await user.type(screen.getByLabelText("Label"), "Personal Claude backup");
     // Use the input id directly — the visible label text is shared with the
     // help-tooltip button so getByLabelText("API key") would be ambiguous.

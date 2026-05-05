@@ -46,6 +46,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/rs/zerolog"
 
+	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
 )
 
@@ -118,31 +119,35 @@ var defaultScopes = []string{
 	"user:file_upload",
 }
 
-// CredentialStore defines the credential operations needed by the auth service.
-// Mirrors codexauth.CredentialStore but uses the labeled round-robin variant
-// because ProviderAnthropic mixes an API-key row (label="") with subscription
-// rows (label!="").
+// CredentialStore defines the credential operations needed by the auth
+// service. Every method takes models.Scope so a single Service instance can
+// drive both org-scoped (admin) and personal-scoped (per-user) subscription
+// flows. Production wires *db.ScopedCredentialStore.
+//
+// Subscription credentials live under ProviderAnthropic with a non-empty
+// label. An Anthropic API-key credential uses label="" and shares the same
+// provider; the two are mutually exclusive per row, so one scope can hold
+// an API key alongside N labeled subscriptions.
 type CredentialStore interface {
-	Get(ctx context.Context, orgID uuid.UUID, provider models.ProviderName) (*models.DecryptedCredential, error)
-	UpsertWithLabel(ctx context.Context, orgID uuid.UUID, createdBy *uuid.UUID, label string, cfg models.ProviderConfig) (*uuid.UUID, error)
-	InsertPendingAuth(ctx context.Context, orgID uuid.UUID, createdBy *uuid.UUID, label string, cfg models.ProviderConfig) (*uuid.UUID, error)
-	GetByID(ctx context.Context, orgID uuid.UUID, id uuid.UUID) (*models.DecryptedCredential, error)
-	GetByProviderAndLabel(ctx context.Context, orgID uuid.UUID, provider models.ProviderName, label string) (*models.DecryptedCredential, error)
-	ListByProvider(ctx context.Context, orgID uuid.UUID, provider models.ProviderName) ([]models.DecryptedCredential, error)
-	ClaimNextLabeledRoundRobin(ctx context.Context, orgID uuid.UUID, provider models.ProviderName) (*models.DecryptedCredential, error)
-	DisableByID(ctx context.Context, orgID uuid.UUID, id uuid.UUID) error
-	UpdateStatusByID(ctx context.Context, orgID uuid.UUID, id uuid.UUID, status string) error
-	UpsertByID(ctx context.Context, orgID uuid.UUID, id uuid.UUID, cfg models.ProviderConfig) error
-	ExistsForProviderByID(ctx context.Context, orgID uuid.UUID, id uuid.UUID, provider models.ProviderName) (bool, error)
+	UpsertWithLabel(ctx context.Context, scope models.Scope, createdBy *uuid.UUID, label string, cfg models.ProviderConfig) (*uuid.UUID, error)
+	InsertPendingAuth(ctx context.Context, scope models.Scope, createdBy *uuid.UUID, label string, cfg models.ProviderConfig) (*uuid.UUID, error)
+	GetByID(ctx context.Context, scope models.Scope, id uuid.UUID) (*models.DecryptedCredential, error)
+	GetByProviderAndLabel(ctx context.Context, scope models.Scope, provider models.ProviderName, label string) (*models.DecryptedCredential, error)
+	ListByProvider(ctx context.Context, scope models.Scope, provider models.ProviderName) ([]models.DecryptedCredential, error)
+	ClaimNextLabeledRoundRobin(ctx context.Context, scope models.Scope, provider models.ProviderName) (*models.DecryptedCredential, error)
+	DisableByID(ctx context.Context, scope models.Scope, id uuid.UUID) error
+	UpdateStatusByID(ctx context.Context, scope models.Scope, id uuid.UUID, status string) error
+	UpsertByID(ctx context.Context, scope models.Scope, id uuid.UUID, cfg models.ProviderConfig) error
+	ExistsForProviderByID(ctx context.Context, scope models.Scope, id uuid.UUID, provider models.ProviderName) (bool, error)
 	// HasActiveLabeled reports whether at least one active labeled credential
-	// exists for (org, provider). Backs HasActiveSubscription with a cheap
+	// exists for (scope, provider). Backs HasActiveSubscription with a cheap
 	// EXISTS probe instead of listing every row.
-	HasActiveLabeled(ctx context.Context, orgID uuid.UUID, provider models.ProviderName) (bool, error)
-	// DisableLabeled disables all subscription rows (label != '') for an org's
-	// Anthropic credentials while leaving the API-key row (label='') intact.
-	// Used by DisconnectAll so the user doesn't lose their Anthropic API key
-	// when disconnecting every Claude subscription.
-	DisableLabeled(ctx context.Context, orgID uuid.UUID, provider models.ProviderName) error
+	HasActiveLabeled(ctx context.Context, scope models.Scope, provider models.ProviderName) (bool, error)
+	// DisableLabeled disables all subscription rows (label != '') at (scope,
+	// provider) while leaving the API-key row (label='') intact. Used by
+	// DisconnectAll so the caller doesn't lose their Anthropic API key when
+	// disconnecting every Claude subscription.
+	DisableLabeled(ctx context.Context, scope models.Scope, provider models.ProviderName) error
 }
 
 // ErrCredentialNotFound is returned when no credential exists for the given org/provider.
@@ -249,9 +254,21 @@ func (s *Service) SetTokenURL(u string) { s.tokenURL = u }
 // SetProfileURL overrides the profile endpoint (useful for testing).
 func (s *Service) SetProfileURL(u string) { s.profileURL = u }
 
-// pendingKey returns the sync.Map key for init-side mutexes scoped to org+label.
-func pendingKey(orgID uuid.UUID, label string) string {
-	return orgID.String() + ":" + label
+// pendingKey returns the sync.Map key for init-side mutexes, namespaced by
+// scope so personal and org flows for the same label never collide. The
+// leading scope tag is part of the key so an org label like
+// `u:<userID>:label` cannot impersonate a personal-scope key.
+func pendingKey(scope models.Scope, label string) string {
+	if scope.IsPersonal() {
+		return "personal:" + scope.OrgID.String() + ":u:" + scope.UserID.String() + ":" + label
+	}
+	return "org:" + scope.OrgID.String() + ":" + label
+}
+
+// orgScope is a small constructor for org-only callers that haven't been
+// updated to think in scopes yet (e.g. legacy GetValidToken path).
+func orgScope(orgID uuid.UUID) models.Scope {
+	return models.Scope{OrgID: orgID}
 }
 
 // randomURLSafe returns a cryptographically random base64url-encoded string
@@ -292,14 +309,14 @@ func (s *Service) buildAuthorizeURL(challenge, state string) string {
 	return s.authorizeURL + "?" + q.Encode()
 }
 
-// InitiateOAuth starts a new PKCE auth flow for the given org+label. Generates
-// a verifier + state, persists them on a pending_auth row, and returns the
-// authorize URL for the caller to hand to the user's browser.
-func (s *Service) InitiateOAuth(ctx context.Context, orgID uuid.UUID, createdBy *uuid.UUID, label string) (*InitiateResponse, error) {
-	// Serialize concurrent init calls for the same (org, label) — otherwise
+// InitiateOAuth starts a new PKCE auth flow at the given (scope, label).
+// Generates a verifier + state, persists them on a pending_auth row, and
+// returns the authorize URL for the caller to hand to the user's browser.
+func (s *Service) InitiateOAuth(ctx context.Context, scope models.Scope, createdBy *uuid.UUID, label string) (*InitiateResponse, error) {
+	// Serialize concurrent init calls for the same (scope, label) — otherwise
 	// two racing initiations could both reach InsertPendingAuth, with the
 	// slower request silently overwriting the faster one's verifier.
-	pKey := pendingKey(orgID, label)
+	pKey := pendingKey(scope, label)
 	muVal, _ := s.initMu.LoadOrStore(pKey, &sync.Mutex{})
 	mu := muVal.(*sync.Mutex)
 	mu.Lock()
@@ -325,13 +342,14 @@ func (s *Service) InitiateOAuth(ctx context.Context, orgID uuid.UUID, createdBy 
 	}
 
 	if s.credentials != nil {
-		if _, err := s.credentials.InsertPendingAuth(ctx, orgID, createdBy, label, pendingCfg); err != nil {
+		if _, err := s.credentials.InsertPendingAuth(ctx, scope, createdBy, label, pendingCfg); err != nil {
 			return nil, fmt.Errorf("persist pending subscription: %w", err)
 		}
 	}
 
 	s.logger.Info().
-		Str("org_id", orgID.String()).
+		Str("org_id", scope.OrgID.String()).
+		Bool("personal", scope.IsPersonal()).
 		Str("label", label).
 		Msg("Claude Code OAuth initiated")
 
@@ -344,8 +362,8 @@ func (s *Service) InitiateOAuth(ctx context.Context, orgID uuid.UUID, createdBy 
 // CompleteOAuth exchanges the user's pasted "<code>#<state>" for tokens,
 // verifies the returned state matches the one we stored, and upgrades the
 // pending row to an active subscription.
-func (s *Service) CompleteOAuth(ctx context.Context, orgID uuid.UUID, label, codeAndState string) (*CompleteResponse, error) {
-	pKey := pendingKey(orgID, label)
+func (s *Service) CompleteOAuth(ctx context.Context, scope models.Scope, label, codeAndState string) (*CompleteResponse, error) {
+	pKey := pendingKey(scope, label)
 	muVal, _ := s.initMu.LoadOrStore(pKey, &sync.Mutex{})
 	mu := muVal.(*sync.Mutex)
 	mu.Lock()
@@ -368,7 +386,7 @@ func (s *Service) CompleteOAuth(ctx context.Context, orgID uuid.UUID, label, cod
 	if s.credentials == nil {
 		return nil, fmt.Errorf("credential store not configured")
 	}
-	cred, err := s.credentials.GetByProviderAndLabel(ctx, orgID, models.ProviderAnthropic, label)
+	cred, err := s.credentials.GetByProviderAndLabel(ctx, scope, models.ProviderAnthropic, label)
 	if err != nil {
 		// Only "no row" should surface as ErrPendingAuthNotFound (→ 404).
 		// Transient DB errors must bubble up as 500s so operators can see them.
@@ -421,18 +439,19 @@ func (s *Service) CompleteOAuth(ctx context.Context, orgID uuid.UUID, label, cod
 	// human-readable tier (AccountType) and the backend's rate_limit_tier.
 	// These fields are display-only; a failure here must not block auth.
 	if profile, perr := s.fetchProfile(ctx, sub.AccessToken); perr != nil {
-		s.logger.Warn().Err(perr).Str("org_id", orgID.String()).Str("label", label).Msg("claude profile fetch failed; continuing without tier info")
+		s.logger.Warn().Err(perr).Str("org_id", scope.OrgID.String()).Str("label", label).Msg("claude profile fetch failed; continuing without tier info")
 	} else if profile != nil {
 		sub.AccountType = profile.Organization.OrganizationType
 		sub.RateLimitTier = profile.Organization.RateLimitTier
 	}
 
-	if err := s.credentials.UpsertByID(ctx, orgID, cred.ID, models.AnthropicConfig{Subscription: sub}); err != nil {
+	if err := s.credentials.UpsertByID(ctx, scope, cred.ID, models.AnthropicConfig{Subscription: sub}); err != nil {
 		return nil, fmt.Errorf("store credential: %w", err)
 	}
 
 	s.logger.Info().
-		Str("org_id", orgID.String()).
+		Str("org_id", scope.OrgID.String()).
+		Bool("personal", scope.IsPersonal()).
 		Str("label", label).
 		Bool("has_refresh_token", sub.RefreshToken != "").
 		Int("expires_in", tokens.ExpiresIn).
@@ -595,12 +614,17 @@ func (s *Service) credRefreshMu(credID uuid.UUID) *sync.Mutex {
 }
 
 // RefreshTokenByID refreshes an expired access token for a specific credential.
-func (s *Service) RefreshTokenByID(ctx context.Context, orgID uuid.UUID, credID uuid.UUID) (*models.AnthropicSubscription, error) {
+//
+// Scope must match the credential's owner — personal credentials require a
+// scope with the matching UserID. The unified runtime path constructs scope
+// from the picked credential's UserID (orchestrator.go); the legacy
+// org-fallback GetValidToken path constructs an org scope.
+func (s *Service) RefreshTokenByID(ctx context.Context, scope models.Scope, credID uuid.UUID) (*models.AnthropicSubscription, error) {
 	mu := s.credRefreshMu(credID)
 	mu.Lock()
 	defer mu.Unlock()
 
-	cred, err := s.credentials.GetByID(ctx, orgID, credID)
+	cred, err := s.credentials.GetByID(ctx, scope, credID)
 	if err != nil {
 		return nil, fmt.Errorf("get credential: %w", err)
 	}
@@ -653,7 +677,7 @@ func (s *Service) RefreshTokenByID(ctx context.Context, orgID uuid.UUID, credID 
 			s.logger.Warn().Str("cred_id", credID.String()).Msg("refresh token already used by another client; access token may still be valid")
 			return nil, fmt.Errorf("refresh token already used by another client")
 		}
-		if err := s.credentials.UpdateStatusByID(ctx, orgID, credID, "invalid"); err != nil {
+		if err := s.credentials.UpdateStatusByID(ctx, scope, credID, "invalid"); err != nil {
 			s.logger.Warn().Err(err).Str("cred_id", credID.String()).Msg("failed to update credential status")
 		}
 		// Drop the per-credential refresh mutex so sync.Map doesn't grow
@@ -694,7 +718,7 @@ func (s *Service) RefreshTokenByID(ctx context.Context, orgID uuid.UUID, credID 
 		newSub.RefreshToken = sub.RefreshToken
 	}
 
-	if err := s.credentials.UpsertByID(ctx, orgID, credID, models.AnthropicConfig{Subscription: newSub}); err != nil {
+	if err := s.credentials.UpsertByID(ctx, scope, credID, models.AnthropicConfig{Subscription: newSub}); err != nil {
 		return nil, fmt.Errorf("store refreshed credential: %w", err)
 	}
 
@@ -721,11 +745,12 @@ func (s *Service) GetValidToken(ctx context.Context, orgID uuid.UUID) (*models.A
 		return nil, nil, nil
 	}
 
+	scope := orgScope(orgID)
 	tried := make(map[uuid.UUID]struct{}, maxRoundRobinAttempts)
 	var lastErr error
 
 	for attempt := 0; attempt < maxRoundRobinAttempts; attempt++ {
-		cred, err := s.credentials.ClaimNextLabeledRoundRobin(ctx, orgID, models.ProviderAnthropic)
+		cred, err := s.credentials.ClaimNextLabeledRoundRobin(ctx, scope, models.ProviderAnthropic)
 		if err != nil {
 			if isNotFoundError(err) {
 				if lastErr != nil {
@@ -767,7 +792,7 @@ func (s *Service) GetValidToken(ctx context.Context, orgID uuid.UUID) (*models.A
 			return &sub, &credID, nil
 		}
 
-		refreshed, refreshErr := s.RefreshTokenByID(ctx, orgID, cred.ID)
+		refreshed, refreshErr := s.RefreshTokenByID(ctx, scope, cred.ID)
 		if refreshErr == nil {
 			credID := cred.ID
 			return refreshed, &credID, nil
@@ -781,7 +806,7 @@ func (s *Service) GetValidToken(ctx context.Context, orgID uuid.UUID) (*models.A
 		}
 
 		s.logger.Warn().Err(refreshErr).Str("cred_id", cred.ID.String()).Msg("token refresh failed and cached token expired; marking invalid")
-		if statusErr := s.credentials.UpdateStatusByID(ctx, orgID, cred.ID, "invalid"); statusErr != nil {
+		if statusErr := s.credentials.UpdateStatusByID(ctx, scope, cred.ID, "invalid"); statusErr != nil {
 			s.logger.Warn().Err(statusErr).Str("cred_id", cred.ID.String()).Msg("failed to mark credential invalid")
 		}
 		// Drop the per-credential refresh mutex — the credential is out of
@@ -806,19 +831,19 @@ func (s *Service) HasActiveSubscription(ctx context.Context, orgID uuid.UUID) (b
 	if s.credentials == nil {
 		return false, nil
 	}
-	exists, err := s.credentials.HasActiveLabeled(ctx, orgID, models.ProviderAnthropic)
+	exists, err := s.credentials.HasActiveLabeled(ctx, orgScope(orgID), models.ProviderAnthropic)
 	if err != nil {
 		return false, fmt.Errorf("check anthropic subscription: %w", err)
 	}
 	return exists, nil
 }
 
-// Disconnect removes a specific Claude subscription by ID for an org.
+// Disconnect removes a specific Claude subscription by ID at the given scope.
 // Ordering matches codexauth: DB first, then in-memory state, so a concurrent
 // refresh cannot resurrect the row after we "forget" its mutex.
-func (s *Service) Disconnect(ctx context.Context, orgID uuid.UUID, credID uuid.UUID) error {
+func (s *Service) Disconnect(ctx context.Context, scope models.Scope, credID uuid.UUID) error {
 	if s.credentials != nil {
-		if err := s.credentials.DisableByID(ctx, orgID, credID); err != nil {
+		if err := s.credentials.DisableByID(ctx, scope, credID); err != nil {
 			return err
 		}
 	}
@@ -827,13 +852,16 @@ func (s *Service) Disconnect(ctx context.Context, orgID uuid.UUID, credID uuid.U
 }
 
 // DisconnectForOrg removes a credential by ID after verifying it belongs to
-// the given org. Returns ErrCredentialNotFound if the credential doesn't
-// exist, belongs to a different org, or belongs to a different provider.
-func (s *Service) DisconnectForOrg(ctx context.Context, orgID uuid.UUID, credID uuid.UUID) error {
+// the given scope. Returns ErrCredentialNotFound if the credential doesn't
+// exist, belongs to a different scope, or belongs to a different provider.
+//
+// The name is preserved for backward compatibility with existing call sites;
+// despite "ForOrg", scope can be either org or personal.
+func (s *Service) DisconnectForOrg(ctx context.Context, scope models.Scope, credID uuid.UUID) error {
 	if s.credentials == nil {
 		return nil
 	}
-	cred, err := s.credentials.GetByID(ctx, orgID, credID)
+	cred, err := s.credentials.GetByID(ctx, scope, credID)
 	if err != nil {
 		if isNotFoundError(err) {
 			return ErrCredentialNotFound
@@ -844,19 +872,19 @@ func (s *Service) DisconnectForOrg(ctx context.Context, orgID uuid.UUID, credID 
 	if cred.Provider != models.ProviderAnthropic || cred.Label == "" || !ok || cfg.Subscription == nil {
 		return ErrCredentialNotFound
 	}
-	return s.Disconnect(ctx, orgID, credID)
+	return s.Disconnect(ctx, scope, credID)
 }
 
-// DisconnectAll removes every Claude subscription for the org, leaving any
-// Anthropic API-key row (label="") in place. Ordering matches Disconnect:
-// the DB rows are disabled first so a concurrent refresh cannot resurrect
-// a credential after we've dropped its mutex; only then do we clean up
-// the in-memory maps.
-func (s *Service) DisconnectAll(ctx context.Context, orgID uuid.UUID) error {
+// DisconnectAll removes every Claude subscription at the given scope,
+// leaving any Anthropic API-key row (label="") in place. Ordering matches
+// Disconnect: the DB rows are disabled first so a concurrent refresh cannot
+// resurrect a credential after we've dropped its mutex; only then do we
+// clean up the in-memory maps.
+func (s *Service) DisconnectAll(ctx context.Context, scope models.Scope) error {
 	if s.credentials == nil {
 		// Still clean the init mutexes so test doubles without a store
 		// don't leak entries.
-		s.clearInitMutexesForOrg(orgID)
+		s.clearInitMutexesForScope(scope)
 		return nil
 	}
 
@@ -864,12 +892,12 @@ func (s *Service) DisconnectAll(ctx context.Context, orgID uuid.UUID) error {
 	// refresh mutexes afterwards. ListByProvider errors are non-fatal here:
 	// the DisableLabeled call below is the source of truth, but log the miss
 	// so operators can correlate any leaked refresh mutexes.
-	creds, err := s.credentials.ListByProvider(ctx, orgID, models.ProviderAnthropic)
+	creds, err := s.credentials.ListByProvider(ctx, scope, models.ProviderAnthropic)
 	if err != nil {
-		s.logger.Warn().Err(err).Str("org_id", orgID.String()).Msg("failed to list claude subscriptions before disconnect cleanup")
+		s.logger.Warn().Err(err).Str("org_id", scope.OrgID.String()).Msg("failed to list claude subscriptions before disconnect cleanup")
 	}
 
-	if err := s.credentials.DisableLabeled(ctx, orgID, models.ProviderAnthropic); err != nil {
+	if err := s.credentials.DisableLabeled(ctx, scope, models.ProviderAnthropic); err != nil {
 		return err
 	}
 
@@ -879,33 +907,41 @@ func (s *Service) DisconnectAll(ctx context.Context, orgID uuid.UUID) error {
 		}
 		s.refreshMu.Delete(cred.ID.String())
 	}
-	s.clearInitMutexesForOrg(orgID)
+	s.clearInitMutexesForScope(scope)
 
 	return nil
 }
 
-// clearInitMutexesForOrg drops every init-side mutex scoped to orgID. Used
-// by DisconnectAll so a subsequent InitiateOAuth gets a fresh mutex instead
-// of reusing a stale one that might still be held by an in-flight call.
-func (s *Service) clearInitMutexesForOrg(orgID uuid.UUID) {
-	orgPrefix := orgID.String() + ":"
+// clearInitMutexesForScope drops every init-side mutex scoped to the given
+// scope. Used by DisconnectAll so a subsequent InitiateOAuth gets a fresh
+// mutex instead of reusing a stale one that might still be held by an
+// in-flight call. Keys carry a leading scope tag, so org and personal keys
+// cannot collide even when a label contains scope-looking delimiters.
+func (s *Service) clearInitMutexesForScope(scope models.Scope) {
+	matches := func(k string) bool {
+		if scope.IsPersonal() {
+			return strings.HasPrefix(k, "personal:"+scope.OrgID.String()+":u:"+scope.UserID.String()+":")
+		}
+		return strings.HasPrefix(k, "org:"+scope.OrgID.String()+":")
+	}
 	s.initMu.Range(func(key, _ any) bool {
-		if k, ok := key.(string); ok && strings.HasPrefix(k, orgPrefix) {
+		if k, ok := key.(string); ok && matches(k) {
 			s.initMu.Delete(key)
 		}
 		return true
 	})
 }
 
-// ListSubscriptions returns all connected Claude subscriptions for an org.
-// Skips the label="" row (which is the Anthropic API-key credential, not
-// a subscription) so the subscriptions list doesn't leak an API key summary.
-func (s *Service) ListSubscriptions(ctx context.Context, orgID uuid.UUID) ([]SubscriptionInfo, error) {
+// ListSubscriptions returns all connected Claude subscriptions at the given
+// scope. Skips the label="" row (which is the Anthropic API-key credential,
+// not a subscription) so the subscriptions list doesn't leak an API key
+// summary.
+func (s *Service) ListSubscriptions(ctx context.Context, scope models.Scope) ([]SubscriptionInfo, error) {
 	if s.credentials == nil {
 		return nil, nil
 	}
 
-	creds, err := s.credentials.ListByProvider(ctx, orgID, models.ProviderAnthropic)
+	creds, err := s.credentials.ListByProvider(ctx, scope, models.ProviderAnthropic)
 	if err != nil {
 		return nil, fmt.Errorf("list subscriptions: %w", err)
 	}
@@ -933,6 +969,16 @@ func (s *Service) ListSubscriptions(ctx context.Context, orgID uuid.UUID) ([]Sub
 }
 
 // isNotFoundError reports whether err signals "no matching credential row".
+// Three sentinels are checked because the credential store now spans both
+// legacy and unified backends:
+//   - pgx.ErrNoRows surfaces from the legacy OrgCredentialStore via
+//     pgx.CollectOneRow on a missing-row read.
+//   - ErrCredentialNotFound is the local sentinel returned by service-layer
+//     ownership checks (DisconnectForOrg).
+//   - db.ErrCodingCredentialNotFound surfaces from the unified
+//     CodingCredentialStore on personal-scope reads.
 func isNotFoundError(err error) bool {
-	return errors.Is(err, pgx.ErrNoRows) || errors.Is(err, ErrCredentialNotFound)
+	return errors.Is(err, pgx.ErrNoRows) ||
+		errors.Is(err, ErrCredentialNotFound) ||
+		errors.Is(err, db.ErrCodingCredentialNotFound)
 }

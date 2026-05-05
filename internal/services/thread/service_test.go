@@ -620,6 +620,10 @@ func TestService_SendMessage(t *testing.T) {
 				Message:   "hi",
 			},
 			setupDeps: func(deps *testDeps) {
+				// Phase 2: when the DB-level CTE rejects the claim because
+				// the per-session running cap is full, surface a
+				// distinguishable error so the composer can offer to queue
+				// the message instead of telling the user they failed.
 				deps.threadStore.claimIdleFn = func(_ context.Context, _, _, _ uuid.UUID) (models.SessionThread, error) {
 					return models.SessionThread{}, db.ErrThreadRunningLimitReached
 				}

@@ -48,10 +48,10 @@ describe("CodingAuthStack", () => {
       />,
     );
 
-    expect(screen.getByText("Team seat A")).toBeInTheDocument();
-    expect(screen.getByText("Default")).toBeInTheDocument();
-    expect(screen.getByText("Invalid")).toBeInTheDocument();
-    expect(screen.getByText("Pi")).toBeInTheDocument();
+    expect(screen.getAllByText("Team seat A").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Default").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Invalid").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Pi").length).toBeGreaterThan(0);
   });
 
   it("supports keyboard-accessible move controls", async () => {
@@ -69,10 +69,27 @@ describe("CodingAuthStack", () => {
       />,
     );
 
-    await user.click(screen.getByRole("button", { name: "Move Pi backup up" }));
+    await user.click(screen.getAllByRole("button", { name: "Move Pi backup up" })[0]);
     expect(onMove).toHaveBeenCalledWith("auth-2", "up");
 
-    await user.click(screen.getByRole("button", { name: "Edit Pi backup" }));
+    await user.click(screen.getAllByRole("button", { name: "Edit Pi backup" })[0]);
     expect(onSelect).toHaveBeenCalledWith("auth-2");
+  });
+
+  it("renders compact mobile cards with inline metadata labels", () => {
+    renderWithProviders(
+      <CodingAuthStack
+        rows={rows}
+        selectedId={null}
+        onSelect={vi.fn()}
+        onMove={vi.fn()}
+        onReorder={vi.fn()}
+      />,
+    );
+
+    expect(screen.getAllByText("Priority").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Auth type").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Status").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("ChatGPT Plus").length).toBeGreaterThan(0);
   });
 });

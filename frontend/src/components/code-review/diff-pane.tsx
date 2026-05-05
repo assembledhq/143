@@ -215,7 +215,7 @@ export const DiffPane = forwardRef<DiffPaneHandle, DiffPaneProps>(
             file={file}
             viewMode={viewMode}
             sessionId={sessionId}
-            isActive={activeFileIndex === undefined || activeFileIndex === i}
+            isActive
             commentsByLine={commentsByLine}
             activeCommentLine={activeCommentLine}
             onAddComment={onAddComment}

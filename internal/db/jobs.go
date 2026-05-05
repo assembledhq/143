@@ -42,6 +42,19 @@ type JobStore struct {
 	logger   zerolog.Logger
 }
 
+// JobQueueHealthSample is an ops-oriented queue snapshot grouped by queue and
+// job type. It intentionally spans orgs so dashboards can show platform-wide
+// pressure rather than one tenant's view.
+type JobQueueHealthSample struct {
+	Queue                    string
+	JobType                  string
+	PendingRunnable          int64
+	PendingDeferred          int64
+	Running                  int64
+	DeadLetter               int64
+	OldestRunnableAgeSeconds float64
+}
+
 func NewJobStore(db DBTX) *JobStore {
 	return &JobStore{db: db, logger: zerolog.Nop()}
 }
@@ -135,6 +148,76 @@ func (s *JobStore) OldestPendingSessionJobAge(ctx context.Context) (time.Duratio
 		return 0, false, fmt.Errorf("oldest pending session job age: %w", err)
 	}
 	return time.Since(runnableAt), true, nil
+}
+
+// QueueHealthSamples returns platform-wide queue health grouped by queue and
+// job type for the worker ops sampler.
+// lint:allow-no-orgid reason="platform health sampler intentionally aggregates queue pressure across orgs"
+func (s *JobStore) QueueHealthSamples(ctx context.Context) ([]JobQueueHealthSample, error) {
+	rows, err := s.db.Query(ctx, `
+		SELECT
+			queue,
+			job_type,
+			COUNT(*) FILTER (WHERE status = 'pending' AND run_at <= now()) AS pending_runnable,
+			COUNT(*) FILTER (WHERE status = 'pending' AND run_at > now()) AS pending_deferred,
+			COUNT(*) FILTER (WHERE status = 'running') AS running,
+			COUNT(*) FILTER (WHERE status = 'dead_letter') AS dead_letter,
+			EXTRACT(EPOCH FROM now() - MIN(run_at) FILTER (WHERE status = 'pending' AND run_at <= now()))::double precision AS oldest_runnable_age_seconds
+		FROM jobs
+		WHERE status IN ('pending', 'running', 'dead_letter')
+		GROUP BY queue, job_type
+		ORDER BY pending_runnable DESC, running DESC, queue ASC, job_type ASC`)
+	if err != nil {
+		return nil, fmt.Errorf("queue health samples: %w", err)
+	}
+	defer rows.Close()
+
+	var samples []JobQueueHealthSample
+	for rows.Next() {
+		var sample JobQueueHealthSample
+		var oldest any
+		if err := rows.Scan(
+			&sample.Queue,
+			&sample.JobType,
+			&sample.PendingRunnable,
+			&sample.PendingDeferred,
+			&sample.Running,
+			&sample.DeadLetter,
+			&oldest,
+		); err != nil {
+			return nil, fmt.Errorf("scan queue health sample: %w", err)
+		}
+		switch v := oldest.(type) {
+		case nil:
+		case float64:
+			sample.OldestRunnableAgeSeconds = v
+		case float32:
+			sample.OldestRunnableAgeSeconds = float64(v)
+		case int64:
+			sample.OldestRunnableAgeSeconds = float64(v)
+		case int:
+			sample.OldestRunnableAgeSeconds = float64(v)
+		case pgtype.Float8:
+			if v.Valid {
+				sample.OldestRunnableAgeSeconds = v.Float64
+			}
+		case pgtype.Numeric:
+			oldestFloat, err := v.Float64Value()
+			if err != nil {
+				return nil, fmt.Errorf("scan queue health sample oldest runnable age: %w", err)
+			}
+			if oldestFloat.Valid {
+				sample.OldestRunnableAgeSeconds = oldestFloat.Float64
+			}
+		default:
+			return nil, fmt.Errorf("scan queue health sample: unsupported oldest runnable age type %T", oldest)
+		}
+		samples = append(samples, sample)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("queue health samples rows: %w", err)
+	}
+	return samples, nil
 }
 
 type jobQuerier interface {

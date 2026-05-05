@@ -18,6 +18,7 @@ import (
 
 	"github.com/assembledhq/143/internal/jobctx"
 	"github.com/assembledhq/143/internal/models"
+	"github.com/assembledhq/143/internal/observability"
 	"github.com/assembledhq/143/internal/services/github/identity"
 	"github.com/assembledhq/143/internal/services/integration"
 	"github.com/assembledhq/143/internal/services/linear"
@@ -89,6 +90,28 @@ const canonicalTimeoutLogMessage = "session exceeded configured timeout"
 // stall the loser's cleanup, long enough that a healthy IsAlive (typically
 // sub-100ms) succeeds with margin.
 const sandboxRaceProbeTimeout = 3 * time.Second
+
+func logAgentRunFinished(log zerolog.Logger, run *models.Session, outcome string, runStartedAt time.Time, addFields func(*zerolog.Event)) {
+	event := log.Info().
+		Str("agent_type", string(run.AgentType)).
+		Str("outcome", outcome).
+		Float64("duration_ms", observability.DurationMillis(time.Since(runStartedAt)))
+	if addFields != nil {
+		addFields(event)
+	}
+	event.Msg("agent run finished")
+}
+
+func logAgentRunFailed(log zerolog.Logger, run *models.Session, err error, outcome string, runStartedAt time.Time, addFields func(*zerolog.Event)) {
+	event := log.Error().Err(err).
+		Str("agent_type", string(run.AgentType)).
+		Str("outcome", outcome).
+		Float64("duration_ms", observability.DurationMillis(time.Since(runStartedAt)))
+	if addFields != nil {
+		addFields(event)
+	}
+	event.Msg("agent run failed")
+}
 
 // diagnoseAcquireHoldRaceLoss decides whether a lost AcquireTurnHold is a
 // genuine duplicate run (winner is alive) or a stale orphan from a crashed
@@ -172,8 +195,15 @@ type ClaudeCodeAuthProvider interface {
 	GetValidToken(ctx context.Context, orgID uuid.UUID) (*models.AnthropicSubscription, *uuid.UUID, error)
 }
 
+// ClaudeCodeAuthRefresher rotates an expired Claude subscription token by
+// credential id. The scope must match the credential's owner: personal
+// subscriptions live in coding_credentials with user_id set, and the
+// underlying lookup filters on (org_id, user_id) — passing org scope for a
+// personal credential would mis-route the lookup and surface as
+// "credential not found", silently dropping personal subscriptions back
+// to the org fallback after their first 8h of token life.
 type ClaudeCodeAuthRefresher interface {
-	RefreshTokenByID(ctx context.Context, orgID uuid.UUID, credID uuid.UUID) (*models.AnthropicSubscription, error)
+	RefreshTokenByID(ctx context.Context, scope models.Scope, credID uuid.UUID) (*models.AnthropicSubscription, error)
 }
 
 // CredentialProvider abstracts retrieving org-scoped provider credentials.
@@ -448,8 +478,8 @@ func (o *Orchestrator) RevertThread(ctx context.Context, session *models.Session
 	}
 
 	sandboxCfg := DefaultSandboxConfig()
-	sandboxCfg.OrgID = session.OrgID
-	sandboxCfg.SessionID = session.ID
+	sandboxCfg.OrgID = session.OrgID.String()
+	sandboxCfg.SessionID = session.ID.String()
 	if slug, err := o.sessionRepoSlug(ctx, session); err != nil {
 		return fmt.Errorf("revert thread: resolve workdir: %w", err)
 	} else if slug != "" {
@@ -1770,11 +1800,17 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 		if wasCancelled || (stopReason == StopReasonNone && errors.Is(ctx.Err(), context.Canceled)) {
 			log.Info().Msg("session cancelled by user")
 			o.handleCancelledSession(ctx, run, sandbox, result, run.CurrentTurn+1, log)
+			logAgentRunFinished(log, run, "cancelled", runStartedAt, func(event *zerolog.Event) {
+				event.Str("stop_reason", string(models.RuntimeStopReasonUserCancel))
+			})
 			return fmt.Errorf("session cancelled: %w", ctx.Err())
 		}
 		if stopReason != StopReasonNone {
 			log.Info().Str("stop_reason", string(stopReason)).Msg("session stopped by runtime policy")
 			o.handlePolicyStoppedSession(ctx, run, sandbox, result, run.CurrentTurn+1, stopReason, log)
+			logAgentRunFinished(log, run, "runtime_policy_stopped", runStartedAt, func(event *zerolog.Event) {
+				event.Str("stop_reason", string(stopReason))
+			})
 			return nil
 		}
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
@@ -1783,6 +1819,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 			return fmt.Errorf("%w after %s: %w", ErrSessionTimedOut, elapsed, err)
 		}
 		o.failRun(ctx, run, err.Error())
+		logAgentRunFailed(log, run, err, "failed", runStartedAt, nil)
 		o.enqueueJob(ctx, run.OrgID, "agent", "analyze_failure", map[string]interface{}{
 			"session_id": run.ID.String(),
 			"org_id":     run.OrgID.String(),
@@ -1795,11 +1832,17 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 	if wasCancelled {
 		log.Info().Msg("agent exited after cancel, snapshotting and returning to idle")
 		o.handleCancelledSession(ctx, run, sandbox, result, run.CurrentTurn+1, log)
+		logAgentRunFinished(log, run, "cancelled", runStartedAt, func(event *zerolog.Event) {
+			event.Str("stop_reason", string(models.RuntimeStopReasonUserCancel))
+		})
 		return nil
 	}
 	if stopReason != StopReasonNone {
 		log.Info().Str("stop_reason", string(stopReason)).Msg("agent exited after runtime policy stop")
 		o.handlePolicyStoppedSession(ctx, run, sandbox, result, run.CurrentTurn+1, stopReason, log)
+		logAgentRunFinished(log, run, "runtime_policy_stopped", runStartedAt, func(event *zerolog.Event) {
+			event.Str("stop_reason", string(stopReason))
+		})
 		return nil
 	}
 
@@ -1855,6 +1898,12 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 		log.Info().
 			Int("turn", turnNumber).
 			Msg("interactive session turn completed and returned to idle")
+		logAgentRunFinished(log, run, "idle", runStartedAt, func(event *zerolog.Event) {
+			event.
+				Str("status", "idle").
+				Float64("confidence", result.ConfidenceScore).
+				Float64("threshold", confidenceThresholds.AutoProceed)
+		})
 		return nil
 	}
 
@@ -1875,11 +1924,12 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 		}
 	}
 
-	log.Info().
-		Str("status", status).
-		Float64("confidence", result.ConfidenceScore).
-		Float64("threshold", confidenceThresholds.AutoProceed).
-		Msg("agent run finished")
+	logAgentRunFinished(log, run, status, runStartedAt, func(event *zerolog.Event) {
+		event.
+			Str("status", status).
+			Float64("confidence", result.ConfidenceScore).
+			Float64("threshold", confidenceThresholds.AutoProceed)
+	})
 
 	// 12. Enqueue follow-up job based on confidence.
 	if result.ConfidenceScore >= confidenceThresholds.AutoProceed {
@@ -3115,7 +3165,16 @@ func (o *Orchestrator) failRunWithCategory(ctx context.Context, run *models.Sess
 // fits the "transient slowness" case and we accept the small false-positive
 // rate where a session is structurally too large to ever fit.
 func (o *Orchestrator) failTimedOutSession(run *models.Session, elapsed time.Duration, turnNumber int, underlyingErr error, log zerolog.Logger) {
-	event := log.Error().Err(underlyingErr).Dur("elapsed", elapsed)
+	// Single canonical log per timeout: includes the canonical message that
+	// SessionTimeoutBurst alerts key off, plus the platform-health fields
+	// (agent_type, outcome, duration_ms) that the platform-health dashboard
+	// uses. Emitting only one event keeps the alert and dashboard counts in
+	// sync — a separate "agent run failed" event would double-count timeouts.
+	event := log.Error().Err(underlyingErr).
+		Str("agent_type", string(run.AgentType)).
+		Str("outcome", "timeout").
+		Float64("duration_ms", observability.DurationMillis(elapsed)).
+		Dur("elapsed", elapsed)
 	if turnNumber > 0 {
 		event = event.Int("turn", turnNumber)
 	}
@@ -3399,7 +3458,12 @@ func (o *Orchestrator) injectPickedUnifiedClaudeCodeAuth(ctx context.Context, or
 	if sub.NeedsRefresh(codexSubscriptionRefreshWindow) {
 		refresher, ok := o.claudeCodeAuth.(ClaudeCodeAuthRefresher)
 		if ok {
-			refreshed, err := refresher.RefreshTokenByID(ctx, orgID, picked.ID)
+			// Build scope from the picked row's UserID. Personal credentials
+			// (UserID != nil) require their scope on the lookup; passing
+			// org scope would miss them in coding_credentials and surface
+			// as "credential not found".
+			scope := models.Scope{OrgID: orgID, UserID: picked.UserID}
+			refreshed, err := refresher.RefreshTokenByID(ctx, scope, picked.ID)
 			if err == nil && refreshed != nil {
 				sub = *refreshed
 			} else if sub.IsExpired() {
