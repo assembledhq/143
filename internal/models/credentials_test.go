@@ -1,6 +1,7 @@
 package models
 
 import (
+	"fmt"
 	"testing"
 	"time"
 
@@ -272,6 +273,71 @@ func TestParseProviderConfig_Linear(t *testing.T) {
 	lc, ok := cfg.(LinearConfig)
 	require.True(t, ok, "config should be LinearConfig")
 	require.Equal(t, "linear_secret", lc.WebhookSecret, "should parse webhook_secret")
+}
+
+func TestParseProviderConfig_Linear_WithRefreshFields(t *testing.T) {
+	t.Parallel()
+
+	expiresAt := time.Now().Add(time.Hour).UTC().Truncate(time.Second)
+	input := fmt.Sprintf(
+		`{"access_token":"lin_at","refresh_token":"lin_rt","expires_at":%q,"token_type":"Bearer","scope":"read,write"}`,
+		expiresAt.Format(time.RFC3339),
+	)
+	cfg, err := ParseProviderConfig(ProviderLinear, []byte(input))
+	require.NoError(t, err)
+
+	lc, ok := cfg.(LinearConfig)
+	require.True(t, ok)
+	require.Equal(t, "lin_at", lc.AccessToken)
+	require.Equal(t, "lin_rt", lc.RefreshToken)
+	require.True(t, expiresAt.Equal(lc.ExpiresAt), "expires_at should round-trip")
+	require.Equal(t, "Bearer", lc.TokenType)
+	require.Equal(t, "read,write", lc.Scope)
+}
+
+func TestLinearConfig_IsExpired(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		cfg      LinearConfig
+		expected bool
+	}{
+		{"expired token", LinearConfig{ExpiresAt: time.Now().Add(-1 * time.Hour)}, true},
+		{"valid token", LinearConfig{ExpiresAt: time.Now().Add(1 * time.Hour)}, false},
+		{"legacy token without expiry", LinearConfig{}, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			require.Equal(t, tt.expected, tt.cfg.IsExpired())
+		})
+	}
+}
+
+func TestLinearConfig_NeedsRefresh(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		cfg      LinearConfig
+		window   time.Duration
+		expected bool
+	}{
+		{"expires within window", LinearConfig{RefreshToken: "rt", ExpiresAt: time.Now().Add(2 * time.Minute)}, 5 * time.Minute, true},
+		{"expires outside window", LinearConfig{RefreshToken: "rt", ExpiresAt: time.Now().Add(1 * time.Hour)}, 5 * time.Minute, false},
+		{"already expired", LinearConfig{RefreshToken: "rt", ExpiresAt: time.Now().Add(-1 * time.Minute)}, 5 * time.Minute, true},
+		{"known expiry without refresh token still needs reconnect", LinearConfig{ExpiresAt: time.Now().Add(2 * time.Minute)}, 5 * time.Minute, true},
+		{"legacy: no refresh token, no expiry", LinearConfig{AccessToken: "lin"}, 5 * time.Minute, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			require.Equal(t, tt.expected, tt.cfg.NeedsRefresh(tt.window))
+		})
+	}
 }
 
 func TestParseProviderConfig_UnknownProvider(t *testing.T) {
