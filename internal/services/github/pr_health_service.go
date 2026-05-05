@@ -769,7 +769,35 @@ func (s *PRService) listCheckRunsForRef(ctx context.Context, token, owner, repo,
 	if err := json.Unmarshal(body, &resp); err != nil {
 		return nil, fmt.Errorf("decode GitHub check runs: %w", err)
 	}
-	return resp.CheckRuns, nil
+	return dedupeCheckRunsByName(resp.CheckRuns), nil
+}
+
+// dedupeCheckRunsByName collapses check runs that share a display name down to
+// the most recent one. GitHub's filter=latest only dedupes within a single
+// workflow run, so a repo whose workflow triggers on both `pull_request` and
+// `push` ends up with two parallel runs on the same SHA — each emits its own
+// "Backend Test", "Frontend Test", etc. and the unfiltered list shows every
+// job twice. Highest ID wins because GitHub allocates check_run IDs
+// monotonically, so the newer workflow run's state replaces the older one.
+func dedupeCheckRunsByName(checkRuns []gitHubCheckRun) []gitHubCheckRun {
+	if len(checkRuns) <= 1 {
+		return checkRuns
+	}
+	bestIdx := make(map[string]int, len(checkRuns))
+	for i, check := range checkRuns {
+		key := strings.ToLower(strings.TrimSpace(check.Name))
+		if existing, ok := bestIdx[key]; !ok || checkRuns[i].ID > checkRuns[existing].ID {
+			bestIdx[key] = i
+		}
+	}
+	deduped := make([]gitHubCheckRun, 0, len(bestIdx))
+	for i, check := range checkRuns {
+		key := strings.ToLower(strings.TrimSpace(check.Name))
+		if bestIdx[key] == i {
+			deduped = append(deduped, check)
+		}
+	}
+	return deduped
 }
 
 func (s *PRService) fetchCheckRunAnnotations(ctx context.Context, token, owner, repo string, checkRunID int64) ([]string, error) {
