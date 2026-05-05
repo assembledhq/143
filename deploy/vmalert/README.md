@@ -15,4 +15,6 @@ The logging compose stack now includes both `vmalert` and `Alertmanager`. Notifi
 - `GRAFANA_ALERTS_WARNING_WEBHOOK_URL`
 - `GRAFANA_ALERTS_CRITICAL_WEBHOOK_URL`
 
-If either webhook URL is omitted, logging deploys now fall back to a disabled localhost endpoint instead of failing provisioning or rollout. Alerts for that severity will be dropped until a real webhook URL is configured.
+Alertmanager now posts to an internal `alert-slack-relay` service, and that relay translates Alertmanager webhook payloads into the plain `{"text": ...}` shape Slack incoming webhooks expect.
+
+If either webhook URL is omitted, the relay falls back to a disabled localhost endpoint instead of failing provisioning or rollout. Alerts for that severity will be dropped until a real webhook URL is configured.

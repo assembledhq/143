@@ -8,7 +8,7 @@ contactPoints:
         type: webhook
         disableResolveMessage: false
         settings:
-          url: $GRAFANA_ALERTS_WARNING_WEBHOOK_URL
+          url: http://alert-slack-relay:8080/warning
           httpMethod: POST
           maxAlerts: 20
   - orgId: 1
@@ -18,6 +18,6 @@ contactPoints:
         type: webhook
         disableResolveMessage: false
         settings:
-          url: $GRAFANA_ALERTS_CRITICAL_WEBHOOK_URL
+          url: http://alert-slack-relay:8080/critical
           httpMethod: POST
           maxAlerts: 20

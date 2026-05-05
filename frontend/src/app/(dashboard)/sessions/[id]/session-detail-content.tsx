@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useQueryState } from "nuqs";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
@@ -1701,6 +1701,18 @@ function SessionTimelineSkeleton() {
   );
 }
 
+type ChatPanelProps = {
+  session: Session;
+  sessionId: string;
+  activeThread?: SessionThread;
+  isActive: boolean;
+  optimisticMessages: SessionMessage[];
+  onDiffClick?: () => void;
+  onApprovePlan?: () => void;
+  onAdjustPlan?: () => void;
+  onRegisterScrollToLiveEdge?: (scrollToLiveEdge: (() => void) | null) => void;
+};
+
 function ChatPanel({
   session,
   sessionId,
@@ -1711,17 +1723,7 @@ function ChatPanel({
   onApprovePlan,
   onAdjustPlan,
   onRegisterScrollToLiveEdge,
-}: {
-  session: Session;
-  sessionId: string;
-  activeThread?: SessionThread;
-  isActive: boolean;
-  optimisticMessages: SessionMessage[];
-  onDiffClick?: () => void;
-  onApprovePlan?: () => void;
-  onAdjustPlan?: () => void;
-  onRegisterScrollToLiveEdge?: (scrollToLiveEdge: (() => void) | null) => void;
-}) {
+}: ChatPanelProps) {
   const queryClient = useQueryClient();
   const { user } = useAuth();
   const [streamedLogs, setStreamedLogs] = useState<SessionLog[]>([]);
@@ -2140,6 +2142,42 @@ function ChatPanel({
     </div>
   );
 }
+
+function sameDiffStats(
+  a?: Session["diff_stats"] | null,
+  b?: Session["diff_stats"] | null,
+): boolean {
+  if (a === b) {
+    return true;
+  }
+  if (!a || !b) {
+    return !a && !b;
+  }
+  return a.added === b.added && a.removed === b.removed && a.files_changed === b.files_changed;
+}
+
+function areChatPanelPropsEqual(previous: ChatPanelProps, next: ChatPanelProps): boolean {
+  return previous.sessionId === next.sessionId &&
+    previous.isActive === next.isActive &&
+    previous.optimisticMessages === next.optimisticMessages &&
+    previous.onDiffClick === next.onDiffClick &&
+    previous.onApprovePlan === next.onApprovePlan &&
+    previous.onAdjustPlan === next.onAdjustPlan &&
+    previous.onRegisterScrollToLiveEdge === next.onRegisterScrollToLiveEdge &&
+    previous.session.id === next.session.id &&
+    previous.session.status === next.session.status &&
+    previous.session.sandbox_state === next.session.sandbox_state &&
+    previous.session.primary_issue_id === next.session.primary_issue_id &&
+    previous.session.org_id === next.session.org_id &&
+    previous.session.created_at === next.session.created_at &&
+    sameDiffStats(previous.session.diff_stats, next.session.diff_stats) &&
+    previous.activeThread?.id === next.activeThread?.id &&
+    previous.activeThread?.status === next.activeThread?.status &&
+    previous.activeThread?.current_turn === next.activeThread?.current_turn &&
+    previous.activeThread?.label === next.activeThread?.label;
+}
+
+const MemoizedChatPanel = memo(ChatPanel, areChatPanelPropsEqual);
 
 // ---------------------------------------------------------------------------
 // Main component
@@ -3068,6 +3106,21 @@ export function SessionDetailContent({ id }: { id: string }) {
     session,
     sendMutation,
   ]);
+  const queueSendRef = useRef(queueSend);
+  const composerCanSendMessageRef = useRef(composerCanSendMessage);
+  const sendPendingRef = useRef(sendMutation.isPending);
+
+  useEffect(() => {
+    queueSendRef.current = queueSend;
+  }, [queueSend]);
+
+  useEffect(() => {
+    composerCanSendMessageRef.current = composerCanSendMessage;
+  }, [composerCanSendMessage]);
+
+  useEffect(() => {
+    sendPendingRef.current = sendMutation.isPending;
+  }, [sendMutation.isPending]);
 
   const cancelMutation = useMutation({
     mutationFn: () => api.sessions.cancelSession(id),
@@ -3193,17 +3246,23 @@ export function SessionDetailContent({ id }: { id: string }) {
   }, [newThreadAgentType]);
 
   const handleApprovePlan = useCallback(() => {
-    if (!composerCanSendMessage || sendMutation.isPending) return;
-    queueSend({
+    if (!composerCanSendMessageRef.current || sendPendingRef.current) return;
+    queueSendRef.current({
       planMode: false,
       overrideMessage: "The plan looks good. Please proceed with executing the implementation plan above. Make all the changes as described.",
     });
-  }, [composerCanSendMessage, queueSend, sendMutation.isPending]);
+  }, []);
 
   const handleAdjustPlan = useCallback(() => {
     setComposerMessage("Please adjust the plan: ");
     setComposerPlanMode(false);
     composerTextareaRef.current?.focus();
+  }, []);
+  const handleChatDiffClick = useCallback(() => {
+    openReview();
+  }, [openReview]);
+  const registerChatPanelScrollToLiveEdge = useCallback((scrollToLiveEdge: (() => void) | null) => {
+    chatPanelScrollToLiveEdgeRef.current = scrollToLiveEdge;
   }, []);
 
   const changesCount = diffStats?.filesChanged;
@@ -3742,19 +3801,17 @@ export function SessionDetailContent({ id }: { id: string }) {
         <div className="flex-1 min-h-0 relative">
           {/* Chat panel — always mounted to preserve scroll, SSE connections, etc. */}
           <div className={cn("h-full", centerMode !== "chat" && "hidden")}>
-            <ChatPanel
+            <MemoizedChatPanel
               key={activeThread ? `${id}:${activeThread.id}` : id}
               session={session}
               sessionId={id}
               activeThread={activeThread}
               isActive={isActive}
               optimisticMessages={optimisticMessages}
-              onDiffClick={() => openReview()}
+              onDiffClick={handleChatDiffClick}
               onApprovePlan={handleApprovePlan}
               onAdjustPlan={handleAdjustPlan}
-              onRegisterScrollToLiveEdge={(scrollToLiveEdge) => {
-                chatPanelScrollToLiveEdgeRef.current = scrollToLiveEdge;
-              }}
+              onRegisterScrollToLiveEdge={registerChatPanelScrollToLiveEdge}
             />
           </div>
           {/* Review diff view — mounted only when active */}
