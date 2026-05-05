@@ -328,6 +328,7 @@ func TestSessionStore_Create(t *testing.T) {
 	store := NewSessionStore(mock)
 	now := time.Now()
 	generatedID := uuid.New()
+	threadID := uuid.New()
 
 	issueID := uuid.New()
 	orgID := uuid.New()
@@ -360,9 +361,9 @@ func TestSessionStore_Create(t *testing.T) {
 	// name) is caught by this test instead of slipping through under
 	// AnyArg() matchers. Order mirrors the named-args block in
 	// SessionStore.Create.
-	mock.ExpectExec("INSERT INTO session_threads").
+	mock.ExpectQuery("INSERT INTO session_threads").
 		WithArgs(generatedID, orgID, models.AgentType("claude_code"), &modelOverride, "Main", models.ThreadStatusIdle).
-		WillReturnResult(pgxmock.NewResult("INSERT", 1))
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(threadID))
 	mock.ExpectExec("INSERT INTO session_issue_links").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("INSERT", 1))
@@ -373,6 +374,8 @@ func TestSessionStore_Create(t *testing.T) {
 	require.Equal(t, generatedID, run.ID, "should set the generated ID on the agent run")
 	require.Equal(t, now, run.CreatedAt, "should set the created_at timestamp on the agent run")
 	require.Equal(t, now, run.LastActivityAt, "should set the last_activity_at timestamp on the agent run")
+	require.NotNil(t, run.PrimaryThreadID, "Create should expose the seeded primary thread ID")
+	require.Equal(t, threadID, *run.PrimaryThreadID, "Create should expose the seeded primary thread ID")
 	require.NotNil(t, run.PrimaryIssueID, "Create should preserve the primary issue ID for issue-backed sessions")
 	require.Equal(t, issueID, *run.PrimaryIssueID, "Create should preserve the primary issue ID on issue-backed sessions")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
@@ -410,9 +413,9 @@ func TestSessionStore_Create_AllowsNilIssueID(t *testing.T) {
 			pgxmock.NewRows([]string{"id", "created_at", "last_activity_at"}).
 				AddRow(generatedID, now, now),
 		)
-	mock.ExpectExec("INSERT INTO session_threads").
+	mock.ExpectQuery("INSERT INTO session_threads").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnResult(pgxmock.NewResult("INSERT", 1))
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
 	mock.ExpectCommit()
 
 	err = store.Create(context.Background(), run)
@@ -457,9 +460,9 @@ func TestSessionStore_Create_RollsBackWhenPrimaryLinkInsertFails(t *testing.T) {
 			pgxmock.NewRows([]string{"id", "created_at", "last_activity_at"}).
 				AddRow(generatedID, now, now),
 		)
-	mock.ExpectExec("INSERT INTO session_threads").
+	mock.ExpectQuery("INSERT INTO session_threads").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnResult(pgxmock.NewResult("INSERT", 1))
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
 	mock.ExpectExec("INSERT INTO session_issue_links").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnError(context.DeadlineExceeded)

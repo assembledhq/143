@@ -490,11 +490,13 @@ func (s *SessionStore) Create(ctx context.Context, run *models.Session) error {
 	// destination from turn 1. Done in the same transaction so the invariant
 	// "every session row implies at least one thread row" cannot be violated
 	// by a partial failure between session insert and thread insert.
-	if _, err := tx.Exec(ctx, `
+	var primaryThreadID uuid.UUID
+	if err := tx.QueryRow(ctx, `
 		INSERT INTO session_threads (
 			session_id, org_id, agent_type, model_override, label, status
 		)
 		VALUES (@session_id, @org_id, @agent_type, @model_override, @label, @status)
+		RETURNING id
 	`, pgx.NamedArgs{
 		"session_id":     run.ID,
 		"org_id":         run.OrgID,
@@ -502,9 +504,10 @@ func (s *SessionStore) Create(ctx context.Context, run *models.Session) error {
 		"model_override": run.ModelOverride,
 		"label":          "Main",
 		"status":         models.ThreadStatusIdle,
-	}); err != nil {
+	}).Scan(&primaryThreadID); err != nil {
 		return fmt.Errorf("insert primary session thread: %w", err)
 	}
+	run.PrimaryThreadID = &primaryThreadID
 
 	if run.PrimaryIssueID != nil {
 		if _, err := tx.Exec(ctx, `

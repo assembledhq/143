@@ -13,10 +13,50 @@
 -- "primary" tab matches the agent the session was started under. Status is
 -- 'idle' to match migration 108's default for never-run threads.
 
-INSERT INTO session_threads (session_id, org_id, agent_type, model_override, label, status)
-SELECT s.id, s.org_id, s.agent_type, s.model_override, 'Main', 'idle'
+INSERT INTO session_threads (session_id, org_id, agent_type, model_override, label, status, current_turn, last_activity_at, started_at, completed_at)
+SELECT
+  s.id,
+  s.org_id,
+  s.agent_type,
+  s.model_override,
+  'Main',
+  CASE
+    WHEN s.status = 'pending' THEN 'pending'
+    WHEN s.status = 'running' THEN 'running'
+    WHEN s.status = 'awaiting_input' THEN 'awaiting_input'
+    WHEN s.status = 'failed' THEN 'failed'
+    WHEN s.status = 'cancelled' THEN 'cancelled'
+    WHEN s.status IN ('completed', 'pr_created') THEN 'completed'
+    ELSE 'idle'
+  END,
+  s.current_turn,
+  s.last_activity_at,
+  s.started_at,
+  s.completed_at
 FROM sessions s
 WHERE s.deleted_at IS NULL
   AND NOT EXISTS (
     SELECT 1 FROM session_threads t WHERE t.session_id = s.id
 );
+
+-- Existing first-turn transcripts and logs predate thread attribution and
+-- have NULL thread_id. Once the primary tab exists, the UI fetches the
+-- selected tab's thread-scoped timeline, so assign unthreaded history to the
+-- single primary thread where that mapping is unambiguous.
+UPDATE session_messages m
+SET thread_id = t.id
+FROM session_threads t
+WHERE m.org_id = t.org_id
+  AND m.session_id = t.session_id
+  AND m.thread_id IS NULL
+  AND t.label = 'Main'
+  AND (SELECT count(*) FROM session_threads x WHERE x.org_id = t.org_id AND x.session_id = t.session_id) = 1;
+
+UPDATE session_logs l
+SET thread_id = t.id
+FROM session_threads t
+WHERE l.org_id = t.org_id
+  AND l.session_id = t.session_id
+  AND l.thread_id IS NULL
+  AND t.label = 'Main'
+  AND (SELECT count(*) FROM session_threads x WHERE x.org_id = t.org_id AND x.session_id = t.session_id) = 1;

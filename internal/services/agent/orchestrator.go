@@ -325,6 +325,12 @@ type SessionMessageStore interface {
 	ListBySession(ctx context.Context, orgID, sessionID uuid.UUID) ([]models.SessionMessage, error)
 }
 
+type SessionThreadStore interface {
+	UpdateStatus(ctx context.Context, orgID, threadID uuid.UUID, status models.ThreadStatus) error
+	CompleteTurn(ctx context.Context, orgID, threadID uuid.UUID, turnNumber int, agentSessionID string) error
+	UpdateResult(ctx context.Context, orgID, threadID uuid.UUID, status models.ThreadStatus, result *models.SessionResult) error
+}
+
 type SessionIssueLinkStore interface {
 	ListBySession(ctx context.Context, orgID, sessionID uuid.UUID) ([]models.SessionIssueLink, error)
 }
@@ -410,6 +416,7 @@ type Orchestrator struct {
 	agentRunLogs      SessionLogStore
 	agentRunQuestions SessionQuestionStore
 	sessionMessages   SessionMessageStore
+	sessionThreads    SessionThreadStore
 	sessionIssueLinks SessionIssueLinkStore
 	issueSnapshots    SessionIssueSnapshotStore
 	decisionLog       DecisionLogStore
@@ -488,6 +495,7 @@ type OrchestratorConfig struct {
 	SessionLogs       SessionLogStore
 	SessionQuestions  SessionQuestionStore
 	SessionMessages   SessionMessageStore
+	SessionThreads    SessionThreadStore
 	SessionIssueLinks SessionIssueLinkStore
 	IssueSnapshots    SessionIssueSnapshotStore
 	DecisionLog       DecisionLogStore
@@ -569,6 +577,7 @@ func NewOrchestrator(cfg OrchestratorConfig) *Orchestrator {
 		agentRunLogs:      cfg.SessionLogs,
 		agentRunQuestions: cfg.SessionQuestions,
 		sessionMessages:   cfg.SessionMessages,
+		sessionThreads:    cfg.SessionThreads,
 		sessionIssueLinks: cfg.SessionIssueLinks,
 		issueSnapshots:    cfg.IssueSnapshots,
 		decisionLog:       cfg.DecisionLog,
@@ -1255,6 +1264,16 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 	if err := o.sessions.UpdateStatus(ctx, run.OrgID, run.ID, "running"); err != nil {
 		return fmt.Errorf("update run status to running: %w", err)
 	}
+	var primaryThreadID *uuid.UUID
+	if run.PrimaryThreadID != nil && *run.PrimaryThreadID != uuid.Nil {
+		threadID := *run.PrimaryThreadID
+		primaryThreadID = &threadID
+		if o.sessionThreads != nil {
+			if err := o.sessionThreads.UpdateStatus(ctx, run.OrgID, threadID, models.ThreadStatusRunning); err != nil {
+				log.Warn().Err(err).Str("thread_id", threadID.String()).Msg("failed to mark primary thread running")
+			}
+		}
+	}
 	if run.PrimaryIssueID != nil && o.issues != nil {
 		if err := o.issues.UpdateStatus(ctx, run.OrgID, *run.PrimaryIssueID, "in_progress"); err != nil {
 			log.Warn().Err(err).Str("issue_id", run.PrimaryIssueID.String()).Msg("failed to update primary issue status to in_progress")
@@ -1699,7 +1718,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 	logWg.Add(1)
 	go func() {
 		defer logWg.Done()
-		o.streamLogs(ctx, run.ID, run.OrgID, nil, turnNumber, logCh, runtimeTracker)
+		o.streamLogs(ctx, run.ID, run.OrgID, primaryThreadID, turnNumber, logCh, runtimeTracker)
 	}()
 
 	execCtx := WithSandboxProvider(ctx, o.provider)
@@ -1708,7 +1727,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 	logWg.Wait()
 
 	// 10b. Retry once on token expiration for Codex agents.
-	result, err = o.retryOnTokenExpired(ctx, run.AgentType, run.OrgID, run.TriggeredByUserID, run.ID, nil, turnNumber, sandbox, adapter, execCtx, prompt, result, err, log)
+	result, err = o.retryOnTokenExpired(ctx, run.AgentType, run.OrgID, run.TriggeredByUserID, run.ID, primaryThreadID, turnNumber, sandbox, adapter, execCtx, prompt, result, err, log)
 
 	// 10c. Shed the just-picked credential's in-process health-cache slot if
 	// the (possibly retried) result indicates a credential-level failure.
@@ -1757,6 +1776,11 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 		}
 		o.failRun(ctx, run, err.Error())
 		logAgentRunFailed(log, run, err, "failed", runStartedAt, nil)
+		if primaryThreadID != nil && o.sessionThreads != nil {
+			if threadErr := o.sessionThreads.UpdateStatus(ctx, run.OrgID, *primaryThreadID, models.ThreadStatusFailed); threadErr != nil {
+				log.Warn().Err(threadErr).Str("thread_id", primaryThreadID.String()).Msg("failed to mark primary thread failed")
+			}
+		}
 		o.enqueueJob(ctx, run.OrgID, "agent", "analyze_failure", map[string]interface{}{
 			"session_id": run.ID.String(),
 			"org_id":     run.OrgID.String(),
@@ -1820,7 +1844,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 
 	if isInteractive {
 		turnNumber := run.CurrentTurn + 1
-		if err := o.createAssistantMessage(ctx, run.ID, run.OrgID, nil, turnNumber, result); err != nil {
+		if err := o.createAssistantMessage(ctx, run.ID, run.OrgID, primaryThreadID, turnNumber, result); err != nil {
 			log.Warn().Err(err).Msg("failed to persist assistant message for interactive turn")
 		}
 
@@ -1830,6 +1854,11 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 		}
 		if err := o.sessions.UpdateTurnComplete(ctx, run.OrgID, run.ID, turnNumber, runResult, agentSessionID, snapshotKey); err != nil {
 			return fmt.Errorf("update interactive turn result: %w", err)
+		}
+		if primaryThreadID != nil && o.sessionThreads != nil {
+			if err := o.sessionThreads.CompleteTurn(ctx, run.OrgID, *primaryThreadID, turnNumber, agentSessionID); err != nil {
+				log.Warn().Err(err).Str("thread_id", primaryThreadID.String()).Msg("failed to mark primary thread turn complete")
+			}
 		}
 
 		log.Info().
@@ -1846,6 +1875,11 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 
 	if err := o.sessions.UpdateResult(ctx, run.OrgID, run.ID, status, runResult); err != nil {
 		return fmt.Errorf("update run result: %w", err)
+	}
+	if primaryThreadID != nil && o.sessionThreads != nil {
+		if err := o.sessionThreads.UpdateResult(ctx, run.OrgID, *primaryThreadID, models.ThreadStatusCompleted, runResult); err != nil {
+			log.Warn().Err(err).Str("thread_id", primaryThreadID.String()).Msg("failed to persist primary thread result")
+		}
 	}
 
 	// Persist snapshot metadata so the session can be continued later.
