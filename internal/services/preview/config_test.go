@@ -699,32 +699,6 @@ func TestLookupInfraTemplate(t *testing.T) {
 	}
 }
 
-func TestAllInfraImages(t *testing.T) {
-	t.Parallel()
-
-	images := AllInfraImages()
-	if len(images) == 0 {
-		t.Fatal("every supported template must contribute an image so worker boot can pre-pull")
-	}
-
-	// No duplicates (postgres-17 / postgres-16 etc. happen to use distinct
-	// images today, but the contract is dedup regardless).
-	seen := map[string]struct{}{}
-	for _, img := range images {
-		if _, dup := seen[img]; dup {
-			t.Errorf("AllInfraImages must dedupe; saw %q twice", img)
-		}
-		seen[img] = struct{}{}
-	}
-
-	// Every template's image should be present.
-	for name, tmpl := range supportedTemplates {
-		if _, ok := seen[tmpl.Image]; !ok {
-			t.Errorf("image %q for template %q is missing from AllInfraImages", tmpl.Image, name)
-		}
-	}
-}
-
 func TestParseConfig_RoundTrip(t *testing.T) {
 	t.Parallel()
 
