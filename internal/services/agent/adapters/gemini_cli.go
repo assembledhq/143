@@ -34,6 +34,13 @@ func (a *GeminiCLIAdapter) Name() models.AgentType {
 	return models.AgentTypeGeminiCLI
 }
 
+// ResumeMode reports that Gemini resumes prior turns by explicit session ID
+// (captured from any stream event carrying `session_id` and threaded back
+// into `gemini --resume <id>`).
+func (a *GeminiCLIAdapter) ResumeMode() agent.SessionResumeMode {
+	return agent.ResumeBySessionID
+}
+
 // PreparePrompt constructs the prompts for Gemini CLI based on the issue context.
 func (a *GeminiCLIAdapter) PreparePrompt(ctx context.Context, input *agent.AgentInput) (*agent.AgentPrompt, error) {
 	if input == nil {
@@ -62,24 +69,23 @@ func (a *GeminiCLIAdapter) Execute(ctx context.Context, sandbox *agent.Sandbox, 
 	}
 
 	var cmd string
-	if prompt.Continuation {
-		// Subsequent turn: resume the latest restored session state.
+	if prompt.Continuation && prompt.ResumeSessionID != "" {
+		// Subsequent turn with a known session ID: deterministic resume by
+		// session id captured from a prior turn's stream output. We avoid
+		// `--resume latest`, which picks up whichever Gemini session is
+		// newest in the local session storage and is non-deterministic when
+		// stale entries are present.
 		msg := shellEscapeDouble(prompt.UserMessage)
-		if prompt.ResumeSessionID != "" {
-			cmd = fmt.Sprintf(
-				"gemini --resume %s --approval-mode=yolo --output-format stream-json -p \"%s\"",
-				shellEscapeSingle(prompt.ResumeSessionID),
-				msg,
-			)
-		} else {
-			cmd = fmt.Sprintf(
-				"gemini --resume latest --approval-mode=yolo --output-format stream-json -p \"%s\"",
-				msg,
-			)
-		}
+		cmd = fmt.Sprintf(
+			"gemini --resume %s --approval-mode=yolo --output-format stream-json -p \"%s\"",
+			shellEscapeSingle(prompt.ResumeSessionID),
+			msg,
+		)
 	} else {
-		// First turn: write prompt file and run fresh. Put it under $HOME
-		// (not WorkDir) so it doesn't pollute the cloned repo's git status.
+		// Fresh exec — used for first turns and as the fallback for
+		// continuation turns when the session ID was never captured (the
+		// orchestrator embeds the prior conversation history into UserPrompt
+		// in that case so the agent has the full context).
 		promptContent := fmt.Sprintf("%s\n\n---\n\n%s", prompt.SystemPrompt, prompt.UserPrompt)
 		promptPath := fmt.Sprintf("%s/.143-prompt.md", sandbox.HomeDir)
 		if err := provider.WriteFile(ctx, sandbox, promptPath, []byte(promptContent)); err != nil {
@@ -170,6 +176,17 @@ func parseGeminiStreamLine(line []byte, result *agent.AgentResult, logCh chan<- 
 		*summaryParts = append(*summaryParts, text)
 		tryExtractConfidence(text, result)
 		return
+	}
+
+	// Capture session_id from whichever event carries it. Gemini's stream
+	// shape varies across versions (session-lifecycle, result, or usage
+	// events have all carried it at different times, in both snake_case
+	// and camelCase), so we accept it wherever it appears rather than
+	// gating on event.Type or a single field name.
+	if id := event.SessionID; id != "" {
+		result.AgentSessionID = id
+	} else if id := event.SessionIDCamel; id != "" {
+		result.AgentSessionID = id
 	}
 
 	// Handle legacy single-object JSON format (no type field).
@@ -381,6 +398,13 @@ type geminiStreamEvent struct {
 		OutputTokens int `json:"outputTokens"`
 	} `json:"stats,omitempty"`
 	Error string `json:"error,omitempty"`
+	// SessionID is captured from any event that carries it (Gemini emits
+	// this on session-lifecycle and result events) so `gemini --resume <id>`
+	// can deterministically resume this conversation on the next turn.
+	// Both snake_case and camelCase variants are accepted because Gemini's
+	// stream-json schema has shipped both spellings across versions.
+	SessionID      string `json:"session_id,omitempty"`
+	SessionIDCamel string `json:"sessionId,omitempty"`
 }
 
 // parseGeminiStreamOutput processes the streaming JSONL output from Gemini CLI,

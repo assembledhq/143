@@ -28,11 +28,14 @@ import (
 
 // mockAgentAdapter implements agent.AgentAdapter.
 type mockAgentAdapter struct {
-	name      models.AgentType
-	executeFn func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error)
+	name       models.AgentType
+	resumeMode agent.SessionResumeMode
+	executeFn  func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error)
 }
 
 func (m *mockAgentAdapter) Name() models.AgentType { return m.name }
+
+func (m *mockAgentAdapter) ResumeMode() agent.SessionResumeMode { return m.resumeMode }
 
 func (m *mockAgentAdapter) PreparePrompt(ctx context.Context, input *agent.AgentInput) (*agent.AgentPrompt, error) {
 	return &agent.AgentPrompt{
@@ -61,6 +64,8 @@ type capturingAdapter struct {
 }
 
 func (c *capturingAdapter) Name() models.AgentType { return c.name }
+
+func (c *capturingAdapter) ResumeMode() agent.SessionResumeMode { return agent.ResumeBySessionID }
 
 func (c *capturingAdapter) PreparePrompt(ctx context.Context, input *agent.AgentInput) (*agent.AgentPrompt, error) {
 	c.captured = input
@@ -2832,6 +2837,88 @@ func TestContinueSession_UsesBuildRunResultInUpdateTurnComplete(t *testing.T) {
 	require.NotEmpty(t, updates[0].snapshotKey, "ContinueSession should persist a snapshot key")
 	require.NotNil(t, updates[0].result, "ContinueSession should build a session result for UpdateTurnComplete")
 	require.NotNil(t, updates[0].result.Diff, "ContinueSession should pass the diff through to UpdateTurnComplete")
+}
+
+func TestContinueSession_EmbedsHistoryWhenResumeBySessionIDAdapterHasNoCapturedSessionID(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	issue.Source = models.IssueSourceManual
+	session := testRun(orgID, issue.ID)
+	session.AgentType = models.AgentTypeClaudeCode
+	session.Origin = models.SessionOriginManual
+	session.InteractionMode = models.SessionInteractionModeInteractive
+	session.ValidationPolicy = models.SessionValidationPolicyOnSessionEnd
+	session.Status = string(models.SessionStatusIdle)
+	session.CurrentTurn = 1
+	// Snapshot present (Path A) but no captured agent session id — exactly
+	// the case where the adapter would otherwise lose conversation context.
+	snapshotKey := "existing-snapshot"
+	session.SnapshotKey = &snapshotKey
+	session.AgentSessionID = nil
+	priorDiff := "diff --git a/main.go b/main.go\n+fixed already\n"
+	session.Diff = &priorDiff
+
+	d := defaultDeps()
+	d.adapter = &mockAgentAdapter{
+		name:       models.AgentTypeClaudeCode,
+		resumeMode: agent.ResumeBySessionID,
+	}
+	d.issues.issue = issue
+	d.messages.messages = []models.SessionMessage{
+		{
+			ID:         1,
+			SessionID:  session.ID,
+			OrgID:      orgID,
+			TurnNumber: 1,
+			Role:       models.MessageRoleUser,
+			Content:    "Please review my changes.",
+		},
+		{
+			ID:         2,
+			SessionID:  session.ID,
+			OrgID:      orgID,
+			TurnNumber: 1,
+			Role:       models.MessageRoleAssistant,
+			Content:    "I found two issues: a missing nil check and an unbounded loop.",
+		},
+		{
+			ID:         3,
+			SessionID:  session.ID,
+			OrgID:      orgID,
+			TurnNumber: 2,
+			Role:       models.MessageRoleUser,
+			Content:    "please fix both of these issues",
+		},
+	}
+	d.provider.RestoreFn = func(ctx context.Context, sb *agent.Sandbox, reader io.Reader) error {
+		_, err := io.ReadAll(reader)
+		return err
+	}
+	d.provider.SnapshotFn = func(ctx context.Context, sb *agent.Sandbox) (io.ReadCloser, error) {
+		return io.NopCloser(bytes.NewReader([]byte("next-snapshot"))), nil
+	}
+	d.snapshots.data = map[string][]byte{snapshotKey: []byte("restored-snapshot")}
+
+	var promptSeen *agent.AgentPrompt
+	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
+		promptSeen = prompt
+		return &agent.AgentResult{Summary: "fixed", ConfidenceScore: 0.9, ExitCode: 0}, nil
+	}
+
+	err := buildOrchestrator(d).ContinueSession(context.Background(), session, nil)
+	require.NoError(t, err, "ContinueSession should succeed via the embedded-history fallback")
+	require.NotNil(t, promptSeen, "adapter must have been invoked")
+	require.False(t, promptSeen.Continuation, "fallback must run a fresh exec, not a Continuation turn")
+	require.Empty(t, promptSeen.ResumeSessionID, "fallback must not set a ResumeSessionID — there is none")
+	require.Contains(t, promptSeen.UserPrompt, "Previous conversation history", "fallback must embed conversation history into the prompt")
+	require.Contains(t, promptSeen.UserPrompt, "Please review my changes.", "fallback must include the prior user turn")
+	require.Contains(t, promptSeen.UserPrompt, "missing nil check", "fallback must include the prior assistant turn so 'fix both issues' is interpretable")
+	require.Contains(t, promptSeen.UserPrompt, "please fix both of these issues", "fallback must include the new user message as the trailing instruction")
+	require.NotContains(t, promptSeen.UserPrompt, "starting from a fresh clone", "snapshot fallback must not claim the restored workspace is a fresh clone")
+	require.NotContains(t, promptSeen.UserPrompt, "Please re-apply these changes", "snapshot fallback must not ask the agent to re-apply a diff that is already present in the restored snapshot")
+	require.NotContains(t, promptSeen.UserPrompt, priorDiff, "snapshot fallback must not include the prior diff as work to re-apply")
 }
 
 func TestContinueSession_UsesThreadExecutionOptions(t *testing.T) {
