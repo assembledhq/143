@@ -138,6 +138,10 @@ export const AGENT_DISPLAY_LABELS: Readonly<Record<string, string>> = {
   custom: "Custom",
 };
 
+export function agentDisplayLabel(agentType: string): string {
+  return AGENTS_BY_KEY[agentType]?.label ?? AGENT_DISPLAY_LABELS[agentType] ?? agentType;
+}
+
 // Resolve the agent type key for a given model string.
 export function agentTypeForModel(model: string): string | undefined {
   return AGENTS.find((a) => a.models.includes(model))?.key;
