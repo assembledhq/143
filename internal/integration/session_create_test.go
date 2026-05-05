@@ -113,3 +113,37 @@ func TestIntegration_CreateManual_RejectsEmptyMessage(t *testing.T) {
 	jobs := listJobs(t, pool, orgID)
 	require.Empty(t, jobs)
 }
+
+func TestIntegration_CreateManual_AllowsImageOnlyStart(t *testing.T) {
+	pool := setup(t)
+
+	orgID := seedOrg(t, pool)
+	user := seedUser(t, pool, orgID)
+
+	handler := newTestSessionHandler(pool)
+
+	body := strings.NewReader(`{"message":"   ","images":["https://example.com/uploaded-shot.png"]}`)
+	req := buildAuthedRequest(http.MethodPost, "/api/v1/sessions/manual", body, orgID, &user, nil)
+
+	rec := httptest.NewRecorder()
+	handler.CreateManual(rec, req)
+
+	require.Equal(t, http.StatusCreated, rec.Code, "image-only manual create should return 201, body=%s", rec.Body.String())
+
+	var resp struct {
+		Data models.Session `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp), "image-only create should return a valid session response")
+	require.NotNil(t, resp.Data.Title, "image-only create should apply the placeholder title")
+	require.Equal(t, "Manual Session", *resp.Data.Title, "image-only create should use the placeholder title until text arrives")
+
+	msgs, err := db.NewSessionMessageStore(pool).ListBySession(context.Background(), orgID, resp.Data.ID)
+	require.NoError(t, err, "image-only create should persist the turn-0 user message")
+	require.Len(t, msgs, 1, "image-only create should persist exactly one initial user message")
+	require.Equal(t, "", msgs[0].Content, "image-only create should keep the initial message body empty")
+	require.Equal(t, []string{"https://example.com/uploaded-shot.png"}, msgs[0].Attachments, "image-only create should persist the uploaded image on the initial message")
+
+	jobs := listJobs(t, pool, orgID)
+	require.Len(t, jobs, 1, "image-only create should still enqueue a run_agent job")
+	require.Equal(t, resp.Data.ID.String(), payloadField(t, jobs[0].Payload, "session_id"), "run_agent payload should target the created image-only session")
+}

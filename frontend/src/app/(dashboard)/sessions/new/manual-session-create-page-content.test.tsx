@@ -35,6 +35,9 @@ const mocks = vi.hoisted(() => ({
   createSessionMock: vi.fn().mockResolvedValue({
     data: { id: "new-sess" },
   }),
+  addOptimisticSessionMock: vi.fn().mockReturnValue("optimistic-1"),
+  removeOptimisticSessionMock: vi.fn(),
+  markOptimisticResolvedMock: vi.fn(),
   sessionComposerFilesMock: vi.fn().mockResolvedValue({ data: [] }),
   sessionComposerSlashCommandsMock: vi.fn().mockResolvedValue({
     groups: [
@@ -161,14 +164,14 @@ vi.mock("@/components/no-repos-warning", () => ({
 
 vi.mock("@/contexts/optimistic-sessions", () => ({
   useOptimisticSessions: () => ({
-    addOptimisticSession: vi.fn(),
-    removeOptimisticSession: vi.fn(),
-    markOptimisticResolved: vi.fn(),
+    addOptimisticSession: mocks.addOptimisticSessionMock,
+    removeOptimisticSession: mocks.removeOptimisticSessionMock,
+    markOptimisticResolved: mocks.markOptimisticResolvedMock,
   }),
   useOptimisticSessionsSafe: () => ({
-    addOptimisticSession: vi.fn(),
-    removeOptimisticSession: vi.fn(),
-    markOptimisticResolved: vi.fn(),
+    addOptimisticSession: mocks.addOptimisticSessionMock,
+    removeOptimisticSession: mocks.removeOptimisticSessionMock,
+    markOptimisticResolved: mocks.markOptimisticResolvedMock,
   }),
   OptimisticSessionsProvider: ({ children }: { children: React.ReactNode }) => children,
 }));
@@ -418,6 +421,42 @@ describe("ManualSessionCreatePageContent", () => {
       expect(mocks.uploadMock).toHaveBeenCalledWith(file);
     });
     expect(await screen.findByRole("button", { name: "Preview uploaded-shot.png" })).toBeInTheDocument();
+  });
+
+  it("allows starting a mobile session with only an uploaded image", async () => {
+    const user = userEvent.setup();
+    setMobileViewport(true);
+    renderWithProviders(<ManualSessionCreatePageContent />);
+
+    const textarea = await screen.findByPlaceholderText("Tell the agent what to do...");
+    const file = new File(["image-bytes"], "mobile-shot.png", { type: "image/png" });
+
+    fireEvent.paste(textarea, {
+      clipboardData: {
+        files: [file],
+        items: [{ kind: "file", type: "image/png", getAsFile: () => file }],
+        types: ["Files"],
+      },
+    });
+
+    await waitFor(() => {
+      expect(mocks.uploadMock).toHaveBeenCalledWith(file);
+    });
+
+    const startButton = await screen.findByRole("button", { name: "Start session" });
+    expect(startButton).toBeEnabled();
+
+    await user.click(startButton);
+
+    await waitFor(() => {
+      expect(mocks.createSessionMock).toHaveBeenCalledWith(
+        expect.objectContaining({
+          message: "",
+          images: ["https://example.com/uploaded-shot.png"],
+        }),
+      );
+    });
+    expect(mocks.addOptimisticSessionMock).toHaveBeenCalledWith("Manual Session");
   });
 
   it("shows slash command suggestions when the user types a slash trigger", async () => {
