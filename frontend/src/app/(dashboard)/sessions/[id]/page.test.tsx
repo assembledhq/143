@@ -859,6 +859,146 @@ describe('SessionDetailPage', () => {
     expect(screen.queryByTestId('session-timeline-skeleton')).not.toBeInTheDocument();
   });
 
+  it('clears the skeleton and enables the composer on an idle thread while a sibling thread is running', async () => {
+    // Regression: in the user-reported scenario the session.status was
+    // "running" (because a sibling thread was running) while the selected
+    // thread was a freshly-created idle one. Two bugs combined: the skeleton
+    // never cleared (because `activeSet.has("running")` was truthy) and the
+    // composer was disabled by a leftover Phase 1 gate that required
+    // session.status !== "running". Phase 2 supports concurrent threads, so
+    // an idle thread must be sendable regardless of sibling activity.
+    const sessionId = 'session-running-sibling';
+    const threads: SessionThread[] = [
+      {
+        id: 'thread-main',
+        session_id: sessionId,
+        org_id: 'org-1',
+        agent_type: 'codex',
+        label: 'Main',
+        status: 'running',
+        current_turn: 1,
+        created_at: '2026-05-04T07:00:00Z',
+        cost_cents: 0,
+        pending_message_count: 0,
+      },
+      {
+        id: 'thread-codex2',
+        session_id: sessionId,
+        org_id: 'org-1',
+        agent_type: 'codex',
+        label: 'Codex 2',
+        status: 'idle',
+        current_turn: 0,
+        created_at: '2026-05-04T07:01:00Z',
+        cost_cents: 0,
+        pending_message_count: 0,
+      },
+    ];
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({
+          data: {
+            ...mockSessions[0],
+            id: sessionId,
+            status: 'running',
+            sandbox_state: 'ready',
+            threads,
+          },
+        } satisfies SingleResponse<Session & { threads: SessionThread[] }>);
+      }),
+      http.get('/api/v1/sessions/:id/threads/:threadId/messages', () => {
+        return HttpResponse.json({
+          data: [] as SessionMessage[],
+          meta: {},
+        } satisfies ListResponse<SessionMessage>);
+      }),
+      http.get('/api/v1/sessions/:id/threads/:threadId/logs', () => {
+        return HttpResponse.json({ data: [], meta: {} });
+      }),
+    );
+
+    const user = userEvent.setup();
+    renderWithProviders(<SessionDetailContent id={sessionId} />);
+
+    await user.click(await screen.findByRole('tab', { name: /Codex 2/ }));
+
+    await waitFor(() => {
+      expect(screen.queryByTestId('session-timeline-skeleton')).not.toBeInTheDocument();
+    });
+    const composer = screen.getByPlaceholderText('Send a message to Codex 2...');
+    expect(composer).toBeEnabled();
+  });
+
+  it('does not shimmer forever for a freshly-created idle thread', async () => {
+    // Regression: opening a brand-new secondary thread (idle, zero messages)
+    // on a session whose overall status was still in `activeSet`
+    // (e.g. "idle"/"running") used to keep the skeleton visible forever,
+    // because the skeleton condition consulted session.status instead of the
+    // selected thread's status. The skeleton must clear once the thread's
+    // data has loaded so the empty-state composer becomes reachable.
+    const sessionId = 'session-new-thread-skeleton';
+    const threads: SessionThread[] = [
+      {
+        id: 'thread-main',
+        session_id: sessionId,
+        org_id: 'org-1',
+        agent_type: 'codex',
+        label: 'Main',
+        status: 'idle',
+        current_turn: 1,
+        created_at: '2026-05-04T07:00:00Z',
+        cost_cents: 0,
+        pending_message_count: 0,
+      },
+      {
+        id: 'thread-codex2',
+        session_id: sessionId,
+        org_id: 'org-1',
+        agent_type: 'codex',
+        label: 'Codex 2',
+        status: 'idle',
+        current_turn: 0,
+        created_at: '2026-05-04T07:01:00Z',
+        cost_cents: 0,
+        pending_message_count: 0,
+      },
+    ];
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({
+          data: {
+            ...mockSessions[0],
+            id: sessionId,
+            status: 'idle',
+            sandbox_state: 'ready',
+            threads,
+          },
+        } satisfies SingleResponse<Session & { threads: SessionThread[] }>);
+      }),
+      http.get('/api/v1/sessions/:id/threads/:threadId/messages', () => {
+        return HttpResponse.json({
+          data: [] as SessionMessage[],
+          meta: {},
+        } satisfies ListResponse<SessionMessage>);
+      }),
+      http.get('/api/v1/sessions/:id/threads/:threadId/logs', () => {
+        return HttpResponse.json({ data: [], meta: {} });
+      }),
+    );
+
+    const user = userEvent.setup();
+    renderWithProviders(<SessionDetailContent id={sessionId} />);
+
+    await user.click(await screen.findByRole('tab', { name: /Codex 2/ }));
+
+    await waitFor(() => {
+      expect(screen.queryByTestId('session-timeline-skeleton')).not.toBeInTheDocument();
+    });
+    expect(screen.getByPlaceholderText('Send a message to Codex 2...')).toBeInTheDocument();
+  });
+
   it('restores the saved scroll position when reopening an existing session', async () => {
     const idleSession: Session = {
       ...mockSessions[0],
