@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/rs/zerolog"
 
 	"github.com/assembledhq/143/internal/db"
@@ -16,15 +17,17 @@ import (
 // Sentinel errors returned by the thread service. Handlers should match on
 // these with errors.Is rather than inspecting error strings.
 var (
-	ErrSessionNotFound     = errors.New("session not found")
-	ErrSessionTerminal     = errors.New("cannot add threads to a completed session")
-	ErrInvalidAgentType    = errors.New("invalid agent type")
-	ErrInvalidModel        = errors.New("invalid model")
-	ErrEnqueueFailed       = errors.New("enqueue failed")
-	ErrThreadNotFound      = errors.New("thread not found")
-	ErrThreadNotIdle       = errors.New("thread must be idle to send a message")
-	ErrActiveThreadExists  = errors.New("another thread is already active")
-	ErrThreadCannotBeEnded = errors.New("thread cannot be ended in its current state")
+	ErrSessionNotFound        = errors.New("session not found")
+	ErrSessionTerminal        = errors.New("cannot add threads to a completed session")
+	ErrSessionNotResumable    = errors.New("session must be idle, running, awaiting input, need guidance, or otherwise resumable to send a message")
+	ErrSessionSnapshotExpired = errors.New("session sandbox snapshot has expired and can no longer be continued")
+	ErrInvalidAgentType       = errors.New("invalid agent type")
+	ErrInvalidModel           = errors.New("invalid model")
+	ErrEnqueueFailed          = errors.New("enqueue failed")
+	ErrThreadNotFound         = errors.New("thread not found")
+	ErrThreadNotIdle          = errors.New("thread must be idle to send a message")
+	ErrActiveThreadExists     = errors.New("another thread is already active")
+	ErrThreadCannotBeEnded    = errors.New("thread cannot be ended in its current state")
 	// ErrRunningLimitReached is returned when sending to an idle tab would
 	// exceed the per-session running-thread cap. The composer should fall
 	// back to queueing the message for delivery once an active sibling
@@ -44,10 +47,29 @@ var (
 )
 
 // SessionStore defines the session DB operations needed by the thread service.
+//
+// ClaimForResume is the fallback when ClaimIdle fails because the session is
+// in a terminal or paused status (completed, pr_created, failed, cancelled,
+// awaiting_input, needs_human_guidance) — mirrors the session-level
+// SendMessage handler so a follow-up sent through a thread tab can resume the
+// same set of session statuses as one sent through the legacy session
+// endpoint. Without this, the thread surface 500s on any non-idle/non-running
+// session.
 type SessionStore interface {
 	GetByID(ctx context.Context, orgID, sessionID uuid.UUID) (models.Session, error)
 	ClaimIdle(ctx context.Context, orgID, sessionID uuid.UUID) (models.Session, error)
+	ClaimForResume(ctx context.Context, orgID, sessionID uuid.UUID) (models.Session, error)
 	UpdateStatus(ctx context.Context, orgID, sessionID uuid.UUID, status string) error
+}
+
+// QuestionStore is the optional clarifying-question surface used by
+// SendMessage to flip the latest pending question to 'answered' when a
+// follow-up message resumes an awaiting_input session. Mirrors the session-
+// level handler's txQuestionStore.AnswerLatestPendingBySession behavior so
+// question state stays in sync with the resumed run regardless of which
+// surface (session-level or thread-level) the user sent through.
+type QuestionStore interface {
+	AnswerLatestPendingBySession(ctx context.Context, orgID, sessionID uuid.UUID, answerText string, answeredBy uuid.UUID) (models.SessionQuestion, error)
 }
 
 // ThreadStore defines the thread DB operations needed by the thread service.
@@ -130,9 +152,15 @@ type SendMessageInput struct {
 // uses ResolvedComments to emit one audit row per resolved comment after
 // the tx commits — matching the post-commit audit pattern of session-level
 // SendMessage.
+//
+// AnsweredQuestion is non-nil when the send resumed an awaiting_input session
+// and a pending clarifying question was flipped to 'answered' alongside the
+// message create. The handler uses it to emit a SessionQuestionAnswered audit
+// after the tx commits — same shape as the session-level path.
 type SendMessageResult struct {
 	Message          *models.SessionMessage
 	ResolvedComments []models.SessionReviewComment
+	AnsweredQuestion *models.SessionQuestion
 }
 
 // Service handles thread business logic.
@@ -144,8 +172,9 @@ type Service struct {
 	jobStore           JobStore
 	fileEvents         FileEventStore                // optional — enables overlap and attribution surfaces
 	canceller          ThreadCanceller               // optional — enables in-flight SIGINT
-	txStarter          db.TxStarter                  // optional — required for SendMessage with ResolveReviewCommentIDs
+	txStarter          db.TxStarter                  // optional — required for SendMessage with ResolveReviewCommentIDs or awaiting_input answer
 	reviewCommentStore *db.SessionReviewCommentStore // optional — required for SendMessage with ResolveReviewCommentIDs
+	questionStore      QuestionStore                 // optional — required to answer pending questions on awaiting_input resume
 	logger             zerolog.Logger
 }
 
@@ -196,17 +225,14 @@ func (s *Service) SetReviewCommentResolver(txStarter db.TxStarter, store *db.Ses
 	s.reviewCommentStore = store
 }
 
-// isSessionAlreadyRunning is the fallback predicate used by SendMessage when
-// a session-level ClaimIdle fails: if the session is already in 'running'
-// state because another tab is mid-turn, the new tab does not need to claim.
-// Returns true on the happy path; on any error we err on the side of caution
-// and propagate the original claim failure.
-func isSessionAlreadyRunning(ctx context.Context, store SessionStore, orgID, sessionID uuid.UUID) bool {
-	session, err := store.GetByID(ctx, orgID, sessionID)
-	if err != nil {
-		return false
-	}
-	return session.Status == string(models.SessionStatusRunning)
+// SetQuestionStore wires the optional clarifying-question store. When wired,
+// SendMessage answers the latest pending question on the session as part of
+// resuming an awaiting_input session — mirroring the session-level handler.
+// Without it, follow-ups to awaiting_input sessions still create a message
+// and resume the run, but the question row is left pending (the orchestrator
+// will resolve it on the next checkpoint).
+func (s *Service) SetQuestionStore(store QuestionStore) {
+	s.questionStore = store
 }
 
 func isTerminalStatus(status string) bool {
@@ -308,10 +334,18 @@ func (s *Service) GetThread(ctx context.Context, orgID, sessionID, threadID uuid
 //
 // ClaimIdleForSession serializes sibling-thread admission in the database
 // while allowing up to MaxRunningThreadsPerSession concurrent tabs. The
-// session-level ClaimIdle is best-effort: when another tab is already
-// running, the session is already in 'running' state and the orchestrator's
-// idempotent UpdateStatus("running") handles the rest. If subsequent message
-// creation or job enqueue fails we best-effort revert the thread to idle.
+// session-level claim mirrors the legacy session-message handler in
+// internal/api/handlers/sessions.go: try ClaimIdle first, fall back to
+// ClaimForResume for terminal/paused statuses (completed, pr_created,
+// failed, cancelled, awaiting_input, needs_human_guidance), and only return
+// ErrSessionNotResumable when neither succeeds. When another tab has already
+// moved the session into running state, ClaimIdle's failure is treated as a
+// no-op since the orchestrator's idempotent UpdateStatus("running") handles
+// the rest.
+//
+// On any downstream failure (message create, comment resolve, question
+// answer, enqueue) we best-effort revert the thread to idle and the session
+// to the status it had before the claim.
 func (s *Service) SendMessage(ctx context.Context, input SendMessageInput) (*SendMessageResult, error) {
 	// Reject early — before any state mutation — when the caller asked to
 	// resolve comments but the service was constructed without the plumbing
@@ -349,22 +383,17 @@ func (s *Service) SendMessage(ctx context.Context, input SendMessageInput) (*Sen
 		return nil, ErrThreadNotFound
 	}
 
-	// Best-effort session-level claim. Treat ErrNoRows-style failures as
-	// "already running due to a sibling tab" and proceed — the session
-	// state machine is idempotent at running. Any other error reverts the
-	// claim and propagates.
-	if _, claimErr := s.sessionStore.ClaimIdle(ctx, input.OrgID, input.SessionID); claimErr != nil {
-		if isSessionAlreadyRunning(ctx, s.sessionStore, input.OrgID, input.SessionID) {
-			s.logger.Debug().
-				Str("session_id", input.SessionID.String()).
-				Str("thread_id", input.ThreadID.String()).
-				Msg("session already running due to sibling thread; proceeding without re-claim")
-		} else {
-			if revertErr := s.threadStore.UpdateStatus(ctx, input.OrgID, input.ThreadID, models.ThreadStatusIdle); revertErr != nil {
-				s.logger.Error().Err(revertErr).Str("thread_id", input.ThreadID.String()).Msg("failed to revert thread to idle after parent session claim failure")
-			}
-			return nil, fmt.Errorf("claim parent session: %w", claimErr)
+	// Try claiming an idle session first, then fall back to resuming a
+	// terminal/paused session — same order as sessions.SendMessage. revertStatus
+	// records the pre-claim status so revertAfterSendFailure can put the
+	// session back exactly where it was; an empty string signals "do not
+	// touch the session" (sibling-running case).
+	claimedSession, revertStatus, claimErr := s.claimSessionForSend(ctx, input.OrgID, input.SessionID)
+	if claimErr != nil {
+		if revertErr := s.threadStore.UpdateStatus(ctx, input.OrgID, input.ThreadID, models.ThreadStatusIdle); revertErr != nil {
+			s.logger.Error().Err(revertErr).Str("thread_id", input.ThreadID.String()).Msg("failed to revert thread to idle after parent session claim failure")
 		}
+		return nil, claimErr
 	}
 
 	content := input.Message
@@ -387,14 +416,23 @@ func (s *Service) SendMessage(ctx context.Context, input SendMessageInput) (*Sen
 		msg.Attachments = input.Images
 	}
 
-	var resolvedComments []models.SessionReviewComment
-	if resolvingComments {
-		resolvedComments, err = s.createMessageWithResolvedComments(ctx, msg, input)
+	// answerPendingQuestion is true when the session was paused on a
+	// clarifying question and the caller has the plumbing to answer it.
+	// Mirrors sessions.go's predicate: revertStatus == awaiting_input &&
+	// userID != nil && questionStore != nil.
+	answerPendingQuestion := revertStatus == string(models.SessionStatusAwaitingInput) && input.UserID != nil && s.questionStore != nil
+
+	var (
+		resolvedComments []models.SessionReviewComment
+		answeredQuestion *models.SessionQuestion
+	)
+	if resolvingComments || answerPendingQuestion {
+		resolvedComments, answeredQuestion, err = s.createMessageInTx(ctx, msg, input, claimedSession, answerPendingQuestion)
 	} else {
 		err = s.messageStore.Create(ctx, msg)
 	}
 	if err != nil {
-		s.revertAfterSendFailure(ctx, input.OrgID, input.SessionID, input.ThreadID, "message creation failure")
+		s.revertAfterSendFailure(ctx, input.OrgID, input.SessionID, input.ThreadID, revertStatus, "message creation failure")
 		// Comment-validation errors are surfaced verbatim so the handler can
 		// match on *db.ErrReviewCommentsNotInSession; everything else gets
 		// wrapped with a "create message" prefix to preserve historical log
@@ -419,48 +457,89 @@ func (s *Service) SendMessage(ctx context.Context, input SendMessageInput) (*Sen
 		"org_id":     input.OrgID.String(),
 	}
 	if _, err := s.jobStore.Enqueue(ctx, input.OrgID, "agent", "continue_session", payload, 5, &dedupeKey); err != nil {
-		// Note: we do NOT roll back the resolved comments here. The message
-		// has been committed and is durably in the timeline; the orchestrator
-		// will retry the enqueue on the next dedupe-eligible event. Reverting
-		// the resolved comments would create a worse inconsistency where the
-		// user sees their addressed comments re-appear despite the message
-		// already being in the conversation.
-		s.revertAfterSendFailure(ctx, input.OrgID, input.SessionID, input.ThreadID, "enqueue failure")
+		// Note: we do NOT roll back the resolved comments or answered
+		// question here. The message has been committed and is durably in
+		// the timeline; the orchestrator will retry the enqueue on the next
+		// dedupe-eligible event. Reverting the resolved comments would
+		// create a worse inconsistency where the user sees their addressed
+		// comments re-appear despite the message already being in the
+		// conversation.
+		s.revertAfterSendFailure(ctx, input.OrgID, input.SessionID, input.ThreadID, revertStatus, "enqueue failure")
 		return nil, fmt.Errorf("%w: %w", ErrEnqueueFailed, err)
 	}
 
 	return &SendMessageResult{
 		Message:          msg,
 		ResolvedComments: resolvedComments,
+		AnsweredQuestion: answeredQuestion,
 	}, nil
 }
 
-// createMessageWithResolvedComments wraps the message insert and the
-// review-comment resolution in a single transaction so the
-// "addressing-comments → message-sent → comments-resolved" invariant cannot
-// be violated by a partial failure between the two writes.
+// claimSessionForSend mirrors the ClaimIdle → ClaimForResume → fail ordering
+// used by the session-level SendMessage handler. Returns the claimed session
+// row, the status to revert to on failure (empty when the session was
+// already running due to a sibling tab and no claim was taken), and a
+// terminal error when neither claim succeeds.
+func (s *Service) claimSessionForSend(ctx context.Context, orgID, sessionID uuid.UUID) (models.Session, string, error) {
+	claimed, claimErr := s.sessionStore.ClaimIdle(ctx, orgID, sessionID)
+	if claimErr == nil {
+		return claimed, string(models.SessionStatusIdle), nil
+	}
+
+	// ClaimIdle failed because the session is not 'idle'. Read the actual
+	// status to decide between four branches:
+	//   - running (sibling tab is mid-turn): no-op, no revert needed
+	//   - sandbox destroyed: surface ErrSessionSnapshotExpired so the
+	//     handler can render a 410 Gone (mirrors sessions.go:1835)
+	//   - terminal/paused: try ClaimForResume, remember original status
+	//   - anything else: surface ErrSessionNotResumable
+	existing, getErr := s.sessionStore.GetByID(ctx, orgID, sessionID)
+	if getErr != nil {
+		return models.Session{}, "", fmt.Errorf("inspect session for claim fallback: %w", getErr)
+	}
+	if existing.Status == string(models.SessionStatusRunning) {
+		s.logger.Debug().
+			Str("session_id", sessionID.String()).
+			Msg("session already running due to sibling thread; proceeding without re-claim")
+		return existing, "", nil
+	}
+	if existing.SandboxState == string(models.SandboxStateDestroyed) {
+		return models.Session{}, "", ErrSessionSnapshotExpired
+	}
+
+	resumed, resumeErr := s.sessionStore.ClaimForResume(ctx, orgID, sessionID)
+	if resumeErr != nil {
+		return models.Session{}, "", fmt.Errorf("%w: %w", ErrSessionNotResumable, resumeErr)
+	}
+	return resumed, existing.Status, nil
+}
+
+// createMessageInTx wraps the message insert plus any of (a) review-comment
+// resolution, (b) pending-question answer in a single transaction so the
+// user-visible invariants — "submitted comments disappear once the follow-up
+// is sent" and "question state stays in sync with the resumed run" — cannot
+// be violated by a partial failure between the writes.
 //
-// Pre-condition: caller has already verified s.txStarter and
-// s.reviewCommentStore are non-nil (via the ErrReviewCommentsNotConfigured
-// guard at the top of SendMessage).
-func (s *Service) createMessageWithResolvedComments(
+// Pre-condition: when resolving comments, the caller has already verified
+// s.txStarter and s.reviewCommentStore are non-nil (via the
+// ErrReviewCommentsNotConfigured guard at the top of SendMessage). When
+// answering a question, s.questionStore is non-nil and input.UserID is set.
+// The tx itself requires s.txStarter; the awaiting_input path therefore
+// needs the txStarter wired even when no comments are involved.
+func (s *Service) createMessageInTx(
 	ctx context.Context,
 	msg *models.SessionMessage,
 	input SendMessageInput,
-) ([]models.SessionReviewComment, error) {
-	// Fetch the session inside the same critical section to read CurrentTurn
-	// for the resolution pass. We use the post-claim session state (the
-	// ClaimIdle above already moved it to 'running' if it was idle), so the
-	// recorded pass matches what session-level SendMessage records on the
-	// same path.
-	session, err := s.sessionStore.GetByID(ctx, input.OrgID, input.SessionID)
-	if err != nil {
-		return nil, fmt.Errorf("get session for resolution pass: %w", err)
+	claimedSession models.Session,
+	answerPendingQuestion bool,
+) ([]models.SessionReviewComment, *models.SessionQuestion, error) {
+	if s.txStarter == nil {
+		return nil, nil, fmt.Errorf("tx starter not configured")
 	}
 
 	tx, err := s.txStarter.Begin(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("begin tx: %w", err)
+		return nil, nil, fmt.Errorf("begin tx: %w", err)
 	}
 	committed := false
 	defer func() {
@@ -476,33 +555,72 @@ func (s *Service) createMessageWithResolvedComments(
 	}()
 
 	txMessageStore := db.NewSessionMessageStore(tx)
-	txCommentStore := db.NewSessionReviewCommentStore(tx)
-
 	if err := txMessageStore.Create(ctx, msg); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	resolved, err := txCommentStore.ValidateAndResolveByIDs(
-		ctx, input.OrgID, input.SessionID, input.ResolveReviewCommentIDs, resolutionPass(&session))
-	if err != nil {
-		return nil, err
+
+	var resolved []models.SessionReviewComment
+	if len(input.ResolveReviewCommentIDs) > 0 {
+		txCommentStore := db.NewSessionReviewCommentStore(tx)
+		// Use the post-claim session state's CurrentTurn so the recorded
+		// pass matches what session-level SendMessage records on the same
+		// path.
+		resolved, err = txCommentStore.ValidateAndResolveByIDs(
+			ctx, input.OrgID, input.SessionID, input.ResolveReviewCommentIDs, resolutionPass(&claimedSession))
+		if err != nil {
+			return nil, nil, err
+		}
 	}
+
+	var answered *models.SessionQuestion
+	if answerPendingQuestion {
+		// Bind the question store to the tx so the answer commits or
+		// rolls back atomically with the message and resolved comments.
+		// pgx.ErrNoRows is benign here: it just means there is no pending
+		// question to answer (the orchestrator already cleared it), so we
+		// log and proceed instead of failing the user's send.
+		txQuestionStore := db.NewSessionQuestionStore(tx)
+		question, qerr := txQuestionStore.AnswerLatestPendingBySession(ctx, input.OrgID, input.SessionID, input.Message, *input.UserID)
+		if qerr != nil {
+			if errors.Is(qerr, pgx.ErrNoRows) {
+				s.logger.Warn().
+					Str("session_id", input.SessionID.String()).
+					Msg("awaiting_input session resumed without a pending question to answer")
+			} else {
+				return nil, nil, fmt.Errorf("answer pending question: %w", qerr)
+			}
+		} else {
+			answered = &question
+		}
+	}
+
 	if err := tx.Commit(ctx); err != nil {
-		return nil, fmt.Errorf("commit tx: %w", err)
+		return nil, nil, fmt.Errorf("commit tx: %w", err)
 	}
 	committed = true
-	return resolved, nil
+	return resolved, answered, nil
 }
 
-// revertAfterSendFailure puts the session and thread back to idle on a
-// best-effort basis after a SendMessage failure. Logs each revert error
-// individually so partial reverts are debuggable, but never returns —
-// callers always have a primary error to surface.
-func (s *Service) revertAfterSendFailure(ctx context.Context, orgID, sessionID, threadID uuid.UUID, reason string) {
-	if revertErr := s.sessionStore.UpdateStatus(ctx, orgID, sessionID, string(models.SessionStatusIdle)); revertErr != nil {
-		s.logger.Error().Err(revertErr).
-			Str("session_id", sessionID.String()).
-			Str("reason", reason).
-			Msg("failed to revert session to idle after thread send failure")
+// revertAfterSendFailure puts the session and thread back to their pre-send
+// state on a best-effort basis after a SendMessage failure. The thread always
+// reverts to idle. The session reverts to revertStatus, which is captured at
+// claim time so a resumed-from-completed session goes back to completed
+// rather than incorrectly being parked at idle. An empty revertStatus means
+// the claim path did not touch the session (sibling-running case) and the
+// session row should be left alone — reverting it to idle would yank the
+// running sibling out from under the orchestrator.
+//
+// Logs each revert error individually so partial reverts are debuggable, but
+// never returns — callers always have a primary error to surface.
+func (s *Service) revertAfterSendFailure(ctx context.Context, orgID, sessionID, threadID uuid.UUID, revertStatus, reason string) {
+	if revertStatus != "" {
+		if revertErr := s.sessionStore.UpdateStatus(ctx, orgID, sessionID, revertStatus); revertErr != nil {
+			s.logger.Error().Err(revertErr).
+				Str("session_id", sessionID.String()).
+				Str("revert_status", revertStatus).
+				Str("reason", reason).
+				Msg("failed to revert session after thread send failure")
+		}
 	}
 	if revertErr := s.threadStore.UpdateStatus(ctx, orgID, threadID, models.ThreadStatusIdle); revertErr != nil {
 		s.logger.Error().Err(revertErr).
