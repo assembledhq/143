@@ -33,6 +33,10 @@ func (m *pmInnerAdapterMock) Execute(ctx context.Context, sandbox *agent.Sandbox
 	return m.executeResult, nil
 }
 
+func (m *pmInnerAdapterMock) ResumeMode() agent.SessionResumeMode {
+	return agent.ResumeUnsupported
+}
+
 func TestPMAdapterPreparePrompt(t *testing.T) {
 	t.Parallel()
 
