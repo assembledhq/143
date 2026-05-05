@@ -716,7 +716,7 @@ describe('SessionSidebar', () => {
     );
   });
 
-  it('keeps the session details button pinned on the right and makes left-side pills horizontally scrollable', async () => {
+  it('uses the full row width for the session link and keeps the metadata pills horizontally scrollable', async () => {
     serveSessions([
       makeSession({
         id: 's1',
