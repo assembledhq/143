@@ -117,7 +117,6 @@ import {
 } from "@/lib/session-open-position";
 import type { ListResponse, Session, SessionDetail, SessionInputCommand, SessionInputReference, SessionLog, SessionMessage, SessionReviewComment, SessionThread, SessionTimelineEntry, User, Validation, CodexAuthStatus, PullRequestHealthResponse, SingleResponse } from "@/lib/types";
 import { AgentTabStrip, computeThreadOverlap } from "./agent-tab-strip";
-import { SessionSummaryPanel, SummarizeButton } from "./session-summary-panel";
 import {
   ThreadAttributionFilter,
   useAttributionAllowedPaths,
@@ -3075,7 +3074,6 @@ export function SessionDetailContent({ id }: { id: string }) {
     () => computeThreadOverlap(threads, fileEventsQuery.data?.data ?? []),
     [threads, fileEventsQuery.data?.data],
   );
-  const [summaryOpen, setSummaryOpen] = useState(false);
   const [attributionFilter, setAttributionFilter] = useState<ThreadAttributionFilterValue>({ kind: "all" });
   const attributionAllowedPaths = useAttributionAllowedPaths(attributionFilter, fileEventsQuery.data?.data);
   const visibleDiffFiles = useMemo(
@@ -3641,10 +3639,6 @@ export function SessionDetailContent({ id }: { id: string }) {
             )}
             <LinkedIssueChips session={session} />
           </div>
-          {/* Summarize tabs trigger — only meaningful when there is more than one tab. */}
-          {threads.length > 1 && (
-            <SummarizeButton onClick={() => setSummaryOpen(true)} />
-          )}
           {/* Desktop toggle: hides/shows the inline right panel. */}
           <DisabledTooltip disabled={centerMode === "review" && showDetailPanel} content={detailToggleTitle}>
             <Button
@@ -3692,8 +3686,6 @@ export function SessionDetailContent({ id }: { id: string }) {
             cancelPendingThreadId={cancelThreadMutation.isPending ? cancelThreadMutation.variables ?? null : null}
           />
         ) : null}
-        <SessionSummaryPanel sessionId={id} open={summaryOpen} onOpenChange={setSummaryOpen} />
-
         {/* Center content — either chat or diff review */}
         <div className="flex-1 min-h-0 relative">
           {/* Chat panel — always mounted to preserve scroll, SSE connections, etc. */}

@@ -401,8 +401,6 @@ export const api = {
       get<import('./types').ListResponse<import('./types').SessionMessage>>(`/api/v1/sessions/${sessionId}/threads/${threadId}/messages`),
     getThreadLogs: (sessionId: string, threadId: string) =>
       get<import('./types').ListResponse<import('./types').SessionLog>>(`/api/v1/sessions/${sessionId}/threads/${threadId}/logs`),
-    summarizeSession: (sessionId: string) =>
-      get<import('./types').SingleResponse<import('./types').SessionSummary>>(`/api/v1/sessions/${sessionId}/summary`),
     listThreadFileEvents: (sessionId: string, since?: string) => {
       const qs = since ? `?since=${encodeURIComponent(since)}` : '';
       return get<import('./types').ListResponse<import('./types').SessionThreadFileEvent>>(`/api/v1/sessions/${sessionId}/thread-file-events${qs}`);
