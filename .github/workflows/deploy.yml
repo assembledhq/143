@@ -61,8 +61,14 @@ jobs:
             ${{ matrix.image }}:${{ github.sha }}
           build-args: |
             BUILD_SHA=${{ github.sha }}
-          cache-from: type=gha,scope=${{ matrix.name }}
-          cache-to: type=gha,mode=max,scope=${{ matrix.name }}
+          # Registry cache instead of type=gha. The 10 GB GHA cache ceiling
+          # was constantly evicting our ~200 MB-per-image layer blobs across
+          # the three matrix builds, busting the apt-install layer in
+          # sandbox/Dockerfile and adding ~9 minutes to deploys. GHCR has
+          # no size cap and persists until manually deleted; the cache lives
+          # at <image>:buildcache alongside :latest and :<sha>.
+          cache-from: type=registry,ref=${{ matrix.image }}:buildcache
+          cache-to: type=registry,ref=${{ matrix.image }}:buildcache,mode=max
 
   deploy:
     needs: build
