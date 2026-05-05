@@ -929,6 +929,7 @@ type testDeps struct {
 	provider         *testutil.MockSandboxProvider
 	adapter          *mockAgentAdapter
 	sessions         *mockSessionStore
+	sessionThreads   *mockSessionThreadStore
 	projects         *mockProjectTaskUpdater
 	issues           *mockIssueStore
 	repos            *mockRepositoryStore
@@ -950,6 +951,46 @@ type testDeps struct {
 	sandboxAuth      agent.SandboxAuthServer
 	users            agent.UserLookup
 	logger           *zerolog.Logger
+}
+
+// mockSessionThreadStore captures thread-status writes the orchestrator
+// makes during failure-path bookkeeping. Methods are no-ops on the happy
+// path; tests that exercise the worker-ownership / sandbox-failure cleanup
+// blocks use updateStatusCalls to assert thread.status was reset.
+type mockSessionThreadStore struct {
+	mu                sync.Mutex
+	updateStatusCalls []struct {
+		threadID uuid.UUID
+		status   models.ThreadStatus
+	}
+}
+
+func (m *mockSessionThreadStore) UpdateStatus(_ context.Context, _, threadID uuid.UUID, status models.ThreadStatus) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.updateStatusCalls = append(m.updateStatusCalls, struct {
+		threadID uuid.UUID
+		status   models.ThreadStatus
+	}{threadID: threadID, status: status})
+	return nil
+}
+
+func (m *mockSessionThreadStore) CompleteTurn(_ context.Context, _, _ uuid.UUID, _ int, _ string) error {
+	return nil
+}
+
+func (m *mockSessionThreadStore) UpdateResult(_ context.Context, _, _ uuid.UUID, _ models.ThreadStatus, _ *models.SessionResult) error {
+	return nil
+}
+
+func (m *mockSessionThreadStore) statuses() []models.ThreadStatus {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]models.ThreadStatus, 0, len(m.updateStatusCalls))
+	for _, c := range m.updateStatusCalls {
+		out = append(out, c.status)
+	}
+	return out
 }
 
 func defaultDeps() testDeps {
@@ -997,10 +1038,15 @@ func buildOrchestrator(d testDeps) *agent.Orchestrator {
 	if d.logger != nil {
 		logger = *d.logger
 	}
+	var sessionThreads agent.SessionThreadStore
+	if d.sessionThreads != nil {
+		sessionThreads = d.sessionThreads
+	}
 	return agent.NewOrchestrator(agent.OrchestratorConfig{
 		Provider:          d.provider,
 		Adapters:          map[models.AgentType]agent.AgentAdapter{d.adapter.Name(): d.adapter},
 		Sessions:          d.sessions,
+		SessionThreads:    sessionThreads,
 		SessionLogs:       d.logs,
 		SessionQuestions:  d.questions,
 		SessionMessages:   d.messages,
@@ -4503,6 +4549,56 @@ func TestContinueSession_SetWorkerNodeIDFailureFailsTurn(t *testing.T) {
 	require.Equal(t, 1, d.sessions.releaseHoldCalls, "ContinueSession should release the turn hold when worker ownership persistence fails")
 	require.Equal(t, 1, d.sessions.finalizeCalls, "ContinueSession should finalize the container destroy when worker ownership persistence fails")
 	require.Contains(t, d.sessions.getStatusUpdates(), string(models.SessionStatusIdle), "ContinueSession should revert the session to idle when worker ownership persistence fails")
+}
+
+// TestContinueSession_SetWorkerNodeIDFailureResetsThread covers the orphan
+// fix: when the worker-ownership CAS in SetWorkerNodeIDForContainer fails
+// mid-turn (the production scenario behind the "Session is not active" +
+// "Agent is working..." UI orphan), the orchestrator must reset BOTH the
+// session.status AND the active thread.status back to idle. The handler's
+// own thread reset is best-effort with a potentially-cancelled ctx; this
+// orchestrator-level reset is the load-bearing one.
+func TestContinueSession_SetWorkerNodeIDFailureResetsThread(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	issue.Source = models.IssueSourceManual
+	session := testRun(orgID, issue.ID)
+	session.Origin = models.SessionOriginManual
+	session.InteractionMode = models.SessionInteractionModeInteractive
+	session.ValidationPolicy = models.SessionValidationPolicyOnSessionEnd
+	session.Status = string(models.SessionStatusIdle)
+	session.CurrentTurn = 1
+
+	threadID := uuid.New()
+
+	d := defaultDeps()
+	d.nodeID = "worker-a"
+	d.sessions.setWorkerNodeErr = errors.New("persist failed")
+	d.sessionThreads = &mockSessionThreadStore{}
+	d.issues.issue = issue
+	d.messages.messages = []models.SessionMessage{
+		{ID: 1, SessionID: session.ID, OrgID: orgID, TurnNumber: 2, Role: models.MessageRoleUser, Content: "retry me"},
+	}
+
+	orch := buildOrchestrator(d)
+	err := orch.ContinueSession(context.Background(), session, &agent.ContinueSessionOptions{
+		AgentType: models.AgentTypeClaudeCode,
+		ThreadID:  &threadID,
+	})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "persist session worker ownership")
+
+	// Session-level revert (existing behavior).
+	require.Contains(t, d.sessions.getStatusUpdates(), string(models.SessionStatusIdle),
+		"session.status must be reverted to idle")
+
+	// New behavior: thread-level revert. Without this, the thread row stays
+	// 'running' and the UI shows the dual-state orphan we hit in prod.
+	statuses := d.sessionThreads.statuses()
+	require.Contains(t, statuses, models.ThreadStatusIdle,
+		"thread.status must be reverted to idle so the UI doesn't get stuck on 'Agent is working...'")
 }
 
 // TestContinueSession_SessionRepoSlug exercises every branch of

@@ -53,6 +53,15 @@ type Config struct {
 	// server process when MODE is "worker" or "all". Increase this on larger
 	// hosts to process more jobs/sandboxes in parallel.
 	WorkerProcessCount int `env:"WORKER_PROCESS_COUNT" envDefault:"2"`
+	// WorkerDrainTimeout is how long graceful shutdown waits for in-flight
+	// worker jobs to finish before cancelling the worker context. Coding
+	// turns routinely run 5–15 minutes (per-org cap is even higher), so a
+	// short window cuts them off mid-execution and produces orphaned thread
+	// rows when partial DB state lands. The deploy script's outer drain
+	// (deploy/scripts/deploy.sh: WORKER_DRAIN_TIMEOUT, default 2h) is a
+	// safety net above this — the in-process budget here is what actually
+	// gates job completion.
+	WorkerDrainTimeout time.Duration `env:"WORKER_DRAIN_TIMEOUT" envDefault:"45m"`
 
 	// GitHub OAuth
 	GitHubOAuthClientID     string `env:"GITHUB_OAUTH_CLIENT_ID"`

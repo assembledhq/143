@@ -1140,12 +1140,20 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 				return &FatalError{Err: err}
 			}
 			if hasThread {
-				if statusErr := stores.SessionThreads.UpdateStatus(ctx, orgID, threadID, models.ThreadStatusIdle); statusErr != nil {
+				// Detached context: this cleanup must land even when ctx was
+				// cancelled by worker drain mid-shutdown. Otherwise the
+				// thread is stuck in 'running' and the UI shows an orphaned
+				// "Agent is working..." indefinitely (until Phase 0.5b of
+				// the reaper picks it up — defense-in-depth, not the primary
+				// path). 10s is plenty for a single UPDATE.
+				cleanupCtx, cleanupCancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+				if statusErr := stores.SessionThreads.UpdateStatus(cleanupCtx, orgID, threadID, models.ThreadStatusIdle); statusErr != nil {
 					logger.Warn().Err(statusErr).
 						Str("session_id", sessionID.String()).
 						Str("thread_id", threadID.String()).
 						Msg("failed to release session thread after continue_session failure")
 				}
+				cleanupCancel()
 			}
 			return err
 		}

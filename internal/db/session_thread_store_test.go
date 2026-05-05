@@ -208,6 +208,63 @@ func TestSessionThreadStore_ListBySession(t *testing.T) {
 	}
 }
 
+func TestSessionThreadStore_ListStuckRunningThreads(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewSessionThreadStore(mock)
+	threadID1 := uuid.New()
+	threadID2 := uuid.New()
+	sessionID := uuid.New()
+	orgID := uuid.New()
+	now := time.Now().Truncate(time.Microsecond)
+	startedAt := now.Add(-3 * time.Hour)
+
+	// Build a 'running' row variant of the standard test row.
+	row := func(id uuid.UUID) []interface{} {
+		base := newSessionThreadRow(id, sessionID, orgID, "thread", now)
+		base[8] = "running"   // status
+		base[17] = &startedAt // started_at
+		return base
+	}
+
+	// Predicate must filter status='running', non-null started_at, and the cutoff.
+	mock.ExpectQuery("SELECT .+ FROM session_threads\\s+WHERE status = 'running'\\s+AND started_at IS NOT NULL\\s+AND started_at < @started_before").
+		WithArgs(anyArgs(1)...).
+		WillReturnRows(
+			pgxmock.NewRows(sessionThreadTestColumns).
+				AddRow(row(threadID1)...).
+				AddRow(row(threadID2)...),
+		)
+
+	threads, err := store.ListStuckRunningThreads(context.Background(), now.Add(-time.Hour))
+	require.NoError(t, err, "ListStuckRunningThreads should not return an error")
+	require.Len(t, threads, 2, "should return both stuck threads")
+	require.Equal(t, threadID1, threads[0].ID)
+	require.Equal(t, threadID2, threads[1].ID)
+	require.Equal(t, models.ThreadStatusRunning, threads[0].Status, "row mapper should hydrate status")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestSessionThreadStore_ListStuckRunningThreads_QueryError(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewSessionThreadStore(mock)
+	mock.ExpectQuery("SELECT .+ FROM session_threads\\s+WHERE status = 'running'").
+		WithArgs(anyArgs(1)...).
+		WillReturnError(fmt.Errorf("connection refused"))
+
+	_, err = store.ListStuckRunningThreads(context.Background(), time.Now())
+	require.Error(t, err, "ListStuckRunningThreads should propagate query errors")
+}
+
 func TestSessionThreadStore_CountBySession(t *testing.T) {
 	t.Parallel()
 
