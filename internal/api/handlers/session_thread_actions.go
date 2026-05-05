@@ -44,28 +44,6 @@ func (h *SessionThreadHandler) CancelThread(w http.ResponseWriter, r *http.Reque
 	writeJSON(w, http.StatusOK, models.SingleResponse[models.SessionThread]{Data: t})
 }
 
-// SummarizeSession handles GET /sessions/{id}/summary — returns a one-glance
-// roll-up of all tabs in the session: per-tab status, latest result summary,
-// touched files, and overlap. Powers the "summarize all tabs" affordance.
-func (h *SessionThreadHandler) SummarizeSession(w http.ResponseWriter, r *http.Request) {
-	orgID := middleware.OrgIDFromContext(r.Context())
-	sessionID, err := uuid.Parse(chi.URLParam(r, "id"))
-	if err != nil {
-		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid session ID")
-		return
-	}
-	summary, err := h.svc.SummarizeSession(r.Context(), orgID, sessionID)
-	if err != nil {
-		if errors.Is(err, thread.ErrSessionNotFound) {
-			writeError(w, r, http.StatusNotFound, "NOT_FOUND", "session not found")
-			return
-		}
-		writeError(w, r, http.StatusInternalServerError, "SUMMARIZE_FAILED", "failed to summarize session", err)
-		return
-	}
-	writeJSON(w, http.StatusOK, models.SingleResponse[thread.SessionSummary]{Data: summary})
-}
-
 // ListThreadFileEvents handles GET /sessions/{id}/thread-file-events — the
 // raw timeline of "tab T touched path P at turn N". The frontend rolls this
 // up into "Touched by tab" and "Overlap" filters in the Changes view.
