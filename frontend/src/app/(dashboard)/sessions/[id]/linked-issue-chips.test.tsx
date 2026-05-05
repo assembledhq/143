@@ -52,6 +52,29 @@ describe('LinkedIssueChips', () => {
     expect(link).toHaveAttribute('rel', 'noopener noreferrer');
   });
 
+  it('renders Linear chip with a logo and subdued neutral styling', () => {
+    const session = makeSession({
+      linked_issues: [
+        {
+          id: 'link-1',
+          session_id: 'sess-1',
+          issue_id: 'issue-1',
+          role: 'primary',
+          position: 0,
+          issue_source: 'linear',
+          external_id: 'VIR-75',
+        },
+      ],
+    });
+
+    render(<LinkedIssueChips session={session} />);
+
+    const link = screen.getByRole('link', { name: 'VIR-75' });
+    expect(link.querySelector('img[aria-hidden="true"]')).not.toBeNull();
+    expect(link.className).toContain('bg-muted');
+    expect(link.className).not.toContain('bg-blue-500/10');
+  });
+
   it('falls back to workspace-less Linear URL when slug missing', () => {
     const session = makeSession({
       linked_issues: [
