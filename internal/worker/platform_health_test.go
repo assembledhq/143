@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"sync"
 	"testing"
 	"time"
 
@@ -36,13 +37,13 @@ func TestRunQueueHealthSamplerEmitsStructuredSamples(t *testing.T) {
 			OldestRunnableAgeSeconds: 42,
 		},
 	}}
-	var logs bytes.Buffer
+	logs := &syncBuffer{}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	done := make(chan struct{})
 	go func() {
-		RunQueueHealthSampler(ctx, store, zerolog.New(&logs), time.Hour)
+		RunQueueHealthSampler(ctx, store, zerolog.New(logs), time.Hour)
 		close(done)
 	}()
 	require.Eventually(t, func() bool {
@@ -61,4 +62,23 @@ func TestRunQueueHealthSamplerEmitsStructuredSamples(t *testing.T) {
 	require.Equal(t, float64(1), event["running"], "queue sampler should include running count")
 	require.Equal(t, float64(0), event["dead_letter"], "queue sampler should include dead-letter count")
 	require.Equal(t, float64(42), event["oldest_runnable_age_seconds"], "queue sampler should include oldest runnable age")
+}
+
+// syncBuffer is a thread-safe bytes.Buffer wrapper for capturing zerolog output
+// when a writer goroutine and an Eventually reader goroutine touch the same buffer.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (s *syncBuffer) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.buf.Write(p)
+}
+
+func (s *syncBuffer) Bytes() []byte {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]byte(nil), s.buf.Bytes()...)
 }
