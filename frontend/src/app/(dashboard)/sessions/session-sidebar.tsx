@@ -510,12 +510,19 @@ export function SessionSidebar() {
                   href={sessionHref}
                   aria-current={isSelected ? "page" : undefined}
                   className={cn(
-                    "block min-w-0 flex-1 rounded-lg border border-border/50 bg-background px-3 py-2.5 shadow-sm transition-all duration-150 md:border-transparent md:bg-muted/30 md:shadow-none",
+                    "relative block min-w-0 flex-1 overflow-hidden rounded-lg border border-border/50 bg-background px-3 py-2.5 shadow-sm transition-all duration-150 md:border-transparent md:bg-muted/30 md:shadow-none",
                     isSelected
-                      ? "border-border/60 bg-background shadow-sm md:border-border/60 md:bg-background md:shadow-sm"
+                      ? "border-primary/20 bg-primary/5 ring-1 ring-primary/15 shadow-sm md:border-primary/20 md:bg-primary/5 md:shadow-sm"
                       : "hover:border-border/60 hover:bg-background md:hover:border-transparent md:hover:bg-background/60"
                   )}
                 >
+                  <span
+                    aria-hidden="true"
+                    className={cn(
+                      "absolute inset-y-2 left-1 w-0.5 rounded-full bg-primary/0 transition-colors duration-150",
+                      isSelected && "bg-primary/55",
+                    )}
+                  />
                   <div className="flex items-start gap-2.5 min-w-0">
                   {/* Unread / working indicator */}
                   <div className="mt-1.5 shrink-0">
@@ -576,7 +583,7 @@ export function SessionSidebar() {
                   size="icon-sm"
                   className={cn(
                     "shrink-0 self-center rounded-lg border border-border/50 bg-background text-muted-foreground shadow-sm hover:text-foreground md:border-transparent md:bg-muted/30 md:shadow-none md:self-start",
-                    isSelected && "border-border/60 bg-background text-foreground md:border-border/60 md:bg-background md:shadow-sm",
+                    isSelected && "border-primary/20 bg-primary/5 text-foreground ring-1 ring-primary/15 md:border-primary/20 md:bg-primary/5 md:shadow-sm",
                   )}
                 >
                   <Link
