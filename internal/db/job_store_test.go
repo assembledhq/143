@@ -666,6 +666,69 @@ func TestJobStore_OldestPendingSessionJobAge_ReturnsWrappedErrors(t *testing.T) 
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+func TestJobStore_QueueHealthSamples(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewJobStore(mock)
+	mock.ExpectQuery("SELECT\\s+queue,\\s+job_type").
+		WillReturnRows(pgxmock.NewRows([]string{
+			"queue",
+			"job_type",
+			"pending_runnable",
+			"pending_deferred",
+			"running",
+			"dead_letter",
+			"oldest_runnable_age_seconds",
+		}).AddRow("agent", "run_agent", int64(3), int64(2), int64(1), int64(0), float64(42)).
+			AddRow("default", "open_pr", int64(0), int64(1), int64(0), int64(2), nil))
+
+	samples, err := store.QueueHealthSamples(context.Background())
+	require.NoError(t, err, "QueueHealthSamples should not return an error")
+	require.Equal(t, []JobQueueHealthSample{
+		{
+			Queue:                    "agent",
+			JobType:                  "run_agent",
+			PendingRunnable:          3,
+			PendingDeferred:          2,
+			Running:                  1,
+			DeadLetter:               0,
+			OldestRunnableAgeSeconds: 42,
+		},
+		{
+			Queue:                    "default",
+			JobType:                  "open_pr",
+			PendingRunnable:          0,
+			PendingDeferred:          1,
+			Running:                  0,
+			DeadLetter:               2,
+			OldestRunnableAgeSeconds: 0,
+		},
+	}, samples, "QueueHealthSamples should return grouped queue health rows")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestJobStore_QueueHealthSamples_ReturnsWrappedErrors(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewJobStore(mock)
+	mock.ExpectQuery("SELECT\\s+queue,\\s+job_type").
+		WillReturnError(errors.New("query failed"))
+
+	samples, err := store.QueueHealthSamples(context.Background())
+	require.Error(t, err, "QueueHealthSamples should return query errors")
+	require.Contains(t, err.Error(), "queue health samples", "QueueHealthSamples should wrap the operation context")
+	require.Nil(t, samples, "QueueHealthSamples should return nil samples on error")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func TestJobStore_CountRunningOwnedByNode(t *testing.T) {
 	t.Parallel()
 
