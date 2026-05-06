@@ -384,19 +384,3 @@ func (d *LinearAgentDispatcher) SetBootstrapEmitter(e linearAgentBootstrapEmitte
 	}
 	d.emitter = e
 }
-
-// emitOpenedBootstrap is exposed to internal callers (worker recovery
-// path) that want to ensure the bootstrap thought has been delivered even
-// if the dispatcher's best-effort emit failed.
-func (d *LinearAgentDispatcher) emitOpenedBootstrap(ctx context.Context, orgID, rowID uuid.UUID, agentSessionID, issueIdentifier string) error {
-	if d == nil || d.emitter == nil {
-		return errors.New("dispatcher emitter not configured")
-	}
-	_, err := d.emitter.Emit(ctx, linear.EmitInput{
-		OrgID:             orgID,
-		AgentSessionRowID: rowID,
-		AgentSessionID:    agentSessionID,
-		Activity:          linear.BootstrapActivity(issueIdentifier),
-	})
-	return err
-}
