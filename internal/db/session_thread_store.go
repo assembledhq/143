@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -22,7 +23,8 @@ func NewSessionThreadStore(db DBTX) *SessionThreadStore {
 const sessionThreadSelectColumns = `id, session_id, org_id, agent_type, model_override,
 	label, instructions, file_scope, status, agent_session_id, current_turn, last_activity_at,
 	confidence_score, result_summary, diff, failure_explanation, failure_category,
-	started_at, completed_at, created_at`
+	started_at, completed_at, created_at,
+	base_snapshot_key, cost_cents, pending_message_count, cancel_requested_at`
 
 // ErrThreadLimitReached is returned when the maximum number of threads per session
 // has been reached and a new thread cannot be created.
@@ -107,7 +109,7 @@ func (s *SessionThreadStore) CountBySession(ctx context.Context, orgID, sessionI
 func (s *SessionThreadStore) UpdateStatus(ctx context.Context, orgID, threadID uuid.UUID, status models.ThreadStatus) error {
 	query := `UPDATE session_threads SET status = @status WHERE id = @id AND org_id = @org_id`
 	if status == models.ThreadStatusRunning {
-		query = `UPDATE session_threads SET status = @status, started_at = now() WHERE id = @id AND org_id = @org_id`
+		query = `UPDATE session_threads SET status = @status, started_at = now(), cancel_requested_at = NULL WHERE id = @id AND org_id = @org_id`
 	} else if status == models.ThreadStatusCompleted || status == models.ThreadStatusFailed || status == models.ThreadStatusCancelled {
 		query = `UPDATE session_threads SET status = @status, completed_at = now() WHERE id = @id AND org_id = @org_id`
 	}
@@ -123,6 +125,44 @@ func (s *SessionThreadStore) UpdateStatus(ctx context.Context, orgID, threadID u
 		return fmt.Errorf("thread not found")
 	}
 	return nil
+}
+
+// CompleteTurn marks the thread idle and advances its current_turn. It is the
+// Phase 1 success path: the shared session UpdateTurnComplete already records
+// confidence_score, result_summary, and diff at the session level, so this
+// method intentionally does not duplicate them on the thread row. Phase 2
+// (thread-scoped runtime execution) will need to populate the thread's own
+// result columns — switch to UpdateTurnComplete on the thread store at that
+// point so per-thread review surfaces have data to show.
+func (s *SessionThreadStore) CompleteTurn(ctx context.Context, orgID, threadID uuid.UUID, turn int, agentSessionID string) error {
+	query := `
+		UPDATE session_threads
+		SET status = 'idle',
+		    current_turn = @current_turn,
+		    last_activity_at = now(),
+		    agent_session_id = COALESCE(@agent_session_id, agent_session_id)
+		WHERE id = @id AND org_id = @org_id`
+
+	ct, err := s.db.Exec(ctx, query, pgx.NamedArgs{
+		"id":               threadID,
+		"org_id":           orgID,
+		"current_turn":     turn,
+		"agent_session_id": emptyStringNil(agentSessionID),
+	})
+	if err != nil {
+		return err
+	}
+	if ct.RowsAffected() == 0 {
+		return fmt.Errorf("thread not found")
+	}
+	return nil
+}
+
+func emptyStringNil(value string) *string {
+	if value == "" {
+		return nil
+	}
+	return &value
 }
 
 // UpdateResult persists agent results on a thread.
@@ -170,6 +210,35 @@ func (s *SessionThreadStore) UpdateResult(ctx context.Context, orgID, threadID u
 	return nil
 }
 
+// ListStuckRunningThreads returns threads stuck in status='running' whose
+// started_at is older than the given cutoff. The reaper uses this to fail
+// rows the orchestrator/handler couldn't reset themselves — typically when
+// a continue_session job dead-letters during a rolling deploy and the
+// thread reset writes can't reach the DB before the worker process exits.
+//
+// Mirrors ListStaleRunningSessions in shape and intent: cross-org scan,
+// LIMIT 100 to bound a single tick, started_at-based cutoff.
+//
+// lint:allow-no-orgid reason="cross-org reaper scan for stuck running threads"
+func (s *SessionThreadStore) ListStuckRunningThreads(ctx context.Context, startedBefore time.Time) ([]models.SessionThread, error) {
+	query := `
+		SELECT ` + sessionThreadSelectColumns + `
+		FROM session_threads
+		WHERE status = 'running'
+		  AND started_at IS NOT NULL
+		  AND started_at < @started_before
+		ORDER BY started_at ASC
+		LIMIT 100`
+
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
+		"started_before": startedBefore,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("query stuck running threads: %w", err)
+	}
+	return pgx.CollectRows(rows, pgx.RowToStructByName[models.SessionThread])
+}
+
 // ClaimIdle atomically transitions an idle thread to running. Used when a user
 // sends a follow-up message to a specific thread.
 func (s *SessionThreadStore) ClaimIdle(ctx context.Context, orgID, threadID uuid.UUID) (models.SessionThread, error) {
@@ -187,6 +256,196 @@ func (s *SessionThreadStore) ClaimIdle(ctx context.Context, orgID, threadID uuid
 		return models.SessionThread{}, fmt.Errorf("claim idle thread: %w", err)
 	}
 	return pgx.CollectOneRow(rows, pgx.RowToStructByName[models.SessionThread])
+}
+
+// ErrThreadRunningLimitReached signals that the requested thread is idle and
+// could otherwise be claimed, but the session has already reached the maximum
+// allowed number of concurrent running siblings.
+var ErrThreadRunningLimitReached = fmt.Errorf("session running thread limit reached")
+
+// ClaimIdleForSession atomically transitions an idle thread to running while
+// enforcing the session-wide running-thread cap. The CTE locks every thread
+// row in the session before evaluating sibling state so concurrent sends to
+// different idle tabs serialize on the database row locks. Allows up to
+// maxRunning sibling tabs (including this one) to be active at the same time;
+// callers should pass models.MaxRunningThreadsPerSession.
+//
+// Returns ErrThreadRunningLimitReached when the target thread is idle but
+// adding it would exceed maxRunning. Callers should distinguish this from
+// "thread not idle" to render the right composer affordance: in the former
+// case, queueing a pending message is appropriate; in the latter, the user is
+// trying to send to a tab whose own turn is still in flight.
+func (s *SessionThreadStore) ClaimIdleForSession(ctx context.Context, orgID, sessionID, threadID uuid.UUID, maxRunning int) (models.SessionThread, error) {
+	if maxRunning <= 0 {
+		maxRunning = models.MaxRunningThreadsPerSession
+	}
+	query := `
+		WITH locked_threads AS (
+			SELECT id, status
+			FROM session_threads
+			WHERE org_id = @org_id AND session_id = @session_id
+			FOR UPDATE
+		), target_idle AS (
+			SELECT 1
+			FROM locked_threads
+			WHERE id = @id AND status = 'idle'
+		), running_count AS (
+			SELECT count(*) AS n
+			FROM locked_threads
+			WHERE id <> @id
+			  AND status IN ('pending', 'running', 'awaiting_input')
+		), eligible AS (
+			-- target is idle AND adding it (siblings + 1) stays at-or-under
+			-- max_running, i.e. siblings_active < max_running.
+			SELECT 1
+			FROM target_idle, running_count
+			WHERE running_count.n < @max_running
+		)
+		UPDATE session_threads
+		SET status = 'running',
+		    started_at = now(),
+		    last_activity_at = now(),
+		    cancel_requested_at = NULL
+		WHERE id = @id
+		  AND org_id = @org_id
+		  AND session_id = @session_id
+		  AND EXISTS (SELECT 1 FROM eligible)
+		RETURNING ` + sessionThreadSelectColumns
+
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
+		"id":          threadID,
+		"org_id":      orgID,
+		"session_id":  sessionID,
+		"max_running": maxRunning,
+	})
+	if err != nil {
+		return models.SessionThread{}, fmt.Errorf("claim idle session thread: %w", err)
+	}
+	thread, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.SessionThread])
+	if err != nil {
+		// pgx.ErrNoRows means the WHERE-with-EXISTS predicate did not match.
+		// Best-effort distinguish "limit reached" from "not idle" by
+		// re-inspecting state without holding the FOR UPDATE lock. A sibling
+		// can transition between the failed claim and this lookup; on that
+		// race we surface the original ErrNoRows and the caller maps it to
+		// "thread not idle". Acceptable trade-off: the worst case is the user
+		// sees the busy-tab affordance instead of the queued-message one for
+		// one cycle, then retries.
+		if errors.Is(err, pgx.ErrNoRows) {
+			limited, lookupErr := s.isAtRunningLimit(ctx, orgID, sessionID, threadID, maxRunning)
+			if lookupErr == nil && limited {
+				return models.SessionThread{}, ErrThreadRunningLimitReached
+			}
+		}
+		return models.SessionThread{}, err
+	}
+	return thread, nil
+}
+
+// isAtRunningLimit returns true when the target thread is idle (so otherwise
+// claimable) but the session already has maxRunning sibling threads active.
+// Used by ClaimIdleForSession to differentiate "limit reached" from "thread
+// status changed under us" without holding the FOR UPDATE lock.
+//
+// Uses COALESCE on the target subquery so a deleted-out-from-under-us row
+// scans as the empty string instead of erroring on NULL → string. In that
+// case we report "not limited" — the caller will fall through to its
+// generic ErrNoRows path which the service maps to ErrThreadNotFound.
+func (s *SessionThreadStore) isAtRunningLimit(ctx context.Context, orgID, sessionID, threadID uuid.UUID, maxRunning int) (bool, error) {
+	var targetStatus string
+	var siblingActive int
+	err := s.db.QueryRow(ctx, `
+		SELECT
+		    COALESCE((SELECT status FROM session_threads WHERE id = @id AND org_id = @org_id), '') AS target_status,
+		    (SELECT count(*) FROM session_threads
+		        WHERE org_id = @org_id AND session_id = @session_id AND id <> @id
+		          AND status IN ('pending', 'running', 'awaiting_input')) AS sibling_active
+	`, pgx.NamedArgs{"id": threadID, "org_id": orgID, "session_id": sessionID}).Scan(&targetStatus, &siblingActive)
+	if err != nil {
+		return false, err
+	}
+	return targetStatus == string(models.ThreadStatusIdle) && siblingActive >= maxRunning, nil
+}
+
+// CountActive returns the number of threads in pending/running/awaiting_input
+// state for a session. Used by the thread service for admission checks and by
+// the API to expose running-tab counts to the UI.
+func (s *SessionThreadStore) CountActive(ctx context.Context, orgID, sessionID uuid.UUID) (int, error) {
+	var count int
+	err := s.db.QueryRow(ctx, `
+		SELECT count(*)
+		FROM session_threads
+		WHERE org_id = @org_id AND session_id = @session_id
+		  AND status IN ('pending', 'running', 'awaiting_input')
+	`, pgx.NamedArgs{"org_id": orgID, "session_id": sessionID}).Scan(&count)
+	return count, err
+}
+
+// SetBaseSnapshot stamps the thread-start checkpoint key onto the thread row.
+// Idempotent: only sets when base_snapshot_key is currently NULL so a
+// re-running first turn (e.g. retry after SIGINT) does not overwrite the
+// original recovery point. A revert later in the thread's lifetime should
+// restore *that* point, not whatever snapshot the most recent retry produced.
+func (s *SessionThreadStore) SetBaseSnapshot(ctx context.Context, orgID, threadID uuid.UUID, key string) error {
+	if key == "" {
+		return nil
+	}
+	_, err := s.db.Exec(ctx,
+		`UPDATE session_threads
+		 SET base_snapshot_key = @key
+		 WHERE id = @id AND org_id = @org_id AND base_snapshot_key IS NULL`,
+		pgx.NamedArgs{"id": threadID, "org_id": orgID, "key": key},
+	)
+	return err
+}
+
+// AddCost increments the thread's cost meter. cost_cents accumulates over the
+// thread's lifetime so the UI can surface a per-tab cost without a separate
+// query against usage events.
+func (s *SessionThreadStore) AddCost(ctx context.Context, orgID, threadID uuid.UUID, cents float64) error {
+	if cents <= 0 {
+		return nil
+	}
+	_, err := s.db.Exec(ctx,
+		`UPDATE session_threads SET cost_cents = cost_cents + @cents WHERE id = @id AND org_id = @org_id`,
+		pgx.NamedArgs{"id": threadID, "org_id": orgID, "cents": cents},
+	)
+	return err
+}
+
+// IncrementPendingMessages is called when a user queues a message on a tab
+// that is currently busy with another turn. The composer reads this counter
+// to render a "queued (N)" affordance.
+func (s *SessionThreadStore) IncrementPendingMessages(ctx context.Context, orgID, threadID uuid.UUID) error {
+	_, err := s.db.Exec(ctx,
+		`UPDATE session_threads SET pending_message_count = pending_message_count + 1 WHERE id = @id AND org_id = @org_id`,
+		pgx.NamedArgs{"id": threadID, "org_id": orgID},
+	)
+	return err
+}
+
+// ClearPendingMessages resets the queued-message counter when a turn drains
+// its pending queue. Stored value is bounded below at 0 so a missed increment
+// does not produce a negative count.
+func (s *SessionThreadStore) ClearPendingMessages(ctx context.Context, orgID, threadID uuid.UUID) error {
+	_, err := s.db.Exec(ctx,
+		`UPDATE session_threads SET pending_message_count = 0 WHERE id = @id AND org_id = @org_id`,
+		pgx.NamedArgs{"id": threadID, "org_id": orgID},
+	)
+	return err
+}
+
+// MarkCancelRequested stamps the thread with a cancel timestamp so the
+// orchestrator and UI can distinguish "user pressed Cancel on this tab" from
+// a session-wide cancel. Idempotent: re-cancel does not move the timestamp.
+func (s *SessionThreadStore) MarkCancelRequested(ctx context.Context, orgID, threadID uuid.UUID) error {
+	_, err := s.db.Exec(ctx,
+		`UPDATE session_threads
+		 SET cancel_requested_at = COALESCE(cancel_requested_at, now())
+		 WHERE id = @id AND org_id = @org_id AND status IN ('pending', 'running', 'awaiting_input')`,
+		pgx.NamedArgs{"id": threadID, "org_id": orgID},
+	)
+	return err
 }
 
 // UpdateTurnComplete sets the thread to idle and persists turn metadata.

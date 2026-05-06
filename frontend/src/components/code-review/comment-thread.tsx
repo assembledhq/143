@@ -33,6 +33,7 @@ interface CommentThreadProps {
   onUpdate: (commentId: string, data: { body?: string; resolved?: boolean }) => void;
   onDelete: (commentId: string) => void;
   className?: string;
+  onRequestEdit?: (comment: SessionReviewComment) => void;
 }
 
 function formatRelativeTime(dateStr: string): string {
@@ -53,14 +54,16 @@ const SingleComment = memo(function SingleComment({
   comment,
   onUpdate,
   onDelete,
+  onRequestEdit,
 }: {
   comment: SessionReviewComment;
   onUpdate: (commentId: string, data: { body?: string; resolved?: boolean }) => void;
   onDelete: (commentId: string) => void;
+  onRequestEdit?: (comment: SessionReviewComment) => void;
 }) {
   const [editing, setEditing] = useState(false);
 
-  if (editing) {
+  if (editing && !onRequestEdit) {
     return (
       <CommentInput
         initialValue={comment.body}
@@ -128,7 +131,13 @@ const SingleComment = memo(function SingleComment({
             size="sm"
             className="h-6 w-6 p-0 text-muted-foreground hover:text-foreground"
             title="Edit"
-            onClick={() => setEditing(true)}
+            onClick={() => {
+              if (onRequestEdit) {
+                onRequestEdit(comment);
+                return;
+              }
+              setEditing(true);
+            }}
           >
             <Edit2 className="h-3 w-3" />
           </Button>
@@ -155,7 +164,7 @@ const SingleComment = memo(function SingleComment({
 /**
  * Displays a stack of comments for a single line, with collapsed resolved view.
  */
-export function CommentThread({ comments, onUpdate, onDelete, className }: CommentThreadProps) {
+export function CommentThread({ comments, onUpdate, onDelete, className, onRequestEdit }: CommentThreadProps) {
   const [showResolved, setShowResolved] = useState(false);
 
   const openComments = comments.filter((c) => !c.resolved);
@@ -171,7 +180,7 @@ export function CommentThread({ comments, onUpdate, onDelete, className }: Comme
     >
       {/* Open comments always shown */}
       {openComments.map((c) => (
-        <SingleComment key={c.id} comment={c} onUpdate={onUpdate} onDelete={onDelete} />
+        <SingleComment key={c.id} comment={c} onUpdate={onUpdate} onDelete={onDelete} onRequestEdit={onRequestEdit} />
       ))}
 
       {/* Resolved comments collapsed by default */}
@@ -180,7 +189,7 @@ export function CommentThread({ comments, onUpdate, onDelete, className }: Comme
           {showResolved ? (
             <>
               {resolvedComments.map((c) => (
-                <SingleComment key={c.id} comment={c} onUpdate={onUpdate} onDelete={onDelete} />
+                <SingleComment key={c.id} comment={c} onUpdate={onUpdate} onDelete={onDelete} onRequestEdit={onRequestEdit} />
               ))}
               <Button
                 variant="ghost"

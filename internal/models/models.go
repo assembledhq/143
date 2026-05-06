@@ -71,10 +71,35 @@ type Integration struct {
 	Provider           IntegrationProvider `db:"provider" json:"provider"`
 	Config             json.RawMessage     `db:"config" json:"-"` // never expose config in JSON (contains secrets)
 	GitHubAppInstalled *bool               `db:"-" json:"github_app_installed,omitempty"`
-	Status             IntegrationStatus   `db:"status" json:"status"`
-	LastSyncedAt       *time.Time          `db:"last_synced_at" json:"last_synced_at,omitempty"`
-	CreatedAt          time.Time           `db:"created_at" json:"created_at"`
+	// AuthError is a derived view of the auth-failure markers stamped into
+	// config jsonb when a provider rejects our access token (currently only
+	// Linear). Populated by ListIntegrations / Get* paths via deriveIntegrationStatus
+	// so the integrations settings UI can render a "Reconnect" CTA without
+	// leaking the rest of config (which contains secrets — see json:"-" above).
+	AuthError    *IntegrationAuthError `db:"-" json:"auth_error,omitempty"`
+	Status       IntegrationStatus     `db:"status" json:"status"`
+	LastSyncedAt *time.Time            `db:"last_synced_at" json:"last_synced_at,omitempty"`
+	CreatedAt    time.Time             `db:"created_at" json:"created_at"`
 }
+
+// IntegrationAuthError is the user-facing shape of an auth failure: a
+// short reason string and the timestamp the failure was last observed.
+// SECURITY: must not include raw provider responses or tokens — the
+// reason field is set to a controlled string at the call site.
+type IntegrationAuthError struct {
+	Reason string    `json:"reason"`
+	At     time.Time `json:"at"`
+}
+
+// IntegrationConfigAuthErrorKey / IntegrationConfigAuthErrorAtKey are the
+// jsonb keys used to stamp an auth-error reason and timestamp into
+// integrations.config. Defined here so the writer (linear service) and
+// readers (api/handlers) share a single source of truth without forcing
+// a dependency edge between those packages.
+const (
+	IntegrationConfigAuthErrorKey   = "last_auth_error"
+	IntegrationConfigAuthErrorAtKey = "last_auth_error_at"
+)
 
 type Repository struct {
 	ID             uuid.UUID       `db:"id" json:"id"`
@@ -156,6 +181,7 @@ type Issue struct {
 // issue linked (zero-issue sessions are a first-class execution path).
 type Session struct {
 	ID                  uuid.UUID               `db:"id" json:"id"`
+	PrimaryThreadID     *uuid.UUID              `db:"-" json:"-"`
 	PrimaryIssueID      *uuid.UUID              `db:"primary_issue_id" json:"primary_issue_id"`
 	OrgID               uuid.UUID               `db:"org_id" json:"org_id"`
 	Origin              SessionOrigin           `db:"origin" json:"origin"`
@@ -276,6 +302,10 @@ type Session struct {
 	PRPushError          *string     `db:"pr_push_error" json:"pr_push_error,omitempty"`
 	DiffCollectedAt      *time.Time  `db:"diff_collected_at" json:"diff_collected_at,omitempty"`
 	LatestDiffSnapshotID *uuid.UUID  `db:"latest_diff_snapshot_id" json:"latest_diff_snapshot_id,omitempty"`
+	// HasUnpushedChanges is a derived read-model field: true when the most
+	// recent persisted session HEAD differs from the open PR's tracked head
+	// commit, which means "Push changes" is actionable.
+	HasUnpushedChanges bool `db:"has_unpushed_changes" json:"has_unpushed_changes"`
 	// LinearPrivate suppresses every Linear write for this session. The agent
 	// still receives Linear context locally; nothing leaves 143. Frozen at
 	// session create — see design 62 §"Composer controls must express distinct
@@ -332,6 +362,10 @@ type SessionIssueLink struct {
 	// links instead of the universal redirect path. Nil for non-Linear
 	// links and Linear links written before workspace caching landed.
 	IssueWorkspaceSlug *string `db:"issue_workspace_slug" json:"issue_workspace_slug,omitempty"`
+	// LinearLastSkippedReason is the latest state-sync skip reason from
+	// provider_state. Exposed so the session detail view can explain why a
+	// linked Linear issue did not move workflow state.
+	LinearLastSkippedReason *string `db:"linear_last_skipped_reason" json:"linear_last_skipped_reason,omitempty"`
 	// RawLinearPrimarySnapshot is the JSONB primary_snapshot cached in
 	// session_issue_link_provider_state at link time. It is internal-only:
 	// the orchestrator decodes it into SessionIssueSnapshotEntry fields when
@@ -469,6 +503,7 @@ type SessionResult struct {
 	FailureCategory     *string         `json:"failure_category,omitempty"`
 	DiffBaseCommitSHA   *string         `json:"-"`
 	DiffHeadCommitSHA   *string         `json:"-"`
+	DiffWorkspaceDirty  bool            `json:"-"`
 	DiffCollectedAt     *time.Time      `json:"-"`
 	DiffSource          string          `json:"-"`
 }
@@ -482,6 +517,7 @@ type SessionDiffSnapshot struct {
 	Source         string    `db:"source" json:"source"`
 	BaseCommitSHA  string    `db:"base_commit_sha" json:"base_commit_sha"`
 	HeadCommitSHA  *string   `db:"head_commit_sha" json:"head_commit_sha,omitempty"`
+	WorkspaceDirty bool      `db:"workspace_dirty" json:"workspace_dirty"`
 	WorkingBranch  *string   `db:"working_branch" json:"working_branch,omitempty"`
 	TargetBranch   *string   `db:"target_branch" json:"target_branch,omitempty"`
 	Diff           string    `db:"diff" json:"diff"`
@@ -615,26 +651,47 @@ type SessionMessage struct {
 // Each thread is one agent doing one piece of work. All threads in a session
 // share the same container and filesystem.
 type SessionThread struct {
-	ID                 uuid.UUID    `db:"id" json:"id"`
-	SessionID          uuid.UUID    `db:"session_id" json:"session_id"`
-	OrgID              uuid.UUID    `db:"org_id" json:"org_id"`
-	AgentType          AgentType    `db:"agent_type" json:"agent_type"`
-	ModelOverride      *string      `db:"model_override" json:"model_override,omitempty"`
-	Label              string       `db:"label" json:"label"`
-	Instructions       *string      `db:"instructions" json:"instructions,omitempty"`
-	FileScope          []string     `db:"file_scope" json:"file_scope,omitempty"`
-	Status             ThreadStatus `db:"status" json:"status"`
-	AgentSessionID     *string      `db:"agent_session_id" json:"agent_session_id,omitempty"`
-	CurrentTurn        int          `db:"current_turn" json:"current_turn"`
-	LastActivityAt     *time.Time   `db:"last_activity_at" json:"last_activity_at,omitempty"`
-	ConfidenceScore    *float64     `db:"confidence_score" json:"confidence_score,omitempty"`
-	ResultSummary      *string      `db:"result_summary" json:"result_summary,omitempty"`
-	Diff               *string      `db:"diff" json:"diff,omitempty"`
-	FailureExplanation *string      `db:"failure_explanation" json:"failure_explanation,omitempty"`
-	FailureCategory    *string      `db:"failure_category" json:"failure_category,omitempty"`
-	StartedAt          *time.Time   `db:"started_at" json:"started_at,omitempty"`
-	CompletedAt        *time.Time   `db:"completed_at" json:"completed_at,omitempty"`
-	CreatedAt          time.Time    `db:"created_at" json:"created_at"`
+	ID                  uuid.UUID    `db:"id" json:"id"`
+	SessionID           uuid.UUID    `db:"session_id" json:"session_id"`
+	OrgID               uuid.UUID    `db:"org_id" json:"org_id"`
+	AgentType           AgentType    `db:"agent_type" json:"agent_type"`
+	ModelOverride       *string      `db:"model_override" json:"model_override,omitempty"`
+	Label               string       `db:"label" json:"label"`
+	Instructions        *string      `db:"instructions" json:"instructions,omitempty"`
+	FileScope           []string     `db:"file_scope" json:"file_scope,omitempty"`
+	Status              ThreadStatus `db:"status" json:"status"`
+	AgentSessionID      *string      `db:"agent_session_id" json:"agent_session_id,omitempty"`
+	CurrentTurn         int          `db:"current_turn" json:"current_turn"`
+	LastActivityAt      *time.Time   `db:"last_activity_at" json:"last_activity_at,omitempty"`
+	ConfidenceScore     *float64     `db:"confidence_score" json:"confidence_score,omitempty"`
+	ResultSummary       *string      `db:"result_summary" json:"result_summary,omitempty"`
+	Diff                *string      `db:"diff" json:"diff,omitempty"`
+	FailureExplanation  *string      `db:"failure_explanation" json:"failure_explanation,omitempty"`
+	FailureCategory     *string      `db:"failure_category" json:"failure_category,omitempty"`
+	StartedAt           *time.Time   `db:"started_at" json:"started_at,omitempty"`
+	CompletedAt         *time.Time   `db:"completed_at" json:"completed_at,omitempty"`
+	CreatedAt           time.Time    `db:"created_at" json:"created_at"`
+	BaseSnapshotKey     *string      `db:"base_snapshot_key" json:"base_snapshot_key,omitempty"`
+	CostCents           float64      `db:"cost_cents" json:"cost_cents"`
+	PendingMessageCount int          `db:"pending_message_count" json:"pending_message_count"`
+	CancelRequestedAt   *time.Time   `db:"cancel_requested_at" json:"cancel_requested_at,omitempty"`
+}
+
+// SessionThreadFileEvent is operational write attribution: which thread
+// touched which path, with optional git blob hashes before/after. Used to
+// power overlap badges in the tab strip and the "Touched by tab" / "Overlap
+// with another tab" filters in the Changes view. Not security attribution.
+type SessionThreadFileEvent struct {
+	ID         int64      `db:"id" json:"id"`
+	OrgID      uuid.UUID  `db:"org_id" json:"org_id"`
+	SessionID  uuid.UUID  `db:"session_id" json:"session_id"`
+	ThreadID   *uuid.UUID `db:"thread_id" json:"thread_id,omitempty"`
+	Turn       int        `db:"turn" json:"turn"`
+	Path       string     `db:"path" json:"path"`
+	EventType  string     `db:"event_type" json:"event_type"`
+	BeforeHash *string    `db:"before_hash" json:"before_hash,omitempty"`
+	AfterHash  *string    `db:"after_hash" json:"after_hash,omitempty"`
+	ObservedAt time.Time  `db:"observed_at" json:"observed_at"`
 }
 
 // SessionQuestion represents a question the agent asks a human during a run.

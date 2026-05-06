@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"testing"
@@ -447,6 +448,87 @@ func TestOrgCredentialStore_UpsertWithLabel_NonCodingProvider(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "no MAX(priority) query should be issued for non-coding providers")
 }
 
+func TestOrgCredentialStore_UpdateLinearConfigIfRefreshTokenMatches(t *testing.T) {
+	t.Parallel()
+
+	t.Run("updates when refresh token matches", func(t *testing.T) {
+		t.Parallel()
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err, "creating mock pool should not error")
+		defer mock.Close()
+
+		orgID := uuid.New()
+		credentialID := uuid.New()
+		now := time.Now().UTC()
+		priorJSON, err := json.Marshal(models.LinearConfig{
+			AccessToken:  "lin_at_old",
+			RefreshToken: "lin_rt_old",
+			ExpiresAt:    now.Add(time.Minute),
+		})
+		require.NoError(t, err, "prior config should marshal")
+
+		mock.ExpectBegin()
+		mock.ExpectQuery(`SELECT .* FROM org_credentials .* FOR UPDATE`).
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnRows(pgxmock.NewRows(credColumns).
+				AddRow(credentialID, orgID, string(models.ProviderLinear), "", crypto.DevEncrypt(priorJSON), "active", nil, nil, nil, now, now))
+		mock.ExpectExec(`UPDATE org_credentials SET config = .* WHERE id = .* AND org_id = .*`).
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+		mock.ExpectCommit()
+
+		store := NewOrgCredentialStore(mock, nil)
+		merged := models.LinearConfig{
+			AccessToken:  "lin_at_new",
+			RefreshToken: "lin_rt_new",
+			ExpiresAt:    now.Add(2 * time.Hour),
+		}
+		current, updated, err := store.UpdateLinearConfigIfRefreshTokenMatches(context.Background(), orgID, "lin_rt_old", merged)
+		require.NoError(t, err, "matching refresh token should update")
+		require.True(t, updated, "matching refresh token should report updated")
+		require.Equal(t, merged, current, "matching refresh token should return the persisted config")
+		require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+	})
+
+	t.Run("skips update when refresh token changed", func(t *testing.T) {
+		t.Parallel()
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err, "creating mock pool should not error")
+		defer mock.Close()
+
+		orgID := uuid.New()
+		credentialID := uuid.New()
+		now := time.Now().UTC()
+		reconnected := models.LinearConfig{
+			AccessToken:   "lin_at_reconnected",
+			RefreshToken:  "lin_rt_reconnected",
+			ExpiresAt:     now.Add(2 * time.Hour),
+			WorkspaceID:   "wks-new",
+			WorkspaceName: "Reconnected Workspace",
+		}
+		currentJSON, err := json.Marshal(reconnected)
+		require.NoError(t, err, "current config should marshal")
+
+		mock.ExpectBegin()
+		mock.ExpectQuery(`SELECT .* FROM org_credentials .* FOR UPDATE`).
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnRows(pgxmock.NewRows(credColumns).
+				AddRow(credentialID, orgID, string(models.ProviderLinear), "", crypto.DevEncrypt(currentJSON), "active", nil, nil, nil, now, now))
+		mock.ExpectCommit()
+
+		store := NewOrgCredentialStore(mock, nil)
+		current, updated, err := store.UpdateLinearConfigIfRefreshTokenMatches(context.Background(), orgID, "lin_rt_old", models.LinearConfig{
+			AccessToken:  "lin_at_from_old_chain",
+			RefreshToken: "lin_rt_from_old_chain",
+			ExpiresAt:    now.Add(2 * time.Hour),
+		})
+		require.NoError(t, err, "changed refresh token should not error")
+		require.False(t, updated, "changed refresh token should report no update")
+		require.Equal(t, reconnected, current, "changed refresh token should return the current row for race recovery")
+		require.NoError(t, mock.ExpectationsWereMet(), "no UPDATE should be issued when the refresh token changed")
+	})
+}
+
 func TestOrgCredentialStore_Get(t *testing.T) {
 	t.Parallel()
 
@@ -618,7 +700,7 @@ func TestOrgCredentialStore_ListCodingAuths(t *testing.T) {
 	require.Equal(t, models.AgentTypeCodex, rows[0].Agent, "ListCodingAuths should classify Codex subscription rows")
 	require.True(t, rows[0].IsDefault, "ListCodingAuths should mark the first runnable row as default")
 	require.Equal(t, models.CodingAuthTypeAPIKey, rows[1].AuthType, "ListCodingAuths should classify API key rows")
-	require.Equal(t, models.CodingAuthStatusNeverVerified, rows[1].Status, "ListCodingAuths should derive Never verified when last_verified_at is nil")
+	require.Equal(t, models.CodingAuthStatusHealthy, rows[1].Status, "ListCodingAuths should treat active rows as healthy regardless of last_verified_at")
 	require.Equal(t, models.AgentTypeGeminiCLI, rows[2].Agent, "ListCodingAuths should classify Gemini API key rows")
 	require.Equal(t, "Gemini CLI API key", rows[2].Label, "ListCodingAuths should synthesize a default label when none is provided")
 	require.Equal(t, models.AgentTypeAmp, rows[3].Agent, "ListCodingAuths should classify Amp API key rows")
@@ -1390,10 +1472,11 @@ func TestOrgCredentialStore_CodingAuthCRUDAndHelpers(t *testing.T) {
 		require.Equal(t, models.CodingAuthTypeSubscription, summary.AuthType, "buildCodingAuthSummary should infer subscription auth type")
 		require.Equal(t, "Codex subscription", summary.Label, "buildCodingAuthSummary should synthesize a fallback label")
 		require.Equal(t, "plus", summary.UsageNote, "buildCodingAuthSummary should surface subscription account type")
-		require.Equal(t, models.CodingAuthStatusHealthy, summary.Status, "buildCodingAuthSummary should map active verified rows to healthy")
+		require.Equal(t, models.CodingAuthStatusHealthy, summary.Status, "buildCodingAuthSummary should map active rows to healthy")
 
 		require.Equal(t, models.CodingAuthStatusInvalid, inferCodingAuthStatus(models.DecryptedCredential{Status: "invalid"}), "inferCodingAuthStatus should map invalid rows")
 		require.Equal(t, models.CodingAuthStatusNeedsReauth, inferCodingAuthStatus(models.DecryptedCredential{Status: "pending_auth"}), "inferCodingAuthStatus should map pending auth rows")
+		require.Equal(t, models.CodingAuthStatusHealthy, inferCodingAuthStatus(models.DecryptedCredential{Status: "active"}), "inferCodingAuthStatus should map active rows to healthy even without last_verified_at")
 		require.Equal(t, models.CodingAuthStatusNeedsReauth, inferCodingAuthStatus(models.DecryptedCredential{Status: "other"}), "inferCodingAuthStatus should map unknown rows to needs reauth")
 		require.Equal(t, models.AgentType(""), inferCodingAuthAgent(models.DecryptedCredential{Provider: models.ProviderOpenRouter}), "inferCodingAuthAgent should reject unsupported providers")
 		require.Equal(t, models.CodingAuthType(""), inferCodingAuthType(models.DecryptedCredential{Config: models.OpenRouterConfig{APIKey: "sk-or"}}), "inferCodingAuthType should reject unsupported provider configs")

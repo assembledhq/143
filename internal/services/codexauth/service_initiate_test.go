@@ -10,6 +10,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
+
+	"github.com/assembledhq/143/internal/models"
 )
 
 func TestInitiateDeviceAuth_IntervalParsing(t *testing.T) {
@@ -60,14 +62,14 @@ func TestInitiateDeviceAuth_IntervalParsing(t *testing.T) {
 			svc.SetIssuer(server.URL)
 
 			orgID := uuid.New()
-			_, err := svc.InitiateDeviceAuth(context.Background(), orgID, nil, "")
+			_, err := svc.InitiateDeviceAuth(context.Background(), models.Scope{OrgID: orgID}, nil, "")
 			if tc.expectErr {
 				require.Error(t, err, "initiate should fail for invalid interval values")
 				return
 			}
 
 			require.NoError(t, err, "initiate should succeed for supported interval formats")
-			val, ok := svc.pending.Load(orgID.String() + ":")
+			val, ok := svc.pending.Load(pendingKey(models.Scope{OrgID: orgID}, ""))
 			require.True(t, ok, "pending auth should be stored after successful initiation")
 
 			pending, ok := val.(*PendingAuth)

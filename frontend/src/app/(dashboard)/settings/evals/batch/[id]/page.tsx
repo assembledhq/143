@@ -1,29 +1,65 @@
 "use client";
 
-import { useMemo } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useCallback, useMemo } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import Link from "next/link";
 import { useParams } from "next/navigation";
 import { api } from "@/lib/api";
 import { queryKeys } from "@/lib/query-keys";
+import { getActiveOrgId } from "@/lib/active-org";
+import { buildEvalBatchStreamURL, SSE_EVENT } from "@/lib/sse";
+import { shouldSubscribeToEvalBatchStream, useEvalSSE } from "@/lib/use-eval-sse";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { PageContainer } from "@/components/page-container";
 import { PageHeader } from "@/components/page-header";
 import { ArrowLeft, Loader2, RefreshCw } from "lucide-react";
-import type { EvalBatchDetail, EvalRun, EvalTask, ListResponse } from "@/lib/types";
+import type { EvalBatchDetail, EvalRun, EvalTask, ListResponse, SingleResponse } from "@/lib/types";
 import { evalRunStatusConfig } from "@/lib/types";
+
+// Slow polling backstop while SSE is the primary update channel. Keeps the
+// matrix correct in the rare event a Redis publish is dropped (network
+// blip on the publish side, subscription disconnect that re-establishes
+// after the missed event) without doing anything close to the prior 5s
+// load on Postgres. When SSE itself is unavailable (Redis down) we drop
+// back to the original 5s cadence — see streamHealthy from useEvalSSE.
+const SSE_BACKSTOP_POLL_MS = 30_000;
+const SSE_DOWN_POLL_MS = 5_000;
 
 export default function BatchDetailPage() {
   const params = useParams();
   const batchId = params.id as string;
+  const queryClient = useQueryClient();
+  const cachedBatch = queryClient.getQueryData<SingleResponse<EvalBatchDetail>>(
+    queryKeys.evals.batch(batchId),
+  )?.data;
+
+  // Per-batch SSE subscription. Invalidates the detail query on each event
+  // so React Query refetches the full EvalBatchDetail (batch + runs). The
+  // event itself carries only batch_id + status, but we don't try to merge
+  // partial state into the cache because the matrix needs the full runs
+  // array — a single GET keeps the rendering path simple.
+  const sseURL = useMemo(() => {
+    if (!batchId || !shouldSubscribeToEvalBatchStream(cachedBatch?.status)) return null;
+    const apiBase = process.env.NEXT_PUBLIC_API_URL || "";
+    return buildEvalBatchStreamURL(apiBase, batchId, getActiveOrgId());
+  }, [batchId, cachedBatch?.status]);
+  const onBatchEvent = useCallback(() => {
+    queryClient.invalidateQueries({ queryKey: queryKeys.evals.batch(batchId) });
+  }, [queryClient, batchId]);
+  const { healthy: streamHealthy } = useEvalSSE({
+    url: sseURL,
+    event: SSE_EVENT.EVAL_BATCH_UPDATED,
+    onEvent: onBatchEvent,
+  });
 
   const { data: batchResponse, isLoading } = useQuery({
     queryKey: queryKeys.evals.batch(batchId),
     queryFn: () => api.evals.getBatch(batchId),
     refetchInterval: (query) => {
       const batch = query.state.data?.data;
-      return batch && batch.status !== "completed" ? 5000 : false;
+      if (!batch || batch.status === "completed") return false;
+      return streamHealthy ? SSE_BACKSTOP_POLL_MS : SSE_DOWN_POLL_MS;
     },
   });
 

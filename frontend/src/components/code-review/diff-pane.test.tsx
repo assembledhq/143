@@ -111,10 +111,10 @@ describe("DiffPane", () => {
     expect(screen.getByTestId("file-b.ts")).toHaveAttribute("data-active", "true");
   });
 
-  it("marks only the matching file as active when activeFileIndex is set", () => {
+  it("keeps syntax highlighting enabled for every file when activeFileIndex is set", () => {
     const files = [makeDiffFile("a.ts"), makeDiffFile("b.ts")];
     render(<DiffPane files={files} viewMode="unified" activeFileIndex={1} />);
-    expect(screen.getByTestId("file-a.ts")).toHaveAttribute("data-active", "false");
+    expect(screen.getByTestId("file-a.ts")).toHaveAttribute("data-active", "true");
     expect(screen.getByTestId("file-b.ts")).toHaveAttribute("data-active", "true");
   });
 
@@ -228,5 +228,31 @@ describe("DiffPane", () => {
     fireEvent.scroll(scrollContainer);
 
     expect(onActiveFileChange).toHaveBeenCalledWith(1);
+  });
+
+  it("replaces the scroll container when resetScrollKey changes so mobile file switches do not keep a stale offset", () => {
+    const { container, rerender } = render(
+      <DiffPane
+        files={[makeDiffFile("a.ts")]}
+        viewMode="unified"
+        resetScrollKey="a.ts"
+      />
+    );
+
+    const firstScrollContainer = container.firstElementChild as HTMLDivElement;
+    firstScrollContainer.scrollTop = 480;
+
+    rerender(
+      <DiffPane
+        files={[makeDiffFile("b.ts")]}
+        viewMode="unified"
+        resetScrollKey="b.ts"
+      />
+    );
+
+    const secondScrollContainer = container.firstElementChild as HTMLDivElement;
+
+    expect(secondScrollContainer).not.toBe(firstScrollContainer);
+    expect(secondScrollContainer.scrollTop).toBe(0);
   });
 });

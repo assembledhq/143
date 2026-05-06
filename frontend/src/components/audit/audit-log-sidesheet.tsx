@@ -35,7 +35,7 @@ export function AuditLogSidesheet({
           <SheetTitle>{title}</SheetTitle>
           <SheetDescription>Recent changes and events</SheetDescription>
         </SheetHeader>
-        <div className="mt-4 -mx-6 overflow-y-auto max-h-[calc(100vh-8rem)]">
+        <div className="mt-4 -mx-6">
           <AuditLogTimeline filters={filters} members={members} pageSize={15} />
         </div>
       </SheetContent>

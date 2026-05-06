@@ -1,20 +1,15 @@
-// Legacy PM model aliases (kept for backward compatibility).
-export const PM_MODEL_OPUS = "opus";
-export const PM_MODEL_SONNET = "sonnet";
-export const PM_MODEL_HAIKU = "haiku";
-
-export const LEGACY_PM_ALIASES = [PM_MODEL_OPUS, PM_MODEL_SONNET, PM_MODEL_HAIKU] as const;
-
-export const CLAUDE_CODE_MODEL_OPUS = "claude-opus-4-6";
+export const CLAUDE_CODE_MODEL_OPUS_47 = "claude-opus-4-7";
+export const CLAUDE_CODE_MODEL_OPUS_46 = "claude-opus-4-6";
 export const CLAUDE_CODE_MODEL_SONNET_46 = "claude-sonnet-4-6";
-export const CLAUDE_CODE_MODEL_SONNET = "claude-sonnet-4-5";
-export const CLAUDE_CODE_MODEL_HAIKU = "claude-haiku-4-5";
+export const CLAUDE_CODE_MODEL_SONNET_45 = "claude-sonnet-4-5";
+export const CLAUDE_CODE_MODEL_HAIKU_45 = "claude-haiku-4-5";
 
 export const AVAILABLE_CLAUDE_CODE_MODELS = [
-  CLAUDE_CODE_MODEL_OPUS,
+  CLAUDE_CODE_MODEL_OPUS_47,
+  CLAUDE_CODE_MODEL_OPUS_46,
   CLAUDE_CODE_MODEL_SONNET_46,
-  CLAUDE_CODE_MODEL_SONNET,
-  CLAUDE_CODE_MODEL_HAIKU,
+  CLAUDE_CODE_MODEL_SONNET_45,
+  CLAUDE_CODE_MODEL_HAIKU_45,
 ] as const;
 
 export const GEMINI_CLI_MODEL_GEMINI_3_1_PRO_PREVIEW = "gemini-3.1-pro-preview";
@@ -29,6 +24,7 @@ export const AVAILABLE_GEMINI_CLI_MODELS = [
   GEMINI_CLI_MODEL_GEMINI_2_5_FLASH,
 ] as const;
 
+export const CODEX_MODEL_GPT_5_5 = "gpt-5.5";
 export const CODEX_MODEL_GPT_5_4 = "gpt-5.4";
 export const CODEX_MODEL_GPT_5_4_MINI = "gpt-5.4-mini";
 export const CODEX_MODEL_GPT_5_3_CODEX = "gpt-5.3-codex";
@@ -37,6 +33,7 @@ export const CODEX_MODEL_GPT_5_CODEX = "gpt-5-codex";
 export const CODEX_MODEL_GPT_5_3_CODEX_SPARK = "gpt-5.3-codex-spark";
 
 export const AVAILABLE_CODEX_MODELS = [
+  CODEX_MODEL_GPT_5_5,
   CODEX_MODEL_GPT_5_4,
   CODEX_MODEL_GPT_5_4_MINI,
   CODEX_MODEL_GPT_5_3_CODEX,
@@ -76,26 +73,11 @@ export const AVAILABLE_PI_MODELS = [
   PI_MODEL_GEMINI_2_5_PRO,
 ] as const;
 
-// PM model configuration: maps each provider to its available models and API key env var.
-export const PM_MODELS_BY_PROVIDER: Record<string, { label: string; models: readonly string[]; apiKeyVar: string }> = {
-  claude_code: { label: "Claude Code", models: AVAILABLE_CLAUDE_CODE_MODELS, apiKeyVar: "ANTHROPIC_API_KEY" },
-  gemini_cli: { label: "Gemini CLI", models: AVAILABLE_GEMINI_CLI_MODELS, apiKeyVar: "GEMINI_API_KEY" },
-  codex: { label: "Codex", models: AVAILABLE_CODEX_MODELS, apiKeyVar: "OPENAI_API_KEY" },
-};
+export const DEFAULT_PM_MODEL = CODEX_MODEL_GPT_5_4;
 
-export const DEFAULT_PM_MODEL = CLAUDE_CODE_MODEL_SONNET;
-
-// Agent type options for session/project creation forms live on the AGENTS
-// registry in @/lib/agents. Import AGENTS (and agentTypeForModel) from there —
-// keeping a second list here would drift.
-
-// All PM models across every provider (for validation / backward compat).
-export const AVAILABLE_PM_MODELS = [
-  ...LEGACY_PM_ALIASES,
-  ...AVAILABLE_CLAUDE_CODE_MODELS,
-  ...AVAILABLE_GEMINI_CLI_MODELS,
-  ...AVAILABLE_CODEX_MODELS,
-] as const;
+// PM and session model dropdowns are both built from the AGENTS registry in
+// @/lib/agents (see availableAgentModelGroups). Keeping a second PM-only list
+// here would drift away from the session picker.
 
 // General-purpose LLM models (used by validation, prioritization, PM services).
 // NOTE: This is a static fallback. The frontend should prefer fetching models

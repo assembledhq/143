@@ -16,15 +16,15 @@ import (
 // to clone. A row with linear_project_id=NULL is the "team default" and
 // matches issues with no project.
 type LinearTeamRepoMapping struct {
-	ID              uuid.UUID  `db:"id" json:"id"`
-	OrgID           uuid.UUID  `db:"org_id" json:"org_id"`
-	LinearTeamID    string     `db:"linear_team_id" json:"linear_team_id"`
-	LinearProjectID *string    `db:"linear_project_id" json:"linear_project_id,omitempty"`
-	RepositoryID    uuid.UUID  `db:"repository_id" json:"repository_id"`
-	DefaultBranch   string     `db:"default_branch" json:"default_branch,omitempty"`
-	Priority        int        `db:"priority" json:"priority"`
-	CreatedAt       time.Time  `db:"created_at" json:"created_at"`
-	UpdatedAt       time.Time  `db:"updated_at" json:"updated_at"`
+	ID              uuid.UUID `db:"id" json:"id"`
+	OrgID           uuid.UUID `db:"org_id" json:"org_id"`
+	LinearTeamID    string    `db:"linear_team_id" json:"linear_team_id"`
+	LinearProjectID *string   `db:"linear_project_id" json:"linear_project_id,omitempty"`
+	RepositoryID    uuid.UUID `db:"repository_id" json:"repository_id"`
+	DefaultBranch   string    `db:"default_branch" json:"default_branch,omitempty"`
+	Priority        int       `db:"priority" json:"priority"`
+	CreatedAt       time.Time `db:"created_at" json:"created_at"`
+	UpdatedAt       time.Time `db:"updated_at" json:"updated_at"`
 }
 
 // LinearTeamRepoMappingStore reads and writes the repo-mapping table. Hot

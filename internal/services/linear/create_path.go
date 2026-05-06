@@ -238,6 +238,17 @@ func (s *Service) resolveWithBudget(parent context.Context, orgID uuid.UUID, hit
 			Msg("linear inline resolution fell back to async")
 		return nil, nil
 	default:
+		if errors.Is(err, ErrUnauthorized) {
+			// 401 from the inline path means the org's Linear token is dead.
+			// Flip the integration row to error + stamp the reason so the
+			// integrations settings page surfaces a Reconnect CTA instead of
+			// the user only learning about it via the per-session "prepare
+			// failed" chip after the worker dead-letters. Detached context so
+			// the inline budget cancellation doesn't kill the status write.
+			markCtx, markCancel := context.WithTimeout(context.WithoutCancel(parent), markIntegrationStatusTimeout)
+			s.MarkIntegrationUnauthorized(markCtx, orgID)
+			markCancel()
+		}
 		s.logger.Debug().
 			Dur("elapsed", elapsed).
 			Err(err).
@@ -247,6 +258,11 @@ func (s *Service) resolveWithBudget(parent context.Context, orgID uuid.UUID, hit
 		return nil, err
 	}
 }
+
+// markIntegrationStatusTimeout caps the side-channel status flip on
+// ErrUnauthorized. The write is a single short UPDATE; we still bound it so
+// a wedged DB doesn't pile up goroutines on a Linear-outage retry storm.
+const markIntegrationStatusTimeout = 3 * time.Second
 
 var errLinearRefDropped = errors.New("linear ref dropped")
 

@@ -10,13 +10,16 @@ import (
 	"testing"
 	"time"
 
+	"github.com/alicebob/miniredis/v2"
 	"github.com/assembledhq/143/internal/api/middleware"
+	"github.com/assembledhq/143/internal/cache"
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/pashagolub/pgxmock/v4"
+	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 )
 
@@ -2653,4 +2656,318 @@ func TestEvalHandler_StartBatch_Validation(t *testing.T) {
 		require.Contains(t, w.Body.String(), "MISSING_FIELD")
 		require.NoError(t, mock.ExpectationsWereMet())
 	})
+}
+
+// --- SSE: StreamBatchUpdates / StreamBootstrapUpdates ---
+
+// stubEvalMembershipStore lets the SSE handler tests exercise cross-org
+// validation without bringing up a real OrganizationMembershipStore. Mirrors
+// stubPullRequestMembershipStore in pull_requests_test.go.
+type stubEvalMembershipStore struct {
+	getFunc func(context.Context, uuid.UUID, uuid.UUID) (models.OrganizationMembership, error)
+}
+
+func (s *stubEvalMembershipStore) Get(ctx context.Context, userID, orgID uuid.UUID) (models.OrganizationMembership, error) {
+	return s.getFunc(ctx, userID, orgID)
+}
+
+func newTestEvalStreams(t *testing.T) (*cache.EvalBatchStreams, *cache.EvalBootstrapStreams) {
+	t.Helper()
+	mr := miniredis.RunT(t)
+	metrics, err := cache.NewMetrics()
+	require.NoError(t, err, "Redis metrics should initialize for SSE tests")
+	client := cache.New(cache.Config{Topology: "standalone", URL: "redis://" + mr.Addr()}, zerolog.Nop(), metrics)
+	require.NotNil(t, client, "Redis client should initialize for SSE tests")
+	t.Cleanup(func() {
+		closeErr := client.Close()
+		if closeErr != nil && !strings.Contains(closeErr.Error(), "client is closed") {
+			require.NoError(t, closeErr, "eval stream test client should close cleanly")
+		}
+	})
+	return cache.NewEvalBatchStreams(client, zerolog.Nop()), cache.NewEvalBootstrapStreams(client, zerolog.Nop())
+}
+
+func TestEvalHandler_StreamBatchUpdates_AuthAndAvailability(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	userID := uuid.New()
+	otherOrgID := uuid.New()
+
+	tests := []struct {
+		name           string
+		setup          func(*EvalHandler, pgxmock.PgxPoolIface, uuid.UUID)
+		batchID        string
+		query          string
+		expectedCode   int
+		expectedSubstr string
+	}{
+		{
+			name:           "503 when streams missing",
+			setup:          func(h *EvalHandler, _ pgxmock.PgxPoolIface, _ uuid.UUID) {},
+			batchID:        uuid.New().String(),
+			expectedCode:   http.StatusServiceUnavailable,
+			expectedSubstr: "eval batch streams unavailable",
+		},
+		{
+			name: "400 invalid batch ID",
+			setup: func(h *EvalHandler, _ pgxmock.PgxPoolIface, _ uuid.UUID) {
+				batchStreams, _ := newTestEvalStreams(t)
+				h.SetBatchStreams(batchStreams)
+			},
+			batchID:        "not-a-uuid",
+			expectedCode:   http.StatusBadRequest,
+			expectedSubstr: "invalid batch ID",
+		},
+		{
+			name: "400 invalid org_id query string",
+			setup: func(h *EvalHandler, _ pgxmock.PgxPoolIface, _ uuid.UUID) {
+				batchStreams, _ := newTestEvalStreams(t)
+				h.SetBatchStreams(batchStreams)
+			},
+			batchID:        uuid.New().String(),
+			query:          "?org_id=not-a-uuid",
+			expectedCode:   http.StatusBadRequest,
+			expectedSubstr: "invalid eval stream org",
+		},
+		{
+			name: "403 when explicit cross-org membership rejected",
+			setup: func(h *EvalHandler, _ pgxmock.PgxPoolIface, _ uuid.UUID) {
+				batchStreams, _ := newTestEvalStreams(t)
+				h.SetBatchStreams(batchStreams)
+				h.SetMembershipStore(&stubEvalMembershipStore{
+					getFunc: func(context.Context, uuid.UUID, uuid.UUID) (models.OrganizationMembership, error) {
+						return models.OrganizationMembership{}, pgx.ErrNoRows
+					},
+				})
+			},
+			batchID:        uuid.New().String(),
+			query:          "?org_id=" + otherOrgID.String(),
+			expectedCode:   http.StatusForbidden,
+			expectedSubstr: "forbidden eval stream org",
+		},
+		{
+			name: "404 when batch not in resolved org",
+			setup: func(h *EvalHandler, mock pgxmock.PgxPoolIface, _ uuid.UUID) {
+				batchStreams, _ := newTestEvalStreams(t)
+				h.SetBatchStreams(batchStreams)
+				mock.ExpectQuery("SELECT .+ FROM eval_batches WHERE id").
+					WithArgs(anyArgs(2)...).
+					WillReturnRows(pgxmock.NewRows(evalBatchColumns))
+			},
+			batchID:        uuid.New().String(),
+			expectedCode:   http.StatusNotFound,
+			expectedSubstr: "eval batch not found",
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "pgxmock pool should initialize")
+			defer mock.Close()
+
+			handler := newEvalHandler(mock)
+			tt.setup(handler, mock, orgID)
+
+			req := httptest.NewRequest(http.MethodGet, "/api/v1/evals/batch/"+tt.batchID+"/stream"+tt.query, nil)
+			req = req.WithContext(evalCtxWithChi(orgID, userID, map[string]string{"batchId": tt.batchID}))
+			w := httptest.NewRecorder()
+
+			handler.StreamBatchUpdates(w, req)
+
+			require.Equal(t, tt.expectedCode, w.Code, "StreamBatchUpdates should return the expected status")
+			require.Contains(t, w.Body.String(), tt.expectedSubstr, "StreamBatchUpdates should explain the failure mode in the body")
+			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+		})
+	}
+}
+
+func TestEvalHandler_StreamBatchUpdates_DeliversPublishedEvent(t *testing.T) {
+	t.Parallel()
+
+	// End-to-end: subscribe via the SSE handler, publish via the cache helper,
+	// confirm the event reaches the response writer with the documented event
+	// type. Locks in the per-batch channel scoping by also publishing for an
+	// unrelated batch and asserting it doesn't leak into the response.
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should initialize")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	userID := uuid.New()
+	batchID := uuid.New()
+	otherBatchID := uuid.New()
+	now := time.Now()
+
+	handler := newEvalHandler(mock)
+	batchStreams, _ := newTestEvalStreams(t)
+	handler.SetBatchStreams(batchStreams)
+
+	mock.ExpectQuery("SELECT .+ FROM eval_batches WHERE id").
+		WithArgs(anyArgs(2)...).
+		WillReturnRows(pgxmock.NewRows(evalBatchColumns).AddRow(newTestEvalBatchRow(batchID, orgID, &userID, now)...))
+
+	ctx, cancel := context.WithCancel(evalCtxWithChi(orgID, userID, map[string]string{"batchId": batchID.String()}))
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/evals/batch/"+batchID.String()+"/stream", nil).WithContext(ctx)
+	rr := newLockedRecorder()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		handler.StreamBatchUpdates(rr, req)
+	}()
+
+	event := models.EvalBatchUpdatedEvent{
+		BatchID:   batchID,
+		OrgID:     orgID,
+		Status:    models.EvalBatchStatusRunning,
+		UpdatedAt: time.Now().UTC(),
+	}
+	otherEvent := models.EvalBatchUpdatedEvent{
+		BatchID:   otherBatchID,
+		OrgID:     orgID,
+		Status:    models.EvalBatchStatusRunning,
+		UpdatedAt: time.Now().UTC(),
+	}
+
+	require.Eventually(t, func() bool {
+		// Publish the cross-batch event first so we'd see it ahead of ours
+		// if the per-batch channel scoping ever regressed.
+		_ = batchStreams.PublishUpdated(context.Background(), otherEvent)
+		_ = batchStreams.PublishUpdated(context.Background(), event)
+		return strings.Contains(rr.BodyString(), "eval_batch.updated")
+	}, 2*time.Second, 20*time.Millisecond, "StreamBatchUpdates should write the per-batch event to the SSE response")
+
+	cancel()
+	<-done
+
+	body := rr.BodyString()
+	require.Contains(t, body, batchID.String(), "SSE response should include the published batch ID")
+	require.NotContains(t, body, otherBatchID.String(), "SSE response must not leak events scoped to other batches")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestEvalHandler_StreamBootstrapUpdates_AuthAndAvailability(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	userID := uuid.New()
+
+	tests := []struct {
+		name           string
+		setup          func(*EvalHandler, pgxmock.PgxPoolIface)
+		runID          string
+		query          string
+		expectedCode   int
+		expectedSubstr string
+	}{
+		{
+			name:           "503 when streams missing",
+			setup:          func(*EvalHandler, pgxmock.PgxPoolIface) {},
+			runID:          uuid.New().String(),
+			expectedCode:   http.StatusServiceUnavailable,
+			expectedSubstr: "eval bootstrap streams unavailable",
+		},
+		{
+			name: "400 invalid run ID",
+			setup: func(h *EvalHandler, _ pgxmock.PgxPoolIface) {
+				_, bs := newTestEvalStreams(t)
+				h.SetBootstrapStreams(bs)
+			},
+			runID:          "not-a-uuid",
+			expectedCode:   http.StatusBadRequest,
+			expectedSubstr: "invalid bootstrap run ID",
+		},
+		{
+			name: "404 when run not in resolved org",
+			setup: func(h *EvalHandler, mock pgxmock.PgxPoolIface) {
+				_, bs := newTestEvalStreams(t)
+				h.SetBootstrapStreams(bs)
+				mock.ExpectQuery("SELECT .+ FROM eval_bootstrap_runs WHERE id").
+					WithArgs(anyArgs(2)...).
+					WillReturnRows(pgxmock.NewRows(bootstrapRunColumns))
+			},
+			runID:          uuid.New().String(),
+			expectedCode:   http.StatusNotFound,
+			expectedSubstr: "bootstrap run not found",
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err)
+			defer mock.Close()
+
+			handler := newEvalHandler(mock)
+			tt.setup(handler, mock)
+
+			req := httptest.NewRequest(http.MethodGet, "/api/v1/evals/bootstrap/"+tt.runID+"/stream"+tt.query, nil)
+			req = req.WithContext(evalCtxWithChi(orgID, userID, map[string]string{"runId": tt.runID}))
+			w := httptest.NewRecorder()
+
+			handler.StreamBootstrapUpdates(w, req)
+			require.Equal(t, tt.expectedCode, w.Code)
+			require.Contains(t, w.Body.String(), tt.expectedSubstr)
+			require.NoError(t, mock.ExpectationsWereMet())
+		})
+	}
+}
+
+func TestEvalHandler_StreamBootstrapUpdates_DeliversPublishedEvent(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	orgID := uuid.New()
+	userID := uuid.New()
+	repoID := uuid.New()
+	runID := uuid.New()
+	now := time.Now()
+
+	handler := newEvalHandler(mock)
+	_, bootstrapStreams := newTestEvalStreams(t)
+	handler.SetBootstrapStreams(bootstrapStreams)
+
+	mock.ExpectQuery("SELECT .+ FROM eval_bootstrap_runs WHERE id").
+		WithArgs(anyArgs(2)...).
+		WillReturnRows(pgxmock.NewRows(bootstrapRunColumns).
+			AddRow(newTestBootstrapRunRow(runID, orgID, repoID, &userID, "running", json.RawMessage(`null`), now)...))
+
+	ctx, cancel := context.WithCancel(evalCtxWithChi(orgID, userID, map[string]string{"runId": runID.String()}))
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/evals/bootstrap/"+runID.String()+"/stream", nil).WithContext(ctx)
+	rr := newLockedRecorder()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		handler.StreamBootstrapUpdates(rr, req)
+	}()
+
+	event := models.EvalBootstrapUpdatedEvent{
+		BootstrapRunID: runID,
+		OrgID:          orgID,
+		Status:         models.EvalBootstrapStatusCompleted,
+		UpdatedAt:      time.Now().UTC(),
+	}
+
+	require.Eventually(t, func() bool {
+		_ = bootstrapStreams.PublishUpdated(context.Background(), event)
+		return strings.Contains(rr.BodyString(), "eval_bootstrap.updated")
+	}, 2*time.Second, 20*time.Millisecond, "StreamBootstrapUpdates should write the per-run event to the SSE response")
+
+	cancel()
+	<-done
+
+	require.Contains(t, rr.BodyString(), runID.String(), "SSE response should include the published bootstrap run ID")
+	require.NoError(t, mock.ExpectationsWereMet())
 }

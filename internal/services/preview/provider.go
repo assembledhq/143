@@ -153,7 +153,5 @@ type InfraHandle struct {
 	InfraName   string
 	Template    string
 	ContainerID string
-	Host        string
-	Port        int
 	Credential  InfraCredential
 }

@@ -20,6 +20,7 @@ interface DiffPaneProps {
   activeFileIndex?: number;
   resetScrollKey?: string;
   onActiveFileChange?: (index: number) => void;
+  onScrollMetricsChange?: (info: { scrollTop: number; direction: "up" | "down" | "idle" }) => void;
   commentsByLine?: Map<CommentLineKey, SessionReviewComment[]>;
   activeCommentLine?: ActiveCommentLine | null;
   onAddComment?: (filePath: string, lineNumber: number, side: "old" | "new") => void;
@@ -28,6 +29,8 @@ interface DiffPaneProps {
   onUpdateComment?: (commentId: string, data: { body?: string; resolved?: boolean }) => void;
   onDeleteComment?: (commentId: string) => void;
   onBrowseFile?: (filePath: string) => void;
+  showInlineCommentComposer?: boolean;
+  onRequestEditComment?: (comment: SessionReviewComment) => void;
 }
 
 export interface DiffPaneHandle {
@@ -44,6 +47,7 @@ export const DiffPane = forwardRef<DiffPaneHandle, DiffPaneProps>(
     activeFileIndex,
     resetScrollKey,
     onActiveFileChange,
+    onScrollMetricsChange,
     commentsByLine,
     activeCommentLine,
     onAddComment,
@@ -52,10 +56,13 @@ export const DiffPane = forwardRef<DiffPaneHandle, DiffPaneProps>(
     onUpdateComment,
     onDeleteComment,
     onBrowseFile,
+    showInlineCommentComposer = true,
+    onRequestEditComment,
   }, ref) {
     const containerRef = useRef<HTMLDivElement>(null);
     const fileRefs = useRef<Map<number, HTMLDivElement>>(new Map());
     const lastReportedActiveFileIndexRef = useRef<number | null>(activeFileIndex ?? null);
+    const lastScrollTopRef = useRef(0);
 
     // Once any expander hits a NO_SANDBOX response, the session container is
     // gone for good — flip every expander on this pane into the disabled state
@@ -148,6 +155,17 @@ export const DiffPane = forwardRef<DiffPaneHandle, DiffPaneProps>(
       onActiveFileChange(nextActiveIndex);
     }, [onActiveFileChange]);
 
+    const handleScroll = useCallback(() => {
+      reportVisibleActiveFile();
+      if (!onScrollMetricsChange || !containerRef.current) return;
+      const scrollTop = containerRef.current.scrollTop;
+      const delta = scrollTop - lastScrollTopRef.current;
+      lastScrollTopRef.current = scrollTop;
+      const direction =
+        Math.abs(delta) < 4 ? "idle" : delta > 0 ? "down" : "up";
+      onScrollMetricsChange({ scrollTop, direction });
+    }, [onScrollMetricsChange, reportVisibleActiveFile]);
+
     useEffect(() => {
       lastReportedActiveFileIndexRef.current = activeFileIndex ?? null;
     }, [activeFileIndex]);
@@ -157,6 +175,7 @@ export const DiffPane = forwardRef<DiffPaneHandle, DiffPaneProps>(
       const container = containerRef.current;
       if (!container) return;
       container.scrollTop = 0;
+      lastScrollTopRef.current = 0;
     }, [resetScrollKey]);
 
     useImperativeHandle(ref, () => ({
@@ -184,9 +203,10 @@ export const DiffPane = forwardRef<DiffPaneHandle, DiffPaneProps>(
 
     return (
       <div
+        key={resetScrollKey ?? "all-files"}
         ref={containerRef}
-        onScroll={reportVisibleActiveFile}
-        className="flex-1 overflow-y-auto p-4 space-y-4"
+        onScroll={handleScroll}
+        className="flex-1 overflow-y-auto p-3 space-y-3 md:p-4 md:space-y-4"
       >
         {files.map((file, i) => (
           <FileDiffSection
@@ -195,7 +215,7 @@ export const DiffPane = forwardRef<DiffPaneHandle, DiffPaneProps>(
             file={file}
             viewMode={viewMode}
             sessionId={sessionId}
-            isActive={activeFileIndex === undefined || activeFileIndex === i}
+            isActive
             commentsByLine={commentsByLine}
             activeCommentLine={activeCommentLine}
             onAddComment={onAddComment}
@@ -206,6 +226,8 @@ export const DiffPane = forwardRef<DiffPaneHandle, DiffPaneProps>(
             onBrowseFile={onBrowseFile}
             contextUnavailable={contextUnavailable}
             onContextUnavailable={handleContextUnavailable}
+            showInlineCommentComposer={showInlineCommentComposer}
+            onRequestEditComment={onRequestEditComment}
           />
         ))}
       </div>

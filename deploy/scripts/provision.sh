@@ -194,6 +194,22 @@ if [ "$ROLE" = "db" ]; then
     chmod 700 /home/deploy/.ssh
     command -v docker &>/dev/null || (curl -fsSL https://get.docker.com | sh)
     usermod -aG docker deploy
+    # Narrow NOPASSWD sudo for the deploy user. Keep entries in sync with
+    # bootstrap.sh — anything used by deploy/scripts/deploy.sh on a db
+    # host has to be listed here. db doesn't need runsc / sandbox-firewall
+    # / iptables-persistent, but must allow install-log-rotation.sh so the
+    # routine deploy path can cap docker container log files without an
+    # extra root SSH hop.
+    cat > /etc/sudoers.d/99-deploy <<'SUDOERS'
+Cmnd_Alias DEPLOY_CMDS = \
+    /usr/bin/chown -R deploy\:deploy /opt/143/deploy/scripts, \
+    /usr/bin/systemctl restart docker, \
+    /opt/143/deploy/scripts/install-log-rotation.sh *
+
+deploy ALL=(root) NOPASSWD: DEPLOY_CMDS
+SUDOERS
+    chmod 440 /etc/sudoers.d/99-deploy
+    visudo -cf /etc/sudoers.d/99-deploy
     cat > /etc/sysctl.d/99-postgres.conf <<SYSCTL
 vm.overcommit_memory = 2
 vm.overcommit_ratio = 80
@@ -213,6 +229,22 @@ elif [ "$ROLE" = "logging" ]; then
     chmod 700 /home/deploy/.ssh
     command -v docker &>/dev/null || (curl -fsSL https://get.docker.com | sh)
     usermod -aG docker deploy
+    # Narrow NOPASSWD sudo for the deploy user. Logging hosts also need
+    # the chown grants because deploy.sh sometimes needs to fix root-owned
+    # vmalert/grafana dirs left over from prior provisioning. Keep in
+    # sync with bootstrap.sh.
+    cat > /etc/sudoers.d/99-deploy <<'SUDOERS'
+Cmnd_Alias DEPLOY_CMDS = \
+    /usr/bin/chown -R deploy\:deploy /opt/143/deploy/scripts, \
+    /usr/bin/chown -R deploy\:deploy /opt/143/deploy/vmalert, \
+    /usr/bin/chown -R deploy\:deploy /opt/143/deploy/grafana, \
+    /usr/bin/systemctl restart docker, \
+    /opt/143/deploy/scripts/install-log-rotation.sh *
+
+deploy ALL=(root) NOPASSWD: DEPLOY_CMDS
+SUDOERS
+    chmod 440 /etc/sudoers.d/99-deploy
+    visudo -cf /etc/sudoers.d/99-deploy
     echo "Bootstrap complete (logging)."
 BOOTSTRAP_LOGGING
 elif [ "$ROLE" = "redis" ]; then
@@ -225,6 +257,19 @@ elif [ "$ROLE" = "redis" ]; then
     chmod 700 /home/deploy/.ssh
     command -v docker &>/dev/null || (curl -fsSL https://get.docker.com | sh)
     usermod -aG docker deploy
+    # Narrow NOPASSWD sudo for the deploy user. Keep in sync with
+    # bootstrap.sh — install-log-rotation.sh is required so deploy.sh
+    # can cap docker container log files without an extra root SSH hop.
+    cat > /etc/sudoers.d/99-deploy <<'SUDOERS'
+Cmnd_Alias DEPLOY_CMDS = \
+    /usr/bin/chown -R deploy\:deploy /opt/143/deploy/scripts, \
+    /usr/bin/systemctl restart docker, \
+    /opt/143/deploy/scripts/install-log-rotation.sh *
+
+deploy ALL=(root) NOPASSWD: DEPLOY_CMDS
+SUDOERS
+    chmod 440 /etc/sudoers.d/99-deploy
+    visudo -cf /etc/sudoers.d/99-deploy
     cat > /etc/sysctl.d/99-redis.conf <<SYSCTL
 vm.overcommit_memory = 1
 net.core.somaxconn = 512
@@ -239,12 +284,24 @@ fi
 # Step 2: Copy compose file and deploy configs
 echo "--- Step 2/5: Copying config files ---"
 scp "${SCP_OPTS[@]}" "$PROJECT_DIR/$COMPOSE_FILE" root@"$HOST":/opt/143/
-if [ "$ROLE" = "app" ] || [ "$ROLE" = "worker" ]; then
+if [ "$ROLE" = "app" ] || [ "$ROLE" = "worker" ] || [ "$ROLE" = "logging" ]; then
   # Vector collector is included from the main compose file
   scp "${SCP_OPTS[@]}" "$PROJECT_DIR/docker-compose.vector.yml" root@"$HOST":/opt/143/
 fi
 scp "${SCP_OPTS[@]}" -r "$PROJECT_DIR/deploy" root@"$HOST":/opt/143/
-ssh "${SSH_OPTS[@]}" root@"$HOST" "chown -R deploy:deploy /opt/143"
+ssh "${SSH_OPTS[@]}" root@"$HOST" "chown -R deploy:deploy /opt/143 && chmod +x /opt/143/deploy/scripts/install-log-rotation.sh"
+
+# Step 2a: Cap docker container log files (max-size/max-file in
+# /etc/docker/daemon.json) BEFORE step 5 starts services. Closes the
+# provision-to-first-deploy window where new containers would log
+# unboundedly. db gets a larger cap because postgres logs every
+# connection / slow query / lock wait, and the db host has no Vector log
+# shipping — the local docker log is the only copy of that trail.
+case "$ROLE" in
+  db) LOG_MAX_SIZE="500m" ;;
+  *)  LOG_MAX_SIZE="100m" ;;
+esac
+ssh "${SSH_OPTS[@]}" root@"$HOST" "/opt/143/deploy/scripts/install-log-rotation.sh $LOG_MAX_SIZE 5"
 
 # Step 2b: Sync authorized keys from deploy/authorized_keys/*.pub
 # Replaces authorized_keys on the host with exactly the keys in the repo.
@@ -259,8 +316,8 @@ fi
 echo "--- Step 3/5: Writing secrets ---"
 if [ "$ROLE" = "logging" ]; then
   # Logging nodes need the Grafana admin password and the private IP for binding VictoriaLogs
-  printf 'GRAFANA_ADMIN_PASSWORD=%s\nVICTORIALOGS_HOST=%s\nGRAFANA_ALERTS_WARNING_WEBHOOK_URL=%s\nGRAFANA_ALERTS_CRITICAL_WEBHOOK_URL=%s\n' \
-    "$GRAFANA_ADMIN_PASSWORD" "$VICTORIALOGS_HOST" "$GRAFANA_ALERTS_WARNING_WEBHOOK_URL" "$GRAFANA_ALERTS_CRITICAL_WEBHOOK_URL" \
+  printf 'GRAFANA_ADMIN_PASSWORD=%s\nVICTORIALOGS_HOST=%s\nSERVER_ROLE=%s\nGRAFANA_ALERTS_WARNING_WEBHOOK_URL=%s\nGRAFANA_ALERTS_CRITICAL_WEBHOOK_URL=%s\n' \
+    "$GRAFANA_ADMIN_PASSWORD" "$VICTORIALOGS_HOST" "logging" "$GRAFANA_ALERTS_WARNING_WEBHOOK_URL" "$GRAFANA_ALERTS_CRITICAL_WEBHOOK_URL" \
     | ssh "${SSH_OPTS[@]}" root@"$HOST" 'cat > /opt/143/.env && chown deploy:deploy /opt/143/.env && chmod 600 /opt/143/.env'
 elif [ "$ROLE" = "db" ]; then
   printf 'DB_PASSWORD=%s\n' "$DB_PASSWORD" \

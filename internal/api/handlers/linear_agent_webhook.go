@@ -103,13 +103,13 @@ type linearAgentBootstrapEmitter interface {
 // ignored" vs ingestion's "issue upsert succeeded, return 200 processed")
 // and grouping the logic keeps HandleLinear's branch a one-liner.
 type LinearAgentDispatcher struct {
-	logger        zerolog.Logger
-	agentSessions *db.LinearAgentSessionStore
-	jobs          linearAgentJobEnqueuer
-	emitter       linearAgentBootstrapEmitter
-	activities    *db.LinearAgentActivityLogStore
+	logger         zerolog.Logger
+	agentSessions  *db.LinearAgentSessionStore
+	jobs           linearAgentJobEnqueuer
+	emitter        linearAgentBootstrapEmitter
+	activities     *db.LinearAgentActivityLogStore
 	settingsLoader func(ctx context.Context, orgID uuid.UUID) (models.LinearAgentSettings, error)
-	clientForOrg  func(ctx context.Context, orgID uuid.UUID) (linear.Client, error)
+	clientForOrg   func(ctx context.Context, orgID uuid.UUID) (linear.Client, error)
 	// metrics records dispatch-side observability. Optional — nil falls
 	// back to no-op counters via the nil-safe RecordX helpers, so a boot
 	// stage that hasn't constructed the metrics package can still wire

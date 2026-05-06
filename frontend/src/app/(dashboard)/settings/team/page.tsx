@@ -283,11 +283,12 @@ export default function TeamSettingsPage() {
 
       {/* Members List */}
       <section className="space-y-3">
-        <div className="flex items-center justify-between gap-3">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <h2 className="text-xs font-medium text-foreground">Members</h2>
           {canManageTeam && (
             <Button
               size="sm"
+              className="w-full sm:w-auto"
               onClick={() => {
                 resetInviteForm();
                 setIsInviteDialogOpen(true);
@@ -348,10 +349,19 @@ export default function TeamSettingsPage() {
                           </div>
                         </div>
                       </div>
-                      <div className="min-w-0 text-xs text-muted-foreground truncate">
-                        {member.email}
+                      <div className="min-w-0 space-y-1">
+                        <div className="text-xs font-medium uppercase tracking-wide text-muted-foreground md:hidden">
+                          Email
+                        </div>
+                        <div className="text-xs text-muted-foreground truncate">
+                          {member.email}
+                        </div>
                       </div>
-                      <div className="flex items-center">
+                      <div className="space-y-1">
+                        <div className="text-xs font-medium uppercase tracking-wide text-muted-foreground md:hidden">
+                          Role
+                        </div>
+                        <div className="flex items-center">
                         {isSelf || !canManageTeam ? (
                           <Badge variant={roleBadgeVariant(member.role)}>
                             {capitalize(member.role)}
@@ -378,10 +388,15 @@ export default function TeamSettingsPage() {
                               <SelectItem value="member">Member</SelectItem>
                               <SelectItem value="viewer">Viewer</SelectItem>
                             </SelectContent>
-                          </Select>
+                            </Select>
                         )}
+                        </div>
                       </div>
-                      <div className="flex items-center justify-start">
+                      <div className="space-y-1">
+                        <div className="text-xs font-medium uppercase tracking-wide text-muted-foreground md:hidden">
+                          Actions
+                        </div>
+                        <div className="flex items-center justify-start">
                         {canManageTeam && !isSelf ? (
                           <Button
                             variant="ghost"
@@ -401,6 +416,7 @@ export default function TeamSettingsPage() {
                             No access
                           </span>
                         )}
+                        </div>
                       </div>
                     </div>
                   );
@@ -423,7 +439,7 @@ export default function TeamSettingsPage() {
                 {invitations.map((inv) => (
                   <div
                     key={inv.id}
-                    className="flex items-center justify-between px-4 py-3"
+                    className="flex flex-col gap-3 px-4 py-3 sm:flex-row sm:items-center sm:justify-between"
                   >
                     <div className="min-w-0">
                       <div className="text-xs font-medium truncate">
@@ -446,7 +462,7 @@ export default function TeamSettingsPage() {
                     <Button
                       variant="ghost"
                       size="sm"
-                      className="text-destructive hover:text-destructive ml-4"
+                      className="w-full text-destructive hover:text-destructive sm:ml-4 sm:w-auto"
                       disabled={revokeMutation.isPending}
                       onClick={() => revokeMutation.mutate(inv.id)}
                     >

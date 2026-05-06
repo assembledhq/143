@@ -16,9 +16,9 @@ import (
 // constraint in linear_agent_activity_log with a two-phase reserve/complete
 // flow:
 //
-//   Reserve  → INSERT the dedupe row; if UNIQUE collision, short-circuit
-//   emit     → call Linear's agentActivityCreate
-//   Complete → record the linear_activity_id on the reserved row
+//	Reserve  → INSERT the dedupe row; if UNIQUE collision, short-circuit
+//	emit     → call Linear's agentActivityCreate
+//	Complete → record the linear_activity_id on the reserved row
 //
 // On Linear failure, the reservation row stays present without a
 // linear_activity_id. The next attempt sees the UNIQUE collision and

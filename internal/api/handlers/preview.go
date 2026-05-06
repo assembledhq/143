@@ -12,6 +12,7 @@ import (
 	"github.com/assembledhq/143/internal/api/middleware"
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
+	"github.com/assembledhq/143/internal/repoconfig"
 	"github.com/assembledhq/143/internal/services/agent"
 	"github.com/assembledhq/143/internal/services/preview"
 	"github.com/assembledhq/143/internal/services/sandbox"
@@ -39,7 +40,7 @@ type PreviewHandler struct {
 }
 
 // NewPreviewHandler creates a new PreviewHandler. fileReader is used to
-// auto-detect .143/preview.json from the session's sandbox workspace when
+// auto-detect repo preview config from the session's sandbox workspace when
 // the client does not supply an explicit config; pass sandbox.NoOpFileReader
 // in environments where workspace introspection is unavailable — its errors
 // wrap sandbox.ErrFileNotFound so auto-detect cleanly falls through to the
@@ -174,12 +175,10 @@ func (h *PreviewHandler) requireManager(w http.ResponseWriter, r *http.Request) 
 	return true
 }
 
-// workspacePreviewConfigPath is the repo-relative path 143 looks at when a
-// client calls StartPreview without supplying an explicit config.
-const workspacePreviewConfigPath = ".143/preview.json"
-
-// readWorkspacePreviewConfig attempts to read and parse .143/preview.json from
-// the session's sandbox workspace. Returns:
+// readWorkspacePreviewConfig attempts to read and parse workspace preview
+// config from the session's sandbox workspace using .143/config.json with a
+// nested "preview" section.
+// Returns:
 //   - (cfg, nil)   when a valid committed config is found and parsed.
 //   - (nil, nil)   for "no config to use" cases where the caller should fall
 //     back to built-in defaults: no fileReader wired, the file is absent, or
@@ -194,34 +193,34 @@ func (h *PreviewHandler) readWorkspacePreviewConfig(ctx context.Context, sb *age
 	if h.fileReader == nil {
 		return nil, nil
 	}
-	content, _, err := h.fileReader.ReadFile(ctx, sb.ID, sb.WorkDir, workspacePreviewConfigPath)
+	content, _, err := h.fileReader.ReadFile(ctx, sb.ID, sb.WorkDir, repoconfig.ConfigPath)
 	if err != nil {
 		if errors.Is(err, sandbox.ErrFileNotFound) {
 			h.logger.Debug().
 				Str("session_id", sessionID.String()).
-				Str("path", workspacePreviewConfigPath).
+				Str("path", repoconfig.ConfigPath).
 				Msg("no committed preview config in workspace")
 			return nil, nil
 		}
 		h.logger.Warn().
 			Err(err).
 			Str("session_id", sessionID.String()).
-			Str("path", workspacePreviewConfigPath).
+			Str("path", repoconfig.ConfigPath).
 			Msg("failed to read committed preview config")
-		return nil, fmt.Errorf("read %s: %w", workspacePreviewConfigPath, err)
+		return nil, fmt.Errorf("read %s: %w", repoconfig.ConfigPath, err)
 	}
 	cfg, err := preview.ParseConfig([]byte(content))
 	if err != nil {
 		h.logger.Warn().
 			Err(err).
 			Str("session_id", sessionID.String()).
-			Str("path", workspacePreviewConfigPath).
+			Str("path", repoconfig.ConfigPath).
 			Msg("committed preview config failed to parse; falling back to defaults")
 		return nil, nil
 	}
 	h.logger.Info().
 		Str("session_id", sessionID.String()).
-		Str("path", workspacePreviewConfigPath).
+		Str("path", repoconfig.ConfigPath).
 		Msg("using preview config from workspace")
 	return cfg, nil
 }
@@ -386,7 +385,7 @@ func (h *PreviewHandler) acquireSandbox(ctx context.Context, orgID uuid.UUID, se
 	// the restored container has consistent resource limits and paths.
 	// WorkDir resolves from the session's repo (HomeDir + "/" + slug) so
 	// downstream sandbox commands — notably readWorkspacePreviewConfig's
-	// ReadFile against sb.WorkDir + "/.143/preview.json" — land in the same
+	// ReadFile against the repo config path under sb.WorkDir — land in the same
 	// path the orchestrator uses, not the legacy /workspace default.
 	sandboxCfg := agent.DefaultSandboxConfig()
 	sandboxCfg.WorkDir = workDir
@@ -504,14 +503,14 @@ func classifyLaunchError(err error) *previewHTTPError {
 		return newPreviewHTTPError(
 			http.StatusUnprocessableEntity,
 			"PREVIEW_INIT_SCRIPT_FAILED",
-			"preview init script failed. Check the script referenced in .143/preview.json. Details: "+cause,
+			"preview init script failed. Check the script referenced in .143/config.json. Details: "+cause,
 			err,
 		)
 	case errors.Is(err, preview.ErrServiceNotReady):
 		return newPreviewHTTPError(
 			http.StatusUnprocessableEntity,
 			"PREVIEW_SERVICE_NOT_READY",
-			"preview service did not pass its readiness probe. The service may have crashed at boot, taken too long to start, or be listening on a different port than declared in .143/preview.json. Details: "+cause,
+			"preview service did not pass its readiness probe. The service may have crashed at boot, taken too long to start, or be listening on a different port than declared in .143/config.json. Details: "+cause,
 			err,
 		)
 	default:
@@ -538,7 +537,7 @@ type startPreviewRequest struct {
 
 // reservationPlaceholderConfig returns a minimal valid config used solely to
 // satisfy ValidateConfig at reservation time when the client hasn't supplied
-// one. The real config (workspace .143/preview.json) is loaded after hydrate
+// one. The real workspace repo config is loaded after hydrate
 // and either replaces this placeholder or causes the reservation to abort
 // with PREVIEW_NO_CONFIG. This config is never executed.
 func reservationPlaceholderConfig() *models.PreviewConfig {
@@ -646,7 +645,7 @@ func (h *PreviewHandler) startPreviewLocal(ctx context.Context, orgID, userID, s
 	}
 
 	if body.Config == nil {
-		// Auto-detect: read .143/preview.json from the session's workspace.
+		// Auto-detect: read preview config from the session's workspace.
 		// We deliberately do NOT fall back to a generic "npm start on :3000"
 		// default — for any repo without that file, that fallback exits within
 		// seconds and the user waits ~90s for the readiness probe to give up.
@@ -661,7 +660,7 @@ func (h *PreviewHandler) startPreviewLocal(ctx context.Context, orgID, userID, s
 			return nil, newPreviewHTTPError(
 				http.StatusUnprocessableEntity,
 				"PREVIEW_NO_CONFIG",
-				"this repo has no .143/preview.json committed. Add one (see docs/guides/previews.md) so the preview knows what command to run.",
+				"This repo has no .143/config.json committed with a preview section. Add one (see docs/guides/previews.md) so the preview knows what command to run.",
 				nil,
 			)
 		}
@@ -1018,11 +1017,11 @@ func (h *PreviewHandler) DetectReadiness(w http.ResponseWriter, r *http.Request)
 	configParam := r.URL.Query().Get("config")
 	if configParam == "" {
 		// No config provided — report not supported (full implementation would
-		// read .143/preview.json from the repo via the GitHub API).
+		// read repo preview config from the repo via the GitHub API).
 		result := models.PreviewDetectionResult{
 			Readiness: models.PreviewReadinessNotSupported,
 			ValidationErrors: []string{
-				"no preview config provided; pass config as a base64-encoded query parameter or read .143/preview.json from the repository",
+				"no preview config provided; pass config as a base64-encoded query parameter or read .143/config.json from the repository",
 			},
 		}
 		writeJSON(w, http.StatusOK, models.SingleResponse[models.PreviewDetectionResult]{Data: result})

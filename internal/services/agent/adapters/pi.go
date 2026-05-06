@@ -34,6 +34,12 @@ func (a *PiAdapter) Name() models.AgentType {
 	return models.AgentTypePi
 }
 
+// ResumeMode reports that Pi has no headless resume mechanism. Continuation
+// turns rely on the restored sandbox filesystem state.
+func (a *PiAdapter) ResumeMode() agent.SessionResumeMode {
+	return agent.ResumeUnsupported
+}
+
 // PreparePrompt constructs the prompts for Pi based on the issue context.
 func (a *PiAdapter) PreparePrompt(ctx context.Context, input *agent.AgentInput) (*agent.AgentPrompt, error) {
 	if input == nil {

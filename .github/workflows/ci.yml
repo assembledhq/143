@@ -115,6 +115,15 @@ jobs:
           go test ./internal/... -coverprofile=coverage.out -covermode=atomic -race -timeout=180s
           go tool cover -func=coverage.out
 
+      # Integration tests run on every backend-test invocation (PR + push).
+      # They reuse the Postgres service this job already brings up — no new
+      # infra. Build-tag gating means they don't run during the unit-test
+      # step above, so we don't double-charge CI for the same code paths.
+      - name: Run integration tests
+        run: |
+          INTEGRATION_DATABASE_URL=$DATABASE_URL \
+          go test -tags=integration -timeout=120s ./internal/integration/...
+
       - name: Check backend coverage floor (main only)
         if: github.event_name == 'push'
         run: |
@@ -181,7 +190,11 @@ jobs:
       - name: Materialize PR base ref (PR only)
         if: github.event_name == 'pull_request'
         working-directory: ${{ github.workspace }}
-        run: git branch -f pr-base HEAD^1
+        env:
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          git rev-parse --verify "${PR_BASE_SHA}^{commit}"
+          git branch -f pr-base "${PR_BASE_SHA}"
 
       - name: Install diff-cover (PR only)
         if: github.event_name == 'pull_request'

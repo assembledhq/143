@@ -866,11 +866,11 @@ describe("PreviewPanel component", () => {
     ).not.toBeInTheDocument();
   });
 
-  it("shows the backend message verbatim (no 'Failed to start preview:' prefix) when no .143/preview.json is committed", async () => {
+  it("shows the backend message verbatim (no 'Failed to start preview:' prefix) when no .143/config.json is committed", async () => {
     const user = userEvent.setup();
     mockGet.mockResolvedValue(makePreviewStatus({ status: "stopped" }));
     const backendMessage =
-      "this repo has no .143/preview.json committed. Add one (see docs/guides/previews.md) so the preview knows what command to run.";
+      "This repo has no .143/config.json committed with a preview section. Add one (see docs/guides/previews.md) so the preview knows what command to run.";
     const err = new Error(backendMessage);
     (err as Error & { code?: string }).code = "PREVIEW_NO_CONFIG";
     mockStart.mockRejectedValueOnce(err);
@@ -910,7 +910,7 @@ describe("PreviewPanel component", () => {
     ],
     [
       "PREVIEW_SERVICE_NOT_READY",
-      "preview service did not pass its readiness probe. The service may have crashed at boot, taken too long to start, or be listening on a different port than declared in .143/preview.json. Details: provider start preview: preview service readiness probe failed: primary service \"app\" (port 3000): timeout",
+      "preview service did not pass its readiness probe. The service may have crashed at boot, taken too long to start, or be listening on a different port than declared in .143/config.json. Details: provider start preview: preview service readiness probe failed: primary service \"app\" (port 3000): timeout",
     ],
   ])(
     "passes backend message through verbatim for %s without the generic prefix",

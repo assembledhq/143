@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/rand/v2"
 	"net/http"
 	"regexp"
 	"strings"
@@ -86,6 +87,90 @@ type SessionHandler struct {
 	linearLinker atomic.Pointer[linearLinkerHolder]
 	// shutdownCh is closed on SIGTERM; see SetShutdownSignal.
 	shutdownCh <-chan struct{}
+	// pollOverride is non-zero in tests to lock the SSE polling fallback to
+	// a predictable interval. Production leaves it at zero so the per-
+	// connection interval is sampled from sseFallbackPoll{Min,Max} for
+	// every reconnect, which staggers Postgres queries across clients and
+	// avoids the synchronized N-client dogpile that follows a Redis outage
+	// when many SSE connections fail over at once. See SetPollIntervalForTest.
+	//
+	// Stored as nanoseconds in atomic.Int64 (not a plain time.Duration field)
+	// because parallel tests share the SessionHandler instance via
+	// newSessionHandler(t, mock) and read this field from request-serving
+	// goroutines while another test goroutine may still be calling the
+	// setter — the race detector would (correctly) flag a plain field even
+	// though the setter is conventionally called once per test before any
+	// requests fire.
+	pollOverrideNanos atomic.Int64
+}
+
+const (
+	// sseFallbackPollMin/Max bracket the per-connection polling interval used
+	// when the Redis-backed log stream is unavailable and we must serve
+	// updates from Postgres. The 1.0s value used here previously translated
+	// into N concurrent SSE clients × 1 query/sec on the runs+logs tables —
+	// fine for steady-state, problematic when a Redis outage drops every
+	// client onto this path simultaneously and they then reconnect in
+	// lockstep when Redis comes back. The min/max bracket plus
+	// sseFallbackPollInterval's uniform sample give each connection an
+	// independent phase, capping the worst-case query rate at ~0.5 N/sec
+	// while keeping the median responsiveness well under the 5s SLA the
+	// frontend's reconnect logic expects.
+	sseFallbackPollMin = 2000 * time.Millisecond
+	sseFallbackPollMax = 3500 * time.Millisecond
+	// sseFallbackHeartbeatMin/Max jitter the SSE keepalive interval for the
+	// same reason — synchronized heartbeats from many connections produce
+	// brief CPU/syscall spikes that don't matter at small N but do at large
+	// N. The 12-18s window stays well under typical proxy idle timeouts (30
+	// or 60s) and the 2× ratio between min and max is enough to break
+	// alignment after a few minutes of running connections.
+	sseFallbackHeartbeatMin = 12 * time.Second
+	sseFallbackHeartbeatMax = 18 * time.Second
+)
+
+// sseFallbackPollInterval returns a per-connection randomized polling interval
+// in [sseFallbackPollMin, sseFallbackPollMax]. The override path is reserved
+// for tests that need a sub-second interval to keep wall-clock test time
+// reasonable; production code never sets it.
+func (h *SessionHandler) sseFallbackPollInterval() time.Duration {
+	if override := time.Duration(h.pollOverrideNanos.Load()); override > 0 {
+		return override
+	}
+	span := int64(sseFallbackPollMax - sseFallbackPollMin)
+	// #nosec G404 -- jitter is a load-shedding mechanism (decorrelate per-
+	// connection Postgres polling so an outage doesn't cause an N-client
+	// dogpile), not a security primitive. An attacker who could predict
+	// the interval gains nothing useful; crypto/rand would just burn
+	// entropy and CPU on a hot path.
+	return sseFallbackPollMin + time.Duration(rand.Int64N(span+1))
+}
+
+// sseFallbackHeartbeatInterval returns a per-connection randomized heartbeat
+// interval in [sseFallbackHeartbeatMin, sseFallbackHeartbeatMax]. Same
+// override-for-tests semantics as sseFallbackPollInterval.
+func (h *SessionHandler) sseFallbackHeartbeatInterval() time.Duration {
+	if override := time.Duration(h.pollOverrideNanos.Load()); override > 0 {
+		// In test mode, scale the heartbeat down proportionally so tests that
+		// exercise the heartbeat branch don't have to wait the production
+		// floor. 5x the poll interval is enough to keep the heartbeat from
+		// firing on every poll tick.
+		return override * 5
+	}
+	span := int64(sseFallbackHeartbeatMax - sseFallbackHeartbeatMin)
+	// #nosec G404 -- non-security jitter; see sseFallbackPollInterval above.
+	return sseFallbackHeartbeatMin + time.Duration(rand.Int64N(span+1))
+}
+
+// SetPollIntervalForTest pins the SSE polling-fallback interval for tests
+// that need deterministic, fast iteration. Calling with d <= 0 restores the
+// default randomized behavior. Safe to call concurrently with request-
+// serving goroutines via the underlying atomic store.
+func (h *SessionHandler) SetPollIntervalForTest(d time.Duration) {
+	if d <= 0 {
+		h.pollOverrideNanos.Store(0)
+		return
+	}
+	h.pollOverrideNanos.Store(int64(d))
 }
 
 // linearLinkerHolder wraps the linearSessionLinker interface so the field
@@ -107,6 +192,7 @@ type linearLinkerHolder struct{ fn linearSessionLinker }
 // validation and produce a session with an empty user turn.
 type linearSessionLinker interface {
 	ResolveAndLinkAtCreate(ctx context.Context, in linear.CreateInput) (linear.CreateResult, error)
+	ResolveAndLinkMidSession(ctx context.Context, in linear.MidSessionInput) error
 	Enabled(ctx context.Context, orgID uuid.UUID) bool
 	TeamKeyAllowlist(ctx context.Context, orgID uuid.UUID) (map[string]bool, error)
 }
@@ -421,7 +507,15 @@ func (h *SessionHandler) List(w http.ResponseWriter, r *http.Request) {
 		filters.RepositoryID = repoID
 	}
 
-	if userIDStr := r.URL.Query().Get("triggered_by_user_id"); userIDStr != "" {
+	if _, ok := r.URL.Query()["triggered_by_user_ids"]; ok {
+		userIDsStr := r.URL.Query().Get("triggered_by_user_ids")
+		userIDs, err := parseUUIDList(userIDsStr)
+		if err != nil {
+			writeError(w, r, http.StatusBadRequest, "INVALID_USER_ID", "invalid triggered_by_user_ids")
+			return
+		}
+		filters.TriggeredByUserIDs = userIDs
+	} else if userIDStr := r.URL.Query().Get("triggered_by_user_id"); userIDStr != "" {
 		userID, err := uuid.Parse(userIDStr)
 		if err != nil {
 			writeError(w, r, http.StatusBadRequest, "INVALID_USER_ID", "invalid triggered_by_user_id")
@@ -508,7 +602,15 @@ func (h *SessionHandler) Counts(w http.ResponseWriter, r *http.Request) {
 		filters.RepositoryID = repoID
 	}
 
-	if userIDStr := r.URL.Query().Get("triggered_by_user_id"); userIDStr != "" {
+	if _, ok := r.URL.Query()["triggered_by_user_ids"]; ok {
+		userIDsStr := r.URL.Query().Get("triggered_by_user_ids")
+		userIDs, err := parseUUIDList(userIDsStr)
+		if err != nil {
+			writeError(w, r, http.StatusBadRequest, "INVALID_USER_ID", "invalid triggered_by_user_ids")
+			return
+		}
+		filters.TriggeredByUserIDs = userIDs
+	} else if userIDStr := r.URL.Query().Get("triggered_by_user_id"); userIDStr != "" {
 		userID, err := uuid.Parse(userIDStr)
 		if err != nil {
 			writeError(w, r, http.StatusBadRequest, "INVALID_USER_ID", "invalid triggered_by_user_id")
@@ -688,11 +790,9 @@ func (h *SessionHandler) TriggerFix(w http.ResponseWriter, r *http.Request) {
 
 	autonomyLevel := body.AutonomyLevel
 	if autonomyLevel == "" {
-		autonomyLevel = "semi"
+		autonomyLevel = string(models.DefaultSessionAutonomy)
 	}
-	// These values are enforced by chk_sessions_autonomy_level CHECK constraint.
-	validAutonomyLevels := map[string]bool{"full": true, "semi": true, "supervised": true}
-	if !validAutonomyLevels[autonomyLevel] {
+	if err := models.SessionAutonomy(autonomyLevel).Validate(); err != nil {
 		writeError(w, r, http.StatusBadRequest, "INVALID_AUTONOMY_LEVEL", "autonomy_level must be one of: full, semi, supervised")
 		return
 	}
@@ -749,12 +849,13 @@ func (h *SessionHandler) TriggerFix(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Enqueue the run_agent job.
-	payload := map[string]string{
-		"session_id": run.ID.String(),
-		"org_id":     orgID.String(),
-	}
-	if _, err := h.jobStore.Enqueue(r.Context(), orgID, "agent", "run_agent", payload, 5, nil); err != nil {
+	// Enqueue the run_agent job. Dedupe by session ID so a double-clicked
+	// submit (or any other transient retry path) cannot land two run_agent
+	// rows for the same session — the second insert would race the first at
+	// AcquireTurnHold and surface "sandbox race" to the user.
+	dedupeKey := db.RunAgentDedupeKey(run.ID)
+	payload := db.RunAgentPayload(run)
+	if _, err := h.jobStore.Enqueue(r.Context(), orgID, "agent", "run_agent", payload, 5, &dedupeKey); err != nil {
 		writeError(w, r, http.StatusInternalServerError, "ENQUEUE_FAILED", "failed to enqueue agent run job", err)
 		return
 	}
@@ -795,12 +896,17 @@ func (h *SessionHandler) RetrySession(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Re-enqueue the run_agent job. If this fails, roll back the session status
-	// so it doesn't get stuck in pending with no job to pick it up.
+	// so it doesn't get stuck in pending with no job to pick it up. Dedupe by
+	// session ID so a Retry can never land alongside an in-flight run_agent
+	// for the same session — the partial unique index on (queue, dedupe_key)
+	// only covers pending|running, so legitimate retries after the prior job
+	// reaches a terminal state still go through.
+	dedupeKey := db.RunAgentDedupeKey(sessionID)
 	payload := map[string]string{
 		"session_id": sessionID.String(),
 		"org_id":     orgID.String(),
 	}
-	if _, err := h.jobStore.Enqueue(r.Context(), orgID, "agent", "run_agent", payload, 5, nil); err != nil {
+	if _, err := h.jobStore.Enqueue(r.Context(), orgID, "agent", "run_agent", payload, 5, &dedupeKey); err != nil {
 		if undoErr := h.runStore.UndoResetForRetry(r.Context(), orgID, sessionID, "Retry failed: could not enqueue job", ""); undoErr != nil {
 			h.logger.Error().Err(undoErr).Str("session_id", sessionID.String()).Msg("failed to undo retry reset after enqueue failure")
 		}
@@ -1012,9 +1118,13 @@ func (h *SessionHandler) streamLogsViaPolling(ctx context.Context, sw *sse.Write
 	}
 	sw.Flush()
 
-	ticker := time.NewTicker(1 * time.Second)
+	// Per-connection randomized intervals — see the comment block above
+	// sseFallbackPollMin for why this isn't a fixed 1s anymore.
+	pollInterval := h.sseFallbackPollInterval()
+	heartbeatInterval := h.sseFallbackHeartbeatInterval()
+	ticker := time.NewTicker(pollInterval)
 	defer ticker.Stop()
-	heartbeat := time.NewTicker(15 * time.Second)
+	heartbeat := time.NewTicker(heartbeatInterval)
 	defer heartbeat.Stop()
 	shutdownCh := h.shutdownCh
 
@@ -1634,12 +1744,6 @@ func (h *SessionHandler) AnswerQuestion(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, http.StatusOK, models.SingleResponse[models.SessionQuestion]{Data: question})
 }
 
-// maxReviewCommentResolveIDsPerMessage caps how many review comments a single
-// SendMessage call can resolve. Each resolved comment emits one audit row
-// after the tx commits, so the cap keeps the post-commit tail bounded even
-// under unusual client behavior. The realistic typical attached-count is 1–3.
-const maxReviewCommentResolveIDsPerMessage = 50
-
 // SendMessage handles POST /sessions/{id}/messages — sends a follow-up message
 // to an idle multi-turn session and enqueues a continue_session job.
 func (h *SessionHandler) SendMessage(w http.ResponseWriter, r *http.Request) {
@@ -1695,31 +1799,14 @@ func (h *SessionHandler) SendMessage(w http.ResponseWriter, r *http.Request) {
 	// /review-comments/{id}, which restricts edits to the comment's author.
 	// Both surfaces share the same audit action so a downstream consumer can
 	// still distinguish via the resolved_via_message flag in audit details.
-	var resolveCommentIDs []uuid.UUID
-	if len(body.ResolveReviewCommentIDs) > 0 {
-		if h.reviewCommentStore == nil {
-			writeError(w, r, http.StatusBadRequest, "REVIEW_COMMENTS_NOT_CONFIGURED", "review comment resolution is not configured for this server")
-			return
-		}
-		if len(body.ResolveReviewCommentIDs) > maxReviewCommentResolveIDsPerMessage {
-			writeError(w, r, http.StatusBadRequest, "TOO_MANY_REVIEW_COMMENT_IDS",
-				fmt.Sprintf("at most %d review comment ids may be resolved per message", maxReviewCommentResolveIDsPerMessage))
-			return
-		}
-		seen := make(map[uuid.UUID]struct{}, len(body.ResolveReviewCommentIDs))
-		resolveCommentIDs = make([]uuid.UUID, 0, len(body.ResolveReviewCommentIDs))
-		for _, raw := range body.ResolveReviewCommentIDs {
-			parsed, err := uuid.Parse(raw)
-			if err != nil {
-				writeError(w, r, http.StatusBadRequest, "INVALID_REVIEW_COMMENT_ID", "invalid review comment id: "+raw)
-				return
-			}
-			if _, dup := seen[parsed]; dup {
-				continue
-			}
-			seen[parsed] = struct{}{}
-			resolveCommentIDs = append(resolveCommentIDs, parsed)
-		}
+	if len(body.ResolveReviewCommentIDs) > 0 && h.reviewCommentStore == nil {
+		writeError(w, r, http.StatusBadRequest, "REVIEW_COMMENTS_NOT_CONFIGURED", "review comment resolution is not configured for this server")
+		return
+	}
+	resolveCommentIDs, parseErr := parseAndDedupeReviewCommentIDs(body.ResolveReviewCommentIDs)
+	if parseErr != nil {
+		parseErr.write(w, r)
+		return
 	}
 
 	// When plan mode is requested, prefix the message so the orchestrator
@@ -1789,6 +1876,7 @@ func (h *SessionHandler) SendMessage(w http.ResponseWriter, r *http.Request) {
 				writeError(w, r, http.StatusInternalServerError, "CREATE_FAILED", "failed to create message", err)
 				return
 			}
+			h.maybeLinkLinearMidSession(r.Context(), orgID, sessionID, body.Message, userID)
 			writeJSON(w, http.StatusCreated, models.SingleResponse[models.SessionMessage]{Data: *msg})
 			return
 		}
@@ -1814,10 +1902,13 @@ func (h *SessionHandler) SendMessage(w http.ResponseWriter, r *http.Request) {
 			writeError(w, r, http.StatusInternalServerError, "CREATE_FAILED", "failed to create message", err)
 			return
 		}
-		resolvedComments, rerr := resolveSessionReviewComments(
-			r.Context(), txReviewCommentStore, orgID, sessionID, resolveCommentIDs, currentResolutionPass(&session))
+		resolvedComments, rerr := txReviewCommentStore.ValidateAndResolveByIDs(
+			r.Context(), orgID, sessionID, resolveCommentIDs, currentResolutionPass(&session))
 		if rerr != nil {
-			rerr.write(w, r)
+			if renderReviewCommentResolveError(w, r, rerr) {
+				return
+			}
+			writeError(w, r, http.StatusInternalServerError, "REVIEW_COMMENT_RESOLVE_FAILED", "failed to resolve review comments", rerr)
 			return
 		}
 		if err := tx.Commit(r.Context()); err != nil {
@@ -1827,6 +1918,7 @@ func (h *SessionHandler) SendMessage(w http.ResponseWriter, r *http.Request) {
 		committed = true
 
 		h.emitReviewCommentResolutionAudits(r, sessionID, msg.ID, resolvedComments)
+		h.maybeLinkLinearMidSession(r.Context(), orgID, sessionID, body.Message, userID)
 		writeJSON(w, http.StatusCreated, models.SingleResponse[models.SessionMessage]{Data: *msg})
 		return
 	}
@@ -1880,11 +1972,14 @@ func (h *SessionHandler) SendMessage(w http.ResponseWriter, r *http.Request) {
 
 	var resolvedComments []models.SessionReviewComment
 	if txReviewCommentStore != nil {
-		var rerr *resolveCommentsError
-		resolvedComments, rerr = resolveSessionReviewComments(
-			r.Context(), txReviewCommentStore, orgID, sessionID, resolveCommentIDs, currentResolutionPass(&session))
+		var rerr error
+		resolvedComments, rerr = txReviewCommentStore.ValidateAndResolveByIDs(
+			r.Context(), orgID, sessionID, resolveCommentIDs, currentResolutionPass(&session))
 		if rerr != nil {
-			rerr.write(w, r)
+			if renderReviewCommentResolveError(w, r, rerr) {
+				return
+			}
+			writeError(w, r, http.StatusInternalServerError, "REVIEW_COMMENT_RESOLVE_FAILED", "failed to resolve review comments", rerr)
 			return
 		}
 	}
@@ -1906,12 +2001,16 @@ func (h *SessionHandler) SendMessage(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Enqueue continue_session job.
+	// Enqueue continue_session job. Dedupe at the session level — only one
+	// continue_session can hold the shared sandbox at a time, so a duplicate
+	// would race AcquireTurnHold and dead-letter via the orchestrator's
+	// self-heal path.
+	dedupeKey := db.ContinueSessionDedupeKey(sessionID)
 	payload := map[string]string{
 		"session_id": sessionID.String(),
 		"org_id":     orgID.String(),
 	}
-	if _, err := h.jobStore.EnqueueInTx(r.Context(), tx, orgID, "agent", "continue_session", payload, 5, nil); err != nil {
+	if _, err := h.jobStore.EnqueueInTx(r.Context(), tx, orgID, "agent", "continue_session", payload, 5, &dedupeKey); err != nil {
 		writeError(w, r, http.StatusInternalServerError, "ENQUEUE_FAILED", "failed to enqueue continue_session job", err)
 		return
 	}
@@ -1940,144 +2039,59 @@ func (h *SessionHandler) SendMessage(w http.ResponseWriter, r *http.Request) {
 			marshalAuditDetails(h.logger, questionDetails))
 	}
 	h.emitReviewCommentResolutionAudits(r, sessionID, msg.ID, resolvedComments)
+	h.maybeLinkLinearMidSession(r.Context(), orgID, sessionID, body.Message, userID)
 
 	writeJSON(w, http.StatusCreated, models.SingleResponse[models.SessionMessage]{Data: *msg})
 }
 
-// currentResolutionPass returns the pass number to record on a comment that
-// is being resolved during the current request, matching the semantics used
-// by the PATCH /review-comments handler: the user's resolving action belongs
-// to the session's current turn (with a fallback to 1 for not-yet-started
-// sessions where CurrentTurn is still 0).
-func currentResolutionPass(session *models.Session) int {
-	if session == nil || session.CurrentTurn == 0 {
-		return 1
-	}
-	return session.CurrentTurn
-}
+// midSessionLinkTimeout caps the detached-context window we give the
+// fire-and-forget mid-session linker. Detached from the request context so a
+// user closing their browser tab between SendMessage's writeJSON and the
+// allowlist+enqueue calls doesn't cancel the link work; bounded so a wedged
+// DB connection can't hold the goroutine forever.
+const midSessionLinkTimeout = 30 * time.Second
 
-// resolveCommentsError carries the HTTP shape of a failure inside the
-// resolve-comments helper, so the helper can stay pure (no http.ResponseWriter
-// dependency) and SendMessage controls when the response is written. underlying
-// is included only when there's a real error worth logging.
-type resolveCommentsError struct {
-	status     int
-	code       string
-	message    string
-	underlying error
-}
-
-func (e *resolveCommentsError) write(w http.ResponseWriter, r *http.Request) {
-	if e.underlying != nil {
-		writeError(w, r, e.status, e.code, e.message, e.underlying)
+// maybeLinkLinearMidSession kicks off detection + async enqueue for a
+// follow-up message body in a detached goroutine. It runs off the request
+// path so SendMessage's running-session fast path stays free of the extra
+// allowlist read and job-insert it would otherwise add to user-perceived
+// latency. Failures are logged but never surface to the caller — the message
+// has already been committed and the agent will see Linear refs as text
+// regardless of whether the side-band link row gets created. This mirrors the
+// design 62 fail-soft contract on the async post-create catch-up path.
+func (h *SessionHandler) maybeLinkLinearMidSession(ctx context.Context, orgID, sessionID uuid.UUID, messageBody string, userID *uuid.UUID) {
+	linker := h.getLinearLinker()
+	if linker == nil {
 		return
 	}
-	writeError(w, r, e.status, e.code, e.message)
-}
-
-// resolveSessionReviewComments validates that every requested ID belongs to
-// the session and resolves the still-open ones, returning the rows whose
-// state actually changed. Already-resolved IDs are silently skipped (the
-// underlying store filters on resolved=false). The helper is pure: it does
-// not write to the response, so the caller decides when (and whether) to
-// surface failures to the HTTP client and to abandon the surrounding tx.
-//
-// The store argument must already be tx-scoped — the validation lookup and
-// the resolve UPDATE share the same tx so other writers can't slip a comment
-// in between the existence check and the update.
-func resolveSessionReviewComments(
-	ctx context.Context,
-	store *db.SessionReviewCommentStore,
-	orgID, sessionID uuid.UUID,
-	ids []uuid.UUID,
-	resolvedByPass int,
-) ([]models.SessionReviewComment, *resolveCommentsError) {
-	if len(ids) == 0 || store == nil {
-		return nil, nil
-	}
-	existing, err := store.ListByIDs(ctx, orgID, sessionID, ids)
-	if err != nil {
-		return nil, &resolveCommentsError{
-			status: http.StatusInternalServerError, code: "REVIEW_COMMENT_LOOKUP_FAILED",
-			message: "failed to look up review comments", underlying: err,
+	detached := context.WithoutCancel(ctx)
+	go func() {
+		bgCtx, cancel := context.WithTimeout(detached, midSessionLinkTimeout)
+		defer cancel()
+		if err := linker.ResolveAndLinkMidSession(bgCtx, linear.MidSessionInput{
+			OrgID:       orgID,
+			SessionID:   sessionID,
+			MessageBody: messageBody,
+			UserID:      userID,
+		}); err != nil {
+			h.logger.Warn().Err(err).
+				Str("session_id", sessionID.String()).
+				Msg("mid-session linear linking failed; follow-up message was sent but no link row was created")
 		}
-	}
-	if len(existing) != len(ids) {
-		// Surface the missing IDs (capped) so misbehaving clients can debug
-		// without leaking other tenants' data — IDs not scoped to this org+
-		// session are functionally indistinguishable from "doesn't exist".
-		found := make(map[uuid.UUID]struct{}, len(existing))
-		for _, c := range existing {
-			found[c.ID] = struct{}{}
-		}
-		const maxMissingInError = 5
-		missing := make([]string, 0, maxMissingInError)
-		for _, id := range ids {
-			if _, ok := found[id]; ok {
-				continue
-			}
-			if len(missing) == maxMissingInError {
-				break
-			}
-			missing = append(missing, id.String())
-		}
-		return nil, &resolveCommentsError{
-			status: http.StatusBadRequest, code: "INVALID_REVIEW_COMMENT_IDS",
-			message: "review comment ids do not belong to this session: " + strings.Join(missing, ", "),
-		}
-	}
-	resolved, err := store.ResolveByIDs(ctx, orgID, sessionID, ids, resolvedByPass)
-	if err != nil {
-		return nil, &resolveCommentsError{
-			status: http.StatusInternalServerError, code: "REVIEW_COMMENT_RESOLVE_FAILED",
-			message: "failed to resolve review comments", underlying: err,
-		}
-	}
-	return resolved, nil
+	}()
 }
 
 // emitReviewCommentResolutionAudits records one audit row per comment whose
-// resolved state actually changed. Mirrors the audit shape emitted by the
-// direct PATCH /review-comments handler so audit consumers see consistent
-// before/after values regardless of which surface triggered the resolution.
-// The resolved_via_message flag lets consumers tell the two surfaces apart.
+// resolved state actually changed. Wraps the shared audit emitter on the
+// SessionHandler so this surface stays consistent with the rest of
+// SendMessage's audit shape.
 func (h *SessionHandler) emitReviewCommentResolutionAudits(
 	r *http.Request,
 	sessionID uuid.UUID,
 	messageID int64,
 	resolved []models.SessionReviewComment,
 ) {
-	if len(resolved) == 0 {
-		return
-	}
-	entries := make([]userAuditEntry, 0, len(resolved))
-	for _, c := range resolved {
-		resID := c.ID.String()
-		sid := sessionID
-		entries = append(entries, userAuditEntry{
-			Action:       models.AuditActionSessionReviewCommentUpdated,
-			ResourceType: models.AuditResourceSessionReviewComment,
-			ResourceID:   &resID,
-			SessionID:    &sid,
-			Details: marshalAuditDetails(h.logger, map[string]any{
-				"review_comment_id":    c.ID.String(),
-				"session_id":           sid.String(),
-				"file_path":            c.FilePath,
-				"line_number":          c.LineNumber,
-				"diff_side":            c.DiffSide,
-				"pass_number":          c.PassNumber,
-				"body_length":          len(c.Body),
-				"resolved_via_message": true,
-				"message_id":           messageID,
-				"changes": map[string]any{
-					"resolved": auditChange(false, true),
-				},
-			}),
-		})
-	}
-	// One INSERT regardless of N — keeps post-commit latency O(1) in the
-	// number of attached comments.
-	emitUserAuditsWithSession(h.audit, r, entries)
+	emitReviewCommentResolutionAudits(h.audit, h.logger, r, sessionID, messageID, resolved)
 }
 
 // ListMessages handles GET /sessions/{id}/messages — returns the conversation messages.
@@ -2306,15 +2320,18 @@ func (h *SessionHandler) CreateManual(w http.ResponseWriter, r *http.Request) {
 	}
 
 	body.Message = strings.TrimSpace(body.Message)
-	// Empty message is allowed iff the user is starting from a linked
-	// Linear issue. Detection runs after the body validation, so we accept
+	// Empty message is allowed when the user attached images or is starting
+	// from a linked Linear issue. Mobile screenshot/photo-first flows rely on
+	// this: the UI explicitly advertises image-only session starts, and the
+	// initial turn persists those attachments even when the text prompt is
+	// blank. Linear detection runs after body validation, so we accept
 	// "looks like a Linear ref somewhere in the inputs" as the relaxation
-	// signal here. The check is tightened with the team-key allowlist so
-	// a "FOO-123"-shaped string for an unknown team no longer waves the
-	// request past — preventing sessions with an empty user turn that
-	// silently no-op inside the linker.
-	if body.Message == "" && !h.canBypassMissingMessageForLinear(r.Context(), orgID, body.References) {
-		writeError(w, r, http.StatusBadRequest, "MISSING_MESSAGE", "message is required")
+	// signal here. The check is tightened with the team-key allowlist so a
+	// "FOO-123"-shaped string for an unknown team no longer waves the request
+	// past — preventing sessions with an empty user turn that silently no-op
+	// inside the linker.
+	if body.Message == "" && len(body.Images) == 0 && !h.canBypassMissingMessageForLinear(r.Context(), orgID, body.References) {
+		writeError(w, r, http.StatusBadRequest, "MISSING_MESSAGE", "message, images, or a linked Linear issue are required")
 		return
 	}
 	for _, reference := range body.References {
@@ -2432,11 +2449,9 @@ func (h *SessionHandler) CreateManual(w http.ResponseWriter, r *http.Request) {
 
 	autonomyLevel := body.AutonomyLevel
 	if autonomyLevel == "" {
-		autonomyLevel = "semi"
+		autonomyLevel = string(models.DefaultSessionAutonomy)
 	}
-	// These values are enforced by chk_sessions_autonomy_level CHECK constraint.
-	validAutonomyLevels := map[string]bool{"full": true, "semi": true, "supervised": true}
-	if !validAutonomyLevels[autonomyLevel] {
+	if err := models.SessionAutonomy(autonomyLevel).Validate(); err != nil {
 		writeError(w, r, http.StatusBadRequest, "INVALID_AUTONOMY_LEVEL", "autonomy_level must be one of: full, semi, supervised")
 		return
 	}
@@ -2488,6 +2503,7 @@ func (h *SessionHandler) CreateManual(w http.ResponseWriter, r *http.Request) {
 		initMsg := &models.SessionMessage{
 			SessionID:  session.ID,
 			OrgID:      orgID,
+			ThreadID:   session.PrimaryThreadID,
 			TurnNumber: 0,
 			Role:       models.MessageRoleUser,
 			Content:    body.Message,
@@ -2635,11 +2651,9 @@ func (h *SessionHandler) CreateManual(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	payload := map[string]string{
-		"session_id": session.ID.String(),
-		"org_id":     orgID.String(),
-	}
-	if _, err := h.jobStore.Enqueue(r.Context(), orgID, "agent", "run_agent", payload, 5, nil); err != nil {
+	dedupeKey := db.RunAgentDedupeKey(session.ID)
+	payload := db.RunAgentPayload(session)
+	if _, err := h.jobStore.Enqueue(r.Context(), orgID, "agent", "run_agent", payload, 5, &dedupeKey); err != nil {
 		writeError(w, r, http.StatusInternalServerError, "ENQUEUE_FAILED", "failed to enqueue manual session", err)
 		return
 	}

@@ -5,6 +5,7 @@ import { ChevronRight, AlertTriangle, FileCode2, FileText, ClipboardList, Check,
 import Image from "next/image";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Separator } from "@/components/ui/separator";
 import {
   Tooltip,
   TooltipContent,
@@ -98,12 +99,12 @@ function DaySeparator({ dateStr }: { dateStr: string }) {
   const label = formatDaySeparatorLabel(dateStr);
   if (!label) return null;
   return (
-    <div className="sticky top-0 z-10 -mx-4 px-4 py-1.5 bg-background/80 backdrop-blur supports-[backdrop-filter]:bg-background/60">
-      <div className="flex items-center gap-2 text-xs text-muted-foreground">
-        <div className="h-px flex-1 bg-border" />
-        <span className="font-medium tabular-nums">{label}</span>
-        <div className="h-px flex-1 bg-border" />
+    <div className="my-4 flex items-center gap-3 px-1">
+      <Separator className="flex-1 bg-border/70" />
+      <div className="rounded-full border border-border/60 bg-muted/35 px-2.5 py-1 text-xs font-medium tabular-nums text-muted-foreground shadow-xs">
+        {label}
       </div>
+      <Separator className="flex-1 bg-border/70" />
     </div>
   );
 }

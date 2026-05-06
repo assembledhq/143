@@ -1,14 +1,14 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import { Check, ChevronDown } from "lucide-react";
+import { ChevronDown } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   Command,
+  CommandCheckItem,
   CommandEmpty,
   CommandGroup,
   CommandInput,
-  CommandItem,
   CommandList,
 } from "@/components/ui/command";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
@@ -93,10 +93,10 @@ export function TimezonePicker({
           aria-expanded={open}
           // Match the sibling SelectTrigger (h-9 / text-sm) so the trio in
           // the schedule row lines up visually.
-          className={cn("h-9 justify-between font-normal", className)}
+          className={cn("h-9 min-w-0 justify-between font-normal", className)}
           title={value}
         >
-          <span className="max-w-[180px] truncate">{value}</span>
+          <span className="min-w-0 max-w-[180px] truncate">{value}</span>
           <ChevronDown className="ml-2 h-3.5 w-3.5 shrink-0 opacity-60" />
         </Button>
       </PopoverTrigger>
@@ -107,7 +107,8 @@ export function TimezonePicker({
             <CommandEmpty>No timezone found.</CommandEmpty>
             {showDetectedGroup && (
               <CommandGroup heading="Detected">
-                <CommandItem
+                <CommandCheckItem
+                  checked={detected === value}
                   // cmdk filters by `value`; include a keyword variant with
                   // spaces so "new york" matches "America/New_York".
                   value={`${detected} ${detected.replace(/_/g, " ")}`}
@@ -116,32 +117,26 @@ export function TimezonePicker({
                     setOpen(false);
                   }}
                 >
-                  <Check className="mr-2 h-3.5 w-3.5 opacity-0" />
                   {detected}{" "}
                   <span className="ml-2 text-xs text-muted-foreground">
                     (browser)
                   </span>
-                </CommandItem>
+                </CommandCheckItem>
               </CommandGroup>
             )}
             <CommandGroup>
               {options.map((tz) => (
-                <CommandItem
+                <CommandCheckItem
                   key={tz}
+                  checked={tz === value}
                   value={`${tz} ${tz.replace(/_/g, " ")}`}
                   onSelect={() => {
                     onChange(tz);
                     setOpen(false);
                   }}
                 >
-                  <Check
-                    className={cn(
-                      "mr-2 h-3.5 w-3.5",
-                      tz === value ? "opacity-100" : "opacity-0",
-                    )}
-                  />
                   {tz}
-                </CommandItem>
+                </CommandCheckItem>
               ))}
             </CommandGroup>
           </CommandList>

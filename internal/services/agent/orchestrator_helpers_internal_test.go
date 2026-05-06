@@ -56,6 +56,10 @@ func (s *helperIssueStore) GetByID(context.Context, uuid.UUID, uuid.UUID) (model
 	return s.issue, nil
 }
 
+func (s *helperIssueStore) UpdateStatus(context.Context, uuid.UUID, uuid.UUID, string) error {
+	return s.err
+}
+
 func TestLatestUserMessage(t *testing.T) {
 	t.Parallel()
 
@@ -68,6 +72,96 @@ func TestLatestUserMessage(t *testing.T) {
 
 	require.NotNil(t, message, "latestUserMessage should return the most recent user message")
 	require.Equal(t, "latest user", message.Content, "latestUserMessage should scan from newest to oldest")
+}
+
+func TestUnprocessedUserMessages_SessionScope(t *testing.T) {
+	t.Parallel()
+
+	// Trailing user messages with no thread are returned in chronological
+	// order; messages preceding the most recent assistant are excluded.
+	pending := unprocessedUserMessages([]models.SessionMessage{
+		{Role: models.MessageRoleUser, Content: "old (already processed)"},
+		{Role: models.MessageRoleAssistant, Content: "assistant reply"},
+		{Role: models.MessageRoleUser, Content: "queued one"},
+		{Role: models.MessageRoleUser, Content: "queued two"},
+	}, nil)
+
+	require.Len(t, pending, 2, "should return only messages after the latest in-scope assistant")
+	require.Equal(t, "queued one", pending[0].Content, "should be oldest-first")
+	require.Equal(t, "queued two", pending[1].Content)
+}
+
+func TestUnprocessedUserMessages_ThreadScope(t *testing.T) {
+	t.Parallel()
+
+	threadA := uuid.New()
+	threadB := uuid.New()
+
+	// Thread B's activity (its own user + assistant exchange) sits between
+	// the two thread-A user messages, but it must not break the thread-A
+	// scan: cross-thread messages are skipped, and only a same-thread
+	// assistant terminates the trailing window.
+	pending := unprocessedUserMessages([]models.SessionMessage{
+		{Role: models.MessageRoleUser, Content: "A first", ThreadID: &threadA},
+		{Role: models.MessageRoleAssistant, Content: "A reply", ThreadID: &threadA},
+		{Role: models.MessageRoleUser, Content: "B prompt", ThreadID: &threadB},
+		{Role: models.MessageRoleAssistant, Content: "B reply", ThreadID: &threadB},
+		{Role: models.MessageRoleUser, Content: "A queued one", ThreadID: &threadA},
+		{Role: models.MessageRoleUser, Content: "A queued two", ThreadID: &threadA},
+	}, &threadA)
+
+	require.Len(t, pending, 2, "thread-scoped scan should ignore cross-thread activity")
+	require.Equal(t, "A queued one", pending[0].Content)
+	require.Equal(t, "A queued two", pending[1].Content)
+}
+
+func TestUnprocessedUserMessages_IgnoresAssistantAfterLatestUserBoundary(t *testing.T) {
+	t.Parallel()
+
+	threadID := uuid.New()
+	latestQueuedUserID := int64(12)
+
+	pending := unprocessedUserMessagesThrough([]models.SessionMessage{
+		{ID: 9, Role: models.MessageRoleAssistant, Content: "previous reply", ThreadID: &threadID},
+		{ID: 10, Role: models.MessageRoleUser, Content: "queued one", ThreadID: &threadID},
+		{ID: 11, Role: models.MessageRoleUser, Content: "queued two", ThreadID: &threadID},
+		{ID: latestQueuedUserID, Role: models.MessageRoleUser, Content: "queued three", ThreadID: &threadID},
+		{ID: 13, Role: models.MessageRoleAssistant, Content: "reply from the in-flight turn", ThreadID: &threadID},
+	}, &threadID, latestQueuedUserID)
+
+	require.Equal(t, []models.SessionMessage{
+		{ID: 10, Role: models.MessageRoleUser, Content: "queued one", ThreadID: &threadID},
+		{ID: 11, Role: models.MessageRoleUser, Content: "queued two", ThreadID: &threadID},
+		{ID: latestQueuedUserID, Role: models.MessageRoleUser, Content: "queued three", ThreadID: &threadID},
+	}, pending, "queued users before a later assistant should all be delivered to the next turn")
+}
+
+func TestUnprocessedUserMessages_NoMessages(t *testing.T) {
+	t.Parallel()
+
+	require.Empty(t, unprocessedUserMessages(nil, nil), "nil input returns empty")
+	require.Empty(t, unprocessedUserMessages([]models.SessionMessage{
+		{Role: models.MessageRoleAssistant, Content: "no trailing user"},
+	}, nil), "no trailing user message returns empty")
+}
+
+func TestDrainAcceptableStatus(t *testing.T) {
+	t.Parallel()
+
+	for _, status := range []string{"idle", "running", "awaiting_input", "needs_human_guidance"} {
+		require.True(t, drainAcceptableStatus(status), "status %q should accept a drain enqueue", status)
+	}
+	for _, status := range []string{"completed", "failed", "cancelled", "skipped", "pr_created", "pending", ""} {
+		require.False(t, drainAcceptableStatus(status), "status %q should not accept a drain enqueue", status)
+	}
+}
+
+func TestContinueSessionDedupeKey(t *testing.T) {
+	t.Parallel()
+
+	id := uuid.MustParse("00000000-0000-0000-0000-000000000abc")
+	require.Equal(t, "continue_session:"+id.String(), continueSessionDedupeKey(id),
+		"local helper must mirror db.ContinueSessionDedupeKey verbatim")
 }
 
 func TestCanonicalReferences_FiltersInvalidEntries(t *testing.T) {
@@ -411,6 +505,43 @@ func TestPromptSeedForSession(t *testing.T) {
 		require.Contains(t, *issue.Description, reasoning, "promptSeedForSession should preserve the PM reasoning in the description")
 		require.Empty(t, gotLinkedIssues, "promptSeedForSession should not synthesize linked issues when no snapshot exists")
 	})
+
+	t.Run("uses pm approach as the synthetic issue title when the session title is missing", func(t *testing.T) {
+		t.Parallel()
+
+		approach := "Inspect the retry path"
+		reasoning := "Timeouts started after the last deploy."
+		orchestrator := &Orchestrator{}
+		issue, gotLinkedIssues := orchestrator.promptSeedForSession(
+			&models.Session{
+				PMApproach:  &approach,
+				PMReasoning: &reasoning,
+			},
+			nil,
+			nil,
+		)
+
+		require.NotNil(t, issue, "promptSeedForSession should synthesize an issue when PM context exists without a title")
+		require.Equal(t, approach, issue.Title, "promptSeedForSession should derive the synthetic issue title from the PM approach before falling back to a placeholder")
+		require.NotNil(t, issue.Description, "promptSeedForSession should still include PM details in the description")
+		require.Empty(t, gotLinkedIssues, "promptSeedForSession should not synthesize linked issues when no snapshot exists")
+	})
+
+	t.Run("uses the latest message as the synthetic issue title when the session title is missing", func(t *testing.T) {
+		t.Parallel()
+
+		orchestrator := &Orchestrator{}
+		issue, gotLinkedIssues := orchestrator.promptSeedForSession(
+			&models.Session{Origin: models.SessionOriginRevision},
+			&models.SessionMessage{Content: "Rework the flaky checkout retry logic\nKeep the current API shape."},
+			nil,
+		)
+
+		require.NotNil(t, issue, "promptSeedForSession should synthesize an issue when a non-manual session has a latest message")
+		require.Equal(t, "Rework the flaky checkout retry logic", issue.Title, "promptSeedForSession should derive the synthetic issue title from the latest message before falling back to a placeholder")
+		require.Nil(t, issue.Description, "promptSeedForSession should not invent a description when only a follow-up message is available")
+		require.Empty(t, gotLinkedIssues, "promptSeedForSession should not synthesize linked issues when no snapshot exists")
+	})
 }
 
 func TestResolvePromptSeed_FallsBackToPrimaryIssueStore(t *testing.T) {
@@ -679,6 +810,218 @@ func TestSnapshotSession_PropagatesProviderErrorWithoutUpdatingSession(t *testin
 	require.Contains(t, err.Error(), "snapshot sandbox")
 	require.Equal(t, &priorKey, session.SnapshotKey, "the prior snapshot pointer must remain intact when Snapshot fails")
 	require.Empty(t, store.saves, "Save must not be called when Snapshot failed")
+}
+
+// TestShedOnRunResultDispatch wires a real AgentEnv with an instrumented
+// CodingCredentialProvider and asserts that the orchestrator's
+// shedOnRunResult routes a finished run's result.Error to the right
+// (ShedRateLimited / ShedAuthRejected / no-op) branch based on the error
+// surface. This is the regression guard that prevents a silent shedding
+// failure if the helper string matchers ever drift apart from the dispatcher.
+func TestShedOnRunResultDispatch(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	userID := uuid.New()
+	credID := uuid.New()
+
+	cases := []struct {
+		name             string
+		agentType        models.AgentType
+		result           *AgentResult
+		runErr           error
+		wantRateLimited  bool
+		wantAuthRejected bool
+	}{
+		{
+			name:             "claude code rate limit error sheds rate limited",
+			agentType:        models.AgentTypeClaudeCode,
+			result:           &AgentResult{Error: "anthropic api: 429 too many requests"},
+			wantRateLimited:  true,
+			wantAuthRejected: false,
+		},
+		{
+			name:             "claude code auth rejected error sheds auth rejected",
+			agentType:        models.AgentTypeClaudeCode,
+			result:           &AgentResult{Error: "401 Unauthorized: refresh_token_reused"},
+			wantRateLimited:  false,
+			wantAuthRejected: true,
+		},
+		{
+			name:             "claude code clean result is a no-op",
+			agentType:        models.AgentTypeClaudeCode,
+			result:           &AgentResult{Error: ""},
+			wantRateLimited:  false,
+			wantAuthRejected: false,
+		},
+		{
+			name:             "codex api key rate limit error sheds rate limited",
+			agentType:        models.AgentTypeCodex,
+			result:           &AgentResult{Error: "rate limit hit"},
+			wantRateLimited:  true,
+			wantAuthRejected: false,
+		},
+		{
+			name:             "nil result is a silent no-op",
+			agentType:        models.AgentTypeClaudeCode,
+			result:           nil,
+			wantRateLimited:  false,
+			wantAuthRejected: false,
+		},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			provider := codingProviderForAgent(tc.agentType)
+			resolvable := map[models.ProviderName][]models.DecryptedCodingCredential{}
+			if provider != "" {
+				resolvable[provider] = []models.DecryptedCodingCredential{
+					{
+						ID:       credID,
+						OrgID:    orgID,
+						UserID:   &userID,
+						Provider: provider,
+						Status:   models.CodingCredentialStatusActive,
+						Config:   testConfigForShedProvider(provider),
+					},
+				}
+			}
+			coding := &envCodingCredentialProvider{
+				resolvable: resolvable,
+			}
+			env := NewAgentEnv(AgentEnvDeps{
+				CodingCredentials: coding,
+				Provider:          &envSandboxProvider{},
+				Logger:            zerolog.Nop(),
+			})
+			// Seed recentPicks for the provider key so the shed lookup resolves
+			// to credID. Unknown agent types return an empty provider and skip
+			// the seed path.
+			if provider != "" {
+				_ = env.resolveProviderConfig(context.Background(), orgID, &userID, provider)
+			}
+
+			o := &Orchestrator{env: env, logger: zerolog.Nop()}
+			o.shedOnRunResult(tc.agentType, orgID, &userID, tc.result, tc.runErr, zerolog.Nop())
+
+			require.Equal(t, tc.wantRateLimited, len(coding.rateLimitedIDs) > 0,
+				"rate-limit shedding state mismatch for %q", tc.name)
+			require.Equal(t, tc.wantAuthRejected, len(coding.authRejectedIDs) > 0,
+				"auth-rejected shedding state mismatch for %q", tc.name)
+			if tc.wantRateLimited {
+				require.Equal(t, credID, coding.rateLimitedIDs[0],
+					"shed call must target the just-picked credential")
+			}
+			if tc.wantAuthRejected {
+				require.Equal(t, credID, coding.authRejectedIDs[0],
+					"shed call must target the just-picked credential")
+			}
+		})
+	}
+}
+
+func testConfigForShedProvider(provider models.ProviderName) models.ProviderConfig {
+	switch provider {
+	case models.ProviderAnthropic:
+		return models.AnthropicConfig{APIKey: "sk-ant-test-1234"}
+	case models.ProviderOpenAI:
+		return models.OpenAIConfig{APIKey: "sk-openai-test-1234"}
+	case models.ProviderGemini:
+		return models.GeminiConfig{APIKey: "gemini-test-1234"}
+	case models.ProviderAmp:
+		return models.AmpConfig{APIKey: "amp-test-1234"}
+	case models.ProviderPi:
+		return models.PiConfig{APIKey: "pi-test-1234"}
+	default:
+		return nil
+	}
+}
+
+// TestIsRateLimitedError pins the surface that triggers a ShedRateLimited
+// call. Drift here would silently turn shedding off on an upstream change in
+// provider error wording.
+func TestIsRateLimitedError(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name string
+		in   string
+		want bool
+	}{
+		{"empty string is not rate limited", "", false},
+		{"unrelated error is not rate limited", "context canceled", false},
+		{"phrase rate limit hit", "anthropic api: rate limit exceeded", true},
+		{"snake-case rate_limit code", `{"code":"rate_limit_exceeded"}`, true},
+		{"http 429 status", "got status 429 from upstream", true},
+		{"too many requests phrase", "Error: too many requests; retry later", true},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			require.Equal(t, tc.want, isRateLimitedError(tc.in))
+		})
+	}
+}
+
+// TestIsAuthRejectedError pins the surface that triggers a ShedAuthRejected
+// call. We keep the input lower-cased because the orchestrator does that
+// before matching; the test mirrors that contract.
+func TestIsAuthRejectedError(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name string
+		in   string
+		want bool
+	}{
+		{"empty string is not auth rejected", "", false},
+		{"unrelated error is not auth rejected", "context canceled", false},
+		{"refresh token reused", `error code: refresh_token_reused`, true},
+		{"invalid grant", `oauth: invalid_grant`, true},
+		{"invalid api key human form", "the provider returned: invalid api key", true},
+		{"invalid api key snake-case", `{"error":"invalid_api_key"}`, true},
+		{"401 unauthorized", "received 401 unauthorized from upstream", true},
+		{"401 unauthenticated", "401 unauthenticated: token expired and refresh failed", true},
+		{"authentication_error code", `{"type":"authentication_error"}`, true},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			require.Equal(t, tc.want, isAuthRejectedError(tc.in))
+		})
+	}
+}
+
+// TestCodingProviderForAgent locks the agent-type → provider mapping the
+// shed dispatcher uses. Codex maps to OpenAI for API-key auth; subscription
+// auth has no recent pick under that provider and remains a no-op.
+func TestCodingProviderForAgent(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name      string
+		agentType models.AgentType
+		want      models.ProviderName
+	}{
+		{"claude code maps to anthropic api key", models.AgentTypeClaudeCode, models.ProviderAnthropic},
+		{"gemini cli maps to gemini", models.AgentTypeGeminiCLI, models.ProviderGemini},
+		{"amp maps to amp", models.AgentTypeAmp, models.ProviderAmp},
+		{"pi maps to pi", models.AgentTypePi, models.ProviderPi},
+		{"codex maps to openai api key", models.AgentTypeCodex, models.ProviderOpenAI},
+		{"unknown agent type returns empty", models.AgentType("unknown"), ""},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			require.Equal(t, tc.want, codingProviderForAgent(tc.agentType))
+		})
+	}
 }
 
 func TestTruncateForLog(t *testing.T) {

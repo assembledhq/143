@@ -16,18 +16,31 @@ import (
 // stores) the Linear service needs. Pulling this out of router.go and
 // cmd/server/main.go avoids two diverging copies of identical wiring.
 type BuildDeps struct {
-	Pool          *pgxpool.Pool
-	Logger        zerolog.Logger
-	Integrations  IntegrationReader
-	Credentials   CredentialReader
-	Issues        *db.IssueStore
-	Sessions      *db.SessionStore
-	IssueLinks    *db.SessionIssueLinkStore
-	Orgs          *db.OrganizationStore
-	Jobs          *db.JobStore
-	JobQueueName  string
-	JobPriority   int
-	ClientFactory ClientFactory
+	Pool               *pgxpool.Pool
+	Logger             zerolog.Logger
+	Integrations       IntegrationReader
+	IntegrationsWriter IntegrationWriter
+	Credentials        CredentialReader
+	// CredentialsWriter persists rotated OAuth tokens after a successful
+	// refresh. Required for the refresh-on-expiry flow to be durable;
+	// without it, refreshed tokens would be lost when the process restarts
+	// and the integration would silently churn refresh tokens at Linear.
+	CredentialsWriter CredentialWriter
+	Issues            *db.IssueStore
+	Sessions          *db.SessionStore
+	IssueLinks        *db.SessionIssueLinkStore
+	Orgs              *db.OrganizationStore
+	Jobs              *db.JobStore
+	JobQueueName      string
+	JobPriority       int
+	ClientFactory     ClientFactory
+	// OAuthClient holds LINEAR_OAUTH_CLIENT_ID and LINEAR_OAUTH_CLIENT_SECRET.
+	// Required for refresh-token redemption: Linear treats /oauth/token as a
+	// confidential-client endpoint and rejects refreshes without these.
+	// Without OAuthClient set, GetValidToken on an expiring credential
+	// surfaces ErrOAuthClientNotConfigured, which the operator must fix by
+	// populating the env vars rather than the user reconnecting.
+	OAuthClient OAuthClientCreds
 	// AppBaseURL is the absolute origin (e.g. cfg.FrontendURL) we send to
 	// Linear inside attachment URLs and comment bodies. Empty falls back to
 	// a relative path which Linear renders as plain text — production
@@ -122,24 +135,36 @@ func Build(deps BuildDeps) *Service {
 		return models.ParseOrgSettings(org.Settings)
 	}
 
+	if deps.OAuthClient.ClientID == "" || deps.OAuthClient.ClientSecret == "" {
+		// Logged at warn (not fatal) so MODE=worker / MODE=api dev rigs that
+		// don't have Linear OAuth provisioned can still boot. Refresh on
+		// expiring tokens will fail with ErrOAuthClientNotConfigured, which
+		// is preferable to crashing the process.
+		deps.Logger.Warn().
+			Msg("linear.Build: OAuthClient is incomplete; refresh-token rotation will fail until LINEAR_OAUTH_CLIENT_ID / LINEAR_OAUTH_CLIENT_SECRET are configured")
+	}
+
 	svc := NewService(Config{
-		Logger:            deps.Logger,
-		Integrations:      deps.Integrations,
-		Credentials:       deps.Credentials,
-		Issues:            deps.Issues,
-		Links:             deps.IssueLinks,
-		TeamKeys:          db.NewLinearTeamKeyStore(deps.Pool),
-		ProviderState:     db.NewLinearProviderStateStore(deps.Pool),
-		StateEvents:       db.NewLinearStateEventStore(deps.Pool),
-		Sessions:          deps.Sessions,
-		ClientFactory:     clientFactory,
-		OrgSettingsLoader: loader,
-		Pool:              deps.Pool,
-		AppBaseURL:        deps.AppBaseURL,
-		TeamKeyCache:      teamKeyCache,
-		AgentSessions:     db.NewLinearAgentSessionStore(deps.Pool),
-		AgentActivities:   db.NewLinearAgentActivityLogStore(deps.Pool),
-		AgentMetrics:      deps.AgentMetrics,
+		Logger:             deps.Logger,
+		Integrations:       deps.Integrations,
+		IntegrationsWriter: deps.IntegrationsWriter,
+		Credentials:        deps.Credentials,
+		CredentialsWriter:  deps.CredentialsWriter,
+		OAuthClient:        deps.OAuthClient,
+		Issues:             deps.Issues,
+		Links:              deps.IssueLinks,
+		TeamKeys:           db.NewLinearTeamKeyStore(deps.Pool),
+		ProviderState:      db.NewLinearProviderStateStore(deps.Pool),
+		StateEvents:        db.NewLinearStateEventStore(deps.Pool),
+		Sessions:           deps.Sessions,
+		ClientFactory:      clientFactory,
+		OrgSettingsLoader:  loader,
+		Pool:               deps.Pool,
+		AppBaseURL:         deps.AppBaseURL,
+		TeamKeyCache:       teamKeyCache,
+		AgentSessions:      db.NewLinearAgentSessionStore(deps.Pool),
+		AgentActivities:    db.NewLinearAgentActivityLogStore(deps.Pool),
+		AgentMetrics:       deps.AgentMetrics,
 	})
 
 	if deps.Jobs != nil {
