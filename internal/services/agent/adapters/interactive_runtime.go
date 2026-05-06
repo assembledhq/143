@@ -106,6 +106,13 @@ func runInteractiveCommand(ctx context.Context, sandbox *agent.Sandbox, spec Int
 		return InteractiveRunResult{}, fmt.Errorf("start interactive command: %w", err)
 	}
 
+	var closeHandle sync.Once
+	closeHandleFunc := func() {
+		closeHandle.Do(func() {
+			_ = handle.Close()
+		})
+	}
+
 	// Defer order matters here. Defers run LIFO, so on return:
 	//
 	//   1. handle.Close() — releases the hijacked connection first so the
@@ -117,11 +124,11 @@ func runInteractiveCommand(ctx context.Context, sandbox *agent.Sandbox, spec Int
 	//
 	// Reordering would let RequestStop call Interrupt on a closed handle
 	// briefly, which is safe but noisy in logs.
-	defer handle.Close()
 	if attacher := agent.InteractiveHandleAttacherFromContext(ctx); attacher != nil {
 		attacher.Attach(handle)
 		defer attacher.Detach()
 	}
+	defer closeHandleFunc()
 
 	var (
 		stderrBuf     bytes.Buffer
@@ -159,6 +166,9 @@ func runInteractiveCommand(ctx context.Context, sandbox *agent.Sandbox, spec Int
 	}
 
 	exitCode, waitErr := handle.Wait(ctx)
+	if waitErr != nil {
+		closeHandleFunc()
+	}
 	// Wait returns when the connection drops; the streaming goroutines
 	// finish draining trailing bytes shortly after. We must wait on them
 	// before returning so callers see the full stderr buffer and any

@@ -20,11 +20,12 @@ import (
 // fakeHandle is a minimal in-memory InteractiveCommandHandle used to drive
 // the cancel registry from the public attach/detach API.
 type fakeHandle struct {
-	mu          sync.Mutex
-	interrupts  []agent.CancellationSpec
-	interruptFn func(spec agent.CancellationSpec) error
-	killed      bool
-	closed      chan struct{}
+	mu                sync.Mutex
+	interrupts        []agent.CancellationSpec
+	interruptFn       func(spec agent.CancellationSpec) error
+	killed            bool
+	killDeadlineDelta time.Duration
+	closed            chan struct{}
 }
 
 func newFakeHandle() *fakeHandle {
@@ -48,9 +49,12 @@ func (h *fakeHandle) Interrupt(_ context.Context, spec agent.CancellationSpec) e
 	return nil
 }
 
-func (h *fakeHandle) Kill(context.Context) error {
+func (h *fakeHandle) Kill(ctx context.Context) error {
 	h.mu.Lock()
 	h.killed = true
+	if deadline, ok := ctx.Deadline(); ok {
+		h.killDeadlineDelta = time.Until(deadline)
+	}
 	h.mu.Unlock()
 	return nil
 }
@@ -87,6 +91,12 @@ func (h *fakeHandle) Killed() bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return h.killed
+}
+
+func (h *fakeHandle) KillDeadlineDelta() time.Duration {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.killDeadlineDelta
 }
 
 func TestCancelRegistry_RegisterDeregister(t *testing.T) {
@@ -262,6 +272,23 @@ func TestCancelRegistry_GraceWindowExpiry_EscalatesToKill(t *testing.T) {
 		return handle.Killed() && ctxCancelled.Load()
 	}, 2*time.Second, 10*time.Millisecond, "grace expiry should escalate to Kill + ctxCancel when the agent ignores Interrupt")
 	require.Len(t, handle.Interrupts(), 1, "Interrupt should be delivered exactly once before Kill escalation")
+}
+
+func TestCancelRegistry_GraceWindowExpiry_UsesFreshKillContext(t *testing.T) {
+	t.Parallel()
+	reg := agent.NewCancelRegistry(zerolog.Nop())
+	id := uuid.New()
+
+	reg.Register(id, func() {}, agent.DefaultCancellationSpec)
+	handle := newFakeHandle()
+	reg.AttachHandle(id, handle)
+
+	require.True(t, reg.RequestStop(id, agent.StopReasonUserCancel, 2*time.Second))
+
+	require.Eventually(t, func() bool {
+		return handle.Killed()
+	}, 4*time.Second, 10*time.Millisecond, "grace expiry should call Kill")
+	require.Greater(t, handle.KillDeadlineDelta(), 29*time.Second, "Kill should receive a fresh force-stop timeout after the grace window expires")
 }
 
 // Compile-time check that fakeHandle satisfies the public handle contract.

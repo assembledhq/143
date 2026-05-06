@@ -184,8 +184,8 @@ func (r *CancelRegistry) RequestStop(sessionID uuid.UUID, reason StopReason, gra
 //  4. After graceWindow, if the entry is still registered, ctxCancel() and
 //     handle.Kill(...) force-close the underlying transport.
 func (r *CancelRegistry) doCancel(sessionID uuid.UUID, entry *cancelEntry, graceWindow time.Duration) {
-	killCtx, killCancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer killCancel()
+	interruptCtx, interruptCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer interruptCancel()
 
 	entry.mu.Lock()
 	handle := entry.handle
@@ -208,13 +208,13 @@ func (r *CancelRegistry) doCancel(sessionID uuid.UUID, entry *cancelEntry, grace
 		return
 	}
 
-	if err := handle.Interrupt(killCtx, spec); err != nil {
+	if err := handle.Interrupt(interruptCtx, spec); err != nil {
 		if errors.Is(err, ErrUnsupportedInterruptMethod) && spec.Method != CancellationMethodCtrlC {
 			r.logger.Warn().Err(err).
 				Str("session_id", sessionID.String()).
 				Str("requested_method", string(spec.Method)).
 				Msg("handle does not support requested interrupt method, falling back to Ctrl+C")
-			err = handle.Interrupt(killCtx, DefaultCancellationSpec)
+			err = handle.Interrupt(interruptCtx, DefaultCancellationSpec)
 		}
 		if err != nil {
 			r.logger.Warn().Err(err).
@@ -242,6 +242,8 @@ func (r *CancelRegistry) doCancel(sessionID uuid.UUID, entry *cancelEntry, grace
 	r.logger.Warn().
 		Str("session_id", sessionID.String()).
 		Msg("agent did not exit after graceful interrupt, force-stopping handle and cancelling context")
+	killCtx, killCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer killCancel()
 	if err := handle.Kill(killCtx); err != nil {
 		r.logger.Warn().Err(err).
 			Str("session_id", sessionID.String()).

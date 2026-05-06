@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"io"
+	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -103,6 +105,43 @@ func TestRunInteractiveCommand_RequiresInteractiveProvider(t *testing.T) {
 	require.Contains(t, err.Error(), "does not support interactive commands")
 }
 
+func TestRunInteractiveCommand_ClosesHandleBeforeWaitingForStreamsAfterContextCancellation(t *testing.T) {
+	t.Parallel()
+
+	handle := newBlockingInteractiveHandle()
+	provider := testutil.NewMockSandboxProvider()
+	provider.StartInteractiveCommandFn = func(context.Context, *agent.Sandbox, agent.InteractiveCommandSpec) (agent.InteractiveCommandHandle, error) {
+		return handle, nil
+	}
+
+	ctx, cancel := context.WithCancel(agent.WithSandboxProvider(context.Background(), provider))
+	done := make(chan error, 1)
+	go func() {
+		_, err := runInteractiveCommand(ctx, &agent.Sandbox{ID: "t", WorkDir: "/w", HomeDir: "/h"}, InteractiveRunSpec{
+			Cmd: "agent",
+			Profile: agent.AgentRuntimeProfile{
+				Cancellation:      agent.DefaultCancellationSpec,
+				PreferSplitOutput: true,
+			},
+			OnStdout: func([]byte) {},
+		})
+		done <- err
+	}()
+
+	cancel()
+
+	require.Eventually(t, func() bool {
+		select {
+		case err := <-done:
+			require.ErrorIs(t, err, context.Canceled, "runInteractiveCommand should return the wait cancellation error")
+			return true
+		default:
+			return false
+		}
+	}, 2*time.Second, 10*time.Millisecond, "runInteractiveCommand should close the handle before waiting for blocked stream readers")
+	require.True(t, handle.Closed(), "context cancellation should close the handle and unblock stream readers")
+}
+
 // nonInteractiveProvider is a stand-alone SandboxProvider implementation
 // that intentionally does NOT also implement InteractiveSandboxProvider.
 // It returns trivial values for every required method.
@@ -142,3 +181,62 @@ func (p *nonInteractiveProvider) Restore(context.Context, *agent.Sandbox, io.Rea
 }
 
 var _ agent.SandboxProvider = (*nonInteractiveProvider)(nil)
+
+type blockingInteractiveHandle struct {
+	stdoutR *io.PipeReader
+	stdoutW *io.PipeWriter
+	stderrR *io.PipeReader
+	stderrW *io.PipeWriter
+	closed  chan struct{}
+	once    sync.Once
+}
+
+func newBlockingInteractiveHandle() *blockingInteractiveHandle {
+	stdoutR, stdoutW := io.Pipe()
+	stderrR, stderrW := io.Pipe()
+	return &blockingInteractiveHandle{
+		stdoutR: stdoutR,
+		stdoutW: stdoutW,
+		stderrR: stderrR,
+		stderrW: stderrW,
+		closed:  make(chan struct{}),
+	}
+}
+
+func (h *blockingInteractiveHandle) ID() string                               { return "blocking" }
+func (h *blockingInteractiveHandle) Stdout() io.Reader                        { return h.stdoutR }
+func (h *blockingInteractiveHandle) Stderr() io.Reader                        { return h.stderrR }
+func (h *blockingInteractiveHandle) WriteInput(context.Context, []byte) error { return nil }
+func (h *blockingInteractiveHandle) CloseInput(context.Context) error         { return nil }
+func (h *blockingInteractiveHandle) Interrupt(context.Context, agent.CancellationSpec) error {
+	return nil
+}
+func (h *blockingInteractiveHandle) Kill(context.Context) error {
+	return h.Close()
+}
+func (h *blockingInteractiveHandle) Wait(ctx context.Context) (int, error) {
+	select {
+	case <-ctx.Done():
+		return -1, ctx.Err()
+	case <-h.closed:
+		return 0, nil
+	}
+}
+func (h *blockingInteractiveHandle) Close() error {
+	h.once.Do(func() {
+		_ = h.stdoutW.Close()
+		_ = h.stderrW.Close()
+		close(h.closed)
+	})
+	return nil
+}
+func (h *blockingInteractiveHandle) Closed() bool {
+	select {
+	case <-h.closed:
+		return true
+	default:
+		return false
+	}
+}
+
+var _ agent.InteractiveCommandHandle = (*blockingInteractiveHandle)(nil)
