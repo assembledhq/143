@@ -456,7 +456,8 @@ func (s *Service) checkCI(ctx context.Context, sandbox *agent.Sandbox) (string, 
 			return "fail", err.Error(), nil
 		}
 
-		commands := make([]string, 0, len(repoCommands.bootstrap)+1+len(repoCommands.validation))
+		commands := make([]string, 0, len(repoCommands.dependencies)+len(repoCommands.bootstrap)+1+len(repoCommands.validation))
+		commands = append(commands, repoCommands.dependencies...)
 		commands = append(commands, repoCommands.bootstrap...)
 		commands = append(commands, ci.command)
 		commands = append(commands, repoCommands.validation...)
@@ -475,8 +476,9 @@ func (s *Service) checkCI(ctx context.Context, sandbox *agent.Sandbox) (string, 
 }
 
 type repoCICommands struct {
-	bootstrap  []string
-	validation []string
+	dependencies []string
+	bootstrap    []string
+	validation   []string
 }
 
 func (s *Service) repoCICommands(ctx context.Context, sandbox *agent.Sandbox) (repoCICommands, error) {
@@ -490,9 +492,15 @@ func (s *Service) repoCICommands(ctx context.Context, sandbox *agent.Sandbox) (r
 		return repoCICommands{}, fmt.Errorf("invalid %s: %w", repoconfig.ConfigPath, err)
 	}
 
+	dependencies, err := repoconfig.InstallCommands(config.Dependencies)
+	if err != nil {
+		return repoCICommands{}, fmt.Errorf("invalid %s: %w", repoconfig.ConfigPath, err)
+	}
+
 	return repoCICommands{
-		bootstrap:  config.Bootstrap.Commands,
-		validation: config.Validation.Commands,
+		dependencies: dependencies,
+		bootstrap:    config.Bootstrap.Commands,
+		validation:   config.Validation.Commands,
 	}, nil
 }
 

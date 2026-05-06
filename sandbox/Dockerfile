@@ -86,23 +86,6 @@ RUN GH_VERSION=$(jq -r '.gh_cli' /tmp/versions.json) && \
 COPY --from=go-builder /usr/local/go /usr/local/go
 ENV PATH="/usr/local/go/bin:${PATH}"
 
-# Install golangci-lint at the version pinned in versions.json. Matches the
-# version used in the main assembled repo's CI so lint results are consistent
-# whether an agent runs locally in a sandbox or in CircleCI.
-COPY sandbox/versions.json /tmp/versions.json
-RUN GOLANGCI_LINT_VERSION=$(jq -r '.golangci_lint' /tmp/versions.json) && \
-    ARCH=$(dpkg --print-architecture) && \
-    case "$ARCH" in \
-        amd64) GCL_ARCH=amd64 ;; \
-        arm64) GCL_ARCH=arm64 ;; \
-        *) echo "unsupported arch: $ARCH" >&2; exit 1 ;; \
-    esac && \
-    curl -fsSL "https://github.com/golangci/golangci-lint/releases/download/v${GOLANGCI_LINT_VERSION}/golangci-lint-${GOLANGCI_LINT_VERSION}-linux-${GCL_ARCH}.tar.gz" -o /tmp/gcl.tgz && \
-    tar -xzf /tmp/gcl.tgz -C /tmp && \
-    install -m 0755 "/tmp/golangci-lint-${GOLANGCI_LINT_VERSION}-linux-${GCL_ARCH}/golangci-lint" /usr/local/bin/golangci-lint && \
-    rm -rf /tmp/gcl.tgz "/tmp/golangci-lint-${GOLANGCI_LINT_VERSION}-linux-${GCL_ARCH}" /tmp/versions.json && \
-    golangci-lint --version
-
 # Install agent CLIs at pinned versions.
 # The npm cache mount avoids re-downloading unchanged packages on rebuilds.
 COPY sandbox/versions.json /tmp/versions.json
@@ -137,4 +120,11 @@ COPY --from=go-builder /bin/143-tools /usr/local/bin/143-tools
 RUN userdel -r ubuntu 2>/dev/null || true \
     && useradd --uid 1000 --create-home --user-group --shell /bin/bash sandbox
 USER sandbox
+
+# Per-repo .143/config.json dependencies install into the sandbox user's
+# ~/.local/bin at session start (no sudo means /usr/local/bin is off-limits at
+# runtime). Keep that directory on PATH so the installed tools are callable
+# from subsequent bootstrap/validation commands.
+ENV PATH="/home/sandbox/.local/bin:${PATH}"
+
 WORKDIR /workspace

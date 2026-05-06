@@ -67,3 +67,52 @@ func TestParse_RejectsBlankCommand(t *testing.T) {
 	require.Error(t, err, "Parse should reject blank repo config commands")
 	require.Contains(t, err.Error(), "validation.commands[0]", "Parse should identify the invalid command path")
 }
+
+func TestParse_AcceptsSupportedDependency(t *testing.T) {
+	t.Parallel()
+
+	cfg, err := Parse([]byte(`{
+		"dependencies": [
+			{"name": "golangci-lint", "version": "2.5.0"}
+		]
+	}`))
+	require.NoError(t, err, "Parse should accept a supported dependency with a version")
+	require.Equal(t, []Dependency{{Name: "golangci-lint", Version: "2.5.0"}}, cfg.Dependencies, "Parse should preserve declared dependencies")
+}
+
+func TestParse_RejectsUnknownDependency(t *testing.T) {
+	t.Parallel()
+
+	_, err := Parse([]byte(`{
+		"dependencies": [
+			{"name": "ruff", "version": "0.6.0"}
+		]
+	}`))
+	require.Error(t, err, "Parse should reject dependencies that are not in the registry")
+	require.Contains(t, err.Error(), `"ruff"`, "Parse should name the offending dependency")
+}
+
+func TestParse_RejectsDependencyMissingVersion(t *testing.T) {
+	t.Parallel()
+
+	_, err := Parse([]byte(`{
+		"dependencies": [
+			{"name": "golangci-lint"}
+		]
+	}`))
+	require.Error(t, err, "Parse should reject dependencies declared without a version")
+	require.Contains(t, err.Error(), "version", "Parse should explain that version is required")
+}
+
+func TestParse_RejectsDuplicateDependency(t *testing.T) {
+	t.Parallel()
+
+	_, err := Parse([]byte(`{
+		"dependencies": [
+			{"name": "golangci-lint", "version": "2.5.0"},
+			{"name": "golangci-lint", "version": "2.4.0"}
+		]
+	}`))
+	require.Error(t, err, "Parse should reject the same dependency declared twice")
+	require.Contains(t, err.Error(), "more than once", "Parse should explain duplicate")
+}
