@@ -70,9 +70,9 @@ func TestBuildIssueApproachPrompt(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name      string
-		fetched   *linear.FetchedIssue
-		mustHave  []string
+		name        string
+		fetched     *linear.FetchedIssue
+		mustHave    []string
 		mustNotHave []string
 	}{
 		{

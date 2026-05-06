@@ -136,7 +136,7 @@ func TestCodingAuthHandlerList(t *testing.T) {
 					AuthType: models.CodingAuthTypeAPIKey,
 					Label:    "Claude backup",
 					Provider: models.ProviderAnthropic,
-					Status:   models.CodingAuthStatusNeverVerified,
+					Status:   models.CodingAuthStatusInvalid,
 				},
 			}, nil
 		},
@@ -155,7 +155,7 @@ func TestCodingAuthHandlerList(t *testing.T) {
 	require.Len(t, resp.Data, 2, "List should return every configured coding auth")
 	require.Equal(t, firstID, resp.Data[0].ID, "List should preserve effective runtime order")
 	require.True(t, resp.Data[0].IsDefault, "List should surface the default row explicitly")
-	require.Equal(t, models.CodingAuthStatusNeverVerified, resp.Data[1].Status, "List should preserve row statuses")
+	require.Equal(t, models.CodingAuthStatusInvalid, resp.Data[1].Status, "List should preserve row statuses")
 }
 
 func TestCodingAuthHandlerList_ErrorAndEmptyCases(t *testing.T) {
@@ -314,7 +314,7 @@ func TestCodingAuthHandlerCreate(t *testing.T) {
 				Agent:    input.Agent,
 				AuthType: input.AuthType,
 				Label:    input.Label,
-				Status:   models.CodingAuthStatusNeverVerified,
+				Status:   models.CodingAuthStatusHealthy,
 			}, nil
 		},
 	}
@@ -359,7 +359,7 @@ func TestCodingAuthHandlerCreate_MergesAgentDefaultsAndDeletesOnFailure(t *testi
 				AuthType: models.CodingAuthTypeAPIKey,
 				Label:    "Amp API key",
 				Provider: models.ProviderAmp,
-				Status:   models.CodingAuthStatusNeverVerified,
+				Status:   models.CodingAuthStatusHealthy,
 			}, nil
 		},
 		deleteFn: func(_ context.Context, gotOrgID uuid.UUID, id uuid.UUID) error {
@@ -430,7 +430,7 @@ func TestCodingAuthHandlerCreate_AgentDefaultsBranches(t *testing.T) {
 					AuthType: input.AuthType,
 					Label:    input.Label,
 					Provider: models.ProviderAmp,
-					Status:   models.CodingAuthStatusNeverVerified,
+					Status:   models.CodingAuthStatusHealthy,
 				}, nil
 			},
 		}

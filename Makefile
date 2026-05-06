@@ -2,7 +2,7 @@
 SANDBOX_STAMP := sandbox/.build-stamp
 SANDBOX_SOURCES := sandbox/Dockerfile sandbox/versions.json
 
-.PHONY: dev dev-ngrok dev-local dev-frontend-only setup test test-race test-coverage test-pr test-coverage-diff test-main migrate-up migrate-down build frontend-dev frontend-lint frontend-typecheck frontend-check lint lint-bootstrap lint-schema lint-stores lint-tenancy hooks-install hooks-uninstall secrets-setup secrets-encrypt secrets-decrypt secrets-edit secrets-rotate provision-app provision-worker provision-db provision-logging provision-redis deploy deploy-app deploy-worker deploy-db deploy-logging deploy-fleet logs logs-query setup-readonly-user db-psql db-query
+.PHONY: dev dev-ngrok dev-local dev-frontend-only setup test test-race test-coverage test-pr test-coverage-diff test-main test-integration migrate-up migrate-down build frontend-dev frontend-lint frontend-typecheck frontend-check lint lint-bootstrap lint-schema lint-stores lint-tenancy hooks-install hooks-uninstall secrets-setup secrets-encrypt secrets-decrypt secrets-edit secrets-rotate provision-app provision-worker provision-db provision-logging provision-redis repair-deploy-sudoers deploy deploy-app deploy-worker deploy-db deploy-logging deploy-fleet logs logs-query setup-readonly-user db-psql db-query
 
 GOLANGCI_LINT_VERSION ?= v2.10.1
 GOLANGCI_LINT_BIN := $(CURDIR)/bin/golangci-lint
@@ -134,11 +134,25 @@ test-main:
 	go test ./internal/... -coverprofile=coverage.out -covermode=atomic -race -timeout=180s
 	go tool cover -func=coverage.out
 
+# Integration tests against a real Postgres. Gated behind the `integration`
+# build tag so `make test` and `go test ./...` stay fast. Reuses DATABASE_URL
+# (the same env CI's backend-test job already exports), so locally:
+#   docker compose up -d postgres && make migrate-up && make test-integration
+test-integration:
+	INTEGRATION_DATABASE_URL=$${INTEGRATION_DATABASE_URL:-$$DATABASE_URL} \
+	go test -tags=integration -timeout=120s ./internal/integration/...
+
 migrate-up:
 	go run cmd/migrate/main.go up
 
 migrate-down:
 	go run cmd/migrate/main.go down
+
+# 65-unified-coding-credentials encrypted-blob post-step. Splits Anthropic
+# subscription rows out of AnthropicConfig into AnthropicSubscriptionConfig.
+# Idempotent; writes a sentinel to coding_credentials_migrations on success.
+migrate-coding-credentials-anthropic-split:
+	go run cmd/migrate-coding-credentials-anthropic-split/main.go
 
 BUILD_SHA ?= $(shell git rev-parse HEAD 2>/dev/null || echo dev)
 LDFLAGS := -X github.com/assembledhq/143/internal/version.BuildSHA=$(BUILD_SHA)
@@ -146,6 +160,7 @@ LDFLAGS := -X github.com/assembledhq/143/internal/version.BuildSHA=$(BUILD_SHA)
 build:
 	go build -ldflags "$(LDFLAGS)" -o bin/server ./cmd/server
 	go build -o bin/migrate ./cmd/migrate
+	go build -o bin/migrate-coding-credentials-anthropic-split ./cmd/migrate-coding-credentials-anthropic-split
 
 frontend-dev:
 	cd frontend && npm run dev
@@ -384,6 +399,17 @@ provision-redis:
 	$(check-ssh-key)
 	./deploy/scripts/provision.sh redis $(HOST) $(SSH_KEY) $(if $(REPROVISION),--reprovision)
 
+# Refresh deploy's narrow sudoers grant on an existing host without tearing
+# down containers. Use when deploy fails on a legacy host with
+# "sudo: a password is required" from a deploy-time helper.
+# Usage:
+#   make repair-deploy-sudoers ROLE=app HOST=87.99.150.138
+repair-deploy-sudoers:
+	@test -n "$(ROLE)" || { echo "ROLE is required. Usage: make repair-deploy-sudoers ROLE=<app|worker|db|logging|redis> HOST=<ip> [SSH_KEY=<path>]"; exit 1; }
+	@test -n "$(HOST)" || { echo "HOST is required. Usage: make repair-deploy-sudoers ROLE=<app|worker|db|logging|redis> HOST=<ip> [SSH_KEY=<path>]"; exit 1; }
+	$(check-ssh-key)
+	bash ./deploy/scripts/repair-deploy-sudoers.sh $(ROLE) $(HOST) $(SSH_KEY)
+
 # Deploy (update) an already-provisioned node.
 # HOST is optional — falls back to the matching role in FLEET_HOSTS from .env.production.enc.
 # SSH_KEY is auto-detected from ~/.ssh/143-deploy but can be overridden.
@@ -429,6 +455,26 @@ deploy-app:
 deploy-worker:
 	$(check-ssh-key)
 	@$(call resolve-host,worker)
+
+# Tail the latest detached worker rollover log on each worker host.
+# Useful after a CI deploy (which runs with WORKER_DEPLOY_DETACH=1) to see
+# whether the rollover finished, or after `make deploy-worker WORKER_DEPLOY_DETACH=1`.
+# Pass FOLLOW=1 to `tail -f` the most recent log instead of dumping the tail.
+deploy-worker-status:
+	$(check-ssh-key)
+	@$(read-fleet-hosts); \
+	HOSTS="$$(echo "$$FLEET" | tr ',' '\n' | grep '^worker:' | cut -d: -f2)"; \
+	if [ -z "$$HOSTS" ]; then \
+		echo "ERROR: no worker host in FLEET_HOSTS"; exit 1; \
+	fi; \
+	for h in $$HOSTS; do \
+		echo "=== worker $$h ==="; \
+		if [ -n "$(FOLLOW)" ]; then \
+			ssh -i $(SSH_KEY) -t deploy@$$h 'f=$$(ls -1t /var/log/143/deploy-worker-*.log 2>/dev/null | head -1); [ -n "$$f" ] && { echo "tailing $$f"; exec tail -f "$$f"; } || echo "no detached deploy logs found"'; \
+		else \
+			ssh -i $(SSH_KEY) deploy@$$h 'ls -1t /var/log/143/deploy-worker-*.log 2>/dev/null | head -3 | while read f; do echo "--- $$f ---"; tail -30 "$$f"; done || echo "no detached deploy logs found"'; \
+		fi; \
+	done
 
 deploy-db:
 	$(check-ssh-key)

@@ -17,6 +17,32 @@ import (
 	"github.com/assembledhq/143/internal/models"
 )
 
+// SessionResumeMode declares how an adapter handles continuation turns. The
+// orchestrator reads this to decide whether to ship a bare follow-up message
+// (and let the agent CLI load its own conversation history) or to embed
+// conversation history in the prompt itself.
+type SessionResumeMode int
+
+const (
+	// ResumeUnsupported: adapter has no headless resume mechanism. Continuation
+	// turns rely on the restored sandbox filesystem state. Adapters in this
+	// mode may set result.AgentSessionID for observability, but the value is
+	// never fed back into the CLI.
+	ResumeUnsupported SessionResumeMode = iota
+
+	// ResumeBySessionID: adapter resumes a specific prior session by ID
+	// captured from that session's stream output. Adapters in this mode MUST:
+	//   1. Set result.AgentSessionID from a stream event during Execute().
+	//   2. When prompt.Continuation && prompt.ResumeSessionID != "", construct
+	//      a deterministic resume command using that ID.
+	//   3. When prompt.Continuation && prompt.ResumeSessionID == "", run a
+	//      fresh exec from prompt.SystemPrompt + prompt.UserPrompt. Adapters
+	//      MUST NOT fall back to non-deterministic flags like --last,
+	//      --continue, or --resume latest, which pick up whatever session
+	//      happens to be newest in the local agent storage.
+	ResumeBySessionID
+)
+
 // AgentAdapter is the contract that all coding agent integrations implement.
 // Each adapter knows how to prepare a prompt and execute a specific agent CLI
 // (e.g., Claude Code, Codex) inside a sandbox.
@@ -31,6 +57,10 @@ type AgentAdapter interface {
 	// Execute runs the agent inside the provided sandbox and streams log
 	// entries to logCh. The channel is closed by the caller after Execute returns.
 	Execute(ctx context.Context, sandbox *Sandbox, prompt *AgentPrompt, logCh chan<- LogEntry) (*AgentResult, error)
+
+	// ResumeMode declares how this adapter handles continuation turns. See
+	// SessionResumeMode for the per-mode contract.
+	ResumeMode() SessionResumeMode
 }
 
 // AgentInput contains everything the agent needs to understand and fix an issue.
@@ -103,6 +133,28 @@ func ParseRevisionContext(raw json.RawMessage) (*RevisionContext, error) {
 	return &parsed, nil
 }
 
+// ResolveConflictsGuidance returns the shared instructions injected into both
+// the system prompt (new-session path) and the continuation user message
+// (resume path) when the repair action is resolve_conflicts. The text warns
+// against the most common failure mode we have observed: agents reporting
+// `git diff` / `git status` numbers taken mid-merge as if they were the PR's
+// net delta, which inflates the apparent change set by the size of the base
+// branch's incoming history.
+func ResolveConflictsGuidance(baseSHA, headSHA string) string {
+	var b strings.Builder
+	b.WriteString("### Conflict resolution guidance\n")
+	b.WriteString("- Bring the base branch into the head branch (merge or rebase). Resolve only the conflicting hunks; do not silently drop this PR's changes and do not revert changes that came in from the base branch.\n")
+	b.WriteString("- While a merge or rebase is in progress, plain `git diff` and `git status` reflect the merge index, not this PR's net delta. Numbers taken from them mid-merge will look enormous (every incoming base-branch change shows up as ours).\n")
+	if baseSHA != "" {
+		b.WriteString(fmt.Sprintf("- After the merge/rebase commit lands, verify the net delta with `git diff %s...HEAD`. That is the only diff worth reporting back; it should be roughly this PR's original changes plus minimal conflict resolution.\n", baseSHA))
+	} else {
+		b.WriteString("- After the merge/rebase commit lands, verify the net delta with `git diff <base_sha>...HEAD` against the base SHA above. That is the only diff worth reporting back; it should be roughly this PR's original changes plus minimal conflict resolution.\n")
+	}
+	b.WriteString("- If the verified net delta is dramatically larger than the original PR (many extra files or thousands of extra lines), stop and investigate before pushing — you have likely captured incoming base-branch history into this branch incorrectly.\n")
+	b.WriteString("- Push only after the working tree is clean and the verified net delta looks right.")
+	return b.String()
+}
+
 func FormatRevisionContextForContinuation(ctx *RevisionContext) string {
 	if ctx == nil {
 		return ""
@@ -138,6 +190,10 @@ func FormatRevisionContextForContinuation(ctx *RevisionContext) string {
 		b.WriteString(fmt.Sprintf("Head SHA: `%s`\n", ctx.RepairContext.HeadSHA))
 		b.WriteString(fmt.Sprintf("Base SHA: `%s`\n", ctx.RepairContext.BaseSHA))
 		b.WriteString(fmt.Sprintf("Merge state: `%s`\n\n", ctx.RepairContext.MergeState))
+		if ctx.RepairAction == models.PullRequestRepairActionTypeResolveConflicts {
+			b.WriteString(ResolveConflictsGuidance(ctx.RepairContext.BaseSHA, ctx.RepairContext.HeadSHA))
+			b.WriteString("\n\n")
+		}
 		if len(ctx.RepairContext.FailingChecks) > 0 {
 			b.WriteString("Failing checks:\n")
 			for _, check := range ctx.RepairContext.FailingChecks {

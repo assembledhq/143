@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useQueryState } from "nuqs";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
@@ -28,7 +28,17 @@ import {
   MessageSquare,
   Paperclip,
   Pencil,
+  Plus,
 } from "lucide-react";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import { LinearIcon } from "@/components/linear-icon";
+import { looksLikeLinearRef } from "@/lib/linear-refs";
+import { getClipboardFiles } from "@/lib/clipboard-files";
 import { notify as toast } from "@/lib/notify";
 import { Badge } from "@/components/ui/badge";
 import { MarkdownContent } from "@/components/markdown";
@@ -49,6 +59,14 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from "@/components/ui/table";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import {
   Select,
   SelectContent,
   SelectItem,
@@ -59,9 +77,11 @@ import {
   Sheet,
   SheetContent,
   SheetDescription,
+  SheetHeader,
   SheetTitle,
 } from "@/components/ui/sheet";
 import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { ChatTimeline } from "@/components/chat-timeline";
 import { SessionComposerTriggerPicker, flattenGroups, type TriggerPickerGroup, type TriggerPickerPosition } from "@/components/session-composer-trigger-picker";
@@ -78,7 +98,7 @@ import {
 } from "@/lib/session-composer-mentions";
 import { queryKeys } from "@/lib/query-keys";
 import { api, ApiError } from "@/lib/api";
-import { AGENTS, AGENTS_BY_KEY } from "@/lib/agents";
+import { AGENTS, AGENTS_BY_KEY, agentDisplayLabel } from "@/lib/agents";
 import { getActiveOrgId } from "@/lib/active-org";
 import { maybeNotifySessionCompleted } from "@/lib/browser-notifications";
 import {
@@ -87,7 +107,7 @@ import {
   buildPullRequestStreamURL,
   buildSessionLogsStreamURL,
 } from "@/lib/sse";
-import { buildTimeline, buildTimelineFromResponse } from "@/lib/timeline";
+import { applyPlanModePrefix, buildTimeline, flattenTimelineResponse, sortTimelineEntries } from "@/lib/timeline";
 import { parseDiffStats, type DiffFile } from "@/lib/diff-parser";
 import { formatReviewMessage } from "@/lib/format-review-message";
 import {
@@ -95,10 +115,16 @@ import {
   resolveInitialSessionAnchor,
   writeStoredSessionScrollPosition,
 } from "@/lib/session-open-position";
-import type { ListResponse, Session, SessionDetail, SessionInputCommand, SessionInputReference, SessionLog, SessionMessage, SessionReviewComment, User, Validation, CodexAuthStatus, PullRequestHealthResponse, SingleResponse } from "@/lib/types";
+import type { ListResponse, Session, SessionDetail, SessionInputCommand, SessionInputReference, SessionLog, SessionMessage, SessionReviewComment, SessionThread, SessionThreadFileEvent, SessionTimelineEntry, User, Validation, CodexAuthStatus, PullRequestHealthResponse, SingleResponse } from "@/lib/types";
+import { AgentTabStrip, computeThreadOverlap } from "./agent-tab-strip";
+import {
+  ThreadAttributionFilter,
+  useAttributionAllowedPaths,
+  type ThreadAttributionFilterValue,
+} from "./thread-attribution-filter";
 import { AuditLogTrigger } from "@/components/audit/audit-log-trigger";
 import { ResizeHandle } from "@/components/resize-handle";
-import { DiffStatsBadge, FileTree, SessionFooter, CommentsSummary, ReviewDiffView, PassSelector, type DiffPassEntry, type PassRange } from "@/components/code-review";
+import { DiffStatsBadge, FileTree, CommentsSummary, ReviewDiffView, PassSelector, type DiffPassEntry, type PassRange } from "@/components/code-review";
 import { LinkedIssueChips } from "./linked-issue-chips";
 import { useReviewComments } from "@/hooks/use-review-comments";
 import { useDiffViewState } from "@/hooks/use-diff-view-state";
@@ -109,9 +135,10 @@ import { PendingAttachmentStrip } from "@/components/pending-attachment-strip";
 import { PRHealthBanner } from "@/components/pr-health-banner";
 import { MobileBackButton } from "@/components/mobile-back-button";
 import { useAuth } from "@/hooks/use-auth";
+import { useMediaQuery } from "@/hooks/use-media-query";
 import { prMergedAccent } from "@/lib/pr-status-styles";
 import { cn, sessionTitle, formatTimeAgo } from "@/lib/utils";
-import { activeSet } from "@/lib/session-status-groups";
+import { activeSet, workingStatusesSet } from "@/lib/session-status-groups";
 
 const PREVIEW_ORIGIN_TEMPLATE =
   process.env.NEXT_PUBLIC_PREVIEW_ORIGIN_TEMPLATE ||
@@ -122,10 +149,14 @@ const PR_ERROR_TOAST_DURATION_MS = 10_000;
 const PR_ERROR_TOAST_MESSAGE = "PR creation failed";
 const MAX_RESOLVE_REVIEW_COMMENTS_PER_MESSAGE = 50;
 
+type PendingFollowUpMessage = SessionMessage & {
+  client_id: number;
+};
+
 const statusConfig: Record<string, { color: string; label: string }> = {
   pending: { color: "bg-muted text-muted-foreground", label: "Pending" },
   running: { color: "bg-primary/10 text-primary", label: "Running" },
-  idle: { color: "bg-sky-50 text-sky-700 dark:bg-sky-950/30 dark:text-sky-400", label: "Idle" },
+  idle: { color: "bg-primary/10 text-primary", label: "Idle" },
   awaiting_input: { color: "bg-amber-50 text-amber-700 dark:bg-amber-950/30 dark:text-amber-400", label: "Awaiting input" },
   needs_human_guidance: { color: "bg-orange-50 text-orange-700 dark:bg-orange-950/30 dark:text-orange-400", label: "Needs guidance" },
   completed: { color: "bg-emerald-50 text-emerald-700 dark:bg-emerald-950/30 dark:text-emerald-400", label: "Completed" },
@@ -174,6 +205,11 @@ function checkResultBadge(result: string | null) {
   return <Badge variant="secondary" className="text-xs">{result}</Badge>;
 }
 
+// AgentThreadTabs lived here in Phase 1. The replacement now lives in
+// agent-tab-strip.tsx (AgentTabStrip) and adds overlap badges, tab actions,
+// and cost surfacing. Status helpers moved with it; the statusConfig table
+// is still owned by this file and passed in as a prop.
+
 // ---------------------------------------------------------------------------
 // Detail panel tabs (shown in right sidebar)
 // ---------------------------------------------------------------------------
@@ -205,6 +241,41 @@ type PRActionErrorState = {
 const terminalSessionStatuses = new Set(["completed", "pr_created", "failed", "cancelled", "skipped"]);
 const SNAPSHOT_EXPIRED_PR_MESSAGE =
   "This session snapshot expired before a PR could be created. Send a new message to rebuild the sandbox, then create the PR again.";
+
+function mergePendingMessages(
+  baseMessages: SessionMessage[],
+  pendingMessages: SessionMessage[],
+): SessionMessage[] {
+  if (pendingMessages.length === 0) {
+    return baseMessages;
+  }
+
+  const merged = [...baseMessages];
+  const seenIDs = new Set(baseMessages.map((message) => message.id));
+  const seenKeys = new Set(baseMessages.map(messageReconciliationKey));
+  for (const message of pendingMessages) {
+    if (seenIDs.has(message.id) || seenKeys.has(messageReconciliationKey(message))) {
+      continue;
+    }
+    merged.push(message);
+    seenIDs.add(message.id);
+    seenKeys.add(messageReconciliationKey(message));
+  }
+  return merged;
+}
+
+function messageReconciliationKey(message: SessionMessage): string {
+  return JSON.stringify({
+    session_id: message.session_id,
+    thread_id: message.thread_id ?? null,
+    turn_number: message.turn_number,
+    role: message.role,
+    content: message.content,
+    attachments: message.attachments ?? [],
+    references: message.references ?? [],
+    commands: message.commands ?? [],
+  });
+}
 const SNAPSHOT_NOT_CAPTURED_PR_MESSAGE =
   "This session finished without saving a reusable checkpoint for PR creation. Send a new message to rebuild the sandbox, then create the PR again.";
 const SNAPSHOT_UNAVAILABLE_PR_MESSAGE =
@@ -286,8 +357,8 @@ function OverviewTab({ session, members }: { session: Session; members: User[] }
   const isCodexAuthFailure = session.failure_category === FAILURE_CATEGORY_CODEX_AUTH;
 
   const { data: codexAuthResponse } = useQuery<SingleResponse<CodexAuthStatus>>({
-    queryKey: ["codex-auth-status"],
-    queryFn: () => api.codexAuth.status(),
+    queryKey: ["codex-auth-status", "personal"],
+    queryFn: () => api.codexAuth.status(undefined, "personal"),
     enabled: isCodexAuthFailure,
   });
   const isCodexAuthenticated = codexAuthResponse?.data?.status === "completed";
@@ -391,6 +462,7 @@ function OverviewTab({ session, members }: { session: Session; members: User[] }
       )}
       {showDeviceCodeModal && (
         <CodexDeviceCodeModal
+          scope="personal"
           onClose={() => setShowDeviceCodeModal(false)}
           onConnected={() => {
             setShowDeviceCodeModal(false);
@@ -575,6 +647,10 @@ function ChangesTab({
   passRange,
   onPassRangeChange,
   emptyStatusText,
+  isMobile,
+  threads,
+  attributionFilter,
+  onAttributionFilterChange,
 }: {
   filteredFiles: DiffFile[];
   activeFileIndex: number;
@@ -586,6 +662,10 @@ function ChangesTab({
   passRange: PassRange | null;
   onPassRangeChange: (range: PassRange | null) => void;
   emptyStatusText: string;
+  isMobile: boolean;
+  threads: SessionThread[];
+  attributionFilter: ThreadAttributionFilterValue;
+  onAttributionFilterChange: (next: ThreadAttributionFilterValue) => void;
 }) {
   const hasDiff = filteredFiles.length > 0;
 
@@ -610,6 +690,20 @@ function ChangesTab({
         </div>
       )}
 
+      {/* Tab attribution filter — visible only when the session has more
+          than one tab. Lets the user scope the diff to one tab's outputs,
+          the overlap, or unattributed paths. */}
+      {threads.length > 1 && (
+        <div className="flex items-center justify-end gap-2 px-4 py-2 border-b border-border">
+          <span className="text-xs text-muted-foreground">Filter by tab:</span>
+          <ThreadAttributionFilter
+            threads={threads}
+            value={attributionFilter}
+            onChange={onAttributionFilterChange}
+          />
+        </div>
+      )}
+
       {/* Comments summary */}
       {comments.length > 0 && (
         <CommentsSummary
@@ -621,23 +715,23 @@ function ChangesTab({
       {/* Main content: file tree or empty state */}
       {hasDiff ? (
         <div className="flex flex-col flex-1 min-h-0">
-          {/* Review all button */}
-          <div className="px-4 py-3">
-            <button
-              onClick={() => onOpenReview()}
-              className="w-full flex items-center justify-center gap-2 px-3 py-2 rounded-md border border-border bg-background text-xs font-medium text-foreground hover:bg-muted/50 transition-colors"
-            >
-              <FileCode2 className="h-3.5 w-3.5" />
-              Review {filteredFiles.length} {filteredFiles.length === 1 ? "file" : "files"}
-            </button>
-          </div>
-
-          {/* File tree — always visible, it's the sidebar's purpose */}
+          {!isMobile ? (
+            <div className="px-4 py-3">
+              <button
+                onClick={() => onOpenReview()}
+                className="w-full flex items-center justify-center gap-2 px-3 py-2 rounded-md border border-border bg-background text-xs font-medium text-foreground hover:bg-muted/50 transition-colors"
+              >
+                <FileCode2 className="h-3.5 w-3.5" />
+                Review {filteredFiles.length} {filteredFiles.length === 1 ? "file" : "files"}
+              </button>
+            </div>
+          ) : null}
           <div className="flex-1 overflow-hidden">
             <FileTree
               files={filteredFiles}
               activeFileIndex={activeFileIndex}
               onFileSelect={handleFileClick}
+              variant={isMobile ? "sheet" : "sidebar"}
             />
           </div>
         </div>
@@ -672,6 +766,7 @@ function SessionComposer({
   attachments,
   isUploading,
   onUpload,
+  onPasteFiles,
   onRemoveAttachment,
   openComments,
   availableModels,
@@ -694,6 +789,7 @@ function SessionComposer({
   repositoryId,
   branch,
   agentType,
+  targetLabel,
 }: {
   message: string;
   onMessageChange: (value: string) => void;
@@ -704,6 +800,7 @@ function SessionComposer({
   attachments: string[];
   isUploading: boolean;
   onUpload: (event: React.ChangeEvent<HTMLInputElement>) => void;
+  onPasteFiles: (files: File[]) => Promise<void>;
   onRemoveAttachment: (url: string) => void;
   openComments: SessionReviewComment[];
   availableModels: readonly string[];
@@ -726,20 +823,83 @@ function SessionComposer({
   repositoryId?: string;
   branch?: string;
   agentType: string;
+  targetLabel?: string;
 }) {
+  const isMobile = useMediaQuery("(max-width: 767px)");
+  const [isTextareaFocused, setIsTextareaFocused] = useState(false);
+  const mobileComposerExpanded = !isMobile
+    || isTextareaFocused
+    || message.length > 0
+    || attachments.length > 0
+    || openComments.length > 0
+    || references.length > 0
+    || commands.length > 0;
+
   useEffect(() => {
     const el = textareaRef.current;
     if (!el) return;
+    if (!mobileComposerExpanded) {
+      el.style.height = "44px";
+      return;
+    }
     el.style.height = "auto";
     el.style.height = `${Math.min(el.scrollHeight, 200)}px`;
-  }, [message, textareaRef]);
+  }, [message, textareaRef, mobileComposerExpanded]);
 
   const composerCardRef = useRef<HTMLDivElement>(null);
   const composerInputSurfaceRef = useRef<HTMLDivElement>(null);
+  const linearInputRef = useRef<HTMLInputElement>(null);
   const [caretPosition, setCaretPosition] = useState(message.length);
   const [selectedTriggerIndex, setSelectedTriggerIndex] = useState(0);
   const [triggerDismissed, setTriggerDismissed] = useState(false);
   const [pickerPosition, setPickerPosition] = useState<TriggerPickerPosition | null>(null);
+  const [mobileSettingsOpen, setMobileSettingsOpen] = useState(false);
+  const [showLinearInput, setShowLinearInput] = useState(false);
+  const [linearInput, setLinearInput] = useState("");
+  const [linearInputError, setLinearInputError] = useState<string | null>(null);
+
+  // Focus the Linear input the render after it mounts. Using a layout
+  // effect (rather than the previous requestAnimationFrame inside the menu
+  // item's onClick) guarantees the input is in the DOM before we focus —
+  // the rAF version raced React's commit and silently dropped focus on the
+  // first open in tight render budgets.
+  useEffect(() => {
+    if (showLinearInput) {
+      linearInputRef.current?.focus();
+    }
+  }, [showLinearInput]);
+
+  function addLinearLink() {
+    const trimmed = linearInput.trim();
+    if (!trimmed) {
+      return;
+    }
+    if (!looksLikeLinearRef(trimmed)) {
+      // Block obvious garbage at submit time. The backend re-validates with
+      // the org's team-key allowlist; this is a UX hint, not a security
+      // boundary, so the regex matches detect.go's lax shape and we leave
+      // the input open so the user can correct it.
+      setLinearInputError("Enter a Linear URL (https://linear.app/...) or key like ACS-1234");
+      return;
+    }
+    // Append the trimmed ref to the message body. SendMessage hands the body
+    // to ResolveAndLinkMidSession which scans it for Linear refs and creates
+    // the session_issue_link row asynchronously, so plain-text append is
+    // exactly what the backend expects.
+    const next = message.length === 0
+      ? trimmed
+      : `${message}${message.endsWith(" ") || message.endsWith("\n") ? "" : " "}${trimmed}`;
+    onMessageChange(next);
+    setLinearInput("");
+    setLinearInputError(null);
+    setShowLinearInput(false);
+    requestAnimationFrame(() => {
+      const el = textareaRef.current;
+      if (!el) return;
+      el.focus();
+      el.setSelectionRange(next.length, next.length);
+    });
+  }
 
   const activeTrigger = useMemo(
     () => findActiveTrigger(message, caretPosition, COMPOSER_TRIGGER_SPECS),
@@ -962,6 +1122,21 @@ function SessionComposer({
     }
   }
 
+  async function handlePaste(event: React.ClipboardEvent<HTMLTextAreaElement>) {
+    const files = getClipboardFiles(event.clipboardData);
+    if (files.length === 0) {
+      return;
+    }
+
+    event.preventDefault();
+    await onPasteFiles(files);
+    requestAnimationFrame(() => {
+      const el = textareaRef.current;
+      if (!el) return;
+      el.focus();
+    });
+  }
+
   const firstError = uploadError || sendError;
   const errorMessage = typeof firstError === "string"
     ? firstError
@@ -970,6 +1145,57 @@ function SessionComposer({
       : firstError
         ? "An error occurred"
         : null;
+  const modelSummary = selectedModel || "Default model";
+  const modeSummary = isClaudeCode && canSendMessage ? (planMode ? "Plan mode" : "Chat mode") : null;
+  const commentSummary = openComments.length > 0
+    ? `${openComments.length} comment${openComments.length > 1 ? "s" : ""} attached`
+    : null;
+
+  const settingsControls = (
+    <div className="space-y-4">
+      {availableModels.length > 0 && (
+        <div className="space-y-2">
+          <Label className="text-xs uppercase tracking-[0.14em] text-muted-foreground">Model</Label>
+          <Select value={selectedModel} onValueChange={onSelectedModelChange}>
+            <SelectTrigger className="h-11 rounded-xl border-border/70 bg-background text-sm" aria-label="Model override">
+              <SelectValue placeholder="Default model" />
+            </SelectTrigger>
+            <SelectContent>
+              {availableModels.map((model) => (
+                <SelectItem key={model} value={model}>
+                  {model}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+      )}
+
+      {isClaudeCode && canSendMessage && (
+        <div className="space-y-2">
+          <Label className="text-xs uppercase tracking-[0.14em] text-muted-foreground">Mode</Label>
+          <div className="grid grid-cols-2 gap-2">
+            <Button
+              type="button"
+              variant={planMode ? "outline" : "default"}
+              className="h-10 rounded-xl"
+              onClick={() => onPlanModeChange(false)}
+            >
+              Chat
+            </Button>
+            <Button
+              type="button"
+              variant={planMode ? "default" : "outline"}
+              className="h-10 rounded-xl"
+              onClick={() => onPlanModeChange(true)}
+            >
+              Plan
+            </Button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
 
   return (
     <>
@@ -1055,7 +1281,10 @@ function SessionComposer({
             ref={textareaRef}
             value={message}
             onChange={(e) => handleMessageChange(e.target.value, e.target.selectionStart ?? e.target.value.length)}
+            onPaste={handlePaste}
             onKeyDown={handleKeyDown}
+            onFocus={() => setIsTextareaFocused(true)}
+            onBlur={() => setIsTextareaFocused(false)}
             onClick={(e) => setCaretPosition(e.currentTarget.selectionStart ?? message.length)}
             onKeyUp={(e) => setCaretPosition(e.currentTarget.selectionStart ?? message.length)}
             onSelect={(e) => setCaretPosition(e.currentTarget.selectionStart ?? message.length)}
@@ -1066,10 +1295,21 @@ function SessionComposer({
                   ? "Session is not active"
                   : planMode
                     ? "Describe what you want to plan..."
-                    : "Send a follow-up message..."
+                    : targetLabel
+                      ? `Send a message to ${targetLabel}...`
+                      : "Send a follow-up message..."
             }
             disabled={!canSendMessage || sendPending}
-            className="min-h-[44px] max-h-[200px] resize-none border-none bg-transparent shadow-none focus-visible:ring-0"
+            rows={isMobile ? 1 : undefined}
+            data-mobile-composer-state={isMobile ? (mobileComposerExpanded ? "expanded" : "collapsed") : undefined}
+            className={cn(
+              "max-h-[200px] resize-none border-none bg-transparent shadow-none focus-visible:ring-0",
+              isMobile
+                ? mobileComposerExpanded
+                  ? "min-h-[96px]"
+                  : "min-h-[44px] overflow-hidden"
+                : "min-h-[44px]",
+            )}
           />
 
           {(references.length > 0 || commands.length > 0) && (
@@ -1137,20 +1377,242 @@ function SessionComposer({
             className="px-3 pb-2"
           />
 
-          <div className="flex items-center gap-1 px-2 pb-2">
-            <DisabledTooltip disabled={!canSendMessage || isUploading} content={attachDisabledReason}>
-              <Button
-                type="button"
-                size="icon"
-                variant="ghost"
-                className="h-8 w-8 shrink-0 rounded-lg text-muted-foreground hover:text-foreground"
-                title="Attach files or images"
-                disabled={!canSendMessage || isUploading}
-                onClick={() => uploadInputRef.current?.click()}
-              >
-                {isUploading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Paperclip className="h-4 w-4" />}
-              </Button>
-            </DisabledTooltip>
+          {showLinearInput && (
+            <div className="flex flex-col gap-1 px-3 pb-2">
+              <div className="flex items-center gap-2">
+                <LinearIcon className="h-4 w-4 shrink-0 text-muted-foreground" />
+                <Input
+                  ref={linearInputRef}
+                  value={linearInput}
+                  onChange={(event) => {
+                    setLinearInput(event.target.value);
+                    if (linearInputError) {
+                      setLinearInputError(null);
+                    }
+                  }}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") {
+                      event.preventDefault();
+                      addLinearLink();
+                    } else if (event.key === "Escape") {
+                      event.preventDefault();
+                      setLinearInput("");
+                      setLinearInputError(null);
+                      setShowLinearInput(false);
+                    }
+                  }}
+                  placeholder="ACS-1234 or https://linear.app/acme/issue/ACS-1234"
+                  aria-label="Linear issue id or URL"
+                  aria-invalid={linearInputError ? true : undefined}
+                  className="h-8"
+                />
+                <Button type="button" variant="outline" size="sm" onClick={addLinearLink}>
+                  Add
+                </Button>
+              </div>
+              {linearInputError && (
+                <p role="alert" className="pl-6 text-xs text-destructive">{linearInputError}</p>
+              )}
+            </div>
+          )}
+
+          <div className="px-2 pb-2">
+            {isMobile ? (
+              <>
+                <div className="flex items-center gap-2">
+                  <DisabledTooltip disabled={!canSendMessage} content={attachDisabledReason}>
+                    <DropdownMenu>
+                      <DropdownMenuTrigger asChild>
+                        <Button
+                          type="button"
+                          size="icon"
+                          variant="ghost"
+                          className="h-8 w-8 shrink-0 rounded-lg text-muted-foreground hover:text-foreground"
+                          title="Add files, photos, or a Linear issue"
+                          aria-label="Add files, photos, or a Linear issue"
+                          disabled={!canSendMessage}
+                        >
+                          {isUploading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4" />}
+                        </Button>
+                      </DropdownMenuTrigger>
+                      <DropdownMenuContent align="start">
+                        <DropdownMenuItem
+                          disabled={isUploading}
+                          onClick={() => uploadInputRef.current?.click()}
+                        >
+                          <Paperclip className="mr-2 h-4 w-4" />
+                          Upload files or photos
+                        </DropdownMenuItem>
+                        <DropdownMenuItem onClick={() => setShowLinearInput(true)}>
+                          <LinearIcon className="mr-2 h-4 w-4" />
+                          Link Linear issue
+                        </DropdownMenuItem>
+                      </DropdownMenuContent>
+                    </DropdownMenu>
+                  </DisabledTooltip>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    aria-label="Session settings"
+                    className="h-8 rounded-full border border-border/60 bg-background/70 px-3 text-xs text-foreground shadow-sm hover:bg-background"
+                    onClick={() => setMobileSettingsOpen(true)}
+                  >
+                    <ClipboardList className="mr-1.5 h-3.5 w-3.5" />
+                    Settings
+                  </Button>
+                  <div className="ml-auto flex items-center gap-1">
+                    {isRunning && (
+                      <DisabledTooltip disabled={cancelPending} content={cancelDisabledReason}>
+                        <Button
+                          size="icon"
+                          variant="outline"
+                          className="h-8 w-8 shrink-0 rounded-lg"
+                          title="Cancel session"
+                          disabled={cancelPending}
+                          onClick={onCancelSession}
+                        >
+                          <Square className="h-3 w-3" />
+                        </Button>
+                      </DisabledTooltip>
+                    )}
+                    <DisabledTooltip disabled={sendDisabled} content={sendDisabledReason}>
+                      <Button
+                        size="icon"
+                        variant={planMode ? "outline" : "default"}
+                        className={cn("h-8 w-8 shrink-0 rounded-lg", planMode && "border-amber-300 dark:border-amber-700 text-amber-700 dark:text-amber-400 hover:bg-amber-50 dark:hover:bg-amber-950/30")}
+                        title={planMode ? "Send plan request" : "Send message"}
+                        disabled={sendDisabled}
+                        onClick={onSend}
+                      >
+                        {sendPending ? (
+                          <Loader2 className="h-4 w-4 animate-spin" />
+                        ) : planMode ? (
+                          <ClipboardList className="h-4 w-4" />
+                        ) : (
+                          <ArrowUp className="h-4 w-4" />
+                        )}
+                      </Button>
+                    </DisabledTooltip>
+                  </div>
+                </div>
+                <div className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
+                  <span className="font-medium text-foreground">{modelSummary}</span>
+                  {modeSummary ? (
+                    <>
+                      <span aria-hidden="true">•</span>
+                      <span>{modeSummary}</span>
+                    </>
+                  ) : null}
+                  {commentSummary ? (
+                    <>
+                      <span aria-hidden="true">•</span>
+                      <span>{commentSummary}</span>
+                    </>
+                  ) : null}
+                </div>
+              </>
+            ) : (
+              <div className="flex items-center gap-1">
+                <DisabledTooltip disabled={!canSendMessage} content={attachDisabledReason}>
+                  <DropdownMenu>
+                    <DropdownMenuTrigger asChild>
+                      <Button
+                        type="button"
+                        size="icon"
+                        variant="ghost"
+                        className="h-8 w-8 shrink-0 rounded-lg text-muted-foreground hover:text-foreground"
+                        title="Add files, photos, or a Linear issue"
+                        aria-label="Add files, photos, or a Linear issue"
+                        disabled={!canSendMessage}
+                      >
+                        {isUploading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4" />}
+                      </Button>
+                    </DropdownMenuTrigger>
+                    <DropdownMenuContent align="start">
+                      <DropdownMenuItem
+                        disabled={isUploading}
+                        onClick={() => uploadInputRef.current?.click()}
+                      >
+                        <Paperclip className="mr-2 h-4 w-4" />
+                        Upload files or photos
+                      </DropdownMenuItem>
+                      <DropdownMenuItem onClick={() => setShowLinearInput(true)}>
+                        <LinearIcon className="mr-2 h-4 w-4" />
+                        Link Linear issue
+                      </DropdownMenuItem>
+                    </DropdownMenuContent>
+                  </DropdownMenu>
+                </DisabledTooltip>
+
+                {availableModels.length > 0 && (
+                  <Select value={selectedModel} onValueChange={onSelectedModelChange}>
+                    <SelectTrigger className="h-8 w-auto gap-1.5 border-none bg-transparent px-2 text-xs text-muted-foreground shadow-none hover:text-foreground focus:ring-0" aria-label="Model override">
+                      <SelectValue placeholder="Default model" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {availableModels.map((model) => (
+                        <SelectItem key={model} value={model}>
+                          {model}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                )}
+
+                {isClaudeCode && canSendMessage && !planMode && (
+                  <button
+                    onClick={() => onPlanModeChange(true)}
+                    className="flex items-center gap-1 h-8 px-2 text-xs text-muted-foreground hover:text-foreground transition-colors rounded-md"
+                    title="Switch to plan mode (Shift+Tab)"
+                  >
+                    <ClipboardList className="h-3.5 w-3.5" />
+                    <span>Plan</span>
+                  </button>
+                )}
+
+                {openComments.length > 0 && (
+                  <span className="text-xs text-muted-foreground">
+                    {openComments.length} comment{openComments.length > 1 ? "s" : ""} attached
+                  </span>
+                )}
+
+                <div className="ml-auto flex items-center gap-1">
+                  {isRunning && (
+                    <DisabledTooltip disabled={cancelPending} content={cancelDisabledReason}>
+                      <Button
+                        size="icon"
+                        variant="outline"
+                        className="h-8 w-8 shrink-0 rounded-lg"
+                        title="Cancel session"
+                        disabled={cancelPending}
+                        onClick={onCancelSession}
+                      >
+                        <Square className="h-3 w-3" />
+                      </Button>
+                    </DisabledTooltip>
+                  )}
+                  <DisabledTooltip disabled={sendDisabled} content={sendDisabledReason}>
+                    <Button
+                      size="icon"
+                      variant={planMode ? "outline" : "default"}
+                      className={cn("h-8 w-8 shrink-0 rounded-lg", planMode && "border-amber-300 dark:border-amber-700 text-amber-700 dark:text-amber-400 hover:bg-amber-50 dark:hover:bg-amber-950/30")}
+                      title={planMode ? "Send plan request" : "Send message"}
+                      disabled={sendDisabled}
+                      onClick={onSend}
+                    >
+                      {sendPending ? (
+                        <Loader2 className="h-4 w-4 animate-spin" />
+                      ) : planMode ? (
+                        <ClipboardList className="h-4 w-4" />
+                      ) : (
+                        <ArrowUp className="h-4 w-4" />
+                      )}
+                    </Button>
+                  </DisabledTooltip>
+                </div>
+              </div>
+            )}
             <input
               ref={uploadInputRef}
               type="file"
@@ -1159,76 +1621,26 @@ function SessionComposer({
               className="hidden"
               onChange={onUpload}
             />
-
-            {availableModels.length > 0 && (
-              <Select value={selectedModel} onValueChange={onSelectedModelChange}>
-                <SelectTrigger className="h-8 w-auto gap-1.5 border-none bg-transparent px-2 text-xs text-muted-foreground shadow-none hover:text-foreground focus:ring-0" aria-label="Model override">
-                  <SelectValue placeholder="Default model" />
-                </SelectTrigger>
-                <SelectContent>
-                  {availableModels.map((model) => (
-                    <SelectItem key={model} value={model}>
-                      {model}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            )}
-
-            {isClaudeCode && canSendMessage && !planMode && (
-              <button
-                onClick={() => onPlanModeChange(true)}
-                className="flex items-center gap-1 h-8 px-2 text-xs text-muted-foreground hover:text-foreground transition-colors rounded-md"
-                title="Switch to plan mode (Shift+Tab)"
-              >
-                <ClipboardList className="h-3.5 w-3.5" />
-                <span>Plan</span>
-              </button>
-            )}
-
-            {openComments.length > 0 && (
-              <span className="text-xs text-muted-foreground">
-                {openComments.length} comment{openComments.length > 1 ? "s" : ""} attached
-              </span>
-            )}
-
-            <div className="ml-auto flex items-center gap-1">
-              {isRunning && (
-                <DisabledTooltip disabled={cancelPending} content={cancelDisabledReason}>
-                  <Button
-                    size="icon"
-                    variant="outline"
-                    className="h-8 w-8 shrink-0 rounded-lg"
-                    title="Cancel session"
-                    disabled={cancelPending}
-                    onClick={onCancelSession}
-                  >
-                    <Square className="h-3 w-3" />
-                  </Button>
-                </DisabledTooltip>
-              )}
-              <DisabledTooltip disabled={sendDisabled} content={sendDisabledReason}>
-                <Button
-                  size="icon"
-                  variant={planMode ? "outline" : "default"}
-                  className={cn("h-8 w-8 shrink-0 rounded-lg", planMode && "border-amber-300 dark:border-amber-700 text-amber-700 dark:text-amber-400 hover:bg-amber-50 dark:hover:bg-amber-950/30")}
-                  title={planMode ? "Send plan request" : "Send message"}
-                  disabled={sendDisabled}
-                  onClick={onSend}
-                >
-                  {sendPending ? (
-                    <Loader2 className="h-4 w-4 animate-spin" />
-                  ) : planMode ? (
-                    <ClipboardList className="h-4 w-4" />
-                  ) : (
-                    <ArrowUp className="h-4 w-4" />
-                  )}
-                </Button>
-              </DisabledTooltip>
-            </div>
           </div>
         </div>
       </div>
+
+      <Sheet open={isMobile && mobileSettingsOpen} onOpenChange={setMobileSettingsOpen}>
+        <SheetContent
+          side="bottom"
+          hideCloseButton
+          className="rounded-t-[1.75rem] border-border/70 px-4 pb-6 pt-5 sm:max-w-none"
+        >
+          <SheetHeader className="mb-4">
+            <SheetTitle className="text-base">Session settings</SheetTitle>
+            <SheetDescription>Adjust the follow-up model and mode without crowding the mobile composer.</SheetDescription>
+          </SheetHeader>
+          {settingsControls}
+          <Button type="button" className="mt-5 h-11 w-full rounded-xl" onClick={() => setMobileSettingsOpen(false)}>
+            Done
+          </Button>
+        </SheetContent>
+      </Sheet>
     </>
   );
 }
@@ -1289,23 +1701,29 @@ function SessionTimelineSkeleton() {
   );
 }
 
-function ChatPanel({
-  session,
-  sessionId,
-  isActive,
-  onDiffClick,
-  onApprovePlan,
-  onAdjustPlan,
-  onRegisterScrollToLiveEdge,
-}: {
+type ChatPanelProps = {
   session: Session;
   sessionId: string;
+  activeThread?: SessionThread;
   isActive: boolean;
+  optimisticMessages: SessionMessage[];
   onDiffClick?: () => void;
   onApprovePlan?: () => void;
   onAdjustPlan?: () => void;
   onRegisterScrollToLiveEdge?: (scrollToLiveEdge: (() => void) | null) => void;
-}) {
+};
+
+function ChatPanel({
+  session,
+  sessionId,
+  activeThread,
+  isActive,
+  optimisticMessages,
+  onDiffClick,
+  onApprovePlan,
+  onAdjustPlan,
+  onRegisterScrollToLiveEdge,
+}: ChatPanelProps) {
   const queryClient = useQueryClient();
   const { user } = useAuth();
   const [streamedLogs, setStreamedLogs] = useState<SessionLog[]>([]);
@@ -1323,14 +1741,30 @@ function ChatPanel({
     [user],
   );
 
-  const isRunning = session.status === "running";
+  const activeThreadId = activeThread?.id;
+  const isRunning = activeThread ? activeThread.status === "running" : session.status === "running";
   const isSnapshotExpired = session.sandbox_state === "destroyed";
   const canSendMessage = session.status !== "skipped" && session.status !== "pending" && !isSnapshotExpired;
 
   const timelineQuery = useQuery({
     queryKey: ["session", sessionId, "timeline"],
     queryFn: () => api.sessions.getTimeline(sessionId),
-    refetchInterval: isActive ? 3000 : false,
+    enabled: !activeThreadId,
+    refetchInterval: isActive && !activeThreadId ? 3000 : false,
+  });
+
+  const threadMessagesQuery = useQuery({
+    queryKey: activeThreadId ? queryKeys.sessions.threadMessages(sessionId, activeThreadId) : ["session", sessionId, "thread", "none", "messages"],
+    queryFn: () => api.sessions.getThreadMessages(sessionId, activeThreadId!),
+    enabled: !!activeThreadId,
+    refetchInterval: activeThread && workingStatusesSet.has(activeThread.status) ? 3000 : false,
+  });
+
+  const threadLogsQuery = useQuery({
+    queryKey: activeThreadId ? queryKeys.sessions.threadLogs(sessionId, activeThreadId) : ["session", sessionId, "thread", "none", "logs"],
+    queryFn: () => api.sessions.getThreadLogs(sessionId, activeThreadId!),
+    enabled: !!activeThreadId,
+    refetchInterval: activeThread && workingStatusesSet.has(activeThread.status) ? 3000 : false,
   });
 
   // Fetch the linked primary issue to display its description as the initial prompt.
@@ -1339,11 +1773,24 @@ function ChatPanel({
   const issueQuery = useQuery({
     queryKey: ["issue", primaryIssueId],
     queryFn: () => api.issues.get(primaryIssueId!),
-    enabled: hasIssue,
+    enabled: hasIssue && !activeThreadId,
   });
 
   const baseTimelineEntries = useMemo(() => {
-    const entries = buildTimelineFromResponse(timelineQuery.data?.data || []);
+    const optimisticForCurrentView = optimisticMessages.filter((message) =>
+      activeThreadId ? message.thread_id === activeThreadId : !message.thread_id
+    );
+    if (activeThreadId) {
+      return buildTimeline(
+        mergePendingMessages(threadMessagesQuery.data?.data ?? [], optimisticForCurrentView),
+        threadLogsQuery.data?.data ?? [],
+      );
+    }
+    const flattenedTimeline = flattenTimelineResponse(timelineQuery.data?.data ?? []);
+    const entries = buildTimeline(
+      mergePendingMessages(flattenedTimeline.messages, optimisticForCurrentView),
+      flattenedTimeline.logs,
+    );
     const issueDescription = issueQuery.data?.data?.description;
     if (!issueDescription) return entries;
     const hasTurn0UserMsg = entries.some((entry) => entry.kind === "message" && entry.data.role === "user" && entry.data.turn_number === 0);
@@ -1358,7 +1805,7 @@ function ChatPanel({
       created_at: session.created_at,
     };
     return [{ kind: "message" as const, data: syntheticMsg }, ...entries];
-  }, [timelineQuery.data?.data, issueQuery.data?.data?.description, sessionId, session.org_id, session.created_at]);
+  }, [activeThreadId, optimisticMessages, threadMessagesQuery.data?.data, threadLogsQuery.data?.data, timelineQuery.data?.data, issueQuery.data?.data?.description, sessionId, session.org_id, session.created_at]);
 
   const timelineEntries = useMemo(() => {
     const fetchedLogIds = new Set<number>();
@@ -1415,20 +1862,29 @@ function ChatPanel({
 
     if (overlayLogs.length === 0) return baseTimelineEntries;
     const overlayEntries = buildTimeline(planModeSeedMessages, overlayLogs).filter((entry) => entry.kind !== "message");
-    return [...baseTimelineEntries, ...overlayEntries];
+    return sortTimelineEntries([...baseTimelineEntries, ...overlayEntries]);
   }, [baseTimelineEntries, streamedLogs]);
-  const hasLoadedTimelineInputs = timelineQuery.isFetched && (!hasIssue || issueQuery.isFetched);
-  // Skeleton only while we'd reasonably expect content: timeline still loading,
-  // or session is active. Terminal sessions with empty timelines must not shimmer forever.
+  const hasLoadedTimelineInputs = activeThreadId
+    ? threadMessagesQuery.isFetched && threadLogsQuery.isFetched
+    : timelineQuery.isFetched && (!hasIssue || issueQuery.isFetched);
+  // Skeleton only while we'd reasonably expect content: data still loading, or
+  // the relevant scope is actively working. For a thread-scoped view, "working"
+  // is the selected thread's status — a freshly-created idle thread on an
+  // otherwise-running session must show its empty-state composer, not a
+  // perpetual skeleton. Terminal sessions with empty timelines must not
+  // shimmer forever either.
+  const expectingMoreContent = activeThread
+    ? workingStatusesSet.has(activeThread.status)
+    : activeSet.has(session.status);
   const showLoadingSkeleton =
     timelineEntries.length === 0 &&
     session.status !== "pending" &&
-    (!hasLoadedTimelineInputs || activeSet.has(session.status));
+    (!hasLoadedTimelineInputs || expectingMoreContent);
 
   const persistScrollPosition = useCallback((scrollTop: number) => {
     if (typeof window === "undefined" || !viewerScope) return;
-    writeStoredSessionScrollPosition(window.localStorage, sessionId, viewerScope, scrollTop);
-  }, [sessionId, viewerScope]);
+    writeStoredSessionScrollPosition(window.localStorage, sessionId, viewerScope, scrollTop, activeThreadId);
+  }, [activeThreadId, sessionId, viewerScope]);
 
   const schedulePersistScrollPosition = useCallback((scrollTop: number) => {
     if (saveScrollTimerRef.current) {
@@ -1477,6 +1933,22 @@ function ChatPanel({
     });
   }, []);
 
+  const mergeSessionStatusUpdate = useCallback((updated: Session) => {
+    queryClient.setQueryData<SingleResponse<SessionDetail>>(["session", sessionId], (existing) => {
+      if (!existing) {
+        return { data: { ...updated, threads: [] } };
+      }
+      return {
+        ...existing,
+        data: {
+          ...existing.data,
+          ...updated,
+          threads: updated.threads ?? existing.data.threads ?? [],
+        },
+      };
+    });
+  }, [queryClient, sessionId]);
+
   useEffect(() => {
     if (!isActive) return;
 
@@ -1496,28 +1968,42 @@ function ChatPanel({
       };
 
       addSSEListener(eventSource, SSE_EVENT.LOG, (log) => {
-        mergeLogs([log]);
+        if (!activeThreadId || log.thread_id === activeThreadId) {
+          mergeLogs([log]);
+        }
       });
 
       addSSEListener(eventSource, SSE_EVENT.STATUS, (updated) => {
-        queryClient.setQueryData(["session", sessionId], { data: updated });
+        mergeSessionStatusUpdate(updated);
         // When the session transitions out of running (e.g. sandbox creation
         // failure reverts to idle), fetch the latest messages so any error
         // message posted by the backend is displayed immediately.
         if (updated.status !== "running") {
           queryClient.invalidateQueries({ queryKey: ["session", sessionId, "timeline"] });
+          if (activeThreadId) {
+            queryClient.invalidateQueries({ queryKey: queryKeys.sessions.threadMessages(sessionId, activeThreadId) });
+            queryClient.invalidateQueries({ queryKey: queryKeys.sessions.threadLogs(sessionId, activeThreadId) });
+          }
         }
       });
 
       addSSEListener(eventSource, SSE_EVENT.DONE, (updated) => {
-        queryClient.setQueryData(["session", sessionId], { data: updated });
+        mergeSessionStatusUpdate(updated);
         eventSource?.close();
         queryClient.invalidateQueries({ queryKey: ["session", sessionId, "timeline"] });
+        if (activeThreadId) {
+          queryClient.invalidateQueries({ queryKey: queryKeys.sessions.threadMessages(sessionId, activeThreadId) });
+          queryClient.invalidateQueries({ queryKey: queryKeys.sessions.threadLogs(sessionId, activeThreadId) });
+        }
       });
 
       eventSource.onerror = () => {
         eventSource?.close();
         queryClient.invalidateQueries({ queryKey: ["session", sessionId, "timeline"] });
+        if (activeThreadId) {
+          queryClient.invalidateQueries({ queryKey: queryKeys.sessions.threadMessages(sessionId, activeThreadId) });
+          queryClient.invalidateQueries({ queryKey: queryKeys.sessions.threadLogs(sessionId, activeThreadId) });
+        }
 
         if (!cancelled && reconnectAttempts.current < MAX_SSE_RECONNECT_ATTEMPTS) {
           const delay =
@@ -1538,7 +2024,7 @@ function ChatPanel({
         clearTimeout(reconnectTimer.current);
       }
     };
-  }, [sessionId, apiBase, isActive, mergeLogs, queryClient]);
+  }, [sessionId, apiBase, isActive, mergeLogs, mergeSessionStatusUpdate, queryClient, activeThreadId]);
 
   // Track whether the user is scrolled near the bottom.
   const handleScroll = useCallback(() => {
@@ -1550,7 +2036,7 @@ function ChatPanel({
 
   useEffect(() => {
     initialAnchorAppliedRef.current = false;
-  }, [sessionId]);
+  }, [activeThreadId, sessionId]);
 
   useEffect(() => {
     const currentScrollEl = scrollRef.current;
@@ -1558,7 +2044,7 @@ function ChatPanel({
       if (saveScrollTimerRef.current) {
         clearTimeout(saveScrollTimerRef.current);
       }
-      if (currentScrollEl) {
+      if (currentScrollEl && initialAnchorAppliedRef.current) {
         persistScrollPosition(currentScrollEl.scrollTop);
       }
     };
@@ -1573,7 +2059,7 @@ function ChatPanel({
     const storedScrollTop =
       typeof window === "undefined"
         ? null
-        : readStoredSessionScrollPosition(window.localStorage, sessionId, viewerScope);
+        : readStoredSessionScrollPosition(window.localStorage, sessionId, viewerScope, activeThreadId);
     const anchor = resolveInitialSessionAnchor({
       entries: timelineEntries,
       isActive: isRunning,
@@ -1599,7 +2085,7 @@ function ChatPanel({
 
     scrollToLiveEdgePosition();
     initialAnchorAppliedRef.current = true;
-  }, [hasLoadedTimelineInputs, isRunning, scrollToLiveEdgePosition, sessionId, syncScrollState, timelineEntries, viewerScope]);
+  }, [activeThreadId, hasLoadedTimelineInputs, isRunning, scrollToLiveEdgePosition, sessionId, syncScrollState, timelineEntries, viewerScope]);
 
   // Only auto-scroll to bottom when new entries arrive if the user is already near the bottom.
   useEffect(() => {
@@ -1643,7 +2129,7 @@ function ChatPanel({
             }
           />
         )}
-        {session.status === "pending" && (
+        {(activeThread?.status === "pending" || (!activeThread && session.status === "pending")) && (
           <div className="flex items-center justify-center py-12">
             <div className="text-center space-y-2 max-w-[280px]">
               <Loader2 className="h-8 w-8 text-muted-foreground/40 mx-auto animate-spin" />
@@ -1656,6 +2142,42 @@ function ChatPanel({
     </div>
   );
 }
+
+function sameDiffStats(
+  a?: Session["diff_stats"] | null,
+  b?: Session["diff_stats"] | null,
+): boolean {
+  if (a === b) {
+    return true;
+  }
+  if (!a || !b) {
+    return !a && !b;
+  }
+  return a.added === b.added && a.removed === b.removed && a.files_changed === b.files_changed;
+}
+
+function areChatPanelPropsEqual(previous: ChatPanelProps, next: ChatPanelProps): boolean {
+  return previous.sessionId === next.sessionId &&
+    previous.isActive === next.isActive &&
+    previous.optimisticMessages === next.optimisticMessages &&
+    previous.onDiffClick === next.onDiffClick &&
+    previous.onApprovePlan === next.onApprovePlan &&
+    previous.onAdjustPlan === next.onAdjustPlan &&
+    previous.onRegisterScrollToLiveEdge === next.onRegisterScrollToLiveEdge &&
+    previous.session.id === next.session.id &&
+    previous.session.status === next.session.status &&
+    previous.session.sandbox_state === next.session.sandbox_state &&
+    previous.session.primary_issue_id === next.session.primary_issue_id &&
+    previous.session.org_id === next.session.org_id &&
+    previous.session.created_at === next.session.created_at &&
+    sameDiffStats(previous.session.diff_stats, next.session.diff_stats) &&
+    previous.activeThread?.id === next.activeThread?.id &&
+    previous.activeThread?.status === next.activeThread?.status &&
+    previous.activeThread?.current_turn === next.activeThread?.current_turn &&
+    previous.activeThread?.label === next.activeThread?.label;
+}
+
+const MemoizedChatPanel = memo(ChatPanel, areChatPanelPropsEqual);
 
 // ---------------------------------------------------------------------------
 // Main component
@@ -1683,6 +2205,7 @@ export function SessionDetailContent({ id }: { id: string }) {
   // default open while the mobile sheet defaults closed (no SSR-unsafe
   // matchMedia needed).
   const [mobileDetailOpen, setMobileDetailOpen] = useState(false);
+  const [mobileReviewComposerOpen, setMobileReviewComposerOpen] = useState(false);
   const [detailWidth, setDetailWidth] = useState(DEFAULT_DETAIL);
   const [activeFileIndex, setActiveFileIndex] = useState(0);
   const [isEditingTitle, setIsEditingTitle] = useState(false);
@@ -1786,11 +2309,54 @@ export function SessionDetailContent({ id }: { id: string }) {
 
   const session = data?.data;
   const members = membersData?.data ?? [];
+  const threads = useMemo(() => session?.threads ?? [], [session?.threads]);
+  const [activeThreadId, setActiveThreadId] = useState<string | null>(null);
+  const activeThread = threads.find((thread) => thread.id === activeThreadId) ?? threads[0];
   const isActive = session ? !terminalStatuses.has(session.status) : false;
   const isRunning = session?.status === "running";
   const currentTitle = session ? sessionTitle(session) : "";
 
   const queryClient = useQueryClient();
+  const optimisticMessageIDRef = useRef(-1_000_000);
+  const [optimisticMessages, setOptimisticMessages] = useState<PendingFollowUpMessage[]>([]);
+
+  useEffect(() => {
+    if (threads.length === 0) {
+      if (activeThreadId !== null) {
+        setActiveThreadId(null);
+      }
+      return;
+    }
+    if (!activeThreadId || !threads.some((thread) => thread.id === activeThreadId)) {
+      setActiveThreadId(threads[0].id);
+    }
+  }, [activeThreadId, threads]);
+
+  useEffect(() => {
+    setOptimisticMessages([]);
+  }, [id]);
+
+  type SendMutationArgs = {
+    activeThreadId?: string;
+    body: {
+      message: string;
+      images?: string[];
+      references?: SessionInputReference[];
+      commands?: SessionInputCommand[];
+      planMode?: boolean;
+    };
+    model?: string;
+    resolvedIDs: string[];
+    optimisticMessage: PendingFollowUpMessage;
+    composerSnapshot: {
+      message: string;
+      attachments: string[];
+      references: SessionInputReference[];
+      commands: SessionInputCommand[];
+      planMode: boolean;
+      selectedModel: string;
+    };
+  };
 
   const updateSessionMutation = useMutation({
     mutationFn: (title: string) => api.sessions.update(id, { title }),
@@ -1818,22 +2384,17 @@ export function SessionDetailContent({ id }: { id: string }) {
     },
   });
 
-  // PR state for the detail-panel header button
+  // PR state for the detail-panel header button. Refetched on demand by the
+  // pr_creation_state and pr_push_state effects below when the session SSE
+  // reports a transition to `succeeded` (worker has written the PR row) or
+  // `failed`. The session status stream is the source of truth for the state
+  // machine, so a separate poll on this endpoint would just duplicate load on
+  // Postgres without any latency win — Redis pub/sub already pushes the
+  // transition within milliseconds, and the SSE polling fallback re-reads the
+  // session row on a 1s tick when Redis is unavailable.
   const { data: prData } = useQuery({
     queryKey: ["session", id, "pr"],
     queryFn: () => api.sessions.getPR(id),
-    refetchInterval: (q) => {
-      const serverState = data?.data?.pr_creation_state;
-      const optimisticWaitingForPR =
-        localPRState !== "idle" && serverState !== "failed" && serverState !== "succeeded";
-      const waitingForPR =
-        optimisticWaitingForPR ||
-        serverState === "queued" ||
-        serverState === "pushing" ||
-        serverState === "succeeded";
-
-      return waitingForPR && !q.state.data?.data ? 2000 : false;
-    },
   });
   const pullRequestId = prData?.data?.id;
   const { data: prHealthData, isLoading: isPRHealthLoading } = useQuery({
@@ -1941,6 +2502,18 @@ export function SessionDetailContent({ id }: { id: string }) {
 
       if (response.data.session_id !== id) {
         router.push(`/sessions/${response.data.session_id}`);
+        return;
+      }
+      // Same-session response: without explicit feedback the click looks
+      // dead. Reused-in-flight is the common case (repair already running on
+      // this session and the failing-tests count hasn't dropped yet, so the
+      // button is still rendered) — surface a toast so the user knows the
+      // request was handled.
+      if (response.data.reused_in_flight) {
+        const label = response.data.repair_action_type === "fix_tests"
+          ? "Fix tests session is already in progress"
+          : "Resolve conflicts session is already in progress";
+        toast.info(label);
       }
     },
     onError: (err) => {
@@ -2178,7 +2751,7 @@ export function SessionDetailContent({ id }: { id: string }) {
         ? "push_changes"
         : resumeActionParam === "create_pr"
           ? "create_pr"
-          : hasPR && prStatus === "open"
+          : hasPR && prStatus === "open" && !!session?.has_unpushed_changes
             ? "push_changes"
             : "create_pr";
     if (action === "push_changes") {
@@ -2188,7 +2761,7 @@ export function SessionDetailContent({ id }: { id: string }) {
       // running would land an immediate 409 (or stale-snapshot error). The
       // effect re-runs when these dependencies flip, so the replay still
       // happens — just on the next tick when the session is actually ready.
-      const pushAvailable = hasPR && prStatus === "open";
+      const pushAvailable = hasPR && prStatus === "open" && !!session?.has_unpushed_changes;
       if (!pushAvailable || !hasSnapshot || isRunning) return;
       resumeAttemptRef.current = resumePRParam;
       pushChangesMutation.mutate({ authorMode: "user", resumeToken: resumePRParam });
@@ -2197,7 +2770,7 @@ export function SessionDetailContent({ id }: { id: string }) {
     if (!canCreatePR) return;
     resumeAttemptRef.current = resumePRParam;
     createPRMutation.mutate({ authorMode: "user", resumeToken: resumePRParam });
-  }, [canCreatePR, createPRMutation, hasPR, hasSnapshot, isRunning, prStatus, pushChangesMutation, resumeActionParam, resumePRParam]);
+  }, [canCreatePR, createPRMutation, hasPR, hasSnapshot, isRunning, prStatus, pushChangesMutation, resumeActionParam, resumePRParam, session?.has_unpushed_changes]);
 
   const sessionDiff = session?.diff;
   const diffStats = useMemo(() => {
@@ -2210,24 +2783,19 @@ export function SessionDetailContent({ id }: { id: string }) {
   // Hooks can't be called conditionally, so provide a stub when session hasn't loaded yet.
   // useDiffViewState only reads `diff` and `diff_history` — the stub satisfies that contract.
   const diffViewState = useDiffViewState(session ?? { diff: null, diff_history: [] } as unknown as Session);
-  const { files: allDiffFiles, filteredFiles, passes, passRange, setPassRange, diffSearchQuery, setDiffSearchQuery } = diffViewState;
-
-  useEffect(() => {
-    if (filteredFiles.length === 0) {
-      if (activeFileIndex !== 0) {
-        setActiveFileIndex(0);
-      }
-      return;
-    }
-    if (activeFileIndex >= filteredFiles.length) {
-      setActiveFileIndex(filteredFiles.length - 1);
-    }
-  }, [activeFileIndex, filteredFiles.length]);
+  const {
+    files: diffFiles,
+    filteredFiles,
+    passes,
+    passRange,
+    setPassRange,
+    diffSearchQuery,
+    setDiffSearchQuery,
+  } = diffViewState;
 
   const {
     comments,
     commentsByLine,
-    openCount: footerOpenCommentCount,
     createComment,
     updateComment,
     deleteComment,
@@ -2282,6 +2850,10 @@ export function SessionDetailContent({ id }: { id: string }) {
   const [composerCommands, setComposerCommands] = useState<SessionInputCommand[]>([]);
   const [composerIsUploading, setComposerIsUploading] = useState(false);
   const [composerUploadError, setComposerUploadError] = useState<string | null>(null);
+  const [addThreadOpen, setAddThreadOpen] = useState(false);
+  const [newThreadAgentType, setNewThreadAgentType] = useState("codex");
+  const [newThreadModel, setNewThreadModel] = useState("");
+  const [newThreadLabel, setNewThreadLabel] = useState("");
   const composerTextareaRef = useRef<HTMLTextAreaElement>(null);
   const composerUploadInputRef = useRef<HTMLInputElement>(null);
   const chatPanelScrollToLiveEdgeRef = useRef<(() => void) | null>(null);
@@ -2294,28 +2866,38 @@ export function SessionDetailContent({ id }: { id: string }) {
     () => comments.filter((comment) => !comment.resolved).slice(0, MAX_RESOLVE_REVIEW_COMMENTS_PER_MESSAGE),
     [comments],
   );
-  const composerCanSendMessage = session?.status !== "skipped" && session?.status !== "pending" && session?.sandbox_state !== "destroyed";
-  const composerIsRunning = session?.status === "running";
+  // Composer gating: messages may be sent at any point while the session or
+  // thread is running. The backend queues mid-turn sends and the orchestrator
+  // drains the queue once the in-flight turn completes. Pending/skipped at
+  // the session level and a destroyed sandbox still block — those are
+  // genuinely unrecoverable, not just busy.
+  const composerCanSendMessage = session?.status !== "skipped" &&
+    session?.status !== "pending" &&
+    session?.sandbox_state !== "destroyed";
+  const composerIsRunning = activeThread ? activeThread.status === "running" : session?.status === "running";
   const composerIsSnapshotExpired = session?.sandbox_state === "destroyed";
-  const composerIsClaudeCode = session?.agent_type === "claude_code";
-  const composerLacksHeadlessResume = session ? (AGENTS_BY_KEY[session.agent_type]?.lacksHeadlessResume ?? false) : false;
+  const composerAgentType = activeThread?.agent_type ?? session?.agent_type ?? "codex";
+  const composerIsClaudeCode = composerAgentType === "claude_code";
+  const composerLacksHeadlessResume = AGENTS_BY_KEY[composerAgentType]?.lacksHeadlessResume ?? false;
   const composerAvailableModels = useMemo(() => {
     if (!session) {
       return [];
     }
-    const agentType = AGENTS.find((agent) => agent.key === session.agent_type);
+    const agentType = AGENTS.find((agent) => agent.key === composerAgentType);
     return agentType?.models ?? [];
-  }, [session]);
+  }, [composerAgentType, session]);
+  const composerTargetLabel = activeThread
+    ? agentDisplayLabel(activeThread.agent_type)
+    : (session ? agentDisplayLabel(session.agent_type) : "agent");
+  const selectedNewThreadAgent = AGENTS_BY_KEY[newThreadAgentType] ?? AGENTS[0];
+  const selectedNewThreadModels = selectedNewThreadAgent?.models ?? [];
 
-  async function handleComposerUpload(event: React.ChangeEvent<HTMLInputElement>) {
-    const fileList = event.target.files;
-    if (!fileList || fileList.length === 0) return;
+  async function uploadComposerFiles(files: File[]) {
+    if (files.length === 0) return;
 
-    const files = Array.from(fileList);
     const oversized = files.filter((file) => file.size > MAX_FILE_SIZE);
     if (oversized.length > 0) {
       setComposerUploadError(`File${oversized.length > 1 ? "s" : ""} too large (max 10 MB): ${oversized.map((file) => file.name).join(", ")}`);
-      event.target.value = "";
       return;
     }
 
@@ -2328,8 +2910,15 @@ export function SessionDetailContent({ id }: { id: string }) {
       setComposerUploadError(err instanceof Error ? err.message : "Upload failed");
     } finally {
       setComposerIsUploading(false);
-      event.target.value = "";
     }
+  }
+
+  async function handleComposerUpload(event: React.ChangeEvent<HTMLInputElement>) {
+    const fileList = event.target.files;
+    if (!fileList || fileList.length === 0) return;
+
+    await uploadComposerFiles(Array.from(fileList));
+    event.target.value = "";
   }
 
   const handleRemoveComposerAttachment = useCallback((url: string) => {
@@ -2337,26 +2926,24 @@ export function SessionDetailContent({ id }: { id: string }) {
   }, []);
 
   const sendMutation = useMutation({
-    mutationFn: (opts: { planMode?: boolean; overrideMessage?: string } = {}) => {
-      setComposerUploadError(null);
-      const draftMessage = opts.overrideMessage ?? composerMessage;
-      const formattedMessage = attachedReviewComments.length > 0
-        ? formatReviewMessage(attachedReviewComments, filteredFiles, draftMessage)
-        : draftMessage;
-      const isPlanRequest = opts.planMode ?? composerPlanMode;
-      const resolveReviewCommentIDs = attachedReviewComments.map((comment) => comment.id);
+    mutationFn: (vars: SendMutationArgs) => {
+      if (vars.activeThreadId) {
+        return api.sessions.sendThreadMessage(id, vars.activeThreadId, {
+          ...vars.body,
+          resolveReviewCommentIDs: vars.resolvedIDs.length > 0 ? vars.resolvedIDs : undefined,
+        })
+          .then((response) => ({ response, resolvedIDs: vars.resolvedIDs }));
+      }
 
       return api.sessions.sendMessage(id, {
-        message: formattedMessage,
-        images: composerAttachments.length > 0 ? composerAttachments : undefined,
-        references: composerReferences.length > 0 ? composerReferences : undefined,
-        commands: composerCommands.length > 0 ? composerCommands : undefined,
-        planMode: isPlanRequest,
-        model: composerSelectedModel || undefined,
-        resolveReviewCommentIDs: resolveReviewCommentIDs.length > 0 ? resolveReviewCommentIDs : undefined,
-      }).then((response) => ({ response, resolvedIDs: resolveReviewCommentIDs }));
+        ...vars.body,
+        model: vars.model,
+        resolveReviewCommentIDs: vars.resolvedIDs.length > 0 ? vars.resolvedIDs : undefined,
+      }).then((response) => ({ response, resolvedIDs: vars.resolvedIDs }));
     },
-    onSuccess: ({ resolvedIDs }) => {
+    onMutate: (vars) => {
+      setComposerUploadError(null);
+      setOptimisticMessages((previous) => [...previous, vars.optimisticMessage]);
       setComposerMessage("");
       setComposerAttachments([]);
       setComposerReferences([]);
@@ -2369,8 +2956,61 @@ export function SessionDetailContent({ id }: { id: string }) {
         composerTextareaRef.current.style.height = "auto";
       }
       chatPanelScrollToLiveEdgeRef.current?.();
+      return {
+        optimisticMessageID: vars.optimisticMessage.client_id,
+        composerSnapshot: vars.composerSnapshot,
+      };
+    },
+    onSuccess: ({ response, resolvedIDs }, vars, context) => {
+      setOptimisticMessages((previous) => previous.filter((message) => message.client_id !== context?.optimisticMessageID));
+      if (vars.activeThreadId) {
+        queryClient.setQueryData<ListResponse<SessionMessage>>(
+          queryKeys.sessions.threadMessages(id, vars.activeThreadId),
+          (previous) => {
+            const existing = previous?.data ?? [];
+            const responseKey = messageReconciliationKey(response.data);
+            const withoutDuplicate = existing.filter((message) =>
+              message.id !== response.data.id && messageReconciliationKey(message) !== responseKey
+            );
+            return {
+              data: [...withoutDuplicate, response.data],
+              meta: previous?.meta ?? {},
+            };
+          },
+        );
+      } else {
+        queryClient.setQueryData<ListResponse<SessionTimelineEntry>>(
+          queryKeys.sessions.timeline(id),
+          (previous) => {
+            const existing = previous?.data ?? [];
+            const responseKey = messageReconciliationKey(response.data);
+            const withoutDuplicate = existing.filter((entry) =>
+              entry.kind !== "message" ||
+              (
+                entry.message?.id !== response.data.id &&
+                messageReconciliationKey(entry.message!) !== responseKey
+              )
+            );
+            return {
+              data: [
+                ...withoutDuplicate,
+                {
+                  kind: "message",
+                  created_at: response.data.created_at,
+                  message: response.data,
+                },
+              ],
+              meta: previous?.meta ?? {},
+            };
+          },
+        );
+      }
       queryClient.invalidateQueries({ queryKey: ["session", id] });
       queryClient.invalidateQueries({ queryKey: ["session", id, "timeline"] });
+      if (vars.activeThreadId) {
+        queryClient.invalidateQueries({ queryKey: queryKeys.sessions.threadMessages(id, vars.activeThreadId) });
+        queryClient.invalidateQueries({ queryKey: queryKeys.sessions.threadLogs(id, vars.activeThreadId) });
+      }
       // Backend resolved the attached review comments inside the same tx as
       // the message. Optimistically flip them to resolved=true in the cache
       // so the "N comments attached" banner disappears immediately, then
@@ -2392,7 +3032,94 @@ export function SessionDetailContent({ id }: { id: string }) {
       }
       queryClient.invalidateQueries({ queryKey: ["session", id, "review-comments"] });
     },
+    onError: (_err, _vars, context) => {
+      setOptimisticMessages((previous) => previous.filter((message) => message.client_id !== context?.optimisticMessageID));
+      if (!context) return;
+      setComposerMessage(context.composerSnapshot.message);
+      setComposerAttachments(context.composerSnapshot.attachments);
+      setComposerReferences(context.composerSnapshot.references);
+      setComposerCommands(context.composerSnapshot.commands);
+      setComposerPlanMode(context.composerSnapshot.planMode);
+      setComposerSelectedModel(context.composerSnapshot.selectedModel);
+    },
   });
+
+  const queueSend = useCallback((opts: { planMode?: boolean; overrideMessage?: string } = {}) => {
+    if (!session) return;
+
+    const draftMessage = opts.overrideMessage ?? composerMessage;
+    const userFacingMessage = attachedReviewComments.length > 0
+      ? formatReviewMessage(attachedReviewComments, filteredFiles, draftMessage)
+      : draftMessage;
+    const isPlanRequest = opts.planMode ?? composerPlanMode;
+    const formattedMessage = applyPlanModePrefix(userFacingMessage, isPlanRequest);
+    const resolvedIDs = attachedReviewComments.map((comment) => comment.id);
+    const optimisticID = optimisticMessageIDRef.current;
+    optimisticMessageIDRef.current -= 1;
+
+    sendMutation.mutate({
+      activeThreadId: activeThread?.id,
+      body: {
+        message: userFacingMessage,
+        images: composerAttachments.length > 0 ? composerAttachments : undefined,
+        references: composerReferences.length > 0 ? composerReferences : undefined,
+        commands: composerCommands.length > 0 ? composerCommands : undefined,
+        planMode: isPlanRequest,
+      },
+      model: composerSelectedModel || undefined,
+      resolvedIDs,
+      optimisticMessage: {
+        client_id: optimisticID,
+        id: optimisticID,
+        session_id: id,
+        org_id: session.org_id,
+        thread_id: activeThread?.id,
+        turn_number: (activeThread?.current_turn ?? session.current_turn ?? 0) + 1,
+        role: "user",
+        content: formattedMessage,
+        attachments: composerAttachments.length > 0 ? composerAttachments : undefined,
+        references: composerReferences.length > 0 ? composerReferences : undefined,
+        commands: composerCommands.length > 0 ? composerCommands : undefined,
+        created_at: new Date().toISOString(),
+      },
+      composerSnapshot: {
+        message: composerMessage,
+        attachments: composerAttachments,
+        references: composerReferences,
+        commands: composerCommands,
+        planMode: composerPlanMode,
+        selectedModel: composerSelectedModel,
+      },
+    });
+  }, [
+    activeThread,
+    attachedReviewComments,
+    composerAttachments,
+    composerCommands,
+    composerMessage,
+    composerPlanMode,
+    composerReferences,
+    composerSelectedModel,
+    filteredFiles,
+    id,
+    session,
+    sendMutation,
+  ]);
+  const queueSendRef = useRef(queueSend);
+  const composerCanSendMessageRef = useRef(composerCanSendMessage);
+  const sendPendingRef = useRef(sendMutation.isPending);
+
+  useEffect(() => {
+    queueSendRef.current = queueSend;
+  }, [queueSend]);
+
+  useEffect(() => {
+    composerCanSendMessageRef.current = composerCanSendMessage;
+  }, [composerCanSendMessage]);
+
+  useEffect(() => {
+    sendPendingRef.current = sendMutation.isPending;
+  }, [sendMutation.isPending]);
 
   const cancelMutation = useMutation({
     mutationFn: () => api.sessions.cancelSession(id),
@@ -2401,18 +3128,163 @@ export function SessionDetailContent({ id }: { id: string }) {
     },
   });
 
+  // Thread-scoped mutations for Phase 3/4 actions. Kept as separate
+  // mutations rather than one polymorphic call so React Query can scope
+  // pending state per-action, which the menu reads to show a spinner only
+  // on the in-flight item.
+  const cancelThreadMutation = useMutation({
+    mutationFn: (threadId: string) => api.sessions.cancelThread(id, threadId),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["session", id] });
+    },
+    onError: (err) => {
+      toast.error(err instanceof Error ? err.message : "Failed to cancel tab");
+    },
+  });
+  const forkThreadMutation = useMutation({
+    mutationFn: (threadId: string) => api.sessions.forkThread(id, threadId),
+    onSuccess: () => {
+      toast.success("Fork queued — new session will appear in your list shortly");
+      queryClient.invalidateQueries({ queryKey: ["sessions"] });
+    },
+    onError: (err) => {
+      toast.error(err instanceof Error ? err.message : "Failed to fork tab");
+    },
+  });
+  const revertThreadMutation = useMutation({
+    mutationFn: (threadId: string) => api.sessions.revertThread(id, threadId),
+    onSuccess: (_data, threadId) => {
+      toast.success("Revert prepared — see the tab transcript for the patch");
+      queryClient.invalidateQueries({ queryKey: queryKeys.sessions.threadMessages(id, threadId) });
+      queryClient.invalidateQueries({ queryKey: ["session", id] });
+    },
+    onError: (err) => {
+      toast.error(err instanceof Error ? err.message : "Failed to prepare revert");
+    },
+  });
+
+  // Session-wide file event timeline powers the tab-strip overlap badges and
+  // the Changes-view attribution filters. Polled at the same cadence as the
+  // session detail so a user-perceptible "tab touched a file" lands within
+  // one polling cycle.
+  //
+  // Polling is incremental: the first request fetches the whole timeline,
+  // subsequent requests pass `?since=<latest observed_at>` so a long session
+  // does not retransfer hundreds of events every 5 seconds. The accumulated
+  // list lives in component state because React Query caches only the most
+  // recent response, which is now a delta.
+  const fileEventsSinceRef = useRef<string | undefined>(undefined);
+  const [accumulatedFileEvents, setAccumulatedFileEvents] = useState<SessionThreadFileEvent[]>([]);
+  const fileEventsQuery = useQuery({
+    queryKey: queryKeys.sessions.threadFileEvents(id),
+    queryFn: () => api.sessions.listThreadFileEvents(id, fileEventsSinceRef.current),
+    enabled: threads.length > 0,
+    refetchInterval: threads.some((t) => t.status === "running" || t.status === "pending") ? 5000 : false,
+    staleTime: 2_000,
+  });
+  useEffect(() => {
+    const incoming = fileEventsQuery.data?.data;
+    if (!incoming || incoming.length === 0) return;
+    setAccumulatedFileEvents((prev) => {
+      const byId = new Map<number, SessionThreadFileEvent>();
+      for (const e of prev) byId.set(e.id, e);
+      for (const e of incoming) byId.set(e.id, e);
+      return Array.from(byId.values()).sort((a, b) => b.observed_at.localeCompare(a.observed_at));
+    });
+    let max = fileEventsSinceRef.current;
+    for (const e of incoming) {
+      if (!max || e.observed_at > max) max = e.observed_at;
+    }
+    fileEventsSinceRef.current = max;
+  }, [fileEventsQuery.data]);
+  const overlapsByThreadId = useMemo(
+    () => computeThreadOverlap(threads, accumulatedFileEvents),
+    [threads, accumulatedFileEvents],
+  );
+  const [attributionFilter, setAttributionFilter] = useState<ThreadAttributionFilterValue>({ kind: "all" });
+  const attributionAllowedPaths = useAttributionAllowedPaths(attributionFilter, accumulatedFileEvents);
+  const visibleDiffFiles = useMemo(
+    () =>
+      attributionAllowedPaths == null
+        ? diffFiles
+        : diffFiles.filter((f) => attributionAllowedPaths.has(f.newPath) || attributionAllowedPaths.has(f.oldPath)),
+    [attributionAllowedPaths, diffFiles],
+  );
+  const visibleFilteredFiles = useMemo(
+    () =>
+      attributionAllowedPaths == null
+        ? filteredFiles
+        : filteredFiles.filter((f) => attributionAllowedPaths.has(f.newPath) || attributionAllowedPaths.has(f.oldPath)),
+    [attributionAllowedPaths, filteredFiles],
+  );
+
+  useEffect(() => {
+    if (visibleFilteredFiles.length === 0) {
+      if (activeFileIndex !== 0) {
+        setActiveFileIndex(0);
+      }
+      return;
+    }
+    if (activeFileIndex >= visibleFilteredFiles.length) {
+      setActiveFileIndex(visibleFilteredFiles.length - 1);
+    }
+  }, [activeFileIndex, visibleFilteredFiles.length]);
+
+  const createThreadMutation = useMutation({
+    mutationFn: () => {
+      const agent = AGENTS_BY_KEY[newThreadAgentType] ?? AGENTS[0];
+      const label = newThreadLabel.trim() || `${agent.label} ${threads.length + 1}`;
+      return api.sessions.createThread(id, {
+        agent_type: agent.key,
+        model: newThreadModel || undefined,
+        label,
+      });
+    },
+    onSuccess: (response) => {
+      queryClient.setQueryData<SingleResponse<SessionDetail>>(["session", id], (existing) => {
+        if (!existing) return existing;
+        const existingThreads = existing.data.threads ?? [];
+        return {
+          ...existing,
+          data: {
+            ...existing.data,
+            threads: [...existingThreads.filter((thread) => thread.id !== response.data.id), response.data],
+          },
+        };
+      });
+      setActiveThreadId(response.data.id);
+      setAddThreadOpen(false);
+      setNewThreadLabel("");
+      setNewThreadModel("");
+      queryClient.invalidateQueries({ queryKey: ["session", id] });
+    },
+    onError: (err) => {
+      toast.error(err instanceof Error ? err.message : "Failed to create tab");
+    },
+  });
+
+  useEffect(() => {
+    setNewThreadModel("");
+  }, [newThreadAgentType]);
+
   const handleApprovePlan = useCallback(() => {
-    if (!composerCanSendMessage || sendMutation.isPending) return;
-    sendMutation.mutate({
+    if (!composerCanSendMessageRef.current || sendPendingRef.current) return;
+    queueSendRef.current({
       planMode: false,
       overrideMessage: "The plan looks good. Please proceed with executing the implementation plan above. Make all the changes as described.",
     });
-  }, [composerCanSendMessage, sendMutation]);
+  }, []);
 
   const handleAdjustPlan = useCallback(() => {
     setComposerMessage("Please adjust the plan: ");
     setComposerPlanMode(false);
     composerTextareaRef.current?.focus();
+  }, []);
+  const handleChatDiffClick = useCallback(() => {
+    openReview();
+  }, [openReview]);
+  const registerChatPanelScrollToLiveEdge = useCallback((scrollToLiveEdge: (() => void) | null) => {
+    chatPanelScrollToLiveEdgeRef.current = scrollToLiveEdge;
   }, []);
 
   const changesCount = diffStats?.filesChanged;
@@ -2458,6 +3330,13 @@ export function SessionDetailContent({ id }: { id: string }) {
     session?.pr_creation_state,
     showValidationTab,
   ]);
+  const isDedicatedMobileReview = centerMode === "review" && isMobileReviewViewport;
+
+  useEffect(() => {
+    if (!isDedicatedMobileReview) {
+      setMobileReviewComposerOpen(false);
+    }
+  }, [isDedicatedMobileReview]);
 
   if (isLoading) {
     return (
@@ -2546,12 +3425,12 @@ export function SessionDetailContent({ id }: { id: string }) {
   }
 
   // Push-changes button derived state. Mirrors the PR creation block above
-  // but operates on session.pr_push_state. Rendered inside the PR health
-  // banner alongside Resolve conflicts / Fix tests / Merge so all PR-level
-  // actions live in one place; the backend exits cleanly with "no changes"
-  // if there is nothing to push, so we don't gate on a frontend-side dirty
-  // check.
-  const pushAvailable = hasPR && prStatus === "open";
+  // but operates on session.pr_push_state and the backend-derived
+  // has_unpushed_changes signal. Rendered inside the PR health banner
+  // alongside Resolve conflicts / Fix tests / Merge so all PR-level
+  // actions live in one place, while still hiding Push changes when the
+  // latest session head already matches the remote PR branch.
+  const pushAvailable = hasPR && prStatus === "open" && !!session.has_unpushed_changes;
   const pushState = session.pr_push_state;
   const queueingPush = localPushState === "submitting";
   const pushingChanges =
@@ -2622,7 +3501,6 @@ export function SessionDetailContent({ id }: { id: string }) {
     : showDetailPanel
       ? "Hide details"
       : "Show details";
-
   // Right-panel content. Rendered inline on desktop and inside a bottom sheet
   // on mobile — the same JSX in both places so tab state stays consistent.
   const panelTabsEl = (
@@ -2637,7 +3515,7 @@ export function SessionDetailContent({ id }: { id: string }) {
             ref={detailTabsRef}
             aria-label="Session detail tabs"
             className={cn(
-              "min-w-0 flex-1 overflow-x-auto overflow-y-hidden",
+              "min-w-0 flex-1 overflow-x-auto overflow-y-hidden pb-1",
               detailTabsOverflow ? "mask-fade-r" : "scrollbar-hide",
             )}
           >
@@ -2657,7 +3535,7 @@ export function SessionDetailContent({ id }: { id: string }) {
               <TabsTrigger value="preview">Preview</TabsTrigger>
             </TabsList>
           </div>
-          <div aria-label="Session detail actions" className="flex items-center gap-2 shrink-0 pl-2">
+          <div aria-label="Session detail actions" className="flex items-center justify-end gap-2 shrink-0 pl-2">
             {hasPR && prData?.data?.github_pr_url ? (
               <>
                 {prStatus === "closed" && (
@@ -2665,12 +3543,12 @@ export function SessionDetailContent({ id }: { id: string }) {
                     PR closed
                   </Badge>
                 )}
-                <a href={prData.data.github_pr_url} target="_blank" rel="noopener noreferrer">
-                  <Button variant="outline" size="sm" className="h-7 text-xs gap-1.5">
+                <Button asChild variant="outline" size="sm" className="h-7 text-xs gap-1.5">
+                  <a href={prData.data.github_pr_url} target="_blank" rel="noopener noreferrer">
                     <ExternalLink className="h-3 w-3" />
                     View PR
-                  </Button>
-                </a>
+                  </a>
+                </Button>
               </>
             ) : showPRAction && !prErrorNotice ? (
               <DisabledTooltip disabled={prActionDisabled} content={prActionTitle}>
@@ -2693,6 +3571,15 @@ export function SessionDetailContent({ id }: { id: string }) {
                 </Button>
               </DisabledTooltip>
             ) : null}
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-8 w-8 md:hidden"
+              aria-label="Close details"
+              onClick={() => setMobileDetailOpen(false)}
+            >
+              <X className="h-4 w-4" />
+            </Button>
           </div>
         </div>
         {prErrorNotice && (
@@ -2707,7 +3594,7 @@ export function SessionDetailContent({ id }: { id: string }) {
 
       <TabsContent value="changes" className="flex-1 min-h-0">
         <ChangesTab
-          filteredFiles={filteredFiles}
+          filteredFiles={visibleFilteredFiles}
           activeFileIndex={activeFileIndex}
           onFileSelect={setActiveFileIndex}
           onOpenReview={openReview}
@@ -2721,6 +3608,10 @@ export function SessionDetailContent({ id }: { id: string }) {
               ? "Changes will appear here as the agent modifies files."
               : "This session did not produce any file changes."
           }
+          isMobile={isMobileReviewViewport}
+          threads={threads}
+          attributionFilter={attributionFilter}
+          onAttributionFilterChange={setAttributionFilter}
         />
       </TabsContent>
       <TabsContent value="overview" className="flex-1 overflow-y-auto scrollbar-hide p-4">
@@ -2810,7 +3701,7 @@ export function SessionDetailContent({ id }: { id: string }) {
     <div className="flex h-full">
       {/* Center area: chat or review diff view */}
       <div className="flex-1 min-w-0 flex flex-col">
-        {/* Session header bar */}
+        {!isDedicatedMobileReview ? (
         <div className="border-b border-border px-4 py-3 bg-background flex items-center justify-between shrink-0">
           <div className="min-w-0 flex-1 flex items-center gap-2">
             <MobileBackButton to="/sessions" label="Back to sessions" />
@@ -2907,22 +3798,42 @@ export function SessionDetailContent({ id }: { id: string }) {
             <PanelBottomOpen className="h-5 w-5" />
           </Button>
         </div>
+        ) : null}
 
+        {!isDedicatedMobileReview ? (
+          <AgentTabStrip
+            threads={threads}
+            activeThreadId={activeThread?.id ?? null}
+            overlapsByThreadId={overlapsByThreadId}
+            statusConfig={statusConfig}
+            onActiveThreadChange={setActiveThreadId}
+            onAddTab={() => {
+              setNewThreadAgentType(session.agent_type || "codex");
+              setNewThreadModel("");
+              setNewThreadLabel("");
+              setAddThreadOpen(true);
+            }}
+            onCancelThread={(tid) => cancelThreadMutation.mutate(tid)}
+            onForkThread={(tid) => forkThreadMutation.mutate(tid)}
+            onRevertThread={(tid) => revertThreadMutation.mutate(tid)}
+            cancelPendingThreadId={cancelThreadMutation.isPending ? cancelThreadMutation.variables ?? null : null}
+          />
+        ) : null}
         {/* Center content — either chat or diff review */}
         <div className="flex-1 min-h-0 relative">
           {/* Chat panel — always mounted to preserve scroll, SSE connections, etc. */}
           <div className={cn("h-full", centerMode !== "chat" && "hidden")}>
-            <ChatPanel
-              key={id}
+            <MemoizedChatPanel
+              key={activeThread ? `${id}:${activeThread.id}` : id}
               session={session}
               sessionId={id}
+              activeThread={activeThread}
               isActive={isActive}
-              onDiffClick={() => openReview()}
+              optimisticMessages={optimisticMessages}
+              onDiffClick={handleChatDiffClick}
               onApprovePlan={handleApprovePlan}
               onAdjustPlan={handleAdjustPlan}
-              onRegisterScrollToLiveEdge={(scrollToLiveEdge) => {
-                chatPanelScrollToLiveEdgeRef.current = scrollToLiveEdge;
-              }}
+              onRegisterScrollToLiveEdge={registerChatPanelScrollToLiveEdge}
             />
           </div>
           {/* Review diff view — mounted only when active */}
@@ -2931,13 +3842,14 @@ export function SessionDetailContent({ id }: { id: string }) {
               <div className="flex-1 min-h-0">
                 <ReviewDiffView
                   sessionId={id}
-                  files={filteredFiles}
-                  allFiles={allDiffFiles}
+                  files={visibleFilteredFiles}
+                  allFiles={visibleDiffFiles}
                   activeFileIndex={activeFileIndex}
                   onFileChange={setActiveFileIndex}
                   onBack={exitReview}
                   isMobile={isMobileReviewViewport}
                   onOpenFileList={openMobileFilesList}
+                  onOpenComposer={session.agent_type !== "pm_agent" ? () => setMobileReviewComposerOpen(true) : undefined}
                   commentsByLine={commentsByLine}
                   activeCommentLine={activeCommentLine}
                   onAddComment={handleAddComment}
@@ -2953,7 +3865,7 @@ export function SessionDetailContent({ id }: { id: string }) {
           )}
         </div>
 
-        {session.agent_type !== "pm_agent" && (
+        {session.agent_type !== "pm_agent" && !isDedicatedMobileReview && (
           <>
             {composerIsSnapshotExpired && (
               <div className="flex items-center gap-2 px-4 py-2.5 text-xs border-t bg-amber-50 dark:bg-amber-950/20 border-amber-200 dark:border-amber-800/40 text-amber-800 dark:text-amber-300">
@@ -2981,6 +3893,7 @@ export function SessionDetailContent({ id }: { id: string }) {
               attachments={composerAttachments}
               isUploading={composerIsUploading}
               onUpload={handleComposerUpload}
+              onPasteFiles={uploadComposerFiles}
               onRemoveAttachment={handleRemoveComposerAttachment}
               openComments={attachedReviewComments}
               availableModels={composerAvailableModels}
@@ -2993,7 +3906,7 @@ export function SessionDetailContent({ id }: { id: string }) {
               cancelPending={cancelMutation.isPending}
               uploadError={composerUploadError}
               onCancelSession={() => cancelMutation.mutate()}
-              onSend={() => sendMutation.mutate({})}
+              onSend={() => queueSend()}
               textareaRef={composerTextareaRef}
               uploadInputRef={composerUploadInputRef}
               references={composerReferences}
@@ -3002,20 +3915,11 @@ export function SessionDetailContent({ id }: { id: string }) {
               onCommandsChange={setComposerCommands}
               repositoryId={session.repository_id}
               branch={session.target_branch}
-              agentType={session.agent_type}
+              agentType={composerAgentType}
+              targetLabel={activeThread ? composerTargetLabel : undefined}
             />
           </>
         )}
-
-        {/* Session footer bar */}
-        <SessionFooter
-          status={session.status}
-          currentTurn={session.current_turn}
-          diffStats={diffStats}
-          onDiffClick={centerMode === "review" ? undefined : () => openReview()}
-          openCommentCount={footerOpenCommentCount}
-          onCommentsClick={centerMode === "review" ? undefined : () => openReview()}
-        />
       </div>
 
       {/* Detail panel — inline on desktop, hidden on mobile (rendered as a
@@ -3037,6 +3941,7 @@ export function SessionDetailContent({ id }: { id: string }) {
         <SheetContent
           side="bottom"
           id="session-detail-sheet"
+          hideCloseButton
           className="md:hidden h-[85vh] max-h-[85vh] min-h-[60vh] p-0 flex flex-col gap-0 bg-background"
         >
           <SheetTitle className="sr-only">Session details</SheetTitle>
@@ -3046,6 +3951,145 @@ export function SessionDetailContent({ id }: { id: string }) {
           {panelTabsEl}
         </SheetContent>
       </Sheet>
+      {session.agent_type !== "pm_agent" ? (
+        <Sheet open={mobileReviewComposerOpen} onOpenChange={setMobileReviewComposerOpen}>
+          <SheetContent
+            side="bottom"
+            className="max-h-[85vh] overflow-y-auto rounded-t-2xl p-0"
+          >
+            <SheetHeader className="border-b border-border px-4 py-4 text-left">
+              <SheetTitle>Message agent</SheetTitle>
+              <SheetDescription>
+                Send follow-up guidance without leaving the mobile diff reader.
+              </SheetDescription>
+            </SheetHeader>
+            {composerIsSnapshotExpired ? (
+              <div className="flex items-center gap-2 px-4 py-3 text-xs border-b bg-amber-50 dark:bg-amber-950/20 border-amber-200 dark:border-amber-800/40 text-amber-800 dark:text-amber-300">
+                <Clock className="h-3.5 w-3.5 shrink-0" />
+                <span>
+                  This session&apos;s environment has expired. Sessions can be continued for up to 30 days after their last activity. To make further changes, please start a new session.
+                </span>
+              </div>
+            ) : null}
+            {composerLacksHeadlessResume && composerCanSendMessage && !composerIsSnapshotExpired ? (
+              <div className="flex items-center gap-2 px-4 py-3 text-xs border-b bg-sky-50 dark:bg-sky-950/20 border-sky-200 dark:border-sky-800/40 text-sky-800 dark:text-sky-300">
+                <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+                <span>
+                  {AGENTS_BY_KEY[session.agent_type]?.label ?? session.agent_type} doesn&apos;t support headless conversation resume. Follow-up messages run against the restored filesystem, but earlier chat context is not replayed — include anything you need the agent to remember.
+                </span>
+              </div>
+            ) : null}
+            <SessionComposer
+              message={composerMessage}
+              onMessageChange={setComposerMessage}
+              planMode={composerPlanMode}
+              onPlanModeChange={setComposerPlanMode}
+              selectedModel={composerSelectedModel}
+              onSelectedModelChange={setComposerSelectedModel}
+              attachments={composerAttachments}
+              isUploading={composerIsUploading}
+              onUpload={handleComposerUpload}
+              onPasteFiles={uploadComposerFiles}
+              onRemoveAttachment={handleRemoveComposerAttachment}
+              openComments={attachedReviewComments}
+              availableModels={composerAvailableModels}
+              canSendMessage={composerCanSendMessage}
+              isRunning={composerIsRunning}
+              isSnapshotExpired={composerIsSnapshotExpired}
+              isClaudeCode={composerIsClaudeCode}
+              sendPending={sendMutation.isPending}
+              sendError={sendMutation.error}
+              cancelPending={cancelMutation.isPending}
+              uploadError={composerUploadError}
+              onCancelSession={() => cancelMutation.mutate()}
+              onSend={() => queueSend()}
+              textareaRef={composerTextareaRef}
+              uploadInputRef={composerUploadInputRef}
+              references={composerReferences}
+              onReferencesChange={setComposerReferences}
+              commands={composerCommands}
+              onCommandsChange={setComposerCommands}
+              repositoryId={session.repository_id}
+              branch={session.target_branch}
+              agentType={composerAgentType}
+              targetLabel={activeThread ? composerTargetLabel : undefined}
+            />
+          </SheetContent>
+        </Sheet>
+      ) : null}
+      <Dialog open={addThreadOpen} onOpenChange={setAddThreadOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Add agent tab</DialogTitle>
+            <DialogDescription>
+              Create a blank tab in this sandbox. It will not run until you send the first message.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4">
+            <div className="space-y-2">
+              <Label className="text-xs" htmlFor="new-thread-agent">Agent</Label>
+              <Select value={newThreadAgentType} onValueChange={setNewThreadAgentType}>
+                <SelectTrigger id="new-thread-agent" aria-label="Agent">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {AGENTS.map((agent) => (
+                    <SelectItem key={agent.key} value={agent.key}>
+                      {agent.label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            {selectedNewThreadModels.length > 0 && (
+              <div className="space-y-2">
+                <Label className="text-xs" htmlFor="new-thread-model">Model</Label>
+                <Select value={newThreadModel || "__default"} onValueChange={(value) => setNewThreadModel(value === "__default" ? "" : value)}>
+                  <SelectTrigger id="new-thread-model" aria-label="Model">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="__default">Default model</SelectItem>
+                    {selectedNewThreadModels.map((model) => (
+                      <SelectItem key={model} value={model}>
+                        {model}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+            )}
+            <div className="space-y-2">
+              <Label className="text-xs" htmlFor="new-thread-label">Tab label</Label>
+              <Input
+                id="new-thread-label"
+                aria-label="Tab label"
+                value={newThreadLabel}
+                onChange={(event) => setNewThreadLabel(event.target.value)}
+                placeholder={`${selectedNewThreadAgent?.label ?? "Agent"} ${threads.length + 1}`}
+              />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => setAddThreadOpen(false)}
+              disabled={createThreadMutation.isPending}
+            >
+              Cancel
+            </Button>
+            <Button
+              type="button"
+              onClick={() => createThreadMutation.mutate()}
+              disabled={createThreadMutation.isPending}
+            >
+              {createThreadMutation.isPending && <Loader2 className="h-4 w-4 animate-spin" />}
+              Create tab
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
       <AlertDialog
         open={!!prAuthPrompt}
         onOpenChange={(open) => {

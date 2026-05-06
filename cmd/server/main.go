@@ -25,8 +25,8 @@ import (
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/llm"
 	"github.com/assembledhq/143/internal/logging"
-	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/metrics"
+	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/observability"
 	"github.com/assembledhq/143/internal/services"
 	"github.com/assembledhq/143/internal/services/agent"
@@ -51,6 +51,8 @@ import (
 	"github.com/assembledhq/143/internal/version"
 	"github.com/assembledhq/143/internal/worker"
 )
+
+const nodeDrainMarkTimeout = 5 * time.Second
 
 // linearAgentSettingsLoader adapts an OrganizationStore into the narrow
 // settings-loader interface used by linear.NewAgentRepoResolver. Mirrors
@@ -170,6 +172,13 @@ func main() {
 	}
 	sessionStreams := cache.NewSessionStreams(redisClient, logger, redisMetrics)
 	jobNotifier := cache.NewJobNotifier(redisClient, logger)
+	// Eval batch + bootstrap pub/sub fanout. Constructed once and shared
+	// between the API (for SSE handlers) and the worker (for publishing on
+	// state transitions) so a single connection pool drives both. nil-safe
+	// when redisClient is nil — the SSE returns 503 and the worker's
+	// publishEvalBatchSignal helper skips publish.
+	evalBatchStreams := cache.NewEvalBatchStreams(redisClient, logger)
+	evalBootstrapStreams := cache.NewEvalBootstrapStreams(redisClient, logger)
 
 	// Create codex auth service (shared between router and orchestrator).
 	var cryptoSvc *crypto.Service
@@ -179,10 +188,47 @@ func main() {
 			logger.Fatal().Err(err).Msg("failed to initialize crypto service")
 		}
 	}
+	// Refuse to serve traffic until the unified-coding-credentials post-step
+	// (Anthropic API-key/subscription split) has run. Fresh installs that have
+	// no anthropic rows pass the gate automatically.
+	if err := db.EnsureAnthropicSplitSentinel(ctx, pool); err != nil {
+		logger.Fatal().Err(err).Msg("coding-credentials migration gate failed; server refusing to start")
+	}
+
 	credentialStore := db.NewOrgCredentialStore(pool, cryptoSvc)
 	userCredentialStore := db.NewUserCredentialStore(pool, cryptoSvc)
-	codexAuthSvc := codexauth.NewService(credentialStore, logger)
-	claudeCodeAuthSvc := claudecodeauth.NewService(credentialStore, logger)
+	codingCredentialStore := db.NewCodingCredentialStore(pool, cryptoSvc)
+	// Wire the unified coding-credentials mirror into both legacy stores so
+	// every existing write path (OAuth services, /settings/coding-auths,
+	// /settings/credentials/personal, /settings/credentials/team) lands in
+	// `coding_credentials` as well as the legacy table. Reads come from the
+	// unified store via AgentEnv.CodingCredentials. The mirror is removed in
+	// the unified-credentials cleanup PR.
+	credentialStore.SetCodingMirror(codingCredentialStore)
+	userCredentialStore.SetCodingMirror(codingCredentialStore)
+	// Pipe mirror failures into the application logger so a drift between
+	// the legacy and unified tables is visible in production telemetry.
+	mirrorLog := func(format string, args ...any) {
+		logger.Warn().Msgf(format, args...)
+	}
+	credentialStore.SetMirrorLogger(mirrorLog)
+	userCredentialStore.SetMirrorLogger(mirrorLog)
+	codingCredentialStore.SetMirrorLogger(mirrorLog)
+	// Expose the mirror's drift / failure counters through OTel so the
+	// dual-write rollout has a dashboard signal when the unified table is
+	// drifting from the legacy stores. Cleaned up alongside the mirror itself.
+	if _, err := metrics.NewMirrorMetrics(func() (uint64, uint64) {
+		return codingCredentialStore.MirrorDriftCount(), codingCredentialStore.MirrorFailureCount()
+	}); err != nil {
+		logger.Fatal().Err(err).Msg("failed to initialize coding-credentials mirror metrics")
+	}
+	// Both OAuth services depend on a scope-aware credential surface. The
+	// adapter routes org-scope traffic to the legacy OrgCredentialStore
+	// (mirrored to coding_credentials) and personal-scope traffic to the
+	// unified CodingCredentialStore directly — see internal/db/scoped_credential_store.go.
+	scopedCredentialStore := db.NewScopedCredentialStore(credentialStore, codingCredentialStore)
+	codexAuthSvc := codexauth.NewService(scopedCredentialStore, logger)
+	claudeCodeAuthSvc := claudecodeauth.NewService(scopedCredentialStore, logger)
 
 	// Platform LLM client for internal features (titles, PR descriptions, project
 	// generation, validation, prioritization). Uses the cheap PLATFORM_LLM_MODEL.
@@ -212,19 +258,6 @@ func main() {
 			pvProvider = dockerPreviewProvider
 			snapshotExec = sandboxExec
 			apiSandboxProvider = sandboxExec
-
-			// Pre-pull infrastructure template images in the background so
-			// the first preview start that needs e.g. postgres:17-alpine
-			// answers the HTTP request inside the server's WriteTimeout
-			// instead of timing out on a multi-minute cold pull. The
-			// provider's lazy-pull stays as a safety net for templates
-			// added after boot. Detached from the process ctx so a slow
-			// pull never blocks shutdown.
-			go func() {
-				prepullCtx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
-				defer cancel()
-				dockerPreviewProvider.EnsureInfraImages(prepullCtx)
-			}()
 		} else {
 			logger.Warn().Err(dockerErr).Msg("Docker not available — file browsing and preview provider disabled")
 		}
@@ -264,6 +297,7 @@ func main() {
 	snapshotLog.Msg("snapshot store configured")
 
 	cancelRegistry := agent.NewCancelRegistry(logger)
+	threadCancelRegistry := agent.NewThreadCancelRegistry(logger)
 	// Shared org-settings cache: the settings handler invalidates it on write,
 	// the orchestrator reads it when resolving Amp/Pi agent_config. In single-
 	// process deployments (MODE=all), the router and worker share this instance
@@ -284,7 +318,7 @@ func main() {
 	// Closed when the process receives SIGTERM so long-lived handlers (SSE
 	// streams, etc.) can end their loops cleanly during graceful shutdown.
 	shutdownCh := make(chan struct{})
-	router, gwSrv, recycleWorker, inspectorCloser, previewManager, err := api.NewRouter(cfg, pool, logger, sentryReporter, codexAuthSvc, claudeCodeAuthSvc, llmClient, fileReader, cancelRegistry, pvProvider, snapshotExec, apiSandboxProvider, apiSnapshotStore, orgSettingsCache, shutdownCh, redisClient, sessionStreams)
+	router, gwSrv, recycleWorker, inspectorCloser, previewManager, err := api.NewRouter(cfg, pool, logger, sentryReporter, codexAuthSvc, claudeCodeAuthSvc, llmClient, fileReader, cancelRegistry, threadCancelRegistry, pvProvider, snapshotExec, apiSandboxProvider, apiSnapshotStore, orgSettingsCache, shutdownCh, redisClient, sessionStreams, codingCredentialStore)
 	if err != nil {
 		logger.Fatal().Err(err).Msg("failed to initialize API router")
 	}
@@ -327,6 +361,7 @@ func main() {
 		pullRequestStore := db.NewPullRequestStore(pool)
 		deployStore := db.NewDeployStore(pool)
 		sessionMessageStore := db.NewSessionMessageStore(pool)
+		sessionThreadStore := db.NewSessionThreadStore(pool)
 		priorityScoreStore := db.NewPriorityScoreStore(pool)
 		complexityEstimateStore := db.NewComplexityEstimateStore(pool)
 		pmPlanStore := db.NewPMPlanStore(pool)
@@ -375,6 +410,8 @@ func main() {
 			EvalBootstraps:      db.NewEvalBootstrapStore(pool),
 			Repositories:        repoStore,
 			SessionMessages:     sessionMessageStore,
+			SessionThreads:      sessionThreadStore,
+			ThreadFileEvents:    db.NewSessionThreadFileEventStore(pool),
 			Automations:         automationStore,
 			AutomationRuns:      automationRunStore,
 			SessionIssueLinks:   db.NewSessionIssueLinkStore(pool),
@@ -386,13 +423,18 @@ func main() {
 		// workerServices.PR.WaitForPostPRSnapshotUploads().
 		var services *worker.Services
 		if canBuildServices(cfg, logger) {
-			services = buildServices(cfg, pool, logger, codexAuthSvc, claudeCodeAuthSvc, credentialStore, userCredentialStore, issueStore, sessionStore,
+			services = buildServices(cfg, pool, logger, codexAuthSvc, claudeCodeAuthSvc, credentialStore, userCredentialStore, codingCredentialStore, issueStore, sessionStore,
 				jobStore, orgStore, repoStore, validationStore, pullRequestStore,
 				deployStore, priorityScoreStore, complexityEstimateStore, pmPlanStore, pmDecisionLogStore,
 				projectStore, projectTaskStore, projectCycleStore, pmDocumentStore, integrationStore,
-				sessionMessageStore, automationRunStore, snapshotStore, billingMetrics, cancelRegistry, orgSettingsCache)
+				sessionMessageStore, automationRunStore, snapshotStore, billingMetrics, cancelRegistry, threadCancelRegistry, orgSettingsCache)
 			if services != nil {
 				sandboxAuthShutdown = services.SandboxAuthShutdown
+				// Wire eval pub/sub publishers so worker handlers can wake
+				// the API SSE subscribers on every state transition without
+				// the API having to poll Postgres.
+				services.EvalBatchStreams = evalBatchStreams
+				services.EvalBootstrapStreams = evalBootstrapStreams
 				workerServices = services
 			}
 		}
@@ -481,12 +523,17 @@ func main() {
 
 		recoveryLoop := cluster.NewRecoveryLoop(nodeManager, jobStore, logger, 90*time.Second, 100)
 		go recoveryLoop.Start(ctx, 30*time.Second)
+		go worker.RunQueueHealthSampler(ctx, jobStore, logger, time.Minute)
 
 		usageRollupStore := db.NewUsageRollupStore(pool)
 		reaperOpts := []agent.SessionReaperOption{
 			agent.WithOrphanCloser(db.NewContainerUsageStore(pool)),
 			agent.WithUsageRoller(usageRollupStore),
 			agent.WithMaxRunningAge(cfg.SessionMaxRunningAge),
+			// Phase 0.5b safety net: fails session_threads stuck in 'running'
+			// past maxRunningAge. Catches orphans the orchestrator/handler
+			// thread.status reset paths couldn't unwind themselves.
+			agent.WithStuckThreadLister(sessionThreadStore),
 		}
 		if previewManager != nil {
 			previewStore := db.NewPreviewStore(pool)
@@ -536,12 +583,18 @@ func main() {
 
 	// Graceful shutdown.
 	//
-	// Ordering matters here. docker-compose.app.yml sets stop_grace_period to
-	// 120s; we must finish shutting down before Docker SIGKILLs us. The total
-	// budget spent below is:
-	//   - SSE drain + http.Server.Shutdown:  up to 110s
-	//   - preview gateway.Shutdown:          up to 60s (parallel with above)
-	// leaving a safety margin under the 120s SIGKILL deadline.
+	// Two independent budgets:
+	//   - Worker job drain:    cfg.WorkerDrainTimeout (default 45m). Long
+	//     enough to let in-flight coding turns finish; cancelling them
+	//     mid-execution produces orphaned thread rows when partial DB state
+	//     lands during the orchestrator's cleanup defers. The matching outer
+	//     bound is docker-compose.worker.yml stop_grace_period.
+	//   - HTTP API drain:      110s. Bounded by docker-compose.app.yml
+	//     stop_grace_period=120s with a 10s SIGKILL safety margin. Only
+	//     load-bearing on api/all modes.
+	//   - Preview gateway:     60s, in parallel with HTTP drain.
+	// On worker-only nodes the HTTP drain is a no-op (no traffic) so the
+	// long worker budget is the only thing the deploy actually waits on.
 	go func() {
 		sigCh := make(chan os.Signal, 1)
 		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
@@ -551,10 +604,12 @@ func main() {
 		for _, w := range processWorkers {
 			w.RequestDrain()
 		}
-		drainCtx, drainCancel := context.WithTimeout(context.Background(), 110*time.Second)
-		if err := nodeManager.RequestDrain(drainCtx, time.Now()); err != nil {
+		nodeDrainCtx, nodeDrainCancel := context.WithTimeout(context.Background(), nodeDrainMarkTimeout)
+		if err := nodeManager.RequestDrain(nodeDrainCtx, time.Now()); err != nil {
 			logger.Warn().Err(err).Msg("failed to mark node draining")
 		}
+		nodeDrainCancel()
+		drainCtx, drainCancel := context.WithTimeout(context.Background(), cfg.WorkerDrainTimeout)
 		for {
 			activeJobs := 0
 			for _, w := range processWorkers {
@@ -577,17 +632,12 @@ func main() {
 		// session is stuck with pending_snapshot_key set with no in-flight
 		// uploader to clear it.
 		//
-		// This drain is best-effort by design: the shared 110s drainCtx is
-		// well below postPRSnapshotUploadTimeout (6 minutes), so a real
-		// upload that has only just started at shutdown will not finish
-		// within budget. That is acceptable — cluster.Scheduler's
-		// reapStrandedPendingSnapshots pass clears stranded rows on the
-		// next tick (within strandedPendingSnapshotThreshold = 15m), so
-		// the worst-case outcome is a delayed resume rather than a
-		// permanently stuck row. The drain still pays for itself when
-		// uploads happen to be near completion (the common case under
-		// light load), and gives the goroutines a chance to call
-		// Promote/Clear before the process exits.
+		// This drain is best-effort by design: drainCtx may have been
+		// largely consumed by the worker drain above. cluster.Scheduler's
+		// reapStrandedPendingSnapshots pass clears any rows the upload
+		// goroutines didn't get to (within strandedPendingSnapshotThreshold
+		// = 15m), so the worst-case outcome is a delayed resume rather than
+		// a permanently stuck row.
 		drainPostPRUploads(drainCtx, resolvePostPRSnapshotDrainer(workerServices), logger)
 	drained:
 		drainCancel()
@@ -802,6 +852,7 @@ func buildServices(
 	claudeCodeAuthSvc *claudecodeauth.Service,
 	credentialStore *db.OrgCredentialStore,
 	userCredentialStore *db.UserCredentialStore,
+	codingCredentialStore *db.CodingCredentialStore,
 	issueStore *db.IssueStore,
 	sessionStore *db.SessionStore,
 	jobStore *db.JobStore,
@@ -824,6 +875,7 @@ func buildServices(
 	snapshotStore storage.SnapshotStore,
 	billingMetrics *metrics.BillingMetrics,
 	cancelRegistry *agent.CancelRegistry,
+	threadCancelRegistry *agent.ThreadCancelRegistry,
 	orgSettingsCache *agent.OrgSettingsCache,
 ) *worker.Services {
 	// GitHub App service (for installation tokens, PR creation).
@@ -888,18 +940,20 @@ func buildServices(
 	// and the PM service so both paths resolve provider credentials, Codex
 	// auth.json, and agent_config overrides through a single code path.
 	agentEnv := agent.NewAgentEnv(agent.AgentEnvDeps{
-		Credentials:      credentialStore,
-		UserCredentials:  userCredentialStore,
-		Orgs:             orgStore,
-		OrgSettingsCache: orgSettingsCache,
-		CodexAuth:        codexAuthSvc,
-		Provider:         sandboxProvider,
-		Logger:           logger,
+		Credentials:       credentialStore,
+		UserCredentials:   userCredentialStore,
+		CodingCredentials: codingCredentialStore,
+		Orgs:              orgStore,
+		OrgSettingsCache:  orgSettingsCache,
+		CodexAuth:         codexAuthSvc,
+		Provider:          sandboxProvider,
+		Logger:            logger,
 	})
 
 	// Orchestrator.
 	sessionLogStore := db.NewSessionLogStore(pool)
 	sessionQuestionStore := db.NewSessionQuestionStore(pool)
+	sessionThreadStore := db.NewSessionThreadStore(pool)
 	projectTaskUpdater := pm.NewProjectHooks(projectTaskStore, projectStore, logger)
 	automationRunUpdater := automations.NewAutomationHooks(automationRunStore, logger)
 	containerUsageStore := db.NewContainerUsageStore(pool)
@@ -937,6 +991,7 @@ func buildServices(
 		SessionLogs:       sessionLogStore,
 		SessionQuestions:  sessionQuestionStore,
 		SessionMessages:   sessionMessageStore,
+		SessionThreads:    sessionThreadStore,
 		SessionIssueLinks: db.NewSessionIssueLinkStore(pool),
 		IssueSnapshots:    db.NewSessionTurnIssueSnapshotStore(pool),
 		DecisionLog:       pmDecisionLogStore,
@@ -951,9 +1006,11 @@ func buildServices(
 		ClaudeCodeAuth:    claudeCodeAuthSvc,
 		Credentials:       credentialStore,
 		UserCredentials:   userCredentialStore,
+		CodingCredentials: codingCredentialStore,
 		Snapshots:         snapshotStore,
 		UsageTracker:      usageTracker,
 		Cancels:           cancelRegistry,
+		ThreadCancels:     threadCancelRegistry,
 		OrgSettingsCache:  orgSettingsCache,
 		IdentityResolver:  identityResolver,
 		SandboxAuth:       sandboxAuthServer,
@@ -977,6 +1034,7 @@ func buildServices(
 		prService,
 		sandboxProvider,
 		snapshotStore,
+		sandboxAuthServer,
 		integrationStore,
 		userCredentialStore,
 		appUserAuthSvc,
@@ -1050,19 +1108,34 @@ func buildServices(
 		logger.Warn().Err(mErr).Msg("failed to register linear_agent metrics in worker; milestone emits will not record")
 	}
 	linearService := linear.Build(linear.BuildDeps{
-		Pool:         pool,
-		Logger:       logger,
-		Integrations: integrationStore,
-		Credentials:  credentialStore,
-		Issues:       issueStore,
-		Sessions:     sessionStore,
-		IssueLinks:   db.NewSessionIssueLinkStore(pool),
-		Orgs:         orgStore,
-		Jobs:         jobStore,
+		Pool:               pool,
+		Logger:             logger,
+		Integrations:       integrationStore,
+		IntegrationsWriter: integrationStore,
+		Credentials:        credentialStore,
+		CredentialsWriter:  credentialStore,
+		Issues:             issueStore,
+		Sessions:           sessionStore,
+		IssueLinks:         db.NewSessionIssueLinkStore(pool),
+		Orgs:               orgStore,
+		Jobs:               jobStore,
+		OAuthClient: linear.OAuthClientCreds{
+			ClientID:     cfg.LinearOAuthClientID,
+			ClientSecret: cfg.LinearOAuthClientSecret,
+		},
 		AppBaseURL:   cfg.FrontendURL,
 		AgentMetrics: workerLinearAgentMetrics,
 	})
 	prService.SetLinearMilestoneEnqueuer(linear.MilestoneEnqueuerFor(jobStore, logger))
+	// Wire the linear service into the agent env so sandbox-bound
+	// LINEAR_ACCESS_TOKEN is resolved through the refresh path. Without
+	// this, sessions that start within the refresh window of a token's
+	// expiry would inject a soon-to-be-stale token and the agent's
+	// 143-tools would 401 mid-turn. SetLinearTokens is a no-op when called
+	// before linearService is built, but the orchestrator construction
+	// happens on the same goroutine after linear.Build returns, so this
+	// ordering is deterministic.
+	agentEnv.SetLinearTokens(linearService)
 
 	// Runtime resource sampler. Optional capability — only providers that
 	// implement RuntimeStatsProvider produce samples. Disabled when the
@@ -1107,8 +1180,8 @@ func buildServices(
 			repoStore,
 		)
 		svc.LinearAgentDeps = &worker.LinearAgentEventHandlerDeps{
-			Stores: nil, // populated below in BuildStores
-			Linear: linearService,
+			Stores:        nil, // populated below in BuildStores
+			Linear:        linearService,
 			RepoResolver:  repoResolver,
 			ProviderState: db.NewLinearProviderStateStore(pool),
 			SettingsLoader: func(ctx context.Context, orgID uuid.UUID) (models.LinearAgentSettings, error) {
@@ -1143,6 +1216,7 @@ func wireWorkerPRService(
 	prService *ghservice.PRService,
 	sandboxProvider agent.SandboxProvider,
 	snapshotStore storage.SnapshotStore,
+	sandboxAuthServer agent.SandboxAuthServer,
 	integrationStore *db.IntegrationStore,
 	userCredentialStore *db.UserCredentialStore,
 	appUserAuthSvc *ghservice.AppUserAuthService,
@@ -1155,6 +1229,7 @@ func wireWorkerPRService(
 		return
 	}
 	prService.SetSandboxPushDeps(sandboxProvider, snapshotStore)
+	prService.SetSandboxAuth(sandboxAuthServer)
 	prService.SetIntegrationStore(integrationStore)
 	prService.SetUserCredentialStore(userCredentialStore)
 	prService.SetAppUserAuth(appUserAuthSvc)

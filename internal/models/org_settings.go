@@ -494,7 +494,7 @@ const (
 	DefaultMinPriorityThreshold                     = 30.0
 	DefaultDefaultAgentType           AgentType     = AgentTypeCodex
 	DefaultPMScheduleHours                          = 24
-	DefaultPMModel                                  = PMModelSonnet
+	DefaultPMModel                                  = CodexModelGPT54
 	DefaultAuditRetentionDays                       = 90
 	DefaultContextRefreshIntervalDays               = 14
 	DefaultOrgSize                    OrgSize       = OrgSizeMedium

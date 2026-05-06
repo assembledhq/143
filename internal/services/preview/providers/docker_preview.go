@@ -388,6 +388,7 @@ func (d *DockerPreviewProvider) StopPreview(ctx context.Context, handle string) 
 
 	// Cancel all service goroutines and wait for background work to finish.
 	state.cancelFn()
+	d.terminateServiceProcesses(state)
 	state.wg.Wait()
 
 	// Tear down infrastructure containers.
@@ -408,6 +409,75 @@ func (d *DockerPreviewProvider) StopPreview(ctx context.Context, handle string) 
 	d.mu.Unlock()
 
 	return nil
+}
+
+const serviceTerminateTimeout = 5 * time.Second
+
+type serviceProcessTarget struct {
+	name string
+	pid  int
+	port int
+}
+
+func (d *DockerPreviewProvider) terminateServiceProcesses(state *previewState) {
+	if d.executor == nil || state.sandbox == nil {
+		return
+	}
+
+	d.mu.RLock()
+	targets := make([]serviceProcessTarget, 0, len(state.services))
+	for name, ss := range state.services {
+		targets = append(targets, serviceProcessTarget{
+			name: name,
+			pid:  ss.pid,
+			port: ss.port,
+		})
+	}
+	d.mu.RUnlock()
+	sort.Slice(targets, func(i, j int) bool {
+		return targets[i].name < targets[j].name
+	})
+
+	for _, target := range targets {
+		if target.pid <= 0 && target.port <= 0 {
+			continue
+		}
+
+		termCtx, cancel := context.WithTimeout(context.Background(), serviceTerminateTimeout)
+		var stderr bytes.Buffer
+		exitCode, err := d.executor.Exec(termCtx, state.sandbox, buildTerminateServiceProcessCmd(target.pid, target.port), io.Discard, &stderr)
+		cancel()
+		if err != nil {
+			d.logger.Warn().Err(err).Str("service", target.name).Msg("failed to terminate preview service process")
+			continue
+		}
+		if exitCode != 0 {
+			d.logger.Warn().
+				Str("service", target.name).
+				Int("exit_code", exitCode).
+				Str("stderr", strings.TrimSpace(stderr.String())).
+				Msg("preview service process termination command exited non-zero")
+		}
+	}
+}
+
+func buildTerminateServiceProcessCmd(pid, port int) string {
+	var explicitPID string
+	if pid > 0 {
+		explicitPID = fmt.Sprintf("printf '%%s\\n' %d", pid)
+	} else {
+		explicitPID = ":"
+	}
+
+	var portPIDs string
+	if port > 0 {
+		portPIDs = fmt.Sprintf("if command -v lsof >/dev/null 2>&1; then lsof -ti :%d 2>/dev/null || true; fi", port)
+	} else {
+		portPIDs = ":"
+	}
+
+	collectPIDs := fmt.Sprintf("{ %s; %s; } | awk 'NF && !seen[$1]++'", explicitPID, portPIDs)
+	return fmt.Sprintf(`pids="$(%s)"; if [ -n "$pids" ]; then kill $pids 2>/dev/null || true; sleep 1; kill -9 $pids 2>/dev/null || true; fi`, collectPIDs)
 }
 
 // =============================================================================
@@ -473,7 +543,7 @@ func (d *DockerPreviewProvider) PreviewStatus(ctx context.Context, handle string
 	for name, ih := range state.infra {
 		infraList = append(infraList, infraInfo{
 			name: name, template: ih.Template, containerID: ih.ContainerID,
-			host: ih.Host, port: ih.Port,
+			host: ih.Credential.Host, port: ih.Credential.Port,
 		})
 	}
 	d.mu.RUnlock()
@@ -518,15 +588,15 @@ func (d *DockerPreviewProvider) provisionInfra(
 		return nil, fmt.Errorf("resolve sandbox network: %w", err)
 	}
 
-	cred, err := generateInfraCredential(infraName)
-	if err != nil {
-		return nil, fmt.Errorf("generate credential for %q: %w", infraName, err)
-	}
 	handlePrefix := previewHandle
 	if len(handlePrefix) > 12 {
 		handlePrefix = handlePrefix[:12]
 	}
 	containerName := fmt.Sprintf("preview-%s-%s", infraName, handlePrefix)
+	cred, err := buildInfraCredential(infraName, containerName, tmpl.DefaultPort)
+	if err != nil {
+		return nil, fmt.Errorf("generate credential for %q: %w", infraName, err)
+	}
 
 	// Ensure the image is on the host before asking Docker to create the
 	// container. Worker hosts only pre-pull the 143-server / 143-sandbox /
@@ -580,8 +650,6 @@ func (d *DockerPreviewProvider) provisionInfra(
 		InfraName:   infraName,
 		Template:    infraCfg.Template,
 		ContainerID: resp.ID,
-		Host:        containerName,
-		Port:        tmpl.DefaultPort,
 		Credential:  cred,
 	}, nil
 }
@@ -686,39 +754,6 @@ func scanPullStreamForError(r io.Reader) error {
 		return fmt.Errorf("read pull stream: %w", err)
 	}
 	return firstErr
-}
-
-// EnsureInfraImages pre-pulls every supported infrastructure template image
-// in parallel, deduplicating via the same singleflight group as the
-// on-demand path. Best-effort: failures are logged but not returned, so a
-// transient registry hiccup doesn't block server startup. Worker boot calls
-// this in a background goroutine so the first preview that needs e.g.
-// postgres:17-alpine usually finds the image already on disk and answers
-// the HTTP request well within the server's WriteTimeout.
-//
-// Safe to call multiple times (singleflight collapses to one inspect each
-// after the first run).
-func (d *DockerPreviewProvider) EnsureInfraImages(ctx context.Context) {
-	images := preview.AllInfraImages()
-	if len(images) == 0 {
-		return
-	}
-	d.logger.Info().Strs("images", images).Msg("pre-pulling preview infra images in background")
-
-	var wg sync.WaitGroup
-	for _, ref := range images {
-		ref := ref
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			if err := d.ensureImage(ctx, ref); err != nil {
-				d.logger.Warn().Err(err).Str("image", ref).Msg("preview infra image pre-pull failed; will retry on first preview start")
-				return
-			}
-		}()
-	}
-	wg.Wait()
-	d.logger.Info().Msg("preview infra image pre-pull pass complete")
 }
 
 func (d *DockerPreviewProvider) buildInfraEnv(template string, cred preview.InfraCredential) []string {
@@ -891,7 +926,7 @@ func notifyServiceFailed(observer preview.ServiceObserver, name, errMsg string, 
 func formatServiceExitError(exitCode int, outputTail []string) string {
 	hint := ""
 	if exitCode == 127 {
-		hint = " (command not found — check that the executable exists on the sandbox's $PATH or use an absolute path in .143/preview.json)"
+		hint = " (command not found — check that the executable exists on the sandbox's $PATH or use an absolute path in .143/config.json)"
 	}
 	base := fmt.Sprintf("exited with code %d%s", exitCode, hint)
 	tail := truncatedTail(outputTail, serviceExitTailLines, serviceExitTailRunes)
@@ -1012,23 +1047,40 @@ func (d *DockerPreviewProvider) startService(
 			}
 		}()
 
-		exitCode, err := d.executor.ExecStream(svcCtx, state.sandbox, cmd, func(line []byte) {
-			// Append to the per-service ring buffer so we can replay the tail
-			// to the observer when the service fails. We copy the bytes
-			// because ExecStream reuses the slice across calls.
-			s := string(line)
+		// appendTail records one line into the per-service ring buffer so we
+		// can replay it to the observer when the service fails. The closure
+		// is shared by stdout and stderr so a process that only logs errors
+		// to stderr (every Go binary using log.Print, every `go build` error)
+		// still surfaces a useful tail instead of an empty buffer.
+		appendTail := func(line string) {
 			d.mu.Lock()
 			if len(ss.outputTail) >= serviceTailLines {
 				ss.outputTail = ss.outputTail[1:]
 			}
-			ss.outputTail = append(ss.outputTail, s)
+			ss.outputTail = append(ss.outputTail, line)
 			d.mu.Unlock()
-			d.logger.Debug().Str("service", name).Str("output", s).Msg("service output")
-		}, io.Discard)
+			d.logger.Debug().Str("service", name).Str("output", line).Msg("service output")
+		}
+		stderrSplitter := &previewLineSplitter{onLine: func(line []byte) {
+			appendTail(string(line))
+		}}
+		exitCode, err := d.executor.ExecStream(svcCtx, state.sandbox, cmd, func(line []byte) {
+			// Copy the bytes because ExecStream reuses the slice across calls.
+			appendTail(string(line))
+		}, stderrSplitter)
+		stderrSplitter.flush()
 
 		d.mu.Lock()
 		var tail []string
-		failed := err != nil || exitCode != 0
+		// If svcCtx was canceled, the service was torn down intentionally
+		// (StopPreview, or readiness-failure cleanup tearing down siblings).
+		// ExecStream's hijacked-connection watcher closes the read mid-stream
+		// in that case and returns a "read exec output" error, but that's the
+		// expected shape of an intentional stop — not a real service failure.
+		// Without this check, a healthy service torn down during cleanup would
+		// be reported to observers as Failed instead of Stopped.
+		stoppedByCancel := svcCtx.Err() != nil && err != nil
+		failed := !stoppedByCancel && (err != nil || exitCode != 0)
 		if failed {
 			ss.status = models.PreviewServiceStatusFailed
 			if err != nil {
@@ -1067,8 +1119,9 @@ func (d *DockerPreviewProvider) startService(
 const readinessProbeAttemptTimeout = 5 * time.Second
 
 func (d *DockerPreviewProvider) waitForReadiness(ctx context.Context, state *previewState, name string, port int, httpPath string, timeout time.Duration) error {
-	deadline := time.NewTimer(timeout)
-	defer deadline.Stop()
+	overallCtx, cancelOverall := context.WithTimeout(ctx, timeout)
+	defer cancelOverall()
+	deadline := time.Now().Add(timeout)
 	tick := time.NewTicker(time.Second)
 	defer tick.Stop()
 
@@ -1099,17 +1152,48 @@ func (d *DockerPreviewProvider) waitForReadiness(ctx context.Context, state *pre
 		return nil
 	}
 
+	// timeoutErr maps overallCtx.Err() back to a caller-friendly error,
+	// distinguishing a parent-ctx cancellation from our own deadline.
+	timeoutErr := func() error {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		return fmt.Errorf("readiness probe timed out after %s", timeout)
+	}
+
 	for {
+		// Check the wall-clock deadline first, before re-entering select. A
+		// time.NewTimer + select on deadline.C used to handle this, but when
+		// a hung Exec returned at the same instant as a buffered tick.C and
+		// a buffered deadline.C, Go's select picked pseudo-randomly between
+		// the two and a string of unlucky picks could stretch the loop far
+		// past `timeout`. Wall-clock check makes the deadline deterministic.
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return timeoutErr()
+		}
 		if err := checkExited(); err != nil {
 			return err
 		}
+		// Check overall deadline before re-entering select: if a hung Exec
+		// just returned because per-attempt timeout cancelled it, both
+		// tick.C and overallCtx.Done() may be ready and select would pick
+		// uniformly at random. We want the deadline to win deterministically.
+		if overallCtx.Err() != nil {
+			return timeoutErr()
+		}
+		// Cap the per-attempt timeout at the remaining budget so a wedged
+		// docker daemon cannot stretch the loop beyond `timeout` by even one
+		// attempt's worth of time.
+		attemptTimeout := readinessProbeAttemptTimeout
+		if remaining < attemptTimeout {
+			attemptTimeout = remaining
+		}
 		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-deadline.C:
-			return fmt.Errorf("readiness probe timed out after %s", timeout)
+		case <-overallCtx.Done():
+			return timeoutErr()
 		case <-tick.C:
-			execCtx, cancel := context.WithTimeout(ctx, readinessProbeAttemptTimeout)
+			execCtx, cancel := context.WithTimeout(overallCtx, attemptTimeout)
 			exitCode, _ := d.executor.Exec(execCtx, state.sandbox, cmd, io.Discard, io.Discard)
 			cancel()
 			if exitCode == 0 {
@@ -1226,12 +1310,19 @@ func resolveCredentialTemplate(template string, cred preview.InfraCredential) st
 	return r.Replace(template)
 }
 
-func generateInfraCredential(infraName string) (preview.InfraCredential, error) {
+// buildInfraCredential constructs a fully-populated InfraCredential. All five
+// fields (Host, Port, Username, Password, Database) must be set on the
+// returned value — resolveCredentialTemplate substitutes every one of them
+// into the inject_env DSN and a zero Host/Port silently produces a broken URL
+// that the consuming service tries to dial against localhost.
+func buildInfraCredential(infraName, host string, port int) (preview.InfraCredential, error) {
 	password, err := preview.RandomHex(16)
 	if err != nil {
 		return preview.InfraCredential{}, fmt.Errorf("generate infra credential password: %w", err)
 	}
 	return preview.InfraCredential{
+		Host:     host,
+		Port:     port,
 		Username: fmt.Sprintf("preview_%s", infraName),
 		Password: password,
 		Database: "preview_db",
@@ -1258,6 +1349,38 @@ func generateHandle() (string, error) {
 
 func shellEscape(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
+}
+
+// previewLineSplitter is an io.Writer that calls onLine for each newline-
+// delimited line written to it. Used as the stderr sink for ExecStream so
+// stderr is fed into the same per-service ring buffer as stdout. The trailing
+// flush() drains a partial final line that wasn't terminated by '\n' (a
+// common shape for `go build` errors and panic stacks that exit without a
+// newline) so it isn't silently lost.
+type previewLineSplitter struct {
+	onLine func(line []byte)
+	buf    bytes.Buffer
+}
+
+func (l *previewLineSplitter) Write(p []byte) (int, error) {
+	n := len(p)
+	l.buf.Write(p)
+	for {
+		line, err := l.buf.ReadBytes('\n')
+		if err != nil {
+			l.buf.Write(line)
+			break
+		}
+		l.onLine(bytes.TrimRight(line, "\n"))
+	}
+	return n, nil
+}
+
+func (l *previewLineSplitter) flush() {
+	if l.buf.Len() > 0 {
+		l.onLine(l.buf.Bytes())
+		l.buf.Reset()
+	}
 }
 
 // tcpPreviewStream wraps a net.Conn as a PreviewStream.

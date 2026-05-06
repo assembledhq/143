@@ -18,7 +18,8 @@ vi.mock('next/link', () => ({
 }));
 
 let mockPathname = '/sessions';
-let mockParams: Record<string, string> = {};
+let mockSelectedSegment: string | null = null;
+const mockRouterPush = vi.fn();
 const mockAuthState: {
   isAuthenticated: boolean;
   user: { id: string } | null;
@@ -32,10 +33,10 @@ const mockAuthState: {
 };
 
 vi.mock('next/navigation', () => ({
-  useRouter: () => ({ push: vi.fn(), replace: vi.fn(), back: vi.fn() }),
+  useRouter: () => ({ push: mockRouterPush, replace: vi.fn(), back: vi.fn() }),
   useSearchParams: () => new URLSearchParams(),
   usePathname: () => mockPathname,
-  useParams: () => mockParams,
+  useSelectedLayoutSegment: () => mockSelectedSegment,
 }));
 
 vi.mock('@/hooks/use-auth', () => ({
@@ -120,7 +121,8 @@ function renderSidebarWithMutableSearchParams(initialSearchParams: Record<string
 describe('SessionSidebar', () => {
   beforeEach(() => {
     mockPathname = '/sessions';
-    mockParams = {};
+    mockSelectedSegment = null;
+    mockRouterPush.mockReset();
     mockOptimisticSessions.length = 0;
     mockAuthState.isAuthenticated = true;
     mockAuthState.user = { id: 'user-1' };
@@ -128,18 +130,18 @@ describe('SessionSidebar', () => {
     mockAuthState.logout = vi.fn();
   });
 
-  it('defaults the owner scope to Mine', async () => {
+  it('defaults the people scope to Mine', async () => {
     let capturedUserId: string | null = null;
     server.use(
       http.get('/api/v1/sessions', ({ request }) => {
-        capturedUserId = new URL(request.url).searchParams.get('triggered_by_user_id');
+        capturedUserId = new URL(request.url).searchParams.get('triggered_by_user_ids');
         return HttpResponse.json({ data: [], meta: {} });
       }),
     );
 
     renderWithProviders(<SessionSidebar />);
 
-    await screen.findByRole('radio', { name: 'Mine' });
+    await screen.findByRole('button', { name: /Mine/ });
     expect(capturedUserId).toBe('user-1');
   });
 
@@ -217,6 +219,56 @@ describe('SessionSidebar', () => {
     });
   });
 
+  it('keeps the desktop archive action de-emphasized until hover or focus', async () => {
+    serveSessions([
+      makeSession({ id: 's1', result_summary: 'Full-width session row' }),
+    ]);
+
+    renderWithProviders(<SessionSidebar />);
+    await screen.findByText('Full-width session row');
+
+    expect(screen.getByRole('button', { name: 'Archive session' })).toHaveClass(
+      'md:opacity-0',
+      'md:group-hover:opacity-100',
+      'md:focus-visible:opacity-100',
+    );
+  });
+
+  it('does not render a separate open-details icon for session rows', async () => {
+    serveSessions([
+      makeSession({ id: 's1', result_summary: 'No extra open button' }),
+    ]);
+
+    renderWithProviders(<SessionSidebar />);
+    await screen.findByText('No extra open button');
+
+    expect(screen.queryByRole('link', { name: 'Open session details for No extra open button' })).not.toBeInTheDocument();
+  });
+
+  it('navigates when the selected row shell is tapped', async () => {
+    mockSelectedSegment = 's1';
+    serveSessions([
+      makeSession({ id: 's1', result_summary: 'Selected session' }),
+    ]);
+
+    renderWithProviders(<SessionSidebar />);
+
+    await screen.findByText('Selected session');
+    const selectedLink = document.querySelector('a[aria-current="page"]') as HTMLAnchorElement | null;
+    expect(selectedLink).not.toBeNull();
+    if (!selectedLink) {
+      throw new Error('expected selected session link to be present');
+    }
+    const selectedRow = selectedLink.parentElement;
+
+    expect(selectedLink).toHaveAttribute('aria-current', 'page');
+    expect(selectedRow).toHaveClass('rounded-xl', 'border', 'border-primary/20', 'bg-background', 'shadow-sm');
+
+    fireEvent.click(selectedRow!);
+
+    expect(mockRouterPush).toHaveBeenCalledWith('/sessions/s1');
+  });
+
   it('clears search on Escape key', async () => {
     serveSessions([
       makeSession({ id: 's1', result_summary: 'Alpha fix' }),
@@ -245,7 +297,7 @@ describe('SessionSidebar', () => {
     ]);
 
     renderWithProviders(<SessionSidebar />, {
-      searchParams: { user: 'all', search: 'Beta' },
+      searchParams: { people: 'all', search: 'Beta' },
     });
 
     const input = await screen.findByPlaceholderText('Search sessions...');
@@ -253,7 +305,7 @@ describe('SessionSidebar', () => {
     expect(screen.queryByText('Alpha fix')).not.toBeInTheDocument();
     expect((await screen.findByText('Beta update')).closest('a')).toHaveAttribute(
       'href',
-      '/sessions/s2?user=all&search=Beta',
+      '/sessions/s2?people=all&search=Beta',
     );
   });
 
@@ -274,8 +326,8 @@ describe('SessionSidebar', () => {
 
     await waitFor(() => {
       expect(input).toHaveValue('');
+      expect(screen.getByText('Alpha fix')).toBeInTheDocument();
     });
-    expect(screen.getByText('Alpha fix')).toBeInTheDocument();
   });
 
   // -----------------------------------------------------------------------
@@ -617,7 +669,7 @@ describe('SessionSidebar', () => {
   // -----------------------------------------------------------------------
 
   it('highlights the selected session', async () => {
-    mockParams = { id: 's1' };
+    mockSelectedSegment = 's1';
     serveSessions([
       makeSession({ id: 's1', result_summary: 'Selected session' }),
       makeSession({ id: 's2', result_summary: 'Other session' }),
@@ -627,8 +679,64 @@ describe('SessionSidebar', () => {
     await screen.findByText('Selected session');
 
     const selectedLink = screen.getByText('Selected session').closest('a');
-    expect(selectedLink?.className).toContain('bg-background');
-    expect(selectedLink?.className).toContain('shadow-sm');
+    const unselectedLink = screen.getByText('Other session').closest('a');
+    const selectedRow = selectedLink?.parentElement;
+    expect(selectedLink?.className).toContain('bg-primary/5');
+    expect(selectedLink?.className).toContain('md:bg-primary/5');
+    expect(selectedLink?.className).toContain('border-transparent');
+    expect(selectedLink?.className).toContain('shadow-none');
+    expect(selectedLink?.className).toContain('ring-0');
+    expect(selectedRow?.className).toContain('rounded-xl');
+    expect(selectedRow?.className).toContain('border-primary/20');
+    expect(selectedRow?.className).toContain('ring-1');
+    expect(selectedRow?.className).toContain('ring-primary/10');
+    expect(selectedRow?.className).toContain('shadow-sm');
+    expect(selectedLink).toHaveAttribute('aria-current', 'page');
+    expect(unselectedLink?.className).not.toContain('bg-primary/5');
+  });
+
+  it('reserves the same selected-shell layout for unselected rows', async () => {
+    mockSelectedSegment = 's1';
+    serveSessions([
+      makeSession({ id: 's1', result_summary: 'Selected session' }),
+      makeSession({ id: 's2', result_summary: 'Other session' }),
+    ]);
+
+    renderWithProviders(<SessionSidebar />);
+    await screen.findByText('Selected session');
+
+    const selectedRow = screen.getByText('Selected session').closest('a')?.parentElement;
+    const unselectedRow = screen.getByText('Other session').closest('a')?.parentElement;
+
+    expect(selectedRow).toHaveClass('border', 'p-1');
+    expect(selectedRow).toHaveClass('border-primary/20');
+    expect(unselectedRow).toHaveClass('border', 'border-transparent', 'p-1');
+  });
+
+  it('highlights the selected session from the active layout segment', async () => {
+    mockPathname = '/sessions/s1';
+    mockSelectedSegment = 's1';
+    serveSessions([
+      makeSession({ id: 's1', result_summary: 'Selected via pathname' }),
+      makeSession({ id: 's2', result_summary: 'Other session' }),
+    ]);
+
+    renderWithProviders(<SessionSidebar />);
+    await screen.findByText('Selected via pathname');
+
+    const selectedLink = screen.getByText('Selected via pathname').closest('a');
+    const selectedRow = selectedLink?.parentElement;
+    expect(selectedLink?.className).toContain('bg-primary/5');
+    expect(selectedLink?.className).toContain('md:bg-primary/5');
+    expect(selectedLink?.className).toContain('border-transparent');
+    expect(selectedLink?.className).toContain('shadow-none');
+    expect(selectedLink?.className).toContain('ring-0');
+    expect(selectedRow?.className).toContain('rounded-xl');
+    expect(selectedRow?.className).toContain('border-primary/20');
+    expect(selectedRow?.className).toContain('ring-1');
+    expect(selectedRow?.className).toContain('ring-primary/10');
+    expect(selectedRow?.className).toContain('shadow-sm');
+    expect(selectedLink).toHaveAttribute('aria-current', 'page');
   });
 
   // -----------------------------------------------------------------------
@@ -641,14 +749,14 @@ describe('SessionSidebar', () => {
     ]);
 
     renderWithProviders(<SessionSidebar />, {
-      searchParams: { user: 'all', status: 'active', repo: 'repo-1' },
+      searchParams: { people: 'all', status: 'active', repo: 'repo-1' },
     });
     await screen.findByText('Linked session');
 
     const link = screen.getByText('Linked session').closest('a');
     expect(link).toHaveAttribute(
       'href',
-      '/sessions/s1?user=all&status=active&repo=repo-1',
+      '/sessions/s1?people=all&status=active&repo=repo-1',
     );
   });
 
@@ -658,29 +766,64 @@ describe('SessionSidebar', () => {
     ]);
 
     renderWithProviders(<SessionSidebar />, {
-      searchParams: { user: 'all', status: 'active', repo: 'repo-1', search: 'Linked' },
+      searchParams: { people: 'all', status: 'active', repo: 'repo-1', search: 'Linked' },
     });
     await screen.findByText('Linked session');
 
     const link = screen.getByText('Linked session').closest('a');
     expect(link).toHaveAttribute(
       'href',
-      '/sessions/s1?user=all&status=active&repo=repo-1&search=Linked',
+      '/sessions/s1?people=all&status=active&repo=repo-1&search=Linked',
     );
   });
 
-  it('preserves a member-id user filter (not just "all")', async () => {
+  it('uses the full row width for the session link and keeps the metadata pills horizontally scrollable', async () => {
+    serveSessions([
+      makeSession({
+        id: 's1',
+        result_summary: 'Overflow session',
+        pm_plan_id: 'plan-123',
+        triggered_by_user_id: undefined,
+        linear_identifier_hint: 'ENG-1234',
+        pr_summary: { status: 'merged', ci_status: '', number: 9, url: '#' },
+        diff_stats: { added: 10, removed: 3, files_changed: 2 },
+      }),
+    ]);
+
+    renderWithProviders(<SessionSidebar />, {
+      searchParams: { people: 'all', status: 'active', repo: 'repo-1', search: 'Overflow' },
+    });
+
+    await screen.findByText('Overflow session');
+
+    const sessionLink = screen.getByText('Overflow session').closest('a');
+    expect(sessionLink).toHaveAttribute(
+      'href',
+      '/sessions/s1?people=all&status=active&repo=repo-1&search=Overflow',
+    );
+
+    const pillsScroller = screen.getByTestId('session-row-meta-scroll-s1');
+    expect(pillsScroller.className).toContain('overflow-x-auto');
+    expect(pillsScroller.className).toContain('scrollbar-hide');
+
+    expect(screen.getByText('ENG-1234')).toBeInTheDocument();
+    expect(screen.getByText('PM')).toBeInTheDocument();
+    expect(screen.getByText('PR')).toBeInTheDocument();
+    expect(screen.getByText('+10')).toBeInTheDocument();
+  });
+
+  it('preserves explicit people selections', async () => {
     serveSessions([
       makeSession({ id: 's1', result_summary: 'Member-scoped session' }),
     ]);
 
     renderWithProviders(<SessionSidebar />, {
-      searchParams: { user: 'user-2' },
+      searchParams: { people: 'user-2,user-3' },
     });
     await screen.findByText('Member-scoped session');
 
     const link = screen.getByText('Member-scoped session').closest('a');
-    expect(link).toHaveAttribute('href', '/sessions/s1?user=user-2');
+    expect(link).toHaveAttribute('href', '/sessions/s1?people=user-2%2Cuser-3');
   });
 
   it('only serializes the filters that are actually set', async () => {
@@ -715,15 +858,34 @@ describe('SessionSidebar', () => {
     ]);
 
     renderWithProviders(<SessionSidebar />, {
-      searchParams: { user: 'all', status: 'active', repo: 'repo-1', search: 'Linked' },
+      searchParams: { people: 'all', status: 'active', repo: 'repo-1', search: 'Linked' },
     });
     const input = await screen.findByPlaceholderText('Search sessions...');
     expect(input).toHaveValue('Linked');
 
     expect(screen.getByRole('link', { name: 'New session' })).toHaveAttribute(
       'href',
-      '/sessions/new?user=all&status=active&repo=repo-1&search=Linked',
+      '/sessions/new?people=all&status=active&repo=repo-1&search=Linked',
     );
+  });
+
+  it('defaults the people scope to Mine for session requests', async () => {
+    const capturedPeople: string[] = [];
+    server.use(
+      http.get('*/api/v1/sessions', ({ request }) => {
+        capturedPeople.push(new URL(request.url).searchParams.get('triggered_by_user_ids') ?? '');
+        return HttpResponse.json({ data: [], meta: {} });
+      }),
+      http.get('*/api/v1/sessions/counts', ({ request }) => {
+        capturedPeople.push(new URL(request.url).searchParams.get('triggered_by_user_ids') ?? '');
+        return HttpResponse.json({ data: { all: 0, active: 0, archived: 0, cap: 100 } });
+      }),
+    );
+
+    renderWithProviders(<SessionSidebar />);
+    await screen.findByRole('button', { name: /Mine/ });
+
+    expect(capturedPeople).toContain('user-1');
   });
 
 });

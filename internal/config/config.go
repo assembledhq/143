@@ -53,6 +53,22 @@ type Config struct {
 	// server process when MODE is "worker" or "all". Increase this on larger
 	// hosts to process more jobs/sandboxes in parallel.
 	WorkerProcessCount int `env:"WORKER_PROCESS_COUNT" envDefault:"2"`
+	// WorkerDrainTimeout is how long graceful shutdown waits for in-flight
+	// worker jobs to finish before cancelling the worker context. Coding
+	// turns routinely run 5–15 minutes (per-org cap is even higher), so a
+	// short window cuts them off mid-execution and produces orphaned thread
+	// rows when partial DB state lands.
+	//
+	// Outer caps (must be ≥ this value):
+	//   - docker-compose.worker.yml stop_grace_period (50m) — binding
+	//     SIGKILL deadline once Docker issues `docker stop`; this is the
+	//     real ceiling on a deploy.
+	//   - deploy/scripts/deploy.sh drain_worker_service polls for up to
+	//     WORKER_DRAIN_TIMEOUT seconds (default 7200s) waiting for the
+	//     SIGTERM'd container to exit, but `--force-recreate` afterwards
+	//     hits stop_grace_period anyway, so the polling ceiling is only a
+	//     safety upper bound, not the effective drain duration.
+	WorkerDrainTimeout time.Duration `env:"WORKER_DRAIN_TIMEOUT" envDefault:"45m"`
 
 	// GitHub OAuth
 	GitHubOAuthClientID     string `env:"GITHUB_OAUTH_CLIENT_ID"`
@@ -172,6 +188,20 @@ type Config struct {
 	// buffer + orchestrator bookkeeping margin); the reaper raises any
 	// lower value and logs a warning.
 	SessionMaxRunningAge time.Duration `env:"SESSION_MAX_RUNNING_AGE" envDefault:"150m"`
+
+	// SessionFilesCacheDir is where the file-context API stages extracted
+	// session workspace snapshots when a session's sandbox container has
+	// already been torn down. The first read for a given snapshot pays a
+	// download + extract; subsequent reads serve straight off this dir.
+	// Empty disables the snapshot fallback (file-context returns NO_SANDBOX
+	// the moment the container is gone, which is the pre-Phase-6 behavior).
+	SessionFilesCacheDir string `env:"SESSION_FILES_CACHE_DIR" envDefault:".data/session-files-cache"`
+
+	// SessionFilesCacheMaxBytes is the soft cap for the on-disk LRU. When
+	// total extracted bytes exceed this, the oldest entries are evicted.
+	// 5 GiB by default; raise on hosts that review many sessions in
+	// parallel and have spare disk.
+	SessionFilesCacheMaxBytes int64 `env:"SESSION_FILES_CACHE_MAX_BYTES" envDefault:"5368709120"`
 
 	// Preview system
 	ChromeWSURL             string `env:"CHROME_WS_URL"`                                                            // e.g. "ws://chrome:9222"

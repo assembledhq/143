@@ -16,7 +16,9 @@ const HORIZONTAL_LOCK_THRESHOLD = 12;
 const TOUCH_QUERY = "(pointer: coarse)";
 const COMMIT_THRESHOLD_RATIO = 0.36;
 const MIN_COMMIT_THRESHOLD = 140;
-const COMMIT_ANIMATION_MS = 220;
+const READY_HAPTIC_MS = 10;
+const COMMIT_HAPTIC_PATTERN = [16, 24, 40];
+const COMMIT_RESET_DELAY_MS = 200;
 // Pre-measurement fallback when a gesture starts before the row has dimensions.
 // Real width is captured from offsetWidth at touchstart.
 const FALLBACK_ROW_WIDTH = ACTION_WIDTH * 4;
@@ -24,6 +26,7 @@ const FALLBACK_ROW_WIDTH = ACTION_WIDTH * 4;
 type DragState = {
   startX: number;
   startY: number;
+  startOffset: number;
   width: number;
   swiping: boolean;
   locked: boolean;
@@ -68,6 +71,14 @@ function commitThresholdFor(width: number) {
   return Math.max(MIN_COMMIT_THRESHOLD, width * COMMIT_THRESHOLD_RATIO);
 }
 
+function isPromiseLike(value: unknown): value is PromiseLike<unknown> {
+  return (
+    (typeof value === "object" || typeof value === "function") &&
+    value !== null &&
+    typeof (value as PromiseLike<unknown>).then === "function"
+  );
+}
+
 export function SwipeActionRow({
   actionLabel,
   actionText,
@@ -75,17 +86,20 @@ export function SwipeActionRow({
   onAction,
   children,
   className,
+  desktopActionVisibility = "always",
 }: {
   actionLabel: string;
   actionText: string;
   actionIcon?: ReactNode;
-  onAction: () => void;
+  onAction: () => void | Promise<unknown>;
   children: ReactNode;
   className?: string;
+  desktopActionVisibility?: "always" | "hover";
 }) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const dragRef = useRef<DragState | null>(null);
   const commitTimerRef = useRef<number | null>(null);
+  const readyHapticPlayedRef = useRef(false);
   // Mirrors isCommitted for use inside touchmove handlers, where the rendered
   // closure can lag behind rapid state transitions.
   const committedRef = useRef(false);
@@ -93,6 +107,7 @@ export function SwipeActionRow({
   const [offset, setOffset] = useState(0);
   const [isDragging, setIsDragging] = useState(false);
   const [isCommitted, setIsCommitted] = useState(false);
+  const [gestureWidth, setGestureWidth] = useState(FALLBACK_ROW_WIDTH);
   const isTouchDevice = useSyncExternalStore(
     subscribeTouchDevice,
     getTouchDeviceSnapshot,
@@ -107,12 +122,29 @@ export function SwipeActionRow({
     };
   }, []);
 
+  const clearCommitTimer = () => {
+    if (commitTimerRef.current !== null) {
+      window.clearTimeout(commitTimerRef.current);
+      commitTimerRef.current = null;
+    }
+  };
+
+  const scheduleClose = () => {
+    clearCommitTimer();
+    commitTimerRef.current = window.setTimeout(() => {
+      commitTimerRef.current = null;
+      close();
+    }, COMMIT_RESET_DELAY_MS);
+  };
+
   const close = () => {
+    clearCommitTimer();
     offsetRef.current = 0;
     setOffset(0);
     setIsDragging(false);
     setIsCommitted(false);
     committedRef.current = false;
+    readyHapticPlayedRef.current = false;
     dragRef.current = null;
   };
 
@@ -122,29 +154,56 @@ export function SwipeActionRow({
     setIsDragging(false);
     setIsCommitted(false);
     committedRef.current = false;
+    readyHapticPlayedRef.current = false;
     dragRef.current = null;
   };
 
+  const handleActionPromise = (
+    result: void | Promise<unknown>,
+    {
+      onResolve,
+      onReject,
+    }: {
+      onResolve?: () => void;
+      onReject?: () => void;
+    } = {},
+  ) => {
+    if (!isPromiseLike(result)) {
+      onResolve?.();
+      return;
+    }
+
+    void result.then(
+      () => {
+        onResolve?.();
+      },
+      (error) => {
+        onReject?.();
+        console.error("Swipe action failed", error);
+      },
+    );
+  };
+
   // Slides the row fully off, fires onAction, then resets after the animation.
-  // Common case: onAction unmounts the row and the unmount effect clears the
-  // timer. Fallback: caller keeps the row mounted, the timer snaps offset back.
   const commitAction = (width: number) => {
     setIsDragging(false);
     offsetRef.current = width;
     setOffset(width);
+    setIsCommitted(true);
     dragRef.current = null;
-    committedRef.current = false;
-    vibrate([15, 30, 40]);
-    onAction();
-    if (commitTimerRef.current !== null) {
-      window.clearTimeout(commitTimerRef.current);
+    committedRef.current = true;
+    readyHapticPlayedRef.current = false;
+    vibrate(COMMIT_HAPTIC_PATTERN);
+    clearCommitTimer();
+    try {
+      handleActionPromise(onAction(), {
+        onResolve: scheduleClose,
+        onReject: close,
+      });
+    } catch (error) {
+      close();
+      throw error;
     }
-    commitTimerRef.current = window.setTimeout(() => {
-      offsetRef.current = 0;
-      setOffset(0);
-      setIsCommitted(false);
-      commitTimerRef.current = null;
-    }, COMMIT_ANIMATION_MS);
   };
 
   const handleTouchStart = (event: React.TouchEvent<HTMLDivElement>) => {
@@ -156,13 +215,17 @@ export function SwipeActionRow({
       window.clearTimeout(commitTimerRef.current);
       commitTimerRef.current = null;
     }
+    const width = containerRef.current?.offsetWidth || FALLBACK_ROW_WIDTH;
+    setGestureWidth(width);
     dragRef.current = {
       startX: touch.clientX,
       startY: touch.clientY,
-      width: containerRef.current?.offsetWidth || FALLBACK_ROW_WIDTH,
+      startOffset: offsetRef.current,
+      width,
       swiping: false,
       locked: false,
     };
+    readyHapticPlayedRef.current = false;
     setIsDragging(true);
   };
 
@@ -193,7 +256,7 @@ export function SwipeActionRow({
       event.preventDefault();
     }
 
-    const nextOffset = Math.max(0, Math.min(drag.width, -deltaX));
+    const nextOffset = Math.max(0, Math.min(drag.width, drag.startOffset - deltaX));
     offsetRef.current = nextOffset;
     setOffset(nextOffset);
 
@@ -201,19 +264,26 @@ export function SwipeActionRow({
     if (willCommit !== committedRef.current) {
       committedRef.current = willCommit;
       setIsCommitted(willCommit);
-      if (willCommit) {
-        // Light tick when the user crosses into the auto-commit zone.
-        vibrate(8);
+      if (willCommit && !readyHapticPlayedRef.current) {
+        // One light pulse signals that release will archive; avoid replaying it
+        // if the user scrubs back and forth near the threshold.
+        readyHapticPlayedRef.current = true;
+        vibrate(READY_HAPTIC_MS);
       }
     }
   };
 
   const handleTouchEnd = () => {
+    const drag = dragRef.current;
     const width =
-      dragRef.current?.width ??
+      drag?.width ??
       containerRef.current?.offsetWidth ??
       FALLBACK_ROW_WIDTH;
     const latestOffset = offsetRef.current;
+    if (drag && !drag.locked && drag.startOffset >= OPEN_THRESHOLD) {
+      close();
+      return;
+    }
     if (latestOffset >= commitThresholdFor(width)) {
       commitAction(width);
       return;
@@ -236,13 +306,18 @@ export function SwipeActionRow({
         : "open"
       : "closed";
   const trailingActionHidden = state === "closed";
-  const actionAreaWidth = Math.max(ACTION_WIDTH, offset);
+  const actionAreaWidth = trailingActionHidden ? 0 : Math.max(ACTION_WIDTH, offset);
+  const commitThreshold = commitThresholdFor(gestureWidth);
+  const swipeProgress = Math.max(0, Math.min(1, offset / commitThreshold));
+  const progressFill = trailingActionHidden ? 0 : Math.max(0.18, swipeProgress);
+  const actionHint = isCommitted
+    ? `Release to ${actionText.toLowerCase()}`
+    : "Keep swiping";
 
   const swipeSurfaceProps = isTouchDevice
     ? {
         className: cn(
-          "relative z-10 touch-pan-y",
-          offset > 0 && "bg-background",
+          "relative z-10 bg-background touch-pan-y",
           !isDragging && "transition-transform duration-200 ease-out",
         ),
         style: { transform: `translateX(-${offset}px)` },
@@ -267,32 +342,46 @@ export function SwipeActionRow({
     >
       {isTouchDevice && (
         <div
-          className="absolute inset-y-0 right-0"
+          className="absolute inset-y-0 right-0 overflow-hidden rounded-r-lg"
           style={{ width: `${actionAreaWidth}px` }}
         >
+          <div
+            aria-hidden="true"
+            className={cn(
+              "absolute inset-0 rounded-r-lg shadow-[inset_1px_0_0_rgba(255,255,255,0.18)] transition-colors duration-150 ease-out",
+              isCommitted ? "bg-amber-700" : "bg-amber-500",
+            )}
+          />
+          <div
+            aria-hidden="true"
+            className={cn(
+              "absolute inset-y-0 right-0 rounded-r-lg transition-all duration-150 ease-out",
+              isCommitted ? "bg-amber-800/90" : "bg-amber-600/88",
+            )}
+            style={{ width: `${progressFill * 100}%` }}
+          />
           <Button
+            variant="ghost"
             aria-label={actionLabel}
             aria-hidden={trailingActionHidden}
             tabIndex={trailingActionHidden ? -1 : 0}
-            className={cn(
-              "h-full w-full rounded-none rounded-r-lg px-0 text-white transition-colors duration-150",
-              isCommitted
-                ? "bg-amber-600 hover:bg-amber-700 active:bg-amber-700"
-                : "bg-amber-500 hover:bg-amber-600 active:bg-amber-600",
-            )}
+            className="relative h-full w-full rounded-none rounded-r-lg bg-transparent px-0 text-white shadow-none hover:bg-transparent hover:text-white active:bg-transparent"
             onClick={() => {
               close();
-              onAction();
+              try {
+                handleActionPromise(onAction());
+              } catch (error) {
+                throw error;
+              }
             }}
           >
-            <span
-              className={cn(
-                "flex flex-col items-center justify-center gap-1 text-xs font-medium transition-transform duration-150",
-                isCommitted && "scale-110",
-              )}
-            >
-              {actionIcon}
-              <span>{actionText}</span>
+            <span className="relative flex h-full w-full flex-col items-center justify-center gap-0.5 px-4 text-center">
+              <span className="text-sm font-semibold tracking-[0.01em] text-white whitespace-nowrap">
+                {actionText}
+              </span>
+              <span className="min-h-[0.75rem] text-xs font-medium tracking-[0.04em] text-white/80 whitespace-nowrap">
+                {actionHint}
+              </span>
             </span>
           </Button>
         </div>
@@ -308,12 +397,20 @@ export function SwipeActionRow({
         size="icon-xs"
         aria-label={actionLabel}
         title={actionLabel}
-        className="absolute right-2 top-2 z-20 hidden border border-border/60 bg-background text-muted-foreground shadow-sm hover:text-foreground md:inline-flex"
+        className={cn(
+          "absolute right-2 top-2 z-20 hidden border border-border/60 bg-background text-muted-foreground shadow-sm hover:text-foreground md:inline-flex",
+          desktopActionVisibility === "hover" &&
+            "md:opacity-0 md:transition-opacity md:duration-150 md:group-hover:opacity-100 md:focus-visible:opacity-100",
+        )}
         onClick={(event) => {
           event.preventDefault();
           event.stopPropagation();
           close();
-          onAction();
+          try {
+            handleActionPromise(onAction());
+          } catch (error) {
+            throw error;
+          }
         }}
       >
         {actionIcon}

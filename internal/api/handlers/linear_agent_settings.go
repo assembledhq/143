@@ -20,13 +20,14 @@ import (
 // AgentSessions.
 //
 // Endpoints (all org-scoped; admin-only enforced by middleware upstream):
-//   GET    /api/v1/integrations/linear/agent             — install status
-//   PATCH  /api/v1/integrations/linear/agent             — enable/disable
-//   GET    /api/v1/integrations/linear/agent/mappings    — list mappings
-//   POST   /api/v1/integrations/linear/agent/mappings    — create/update
-//   DELETE /api/v1/integrations/linear/agent/mappings/{id}
-//   GET    /api/v1/integrations/linear/agent/sessions    — debug list
-//   GET    /api/v1/integrations/linear/agent/sessions/{id} — debug detail
+//
+//	GET    /api/v1/integrations/linear/agent             — install status
+//	PATCH  /api/v1/integrations/linear/agent             — enable/disable
+//	GET    /api/v1/integrations/linear/agent/mappings    — list mappings
+//	POST   /api/v1/integrations/linear/agent/mappings    — create/update
+//	DELETE /api/v1/integrations/linear/agent/mappings/{id}
+//	GET    /api/v1/integrations/linear/agent/sessions    — debug list
+//	GET    /api/v1/integrations/linear/agent/sessions/{id} — debug detail
 type LinearAgentSettingsHandler struct {
 	mappings      *db.LinearTeamRepoMappingStore
 	credentials   linearAgentCredentialReader
@@ -288,8 +289,8 @@ func parseLimitParam(r *http.Request, dflt, max int) int {
 // the linear_agent_sessions row plus the activity log so an operator
 // can replay what the agent has emitted to Linear.
 type AgentSessionDebugDetail struct {
-	Session    AgentSessionDebugSummary       `json:"session"`
-	Activities []db.LinearAgentActivityLog    `json:"activities"`
+	Session    AgentSessionDebugSummary    `json:"session"`
+	Activities []db.LinearAgentActivityLog `json:"activities"`
 }
 
 // GetSession returns the full debug view for a single agent session.

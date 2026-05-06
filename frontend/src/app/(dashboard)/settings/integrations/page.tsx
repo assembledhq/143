@@ -172,6 +172,14 @@ export default function IntegrationsPage() {
   const linearIntegration = integrationsResp?.data?.find(
     (integration) => integration.provider === "linear" && integration.status === "active"
   );
+  // The auth-error banner needs to fire even when status !== "active" — the
+  // worker flips Linear to "error" on a 401, which would otherwise look
+  // identical to "never connected" through the linearConnected flag below
+  // and the user would never learn their token expired.
+  const linearAuthErrorRow = integrationsResp?.data?.find(
+    (integration) => integration.provider === "linear" && integration.auth_error
+  );
+  const linearAuthError = linearAuthErrorRow?.auth_error ?? null;
   const slackIntegration = integrationsResp?.data?.find(
     (integration) => integration.provider === "slack" && integration.status === "active"
   );
@@ -211,6 +219,7 @@ export default function IntegrationsPage() {
         sentryConnected={Boolean(sentryIntegration)}
         linearConnected={Boolean(linearIntegration)}
         linearLoading={false}
+        linearAuthError={linearAuthError}
         slackConnected={Boolean(slackIntegration)}
         notionConnected={Boolean(notionIntegration)}
         notionLoading={notionConnectMutation.isPending}

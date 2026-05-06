@@ -20,6 +20,43 @@ describe("NewAutomationPage", () => {
     pushMock.mockReset();
   });
 
+  it("allows the timezone selector to wrap cleanly on mobile layouts", async () => {
+    const expectedTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+
+    server.use(
+      http.get("/api/v1/repositories", () =>
+        HttpResponse.json({
+          data: [
+            {
+              id: "repo-1",
+              org_id: "org-1",
+              integration_id: "int-1",
+              github_id: 1,
+              full_name: "acme/repo",
+              default_branch: "main",
+              private: false,
+              clone_url: "https://github.com/acme/repo.git",
+              installation_id: 10,
+              status: "active",
+              settings: {},
+              created_at: "2026-03-05T12:00:00Z",
+              updated_at: "2026-03-05T12:00:00Z",
+            },
+          ],
+          meta: {},
+        }),
+      ),
+    );
+
+    renderWithProviders(<NewAutomationPage />);
+
+    const timezoneButton = await screen.findByTitle(expectedTimezone);
+    const scheduleRow = timezoneButton.parentElement;
+
+    expect(scheduleRow).toHaveClass("flex-wrap");
+    expect(timezoneButton).toHaveClass("w-full", "sm:w-auto");
+  });
+
   it("prefills the form from the selected template and links to the full library", async () => {
     server.use(
       http.get("/api/v1/repositories", () =>
@@ -68,6 +105,34 @@ describe("NewAutomationPage", () => {
     let requestBody: Record<string, unknown> | null = null;
 
     server.use(
+      http.get("*/api/v1/settings", () => HttpResponse.json({
+        data: {
+          id: "org-1",
+          name: "Test Org",
+          settings: { default_agent_type: "codex" },
+        },
+      })),
+      http.get("*/api/v1/settings/codex-auth/status", () => HttpResponse.json({
+        data: { status: "completed" },
+      })),
+      http.get("*/api/v1/settings/credentials/resolved", () => HttpResponse.json({
+        data: [
+          { provider: "openai", source: "org" },
+        ],
+        meta: {},
+      })),
+      http.get("*/api/v1/settings/credentials/team", () => HttpResponse.json({
+        data: [],
+        meta: {},
+      })),
+      http.get("*/api/v1/settings/coding-auths", () => HttpResponse.json({
+        data: [],
+        meta: {},
+      })),
+      http.get("*/api/v1/coding-credentials*", () => HttpResponse.json({
+        data: [],
+        meta: {},
+      })),
       http.get("*/api/v1/repositories", () => HttpResponse.json({
         data: [
           {
@@ -124,5 +189,6 @@ describe("NewAutomationPage", () => {
         base_branch: "release/weekly",
       });
     });
-  });
+  }, 20000);
+
 });

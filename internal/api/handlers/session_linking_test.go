@@ -26,6 +26,7 @@ var sessionIssueLinkHandlerColumns = []string{
 	// Migration 102 — Linear workspace slug is left-joined off
 	// session_issue_link_provider_state for deep-link rendering.
 	"issue_workspace_slug",
+	"linear_last_skipped_reason",
 	"linear_primary_snapshot",
 }
 
@@ -60,6 +61,7 @@ func TestSessionHandler_EnrichSessionLinks(t *testing.T) {
 					&title, &source, nil, nil,
 					&repoID, nil,
 					nil, // issue_workspace_slug — not set on legacy fixtures
+					nil, // linear_last_skipped_reason
 					nil, // linear_primary_snapshot
 				),
 			)
@@ -281,6 +283,7 @@ func TestSessionHandler_RetrySession_EnrichesLinks(t *testing.T) {
 				nil, nil, nil, nil,
 				nil, nil,
 				nil, // issue_workspace_slug
+				nil, // linear_last_skipped_reason
 				nil, // linear_primary_snapshot
 			),
 		)

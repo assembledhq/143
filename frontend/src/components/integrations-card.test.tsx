@@ -39,4 +39,32 @@ describe("IntegrationsCard", () => {
     expect(onConnect).toHaveBeenCalledTimes(1);
     expect(screen.getByText("Coming soon")).toBeInTheDocument();
   });
+
+  it("stacks card content for compact layouts", () => {
+    renderWithProviders(
+      <IntegrationsCard
+        items={[
+          {
+            id: "github",
+            title: "GitHub",
+            description: "Sync repositories and open PRs.",
+            action: <Button size="sm">Connect</Button>,
+          },
+        ]}
+      />,
+    );
+
+    const card = screen.getByTestId("integration-card");
+    const content = card.querySelector('[data-slot="card-content"]');
+    const actionWrapper = screen.getByRole("button", { name: "Connect" }).parentElement;
+
+    expect(content).toHaveClass("flex-col");
+    expect(content).toHaveClass("items-start");
+    expect(content).toHaveClass("sm:flex-row");
+    expect(content).toHaveClass("sm:items-center");
+    expect(actionWrapper).toHaveClass("w-full");
+    expect(actionWrapper).toHaveClass("sm:w-auto");
+    expect(actionWrapper).toHaveClass("[&>*]:w-full");
+    expect(actionWrapper).toHaveClass("sm:[&>*]:w-auto");
+  });
 });

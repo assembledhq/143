@@ -939,6 +939,12 @@ func TestPRServiceCreateRepairRevisionSessionAndResumeRepairSession(t *testing.T
 						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 					).
 					WillReturnRows(pgxmock.NewRows([]string{"id", "created_at", "last_activity_at"}).AddRow(uuid.New(), now, now))
+				mock.ExpectQuery("INSERT INTO session_threads").
+					WithArgs(
+						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+						pgxmock.AnyArg(), pgxmock.AnyArg(),
+					).
+					WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
 				mock.ExpectExec("INSERT INTO session_issue_links").
 					WithArgs(
 						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
@@ -959,7 +965,7 @@ func TestPRServiceCreateRepairRevisionSessionAndResumeRepairSession(t *testing.T
 						"job_type":   "run_agent",
 						"payload":    pgxmock.AnyArg(),
 						"priority":   5,
-						"dedupe_key": (*string)(nil),
+						"dedupe_key": pgxmock.AnyArg(),
 					}).
 					WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
 				mock.ExpectQuery("INSERT INTO pull_request_repair_runs").
@@ -984,6 +990,7 @@ func TestPRServiceCreateRepairRevisionSessionAndResumeRepairSession(t *testing.T
 		{
 			name: "resume repair session",
 			run: func(t *testing.T, mock pgxmock.PgxPoolIface, service *PRService, pr models.PullRequest, parentSession models.Session, userID uuid.UUID, now time.Time) {
+				threadID := uuid.New()
 				mock.ExpectBegin()
 				mock.ExpectQuery("UPDATE sessions").
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
@@ -994,10 +1001,24 @@ func TestPRServiceCreateRepairRevisionSessionAndResumeRepairSession(t *testing.T
 				mock.ExpectExec("UPDATE sessions.+SET revision_context").
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+				mock.ExpectQuery("SELECT .+ FROM session_threads WHERE org_id .+ AND session_id").
+					WithArgs(pr.OrgID, parentSession.ID).
+					WillReturnRows(
+						pgxmock.NewRows(prHealthSessionThreadColumns).
+							AddRow(newPRHealthSessionThreadRow(threadID, parentSession.ID, pr.OrgID, now)...),
+					)
 				mock.ExpectQuery("INSERT INTO session_messages").
 					WithArgs(
-						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+						parentSession.ID,
+						pr.OrgID,
+						uuidPtrArg{want: threadID},
+						pgxmock.AnyArg(),
+						1,
+						models.MessageRoleUser,
+						"Please resolve the conflicts.",
+						pgxmock.AnyArg(),
+						pgxmock.AnyArg(),
+						pgxmock.AnyArg(),
 						pgxmock.AnyArg(),
 					).
 					WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(int64(1), now))
@@ -1008,7 +1029,7 @@ func TestPRServiceCreateRepairRevisionSessionAndResumeRepairSession(t *testing.T
 						"job_type":   "continue_session",
 						"payload":    pgxmock.AnyArg(),
 						"priority":   5,
-						"dedupe_key": (*string)(nil),
+						"dedupe_key": pgxmock.AnyArg(),
 					}).
 					WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
 				mock.ExpectQuery("INSERT INTO pull_request_repair_runs").
@@ -1565,6 +1586,15 @@ var prRepairRunTestColumns = []string{
 	"id", "org_id", "pull_request_id", "session_id", "action_type", "health_version", "active", "obsoleted_by_version", "created_at", "updated_at",
 }
 
+var prHealthSessionThreadColumns = []string{
+	"id", "session_id", "org_id", "agent_type", "model_override",
+	"label", "instructions", "file_scope", "status", "agent_session_id",
+	"current_turn", "last_activity_at",
+	"confidence_score", "result_summary", "diff", "failure_explanation", "failure_category",
+	"started_at", "completed_at", "created_at",
+	"base_snapshot_key", "cost_cents", "pending_message_count", "cancel_requested_at",
+}
+
 var prHealthSessionColumns = []string{
 	"id", "primary_issue_id", "org_id", "origin", "interaction_mode", "validation_policy", "agent_type", "status", "autonomy_level", "token_mode",
 	"complexity_tier", "confidence_score", "confidence_reasoning", "risk_factors",
@@ -1578,7 +1608,7 @@ var prHealthSessionColumns = []string{
 	"runtime_extension_count", "runtime_extension_seconds", "runtime_stop_reason", "runtime_graceful_stop_at",
 	"checkpointed_at", "checkpoint_kind", "checkpoint_capability", "checkpoint_size_bytes", "checkpoint_error",
 	"recovery_state", "recovery_queued_at", "recovery_started_at", "recovery_attempt_count",
-	"target_branch", "working_branch", "base_commit_sha", "repository_id", "diff_stats", "diff_history", "input_manifest", "archived_at", "archived_by_user_id", "automation_run_id", "pr_creation_state", "pr_creation_error", "pr_push_state", "pr_push_error", "diff_collected_at", "latest_diff_snapshot_id",
+	"target_branch", "working_branch", "base_commit_sha", "repository_id", "diff_stats", "diff_history", "input_manifest", "archived_at", "archived_by_user_id", "automation_run_id", "pr_creation_state", "pr_creation_error", "pr_push_state", "pr_push_error", "diff_collected_at", "latest_diff_snapshot_id", "has_unpushed_changes",
 	"linear_private", "linear_state_sync_disabled", "linear_identifier_hint", "linear_prepare_state",
 	"deleted_at", "git_identity_source", "git_identity_user_id", "created_at",
 }
@@ -1602,9 +1632,29 @@ func newPRHealthSessionRow(sessionID, orgID uuid.UUID, now time.Time, status str
 		"", nil, nil, 0,
 		nil, nil, nil, nil, nil, nil, nil,
 		nil, nil, nil, "idle", (*string)(nil), "idle", (*string)(nil), nil, nil,
-		false, false, (*string)(nil), models.LinearPrepareStateNone,
+		false, false, false, (*string)(nil), models.LinearPrepareStateNone,
 		nil, nil, nil, now,
 	}
+}
+
+func newPRHealthSessionThreadRow(threadID, sessionID, orgID uuid.UUID, now time.Time) []any {
+	return []any{
+		threadID, sessionID, orgID, "claude_code", nil,
+		"Main", nil, nil, models.ThreadStatusIdle, nil,
+		0, nil,
+		nil, nil, nil, nil, nil,
+		nil, nil, now,
+		nil, float64(0), 0, nil,
+	}
+}
+
+type uuidPtrArg struct {
+	want uuid.UUID
+}
+
+func (a uuidPtrArg) Match(value any) bool {
+	got, ok := value.(*uuid.UUID)
+	return ok && got != nil && *got == a.want
 }
 
 func setPRHealthSessionRowValue(row []any, column string, value any) {

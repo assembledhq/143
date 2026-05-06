@@ -28,6 +28,7 @@ import (
 	"github.com/assembledhq/143/internal/prompts"
 	"github.com/assembledhq/143/internal/services/agent"
 	"github.com/assembledhq/143/internal/services/github/identity"
+	"github.com/assembledhq/143/internal/services/sandboxauth"
 	"github.com/assembledhq/143/internal/services/storage"
 )
 
@@ -77,8 +78,9 @@ type PRService struct {
 	prHealthStreams  *cache.PullRequestStreams
 	llmClient        llm.Client
 	audit            *db.AuditEmitter
-	sandboxProvider  agent.SandboxProvider // used by the push-based PR flow
-	snapshots        storage.SnapshotStore // used by the push-based PR flow
+	sandboxProvider  agent.SandboxProvider   // used by the push-based PR flow
+	snapshots        storage.SnapshotStore   // used by the push-based PR flow
+	sandboxAuth      agent.SandboxAuthServer // per-push GitHub credential socket; required for the push-based PR flow
 	logger           zerolog.Logger
 	baseURL          string
 	appBaseURL       string
@@ -242,6 +244,18 @@ func (s *PRService) SetSandboxPushDeps(provider agent.SandboxProvider, snapshots
 	s.snapshots = snapshots
 }
 
+// SetSandboxAuth wires the per-session credential socket bridge used to
+// authenticate `git push` from the pr_push sandbox. The push sandbox is
+// hydrated from a snapshot whose .git/config carries
+// `credential.helper=!143-tools git-credential` (set by git-bootstrap during
+// the original agent run); the helper expects _143_AUTH_SOCK to point at a
+// listening socket. Without one wired here, the helper exits non-zero and the
+// push fails. Required for CreatePR / PushChangesToPR; if nil, both return a
+// configuration error.
+func (s *PRService) SetSandboxAuth(server agent.SandboxAuthServer) {
+	s.sandboxAuth = server
+}
+
 func (s *PRService) SetPullRequestStreams(streams *cache.PullRequestStreams) {
 	s.prHealthStreams = streams
 }
@@ -266,6 +280,14 @@ const (
 	// SnapshotUnavailablePRMessage is shown when the DB points at a checkpoint
 	// that is no longer present in storage.
 	SnapshotUnavailablePRMessage = "This session had a saved checkpoint, but it is no longer available in storage. Send a new message to rebuild the sandbox, then create the PR again."
+	// PushRejectedPRMessage is shown when `git push` was rejected because the
+	// remote branch advanced (or appeared) outside this session — typically a
+	// stale tip from a prior partial-success attempt or a manual push. The
+	// session's working branch embeds the session UUID so 143 owns the
+	// namespace; the script uses --force-with-lease to recover automatically,
+	// and this error fires when even the lease check fails (a true concurrent
+	// write between ls-remote and push).
+	PushRejectedPRMessage = "GitHub rejected the push because the remote branch changed during the attempt. Try again, or delete the branch on GitHub if it was created outside this session."
 )
 
 // WaitForPostPRSnapshotUploads blocks until every in-flight post-PR snapshot
@@ -311,6 +333,13 @@ var (
 // uncommitted changes relative to the base branch — there's nothing to push.
 // This typically means the diff was reverted or the session produced no edits.
 var ErrNoChanges = errors.New("no changes to push")
+
+// ErrPushRejected is returned by pushSessionBranch when `git push` exits
+// non-zero with a rejection (non-fast-forward, stale info from
+// --force-with-lease, "failed to push some refs"). Distinct from generic exec
+// failures so the worker can surface a targeted user-facing message instead
+// of the catch-all "Check GitHub access or repo permissions" fallback.
+var ErrPushRejected = errors.New("git push rejected by remote")
 
 // identityResolver returns a resolver wired with the PRService's current
 // dependencies. Lazily built on first use and cached; any Set* mutator
@@ -467,6 +496,19 @@ func (s *PRService) CreatePR(ctx context.Context, run *models.Session, params ..
 		}
 	}
 
+	// issues.external_id is the canonical Linear UUID (Linear's API needs it
+	// for writes), but PR title prefixing wants the human key like "VIR-75".
+	// session_issue_links carries that human key via the COALESCE in
+	// sessionIssueLinkSelectColumns once provider_state.identifier has been
+	// written by LinkResolved. Build a sibling issue carrying the human key
+	// so both the LLM-prefixing and static-fallback paths see "[VIR-75]"
+	// instead of silently dropping the identifier when
+	// collectLinearIdentifiers' UUID shape check fails on the bare issues
+	// row. Returns a fresh copy rather than mutating `issue`, so the
+	// canonical UUID stays intact for any code path that still needs it
+	// (e.g. Linear API writes keyed off issues.external_id).
+	issue = issueWithLinearHumanKey(issue, run.LinkedIssues)
+
 	// Resolve repository. sessions.repository_id is the canonical source of
 	// truth — session creation copies issue.repository_id into it up front.
 	if run.RepositoryID == nil {
@@ -522,7 +564,7 @@ func (s *PRService) CreatePR(ctx context.Context, run *models.Session, params ..
 		}
 	}
 
-	pushed, err := s.pushSessionBranch(ctx, run, &repo, token, *run.SnapshotKey, branchName, commitMsg, authorName, authorEmail)
+	pushed, err := s.pushSessionBranch(ctx, run, &repo, orgSettings, *run.SnapshotKey, branchName, commitMsg, authorName, authorEmail)
 	if err != nil {
 		return nil, err
 	}
@@ -542,7 +584,13 @@ func (s *PRService) CreatePR(ctx context.Context, run *models.Session, params ..
 
 	var title, body string
 	if generated, genErr := s.generatePRContent(ctx, token, owner, repoName, defaultBranch, *run.RepositoryID, run.OrgID, run, issue); genErr == nil {
-		title = generated.Title
+		// The LLM prompt does not instruct the model to embed a "[KEY-N]"
+		// Linear key in the title — only formatPRTitle/formatSyncedPRTitle
+		// did, so the LLM-generated path was silently shipping unprefixed
+		// titles whenever the LLM call succeeded. Route the LLM title
+		// through the same prefixer so Linear's GitHub integration can
+		// claim the PR.
+		title = applyLinearKeyPrefixes(run, generated.Title, issue)
 		body = generated.Body
 	} else {
 		s.logger.Warn().Err(genErr).Msg("LLM PR content generation failed, falling back to static")
@@ -601,6 +649,9 @@ func (s *PRService) CreatePR(ctx context.Context, run *models.Session, params ..
 	}
 	if err := s.pullRequests.Create(ctx, pr); err != nil {
 		return nil, fmt.Errorf("store pull request: %w", err)
+	}
+	if err := s.sessions.MarkLatestDiffSnapshotPushed(ctx, run.OrgID, run.ID, headSHA); err != nil {
+		s.logger.Warn().Err(err).Str("session_id", run.ID.String()).Msg("failed to mark latest diff snapshot as pushed after PR creation")
 	}
 
 	// Record the pending snapshot, then dispatch the upload. If capture
@@ -752,11 +803,16 @@ func (s *PRService) PushChangesToPR(ctx context.Context, run *models.Session, pa
 		}
 	}
 
+	// Resolve identity for the commit name/email and the co-author trailer.
+	// The push token itself flows via the per-session credential socket (see
+	// pushSessionBranch), so resolution.Token isn't read here — we resolve
+	// purely to run the resolver's user-token validation before opening a
+	// sandbox, so a revoked grant surfaces as a clear UI error rather than a
+	// helper-side ECONNREFUSED.
 	resolution, err := s.resolveToken(ctx, run, &repo, orgSettings, opts.AuthorMode)
 	if err != nil {
 		return nil, fmt.Errorf("resolve token: %w", err)
 	}
-	token := resolution.Token
 
 	// Use the persisted head_ref captured at PR-creation time. Guarded by the
 	// ErrLegacyPRMissingHeadRef check above, so we know it's set here.
@@ -771,7 +827,7 @@ func (s *PRService) PushChangesToPR(ctx context.Context, run *models.Session, pa
 		}
 	}
 
-	pushed, err := s.pushSessionBranch(ctx, run, &repo, token, *run.SnapshotKey, branchName, commitMsg, authorName, authorEmail)
+	pushed, err := s.pushSessionBranch(ctx, run, &repo, orgSettings, *run.SnapshotKey, branchName, commitMsg, authorName, authorEmail)
 	if err != nil {
 		return nil, err
 	}
@@ -787,6 +843,9 @@ func (s *PRService) PushChangesToPR(ctx context.Context, run *models.Session, pa
 
 	if err := s.pullRequests.UpdateHeadSHA(ctx, run.OrgID, pr.ID, pushed.HeadSHA); err != nil {
 		return nil, fmt.Errorf("update pull request head sha: %w", err)
+	}
+	if err := s.sessions.MarkLatestDiffSnapshotPushed(ctx, run.OrgID, run.ID, pushed.HeadSHA); err != nil {
+		s.logger.Warn().Err(err).Str("session_id", run.ID.String()).Msg("failed to mark latest diff snapshot as pushed after PR push")
 	}
 	pr.HeadSHA = &pushed.HeadSHA
 	s.enqueuePullRequestStateSync(ctx, pr)
@@ -932,9 +991,15 @@ func (s *PRService) SyncSessionTitle(ctx context.Context, session *models.Sessio
 // container, stages + commits any uncommitted changes, and pushes HEAD to a
 // new remote branch. The sandbox is always destroyed on return.
 //
-// The GitHub token is never passed via argv or URL. It's written to a file
-// inside the sandbox and read by a GIT_ASKPASS helper, so `ps` inside the
-// container shows only a plain https URL with no credentials.
+// Authentication comes from the per-session credential socket, not from argv
+// or URL. The sandbox snapshot already has
+// `credential.helper=!143-tools git-credential` baked into .git/config (set by
+// git-bootstrap during the original agent run); we open a fresh listener
+// keyed by a per-push UUID and bind-mount it into the container so the helper
+// resolves to a live token. Using a per-push UUID (rather than the session
+// ID) avoids kicking the agent run's listener — important when a preview
+// hold is keeping the agent's container alive across turns.
+//
 // pushResult captures what pushSessionBranch produced on a successful push:
 // the new HEAD SHA from the remote (parsed from the script's stdout sentinel),
 // and an optional snapshot of the post-push sandbox spooled to a local temp
@@ -953,17 +1018,41 @@ func (s *PRService) pushSessionBranch(
 	ctx context.Context,
 	run *models.Session,
 	repo *models.Repository,
-	token, snapshotKey, branchName, commitMsg, authorName, authorEmail string,
+	orgSettings models.OrgSettings,
+	snapshotKey, branchName, commitMsg, authorName, authorEmail string,
 ) (*pushResult, error) {
+	if s.sandboxAuth == nil {
+		return nil, fmt.Errorf("PRService: sandbox auth socket not configured")
+	}
+
 	cfg := agent.DefaultSandboxConfig()
 	cfg.SessionID = run.ID.String()
 	cfg.OrgID = run.OrgID.String()
 	cfg.Purpose = "pr_push"
+	if cfg.Env == nil {
+		cfg.Env = map[string]string{}
+	}
 	// Mirror the workspace layout used at session start so restore overlays
 	// the snapshot onto the path git already has recorded in .git/config.
 	if slug := agent.SlugForRepo(repo.FullName); slug != "" {
 		cfg.WorkDir = fmt.Sprintf("%s/%s", cfg.HomeDir, slug)
 	}
+
+	// Open a per-push credential listener. Keyed by a fresh UUID so it can't
+	// collide with the agent run's listener (still active when a preview is
+	// holding the original container alive across turns).
+	pushID := uuid.New()
+	socketPath, err := s.sandboxAuth.Listen(ctx, pushID, run, repo, orgSettings)
+	if err != nil {
+		return nil, fmt.Errorf("open sandbox auth socket: %w", err)
+	}
+	defer s.sandboxAuth.Close(pushID)
+	cfg.AuthSocketPath = socketPath
+	cfg.Env[sandboxauth.SocketEnvVar] = sandboxauth.SandboxSocketPath
+	// GitNameEnvVar / GitEmailEnvVar are intentionally NOT set: those are
+	// consumed by `143-tools git-bootstrap`, which the pr_push sandbox never
+	// runs (the snapshot already has user.name/email configured, and the
+	// push script re-sets them via `git config` from the resolved identity).
 
 	sandbox, err := agent.HydrateSandboxFromSnapshot(ctx, s.sandboxProvider, s.snapshots, snapshotKey, cfg)
 	if err != nil {
@@ -982,20 +1071,14 @@ func (s *PRService) pushSessionBranch(
 		}
 	}()
 
-	// Write the commit message, credential, and askpass helper to files.
-	// Passing the credential via file keeps it out of argv and shell history.
+	// Commit message goes to a file so multi-line / hostile content can't
+	// leak through argv. Token goes via the helper socket — no token files,
+	// no askpass shell stub.
 	if err := s.sandboxProvider.WriteFile(ctx, sandbox, pushCommitMsgPath, []byte(commitMsg)); err != nil {
 		return nil, fmt.Errorf("write commit message to sandbox: %w", err)
 	}
-	if err := s.sandboxProvider.WriteFile(ctx, sandbox, pushInputPath, []byte(token)); err != nil {
-		return nil, fmt.Errorf("write credential to sandbox: %w", err)
-	}
-	helperScript := "#!/bin/sh\nexec cat " + shellQuote(pushInputPath) + "\n"
-	if err := s.sandboxProvider.WriteFile(ctx, sandbox, pushHelperPath, []byte(helperScript)); err != nil {
-		return nil, fmt.Errorf("write push helper to sandbox: %w", err)
-	}
 
-	pushURL := fmt.Sprintf("https://x-access-token@github.com/%s.git", repo.FullName)
+	pushURL := fmt.Sprintf("https://github.com/%s.git", repo.FullName)
 	script := buildPushScript(sandbox.WorkDir, authorName, authorEmail, branchName, pushURL)
 
 	var stdout, stderr bytes.Buffer
@@ -1003,6 +1086,29 @@ func (s *PRService) pushSessionBranch(
 	if execErr != nil {
 		return nil, fmt.Errorf("exec push script: %w", execErr)
 	}
+
+	// One internal retry on a server-side rejection. The script is
+	// idempotent: the second run finds the index clean (already committed),
+	// skips the commit branch, re-reads the remote SHA via ls-remote, and
+	// retries the push with a fresh --force-with-lease. This collapses the
+	// race window between our first ls-remote and our first push (the only
+	// case --force-with-lease can fail when 143 owns the branch namespace)
+	// into self-healing instead of surfacing ErrPushRejected. A persistent
+	// rejection on the second attempt still bubbles up.
+	if exitCode != 0 && exitCode != pushExitNoChanges && isPushRejection(stderr.String()) {
+		s.logger.Info().
+			Str("session_id", run.ID.String()).
+			Str("branch", branchName).
+			Str("stderr", strings.TrimSpace(stderr.String())).
+			Msg("push rejected on first attempt; retrying once with fresh lease")
+		stdout.Reset()
+		stderr.Reset()
+		exitCode, execErr = s.sandboxProvider.Exec(ctx, sandbox, script, &stdout, &stderr)
+		if execErr != nil {
+			return nil, fmt.Errorf("exec push script (retry): %w", execErr)
+		}
+	}
+
 	switch exitCode {
 	case 0:
 		// Continue to HeadSHA parse + snapshot capture below.
@@ -1010,11 +1116,11 @@ func (s *PRService) pushSessionBranch(
 		return nil, ErrNoChanges
 	default:
 		msg := strings.TrimSpace(stderr.String())
-		// Defense in depth: if the token ever leaks into stderr (e.g. via a
-		// future code path that reintroduces it), scrub before returning.
-		msg = strings.ReplaceAll(msg, token, "***")
 		if msg == "" {
 			msg = "(no stderr)"
+		}
+		if isPushRejection(msg) {
+			return nil, fmt.Errorf("%w (exit %d): %s", ErrPushRejected, exitCode, msg)
 		}
 		return nil, fmt.Errorf("git push failed (exit %d): %s", exitCode, msg)
 	}
@@ -1103,16 +1209,10 @@ func (s *PRService) captureSandboxSnapshot(ctx context.Context, sandbox *agent.S
 	return path, size, nil
 }
 
-// Sandbox-internal paths used by the push flow. Under /tmp so they're
-// auto-cleaned on sandbox destroy; the trap inside the script also removes
-// them explicitly on exit for defense in depth.
-const (
-	pushCommitMsgPath = "/tmp/143-pr-commit-msg"
-	pushInputPath     = "/tmp/143-pr-input"
-	// /tmp is mounted noexec in sandbox containers; the askpass helper must
-	// live on the exec-allowed scratch tmpfs so git can invoke it.
-	pushHelperPath = "/var/tmp/143-pr-helper.sh"
-)
+// pushCommitMsgPath is the in-sandbox file the script reads `git commit -F`
+// from. Under /tmp so it's auto-cleaned on sandbox destroy; the trap inside
+// the script also removes it explicitly on exit for defense in depth.
+const pushCommitMsgPath = "/tmp/143-pr-commit-msg"
 
 // pushExitNoChanges is the sentinel exit code the push script uses when the
 // restored working tree has no uncommitted changes AND no commits ahead of
@@ -1127,36 +1227,49 @@ const pushHeadSHASentinel = "__143_HEAD_SHA="
 
 // pushScriptTemplate is the shell script executed inside the restored
 // sandbox. All variable interpolations are pre-quoted by the caller (see
-// buildPushScript) so they're safe to embed directly. The credential is read
-// by the `GIT_ASKPASS` helper from pushInputPath — it never appears in argv.
-//
-// The cleanup function is hoisted into a shell function rather than inlined
-// in the trap because `trap 'rm -f %[1]s ...'` would interleave single-
-// quoted strings in a way that works but is fragile to reason about.
+// buildPushScript) so they're safe to embed directly. Authentication comes
+// from credential.helper=!143-tools git-credential (already in the snapshot's
+// .git/config) talking to the per-push host socket bridge — no token files,
+// no GIT_ASKPASS, no userinfo in the URL.
 //
 // On the success branch (push lands), the script prints
 // `__143_HEAD_SHA=<sha>` so the caller can persist the just-pushed commit
 // onto the PullRequest row without a second GitHub round-trip. The line is
-// only emitted on the success branch — the `exit %[7]d` no-changes contract
-// is unchanged.
+// only emitted on the success branch — the no-changes contract is unchanged.
+//
+// Push uses --force-with-lease keyed on the SHA we just observed via
+// ls-remote. Rationale:
+//   - The session's working branch embeds the session UUID, so 143 owns the
+//     namespace and is the only legitimate writer.
+//   - Snapshot restores rebuild the local commit with fresh metadata, so a
+//     second attempt produces a different SHA than a prior partial-success
+//     push left on the remote — a plain push would fail non-fast-forward
+//     forever. The lease lets us recover from that state automatically.
+//   - The lease still aborts if a third party raced us between ls-remote and
+//     push, which is the only case this scheme can't (and shouldn't) recover
+//     from silently — surface ErrPushRejected so the UI says so.
+//
+// When the remote branch does not exist, ls-remote prints nothing,
+// remote_sha is empty, and `--force-with-lease=<ref>:` resolves to "expect
+// the ref to not exist" — a safe creation push.
 const pushScriptTemplate = `set -eu
-cleanup() { rm -f %[1]s %[2]s %[3]s; }
+cleanup() { rm -f %[1]s; }
 trap cleanup EXIT
-cd %[4]s
-git config user.name %[5]s
-git config user.email %[6]s
+cd %[2]s
+git config user.name %[3]s
+git config user.email %[4]s
 git add -A
 if ! git diff --cached --quiet; then
     git commit -F %[1]s
 fi
 if git rev-parse --abbrev-ref --symbolic-full-name @{u} >/dev/null 2>&1; then
     if git merge-base --is-ancestor HEAD @{u}; then
-        exit %[7]d
+        exit %[5]d
     fi
 fi
-chmod +x %[3]s
-GIT_ASKPASS=%[3]s GIT_TERMINAL_PROMPT=0 git push %[8]s HEAD:refs/heads/%[9]s
-echo "%[10]s$(git rev-parse HEAD)"
+remote_sha=$(git ls-remote %[6]s refs/heads/%[7]s | awk 'NR==1 {print $1}')
+git push --force-with-lease=refs/heads/%[7]s:"${remote_sha}" %[6]s HEAD:refs/heads/%[7]s
+echo "%[8]s$(git rev-parse HEAD)"
 `
 
 // buildPushScript renders pushScriptTemplate with caller-supplied values.
@@ -1167,8 +1280,6 @@ func buildPushScript(workDir, authorName, authorEmail, branchName, pushURL strin
 	return fmt.Sprintf(
 		pushScriptTemplate,
 		shellQuote(pushCommitMsgPath),
-		shellQuote(pushInputPath),
-		shellQuote(pushHelperPath),
 		shellQuote(workDir),
 		shellQuote(authorName),
 		shellQuote(authorEmail),
@@ -1181,6 +1292,30 @@ func buildPushScript(workDir, authorName, authorEmail, branchName, pushURL strin
 		// sentinel to include shell metacharacters MUST add quoting here.
 		pushHeadSHASentinel,
 	)
+}
+
+// isPushRejection inspects git's stderr from a failed `git push` and reports
+// whether the failure was a server-side rejection (non-fast-forward, stale
+// info from --force-with-lease, generic "failed to push some refs"). Used to
+// promote those cases to ErrPushRejected so the worker can render a
+// targeted user-facing message instead of the catch-all permissions fallback.
+//
+// Match is substring-based and case-insensitive: git's wording is stable
+// enough across versions that anchoring on these phrases is safer than
+// trying to parse exit codes (always 1) or structured output (none).
+func isPushRejection(stderr string) bool {
+	lc := strings.ToLower(stderr)
+	for _, marker := range []string{
+		"non-fast-forward",
+		"stale info",
+		"failed to push some refs",
+		"rejected",
+	} {
+		if strings.Contains(lc, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 // shellQuote single-quotes s for safe interpolation into a POSIX shell.
@@ -2116,6 +2251,49 @@ func formatPRTitle(session *models.Session, issue *models.Issue) string {
 		return applyLinearKeyPrefixes(session, title, nil)
 	}
 	return applyLinearKeyPrefixes(session, fmt.Sprintf("Session %s", session.ID.String()[:8]), nil)
+}
+
+// issueWithLinearHumanKey returns the input issue when no rewrite is needed,
+// or a shallow copy with ExternalID set to the primary Linear link's human
+// key (e.g. "VIR-75"). Mirrors the COALESCE in sessionIssueLinkSelectColumns:
+// if LinkResolved persisted Identifier into provider_state, ListBySession
+// returns the human key on link.ExternalID.
+//
+// Idempotent — calling on the result returns the same pointer because the
+// second call sees the human key already on issue.ExternalID and short-
+// circuits before allocating. Non-mutating so the canonical issues.external_id
+// (the Linear UUID) stays intact on the caller's struct for any code path
+// that still needs it (Linear API writes are keyed off the UUID).
+//
+// Returns the original pointer unchanged when issue is nil, when issue is
+// not Linear-sourced, when no primary Linear link with a key-shaped
+// ExternalID is hydrated, or when issue.ExternalID is already the key-shaped
+// value (idempotency).
+func issueWithLinearHumanKey(issue *models.Issue, links []models.SessionIssueLink) *models.Issue {
+	if issue == nil || issue.Source != models.IssueSourceLinear {
+		return issue
+	}
+	if linearKeyShapeRE.MatchString(issue.ExternalID) {
+		return issue
+	}
+	for _, link := range links {
+		if link.Role != models.SessionIssueLinkRolePrimary {
+			continue
+		}
+		if link.IssueSource == nil || *link.IssueSource != models.IssueSourceLinear {
+			continue
+		}
+		if link.ExternalID == nil {
+			continue
+		}
+		if !linearKeyShapeRE.MatchString(*link.ExternalID) {
+			continue
+		}
+		copyIssue := *issue
+		copyIssue.ExternalID = *link.ExternalID
+		return &copyIssue
+	}
+	return issue
 }
 
 // stripLinearColonPrefix removes a leading "ACS-1234: " preamble from a

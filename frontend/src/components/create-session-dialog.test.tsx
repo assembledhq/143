@@ -1,8 +1,10 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { renderWithProviders, screen, userEvent, waitFor } from "@/test/test-utils";
+import { fireEvent, renderWithProviders, screen, userEvent, waitFor } from "@/test/test-utils";
 import { CreateSessionDialog } from "./create-session-dialog";
 import { http, HttpResponse } from "msw";
 import { server } from "@/test/mocks/server";
+
+const DRAFT_STORAGE_KEY = "143:new-session-draft";
 
 vi.mock("next/navigation", () => ({
   useRouter: () => ({
@@ -11,6 +13,22 @@ vi.mock("next/navigation", () => ({
   }),
   useSearchParams: () => new URLSearchParams(),
 }));
+
+function setMobileViewport(matches: boolean) {
+  Object.defineProperty(window, "matchMedia", {
+    writable: true,
+    value: vi.fn().mockImplementation((query: string) => ({
+      matches: query === "(max-width: 767px)" ? matches : false,
+      media: query,
+      onchange: null,
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      dispatchEvent: vi.fn(),
+    })),
+  });
+}
 
 function setupManualSessionHandler() {
   server.use(
@@ -69,6 +87,8 @@ describe("CreateSessionDialog", () => {
   beforeEach(() => {
     onOpenChange = vi.fn<(open: boolean) => void>();
     window.localStorage.clear();
+    window.sessionStorage.clear();
+    setMobileViewport(false);
   });
 
   it("renders dialog with title when open", () => {
@@ -98,15 +118,15 @@ describe("CreateSessionDialog", () => {
     ).toBeInTheDocument();
   });
 
-  it("disables Create button when textarea is empty", () => {
+  it("disables Start session button when textarea is empty", () => {
     renderWithProviders(
       <CreateSessionDialog open onOpenChange={onOpenChange} />,
     );
 
-    expect(screen.getByRole("button", { name: /Create/ })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Start session" })).toBeDisabled();
   });
 
-  it("enables Create button when textarea has text", async () => {
+  it("enables Start session button when textarea has text", async () => {
     const user = userEvent.setup();
 
     renderWithProviders(
@@ -118,7 +138,7 @@ describe("CreateSessionDialog", () => {
       "Fix the login bug",
     );
 
-    expect(screen.getByRole("button", { name: /Create/ })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Start session" })).toBeEnabled();
   });
 
   it("calls onOpenChange(false) on successful submission", async () => {
@@ -134,11 +154,36 @@ describe("CreateSessionDialog", () => {
       "Fix the login bug",
     );
 
-    await user.click(screen.getByRole("button", { name: /Create/ }));
+    await user.click(screen.getByRole("button", { name: "Start session" }));
 
     await waitFor(() => {
       expect(onOpenChange).toHaveBeenCalledWith(false);
     });
+  });
+
+  it("does not restore the submitted prompt after closing before the draft debounce fires", async () => {
+    setupManualSessionHandler();
+
+    const { rerender } = renderWithProviders(
+      <CreateSessionDialog open onOpenChange={onOpenChange} />,
+    );
+
+    const textarea = screen.getByPlaceholderText("Tell the agent what to do...");
+    fireEvent.change(textarea, { target: { value: "Fix stale draft" } });
+
+    fireEvent.click(screen.getByRole("button", { name: "Start session" }));
+
+    await waitFor(() => {
+      expect(onOpenChange).toHaveBeenCalledWith(false);
+    });
+
+    rerender(<CreateSessionDialog open={false} onOpenChange={onOpenChange} />);
+
+    expect(window.sessionStorage.getItem(DRAFT_STORAGE_KEY)).toBeNull();
+
+    rerender(<CreateSessionDialog open onOpenChange={onOpenChange} />);
+
+    expect(screen.getByPlaceholderText<HTMLTextAreaElement>("Tell the agent what to do...").value).toBe("");
   });
 
   it("shows error message when session creation fails", async () => {
@@ -162,7 +207,7 @@ describe("CreateSessionDialog", () => {
       "Fix the login bug",
     );
 
-    await user.click(screen.getByRole("button", { name: /Create/ }));
+    await user.click(screen.getByRole("button", { name: "Start session" }));
 
     await waitFor(() => {
       expect(screen.getByText(/Something went wrong/)).toBeInTheDocument();
@@ -188,6 +233,48 @@ describe("CreateSessionDialog", () => {
     );
 
     expect(screen.getByRole("combobox", { name: /Model/ })).toBeInTheDocument();
+  });
+
+  it("uses a mobile settings sheet instead of inline repo and model controls on small screens", async () => {
+    const user = userEvent.setup();
+    setMobileViewport(true);
+    setupRepoHandlers();
+
+    renderWithProviders(
+      <CreateSessionDialog open onOpenChange={onOpenChange} />,
+    );
+
+    expect(await screen.findByRole("button", { name: "Session settings" })).toBeInTheDocument();
+    await waitFor(() => {
+      expect(screen.getByText("api-server")).toBeInTheDocument();
+      expect(screen.getByText("main")).toBeInTheDocument();
+      expect(screen.getByText("Default model")).toBeInTheDocument();
+      expect(screen.getByText("Default reasoning")).toBeInTheDocument();
+    });
+    expect(screen.queryByRole("combobox", { name: /Model override/i })).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Session settings" }));
+
+    expect(await screen.findByRole("dialog", { name: "Session settings" })).toBeInTheDocument();
+    expect(screen.getByRole("combobox", { name: /Model override/i })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Target branch/ })).toBeInTheDocument();
+  });
+
+  it("renders the mobile dialog as a full-screen scrollable composer", () => {
+    setMobileViewport(true);
+
+    renderWithProviders(
+      <CreateSessionDialog open onOpenChange={onOpenChange} />,
+    );
+
+    const dialog = screen.getByRole("dialog", { name: "New session" });
+    const textarea = screen.getByRole("textbox", { name: "Session prompt" });
+
+    expect(dialog).toHaveClass("inset-0");
+    expect(dialog).toHaveClass("h-dvh");
+    expect(dialog).toHaveClass("max-w-none");
+    expect(dialog).toHaveClass("overflow-y-auto");
+    expect(textarea).toHaveClass("text-base");
   });
 
   it("shows attachment button", () => {
@@ -266,6 +353,30 @@ describe("CreateSessionDialog", () => {
     // Should show the image as an attachment with a remove button
     expect(screen.getByAltText("screenshot.png")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /Remove screenshot.png/ })).toBeInTheDocument();
+  });
+
+  it("allows starting a mobile dialog session with only an attachment", async () => {
+    const user = userEvent.setup();
+    setMobileViewport(true);
+    setupManualSessionHandler();
+
+    renderWithProviders(
+      <CreateSessionDialog open onOpenChange={onOpenChange} />,
+    );
+
+    await user.click(await screen.findByRole("button", { name: "Add files or photos" }));
+    await user.click(screen.getByRole("menuitem", { name: "Add image URL" }));
+    await user.type(screen.getByLabelText("Image URL"), "https://example.com/mobile-attachment.png");
+    await user.click(screen.getByRole("button", { name: "Add" }));
+
+    const startButton = screen.getByRole("button", { name: "Start session" });
+    expect(startButton).toBeEnabled();
+
+    await user.click(startButton);
+
+    await waitFor(() => {
+      expect(onOpenChange).toHaveBeenCalledWith(false);
+    });
   });
 
   it("opens an image lightbox from the dialog attachment thumbnail", async () => {
@@ -472,7 +583,7 @@ describe("CreateSessionDialog", () => {
       });
 
       // Submit
-      await user.click(screen.getByRole("button", { name: /Create/ }));
+      await user.click(screen.getByRole("button", { name: "Start session" }));
 
       await waitFor(() => {
         expect(onOpenChange).toHaveBeenCalledWith(false);
@@ -504,6 +615,14 @@ describe("CreateSessionDialog", () => {
           },
         });
       }),
+      // Gemini must be available in the model picker for this test to be able
+      // to select "gemini-2.5-pro"; the composer hides agents the user has no
+      // credentials for.
+      http.get("/api/v1/settings/credentials/resolved", () => {
+        return HttpResponse.json({
+          data: [{ provider: "gemini", source: "personal" }],
+        });
+      }),
       http.post("/api/v1/sessions/manual", async ({ request }) => {
         requestBody = await request.json() as Record<string, unknown>;
         return HttpResponse.json({
@@ -527,7 +646,7 @@ describe("CreateSessionDialog", () => {
       screen.getByPlaceholderText("Tell the agent what to do..."),
       "Fix the login bug",
     );
-    await user.click(screen.getByRole("button", { name: /Create/ }));
+    await user.click(screen.getByRole("button", { name: "Start session" }));
 
     await waitFor(() => {
       expect(onOpenChange).toHaveBeenCalledWith(false);

@@ -147,9 +147,9 @@ func (h *IngestionWebhookHandler) handleProvider(w http.ResponseWriter, r *http.
 				zerolog.Ctx(r.Context()).Warn().Err(err).Msg("failed to mark webhook processed")
 			}
 			writeJSON(w, http.StatusOK, map[string]any{
-				"status":            result.Status,
-				"agent_session_id":  result.AgentSessionID,
-				"job_id":            result.JobID,
+				"status":           result.Status,
+				"agent_session_id": result.AgentSessionID,
+				"job_id":           result.JobID,
 			})
 			return
 		}

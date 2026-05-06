@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/assembledhq/143/internal/models"
+	"github.com/assembledhq/143/internal/repoconfig"
 )
 
 // =============================================================================
@@ -28,35 +29,13 @@ var supportedTemplates = map[string]InfraTemplate{
 	"postgres-17": {Image: "postgres:17-alpine", DefaultPort: 5432, HealthCmd: []string{"pg_isready"}, DefaultMemMB: 256, DefaultCPU: 0.25, MaxMemMB: 512},
 	"postgres-16": {Image: "postgres:16-alpine", DefaultPort: 5432, HealthCmd: []string{"pg_isready"}, DefaultMemMB: 256, DefaultCPU: 0.25, MaxMemMB: 512},
 	"redis-7":     {Image: "redis:7-alpine", DefaultPort: 6379, HealthCmd: []string{"redis-cli", "ping"}, DefaultMemMB: 128, DefaultCPU: 0.1, MaxMemMB: 256},
-	"mysql-8":     {Image: "mysql:8-lts", DefaultPort: 3306, HealthCmd: []string{"mysqladmin", "ping"}, DefaultMemMB: 384, DefaultCPU: 0.25, MaxMemMB: 768},
+	"mysql-8":     {Image: "mysql:8.4", DefaultPort: 3306, HealthCmd: []string{"mysqladmin", "ping"}, DefaultMemMB: 384, DefaultCPU: 0.25, MaxMemMB: 768},
 }
 
 // LookupInfraTemplate returns the template definition for a known template name.
 func LookupInfraTemplate(name string) (InfraTemplate, bool) {
 	t, ok := supportedTemplates[name]
 	return t, ok
-}
-
-// AllInfraImages returns the deduplicated set of Docker images used by every
-// supported infrastructure template. Worker boot calls this to pre-pull
-// images in the background, so the first preview that needs e.g.
-// postgres:17-alpine doesn't have to pay the cold-pull latency inside the
-// HTTP request handler (the server's WriteTimeout is far shorter than a
-// large image pull).
-func AllInfraImages() []string {
-	seen := make(map[string]struct{}, len(supportedTemplates))
-	out := make([]string, 0, len(supportedTemplates))
-	for _, t := range supportedTemplates {
-		if t.Image == "" {
-			continue
-		}
-		if _, ok := seen[t.Image]; ok {
-			continue
-		}
-		seen[t.Image] = struct{}{}
-		out = append(out, t.Image)
-	}
-	return out
 }
 
 // =============================================================================
@@ -71,10 +50,12 @@ const (
 )
 
 // =============================================================================
-// Raw config (direct JSON unmarshal of .143/preview.json)
+// Raw preview config (direct JSON unmarshal of the nested "preview" section in
+// .143/config.json).
 // =============================================================================
 
-// rawPreviewConfig is the direct JSON representation of .143/preview.json.
+// rawPreviewConfig is the direct JSON representation of the nested preview
+// section inside .143/config.json.
 // It supports both single-service (top-level command/port) and multi-service
 // (services map) formats.
 type rawPreviewConfig struct {
@@ -110,11 +91,16 @@ func (r *rawPreviewConfig) hasBothFormats() bool {
 // ParseConfig
 // =============================================================================
 
-// ParseConfig parses a .143/preview.json file and normalizes single-service
-// configs to the multi-service format.
+// ParseConfig parses the nested preview section from .143/config.json and
+// normalizes single-service configs to the multi-service format.
 func ParseConfig(data []byte) (*models.PreviewConfig, error) {
+	previewData, err := extractPreviewSection(data)
+	if err != nil {
+		return nil, err
+	}
+
 	var raw rawPreviewConfig
-	if err := json.Unmarshal(data, &raw); err != nil {
+	if err := json.Unmarshal(previewData, &raw); err != nil {
 		return nil, fmt.Errorf("parse preview config: %w", err)
 	}
 
@@ -161,6 +147,36 @@ func ParseConfig(data []byte) (*models.PreviewConfig, error) {
 	}
 
 	return cfg, nil
+}
+
+func extractPreviewSection(data []byte) ([]byte, error) {
+	var probe map[string]json.RawMessage
+	if err := json.Unmarshal(data, &probe); err != nil {
+		return data, nil
+	}
+	_, hasPreview := probe["preview"]
+	_, hasBootstrap := probe["bootstrap"]
+	_, hasValidation := probe["validation"]
+	if !hasPreview && !hasBootstrap && !hasValidation {
+		return data, nil
+	}
+	if _, hasLegacyPreviewFields := probe["services"]; hasLegacyPreviewFields {
+		return data, nil
+	}
+	if _, hasLegacyPreviewFields := probe["command"]; hasLegacyPreviewFields {
+		return data, nil
+	}
+	if !hasPreview {
+		return nil, fmt.Errorf("parse preview config: missing preview section in %s", repoconfig.ConfigPath)
+	}
+	cfg, err := repoconfig.Parse(data)
+	if err != nil || len(cfg.Preview) == 0 {
+		if err != nil {
+			return nil, fmt.Errorf("parse preview config: %w", err)
+		}
+		return nil, fmt.Errorf("parse preview config: missing preview section in %s", repoconfig.ConfigPath)
+	}
+	return cfg.Preview, nil
 }
 
 // =============================================================================

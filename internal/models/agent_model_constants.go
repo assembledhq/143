@@ -6,24 +6,19 @@ import (
 	"strings"
 )
 
-// Legacy PM model aliases (kept for backward compatibility).
-const (
-	PMModelOpus   = "opus"
-	PMModelSonnet = "sonnet"
-	PMModelHaiku  = "haiku"
-)
-
-var legacyPMAliases = []string{PMModelOpus, PMModelSonnet, PMModelHaiku}
-
-// AvailablePMModels includes all models from every provider plus legacy aliases.
-// The PM agent can use any model from any configured provider.
+// AvailablePMModels is the union of every coding-agent's model list. It mirrors
+// the model set the session picker offers (frontend lib/agents.ts AGENTS) so
+// admins can pick any model the org could otherwise spin up a session with —
+// including Amp modes ("smart"/"deep"/...) and Pi's curated provider/model
+// strings.
 var AvailablePMModels []string
 
 func init() {
-	AvailablePMModels = append(AvailablePMModels, legacyPMAliases...)
 	AvailablePMModels = append(AvailablePMModels, AvailableClaudeCodeModels...)
 	AvailablePMModels = append(AvailablePMModels, AvailableGeminiCLIModels...)
 	AvailablePMModels = append(AvailablePMModels, AvailableCodexModels...)
+	AvailablePMModels = append(AvailablePMModels, AvailableAmpModes...)
+	AvailablePMModels = append(AvailablePMModels, AvailablePiModels...)
 }
 
 // Amp uses agent "modes" (not models) to select model + system prompt + tools.
@@ -58,13 +53,14 @@ var AvailablePiModels = []string{
 }
 
 const (
-	ClaudeCodeModelOpus     = "claude-opus-4-6"
+	ClaudeCodeModelOpus47   = "claude-opus-4-7"
+	ClaudeCodeModelOpus46   = "claude-opus-4-6"
 	ClaudeCodeModelSonnet46 = "claude-sonnet-4-6"
-	ClaudeCodeModelSonnet   = "claude-sonnet-4-5"
-	ClaudeCodeModelHaiku    = "claude-haiku-4-5"
+	ClaudeCodeModelSonnet45 = "claude-sonnet-4-5"
+	ClaudeCodeModelHaiku45  = "claude-haiku-4-5"
 )
 
-var AvailableClaudeCodeModels = []string{ClaudeCodeModelOpus, ClaudeCodeModelSonnet46, ClaudeCodeModelSonnet, ClaudeCodeModelHaiku}
+var AvailableClaudeCodeModels = []string{ClaudeCodeModelOpus47, ClaudeCodeModelOpus46, ClaudeCodeModelSonnet46, ClaudeCodeModelSonnet45, ClaudeCodeModelHaiku45}
 
 const (
 	GeminiCLIModelGemini31ProPreview  = "gemini-3.1-pro-preview"
@@ -81,6 +77,7 @@ var AvailableGeminiCLIModels = []string{
 }
 
 const (
+	CodexModelGPT55           = "gpt-5.5"
 	CodexModelGPT54           = "gpt-5.4"
 	CodexModelGPT54Mini       = "gpt-5.4-mini"
 	CodexModelGPT53Codex      = "gpt-5.3-codex"
@@ -90,6 +87,7 @@ const (
 )
 
 var AvailableCodexModels = []string{
+	CodexModelGPT55,
 	CodexModelGPT54,
 	CodexModelGPT54Mini,
 	CodexModelGPT53Codex,
@@ -98,22 +96,68 @@ var AvailableCodexModels = []string{
 	CodexModelGPT53CodexSpark,
 }
 
-func IsSupportedPMModel(model string) bool {
-	for _, supportedModel := range AvailablePMModels {
-		if model == supportedModel {
-			return true
+// AgentTypeForModel returns the AgentType whose curated model list contains
+// the given model. The curated lookup runs first so an entry like
+// "openai/gpt-5.4" resolves to AgentTypePi (its native registry) rather than
+// being misread by the slash heuristic — only after every list misses do we
+// fall back to AgentTypePi for unknown "provider/model"-shaped strings, since
+// Pi accepts arbitrary provider/model overrides at run time. Returns an empty
+// AgentType when no agent owns the model.
+//
+// Mirrors the frontend agentTypeForModel helper in lib/agents.ts so PM and
+// session pickers route through the same agent-resolution rules.
+func AgentTypeForModel(model string) AgentType {
+	if model == "" {
+		return ""
+	}
+	for _, m := range AvailableCodexModels {
+		if m == model {
+			return AgentTypeCodex
 		}
 	}
-	return false
+	for _, m := range AvailableClaudeCodeModels {
+		if m == model {
+			return AgentTypeClaudeCode
+		}
+	}
+	for _, m := range AvailableGeminiCLIModels {
+		if m == model {
+			return AgentTypeGeminiCLI
+		}
+	}
+	for _, m := range AvailableAmpModes {
+		if m == model {
+			return AgentTypeAmp
+		}
+	}
+	for _, m := range AvailablePiModels {
+		if m == model {
+			return AgentTypePi
+		}
+	}
+	if strings.Contains(model, "/") {
+		return AgentTypePi
+	}
+	return ""
+}
+
+// ValidatePMModel validates a pm_model setting using the same rules as
+// session model validation. It resolves the model's agent type via
+// AgentTypeForModel and delegates to ValidateModelForAgentType, so PM
+// accepts every model the session picker accepts — including Pi's
+// arbitrary "provider/model" overrides.
+func ValidatePMModel(model string) error {
+	if model == "" {
+		return nil
+	}
+	agentType := AgentTypeForModel(model)
+	if agentType == "" {
+		return fmt.Errorf("pm_model %q is not recognized — pick a model from any configured coding agent", model)
+	}
+	return ValidateModelForAgentType(agentType, model)
 }
 
 func IsSupportedClaudeCodeModel(model string) bool {
-	// Accept legacy PM aliases (opus, sonnet, haiku) for Claude Code.
-	for _, alias := range legacyPMAliases {
-		if model == alias {
-			return true
-		}
-	}
 	for _, supportedModel := range AvailableClaudeCodeModels {
 		if model == supportedModel {
 			return true
@@ -390,8 +434,8 @@ func ValidateSettingsModels(settings OrgSettings) error {
 	if err := settings.LLMReasoningEffort.Validate(); err != nil {
 		return err
 	}
-	if settings.PMModel != "" && !IsSupportedPMModel(settings.PMModel) {
-		return fmt.Errorf("pm_model must be one of: %v", AvailablePMModels)
+	if err := ValidatePMModel(settings.PMModel); err != nil {
+		return err
 	}
 
 	for agentTypeStr, envVars := range settings.AgentConfig {
@@ -412,7 +456,7 @@ func ValidateSettingsModels(settings OrgSettings) error {
 		case AgentTypeClaudeCode:
 			model := envVars["ANTHROPIC_MODEL"]
 			if model != "" && !IsSupportedClaudeCodeModel(model) {
-				return fmt.Errorf("agent_config.claude_code.ANTHROPIC_MODEL must be one of: %v or %v", legacyPMAliases, AvailableClaudeCodeModels)
+				return fmt.Errorf("agent_config.claude_code.ANTHROPIC_MODEL must be one of: %v", AvailableClaudeCodeModels)
 			}
 		case AgentTypeGeminiCLI:
 			model := envVars["GEMINI_MODEL"]

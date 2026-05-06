@@ -1,5 +1,5 @@
 import { http, HttpResponse } from 'msw';
-import type { Issue, Session, SessionLog, SessionMessage, SessionReviewComment, SessionTimelineEntry, User, Validation, PullRequest, PullRequestHealthResponse, PullRequestRepairResponse, ListResponse, SingleResponse, PMStatus, PMDecisionsResponse, Project, ProjectDetail } from '@/lib/types';
+import type { Issue, Session, SessionLog, SessionMessage, SessionReviewComment, SessionThread, SessionTimelineEntry, User, Validation, PullRequest, PullRequestHealthResponse, PullRequestRepairResponse, ListResponse, SingleResponse, PMStatus, PMDecisionsResponse, Project, ProjectDetail } from '@/lib/types';
 
 export const mockIssues: Issue[] = [
   {
@@ -372,6 +372,64 @@ export const handlers = [
     } satisfies ListResponse<SessionMessage>);
   }),
 
+  http.get('/api/v1/sessions/:id/threads', () => {
+    return HttpResponse.json({
+      data: [] as SessionThread[],
+      meta: {},
+    } satisfies ListResponse<SessionThread>);
+  }),
+
+  http.post('/api/v1/sessions/:id/threads', async ({ request, params }) => {
+    const body = await request.json() as { label?: string; agent_type?: string; model?: string };
+    return HttpResponse.json({
+      data: {
+        id: 'thread-new',
+        session_id: params.id as string,
+        org_id: 'org-1',
+        agent_type: body.agent_type || 'codex',
+        model_override: body.model || undefined,
+        label: body.label || 'Codex 2',
+        status: 'idle',
+        current_turn: 0,
+        created_at: '2026-02-17T07:12:00Z',
+        cost_cents: 0,
+        pending_message_count: 0,
+      },
+    } satisfies SingleResponse<SessionThread>, { status: 201 });
+  }),
+
+  http.get('/api/v1/sessions/:id/threads/:threadId/messages', () => {
+    return HttpResponse.json({
+      data: [] as SessionMessage[],
+      meta: {},
+    } satisfies ListResponse<SessionMessage>);
+  }),
+
+  http.get('/api/v1/sessions/:id/threads/:threadId/logs', () => {
+    return HttpResponse.json({
+      data: [] as SessionLog[],
+      meta: {},
+    } satisfies ListResponse<SessionLog>);
+  }),
+
+  http.post('/api/v1/sessions/:id/threads/:threadId/messages', async ({ request, params }) => {
+    const body = await request.json() as { message: string; images?: string[] };
+    return HttpResponse.json({
+      data: {
+        id: 2,
+        session_id: params.id as string,
+        org_id: 'org-1',
+        thread_id: params.threadId as string,
+        user_id: 'user-1',
+        turn_number: 1,
+        role: 'user' as const,
+        content: body.message,
+        attachments: body.images,
+        created_at: '2026-02-17T07:12:00Z',
+      },
+    } satisfies SingleResponse<SessionMessage>, { status: 201 });
+  }),
+
   http.post('/api/v1/sessions/:id/messages', () => {
     return HttpResponse.json({
       data: {
@@ -660,6 +718,27 @@ export const handlers = [
   }),
 
   http.get('/api/v1/settings/credentials/resolved', () => {
+    return HttpResponse.json({
+      data: [],
+      meta: {},
+    });
+  }),
+
+  http.get('/api/v1/settings/credentials/team', () => {
+    return HttpResponse.json({
+      data: [],
+      meta: {},
+    });
+  }),
+
+  http.get('/api/v1/settings/coding-auths', () => {
+    return HttpResponse.json({
+      data: [],
+      meta: {},
+    });
+  }),
+
+  http.get('/api/v1/coding-credentials', () => {
     return HttpResponse.json({
       data: [],
       meta: {},

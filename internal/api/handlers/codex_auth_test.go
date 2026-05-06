@@ -31,6 +31,12 @@ func codexBufferedLogger(buf *bytes.Buffer) zerolog.Logger {
 func codexAddOrgContext(r *http.Request) *http.Request {
 	orgID := uuid.MustParse("00000000-0000-0000-0000-000000000001")
 	ctx := middleware.WithOrgID(r.Context(), orgID)
+	// Handlers now require a user + active role on the context: scope
+	// resolution defaults to org scope, which is admin-gated. Inject a stub
+	// admin user so the existing tests behave the same way they did before
+	// scope resolution was added.
+	ctx = middleware.WithUser(ctx, &models.User{ID: uuid.MustParse("00000000-0000-0000-0000-0000000000a1")})
+	ctx = middleware.WithActiveRole(ctx, "admin")
 	return r.WithContext(ctx)
 }
 
@@ -47,19 +53,7 @@ type codexCredentialStoreStub struct {
 	insertPendingAuthErr error
 }
 
-func (s *codexCredentialStoreStub) Upsert(_ context.Context, _ uuid.UUID, _ models.ProviderConfig) error {
-	return nil
-}
-
-func (s *codexCredentialStoreStub) Get(_ context.Context, _ uuid.UUID, _ models.ProviderName) (*models.DecryptedCredential, error) {
-	return nil, errors.New("not found")
-}
-
-func (s *codexCredentialStoreStub) UpdateStatus(_ context.Context, _ uuid.UUID, _ models.ProviderName, _ string) error {
-	return nil
-}
-
-func (s *codexCredentialStoreStub) Disable(_ context.Context, _ uuid.UUID, _ models.ProviderName) error {
+func (s *codexCredentialStoreStub) Disable(_ context.Context, _ models.Scope, _ models.ProviderName) error {
 	if s.disableErr != nil {
 		return s.disableErr
 	}
@@ -67,37 +61,37 @@ func (s *codexCredentialStoreStub) Disable(_ context.Context, _ uuid.UUID, _ mod
 	return nil
 }
 
-func (s *codexCredentialStoreStub) UpsertWithLabel(_ context.Context, _ uuid.UUID, _ *uuid.UUID, _ string, _ models.ProviderConfig) (*uuid.UUID, error) {
+func (s *codexCredentialStoreStub) UpsertWithLabel(_ context.Context, _ models.Scope, _ *uuid.UUID, _ string, _ models.ProviderConfig) (*uuid.UUID, error) {
 	return nil, errors.New("not implemented")
 }
 
-func (s *codexCredentialStoreStub) InsertPendingAuth(_ context.Context, _ uuid.UUID, _ *uuid.UUID, _ string, _ models.ProviderConfig) (*uuid.UUID, error) {
+func (s *codexCredentialStoreStub) InsertPendingAuth(_ context.Context, _ models.Scope, _ *uuid.UUID, _ string, _ models.ProviderConfig) (*uuid.UUID, error) {
 	if s.insertPendingAuthErr != nil {
 		return nil, s.insertPendingAuthErr
 	}
 	return nil, errors.New("not implemented")
 }
 
-func (s *codexCredentialStoreStub) GetByID(_ context.Context, _ uuid.UUID, _ uuid.UUID) (*models.DecryptedCredential, error) {
+func (s *codexCredentialStoreStub) GetByID(_ context.Context, _ models.Scope, _ uuid.UUID) (*models.DecryptedCredential, error) {
 	if s.getByIDResult != nil {
 		return s.getByIDResult, nil
 	}
 	return nil, errors.New("not found")
 }
 
-func (s *codexCredentialStoreStub) ListByProvider(_ context.Context, _ uuid.UUID, _ models.ProviderName) ([]models.DecryptedCredential, error) {
+func (s *codexCredentialStoreStub) ListByProvider(_ context.Context, _ models.Scope, _ models.ProviderName) ([]models.DecryptedCredential, error) {
 	return nil, nil
 }
 
-func (s *codexCredentialStoreStub) GetByProviderAndLabel(_ context.Context, _ uuid.UUID, _ models.ProviderName, _ string) (*models.DecryptedCredential, error) {
+func (s *codexCredentialStoreStub) GetByProviderAndLabel(_ context.Context, _ models.Scope, _ models.ProviderName, _ string) (*models.DecryptedCredential, error) {
 	return nil, errors.New("not found")
 }
 
-func (s *codexCredentialStoreStub) ClaimNextRoundRobin(_ context.Context, _ uuid.UUID, _ models.ProviderName) (*models.DecryptedCredential, error) {
+func (s *codexCredentialStoreStub) ClaimNextRoundRobin(_ context.Context, _ models.Scope, _ models.ProviderName) (*models.DecryptedCredential, error) {
 	return nil, errors.New("not found")
 }
 
-func (s *codexCredentialStoreStub) DisableByID(_ context.Context, _ uuid.UUID, _ uuid.UUID) error {
+func (s *codexCredentialStoreStub) DisableByID(_ context.Context, _ models.Scope, _ uuid.UUID) error {
 	if s.disableErr != nil {
 		return s.disableErr
 	}
@@ -105,15 +99,15 @@ func (s *codexCredentialStoreStub) DisableByID(_ context.Context, _ uuid.UUID, _
 	return nil
 }
 
-func (s *codexCredentialStoreStub) UpdateStatusByID(_ context.Context, _ uuid.UUID, _ uuid.UUID, _ string) error {
+func (s *codexCredentialStoreStub) UpdateStatusByID(_ context.Context, _ models.Scope, _ uuid.UUID, _ string) error {
 	return nil
 }
 
-func (s *codexCredentialStoreStub) UpsertByID(_ context.Context, _ uuid.UUID, _ uuid.UUID, _ models.ProviderConfig) error {
+func (s *codexCredentialStoreStub) UpsertByID(_ context.Context, _ models.Scope, _ uuid.UUID, _ models.ProviderConfig) error {
 	return nil
 }
 
-func (s *codexCredentialStoreStub) ExistsForProviderByID(_ context.Context, _ uuid.UUID, _ uuid.UUID, _ models.ProviderName) (bool, error) {
+func (s *codexCredentialStoreStub) ExistsForProviderByID(_ context.Context, _ models.Scope, _ uuid.UUID, _ models.ProviderName) (bool, error) {
 	return s.existsForProviderByIDResult, nil
 }
 

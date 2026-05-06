@@ -680,12 +680,12 @@ func TestGeminiCLIAdapter_Execute_StreamingOutput(t *testing.T) {
 	require.Equal(t, 1, toolUseCount, "should have 1 tool_use log entry")
 }
 
-func TestGeminiCLIAdapter_Execute_ContinuationWithoutSessionIDUsesResumeMode(t *testing.T) {
+func TestGeminiCLIAdapter_Execute_ContinuationWithoutSessionIDFallsBackToFreshExec(t *testing.T) {
 	t.Parallel()
 
 	provider := newMockProvider()
 	provider.ExecFn = func(ctx context.Context, sb *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
-		if strings.HasPrefix(cmd, "gemini --resume") {
+		if strings.HasPrefix(cmd, "gemini") {
 			_, _ = stdout.Write([]byte(`{"type":"text","content":"continuing gemini session"}`))
 			return 0, nil
 		}
@@ -703,6 +703,8 @@ func TestGeminiCLIAdapter_Execute_ContinuationWithoutSessionIDUsesResumeMode(t *
 	adapter := NewGeminiCLIAdapter(zerolog.Nop())
 	sandbox := &agent.Sandbox{ID: "test", WorkDir: "/workspace", HomeDir: "/home/sandbox", Metadata: map[string]string{agent.SandboxMetadataBaseCommitSHA: "abc123"}}
 	prompt := &agent.AgentPrompt{
+		SystemPrompt: "system",
+		UserPrompt:   "history-embedded user prompt",
 		UserMessage:  "Please include a regression test.",
 		MaxTokens:    50_000,
 		Continuation: true,
@@ -712,9 +714,58 @@ func TestGeminiCLIAdapter_Execute_ContinuationWithoutSessionIDUsesResumeMode(t *
 	ctx := WithSandboxProvider(context.Background(), provider)
 
 	result, err := adapter.Execute(ctx, sandbox, prompt, logCh)
-	require.NoError(t, err, "continuation should succeed without an explicit Gemini session ID")
+	require.NoError(t, err, "continuation should succeed when falling back to fresh exec")
 	require.NotNil(t, result, "continuation should return a result")
-	require.Contains(t, provider.ExecCalls[0], "gemini --resume", "continuation without a session ID should still use Gemini resume mode")
-	_, exists := provider.Files["/home/sandbox/.143-prompt.md"]
-	require.False(t, exists, "continuation should not write a fresh prompt file")
+	require.NotContains(t, provider.ExecCalls[0], "--resume", "continuation without a session ID must not use --resume (latest is non-deterministic)")
+	contents, exists := provider.Files["/home/sandbox/.143-prompt.md"]
+	require.True(t, exists, "fresh exec must write the system+user prompt to a file")
+	require.Contains(t, string(contents), "history-embedded user prompt", "prompt file should carry the orchestrator-provided history-embedded user prompt")
+}
+
+func TestGeminiCLIAdapter_ParseStreamLine_CapturesSessionID(t *testing.T) {
+	t.Parallel()
+
+	result := &agent.AgentResult{}
+	logCh := make(chan agent.LogEntry, 4)
+	var summaryParts []string
+	lastAssistant := ""
+
+	parseGeminiStreamLine(
+		[]byte(`{"type":"result","content":"done","session_id":"gemini-session-xyz"}`),
+		result,
+		logCh,
+		&summaryParts,
+		&lastAssistant,
+	)
+
+	require.Equal(t, "gemini-session-xyz", result.AgentSessionID, "session_id on any event should populate AgentSessionID for downstream resume")
+}
+
+func TestGeminiCLIAdapter_ParseStreamLine_CapturesCamelCaseSessionIDOnLifecycleEvent(t *testing.T) {
+	t.Parallel()
+
+	result := &agent.AgentResult{}
+	logCh := make(chan agent.LogEntry, 4)
+	var summaryParts []string
+	lastAssistant := ""
+
+	// Older / different Gemini stream shapes emit session id under
+	// `sessionId` (camelCase) on a session-lifecycle event; capture must
+	// not depend on the exact event type or the exact field spelling.
+	parseGeminiStreamLine(
+		[]byte(`{"type":"session_started","sessionId":"gemini-session-camel"}`),
+		result,
+		logCh,
+		&summaryParts,
+		&lastAssistant,
+	)
+
+	require.Equal(t, "gemini-session-camel", result.AgentSessionID, "camelCase sessionId on a lifecycle event must populate AgentSessionID")
+}
+
+func TestGeminiCLIAdapter_ResumeMode(t *testing.T) {
+	t.Parallel()
+
+	adapter := NewGeminiCLIAdapter(zerolog.Nop())
+	require.Equal(t, agent.ResumeBySessionID, adapter.ResumeMode())
 }

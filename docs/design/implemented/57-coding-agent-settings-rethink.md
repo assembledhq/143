@@ -90,7 +90,7 @@ Each row represents one authorized coding agent auth, not one provider.
 - `Auth type` — `Subscription` or `API key`
 - `Label` — human-friendly identifier like `Codex team seat A` or `Claude prod key 2`
 - `Scope` — `Organization`
-- `Status` — `Healthy`, `Rate limited`, `Needs reauth`, `Invalid`, `Never verified`
+- `Status` — `Healthy`, `Rate limited`, `Needs reauth`, `Invalid`
 - `Default` — badge on exactly one row
 - `Last used` — relative timestamp
 - `Usage notes` — masked identity or email, key suffix, or subscription owner
@@ -242,7 +242,7 @@ That gives the product one visual language but two different emphases:
 | Backups in fallback order                                                  |
 |--------------------------------------------------------------------------- |
 | 2  | Claude Code | API key      | ...8LM2            | Healthy            |
-| 3  | Codex       | API key      | ...1DF9            | Never verified     |
+| 3  | Codex       | API key      | ...1DF9            | Healthy            |
 +---------------------------------------------------------------------------+
 | Effective resolution: Personal #1 -> Personal #2 -> Org default -> Org #2 |
 +---------------------------------------------------------------------------+

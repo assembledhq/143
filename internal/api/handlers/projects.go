@@ -110,7 +110,15 @@ func (h *ProjectHandler) List(w http.ResponseWriter, r *http.Request) {
 		filters.RepositoryID = repoID
 	}
 
-	if createdByStr := r.URL.Query().Get("created_by"); createdByStr != "" {
+	if _, ok := r.URL.Query()["created_by_ids"]; ok {
+		createdByIDsStr := r.URL.Query().Get("created_by_ids")
+		createdByIDs, err := parseUUIDList(createdByIDsStr)
+		if err != nil {
+			writeError(w, r, http.StatusBadRequest, "INVALID_USER_ID", "invalid created_by_ids")
+			return
+		}
+		filters.CreatedByIDs = createdByIDs
+	} else if createdByStr := r.URL.Query().Get("created_by"); createdByStr != "" {
 		createdBy, err := uuid.Parse(createdByStr)
 		if err != nil {
 			writeError(w, r, http.StatusBadRequest, "INVALID_USER_ID", "invalid created_by")

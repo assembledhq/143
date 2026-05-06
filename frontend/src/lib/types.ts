@@ -84,6 +84,17 @@ export interface Integration {
   org_id: string;
   provider: string;
   github_app_installed?: boolean;
+  /**
+   * Surfaced by the backend when a provider rejects our access token (e.g.
+   * Linear returns 401). Populated by deriveIntegrationStatus on the server
+   * — when present, the integrations settings card renders an amber banner
+   * with a Reconnect CTA. The reason field is a controlled string from the
+   * backend; never render arbitrary provider responses through this surface.
+   */
+  auth_error?: {
+    reason: string;
+    at: string;
+  };
   status: string;
   last_synced_at?: string;
   created_at: string;
@@ -154,6 +165,7 @@ export interface Session {
   pr_creation_error?: string;
   pr_push_state?: "idle" | "queued" | "pushing" | "succeeded" | "failed";
   pr_push_error?: string;
+  has_unpushed_changes?: boolean;
   target_branch?: string;
   repository_id?: string;
   linked_issues?: Array<{
@@ -169,6 +181,9 @@ export interface Session {
     // Linear workspace slug (e.g. "acs"). Used to build deep links to
     // linear.app/<slug>/issue/<KEY>. Empty/undefined for non-Linear links.
     issue_workspace_slug?: string;
+    // Latest backend-recorded reason a Linear state sync was skipped for
+    // this link (if any). Used by the session detail debug chip.
+    linear_last_skipped_reason?: string;
   }>;
   // Linear-specific session policy flags. Frozen at session create.
   linear_private?: boolean;
@@ -187,6 +202,7 @@ export interface Session {
   diff?: string;
   diff_stats?: { added: number; removed: number; files_changed: number };
   diff_history?: Array<{ pass: number; diff: string; diff_stats: { added: number; removed: number; files_changed: number }; created_at: string }>;
+  threads?: SessionThread[];
   archived_at?: string;
   archived_by_user_id?: string;
   created_at: string;
@@ -248,6 +264,27 @@ export interface SessionThread {
   started_at?: string;
   completed_at?: string;
   created_at: string;
+  base_snapshot_key?: string;
+  cost_cents: number;
+  pending_message_count: number;
+  cancel_requested_at?: string;
+}
+
+export interface SessionThreadFileEvent {
+  id: number;
+  org_id: string;
+  session_id: string;
+  thread_id?: string;
+  turn: number;
+  path: string;
+  event_type: 'created' | 'modified' | 'deleted';
+  before_hash?: string;
+  after_hash?: string;
+  observed_at: string;
+}
+
+export interface ForkResult {
+  job_id: string;
 }
 
 export interface SessionDetail extends Session {
@@ -776,7 +813,7 @@ export interface ResolvedCredential {
 
 export type CodingAuthAgent = "codex" | "claude_code" | "gemini_cli" | "amp" | "pi";
 export type CodingAuthType = "subscription" | "api_key";
-export type CodingAuthStatus = "healthy" | "rate_limited" | "needs_reauth" | "invalid" | "never_verified";
+export type CodingAuthStatus = "healthy" | "rate_limited" | "needs_reauth" | "invalid";
 
 export interface CodingAuth {
   id: string;
@@ -792,6 +829,33 @@ export interface CodingAuth {
   last_verified_at?: string;
   last_used_at?: string;
   usage_note?: string;
+  created_by?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+// CodingCredentialScope is the scope dimension of the unified
+// coding-credentials API: "org" rows are visible to every member of the org as
+// a fallback; "personal" rows belong to the requesting user only and run ahead
+// of any org row in the resolver.
+export type CodingCredentialScope = "org" | "personal";
+
+// CodingCredentialSummary is the on-the-wire representation of a row from the
+// unified coding_credentials table. Mirrors models.CodingCredentialSummary.
+export interface CodingCredentialSummary {
+  id: string;
+  org_id: string;
+  user_id?: string;
+  scope: CodingCredentialScope;
+  priority: number;
+  agent: CodingAuthAgent;
+  auth_type: CodingAuthType;
+  provider: string;
+  label: string;
+  status: CodingAuthStatus;
+  is_default: boolean;
+  usage_note?: string;
+  last_verified_at?: string;
   created_by?: string;
   created_at: string;
   updated_at: string;
@@ -1212,6 +1276,27 @@ export interface EvalBootstrapRun {
   created_at: string;
   completed_at?: string;
   error_message?: string;
+}
+
+// Lightweight signal arriving over the per-batch SSE stream. Mirrors
+// models.EvalBatchUpdatedEvent. Consumers refetch the full EvalBatchDetail on
+// receipt rather than reading fields from the event itself, so payload size
+// stays bounded for large batches.
+export interface EvalBatchUpdatedEvent {
+  batch_id: string;
+  org_id: string;
+  status: EvalBatchStatus;
+  updated_at: string;
+}
+
+// Lightweight signal arriving over the per-bootstrap-run SSE stream. Mirrors
+// models.EvalBootstrapUpdatedEvent.
+export interface EvalBootstrapUpdatedEvent {
+  bootstrap_run_id: string;
+  org_id: string;
+  status: EvalBootstrapStatus;
+  session_id?: string;
+  updated_at: string;
 }
 
 export const evalComplexityConfig: Record<EvalComplexity, { color: string; label: string }> = {

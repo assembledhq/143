@@ -32,7 +32,7 @@ describe('ManualSessionCreatePage', () => {
     expect(screen.getByText("Let's build")).toBeInTheDocument();
     expect(screen.getByPlaceholderText('Tell the agent what to do...')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Add files or photos' })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Dictate' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Dictate' })).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Start session' })).toBeDisabled();
   });
 
@@ -552,48 +552,12 @@ describe('ManualSessionCreatePage', () => {
     });
   });
 
-  it('shows dictation not supported error', async () => {
-    const user = userEvent.setup();
+  it('does not render dictation controls or errors', () => {
     renderWithProviders(<ManualSessionCreatePageContent />);
 
-    await user.click(screen.getByRole('button', { name: 'Dictate' }));
-
-    expect(screen.getByText('Dictation is not supported in this browser.')).toBeInTheDocument();
-  });
-
-  it('shows dictation error when recognition fails', async () => {
-    let capturedInstance: { onerror: (() => void) | null; onend: (() => void) | null };
-
-    class MockSpeechRecognition {
-      continuous = false;
-      interimResults = false;
-      lang = '';
-      onresult: ((event: unknown) => void) | null = null;
-      onerror: (() => void) | null = null;
-      onend: (() => void) | null = null;
-      start() { /* noop */ }
-      stop() { /* noop */ }
-      constructor() {
-        // eslint-disable-next-line @typescript-eslint/no-this-alias
-        capturedInstance = this;
-      }
-    }
-
-    (window as unknown as Record<string, unknown>).SpeechRecognition = MockSpeechRecognition;
-
-    const user = userEvent.setup();
-    renderWithProviders(<ManualSessionCreatePageContent />);
-
-    await user.click(screen.getByRole('button', { name: 'Dictate' }));
-
-    // Trigger the error handler inside act to ensure React processes state updates
-    await act(async () => {
-      capturedInstance!.onerror!();
-    });
-
-    expect(screen.getByText('Dictation failed. Please type your request.')).toBeInTheDocument();
-
-    delete (window as unknown as Record<string, unknown>).SpeechRecognition;
+    expect(screen.queryByRole('button', { name: 'Dictate' })).not.toBeInTheDocument();
+    expect(screen.queryByText('Dictation is not supported in this browser.')).not.toBeInTheDocument();
+    expect(screen.queryByText('Dictation failed. Please type your request.')).not.toBeInTheDocument();
   });
 
   it('removes attachment when clicking remove button', async () => {
@@ -623,6 +587,63 @@ describe('ManualSessionCreatePage', () => {
     // The image URL input area should still be visible (not dismissed)
     // and no attachment badges should appear
     expect(screen.getByPlaceholderText('https://example.com/screenshot.png')).toBeInTheDocument();
+  });
+
+  it('adds a linked Linear issue as a chip via the Add linear issue menu item', async () => {
+    const user = userEvent.setup();
+    server.use(
+      http.get('/api/v1/integrations', () => HttpResponse.json({
+        data: [
+          {
+            id: 'integration-linear',
+            provider: 'linear',
+            status: 'active',
+          },
+        ],
+        meta: {},
+      })),
+    );
+    renderWithProviders(<ManualSessionCreatePageContent />);
+
+    await user.click(screen.getByRole('button', { name: 'Add files or photos' }));
+    await user.click(screen.getByRole('menuitem', { name: 'Add linear issue' }));
+
+    await user.type(screen.getByLabelText('Linear issue id or URL'), 'https://linear.app/acme/issue/ACS-1234');
+    await user.click(screen.getByRole('button', { name: 'Add' }));
+
+    expect(screen.getByText('ACS-1234')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Remove ACS-1234' })).toBeInTheDocument();
+    expect(screen.getByPlaceholderText('Tell the agent what to do...')).toHaveValue('');
+    expect(screen.queryByLabelText('Linear issue id or URL')).not.toBeInTheDocument();
+  });
+
+  it('rejects free-text input in the Linear add affordance with an inline error', async () => {
+    const user = userEvent.setup();
+    server.use(
+      http.get('/api/v1/integrations', () => HttpResponse.json({
+        data: [
+          {
+            id: 'integration-linear',
+            provider: 'linear',
+            status: 'active',
+          },
+        ],
+        meta: {},
+      })),
+    );
+    renderWithProviders(<ManualSessionCreatePageContent />);
+
+    await user.click(screen.getByRole('button', { name: 'Add files or photos' }));
+    await user.click(screen.getByRole('menuitem', { name: 'Add linear issue' }));
+
+    await user.type(screen.getByLabelText('Linear issue id or URL'), 'just some text');
+    await user.click(screen.getByRole('button', { name: 'Add' }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'Enter a Linear URL (https://linear.app/...) or key like ACS-1234',
+    );
+    expect(screen.getByLabelText('Linear issue id or URL')).toBeInTheDocument();
+    expect(screen.getByPlaceholderText('Tell the agent what to do...')).toHaveValue('');
   });
 
   it('uploads a file via the upload endpoint and shows thumbnail', async () => {

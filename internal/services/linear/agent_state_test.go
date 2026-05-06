@@ -18,9 +18,9 @@ func TestMilestoneActivity(t *testing.T) {
 		bodyHas   string
 	}{
 		{
-			name:    "linked is suppressed (dispatcher already emitted bootstrap)",
-			event:   MilestoneLinked,
-			wantOK:  false,
+			name:   "linked is suppressed (dispatcher already emitted bootstrap)",
+			event:  MilestoneLinked,
+			wantOK: false,
 		},
 		{
 			name:      "started emits action with state pin",

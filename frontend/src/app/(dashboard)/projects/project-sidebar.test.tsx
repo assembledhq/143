@@ -17,6 +17,7 @@ vi.mock('next/link', () => ({
 }));
 
 let mockPathname = '/projects';
+let mockSelectedSegment: string | null = null;
 const mockAuthState: {
   isAuthenticated: boolean;
   user: { id: string } | null;
@@ -33,7 +34,7 @@ vi.mock('next/navigation', () => ({
   useRouter: () => ({ push: vi.fn(), replace: vi.fn(), back: vi.fn() }),
   useSearchParams: () => new URLSearchParams(),
   usePathname: () => mockPathname,
-  useParams: () => ({}),
+  useSelectedLayoutSegment: () => mockSelectedSegment,
 }));
 
 vi.mock('@/hooks/use-auth', () => ({
@@ -49,6 +50,7 @@ vi.mock('@/lib/notify', () => ({
 describe('ProjectSidebar', () => {
   beforeEach(() => {
     mockPathname = '/projects';
+    mockSelectedSegment = null;
     mockAuthState.isAuthenticated = true;
     mockAuthState.user = { id: 'user-1' };
     mockAuthState.isLoading = false;
@@ -67,26 +69,26 @@ describe('ProjectSidebar', () => {
     expect(screen.getByText('Security Sweep')).toBeInTheDocument();
   });
 
-  it('defaults the owner scope to Mine', async () => {
+  it('defaults the people scope to Mine', async () => {
     let capturedCreatedBy: string | null = null;
     server.use(
       http.get('*/api/v1/projects', ({ request }) => {
-        capturedCreatedBy = new URL(request.url).searchParams.get('created_by');
+        capturedCreatedBy = new URL(request.url).searchParams.get('created_by_ids');
         return HttpResponse.json({ data: [], meta: {} } satisfies ListResponse<Project>);
       }),
     );
 
     renderWithProviders(<ProjectSidebar />);
 
-    await screen.findByRole('radio', { name: 'Mine' });
+    await screen.findByRole('button', { name: /Mine/ });
     expect(capturedCreatedBy).toBe('user-1');
   });
 
-  it('switches the owner scope to Everyone', async () => {
+  it('switches the people scope to Everyone', async () => {
     const createdByValues: string[] = [];
     server.use(
       http.get('*/api/v1/projects', ({ request }) => {
-        createdByValues.push(new URL(request.url).searchParams.get('created_by') ?? '');
+        createdByValues.push(new URL(request.url).searchParams.get('created_by_ids') ?? '');
         return HttpResponse.json({ data: [], meta: {} } satisfies ListResponse<Project>);
       }),
     );
@@ -94,19 +96,37 @@ describe('ProjectSidebar', () => {
     const user = userEvent.setup();
     renderWithProviders(<ProjectSidebar />);
 
-    await screen.findByRole('radio', { name: 'Mine' });
-    await user.click(screen.getByRole('radio', { name: 'Everyone' }));
+    await user.click(screen.getByRole('button', { name: /Mine/ }));
+    await user.click(await screen.findByRole('button', { name: 'Everyone' }));
 
     expect(createdByValues).toContain('user-1');
     expect(createdByValues).toContain('');
   });
 
-  it('shows the owner scope toggle', async () => {
+  it('can switch legacy user=all links back to Mine', async () => {
+    const createdByValues: string[] = [];
+    server.use(
+      http.get('*/api/v1/projects', ({ request }) => {
+        createdByValues.push(new URL(request.url).searchParams.get('created_by_ids') ?? '');
+        return HttpResponse.json({ data: [], meta: {} } satisfies ListResponse<Project>);
+      }),
+    );
+
+    const user = userEvent.setup();
+    renderWithProviders(<ProjectSidebar />, { searchParams: { user: 'all' } });
+
+    await user.click(await screen.findByRole('button', { name: /Everyone/ }));
+    await user.click(await screen.findByRole('button', { name: 'Mine' }));
+
+    expect(createdByValues).toContain('');
+    expect(createdByValues).toContain('user-1');
+  });
+
+  it('shows the people filter trigger', async () => {
     renderWithProviders(<ProjectSidebar />);
     await screen.findByText('Test Project');
 
-    expect(screen.getByRole('radio', { name: 'Everyone' })).toBeInTheDocument();
-    expect(screen.getByRole('radio', { name: 'Mine' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Mine/ })).toBeInTheDocument();
   });
 
   it('displays New project link at top', () => {
@@ -122,14 +142,14 @@ describe('ProjectSidebar', () => {
       }),
     );
 
-    renderWithProviders(<ProjectSidebar />, { searchParams: { user: 'all' } });
+    renderWithProviders(<ProjectSidebar />, { searchParams: { people: 'all' } });
     expect(await screen.findByText('No projects yet')).toBeInTheDocument();
   });
 
   it('shows a dedicated empty state when the default Mine view is empty', async () => {
     server.use(
       http.get('*/api/v1/projects', ({ request }) => {
-        const createdBy = new URL(request.url).searchParams.get('created_by');
+        const createdBy = new URL(request.url).searchParams.get('created_by_ids');
         if (createdBy === 'user-1') {
           return HttpResponse.json({ data: [], meta: {} } satisfies ListResponse<Project>);
         }
@@ -246,6 +266,17 @@ describe('ProjectSidebar', () => {
     });
   });
 
+  it('keeps the desktop archive action de-emphasized until hover or focus', async () => {
+    renderWithProviders(<ProjectSidebar />);
+    await screen.findByText('Test Project');
+
+    expect(screen.getAllByRole('button', { name: 'Archive project' })[0]).toHaveClass(
+      'md:opacity-0',
+      'md:group-hover:opacity-100',
+      'md:focus-visible:opacity-100',
+    );
+  });
+
   it('uses a left-aligned horizontal-only tab scroller', async () => {
     renderWithProviders(<ProjectSidebar />);
     await screen.findByText('Test Project');
@@ -263,7 +294,7 @@ describe('ProjectSidebar', () => {
 
   it('restores search from the URL and preserves it in project detail links', async () => {
     renderWithProviders(<ProjectSidebar />, {
-      searchParams: { user: 'all', search: 'Security' },
+      searchParams: { people: 'all', search: 'Security' },
     });
 
     const input = await screen.findByPlaceholderText('Search projects...');
@@ -271,7 +302,7 @@ describe('ProjectSidebar', () => {
     expect(screen.queryByText('Test Project')).not.toBeInTheDocument();
     expect((await screen.findByText('Security Sweep')).closest('a')).toHaveAttribute(
       'href',
-      expect.stringMatching(/^\/projects\/[^?]+\?user=all&search=Security$/),
+      expect.stringMatching(/^\/projects\/[^?]+\?people=all&search=Security$/),
     );
   });
 
@@ -286,6 +317,7 @@ describe('ProjectSidebar', () => {
 
   it('shows ghost New project entry when on /projects/new', async () => {
     mockPathname = '/projects/new';
+    mockSelectedSegment = 'new';
 
     renderWithProviders(<ProjectSidebar />);
     await screen.findByText('Test Project');
@@ -295,35 +327,48 @@ describe('ProjectSidebar', () => {
     expect(newProjectTexts.length).toBeGreaterThanOrEqual(2);
   });
 
+  it('highlights the selected project from the active layout segment', async () => {
+    mockPathname = '/projects/proj-1';
+    mockSelectedSegment = 'proj-1';
+
+    renderWithProviders(<ProjectSidebar />);
+    await screen.findByText('Test Project');
+
+    const selectedLink = screen.getByText('Test Project').closest('a');
+    expect(selectedLink?.className).toContain('bg-background');
+    expect(selectedLink?.className).toContain('shadow-sm');
+    expect(selectedLink?.className).toContain('border');
+  });
+
   it('preserves the user/status/repo filters in project detail links', async () => {
     renderWithProviders(<ProjectSidebar />, {
-      searchParams: { user: 'all', status: 'active', repo: 'repo-1' },
+      searchParams: { people: 'all', status: 'active', repo: 'repo-1' },
     });
 
     const link = (await screen.findByText('Test Project')).closest('a');
     expect(link?.getAttribute('href')).toMatch(
-      /^\/projects\/[^?]+\?user=all&status=active&repo=repo-1$/,
+      /^\/projects\/[^?]+\?people=all&status=active&repo=repo-1$/,
     );
   });
 
   it('preserves search alongside the existing filters in project detail links', async () => {
     renderWithProviders(<ProjectSidebar />, {
-      searchParams: { user: 'all', status: 'active', repo: 'repo-1', search: 'Test' },
+      searchParams: { people: 'all', status: 'active', repo: 'repo-1', search: 'Test' },
     });
 
     const link = (await screen.findByText('Test Project')).closest('a');
     expect(link?.getAttribute('href')).toMatch(
-      /^\/projects\/[^?]+\?user=all&status=active&repo=repo-1&search=Test$/,
+      /^\/projects\/[^?]+\?people=all&status=active&repo=repo-1&search=Test$/,
     );
   });
 
-  it('preserves a member-id user filter (not just "all")', async () => {
+  it('preserves explicit people selections', async () => {
     renderWithProviders(<ProjectSidebar />, {
-      searchParams: { user: 'user-2' },
+      searchParams: { people: 'user-2,user-3' },
     });
 
     const link = (await screen.findByText('Test Project')).closest('a');
-    expect(link?.getAttribute('href')).toMatch(/^\/projects\/[^?]+\?user=user-2$/);
+    expect(link?.getAttribute('href')).toMatch(/^\/projects\/[^?]+\?people=user-2%2Cuser-3$/);
   });
 
   it('only serializes the filters that are actually set', async () => {

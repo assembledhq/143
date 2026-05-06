@@ -394,6 +394,78 @@ func TestCheckCI_NpmTestsPass(t *testing.T) {
 	require.Contains(t, details, "npm test", "details should mention npm test command")
 }
 
+func TestCheckCI_RepoConfiguredCommandsRunBootstrapBeforeDefaultAndValidationCommands(t *testing.T) {
+	t.Parallel()
+	provider := newMockProvider()
+	provider.Files["package.json"] = []byte("{}")
+	provider.Files[".143/config.json"] = []byte(`{
+  "bootstrap": {
+    "commands": ["npm ci"]
+  },
+  "validation": {
+    "commands": ["npm run lint"]
+  }
+}`)
+	provider.ExecFn = func(ctx context.Context, sb *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
+		fmt.Fprint(stdout, "ok\n")
+		return 0, nil
+	}
+
+	s := &Service{provider: provider, logger: zerolog.Nop()}
+	sandbox := &agent.Sandbox{ID: "test", WorkDir: "/workspace"}
+
+	result, details, err := s.checkCI(context.Background(), sandbox)
+	require.NoError(t, err, "checkCI should not return an error when repo-configured commands pass")
+	require.Equal(t, "pass", result, "passing default and repo-configured commands should produce a pass result")
+	require.Equal(t, []string{"npm ci", "npm test", "npm run lint"}, provider.ExecCalls, "checkCI should run bootstrap commands before the default npm test command and repo-configured validation commands")
+	require.Contains(t, details, "npm ci", "details should mention the bootstrap command")
+	require.Contains(t, details, "npm test", "details should mention the default npm test command")
+	require.Contains(t, details, "npm run lint", "details should mention the repo-configured validation command")
+}
+
+func TestCheckCI_RepoConfiguredValidationCommandFailureFailsCheck(t *testing.T) {
+	t.Parallel()
+	provider := newMockProvider()
+	provider.Files["package.json"] = []byte("{}")
+	provider.Files[".143/config.json"] = []byte(`{
+  "validation": {
+    "commands": ["npm run lint"]
+  }
+}`)
+	provider.ExecFn = func(ctx context.Context, sb *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
+		if cmd == "npm run lint" {
+			fmt.Fprint(stderr, "eslint: 2 problems\n")
+			return 1, nil
+		}
+		fmt.Fprint(stdout, "ok\n")
+		return 0, nil
+	}
+
+	s := &Service{provider: provider, logger: zerolog.Nop()}
+	sandbox := &agent.Sandbox{ID: "test", WorkDir: "/workspace"}
+
+	result, details, err := s.checkCI(context.Background(), sandbox)
+	require.NoError(t, err, "checkCI should not return an error when a repo-configured validation command fails")
+	require.Equal(t, "fail", result, "failing repo-configured validation command should fail the CI check")
+	require.Contains(t, details, "npm run lint", "details should mention the failing repo-configured validation command")
+	require.Contains(t, details, "eslint: 2 problems", "details should include the failing lint output")
+}
+
+func TestCheckCI_InvalidRepoValidationConfigFailsCheck(t *testing.T) {
+	t.Parallel()
+	provider := newMockProvider()
+	provider.Files["package.json"] = []byte("{}")
+	provider.Files[".143/config.json"] = []byte(`{"validation":{"commands":[123]}}`)
+
+	s := &Service{provider: provider, logger: zerolog.Nop()}
+	sandbox := &agent.Sandbox{ID: "test", WorkDir: "/workspace"}
+
+	result, details, err := s.checkCI(context.Background(), sandbox)
+	require.NoError(t, err, "checkCI should not return an error when repo validation config is invalid")
+	require.Equal(t, "fail", result, "invalid repo validation config should fail the CI check")
+	require.Contains(t, details, ".143/config.json", "details should mention the invalid repo validation config path")
+}
+
 func TestCheckCI_NoProjectType(t *testing.T) {
 	t.Parallel()
 	provider := newMockProvider()

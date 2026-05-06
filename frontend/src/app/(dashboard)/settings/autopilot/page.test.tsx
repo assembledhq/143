@@ -48,6 +48,100 @@ describe("AutopilotSettingsPage", () => {
     expect(screen.queryByText("Priority weights")).not.toBeInTheDocument();
   });
 
+  it("opens the PM model dropdown with groups for every agent the org has configured (incl. Amp modes and Pi)", async () => {
+    server.use(
+      http.get("/api/v1/settings", () => HttpResponse.json({
+        data: {
+          id: "org-1",
+          name: "Org",
+          settings: {
+            pm_model: "gpt-5.4",
+            default_agent_type: "codex",
+            agent_config: {
+              codex: { OPENAI_API_KEY: "sk-***" },
+              claude_code: { ANTHROPIC_API_KEY: "sk-ant-***" },
+              gemini_cli: { GEMINI_API_KEY: "AIza-***" },
+              amp: { AMP_API_KEY: "amp_***" },
+              pi: { PI_API_KEY: "pi_***" },
+            },
+          },
+          created_at: "2026-03-20T00:00:00Z",
+          updated_at: "2026-03-20T00:00:00Z",
+        },
+      })),
+      http.get("/api/v1/repositories", () => HttpResponse.json({ data: [], meta: {} })),
+    );
+
+    const user = userEvent.setup();
+    renderWithProviders(<AutopilotSettingsPage />);
+
+    await user.click(await screen.findByLabelText("PM model"));
+
+    // Group labels — Amp's row is relabeled "Amp modes" so the mode names
+    // (smart/deep/...) read correctly next to model IDs from other agents.
+    expect(await screen.findByText("Codex")).toBeInTheDocument();
+    expect(screen.getByText("Claude Code")).toBeInTheDocument();
+    expect(screen.getByText("Gemini CLI")).toBeInTheDocument();
+    expect(screen.getByText("Amp modes")).toBeInTheDocument();
+    expect(screen.getByText("Pi")).toBeInTheDocument();
+
+    // Spot-check a row from each kind: Codex model, Amp mode, Pi provider/model.
+    expect(screen.getByRole("option", { name: "claude-opus-4-7" })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "smart" })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "anthropic/claude-opus-4-7" })).toBeInTheDocument();
+  });
+
+  it("includes unified org subscription credentials in PM model availability", async () => {
+    server.use(
+      http.get("/api/v1/settings", () => HttpResponse.json({
+        data: {
+          id: "org-1",
+          name: "Org",
+          settings: {
+            pm_model: "claude-sonnet-4-5",
+            default_agent_type: "codex",
+            agent_config: {},
+          },
+          created_at: "2026-03-20T00:00:00Z",
+          updated_at: "2026-03-20T00:00:00Z",
+        },
+      })),
+      http.get("/api/v1/repositories", () => HttpResponse.json({ data: [], meta: {} })),
+      http.get("/api/v1/settings/coding-auths", () => HttpResponse.json({ data: [], meta: {} })),
+      http.get("/api/v1/coding-credentials", ({ request }) => {
+        const url = new URL(request.url);
+        if (url.searchParams.get("scope") !== "org") {
+          return HttpResponse.json({ data: [], meta: {} });
+        }
+        return HttpResponse.json({
+          data: [{
+            id: "cred-1",
+            org_id: "org-1",
+            scope: "org",
+            priority: 1,
+            agent: "claude_code",
+            auth_type: "subscription",
+            provider: "anthropic_subscription",
+            label: "Claude subscription",
+            status: "healthy",
+            is_default: true,
+            created_at: "2026-03-20T00:00:00Z",
+            updated_at: "2026-03-20T00:00:00Z",
+          }],
+          meta: {},
+        });
+      }),
+    );
+
+    const user = userEvent.setup();
+    renderWithProviders(<AutopilotSettingsPage />);
+
+    await user.click(await screen.findByLabelText("PM model"));
+
+    expect(await screen.findByText("Claude Code")).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "claude-sonnet-4-5" })).toBeInTheDocument();
+  });
+
   it("autosaves the PM cadence when the value changes and the input blurs", async () => {
     let capturedBody: unknown;
     server.use(

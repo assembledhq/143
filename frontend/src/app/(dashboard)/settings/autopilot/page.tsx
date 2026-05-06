@@ -23,7 +23,8 @@ import { PageContainer } from "@/components/page-container";
 import { PageHeader } from "@/components/page-header";
 import { useAutosave } from "@/hooks/useAutosave";
 import { useAutosaveNumericField } from "@/hooks/useAutosaveNumericField";
-import { DEFAULT_PM_MODEL, PM_MODELS_BY_PROVIDER } from "@/lib/model-constants";
+import { availableAgentModelGroups, pmUsableResolvedCredentials } from "@/lib/agents";
+import { DEFAULT_PM_MODEL } from "@/lib/model-constants";
 import { queryKeys } from "@/lib/query-keys";
 import {
   applyOrgSettingsPatch,
@@ -37,7 +38,7 @@ import {
   PM_SCHEDULE_MAX_HOURS,
   clampNumber,
 } from "@/lib/settings-constants";
-import type { ListResponse, Organization, OrgSettings, RepoSettings, Repository, SingleResponse } from "@/lib/types";
+import type { CodingAuth, CodingCredentialSummary, ListResponse, Organization, OrgSettings, RepoSettings, Repository, ResolvedCredential, SingleResponse, UserCredentialSummary } from "@/lib/types";
 
 export default function AutopilotSettingsPage() {
   const { user } = useAuth();
@@ -53,6 +54,31 @@ export default function AutopilotSettingsPage() {
     queryFn: () => api.repositories.list(),
     enabled: isAdmin,
   });
+  const { data: resolvedCredsResponse } = useQuery<ListResponse<ResolvedCredential>>({
+    queryKey: queryKeys.credentials.resolved,
+    queryFn: () => api.userCredentials.listResolved(),
+    enabled: isAdmin,
+  });
+  const { data: teamDefaultsResponse } = useQuery<ListResponse<UserCredentialSummary>>({
+    queryKey: queryKeys.credentials.teamDefaults,
+    queryFn: () => api.userCredentials.listTeamDefaults(),
+    enabled: isAdmin,
+  });
+  const { data: codexAuthResponse } = useQuery({
+    queryKey: queryKeys.codexAuth.status,
+    queryFn: () => api.codexAuth.status(),
+    enabled: isAdmin,
+  });
+  const { data: codingAuthsResponse } = useQuery<ListResponse<CodingAuth>>({
+    queryKey: ["coding-auths"],
+    queryFn: () => api.codingAuths.list(),
+    enabled: isAdmin,
+  });
+  const { data: orgCodingCredentialsResponse } = useQuery<ListResponse<CodingCredentialSummary>>({
+    queryKey: ["coding-credentials", "org"],
+    queryFn: () => api.codingCredentials.list("org"),
+    enabled: isAdmin,
+  });
 
   const settings = (settingsResponse?.data?.settings ?? {}) as OrgSettings;
   const repositories = repositoriesResponse?.data ?? [];
@@ -60,18 +86,37 @@ export default function AutopilotSettingsPage() {
     const repoSettings = (repository.settings ?? {}) as RepoSettings;
     return repoSettings.pm != null;
   });
+  const resolvedCredentials = useMemo(
+    () => resolvedCredsResponse?.data ?? [],
+    [resolvedCredsResponse],
+  );
+  const codingAuths = useMemo(
+    () => codingAuthsResponse?.data ?? [],
+    [codingAuthsResponse],
+  );
+  const orgCodingCredentials = useMemo(
+    () => orgCodingCredentialsResponse?.data ?? [],
+    [orgCodingCredentialsResponse],
+  );
+  const pmCodingAuthAvailability = useMemo(
+    () => [...codingAuths, ...orgCodingCredentials],
+    [codingAuths, orgCodingCredentials],
+  );
+  const codexAuthStatus = codexAuthResponse?.data;
+  const pmResolvedCredentials = useMemo(
+    () => pmUsableResolvedCredentials(resolvedCredentials, teamDefaultsResponse?.data ?? []),
+    [resolvedCredentials, teamDefaultsResponse],
+  );
 
-  const enabledPmModelGroups = useMemo(() => {
-    const agentConfig = settings.agent_config ?? {};
-    const defaultAgent = settings.default_agent_type || "codex";
-
-    return Object.entries(PM_MODELS_BY_PROVIDER)
-      .filter(([providerKey, { apiKeyVar }]) => {
-        const orgKey = agentConfig[providerKey]?.[apiKeyVar];
-        return Boolean(orgKey) || providerKey === defaultAgent;
-      })
-      .map(([, { label, models }]) => ({ label, models }));
-  }, [settings.agent_config, settings.default_agent_type]);
+  const pmModelGroups = useMemo(() => {
+    return availableAgentModelGroups(
+      pmResolvedCredentials,
+      codexAuthStatus,
+      pmCodingAuthAvailability,
+      settings.default_agent_type || "codex",
+      { orgAgentConfig: settings.agent_config },
+    );
+  }, [pmResolvedCredentials, codexAuthStatus, pmCodingAuthAvailability, settings.default_agent_type, settings.agent_config]);
 
   const scheduleHoursServer = settings.pm_schedule_hours ?? 24;
   const pmModel = settings.pm_model ?? DEFAULT_PM_MODEL;
@@ -154,11 +199,11 @@ export default function AutopilotSettingsPage() {
                     <SelectItem value={DEFAULT_PM_MODEL}>
                       Auto ({DEFAULT_PM_MODEL})
                     </SelectItem>
-                    {enabledPmModelGroups.map((group) => {
+                    {pmModelGroups.map((group) => {
                       const models = group.models.filter((m) => m !== DEFAULT_PM_MODEL);
                       if (models.length === 0) return null;
                       return (
-                        <SelectGroup key={group.label}>
+                        <SelectGroup key={group.key}>
                           <SelectLabel>{group.label}</SelectLabel>
                           {models.map((model) => (
                             <SelectItem key={model} value={model}>

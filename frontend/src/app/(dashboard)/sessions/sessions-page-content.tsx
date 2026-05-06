@@ -15,6 +15,7 @@ import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useQueryState, parseAsString } from "nuqs";
 import { PageHeader } from "@/components/page-header";
+import { PeopleFilter } from "@/components/people-filter";
 import { PMStatusBanner } from "@/components/pm/pm-status-banner";
 import { DecisionsView } from "@/components/pm/decisions-view";
 import { Button } from "@/components/ui/button";
@@ -33,9 +34,8 @@ import { formatTimeAgo, sessionTitle } from "@/lib/utils";
 import { StatusDot } from "@/components/status-dot";
 import { AnimatedEllipsis } from "@/components/animated-ellipsis";
 import { AgentBadge } from "@/components/agent-badge";
-import { useSessionUserFilter } from "@/hooks/use-session-user-filter";
+import { usePeopleFilter } from "@/hooks/use-people-filter";
 import { prMergedAccent } from "@/lib/pr-status-styles";
-import { SessionOwnerToggle } from "./session-owner-toggle";
 import type { Session, SessionListItem, User } from "@/lib/types";
 import {
   workingSet,
@@ -50,7 +50,7 @@ import { getCountForTab, renderCount } from "@/lib/session-counts";
 const statusConfig: Record<string, { dot: string; text: string; bg: string; label: string }> = {
   pending: { dot: "bg-muted-foreground/50", text: "text-muted-foreground", bg: "bg-muted", label: "Pending" },
   running: { dot: "bg-primary", text: "text-primary", bg: "bg-primary/10", label: "Running" },
-  idle: { dot: "bg-sky-500", text: "text-sky-700 dark:text-sky-400", bg: "bg-sky-50 dark:bg-sky-950/30", label: "Idle" },
+  idle: { dot: "bg-primary", text: "text-primary", bg: "bg-primary/10", label: "Idle" },
   awaiting_input: { dot: "bg-amber-500", text: "text-amber-700 dark:text-amber-400", bg: "bg-amber-50 dark:bg-amber-950/30", label: "Awaiting input" },
   needs_human_guidance: { dot: "bg-orange-500", text: "text-orange-700 dark:text-orange-400", bg: "bg-orange-50 dark:bg-orange-950/30", label: "Needs guidance" },
   completed: { dot: "bg-emerald-500", text: "text-emerald-700 dark:text-emerald-400", bg: "bg-emerald-50 dark:bg-emerald-950/30", label: "Completed" },
@@ -202,7 +202,15 @@ function buildColumns(members: User[]): ColumnDef<Session>[] {
 
 export function SessionsPageContent() {
   const router = useRouter();
-  const { currentUserFilter, triggeredByUserId, isResolved, setUserFilter } = useSessionUserFilter();
+  const {
+    mode,
+    selectedUserIDs,
+    scopedUserIDs,
+    serializedPeopleParam,
+    currentUser,
+    isResolved,
+    setPeopleFilter,
+  } = usePeopleFilter();
   const [activeFilter, setActiveFilter] = useQueryState("status", parseAsString);
   const [repo] = useQueryState("repo");
   const [sorting, setSorting] = useState<SortingState>([]);
@@ -233,7 +241,7 @@ export function SessionsPageContent() {
 
   // Reset pagination when the effective query scope changes. Adjusting state
   // during render (rather than in an effect) avoids cascading renders.
-  const scopeKey = `${repo ?? ""}|${triggeredByUserId ?? ""}|${currentFilter}`;
+  const scopeKey = `${repo ?? ""}|${serializedPeopleParam ?? "mine"}|${currentFilter}`;
   const [prevScopeKey, setPrevScopeKey] = useState(scopeKey);
   if (prevScopeKey !== scopeKey) {
     setPrevScopeKey(scopeKey);
@@ -245,14 +253,14 @@ export function SessionsPageContent() {
     () => ({
       limit: 50,
       repository_id: repo ?? undefined,
-      triggered_by_user_id: triggeredByUserId,
+      triggered_by_user_ids: scopedUserIDs,
       ...(statusParam ? { status: statusParam } : {}),
     }),
-    [repo, triggeredByUserId, statusParam],
+    [repo, scopedUserIDs, statusParam],
   );
 
   const { data: listData, isLoading, error } = useQuery({
-    queryKey: [...queryKeys.sessions.list(repo), "filtered", currentFilter, triggeredByUserId],
+    queryKey: [...queryKeys.sessions.list(repo), "filtered", currentFilter, serializedPeopleParam],
     queryFn: () => api.sessions.list(listParams),
     refetchInterval: isPaginated || showDecisions ? false : 10000,
     enabled: !showDecisions && isResolved,
@@ -260,11 +268,11 @@ export function SessionsPageContent() {
 
   // Tab badge counts.
   const { data: countsData } = useQuery({
-    queryKey: queryKeys.sessions.counts(repo, triggeredByUserId),
+    queryKey: queryKeys.sessions.counts(repo, serializedPeopleParam),
     queryFn: () =>
       api.sessions.counts({
         repository_id: repo ?? undefined,
-        triggered_by_user_id: triggeredByUserId,
+        triggered_by_user_ids: scopedUserIDs,
       }),
     refetchInterval: showDecisions ? false : 10000,
     enabled: !showDecisions && isResolved,
@@ -369,9 +377,12 @@ export function SessionsPageContent() {
         </div>
 
         {/* User filter toggle */}
-        <SessionOwnerToggle
-          currentUserFilter={currentUserFilter}
-          onFilterChange={setUserFilter}
+        <PeopleFilter
+          mode={mode}
+          selectedUserIDs={selectedUserIDs}
+          members={members}
+          currentUser={currentUser}
+          onFilterChange={setPeopleFilter}
           className="ml-auto shrink-0 mr-2"
         />
       </div>

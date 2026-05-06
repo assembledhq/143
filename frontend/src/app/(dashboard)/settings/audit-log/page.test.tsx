@@ -177,7 +177,10 @@ describe('AuditLogPage', () => {
       expect(screen.getByText('created session')).toBeInTheDocument();
     });
 
-    await userEvent.click(screen.getByRole('button', { name: 'Load older' }));
+    expect(screen.queryByText('Latest first')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Back to newest' })).not.toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole('button', { name: 'Load more' }));
 
     await waitFor(() => {
       expect(screen.getByText('created session')).toBeInTheDocument();

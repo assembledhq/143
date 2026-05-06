@@ -33,6 +33,7 @@ var sessionColumns = []string{
 	"base_commit_sha", "repository_id", "diff_stats", "diff_history", "input_manifest",
 	"archived_at", "archived_by_user_id", "automation_run_id",
 	"pr_creation_state", "pr_creation_error", "pr_push_state", "pr_push_error", "diff_collected_at", "latest_diff_snapshot_id",
+	"has_unpushed_changes",
 	"linear_private", "linear_state_sync_disabled", "linear_identifier_hint", "linear_prepare_state",
 	"deleted_at", "git_identity_source", "git_identity_user_id", "created_at",
 }
@@ -95,6 +96,7 @@ func newSessionRow(id, issueID, orgID uuid.UUID, now time.Time) []interface{} {
 		(*string)(nil), // pr_push_error
 		nil,            // diff_collected_at
 		nil,            // latest_diff_snapshot_id
+		false,          // has_unpushed_changes
 		false,          // linear_private
 		false,          // linear_state_sync_disabled
 		(*string)(nil), // linear_identifier_hint
@@ -256,9 +258,38 @@ func TestSessionStore_GetByID(t *testing.T) {
 			require.NotNil(t, run.PrimaryIssueID, "should populate the primary issue ID")
 			require.Equal(t, issueID, *run.PrimaryIssueID, "should return the correct issue ID")
 			require.Equal(t, models.AgentType("claude_code"), run.AgentType, "should return the correct agent type")
+			require.False(t, run.HasUnpushedChanges, "GetByID should default has_unpushed_changes to false when the derived column is false")
 			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 		})
 	}
+}
+
+func TestSessionStore_GetByID_WithUnpushedChanges(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewSessionStore(mock)
+	orgID := uuid.New()
+	runID := uuid.New()
+	issueID := uuid.New()
+	now := time.Now()
+	row := newSessionRow(runID, issueID, orgID, now)
+	row[78] = true // has_unpushed_changes
+
+	mock.ExpectQuery("SELECT .+ FROM sessions WHERE id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(sessionColumns).
+				AddRow(row...),
+		)
+
+	run, err := store.GetByID(context.Background(), orgID, runID)
+	require.NoError(t, err, "GetByID should not return an error when the session exists")
+	require.True(t, run.HasUnpushedChanges, "GetByID should surface the derived has_unpushed_changes flag")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
 func TestSessionStore_ListRecentByOrg(t *testing.T) {
@@ -297,15 +328,19 @@ func TestSessionStore_Create(t *testing.T) {
 	store := NewSessionStore(mock)
 	now := time.Now()
 	generatedID := uuid.New()
+	threadID := uuid.New()
 
 	issueID := uuid.New()
+	orgID := uuid.New()
+	modelOverride := "opus-4-7"
 	run := &models.Session{
 		PrimaryIssueID: &issueID,
-		OrgID:          uuid.New(),
+		OrgID:          orgID,
 		AgentType:      "claude_code",
 		Status:         "pending",
 		AutonomyLevel:  "supervised",
 		TokenMode:      "low",
+		ModelOverride:  &modelOverride,
 	}
 
 	mock.ExpectBegin()
@@ -321,6 +356,14 @@ func TestSessionStore_Create(t *testing.T) {
 			pgxmock.NewRows([]string{"id", "created_at", "last_activity_at"}).
 				AddRow(generatedID, now, now),
 		)
+	// Pin the seeded primary thread's args so a regression that swaps fields
+	// (e.g. status defaulted to 'pending', or label hard-coded to the agent
+	// name) is caught by this test instead of slipping through under
+	// AnyArg() matchers. Order mirrors the named-args block in
+	// SessionStore.Create.
+	mock.ExpectQuery("INSERT INTO session_threads").
+		WithArgs(generatedID, orgID, models.AgentType("claude_code"), &modelOverride, "Main", models.ThreadStatusIdle).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(threadID))
 	mock.ExpectExec("INSERT INTO session_issue_links").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("INSERT", 1))
@@ -331,6 +374,8 @@ func TestSessionStore_Create(t *testing.T) {
 	require.Equal(t, generatedID, run.ID, "should set the generated ID on the agent run")
 	require.Equal(t, now, run.CreatedAt, "should set the created_at timestamp on the agent run")
 	require.Equal(t, now, run.LastActivityAt, "should set the last_activity_at timestamp on the agent run")
+	require.NotNil(t, run.PrimaryThreadID, "Create should expose the seeded primary thread ID")
+	require.Equal(t, threadID, *run.PrimaryThreadID, "Create should expose the seeded primary thread ID")
 	require.NotNil(t, run.PrimaryIssueID, "Create should preserve the primary issue ID for issue-backed sessions")
 	require.Equal(t, issueID, *run.PrimaryIssueID, "Create should preserve the primary issue ID on issue-backed sessions")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
@@ -346,9 +391,10 @@ func TestSessionStore_Create_AllowsNilIssueID(t *testing.T) {
 	store := NewSessionStore(mock)
 	now := time.Now()
 	generatedID := uuid.New()
+	orgID := uuid.New()
 
 	run := &models.Session{
-		OrgID:         uuid.New(),
+		OrgID:         orgID,
 		AgentType:     "claude_code",
 		Status:        "pending",
 		AutonomyLevel: "supervised",
@@ -368,6 +414,13 @@ func TestSessionStore_Create_AllowsNilIssueID(t *testing.T) {
 			pgxmock.NewRows([]string{"id", "created_at", "last_activity_at"}).
 				AddRow(generatedID, now, now),
 		)
+	// Pin the seeded primary thread args (label "Main", idle status, agent
+	// mirrored from the session, no model override) so a regression that
+	// changes any of these defaults is caught here as well as in the
+	// happy-path Create test.
+	mock.ExpectQuery("INSERT INTO session_threads").
+		WithArgs(generatedID, orgID, models.AgentType("claude_code"), (*string)(nil), "Main", models.ThreadStatusIdle).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
 	mock.ExpectCommit()
 
 	err = store.Create(context.Background(), run)
@@ -389,10 +442,11 @@ func TestSessionStore_Create_RollsBackWhenPrimaryLinkInsertFails(t *testing.T) {
 	now := time.Now()
 	generatedID := uuid.New()
 	issueID := uuid.New()
+	orgID := uuid.New()
 
 	run := &models.Session{
 		PrimaryIssueID: &issueID,
-		OrgID:          uuid.New(),
+		OrgID:          orgID,
 		AgentType:      "claude_code",
 		Status:         "pending",
 		AutonomyLevel:  "supervised",
@@ -412,6 +466,12 @@ func TestSessionStore_Create_RollsBackWhenPrimaryLinkInsertFails(t *testing.T) {
 			pgxmock.NewRows([]string{"id", "created_at", "last_activity_at"}).
 				AddRow(generatedID, now, now),
 		)
+	// Pin the seeded primary thread args so a rollback regression that
+	// also corrupts the thread INSERT's defaults (label, status, mirrored
+	// agent_type) is caught here.
+	mock.ExpectQuery("INSERT INTO session_threads").
+		WithArgs(generatedID, orgID, models.AgentType("claude_code"), (*string)(nil), "Main", models.ThreadStatusIdle).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
 	mock.ExpectExec("INSERT INTO session_issue_links").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnError(context.DeadlineExceeded)

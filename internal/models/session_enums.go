@@ -220,6 +220,45 @@ func (s PRPushState) Validate() error {
 	}
 }
 
+// SessionAutonomy is the per-run autonomy knob stored in
+// sessions.autonomy_level. It is intentionally distinct from the org-level
+// AutonomyLevel (manual / auto_simple / auto_all) which controls when the PM
+// auto-triggers runs; conflating the two writes the wrong vocabulary into the
+// column and trips chk_sessions_autonomy_level on insert.
+type SessionAutonomy string
+
+const (
+	SessionAutonomyFull       SessionAutonomy = "full"
+	SessionAutonomySemi       SessionAutonomy = "semi"
+	SessionAutonomySupervised SessionAutonomy = "supervised"
+)
+
+// AllSessionAutonomies is the canonical list of valid SessionAutonomy values.
+// Validate() and the chk_sessions_autonomy_level CHECK constraint in
+// migrations/000035_check_constraints.up.sql consume this vocabulary;
+// TestSessionAutonomyMigrationVocabularyMatchesGoEnum pins the two together.
+func AllSessionAutonomies() []SessionAutonomy {
+	return []SessionAutonomy{
+		SessionAutonomyFull,
+		SessionAutonomySemi,
+		SessionAutonomySupervised,
+	}
+}
+
+func (a SessionAutonomy) Validate() error {
+	for _, valid := range AllSessionAutonomies() {
+		if a == valid {
+			return nil
+		}
+	}
+	return fmt.Errorf("invalid SessionAutonomy: %q", a)
+}
+
+// DefaultSessionAutonomy is the autonomy level applied when a session is
+// created without an explicit value (API session-create, PM-spawned runs,
+// automation-triggered runs).
+const DefaultSessionAutonomy = SessionAutonomySemi
+
 // SandboxState tracks the lifecycle of a session's sandbox.
 type SandboxState string
 
@@ -269,6 +308,24 @@ func (s ThreadStatus) Validate() error {
 
 // MaxThreadsPerSession is the maximum number of threads allowed in a single session.
 const MaxThreadsPerSession = 4
+
+// MaxRunningThreadsPerSession caps how many threads inside one sandbox can be
+// in an active state (pending/running/awaiting_input) at the same time. Lower
+// than MaxThreadsPerSession so a user can keep idle "lanes" parked while
+// limiting concurrent filesystem writers and live cost burn. Mirrors the
+// "max running threads per session: 3" guidance in
+// docs/design/68-sandbox-agent-tabs-and-threads.md.
+const MaxRunningThreadsPerSession = 3
+
+// FileEventTypeCreated, FileEventTypeModified, FileEventTypeDeleted are the
+// canonical event_type values for session_thread_file_events. The orchestrator
+// classifies git status output into these three buckets. Renames are recorded
+// as a delete + create pair so each path's history is independent.
+const (
+	FileEventTypeCreated  = "created"
+	FileEventTypeModified = "modified"
+	FileEventTypeDeleted  = "deleted"
+)
 
 // MessageRole identifies who sent a session message.
 type MessageRole string
