@@ -1,5 +1,8 @@
 "use client";
 
+import { LinearIcon } from "@/components/linear-icon";
+import { Badge } from "@/components/ui/badge";
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import type { Session } from "@/lib/types";
 
 function linearSkipReasonDetail(reason: string): string {
@@ -54,122 +57,163 @@ export function LinkedIssueChips({ session }: { session: Session }) {
   if (links.length === 0 && !prepareFailed) return null;
 
   return (
-    <div className="flex flex-wrap items-center gap-1 ml-2 shrink-0">
-      {prepareFailed && (
-        // Clickable link rather than a plain status chip: the most common
-        // root cause we've seen for prepare-failed is a revoked Linear OAuth
-        // token, and the integrations settings page now surfaces the
-        // specific reason + a Reconnect CTA. Sending the user there beats
-        // a dead-end "prepare failed" badge with no path forward.
-        <a
-          key="linear-prepare-failed"
-          href="/settings/integrations"
-          className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium bg-amber-500/10 text-amber-700 dark:text-amber-300 border border-amber-500/30 hover:bg-amber-500/20"
-          aria-describedby="linear-prepare-failed-detail"
-        >
-          Linear: prepare failed
-          {/* sr-only sibling instead of `title=…`: most screen readers ignore
-              title attributes, so the detail goes through aria-describedby. */}
-          <span id="linear-prepare-failed-detail" className="sr-only">
-            Linear context preparation failed; turn 1 ran without the primary
-            issue snapshot. The most common cause is a revoked or expired
-            Linear access token — open Settings → Integrations to verify the
-            connection, or re-paste the Linear URL in a follow-up message
-            to re-trigger detection.
-          </span>
-        </a>
-      )}
-      {links.map((link) => {
-        const isLinear = link.issue_source === "linear";
-        const isPrimary = link.role === "primary";
-        // Linear links must always carry an external_id (the Linear key
-        // like "ACS-1234"). Falling back to a UUID slice would surface a
-        // bug as a confusing chip; render an explicit placeholder instead
-        // so the missing key is visible during dogfooding. Non-Linear
-        // sources without an external_id render a labeled placeholder
-        // rather than a UUID slice — leaking the issue UUID into the UI
-        // confuses users and isn't a stable identifier they can search.
-        const ident = isLinear
-          ? (link.external_id ?? "Linear (no key)")
-          : (link.external_id ?? "Issue (no key)");
-        const tooltip =
-          (link.issue_title ?? "") +
-          (isPrimary ? " (primary)" : " (related)") +
-          (link.issue_status ? ` · ${link.issue_status}` : "");
+    <TooltipProvider delayDuration={150}>
+      <div className="flex flex-wrap items-center gap-1 ml-2 shrink-0">
+        {prepareFailed && (
+          <Tooltip>
+            <TooltipTrigger asChild>
+              {/* Clickable link rather than a plain status chip: the most common
+                  root cause we've seen for prepare-failed is a revoked Linear OAuth
+                  token, and the integrations settings page now surfaces the
+                  specific reason + a Reconnect CTA. Sending the user there beats
+                  a dead-end "prepare failed" badge with no path forward. */}
+              <a
+                key="linear-prepare-failed"
+                href="/settings/integrations"
+                className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium bg-amber-500/10 text-amber-700 dark:text-amber-300 border border-amber-500/30 hover:bg-amber-500/20"
+                aria-describedby="linear-prepare-failed-detail"
+              >
+                Linear: prepare failed
+                {/* sr-only sibling instead of `title=…`: most screen readers ignore
+                    title attributes, so the detail goes through aria-describedby. */}
+                <span id="linear-prepare-failed-detail" className="sr-only">
+                  Linear context preparation failed; turn 1 ran without the primary
+                  issue snapshot. The most common cause is a revoked or expired
+                  Linear access token — open Settings → Integrations to verify the
+                  connection, or re-paste the Linear URL in a follow-up message
+                  to re-trigger detection.
+                </span>
+              </a>
+            </TooltipTrigger>
+            <TooltipContent sideOffset={6} className="max-w-80">
+              Linear context preparation failed; turn 1 ran without the primary
+              issue snapshot. The most common cause is a revoked or expired
+              Linear access token. Open Settings → Integrations to verify the
+              connection, or re-paste the Linear URL in a follow-up message to
+              re-trigger detection.
+            </TooltipContent>
+          </Tooltip>
+        )}
+        {links.map((link) => {
+          const isLinear = link.issue_source === "linear";
+          const isPrimary = link.role === "primary";
+          // Linear links must always carry an external_id (the Linear key
+          // like "ACS-1234"). Falling back to a UUID slice would surface a
+          // bug as a confusing chip; render an explicit placeholder instead
+          // so the missing key is visible during dogfooding. Non-Linear
+          // sources without an external_id render a labeled placeholder
+          // rather than a UUID slice — leaking the issue UUID into the UI
+          // confuses users and isn't a stable identifier they can search.
+          const ident = isLinear
+            ? (link.external_id ?? "Linear (no key)")
+            : (link.external_id ?? "Issue (no key)");
+          const tooltip =
+            (link.issue_title ?? "") +
+            (isPrimary ? " (primary)" : " (related)") +
+            (link.issue_status ? ` · ${link.issue_status}` : "");
 
-        const chipClasses = isPrimary
-          ? "inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium bg-blue-500/10 text-blue-700 dark:text-blue-300 border border-blue-500/30"
-          : "inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium bg-muted text-muted-foreground border border-border";
-        const linearSkipDetail =
-          isLinear && isPrimary && link.linear_last_skipped_reason
-            ? linearSkipReasonDetail(link.linear_last_skipped_reason)
-            : "";
+          const chipClasses = isLinear
+            ? isPrimary
+              ? "bg-muted/80 text-foreground border-border/70 [a&]:hover:bg-accent/80"
+              : "bg-muted/60 text-muted-foreground border-border/60 [a&]:hover:bg-accent/70 [a&]:hover:text-foreground"
+            : isPrimary
+              ? "bg-blue-500/10 text-blue-700 dark:text-blue-300 border-blue-500/30"
+              : "bg-muted text-muted-foreground border-border";
+          const linearSkipDetail =
+            isLinear && isPrimary && link.linear_last_skipped_reason
+              ? linearSkipReasonDetail(link.linear_last_skipped_reason)
+              : "";
+          const chipContent = (
+            <>
+              {isLinear ? <LinearIcon className="h-3 w-3 opacity-70" /> : null}
+              <span>{ident}</span>
+            </>
+          );
 
-        if (isLinear && link.external_id) {
-          // Prefer the workspace-qualified URL when we cached the slug;
-          // it resolves correctly regardless of which workspace the user
-          // last viewed in Linear. Fall back to the universal redirect
-          // for legacy links written before slug caching landed. Both
-          // segments are URL-encoded defensively even though the backend
-          // already normalizes them — guards against future code paths
-          // that surface user-typed slug overrides.
-          const url = link.issue_workspace_slug
-            ? `https://linear.app/${encodeURIComponent(link.issue_workspace_slug)}/issue/${encodeURIComponent(link.external_id)}`
-            : `https://linear.app/issue/${encodeURIComponent(link.external_id)}`;
-          // The link text (the Linear identifier) is already the
-          // accessible name; `title` provides the issue context on hover
-          // for sighted users. Don't set aria-label here — overriding the
-          // accessible name with the long tooltip would force screen
-          // readers to read the title instead of the identifier on each
-          // chip in a long list.
+          if (isLinear && link.external_id) {
+            // Prefer the workspace-qualified URL when we cached the slug;
+            // it resolves correctly regardless of which workspace the user
+            // last viewed in Linear. Fall back to the universal redirect
+            // for legacy links written before slug caching landed. Both
+            // segments are URL-encoded defensively even though the backend
+            // already normalizes them — guards against future code paths
+            // that surface user-typed slug overrides.
+            const url = link.issue_workspace_slug
+              ? `https://linear.app/${encodeURIComponent(link.issue_workspace_slug)}/issue/${encodeURIComponent(link.external_id)}`
+              : `https://linear.app/issue/${encodeURIComponent(link.external_id)}`;
+            // The link text (the Linear identifier) remains the accessible
+            // name. Avoid overriding it with the long context string.
+            return (
+              <div key={link.id} className="inline-flex items-center gap-1">
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Badge asChild variant="secondary" className={chipClasses}>
+                      <a
+                        href={url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                      >
+                        {chipContent}
+                      </a>
+                    </Badge>
+                  </TooltipTrigger>
+                  <TooltipContent sideOffset={6}>{tooltip}</TooltipContent>
+                </Tooltip>
+                {linearSkipDetail && (
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <span
+                        className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium bg-amber-500/10 text-amber-700 dark:text-amber-300 border border-amber-500/30"
+                        aria-label={linearSkipDetail}
+                      >
+                        Linear sync skipped
+                      </span>
+                    </TooltipTrigger>
+                    <TooltipContent sideOffset={6} className="max-w-80">
+                      {linearSkipDetail}
+                    </TooltipContent>
+                  </Tooltip>
+                )}
+              </div>
+            );
+          }
+
+          // Non-interactive chip: most screen readers ignore `title` on
+          // non-link/non-button elements, so mirror the tooltip into
+          // aria-label so SR users get the issue title + role context.
           return (
             <div key={link.id} className="inline-flex items-center gap-1">
-              <a
-                href={url}
-                target="_blank"
-                rel="noopener noreferrer"
-                className={chipClasses}
-                title={tooltip}
-              >
-                {ident}
-              </a>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Badge
+                    variant="secondary"
+                    className={chipClasses}
+                    aria-label={tooltip}
+                  >
+                    {chipContent}
+                  </Badge>
+                </TooltipTrigger>
+                <TooltipContent sideOffset={6}>{tooltip}</TooltipContent>
+              </Tooltip>
               {linearSkipDetail && (
-                <span
-                  className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium bg-amber-500/10 text-amber-700 dark:text-amber-300 border border-amber-500/30"
-                  title={linearSkipDetail}
-                  aria-label={linearSkipDetail}
-                >
-                  Linear sync skipped
-                </span>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <span
+                      className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium bg-amber-500/10 text-amber-700 dark:text-amber-300 border border-amber-500/30"
+                      aria-label={linearSkipDetail}
+                    >
+                      Linear sync skipped
+                    </span>
+                  </TooltipTrigger>
+                  <TooltipContent sideOffset={6} className="max-w-80">
+                    {linearSkipDetail}
+                  </TooltipContent>
+                </Tooltip>
               )}
             </div>
           );
-        }
-
-        // Non-interactive chip: most screen readers ignore `title` on
-        // non-link/non-button elements, so mirror the tooltip into
-        // aria-label so SR users get the issue title + role context.
-        return (
-          <div key={link.id} className="inline-flex items-center gap-1">
-            <span
-              className={chipClasses}
-              title={tooltip}
-              aria-label={tooltip}
-            >
-              {ident}
-            </span>
-            {linearSkipDetail && (
-              <span
-                className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium bg-amber-500/10 text-amber-700 dark:text-amber-300 border border-amber-500/30"
-                title={linearSkipDetail}
-                aria-label={linearSkipDetail}
-              >
-                Linear sync skipped
-              </span>
-            )}
-          </div>
-        );
-      })}
-    </div>
+        })}
+      </div>
+    </TooltipProvider>
   );
 }

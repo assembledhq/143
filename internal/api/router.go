@@ -229,12 +229,17 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 		Integrations:       integrationStore,
 		IntegrationsWriter: integrationStore,
 		Credentials:        credentialStore,
+		CredentialsWriter:  credentialStore,
 		Issues:             issueStore,
 		Sessions:           sessionStore,
 		IssueLinks:         sessionIssueLinkStore,
 		Orgs:               orgStore,
 		Jobs:               jobStore,
-		AppBaseURL:         cfg.FrontendURL,
+		OAuthClient: linear.OAuthClientCreds{
+			ClientID:     cfg.LinearOAuthClientID,
+			ClientSecret: cfg.LinearOAuthClientSecret,
+		},
+		AppBaseURL: cfg.FrontendURL,
 	})
 	if sessionStreams != nil {
 		// Republish session status on every link change so the detail view
@@ -281,7 +286,25 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	if threadCanceller != nil {
 		threadSvc.SetCanceller(threadCanceller)
 	}
+	// Wire review-comment resolution so SendThreadMessage can resolve
+	// comments atomically with the message create — same invariant the
+	// session-level SendMessage already enforces. Without this, the
+	// "submitted comments stick around for the next turn" bug surfaces on
+	// any session whose follow-up flows through a thread tab.
+	threadSvc.SetReviewCommentResolver(pool, sessionReviewCommentStore)
+	// Wire the question store so a follow-up sent to an awaiting_input
+	// session via a thread tab flips the latest pending question to
+	// 'answered' atomically with the message create — same invariant the
+	// session-level handler maintains. Without this, question state
+	// diverges from the resumed run on the thread surface.
+	threadSvc.SetQuestionStore(sessionQuestionStore)
 	sessionThreadHandler := handlers.NewSessionThreadHandler(threadSvc)
+	sessionThreadHandler.SetAuditEmitter(auditEmitter)
+	sessionThreadHandler.SetLogger(logger)
+	// Mirror sessionHandler.SetLinearLinker so Linear refs typed into a
+	// thread tab follow-up get the same fail-soft mid-session linking the
+	// legacy session surface already provides.
+	sessionThreadHandler.SetLinearLinker(linearService)
 	pmHandler := handlers.NewPMHandler(pmPlanStore, pmDecisionLogStore, jobStore, orgStore)
 	priorityHandler := handlers.NewPriorityHandler(priorityScoreStore, complexityEstimateStore, jobStore)
 	ingestionWebhookHandler := handlers.NewIngestionWebhookHandler(webhookDeliveryStore, integrationStore, credentialStore, ingestionSvc, logger)
@@ -395,7 +418,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	auditLogHandler := handlers.NewAuditLogHandler(auditLogStore)
 	sessionReviewCommentHandler := handlers.NewSessionReviewCommentHandler(sessionReviewCommentStore, sessionStore, logger)
 	sessionReviewCommentHandler.SetAuditEmitter(auditEmitter)
-	sessionReviewCommentHandler.SetMessageAndJobStores(sessionMessageStore, jobStore)
+	sessionReviewCommentHandler.SetMessageAndJobStores(sessionMessageStore, sessionThreadStore, jobStore)
 	// Initialize the session-files snapshot cache so that file-context reads
 	// keep working after the live container is torn down. The cache is
 	// best-effort: a build error here is logged and the handler falls back
@@ -722,7 +745,6 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Get("/api/v1/sessions/{id}/threads/{tid}", sessionThreadHandler.GetThread)
 				r.Get("/api/v1/sessions/{id}/threads/{tid}/messages", sessionThreadHandler.GetThreadMessages)
 				r.Get("/api/v1/sessions/{id}/threads/{tid}/logs", sessionThreadHandler.GetThreadLogs)
-				r.Get("/api/v1/sessions/{id}/summary", sessionThreadHandler.SummarizeSession)
 				r.Get("/api/v1/sessions/{id}/thread-file-events", sessionThreadHandler.ListThreadFileEvents)
 				r.Get("/api/v1/sessions/{id}/review-comments", sessionReviewCommentHandler.List)
 				r.Get("/api/v1/sessions/{id}/usage", usageHandler.ListBySession)

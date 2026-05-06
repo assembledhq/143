@@ -156,6 +156,11 @@ The agent tab strip belongs directly above the transcript and shared composer.
 It should not live in the side panel that shows session details, PR health,
 linked issues, or metadata.
 
+Tab titles should stay plain and stable. The visible label is just the tab's
+name, such as `Main` or `Claude 2`; status belongs in the separate dot/badges,
+not appended to the title text. Avoid labels like `Main -- idle` or
+`Claude • running` in the title itself.
+
 When there is only one tab, the default UI should continue to feel like
 today's single-agent session. The tab system should be discoverable but quiet:
 
@@ -272,7 +277,9 @@ Each tab header should show:
 - attention badge when the tab needs input
 - changed-file count since the tab started
 - conflict badge when another active tab touched overlapping files
-- cost/time hover details
+- optional hover card with plain-language status, queued follow-up work, and
+  overlap/conflict signals; avoid low-signal operational metrics like per-tab
+  cost in the primary tooltip
 
 ### Combined Review
 
@@ -802,9 +809,10 @@ shorter human supervision time for sessions where parallelism is appropriate.
 - Added `session_threads`.
 - Added `thread_id` to session messages and logs.
 - Kept existing single-thread APIs working.
-- Note: default-thread backfill for legacy sessions is not part of the current
-  Phase 1 UI path; sessions without explicit threads still fall back to the
-  existing session transcript/composer.
+- Added a primary-thread invariant: every non-deleted session has a seeded
+  `Main` thread. Legacy NULL-thread messages/logs are attributed to that row
+  when the mapping is unambiguous, and new first-turn execution is attributed
+  to the seeded primary thread.
 
 ### Phase 1: Multiple blank tabs, one running thread at a time — Completed
 

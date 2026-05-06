@@ -306,7 +306,7 @@ func TestClaudeCodeAdapter_Execute_MissingSandboxProvider(t *testing.T) {
 	require.Contains(t, err.Error(), "sandbox provider not found")
 }
 
-func TestClaudeCodeAdapter_Execute_ContinuationUsesContinueMode(t *testing.T) {
+func TestClaudeCodeAdapter_Execute_ContinuationWithSessionIDUsesResumeByID(t *testing.T) {
 	t.Parallel()
 
 	provider := testutil.NewMockSandboxProvider()
@@ -329,6 +329,47 @@ func TestClaudeCodeAdapter_Execute_ContinuationUsesContinueMode(t *testing.T) {
 	adapter := NewClaudeCodeAdapter(zerolog.Nop())
 	sandbox := &agent.Sandbox{ID: "test", WorkDir: "/workspace", HomeDir: "/home/sandbox", Metadata: map[string]string{agent.SandboxMetadataBaseCommitSHA: "abc123"}}
 	prompt := &agent.AgentPrompt{
+		UserMessage:     "Please tighten the guard clause.",
+		MaxTokens:       50_000,
+		Continuation:    true,
+		ResumeSessionID: "claude-session-abc",
+	}
+	logCh := make(chan agent.LogEntry, 10)
+	ctx := WithSandboxProvider(context.Background(), provider)
+
+	result, err := adapter.Execute(ctx, sandbox, prompt, logCh)
+	require.NoError(t, err, "continuation should succeed")
+	require.NotNil(t, result, "continuation should return a result")
+	require.NotContains(t, provider.ExecCalls[0], "--continue", "continuation must not use --continue, which is non-deterministic")
+	require.Contains(t, provider.ExecCalls[0], "--resume claude-session-abc", "continuation should resume by explicit session ID")
+	_, exists := provider.Files["/home/sandbox/.143-prompt.md"]
+	require.False(t, exists, "deterministic resume should not write a fresh prompt file")
+}
+
+func TestClaudeCodeAdapter_Execute_ContinuationWithoutSessionIDFallsBackToFreshExec(t *testing.T) {
+	t.Parallel()
+
+	provider := testutil.NewMockSandboxProvider()
+	provider.ExecFn = func(ctx context.Context, sb *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
+		if strings.HasPrefix(cmd, "claude") {
+			_, _ = stdout.Write([]byte(`{"type":"assistant","content":"continuing the session"}`))
+			return 0, nil
+		}
+		if strings.HasPrefix(cmd, "git rev-parse") {
+			_, _ = stdout.Write([]byte("true\n"))
+			return 0, nil
+		}
+		if strings.HasPrefix(cmd, "git diff") {
+			return 0, nil
+		}
+		return 0, nil
+	}
+
+	adapter := NewClaudeCodeAdapter(zerolog.Nop())
+	sandbox := &agent.Sandbox{ID: "test", WorkDir: "/workspace", HomeDir: "/home/sandbox", Metadata: map[string]string{agent.SandboxMetadataBaseCommitSHA: "abc123"}}
+	prompt := &agent.AgentPrompt{
+		SystemPrompt: "system",
+		UserPrompt:   "history-embedded user prompt",
 		UserMessage:  "Please tighten the guard clause.",
 		MaxTokens:    50_000,
 		Continuation: true,
@@ -337,11 +378,53 @@ func TestClaudeCodeAdapter_Execute_ContinuationUsesContinueMode(t *testing.T) {
 	ctx := WithSandboxProvider(context.Background(), provider)
 
 	result, err := adapter.Execute(ctx, sandbox, prompt, logCh)
-	require.NoError(t, err, "continuation should succeed")
+	require.NoError(t, err, "continuation should succeed when falling back to fresh exec")
 	require.NotNil(t, result, "continuation should return a result")
-	require.Contains(t, provider.ExecCalls[0], "--continue", "continuation should use Claude's continue mode")
-	_, exists := provider.Files["/home/sandbox/.143-prompt.md"]
-	require.False(t, exists, "continuation should not write a fresh prompt file")
+	require.NotContains(t, provider.ExecCalls[0], "--continue", "continuation must not use --continue, which is non-deterministic")
+	require.NotContains(t, provider.ExecCalls[0], "--resume", "continuation without an id must not pass --resume")
+	contents, exists := provider.Files["/home/sandbox/.143-prompt.md"]
+	require.True(t, exists, "fresh exec must write the system+user prompt to a file")
+	require.Contains(t, string(contents), "history-embedded user prompt", "prompt file should carry the orchestrator-provided history-embedded user prompt")
+}
+
+func TestClaudeCodeAdapter_ResumeMode(t *testing.T) {
+	t.Parallel()
+
+	adapter := NewClaudeCodeAdapter(zerolog.Nop())
+	require.Equal(t, agent.ResumeBySessionID, adapter.ResumeMode())
+}
+
+func TestClaudeCodeAdapter_Execute_CapturesResultEventSessionID(t *testing.T) {
+	t.Parallel()
+
+	provider := testutil.NewMockSandboxProvider()
+	provider.ExecFn = func(ctx context.Context, sb *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
+		if strings.HasPrefix(cmd, "claude") {
+			// Claude Code emits the session id on its terminal `result` event.
+			_, _ = stdout.Write([]byte(`{"type":"assistant","content":"done"}` + "\n" +
+				`{"type":"result","content":"summary","session_id":"claude-session-xyz"}`))
+			return 0, nil
+		}
+		if strings.HasPrefix(cmd, "git rev-parse") {
+			_, _ = stdout.Write([]byte("true\n"))
+			return 0, nil
+		}
+		if strings.HasPrefix(cmd, "git diff") {
+			return 0, nil
+		}
+		return 0, nil
+	}
+
+	adapter := NewClaudeCodeAdapter(zerolog.Nop())
+	sandbox := &agent.Sandbox{ID: "test", WorkDir: "/workspace", HomeDir: "/home/sandbox", Metadata: map[string]string{agent.SandboxMetadataBaseCommitSHA: "abc123"}}
+	prompt := &agent.AgentPrompt{SystemPrompt: "system", UserPrompt: "user", MaxTokens: 50_000}
+	logCh := make(chan agent.LogEntry, 10)
+	ctx := WithSandboxProvider(context.Background(), provider)
+
+	result, err := adapter.Execute(ctx, sandbox, prompt, logCh)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.Equal(t, "claude-session-xyz", result.AgentSessionID, "result event's session_id must populate AgentSessionID for next-turn resume")
 }
 
 func TestClaudeCodeAdapter_Execute_IncludesReasoningEffortOverride(t *testing.T) {

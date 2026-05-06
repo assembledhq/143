@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useQueryState } from "nuqs";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
@@ -98,7 +98,7 @@ import {
 } from "@/lib/session-composer-mentions";
 import { queryKeys } from "@/lib/query-keys";
 import { api, ApiError } from "@/lib/api";
-import { AGENTS, AGENTS_BY_KEY } from "@/lib/agents";
+import { AGENTS, AGENTS_BY_KEY, agentDisplayLabel } from "@/lib/agents";
 import { getActiveOrgId } from "@/lib/active-org";
 import { maybeNotifySessionCompleted } from "@/lib/browser-notifications";
 import {
@@ -117,7 +117,6 @@ import {
 } from "@/lib/session-open-position";
 import type { ListResponse, Session, SessionDetail, SessionInputCommand, SessionInputReference, SessionLog, SessionMessage, SessionReviewComment, SessionThread, SessionThreadFileEvent, SessionTimelineEntry, User, Validation, CodexAuthStatus, PullRequestHealthResponse, SingleResponse } from "@/lib/types";
 import { AgentTabStrip, computeThreadOverlap } from "./agent-tab-strip";
-import { SessionSummaryPanel, SummarizeButton } from "./session-summary-panel";
 import {
   ThreadAttributionFilter,
   useAttributionAllowedPaths,
@@ -139,7 +138,7 @@ import { useAuth } from "@/hooks/use-auth";
 import { useMediaQuery } from "@/hooks/use-media-query";
 import { prMergedAccent } from "@/lib/pr-status-styles";
 import { cn, sessionTitle, formatTimeAgo } from "@/lib/utils";
-import { activeSet } from "@/lib/session-status-groups";
+import { activeSet, workingStatusesSet } from "@/lib/session-status-groups";
 
 const PREVIEW_ORIGIN_TEMPLATE =
   process.env.NEXT_PUBLIC_PREVIEW_ORIGIN_TEMPLATE ||
@@ -157,7 +156,7 @@ type PendingFollowUpMessage = SessionMessage & {
 const statusConfig: Record<string, { color: string; label: string }> = {
   pending: { color: "bg-muted text-muted-foreground", label: "Pending" },
   running: { color: "bg-primary/10 text-primary", label: "Running" },
-  idle: { color: "bg-sky-50 text-sky-700 dark:bg-sky-950/30 dark:text-sky-400", label: "Idle" },
+  idle: { color: "bg-primary/10 text-primary", label: "Idle" },
   awaiting_input: { color: "bg-amber-50 text-amber-700 dark:bg-amber-950/30 dark:text-amber-400", label: "Awaiting input" },
   needs_human_guidance: { color: "bg-orange-50 text-orange-700 dark:bg-orange-950/30 dark:text-orange-400", label: "Needs guidance" },
   completed: { color: "bg-emerald-50 text-emerald-700 dark:bg-emerald-950/30 dark:text-emerald-400", label: "Completed" },
@@ -826,12 +825,26 @@ function SessionComposer({
   agentType: string;
   targetLabel?: string;
 }) {
+  const isMobile = useMediaQuery("(max-width: 767px)");
+  const [isTextareaFocused, setIsTextareaFocused] = useState(false);
+  const mobileComposerExpanded = !isMobile
+    || isTextareaFocused
+    || message.length > 0
+    || attachments.length > 0
+    || openComments.length > 0
+    || references.length > 0
+    || commands.length > 0;
+
   useEffect(() => {
     const el = textareaRef.current;
     if (!el) return;
+    if (!mobileComposerExpanded) {
+      el.style.height = "44px";
+      return;
+    }
     el.style.height = "auto";
     el.style.height = `${Math.min(el.scrollHeight, 200)}px`;
-  }, [message, textareaRef]);
+  }, [message, textareaRef, mobileComposerExpanded]);
 
   const composerCardRef = useRef<HTMLDivElement>(null);
   const composerInputSurfaceRef = useRef<HTMLDivElement>(null);
@@ -841,7 +854,6 @@ function SessionComposer({
   const [triggerDismissed, setTriggerDismissed] = useState(false);
   const [pickerPosition, setPickerPosition] = useState<TriggerPickerPosition | null>(null);
   const [mobileSettingsOpen, setMobileSettingsOpen] = useState(false);
-  const isMobile = useMediaQuery("(max-width: 767px)");
   const [showLinearInput, setShowLinearInput] = useState(false);
   const [linearInput, setLinearInput] = useState("");
   const [linearInputError, setLinearInputError] = useState<string | null>(null);
@@ -1271,6 +1283,8 @@ function SessionComposer({
             onChange={(e) => handleMessageChange(e.target.value, e.target.selectionStart ?? e.target.value.length)}
             onPaste={handlePaste}
             onKeyDown={handleKeyDown}
+            onFocus={() => setIsTextareaFocused(true)}
+            onBlur={() => setIsTextareaFocused(false)}
             onClick={(e) => setCaretPosition(e.currentTarget.selectionStart ?? message.length)}
             onKeyUp={(e) => setCaretPosition(e.currentTarget.selectionStart ?? message.length)}
             onSelect={(e) => setCaretPosition(e.currentTarget.selectionStart ?? message.length)}
@@ -1286,7 +1300,16 @@ function SessionComposer({
                       : "Send a follow-up message..."
             }
             disabled={!canSendMessage || sendPending}
-            className="min-h-[44px] max-h-[200px] resize-none border-none bg-transparent shadow-none focus-visible:ring-0"
+            rows={isMobile ? 1 : undefined}
+            data-mobile-composer-state={isMobile ? (mobileComposerExpanded ? "expanded" : "collapsed") : undefined}
+            className={cn(
+              "max-h-[200px] resize-none border-none bg-transparent shadow-none focus-visible:ring-0",
+              isMobile
+                ? mobileComposerExpanded
+                  ? "min-h-[96px]"
+                  : "min-h-[44px] overflow-hidden"
+                : "min-h-[44px]",
+            )}
           />
 
           {(references.length > 0 || commands.length > 0) && (
@@ -1678,6 +1701,18 @@ function SessionTimelineSkeleton() {
   );
 }
 
+type ChatPanelProps = {
+  session: Session;
+  sessionId: string;
+  activeThread?: SessionThread;
+  isActive: boolean;
+  optimisticMessages: SessionMessage[];
+  onDiffClick?: () => void;
+  onApprovePlan?: () => void;
+  onAdjustPlan?: () => void;
+  onRegisterScrollToLiveEdge?: (scrollToLiveEdge: (() => void) | null) => void;
+};
+
 function ChatPanel({
   session,
   sessionId,
@@ -1688,17 +1723,7 @@ function ChatPanel({
   onApprovePlan,
   onAdjustPlan,
   onRegisterScrollToLiveEdge,
-}: {
-  session: Session;
-  sessionId: string;
-  activeThread?: SessionThread;
-  isActive: boolean;
-  optimisticMessages: SessionMessage[];
-  onDiffClick?: () => void;
-  onApprovePlan?: () => void;
-  onAdjustPlan?: () => void;
-  onRegisterScrollToLiveEdge?: (scrollToLiveEdge: (() => void) | null) => void;
-}) {
+}: ChatPanelProps) {
   const queryClient = useQueryClient();
   const { user } = useAuth();
   const [streamedLogs, setStreamedLogs] = useState<SessionLog[]>([]);
@@ -1732,14 +1757,14 @@ function ChatPanel({
     queryKey: activeThreadId ? queryKeys.sessions.threadMessages(sessionId, activeThreadId) : ["session", sessionId, "thread", "none", "messages"],
     queryFn: () => api.sessions.getThreadMessages(sessionId, activeThreadId!),
     enabled: !!activeThreadId,
-    refetchInterval: activeThread && ["pending", "running", "awaiting_input"].includes(activeThread.status) ? 3000 : false,
+    refetchInterval: activeThread && workingStatusesSet.has(activeThread.status) ? 3000 : false,
   });
 
   const threadLogsQuery = useQuery({
     queryKey: activeThreadId ? queryKeys.sessions.threadLogs(sessionId, activeThreadId) : ["session", sessionId, "thread", "none", "logs"],
     queryFn: () => api.sessions.getThreadLogs(sessionId, activeThreadId!),
     enabled: !!activeThreadId,
-    refetchInterval: activeThread && ["pending", "running", "awaiting_input"].includes(activeThread.status) ? 3000 : false,
+    refetchInterval: activeThread && workingStatusesSet.has(activeThread.status) ? 3000 : false,
   });
 
   // Fetch the linked primary issue to display its description as the initial prompt.
@@ -1842,12 +1867,19 @@ function ChatPanel({
   const hasLoadedTimelineInputs = activeThreadId
     ? threadMessagesQuery.isFetched && threadLogsQuery.isFetched
     : timelineQuery.isFetched && (!hasIssue || issueQuery.isFetched);
-  // Skeleton only while we'd reasonably expect content: timeline still loading,
-  // or session is active. Terminal sessions with empty timelines must not shimmer forever.
+  // Skeleton only while we'd reasonably expect content: data still loading, or
+  // the relevant scope is actively working. For a thread-scoped view, "working"
+  // is the selected thread's status — a freshly-created idle thread on an
+  // otherwise-running session must show its empty-state composer, not a
+  // perpetual skeleton. Terminal sessions with empty timelines must not
+  // shimmer forever either.
+  const expectingMoreContent = activeThread
+    ? workingStatusesSet.has(activeThread.status)
+    : activeSet.has(session.status);
   const showLoadingSkeleton =
     timelineEntries.length === 0 &&
     session.status !== "pending" &&
-    (!hasLoadedTimelineInputs || activeSet.has(session.status));
+    (!hasLoadedTimelineInputs || expectingMoreContent);
 
   const persistScrollPosition = useCallback((scrollTop: number) => {
     if (typeof window === "undefined" || !viewerScope) return;
@@ -2110,6 +2142,42 @@ function ChatPanel({
     </div>
   );
 }
+
+function sameDiffStats(
+  a?: Session["diff_stats"] | null,
+  b?: Session["diff_stats"] | null,
+): boolean {
+  if (a === b) {
+    return true;
+  }
+  if (!a || !b) {
+    return !a && !b;
+  }
+  return a.added === b.added && a.removed === b.removed && a.files_changed === b.files_changed;
+}
+
+function areChatPanelPropsEqual(previous: ChatPanelProps, next: ChatPanelProps): boolean {
+  return previous.sessionId === next.sessionId &&
+    previous.isActive === next.isActive &&
+    previous.optimisticMessages === next.optimisticMessages &&
+    previous.onDiffClick === next.onDiffClick &&
+    previous.onApprovePlan === next.onApprovePlan &&
+    previous.onAdjustPlan === next.onAdjustPlan &&
+    previous.onRegisterScrollToLiveEdge === next.onRegisterScrollToLiveEdge &&
+    previous.session.id === next.session.id &&
+    previous.session.status === next.session.status &&
+    previous.session.sandbox_state === next.session.sandbox_state &&
+    previous.session.primary_issue_id === next.session.primary_issue_id &&
+    previous.session.org_id === next.session.org_id &&
+    previous.session.created_at === next.session.created_at &&
+    sameDiffStats(previous.session.diff_stats, next.session.diff_stats) &&
+    previous.activeThread?.id === next.activeThread?.id &&
+    previous.activeThread?.status === next.activeThread?.status &&
+    previous.activeThread?.current_turn === next.activeThread?.current_turn &&
+    previous.activeThread?.label === next.activeThread?.label;
+}
+
+const MemoizedChatPanel = memo(ChatPanel, areChatPanelPropsEqual);
 
 // ---------------------------------------------------------------------------
 // Main component
@@ -2434,6 +2502,18 @@ export function SessionDetailContent({ id }: { id: string }) {
 
       if (response.data.session_id !== id) {
         router.push(`/sessions/${response.data.session_id}`);
+        return;
+      }
+      // Same-session response: without explicit feedback the click looks
+      // dead. Reused-in-flight is the common case (repair already running on
+      // this session and the failing-tests count hasn't dropped yet, so the
+      // button is still rendered) — surface a toast so the user knows the
+      // request was handled.
+      if (response.data.reused_in_flight) {
+        const label = response.data.repair_action_type === "fix_tests"
+          ? "Fix tests session is already in progress"
+          : "Resolve conflicts session is already in progress";
+        toast.info(label);
       }
     },
     onError: (err) => {
@@ -2703,19 +2783,15 @@ export function SessionDetailContent({ id }: { id: string }) {
   // Hooks can't be called conditionally, so provide a stub when session hasn't loaded yet.
   // useDiffViewState only reads `diff` and `diff_history` — the stub satisfies that contract.
   const diffViewState = useDiffViewState(session ?? { diff: null, diff_history: [] } as unknown as Session);
-  const { files: allDiffFiles, filteredFiles, passes, passRange, setPassRange, diffSearchQuery, setDiffSearchQuery } = diffViewState;
-
-  useEffect(() => {
-    if (filteredFiles.length === 0) {
-      if (activeFileIndex !== 0) {
-        setActiveFileIndex(0);
-      }
-      return;
-    }
-    if (activeFileIndex >= filteredFiles.length) {
-      setActiveFileIndex(filteredFiles.length - 1);
-    }
-  }, [activeFileIndex, filteredFiles.length]);
+  const {
+    files: diffFiles,
+    filteredFiles,
+    passes,
+    passRange,
+    setPassRange,
+    diffSearchQuery,
+    setDiffSearchQuery,
+  } = diffViewState;
 
   const {
     comments,
@@ -2791,10 +2867,14 @@ export function SessionDetailContent({ id }: { id: string }) {
     () => comments.filter((comment) => !comment.resolved).slice(0, MAX_RESOLVE_REVIEW_COMMENTS_PER_MESSAGE),
     [comments],
   );
+  // Composer gating: messages may be sent at any point while the session or
+  // thread is running. The backend queues mid-turn sends and the orchestrator
+  // drains the queue once the in-flight turn completes. Pending/skipped at
+  // the session level and a destroyed sandbox still block — those are
+  // genuinely unrecoverable, not just busy.
   const composerCanSendMessage = session?.status !== "skipped" &&
     session?.status !== "pending" &&
-    session?.sandbox_state !== "destroyed" &&
-    (!activeThread || (session?.status !== "running" && activeThread.status === "idle"));
+    session?.sandbox_state !== "destroyed";
   const composerIsRunning = activeThread ? activeThread.status === "running" : session?.status === "running";
   const composerIsSnapshotExpired = session?.sandbox_state === "destroyed";
   const composerAgentType = activeThread?.agent_type ?? session?.agent_type ?? "codex";
@@ -2807,7 +2887,9 @@ export function SessionDetailContent({ id }: { id: string }) {
     const agentType = AGENTS.find((agent) => agent.key === composerAgentType);
     return agentType?.models ?? [];
   }, [composerAgentType, session]);
-  const activeThreadLabel = activeThread?.label ?? (session ? AGENTS_BY_KEY[session.agent_type]?.label ?? session.agent_type : "agent");
+  const composerTargetLabel = activeThread
+    ? agentDisplayLabel(activeThread.agent_type)
+    : (session ? agentDisplayLabel(session.agent_type) : "agent");
   const selectedNewThreadAgent = AGENTS_BY_KEY[newThreadAgentType] ?? AGENTS[0];
   const selectedNewThreadModels = selectedNewThreadAgent?.models ?? [];
 
@@ -2847,7 +2929,10 @@ export function SessionDetailContent({ id }: { id: string }) {
   const sendMutation = useMutation({
     mutationFn: (vars: SendMutationArgs) => {
       if (vars.activeThreadId) {
-        return api.sessions.sendThreadMessage(id, vars.activeThreadId, vars.body)
+        return api.sessions.sendThreadMessage(id, vars.activeThreadId, {
+          ...vars.body,
+          resolveReviewCommentIDs: vars.resolvedIDs.length > 0 ? vars.resolvedIDs : undefined,
+        })
           .then((response) => ({ response, resolvedIDs: vars.resolvedIDs }));
       }
 
@@ -3021,6 +3106,21 @@ export function SessionDetailContent({ id }: { id: string }) {
     session,
     sendMutation,
   ]);
+  const queueSendRef = useRef(queueSend);
+  const composerCanSendMessageRef = useRef(composerCanSendMessage);
+  const sendPendingRef = useRef(sendMutation.isPending);
+
+  useEffect(() => {
+    queueSendRef.current = queueSend;
+  }, [queueSend]);
+
+  useEffect(() => {
+    composerCanSendMessageRef.current = composerCanSendMessage;
+  }, [composerCanSendMessage]);
+
+  useEffect(() => {
+    sendPendingRef.current = sendMutation.isPending;
+  }, [sendMutation.isPending]);
 
   const cancelMutation = useMutation({
     mutationFn: () => api.sessions.cancelSession(id),
@@ -3102,9 +3202,34 @@ export function SessionDetailContent({ id }: { id: string }) {
     () => computeThreadOverlap(threads, accumulatedFileEvents),
     [threads, accumulatedFileEvents],
   );
-  const [summaryOpen, setSummaryOpen] = useState(false);
   const [attributionFilter, setAttributionFilter] = useState<ThreadAttributionFilterValue>({ kind: "all" });
   const attributionAllowedPaths = useAttributionAllowedPaths(attributionFilter, accumulatedFileEvents);
+  const visibleDiffFiles = useMemo(
+    () =>
+      attributionAllowedPaths == null
+        ? diffFiles
+        : diffFiles.filter((f) => attributionAllowedPaths.has(f.newPath) || attributionAllowedPaths.has(f.oldPath)),
+    [attributionAllowedPaths, diffFiles],
+  );
+  const visibleFilteredFiles = useMemo(
+    () =>
+      attributionAllowedPaths == null
+        ? filteredFiles
+        : filteredFiles.filter((f) => attributionAllowedPaths.has(f.newPath) || attributionAllowedPaths.has(f.oldPath)),
+    [attributionAllowedPaths, filteredFiles],
+  );
+
+  useEffect(() => {
+    if (visibleFilteredFiles.length === 0) {
+      if (activeFileIndex !== 0) {
+        setActiveFileIndex(0);
+      }
+      return;
+    }
+    if (activeFileIndex >= visibleFilteredFiles.length) {
+      setActiveFileIndex(visibleFilteredFiles.length - 1);
+    }
+  }, [activeFileIndex, visibleFilteredFiles.length]);
 
   const createThreadMutation = useMutation({
     mutationFn: () => {
@@ -3144,17 +3269,23 @@ export function SessionDetailContent({ id }: { id: string }) {
   }, [newThreadAgentType]);
 
   const handleApprovePlan = useCallback(() => {
-    if (!composerCanSendMessage || sendMutation.isPending) return;
-    queueSend({
+    if (!composerCanSendMessageRef.current || sendPendingRef.current) return;
+    queueSendRef.current({
       planMode: false,
       overrideMessage: "The plan looks good. Please proceed with executing the implementation plan above. Make all the changes as described.",
     });
-  }, [composerCanSendMessage, queueSend, sendMutation.isPending]);
+  }, []);
 
   const handleAdjustPlan = useCallback(() => {
     setComposerMessage("Please adjust the plan: ");
     setComposerPlanMode(false);
     composerTextareaRef.current?.focus();
+  }, []);
+  const handleChatDiffClick = useCallback(() => {
+    openReview();
+  }, [openReview]);
+  const registerChatPanelScrollToLiveEdge = useCallback((scrollToLiveEdge: (() => void) | null) => {
+    chatPanelScrollToLiveEdgeRef.current = scrollToLiveEdge;
   }, []);
 
   const changesCount = diffStats?.filesChanged;
@@ -3464,11 +3595,7 @@ export function SessionDetailContent({ id }: { id: string }) {
 
       <TabsContent value="changes" className="flex-1 min-h-0">
         <ChangesTab
-          filteredFiles={
-            attributionAllowedPaths == null
-              ? filteredFiles
-              : filteredFiles.filter((f) => attributionAllowedPaths.has(f.newPath) || attributionAllowedPaths.has(f.oldPath))
-          }
+          filteredFiles={visibleFilteredFiles}
           activeFileIndex={activeFileIndex}
           onFileSelect={setActiveFileIndex}
           onOpenReview={openReview}
@@ -3646,10 +3773,6 @@ export function SessionDetailContent({ id }: { id: string }) {
             )}
             <LinkedIssueChips session={session} />
           </div>
-          {/* Summarize tabs trigger — only meaningful when there is more than one tab. */}
-          {threads.length > 1 && (
-            <SummarizeButton onClick={() => setSummaryOpen(true)} />
-          )}
           {/* Desktop toggle: hides/shows the inline right panel. */}
           <DisabledTooltip disabled={centerMode === "review" && showDetailPanel} content={detailToggleTitle}>
             <Button
@@ -3697,25 +3820,21 @@ export function SessionDetailContent({ id }: { id: string }) {
             cancelPendingThreadId={cancelThreadMutation.isPending ? cancelThreadMutation.variables ?? null : null}
           />
         ) : null}
-        <SessionSummaryPanel sessionId={id} open={summaryOpen} onOpenChange={setSummaryOpen} />
-
         {/* Center content — either chat or diff review */}
         <div className="flex-1 min-h-0 relative">
           {/* Chat panel — always mounted to preserve scroll, SSE connections, etc. */}
           <div className={cn("h-full", centerMode !== "chat" && "hidden")}>
-            <ChatPanel
+            <MemoizedChatPanel
               key={activeThread ? `${id}:${activeThread.id}` : id}
               session={session}
               sessionId={id}
               activeThread={activeThread}
               isActive={isActive}
               optimisticMessages={optimisticMessages}
-              onDiffClick={() => openReview()}
+              onDiffClick={handleChatDiffClick}
               onApprovePlan={handleApprovePlan}
               onAdjustPlan={handleAdjustPlan}
-              onRegisterScrollToLiveEdge={(scrollToLiveEdge) => {
-                chatPanelScrollToLiveEdgeRef.current = scrollToLiveEdge;
-              }}
+              onRegisterScrollToLiveEdge={registerChatPanelScrollToLiveEdge}
             />
           </div>
           {/* Review diff view — mounted only when active */}
@@ -3724,8 +3843,8 @@ export function SessionDetailContent({ id }: { id: string }) {
               <div className="flex-1 min-h-0">
                 <ReviewDiffView
                   sessionId={id}
-                  files={filteredFiles}
-                  allFiles={allDiffFiles}
+                  files={visibleFilteredFiles}
+                  allFiles={visibleDiffFiles}
                   activeFileIndex={activeFileIndex}
                   onFileChange={setActiveFileIndex}
                   onBack={exitReview}
@@ -3798,12 +3917,12 @@ export function SessionDetailContent({ id }: { id: string }) {
               repositoryId={session.repository_id}
               branch={session.target_branch}
               agentType={composerAgentType}
-              targetLabel={activeThread ? activeThreadLabel : undefined}
+              targetLabel={activeThread ? composerTargetLabel : undefined}
             />
           </>
         )}
 
-        {!isDedicatedMobileReview ? (
+        {!isDedicatedMobileReview && !isMobileReviewViewport ? (
         <SessionFooter
           status={session.status}
           currentTurn={session.current_turn}
@@ -3905,7 +4024,7 @@ export function SessionDetailContent({ id }: { id: string }) {
               repositoryId={session.repository_id}
               branch={session.target_branch}
               agentType={composerAgentType}
-              targetLabel={activeThread ? activeThreadLabel : undefined}
+              targetLabel={activeThread ? composerTargetLabel : undefined}
             />
           </SheetContent>
         </Sheet>

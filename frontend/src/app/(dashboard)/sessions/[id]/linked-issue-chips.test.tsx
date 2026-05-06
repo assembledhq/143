@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { render, screen } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { LinkedIssueChips } from './linked-issue-chips';
 import type { Session } from '@/lib/types';
 
@@ -50,6 +51,55 @@ describe('LinkedIssueChips', () => {
     expect(link).toHaveAttribute('href', 'https://linear.app/acs/issue/ACS-1234');
     expect(link).toHaveAttribute('target', '_blank');
     expect(link).toHaveAttribute('rel', 'noopener noreferrer');
+  });
+
+  it('shows the shared tooltip on hover for a Linear chip instead of relying on the native title hover', async () => {
+    const user = userEvent.setup();
+    const session = makeSession({
+      linked_issues: [
+        {
+          id: 'link-1',
+          session_id: 'sess-1',
+          issue_id: 'issue-1',
+          role: 'primary',
+          position: 0,
+          issue_source: 'linear',
+          external_id: 'ACS-1234',
+          issue_title: 'Add OAuth callback',
+          issue_status: 'In Progress',
+          issue_workspace_slug: 'acs',
+        },
+      ],
+    });
+
+    render(<LinkedIssueChips session={session} />);
+
+    await user.hover(screen.getByRole('link', { name: 'ACS-1234' }));
+
+    expect(await screen.findByRole('tooltip')).toHaveTextContent('Add OAuth callback (primary) · In Progress');
+  });
+
+  it('renders Linear chip with a logo and subdued neutral styling', () => {
+    const session = makeSession({
+      linked_issues: [
+        {
+          id: 'link-1',
+          session_id: 'sess-1',
+          issue_id: 'issue-1',
+          role: 'primary',
+          position: 0,
+          issue_source: 'linear',
+          external_id: 'VIR-75',
+        },
+      ],
+    });
+
+    render(<LinkedIssueChips session={session} />);
+
+    const link = screen.getByRole('link', { name: 'VIR-75' });
+    expect(link.querySelector('img[aria-hidden="true"]')).not.toBeNull();
+    expect(link.className).toContain('bg-muted');
+    expect(link.className).not.toContain('bg-blue-500/10');
   });
 
   it('falls back to workspace-less Linear URL when slug missing', () => {
@@ -225,5 +275,29 @@ describe('LinkedIssueChips', () => {
 
     expect(screen.getByText('Linear sync skipped')).toBeInTheDocument();
     expect(screen.getByLabelText(/workflow state sync is disabled/i)).toBeInTheDocument();
+  });
+
+  it('shows the shared tooltip on hover for the sync-skipped chip', async () => {
+    const user = userEvent.setup();
+    const session = makeSession({
+      linked_issues: [
+        {
+          id: 'link-1',
+          session_id: 'sess-1',
+          issue_id: 'issue-1',
+          role: 'primary',
+          position: 0,
+          issue_source: 'linear',
+          external_id: 'ACS-1',
+          linear_last_skipped_reason: 'per_team_disabled',
+        },
+      ],
+    });
+
+    render(<LinkedIssueChips session={session} />);
+
+    await user.hover(screen.getByText('Linear sync skipped'));
+
+    expect(await screen.findByRole('tooltip')).toHaveTextContent('Workflow state sync is disabled by org or team Linear automation settings.');
   });
 });

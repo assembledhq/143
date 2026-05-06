@@ -39,7 +39,7 @@ function threadStatusDotClass(status: string): string {
     case "cancelled":
       return "bg-muted-foreground/60";
     default:
-      return "bg-sky-500";
+      return "bg-primary";
   }
 }
 
@@ -89,12 +89,6 @@ export function computeThreadOverlap(
   return result;
 }
 
-function formatCost(cents: number): string {
-  if (cents <= 0) return "—";
-  if (cents < 1) return `${(cents).toFixed(2)}¢`;
-  return `$${(cents / 100).toFixed(2)}`;
-}
-
 interface AgentTabStripProps {
   threads: SessionThread[];
   activeThreadId: string | null;
@@ -110,7 +104,7 @@ interface AgentTabStripProps {
 
 // AgentTabStrip is the user's primary surface for switching between tabs and
 // taking per-tab actions (cancel, fork, revert). It renders a compact
-// Conductor-style row with status, cost, overlap badge, and an actions menu
+// Conductor-style row with status, overlap badge, and an actions menu
 // per tab.
 //
 // Design notes:
@@ -203,7 +197,6 @@ export function AgentTabStrip({
                       <div className="space-y-1">
                         <div className="font-medium">{thread.label} <span className="font-normal text-muted-foreground">— {agentLabel}</span></div>
                         <div className="text-muted-foreground">{statusLabel}{queued > 0 ? ` · ${queued} message${queued === 1 ? "" : "s"} queued` : ""}</div>
-                        <div className="text-muted-foreground">Cost: {formatCost(thread.cost_cents)}</div>
                         {overlap.length > 0 && (
                           <div className="pt-1">
                             <div className="font-medium text-amber-700 dark:text-amber-400">Overlap with another tab:</div>

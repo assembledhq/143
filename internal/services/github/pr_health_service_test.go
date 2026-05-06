@@ -939,6 +939,12 @@ func TestPRServiceCreateRepairRevisionSessionAndResumeRepairSession(t *testing.T
 						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 					).
 					WillReturnRows(pgxmock.NewRows([]string{"id", "created_at", "last_activity_at"}).AddRow(uuid.New(), now, now))
+				mock.ExpectQuery("INSERT INTO session_threads").
+					WithArgs(
+						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+						pgxmock.AnyArg(), pgxmock.AnyArg(),
+					).
+					WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
 				mock.ExpectExec("INSERT INTO session_issue_links").
 					WithArgs(
 						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
@@ -984,6 +990,7 @@ func TestPRServiceCreateRepairRevisionSessionAndResumeRepairSession(t *testing.T
 		{
 			name: "resume repair session",
 			run: func(t *testing.T, mock pgxmock.PgxPoolIface, service *PRService, pr models.PullRequest, parentSession models.Session, userID uuid.UUID, now time.Time) {
+				threadID := uuid.New()
 				mock.ExpectBegin()
 				mock.ExpectQuery("UPDATE sessions").
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
@@ -994,10 +1001,24 @@ func TestPRServiceCreateRepairRevisionSessionAndResumeRepairSession(t *testing.T
 				mock.ExpectExec("UPDATE sessions.+SET revision_context").
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+				mock.ExpectQuery("SELECT .+ FROM session_threads WHERE org_id .+ AND session_id").
+					WithArgs(pr.OrgID, parentSession.ID).
+					WillReturnRows(
+						pgxmock.NewRows(prHealthSessionThreadColumns).
+							AddRow(newPRHealthSessionThreadRow(threadID, parentSession.ID, pr.OrgID, now)...),
+					)
 				mock.ExpectQuery("INSERT INTO session_messages").
 					WithArgs(
-						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+						parentSession.ID,
+						pr.OrgID,
+						uuidPtrArg{want: threadID},
+						pgxmock.AnyArg(),
+						1,
+						models.MessageRoleUser,
+						"Please resolve the conflicts.",
+						pgxmock.AnyArg(),
+						pgxmock.AnyArg(),
+						pgxmock.AnyArg(),
 						pgxmock.AnyArg(),
 					).
 					WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(int64(1), now))
@@ -1565,6 +1586,15 @@ var prRepairRunTestColumns = []string{
 	"id", "org_id", "pull_request_id", "session_id", "action_type", "health_version", "active", "obsoleted_by_version", "created_at", "updated_at",
 }
 
+var prHealthSessionThreadColumns = []string{
+	"id", "session_id", "org_id", "agent_type", "model_override",
+	"label", "instructions", "file_scope", "status", "agent_session_id",
+	"current_turn", "last_activity_at",
+	"confidence_score", "result_summary", "diff", "failure_explanation", "failure_category",
+	"started_at", "completed_at", "created_at",
+	"base_snapshot_key", "cost_cents", "pending_message_count", "cancel_requested_at",
+}
+
 var prHealthSessionColumns = []string{
 	"id", "primary_issue_id", "org_id", "origin", "interaction_mode", "validation_policy", "agent_type", "status", "autonomy_level", "token_mode",
 	"complexity_tier", "confidence_score", "confidence_reasoning", "risk_factors",
@@ -1605,6 +1635,26 @@ func newPRHealthSessionRow(sessionID, orgID uuid.UUID, now time.Time, status str
 		false, false, false, (*string)(nil), models.LinearPrepareStateNone,
 		nil, nil, nil, now,
 	}
+}
+
+func newPRHealthSessionThreadRow(threadID, sessionID, orgID uuid.UUID, now time.Time) []any {
+	return []any{
+		threadID, sessionID, orgID, "claude_code", nil,
+		"Main", nil, nil, models.ThreadStatusIdle, nil,
+		0, nil,
+		nil, nil, nil, nil, nil,
+		nil, nil, now,
+		nil, float64(0), 0, nil,
+	}
+}
+
+type uuidPtrArg struct {
+	want uuid.UUID
+}
+
+func (a uuidPtrArg) Match(value any) bool {
+	got, ok := value.(*uuid.UUID)
+	return ok && got != nil && *got == a.want
 }
 
 func setPRHealthSessionRowValue(row []any, column string, value any) {

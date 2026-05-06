@@ -103,6 +103,7 @@ import type {
 
 const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10 MB
 const DRAFT_SAVE_DEBOUNCE_MS = 400;
+const DEFAULT_MANUAL_SESSION_TITLE = "Manual Session";
 const triggerPickerIconClassName = "h-4 w-4 shrink-0";
 const directoryTriggerIcon = <FolderTree className={triggerPickerIconClassName} />;
 const fileTriggerIcon = <FileCode2 className={triggerPickerIconClassName} />;
@@ -578,8 +579,11 @@ export function ManualSessionComposer({
   );
   const hasInvalidCommands = invalidCommandTokens.length > 0;
   const hasSubmittableInput = useMemo(
-    () => message.trim().length > 0 || references.some((reference) => referenceCarriesLinearRef(reference)),
-    [message, references],
+    () =>
+      message.trim().length > 0 ||
+      attachments.length > 0 ||
+      references.some((reference) => referenceCarriesLinearRef(reference)),
+    [attachments, message, references],
   );
 
   const createManualSessionMutation = useMutation({
@@ -599,9 +603,10 @@ export function ManualSessionComposer({
       const rawTitle = message.trim().length > 0
         ? message.trim()
         : references.find((reference) => referenceCarriesLinearRef(reference))?.display ?? "";
-      const title = rawTitle.length > 80
-        ? rawTitle.slice(0, 80) + "..."
-        : rawTitle;
+      const optimisticTitle = rawTitle || DEFAULT_MANUAL_SESSION_TITLE;
+      const title = optimisticTitle.length > 80
+        ? optimisticTitle.slice(0, 80) + "..."
+        : optimisticTitle;
       return { optimisticId: addOptimisticSession(title) };
     },
     onSuccess: (response, _variables, context) => {

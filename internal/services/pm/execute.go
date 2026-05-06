@@ -88,10 +88,7 @@ func (s *Service) executePlan(ctx context.Context, orgID uuid.UUID, plan *Plan, 
 		}
 
 		dedupeKey := db.RunAgentDedupeKey(run.ID)
-		payload := map[string]string{
-			"session_id": run.ID.String(),
-			"org_id":     orgID.String(),
-		}
+		payload := db.RunAgentPayload(run)
 		if _, err := s.jobs.Enqueue(ctx, orgID, "agent", "run_agent", payload, 5, &dedupeKey); err != nil {
 			s.logger.Error().Err(err).Str("session_id", run.ID.String()).Msg("failed to enqueue agent run job")
 			task.Status = models.PMTaskStatusSkippedCapacity

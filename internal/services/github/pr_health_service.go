@@ -554,6 +554,7 @@ func (s *PRService) resumeRepairSession(ctx context.Context, pr models.PullReque
 
 	txSessions := db.NewSessionStore(tx)
 	txMessages := db.NewSessionMessageStore(tx)
+	txThreads := db.NewSessionThreadStore(tx)
 	txPRs := db.NewPullRequestStore(tx)
 
 	claimed, claimErr := txSessions.ClaimIdle(ctx, pr.OrgID, session.ID)
@@ -566,9 +567,27 @@ func (s *PRService) resumeRepairSession(ctx context.Context, pr models.PullReque
 	if err := txSessions.UpdateRevisionContext(ctx, pr.OrgID, claimed.ID, revisionContext); err != nil {
 		return nil, err
 	}
+	// The session's primary thread is the "Main" tab seeded at session
+	// creation. Without attributing the repair message to that thread, the
+	// session-detail UI's per-thread timeline query (ListByThread) skips it
+	// and the user sees the click do nothing in the conversation view —
+	// SessionStore.ClaimIdle/ClaimForResume don't hydrate PrimaryThreadID
+	// from the row, so we look it up here. ListBySession orders by
+	// created_at ASC, matching the convention that the first-created thread
+	// is "Main".
+	threads, err := txThreads.ListBySession(ctx, pr.OrgID, claimed.ID)
+	if err != nil {
+		return nil, fmt.Errorf("list session threads for repair message: %w", err)
+	}
+	var threadID *uuid.UUID
+	if len(threads) > 0 {
+		id := threads[0].ID
+		threadID = &id
+	}
 	msg := &models.SessionMessage{
 		SessionID:  claimed.ID,
 		OrgID:      pr.OrgID,
+		ThreadID:   threadID,
 		UserID:     &userID,
 		TurnNumber: claimed.CurrentTurn + 1,
 		Role:       models.MessageRoleUser,
@@ -664,6 +683,7 @@ func (s *PRService) createRepairRevisionSession(ctx context.Context, pr models.P
 	msg := &models.SessionMessage{
 		SessionID:  session.ID,
 		OrgID:      session.OrgID,
+		ThreadID:   session.PrimaryThreadID,
 		UserID:     &userID,
 		TurnNumber: 0,
 		Role:       models.MessageRoleUser,
@@ -673,10 +693,7 @@ func (s *PRService) createRepairRevisionSession(ctx context.Context, pr models.P
 		return nil, err
 	}
 	dedupeKey := db.RunAgentDedupeKey(session.ID)
-	payload := map[string]string{
-		"session_id": session.ID.String(),
-		"org_id":     session.OrgID.String(),
-	}
+	payload := db.RunAgentPayload(session)
 	if _, err := s.jobs.EnqueueInTx(ctx, tx, session.OrgID, "agent", "run_agent", payload, 5, &dedupeKey); err != nil {
 		return nil, err
 	}
@@ -752,7 +769,35 @@ func (s *PRService) listCheckRunsForRef(ctx context.Context, token, owner, repo,
 	if err := json.Unmarshal(body, &resp); err != nil {
 		return nil, fmt.Errorf("decode GitHub check runs: %w", err)
 	}
-	return resp.CheckRuns, nil
+	return dedupeCheckRunsByName(resp.CheckRuns), nil
+}
+
+// dedupeCheckRunsByName collapses check runs that share a display name down to
+// the most recent one. GitHub's filter=latest only dedupes within a single
+// workflow run, so a repo whose workflow triggers on both `pull_request` and
+// `push` ends up with two parallel runs on the same SHA — each emits its own
+// "Backend Test", "Frontend Test", etc. and the unfiltered list shows every
+// job twice. Highest ID wins because GitHub allocates check_run IDs
+// monotonically, so the newer workflow run's state replaces the older one.
+func dedupeCheckRunsByName(checkRuns []gitHubCheckRun) []gitHubCheckRun {
+	if len(checkRuns) <= 1 {
+		return checkRuns
+	}
+	bestIdx := make(map[string]int, len(checkRuns))
+	for i, check := range checkRuns {
+		key := strings.ToLower(strings.TrimSpace(check.Name))
+		if existing, ok := bestIdx[key]; !ok || checkRuns[i].ID > checkRuns[existing].ID {
+			bestIdx[key] = i
+		}
+	}
+	deduped := make([]gitHubCheckRun, 0, len(bestIdx))
+	for i, check := range checkRuns {
+		key := strings.ToLower(strings.TrimSpace(check.Name))
+		if bestIdx[key] == i {
+			deduped = append(deduped, check)
+		}
+	}
+	return deduped
 }
 
 func (s *PRService) fetchCheckRunAnnotations(ctx context.Context, token, owner, repo string, checkRunID int64) ([]string, error) {

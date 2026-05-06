@@ -344,10 +344,7 @@ func (s *Service) CheckAutoTrigger(ctx context.Context, orgID uuid.UUID, score *
 		return fmt.Errorf("create agent run: %w", err)
 	}
 
-	payload := map[string]string{
-		"session_id": run.ID.String(),
-		"org_id":     orgID.String(),
-	}
+	payload := db.RunAgentPayload(run)
 	dedupeKey := db.RunAgentDedupeKey(run.ID)
 	if _, err := s.jobs.Enqueue(ctx, orgID, "agent", "run_agent", payload, 5, &dedupeKey); err != nil {
 		return fmt.Errorf("enqueue run_agent job: %w", err)

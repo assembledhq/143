@@ -404,12 +404,16 @@ func TestGraphQLClientIssueRecentHumanEdits(t *testing.T) {
 	now := time.Date(2026, 4, 27, 12, 0, 0, 0, time.UTC)
 	client := newGraphQLClientForTest(t, func(t *testing.T, req linearGraphQLRequest, w http.ResponseWriter) {
 		require.Contains(t, req.Query, "history(first: 10)", "IssueRecentHumanEdits should query issue history")
+		require.Contains(t, req.Query, "viewer { id }", "IssueRecentHumanEdits should fetch viewer id for self-attribution filtering")
 		writeGraphQLResponse(t, w, `{
-			"data": {"issue": {"history": {"nodes": [
-				{"createdAt": "2026-04-27T11:45:00Z", "actor": null, "botActor": {"name": "GitHub"}, "fromState": {"id": "a"}, "toState": {"id": "b"}},
-				{"createdAt": "2026-04-27T11:50:00Z", "actor": {"name": "Ada", "displayName": "Ada"}, "botActor": null, "fromState": {"id": "b"}, "toState": {"id": "c"}},
-				{"createdAt": "2026-04-27T11:55:00Z", "actor": {"name": "Ignored"}, "botActor": null, "fromState": null, "toState": {"id": "d"}}
-			]}}}
+			"data": {
+				"viewer": {"id": "viewer-self"},
+				"issue": {"history": {"nodes": [
+					{"createdAt": "2026-04-27T11:45:00Z", "actor": null, "botActor": {"name": "GitHub"}, "fromState": {"id": "a"}, "toState": {"id": "b"}},
+					{"createdAt": "2026-04-27T11:50:00Z", "actor": {"id": "actor-ada", "name": "Ada", "displayName": "Ada"}, "botActor": null, "fromState": {"id": "b"}, "toState": {"id": "c"}},
+					{"createdAt": "2026-04-27T11:55:00Z", "actor": {"id": "actor-ignored", "name": "Ignored"}, "botActor": null, "fromState": null, "toState": {"id": "d"}}
+				]}}
+			}
 		}`)
 	})
 
@@ -418,12 +422,38 @@ func TestGraphQLClientIssueRecentHumanEdits(t *testing.T) {
 	require.True(t, edited, "IssueRecentHumanEdits should detect recent human state transitions")
 }
 
+func TestGraphQLClientIssueRecentHumanEditsIgnoresSelfActor(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 4, 27, 12, 0, 0, 0, time.UTC)
+	client := newGraphQLClientForTest(t, func(t *testing.T, req linearGraphQLRequest, w http.ResponseWriter) {
+		require.Contains(t, req.Query, "viewer { id }", "IssueRecentHumanEdits should fetch viewer id for self-attribution filtering")
+		// Linear attributes OAuth-driven moves to the authorizing user with
+		// botActor=null. The only state transition in the window is one
+		// 143 itself made — IssueRecentHumanEdits must NOT flag this as a
+		// human edit, otherwise the next milestone (e.g. PR-open after
+		// session-start) gets suppressed within the 10-min cooldown.
+		writeGraphQLResponse(t, w, `{
+			"data": {
+				"viewer": {"id": "viewer-self"},
+				"issue": {"history": {"nodes": [
+					{"createdAt": "2026-04-27T11:55:00Z", "actor": {"id": "viewer-self", "name": "John Doe", "displayName": "John"}, "botActor": null, "fromState": {"id": "a"}, "toState": {"id": "b"}}
+				]}}
+			}
+		}`)
+	})
+
+	edited, err := client.IssueRecentHumanEdits(context.Background(), "issue-1", now.Add(-20*time.Minute))
+	require.NoError(t, err, "IssueRecentHumanEdits should parse history")
+	require.False(t, edited, "IssueRecentHumanEdits should ignore transitions performed by our own OAuth actor")
+}
+
 func TestGraphQLClientIssueRecentHumanEditsNoIssue(t *testing.T) {
 	t.Parallel()
 
 	client := newGraphQLClientForTest(t, func(t *testing.T, req linearGraphQLRequest, w http.ResponseWriter) {
 		require.Contains(t, req.Query, "history(first: 10)", "IssueRecentHumanEdits should query issue history")
-		writeGraphQLResponse(t, w, `{"data":{"issue":null}}`)
+		writeGraphQLResponse(t, w, `{"data":{"viewer":{"id":"viewer-self"},"issue":null}}`)
 	})
 
 	edited, err := client.IssueRecentHumanEdits(context.Background(), "issue-1", time.Now())

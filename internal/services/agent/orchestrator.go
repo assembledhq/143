@@ -325,6 +325,16 @@ type SessionMessageStore interface {
 	ListBySession(ctx context.Context, orgID, sessionID uuid.UUID) ([]models.SessionMessage, error)
 }
 
+type SessionThreadStore interface {
+	UpdateStatus(ctx context.Context, orgID, threadID uuid.UUID, status models.ThreadStatus) error
+	CompleteTurn(ctx context.Context, orgID, threadID uuid.UUID, turnNumber int, agentSessionID string) error
+	UpdateResult(ctx context.Context, orgID, threadID uuid.UUID, status models.ThreadStatus, result *models.SessionResult) error
+	// ClearPendingMessages resets the queued-message counter once the
+	// orchestrator has re-enqueued a continue_session to drain the queue.
+	// Called from drainQueuedMessages after the in-flight turn completes.
+	ClearPendingMessages(ctx context.Context, orgID, threadID uuid.UUID) error
+}
+
 type SessionIssueLinkStore interface {
 	ListBySession(ctx context.Context, orgID, sessionID uuid.UUID) ([]models.SessionIssueLink, error)
 }
@@ -410,6 +420,7 @@ type Orchestrator struct {
 	agentRunLogs      SessionLogStore
 	agentRunQuestions SessionQuestionStore
 	sessionMessages   SessionMessageStore
+	sessionThreads    SessionThreadStore
 	sessionIssueLinks SessionIssueLinkStore
 	issueSnapshots    SessionIssueSnapshotStore
 	decisionLog       DecisionLogStore
@@ -584,6 +595,7 @@ type OrchestratorConfig struct {
 	SessionLogs       SessionLogStore
 	SessionQuestions  SessionQuestionStore
 	SessionMessages   SessionMessageStore
+	SessionThreads    SessionThreadStore
 	SessionIssueLinks SessionIssueLinkStore
 	IssueSnapshots    SessionIssueSnapshotStore
 	DecisionLog       DecisionLogStore
@@ -665,6 +677,7 @@ func NewOrchestrator(cfg OrchestratorConfig) *Orchestrator {
 		agentRunLogs:      cfg.SessionLogs,
 		agentRunQuestions: cfg.SessionQuestions,
 		sessionMessages:   cfg.SessionMessages,
+		sessionThreads:    cfg.SessionThreads,
 		sessionIssueLinks: cfg.SessionIssueLinks,
 		issueSnapshots:    cfg.IssueSnapshots,
 		decisionLog:       cfg.DecisionLog,
@@ -938,6 +951,53 @@ func latestUserMessage(messages []models.SessionMessage) *models.SessionMessage 
 	return nil
 }
 
+// unprocessedUserMessages returns the consecutive trailing user messages for
+// a given thread scope — i.e. all user messages after the most recent
+// in-scope assistant message. When threadID is nil the scope is the
+// session-level conversation (messages with no thread); when threadID is
+// non-nil the scope is that specific thread.
+//
+// Used by ContinueSession to bundle rapid-fire mid-turn user sends into a
+// single agent invocation. Without this, the orchestrator processes only
+// the very latest user message and silently drops earlier queued ones.
+// Returned messages are in oldest-first order.
+func unprocessedUserMessages(messages []models.SessionMessage, threadID *uuid.UUID) []models.SessionMessage {
+	return unprocessedUserMessagesThrough(messages, threadID, 1<<63-1)
+}
+
+// unprocessedUserMessagesThrough is the boundary-aware form used when a later
+// assistant message may already exist in the timeline. Mid-turn queued user
+// rows are inserted before the in-flight turn's assistant row; when the drain
+// job starts, that assistant must not hide the queued users.
+func unprocessedUserMessagesThrough(messages []models.SessionMessage, threadID *uuid.UUID, latestUserMessageID int64) []models.SessionMessage {
+	matchesScope := func(m models.SessionMessage) bool {
+		if threadID == nil {
+			return m.ThreadID == nil
+		}
+		return m.ThreadID != nil && *m.ThreadID == *threadID
+	}
+	var pending []models.SessionMessage
+	for i := len(messages) - 1; i >= 0; i-- {
+		m := messages[i]
+		if m.ID > latestUserMessageID {
+			continue
+		}
+		if !matchesScope(m) {
+			continue
+		}
+		if m.Role == models.MessageRoleAssistant {
+			break
+		}
+		if m.Role == models.MessageRoleUser {
+			pending = append(pending, m)
+		}
+	}
+	for i, j := 0, len(pending)-1; i < j; i, j = i+1, j-1 {
+		pending[i], pending[j] = pending[j], pending[i]
+	}
+	return pending
+}
+
 func canonicalReferences(message *models.SessionMessage) []models.SessionInputReference {
 	if message == nil || len(message.References) == 0 {
 		return nil
@@ -1202,10 +1262,7 @@ func (o *Orchestrator) promptSeedForSession(session *models.Session, latestMessa
 		return issue, linkedIssues
 	}
 
-	title := "Session task"
-	if session.Title != nil && strings.TrimSpace(*session.Title) != "" {
-		title = *session.Title
-	}
+	title := syntheticIssueTitleForSession(session, latestMessage)
 	var descriptionParts []string
 	if session.PMApproach != nil && strings.TrimSpace(*session.PMApproach) != "" {
 		descriptionParts = append(descriptionParts, *session.PMApproach)
@@ -1223,6 +1280,42 @@ func (o *Orchestrator) promptSeedForSession(session *models.Session, latestMessa
 		issue.Description = &description
 	}
 	return issue, linkedIssues
+}
+
+func syntheticIssueTitleForSession(session *models.Session, latestMessage *models.SessionMessage) string {
+	if session.Title != nil && strings.TrimSpace(*session.Title) != "" {
+		return strings.TrimSpace(*session.Title)
+	}
+	if latestMessage != nil {
+		if title := syntheticIssueTitleFragment(latestMessage.Content); title != "" {
+			return title
+		}
+	}
+	if session.PMApproach != nil {
+		if title := syntheticIssueTitleFragment(*session.PMApproach); title != "" {
+			return title
+		}
+	}
+	if session.PMReasoning != nil {
+		if title := syntheticIssueTitleFragment(*session.PMReasoning); title != "" {
+			return title
+		}
+	}
+	return "Session"
+}
+
+func syntheticIssueTitleFragment(value string) string {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return ""
+	}
+	if idx := strings.Index(trimmed, "\n"); idx >= 0 {
+		trimmed = strings.TrimSpace(trimmed[:idx])
+	}
+	if len(trimmed) <= 120 {
+		return trimmed
+	}
+	return strings.TrimSpace(trimmed[:120]) + "..."
 }
 
 func issueSnapshotEntriesFromIssue(issue *models.Issue) []models.SessionIssueSnapshotEntry {
@@ -1317,6 +1410,16 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 	// populated by the caller.
 	if err := o.sessions.UpdateStatus(ctx, run.OrgID, run.ID, "running"); err != nil {
 		return fmt.Errorf("update run status to running: %w", err)
+	}
+	var primaryThreadID *uuid.UUID
+	if run.PrimaryThreadID != nil && *run.PrimaryThreadID != uuid.Nil {
+		threadID := *run.PrimaryThreadID
+		primaryThreadID = &threadID
+		if o.sessionThreads != nil {
+			if err := o.sessionThreads.UpdateStatus(ctx, run.OrgID, threadID, models.ThreadStatusRunning); err != nil {
+				log.Warn().Err(err).Str("thread_id", threadID.String()).Msg("failed to mark primary thread running")
+			}
+		}
 	}
 	if run.PrimaryIssueID != nil && o.issues != nil {
 		if err := o.issues.UpdateStatus(ctx, run.OrgID, *run.PrimaryIssueID, "in_progress"); err != nil {
@@ -1652,6 +1755,10 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 	}()
 	if o.nodeID != "" {
 		if err := o.sessions.SetWorkerNodeIDForContainer(ctx, run.OrgID, run.ID, sandbox.ID, o.nodeID); err != nil {
+			log.Error().Err(err).
+				Str("container_id", sandbox.ID).
+				Str("worker_node_id", o.nodeID).
+				Msg("persist session worker ownership: CAS failed (container_id moved or worker_node_id held by another worker)")
 			o.failRun(ctx, run, fmt.Sprintf("persist session worker ownership: %s", err))
 			return fmt.Errorf("persist session worker ownership: %w", err)
 		}
@@ -1762,7 +1869,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 	logWg.Add(1)
 	go func() {
 		defer logWg.Done()
-		o.streamLogs(ctx, run.ID, run.OrgID, nil, turnNumber, logCh, runtimeTracker)
+		o.streamLogs(ctx, run.ID, run.OrgID, primaryThreadID, turnNumber, logCh, runtimeTracker)
 	}()
 
 	execCtx := WithSandboxProvider(ctx, o.provider)
@@ -1771,7 +1878,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 	logWg.Wait()
 
 	// 10b. Retry once on token expiration for Codex agents.
-	result, err = o.retryOnTokenExpired(ctx, run.AgentType, run.OrgID, run.TriggeredByUserID, run.ID, nil, turnNumber, sandbox, adapter, execCtx, prompt, result, err, log)
+	result, err = o.retryOnTokenExpired(ctx, run.AgentType, run.OrgID, run.TriggeredByUserID, run.ID, primaryThreadID, turnNumber, sandbox, adapter, execCtx, prompt, result, err, log)
 
 	// 10c. Shed the just-picked credential's in-process health-cache slot if
 	// the (possibly retried) result indicates a credential-level failure.
@@ -1820,6 +1927,9 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 		}
 		o.failRun(ctx, run, err.Error())
 		logAgentRunFailed(log, run, err, "failed", runStartedAt, nil)
+		o.updatePrimaryThreadTerminal(ctx, run, models.ThreadStatusFailed, &models.SessionResult{
+			Error: strPtr(err.Error()),
+		}, log)
 		o.enqueueJob(ctx, run.OrgID, "agent", "analyze_failure", map[string]interface{}{
 			"session_id": run.ID.String(),
 			"org_id":     run.OrgID.String(),
@@ -1883,7 +1993,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 
 	if isInteractive {
 		turnNumber := run.CurrentTurn + 1
-		if err := o.createAssistantMessage(ctx, run.ID, run.OrgID, nil, turnNumber, result); err != nil {
+		if err := o.createAssistantMessage(ctx, run.ID, run.OrgID, primaryThreadID, turnNumber, result); err != nil {
 			log.Warn().Err(err).Msg("failed to persist assistant message for interactive turn")
 		}
 
@@ -1893,6 +2003,11 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 		}
 		if err := o.sessions.UpdateTurnComplete(ctx, run.OrgID, run.ID, turnNumber, runResult, agentSessionID, snapshotKey); err != nil {
 			return fmt.Errorf("update interactive turn result: %w", err)
+		}
+		if primaryThreadID != nil && o.sessionThreads != nil {
+			if err := o.sessionThreads.CompleteTurn(ctx, run.OrgID, *primaryThreadID, turnNumber, agentSessionID); err != nil {
+				log.Warn().Err(err).Str("thread_id", primaryThreadID.String()).Msg("failed to mark primary thread turn complete")
+			}
 		}
 
 		log.Info().
@@ -1909,6 +2024,11 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 
 	if err := o.sessions.UpdateResult(ctx, run.OrgID, run.ID, status, runResult); err != nil {
 		return fmt.Errorf("update run result: %w", err)
+	}
+	if primaryThreadID != nil && o.sessionThreads != nil {
+		if err := o.sessionThreads.UpdateResult(ctx, run.OrgID, *primaryThreadID, models.ThreadStatusCompleted, runResult); err != nil {
+			log.Warn().Err(err).Str("thread_id", primaryThreadID.String()).Msg("failed to persist primary thread result")
+		}
 	}
 
 	// Persist snapshot metadata so the session can be continued later.
@@ -2070,14 +2190,29 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		return fmt.Errorf("no user message found")
 	}
 	threadID := latestMsg.ThreadID
-	userMessage := latestMsg.Content
-	var planMode bool
-
-	// Detect plan mode prefix and strip it, wrapping with plan instructions.
+	// Bundle every trailing user message in scope into the prompt seed so
+	// rapid mid-turn sends are all delivered to the agent. The latest
+	// message remains the "carrier" for thread_id, references, and
+	// plan-mode detection — earlier queued messages contribute only their
+	// text content. When only a single user message is unprocessed, this
+	// reduces to the legacy single-message behavior.
 	const planModePrefix = "[PLAN_MODE]\n"
-	if strings.HasPrefix(userMessage, planModePrefix) {
-		planMode = true
-		originalMessage := strings.TrimPrefix(userMessage, planModePrefix)
+	pendingMsgs := unprocessedUserMessagesThrough(messages, threadID, latestMsg.ID)
+	planMode := strings.HasPrefix(latestMsg.Content, planModePrefix)
+	var userMessage string
+	if len(pendingMsgs) <= 1 {
+		userMessage = strings.TrimPrefix(latestMsg.Content, planModePrefix)
+	} else {
+		var sb strings.Builder
+		for i, m := range pendingMsgs {
+			if i > 0 {
+				sb.WriteString("\n\n---\n\n")
+			}
+			sb.WriteString(strings.TrimPrefix(m.Content, planModePrefix))
+		}
+		userMessage = sb.String()
+	}
+	if planMode {
 		userMessage = "You are in PLAN MODE. Instead of making changes directly, create a detailed implementation plan for the following request. Describe:\n" +
 			"1. What files need to be changed and why\n" +
 			"2. What specific changes are needed in each file\n" +
@@ -2085,7 +2220,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 			"4. Any potential risks or considerations\n\n" +
 			"Do NOT make any file changes or use any tools that modify files. Only output the plan as a structured markdown response. " +
 			"The user will review the plan and either approve it or request adjustments before you proceed.\n\n" +
-			"User's request:\n" + originalMessage
+			"User's request:\n" + userMessage
 	}
 	_ = planMode // used by adapters that support explicit plan mode
 	revisionContext, revErr := ParseRevisionContext(session.RevisionContext)
@@ -2423,6 +2558,15 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	if o.usageTracker != nil {
 		usageEventID = o.usageTracker.ContainerStarted(ctx, session.OrgID, session.ID, sandbox, sandboxCfg, containerStartedAt)
 	}
+	drainAfterRelease := false
+	defer func() {
+		if !drainAfterRelease {
+			return
+		}
+		drainCtx, drainCancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+		defer drainCancel()
+		o.drainQueuedMessages(drainCtx, session, latestMsg, threadID, log)
+	}()
 	defer func() {
 		exitReason := containerExitReason(ctx, err)
 		if o.usageTracker != nil {
@@ -2466,8 +2610,34 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	}()
 	if o.nodeID != "" {
 		if err := o.sessions.SetWorkerNodeIDForContainer(ctx, session.OrgID, session.ID, sandbox.ID, o.nodeID); err != nil {
-			if revertErr := o.sessions.UpdateStatus(ctx, session.OrgID, session.ID, string(models.SessionStatusIdle)); revertErr != nil {
+			log.Error().Err(err).
+				Str("container_id", sandbox.ID).
+				Str("worker_node_id", o.nodeID).
+				Msg("persist session worker ownership: CAS failed (container_id moved or worker_node_id held by another worker)")
+			// Detached context for the cleanup writes: this site fires when
+			// a CAS conflict means another worker already owns the row, and
+			// also during rolling-deploy ctx cancellation. Both cases need
+			// the revert to land. Without WithoutCancel, a cancelled ctx
+			// silently fails the UpdateStatus and leaves session.status =
+			// 'running' / thread.status = 'running' permanently — that's
+			// the orphan that produces "Session is not active" +
+			// "Agent is working..." in the UI at the same time.
+			cleanupCtx, cleanupCancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+			defer cleanupCancel()
+			if revertErr := o.sessions.UpdateStatus(cleanupCtx, session.OrgID, session.ID, string(models.SessionStatusIdle)); revertErr != nil {
 				log.Error().Err(revertErr).Msg("failed to revert session to idle after worker ownership persistence failure")
+			}
+			// Mirror the session revert onto the active thread. The handler
+			// also resets thread.status on error, but it can miss when its
+			// own ctx is cancelled mid-shutdown (the exact scenario this
+			// failure path tends to fire in). Belt-and-suspenders here is
+			// what unblocks the UI for the user that just sent a message.
+			if opts != nil && opts.ThreadID != nil && o.sessionThreads != nil {
+				if revertErr := o.sessionThreads.UpdateStatus(cleanupCtx, session.OrgID, *opts.ThreadID, models.ThreadStatusIdle); revertErr != nil {
+					log.Error().Err(revertErr).
+						Str("thread_id", opts.ThreadID.String()).
+						Msg("failed to revert thread to idle after worker ownership persistence failure")
+				}
 			}
 			o.registerSandboxFailureMessage(
 				ctx,
@@ -2520,8 +2690,19 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 
 		commands := canonicalCommands(latestMsg, session.AgentType)
 		hasThreadAgentSessionID := session.AgentSessionID != nil && *session.AgentSessionID != ""
-		if threadScopedExecution && !hasThreadAgentSessionID {
-			input := &AgentInput{
+		resumeMode := adapter.ResumeMode()
+		// missingResumeID covers the case where the adapter resumes by
+		// session id but no id was captured from a prior turn — e.g. the
+		// session predates session-id capture, or capture failed. Without
+		// the id, the adapter falls back to a fresh exec, so we must embed
+		// the conversation history into the prompt or the agent loses
+		// context. Threaded first turns are handled by the next branch.
+		missingResumeID := resumeMode == ResumeBySessionID && !hasThreadAgentSessionID && !threadScopedExecution
+		// Both snapshot-path branches that go through PreparePrompt feed it
+		// the same context; capture once here so a future field addition
+		// can't drift between the two callers.
+		buildSnapshotContinueInput := func() *AgentInput {
+			return &AgentInput{
 				Issue:        promptIssue,
 				LinkedIssues: linkedIssues,
 				Manual:       session.Origin == models.SessionOriginManual,
@@ -2547,11 +2728,28 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 				RevisionContext:   revisionContext,
 				IntegrationSkills: integrationSkills,
 			}
-			prompt, err = adapter.PreparePrompt(ctx, input)
+		}
+		if threadScopedExecution && !hasThreadAgentSessionID {
+			prompt, err = adapter.PreparePrompt(ctx, buildSnapshotContinueInput())
 			if err != nil {
 				o.failRun(ctx, session, fmt.Sprintf("prepare prompt for thread: %s", err))
 				return fmt.Errorf("prepare prompt for thread: %w", err)
 			}
+		} else if missingResumeID {
+			basePrompt, err := adapter.PreparePrompt(ctx, buildSnapshotContinueInput())
+			if err != nil {
+				o.failRun(ctx, session, fmt.Sprintf("prepare prompt for resume fallback: %s", err))
+				return fmt.Errorf("prepare prompt for resume fallback: %w", err)
+			}
+			// Override UserPrompt with conversation history so the agent has
+			// prior context when running a fresh exec. The snapshot already
+			// restored the workspace, so do not ask the agent to re-apply the
+			// stored diff.
+			basePrompt.UserPrompt = o.buildRestoredWorkspaceResumeContext(session, promptIssue, messages, userMessage)
+			basePrompt.Continuation = false
+			basePrompt.RevisionContext = revisionContext
+			prompt = basePrompt
+			log.Info().Msg("continuing session with embedded history (no captured agent session id)")
 		} else {
 			var resumeSessionID string
 			if hasThreadAgentSessionID {
@@ -2684,6 +2882,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		if wasCancelled || (stopReason == StopReasonNone && errors.Is(ctx.Err(), context.Canceled)) {
 			log.Info().Msg("session cancelled by user during continue")
 			o.handleCancelledSession(ctx, session, sandbox, result, turnNumber, log)
+			drainAfterRelease = true
 			return fmt.Errorf("session cancelled: %w", ctx.Err())
 		}
 		if stopReason != StopReasonNone {
@@ -2704,6 +2903,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	if wasCancelled {
 		log.Info().Msg("agent exited after cancel during continue, returning to idle")
 		o.handleCancelledSession(ctx, session, sandbox, result, turnNumber, log)
+		drainAfterRelease = true
 		return nil
 	}
 	if stopReason != StopReasonNone {
@@ -2768,8 +2968,119 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		return fmt.Errorf("update turn complete: %w", err)
 	}
 
+	drainAfterRelease = true
+
 	log.Info().Int("turn", turnNumber).Msg("session turn completed, now idle")
 	return nil
+}
+
+// drainQueuedMessages re-enqueues a continue_session when a user message
+// arrived during the just-completed turn. Mid-turn sends are accepted by
+// both the session-level fast path (sessions.go) and the thread service's
+// queue-only path (thread/service.go); without this drain those messages
+// would sit in the database with no agent picking them up.
+//
+// Called from both the success path and the cancel-back-to-idle path of
+// ContinueSession. The session's current status is re-fetched so a drain
+// from the cancel path that ended up terminal (snapshot failed → cancelled)
+// does not enqueue a job the worker would just refuse. All failure modes
+// are logged-only because the next user-triggered send will pick up the
+// queued message anyway.
+func (o *Orchestrator) drainQueuedMessages(ctx context.Context, session *models.Session, processed *models.SessionMessage, threadID *uuid.UUID, log zerolog.Logger) {
+	if processed == nil || o.jobs == nil || o.sessionMessages == nil {
+		return
+	}
+	messages, err := o.sessionMessages.ListBySession(ctx, session.OrgID, session.ID)
+	if err != nil {
+		log.Warn().Err(err).Msg("failed to fetch messages for post-turn queue drain")
+		return
+	}
+	hasQueued := false
+	for _, m := range messages {
+		if m.Role != models.MessageRoleUser || m.ID <= processed.ID {
+			continue
+		}
+		// On the thread path, a queued message is bound to the same thread —
+		// we drain only the matching thread's queue. On the session path
+		// threadID is nil and we accept any user message that matches the
+		// session-level scope (no thread).
+		if threadID != nil {
+			if m.ThreadID == nil || *m.ThreadID != *threadID {
+				continue
+			}
+		} else if m.ThreadID != nil {
+			continue
+		}
+		hasQueued = true
+		break
+	}
+	if !hasQueued {
+		return
+	}
+
+	// Confirm the session is in a state that can accept another turn before
+	// enqueueing. Skipping the GetByID would still be safe (the worker would
+	// refuse a job for a terminal session), but it would create a noisy
+	// dead-letter trail on every cancelled run that left the session marked
+	// failed/cancelled.
+	current, getErr := o.sessions.GetByID(ctx, session.OrgID, session.ID)
+	if getErr != nil {
+		log.Warn().Err(getErr).Msg("failed to fetch session for queue drain status check")
+		return
+	}
+	if !drainAcceptableStatus(current.Status) {
+		return
+	}
+
+	if threadID != nil && o.sessionThreads != nil {
+		if err := o.sessionThreads.ClearPendingMessages(ctx, session.OrgID, *threadID); err != nil {
+			log.Warn().Err(err).Str("thread_id", threadID.String()).Msg("failed to clear pending_message_count after drain")
+		}
+	}
+	payload := map[string]string{
+		"session_id": session.ID.String(),
+		"org_id":     session.OrgID.String(),
+	}
+	if threadID != nil {
+		payload["thread_id"] = threadID.String()
+	}
+	dedupeKey := continueSessionDrainDedupeKey(session.ID, processed.ID)
+	if _, err := o.jobs.Enqueue(ctx, session.OrgID, "agent", "continue_session", payload, 5, &dedupeKey); err != nil {
+		log.Warn().Err(err).Msg("failed to enqueue continue_session for queued messages")
+	}
+}
+
+// drainAcceptableStatus returns true for session states that can absorb
+// another continue_session turn: running (the in-flight job will pick the
+// queued message up via latest-message reads) and idle (a fresh
+// continue_session can claim it). Terminal states are skipped — a queued
+// message after a failed/cancelled session waits for the user to take an
+// explicit action.
+func drainAcceptableStatus(status string) bool {
+	switch status {
+	case string(models.SessionStatusIdle),
+		string(models.SessionStatusRunning),
+		string(models.SessionStatusAwaitingInput),
+		string(models.SessionStatusNeedsHumanGuidance):
+		return true
+	}
+	return false
+}
+
+// continueSessionDedupeKey mirrors db.ContinueSessionDedupeKey. The agent
+// package deliberately avoids importing the db package; this helper keeps
+// the dedupe-key shape in lockstep without taking on the dependency. Keep
+// these two definitions identical or the dedupe will silently break.
+func continueSessionDedupeKey(sessionID uuid.UUID) string {
+	return "continue_session:" + sessionID.String()
+}
+
+// continueSessionDrainDedupeKey intentionally differs from
+// continueSessionDedupeKey because drainQueuedMessages runs while the current
+// continue_session job is still in status='running'. Reusing the active key
+// would hit the jobs dedupe index and turn the enqueue into a no-op.
+func continueSessionDrainDedupeKey(sessionID uuid.UUID, processedMessageID int64) string {
+	return fmt.Sprintf("continue_session_drain:%s:%d", sessionID.String(), processedMessageID)
 }
 
 // setupFreshSandbox clones the session's repository into the sandbox when no
@@ -2915,27 +3226,7 @@ func (o *Orchestrator) buildResumeContext(session *models.Session, issue *models
 
 	b.WriteString("This is a continuation of a previous session. The previous workspace state is not available, so you are starting from a fresh clone.\n\n")
 
-	// Include the original issue description for context (especially
-	// important for non-manual sessions that may have no prior messages).
-	if issue != nil && issue.Description != nil && *issue.Description != "" {
-		b.WriteString("## Original issue\n\n**")
-		b.WriteString(issue.Title)
-		b.WriteString("**\n\n")
-		b.WriteString(*issue.Description)
-		b.WriteString("\n\n")
-	}
-
-	// Include conversation history if available.
-	if len(messages) > 1 { // >1 because the latest user message is always present
-		b.WriteString("## Previous conversation history\n\n")
-		for _, msg := range messages[:len(messages)-1] {
-			role := "User"
-			if msg.Role == models.MessageRoleAssistant {
-				role = "Assistant"
-			}
-			b.WriteString(fmt.Sprintf("**%s:** %s\n\n", role, msg.Content))
-		}
-	}
+	writeResumeIssueAndHistory(&b, issue, messages)
 
 	// Include the stored diff if available, truncating if very large.
 	if session.Diff != nil && *session.Diff != "" {
@@ -2965,6 +3256,53 @@ func (o *Orchestrator) buildResumeContext(session *models.Session, issue *models
 	b.WriteString(latestUserMessage)
 
 	return b.String()
+}
+
+// buildRestoredWorkspaceResumeContext constructs the user prompt for a
+// snapshot-backed continuation where the agent CLI cannot resume by session ID.
+// The workspace already contains the previous turn's files, so it includes
+// conversation context without asking the agent to re-apply the stored diff.
+func (o *Orchestrator) buildRestoredWorkspaceResumeContext(session *models.Session, issue *models.Issue, messages []models.SessionMessage, latestUserMessage string) string {
+	var b bytes.Buffer
+
+	b.WriteString("This is a continuation of a previous session. The previous workspace state has been restored from the last saved snapshot, so treat the files on disk as the current state.\n\n")
+
+	writeResumeIssueAndHistory(&b, issue, messages)
+
+	if session.ResultSummary != nil && *session.ResultSummary != "" {
+		b.WriteString("## Previous session summary\n\n")
+		b.WriteString(*session.ResultSummary)
+		b.WriteString("\n\n")
+	}
+
+	b.WriteString("## New message\n\n")
+	b.WriteString(latestUserMessage)
+
+	return b.String()
+}
+
+func writeResumeIssueAndHistory(b *bytes.Buffer, issue *models.Issue, messages []models.SessionMessage) {
+	// Include the original issue description for context (especially
+	// important for non-manual sessions that may have no prior messages).
+	if issue != nil && issue.Description != nil && *issue.Description != "" {
+		b.WriteString("## Original issue\n\n**")
+		b.WriteString(issue.Title)
+		b.WriteString("**\n\n")
+		b.WriteString(*issue.Description)
+		b.WriteString("\n\n")
+	}
+
+	// Include conversation history if available.
+	if len(messages) > 1 { // >1 because the latest user message is always present
+		b.WriteString("## Previous conversation history\n\n")
+		for _, msg := range messages[:len(messages)-1] {
+			role := "User"
+			if msg.Role == models.MessageRoleAssistant {
+				role = "Assistant"
+			}
+			b.WriteString(fmt.Sprintf("**%s:** %s\n\n", role, msg.Content))
+		}
+	}
 }
 
 func manualSessionReferences(issue *models.Issue) []models.SessionInputReference {
@@ -3213,6 +3551,10 @@ func (o *Orchestrator) failTimedOutSession(run *models.Session, elapsed time.Dur
 			"Retry the session — transient slowness (LLM latency, git clone) may have pushed the run over the edge",
 		},
 	)
+	o.updatePrimaryThreadTerminal(cleanupCtx, run, models.ThreadStatusFailed, &models.SessionResult{
+		Error:           &explanation,
+		FailureCategory: strPtr(FailureCategoryTimeout),
+	}, log)
 }
 
 // ensureCodexAuth injects Codex auth credentials into the sandbox, failing the
@@ -3694,11 +4036,18 @@ func (o *Orchestrator) handleCancelledSession(ctx context.Context, session *mode
 		if err := o.sessions.UpdateTurnComplete(bgCtx, session.OrgID, session.ID, turnNumber, nil, agentSessionID, snapshotKey); err != nil {
 			log.Warn().Err(err).Msg("failed to return cancelled session to idle")
 			_ = o.sessions.UpdateStatus(bgCtx, session.OrgID, session.ID, string(models.SessionStatusCancelled))
+			o.updatePrimaryThreadTerminal(bgCtx, session, models.ThreadStatusCancelled, nil, log)
 		} else {
 			log.Info().Int("turn", turnNumber).Msg("cancelled session returned to idle")
+			if o.sessionThreads != nil && session.PrimaryThreadID != nil && *session.PrimaryThreadID != uuid.Nil {
+				if threadErr := o.sessionThreads.CompleteTurn(bgCtx, session.OrgID, *session.PrimaryThreadID, turnNumber, agentSessionID); threadErr != nil {
+					log.Warn().Err(threadErr).Str("thread_id", session.PrimaryThreadID.String()).Msg("failed to return primary thread to idle after cancel")
+				}
+			}
 		}
 	} else {
 		_ = o.sessions.UpdateStatus(bgCtx, session.OrgID, session.ID, string(models.SessionStatusCancelled))
+		o.updatePrimaryThreadTerminal(bgCtx, session, models.ThreadStatusCancelled, nil, log)
 	}
 }
 
@@ -3814,6 +4163,10 @@ func (o *Orchestrator) handlePolicyStoppedSession(ctx context.Context, session *
 
 	errMsg, explanation, nextSteps := gracefulStopFailure(reason, snapshotKey != "", session.SnapshotKey != nil && *session.SnapshotKey != "")
 	o.failRunWithCategory(bgCtx, session, errMsg, FailureCategoryTimeout, explanation, nextSteps)
+	o.updatePrimaryThreadTerminal(bgCtx, session, models.ThreadStatusFailed, &models.SessionResult{
+		Error:           &explanation,
+		FailureCategory: strPtr(FailureCategoryTimeout),
+	}, log)
 }
 
 func gracefulStopFailure(reason StopReason, checkpointedThisTurn, hadPriorCheckpoint bool) (string, string, []string) {
@@ -3912,6 +4265,32 @@ func strPtr(s string) *string {
 		return nil
 	}
 	return &s
+}
+
+// updatePrimaryThreadTerminal mirrors a session-level terminal transition onto
+// the seeded primary thread row. When result is non-nil, it persists the same
+// failure_explanation / failure_category / result_summary / diff the session
+// got so per-thread review surfaces (Phase 2) have data to display; when nil,
+// it just transitions the status (e.g. cancel without a result payload). All
+// errors are logged best-effort because this is bookkeeping — a failure here
+// must not abort the surrounding session-level cleanup.
+func (o *Orchestrator) updatePrimaryThreadTerminal(ctx context.Context, run *models.Session, status models.ThreadStatus, result *models.SessionResult, log zerolog.Logger) {
+	if o.sessionThreads == nil || run == nil || run.PrimaryThreadID == nil || *run.PrimaryThreadID == uuid.Nil {
+		return
+	}
+	threadID := *run.PrimaryThreadID
+	var err error
+	if result != nil {
+		err = o.sessionThreads.UpdateResult(ctx, run.OrgID, threadID, status, result)
+	} else {
+		err = o.sessionThreads.UpdateStatus(ctx, run.OrgID, threadID, status)
+	}
+	if err != nil {
+		log.Warn().Err(err).
+			Str("thread_id", threadID.String()).
+			Str("status", string(status)).
+			Msg("failed to update primary thread terminal status")
+	}
 }
 
 func timePtr(t time.Time) *time.Time {

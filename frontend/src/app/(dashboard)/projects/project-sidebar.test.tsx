@@ -266,6 +266,17 @@ describe('ProjectSidebar', () => {
     });
   });
 
+  it('keeps the desktop archive action de-emphasized until hover or focus', async () => {
+    renderWithProviders(<ProjectSidebar />);
+    await screen.findByText('Test Project');
+
+    expect(screen.getAllByRole('button', { name: 'Archive project' })[0]).toHaveClass(
+      'md:opacity-0',
+      'md:group-hover:opacity-100',
+      'md:focus-visible:opacity-100',
+    );
+  });
+
   it('uses a left-aligned horizontal-only tab scroller', async () => {
     renderWithProviders(<ProjectSidebar />);
     await screen.findByText('Test Project');

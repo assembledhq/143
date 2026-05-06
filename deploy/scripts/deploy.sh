@@ -49,6 +49,17 @@ echo "Deploying role=$ROLE tag=$TAG to $HOST..."
 SSH_OPTS=(-o StrictHostKeyChecking=accept-new -i "$SSH_KEY")
 SCP_OPTS=(-o StrictHostKeyChecking=accept-new -i "$SSH_KEY")
 
+repair_deploy_sudoers() {
+  bash "$SCRIPT_DIR/repair-deploy-sudoers.sh" "$ROLE" "$HOST" "$SSH_KEY"
+}
+
+warn_log_rotation_skipped() {
+  echo "WARNING: docker log rotation was not updated on this deploy; continuing."
+  echo "  The service deploy will continue, but local Docker json-file logs may remain unbounded."
+  echo "  To repair the host when root SSH is available, run:"
+  echo "    make repair-deploy-sudoers ROLE=$ROLE HOST=$HOST SSH_KEY=$SSH_KEY"
+}
+
 # --- Refresh secrets from .env.production.enc ---
 if [ -z "${SOPS_AGE_KEY:-}" ]; then
   AGE_KEY_FILE="${SOPS_AGE_KEY_FILE:-$HOME/.config/sops/age/keys.txt}"
@@ -145,6 +156,14 @@ if [ "$ROLE" = "app" ] || [ "$ROLE" = "worker" ] || [ "$ROLE" = "logging" ]; the
   scp "${SCP_OPTS[@]}" "$PROJECT_DIR/deploy/vector.yaml" deploy@"$HOST":/opt/143/deploy/
 fi
 if [ "$ROLE" = "logging" ]; then
+  # Older logging hosts may have root-owned vmalert/grafana dirs from a prior
+  # provision step; without ownership the deploy user can't unlink the entries
+  # in `rm -rf` below. Mirror the worker pattern: try a non-interactive sudo
+  # chown (narrowly granted in deploy/scripts/bootstrap.sh), tolerate failure
+  # so the rm still runs on hosts where files are already deploy-owned.
+  ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
+    "sudo -n chown -R deploy:deploy /opt/143/deploy/vmalert 2>&1 | sed 's/^/  chown: /' || true; \
+     sudo -n chown -R deploy:deploy /opt/143/deploy/grafana 2>&1 | sed 's/^/  chown: /' || true"
   ssh "${SSH_OPTS[@]}" deploy@"$HOST" "rm -rf /opt/143/deploy/grafana/provisioning /opt/143/deploy/vmalert/rules && mkdir -p /opt/143/deploy/grafana /opt/143/deploy/vmalert"
   scp -r "${SCP_OPTS[@]}" "$PROJECT_DIR/deploy/grafana/provisioning" deploy@"$HOST":/opt/143/deploy/grafana/
   scp -r "${SCP_OPTS[@]}" "$PROJECT_DIR/deploy/vmalert/rules" deploy@"$HOST":/opt/143/deploy/vmalert/
@@ -172,23 +191,99 @@ if [ "$ROLE" = "worker" ]; then
   # concurrent run). rename(2) gives the new contents a fresh inode.
   if ! scp -p "${SCP_OPTS[@]}" "$PROJECT_DIR/deploy/scripts/sandbox-firewall.sh" \
       deploy@"$HOST":/opt/143/deploy/scripts/sandbox-firewall.sh.new; then
-    echo "ERROR: scp of sandbox-firewall.sh failed."
-    echo "  Hint: the worker likely has root-owned files under /opt/143/deploy/scripts AND"
-    echo "  the 'deploy' user lacks NOPASSWD sudo. One-time fix on the worker host:"
-    echo "    1) Log in as root (provider console) and run:"
-    echo "       echo 'deploy ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/99-deploy"
-    echo "       chmod 440 /etc/sudoers.d/99-deploy"
-    echo "       chown -R deploy:deploy /opt/143/deploy"
-    echo "    2) Re-run the deploy."
-    exit 1
+    echo "sandbox-firewall.sh sync failed; trying no-teardown deploy sudoers repair..."
+    if repair_deploy_sudoers; then
+      ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
+        "sudo -n chown -R deploy:deploy /opt/143/deploy/scripts 2>&1 | sed 's/^/  chown: /' || true"
+      scp -p "${SCP_OPTS[@]}" "$PROJECT_DIR/deploy/scripts/sandbox-firewall.sh" \
+        deploy@"$HOST":/opt/143/deploy/scripts/sandbox-firewall.sh.new
+    else
+      echo "ERROR: scp of sandbox-firewall.sh failed and sudoers repair via root SSH did not complete."
+      echo "  Run once from a machine with root SSH access:"
+      echo "    make repair-deploy-sudoers ROLE=$ROLE HOST=$HOST SSH_KEY=$SSH_KEY"
+      echo "  Then re-run the deploy."
+      exit 1
+    fi
   fi
   ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
     "mv /opt/143/deploy/scripts/sandbox-firewall.sh.new /opt/143/deploy/scripts/sandbox-firewall.sh \
      || { rm -f /opt/143/deploy/scripts/sandbox-firewall.sh.new; exit 1; }"
 fi
 
+# --- Docker log rotation (idempotent) ---
+# Cap container log file growth so a chatty container can't fill the disk.
+# Docker's default json-file driver has no size limit. Logs ship to
+# VictoriaLogs (Vector → 30d retention) on app/worker/logging hosts; the
+# local file is just a buffer plus a crash-recovery window. db and redis
+# hosts have no Vector — the local file is the only copy — so db gets a
+# larger cap because postgresql.conf logs every connection, every query
+# >500ms, and every lock wait, and the entire trail is local-only.
+#
+# Sync the helper, then call it via deploy+sudo (matches sandbox-firewall.sh
+# pattern). The script is idempotent and only restarts docker when the
+# content of /etc/docker/daemon.json actually changes, so steady-state
+# deploys cost nothing.
+case "$ROLE" in
+  db) LOG_MAX_SIZE="500m" ;;  # postgres logs are verbose AND local-only
+  *)  LOG_MAX_SIZE="100m" ;;
+esac
+LOG_MAX_FILE="5"
+LOG_ROTATION_READY=1
+
+# Sync install-log-rotation.sh: stage to .new, atomic rename. Same ETXTBSY
+# avoidance as sandbox-firewall.sh — a lingering FD on the old inode would
+# break the subsequent `sudo install-log-rotation.sh` exec.
+ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
+  "sudo -n chown -R deploy:deploy /opt/143/deploy/scripts 2>&1 | sed 's/^/  chown: /' || true"
+if ! scp -p "${SCP_OPTS[@]}" "$PROJECT_DIR/deploy/scripts/install-log-rotation.sh" \
+    deploy@"$HOST":/opt/143/deploy/scripts/install-log-rotation.sh.new; then
+  echo "install-log-rotation.sh sync failed; trying no-teardown deploy sudoers repair..."
+  if repair_deploy_sudoers; then
+    ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
+      "sudo -n chown -R deploy:deploy /opt/143/deploy/scripts 2>&1 | sed 's/^/  chown: /' || true"
+    scp -p "${SCP_OPTS[@]}" "$PROJECT_DIR/deploy/scripts/install-log-rotation.sh" \
+      deploy@"$HOST":/opt/143/deploy/scripts/install-log-rotation.sh.new
+  else
+    warn_log_rotation_skipped
+    LOG_ROTATION_READY=0
+  fi
+fi
+if [ "$LOG_ROTATION_READY" -eq 1 ]; then
+  if ! ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
+    "mv /opt/143/deploy/scripts/install-log-rotation.sh.new /opt/143/deploy/scripts/install-log-rotation.sh \
+     && chmod +x /opt/143/deploy/scripts/install-log-rotation.sh \
+     || { rm -f /opt/143/deploy/scripts/install-log-rotation.sh.new; exit 1; }"; then
+    warn_log_rotation_skipped
+    LOG_ROTATION_READY=0
+  fi
+fi
+
+if [ "$LOG_ROTATION_READY" -eq 1 ]; then
+  echo "Ensuring docker log rotation (max-size=$LOG_MAX_SIZE, max-file=$LOG_MAX_FILE)..."
+  # `sudo -n` so missing-sudoers fails fast instead of hanging on a password
+  # prompt CI can't satisfy. If the repair path also isn't available, keep the
+  # deploy moving: log rotation is an operational hardening step, not the app
+  # or database rollout itself.
+  run_log_rotation() {
+    ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
+      "sudo -n /opt/143/deploy/scripts/install-log-rotation.sh $LOG_MAX_SIZE $LOG_MAX_FILE"
+  }
+  if ! run_log_rotation; then
+    echo "install-log-rotation.sh failed under deploy+sudo; trying no-teardown deploy sudoers repair..."
+    if repair_deploy_sudoers; then
+      echo "Retrying docker log rotation after sudoers repair..."
+      if ! run_log_rotation; then
+        warn_log_rotation_skipped
+      fi
+    else
+      warn_log_rotation_skipped
+    fi
+  fi
+fi
+
 ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
   "COMPOSE_FILE=$COMPOSE_FILE" "HEALTH_SERVICE=$HEALTH_SERVICE" "ROLE=$ROLE" "IMAGE_TAG=$TAG" \
+  "WORKER_DEPLOY_DETACH=${WORKER_DEPLOY_DETACH:-}" \
   bash << 'REMOTE'
   set -euo pipefail
   cd /opt/143
@@ -507,20 +602,92 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
     fi
 
   elif [ "$ROLE" = "worker" ]; then
-    # Workers remain single-replica, but we now drain the old replica before
-    # replacement so accepted long-running sessions are not interrupted by a
-    # routine deploy.
-    drain_worker_service "$HEALTH_SERVICE"
-    docker compose -f "$COMPOSE_FILE" up -d --no-deps --force-recreate "$HEALTH_SERVICE"
+    # Workers remain single-replica, but we drain the old replica before
+    # replacement so accepted long-running sessions are not interrupted.
+    #
+    # Worker drain can take up to WORKER_DRAIN_TIMEOUT (default 45m in the
+    # process, capped by docker stop_grace_period). Holding an SSH session
+    # — and therefore a CI runner minute — open that long is wasteful, so
+    # CI sets WORKER_DEPLOY_DETACH=1 to spawn the rollover as a backgrounded
+    # host-side process and return immediately. Manual deploys leave it
+    # unset to keep the synchronous "did it work?" feedback loop.
+    if [ -n "${WORKER_DEPLOY_DETACH:-}" ]; then
+      mkdir -p /var/log/143
+      sha_short="${IMAGE_TAG:0:7}"
+      log_file="/var/log/143/deploy-worker-$(date -u +%Y%m%dT%H%M%SZ)-${sha_short}.log"
+      # Predictable status filename (one per SHA) so CI can poll for it
+      # deterministically. "ok" on success, "fail: <reason>" otherwise.
+      # Cleared inside the flocked block below so a same-SHA redeploy
+      # can't wipe a still-running prior deploy's status file.
+      status_file="/var/log/143/deploy-worker-${sha_short}.status"
+      rollover_script="$(mktemp /tmp/143-rollover-worker-XXXXXX.sh)"
+      # Bake the helpers + bound vars into a self-contained script. $(declare
+      # -f ...) and "$VAR" expand at heredoc time (remote bash); \$ inside is
+      # preserved for runtime.
+      cat > "$rollover_script" <<EOS
+#!/bin/bash
+set -euo pipefail
+$(declare -f drain_worker_service wait_container_healthy dump_diagnostics)
+COMPOSE_FILE='$COMPOSE_FILE'
+HEALTH_SERVICE='$HEALTH_SERVICE'
+STATUS_FILE='$status_file'
 
-    CONTAINER_ID="$(docker compose -f "$COMPOSE_FILE" ps -q "$HEALTH_SERVICE" | head -1)"
-    if [ -n "$CONTAINER_ID" ]; then
-      if ! wait_container_healthy "$CONTAINER_ID" 120; then
-        echo "ERROR: new worker failed health check"
-        exit 1
+# Always write a status file so the verify step has a deterministic signal.
+# If we exit before the success line writes "ok", the trap leaves "fail".
+on_exit() {
+  rc=\$?
+  if [ ! -s "\$STATUS_FILE" ] || ! grep -q '^ok' "\$STATUS_FILE"; then
+    echo "fail: exit \$rc at \$(date -u -Iseconds)" > "\$STATUS_FILE"
+  fi
+}
+trap on_exit EXIT
+
+# Clear any stale status from a previous deploy of this same SHA. Done
+# here (inside the flock) rather than from the parent shell so a
+# concurrent same-SHA redeploy can't wipe an in-flight deploy's status.
+rm -f "\$STATUS_FILE"
+
+cd /opt/143
+echo "[\$(date -u -Iseconds)] starting detached worker rollover (tag=$IMAGE_TAG)"
+drain_worker_service "\$HEALTH_SERVICE"
+docker compose -f "\$COMPOSE_FILE" up -d --no-deps --force-recreate "\$HEALTH_SERVICE"
+cid="\$(docker compose -f "\$COMPOSE_FILE" ps -q "\$HEALTH_SERVICE" | head -1)"
+if [ -n "\$cid" ]; then
+  wait_container_healthy "\$cid" 120 || { echo "[\$(date -u -Iseconds)] HEALTH CHECK FAILED"; exit 1; }
+fi
+echo "[\$(date -u -Iseconds)] rollover succeeded"
+echo "ok" > "\$STATUS_FILE"
+EOS
+      chmod 700 "$rollover_script"
+
+      # setsid: new session, detached from the SSH controlling tty so the
+      #   child survives session end (no SIGHUP).
+      # flock: serialize against any prior detached deploy on this host so
+      #   back-to-back commits can't race on docker.
+      # </dev/null + redirect: nothing tied back to the SSH stdio so SSH can
+      #   close cleanly.
+      setsid bash -c "
+        flock -x /tmp/143-deploy-worker.lock '$rollover_script' >>'$log_file' 2>&1
+        rm -f '$rollover_script'
+      " </dev/null >/dev/null 2>&1 &
+      disown
+      echo "Detached worker rollover launched."
+      echo "  log:    $log_file"
+      echo "  status: $status_file (poll for 'ok' / 'fail')"
+      echo "  follow: ssh deploy@<host> tail -f $log_file"
+    else
+      drain_worker_service "$HEALTH_SERVICE"
+      docker compose -f "$COMPOSE_FILE" up -d --no-deps --force-recreate "$HEALTH_SERVICE"
+
+      CONTAINER_ID="$(docker compose -f "$COMPOSE_FILE" ps -q "$HEALTH_SERVICE" | head -1)"
+      if [ -n "$CONTAINER_ID" ]; then
+        if ! wait_container_healthy "$CONTAINER_ID" 120; then
+          echo "ERROR: new worker failed health check"
+          exit 1
+        fi
       fi
+      echo "$HEALTH_SERVICE restarted successfully."
     fi
-    echo "$HEALTH_SERVICE restarted successfully."
 
   else
     # Non-rolling roles (db, logging) — just recreate everything.

@@ -854,10 +854,7 @@ func (h *SessionHandler) TriggerFix(w http.ResponseWriter, r *http.Request) {
 	// rows for the same session — the second insert would race the first at
 	// AcquireTurnHold and surface "sandbox race" to the user.
 	dedupeKey := db.RunAgentDedupeKey(run.ID)
-	payload := map[string]string{
-		"session_id": run.ID.String(),
-		"org_id":     orgID.String(),
-	}
+	payload := db.RunAgentPayload(run)
 	if _, err := h.jobStore.Enqueue(r.Context(), orgID, "agent", "run_agent", payload, 5, &dedupeKey); err != nil {
 		writeError(w, r, http.StatusInternalServerError, "ENQUEUE_FAILED", "failed to enqueue agent run job", err)
 		return
@@ -1747,12 +1744,6 @@ func (h *SessionHandler) AnswerQuestion(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, http.StatusOK, models.SingleResponse[models.SessionQuestion]{Data: question})
 }
 
-// maxReviewCommentResolveIDsPerMessage caps how many review comments a single
-// SendMessage call can resolve. Each resolved comment emits one audit row
-// after the tx commits, so the cap keeps the post-commit tail bounded even
-// under unusual client behavior. The realistic typical attached-count is 1–3.
-const maxReviewCommentResolveIDsPerMessage = 50
-
 // SendMessage handles POST /sessions/{id}/messages — sends a follow-up message
 // to an idle multi-turn session and enqueues a continue_session job.
 func (h *SessionHandler) SendMessage(w http.ResponseWriter, r *http.Request) {
@@ -1808,31 +1799,14 @@ func (h *SessionHandler) SendMessage(w http.ResponseWriter, r *http.Request) {
 	// /review-comments/{id}, which restricts edits to the comment's author.
 	// Both surfaces share the same audit action so a downstream consumer can
 	// still distinguish via the resolved_via_message flag in audit details.
-	var resolveCommentIDs []uuid.UUID
-	if len(body.ResolveReviewCommentIDs) > 0 {
-		if h.reviewCommentStore == nil {
-			writeError(w, r, http.StatusBadRequest, "REVIEW_COMMENTS_NOT_CONFIGURED", "review comment resolution is not configured for this server")
-			return
-		}
-		if len(body.ResolveReviewCommentIDs) > maxReviewCommentResolveIDsPerMessage {
-			writeError(w, r, http.StatusBadRequest, "TOO_MANY_REVIEW_COMMENT_IDS",
-				fmt.Sprintf("at most %d review comment ids may be resolved per message", maxReviewCommentResolveIDsPerMessage))
-			return
-		}
-		seen := make(map[uuid.UUID]struct{}, len(body.ResolveReviewCommentIDs))
-		resolveCommentIDs = make([]uuid.UUID, 0, len(body.ResolveReviewCommentIDs))
-		for _, raw := range body.ResolveReviewCommentIDs {
-			parsed, err := uuid.Parse(raw)
-			if err != nil {
-				writeError(w, r, http.StatusBadRequest, "INVALID_REVIEW_COMMENT_ID", "invalid review comment id: "+raw)
-				return
-			}
-			if _, dup := seen[parsed]; dup {
-				continue
-			}
-			seen[parsed] = struct{}{}
-			resolveCommentIDs = append(resolveCommentIDs, parsed)
-		}
+	if len(body.ResolveReviewCommentIDs) > 0 && h.reviewCommentStore == nil {
+		writeError(w, r, http.StatusBadRequest, "REVIEW_COMMENTS_NOT_CONFIGURED", "review comment resolution is not configured for this server")
+		return
+	}
+	resolveCommentIDs, parseErr := parseAndDedupeReviewCommentIDs(body.ResolveReviewCommentIDs)
+	if parseErr != nil {
+		parseErr.write(w, r)
+		return
 	}
 
 	// When plan mode is requested, prefix the message so the orchestrator
@@ -1928,10 +1902,13 @@ func (h *SessionHandler) SendMessage(w http.ResponseWriter, r *http.Request) {
 			writeError(w, r, http.StatusInternalServerError, "CREATE_FAILED", "failed to create message", err)
 			return
 		}
-		resolvedComments, rerr := resolveSessionReviewComments(
-			r.Context(), txReviewCommentStore, orgID, sessionID, resolveCommentIDs, currentResolutionPass(&session))
+		resolvedComments, rerr := txReviewCommentStore.ValidateAndResolveByIDs(
+			r.Context(), orgID, sessionID, resolveCommentIDs, currentResolutionPass(&session))
 		if rerr != nil {
-			rerr.write(w, r)
+			if renderReviewCommentResolveError(w, r, rerr) {
+				return
+			}
+			writeError(w, r, http.StatusInternalServerError, "REVIEW_COMMENT_RESOLVE_FAILED", "failed to resolve review comments", rerr)
 			return
 		}
 		if err := tx.Commit(r.Context()); err != nil {
@@ -1995,11 +1972,14 @@ func (h *SessionHandler) SendMessage(w http.ResponseWriter, r *http.Request) {
 
 	var resolvedComments []models.SessionReviewComment
 	if txReviewCommentStore != nil {
-		var rerr *resolveCommentsError
-		resolvedComments, rerr = resolveSessionReviewComments(
-			r.Context(), txReviewCommentStore, orgID, sessionID, resolveCommentIDs, currentResolutionPass(&session))
+		var rerr error
+		resolvedComments, rerr = txReviewCommentStore.ValidateAndResolveByIDs(
+			r.Context(), orgID, sessionID, resolveCommentIDs, currentResolutionPass(&session))
 		if rerr != nil {
-			rerr.write(w, r)
+			if renderReviewCommentResolveError(w, r, rerr) {
+				return
+			}
+			writeError(w, r, http.StatusInternalServerError, "REVIEW_COMMENT_RESOLVE_FAILED", "failed to resolve review comments", rerr)
 			return
 		}
 	}
@@ -2101,140 +2081,17 @@ func (h *SessionHandler) maybeLinkLinearMidSession(ctx context.Context, orgID, s
 	}()
 }
 
-// currentResolutionPass returns the pass number to record on a comment that
-// is being resolved during the current request, matching the semantics used
-// by the PATCH /review-comments handler: the user's resolving action belongs
-// to the session's current turn (with a fallback to 1 for not-yet-started
-// sessions where CurrentTurn is still 0).
-func currentResolutionPass(session *models.Session) int {
-	if session == nil || session.CurrentTurn == 0 {
-		return 1
-	}
-	return session.CurrentTurn
-}
-
-// resolveCommentsError carries the HTTP shape of a failure inside the
-// resolve-comments helper, so the helper can stay pure (no http.ResponseWriter
-// dependency) and SendMessage controls when the response is written. underlying
-// is included only when there's a real error worth logging.
-type resolveCommentsError struct {
-	status     int
-	code       string
-	message    string
-	underlying error
-}
-
-func (e *resolveCommentsError) write(w http.ResponseWriter, r *http.Request) {
-	if e.underlying != nil {
-		writeError(w, r, e.status, e.code, e.message, e.underlying)
-		return
-	}
-	writeError(w, r, e.status, e.code, e.message)
-}
-
-// resolveSessionReviewComments validates that every requested ID belongs to
-// the session and resolves the still-open ones, returning the rows whose
-// state actually changed. Already-resolved IDs are silently skipped (the
-// underlying store filters on resolved=false). The helper is pure: it does
-// not write to the response, so the caller decides when (and whether) to
-// surface failures to the HTTP client and to abandon the surrounding tx.
-//
-// The store argument must already be tx-scoped — the validation lookup and
-// the resolve UPDATE share the same tx so other writers can't slip a comment
-// in between the existence check and the update.
-func resolveSessionReviewComments(
-	ctx context.Context,
-	store *db.SessionReviewCommentStore,
-	orgID, sessionID uuid.UUID,
-	ids []uuid.UUID,
-	resolvedByPass int,
-) ([]models.SessionReviewComment, *resolveCommentsError) {
-	if len(ids) == 0 || store == nil {
-		return nil, nil
-	}
-	existing, err := store.ListByIDs(ctx, orgID, sessionID, ids)
-	if err != nil {
-		return nil, &resolveCommentsError{
-			status: http.StatusInternalServerError, code: "REVIEW_COMMENT_LOOKUP_FAILED",
-			message: "failed to look up review comments", underlying: err,
-		}
-	}
-	if len(existing) != len(ids) {
-		// Surface the missing IDs (capped) so misbehaving clients can debug
-		// without leaking other tenants' data — IDs not scoped to this org+
-		// session are functionally indistinguishable from "doesn't exist".
-		found := make(map[uuid.UUID]struct{}, len(existing))
-		for _, c := range existing {
-			found[c.ID] = struct{}{}
-		}
-		const maxMissingInError = 5
-		missing := make([]string, 0, maxMissingInError)
-		for _, id := range ids {
-			if _, ok := found[id]; ok {
-				continue
-			}
-			if len(missing) == maxMissingInError {
-				break
-			}
-			missing = append(missing, id.String())
-		}
-		return nil, &resolveCommentsError{
-			status: http.StatusBadRequest, code: "INVALID_REVIEW_COMMENT_IDS",
-			message: "review comment ids do not belong to this session: " + strings.Join(missing, ", "),
-		}
-	}
-	resolved, err := store.ResolveByIDs(ctx, orgID, sessionID, ids, resolvedByPass)
-	if err != nil {
-		return nil, &resolveCommentsError{
-			status: http.StatusInternalServerError, code: "REVIEW_COMMENT_RESOLVE_FAILED",
-			message: "failed to resolve review comments", underlying: err,
-		}
-	}
-	return resolved, nil
-}
-
 // emitReviewCommentResolutionAudits records one audit row per comment whose
-// resolved state actually changed. Mirrors the audit shape emitted by the
-// direct PATCH /review-comments handler so audit consumers see consistent
-// before/after values regardless of which surface triggered the resolution.
-// The resolved_via_message flag lets consumers tell the two surfaces apart.
+// resolved state actually changed. Wraps the shared audit emitter on the
+// SessionHandler so this surface stays consistent with the rest of
+// SendMessage's audit shape.
 func (h *SessionHandler) emitReviewCommentResolutionAudits(
 	r *http.Request,
 	sessionID uuid.UUID,
 	messageID int64,
 	resolved []models.SessionReviewComment,
 ) {
-	if len(resolved) == 0 {
-		return
-	}
-	entries := make([]userAuditEntry, 0, len(resolved))
-	for _, c := range resolved {
-		resID := c.ID.String()
-		sid := sessionID
-		entries = append(entries, userAuditEntry{
-			Action:       models.AuditActionSessionReviewCommentUpdated,
-			ResourceType: models.AuditResourceSessionReviewComment,
-			ResourceID:   &resID,
-			SessionID:    &sid,
-			Details: marshalAuditDetails(h.logger, map[string]any{
-				"review_comment_id":    c.ID.String(),
-				"session_id":           sid.String(),
-				"file_path":            c.FilePath,
-				"line_number":          c.LineNumber,
-				"diff_side":            c.DiffSide,
-				"pass_number":          c.PassNumber,
-				"body_length":          len(c.Body),
-				"resolved_via_message": true,
-				"message_id":           messageID,
-				"changes": map[string]any{
-					"resolved": auditChange(false, true),
-				},
-			}),
-		})
-	}
-	// One INSERT regardless of N — keeps post-commit latency O(1) in the
-	// number of attached comments.
-	emitUserAuditsWithSession(h.audit, r, entries)
+	emitReviewCommentResolutionAudits(h.audit, h.logger, r, sessionID, messageID, resolved)
 }
 
 // ListMessages handles GET /sessions/{id}/messages — returns the conversation messages.
@@ -2463,15 +2320,18 @@ func (h *SessionHandler) CreateManual(w http.ResponseWriter, r *http.Request) {
 	}
 
 	body.Message = strings.TrimSpace(body.Message)
-	// Empty message is allowed iff the user is starting from a linked
-	// Linear issue. Detection runs after the body validation, so we accept
+	// Empty message is allowed when the user attached images or is starting
+	// from a linked Linear issue. Mobile screenshot/photo-first flows rely on
+	// this: the UI explicitly advertises image-only session starts, and the
+	// initial turn persists those attachments even when the text prompt is
+	// blank. Linear detection runs after body validation, so we accept
 	// "looks like a Linear ref somewhere in the inputs" as the relaxation
-	// signal here. The check is tightened with the team-key allowlist so
-	// a "FOO-123"-shaped string for an unknown team no longer waves the
-	// request past — preventing sessions with an empty user turn that
-	// silently no-op inside the linker.
-	if body.Message == "" && !h.canBypassMissingMessageForLinear(r.Context(), orgID, body.References) {
-		writeError(w, r, http.StatusBadRequest, "MISSING_MESSAGE", "message is required")
+	// signal here. The check is tightened with the team-key allowlist so a
+	// "FOO-123"-shaped string for an unknown team no longer waves the request
+	// past — preventing sessions with an empty user turn that silently no-op
+	// inside the linker.
+	if body.Message == "" && len(body.Images) == 0 && !h.canBypassMissingMessageForLinear(r.Context(), orgID, body.References) {
+		writeError(w, r, http.StatusBadRequest, "MISSING_MESSAGE", "message, images, or a linked Linear issue are required")
 		return
 	}
 	for _, reference := range body.References {
@@ -2643,6 +2503,7 @@ func (h *SessionHandler) CreateManual(w http.ResponseWriter, r *http.Request) {
 		initMsg := &models.SessionMessage{
 			SessionID:  session.ID,
 			OrgID:      orgID,
+			ThreadID:   session.PrimaryThreadID,
 			TurnNumber: 0,
 			Role:       models.MessageRoleUser,
 			Content:    body.Message,
@@ -2791,10 +2652,7 @@ func (h *SessionHandler) CreateManual(w http.ResponseWriter, r *http.Request) {
 	}
 
 	dedupeKey := db.RunAgentDedupeKey(session.ID)
-	payload := map[string]string{
-		"session_id": session.ID.String(),
-		"org_id":     orgID.String(),
-	}
+	payload := db.RunAgentPayload(session)
 	if _, err := h.jobStore.Enqueue(r.Context(), orgID, "agent", "run_agent", payload, 5, &dedupeKey); err != nil {
 		writeError(w, r, http.StatusInternalServerError, "ENQUEUE_FAILED", "failed to enqueue manual session", err)
 		return

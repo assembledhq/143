@@ -450,9 +450,9 @@ describe('SessionDetailPage', () => {
       expect(createdThread).toBe(true);
     });
     expect(await screen.findByRole('tab', { name: /Tests/ })).toBeInTheDocument();
-    expect(screen.getByPlaceholderText('Send a message to Tests...')).toBeInTheDocument();
+    expect(screen.getByPlaceholderText('Send a message to Codex...')).toBeInTheDocument();
 
-    await user.type(screen.getByPlaceholderText('Send a message to Tests...'), 'Run the frontend checks.');
+    await user.type(screen.getByPlaceholderText('Send a message to Codex...'), 'Run the frontend checks.');
     await user.click(screen.getByRole('button', { name: 'Send message' }));
 
     await waitFor(() => {
@@ -857,6 +857,146 @@ describe('SessionDetailPage', () => {
     // the loading state).
     expect(await screen.findByText(/files? changed/)).toBeInTheDocument();
     expect(screen.queryByTestId('session-timeline-skeleton')).not.toBeInTheDocument();
+  });
+
+  it('clears the skeleton and enables the composer on an idle thread while a sibling thread is running', async () => {
+    // Regression: in the user-reported scenario the session.status was
+    // "running" (because a sibling thread was running) while the selected
+    // thread was a freshly-created idle one. Two bugs combined: the skeleton
+    // never cleared (because `activeSet.has("running")` was truthy) and the
+    // composer was disabled by a leftover Phase 1 gate that required
+    // session.status !== "running". Phase 2 supports concurrent threads, so
+    // an idle thread must be sendable regardless of sibling activity.
+    const sessionId = 'session-running-sibling';
+    const threads: SessionThread[] = [
+      {
+        id: 'thread-main',
+        session_id: sessionId,
+        org_id: 'org-1',
+        agent_type: 'codex',
+        label: 'Main',
+        status: 'running',
+        current_turn: 1,
+        created_at: '2026-05-04T07:00:00Z',
+        cost_cents: 0,
+        pending_message_count: 0,
+      },
+      {
+        id: 'thread-codex2',
+        session_id: sessionId,
+        org_id: 'org-1',
+        agent_type: 'codex',
+        label: 'Codex 2',
+        status: 'idle',
+        current_turn: 0,
+        created_at: '2026-05-04T07:01:00Z',
+        cost_cents: 0,
+        pending_message_count: 0,
+      },
+    ];
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({
+          data: {
+            ...mockSessions[0],
+            id: sessionId,
+            status: 'running',
+            sandbox_state: 'ready',
+            threads,
+          },
+        } satisfies SingleResponse<Session & { threads: SessionThread[] }>);
+      }),
+      http.get('/api/v1/sessions/:id/threads/:threadId/messages', () => {
+        return HttpResponse.json({
+          data: [] as SessionMessage[],
+          meta: {},
+        } satisfies ListResponse<SessionMessage>);
+      }),
+      http.get('/api/v1/sessions/:id/threads/:threadId/logs', () => {
+        return HttpResponse.json({ data: [], meta: {} });
+      }),
+    );
+
+    const user = userEvent.setup();
+    renderWithProviders(<SessionDetailContent id={sessionId} />);
+
+    await user.click(await screen.findByRole('tab', { name: /Codex 2/ }));
+
+    await waitFor(() => {
+      expect(screen.queryByTestId('session-timeline-skeleton')).not.toBeInTheDocument();
+    });
+    const composer = screen.getByPlaceholderText('Send a message to Codex...');
+    expect(composer).toBeEnabled();
+  });
+
+  it('does not shimmer forever for a freshly-created idle thread', async () => {
+    // Regression: opening a brand-new secondary thread (idle, zero messages)
+    // on a session whose overall status was still in `activeSet`
+    // (e.g. "idle"/"running") used to keep the skeleton visible forever,
+    // because the skeleton condition consulted session.status instead of the
+    // selected thread's status. The skeleton must clear once the thread's
+    // data has loaded so the empty-state composer becomes reachable.
+    const sessionId = 'session-new-thread-skeleton';
+    const threads: SessionThread[] = [
+      {
+        id: 'thread-main',
+        session_id: sessionId,
+        org_id: 'org-1',
+        agent_type: 'codex',
+        label: 'Main',
+        status: 'idle',
+        current_turn: 1,
+        created_at: '2026-05-04T07:00:00Z',
+        cost_cents: 0,
+        pending_message_count: 0,
+      },
+      {
+        id: 'thread-codex2',
+        session_id: sessionId,
+        org_id: 'org-1',
+        agent_type: 'codex',
+        label: 'Codex 2',
+        status: 'idle',
+        current_turn: 0,
+        created_at: '2026-05-04T07:01:00Z',
+        cost_cents: 0,
+        pending_message_count: 0,
+      },
+    ];
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({
+          data: {
+            ...mockSessions[0],
+            id: sessionId,
+            status: 'idle',
+            sandbox_state: 'ready',
+            threads,
+          },
+        } satisfies SingleResponse<Session & { threads: SessionThread[] }>);
+      }),
+      http.get('/api/v1/sessions/:id/threads/:threadId/messages', () => {
+        return HttpResponse.json({
+          data: [] as SessionMessage[],
+          meta: {},
+        } satisfies ListResponse<SessionMessage>);
+      }),
+      http.get('/api/v1/sessions/:id/threads/:threadId/logs', () => {
+        return HttpResponse.json({ data: [], meta: {} });
+      }),
+    );
+
+    const user = userEvent.setup();
+    renderWithProviders(<SessionDetailContent id={sessionId} />);
+
+    await user.click(await screen.findByRole('tab', { name: /Codex 2/ }));
+
+    await waitFor(() => {
+      expect(screen.queryByTestId('session-timeline-skeleton')).not.toBeInTheDocument();
+    });
+    expect(screen.getByPlaceholderText('Send a message to Codex...')).toBeInTheDocument();
   });
 
   it('restores the saved scroll position when reopening an existing session', async () => {
@@ -5002,6 +5142,143 @@ describe('SessionDetailPage', () => {
     expect(await screen.findByText(/Review 2 files/)).toBeInTheDocument();
   });
 
+  it('keeps the review diff file set aligned with the Changes tab attribution filter', async () => {
+    const sessionId = 'session-abcdef12-3456-7890';
+    const codexThread: SessionThread = {
+      id: 'thread-codex',
+      session_id: sessionId,
+      org_id: 'org-1',
+      agent_type: 'codex',
+      label: 'Codex',
+      status: 'completed',
+      current_turn: 1,
+      created_at: '2026-02-17T07:00:00Z',
+      cost_cents: 0,
+      pending_message_count: 0,
+    };
+    const claudeThread: SessionThread = {
+      id: 'thread-claude',
+      session_id: sessionId,
+      org_id: 'org-1',
+      agent_type: 'claude_code',
+      label: 'Claude review',
+      status: 'completed',
+      current_turn: 1,
+      created_at: '2026-02-17T07:01:00Z',
+      cost_cents: 0,
+      pending_message_count: 0,
+    };
+    const sessionWithThreadsAndDiff: Session = {
+      ...mockSessions[0],
+      id: sessionId,
+      threads: [codexThread, claudeThread],
+      diff: [
+        'diff --git a/frontend/src/app.ts b/frontend/src/app.ts',
+        '--- a/frontend/src/app.ts',
+        '+++ b/frontend/src/app.ts',
+        '@@ -1 +1,2 @@',
+        ' export const app = true;',
+        '+export const codex = true;',
+        'diff --git a/frontend/src/lib/helpers.ts b/frontend/src/lib/helpers.ts',
+        '--- a/frontend/src/lib/helpers.ts',
+        '+++ b/frontend/src/lib/helpers.ts',
+        '@@ -1 +1,2 @@',
+        ' export const helper = true;',
+        '+export const shared = true;',
+        'diff --git a/frontend/src/components/automation-model-select.tsx b/frontend/src/components/automation-model-select.tsx',
+        '--- a/frontend/src/components/automation-model-select.tsx',
+        '+++ b/frontend/src/components/automation-model-select.tsx',
+        '@@ -1 +1,2 @@',
+        ' export function AutomationModelSelect() {',
+        '+  return null;',
+        ' }',
+      ].join('\n'),
+      diff_stats: { added: 3, removed: 0, files_changed: 3 },
+    };
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({
+          data: sessionWithThreadsAndDiff,
+        } satisfies SingleResponse<Session>);
+      }),
+      http.get('/api/v1/sessions/:id/thread-file-events', () => {
+        return HttpResponse.json({
+          data: [
+            {
+              id: 1,
+              org_id: 'org-1',
+              session_id: sessionId,
+              thread_id: codexThread.id,
+              turn: 1,
+              path: 'frontend/src/app.ts',
+              event_type: 'modified',
+              observed_at: '2026-02-17T07:02:00Z',
+            },
+            {
+              id: 2,
+              org_id: 'org-1',
+              session_id: sessionId,
+              thread_id: codexThread.id,
+              turn: 1,
+              path: 'frontend/src/lib/helpers.ts',
+              event_type: 'modified',
+              observed_at: '2026-02-17T07:02:30Z',
+            },
+            {
+              id: 3,
+              org_id: 'org-1',
+              session_id: sessionId,
+              thread_id: claudeThread.id,
+              turn: 1,
+              path: 'frontend/src/lib/helpers.ts',
+              event_type: 'modified',
+              observed_at: '2026-02-17T07:03:00Z',
+            },
+            {
+              id: 4,
+              org_id: 'org-1',
+              session_id: sessionId,
+              thread_id: claudeThread.id,
+              turn: 1,
+              path: 'frontend/src/components/automation-model-select.tsx',
+              event_type: 'modified',
+              observed_at: '2026-02-17T07:03:30Z',
+            },
+          ],
+          meta: {},
+        } satisfies ListResponse<import('@/lib/types').SessionThreadFileEvent>);
+      }),
+      http.get('/api/v1/sessions/:id/threads/:threadId/messages', () => {
+        return HttpResponse.json({ data: [] as SessionMessage[], meta: {} } satisfies ListResponse<SessionMessage>);
+      }),
+      http.get('/api/v1/sessions/:id/threads/:threadId/logs', () => {
+        return HttpResponse.json({ data: [], meta: {} });
+      }),
+    );
+
+    const user = userEvent.setup();
+    renderWithProviders(<SessionDetailContent id={sessionId} />);
+
+    await screen.findAllByText('Fixed TypeError by adding null check');
+    await user.click(screen.getByRole('tab', { name: /^Changes/ }));
+
+    const changesPanel = screen.getByRole('tabpanel', { name: /^Changes/ });
+    await user.click(within(changesPanel).getByRole('combobox'));
+    await user.click(await screen.findByRole('option', { name: 'Touched by Codex' }));
+
+    expect(await screen.findByText('Review 2 files')).toBeInTheDocument();
+    expect(screen.queryByText(/^automation-model-select\.tsx$/)).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: 'Review 2 files' }));
+
+    expect(await screen.findByText('frontend/src/app.ts')).toBeInTheDocument();
+    expect(screen.getByText('frontend/src/lib/helpers.ts')).toBeInTheDocument();
+    expect(
+      screen.queryByText('frontend/src/components/automation-model-select.tsx')
+    ).not.toBeInTheDocument();
+  });
+
   it('shows model selector for agents with available models', async () => {
     const idleSession: Session = {
       ...mockSessions[0],
@@ -5052,6 +5329,64 @@ describe('SessionDetailPage', () => {
 
     expect(await screen.findByRole('dialog', { name: 'Session settings' })).toBeInTheDocument();
     expect(screen.getByLabelText('Model override')).toBeInTheDocument();
+  });
+
+  it('hides the session footer on mobile conversation view', async () => {
+    const idleSession: Session = {
+      ...mockSessions[0],
+      status: 'idle',
+      completed_at: undefined,
+      current_turn: 3,
+      sandbox_state: 'snapshotted',
+      diff: 'diff --git a/src/app.ts b/src/app.ts\n--- a/src/app.ts\n+++ b/src/app.ts\n@@ -1,3 +1,4 @@\n import express from "express";\n+import cors from "cors";\n const app = express();\n app.listen(3000);',
+      diff_stats: { added: 1, removed: 0, files_changed: 1 },
+    };
+
+    setMobileViewport(true);
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({ data: idleSession } satisfies SingleResponse<Session>);
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id="session-mobile-footer-hidden" />);
+    await screen.findByPlaceholderText('Send a follow-up message...');
+
+    expect(screen.queryByTestId('session-footer')).not.toBeInTheDocument();
+  });
+
+  it('keeps the mobile follow-up textarea collapsed until focused', async () => {
+    const idleSession: Session = {
+      ...mockSessions[0],
+      status: 'idle',
+      completed_at: undefined,
+      current_turn: 1,
+      sandbox_state: 'snapshotted',
+    };
+
+    setMobileViewport(true);
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({ data: idleSession } satisfies SingleResponse<Session>);
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id="session-mobile-composer-height" />);
+    const textarea = await screen.findByPlaceholderText('Send a follow-up message...');
+
+    expect(textarea).toHaveAttribute('data-mobile-composer-state', 'collapsed');
+    expect(textarea).toHaveAttribute('rows', '1');
+
+    const user = userEvent.setup();
+    await user.click(textarea);
+
+    expect(textarea).toHaveAttribute('data-mobile-composer-state', 'expanded');
+
+    fireEvent.blur(textarea);
+
+    await waitFor(() => {
+      expect(textarea).toHaveAttribute('data-mobile-composer-state', 'collapsed');
+    });
   });
 
   it('matches both trigger menus to the continue-session input width', async () => {
@@ -5317,6 +5652,7 @@ describe('SessionDetailPage', () => {
 
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
     await screen.findByPlaceholderText('Send a follow-up message...');
+    expect(screen.getByTestId('session-footer')).toBeInTheDocument();
     // Turn indicator and diff stats should appear in footer
     const turnElements = screen.getAllByText(/Turn 3/);
     expect(turnElements.length).toBeGreaterThanOrEqual(1);

@@ -484,6 +484,31 @@ func (s *SessionStore) Create(ctx context.Context, run *models.Session) error {
 	if err := row.Scan(&run.ID, &run.CreatedAt, &run.LastActivityAt); err != nil {
 		return err
 	}
+
+	// Seed a primary thread row so the multi-tab UI (AgentTabStrip) has
+	// something to render and the worker thread-attribution path has a
+	// destination from turn 1. Done in the same transaction so the invariant
+	// "every session row implies at least one thread row" cannot be violated
+	// by a partial failure between session insert and thread insert.
+	var primaryThreadID uuid.UUID
+	if err := tx.QueryRow(ctx, `
+		INSERT INTO session_threads (
+			session_id, org_id, agent_type, model_override, label, status
+		)
+		VALUES (@session_id, @org_id, @agent_type, @model_override, @label, @status)
+		RETURNING id
+	`, pgx.NamedArgs{
+		"session_id":     run.ID,
+		"org_id":         run.OrgID,
+		"agent_type":     run.AgentType,
+		"model_override": run.ModelOverride,
+		"label":          "Main",
+		"status":         models.ThreadStatusIdle,
+	}).Scan(&primaryThreadID); err != nil {
+		return fmt.Errorf("insert primary session thread: %w", err)
+	}
+	run.PrimaryThreadID = &primaryThreadID
+
 	if run.PrimaryIssueID != nil {
 		if _, err := tx.Exec(ctx, `
 			INSERT INTO session_issue_links (org_id, session_id, issue_id, role, position, added_by_user_id)
@@ -1905,6 +1930,11 @@ func (s *SessionStore) SetWorkerNodeIDForContainer(ctx context.Context, orgID, s
 		return fmt.Errorf("set worker node id for container: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
+		// Two CAS conditions can produce this: container_id no longer matches
+		// expectedContainerID (a concurrent hydrate/destroy raced us), or
+		// worker_node_id is already held by a different worker. The IDs are
+		// not in this string because callers surface it as a user-facing chat
+		// message; callers log the structured IDs separately for ops.
 		return fmt.Errorf("session container ownership changed before worker ownership could be recorded")
 	}
 	return nil
@@ -1933,8 +1963,14 @@ func (s *SessionStore) SetWorkerNodeIDForContainer(ctx context.Context, orgID, s
 // FinalizeContainerDestroy instead, which additionally flips sandbox_state
 // to 'snapshotted'.
 func (s *SessionStore) ClearContainerID(ctx context.Context, orgID, sessionID uuid.UUID, expectedContainerID string) (cleared bool, err error) {
+	// worker_node_id is paired with container_id ownership: once the container
+	// is gone, the recorded owner is by definition stale. Leaving it set would
+	// trip up the next turn's SetWorkerNodeIDForContainer CAS (which rejects
+	// a different worker stamping over a stale value) and silently fail the
+	// turn — symmetrical to FinalizeContainerDestroy, which clears both.
 	query := `UPDATE sessions
 		SET container_id = NULL,
+		    worker_node_id = NULL,
 		    turn_holding_container = FALSE
 		WHERE id = @id
 		  AND org_id = @org_id

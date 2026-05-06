@@ -662,9 +662,15 @@ Platform infrastructure templates are maintained by 143 and versioned independen
 | `postgres-17` | `postgres:17-alpine` | 5432 | Auto-creates a database named `preview` |
 | `postgres-16` | `postgres:16-alpine` | 5432 | Auto-creates a database named `preview` |
 | `redis-7` | `redis:7-alpine` | 6379 | No auth by default |
-| `mysql-8` | `mysql:8-lts` | 3306 | Auto-creates a database named `preview` |
+| `mysql-8` | `mysql:8.4` | 3306 | Auto-creates a database named `preview` |
 
 Templates are not user-extensible in MVP. Custom infrastructure requires managed destinations pointing at external services.
+
+##### Image Caching
+
+Infrastructure images are pulled lazily on the first preview start that references each template, then cached in the worker's Docker image store. They survive container restarts (rolling deploys included) and are only re-pulled when the worker VM is reprovisioned. There is no boot-time pre-pull — declaring a template in `config.json` is the only thing that fetches the image.
+
+For a small, stable worker fleet this is fine: each template is pulled at most once per VM lifetime. **At larger fleet sizes** (or when reprovision rhythm picks up), the standard mitigation is a **pull-through registry mirror** on the private network: a single `registry:2` container with `proxy.remoteurl: https://registry-1.docker.io`, plus `registry-mirrors` configured in each worker's `/etc/docker/daemon.json`. Workers still pull lazily, but from a nearby cache, so the first pull is ~5s instead of ~30s and N workers pulling the same image only fetch it from Docker Hub once. Adopt this when fleet size > ~5 workers, when Docker Hub rate limits become a concern, or when first-pull latency starts surfacing in user-visible startup time.
 
 #### Infrastructure vs Managed Destinations
 

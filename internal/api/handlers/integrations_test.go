@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/assembledhq/143/internal/api/middleware"
+	"github.com/assembledhq/143/internal/crypto"
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
 	"github.com/google/uuid"
@@ -310,7 +311,7 @@ func TestIntegrationHandler_StartLinearOAuth_RedirectsToLinearAuthorize(t *testi
 	require.Equal(t, "linear-client-id", parsed.Query().Get("client_id"), "redirect should include configured client id")
 	require.Equal(t, "code", parsed.Query().Get("response_type"), "redirect should request auth code flow")
 	require.Equal(t, "http://localhost:8080/api/v1/integrations/linear/callback", parsed.Query().Get("redirect_uri"), "redirect should include API callback URL")
-	require.Equal(t, "read,write", parsed.Query().Get("scope"), "redirect should request Linear read and write scopes")
+	require.Equal(t, "read,write", parsed.Query().Get("scope"), "redirect should request only Linear's documented read and write scopes")
 	require.NotEmpty(t, parsed.Query().Get("state"), "redirect should include oauth state")
 
 	setCookie := w.Result().Header.Get("Set-Cookie")
@@ -353,6 +354,8 @@ func TestIntegrationHandler_ExchangeLinearCode_UsesFormEncodedBody(t *testing.T)
 
 	require.NoError(t, err, "exchangeLinearCode should parse a successful token response")
 	require.Equal(t, "linear-token", token.AccessToken, "exchangeLinearCode should return the access token")
+	require.Equal(t, "linear-refresh", token.RefreshToken, "exchangeLinearCode should capture the refresh token")
+	require.Equal(t, 86400, token.ExpiresIn, "exchangeLinearCode should capture the expires_in TTL so callers can compute ExpiresAt")
 }
 
 func TestIntegrationHandler_StartLinearOAuth_NotConfigured(t *testing.T) {
@@ -371,6 +374,121 @@ func TestIntegrationHandler_StartLinearOAuth_NotConfigured(t *testing.T) {
 	handler.StartLinearOAuth(w, req)
 	require.Equal(t, http.StatusServiceUnavailable, w.Code)
 	require.Contains(t, w.Body.String(), "LINEAR_OAUTH_NOT_CONFIGURED")
+}
+
+// TestIntegrationHandler_HandleLinearOAuthCallback_PersistsRefreshTokenAndExpiry
+// is the round-trip integration test for Linear's refresh-token response:
+// when Linear includes refresh_token + expires_in, those fields must end
+// up inside the persisted LinearConfig JSON. Without this test, a future
+// refactor that drops the merge (e.g. forgets to map ExpiresIn to ExpiresAt)
+// would compile, pass unit tests, and silently regress the entire refresh
+// capability — every new connection would look healthy until the access
+// token aged out.
+//
+// The fakeCrypto is nil so OrgCredentialStore uses DevEncrypt — a
+// reversible "v0:<plaintext>" wrapper. We capture the encrypted bytes
+// from pgxmock, strip the prefix, and assert on the JSON fields. This
+// is the highest-value test in this file because it verifies the
+// refresh-flow plumbing end-to-end through the OAuth callback rather
+// than via a unit mock.
+func TestIntegrationHandler_HandleLinearOAuthCallback_PersistsRefreshTokenAndExpiry(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	integrationID := uuid.New()
+	now := time.Now().UTC()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := db.NewIntegrationStore(mock)
+	credentialStore := db.NewOrgCredentialStore(mock, nil)
+
+	transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		switch req.URL.String() {
+		case "https://api.linear.app/oauth/token":
+			respBody := `{"access_token":"lin_at","refresh_token":"lin_rt","token_type":"Bearer","scope":"read,write","expires_in":7200}`
+			return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(bytes.NewBufferString(respBody))}, nil
+		case "https://api.linear.app/graphql":
+			return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(bytes.NewBufferString(`{"data":{"viewer":{"organization":{"id":"lin-org-1","name":"Acme"}}}}`))}, nil
+		default:
+			return nil, errors.New("unexpected request URL")
+		}
+	})
+
+	handler := NewIntegrationHandler(store, credentialStore, "linear-client-id", "linear-client-secret", "http://localhost:8080", "http://localhost:3000")
+	handler.client = &http.Client{Transport: transport}
+
+	// Custom matcher captures the encrypted credential blob so we can
+	// decrypt and assert on the JSON. argMatcher must be the 4th
+	// pgxmock arg (the @config bytes) per OrgCredentialStore.UpsertWithLabel.
+	var capturedConfigBytes []byte
+	configCapture := pgxmock.QueryMatcherFunc(func(_ string, _ string) error { return nil })
+	_ = configCapture
+	mock.ExpectQuery("INSERT INTO org_credentials").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), capturingArg(&capturedConfigBytes), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
+
+	mock.ExpectQuery("SELECT .+ FROM integrations .+ provider = @provider .+ status IN \\('active', 'error'\\)").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "org_id", "provider", "config", "status", "last_synced_at", "created_at"}))
+
+	mock.ExpectQuery("INSERT INTO integrations").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(integrationID, now))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/integrations/linear/callback?code=test-code&state=test-state", nil)
+	req.AddCookie(&http.Cookie{Name: "linear_integration_oauth_state", Value: "test-state"})
+	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+	w := httptest.NewRecorder()
+
+	handler.HandleLinearOAuthCallback(w, req)
+
+	require.Equal(t, http.StatusTemporaryRedirect, w.Code)
+	require.NoError(t, mock.ExpectationsWereMet())
+
+	// Decrypt the captured bytes (DevEncrypt = "v0:" prefix + plaintext).
+	require.NotEmpty(t, capturedConfigBytes, "callback should have written the credential")
+	plaintext, err := crypto.DevDecrypt(capturedConfigBytes)
+	require.NoError(t, err, "captured bytes should be DevEncrypt'd")
+
+	var persisted models.LinearConfig
+	require.NoError(t, json.Unmarshal(plaintext, &persisted), "persisted config should decode as LinearConfig")
+
+	require.Equal(t, "lin_at", persisted.AccessToken, "access_token must be persisted")
+	require.Equal(t, "lin_rt", persisted.RefreshToken, "refresh_token must be persisted — without this the whole refresh flow breaks")
+	require.Equal(t, "Bearer", persisted.TokenType)
+	require.Equal(t, "read,write", persisted.Scope)
+	require.Equal(t, "lin-org-1", persisted.WorkspaceID)
+	require.Equal(t, "Acme", persisted.WorkspaceName)
+	// expires_in=7200 → ExpiresAt ~2h from now. Allow a generous skew
+	// because the callback computes ExpiresAt = time.Now()+expires_in
+	// and the test reads ExpiresAt some milliseconds later.
+	require.WithinDuration(t, time.Now().Add(2*time.Hour), persisted.ExpiresAt, 30*time.Second, "ExpiresAt must reflect expires_in=7200")
+}
+
+// capturingArg returns a pgxmock argument matcher that records the value
+// it sees into the supplied byte slice pointer. Used for asserting on
+// encrypted config payloads that we want to decrypt and inspect.
+func capturingArg(dest *[]byte) pgxmock.Argument {
+	return capturingArgImpl{dest: dest}
+}
+
+type capturingArgImpl struct {
+	dest *[]byte
+}
+
+func (c capturingArgImpl) Match(v interface{}) bool {
+	switch b := v.(type) {
+	case []byte:
+		*c.dest = append((*c.dest)[:0], b...)
+	case string:
+		*c.dest = append((*c.dest)[:0], []byte(b)...)
+	default:
+		return false
+	}
+	return true
 }
 
 func TestIntegrationHandler_HandleLinearOAuthCallback_SavesCredentialAndIntegration(t *testing.T) {

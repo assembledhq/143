@@ -74,6 +74,96 @@ func TestLatestUserMessage(t *testing.T) {
 	require.Equal(t, "latest user", message.Content, "latestUserMessage should scan from newest to oldest")
 }
 
+func TestUnprocessedUserMessages_SessionScope(t *testing.T) {
+	t.Parallel()
+
+	// Trailing user messages with no thread are returned in chronological
+	// order; messages preceding the most recent assistant are excluded.
+	pending := unprocessedUserMessages([]models.SessionMessage{
+		{Role: models.MessageRoleUser, Content: "old (already processed)"},
+		{Role: models.MessageRoleAssistant, Content: "assistant reply"},
+		{Role: models.MessageRoleUser, Content: "queued one"},
+		{Role: models.MessageRoleUser, Content: "queued two"},
+	}, nil)
+
+	require.Len(t, pending, 2, "should return only messages after the latest in-scope assistant")
+	require.Equal(t, "queued one", pending[0].Content, "should be oldest-first")
+	require.Equal(t, "queued two", pending[1].Content)
+}
+
+func TestUnprocessedUserMessages_ThreadScope(t *testing.T) {
+	t.Parallel()
+
+	threadA := uuid.New()
+	threadB := uuid.New()
+
+	// Thread B's activity (its own user + assistant exchange) sits between
+	// the two thread-A user messages, but it must not break the thread-A
+	// scan: cross-thread messages are skipped, and only a same-thread
+	// assistant terminates the trailing window.
+	pending := unprocessedUserMessages([]models.SessionMessage{
+		{Role: models.MessageRoleUser, Content: "A first", ThreadID: &threadA},
+		{Role: models.MessageRoleAssistant, Content: "A reply", ThreadID: &threadA},
+		{Role: models.MessageRoleUser, Content: "B prompt", ThreadID: &threadB},
+		{Role: models.MessageRoleAssistant, Content: "B reply", ThreadID: &threadB},
+		{Role: models.MessageRoleUser, Content: "A queued one", ThreadID: &threadA},
+		{Role: models.MessageRoleUser, Content: "A queued two", ThreadID: &threadA},
+	}, &threadA)
+
+	require.Len(t, pending, 2, "thread-scoped scan should ignore cross-thread activity")
+	require.Equal(t, "A queued one", pending[0].Content)
+	require.Equal(t, "A queued two", pending[1].Content)
+}
+
+func TestUnprocessedUserMessages_IgnoresAssistantAfterLatestUserBoundary(t *testing.T) {
+	t.Parallel()
+
+	threadID := uuid.New()
+	latestQueuedUserID := int64(12)
+
+	pending := unprocessedUserMessagesThrough([]models.SessionMessage{
+		{ID: 9, Role: models.MessageRoleAssistant, Content: "previous reply", ThreadID: &threadID},
+		{ID: 10, Role: models.MessageRoleUser, Content: "queued one", ThreadID: &threadID},
+		{ID: 11, Role: models.MessageRoleUser, Content: "queued two", ThreadID: &threadID},
+		{ID: latestQueuedUserID, Role: models.MessageRoleUser, Content: "queued three", ThreadID: &threadID},
+		{ID: 13, Role: models.MessageRoleAssistant, Content: "reply from the in-flight turn", ThreadID: &threadID},
+	}, &threadID, latestQueuedUserID)
+
+	require.Equal(t, []models.SessionMessage{
+		{ID: 10, Role: models.MessageRoleUser, Content: "queued one", ThreadID: &threadID},
+		{ID: 11, Role: models.MessageRoleUser, Content: "queued two", ThreadID: &threadID},
+		{ID: latestQueuedUserID, Role: models.MessageRoleUser, Content: "queued three", ThreadID: &threadID},
+	}, pending, "queued users before a later assistant should all be delivered to the next turn")
+}
+
+func TestUnprocessedUserMessages_NoMessages(t *testing.T) {
+	t.Parallel()
+
+	require.Empty(t, unprocessedUserMessages(nil, nil), "nil input returns empty")
+	require.Empty(t, unprocessedUserMessages([]models.SessionMessage{
+		{Role: models.MessageRoleAssistant, Content: "no trailing user"},
+	}, nil), "no trailing user message returns empty")
+}
+
+func TestDrainAcceptableStatus(t *testing.T) {
+	t.Parallel()
+
+	for _, status := range []string{"idle", "running", "awaiting_input", "needs_human_guidance"} {
+		require.True(t, drainAcceptableStatus(status), "status %q should accept a drain enqueue", status)
+	}
+	for _, status := range []string{"completed", "failed", "cancelled", "skipped", "pr_created", "pending", ""} {
+		require.False(t, drainAcceptableStatus(status), "status %q should not accept a drain enqueue", status)
+	}
+}
+
+func TestContinueSessionDedupeKey(t *testing.T) {
+	t.Parallel()
+
+	id := uuid.MustParse("00000000-0000-0000-0000-000000000abc")
+	require.Equal(t, "continue_session:"+id.String(), continueSessionDedupeKey(id),
+		"local helper must mirror db.ContinueSessionDedupeKey verbatim")
+}
+
 func TestCanonicalReferences_FiltersInvalidEntries(t *testing.T) {
 	t.Parallel()
 
@@ -413,6 +503,43 @@ func TestPromptSeedForSession(t *testing.T) {
 		require.NotNil(t, issue.Description, "promptSeedForSession should combine PM approach and reasoning into the description")
 		require.Contains(t, *issue.Description, approach, "promptSeedForSession should preserve the PM approach in the description")
 		require.Contains(t, *issue.Description, reasoning, "promptSeedForSession should preserve the PM reasoning in the description")
+		require.Empty(t, gotLinkedIssues, "promptSeedForSession should not synthesize linked issues when no snapshot exists")
+	})
+
+	t.Run("uses pm approach as the synthetic issue title when the session title is missing", func(t *testing.T) {
+		t.Parallel()
+
+		approach := "Inspect the retry path"
+		reasoning := "Timeouts started after the last deploy."
+		orchestrator := &Orchestrator{}
+		issue, gotLinkedIssues := orchestrator.promptSeedForSession(
+			&models.Session{
+				PMApproach:  &approach,
+				PMReasoning: &reasoning,
+			},
+			nil,
+			nil,
+		)
+
+		require.NotNil(t, issue, "promptSeedForSession should synthesize an issue when PM context exists without a title")
+		require.Equal(t, approach, issue.Title, "promptSeedForSession should derive the synthetic issue title from the PM approach before falling back to a placeholder")
+		require.NotNil(t, issue.Description, "promptSeedForSession should still include PM details in the description")
+		require.Empty(t, gotLinkedIssues, "promptSeedForSession should not synthesize linked issues when no snapshot exists")
+	})
+
+	t.Run("uses the latest message as the synthetic issue title when the session title is missing", func(t *testing.T) {
+		t.Parallel()
+
+		orchestrator := &Orchestrator{}
+		issue, gotLinkedIssues := orchestrator.promptSeedForSession(
+			&models.Session{Origin: models.SessionOriginRevision},
+			&models.SessionMessage{Content: "Rework the flaky checkout retry logic\nKeep the current API shape."},
+			nil,
+		)
+
+		require.NotNil(t, issue, "promptSeedForSession should synthesize an issue when a non-manual session has a latest message")
+		require.Equal(t, "Rework the flaky checkout retry logic", issue.Title, "promptSeedForSession should derive the synthetic issue title from the latest message before falling back to a placeholder")
+		require.Nil(t, issue.Description, "promptSeedForSession should not invent a description when only a follow-up message is available")
 		require.Empty(t, gotLinkedIssues, "promptSeedForSession should not synthesize linked issues when no snapshot exists")
 	})
 }

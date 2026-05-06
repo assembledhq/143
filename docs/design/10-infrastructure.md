@@ -1,6 +1,6 @@
 # Design: Infrastructure & Deployment
 
-> **Status:** Partially Implemented | **Last reviewed:** 2026-04-21
+> **Status:** Partially Implemented | **Last reviewed:** 2026-05-05
 
 This document describes how 143.dev is packaged, deployed, and scaled.
 
@@ -227,6 +227,15 @@ CMD ["./server"]
 **Sandbox Dockerfile**: See `sandbox/Dockerfile` for the full definition. The image installs all three agent CLIs (Claude Code, Codex, Gemini) at pinned versions from `sandbox/versions.json` via `sandbox/install-agents.sh`. Build with `docker build -t 143-sandbox:latest sandbox/`. CI also builds this image, and local Docker development builds it through the `sandbox` compose target.
 
 This image is used by the Docker sandbox provider. It runs under **gVisor** (`runsc` runtime) by default for syscall-level isolation. The same image works with both `runsc` (gVisor) and `runc` (standard Docker) — no image changes needed when switching runtimes.
+
+### Deploy-Time Host Hardening
+
+Fleet deploys attempt to keep host hardening in place as they roll services:
+
+- Docker `json-file` log rotation is installed through `deploy/scripts/install-log-rotation.sh`, which merges the desired `log-driver` and `log-opts` into `/etc/docker/daemon.json` and restarts Docker only when the file changes.
+- The deploy user receives a narrow `NOPASSWD` sudoers grant during provisioning so routine deploys can run the log-rotation helper and worker firewall helper without broad root access.
+- Existing hosts that predate a sudoers entry are repaired through `deploy/scripts/repair-deploy-sudoers.sh` when root SSH is available.
+- If a routine deploy cannot repair sudoers from CI, Docker log-rotation update failure is warning-only. The service rollout continues, and operators can run `make repair-deploy-sudoers ROLE=<role> HOST=<host>` later from a machine with root SSH access.
 
 **gVisor Setup (Production)**:
 
