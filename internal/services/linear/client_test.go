@@ -347,6 +347,7 @@ func TestGraphQLClientWorkflowStateForType(t *testing.T) {
 
 	client := newGraphQLClientForTest(t, func(t *testing.T, req linearGraphQLRequest, w http.ResponseWriter) {
 		require.Contains(t, req.Query, "workflowStates", "WorkflowStateForType should query team workflow states")
+		require.Contains(t, req.Query, "$teamID: ID!", "WorkflowStateForType should declare teamID with Linear's ID scalar")
 		require.Contains(t, string(req.Variables), `"teamID":"team-1"`, "WorkflowStateForType should pass the team id")
 		writeGraphQLResponse(t, w, `{
 			"data": {"workflowStates": {"nodes": [
