@@ -64,6 +64,7 @@ export default function NewAutomationPage() {
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [baseBranchByRepoId, setBaseBranchByRepoId] = useState<Record<string, string>>({});
   const [model, setModel] = useState<string | undefined>(undefined);
+  const [identityScope, setIdentityScope] = useState<"org" | "personal">("org");
   const [priority, setPriority] = useState(50);
   const [redirecting, setRedirecting] = useState(false);
 
@@ -103,6 +104,7 @@ export default function NewAutomationPage() {
         interval_run_at: `${intervalRunHour}:${intervalRunMinute}`,
         timezone,
         model,
+        identity_scope: identityScope,
         base_branch: selectedBaseBranch.trim() || undefined,
         priority,
       }),
@@ -254,6 +256,22 @@ export default function NewAutomationPage() {
                 ))}
               </SelectContent>
             </Select>
+          </div>
+
+          <div className="space-y-1.5">
+            <Label>Run as</Label>
+            <Select value={identityScope} onValueChange={(value: "org" | "personal") => setIdentityScope(value)}>
+              <SelectTrigger aria-label="Run as">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="org">Organization</SelectItem>
+                <SelectItem value="personal">Personal</SelectItem>
+              </SelectContent>
+            </Select>
+            <p className="text-xs text-muted-foreground">
+              Choose whether this automation runs with organization credentials and opens PRs as 143-bot, or uses the creator&apos;s coding-agent preferences and GitHub identity.
+            </p>
           </div>
 
           <div className="space-y-1.5">

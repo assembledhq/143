@@ -65,6 +65,7 @@ function SettingsTab({ automation }: { automation: Automation }) {
   const detectedTimezone = useMemo(() => browserTimezone(), []);
   const [baseBranch, setBaseBranch] = useState(automation.base_branch);
   const [model, setModel] = useState<string | undefined>(automation.model_override);
+  const [identityScope, setIdentityScope] = useState<"org" | "personal">(automation.identity_scope ?? "org");
 
   const updateMutation = useMutation({
     mutationFn: () =>
@@ -77,6 +78,7 @@ function SettingsTab({ automation }: { automation: Automation }) {
         interval_run_at: `${intervalRunHour}:${intervalRunMinute}`,
         timezone,
         model: model ?? "",
+        identity_scope: identityScope,
         base_branch: baseBranch.trim() || undefined,
       }),
     onSuccess: () => {
@@ -100,6 +102,21 @@ function SettingsTab({ automation }: { automation: Automation }) {
           <span className="text-muted-foreground font-normal">(optional)</span>
         </Label>
         <Input id="scope" value={scope} onChange={(e) => setScope(e.target.value)} />
+      </div>
+      <div className="space-y-1.5">
+        <Label>Run as</Label>
+        <Select value={identityScope} onValueChange={(value: "org" | "personal") => setIdentityScope(value)}>
+          <SelectTrigger aria-label="Run as">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="org">Organization automation</SelectItem>
+            <SelectItem value="personal">Personal automation</SelectItem>
+          </SelectContent>
+        </Select>
+        <p className="text-xs text-muted-foreground">
+          Organization automations use team credentials and open PRs as 143-bot. Personal automations use the creator&apos;s coding-agent preferences and GitHub identity.
+        </p>
       </div>
       <div className="space-y-1.5">
         <Label id="schedule-label">Schedule</Label>

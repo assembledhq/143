@@ -24,6 +24,7 @@ type Automation struct {
 	ExecutionMode  string     `db:"execution_mode"  json:"execution_mode"`
 	MaxConcurrent  int        `db:"max_concurrent"  json:"max_concurrent"`
 	BaseBranch     string     `db:"base_branch"     json:"base_branch"`
+	IdentityScope  AutomationIdentityScope `db:"identity_scope" json:"identity_scope"`
 	ScheduleType   string     `db:"schedule_type"   json:"schedule_type"`
 	IntervalValue  *int       `db:"interval_value"  json:"interval_value,omitempty"`
 	IntervalUnit   *string    `db:"interval_unit"   json:"interval_unit,omitempty"`
@@ -122,6 +123,31 @@ const (
 	AutomationScheduleCron     = "cron"
 )
 
+// AutomationIdentityScope controls whose credentials an automation uses when
+// it spawns sessions and creates pull requests.
+type AutomationIdentityScope string
+
+const (
+	AutomationIdentityScopeOrg      AutomationIdentityScope = "org"
+	AutomationIdentityScopePersonal AutomationIdentityScope = "personal"
+)
+
+func (s AutomationIdentityScope) Validate() error {
+	switch s {
+	case "", AutomationIdentityScopeOrg, AutomationIdentityScopePersonal:
+		return nil
+	default:
+		return fmt.Errorf("invalid identity_scope: %q (must be org or personal)", s)
+	}
+}
+
+func (s AutomationIdentityScope) OrDefault() AutomationIdentityScope {
+	if s == "" {
+		return AutomationIdentityScopeOrg
+	}
+	return s
+}
+
 // BuildConfigSnapshot returns the JSON config snapshot for an automation run.
 //
 // The current fields are all string / *string and json.Marshal can't fail for
@@ -133,6 +159,7 @@ func (a *Automation) BuildConfigSnapshot() (json.RawMessage, error) {
 		"agent_type":     a.AgentType,
 		"model_override": a.ModelOverride,
 		"scope":          a.Scope,
+		"identity_scope": a.IdentityScope.OrDefault(),
 		"base_branch":    a.BaseBranch,
 	})
 	if err != nil {

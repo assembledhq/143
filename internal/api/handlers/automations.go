@@ -198,6 +198,7 @@ func (h *AutomationHandler) Create(w http.ResponseWriter, r *http.Request) {
 		ExecutionMode  *string `json:"execution_mode"`
 		MaxConcurrent  *int    `json:"max_concurrent"`
 		BaseBranch     *string `json:"base_branch"`
+		IdentityScope  *string `json:"identity_scope"`
 		ScheduleType   *string `json:"schedule_type"`
 		IntervalValue  *int    `json:"interval_value"`
 		IntervalUnit   *string `json:"interval_unit"`
@@ -345,6 +346,15 @@ func (h *AutomationHandler) Create(w http.ResponseWriter, r *http.Request) {
 		baseBranch = *req.BaseBranch
 	}
 
+	identityScope := models.AutomationIdentityScopeOrg
+	if req.IdentityScope != nil && *req.IdentityScope != "" {
+		identityScope = models.AutomationIdentityScope(*req.IdentityScope)
+		if err := identityScope.Validate(); err != nil {
+			writeError(w, r, http.StatusBadRequest, "INVALID_IDENTITY_SCOPE", err.Error())
+			return
+		}
+	}
+
 	timezone := "UTC"
 	if req.Timezone != nil && *req.Timezone != "" {
 		if err := validateTimezone(*req.Timezone); err != nil {
@@ -374,6 +384,7 @@ func (h *AutomationHandler) Create(w http.ResponseWriter, r *http.Request) {
 		ExecutionMode:  execMode,
 		MaxConcurrent:  maxConcurrent,
 		BaseBranch:     baseBranch,
+		IdentityScope:  identityScope,
 		ScheduleType:   scheduleType,
 		IntervalValue:  intervalValuePtr,
 		IntervalUnit:   intervalUnitPtr,
@@ -434,6 +445,7 @@ func (h *AutomationHandler) Update(w http.ResponseWriter, r *http.Request) {
 		ExecutionMode  *string `json:"execution_mode"`
 		MaxConcurrent  *int    `json:"max_concurrent"`
 		BaseBranch     *string `json:"base_branch"`
+		IdentityScope  *string `json:"identity_scope"`
 		ScheduleType   *string `json:"schedule_type"`
 		IntervalValue  *int    `json:"interval_value"`
 		IntervalUnit   *string `json:"interval_unit"`
@@ -512,6 +524,18 @@ func (h *AutomationHandler) Update(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		automation.ExecutionMode = *req.ExecutionMode
+	}
+	if req.IdentityScope != nil {
+		identityScope := models.AutomationIdentityScope(*req.IdentityScope)
+		if err := identityScope.Validate(); err != nil {
+			writeError(w, r, http.StatusBadRequest, "INVALID_IDENTITY_SCOPE", err.Error())
+			return
+		}
+		if identityScope.OrDefault() == models.AutomationIdentityScopePersonal && automation.CreatedBy == nil {
+			writeError(w, r, http.StatusBadRequest, "INVALID_IDENTITY_SCOPE", "identity_scope=personal requires automation.created_by")
+			return
+		}
+		automation.IdentityScope = identityScope.OrDefault()
 	}
 	if req.MaxConcurrent != nil {
 		if *req.MaxConcurrent <= 0 || *req.MaxConcurrent > 100 {
