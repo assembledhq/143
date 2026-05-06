@@ -74,6 +74,49 @@ func TestLatestUserMessage(t *testing.T) {
 	require.Equal(t, "latest user", message.Content, "latestUserMessage should scan from newest to oldest")
 }
 
+func TestLatestUserMessageInScope_ThreadScopedSelection(t *testing.T) {
+	t.Parallel()
+
+	threadA := uuid.New()
+	threadB := uuid.New()
+
+	// Regression: ListBySession orders messages by (turn_number, id), and
+	// per-thread turn counters are independent — so a sibling thread's old
+	// message at a high turn_number can sort *after* a brand-new message at
+	// thread B's low turn_number. The unscoped helper would return the
+	// wrong row; the scoped helper must pick the latest user message
+	// belonging to the requested thread.
+	messages := []models.SessionMessage{
+		{ID: 1052, Role: models.MessageRoleUser, Content: "B turn 1", ThreadID: &threadB},
+		{ID: 1122, Role: models.MessageRoleUser, Content: "B turn 2", ThreadID: &threadB},
+		{ID: 1046, Role: models.MessageRoleUser, Content: "A turn 9", ThreadID: &threadA},
+		{ID: 1048, Role: models.MessageRoleAssistant, Content: "A reply", ThreadID: &threadA},
+		{ID: 1069, Role: models.MessageRoleAssistant, Content: "A later reply", ThreadID: &threadA},
+	}
+
+	scoped := latestUserMessageInScope(messages, &threadB)
+	require.NotNil(t, scoped, "should find a user message in thread B's scope")
+	require.Equal(t, "B turn 2", scoped.Content, "scoped lookup should return thread B's most recent user, not thread A's higher-turn row")
+
+	scopedA := latestUserMessageInScope(messages, &threadA)
+	require.NotNil(t, scopedA)
+	require.Equal(t, "A turn 9", scopedA.Content, "scoped lookup should return thread A's most recent user when asked for thread A")
+}
+
+func TestLatestUserMessageInScope_NoThreadFallback(t *testing.T) {
+	t.Parallel()
+
+	threadA := uuid.New()
+	messages := []models.SessionMessage{
+		{ID: 1, Role: models.MessageRoleUser, Content: "session-level"},
+		{ID: 2, Role: models.MessageRoleUser, Content: "thread A", ThreadID: &threadA},
+	}
+
+	got := latestUserMessageInScope(messages, nil)
+	require.NotNil(t, got)
+	require.Equal(t, "session-level", got.Content, "nil scope should ignore threaded messages and return the latest no-thread user")
+}
+
 func TestUnprocessedUserMessages_SessionScope(t *testing.T) {
 	t.Parallel()
 

@@ -1045,6 +1045,7 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 		logger.Info().
 			Str("session_id", sessionID.String()).
 			Str("org_id", orgID.String()).
+			Str("thread_id", input.ThreadID).
 			Int("current_turn", session.CurrentTurn).
 			Dur("session_timeout", sessionTimeout).
 			Dur("runtime_ceiling", runtimeCeiling).
