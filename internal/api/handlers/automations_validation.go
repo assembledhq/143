@@ -23,7 +23,7 @@ import (
 // than a Postgres constraint violation — the user-legible error.
 const (
 	automationNameMaxLength = 200
-	automationGoalMaxLength = 4000
+	automationGoalMaxLength = 8000
 )
 
 func validateAutomationNameAndGoal(name, goal string) error {

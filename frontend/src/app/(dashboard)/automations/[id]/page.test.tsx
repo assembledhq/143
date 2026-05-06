@@ -1,8 +1,9 @@
 import { describe, it, expect, vi } from "vitest";
-import { renderWithProviders, screen, userEvent, waitFor } from "@/test/test-utils";
+import { fireEvent, renderWithProviders, screen, userEvent, waitFor } from "@/test/test-utils";
 import { server } from "@/test/mocks/server";
 import { http, HttpResponse } from "msw";
 import AutomationDetailPage from "./page";
+import { AUTOMATION_GOAL_MAX_LENGTH } from "@/lib/automation-validation";
 
 const pushMock = vi.fn();
 
@@ -199,6 +200,66 @@ describe("AutomationDetailPage", () => {
     await waitFor(() => {
       expect(updateBody).toMatchObject({ base_branch: "release/ops" });
     });
+  });
+
+  it("shows goal length validation and blocks saving when the goal exceeds the backend limit", async () => {
+    server.use(
+      http.get("*/api/v1/automations/auto-1", () => HttpResponse.json({
+        data: {
+          id: "auto-1",
+          org_id: "org-1",
+          repository_id: "repo-1",
+          name: "Weekly audit",
+          goal: "Check release health",
+          scope: "",
+          interval_value: 1,
+          interval_unit: "weeks",
+          base_branch: "main",
+          enabled: true,
+          timezone: "UTC",
+          last_run_at: null,
+          next_run_at: null,
+          priority: 50,
+          created_at: "2026-01-01T00:00:00Z",
+          updated_at: "2026-01-01T00:00:00Z",
+        },
+      })),
+      http.get("*/api/v1/automations/auto-1/runs*", () => HttpResponse.json({ data: [], meta: {} })),
+      http.get("*/api/v1/automations/auto-1/stats*", () => HttpResponse.json({
+        data: {
+          since: "2026-01-01T00:00:00Z",
+          until: "2026-01-31T00:00:00Z",
+          buckets: [],
+          totals: {
+            total: 0,
+            completed: 0,
+            completed_noop: 0,
+            failed: 0,
+            skipped: 0,
+            running: 0,
+            pending: 0,
+            success_rate: 0,
+            avg_duration_seconds: 0,
+          },
+        },
+      })),
+    );
+
+    renderWithProviders(<AutomationDetailPage />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Weekly audit")).toBeInTheDocument();
+    });
+
+    await userEvent.setup().click(screen.getByRole("tab", { name: "Settings" }));
+
+    fireEvent.change(screen.getByLabelText("Goal"), {
+      target: { value: "x".repeat(AUTOMATION_GOAL_MAX_LENGTH + 1) },
+    });
+
+    expect(screen.getByText(`Goal must be at most ${AUTOMATION_GOAL_MAX_LENGTH} characters.`)).toBeInTheDocument();
+    expect(screen.getByText(`${AUTOMATION_GOAL_MAX_LENGTH + 1} / ${AUTOMATION_GOAL_MAX_LENGTH}`)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Save changes" })).toBeDisabled();
   });
 
   it("saves the selected model override", async () => {

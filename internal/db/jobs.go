@@ -39,12 +39,19 @@ func RunAgentPayload(run *models.Session) map[string]string {
 }
 
 // ContinueSessionDedupeKey returns the dedupe key used for continue_session
-// enqueues. Thread-level because concurrent tabs are allowed to queue follow-up
-// turns independently; worker-side locking still serializes actual shared-
-// sandbox execution when needed. See RunAgentDedupeKey for the partial-index
-// rationale.
-func ContinueSessionDedupeKey(threadID uuid.UUID) string {
-	return "continue_session:" + threadID.String()
+// enqueues. Thread-level: each thread/tab gets its own dedupe scope so a
+// concurrent send to thread B is not silently dropped while thread A is
+// running. Rapid-fire sends to the same thread still collapse (the partial
+// unique index turns the duplicate INSERT into a no-op, and the orchestrator's
+// post-turn drain picks the queued messages up). Worker-side AcquireTurnHold
+// serializes actual shared-sandbox execution when both threads run.
+//
+// Callers without a thread context (legacy session-level handlers, PR health
+// repair) pass the session ID instead — that key occupies a different dedupe
+// scope from any thread key (different UUID), which is intentional. See
+// RunAgentDedupeKey for the partial-index rationale.
+func ContinueSessionDedupeKey(scopeID uuid.UUID) string {
+	return "continue_session:" + scopeID.String()
 }
 
 type JobStore struct {
