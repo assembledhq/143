@@ -416,6 +416,15 @@ func (s *Service) SendMessage(ctx context.Context, input SendMessageInput) (*Sen
 			}
 			return nil, claimErr
 		}
+		if revertStatus == "" {
+			if resolvingComments {
+				if revertErr := s.threadStore.UpdateStatus(ctx, input.OrgID, input.ThreadID, models.ThreadStatusIdle); revertErr != nil {
+					s.logger.Error().Err(revertErr).Str("thread_id", input.ThreadID.String()).Msg("failed to release sibling-queued thread after unsupported comment resolution")
+				}
+				return nil, ErrThreadNotIdle
+			}
+			return s.queueClaimedThreadBehindSibling(ctx, input, thread)
+		}
 	}
 
 	content := input.Message
@@ -496,10 +505,9 @@ func (s *Service) SendMessage(ctx context.Context, input SendMessageInput) (*Sen
 	// Reuse the session continuation worker for phase 1. The latest user
 	// message carries thread_id, so the orchestrator attributes assistant
 	// messages and streamed logs back to this tab while still operating on the
-	// single shared sandbox. Dedupe at the thread level so a concurrent send
-	// to a sibling tab is not silently swallowed by the partial unique index;
-	// worker-side AcquireTurnHold serializes the actual shared-sandbox
-	// execution when both threads run.
+	// single shared sandbox. Dedupe at the thread level so rapid-fire sends to
+	// this tab collapse, while sibling sends that arrive during another tab's
+	// turn are queued without enqueueing a second shared-sandbox job.
 	dedupeKey := db.ContinueSessionDedupeKey(thread.ID)
 	payload := map[string]string{
 		"session_id": thread.SessionID.String(),
@@ -574,6 +582,39 @@ func (s *Service) queueMessageOnIdleThread(ctx context.Context, input SendMessag
 	}
 	if err := s.threadStore.IncrementPendingMessages(ctx, input.OrgID, input.ThreadID); err != nil {
 		return nil, fmt.Errorf("increment queued message count: %w", err)
+	}
+	return &SendMessageResult{Message: msg}, nil
+}
+
+func (s *Service) queueClaimedThreadBehindSibling(ctx context.Context, input SendMessageInput, thread models.SessionThread) (*SendMessageResult, error) {
+	if err := s.threadStore.UpdateStatus(ctx, input.OrgID, input.ThreadID, models.ThreadStatusIdle); err != nil {
+		return nil, fmt.Errorf("release thread for queued sibling message: %w", err)
+	}
+
+	content := input.Message
+	if input.PlanMode {
+		content = "[PLAN_MODE]\n" + content
+	}
+	msg := &models.SessionMessage{
+		SessionID:  thread.SessionID,
+		OrgID:      input.OrgID,
+		ThreadID:   &input.ThreadID,
+		UserID:     input.UserID,
+		TurnNumber: thread.CurrentTurn + 1,
+		Role:       models.MessageRoleUser,
+		Content:    content,
+		References: input.References,
+		Commands:   input.Commands,
+	}
+	if len(input.Images) > 0 {
+		msg.Attachments = input.Images
+	}
+
+	if err := s.messageStore.Create(ctx, msg); err != nil {
+		return nil, fmt.Errorf("create queued sibling message: %w", err)
+	}
+	if err := s.threadStore.IncrementPendingMessages(ctx, input.OrgID, input.ThreadID); err != nil {
+		return nil, fmt.Errorf("increment queued sibling message count: %w", err)
 	}
 	return &SendMessageResult{Message: msg}, nil
 }

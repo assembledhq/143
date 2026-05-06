@@ -569,7 +569,7 @@ func TestService_SendMessage(t *testing.T) {
 			},
 		},
 		{
-			name: "proceeds when parent session is already running due to sibling",
+			name: "queues without enqueue when parent session is already running due to sibling",
 			input: SendMessageInput{
 				SessionID: sessionID,
 				OrgID:     orgID,
@@ -580,10 +580,10 @@ func TestService_SendMessage(t *testing.T) {
 				deps.threadStore.claimIdleFn = func(_ context.Context, _, _, _ uuid.UUID) (models.SessionThread, error) {
 					return models.SessionThread{ID: threadID, SessionID: sessionID, OrgID: orgID, CurrentTurn: 1, Status: models.ThreadStatusRunning}, nil
 				}
-				// Phase 2: parent session ClaimIdle fails because a sibling
-				// tab already moved the session into running state. The
-				// service should treat this as a no-op and proceed instead
-				// of failing the user's send.
+				// The parent session ClaimIdle fails because a sibling tab
+				// already moved the session into running state. The service must
+				// queue this message for the requested thread without enqueueing a
+				// second continue_session job for the shared sandbox.
 				deps.sessionStore.claimIdleFn = func(_ context.Context, _, _ uuid.UUID) (models.Session, error) {
 					return models.Session{}, fmt.Errorf("session already running")
 				}
@@ -591,10 +591,22 @@ func TestService_SendMessage(t *testing.T) {
 					return models.Session{ID: sessionID, OrgID: orgID, Status: string(models.SessionStatusRunning)}, nil
 				}
 				deps.messageStore.createFn = func(_ context.Context, msg *models.SessionMessage) error {
+					require.Equal(t, "hi", msg.Content, "queued sibling message should preserve content")
+					require.Equal(t, 2, msg.TurnNumber, "queued sibling message should use the claimed thread's next turn")
 					msg.ID = 99
 					return nil
 				}
+				deps.threadStore.updateStatusFn = func(_ context.Context, _, tid uuid.UUID, status models.ThreadStatus) error {
+					require.Equal(t, threadID, tid, "sibling-running queue should release the claimed thread")
+					require.Equal(t, models.ThreadStatusIdle, status, "sibling-running queue should leave the thread idle with pending messages")
+					return nil
+				}
+				deps.threadStore.incrementPendingFn = func(_ context.Context, _, tid uuid.UUID) error {
+					require.Equal(t, threadID, tid, "sibling-running queue should increment the requested thread")
+					return nil
+				}
 				deps.jobStore.enqueueFn = func(_ context.Context, _ uuid.UUID, _, _ string, _ any, _ int, _ *string) (uuid.UUID, error) {
+					t.Fatalf("sibling-running send must queue only and must not enqueue a concurrent continue_session job")
 					return uuid.New(), nil
 				}
 			},
@@ -816,7 +828,7 @@ func TestService_SendMessage(t *testing.T) {
 			expectErr: ErrEnqueueFailed,
 		},
 		{
-			name: "enqueue failure does not revert sibling-owned session to idle",
+			name: "sibling-owned session queues without touching job store",
 			input: SendMessageInput{
 				SessionID: sessionID,
 				OrgID:     orgID,
@@ -837,11 +849,19 @@ func TestService_SendMessage(t *testing.T) {
 					msg.ID = 42
 					return nil
 				}
+				deps.threadStore.updateStatusFn = func(_ context.Context, _, _ uuid.UUID, status models.ThreadStatus) error {
+					require.Equal(t, models.ThreadStatusIdle, status, "sibling-owned send should release the claimed thread")
+					return nil
+				}
+				deps.threadStore.incrementPendingFn = func(_ context.Context, _, tid uuid.UUID) error {
+					require.Equal(t, threadID, tid, "sibling-owned send should increment pending messages")
+					return nil
+				}
 				deps.jobStore.enqueueFn = func(_ context.Context, _ uuid.UUID, _, _ string, _ any, _ int, _ *string) (uuid.UUID, error) {
-					return uuid.Nil, fmt.Errorf("queue down")
+					t.Fatalf("sibling-owned send must not enqueue a concurrent continue_session job")
+					return uuid.Nil, nil
 				}
 			},
-			expectErr: ErrEnqueueFailed,
 		},
 		{
 			name: "resumes a completed session via ClaimForResume",
