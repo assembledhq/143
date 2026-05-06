@@ -1,5 +1,10 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { formatDuration } from "./session-detail-content";
+import {
+  formatDuration,
+  getPendingEditableThreadUpdate,
+  trackInFlightAgentUpdate,
+} from "./session-detail-content";
+import type { SessionThread } from "@/lib/types";
 
 const start = "2026-01-01T00:00:00.000Z";
 const plus = (ms: number) => new Date(new Date(start).getTime() + ms).toISOString();
@@ -42,5 +47,45 @@ describe("formatDuration", () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date(plus(2 * 60 * 60_000 + 30 * 60_000)));
     expect(formatDuration(start)).toBe("2h 30m");
+  });
+});
+
+describe("getPendingEditableThreadUpdate", () => {
+  const editableThread: SessionThread = {
+    id: "thread-1",
+    session_id: "session-1",
+    org_id: "org-1",
+    agent_type: "codex",
+    label: "Codex 2",
+    status: "idle",
+    current_turn: 0,
+    model_override: "gpt-5.4",
+    created_at: "2026-01-01T00:00:00.000Z",
+    cost_cents: 0,
+    pending_message_count: 0,
+  };
+
+  it("does not clear an existing model override when the composer model is untouched", () => {
+    expect(getPendingEditableThreadUpdate(editableThread, true, "")).toBeUndefined();
+  });
+
+  it("returns an update when the user selects a different model", () => {
+    expect(getPendingEditableThreadUpdate(editableThread, true, "gpt-5.4-mini")).toEqual({
+      label: "Codex 2",
+      model: "gpt-5.4-mini",
+    });
+  });
+});
+
+describe("trackInFlightAgentUpdate", () => {
+  it("clears the tracked promise and consumes rejections", async () => {
+    const ref: { current: Promise<unknown> | null } = { current: null };
+    const promise = Promise.reject(new Error("patch failed"));
+
+    trackInFlightAgentUpdate(ref, promise);
+    await expect(promise).rejects.toThrow("patch failed");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(ref.current).toBeNull();
   });
 });

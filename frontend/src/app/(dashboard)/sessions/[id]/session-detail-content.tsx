@@ -163,6 +163,13 @@ type PendingFollowUpMessage = SessionMessage & {
   client_id: number;
 };
 
+type PendingEditableThreadUpdate = {
+  label: string;
+  // null clears an existing override; a string sets it. Field is always
+  // present on this path so the backend treats omission separately.
+  model: string | null;
+};
+
 const statusConfig: Record<string, { color: string; label: string }> = {
   pending: { color: "bg-muted text-muted-foreground", label: "Pending" },
   running: { color: "bg-primary/10 text-primary", label: "Running" },
@@ -193,6 +200,36 @@ export function formatDuration(startedAt?: string, completedAt?: string): string
   if (hours < 24) return `${hours}h ${mins % 60}m`;
   const days = Math.floor(hours / 24);
   return `${days}d ${hours % 24}h`;
+}
+
+export function getPendingEditableThreadUpdate(
+  activeThread: SessionThread | undefined,
+  activeThreadIsEditable: boolean,
+  composerSelectedModel: string,
+): PendingEditableThreadUpdate | undefined {
+  if (!activeThread || !activeThreadIsEditable || composerSelectedModel === "") {
+    return undefined;
+  }
+  const existingModel = activeThread.model_override ?? null;
+  if (composerSelectedModel === existingModel) {
+    return undefined;
+  }
+  return {
+    label: activeThread.label,
+    model: composerSelectedModel,
+  };
+}
+
+export function trackInFlightAgentUpdate(
+  ref: { current: Promise<unknown> | null },
+  promise: Promise<unknown>,
+): void {
+  ref.current = promise;
+  promise.catch(() => undefined).then(() => {
+    if (ref.current === promise) {
+      ref.current = null;
+    }
+  });
 }
 
 const triggerPickerIconClassName = "h-4 w-4 shrink-0";
@@ -2432,8 +2469,6 @@ export function SessionDetailContent({ id }: { id: string }) {
     };
     editableThreadUpdate?: {
       label: string;
-      // null clears an existing override; a string sets it. Field is always
-      // present on this path so the backend treats omission separately.
       model: string | null;
     };
     model?: string;
@@ -3006,18 +3041,7 @@ export function SessionDetailContent({ id }: { id: string }) {
     };
   }, [activeThread?.agent_type, activeThread?.model_override, session?.agent_type, threads.length]);
   const pendingEditableThreadUpdate = useMemo(() => {
-    if (!activeThread || !activeThreadIsEditable) {
-      return undefined;
-    }
-    const selectedModel = composerSelectedModel || null;
-    const existingModel = activeThread.model_override ?? null;
-    if (selectedModel === existingModel) {
-      return undefined;
-    }
-    return {
-      label: activeThread.label,
-      model: selectedModel,
-    };
+    return getPendingEditableThreadUpdate(activeThread, activeThreadIsEditable, composerSelectedModel);
   }, [activeThread, activeThreadIsEditable, composerSelectedModel]);
 
   async function uploadComposerFiles(files: File[]) {
@@ -3445,12 +3469,7 @@ export function SessionDetailContent({ id }: { id: string }) {
         label: nextLabel,
       },
     });
-    inFlightAgentUpdateRef.current = promise;
-    promise.finally(() => {
-      if (inFlightAgentUpdateRef.current === promise) {
-        inFlightAgentUpdateRef.current = null;
-      }
-    });
+    trackInFlightAgentUpdate(inFlightAgentUpdateRef, promise);
   }, [activeThread, activeThreadIsEditable, buildThreadLabelForAgent, updateThreadMutation]);
 
   const handleApprovePlan = useCallback(() => {
