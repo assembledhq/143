@@ -3433,9 +3433,10 @@ func (o *Orchestrator) registerSandboxFailureMessage(ctx context.Context, sessio
 // observe the deferred behavior must wrap the context with
 // jobctx.WithDeadLetterHooks and explicitly invoke RunDeadLetterHooks.
 //
-// session is captured by value so the hook isn't racing the caller's
-// later mutations to the same struct (e.g. AcquireTurnHold patches
-// CurrentTurn after this point).
+// session is captured by value at registration time so the hook reads
+// the same snapshot the caller just observed (turn number, container
+// id, etc.), regardless of any later mutations to the underlying
+// struct as the orchestrator advances through subsequent setup.
 func (o *Orchestrator) registerSandboxInfraFailure(
 	ctx context.Context,
 	session *models.Session,
@@ -3486,6 +3487,20 @@ func (o *Orchestrator) registerSandboxInfraFailure(
 // claim re-enter cleanly without tripping the "session is already
 // running" branches in the orchestrator's status checks. reason labels
 // the log line so on-call can tell the three abandon paths apart.
+//
+// Deliberately does NOT revert sandbox_state. Sibling failure paths
+// (auth wiring, hydrate, sandbox-create around line ~2532 / ~2575 /
+// ~2615) revert it to "snapshotted" because they fire AFTER the
+// orchestrator has begun creating its own sandbox — there's a fresh
+// container to mark as gone. The reuse-path abandon fires BEFORE any
+// sandbox creation: container_id either still points at a peer holder
+// (aliveErr / CAS-lost) or was just CAS-cleared by us via
+// ClearContainerID. In the holder cases sandbox_state legitimately
+// remains "running" because someone else's container is still alive;
+// in the CAS-cleared case the next attempt's hydrate/create path will
+// transition sandbox_state correctly when it republishes container_id.
+// Setting "snapshotted" here would either lie about peer-held
+// containers or race the next attempt's own state writes.
 func (o *Orchestrator) abandonReuseForRetry(ctx context.Context, session *models.Session, log zerolog.Logger, reason string) error {
 	if revertErr := o.sessions.UpdateStatus(ctx, session.OrgID, session.ID, string(models.SessionStatusPending)); revertErr != nil {
 		log.Error().Err(revertErr).

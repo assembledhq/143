@@ -19,6 +19,7 @@ import (
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/services/agent"
 	"github.com/assembledhq/143/internal/services/github/identity"
+	"github.com/assembledhq/143/internal/services/linear"
 	"github.com/assembledhq/143/internal/services/sandboxauth"
 	"github.com/assembledhq/143/internal/services/storage"
 	"github.com/assembledhq/143/internal/testutil"
@@ -5686,24 +5687,19 @@ func TestContinueSession_CodexAuthInjectInfraFailureDeferredToDeadLetter(t *test
 				"caller-visible error must still wrap the codex auth injection prefix so worker logs and the session.last_error stay shaped the same as before")
 
 			countLinearFailed := func() int {
-				var n int
-				for _, m := range d.messages.getMessages() {
-					if m.Role == models.MessageRoleAssistant && m.SessionID == session.ID {
-						n++
-					}
+				// linear.EnqueueMilestone packs the milestone name into
+				// the payload's "event" field. Filter on that so the
+				// assertion is meaningful even if a future change to
+				// ContinueSession also enqueues other milestone events
+				// (e.g. "started") on the same path.
+				payload, ok := d.jobs.getPayload("linear_milestone").(map[string]any)
+				if !ok {
+					return 0
 				}
-				_ = n
-				// Linear emission lives on the jobs mock — count only
-				// "linear_milestone" enqueues for this session. Other
-				// linear milestones (e.g. "started" from RunAgent) are
-				// not in scope for ContinueSession's path.
-				var milestoneFails int
-				for _, j := range d.jobs.getEnqueued() {
-					if j == "linear_milestone" {
-						milestoneFails++
-					}
+				if event, _ := payload["event"].(string); event == string(linear.MilestoneFailed) {
+					return 1
 				}
-				return milestoneFails
+				return 0
 			}
 			countFailedResult := func() int {
 				var n int
@@ -5829,6 +5825,127 @@ func TestContinueSession_CodexAuthInvalidStillFailsInline(t *testing.T) {
 		}
 	}
 	require.GreaterOrEqual(t, failedFailures, 1, "auth-invalid path must record the codex_auth_expired category inline")
+}
+
+// TestRunAgent_CodexAuthInjectInfraFailureDeferredToDeadLetter mirrors
+// TestContinueSession_CodexAuthInjectInfraFailureDeferredToDeadLetter for
+// the RunAgent call site (ensureCodexAuth at orchestrator.go:1908). Both
+// call sites share ensureCodexAuth, so the deferred behavior must hold
+// regardless of which orchestration entry point hit the failure.
+func TestRunAgent_CodexAuthInjectInfraFailureDeferredToDeadLetter(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name                     string
+		runHooks                 bool
+		wantInlineLinearFail     bool
+		wantInlineFailedResult   bool
+		wantPostHookLinearFail   bool
+		wantPostHookFailedResult bool
+	}{
+		{
+			name:                     "mid-retry: zero session-state churn",
+			runHooks:                 false,
+			wantInlineLinearFail:     false,
+			wantInlineFailedResult:   false,
+			wantPostHookLinearFail:   false,
+			wantPostHookFailedResult: false,
+		},
+		{
+			name:                     "dead-letter: failed result + Linear failed enqueued exactly once",
+			runHooks:                 true,
+			wantInlineLinearFail:     false,
+			wantInlineFailedResult:   false,
+			wantPostHookLinearFail:   true,
+			wantPostHookFailedResult: true,
+		},
+	}
+
+	for _, c := range cases {
+		c := c
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+
+			orgID := testOrg()
+			issue := testIssue(orgID)
+			run := testRun(orgID, issue.ID)
+			run.AgentType = models.AgentTypeCodex
+
+			d := defaultDeps()
+			d.adapter.name = models.AgentTypeCodex
+			d.issues.issue = issue
+			d.codexAuth = &mockCodexAuthProvider{
+				cfg: &models.OpenAIChatGPTConfig{
+					AccessToken:  "valid-access",
+					RefreshToken: "valid-refresh",
+					ExpiresAt:    time.Now().Add(time.Hour),
+				},
+			}
+			// Sandbox creation succeeds; the failure we exercise is
+			// the post-clone codex auth injection's docker exec.
+			d.provider.CreateFn = func(_ context.Context, cfg agent.SandboxConfig) (*agent.Sandbox, error) {
+				return &agent.Sandbox{ID: "sbx-1", Provider: "mock", WorkDir: cfg.WorkDir, HomeDir: cfg.HomeDir}, nil
+			}
+			d.provider.ExecFn = func(_ context.Context, _ *agent.Sandbox, cmd string, _, _ io.Writer) (int, error) {
+				if strings.Contains(cmd, ".codex") {
+					return 0, errors.New("Error response from daemon: No such container: sbx-1")
+				}
+				return 0, nil
+			}
+
+			ctx := jobctx.WithDeadLetterHooks(context.Background())
+			orch := buildOrchestrator(d)
+			err := orch.RunAgent(ctx, run)
+			require.Error(t, err)
+			require.Contains(t, err.Error(), "codex auth injection")
+
+			countLinearFailed := func() int {
+				payload, ok := d.jobs.getPayload("linear_milestone").(map[string]any)
+				if !ok {
+					return 0
+				}
+				if event, _ := payload["event"].(string); event == string(linear.MilestoneFailed) {
+					return 1
+				}
+				return 0
+			}
+			countFailedResult := func() int {
+				var n int
+				for _, r := range d.sessions.getResultUpdates() {
+					if r.status == "failed" {
+						n++
+					}
+				}
+				return n
+			}
+
+			if c.wantInlineLinearFail {
+				require.Equal(t, 1, countLinearFailed(), "inline linear_milestone:failed expected before hook runs")
+			} else {
+				require.Zero(t, countLinearFailed(), "no inline linear_milestone:failed should be enqueued during retry — would emit a false 'failed' ping on every attempt")
+			}
+			if c.wantInlineFailedResult {
+				require.Equal(t, 1, countFailedResult(), "inline failed result expected before hook runs")
+			} else {
+				require.Zero(t, countFailedResult(), "no inline failed result should be persisted during retry — would flicker session.status mid-flight")
+			}
+
+			if c.runHooks {
+				jobctx.RunDeadLetterHooks(ctx, err)
+			}
+
+			if c.wantPostHookLinearFail {
+				require.Equal(t, 1, countLinearFailed(), "dead-letter hook should enqueue exactly one linear_milestone:failed")
+			} else {
+				require.Zero(t, countLinearFailed(), "no linear_milestone:failed should be enqueued when hook does not fire")
+			}
+			if c.wantPostHookFailedResult {
+				require.GreaterOrEqual(t, countFailedResult(), 1, "dead-letter hook should mark the session failed")
+			} else {
+				require.Zero(t, countFailedResult(), "session should not be marked failed when hook does not fire")
+			}
+		})
+	}
 }
 
 // ---------------------------------------------------------------------------
