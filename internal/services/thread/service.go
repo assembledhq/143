@@ -112,6 +112,7 @@ type LogStore interface {
 // JobStore defines the job DB operations needed by the thread service.
 type JobStore interface {
 	Enqueue(ctx context.Context, orgID uuid.UUID, queue, jobType string, payload any, priority int, dedupeKey *string) (uuid.UUID, error)
+	EnqueueWithOpts(ctx context.Context, orgID uuid.UUID, opts db.EnqueueOpts) (uuid.UUID, error)
 }
 
 // CreateThreadInput holds the input for creating a new thread.
@@ -504,7 +505,14 @@ func (s *Service) SendMessage(ctx context.Context, input SendMessageInput) (*Sen
 		"thread_id":  input.ThreadID.String(),
 		"org_id":     input.OrgID.String(),
 	}
-	if _, err := s.jobStore.Enqueue(ctx, input.OrgID, "agent", "continue_session", payload, 5, &dedupeKey); err != nil {
+	if _, err := s.jobStore.EnqueueWithOpts(ctx, input.OrgID, db.EnqueueOpts{
+		Queue:        "agent",
+		JobType:      "continue_session",
+		Payload:      payload,
+		Priority:     5,
+		DedupeKey:    &dedupeKey,
+		TargetNodeID: models.SessionWorkerTarget(&claimedSession),
+	}); err != nil {
 		// Note: we do NOT roll back the resolved comments or answered
 		// question here. The message has been committed and is durably in
 		// the timeline; the orchestrator will retry the enqueue on the next
