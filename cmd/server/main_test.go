@@ -2,6 +2,9 @@ package main
 
 import (
 	"context"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
 	"strings"
 	"sync/atomic"
@@ -147,6 +150,38 @@ func TestMainStartupRunsRehydrateBeforeWorkers(t *testing.T) {
 	require.NotEqual(t, -1, startWorkers, "startup should still start process workers")
 	require.NotEqual(t, -1, rehydrate, "startup should still run sandbox auth rehydrate")
 	require.Less(t, rehydrate, startWorkers, "sandbox auth rehydrate/sweep must run before process workers can claim jobs")
+}
+
+func TestMainPassesConfiguredNodeIDToWorkers(t *testing.T) {
+	t.Parallel()
+
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "main.go", nil, 0)
+	require.NoError(t, err, "main.go should parse for worker node ID wiring regression test")
+
+	var workerStart *ast.CallExpr
+	ast.Inspect(file, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		fn, ok := call.Fun.(*ast.Ident)
+		if ok && fn.Name == "startProcessWorkers" {
+			workerStart = call
+			return false
+		}
+		return true
+	})
+
+	require.NotNil(t, workerStart, "startup should call startProcessWorkers")
+	require.GreaterOrEqual(t, len(workerStart.Args), 4, "startProcessWorkers call should include the node ID argument")
+
+	nodeArg, ok := workerStart.Args[3].(*ast.SelectorExpr)
+	require.True(t, ok, "worker node ID argument should be a selector expression")
+	root, ok := nodeArg.X.(*ast.Ident)
+	require.True(t, ok, "worker node ID argument should be rooted at cfg")
+	require.Equal(t, "cfg", root.Name, "workers should use the configured node ID root")
+	require.Equal(t, "NodeID", nodeArg.Sel.Name, "workers should use cfg.NodeID rather than the Docker hostname")
 }
 
 func TestMainAdvertisesPreviewAfterHTTPListen(t *testing.T) {
