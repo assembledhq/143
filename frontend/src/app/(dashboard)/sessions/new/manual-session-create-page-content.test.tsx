@@ -473,14 +473,25 @@ describe("ManualSessionCreatePageContent", () => {
     expect(screen.getByText("Review pending changes")).toBeInTheDocument();
   });
 
-  it("only shows the add linear issue action when Linear is integrated", async () => {
+  it("shows the shared add menu items in the new session composer", async () => {
+    const user = userEvent.setup();
+    renderWithProviders(<ManualSessionCreatePageContent />);
+
+    await user.click(await screen.findByRole("button", { name: "Add files or photos" }));
+
+    expect(await screen.findByRole("menuitem", { name: "Upload files or photos" })).toBeInTheDocument();
+    expect(screen.getByRole("menuitem", { name: "Add image URL" })).toBeInTheDocument();
+    expect(screen.getByRole("menuitem", { name: "Add linear issue" })).toBeInTheDocument();
+  });
+
+  it("shows the linear issue action even when Linear is not configured", async () => {
     const user = userEvent.setup();
     mocks.integrationsListMock.mockResolvedValueOnce({ data: [] });
     renderWithProviders(<ManualSessionCreatePageContent />);
 
     await user.click(await screen.findByRole("button", { name: "Add files or photos" }));
 
-    expect(screen.queryByRole("menuitem", { name: "Add linear issue" })).not.toBeInTheDocument();
+    expect(await screen.findByRole("menuitem", { name: "Add linear issue" })).toBeInTheDocument();
   });
 
   it("adds a linked Linear issue as a chip instead of moving it into the prompt text", async () => {
