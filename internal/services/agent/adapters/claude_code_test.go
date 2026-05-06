@@ -196,7 +196,7 @@ func TestClaudeCodeAdapter_Execute(t *testing.T) {
 
 			provider := testutil.NewMockSandboxProvider()
 			provider.ExecFn = func(ctx context.Context, sb *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
-				if strings.HasPrefix(cmd, "claude") {
+				if strings.Contains(cmd, "claude --print") {
 					_, _ = stdout.Write([]byte(tt.claudeOutput))
 					if tt.stderrOutput != "" {
 						_, _ = stderr.Write([]byte(tt.stderrOutput))
@@ -245,6 +245,8 @@ func TestClaudeCodeAdapter_Execute(t *testing.T) {
 			promptData, exists := provider.Files["/home/sandbox/.143-prompt.md"]
 			require.True(t, exists, "prompt file should have been written")
 			require.Contains(t, string(promptData), "Fix the bug.")
+			require.NotContains(t, provider.ExecCalls[0], ".143-agent.pid", "claude adapter must not embed pidfile scaffolding (provider internal)")
+			require.NotContains(t, provider.ExecCalls[0], "& pid=$!", "claude adapter must not embed shell-shim wrapping (provider internal)")
 		})
 	}
 }
@@ -254,7 +256,7 @@ func TestClaudeCodeAdapter_Execute_ExecError(t *testing.T) {
 
 	provider := testutil.NewMockSandboxProvider()
 	provider.ExecFn = func(ctx context.Context, sb *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
-		if strings.HasPrefix(cmd, "claude") {
+		if strings.Contains(cmd, "claude --print") {
 			return 0, context.DeadlineExceeded
 		}
 		return 0, nil
@@ -311,7 +313,7 @@ func TestClaudeCodeAdapter_Execute_ContinuationWithSessionIDUsesResumeByID(t *te
 
 	provider := testutil.NewMockSandboxProvider()
 	provider.ExecFn = func(ctx context.Context, sb *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
-		if strings.HasPrefix(cmd, "claude") {
+		if strings.Contains(cmd, "claude --print") {
 			_, _ = stdout.Write([]byte(`{"type":"assistant","content":"continuing the session"}`))
 			return 0, nil
 		}
@@ -432,7 +434,7 @@ func TestClaudeCodeAdapter_Execute_IncludesReasoningEffortOverride(t *testing.T)
 
 	provider := testutil.NewMockSandboxProvider()
 	provider.ExecFn = func(ctx context.Context, sb *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
-		if strings.HasPrefix(cmd, "claude") {
+		if strings.Contains(cmd, "claude --print") {
 			_, _ = stdout.Write([]byte(`{"type":"assistant","content":"done"}`))
 			return 0, nil
 		}
