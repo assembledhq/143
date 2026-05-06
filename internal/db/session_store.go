@@ -1446,6 +1446,32 @@ func (s *SessionStore) UpdateSnapshotInfo(ctx context.Context, orgID, sessionID 
 	return err
 }
 
+// UpdateWorkspaceSnapshot persists a refreshed snapshot key plus diff metadata
+// for workspace-mutating actions that are not agent turns, such as "revert this
+// tab". Unlike UpdateTurnComplete, this intentionally leaves status, current
+// turn, summary, and confidence untouched.
+func (s *SessionStore) UpdateWorkspaceSnapshot(ctx context.Context, orgID, sessionID uuid.UUID, snapshotKey string, result *models.SessionResult) error {
+	query := `
+		UPDATE sessions
+		SET snapshot_key = @snapshot_key,
+		    sandbox_state = 'snapshotted',
+		    last_activity_at = now(),
+		    diff = COALESCE(@diff, diff),
+		    base_commit_sha = COALESCE(@base_commit_sha, base_commit_sha),
+		    diff_collected_at = COALESCE(@diff_collected_at, diff_collected_at)
+		WHERE id = @id AND org_id = @org_id`
+
+	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
+		"id":                sessionID,
+		"org_id":            orgID,
+		"snapshot_key":      snapshotKey,
+		"diff":              result.Diff,
+		"base_commit_sha":   result.DiffBaseCommitSHA,
+		"diff_collected_at": result.DiffCollectedAt,
+	})
+	return err
+}
+
 // UpdateSandboxState changes only the sandbox lifecycle column. It deliberately
 // does NOT touch last_activity_at because the reaper calls this to mark
 // long-completed sessions as 'destroyed' during snapshot cleanup — bumping the

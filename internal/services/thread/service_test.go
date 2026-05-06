@@ -24,6 +24,7 @@ type mockThreadStore struct {
 	claimIdleFn        func(ctx context.Context, orgID, sessionID, threadID uuid.UUID) (models.SessionThread, error)
 	updateStatusFn     func(ctx context.Context, orgID, threadID uuid.UUID, status models.ThreadStatus) error
 	incrementPendingFn func(ctx context.Context, orgID, threadID uuid.UUID) error
+	pendingCalls       []uuid.UUID
 }
 
 func (m *mockThreadStore) Create(ctx context.Context, t *models.SessionThread, max int) error {
@@ -62,6 +63,7 @@ func (m *mockThreadStore) UpdateStatus(ctx context.Context, orgID, threadID uuid
 }
 
 func (m *mockThreadStore) IncrementPendingMessages(ctx context.Context, orgID, threadID uuid.UUID) error {
+	m.pendingCalls = append(m.pendingCalls, threadID)
 	if m.incrementPendingFn != nil {
 		return m.incrementPendingFn(ctx, orgID, threadID)
 	}
@@ -77,6 +79,7 @@ type mockSessionStore struct {
 	claimIdleFn      func(ctx context.Context, orgID, sessionID uuid.UUID) (models.Session, error)
 	claimForResumeFn func(ctx context.Context, orgID, sessionID uuid.UUID) (models.Session, error)
 	updateStatusFn   func(ctx context.Context, orgID, sessionID uuid.UUID, status string) error
+	updateCalls      []string
 }
 
 func (m *mockSessionStore) GetByID(ctx context.Context, orgID, sessionID uuid.UUID) (models.Session, error) {
@@ -101,6 +104,7 @@ func (m *mockSessionStore) ClaimForResume(ctx context.Context, orgID, sessionID 
 }
 
 func (m *mockSessionStore) UpdateStatus(ctx context.Context, orgID, sessionID uuid.UUID, status string) error {
+	m.updateCalls = append(m.updateCalls, status)
 	if m.updateStatusFn != nil {
 		return m.updateStatusFn(ctx, orgID, sessionID, status)
 	}
@@ -519,11 +523,13 @@ func TestService_SendMessage(t *testing.T) {
 					msg.CreatedAt = time.Now()
 					return nil
 				}
-				deps.jobStore.enqueueFn = func(_ context.Context, _ uuid.UUID, queue, jobType string, payload any, _ int, _ *string) (uuid.UUID, error) {
+				deps.jobStore.enqueueFn = func(_ context.Context, _ uuid.UUID, queue, jobType string, payload any, _ int, dedupeKey *string) (uuid.UUID, error) {
 					require.Equal(t, "agent", queue, "thread messages should use the agent queue")
 					require.Equal(t, "continue_session", jobType, "thread messages should reuse the continue-session worker")
 					require.IsType(t, map[string]string{}, payload, "thread message payload should be string keyed")
 					require.Equal(t, threadID.String(), payload.(map[string]string)["thread_id"], "thread id should be included for worker attribution")
+					require.NotNil(t, dedupeKey, "continue-session enqueue should carry a dedupe key")
+					require.Equal(t, db.ContinueSessionDedupeKey(sessionID), *dedupeKey, "continue-session dedupe should be keyed by session so concurrent tabs serialize on the shared sandbox")
 					return uuid.New(), nil
 				}
 			},
@@ -690,7 +696,7 @@ func TestService_SendMessage(t *testing.T) {
 			expectErr: ErrThreadNotIdle,
 		},
 		{
-			name: "running limit reached",
+			name: "running limit reached queues the message instead of rejecting it",
 			input: SendMessageInput{
 				SessionID: sessionID,
 				OrgID:     orgID,
@@ -705,8 +711,21 @@ func TestService_SendMessage(t *testing.T) {
 				deps.threadStore.claimIdleFn = func(_ context.Context, _, _, _ uuid.UUID) (models.SessionThread, error) {
 					return models.SessionThread{}, db.ErrThreadRunningLimitReached
 				}
+				deps.threadStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
+					return models.SessionThread{ID: threadID, SessionID: sessionID, OrgID: orgID, CurrentTurn: 2, Status: models.ThreadStatusIdle}, nil
+				}
+				deps.messageStore.createFn = func(_ context.Context, msg *models.SessionMessage) error {
+					msg.ID = 77
+					require.NotNil(t, msg.ThreadID, "queued thread message should retain thread attribution")
+					require.Equal(t, threadID, *msg.ThreadID, "queued thread message should target the requested thread")
+					require.Equal(t, 3, msg.TurnNumber, "queued message should use the next turn number for that thread")
+					return nil
+				}
+				deps.jobStore.enqueueFn = func(_ context.Context, _ uuid.UUID, _, _ string, _ any, _ int, _ *string) (uuid.UUID, error) {
+					require.Fail(t, "queued thread message should not enqueue work until a running slot opens")
+					return uuid.Nil, nil
+				}
 			},
-			expectErr: ErrRunningLimitReached,
 		},
 		{
 			name: "session mismatch reverts to idle",
@@ -741,6 +760,29 @@ func TestService_SendMessage(t *testing.T) {
 			},
 		},
 		{
+			name: "message creation failure does not revert sibling-owned session to idle",
+			input: SendMessageInput{
+				SessionID: sessionID,
+				OrgID:     orgID,
+				ThreadID:  threadID,
+				Message:   "hi",
+			},
+			setupDeps: func(deps *testDeps) {
+				deps.threadStore.claimIdleFn = func(_ context.Context, _, _, _ uuid.UUID) (models.SessionThread, error) {
+					return models.SessionThread{ID: threadID, SessionID: sessionID, OrgID: orgID, CurrentTurn: 1}, nil
+				}
+				deps.sessionStore.claimIdleFn = func(_ context.Context, _, _ uuid.UUID) (models.Session, error) {
+					return models.Session{}, fmt.Errorf("session already running")
+				}
+				deps.sessionStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.Session, error) {
+					return models.Session{ID: sessionID, OrgID: orgID, Status: string(models.SessionStatusRunning)}, nil
+				}
+				deps.messageStore.createFn = func(_ context.Context, _ *models.SessionMessage) error {
+					return fmt.Errorf("db error")
+				}
+			},
+		},
+		{
 			name: "enqueue failure reverts to idle",
 			input: SendMessageInput{
 				SessionID: sessionID,
@@ -751,6 +793,34 @@ func TestService_SendMessage(t *testing.T) {
 			setupDeps: func(deps *testDeps) {
 				deps.threadStore.claimIdleFn = func(_ context.Context, _, _, _ uuid.UUID) (models.SessionThread, error) {
 					return models.SessionThread{ID: threadID, SessionID: sessionID, OrgID: orgID, CurrentTurn: 1}, nil
+				}
+				deps.messageStore.createFn = func(_ context.Context, msg *models.SessionMessage) error {
+					msg.ID = 42
+					return nil
+				}
+				deps.jobStore.enqueueFn = func(_ context.Context, _ uuid.UUID, _, _ string, _ any, _ int, _ *string) (uuid.UUID, error) {
+					return uuid.Nil, fmt.Errorf("queue down")
+				}
+			},
+			expectErr: ErrEnqueueFailed,
+		},
+		{
+			name: "enqueue failure does not revert sibling-owned session to idle",
+			input: SendMessageInput{
+				SessionID: sessionID,
+				OrgID:     orgID,
+				ThreadID:  threadID,
+				Message:   "hi",
+			},
+			setupDeps: func(deps *testDeps) {
+				deps.threadStore.claimIdleFn = func(_ context.Context, _, _, _ uuid.UUID) (models.SessionThread, error) {
+					return models.SessionThread{ID: threadID, SessionID: sessionID, OrgID: orgID, CurrentTurn: 1}, nil
+				}
+				deps.sessionStore.claimIdleFn = func(_ context.Context, _, _ uuid.UUID) (models.Session, error) {
+					return models.Session{}, fmt.Errorf("session already running")
+				}
+				deps.sessionStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.Session, error) {
+					return models.Session{ID: sessionID, OrgID: orgID, Status: string(models.SessionStatusRunning)}, nil
 				}
 				deps.messageStore.createFn = func(_ context.Context, msg *models.SessionMessage) error {
 					msg.ID = 42
@@ -954,6 +1024,9 @@ func TestService_SendMessage(t *testing.T) {
 			if tt.expectErr != nil {
 				require.ErrorIs(t, err, tt.expectErr, "should return expected error")
 				require.Nil(t, result, "should not return a result on error")
+				if tt.name == "enqueue failure does not revert sibling-owned session to idle" || tt.name == "message creation failure does not revert sibling-owned session to idle" {
+					require.Empty(t, deps.sessionStore.updateCalls, "SendMessage should leave the parent session running when a sibling thread already owns it")
+				}
 				return
 			}
 			switch tt.name {
@@ -963,10 +1036,18 @@ func TestService_SendMessage(t *testing.T) {
 				require.Error(t, err, "should return error on message creation failure")
 				return
 			}
+			if tt.name == "message creation failure does not revert sibling-owned session to idle" {
+				require.Error(t, err, "should return error on message creation failure even when sibling owns the parent session")
+				require.Empty(t, deps.sessionStore.updateCalls, "SendMessage should leave the parent session running when a sibling thread already owns it")
+				return
+			}
 			require.NoError(t, err, "should not return an error")
 			require.NotNil(t, result, "should return a result")
 			require.NotNil(t, result.Message, "should return a message")
 			require.Equal(t, models.MessageRoleUser, result.Message.Role, "should set role to user")
+			if tt.name == "running limit reached queues the message instead of rejecting it" {
+				require.Equal(t, []uuid.UUID{threadID}, deps.threadStore.pendingCalls, "queued send should increment the pending message count for that thread")
+			}
 		})
 	}
 }
