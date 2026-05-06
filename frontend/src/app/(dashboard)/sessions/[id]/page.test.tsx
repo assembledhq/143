@@ -4484,6 +4484,33 @@ describe('SessionDetailPage', () => {
     expect(screen.getByTitle('Add files, photos, or a Linear issue')).not.toBeDisabled();
   });
 
+  it('shows the shared add menu items in the continue-session composer', async () => {
+    const idleSession: Session = {
+      ...mockSessions[0],
+      status: 'idle',
+      completed_at: undefined,
+      current_turn: 1,
+      sandbox_state: 'snapshotted',
+      snapshot_key: 'snapshot/test',
+    };
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({ data: idleSession } satisfies SingleResponse<Session>);
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+    const user = userEvent.setup();
+
+    await screen.findByPlaceholderText('Send a follow-up message...');
+    await user.click(screen.getByTitle('Add files, photos, or a Linear issue'));
+
+    expect(await screen.findByRole('menuitem', { name: 'Upload files or photos' })).toBeInTheDocument();
+    expect(screen.getByRole('menuitem', { name: 'Add image URL' })).toBeInTheDocument();
+    expect(screen.getByRole('menuitem', { name: 'Add linear issue' })).toBeInTheDocument();
+  });
+
   it('uploads an image pasted into the follow-up prompt and shows it in the attachment strip', async () => {
     const idleSession: Session = {
       ...mockSessions[0],
@@ -4521,6 +4548,33 @@ describe('SessionDetailPage', () => {
       expect(uploadSpy).toHaveBeenCalledWith(file);
     });
     expect(await screen.findByRole('button', { name: 'Preview pasted-follow-up.png' })).toBeInTheDocument();
+  });
+
+  it('adds an image URL from the continue-session dropdown and shows it in the attachment strip', async () => {
+    const idleSession: Session = {
+      ...mockSessions[0],
+      status: 'idle',
+      completed_at: undefined,
+      current_turn: 1,
+      sandbox_state: 'snapshotted',
+    };
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({ data: idleSession } satisfies SingleResponse<Session>);
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+    const user = userEvent.setup();
+
+    await screen.findByPlaceholderText('Send a follow-up message...');
+    await user.click(screen.getByTitle('Add files, photos, or a Linear issue'));
+    await user.click(await screen.findByRole('menuitem', { name: 'Add image URL' }));
+    await user.type(screen.getByRole('textbox', { name: 'Image URL' }), 'https://example.com/follow-up-shot.png');
+    await user.click(screen.getByRole('button', { name: 'Add' }));
+
+    expect(await screen.findByRole('button', { name: 'Preview follow-up-shot.png' })).toBeInTheDocument();
   });
 
   it('shows Codex agent type label', async () => {
@@ -4568,7 +4622,7 @@ describe('SessionDetailPage', () => {
     const user = userEvent.setup();
 
     await user.click(screen.getByTitle('Add files, photos, or a Linear issue'));
-    await user.click(await screen.findByRole('menuitem', { name: 'Link Linear issue' }));
+    await user.click(await screen.findByRole('menuitem', { name: 'Add linear issue' }));
 
     const linearInput = await screen.findByLabelText('Linear issue id or URL');
     await user.type(linearInput, 'ACS-1234');
@@ -4601,7 +4655,7 @@ describe('SessionDetailPage', () => {
     const user = userEvent.setup();
 
     await user.click(screen.getByTitle('Add files, photos, or a Linear issue'));
-    await user.click(await screen.findByRole('menuitem', { name: 'Link Linear issue' }));
+    await user.click(await screen.findByRole('menuitem', { name: 'Add linear issue' }));
 
     const linearInput = await screen.findByLabelText('Linear issue id or URL');
     await user.type(linearInput, 'fix the bug');
