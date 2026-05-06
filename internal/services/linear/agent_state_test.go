@@ -8,6 +8,7 @@ import (
 )
 
 func TestMilestoneActivity(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name      string
 		event     MilestoneEvent
@@ -62,7 +63,9 @@ func TestMilestoneActivity(t *testing.T) {
 		},
 	}
 	for _, tc := range tests {
+		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			activity, ok := MilestoneActivity(tc.event, tc.prNumber)
 			if ok != tc.wantOK {
 				t.Fatalf("MilestoneActivity ok=%v, want %v", ok, tc.wantOK)
@@ -90,6 +93,7 @@ func TestMilestoneActivity(t *testing.T) {
 }
 
 func TestBootstrapActivity(t *testing.T) {
+	t.Parallel()
 	a := BootstrapActivity("ACS-1234")
 	if a.Type != models.LinearAgentActivityThought {
 		t.Errorf("Type=%q want thought", a.Type)
@@ -106,6 +110,7 @@ func TestBootstrapActivity(t *testing.T) {
 }
 
 func TestBootstrapActivity_NoIdentifier(t *testing.T) {
+	t.Parallel()
 	a := BootstrapActivity("")
 	if strings.Contains(a.Body, "<nil>") || strings.Contains(a.Body, "%!") {
 		t.Errorf("Body=%q must not contain stray formatting placeholders when identifier is empty", a.Body)
@@ -113,6 +118,7 @@ func TestBootstrapActivity_NoIdentifier(t *testing.T) {
 }
 
 func TestUnmappedRepoActivity(t *testing.T) {
+	t.Parallel()
 	a := UnmappedRepoActivity("Backend")
 	if a.Type != models.LinearAgentActivityResponse {
 		t.Errorf("Type=%q want response", a.Type)

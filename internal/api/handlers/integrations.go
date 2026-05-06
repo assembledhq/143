@@ -1458,16 +1458,6 @@ func (h *IntegrationHandler) fetchLinearViewer(ctx context.Context, accessToken 
 	}, nil
 }
 
-// fetchLinearWorkspace is preserved for callers that don't care about the
-// app-user fields. New code should call fetchLinearViewer directly.
-func (h *IntegrationHandler) fetchLinearWorkspace(ctx context.Context, accessToken string) (string, string, error) {
-	info, err := h.fetchLinearViewer(ctx, accessToken)
-	if err != nil {
-		return "", "", err
-	}
-	return info.WorkspaceID, info.WorkspaceName, nil
-}
-
 // --- Sentry token exchange ---
 
 func (h *IntegrationHandler) exchangeSentryCode(ctx context.Context, code string) (*sentryTokenResponse, error) {

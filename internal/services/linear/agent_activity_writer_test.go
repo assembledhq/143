@@ -106,6 +106,7 @@ func newWriterTestRig(t *testing.T) *writerTestRig {
 }
 
 func TestAgentActivityWriter_HappyPath(t *testing.T) {
+	t.Parallel()
 	rig := newWriterTestRig(t)
 
 	// Reserve succeeds (Reserved=true).
@@ -142,6 +143,7 @@ func TestAgentActivityWriter_HappyPath(t *testing.T) {
 }
 
 func TestAgentActivityWriter_DuplicateShortCircuits(t *testing.T) {
+	t.Parallel()
 	rig := newWriterTestRig(t)
 
 	// Reserve hits ON CONFLICT — Reserved=false.
@@ -170,6 +172,7 @@ func TestAgentActivityWriter_DuplicateShortCircuits(t *testing.T) {
 }
 
 func TestAgentActivityWriter_LinearFailureKeepsReservation(t *testing.T) {
+	t.Parallel()
 	rig := newWriterTestRig(t)
 
 	// Reserve succeeds.
@@ -201,6 +204,7 @@ func TestAgentActivityWriter_LinearFailureKeepsReservation(t *testing.T) {
 }
 
 func TestAgentActivityWriter_PinSessionStatePropagates(t *testing.T) {
+	t.Parallel()
 	rig := newWriterTestRig(t)
 
 	rig.mock.ExpectQuery("INSERT INTO linear_agent_activity_log").
@@ -230,6 +234,7 @@ func TestAgentActivityWriter_PinSessionStatePropagates(t *testing.T) {
 }
 
 func TestAgentActivityWriter_RejectsMissingFields(t *testing.T) {
+	t.Parallel()
 	rig := newWriterTestRig(t)
 
 	_, err := rig.writer.Emit(context.Background(), EmitInput{
