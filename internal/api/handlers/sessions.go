@@ -221,6 +221,25 @@ func looksLikeLinearReference(refs []models.SessionInputReference) bool {
 	return false
 }
 
+func linearReferenceText(refs []models.SessionInputReference) string {
+	if len(refs) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(refs)*3)
+	for _, ref := range refs {
+		if ref.Display != "" {
+			parts = append(parts, ref.Display)
+		}
+		if ref.ID != "" && ref.ID != ref.Display {
+			parts = append(parts, ref.ID)
+		}
+		if ref.Token != "" && ref.Token != ref.Display && ref.Token != ref.ID {
+			parts = append(parts, ref.Token)
+		}
+	}
+	return strings.Join(parts, "\n")
+}
+
 // canBypassMissingMessageForLinear is the same check as looksLikeLinearReference
 // tightened with the team-key allowlist, so a malformed "FOO-123" can no
 // longer wave the request past MISSING_MESSAGE. URL refs always pass — a
@@ -1772,8 +1791,8 @@ func (h *SessionHandler) SendMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	body.Message = strings.TrimSpace(body.Message)
-	if body.Message == "" && len(body.Images) == 0 {
-		writeError(w, r, http.StatusBadRequest, "MISSING_MESSAGE", "message or images are required")
+	if body.Message == "" && len(body.Images) == 0 && len(body.References) == 0 {
+		writeError(w, r, http.StatusBadRequest, "MISSING_MESSAGE", "message, images, or references are required")
 		return
 	}
 	for _, reference := range body.References {
@@ -1876,7 +1895,7 @@ func (h *SessionHandler) SendMessage(w http.ResponseWriter, r *http.Request) {
 				writeError(w, r, http.StatusInternalServerError, "CREATE_FAILED", "failed to create message", err)
 				return
 			}
-			h.maybeLinkLinearMidSession(r.Context(), orgID, sessionID, body.Message, userID)
+			h.maybeLinkLinearMidSession(r.Context(), orgID, sessionID, body.Message, linearReferenceText(body.References), userID)
 			writeJSON(w, http.StatusCreated, models.SingleResponse[models.SessionMessage]{Data: *msg})
 			return
 		}
@@ -1918,7 +1937,7 @@ func (h *SessionHandler) SendMessage(w http.ResponseWriter, r *http.Request) {
 		committed = true
 
 		h.emitReviewCommentResolutionAudits(r, sessionID, msg.ID, resolvedComments)
-		h.maybeLinkLinearMidSession(r.Context(), orgID, sessionID, body.Message, userID)
+		h.maybeLinkLinearMidSession(r.Context(), orgID, sessionID, body.Message, linearReferenceText(body.References), userID)
 		writeJSON(w, http.StatusCreated, models.SingleResponse[models.SessionMessage]{Data: *msg})
 		return
 	}
@@ -2048,7 +2067,7 @@ func (h *SessionHandler) SendMessage(w http.ResponseWriter, r *http.Request) {
 			marshalAuditDetails(h.logger, questionDetails))
 	}
 	h.emitReviewCommentResolutionAudits(r, sessionID, msg.ID, resolvedComments)
-	h.maybeLinkLinearMidSession(r.Context(), orgID, sessionID, body.Message, userID)
+	h.maybeLinkLinearMidSession(r.Context(), orgID, sessionID, body.Message, linearReferenceText(body.References), userID)
 
 	writeJSON(w, http.StatusCreated, models.SingleResponse[models.SessionMessage]{Data: *msg})
 }
@@ -2068,7 +2087,7 @@ const midSessionLinkTimeout = 30 * time.Second
 // has already been committed and the agent will see Linear refs as text
 // regardless of whether the side-band link row gets created. This mirrors the
 // design 62 fail-soft contract on the async post-create catch-up path.
-func (h *SessionHandler) maybeLinkLinearMidSession(ctx context.Context, orgID, sessionID uuid.UUID, messageBody string, userID *uuid.UUID) {
+func (h *SessionHandler) maybeLinkLinearMidSession(ctx context.Context, orgID, sessionID uuid.UUID, messageBody, referenceText string, userID *uuid.UUID) {
 	linker := h.getLinearLinker()
 	if linker == nil {
 		return
@@ -2078,10 +2097,11 @@ func (h *SessionHandler) maybeLinkLinearMidSession(ctx context.Context, orgID, s
 		bgCtx, cancel := context.WithTimeout(detached, midSessionLinkTimeout)
 		defer cancel()
 		if err := linker.ResolveAndLinkMidSession(bgCtx, linear.MidSessionInput{
-			OrgID:       orgID,
-			SessionID:   sessionID,
-			MessageBody: messageBody,
-			UserID:      userID,
+			OrgID:         orgID,
+			SessionID:     sessionID,
+			MessageBody:   messageBody,
+			ReferenceText: referenceText,
+			UserID:        userID,
 		}); err != nil {
 			h.logger.Warn().Err(err).
 				Str("session_id", sessionID.String()).
@@ -2576,26 +2596,13 @@ func (h *SessionHandler) CreateManual(w http.ResponseWriter, r *http.Request) {
 	}
 	if linker != nil {
 		userID := manualTriggeredByUserID
-		referenceText := ""
-		if len(body.References) > 0 {
-			var refDisplays []string
-			for _, ref := range body.References {
-				if ref.Display != "" {
-					refDisplays = append(refDisplays, ref.Display)
-				}
-				if ref.ID != "" && ref.ID != ref.Display {
-					refDisplays = append(refDisplays, ref.ID)
-				}
-			}
-			referenceText = strings.Join(refDisplays, "\n")
-		}
 		linearResult, linkErr := linker.ResolveAndLinkAtCreate(r.Context(), linear.CreateInput{
 			OrgID:                   orgID,
 			SessionID:               session.ID,
 			MessageBody:             body.Message,
 			SessionTitle:            title,
 			BranchName:              body.Branch,
-			ReferenceText:           referenceText,
+			ReferenceText:           linearReferenceText(body.References),
 			UserID:                  userID,
 			LinearPrivate:           body.LinearPrivate,
 			LinearStateSyncDisabled: body.LinearStateSyncDisabled,
