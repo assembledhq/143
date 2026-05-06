@@ -27,16 +27,8 @@ import {
   PanelBottomOpen,
   Clock,
   MessageSquare,
-  Paperclip,
   Pencil,
-  Plus,
 } from "lucide-react";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
 import { LinearIcon } from "@/components/linear-icon";
 import { looksLikeLinearRef } from "@/lib/linear-refs";
 import { getClipboardFiles } from "@/lib/clipboard-files";
@@ -85,6 +77,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { ChatTimeline } from "@/components/chat-timeline";
+import { SessionComposerAttachmentMenu } from "@/components/session-composer-attachment-menu";
 import { SessionComposerTriggerPicker, flattenGroups, type TriggerPickerGroup, type TriggerPickerPosition } from "@/components/session-composer-trigger-picker";
 import { useSessionComposerSlashCommands } from "@/hooks/use-session-composer-slash-commands";
 import {
@@ -789,6 +782,7 @@ function SessionComposer({
   isUploading,
   onUpload,
   onPasteFiles,
+  onAddAttachment,
   onRemoveAttachment,
   openComments,
   availableModels,
@@ -823,6 +817,7 @@ function SessionComposer({
   isUploading: boolean;
   onUpload: (event: React.ChangeEvent<HTMLInputElement>) => void;
   onPasteFiles: (files: File[]) => Promise<void>;
+  onAddAttachment: (url: string) => void;
   onRemoveAttachment: (url: string) => void;
   openComments: SessionReviewComment[];
   availableModels: readonly string[];
@@ -876,6 +871,8 @@ function SessionComposer({
   const [triggerDismissed, setTriggerDismissed] = useState(false);
   const [pickerPosition, setPickerPosition] = useState<TriggerPickerPosition | null>(null);
   const [mobileSettingsOpen, setMobileSettingsOpen] = useState(false);
+  const [showImageInput, setShowImageInput] = useState(false);
+  const [imageURL, setImageURL] = useState("");
   const [showLinearInput, setShowLinearInput] = useState(false);
   const [linearInput, setLinearInput] = useState("");
   const [linearInputError, setLinearInputError] = useState<string | null>(null);
@@ -890,6 +887,19 @@ function SessionComposer({
       linearInputRef.current?.focus();
     }
   }, [showLinearInput]);
+
+  function addImageURL() {
+    const trimmed = imageURL.trim();
+    if (!trimmed) {
+      return;
+    }
+    onAddAttachment(trimmed);
+    setImageURL("");
+    setShowImageInput(false);
+    requestAnimationFrame(() => {
+      textareaRef.current?.focus();
+    });
+  }
 
   function addLinearLink() {
     const trimmed = linearInput.trim();
@@ -1399,6 +1409,21 @@ function SessionComposer({
             className="px-3 pb-2"
           />
 
+          {showImageInput && (
+            <div className="flex items-center gap-2 px-3 pb-2">
+              <Input
+                value={imageURL}
+                onChange={(event) => setImageURL(event.target.value)}
+                placeholder="https://example.com/screenshot.png"
+                aria-label="Image URL"
+                className="h-8"
+              />
+              <Button type="button" variant="outline" size="sm" onClick={addImageURL}>
+                Add
+              </Button>
+            </div>
+          )}
+
           {showLinearInput && (
             <div className="flex flex-col gap-1 px-3 pb-2">
               <div className="flex items-center gap-2">
@@ -1443,34 +1468,16 @@ function SessionComposer({
               <>
                 <div className="flex items-center gap-2">
                   <DisabledTooltip disabled={!canSendMessage} content={attachDisabledReason}>
-                    <DropdownMenu>
-                      <DropdownMenuTrigger asChild>
-                        <Button
-                          type="button"
-                          size="icon"
-                          variant="ghost"
-                          className="h-8 w-8 shrink-0 rounded-lg text-muted-foreground hover:text-foreground"
-                          title="Add files, photos, or a Linear issue"
-                          aria-label="Add files, photos, or a Linear issue"
-                          disabled={!canSendMessage}
-                        >
-                          {isUploading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4" />}
-                        </Button>
-                      </DropdownMenuTrigger>
-                      <DropdownMenuContent align="start">
-                        <DropdownMenuItem
-                          disabled={isUploading}
-                          onClick={() => uploadInputRef.current?.click()}
-                        >
-                          <Paperclip className="mr-2 h-4 w-4" />
-                          Upload files or photos
-                        </DropdownMenuItem>
-                        <DropdownMenuItem onClick={() => setShowLinearInput(true)}>
-                          <LinearIcon className="mr-2 h-4 w-4" />
-                          Link Linear issue
-                        </DropdownMenuItem>
-                      </DropdownMenuContent>
-                    </DropdownMenu>
+                    <SessionComposerAttachmentMenu
+                      disabled={!canSendMessage}
+                      isUploading={isUploading}
+                      buttonAriaLabel="Add files, photos, or a Linear issue"
+                      buttonTitle="Add files, photos, or a Linear issue"
+                      buttonClassName="h-8 w-8 shrink-0 rounded-lg text-muted-foreground hover:text-foreground"
+                      onUploadFiles={() => uploadInputRef.current?.click()}
+                      onAddImageURL={() => setShowImageInput(true)}
+                      onAddLinearIssue={() => setShowLinearInput(true)}
+                    />
                   </DisabledTooltip>
                   <Button
                     type="button"
@@ -1537,34 +1544,16 @@ function SessionComposer({
             ) : (
               <div className="flex items-center gap-1">
                 <DisabledTooltip disabled={!canSendMessage} content={attachDisabledReason}>
-                  <DropdownMenu>
-                    <DropdownMenuTrigger asChild>
-                      <Button
-                        type="button"
-                        size="icon"
-                        variant="ghost"
-                        className="h-8 w-8 shrink-0 rounded-lg text-muted-foreground hover:text-foreground"
-                        title="Add files, photos, or a Linear issue"
-                        aria-label="Add files, photos, or a Linear issue"
-                        disabled={!canSendMessage}
-                      >
-                        {isUploading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4" />}
-                      </Button>
-                    </DropdownMenuTrigger>
-                    <DropdownMenuContent align="start">
-                      <DropdownMenuItem
-                        disabled={isUploading}
-                        onClick={() => uploadInputRef.current?.click()}
-                      >
-                        <Paperclip className="mr-2 h-4 w-4" />
-                        Upload files or photos
-                      </DropdownMenuItem>
-                      <DropdownMenuItem onClick={() => setShowLinearInput(true)}>
-                        <LinearIcon className="mr-2 h-4 w-4" />
-                        Link Linear issue
-                      </DropdownMenuItem>
-                    </DropdownMenuContent>
-                  </DropdownMenu>
+                  <SessionComposerAttachmentMenu
+                    disabled={!canSendMessage}
+                    isUploading={isUploading}
+                    buttonAriaLabel="Add files, photos, or a Linear issue"
+                    buttonTitle="Add files, photos, or a Linear issue"
+                    buttonClassName="h-8 w-8 shrink-0 rounded-lg text-muted-foreground hover:text-foreground"
+                    onUploadFiles={() => uploadInputRef.current?.click()}
+                    onAddImageURL={() => setShowImageInput(true)}
+                    onAddLinearIssue={() => setShowLinearInput(true)}
+                  />
                 </DisabledTooltip>
 
                 {availableModels.length > 0 && (
@@ -2995,6 +2984,10 @@ export function SessionDetailContent({ id }: { id: string }) {
     setComposerAttachments((previous) => previous.filter((attachment) => attachment !== url));
   }, []);
 
+  const handleAddComposerAttachment = useCallback((url: string) => {
+    setComposerAttachments((previous) => [...previous, url]);
+  }, []);
+
   const sendMutation = useMutation({
     mutationFn: (vars: SendMutationArgs) => {
       if (vars.activeThreadId) {
@@ -3964,6 +3957,7 @@ export function SessionDetailContent({ id }: { id: string }) {
               isUploading={composerIsUploading}
               onUpload={handleComposerUpload}
               onPasteFiles={uploadComposerFiles}
+              onAddAttachment={handleAddComposerAttachment}
               onRemoveAttachment={handleRemoveComposerAttachment}
               openComments={attachedReviewComments}
               availableModels={composerAvailableModels}
@@ -4060,6 +4054,7 @@ export function SessionDetailContent({ id }: { id: string }) {
               isUploading={composerIsUploading}
               onUpload={handleComposerUpload}
               onPasteFiles={uploadComposerFiles}
+              onAddAttachment={handleAddComposerAttachment}
               onRemoveAttachment={handleRemoveComposerAttachment}
               openComments={attachedReviewComments}
               availableModels={composerAvailableModels}
