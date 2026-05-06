@@ -5726,6 +5726,48 @@ describe('SessionDetailPage', () => {
     expect(screen.getByText('Unknown user')).toBeInTheDocument();
   });
 
+  it('shows automation provenance in the overview tab for automation-created sessions', async () => {
+    const automationSession: Session = {
+      ...mockSessions[0],
+      origin: 'automation',
+      automation_run_id: 'automation-run-1',
+      triggered_by_user_id: undefined,
+    };
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({ data: automationSession } satisfies SingleResponse<Session>);
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+
+    await screen.findAllByText('Fixed TypeError by adding null check');
+    expect(screen.getByText('Created by automation')).toBeInTheDocument();
+    expect(screen.getByText('Automation run')).toBeInTheDocument();
+  });
+
+  it('does not show automation provenance for manually created sessions', async () => {
+    const manualSession: Session = {
+      ...mockSessions[0],
+      origin: 'manual',
+      automation_run_id: undefined,
+      triggered_by_user_id: mockMembers[0].id,
+    };
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({ data: manualSession } satisfies SingleResponse<Session>);
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+
+    await screen.findAllByText('Fixed TypeError by adding null check');
+    expect(screen.queryByText('Created by automation')).not.toBeInTheDocument();
+    expect(screen.queryByText('Automation run')).not.toBeInTheDocument();
+  });
+
   it('falls back to github_login when triggering member has no display name', async () => {
     const memberWithoutName: User = {
       id: 'user-no-name',
