@@ -19,6 +19,12 @@ const (
 	FailureCategoryComplexity     = "complexity"
 	FailureCategoryCodexAuth      = "codex_auth_expired"
 	FailureCategoryClaudeCodeAuth = "claude_code_auth_expired"
+	// FailureCategoryCodexAuthInject is set when codex auth.json injection
+	// into the sandbox failed for non-auth reasons (Docker container missing,
+	// exec/write transport error, etc). Distinct from codex_auth_expired so
+	// the UI does not push the user to re-authenticate when the credential
+	// is fine.
+	FailureCategoryCodexAuthInject = "codex_auth_inject_failed"
 	// FailureCategoryTimeout marks a session that hit its configured
 	// wall-clock limit. Set explicitly by the orchestrator timeout path so
 	// classification does not depend on error-text matching in classifyFailure.

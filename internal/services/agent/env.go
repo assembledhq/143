@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"path"
 	"sort"
@@ -15,6 +16,24 @@ import (
 
 	"github.com/assembledhq/143/internal/models"
 )
+
+// ErrCodexAuthInvalid marks errors that genuinely indicate the user's ChatGPT
+// credential is unusable: refresh token revoked, refresh failed and cached
+// access token already expired, no usable subscription credential. Errors
+// from sandbox-side operations (Docker exec, file write) are NOT wrapped
+// with this sentinel. The orchestrator branches on errors.Is so that only
+// true auth failures show the "re-authenticate with ChatGPT" banner.
+var ErrCodexAuthInvalid = errors.New("codex auth invalid")
+
+// wrapCodexAuthInvalid tags err as a genuine auth failure so callers can
+// distinguish it from sandbox/transport errors via errors.Is. Returns nil
+// when err is nil so it is safe to use in a return chain.
+func wrapCodexAuthInvalid(err error) error {
+	if err == nil {
+		return nil
+	}
+	return fmt.Errorf("%w: %w", ErrCodexAuthInvalid, err)
+}
 
 // AuthError is returned by CheckAuth and parsePlan's auth-detection heuristic
 // when an agent run cannot authenticate. Callers can errors.As to distinguish
@@ -1009,7 +1028,7 @@ func (e *AgentEnv) InjectCodexAuthForUser(ctx context.Context, orgID uuid.UUID, 
 	// bypass round-robin entirely.
 	cfg, err := e.codexAuth.GetValidToken(ctx, orgID)
 	if err != nil {
-		return false, fmt.Errorf("get codex auth token: %w", err)
+		return false, wrapCodexAuthInvalid(fmt.Errorf("get codex auth token: %w", err))
 	}
 	if cfg == nil {
 		// No OAuth token — not an error, agent will use API key.
@@ -1040,7 +1059,7 @@ func (e *AgentEnv) refreshCodexSubscriptionIfNeeded(ctx context.Context, scope m
 				Msg("codex subscription needs refresh but no refresher is configured; using cached token")
 			return &cfg, nil
 		}
-		return nil, fmt.Errorf("codex subscription %s is expired and no refresh provider is configured", credID)
+		return nil, wrapCodexAuthInvalid(fmt.Errorf("codex subscription %s is expired and no refresh provider is configured", credID))
 	}
 
 	refreshed, err := refresher.RefreshTokenByID(ctx, scope, credID)
@@ -1052,7 +1071,7 @@ func (e *AgentEnv) refreshCodexSubscriptionIfNeeded(ctx context.Context, scope m
 				Msg("codex subscription refresh failed; using cached token")
 			return &cfg, nil
 		}
-		return nil, fmt.Errorf("refresh codex subscription %s: %w", credID, err)
+		return nil, wrapCodexAuthInvalid(fmt.Errorf("refresh codex subscription %s: %w", credID, err))
 	}
 	if refreshed == nil {
 		if !cfg.IsExpired() {
@@ -1061,7 +1080,7 @@ func (e *AgentEnv) refreshCodexSubscriptionIfNeeded(ctx context.Context, scope m
 				Msg("codex subscription refresh returned no token; using cached token")
 			return &cfg, nil
 		}
-		return nil, fmt.Errorf("refresh codex subscription %s returned no token", credID)
+		return nil, wrapCodexAuthInvalid(fmt.Errorf("refresh codex subscription %s returned no token", credID))
 	}
 	return refreshed, nil
 }
