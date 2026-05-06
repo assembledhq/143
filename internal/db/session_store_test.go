@@ -1053,8 +1053,8 @@ func TestSessionStore_ClaimForResume(t *testing.T) {
 			name: "resumes completed session successfully",
 			setupMock: func(mock pgxmock.PgxPoolIface) {
 				now := time.Now()
-				mock.ExpectQuery("UPDATE sessions\\s+SET status = 'running', completed_at = NULL, last_activity_at = now\\(\\)\\s+WHERE id = @id AND org_id = @org_id AND status IN \\('completed', 'pr_created', 'failed', 'cancelled', 'awaiting_input', 'needs_human_guidance'\\)\\s+AND sandbox_state != 'destroyed'\\s+RETURNING").
-					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+				mock.ExpectQuery("UPDATE sessions\\s+SET status = 'running', completed_at = NULL, last_activity_at = now\\(\\)\\s+WHERE id = @id AND org_id = @org_id AND status = ANY\\(@statuses\\)\\s+AND sandbox_state != 'destroyed'\\s+RETURNING").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(
 						pgxmock.NewRows(sessionTestColumns).AddRow(
 							newAgentSessionRow(uuid.New(), uuid.New(), uuid.New(), now)...,
@@ -1066,8 +1066,8 @@ func TestSessionStore_ClaimForResume(t *testing.T) {
 		{
 			name: "returns error when no matching row",
 			setupMock: func(mock pgxmock.PgxPoolIface) {
-				mock.ExpectQuery("UPDATE sessions\\s+SET status = 'running', completed_at = NULL, last_activity_at = now\\(\\)\\s+WHERE id = @id AND org_id = @org_id AND status IN \\('completed', 'pr_created', 'failed', 'cancelled', 'awaiting_input', 'needs_human_guidance'\\)\\s+AND sandbox_state != 'destroyed'\\s+RETURNING").
-					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+				mock.ExpectQuery("UPDATE sessions\\s+SET status = 'running', completed_at = NULL, last_activity_at = now\\(\\)\\s+WHERE id = @id AND org_id = @org_id AND status = ANY\\(@statuses\\)\\s+AND sandbox_state != 'destroyed'\\s+RETURNING").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(pgxmock.NewRows(sessionTestColumns))
 			},
 			wantErr: true,
@@ -1078,8 +1078,8 @@ func TestSessionStore_ClaimForResume(t *testing.T) {
 				now := time.Now()
 				row := newAgentSessionRow(uuid.New(), uuid.New(), uuid.New(), now)
 				row[4] = string(models.SessionStatusRunning)
-				mock.ExpectQuery("UPDATE sessions\\s+SET status = 'running', completed_at = NULL, last_activity_at = now\\(\\)\\s+WHERE id = @id AND org_id = @org_id AND status IN \\('completed', 'pr_created', 'failed', 'cancelled', 'awaiting_input', 'needs_human_guidance'\\)\\s+AND sandbox_state != 'destroyed'\\s+RETURNING").
-					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+				mock.ExpectQuery("UPDATE sessions\\s+SET status = 'running', completed_at = NULL, last_activity_at = now\\(\\)\\s+WHERE id = @id AND org_id = @org_id AND status = ANY\\(@statuses\\)\\s+AND sandbox_state != 'destroyed'\\s+RETURNING").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(
 						pgxmock.NewRows(sessionTestColumns).AddRow(row...),
 					)
@@ -1092,8 +1092,8 @@ func TestSessionStore_ClaimForResume(t *testing.T) {
 				now := time.Now()
 				row := newAgentSessionRow(uuid.New(), uuid.New(), uuid.New(), now)
 				row[4] = string(models.SessionStatusRunning)
-				mock.ExpectQuery("UPDATE sessions\\s+SET status = 'running', completed_at = NULL, last_activity_at = now\\(\\)\\s+WHERE id = @id AND org_id = @org_id AND status IN \\('completed', 'pr_created', 'failed', 'cancelled', 'awaiting_input', 'needs_human_guidance'\\)\\s+AND sandbox_state != 'destroyed'\\s+RETURNING").
-					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+				mock.ExpectQuery("UPDATE sessions\\s+SET status = 'running', completed_at = NULL, last_activity_at = now\\(\\)\\s+WHERE id = @id AND org_id = @org_id AND status = ANY\\(@statuses\\)\\s+AND sandbox_state != 'destroyed'\\s+RETURNING").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(
 						pgxmock.NewRows(sessionTestColumns).AddRow(row...),
 					)
