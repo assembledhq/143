@@ -212,10 +212,13 @@ func (h *SessionThreadHandler) UpdateThread(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
+	// Model is *string so we can distinguish "field omitted" (keep existing
+	// override) from "field present and empty" (clear the override). A plain
+	// string would collapse both to "" and silently keep stale overrides.
 	var body struct {
-		AgentType string `json:"agent_type"`
-		Model     string `json:"model"`
-		Label     string `json:"label"`
+		AgentType string  `json:"agent_type"`
+		Model     *string `json:"model"`
+		Label     string  `json:"label"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeError(w, r, http.StatusBadRequest, "INVALID_BODY", "invalid request body")
@@ -239,7 +242,7 @@ func (h *SessionThreadHandler) UpdateThread(w http.ResponseWriter, r *http.Reque
 	if err != nil {
 		switch {
 		case errors.Is(err, thread.ErrSessionNotFound), errors.Is(err, thread.ErrThreadNotFound):
-			writeError(w, r, http.StatusNotFound, "NOT_FOUND", "thread not found")
+			writeError(w, r, http.StatusNotFound, "NOT_FOUND", "session or thread not found")
 		case errors.Is(err, thread.ErrSessionTerminal):
 			writeError(w, r, http.StatusConflict, "SESSION_TERMINAL", "cannot edit tabs on a completed session")
 		case errors.Is(err, thread.ErrThreadNotEditable):

@@ -443,7 +443,7 @@ func TestService_UpdateThread(t *testing.T) {
 				OrgID:     orgID,
 				ThreadID:  threadID,
 				AgentType: "codex",
-				Model:     models.CodexModelGPT54Mini,
+				Model:     stringPtr(models.CodexModelGPT54Mini),
 				Label:     "Codex 2",
 			},
 			setupDeps: func(deps *testDeps) {
@@ -469,6 +469,75 @@ func TestService_UpdateThread(t *testing.T) {
 			},
 			expectedType:  models.AgentTypeCodex,
 			expectedLabel: "Codex 2",
+			expectedModel: stringPtr(models.CodexModelGPT54Mini),
+		},
+		{
+			name: "explicit empty model clears an existing override without switching agent",
+			input: UpdateThreadInput{
+				SessionID: sessionID,
+				OrgID:     orgID,
+				ThreadID:  threadID,
+				Model:     stringPtr(""),
+				Label:     "Codex 2",
+			},
+			setupDeps: func(deps *testDeps) {
+				existing := models.CodexModelGPT54Mini
+				deps.sessionStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.Session, error) {
+					return models.Session{ID: sessionID, OrgID: orgID, Status: "running", AgentType: models.AgentTypeCodex}, nil
+				}
+				deps.threadStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
+					return models.SessionThread{
+						ID:            threadID,
+						SessionID:     sessionID,
+						OrgID:         orgID,
+						AgentType:     models.AgentTypeCodex,
+						ModelOverride: &existing,
+						Label:         "Codex 2",
+						Status:        models.ThreadStatusIdle,
+						CurrentTurn:   0,
+					}, nil
+				}
+				deps.threadStore.updateFn = func(_ context.Context, updated *models.SessionThread) error {
+					require.Nil(t, updated.ModelOverride, "explicit empty model should clear the override")
+					return nil
+				}
+			},
+			expectedType:  models.AgentTypeCodex,
+			expectedLabel: "Codex 2",
+		},
+		{
+			name: "omitted model preserves an existing override on a label-only patch",
+			input: UpdateThreadInput{
+				SessionID: sessionID,
+				OrgID:     orgID,
+				ThreadID:  threadID,
+				Label:     "Codex 2 renamed",
+			},
+			setupDeps: func(deps *testDeps) {
+				existing := models.CodexModelGPT54Mini
+				deps.sessionStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.Session, error) {
+					return models.Session{ID: sessionID, OrgID: orgID, Status: "running", AgentType: models.AgentTypeCodex}, nil
+				}
+				deps.threadStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
+					return models.SessionThread{
+						ID:            threadID,
+						SessionID:     sessionID,
+						OrgID:         orgID,
+						AgentType:     models.AgentTypeCodex,
+						ModelOverride: &existing,
+						Label:         "Codex 2",
+						Status:        models.ThreadStatusIdle,
+						CurrentTurn:   0,
+					}, nil
+				}
+				deps.threadStore.updateFn = func(_ context.Context, updated *models.SessionThread) error {
+					require.NotNil(t, updated.ModelOverride, "label-only patch should preserve the existing model override")
+					require.Equal(t, models.CodexModelGPT54Mini, *updated.ModelOverride, "label-only patch should preserve the existing model override")
+					return nil
+				}
+			},
+			expectedType:  models.AgentTypeCodex,
+			expectedLabel: "Codex 2 renamed",
 			expectedModel: stringPtr(models.CodexModelGPT54Mini),
 		},
 		{
@@ -637,7 +706,7 @@ func TestService_UpdateThread(t *testing.T) {
 				OrgID:     orgID,
 				ThreadID:  threadID,
 				AgentType: "codex",
-				Model:     models.ClaudeCodeModelSonnet46,
+				Model:     stringPtr(models.ClaudeCodeModelSonnet46),
 				Label:     "Codex 2",
 			},
 			setupDeps: func(deps *testDeps) {
@@ -665,7 +734,7 @@ func TestService_UpdateThread(t *testing.T) {
 				OrgID:     orgID,
 				ThreadID:  threadID,
 				AgentType: "codex",
-				Model:     models.CodexModelGPT54Mini,
+				Model:     stringPtr(models.CodexModelGPT54Mini),
 				Label:     "Codex 2",
 			},
 			setupDeps: func(deps *testDeps) {

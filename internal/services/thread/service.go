@@ -128,12 +128,17 @@ type CreateThreadInput struct {
 	FileScope    []string
 }
 
+// UpdateThreadInput patches an editable (idle, current_turn=0) thread. Model
+// uses *string to distinguish three wire states:
+//   - nil:       field not present in the patch — keep the existing override
+//   - non-nil "": field present and empty — clear the override
+//   - non-nil v: field present with a value — set/validate to v
 type UpdateThreadInput struct {
 	SessionID uuid.UUID
 	OrgID     uuid.UUID
 	ThreadID  uuid.UUID
 	AgentType string
-	Model     string
+	Model     *string
 	Label     string
 }
 
@@ -341,12 +346,19 @@ func (s *Service) UpdateThread(ctx context.Context, input UpdateThreadInput) (*m
 
 	thread.AgentType = agentType
 	thread.Label = input.Label
-	if input.Model != "" {
-		if err := models.ValidateModelForAgentType(agentType, input.Model); err != nil {
+	switch {
+	case input.Model != nil && *input.Model != "":
+		if err := models.ValidateModelForAgentType(agentType, *input.Model); err != nil {
 			return nil, fmt.Errorf("%w: %w", ErrInvalidModel, err)
 		}
-		thread.ModelOverride = &input.Model
-	} else if input.AgentType != "" {
+		model := *input.Model
+		thread.ModelOverride = &model
+	case input.Model != nil:
+		// Explicit empty model — user picked the agent default.
+		thread.ModelOverride = nil
+	case input.AgentType != "":
+		// Agent switched without an explicit model: drop the inherited override
+		// because it was scoped to the previous agent.
 		thread.ModelOverride = nil
 	}
 
