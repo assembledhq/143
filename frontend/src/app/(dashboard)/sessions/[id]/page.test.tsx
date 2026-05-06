@@ -498,7 +498,7 @@ describe('SessionDetailPage', () => {
 
     renderWithProviders(<SessionDetailContent id={sessionId} />);
 
-    expect(await screen.findByRole('tab', { name: /Codex/ })).toBeInTheDocument();
+    expect(await screen.findByRole('group', { name: /Codex/ })).toBeInTheDocument();
     await waitFor(() => {
       expect(MockEventSource.instances.length).toBeGreaterThan(0);
     });
@@ -512,7 +512,7 @@ describe('SessionDetailPage', () => {
       });
     });
 
-    expect(screen.getByRole('tab', { name: /Codex/ })).toBeInTheDocument();
+    expect(screen.getByRole('group', { name: /Codex/ })).toBeInTheDocument();
   });
 
   it('does not hide vertical overflow on the detail tablist', async () => {
