@@ -2442,18 +2442,10 @@ func (h *SessionHandler) CreateManual(w http.ResponseWriter, r *http.Request) {
 		modelOverride = &body.Model
 	}
 
-	reasoningEffort := models.ReasoningEffort(body.ReasoningEffort)
-	if err := reasoningEffort.Validate(); err != nil {
+	reasoningOverride, err := parseReasoningEffortForAgent(agentType, body.ReasoningEffort)
+	if err != nil {
 		writeError(w, r, http.StatusBadRequest, "INVALID_REASONING_EFFORT", err.Error())
 		return
-	}
-	if reasoningEffort != "" && !agentType.SupportsReasoningEffortLevel(reasoningEffort) {
-		writeError(w, r, http.StatusBadRequest, "INVALID_REASONING_EFFORT", fmt.Sprintf("reasoning_effort is not supported for agent_type %q", agentType))
-		return
-	}
-	var reasoningOverride *models.ReasoningEffort
-	if reasoningEffort != "" {
-		reasoningOverride = &reasoningEffort
 	}
 
 	autonomyLevel := body.AutonomyLevel

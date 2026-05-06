@@ -1389,6 +1389,7 @@ export interface Automation {
   scope?: string;
   agent_type?: string;
   model_override?: string;
+  reasoning_effort?: Session["reasoning_effort"];
   execution_mode: string;
   max_concurrent: number;
   base_branch: string;
