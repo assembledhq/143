@@ -601,7 +601,14 @@ func (s *PRService) resumeRepairSession(ctx context.Context, pr models.PullReque
 		"session_id": claimed.ID.String(),
 		"org_id":     pr.OrgID.String(),
 	}
-	if _, err := s.jobs.EnqueueInTx(ctx, tx, pr.OrgID, "agent", "continue_session", payload, 5, &continueDedupeKey); err != nil {
+	if _, err := s.jobs.EnqueueInTxWithOpts(ctx, tx, pr.OrgID, db.EnqueueOpts{
+		Queue:        "agent",
+		JobType:      "continue_session",
+		Payload:      payload,
+		Priority:     5,
+		DedupeKey:    &continueDedupeKey,
+		TargetNodeID: models.SessionWorkerTarget(&claimed),
+	}); err != nil {
 		return nil, err
 	}
 	repairRun := &models.PullRequestRepairRun{

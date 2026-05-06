@@ -1126,6 +1126,23 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 					Msg("continue_session cleared stale orphan container_id; retrying against the clean row")
 				return &RetryableError{Err: err, RetryAfter: &retryAfter}
 			}
+			if errors.Is(err, agent.ErrSandboxOnDifferentNode) {
+				// We claimed a job whose session sandbox lives on a sibling
+				// worker. Release it so the correct node can pick it up. A
+				// 5s delay (longer than the stale-orphan path) avoids tight
+				// loops if the wrong-node worker keeps polling first while
+				// the right one is briefly busy. With node-affinity routing
+				// (target_node_id on jobs) in place this branch is rare —
+				// it only fires for jobs enqueued before the affinity rolled
+				// out, or as a defense-in-depth catch for bugs that bypass
+				// the pinning.
+				retryAfter := 5 * time.Second
+				logger.Info().
+					Str("session_id", sessionID.String()).
+					Err(err).
+					Msg("continue_session claimed on the wrong node; releasing for the correct worker")
+				return &RetryableError{Err: err, RetryAfter: &retryAfter}
+			}
 			if errors.Is(err, agent.ErrSandboxPreviewRace) {
 				// A preview hydrate published the live container first. Retry
 				// so the next attempt fetches the updated session row and

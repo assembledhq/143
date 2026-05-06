@@ -125,10 +125,11 @@ type drainStubJobs struct {
 }
 
 type drainStubEnqueue struct {
-	queue     string
-	jobType   string
-	payload   any
-	dedupeKey string
+	queue        string
+	jobType      string
+	payload      any
+	dedupeKey    string
+	targetNodeID string
 }
 
 func (j *drainStubJobs) Enqueue(_ context.Context, _ uuid.UUID, queue, jobType string, payload any, _ int, dedupeKey *string) (uuid.UUID, error) {
@@ -144,6 +145,28 @@ func (j *drainStubJobs) Enqueue(_ context.Context, _ uuid.UUID, queue, jobType s
 		jobType:   jobType,
 		payload:   payload,
 		dedupeKey: key,
+	})
+	return uuid.New(), nil
+}
+
+func (j *drainStubJobs) EnqueueWithTarget(_ context.Context, _ uuid.UUID, queue, jobType string, payload any, _ int, dedupeKey *string, targetNodeID *string) (uuid.UUID, error) {
+	if j.err != nil {
+		return uuid.Nil, j.err
+	}
+	key := ""
+	if dedupeKey != nil {
+		key = *dedupeKey
+	}
+	target := ""
+	if targetNodeID != nil {
+		target = *targetNodeID
+	}
+	j.enqueues = append(j.enqueues, drainStubEnqueue{
+		queue:        queue,
+		jobType:      jobType,
+		payload:      payload,
+		dedupeKey:    key,
+		targetNodeID: target,
 	})
 	return uuid.New(), nil
 }
