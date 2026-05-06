@@ -19,6 +19,7 @@ export interface UseAutosaveOptions<TVars> {
   coalesce?: (queued: TVars, incoming: TVars) => TVars;
   debounceMs?: number;
   errorMessage?: string;
+  invalidateOnSettled?: boolean;
 }
 
 export interface UseAutosaveResult<TVars> {
@@ -53,16 +54,19 @@ interface QueueEntry {
   inFlight: boolean;
   pendingVars: unknown;
   hasPending: boolean;
+  pendingOwnerIds: Set<string>;
   coalesce?: (queued: unknown, incoming: unknown) => unknown;
   mutationFn?: (vars: unknown) => Promise<unknown>;
   applyOptimistic?: (previous: unknown, vars: unknown) => unknown;
   errorMessage?: string;
-  listeners: Set<(status: QueueStatus) => void>;
+  invalidateOnSettled: boolean;
+  listeners: Set<(status: QueueStatus, ownerIds: ReadonlySet<string>) => void>;
 }
 
 type QueueStatus = "idle" | "saving" | "saved" | "error";
 
 const queues = new Map<string, QueueEntry>();
+let autosaveListenerID = 0;
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
@@ -108,6 +112,8 @@ function getQueue(key: QueryKey): QueueEntry {
       inFlight: false,
       pendingVars: undefined,
       hasPending: false,
+      pendingOwnerIds: new Set(),
+      invalidateOnSettled: true,
       listeners: new Set(),
     };
     queues.set(id, entry);
@@ -127,11 +133,12 @@ function maybeEvictQueue(key: string, entry: QueueEntry): void {
  */
 export function __resetAutosaveQueuesForTests(): void {
   queues.clear();
+  autosaveListenerID = 0;
 }
 
-function emit(entry: QueueEntry, status: QueueStatus): void {
+function emit(entry: QueueEntry, status: QueueStatus, ownerIds: ReadonlySet<string>): void {
   for (const listener of entry.listeners) {
-    listener(status);
+    listener(status, ownerIds);
   }
 }
 
@@ -140,25 +147,27 @@ async function run(
   entry: QueueEntry,
   vars: unknown,
   queryKey: QueryKey,
+  ownerIds: Set<string>,
 ): Promise<void> {
   entry.inFlight = true;
-  emit(entry, "saving");
+  emit(entry, "saving", ownerIds);
 
   await queryClient.cancelQueries({ queryKey });
   const previous = queryClient.getQueryData(queryKey);
   const applyOptimistic = entry.applyOptimistic!;
   const mutationFn = entry.mutationFn!;
   const errorMessage = entry.errorMessage ?? DEFAULT_ERROR_MESSAGE;
+  const invalidateOnSettled = entry.invalidateOnSettled;
   queryClient.setQueryData(queryKey, (current: unknown) => applyOptimistic(current, vars));
 
   try {
     await mutationFn(vars);
-    emit(entry, "saved");
+    emit(entry, "saved", ownerIds);
   } catch (err) {
     captureError(err, { feature: "useAutosave" });
     queryClient.setQueryData(queryKey, previous);
     toast.error(errorMessage);
-    emit(entry, "error");
+    emit(entry, "error", ownerIds);
   } finally {
     // NOTE: `inFlight` flips to false only after `invalidateQueries` settles.
     // Any `save()` call that races in between lands in the pending slot; the
@@ -171,15 +180,19 @@ async function run(
     // the optimistic cache for the failed write, so the pending run starts
     // from the rolled-back baseline and applies only the new intent.
     entry.inFlight = false;
-    await queryClient.invalidateQueries({ queryKey });
+    if (invalidateOnSettled) {
+      await queryClient.invalidateQueries({ queryKey });
+    }
     if (entry.hasPending) {
       const next = entry.pendingVars;
+      const nextOwnerIds = new Set(entry.pendingOwnerIds);
       entry.hasPending = false;
       entry.pendingVars = undefined;
+      entry.pendingOwnerIds.clear();
       // Fire the coalesced follow-up through the entry's currently-registered
       // fns (refreshed on every dispatch), so a caller who queued mid-flight
       // with updated mutationFn/applyOptimistic drives the next run.
-      void run(queryClient, entry, next, queryKey);
+      void run(queryClient, entry, next, queryKey, nextOwnerIds);
     } else {
       maybeEvictQueue(hashKey(queryKey), entry);
     }
@@ -234,9 +247,15 @@ export function useAutosave<TVars>({
   coalesce,
   debounceMs = 0,
   errorMessage = DEFAULT_ERROR_MESSAGE,
+  invalidateOnSettled = true,
 }: UseAutosaveOptions<TVars>): UseAutosaveResult<TVars> {
   const queryClient = useQueryClient();
   const [status, setStatus] = useState<AutosaveStatus>("idle");
+  const hookIDRef = useRef<string | null>(null);
+  if (hookIDRef.current === null) {
+    autosaveListenerID += 1;
+    hookIDRef.current = `autosave-${autosaveListenerID}`;
+  }
 
   // Keep latest options in refs so the stable callbacks below don't churn
   // when callers re-render. Assignment lives in an effect — matching
@@ -249,6 +268,7 @@ export function useAutosave<TVars>({
   const coalesceRef = useRef(coalesce);
   const errorMessageRef = useRef(errorMessage);
   const debounceMsRef = useRef(debounceMs);
+  const invalidateOnSettledRef = useRef(invalidateOnSettled);
   // Intentional: NO dependency array. This effect must run after every
   // commit so the refs always mirror the freshest prop/callback values a
   // parent passed in. Adding deps (e.g. `[mutationFn, applyOptimistic, ...]`)
@@ -262,6 +282,7 @@ export function useAutosave<TVars>({
     coalesceRef.current = coalesce;
     errorMessageRef.current = errorMessage;
     debounceMsRef.current = debounceMs;
+    invalidateOnSettledRef.current = invalidateOnSettled;
   });
 
   // Debounce state is local to each hook instance — two callers of the same
@@ -279,7 +300,10 @@ export function useAutosave<TVars>({
   // queryKey see consistent saving/saved/error transitions.
   useEffect(() => {
     const entry = getQueue(queryKey);
-    const listener = (next: QueueStatus) => {
+    const listener = (next: QueueStatus, ownerIds: ReadonlySet<string>) => {
+      if (!ownerIds.has(hookIDRef.current!)) {
+        return;
+      }
       setStatus(next);
       if (lingerTimerRef.current) {
         clearTimeout(lingerTimerRef.current);
@@ -349,17 +373,21 @@ export function useAutosave<TVars>({
       entry.mutationFn = (v) => mutationFnRef.current(v as TVars);
       entry.applyOptimistic = (prev, v) => applyOptimisticRef.current(prev, v as TVars);
       entry.errorMessage = errorMessageRef.current;
+      entry.invalidateOnSettled = invalidateOnSettledRef.current;
 
       if (entry.inFlight) {
         if (entry.hasPending && entry.coalesce) {
           entry.pendingVars = entry.coalesce(entry.pendingVars, vars);
+          entry.pendingOwnerIds.add(hookIDRef.current!);
         } else {
           entry.pendingVars = vars;
+          entry.pendingOwnerIds.clear();
+          entry.pendingOwnerIds.add(hookIDRef.current!);
         }
         entry.hasPending = true;
         return;
       }
-      void run(queryClient, entry, vars, queryKey);
+      void run(queryClient, entry, vars, queryKey, new Set([hookIDRef.current!]));
     },
     // queryKey identity can change per render; serializedKey is the actual dep.
     // eslint-disable-next-line react-hooks/exhaustive-deps
