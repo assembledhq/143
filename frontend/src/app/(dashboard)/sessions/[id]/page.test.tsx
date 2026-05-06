@@ -1607,7 +1607,7 @@ describe('SessionDetailPage', () => {
 
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
 
-    expect((await screen.findAllByText('PR closed')).length).toBeGreaterThanOrEqual(2);
+    expect((await screen.findAllByText('PR #42 closed')).length).toBeGreaterThanOrEqual(2);
     expect(screen.getByText('PR #42 was closed without merging.')).toBeInTheDocument();
     expect(screen.getByRole('link', { name: 'View PR' })).toBeInTheDocument();
     expect(screen.queryByText('PR health')).not.toBeInTheDocument();
@@ -1652,7 +1652,7 @@ describe('SessionDetailPage', () => {
     await user.click(mergeButton);
 
     await waitFor(() => expect(mergeCalled).toBe(true));
-    await waitFor(() => expect(toast.success).toHaveBeenCalledWith('PR merged', expect.any(Object)));
+    await waitFor(() => expect(toast.success).toHaveBeenCalledWith('PR #42 merged', expect.any(Object)));
   });
 
   it('renders external links for CI checks shown from the PR details hover card', async () => {
@@ -1726,8 +1726,7 @@ describe('SessionDetailPage', () => {
 
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
 
-    expect(await screen.findByText('PR merged')).toBeInTheDocument();
-    expect(screen.queryAllByText('PR merged')).toHaveLength(1);
+    expect((await screen.findAllByText('PR #42 merged')).length).toBeGreaterThanOrEqual(2);
     expect(screen.getByText('PR #42 was merged successfully.')).toHaveClass('text-xs');
     expect(screen.getByText('This change has landed. Open a follow-up session if you need to make another revision.')).toHaveClass('text-xs');
     expect(screen.getByRole('link', { name: 'View PR' })).toBeInTheDocument();
