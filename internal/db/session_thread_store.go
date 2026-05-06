@@ -258,17 +258,14 @@ func (s *SessionThreadStore) ClaimIdle(ctx context.Context, orgID, threadID uuid
 	return pgx.CollectOneRow(rows, pgx.RowToStructByName[models.SessionThread])
 }
 
-// ErrThreadRunningLimitReached signals that the requested thread is idle and
-// could otherwise be claimed, but the session has already reached the maximum
-// allowed number of concurrent running siblings.
+// ErrThreadRunningLimitReached signals that the requested thread is otherwise
+// claimable (idle, or in a resumable status), but the session has already
+// reached the maximum allowed number of concurrent running siblings.
 var ErrThreadRunningLimitReached = fmt.Errorf("session running thread limit reached")
 
 // ClaimIdleForSession atomically transitions an idle thread to running while
-// enforcing the session-wide running-thread cap. The CTE locks every thread
-// row in the session before evaluating sibling state so concurrent sends to
-// different idle tabs serialize on the database row locks. Allows up to
-// maxRunning sibling tabs (including this one) to be active at the same time;
-// callers should pass models.MaxRunningThreadsPerSession.
+// enforcing the session-wide running-thread cap. See claimForSession for the
+// shared CTE/cap mechanics.
 //
 // Returns ErrThreadRunningLimitReached when the target thread is idle but
 // adding it would exceed maxRunning. Callers should distinguish this from
@@ -276,6 +273,66 @@ var ErrThreadRunningLimitReached = fmt.Errorf("session running thread limit reac
 // case, queueing a pending message is appropriate; in the latter, the user is
 // trying to send to a tab whose own turn is still in flight.
 func (s *SessionThreadStore) ClaimIdleForSession(ctx context.Context, orgID, sessionID, threadID uuid.UUID, maxRunning int) (models.SessionThread, error) {
+	return s.claimForSession(ctx, claimForSessionArgs{
+		orgID:             orgID,
+		sessionID:         sessionID,
+		threadID:          threadID,
+		maxRunning:        maxRunning,
+		claimableStatuses: []string{string(models.ThreadStatusIdle)},
+		extraSetClauses:   "started_at = now(),",
+	})
+}
+
+// ClaimForResumeInSession atomically transitions a thread in a resumable
+// terminal/paused status (completed, failed, cancelled, awaiting_input) back
+// to running so a follow-up message can continue it. Mirrors
+// SessionStore.ClaimForResume at the thread layer; the resumable-status set
+// lives in models.ResumableThreadStatuses.
+//
+// Honors the same session-wide running-thread cap as ClaimIdleForSession and
+// surfaces ErrThreadRunningLimitReached the same way, so callers can keep one
+// "limit hit, queue instead" branch regardless of which claim path failed.
+//
+// Does not reset started_at — the original thread start time remains the
+// authoritative "first activity" stamp. completed_at is cleared so the row
+// reflects the new in-flight turn rather than the previous terminal state.
+func (s *SessionThreadStore) ClaimForResumeInSession(ctx context.Context, orgID, sessionID, threadID uuid.UUID, maxRunning int) (models.SessionThread, error) {
+	return s.claimForSession(ctx, claimForSessionArgs{
+		orgID:             orgID,
+		sessionID:         sessionID,
+		threadID:          threadID,
+		maxRunning:        maxRunning,
+		claimableStatuses: threadStatusStrings(models.ResumableThreadStatuses),
+		extraSetClauses:   "completed_at = NULL,",
+	})
+}
+
+// claimForSessionArgs bundles inputs for claimForSession so each call site
+// stays readable and additions (e.g. a future "preserve cancel_requested_at"
+// flag) don't ripple across positional argument lists.
+type claimForSessionArgs struct {
+	orgID, sessionID, threadID uuid.UUID
+	maxRunning                 int
+	// claimableStatuses is the set of current thread statuses from which the
+	// claim is allowed to fire. ClaimIdleForSession passes ['idle']; the
+	// resume path passes models.ResumableThreadStatuses.
+	claimableStatuses []string
+	// extraSetClauses is interpolated verbatim into the UPDATE SET clause and
+	// must end in a trailing comma when non-empty. Kept as a controlled string
+	// rather than a parameter list because the assignments differ structurally
+	// (started_at = now() vs completed_at = NULL); the values are not user
+	// input.
+	extraSetClauses string
+}
+
+// claimForSession is the shared core of ClaimIdleForSession and
+// ClaimForResumeInSession. The CTE locks every thread row in the session
+// before evaluating sibling state so concurrent sends to different tabs
+// serialize on the database row locks. Allows up to maxRunning sibling tabs
+// (including this one) to be active at the same time; callers should pass
+// models.MaxRunningThreadsPerSession.
+func (s *SessionThreadStore) claimForSession(ctx context.Context, args claimForSessionArgs) (models.SessionThread, error) {
+	maxRunning := args.maxRunning
 	if maxRunning <= 0 {
 		maxRunning = models.MaxRunningThreadsPerSession
 	}
@@ -285,25 +342,25 @@ func (s *SessionThreadStore) ClaimIdleForSession(ctx context.Context, orgID, ses
 			FROM session_threads
 			WHERE org_id = @org_id AND session_id = @session_id
 			FOR UPDATE
-		), target_idle AS (
+		), target_claimable AS (
 			SELECT 1
 			FROM locked_threads
-			WHERE id = @id AND status = 'idle'
+			WHERE id = @id AND status = ANY(@claimable_statuses)
 		), running_count AS (
 			SELECT count(*) AS n
 			FROM locked_threads
 			WHERE id <> @id
 			  AND status IN ('pending', 'running', 'awaiting_input')
 		), eligible AS (
-			-- target is idle AND adding it (siblings + 1) stays at-or-under
+			-- target is claimable AND adding it (siblings + 1) stays at-or-under
 			-- max_running, i.e. siblings_active < max_running.
 			SELECT 1
-			FROM target_idle, running_count
+			FROM target_claimable, running_count
 			WHERE running_count.n < @max_running
 		)
 		UPDATE session_threads
 		SET status = 'running',
-		    started_at = now(),
+		    ` + args.extraSetClauses + `
 		    last_activity_at = now(),
 		    cancel_requested_at = NULL
 		WHERE id = @id
@@ -313,26 +370,27 @@ func (s *SessionThreadStore) ClaimIdleForSession(ctx context.Context, orgID, ses
 		RETURNING ` + sessionThreadSelectColumns
 
 	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
-		"id":          threadID,
-		"org_id":      orgID,
-		"session_id":  sessionID,
-		"max_running": maxRunning,
+		"id":                 args.threadID,
+		"org_id":             args.orgID,
+		"session_id":         args.sessionID,
+		"max_running":        maxRunning,
+		"claimable_statuses": args.claimableStatuses,
 	})
 	if err != nil {
-		return models.SessionThread{}, fmt.Errorf("claim idle session thread: %w", err)
+		return models.SessionThread{}, fmt.Errorf("claim session thread: %w", err)
 	}
 	thread, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.SessionThread])
 	if err != nil {
 		// pgx.ErrNoRows means the WHERE-with-EXISTS predicate did not match.
-		// Best-effort distinguish "limit reached" from "not idle" by
-		// re-inspecting state without holding the FOR UPDATE lock. A sibling
-		// can transition between the failed claim and this lookup; on that
-		// race we surface the original ErrNoRows and the caller maps it to
-		// "thread not idle". Acceptable trade-off: the worst case is the user
-		// sees the busy-tab affordance instead of the queued-message one for
-		// one cycle, then retries.
+		// Best-effort distinguish "limit reached" from "status not claimable"
+		// by re-inspecting state without holding the FOR UPDATE lock. A
+		// sibling can transition between the failed claim and this lookup; on
+		// that race we surface the original ErrNoRows and the caller maps it
+		// to "thread not claimable in this status". Acceptable trade-off: the
+		// worst case is the user sees the busy-tab affordance instead of the
+		// queued-message one for one cycle, then retries.
 		if errors.Is(err, pgx.ErrNoRows) {
-			limited, lookupErr := s.isAtRunningLimit(ctx, orgID, sessionID, threadID, maxRunning)
+			limited, lookupErr := s.isAtRunningLimit(ctx, args.orgID, args.sessionID, args.threadID, maxRunning, args.claimableStatuses)
 			if lookupErr == nil && limited {
 				return models.SessionThread{}, ErrThreadRunningLimitReached
 			}
@@ -342,16 +400,17 @@ func (s *SessionThreadStore) ClaimIdleForSession(ctx context.Context, orgID, ses
 	return thread, nil
 }
 
-// isAtRunningLimit returns true when the target thread is idle (so otherwise
-// claimable) but the session already has maxRunning sibling threads active.
-// Used by ClaimIdleForSession to differentiate "limit reached" from "thread
-// status changed under us" without holding the FOR UPDATE lock.
+// isAtRunningLimit returns true when the target thread is in a claimable
+// status (so otherwise eligible) but the session already has maxRunning
+// sibling threads active. Used by claimForSession to differentiate
+// "limit reached" from "status changed under us" without holding the
+// FOR UPDATE lock.
 //
 // Uses COALESCE on the target subquery so a deleted-out-from-under-us row
 // scans as the empty string instead of erroring on NULL → string. In that
 // case we report "not limited" — the caller will fall through to its
 // generic ErrNoRows path which the service maps to ErrThreadNotFound.
-func (s *SessionThreadStore) isAtRunningLimit(ctx context.Context, orgID, sessionID, threadID uuid.UUID, maxRunning int) (bool, error) {
+func (s *SessionThreadStore) isAtRunningLimit(ctx context.Context, orgID, sessionID, threadID uuid.UUID, maxRunning int, claimableStatuses []string) (bool, error) {
 	var targetStatus string
 	var siblingActive int
 	err := s.db.QueryRow(ctx, `
@@ -364,7 +423,15 @@ func (s *SessionThreadStore) isAtRunningLimit(ctx context.Context, orgID, sessio
 	if err != nil {
 		return false, err
 	}
-	return targetStatus == string(models.ThreadStatusIdle) && siblingActive >= maxRunning, nil
+	if siblingActive < maxRunning {
+		return false, nil
+	}
+	for _, claimable := range claimableStatuses {
+		if targetStatus == claimable {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // CountActive returns the number of threads in pending/running/awaiting_input

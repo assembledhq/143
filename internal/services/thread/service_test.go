@@ -22,6 +22,7 @@ type mockThreadStore struct {
 	getByIDFn          func(ctx context.Context, orgID, threadID uuid.UUID) (models.SessionThread, error)
 	listBySessionFn    func(ctx context.Context, orgID, sessionID uuid.UUID) ([]models.SessionThread, error)
 	claimIdleFn        func(ctx context.Context, orgID, sessionID, threadID uuid.UUID) (models.SessionThread, error)
+	claimForResumeFn   func(ctx context.Context, orgID, sessionID, threadID uuid.UUID) (models.SessionThread, error)
 	updateStatusFn     func(ctx context.Context, orgID, threadID uuid.UUID, status models.ThreadStatus) error
 	incrementPendingFn func(ctx context.Context, orgID, threadID uuid.UUID) error
 	pendingCalls       []uuid.UUID
@@ -53,6 +54,13 @@ func (m *mockThreadStore) ClaimIdleForSession(ctx context.Context, orgID, sessio
 		return m.claimIdleFn(ctx, orgID, sessionID, threadID)
 	}
 	return models.SessionThread{}, fmt.Errorf("not idle")
+}
+
+func (m *mockThreadStore) ClaimForResumeInSession(ctx context.Context, orgID, sessionID, threadID uuid.UUID, _ int) (models.SessionThread, error) {
+	if m.claimForResumeFn != nil {
+		return m.claimForResumeFn(ctx, orgID, sessionID, threadID)
+	}
+	return models.SessionThread{}, fmt.Errorf("not resumable")
 }
 
 func (m *mockThreadStore) UpdateStatus(ctx context.Context, orgID, threadID uuid.UUID, status models.ThreadStatus) error {
@@ -693,30 +701,75 @@ func TestService_SendMessage(t *testing.T) {
 			expectErr: ErrReviewCommentsNotConfigured,
 		},
 		{
-			name: "completed thread rejected instead of queued",
+			name: "completed thread resumes via ClaimForResumeInSession",
 			input: SendMessageInput{
 				SessionID: sessionID,
 				OrgID:     orgID,
 				ThreadID:  threadID,
-				Message:   "queued",
+				Message:   "follow up after completion",
 			},
 			setupDeps: func(deps *testDeps) {
+				// Idle claim fails because the thread is sitting in a
+				// terminal state, not idle. The service then inspects the
+				// thread and falls back to ClaimForResumeInSession — same
+				// pattern as the session-level ClaimIdle → ClaimForResume
+				// fallback in claimSessionForSend.
 				deps.threadStore.claimIdleFn = func(_ context.Context, _, _, _ uuid.UUID) (models.SessionThread, error) {
 					return models.SessionThread{}, fmt.Errorf("no rows")
 				}
 				deps.threadStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
 					return models.SessionThread{ID: threadID, SessionID: sessionID, OrgID: orgID, CurrentTurn: 3, Status: models.ThreadStatusCompleted}, nil
 				}
-				deps.messageStore.createFn = func(_ context.Context, _ *models.SessionMessage) error {
-					t.Fatalf("terminal threads must not create queued messages")
+				resumeCalled := false
+				deps.threadStore.claimForResumeFn = func(_ context.Context, _, sid, tid uuid.UUID) (models.SessionThread, error) {
+					resumeCalled = true
+					require.Equal(t, sessionID, sid, "should resume against the requested session")
+					require.Equal(t, threadID, tid, "should resume the requested thread")
+					return models.SessionThread{ID: threadID, SessionID: sessionID, OrgID: orgID, CurrentTurn: 3, Status: models.ThreadStatusRunning}, nil
+				}
+				deps.messageStore.createFn = func(_ context.Context, msg *models.SessionMessage) error {
+					require.True(t, resumeCalled, "message create should run after the resume claim succeeded")
+					msg.ID = 99
+					require.Equal(t, 4, msg.TurnNumber, "resumed thread should advance to the next turn after CurrentTurn")
 					return nil
 				}
 				deps.threadStore.incrementPendingFn = func(_ context.Context, _, _ uuid.UUID) error {
-					t.Fatalf("terminal threads must not bump pending_message_count")
+					t.Fatalf("resumed threads should run a new turn, not queue a pending message")
 					return nil
 				}
 			},
-			expectErr: ErrThreadNotIdle,
+		},
+		{
+			name: "completed thread resume hitting cap queues against still-idle thread",
+			input: SendMessageInput{
+				SessionID: sessionID,
+				OrgID:     orgID,
+				ThreadID:  threadID,
+				Message:   "follow up after completion",
+			},
+			setupDeps: func(deps *testDeps) {
+				// Resume path hits the same per-session running cap as the
+				// idle claim path. The service should treat this identically
+				// to the idle-cap case: queue the message against the still-
+				// unclaimed thread instead of failing.
+				deps.threadStore.claimIdleFn = func(_ context.Context, _, _, _ uuid.UUID) (models.SessionThread, error) {
+					return models.SessionThread{}, fmt.Errorf("no rows")
+				}
+				deps.threadStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
+					return models.SessionThread{ID: threadID, SessionID: sessionID, OrgID: orgID, CurrentTurn: 3, Status: models.ThreadStatusCompleted}, nil
+				}
+				deps.threadStore.claimForResumeFn = func(_ context.Context, _, _, _ uuid.UUID) (models.SessionThread, error) {
+					return models.SessionThread{}, db.ErrThreadRunningLimitReached
+				}
+				deps.messageStore.createFn = func(_ context.Context, msg *models.SessionMessage) error {
+					msg.ID = 100
+					return nil
+				}
+				deps.jobStore.enqueueFn = func(_ context.Context, _ uuid.UUID, _, _ string, _ any, _ int, _ *string) (uuid.UUID, error) {
+					require.Fail(t, "queued resume message should not enqueue a continue_session")
+					return uuid.Nil, nil
+				}
+			},
 		},
 		{
 			name: "running limit reached queues the message instead of rejecting it",
