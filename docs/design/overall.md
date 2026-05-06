@@ -25,6 +25,7 @@ The system aggregates issues from support, Sentry, and Linear, prioritizes them 
 - Session composers should treat pasted clipboard images the same as dropped or picker-selected uploads so screenshots can be attached directly from the textarea in both new-session and follow-up flows.
 - Manual session creation should accept attachments-only starts. If the user uploads screenshots, photos, or files without typing prompt text, the create action stays enabled, the initial turn persists those attachments, and the session can begin with a placeholder title until the agent or user adds more text.
 - Settings pages should not rely on desktop-only table layouts on phones. Shared headers should give actions a full-width mobile lane, and dense settings lists should collapse into stacked rows/cards with inline labels instead of forcing horizontal scanning.
+- Automation run history should use a clear execution-row layout: strong status-first rows, a consistent metadata rail, room for result or failure snippets, and collapsible quiet-run groupings for low-signal streaks. Scope this to `/automations/:id` first and leave `/sessions` unchanged while the pattern is validated. Wireframes: [future/72-execution-list-wireframes.md](future/72-execution-list-wireframes.md).
 
 ## Autopilot workspace UX
 
