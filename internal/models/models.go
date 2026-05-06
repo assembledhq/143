@@ -808,9 +808,46 @@ type Job struct {
 	RunOwnerID     *string         `db:"run_owner_id" json:"run_owner_id,omitempty"`
 	LastError      *string         `db:"last_error" json:"last_error,omitempty"`
 	DedupeKey      *string         `db:"dedupe_key" json:"dedupe_key,omitempty"`
-	CreatedAt      time.Time       `db:"created_at" json:"created_at"`
-	UpdatedAt      time.Time       `db:"updated_at" json:"updated_at"`
-	CompletedAt    *time.Time      `db:"completed_at" json:"completed_at,omitempty"`
+	// TargetNodeID, when set, restricts the job to be claimed by this
+	// specific worker node. Used for sandbox-bound jobs (continue_session,
+	// open_pr, run_agent for resume) where the work must execute on the same
+	// docker daemon as the session's recorded container_id. NULL means any
+	// worker can claim. A pinned job becomes claimable by any worker if its
+	// target node is marked dead in the `nodes` table (starvation safety).
+	TargetNodeID *string    `db:"target_node_id" json:"target_node_id,omitempty"`
+	CreatedAt    time.Time  `db:"created_at" json:"created_at"`
+	UpdatedAt    time.Time  `db:"updated_at" json:"updated_at"`
+	CompletedAt  *time.Time `db:"completed_at" json:"completed_at,omitempty"`
+}
+
+// SessionWorkerTarget returns the worker_node_id to pin sandbox-bound jobs
+// (continue_session, open_pr, run_agent for resume) to, or nil if the
+// session has no live sandbox to be pinned to.
+//
+// Pinning is correct only when the session currently owns a sandbox (its
+// container_id and worker_node_id are both populated). After a snapshot —
+// either by reaper recycling, post-PR snapshot capture, or explicit user
+// stop — container_id is cleared and any worker can hydrate fresh, so the
+// caller wants nil. Both fields are checked because container_id without
+// worker_node_id is a transient state during the AcquireTurnHold → Set
+// WorkerNodeID handshake; pinning during that window would race the
+// owner-publishing CAS.
+//
+// The defensive empty-string check guards against a malformed row where the
+// pointer is non-nil but the value is the zero string — recording an empty
+// target would make every claim attempt mismatch and starve the job.
+func SessionWorkerTarget(s *Session) *string {
+	if s == nil {
+		return nil
+	}
+	if s.ContainerID == nil || *s.ContainerID == "" {
+		return nil
+	}
+	if s.WorkerNodeID == nil || *s.WorkerNodeID == "" {
+		return nil
+	}
+	owner := *s.WorkerNodeID
+	return &owner
 }
 
 // SessionReviewComment represents an inline review comment on a session diff.

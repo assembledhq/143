@@ -74,9 +74,10 @@ func (m *mockThreadStore) MarkCancelRequested(ctx context.Context, orgID, thread
 }
 
 type mockSessionStoreForThread struct {
-	getByIDFn      func(ctx context.Context, orgID, sessionID uuid.UUID) (models.Session, error)
-	claimIdleFn    func(ctx context.Context, orgID, sessionID uuid.UUID) (models.Session, error)
-	updateStatusFn func(ctx context.Context, orgID, sessionID uuid.UUID, status string) error
+	getByIDFn        func(ctx context.Context, orgID, sessionID uuid.UUID) (models.Session, error)
+	claimIdleFn      func(ctx context.Context, orgID, sessionID uuid.UUID) (models.Session, error)
+	claimForResumeFn func(ctx context.Context, orgID, sessionID uuid.UUID) (models.Session, error)
+	updateStatusFn   func(ctx context.Context, orgID, sessionID uuid.UUID, status string) error
 }
 
 func (m *mockSessionStoreForThread) GetByID(ctx context.Context, orgID, sessionID uuid.UUID) (models.Session, error) {
@@ -91,6 +92,13 @@ func (m *mockSessionStoreForThread) ClaimIdle(ctx context.Context, orgID, sessio
 		return m.claimIdleFn(ctx, orgID, sessionID)
 	}
 	return models.Session{ID: sessionID, OrgID: orgID, Status: string(models.SessionStatusRunning)}, nil
+}
+
+func (m *mockSessionStoreForThread) ClaimForResume(ctx context.Context, orgID, sessionID uuid.UUID) (models.Session, error) {
+	if m.claimForResumeFn != nil {
+		return m.claimForResumeFn(ctx, orgID, sessionID)
+	}
+	return models.Session{}, fmt.Errorf("no rows")
 }
 
 func (m *mockSessionStoreForThread) UpdateStatus(ctx context.Context, orgID, sessionID uuid.UUID, status string) error {
@@ -139,6 +147,10 @@ func (m *mockJobStore) Enqueue(ctx context.Context, orgID uuid.UUID, queue, jobT
 		return m.enqueueFn(ctx, orgID, queue, jobType, payload, priority, dedupeKey)
 	}
 	return uuid.New(), nil
+}
+
+func (m *mockJobStore) EnqueueWithOpts(ctx context.Context, orgID uuid.UUID, opts db.EnqueueOpts) (uuid.UUID, error) {
+	return m.Enqueue(ctx, orgID, opts.Queue, opts.JobType, opts.Payload, opts.Priority, opts.DedupeKey)
 }
 
 // --- Helper to build the handler ---
@@ -626,25 +638,37 @@ func TestSessionThreadHandler_SendThreadMessage(t *testing.T) {
 			expectedError: "NOT_FOUND",
 		},
 		{
-			name:           "thread not idle",
+			// Sending to a thread that is mid-turn now succeeds: the message
+			// is queued (created + pending_message_count incremented) and
+			// will be picked up when the in-flight turn completes. The
+			// composer never sees a NOT_IDLE bounce.
+			name:           "thread busy queues without enqueue",
 			sessionIDParam: sessionID.String(),
 			threadIDParam:  threadID.String(),
-			body:           `{"message":"continue"}`,
+			body:           `{"message":"please continue"}`,
 			setupDeps: func(deps *threadTestDeps) {
 				deps.threadStore.claimIdleFn = func(_ context.Context, _, _, _ uuid.UUID) (models.SessionThread, error) {
 					return models.SessionThread{}, fmt.Errorf("no rows")
 				}
 				deps.threadStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
 					return models.SessionThread{
-						ID:        threadID,
-						SessionID: sessionID,
-						OrgID:     orgID,
-						Status:    models.ThreadStatusRunning,
+						ID:          threadID,
+						SessionID:   sessionID,
+						OrgID:       orgID,
+						Status:      models.ThreadStatusRunning,
+						CurrentTurn: 1,
 					}, nil
 				}
+				deps.messageStore.createFn = func(_ context.Context, msg *models.SessionMessage) error {
+					msg.ID = 42
+					return nil
+				}
+				deps.jobStore.enqueueFn = func(_ context.Context, _ uuid.UUID, _, _ string, _ any, _ int, _ *string) (uuid.UUID, error) {
+					t.Fatalf("queue-only path must not enqueue")
+					return uuid.UUID{}, nil
+				}
 			},
-			expectedCode:  http.StatusConflict,
-			expectedError: "NOT_IDLE",
+			expectedCode: http.StatusCreated,
 		},
 		{
 			name:           "enqueue failure",
@@ -680,6 +704,41 @@ func TestSessionThreadHandler_SendThreadMessage(t *testing.T) {
 			setupDeps:      func(deps *threadTestDeps) {},
 			expectedCode:   http.StatusBadRequest,
 			expectedError:  "INVALID_BODY",
+		},
+		{
+			// Malformed comment IDs are caught at the wire-level parser
+			// before any service work happens — same shape session-level
+			// SendMessage uses, so the two surfaces stay consistent.
+			name:           "malformed comment ID rejected by parser",
+			sessionIDParam: sessionID.String(),
+			threadIDParam:  threadID.String(),
+			body:           `{"message":"hi","resolve_review_comment_ids":["not-a-uuid"]}`,
+			setupDeps:      func(deps *threadTestDeps) {},
+			expectedCode:   http.StatusBadRequest,
+			expectedError:  "INVALID_REVIEW_COMMENT_ID",
+		},
+		{
+			// When the service is wired without a resolver but the client
+			// sends comment IDs, surface a 400 with REVIEW_COMMENTS_NOT_CONFIGURED
+			// so the client can disable the feature flag rather than retrying.
+			// The default newThreadHandler does not call SetReviewCommentResolver.
+			name:           "resolve IDs rejected when resolver not wired",
+			sessionIDParam: sessionID.String(),
+			threadIDParam:  threadID.String(),
+			body:           `{"message":"hi","resolve_review_comment_ids":["00000000-0000-4000-8000-000000000000"]}`,
+			setupDeps: func(deps *threadTestDeps) {
+				deps.threadStore.claimIdleFn = func(_ context.Context, _, _, _ uuid.UUID) (models.SessionThread, error) {
+					return models.SessionThread{
+						ID:          threadID,
+						SessionID:   sessionID,
+						OrgID:       orgID,
+						Status:      models.ThreadStatusRunning,
+						CurrentTurn: 1,
+					}, nil
+				}
+			},
+			expectedCode:  http.StatusBadRequest,
+			expectedError: "REVIEW_COMMENTS_NOT_CONFIGURED",
 		},
 	}
 

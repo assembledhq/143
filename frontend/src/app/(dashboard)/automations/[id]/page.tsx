@@ -1,6 +1,7 @@
 "use client";
 
 import { useMemo, useRef, useState } from "react";
+import dynamic from "next/dynamic";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Play, Pause, Loader2 } from "lucide-react";
 import { useParams, useRouter } from "next/navigation";
@@ -22,8 +23,16 @@ import { PageHeader } from "@/components/page-header";
 import { BranchPicker } from "@/components/branch-picker";
 import { AutomationModelSelect } from "@/components/automation-model-select";
 import { api } from "@/lib/api";
+import { agentTypeForModel } from "@/lib/agents";
+import { AUTOMATION_GOAL_MAX_LENGTH, automationGoalLengthState } from "@/lib/automation-validation";
 import type { Automation } from "@/lib/types";
-import { AutomationStatsCard } from "./automation-stats-card";
+import { cn } from "@/lib/utils";
+import {
+  getCodingAgentReasoningOptions,
+  supportsReasoningEffort,
+  toCodingAgentReasoningEffort,
+  type CodingAgentReasoningEffort,
+} from "@/lib/coding-agent-reasoning";
 import { RunsTab } from "./runs-tab";
 import {
   browserTimezone,
@@ -33,6 +42,15 @@ import {
   splitRunAt,
 } from "../schedule-time";
 import { TimezonePicker } from "../timezone-picker";
+
+// Defer recharts (the only dep here that's expensive) into its own chunk.
+const AutomationStatsCard = dynamic(
+  () => import("./automation-stats-card").then((m) => ({ default: m.AutomationStatsCard })),
+  {
+    ssr: false,
+    loading: () => <div className="h-48 bg-muted/20 animate-pulse rounded-lg" />,
+  },
+);
 
 // Single source of truth for interval unit values. Kept as a tuple so we can
 // derive the union type for state AND runtime-validate incoming Select values
@@ -66,6 +84,20 @@ function SettingsTab({ automation }: { automation: Automation }) {
   const [baseBranch, setBaseBranch] = useState(automation.base_branch);
   const [model, setModel] = useState<string | undefined>(automation.model_override);
   const [identityScope, setIdentityScope] = useState<"org" | "personal">(automation.identity_scope ?? "org");
+  const [reasoningEffort, setReasoningEffort] = useState<CodingAgentReasoningEffort>(automation.reasoning_effort ?? "");
+
+  const { data: settingsResponse } = useQuery({
+    queryKey: ["settings"],
+    queryFn: () => api.settings.get(),
+  });
+  const settings = (settingsResponse?.data?.settings ?? {}) as { default_agent_type?: string };
+  const defaultAgentType = settings.default_agent_type ?? "codex";
+  const effectiveAgentType = model
+    ? agentTypeForModel(model) ?? automation.agent_type ?? defaultAgentType
+    : automation.agent_type ?? defaultAgentType;
+  const showReasoningSelector = supportsReasoningEffort(effectiveAgentType);
+  const reasoningOptions = getCodingAgentReasoningOptions(effectiveAgentType);
+  const goalLength = automationGoalLengthState(goal);
 
   const updateMutation = useMutation({
     mutationFn: () =>
@@ -79,6 +111,7 @@ function SettingsTab({ automation }: { automation: Automation }) {
         timezone,
         model: model ?? "",
         identity_scope: identityScope,
+        reasoning_effort: showReasoningSelector && reasoningEffort ? reasoningEffort : "",
         base_branch: baseBranch.trim() || undefined,
       }),
     onSuccess: () => {
@@ -93,8 +126,28 @@ function SettingsTab({ automation }: { automation: Automation }) {
         <Input id="name" value={name} onChange={(e) => setName(e.target.value)} />
       </div>
       <div className="space-y-1.5">
-        <Label htmlFor="goal">Goal</Label>
-        <Textarea id="goal" value={goal} onChange={(e) => setGoal(e.target.value)} rows={3} />
+        <div className="flex items-center justify-between gap-3">
+          <Label htmlFor="goal">Goal</Label>
+          <span
+            className={cn(
+              "text-xs tabular-nums",
+              goalLength.isTooLong ? "text-destructive" : "text-muted-foreground",
+            )}
+          >
+            {goalLength.countText}
+          </span>
+        </div>
+        <Textarea
+          id="goal"
+          value={goal}
+          onChange={(e) => setGoal(e.target.value)}
+          rows={3}
+          maxLength={AUTOMATION_GOAL_MAX_LENGTH}
+          aria-invalid={goalLength.isTooLong}
+        />
+        <p className={cn("text-xs", goalLength.isTooLong ? "text-destructive" : "text-muted-foreground")}>
+          {goalLength.message ?? `Up to ${AUTOMATION_GOAL_MAX_LENGTH.toLocaleString("en-US")} characters.`}
+        </p>
       </div>
       <div className="space-y-1.5">
         <Label htmlFor="scope">
@@ -126,7 +179,7 @@ function SettingsTab({ automation }: { automation: Automation }) {
             role="group"
             aria-labelledby="schedule-label"
           >
-            <span className="text-sm text-muted-foreground">Run every</span>
+            <span className="text-sm font-medium leading-none text-muted-foreground">Run every</span>
             <Input
               id="interval-value"
               aria-label="Interval value"
@@ -155,7 +208,7 @@ function SettingsTab({ automation }: { automation: Automation }) {
             </Select>
           </div>
           <div className="flex flex-wrap items-start gap-2 sm:items-center">
-            <span className="text-sm text-muted-foreground">At</span>
+            <span className="text-sm font-medium leading-none text-muted-foreground">At</span>
             <Select value={intervalRunHour} onValueChange={setIntervalRunHour}>
               <SelectTrigger className="w-20" aria-label="Run at hour">
                 <SelectValue />
@@ -189,9 +242,6 @@ function SettingsTab({ automation }: { automation: Automation }) {
             />
           </div>
         </div>
-        <p className="text-xs text-muted-foreground">
-          Run time is in {timezone}, selectable in 5-minute increments.
-        </p>
       </div>
       <div className="space-y-1.5">
         <Label htmlFor="automation-model">Model</Label>
@@ -202,6 +252,27 @@ function SettingsTab({ automation }: { automation: Automation }) {
           onValueChange={setModel}
         />
       </div>
+      {showReasoningSelector ? (
+        <div className="space-y-1.5">
+          <Label htmlFor="automation-reasoning">Reasoning</Label>
+          <Select
+            value={reasoningEffort || "__default__"}
+            onValueChange={(value) => setReasoningEffort(value === "__default__" ? "" : toCodingAgentReasoningEffort(value))}
+          >
+            <SelectTrigger id="automation-reasoning" aria-label="Reasoning">
+              <SelectValue placeholder="Default reasoning" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="__default__">Default reasoning</SelectItem>
+              {reasoningOptions.map((option) => (
+                <SelectItem key={option.value} value={option.value}>
+                  {option.label}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+      ) : null}
       <div className="space-y-1.5">
         <Label>Base branch</Label>
         <BranchPicker
@@ -217,7 +288,7 @@ function SettingsTab({ automation }: { automation: Automation }) {
       <div className="flex items-center gap-3 pt-2">
         <Button
           onClick={() => updateMutation.mutate()}
-          disabled={updateMutation.isPending}
+          disabled={updateMutation.isPending || goalLength.isTooLong}
         >
           {updateMutation.isPending && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
           Save changes

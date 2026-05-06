@@ -194,6 +194,22 @@ if [ "$ROLE" = "db" ]; then
     chmod 700 /home/deploy/.ssh
     command -v docker &>/dev/null || (curl -fsSL https://get.docker.com | sh)
     usermod -aG docker deploy
+    # Narrow NOPASSWD sudo for the deploy user. Keep entries in sync with
+    # bootstrap.sh — anything used by deploy/scripts/deploy.sh on a db
+    # host has to be listed here. db doesn't need runsc / sandbox-firewall
+    # / iptables-persistent, but must allow install-log-rotation.sh so the
+    # routine deploy path can cap docker container log files without an
+    # extra root SSH hop.
+    cat > /etc/sudoers.d/99-deploy <<'SUDOERS'
+Cmnd_Alias DEPLOY_CMDS = \
+    /usr/bin/chown -R deploy\:deploy /opt/143/deploy/scripts, \
+    /usr/bin/systemctl restart docker, \
+    /opt/143/deploy/scripts/install-log-rotation.sh *
+
+deploy ALL=(root) NOPASSWD: DEPLOY_CMDS
+SUDOERS
+    chmod 440 /etc/sudoers.d/99-deploy
+    visudo -cf /etc/sudoers.d/99-deploy
     cat > /etc/sysctl.d/99-postgres.conf <<SYSCTL
 vm.overcommit_memory = 2
 vm.overcommit_ratio = 80
@@ -213,6 +229,22 @@ elif [ "$ROLE" = "logging" ]; then
     chmod 700 /home/deploy/.ssh
     command -v docker &>/dev/null || (curl -fsSL https://get.docker.com | sh)
     usermod -aG docker deploy
+    # Narrow NOPASSWD sudo for the deploy user. Logging hosts also need
+    # the chown grants because deploy.sh sometimes needs to fix root-owned
+    # vmalert/grafana dirs left over from prior provisioning. Keep in
+    # sync with bootstrap.sh.
+    cat > /etc/sudoers.d/99-deploy <<'SUDOERS'
+Cmnd_Alias DEPLOY_CMDS = \
+    /usr/bin/chown -R deploy\:deploy /opt/143/deploy/scripts, \
+    /usr/bin/chown -R deploy\:deploy /opt/143/deploy/vmalert, \
+    /usr/bin/chown -R deploy\:deploy /opt/143/deploy/grafana, \
+    /usr/bin/systemctl restart docker, \
+    /opt/143/deploy/scripts/install-log-rotation.sh *
+
+deploy ALL=(root) NOPASSWD: DEPLOY_CMDS
+SUDOERS
+    chmod 440 /etc/sudoers.d/99-deploy
+    visudo -cf /etc/sudoers.d/99-deploy
     echo "Bootstrap complete (logging)."
 BOOTSTRAP_LOGGING
 elif [ "$ROLE" = "redis" ]; then
@@ -225,6 +257,19 @@ elif [ "$ROLE" = "redis" ]; then
     chmod 700 /home/deploy/.ssh
     command -v docker &>/dev/null || (curl -fsSL https://get.docker.com | sh)
     usermod -aG docker deploy
+    # Narrow NOPASSWD sudo for the deploy user. Keep in sync with
+    # bootstrap.sh — install-log-rotation.sh is required so deploy.sh
+    # can cap docker container log files without an extra root SSH hop.
+    cat > /etc/sudoers.d/99-deploy <<'SUDOERS'
+Cmnd_Alias DEPLOY_CMDS = \
+    /usr/bin/chown -R deploy\:deploy /opt/143/deploy/scripts, \
+    /usr/bin/systemctl restart docker, \
+    /opt/143/deploy/scripts/install-log-rotation.sh *
+
+deploy ALL=(root) NOPASSWD: DEPLOY_CMDS
+SUDOERS
+    chmod 440 /etc/sudoers.d/99-deploy
+    visudo -cf /etc/sudoers.d/99-deploy
     cat > /etc/sysctl.d/99-redis.conf <<SYSCTL
 vm.overcommit_memory = 1
 net.core.somaxconn = 512
@@ -244,7 +289,19 @@ if [ "$ROLE" = "app" ] || [ "$ROLE" = "worker" ] || [ "$ROLE" = "logging" ]; the
   scp "${SCP_OPTS[@]}" "$PROJECT_DIR/docker-compose.vector.yml" root@"$HOST":/opt/143/
 fi
 scp "${SCP_OPTS[@]}" -r "$PROJECT_DIR/deploy" root@"$HOST":/opt/143/
-ssh "${SSH_OPTS[@]}" root@"$HOST" "chown -R deploy:deploy /opt/143"
+ssh "${SSH_OPTS[@]}" root@"$HOST" "chown -R deploy:deploy /opt/143 && chmod +x /opt/143/deploy/scripts/install-log-rotation.sh"
+
+# Step 2a: Cap docker container log files (max-size/max-file in
+# /etc/docker/daemon.json) BEFORE step 5 starts services. Closes the
+# provision-to-first-deploy window where new containers would log
+# unboundedly. db gets a larger cap because postgres logs every
+# connection / slow query / lock wait, and the db host has no Vector log
+# shipping — the local docker log is the only copy of that trail.
+case "$ROLE" in
+  db) LOG_MAX_SIZE="500m" ;;
+  *)  LOG_MAX_SIZE="100m" ;;
+esac
+ssh "${SSH_OPTS[@]}" root@"$HOST" "/opt/143/deploy/scripts/install-log-rotation.sh $LOG_MAX_SIZE 5"
 
 # Step 2b: Sync authorized keys from deploy/authorized_keys/*.pub
 # Replaces authorized_keys on the host with exactly the keys in the repo.
@@ -269,11 +326,13 @@ elif [ "$ROLE" = "redis" ]; then
   printf 'REDIS_PASSWORD=%s\nREDIS_PRIVATE_IP=%s\n' "$REDIS_PASSWORD" "$REDIS_PRIVATE_IP" \
     | ssh "${SSH_OPTS[@]}" root@"$HOST" 'cat > /opt/143/.env && chown deploy:deploy /opt/143/.env && chmod 600 /opt/143/.env'
 elif [ "$ROLE" = "worker" ]; then
-  # Workers only get the secrets they need — no age key or encrypted bundle.
-  # A worker compromise cannot decrypt the full production secret set, but it
-  # still needs GitHub App user-auth client creds to refresh user PR tokens.
-  printf 'DB_PASSWORD=%s\nDB_HOST=%s\nVICTORIALOGS_HOST=%s\nSERVER_ROLE=%s\nREDIS_TOPOLOGY=%s\nREDIS_PRIVATE_IP=%s\nREDIS_PASSWORD=%s\nGITHUB_APP_CLIENT_ID=%s\nGITHUB_APP_CLIENT_SECRET=%s\nWORKER_PROCESS_COUNT=%s\nSANDBOX_CPU_LIMIT=%s\nSANDBOX_MEMORY_LIMIT_MB=%s\nSANDBOX_DISK_LIMIT_GB=%s\n' \
-    "$DB_PASSWORD" "$DB_HOST" "$VICTORIALOGS_HOST" "$ROLE" "${REDIS_TOPOLOGY:-standalone}" "${REDIS_PRIVATE_IP:-}" "${REDIS_PASSWORD:-}" "${GITHUB_APP_CLIENT_ID:-}" "${GITHUB_APP_CLIENT_SECRET:-}" \
+  # Workers need the age key plus the encrypted production env bundle because
+  # the worker compose file bind-mounts .env.production.enc into the container
+  # and docker-entrypoint.sh decrypts it at boot. Provision the file before the
+  # first `docker compose up` — if the source path is missing, Docker creates a
+  # directory at /opt/143/.env.production.enc and later deploy-time scp fails.
+  printf 'SOPS_AGE_KEY=%s\nDB_PASSWORD=%s\nDB_HOST=%s\nVICTORIALOGS_HOST=%s\nSERVER_ROLE=%s\nREDIS_TOPOLOGY=%s\nREDIS_PRIVATE_IP=%s\nREDIS_PASSWORD=%s\nGITHUB_APP_CLIENT_ID=%s\nGITHUB_APP_CLIENT_SECRET=%s\nWORKER_PROCESS_COUNT=%s\nSANDBOX_CPU_LIMIT=%s\nSANDBOX_MEMORY_LIMIT_MB=%s\nSANDBOX_DISK_LIMIT_GB=%s\n' \
+    "$SOPS_AGE_KEY" "$DB_PASSWORD" "$DB_HOST" "$VICTORIALOGS_HOST" "$ROLE" "${REDIS_TOPOLOGY:-standalone}" "${REDIS_PRIVATE_IP:-}" "${REDIS_PASSWORD:-}" "${GITHUB_APP_CLIENT_ID:-}" "${GITHUB_APP_CLIENT_SECRET:-}" \
     "${WORKER_PROCESS_COUNT:-}" "${SANDBOX_CPU_LIMIT:-}" "${SANDBOX_MEMORY_LIMIT_MB:-}" "${SANDBOX_DISK_LIMIT_GB:-}" \
     | ssh "${SSH_OPTS[@]}" root@"$HOST" 'cat > /opt/143/.env && chown deploy:deploy /opt/143/.env && chmod 600 /opt/143/.env'
 
@@ -288,6 +347,11 @@ elif [ "$ROLE" = "worker" ]; then
   # when parsing docker-compose.worker.yml. deploy.sh repeats this on every
   # deploy.
   ssh "${SSH_OPTS[@]}" root@"$HOST" 'cat /opt/143/.env.local >> /opt/143/.env'
+
+  if [ -f "$ENC_FILE" ]; then
+    scp "${SCP_OPTS[@]}" "$ENC_FILE" root@"$HOST":/opt/143/
+    ssh "${SSH_OPTS[@]}" root@"$HOST" "chown deploy:deploy /opt/143/.env.production.enc && chmod 644 /opt/143/.env.production.enc"
+  fi
 else
   # App nodes get the full secret set for SOPS decryption
   printf 'SOPS_AGE_KEY=%s\nDB_PASSWORD=%s\nDB_HOST=%s\nVICTORIALOGS_HOST=%s\nSERVER_ROLE=%s\nREDIS_TOPOLOGY=%s\nREDIS_PRIVATE_IP=%s\nREDIS_PASSWORD=%s\n' "$SOPS_AGE_KEY" "$DB_PASSWORD" "$DB_HOST" "$VICTORIALOGS_HOST" "$ROLE" "${REDIS_TOPOLOGY:-standalone}" "${REDIS_PRIVATE_IP:-}" "${REDIS_PASSWORD:-}" \
@@ -327,9 +391,34 @@ PULL_APP
       set -euo pipefail
       su - deploy -c 'docker pull ghcr.io/assembledhq/143-server:latest'
       su - deploy -c 'docker pull ghcr.io/assembledhq/143-sandbox:latest'
-      # Ensure the shared sandbox egress network exists (idempotent).
+      # Ensure the shared sandbox bridge exists with a pinned subnet.
+      #
+      # The subnet is hard-coded to 172.30.0.0/24 so sandbox-dns can be
+      # given the stable static IP 172.30.0.2 in docker-compose.worker.yml,
+      # which /etc/143/sandbox-resolv.conf below points at. Without a pinned
+      # subnet Docker auto-assigns from its default pool and the static IP
+      # mapping breaks.
+      #
       # enable_icc=false blocks one sandbox from TCP-connecting to another.
-      su - deploy -c 'docker network inspect 143-sandbox >/dev/null 2>&1 || docker network create --driver bridge --opt com.docker.network.bridge.enable_icc=false --label managed-by=143 143-sandbox'
+      # Intra-bridge traffic from a sandbox to preview-infra and to
+      # sandbox-dns is allowed by an explicit RETURN rule installed in
+      # DOCKER-USER by sandbox-firewall.sh.
+      # docker inspect returns "" on a missing network (with exit 1 swallowed
+      # by `|| true`) and the subnet string on an existing one. Distinguishing
+      # the two via a single call keeps us from spawning two `su - deploy`
+      # login shells per provision.
+      EXISTING_SANDBOX_SUBNET=$(su - deploy -c 'docker network inspect 143-sandbox -f "{{range .IPAM.Config}}{{.Subnet}}{{end}}" 2>/dev/null' || true)
+      if [ -z "$EXISTING_SANDBOX_SUBNET" ]; then
+        su - deploy -c 'docker network create --driver bridge --subnet 172.30.0.0/24 --opt com.docker.network.bridge.enable_icc=false --label managed-by=143 143-sandbox'
+      elif [ "$EXISTING_SANDBOX_SUBNET" != "172.30.0.0/24" ]; then
+        echo "ERROR: 143-sandbox network has subnet '$EXISTING_SANDBOX_SUBNET'; expected 172.30.0.0/24." >&2
+        echo "  This worker was provisioned before the pinned-subnet change. To upgrade:" >&2
+        echo "    1. docker compose -f /opt/143/docker-compose.worker.yml down" >&2
+        echo "    2. docker network rm 143-sandbox" >&2
+        echo "    3. Re-run provision-worker for this host." >&2
+        echo "  Step 1 will drain in-flight coding turns; plan for a maintenance window." >&2
+        exit 1
+      fi
       # Install iptables-persistent so the egress block survives reboots.
       apt-get install -y --no-install-recommends iptables-persistent >/dev/null 2>&1 || true
       # Apply sandbox egress firewall. Script is idempotent and reads the
@@ -341,13 +430,19 @@ PULL_APP
       # /etc/resolv.conf. Required because user-defined Docker networks inject
       # 127.0.0.11 (Docker's embedded DNS) into resolv.conf, and gVisor's
       # netstack can't reach it. HostConfig.DNS doesn't help — it only changes
-      # the upstream the embedded resolver forwards to. Bind-mounting our own
-      # resolv.conf bypasses 127.0.0.11 entirely. Future: point this at a
-      # host-local DNS forwarder (dnsmasq on 172.19.0.1) for filtering/logging.
+      # the upstream the embedded resolver forwards to.
+      #
+      # Points at the sandbox-dns container's static IP (172.30.0.2 on the
+      # 143-sandbox bridge). sandbox-dns is a non-gVisor container that CAN
+      # reach 127.0.0.11 normally and forwards every query there, so preview-
+      # infrastructure container names (preview-db-<handle>, etc.) resolve
+      # via Docker's embedded resolver while public lookups continue to work
+      # through the daemon's upstream forwarders. Bringing up sandbox-dns is
+      # gated by docker-compose.worker.yml depends_on, so by the time the
+      # worker is taking traffic this address is answering.
       mkdir -p /etc/143
       cat > /etc/143/sandbox-resolv.conf <<RESOLV
-nameserver 1.1.1.1
-nameserver 8.8.8.8
+nameserver 172.30.0.2
 options edns0 trust-ad ndots:0
 RESOLV
       chmod 644 /etc/143/sandbox-resolv.conf

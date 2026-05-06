@@ -206,6 +206,7 @@ type orchestratorService interface {
 	RunAgent(ctx context.Context, run *models.Session) error
 	ContinueSession(ctx context.Context, session *models.Session, opts *agent.ContinueSessionOptions) error
 	RecoverSession(ctx context.Context, session *models.Session) error
+	RevertThread(ctx context.Context, session *models.Session, thread *models.SessionThread) error
 	ResolveSessionTimeout(ctx context.Context, orgID uuid.UUID) time.Duration
 	ResolveAbsoluteRuntimeCeiling(ctx context.Context, orgID uuid.UUID) time.Duration
 }
@@ -515,6 +516,15 @@ func newAutomationRunHandler(stores *Stores, services *Services, logger zerolog.
 			} else {
 				log.Warn().Err(err).Msg("invalid agent_type on automation, falling back to default")
 			}
+		} else if stores.Organizations != nil {
+			org, err := stores.Organizations.GetByID(ctx, orgID)
+			if err != nil {
+				log.Warn().Err(err).Msg("failed to load org settings for automation agent fallback")
+			} else if settings, err := models.ParseOrgSettings(org.Settings); err != nil {
+				log.Warn().Err(err).Msg("failed to parse org settings for automation agent fallback")
+			} else if settings.DefaultAgentType != "" {
+				agentType = settings.DefaultAgentType
+			}
 		}
 
 		var targetBranch *string
@@ -540,6 +550,7 @@ func newAutomationRunHandler(stores *Stores, services *Services, logger zerolog.
 			AutonomyLevel:     string(models.DefaultSessionAutonomy),
 			TokenMode:         "low",
 			ModelOverride:     automation.ModelOverride,
+			ReasoningEffort:   automation.ReasoningEffort,
 			TriggeredByUserID: sessionTriggeredByUserID,
 			TargetBranch:      targetBranch,
 			RepositoryID:      automation.RepositoryID,
@@ -1100,6 +1111,7 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 		logger.Info().
 			Str("session_id", sessionID.String()).
 			Str("org_id", orgID.String()).
+			Str("thread_id", input.ThreadID).
 			Int("current_turn", session.CurrentTurn).
 			Dur("session_timeout", sessionTimeout).
 			Dur("runtime_ceiling", runtimeCeiling).
@@ -1110,6 +1122,12 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 		var hasThread bool
 		var continueOpts *agent.ContinueSessionOptions
 		var resultAgentSessionID string
+		// Captured by the OnTurnComplete callback so the post-success block
+		// below can persist per-thread result metadata (diff, summary,
+		// confidence) onto the thread row. Stays nil when the orchestrator
+		// short-circuited before completing a turn (cancel, policy stop) so
+		// we fall back to the status-only completion path.
+		var lastTurnResult *agent.AgentResult
 		if input.ThreadID != "" && stores.SessionThreads != nil {
 			parsedThreadID, parseErr := uuid.Parse(input.ThreadID)
 			if parseErr != nil {
@@ -1147,8 +1165,12 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 					ThreadAgentSessionID: thread.AgentSessionID,
 					ResultAgentSessionID: &resultAgentSessionID,
 					ThreadID:             &threadIDLocal,
-					OnTurnComplete: func(diff string, costUSD float64) {
-						emitThreadAttribution(ctx, stores, orgID, sessionID, threadIDLocal, threadTurnBefore+1, diff, costUSD, logger)
+					OnTurnComplete: func(result *agent.AgentResult) {
+						lastTurnResult = result
+						if result == nil {
+							return
+						}
+						emitThreadAttribution(ctx, stores, orgID, sessionID, threadIDLocal, threadTurnBefore+1, result.Diff, result.TokenUsage.TotalCostUSD, logger)
 					},
 				}
 			}
@@ -1169,6 +1191,23 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 					Str("session_id", sessionID.String()).
 					Err(err).
 					Msg("continue_session cleared stale orphan container_id; retrying against the clean row")
+				return &RetryableError{Err: err, RetryAfter: &retryAfter}
+			}
+			if errors.Is(err, agent.ErrSandboxOnDifferentNode) {
+				// We claimed a job whose session sandbox lives on a sibling
+				// worker. Release it so the correct node can pick it up. A
+				// 5s delay (longer than the stale-orphan path) avoids tight
+				// loops if the wrong-node worker keeps polling first while
+				// the right one is briefly busy. With node-affinity routing
+				// (target_node_id on jobs) in place this branch is rare —
+				// it only fires for jobs enqueued before the affinity rolled
+				// out, or as a defense-in-depth catch for bugs that bypass
+				// the pinning.
+				retryAfter := 5 * time.Second
+				logger.Info().
+					Str("session_id", sessionID.String()).
+					Err(err).
+					Msg("continue_session claimed on the wrong node; releasing for the correct worker")
 				return &RetryableError{Err: err, RetryAfter: &retryAfter}
 			}
 			if errors.Is(err, agent.ErrSandboxPreviewRace) {
@@ -1196,12 +1235,20 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 				return &FatalError{Err: err}
 			}
 			if hasThread {
-				if statusErr := stores.SessionThreads.UpdateStatus(ctx, orgID, threadID, models.ThreadStatusIdle); statusErr != nil {
+				// Detached context: this cleanup must land even when ctx was
+				// cancelled by worker drain mid-shutdown. Otherwise the
+				// thread is stuck in 'running' and the UI shows an orphaned
+				// "Agent is working..." indefinitely (until Phase 0.5b of
+				// the reaper picks it up — defense-in-depth, not the primary
+				// path). 10s is plenty for a single UPDATE.
+				cleanupCtx, cleanupCancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+				if statusErr := stores.SessionThreads.UpdateStatus(cleanupCtx, orgID, threadID, models.ThreadStatusIdle); statusErr != nil {
 					logger.Warn().Err(statusErr).
 						Str("session_id", sessionID.String()).
 						Str("thread_id", threadID.String()).
 						Msg("failed to release session thread after continue_session failure")
 				}
+				cleanupCancel()
 			}
 			return err
 		}
@@ -1211,11 +1258,39 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 			// thread's new current_turn is the same value once the assistant
 			// turn completes. The session's CurrentTurn is independent — it
 			// tracks the shared sandbox's total turns across all threads.
-			if err := stores.SessionThreads.CompleteTurn(ctx, orgID, threadID, threadTurnBefore+1, resultAgentSessionID); err != nil {
-				logger.Warn().Err(err).
-					Str("session_id", sessionID.String()).
-					Str("thread_id", threadID.String()).
-					Msg("failed to mark session thread turn complete")
+			//
+			// When OnTurnComplete fired we have the agent's result in hand,
+			// so persist diff/summary/confidence onto the thread row via
+			// UpdateTurnComplete — this is the data the revert action and
+			// the per-tab summary panel read. When the turn short-circuited
+			// before producing a result (cancel, policy stop) we fall back
+			// to CompleteTurn which only flips status.
+			if lastTurnResult != nil {
+				var summaryPtr, diffPtr *string
+				if lastTurnResult.Summary != "" {
+					summaryPtr = &lastTurnResult.Summary
+				}
+				if lastTurnResult.Diff != "" {
+					diffPtr = &lastTurnResult.Diff
+				}
+				threadResult := &models.SessionResult{
+					ConfidenceScore: &lastTurnResult.ConfidenceScore,
+					ResultSummary:   summaryPtr,
+					Diff:            diffPtr,
+				}
+				if err := stores.SessionThreads.UpdateTurnComplete(ctx, orgID, threadID, threadTurnBefore+1, threadResult, resultAgentSessionID); err != nil {
+					logger.Warn().Err(err).
+						Str("session_id", sessionID.String()).
+						Str("thread_id", threadID.String()).
+						Msg("failed to persist session thread turn result")
+				}
+			} else {
+				if err := stores.SessionThreads.CompleteTurn(ctx, orgID, threadID, threadTurnBefore+1, resultAgentSessionID); err != nil {
+					logger.Warn().Err(err).
+						Str("session_id", sessionID.String()).
+						Str("thread_id", threadID.String()).
+						Msg("failed to mark session thread turn complete")
+				}
 			}
 		}
 

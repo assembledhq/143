@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -47,6 +48,15 @@ type gitHubPullRequestDetails struct {
 
 type gitHubCheckRunsResponse struct {
 	CheckRuns []gitHubCheckRun `json:"check_runs"`
+}
+
+type gitHubBranchResponse struct {
+	Protected  bool `json:"protected"`
+	Protection struct {
+		RequiredStatusChecks *struct {
+			Contexts []string `json:"contexts"`
+		} `json:"required_status_checks"`
+	} `json:"protection"`
 }
 
 type gitHubCheckRun struct {
@@ -153,7 +163,7 @@ func (s *PRService) buildPullRequestHealthResponse(ctx context.Context, pr model
 				resp.HealthVersion = current.Version
 				resp.HeadSHA = current.HeadSHA
 				resp.BaseSHA = current.BaseSHA
-				resp.ChecksConfirmed = true
+				resp.ChecksConfirmed = summary.ChecksConfirmed || (len(summary.Checks) > 0 && determineChecksConfirmed(summary.Checks, false))
 				resp.EnrichmentStatus = current.EnrichmentStatus
 				resp.EnrichmentRequested = current.EnrichmentStatus == models.PullRequestHealthEnrichmentStatusPending
 				resp.EnrichmentReady = current.EnrichmentStatus == models.PullRequestHealthEnrichmentStatusReady
@@ -248,6 +258,25 @@ func (s *PRService) SyncPullRequestState(ctx context.Context, orgID, pullRequest
 		return err
 	}
 
+	requiredChecksConfigured := false
+	if len(checkRuns) == 0 {
+		requiredChecksConfigured, err = s.branchRequiresStatusChecks(ctx, token, owner, repoName, details.Base.Ref)
+		if err != nil {
+			return err
+		}
+	}
+
+	var prior *models.PullRequestHealthCurrent
+	priorCurrent, priorErr := s.pullRequests.GetHealthCurrent(ctx, orgID, pullRequestID)
+	switch {
+	case priorErr == nil:
+		prior = &priorCurrent
+	case errors.Is(priorErr, pgx.ErrNoRows):
+		prior = nil
+	default:
+		return priorErr
+	}
+
 	summary := models.PullRequestHealthSummary{
 		Checks: make([]models.PullRequestCheckSummary, 0),
 	}
@@ -267,12 +296,12 @@ func (s *PRService) SyncPullRequestState(ctx context.Context, orgID, pullRequest
 			Summary:    firstNonEmpty(check.Output.Title, truncateText(stripWhitespace(check.Output.Summary), 240)),
 		})
 	}
+	summary.ChecksConfirmed = determineChecksConfirmed(summary.Checks, requiredChecksConfigured)
 	summary.NeedsAgentAction = summary.HasConflicts || summary.FailingTestCount > 0
 
 	mergeStateIndeterminate, testsIndeterminate := detectIndeterminateSignals(details.Mergeable, details.MergeableState, checkRuns)
 	if mergeStateIndeterminate || testsIndeterminate {
-		prior, priorErr := s.pullRequests.GetHealthCurrent(ctx, orgID, pullRequestID)
-		if priorErr == nil && shouldSkipIndeterminateSnapshotWrite(mergeStateIndeterminate, testsIndeterminate, details.Head.SHA, summary.FailingTestCount, prior) {
+		if prior != nil && shouldSkipIndeterminateSnapshotWrite(mergeStateIndeterminate, testsIndeterminate, details.Head.SHA, summary.FailingTestCount, *prior) {
 			s.logger.Debug().
 				Str("pull_request_id", pullRequestID.String()).
 				Str("head_sha", details.Head.SHA).
@@ -554,6 +583,7 @@ func (s *PRService) resumeRepairSession(ctx context.Context, pr models.PullReque
 
 	txSessions := db.NewSessionStore(tx)
 	txMessages := db.NewSessionMessageStore(tx)
+	txThreads := db.NewSessionThreadStore(tx)
 	txPRs := db.NewPullRequestStore(tx)
 
 	claimed, claimErr := txSessions.ClaimIdle(ctx, pr.OrgID, session.ID)
@@ -566,9 +596,27 @@ func (s *PRService) resumeRepairSession(ctx context.Context, pr models.PullReque
 	if err := txSessions.UpdateRevisionContext(ctx, pr.OrgID, claimed.ID, revisionContext); err != nil {
 		return nil, err
 	}
+	// The session's primary thread is the "Main" tab seeded at session
+	// creation. Without attributing the repair message to that thread, the
+	// session-detail UI's per-thread timeline query (ListByThread) skips it
+	// and the user sees the click do nothing in the conversation view —
+	// SessionStore.ClaimIdle/ClaimForResume don't hydrate PrimaryThreadID
+	// from the row, so we look it up here. ListBySession orders by
+	// created_at ASC, matching the convention that the first-created thread
+	// is "Main".
+	threads, err := txThreads.ListBySession(ctx, pr.OrgID, claimed.ID)
+	if err != nil {
+		return nil, fmt.Errorf("list session threads for repair message: %w", err)
+	}
+	var threadID *uuid.UUID
+	if len(threads) > 0 {
+		id := threads[0].ID
+		threadID = &id
+	}
 	msg := &models.SessionMessage{
 		SessionID:  claimed.ID,
 		OrgID:      pr.OrgID,
+		ThreadID:   threadID,
 		UserID:     &userID,
 		TurnNumber: claimed.CurrentTurn + 1,
 		Role:       models.MessageRoleUser,
@@ -582,7 +630,14 @@ func (s *PRService) resumeRepairSession(ctx context.Context, pr models.PullReque
 		"session_id": claimed.ID.String(),
 		"org_id":     pr.OrgID.String(),
 	}
-	if _, err := s.jobs.EnqueueInTx(ctx, tx, pr.OrgID, "agent", "continue_session", payload, 5, &continueDedupeKey); err != nil {
+	if _, err := s.jobs.EnqueueInTxWithOpts(ctx, tx, pr.OrgID, db.EnqueueOpts{
+		Queue:        "agent",
+		JobType:      "continue_session",
+		Payload:      payload,
+		Priority:     5,
+		DedupeKey:    &continueDedupeKey,
+		TargetNodeID: models.SessionWorkerTarget(&claimed),
+	}); err != nil {
 		return nil, err
 	}
 	repairRun := &models.PullRequestRepairRun{
@@ -750,7 +805,52 @@ func (s *PRService) listCheckRunsForRef(ctx context.Context, token, owner, repo,
 	if err := json.Unmarshal(body, &resp); err != nil {
 		return nil, fmt.Errorf("decode GitHub check runs: %w", err)
 	}
-	return resp.CheckRuns, nil
+	return dedupeCheckRunsByName(resp.CheckRuns), nil
+}
+
+func (s *PRService) branchRequiresStatusChecks(ctx context.Context, token, owner, repo, branch string) (bool, error) {
+	path := fmt.Sprintf("/repos/%s/%s/branches/%s", owner, repo, url.PathEscape(branch))
+	body, err := s.doGitHubRequest(ctx, token, http.MethodGet, path, nil)
+	if err != nil {
+		return false, err
+	}
+
+	var resp gitHubBranchResponse
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return false, fmt.Errorf("decode GitHub branch protection: %w", err)
+	}
+	if !resp.Protected || resp.Protection.RequiredStatusChecks == nil {
+		return false, nil
+	}
+	return len(resp.Protection.RequiredStatusChecks.Contexts) > 0, nil
+}
+
+// dedupeCheckRunsByName collapses check runs that share a display name down to
+// the most recent one. GitHub's filter=latest only dedupes within a single
+// workflow run, so a repo whose workflow triggers on both `pull_request` and
+// `push` ends up with two parallel runs on the same SHA — each emits its own
+// "Backend Test", "Frontend Test", etc. and the unfiltered list shows every
+// job twice. Highest ID wins because GitHub allocates check_run IDs
+// monotonically, so the newer workflow run's state replaces the older one.
+func dedupeCheckRunsByName(checkRuns []gitHubCheckRun) []gitHubCheckRun {
+	if len(checkRuns) <= 1 {
+		return checkRuns
+	}
+	bestIdx := make(map[string]int, len(checkRuns))
+	for i, check := range checkRuns {
+		key := strings.ToLower(strings.TrimSpace(check.Name))
+		if existing, ok := bestIdx[key]; !ok || checkRuns[i].ID > checkRuns[existing].ID {
+			bestIdx[key] = i
+		}
+	}
+	deduped := make([]gitHubCheckRun, 0, len(bestIdx))
+	for i, check := range checkRuns {
+		key := strings.ToLower(strings.TrimSpace(check.Name))
+		if bestIdx[key] == i {
+			deduped = append(deduped, check)
+		}
+	}
+	return deduped
 }
 
 func (s *PRService) fetchCheckRunAnnotations(ctx context.Context, token, owner, repo string, checkRunID int64) ([]string, error) {

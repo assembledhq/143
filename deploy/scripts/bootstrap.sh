@@ -13,6 +13,12 @@ mkdir -p /home/deploy/.ssh /opt/143
 chown -R deploy:deploy /home/deploy/.ssh /opt/143
 chmod 700 /home/deploy/.ssh
 
+# Detached worker rollovers (WORKER_DEPLOY_DETACH=1) write progress + status
+# files here. /var/log is root-owned so the deploy user can't mkdir it
+# itself; provision once with deploy ownership.
+mkdir -p /var/log/143
+chown deploy:deploy /var/log/143
+
 # Docker (idempotent)
 command -v docker &>/dev/null || (curl -fsSL https://get.docker.com | sh)
 
@@ -34,7 +40,8 @@ Cmnd_Alias DEPLOY_CMDS = \
     /usr/bin/runsc install -- --ignore-cgroups --host-uds=open, \
     /usr/bin/systemctl restart docker, \
     /usr/bin/apt-get install -y --no-install-recommends iptables-persistent, \
-    /opt/143/deploy/scripts/sandbox-firewall.sh 143-sandbox
+    /opt/143/deploy/scripts/sandbox-firewall.sh 143-sandbox, \
+    /opt/143/deploy/scripts/install-log-rotation.sh *
 
 deploy ALL=(root) NOPASSWD: DEPLOY_CMDS
 SUDOERS

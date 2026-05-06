@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { availableAgentModelGroups, pmUsableResolvedCredentials } from "./agents";
+import { agentDisplayLabel, availableAgentModelGroups, pmUsableResolvedCredentials } from "./agents";
 import type { CodingAuth, CodingCredentialSummary, ResolvedCredential, UserCredentialSummary } from "./types";
 
 const codexCred: ResolvedCredential = {
@@ -101,6 +101,18 @@ describe("availableAgentModelGroups", () => {
       },
     );
     expect(groups.map((g) => g.key)).toEqual(["codex"]);
+  });
+});
+
+describe("agentDisplayLabel", () => {
+  it("returns the provider label for selectable agent types", () => {
+    expect(agentDisplayLabel("codex")).toBe("Codex");
+    expect(agentDisplayLabel("claude_code")).toBe("Claude Code");
+  });
+
+  it("falls back to display-only labels and then the raw key", () => {
+    expect(agentDisplayLabel("pm_agent")).toBe("PM Agent");
+    expect(agentDisplayLabel("unknown_agent")).toBe("unknown_agent");
   });
 });
 

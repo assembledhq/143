@@ -238,12 +238,14 @@ func TestBuildConfigSnapshot(t *testing.T) {
 	agent := "codex"
 	model := "opus-4-7"
 	scope := "src/"
+	reasoning := ReasoningEffortXHigh
 	a := Automation{
-		AgentType:     &agent,
-		ModelOverride: &model,
-		Scope:         &scope,
-		IdentityScope: AutomationIdentityScopePersonal,
-		BaseBranch:    "main",
+		AgentType:       &agent,
+		ModelOverride:   &model,
+		ReasoningEffort: &reasoning,
+		Scope:           &scope,
+		IdentityScope:   AutomationIdentityScopePersonal,
+		BaseBranch:      "main",
 	}
 
 	raw, err := a.BuildConfigSnapshot()
@@ -254,6 +256,7 @@ func TestBuildConfigSnapshot(t *testing.T) {
 	require.NoError(t, json.Unmarshal(raw, &decoded))
 	require.Equal(t, "codex", decoded["agent_type"])
 	require.Equal(t, "opus-4-7", decoded["model_override"])
+	require.Equal(t, "xhigh", decoded["reasoning_effort"])
 	require.Equal(t, "src/", decoded["scope"])
 	require.Equal(t, string(AutomationIdentityScopePersonal), decoded["identity_scope"])
 	require.Equal(t, "main", decoded["base_branch"])
@@ -270,6 +273,7 @@ func TestBuildConfigSnapshot_NilOptionalFields(t *testing.T) {
 	require.NoError(t, json.Unmarshal(raw, &decoded))
 	require.Nil(t, decoded["agent_type"])
 	require.Nil(t, decoded["model_override"])
+	require.Nil(t, decoded["reasoning_effort"])
 	require.Nil(t, decoded["scope"])
 	require.Equal(t, string(AutomationIdentityScopeOrg), decoded["identity_scope"])
 	require.Equal(t, "develop", decoded["base_branch"])

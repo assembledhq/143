@@ -28,11 +28,14 @@ import (
 
 // mockAgentAdapter implements agent.AgentAdapter.
 type mockAgentAdapter struct {
-	name      models.AgentType
-	executeFn func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error)
+	name       models.AgentType
+	resumeMode agent.SessionResumeMode
+	executeFn  func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error)
 }
 
 func (m *mockAgentAdapter) Name() models.AgentType { return m.name }
+
+func (m *mockAgentAdapter) ResumeMode() agent.SessionResumeMode { return m.resumeMode }
 
 func (m *mockAgentAdapter) PreparePrompt(ctx context.Context, input *agent.AgentInput) (*agent.AgentPrompt, error) {
 	return &agent.AgentPrompt{
@@ -61,6 +64,8 @@ type capturingAdapter struct {
 }
 
 func (c *capturingAdapter) Name() models.AgentType { return c.name }
+
+func (c *capturingAdapter) ResumeMode() agent.SessionResumeMode { return agent.ResumeBySessionID }
 
 func (c *capturingAdapter) PreparePrompt(ctx context.Context, input *agent.AgentInput) (*agent.AgentPrompt, error) {
 	c.captured = input
@@ -199,6 +204,7 @@ type mockSessionStore struct {
 	countRunning           int
 	statusUpdates          []string
 	resultUpdates          []resultUpdate
+	workspaceUpdates       []workspaceUpdate
 	turnUpdates            []turnUpdate
 	runtimeBegins          []runtimeBegin
 	progressUpdates        []runtimeProgressUpdate
@@ -237,6 +243,10 @@ type mockSessionStore struct {
 	containerHoldingPages [][]models.Session
 	containerHoldingErr   error
 	containerHoldingCalls int
+
+	// getByIDFn lets individual tests stub the session row that drain and
+	// other helpers query for status. Defaults to an empty Session when nil.
+	getByIDFn func(orgID, sessionID uuid.UUID) (models.Session, error)
 }
 
 type failureUpdate struct {
@@ -290,6 +300,11 @@ type resultUpdate struct {
 	result *models.SessionResult
 }
 
+type workspaceUpdate struct {
+	snapshotKey string
+	result      *models.SessionResult
+}
+
 type turnUpdate struct {
 	turn           int
 	result         *models.SessionResult
@@ -330,6 +345,16 @@ func (m *mockSessionStore) UpdateTurnComplete(ctx context.Context, orgID, sessio
 }
 
 func (m *mockSessionStore) UpdateSnapshotInfo(ctx context.Context, orgID, sessionID uuid.UUID, agentSessionID, snapshotKey string) error {
+	return nil
+}
+
+func (m *mockSessionStore) UpdateWorkspaceSnapshot(ctx context.Context, orgID, sessionID uuid.UUID, snapshotKey string, result *models.SessionResult) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.workspaceUpdates = append(m.workspaceUpdates, workspaceUpdate{
+		snapshotKey: snapshotKey,
+		result:      result,
+	})
 	return nil
 }
 
@@ -447,6 +472,11 @@ func (m *mockSessionStore) UpdateFailure(ctx context.Context, orgID, runID uuid.
 }
 
 func (m *mockSessionStore) GetByID(ctx context.Context, orgID, sessionID uuid.UUID) (models.Session, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.getByIDFn != nil {
+		return m.getByIDFn(orgID, sessionID)
+	}
 	return models.Session{}, nil
 }
 
@@ -564,6 +594,14 @@ func (m *mockSessionStore) getTurnUpdates() []turnUpdate {
 	defer m.mu.Unlock()
 	out := make([]turnUpdate, len(m.turnUpdates))
 	copy(out, m.turnUpdates)
+	return out
+}
+
+func (m *mockSessionStore) getWorkspaceUpdates() []workspaceUpdate {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]workspaceUpdate, len(m.workspaceUpdates))
+	copy(out, m.workspaceUpdates)
 	return out
 }
 
@@ -836,6 +874,7 @@ type mockJobStore struct {
 	mu               sync.Mutex
 	enqueued         []string // job types
 	payloads         map[string]any
+	targets          map[string]*string // jobType -> last-seen TargetNodeID
 	oldestPendingAge time.Duration
 	hasPendingAge    bool
 }
@@ -849,6 +888,16 @@ func (m *mockJobStore) Enqueue(ctx context.Context, orgID uuid.UUID, queue, jobT
 	m.enqueued = append(m.enqueued, jobType)
 	m.payloads[jobType] = payload
 	return uuid.New(), nil
+}
+
+func (m *mockJobStore) EnqueueWithTarget(ctx context.Context, orgID uuid.UUID, queue, jobType string, payload any, priority int, dedupeKey *string, targetNodeID *string) (uuid.UUID, error) {
+	m.mu.Lock()
+	if m.targets == nil {
+		m.targets = make(map[string]*string)
+	}
+	m.targets[jobType] = targetNodeID
+	m.mu.Unlock()
+	return m.Enqueue(ctx, orgID, queue, jobType, payload, priority, dedupeKey)
 }
 
 func (m *mockJobStore) OldestPendingSessionJobAge(ctx context.Context) (time.Duration, bool, error) {
@@ -929,6 +978,7 @@ type testDeps struct {
 	provider         *testutil.MockSandboxProvider
 	adapter          *mockAgentAdapter
 	sessions         *mockSessionStore
+	sessionThreads   *mockSessionThreadStore
 	projects         *mockProjectTaskUpdater
 	issues           *mockIssueStore
 	repos            *mockRepositoryStore
@@ -950,6 +1000,50 @@ type testDeps struct {
 	sandboxAuth      agent.SandboxAuthServer
 	users            agent.UserLookup
 	logger           *zerolog.Logger
+}
+
+// mockSessionThreadStore captures thread-status writes the orchestrator
+// makes during failure-path bookkeeping. Methods are no-ops on the happy
+// path; tests that exercise the worker-ownership / sandbox-failure cleanup
+// blocks use updateStatusCalls to assert thread.status was reset.
+type mockSessionThreadStore struct {
+	mu                sync.Mutex
+	updateStatusCalls []struct {
+		threadID uuid.UUID
+		status   models.ThreadStatus
+	}
+}
+
+func (m *mockSessionThreadStore) UpdateStatus(_ context.Context, _, threadID uuid.UUID, status models.ThreadStatus) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.updateStatusCalls = append(m.updateStatusCalls, struct {
+		threadID uuid.UUID
+		status   models.ThreadStatus
+	}{threadID: threadID, status: status})
+	return nil
+}
+
+func (m *mockSessionThreadStore) CompleteTurn(_ context.Context, _, _ uuid.UUID, _ int, _ string) error {
+	return nil
+}
+
+func (m *mockSessionThreadStore) UpdateResult(_ context.Context, _, _ uuid.UUID, _ models.ThreadStatus, _ *models.SessionResult) error {
+	return nil
+}
+
+func (m *mockSessionThreadStore) ClearPendingMessages(_ context.Context, _, _ uuid.UUID) error {
+	return nil
+}
+
+func (m *mockSessionThreadStore) statuses() []models.ThreadStatus {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]models.ThreadStatus, 0, len(m.updateStatusCalls))
+	for _, c := range m.updateStatusCalls {
+		out = append(out, c.status)
+	}
+	return out
 }
 
 func defaultDeps() testDeps {
@@ -997,10 +1091,15 @@ func buildOrchestrator(d testDeps) *agent.Orchestrator {
 	if d.logger != nil {
 		logger = *d.logger
 	}
+	var sessionThreads agent.SessionThreadStore
+	if d.sessionThreads != nil {
+		sessionThreads = d.sessionThreads
+	}
 	return agent.NewOrchestrator(agent.OrchestratorConfig{
 		Provider:          d.provider,
 		Adapters:          map[models.AgentType]agent.AgentAdapter{d.adapter.Name(): d.adapter},
 		Sessions:          d.sessions,
+		SessionThreads:    sessionThreads,
 		SessionLogs:       d.logs,
 		SessionQuestions:  d.questions,
 		SessionMessages:   d.messages,
@@ -2711,6 +2810,90 @@ func TestContinueSession_GatesOnPendingSnapshotKey(t *testing.T) {
 	require.Empty(t, d.sessions.getStatusUpdates(), "ContinueSession must not mutate session state before the gate fires")
 }
 
+func TestRevertThread_UpdatesWorkspaceSnapshot(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	sessionID := uuid.New()
+	threadID := uuid.New()
+	snapshotKey := "snapshots/test/session.tar.zst"
+	baseCommitSHA := "base-sha"
+	threadDiff := "diff --git a/foo.txt b/foo.txt\n--- a/foo.txt\n+++ b/foo.txt\n@@ -1 +1 @@\n-old\n+new\n"
+
+	sessions := &mockSessionStore{}
+	snapshots := &mockSnapshotStore{
+		data: map[string][]byte{
+			snapshotKey: []byte("prior-snapshot"),
+		},
+	}
+	provider := testutil.NewMockSandboxProvider()
+	provider.RestoreFn = func(ctx context.Context, sb *agent.Sandbox, reader io.Reader) error {
+		_, err := io.ReadAll(reader)
+		return err
+	}
+	provider.SnapshotFn = func(ctx context.Context, sb *agent.Sandbox) (io.ReadCloser, error) {
+		return io.NopCloser(bytes.NewReader([]byte("post-revert-snapshot"))), nil
+	}
+	var appliedReversePatch bool
+	provider.ExecFn = func(ctx context.Context, sb *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
+		switch {
+		case cmd == "git rev-parse --is-inside-work-tree":
+			_, _ = io.WriteString(stdout, "true\n")
+			return 0, nil
+		case strings.HasPrefix(cmd, "git apply -R "):
+			appliedReversePatch = true
+			return 0, nil
+		case cmd == "git diff --find-renames --binary base-sha -- .":
+			_, _ = io.WriteString(stdout, "diff --git a/foo.txt b/foo.txt\n")
+			return 0, nil
+		case cmd == "git ls-files --others --exclude-standard -- .":
+			return 0, nil
+		case cmd == "git rev-parse HEAD":
+			_, _ = io.WriteString(stdout, "head-sha\n")
+			return 0, nil
+		case cmd == "git status --porcelain --untracked-files=all -- .":
+			_, _ = io.WriteString(stdout, " M foo.txt\n")
+			return 0, nil
+		default:
+			return 0, nil
+		}
+	}
+
+	orch := agent.NewOrchestrator(agent.OrchestratorConfig{
+		Provider:         provider,
+		Sessions:         sessions,
+		SessionLogs:      &mockSessionLogStore{},
+		SessionQuestions: &mockSessionQuestionStore{},
+		SessionMessages:  &mockSessionMessageStore{},
+		Snapshots:        snapshots,
+		Logger:           zerolog.Nop(),
+	})
+
+	session := &models.Session{
+		ID:            sessionID,
+		OrgID:         orgID,
+		Status:        string(models.SessionStatusIdle),
+		SnapshotKey:   &snapshotKey,
+		BaseCommitSHA: &baseCommitSHA,
+	}
+	thread := &models.SessionThread{
+		ID:        threadID,
+		SessionID: sessionID,
+		OrgID:     orgID,
+		Diff:      &threadDiff,
+	}
+
+	err := orch.RevertThread(context.Background(), session, thread)
+	require.NoError(t, err, "RevertThread should apply the reverse patch and persist the updated workspace state")
+	require.True(t, appliedReversePatch, "RevertThread should run git apply -R inside the sandbox")
+
+	updates := sessions.getWorkspaceUpdates()
+	require.Len(t, updates, 1, "RevertThread should persist one workspace snapshot update")
+	require.Equal(t, "snapshots/"+orgID.String()+"/"+sessionID.String()+"/workspace.tar.zst", updates[0].snapshotKey, "RevertThread should refresh the session snapshot key")
+	require.NotNil(t, updates[0].result.Diff, "RevertThread should persist the refreshed session diff")
+	require.Equal(t, "diff --git a/foo.txt b/foo.txt\n", *updates[0].result.Diff, "RevertThread should store the post-revert diff")
+}
+
 func TestContinueSession_UsesBuildRunResultInUpdateTurnComplete(t *testing.T) {
 	t.Parallel()
 
@@ -2773,6 +2956,88 @@ func TestContinueSession_UsesBuildRunResultInUpdateTurnComplete(t *testing.T) {
 	require.NotEmpty(t, updates[0].snapshotKey, "ContinueSession should persist a snapshot key")
 	require.NotNil(t, updates[0].result, "ContinueSession should build a session result for UpdateTurnComplete")
 	require.NotNil(t, updates[0].result.Diff, "ContinueSession should pass the diff through to UpdateTurnComplete")
+}
+
+func TestContinueSession_EmbedsHistoryWhenResumeBySessionIDAdapterHasNoCapturedSessionID(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	issue.Source = models.IssueSourceManual
+	session := testRun(orgID, issue.ID)
+	session.AgentType = models.AgentTypeClaudeCode
+	session.Origin = models.SessionOriginManual
+	session.InteractionMode = models.SessionInteractionModeInteractive
+	session.ValidationPolicy = models.SessionValidationPolicyOnSessionEnd
+	session.Status = string(models.SessionStatusIdle)
+	session.CurrentTurn = 1
+	// Snapshot present (Path A) but no captured agent session id — exactly
+	// the case where the adapter would otherwise lose conversation context.
+	snapshotKey := "existing-snapshot"
+	session.SnapshotKey = &snapshotKey
+	session.AgentSessionID = nil
+	priorDiff := "diff --git a/main.go b/main.go\n+fixed already\n"
+	session.Diff = &priorDiff
+
+	d := defaultDeps()
+	d.adapter = &mockAgentAdapter{
+		name:       models.AgentTypeClaudeCode,
+		resumeMode: agent.ResumeBySessionID,
+	}
+	d.issues.issue = issue
+	d.messages.messages = []models.SessionMessage{
+		{
+			ID:         1,
+			SessionID:  session.ID,
+			OrgID:      orgID,
+			TurnNumber: 1,
+			Role:       models.MessageRoleUser,
+			Content:    "Please review my changes.",
+		},
+		{
+			ID:         2,
+			SessionID:  session.ID,
+			OrgID:      orgID,
+			TurnNumber: 1,
+			Role:       models.MessageRoleAssistant,
+			Content:    "I found two issues: a missing nil check and an unbounded loop.",
+		},
+		{
+			ID:         3,
+			SessionID:  session.ID,
+			OrgID:      orgID,
+			TurnNumber: 2,
+			Role:       models.MessageRoleUser,
+			Content:    "please fix both of these issues",
+		},
+	}
+	d.provider.RestoreFn = func(ctx context.Context, sb *agent.Sandbox, reader io.Reader) error {
+		_, err := io.ReadAll(reader)
+		return err
+	}
+	d.provider.SnapshotFn = func(ctx context.Context, sb *agent.Sandbox) (io.ReadCloser, error) {
+		return io.NopCloser(bytes.NewReader([]byte("next-snapshot"))), nil
+	}
+	d.snapshots.data = map[string][]byte{snapshotKey: []byte("restored-snapshot")}
+
+	var promptSeen *agent.AgentPrompt
+	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
+		promptSeen = prompt
+		return &agent.AgentResult{Summary: "fixed", ConfidenceScore: 0.9, ExitCode: 0}, nil
+	}
+
+	err := buildOrchestrator(d).ContinueSession(context.Background(), session, nil)
+	require.NoError(t, err, "ContinueSession should succeed via the embedded-history fallback")
+	require.NotNil(t, promptSeen, "adapter must have been invoked")
+	require.False(t, promptSeen.Continuation, "fallback must run a fresh exec, not a Continuation turn")
+	require.Empty(t, promptSeen.ResumeSessionID, "fallback must not set a ResumeSessionID — there is none")
+	require.Contains(t, promptSeen.UserPrompt, "Previous conversation history", "fallback must embed conversation history into the prompt")
+	require.Contains(t, promptSeen.UserPrompt, "Please review my changes.", "fallback must include the prior user turn")
+	require.Contains(t, promptSeen.UserPrompt, "missing nil check", "fallback must include the prior assistant turn so 'fix both issues' is interpretable")
+	require.Contains(t, promptSeen.UserPrompt, "please fix both of these issues", "fallback must include the new user message as the trailing instruction")
+	require.NotContains(t, promptSeen.UserPrompt, "starting from a fresh clone", "snapshot fallback must not claim the restored workspace is a fresh clone")
+	require.NotContains(t, promptSeen.UserPrompt, "Please re-apply these changes", "snapshot fallback must not ask the agent to re-apply a diff that is already present in the restored snapshot")
+	require.NotContains(t, promptSeen.UserPrompt, priorDiff, "snapshot fallback must not include the prior diff as work to re-apply")
 }
 
 func TestContinueSession_UsesThreadExecutionOptions(t *testing.T) {
@@ -2839,6 +3104,7 @@ func TestContinueSession_UsesThreadExecutionOptions(t *testing.T) {
 		ModelOverride:        &threadModel,
 		ThreadAgentSessionID: nil,
 		ResultAgentSessionID: &threadAgentSessionID,
+		ThreadID:             &threadID,
 	})
 	require.NoError(t, err, "ContinueSession should execute with the thread-selected adapter")
 	require.Equal(t, threadModel, createdCfg.Env["GEMINI_MODEL"], "ContinueSession should apply the thread model to the thread agent env")
@@ -2917,6 +3183,244 @@ func TestContinueSession_RepairedSlashCommandsOnReusePath(t *testing.T) {
 	orch := buildOrchestrator(d)
 	err := orch.ContinueSession(context.Background(), session, nil)
 	require.NoError(t, err, "ContinueSession should succeed on the reuse path when slash commands need repair")
+}
+
+// TestContinueSession_ReusePathClearsStaleOrphanWhenContainerDead verifies the
+// defensive liveness probe in the reuse path. When session.container_id points
+// at a container that no longer exists (worker rollover / docker eviction
+// destroyed it without going through FinalizeContainerDestroy), the
+// continue_session must NOT proceed to attach to the dead container — that
+// path historically misclassified the resulting Docker error as a Codex auth
+// expiry. Instead, ClearContainerID is called and ErrStaleSandboxIDCleared is
+// returned so the worker retries against a clean row.
+//
+// The probe is gated on session.WorkerNodeID matching this worker's node id;
+// see TestContinueSession_ReusePathBailsOutOnCrossNodeClaim for the wrong-node
+// path that the gate guards against.
+func TestContinueSession_ReusePathClearsStaleOrphanWhenContainerDead(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	issue.Source = models.IssueSourceManual
+	session := testRun(orgID, issue.ID)
+	session.Status = string(models.SessionStatusIdle)
+	session.CurrentTurn = 1
+	stale := "stale-container-8d0c678c"
+	session.ContainerID = &stale
+	thisNode := "worker-this-node"
+	session.WorkerNodeID = &thisNode
+	session.SandboxState = string(models.SandboxStateRunning)
+
+	d := defaultDeps()
+	d.nodeID = thisNode
+	d.issues.issue = issue
+	d.messages.messages = []models.SessionMessage{
+		{
+			ID:         1,
+			SessionID:  session.ID,
+			OrgID:      orgID,
+			TurnNumber: 2,
+			Role:       models.MessageRoleUser,
+			Content:    "follow-up",
+		},
+	}
+	d.provider.IsAliveFn = func(ctx context.Context, sb *agent.Sandbox) (bool, error) {
+		require.Equal(t, stale, sb.ID, "IsAlive must probe the recorded container_id")
+		return false, nil
+	}
+	d.sessions.clearContainerIDFn = func(expected string) (bool, error) {
+		require.Equal(t, stale, expected, "ClearContainerID must guard the CAS on the recorded id")
+		return true, nil
+	}
+	d.provider.CreateFn = func(context.Context, agent.SandboxConfig) (*agent.Sandbox, error) {
+		t.Fatalf("provider.Create must not run when liveness probe rejects the recorded container_id; the worker will retry")
+		return nil, nil
+	}
+	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
+		t.Fatalf("adapter.Execute must not run when the session bailed out for a stale-orphan retry")
+		return nil, nil
+	}
+
+	orch := buildOrchestrator(d)
+	err := orch.ContinueSession(context.Background(), session, nil)
+	require.Error(t, err)
+	require.ErrorIs(t, err, agent.ErrStaleSandboxIDCleared,
+		"ContinueSession reuse path with dead recorded container_id must return ErrStaleSandboxIDCleared so the worker retries")
+	require.Equal(t, 1, d.sessions.clearContainerIDCalls, "ClearContainerID must be called exactly once")
+}
+
+// TestContinueSession_ReusePathBailsOutOnCrossNodeClaim verifies that when a
+// continue_session job is claimed by the wrong worker (session.worker_node_id
+// names a sibling node, e.g. before node-affinity job routing has rolled out
+// or as a defense-in-depth catch for bugs that bypass it), the orchestrator
+// returns ErrSandboxOnDifferentNode WITHOUT probing IsAlive or clearing
+// container_id. Probing on the wrong daemon false-reports dead, and clearing
+// would orphan the live container on its real host — both wrong moves.
+func TestContinueSession_ReusePathBailsOutOnCrossNodeClaim(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	issue.Source = models.IssueSourceManual
+	session := testRun(orgID, issue.ID)
+	session.Status = string(models.SessionStatusIdle)
+	session.CurrentTurn = 1
+	containerID := "preview-container-on-other-host"
+	session.ContainerID = &containerID
+	otherNode := "worker-host-c"
+	session.WorkerNodeID = &otherNode
+	session.SandboxState = string(models.SandboxStateRunning)
+
+	d := defaultDeps()
+	d.nodeID = "worker-host-7" // we are NOT the recorded owner
+	d.issues.issue = issue
+	d.messages.messages = []models.SessionMessage{
+		{
+			ID:         1,
+			SessionID:  session.ID,
+			OrgID:      orgID,
+			TurnNumber: 2,
+			Role:       models.MessageRoleUser,
+			Content:    "follow-up",
+		},
+	}
+	d.provider.IsAliveFn = func(context.Context, *agent.Sandbox) (bool, error) {
+		t.Fatalf("IsAlive must NOT be called on cross-node claim — probing the wrong daemon false-reports dead")
+		return false, nil
+	}
+	d.sessions.clearContainerIDFn = func(string) (bool, error) {
+		t.Fatalf("ClearContainerID must NOT be called on cross-node claim — would orphan the live container on its real host")
+		return false, nil
+	}
+	d.provider.CreateFn = func(context.Context, agent.SandboxConfig) (*agent.Sandbox, error) {
+		t.Fatalf("provider.Create must not run on cross-node claim — wrong worker")
+		return nil, nil
+	}
+	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
+		t.Fatalf("adapter.Execute must not run on cross-node claim")
+		return nil, nil
+	}
+
+	orch := buildOrchestrator(d)
+	err := orch.ContinueSession(context.Background(), session, nil)
+	require.Error(t, err)
+	require.ErrorIs(t, err, agent.ErrSandboxOnDifferentNode,
+		"cross-node continue_session claim must return ErrSandboxOnDifferentNode so the worker re-enqueues for the correct node")
+	require.Equal(t, 0, d.sessions.clearContainerIDCalls, "container_id must be untouched on cross-node bail-out")
+}
+
+func TestContinueSession_ReusePathClearsContainerForDeadTargetNodeRecovery(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	issue.Source = models.IssueSourceManual
+	session := testRun(orgID, issue.ID)
+	session.Status = string(models.SessionStatusIdle)
+	session.CurrentTurn = 1
+	containerID := "container-on-dead-worker"
+	session.ContainerID = &containerID
+	deadNode := "worker-dead"
+	session.WorkerNodeID = &deadNode
+	session.SandboxState = string(models.SandboxStateRunning)
+
+	d := defaultDeps()
+	d.nodeID = "worker-recovery"
+	d.issues.issue = issue
+	d.messages.messages = []models.SessionMessage{
+		{
+			ID:         1,
+			SessionID:  session.ID,
+			OrgID:      orgID,
+			TurnNumber: 2,
+			Role:       models.MessageRoleUser,
+			Content:    "follow-up",
+		},
+	}
+	d.provider.IsAliveFn = func(context.Context, *agent.Sandbox) (bool, error) {
+		t.Fatalf("IsAlive must not probe the recovery worker's daemon for a dead target node container")
+		return false, nil
+	}
+	d.sessions.clearContainerIDFn = func(expected string) (bool, error) {
+		require.Equal(t, containerID, expected, "dead-node recovery should CAS-clear the recorded container id")
+		return true, nil
+	}
+	d.provider.CreateFn = func(context.Context, agent.SandboxConfig) (*agent.Sandbox, error) {
+		t.Fatalf("provider.Create must not run until the retry observes the cleared container_id")
+		return nil, nil
+	}
+	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
+		t.Fatalf("adapter.Execute must not run until the retry observes the cleared container_id")
+		return nil, nil
+	}
+
+	orch := buildOrchestrator(d)
+	ctx := jobctx.WithDeadTargetNode(context.Background(), deadNode)
+	err := orch.ContinueSession(ctx, session, nil)
+	require.Error(t, err, "dead-node recovery should stop the current attempt after clearing the stale container")
+	require.ErrorIs(t, err, agent.ErrStaleSandboxIDCleared,
+		"dead-node recovery should retry so the next attempt hydrates on the recovery worker")
+	require.Equal(t, 1, d.sessions.clearContainerIDCalls, "dead-node recovery should clear the recorded container exactly once")
+}
+
+// TestContinueSession_ReusePathProceedsWhenIsAliveErrors covers the
+// conservative fallback: a transient docker / probe error must NOT trigger
+// the orphan-clear path. The reuse continues and any real failure surfaces
+// through the normal downstream code (so a brief docker hiccup doesn't tear
+// down a session row that's actually fine).
+func TestContinueSession_ReusePathProceedsWhenIsAliveErrors(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	issue.Source = models.IssueSourceManual
+	session := testRun(orgID, issue.ID)
+	session.Status = string(models.SessionStatusIdle)
+	session.CurrentTurn = 1
+	existing := "preview-container-abc"
+	session.ContainerID = &existing
+	thisNode := "worker-this-node"
+	session.WorkerNodeID = &thisNode
+	session.SandboxState = string(models.SandboxStateRunning)
+
+	d := defaultDeps()
+	d.nodeID = thisNode
+	d.issues.issue = issue
+	d.messages.messages = []models.SessionMessage{
+		{
+			ID:         1,
+			SessionID:  session.ID,
+			OrgID:      orgID,
+			TurnNumber: 2,
+			Role:       models.MessageRoleUser,
+			Content:    "follow-up",
+		},
+	}
+	d.provider.IsAliveFn = func(ctx context.Context, sb *agent.Sandbox) (bool, error) {
+		return false, errors.New("docker connection refused")
+	}
+	d.sessions.clearContainerIDFn = func(expected string) (bool, error) {
+		t.Fatalf("ClearContainerID must NOT be called when IsAlive errored; transient probe failures fall through")
+		return false, nil
+	}
+	d.provider.CreateFn = func(context.Context, agent.SandboxConfig) (*agent.Sandbox, error) {
+		t.Fatalf("provider.Create must not be called on the reuse path")
+		return nil, nil
+	}
+	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
+		return &agent.AgentResult{
+			Summary:             "done",
+			ConfidenceScore:     0.9,
+			ConfidenceReasoning: "ok",
+			ExitCode:            0,
+		}, nil
+	}
+
+	orch := buildOrchestrator(d)
+	err := orch.ContinueSession(context.Background(), session, nil)
+	require.NoError(t, err, "transient IsAlive probe error must NOT bail out — reuse continues so transient docker hiccups don't reset the session row")
+	require.Equal(t, 0, d.sessions.clearContainerIDCalls, "ClearContainerID must not be invoked on probe-error path")
 }
 
 func TestRunAgent_LogStreamingWithQuestion(t *testing.T) {
@@ -3623,7 +4127,7 @@ func TestContinueSession_PersistsTurnResultAndReturnsToIdle(t *testing.T) {
 	}
 
 	orch := buildOrchestrator(d)
-	err := orch.ContinueSession(context.Background(), session, nil)
+	err := orch.ContinueSession(context.Background(), session, &agent.ContinueSessionOptions{ThreadID: &threadID})
 	require.NoError(t, err, "continue_session should succeed")
 
 	turnUpdates := d.sessions.getTurnUpdates()
@@ -3647,6 +4151,82 @@ func TestContinueSession_PersistsTurnResultAndReturnsToIdle(t *testing.T) {
 	require.Equal(t, threadID, *d.logs.logs[0].ThreadID, "persisted output logs should keep the triggering thread id")
 	require.NotNil(t, d.logs.markedThreadID, "duplicate marker should preserve the thread id")
 	require.Equal(t, threadID, *d.logs.markedThreadID, "duplicate marker should use the triggering thread id")
+}
+
+// TestContinueSession_RoutesToRequestedThreadAcrossSiblingTurns is the
+// regression test for the multi-tab dispatch bug: a sibling thread further
+// along in turns (Main on turn 9 with assistant replies through turn 11) used
+// to "win" the orchestrator's latest-user-message lookup over a brand-new
+// message on a younger thread (Codex 2 turn 2), causing the new message to be
+// orphaned and the wrong thread to be re-run. Locks the contract that when
+// the worker plumbs opts.ThreadID through, ContinueSession executes for that
+// thread and writes the assistant reply against it — even when sibling
+// threads have higher turn_numbers in the (turn_number, id)-ordered slice
+// returned by ListBySession.
+func TestContinueSession_RoutesToRequestedThreadAcrossSiblingTurns(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	mainThreadID := uuid.New()  // Main: many turns, last user already answered
+	codexThreadID := uuid.New() // Codex 2: brand-new tab, user just sent
+	issue := testIssue(orgID)
+	issue.Source = models.IssueSourceManual
+	session := testRun(orgID, issue.ID)
+	session.Origin = models.SessionOriginManual
+	session.InteractionMode = models.SessionInteractionModeInteractive
+	session.ValidationPolicy = models.SessionValidationPolicyOnSessionEnd
+	session.Status = string(models.SessionStatusIdle)
+	session.CurrentTurn = 11
+	session.SnapshotKey = strPtr("snapshots/test/session.tar")
+
+	d := defaultDeps()
+	d.issues.issue = issue
+	// Insertion order matches the ordering the real DB returns from
+	// ListBySession (ORDER BY turn_number ASC, id ASC). Each thread keeps its
+	// own turn counter, so the (turn=2, id=1052) row from Codex 2 sorts before
+	// the (turn=9, id=1046) row from Main even though Codex 2's message is
+	// chronologically newer. Pre-fix, latestUserMessage walked from the end
+	// of this slice and returned the Main turn-9 row — orphaning the Codex 2
+	// message and re-running an already-answered Main turn.
+	d.messages.messages = []models.SessionMessage{
+		{ID: 1052, SessionID: session.ID, OrgID: orgID, ThreadID: &codexThreadID, TurnNumber: 2, Role: models.MessageRoleUser, Content: "please fix the tests"},
+		{ID: 1046, SessionID: session.ID, OrgID: orgID, ThreadID: &mainThreadID, TurnNumber: 9, Role: models.MessageRoleUser, Content: "main turn 9 (already answered)"},
+		{ID: 1048, SessionID: session.ID, OrgID: orgID, ThreadID: &mainThreadID, TurnNumber: 9, Role: models.MessageRoleAssistant, Content: "main turn 9 reply"},
+		{ID: 1069, SessionID: session.ID, OrgID: orgID, ThreadID: &mainThreadID, TurnNumber: 11, Role: models.MessageRoleAssistant, Content: "main turn 11 reply"},
+	}
+	d.provider.RestoreFn = func(ctx context.Context, sb *agent.Sandbox, reader io.Reader) error {
+		_, err := io.ReadAll(reader)
+		return err
+	}
+	d.provider.SnapshotFn = func(ctx context.Context, sb *agent.Sandbox) (io.ReadCloser, error) {
+		return io.NopCloser(bytes.NewReader([]byte("next-snapshot"))), nil
+	}
+	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
+		require.Equal(t, "please fix the tests", prompt.UserMessage,
+			"continue_session for Codex 2 must run with Codex 2's user message, not the higher-turn Main message that sorts last in the (turn_number, id) ordering")
+		return &agent.AgentResult{
+			Summary:         "Codex 2 reply",
+			ConfidenceScore: 0.7,
+			ExitCode:        0,
+		}, nil
+	}
+	d.snapshots.data = map[string][]byte{
+		*session.SnapshotKey: []byte("restored-snapshot"),
+	}
+
+	err := buildOrchestrator(d).ContinueSession(context.Background(), session, &agent.ContinueSessionOptions{
+		ThreadID: &codexThreadID,
+	})
+	require.NoError(t, err, "ContinueSession should succeed for the Codex 2 thread")
+
+	messages := d.messages.getMessages()
+	require.Len(t, messages, 5, "an assistant reply should be appended to the timeline")
+	reply := messages[4]
+	require.Equal(t, models.MessageRoleAssistant, reply.Role)
+	require.Equal(t, "Codex 2 reply", reply.Content, "assistant reply content should come from the Codex 2 turn")
+	require.NotNil(t, reply.ThreadID, "assistant reply must be attributed to a thread, not session-level")
+	require.Equal(t, codexThreadID, *reply.ThreadID,
+		"assistant reply must be tagged with the Codex 2 thread, not Main — pre-fix this was the load-bearing assertion that failed in prod")
 }
 
 func TestContinueSession_FreshResumeClaudeTokenFailureFallsBackToAPIKey(t *testing.T) {
@@ -4503,6 +5083,56 @@ func TestContinueSession_SetWorkerNodeIDFailureFailsTurn(t *testing.T) {
 	require.Equal(t, 1, d.sessions.releaseHoldCalls, "ContinueSession should release the turn hold when worker ownership persistence fails")
 	require.Equal(t, 1, d.sessions.finalizeCalls, "ContinueSession should finalize the container destroy when worker ownership persistence fails")
 	require.Contains(t, d.sessions.getStatusUpdates(), string(models.SessionStatusIdle), "ContinueSession should revert the session to idle when worker ownership persistence fails")
+}
+
+// TestContinueSession_SetWorkerNodeIDFailureResetsThread covers the orphan
+// fix: when the worker-ownership CAS in SetWorkerNodeIDForContainer fails
+// mid-turn (the production scenario behind the "Session is not active" +
+// "Agent is working..." UI orphan), the orchestrator must reset BOTH the
+// session.status AND the active thread.status back to idle. The handler's
+// own thread reset is best-effort with a potentially-cancelled ctx; this
+// orchestrator-level reset is the load-bearing one.
+func TestContinueSession_SetWorkerNodeIDFailureResetsThread(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	issue.Source = models.IssueSourceManual
+	session := testRun(orgID, issue.ID)
+	session.Origin = models.SessionOriginManual
+	session.InteractionMode = models.SessionInteractionModeInteractive
+	session.ValidationPolicy = models.SessionValidationPolicyOnSessionEnd
+	session.Status = string(models.SessionStatusIdle)
+	session.CurrentTurn = 1
+
+	threadID := uuid.New()
+
+	d := defaultDeps()
+	d.nodeID = "worker-a"
+	d.sessions.setWorkerNodeErr = errors.New("persist failed")
+	d.sessionThreads = &mockSessionThreadStore{}
+	d.issues.issue = issue
+	d.messages.messages = []models.SessionMessage{
+		{ID: 1, SessionID: session.ID, OrgID: orgID, ThreadID: &threadID, TurnNumber: 2, Role: models.MessageRoleUser, Content: "retry me"},
+	}
+
+	orch := buildOrchestrator(d)
+	err := orch.ContinueSession(context.Background(), session, &agent.ContinueSessionOptions{
+		AgentType: models.AgentTypeClaudeCode,
+		ThreadID:  &threadID,
+	})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "persist session worker ownership")
+
+	// Session-level revert (existing behavior).
+	require.Contains(t, d.sessions.getStatusUpdates(), string(models.SessionStatusIdle),
+		"session.status must be reverted to idle")
+
+	// New behavior: thread-level revert. Without this, the thread row stays
+	// 'running' and the UI shows the dual-state orphan we hit in prod.
+	statuses := d.sessionThreads.statuses()
+	require.Contains(t, statuses, models.ThreadStatusIdle,
+		"thread.status must be reverted to idle so the UI doesn't get stuck on 'Agent is working...'")
 }
 
 // TestContinueSession_SessionRepoSlug exercises every branch of

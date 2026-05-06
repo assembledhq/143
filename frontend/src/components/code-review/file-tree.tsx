@@ -21,6 +21,26 @@ interface TreeNode {
   file?: DiffFile;
 }
 
+function flattenLeafNodes(node: TreeNode): TreeNode[] {
+  const leaves: TreeNode[] = [];
+
+  for (const child of node.children.values()) {
+    if (child.fileIndex === undefined) {
+      leaves.push(...flattenLeafNodes(child));
+      continue;
+    }
+    leaves.push(child);
+  }
+
+  return leaves;
+}
+
+function treePreservesIncomingOrder(tree: TreeNode, files: DiffFile[]): boolean {
+  const leaves = flattenLeafNodes(tree);
+  if (leaves.length !== files.length) return false;
+  return leaves.every((leaf, index) => leaf.file === files[index]);
+}
+
 function buildTree(files: DiffFile[]): TreeNode {
   const root: TreeNode = { name: "", fullPath: "", children: new Map() };
 
@@ -67,6 +87,43 @@ function flattenSingleChildDirs(node: TreeNode): TreeNode {
   }
 
   return { ...node, children: newChildren };
+}
+
+function FileRow({
+  label,
+  fileIndex,
+  file,
+  activeFileIndex,
+  onFileSelect,
+  depth = 0,
+}: {
+  label: string;
+  fileIndex: number;
+  file: DiffFile;
+  activeFileIndex: number;
+  onFileSelect: (index: number) => void;
+  depth?: number;
+}) {
+  return (
+    <button
+      onClick={() => onFileSelect(fileIndex)}
+      className={cn(
+        "flex items-center gap-1.5 w-full px-2 py-1 text-xs rounded transition-colors text-left",
+        fileIndex === activeFileIndex
+          ? "bg-primary/10 text-primary font-medium"
+          : "text-foreground hover:bg-muted/50"
+      )}
+      style={{ paddingLeft: `${depth * 12 + 8}px` }}
+    >
+      <FileText className="h-3 w-3 shrink-0 text-muted-foreground" />
+      <span className="truncate flex-1">{label}</span>
+      <span className="shrink-0 text-xs font-mono text-muted-foreground">
+        <span className="text-green-600 dark:text-green-400">+{file.stats.added}</span>
+        {" "}
+        <span className="text-red-600 dark:text-red-400">-{file.stats.removed}</span>
+      </span>
+    </button>
+  );
 }
 
 const TreeDirectory = memo(function TreeDirectory({
@@ -116,27 +173,15 @@ const TreeDirectory = memo(function TreeDirectory({
             }
 
             return (
-              <button
+              <FileRow
                 key={entry.fullPath}
-                onClick={() => onFileSelect(entry.fileIndex!)}
-                className={cn(
-                  "flex items-center gap-1.5 w-full px-2 py-1 text-xs rounded transition-colors text-left",
-                  entry.fileIndex === activeFileIndex
-                    ? "bg-primary/10 text-primary font-medium"
-                    : "text-foreground hover:bg-muted/50"
-                )}
-                style={{ paddingLeft: `${(node.name ? depth + 1 : depth) * 12 + 8}px` }}
-              >
-                <FileText className="h-3 w-3 shrink-0 text-muted-foreground" />
-                <span className="truncate flex-1">{entry.name}</span>
-                {entry.file && (
-                  <span className="shrink-0 text-xs font-mono text-muted-foreground">
-                    <span className="text-green-600 dark:text-green-400">+{entry.file.stats.added}</span>
-                    {" "}
-                    <span className="text-red-600 dark:text-red-400">-{entry.file.stats.removed}</span>
-                  </span>
-                )}
-              </button>
+                label={entry.name}
+                fileIndex={entry.fileIndex}
+                file={entry.file!}
+                activeFileIndex={activeFileIndex}
+                onFileSelect={onFileSelect}
+                depth={(node.name ? depth + 1 : depth)}
+              />
             );
           })}
         </>
@@ -180,6 +225,10 @@ export function FileTree({
     () => flattenSingleChildDirs(buildTree(filteredFiles)),
     [filteredFiles]
   );
+  const useFlatFileOrder = useMemo(
+    () => !treePreservesIncomingOrder(tree, filteredFiles),
+    [tree, filteredFiles]
+  );
 
   // Convert activeFileIndex from original files array to the filtered position.
   const filteredActiveIndex = filteredIndexMap.get(activeFileIndex) ?? activeFileIndex;
@@ -214,11 +263,24 @@ export function FileTree({
         ) : null}
       </div>
       <div className="flex-1 overflow-y-auto scrollbar-hide px-3 pb-2">
-        <TreeDirectory
-          node={tree}
-          activeFileIndex={filteredActiveIndex}
-          onFileSelect={handleFileSelect}
-        />
+        {useFlatFileOrder ? (
+          filteredFiles.map((file, filteredIdx) => (
+            <FileRow
+              key={`${file.newPath}:${filteredIdx}`}
+              label={file.newPath}
+              fileIndex={filteredIdx}
+              file={file}
+              activeFileIndex={filteredActiveIndex}
+              onFileSelect={handleFileSelect}
+            />
+          ))
+        ) : (
+          <TreeDirectory
+            node={tree}
+            activeFileIndex={filteredActiveIndex}
+            onFileSelect={handleFileSelect}
+          />
+        )}
       </div>
     </div>
   );

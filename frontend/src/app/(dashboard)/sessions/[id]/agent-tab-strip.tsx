@@ -39,7 +39,7 @@ function threadStatusDotClass(status: string): string {
     case "cancelled":
       return "bg-muted-foreground/60";
     default:
-      return "bg-sky-500";
+      return "bg-primary";
   }
 }
 
@@ -89,12 +89,6 @@ export function computeThreadOverlap(
   return result;
 }
 
-function formatCost(cents: number): string {
-  if (cents <= 0) return "—";
-  if (cents < 1) return `${(cents).toFixed(2)}¢`;
-  return `$${(cents / 100).toFixed(2)}`;
-}
-
 interface AgentTabStripProps {
   threads: SessionThread[];
   activeThreadId: string | null;
@@ -110,7 +104,7 @@ interface AgentTabStripProps {
 
 // AgentTabStrip is the user's primary surface for switching between tabs and
 // taking per-tab actions (cancel, fork, revert). It renders a compact
-// Conductor-style row with status, cost, overlap badge, and an actions menu
+// Conductor-style row with status, overlap badge, and an actions menu
 // per tab.
 //
 // Design notes:
@@ -135,6 +129,124 @@ export function AgentTabStrip({
   const tabs = useMemo(() => threads, [threads]);
   if (tabs.length === 0 || !activeThreadId) {
     return null;
+  }
+  const activeThread = tabs.find((thread) => thread.id === activeThreadId);
+  if (!activeThread) {
+    return null;
+  }
+
+  if (tabs.length === 1) {
+    const agent = AGENTS_BY_KEY[activeThread.agent_type];
+    const agentLabel = agent?.label ?? activeThread.agent_type;
+    const statusLabel = threadStatusLabel(activeThread.status, statusConfig);
+    const overlap = overlapsByThreadId.get(activeThread.id) ?? [];
+    const isCancelling =
+      activeThread.cancel_requested_at != null && isActiveStatus(activeThread.status);
+    const queued = activeThread.pending_message_count ?? 0;
+    const needsAttention =
+      activeThread.status === "awaiting_input" || activeThread.status === "failed";
+
+    return (
+      <TooltipProvider delayDuration={150}>
+        <div className="shrink-0 border-b border-border bg-background px-3 py-2">
+          <div className="flex min-w-0 items-center gap-2">
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <div
+                  tabIndex={0}
+                  role="group"
+                  aria-label={`${agentLabel} ${statusLabel}`}
+                  className="flex min-w-0 flex-1 items-center gap-2 rounded-md px-1 py-1 outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
+                >
+                  <span
+                    className={cn(
+                      "h-2 w-2 shrink-0 rounded-full",
+                      threadStatusDotClass(activeThread.status),
+                      activeThread.status === "running" && !isCancelling && "animate-pulse",
+                    )}
+                    aria-hidden
+                  />
+                  <span className="truncate text-sm font-medium text-foreground">{agentLabel}</span>
+                  <span className="truncate text-sm text-muted-foreground">{statusLabel}</span>
+                  {isCancelling && (
+                    <Loader2
+                      className="h-3.5 w-3.5 shrink-0 animate-spin text-muted-foreground"
+                      aria-label="Cancelling"
+                    />
+                  )}
+                  {queued > 0 && (
+                    <Badge variant="secondary" className="h-4 px-1 text-xs leading-none">
+                      {queued}
+                    </Badge>
+                  )}
+                  {needsAttention && (
+                    <span
+                      className="h-1.5 w-1.5 shrink-0 rounded-full bg-amber-500"
+                      aria-label="Needs attention"
+                    />
+                  )}
+                  {overlap.length > 0 && (
+                    <AlertTriangle
+                      className="h-3 w-3 shrink-0 text-amber-600 dark:text-amber-400"
+                      aria-label={`Overlaps with another tab on ${overlap.length} file${overlap.length === 1 ? "" : "s"}`}
+                    />
+                  )}
+                </div>
+              </TooltipTrigger>
+              <TooltipContent side="bottom" className="max-w-sm text-xs">
+                <div className="space-y-1">
+                  <div className="font-medium">
+                    {agentLabel}
+                    <span className="font-normal text-muted-foreground"> — {activeThread.label}</span>
+                  </div>
+                  <div className="text-muted-foreground">
+                    {statusLabel}
+                    {queued > 0 ? ` · ${queued} message${queued === 1 ? "" : "s"} queued` : ""}
+                  </div>
+                  {overlap.length > 0 && (
+                    <div className="pt-1">
+                      <div className="font-medium text-amber-700 dark:text-amber-400">
+                        Overlap with another tab:
+                      </div>
+                      <ul className="text-muted-foreground">
+                        {overlap.slice(0, 5).map((path) => (
+                          <li key={path} className="truncate">
+                            {path}
+                          </li>
+                        ))}
+                        {overlap.length > 5 && (
+                          <li className="text-muted-foreground/80">…and {overlap.length - 5} more</li>
+                        )}
+                      </ul>
+                    </div>
+                  )}
+                </div>
+              </TooltipContent>
+            </Tooltip>
+
+            <ThreadActionsMenu
+              threads={tabs}
+              activeThreadId={activeThreadId}
+              onCancel={onCancelThread}
+              onFork={onForkThread}
+              onRevert={onRevertThread}
+              cancelPendingThreadId={cancelPendingThreadId}
+            />
+            <Button
+              type="button"
+              size="icon"
+              variant="ghost"
+              className="h-8 w-8 shrink-0"
+              aria-label="Add agent tab"
+              title="Add agent tab"
+              onClick={onAddTab}
+            >
+              <Plus className="h-4 w-4" />
+            </Button>
+          </div>
+        </div>
+      </TooltipProvider>
+    );
   }
 
   return (
@@ -203,7 +315,6 @@ export function AgentTabStrip({
                       <div className="space-y-1">
                         <div className="font-medium">{thread.label} <span className="font-normal text-muted-foreground">— {agentLabel}</span></div>
                         <div className="text-muted-foreground">{statusLabel}{queued > 0 ? ` · ${queued} message${queued === 1 ? "" : "s"} queued` : ""}</div>
-                        <div className="text-muted-foreground">Cost: {formatCost(thread.cost_cents)}</div>
                         {overlap.length > 0 && (
                           <div className="pt-1">
                             <div className="font-medium text-amber-700 dark:text-amber-400">Overlap with another tab:</div>

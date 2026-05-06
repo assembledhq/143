@@ -59,6 +59,13 @@ func (a *ClaudeCodeAdapter) Name() models.AgentType {
 	return models.AgentTypeClaudeCode
 }
 
+// ResumeMode reports that Claude Code resumes prior turns by explicit session
+// ID (captured from the `result` event's `session_id` field and threaded back
+// into `claude --resume <id>`).
+func (a *ClaudeCodeAdapter) ResumeMode() agent.SessionResumeMode {
+	return agent.ResumeBySessionID
+}
+
 // PreparePrompt constructs the system and user prompts for Claude Code
 // based on the issue context.
 func (a *ClaudeCodeAdapter) PreparePrompt(ctx context.Context, input *agent.AgentInput) (*agent.AgentPrompt, error) {
@@ -93,19 +100,26 @@ func (a *ClaudeCodeAdapter) Execute(ctx context.Context, sandbox *agent.Sandbox,
 	if prompt.ReasoningEffort != "" {
 		effortArg = fmt.Sprintf(" --effort %s", prompt.ReasoningEffort)
 	}
-	if prompt.Continuation {
-		// Subsequent turn: resume the latest session with --continue.
-		// The prompt is a positional argument to --print.
+	if prompt.Continuation && prompt.ResumeSessionID != "" {
+		// Subsequent turn with a known session ID: deterministic resume by
+		// session id captured from a prior turn's `result` event. We avoid
+		// `--continue`, which resumes whatever Claude session is newest in
+		// the local data dir and is non-deterministic when stale entries
+		// are present.
 		msg := shellEscapeDouble(prompt.UserMessage)
 		cmd = fmt.Sprintf(
-			"claude --print --output-format stream-json --verbose%s --continue \"%s\"",
+			"claude --print --output-format stream-json --verbose%s --resume %s \"%s\"",
 			effortArg,
+			shellEscapeSingle(prompt.ResumeSessionID),
 			msg,
 		)
 	} else {
-		// First turn: write prompt file under $HOME (not WorkDir so it
-		// doesn't pollute the cloned repo's git status) and pipe it into
-		// claude via stdin.
+		// Fresh exec — used for first turns and as the fallback for
+		// continuation turns when the session ID was never captured (the
+		// orchestrator embeds the prior conversation history into UserPrompt
+		// in that case so the agent has the full context). Write the prompt
+		// under $HOME (not WorkDir, which would pollute git status) and pipe
+		// it into claude via stdin.
 		promptContent := fmt.Sprintf("%s\n\n---\n\n%s", prompt.SystemPrompt, prompt.UserPrompt)
 		promptPath := fmt.Sprintf("%s/.143-prompt.md", sandbox.HomeDir)
 		if err := provider.WriteFile(ctx, sandbox, promptPath, []byte(promptContent)); err != nil {

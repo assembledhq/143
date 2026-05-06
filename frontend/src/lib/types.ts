@@ -283,35 +283,6 @@ export interface SessionThreadFileEvent {
   observed_at: string;
 }
 
-export interface ThreadSummary {
-  id: string;
-  label: string;
-  agent_type: string;
-  status: string;
-  current_turn: number;
-  result_summary?: string;
-  confidence_score?: number;
-  cost_cents: number;
-  started_at?: string;
-  last_activity_at?: string;
-  touched_paths?: string[];
-}
-
-export interface TouchedFileRoll {
-  path: string;
-  last_event_type: 'created' | 'modified' | 'deleted';
-  last_observed_at: string;
-  owner_thread_ids: string[];
-}
-
-export interface SessionSummary {
-  session_id: string;
-  generated_at: string;
-  active_count: number;
-  threads: ThreadSummary[];
-  touched_files: TouchedFileRoll[];
-}
-
 export interface ForkResult {
   job_id: string;
 }
@@ -1419,6 +1390,7 @@ export interface Automation {
   scope?: string;
   agent_type?: string;
   model_override?: string;
+  reasoning_effort?: Session["reasoning_effort"];
   execution_mode: string;
   max_concurrent: number;
   base_branch: string;

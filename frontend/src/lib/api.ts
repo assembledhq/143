@@ -378,7 +378,7 @@ export const api = {
       get<import('./types').SingleResponse<import('./types').SessionThread>>(`/api/v1/sessions/${sessionId}/threads/${threadId}`),
     createThread: (sessionId: string, body: { agent_type?: string; model?: string; label: string; instructions?: string; file_scope?: string[] }) =>
       post<import('./types').SingleResponse<import('./types').SessionThread>>(`/api/v1/sessions/${sessionId}/threads`, body),
-    sendThreadMessage: (sessionId: string, threadId: string, body: { message: string; images?: string[]; references?: import('./types').SessionInputReference[]; commands?: import('./types').SessionInputCommand[]; planMode?: boolean }) =>
+    sendThreadMessage: (sessionId: string, threadId: string, body: { message: string; images?: string[]; references?: import('./types').SessionInputReference[]; commands?: import('./types').SessionInputCommand[]; planMode?: boolean; resolveReviewCommentIDs?: string[] }) =>
       post<import('./types').SingleResponse<import('./types').SessionMessage>>(
         `/api/v1/sessions/${sessionId}/threads/${threadId}/messages`,
         {
@@ -387,6 +387,7 @@ export const api = {
           references: body.references && body.references.length > 0 ? body.references : undefined,
           commands: body.commands && body.commands.length > 0 ? body.commands : undefined,
           plan_mode: body.planMode || undefined,
+          resolve_review_comment_ids: body.resolveReviewCommentIDs && body.resolveReviewCommentIDs.length > 0 ? body.resolveReviewCommentIDs : undefined,
         },
       ),
     endThread: (sessionId: string, threadId: string) =>
@@ -401,8 +402,6 @@ export const api = {
       get<import('./types').ListResponse<import('./types').SessionMessage>>(`/api/v1/sessions/${sessionId}/threads/${threadId}/messages`),
     getThreadLogs: (sessionId: string, threadId: string) =>
       get<import('./types').ListResponse<import('./types').SessionLog>>(`/api/v1/sessions/${sessionId}/threads/${threadId}/logs`),
-    summarizeSession: (sessionId: string) =>
-      get<import('./types').SingleResponse<import('./types').SessionSummary>>(`/api/v1/sessions/${sessionId}/summary`),
     listThreadFileEvents: (sessionId: string, since?: string) => {
       const qs = since ? `?since=${encodeURIComponent(since)}` : '';
       return get<import('./types').ListResponse<import('./types').SessionThreadFileEvent>>(`/api/v1/sessions/${sessionId}/thread-file-events${qs}`);

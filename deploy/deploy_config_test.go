@@ -2,6 +2,7 @@ package deploy_test
 
 import (
 	"encoding/json"
+	"net/netip"
 	"os"
 	"strings"
 	"testing"
@@ -26,13 +27,18 @@ func TestWorkerProvisioningIncludesGitHubAppUserAuthSecrets(t *testing.T) {
 
 	cloudInit, err := os.ReadFile("../deploy/cloud-init/worker.yml")
 	require.NoError(t, err, "test should read the worker cloud-init template")
+	require.Contains(t, string(cloudInit), "SOPS_AGE_KEY=${SOPS_AGE_KEY}", "worker cloud-init should provide SOPS_AGE_KEY so the container can decrypt .env.production.enc at boot")
 	require.Contains(t, string(cloudInit), "GITHUB_APP_CLIENT_ID=${GITHUB_APP_CLIENT_ID}", "worker cloud-init should provide the GitHub App user auth client ID")
 	require.Contains(t, string(cloudInit), "GITHUB_APP_CLIENT_SECRET=${GITHUB_APP_CLIENT_SECRET}", "worker cloud-init should provide the GitHub App user auth client secret")
+	require.Contains(t, string(cloudInit), "- path: /opt/143/.env.production.enc", "worker cloud-init should stage the encrypted production env file before docker compose starts")
+	require.Contains(t, string(cloudInit), "ENV_PRODUCTION_ENC_B64", "worker cloud-init should carry the encrypted production env payload as base64 input")
 
 	provisionScript, err := os.ReadFile("../deploy/scripts/provision.sh")
 	require.NoError(t, err, "test should read the provisioning script")
+	require.Contains(t, string(provisionScript), "SOPS_AGE_KEY=%s", "worker reprovision path should write SOPS_AGE_KEY into .env so docker-entrypoint.sh decrypts the encrypted env bundle")
 	require.Contains(t, string(provisionScript), "GITHUB_APP_CLIENT_ID=%s", "worker reprovision path should write the GitHub App user auth client ID into .env")
 	require.Contains(t, string(provisionScript), "GITHUB_APP_CLIENT_SECRET=%s", "worker reprovision path should write the GitHub App user auth client secret into .env")
+	require.Contains(t, string(provisionScript), `scp "${SCP_OPTS[@]}" "$ENC_FILE" root@"$HOST":/opt/143/`, "worker reprovision path should copy .env.production.enc to the host before starting docker compose so bind-mount source creation cannot turn it into a directory")
 }
 
 // Worker preview routing requires three per-host values: NODE_ID,
@@ -175,6 +181,70 @@ func TestLoggingDesignDocsTrackProvisionedDashboardsAndAlerts(t *testing.T) {
 	require.Contains(t, designText, "deploy/vmalert/rules/production-alerts.yml", "logging design doc should track repo-owned alert rules")
 }
 
+// Docker's json-file driver grows unbounded by default, so a chatty
+// container will fill the disk on its own. The fix: install-log-rotation.sh
+// merges log-driver/log-opts into /etc/docker/daemon.json (preserving any
+// gVisor runtimes block on workers) and restarts docker only when the
+// content actually changes. Pin the wiring here so a future refactor
+// doesn't silently strip it off and leave us in the unbounded-growth
+// state. db keeps its own larger cap because the db host is the only
+// role without Vector log shipping (postgres logs are local-only) AND
+// postgresql.conf logs every connection, every query >500ms, and every
+// lock wait — a smaller cap would lose the forensic trail during an
+// incident.
+func TestDeployConfiguresDockerLogRotation(t *testing.T) {
+	t.Parallel()
+
+	helper, err := os.ReadFile("../deploy/scripts/install-log-rotation.sh")
+	require.NoError(t, err, "install-log-rotation.sh should exist as the single source of truth for daemon.json log-rotation logic")
+	helperText := string(helper)
+	require.Contains(t, helperText, "/etc/docker/daemon.json", "install-log-rotation.sh should target daemon.json (not a per-container override) so dynamically-spawned sandbox containers also inherit the cap")
+	require.Contains(t, helperText, `"log-driver"`, "install-log-rotation.sh should write the json-file log-driver into daemon.json")
+	require.Contains(t, helperText, "systemctl restart docker", "install-log-rotation.sh must restart docker on change — log-driver/log-opts only take effect for newly created containers, so existing services need to inherit the cap on the next recreate")
+	require.Contains(t, helperText, "mv ", "install-log-rotation.sh should write atomically (tempfile + rename) — a SIGKILL between truncate and write under a plain `>` would leave a zero-byte daemon.json that docker rejects")
+
+	deployScript, err := os.ReadFile("../deploy/scripts/deploy.sh")
+	require.NoError(t, err, "test should read deploy script")
+	deployText := string(deployScript)
+	require.Contains(t, deployText, "install-log-rotation.sh", "deploy.sh should sync and invoke the install-log-rotation.sh helper on every deploy")
+	require.Contains(t, deployText, `db) LOG_MAX_SIZE="500m"`, "deploy.sh should give the db role a larger log cap — postgres logging is verbose and the db host has no Vector log shipping, so the local docker log is the only copy")
+	require.Contains(t, deployText, `*)  LOG_MAX_SIZE="100m"`, "deploy.sh should default non-db roles to a 100m cap")
+	require.Contains(t, deployText, "sudo -n /opt/143/deploy/scripts/install-log-rotation.sh", "deploy.sh should invoke install-log-rotation.sh via deploy+sudo (not root SSH) — matches the sandbox-firewall.sh pattern and avoids depending on root SSH at routine deploy time")
+	require.Contains(t, deployText, "repair-deploy-sudoers.sh", "deploy.sh should try the narrow root repair path when a legacy host is missing the deploy sudoers entry")
+	require.Contains(t, deployText, "Retrying docker log rotation after sudoers repair", "deploy.sh should retry install-log-rotation.sh after repairing sudoers so a single deploy can recover legacy hosts")
+	require.Contains(t, deployText, "WARNING: docker log rotation was not updated on this deploy; continuing.", "deploy.sh should keep routine deploys moving when a legacy host cannot be sudoers-repaired from CI")
+	require.NotContains(t, deployText, "ERROR: install-log-rotation.sh failed and sudoers repair via root SSH did not complete.", "deploy.sh should not fail the whole deploy solely because optional log-rotation repair is unavailable")
+
+	bootstrap, err := os.ReadFile("../deploy/scripts/bootstrap.sh")
+	require.NoError(t, err, "test should read bootstrap.sh")
+	require.Contains(t, string(bootstrap), "/opt/143/deploy/scripts/install-log-rotation.sh *", "bootstrap.sh sudoers Cmnd_Alias must allow install-log-rotation.sh — without it the deploy+sudo path in deploy.sh fails on app/worker hosts")
+
+	provision, err := os.ReadFile("../deploy/scripts/provision.sh")
+	require.NoError(t, err, "test should read provision.sh")
+	provisionText := string(provision)
+	require.Contains(t, provisionText, "install-log-rotation.sh", "provision.sh should invoke install-log-rotation.sh after staging deploy/ so newly-provisioned hosts have rotation in place before services start (closes the provision-to-first-deploy unbounded-growth window)")
+	require.GreaterOrEqual(t, strings.Count(provisionText, "/usr/bin/chown -R deploy\\:deploy /opt/143/deploy/scripts"), 3, "provision.sh inline bootstraps for db, logging, and redis must allow deploy to fix root-owned deploy/scripts before syncing helpers")
+	// db/logging/redis bootstraps don't run bootstrap.sh, so each must
+	// install its own /etc/sudoers.d/99-deploy or the deploy+sudo path
+	// breaks on those roles.
+	require.GreaterOrEqual(t, strings.Count(provisionText, "/opt/143/deploy/scripts/install-log-rotation.sh *"), 3, "provision.sh inline bootstraps for db, logging, and redis must each grant deploy NOPASSWD sudo for install-log-rotation.sh")
+
+	repair, err := os.ReadFile("../deploy/scripts/repair-deploy-sudoers.sh")
+	require.NoError(t, err, "repair-deploy-sudoers.sh should exist for legacy hosts that are missing the deploy sudoers entry")
+	repairText := string(repair)
+	require.Contains(t, repairText, "/etc/sudoers.d/99-deploy", "repair-deploy-sudoers.sh should update the deploy sudoers file")
+	require.Contains(t, repairText, "mktemp /etc/sudoers.d/99-deploy", "repair-deploy-sudoers.sh should stage sudoers in the target directory before replacing the live file")
+	require.Contains(t, repairText, "visudo -cf \"$TMP\"", "repair-deploy-sudoers.sh should validate the staged sudoers file before installing it")
+	require.Contains(t, repairText, "mv \"$TMP\" /etc/sudoers.d/99-deploy", "repair-deploy-sudoers.sh should atomically replace sudoers only after validation succeeds")
+	require.NotContains(t, repairText, "cat > /etc/sudoers.d/99-deploy", "repair-deploy-sudoers.sh must not write directly to the live sudoers file")
+	require.Contains(t, repairText, "deploy ALL=(root) NOPASSWD: DEPLOY_CMDS", "repair-deploy-sudoers.sh should install the same narrow command alias used by provisioning")
+	require.NotContains(t, repairText, "NOPASSWD:ALL", "repair-deploy-sudoers.sh must not repair legacy hosts by granting blanket passwordless sudo")
+
+	makefile, err := os.ReadFile("../Makefile")
+	require.NoError(t, err, "test should read Makefile")
+	require.Contains(t, string(makefile), "repair-deploy-sudoers:", "Makefile should expose the no-teardown sudoers repair as an operator target")
+}
+
 func TestLoggingDeploySyncsProvisionedObservabilityConfig(t *testing.T) {
 	t.Parallel()
 
@@ -200,4 +270,53 @@ func TestLoggingDeploySyncsProvisionedObservabilityConfig(t *testing.T) {
 	dashboardProvider, err := os.ReadFile("../deploy/grafana/provisioning/dashboards/dashboards.yml")
 	require.NoError(t, err, "test should read Grafana dashboard provider config")
 	require.Contains(t, string(dashboardProvider), "disableDeletion: false", "Grafana dashboard provisioning should remove dashboards deleted from the repo")
+}
+
+// Sandbox DNS resolution depends on three values agreeing across three
+// files:
+//
+//   - the bridge subnet pinned by provision.sh (so sandbox-dns can claim a
+//     stable IP),
+//   - the sandbox-dns container's static ipv4_address in the worker compose
+//     file,
+//   - the nameserver line written into /etc/143/sandbox-resolv.conf, which
+//     every sandbox bind-mounts as /etc/resolv.conf.
+//
+// If any of these drifts independently, sandboxes silently lose DNS for
+// preview-infrastructure container names and every preview start fails at
+// the first migration. Lock the alignment in CI so a future renumbering
+// has to touch all three files in the same PR.
+func TestSandboxDNSConfigAlignment(t *testing.T) {
+	t.Parallel()
+
+	const (
+		sandboxSubnet = "172.30.0.0/24"
+		sandboxDNSIP  = "172.30.0.2"
+	)
+
+	prefix, err := netip.ParsePrefix(sandboxSubnet)
+	require.NoError(t, err, "test constant for sandbox subnet should be a valid CIDR")
+	dnsAddr, err := netip.ParseAddr(sandboxDNSIP)
+	require.NoError(t, err, "test constant for sandbox-dns IP should be a valid address")
+	require.True(t, prefix.Contains(dnsAddr), "sandbox-dns IP %s must lie inside the pinned subnet %s", sandboxDNSIP, sandboxSubnet)
+
+	provisionScript, err := os.ReadFile("../deploy/scripts/provision.sh")
+	require.NoError(t, err, "test should read the provisioning script")
+	provisionText := string(provisionScript)
+	require.Contains(t, provisionText, "--subnet "+sandboxSubnet, "provision.sh should create 143-sandbox with the pinned subnet so sandbox-dns gets a predictable static IP")
+	require.Contains(t, provisionText, `"$EXISTING_SANDBOX_SUBNET" != "`+sandboxSubnet+`"`, "provision.sh should fail loudly when an existing 143-sandbox network has a different subnet — silent reuse breaks the static-IP mapping")
+	require.Contains(t, provisionText, "nameserver "+sandboxDNSIP, "provision.sh should write sandbox-dns's IP into /etc/143/sandbox-resolv.conf")
+
+	compose, err := os.ReadFile("../docker-compose.worker.yml")
+	require.NoError(t, err, "test should read the worker compose file")
+	composeText := string(compose)
+	require.Contains(t, composeText, "ipv4_address: "+sandboxDNSIP, "worker compose should pin sandbox-dns to the same static IP that sandbox-resolv.conf points at")
+	require.Contains(t, composeText, "name: 143-sandbox", "worker compose should attach sandbox-dns to the externally-managed 143-sandbox bridge, not a compose-private network")
+	require.Contains(t, composeText, "external: true", "worker compose should declare the sandbox network as external — the bridge is created by provision.sh, not compose")
+
+	dockerfile, err := os.ReadFile("../Dockerfile.dnsmasq")
+	require.NoError(t, err, "test should read the dnsmasq Dockerfile")
+	dockerfileText := string(dockerfile)
+	require.Contains(t, dockerfileText, "--server=127.0.0.11", "dnsmasq must forward to Docker's embedded resolver — that's the only place preview-infra container names are registered")
+	require.Contains(t, dockerfileText, "--no-resolv", "dnsmasq must ignore its own /etc/resolv.conf (which itself points at 127.0.0.11) to avoid a forwarding loop")
 }

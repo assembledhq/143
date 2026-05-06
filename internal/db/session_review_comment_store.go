@@ -108,6 +108,64 @@ func (s *SessionReviewCommentStore) ListByIDs(ctx context.Context, orgID, sessio
 	return pgx.CollectRows(rows, pgx.RowToStructByName[models.SessionReviewComment])
 }
 
+// ErrReviewCommentsNotInSession is returned by ValidateAndResolveByIDs when
+// one or more requested IDs do not belong to the org+session pair (either
+// they don't exist or they belong to another session). The error wraps the
+// missing IDs so callers can surface them to the client without leaking
+// other tenants' data via existence-vs-not-found probing.
+type ErrReviewCommentsNotInSession struct {
+	Missing []uuid.UUID
+}
+
+func (e *ErrReviewCommentsNotInSession) Error() string {
+	return fmt.Sprintf("review comment ids do not belong to this session (%d missing)", len(e.Missing))
+}
+
+// ValidateAndResolveByIDs validates that every id belongs to the org+session
+// pair and then resolves the still-open ones in the same call, returning the
+// rows whose state actually changed. When run against a tx-scoped store, the
+// validation lookup and the resolve UPDATE share a transaction so other
+// writers cannot slip a comment in between the existence check and the
+// update — keeping the "either both happen or neither does" invariant that
+// the SendMessage flow relies on.
+//
+// Returns *ErrReviewCommentsNotInSession (wrapping the missing IDs) when one
+// or more IDs do not belong to this session; callers can surface the missing
+// list without doing their own existence comparison. Already-resolved IDs
+// are silently skipped (the underlying UPDATE filters on resolved=false).
+func (s *SessionReviewCommentStore) ValidateAndResolveByIDs(
+	ctx context.Context,
+	orgID, sessionID uuid.UUID,
+	ids []uuid.UUID,
+	resolvedByPass int,
+) ([]models.SessionReviewComment, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	existing, err := s.ListByIDs(ctx, orgID, sessionID, ids)
+	if err != nil {
+		return nil, fmt.Errorf("validate review comments: %w", err)
+	}
+	if len(existing) != len(ids) {
+		found := make(map[uuid.UUID]struct{}, len(existing))
+		for _, c := range existing {
+			found[c.ID] = struct{}{}
+		}
+		missing := make([]uuid.UUID, 0, len(ids)-len(existing))
+		for _, id := range ids {
+			if _, ok := found[id]; !ok {
+				missing = append(missing, id)
+			}
+		}
+		return nil, &ErrReviewCommentsNotInSession{Missing: missing}
+	}
+	resolved, err := s.ResolveByIDs(ctx, orgID, sessionID, ids, resolvedByPass)
+	if err != nil {
+		return nil, fmt.Errorf("resolve review comments: %w", err)
+	}
+	return resolved, nil
+}
+
 // ResolveByIDs marks the listed comments as resolved if they aren't already,
 // returning the rows whose state actually changed. Already-resolved comments
 // are silently skipped, which makes the operation idempotent: callers can
