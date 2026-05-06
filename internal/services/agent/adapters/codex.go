@@ -61,6 +61,17 @@ func (a *CodexAdapter) PreparePrompt(ctx context.Context, input *agent.AgentInpu
 	}, nil
 }
 
+// codexRuntimeProfile captures Codex's interactive runtime needs.
+var codexRuntimeProfile = agent.AgentRuntimeProfile{
+	Cancellation:      agent.DefaultCancellationSpec,
+	PreferSplitOutput: true,
+}
+
+// RuntimeProfile declares Codex's interactive runtime requirements.
+func (a *CodexAdapter) RuntimeProfile() agent.AgentRuntimeProfile {
+	return codexRuntimeProfile
+}
+
 // Execute runs the Codex CLI inside the sandbox and streams output.
 func (a *CodexAdapter) Execute(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
 	provider := agent.SandboxProviderFromContext(ctx)
@@ -114,23 +125,24 @@ func (a *CodexAdapter) Execute(ctx context.Context, sandbox *agent.Sandbox, prom
 		Metadata:  map[string]interface{}{"max_tokens": prompt.MaxTokens, "resume": prompt.Continuation},
 	}
 
-	// Execute with real-time streaming.
 	result := &agent.AgentResult{}
-	var stderr bytes.Buffer
 	var summaryParts []string
 	var lastAssistantContent string
 	lastOutputByType := make(map[string]string)
 
-	exitCode, err := provider.ExecStream(ctx, sandbox, cmd, func(line []byte) {
-		if len(bytes.TrimSpace(line)) == 0 {
-			return
-		}
-		parseCodexStreamLine(line, result, logCh, &summaryParts, lastOutputByType, &lastAssistantContent)
-	}, &stderr)
+	runResult, err := runInteractiveCommand(ctx, sandbox, InteractiveRunSpec{
+		Cmd:     cmd,
+		Profile: codexRuntimeProfile,
+		OnStdout: func(line []byte) {
+			parseCodexStreamLine(line, result, logCh, &summaryParts, lastOutputByType, &lastAssistantContent)
+		},
+	})
 	if err != nil {
 		return nil, fmt.Errorf("exec codex CLI: %w", err)
 	}
 
+	exitCode := runResult.ExitCode
+	stderr := runResult.Stderr
 	result.ExitCode = exitCode
 	if len(summaryParts) > 0 {
 		result.Summary = strings.Join(summaryParts, "\n")
@@ -140,8 +152,8 @@ func (a *CodexAdapter) Execute(ctx context.Context, sandbox *agent.Sandbox, prom
 
 	// Filter refresh-token errors once and reuse the result.
 	var filteredStderr string
-	if stderr.Len() > 0 {
-		filteredStderr = filterRefreshTokenLines(stderr.String())
+	if len(stderr) > 0 {
+		filteredStderr = filterRefreshTokenLines(string(stderr))
 		if filteredStderr != "" {
 			logCh <- agent.LogEntry{
 				Timestamp: time.Now(),
