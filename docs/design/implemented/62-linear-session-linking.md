@@ -1,6 +1,6 @@
 # 62 - Linear Session Linking and Bidirectional Updates
 
-> **Status:** Implemented | **Last reviewed:** 2026-04-27
+> **Status:** Implemented | **Last reviewed:** 2026-05-06
 >
 > **Depends on:** [./04-ingestion.md](./04-ingestion.md), [./08-pr-and-ship.md](./08-pr-and-ship.md), [../future/59-session-issue-decoupling-and-multi-issue-linking.md](../future/59-session-issue-decoupling-and-multi-issue-linking.md)
 
@@ -67,6 +67,8 @@ This design is wiring, not a new subsystem.
 **Path A — paste a URL or identifier into the composer.** Session creation returns quickly, but turn 1 does not start until one unambiguous primary Linear ref has been resolved and its context snapshot captured. Additional refs are linked asynchronously as related. Linear gets an attachment + "agent started" comment shortly after.
 
 **Path B — references picker.** If the user attaches an existing `linear`-source `issues` row through the `@` references mention, the link is created in the session-create transaction. The async detector skips it.
+
+Picker-added Linear refs must stay visible in the transcript. Session/thread chat should render a capitalized `Linear` tag plus the concrete issue identifier (for example `ACS-1234`) for user messages that include detached Linear references, rather than hiding that state in side metadata or a generic `linear issue` label.
 
 **Path C — Linear is not enabled.** Detection is a no-op. No errors, no warnings.
 

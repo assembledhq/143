@@ -111,6 +111,35 @@ func TestResolveAndLinkMidSession(t *testing.T) {
 		require.Equal(t, userID.String(), enqueuedPayload["user_id"], "payload should attribute the link to the sender")
 	})
 
+	t.Run("structured reference text is scanned even when message body is generic", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err)
+		defer mock.Close()
+
+		orgID := uuid.New()
+		sessionID := uuid.New()
+		var enqueuedPayload map[string]any
+		svc := newCreatePathService(mock, createPathClient{}, nil)
+		svc.SetJobEnqueuer(func(_ context.Context, gotOrgID uuid.UUID, _ string, payload any, _ *string) error {
+			require.Equal(t, orgID, gotOrgID, "enqueue should preserve org scope")
+			body, marshalErr := json.Marshal(payload)
+			require.NoError(t, marshalErr)
+			require.NoError(t, json.Unmarshal(body, &enqueuedPayload))
+			return nil
+		})
+
+		err = svc.ResolveAndLinkMidSession(context.Background(), MidSessionInput{
+			OrgID:         orgID,
+			SessionID:     sessionID,
+			MessageBody:   "Please pull this into the conversation.",
+			ReferenceText: "Linear issue\nACS-44\nhttps://linear.app/acme/issue/ACS-44",
+		})
+		require.NoError(t, err, "structured refs should be scanned alongside the free-form message body")
+		require.Equal(t, []any{"ACS-44"}, enqueuedPayload["identifiers"], "payload should include the identifier found only in structured references")
+	})
+
 	t.Run("bare identifier requires team-key allowlist", func(t *testing.T) {
 		t.Parallel()
 
