@@ -98,7 +98,7 @@ import {
 } from "@/lib/session-composer-mentions";
 import { queryKeys } from "@/lib/query-keys";
 import { api, ApiError } from "@/lib/api";
-import { AGENTS, AGENTS_BY_KEY } from "@/lib/agents";
+import { AGENTS, AGENTS_BY_KEY, agentDisplayLabel } from "@/lib/agents";
 import { getActiveOrgId } from "@/lib/active-org";
 import { maybeNotifySessionCompleted } from "@/lib/browser-notifications";
 import {
@@ -2887,7 +2887,9 @@ export function SessionDetailContent({ id }: { id: string }) {
     const agentType = AGENTS.find((agent) => agent.key === composerAgentType);
     return agentType?.models ?? [];
   }, [composerAgentType, session]);
-  const activeThreadLabel = activeThread?.label ?? (session ? AGENTS_BY_KEY[session.agent_type]?.label ?? session.agent_type : "agent");
+  const composerTargetLabel = activeThread
+    ? agentDisplayLabel(activeThread.agent_type)
+    : (session ? agentDisplayLabel(session.agent_type) : "agent");
   const selectedNewThreadAgent = AGENTS_BY_KEY[newThreadAgentType] ?? AGENTS[0];
   const selectedNewThreadModels = selectedNewThreadAgent?.models ?? [];
 
@@ -3892,7 +3894,7 @@ export function SessionDetailContent({ id }: { id: string }) {
               repositoryId={session.repository_id}
               branch={session.target_branch}
               agentType={composerAgentType}
-              targetLabel={activeThread ? activeThreadLabel : undefined}
+              targetLabel={activeThread ? composerTargetLabel : undefined}
             />
           </>
         )}
@@ -3999,7 +4001,7 @@ export function SessionDetailContent({ id }: { id: string }) {
               repositoryId={session.repository_id}
               branch={session.target_branch}
               agentType={composerAgentType}
-              targetLabel={activeThread ? activeThreadLabel : undefined}
+              targetLabel={activeThread ? composerTargetLabel : undefined}
             />
           </SheetContent>
         </Sheet>

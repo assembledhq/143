@@ -450,9 +450,9 @@ describe('SessionDetailPage', () => {
       expect(createdThread).toBe(true);
     });
     expect(await screen.findByRole('tab', { name: /Tests/ })).toBeInTheDocument();
-    expect(screen.getByPlaceholderText('Send a message to Tests...')).toBeInTheDocument();
+    expect(screen.getByPlaceholderText('Send a message to Codex...')).toBeInTheDocument();
 
-    await user.type(screen.getByPlaceholderText('Send a message to Tests...'), 'Run the frontend checks.');
+    await user.type(screen.getByPlaceholderText('Send a message to Codex...'), 'Run the frontend checks.');
     await user.click(screen.getByRole('button', { name: 'Send message' }));
 
     await waitFor(() => {
@@ -926,7 +926,7 @@ describe('SessionDetailPage', () => {
     await waitFor(() => {
       expect(screen.queryByTestId('session-timeline-skeleton')).not.toBeInTheDocument();
     });
-    const composer = screen.getByPlaceholderText('Send a message to Codex 2...');
+    const composer = screen.getByPlaceholderText('Send a message to Codex...');
     expect(composer).toBeEnabled();
   });
 
@@ -996,7 +996,7 @@ describe('SessionDetailPage', () => {
     await waitFor(() => {
       expect(screen.queryByTestId('session-timeline-skeleton')).not.toBeInTheDocument();
     });
-    expect(screen.getByPlaceholderText('Send a message to Codex 2...')).toBeInTheDocument();
+    expect(screen.getByPlaceholderText('Send a message to Codex...')).toBeInTheDocument();
   });
 
   it('restores the saved scroll position when reopening an existing session', async () => {
