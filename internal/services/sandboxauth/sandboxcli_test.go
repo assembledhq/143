@@ -16,12 +16,19 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+var resolvedGitPath = func() string {
+	path, err := exec.LookPath("git")
+	if err != nil {
+		return ""
+	}
+	return path
+}()
+
 // gitAvailable reports whether `git` is on PATH. Bootstrap tests skip when
 // it's not — sandboxauth runs inside the sandbox image where git is always
 // present, so the tests are integration-grade by design.
 func gitAvailable() bool {
-	_, err := exec.LookPath("git")
-	return err == nil
+	return resolvedGitPath != ""
 }
 
 // startSocketServer spins up a Unix-domain socket server in a goroutine that
@@ -702,6 +709,18 @@ func TestRunGit_IgnoresBrokenAmbientGitConfig(t *testing.T) {
 	require.Contains(t, string(configBytes), "Alice Example", "runGit should still write the requested repo-local config entry")
 }
 
+func TestTestGitCommand_UsesResolvedSystemGitPath(t *testing.T) {
+	if !gitAvailable() {
+		t.Skip("git not available on this runner")
+	}
+
+	workdir := t.TempDir()
+	t.Setenv("PATH", fakeGitPath(t, "#!/bin/sh\nexit 17\n")+":"+os.Getenv("PATH"))
+
+	err := testGitCommand(workdir, "init", "--quiet").Run()
+	require.NoError(t, err, "testGitCommand should keep using the real git binary even when PATH is overridden")
+}
+
 func TestHandleSubcommand_GitBootstrapDispatches(t *testing.T) {
 	t.Parallel()
 
@@ -739,7 +758,7 @@ func readGitConfig(t *testing.T, workdir string) string {
 
 func testGitCommand(workdir string, args ...string) *exec.Cmd {
 	full := append([]string{"-C", workdir}, args...)
-	cmd := exec.Command("git", full...) // #nosec G204,G702 -- test helper executes fixed git invocations against temp repos
+	cmd := exec.Command(resolvedGitPath, full...) // #nosec G204,G702 -- test helper executes fixed git invocations against temp repos
 	cmd.Env = appendGitEnv(os.Environ())
 	return cmd
 }
