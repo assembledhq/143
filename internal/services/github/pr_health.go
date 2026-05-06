@@ -174,6 +174,18 @@ func normalizeStoredCheckSummaries(summary *models.PullRequestHealthSummary) {
 	}
 }
 
+func determineChecksConfirmed(checks []models.PullRequestCheckSummary, requiredChecksConfigured bool) bool {
+	if len(checks) > 0 {
+		for _, check := range checks {
+			if classifyStoredCheckStatus(check) != models.PullRequestCheckStatusPassed && classifyStoredCheckStatus(check) != models.PullRequestCheckStatusFailed {
+				return false
+			}
+		}
+		return true
+	}
+	return !requiredChecksConfigured
+}
+
 func classifyStoredCheckStatus(check models.PullRequestCheckSummary) models.PullRequestCheckStatus {
 	return normalizeStoredCheckStatus(check.Status)
 }
