@@ -296,12 +296,28 @@ func TestSessionThreadHandler_CreateThread(t *testing.T) {
 			expectedError: "THREAD_LIMIT",
 		},
 		{
-			name:           "session in terminal state",
+			name:           "success for completed session",
+			sessionIDParam: sessionID.String(),
+			body:           `{"label":"Backend API"}`,
+			setupDeps: func(deps *threadTestDeps) {
+				deps.sessionStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.Session, error) {
+					return models.Session{ID: sessionID, OrgID: orgID, Status: "completed", AgentType: models.AgentTypeClaudeCode}, nil
+				}
+				deps.threadStore.createFn = func(_ context.Context, t *models.SessionThread, _ int) error {
+					t.ID = threadID
+					t.CreatedAt = now
+					return nil
+				}
+			},
+			expectedCode: http.StatusCreated,
+		},
+		{
+			name:           "session in non-resumable terminal state",
 			sessionIDParam: sessionID.String(),
 			body:           `{"label":"Backend"}`,
 			setupDeps: func(deps *threadTestDeps) {
 				deps.sessionStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.Session, error) {
-					return models.Session{ID: sessionID, OrgID: orgID, Status: "completed", AgentType: models.AgentTypeClaudeCode}, nil
+					return models.Session{ID: sessionID, OrgID: orgID, Status: "skipped", AgentType: models.AgentTypeClaudeCode}, nil
 				}
 			},
 			expectedCode:  http.StatusConflict,

@@ -237,14 +237,6 @@ func (s *Service) SetQuestionStore(store QuestionStore) {
 	s.questionStore = store
 }
 
-func isTerminalStatus(status string) bool {
-	switch status {
-	case "completed", "pr_created", "failed", "cancelled", "skipped":
-		return true
-	}
-	return false
-}
-
 // CreateThread validates inputs and creates a blank idle thread.
 func (s *Service) CreateThread(ctx context.Context, input CreateThreadInput) (*models.SessionThread, error) {
 	// Verify session exists and belongs to org.
@@ -253,8 +245,11 @@ func (s *Service) CreateThread(ctx context.Context, input CreateThreadInput) (*m
 		return nil, fmt.Errorf("%w: %w", ErrSessionNotFound, err)
 	}
 
-	// Only allow adding threads to active sessions.
-	if isTerminalStatus(session.Status) {
+	// Allow blank tabs on active sessions and on the same terminal statuses
+	// the follow-up message path can already resume. This keeps "add tab"
+	// aligned with "continue session" while still rejecting non-resumable
+	// statuses such as skipped.
+	if !models.SessionStatus(session.Status).CanAddThread() {
 		return nil, ErrSessionTerminal
 	}
 
