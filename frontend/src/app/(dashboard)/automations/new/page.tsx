@@ -23,6 +23,7 @@ import {
   CollapsibleTrigger,
 } from "@/components/ui/collapsible";
 import { api } from "@/lib/api";
+import { AUTOMATION_GOAL_MAX_LENGTH, automationGoalLengthState } from "@/lib/automation-validation";
 import { BranchPicker } from "@/components/branch-picker";
 import { AutomationModelSelect } from "@/components/automation-model-select";
 import { NoReposWarning } from "@/components/no-repos-warning";
@@ -126,8 +127,12 @@ export default function NewAutomationPage() {
     );
   }
 
+  const goalLength = automationGoalLengthState(goal);
   const canSubmit =
-    name.trim().length > 0 && goal.trim().length > 0 && repoId.length > 0;
+    name.trim().length > 0 &&
+    goal.trim().length > 0 &&
+    !goalLength.isTooLong &&
+    repoId.length > 0;
 
   const featuredTemplates = automationTemplates.filter((template) =>
     featuredAutomationTemplateIDs.includes(template.id),
@@ -215,14 +220,29 @@ export default function NewAutomationPage() {
           </div>
 
           <div className="space-y-1.5">
-            <Label htmlFor="goal">Goal</Label>
+            <div className="flex items-center justify-between gap-3">
+              <Label htmlFor="goal">Goal</Label>
+              <span
+                className={cn(
+                  "text-xs tabular-nums",
+                  goalLength.isTooLong ? "text-destructive" : "text-muted-foreground",
+                )}
+              >
+                {goalLength.countText}
+              </span>
+            </div>
             <Textarea
               id="goal"
               value={goal}
               onChange={(e) => setGoal(e.target.value)}
               placeholder="Describe what the automation should do each run..."
               rows={3}
+              maxLength={AUTOMATION_GOAL_MAX_LENGTH}
+              aria-invalid={goalLength.isTooLong}
             />
+            <p className={cn("text-xs", goalLength.isTooLong ? "text-destructive" : "text-muted-foreground")}>
+              {goalLength.message ?? `Up to ${AUTOMATION_GOAL_MAX_LENGTH} characters.`}
+            </p>
           </div>
 
           <div className="space-y-1.5">
