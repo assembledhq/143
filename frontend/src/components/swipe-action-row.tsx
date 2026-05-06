@@ -16,9 +16,9 @@ const HORIZONTAL_LOCK_THRESHOLD = 12;
 const TOUCH_QUERY = "(pointer: coarse)";
 const COMMIT_THRESHOLD_RATIO = 0.36;
 const MIN_COMMIT_THRESHOLD = 140;
-const COMMIT_ANIMATION_MS = 220;
 const READY_HAPTIC_MS = 10;
 const COMMIT_HAPTIC_PATTERN = [16, 24, 40];
+const COMMIT_RESET_DELAY_MS = 200;
 // Pre-measurement fallback when a gesture starts before the row has dimensions.
 // Real width is captured from offsetWidth at touchstart.
 const FALLBACK_ROW_WIDTH = ACTION_WIDTH * 4;
@@ -71,6 +71,14 @@ function commitThresholdFor(width: number) {
   return Math.max(MIN_COMMIT_THRESHOLD, width * COMMIT_THRESHOLD_RATIO);
 }
 
+function isPromiseLike(value: unknown): value is PromiseLike<unknown> {
+  return (
+    (typeof value === "object" || typeof value === "function") &&
+    value !== null &&
+    typeof (value as PromiseLike<unknown>).then === "function"
+  );
+}
+
 export function SwipeActionRow({
   actionLabel,
   actionText,
@@ -78,13 +86,15 @@ export function SwipeActionRow({
   onAction,
   children,
   className,
+  desktopActionVisibility = "always",
 }: {
   actionLabel: string;
   actionText: string;
   actionIcon?: ReactNode;
-  onAction: () => void;
+  onAction: () => void | Promise<unknown>;
   children: ReactNode;
   className?: string;
+  desktopActionVisibility?: "always" | "hover";
 }) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const dragRef = useRef<DragState | null>(null);
@@ -112,7 +122,23 @@ export function SwipeActionRow({
     };
   }, []);
 
+  const clearCommitTimer = () => {
+    if (commitTimerRef.current !== null) {
+      window.clearTimeout(commitTimerRef.current);
+      commitTimerRef.current = null;
+    }
+  };
+
+  const scheduleClose = () => {
+    clearCommitTimer();
+    commitTimerRef.current = window.setTimeout(() => {
+      commitTimerRef.current = null;
+      close();
+    }, COMMIT_RESET_DELAY_MS);
+  };
+
   const close = () => {
+    clearCommitTimer();
     offsetRef.current = 0;
     setOffset(0);
     setIsDragging(false);
@@ -132,27 +158,52 @@ export function SwipeActionRow({
     dragRef.current = null;
   };
 
+  const handleActionPromise = (
+    result: void | Promise<unknown>,
+    {
+      onResolve,
+      onReject,
+    }: {
+      onResolve?: () => void;
+      onReject?: () => void;
+    } = {},
+  ) => {
+    if (!isPromiseLike(result)) {
+      onResolve?.();
+      return;
+    }
+
+    void result.then(
+      () => {
+        onResolve?.();
+      },
+      (error) => {
+        onReject?.();
+        console.error("Swipe action failed", error);
+      },
+    );
+  };
+
   // Slides the row fully off, fires onAction, then resets after the animation.
-  // Common case: onAction unmounts the row and the unmount effect clears the
-  // timer. Fallback: caller keeps the row mounted, the timer snaps offset back.
   const commitAction = (width: number) => {
     setIsDragging(false);
     offsetRef.current = width;
     setOffset(width);
+    setIsCommitted(true);
     dragRef.current = null;
-    committedRef.current = false;
+    committedRef.current = true;
     readyHapticPlayedRef.current = false;
     vibrate(COMMIT_HAPTIC_PATTERN);
-    onAction();
-    if (commitTimerRef.current !== null) {
-      window.clearTimeout(commitTimerRef.current);
+    clearCommitTimer();
+    try {
+      handleActionPromise(onAction(), {
+        onResolve: scheduleClose,
+        onReject: close,
+      });
+    } catch (error) {
+      close();
+      throw error;
     }
-    commitTimerRef.current = window.setTimeout(() => {
-      offsetRef.current = 0;
-      setOffset(0);
-      setIsCommitted(false);
-      commitTimerRef.current = null;
-    }, COMMIT_ANIMATION_MS);
   };
 
   const handleTouchStart = (event: React.TouchEvent<HTMLDivElement>) => {
@@ -317,25 +368,18 @@ export function SwipeActionRow({
             className="relative h-full w-full rounded-none rounded-r-lg bg-transparent px-0 text-white shadow-none hover:bg-transparent hover:text-white active:bg-transparent"
             onClick={() => {
               close();
-              onAction();
+              try {
+                handleActionPromise(onAction());
+              } catch (error) {
+                throw error;
+              }
             }}
           >
-            <span className="relative flex h-full w-full flex-col items-center justify-center gap-1.5 px-4 text-center">
-              <span
-                className={cn(
-                  "flex h-10 w-10 items-center justify-center rounded-full border border-white/25 bg-white/10 shadow-[inset_0_1px_0_rgba(255,255,255,0.12)] transition-transform duration-150",
-                  isCommitted && "bg-white/14",
-                )}
-                style={{
-                  transform: `scale(${1 + swipeProgress * 0.04})`,
-                }}
-              >
-                {actionIcon}
-              </span>
-              <span className="text-sm font-semibold tracking-[0.01em] text-white">
+            <span className="relative flex h-full w-full flex-col items-center justify-center gap-0.5 px-4 text-center">
+              <span className="text-sm font-semibold tracking-[0.01em] text-white whitespace-nowrap">
                 {actionText}
               </span>
-              <span className="min-h-[0.75rem] text-xs font-medium tracking-[0.06em] text-white/80">
+              <span className="min-h-[0.75rem] text-xs font-medium tracking-[0.04em] text-white/80 whitespace-nowrap">
                 {actionHint}
               </span>
             </span>
@@ -353,12 +397,20 @@ export function SwipeActionRow({
         size="icon-xs"
         aria-label={actionLabel}
         title={actionLabel}
-        className="absolute right-2 top-2 z-20 hidden border border-border/60 bg-background text-muted-foreground shadow-sm hover:text-foreground md:inline-flex"
+        className={cn(
+          "absolute right-2 top-2 z-20 hidden border border-border/60 bg-background text-muted-foreground shadow-sm hover:text-foreground md:inline-flex",
+          desktopActionVisibility === "hover" &&
+            "md:opacity-0 md:transition-opacity md:duration-150 md:group-hover:opacity-100 md:focus-visible:opacity-100",
+        )}
         onClick={(event) => {
           event.preventDefault();
           event.stopPropagation();
           close();
-          onAction();
+          try {
+            handleActionPromise(onAction());
+          } catch (error) {
+            throw error;
+          }
         }}
       >
         {actionIcon}

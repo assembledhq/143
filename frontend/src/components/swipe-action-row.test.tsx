@@ -34,6 +34,16 @@ function mockMatchMedia(coarse: boolean) {
   };
 }
 
+function deferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
 describe('SwipeActionRow', () => {
   it('keeps the hidden swipe action out of the accessibility tree while closed', () => {
     renderWithProviders(
@@ -47,6 +57,25 @@ describe('SwipeActionRow', () => {
     );
 
     expect(screen.getAllByRole('button', { name: 'Archive item' })).toHaveLength(1);
+  });
+
+  it('can de-emphasize the desktop action button until hover or focus', () => {
+    renderWithProviders(
+      <SwipeActionRow
+        actionLabel="Archive item"
+        actionText="Archive"
+        desktopActionVisibility="hover"
+        onAction={() => {}}
+      >
+        <div>Row content</div>
+      </SwipeActionRow>,
+    );
+
+    expect(screen.getByRole('button', { name: 'Archive item' })).toHaveClass(
+      'md:opacity-0',
+      'md:group-hover:opacity-100',
+      'md:focus-visible:opacity-100',
+    );
   });
 
   it('reveals the trailing action after a left swipe and invokes it', async () => {
@@ -224,6 +253,167 @@ describe('SwipeActionRow', () => {
 
     expect(screen.getByText('Release to archive')).toBeInTheDocument();
     expect(container).toHaveAttribute('data-swipe-state', 'committed');
+  });
+
+  it('keeps the trailing archive affordance to two text lines while swiping', () => {
+    renderWithProviders(
+      <SwipeActionRow
+        actionLabel="Archive item"
+        actionText="Archive"
+        onAction={() => {}}
+      >
+        <div>Row content</div>
+      </SwipeActionRow>,
+    );
+
+    const surface = screen.getByText('Row content').closest('[data-swipe-surface="true"]');
+    expect(surface).not.toBeNull();
+
+    fireEvent.touchStart(surface!, {
+      touches: [{ clientX: 220, clientY: 20 }],
+    });
+    fireEvent.touchMove(surface!, {
+      touches: [{ clientX: 120, clientY: 24 }],
+    });
+
+    expect(screen.getByText('Archive')).toBeInTheDocument();
+    expect(screen.getByText('Keep swiping')).toBeInTheDocument();
+    expect(screen.queryByTestId('swipe-action-icon')).not.toBeInTheDocument();
+  });
+
+  it('keeps the row slid fully left until the archive action settles', async () => {
+    vi.useFakeTimers();
+    const action = deferred<void>();
+    const onAction = vi.fn(() => action.promise);
+
+    try {
+      renderWithProviders(
+        <SwipeActionRow
+          actionLabel="Archive item"
+          actionText="Archive"
+          onAction={onAction}
+        >
+          <div>Row content</div>
+        </SwipeActionRow>,
+      );
+
+      const surface = screen.getByText('Row content').closest('[data-swipe-surface="true"]') as HTMLElement | null;
+      expect(surface).not.toBeNull();
+      const container = surface!.parentElement;
+      expect(container).not.toBeNull();
+      Object.defineProperty(container!, 'offsetWidth', {
+        configurable: true,
+        value: 390,
+      });
+
+      fireEvent.touchStart(surface!, {
+        touches: [{ clientX: 320, clientY: 20 }],
+      });
+      fireEvent.touchMove(surface!, {
+        touches: [{ clientX: 170, clientY: 24 }],
+      });
+      fireEvent.touchEnd(surface!);
+
+      expect(onAction).toHaveBeenCalledTimes(1);
+      expect(surface!.style.transform).toBe('translateX(-390px)');
+
+      await act(async () => {
+        action.resolve();
+        await action.promise;
+      });
+
+      expect(surface!.style.transform).toBe('translateX(-390px)');
+
+      await act(async () => {
+        vi.advanceTimersByTime(200);
+      });
+
+      expect(surface!.style.transform).toBe('translateX(-0px)');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('swallows rejected promises from the revealed action button path', async () => {
+    const action = deferred<void>();
+    const onUnhandledRejection = vi.fn();
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+    window.addEventListener('unhandledrejection', onUnhandledRejection);
+
+    try {
+      renderWithProviders(
+        <SwipeActionRow
+          actionLabel="Archive item"
+          actionText="Archive"
+          onAction={() => action.promise}
+        >
+          <div>Row content</div>
+        </SwipeActionRow>,
+      );
+
+      const surface = screen.getByText('Row content').closest('[data-swipe-surface="true"]');
+      expect(surface).not.toBeNull();
+
+      fireEvent.touchStart(surface!, {
+        touches: [{ clientX: 220, clientY: 20 }],
+      });
+      fireEvent.touchMove(surface!, {
+        touches: [{ clientX: 120, clientY: 24 }],
+      });
+      fireEvent.touchEnd(surface!);
+
+      fireEvent.click(screen.getAllByRole('button', { name: 'Archive item' })[0]);
+
+      await act(async () => {
+        action.reject(new Error('archive failed'));
+        try {
+          await action.promise;
+        } catch {
+          // Expected rejection for this test.
+        }
+      });
+
+      expect(onUnhandledRejection).not.toHaveBeenCalled();
+    } finally {
+      consoleError.mockRestore();
+      window.removeEventListener('unhandledrejection', onUnhandledRejection);
+    }
+  });
+
+  it('swallows rejected promises from the desktop action button path', async () => {
+    const action = deferred<void>();
+    const onUnhandledRejection = vi.fn();
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+    window.addEventListener('unhandledrejection', onUnhandledRejection);
+
+    try {
+      renderWithProviders(
+        <SwipeActionRow
+          actionLabel="Archive item"
+          actionText="Archive"
+          actionIcon={<span>Archive icon</span>}
+          onAction={() => action.promise}
+        >
+          <div>Row content</div>
+        </SwipeActionRow>,
+      );
+
+      fireEvent.click(screen.getByRole('button', { name: 'Archive item' }));
+
+      await act(async () => {
+        action.reject(new Error('archive failed'));
+        try {
+          await action.promise;
+        } catch {
+          // Expected rejection for this test.
+        }
+      });
+
+      expect(onUnhandledRejection).not.toHaveBeenCalled();
+    } finally {
+      consoleError.mockRestore();
+      window.removeEventListener('unhandledrejection', onUnhandledRejection);
+    }
   });
 
   it('keeps the moving row surface opaque while the action is revealed', () => {

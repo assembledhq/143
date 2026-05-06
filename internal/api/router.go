@@ -229,12 +229,17 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 		Integrations:       integrationStore,
 		IntegrationsWriter: integrationStore,
 		Credentials:        credentialStore,
+		CredentialsWriter:  credentialStore,
 		Issues:             issueStore,
 		Sessions:           sessionStore,
 		IssueLinks:         sessionIssueLinkStore,
 		Orgs:               orgStore,
 		Jobs:               jobStore,
-		AppBaseURL:         cfg.FrontendURL,
+		OAuthClient: linear.OAuthClientCreds{
+			ClientID:     cfg.LinearOAuthClientID,
+			ClientSecret: cfg.LinearOAuthClientSecret,
+		},
+		AppBaseURL: cfg.FrontendURL,
 	})
 	if sessionStreams != nil {
 		// Republish session status on every link change so the detail view
@@ -287,9 +292,19 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	// "submitted comments stick around for the next turn" bug surfaces on
 	// any session whose follow-up flows through a thread tab.
 	threadSvc.SetReviewCommentResolver(pool, sessionReviewCommentStore)
+	// Wire the question store so a follow-up sent to an awaiting_input
+	// session via a thread tab flips the latest pending question to
+	// 'answered' atomically with the message create — same invariant the
+	// session-level handler maintains. Without this, question state
+	// diverges from the resumed run on the thread surface.
+	threadSvc.SetQuestionStore(sessionQuestionStore)
 	sessionThreadHandler := handlers.NewSessionThreadHandler(threadSvc)
 	sessionThreadHandler.SetAuditEmitter(auditEmitter)
 	sessionThreadHandler.SetLogger(logger)
+	// Mirror sessionHandler.SetLinearLinker so Linear refs typed into a
+	// thread tab follow-up get the same fail-soft mid-session linking the
+	// legacy session surface already provides.
+	sessionThreadHandler.SetLinearLinker(linearService)
 	pmHandler := handlers.NewPMHandler(pmPlanStore, pmDecisionLogStore, jobStore, orgStore)
 	priorityHandler := handlers.NewPriorityHandler(priorityScoreStore, complexityEstimateStore, jobStore)
 	ingestionWebhookHandler := handlers.NewIngestionWebhookHandler(webhookDeliveryStore, integrationStore, credentialStore, ingestionSvc, logger)

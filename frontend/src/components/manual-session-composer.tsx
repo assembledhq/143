@@ -4,9 +4,6 @@ import { useDeferredValue, useEffect, useMemo, useRef, useState, type ReactNode 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   ArrowUp,
-  Plus,
-  Link as LinkIcon,
-  Paperclip,
   GitBranch,
   ChevronDown,
   FileCode2,
@@ -49,6 +46,7 @@ import { LinearIcon } from "@/components/linear-icon";
 import { looksLikeLinearRef } from "@/lib/linear-refs";
 import { getClipboardFiles } from "@/lib/clipboard-files";
 import { PendingAttachmentStrip } from "@/components/pending-attachment-strip";
+import { SessionComposerAttachmentMenu } from "@/components/session-composer-attachment-menu";
 import {
   SessionComposerTriggerPicker,
   flattenGroups,
@@ -103,6 +101,7 @@ import type {
 
 const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10 MB
 const DRAFT_SAVE_DEBOUNCE_MS = 400;
+const DEFAULT_MANUAL_SESSION_TITLE = "Manual Session";
 const triggerPickerIconClassName = "h-4 w-4 shrink-0";
 const directoryTriggerIcon = <FolderTree className={triggerPickerIconClassName} />;
 const fileTriggerIcon = <FileCode2 className={triggerPickerIconClassName} />;
@@ -394,15 +393,6 @@ export function ManualSessionComposer({
     queryFn: () => api.repositories.list(),
   });
   const repositories = useMemo(() => reposResponse?.data ?? [], [reposResponse]);
-  const { data: integrationsResponse } = useQuery({
-    queryKey: ["integrations"],
-    queryFn: () => api.integrations.list(),
-  });
-  const linearIntegrated = useMemo(
-    () => (integrationsResponse?.data ?? []).some((integration) => integration.provider === "linear" && integration.status === "active"),
-    [integrationsResponse],
-  );
-
   // Drop a hydrated repo id (from the draft or the `?repo=` URL param) if the
   // repos query has resolved and the id isn't in the list — repo was deleted,
   // access was revoked, or the URL was bogus. Without this, the picker would
@@ -578,8 +568,11 @@ export function ManualSessionComposer({
   );
   const hasInvalidCommands = invalidCommandTokens.length > 0;
   const hasSubmittableInput = useMemo(
-    () => message.trim().length > 0 || references.some((reference) => referenceCarriesLinearRef(reference)),
-    [message, references],
+    () =>
+      message.trim().length > 0 ||
+      attachments.length > 0 ||
+      references.some((reference) => referenceCarriesLinearRef(reference)),
+    [attachments, message, references],
   );
 
   const createManualSessionMutation = useMutation({
@@ -599,9 +592,10 @@ export function ManualSessionComposer({
       const rawTitle = message.trim().length > 0
         ? message.trim()
         : references.find((reference) => referenceCarriesLinearRef(reference))?.display ?? "";
-      const title = rawTitle.length > 80
-        ? rawTitle.slice(0, 80) + "..."
-        : rawTitle;
+      const optimisticTitle = rawTitle || DEFAULT_MANUAL_SESSION_TITLE;
+      const title = optimisticTitle.length > 80
+        ? optimisticTitle.slice(0, 80) + "..."
+        : optimisticTitle;
       return { optimisticId: addOptimisticSession(title) };
     },
     onSuccess: (response, _variables, context) => {
@@ -1337,29 +1331,13 @@ export function ManualSessionComposer({
                 {isMobile ? (
                   <>
                     <div className="flex items-center gap-2">
-                      <DropdownMenu>
-                        <DropdownMenuTrigger asChild>
-                          <Button variant="ghost" size="icon" aria-label="Add files or photos" className="h-8 w-8 rounded-full text-muted-foreground hover:text-foreground">
-                            <Plus className="h-5 w-5" />
-                          </Button>
-                        </DropdownMenuTrigger>
-                        <DropdownMenuContent align="start">
-                          <DropdownMenuItem onClick={() => uploadInputRef.current?.click()}>
-                            <Paperclip className="mr-2 h-4 w-4" />
-                            Upload files or photos
-                          </DropdownMenuItem>
-                          <DropdownMenuItem onClick={() => setShowImageInput(true)}>
-                            <LinkIcon data-testid="add-image-url-link-icon" className="mr-2 h-4 w-4" />
-                            Add image URL
-                          </DropdownMenuItem>
-                          {linearIntegrated ? (
-                            <DropdownMenuItem onClick={() => setShowLinearInput(true)}>
-                              <LinearIcon className="mr-2 h-4 w-4" />
-                              Add linear issue
-                            </DropdownMenuItem>
-                          ) : null}
-                        </DropdownMenuContent>
-                      </DropdownMenu>
+                      <SessionComposerAttachmentMenu
+                        buttonAriaLabel="Add files or photos"
+                        buttonClassName="h-8 w-8 rounded-full text-muted-foreground hover:text-foreground"
+                        onUploadFiles={() => uploadInputRef.current?.click()}
+                        onAddImageURL={() => setShowImageInput(true)}
+                        onAddLinearIssue={() => setShowLinearInput(true)}
+                      />
                       <Button
                         type="button"
                         variant="ghost"
@@ -1398,29 +1376,13 @@ export function ManualSessionComposer({
                   </>
                 ) : (
                   <div className="flex items-center gap-1">
-                    <DropdownMenu>
-                      <DropdownMenuTrigger asChild>
-                        <Button variant="ghost" size="icon" aria-label="Add files or photos" className="h-8 w-8 rounded-full text-muted-foreground hover:text-foreground">
-                          <Plus className="h-5 w-5" />
-                        </Button>
-                      </DropdownMenuTrigger>
-                      <DropdownMenuContent align="start">
-                        <DropdownMenuItem onClick={() => uploadInputRef.current?.click()}>
-                          <Paperclip className="mr-2 h-4 w-4" />
-                          Upload files or photos
-                        </DropdownMenuItem>
-                        <DropdownMenuItem onClick={() => setShowImageInput(true)}>
-                          <LinkIcon data-testid="add-image-url-link-icon" className="mr-2 h-4 w-4" />
-                          Add image URL
-                        </DropdownMenuItem>
-                        {linearIntegrated ? (
-                          <DropdownMenuItem onClick={() => setShowLinearInput(true)}>
-                            <LinearIcon className="mr-2 h-4 w-4" />
-                            Add linear issue
-                          </DropdownMenuItem>
-                        ) : null}
-                      </DropdownMenuContent>
-                    </DropdownMenu>
+                    <SessionComposerAttachmentMenu
+                      buttonAriaLabel="Add files or photos"
+                      buttonClassName="h-8 w-8 rounded-full text-muted-foreground hover:text-foreground"
+                      onUploadFiles={() => uploadInputRef.current?.click()}
+                      onAddImageURL={() => setShowImageInput(true)}
+                      onAddLinearIssue={() => setShowLinearInput(true)}
+                    />
 
                     {repositories.length > 0 && (
                       <DropdownMenu>

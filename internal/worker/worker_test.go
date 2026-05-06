@@ -83,8 +83,8 @@ func TestWorker_Poll(t *testing.T) {
 			name: "no pending jobs returns cleanly",
 			setupMock: func(t *testing.T, w *Worker, mock pgxmock.PgxPoolIface) {
 				t.Helper()
-				mock.ExpectQuery("WITH next_job AS").
-					WithArgs("test-node", "test-node", pgxmock.AnyArg(), int(defaultLeaseDuration.Seconds())).
+				mock.ExpectQuery("WITH dead_target_nodes AS").
+					WithArgs(pgxmock.AnyArg(), "test-node", "test-node", pgxmock.AnyArg(), int(defaultLeaseDuration.Seconds())).
 					WillReturnError(pgx.ErrNoRows)
 			},
 		},
@@ -106,6 +106,30 @@ func TestWorker_Poll(t *testing.T) {
 				})
 
 				expectClaim(mock, jobID, orgID, "test_job", payload, now, lockToken)
+				mock.ExpectExec("UPDATE jobs\\s+SET status = 'succeeded'").
+					WithArgs(jobID, lockToken).
+					WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+			},
+		},
+		{
+			name: "dead target node is exposed to handler context",
+			setupMock: func(t *testing.T, w *Worker, mock pgxmock.PgxPoolIface) {
+				t.Helper()
+
+				jobID := uuid.New()
+				lockToken := uuid.New()
+				orgID := uuid.New()
+				now := time.Now()
+				targetNodeID := "dead-node"
+
+				w.Register("recovery_job", func(ctx context.Context, jobType string, got json.RawMessage) error {
+					gotTarget, ok := jobctx.DeadTargetNodeFromContext(ctx)
+					require.True(t, ok, "handler context should mark claims recovered from a dead target node")
+					require.Equal(t, targetNodeID, gotTarget, "handler context should expose the dead target node id")
+					return nil
+				})
+
+				expectClaimWithTarget(mock, jobID, orgID, "recovery_job", json.RawMessage(`{}`), now, lockToken, &targetNodeID)
 				mock.ExpectExec("UPDATE jobs\\s+SET status = 'succeeded'").
 					WithArgs(jobID, lockToken).
 					WillReturnResult(pgxmock.NewResult("UPDATE", 1))
@@ -226,16 +250,16 @@ func TestWorker_Poll(t *testing.T) {
 				jobID := uuid.New()
 				orgID := uuid.New()
 				now := time.Now()
-				mock.ExpectQuery("WITH next_job AS").
-					WithArgs("test-node", "test-node", pgxmock.AnyArg(), int(defaultLeaseDuration.Seconds())).
+				mock.ExpectQuery("WITH dead_target_nodes AS").
+					WithArgs(pgxmock.AnyArg(), "test-node", "test-node", pgxmock.AnyArg(), int(defaultLeaseDuration.Seconds())).
 					WillReturnRows(pgxmock.NewRows([]string{
 						"id", "org_id", "queue", "job_type", "payload", "priority", "status",
 						"attempts", "max_attempts", "run_at", "locked_by_node_id", "locked_at",
 						"lease_expires_at", "lock_token", "run_owner_id", "last_error",
-						"dedupe_key", "created_at", "updated_at", "completed_at",
+						"dedupe_key", "target_node_id", "created_at", "updated_at", "completed_at",
 					}).AddRow(
 						jobID, orgID, "default", "missing_token", json.RawMessage(`{}`), 5, "running",
-						1, 3, now, "test-node", now, now.Add(defaultLeaseDuration), nil, "test-node", nil, nil, now, now, nil,
+						1, 3, now, "test-node", now, now.Add(defaultLeaseDuration), nil, "test-node", nil, nil, nil, now, now, nil,
 					))
 			},
 		},
@@ -544,8 +568,8 @@ func TestWorker_Start_StopsOnContextCancel(t *testing.T) {
 	w.pollInterval = 10 * time.Millisecond
 	mock.MatchExpectationsInOrder(false)
 	for range 5 {
-		mock.ExpectQuery("WITH next_job AS").
-			WithArgs("test-node", "test-node", pgxmock.AnyArg(), int(defaultLeaseDuration.Seconds())).
+		mock.ExpectQuery("WITH dead_target_nodes AS").
+			WithArgs(pgxmock.AnyArg(), "test-node", "test-node", pgxmock.AnyArg(), int(defaultLeaseDuration.Seconds())).
 			WillReturnError(pgx.ErrNoRows)
 	}
 
@@ -722,16 +746,28 @@ func expectClaim(mock pgxmock.PgxPoolIface, jobID, orgID uuid.UUID, jobType stri
 }
 
 func expectClaimWithAttempts(mock pgxmock.PgxPoolIface, jobID, orgID uuid.UUID, jobType string, payload json.RawMessage, createdAt time.Time, lockToken uuid.UUID, attempts, maxAttempts int) {
-	mock.ExpectQuery("WITH next_job AS").
-		WithArgs("test-node", "test-node", pgxmock.AnyArg(), int(defaultLeaseDuration.Seconds())).
+	expectClaimWithAttemptsAndTarget(mock, jobID, orgID, jobType, payload, createdAt, lockToken, attempts, maxAttempts, nil)
+}
+
+func expectClaimWithTarget(mock pgxmock.PgxPoolIface, jobID, orgID uuid.UUID, jobType string, payload json.RawMessage, createdAt time.Time, lockToken uuid.UUID, targetNodeID *string) {
+	expectClaimWithAttemptsAndTarget(mock, jobID, orgID, jobType, payload, createdAt, lockToken, 1, 3, targetNodeID)
+}
+
+func expectClaimWithAttemptsAndTarget(mock pgxmock.PgxPoolIface, jobID, orgID uuid.UUID, jobType string, payload json.RawMessage, createdAt time.Time, lockToken uuid.UUID, attempts, maxAttempts int, targetNodeID *string) {
+	var target any
+	if targetNodeID != nil {
+		target = *targetNodeID
+	}
+	mock.ExpectQuery("WITH dead_target_nodes AS").
+		WithArgs(pgxmock.AnyArg(), "test-node", "test-node", pgxmock.AnyArg(), int(defaultLeaseDuration.Seconds())).
 		WillReturnRows(pgxmock.NewRows([]string{
 			"id", "org_id", "queue", "job_type", "payload", "priority", "status",
 			"attempts", "max_attempts", "run_at", "locked_by_node_id", "locked_at",
 			"lease_expires_at", "lock_token", "run_owner_id", "last_error",
-			"dedupe_key", "created_at", "updated_at", "completed_at",
+			"dedupe_key", "target_node_id", "created_at", "updated_at", "completed_at",
 		}).AddRow(
 			jobID, orgID, "default", jobType, payload, 5, "running",
 			attempts, maxAttempts, createdAt, "test-node", createdAt, createdAt.Add(defaultLeaseDuration),
-			lockToken.String(), "test-node", nil, nil, createdAt, createdAt, nil,
+			lockToken.String(), "test-node", nil, nil, target, createdAt, createdAt, nil,
 		))
 }

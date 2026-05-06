@@ -350,6 +350,81 @@ func (s *OrgCredentialStore) UpsertByID(ctx context.Context, orgID uuid.UUID, id
 	return err
 }
 
+// UpdateLinearConfigIfRefreshTokenMatches updates the singleton Linear
+// credential only if its stored refresh token still matches the token the
+// caller just redeemed. The row is locked for the read/compare/write so a
+// reconnect or peer refresh cannot be overwritten by a stale refresh response.
+//
+// Returns the current row config with updated=false when the refresh token has
+// changed. Callers should use that config for race recovery rather than
+// retrying the stale token chain.
+func (s *OrgCredentialStore) UpdateLinearConfigIfRefreshTokenMatches(ctx context.Context, orgID uuid.UUID, expectedRefreshToken string, cfg models.LinearConfig) (models.LinearConfig, bool, error) {
+	txStarter, ok := s.db.(TxStarter)
+	if !ok {
+		return models.LinearConfig{}, false, fmt.Errorf("org credential store db does not support transactions")
+	}
+	tx, err := txStarter.Begin(ctx)
+	if err != nil {
+		return models.LinearConfig{}, false, fmt.Errorf("begin linear credential refresh update: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	query := `
+		SELECT ` + credentialColumns + `
+		FROM org_credentials
+		WHERE org_id = @org_id
+		  AND provider = @provider
+		  AND label = ''
+		  AND status != 'disabled'
+		FOR UPDATE`
+	rows, err := tx.Query(ctx, query, pgx.NamedArgs{
+		"org_id":   orgID,
+		"provider": string(models.ProviderLinear),
+	})
+	if err != nil {
+		return models.LinearConfig{}, false, fmt.Errorf("query linear credential for refresh update: %w", err)
+	}
+	row, err := pgx.CollectOneRow(rows, pgx.RowToStructByNameLax[models.OrgCredential])
+	if err != nil {
+		return models.LinearConfig{}, false, fmt.Errorf("load linear credential for refresh update: %w", err)
+	}
+
+	currentCred, err := s.decryptRow(row)
+	if err != nil {
+		return models.LinearConfig{}, false, err
+	}
+	current, ok := currentCred.Config.(models.LinearConfig)
+	if !ok {
+		return models.LinearConfig{}, false, fmt.Errorf("linear credential config is wrong type: got %T", currentCred.Config)
+	}
+	if current.RefreshToken != expectedRefreshToken {
+		if err := tx.Commit(ctx); err != nil {
+			return models.LinearConfig{}, false, fmt.Errorf("commit skipped linear credential refresh update: %w", err)
+		}
+		return current, false, nil
+	}
+
+	encrypted, err := s.marshalAndEncrypt(cfg)
+	if err != nil {
+		return models.LinearConfig{}, false, err
+	}
+	tag, err := tx.Exec(ctx, `UPDATE org_credentials SET config = @config, status = 'active', updated_at = now() WHERE id = @id AND org_id = @org_id`, pgx.NamedArgs{
+		"id":     row.ID,
+		"org_id": orgID,
+		"config": encrypted,
+	})
+	if err != nil {
+		return models.LinearConfig{}, false, fmt.Errorf("update linear credential after refresh: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return models.LinearConfig{}, false, pgx.ErrNoRows
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return models.LinearConfig{}, false, fmt.Errorf("commit linear credential refresh update: %w", err)
+	}
+	return cfg, true, nil
+}
+
 // Get decrypts and returns the unlabeled credential for an (org, provider).
 // Convention: a provider that stores a single credential per org (e.g. an
 // Anthropic API key) uses label=""; providers with multiple rows per org

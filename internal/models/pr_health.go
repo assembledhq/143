@@ -125,6 +125,7 @@ type PullRequestHealthSummary struct {
 	HasConflicts     bool                      `json:"has_conflicts"`
 	FailingTestCount int                       `json:"failing_test_count"`
 	NeedsAgentAction bool                      `json:"needs_agent_action"`
+	ChecksConfirmed  bool                      `json:"checks_confirmed,omitempty"`
 	Checks           []PullRequestCheckSummary `json:"checks,omitempty"`
 }
 

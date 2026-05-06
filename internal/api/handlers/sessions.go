@@ -2004,13 +2004,22 @@ func (h *SessionHandler) SendMessage(w http.ResponseWriter, r *http.Request) {
 	// Enqueue continue_session job. Dedupe at the session level — only one
 	// continue_session can hold the shared sandbox at a time, so a duplicate
 	// would race AcquireTurnHold and dead-letter via the orchestrator's
-	// self-heal path.
+	// self-heal path. Pin to the worker that owns the live sandbox so the
+	// job can't be claimed by a sibling node whose docker daemon doesn't
+	// know about the container_id.
 	dedupeKey := db.ContinueSessionDedupeKey(sessionID)
 	payload := map[string]string{
 		"session_id": sessionID.String(),
 		"org_id":     orgID.String(),
 	}
-	if _, err := h.jobStore.EnqueueInTx(r.Context(), tx, orgID, "agent", "continue_session", payload, 5, &dedupeKey); err != nil {
+	if _, err := h.jobStore.EnqueueInTxWithOpts(r.Context(), tx, orgID, db.EnqueueOpts{
+		Queue:        "agent",
+		JobType:      "continue_session",
+		Payload:      payload,
+		Priority:     5,
+		DedupeKey:    &dedupeKey,
+		TargetNodeID: models.SessionWorkerTarget(&session),
+	}); err != nil {
 		writeError(w, r, http.StatusInternalServerError, "ENQUEUE_FAILED", "failed to enqueue continue_session job", err)
 		return
 	}
@@ -2320,15 +2329,18 @@ func (h *SessionHandler) CreateManual(w http.ResponseWriter, r *http.Request) {
 	}
 
 	body.Message = strings.TrimSpace(body.Message)
-	// Empty message is allowed iff the user is starting from a linked
-	// Linear issue. Detection runs after the body validation, so we accept
+	// Empty message is allowed when the user attached images or is starting
+	// from a linked Linear issue. Mobile screenshot/photo-first flows rely on
+	// this: the UI explicitly advertises image-only session starts, and the
+	// initial turn persists those attachments even when the text prompt is
+	// blank. Linear detection runs after body validation, so we accept
 	// "looks like a Linear ref somewhere in the inputs" as the relaxation
-	// signal here. The check is tightened with the team-key allowlist so
-	// a "FOO-123"-shaped string for an unknown team no longer waves the
-	// request past — preventing sessions with an empty user turn that
-	// silently no-op inside the linker.
-	if body.Message == "" && !h.canBypassMissingMessageForLinear(r.Context(), orgID, body.References) {
-		writeError(w, r, http.StatusBadRequest, "MISSING_MESSAGE", "message is required")
+	// signal here. The check is tightened with the team-key allowlist so a
+	// "FOO-123"-shaped string for an unknown team no longer waves the request
+	// past — preventing sessions with an empty user turn that silently no-op
+	// inside the linker.
+	if body.Message == "" && len(body.Images) == 0 && !h.canBypassMissingMessageForLinear(r.Context(), orgID, body.References) {
+		writeError(w, r, http.StatusBadRequest, "MISSING_MESSAGE", "message, images, or a linked Linear issue are required")
 		return
 	}
 	for _, reference := range body.References {
@@ -2430,18 +2442,10 @@ func (h *SessionHandler) CreateManual(w http.ResponseWriter, r *http.Request) {
 		modelOverride = &body.Model
 	}
 
-	reasoningEffort := models.ReasoningEffort(body.ReasoningEffort)
-	if err := reasoningEffort.Validate(); err != nil {
+	reasoningOverride, err := parseReasoningEffortForAgent(agentType, body.ReasoningEffort)
+	if err != nil {
 		writeError(w, r, http.StatusBadRequest, "INVALID_REASONING_EFFORT", err.Error())
 		return
-	}
-	if reasoningEffort != "" && !agentType.SupportsReasoningEffortLevel(reasoningEffort) {
-		writeError(w, r, http.StatusBadRequest, "INVALID_REASONING_EFFORT", fmt.Sprintf("reasoning_effort is not supported for agent_type %q", agentType))
-		return
-	}
-	var reasoningOverride *models.ReasoningEffort
-	if reasoningEffort != "" {
-		reasoningOverride = &reasoningEffort
 	}
 
 	autonomyLevel := body.AutonomyLevel

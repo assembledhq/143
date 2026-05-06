@@ -171,6 +171,8 @@ func (a *reviewAdapter) Execute(_ context.Context, _ *agent.Sandbox, _ *agent.Ag
 	return &agent.AgentResult{}, nil
 }
 
+func (a *reviewAdapter) ResumeMode() agent.SessionResumeMode { return agent.ResumeUnsupported }
+
 func marshalOrgSettingsForReview(t *testing.T, settings models.OrgSettings) []byte {
 	t.Helper()
 

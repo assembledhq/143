@@ -166,6 +166,49 @@ func TestMainAdvertisesPreviewAfterHTTPListen(t *testing.T) {
 	require.Less(t, ready, serve, "preview routing should be advertised before serving blocks")
 }
 
+func TestGracefulShutdownUsesShortNodeDrainContext(t *testing.T) {
+	t.Parallel()
+
+	src, err := os.ReadFile("main.go")
+	require.NoError(t, err, "main.go should be readable for shutdown ordering regression test")
+
+	body := string(src)
+	require.Contains(t, body, "const nodeDrainMarkTimeout = 5 * time.Second",
+		"node drain DB marking should use a short bounded timeout")
+	require.Contains(t, body, "nodeDrainCtx, nodeDrainCancel := context.WithTimeout(context.Background(), nodeDrainMarkTimeout)",
+		"node drain DB marking should not consume the worker job drain context")
+	require.Contains(t, body, "nodeManager.RequestDrain(nodeDrainCtx, time.Now())",
+		"node drain DB marking should use the short node-drain context")
+	require.Contains(t, body, "drainCtx, drainCancel := context.WithTimeout(context.Background(), cfg.WorkerDrainTimeout)",
+		"worker jobs should keep the full configured drain timeout")
+
+	nodeDrain := strings.Index(body, "nodeManager.RequestDrain(nodeDrainCtx, time.Now())")
+	workerDrain := strings.Index(body, "drainCtx, drainCancel := context.WithTimeout(context.Background(), cfg.WorkerDrainTimeout)")
+	activeJobLoop := strings.Index(body, "activeJobs := 0")
+	require.NotEqual(t, -1, nodeDrain, "shutdown should mark the node draining")
+	require.NotEqual(t, -1, workerDrain, "shutdown should create the worker drain context")
+	require.NotEqual(t, -1, activeJobLoop, "shutdown should wait for active jobs")
+	require.Less(t, nodeDrain, workerDrain, "node drain DB marking should happen before the worker drain budget starts")
+	require.Less(t, workerDrain, activeJobLoop, "the worker drain budget should be reserved for the active-job wait")
+}
+
+func TestDeployWorkflowWaitsForWorkerRolloverTerminalStatus(t *testing.T) {
+	t.Parallel()
+
+	src, err := os.ReadFile("../../.github/workflows/deploy.yml")
+	require.NoError(t, err, "deploy workflow should be readable for worker rollover regression test")
+
+	body := string(src)
+	require.Contains(t, body, `VERIFY_TIMEOUT_SECONDS: "4200"`,
+		"worker rollover verification should cover the full 45m drain plus recreate/healthcheck with margin")
+	require.Contains(t, body, `outcome="timeout"`,
+		"worker rollover timeout should be reported as timeout, not successful in_progress")
+	require.Contains(t, body, "overall_rc=1",
+		"worker rollover timeout/failure should fail the deploy job so later deploys do not race host-side rollover")
+	require.NotContains(t, body, `outcome="in_progress"`,
+		"deploy workflow should not pass while detached worker rollover is still running")
+}
+
 // fakeDrainer is a postPRSnapshotDrainer that blocks WaitForPostPRSnapshotUploads
 // on a release channel. Tests use it to drive the success-vs-timeout branches
 // of drainPostPRUploads deterministically.

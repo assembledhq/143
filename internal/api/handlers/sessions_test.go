@@ -3673,6 +3673,39 @@ func TestSessionHandler_CreateManual(t *testing.T) {
 			expectedBody: "MISSING_MESSAGE",
 		},
 		{
+			name: "creates manual session successfully with only images",
+			body: `{"message":"  ","images":["https://example.com/mobile-shot.png"],"agent_type":"claude_code"}`,
+			setupMock: func(mock pgxmock.PgxPoolIface, orgID uuid.UUID) {
+				now := time.Now()
+				runID := uuid.New()
+				messageID := int64(1)
+				jobID := uuid.New()
+
+				mock.ExpectQuery("SELECT .+ FROM organizations WHERE id").
+					WithArgs(pgxmock.AnyArg()).
+					WillReturnRows(pgxmock.NewRows([]string{"id", "name", "settings", "created_at", "updated_at"}).
+						AddRow(orgID, "test-org", nil, now, now))
+
+				expectManualSessionCreate(mock, runID, now)
+
+				mock.ExpectQuery("INSERT INTO session_messages").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(messageID, now))
+
+				mock.ExpectQuery("SELECT count").
+					WithArgs(pgxmock.AnyArg()).
+					WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
+
+				mock.ExpectQuery("INSERT INTO jobs").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+						pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(jobID))
+			},
+			expectedCode: http.StatusCreated,
+			expectedBody: "claude_code",
+		},
+		{
 			name:         "returns bad request for invalid body",
 			body:         `{invalid`,
 			setupMock:    func(mock pgxmock.PgxPoolIface, orgID uuid.UUID) {},

@@ -6,11 +6,13 @@ import (
 	"errors"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/assembledhq/143/internal/api/middleware"
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
+	"github.com/assembledhq/143/internal/services/linear"
 	"github.com/assembledhq/143/internal/services/thread"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
@@ -34,9 +36,10 @@ type ThreadService interface {
 }
 
 type SessionThreadHandler struct {
-	svc    ThreadService
-	audit  *db.AuditEmitter
-	logger zerolog.Logger
+	svc          ThreadService
+	audit        *db.AuditEmitter
+	logger       zerolog.Logger
+	linearLinker atomic.Pointer[linearLinkerHolder]
 }
 
 func NewSessionThreadHandler(svc ThreadService) *SessionThreadHandler {
@@ -55,6 +58,87 @@ func (h *SessionThreadHandler) SetAuditEmitter(audit *db.AuditEmitter) {
 // the zerolog Nop value is harmless when unset.
 func (h *SessionThreadHandler) SetLogger(logger zerolog.Logger) {
 	h.logger = logger
+}
+
+// SetLinearLinker injects the Linear session-linking service used by
+// SendThreadMessage to detect and link Linear references in follow-up
+// messages. When unset, follow-ups still send normally — Linear refs are
+// treated as opaque text, same fail-soft contract as
+// SessionHandler.SetLinearLinker. Stored via atomic.Pointer so a late-running
+// test can wire the linker without racing the read path.
+func (h *SessionThreadHandler) SetLinearLinker(linker linearSessionLinker) {
+	if linker == nil {
+		h.linearLinker.Store(nil)
+		return
+	}
+	h.linearLinker.Store(&linearLinkerHolder{fn: linker})
+}
+
+// getLinearLinker returns the currently-wired linker (or nil if none).
+func (h *SessionThreadHandler) getLinearLinker() linearSessionLinker {
+	holder := h.linearLinker.Load()
+	if holder == nil {
+		return nil
+	}
+	return holder.fn
+}
+
+// maybeLinkLinearMidSession kicks off detection + async enqueue for a
+// follow-up message body in a detached goroutine. Mirrors
+// SessionHandler.maybeLinkLinearMidSession verbatim so a Linear ref typed
+// into a thread tab gets the same fail-soft, off-path linking the legacy
+// session surface already provides.
+func (h *SessionThreadHandler) maybeLinkLinearMidSession(ctx context.Context, orgID, sessionID uuid.UUID, messageBody string, userID *uuid.UUID) {
+	linker := h.getLinearLinker()
+	if linker == nil {
+		return
+	}
+	detached := context.WithoutCancel(ctx)
+	go func() {
+		bgCtx, cancel := context.WithTimeout(detached, midSessionLinkTimeout)
+		defer cancel()
+		if err := linker.ResolveAndLinkMidSession(bgCtx, linear.MidSessionInput{
+			OrgID:       orgID,
+			SessionID:   sessionID,
+			MessageBody: messageBody,
+			UserID:      userID,
+		}); err != nil {
+			h.logger.Warn().Err(err).
+				Str("session_id", sessionID.String()).
+				Msg("mid-session linear linking failed; thread follow-up was sent but no link row was created")
+		}
+	}()
+}
+
+// emitThreadAnsweredQuestionAudit records a SessionQuestionAnswered audit
+// when a thread-scoped follow-up resumed an awaiting_input session and
+// flipped a pending question to 'answered'. Same shape as the inline emit in
+// the session-level handler so audit consumers see one consistent record per
+// answered question.
+func emitThreadAnsweredQuestionAudit(
+	emitter *db.AuditEmitter,
+	logger zerolog.Logger,
+	r *http.Request,
+	sessionID uuid.UUID,
+	question models.SessionQuestion,
+	userID uuid.UUID,
+	answerLength int,
+) {
+	qIDStr := question.ID.String()
+	details := map[string]any{
+		"question_id":   question.ID.String(),
+		"session_id":    question.SessionID.String(),
+		"question_text": question.QuestionText,
+		"status":        question.Status,
+		"answer_length": answerLength,
+		"answered_by":   userID.String(),
+		"option_count":  len(question.Options),
+		"auto_answered": true,
+	}
+	if question.BlocksPhase != nil {
+		details["blocks_phase"] = *question.BlocksPhase
+	}
+	emitUserAuditWithSession(emitter, r, models.AuditActionSessionQuestionAnswered, models.AuditResourceSession, &qIDStr, &sessionID, nil, marshalAuditDetails(logger, details))
 }
 
 // CreateThread handles POST /sessions/{id}/threads — adds a new agent thread
@@ -305,6 +389,10 @@ func (h *SessionThreadHandler) SendThreadMessage(w http.ResponseWriter, r *http.
 			writeError(w, r, http.StatusConflict, "RUNNING_LIMIT", "this session already has the maximum number of tabs running concurrently")
 		case errors.Is(err, thread.ErrActiveThreadExists):
 			writeError(w, r, http.StatusConflict, "ACTIVE_THREAD_EXISTS", "another tab is already running in this sandbox")
+		case errors.Is(err, thread.ErrSessionSnapshotExpired):
+			writeError(w, r, http.StatusGone, "SNAPSHOT_EXPIRED", "this session's environment has expired and can no longer be continued")
+		case errors.Is(err, thread.ErrSessionNotResumable):
+			writeError(w, r, http.StatusConflict, "NOT_RESUMABLE", "session must be idle, running, awaiting input, need guidance, or otherwise resumable to send a message")
 		case errors.Is(err, thread.ErrEnqueueFailed):
 			writeError(w, r, http.StatusInternalServerError, "ENQUEUE_FAILED", "failed to enqueue continue_session job", err)
 		default:
@@ -313,11 +401,25 @@ func (h *SessionThreadHandler) SendThreadMessage(w http.ResponseWriter, r *http.
 		return
 	}
 
+	// Emit a SessionQuestionAnswered audit when the send resumed an
+	// awaiting_input session and flipped a pending question to answered.
+	// Same shape as the session-level path so audit consumers see one row
+	// per answered question regardless of the surface.
+	if result.AnsweredQuestion != nil && userID != nil {
+		emitThreadAnsweredQuestionAudit(h.audit, h.logger, r, sessionID, *result.AnsweredQuestion, *userID, len(body.Message))
+	}
+
 	// Audit one row per resolved comment after the tx commits — same shape
 	// as session-level SendMessage so audit consumers see consistent
 	// before/after values regardless of which surface triggered the
 	// resolution.
 	emitReviewCommentResolutionAudits(h.audit, h.logger, r, sessionID, result.Message.ID, result.ResolvedComments)
+
+	// Mid-session Linear linking, fire-and-forget — mirrors the session-level
+	// SendMessage hook so refs in a follow-up are detected and linked
+	// regardless of whether the user sent through the session or thread
+	// surface.
+	h.maybeLinkLinearMidSession(r.Context(), orgID, sessionID, body.Message, userID)
 
 	writeJSON(w, http.StatusCreated, models.SingleResponse[models.SessionMessage]{Data: *result.Message})
 }

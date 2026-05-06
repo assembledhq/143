@@ -284,7 +284,7 @@ func TestPRServiceMergePullRequestRunsMergedFollowUps(t *testing.T) {
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/assembledhq/143/pulls/42":
 			_, _ = w.Write([]byte(`{"number":42,"html_url":"https://github.com/assembledhq/143/pull/42","state":"open","mergeable":true,"mergeable_state":"clean","head":{"ref":"feature","sha":"head-merge"},"base":{"ref":"main","sha":"base-merge"}}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/assembledhq/143/commits/head-merge/check-runs":
-			_, _ = w.Write([]byte(`{"check_runs":[]}`))
+			_, _ = w.Write([]byte(`{"check_runs":[{"id":7,"name":"unit tests","conclusion":"success","status":"completed","app":{"slug":"github-actions"},"output":{}}]}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/assembledhq/143":
 			_, _ = w.Write([]byte(`{"allow_squash_merge":true,"allow_merge_commit":true,"allow_rebase_merge":false}`))
 		case r.Method == http.MethodPut && r.URL.Path == "/repos/assembledhq/143/pulls/42/merge":
@@ -326,6 +326,9 @@ func TestPRServiceMergePullRequestRunsMergedFollowUps(t *testing.T) {
 		WillReturnRows(pgxmock.NewRows(prTestRepoColumns).AddRow(
 			repoID, orgID, integrationID, int64(1), "assembledhq/143", "main", false, nil, nil, "https://github.com/assembledhq/143.git", int64(123), "active", nil, nil, []byte(`{}`), now, now,
 		))
+	prMock.ExpectQuery("SELECT .+ FROM pull_request_health_current").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": prID}).
+		WillReturnRows(pgxmock.NewRows(prHealthCurrentTestColumns))
 
 	prMock.ExpectBegin()
 	prMock.ExpectQuery("SELECT .+ FROM pull_request_health_current").

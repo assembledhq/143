@@ -1,6 +1,7 @@
 "use client";
 
-import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
+import dynamic from "next/dynamic";
 import { useRouter } from "next/navigation";
 import { useQueryState } from "nuqs";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
@@ -26,16 +27,8 @@ import {
   PanelBottomOpen,
   Clock,
   MessageSquare,
-  Paperclip,
   Pencil,
-  Plus,
 } from "lucide-react";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
 import { LinearIcon } from "@/components/linear-icon";
 import { looksLikeLinearRef } from "@/lib/linear-refs";
 import { getClipboardFiles } from "@/lib/clipboard-files";
@@ -76,6 +69,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { ChatTimeline } from "@/components/chat-timeline";
+import { SessionComposerAttachmentMenu } from "@/components/session-composer-attachment-menu";
 import { SessionComposerTriggerPicker, flattenGroups, type TriggerPickerGroup, type TriggerPickerPosition } from "@/components/session-composer-trigger-picker";
 import { useSessionComposerSlashCommands } from "@/hooks/use-session-composer-slash-commands";
 import {
@@ -90,7 +84,7 @@ import {
 } from "@/lib/session-composer-mentions";
 import { queryKeys } from "@/lib/query-keys";
 import { api, ApiError } from "@/lib/api";
-import { AGENTS, AGENTS_BY_KEY } from "@/lib/agents";
+import { AGENTS, AGENTS_BY_KEY, agentDisplayLabel } from "@/lib/agents";
 import { getActiveOrgId } from "@/lib/active-org";
 import { maybeNotifySessionCompleted } from "@/lib/browser-notifications";
 import {
@@ -99,7 +93,7 @@ import {
   buildPullRequestStreamURL,
   buildSessionLogsStreamURL,
 } from "@/lib/sse";
-import { applyPlanModePrefix, buildTimeline, flattenTimelineResponse, sortTimelineEntries } from "@/lib/timeline";
+import { applyPlanModePrefix, buildTimeline, flattenTimelineResponse, sortTimelineEntries, type TimelineEntry } from "@/lib/timeline";
 import { parseDiffStats, type DiffFile } from "@/lib/diff-parser";
 import { formatReviewMessage } from "@/lib/format-review-message";
 import {
@@ -107,7 +101,7 @@ import {
   resolveInitialSessionAnchor,
   writeStoredSessionScrollPosition,
 } from "@/lib/session-open-position";
-import type { ListResponse, Session, SessionDetail, SessionInputCommand, SessionInputReference, SessionLog, SessionMessage, SessionReviewComment, SessionThread, SessionTimelineEntry, User, Validation, CodexAuthStatus, PullRequestHealthResponse, SingleResponse } from "@/lib/types";
+import type { ListResponse, Session, SessionDetail, SessionInputCommand, SessionInputReference, SessionLog, SessionMessage, SessionReviewComment, SessionThread, SessionThreadFileEvent, SessionTimelineEntry, User, Validation, CodexAuthStatus, PullRequestHealthResponse, SingleResponse } from "@/lib/types";
 import { AgentTabStrip, computeThreadOverlap } from "./agent-tab-strip";
 import {
   ThreadAttributionFilter,
@@ -116,21 +110,42 @@ import {
 } from "./thread-attribution-filter";
 import { AuditLogTrigger } from "@/components/audit/audit-log-trigger";
 import { ResizeHandle } from "@/components/resize-handle";
-import { DiffStatsBadge, FileTree, SessionFooter, CommentsSummary, ReviewDiffView, PassSelector, type DiffPassEntry, type PassRange } from "@/components/code-review";
+import { DiffStatsBadge, FileTree, CommentsSummary, PassSelector, type DiffPassEntry, type PassRange } from "@/components/code-review";
 import { LinkedIssueChips } from "./linked-issue-chips";
 import { useReviewComments } from "@/hooks/use-review-comments";
 import { useDiffViewState } from "@/hooks/use-diff-view-state";
 import { CodexDeviceCodeModal } from "@/components/codex-device-code-modal";
 import { AgentBadge } from "@/components/agent-badge";
-import { PreviewPanel } from "@/components/preview/preview-panel";
 import { PendingAttachmentStrip } from "@/components/pending-attachment-strip";
 import { PRHealthBanner } from "@/components/pr-health-banner";
 import { MobileBackButton } from "@/components/mobile-back-button";
 import { useAuth } from "@/hooks/use-auth";
 import { useMediaQuery } from "@/hooks/use-media-query";
+import { useDocumentVisible } from "@/hooks/use-document-visible";
 import { prMergedAccent } from "@/lib/pr-status-styles";
 import { cn, sessionTitle, formatTimeAgo } from "@/lib/utils";
 import { activeSet, workingStatusesSet } from "@/lib/session-status-groups";
+
+// Defer the diff viewer (shiki + diff-parser) until the user actually opens
+// review mode. Saves ~100KB+ from the initial session-detail bundle for the
+// common case of just chatting with the agent.
+const ReviewDiffView = dynamic(
+  () => import("@/components/code-review/review-diff-view").then((m) => ({ default: m.ReviewDiffView })),
+  {
+    ssr: false,
+    loading: () => <div className="h-full w-full bg-muted/20 animate-pulse rounded-lg" />,
+  },
+);
+
+// Defer the preview panel (iframe wrapper + visual editing tooling) until
+// the user actually opens the preview tab.
+const PreviewPanel = dynamic(
+  () => import("@/components/preview/preview-panel").then((m) => ({ default: m.PreviewPanel })),
+  {
+    ssr: false,
+    loading: () => <div className="h-full w-full bg-muted/20 animate-pulse rounded-lg" />,
+  },
+);
 
 const PREVIEW_ORIGIN_TEMPLATE =
   process.env.NEXT_PUBLIC_PREVIEW_ORIGIN_TEMPLATE ||
@@ -759,6 +774,7 @@ function SessionComposer({
   isUploading,
   onUpload,
   onPasteFiles,
+  onAddAttachment,
   onRemoveAttachment,
   openComments,
   availableModels,
@@ -797,6 +813,7 @@ function SessionComposer({
   isUploading: boolean;
   onUpload: (event: React.ChangeEvent<HTMLInputElement>) => void;
   onPasteFiles: (files: File[]) => Promise<void>;
+  onAddAttachment: (url: string) => void;
   onRemoveAttachment: (url: string) => void;
   openComments: SessionReviewComment[];
   availableModels: readonly string[];
@@ -825,12 +842,26 @@ function SessionComposer({
   agentUpdatePending: boolean;
   targetLabel?: string;
 }) {
+  const isMobile = useMediaQuery("(max-width: 767px)");
+  const [isTextareaFocused, setIsTextareaFocused] = useState(false);
+  const mobileComposerExpanded = !isMobile
+    || isTextareaFocused
+    || message.length > 0
+    || attachments.length > 0
+    || openComments.length > 0
+    || references.length > 0
+    || commands.length > 0;
+
   useEffect(() => {
     const el = textareaRef.current;
     if (!el) return;
+    if (!mobileComposerExpanded) {
+      el.style.height = "44px";
+      return;
+    }
     el.style.height = "auto";
     el.style.height = `${Math.min(el.scrollHeight, 200)}px`;
-  }, [message, textareaRef]);
+  }, [message, textareaRef, mobileComposerExpanded]);
 
   const composerCardRef = useRef<HTMLDivElement>(null);
   const composerInputSurfaceRef = useRef<HTMLDivElement>(null);
@@ -840,7 +871,8 @@ function SessionComposer({
   const [triggerDismissed, setTriggerDismissed] = useState(false);
   const [pickerPosition, setPickerPosition] = useState<TriggerPickerPosition | null>(null);
   const [mobileSettingsOpen, setMobileSettingsOpen] = useState(false);
-  const isMobile = useMediaQuery("(max-width: 767px)");
+  const [showImageInput, setShowImageInput] = useState(false);
+  const [imageURL, setImageURL] = useState("");
   const [showLinearInput, setShowLinearInput] = useState(false);
   const [linearInput, setLinearInput] = useState("");
   const [linearInputError, setLinearInputError] = useState<string | null>(null);
@@ -855,6 +887,19 @@ function SessionComposer({
       linearInputRef.current?.focus();
     }
   }, [showLinearInput]);
+
+  function addImageURL() {
+    const trimmed = imageURL.trim();
+    if (!trimmed) {
+      return;
+    }
+    onAddAttachment(trimmed);
+    setImageURL("");
+    setShowImageInput(false);
+    requestAnimationFrame(() => {
+      textareaRef.current?.focus();
+    });
+  }
 
   function addLinearLink() {
     const trimmed = linearInput.trim();
@@ -1288,6 +1333,8 @@ function SessionComposer({
             onChange={(e) => handleMessageChange(e.target.value, e.target.selectionStart ?? e.target.value.length)}
             onPaste={handlePaste}
             onKeyDown={handleKeyDown}
+            onFocus={() => setIsTextareaFocused(true)}
+            onBlur={() => setIsTextareaFocused(false)}
             onClick={(e) => setCaretPosition(e.currentTarget.selectionStart ?? message.length)}
             onKeyUp={(e) => setCaretPosition(e.currentTarget.selectionStart ?? message.length)}
             onSelect={(e) => setCaretPosition(e.currentTarget.selectionStart ?? message.length)}
@@ -1303,7 +1350,16 @@ function SessionComposer({
                       : "Send a follow-up message..."
             }
             disabled={!canSendMessage || sendPending}
-            className="min-h-[44px] max-h-[200px] resize-none border-none bg-transparent shadow-none focus-visible:ring-0"
+            rows={isMobile ? 1 : undefined}
+            data-mobile-composer-state={isMobile ? (mobileComposerExpanded ? "expanded" : "collapsed") : undefined}
+            className={cn(
+              "max-h-[200px] resize-none border-none bg-transparent shadow-none focus-visible:ring-0",
+              isMobile
+                ? mobileComposerExpanded
+                  ? "min-h-[96px]"
+                  : "min-h-[44px] overflow-hidden"
+                : "min-h-[44px]",
+            )}
           />
 
           {(references.length > 0 || commands.length > 0) && (
@@ -1371,6 +1427,21 @@ function SessionComposer({
             className="px-3 pb-2"
           />
 
+          {showImageInput && (
+            <div className="flex items-center gap-2 px-3 pb-2">
+              <Input
+                value={imageURL}
+                onChange={(event) => setImageURL(event.target.value)}
+                placeholder="https://example.com/screenshot.png"
+                aria-label="Image URL"
+                className="h-8"
+              />
+              <Button type="button" variant="outline" size="sm" onClick={addImageURL}>
+                Add
+              </Button>
+            </div>
+          )}
+
           {showLinearInput && (
             <div className="flex flex-col gap-1 px-3 pb-2">
               <div className="flex items-center gap-2">
@@ -1415,34 +1486,16 @@ function SessionComposer({
               <>
                 <div className="flex items-center gap-2">
                   <DisabledTooltip disabled={!canSendMessage} content={attachDisabledReason}>
-                    <DropdownMenu>
-                      <DropdownMenuTrigger asChild>
-                        <Button
-                          type="button"
-                          size="icon"
-                          variant="ghost"
-                          className="h-8 w-8 shrink-0 rounded-lg text-muted-foreground hover:text-foreground"
-                          title="Add files, photos, or a Linear issue"
-                          aria-label="Add files, photos, or a Linear issue"
-                          disabled={!canSendMessage}
-                        >
-                          {isUploading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4" />}
-                        </Button>
-                      </DropdownMenuTrigger>
-                      <DropdownMenuContent align="start">
-                        <DropdownMenuItem
-                          disabled={isUploading}
-                          onClick={() => uploadInputRef.current?.click()}
-                        >
-                          <Paperclip className="mr-2 h-4 w-4" />
-                          Upload files or photos
-                        </DropdownMenuItem>
-                        <DropdownMenuItem onClick={() => setShowLinearInput(true)}>
-                          <LinearIcon className="mr-2 h-4 w-4" />
-                          Link Linear issue
-                        </DropdownMenuItem>
-                      </DropdownMenuContent>
-                    </DropdownMenu>
+                    <SessionComposerAttachmentMenu
+                      disabled={!canSendMessage}
+                      isUploading={isUploading}
+                      buttonAriaLabel="Add files, photos, or a Linear issue"
+                      buttonTitle="Add files, photos, or a Linear issue"
+                      buttonClassName="h-8 w-8 shrink-0 rounded-lg text-muted-foreground hover:text-foreground"
+                      onUploadFiles={() => uploadInputRef.current?.click()}
+                      onAddImageURL={() => setShowImageInput(true)}
+                      onAddLinearIssue={() => setShowLinearInput(true)}
+                    />
                   </DisabledTooltip>
                   <Button
                     type="button"
@@ -1509,34 +1562,16 @@ function SessionComposer({
             ) : (
               <div className="flex items-center gap-1">
                 <DisabledTooltip disabled={!canSendMessage} content={attachDisabledReason}>
-                  <DropdownMenu>
-                    <DropdownMenuTrigger asChild>
-                      <Button
-                        type="button"
-                        size="icon"
-                        variant="ghost"
-                        className="h-8 w-8 shrink-0 rounded-lg text-muted-foreground hover:text-foreground"
-                        title="Add files, photos, or a Linear issue"
-                        aria-label="Add files, photos, or a Linear issue"
-                        disabled={!canSendMessage}
-                      >
-                        {isUploading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4" />}
-                      </Button>
-                    </DropdownMenuTrigger>
-                    <DropdownMenuContent align="start">
-                      <DropdownMenuItem
-                        disabled={isUploading}
-                        onClick={() => uploadInputRef.current?.click()}
-                      >
-                        <Paperclip className="mr-2 h-4 w-4" />
-                        Upload files or photos
-                      </DropdownMenuItem>
-                      <DropdownMenuItem onClick={() => setShowLinearInput(true)}>
-                        <LinearIcon className="mr-2 h-4 w-4" />
-                        Link Linear issue
-                      </DropdownMenuItem>
-                    </DropdownMenuContent>
-                  </DropdownMenu>
+                  <SessionComposerAttachmentMenu
+                    disabled={!canSendMessage}
+                    isUploading={isUploading}
+                    buttonAriaLabel="Add files, photos, or a Linear issue"
+                    buttonTitle="Add files, photos, or a Linear issue"
+                    buttonClassName="h-8 w-8 shrink-0 rounded-lg text-muted-foreground hover:text-foreground"
+                    onUploadFiles={() => uploadInputRef.current?.click()}
+                    onAddImageURL={() => setShowImageInput(true)}
+                    onAddLinearIssue={() => setShowLinearInput(true)}
+                  />
                 </DisabledTooltip>
 
                 {availableModels.length > 0 && (
@@ -1663,9 +1698,24 @@ const BASE_SSE_RECONNECT_DELAY_MS = 1000;
 const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10 MB
 const SCROLL_NEAR_BOTTOM_THRESHOLD = 100;
 const SCROLL_POSITION_SAVE_DEBOUNCE_MS = 150;
+// Sliding window for the SSE log overlay buffer. The persisted logs are
+// fetched separately via the timeline query; streamedLogs only holds the
+// not-yet-persisted overlay that bridges the gap between an SSE push and the
+// next DB fetch. A few thousand entries is enough headroom for any active
+// session, and capping it bounds both memory and the per-event filter cost.
+const STREAMED_LOGS_MAX = 2000;
 
 function isNearBottom(el: HTMLElement): boolean {
   return el.scrollHeight - el.scrollTop - el.clientHeight < SCROLL_NEAR_BOTTOM_THRESHOLD;
+}
+
+function normalizeTranscriptContent(content: string): string {
+  return content
+    .replace(/\r\n/g, "\n")
+    .split("\n")
+    .map((line) => line.replace(/[ \t\r]+$/g, ""))
+    .join("\n")
+    .replace(/\n+$/g, "");
 }
 
 function SessionTimelineSkeleton() {
@@ -1710,6 +1760,18 @@ function SessionTimelineSkeleton() {
   );
 }
 
+type ChatPanelProps = {
+  session: Session;
+  sessionId: string;
+  activeThread?: SessionThread;
+  isActive: boolean;
+  optimisticMessages: SessionMessage[];
+  onDiffClick?: () => void;
+  onApprovePlan?: () => void;
+  onAdjustPlan?: () => void;
+  onRegisterScrollToLiveEdge?: (scrollToLiveEdge: (() => void) | null) => void;
+};
+
 function ChatPanel({
   session,
   sessionId,
@@ -1720,17 +1782,7 @@ function ChatPanel({
   onApprovePlan,
   onAdjustPlan,
   onRegisterScrollToLiveEdge,
-}: {
-  session: Session;
-  sessionId: string;
-  activeThread?: SessionThread;
-  isActive: boolean;
-  optimisticMessages: SessionMessage[];
-  onDiffClick?: () => void;
-  onApprovePlan?: () => void;
-  onAdjustPlan?: () => void;
-  onRegisterScrollToLiveEdge?: (scrollToLiveEdge: (() => void) | null) => void;
-}) {
+}: ChatPanelProps) {
   const queryClient = useQueryClient();
   const { user } = useAuth();
   const [streamedLogs, setStreamedLogs] = useState<SessionLog[]>([]);
@@ -1743,6 +1795,7 @@ function ChatPanel({
   const reconnectTimer = useRef<ReturnType<typeof setTimeout>>(null);
   const apiBase = process.env.NEXT_PUBLIC_API_URL || "";
   const [showJumpToLatest, setShowJumpToLatest] = useState(false);
+  const isDocumentVisible = useDocumentVisible();
   const viewerScope = useMemo(
     () => (user ? { userId: user.id, orgId: user.org_id } : null),
     [user],
@@ -1814,17 +1867,14 @@ function ChatPanel({
     return [{ kind: "message" as const, data: syntheticMsg }, ...entries];
   }, [activeThreadId, optimisticMessages, threadMessagesQuery.data?.data, threadLogsQuery.data?.data, timelineQuery.data?.data, issueQuery.data?.data?.description, sessionId, session.org_id, session.created_at]);
 
-  const timelineEntries = useMemo(() => {
+  // Walk baseTimelineEntries once when it changes to derive the dedup keys
+  // used to filter streamedLogs. Splitting this out of the timelineEntries
+  // memo means each new SSE log event no longer triggers an O(N) walk over
+  // the entire base timeline — only the O(M) filter over streamed logs.
+  const baseTimelineDedupKeys = useMemo(() => {
     const fetchedLogIds = new Set<number>();
     const assistantTranscriptByTurn = new Map<number, Set<string>>();
     const planModeSeedMessages: SessionMessage[] = [];
-    const normalizeTranscriptContent = (content: string) =>
-      content
-        .replace(/\r\n/g, "\n")
-        .split("\n")
-        .map((line) => line.replace(/[ \t\r]+$/g, ""))
-        .join("\n")
-        .replace(/\n+$/g, "");
 
     for (const entry of baseTimelineEntries) {
       switch (entry.kind) {
@@ -1859,6 +1909,12 @@ function ChatPanel({
       }
     }
 
+    return { fetchedLogIds, assistantTranscriptByTurn, planModeSeedMessages };
+  }, [baseTimelineEntries]);
+
+  const timelineEntries = useMemo(() => {
+    const { fetchedLogIds, assistantTranscriptByTurn, planModeSeedMessages } = baseTimelineDedupKeys;
+
     const overlayLogs = streamedLogs.filter((log) => {
       if (fetchedLogIds.has(log.id)) return false;
       if (log.level !== "output") return true;
@@ -1870,7 +1926,7 @@ function ChatPanel({
     if (overlayLogs.length === 0) return baseTimelineEntries;
     const overlayEntries = buildTimeline(planModeSeedMessages, overlayLogs).filter((entry) => entry.kind !== "message");
     return sortTimelineEntries([...baseTimelineEntries, ...overlayEntries]);
-  }, [baseTimelineEntries, streamedLogs]);
+  }, [baseTimelineEntries, baseTimelineDedupKeys, streamedLogs]);
   const hasLoadedTimelineInputs = activeThreadId
     ? threadMessagesQuery.isFetched && threadLogsQuery.isFetched
     : timelineQuery.isFetched && (!hasIssue || issueQuery.isFetched);
@@ -1890,8 +1946,8 @@ function ChatPanel({
 
   const persistScrollPosition = useCallback((scrollTop: number) => {
     if (typeof window === "undefined" || !viewerScope) return;
-    writeStoredSessionScrollPosition(window.localStorage, sessionId, viewerScope, scrollTop);
-  }, [sessionId, viewerScope]);
+    writeStoredSessionScrollPosition(window.localStorage, sessionId, viewerScope, scrollTop, activeThreadId);
+  }, [activeThreadId, sessionId, viewerScope]);
 
   const schedulePersistScrollPosition = useCallback((scrollTop: number) => {
     if (saveScrollTimerRef.current) {
@@ -1920,6 +1976,14 @@ function ChatPanel({
     setShowJumpToLatest(false);
   }, [scrollToLiveEdgePosition]);
 
+  const getEntryContainerProps = useCallback(
+    (_entry: TimelineEntry, index: number) =>
+      ({
+        "data-session-entry-index": index,
+      }) as React.HTMLAttributes<HTMLDivElement> & Record<`data-${string}`, string | number | undefined>,
+    [],
+  );
+
   useEffect(() => {
     onRegisterScrollToLiveEdge?.(scrollToLiveEdge);
     return () => onRegisterScrollToLiveEdge?.(null);
@@ -1936,7 +2000,14 @@ function ChatPanel({
         }
       }
       if (toAdd.length === 0) return prev;
-      return [...prev, ...toAdd];
+      const next = [...prev, ...toAdd];
+      // Drop oldest entries once we exceed the cap so a long-running session
+      // can't grow the overlay buffer without bound. Older logs already exist
+      // in the persisted timeline once the next refetch lands.
+      if (next.length > STREAMED_LOGS_MAX) {
+        return next.slice(next.length - STREAMED_LOGS_MAX);
+      }
+      return next;
     });
   }, []);
 
@@ -1957,7 +2028,13 @@ function ChatPanel({
   }, [queryClient, sessionId]);
 
   useEffect(() => {
-    if (!isActive) return;
+    // Pause the SSE stream while the tab is hidden. EventSource handlers fire
+    // even in a hidden tab and trigger setState/re-renders on this large
+    // component, which steals main-thread time from any tab the user just
+    // switched to (notably "View PR" → github.com). On reconnect, the existing
+    // onerror path already invalidates the timeline/thread queries so the user
+    // sees fresh state when they return.
+    if (!isActive || !isDocumentVisible) return;
 
     let eventSource: EventSource | null = null;
     let cancelled = false;
@@ -2031,7 +2108,7 @@ function ChatPanel({
         clearTimeout(reconnectTimer.current);
       }
     };
-  }, [sessionId, apiBase, isActive, mergeLogs, mergeSessionStatusUpdate, queryClient, activeThreadId]);
+  }, [sessionId, apiBase, isActive, isDocumentVisible, mergeLogs, mergeSessionStatusUpdate, queryClient, activeThreadId]);
 
   // Track whether the user is scrolled near the bottom.
   const handleScroll = useCallback(() => {
@@ -2043,7 +2120,7 @@ function ChatPanel({
 
   useEffect(() => {
     initialAnchorAppliedRef.current = false;
-  }, [sessionId]);
+  }, [activeThreadId, sessionId]);
 
   useEffect(() => {
     const currentScrollEl = scrollRef.current;
@@ -2066,7 +2143,7 @@ function ChatPanel({
     const storedScrollTop =
       typeof window === "undefined"
         ? null
-        : readStoredSessionScrollPosition(window.localStorage, sessionId, viewerScope);
+        : readStoredSessionScrollPosition(window.localStorage, sessionId, viewerScope, activeThreadId);
     const anchor = resolveInitialSessionAnchor({
       entries: timelineEntries,
       isActive: isRunning,
@@ -2092,7 +2169,7 @@ function ChatPanel({
 
     scrollToLiveEdgePosition();
     initialAnchorAppliedRef.current = true;
-  }, [hasLoadedTimelineInputs, isRunning, scrollToLiveEdgePosition, sessionId, syncScrollState, timelineEntries, viewerScope]);
+  }, [activeThreadId, hasLoadedTimelineInputs, isRunning, scrollToLiveEdgePosition, sessionId, syncScrollState, timelineEntries, viewerScope]);
 
   // Only auto-scroll to bottom when new entries arrive if the user is already near the bottom.
   useEffect(() => {
@@ -2129,11 +2206,7 @@ function ChatPanel({
             onDiffClick={onDiffClick}
             onApprovePlan={canSendMessage ? onApprovePlan : undefined}
             onAdjustPlan={canSendMessage ? onAdjustPlan : undefined}
-            getEntryContainerProps={(_, index) =>
-              ({
-                "data-session-entry-index": index,
-              }) as React.HTMLAttributes<HTMLDivElement> & Record<`data-${string}`, string | number | undefined>
-            }
+            getEntryContainerProps={getEntryContainerProps}
           />
         )}
         {(activeThread?.status === "pending" || (!activeThread && session.status === "pending")) && (
@@ -2149,6 +2222,42 @@ function ChatPanel({
     </div>
   );
 }
+
+function sameDiffStats(
+  a?: Session["diff_stats"] | null,
+  b?: Session["diff_stats"] | null,
+): boolean {
+  if (a === b) {
+    return true;
+  }
+  if (!a || !b) {
+    return !a && !b;
+  }
+  return a.added === b.added && a.removed === b.removed && a.files_changed === b.files_changed;
+}
+
+function areChatPanelPropsEqual(previous: ChatPanelProps, next: ChatPanelProps): boolean {
+  return previous.sessionId === next.sessionId &&
+    previous.isActive === next.isActive &&
+    previous.optimisticMessages === next.optimisticMessages &&
+    previous.onDiffClick === next.onDiffClick &&
+    previous.onApprovePlan === next.onApprovePlan &&
+    previous.onAdjustPlan === next.onAdjustPlan &&
+    previous.onRegisterScrollToLiveEdge === next.onRegisterScrollToLiveEdge &&
+    previous.session.id === next.session.id &&
+    previous.session.status === next.session.status &&
+    previous.session.sandbox_state === next.session.sandbox_state &&
+    previous.session.primary_issue_id === next.session.primary_issue_id &&
+    previous.session.org_id === next.session.org_id &&
+    previous.session.created_at === next.session.created_at &&
+    sameDiffStats(previous.session.diff_stats, next.session.diff_stats) &&
+    previous.activeThread?.id === next.activeThread?.id &&
+    previous.activeThread?.status === next.activeThread?.status &&
+    previous.activeThread?.current_turn === next.activeThread?.current_turn &&
+    previous.activeThread?.label === next.activeThread?.label;
+}
+
+const MemoizedChatPanel = memo(ChatPanel, areChatPanelPropsEqual);
 
 // ---------------------------------------------------------------------------
 // Main component
@@ -2249,6 +2358,7 @@ export function SessionDetailContent({ id }: { id: string }) {
   const [prAuthPrompt, setPRAuthPrompt] = useState<PRAuthPromptState | null>(null);
   const resumeAttemptRef = useRef<string | null>(null);
   const apiBase = process.env.NEXT_PUBLIC_API_URL || "";
+  const isDocumentVisible = useDocumentVisible();
 
   const { data, isLoading, error } = useQuery({
     queryKey: ["session", id],
@@ -2371,12 +2481,19 @@ export function SessionDetailContent({ id }: { id: string }) {
   const { data: prData } = useQuery({
     queryKey: ["session", id, "pr"],
     queryFn: () => api.sessions.getPR(id),
+    // Updates flow in via mutation invalidations and the session SSE stream
+    // (pr_creation_state / pr_push_state); a small staleTime suppresses
+    // redundant refetches on remount or unrelated cache invalidations.
+    staleTime: 30_000,
   });
   const pullRequestId = prData?.data?.id;
   const { data: prHealthData, isLoading: isPRHealthLoading } = useQuery({
     queryKey: ["pull-request", pullRequestId, "health"],
     queryFn: () => api.pullRequests.getHealth(pullRequestId!),
     enabled: !!pullRequestId && prData?.data?.status === "open",
+    // Pushed via the PULL_REQUEST_UPDATED SSE event, so a longer staleTime is
+    // safe — refetches on focus/remount won't fire a redundant network call.
+    staleTime: 30_000,
   });
   const prHealth = prHealthData?.data;
   const prStatus = prData?.data?.status;
@@ -2534,7 +2651,11 @@ export function SessionDetailContent({ id }: { id: string }) {
     },
   });
   useEffect(() => {
-    if (!pullRequestId || prData?.data?.status !== "open") {
+    // Pause the PR health SSE stream while the tab is hidden — same reasoning
+    // as the session log stream above. The onerror branch already invalidates
+    // the health query on disconnect, so reconnecting on visibility refreshes
+    // the cached health to whatever happened while we were away.
+    if (!pullRequestId || prData?.data?.status !== "open" || !isDocumentVisible) {
       return;
     }
 
@@ -2586,7 +2707,7 @@ export function SessionDetailContent({ id }: { id: string }) {
         clearTimeout(reconnectTimer);
       }
     };
-  }, [apiBase, prData?.data?.status, pullRequestId, queryClient]);
+  }, [apiBase, prData?.data?.status, pullRequestId, queryClient, isDocumentVisible]);
   const previousSessionStatusRef = useRef<string | undefined>(undefined);
   useEffect(() => {
     const currentStatus = session?.status;
@@ -2772,7 +2893,6 @@ export function SessionDetailContent({ id }: { id: string }) {
   const {
     comments,
     commentsByLine,
-    openCount: footerOpenCommentCount,
     createComment,
     updateComment,
     deleteComment,
@@ -2839,16 +2959,14 @@ export function SessionDetailContent({ id }: { id: string }) {
     () => comments.filter((comment) => !comment.resolved).slice(0, MAX_RESOLVE_REVIEW_COMMENTS_PER_MESSAGE),
     [comments],
   );
-  // Composer gating: per the design (docs/design/implemented/68-sandbox-agent-tabs-and-threads.md),
-  // Phase 2 supports concurrent threads in one sandbox. The composer is locked
-  // only while the *selected* thread is running — sibling threads being active
-  // (which makes session.status === "running") must not block sending into an
-  // idle thread, since the backend admits concurrent sends up to the per-session
-  // running cap. Pending/skipped/destroyed at the session level still block.
+  // Composer gating: messages may be sent at any point while the session or
+  // thread is running. The backend queues mid-turn sends and the orchestrator
+  // drains the queue once the in-flight turn completes. Pending/skipped at
+  // the session level and a destroyed sandbox still block — those are
+  // genuinely unrecoverable, not just busy.
   const composerCanSendMessage = session?.status !== "skipped" &&
     session?.status !== "pending" &&
-    session?.sandbox_state !== "destroyed" &&
-    (!activeThread || activeThread.status === "idle");
+    session?.sandbox_state !== "destroyed";
   const composerIsRunning = activeThread ? activeThread.status === "running" : session?.status === "running";
   const composerIsSnapshotExpired = session?.sandbox_state === "destroyed";
   const composerAgentType = activeThread?.agent_type ?? session?.agent_type ?? "codex";
@@ -2926,6 +3044,10 @@ export function SessionDetailContent({ id }: { id: string }) {
 
   const handleRemoveComposerAttachment = useCallback((url: string) => {
     setComposerAttachments((previous) => previous.filter((attachment) => attachment !== url));
+  }, []);
+
+  const handleAddComposerAttachment = useCallback((url: string) => {
+    setComposerAttachments((previous) => [...previous, url]);
   }, []);
 
   const sendMutation = useMutation({
@@ -3117,6 +3239,21 @@ export function SessionDetailContent({ id }: { id: string }) {
     session,
     sendMutation,
   ]);
+  const queueSendRef = useRef(queueSend);
+  const composerCanSendMessageRef = useRef(composerCanSendMessage);
+  const sendPendingRef = useRef(sendMutation.isPending);
+
+  useEffect(() => {
+    queueSendRef.current = queueSend;
+  }, [queueSend]);
+
+  useEffect(() => {
+    composerCanSendMessageRef.current = composerCanSendMessage;
+  }, [composerCanSendMessage]);
+
+  useEffect(() => {
+    sendPendingRef.current = sendMutation.isPending;
+  }, [sendMutation.isPending]);
 
   const cancelMutation = useMutation({
     mutationFn: () => api.sessions.cancelSession(id),
@@ -3164,19 +3301,42 @@ export function SessionDetailContent({ id }: { id: string }) {
   // the Changes-view attribution filters. Polled at the same cadence as the
   // session detail so a user-perceptible "tab touched a file" lands within
   // one polling cycle.
+  //
+  // Polling is incremental: the first request fetches the whole timeline,
+  // subsequent requests pass `?since=<latest observed_at>` so a long session
+  // does not retransfer hundreds of events every 5 seconds. The accumulated
+  // list lives in component state because React Query caches only the most
+  // recent response, which is now a delta.
+  const fileEventsSinceRef = useRef<string | undefined>(undefined);
+  const [accumulatedFileEvents, setAccumulatedFileEvents] = useState<SessionThreadFileEvent[]>([]);
   const fileEventsQuery = useQuery({
     queryKey: queryKeys.sessions.threadFileEvents(id),
-    queryFn: () => api.sessions.listThreadFileEvents(id),
+    queryFn: () => api.sessions.listThreadFileEvents(id, fileEventsSinceRef.current),
     enabled: threads.length > 0,
     refetchInterval: threads.some((t) => t.status === "running" || t.status === "pending") ? 5000 : false,
     staleTime: 2_000,
   });
+  useEffect(() => {
+    const incoming = fileEventsQuery.data?.data;
+    if (!incoming || incoming.length === 0) return;
+    setAccumulatedFileEvents((prev) => {
+      const byId = new Map<number, SessionThreadFileEvent>();
+      for (const e of prev) byId.set(e.id, e);
+      for (const e of incoming) byId.set(e.id, e);
+      return Array.from(byId.values()).sort((a, b) => b.observed_at.localeCompare(a.observed_at));
+    });
+    let max = fileEventsSinceRef.current;
+    for (const e of incoming) {
+      if (!max || e.observed_at > max) max = e.observed_at;
+    }
+    fileEventsSinceRef.current = max;
+  }, [fileEventsQuery.data]);
   const overlapsByThreadId = useMemo(
-    () => computeThreadOverlap(threads, fileEventsQuery.data?.data ?? []),
-    [threads, fileEventsQuery.data?.data],
+    () => computeThreadOverlap(threads, accumulatedFileEvents),
+    [threads, accumulatedFileEvents],
   );
   const [attributionFilter, setAttributionFilter] = useState<ThreadAttributionFilterValue>({ kind: "all" });
-  const attributionAllowedPaths = useAttributionAllowedPaths(attributionFilter, fileEventsQuery.data?.data);
+  const attributionAllowedPaths = useAttributionAllowedPaths(attributionFilter, accumulatedFileEvents);
   const visibleDiffFiles = useMemo(
     () =>
       attributionAllowedPaths == null
@@ -3264,17 +3424,23 @@ export function SessionDetailContent({ id }: { id: string }) {
   }, [activeThread, activeThreadIsEditable, buildThreadLabelForAgent, updateThreadMutation]);
 
   const handleApprovePlan = useCallback(() => {
-    if (!composerCanSendMessage || sendMutation.isPending) return;
-    queueSend({
+    if (!composerCanSendMessageRef.current || sendPendingRef.current) return;
+    queueSendRef.current({
       planMode: false,
       overrideMessage: "The plan looks good. Please proceed with executing the implementation plan above. Make all the changes as described.",
     });
-  }, [composerCanSendMessage, queueSend, sendMutation.isPending]);
+  }, []);
 
   const handleAdjustPlan = useCallback(() => {
     setComposerMessage("Please adjust the plan: ");
     setComposerPlanMode(false);
     composerTextareaRef.current?.focus();
+  }, []);
+  const handleChatDiffClick = useCallback(() => {
+    openReview();
+  }, [openReview]);
+  const registerChatPanelScrollToLiveEdge = useCallback((scrollToLiveEdge: (() => void) | null) => {
+    chatPanelScrollToLiveEdgeRef.current = scrollToLiveEdge;
   }, []);
 
   const changesCount = diffStats?.filesChanged;
@@ -3809,19 +3975,17 @@ export function SessionDetailContent({ id }: { id: string }) {
         <div className="flex-1 min-h-0 relative">
           {/* Chat panel — always mounted to preserve scroll, SSE connections, etc. */}
           <div className={cn("h-full", centerMode !== "chat" && "hidden")}>
-            <ChatPanel
+            <MemoizedChatPanel
               key={activeThread ? `${id}:${activeThread.id}` : id}
               session={session}
               sessionId={id}
               activeThread={activeThread}
               isActive={isActive}
               optimisticMessages={optimisticMessages}
-              onDiffClick={() => openReview()}
+              onDiffClick={handleChatDiffClick}
               onApprovePlan={handleApprovePlan}
               onAdjustPlan={handleAdjustPlan}
-              onRegisterScrollToLiveEdge={(scrollToLiveEdge) => {
-                chatPanelScrollToLiveEdgeRef.current = scrollToLiveEdge;
-              }}
+              onRegisterScrollToLiveEdge={registerChatPanelScrollToLiveEdge}
             />
           </div>
           {/* Review diff view — mounted only when active */}
@@ -3882,6 +4046,7 @@ export function SessionDetailContent({ id }: { id: string }) {
               isUploading={composerIsUploading}
               onUpload={handleComposerUpload}
               onPasteFiles={uploadComposerFiles}
+              onAddAttachment={handleAddComposerAttachment}
               onRemoveAttachment={handleRemoveComposerAttachment}
               openComments={attachedReviewComments}
               availableModels={composerAvailableModels}
@@ -3912,17 +4077,6 @@ export function SessionDetailContent({ id }: { id: string }) {
             />
           </>
         )}
-
-        {!isDedicatedMobileReview ? (
-        <SessionFooter
-          status={session.status}
-          currentTurn={session.current_turn}
-          diffStats={diffStats}
-          onDiffClick={centerMode === "review" ? undefined : () => openReview()}
-          openCommentCount={footerOpenCommentCount}
-          onCommentsClick={centerMode === "review" ? undefined : () => openReview()}
-        />
-        ) : null}
       </div>
 
       {/* Detail panel — inline on desktop, hidden on mobile (rendered as a
@@ -3993,6 +4147,7 @@ export function SessionDetailContent({ id }: { id: string }) {
               isUploading={composerIsUploading}
               onUpload={handleComposerUpload}
               onPasteFiles={uploadComposerFiles}
+              onAddAttachment={handleAddComposerAttachment}
               onRemoveAttachment={handleRemoveComposerAttachment}
               openComments={attachedReviewComments}
               availableModels={composerAvailableModels}

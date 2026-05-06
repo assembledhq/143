@@ -66,9 +66,14 @@ type githubAppService interface {
 // --- Linear types ---
 
 type linearTokenResponse struct {
-	AccessToken string `json:"access_token"`
-	TokenType   string `json:"token_type"`
-	Scope       string `json:"scope"`
+	AccessToken  string `json:"access_token"`
+	RefreshToken string `json:"refresh_token"`
+	TokenType    string `json:"token_type"`
+	Scope        string `json:"scope"`
+	// ExpiresIn is the access token TTL in seconds. Legacy installs created
+	// before Linear's refresh-token rollout can have credential rows with a
+	// zero ExpiresAt, which the runtime treats as "no known expiry".
+	ExpiresIn int `json:"expires_in"`
 }
 
 type linearOrganization struct {
@@ -476,10 +481,14 @@ func (h *IntegrationHandler) HandleLinearOAuthCallback(w http.ResponseWriter, r 
 
 	linearConfig := models.LinearConfig{
 		AccessToken:   token.AccessToken,
+		RefreshToken:  token.RefreshToken,
 		TokenType:     token.TokenType,
 		Scope:         token.Scope,
 		WorkspaceID:   workspaceID,
 		WorkspaceName: workspaceName,
+	}
+	if token.ExpiresIn > 0 {
+		linearConfig.ExpiresAt = time.Now().Add(time.Duration(token.ExpiresIn) * time.Second)
 	}
 	if err := h.credentialStore.Upsert(r.Context(), orgID, linearConfig); err != nil {
 		writeError(w, r, http.StatusInternalServerError, "SAVE_CREDENTIAL_FAILED", "failed to store linear credential", err)

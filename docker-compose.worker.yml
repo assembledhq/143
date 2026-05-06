@@ -37,6 +37,43 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
     restart: "no"
 
+  # DNS resolver for sandbox containers. Sandboxes bind-mount their
+  # /etc/resolv.conf to point at this container's static IP on the
+  # 143-sandbox bridge (172.30.0.2), which forwards to Docker's embedded
+  # resolver at 127.0.0.11 — the only place preview-infra container names
+  # (preview-db-<handle>, etc.) are registered. See Dockerfile.dnsmasq for
+  # the rationale. Built locally on each worker; the build context is just
+  # the Dockerfile, so no source tree on the host is required.
+  sandbox-dns:
+    build:
+      context: .
+      dockerfile: Dockerfile.dnsmasq
+    image: 143-sandbox-dns:local
+    networks:
+      sandbox:
+        # Static IP so /etc/143/sandbox-resolv.conf can hard-code it. Pinned
+        # to the network's first usable host after the gateway (.1).
+        ipv4_address: 172.30.0.2
+    healthcheck:
+      # Resolve a name from dnsmasq's own /etc/hosts via the local listener.
+      # Doesn't touch upstream, so the check stays green when the bridge
+      # gateway or 127.0.0.11 is briefly unhealthy — we only fail when
+      # dnsmasq itself isn't answering.
+      test: ["CMD-SHELL", "nslookup localhost 127.0.0.1 >/dev/null 2>&1"]
+      interval: 15s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 64M
+          cpus: "0.2"
+        reservations:
+          memory: 16M
+          cpus: "0.05"
+
   worker:
     image: ghcr.io/assembledhq/143-server:${IMAGE_TAG:-latest}
     depends_on:
@@ -44,6 +81,11 @@ services:
         condition: service_started
       gvisor-check:
         condition: service_completed_successfully
+      # Block worker startup until sandbox-dns is answering queries.
+      # Sandboxes spawned by an early worker would otherwise come up with no
+      # working DNS and fail their first preview-infra lookup.
+      sandbox-dns:
+        condition: service_healthy
     # NODE_ID, WORKER_PRIVATE_IP, and PREVIEW_INTERNAL_BASE_URL are per-host
     # identity. They live in /opt/143/.env.local and are concatenated into
     # /opt/143/.env by provision.sh / deploy.sh so docker compose can
@@ -60,6 +102,7 @@ services:
       MAX_CONCURRENT_RUNS: ${MAX_CONCURRENT_RUNS:-5}
       NODE_ID: ${NODE_ID:?missing in /opt/143/.env.local}
       PREVIEW_INTERNAL_BASE_URL: ${PREVIEW_INTERNAL_BASE_URL:?missing in /opt/143/.env.local}
+      PREVIEW_ORIGIN_TEMPLATE: ${PREVIEW_ORIGIN_TEMPLATE:-https://{id}.preview.143.dev}
       SANDBOX_IMAGE: ghcr.io/assembledhq/143-sandbox:${IMAGE_TAG:-latest}
       SANDBOX_RUNTIME: runsc
       SANDBOX_REQUIRE_GVISOR: "true"
@@ -88,6 +131,9 @@ services:
       # path. The host directory is provisioned 0750 and owned 1000:1000
       # via systemd-tmpfiles in deploy/scripts/provision.sh.
       - /var/run/143/sandbox-auth:/var/run/143/sandbox-auth
+      # Provisioning must stage this file before the first `docker compose up`.
+      # If the bind source is missing, Docker creates a directory at the host
+      # path and later deploy-time scp of the encrypted env file fails.
       - .env.production.enc:/.env.production.enc:ro
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://localhost:8080/healthz || exit 1"]
@@ -95,9 +141,27 @@ services:
       timeout: 5s
       retries: 3
       start_period: 60s
+    # Must be ≥ in-process WORKER_DRAIN_TIMEOUT (internal/config/config.go,
+    # default 45m) so Docker doesn't SIGKILL the process while it's still
+    # draining in-flight coding turns. This is the binding outer cap — both
+    # the rolling-deploy path's `--force-recreate` and any plain `docker
+    # stop` / `docker compose restart` go through stop_grace_period.
+    # deploy/scripts/deploy.sh's WORKER_DRAIN_TIMEOUT (default 7200s) is a
+    # polling ceiling for the SIGTERM-then-wait loop, not a separate drain
+    # budget — once we recreate, this 50m is what holds.
+    stop_grace_period: 50m
     restart: unless-stopped
     deploy:
       resources:
         limits:
           memory: 2G
           cpus: "1.0"
+
+# The 143-sandbox bridge is created out-of-band by deploy/scripts/provision.sh
+# (with a pinned --subnet of 172.30.0.0/24 so sandbox-dns can have a stable
+# IP). Declared external here so compose attaches to the existing network
+# instead of creating its own.
+networks:
+  sandbox:
+    external: true
+    name: 143-sandbox

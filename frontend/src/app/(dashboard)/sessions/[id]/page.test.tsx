@@ -714,7 +714,7 @@ describe('SessionDetailPage', () => {
 
     renderWithProviders(<SessionDetailContent id={sessionId} />);
 
-    expect(await screen.findByRole('tab', { name: /Codex/ })).toBeInTheDocument();
+    expect(await screen.findByRole('group', { name: /Codex/ })).toBeInTheDocument();
     await waitFor(() => {
       expect(MockEventSource.instances.length).toBeGreaterThan(0);
     });
@@ -728,7 +728,7 @@ describe('SessionDetailPage', () => {
       });
     });
 
-    expect(screen.getByRole('tab', { name: /Codex/ })).toBeInTheDocument();
+    expect(screen.getByRole('group', { name: /Codex/ })).toBeInTheDocument();
   });
 
   it('does not hide vertical overflow on the detail tablist', async () => {
@@ -883,9 +883,7 @@ describe('SessionDetailPage', () => {
     renderWithProviders(<SessionDetailContent id={idleSession.id} />);
     expect(await screen.findByText('Fix the bug')).toBeInTheDocument();
     expect(screen.getByText('Done fixing')).toBeInTheDocument();
-    // Turn indicator shown in header and footer
-    const turnElements = screen.getAllByText(/Turn 2/);
-    expect(turnElements.length).toBeGreaterThanOrEqual(1);
+    expect(screen.queryByTestId('session-footer')).not.toBeInTheDocument();
   });
 
   it('suppresses duplicate final output log when timeline includes matching assistant transcript', async () => {
@@ -1255,6 +1253,89 @@ describe('SessionDetailPage', () => {
 
     await waitFor(() => {
       expect(getChatScroller(container).scrollTop).toBe(320);
+    });
+  });
+
+  it('restores a thread-specific saved scroll position when switching tabs in a session', async () => {
+    const threadSession: Session = {
+      ...mockSessions[0],
+      id: 'session-thread-scroll-restore',
+      status: 'idle',
+      completed_at: undefined,
+      sandbox_state: 'snapshotted',
+      threads: [
+        {
+          id: 'thread-main',
+          session_id: 'session-thread-scroll-restore',
+          org_id: 'org-1',
+          agent_type: 'codex',
+          label: 'Main',
+          status: 'idle',
+          current_turn: 1,
+          created_at: '2026-02-17T07:00:00Z',
+          cost_cents: 0,
+          pending_message_count: 0,
+        },
+        {
+          id: 'thread-codex-2',
+          session_id: 'session-thread-scroll-restore',
+          org_id: 'org-1',
+          agent_type: 'codex',
+          label: 'Codex 2',
+          status: 'idle',
+          current_turn: 1,
+          created_at: '2026-02-17T07:03:00Z',
+          cost_cents: 0,
+          pending_message_count: 0,
+        },
+      ],
+    };
+
+    window.localStorage.setItem(`session-scroll-position:org-1:user-1:${threadSession.id}:thread-main`, JSON.stringify({ version: 1, scrollTop: 120 }));
+    window.localStorage.setItem(`session-scroll-position:org-1:user-1:${threadSession.id}:thread-codex-2`, JSON.stringify({ version: 1, scrollTop: 410 }));
+    vi.spyOn(HTMLElement.prototype, 'scrollHeight', 'get').mockReturnValue(900);
+    vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockReturnValue(200);
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({ data: threadSession } satisfies SingleResponse<Session>);
+      }),
+      http.get('/api/v1/sessions/:id/threads/:threadId/messages', ({ params }) => {
+        const assistantContent = params.threadId === 'thread-main' ? 'Main reply' : 'Codex 2 reply';
+        return HttpResponse.json({
+          data: [
+            {
+              id: params.threadId === 'thread-main' ? 1 : 2,
+              session_id: threadSession.id,
+              org_id: 'org-1',
+              thread_id: params.threadId as string,
+              turn_number: 1,
+              role: 'assistant',
+              content: assistantContent,
+              created_at: '2026-02-17T07:02:00Z',
+            },
+          ] as SessionMessage[],
+          meta: {},
+        } satisfies ListResponse<SessionMessage>);
+      }),
+      http.get('/api/v1/sessions/:id/threads/:threadId/logs', () => {
+        return HttpResponse.json({ data: [], meta: {} });
+      }),
+    );
+
+    const user = userEvent.setup();
+    const { container } = renderWithProviders(<SessionDetailContent id={threadSession.id} />);
+    await screen.findByText('Main reply');
+
+    await waitFor(() => {
+      expect(getChatScroller(container).scrollTop).toBe(120);
+    });
+
+    await user.click(screen.getByRole('tab', { name: /Codex 2/ }));
+    await screen.findByText('Codex 2 reply');
+
+    await waitFor(() => {
+      expect(getChatScroller(container).scrollTop).toBe(410);
     });
   });
 
@@ -4619,6 +4700,33 @@ describe('SessionDetailPage', () => {
     expect(screen.getByTitle('Add files, photos, or a Linear issue')).not.toBeDisabled();
   });
 
+  it('shows the shared add menu items in the continue-session composer', async () => {
+    const idleSession: Session = {
+      ...mockSessions[0],
+      status: 'idle',
+      completed_at: undefined,
+      current_turn: 1,
+      sandbox_state: 'snapshotted',
+      snapshot_key: 'snapshot/test',
+    };
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({ data: idleSession } satisfies SingleResponse<Session>);
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+    const user = userEvent.setup();
+
+    await screen.findByPlaceholderText('Send a follow-up message...');
+    await user.click(screen.getByTitle('Add files, photos, or a Linear issue'));
+
+    expect(await screen.findByRole('menuitem', { name: 'Upload files or photos' })).toBeInTheDocument();
+    expect(screen.getByRole('menuitem', { name: 'Add image URL' })).toBeInTheDocument();
+    expect(screen.getByRole('menuitem', { name: 'Add linear issue' })).toBeInTheDocument();
+  });
+
   it('uploads an image pasted into the follow-up prompt and shows it in the attachment strip', async () => {
     const idleSession: Session = {
       ...mockSessions[0],
@@ -4656,6 +4764,33 @@ describe('SessionDetailPage', () => {
       expect(uploadSpy).toHaveBeenCalledWith(file);
     });
     expect(await screen.findByRole('button', { name: 'Preview pasted-follow-up.png' })).toBeInTheDocument();
+  });
+
+  it('adds an image URL from the continue-session dropdown and shows it in the attachment strip', async () => {
+    const idleSession: Session = {
+      ...mockSessions[0],
+      status: 'idle',
+      completed_at: undefined,
+      current_turn: 1,
+      sandbox_state: 'snapshotted',
+    };
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({ data: idleSession } satisfies SingleResponse<Session>);
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+    const user = userEvent.setup();
+
+    await screen.findByPlaceholderText('Send a follow-up message...');
+    await user.click(screen.getByTitle('Add files, photos, or a Linear issue'));
+    await user.click(await screen.findByRole('menuitem', { name: 'Add image URL' }));
+    await user.type(screen.getByRole('textbox', { name: 'Image URL' }), 'https://example.com/follow-up-shot.png');
+    await user.click(screen.getByRole('button', { name: 'Add' }));
+
+    expect(await screen.findByRole('button', { name: 'Preview follow-up-shot.png' })).toBeInTheDocument();
   });
 
   it('shows Codex agent type label', async () => {
@@ -4703,7 +4838,7 @@ describe('SessionDetailPage', () => {
     const user = userEvent.setup();
 
     await user.click(screen.getByTitle('Add files, photos, or a Linear issue'));
-    await user.click(await screen.findByRole('menuitem', { name: 'Link Linear issue' }));
+    await user.click(await screen.findByRole('menuitem', { name: 'Add linear issue' }));
 
     const linearInput = await screen.findByLabelText('Linear issue id or URL');
     await user.type(linearInput, 'ACS-1234');
@@ -4736,7 +4871,7 @@ describe('SessionDetailPage', () => {
     const user = userEvent.setup();
 
     await user.click(screen.getByTitle('Add files, photos, or a Linear issue'));
-    await user.click(await screen.findByRole('menuitem', { name: 'Link Linear issue' }));
+    await user.click(await screen.findByRole('menuitem', { name: 'Add linear issue' }));
 
     const linearInput = await screen.findByLabelText('Linear issue id or URL');
     await user.type(linearInput, 'fix the bug');
@@ -5547,6 +5682,64 @@ describe('SessionDetailPage', () => {
     expect(screen.getByLabelText('Model override')).toBeInTheDocument();
   });
 
+  it('does not render the session footer on mobile conversation view', async () => {
+    const idleSession: Session = {
+      ...mockSessions[0],
+      status: 'idle',
+      completed_at: undefined,
+      current_turn: 3,
+      sandbox_state: 'snapshotted',
+      diff: 'diff --git a/src/app.ts b/src/app.ts\n--- a/src/app.ts\n+++ b/src/app.ts\n@@ -1,3 +1,4 @@\n import express from "express";\n+import cors from "cors";\n const app = express();\n app.listen(3000);',
+      diff_stats: { added: 1, removed: 0, files_changed: 1 },
+    };
+
+    setMobileViewport(true);
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({ data: idleSession } satisfies SingleResponse<Session>);
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id="session-mobile-footer-hidden" />);
+    await screen.findByPlaceholderText('Send a follow-up message...');
+
+    expect(screen.queryByTestId('session-footer')).not.toBeInTheDocument();
+  });
+
+  it('keeps the mobile follow-up textarea collapsed until focused', async () => {
+    const idleSession: Session = {
+      ...mockSessions[0],
+      status: 'idle',
+      completed_at: undefined,
+      current_turn: 1,
+      sandbox_state: 'snapshotted',
+    };
+
+    setMobileViewport(true);
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({ data: idleSession } satisfies SingleResponse<Session>);
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id="session-mobile-composer-height" />);
+    const textarea = await screen.findByPlaceholderText('Send a follow-up message...');
+
+    expect(textarea).toHaveAttribute('data-mobile-composer-state', 'collapsed');
+    expect(textarea).toHaveAttribute('rows', '1');
+
+    const user = userEvent.setup();
+    await user.click(textarea);
+
+    expect(textarea).toHaveAttribute('data-mobile-composer-state', 'expanded');
+
+    fireEvent.blur(textarea);
+
+    await waitFor(() => {
+      expect(textarea).toHaveAttribute('data-mobile-composer-state', 'collapsed');
+    });
+  });
+
   it('matches both trigger menus to the continue-session input width', async () => {
     const resumableSession: Session = {
       ...mockSessions[0],
@@ -5791,7 +5984,7 @@ describe('SessionDetailPage', () => {
     });
   });
 
-  it('renders SessionFooter with turn number for multi-turn session', async () => {
+  it('does not render the session footer for multi-turn sessions', async () => {
     const idleSession: Session = {
       ...mockSessions[0],
       status: 'idle',
@@ -5810,9 +6003,7 @@ describe('SessionDetailPage', () => {
 
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
     await screen.findByPlaceholderText('Send a follow-up message...');
-    // Turn indicator and diff stats should appear in footer
-    const turnElements = screen.getAllByText(/Turn 3/);
-    expect(turnElements.length).toBeGreaterThanOrEqual(1);
+    expect(screen.queryByTestId('session-footer')).not.toBeInTheDocument();
   });
 
   it('shows Shift+Tab toggle for plan mode in claude_code session', async () => {
