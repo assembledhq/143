@@ -64,10 +64,18 @@ type AgentAdapter interface {
 }
 
 // AgentInput contains everything the agent needs to understand and fix an issue.
+type PromptStyle string
+
+const (
+	PromptStyleIssueContext PromptStyle = "issue_context"
+	PromptStyleRawTask      PromptStyle = "raw_task"
+)
+
 type AgentInput struct {
 	Issue              *models.Issue
 	LinkedIssues       []models.SessionIssueSnapshotEntry
 	Manual             bool
+	PromptStyle        PromptStyle
 	UserMessage        string
 	RepoURL            string
 	RepoBranch         string
