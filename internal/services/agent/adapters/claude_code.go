@@ -88,6 +88,18 @@ func (a *ClaudeCodeAdapter) PreparePrompt(ctx context.Context, input *agent.Agen
 	}, nil
 }
 
+// claudeCodeRuntimeProfile is shared by Execute and the test surface.
+var claudeCodeRuntimeProfile = agent.AgentRuntimeProfile{
+	Cancellation:      agent.DefaultCancellationSpec,
+	PreferSplitOutput: true,
+}
+
+// RuntimeProfile declares Claude Code's interactive runtime requirements.
+// Claude honors SIGINT cleanly so no TTY is required.
+func (a *ClaudeCodeAdapter) RuntimeProfile() agent.AgentRuntimeProfile {
+	return claudeCodeRuntimeProfile
+}
+
 // Execute runs the Claude Code CLI inside the sandbox and streams output.
 func (a *ClaudeCodeAdapter) Execute(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
 	provider := agent.SandboxProviderFromContext(ctx)
@@ -139,98 +151,23 @@ func (a *ClaudeCodeAdapter) Execute(ctx context.Context, sandbox *agent.Sandbox,
 		Metadata:  map[string]interface{}{"max_tokens": prompt.MaxTokens, "resume": prompt.Continuation},
 	}
 
-	// Execute with real-time streaming.
 	result := &agent.AgentResult{}
-	var stderr bytes.Buffer
 	var summaryParts []string
 	var lastAssistantContent string
 
-	exitCode, err := provider.ExecStream(ctx, sandbox, cmd, func(line []byte) {
-		if len(bytes.TrimSpace(line)) == 0 {
-			return
-		}
-
-		var event claudeStreamEvent
-		if err := json.Unmarshal(line, &event); err != nil {
-			logCh <- agent.LogEntry{
-				Timestamp: time.Now(),
-				Level:     "output",
-				Message:   string(line),
-			}
-			return
-		}
-
-		switch event.Type {
-		case "assistant":
-			logCh <- agent.LogEntry{
-				Timestamp: time.Now(),
-				Level:     "output",
-				Message:   event.Content,
-			}
-			// Individual assistant text blocks are persisted as separate output
-			// logs — don't merge them into the summary. Track the last one as
-			// a fallback in case no "result" event arrives.
-			lastAssistantContent = event.Content
-			tryExtractConfidence(event.Content, result)
-
-		case "tool_use":
-			logCh <- agent.LogEntry{
-				Timestamp: time.Now(),
-				Level:     "tool_use",
-				Message:   fmt.Sprintf("using tool: %s", event.Tool),
-				Metadata:  claudeToolUseMetadata(event),
-			}
-
-		case "tool_result":
-			logCh <- agent.LogEntry{
-				Timestamp: time.Now(),
-				Level:     "output",
-				Message:   string(event.Result),
-				Metadata:  map[string]interface{}{"type": "tool_result"},
-			}
-
-		case "error":
-			msg := event.Message
-			if msg == "" {
-				msg = event.Content
-			}
-			logCh <- agent.LogEntry{
-				Timestamp: time.Now(),
-				Level:     "error",
-				Message:   msg,
-			}
-
-		case "result":
-			logCh <- agent.LogEntry{
-				Timestamp: time.Now(),
-				Level:     "info",
-				Message:   event.Content,
-			}
-			summaryParts = append(summaryParts, event.Content)
-			tryExtractConfidence(event.Content, result)
-			if len(event.Result) > 0 {
-				var usage agent.TokenUsage
-				if err := json.Unmarshal(event.Result, &usage); err == nil && usage.InputTokens > 0 {
-					result.TokenUsage = usage
-				}
-			}
-			// Extract session ID from result event if present.
-			if event.SessionID != "" {
-				result.AgentSessionID = event.SessionID
-			}
-
-		default:
-			logCh <- agent.LogEntry{
-				Timestamp: time.Now(),
-				Level:     "debug",
-				Message:   string(line),
-			}
-		}
-	}, &stderr)
+	runResult, err := runInteractiveCommand(ctx, sandbox, InteractiveRunSpec{
+		Cmd:     cmd,
+		Profile: claudeCodeRuntimeProfile,
+		OnStdout: func(line []byte) {
+			parseClaudeStreamLine(line, result, logCh, &summaryParts, &lastAssistantContent)
+		},
+	})
 	if err != nil {
 		return nil, fmt.Errorf("exec claude CLI: %w", err)
 	}
 
+	exitCode := runResult.ExitCode
+	stderr := runResult.Stderr
 	result.ExitCode = exitCode
 	if len(summaryParts) > 0 {
 		result.Summary = strings.Join(summaryParts, "\n")
@@ -240,18 +177,18 @@ func (a *ClaudeCodeAdapter) Execute(ctx context.Context, sandbox *agent.Sandbox,
 		result.Summary = lastAssistantContent
 	}
 
-	if stderr.Len() > 0 {
+	if len(stderr) > 0 {
 		logCh <- agent.LogEntry{
 			Timestamp: time.Now(),
 			Level:     "error",
-			Message:   stderr.String(),
+			Message:   string(stderr),
 		}
 	}
 
 	if exitCode != 0 {
 		result.Error = fmt.Sprintf("claude CLI exited with code %d", exitCode)
-		if stderr.Len() > 0 {
-			result.Error += ": " + stderr.String()
+		if len(stderr) > 0 {
+			result.Error += ": " + string(stderr)
 		}
 	}
 
@@ -274,6 +211,83 @@ func (a *ClaudeCodeAdapter) Execute(ctx context.Context, sandbox *agent.Sandbox,
 	}
 
 	return result, nil
+}
+
+// parseClaudeStreamLine processes a single non-empty stdout line from the
+// Claude Code CLI. Extracted so Execute and parseStreamOutput share parsing.
+func parseClaudeStreamLine(line []byte, result *agent.AgentResult, logCh chan<- agent.LogEntry, summaryParts *[]string, lastAssistant *string) {
+	var event claudeStreamEvent
+	if err := json.Unmarshal(line, &event); err != nil {
+		logCh <- agent.LogEntry{
+			Timestamp: time.Now(),
+			Level:     "output",
+			Message:   string(line),
+		}
+		return
+	}
+
+	switch event.Type {
+	case "assistant":
+		logCh <- agent.LogEntry{
+			Timestamp: time.Now(),
+			Level:     "output",
+			Message:   event.Content,
+		}
+		*lastAssistant = event.Content
+		tryExtractConfidence(event.Content, result)
+
+	case "tool_use":
+		logCh <- agent.LogEntry{
+			Timestamp: time.Now(),
+			Level:     "tool_use",
+			Message:   fmt.Sprintf("using tool: %s", event.Tool),
+			Metadata:  claudeToolUseMetadata(event),
+		}
+
+	case "tool_result":
+		logCh <- agent.LogEntry{
+			Timestamp: time.Now(),
+			Level:     "output",
+			Message:   string(event.Result),
+			Metadata:  map[string]interface{}{"type": "tool_result"},
+		}
+
+	case "error":
+		msg := event.Message
+		if msg == "" {
+			msg = event.Content
+		}
+		logCh <- agent.LogEntry{
+			Timestamp: time.Now(),
+			Level:     "error",
+			Message:   msg,
+		}
+
+	case "result":
+		logCh <- agent.LogEntry{
+			Timestamp: time.Now(),
+			Level:     "info",
+			Message:   event.Content,
+		}
+		*summaryParts = append(*summaryParts, event.Content)
+		tryExtractConfidence(event.Content, result)
+		if len(event.Result) > 0 {
+			var usage agent.TokenUsage
+			if err := json.Unmarshal(event.Result, &usage); err == nil && usage.InputTokens > 0 {
+				result.TokenUsage = usage
+			}
+		}
+		if event.SessionID != "" {
+			result.AgentSessionID = event.SessionID
+		}
+
+	default:
+		logCh <- agent.LogEntry{
+			Timestamp: time.Now(),
+			Level:     "debug",
+			Message:   string(line),
+		}
+	}
 }
 
 // WithSandboxProvider re-exports agent.WithSandboxProvider for backward compatibility.

@@ -187,7 +187,6 @@ func newRevertSessionThreadHandler(stores *Stores, services *Services, logger ze
 			return fmt.Errorf("revert thread: %w", err)
 		}
 
-
 		if stores.SessionMessages != nil {
 			msg := &models.SessionMessage{
 				SessionID: sessionID,
