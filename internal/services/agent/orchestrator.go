@@ -459,6 +459,99 @@ func (o *Orchestrator) CancelThreadByID(threadID uuid.UUID) bool {
 	return o.threadCancels.CancelThread(threadID)
 }
 
+type workspaceSnapshotUpdater interface {
+	UpdateWorkspaceSnapshot(ctx context.Context, orgID, sessionID uuid.UUID, snapshotKey string, result *models.SessionResult) error
+}
+
+// RevertThread applies a thread's stored diff in reverse against the latest
+// durable session snapshot, then snapshots the resulting workspace and updates
+// the session diff metadata so the UI reflects the reverted state.
+func (o *Orchestrator) RevertThread(ctx context.Context, session *models.Session, thread *models.SessionThread) error {
+	if session == nil {
+		return fmt.Errorf("revert thread: session is nil")
+	}
+	if thread == nil {
+		return fmt.Errorf("revert thread: thread is nil")
+	}
+	if thread.Diff == nil || strings.TrimSpace(*thread.Diff) == "" {
+		return fmt.Errorf("revert thread: thread diff is empty")
+	}
+	if session.SnapshotKey == nil || *session.SnapshotKey == "" {
+		return fmt.Errorf("revert thread: session snapshot is unavailable")
+	}
+	if o.snapshots == nil {
+		return fmt.Errorf("revert thread: snapshot store is unavailable")
+	}
+
+	updater, ok := o.sessions.(workspaceSnapshotUpdater)
+	if !ok {
+		return fmt.Errorf("revert thread: session store does not support workspace snapshot updates")
+	}
+
+	sandboxCfg := DefaultSandboxConfig()
+	sandboxCfg.OrgID = session.OrgID.String()
+	sandboxCfg.SessionID = session.ID.String()
+	if slug, err := o.sessionRepoSlug(ctx, session); err != nil {
+		return fmt.Errorf("revert thread: resolve workdir: %w", err)
+	} else if slug != "" {
+		sandboxCfg.WorkDir = sandboxCfg.HomeDir + "/" + slug
+	}
+
+	sandbox, err := HydrateSandboxFromSnapshot(ctx, o.provider, o.snapshots, *session.SnapshotKey, sandboxCfg)
+	if err != nil {
+		return fmt.Errorf("revert thread: hydrate sandbox: %w", err)
+	}
+	defer func() {
+		if destroyErr := o.provider.Destroy(context.Background(), sandbox); destroyErr != nil {
+			o.logger.Warn().Err(destroyErr).Str("session_id", session.ID.String()).Msg("failed to destroy revert sandbox")
+		}
+	}()
+
+	patchPath := path.Join(sandbox.HomeDir, ".143-thread-revert.patch")
+	if err := o.provider.WriteFile(ctx, sandbox, patchPath, []byte(*thread.Diff)); err != nil {
+		return fmt.Errorf("revert thread: write patch: %w", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	applyCmd := fmt.Sprintf("git apply -R '%s'", shellEscapeSingleQuote(patchPath))
+	exitCode, err := o.provider.Exec(ctx, sandbox, applyCmd, &stdout, &stderr)
+	if err != nil {
+		return fmt.Errorf("revert thread: apply reverse patch: %w", err)
+	}
+	if exitCode != 0 {
+		return fmt.Errorf("revert thread: apply reverse patch exited with code %d: %s", exitCode, strings.TrimSpace(stderr.String()))
+	}
+
+	targetBranch := ""
+	if session.TargetBranch != nil {
+		targetBranch = *session.TargetBranch
+	}
+	diff, diffErr := o.collectWorkspaceDiff(ctx, sandbox, derefString(session.BaseCommitSHA), targetBranch)
+	if diffErr != nil && !errors.Is(diffErr, errNoBaseCommitSHA) {
+		return fmt.Errorf("revert thread: collect session diff: %w", diffErr)
+	}
+
+	newSnapshotKey, _, err := o.snapshotSession(ctx, session, sandbox, nil)
+	if err != nil {
+		return fmt.Errorf("revert thread: snapshot updated workspace: %w", err)
+	}
+	if newSnapshotKey == "" && session.SnapshotKey != nil {
+		newSnapshotKey = *session.SnapshotKey
+	}
+
+	result := &models.SessionResult{
+		DiffBaseCommitSHA: session.BaseCommitSHA,
+		DiffCollectedAt:   timePtr(time.Now().UTC()),
+	}
+	if diff != "" {
+		result.Diff = &diff
+	}
+	if err := updater.UpdateWorkspaceSnapshot(ctx, session.OrgID, session.ID, newSnapshotKey, result); err != nil {
+		return fmt.Errorf("revert thread: persist workspace snapshot: %w", err)
+	}
+	return nil
+}
+
 // DurableCheckpoint is the latest fully committed resume boundary for a
 // session. Recovery may resume from this checkpoint, but never from newer
 // in-memory state that was not durably persisted.
@@ -484,11 +577,14 @@ type ContinueSessionOptions struct {
 	// session-level CancelRegistry behavior.
 	ThreadID *uuid.UUID
 
-	// OnTurnComplete fires after a successful turn with the per-turn diff
-	// and the agent-reported cost in USD. The thread continuation handler
-	// uses this to emit file-attribution events. Errors are swallowed by
-	// the orchestrator: file attribution is operational, not critical.
-	OnTurnComplete func(diff string, costUSD float64)
+	// OnTurnComplete fires after a successful turn with the agent's full
+	// result. The thread continuation handler uses this both to emit file-
+	// attribution events (from result.Diff) and to persist per-tab turn
+	// metadata (result.Summary, result.ConfidenceScore, result.Diff) onto
+	// the thread row so revert and the summary panel have data. Errors are
+	// swallowed by the orchestrator: per-tab bookkeeping is operational,
+	// not critical to the turn itself.
+	OnTurnComplete func(result *AgentResult)
 }
 
 // OrchestratorConfig holds the dependencies for creating an Orchestrator.
@@ -2558,11 +2654,10 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		o.cancels.Register(session.ID, sandbox, o.provider, cancel)
 	}
 	// Mirror the registration on the thread-scoped registry so a per-tab
-	// cancel can SIGINT just this thread's agent process. The session-level
+	// cancel can unwind just this thread's run context. The session-level
 	// registry remains the legacy path for whole-sandbox cancels.
 	if o.threadCancels != nil && opts != nil && opts.ThreadID != nil {
-		processName := agentProcessName(session.AgentType)
-		o.threadCancels.Register(*opts.ThreadID, sandbox, o.provider, processName, cancel)
+		o.threadCancels.Register(*opts.ThreadID, cancel)
 		defer o.threadCancels.Deregister(*opts.ThreadID)
 	}
 
@@ -2842,7 +2937,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 					log.Warn().Interface("panic", r).Msg("OnTurnComplete callback panicked")
 				}
 			}()
-			opts.OnTurnComplete(result.Diff, result.TokenUsage.TotalCostUSD)
+			opts.OnTurnComplete(result)
 		}()
 	}
 
@@ -4273,6 +4368,111 @@ func formatWorkingBranch(run *models.Session, issue *models.Issue) string {
 // shellEscapeSingleQuote escapes single quotes for safe use in shell commands.
 func shellEscapeSingleQuote(s string) string {
 	return strings.ReplaceAll(s, "'", "'\\''")
+}
+
+func derefString(value *string) string {
+	if value == nil {
+		return ""
+	}
+	return *value
+}
+
+var errNoBaseCommitSHA = errors.New("base commit sha is required")
+
+func (o *Orchestrator) collectWorkspaceDiff(ctx context.Context, sandbox *Sandbox, baseCommitSHA, targetBranch string) (string, error) {
+	var checkStdout, checkStderr bytes.Buffer
+	checkExit, err := o.provider.Exec(ctx, sandbox, "git rev-parse --is-inside-work-tree", &checkStdout, &checkStderr)
+	if err != nil {
+		return "", fmt.Errorf("check git repo: %w", err)
+	}
+	if checkExit != 0 {
+		return "", nil
+	}
+	if baseCommitSHA == "" {
+		return "", errNoBaseCommitSHA
+	}
+
+	diffBase := o.resolveWorkspaceDiffBase(ctx, sandbox, baseCommitSHA, targetBranch)
+	diffCmd := fmt.Sprintf("git diff --find-renames --binary %s -- .", shellEscapeSingleQuote(diffBase))
+
+	var stdout, stderr bytes.Buffer
+	exitCode, err := o.provider.Exec(ctx, sandbox, diffCmd, &stdout, &stderr)
+	if err != nil {
+		return "", fmt.Errorf("exec git diff: %w", err)
+	}
+	if exitCode != 0 {
+		return "", fmt.Errorf("git diff exited with code %d: %s", exitCode, stderr.String())
+	}
+
+	untrackedDiff, err := o.collectUntrackedDiffs(ctx, sandbox)
+	if err != nil {
+		return "", err
+	}
+	return stdout.String() + untrackedDiff, nil
+}
+
+func (o *Orchestrator) resolveWorkspaceDiffBase(ctx context.Context, sandbox *Sandbox, baseCommitSHA, targetBranch string) string {
+	if targetBranch == "" {
+		return baseCommitSHA
+	}
+
+	escapedBranch := shellEscapeSingleQuote(targetBranch)
+	var fetchErr bytes.Buffer
+	fetchCmd := fmt.Sprintf("git fetch --quiet --no-tags origin '%s'", escapedBranch)
+	fetchExit, fetchExecErr := o.provider.Exec(ctx, sandbox, fetchCmd, io.Discard, &fetchErr)
+
+	var mbOut, mbErr bytes.Buffer
+	mbCmd := fmt.Sprintf("git merge-base 'origin/%s' HEAD", escapedBranch)
+	exitCode, err := o.provider.Exec(ctx, sandbox, mbCmd, &mbOut, &mbErr)
+	if err != nil || exitCode != 0 {
+		o.logger.Debug().
+			Str("target_branch", targetBranch).
+			Str("fallback_base_commit_sha", baseCommitSHA).
+			Int("fetch_exit", fetchExit).
+			AnErr("fetch_exec_err", fetchExecErr).
+			Str("fetch_stderr", strings.TrimSpace(fetchErr.String())).
+			Int("merge_base_exit", exitCode).
+			AnErr("merge_base_exec_err", err).
+			Str("merge_base_stderr", strings.TrimSpace(mbErr.String())).
+			Msg("workspace diff: merge-base unavailable, falling back to base commit sha")
+		return baseCommitSHA
+	}
+	mb := strings.TrimSpace(mbOut.String())
+	if mb == "" {
+		return baseCommitSHA
+	}
+	return mb
+}
+
+func (o *Orchestrator) collectUntrackedDiffs(ctx context.Context, sandbox *Sandbox) (string, error) {
+	var stdout, stderr bytes.Buffer
+	exitCode, err := o.provider.Exec(ctx, sandbox, "git ls-files --others --exclude-standard -- .", &stdout, &stderr)
+	if err != nil {
+		return "", fmt.Errorf("list untracked files: %w", err)
+	}
+	if exitCode != 0 {
+		return "", fmt.Errorf("git ls-files exited with code %d: %s", exitCode, stderr.String())
+	}
+
+	var builder strings.Builder
+	for _, filePath := range strings.Split(strings.TrimSpace(stdout.String()), "\n") {
+		filePath = strings.TrimSpace(filePath)
+		if filePath == "" {
+			continue
+		}
+
+		var fileStdout, fileStderr bytes.Buffer
+		cmd := fmt.Sprintf("git diff --find-renames --binary --no-index -- /dev/null '%s'", shellEscapeSingleQuote(filePath))
+		exitCode, err = o.provider.Exec(ctx, sandbox, cmd, &fileStdout, &fileStderr)
+		if err != nil {
+			return "", fmt.Errorf("diff untracked file %s: %w", filePath, err)
+		}
+		if exitCode != 0 && exitCode != 1 {
+			return "", fmt.Errorf("git diff for untracked file %s exited with code %d: %s", filePath, exitCode, fileStderr.String())
+		}
+		builder.WriteString(fileStdout.String())
+	}
+	return builder.String(), nil
 }
 
 // isTokenExpiredError returns true if the error string indicates the Codex CLI

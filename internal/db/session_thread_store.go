@@ -109,7 +109,7 @@ func (s *SessionThreadStore) CountBySession(ctx context.Context, orgID, sessionI
 func (s *SessionThreadStore) UpdateStatus(ctx context.Context, orgID, threadID uuid.UUID, status models.ThreadStatus) error {
 	query := `UPDATE session_threads SET status = @status WHERE id = @id AND org_id = @org_id`
 	if status == models.ThreadStatusRunning {
-		query = `UPDATE session_threads SET status = @status, started_at = now() WHERE id = @id AND org_id = @org_id`
+		query = `UPDATE session_threads SET status = @status, started_at = now(), cancel_requested_at = NULL WHERE id = @id AND org_id = @org_id`
 	} else if status == models.ThreadStatusCompleted || status == models.ThreadStatusFailed || status == models.ThreadStatusCancelled {
 		query = `UPDATE session_threads SET status = @status, completed_at = now() WHERE id = @id AND org_id = @org_id`
 	}
@@ -304,7 +304,8 @@ func (s *SessionThreadStore) ClaimIdleForSession(ctx context.Context, orgID, ses
 		UPDATE session_threads
 		SET status = 'running',
 		    started_at = now(),
-		    last_activity_at = now()
+		    last_activity_at = now(),
+		    cancel_requested_at = NULL
 		WHERE id = @id
 		  AND org_id = @org_id
 		  AND session_id = @session_id
@@ -323,8 +324,13 @@ func (s *SessionThreadStore) ClaimIdleForSession(ctx context.Context, orgID, ses
 	thread, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.SessionThread])
 	if err != nil {
 		// pgx.ErrNoRows means the WHERE-with-EXISTS predicate did not match.
-		// Distinguish "limit reached" from "not idle" by inspecting current
-		// state — saves the caller a second query on the happy paths.
+		// Best-effort distinguish "limit reached" from "not idle" by
+		// re-inspecting state without holding the FOR UPDATE lock. A sibling
+		// can transition between the failed claim and this lookup; on that
+		// race we surface the original ErrNoRows and the caller maps it to
+		// "thread not idle". Acceptable trade-off: the worst case is the user
+		// sees the busy-tab affordance instead of the queued-message one for
+		// one cycle, then retries.
 		if errors.Is(err, pgx.ErrNoRows) {
 			limited, lookupErr := s.isAtRunningLimit(ctx, orgID, sessionID, threadID, maxRunning)
 			if lookupErr == nil && limited {
@@ -377,7 +383,9 @@ func (s *SessionThreadStore) CountActive(ctx context.Context, orgID, sessionID u
 
 // SetBaseSnapshot stamps the thread-start checkpoint key onto the thread row.
 // Idempotent: only sets when base_snapshot_key is currently NULL so a
-// re-running first turn does not overwrite the original recovery point.
+// re-running first turn (e.g. retry after SIGINT) does not overwrite the
+// original recovery point. A revert later in the thread's lifetime should
+// restore *that* point, not whatever snapshot the most recent retry produced.
 func (s *SessionThreadStore) SetBaseSnapshot(ctx context.Context, orgID, threadID uuid.UUID, key string) error {
 	if key == "" {
 		return nil
