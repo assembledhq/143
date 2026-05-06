@@ -35,6 +35,7 @@ func (f *fakeJobs) Enqueue(_ context.Context, orgID uuid.UUID, queue, jobType st
 }
 
 func TestLinearAgentDispatcher_FeatureOff(t *testing.T) {
+	t.Parallel()
 	jobs := &fakeJobs{}
 	d := NewLinearAgentDispatcher(LinearAgentDispatcherConfig{
 		Logger:         zerolog.Nop(),
@@ -51,6 +52,7 @@ func TestLinearAgentDispatcher_FeatureOff(t *testing.T) {
 }
 
 func TestLinearAgentDispatcher_NonAgentEventIgnored(t *testing.T) {
+	t.Parallel()
 	// Build a dispatcher with the feature enabled but pass an event type
 	// that isn't AgentSessionEvent. Should return ignored without
 	// touching jobs or stores.
@@ -72,6 +74,7 @@ func TestLinearAgentDispatcher_NonAgentEventIgnored(t *testing.T) {
 // store and is exercised end-to-end at a higher layer.
 
 func TestSniffLinearEventType(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name string
 		body string
@@ -99,7 +102,9 @@ func TestSniffLinearEventType(t *testing.T) {
 		},
 	}
 	for _, tc := range tests {
+		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			got := sniffLinearEventType([]byte(tc.body))
 			if got != tc.want {
 				t.Fatalf("got %q want %q", got, tc.want)
