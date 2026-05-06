@@ -63,7 +63,7 @@ type AgentAdapter interface {
 	ResumeMode() SessionResumeMode
 }
 
-// AgentInput contains everything the agent needs to understand and fix an issue.
+// PromptStyle controls how the shared prompt builders render an agent task.
 type PromptStyle string
 
 const (
@@ -71,6 +71,7 @@ const (
 	PromptStyleRawTask      PromptStyle = "raw_task"
 )
 
+// AgentInput contains everything the agent needs to understand and fix an issue.
 type AgentInput struct {
 	Issue              *models.Issue
 	LinkedIssues       []models.SessionIssueSnapshotEntry
