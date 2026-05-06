@@ -5545,6 +5545,30 @@ describe('SessionDetailPage', () => {
     });
   });
 
+  it('autofocuses the follow-up textarea on desktop session detail pages', async () => {
+    const idleSession: Session = {
+      ...mockSessions[0],
+      status: 'idle',
+      completed_at: undefined,
+      current_turn: 1,
+      sandbox_state: 'snapshotted',
+    };
+
+    setMobileViewport(false);
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({ data: idleSession } satisfies SingleResponse<Session>);
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id="session-desktop-autofocus" />);
+    const textarea = await screen.findByPlaceholderText('Send a follow-up message...');
+
+    await waitFor(() => {
+      expect(textarea).toHaveFocus();
+    });
+  });
+
   it('matches both trigger menus to the continue-session input width', async () => {
     const resumableSession: Session = {
       ...mockSessions[0],

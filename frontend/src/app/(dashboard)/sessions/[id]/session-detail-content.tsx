@@ -853,6 +853,13 @@ function SessionComposer({
     || commands.length > 0;
 
   useEffect(() => {
+    if (isMobile || !canSendMessage) {
+      return;
+    }
+    textareaRef.current?.focus();
+  }, [isMobile, canSendMessage, textareaRef]);
+
+  useEffect(() => {
     const el = textareaRef.current;
     if (!el) return;
     if (!mobileComposerExpanded) {
