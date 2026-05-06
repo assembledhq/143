@@ -142,12 +142,23 @@ func (m *mockLogStore) ListByThread(ctx context.Context, orgID, threadID uuid.UU
 }
 
 type mockJobStore struct {
-	enqueueFn func(ctx context.Context, orgID uuid.UUID, queue, jobType string, payload any, priority int, dedupeKey *string) (uuid.UUID, error)
+	enqueueFn         func(ctx context.Context, orgID uuid.UUID, queue, jobType string, payload any, priority int, dedupeKey *string) (uuid.UUID, error)
+	enqueueWithOptsFn func(ctx context.Context, orgID uuid.UUID, opts db.EnqueueOpts) (uuid.UUID, error)
 }
 
 func (m *mockJobStore) Enqueue(ctx context.Context, orgID uuid.UUID, queue, jobType string, payload any, priority int, dedupeKey *string) (uuid.UUID, error) {
 	if m.enqueueFn != nil {
 		return m.enqueueFn(ctx, orgID, queue, jobType, payload, priority, dedupeKey)
+	}
+	return uuid.New(), nil
+}
+
+func (m *mockJobStore) EnqueueWithOpts(ctx context.Context, orgID uuid.UUID, opts db.EnqueueOpts) (uuid.UUID, error) {
+	if m.enqueueWithOptsFn != nil {
+		return m.enqueueWithOptsFn(ctx, orgID, opts)
+	}
+	if m.enqueueFn != nil {
+		return m.enqueueFn(ctx, orgID, opts.Queue, opts.JobType, opts.Payload, opts.Priority, opts.DedupeKey)
 	}
 	return uuid.New(), nil
 }

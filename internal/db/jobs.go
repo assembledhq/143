@@ -106,8 +106,36 @@ func (s *JobStore) GetLatestFailedByType(ctx context.Context, orgID uuid.UUID, j
 	return &result, nil
 }
 
-func (s *JobStore) Enqueue(ctx context.Context, orgID uuid.UUID, queue, jobType string, payload any, priority int, dedupeKey *string) (uuid.UUID, error) {
-	id, err := enqueueOn(ctx, s.db, orgID, queue, jobType, payload, priority, dedupeKey)
+// EnqueueOpts captures all parameters for a single Enqueue call. Callers fill
+// in the fields they need; zero values pass through.
+//
+// New enqueue-time scheduling features (target node, deferred run-at, custom
+// max attempts) are added here rather than as new positional method
+// parameters so the signature stays stable as the queue grows new affinity /
+// scheduling capabilities. The plain Enqueue/EnqueueInTx methods remain as
+// thin wrappers around the opts form for the common "no special scheduling"
+// case so the bulk of existing call sites stay untouched.
+type EnqueueOpts struct {
+	Queue     string
+	JobType   string
+	Payload   any
+	Priority  int
+	DedupeKey *string
+
+	// TargetNodeID, when set, restricts the job to be claimed by this
+	// specific worker node. Used for sandbox-bound jobs (continue_session,
+	// open_pr, run_agent for resume) where the work must execute on the
+	// same docker daemon as the session's recorded container_id. NULL
+	// means any worker can claim. The claim path falls back to "any worker"
+	// if the target node is marked dead in the `nodes` table, so a pinned
+	// job cannot starve when its node is permanently lost.
+	TargetNodeID *string
+}
+
+// EnqueueWithOpts is the canonical enqueue path. Enqueue/EnqueueInTx wrap it
+// for the common case.
+func (s *JobStore) EnqueueWithOpts(ctx context.Context, orgID uuid.UUID, opts EnqueueOpts) (uuid.UUID, error) {
+	id, err := enqueueOn(ctx, s.db, orgID, opts)
 	if err != nil {
 		return id, err
 	}
@@ -115,11 +143,49 @@ func (s *JobStore) Enqueue(ctx context.Context, orgID uuid.UUID, queue, jobType 
 	return id, nil
 }
 
+// EnqueueInTxWithOpts is the in-transaction variant of EnqueueWithOpts. The
+// caller is responsible for calling Notify after commit so the wake-up isn't
+// fired before the row is durable.
+func (s *JobStore) EnqueueInTxWithOpts(ctx context.Context, tx pgx.Tx, orgID uuid.UUID, opts EnqueueOpts) (uuid.UUID, error) {
+	return enqueueOn(ctx, tx, orgID, opts)
+}
+
+func (s *JobStore) Enqueue(ctx context.Context, orgID uuid.UUID, queue, jobType string, payload any, priority int, dedupeKey *string) (uuid.UUID, error) {
+	return s.EnqueueWithOpts(ctx, orgID, EnqueueOpts{
+		Queue:     queue,
+		JobType:   jobType,
+		Payload:   payload,
+		Priority:  priority,
+		DedupeKey: dedupeKey,
+	})
+}
+
+// EnqueueWithTarget is the positional-args wrapper for callers (typically
+// service-package interfaces with a fixed JobStore method shape) that need
+// to set TargetNodeID without depending on the EnqueueOpts type. Behaves
+// identically to EnqueueWithOpts; pass nil targetNodeID for an unpinned job.
+func (s *JobStore) EnqueueWithTarget(ctx context.Context, orgID uuid.UUID, queue, jobType string, payload any, priority int, dedupeKey *string, targetNodeID *string) (uuid.UUID, error) {
+	return s.EnqueueWithOpts(ctx, orgID, EnqueueOpts{
+		Queue:        queue,
+		JobType:      jobType,
+		Payload:      payload,
+		Priority:     priority,
+		DedupeKey:    dedupeKey,
+		TargetNodeID: targetNodeID,
+	})
+}
+
 // EnqueueInTx inserts a job inside an existing transaction so callers that
 // must create a row and a job atomically (e.g. automation RunNow) don't leave
 // orphaned state when one side fails.
 func (s *JobStore) EnqueueInTx(ctx context.Context, tx pgx.Tx, orgID uuid.UUID, queue, jobType string, payload any, priority int, dedupeKey *string) (uuid.UUID, error) {
-	return enqueueOn(ctx, tx, orgID, queue, jobType, payload, priority, dedupeKey)
+	return s.EnqueueInTxWithOpts(ctx, tx, orgID, EnqueueOpts{
+		Queue:     queue,
+		JobType:   jobType,
+		Payload:   payload,
+		Priority:  priority,
+		DedupeKey: dedupeKey,
+	})
 }
 
 // Notify publishes a best-effort wake-up for an already-created job row.
@@ -235,27 +301,37 @@ type jobQuerier interface {
 	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
 }
 
-func enqueueOn(ctx context.Context, q jobQuerier, orgID uuid.UUID, queue, jobType string, payload any, priority int, dedupeKey *string) (uuid.UUID, error) {
-	payloadJSON, err := json.Marshal(payload)
+func enqueueOn(ctx context.Context, q jobQuerier, orgID uuid.UUID, opts EnqueueOpts) (uuid.UUID, error) {
+	payloadJSON, err := json.Marshal(opts.Payload)
 	if err != nil {
 		return uuid.Nil, err
 	}
 
 	var id uuid.UUID
+	args := pgx.NamedArgs{
+		"org_id":         orgID,
+		"queue":          opts.Queue,
+		"job_type":       opts.JobType,
+		"payload":        payloadJSON,
+		"priority":       opts.Priority,
+		"dedupe_key":     opts.DedupeKey,
+		"target_node_id": opts.TargetNodeID,
+	}
 	query := `
-		INSERT INTO jobs (org_id, queue, job_type, payload, priority, dedupe_key)
-		VALUES (@org_id, @queue, @job_type, @payload, @priority, @dedupe_key)
+		INSERT INTO jobs (org_id, queue, job_type, payload, priority, dedupe_key, target_node_id)
+		VALUES (@org_id, @queue, @job_type, @payload, @priority, @dedupe_key, @target_node_id)
 		ON CONFLICT DO NOTHING
 		RETURNING id`
+	if opts.TargetNodeID == nil {
+		query = `
+			INSERT INTO jobs (org_id, queue, job_type, payload, priority, dedupe_key)
+			VALUES (@org_id, @queue, @job_type, @payload, @priority, @dedupe_key)
+			ON CONFLICT DO NOTHING
+			RETURNING id`
+		delete(args, "target_node_id")
+	}
 
-	err = q.QueryRow(ctx, query, pgx.NamedArgs{
-		"org_id":     orgID,
-		"queue":      queue,
-		"job_type":   jobType,
-		"payload":    payloadJSON,
-		"priority":   priority,
-		"dedupe_key": dedupeKey,
-	}).Scan(&id)
+	err = q.QueryRow(ctx, query, args).Scan(&id)
 	// ON CONFLICT DO NOTHING returns no row when a pending/running job with the
 	// same (queue, dedupe_key) already exists. Treat that as a successful no-op:
 	// the existing job will satisfy the caller's intent.
@@ -278,7 +354,13 @@ func (s *JobStore) DeleteExpiredCompleted(ctx context.Context, retentionDays int
 const claimedJobColumns = `j.id, j.org_id, j.queue, j.job_type, j.payload, j.priority, j.status,
 	j.attempts, j.max_attempts, j.run_at, j.locked_by_node_id, j.locked_at,
 	j.lease_expires_at, j.lock_token, j.run_owner_id, j.last_error,
-	j.dedupe_key, j.created_at, j.updated_at, j.completed_at`
+	j.dedupe_key, j.target_node_id, j.created_at, j.updated_at, j.completed_at`
+
+// nodeDeadHeartbeatThreshold is how long a node can go without heartbeating
+// before its pinned jobs become claimable by any worker. Set generously
+// above the node manager's heartbeat interval (currently 10s) so a transient
+// network blip doesn't unpin jobs from a healthy worker.
+const nodeDeadHeartbeatThreshold = 90 * time.Second
 
 type jobExecer interface {
 	Exec(ctx context.Context, sql string, arguments ...any) (pgconn.CommandTag, error)
@@ -287,14 +369,33 @@ type jobExecer interface {
 // ClaimNextRunnable atomically claims the next due pending job, marking it as
 // running with a renewable lease and fencing token. Returns nil, nil when no
 // runnable job exists.
+//
+// Node-affinity filter: jobs with target_node_id NULL can be claimed by any
+// worker (the common case). Jobs with target_node_id set can only be claimed
+// by the matching node OR if the target node is dead (status='dead' or stale
+// heartbeat). The dead-node fallback prevents starvation when a pinned worker
+// is permanently lost — the job becomes claimable by anyone instead of
+// sitting forever. The freshness threshold matches ReclaimLostRunningJobs's
+// dead-node detection so the two paths agree on what "dead" means.
 // lint:allow-no-orgid reason="worker queue consumer scans cross-org jobs by design"
 func (s *JobStore) ClaimNextRunnable(ctx context.Context, nodeID, ownerID string, lockToken uuid.UUID, leaseDuration time.Duration) (*models.Job, error) {
 	query := fmt.Sprintf(`
-		WITH next_job AS (
+		WITH dead_target_nodes AS (
 			SELECT id
-			FROM jobs
-			WHERE status = 'pending' AND run_at <= now()
-			ORDER BY priority DESC, created_at ASC
+			FROM nodes
+			WHERE status = 'dead' OR last_heartbeat_at < @dead_before
+		),
+		next_job AS (
+			SELECT j.id
+			FROM jobs j
+			LEFT JOIN dead_target_nodes d ON d.id = j.target_node_id
+			WHERE j.status = 'pending' AND j.run_at <= now()
+			  AND (
+			    j.target_node_id IS NULL
+			    OR j.target_node_id = @node_id
+			    OR d.id IS NOT NULL
+			  )
+			ORDER BY j.priority DESC, j.created_at ASC
 			FOR UPDATE SKIP LOCKED
 			LIMIT 1
 		)
@@ -319,17 +420,19 @@ func (s *JobStore) ClaimNextRunnable(ctx context.Context, nodeID, ownerID string
 	var runOwnerID pgtype.Text
 	var lastError pgtype.Text
 	var dedupeKey pgtype.Text
+	var targetNodeID pgtype.Text
 	var completedAt pgtype.Timestamptz
 	err := s.db.QueryRow(ctx, query, pgx.NamedArgs{
 		"node_id":       nodeID,
 		"owner_id":      ownerID,
 		"lock_token":    lockToken,
 		"lease_seconds": int(leaseDuration.Seconds()),
+		"dead_before":   time.Now().Add(-nodeDeadHeartbeatThreshold),
 	}).Scan(
 		&job.ID, &job.OrgID, &job.Queue, &job.JobType, &job.Payload, &job.Priority,
 		&job.Status, &job.Attempts, &job.MaxAttempts, &job.RunAt, &lockedByNodeID,
 		&lockedAt, &leaseExpiresAt, &persistedLockToken, &runOwnerID,
-		&lastError, &dedupeKey, &job.CreatedAt, &job.UpdatedAt, &completedAt,
+		&lastError, &dedupeKey, &targetNodeID, &job.CreatedAt, &job.UpdatedAt, &completedAt,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
@@ -358,6 +461,9 @@ func (s *JobStore) ClaimNextRunnable(ctx context.Context, nodeID, ownerID string
 	}
 	if dedupeKey.Valid {
 		job.DedupeKey = &dedupeKey.String
+	}
+	if targetNodeID.Valid {
+		job.TargetNodeID = &targetNodeID.String
 	}
 	if completedAt.Valid {
 		job.CompletedAt = &completedAt.Time

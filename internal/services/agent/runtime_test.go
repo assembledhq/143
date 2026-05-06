@@ -155,6 +155,10 @@ func (s *runtimeTestJobStore) Enqueue(context.Context, uuid.UUID, string, string
 	return uuid.New(), nil
 }
 
+func (s *runtimeTestJobStore) EnqueueWithTarget(context.Context, uuid.UUID, string, string, any, int, *string, *string) (uuid.UUID, error) {
+	return uuid.New(), nil
+}
+
 func (s *runtimeTestJobStore) OldestPendingSessionJobAge(context.Context) (time.Duration, bool, error) {
 	return 0, false, nil
 }
@@ -166,6 +170,10 @@ type runtimeTestJobBacklogStore struct {
 }
 
 func (s *runtimeTestJobBacklogStore) Enqueue(context.Context, uuid.UUID, string, string, any, int, *string) (uuid.UUID, error) {
+	return uuid.New(), nil
+}
+
+func (s *runtimeTestJobBacklogStore) EnqueueWithTarget(context.Context, uuid.UUID, string, string, any, int, *string, *string) (uuid.UUID, error) {
 	return uuid.New(), nil
 }
 

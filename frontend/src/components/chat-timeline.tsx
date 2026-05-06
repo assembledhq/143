@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback } from "react";
+import { memo, useState, useCallback } from "react";
 import { ChevronRight, AlertTriangle, FileCode2, FileText, ClipboardList, Check, PenLine } from "lucide-react";
 import Image from "next/image";
 import { Badge } from "@/components/ui/badge";
@@ -109,7 +109,7 @@ function DaySeparator({ dateStr }: { dateStr: string }) {
   );
 }
 
-function ToolGroupEntry({ toolUse, toolResult }: { toolUse: SessionLog; toolResult?: SessionLog }) {
+const ToolGroupEntry = memo(function ToolGroupEntry({ toolUse, toolResult }: { toolUse: SessionLog; toolResult?: SessionLog }) {
   const [open, setOpen] = useState(false);
   const { label } = deriveToolDisplay(toolUse);
   const inputDetail = formatToolInput(toolUse);
@@ -154,9 +154,9 @@ function ToolGroupEntry({ toolUse, toolResult }: { toolUse: SessionLog; toolResu
       )}
     </div>
   );
-}
+});
 
-function ErrorEntry({ log }: { log: SessionLog }) {
+const ErrorEntry = memo(function ErrorEntry({ log }: { log: SessionLog }) {
   const [expanded, setExpanded] = useState(false);
   const isLong = log.message.length > 200;
   const displayMessage = !isLong || expanded ? log.message : log.message.slice(0, 200) + "...";
@@ -186,9 +186,9 @@ function ErrorEntry({ log }: { log: SessionLog }) {
       </div>
     </div>
   );
-}
+});
 
-function HiddenLogEntry({ log }: { log: SessionLog }) {
+const HiddenLogEntry = memo(function HiddenLogEntry({ log }: { log: SessionLog }) {
   return (
     <div className="flex items-start gap-2 px-2 py-0.5 text-xs font-mono text-muted-foreground/70 min-w-0">
       <TimestampLabel
@@ -205,7 +205,7 @@ function HiddenLogEntry({ log }: { log: SessionLog }) {
       <span className="min-w-0 flex-1 break-all">{log.message}</span>
     </div>
   );
-}
+});
 
 function HiddenLogsGroup({ logs }: { logs: SessionLog[] }) {
   const [open, setOpen] = useState(false);
@@ -261,7 +261,7 @@ export function formatMessageTime(dateStr: string): string {
   });
 }
 
-function AttachmentGrid({ attachments }: { attachments: string[] }) {
+const AttachmentGrid = memo(function AttachmentGrid({ attachments }: { attachments: string[] }) {
   const [lightboxSrc, setLightboxSrc] = useState<string | null>(null);
 
   const closeLightbox = useCallback(() => setLightboxSrc(null), []);
@@ -330,7 +330,7 @@ function AttachmentGrid({ attachments }: { attachments: string[] }) {
       )}
     </>
   );
-}
+});
 
 function AssistantBubble({ children }: { children: React.ReactNode }) {
   return (
@@ -342,7 +342,7 @@ function AssistantBubble({ children }: { children: React.ReactNode }) {
   );
 }
 
-function MessageBubble({ msg }: { msg: SessionMessage }) {
+const MessageBubble = memo(function MessageBubble({ msg }: { msg: SessionMessage }) {
   // Strip plan mode prefix from user messages for display.
   const isPlanModeUser = msg.role === "user" && msg.content.startsWith(PLAN_MODE_PREFIX);
   const displayContent = isPlanModeUser
@@ -386,7 +386,7 @@ function MessageBubble({ msg }: { msg: SessionMessage }) {
       />
     </AssistantBubble>
   );
-}
+});
 
 function PlanOutputBubble({
   children,
@@ -438,7 +438,7 @@ function PlanOutputBubble({
   );
 }
 
-function CodeDiffSummary({
+const CodeDiffSummary = memo(function CodeDiffSummary({
   added,
   removed,
   filesChanged,
@@ -469,7 +469,7 @@ function CodeDiffSummary({
       </Button>
     </div>
   );
-}
+});
 
 interface ChatTimelineProps {
   entries: TimelineEntry[];
@@ -484,7 +484,7 @@ interface ChatTimelineProps {
   ) => React.HTMLAttributes<HTMLDivElement> & Record<`data-${string}`, string | number | undefined>;
 }
 
-export function ChatTimeline({ entries, isRunning, diffStats, onDiffClick, onApprovePlan, onAdjustPlan, getEntryContainerProps }: ChatTimelineProps) {
+function ChatTimelineImpl({ entries, isRunning, diffStats, onDiffClick, onApprovePlan, onAdjustPlan, getEntryContainerProps }: ChatTimelineProps) {
   // Separate visible entries (messages, tool groups, errors) from hidden logs.
   // Group consecutive hidden logs together so they share a single "Show more" toggle.
   const rendered: React.ReactNode[] = [];
@@ -660,3 +660,24 @@ export function ChatTimeline({ entries, isRunning, diffStats, onDiffClick, onApp
     </TooltipProvider>
   );
 }
+
+function diffStatsEqual(
+  a: ChatTimelineProps["diffStats"],
+  b: ChatTimelineProps["diffStats"],
+): boolean {
+  if (a === b) return true;
+  if (!a || !b) return !a && !b;
+  return a.added === b.added && a.removed === b.removed && a.files_changed === b.files_changed;
+}
+
+export const ChatTimeline = memo(ChatTimelineImpl, (prev, next) => {
+  return (
+    prev.entries === next.entries &&
+    prev.isRunning === next.isRunning &&
+    prev.onDiffClick === next.onDiffClick &&
+    prev.onApprovePlan === next.onApprovePlan &&
+    prev.onAdjustPlan === next.onAdjustPlan &&
+    prev.getEntryContainerProps === next.getEntryContainerProps &&
+    diffStatsEqual(prev.diffStats, next.diffStats)
+  );
+});
