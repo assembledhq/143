@@ -667,9 +667,7 @@ describe('SessionDetailPage', () => {
     renderWithProviders(<SessionDetailContent id={idleSession.id} />);
     expect(await screen.findByText('Fix the bug')).toBeInTheDocument();
     expect(screen.getByText('Done fixing')).toBeInTheDocument();
-    // Turn indicator shown in header and footer
-    const turnElements = screen.getAllByText(/Turn 2/);
-    expect(turnElements.length).toBeGreaterThanOrEqual(1);
+    expect(screen.queryByTestId('session-footer')).not.toBeInTheDocument();
   });
 
   it('suppresses duplicate final output log when timeline includes matching assistant transcript', async () => {
@@ -5331,7 +5329,7 @@ describe('SessionDetailPage', () => {
     expect(screen.getByLabelText('Model override')).toBeInTheDocument();
   });
 
-  it('hides the session footer on mobile conversation view', async () => {
+  it('does not render the session footer on mobile conversation view', async () => {
     const idleSession: Session = {
       ...mockSessions[0],
       status: 'idle',
@@ -5633,7 +5631,7 @@ describe('SessionDetailPage', () => {
     });
   });
 
-  it('renders SessionFooter with turn number for multi-turn session', async () => {
+  it('does not render the session footer for multi-turn sessions', async () => {
     const idleSession: Session = {
       ...mockSessions[0],
       status: 'idle',
@@ -5652,10 +5650,7 @@ describe('SessionDetailPage', () => {
 
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
     await screen.findByPlaceholderText('Send a follow-up message...');
-    expect(screen.getByTestId('session-footer')).toBeInTheDocument();
-    // Turn indicator and diff stats should appear in footer
-    const turnElements = screen.getAllByText(/Turn 3/);
-    expect(turnElements.length).toBeGreaterThanOrEqual(1);
+    expect(screen.queryByTestId('session-footer')).not.toBeInTheDocument();
   });
 
   it('shows Shift+Tab toggle for plan mode in claude_code session', async () => {

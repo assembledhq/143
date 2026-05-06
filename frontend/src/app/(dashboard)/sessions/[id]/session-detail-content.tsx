@@ -124,7 +124,7 @@ import {
 } from "./thread-attribution-filter";
 import { AuditLogTrigger } from "@/components/audit/audit-log-trigger";
 import { ResizeHandle } from "@/components/resize-handle";
-import { DiffStatsBadge, FileTree, SessionFooter, CommentsSummary, ReviewDiffView, PassSelector, type DiffPassEntry, type PassRange } from "@/components/code-review";
+import { DiffStatsBadge, FileTree, CommentsSummary, ReviewDiffView, PassSelector, type DiffPassEntry, type PassRange } from "@/components/code-review";
 import { LinkedIssueChips } from "./linked-issue-chips";
 import { useReviewComments } from "@/hooks/use-review-comments";
 import { useDiffViewState } from "@/hooks/use-diff-view-state";
@@ -2796,7 +2796,6 @@ export function SessionDetailContent({ id }: { id: string }) {
   const {
     comments,
     commentsByLine,
-    openCount: footerOpenCommentCount,
     createComment,
     updateComment,
     deleteComment,
@@ -3896,17 +3895,6 @@ export function SessionDetailContent({ id }: { id: string }) {
             />
           </>
         )}
-
-        {!isDedicatedMobileReview && !isMobileReviewViewport ? (
-        <SessionFooter
-          status={session.status}
-          currentTurn={session.current_turn}
-          diffStats={diffStats}
-          onDiffClick={centerMode === "review" ? undefined : () => openReview()}
-          openCommentCount={footerOpenCommentCount}
-          onCommentsClick={centerMode === "review" ? undefined : () => openReview()}
-        />
-        ) : null}
       </div>
 
       {/* Detail panel — inline on desktop, hidden on mobile (rendered as a
