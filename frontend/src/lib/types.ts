@@ -1379,6 +1379,7 @@ export interface UsageBreakdownRow {
 // Automation types
 export type AutomationScheduleType = 'interval' | 'cron';
 export type AutomationRunStatus = 'pending' | 'running' | 'completed' | 'completed_noop' | 'failed' | 'skipped';
+export type AutomationIdentityScope = 'org' | 'personal';
 
 export interface Automation {
   id: string;
@@ -1393,6 +1394,7 @@ export interface Automation {
   execution_mode: string;
   max_concurrent: number;
   base_branch: string;
+  identity_scope: AutomationIdentityScope;
   schedule_type: AutomationScheduleType;
   interval_value?: number;
   interval_unit?: 'hours' | 'days' | 'weeks';

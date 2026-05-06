@@ -46,6 +46,7 @@ func automationTestColumns() []string {
 	return []string{
 		"id", "org_id", "repository_id", "name", "goal", "scope",
 		"agent_type", "model_override", "reasoning_effort", "execution_mode", "max_concurrent", "base_branch",
+		"identity_scope",
 		"schedule_type", "interval_value", "interval_unit", "interval_run_at", "cron_expression", "timezone",
 		"next_run_at", "last_run_at", "enabled", "created_by", "paused_by", "paused_at",
 		"priority", "created_at", "updated_at", "deleted_at",
@@ -72,6 +73,7 @@ func newAutomationRow(mock pgxmock.PgxPoolIface, a models.Automation) *pgxmock.R
 	return pgxmock.NewRows(automationTestColumns()).AddRow(
 		a.ID, a.OrgID, a.RepositoryID, a.Name, a.Goal, a.Scope,
 		a.AgentType, a.ModelOverride, a.ReasoningEffort, a.ExecutionMode, a.MaxConcurrent, a.BaseBranch,
+		a.IdentityScope.OrDefault(),
 		a.ScheduleType, a.IntervalValue, a.IntervalUnit, a.IntervalRunAt, a.CronExpression, a.Timezone,
 		a.NextRunAt, a.LastRunAt, a.Enabled, a.CreatedBy, a.PausedBy, a.PausedAt,
 		a.Priority, a.CreatedAt, a.UpdatedAt, a.DeletedAt,
@@ -297,6 +299,7 @@ func TestAutomationHandler_Create_ValidationErrors(t *testing.T) {
 		{name: "invalid exec mode", body: map[string]any{"name": "n", "goal": "g", "execution_mode": "mayhem"}, code: http.StatusBadRequest},
 		{name: "invalid agent type", body: map[string]any{"name": "n", "goal": "g", "agent_type": "bogus"}, code: http.StatusBadRequest},
 		{name: "invalid model", body: map[string]any{"name": "n", "goal": "g", "model": "not-a-real-model"}, code: http.StatusBadRequest},
+		{name: "invalid identity scope", body: map[string]any{"name": "n", "goal": "g", "identity_scope": "team"}, code: http.StatusBadRequest},
 		{name: "invalid reasoning effort", body: map[string]any{"name": "n", "goal": "g", "agent_type": "codex", "reasoning_effort": "turbo"}, code: http.StatusBadRequest},
 		{name: "unsupported reasoning effort for agent", body: map[string]any{"name": "n", "goal": "g", "agent_type": "codex", "reasoning_effort": "max"}, code: http.StatusBadRequest},
 		{name: "goal too long", body: map[string]any{"name": "n", "goal": longGoal}, code: http.StatusBadRequest},
@@ -350,7 +353,7 @@ func TestAutomationHandler_Create_OK(t *testing.T) {
 	newID := uuid.New()
 	now := time.Now()
 	mock.ExpectQuery("INSERT INTO automations").
-		WithArgs(testAnyArgs(21)...).
+		WithArgs(testAnyArgs(22)...).
 		WillReturnRows(
 			pgxmock.NewRows([]string{"id", "created_at", "updated_at"}).AddRow(newID, now, now),
 		)
@@ -375,6 +378,41 @@ func TestAutomationHandler_Create_OK(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
 	require.NotNil(t, resp.Data.ReasoningEffort)
 	require.Equal(t, models.ReasoningEffortXHigh, *resp.Data.ReasoningEffort)
+	require.Equal(t, models.AutomationIdentityScopeOrg, resp.Data.IdentityScope)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestAutomationHandler_Create_PersonalIdentityScope(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	newID := uuid.New()
+	now := time.Now()
+	mock.ExpectQuery("INSERT INTO automations").
+		WithArgs(testAnyArgs(22)...).
+		WillReturnRows(
+			pgxmock.NewRows([]string{"id", "created_at", "updated_at"}).AddRow(newID, now, now),
+		)
+
+	h := NewAutomationHandler(db.NewAutomationStore(mock), db.NewAutomationRunStore(mock))
+	body := map[string]any{
+		"name":           "my automation",
+		"goal":           "poke at things",
+		"interval_value": 2,
+		"interval_unit":  "days",
+		"identity_scope": "personal",
+	}
+	req := newAutomationRequest(t, http.MethodPost, "/api/v1/automations", body, uuid.New(), uuid.New(), nil)
+	rr := httptest.NewRecorder()
+	h.Create(rr, req)
+	require.Equal(t, http.StatusCreated, rr.Code)
+
+	var resp models.SingleResponse[models.Automation]
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
+	require.Equal(t, models.AutomationIdentityScopePersonal, resp.Data.IdentityScope)
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
@@ -388,7 +426,7 @@ func TestAutomationHandler_Create_ModelInfersAgentType(t *testing.T) {
 	newID := uuid.New()
 	now := time.Now()
 	mock.ExpectQuery("INSERT INTO automations").
-		WithArgs(testAnyArgs(21)...).
+		WithArgs(testAnyArgs(22)...).
 		WillReturnRows(
 			pgxmock.NewRows([]string{"id", "created_at", "updated_at"}).AddRow(newID, now, now),
 		)
@@ -453,7 +491,7 @@ func TestAutomationHandler_Create_AllowsAvailableValidModel(t *testing.T) {
 	newID := uuid.New()
 	now := time.Now()
 	mock.ExpectQuery("INSERT INTO automations").
-		WithArgs(testAnyArgs(21)...).
+		WithArgs(testAnyArgs(22)...).
 		WillReturnRows(
 			pgxmock.NewRows([]string{"id", "created_at", "updated_at"}).AddRow(newID, now, now),
 		)
@@ -489,7 +527,7 @@ func TestAutomationHandler_Create_ReasoningFallsBackWhenOrgSettingsMalformed(t *
 	newID := uuid.New()
 	now := time.Now()
 	mock.ExpectQuery("INSERT INTO automations").
-		WithArgs(testAnyArgs(21)...).
+		WithArgs(testAnyArgs(22)...).
 		WillReturnRows(
 			pgxmock.NewRows([]string{"id", "created_at", "updated_at"}).AddRow(newID, now, now),
 		)
@@ -526,7 +564,7 @@ func TestAutomationHandler_Create_IntervalNonUTCTimezone(t *testing.T) {
 	newID := uuid.New()
 	now := time.Now()
 	mock.ExpectQuery("INSERT INTO automations").
-		WithArgs(testAnyArgs(21)...).
+		WithArgs(testAnyArgs(22)...).
 		WillReturnRows(
 			pgxmock.NewRows([]string{"id", "created_at", "updated_at"}).AddRow(newID, now, now),
 		)
@@ -658,6 +696,8 @@ func TestAutomationHandler_Update_ValidationErrors(t *testing.T) {
 		{name: "invalid interval run at", body: map[string]any{"interval_run_at": "11:07"}, code: http.StatusBadRequest},
 		{name: "invalid agent type", body: map[string]any{"agent_type": "bogus"}, code: http.StatusBadRequest},
 		{name: "invalid model", body: map[string]any{"model": "not-a-real-model"}, code: http.StatusBadRequest},
+		{name: "invalid identity scope", body: map[string]any{"identity_scope": "team"}, code: http.StatusBadRequest},
+		{name: "personal identity scope requires creator", body: map[string]any{"identity_scope": "personal"}, code: http.StatusBadRequest},
 		{name: "invalid reasoning effort", body: map[string]any{"reasoning_effort": "turbo"}, code: http.StatusBadRequest},
 		{name: "unsupported reasoning effort for codex", body: map[string]any{"agent_type": "codex", "reasoning_effort": "max"}, code: http.StatusBadRequest},
 		// Reject mismatched companion fields up front: existing automation
@@ -724,7 +764,7 @@ func TestAutomationHandler_Update_OK(t *testing.T) {
 		WithArgs(testAnyArgs(2)...).
 		WillReturnRows(newAutomationRow(mock, a))
 	mock.ExpectExec("UPDATE automations SET").
-		WithArgs(testAnyArgs(23)...).
+		WithArgs(testAnyArgs(24)...).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
 	h := NewAutomationHandler(db.NewAutomationStore(mock), db.NewAutomationRunStore(mock))
@@ -777,7 +817,7 @@ func TestAutomationHandler_Update_ReasoningFallsBackWhenOrgSettingsMalformed(t *
 		WithArgs(testAnyArgs(2)...).
 		WillReturnRows(newAutomationRow(mock, a))
 	mock.ExpectExec("UPDATE automations SET").
-		WithArgs(testAnyArgs(23)...).
+		WithArgs(testAnyArgs(24)...).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
 	h := NewAutomationHandler(db.NewAutomationStore(mock), db.NewAutomationRunStore(mock))
@@ -819,7 +859,7 @@ func TestAutomationHandler_Update_BlankModelPreservesExplicitAgentType(t *testin
 		WithArgs(testAnyArgs(2)...).
 		WillReturnRows(newAutomationRow(mock, a))
 	mock.ExpectExec("UPDATE automations SET").
-		WithArgs(testAnyArgs(23)...).
+		WithArgs(testAnyArgs(24)...).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
 	h := NewAutomationHandler(db.NewAutomationStore(mock), db.NewAutomationRunStore(mock))
@@ -873,7 +913,7 @@ func TestAutomationHandler_Update_TimezoneOnlyRecomputesNextRunAt(t *testing.T) 
 		WithArgs(testAnyArgs(2)...).
 		WillReturnRows(newAutomationRow(mock, a))
 	mock.ExpectExec("UPDATE automations SET").
-		WithArgs(testAnyArgs(23)...).
+		WithArgs(testAnyArgs(24)...).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
 	h := NewAutomationHandler(db.NewAutomationStore(mock), db.NewAutomationRunStore(mock))
@@ -927,7 +967,7 @@ func TestAutomationHandler_Update_SwitchScheduleType_OK(t *testing.T) {
 			WithArgs(testAnyArgs(2)...).
 			WillReturnRows(newAutomationRow(mock, a))
 		mock.ExpectExec("UPDATE automations SET").
-			WithArgs(testAnyArgs(23)...).
+			WithArgs(testAnyArgs(24)...).
 			WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
 		h := NewAutomationHandler(db.NewAutomationStore(mock), db.NewAutomationRunStore(mock))
@@ -963,7 +1003,7 @@ func TestAutomationHandler_Update_SwitchScheduleType_OK(t *testing.T) {
 			WithArgs(testAnyArgs(2)...).
 			WillReturnRows(newAutomationRow(mock, a))
 		mock.ExpectExec("UPDATE automations SET").
-			WithArgs(testAnyArgs(23)...).
+			WithArgs(testAnyArgs(24)...).
 			WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
 		h := NewAutomationHandler(db.NewAutomationStore(mock), db.NewAutomationRunStore(mock))
@@ -1134,7 +1174,7 @@ func TestAutomationHandler_Pause_OK(t *testing.T) {
 		WithArgs(testAnyArgs(2)...).
 		WillReturnRows(newAutomationRow(mock, a))
 	mock.ExpectExec("UPDATE automations SET").
-		WithArgs(testAnyArgs(23)...).
+		WithArgs(testAnyArgs(24)...).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
 	h := NewAutomationHandler(db.NewAutomationStore(mock), db.NewAutomationRunStore(mock))
@@ -1192,7 +1232,7 @@ func TestAutomationHandler_Resume_OK(t *testing.T) {
 		WithArgs(testAnyArgs(2)...).
 		WillReturnRows(newAutomationRow(mock, a))
 	mock.ExpectExec("UPDATE automations SET").
-		WithArgs(testAnyArgs(23)...).
+		WithArgs(testAnyArgs(24)...).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
 	h := NewAutomationHandler(db.NewAutomationStore(mock), db.NewAutomationRunStore(mock))
