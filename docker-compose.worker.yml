@@ -89,6 +89,9 @@ services:
       # path. The host directory is provisioned 0750 and owned 1000:1000
       # via systemd-tmpfiles in deploy/scripts/provision.sh.
       - /var/run/143/sandbox-auth:/var/run/143/sandbox-auth
+      # Provisioning must stage this file before the first `docker compose up`.
+      # If the bind source is missing, Docker creates a directory at the host
+      # path and later deploy-time scp of the encrypted env file fails.
       - .env.production.enc:/.env.production.enc:ro
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://localhost:8080/healthz || exit 1"]
