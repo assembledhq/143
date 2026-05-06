@@ -76,9 +76,14 @@ describe("AutomationDetailPage", () => {
 
     const timezoneButton = screen.getByTitle("UTC");
     const scheduleRow = timezoneButton.parentElement;
+    const runEveryText = screen.getByText("Run every");
+    const atText = screen.getByText("At");
 
     expect(scheduleRow).toHaveClass("flex-wrap");
     expect(timezoneButton).toHaveClass("w-full", "sm:w-auto");
+    expect(runEveryText).toHaveClass("text-sm", "font-medium", "leading-none", "text-muted-foreground");
+    expect(atText).toHaveClass("text-sm", "font-medium", "leading-none", "text-muted-foreground");
+    expect(screen.queryByText(/Run time is in/i)).not.toBeInTheDocument();
   });
 
   it("renders a back button to the automations list preserving query params", async () => {
@@ -257,8 +262,14 @@ describe("AutomationDetailPage", () => {
       target: { value: "x".repeat(AUTOMATION_GOAL_MAX_LENGTH + 1) },
     });
 
-    expect(screen.getByText(`Goal must be at most ${AUTOMATION_GOAL_MAX_LENGTH} characters.`)).toBeInTheDocument();
-    expect(screen.getByText(`${AUTOMATION_GOAL_MAX_LENGTH + 1} / ${AUTOMATION_GOAL_MAX_LENGTH}`)).toBeInTheDocument();
+    expect(
+      screen.getByText(`Goal must be at most ${AUTOMATION_GOAL_MAX_LENGTH.toLocaleString("en-US")} characters.`),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        `${(AUTOMATION_GOAL_MAX_LENGTH + 1).toLocaleString("en-US")} / ${AUTOMATION_GOAL_MAX_LENGTH.toLocaleString("en-US")}`,
+      ),
+    ).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Save changes" })).toBeDisabled();
   });
 
