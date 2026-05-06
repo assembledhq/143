@@ -136,6 +136,7 @@ import { PRHealthBanner } from "@/components/pr-health-banner";
 import { MobileBackButton } from "@/components/mobile-back-button";
 import { useAuth } from "@/hooks/use-auth";
 import { useMediaQuery } from "@/hooks/use-media-query";
+import { useDocumentVisible } from "@/hooks/use-document-visible";
 import { prMergedAccent } from "@/lib/pr-status-styles";
 import { cn, sessionTitle, formatTimeAgo } from "@/lib/utils";
 import { activeSet, workingStatusesSet } from "@/lib/session-status-groups";
@@ -1736,6 +1737,7 @@ function ChatPanel({
   const reconnectTimer = useRef<ReturnType<typeof setTimeout>>(null);
   const apiBase = process.env.NEXT_PUBLIC_API_URL || "";
   const [showJumpToLatest, setShowJumpToLatest] = useState(false);
+  const isDocumentVisible = useDocumentVisible();
   const viewerScope = useMemo(
     () => (user ? { userId: user.id, orgId: user.org_id } : null),
     [user],
@@ -1950,7 +1952,13 @@ function ChatPanel({
   }, [queryClient, sessionId]);
 
   useEffect(() => {
-    if (!isActive) return;
+    // Pause the SSE stream while the tab is hidden. EventSource handlers fire
+    // even in a hidden tab and trigger setState/re-renders on this large
+    // component, which steals main-thread time from any tab the user just
+    // switched to (notably "View PR" → github.com). On reconnect, the existing
+    // onerror path already invalidates the timeline/thread queries so the user
+    // sees fresh state when they return.
+    if (!isActive || !isDocumentVisible) return;
 
     let eventSource: EventSource | null = null;
     let cancelled = false;
@@ -2024,7 +2032,7 @@ function ChatPanel({
         clearTimeout(reconnectTimer.current);
       }
     };
-  }, [sessionId, apiBase, isActive, mergeLogs, mergeSessionStatusUpdate, queryClient, activeThreadId]);
+  }, [sessionId, apiBase, isActive, isDocumentVisible, mergeLogs, mergeSessionStatusUpdate, queryClient, activeThreadId]);
 
   // Track whether the user is scrolled near the bottom.
   const handleScroll = useCallback(() => {
@@ -2278,6 +2286,7 @@ export function SessionDetailContent({ id }: { id: string }) {
   const [prAuthPrompt, setPRAuthPrompt] = useState<PRAuthPromptState | null>(null);
   const resumeAttemptRef = useRef<string | null>(null);
   const apiBase = process.env.NEXT_PUBLIC_API_URL || "";
+  const isDocumentVisible = useDocumentVisible();
 
   const { data, isLoading, error } = useQuery({
     queryKey: ["session", id],
@@ -2395,12 +2404,19 @@ export function SessionDetailContent({ id }: { id: string }) {
   const { data: prData } = useQuery({
     queryKey: ["session", id, "pr"],
     queryFn: () => api.sessions.getPR(id),
+    // Updates flow in via mutation invalidations and the session SSE stream
+    // (pr_creation_state / pr_push_state); a small staleTime suppresses
+    // redundant refetches on remount or unrelated cache invalidations.
+    staleTime: 30_000,
   });
   const pullRequestId = prData?.data?.id;
   const { data: prHealthData, isLoading: isPRHealthLoading } = useQuery({
     queryKey: ["pull-request", pullRequestId, "health"],
     queryFn: () => api.pullRequests.getHealth(pullRequestId!),
     enabled: !!pullRequestId && prData?.data?.status === "open",
+    // Pushed via the PULL_REQUEST_UPDATED SSE event, so a longer staleTime is
+    // safe — refetches on focus/remount won't fire a redundant network call.
+    staleTime: 30_000,
   });
   const prHealth = prHealthData?.data;
   const prStatus = prData?.data?.status;
@@ -2558,7 +2574,11 @@ export function SessionDetailContent({ id }: { id: string }) {
     },
   });
   useEffect(() => {
-    if (!pullRequestId || prData?.data?.status !== "open") {
+    // Pause the PR health SSE stream while the tab is hidden — same reasoning
+    // as the session log stream above. The onerror branch already invalidates
+    // the health query on disconnect, so reconnecting on visibility refreshes
+    // the cached health to whatever happened while we were away.
+    if (!pullRequestId || prData?.data?.status !== "open" || !isDocumentVisible) {
       return;
     }
 
@@ -2610,7 +2630,7 @@ export function SessionDetailContent({ id }: { id: string }) {
         clearTimeout(reconnectTimer);
       }
     };
-  }, [apiBase, prData?.data?.status, pullRequestId, queryClient]);
+  }, [apiBase, prData?.data?.status, pullRequestId, queryClient, isDocumentVisible]);
   const previousSessionStatusRef = useRef<string | undefined>(undefined);
   useEffect(() => {
     const currentStatus = session?.status;
