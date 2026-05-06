@@ -308,13 +308,7 @@ func enqueueOn(ctx context.Context, q jobQuerier, orgID uuid.UUID, opts EnqueueO
 	}
 
 	var id uuid.UUID
-	query := `
-		INSERT INTO jobs (org_id, queue, job_type, payload, priority, dedupe_key, target_node_id)
-		VALUES (@org_id, @queue, @job_type, @payload, @priority, @dedupe_key, @target_node_id)
-		ON CONFLICT DO NOTHING
-		RETURNING id`
-
-	err = q.QueryRow(ctx, query, pgx.NamedArgs{
+	args := pgx.NamedArgs{
 		"org_id":         orgID,
 		"queue":          opts.Queue,
 		"job_type":       opts.JobType,
@@ -322,7 +316,22 @@ func enqueueOn(ctx context.Context, q jobQuerier, orgID uuid.UUID, opts EnqueueO
 		"priority":       opts.Priority,
 		"dedupe_key":     opts.DedupeKey,
 		"target_node_id": opts.TargetNodeID,
-	}).Scan(&id)
+	}
+	query := `
+		INSERT INTO jobs (org_id, queue, job_type, payload, priority, dedupe_key, target_node_id)
+		VALUES (@org_id, @queue, @job_type, @payload, @priority, @dedupe_key, @target_node_id)
+		ON CONFLICT DO NOTHING
+		RETURNING id`
+	if opts.TargetNodeID == nil {
+		query = `
+			INSERT INTO jobs (org_id, queue, job_type, payload, priority, dedupe_key)
+			VALUES (@org_id, @queue, @job_type, @payload, @priority, @dedupe_key)
+			ON CONFLICT DO NOTHING
+			RETURNING id`
+		delete(args, "target_node_id")
+	}
+
+	err = q.QueryRow(ctx, query, args).Scan(&id)
 	// ON CONFLICT DO NOTHING returns no row when a pending/running job with the
 	// same (queue, dedupe_key) already exists. Treat that as a successful no-op:
 	// the existing job will satisfy the caller's intent.

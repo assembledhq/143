@@ -2365,6 +2365,37 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		}
 		switch {
 		case recordedNode != "" && recordedNode != o.nodeID:
+			if deadTargetNode, ok := jobctx.DeadTargetNodeFromContext(ctx); ok && deadTargetNode == recordedNode {
+				cleared, clearErr := o.sessions.ClearContainerID(ctx, session.OrgID, session.ID, *session.ContainerID)
+				if clearErr != nil {
+					log.Warn().Err(clearErr).
+						Str("stale_container_id", *session.ContainerID).
+						Str("dead_target_node", deadTargetNode).
+						Msg("ClearContainerID failed during dead-node continue_session recovery; retrying for another recovery attempt")
+					if revertErr := o.sessions.UpdateStatus(ctx, session.OrgID, session.ID, string(models.SessionStatusPending)); revertErr != nil {
+						log.Error().Err(revertErr).Msg("failed to revert session to pending after dead-node recovery clear failure")
+					}
+					return ErrSandboxOnDifferentNode
+				}
+				if !cleared {
+					log.Info().
+						Str("stale_container_id", *session.ContainerID).
+						Str("dead_target_node", deadTargetNode).
+						Msg("ClearContainerID CAS lost during dead-node continue_session recovery; retrying against the current row")
+					if revertErr := o.sessions.UpdateStatus(ctx, session.OrgID, session.ID, string(models.SessionStatusPending)); revertErr != nil {
+						log.Error().Err(revertErr).Msg("failed to revert session to pending after dead-node recovery CAS miss")
+					}
+					return ErrStaleSandboxIDCleared
+				}
+				log.Warn().
+					Str("stale_container_id", *session.ContainerID).
+					Str("dead_target_node", deadTargetNode).
+					Msg("cleared container_id from dead-node continue_session recovery; signaling retry to hydrate on this worker")
+				if revertErr := o.sessions.UpdateStatus(ctx, session.OrgID, session.ID, string(models.SessionStatusPending)); revertErr != nil {
+					log.Error().Err(revertErr).Msg("failed to revert session to pending after dead-node recovery clear")
+				}
+				return ErrStaleSandboxIDCleared
+			}
 			log.Info().
 				Str("container_id", *session.ContainerID).
 				Str("recorded_node", recordedNode).

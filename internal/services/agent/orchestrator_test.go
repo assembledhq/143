@@ -3309,6 +3309,60 @@ func TestContinueSession_ReusePathBailsOutOnCrossNodeClaim(t *testing.T) {
 	require.Equal(t, 0, d.sessions.clearContainerIDCalls, "container_id must be untouched on cross-node bail-out")
 }
 
+func TestContinueSession_ReusePathClearsContainerForDeadTargetNodeRecovery(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	issue.Source = models.IssueSourceManual
+	session := testRun(orgID, issue.ID)
+	session.Status = string(models.SessionStatusIdle)
+	session.CurrentTurn = 1
+	containerID := "container-on-dead-worker"
+	session.ContainerID = &containerID
+	deadNode := "worker-dead"
+	session.WorkerNodeID = &deadNode
+	session.SandboxState = string(models.SandboxStateRunning)
+
+	d := defaultDeps()
+	d.nodeID = "worker-recovery"
+	d.issues.issue = issue
+	d.messages.messages = []models.SessionMessage{
+		{
+			ID:         1,
+			SessionID:  session.ID,
+			OrgID:      orgID,
+			TurnNumber: 2,
+			Role:       models.MessageRoleUser,
+			Content:    "follow-up",
+		},
+	}
+	d.provider.IsAliveFn = func(context.Context, *agent.Sandbox) (bool, error) {
+		t.Fatalf("IsAlive must not probe the recovery worker's daemon for a dead target node container")
+		return false, nil
+	}
+	d.sessions.clearContainerIDFn = func(expected string) (bool, error) {
+		require.Equal(t, containerID, expected, "dead-node recovery should CAS-clear the recorded container id")
+		return true, nil
+	}
+	d.provider.CreateFn = func(context.Context, agent.SandboxConfig) (*agent.Sandbox, error) {
+		t.Fatalf("provider.Create must not run until the retry observes the cleared container_id")
+		return nil, nil
+	}
+	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
+		t.Fatalf("adapter.Execute must not run until the retry observes the cleared container_id")
+		return nil, nil
+	}
+
+	orch := buildOrchestrator(d)
+	ctx := jobctx.WithDeadTargetNode(context.Background(), deadNode)
+	err := orch.ContinueSession(ctx, session, nil)
+	require.Error(t, err, "dead-node recovery should stop the current attempt after clearing the stale container")
+	require.ErrorIs(t, err, agent.ErrStaleSandboxIDCleared,
+		"dead-node recovery should retry so the next attempt hydrates on the recovery worker")
+	require.Equal(t, 1, d.sessions.clearContainerIDCalls, "dead-node recovery should clear the recorded container exactly once")
+}
+
 // TestContinueSession_ReusePathProceedsWhenIsAliveErrors covers the
 // conservative fallback: a transient docker / probe error must NOT trigger
 // the orphan-clear path. The reuse continues and any real failure surfaces

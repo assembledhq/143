@@ -127,3 +127,13 @@ func TestWithLockToken_RoundTrip(t *testing.T) {
 	require.True(t, ok, "WithLockToken should store the lock token in context")
 	require.Equal(t, want, got, "LockTokenFromContext should return the stored token")
 }
+
+func TestWithDeadTargetNode_RoundTrip(t *testing.T) {
+	t.Parallel()
+
+	ctx := jobctx.WithDeadTargetNode(context.Background(), "worker-dead")
+
+	got, ok := jobctx.DeadTargetNodeFromContext(ctx)
+	require.True(t, ok, "WithDeadTargetNode should store the dead target node in context")
+	require.Equal(t, "worker-dead", got, "DeadTargetNodeFromContext should return the stored node id")
+}
