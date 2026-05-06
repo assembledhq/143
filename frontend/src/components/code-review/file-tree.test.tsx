@@ -21,6 +21,29 @@ const files: DiffFile[] = [
 ];
 
 describe("FileTree", () => {
+  it("preserves exact incoming file order when directory entries are interleaved with root files", () => {
+    const orderedFiles: DiffFile[] = [
+      makeDiffFile("src/first.ts", 1, 0),
+      makeDiffFile("README.md", 1, 0),
+      makeDiffFile("src/second.ts", 1, 0),
+    ];
+
+    render(
+      <FileTree files={orderedFiles} activeFileIndex={0} onFileSelect={vi.fn()} />
+    );
+
+    const firstFile = screen.getByText(/first\.ts$/);
+    const readmeFile = screen.getByText("README.md");
+    const secondFile = screen.getByText(/second\.ts$/);
+
+    expect(
+      firstFile.compareDocumentPosition(readmeFile) & Node.DOCUMENT_POSITION_FOLLOWING
+    ).toBeTruthy();
+    expect(
+      readmeFile.compareDocumentPosition(secondFile) & Node.DOCUMENT_POSITION_FOLLOWING
+    ).toBeTruthy();
+  });
+
   it("keeps root files and directories in the incoming order", () => {
     const orderedFiles: DiffFile[] = [
       makeDiffFile("README.md", 1, 0),
