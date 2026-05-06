@@ -443,17 +443,11 @@ func (h *IntegrationHandler) StartLinearOAuth(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	// offline_access is the documented Linear scope that triggers refresh_token
-	// + expires_in in the token response. Without it, Linear treats the token
-	// as long-lived but the refresh path here is unrecoverable on revocation —
-	// the user has to manually reconnect after every revocation event. The
-	// rest of the refresh machinery in internal/services/linear/refresh.go is
-	// a no-op until this scope is granted.
 	params := url.Values{
 		"client_id":     {h.linearClientID},
 		"redirect_uri":  {h.linearRedirectURL()},
 		"response_type": {"code"},
-		"scope":         {"read,write,offline_access"},
+		"scope":         {"read,write"},
 		"state":         {state},
 	}
 
