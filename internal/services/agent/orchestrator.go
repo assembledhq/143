@@ -2313,6 +2313,54 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		sandboxCfg.Env["HOME"] = sandboxCfg.HomeDir
 	}
 	reusedExisting := session.ContainerID != nil && *session.ContainerID != ""
+	// Liveness check on reuse: a recorded container_id only means "someone
+	// (preview, prior turn) wrote it" — it does NOT prove the container is
+	// still alive. If the container was destroyed without going through
+	// FinalizeContainerDestroy / ClearContainerID (worker rollover, docker
+	// daemon eviction, OOM kill, ad-hoc cleanup), the row holds a stale ID
+	// pointing at a dead container. The reuse branch below then builds a
+	// Sandbox{} from that ID and the first downstream Docker exec fails
+	// with "No such container", historically misclassified as a Codex auth
+	// expiry. Probe IsAlive up front; if dead, CAS-clear via ClearContainerID
+	// and return ErrStaleSandboxIDCleared so the worker retries against a
+	// clean row (the next attempt sees container_id=NULL and falls through
+	// to hydrate-from-snapshot or fresh-create).
+	//
+	// On probe error we conservatively keep going (treat as alive) — the
+	// downstream operation will surface a real failure if the container is
+	// gone, and we'd rather not retry-loop against a transient docker hiccup.
+	if reusedExisting {
+		probeCtx, cancel := context.WithTimeout(ctx, sandboxRaceProbeTimeout)
+		alive, aliveErr := o.provider.IsAlive(probeCtx, &Sandbox{ID: *session.ContainerID, Provider: "docker"})
+		cancel()
+		switch {
+		case aliveErr != nil:
+			log.Warn().Err(aliveErr).
+				Str("container_id", *session.ContainerID).
+				Msg("IsAlive probe on recorded container_id failed during continue_session reuse; assuming alive and proceeding")
+		case !alive:
+			cleared, clearErr := o.sessions.ClearContainerID(ctx, session.OrgID, session.ID, *session.ContainerID)
+			if clearErr != nil {
+				log.Warn().Err(clearErr).
+					Str("stale_container_id", *session.ContainerID).
+					Msg("ClearContainerID failed during continue_session reuse liveness check; falling through to reuse path which will surface the underlying docker error")
+				break
+			}
+			if !cleared {
+				log.Info().
+					Str("stale_container_id", *session.ContainerID).
+					Msg("ClearContainerID CAS lost during continue_session reuse liveness check (a new holder acquired between probe and clear); proceeding with the now-active row")
+				break
+			}
+			log.Warn().
+				Str("stale_container_id", *session.ContainerID).
+				Msg("cleared stale orphan container_id during continue_session reuse liveness check; signaling retry to re-enter against the clean row")
+			if revertErr := o.sessions.UpdateStatus(ctx, session.OrgID, session.ID, string(models.SessionStatusPending)); revertErr != nil {
+				log.Error().Err(revertErr).Msg("failed to revert session to pending after stale container_id cleared")
+			}
+			return ErrStaleSandboxIDCleared
+		}
+	}
 	integrationSkills := o.BuildIntegrationSkills(ctx, session.OrgID)
 	var authState *sandboxGitHubAuthState
 	var authErr error
@@ -3557,8 +3605,13 @@ func (o *Orchestrator) failTimedOutSession(run *models.Session, elapsed time.Dur
 	}, log)
 }
 
-// ensureCodexAuth injects Codex auth credentials into the sandbox, failing the
-// run with a codex_auth_expired category if injection fails or no creds exist.
+// ensureCodexAuth injects Codex auth credentials into the sandbox. On failure
+// it distinguishes between genuine auth invalidity (refresh-token revoked,
+// no usable credential) — surfaced as codex_auth_expired with a re-authenticate
+// CTA — and sandbox/transport errors during injection (Docker container gone,
+// exec/write failure) — surfaced as codex_auth_inject_failed with a retry CTA.
+// Auth-side errors are tagged at the source via wrapCodexAuthInvalid in env.go;
+// anything else is treated as transient infra.
 func (o *Orchestrator) ensureCodexAuth(ctx context.Context, run *models.Session, sandbox *Sandbox, env map[string]string) error {
 	if env["OPENAI_API_KEY"] != "" && o.env != nil && o.env.unifiedCodingCredentialIsAPIKey(ctx, run.OrgID, run.TriggeredByUserID, models.ProviderOpenAI) {
 		return nil
@@ -3566,11 +3619,20 @@ func (o *Orchestrator) ensureCodexAuth(ctx context.Context, run *models.Session,
 
 	injected, err := o.env.InjectCodexAuthForUser(ctx, run.OrgID, run.TriggeredByUserID, sandbox)
 	if err != nil {
+		if errors.Is(err, ErrCodexAuthInvalid) {
+			o.failRunWithCategory(ctx, run,
+				fmt.Sprintf("codex auth injection failed: %s", err),
+				FailureCategoryCodexAuth,
+				"Your ChatGPT authentication has expired or was revoked. Please re-authenticate to continue using Codex.",
+				[]string{"Re-authenticate with ChatGPT from the session page to sign in again"},
+			)
+			return fmt.Errorf("codex auth injection: %w", err)
+		}
 		o.failRunWithCategory(ctx, run,
 			fmt.Sprintf("codex auth injection failed: %s", err),
-			FailureCategoryCodexAuth,
-			"Your ChatGPT authentication has expired or was revoked. Please re-authenticate to continue using Codex.",
-			[]string{"Re-authenticate with ChatGPT from the session page to sign in again"},
+			FailureCategoryCodexAuthInject,
+			"Could not inject ChatGPT credentials into the sandbox because of an infrastructure error (Docker exec or file write failed). Your ChatGPT authentication itself is still valid — retry the session.",
+			[]string{"Retry the session — the underlying sandbox error is usually transient", "If retries keep failing, check the worker logs for Docker errors"},
 		)
 		return fmt.Errorf("codex auth injection: %w", err)
 	}

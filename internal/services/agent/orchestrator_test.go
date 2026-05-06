@@ -3173,6 +3173,120 @@ func TestContinueSession_RepairedSlashCommandsOnReusePath(t *testing.T) {
 	require.NoError(t, err, "ContinueSession should succeed on the reuse path when slash commands need repair")
 }
 
+// TestContinueSession_ReusePathClearsStaleOrphanWhenContainerDead verifies the
+// defensive liveness probe in the reuse path. When session.container_id points
+// at a container that no longer exists (worker rollover / docker eviction
+// destroyed it without going through FinalizeContainerDestroy), the
+// continue_session must NOT proceed to attach to the dead container — that
+// path historically misclassified the resulting Docker error as a Codex auth
+// expiry. Instead, ClearContainerID is called and ErrStaleSandboxIDCleared is
+// returned so the worker retries against a clean row.
+func TestContinueSession_ReusePathClearsStaleOrphanWhenContainerDead(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	issue.Source = models.IssueSourceManual
+	session := testRun(orgID, issue.ID)
+	session.Status = string(models.SessionStatusIdle)
+	session.CurrentTurn = 1
+	stale := "stale-container-8d0c678c"
+	session.ContainerID = &stale
+	session.SandboxState = string(models.SandboxStateRunning)
+
+	d := defaultDeps()
+	d.issues.issue = issue
+	d.messages.messages = []models.SessionMessage{
+		{
+			ID:         1,
+			SessionID:  session.ID,
+			OrgID:      orgID,
+			TurnNumber: 2,
+			Role:       models.MessageRoleUser,
+			Content:    "follow-up",
+		},
+	}
+	d.provider.IsAliveFn = func(ctx context.Context, sb *agent.Sandbox) (bool, error) {
+		require.Equal(t, stale, sb.ID, "IsAlive must probe the recorded container_id")
+		return false, nil
+	}
+	d.sessions.clearContainerIDFn = func(expected string) (bool, error) {
+		require.Equal(t, stale, expected, "ClearContainerID must guard the CAS on the recorded id")
+		return true, nil
+	}
+	d.provider.CreateFn = func(context.Context, agent.SandboxConfig) (*agent.Sandbox, error) {
+		t.Fatalf("provider.Create must not run when liveness probe rejects the recorded container_id; the worker will retry")
+		return nil, nil
+	}
+	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
+		t.Fatalf("adapter.Execute must not run when the session bailed out for a stale-orphan retry")
+		return nil, nil
+	}
+
+	orch := buildOrchestrator(d)
+	err := orch.ContinueSession(context.Background(), session, nil)
+	require.Error(t, err)
+	require.ErrorIs(t, err, agent.ErrStaleSandboxIDCleared,
+		"ContinueSession reuse path with dead recorded container_id must return ErrStaleSandboxIDCleared so the worker retries")
+	require.Equal(t, 1, d.sessions.clearContainerIDCalls, "ClearContainerID must be called exactly once")
+}
+
+// TestContinueSession_ReusePathProceedsWhenIsAliveErrors covers the
+// conservative fallback: a transient docker / probe error must NOT trigger
+// the orphan-clear path. The reuse continues and any real failure surfaces
+// through the normal downstream code (so a brief docker hiccup doesn't tear
+// down a session row that's actually fine).
+func TestContinueSession_ReusePathProceedsWhenIsAliveErrors(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	issue.Source = models.IssueSourceManual
+	session := testRun(orgID, issue.ID)
+	session.Status = string(models.SessionStatusIdle)
+	session.CurrentTurn = 1
+	existing := "preview-container-abc"
+	session.ContainerID = &existing
+	session.SandboxState = string(models.SandboxStateRunning)
+
+	d := defaultDeps()
+	d.issues.issue = issue
+	d.messages.messages = []models.SessionMessage{
+		{
+			ID:         1,
+			SessionID:  session.ID,
+			OrgID:      orgID,
+			TurnNumber: 2,
+			Role:       models.MessageRoleUser,
+			Content:    "follow-up",
+		},
+	}
+	d.provider.IsAliveFn = func(ctx context.Context, sb *agent.Sandbox) (bool, error) {
+		return false, errors.New("docker connection refused")
+	}
+	d.sessions.clearContainerIDFn = func(expected string) (bool, error) {
+		t.Fatalf("ClearContainerID must NOT be called when IsAlive errored; transient probe failures fall through")
+		return false, nil
+	}
+	d.provider.CreateFn = func(context.Context, agent.SandboxConfig) (*agent.Sandbox, error) {
+		t.Fatalf("provider.Create must not be called on the reuse path")
+		return nil, nil
+	}
+	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
+		return &agent.AgentResult{
+			Summary:             "done",
+			ConfidenceScore:     0.9,
+			ConfidenceReasoning: "ok",
+			ExitCode:            0,
+		}, nil
+	}
+
+	orch := buildOrchestrator(d)
+	err := orch.ContinueSession(context.Background(), session, nil)
+	require.NoError(t, err, "transient IsAlive probe error must NOT bail out — reuse continues so transient docker hiccups don't reset the session row")
+	require.Equal(t, 0, d.sessions.clearContainerIDCalls, "ClearContainerID must not be invoked on probe-error path")
+}
+
 func TestRunAgent_LogStreamingWithQuestion(t *testing.T) {
 	t.Parallel()
 
