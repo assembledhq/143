@@ -34,17 +34,20 @@ interface ScrollStorageWriter {
 export function getSessionScrollStorageKey(
   sessionId: string,
   viewerScope: SessionScrollViewerScope,
+  threadId?: string | null,
 ): string {
   const orgPart = viewerScope.orgId ?? "no-org";
-  return `${SESSION_SCROLL_STORAGE_PREFIX}${orgPart}:${viewerScope.userId}:${sessionId}`;
+  const threadSuffix = threadId ? `:${threadId}` : "";
+  return `${SESSION_SCROLL_STORAGE_PREFIX}${orgPart}:${viewerScope.userId}:${sessionId}${threadSuffix}`;
 }
 
 export function readStoredSessionScrollPosition(
   storage: Pick<Storage, "getItem"> | ScrollStorageReader,
   sessionId: string,
   viewerScope: SessionScrollViewerScope,
+  threadId?: string | null,
 ): number | null {
-  const key = getSessionScrollStorageKey(sessionId, viewerScope);
+  const key = getSessionScrollStorageKey(sessionId, viewerScope, threadId);
   const rawValue =
     "getItem" in storage ? storage.getItem(key) : storage.get(key) ?? null;
 
@@ -75,12 +78,13 @@ export function writeStoredSessionScrollPosition(
   sessionId: string,
   viewerScope: SessionScrollViewerScope,
   scrollTop: number,
+  threadId?: string | null,
 ): void {
   if (!Number.isFinite(scrollTop) || scrollTop < 0) {
     return;
   }
 
-  const key = getSessionScrollStorageKey(sessionId, viewerScope);
+  const key = getSessionScrollStorageKey(sessionId, viewerScope, threadId);
   const normalizedValue = JSON.stringify({
     version: 1,
     scrollTop: Math.round(scrollTop),
