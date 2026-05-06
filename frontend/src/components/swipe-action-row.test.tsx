@@ -78,6 +78,27 @@ describe('SwipeActionRow', () => {
     );
   });
 
+  it('gives the desktop action button a roomier inset from the top edge', () => {
+    const restore = mockMatchMedia(false);
+
+    try {
+      renderWithProviders(
+        <SwipeActionRow
+          actionLabel="Archive item"
+          actionText="Archive"
+          actionIcon={<span>Archive icon</span>}
+          onAction={() => {}}
+        >
+          <div>Row content</div>
+        </SwipeActionRow>,
+      );
+
+      expect(screen.getByRole('button', { name: 'Archive item' })).toHaveClass('top-3', 'right-3');
+    } finally {
+      restore();
+    }
+  });
+
   it('reveals the trailing action after a left swipe and invokes it', async () => {
     const onAction = vi.fn();
 
