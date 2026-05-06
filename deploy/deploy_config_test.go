@@ -2,6 +2,7 @@ package deploy_test
 
 import (
 	"encoding/json"
+	"net/netip"
 	"os"
 	"strings"
 	"testing"
@@ -269,4 +270,53 @@ func TestLoggingDeploySyncsProvisionedObservabilityConfig(t *testing.T) {
 	dashboardProvider, err := os.ReadFile("../deploy/grafana/provisioning/dashboards/dashboards.yml")
 	require.NoError(t, err, "test should read Grafana dashboard provider config")
 	require.Contains(t, string(dashboardProvider), "disableDeletion: false", "Grafana dashboard provisioning should remove dashboards deleted from the repo")
+}
+
+// Sandbox DNS resolution depends on three values agreeing across three
+// files:
+//
+//   - the bridge subnet pinned by provision.sh (so sandbox-dns can claim a
+//     stable IP),
+//   - the sandbox-dns container's static ipv4_address in the worker compose
+//     file,
+//   - the nameserver line written into /etc/143/sandbox-resolv.conf, which
+//     every sandbox bind-mounts as /etc/resolv.conf.
+//
+// If any of these drifts independently, sandboxes silently lose DNS for
+// preview-infrastructure container names and every preview start fails at
+// the first migration. Lock the alignment in CI so a future renumbering
+// has to touch all three files in the same PR.
+func TestSandboxDNSConfigAlignment(t *testing.T) {
+	t.Parallel()
+
+	const (
+		sandboxSubnet = "172.30.0.0/24"
+		sandboxDNSIP  = "172.30.0.2"
+	)
+
+	prefix, err := netip.ParsePrefix(sandboxSubnet)
+	require.NoError(t, err, "test constant for sandbox subnet should be a valid CIDR")
+	dnsAddr, err := netip.ParseAddr(sandboxDNSIP)
+	require.NoError(t, err, "test constant for sandbox-dns IP should be a valid address")
+	require.True(t, prefix.Contains(dnsAddr), "sandbox-dns IP %s must lie inside the pinned subnet %s", sandboxDNSIP, sandboxSubnet)
+
+	provisionScript, err := os.ReadFile("../deploy/scripts/provision.sh")
+	require.NoError(t, err, "test should read the provisioning script")
+	provisionText := string(provisionScript)
+	require.Contains(t, provisionText, "--subnet "+sandboxSubnet, "provision.sh should create 143-sandbox with the pinned subnet so sandbox-dns gets a predictable static IP")
+	require.Contains(t, provisionText, `"$EXISTING_SANDBOX_SUBNET" != "`+sandboxSubnet+`"`, "provision.sh should fail loudly when an existing 143-sandbox network has a different subnet — silent reuse breaks the static-IP mapping")
+	require.Contains(t, provisionText, "nameserver "+sandboxDNSIP, "provision.sh should write sandbox-dns's IP into /etc/143/sandbox-resolv.conf")
+
+	compose, err := os.ReadFile("../docker-compose.worker.yml")
+	require.NoError(t, err, "test should read the worker compose file")
+	composeText := string(compose)
+	require.Contains(t, composeText, "ipv4_address: "+sandboxDNSIP, "worker compose should pin sandbox-dns to the same static IP that sandbox-resolv.conf points at")
+	require.Contains(t, composeText, "name: 143-sandbox", "worker compose should attach sandbox-dns to the externally-managed 143-sandbox bridge, not a compose-private network")
+	require.Contains(t, composeText, "external: true", "worker compose should declare the sandbox network as external — the bridge is created by provision.sh, not compose")
+
+	dockerfile, err := os.ReadFile("../Dockerfile.dnsmasq")
+	require.NoError(t, err, "test should read the dnsmasq Dockerfile")
+	dockerfileText := string(dockerfile)
+	require.Contains(t, dockerfileText, "--server=127.0.0.11", "dnsmasq must forward to Docker's embedded resolver — that's the only place preview-infra container names are registered")
+	require.Contains(t, dockerfileText, "--no-resolv", "dnsmasq must ignore its own /etc/resolv.conf (which itself points at 127.0.0.11) to avoid a forwarding loop")
 }
