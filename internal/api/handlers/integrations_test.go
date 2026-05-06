@@ -311,7 +311,7 @@ func TestIntegrationHandler_StartLinearOAuth_RedirectsToLinearAuthorize(t *testi
 	require.Equal(t, "linear-client-id", parsed.Query().Get("client_id"), "redirect should include configured client id")
 	require.Equal(t, "code", parsed.Query().Get("response_type"), "redirect should request auth code flow")
 	require.Equal(t, "http://localhost:8080/api/v1/integrations/linear/callback", parsed.Query().Get("redirect_uri"), "redirect should include API callback URL")
-	require.Equal(t, "read,write", parsed.Query().Get("scope"), "redirect should request only Linear's documented read and write scopes")
+	require.Equal(t, "read,write,offline_access", parsed.Query().Get("scope"), "redirect must include offline_access so Linear issues a refresh_token; without it the refresh path in internal/services/linear cannot recover from token revocation and users have to manually reconnect")
 	require.NotEmpty(t, parsed.Query().Get("state"), "redirect should include oauth state")
 
 	setCookie := w.Result().Header.Get("Set-Cookie")
