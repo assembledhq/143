@@ -2,6 +2,7 @@
 
 import { memo, useMemo, useState } from "react";
 import { ChevronDown, ChevronRight, Search, FileText } from "lucide-react";
+import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
 import type { DiffFile } from "@/lib/diff-parser";
 
@@ -9,6 +10,7 @@ interface FileTreeProps {
   files: DiffFile[];
   activeFileIndex: number;
   onFileSelect: (index: number) => void;
+  variant?: "sidebar" | "sheet";
 }
 
 interface TreeNode {
@@ -147,6 +149,7 @@ export function FileTree({
   files,
   activeFileIndex,
   onFileSelect,
+  variant = "sidebar",
 }: FileTreeProps) {
   const [filter, setFilter] = useState("");
 
@@ -191,20 +194,24 @@ export function FileTree({
 
   return (
     <div className="flex flex-col h-full">
-      <div className="px-4 pb-3">
+      <div className={cn("px-4 pb-3", variant === "sheet" && "pt-1")}>
         <p className="text-xs font-medium text-muted-foreground/70 uppercase tracking-wider mb-2">
           {files.length} files changed
         </p>
         <div className="relative">
           <Search className="absolute left-2 top-1/2 -translate-y-1/2 h-3 w-3 text-muted-foreground/50" />
-          <input
-            type="text"
+          <Input
             placeholder="Filter files..."
             value={filter}
             onChange={(e) => setFilter(e.target.value)}
-            className="w-full h-7 pl-7 pr-2 rounded-md border border-border bg-background text-xs placeholder:text-muted-foreground/50 focus:outline-none focus:ring-1 focus:ring-ring"
+            className="h-8 border-border/70 bg-background pl-7 pr-2 text-xs placeholder:text-muted-foreground/50"
           />
         </div>
+        {variant === "sheet" ? (
+          <p className="mt-2 text-xs text-muted-foreground/70">
+            Select a file to jump back into the full-screen diff reader.
+          </p>
+        ) : null}
       </div>
       <div className="flex-1 overflow-y-auto scrollbar-hide px-3 pb-2">
         <TreeDirectory

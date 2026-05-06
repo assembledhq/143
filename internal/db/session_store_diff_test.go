@@ -62,11 +62,12 @@ func TestSessionStore_UpdateResult_WithDiffSnapshot(t *testing.T) {
 	headSHA := "head123"
 	baseSHA := "base123"
 	result := &models.SessionResult{
-		Diff:              &diff,
-		DiffBaseCommitSHA: &baseSHA,
-		DiffHeadCommitSHA: &headSHA,
-		DiffCollectedAt:   &collectedAt,
-		DiffSource:        "review",
+		Diff:               &diff,
+		DiffBaseCommitSHA:  &baseSHA,
+		DiffHeadCommitSHA:  &headSHA,
+		DiffWorkspaceDirty: true,
+		DiffCollectedAt:    &collectedAt,
+		DiffSource:         "review",
 	}
 
 	mock.ExpectBegin()
@@ -82,7 +83,7 @@ func TestSessionStore_UpdateResult_WithDiffSnapshot(t *testing.T) {
 			),
 		)
 	mock.ExpectQuery("INSERT INTO session_diff_snapshots").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(snapshotID))
 	mock.ExpectExec("UPDATE sessions\\s+SET latest_diff_snapshot_id").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
@@ -101,8 +102,9 @@ func TestSessionStore_UpdateResult_WithDiffSnapshotBeginFailure(t *testing.T) {
 	diff := "diff"
 	baseSHA := "base123"
 	result := &models.SessionResult{
-		Diff:              &diff,
-		DiffBaseCommitSHA: &baseSHA,
+		Diff:               &diff,
+		DiffBaseCommitSHA:  &baseSHA,
+		DiffWorkspaceDirty: true,
 	}
 
 	err := store.UpdateResult(context.Background(), uuid.New(), uuid.New(), "completed", result)
@@ -124,8 +126,9 @@ func TestSessionStore_UpdateTurnComplete_WithDiffSnapshot(t *testing.T) {
 	diff := "--- a/a.go\n+++ b/a.go\n"
 	baseSHA := "base123"
 	result := &models.SessionResult{
-		Diff:              &diff,
-		DiffBaseCommitSHA: &baseSHA,
+		Diff:               &diff,
+		DiffBaseCommitSHA:  &baseSHA,
+		DiffWorkspaceDirty: true,
 	}
 
 	mock.ExpectBegin()
@@ -135,7 +138,7 @@ func TestSessionStore_UpdateTurnComplete_WithDiffSnapshot(t *testing.T) {
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 	mock.ExpectQuery("INSERT INTO session_diff_snapshots").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(snapshotID))
 	mock.ExpectExec("UPDATE sessions\\s+SET latest_diff_snapshot_id").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
@@ -169,13 +172,34 @@ func TestSessionStore_UpdateTurnComplete_WithDiffSnapshotInsertFailure(t *testin
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 	mock.ExpectQuery("INSERT INTO session_diff_snapshots").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnError(errors.New("insert failed"))
 	mock.ExpectRollback()
 
 	err = store.UpdateTurnComplete(context.Background(), uuid.New(), uuid.New(), 2, result, "agent-123", "snap-key")
 	require.Error(t, err, "UpdateTurnComplete should return an error when snapshot insertion fails")
 	require.Contains(t, err.Error(), "insert session diff snapshot", "UpdateTurnComplete should surface the snapshot insertion failure")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestSessionStore_MarkLatestDiffSnapshotPushed(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewSessionStore(mock)
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	headSHA := "abc1234567890abcdef1234567890abcdef12345"
+
+	mock.ExpectExec("UPDATE session_diff_snapshots").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	err = store.MarkLatestDiffSnapshotPushed(context.Background(), orgID, sessionID, headSHA)
+	require.NoError(t, err, "MarkLatestDiffSnapshotPushed should update the latest diff snapshot state")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 

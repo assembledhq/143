@@ -42,6 +42,7 @@ func TestMultiTenancyAudit(t *testing.T) {
 		"eval_batches",
 		"eval_bootstrap_runs",
 		"organization_memberships",
+		"coding_credentials",
 	}
 
 	// Tables exempt from org_id requirement (global or no org_id column)
@@ -98,6 +99,9 @@ func TestMultiTenancyAudit(t *testing.T) {
 		{"users", "where id = @id`"},
 
 		{"organization_memberships", "count(*) from organization_memberships where user_id"}, // CountForUser: user-scoped aggregate; the membership set IS the authoritative org list
+		{"coding_credentials", "where status = 'pending_auth'"},                              // JanitorDeletePendingAuthOlderThan: cross-org system cleanup of expired OAuth handshakes
+		{"coding_credentials", "where provider = 'anthropic'"},                               // EnsureAnthropicSplitSentinel: cross-org migration gate before serving traffic
+		{"coding_credentials", "coding_credentials_migrations"},                              // global migration-sentinel table; name prefix overlaps coding_credentials
 	}
 
 	// Scan all .go files in the db package (not test files)

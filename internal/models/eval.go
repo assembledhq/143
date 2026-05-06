@@ -273,3 +273,26 @@ type EvalBootstrapRun struct {
 	CompletedAt  *time.Time          `db:"completed_at" json:"completed_at,omitempty"`
 	ErrorMessage *string             `db:"error_message" json:"error_message,omitempty"`
 }
+
+// EvalBatchUpdatedEvent is the lightweight pub/sub signal published whenever
+// an eval batch's status or one of its runs' statuses changes. Consumers fetch
+// the full EvalBatchDetail via the existing GET handler when they receive an
+// event; the payload deliberately does not include the runs array to keep
+// fanout cost bounded for large batches.
+type EvalBatchUpdatedEvent struct {
+	BatchID   uuid.UUID       `json:"batch_id"`
+	OrgID     uuid.UUID       `json:"org_id"`
+	Status    EvalBatchStatus `json:"status"`
+	UpdatedAt time.Time       `json:"updated_at"`
+}
+
+// EvalBootstrapUpdatedEvent is the pub/sub signal for bootstrap (PR-history
+// scan) status transitions. Mirrors EvalBatchUpdatedEvent — clients fetch the
+// full EvalBootstrapRun on receipt.
+type EvalBootstrapUpdatedEvent struct {
+	BootstrapRunID uuid.UUID           `json:"bootstrap_run_id"`
+	OrgID          uuid.UUID           `json:"org_id"`
+	Status         EvalBootstrapStatus `json:"status"`
+	SessionID      *uuid.UUID          `json:"session_id,omitempty"`
+	UpdatedAt      time.Time           `json:"updated_at"`
+}

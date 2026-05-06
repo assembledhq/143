@@ -1,8 +1,11 @@
 package agent_test
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -101,6 +104,83 @@ func TestRuntimeSampler_SamplesActiveContainers(t *testing.T) {
 	prov.mu.Lock()
 	defer prov.mu.Unlock()
 	require.Contains(t, prov.calls, "ctr-A")
+}
+
+func TestRuntimeSampler_LogsAggregateHealthSample(t *testing.T) {
+	t.Parallel()
+	tracker := agent.NewUsageTracker(nil, newMetrics(t), zerolog.Nop())
+	prov := &fakeStatsProvider{
+		stats: agent.RuntimeStats{
+			MemoryBytes:      768 * 1024 * 1024,
+			MemoryLimitBytes: 1024 * 1024 * 1024,
+			CPUCores:         0.50,
+		},
+	}
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	cfg := agent.SandboxConfig{CPULimit: 1, MemoryLimitMB: 1024}
+	sb := &agent.Sandbox{ID: "ctr-health", Provider: "docker", OrgID: orgID.String()}
+	tracker.ContainerStarted(context.Background(), orgID, sessionID, sb, cfg, time.Now())
+
+	logs := &syncBuffer{}
+	s := agent.NewRuntimeSampler(tracker, prov, newMetrics(t), 10*time.Millisecond, zerolog.New(logs))
+	ctx, cancel := context.WithCancel(context.Background())
+	go s.Run(ctx)
+	require.Eventually(t, func() bool {
+		return strings.Contains(logs.String(), "platform health: runtime sample")
+	}, time.Second, 10*time.Millisecond, "runtime sampler should emit aggregate platform-health logs")
+	cancel()
+
+	var event map[string]any
+	for _, line := range bytes.Split(bytes.TrimSpace(logs.Bytes()), []byte("\n")) {
+		var candidate map[string]any
+		require.NoError(t, json.Unmarshal(line, &candidate), "runtime sampler should emit JSON logs")
+		if candidate["message"] == "platform health: runtime sample" {
+			event = candidate
+			break
+		}
+	}
+	require.NotNil(t, event, "runtime health log should be present")
+	require.Equal(t, "platform health: runtime sample", event["message"], "runtime health log should have the canonical message")
+	require.Equal(t, float64(1), event["active_containers"], "runtime health log should include active container count")
+	require.Equal(t, float64(0), event["sample_failures"], "runtime health log should include sample failure count")
+	require.InDelta(t, 0.75, event["max_memory_util"].(float64), 0.001, "runtime health log should include max memory utilization")
+	require.InDelta(t, 0.50, event["max_cpu_util"].(float64), 0.001, "runtime health log should include max CPU utilization")
+	require.InDelta(t, 0.75, event["mean_memory_util"].(float64), 0.001, "runtime health log should include mean memory utilization to distinguish single-container outliers from across-the-board pressure")
+	require.InDelta(t, 0.50, event["mean_cpu_util"].(float64), 0.001, "runtime health log should include mean CPU utilization")
+}
+
+func TestRuntimeSampler_LogsAggregateHealthSampleWhenIdle(t *testing.T) {
+	t.Parallel()
+	tracker := agent.NewUsageTracker(nil, newMetrics(t), zerolog.Nop())
+	prov := &fakeStatsProvider{}
+
+	logs := &syncBuffer{}
+	s := agent.NewRuntimeSampler(tracker, prov, newMetrics(t), 10*time.Millisecond, zerolog.New(logs))
+	ctx, cancel := context.WithCancel(context.Background())
+	go s.Run(ctx)
+	require.Eventually(t, func() bool {
+		return strings.Contains(logs.String(), "platform health: runtime sample")
+	}, time.Second, 10*time.Millisecond, "runtime sampler should emit idle platform-health logs")
+	cancel()
+
+	var event map[string]any
+	for _, line := range bytes.Split(bytes.TrimSpace(logs.Bytes()), []byte("\n")) {
+		var candidate map[string]any
+		require.NoError(t, json.Unmarshal(line, &candidate), "runtime sampler should emit JSON logs")
+		if candidate["message"] == "platform health: runtime sample" {
+			event = candidate
+			break
+		}
+	}
+	require.NotNil(t, event, "runtime health log should be present even with no active containers")
+	require.Equal(t, float64(0), event["active_containers"], "idle runtime health log should report zero active containers")
+	require.Equal(t, float64(0), event["sample_failures"], "idle runtime health log should report zero sample failures")
+	require.Equal(t, float64(0), event["max_memory_util"], "idle runtime health log should report zero memory utilization")
+	require.Equal(t, float64(0), event["max_cpu_util"], "idle runtime health log should report zero CPU utilization")
+	require.Equal(t, float64(0), event["mean_memory_util"], "idle runtime health log should report zero mean memory utilization")
+	require.Equal(t, float64(0), event["mean_cpu_util"], "idle runtime health log should report zero mean CPU utilization")
+	require.Equal(t, int64(0), prov.called.Load(), "idle runtime sampler should not call stats provider")
 }
 
 func TestRuntimeSampler_StoppedContainerIsNotSampled(t *testing.T) {
@@ -252,6 +332,31 @@ type wrappedErr struct {
 
 func (w *wrappedErr) Error() string { return w.prefix + ": " + w.err.Error() }
 func (w *wrappedErr) Unwrap() error { return w.err }
+
+// syncBuffer is a thread-safe bytes.Buffer wrapper for capturing zerolog output
+// when a writer goroutine and an Eventually reader goroutine touch the same buffer.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (s *syncBuffer) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.buf.Write(p)
+}
+
+func (s *syncBuffer) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.buf.String()
+}
+
+func (s *syncBuffer) Bytes() []byte {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]byte(nil), s.buf.Bytes()...)
+}
 
 func TestUsageTrackerSnapshot_IsCopy(t *testing.T) {
 	t.Parallel()

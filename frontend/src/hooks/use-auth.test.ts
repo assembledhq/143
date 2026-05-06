@@ -107,7 +107,7 @@ describe('useAuth', () => {
     expect(result.current.isLoading).toBe(true);
   });
 
-  it('logout calls api, clears query cache and redirects', async () => {
+  it('logout calls api, clears query cache and redirects to the landing page', async () => {
     meMock.mockResolvedValue({
       data: { id: '1', email: 'test@test.com', name: 'Test' },
     });
@@ -130,7 +130,7 @@ describe('useAuth', () => {
     await result.current.logout();
 
     expect(logoutMock).toHaveBeenCalledTimes(1);
-    expect(window.location.href).toBe('/login');
+    expect(window.location.href).toBe('/');
 
     // Restore original location
     Object.defineProperty(window, 'location', {

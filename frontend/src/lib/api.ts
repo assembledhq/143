@@ -300,12 +300,13 @@ export const api = {
       del(`/api/v1/pm/documents/${docId}`),
   },
   sessions: {
-    list: (params?: { status?: string; cursor?: string; limit?: number; repository_id?: string; triggered_by_user_id?: string; search?: string; include_archived?: boolean; only_archived?: boolean }) => {
+    list: (params?: { status?: string; cursor?: string; limit?: number; repository_id?: string; triggered_by_user_id?: string; triggered_by_user_ids?: string[]; search?: string; include_archived?: boolean; only_archived?: boolean }) => {
       const searchParams = new URLSearchParams();
       if (params?.status) searchParams.set('status', params.status);
       if (params?.cursor) searchParams.set('cursor', params.cursor);
       if (params?.limit) searchParams.set('limit', String(params.limit));
       if (params?.repository_id) searchParams.set('repository_id', params.repository_id);
+      if (params?.triggered_by_user_ids?.length) searchParams.set('triggered_by_user_ids', params.triggered_by_user_ids.join(','));
       if (params?.triggered_by_user_id) searchParams.set('triggered_by_user_id', params.triggered_by_user_id);
       if (params?.search) searchParams.set('search', params.search);
       if (params?.only_archived) searchParams.set('only_archived', 'true');
@@ -313,9 +314,10 @@ export const api = {
       const qs = searchParams.toString();
       return get<import('./types').ListResponse<import('./types').SessionListItem>>(`/api/v1/sessions${qs ? `?${qs}` : ''}`);
     },
-    counts: (params?: { repository_id?: string; triggered_by_user_id?: string }) => {
+    counts: (params?: { repository_id?: string; triggered_by_user_id?: string; triggered_by_user_ids?: string[] }) => {
       const searchParams = new URLSearchParams();
       if (params?.repository_id) searchParams.set('repository_id', params.repository_id);
+      if (params?.triggered_by_user_ids?.length) searchParams.set('triggered_by_user_ids', params.triggered_by_user_ids.join(','));
       if (params?.triggered_by_user_id) searchParams.set('triggered_by_user_id', params.triggered_by_user_id);
       const qs = searchParams.toString();
       return get<import('./types').SingleResponse<import('./types').SessionCounts>>(`/api/v1/sessions/counts${qs ? `?${qs}` : ''}`);
@@ -376,14 +378,34 @@ export const api = {
       get<import('./types').SingleResponse<import('./types').SessionThread>>(`/api/v1/sessions/${sessionId}/threads/${threadId}`),
     createThread: (sessionId: string, body: { agent_type?: string; model?: string; label: string; instructions?: string; file_scope?: string[] }) =>
       post<import('./types').SingleResponse<import('./types').SessionThread>>(`/api/v1/sessions/${sessionId}/threads`, body),
-    sendThreadMessage: (sessionId: string, threadId: string, message: string, images?: string[]) =>
-      post<import('./types').SingleResponse<import('./types').SessionMessage>>(`/api/v1/sessions/${sessionId}/threads/${threadId}/messages`, { message, images }),
+    sendThreadMessage: (sessionId: string, threadId: string, body: { message: string; images?: string[]; references?: import('./types').SessionInputReference[]; commands?: import('./types').SessionInputCommand[]; planMode?: boolean; resolveReviewCommentIDs?: string[] }) =>
+      post<import('./types').SingleResponse<import('./types').SessionMessage>>(
+        `/api/v1/sessions/${sessionId}/threads/${threadId}/messages`,
+        {
+          message: body.message,
+          images: body.images,
+          references: body.references && body.references.length > 0 ? body.references : undefined,
+          commands: body.commands && body.commands.length > 0 ? body.commands : undefined,
+          plan_mode: body.planMode || undefined,
+          resolve_review_comment_ids: body.resolveReviewCommentIDs && body.resolveReviewCommentIDs.length > 0 ? body.resolveReviewCommentIDs : undefined,
+        },
+      ),
     endThread: (sessionId: string, threadId: string) =>
       post<import('./types').SingleResponse<import('./types').SessionThread>>(`/api/v1/sessions/${sessionId}/threads/${threadId}/end`),
+    cancelThread: (sessionId: string, threadId: string) =>
+      post<import('./types').SingleResponse<import('./types').SessionThread>>(`/api/v1/sessions/${sessionId}/threads/${threadId}/cancel`),
+    forkThread: (sessionId: string, threadId: string, body: { label?: string } = {}) =>
+      post<import('./types').SingleResponse<import('./types').ForkResult>>(`/api/v1/sessions/${sessionId}/threads/${threadId}/fork`, body),
+    revertThread: (sessionId: string, threadId: string) =>
+      post<import('./types').SingleResponse<import('./types').ForkResult>>(`/api/v1/sessions/${sessionId}/threads/${threadId}/revert`),
     getThreadMessages: (sessionId: string, threadId: string) =>
       get<import('./types').ListResponse<import('./types').SessionMessage>>(`/api/v1/sessions/${sessionId}/threads/${threadId}/messages`),
     getThreadLogs: (sessionId: string, threadId: string) =>
       get<import('./types').ListResponse<import('./types').SessionLog>>(`/api/v1/sessions/${sessionId}/threads/${threadId}/logs`),
+    listThreadFileEvents: (sessionId: string, since?: string) => {
+      const qs = since ? `?since=${encodeURIComponent(since)}` : '';
+      return get<import('./types').ListResponse<import('./types').SessionThreadFileEvent>>(`/api/v1/sessions/${sessionId}/thread-file-events${qs}`);
+    },
     listReviewComments: (sessionId: string) =>
       get<import('./types').ListResponse<import('./types').SessionReviewComment>>(`/api/v1/sessions/${sessionId}/review-comments`),
     createReviewComment: (sessionId: string, body: { file_path: string; line_number: number; side?: string; body: string }) =>
@@ -470,6 +492,45 @@ export const api = {
     listResolved: () =>
       get<import('./types').ListResponse<import('./types').ResolvedCredential>>('/api/v1/settings/credentials/resolved'),
   },
+  // Unified coding-credentials API — replaces the split userCredentials +
+  // codingAuths surface. See docs/design/future/65-unified-coding-credentials.md.
+  // The legacy `codingAuths` and `userCredentials` clients below still work
+  // (their writes are mirrored into coding_credentials by the backend) and
+  // remain in use by /settings/agent until the cleanup PR.
+  codingCredentials: {
+    list: (scope: 'org' | 'personal' | 'resolved' = 'personal') =>
+      get<import('./types').ListResponse<import('./types').CodingCredentialSummary>>(
+        `/api/v1/coding-credentials?scope=${scope}`,
+      ),
+    create: (body: {
+      scope: 'org' | 'personal';
+      agent: string;
+      auth_type: 'api_key';
+      label?: string;
+      api_key?: string;
+      api_type?: string;
+      base_url?: string;
+      agent_defaults?: Record<string, string>;
+    }) =>
+      post<import('./types').CodingCredentialSummary>('/api/v1/coding-credentials', body),
+    update: (id: string, body: { scope: 'org' | 'personal'; label?: string; status?: string }) =>
+      request<import('./types').CodingCredentialSummary>(`/api/v1/coding-credentials/${id}`, {
+        method: 'PATCH',
+        body: JSON.stringify(body),
+      }),
+    delete: (id: string, scope: 'org' | 'personal' = 'personal') =>
+      del(`/api/v1/coding-credentials/${id}?scope=${scope}`),
+    move: (id: string, body: { scope: 'org' | 'personal'; before_id?: string; after_id?: string; to_top?: boolean; to_bottom?: boolean }) =>
+      request(`/api/v1/coding-credentials/${id}/move`, {
+        method: 'PATCH',
+        body: JSON.stringify(body),
+      }),
+    reorder: (scope: 'org' | 'personal', orderedIDs: string[]) =>
+      request('/api/v1/coding-credentials/reorder', {
+        method: 'PATCH',
+        body: JSON.stringify({ scope, ordered_ids: orderedIDs }),
+      }),
+  },
   codingAuths: {
     list: () =>
       get<import('./types').ListResponse<import('./types').CodingAuth>>('/api/v1/settings/coding-auths'),
@@ -518,8 +579,23 @@ export const api = {
     syncGitHub: () => post<{ data: { repos_synced: number; errors: number } }>('/api/v1/integrations/github/sync'),
   },
   codexAuth: {
-    initiate: (label?: string) => post<import('./types').SingleResponse<import('./types').CodexDeviceAuth>>('/api/v1/settings/codex-auth/initiate', { label: label ?? '' }),
-    status: (label?: string) => get<import('./types').SingleResponse<import('./types').CodexAuthStatus>>(`/api/v1/settings/codex-auth/status${label ? `?label=${encodeURIComponent(label)}` : ''}`),
+    // `scope` defaults to "org" on the server; pass "personal" to write the
+    // pending-auth row against the caller's user_id in coding_credentials so
+    // the resulting subscription appears in the user's personal stack.
+    initiate: (label?: string, scope?: 'org' | 'personal') =>
+      post<import('./types').SingleResponse<import('./types').CodexDeviceAuth>>(
+        '/api/v1/settings/codex-auth/initiate',
+        { label: label ?? '', ...(scope ? { scope } : {}) },
+      ),
+    status: (label?: string, scope?: 'org' | 'personal') => {
+      const params = new URLSearchParams();
+      if (label) params.set('label', label);
+      if (scope) params.set('scope', scope);
+      const qs = params.toString();
+      return get<import('./types').SingleResponse<import('./types').CodexAuthStatus>>(
+        `/api/v1/settings/codex-auth/status${qs ? `?${qs}` : ''}`,
+      );
+    },
     listSubscriptions: () => get<import('./types').ListResponse<import('./types').CodexSubscription>>('/api/v1/settings/codex-auth/subscriptions'),
     removeSubscription: (id: string) => del(`/api/v1/settings/codex-auth/subscriptions/${id}`),
     // Disconnects every ChatGPT subscription for the org. Used by the
@@ -530,9 +606,19 @@ export const api = {
   claudeCodeAuth: {
     // Starts a PKCE auth flow. The response's authorize_url is opened in the
     // user's browser; after logging in the user pastes `<code>#<state>` back
-    // and the caller invokes complete() with it.
-    initiate: (label: string) => post<import('./types').SingleResponse<import('./types').ClaudeCodeInitiateResponse>>('/api/v1/settings/claude-code-auth/initiate', { label }),
-    complete: (label: string, code: string) => post<import('./types').SingleResponse<import('./types').ClaudeCodeCompleteResponse>>('/api/v1/settings/claude-code-auth/complete', { label, code }),
+    // and the caller invokes complete() with it. `scope` defaults to "org"
+    // on the server; "personal" routes the pending row into the caller's
+    // own user-scoped credential stack.
+    initiate: (label: string, scope?: 'org' | 'personal') =>
+      post<import('./types').SingleResponse<import('./types').ClaudeCodeInitiateResponse>>(
+        '/api/v1/settings/claude-code-auth/initiate',
+        { label, ...(scope ? { scope } : {}) },
+      ),
+    complete: (label: string, code: string, scope?: 'org' | 'personal') =>
+      post<import('./types').SingleResponse<import('./types').ClaudeCodeCompleteResponse>>(
+        '/api/v1/settings/claude-code-auth/complete',
+        { label, code, ...(scope ? { scope } : {}) },
+      ),
     listSubscriptions: () => get<import('./types').ListResponse<import('./types').ClaudeCodeSubscription>>('/api/v1/settings/claude-code-auth/subscriptions'),
     removeSubscription: (id: string) => del(`/api/v1/settings/claude-code-auth/subscriptions/${id}`),
     // Disconnects every Claude subscription for the org while leaving any
@@ -613,7 +699,7 @@ export const api = {
       ),
   },
   projects: {
-    list: (params?: { status?: string; cursor?: string; limit?: number; repository_id?: string; search?: string; proposed_by_pm?: boolean; created_by?: string; include_archived?: boolean; only_archived?: boolean }) => {
+    list: (params?: { status?: string; cursor?: string; limit?: number; repository_id?: string; search?: string; proposed_by_pm?: boolean; created_by?: string; created_by_ids?: string[]; include_archived?: boolean; only_archived?: boolean }) => {
       const searchParams = new URLSearchParams();
       if (params?.status) searchParams.set('status', params.status);
       if (params?.cursor) searchParams.set('cursor', params.cursor);
@@ -621,6 +707,7 @@ export const api = {
       if (params?.repository_id) searchParams.set('repository_id', params.repository_id);
       if (params?.search) searchParams.set('search', params.search);
       if (params?.proposed_by_pm !== undefined) searchParams.set('proposed_by_pm', String(params.proposed_by_pm));
+      if (params?.created_by_ids?.length) searchParams.set('created_by_ids', params.created_by_ids.join(','));
       if (params?.created_by) searchParams.set('created_by', params.created_by);
       if (params?.only_archived) searchParams.set('only_archived', 'true');
       else if (params?.include_archived) searchParams.set('include_archived', 'true');

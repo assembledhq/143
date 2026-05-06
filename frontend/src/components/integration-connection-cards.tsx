@@ -43,10 +43,21 @@ type SourceControlIntegrationCardProps = IntegrationCallbacks & RepoCallbacks & 
   isSyncing?: boolean;
 };
 
+// IntegrationAuthErrorInfo mirrors the shape the backend returns on
+// Integration.auth_error: a controlled reason string plus the timestamp
+// the failure was last observed. Surfaced as an amber banner attached to
+// the relevant integration card so the user sees "you need to reconnect"
+// rather than a generic "session prepare failed" downstream.
+export type IntegrationAuthErrorInfo = {
+  reason: string;
+  at: string;
+};
+
 type AdditionalIntegrationCardsProps = IntegrationCallbacks & {
   sentryConnected: boolean;
   linearConnected: boolean;
   linearLoading: boolean;
+  linearAuthError?: IntegrationAuthErrorInfo | null;
   slackConnected: boolean;
   notionConnected: boolean;
   notionLoading?: boolean;
@@ -197,6 +208,49 @@ function ConnectedReposList({
   );
 }
 
+// IntegrationAuthErrorAlert renders the amber "your token was rejected"
+// banner the integrations card slots in via `extra`. Reason + timestamp
+// only — the actual Reconnect button lives in the row's main action slot
+// (IntegrationAction with authErrored=true) so there's a single CTA per
+// row instead of two.
+function IntegrationAuthErrorAlert({ info }: { info: IntegrationAuthErrorInfo }) {
+  // Render the absolute timestamp in an unambiguous, locale-stable format
+  // (YYYY-MM-DD HH:MM:SS in the viewer's local timezone) so operators
+  // helping each other across regions can compare notes without
+  // 5/2/2026-vs-02/05/2026 confusion. Local time still — the user is
+  // already implicitly in their tz when they read the page.
+  let observedAt = info.at;
+  try {
+    const d = new Date(info.at);
+    if (!Number.isNaN(d.getTime())) {
+      const fmt = new Intl.DateTimeFormat("sv-SE", {
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+        hour: "2-digit",
+        minute: "2-digit",
+        second: "2-digit",
+        hour12: false,
+      });
+      observedAt = fmt.format(d);
+    }
+  } catch {
+    // fall back to the raw string
+  }
+  return (
+    <div
+      role="alert"
+      className="mt-2 rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-300"
+    >
+      <div className="font-medium">Reconnect required</div>
+      <p className="mt-0.5 text-amber-700/90 dark:text-amber-200/90">{info.reason}</p>
+      <p className="mt-0.5 text-xs text-amber-700/70 dark:text-amber-200/70">
+        Last seen at {observedAt}
+      </p>
+    </div>
+  );
+}
+
 function IntegrationLogo({ name, src }: { name: string; src: string }) {
   return (
     <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-muted/50 dark:bg-white/5 ring-1 ring-border/50 transition-transform duration-200 group-hover:scale-105">
@@ -230,6 +284,7 @@ function IntegrationAction({
   disconnectError,
   loading,
   readOnly,
+  authErrored,
 }: {
   connected: boolean;
   integrationKey: IntegrationKey;
@@ -240,14 +295,40 @@ function IntegrationAction({
   disconnectError?: string | null;
   loading?: boolean;
   readOnly?: boolean;
+  /**
+   * When true, the row's primary action becomes a "Reconnect <Provider>"
+   * button instead of "Connect"/"Disconnect". Set whenever the backend
+   * surfaces Integration.auth_error so the user has a single clear CTA
+   * (the amber banner above the row carries the reason; this is the action).
+   */
+  authErrored?: boolean;
 }) {
   const [confirmOpen, setConfirmOpen] = useState(false);
 
   if (readOnly) {
     return (
-      <Badge variant={connected ? "secondary" : "outline"} className="text-xs">
-        {connected ? "Connected" : "Not connected"}
+      <Badge variant={authErrored ? "outline" : connected ? "secondary" : "outline"} className="text-xs">
+        {authErrored ? "Reconnect required" : connected ? "Connected" : "Not connected"}
       </Badge>
+    );
+  }
+
+  if (authErrored) {
+    // Single CTA in the auth-errored state: skip the disconnect / connected
+    // / connect branches below so the user sees one unambiguous "Reconnect"
+    // button. onConnect drives the OAuth flow which the API handler treats
+    // as a reconnect (ensureIntegration resets status and clears markers).
+    return (
+      <Button
+        size="sm"
+        variant="default"
+        loading={loading}
+        disabled={loading}
+        onClick={onConnect}
+        aria-label={`Reconnect ${integrationName}`}
+      >
+        {`Reconnect ${integrationName}`}
+      </Button>
     );
   }
 
@@ -377,6 +458,7 @@ export function AdditionalIntegrationCards({
   sentryConnected,
   linearConnected,
   linearLoading,
+  linearAuthError,
   slackConnected,
   notionConnected,
   notionLoading,
@@ -423,6 +505,7 @@ export function AdditionalIntegrationCards({
           description: linear.description,
           logo: <IntegrationLogo name={linear.name} src={linear.logoSrc} />,
           badge: <Badge variant="secondary" className="text-xs">Optional</Badge>,
+          extra: linearAuthError ? <IntegrationAuthErrorAlert info={linearAuthError} /> : undefined,
           action: (
             <IntegrationAction
               connected={linearConnected}
@@ -434,6 +517,7 @@ export function AdditionalIntegrationCards({
               disconnectError={disconnectErrorProvider === "linear" ? disconnectError : null}
               loading={linearLoading}
               readOnly={readOnly}
+              authErrored={Boolean(linearAuthError)}
             />
           ),
         },
@@ -496,6 +580,7 @@ export function AllIntegrationCards({
   sentryConnected,
   linearConnected,
   linearLoading,
+  linearAuthError,
   slackConnected,
   notionConnected,
   notionLoading,
@@ -565,6 +650,7 @@ export function AllIntegrationCards({
           description: linear.description,
           logo: <IntegrationLogo name={linear.name} src={linear.logoSrc} />,
           badge: <Badge variant="secondary" className="text-xs">Optional</Badge>,
+          extra: linearAuthError ? <IntegrationAuthErrorAlert info={linearAuthError} /> : undefined,
           action: (
             <IntegrationAction
               connected={linearConnected}
@@ -576,6 +662,7 @@ export function AllIntegrationCards({
               disconnectError={disconnectErrorProvider === "linear" ? disconnectError : null}
               loading={linearLoading}
               readOnly={readOnly}
+              authErrored={Boolean(linearAuthError)}
             />
           ),
         },

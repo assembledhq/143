@@ -143,6 +143,23 @@ describe('api client', () => {
       expect(url.searchParams.get('status')).toBe('completed');
     });
 
+    it('serializes multi-person session filters', async () => {
+      let capturedUrl: string | undefined;
+
+      server.use(
+        http.get('/api/v1/sessions', ({ request }) => {
+          capturedUrl = request.url;
+          return HttpResponse.json({ data: [], meta: {} });
+        }),
+      );
+
+      await api.sessions.list({ triggered_by_user_ids: ['user-1', 'user-2'] });
+
+      expect(capturedUrl).toBeDefined();
+      const url = new URL(capturedUrl!);
+      expect(url.searchParams.get('triggered_by_user_ids')).toBe('user-1,user-2');
+    });
+
     it('fetches single session', async () => {
       const mockSession = {
         data: {
@@ -180,6 +197,25 @@ describe('api client', () => {
 
       await api.sessions.answerQuestion('session-1', 'q-1', 'Try option B');
       expect(capturedBody).toEqual({ answer: 'Try option B' });
+    });
+  });
+
+  describe('projects', () => {
+    it('serializes multi-person project filters', async () => {
+      let capturedUrl: string | undefined;
+
+      server.use(
+        http.get('/api/v1/projects', ({ request }) => {
+          capturedUrl = request.url;
+          return HttpResponse.json({ data: [], meta: {} });
+        }),
+      );
+
+      await api.projects.list({ created_by_ids: ['user-1', 'user-2'] });
+
+      expect(capturedUrl).toBeDefined();
+      const url = new URL(capturedUrl!);
+      expect(url.searchParams.get('created_by_ids')).toBe('user-1,user-2');
     });
   });
 

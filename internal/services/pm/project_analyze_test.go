@@ -25,6 +25,7 @@ func (m *mockAdapter) PreparePrompt(ctx context.Context, input *agent.AgentInput
 func (m *mockAdapter) Execute(ctx context.Context, sb *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
 	return &agent.AgentResult{}, nil
 }
+func (m *mockAdapter) ResumeMode() agent.SessionResumeMode { return agent.ResumeUnsupported }
 
 // mockSandbox is a minimal stub for agent.SandboxProvider.
 type mockSandbox struct{}

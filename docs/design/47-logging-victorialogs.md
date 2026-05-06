@@ -1,10 +1,10 @@
 # Design: Centralized Logging with VictoriaLogs
 
-> **Status:** Partially Implemented | **Last reviewed:** 2026-04-21
+> **Status:** Partially Implemented | **Last reviewed:** 2026-05-04
 >
-> **Implementation notes:** VictoriaLogs/Grafana Docker Compose, Vector collector config, logging-node cloud-init, deploy/provision script support, and `make logs` / `make logs-query` are implemented. Dashboard and alert curation remain follow-up operational work.
+> **Implementation notes:** VictoriaLogs/Grafana Docker Compose, Vector collector config, logging-node cloud-init, deploy/provision script support, `make logs` / `make logs-query`, provisioned Grafana error and platform health dashboards, and repo-owned `vmalert` alert rules are implemented. Scheduler heartbeat alerts remain follow-up operational work.
 
-Self-hosted VictoriaLogs + Grafana stack on a dedicated Hetzner logging server, with Vector collectors on the app and worker servers.
+Self-hosted VictoriaLogs + Grafana stack on a dedicated Hetzner logging server, with Vector collectors on the app, worker, and logging servers.
 
 ## Motivation
 
@@ -338,16 +338,19 @@ Provisioning workflow:
 
 ### Step 2: Deploy Vector Collectors
 
-1. Add `VICTORIALOGS_HOST` (logging server's private IP) and `SERVER_ROLE` to the `.env` on both app and worker servers. Update provisioning/deploy scripts to include these vars (see A.2 and A.3 changes below).
-2. Add `docker-compose.vector.yml` to the repo and `include` it from `docker-compose.app.yml` and `docker-compose.worker.yml`
-3. Deploy both — Vector starts collecting Docker logs immediately
+1. Add `VICTORIALOGS_HOST` (logging server's private IP) and `SERVER_ROLE` to the `.env` on app, worker, and logging servers. Update provisioning/deploy scripts to include these vars (see A.2 and A.3 changes below).
+2. Add `docker-compose.vector.yml` to the repo and `include` it from `docker-compose.app.yml`, `docker-compose.worker.yml`, and `docker-compose.logging.yml`
+3. Deploy the nodes — Vector starts collecting Docker logs immediately, including logging-node services such as `disk-monitor`
 4. Verify logs appear in Grafana
 
 ### Step 3: Set Up Dashboards and Alerts
 
-1. Create Grafana dashboards for key views (errors by service, agent run logs, request logs)
-2. Configure Grafana alerts (error rate spikes, agent run failures, sandbox OOM)
-3. Update `09-observability.md` and `10-infrastructure.md` to reference VictoriaLogs
+1. The provisioned error drilldown dashboard lives at `deploy/grafana/provisioning/dashboards/errors.json` and covers PR creation/push failures, session problems, worker fatal jobs, API 5xxs, reaper errors, top error messages, and raw recent error logs.
+2. The provisioned platform health dashboard lives at `deploy/grafana/provisioning/dashboards/platform-health.json` and covers job queue health, session/agent outcomes, API latency and traffic, and sandbox/runtime health from structured log signals.
+3. The Grafana dashboard provider uses `disableDeletion: false`, so removed dashboard JSON files are deleted from Grafana after provisioning resync.
+4. The repo-owned alert rules live at `deploy/vmalert/rules/production-alerts.yml` and are evaluated by `vmalert` against VictoriaLogs, then routed through Alertmanager.
+5. `deploy-logging` syncs `deploy/grafana/provisioning/`, `deploy/vmalert/rules/`, `docker-compose.vector.yml`, and `deploy/vector.yaml` before recreating the logging stack. This makes dashboard, datasource, Vector, and alert rule edits apply through normal deploys.
+6. Scheduler heartbeat alerts should wait for dedicated heartbeat signals so the rules are not guesswork.
 
 ## LogsQL Query Examples
 
@@ -373,7 +376,10 @@ org_id:"org-456" AND _time:[now-1h,now]
 trace_id:"tr-789" OR request_id:"req-012"
 
 # Numeric range filter (e.g. response times over 1 second)
-service:api AND response_time_ms:range(1000, Inf)
+service:api AND duration_ms:range(1000, Inf)
+
+# API request traffic by status class
+service:api AND (_msg:"request" OR _msg:"request failed") | stats by (status_class) count() as requests
 ```
 
 ## Alerting
@@ -408,6 +414,7 @@ The repo-owned production rule set now lives in `deploy/vmalert/rules/production
 - `vmalert` for rule evaluation
 - `Alertmanager` for grouping and delivery
 - `Grafana` for dashboards and alert visibility via the provisioned Alertmanager datasource
+- `Vector` for collecting logging-node container logs, including `disk-monitor`
 
 ## Resource Budget
 

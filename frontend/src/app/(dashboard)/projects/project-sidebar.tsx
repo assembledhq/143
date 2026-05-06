@@ -4,10 +4,10 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { notify as toast } from "@/lib/notify";
 import { Archive, ArchiveRestore, FolderKanban, Plus, Search } from "lucide-react";
 import Link from "next/link";
-import { useParams, usePathname } from "next/navigation";
+import { usePathname, useSelectedLayoutSegment } from "next/navigation";
 import { useEffect, useMemo, useState } from "react";
 import { useQueryState, parseAsString } from "nuqs";
-import { OwnerScopeToggle } from "@/components/owner-scope-toggle";
+import { PeopleFilter } from "@/components/people-filter";
 import { SwipeActionRow } from "@/components/swipe-action-row";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -15,8 +15,7 @@ import { cn, formatTimeAgo } from "@/lib/utils";
 import { StatusDot } from "@/components/status-dot";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { api } from "@/lib/api";
-import { useProjectUserFilter } from "@/hooks/use-project-user-filter";
-import { useFilterSuffix } from "@/hooks/use-owner-scope-filter";
+import { useFilterSuffix, usePeopleFilter } from "@/hooks/use-people-filter";
 import { projectStatusConfig, projectStatusDotColor } from "@/lib/types";
 import type { Project } from "@/lib/types";
 const filterTabs = [
@@ -37,10 +36,18 @@ function filterProjects(projects: Project[], filter: string | null): Project[] {
 // ---------------------------------------------------------------------------
 
 export function ProjectSidebar() {
-  const params = useParams();
   const pathname = usePathname();
-  const selectedId = params?.id as string | undefined;
-  const { currentUserFilter, createdByUserId, isResolved, setUserFilter } = useProjectUserFilter();
+  const selectedSegment = useSelectedLayoutSegment();
+  const selectedId = selectedSegment && selectedSegment !== "new" ? selectedSegment : undefined;
+  const {
+    mode,
+    selectedUserIDs,
+    scopedUserIDs,
+    serializedPeopleParam,
+    currentUser,
+    isResolved,
+    setPeopleFilter,
+  } = usePeopleFilter();
   const [searchParam, setSearchParam] = useQueryState("search", parseAsString);
   const [search, setSearch] = useState(searchParam ?? "");
   const [activeFilter, setActiveFilter] = useQueryState("status", parseAsString);
@@ -61,12 +68,19 @@ export function ProjectSidebar() {
     void setSearchParam(search || null);
   }, [search, searchParam, setSearchParam]);
 
+  const { data: membersData } = useQuery({
+    queryKey: ["team", "members"],
+    queryFn: () => api.team.listMembers(),
+  });
+
+  const members = useMemo(() => membersData?.data ?? [], [membersData?.data]);
+
   const { data, isLoading } = useQuery({
-    queryKey: ["projects", activeFilter, repo, currentUserFilter, createdByUserId],
+    queryKey: ["projects", activeFilter, repo, serializedPeopleParam],
     queryFn: () => api.projects.list({
       limit: 50,
       repository_id: repo ?? undefined,
-      created_by: createdByUserId,
+      created_by_ids: scopedUserIDs,
       ...(activeFilter === "archived" ? { only_archived: true } : {}),
     }),
     enabled: isResolved,
@@ -118,11 +132,11 @@ export function ProjectSidebar() {
 
   // Carry the sidebar's filters into detail-page links so opening a project
   // doesn't reset the scope back to "Mine".
-  const filterSuffix = useFilterSuffix(currentUserFilter, activeFilter, repo, search || null);
+  const filterSuffix = useFilterSuffix(serializedPeopleParam, activeFilter, repo, search || null);
 
   const isNewProject = pathname === "/projects/new";
   const showMineEmptyState =
-    currentUserFilter === "mine" &&
+    mode === "mine" &&
     currentFilter === "all" &&
     !search.trim() &&
     displayedProjects.length === 0;
@@ -141,9 +155,12 @@ export function ProjectSidebar() {
               className="h-8 pl-8 text-xs"
             />
         </div>
-          <OwnerScopeToggle
-            currentUserFilter={currentUserFilter}
-            onFilterChange={setUserFilter}
+          <PeopleFilter
+            mode={mode}
+            selectedUserIDs={selectedUserIDs}
+            members={members}
+            currentUser={currentUser}
+            onFilterChange={setPeopleFilter}
             className="shrink-0"
           />
         </div>
@@ -205,7 +222,7 @@ export function ProjectSidebar() {
 
         {isResolved && !isLoading && displayedProjects.length === 0 && (
           <div className="px-2 py-8 text-center text-xs text-muted-foreground">
-            {allProjects.length === 0 && currentUserFilter === "all" ? (
+            {allProjects.length === 0 && mode === "all" ? (
               <div className="space-y-2">
                 <FolderKanban className="h-5 w-5 mx-auto text-muted-foreground/40" />
                 <p>No projects yet</p>
@@ -238,12 +255,13 @@ export function ProjectSidebar() {
               className="mb-0.5"
               actionLabel={isArchived ? "Unarchive project" : "Archive project"}
               actionText={isArchived ? "Restore" : "Archive"}
+              desktopActionVisibility="hover"
               actionIcon={isArchived ? <ArchiveRestore className="h-4 w-4" /> : <Archive className="h-4 w-4" />}
               onAction={() => {
                 if (isArchived) {
-                  unarchiveMutation.mutate(project.id);
+                  return unarchiveMutation.mutateAsync(project.id);
                 } else {
-                  archiveMutation.mutate(project.id);
+                  return archiveMutation.mutateAsync(project.id);
                 }
               }}
             >

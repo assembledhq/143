@@ -4,9 +4,10 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { notify as toast } from "@/lib/notify";
 import { Archive, ArchiveRestore, Plus, Search } from "lucide-react";
 import Link from "next/link";
-import { useParams, usePathname } from "next/navigation";
+import { usePathname, useRouter, useSelectedLayoutSegment } from "next/navigation";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useQueryState, parseAsString } from "nuqs";
+import { PeopleFilter } from "@/components/people-filter";
 import { cn, formatTimeAgo, sessionTitle } from "@/lib/utils";
 import { StatusDot } from "@/components/status-dot";
 import { AnimatedEllipsis } from "@/components/animated-ellipsis";
@@ -15,14 +16,12 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { api } from "@/lib/api";
-import { useSessionUserFilter } from "@/hooks/use-session-user-filter";
-import { useFilterSuffix } from "@/hooks/use-owner-scope-filter";
-import { SessionOwnerToggle } from "./session-owner-toggle";
+import { useFilterSuffix, usePeopleFilter } from "@/hooks/use-people-filter";
 import { queryKeys } from "@/lib/query-keys";
 import { useOptimisticSessions, type OptimisticSession } from "@/contexts/optimistic-sessions";
 import { DiffStatsBadge } from "@/components/code-review/diff-stats-badge";
 import { NoReposWarning } from "@/components/no-repos-warning";
-import type { SessionListItem } from "@/lib/types";
+import type { SessionListItem, User } from "@/lib/types";
 import { prMergedAccent } from "@/lib/pr-status-styles";
 import {
   workingSet,
@@ -37,7 +36,7 @@ import { getCountForTab, renderCount } from "@/lib/session-counts";
 const statusConfig: Record<string, { dot: string; label: string }> = {
   pending: { dot: "bg-muted-foreground/50", label: "Pending" },
   running: { dot: "bg-primary", label: "Running" },
-  idle: { dot: "bg-sky-500", label: "Idle" },
+  idle: { dot: "bg-primary", label: "Idle" },
   awaiting_input: { dot: "bg-amber-500", label: "Awaiting input" },
   needs_human_guidance: { dot: "bg-orange-500", label: "Needs guidance" },
   completed: { dot: "bg-emerald-500", label: "Completed" },
@@ -122,6 +121,19 @@ function SessionDiffBadge({ diffStats }: { diffStats?: { added: number; removed:
   );
 }
 
+function SessionLinearBadge({ session }: { session: SessionListItem }) {
+  const linearLabel =
+    session.linear_identifier_hint ??
+    session.linked_issues?.find((issue) => issue.issue_source === "linear")?.external_id;
+  if (!linearLabel) return null;
+
+  return (
+    <span className="inline-flex shrink-0 rounded-md border border-border/60 bg-muted/50 px-1.5 py-0.5 text-xs text-muted-foreground">
+      {linearLabel}
+    </span>
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Optimistic (unsaved) session row
 // ---------------------------------------------------------------------------
@@ -159,11 +171,20 @@ function OptimisticSessionRow({ session }: { session: OptimisticSession }) {
 // ---------------------------------------------------------------------------
 
 export function SessionSidebar() {
-  const params = useParams();
+  const router = useRouter();
   const pathname = usePathname();
+  const selectedSegment = useSelectedLayoutSegment();
   const queryClient = useQueryClient();
-  const { currentUserFilter, triggeredByUserId, isResolved, setUserFilter } = useSessionUserFilter();
-  const selectedId = params?.id as string | undefined;
+  const {
+    mode,
+    selectedUserIDs,
+    scopedUserIDs,
+    serializedPeopleParam,
+    currentUser,
+    isResolved,
+    setPeopleFilter,
+  } = usePeopleFilter();
+  const selectedId = selectedSegment && selectedSegment !== "new" ? selectedSegment : undefined;
   const [searchParam, setSearchParam] = useQueryState("search", parseAsString);
   const [search, setSearch] = useState(searchParam ?? "");
   const searchRef = useRef(search);
@@ -208,6 +229,11 @@ export function SessionSidebar() {
 
   const [activeFilter, setActiveFilter] = useQueryState("status", parseAsString);
   const [repo] = useQueryState("repo");
+  const { data: membersData } = useQuery({
+    queryKey: ["team", "members"],
+    queryFn: () => api.team.listMembers(),
+  });
+  const members = useMemo<User[]>(() => membersData?.data ?? [], [membersData?.data]);
 
   const { optimisticSessions, removeOptimisticSession } = useOptimisticSessions();
 
@@ -229,7 +255,7 @@ export function SessionSidebar() {
   // Reset pagination when the effective query scope changes. Adjusting state
   // during render (rather than in an effect) avoids cascading renders — see
   // https://react.dev/reference/react/useState#storing-information-from-previous-renders.
-  const scopeKey = `${repo ?? ""}|${triggeredByUserId ?? ""}|${currentFilter}|${trimmedSearch}`;
+  const scopeKey = `${repo ?? ""}|${serializedPeopleParam ?? "mine"}|${currentFilter}|${trimmedSearch}`;
   const [prevScopeKey, setPrevScopeKey] = useState(scopeKey);
   if (prevScopeKey !== scopeKey) {
     setPrevScopeKey(scopeKey);
@@ -240,16 +266,16 @@ export function SessionSidebar() {
     () => ({
       limit: 50,
       repository_id: repo ?? undefined,
-      triggered_by_user_id: triggeredByUserId,
+      triggered_by_user_ids: scopedUserIDs,
       search: trimmedSearch || undefined,
       ...(isArchivedView ? { only_archived: true } : {}),
       ...(!isArchivedView && statusParam ? { status: statusParam } : {}),
     }),
-    [repo, triggeredByUserId, trimmedSearch, isArchivedView, statusParam],
+    [repo, scopedUserIDs, trimmedSearch, isArchivedView, statusParam],
   );
 
   const { data: listData, isLoading } = useQuery({
-    queryKey: [...queryKeys.sessions.list(repo), "filtered", currentFilter, triggeredByUserId, trimmedSearch],
+    queryKey: [...queryKeys.sessions.list(repo), "filtered", currentFilter, serializedPeopleParam, trimmedSearch],
     queryFn: () => api.sessions.list(listParams),
     enabled: isResolved,
     refetchInterval: isPaginated ? false : 10000,
@@ -258,11 +284,11 @@ export function SessionSidebar() {
   // Tab badge counts. Search-independent so tabs reflect the scope totals, not
   // the current search result size.
   const { data: countsData } = useQuery({
-    queryKey: queryKeys.sessions.counts(repo, triggeredByUserId),
+    queryKey: queryKeys.sessions.counts(repo, serializedPeopleParam),
     queryFn: () =>
       api.sessions.counts({
         repository_id: repo ?? undefined,
-        triggered_by_user_id: triggeredByUserId,
+        triggered_by_user_ids: scopedUserIDs,
       }),
     enabled: isResolved,
     refetchInterval: 10000,
@@ -334,7 +360,7 @@ export function SessionSidebar() {
 
   // Carry the sidebar's filters into detail-page links so opening a session
   // doesn't reset the scope back to "Mine".
-  const filterSuffix = useFilterSuffix(currentUserFilter, activeFilter, repo, search || null);
+  const filterSuffix = useFilterSuffix(serializedPeopleParam, activeFilter, repo, search || null);
 
   const isNewSession = pathname === "/sessions/new";
   const showDefaultEmptyState =
@@ -362,9 +388,12 @@ export function SessionSidebar() {
               className="h-8 pl-8 text-xs"
             />
           </div>
-          <SessionOwnerToggle
-            currentUserFilter={currentUserFilter}
-            onFilterChange={setUserFilter}
+          <PeopleFilter
+            mode={mode}
+            selectedUserIDs={selectedUserIDs}
+            members={members}
+            currentUser={currentUser}
+            onFilterChange={setPeopleFilter}
             className="shrink-0"
           />
         </div>
@@ -459,6 +488,8 @@ export function SessionSidebar() {
           const hasUnread = isUnread(session);
           const ts = session.completed_at || session.started_at || session.created_at;
           const isArchived = !!session.archived_at;
+          const title = sessionTitle(session);
+          const sessionHref = `/sessions/${session.id}${filterSuffix}`;
 
           return (
             <SwipeActionRow
@@ -466,74 +497,98 @@ export function SessionSidebar() {
               className="mb-0.5"
               actionLabel={isArchived ? "Unarchive session" : "Archive session"}
               actionText={isArchived ? "Restore" : "Archive"}
+              desktopActionVisibility="hover"
               actionIcon={isArchived ? <ArchiveRestore className="h-4 w-4" /> : <Archive className="h-4 w-4" />}
               onAction={() => {
                 if (isArchived) {
-                  unarchiveMutation.mutate(session.id);
+                  return unarchiveMutation.mutateAsync(session.id);
                 } else {
-                  archiveMutation.mutate(session.id);
+                  return archiveMutation.mutateAsync(session.id);
                 }
               }}
             >
-              <Link
-                href={`/sessions/${session.id}${filterSuffix}`}
+              <div
                 className={cn(
-                  "block rounded-lg bg-muted/30 px-3 py-2.5 transition-all duration-150",
-                  isSelected
-                    ? "bg-background shadow-sm border border-border/50"
-                    : "hover:bg-background/60"
+                  "flex min-w-0 rounded-xl border border-transparent p-1 transition-all duration-150",
+                  isSelected && "cursor-pointer border-primary/20 bg-background shadow-sm ring-1 ring-primary/10",
                 )}
+                onClick={(event) => {
+                  if (!isSelected || event.defaultPrevented || event.target !== event.currentTarget) {
+                    return;
+                  }
+                  router.push(sessionHref);
+                }}
               >
-                <div className="flex items-start gap-2.5 min-w-0">
-                  {/* Unread / working indicator */}
-                  <div className="mt-1.5 shrink-0">
-                    {isWorkingSession ? (
-                      <StatusDot animate color="bg-primary" pingColor="bg-primary/60" />
-                    ) : hasUnread ? (
-                      <StatusDot color="bg-primary" />
-                    ) : (
-                      <span className="inline-flex rounded-full h-2 w-2" />
-                    )}
-                  </div>
-
-                {/* Content */}
-                <div className="min-w-0 flex-1">
-                  <div className="flex items-start justify-between gap-2">
-                    <p className={cn(
-                      "text-xs font-medium truncate leading-snug",
-                      hasUnread || isWorkingSession ? "text-foreground" : "text-muted-foreground"
-                    )}>
-                      {sessionTitle(session)}
-                    </p>
-                  </div>
-                  <div className="flex items-center justify-between mt-0.5">
-                    <div className="flex items-center gap-3 min-w-0">
-                      <span className="text-xs text-muted-foreground shrink-0">
-                        <span>{cfg.label}</span>
-                        {isWorkingSession && <AnimatedEllipsis />}
-                      </span>
-                      {session.pm_plan_id && !session.triggered_by_user_id && (
-                        <span className="inline-flex items-center rounded-full bg-primary/10 px-1.5 py-0.5 text-xs font-medium text-primary shrink-0">
-                          PM
-                        </span>
-                      )}
-                      <span className="text-xs text-muted-foreground/50 truncate">
-                        {formatTimeAgo(ts)}
-                      </span>
-                    </div>
-                    <div className="flex items-center gap-1.5 shrink-0">
-                      <PRStatusBadge prSummary={session.pr_summary} />
-                      <SessionDiffBadge diffStats={session.diff_stats} />
-                    </div>
-                  </div>
-                  {session.status === "failed" && (session.failure_explanation || session.error) && (
-                    <p className="text-xs text-destructive/70 truncate mt-0.5">
-                      {session.failure_explanation || session.error}
-                    </p>
+                <Link
+                  href={sessionHref}
+                  aria-current={isSelected ? "page" : undefined}
+                  className={cn(
+                    "relative block min-w-0 flex-1 overflow-hidden rounded-lg border border-border/50 bg-background px-3 py-2.5 shadow-sm transition-all duration-150 md:border-transparent md:bg-muted/30 md:shadow-none",
+                    isSelected
+                      ? "border-transparent bg-primary/5 shadow-none ring-0 md:border-transparent md:bg-primary/5 md:shadow-none"
+                      : "hover:border-border/60 hover:bg-background md:hover:border-transparent md:hover:bg-background/60"
                   )}
-                </div>
-                </div>
-              </Link>
+                >
+                  <span
+                    aria-hidden="true"
+                    className={cn(
+                      "absolute inset-y-2 left-1 w-0.5 rounded-full bg-primary/0 transition-colors duration-150",
+                      isSelected && "bg-primary/55",
+                    )}
+                  />
+                  <div className="flex items-start gap-2.5 min-w-0">
+                    <div className="mt-1.5 shrink-0">
+                      {isWorkingSession ? (
+                        <StatusDot animate color="bg-primary" pingColor="bg-primary/60" />
+                      ) : hasUnread ? (
+                        <StatusDot color="bg-primary" />
+                      ) : (
+                        <span className="inline-flex rounded-full h-2 w-2" />
+                      )}
+                    </div>
+
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-start justify-between gap-2">
+                        <p className={cn(
+                          "text-xs font-medium truncate leading-snug",
+                          hasUnread || isWorkingSession ? "text-foreground" : "text-muted-foreground"
+                        )}>
+                          {title}
+                        </p>
+                      </div>
+                      <div className="mt-0.5 flex min-w-0 items-center gap-2">
+                        <div
+                          data-testid={`session-row-meta-scroll-${session.id}`}
+                          className="min-w-0 flex-1 overflow-x-auto overflow-y-hidden scrollbar-hide"
+                        >
+                          <div className="flex min-w-max items-center gap-1.5 pr-1">
+                            <span className="text-xs text-muted-foreground shrink-0">
+                              <span>{cfg.label}</span>
+                              {isWorkingSession && <AnimatedEllipsis />}
+                            </span>
+                            {session.pm_plan_id && !session.triggered_by_user_id && (
+                              <span className="inline-flex items-center rounded-full bg-primary/10 px-1.5 py-0.5 text-xs font-medium text-primary shrink-0">
+                                PM
+                              </span>
+                            )}
+                            <SessionLinearBadge session={session} />
+                            <span className="text-xs text-muted-foreground/50 shrink-0">
+                              {formatTimeAgo(ts)}
+                            </span>
+                            <PRStatusBadge prSummary={session.pr_summary} />
+                            <SessionDiffBadge diffStats={session.diff_stats} />
+                          </div>
+                        </div>
+                      </div>
+                      {session.status === "failed" && (session.failure_explanation || session.error) && (
+                        <p className="text-xs text-destructive/70 truncate mt-0.5">
+                          {session.failure_explanation || session.error}
+                        </p>
+                      )}
+                    </div>
+                  </div>
+                </Link>
+              </div>
             </SwipeActionRow>
           );
         })}

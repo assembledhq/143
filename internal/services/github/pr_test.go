@@ -25,6 +25,7 @@ import (
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/services/agent"
+	"github.com/assembledhq/143/internal/services/sandboxauth"
 	"github.com/assembledhq/143/internal/services/storage"
 )
 
@@ -122,19 +123,33 @@ func (s *prTestSnapshotStore) Delete(_ context.Context, key string) error {
 }
 
 type prTestSandboxProvider struct {
-	lastConfig  agent.SandboxConfig
-	lastExecCmd string
-	writes      map[string][]byte
-	execExit    int
-	execErr     error
-	execStderr  string
-	execStdout  string
-	createErr   error
-	restoreErr  error
-	writeErrs   map[string]error
-	destroyErr  error
-	destroyed   int
-	snapshotErr error
+	lastConfig    agent.SandboxConfig
+	lastExecCmd   string
+	writes        map[string][]byte
+	execExit      int
+	execErr       error
+	execStderr    string
+	execStdout    string
+	execSequence  []prTestExecResponse
+	execCallCount int
+	createErr     error
+	restoreErr    error
+	writeErrs     map[string]error
+	destroyErr    error
+	destroyed     int
+	snapshotErr   error
+}
+
+// prTestExecResponse drives a multi-call Exec sequence: each provider Exec()
+// pops the next response (capped at the slice length, after which the static
+// execExit/execStdout/execStderr/execErr fields take over). Lets tests assert
+// behavior that depends on the order of two or more sandbox executions —
+// e.g. "first push attempt is rejected, second succeeds".
+type prTestExecResponse struct {
+	exit   int
+	stdout string
+	stderr string
+	err    error
 }
 
 func (p *prTestSandboxProvider) Name() string { return "test" }
@@ -153,6 +168,18 @@ func (p *prTestSandboxProvider) CloneRepo(context.Context, *agent.Sandbox, strin
 
 func (p *prTestSandboxProvider) Exec(_ context.Context, _ *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
 	p.lastExecCmd = cmd
+	idx := p.execCallCount
+	p.execCallCount++
+	if idx < len(p.execSequence) {
+		r := p.execSequence[idx]
+		if r.stdout != "" {
+			_, _ = io.WriteString(stdout, r.stdout)
+		}
+		if r.stderr != "" {
+			_, _ = io.WriteString(stderr, r.stderr)
+		}
+		return r.exit, r.err
+	}
 	if p.execStdout != "" {
 		_, _ = io.WriteString(stdout, p.execStdout)
 	}
@@ -2879,6 +2906,102 @@ func TestNormalizePRTitleCandidate_TruncatesLongTitle(t *testing.T) {
 	require.Len(t, result, 120, "normalizePRTitleCandidate should cap PR titles at 120 chars")
 }
 
+func TestIssueWithLinearHumanKey_ReturnsCopyWithHumanKey(t *testing.T) {
+	t.Parallel()
+	source := models.IssueSourceLinear
+	humanKey := "VIR-75"
+	original := &models.Issue{
+		Source:     models.IssueSourceLinear,
+		ExternalID: "321100d2-6427-4026-b163-625d953798a6",
+	}
+	links := []models.SessionIssueLink{{
+		Role:        models.SessionIssueLinkRolePrimary,
+		IssueSource: &source,
+		ExternalID:  &humanKey,
+	}}
+	got := issueWithLinearHumanKey(original, links)
+	require.Equal(t, "VIR-75", got.ExternalID, "returned issue should carry the human Linear key from the primary link")
+	require.Equal(t, "321100d2-6427-4026-b163-625d953798a6", original.ExternalID, "original issue's canonical UUID must be preserved — Linear API writes still need it")
+	require.NotSame(t, original, got, "should return a fresh issue rather than mutating the input when a rewrite happens")
+}
+
+func TestIssueWithLinearHumanKey_Idempotent(t *testing.T) {
+	t.Parallel()
+	source := models.IssueSourceLinear
+	humanKey := "VIR-75"
+	links := []models.SessionIssueLink{{
+		Role:        models.SessionIssueLinkRolePrimary,
+		IssueSource: &source,
+		ExternalID:  &humanKey,
+	}}
+	first := issueWithLinearHumanKey(&models.Issue{
+		Source:     models.IssueSourceLinear,
+		ExternalID: "321100d2-6427-4026-b163-625d953798a6",
+	}, links)
+	second := issueWithLinearHumanKey(first, links)
+	require.Same(t, first, second, "calling on a result that already carries the human key should short-circuit without allocating")
+	require.Equal(t, "VIR-75", second.ExternalID)
+}
+
+func TestIssueWithLinearHumanKey_ReturnsInputWhenLinkAlsoUUID(t *testing.T) {
+	t.Parallel()
+	source := models.IssueSourceLinear
+	uuidStr := "321100d2-6427-4026-b163-625d953798a6"
+	original := &models.Issue{
+		Source:     models.IssueSourceLinear,
+		ExternalID: uuidStr,
+	}
+	links := []models.SessionIssueLink{{
+		Role:        models.SessionIssueLinkRolePrimary,
+		IssueSource: &source,
+		ExternalID:  &uuidStr,
+	}}
+	got := issueWithLinearHumanKey(original, links)
+	require.Same(t, original, got, "should return the original pointer unchanged when no link carries the human key (provider_state.identifier not yet written)")
+}
+
+func TestIssueWithLinearHumanKey_SkipsRelatedLinks(t *testing.T) {
+	t.Parallel()
+	source := models.IssueSourceLinear
+	relatedKey := "VIR-99"
+	original := &models.Issue{
+		Source:     models.IssueSourceLinear,
+		ExternalID: "321100d2-6427-4026-b163-625d953798a6",
+	}
+	links := []models.SessionIssueLink{{
+		Role:        models.SessionIssueLinkRoleRelated,
+		IssueSource: &source,
+		ExternalID:  &relatedKey,
+	}}
+	got := issueWithLinearHumanKey(original, links)
+	require.Same(t, original, got, "related links must not seed the primary identifier — only the primary link's key belongs in the title prefix anchor position")
+}
+
+func TestIssueWithLinearHumanKey_NoOpForNonLinearIssue(t *testing.T) {
+	t.Parallel()
+	source := models.IssueSourceLinear
+	humanKey := "VIR-75"
+	original := &models.Issue{
+		Source:     models.IssueSourceSentry,
+		ExternalID: "sentry-event-1",
+	}
+	links := []models.SessionIssueLink{{
+		Role:        models.SessionIssueLinkRolePrimary,
+		IssueSource: &source,
+		ExternalID:  &humanKey,
+	}}
+	got := issueWithLinearHumanKey(original, links)
+	require.Same(t, original, got, "non-Linear issues must not be touched")
+}
+
+func TestIssueWithLinearHumanKey_NilIssueIsSafe(t *testing.T) {
+	t.Parallel()
+	require.NotPanics(t, func() {
+		got := issueWithLinearHumanKey(nil, nil)
+		require.Nil(t, got)
+	})
+}
+
 func TestApplyLinearKeyPrefixes_SinglePrimary(t *testing.T) {
 	t.Parallel()
 	source := models.IssueSourceLinear
@@ -3394,6 +3517,9 @@ func TestPushChangesToPR_EnqueuesHealthSyncAfterSuccessfulPush(t *testing.T) {
 	mock.ExpectExec("UPDATE pull_requests SET head_sha").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectExec("UPDATE session_diff_snapshots").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 	mock.ExpectQuery("INSERT INTO jobs").
 		WithArgs(pgx.NamedArgs{
 			"org_id":     orgID,
@@ -3422,6 +3548,7 @@ func TestPushChangesToPR_EnqueuesHealthSyncAfterSuccessfulPush(t *testing.T) {
 		jobs:            db.NewJobStore(mock),
 		sandboxProvider: provider,
 		snapshots:       &prTestSnapshotStore{payload: []byte("snapshot")},
+		sandboxAuth:     &fakeSandboxAuth{socketPath: "/tmp/fake.sock"},
 		logger:          zerolog.Nop(),
 	}
 
@@ -3587,13 +3714,12 @@ func TestBuildPushScript_Structure(t *testing.T) {
 		"Test User",
 		"test@example.com",
 		"143/abc123/fix-typo",
-		"https://x-access-token@github.com/owner/repo.git",
+		"https://github.com/owner/repo.git",
 	)
 
-	// Input path, helper path, and commit-msg path must appear in the
-	// cleanup function so files are removed on exit. The helper must live
-	// outside /tmp because sandbox containers mount /tmp as noexec.
-	require.Contains(t, script, "cleanup() { rm -f '/tmp/143-pr-commit-msg' '/tmp/143-pr-input' '/var/tmp/143-pr-helper.sh'; }")
+	// Only the commit-msg file is created by the script; auth comes from
+	// the per-push credential socket, so there's nothing else to clean up.
+	require.Contains(t, script, "cleanup() { rm -f '/tmp/143-pr-commit-msg'; }")
 	require.Contains(t, script, "trap cleanup EXIT")
 
 	// Author identity is set via git config with quoted values.
@@ -3606,17 +3732,21 @@ func TestBuildPushScript_Structure(t *testing.T) {
 	// Commit message is read from file (not argv).
 	require.Contains(t, script, "git commit -F '/tmp/143-pr-commit-msg'")
 
-	// Push uses askpass + disables terminal prompt; branch and URL are quoted.
-	require.Contains(t, script, "GIT_ASKPASS='/var/tmp/143-pr-helper.sh' GIT_TERMINAL_PROMPT=0")
-	require.Contains(t, script, "'https://x-access-token@github.com/owner/repo.git'")
-	require.Contains(t, script, "HEAD:refs/heads/'143/abc123/fix-typo'")
+	// Push uses --force-with-lease keyed on the remote SHA we just observed
+	// via ls-remote. Auth flows through credential.helper=!143-tools
+	// git-credential talking to the per-push host socket — no userinfo in
+	// the URL.
+	require.Contains(t, script, "git ls-remote 'https://github.com/owner/repo.git' refs/heads/'143/abc123/fix-typo'")
+	require.Contains(t, script, `git push --force-with-lease=refs/heads/'143/abc123/fix-typo':"${remote_sha}" 'https://github.com/owner/repo.git' HEAD:refs/heads/'143/abc123/fix-typo'`)
 
 	// No-changes sentinel exit code is present in the upstream-ancestor branch.
 	require.Contains(t, script, "exit 77")
 
-	// Critically: script must NOT contain a secret-looking userinfo pattern,
-	// because tokens are passed via GIT_ASKPASS, not in the URL.
-	require.NotContains(t, script, "x-access-token:")
+	// Defense in depth: the script must not embed userinfo in the URL or
+	// reference any GIT_ASKPASS-style helper. Both auth mechanisms are gone.
+	require.NotContains(t, script, "x-access-token")
+	require.NotContains(t, script, "GIT_ASKPASS")
+	require.NotContains(t, script, "GIT_TERMINAL_PROMPT")
 }
 
 func TestBuildPushScript_QuotesHostileBranchName(t *testing.T) {
@@ -3629,9 +3759,56 @@ func TestBuildPushScript_QuotesHostileBranchName(t *testing.T) {
 		"Bot",
 		"bot@example.com",
 		"143/abc/it's-fine",
-		"https://x-access-token@github.com/o/r.git",
+		"https://github.com/o/r.git",
 	)
 	require.Contains(t, script, `HEAD:refs/heads/'143/abc/it'\''s-fine'`)
+	// The branch is interpolated three times now (ls-remote, lease ref, push
+	// ref); each must round-trip through shellQuote so the embedded quote
+	// can't break out and corrupt the script.
+	require.Contains(t, script, `git ls-remote 'https://github.com/o/r.git' refs/heads/'143/abc/it'\''s-fine'`)
+	require.Contains(t, script, `--force-with-lease=refs/heads/'143/abc/it'\''s-fine':"${remote_sha}"`)
+}
+
+func TestIsPushRejection(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name string
+		in   string
+		want bool
+	}{
+		{
+			name: "non-fast-forward",
+			in:   "To https://github.com/o/r.git\n ! [rejected]   HEAD -> b (non-fast-forward)\nerror: failed to push some refs",
+			want: true,
+		},
+		{
+			name: "stale info from force-with-lease",
+			in:   " ! [rejected]   HEAD -> b (stale info)\nerror: failed to push some refs to 'https://github.com/o/r.git'",
+			want: true,
+		},
+		{
+			name: "uppercase still matches",
+			in:   "REJECTED",
+			want: true,
+		},
+		{
+			name: "unrelated network error",
+			in:   "fatal: unable to access 'https://github.com/o/r.git/': Could not resolve host",
+			want: false,
+		},
+		{
+			name: "empty stderr",
+			in:   "",
+			want: false,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			require.Equal(t, c.want, isPushRejection(c.in))
+		})
+	}
 }
 
 func TestFormatBranchName_PrefersSessionWorkingBranch(t *testing.T) {
@@ -3794,13 +3971,6 @@ func TestPushSessionBranch(t *testing.T) {
 			wantDestroyCnt: 1,
 		},
 		{
-			name:           "write helper failure returns error",
-			snapshots:      &prTestSnapshotStore{payload: []byte("snapshot")},
-			provider:       &prTestSandboxProvider{writeErrs: map[string]error{pushHelperPath: errors.New("chmod failed")}},
-			wantErrSubstr:  "write push helper to sandbox",
-			wantDestroyCnt: 1,
-		},
-		{
 			name:           "exec failure returns error",
 			snapshots:      &prTestSnapshotStore{payload: []byte("snapshot")},
 			provider:       &prTestSandboxProvider{execErr: errors.New("sandbox exec failed")},
@@ -3815,10 +3985,24 @@ func TestPushSessionBranch(t *testing.T) {
 			wantDestroyCnt: 1,
 		},
 		{
-			name:           "nonzero exit scrubs token from stderr",
+			name:           "nonzero exit with non-rejection stderr surfaces raw error",
 			snapshots:      &prTestSnapshotStore{payload: []byte("snapshot")},
-			provider:       &prTestSandboxProvider{execExit: 12, execStderr: "token leaked: secret-token"},
-			wantErrSubstr:  "git push failed (exit 12): token leaked: ***",
+			provider:       &prTestSandboxProvider{execExit: 12, execStderr: "fatal: unable to access remote"},
+			wantErrSubstr:  "git push failed (exit 12): fatal: unable to access remote",
+			wantDestroyCnt: 1,
+		},
+		{
+			name:           "non-fast-forward rejection maps to ErrPushRejected",
+			snapshots:      &prTestSnapshotStore{payload: []byte("snapshot")},
+			provider:       &prTestSandboxProvider{execExit: 1, execStderr: "! [rejected]   HEAD -> b (non-fast-forward)\nerror: failed to push some refs"},
+			wantErrIs:      ErrPushRejected,
+			wantDestroyCnt: 1,
+		},
+		{
+			name:           "stale info from force-with-lease maps to ErrPushRejected",
+			snapshots:      &prTestSnapshotStore{payload: []byte("snapshot")},
+			provider:       &prTestSandboxProvider{execExit: 1, execStderr: "! [rejected]   HEAD -> b (stale info)"},
+			wantErrIs:      ErrPushRejected,
 			wantDestroyCnt: 1,
 		},
 		{
@@ -3850,9 +4034,11 @@ func TestPushSessionBranch(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
+			auth := &fakeSandboxAuth{socketPath: "/tmp/fake.sock"}
 			svc := &PRService{
 				sandboxProvider: tt.provider,
 				snapshots:       tt.snapshots,
+				sandboxAuth:     auth,
 				logger:          zerolog.Nop(),
 			}
 			run := &models.Session{ID: uuid.New(), OrgID: uuid.New()}
@@ -3862,7 +4048,7 @@ func TestPushSessionBranch(t *testing.T) {
 				context.Background(),
 				run,
 				repo,
-				"secret-token",
+				models.OrgSettings{},
 				"snapshots/key.tar",
 				"143/abc123/fix",
 				"commit message",
@@ -3884,9 +4070,8 @@ func TestPushSessionBranch(t *testing.T) {
 				require.NoError(t, err, "pushSessionBranch should succeed")
 				require.NotNil(t, result, "pushSessionBranch should return a non-nil result on success")
 				require.Equal(t, []byte("commit message"), tt.provider.writes[pushCommitMsgPath], "pushSessionBranch should write the commit message file")
-				require.Equal(t, []byte("secret-token"), tt.provider.writes[pushInputPath], "pushSessionBranch should write the credential input file")
-				require.Contains(t, string(tt.provider.writes[pushHelperPath]), pushInputPath, "pushSessionBranch should write a helper script that reads the credential input file")
-				require.Contains(t, tt.provider.lastExecCmd, "GIT_ASKPASS", "pushSessionBranch should run git push through the helper script")
+				require.NotContains(t, tt.provider.lastExecCmd, "GIT_ASKPASS", "pushSessionBranch should auth via the credential socket, not askpass")
+				require.NotContains(t, tt.provider.lastExecCmd, "x-access-token", "pushSessionBranch should not embed credentials in the push URL")
 				require.Equal(t, tt.wantHeadSHA, result.HeadSHA, "pushSessionBranch should return the parsed HEAD SHA")
 				if tt.wantSnapshotCaptured {
 					require.NotEmpty(t, result.CapturedSnapshotPath, "pushSessionBranch should spool the post-push snapshot to a temp file")
@@ -3899,8 +4084,220 @@ func TestPushSessionBranch(t *testing.T) {
 			}
 
 			require.Equal(t, tt.wantDestroyCnt, tt.provider.destroyed, "pushSessionBranch should always destroy the hydrated sandbox")
+			// Whatever the outcome, the per-push auth listener must be closed
+			// — leaking it would strand the listener until orchestrator shutdown.
+			require.Equal(t, 1, auth.listenCount, "pushSessionBranch should open exactly one auth listener")
+			require.Equal(t, 1, auth.closeCount, "pushSessionBranch should close the auth listener on every exit path")
 		})
 	}
+}
+
+// fakeSandboxAuth records Listen/Close calls so pushSessionBranch tests can
+// assert the per-push listener is opened and closed exactly once across every
+// success and failure path.
+type fakeSandboxAuth struct {
+	socketPath    string
+	listenErr     error
+	listenCount   int
+	closeCount    int
+	lastListenKey uuid.UUID
+}
+
+func (f *fakeSandboxAuth) Listen(_ context.Context, sessionID uuid.UUID, _ *models.Session, _ *models.Repository, _ models.OrgSettings) (string, error) {
+	f.listenCount++
+	f.lastListenKey = sessionID
+	if f.listenErr != nil {
+		return "", f.listenErr
+	}
+	return f.socketPath, nil
+}
+
+func (f *fakeSandboxAuth) Close(_ uuid.UUID) {
+	f.closeCount++
+}
+
+// TestPushSessionBranch_RetryOnRejection_Succeeds locks in the self-healing
+// behavior: if the first push attempt is rejected (race between our
+// ls-remote and our push, only failure mode --force-with-lease can
+// surface when 143 owns the branch namespace), the service runs the
+// idempotent push script a second time, picks up the new remote SHA,
+// and succeeds — without surfacing ErrPushRejected.
+func TestPushSessionBranch_RetryOnRejection_Succeeds(t *testing.T) {
+	t.Parallel()
+
+	const headSHA = "abc1234567890abcdef1234567890abcdef12345"
+	provider := &prTestSandboxProvider{
+		execSequence: []prTestExecResponse{
+			{exit: 1, stderr: "! [rejected]   HEAD -> b (stale info)\nerror: failed to push some refs"},
+			{exit: 0, stdout: pushHeadSHASentinel + headSHA + "\n"},
+		},
+	}
+	svc := &PRService{
+		sandboxProvider: provider,
+		snapshots:       &prTestSnapshotStore{payload: []byte("snapshot")},
+		sandboxAuth:     &fakeSandboxAuth{socketPath: "/tmp/fake.sock"},
+		logger:          zerolog.Nop(),
+	}
+	run := &models.Session{ID: uuid.New(), OrgID: uuid.New()}
+	repo := &models.Repository{FullName: "owner/repo"}
+
+	result, err := svc.pushSessionBranch(
+		context.Background(),
+		run,
+		repo,
+		models.OrgSettings{},
+		"snapshots/key.tar",
+		"143/abc/fix",
+		"commit message",
+		"Bot",
+		"bot@example.com",
+	)
+	t.Cleanup(func() {
+		if result != nil && result.CapturedSnapshotPath != "" {
+			_ = os.Remove(result.CapturedSnapshotPath)
+		}
+	})
+
+	require.NoError(t, err, "self-heal: a single rejection followed by success must NOT surface ErrPushRejected")
+	require.Equal(t, headSHA, result.HeadSHA)
+	require.Equal(t, 2, provider.execCallCount, "pushSessionBranch must execute the script exactly twice — once rejected, once retried")
+}
+
+// TestPushSessionBranch_RetryOnRejection_PersistentRejection asserts the
+// retry is one-shot: a second rejection bubbles up as ErrPushRejected so
+// the worker can surface it (instead of looping silently).
+func TestPushSessionBranch_RetryOnRejection_PersistentRejection(t *testing.T) {
+	t.Parallel()
+
+	rejectStderr := "! [rejected]   HEAD -> b (non-fast-forward)\nerror: failed to push some refs"
+	provider := &prTestSandboxProvider{
+		execSequence: []prTestExecResponse{
+			{exit: 1, stderr: rejectStderr},
+			{exit: 1, stderr: rejectStderr},
+		},
+	}
+	svc := &PRService{
+		sandboxProvider: provider,
+		snapshots:       &prTestSnapshotStore{payload: []byte("snapshot")},
+		sandboxAuth:     &fakeSandboxAuth{socketPath: "/tmp/fake.sock"},
+		logger:          zerolog.Nop(),
+	}
+
+	_, err := svc.pushSessionBranch(
+		context.Background(),
+		&models.Session{ID: uuid.New(), OrgID: uuid.New()},
+		&models.Repository{FullName: "owner/repo"},
+		models.OrgSettings{},
+		"snapshots/key.tar",
+		"143/abc/fix",
+		"commit message",
+		"Bot",
+		"bot@example.com",
+	)
+	require.ErrorIs(t, err, ErrPushRejected, "persistent rejection must still surface ErrPushRejected")
+	require.Equal(t, 2, provider.execCallCount, "retry budget is one — at most two total attempts")
+}
+
+// TestPushSessionBranch_NoRetryOnNonRejection asserts the retry is gated
+// on isPushRejection: non-rejection failures (e.g. exec errors, network)
+// are NOT retried, since they aren't the race --force-with-lease detects.
+func TestPushSessionBranch_NoRetryOnNonRejection(t *testing.T) {
+	t.Parallel()
+
+	provider := &prTestSandboxProvider{execExit: 1, execStderr: "fatal: unable to access remote"}
+	svc := &PRService{
+		sandboxProvider: provider,
+		snapshots:       &prTestSnapshotStore{payload: []byte("snapshot")},
+		sandboxAuth:     &fakeSandboxAuth{socketPath: "/tmp/fake.sock"},
+		logger:          zerolog.Nop(),
+	}
+
+	_, err := svc.pushSessionBranch(
+		context.Background(),
+		&models.Session{ID: uuid.New(), OrgID: uuid.New()},
+		&models.Repository{FullName: "owner/repo"},
+		models.OrgSettings{},
+		"snapshots/key.tar",
+		"143/abc/fix",
+		"commit message",
+		"Bot",
+		"bot@example.com",
+	)
+	require.Error(t, err)
+	require.NotErrorIs(t, err, ErrPushRejected)
+	require.Equal(t, 1, provider.execCallCount, "non-rejection failure must NOT be retried")
+}
+
+// TestPushSessionBranch_AuthSocketWired locks in the regression fix: the
+// pr_push sandbox MUST get a credential socket wired before HydrateSandboxFromSnapshot
+// runs, otherwise the snapshot's baked-in `credential.helper=!143-tools git-credential`
+// will exit non-zero with `_143_AUTH_SOCK is not set` and the push fails.
+func TestPushSessionBranch_AuthSocketWired(t *testing.T) {
+	t.Parallel()
+
+	provider := &prTestSandboxProvider{execStdout: pushHeadSHASentinel + "abc1234567890abcdef1234567890abcdef12345\n"}
+	auth := &fakeSandboxAuth{socketPath: "/host/socket-dir/sock"}
+	svc := &PRService{
+		sandboxProvider: provider,
+		snapshots:       &prTestSnapshotStore{payload: []byte("snapshot")},
+		sandboxAuth:     auth,
+		logger:          zerolog.Nop(),
+	}
+	run := &models.Session{ID: uuid.New(), OrgID: uuid.New()}
+	repo := &models.Repository{FullName: "owner/repo"}
+
+	result, err := svc.pushSessionBranch(
+		context.Background(),
+		run,
+		repo,
+		models.OrgSettings{},
+		"snapshots/key.tar",
+		"143/abc/fix",
+		"commit message",
+		"Bot",
+		"bot@example.com",
+	)
+	t.Cleanup(func() {
+		if result != nil && result.CapturedSnapshotPath != "" {
+			_ = os.Remove(result.CapturedSnapshotPath)
+		}
+	})
+	require.NoError(t, err)
+
+	// Listener keyed by a fresh per-push UUID, NOT the session ID — that's
+	// what keeps a still-active agent listener (e.g. preview holding the
+	// agent container alive) from being yanked.
+	require.Equal(t, 1, auth.listenCount)
+	require.NotEqual(t, run.ID, auth.lastListenKey, "auth listener must be keyed by a per-push UUID, not the session ID")
+
+	// The sandbox config the provider saw must carry the host socket path
+	// + the in-container env var that 143-tools git-credential reads.
+	require.Equal(t, "/host/socket-dir/sock", provider.lastConfig.AuthSocketPath)
+	require.Equal(t, sandboxauth.SandboxSocketPath, provider.lastConfig.Env[sandboxauth.SocketEnvVar])
+	// GitNameEnvVar / GitEmailEnvVar are deliberately absent: they're
+	// consumed only by `143-tools git-bootstrap`, which the pr_push sandbox
+	// never runs. The push script sets identity directly via `git config`.
+	require.NotContains(t, provider.lastConfig.Env, sandboxauth.GitNameEnvVar)
+	require.NotContains(t, provider.lastConfig.Env, sandboxauth.GitEmailEnvVar)
+}
+
+func TestPushSessionBranch_RequiresSandboxAuth(t *testing.T) {
+	t.Parallel()
+
+	svc := &PRService{
+		sandboxProvider: &prTestSandboxProvider{},
+		snapshots:       &prTestSnapshotStore{},
+		logger:          zerolog.Nop(),
+	}
+	_, err := svc.pushSessionBranch(
+		context.Background(),
+		&models.Session{ID: uuid.New(), OrgID: uuid.New()},
+		&models.Repository{FullName: "o/r"},
+		models.OrgSettings{},
+		"k", "b", "m", "n", "e@x",
+	)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "sandbox auth socket not configured")
 }
 
 func TestParsePushHeadSHA(t *testing.T) {
@@ -4280,6 +4677,9 @@ func TestCreatePR_SuccessPushesSnapshotBranchAndStoresPR(t *testing.T) {
 	mock.ExpectQuery("INSERT INTO pull_requests").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at", "updated_at"}).AddRow(uuid.New(), now, now))
+	mock.ExpectExec("UPDATE session_diff_snapshots").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 	mock.ExpectQuery("UPDATE sessions SET status").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
@@ -4333,6 +4733,7 @@ func TestCreatePR_SuccessPushesSnapshotBranchAndStoresPR(t *testing.T) {
 		orgs:            db.NewOrganizationStore(mock),
 		sandboxProvider: provider,
 		snapshots:       &prTestSnapshotStore{payload: []byte("snapshot")},
+		sandboxAuth:     &fakeSandboxAuth{socketPath: "/tmp/fake.sock"},
 		baseURL:         server.URL,
 		httpClient:      server.Client(),
 		logger:          zerolog.Nop(),
@@ -4426,6 +4827,9 @@ func TestCreatePR_SuccessDispatchesPostPRSnapshotUpload(t *testing.T) {
 	mock.ExpectQuery("INSERT INTO pull_requests").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at", "updated_at"}).AddRow(uuid.New(), now, now))
+	mock.ExpectExec("UPDATE session_diff_snapshots").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 	// SetPendingSnapshotKey: the synchronous write that records the
 	// post-PR upload in flight. pgx NamedArgs expand to positional args by
 	// @-placeholder order: SET pending_snapshot_key = @key first, then
@@ -4485,6 +4889,7 @@ func TestCreatePR_SuccessDispatchesPostPRSnapshotUpload(t *testing.T) {
 		orgs:            db.NewOrganizationStore(mock),
 		sandboxProvider: provider,
 		snapshots:       &prTestSnapshotStore{payload: []byte("snapshot")},
+		sandboxAuth:     &fakeSandboxAuth{socketPath: "/tmp/fake.sock"},
 		baseURL:         server.URL,
 		httpClient:      server.Client(),
 		logger:          zerolog.Nop(),
@@ -4555,10 +4960,11 @@ func TestCreatePR_NoCommitsBetweenMapsToErrNoChanges(t *testing.T) {
 		sandboxProvider: &prTestSandboxProvider{
 			execStdout: pushHeadSHASentinel + "abc1234567890abcdef1234567890abcdef12345\n",
 		},
-		snapshots:  &prTestSnapshotStore{payload: []byte("snapshot")},
-		baseURL:    server.URL,
-		httpClient: server.Client(),
-		logger:     zerolog.Nop(),
+		snapshots:   &prTestSnapshotStore{payload: []byte("snapshot")},
+		sandboxAuth: &fakeSandboxAuth{socketPath: "/tmp/fake.sock"},
+		baseURL:     server.URL,
+		httpClient:  server.Client(),
+		logger:      zerolog.Nop(),
 	}
 
 	run := &models.Session{

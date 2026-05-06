@@ -81,14 +81,93 @@ const codingCredentialColumns = "id, org_id, provider, label, config, status, pr
 // Sentry, Linear). The credential store holds keys used for AI model access and other
 // infrastructure services, while integrations hold OAuth tokens and webhook configs for
 // external platform connectivity.
+//
+// During the unified-coding-credentials migration window, every coding-provider
+// write here is also mirrored into the unified `coding_credentials` table via
+// the codingMirror. main.go calls SetCodingMirror after construction to wire it.
+// The mirror is removed in the cleanup PR.
 type OrgCredentialStore struct {
-	db     DBTX
-	crypto *crypto.Service // nil = dev mode (plaintext with v0: prefix)
+	db           DBTX
+	crypto       *crypto.Service // nil = dev mode (plaintext with v0: prefix)
+	codingMirror CodingCredentialMirror
+	mirrorLogf   func(format string, args ...any) // optional structured-log hook for mirror failures
 }
 
 // NewOrgCredentialStore creates a new credential store.
 func NewOrgCredentialStore(db DBTX, cryptoSvc *crypto.Service) *OrgCredentialStore {
-	return &OrgCredentialStore{db: db, crypto: cryptoSvc}
+	return &OrgCredentialStore{db: db, crypto: cryptoSvc, codingMirror: NoopMirror()}
+}
+
+// SetCodingMirror installs the unified-credentials mirror. Calling with nil
+// reverts to a no-op mirror. Must be called before serving traffic — the
+// mirror itself is goroutine-safe but the field is not under a mutex.
+//
+// lint:allow-no-orgid reason="process-wide mirror configuration; not tenant data"
+func (s *OrgCredentialStore) SetCodingMirror(m CodingCredentialMirror) {
+	if m == nil {
+		s.codingMirror = NoopMirror()
+		return
+	}
+	s.codingMirror = m
+}
+
+// SetMirrorLogger installs a structured-log hook used when the mirror write
+// fails. Production wires the application logger; tests usually leave it nil.
+//
+// lint:allow-no-orgid reason="process-wide logger configuration; not tenant data"
+func (s *OrgCredentialStore) SetMirrorLogger(logf func(format string, args ...any)) {
+	s.mirrorLogf = logf
+}
+
+func (s *OrgCredentialStore) logMirrorFailure(action string, id uuid.UUID, err error) {
+	if s.mirrorLogf == nil || err == nil {
+		return
+	}
+	s.mirrorLogf("coding_credentials mirror %s id=%s err=%v", action, id, err)
+}
+
+// reflectOrgCredentialByID loads the row for `id` and asks the mirror to
+// reflect it. Used after every write whose return shape doesn't already give
+// us the full row. Failure is logged, never propagated — the caller's write
+// already succeeded against the legacy table.
+func (s *OrgCredentialStore) reflectOrgCredentialByID(ctx context.Context, id uuid.UUID) {
+	if s.codingMirror == nil {
+		return
+	}
+	row, cfg, err := s.loadOrgCredentialByID(ctx, id)
+	if err != nil {
+		s.logMirrorFailure("load-by-id", id, err)
+		return
+	}
+	if mirrErr := s.codingMirror.MirrorOrgCredential(ctx, row, cfg); mirrErr != nil {
+		s.logMirrorFailure("upsert", id, mirrErr)
+	}
+}
+
+// loadOrgCredentialByID is a private helper that reads a row + decrypts it
+// without going through the public Get path (which filters out disabled rows
+// and would prevent the mirror from reflecting state-flip writes).
+func (s *OrgCredentialStore) loadOrgCredentialByID(ctx context.Context, id uuid.UUID) (models.OrgCredential, models.ProviderConfig, error) {
+	rows, err := s.db.Query(ctx,
+		`SELECT `+codingCredentialColumns+` FROM org_credentials WHERE id = @id`,
+		pgx.NamedArgs{"id": id},
+	)
+	if err != nil {
+		return models.OrgCredential{}, nil, fmt.Errorf("load org credential: %w", err)
+	}
+	row, err := pgx.CollectOneRow(rows, pgx.RowToStructByNameLax[models.OrgCredential])
+	if err != nil {
+		return models.OrgCredential{}, nil, fmt.Errorf("load org credential row: %w", err)
+	}
+	plaintext, err := s.decrypt(row.Config)
+	if err != nil {
+		return row, nil, fmt.Errorf("decrypt for mirror: %w", err)
+	}
+	cfg, err := jsonDecodeProvider(row.Provider, plaintext)
+	if err != nil {
+		return row, nil, err
+	}
+	return row, cfg, nil
 }
 
 // Upsert encrypts and stores a strongly-typed provider config (label defaults to "").
@@ -141,6 +220,7 @@ func (s *OrgCredentialStore) UpsertWithLabel(ctx context.Context, orgID uuid.UUI
 		if err != nil {
 			return nil, err
 		}
+		s.reflectOrgCredentialByID(ctx, id)
 		return &id, nil
 	}
 
@@ -166,6 +246,11 @@ func (s *OrgCredentialStore) UpsertWithLabel(ctx context.Context, orgID uuid.UUI
 	if err != nil {
 		return nil, fmt.Errorf("upsert %s credential: %w", provider, err)
 	}
+	// We're already in the non-coding branch (the coding-provider path returned
+	// above), so skip the mirror reflect call entirely. Calling it here would
+	// run a SELECT + decrypt for github_app/sentry/linear/notion/slack writes
+	// only to discover that mirrorProviderForOrg returns ok=false and emits
+	// nothing — wasted work on every integration write.
 	return &id, nil
 }
 
@@ -239,6 +324,7 @@ func (s *OrgCredentialStore) InsertPendingAuth(ctx context.Context, orgID uuid.U
 	if err != nil {
 		return nil, err
 	}
+	s.reflectOrgCredentialByID(ctx, id)
 	return &id, nil
 }
 
@@ -258,7 +344,85 @@ func (s *OrgCredentialStore) UpsertByID(ctx context.Context, orgID uuid.UUID, id
 		"org_id": orgID,
 		"config": encrypted,
 	})
+	if err == nil {
+		s.reflectOrgCredentialByID(ctx, id)
+	}
 	return err
+}
+
+// UpdateLinearConfigIfRefreshTokenMatches updates the singleton Linear
+// credential only if its stored refresh token still matches the token the
+// caller just redeemed. The row is locked for the read/compare/write so a
+// reconnect or peer refresh cannot be overwritten by a stale refresh response.
+//
+// Returns the current row config with updated=false when the refresh token has
+// changed. Callers should use that config for race recovery rather than
+// retrying the stale token chain.
+func (s *OrgCredentialStore) UpdateLinearConfigIfRefreshTokenMatches(ctx context.Context, orgID uuid.UUID, expectedRefreshToken string, cfg models.LinearConfig) (models.LinearConfig, bool, error) {
+	txStarter, ok := s.db.(TxStarter)
+	if !ok {
+		return models.LinearConfig{}, false, fmt.Errorf("org credential store db does not support transactions")
+	}
+	tx, err := txStarter.Begin(ctx)
+	if err != nil {
+		return models.LinearConfig{}, false, fmt.Errorf("begin linear credential refresh update: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	query := `
+		SELECT ` + credentialColumns + `
+		FROM org_credentials
+		WHERE org_id = @org_id
+		  AND provider = @provider
+		  AND label = ''
+		  AND status != 'disabled'
+		FOR UPDATE`
+	rows, err := tx.Query(ctx, query, pgx.NamedArgs{
+		"org_id":   orgID,
+		"provider": string(models.ProviderLinear),
+	})
+	if err != nil {
+		return models.LinearConfig{}, false, fmt.Errorf("query linear credential for refresh update: %w", err)
+	}
+	row, err := pgx.CollectOneRow(rows, pgx.RowToStructByNameLax[models.OrgCredential])
+	if err != nil {
+		return models.LinearConfig{}, false, fmt.Errorf("load linear credential for refresh update: %w", err)
+	}
+
+	currentCred, err := s.decryptRow(row)
+	if err != nil {
+		return models.LinearConfig{}, false, err
+	}
+	current, ok := currentCred.Config.(models.LinearConfig)
+	if !ok {
+		return models.LinearConfig{}, false, fmt.Errorf("linear credential config is wrong type: got %T", currentCred.Config)
+	}
+	if current.RefreshToken != expectedRefreshToken {
+		if err := tx.Commit(ctx); err != nil {
+			return models.LinearConfig{}, false, fmt.Errorf("commit skipped linear credential refresh update: %w", err)
+		}
+		return current, false, nil
+	}
+
+	encrypted, err := s.marshalAndEncrypt(cfg)
+	if err != nil {
+		return models.LinearConfig{}, false, err
+	}
+	tag, err := tx.Exec(ctx, `UPDATE org_credentials SET config = @config, status = 'active', updated_at = now() WHERE id = @id AND org_id = @org_id`, pgx.NamedArgs{
+		"id":     row.ID,
+		"org_id": orgID,
+		"config": encrypted,
+	})
+	if err != nil {
+		return models.LinearConfig{}, false, fmt.Errorf("update linear credential after refresh: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return models.LinearConfig{}, false, pgx.ErrNoRows
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return models.LinearConfig{}, false, fmt.Errorf("commit linear credential refresh update: %w", err)
+	}
+	return cfg, true, nil
 }
 
 // Get decrypts and returns the unlabeled credential for an (org, provider).
@@ -532,12 +696,44 @@ func (s *OrgCredentialStore) ClaimNextRoundRobin(ctx context.Context, orgID uuid
 
 // Disable soft-deletes a credential.
 func (s *OrgCredentialStore) Disable(ctx context.Context, orgID uuid.UUID, provider models.ProviderName) error {
+	// Capture affected ids for the mirror before we issue the UPDATE. The pre-SELECT
+	// is consistent: a concurrent insert at this label will not appear in our
+	// snapshot, but any newly-inserted row is already mirrored by its own write
+	// path, so the mirror does not need to know about it here.
+	mirrorIDs := s.findOrgCredentialIDsForMirror(ctx, orgID, provider, false)
 	query := `UPDATE org_credentials SET status = 'disabled', updated_at = now() WHERE org_id = @org_id AND provider = @provider AND label = ''`
 	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
 		"org_id":   orgID,
 		"provider": string(provider),
 	})
-	return err
+	if err != nil {
+		return err
+	}
+	for _, id := range mirrorIDs {
+		if mirrErr := s.codingMirror.MirrorOrgCredentialDisable(ctx, orgID, id); mirrErr != nil {
+			s.logMirrorFailure("disable", id, mirrErr)
+		}
+	}
+	return nil
+}
+
+// findOrgCredentialIDsForMirror returns the ids that match the given (provider,
+// label-shape) so the caller can mirror a bulk operation. labelNotEmpty=false
+// means "label = ”"; labelNotEmpty=true means "label != ”". Errors are
+// swallowed — the mirror is best-effort.
+func (s *OrgCredentialStore) findOrgCredentialIDsForMirror(ctx context.Context, orgID uuid.UUID, provider models.ProviderName, labelNotEmpty bool) []uuid.UUID {
+	clause := "label = ''"
+	if labelNotEmpty {
+		clause = "label != ''"
+	}
+	rows, err := s.db.Query(ctx,
+		`SELECT id FROM org_credentials WHERE org_id = @org_id AND provider = @provider AND `+clause,
+		pgx.NamedArgs{"org_id": orgID, "provider": string(provider)},
+	)
+	if err != nil {
+		return nil
+	}
+	return collectMirrorIDs(rows)
 }
 
 // HasActiveLabeled reports whether (org, provider) has at least one active
@@ -567,12 +763,21 @@ func (s *OrgCredentialStore) HasActiveLabeled(ctx context.Context, orgID uuid.UU
 // an API-key row (label=”) with subscription rows (label!=”) and the
 // caller wants to clear only the subscriptions.
 func (s *OrgCredentialStore) DisableLabeled(ctx context.Context, orgID uuid.UUID, provider models.ProviderName) error {
+	mirrorIDs := s.findOrgCredentialIDsForMirror(ctx, orgID, provider, true)
 	query := `UPDATE org_credentials SET status = 'disabled', updated_at = now() WHERE org_id = @org_id AND provider = @provider AND label != ''`
 	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
 		"org_id":   orgID,
 		"provider": string(provider),
 	})
-	return err
+	if err != nil {
+		return err
+	}
+	for _, id := range mirrorIDs {
+		if mirrErr := s.codingMirror.MirrorOrgCredentialDisable(ctx, orgID, id); mirrErr != nil {
+			s.logMirrorFailure("disable-labeled", id, mirrErr)
+		}
+	}
+	return nil
 }
 
 // DisableByID soft-deletes a specific credential by its ID, scoped to org.
@@ -582,6 +787,11 @@ func (s *OrgCredentialStore) DisableByID(ctx context.Context, orgID uuid.UUID, i
 		"id":     id,
 		"org_id": orgID,
 	})
+	if err == nil {
+		if mirrErr := s.codingMirror.MirrorOrgCredentialDisable(ctx, orgID, id); mirrErr != nil {
+			s.logMirrorFailure("disable-by-id", id, mirrErr)
+		}
+	}
 	return err
 }
 
@@ -605,13 +815,30 @@ func (s *OrgCredentialStore) ExistsForProviderByID(ctx context.Context, orgID uu
 
 // UpdateStatus updates the status and last_verified_at timestamp.
 func (s *OrgCredentialStore) UpdateStatus(ctx context.Context, orgID uuid.UUID, provider models.ProviderName, status string) error {
+	// Snapshot the affected ids so the post-update mirror can flip status on
+	// each one. Pre-SELECT keeps the public Exec call path identical, which
+	// keeps the mock-based unit tests green.
+	mirrorRows, qErr := s.db.Query(ctx,
+		`SELECT id FROM org_credentials WHERE org_id = @org_id AND provider = @provider`,
+		pgx.NamedArgs{"org_id": orgID, "provider": string(provider)},
+	)
+	var mirrorIDs []uuid.UUID
+	if qErr == nil {
+		mirrorIDs = collectMirrorIDs(mirrorRows)
+	}
 	query := `UPDATE org_credentials SET status = @status, last_verified_at = now(), updated_at = now() WHERE org_id = @org_id AND provider = @provider`
 	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
 		"org_id":   orgID,
 		"provider": string(provider),
 		"status":   status,
 	})
-	return err
+	if err != nil {
+		return err
+	}
+	for _, id := range mirrorIDs {
+		s.reflectOrgCredentialByID(ctx, id)
+	}
+	return nil
 }
 
 // UpdateStatusByID updates the status for a specific credential by ID, scoped to org.
@@ -622,7 +849,28 @@ func (s *OrgCredentialStore) UpdateStatusByID(ctx context.Context, orgID uuid.UU
 		"org_id": orgID,
 		"status": status,
 	})
+	if err == nil {
+		s.reflectOrgCredentialByID(ctx, id)
+	}
 	return err
+}
+
+// collectMirrorIDs walks a pgx.Rows result of a single uuid column,
+// swallowing scan errors per row. Used by the mirror-aware write paths;
+// distinct from the package's strict collectIDs (which fails the whole call
+// on the first scan error). Mirror writes are best-effort — losing one id
+// to a scan glitch costs only that mirror; the legacy write already succeeded.
+func collectMirrorIDs(rows pgx.Rows) []uuid.UUID {
+	defer rows.Close()
+	var out []uuid.UUID
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			continue
+		}
+		out = append(out, id)
+	}
+	return out
 }
 
 // marshalAndEncrypt serializes and encrypts a provider config for storage.
@@ -754,7 +1002,13 @@ func (s *OrgCredentialStore) ReorderCodingAuths(ctx context.Context, orgID uuid.
 		}
 	}
 
-	return tx.Commit(ctx)
+	if err := tx.Commit(ctx); err != nil {
+		return err
+	}
+	for _, id := range ids {
+		s.reflectOrgCredentialByID(ctx, id)
+	}
+	return nil
 }
 
 // withCodingAuthPriority runs fn inside a transaction guarded by a per-org
@@ -857,6 +1111,7 @@ func (s *OrgCredentialStore) CreateCodingAuth(ctx context.Context, orgID uuid.UU
 	if !ok {
 		return nil, fmt.Errorf("unsupported coding auth row")
 	}
+	s.reflectOrgCredentialByID(ctx, row.ID)
 	return &codingAuth, nil
 }
 
@@ -887,6 +1142,7 @@ func (s *OrgCredentialStore) UpdateCodingAuth(ctx context.Context, orgID uuid.UU
 	if !ok {
 		return nil, fmt.Errorf("unsupported coding auth row")
 	}
+	s.reflectOrgCredentialByID(ctx, id)
 	return &codingAuth, nil
 }
 
@@ -898,6 +1154,9 @@ func (s *OrgCredentialStore) DisableCodingAuth(ctx context.Context, orgID uuid.U
 	if err != nil {
 		return fmt.Errorf("disable coding auth: %w", err)
 	}
+	if mirrErr := s.codingMirror.MirrorOrgCredentialDisable(ctx, orgID, id); mirrErr != nil {
+		s.logMirrorFailure("disable-coding-auth", id, mirrErr)
+	}
 	return nil
 }
 
@@ -908,6 +1167,9 @@ func (s *OrgCredentialStore) DeleteCodingAuth(ctx context.Context, orgID uuid.UU
 	)
 	if err != nil {
 		return fmt.Errorf("delete coding auth: %w", err)
+	}
+	if mirrErr := s.codingMirror.MirrorOrgCredentialDelete(ctx, orgID, id); mirrErr != nil {
+		s.logMirrorFailure("delete-coding-auth", id, mirrErr)
 	}
 	return nil
 }
@@ -1032,9 +1294,6 @@ func inferCodingAuthStatus(cred models.DecryptedCredential) models.CodingAuthSta
 	case "pending_auth":
 		return models.CodingAuthStatusNeedsReauth
 	case "active":
-		if cred.LastVerifiedAt == nil {
-			return models.CodingAuthStatusNeverVerified
-		}
 		return models.CodingAuthStatusHealthy
 	default:
 		return models.CodingAuthStatusNeedsReauth
@@ -1042,7 +1301,7 @@ func inferCodingAuthStatus(cred models.DecryptedCredential) models.CodingAuthSta
 }
 
 func isRunnableCodingAuthStatus(status models.CodingAuthStatus) bool {
-	return status == models.CodingAuthStatusHealthy || status == models.CodingAuthStatusNeverVerified
+	return status == models.CodingAuthStatusHealthy
 }
 
 func codingAuthUsageNote(cred models.DecryptedCredential) string {

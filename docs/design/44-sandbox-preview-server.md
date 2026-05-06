@@ -448,7 +448,7 @@ This happens transparently. The UI should show a brief "Preview restarting..." i
 
 Each preview configuration may contain **one or more services**. One service is designated as the `primary` — this is the service the preview gateway proxies browser traffic to. All other services are **support services** that run alongside the primary inside the same sandbox, reachable via `localhost`.
 
-Repo config lives in `.143/preview.json`:
+Repo config lives in `.143/config.json`:
 
 ### Single-Service Example (SPA or Framework-Integrated Full-Stack)
 
@@ -541,7 +541,7 @@ The repo config **never contains actual secrets**. Instead, it references a name
 
 1. **Admin setup (once)**: An org admin goes to **Settings → Credentials** in the 143 UI and creates a credential set named `repo-main-preview`. They add the env vars the preview needs — for example, `DATABASE_URL=postgres://user:pass@staging-rds.amazonaws.com:5432/mydb`. These values are stored encrypted in the `org_credentials` table, never in the repo.
 
-2. **Repo config references the credential set**: The `.143/preview.json` declares which credential set to use and which env vars to pull from it:
+2. **Repo config references the credential set**: The `.143/config.json` declares which credential set to use and which env vars to pull from it:
    ```json
    "credentials": {
      "mode": "managed_env",
@@ -662,9 +662,15 @@ Platform infrastructure templates are maintained by 143 and versioned independen
 | `postgres-17` | `postgres:17-alpine` | 5432 | Auto-creates a database named `preview` |
 | `postgres-16` | `postgres:16-alpine` | 5432 | Auto-creates a database named `preview` |
 | `redis-7` | `redis:7-alpine` | 6379 | No auth by default |
-| `mysql-8` | `mysql:8-lts` | 3306 | Auto-creates a database named `preview` |
+| `mysql-8` | `mysql:8.4` | 3306 | Auto-creates a database named `preview` |
 
 Templates are not user-extensible in MVP. Custom infrastructure requires managed destinations pointing at external services.
+
+##### Image Caching
+
+Infrastructure images are pulled lazily on the first preview start that references each template, then cached in the worker's Docker image store. They survive container restarts (rolling deploys included) and are only re-pulled when the worker VM is reprovisioned. There is no boot-time pre-pull — declaring a template in `config.json` is the only thing that fetches the image.
+
+For a small, stable worker fleet this is fine: each template is pulled at most once per VM lifetime. **At larger fleet sizes** (or when reprovision rhythm picks up), the standard mitigation is a **pull-through registry mirror** on the private network: a single `registry:2` container with `proxy.remoteurl: https://registry-1.docker.io`, plus `registry-mirrors` configured in each worker's `/etc/docker/daemon.json`. Workers still pull lazily, but from a nearby cache, so the first pull is ~5s instead of ~30s and N workers pulling the same image only fetch it from Docker Hub once. Adopt this when fleet size > ~5 workers, when Docker Hub rate limits become a concern, or when first-pull latency starts surfacing in user-visible startup time.
 
 #### Infrastructure vs Managed Destinations
 
@@ -740,7 +746,7 @@ For configs with `credentials.mode != none` (connected previews), `init_script` 
 
 Preview config is untrusted repo content. Not all fields should be read from the same revision.
 
-- **Security-sensitive fields** come from the base branch version of `.143/preview.json` plus admin-managed settings
+- **Security-sensitive fields** come from the base branch version of `.143/config.json` plus admin-managed settings
 - **Runtime behavior fields** come from the session diff so the preview matches the change under review
 
 For MVP, read these from the **base branch**:
@@ -1033,7 +1039,7 @@ Known failure patterns the preview manager should detect and surface:
 | Pattern | Suggested Fix |
 |---------|--------------|
 | Port not reachable after timeout | "The dev server did not respond on port {port}. Check that your dev server binds to `0.0.0.0`, not `localhost`. You can set `HOST=0.0.0.0` in the preview config env." |
-| `EADDRINUSE` in process output | "Port {port} is already in use inside the sandbox. Check for conflicting processes or change the port in `.143/preview.json`." |
+| `EADDRINUSE` in process output | "Port {port} is already in use inside the sandbox. Check for conflicting processes or change the port in `.143/config.json`." |
 | `MODULE_NOT_FOUND` or `Cannot find module` | "A required dependency is missing. Ensure `npm install` or equivalent runs during the Build phase." |
 | OOM kill (exit code 137) | "The preview process exceeded its memory limit ({limit}MB). Try a lighter dev server configuration or request a higher limit." |
 | Non-zero exit within 5 seconds of start | "The dev server exited immediately. Check the process output below for configuration errors." |
@@ -2029,7 +2035,7 @@ The server connects to it via the Chrome DevTools Protocol at `chrome:9222`. The
 A developer working on the preview feature should be able to:
 
 1. Start the full stack with `make dev`
-2. Create a session against a repo that has a `.143/preview.json`
+2. Create a session against a repo that has a `.143/config.json`
 3. Click "Start Preview" in the session UI
 4. See the preview lifecycle (Build → Init → Start) streamed in the UI
 5. Interact with the live preview in the iframe

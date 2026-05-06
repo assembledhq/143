@@ -218,11 +218,9 @@ func (h *InternalIssueHandler) dispatchSession(r *http.Request, orgID uuid.UUID,
 		return nil, err
 	}
 
-	payload := map[string]string{
-		"session_id": session.ID.String(),
-		"org_id":     orgID.String(),
-	}
-	if _, err := h.jobStore.Enqueue(r.Context(), orgID, "agent", "run_agent", payload, 5, nil); err != nil {
+	dedupeKey := db.RunAgentDedupeKey(session.ID)
+	payload := db.RunAgentPayload(session)
+	if _, err := h.jobStore.Enqueue(r.Context(), orgID, "agent", "run_agent", payload, 5, &dedupeKey); err != nil {
 		return nil, err
 	}
 

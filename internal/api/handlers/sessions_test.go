@@ -157,6 +157,7 @@ var sessionColumns = []string{
 	"checkpointed_at", "checkpoint_kind", "checkpoint_capability", "checkpoint_size_bytes", "checkpoint_error",
 	"recovery_state", "recovery_queued_at", "recovery_started_at", "recovery_attempt_count",
 	"target_branch", "working_branch", "base_commit_sha", "repository_id", "diff_stats", "diff_history", "input_manifest", "archived_at", "archived_by_user_id", "automation_run_id", "pr_creation_state", "pr_creation_error", "pr_push_state", "pr_push_error", "diff_collected_at", "latest_diff_snapshot_id",
+	"has_unpushed_changes",
 	"linear_private", "linear_state_sync_disabled", "linear_identifier_hint", "linear_prepare_state",
 	"deleted_at", "git_identity_source", "git_identity_user_id", "created_at",
 }
@@ -235,20 +236,22 @@ const (
 func TestPreLinearSessionColumnsLenStaysInSync(t *testing.T) {
 	t.Parallel()
 	const pendingSnapshotFieldsAdded = 2
+	const unpushedChangesFieldAdded = 1
 	const linearFieldsAdded = 4
 	const identityFieldsAdded = 2
 	const prPushFieldsAdded = 2
-	require.Equal(t, preLinearSessionColumnsLen+pendingSnapshotFieldsAdded+linearFieldsAdded+identityFieldsAdded+prPushFieldsAdded, len(sessionColumns),
+	require.Equal(t, preLinearSessionColumnsLen+pendingSnapshotFieldsAdded+unpushedChangesFieldAdded+linearFieldsAdded+identityFieldsAdded+prPushFieldsAdded, len(sessionColumns),
 		"sessionColumns shifted; bump preLinearSessionColumnsLen, pendingSnapshotFieldsAdded, "+
-			"linearFieldsAdded, identityFieldsAdded, or prPushFieldsAdded if a new migration added more session columns")
+			"unpushedChangesFieldAdded, linearFieldsAdded, identityFieldsAdded, or prPushFieldsAdded if a new migration added more session columns")
 }
 
-// linearSessionDefaults returns the placeholder values for the four
-// linear_* columns inserted by migration 103. Test rows that don't pass
+// linearSessionDefaults returns the placeholder values for the derived
+// has_unpushed_changes field plus the four linear_* columns. Test rows that don't pass
 // values for these get them auto-padded by sessionTestRow (one of the
 // length-difference cases below).
 func linearSessionDefaults() []interface{} {
 	return []interface{}{
+		false,                                 // has_unpushed_changes
 		false,                                 // linear_private
 		false,                                 // linear_state_sync_disabled
 		(*string)(nil),                        // linear_identifier_hint
@@ -256,7 +259,7 @@ func linearSessionDefaults() []interface{} {
 	}
 }
 
-// padLinearFields injects the four linear_* defaults at the position right
+// padLinearFields injects has_unpushed_changes plus the linear_* defaults at the position right
 // before the trailing deleted_at/created_at columns when the row was built
 // without them. Called from sessionTestRow on each row regardless of the
 // branch that resolved its prior shape. Runs before padSessionIdentityColumns,
@@ -269,7 +272,7 @@ func padLinearFields(values []interface{}) []interface{} {
 		return values
 	}
 	insertAt := len(values) - 2 // before deleted_at, created_at
-	row := make([]interface{}, 0, len(values)+4)
+	row := make([]interface{}, 0, len(values)+5)
 	row = append(row, values[:insertAt]...)
 	row = append(row, linearSessionDefaults()...)
 	row = append(row, values[insertAt:]...)
@@ -608,6 +611,9 @@ func expectManualSessionCreate(mock pgxmock.PgxPoolIface, runID uuid.UUID, now t
 	mock.ExpectQuery("INSERT INTO sessions").
 		WithArgs(sessionAnyArgs(26)...).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at", "last_activity_at"}).AddRow(runID, now, now))
+	mock.ExpectQuery("INSERT INTO session_threads").
+		WithArgs(sessionAnyArgs(6)...).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
 	mock.ExpectCommit()
 }
 
@@ -616,6 +622,9 @@ func expectIssueSessionCreate(mock pgxmock.PgxPoolIface, runID uuid.UUID, now ti
 	mock.ExpectQuery("INSERT INTO sessions").
 		WithArgs(sessionAnyArgs(26)...).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at", "last_activity_at"}).AddRow(runID, now, now))
+	mock.ExpectQuery("INSERT INTO session_threads").
+		WithArgs(sessionAnyArgs(6)...).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
 	mock.ExpectExec("INSERT INTO session_issue_links").
 		WithArgs(sessionAnyArgs(4)...).
 		WillReturnResult(pgxmock.NewResult("INSERT", 1))
@@ -1089,6 +1098,36 @@ func TestSessionHandler_Counts_WithScopeFilters(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+func TestSessionHandler_Counts_WithTriggeredByUserIDs(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create pgxmock pool without error")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	userID1 := uuid.New()
+	userID2 := uuid.New()
+	handler := newSessionHandler(t, mock)
+
+	mock.ExpectQuery(`(?s)SELECT.*triggered_by_user_id = ANY`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows([]string{"all_count", "active_count", "archived_count"}).
+				AddRow(5, 2, 1),
+		)
+
+	req := httptest.NewRequest(http.MethodGet,
+		"/api/v1/sessions/counts?triggered_by_user_ids="+userID1.String()+","+userID2.String(), nil)
+	ctx := middleware.WithOrgID(req.Context(), orgID)
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	handler.Counts(w, req)
+	require.Equal(t, http.StatusOK, w.Code, "should return 200 with triggered_by_user_ids")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func TestSessionHandler_Counts_InvalidRepositoryID(t *testing.T) {
 	t.Parallel()
 
@@ -1126,6 +1165,86 @@ func TestSessionHandler_Counts_InvalidUserID(t *testing.T) {
 
 	handler.Counts(w, req)
 	require.Equal(t, http.StatusBadRequest, w.Code, "should reject invalid triggered_by_user_id")
+	require.Contains(t, w.Body.String(), "INVALID_USER_ID")
+}
+
+func TestSessionHandler_Counts_InvalidUserIDs(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create pgxmock pool without error")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	handler := newSessionHandler(t, mock)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/sessions/counts?triggered_by_user_ids=bad", nil)
+	ctx := middleware.WithOrgID(req.Context(), orgID)
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	handler.Counts(w, req)
+	require.Equal(t, http.StatusBadRequest, w.Code, "should reject invalid triggered_by_user_ids")
+	require.Contains(t, w.Body.String(), "INVALID_USER_ID")
+}
+
+func TestSessionHandler_Counts_BlankUserIDs(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create pgxmock pool without error")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	handler := newSessionHandler(t, mock)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/sessions/counts?triggered_by_user_ids=,,,", nil)
+	ctx := middleware.WithOrgID(req.Context(), orgID)
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	handler.Counts(w, req)
+	require.Equal(t, http.StatusBadRequest, w.Code, "should reject blank triggered_by_user_ids")
+	require.Contains(t, w.Body.String(), "INVALID_USER_ID")
+}
+
+func TestSessionHandler_Counts_EmptyUserIDs(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create pgxmock pool without error")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	handler := newSessionHandler(t, mock)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/sessions/counts?triggered_by_user_ids=", nil)
+	ctx := middleware.WithOrgID(req.Context(), orgID)
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	handler.Counts(w, req)
+	require.Equal(t, http.StatusBadRequest, w.Code, "should reject empty triggered_by_user_ids")
+	require.Contains(t, w.Body.String(), "INVALID_USER_ID")
+}
+
+func TestSessionHandler_Counts_WhitespaceUserIDs(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create pgxmock pool without error")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	handler := newSessionHandler(t, mock)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/sessions/counts?triggered_by_user_ids=%20", nil)
+	ctx := middleware.WithOrgID(req.Context(), orgID)
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	handler.Counts(w, req)
+	require.Equal(t, http.StatusBadRequest, w.Code, "should reject whitespace triggered_by_user_ids")
 	require.Contains(t, w.Body.String(), "INVALID_USER_ID")
 }
 
@@ -3041,6 +3160,10 @@ func TestSessionHandler_StreamLogsViaPolling_ReplaysAndFinishes(t *testing.T) {
 	defer mock.Close()
 
 	handler := newSessionHandler(t, mock)
+	// Pin the polling interval so the test isn't sensitive to the jittered
+	// production range (2s–3.5s). Production uses jittered per-connection
+	// intervals to avoid a synchronized N-client dogpile when Redis recovers.
+	handler.SetPollIntervalForTest(20 * time.Millisecond)
 	orgID := uuid.New()
 	runID := uuid.New()
 	issueID := uuid.New()
@@ -3167,6 +3290,7 @@ func TestSessionHandler_StreamLogsViaPolling_ReloadFailureReturns(t *testing.T) 
 	defer mock.Close()
 
 	handler := newSessionHandler(t, mock)
+	handler.SetPollIntervalForTest(20 * time.Millisecond)
 	orgID := uuid.New()
 	runID := uuid.New()
 	issueID := uuid.New()
@@ -3275,6 +3399,7 @@ func TestSessionHandler_StreamLogsViaPolling_StatusAndDoneWriteFailures(t *testi
 				defer mock.Close()
 
 				handler := newSessionHandler(t, mock)
+				handler.SetPollIntervalForTest(20 * time.Millisecond)
 				orgID := uuid.New()
 				runID := uuid.New()
 				issueID := uuid.New()
@@ -3338,6 +3463,7 @@ func TestSessionHandler_StreamLogs_RedisFallbackToPolling(t *testing.T) {
 	issueID := uuid.New()
 	now := time.Now()
 	handler := newSessionHandler(t, mock)
+	handler.SetPollIntervalForTest(20 * time.Millisecond)
 	streams, _ := newSessionTestStreams(t)
 	handler.SetStreams(streams)
 	handler.SetShutdownSignal(make(chan struct{}))
@@ -3396,6 +3522,36 @@ func TestSessionHandler_StreamLogs_RedisFallbackToPolling(t *testing.T) {
 		t.Fatal("StreamLogs did not finish after falling back to polling")
 	}
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestSessionHandler_SSEFallbackJitterRange(t *testing.T) {
+	t.Parallel()
+
+	// Locks in the dogpile-mitigation contract: every sampled interval must
+	// fall inside the documented bracket so a future change can't silently
+	// regress the worst-case Postgres query rate during a Redis outage.
+	// The test override path is also verified — if SetPollIntervalForTest is
+	// ever broken, every other test in this file would still pass on luck
+	// because the production sampler returns timing in the seconds range.
+	h := &SessionHandler{}
+
+	for i := 0; i < 200; i++ {
+		got := h.sseFallbackPollInterval()
+		require.GreaterOrEqual(t, got, sseFallbackPollMin, "production poll interval must respect the lower bound")
+		require.LessOrEqual(t, got, sseFallbackPollMax, "production poll interval must respect the upper bound")
+		hb := h.sseFallbackHeartbeatInterval()
+		require.GreaterOrEqual(t, hb, sseFallbackHeartbeatMin, "production heartbeat interval must respect the lower bound")
+		require.LessOrEqual(t, hb, sseFallbackHeartbeatMax, "production heartbeat interval must respect the upper bound")
+	}
+
+	h.SetPollIntervalForTest(75 * time.Millisecond)
+	require.Equal(t, 75*time.Millisecond, h.sseFallbackPollInterval(), "test override should pin the poll interval to the requested value")
+	require.Equal(t, 5*75*time.Millisecond, h.sseFallbackHeartbeatInterval(), "test override should derive the heartbeat from the same scale")
+
+	h.SetPollIntervalForTest(0)
+	got := h.sseFallbackPollInterval()
+	require.GreaterOrEqual(t, got, sseFallbackPollMin, "passing 0 to the override should restore the default randomized sampler")
+	require.LessOrEqual(t, got, sseFallbackPollMax, "passing 0 to the override should restore the default randomized sampler")
 }
 
 func TestSessionHandler_CreateManual(t *testing.T) {
@@ -3515,6 +3671,39 @@ func TestSessionHandler_CreateManual(t *testing.T) {
 			setupMock:    func(mock pgxmock.PgxPoolIface, orgID uuid.UUID) {},
 			expectedCode: http.StatusBadRequest,
 			expectedBody: "MISSING_MESSAGE",
+		},
+		{
+			name: "creates manual session successfully with only images",
+			body: `{"message":"  ","images":["https://example.com/mobile-shot.png"],"agent_type":"claude_code"}`,
+			setupMock: func(mock pgxmock.PgxPoolIface, orgID uuid.UUID) {
+				now := time.Now()
+				runID := uuid.New()
+				messageID := int64(1)
+				jobID := uuid.New()
+
+				mock.ExpectQuery("SELECT .+ FROM organizations WHERE id").
+					WithArgs(pgxmock.AnyArg()).
+					WillReturnRows(pgxmock.NewRows([]string{"id", "name", "settings", "created_at", "updated_at"}).
+						AddRow(orgID, "test-org", nil, now, now))
+
+				expectManualSessionCreate(mock, runID, now)
+
+				mock.ExpectQuery("INSERT INTO session_messages").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(messageID, now))
+
+				mock.ExpectQuery("SELECT count").
+					WithArgs(pgxmock.AnyArg()).
+					WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
+
+				mock.ExpectQuery("INSERT INTO jobs").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+						pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(jobID))
+			},
+			expectedCode: http.StatusCreated,
+			expectedBody: "claude_code",
 		},
 		{
 			name:         "returns bad request for invalid body",
@@ -3908,9 +4097,9 @@ func TestSessionHandler_EndSession_ManualSkipsValidation(t *testing.T) {
 	mock.ExpectQuery("INSERT INTO jobs").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(jobID))
-	mock.ExpectExec("UPDATE sessions").
+	mock.ExpectQuery("UPDATE sessions").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+		WillReturnRows(pgxmock.NewRows(sessionColumns))
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/"+sessionID.String()+"/end", nil)
 	rctx := chi.NewRouteContext()
@@ -5673,148 +5862,85 @@ func TestCurrentResolutionPass(t *testing.T) {
 	}
 }
 
-func TestResolveCommentsError_Write(t *testing.T) {
+// TestParseAndDedupeReviewCommentIDs covers the shared helper used by both
+// session-level SendMessage and thread-level SendThreadMessage. The
+// behaviors under test (cap, dedupe, malformed UUID rejection) are uniform
+// across both surfaces; the deeper validate-and-resolve tests live in the db
+// package against ValidateAndResolveByIDs.
+func TestParseAndDedupeReviewCommentIDs(t *testing.T) {
 	t.Parallel()
 
-	tests := []struct {
-		name       string
-		err        *resolveCommentsError
-		expectCode string
-	}{
-		{
-			name: "writes plain error",
-			err: &resolveCommentsError{
-				status: http.StatusBadRequest, code: "BAD_COMMENTS", message: "bad comments",
-			},
-			expectCode: "BAD_COMMENTS",
-		},
-		{
-			name: "writes underlying error",
-			err: &resolveCommentsError{
-				status: http.StatusInternalServerError, code: "COMMENT_LOOKUP_FAILED", message: "lookup failed", underlying: errors.New("db down"),
-			},
-			expectCode: "COMMENT_LOOKUP_FAILED",
-		},
-	}
+	t.Run("returns nil for empty input", func(t *testing.T) {
+		t.Parallel()
+		out, perr := parseAndDedupeReviewCommentIDs(nil)
+		require.Nil(t, perr)
+		require.Nil(t, out)
+	})
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
+	t.Run("rejects malformed UUID before any work", func(t *testing.T) {
+		t.Parallel()
+		out, perr := parseAndDedupeReviewCommentIDs([]string{"not-a-uuid"})
+		require.NotNil(t, perr)
+		require.Equal(t, "INVALID_REVIEW_COMMENT_ID", perr.code)
+		require.Equal(t, http.StatusBadRequest, perr.status)
+		require.Empty(t, out)
+	})
 
-			req := httptest.NewRequest(http.MethodPost, "/", nil)
-			w := httptest.NewRecorder()
-			tt.err.write(w, req)
-			require.Equal(t, tt.err.status, w.Code, "resolveCommentsError should write the configured HTTP status")
-			require.Contains(t, w.Body.String(), tt.expectCode, "response should include the configured error code")
-		})
-	}
+	t.Run("rejects too many IDs", func(t *testing.T) {
+		t.Parallel()
+		raw := make([]string, maxReviewCommentResolveIDsPerMessage+1)
+		for i := range raw {
+			raw[i] = uuid.New().String()
+		}
+		out, perr := parseAndDedupeReviewCommentIDs(raw)
+		require.NotNil(t, perr)
+		require.Equal(t, "TOO_MANY_REVIEW_COMMENT_IDS", perr.code)
+		require.Equal(t, http.StatusBadRequest, perr.status)
+		require.Empty(t, out)
+	})
+
+	t.Run("dedupes preserving first occurrence", func(t *testing.T) {
+		t.Parallel()
+		a := uuid.New()
+		b := uuid.New()
+		out, perr := parseAndDedupeReviewCommentIDs([]string{a.String(), b.String(), a.String()})
+		require.Nil(t, perr)
+		require.Equal(t, []uuid.UUID{a, b}, out)
+	})
 }
 
-func TestResolveSessionReviewComments(t *testing.T) {
+func TestRenderReviewCommentResolveError(t *testing.T) {
 	t.Parallel()
 
-	t.Run("no-op for empty IDs or missing store", func(t *testing.T) {
+	t.Run("returns false for nil error", func(t *testing.T) {
 		t.Parallel()
-
-		orgID := uuid.New()
-		sessionID := uuid.New()
-		resolved, rerr := resolveSessionReviewComments(context.Background(), nil, orgID, sessionID, []uuid.UUID{uuid.New()}, 1)
-		require.Nil(t, rerr, "nil store should be a no-op")
-		require.Empty(t, resolved, "nil store should not resolve comments")
-
-		mock, err := pgxmock.NewPool()
-		require.NoError(t, err, "pgxmock pool should initialize")
-		defer mock.Close()
-
-		store := db.NewSessionReviewCommentStore(mock)
-		resolved, rerr = resolveSessionReviewComments(context.Background(), store, orgID, sessionID, nil, 1)
-		require.Nil(t, rerr, "empty ID list should be a no-op")
-		require.Empty(t, resolved, "empty ID list should not resolve comments")
-		require.NoError(t, mock.ExpectationsWereMet(), "empty ID list should not query the store")
+		w := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/", nil)
+		require.False(t, renderReviewCommentResolveError(w, req, nil))
+		require.Equal(t, http.StatusOK, w.Code, "no body should be written")
 	})
 
-	t.Run("returns lookup errors", func(t *testing.T) {
+	t.Run("returns false for unrelated errors", func(t *testing.T) {
 		t.Parallel()
-
-		mock, err := pgxmock.NewPool()
-		require.NoError(t, err, "pgxmock pool should initialize")
-		defer mock.Close()
-
-		orgID := uuid.New()
-		sessionID := uuid.New()
-		commentID := uuid.New()
-		mock.ExpectQuery("SELECT .+ FROM session_review_comments WHERE id = ANY").
-			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-			WillReturnError(errors.New("connection refused"))
-
-		resolved, rerr := resolveSessionReviewComments(context.Background(), db.NewSessionReviewCommentStore(mock), orgID, sessionID, []uuid.UUID{commentID}, 1)
-		require.Empty(t, resolved, "lookup failure should not return resolved comments")
-		require.NotNil(t, rerr, "lookup failure should return a structured error")
-		require.Equal(t, "REVIEW_COMMENT_LOOKUP_FAILED", rerr.code, "lookup failure should use the lookup error code")
-		require.NoError(t, mock.ExpectationsWereMet(), "all store expectations should be met")
+		w := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/", nil)
+		require.False(t, renderReviewCommentResolveError(w, req, errors.New("connection refused")))
+		require.Equal(t, http.StatusOK, w.Code, "unrelated errors should not be written by this helper")
 	})
 
-	t.Run("caps missing ID details", func(t *testing.T) {
+	t.Run("renders ErrReviewCommentsNotInSession with capped IDs", func(t *testing.T) {
 		t.Parallel()
-
-		mock, err := pgxmock.NewPool()
-		require.NoError(t, err, "pgxmock pool should initialize")
-		defer mock.Close()
-
-		now := time.Now()
-		orgID := uuid.New()
-		sessionID := uuid.New()
-		userID := uuid.New()
 		ids := []uuid.UUID{uuid.New(), uuid.New(), uuid.New(), uuid.New(), uuid.New(), uuid.New(), uuid.New()}
-		mock.ExpectQuery("SELECT .+ FROM session_review_comments WHERE id = ANY").
-			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-			WillReturnRows(
-				pgxmock.NewRows(reviewCommentColumns).
-					AddRow(ids[0], sessionID, orgID, userID, "main.go",
-						1, "right", "exists", false, (*time.Time)(nil), (*int)(nil),
-						1, now, now),
-			)
-
-		resolved, rerr := resolveSessionReviewComments(context.Background(), db.NewSessionReviewCommentStore(mock), orgID, sessionID, ids, 1)
-		require.Empty(t, resolved, "missing IDs should not resolve comments")
-		require.NotNil(t, rerr, "missing IDs should return a structured error")
-		require.Equal(t, "INVALID_REVIEW_COMMENT_IDS", rerr.code, "missing IDs should use the invalid IDs error code")
-		require.NotContains(t, rerr.message, ids[0].String(), "existing IDs should not be reported as missing")
-		require.Contains(t, rerr.message, ids[1].String(), "first missing ID should be reported")
-		require.Contains(t, rerr.message, ids[5].String(), "fifth missing ID should be reported")
-		require.NotContains(t, rerr.message, ids[6].String(), "missing ID details should be capped")
-		require.NoError(t, mock.ExpectationsWereMet(), "all store expectations should be met")
-	})
-
-	t.Run("returns resolve errors", func(t *testing.T) {
-		t.Parallel()
-
-		mock, err := pgxmock.NewPool()
-		require.NoError(t, err, "pgxmock pool should initialize")
-		defer mock.Close()
-
-		now := time.Now()
-		orgID := uuid.New()
-		sessionID := uuid.New()
-		userID := uuid.New()
-		commentID := uuid.New()
-		mock.ExpectQuery("SELECT .+ FROM session_review_comments WHERE id = ANY").
-			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-			WillReturnRows(
-				pgxmock.NewRows(reviewCommentColumns).
-					AddRow(commentID, sessionID, orgID, userID, "main.go",
-						1, "right", "exists", false, (*time.Time)(nil), (*int)(nil),
-						1, now, now),
-			)
-		mock.ExpectQuery("UPDATE session_review_comments SET resolved = true").
-			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-			WillReturnError(errors.New("connection refused"))
-
-		resolved, rerr := resolveSessionReviewComments(context.Background(), db.NewSessionReviewCommentStore(mock), orgID, sessionID, []uuid.UUID{commentID}, 2)
-		require.Empty(t, resolved, "resolve failure should not return resolved comments")
-		require.NotNil(t, rerr, "resolve failure should return a structured error")
-		require.Equal(t, "REVIEW_COMMENT_RESOLVE_FAILED", rerr.code, "resolve failure should use the resolve error code")
-		require.NoError(t, mock.ExpectationsWereMet(), "all store expectations should be met")
+		w := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/", nil)
+		require.True(t, renderReviewCommentResolveError(w, req, &db.ErrReviewCommentsNotInSession{Missing: ids}))
+		require.Equal(t, http.StatusBadRequest, w.Code)
+		body := w.Body.String()
+		require.Contains(t, body, "INVALID_REVIEW_COMMENT_IDS")
+		require.Contains(t, body, ids[0].String(), "first missing ID should appear")
+		require.Contains(t, body, ids[4].String(), "fifth missing ID should appear")
+		require.NotContains(t, body, ids[5].String(), "missing ID details should be capped at 5")
+		require.NotContains(t, body, ids[6].String(), "missing ID details should be capped at 5")
 	})
 }
 
@@ -6053,9 +6179,9 @@ func TestSessionHandler_CreatePR_Success(t *testing.T) {
 	mock.ExpectQuery("INSERT INTO jobs").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(jobID))
-	mock.ExpectExec("UPDATE sessions").
+	mock.ExpectQuery("UPDATE sessions").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+		WillReturnRows(pgxmock.NewRows(sessionColumns))
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/"+sessionID.String()+"/pr", nil)
 	rctx := chi.NewRouteContext()
@@ -6123,9 +6249,9 @@ func TestSessionHandler_CreatePR_DedupeConflict(t *testing.T) {
 	mock.ExpectQuery("INSERT INTO jobs").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnError(pgx.ErrNoRows)
-	mock.ExpectExec("UPDATE sessions").
+	mock.ExpectQuery("UPDATE sessions").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+		WillReturnRows(pgxmock.NewRows(sessionColumns))
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/"+sessionID.String()+"/pr", nil)
 	rctx := chi.NewRouteContext()
@@ -6446,9 +6572,9 @@ func TestSessionHandler_CreatePR_AppAuthorModeBypassesAuthIntercept(t *testing.T
 	mock.ExpectQuery("INSERT INTO jobs").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(jobID))
-	mock.ExpectExec("UPDATE sessions").
+	mock.ExpectQuery("UPDATE sessions").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+		WillReturnRows(pgxmock.NewRows(sessionColumns))
 
 	body := strings.NewReader(`{"author_mode":"app"}`)
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/"+sessionID.String()+"/pr", body)
@@ -6597,9 +6723,9 @@ func TestSessionHandler_CreatePR_UserPreferredWithoutGitHubAppUserAuthFallsBackT
 	mock.ExpectQuery("INSERT INTO jobs").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(jobID))
-	mock.ExpectExec("UPDATE sessions").
+	mock.ExpectQuery("UPDATE sessions").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+		WillReturnRows(pgxmock.NewRows(sessionColumns))
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/"+sessionID.String()+"/pr", strings.NewReader(`{"author_mode":"auto"}`))
 	rctx := chi.NewRouteContext()
@@ -6974,7 +7100,7 @@ func TestSessionHandler_CreatePR_UpdateStateErrorStillAccepted(t *testing.T) {
 	mock.ExpectQuery("INSERT INTO jobs").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(jobID))
-	mock.ExpectExec("UPDATE sessions").
+	mock.ExpectQuery("UPDATE sessions").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnError(errors.New("write failed"))
 
@@ -7334,6 +7460,7 @@ func pushSessionRow(sessionID, issueID, orgID uuid.UUID, now time.Time, opts pus
 		"pr_push_error":                  (*string)(nil),
 		"diff_collected_at":              nil,
 		"latest_diff_snapshot_id":        nil,
+		"has_unpushed_changes":           false,
 		"linear_private":                 false,
 		"linear_state_sync_disabled":     false,
 		"linear_identifier_hint":         (*string)(nil),
@@ -7379,11 +7506,13 @@ func TestSessionHandler_PushChangesToPR_Success(t *testing.T) {
 	mock.ExpectQuery("INSERT INTO jobs").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(jobID))
-	// CAS update from TryMarkPRPushQueued — 2 args (id, org_id) and rows-
-	// affected=1 to indicate the racing-winner branch.
-	mock.ExpectExec("UPDATE sessions").
+	// CAS update from TryMarkPRPushQueued — 2 args (id, org_id). RETURNING +
+	// publishStatus replaced bare Exec so the SSE detail page sees the
+	// transition immediately; the test returns the post-CAS row (pr_push_state
+	// flipped to "queued") to mirror what Postgres would actually return.
+	mock.ExpectQuery("UPDATE sessions").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+		WillReturnRows(pushSessionRow(sessionID, issueID, orgID, now, pushSessionRowOpts{pushState: "queued"}))
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/"+sessionID.String()+"/pr/push", nil)
 	rctx := chi.NewRouteContext()
@@ -7436,10 +7565,11 @@ func TestSessionHandler_PushChangesToPR_CASLosesRaceReturnsConflict(t *testing.T
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(jobID))
 	// CAS UPDATE matches no rows because a concurrent winner already moved
-	// pr_push_state to 'queued'.
-	mock.ExpectExec("UPDATE sessions").
+	// pr_push_state to 'queued'. RETURNING with empty rows triggers
+	// pgx.ErrNoRows in TryMarkPRPushQueued, which surfaces as (false, nil).
+	mock.ExpectQuery("UPDATE sessions").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
+		WillReturnRows(pgxmock.NewRows(sessionColumns))
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/"+sessionID.String()+"/pr/push", nil)
 	rctx := chi.NewRouteContext()

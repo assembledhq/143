@@ -11,13 +11,20 @@ export function CodexDeviceCodeModal({
   onClose,
   onConnected,
   label,
+  scope,
 }: {
   onClose: () => void;
   onConnected?: () => void;
   label?: string;
+  // scope routes the pending-auth row into either the org or the caller's
+  // personal credential stack. Defaults to org for backwards compatibility
+  // with the admin /settings/agent flow.
+  scope?: 'org' | 'personal';
 }) {
-  // Capture the label at mount time so it stays stable throughout the auth flow.
+  // Capture the label + scope at mount time so they stay stable throughout
+  // the auth flow.
   const [stableLabel] = useState(() => label);
+  const [stableScope] = useState(() => scope);
   const [deviceAuth, setDeviceAuth] = useState<CodexDeviceAuth | null>(null);
   const [status, setStatus] = useState<string>("initiating");
   const [error, setError] = useState("");
@@ -36,7 +43,7 @@ export function CodexDeviceCodeModal({
     try {
       setStatus("initiating");
       setError("");
-      const resp = await api.codexAuth.initiate(stableLabel);
+      const resp = await api.codexAuth.initiate(stableLabel, stableScope);
       setDeviceAuth(resp.data);
       setTimeLeft(resp.data.expires_in);
       setStatus("pending");
@@ -47,7 +54,7 @@ export function CodexDeviceCodeModal({
       setError(message);
       setStatus("error");
     }
-  }, [stableLabel]);
+  }, [stableLabel, stableScope]);
 
   useEffect(() => {
     const id = setTimeout(() => {
@@ -61,7 +68,7 @@ export function CodexDeviceCodeModal({
 
     pollRef.current = setInterval(async () => {
       try {
-        const resp = await api.codexAuth.status(stableLabel);
+        const resp = await api.codexAuth.status(stableLabel, stableScope);
         if (resp.data.status === "completed") {
           setStatus("completed");
           if (pollRef.current) clearInterval(pollRef.current);
@@ -94,7 +101,7 @@ export function CodexDeviceCodeModal({
       if (timerRef.current) clearInterval(timerRef.current);
       if (copyTimeoutRef.current) clearTimeout(copyTimeoutRef.current);
     };
-  }, [status, stableLabel]);
+  }, [status, stableLabel, stableScope]);
 
   const minutes = Math.floor(timeLeft / 60);
   const seconds = timeLeft % 60;

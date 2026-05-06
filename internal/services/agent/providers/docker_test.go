@@ -9,6 +9,7 @@ import (
 	"net"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -1741,4 +1742,112 @@ func TestRedactToken(t *testing.T) {
 		redactToken("fatal: ghp_secret@github.com/org/repo.git not found", "ghp_secret"))
 	require.Equal(t, "fatal: repo not found",
 		redactToken("fatal: repo not found", ""))
+}
+
+// blockingHijackedConn is a net.Conn whose Read blocks until Close is called,
+// modeling a hijacked exec connection for a long-running process (e.g. a
+// preview service like `npm run dev`) that never produces output and never
+// EOFs on its own. Closing the connection unblocks the read with EOF — the
+// same shape the docker daemon presents when the underlying exec is killed.
+type blockingHijackedConn struct {
+	pr        *io.PipeReader
+	pw        *io.PipeWriter
+	closeOnce sync.Once
+}
+
+func newBlockingHijackedConn() *blockingHijackedConn {
+	pr, pw := io.Pipe()
+	return &blockingHijackedConn{pr: pr, pw: pw}
+}
+
+func (c *blockingHijackedConn) Read(p []byte) (int, error)  { return c.pr.Read(p) }
+func (c *blockingHijackedConn) Write(p []byte) (int, error) { return len(p), nil }
+func (c *blockingHijackedConn) Close() error {
+	c.closeOnce.Do(func() {
+		_ = c.pw.Close()
+		_ = c.pr.Close()
+	})
+	return nil
+}
+func (c *blockingHijackedConn) LocalAddr() net.Addr                { return nil }
+func (c *blockingHijackedConn) RemoteAddr() net.Addr               { return nil }
+func (c *blockingHijackedConn) SetDeadline(t time.Time) error      { return nil }
+func (c *blockingHijackedConn) SetReadDeadline(t time.Time) error  { return nil }
+func (c *blockingHijackedConn) SetWriteDeadline(t time.Time) error { return nil }
+
+// TestDockerProvider_ExecStream_CancelUnblocksHijackedRead verifies that
+// canceling the context unblocks ExecStream when StdCopy is reading from a
+// hijacked connection that would otherwise never EOF.
+//
+// Regression: pre-fix, ExecStream blocked indefinitely on the hijacked read
+// because stdcopy.StdCopy reads from a raw net.Conn that doesn't observe
+// ctx cancellation. That deadlocked preview StopPreview's state.wg.Wait()
+// and stranded sandboxes for ~15 minutes — until the cleanup worker's idle
+// pass eventually destroyed the container, killing the exec process and
+// closing the hijacked connection from the daemon side.
+//
+// The fix spawns a watcher goroutine inside ExecStream that closes the
+// hijacked connection when ctx is canceled, unblocking StdCopy promptly.
+func TestDockerProvider_ExecStream_CancelUnblocksHijackedRead(t *testing.T) {
+	t.Parallel()
+
+	conn := newBlockingHijackedConn()
+	defer conn.Close()
+
+	mock := &mockDockerClient{}
+	mock.containerExecAttachFn = func(_ context.Context, _ string, _ container.ExecAttachOptions) (types.HijackedResponse, error) {
+		return types.HijackedResponse{
+			Conn:   conn,
+			Reader: bufio.NewReader(conn),
+		}, nil
+	}
+	// Have ExecInspect honor ctx so the post-StdCopy inspect surfaces the
+	// cancellation if StdCopy returned a clean EOF (the io.Pipe shape).
+	mock.containerExecInspectFn = func(ctx context.Context, _ string) (container.ExecInspect, error) {
+		if err := ctx.Err(); err != nil {
+			return container.ExecInspect{}, err
+		}
+		return container.ExecInspect{ExitCode: 0}, nil
+	}
+
+	p := NewDockerProvider(mock, newTestLogger())
+	sb := &agent.Sandbox{ID: "test-container", Provider: "docker", WorkDir: "/workspace"}
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	type result struct {
+		exitCode int
+		err      error
+	}
+	resultCh := make(chan result, 1)
+	go func() {
+		ec, err := p.ExecStream(ctx, sb, "long-running-service", func([]byte) {}, io.Discard)
+		resultCh <- result{ec, err}
+	}()
+
+	// Give the goroutine time to enter StdCopy on the hijacked read. If we
+	// race ahead of it, canceling ctx before the watcher is registered would
+	// still unblock the read on the next Close — but we want to exercise the
+	// realistic ordering where StdCopy is already blocked.
+	time.Sleep(50 * time.Millisecond)
+
+	// Sanity: ExecStream should still be running. Pre-fix this would also
+	// pass — the bug is in cancellation, not initial blocking.
+	select {
+	case r := <-resultCh:
+		t.Fatalf("ExecStream returned before ctx was canceled: exitCode=%d err=%v", r.exitCode, r.err)
+	default:
+	}
+
+	cancel()
+
+	select {
+	case r := <-resultCh:
+		// Either StdCopy errored ("read exec output: ...") or ExecInspect
+		// observed the canceled ctx ("inspect exec: context canceled"). Both
+		// shapes are acceptable; what matters is that ExecStream returned.
+		require.Error(t, r.err, "expected ExecStream to surface an error after ctx cancel")
+	case <-time.After(2 * time.Second):
+		t.Fatal("ExecStream did not return within 2s after ctx cancel — the hijacked read was not unblocked")
+	}
 }

@@ -41,6 +41,24 @@ describe("session-open-position", () => {
     expect(getSessionScrollStorageKey("sess-123", viewerScope)).toBe("session-scroll-position:org-1:user-1:sess-123");
   });
 
+  it("builds distinct scroll storage keys for different threads in one session", () => {
+    expect(getSessionScrollStorageKey("sess-123", viewerScope, "thread-a")).toBe(
+      "session-scroll-position:org-1:user-1:sess-123:thread-a",
+    );
+    expect(getSessionScrollStorageKey("sess-123", viewerScope, "thread-a")).not.toBe(
+      getSessionScrollStorageKey("sess-123", viewerScope, "thread-b"),
+    );
+  });
+
+  it("reads a stored thread-specific session position when present", () => {
+    const storage = new Map<string, string>([
+      ["session-scroll-position:org-1:user-1:sess-123:thread-a", JSON.stringify({ version: 1, scrollTop: 240 })],
+    ]);
+
+    expect(readStoredSessionScrollPosition(storage, "sess-123", viewerScope, "thread-a")).toBe(240);
+    expect(readStoredSessionScrollPosition(storage, "sess-123", viewerScope, "thread-b")).toBeNull();
+  });
+
   it("scopes storage keys by viewer identity", () => {
     expect(
       getSessionScrollStorageKey("sess-123", { userId: "user-1", orgId: "org-1" }),
@@ -81,6 +99,16 @@ describe("session-open-position", () => {
     writeStoredSessionScrollPosition(storage, "sess-123", viewerScope, 319.8);
 
     expect(storage.get("session-scroll-position:org-1:user-1:sess-123")).toBe(JSON.stringify({ version: 1, scrollTop: 320 }));
+  });
+
+  it("stores normalized scroll positions for a thread-specific view", () => {
+    const storage = new Map<string, string>();
+
+    writeStoredSessionScrollPosition(storage, "sess-123", viewerScope, 101.2, "thread-a");
+
+    expect(storage.get("session-scroll-position:org-1:user-1:sess-123:thread-a")).toBe(
+      JSON.stringify({ version: 1, scrollTop: 101 }),
+    );
   });
 
   it("does not read another viewer's saved session position", () => {

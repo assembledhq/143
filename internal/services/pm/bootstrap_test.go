@@ -115,16 +115,30 @@ type mockCredStore struct {
 	creds map[models.ProviderName]*models.DecryptedCredential
 }
 
+// withDefaultStatus applies Status="active" when the test fixture didn't set
+// one. The legacy fallback resolver in agent.AgentEnv now filters by status,
+// and these PM tests pre-date that filter — every fixture would otherwise
+// need to repeat `Status: "active"` for behavior that's already production
+// reality.
+func (m *mockCredStore) withDefaultStatus(cred *models.DecryptedCredential) *models.DecryptedCredential {
+	if cred == nil || cred.Status != "" {
+		return cred
+	}
+	copy := *cred
+	copy.Status = models.CodingCredentialStatusActive
+	return &copy
+}
+
 func (m *mockCredStore) Get(_ context.Context, _ uuid.UUID, provider models.ProviderName) (*models.DecryptedCredential, error) {
 	if c, ok := m.creds[provider]; ok {
-		return c, nil
+		return m.withDefaultStatus(c), nil
 	}
 	return nil, pgx.ErrNoRows
 }
 
 func (m *mockCredStore) ListByProvider(_ context.Context, _ uuid.UUID, provider models.ProviderName) ([]models.DecryptedCredential, error) {
 	if c, ok := m.creds[provider]; ok {
-		return []models.DecryptedCredential{*c}, nil
+		return []models.DecryptedCredential{*m.withDefaultStatus(c)}, nil
 	}
 	return nil, pgx.ErrNoRows
 }

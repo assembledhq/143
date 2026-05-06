@@ -4,7 +4,9 @@ users:
   - name: deploy
     groups: docker
     shell: /bin/bash
-    sudo: ALL=(ALL) NOPASSWD:ALL
+    # No sudo here — narrow NOPASSWD grant is installed by deploy/scripts/bootstrap.sh
+    # on the first `make provision-<role>` run. Cloud-init's runcmd doesn't need
+    # sudo (it runs as root and uses `su - deploy -c ...` for deploy-owned steps).
     ssh_authorized_keys:
       - ${SSH_PUBLIC_KEY}
 

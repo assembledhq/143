@@ -64,7 +64,7 @@ export function ProviderKeyRow({
             className="text-xs px-1.5 py-0"
             title="Provider for the current default model"
           >
-            current
+            Current
           </Badge>
         )}
       </div>

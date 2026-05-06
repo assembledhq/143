@@ -21,6 +21,7 @@ var sessionIssueLinkTestColumns = []string{
 	// Migration 102 — Linear workspace slug is left-joined off
 	// session_issue_link_provider_state for deep-link rendering.
 	"issue_workspace_slug",
+	"linear_last_skipped_reason",
 	"linear_primary_snapshot",
 }
 
@@ -140,6 +141,12 @@ func TestSessionIssueLinkSelectColumns_UsesLinearIdentifierForExternalID(t *test
 	require.Contains(t, sessionIssueLinkSelectColumns, "COALESCE(provider_state.state->>'identifier', i.external_id) AS external_id", "linked issue enrichment should expose the human Linear key when provider state has it")
 }
 
+func TestSessionIssueLinkSelectColumns_ExposesLinearLastSkippedReason(t *testing.T) {
+	t.Parallel()
+
+	require.Contains(t, sessionIssueLinkSelectColumns, "(provider_state.state->>'last_skipped_reason') AS linear_last_skipped_reason", "linked issue enrichment should expose the latest Linear state-sync skip reason for operator debugging")
+}
+
 func TestSessionIssueLinkStore_ListBySession(t *testing.T) {
 	t.Parallel()
 
@@ -159,6 +166,7 @@ func TestSessionIssueLinkStore_ListBySession(t *testing.T) {
 	externalID := "ENG-123"
 	description := "Customers hit a timeout after payment authorization."
 	status := "open"
+	lastSkippedReason := "user_recent_edit"
 
 	mock.ExpectQuery("SELECT .+ FROM session_issue_links").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
@@ -169,6 +177,7 @@ func TestSessionIssueLinkStore_ListBySession(t *testing.T) {
 				&title, &source, &externalID, &description,
 				&repoID, &status,
 				nil, // issue_workspace_slug
+				&lastSkippedReason,
 				nil, // linear_primary_snapshot
 			),
 		)
@@ -179,6 +188,7 @@ func TestSessionIssueLinkStore_ListBySession(t *testing.T) {
 	require.Equal(t, issueID, links[0].IssueID, "ListBySession should decode the linked issue id")
 	require.Equal(t, models.SessionIssueLinkRolePrimary, links[0].Role, "ListBySession should decode the link role")
 	require.Equal(t, title, *links[0].IssueTitle, "ListBySession should decode issue enrichment fields")
+	require.Equal(t, lastSkippedReason, *links[0].LinearLastSkippedReason, "ListBySession should decode the latest Linear skip reason for operator debugging")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
@@ -228,7 +238,7 @@ func TestSessionIssueLinkStore_GetByIDAndRemove(t *testing.T) {
 				linkID, orgID, sessionID, issueID, string(models.SessionIssueLinkRolePrimary),
 				0, nil, now,
 				&title, &source, &externalID, nil,
-				nil, &status, &workspace, nil,
+				nil, &status, &workspace, nil, nil,
 			))
 
 		got, err := store.GetByID(context.Background(), orgID, linkID)
@@ -310,9 +320,9 @@ func TestSessionIssueLinkStore_ListBySessionIDs(t *testing.T) {
 			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 			WillReturnRows(
 				pgxmock.NewRows(sessionIssueLinkTestColumns).
-					AddRow(uuid.New(), orgID, sessionA, uuid.New(), string(models.SessionIssueLinkRolePrimary), 0, nil, now, nil, nil, nil, nil, &repoID, nil, nil, nil).
-					AddRow(uuid.New(), orgID, sessionA, uuid.New(), string(models.SessionIssueLinkRoleRelated), 1, nil, now, nil, nil, nil, nil, &repoID, nil, nil, nil).
-					AddRow(uuid.New(), orgID, sessionB, uuid.New(), string(models.SessionIssueLinkRolePrimary), 0, nil, now, nil, nil, nil, nil, &repoID, nil, nil, nil),
+					AddRow(uuid.New(), orgID, sessionA, uuid.New(), string(models.SessionIssueLinkRolePrimary), 0, nil, now, nil, nil, nil, nil, &repoID, nil, nil, nil, nil).
+					AddRow(uuid.New(), orgID, sessionA, uuid.New(), string(models.SessionIssueLinkRoleRelated), 1, nil, now, nil, nil, nil, nil, &repoID, nil, nil, nil, nil).
+					AddRow(uuid.New(), orgID, sessionB, uuid.New(), string(models.SessionIssueLinkRolePrimary), 0, nil, now, nil, nil, nil, nil, &repoID, nil, nil, nil, nil),
 			)
 
 		grouped, err := store.ListBySessionIDs(context.Background(), orgID, []uuid.UUID{sessionA, sessionB})
@@ -353,7 +363,7 @@ func TestSessionIssueLinkStore_ListBySessionIDs(t *testing.T) {
 			WillReturnRows(
 				pgxmock.NewRows(sessionIssueLinkTestColumns).AddRow(
 					"bad-uuid", uuid.New(), uuid.New(), uuid.New(), string(models.SessionIssueLinkRolePrimary),
-					0, nil, time.Now().UTC(), nil, nil, nil, nil, nil, nil, nil, nil,
+					0, nil, time.Now().UTC(), nil, nil, nil, nil, nil, nil, nil, nil, nil,
 				),
 			)
 

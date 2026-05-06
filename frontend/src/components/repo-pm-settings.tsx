@@ -22,16 +22,22 @@ import {
 import { X } from "lucide-react";
 import { useAutosave } from "@/hooks/useAutosave";
 import { useAutosaveNumericField } from "@/hooks/useAutosaveNumericField";
+import { availableAgentModelGroups, pmUsableResolvedCredentials } from "@/lib/agents";
 import { queryKeys } from "@/lib/query-keys";
 import type {
+  CodingAuth,
+  CodingCredentialSummary,
+  ListResponse,
   Organization,
   OrgSettings,
   RepoSettings,
   RepoPMSettings,
   Repository,
+  ResolvedCredential,
   SingleResponse,
+  UserCredentialSummary,
 } from "@/lib/types";
-import { DEFAULT_PM_MODEL, PM_MODELS_BY_PROVIDER } from "@/lib/model-constants";
+import { DEFAULT_PM_MODEL } from "@/lib/model-constants";
 
 const PM_SCHEDULE_MIN = 1;
 const PM_SCHEDULE_MAX = 24;
@@ -80,6 +86,22 @@ export function RepoPMSettingsEditor({ repository }: RepoPMSettingsProps) {
     queryKey: queryKeys.settings.all,
     queryFn: () => api.settings.get(),
   });
+  const { data: resolvedCredsResponse } = useQuery<ListResponse<ResolvedCredential>>({
+    queryKey: queryKeys.credentials.resolved,
+    queryFn: () => api.userCredentials.listResolved(),
+  });
+  const { data: teamDefaultsResponse } = useQuery<ListResponse<UserCredentialSummary>>({
+    queryKey: queryKeys.credentials.teamDefaults,
+    queryFn: () => api.userCredentials.listTeamDefaults(),
+  });
+  const { data: codingAuthsResponse } = useQuery<ListResponse<CodingAuth>>({
+    queryKey: ["coding-auths"],
+    queryFn: () => api.codingAuths.list(),
+  });
+  const { data: orgCodingCredentialsResponse } = useQuery<ListResponse<CodingCredentialSummary>>({
+    queryKey: ["coding-credentials", "org"],
+    queryFn: () => api.codingCredentials.list("org"),
+  });
 
   const orgSettings = (orgResponse?.data?.settings ?? {}) as OrgSettings;
   const repoSettings = (repository.settings ?? {}) as RepoSettings;
@@ -112,17 +134,40 @@ export function RepoPMSettingsEditor({ repository }: RepoPMSettingsProps) {
   const [focusInput, setFocusInput] = useState("");
   const [avoidInput, setAvoidInput] = useState("");
 
-  const enabledPmModelGroups = useMemo(() => {
-    const agentConfig = orgSettings.agent_config ?? {};
-    const defaultAgent = orgSettings.default_agent_type || "codex";
+  const resolvedCredentials = useMemo(
+    () => resolvedCredsResponse?.data ?? [],
+    [resolvedCredsResponse],
+  );
+  const codingAuths = useMemo(
+    () => codingAuthsResponse?.data ?? [],
+    [codingAuthsResponse],
+  );
+  const orgCodingCredentials = useMemo(
+    () => orgCodingCredentialsResponse?.data ?? [],
+    [orgCodingCredentialsResponse],
+  );
+  const pmCodingAuthAvailability = useMemo(
+    () => [...codingAuths, ...orgCodingCredentials],
+    [codingAuths, orgCodingCredentials],
+  );
+  const pmResolvedCredentials = useMemo(
+    () => pmUsableResolvedCredentials(resolvedCredentials, teamDefaultsResponse?.data ?? []),
+    [resolvedCredentials, teamDefaultsResponse],
+  );
 
-    return Object.entries(PM_MODELS_BY_PROVIDER)
-      .filter(([providerKey, { apiKeyVar }]) => {
-        const orgKey = agentConfig[providerKey]?.[apiKeyVar];
-        return Boolean(orgKey) || providerKey === defaultAgent;
-      })
-      .map(([, { label, models }]) => ({ label, models }));
-  }, [orgSettings.agent_config, orgSettings.default_agent_type]);
+  const pmModelGroups = useMemo(() => {
+    return availableAgentModelGroups(
+      pmResolvedCredentials,
+      null,
+      pmCodingAuthAvailability,
+      orgSettings.default_agent_type || "codex",
+      { orgAgentConfig: orgSettings.agent_config },
+    );
+  }, [pmResolvedCredentials, pmCodingAuthAvailability, orgSettings.default_agent_type, orgSettings.agent_config]);
+
+  const credentialsLoaded = Boolean(
+    resolvedCredsResponse && teamDefaultsResponse && codingAuthsResponse && orgCodingCredentialsResponse,
+  );
 
   const autosave = useAutosave<RepoPatch>({
     queryKey: ["repository", repository.id],
@@ -311,13 +356,17 @@ export function RepoPMSettingsEditor({ repository }: RepoPMSettingsProps) {
                       <SelectValue placeholder="Select a model" />
                     </SelectTrigger>
                     <SelectContent>
-                      {enabledPmModelGroups.length === 0 ? (
+                      {!credentialsLoaded ? (
+                        <SelectItem value={DEFAULT_PM_MODEL} disabled>
+                          Loading providers…
+                        </SelectItem>
+                      ) : pmModelGroups.length === 0 ? (
                         <SelectItem value={DEFAULT_PM_MODEL} disabled>
                           No providers configured
                         </SelectItem>
                       ) : (
-                        enabledPmModelGroups.map((group) => (
-                          <SelectGroup key={group.label}>
+                        pmModelGroups.map((group) => (
+                          <SelectGroup key={group.key}>
                             <SelectLabel>{group.label}</SelectLabel>
                             {group.models.map((model) => (
                               <SelectItem key={model} value={model}>

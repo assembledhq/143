@@ -78,12 +78,12 @@ func (f *fakeAgentMetricsRecorder) RecordActivityEmitted(_ context.Context, t st
 }
 
 type writerTestRig struct {
-	mock     pgxmock.PgxPoolIface
-	client   *agentWriterFake
-	metrics  *fakeAgentMetricsRecorder
-	writer   *AgentActivityWriter
-	orgID    uuid.UUID
-	rowID    uuid.UUID
+	mock    pgxmock.PgxPoolIface
+	client  *agentWriterFake
+	metrics *fakeAgentMetricsRecorder
+	writer  *AgentActivityWriter
+	orgID   uuid.UUID
+	rowID   uuid.UUID
 }
 
 func newWriterTestRig(t *testing.T) *writerTestRig {

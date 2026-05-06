@@ -175,8 +175,12 @@ func (s *Service) finalizeSandboxEnv(agentType models.AgentType, env map[string]
 	return s.env.CheckAuth(agentType, env)
 }
 
-func (s *Service) injectRequiredAgentAuth(ctx context.Context, orgID uuid.UUID, agentType models.AgentType, sb *agent.Sandbox) error {
+func (s *Service) injectRequiredAgentAuth(ctx context.Context, orgID uuid.UUID, agentType models.AgentType, sb *agent.Sandbox, env map[string]string) error {
 	if agentType != models.AgentTypeCodex {
+		return nil
+	}
+
+	if env["OPENAI_API_KEY"] != "" {
 		return nil
 	}
 
@@ -321,7 +325,7 @@ func (s *Service) Analyze(ctx context.Context, orgID uuid.UUID, trigger models.P
 		Status:        "running",
 		Title:         strPtr("PM Analysis"),
 		RepositoryID:  &repo.ID,
-		AutonomyLevel: "full",
+		AutonomyLevel: string(models.SessionAutonomyFull),
 		TokenMode:     "high",
 	}
 	if err := s.sessions.Create(ctx, pmSession); err != nil {
@@ -422,7 +426,7 @@ func (s *Service) Analyze(ctx context.Context, orgID uuid.UUID, trigger models.P
 		}
 	}()
 
-	if err := s.injectRequiredAgentAuth(ctx, orgID, agentType, sb); err != nil {
+	if err := s.injectRequiredAgentAuth(ctx, orgID, agentType, sb, sbCfg.Env); err != nil {
 		exitReason = containerExitReason(ctx, err)
 		return nil, failSession("inject codex auth", err)
 	}

@@ -66,9 +66,14 @@ type githubAppService interface {
 // --- Linear types ---
 
 type linearTokenResponse struct {
-	AccessToken string `json:"access_token"`
-	TokenType   string `json:"token_type"`
-	Scope       string `json:"scope"`
+	AccessToken  string `json:"access_token"`
+	RefreshToken string `json:"refresh_token"`
+	TokenType    string `json:"token_type"`
+	Scope        string `json:"scope"`
+	// ExpiresIn is the access token TTL in seconds. Legacy installs created
+	// before Linear's refresh-token rollout can have credential rows with a
+	// zero ExpiresAt, which the runtime treats as "no known expiry".
+	ExpiresIn int `json:"expires_in"`
 }
 
 type linearOrganization struct {
@@ -316,7 +321,19 @@ func (h *IntegrationHandler) ListIntegrations(w http.ResponseWriter, r *http.Req
 }
 
 func (h *IntegrationHandler) deriveIntegrationStatus(ctx context.Context, integration *models.Integration) {
-	if integration == nil || integration.Provider != models.IntegrationProviderGitHub {
+	if integration == nil {
+		return
+	}
+
+	// Auth-error surfacing is provider-agnostic: the linear service stamps
+	// the markers, but the UI can render the same banner for any provider
+	// that adopts the convention later. Read-only — never echo the rest of
+	// config (which holds tokens).
+	if authErr := readAuthErrorFromConfig(integration.Config); authErr != nil {
+		integration.AuthError = authErr
+	}
+
+	if integration.Provider != models.IntegrationProviderGitHub {
 		return
 	}
 
@@ -333,6 +350,30 @@ func (h *IntegrationHandler) deriveIntegrationStatus(ctx context.Context, integr
 		}
 	}
 	integration.GitHubAppInstalled = &installed
+}
+
+// readAuthErrorFromConfig extracts the auth-error pair the linear service
+// stamps when it sees a 401. Returns nil when either key is missing or the
+// timestamp doesn't parse — partial markers are treated as absent so a
+// malformed jsonb doesn't render an empty banner.
+func readAuthErrorFromConfig(raw json.RawMessage) *models.IntegrationAuthError {
+	if len(raw) == 0 {
+		return nil
+	}
+	cfg := map[string]any{}
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		return nil
+	}
+	reason, _ := cfg[models.IntegrationConfigAuthErrorKey].(string)
+	atStr, _ := cfg[models.IntegrationConfigAuthErrorAtKey].(string)
+	if reason == "" || atStr == "" {
+		return nil
+	}
+	at, err := time.Parse(time.RFC3339, atStr)
+	if err != nil {
+		return nil
+	}
+	return &models.IntegrationAuthError{Reason: reason, At: at}
 }
 
 // DisconnectIntegration sets the integration status to inactive for a given provider.
@@ -410,12 +451,18 @@ func (h *IntegrationHandler) StartLinearOAuth(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	// Single OAuth flow that grants both the legacy read/write scopes used
-	// by the existing session-linking write-back AND the agent scopes
-	// (app:assignable, app:mentionable) used by the inbound agent feature.
-	// Linear treats scopes additively, so this flow is a strict superset of
-	// the previous one — orgs that only ever use the outbound integration
-	// pay nothing for the agent scopes being granted.
+	// Single OAuth flow that grants the legacy read/write scopes used by
+	// the existing session-linking write-back, the agent scopes
+	// (app:assignable, app:mentionable) used by the inbound agent feature,
+	// and offline_access so Linear issues refresh_token + expires_in for
+	// rotation. Linear treats scopes additively, so this flow is a strict
+	// superset of the previous one — orgs that only ever use the outbound
+	// integration pay nothing for the agent scopes being granted.
+	//
+	// offline_access is required for refresh: without it Linear issues a
+	// long-lived token with no refresh path, and the refresh machinery in
+	// internal/services/linear/refresh.go is a no-op (every revocation
+	// forces a manual reconnect).
 	//
 	// actor=app provisions a dedicated agent user (`@143`) in the workspace
 	// and ties subsequent token-authored writes to it. Workspace-admin
@@ -468,6 +515,7 @@ func (h *IntegrationHandler) HandleLinearOAuthCallback(w http.ResponseWriter, r 
 	// uses "AppUserID != \"\"" as the "agent installed" predicate.
 	linearConfig := models.LinearConfig{
 		AccessToken:   token.AccessToken,
+		RefreshToken:  token.RefreshToken,
 		TokenType:     token.TokenType,
 		Scope:         token.Scope,
 		WorkspaceID:   viewer.WorkspaceID,
@@ -477,6 +525,9 @@ func (h *IntegrationHandler) HandleLinearOAuthCallback(w http.ResponseWriter, r 
 		linearConfig.AppUserID = viewer.AppUserID
 		linearConfig.AppUserName = viewer.AppUserName
 		linearConfig.AgentScopesGranted = true
+	}
+	if token.ExpiresIn > 0 {
+		linearConfig.ExpiresAt = time.Now().Add(time.Duration(token.ExpiresIn) * time.Second)
 	}
 	if err := h.credentialStore.Upsert(r.Context(), orgID, linearConfig); err != nil {
 		writeError(w, r, http.StatusInternalServerError, "SAVE_CREDENTIAL_FAILED", "failed to store linear credential", err)
@@ -1204,13 +1255,45 @@ func (h *IntegrationHandler) maybeEnqueuePMContext(ctx context.Context, orgID uu
 }
 
 func (h *IntegrationHandler) ensureIntegration(ctx context.Context, orgID uuid.UUID, provider models.IntegrationProvider) (models.Integration, bool, error) {
-	activeIntegrations, err := h.integrationStore.ListByOrgAndProvider(ctx, orgID, string(provider))
+	// One round trip: returns active rows first, then errored rows. Lets a
+	// reconnect after a 401-flip reuse the original row instead of leaving
+	// a stale errored row plus a fresh duplicate. Active-first ORDER BY in
+	// SQL keeps the existing "prefer active" precedence.
+	reusableIntegrations, err := h.integrationStore.ListReusableForReconnect(ctx, orgID, string(provider))
 	if err != nil {
 		return models.Integration{}, false, err
 	}
 
-	if len(activeIntegrations) > 0 {
-		return activeIntegrations[0], false, nil
+	if len(reusableIntegrations) > 0 {
+		integration := reusableIntegrations[0]
+		// A reconnect flow lands here: if the row is errored (most often
+		// from a prior 401 the worker stamped) restore it to active and
+		// strip the auth-error markers so the settings UI's Reconnect CTA
+		// goes away immediately. Best-effort — failures here don't prevent
+		// the OAuth flow from completing because the credential write has
+		// already succeeded; the next successful Linear API call will
+		// invoke ClearIntegrationUnauthorized and converge state anyway.
+		// When both fields need to change we write atomically so the row
+		// can never be observed as "active with stale auth_error markers"
+		// (which would render no Reconnect CTA but also no Connect CTA).
+		clearedConfig, configChanged := stripAuthErrorMarkers(integration.Config)
+		statusErrored := integration.Status == models.IntegrationStatusError
+		switch {
+		case configChanged && statusErrored:
+			if err := h.integrationStore.UpdateStatusAndConfig(ctx, orgID, integration.ID, string(models.IntegrationStatusActive), clearedConfig); err == nil {
+				integration.Config = clearedConfig
+				integration.Status = models.IntegrationStatusActive
+			}
+		case configChanged:
+			if err := h.integrationStore.UpdateConfig(ctx, orgID, integration.ID, clearedConfig); err == nil {
+				integration.Config = clearedConfig
+			}
+		case statusErrored:
+			if err := h.integrationStore.UpdateStatus(ctx, orgID, integration.ID, string(models.IntegrationStatusActive)); err == nil {
+				integration.Status = models.IntegrationStatusActive
+			}
+		}
+		return integration, false, nil
 	}
 
 	integration := &models.Integration{
@@ -1226,6 +1309,38 @@ func (h *IntegrationHandler) ensureIntegration(ctx context.Context, orgID uuid.U
 	h.maybeEnqueuePMContext(ctx, orgID)
 
 	return *integration, true, nil
+}
+
+// stripAuthErrorMarkers removes the auth-error keys the linear service
+// stamps into integrations.config when it observes a 401. Returns the
+// (possibly unchanged) jsonb and a flag indicating whether any keys were
+// dropped — the caller skips the UPDATE when nothing changed to avoid
+// pointless updated_at churn on the integrations row.
+//
+// Lives in the integrations handler so the OAuth reconnect path doesn't
+// need to import internal/services/linear; the key names are shared via
+// constants in the models package so writer (linear service) and readers
+// (this handler) can't drift.
+func stripAuthErrorMarkers(raw json.RawMessage) (json.RawMessage, bool) {
+	if len(raw) == 0 {
+		return raw, false
+	}
+	cfg := map[string]any{}
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		return raw, false
+	}
+	_, hadErr := cfg[models.IntegrationConfigAuthErrorKey]
+	_, hadAt := cfg[models.IntegrationConfigAuthErrorAtKey]
+	if !hadErr && !hadAt {
+		return raw, false
+	}
+	delete(cfg, models.IntegrationConfigAuthErrorKey)
+	delete(cfg, models.IntegrationConfigAuthErrorAtKey)
+	out, err := json.Marshal(cfg)
+	if err != nil {
+		return raw, false
+	}
+	return out, true
 }
 
 // --- Redirect URLs ---

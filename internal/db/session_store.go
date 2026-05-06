@@ -63,22 +63,24 @@ type SessionFilters struct {
 	// the cursor). The inverse — a duplicate reappearing on an earlier page —
 	// only happens if the same page is re-fetched. The frontend dedupes by id,
 	// so this manifests as occasional reordering, not data loss.
-	CursorTime        *time.Time
-	CursorID          *uuid.UUID
-	AdHocOnly         bool      // When true, only return runs where pm_plan_id IS NULL (not linked to a PM plan).
-	RepositoryID      uuid.UUID // When non-zero, filter sessions by repository via issues table.
-	TriggeredByUserID uuid.UUID // When non-zero, filter sessions to those triggered by this user.
-	Search            string    // When non-empty, filter sessions by title (case-insensitive prefix/substring match).
-	IncludeArchived   bool      // When true, include archived sessions in the results.
-	OnlyArchived      bool      // When true, return only archived sessions.
+	CursorTime         *time.Time
+	CursorID           *uuid.UUID
+	AdHocOnly          bool      // When true, only return runs where pm_plan_id IS NULL (not linked to a PM plan).
+	RepositoryID       uuid.UUID // When non-zero, filter sessions by repository via issues table.
+	TriggeredByUserID  uuid.UUID // When non-zero, filter sessions to those triggered by this user.
+	TriggeredByUserIDs []uuid.UUID
+	Search             string // When non-empty, filter sessions by title (case-insensitive prefix/substring match).
+	IncludeArchived    bool   // When true, include archived sessions in the results.
+	OnlyArchived       bool   // When true, return only archived sessions.
 }
 
 // SessionCountsFilters scopes CountsByOrg to a subset of sessions.
 // Status, archived, and search are not accepted — the counts endpoint
 // always returns totals for the all/active/archived buckets.
 type SessionCountsFilters struct {
-	RepositoryID      uuid.UUID
-	TriggeredByUserID uuid.UUID
+	RepositoryID       uuid.UUID
+	TriggeredByUserID  uuid.UUID
+	TriggeredByUserIDs []uuid.UUID
 }
 
 // sessionCountsCap bounds each count subquery so a single user with millions
@@ -108,6 +110,25 @@ const sessionPrimaryIssueIDColumn = `(SELECT sil.issue_id
 		WHERE sil.org_id = sessions.org_id AND sil.session_id = sessions.id AND sil.role = 'primary'
 		LIMIT 1) AS primary_issue_id`
 
+// hasUnpushedChangesColumn derives whether the session's latest persisted diff
+// snapshot still contains content not represented on the open PR branch. A
+// snapshot is considered pushable when it either captured a dirty worktree or
+// its recorded HEAD differs from the PR head SHA.
+const hasUnpushedChangesColumn = `EXISTS (
+		SELECT 1
+		FROM pull_requests pr
+		JOIN session_diff_snapshots sds
+		  ON sds.id = sessions.latest_diff_snapshot_id
+		 AND sds.org_id = sessions.org_id
+		WHERE pr.session_id = sessions.id
+		  AND pr.org_id = sessions.org_id
+		  AND pr.status = 'open'
+		  AND (
+		    sds.workspace_dirty
+		    OR (sds.head_commit_sha IS NOT NULL AND sds.head_commit_sha IS DISTINCT FROM pr.head_sha)
+		  )
+	) AS has_unpushed_changes`
+
 // sessionSelectColumns is used for single-session queries where we want all fields.
 const sessionSelectColumns = `id,
 	` + sessionPrimaryIssueIDColumn + `,
@@ -124,6 +145,7 @@ const sessionSelectColumns = `id,
 	checkpointed_at, checkpoint_kind, checkpoint_capability, checkpoint_size_bytes, checkpoint_error,
 	recovery_state, recovery_queued_at, recovery_started_at, recovery_attempt_count,
 	target_branch, working_branch, base_commit_sha, repository_id, diff_stats, diff_history, input_manifest, archived_at, archived_by_user_id, automation_run_id, pr_creation_state, pr_creation_error, pr_push_state, pr_push_error, diff_collected_at, latest_diff_snapshot_id,
+	` + hasUnpushedChangesColumn + `,
 	linear_private, linear_state_sync_disabled, linear_identifier_hint, linear_prepare_state,
 	deleted_at, git_identity_source, git_identity_user_id, created_at`
 
@@ -144,6 +166,7 @@ const sessionListColumns = `id,
 	checkpointed_at, checkpoint_kind, checkpoint_capability, checkpoint_size_bytes, checkpoint_error,
 	recovery_state, recovery_queued_at, recovery_started_at, recovery_attempt_count,
 	target_branch, working_branch, base_commit_sha, repository_id, diff_stats, NULL::jsonb AS diff_history, input_manifest, archived_at, archived_by_user_id, automation_run_id, pr_creation_state, pr_creation_error, pr_push_state, pr_push_error, diff_collected_at, latest_diff_snapshot_id,
+	` + hasUnpushedChangesColumn + `,
 	linear_private, linear_state_sync_disabled, linear_identifier_hint, linear_prepare_state,
 	deleted_at, git_identity_source, git_identity_user_id, created_at`
 
@@ -267,7 +290,10 @@ func (s *SessionStore) ListByOrg(ctx context.Context, orgID uuid.UUID, filters S
 		query += ` AND status = ANY(@statuses)`
 		args["statuses"] = statusStrings
 	}
-	if filters.TriggeredByUserID != uuid.Nil {
+	if len(filters.TriggeredByUserIDs) > 0 {
+		query += ` AND triggered_by_user_id = ANY(@triggered_by_user_ids)`
+		args["triggered_by_user_ids"] = filters.TriggeredByUserIDs
+	} else if filters.TriggeredByUserID != uuid.Nil {
 		query += ` AND triggered_by_user_id = @triggered_by_user_id`
 		args["triggered_by_user_id"] = filters.TriggeredByUserID
 	}
@@ -327,7 +353,10 @@ func (s *SessionStore) CountsByOrg(ctx context.Context, orgID uuid.UUID, filters
 		scope += " AND repository_id = @repository_id"
 		args["repository_id"] = filters.RepositoryID
 	}
-	if filters.TriggeredByUserID != uuid.Nil {
+	if len(filters.TriggeredByUserIDs) > 0 {
+		scope += " AND triggered_by_user_id = ANY(@triggered_by_user_ids)"
+		args["triggered_by_user_ids"] = filters.TriggeredByUserIDs
+	} else if filters.TriggeredByUserID != uuid.Nil {
 		scope += " AND triggered_by_user_id = @triggered_by_user_id"
 		args["triggered_by_user_id"] = filters.TriggeredByUserID
 	}
@@ -455,6 +484,31 @@ func (s *SessionStore) Create(ctx context.Context, run *models.Session) error {
 	if err := row.Scan(&run.ID, &run.CreatedAt, &run.LastActivityAt); err != nil {
 		return err
 	}
+
+	// Seed a primary thread row so the multi-tab UI (AgentTabStrip) has
+	// something to render and the worker thread-attribution path has a
+	// destination from turn 1. Done in the same transaction so the invariant
+	// "every session row implies at least one thread row" cannot be violated
+	// by a partial failure between session insert and thread insert.
+	var primaryThreadID uuid.UUID
+	if err := tx.QueryRow(ctx, `
+		INSERT INTO session_threads (
+			session_id, org_id, agent_type, model_override, label, status
+		)
+		VALUES (@session_id, @org_id, @agent_type, @model_override, @label, @status)
+		RETURNING id
+	`, pgx.NamedArgs{
+		"session_id":     run.ID,
+		"org_id":         run.OrgID,
+		"agent_type":     run.AgentType,
+		"model_override": run.ModelOverride,
+		"label":          "Main",
+		"status":         models.ThreadStatusIdle,
+	}).Scan(&primaryThreadID); err != nil {
+		return fmt.Errorf("insert primary session thread: %w", err)
+	}
+	run.PrimaryThreadID = &primaryThreadID
+
 	if run.PrimaryIssueID != nil {
 		if _, err := tx.Exec(ctx, `
 			INSERT INTO session_issue_links (org_id, session_id, issue_id, role, position, added_by_user_id)
@@ -1267,12 +1321,12 @@ func (s *SessionStore) writeDiffSnapshot(ctx context.Context, db DBTX, orgID, se
 	insertQuery := `
 		INSERT INTO session_diff_snapshots (
 			session_id, org_id, turn_number, sequence_number, source,
-			base_commit_sha, head_commit_sha, working_branch, target_branch, diff,
+			base_commit_sha, head_commit_sha, workspace_dirty, working_branch, target_branch, diff,
 			files_changed, lines_added, lines_removed, captured_at
 		)
 		SELECT
 			@session_id, @org_id, @turn_number, 1, @source,
-			@base_commit_sha, @head_commit_sha, working_branch, target_branch, @diff,
+			@base_commit_sha, @head_commit_sha, @workspace_dirty, working_branch, target_branch, @diff,
 			@files_changed, @lines_added, @lines_removed, @captured_at
 		FROM sessions
 		WHERE id = @session_id AND org_id = @org_id
@@ -1285,6 +1339,7 @@ func (s *SessionStore) writeDiffSnapshot(ctx context.Context, db DBTX, orgID, se
 		"source":          source,
 		"base_commit_sha": *result.DiffBaseCommitSHA,
 		"head_commit_sha": result.DiffHeadCommitSHA,
+		"workspace_dirty": result.DiffWorkspaceDirty,
 		"diff":            *result.Diff,
 		"files_changed":   stats.FilesChanged,
 		"lines_added":     stats.Added,
@@ -1310,6 +1365,30 @@ func (s *SessionStore) writeDiffSnapshot(ctx context.Context, db DBTX, orgID, se
 		return fmt.Errorf("update session latest diff snapshot: %w", err)
 	}
 	return nil
+}
+
+// MarkLatestDiffSnapshotPushed normalizes the latest persisted diff snapshot
+// after a successful PR create/push so the read-model no longer treats that
+// snapshot as pending local work. This updates both the recorded head commit
+// and the dirty-worktree bit because the push flow stages/commits any
+// uncommitted changes before pushing.
+func (s *SessionStore) MarkLatestDiffSnapshotPushed(ctx context.Context, orgID, sessionID uuid.UUID, pushedHeadSHA string) error {
+	_, err := s.db.Exec(ctx, `
+		UPDATE session_diff_snapshots
+		SET head_commit_sha = @head_commit_sha,
+		    workspace_dirty = FALSE
+		WHERE id = (
+			SELECT latest_diff_snapshot_id
+			FROM sessions
+			WHERE id = @id AND org_id = @org_id
+		)
+		  AND org_id = @org_id
+	`, pgx.NamedArgs{
+		"id":              sessionID,
+		"org_id":          orgID,
+		"head_commit_sha": pushedHeadSHA,
+	})
+	return err
 }
 
 func (s *SessionStore) UpdateBaseCommitSHA(ctx context.Context, orgID, sessionID uuid.UUID, baseCommitSHA string) error {
@@ -1367,6 +1446,32 @@ func (s *SessionStore) UpdateSnapshotInfo(ctx context.Context, orgID, sessionID 
 	return err
 }
 
+// UpdateWorkspaceSnapshot persists a refreshed snapshot key plus diff metadata
+// for workspace-mutating actions that are not agent turns, such as "revert this
+// tab". Unlike UpdateTurnComplete, this intentionally leaves status, current
+// turn, summary, and confidence untouched.
+func (s *SessionStore) UpdateWorkspaceSnapshot(ctx context.Context, orgID, sessionID uuid.UUID, snapshotKey string, result *models.SessionResult) error {
+	query := `
+		UPDATE sessions
+		SET snapshot_key = @snapshot_key,
+		    sandbox_state = 'snapshotted',
+		    last_activity_at = now(),
+		    diff = COALESCE(@diff, diff),
+		    base_commit_sha = COALESCE(@base_commit_sha, base_commit_sha),
+		    diff_collected_at = COALESCE(@diff_collected_at, diff_collected_at)
+		WHERE id = @id AND org_id = @org_id`
+
+	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
+		"id":                sessionID,
+		"org_id":            orgID,
+		"snapshot_key":      snapshotKey,
+		"diff":              result.Diff,
+		"base_commit_sha":   result.DiffBaseCommitSHA,
+		"diff_collected_at": result.DiffCollectedAt,
+	})
+	return err
+}
+
 // UpdateSandboxState changes only the sandbox lifecycle column. It deliberately
 // does NOT touch last_activity_at because the reaper calls this to mark
 // long-completed sessions as 'destroyed' during snapshot cleanup — bumping the
@@ -1403,17 +1508,37 @@ func (s *SessionStore) UpdatePRCreationState(ctx context.Context, orgID, session
 	} else {
 		errArg = nil
 	}
+	// RETURNING + publishStatus replaces a prior frontend 2s poll on
+	// /sessions/{id}/pr that existed solely to observe this column's
+	// transitions. Detail page now relies on the session status SSE.
 	query := `UPDATE sessions
 		SET pr_creation_state = @state, pr_creation_error = @err
 		WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL
-		  AND pr_creation_state <> 'succeeded'`
-	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
+		  AND pr_creation_state <> 'succeeded'
+		RETURNING ` + sessionSelectColumns
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
 		"id":     sessionID,
 		"org_id": orgID,
 		"state":  string(state),
 		"err":    errArg,
 	})
-	return err
+	if err != nil {
+		return err
+	}
+	session, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.Session])
+	if err != nil {
+		// Pre-existing semantics: matching zero rows (e.g. the row is
+		// already in the terminal `succeeded` state) is a no-op, not an
+		// error. ErrNoRows here means the WHERE clause filtered the row
+		// out — surface no error and skip publishing since nothing changed.
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil
+		}
+		return err
+	}
+	hydrateSessionPolicy(&session)
+	s.publishStatus(ctx, &session)
+	return nil
 }
 
 // TryMarkPRPushQueued atomically transitions pr_push_state from any non-in-
@@ -1428,18 +1553,32 @@ func (s *SessionStore) UpdatePRCreationState(ctx context.Context, orgID, session
 // side the matching guarantee that exactly one of the racing requests
 // returns 202 and the other returns 409.
 func (s *SessionStore) TryMarkPRPushQueued(ctx context.Context, orgID, sessionID uuid.UUID) (bool, error) {
+	// RETURNING + publishStatus so the API call that flips this column
+	// surfaces immediately on the session status SSE — the detail-page
+	// Push button used to wait for the worker's first state transition
+	// (or a 1s polling fallback) to reflect the user's click.
 	query := `UPDATE sessions
 		SET pr_push_state = 'queued', pr_push_error = NULL
 		WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL
-		  AND pr_push_state NOT IN ('queued', 'pushing')`
-	res, err := s.db.Exec(ctx, query, pgx.NamedArgs{
+		  AND pr_push_state NOT IN ('queued', 'pushing')
+		RETURNING ` + sessionSelectColumns
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
 		"id":     sessionID,
 		"org_id": orgID,
 	})
 	if err != nil {
 		return false, err
 	}
-	return res.RowsAffected() > 0, nil
+	session, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.Session])
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return false, nil
+		}
+		return false, err
+	}
+	hydrateSessionPolicy(&session)
+	s.publishStatus(ctx, &session)
+	return true, nil
 }
 
 // UpdatePRPushState transitions pr_push_state and sets/clears pr_push_error
@@ -1462,16 +1601,31 @@ func (s *SessionStore) UpdatePRPushState(ctx context.Context, orgID, sessionID u
 	} else {
 		errArg = nil
 	}
+	// RETURNING + publishStatus so the detail-page Push button reflects
+	// transitions on the existing session status SSE without a separate poll.
 	query := `UPDATE sessions
 		SET pr_push_state = @state, pr_push_error = @err
-		WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL`
-	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
+		WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL
+		RETURNING ` + sessionSelectColumns
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
 		"id":     sessionID,
 		"org_id": orgID,
 		"state":  string(state),
 		"err":    errArg,
 	})
-	return err
+	if err != nil {
+		return err
+	}
+	session, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.Session])
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil
+		}
+		return err
+	}
+	hydrateSessionPolicy(&session)
+	s.publishStatus(ctx, &session)
+	return nil
 }
 
 // ClearSnapshotKey NULLs the snapshot_key column and transitions sandbox_state
@@ -1727,6 +1881,34 @@ func (s *SessionStore) PublishHydratedContainerID(ctx context.Context, orgID, se
 	return actualContainerID, nil
 }
 
+// ContainerHoldState returns whether the expected container is currently held
+// by an agent turn, by a preview, or both. It is intentionally pinned to
+// container_id = @expected so callers diagnosing a race do not accidentally
+// read holder state for a newer container published after their liveness probe.
+func (s *SessionStore) ContainerHoldState(ctx context.Context, orgID, sessionID uuid.UUID, expectedContainerID string) (turnHolds bool, previewHolds bool, err error) {
+	query := `SELECT
+			COALESCE(s.turn_holding_container, FALSE) AS turn_holds,
+			EXISTS (
+				SELECT 1
+				FROM preview_instances p
+				WHERE p.session_id = s.id
+				  AND p.org_id = s.org_id
+				  AND p.preview_holding_container = TRUE
+			) AS preview_holds
+		FROM sessions s
+		WHERE s.id = @id
+		  AND s.org_id = @org_id
+		  AND s.container_id = @expected`
+	if err := s.db.QueryRow(ctx, query, pgx.NamedArgs{
+		"id":       sessionID,
+		"org_id":   orgID,
+		"expected": expectedContainerID,
+	}).Scan(&turnHolds, &previewHolds); err != nil {
+		return false, false, fmt.Errorf("container hold state: %w", err)
+	}
+	return turnHolds, previewHolds, nil
+}
+
 // SetWorkerNodeIDForContainer records the worker node currently owning the
 // session's live container. The update is CAS-scoped to the expected
 // container_id so callers do not accidentally stamp ownership onto a newer
@@ -1748,6 +1930,11 @@ func (s *SessionStore) SetWorkerNodeIDForContainer(ctx context.Context, orgID, s
 		return fmt.Errorf("set worker node id for container: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
+		// Two CAS conditions can produce this: container_id no longer matches
+		// expectedContainerID (a concurrent hydrate/destroy raced us), or
+		// worker_node_id is already held by a different worker. The IDs are
+		// not in this string because callers surface it as a user-facing chat
+		// message; callers log the structured IDs separately for ops.
 		return fmt.Errorf("session container ownership changed before worker ownership could be recorded")
 	}
 	return nil
@@ -1776,8 +1963,14 @@ func (s *SessionStore) SetWorkerNodeIDForContainer(ctx context.Context, orgID, s
 // FinalizeContainerDestroy instead, which additionally flips sandbox_state
 // to 'snapshotted'.
 func (s *SessionStore) ClearContainerID(ctx context.Context, orgID, sessionID uuid.UUID, expectedContainerID string) (cleared bool, err error) {
+	// worker_node_id is paired with container_id ownership: once the container
+	// is gone, the recorded owner is by definition stale. Leaving it set would
+	// trip up the next turn's SetWorkerNodeIDForContainer CAS (which rejects
+	// a different worker stamping over a stale value) and silently fail the
+	// turn — symmetrical to FinalizeContainerDestroy, which clears both.
 	query := `UPDATE sessions
 		SET container_id = NULL,
+		    worker_node_id = NULL,
 		    turn_holding_container = FALSE
 		WHERE id = @id
 		  AND org_id = @org_id

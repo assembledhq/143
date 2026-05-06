@@ -918,6 +918,30 @@ func TestServiceIntegrationAndTeamKeys(t *testing.T) {
 		require.True(t, (&Service{integrations: createPathIntegrationReader{integration: activeIntegration}}).Enabled(context.Background(), orgID), "active integration should enable Linear")
 	})
 
+	t.Run("integrationFor maps pgx.ErrNoRows to ErrIntegrationNotFound", func(t *testing.T) {
+		t.Parallel()
+		// Workers branch on errors.Is(err, ErrIntegrationNotFound) to dead-letter
+		// instead of burning the 8-minute retryable window — guard the pgx.ErrNoRows
+		// → sentinel mapping so a future swap of the store query (e.g. CollectOneRow
+		// → manual scan) doesn't quietly drop the classification.
+		svc := &Service{integrations: createPathIntegrationReader{err: pgx.ErrNoRows}}
+		_, _, err := svc.integrationFor(context.Background(), orgID)
+		require.Error(t, err, "integrationFor should surface the no-rows lookup")
+		require.ErrorIs(t, err, ErrIntegrationNotFound, "integrationFor should map pgx.ErrNoRows to the worker-fatal sentinel")
+	})
+
+	t.Run("integrationFor preserves non-no-rows lookup errors", func(t *testing.T) {
+		t.Parallel()
+		// A transient query-level failure must NOT masquerade as the missing-row
+		// sentinel — workers would otherwise dead-letter on a flake.
+		lookupErr := errors.New("connection reset by peer")
+		svc := &Service{integrations: createPathIntegrationReader{err: lookupErr}}
+		_, _, err := svc.integrationFor(context.Background(), orgID)
+		require.Error(t, err, "integrationFor should surface non-no-rows errors")
+		require.ErrorIs(t, err, lookupErr, "integrationFor should preserve transient lookup errors")
+		require.NotErrorIs(t, err, ErrIntegrationNotFound, "transient errors should not collapse onto the missing-row sentinel")
+	})
+
 	t.Run("integrationFor validates credential shape", func(t *testing.T) {
 		t.Parallel()
 
