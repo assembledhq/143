@@ -494,6 +494,15 @@ func newAutomationRunHandler(stores *Stores, services *Services, logger zerolog.
 			} else {
 				log.Warn().Err(err).Msg("invalid agent_type on automation, falling back to default")
 			}
+		} else if stores.Organizations != nil {
+			org, err := stores.Organizations.GetByID(ctx, orgID)
+			if err != nil {
+				log.Warn().Err(err).Msg("failed to load org settings for automation agent fallback")
+			} else if settings, err := models.ParseOrgSettings(org.Settings); err != nil {
+				log.Warn().Err(err).Msg("failed to parse org settings for automation agent fallback")
+			} else if settings.DefaultAgentType != "" {
+				agentType = settings.DefaultAgentType
+			}
 		}
 
 		var targetBranch *string
@@ -519,6 +528,7 @@ func newAutomationRunHandler(stores *Stores, services *Services, logger zerolog.
 			AutonomyLevel:     string(models.DefaultSessionAutonomy),
 			TokenMode:         "low",
 			ModelOverride:     automation.ModelOverride,
+			ReasoningEffort:   automation.ReasoningEffort,
 			TriggeredByUserID: run.TriggeredByUserID,
 			TargetBranch:      targetBranch,
 			RepositoryID:      automation.RepositoryID,

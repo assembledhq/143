@@ -23,9 +23,16 @@ import { PageHeader } from "@/components/page-header";
 import { BranchPicker } from "@/components/branch-picker";
 import { AutomationModelSelect } from "@/components/automation-model-select";
 import { api } from "@/lib/api";
+import { agentTypeForModel } from "@/lib/agents";
 import { AUTOMATION_GOAL_MAX_LENGTH, automationGoalLengthState } from "@/lib/automation-validation";
 import type { Automation } from "@/lib/types";
 import { cn } from "@/lib/utils";
+import {
+  getCodingAgentReasoningOptions,
+  supportsReasoningEffort,
+  toCodingAgentReasoningEffort,
+  type CodingAgentReasoningEffort,
+} from "@/lib/coding-agent-reasoning";
 import { RunsTab } from "./runs-tab";
 import {
   browserTimezone,
@@ -76,6 +83,19 @@ function SettingsTab({ automation }: { automation: Automation }) {
   const detectedTimezone = useMemo(() => browserTimezone(), []);
   const [baseBranch, setBaseBranch] = useState(automation.base_branch);
   const [model, setModel] = useState<string | undefined>(automation.model_override);
+  const [reasoningEffort, setReasoningEffort] = useState<CodingAgentReasoningEffort>(automation.reasoning_effort ?? "");
+
+  const { data: settingsResponse } = useQuery({
+    queryKey: ["settings"],
+    queryFn: () => api.settings.get(),
+  });
+  const settings = (settingsResponse?.data?.settings ?? {}) as { default_agent_type?: string };
+  const defaultAgentType = settings.default_agent_type ?? "codex";
+  const effectiveAgentType = model
+    ? agentTypeForModel(model) ?? automation.agent_type ?? defaultAgentType
+    : automation.agent_type ?? defaultAgentType;
+  const showReasoningSelector = supportsReasoningEffort(effectiveAgentType);
+  const reasoningOptions = getCodingAgentReasoningOptions(effectiveAgentType);
   const goalLength = automationGoalLengthState(goal);
 
   const updateMutation = useMutation({
@@ -89,6 +109,7 @@ function SettingsTab({ automation }: { automation: Automation }) {
         interval_run_at: `${intervalRunHour}:${intervalRunMinute}`,
         timezone,
         model: model ?? "",
+        reasoning_effort: showReasoningSelector && reasoningEffort ? reasoningEffort : "",
         base_branch: baseBranch.trim() || undefined,
       }),
     onSuccess: () => {
@@ -217,6 +238,27 @@ function SettingsTab({ automation }: { automation: Automation }) {
           onValueChange={setModel}
         />
       </div>
+      {showReasoningSelector ? (
+        <div className="space-y-1.5">
+          <Label htmlFor="automation-reasoning">Reasoning</Label>
+          <Select
+            value={reasoningEffort || "__default__"}
+            onValueChange={(value) => setReasoningEffort(value === "__default__" ? "" : toCodingAgentReasoningEffort(value))}
+          >
+            <SelectTrigger id="automation-reasoning" aria-label="Reasoning">
+              <SelectValue placeholder="Default reasoning" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="__default__">Default reasoning</SelectItem>
+              {reasoningOptions.map((option) => (
+                <SelectItem key={option.value} value={option.value}>
+                  {option.label}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+      ) : null}
       <div className="space-y-1.5">
         <Label>Base branch</Label>
         <BranchPicker

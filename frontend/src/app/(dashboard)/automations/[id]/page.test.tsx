@@ -473,4 +473,95 @@ describe("AutomationDetailPage", () => {
     });
   });
 
+  it("saves the selected reasoning override", async () => {
+    const user = userEvent.setup();
+    let updateBody: Record<string, unknown> | null = null;
+
+    server.use(
+      http.get("*/api/v1/settings", () => HttpResponse.json({
+        data: {
+          settings: {
+            default_agent_type: "codex",
+          },
+        },
+      })),
+      http.get("*/api/v1/settings/credentials/resolved", () => HttpResponse.json({
+        data: [{ provider: "openai", source: "org" }],
+        meta: {},
+      })),
+      http.get("*/api/v1/settings/credentials/team", () => HttpResponse.json({
+        data: [],
+        meta: {},
+      })),
+      http.get("*/api/v1/settings/codex-auth/status", () => HttpResponse.json({
+        data: { status: "completed" },
+      })),
+      http.get("*/api/v1/settings/coding-auths", () => HttpResponse.json({
+        data: [],
+        meta: {},
+      })),
+      http.get("*/api/v1/coding-credentials*", () => HttpResponse.json({
+        data: [],
+        meta: {},
+      })),
+      http.get("*/api/v1/automations/auto-1", () => HttpResponse.json({
+        data: {
+          id: "auto-1",
+          org_id: "org-1",
+          repository_id: "repo-1",
+          name: "Weekly audit",
+          goal: "Check release health",
+          scope: "",
+          interval_value: 1,
+          interval_unit: "weeks",
+          base_branch: "main",
+          enabled: true,
+          timezone: "UTC",
+          last_run_at: null,
+          next_run_at: null,
+          priority: 50,
+          created_at: "2026-01-01T00:00:00Z",
+          updated_at: "2026-01-01T00:00:00Z",
+        },
+      })),
+      http.get("*/api/v1/automations/auto-1/runs*", () => HttpResponse.json({ data: [], meta: {} })),
+      http.get("*/api/v1/automations/auto-1/stats*", () => HttpResponse.json({
+        data: {
+          since: "2026-01-01T00:00:00Z",
+          until: "2026-01-31T00:00:00Z",
+          buckets: [],
+          totals: {
+            total: 0,
+            completed: 0,
+            completed_noop: 0,
+            failed: 0,
+            skipped: 0,
+            running: 0,
+            pending: 0,
+            success_rate: 0,
+            avg_duration_seconds: 0,
+          },
+        },
+      })),
+      http.patch("*/api/v1/automations/auto-1", async ({ request }) => {
+        updateBody = await request.json() as Record<string, unknown>;
+        return HttpResponse.json({ data: { id: "auto-1" } });
+      }),
+    );
+
+    renderWithProviders(<AutomationDetailPage />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Weekly audit")).toBeInTheDocument();
+    });
+
+    await user.click(screen.getByRole("tab", { name: "Settings" }));
+    await user.click(screen.getByRole("combobox", { name: "Reasoning" }));
+    await user.click(await screen.findByText("High"));
+    await user.click(screen.getByRole("button", { name: "Save changes" }));
+
+    await waitFor(() => {
+      expect(updateBody).toMatchObject({ reasoning_effort: "high" });
+    });
+  });
 });
