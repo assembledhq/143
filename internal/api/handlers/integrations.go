@@ -443,15 +443,17 @@ func (h *IntegrationHandler) StartLinearOAuth(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	// Linear returns refresh_token + expires_in from the standard auth-code
-	// exchange for OAuth apps on the refresh-token system. Keep this to
-	// documented Linear scopes only; adding generic OAuth scopes such as
-	// offline_access makes Linear reject the authorize URL as invalid_scope.
+	// offline_access is the documented Linear scope that triggers refresh_token
+	// + expires_in in the token response. Without it, Linear treats the token
+	// as long-lived but the refresh path here is unrecoverable on revocation —
+	// the user has to manually reconnect after every revocation event. The
+	// rest of the refresh machinery in internal/services/linear/refresh.go is
+	// a no-op until this scope is granted.
 	params := url.Values{
 		"client_id":     {h.linearClientID},
 		"redirect_uri":  {h.linearRedirectURL()},
 		"response_type": {"code"},
-		"scope":         {"read,write"},
+		"scope":         {"read,write,offline_access"},
 		"state":         {state},
 	}
 
