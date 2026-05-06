@@ -40,6 +40,7 @@ import { PageHeader } from "@/components/page-header";
 import { PageContainer } from "@/components/page-container";
 import { useAuth } from "@/hooks/use-auth";
 import { AuditLogTrigger } from "@/components/audit/audit-log-trigger";
+import { capitalizeWords } from "@/lib/utils";
 import type {
   User,
   InvitationResponse,
@@ -232,7 +233,6 @@ export default function TeamSettingsPage() {
     });
   }
 
-  const capitalize = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
   const inviteDraftLabel = inviteDraft
     ? inviteDraft.mode === "github"
       ? `@${inviteDraft.value}`
@@ -364,7 +364,7 @@ export default function TeamSettingsPage() {
                         <div className="flex items-center">
                         {isSelf || !canManageTeam ? (
                           <Badge variant={roleBadgeVariant(member.role)}>
-                            {capitalize(member.role)}
+                            {capitalizeWords(member.role)}
                           </Badge>
                         ) : (
                           <Select
@@ -380,7 +380,7 @@ export default function TeamSettingsPage() {
                               aria-label={`Role for ${member.name}`}
                             >
                               <SelectValue>
-                                {capitalize(member.role)}
+                                {capitalizeWords(member.role)}
                               </SelectValue>
                             </SelectTrigger>
                             <SelectContent>
@@ -455,7 +455,7 @@ export default function TeamSettingsPage() {
                         )}
                         Invited by {inv.invited_by.name} as{" "}
                         <Badge variant="outline" className="ml-0.5">
-                          {capitalize(inv.role)}
+                          {capitalizeWords(inv.role)}
                         </Badge>
                       </div>
                     </div>
@@ -731,7 +731,7 @@ export default function TeamSettingsPage() {
                 <Label htmlFor="invite-role">Role</Label>
                 <Select value={inviteRole} onValueChange={setInviteRole}>
                   <SelectTrigger id="invite-role" className="h-9 w-full">
-                    <SelectValue>{capitalize(inviteRole)}</SelectValue>
+                    <SelectValue>{capitalizeWords(inviteRole)}</SelectValue>
                   </SelectTrigger>
                   <SelectContent>
                     <SelectItem value="admin">Admin</SelectItem>
@@ -774,11 +774,11 @@ export default function TeamSettingsPage() {
                 <>
                   You&apos;re about to change your own role from{" "}
                   <span className="font-medium">
-                    {capitalize(pendingRoleChange?.member.role ?? "")}
+                    {capitalizeWords(pendingRoleChange?.member.role ?? "")}
                   </span>{" "}
                   to{" "}
                   <span className="font-medium">
-                    {capitalize(pendingRoleChange?.newRole ?? "")}
+                    {capitalizeWords(pendingRoleChange?.newRole ?? "")}
                   </span>
                   . You may lose access to admin features and won&apos;t be able to undo this
                   yourself.
@@ -787,11 +787,11 @@ export default function TeamSettingsPage() {
                 <>
                   Change {pendingRoleChange?.member.name}&apos;s role from{" "}
                   <span className="font-medium">
-                    {capitalize(pendingRoleChange?.member.role ?? "")}
+                    {capitalizeWords(pendingRoleChange?.member.role ?? "")}
                   </span>{" "}
                   to{" "}
                   <span className="font-medium">
-                    {capitalize(pendingRoleChange?.newRole ?? "")}
+                    {capitalizeWords(pendingRoleChange?.newRole ?? "")}
                   </span>
                   ? Their permissions will update immediately.
                 </>
