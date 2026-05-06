@@ -205,6 +205,7 @@ export interface Session {
   threads?: SessionThread[];
   archived_at?: string;
   archived_by_user_id?: string;
+  automation_run_id?: string;
   created_at: string;
 }
 
