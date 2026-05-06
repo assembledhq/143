@@ -26,7 +26,6 @@ import { api } from "@/lib/api";
 import { AUTOMATION_GOAL_MAX_LENGTH, automationGoalLengthState } from "@/lib/automation-validation";
 import type { Automation } from "@/lib/types";
 import { cn } from "@/lib/utils";
-import { AutomationStatsCard } from "./automation-stats-card";
 import { RunsTab } from "./runs-tab";
 import {
   browserTimezone,
