@@ -20,6 +20,7 @@ import (
 // ThreadService defines the interface for thread business logic.
 type ThreadService interface {
 	CreateThread(ctx context.Context, input thread.CreateThreadInput) (*models.SessionThread, error)
+	UpdateThread(ctx context.Context, input thread.UpdateThreadInput) (*models.SessionThread, error)
 	ListThreads(ctx context.Context, orgID, sessionID uuid.UUID) ([]models.SessionThread, error)
 	GetThread(ctx context.Context, orgID, sessionID, threadID uuid.UUID) (models.SessionThread, error)
 	SendMessage(ctx context.Context, input thread.SendMessageInput) (*thread.SendMessageResult, error)
@@ -112,6 +113,64 @@ func (h *SessionThreadHandler) CreateThread(w http.ResponseWriter, r *http.Reque
 	}
 
 	writeJSON(w, http.StatusCreated, models.SingleResponse[models.SessionThread]{Data: *result})
+}
+
+func (h *SessionThreadHandler) UpdateThread(w http.ResponseWriter, r *http.Request) {
+	orgID := middleware.OrgIDFromContext(r.Context())
+	sessionID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid session ID")
+		return
+	}
+	threadID, err := uuid.Parse(chi.URLParam(r, "tid"))
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid thread ID")
+		return
+	}
+
+	var body struct {
+		AgentType string `json:"agent_type"`
+		Model     string `json:"model"`
+		Label     string `json:"label"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_BODY", "invalid request body")
+		return
+	}
+
+	body.Label = strings.TrimSpace(body.Label)
+	if body.Label == "" {
+		writeError(w, r, http.StatusBadRequest, "MISSING_LABEL", "label is required")
+		return
+	}
+
+	result, err := h.svc.UpdateThread(r.Context(), thread.UpdateThreadInput{
+		SessionID: sessionID,
+		OrgID:     orgID,
+		ThreadID:  threadID,
+		AgentType: body.AgentType,
+		Model:     body.Model,
+		Label:     body.Label,
+	})
+	if err != nil {
+		switch {
+		case errors.Is(err, thread.ErrSessionNotFound), errors.Is(err, thread.ErrThreadNotFound):
+			writeError(w, r, http.StatusNotFound, "NOT_FOUND", "thread not found")
+		case errors.Is(err, thread.ErrSessionTerminal):
+			writeError(w, r, http.StatusConflict, "SESSION_TERMINAL", "cannot edit tabs on a completed session")
+		case errors.Is(err, thread.ErrThreadNotEditable):
+			writeError(w, r, http.StatusConflict, "THREAD_NOT_EDITABLE", "only blank idle tabs can be edited")
+		case errors.Is(err, thread.ErrInvalidAgentType):
+			writeError(w, r, http.StatusBadRequest, "INVALID_AGENT_TYPE", err.Error())
+		case errors.Is(err, thread.ErrInvalidModel):
+			writeError(w, r, http.StatusBadRequest, "INVALID_MODEL", err.Error())
+		default:
+			writeError(w, r, http.StatusInternalServerError, "UPDATE_FAILED", "failed to update thread", err)
+		}
+		return
+	}
+
+	writeJSON(w, http.StatusOK, models.SingleResponse[models.SessionThread]{Data: *result})
 }
 
 // ListThreads handles GET /sessions/{id}/threads — returns all threads for a session.

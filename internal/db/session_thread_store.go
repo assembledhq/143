@@ -126,6 +126,39 @@ func (s *SessionThreadStore) UpdateStatus(ctx context.Context, orgID, threadID u
 	return nil
 }
 
+func (s *SessionThreadStore) UpdateEditable(ctx context.Context, thread *models.SessionThread) error {
+	query := `
+		UPDATE session_threads
+		SET agent_type = @agent_type,
+		    model_override = @model_override,
+		    label = @label
+		WHERE id = @id
+		  AND org_id = @org_id
+		  AND session_id = @session_id
+		  AND status = 'idle'
+		  AND current_turn = 0
+		RETURNING ` + sessionThreadSelectColumns
+
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
+		"id":             thread.ID,
+		"org_id":         thread.OrgID,
+		"session_id":     thread.SessionID,
+		"agent_type":     thread.AgentType,
+		"model_override": thread.ModelOverride,
+		"label":          thread.Label,
+	})
+	if err != nil {
+		return fmt.Errorf("update editable thread fields: %w", err)
+	}
+
+	updated, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.SessionThread])
+	if err != nil {
+		return err
+	}
+	*thread = updated
+	return nil
+}
+
 // CompleteTurn marks the thread idle and advances its current_turn. It is the
 // Phase 1 success path: the shared session UpdateTurnComplete already records
 // confidence_score, result_summary, and diff at the session level, so this

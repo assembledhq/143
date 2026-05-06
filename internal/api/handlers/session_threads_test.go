@@ -27,6 +27,7 @@ type mockThreadStore struct {
 	getByIDFn       func(ctx context.Context, orgID, threadID uuid.UUID) (models.SessionThread, error)
 	listBySessionFn func(ctx context.Context, orgID, sessionID uuid.UUID) ([]models.SessionThread, error)
 	claimIdleFn     func(ctx context.Context, orgID, sessionID, threadID uuid.UUID) (models.SessionThread, error)
+	updateFn        func(ctx context.Context, t *models.SessionThread) error
 	updateStatusFn  func(ctx context.Context, orgID, threadID uuid.UUID, status models.ThreadStatus) error
 }
 
@@ -56,6 +57,13 @@ func (m *mockThreadStore) ClaimIdleForSession(ctx context.Context, orgID, sessio
 		return m.claimIdleFn(ctx, orgID, sessionID, threadID)
 	}
 	return models.SessionThread{}, fmt.Errorf("not idle")
+}
+
+func (m *mockThreadStore) UpdateEditable(ctx context.Context, t *models.SessionThread) error {
+	if m.updateFn != nil {
+		return m.updateFn(ctx, t)
+	}
+	return nil
 }
 
 func (m *mockThreadStore) UpdateStatus(ctx context.Context, orgID, threadID uuid.UUID, status models.ThreadStatus) error {
@@ -322,6 +330,169 @@ func TestSessionThreadHandler_CreateThread(t *testing.T) {
 				require.Equal(t, threadID, resp.Data.ID, "should return the created thread ID")
 				require.Equal(t, "Backend API", resp.Data.Label, "should return the correct label")
 			}
+		})
+	}
+}
+
+func TestSessionThreadHandler_UpdateThread(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	threadID := uuid.New()
+
+	tests := []struct {
+		name           string
+		sessionIDParam string
+		threadIDParam  string
+		body           string
+		setupDeps      func(deps *threadTestDeps)
+		expectedCode   int
+		expectedError  string
+	}{
+		{
+			name:           "success",
+			sessionIDParam: sessionID.String(),
+			threadIDParam:  threadID.String(),
+			body:           `{"agent_type":"codex","label":"Codex 2"}`,
+			setupDeps: func(deps *threadTestDeps) {
+				deps.sessionStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.Session, error) {
+					return models.Session{ID: sessionID, OrgID: orgID, Status: "running", AgentType: models.AgentTypeClaudeCode}, nil
+				}
+				deps.threadStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
+					return models.SessionThread{
+						ID:          threadID,
+						SessionID:   sessionID,
+						OrgID:       orgID,
+						AgentType:   models.AgentTypeClaudeCode,
+						Label:       "Claude Code 2",
+						Status:      models.ThreadStatusIdle,
+						CurrentTurn: 0,
+					}, nil
+				}
+				deps.threadStore.updateFn = func(_ context.Context, updated *models.SessionThread) error {
+					require.Equal(t, models.AgentTypeCodex, updated.AgentType, "UpdateThread should persist the requested agent type")
+					require.Equal(t, "Codex 2", updated.Label, "UpdateThread should persist the requested label")
+					return nil
+				}
+			},
+			expectedCode: http.StatusOK,
+		},
+		{
+			name:           "invalid session ID",
+			sessionIDParam: "not-a-uuid",
+			threadIDParam:  threadID.String(),
+			body:           `{"agent_type":"codex","label":"Codex 2"}`,
+			setupDeps:      func(deps *threadTestDeps) {},
+			expectedCode:   http.StatusBadRequest,
+			expectedError:  "INVALID_ID",
+		},
+		{
+			name:           "invalid thread ID",
+			sessionIDParam: sessionID.String(),
+			threadIDParam:  "not-a-uuid",
+			body:           `{"agent_type":"codex","label":"Codex 2"}`,
+			setupDeps:      func(deps *threadTestDeps) {},
+			expectedCode:   http.StatusBadRequest,
+			expectedError:  "INVALID_ID",
+		},
+		{
+			name:           "invalid body",
+			sessionIDParam: sessionID.String(),
+			threadIDParam:  threadID.String(),
+			body:           `{invalid-json`,
+			setupDeps:      func(deps *threadTestDeps) {},
+			expectedCode:   http.StatusBadRequest,
+			expectedError:  "INVALID_BODY",
+		},
+		{
+			name:           "empty label rejected",
+			sessionIDParam: sessionID.String(),
+			threadIDParam:  threadID.String(),
+			body:           `{"agent_type":"codex","label":"   "}`,
+			setupDeps:      func(deps *threadTestDeps) {},
+			expectedCode:   http.StatusBadRequest,
+			expectedError:  "MISSING_LABEL",
+		},
+		{
+			name:           "thread not editable",
+			sessionIDParam: sessionID.String(),
+			threadIDParam:  threadID.String(),
+			body:           `{"agent_type":"codex","label":"Codex 2"}`,
+			setupDeps: func(deps *threadTestDeps) {
+				deps.sessionStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.Session, error) {
+					return models.Session{ID: sessionID, OrgID: orgID, Status: "running", AgentType: models.AgentTypeClaudeCode}, nil
+				}
+				deps.threadStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
+					return models.SessionThread{
+						ID:          threadID,
+						SessionID:   sessionID,
+						OrgID:       orgID,
+						AgentType:   models.AgentTypeClaudeCode,
+						Label:       "Claude Code 2",
+						Status:      models.ThreadStatusRunning,
+						CurrentTurn: 0,
+					}, nil
+				}
+			},
+			expectedCode:  http.StatusConflict,
+			expectedError: "THREAD_NOT_EDITABLE",
+		},
+		{
+			name:           "invalid agent type",
+			sessionIDParam: sessionID.String(),
+			threadIDParam:  threadID.String(),
+			body:           `{"agent_type":"pm_agent","label":"PM Agent 2"}`,
+			setupDeps: func(deps *threadTestDeps) {
+				deps.sessionStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.Session, error) {
+					return models.Session{ID: sessionID, OrgID: orgID, Status: "running", AgentType: models.AgentTypeClaudeCode}, nil
+				}
+				deps.threadStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
+					return models.SessionThread{
+						ID:          threadID,
+						SessionID:   sessionID,
+						OrgID:       orgID,
+						AgentType:   models.AgentTypeClaudeCode,
+						Label:       "Claude Code 2",
+						Status:      models.ThreadStatusIdle,
+						CurrentTurn: 0,
+					}, nil
+				}
+			},
+			expectedCode:  http.StatusBadRequest,
+			expectedError: "INVALID_AGENT_TYPE",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			handler, deps := newThreadHandler(t)
+			tt.setupDeps(deps)
+
+			req := threadRequest(http.MethodPatch, "/api/v1/sessions/"+tt.sessionIDParam+"/threads/"+tt.threadIDParam, tt.body, orgID, map[string]string{
+				"id":  tt.sessionIDParam,
+				"tid": tt.threadIDParam,
+			})
+			w := httptest.NewRecorder()
+
+			handler.UpdateThread(w, req)
+			require.Equal(t, tt.expectedCode, w.Code, "UpdateThread should return the expected status code")
+
+			if tt.expectedError != "" {
+				var errResp models.ErrorResponse
+				err := json.Unmarshal(w.Body.Bytes(), &errResp)
+				require.NoError(t, err, "response body should be valid JSON")
+				require.Equal(t, tt.expectedError, errResp.Error.Code, "UpdateThread should return the expected error code")
+				return
+			}
+
+			var resp models.SingleResponse[models.SessionThread]
+			err := json.Unmarshal(w.Body.Bytes(), &resp)
+			require.NoError(t, err, "response body should be valid JSON")
+			require.Equal(t, models.AgentTypeCodex, resp.Data.AgentType, "UpdateThread should return the updated agent type")
+			require.Equal(t, "Codex 2", resp.Data.Label, "UpdateThread should return the updated label")
 		})
 	}
 }

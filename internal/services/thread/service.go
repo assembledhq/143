@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/rs/zerolog"
 
 	"github.com/assembledhq/143/internal/db"
@@ -22,6 +23,7 @@ var (
 	ErrInvalidModel        = errors.New("invalid model")
 	ErrEnqueueFailed       = errors.New("enqueue failed")
 	ErrThreadNotFound      = errors.New("thread not found")
+	ErrThreadNotEditable   = errors.New("thread is not editable")
 	ErrThreadNotIdle       = errors.New("thread must be idle to send a message")
 	ErrActiveThreadExists  = errors.New("another thread is already active")
 	ErrThreadCannotBeEnded = errors.New("thread cannot be ended in its current state")
@@ -56,6 +58,7 @@ type ThreadStore interface {
 	GetByID(ctx context.Context, orgID, threadID uuid.UUID) (models.SessionThread, error)
 	ListBySession(ctx context.Context, orgID, sessionID uuid.UUID) ([]models.SessionThread, error)
 	ClaimIdleForSession(ctx context.Context, orgID, sessionID, threadID uuid.UUID, maxRunning int) (models.SessionThread, error)
+	UpdateEditable(ctx context.Context, thread *models.SessionThread) error
 	UpdateStatus(ctx context.Context, orgID, threadID uuid.UUID, status models.ThreadStatus) error
 	IncrementPendingMessages(ctx context.Context, orgID, threadID uuid.UUID) error
 	MarkCancelRequested(ctx context.Context, orgID, threadID uuid.UUID) error
@@ -101,6 +104,15 @@ type CreateThreadInput struct {
 	Label        string
 	Instructions string
 	FileScope    []string
+}
+
+type UpdateThreadInput struct {
+	SessionID uuid.UUID
+	OrgID     uuid.UUID
+	ThreadID  uuid.UUID
+	AgentType string
+	Model     string
+	Label     string
 }
 
 // SendMessageInput holds the input for sending a message to a thread.
@@ -271,6 +283,54 @@ func (s *Service) CreateThread(ctx context.Context, input CreateThreadInput) (*m
 	}
 
 	return thread, nil
+}
+
+func (s *Service) UpdateThread(ctx context.Context, input UpdateThreadInput) (*models.SessionThread, error) {
+	session, err := s.sessionStore.GetByID(ctx, input.OrgID, input.SessionID)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrSessionNotFound, err)
+	}
+	if isTerminalStatus(session.Status) {
+		return nil, ErrSessionTerminal
+	}
+
+	thread, err := s.threadStore.GetByID(ctx, input.OrgID, input.ThreadID)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrThreadNotFound, err)
+	}
+	if thread.SessionID != input.SessionID {
+		return nil, ErrThreadNotFound
+	}
+	if thread.Status != models.ThreadStatusIdle || thread.CurrentTurn != 0 {
+		return nil, ErrThreadNotEditable
+	}
+
+	agentType := thread.AgentType
+	if input.AgentType != "" {
+		agentType = models.AgentType(input.AgentType)
+		if err := agentType.Validate(); err != nil {
+			return nil, fmt.Errorf("%w: %w", ErrInvalidAgentType, err)
+		}
+	}
+
+	thread.AgentType = agentType
+	thread.Label = input.Label
+	if input.Model != "" {
+		if err := models.ValidateModelForAgentType(agentType, input.Model); err != nil {
+			return nil, fmt.Errorf("%w: %w", ErrInvalidModel, err)
+		}
+		thread.ModelOverride = &input.Model
+	} else if input.AgentType != "" {
+		thread.ModelOverride = nil
+	}
+
+	if err := s.threadStore.UpdateEditable(ctx, &thread); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrThreadNotEditable
+		}
+		return nil, fmt.Errorf("update thread: %w", err)
+	}
+	return &thread, nil
 }
 
 // ListThreads returns all threads for a session.

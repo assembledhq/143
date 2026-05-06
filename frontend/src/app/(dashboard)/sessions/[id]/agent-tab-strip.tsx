@@ -96,6 +96,7 @@ interface AgentTabStripProps {
   statusConfig: Record<string, { label: string }>;
   onActiveThreadChange: (threadId: string) => void;
   onAddTab: () => void;
+  addTabPending?: boolean;
   onCancelThread: (threadId: string) => void;
   onForkThread: (threadId: string) => void;
   onRevertThread: (threadId: string) => void;
@@ -121,6 +122,7 @@ export function AgentTabStrip({
   statusConfig,
   onActiveThreadChange,
   onAddTab,
+  addTabPending = false,
   onCancelThread,
   onForkThread,
   onRevertThread,
@@ -234,6 +236,7 @@ export function AgentTabStrip({
             aria-label="Add agent tab"
             title="Add agent tab"
             onClick={onAddTab}
+            disabled={addTabPending}
           >
             <Plus className="h-4 w-4" />
           </Button>

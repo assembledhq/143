@@ -398,6 +398,25 @@ export const handlers = [
     } satisfies SingleResponse<SessionThread>, { status: 201 });
   }),
 
+  http.patch('/api/v1/sessions/:id/threads/:threadId', async ({ request, params }) => {
+    const body = await request.json() as { label?: string; agent_type?: string; model?: string };
+    return HttpResponse.json({
+      data: {
+        id: params.threadId as string,
+        session_id: params.id as string,
+        org_id: 'org-1',
+        agent_type: body.agent_type || 'codex',
+        model_override: body.model || undefined,
+        label: body.label || 'Codex 2',
+        status: 'idle',
+        current_turn: 0,
+        created_at: '2026-02-17T07:12:00Z',
+        cost_cents: 0,
+        pending_message_count: 0,
+      },
+    } satisfies SingleResponse<SessionThread>);
+  }),
+
   http.get('/api/v1/sessions/:id/threads/:threadId/messages', () => {
     return HttpResponse.json({
       data: [] as SessionMessage[],
