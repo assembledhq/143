@@ -30,6 +30,7 @@ services:
       MODE: api
       BASE_URL: ${BASE_URL:-https://143.dev}
       FRONTEND_URL: ${FRONTEND_URL:-https://143.dev}
+      PREVIEW_ORIGIN_TEMPLATE: ${PREVIEW_ORIGIN_TEMPLATE:-https://{id}.preview.143.dev}
       NODE_ID: ${NODE_ID:-}
     env_file:
       - .env

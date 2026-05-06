@@ -100,6 +100,31 @@ func (m *reaperMockSessionLister) UpdateSandboxState(_ context.Context, orgID, s
 	return m.updateSandboxErr
 }
 
+// reaperMockThreadLister implements StuckThreadLister for testing.
+type reaperMockThreadLister struct {
+	stuckThreads []models.SessionThread
+	listErr      error
+	updateErr    error
+
+	updatedThreadResults []threadResultUpdate
+}
+
+type threadResultUpdate struct {
+	orgID    uuid.UUID
+	threadID uuid.UUID
+	status   models.ThreadStatus
+	result   *models.SessionResult
+}
+
+func (m *reaperMockThreadLister) ListStuckRunningThreads(_ context.Context, _ time.Time) ([]models.SessionThread, error) {
+	return m.stuckThreads, m.listErr
+}
+
+func (m *reaperMockThreadLister) UpdateResult(_ context.Context, orgID, threadID uuid.UUID, status models.ThreadStatus, result *models.SessionResult) error {
+	m.updatedThreadResults = append(m.updatedThreadResults, threadResultUpdate{orgID: orgID, threadID: threadID, status: status, result: result})
+	return m.updateErr
+}
+
 // reaperMockSnapshotStore implements storage.SnapshotStore for testing.
 type reaperMockSnapshotStore struct {
 	deletedKeys []string
@@ -762,4 +787,100 @@ func TestReapPhase2_ProceedsWhenPreviewStopperErrors(t *testing.T) {
 	require.Len(t, stopper.calls, 1)
 	require.Len(t, snapStore.deletedKeys, 1, "snapshot cleanup must continue even if preview stop errors")
 	require.Len(t, mock.updatedSandboxes, 1)
+}
+
+func TestReapPhase0_5b_FailsStuckRunningThreads(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	threadID1 := uuid.New()
+	threadID2 := uuid.New()
+	startedAt := time.Now().Add(-3 * time.Hour)
+
+	threads := &reaperMockThreadLister{
+		stuckThreads: []models.SessionThread{
+			{ID: threadID1, OrgID: orgID, SessionID: sessionID, Status: models.ThreadStatusRunning, StartedAt: &startedAt},
+			{ID: threadID2, OrgID: orgID, SessionID: sessionID, Status: models.ThreadStatusRunning, StartedAt: &startedAt},
+		},
+	}
+	sessions := &reaperMockSessionLister{}
+	snapStore := &reaperMockSnapshotStore{}
+
+	reaper := NewSessionReaper(sessions, snapStore, 30*time.Minute, 24*time.Hour, time.Minute, zerolog.Nop(),
+		WithStuckThreadLister(threads),
+	)
+	reaper.reap(context.Background())
+
+	// Both threads should be marked failed with the stuck_thread category.
+	require.Len(t, threads.updatedThreadResults, 2)
+	for _, u := range threads.updatedThreadResults {
+		assert.Equal(t, models.ThreadStatusFailed, u.status, "stuck threads should be marked failed")
+		require.NotNil(t, u.result, "result should be set so failure_explanation/category land in the row")
+		require.NotNil(t, u.result.FailureCategory, "failure category should be set")
+		assert.Equal(t, FailureCategoryStuckThread, *u.result.FailureCategory)
+		require.NotNil(t, u.result.Error, "error message should be set")
+	}
+	threadIDs := []uuid.UUID{threads.updatedThreadResults[0].threadID, threads.updatedThreadResults[1].threadID}
+	assert.Contains(t, threadIDs, threadID1)
+	assert.Contains(t, threadIDs, threadID2)
+}
+
+func TestReapPhase0_5b_SkippedWhenNoLister(t *testing.T) {
+	t.Parallel()
+
+	sessions := &reaperMockSessionLister{}
+	snapStore := &reaperMockSnapshotStore{}
+
+	// No WithStuckThreadLister option — Phase 0.5b should be a no-op and not
+	// panic. This is the production safety property: existing deployments
+	// that don't wire the option must keep working.
+	reaper := NewSessionReaper(sessions, snapStore, 30*time.Minute, 24*time.Hour, time.Minute, zerolog.Nop())
+	reaper.reap(context.Background())
+}
+
+func TestReapPhase0_5b_ContinuesOnUpdateError(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	threadID1 := uuid.New()
+	threadID2 := uuid.New()
+	startedAt := time.Now().Add(-3 * time.Hour)
+
+	threads := &reaperMockThreadLister{
+		stuckThreads: []models.SessionThread{
+			{ID: threadID1, OrgID: orgID, SessionID: sessionID, Status: models.ThreadStatusRunning, StartedAt: &startedAt},
+			{ID: threadID2, OrgID: orgID, SessionID: sessionID, Status: models.ThreadStatusRunning, StartedAt: &startedAt},
+		},
+		updateErr: errors.New("db error"),
+	}
+	sessions := &reaperMockSessionLister{}
+	snapStore := &reaperMockSnapshotStore{}
+
+	reaper := NewSessionReaper(sessions, snapStore, 30*time.Minute, 24*time.Hour, time.Minute, zerolog.Nop(),
+		WithStuckThreadLister(threads),
+	)
+	reaper.reap(context.Background())
+
+	// Both attempts must be made even when the first errors — a single
+	// transient DB blip on one row shouldn't strand siblings forever.
+	require.Len(t, threads.updatedThreadResults, 2)
+}
+
+func TestReapPhase0_5b_ContinuesOnListError(t *testing.T) {
+	t.Parallel()
+
+	threads := &reaperMockThreadLister{listErr: errors.New("query failed")}
+	sessions := &reaperMockSessionLister{}
+	snapStore := &reaperMockSnapshotStore{}
+
+	// A list-stage error must not panic or prevent later phases from
+	// running. The phase logs and falls through.
+	reaper := NewSessionReaper(sessions, snapStore, 30*time.Minute, 24*time.Hour, time.Minute, zerolog.Nop(),
+		WithStuckThreadLister(threads),
+	)
+	reaper.reap(context.Background())
+
+	require.Empty(t, threads.updatedThreadResults, "no rows should be touched when the list query failed")
 }

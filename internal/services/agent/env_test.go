@@ -414,6 +414,117 @@ func TestAgentEnvResolveExportsCredentialsAndIntegrations(t *testing.T) {
 	}
 }
 
+// fakeLinearTokens implements LinearTokenResolver for env tests. The
+// scripted return values let each test pin "refresh succeeds with new
+// token" / "no integration installed" / "refresh exploded" without
+// involving the real linear service.
+type fakeLinearTokens struct {
+	token string
+	err   error
+	calls int
+}
+
+func (f *fakeLinearTokens) GetValidAccessToken(_ context.Context, _ uuid.UUID) (string, error) {
+	f.calls++
+	return f.token, f.err
+}
+
+func TestAgentEnvResolveLinearTokenInjection(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	orgID := uuid.New()
+	userID := uuid.New()
+
+	t.Run("resolver returns rotated token; raw cached token is ignored", func(t *testing.T) {
+		t.Parallel()
+		// Cache holds an old token; resolver returns the rotated one. The
+		// resolver path must win — that's the entire point of plumbing
+		// refresh-aware token resolution into env injection.
+		env := NewAgentEnv(AgentEnvDeps{
+			Credentials: &envCredentialProvider{
+				creds: map[models.ProviderName]*models.DecryptedCredential{
+					models.ProviderAnthropic: {Config: models.AnthropicConfig{APIKey: "sk-ant"}},
+					models.ProviderLinear:    {Config: models.LinearConfig{AccessToken: "stale-cached-token"}},
+				},
+			},
+			UserCredentials: &envUserCredentialProvider{},
+			Provider:        &envSandboxProvider{},
+			Logger:          zerolog.Nop(),
+		})
+		resolver := &fakeLinearTokens{token: "rotated-token"}
+		env.SetLinearTokens(resolver)
+
+		got := env.Resolve(ctx, orgID, models.AgentTypeClaudeCode, &userID)
+		require.Equal(t, "rotated-token", got["LINEAR_ACCESS_TOKEN"], "rotated token from resolver must override the cached row")
+		require.Equal(t, 1, resolver.calls, "resolver must be consulted")
+	})
+
+	t.Run("resolver returns empty for missing integration; env var is not set", func(t *testing.T) {
+		t.Parallel()
+		env := NewAgentEnv(AgentEnvDeps{
+			Credentials: &envCredentialProvider{
+				creds: map[models.ProviderName]*models.DecryptedCredential{
+					models.ProviderAnthropic: {Config: models.AnthropicConfig{APIKey: "sk-ant"}},
+				},
+			},
+			UserCredentials: &envUserCredentialProvider{},
+			Provider:        &envSandboxProvider{},
+			Logger:          zerolog.Nop(),
+		})
+		env.SetLinearTokens(&fakeLinearTokens{token: "", err: nil})
+
+		got := env.Resolve(ctx, orgID, models.AgentTypeClaudeCode, &userID)
+		_, present := got["LINEAR_ACCESS_TOKEN"]
+		require.False(t, present, "no integration → no LINEAR_ACCESS_TOKEN env var")
+	})
+
+	t.Run("resolver hard failure leaves LINEAR_ACCESS_TOKEN unset rather than injecting a known-bad cached token", func(t *testing.T) {
+		t.Parallel()
+		// Even with a cached token in the credential store, a refresh hard
+		// failure (revoked refresh token) must NOT inject the cached token —
+		// the agent would just 401 in the sandbox. Better to omit the env
+		// var so 143-tools reports "linear not configured" cleanly.
+		env := NewAgentEnv(AgentEnvDeps{
+			Credentials: &envCredentialProvider{
+				creds: map[models.ProviderName]*models.DecryptedCredential{
+					models.ProviderAnthropic: {Config: models.AnthropicConfig{APIKey: "sk-ant"}},
+					models.ProviderLinear:    {Config: models.LinearConfig{AccessToken: "doomed-cached-token"}},
+				},
+			},
+			UserCredentials: &envUserCredentialProvider{},
+			Provider:        &envSandboxProvider{},
+			Logger:          zerolog.Nop(),
+		})
+		env.SetLinearTokens(&fakeLinearTokens{err: errors.New("refresh token revoked")})
+
+		got := env.Resolve(ctx, orgID, models.AgentTypeClaudeCode, &userID)
+		_, present := got["LINEAR_ACCESS_TOKEN"]
+		require.False(t, present, "resolver error must NOT fall through to the stale cached token")
+	})
+
+	t.Run("no resolver wired; falls back to raw cached token", func(t *testing.T) {
+		t.Parallel()
+		// Backward-compat path: tests / wiring that never called
+		// SetLinearTokens must keep the legacy behavior of injecting the
+		// raw stored access token. New production wiring always sets the
+		// resolver, so this branch is only exercised by older fixtures.
+		env := NewAgentEnv(AgentEnvDeps{
+			Credentials: &envCredentialProvider{
+				creds: map[models.ProviderName]*models.DecryptedCredential{
+					models.ProviderAnthropic: {Config: models.AnthropicConfig{APIKey: "sk-ant"}},
+					models.ProviderLinear:    {Config: models.LinearConfig{AccessToken: "legacy-token"}},
+				},
+			},
+			UserCredentials: &envUserCredentialProvider{},
+			Provider:        &envSandboxProvider{},
+			Logger:          zerolog.Nop(),
+		})
+
+		got := env.Resolve(ctx, orgID, models.AgentTypeClaudeCode, &userID)
+		require.Equal(t, "legacy-token", got["LINEAR_ACCESS_TOKEN"])
+	})
+}
+
 func TestAgentEnvResolveAppliesCachedAgentConfigOverrides(t *testing.T) {
 	t.Parallel()
 
@@ -1372,6 +1483,73 @@ func TestAgentEnvInjectCodexAuth(t *testing.T) {
 			if tt.assertWrites != nil {
 				tt.assertWrites(t, tt.sandboxProvider)
 			}
+		})
+	}
+}
+
+// TestAgentEnvInjectCodexAuth_ErrorClassification verifies that
+// InjectCodexAuth tags genuine auth failures with ErrCodexAuthInvalid while
+// leaving sandbox/transport errors un-tagged. The orchestrator branches on
+// this sentinel to decide whether to surface a "re-authenticate with ChatGPT"
+// CTA or a generic retry CTA — misclassification (e.g. labeling a Docker
+// "no such container" as auth-expired) sends users to redo OAuth when their
+// credential is fine.
+func TestAgentEnvInjectCodexAuth_ErrorClassification(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	orgID := uuid.New()
+	sandbox := &Sandbox{HomeDir: "/home/test"}
+
+	tests := []struct {
+		name          string
+		codexAuth     CodexAuthProvider
+		provider      *envSandboxProvider
+		wantAuthError bool
+	}{
+		{
+			name:          "GetValidToken failure is auth-shaped",
+			codexAuth:     envCodexAuthProvider{err: errors.New("refresh token revoked")},
+			provider:      &envSandboxProvider{},
+			wantAuthError: true,
+		},
+		{
+			name:          "Docker exec failure is NOT auth-shaped",
+			codexAuth:     envCodexAuthProvider{token: &models.OpenAIChatGPTConfig{AccessToken: "access", IDToken: "id"}},
+			provider:      &envSandboxProvider{execErr: errors.New("Error response from daemon: No such container: abc123")},
+			wantAuthError: false,
+		},
+		{
+			name:          "mkdir non-zero exit is NOT auth-shaped",
+			codexAuth:     envCodexAuthProvider{token: &models.OpenAIChatGPTConfig{AccessToken: "access", IDToken: "id"}},
+			provider:      &envSandboxProvider{execExitCode: 1},
+			wantAuthError: false,
+		},
+		{
+			name:      "WriteFile failure is NOT auth-shaped",
+			codexAuth: envCodexAuthProvider{token: &models.OpenAIChatGPTConfig{AccessToken: "access", IDToken: "id"}},
+			provider: &envSandboxProvider{writeErrByPath: map[string]error{
+				"/home/test/.codex/auth.json": errors.New("disk full"),
+			}},
+			wantAuthError: false,
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			env := NewAgentEnv(AgentEnvDeps{
+				CodexAuth: tt.codexAuth,
+				Provider:  tt.provider,
+				Logger:    zerolog.Nop(),
+			})
+
+			_, err := env.InjectCodexAuth(ctx, orgID, sandbox)
+			require.Error(t, err)
+			require.Equal(t, tt.wantAuthError, errors.Is(err, ErrCodexAuthInvalid),
+				"errors.Is(err, ErrCodexAuthInvalid) mismatch for %s — got err=%v", tt.name, err)
 		})
 	}
 }

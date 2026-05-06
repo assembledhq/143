@@ -2320,15 +2320,18 @@ func (h *SessionHandler) CreateManual(w http.ResponseWriter, r *http.Request) {
 	}
 
 	body.Message = strings.TrimSpace(body.Message)
-	// Empty message is allowed iff the user is starting from a linked
-	// Linear issue. Detection runs after the body validation, so we accept
+	// Empty message is allowed when the user attached images or is starting
+	// from a linked Linear issue. Mobile screenshot/photo-first flows rely on
+	// this: the UI explicitly advertises image-only session starts, and the
+	// initial turn persists those attachments even when the text prompt is
+	// blank. Linear detection runs after body validation, so we accept
 	// "looks like a Linear ref somewhere in the inputs" as the relaxation
-	// signal here. The check is tightened with the team-key allowlist so
-	// a "FOO-123"-shaped string for an unknown team no longer waves the
-	// request past — preventing sessions with an empty user turn that
-	// silently no-op inside the linker.
-	if body.Message == "" && !h.canBypassMissingMessageForLinear(r.Context(), orgID, body.References) {
-		writeError(w, r, http.StatusBadRequest, "MISSING_MESSAGE", "message is required")
+	// signal here. The check is tightened with the team-key allowlist so a
+	// "FOO-123"-shaped string for an unknown team no longer waves the request
+	// past — preventing sessions with an empty user turn that silently no-op
+	// inside the linker.
+	if body.Message == "" && len(body.Images) == 0 && !h.canBypassMissingMessageForLinear(r.Context(), orgID, body.References) {
+		writeError(w, r, http.StatusBadRequest, "MISSING_MESSAGE", "message, images, or a linked Linear issue are required")
 		return
 	}
 	for _, reference := range body.References {

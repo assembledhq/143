@@ -355,49 +355,6 @@ func TestEnsureImage_SingleflightDedupes(t *testing.T) {
 	require.Equal(t, 1, cli.imagePullCalls, "%d concurrent ensureImage callers should share a single underlying pull", callers)
 }
 
-// TestEnsureInfraImages_PullsAllSupported verifies the worker-boot
-// pre-pull pass invokes the registry once per supported template image,
-// so the first preview start is a fast inspect rather than a multi-minute
-// cold pull that would blow through the HTTP server's WriteTimeout.
-func TestEnsureInfraImages_PullsAllSupported(t *testing.T) {
-	t.Parallel()
-
-	cli := &mockDockerPreviewClient{
-		imagesPresent:      map[string]bool{},
-		imagePullPopulates: true,
-	}
-	provider := NewDockerPreviewProvider(cli, &noopSandboxExecutor{}, zerolog.Nop())
-
-	provider.EnsureInfraImages(context.Background())
-
-	require.Equal(t, len(preview.AllInfraImages()), cli.imagePullCalls, "every supported infra image should be pre-pulled")
-
-	// Second call is a no-op: every image is already present, so we hit
-	// the fast inspect path.
-	cli.imagePullCalls = 0
-	provider.EnsureInfraImages(context.Background())
-	require.Zero(t, cli.imagePullCalls, "second pass must not re-pull images that are already present")
-}
-
-// TestEnsureInfraImages_LogsAndContinuesOnFailure verifies that pre-pull
-// is best-effort: a registry failure for one image does not propagate up
-// or stop the others (and definitely doesn't block server boot). The
-// lazy-pull path stays as a safety net for whatever didn't pre-pull.
-func TestEnsureInfraImages_LogsAndContinuesOnFailure(t *testing.T) {
-	t.Parallel()
-
-	cli := &mockDockerPreviewClient{
-		imagesPresent: map[string]bool{},
-		imagePullErr:  errors.New("registry unreachable"),
-	}
-	provider := NewDockerPreviewProvider(cli, &noopSandboxExecutor{}, zerolog.Nop())
-
-	// Should not panic, should not block, should not return.
-	provider.EnsureInfraImages(context.Background())
-
-	require.Equal(t, len(preview.AllInfraImages()), cli.imagePullCalls, "every image should still be attempted even when the first one fails")
-}
-
 func TestBuildInfraEnv_Redis(t *testing.T) {
 	t.Parallel()
 	d := &DockerPreviewProvider{}
@@ -442,10 +399,17 @@ func TestResolveCredentialTemplate(t *testing.T) {
 	require.Equal(t, "postgres://preview_db:secret@preview-db-abc123:5432/preview_db", result)
 }
 
-func TestGenerateInfraCredential(t *testing.T) {
+// TestBuildInfraCredential_PopulatesAllFields locks in the invariant that the
+// constructor populates every field consumed by resolveCredentialTemplate. A
+// previous bug left Host/Port unset and produced a DSN with empty host/port,
+// which the migrator silently dialed against [::1]:5432 instead of the real
+// container.
+func TestBuildInfraCredential_PopulatesAllFields(t *testing.T) {
 	t.Parallel()
-	cred, err := generateInfraCredential("db")
+	cred, err := buildInfraCredential("db", "preview-db-abc123", 5432)
 	require.NoError(t, err)
+	require.Equal(t, "preview-db-abc123", cred.Host)
+	require.Equal(t, 5432, cred.Port)
 	require.Equal(t, "preview_db", cred.Username)
 	require.Equal(t, "preview_db", cred.Database)
 	require.Len(t, cred.Password, 32) // 16 bytes → 32 hex chars
@@ -504,25 +468,25 @@ func TestBuildServiceEnvs(t *testing.T) {
 		},
 	}
 
-	infraCreds := map[string]preview.InfraCredential{
-		"db": {
-			Host:     "preview-db-abc",
-			Port:     5432,
-			Username: "preview_db",
-			Password: "secret",
-			Database: "preview_db",
-		},
-	}
+	// Build the credential via the production constructor so this test
+	// exercises the same wiring as provisionInfra. A prior version of this
+	// test hand-rolled the InfraCredential literal with Host/Port set, which
+	// hid a bug where the production path stored a credential with empty
+	// Host/Port and produced an unconnectable DATABASE_URL.
+	cred, err := buildInfraCredential("db", "preview-db-abc", 5432)
+	require.NoError(t, err)
+	infraCreds := map[string]preview.InfraCredential{"db": cred}
+	expectedDSN := fmt.Sprintf("postgres://preview_db:%s@preview-db-abc:5432/preview_db", cred.Password)
 
 	envs := d.buildServiceEnvs(cfg, infraCreds, nil)
 
 	// web should have NODE_ENV + DATABASE_URL
 	require.Equal(t, "development", envs["web"]["NODE_ENV"])
-	require.Equal(t, "postgres://preview_db:secret@preview-db-abc:5432/preview_db", envs["web"]["DATABASE_URL"])
+	require.Equal(t, expectedDSN, envs["web"]["DATABASE_URL"])
 
 	// worker should have WORKER_THREADS + DATABASE_URL
 	require.Equal(t, "2", envs["worker"]["WORKER_THREADS"])
-	require.Equal(t, "postgres://preview_db:secret@preview-db-abc:5432/preview_db", envs["worker"]["DATABASE_URL"])
+	require.Equal(t, expectedDSN, envs["worker"]["DATABASE_URL"])
 }
 
 // TestBuildServiceEnvs_ExtraEnvOverrides verifies that platform-level extras

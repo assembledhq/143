@@ -66,9 +66,14 @@ type githubAppService interface {
 // --- Linear types ---
 
 type linearTokenResponse struct {
-	AccessToken string `json:"access_token"`
-	TokenType   string `json:"token_type"`
-	Scope       string `json:"scope"`
+	AccessToken  string `json:"access_token"`
+	RefreshToken string `json:"refresh_token"`
+	TokenType    string `json:"token_type"`
+	Scope        string `json:"scope"`
+	// ExpiresIn is the access token TTL in seconds. Legacy installs created
+	// before Linear's refresh-token rollout can have credential rows with a
+	// zero ExpiresAt, which the runtime treats as "no known expiry".
+	ExpiresIn int `json:"expires_in"`
 }
 
 type linearOrganization struct {
@@ -438,11 +443,17 @@ func (h *IntegrationHandler) StartLinearOAuth(w http.ResponseWriter, r *http.Req
 		return
 	}
 
+	// offline_access is the documented Linear scope that triggers refresh_token
+	// + expires_in in the token response. Without it, Linear treats the token
+	// as long-lived but the refresh path here is unrecoverable on revocation —
+	// the user has to manually reconnect after every revocation event. The
+	// rest of the refresh machinery in internal/services/linear/refresh.go is
+	// a no-op until this scope is granted.
 	params := url.Values{
 		"client_id":     {h.linearClientID},
 		"redirect_uri":  {h.linearRedirectURL()},
 		"response_type": {"code"},
-		"scope":         {"read,write"},
+		"scope":         {"read,write,offline_access"},
 		"state":         {state},
 	}
 
@@ -476,10 +487,14 @@ func (h *IntegrationHandler) HandleLinearOAuthCallback(w http.ResponseWriter, r 
 
 	linearConfig := models.LinearConfig{
 		AccessToken:   token.AccessToken,
+		RefreshToken:  token.RefreshToken,
 		TokenType:     token.TokenType,
 		Scope:         token.Scope,
 		WorkspaceID:   workspaceID,
 		WorkspaceName: workspaceName,
+	}
+	if token.ExpiresIn > 0 {
+		linearConfig.ExpiresAt = time.Now().Add(time.Duration(token.ExpiresIn) * time.Second)
 	}
 	if err := h.credentialStore.Upsert(r.Context(), orgID, linearConfig); err != nil {
 		writeError(w, r, http.StatusInternalServerError, "SAVE_CREDENTIAL_FAILED", "failed to store linear credential", err)
