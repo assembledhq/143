@@ -23,7 +23,7 @@ vi.mock("next/navigation", () => ({
 }));
 
 describe("AutomationDetailPage", () => {
-  it("allows the timezone selector to wrap cleanly on mobile layouts", async () => {
+  it("matches the schedule controls and labels to the app input sizing", async () => {
     server.use(
       http.get("*/api/v1/automations/auto-1", () => HttpResponse.json({
         data: {
@@ -78,11 +78,18 @@ describe("AutomationDetailPage", () => {
     const scheduleRow = timezoneButton.parentElement;
     const runEveryText = screen.getByText("Run every");
     const atText = screen.getByText("At");
+    const intervalUnitTrigger = screen.getByLabelText("Interval unit");
+    const hourTrigger = screen.getByLabelText("Run at hour");
+    const minuteTrigger = screen.getByLabelText("Run at minute");
 
     expect(scheduleRow).toHaveClass("flex-wrap");
     expect(timezoneButton).toHaveClass("w-full", "sm:w-auto");
-    expect(runEveryText).toHaveClass("text-sm", "font-medium", "leading-none", "text-muted-foreground");
-    expect(atText).toHaveClass("text-sm", "font-medium", "leading-none", "text-muted-foreground");
+    expect(intervalUnitTrigger).toHaveClass("h-9", "text-xs");
+    expect(hourTrigger).toHaveClass("h-9", "text-xs");
+    expect(minuteTrigger).toHaveClass("h-9", "text-xs");
+    expect(timezoneButton).toHaveClass("h-9", "text-xs");
+    expect(runEveryText).toHaveClass("text-xs", "font-medium", "leading-none", "text-muted-foreground");
+    expect(atText).toHaveClass("text-xs", "font-medium", "leading-none", "text-muted-foreground");
     expect(screen.queryByText(/Run time is in/i)).not.toBeInTheDocument();
   });
 

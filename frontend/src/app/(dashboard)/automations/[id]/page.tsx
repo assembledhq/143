@@ -162,7 +162,7 @@ function SettingsTab({ automation }: { automation: Automation }) {
             role="group"
             aria-labelledby="schedule-label"
           >
-            <span className="text-sm font-medium leading-none text-muted-foreground">Run every</span>
+            <span className="text-xs font-medium leading-none text-muted-foreground">Run every</span>
             <Input
               id="interval-value"
               aria-label="Interval value"
@@ -180,7 +180,7 @@ function SettingsTab({ automation }: { automation: Automation }) {
               value={intervalUnit}
               onValueChange={(v) => setIntervalUnit(toIntervalUnit(v, intervalUnit))}
             >
-              <SelectTrigger className="w-28" aria-label="Interval unit">
+              <SelectTrigger className="h-9 w-28" aria-label="Interval unit">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
@@ -191,9 +191,9 @@ function SettingsTab({ automation }: { automation: Automation }) {
             </Select>
           </div>
           <div className="flex flex-wrap items-start gap-2 sm:items-center">
-            <span className="text-sm font-medium leading-none text-muted-foreground">At</span>
+            <span className="text-xs font-medium leading-none text-muted-foreground">At</span>
             <Select value={intervalRunHour} onValueChange={setIntervalRunHour}>
-              <SelectTrigger className="w-20" aria-label="Run at hour">
+              <SelectTrigger className="h-9 w-20" aria-label="Run at hour">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
@@ -206,7 +206,7 @@ function SettingsTab({ automation }: { automation: Automation }) {
             </Select>
             <span className="text-sm text-muted-foreground">:</span>
             <Select value={intervalRunMinute} onValueChange={setIntervalRunMinute}>
-              <SelectTrigger className="w-20" aria-label="Run at minute">
+              <SelectTrigger className="h-9 w-20" aria-label="Run at minute">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
