@@ -799,6 +799,104 @@ func TestIntegrationHandler_ConnectLinear_ReactivatesErroredIntegration(t *testi
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+// TestIntegrationHandler_ConnectLinear_ConvergesDuplicateErroredRow pins
+// the duplicate-row cleanup. When ListReusableForReconnect returns the
+// canonical active row plus a stale errored duplicate (historical state
+// from before ensureIntegration was the only write path), the duplicate
+// must also have its auth_error markers stripped and status flipped to
+// active. Otherwise /api/v1/integrations would surface auth_error from
+// the orphan row and keep the Reconnect CTA visible after a healthy
+// reconnect against the canonical row.
+func TestIntegrationHandler_ConnectLinear_ConvergesDuplicateErroredRow(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	canonicalID := uuid.New()
+	duplicateID := uuid.New()
+	now := time.Now()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := db.NewIntegrationStore(mock)
+	handler := NewIntegrationHandler(store, nil, "", "", "http://localhost:8080", "http://localhost:3000")
+
+	// Active row first (per the SQL ORDER BY), then the errored duplicate.
+	mock.ExpectQuery("SELECT .+ FROM integrations .+ provider = @provider .+ status IN \\('active', 'error'\\)").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows([]string{"id", "org_id", "provider", "config", "status", "last_synced_at", "created_at"}).
+				AddRow(canonicalID, orgID, "linear", json.RawMessage(`{}`), "active", nil, now).
+				AddRow(duplicateID, orgID, "linear", json.RawMessage(`{"last_auth_error":"prior","last_auth_error_at":"2026-05-05T22:49:11Z"}`), "error", nil, now),
+		)
+
+	// Canonical row is already active+empty: no UPDATE for it. The
+	// duplicate is errored with auth-error markers, so a single atomic
+	// flip should fire for that one ID.
+	mock.ExpectExec("UPDATE integrations SET status = @status, config = @config").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/integrations/linear/connect", nil)
+	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+	w := httptest.NewRecorder()
+
+	handler.ConnectLinear(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "ConnectLinear should reuse the canonical active row")
+	var resp models.SingleResponse[models.Integration]
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp), "ConnectLinear response should be valid JSON")
+	require.Equal(t, canonicalID, resp.Data.ID, "ConnectLinear should return the canonical (active) integration ID, not the duplicate")
+	require.NoError(t, mock.ExpectationsWereMet(), "duplicate row must also be flipped to active+stripped")
+}
+
+// TestIntegrationHandler_ConnectLinear_PropagatesDuplicateConvergeFailure
+// pins that DB errors during duplicate-row convergence surface as 500
+// rather than getting swallowed. Silent failure here is what produced
+// the stale-duplicate-row bug to begin with — a "successful" reconnect
+// that quietly left an orphan errored row visible to the integrations
+// list, keeping the Reconnect CTA pinned on after the canonical row was
+// healthy.
+func TestIntegrationHandler_ConnectLinear_PropagatesDuplicateConvergeFailure(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	canonicalID := uuid.New()
+	duplicateID := uuid.New()
+	now := time.Now()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := db.NewIntegrationStore(mock)
+	handler := NewIntegrationHandler(store, nil, "", "", "http://localhost:8080", "http://localhost:3000")
+
+	mock.ExpectQuery("SELECT .+ FROM integrations .+ provider = @provider .+ status IN \\('active', 'error'\\)").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows([]string{"id", "org_id", "provider", "config", "status", "last_synced_at", "created_at"}).
+				AddRow(canonicalID, orgID, "linear", json.RawMessage(`{}`), "active", nil, now).
+				AddRow(duplicateID, orgID, "linear", json.RawMessage(`{"last_auth_error":"prior","last_auth_error_at":"2026-05-05T22:49:11Z"}`), "error", nil, now),
+		)
+	// Duplicate-row UPDATE blows up — the OAuth flow must surface this
+	// as 500, not return 200 with a half-converged DB.
+	mock.ExpectExec("UPDATE integrations SET status = @status, config = @config").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnError(errors.New("update failed"))
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/integrations/linear/connect", nil)
+	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+	w := httptest.NewRecorder()
+
+	handler.ConnectLinear(w, req)
+
+	require.Equal(t, http.StatusInternalServerError, w.Code, "ConnectLinear must return 500 when duplicate-row converge fails")
+	require.Contains(t, w.Body.String(), "CONNECT_LINEAR_FAILED")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
 func TestIntegrationHandler_ConnectLinear_ReturnsInternalErrorWhenLookupFails(t *testing.T) {
 	t.Parallel()
 
