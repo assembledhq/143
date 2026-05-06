@@ -1487,6 +1487,73 @@ func TestAgentEnvInjectCodexAuth(t *testing.T) {
 	}
 }
 
+// TestAgentEnvInjectCodexAuth_ErrorClassification verifies that
+// InjectCodexAuth tags genuine auth failures with ErrCodexAuthInvalid while
+// leaving sandbox/transport errors un-tagged. The orchestrator branches on
+// this sentinel to decide whether to surface a "re-authenticate with ChatGPT"
+// CTA or a generic retry CTA — misclassification (e.g. labeling a Docker
+// "no such container" as auth-expired) sends users to redo OAuth when their
+// credential is fine.
+func TestAgentEnvInjectCodexAuth_ErrorClassification(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	orgID := uuid.New()
+	sandbox := &Sandbox{HomeDir: "/home/test"}
+
+	tests := []struct {
+		name          string
+		codexAuth     CodexAuthProvider
+		provider      *envSandboxProvider
+		wantAuthError bool
+	}{
+		{
+			name:          "GetValidToken failure is auth-shaped",
+			codexAuth:     envCodexAuthProvider{err: errors.New("refresh token revoked")},
+			provider:      &envSandboxProvider{},
+			wantAuthError: true,
+		},
+		{
+			name:          "Docker exec failure is NOT auth-shaped",
+			codexAuth:     envCodexAuthProvider{token: &models.OpenAIChatGPTConfig{AccessToken: "access", IDToken: "id"}},
+			provider:      &envSandboxProvider{execErr: errors.New("Error response from daemon: No such container: abc123")},
+			wantAuthError: false,
+		},
+		{
+			name:          "mkdir non-zero exit is NOT auth-shaped",
+			codexAuth:     envCodexAuthProvider{token: &models.OpenAIChatGPTConfig{AccessToken: "access", IDToken: "id"}},
+			provider:      &envSandboxProvider{execExitCode: 1},
+			wantAuthError: false,
+		},
+		{
+			name:      "WriteFile failure is NOT auth-shaped",
+			codexAuth: envCodexAuthProvider{token: &models.OpenAIChatGPTConfig{AccessToken: "access", IDToken: "id"}},
+			provider: &envSandboxProvider{writeErrByPath: map[string]error{
+				"/home/test/.codex/auth.json": errors.New("disk full"),
+			}},
+			wantAuthError: false,
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			env := NewAgentEnv(AgentEnvDeps{
+				CodexAuth: tt.codexAuth,
+				Provider:  tt.provider,
+				Logger:    zerolog.Nop(),
+			})
+
+			_, err := env.InjectCodexAuth(ctx, orgID, sandbox)
+			require.Error(t, err)
+			require.Equal(t, tt.wantAuthError, errors.Is(err, ErrCodexAuthInvalid),
+				"errors.Is(err, ErrCodexAuthInvalid) mismatch for %s — got err=%v", tt.name, err)
+		})
+	}
+}
+
 func TestAgentEnvInjectCodexAuthForUser_RefreshesUnifiedSubscriptionByID(t *testing.T) {
 	t.Parallel()
 
