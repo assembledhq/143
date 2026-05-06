@@ -19,7 +19,11 @@ export function PageHeader({ title, description, subtitle, action }: PageHeaderP
           <p className="mt-1 text-xs text-muted-foreground">{subtitle}</p>
         )}
       </div>
-      {action && <div className="shrink-0">{action}</div>}
+      {action && (
+        <div className="w-full shrink-0 sm:w-auto [&>*]:w-full sm:[&>*]:w-auto">
+          {action}
+        </div>
+      )}
     </div>
   );
 }

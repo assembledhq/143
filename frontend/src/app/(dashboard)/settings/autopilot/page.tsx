@@ -38,7 +38,7 @@ import {
   PM_SCHEDULE_MAX_HOURS,
   clampNumber,
 } from "@/lib/settings-constants";
-import type { CodingAuth, ListResponse, Organization, OrgSettings, RepoSettings, Repository, ResolvedCredential, SingleResponse, UserCredentialSummary } from "@/lib/types";
+import type { CodingAuth, CodingCredentialSummary, ListResponse, Organization, OrgSettings, RepoSettings, Repository, ResolvedCredential, SingleResponse, UserCredentialSummary } from "@/lib/types";
 
 export default function AutopilotSettingsPage() {
   const { user } = useAuth();
@@ -74,6 +74,11 @@ export default function AutopilotSettingsPage() {
     queryFn: () => api.codingAuths.list(),
     enabled: isAdmin,
   });
+  const { data: orgCodingCredentialsResponse } = useQuery<ListResponse<CodingCredentialSummary>>({
+    queryKey: ["coding-credentials", "org"],
+    queryFn: () => api.codingCredentials.list("org"),
+    enabled: isAdmin,
+  });
 
   const settings = (settingsResponse?.data?.settings ?? {}) as OrgSettings;
   const repositories = repositoriesResponse?.data ?? [];
@@ -89,6 +94,14 @@ export default function AutopilotSettingsPage() {
     () => codingAuthsResponse?.data ?? [],
     [codingAuthsResponse],
   );
+  const orgCodingCredentials = useMemo(
+    () => orgCodingCredentialsResponse?.data ?? [],
+    [orgCodingCredentialsResponse],
+  );
+  const pmCodingAuthAvailability = useMemo(
+    () => [...codingAuths, ...orgCodingCredentials],
+    [codingAuths, orgCodingCredentials],
+  );
   const codexAuthStatus = codexAuthResponse?.data;
   const pmResolvedCredentials = useMemo(
     () => pmUsableResolvedCredentials(resolvedCredentials, teamDefaultsResponse?.data ?? []),
@@ -99,11 +112,11 @@ export default function AutopilotSettingsPage() {
     return availableAgentModelGroups(
       pmResolvedCredentials,
       codexAuthStatus,
-      codingAuths,
+      pmCodingAuthAvailability,
       settings.default_agent_type || "codex",
       { orgAgentConfig: settings.agent_config },
     );
-  }, [pmResolvedCredentials, codexAuthStatus, codingAuths, settings.default_agent_type, settings.agent_config]);
+  }, [pmResolvedCredentials, codexAuthStatus, pmCodingAuthAvailability, settings.default_agent_type, settings.agent_config]);
 
   const scheduleHoursServer = settings.pm_schedule_hours ?? 24;
   const pmModel = settings.pm_model ?? DEFAULT_PM_MODEL;

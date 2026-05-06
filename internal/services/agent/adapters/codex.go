@@ -32,6 +32,13 @@ func (a *CodexAdapter) Name() models.AgentType {
 	return models.AgentTypeCodex
 }
 
+// ResumeMode reports that Codex resumes prior turns by explicit session ID
+// (captured from the `thread.started` event Codex emits at the start of each
+// `--json` run and threaded back into `codex exec resume <id>`).
+func (a *CodexAdapter) ResumeMode() agent.SessionResumeMode {
+	return agent.ResumeBySessionID
+}
+
 // PreparePrompt constructs the prompts for Codex CLI based on the issue context.
 // Reuses the shared buildSystemPrompt() and buildUserPrompt() functions.
 func (a *CodexAdapter) PreparePrompt(ctx context.Context, input *agent.AgentInput) (*agent.AgentPrompt, error) {
@@ -81,23 +88,24 @@ func (a *CodexAdapter) Execute(ctx context.Context, sandbox *agent.Sandbox, prom
 	if prompt.ReasoningEffort != "" {
 		reasoningArg = fmt.Sprintf(" -c '%s'", shellEscapeSingle(fmt.Sprintf(`model_reasoning_effort="%s"`, prompt.ReasoningEffort)))
 	}
-	if prompt.Continuation {
+	if prompt.Continuation && prompt.ResumeSessionID != "" {
+		// Subsequent turn with a known session ID: deterministic resume by
+		// thread/session id captured from a prior turn's `thread.started`
+		// event. We avoid `codex exec resume --last` because `--last` reads
+		// whichever rollout file is newest in ~/.codex/sessions, which is
+		// non-deterministic when stale entries are present.
 		msg := shellEscapeDouble(prompt.UserMessage)
-		if prompt.ResumeSessionID != "" {
-			cmd = fmt.Sprintf(
-				"codex exec resume --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check --json%s %s \"%s\"",
-				reasoningArg,
-				shellEscapeCodex(prompt.ResumeSessionID),
-				msg,
-			)
-		} else {
-			cmd = fmt.Sprintf(
-				"codex exec resume --last --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check --json%s \"%s\"",
-				reasoningArg,
-				msg,
-			)
-		}
+		cmd = fmt.Sprintf(
+			"codex exec resume --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check --json%s %s \"%s\"",
+			reasoningArg,
+			shellEscapeCodex(prompt.ResumeSessionID),
+			msg,
+		)
 	} else {
+		// Fresh exec — used for first turns and as the fallback for
+		// continuation turns when the session ID was never captured (the
+		// orchestrator embeds the prior conversation history into UserPrompt
+		// in that case so the agent has the full context).
 		promptContent := fmt.Sprintf("%s\n\n---\n\n%s", prompt.SystemPrompt, prompt.UserPrompt)
 		promptPath := fmt.Sprintf("%s/.143-prompt.md", sandbox.HomeDir)
 		if err := provider.WriteFile(ctx, sandbox, promptPath, []byte(promptContent)); err != nil {
@@ -245,6 +253,18 @@ func parseCodexStreamLine(line []byte, result *agent.AgentResult, logCh chan<- a
 	}
 
 	switch event.Type {
+	case "thread.started":
+		// Capture the Codex thread/session ID so `codex exec resume <id>` can
+		// deterministically resume this conversation on the next turn.
+		if event.ThreadID != "" {
+			result.AgentSessionID = event.ThreadID
+		}
+		logCh <- agent.LogEntry{
+			Timestamp: time.Now(),
+			Level:     "debug",
+			Message:   string(line),
+		}
+
 	case "message", "text", "assistant":
 		content := event.Content
 		if content == "" {
@@ -526,6 +546,11 @@ type codexStreamEvent struct {
 	Error string          `json:"error,omitempty"`
 	Item  *codexItem      `json:"item,omitempty"`
 	Usage json.RawMessage `json:"usage,omitempty"`
+	// ThreadID is emitted by Codex on the `thread.started` event at the start
+	// of each `--json` run. Codex's CLI exposes its conversation state under
+	// the `thread` name; `codex exec resume <id>` accepts this same value as
+	// the rollout/session identifier for deterministic resumes.
+	ThreadID string `json:"thread_id,omitempty"`
 }
 
 // parseCodexStreamOutput processes the streaming JSONL output from Codex CLI,

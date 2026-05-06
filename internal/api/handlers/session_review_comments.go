@@ -27,6 +27,7 @@ type SessionReviewCommentHandler struct {
 	store        *db.SessionReviewCommentStore
 	sessionStore *db.SessionStore
 	messageStore *db.SessionMessageStore
+	threadStore  *db.SessionThreadStore
 	jobStore     *db.JobStore
 	logger       zerolog.Logger
 	audit        *db.AuditEmitter
@@ -40,10 +41,15 @@ func NewSessionReviewCommentHandler(store *db.SessionReviewCommentStore, session
 	}
 }
 
-// SetMessageAndJobStores wires the message and job stores needed by SendToAgent
-// to send messages directly without a second frontend call.
-func (h *SessionReviewCommentHandler) SetMessageAndJobStores(messageStore *db.SessionMessageStore, jobStore *db.JobStore) {
+// SetMessageAndJobStores wires the message, thread, and job stores needed by
+// SendToAgent to send messages directly without a second frontend call. The
+// thread store is required so the synthesized "address these review comments"
+// message lands on the session's primary thread; without it the message has
+// thread_id=NULL and the per-thread timeline query skips it, leaving the
+// click looking like a no-op.
+func (h *SessionReviewCommentHandler) SetMessageAndJobStores(messageStore *db.SessionMessageStore, threadStore *db.SessionThreadStore, jobStore *db.JobStore) {
 	h.messageStore = messageStore
+	h.threadStore = threadStore
 	h.jobStore = jobStore
 }
 
@@ -384,9 +390,30 @@ func (h *SessionReviewCommentHandler) SendToAgent(w http.ResponseWriter, r *http
 			userID = &user.ID
 		}
 
+		// Attribute the synthesized review-comment prompt to the session's
+		// primary thread. ClaimIdle doesn't hydrate session.PrimaryThreadID,
+		// so look it up here. ListBySession orders by created_at ASC so the
+		// first entry is the seeded "Main" thread.
+		var threadID *uuid.UUID
+		if h.threadStore != nil {
+			threads, err := h.threadStore.ListBySession(r.Context(), orgID, sessionID)
+			if err != nil {
+				if revertErr := h.sessionStore.UpdateStatus(r.Context(), orgID, sessionID, string(models.SessionStatusIdle)); revertErr != nil {
+					h.logger.Error().Err(revertErr).Str("session_id", sessionID.String()).Msg("failed to revert session to idle after thread lookup failure")
+				}
+				writeError(w, r, http.StatusInternalServerError, "THREAD_LOOKUP_FAILED", "failed to look up session threads")
+				return
+			}
+			if len(threads) > 0 {
+				id := threads[0].ID
+				threadID = &id
+			}
+		}
+
 		msg := &models.SessionMessage{
 			SessionID:  sessionID,
 			OrgID:      orgID,
+			ThreadID:   threadID,
 			UserID:     userID,
 			TurnNumber: session.CurrentTurn + 1,
 			Role:       models.MessageRoleUser,
@@ -406,7 +433,14 @@ func (h *SessionReviewCommentHandler) SendToAgent(w http.ResponseWriter, r *http
 			"session_id": sessionID.String(),
 			"org_id":     orgID.String(),
 		}
-		if _, err := h.jobStore.Enqueue(r.Context(), orgID, "agent", "continue_session", payload, 5, &dedupeKey); err != nil {
+		if _, err := h.jobStore.EnqueueWithOpts(r.Context(), orgID, db.EnqueueOpts{
+			Queue:        "agent",
+			JobType:      "continue_session",
+			Payload:      payload,
+			Priority:     5,
+			DedupeKey:    &dedupeKey,
+			TargetNodeID: models.SessionWorkerTarget(&session),
+		}); err != nil {
 			// Delete the orphaned message and revert session status.
 			if msg.ID != 0 {
 				if delErr := h.messageStore.Delete(r.Context(), msg.ID); delErr != nil {

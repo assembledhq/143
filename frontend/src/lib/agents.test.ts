@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
-import { availableAgentModelGroups, pmUsableResolvedCredentials } from "./agents";
-import type { CodingAuth, ResolvedCredential, UserCredentialSummary } from "./types";
+import { agentDisplayLabel, availableAgentModelGroups, pmUsableResolvedCredentials } from "./agents";
+import type { CodingAuth, CodingCredentialSummary, ResolvedCredential, UserCredentialSummary } from "./types";
 
 const codexCred: ResolvedCredential = {
   provider: "openai",
@@ -30,6 +30,22 @@ const ampCodingAuth: CodingAuth = {
   updated_at: "2026-03-20T00:00:00Z",
 };
 
+const personalClaudeSubscription: CodingCredentialSummary = {
+  id: "cc-claude",
+  org_id: "org-1",
+  user_id: "user-1",
+  scope: "personal",
+  priority: 1,
+  agent: "claude_code",
+  auth_type: "subscription",
+  provider: "anthropic_subscription",
+  label: "Personal Claude",
+  status: "healthy",
+  is_default: true,
+  created_at: "2026-03-20T00:00:00Z",
+  updated_at: "2026-03-20T00:00:00Z",
+};
+
 describe("availableAgentModelGroups", () => {
   it("includes only the default agent when no creds resolve", () => {
     const groups = availableAgentModelGroups([], null, [], "codex");
@@ -45,6 +61,11 @@ describe("availableAgentModelGroups", () => {
     const groups = availableAgentModelGroups([], null, [ampCodingAuth], "codex");
     const amp = groups.find((g) => g.key === "amp");
     expect(amp?.label).toBe("Amp modes");
+  });
+
+  it("treats unified personal subscription rows as available for session agents", () => {
+    const groups = availableAgentModelGroups([], null, [personalClaudeSubscription], "codex");
+    expect(groups.map((g) => g.key)).toEqual(["codex", "claude_code"]);
   });
 
   it("orgAgentConfig surfaces agents whose API key is set even without user creds (PM scope)", () => {
@@ -80,6 +101,18 @@ describe("availableAgentModelGroups", () => {
       },
     );
     expect(groups.map((g) => g.key)).toEqual(["codex"]);
+  });
+});
+
+describe("agentDisplayLabel", () => {
+  it("returns the provider label for selectable agent types", () => {
+    expect(agentDisplayLabel("codex")).toBe("Codex");
+    expect(agentDisplayLabel("claude_code")).toBe("Claude Code");
+  });
+
+  it("falls back to display-only labels and then the raw key", () => {
+    expect(agentDisplayLabel("pm_agent")).toBe("PM Agent");
+    expect(agentDisplayLabel("unknown_agent")).toBe("unknown_agent");
   });
 });
 

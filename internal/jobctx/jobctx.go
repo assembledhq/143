@@ -15,6 +15,7 @@ type ctxKey int
 const (
 	hooksKey ctxKey = iota
 	lockTokenKey
+	deadTargetNodeKey
 )
 
 // DeadLetterHook runs synchronously on the worker's poll goroutine when
@@ -40,6 +41,15 @@ func WithLockToken(ctx context.Context, token uuid.UUID) context.Context {
 func LockTokenFromContext(ctx context.Context) (uuid.UUID, bool) {
 	token, ok := ctx.Value(lockTokenKey).(uuid.UUID)
 	return token, ok
+}
+
+func WithDeadTargetNode(ctx context.Context, nodeID string) context.Context {
+	return context.WithValue(ctx, deadTargetNodeKey, nodeID)
+}
+
+func DeadTargetNodeFromContext(ctx context.Context) (string, bool) {
+	nodeID, ok := ctx.Value(deadTargetNodeKey).(string)
+	return nodeID, ok && nodeID != ""
 }
 
 // RegisterDeadLetterHook queues a hook on the context's registry. When the

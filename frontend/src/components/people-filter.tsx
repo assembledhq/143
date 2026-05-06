@@ -1,15 +1,15 @@
 "use client";
 
-import { Check, ChevronDown, Users } from "lucide-react";
+import { ChevronDown, Users } from "lucide-react";
 import { useMemo, useState } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
   Command,
+  CommandCheckItem,
   CommandEmpty,
   CommandGroup,
   CommandInput,
-  CommandItem,
   CommandList,
 } from "@/components/ui/command";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
@@ -95,7 +95,7 @@ export function PeopleFilter({
     <div className={cn("min-w-0", className)}>
       <Popover open={open} onOpenChange={setOpen}>
         <PopoverTrigger asChild>
-          <Button variant="outline" size="sm" className="h-8 gap-1.5 bg-background min-w-0">
+          <Button variant="outline" className="bg-background min-w-0">
             <Users className="h-3.5 w-3.5 text-muted-foreground" />
             <span className="truncate">{label}</span>
             <ChevronDown className="h-3 w-3 text-muted-foreground" />
@@ -147,26 +147,20 @@ export function PeopleFilter({
                       : false;
 
                   return (
-                    <CommandItem
+                    <CommandCheckItem
                       key={member.id}
+                      checked={isChecked}
                       value={`${member.name} ${member.email}`}
                       onSelect={() => toggleMember(member.id)}
-                      className="flex items-center gap-2"
+                      className="flex items-center"
                     >
-                      <span className={cn(
-                        "flex h-4 w-4 items-center justify-center rounded-sm border border-border",
-                        isChecked && "bg-primary text-primary-foreground border-primary",
-                      )}
-                      >
-                        {isChecked && <Check className="h-3 w-3" />}
-                      </span>
                       <span className="min-w-0 flex-1 truncate text-sm">
                         {member.name}
                         {member.id === currentUser?.id && (
                           <span className="ml-1 text-xs text-muted-foreground">(you)</span>
                         )}
                       </span>
-                    </CommandItem>
+                    </CommandCheckItem>
                   );
                 })}
               </CommandGroup>

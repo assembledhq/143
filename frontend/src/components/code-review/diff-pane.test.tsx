@@ -111,10 +111,10 @@ describe("DiffPane", () => {
     expect(screen.getByTestId("file-b.ts")).toHaveAttribute("data-active", "true");
   });
 
-  it("marks only the matching file as active when activeFileIndex is set", () => {
+  it("keeps syntax highlighting enabled for every file when activeFileIndex is set", () => {
     const files = [makeDiffFile("a.ts"), makeDiffFile("b.ts")];
     render(<DiffPane files={files} viewMode="unified" activeFileIndex={1} />);
-    expect(screen.getByTestId("file-a.ts")).toHaveAttribute("data-active", "false");
+    expect(screen.getByTestId("file-a.ts")).toHaveAttribute("data-active", "true");
     expect(screen.getByTestId("file-b.ts")).toHaveAttribute("data-active", "true");
   });
 

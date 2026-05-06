@@ -20,6 +20,9 @@ func (testAdapterDefaultCancel) PreparePrompt(context.Context, *agent.AgentInput
 func (testAdapterDefaultCancel) Execute(context.Context, *agent.Sandbox, *agent.AgentPrompt, chan<- agent.LogEntry) (*agent.AgentResult, error) {
 	return nil, nil
 }
+func (testAdapterDefaultCancel) ResumeMode() agent.SessionResumeMode {
+	return agent.ResumeUnsupported
+}
 
 type testAdapterEscapeCancel struct{ testAdapterDefaultCancel }
 

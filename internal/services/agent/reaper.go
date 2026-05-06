@@ -36,17 +36,21 @@ type PreviewStopper interface {
 }
 
 // SessionReaper periodically cleans up stale sessions and expired snapshots
-// in six phases:
+// in seven phases:
 //   - Phase 0: Fail sessions stuck in pending for longer than maxPendingAge
 //   - Phase 0.5: Fail sessions stuck in running for longer than maxRunningAge
 //     (safety net for orphaned sessions when the worker handler timeout path
 //     didn't run, e.g. worker crash or DB write failure during failure handling)
+//   - Phase 0.5b: Fail threads stuck in running for longer than maxRunningAge
+//     (defense-in-depth above the orchestrator/handler thread.status resets,
+//     which can miss when ctx is cancelled by worker drain mid-shutdown)
 //   - Phase 1: Transition idle sessions to completed (keep snapshots)
 //   - Phase 2: Delete snapshots that have exceeded the max snapshot age
 //   - Phase 3: Close orphaned container usage events for billing accuracy
 //   - Phase 4: Roll up hourly usage data and clean up old rollup rows
 type SessionReaper struct {
 	sessions         StaleSessionLister
+	threads          StuckThreadLister // nil-safe — Phase 0.5b disabled if nil
 	snapshotStore    storage.SnapshotStore
 	orphanCloser     OrphanCloser   // nil-safe — billing orphan cleanup disabled if nil
 	usageRoller      UsageRoller    // nil-safe — usage rollup disabled if nil
@@ -73,6 +77,14 @@ type StaleSessionLister interface {
 	UpdateSandboxState(ctx context.Context, orgID, sessionID uuid.UUID, state string) error
 }
 
+// StuckThreadLister is the subset of the session-thread store used by the
+// reaper's Phase 0.5b. Wiring is optional via WithStuckThreadLister; when
+// unset, the reaper logs a startup notice and skips the phase.
+type StuckThreadLister interface {
+	ListStuckRunningThreads(ctx context.Context, startedBefore time.Time) ([]models.SessionThread, error)
+	UpdateResult(ctx context.Context, orgID, threadID uuid.UUID, status models.ThreadStatus, result *models.SessionResult) error
+}
+
 // SessionReaperOption configures optional SessionReaper dependencies.
 type SessionReaperOption func(*SessionReaper)
 
@@ -92,6 +104,15 @@ func WithUsageRoller(ur UsageRoller) SessionReaperOption {
 // leave behind an orphan container.
 func WithPreviewStopper(ps PreviewStopper) SessionReaperOption {
 	return func(r *SessionReaper) { r.previewStopper = ps }
+}
+
+// WithStuckThreadLister enables Phase 0.5b — failing threads stuck in
+// status='running' past maxRunningAge. Defense-in-depth above the
+// orchestrator/handler thread.status resets, which can miss when ctx is
+// cancelled by worker drain mid-shutdown. Without this option, the phase
+// is skipped (the session-level Phase 0.5 still runs).
+func WithStuckThreadLister(t StuckThreadLister) SessionReaperOption {
+	return func(r *SessionReaper) { r.threads = t }
 }
 
 // NewSessionReaper creates a reaper that runs every interval, cleaning up
@@ -173,6 +194,7 @@ func (r *SessionReaper) Run(ctx context.Context) {
 		Dur("max_running", r.maxRunningAge).
 		Dur("max_idle", r.maxIdleAge).
 		Dur("max_snapshot_age", r.maxSnapshotAge).
+		Bool("stuck_thread_phase_enabled", r.threads != nil).
 		Msg("session reaper started")
 
 	for {
@@ -195,6 +217,14 @@ const FailureCategoryStuckPending = "stuck_pending"
 // handler context timeout path didn't execute (crashed worker, DB write
 // failure during failure bookkeeping, or a new silent-failure code path).
 const FailureCategoryStuckRunning = "stuck_running"
+
+// FailureCategoryStuckThread is the failure category for threads stuck in
+// status='running' past maxRunningAge. Distinguished from StuckRunning so
+// alerts on the two phases can be tuned independently — a stuck thread is
+// usually traceable to a continue_session dead-letter that the orchestrator
+// or handler couldn't unwind, while a stuck session is usually a worker
+// crash mid-RunAgent.
+const FailureCategoryStuckThread = "stuck_thread"
 
 func (r *SessionReaper) reap(ctx context.Context) {
 	// Phase 0: Fail sessions stuck in pending with no active job.
@@ -273,6 +303,50 @@ func (r *SessionReaper) reap(ctx context.Context) {
 					Dur("elapsed", time.Since(*s.StartedAt))
 			}
 			event.Msg("reaper: failed stale running session — worker did not persist terminal status")
+		}
+	}
+
+	// Phase 0.5b: Fail threads stuck in status='running' past maxRunningAge.
+	// Defense-in-depth above the orchestrator/handler thread.status resets:
+	// when a continue_session job dead-letters during a rolling deploy, the
+	// orchestrator's revert and the handler's revert can both miss if their
+	// ctx was cancelled before the DB write landed. Without this phase, the
+	// thread row stays 'running' forever and the UI shows "Agent is working"
+	// next to "Session is not active" — exactly the orphan we hit in prod.
+	//
+	// Reuses maxRunningAge (~2h30m floor) because the cutoff is the same
+	// idea: any thread alive longer than the maximum legitimate turn cap
+	// has been orphaned. Logged at Warn (not Error) because in steady state
+	// after the orchestrator/handler patches we expect this phase to fire
+	// rarely; promote to Error in alerts if the rate gets noisy.
+	if r.threads != nil {
+		stuckThreads, err := r.threads.ListStuckRunningThreads(ctx, runningCutoff)
+		if err != nil {
+			r.logger.Error().Err(err).Msg("reaper: failed to list stuck running threads")
+		} else {
+			for _, t := range stuckThreads {
+				errMsg := fmt.Sprintf("thread stuck in running state for more than %s — no terminal status from worker", r.maxRunningAge)
+				result := &models.SessionResult{
+					Error:           strPtr(errMsg),
+					FailureCategory: strPtr(FailureCategoryStuckThread),
+				}
+				if err := r.threads.UpdateResult(ctx, t.OrgID, t.ID, models.ThreadStatusFailed, result); err != nil {
+					r.logger.Error().Err(err).
+						Str("thread_id", t.ID.String()).
+						Str("session_id", t.SessionID.String()).
+						Msg("reaper: failed to mark stuck running thread as failed")
+					continue
+				}
+				event := r.logger.Warn().
+					Str("thread_id", t.ID.String()).
+					Str("session_id", t.SessionID.String()).
+					Str("org_id", t.OrgID.String())
+				if t.StartedAt != nil {
+					event = event.Time("started_at", *t.StartedAt).
+						Dur("elapsed", time.Since(*t.StartedAt))
+				}
+				event.Msg("reaper: failed stuck running thread — orchestrator/handler did not reset thread status")
+			}
 		}
 	}
 

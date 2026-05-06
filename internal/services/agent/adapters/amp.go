@@ -34,6 +34,14 @@ func (a *AmpAdapter) Name() models.AgentType {
 	return models.AgentTypeAmp
 }
 
+// ResumeMode reports that Amp has no headless resume mechanism. Continuation
+// turns rely on the restored sandbox filesystem state. The session_id Amp
+// emits in its stream is captured for observability only and is never fed
+// back into the CLI.
+func (a *AmpAdapter) ResumeMode() agent.SessionResumeMode {
+	return agent.ResumeUnsupported
+}
+
 // PreparePrompt constructs the prompts for Amp based on the issue context.
 func (a *AmpAdapter) PreparePrompt(ctx context.Context, input *agent.AgentInput) (*agent.AgentPrompt, error) {
 	if input == nil {

@@ -12,6 +12,8 @@ import {
 } from "@/lib/model-constants";
 import type { CodexAuthStatus, CodingAuth, ResolvedCredential, UserCredentialSummary } from "@/lib/types";
 
+type CodingAuthAvailability = Pick<CodingAuth, "agent" | "status">;
+
 export interface AgentEnvVar {
   name: string;
   label: string;
@@ -136,6 +138,10 @@ export const AGENT_DISPLAY_LABELS: Readonly<Record<string, string>> = {
   custom: "Custom",
 };
 
+export function agentDisplayLabel(agentType: string): string {
+  return AGENTS_BY_KEY[agentType]?.label ?? AGENT_DISPLAY_LABELS[agentType] ?? agentType;
+}
+
 // Resolve the agent type key for a given model string.
 export function agentTypeForModel(model: string): string | undefined {
   return AGENTS.find((a) => a.models.includes(model))?.key;
@@ -167,7 +173,7 @@ export function isAgentAvailable(
   agentType: string,
   resolvedCredentials: readonly ResolvedCredential[],
   codexAuthStatus?: CodexAuthStatus | null,
-  codingAuths: readonly CodingAuth[] = [],
+  codingAuths: readonly CodingAuthAvailability[] = [],
 ): boolean {
   if (isAgentConnected(agentType, resolvedCredentials, codexAuthStatus)) return true;
   return codingAuths.some(
@@ -202,7 +208,7 @@ export interface AvailableAgentModelGroupsOptions {
 export function availableAgentModelGroups(
   resolvedCredentials: readonly ResolvedCredential[],
   codexAuthStatus: CodexAuthStatus | null | undefined,
-  codingAuths: readonly CodingAuth[],
+  codingAuths: readonly CodingAuthAvailability[],
   defaultAgentType: string,
   options: AvailableAgentModelGroupsOptions = {},
 ): AgentModelGroup[] {

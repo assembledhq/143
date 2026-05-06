@@ -1,10 +1,11 @@
 import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
 import { http, HttpResponse } from 'msw';
-import { renderWithProviders, screen, userEvent, waitFor, within } from '@/test/test-utils';
+import { fireEvent, renderWithProviders, screen, userEvent, waitFor, within } from '@/test/test-utils';
 import { act } from '@testing-library/react';
 import { server } from '@/test/mocks/server';
 import { mockSessions, mockMembers, mockIssues, mockPRHealth } from '@/test/mocks/handlers';
 import { SessionDetailContent } from './session-detail-content';
+import { api } from '@/lib/api';
 import type { Issue, Session, SessionMessage, SessionReviewComment, SessionThread, SessionTimelineEntry, User, SingleResponse, ListResponse } from '@/lib/types';
 
 const { toast } = vi.hoisted(() => ({
@@ -322,6 +323,8 @@ describe('SessionDetailPage', () => {
         status: 'idle',
         current_turn: 1,
         created_at: '2026-02-17T07:00:00Z',
+        cost_cents: 0,
+        pending_message_count: 0,
       },
       {
         id: 'thread-claude',
@@ -332,6 +335,8 @@ describe('SessionDetailPage', () => {
         status: 'running',
         current_turn: 1,
         created_at: '2026-02-17T07:01:00Z',
+        cost_cents: 0,
+        pending_message_count: 0,
       },
     ];
     const messagesByThread: Record<string, SessionMessage[]> = {
@@ -404,6 +409,8 @@ describe('SessionDetailPage', () => {
           status: 'idle',
           current_turn: 0,
           created_at: '2026-02-17T07:04:00Z',
+          cost_cents: 0,
+          pending_message_count: 0,
         };
         threads.push(thread);
         messagesByThread[thread.id] = [];
@@ -443,9 +450,9 @@ describe('SessionDetailPage', () => {
       expect(createdThread).toBe(true);
     });
     expect(await screen.findByRole('tab', { name: /Tests/ })).toBeInTheDocument();
-    expect(screen.getByPlaceholderText('Send a message to Tests...')).toBeInTheDocument();
+    expect(screen.getByPlaceholderText('Send a message to Codex...')).toBeInTheDocument();
 
-    await user.type(screen.getByPlaceholderText('Send a message to Tests...'), 'Run the frontend checks.');
+    await user.type(screen.getByPlaceholderText('Send a message to Codex...'), 'Run the frontend checks.');
     await user.click(screen.getByRole('button', { name: 'Send message' }));
 
     await waitFor(() => {
@@ -465,6 +472,8 @@ describe('SessionDetailPage', () => {
       status: 'running',
       current_turn: 1,
       created_at: '2026-02-17T07:00:00Z',
+      cost_cents: 0,
+      pending_message_count: 0,
     };
 
     server.use(
@@ -489,7 +498,7 @@ describe('SessionDetailPage', () => {
 
     renderWithProviders(<SessionDetailContent id={sessionId} />);
 
-    expect(await screen.findByRole('tab', { name: /Codex/ })).toBeInTheDocument();
+    expect(await screen.findByRole('group', { name: /Codex/ })).toBeInTheDocument();
     await waitFor(() => {
       expect(MockEventSource.instances.length).toBeGreaterThan(0);
     });
@@ -503,7 +512,7 @@ describe('SessionDetailPage', () => {
       });
     });
 
-    expect(screen.getByRole('tab', { name: /Codex/ })).toBeInTheDocument();
+    expect(screen.getByRole('group', { name: /Codex/ })).toBeInTheDocument();
   });
 
   it('does not hide vertical overflow on the detail tablist', async () => {
@@ -658,9 +667,7 @@ describe('SessionDetailPage', () => {
     renderWithProviders(<SessionDetailContent id={idleSession.id} />);
     expect(await screen.findByText('Fix the bug')).toBeInTheDocument();
     expect(screen.getByText('Done fixing')).toBeInTheDocument();
-    // Turn indicator shown in header and footer
-    const turnElements = screen.getAllByText(/Turn 2/);
-    expect(turnElements.length).toBeGreaterThanOrEqual(1);
+    expect(screen.queryByTestId('session-footer')).not.toBeInTheDocument();
   });
 
   it('suppresses duplicate final output log when timeline includes matching assistant transcript', async () => {
@@ -850,6 +857,146 @@ describe('SessionDetailPage', () => {
     expect(screen.queryByTestId('session-timeline-skeleton')).not.toBeInTheDocument();
   });
 
+  it('clears the skeleton and enables the composer on an idle thread while a sibling thread is running', async () => {
+    // Regression: in the user-reported scenario the session.status was
+    // "running" (because a sibling thread was running) while the selected
+    // thread was a freshly-created idle one. Two bugs combined: the skeleton
+    // never cleared (because `activeSet.has("running")` was truthy) and the
+    // composer was disabled by a leftover Phase 1 gate that required
+    // session.status !== "running". Phase 2 supports concurrent threads, so
+    // an idle thread must be sendable regardless of sibling activity.
+    const sessionId = 'session-running-sibling';
+    const threads: SessionThread[] = [
+      {
+        id: 'thread-main',
+        session_id: sessionId,
+        org_id: 'org-1',
+        agent_type: 'codex',
+        label: 'Main',
+        status: 'running',
+        current_turn: 1,
+        created_at: '2026-05-04T07:00:00Z',
+        cost_cents: 0,
+        pending_message_count: 0,
+      },
+      {
+        id: 'thread-codex2',
+        session_id: sessionId,
+        org_id: 'org-1',
+        agent_type: 'codex',
+        label: 'Codex 2',
+        status: 'idle',
+        current_turn: 0,
+        created_at: '2026-05-04T07:01:00Z',
+        cost_cents: 0,
+        pending_message_count: 0,
+      },
+    ];
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({
+          data: {
+            ...mockSessions[0],
+            id: sessionId,
+            status: 'running',
+            sandbox_state: 'ready',
+            threads,
+          },
+        } satisfies SingleResponse<Session & { threads: SessionThread[] }>);
+      }),
+      http.get('/api/v1/sessions/:id/threads/:threadId/messages', () => {
+        return HttpResponse.json({
+          data: [] as SessionMessage[],
+          meta: {},
+        } satisfies ListResponse<SessionMessage>);
+      }),
+      http.get('/api/v1/sessions/:id/threads/:threadId/logs', () => {
+        return HttpResponse.json({ data: [], meta: {} });
+      }),
+    );
+
+    const user = userEvent.setup();
+    renderWithProviders(<SessionDetailContent id={sessionId} />);
+
+    await user.click(await screen.findByRole('tab', { name: /Codex 2/ }));
+
+    await waitFor(() => {
+      expect(screen.queryByTestId('session-timeline-skeleton')).not.toBeInTheDocument();
+    });
+    const composer = screen.getByPlaceholderText('Send a message to Codex...');
+    expect(composer).toBeEnabled();
+  });
+
+  it('does not shimmer forever for a freshly-created idle thread', async () => {
+    // Regression: opening a brand-new secondary thread (idle, zero messages)
+    // on a session whose overall status was still in `activeSet`
+    // (e.g. "idle"/"running") used to keep the skeleton visible forever,
+    // because the skeleton condition consulted session.status instead of the
+    // selected thread's status. The skeleton must clear once the thread's
+    // data has loaded so the empty-state composer becomes reachable.
+    const sessionId = 'session-new-thread-skeleton';
+    const threads: SessionThread[] = [
+      {
+        id: 'thread-main',
+        session_id: sessionId,
+        org_id: 'org-1',
+        agent_type: 'codex',
+        label: 'Main',
+        status: 'idle',
+        current_turn: 1,
+        created_at: '2026-05-04T07:00:00Z',
+        cost_cents: 0,
+        pending_message_count: 0,
+      },
+      {
+        id: 'thread-codex2',
+        session_id: sessionId,
+        org_id: 'org-1',
+        agent_type: 'codex',
+        label: 'Codex 2',
+        status: 'idle',
+        current_turn: 0,
+        created_at: '2026-05-04T07:01:00Z',
+        cost_cents: 0,
+        pending_message_count: 0,
+      },
+    ];
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({
+          data: {
+            ...mockSessions[0],
+            id: sessionId,
+            status: 'idle',
+            sandbox_state: 'ready',
+            threads,
+          },
+        } satisfies SingleResponse<Session & { threads: SessionThread[] }>);
+      }),
+      http.get('/api/v1/sessions/:id/threads/:threadId/messages', () => {
+        return HttpResponse.json({
+          data: [] as SessionMessage[],
+          meta: {},
+        } satisfies ListResponse<SessionMessage>);
+      }),
+      http.get('/api/v1/sessions/:id/threads/:threadId/logs', () => {
+        return HttpResponse.json({ data: [], meta: {} });
+      }),
+    );
+
+    const user = userEvent.setup();
+    renderWithProviders(<SessionDetailContent id={sessionId} />);
+
+    await user.click(await screen.findByRole('tab', { name: /Codex 2/ }));
+
+    await waitFor(() => {
+      expect(screen.queryByTestId('session-timeline-skeleton')).not.toBeInTheDocument();
+    });
+    expect(screen.getByPlaceholderText('Send a message to Codex...')).toBeInTheDocument();
+  });
+
   it('restores the saved scroll position when reopening an existing session', async () => {
     const idleSession: Session = {
       ...mockSessions[0],
@@ -890,6 +1037,89 @@ describe('SessionDetailPage', () => {
 
     await waitFor(() => {
       expect(getChatScroller(container).scrollTop).toBe(320);
+    });
+  });
+
+  it('restores a thread-specific saved scroll position when switching tabs in a session', async () => {
+    const threadSession: Session = {
+      ...mockSessions[0],
+      id: 'session-thread-scroll-restore',
+      status: 'idle',
+      completed_at: undefined,
+      sandbox_state: 'snapshotted',
+      threads: [
+        {
+          id: 'thread-main',
+          session_id: 'session-thread-scroll-restore',
+          org_id: 'org-1',
+          agent_type: 'codex',
+          label: 'Main',
+          status: 'idle',
+          current_turn: 1,
+          created_at: '2026-02-17T07:00:00Z',
+          cost_cents: 0,
+          pending_message_count: 0,
+        },
+        {
+          id: 'thread-codex-2',
+          session_id: 'session-thread-scroll-restore',
+          org_id: 'org-1',
+          agent_type: 'codex',
+          label: 'Codex 2',
+          status: 'idle',
+          current_turn: 1,
+          created_at: '2026-02-17T07:03:00Z',
+          cost_cents: 0,
+          pending_message_count: 0,
+        },
+      ],
+    };
+
+    window.localStorage.setItem(`session-scroll-position:org-1:user-1:${threadSession.id}:thread-main`, JSON.stringify({ version: 1, scrollTop: 120 }));
+    window.localStorage.setItem(`session-scroll-position:org-1:user-1:${threadSession.id}:thread-codex-2`, JSON.stringify({ version: 1, scrollTop: 410 }));
+    vi.spyOn(HTMLElement.prototype, 'scrollHeight', 'get').mockReturnValue(900);
+    vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockReturnValue(200);
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({ data: threadSession } satisfies SingleResponse<Session>);
+      }),
+      http.get('/api/v1/sessions/:id/threads/:threadId/messages', ({ params }) => {
+        const assistantContent = params.threadId === 'thread-main' ? 'Main reply' : 'Codex 2 reply';
+        return HttpResponse.json({
+          data: [
+            {
+              id: params.threadId === 'thread-main' ? 1 : 2,
+              session_id: threadSession.id,
+              org_id: 'org-1',
+              thread_id: params.threadId as string,
+              turn_number: 1,
+              role: 'assistant',
+              content: assistantContent,
+              created_at: '2026-02-17T07:02:00Z',
+            },
+          ] as SessionMessage[],
+          meta: {},
+        } satisfies ListResponse<SessionMessage>);
+      }),
+      http.get('/api/v1/sessions/:id/threads/:threadId/logs', () => {
+        return HttpResponse.json({ data: [], meta: {} });
+      }),
+    );
+
+    const user = userEvent.setup();
+    const { container } = renderWithProviders(<SessionDetailContent id={threadSession.id} />);
+    await screen.findByText('Main reply');
+
+    await waitFor(() => {
+      expect(getChatScroller(container).scrollTop).toBe(120);
+    });
+
+    await user.click(screen.getByRole('tab', { name: /Codex 2/ }));
+    await screen.findByText('Codex 2 reply');
+
+    await waitFor(() => {
+      expect(getChatScroller(container).scrollTop).toBe(410);
     });
   });
 
@@ -1180,10 +1410,13 @@ describe('SessionDetailPage', () => {
     renderWithProviders(<SessionDetailContent id={runningSession.id} />);
 
     expect(await screen.findByText('Agent is working...')).toBeInTheDocument();
-    expect(MockEventSource.instances).toHaveLength(1);
+    const sessionStream = MockEventSource.instances.find((instance) =>
+      instance.url.includes(`/api/v1/sessions/${runningSession.id}/logs/stream`),
+    );
+    expect(sessionStream).toBeDefined();
 
     await act(async () => {
-      MockEventSource.instances[0].onmessage?.(
+      sessionStream?.onmessage?.(
         new MessageEvent('message', {
           data: JSON.stringify({
             id: 501,
@@ -3281,20 +3514,40 @@ describe('SessionDetailPage', () => {
       failure_explanation: 'Codex token expired',
       agent_type: 'codex',
     };
+    let statusScope: string | null = null;
+    let initiateBody: Record<string, unknown> | null = null;
 
     server.use(
       http.get('/api/v1/sessions/:id', () => {
         return HttpResponse.json({ data: codexAuthSession } satisfies SingleResponse<Session>);
       }),
-      http.get('/api/v1/settings/codex-auth/status', () => {
+      http.get('/api/v1/settings/codex-auth/status', ({ request }) => {
+        statusScope = new URL(request.url).searchParams.get('scope');
         return HttpResponse.json({ data: { status: 'none' } });
+      }),
+      http.post('/api/v1/settings/codex-auth/initiate', async ({ request }) => {
+        initiateBody = await request.json() as Record<string, unknown>;
+        return HttpResponse.json({
+          data: {
+            user_code: 'TEST-CODE',
+            verification_uri: 'https://auth.openai.com/codex/device',
+            expires_in: 900,
+          },
+        });
       }),
     );
 
     renderWithProviders(<SessionDetailContent id="session-98765432-abcd-ef01" />);
     await screen.findByText('Failure details');
     expect(screen.getByText('codex_auth_expired')).toBeInTheDocument();
-    expect(screen.getByText('Re-authenticate with ChatGPT')).toBeInTheDocument();
+    await waitFor(() => {
+      expect(statusScope).toBe('personal');
+    });
+    const user = userEvent.setup();
+    await user.click(screen.getByText('Re-authenticate with ChatGPT'));
+    await waitFor(() => {
+      expect(initiateBody).toMatchObject({ scope: 'personal' });
+    });
     // Should NOT show failure_next_steps for codex auth failures
     expect(screen.queryByText('Next steps')).not.toBeInTheDocument();
   });
@@ -3311,7 +3564,8 @@ describe('SessionDetailPage', () => {
       http.get('/api/v1/sessions/:id', () => {
         return HttpResponse.json({ data: codexAuthSession } satisfies SingleResponse<Session>);
       }),
-      http.get('/api/v1/settings/codex-auth/status', () => {
+      http.get('/api/v1/settings/codex-auth/status', ({ request }) => {
+        expect(new URL(request.url).searchParams.get('scope')).toBe('personal');
         return HttpResponse.json({ data: { status: 'completed' } });
       }),
     );
@@ -3575,6 +3829,200 @@ describe('SessionDetailPage', () => {
     await waitFor(() => {
       expect(messageSent).toBe(true);
     });
+  });
+
+  it('renders a follow-up message in the transcript immediately before the backend responds', async () => {
+    const idleSession: Session = {
+      ...mockSessions[0],
+      status: 'idle',
+      completed_at: undefined,
+      current_turn: 1,
+      sandbox_state: 'snapshotted',
+    };
+    let releaseResponse!: () => void;
+    const responseReleased = new Promise<void>((resolve) => {
+      releaseResponse = resolve;
+    });
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({ data: idleSession } satisfies SingleResponse<Session>);
+      }),
+      http.post('/api/v1/sessions/:id/messages', async ({ request }) => {
+        const body = await request.json() as { message: string };
+        await responseReleased;
+        return HttpResponse.json({
+          data: {
+            id: 99,
+            session_id: idleSession.id,
+            org_id: 'org-1',
+            user_id: 'user-1',
+            turn_number: 2,
+            role: 'user' as const,
+            content: body.message,
+            created_at: '2026-02-17T07:10:00Z',
+          },
+        } satisfies SingleResponse<SessionMessage>);
+      }),
+    );
+
+    const user = userEvent.setup();
+    renderWithProviders(<SessionDetailContent id={idleSession.id} />);
+
+    const textarea = await screen.findByPlaceholderText('Send a follow-up message...');
+    await user.type(textarea, 'Show this immediately');
+    await user.keyboard('{Enter}');
+
+    expect(await screen.findByText('Show this immediately')).toBeInTheDocument();
+    expect(textarea).toHaveValue('');
+
+    releaseResponse();
+
+    await waitFor(() => {
+      expect(screen.getByText('Show this immediately')).toBeInTheDocument();
+    });
+  });
+
+  it('does not double-render a follow-up when the timeline poll sees the real message before POST resolves', async () => {
+    const idleSession: Session = {
+      ...mockSessions[0],
+      status: 'idle',
+      completed_at: undefined,
+      current_turn: 1,
+      sandbox_state: 'snapshotted',
+    };
+    let timelineEntries: SessionTimelineEntry[] = [];
+    let timelineFetchCount = 0;
+    let releaseResponse!: () => void;
+    const responseReleased = new Promise<void>((resolve) => {
+      releaseResponse = resolve;
+    });
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({ data: idleSession } satisfies SingleResponse<Session>);
+      }),
+      http.get('/api/v1/sessions/:id/timeline', () => {
+        timelineFetchCount += 1;
+        return HttpResponse.json({
+          data: timelineEntries,
+          meta: {},
+        } satisfies ListResponse<SessionTimelineEntry>);
+      }),
+      http.post('/api/v1/sessions/:id/messages', async ({ request }) => {
+        const body = await request.json() as { message: string };
+        const realMessage: SessionMessage = {
+          id: 99,
+          session_id: idleSession.id,
+          org_id: 'org-1',
+          user_id: 'user-1',
+          turn_number: 2,
+          role: 'user',
+          content: body.message,
+          created_at: '2026-02-17T07:10:00Z',
+        };
+        timelineEntries = [
+          {
+            kind: 'message',
+            created_at: '2026-02-17T07:10:00Z',
+            message: realMessage,
+          },
+        ];
+        await responseReleased;
+        return HttpResponse.json({
+          data: realMessage,
+        } satisfies SingleResponse<SessionMessage>);
+      }),
+    );
+
+    const user = userEvent.setup();
+    renderWithProviders(<SessionDetailContent id={idleSession.id} />);
+
+    const textarea = await screen.findByPlaceholderText('Send a follow-up message...');
+    await user.type(textarea, 'Show once');
+    await user.keyboard('{Enter}');
+
+    expect(await screen.findByText('Show once')).toBeInTheDocument();
+
+    await waitFor(() => {
+      expect(timelineFetchCount).toBeGreaterThanOrEqual(2);
+    }, { timeout: 4500 });
+
+    expect(screen.getAllByText('Show once')).toHaveLength(1);
+
+    releaseResponse();
+  });
+
+  it('treats an optimistic plan-mode follow-up as a plan turn for streamed output', async () => {
+    const idleSession: Session = {
+      ...mockSessions[0],
+      agent_type: 'claude_code',
+      status: 'idle',
+      completed_at: undefined,
+      current_turn: 1,
+      sandbox_state: 'snapshotted',
+    };
+    let releaseResponse!: () => void;
+    const responseReleased = new Promise<void>((resolve) => {
+      releaseResponse = resolve;
+    });
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({ data: idleSession } satisfies SingleResponse<Session>);
+      }),
+      http.post('/api/v1/sessions/:id/messages', async ({ request }) => {
+        const body = await request.json() as { message: string; plan_mode?: boolean };
+        await responseReleased;
+        return HttpResponse.json({
+          data: {
+            id: 100,
+            session_id: idleSession.id,
+            org_id: 'org-1',
+            user_id: 'user-1',
+            turn_number: 2,
+            role: 'user' as const,
+            content: body.plan_mode ? `[PLAN_MODE]\n${body.message}` : body.message,
+            created_at: '2026-02-17T07:10:00Z',
+          },
+        } satisfies SingleResponse<SessionMessage>);
+      }),
+    );
+
+    const user = userEvent.setup();
+    renderWithProviders(<SessionDetailContent id={idleSession.id} />);
+
+    const textarea = await screen.findByPlaceholderText('Send a follow-up message...');
+    await user.click(screen.getByTitle('Switch to plan mode (Shift+Tab)'));
+    await user.type(screen.getByPlaceholderText('Describe what you want to plan...'), 'Plan this change');
+    await user.keyboard('{Enter}');
+
+    const sessionStream = MockEventSource.instances.find((instance) =>
+      instance.url.includes(`/api/v1/sessions/${idleSession.id}/logs/stream`),
+    );
+    expect(sessionStream).toBeDefined();
+
+    await act(async () => {
+      sessionStream?.onmessage?.(
+        new MessageEvent('message', {
+          data: JSON.stringify({
+            id: 501,
+            session_id: idleSession.id,
+            level: 'output',
+            message: 'Plan step 1',
+            metadata: null,
+            turn_number: 2,
+            created_at: '2026-02-17T07:10:30Z',
+          }),
+        }),
+      );
+    });
+
+    expect(await screen.findByText('Implementation Plan')).toBeInTheDocument();
+    expect(screen.getByText('Plan step 1')).toBeInTheDocument();
+    expect(textarea).toHaveValue('');
+
+    releaseResponse();
   });
 
   it('clears attached review comments after sending them to the agent', async () => {
@@ -4034,6 +4482,45 @@ describe('SessionDetailPage', () => {
     await screen.findByPlaceholderText('Send a follow-up message...');
     expect(screen.getByTitle('Add files, photos, or a Linear issue')).toBeInTheDocument();
     expect(screen.getByTitle('Add files, photos, or a Linear issue')).not.toBeDisabled();
+  });
+
+  it('uploads an image pasted into the follow-up prompt and shows it in the attachment strip', async () => {
+    const idleSession: Session = {
+      ...mockSessions[0],
+      status: 'idle',
+      completed_at: undefined,
+      current_turn: 1,
+      sandbox_state: 'snapshotted',
+    };
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({ data: idleSession } satisfies SingleResponse<Session>);
+      }),
+    );
+
+    const uploadSpy = vi.spyOn(api.uploads, 'upload').mockResolvedValue({
+      url: 'https://example.com/pasted-follow-up.png',
+      file_name: 'pasted-follow-up.png',
+      content_type: 'image/png',
+    });
+
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+    const textarea = await screen.findByPlaceholderText('Send a follow-up message...');
+    const file = new File(['image-bytes'], 'pasted-follow-up.png', { type: 'image/png' });
+
+    fireEvent.paste(textarea, {
+      clipboardData: {
+        files: [file],
+        items: [{ kind: 'file', type: 'image/png', getAsFile: () => file }],
+        types: ['Files'],
+      },
+    });
+
+    await waitFor(() => {
+      expect(uploadSpy).toHaveBeenCalledWith(file);
+    });
+    expect(await screen.findByRole('button', { name: 'Preview pasted-follow-up.png' })).toBeInTheDocument();
   });
 
   it('shows Codex agent type label', async () => {
@@ -4736,6 +5223,143 @@ describe('SessionDetailPage', () => {
     expect(await screen.findByText(/Review 2 files/)).toBeInTheDocument();
   });
 
+  it('keeps the review diff file set aligned with the Changes tab attribution filter', async () => {
+    const sessionId = 'session-abcdef12-3456-7890';
+    const codexThread: SessionThread = {
+      id: 'thread-codex',
+      session_id: sessionId,
+      org_id: 'org-1',
+      agent_type: 'codex',
+      label: 'Codex',
+      status: 'completed',
+      current_turn: 1,
+      created_at: '2026-02-17T07:00:00Z',
+      cost_cents: 0,
+      pending_message_count: 0,
+    };
+    const claudeThread: SessionThread = {
+      id: 'thread-claude',
+      session_id: sessionId,
+      org_id: 'org-1',
+      agent_type: 'claude_code',
+      label: 'Claude review',
+      status: 'completed',
+      current_turn: 1,
+      created_at: '2026-02-17T07:01:00Z',
+      cost_cents: 0,
+      pending_message_count: 0,
+    };
+    const sessionWithThreadsAndDiff: Session = {
+      ...mockSessions[0],
+      id: sessionId,
+      threads: [codexThread, claudeThread],
+      diff: [
+        'diff --git a/frontend/src/app.ts b/frontend/src/app.ts',
+        '--- a/frontend/src/app.ts',
+        '+++ b/frontend/src/app.ts',
+        '@@ -1 +1,2 @@',
+        ' export const app = true;',
+        '+export const codex = true;',
+        'diff --git a/frontend/src/lib/helpers.ts b/frontend/src/lib/helpers.ts',
+        '--- a/frontend/src/lib/helpers.ts',
+        '+++ b/frontend/src/lib/helpers.ts',
+        '@@ -1 +1,2 @@',
+        ' export const helper = true;',
+        '+export const shared = true;',
+        'diff --git a/frontend/src/components/automation-model-select.tsx b/frontend/src/components/automation-model-select.tsx',
+        '--- a/frontend/src/components/automation-model-select.tsx',
+        '+++ b/frontend/src/components/automation-model-select.tsx',
+        '@@ -1 +1,2 @@',
+        ' export function AutomationModelSelect() {',
+        '+  return null;',
+        ' }',
+      ].join('\n'),
+      diff_stats: { added: 3, removed: 0, files_changed: 3 },
+    };
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({
+          data: sessionWithThreadsAndDiff,
+        } satisfies SingleResponse<Session>);
+      }),
+      http.get('/api/v1/sessions/:id/thread-file-events', () => {
+        return HttpResponse.json({
+          data: [
+            {
+              id: 1,
+              org_id: 'org-1',
+              session_id: sessionId,
+              thread_id: codexThread.id,
+              turn: 1,
+              path: 'frontend/src/app.ts',
+              event_type: 'modified',
+              observed_at: '2026-02-17T07:02:00Z',
+            },
+            {
+              id: 2,
+              org_id: 'org-1',
+              session_id: sessionId,
+              thread_id: codexThread.id,
+              turn: 1,
+              path: 'frontend/src/lib/helpers.ts',
+              event_type: 'modified',
+              observed_at: '2026-02-17T07:02:30Z',
+            },
+            {
+              id: 3,
+              org_id: 'org-1',
+              session_id: sessionId,
+              thread_id: claudeThread.id,
+              turn: 1,
+              path: 'frontend/src/lib/helpers.ts',
+              event_type: 'modified',
+              observed_at: '2026-02-17T07:03:00Z',
+            },
+            {
+              id: 4,
+              org_id: 'org-1',
+              session_id: sessionId,
+              thread_id: claudeThread.id,
+              turn: 1,
+              path: 'frontend/src/components/automation-model-select.tsx',
+              event_type: 'modified',
+              observed_at: '2026-02-17T07:03:30Z',
+            },
+          ],
+          meta: {},
+        } satisfies ListResponse<import('@/lib/types').SessionThreadFileEvent>);
+      }),
+      http.get('/api/v1/sessions/:id/threads/:threadId/messages', () => {
+        return HttpResponse.json({ data: [] as SessionMessage[], meta: {} } satisfies ListResponse<SessionMessage>);
+      }),
+      http.get('/api/v1/sessions/:id/threads/:threadId/logs', () => {
+        return HttpResponse.json({ data: [], meta: {} });
+      }),
+    );
+
+    const user = userEvent.setup();
+    renderWithProviders(<SessionDetailContent id={sessionId} />);
+
+    await screen.findAllByText('Fixed TypeError by adding null check');
+    await user.click(screen.getByRole('tab', { name: /^Changes/ }));
+
+    const changesPanel = screen.getByRole('tabpanel', { name: /^Changes/ });
+    await user.click(within(changesPanel).getByRole('combobox'));
+    await user.click(await screen.findByRole('option', { name: 'Touched by Codex' }));
+
+    expect(await screen.findByText('Review 2 files')).toBeInTheDocument();
+    expect(screen.queryByText(/^automation-model-select\.tsx$/)).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: 'Review 2 files' }));
+
+    expect(await screen.findByText('frontend/src/app.ts')).toBeInTheDocument();
+    expect(screen.getByText('frontend/src/lib/helpers.ts')).toBeInTheDocument();
+    expect(
+      screen.queryByText('frontend/src/components/automation-model-select.tsx')
+    ).not.toBeInTheDocument();
+  });
+
   it('shows model selector for agents with available models', async () => {
     const idleSession: Session = {
       ...mockSessions[0],
@@ -4786,6 +5410,64 @@ describe('SessionDetailPage', () => {
 
     expect(await screen.findByRole('dialog', { name: 'Session settings' })).toBeInTheDocument();
     expect(screen.getByLabelText('Model override')).toBeInTheDocument();
+  });
+
+  it('does not render the session footer on mobile conversation view', async () => {
+    const idleSession: Session = {
+      ...mockSessions[0],
+      status: 'idle',
+      completed_at: undefined,
+      current_turn: 3,
+      sandbox_state: 'snapshotted',
+      diff: 'diff --git a/src/app.ts b/src/app.ts\n--- a/src/app.ts\n+++ b/src/app.ts\n@@ -1,3 +1,4 @@\n import express from "express";\n+import cors from "cors";\n const app = express();\n app.listen(3000);',
+      diff_stats: { added: 1, removed: 0, files_changed: 1 },
+    };
+
+    setMobileViewport(true);
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({ data: idleSession } satisfies SingleResponse<Session>);
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id="session-mobile-footer-hidden" />);
+    await screen.findByPlaceholderText('Send a follow-up message...');
+
+    expect(screen.queryByTestId('session-footer')).not.toBeInTheDocument();
+  });
+
+  it('keeps the mobile follow-up textarea collapsed until focused', async () => {
+    const idleSession: Session = {
+      ...mockSessions[0],
+      status: 'idle',
+      completed_at: undefined,
+      current_turn: 1,
+      sandbox_state: 'snapshotted',
+    };
+
+    setMobileViewport(true);
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({ data: idleSession } satisfies SingleResponse<Session>);
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id="session-mobile-composer-height" />);
+    const textarea = await screen.findByPlaceholderText('Send a follow-up message...');
+
+    expect(textarea).toHaveAttribute('data-mobile-composer-state', 'collapsed');
+    expect(textarea).toHaveAttribute('rows', '1');
+
+    const user = userEvent.setup();
+    await user.click(textarea);
+
+    expect(textarea).toHaveAttribute('data-mobile-composer-state', 'expanded');
+
+    fireEvent.blur(textarea);
+
+    await waitFor(() => {
+      expect(textarea).toHaveAttribute('data-mobile-composer-state', 'collapsed');
+    });
   });
 
   it('matches both trigger menus to the continue-session input width', async () => {
@@ -5032,7 +5714,7 @@ describe('SessionDetailPage', () => {
     });
   });
 
-  it('renders SessionFooter with turn number for multi-turn session', async () => {
+  it('does not render the session footer for multi-turn sessions', async () => {
     const idleSession: Session = {
       ...mockSessions[0],
       status: 'idle',
@@ -5051,9 +5733,7 @@ describe('SessionDetailPage', () => {
 
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
     await screen.findByPlaceholderText('Send a follow-up message...');
-    // Turn indicator and diff stats should appear in footer
-    const turnElements = screen.getAllByText(/Turn 3/);
-    expect(turnElements.length).toBeGreaterThanOrEqual(1);
+    expect(screen.queryByTestId('session-footer')).not.toBeInTheDocument();
   });
 
   it('shows Shift+Tab toggle for plan mode in claude_code session', async () => {

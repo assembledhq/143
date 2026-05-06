@@ -47,6 +47,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { BranchPicker } from "@/components/branch-picker";
 import { LinearIcon } from "@/components/linear-icon";
 import { looksLikeLinearRef } from "@/lib/linear-refs";
+import { getClipboardFiles } from "@/lib/clipboard-files";
 import { PendingAttachmentStrip } from "@/components/pending-attachment-strip";
 import {
   SessionComposerTriggerPicker,
@@ -102,11 +103,39 @@ import type {
 
 const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10 MB
 const DRAFT_SAVE_DEBOUNCE_MS = 400;
+const DEFAULT_MANUAL_SESSION_TITLE = "Manual Session";
 const triggerPickerIconClassName = "h-4 w-4 shrink-0";
 const directoryTriggerIcon = <FolderTree className={triggerPickerIconClassName} />;
 const fileTriggerIcon = <FileCode2 className={triggerPickerIconClassName} />;
 
 type ComposerPickerPosition = TriggerPickerPosition;
+
+function isDetachedReference(reference: SessionInputReference): boolean {
+  return reference.kind === "app" || reference.kind === "plugin";
+}
+
+function syncComposerReferences(text: string, references: SessionInputReference[]): SessionInputReference[] {
+  const inlineReferences = references.filter((reference) => !isDetachedReference(reference));
+  const detachedReferences = references.filter((reference) => isDetachedReference(reference));
+  return [...syncReferencesWithMessage(text, inlineReferences), ...detachedReferences];
+}
+
+function linearReferenceFromInput(input: string): SessionInputReference {
+  const trimmed = input.trim();
+  const keyMatch = trimmed.match(/([A-Z][A-Z0-9_]{0,9}-[0-9]+)/);
+  const identifier = keyMatch?.[1] ?? trimmed;
+
+  return {
+    kind: "app",
+    id: identifier,
+    display: identifier,
+    ...(trimmed !== identifier ? { token: trimmed } : {}),
+  };
+}
+
+function referenceCarriesLinearRef(reference: SessionInputReference): boolean {
+  return looksLikeLinearRef(reference.token ?? reference.id ?? reference.display);
+}
 
 export interface ManualSessionComposerProps {
   /** Called with the new session id once create succeeds. Caller decides routing. */
@@ -129,6 +158,8 @@ export interface ManualSessionComposerProps {
   textareaClassName?: string;
   /** Placeholder for the textarea. Defaults to "Tell the agent what to do..." */
   placeholder?: string;
+  /** Accessible label for the textarea. Defaults to "Session prompt". */
+  textareaAriaLabel?: string;
   /** Show the live drop indicator pill inside the dropzone. Page only. */
   showDropIndicator?: boolean;
   /** Test id placed on the outer drop-target div. */
@@ -146,6 +177,7 @@ export function ManualSessionComposer({
   heroSlot,
   textareaClassName,
   placeholder = "Tell the agent what to do...",
+  textareaAriaLabel = "Session prompt",
   showDropIndicator = false,
   dataTestId,
 }: ManualSessionComposerProps) {
@@ -241,12 +273,14 @@ export function ManualSessionComposer({
 
       const draftProjectCommands = projectCommandsOnly(draft.commands);
       if (repoConflict) {
-        const strippedReferences = draft.references.reduce(
+        const inlineDraftReferences = draft.references.filter((reference) => !isDetachedReference(reference));
+        const detachedDraftReferences = draft.references.filter((reference) => isDetachedReference(reference));
+        const strippedReferences = inlineDraftReferences.reduce(
           (text, reference) => removeMentionReference(text, reference),
           draft.message,
         );
         setMessage(removeCommandsFromMessage(strippedReferences, draftProjectCommands));
-        setReferences([]);
+        setReferences(detachedDraftReferences);
         setCommands(draft.commands.filter((command) => command.source !== "project"));
       } else {
         setMessage(draft.message);
@@ -361,6 +395,14 @@ export function ManualSessionComposer({
     queryFn: () => api.repositories.list(),
   });
   const repositories = useMemo(() => reposResponse?.data ?? [], [reposResponse]);
+  const { data: integrationsResponse } = useQuery({
+    queryKey: ["integrations"],
+    queryFn: () => api.integrations.list(),
+  });
+  const linearIntegrated = useMemo(
+    () => (integrationsResponse?.data ?? []).some((integration) => integration.provider === "linear" && integration.status === "active"),
+    [integrationsResponse],
+  );
 
   // Drop a hydrated repo id (from the draft or the `?repo=` URL param) if the
   // repos query has resolved and the id isn't in the list — repo was deleted,
@@ -536,6 +578,13 @@ export function ManualSessionComposer({
     [commands, effectiveAgentType],
   );
   const hasInvalidCommands = invalidCommandTokens.length > 0;
+  const hasSubmittableInput = useMemo(
+    () =>
+      message.trim().length > 0 ||
+      attachments.length > 0 ||
+      references.some((reference) => referenceCarriesLinearRef(reference)),
+    [attachments, message, references],
+  );
 
   const createManualSessionMutation = useMutation({
     mutationFn: () =>
@@ -551,9 +600,13 @@ export function ManualSessionComposer({
       }),
     onMutate: () => {
       setCreationError(null);
-      const title = message.trim().length > 80
-        ? message.trim().slice(0, 80) + "..."
-        : message.trim();
+      const rawTitle = message.trim().length > 0
+        ? message.trim()
+        : references.find((reference) => referenceCarriesLinearRef(reference))?.display ?? "";
+      const optimisticTitle = rawTitle || DEFAULT_MANUAL_SESSION_TITLE;
+      const title = optimisticTitle.length > 80
+        ? optimisticTitle.slice(0, 80) + "..."
+        : optimisticTitle;
       return { optimisticId: addOptimisticSession(title) };
     },
     onSuccess: (response, _variables, context) => {
@@ -581,7 +634,7 @@ export function ManualSessionComposer({
 
   function submitManualSession() {
     if (submittingRef.current) return;
-    if (message.trim().length === 0) return;
+    if (!hasSubmittableInput) return;
     if (hasInvalidCommands) return;
     submittingRef.current = true;
     createManualSessionMutation.mutate();
@@ -634,10 +687,12 @@ export function ManualSessionComposer({
     }
     previousRepoIdRef.current = selectedRepoId;
     setMessage((previous) => {
-      const withoutReferences = references.reduce((next, reference) => removeMentionReference(next, reference), previous);
+      const withoutReferences = references
+        .filter((reference) => !isDetachedReference(reference))
+        .reduce((next, reference) => removeMentionReference(next, reference), previous);
       return removeCommandsFromMessage(withoutReferences, projectCommandsOnly(commands));
     });
-    setReferences([]);
+    setReferences((previous) => previous.filter((reference) => isDetachedReference(reference)));
     setCommands((previous) => previous.filter((command) => command.source !== "project"));
   }, [commands, references, selectedRepoId]);
 
@@ -688,7 +743,7 @@ export function ManualSessionComposer({
 
   function updateMessage(nextMessage: string, nextCaret: number) {
     setMessage(nextMessage);
-    setReferences((previous) => syncReferencesWithMessage(nextMessage, previous));
+    setReferences((previous) => syncComposerReferences(nextMessage, previous));
     setCommands((previous) => syncCommandsWithMessage(nextMessage, previous));
     setCaretPosition(nextCaret);
   }
@@ -703,9 +758,9 @@ export function ManualSessionComposer({
     setReferences((previous) => {
       const existing = previous.find((item) => (item.token ?? item.display) === (reference.token ?? reference.display));
       if (existing) {
-        return syncReferencesWithMessage(inserted.text, previous);
+        return syncComposerReferences(inserted.text, previous);
       }
-      return syncReferencesWithMessage(inserted.text, [...previous, reference]);
+      return syncComposerReferences(inserted.text, [...previous, reference]);
     });
     setCaretPosition(inserted.caret);
     setTriggerDismissed(false);
@@ -745,7 +800,7 @@ export function ManualSessionComposer({
   }
 
   function removeReference(reference: SessionInputReference) {
-    const nextMessage = removeMentionReference(message, reference);
+    const nextMessage = isDetachedReference(reference) ? message : removeMentionReference(message, reference);
     setMessage(nextMessage);
     setReferences((previous) => previous.filter((item) => (item.token ?? item.display) !== (reference.token ?? reference.display)));
     setCaretPosition(nextMessage.length);
@@ -869,6 +924,19 @@ export function ManualSessionComposer({
     });
   }
 
+  async function handlePaste(event: React.ClipboardEvent<HTMLTextAreaElement>) {
+    const files = getClipboardFiles(event.clipboardData);
+    if (files.length === 0) {
+      return;
+    }
+
+    event.preventDefault();
+    await uploadFiles(files);
+    requestAnimationFrame(() => {
+      messageInputRef.current?.focus();
+    });
+  }
+
   function addImageURL() {
     const trimmed = imageURL.trim();
     if (!trimmed) {
@@ -891,16 +959,13 @@ export function ManualSessionComposer({
       setLinearInputError("Enter a Linear URL (https://linear.app/...) or key like ACS-1234");
       return;
     }
-    // Append the URL or identifier to the message body. The Linear linker on
-    // the backend (ResolveAndLinkAtCreate) scans the message text for both
-    // linear.app URLs and bare identifiers like ACS-1234, so passing the
-    // user's input through verbatim is enough to wire the issue up.
-    setMessage((previous) => {
-      if (previous.length === 0) {
-        return trimmed;
+    const reference = linearReferenceFromInput(trimmed);
+    setReferences((previous) => {
+      const alreadyLinked = previous.some((item) => item.kind === reference.kind && item.id === reference.id);
+      if (alreadyLinked) {
+        return previous;
       }
-      const separator = previous.endsWith("\n") ? "" : previous.endsWith(" ") ? "" : " ";
-      return `${previous}${separator}${trimmed}`;
+      return [...previous, reference];
     });
     setLinearInput("");
     setLinearInputError(null);
@@ -1100,6 +1165,7 @@ export function ManualSessionComposer({
                 onChange={(event) => {
                   updateMessage(event.target.value, event.target.selectionStart ?? event.target.value.length);
                 }}
+                onPaste={handlePaste}
                 onBlur={flushDraftSave}
                 onClick={(event) => setCaretPosition(event.currentTarget.selectionStart ?? message.length)}
                 onKeyUp={(event) => setCaretPosition(event.currentTarget.selectionStart ?? message.length)}
@@ -1145,7 +1211,7 @@ export function ManualSessionComposer({
                   "min-h-[44px] resize-none border-none bg-transparent px-0 py-2 shadow-none placeholder:text-muted-foreground/60 focus-visible:ring-0 disabled:opacity-60 disabled:cursor-not-allowed",
                   textareaClassName,
                 )}
-                aria-label="Session prompt"
+                aria-label={textareaAriaLabel}
               />
 
               {(references.length > 0 || commands.length > 0) && (
@@ -1156,7 +1222,11 @@ export function ManualSessionComposer({
                       variant="secondary"
                       className="gap-1 rounded-full border-border/60 bg-muted/60 pl-2 pr-1"
                     >
-                      {reference.kind === "directory" ? <FolderTree className="h-3 w-3" /> : <FileCode2 className="h-3 w-3" />}
+                      {reference.kind === "directory"
+                        ? <FolderTree className="h-3 w-3" />
+                        : reference.kind === "app" && referenceCarriesLinearRef(reference)
+                          ? <LinearIcon className="h-3 w-3" />
+                          : <FileCode2 className="h-3 w-3" />}
                       <span className="max-w-[18rem] truncate">{reference.display}</span>
                       <Button
                         type="button"
@@ -1287,10 +1357,12 @@ export function ManualSessionComposer({
                             <LinkIcon data-testid="add-image-url-link-icon" className="mr-2 h-4 w-4" />
                             Add image URL
                           </DropdownMenuItem>
-                          <DropdownMenuItem onClick={() => setShowLinearInput(true)}>
-                            <LinearIcon className="mr-2 h-4 w-4" />
-                            Link Linear issue
-                          </DropdownMenuItem>
+                          {linearIntegrated ? (
+                            <DropdownMenuItem onClick={() => setShowLinearInput(true)}>
+                              <LinearIcon className="mr-2 h-4 w-4" />
+                              Add linear issue
+                            </DropdownMenuItem>
+                          ) : null}
                         </DropdownMenuContent>
                       </DropdownMenu>
                       <Button
@@ -1308,7 +1380,7 @@ export function ManualSessionComposer({
                         type="button"
                         size="icon"
                         onClick={submitManualSession}
-                        disabled={message.trim().length === 0 || createManualSessionMutation.isPending}
+                        disabled={!hasSubmittableInput || createManualSessionMutation.isPending}
                         className="ml-auto h-8 w-8 rounded-full"
                         aria-label="Start session"
                       >
@@ -1346,10 +1418,12 @@ export function ManualSessionComposer({
                           <LinkIcon data-testid="add-image-url-link-icon" className="mr-2 h-4 w-4" />
                           Add image URL
                         </DropdownMenuItem>
-                        <DropdownMenuItem onClick={() => setShowLinearInput(true)}>
-                          <LinearIcon className="mr-2 h-4 w-4" />
-                          Link Linear issue
-                        </DropdownMenuItem>
+                        {linearIntegrated ? (
+                          <DropdownMenuItem onClick={() => setShowLinearInput(true)}>
+                            <LinearIcon className="mr-2 h-4 w-4" />
+                            Add linear issue
+                          </DropdownMenuItem>
+                        ) : null}
                       </DropdownMenuContent>
                     </DropdownMenu>
 
@@ -1434,7 +1508,7 @@ export function ManualSessionComposer({
                       type="button"
                       size="icon"
                       onClick={submitManualSession}
-                      disabled={message.trim().length === 0 || createManualSessionMutation.isPending}
+                      disabled={!hasSubmittableInput || createManualSessionMutation.isPending}
                       className="ml-auto h-8 w-8 rounded-full"
                       aria-label="Start session"
                     >

@@ -70,12 +70,18 @@ export const PERSONAL_PROVIDER_OPTIONS: Array<{
   key: PersonalProvider;
   label: string;
   iconSrc?: string;
+  // Mirrors ORG_PROVIDER_OPTIONS.supportsSubscription. When true the
+  // personal Add-auth modal exposes the subscription radio so users can
+  // connect their own Codex / Claude Code OAuth flow as a personal-stack
+  // credential. The OAuth modal handles the device-code or PKCE handshake;
+  // the resulting row lands in coding_credentials with user_id set.
+  supportsSubscription: boolean;
 }> = [
-  { key: "openai", label: "Codex", iconSrc: "/agents/codex.svg" },
-  { key: "anthropic", label: "Claude Code", iconSrc: "/agents/claude_code.svg" },
-  { key: "gemini", label: "Gemini CLI", iconSrc: "/agents/gemini_cli.svg" },
-  { key: "amp", label: "Amp", iconSrc: "/agents/amp.svg" },
-  { key: "pi", label: "Pi" },
+  { key: "openai", label: "Codex", iconSrc: "/agents/codex.svg", supportsSubscription: true },
+  { key: "anthropic", label: "Claude Code", iconSrc: "/agents/claude_code.svg", supportsSubscription: true },
+  { key: "gemini", label: "Gemini CLI", iconSrc: "/agents/gemini_cli.svg", supportsSubscription: false },
+  { key: "amp", label: "Amp", iconSrc: "/agents/amp.svg", supportsSubscription: false },
+  { key: "pi", label: "Pi", supportsSubscription: false },
 ];
 
 export function apiKeyHelp(provider: ApiKeyProvider | PersonalProvider) {

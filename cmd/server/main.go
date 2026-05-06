@@ -50,6 +50,8 @@ import (
 	"github.com/assembledhq/143/internal/worker"
 )
 
+const nodeDrainMarkTimeout = 5 * time.Second
+
 func main() {
 	cfg := config.Load()
 	logger := logging.NewLogger(cfg.LogLevel, cfg.Env)
@@ -195,8 +197,13 @@ func main() {
 	}); err != nil {
 		logger.Fatal().Err(err).Msg("failed to initialize coding-credentials mirror metrics")
 	}
-	codexAuthSvc := codexauth.NewService(credentialStore, logger)
-	claudeCodeAuthSvc := claudecodeauth.NewService(credentialStore, logger)
+	// Both OAuth services depend on a scope-aware credential surface. The
+	// adapter routes org-scope traffic to the legacy OrgCredentialStore
+	// (mirrored to coding_credentials) and personal-scope traffic to the
+	// unified CodingCredentialStore directly — see internal/db/scoped_credential_store.go.
+	scopedCredentialStore := db.NewScopedCredentialStore(credentialStore, codingCredentialStore)
+	codexAuthSvc := codexauth.NewService(scopedCredentialStore, logger)
+	claudeCodeAuthSvc := claudecodeauth.NewService(scopedCredentialStore, logger)
 
 	// Platform LLM client for internal features (titles, PR descriptions, project
 	// generation, validation, prioritization). Uses the cheap PLATFORM_LLM_MODEL.
@@ -226,19 +233,6 @@ func main() {
 			pvProvider = dockerPreviewProvider
 			snapshotExec = sandboxExec
 			apiSandboxProvider = sandboxExec
-
-			// Pre-pull infrastructure template images in the background so
-			// the first preview start that needs e.g. postgres:17-alpine
-			// answers the HTTP request inside the server's WriteTimeout
-			// instead of timing out on a multi-minute cold pull. The
-			// provider's lazy-pull stays as a safety net for templates
-			// added after boot. Detached from the process ctx so a slow
-			// pull never blocks shutdown.
-			go func() {
-				prepullCtx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
-				defer cancel()
-				dockerPreviewProvider.EnsureInfraImages(prepullCtx)
-			}()
 		} else {
 			logger.Warn().Err(dockerErr).Msg("Docker not available — file browsing and preview provider disabled")
 		}
@@ -278,6 +272,7 @@ func main() {
 	snapshotLog.Msg("snapshot store configured")
 
 	cancelRegistry := agent.NewCancelRegistry(logger)
+	threadCancelRegistry := agent.NewThreadCancelRegistry(logger)
 	// Shared org-settings cache: the settings handler invalidates it on write,
 	// the orchestrator reads it when resolving Amp/Pi agent_config. In single-
 	// process deployments (MODE=all), the router and worker share this instance
@@ -298,7 +293,7 @@ func main() {
 	// Closed when the process receives SIGTERM so long-lived handlers (SSE
 	// streams, etc.) can end their loops cleanly during graceful shutdown.
 	shutdownCh := make(chan struct{})
-	router, gwSrv, recycleWorker, inspectorCloser, previewManager, err := api.NewRouter(cfg, pool, logger, sentryReporter, codexAuthSvc, claudeCodeAuthSvc, llmClient, fileReader, cancelRegistry, pvProvider, snapshotExec, apiSandboxProvider, apiSnapshotStore, orgSettingsCache, shutdownCh, redisClient, sessionStreams, codingCredentialStore)
+	router, gwSrv, recycleWorker, inspectorCloser, previewManager, err := api.NewRouter(cfg, pool, logger, sentryReporter, codexAuthSvc, claudeCodeAuthSvc, llmClient, fileReader, cancelRegistry, threadCancelRegistry, pvProvider, snapshotExec, apiSandboxProvider, apiSnapshotStore, orgSettingsCache, shutdownCh, redisClient, sessionStreams, codingCredentialStore)
 	if err != nil {
 		logger.Fatal().Err(err).Msg("failed to initialize API router")
 	}
@@ -391,6 +386,7 @@ func main() {
 			Repositories:        repoStore,
 			SessionMessages:     sessionMessageStore,
 			SessionThreads:      sessionThreadStore,
+			ThreadFileEvents:    db.NewSessionThreadFileEventStore(pool),
 			Automations:         automationStore,
 			AutomationRuns:      automationRunStore,
 			SessionIssueLinks:   db.NewSessionIssueLinkStore(pool),
@@ -406,7 +402,7 @@ func main() {
 				jobStore, orgStore, repoStore, validationStore, pullRequestStore,
 				deployStore, priorityScoreStore, complexityEstimateStore, pmPlanStore, pmDecisionLogStore,
 				projectStore, projectTaskStore, projectCycleStore, pmDocumentStore, integrationStore,
-				sessionMessageStore, automationRunStore, snapshotStore, billingMetrics, cancelRegistry, orgSettingsCache)
+				sessionMessageStore, automationRunStore, snapshotStore, billingMetrics, cancelRegistry, threadCancelRegistry, orgSettingsCache)
 			if services != nil {
 				sandboxAuthShutdown = services.SandboxAuthShutdown
 				// Wire eval pub/sub publishers so worker handlers can wake
@@ -492,12 +488,17 @@ func main() {
 
 		recoveryLoop := cluster.NewRecoveryLoop(nodeManager, jobStore, logger, 90*time.Second, 100)
 		go recoveryLoop.Start(ctx, 30*time.Second)
+		go worker.RunQueueHealthSampler(ctx, jobStore, logger, time.Minute)
 
 		usageRollupStore := db.NewUsageRollupStore(pool)
 		reaperOpts := []agent.SessionReaperOption{
 			agent.WithOrphanCloser(db.NewContainerUsageStore(pool)),
 			agent.WithUsageRoller(usageRollupStore),
 			agent.WithMaxRunningAge(cfg.SessionMaxRunningAge),
+			// Phase 0.5b safety net: fails session_threads stuck in 'running'
+			// past maxRunningAge. Catches orphans the orchestrator/handler
+			// thread.status reset paths couldn't unwind themselves.
+			agent.WithStuckThreadLister(sessionThreadStore),
 		}
 		if previewManager != nil {
 			previewStore := db.NewPreviewStore(pool)
@@ -547,12 +548,18 @@ func main() {
 
 	// Graceful shutdown.
 	//
-	// Ordering matters here. docker-compose.app.yml sets stop_grace_period to
-	// 120s; we must finish shutting down before Docker SIGKILLs us. The total
-	// budget spent below is:
-	//   - SSE drain + http.Server.Shutdown:  up to 110s
-	//   - preview gateway.Shutdown:          up to 60s (parallel with above)
-	// leaving a safety margin under the 120s SIGKILL deadline.
+	// Two independent budgets:
+	//   - Worker job drain:    cfg.WorkerDrainTimeout (default 45m). Long
+	//     enough to let in-flight coding turns finish; cancelling them
+	//     mid-execution produces orphaned thread rows when partial DB state
+	//     lands during the orchestrator's cleanup defers. The matching outer
+	//     bound is docker-compose.worker.yml stop_grace_period.
+	//   - HTTP API drain:      110s. Bounded by docker-compose.app.yml
+	//     stop_grace_period=120s with a 10s SIGKILL safety margin. Only
+	//     load-bearing on api/all modes.
+	//   - Preview gateway:     60s, in parallel with HTTP drain.
+	// On worker-only nodes the HTTP drain is a no-op (no traffic) so the
+	// long worker budget is the only thing the deploy actually waits on.
 	go func() {
 		sigCh := make(chan os.Signal, 1)
 		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
@@ -562,10 +569,12 @@ func main() {
 		for _, w := range processWorkers {
 			w.RequestDrain()
 		}
-		drainCtx, drainCancel := context.WithTimeout(context.Background(), 110*time.Second)
-		if err := nodeManager.RequestDrain(drainCtx, time.Now()); err != nil {
+		nodeDrainCtx, nodeDrainCancel := context.WithTimeout(context.Background(), nodeDrainMarkTimeout)
+		if err := nodeManager.RequestDrain(nodeDrainCtx, time.Now()); err != nil {
 			logger.Warn().Err(err).Msg("failed to mark node draining")
 		}
+		nodeDrainCancel()
+		drainCtx, drainCancel := context.WithTimeout(context.Background(), cfg.WorkerDrainTimeout)
 		for {
 			activeJobs := 0
 			for _, w := range processWorkers {
@@ -588,17 +597,12 @@ func main() {
 		// session is stuck with pending_snapshot_key set with no in-flight
 		// uploader to clear it.
 		//
-		// This drain is best-effort by design: the shared 110s drainCtx is
-		// well below postPRSnapshotUploadTimeout (6 minutes), so a real
-		// upload that has only just started at shutdown will not finish
-		// within budget. That is acceptable — cluster.Scheduler's
-		// reapStrandedPendingSnapshots pass clears stranded rows on the
-		// next tick (within strandedPendingSnapshotThreshold = 15m), so
-		// the worst-case outcome is a delayed resume rather than a
-		// permanently stuck row. The drain still pays for itself when
-		// uploads happen to be near completion (the common case under
-		// light load), and gives the goroutines a chance to call
-		// Promote/Clear before the process exits.
+		// This drain is best-effort by design: drainCtx may have been
+		// largely consumed by the worker drain above. cluster.Scheduler's
+		// reapStrandedPendingSnapshots pass clears any rows the upload
+		// goroutines didn't get to (within strandedPendingSnapshotThreshold
+		// = 15m), so the worst-case outcome is a delayed resume rather than
+		// a permanently stuck row.
 		drainPostPRUploads(drainCtx, resolvePostPRSnapshotDrainer(workerServices), logger)
 	drained:
 		drainCancel()
@@ -836,6 +840,7 @@ func buildServices(
 	snapshotStore storage.SnapshotStore,
 	billingMetrics *metrics.BillingMetrics,
 	cancelRegistry *agent.CancelRegistry,
+	threadCancelRegistry *agent.ThreadCancelRegistry,
 	orgSettingsCache *agent.OrgSettingsCache,
 ) *worker.Services {
 	// GitHub App service (for installation tokens, PR creation).
@@ -913,6 +918,7 @@ func buildServices(
 	// Orchestrator.
 	sessionLogStore := db.NewSessionLogStore(pool)
 	sessionQuestionStore := db.NewSessionQuestionStore(pool)
+	sessionThreadStore := db.NewSessionThreadStore(pool)
 	projectTaskUpdater := pm.NewProjectHooks(projectTaskStore, projectStore, logger)
 	automationRunUpdater := automations.NewAutomationHooks(automationRunStore, logger)
 	containerUsageStore := db.NewContainerUsageStore(pool)
@@ -950,6 +956,7 @@ func buildServices(
 		SessionLogs:       sessionLogStore,
 		SessionQuestions:  sessionQuestionStore,
 		SessionMessages:   sessionMessageStore,
+		SessionThreads:    sessionThreadStore,
 		SessionIssueLinks: db.NewSessionIssueLinkStore(pool),
 		IssueSnapshots:    db.NewSessionTurnIssueSnapshotStore(pool),
 		DecisionLog:       pmDecisionLogStore,
@@ -968,6 +975,7 @@ func buildServices(
 		Snapshots:         snapshotStore,
 		UsageTracker:      usageTracker,
 		Cancels:           cancelRegistry,
+		ThreadCancels:     threadCancelRegistry,
 		OrgSettingsCache:  orgSettingsCache,
 		IdentityResolver:  identityResolver,
 		SandboxAuth:       sandboxAuthServer,
@@ -1061,14 +1069,28 @@ func buildServices(
 		Integrations:       integrationStore,
 		IntegrationsWriter: integrationStore,
 		Credentials:        credentialStore,
+		CredentialsWriter:  credentialStore,
 		Issues:             issueStore,
 		Sessions:           sessionStore,
 		IssueLinks:         db.NewSessionIssueLinkStore(pool),
 		Orgs:               orgStore,
 		Jobs:               jobStore,
-		AppBaseURL:         cfg.FrontendURL,
+		OAuthClient: linear.OAuthClientCreds{
+			ClientID:     cfg.LinearOAuthClientID,
+			ClientSecret: cfg.LinearOAuthClientSecret,
+		},
+		AppBaseURL: cfg.FrontendURL,
 	})
 	prService.SetLinearMilestoneEnqueuer(linear.MilestoneEnqueuerFor(jobStore, logger))
+	// Wire the linear service into the agent env so sandbox-bound
+	// LINEAR_ACCESS_TOKEN is resolved through the refresh path. Without
+	// this, sessions that start within the refresh window of a token's
+	// expiry would inject a soon-to-be-stale token and the agent's
+	// 143-tools would 401 mid-turn. SetLinearTokens is a no-op when called
+	// before linearService is built, but the orchestrator construction
+	// happens on the same goroutine after linear.Build returns, so this
+	// ordering is deterministic.
+	agentEnv.SetLinearTokens(linearService)
 
 	// Runtime resource sampler. Optional capability — only providers that
 	// implement RuntimeStatsProvider produce samples. Disabled when the

@@ -23,8 +23,14 @@ import (
 // mockCredentialStore is a minimal in-memory store used to drive the
 // service's interactions. Only methods exercised by the tests below are
 // fully implemented; unused ones return sensible defaults.
+//
+// Each cred carries the scope it was inserted at via credScope so personal
+// and org rows for the same (org, label) pair don't collide in the
+// in-memory map — mirroring the real CodingCredentialStore's per-scope
+// partitioning.
 type mockCredentialStore struct {
-	creds map[uuid.UUID]*models.DecryptedCredential
+	creds     map[uuid.UUID]*models.DecryptedCredential
+	credScope map[uuid.UUID]models.Scope
 
 	getByIDErr            error
 	upsertByIDErr         error
@@ -38,21 +44,42 @@ type mockCredentialStore struct {
 }
 
 func newMockCredentialStore() *mockCredentialStore {
-	return &mockCredentialStore{creds: make(map[uuid.UUID]*models.DecryptedCredential)}
+	return &mockCredentialStore{
+		creds:     make(map[uuid.UUID]*models.DecryptedCredential),
+		credScope: make(map[uuid.UUID]models.Scope),
+	}
 }
 
-func (m *mockCredentialStore) Get(_ context.Context, orgID uuid.UUID, provider models.ProviderName) (*models.DecryptedCredential, error) {
+// scopesMatch is true when the cred at id was inserted under a scope that
+// matches the lookup scope. Tests that mutate creds directly (without going
+// through Upsert/InsertPendingAuth) inherit org-scope semantics — keeps
+// existing tests working without forcing them to pre-register scope.
+func (m *mockCredentialStore) scopesMatch(id uuid.UUID, scope models.Scope) bool {
+	stored, ok := m.credScope[id]
+	if !ok {
+		return scope.IsOrg()
+	}
+	if stored.IsPersonal() != scope.IsPersonal() {
+		return false
+	}
+	if stored.IsPersonal() {
+		return *stored.UserID == *scope.UserID && stored.OrgID == scope.OrgID
+	}
+	return stored.OrgID == scope.OrgID
+}
+
+func (m *mockCredentialStore) Get(_ context.Context, scope models.Scope, provider models.ProviderName) (*models.DecryptedCredential, error) {
 	for _, cred := range m.creds {
-		if cred.OrgID == orgID && cred.Provider == provider && cred.Label == "" {
+		if cred.OrgID == scope.OrgID && cred.Provider == provider && cred.Label == "" {
 			return cred, nil
 		}
 	}
 	return nil, ErrCredentialNotFound
 }
 
-func (m *mockCredentialStore) UpsertWithLabel(_ context.Context, orgID uuid.UUID, createdBy *uuid.UUID, label string, cfg models.ProviderConfig) (*uuid.UUID, error) {
+func (m *mockCredentialStore) UpsertWithLabel(_ context.Context, scope models.Scope, createdBy *uuid.UUID, label string, cfg models.ProviderConfig) (*uuid.UUID, error) {
 	for _, cred := range m.creds {
-		if cred.OrgID == orgID && cred.Provider == cfg.Provider() && cred.Label == label {
+		if m.scopesMatch(cred.ID, scope) && cred.Provider == cfg.Provider() && cred.Label == label {
 			cred.Config = cfg
 			cred.Status = "active"
 			return &cred.ID, nil
@@ -61,20 +88,21 @@ func (m *mockCredentialStore) UpsertWithLabel(_ context.Context, orgID uuid.UUID
 	id := uuid.New()
 	m.creds[id] = &models.DecryptedCredential{
 		ID:        id,
-		OrgID:     orgID,
+		OrgID:     scope.OrgID,
 		Provider:  cfg.Provider(),
 		Label:     label,
 		Config:    cfg,
 		Status:    "active",
 		CreatedBy: createdBy,
 	}
+	m.credScope[id] = scope
 	return &id, nil
 }
 
-func (m *mockCredentialStore) InsertPendingAuth(_ context.Context, orgID uuid.UUID, createdBy *uuid.UUID, label string, cfg models.ProviderConfig) (*uuid.UUID, error) {
+func (m *mockCredentialStore) InsertPendingAuth(_ context.Context, scope models.Scope, createdBy *uuid.UUID, label string, cfg models.ProviderConfig) (*uuid.UUID, error) {
 	now := time.Now()
 	for _, cred := range m.creds {
-		if cred.OrgID == orgID && cred.Provider == cfg.Provider() && cred.Label == label {
+		if m.scopesMatch(cred.ID, scope) && cred.Provider == cfg.Provider() && cred.Label == label {
 			if cred.Status != "pending_auth" && cred.Status != "disabled" {
 				return nil, &db.ErrCredentialLabelTaken{Label: label, ExistingStatus: cred.Status}
 			}
@@ -87,7 +115,7 @@ func (m *mockCredentialStore) InsertPendingAuth(_ context.Context, orgID uuid.UU
 	id := uuid.New()
 	m.creds[id] = &models.DecryptedCredential{
 		ID:        id,
-		OrgID:     orgID,
+		OrgID:     scope.OrgID,
 		Provider:  cfg.Provider(),
 		Label:     label,
 		Config:    cfg,
@@ -96,51 +124,52 @@ func (m *mockCredentialStore) InsertPendingAuth(_ context.Context, orgID uuid.UU
 		CreatedAt: now,
 		UpdatedAt: now,
 	}
+	m.credScope[id] = scope
 	return &id, nil
 }
 
-func (m *mockCredentialStore) GetByID(_ context.Context, orgID uuid.UUID, id uuid.UUID) (*models.DecryptedCredential, error) {
+func (m *mockCredentialStore) GetByID(_ context.Context, scope models.Scope, id uuid.UUID) (*models.DecryptedCredential, error) {
 	if m.getByIDErr != nil {
 		return nil, m.getByIDErr
 	}
-	if cred, ok := m.creds[id]; ok && cred.OrgID == orgID {
+	if cred, ok := m.creds[id]; ok && m.scopesMatch(cred.ID, scope) {
 		return cred, nil
 	}
 	return nil, ErrCredentialNotFound
 }
 
-func (m *mockCredentialStore) GetByProviderAndLabel(_ context.Context, orgID uuid.UUID, provider models.ProviderName, label string) (*models.DecryptedCredential, error) {
+func (m *mockCredentialStore) GetByProviderAndLabel(_ context.Context, scope models.Scope, provider models.ProviderName, label string) (*models.DecryptedCredential, error) {
 	if m.getByProviderLabelErr != nil {
 		return nil, m.getByProviderLabelErr
 	}
 	for _, cred := range m.creds {
-		if cred.OrgID == orgID && cred.Provider == provider && cred.Label == label {
+		if m.scopesMatch(cred.ID, scope) && cred.Provider == provider && cred.Label == label {
 			return cred, nil
 		}
 	}
 	return nil, ErrCredentialNotFound
 }
 
-func (m *mockCredentialStore) ListByProvider(_ context.Context, orgID uuid.UUID, provider models.ProviderName) ([]models.DecryptedCredential, error) {
+func (m *mockCredentialStore) ListByProvider(_ context.Context, scope models.Scope, provider models.ProviderName) ([]models.DecryptedCredential, error) {
 	if m.listByProviderErr != nil {
 		return nil, m.listByProviderErr
 	}
 	var out []models.DecryptedCredential
 	for _, cred := range m.creds {
-		if cred.OrgID == orgID && cred.Provider == provider {
+		if m.scopesMatch(cred.ID, scope) && cred.Provider == provider {
 			out = append(out, *cred)
 		}
 	}
 	return out, nil
 }
 
-func (m *mockCredentialStore) ClaimNextLabeledRoundRobin(_ context.Context, orgID uuid.UUID, provider models.ProviderName) (*models.DecryptedCredential, error) {
+func (m *mockCredentialStore) ClaimNextLabeledRoundRobin(_ context.Context, scope models.Scope, provider models.ProviderName) (*models.DecryptedCredential, error) {
 	if m.claimErr != nil {
 		return nil, m.claimErr
 	}
 	var oldest *models.DecryptedCredential
 	for _, cred := range m.creds {
-		if cred.OrgID != orgID || cred.Provider != provider || cred.Status != "active" || cred.Label == "" {
+		if !m.scopesMatch(cred.ID, scope) || cred.Provider != provider || cred.Status != "active" || cred.Label == "" {
 			continue
 		}
 		if oldest == nil {
@@ -161,28 +190,28 @@ func (m *mockCredentialStore) ClaimNextLabeledRoundRobin(_ context.Context, orgI
 	return oldest, nil
 }
 
-func (m *mockCredentialStore) DisableByID(_ context.Context, orgID uuid.UUID, id uuid.UUID) error {
+func (m *mockCredentialStore) DisableByID(_ context.Context, scope models.Scope, id uuid.UUID) error {
 	if m.disableErr != nil {
 		return m.disableErr
 	}
-	if cred, ok := m.creds[id]; ok && cred.OrgID == orgID {
+	if cred, ok := m.creds[id]; ok && m.scopesMatch(cred.ID, scope) {
 		cred.Status = "disabled"
 	}
 	return nil
 }
 
-func (m *mockCredentialStore) UpdateStatusByID(_ context.Context, orgID uuid.UUID, id uuid.UUID, status string) error {
-	if cred, ok := m.creds[id]; ok && cred.OrgID == orgID {
+func (m *mockCredentialStore) UpdateStatusByID(_ context.Context, scope models.Scope, id uuid.UUID, status string) error {
+	if cred, ok := m.creds[id]; ok && m.scopesMatch(cred.ID, scope) {
 		cred.Status = status
 	}
 	return nil
 }
 
-func (m *mockCredentialStore) UpsertByID(_ context.Context, orgID uuid.UUID, id uuid.UUID, cfg models.ProviderConfig) error {
+func (m *mockCredentialStore) UpsertByID(_ context.Context, scope models.Scope, id uuid.UUID, cfg models.ProviderConfig) error {
 	if m.upsertByIDErr != nil {
 		return m.upsertByIDErr
 	}
-	if cred, ok := m.creds[id]; ok && cred.OrgID == orgID {
+	if cred, ok := m.creds[id]; ok && m.scopesMatch(cred.ID, scope) {
 		if cred.Status == "disabled" {
 			return nil
 		}
@@ -192,34 +221,34 @@ func (m *mockCredentialStore) UpsertByID(_ context.Context, orgID uuid.UUID, id 
 	return nil
 }
 
-func (m *mockCredentialStore) ExistsForProviderByID(_ context.Context, orgID uuid.UUID, id uuid.UUID, provider models.ProviderName) (bool, error) {
+func (m *mockCredentialStore) ExistsForProviderByID(_ context.Context, scope models.Scope, id uuid.UUID, provider models.ProviderName) (bool, error) {
 	if m.existsErr != nil {
 		return false, m.existsErr
 	}
-	if cred, ok := m.creds[id]; ok && cred.OrgID == orgID && cred.Provider == provider {
+	if cred, ok := m.creds[id]; ok && m.scopesMatch(cred.ID, scope) && cred.Provider == provider {
 		return true, nil
 	}
 	return false, nil
 }
 
-func (m *mockCredentialStore) DisableLabeled(_ context.Context, orgID uuid.UUID, provider models.ProviderName) error {
+func (m *mockCredentialStore) DisableLabeled(_ context.Context, scope models.Scope, provider models.ProviderName) error {
 	if m.disableLabeledErr != nil {
 		return m.disableLabeledErr
 	}
 	for _, cred := range m.creds {
-		if cred.OrgID == orgID && cred.Provider == provider && cred.Label != "" {
+		if m.scopesMatch(cred.ID, scope) && cred.Provider == provider && cred.Label != "" {
 			cred.Status = "disabled"
 		}
 	}
 	return nil
 }
 
-func (m *mockCredentialStore) HasActiveLabeled(_ context.Context, orgID uuid.UUID, provider models.ProviderName) (bool, error) {
+func (m *mockCredentialStore) HasActiveLabeled(_ context.Context, scope models.Scope, provider models.ProviderName) (bool, error) {
 	if m.hasActiveLabeledErr != nil {
 		return false, m.hasActiveLabeledErr
 	}
 	for _, cred := range m.creds {
-		if cred.OrgID == orgID && cred.Provider == provider && cred.Label != "" && cred.Status == "active" {
+		if m.scopesMatch(cred.ID, scope) && cred.Provider == provider && cred.Label != "" && cred.Status == "active" {
 			return true, nil
 		}
 	}
@@ -233,7 +262,7 @@ func TestInitiateOAuth_PersistsPendingSubscriptionRow(t *testing.T) {
 	svc := NewService(store, zerolog.Nop())
 
 	orgID := uuid.New()
-	resp, err := svc.InitiateOAuth(context.Background(), orgID, nil, "team-a")
+	resp, err := svc.InitiateOAuth(context.Background(), models.Scope{OrgID: orgID}, nil, "team-a")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -250,7 +279,7 @@ func TestInitiateOAuth_PersistsPendingSubscriptionRow(t *testing.T) {
 		t.Errorf("authorize URL state mismatch: %s", resp.AuthorizeURL)
 	}
 
-	cred, err := store.GetByProviderAndLabel(context.Background(), orgID, models.ProviderAnthropic, "team-a")
+	cred, err := store.GetByProviderAndLabel(context.Background(), models.Scope{OrgID: orgID}, models.ProviderAnthropic, "team-a")
 	if err != nil {
 		t.Fatalf("expected persisted pending row: %v", err)
 	}
@@ -279,14 +308,14 @@ func TestInitiateOAuth_LabelTakenByActiveRow(t *testing.T) {
 	svc := NewService(store, zerolog.Nop())
 
 	orgID := uuid.New()
-	_, err := store.UpsertWithLabel(context.Background(), orgID, nil, "team-a", models.AnthropicConfig{
+	_, err := store.UpsertWithLabel(context.Background(), models.Scope{OrgID: orgID}, nil, "team-a", models.AnthropicConfig{
 		Subscription: &models.AnthropicSubscription{AccessToken: "a", RefreshToken: "r", ExpiresAt: time.Now().Add(time.Hour)},
 	})
 	if err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 
-	_, err = svc.InitiateOAuth(context.Background(), orgID, nil, "team-a")
+	_, err = svc.InitiateOAuth(context.Background(), models.Scope{OrgID: orgID}, nil, "team-a")
 	if err == nil {
 		t.Fatal("expected ErrCredentialLabelTaken, got nil")
 	}
@@ -304,7 +333,7 @@ func TestGetValidToken_SkipsAPIKeyRow(t *testing.T) {
 	orgID := uuid.New()
 
 	// Seed the API-key row (label=""), which must never be claimed for subs.
-	_, err := store.UpsertWithLabel(context.Background(), orgID, nil, "", models.AnthropicConfig{APIKey: "sk-ant-fake"})
+	_, err := store.UpsertWithLabel(context.Background(), models.Scope{OrgID: orgID}, nil, "", models.AnthropicConfig{APIKey: "sk-ant-fake"})
 	if err != nil {
 		t.Fatalf("seed api key: %v", err)
 	}
@@ -319,7 +348,7 @@ func TestGetValidToken_SkipsAPIKeyRow(t *testing.T) {
 			AccountType:  "pro",
 		},
 	}
-	subID, err := store.UpsertWithLabel(context.Background(), orgID, nil, "team-a", subCfg)
+	subID, err := store.UpsertWithLabel(context.Background(), models.Scope{OrgID: orgID}, nil, "team-a", subCfg)
 	if err != nil {
 		t.Fatalf("seed subscription: %v", err)
 	}
@@ -345,7 +374,7 @@ func TestGetValidToken_ReturnsNilWhenOnlyAPIKeyPresent(t *testing.T) {
 	svc := NewService(store, zerolog.Nop())
 
 	orgID := uuid.New()
-	_, err := store.UpsertWithLabel(context.Background(), orgID, nil, "", models.AnthropicConfig{APIKey: "sk-ant-fake"})
+	_, err := store.UpsertWithLabel(context.Background(), models.Scope{OrgID: orgID}, nil, "", models.AnthropicConfig{APIKey: "sk-ant-fake"})
 	if err != nil {
 		t.Fatalf("seed: %v", err)
 	}
@@ -373,7 +402,7 @@ func TestGetValidToken_RotatesLRU(t *testing.T) {
 			ExpiresAt:    time.Now().Add(time.Hour),
 			AccountType:  "max",
 		}}
-		id, err := store.UpsertWithLabel(context.Background(), orgID, nil, label, cfg)
+		id, err := store.UpsertWithLabel(context.Background(), models.Scope{OrgID: orgID}, nil, label, cfg)
 		if err != nil {
 			t.Fatalf("seed: %v", err)
 		}
@@ -401,12 +430,12 @@ func TestDisconnectAll_PreservesAPIKeyRow(t *testing.T) {
 	svc := NewService(store, zerolog.Nop())
 
 	orgID := uuid.New()
-	apiKeyID, _ := store.UpsertWithLabel(context.Background(), orgID, nil, "", models.AnthropicConfig{APIKey: "sk-ant"})
-	subID, _ := store.UpsertWithLabel(context.Background(), orgID, nil, "team-a", models.AnthropicConfig{
+	apiKeyID, _ := store.UpsertWithLabel(context.Background(), models.Scope{OrgID: orgID}, nil, "", models.AnthropicConfig{APIKey: "sk-ant"})
+	subID, _ := store.UpsertWithLabel(context.Background(), models.Scope{OrgID: orgID}, nil, "team-a", models.AnthropicConfig{
 		Subscription: &models.AnthropicSubscription{AccessToken: "a", RefreshToken: "r", ExpiresAt: time.Now().Add(time.Hour)},
 	})
 
-	if err := svc.DisconnectAll(context.Background(), orgID); err != nil {
+	if err := svc.DisconnectAll(context.Background(), models.Scope{OrgID: orgID}); err != nil {
 		t.Fatalf("DisconnectAll: %v", err)
 	}
 
@@ -434,7 +463,7 @@ func TestDisconnectForOrg_RejectsUnlabeledAnthropicAPIKey(t *testing.T) {
 		Status:   "active",
 	}
 
-	err := svc.DisconnectForOrg(context.Background(), orgID, apiKeyID)
+	err := svc.DisconnectForOrg(context.Background(), models.Scope{OrgID: orgID}, apiKeyID)
 	require.ErrorIs(t, err, ErrCredentialNotFound, "Claude subscription disconnect should reject an Anthropic API-key row")
 	require.Equal(t, "active", store.creds[apiKeyID].Status, "Anthropic API-key row should remain active")
 }
@@ -445,12 +474,12 @@ func TestListSubscriptions_SkipsAPIKeyRow(t *testing.T) {
 	svc := NewService(store, zerolog.Nop())
 
 	orgID := uuid.New()
-	_, _ = store.UpsertWithLabel(context.Background(), orgID, nil, "", models.AnthropicConfig{APIKey: "sk-ant"})
-	_, _ = store.UpsertWithLabel(context.Background(), orgID, nil, "team-a", models.AnthropicConfig{
+	_, _ = store.UpsertWithLabel(context.Background(), models.Scope{OrgID: orgID}, nil, "", models.AnthropicConfig{APIKey: "sk-ant"})
+	_, _ = store.UpsertWithLabel(context.Background(), models.Scope{OrgID: orgID}, nil, "team-a", models.AnthropicConfig{
 		Subscription: &models.AnthropicSubscription{AccessToken: "a", RefreshToken: "r", ExpiresAt: time.Now().Add(time.Hour), AccountType: "max"},
 	})
 
-	subs, err := svc.ListSubscriptions(context.Background(), orgID)
+	subs, err := svc.ListSubscriptions(context.Background(), models.Scope{OrgID: orgID})
 	if err != nil {
 		t.Fatalf("ListSubscriptions: %v", err)
 	}
@@ -469,7 +498,7 @@ func TestListSubscriptions_SkipsAPIKeyRow(t *testing.T) {
 // row and returns its ID so tests can exercise the refresh path.
 func seedActiveSub(t *testing.T, store *mockCredentialStore, orgID uuid.UUID, label, access, refresh string, expiresAt time.Time) uuid.UUID {
 	t.Helper()
-	id, err := store.UpsertWithLabel(context.Background(), orgID, nil, label, models.AnthropicConfig{
+	id, err := store.UpsertWithLabel(context.Background(), models.Scope{OrgID: orgID}, nil, label, models.AnthropicConfig{
 		Subscription: &models.AnthropicSubscription{
 			AccessToken:  access,
 			RefreshToken: refresh,
@@ -510,7 +539,7 @@ func TestRefreshTokenByID_HappyPath(t *testing.T) {
 	// Expired so the refresh actually runs.
 	credID := seedActiveSub(t, store, orgID, "team-a", "old-access", "old-refresh", time.Now().Add(-time.Minute))
 
-	newSub, err := svc.RefreshTokenByID(context.Background(), orgID, credID)
+	newSub, err := svc.RefreshTokenByID(context.Background(), models.Scope{OrgID: orgID}, credID)
 	if err != nil {
 		t.Fatalf("RefreshTokenByID: %v", err)
 	}
@@ -547,7 +576,7 @@ func TestRefreshTokenByID_PreservesRefreshTokenWhenEmpty(t *testing.T) {
 	orgID := uuid.New()
 	credID := seedActiveSub(t, store, orgID, "team-a", "old-access", "keep-this-refresh", time.Now().Add(-time.Minute))
 
-	newSub, err := svc.RefreshTokenByID(context.Background(), orgID, credID)
+	newSub, err := svc.RefreshTokenByID(context.Background(), models.Scope{OrgID: orgID}, credID)
 	if err != nil {
 		t.Fatalf("RefreshTokenByID: %v", err)
 	}
@@ -573,12 +602,12 @@ func TestRefreshTokenByID_RejectsEmptyAccessToken(t *testing.T) {
 	orgID := uuid.New()
 	credID := seedActiveSub(t, store, orgID, "team-a", "old-access", "old-refresh", time.Now().Add(-time.Minute))
 
-	newSub, err := svc.RefreshTokenByID(context.Background(), orgID, credID)
+	newSub, err := svc.RefreshTokenByID(context.Background(), models.Scope{OrgID: orgID}, credID)
 	require.Nil(t, newSub, "RefreshTokenByID should not return a subscription when the refresh response omits access_token")
 	require.Error(t, err, "RefreshTokenByID should fail closed when the refresh response omits access_token")
 	require.Contains(t, err.Error(), "empty access_token", "RefreshTokenByID should surface the empty access_token error")
 
-	storedCred, getErr := store.GetByID(context.Background(), orgID, credID)
+	storedCred, getErr := store.GetByID(context.Background(), models.Scope{OrgID: orgID}, credID)
 	require.NoError(t, getErr, "GetByID should return the seeded credential after a failed refresh")
 
 	storedCfg, ok := storedCred.Config.(models.AnthropicConfig)
@@ -606,7 +635,7 @@ func TestRefreshTokenByID_RefreshTokenReused(t *testing.T) {
 	orgID := uuid.New()
 	credID := seedActiveSub(t, store, orgID, "team-a", "old-access", "old-refresh", time.Now().Add(-time.Minute))
 
-	_, err := svc.RefreshTokenByID(context.Background(), orgID, credID)
+	_, err := svc.RefreshTokenByID(context.Background(), models.Scope{OrgID: orgID}, credID)
 	if err == nil {
 		t.Fatal("want error on refresh_token_reused")
 	}
@@ -639,7 +668,7 @@ func TestRefreshTokenByID_UnauthorizedMarksInvalid(t *testing.T) {
 	orgID := uuid.New()
 	credID := seedActiveSub(t, store, orgID, "team-a", "old-access", "old-refresh", time.Now().Add(-time.Minute))
 
-	_, err := svc.RefreshTokenByID(context.Background(), orgID, credID)
+	_, err := svc.RefreshTokenByID(context.Background(), models.Scope{OrgID: orgID}, credID)
 	if err == nil {
 		t.Fatal("want error on 401")
 	}
@@ -655,7 +684,7 @@ func TestRefreshTokenByID_NoRefreshToken(t *testing.T) {
 
 	orgID := uuid.New()
 	// Store a sub with empty refresh token + expired access.
-	id, err := store.UpsertWithLabel(context.Background(), orgID, nil, "team-a", models.AnthropicConfig{
+	id, err := store.UpsertWithLabel(context.Background(), models.Scope{OrgID: orgID}, nil, "team-a", models.AnthropicConfig{
 		Subscription: &models.AnthropicSubscription{
 			AccessToken: "old-access",
 			ExpiresAt:   time.Now().Add(-time.Minute),
@@ -665,7 +694,7 @@ func TestRefreshTokenByID_NoRefreshToken(t *testing.T) {
 		t.Fatalf("seed: %v", err)
 	}
 
-	_, err = svc.RefreshTokenByID(context.Background(), orgID, *id)
+	_, err = svc.RefreshTokenByID(context.Background(), models.Scope{OrgID: orgID}, *id)
 	if err == nil {
 		t.Fatal("want error when refresh_token is empty")
 	}
@@ -698,16 +727,16 @@ func TestCompleteOAuth_ParsesScopesAndFetchesProfile(t *testing.T) {
 	svc.SetProfileURL(profileTS.URL)
 
 	orgID := uuid.New()
-	resp, err := svc.InitiateOAuth(context.Background(), orgID, nil, "team-a")
+	resp, err := svc.InitiateOAuth(context.Background(), models.Scope{OrgID: orgID}, nil, "team-a")
 	if err != nil {
 		t.Fatalf("InitiateOAuth: %v", err)
 	}
 
-	if _, err := svc.CompleteOAuth(context.Background(), orgID, "team-a", "mycode#"+resp.State); err != nil {
+	if _, err := svc.CompleteOAuth(context.Background(), models.Scope{OrgID: orgID}, "team-a", "mycode#"+resp.State); err != nil {
 		t.Fatalf("CompleteOAuth: %v", err)
 	}
 
-	cred, err := store.GetByProviderAndLabel(context.Background(), orgID, models.ProviderAnthropic, "team-a")
+	cred, err := store.GetByProviderAndLabel(context.Background(), models.Scope{OrgID: orgID}, models.ProviderAnthropic, "team-a")
 	if err != nil {
 		t.Fatalf("lookup: %v", err)
 	}
@@ -747,12 +776,12 @@ func TestCompleteOAuth_ProfileFailureDoesNotBlock(t *testing.T) {
 	svc.SetProfileURL(profileTS.URL)
 
 	orgID := uuid.New()
-	resp, err := svc.InitiateOAuth(context.Background(), orgID, nil, "team-a")
+	resp, err := svc.InitiateOAuth(context.Background(), models.Scope{OrgID: orgID}, nil, "team-a")
 	if err != nil {
 		t.Fatalf("InitiateOAuth: %v", err)
 	}
 
-	if _, err := svc.CompleteOAuth(context.Background(), orgID, "team-a", "mycode#"+resp.State); err != nil {
+	if _, err := svc.CompleteOAuth(context.Background(), models.Scope{OrgID: orgID}, "team-a", "mycode#"+resp.State); err != nil {
 		t.Fatalf("want success despite profile failure, got %v", err)
 	}
 }
@@ -764,11 +793,11 @@ func TestDisconnectForOrg_WrongOrgNotFound(t *testing.T) {
 
 	org1 := uuid.New()
 	org2 := uuid.New()
-	id, _ := store.UpsertWithLabel(context.Background(), org1, nil, "team-a", models.AnthropicConfig{
+	id, _ := store.UpsertWithLabel(context.Background(), models.Scope{OrgID: org1}, nil, "team-a", models.AnthropicConfig{
 		Subscription: &models.AnthropicSubscription{AccessToken: "a", RefreshToken: "r", ExpiresAt: time.Now().Add(time.Hour)},
 	})
 
-	if err := svc.DisconnectForOrg(context.Background(), org2, *id); err != ErrCredentialNotFound {
+	if err := svc.DisconnectForOrg(context.Background(), models.Scope{OrgID: org2}, *id); err != ErrCredentialNotFound {
 		t.Errorf("want ErrCredentialNotFound, got %v", err)
 	}
 }
@@ -856,7 +885,7 @@ func TestHasActiveSubscription(t *testing.T) {
 		t.Errorf("empty store: got (%v, %v), want (false, nil)", has, err)
 	}
 
-	_, _ = store.UpsertWithLabel(context.Background(), orgID, nil, "team-a", models.AnthropicConfig{
+	_, _ = store.UpsertWithLabel(context.Background(), models.Scope{OrgID: orgID}, nil, "team-a", models.AnthropicConfig{
 		Subscription: &models.AnthropicSubscription{AccessToken: "a", RefreshToken: "r", ExpiresAt: time.Now().Add(time.Hour)},
 	})
 	has, err = svc.HasActiveSubscription(context.Background(), orgID)
@@ -880,10 +909,10 @@ func TestCompleteOAuth_InvalidPasteFormat(t *testing.T) {
 	svc := NewService(store, zerolog.Nop())
 
 	orgID := uuid.New()
-	if _, err := svc.InitiateOAuth(context.Background(), orgID, nil, "team-a"); err != nil {
+	if _, err := svc.InitiateOAuth(context.Background(), models.Scope{OrgID: orgID}, nil, "team-a"); err != nil {
 		t.Fatalf("InitiateOAuth: %v", err)
 	}
-	if _, err := svc.CompleteOAuth(context.Background(), orgID, "team-a", "no-hash-at-all"); !errors.Is(err, ErrInvalidPaste) {
+	if _, err := svc.CompleteOAuth(context.Background(), models.Scope{OrgID: orgID}, "team-a", "no-hash-at-all"); !errors.Is(err, ErrInvalidPaste) {
 		t.Errorf("want ErrInvalidPaste, got %v", err)
 	}
 }
@@ -894,10 +923,10 @@ func TestCompleteOAuth_StateMismatch(t *testing.T) {
 	svc := NewService(store, zerolog.Nop())
 
 	orgID := uuid.New()
-	if _, err := svc.InitiateOAuth(context.Background(), orgID, nil, "team-a"); err != nil {
+	if _, err := svc.InitiateOAuth(context.Background(), models.Scope{OrgID: orgID}, nil, "team-a"); err != nil {
 		t.Fatalf("InitiateOAuth: %v", err)
 	}
-	if _, err := svc.CompleteOAuth(context.Background(), orgID, "team-a", "code#wrong-state"); !errors.Is(err, ErrInvalidPaste) {
+	if _, err := svc.CompleteOAuth(context.Background(), models.Scope{OrgID: orgID}, "team-a", "code#wrong-state"); !errors.Is(err, ErrInvalidPaste) {
 		t.Errorf("want ErrInvalidPaste for state mismatch, got %v", err)
 	}
 }
@@ -908,7 +937,7 @@ func TestCompleteOAuth_NoPendingRow(t *testing.T) {
 	svc := NewService(store, zerolog.Nop())
 
 	orgID := uuid.New()
-	if _, err := svc.CompleteOAuth(context.Background(), orgID, "team-a", "code#state"); !errors.Is(err, ErrPendingAuthNotFound) {
+	if _, err := svc.CompleteOAuth(context.Background(), models.Scope{OrgID: orgID}, "team-a", "code#state"); !errors.Is(err, ErrPendingAuthNotFound) {
 		t.Errorf("want ErrPendingAuthNotFound, got %v", err)
 	}
 }
@@ -919,19 +948,19 @@ func TestCompleteOAuth_Expired(t *testing.T) {
 	svc := NewService(store, zerolog.Nop())
 
 	orgID := uuid.New()
-	resp, err := svc.InitiateOAuth(context.Background(), orgID, nil, "team-a")
+	resp, err := svc.InitiateOAuth(context.Background(), models.Scope{OrgID: orgID}, nil, "team-a")
 	if err != nil {
 		t.Fatalf("InitiateOAuth: %v", err)
 	}
 
 	// Backdate the pending row past the TTL window.
-	cred, err := store.GetByProviderAndLabel(context.Background(), orgID, models.ProviderAnthropic, "team-a")
+	cred, err := store.GetByProviderAndLabel(context.Background(), models.Scope{OrgID: orgID}, models.ProviderAnthropic, "team-a")
 	if err != nil {
 		t.Fatalf("lookup: %v", err)
 	}
 	cred.UpdatedAt = time.Now().Add(-2 * pendingAuthTTL)
 
-	if _, err := svc.CompleteOAuth(context.Background(), orgID, "team-a", "code#"+resp.State); !errors.Is(err, ErrPendingAuthExpired) {
+	if _, err := svc.CompleteOAuth(context.Background(), models.Scope{OrgID: orgID}, "team-a", "code#"+resp.State); !errors.Is(err, ErrPendingAuthExpired) {
 		t.Errorf("want ErrPendingAuthExpired, got %v", err)
 	}
 }
@@ -943,14 +972,14 @@ func TestCompleteOAuth_AlreadyActive(t *testing.T) {
 
 	orgID := uuid.New()
 	// Seed an active (not pending) row — replay attempts must not overwrite it.
-	_, _ = store.UpsertWithLabel(context.Background(), orgID, nil, "team-a", models.AnthropicConfig{
+	_, _ = store.UpsertWithLabel(context.Background(), models.Scope{OrgID: orgID}, nil, "team-a", models.AnthropicConfig{
 		Subscription: &models.AnthropicSubscription{
 			AccessToken: "live", RefreshToken: "r", ExpiresAt: time.Now().Add(time.Hour),
 			State: "s", CodeVerifier: "v",
 		},
 	})
 
-	if _, err := svc.CompleteOAuth(context.Background(), orgID, "team-a", "code#s"); !errors.Is(err, ErrPendingAuthNotFound) {
+	if _, err := svc.CompleteOAuth(context.Background(), models.Scope{OrgID: orgID}, "team-a", "code#s"); !errors.Is(err, ErrPendingAuthNotFound) {
 		t.Errorf("active row should surface as ErrPendingAuthNotFound, got %v", err)
 	}
 }
@@ -970,12 +999,12 @@ func TestCompleteOAuth_TokenExchangeFailure(t *testing.T) {
 	svc.SetProfileURL("")
 
 	orgID := uuid.New()
-	resp, err := svc.InitiateOAuth(context.Background(), orgID, nil, "team-a")
+	resp, err := svc.InitiateOAuth(context.Background(), models.Scope{OrgID: orgID}, nil, "team-a")
 	if err != nil {
 		t.Fatalf("InitiateOAuth: %v", err)
 	}
 
-	if _, err := svc.CompleteOAuth(context.Background(), orgID, "team-a", "code#"+resp.State); err == nil {
+	if _, err := svc.CompleteOAuth(context.Background(), models.Scope{OrgID: orgID}, "team-a", "code#"+resp.State); err == nil {
 		t.Fatal("want error from token exchange failure")
 	}
 }
@@ -1043,14 +1072,14 @@ func TestDisconnect_ClearsRefreshMutex(t *testing.T) {
 	svc := NewService(store, zerolog.Nop())
 
 	orgID := uuid.New()
-	id, _ := store.UpsertWithLabel(context.Background(), orgID, nil, "team-a", models.AnthropicConfig{
+	id, _ := store.UpsertWithLabel(context.Background(), models.Scope{OrgID: orgID}, nil, "team-a", models.AnthropicConfig{
 		Subscription: &models.AnthropicSubscription{AccessToken: "a", RefreshToken: "r", ExpiresAt: time.Now().Add(time.Hour)},
 	})
 
 	// Prime the refresh mutex so Disconnect has something to drop.
 	_ = svc.credRefreshMu(*id)
 
-	if err := svc.Disconnect(context.Background(), orgID, *id); err != nil {
+	if err := svc.Disconnect(context.Background(), models.Scope{OrgID: orgID}, *id); err != nil {
 		t.Fatalf("Disconnect: %v", err)
 	}
 	if store.creds[*id].Status != "disabled" {
@@ -1064,11 +1093,11 @@ func TestDisconnectForOrg_Success(t *testing.T) {
 	svc := NewService(store, zerolog.Nop())
 
 	orgID := uuid.New()
-	id, _ := store.UpsertWithLabel(context.Background(), orgID, nil, "team-a", models.AnthropicConfig{
+	id, _ := store.UpsertWithLabel(context.Background(), models.Scope{OrgID: orgID}, nil, "team-a", models.AnthropicConfig{
 		Subscription: &models.AnthropicSubscription{AccessToken: "a", RefreshToken: "r", ExpiresAt: time.Now().Add(time.Hour)},
 	})
 
-	if err := svc.DisconnectForOrg(context.Background(), orgID, *id); err != nil {
+	if err := svc.DisconnectForOrg(context.Background(), models.Scope{OrgID: orgID}, *id); err != nil {
 		t.Fatalf("DisconnectForOrg: %v", err)
 	}
 	if store.creds[*id].Status != "disabled" {
@@ -1081,10 +1110,10 @@ func TestDisconnectAll_NilStore(t *testing.T) {
 	svc := NewService(nil, zerolog.Nop())
 	// Populates an init mutex via InitiateOAuth before DisconnectAll sweeps it.
 	orgID := uuid.New()
-	if _, err := svc.InitiateOAuth(context.Background(), orgID, nil, "team-a"); err != nil {
+	if _, err := svc.InitiateOAuth(context.Background(), models.Scope{OrgID: orgID}, nil, "team-a"); err != nil {
 		t.Fatalf("InitiateOAuth: %v", err)
 	}
-	if err := svc.DisconnectAll(context.Background(), orgID); err != nil {
+	if err := svc.DisconnectAll(context.Background(), models.Scope{OrgID: orgID}); err != nil {
 		t.Errorf("DisconnectAll with nil store: %v", err)
 	}
 }
@@ -1092,7 +1121,7 @@ func TestDisconnectAll_NilStore(t *testing.T) {
 func TestListSubscriptions_NilStore(t *testing.T) {
 	t.Parallel()
 	svc := NewService(nil, zerolog.Nop())
-	subs, err := svc.ListSubscriptions(context.Background(), uuid.New())
+	subs, err := svc.ListSubscriptions(context.Background(), models.Scope{OrgID: uuid.New()})
 	if err != nil || subs != nil {
 		t.Errorf("want (nil, nil); got (%v, %v)", subs, err)
 	}
@@ -1115,7 +1144,7 @@ func TestSetters(t *testing.T) {
 func TestCompleteOAuth_NilStore(t *testing.T) {
 	t.Parallel()
 	svc := NewService(nil, zerolog.Nop())
-	_, err := svc.CompleteOAuth(context.Background(), uuid.New(), "team-a", "code#state")
+	_, err := svc.CompleteOAuth(context.Background(), models.Scope{OrgID: uuid.New()}, "team-a", "code#state")
 	if err == nil || !strings.Contains(err.Error(), "credential store") {
 		t.Errorf("want credential-store error, got %v", err)
 	}
@@ -1126,7 +1155,7 @@ func TestCompleteOAuth_DBError(t *testing.T) {
 	store := newMockCredentialStore()
 	store.getByProviderLabelErr = errors.New("db is down")
 	svc := NewService(store, zerolog.Nop())
-	_, err := svc.CompleteOAuth(context.Background(), uuid.New(), "team-a", "code#state")
+	_, err := svc.CompleteOAuth(context.Background(), models.Scope{OrgID: uuid.New()}, "team-a", "code#state")
 	if err == nil || errors.Is(err, ErrPendingAuthNotFound) {
 		t.Errorf("want wrapped DB error, got %v", err)
 	}
@@ -1147,13 +1176,13 @@ func TestCompleteOAuth_UpsertError(t *testing.T) {
 	svc.SetProfileURL("")
 
 	orgID := uuid.New()
-	resp, err := svc.InitiateOAuth(context.Background(), orgID, nil, "team-a")
+	resp, err := svc.InitiateOAuth(context.Background(), models.Scope{OrgID: orgID}, nil, "team-a")
 	if err != nil {
 		t.Fatalf("InitiateOAuth: %v", err)
 	}
 	store.upsertByIDErr = errors.New("db write failed")
 
-	if _, err := svc.CompleteOAuth(context.Background(), orgID, "team-a", "code#"+resp.State); err == nil {
+	if _, err := svc.CompleteOAuth(context.Background(), models.Scope{OrgID: orgID}, "team-a", "code#"+resp.State); err == nil {
 		t.Fatal("want error when UpsertByID fails")
 	}
 }
@@ -1178,7 +1207,7 @@ func TestCompleteOAuth_PendingRowMissingState(t *testing.T) {
 		Status:    "pending_auth",
 		UpdatedAt: time.Now(),
 	}
-	if _, err := svc.CompleteOAuth(context.Background(), orgID, "team-a", "code#state"); !errors.Is(err, ErrPendingAuthNotFound) {
+	if _, err := svc.CompleteOAuth(context.Background(), models.Scope{OrgID: orgID}, "team-a", "code#state"); !errors.Is(err, ErrPendingAuthNotFound) {
 		t.Errorf("want ErrPendingAuthNotFound, got %v", err)
 	}
 }
@@ -1199,7 +1228,7 @@ func TestCompleteOAuth_UnexpectedConfig(t *testing.T) {
 		Status:    "pending_auth",
 		UpdatedAt: time.Now(),
 	}
-	if _, err := svc.CompleteOAuth(context.Background(), orgID, "team-a", "code#state"); err == nil {
+	if _, err := svc.CompleteOAuth(context.Background(), models.Scope{OrgID: orgID}, "team-a", "code#state"); err == nil {
 		t.Fatal("want error for unexpected config")
 	}
 }
@@ -1209,7 +1238,7 @@ func TestRefreshTokenByID_GetByIDError(t *testing.T) {
 	store := newMockCredentialStore()
 	store.getByIDErr = errors.New("boom")
 	svc := NewService(store, zerolog.Nop())
-	_, err := svc.RefreshTokenByID(context.Background(), uuid.New(), uuid.New())
+	_, err := svc.RefreshTokenByID(context.Background(), models.Scope{OrgID: uuid.New()}, uuid.New())
 	if err == nil {
 		t.Fatal("want error when GetByID fails")
 	}
@@ -1229,7 +1258,7 @@ func TestRefreshTokenByID_NotAnthropicConfig(t *testing.T) {
 		Status:   "active",
 	}
 	svc := NewService(store, zerolog.Nop())
-	_, err := svc.RefreshTokenByID(context.Background(), orgID, id)
+	_, err := svc.RefreshTokenByID(context.Background(), models.Scope{OrgID: orgID}, id)
 	if err == nil {
 		t.Fatal("want error when config is not subscription")
 	}
@@ -1244,7 +1273,7 @@ func TestRefreshTokenByID_StillFreshAfterLock(t *testing.T) {
 	// Token is not near expiry — Refresh should short-circuit and return it.
 	credID := seedActiveSub(t, store, orgID, "team-a", "fresh", "refresh", time.Now().Add(time.Hour))
 
-	sub, err := svc.RefreshTokenByID(context.Background(), orgID, credID)
+	sub, err := svc.RefreshTokenByID(context.Background(), models.Scope{OrgID: orgID}, credID)
 	if err != nil || sub == nil {
 		t.Fatalf("want cached fresh token, got (%v, %v)", sub, err)
 	}
@@ -1269,7 +1298,7 @@ func TestRefreshTokenByID_Non200Status(t *testing.T) {
 	orgID := uuid.New()
 	credID := seedActiveSub(t, store, orgID, "team-a", "old", "refresh", time.Now().Add(-time.Minute))
 
-	_, err := svc.RefreshTokenByID(context.Background(), orgID, credID)
+	_, err := svc.RefreshTokenByID(context.Background(), models.Scope{OrgID: orgID}, credID)
 	if err == nil {
 		t.Fatal("want error on 500")
 	}
@@ -1294,7 +1323,7 @@ func TestRefreshTokenByID_MalformedResponse(t *testing.T) {
 	orgID := uuid.New()
 	credID := seedActiveSub(t, store, orgID, "team-a", "old", "refresh", time.Now().Add(-time.Minute))
 
-	_, err := svc.RefreshTokenByID(context.Background(), orgID, credID)
+	_, err := svc.RefreshTokenByID(context.Background(), models.Scope{OrgID: orgID}, credID)
 	if err == nil {
 		t.Fatal("want parse error on malformed JSON")
 	}
@@ -1315,7 +1344,7 @@ func TestRefreshTokenByID_NetworkError(t *testing.T) {
 	orgID := uuid.New()
 	credID := seedActiveSub(t, store, orgID, "team-a", "old", "refresh", time.Now().Add(-time.Minute))
 
-	_, err := svc.RefreshTokenByID(context.Background(), orgID, credID)
+	_, err := svc.RefreshTokenByID(context.Background(), models.Scope{OrgID: orgID}, credID)
 	if err == nil {
 		t.Fatal("want network error")
 	}
@@ -1338,7 +1367,7 @@ func TestRefreshTokenByID_UpsertError(t *testing.T) {
 	credID := seedActiveSub(t, store, orgID, "team-a", "old", "refresh", time.Now().Add(-time.Minute))
 	store.upsertByIDErr = errors.New("db down")
 
-	_, err := svc.RefreshTokenByID(context.Background(), orgID, credID)
+	_, err := svc.RefreshTokenByID(context.Background(), models.Scope{OrgID: orgID}, credID)
 	if err == nil {
 		t.Fatal("want error from Upsert failure")
 	}
@@ -1423,7 +1452,7 @@ func TestDisconnect_StoreError(t *testing.T) {
 	store := newMockCredentialStore()
 	store.disableErr = errors.New("db down")
 	svc := NewService(store, zerolog.Nop())
-	err := svc.Disconnect(context.Background(), uuid.New(), uuid.New())
+	err := svc.Disconnect(context.Background(), models.Scope{OrgID: uuid.New()}, uuid.New())
 	if err == nil {
 		t.Fatal("want error from DisableByID")
 	}
@@ -1432,7 +1461,7 @@ func TestDisconnect_StoreError(t *testing.T) {
 func TestDisconnect_NilStore(t *testing.T) {
 	t.Parallel()
 	svc := NewService(nil, zerolog.Nop())
-	if err := svc.Disconnect(context.Background(), uuid.New(), uuid.New()); err != nil {
+	if err := svc.Disconnect(context.Background(), models.Scope{OrgID: uuid.New()}, uuid.New()); err != nil {
 		t.Errorf("want nil with nil store, got %v", err)
 	}
 }
@@ -1440,7 +1469,7 @@ func TestDisconnect_NilStore(t *testing.T) {
 func TestDisconnectForOrg_NilStore(t *testing.T) {
 	t.Parallel()
 	svc := NewService(nil, zerolog.Nop())
-	if err := svc.DisconnectForOrg(context.Background(), uuid.New(), uuid.New()); err != nil {
+	if err := svc.DisconnectForOrg(context.Background(), models.Scope{OrgID: uuid.New()}, uuid.New()); err != nil {
 		t.Errorf("want nil with nil store, got %v", err)
 	}
 }
@@ -1450,7 +1479,7 @@ func TestDisconnectForOrg_ExistsError(t *testing.T) {
 	store := newMockCredentialStore()
 	store.existsErr = errors.New("db down")
 	svc := NewService(store, zerolog.Nop())
-	err := svc.DisconnectForOrg(context.Background(), uuid.New(), uuid.New())
+	err := svc.DisconnectForOrg(context.Background(), models.Scope{OrgID: uuid.New()}, uuid.New())
 	if err == nil {
 		t.Fatal("want wrapped exists error")
 	}
@@ -1461,7 +1490,7 @@ func TestDisconnectAll_DisableLabeledError(t *testing.T) {
 	store := newMockCredentialStore()
 	store.disableLabeledErr = errors.New("db down")
 	svc := NewService(store, zerolog.Nop())
-	if err := svc.DisconnectAll(context.Background(), uuid.New()); err == nil {
+	if err := svc.DisconnectAll(context.Background(), models.Scope{OrgID: uuid.New()}); err == nil {
 		t.Fatal("want wrapped DisableLabeled error")
 	}
 }
@@ -1474,7 +1503,7 @@ func TestDisconnectAll_LogsListByProviderError(t *testing.T) {
 	var logBuf bytes.Buffer
 	svc := NewService(store, zerolog.New(&logBuf))
 
-	err := svc.DisconnectAll(context.Background(), uuid.New())
+	err := svc.DisconnectAll(context.Background(), models.Scope{OrgID: uuid.New()})
 
 	require.NoError(t, err, "DisconnectAll should continue when listing subscription IDs fails during best-effort mutex cleanup")
 	require.Contains(t, logBuf.String(), "failed to list claude subscriptions before disconnect cleanup", "DisconnectAll should log the list failure so leaked refresh mutexes are visible to operators")
@@ -1496,7 +1525,7 @@ func TestListSubscriptions_StoreError(t *testing.T) {
 	store := newMockCredentialStore()
 	store.listByProviderErr = errors.New("db down")
 	svc := NewService(store, zerolog.Nop())
-	_, err := svc.ListSubscriptions(context.Background(), uuid.New())
+	_, err := svc.ListSubscriptions(context.Background(), models.Scope{OrgID: uuid.New()})
 	if err == nil {
 		t.Fatal("want wrapped list error")
 	}
@@ -1520,7 +1549,7 @@ func TestListSubscriptions_SkipsNonSubscriptionConfig(t *testing.T) {
 		Status:   "active",
 	}
 
-	subs, err := svc.ListSubscriptions(context.Background(), orgID)
+	subs, err := svc.ListSubscriptions(context.Background(), models.Scope{OrgID: orgID})
 	if err != nil {
 		t.Fatalf("ListSubscriptions: %v", err)
 	}
@@ -1610,11 +1639,11 @@ func TestExchangeAuthCode_EmptyAccessToken(t *testing.T) {
 	svc.SetProfileURL("")
 
 	orgID := uuid.New()
-	resp, err := svc.InitiateOAuth(context.Background(), orgID, nil, "team-a")
+	resp, err := svc.InitiateOAuth(context.Background(), models.Scope{OrgID: orgID}, nil, "team-a")
 	if err != nil {
 		t.Fatalf("InitiateOAuth: %v", err)
 	}
-	if _, err := svc.CompleteOAuth(context.Background(), orgID, "team-a", "code#"+resp.State); err == nil || !strings.Contains(err.Error(), "empty access_token") {
+	if _, err := svc.CompleteOAuth(context.Background(), models.Scope{OrgID: orgID}, "team-a", "code#"+resp.State); err == nil || !strings.Contains(err.Error(), "empty access_token") {
 		t.Errorf("want empty access_token error, got %v", err)
 	}
 }
@@ -1631,11 +1660,11 @@ func TestExchangeAuthCode_NetworkError(t *testing.T) {
 	svc.SetProfileURL("")
 
 	orgID := uuid.New()
-	resp, err := svc.InitiateOAuth(context.Background(), orgID, nil, "team-a")
+	resp, err := svc.InitiateOAuth(context.Background(), models.Scope{OrgID: orgID}, nil, "team-a")
 	if err != nil {
 		t.Fatalf("InitiateOAuth: %v", err)
 	}
-	if _, err := svc.CompleteOAuth(context.Background(), orgID, "team-a", "code#"+resp.State); err == nil {
+	if _, err := svc.CompleteOAuth(context.Background(), models.Scope{OrgID: orgID}, "team-a", "code#"+resp.State); err == nil {
 		t.Fatal("want network error")
 	}
 }
@@ -1655,11 +1684,83 @@ func TestExchangeAuthCode_MalformedResponse(t *testing.T) {
 	svc.SetProfileURL("")
 
 	orgID := uuid.New()
-	resp, err := svc.InitiateOAuth(context.Background(), orgID, nil, "team-a")
+	resp, err := svc.InitiateOAuth(context.Background(), models.Scope{OrgID: orgID}, nil, "team-a")
 	if err != nil {
 		t.Fatalf("InitiateOAuth: %v", err)
 	}
-	if _, err := svc.CompleteOAuth(context.Background(), orgID, "team-a", "code#"+resp.State); err == nil {
+	if _, err := svc.CompleteOAuth(context.Background(), models.Scope{OrgID: orgID}, "team-a", "code#"+resp.State); err == nil {
 		t.Fatal("want parse error")
 	}
+}
+
+// --- Personal-scope coverage ---
+//
+// The OAuth flow used to be exclusively org-scoped; this PR added personal
+// scope so individual users can connect their own Claude subscription as a
+// personal-stack credential. The tests below lock the new contract: scope
+// flows through Initiate, GetByProviderAndLabel sees the personal row, and
+// the personal pendingKey shape is distinct from the org one so the same
+// label can coexist across scopes.
+
+func TestPendingKey_ScopesAreDistinct(t *testing.T) {
+	t.Parallel()
+	orgID := uuid.New()
+	userID := uuid.New()
+	orgKey := pendingKey(models.Scope{OrgID: orgID}, "team-a")
+	personalKey := pendingKey(models.Scope{OrgID: orgID, UserID: &userID}, "team-a")
+	require.NotEqual(t, orgKey, personalKey, "personal scope must produce a distinct pending key")
+	require.Contains(t, personalKey, ":u:", "personal pendingKey expected to contain :u: segment")
+
+	collidingOrgLabel := "u:" + userID.String() + ":team-a"
+	collidingOrgKey := pendingKey(models.Scope{OrgID: orgID}, collidingOrgLabel)
+	require.NotEqual(t, collidingOrgKey, personalKey, "org labels must not be able to collide with personal pending keys")
+}
+
+func TestInitiateOAuth_PersonalScope(t *testing.T) {
+	t.Parallel()
+
+	store := newMockCredentialStore()
+	svc := NewService(store, zerolog.Nop())
+
+	orgID := uuid.New()
+	userID := uuid.New()
+	personalScope := models.Scope{OrgID: orgID, UserID: &userID}
+
+	resp, err := svc.InitiateOAuth(context.Background(), personalScope, &userID, "personal-claude")
+	require.NoError(t, err)
+	require.NotEmpty(t, resp.State, "personal OAuth must produce a CSRF state")
+	require.Contains(t, resp.AuthorizeURL, "code_challenge=", "authorize URL missing PKCE challenge")
+
+	cred, err := store.GetByProviderAndLabel(context.Background(), personalScope, models.ProviderAnthropic, "personal-claude")
+	require.NoError(t, err, "personal pending row must be persisted")
+	require.Equal(t, "pending_auth", cred.Status, "personal row must start in pending_auth")
+	require.NotNil(t, cred.CreatedBy)
+	require.Equal(t, userID, *cred.CreatedBy)
+
+	_, err = store.GetByProviderAndLabel(context.Background(), models.Scope{OrgID: orgID}, models.ProviderAnthropic, "personal-claude")
+	require.Error(t, err, "personal-scope row must not be visible to an org-scope read")
+}
+
+func TestInitiateOAuth_SameLabelAcrossScopes(t *testing.T) {
+	// A user adding a personal "claude-pro" subscription must not collide
+	// with an org-scope "claude-pro" subscription that already exists.
+	t.Parallel()
+
+	store := newMockCredentialStore()
+	svc := NewService(store, zerolog.Nop())
+
+	orgID := uuid.New()
+	userID := uuid.New()
+	label := "claude-pro"
+
+	_, err := svc.InitiateOAuth(context.Background(), models.Scope{OrgID: orgID}, nil, label)
+	require.NoError(t, err, "org initiate should succeed")
+	_, err = svc.InitiateOAuth(context.Background(), models.Scope{OrgID: orgID, UserID: &userID}, &userID, label)
+	require.NoError(t, err, "personal initiate with the same label must succeed")
+
+	orgRow, err := store.GetByProviderAndLabel(context.Background(), models.Scope{OrgID: orgID}, models.ProviderAnthropic, label)
+	require.NoError(t, err)
+	personalRow, err := store.GetByProviderAndLabel(context.Background(), models.Scope{OrgID: orgID, UserID: &userID}, models.ProviderAnthropic, label)
+	require.NoError(t, err)
+	require.NotEqual(t, orgRow.ID, personalRow.ID, "org and personal rows must be distinct credentials despite sharing the label")
 }

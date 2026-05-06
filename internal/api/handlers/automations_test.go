@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -95,6 +96,74 @@ func newAutomationRequest(t *testing.T, method, path string, body any, orgID uui
 		ctx = context.WithValue(ctx, chi.RouteCtxKey, rctx)
 	}
 	return req.WithContext(ctx)
+}
+
+type stubAutomationOrgLookup struct {
+	org models.Organization
+	err error
+}
+
+func (s *stubAutomationOrgLookup) GetByID(context.Context, uuid.UUID) (models.Organization, error) {
+	if s.err != nil {
+		return models.Organization{}, s.err
+	}
+	return s.org, nil
+}
+
+type stubAutomationOrgCredentialLookup struct {
+	list []models.DecryptedCredential
+	get  *models.DecryptedCredential
+	err  error
+}
+
+func (s *stubAutomationOrgCredentialLookup) ListByProvider(context.Context, uuid.UUID, models.ProviderName) ([]models.DecryptedCredential, error) {
+	if s.err != nil {
+		return nil, s.err
+	}
+	return s.list, nil
+}
+
+func (s *stubAutomationOrgCredentialLookup) Get(context.Context, uuid.UUID, models.ProviderName) (*models.DecryptedCredential, error) {
+	if s.err != nil {
+		return nil, s.err
+	}
+	return s.get, nil
+}
+
+type stubAutomationUserCredentialLookup struct {
+	rows []models.DecryptedUserCredential
+	err  error
+}
+
+func (s *stubAutomationUserCredentialLookup) ListTeamDefaults(context.Context, uuid.UUID) ([]models.DecryptedUserCredential, error) {
+	if s.err != nil {
+		return nil, s.err
+	}
+	return s.rows, nil
+}
+
+type stubAutomationCodingAuthLookup struct {
+	rows []models.CodingAuth
+	err  error
+}
+
+func (s *stubAutomationCodingAuthLookup) ListCodingAuths(context.Context, uuid.UUID) ([]models.CodingAuth, error) {
+	if s.err != nil {
+		return nil, s.err
+	}
+	return s.rows, nil
+}
+
+type stubAutomationCodingCredentialLookup struct {
+	rows []models.DecryptedCodingCredential
+	err  error
+}
+
+func (s *stubAutomationCodingCredentialLookup) ListByScope(context.Context, models.Scope) ([]models.DecryptedCodingCredential, error) {
+	if s.err != nil {
+		return nil, s.err
+	}
+	return s.rows, nil
 }
 
 // --- List ---
@@ -210,6 +279,8 @@ func TestAutomationHandler_Get_NotFound(t *testing.T) {
 func TestAutomationHandler_Create_ValidationErrors(t *testing.T) {
 	t.Parallel()
 
+	longGoal := strings.Repeat("g", automationGoalMaxLength+1)
+
 	tests := []struct {
 		name string
 		body any
@@ -224,6 +295,9 @@ func TestAutomationHandler_Create_ValidationErrors(t *testing.T) {
 		{name: "invalid interval unit", body: map[string]any{"name": "n", "goal": "g", "interval_unit": "fortnights"}, code: http.StatusBadRequest},
 		{name: "invalid interval run at", body: map[string]any{"name": "n", "goal": "g", "interval_run_at": "09:37"}, code: http.StatusBadRequest},
 		{name: "invalid exec mode", body: map[string]any{"name": "n", "goal": "g", "execution_mode": "mayhem"}, code: http.StatusBadRequest},
+		{name: "invalid agent type", body: map[string]any{"name": "n", "goal": "g", "agent_type": "bogus"}, code: http.StatusBadRequest},
+		{name: "invalid model", body: map[string]any{"name": "n", "goal": "g", "model": "not-a-real-model"}, code: http.StatusBadRequest},
+		{name: "goal too long", body: map[string]any{"name": "n", "goal": longGoal}, code: http.StatusBadRequest},
 		{name: "max_concurrent too high", body: map[string]any{"name": "n", "goal": "g", "max_concurrent": 9999}, code: http.StatusBadRequest},
 		{name: "priority out of range", body: map[string]any{"name": "n", "goal": "g", "priority": 999}, code: http.StatusBadRequest},
 		// Cross-typed schedule fields are rejected up front so client bugs
@@ -294,6 +368,107 @@ func TestAutomationHandler_Create_OK(t *testing.T) {
 	h.Create(rr, req)
 	require.Equal(t, http.StatusCreated, rr.Code)
 	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestAutomationHandler_Create_ModelInfersAgentType(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	newID := uuid.New()
+	now := time.Now()
+	mock.ExpectQuery("INSERT INTO automations").
+		WithArgs(testAnyArgs(20)...).
+		WillReturnRows(
+			pgxmock.NewRows([]string{"id", "created_at", "updated_at"}).AddRow(newID, now, now),
+		)
+
+	h := NewAutomationHandler(db.NewAutomationStore(mock), db.NewAutomationRunStore(mock))
+	body := map[string]any{
+		"name":           "my automation",
+		"goal":           "poke at things",
+		"interval_value": 2,
+		"interval_unit":  "days",
+		"model":          "claude-sonnet-4-6",
+	}
+	req := newAutomationRequest(t, http.MethodPost, "/api/v1/automations", body, uuid.New(), uuid.New(), nil)
+	rr := httptest.NewRecorder()
+	h.Create(rr, req)
+	require.Equal(t, http.StatusCreated, rr.Code)
+
+	var resp models.SingleResponse[models.Automation]
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
+	require.NotNil(t, resp.Data.AgentType)
+	require.Equal(t, string(models.AgentTypeClaudeCode), *resp.Data.AgentType)
+	require.NotNil(t, resp.Data.ModelOverride)
+	require.Equal(t, "claude-sonnet-4-6", *resp.Data.ModelOverride)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestAutomationHandler_Create_RejectsUnavailableValidModel(t *testing.T) {
+	t.Parallel()
+
+	h := NewAutomationHandler(nil, nil)
+	h.SetOrgStore(&stubAutomationOrgLookup{org: models.Organization{Settings: json.RawMessage(`{}`)}})
+	h.SetOrgCredentialStore(&stubAutomationOrgCredentialLookup{})
+	h.SetUserCredentialStore(&stubAutomationUserCredentialLookup{})
+	h.SetCodingAuthStore(&stubAutomationCodingAuthLookup{})
+	h.SetCodingCredentialStore(&stubAutomationCodingCredentialLookup{})
+
+	body := map[string]any{
+		"name":           "my automation",
+		"goal":           "poke at things",
+		"interval_value": 2,
+		"interval_unit":  "days",
+		"model":          "claude-sonnet-4-6",
+	}
+	req := newAutomationRequest(t, http.MethodPost, "/api/v1/automations", body, uuid.New(), uuid.New(), nil)
+	rr := httptest.NewRecorder()
+	h.Create(rr, req)
+	require.Equal(t, http.StatusBadRequest, rr.Code, "Create should reject a valid model when no usable credentials exist")
+
+	var resp models.ErrorResponse
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp), "Create should return a JSON error response")
+	require.Equal(t, "INVALID_MODEL", resp.Error.Code, "Create should classify unavailable models as INVALID_MODEL")
+	require.Contains(t, resp.Error.Message, "configure a team-usable credential first", "Create should explain how to make the model available")
+}
+
+func TestAutomationHandler_Create_AllowsAvailableValidModel(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	newID := uuid.New()
+	now := time.Now()
+	mock.ExpectQuery("INSERT INTO automations").
+		WithArgs(testAnyArgs(20)...).
+		WillReturnRows(
+			pgxmock.NewRows([]string{"id", "created_at", "updated_at"}).AddRow(newID, now, now),
+		)
+
+	h := NewAutomationHandler(db.NewAutomationStore(mock), db.NewAutomationRunStore(mock))
+	h.SetCodingAuthStore(&stubAutomationCodingAuthLookup{
+		rows: []models.CodingAuth{
+			{Agent: models.AgentTypeClaudeCode, Status: models.CodingAuthStatusHealthy},
+		},
+	})
+
+	body := map[string]any{
+		"name":           "my automation",
+		"goal":           "poke at things",
+		"interval_value": 2,
+		"interval_unit":  "days",
+		"model":          "claude-sonnet-4-6",
+	}
+	req := newAutomationRequest(t, http.MethodPost, "/api/v1/automations", body, uuid.New(), uuid.New(), nil)
+	rr := httptest.NewRecorder()
+	h.Create(rr, req)
+	require.Equal(t, http.StatusCreated, rr.Code, "Create should allow a valid model when a matching healthy coding auth exists")
+	require.NoError(t, mock.ExpectationsWereMet(), "Create should insert the automation")
 }
 
 // TestAutomationHandler_Create_IntervalNonUTCTimezone locks in the post-
@@ -418,6 +593,8 @@ func TestAutomationHandler_Create_RepoIDFailsClosedWhenNoStore(t *testing.T) {
 func TestAutomationHandler_Update_ValidationErrors(t *testing.T) {
 	t.Parallel()
 
+	longGoal := strings.Repeat("g", automationGoalMaxLength+1)
+
 	tests := []struct {
 		name string
 		body any
@@ -425,6 +602,7 @@ func TestAutomationHandler_Update_ValidationErrors(t *testing.T) {
 	}{
 		{name: "blank name", body: map[string]any{"name": "   "}, code: http.StatusBadRequest},
 		{name: "blank goal", body: map[string]any{"goal": "   "}, code: http.StatusBadRequest},
+		{name: "goal too long", body: map[string]any{"goal": longGoal}, code: http.StatusBadRequest},
 		{name: "invalid exec mode", body: map[string]any{"execution_mode": "x"}, code: http.StatusBadRequest},
 		{name: "invalid priority", body: map[string]any{"priority": 999}, code: http.StatusBadRequest},
 		{name: "cron invalid expression", body: map[string]any{"schedule_type": "cron", "cron_expression": "nope"}, code: http.StatusBadRequest},
@@ -438,6 +616,8 @@ func TestAutomationHandler_Update_ValidationErrors(t *testing.T) {
 		{name: "invalid interval value", body: map[string]any{"interval_value": -1}, code: http.StatusBadRequest},
 		{name: "invalid interval unit", body: map[string]any{"interval_unit": "bogus"}, code: http.StatusBadRequest},
 		{name: "invalid interval run at", body: map[string]any{"interval_run_at": "11:07"}, code: http.StatusBadRequest},
+		{name: "invalid agent type", body: map[string]any{"agent_type": "bogus"}, code: http.StatusBadRequest},
+		{name: "invalid model", body: map[string]any{"model": "not-a-real-model"}, code: http.StatusBadRequest},
 		// Reject mismatched companion fields up front: existing automation
 		// is interval, so cron_expression on its own should 400 (not be
 		// silently dropped during normalisation).
@@ -523,6 +703,52 @@ func TestAutomationHandler_Update_OK(t *testing.T) {
 	rr := httptest.NewRecorder()
 	h.Update(rr, req)
 	require.Equal(t, http.StatusOK, rr.Code)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestAutomationHandler_Update_BlankModelPreservesExplicitAgentType(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	orgID := uuid.New()
+	id := uuid.New()
+	now := time.Now()
+	iv := 1
+	unit := "days"
+	agentType := string(models.AgentTypeClaudeCode)
+	model := "claude-sonnet-4-6"
+	a := models.Automation{
+		ID: id, OrgID: orgID, Name: "a", Goal: "g",
+		AgentType: &agentType, ModelOverride: &model,
+		ExecutionMode: "sequential", BaseBranch: "main", ScheduleType: "interval",
+		Timezone: "UTC", Enabled: true, IntervalValue: &iv, IntervalUnit: &unit,
+		CreatedAt: now, UpdatedAt: now,
+	}
+
+	mock.ExpectQuery("SELECT .+ FROM automations WHERE id =").
+		WithArgs(testAnyArgs(2)...).
+		WillReturnRows(newAutomationRow(mock, a))
+	mock.ExpectExec("UPDATE automations SET").
+		WithArgs(testAnyArgs(22)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	h := NewAutomationHandler(db.NewAutomationStore(mock), db.NewAutomationRunStore(mock))
+	body := map[string]any{
+		"model": "",
+	}
+	req := newAutomationRequest(t, http.MethodPatch, "/api/v1/automations/"+id.String(), body, orgID, uuid.New(), map[string]string{"id": id.String()})
+	rr := httptest.NewRecorder()
+	h.Update(rr, req)
+	require.Equal(t, http.StatusOK, rr.Code)
+
+	var resp models.SingleResponse[models.Automation]
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
+	require.NotNil(t, resp.Data.AgentType)
+	require.Equal(t, string(models.AgentTypeClaudeCode), *resp.Data.AgentType)
+	require.Nil(t, resp.Data.ModelOverride)
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 

@@ -9,7 +9,6 @@ export { ReviewToolbar, type ViewMode } from "./review-toolbar";
 export { DiffToolbar } from "./diff-toolbar";
 export { PassSelector, type DiffPassEntry, type PassRange } from "./pass-selector";
 export { DiffPane, type DiffPaneHandle } from "./diff-pane";
-export { SessionFooter } from "./session-footer";
 export { ContextExpander } from "./context-expander";
 export { KeyboardHelpOverlay } from "./keyboard-help-overlay";
 export { CommentInput } from "./comment-input";

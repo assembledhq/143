@@ -47,7 +47,7 @@ func TestNewRouter_EncryptionKeyValidation(t *testing.T) {
 			cfg := &config.Config{EncryptionMasterKey: tt.masterKey}
 			codexSvc := codexauth.NewService(nil, zerolog.Nop())
 			claudeSvc := claudecodeauth.NewService(nil, zerolog.Nop())
-			router, _, _, _, _, err := NewRouter(cfg, nil, zerolog.Nop(), nil, codexSvc, claudeSvc, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+			router, _, _, _, _, err := NewRouter(cfg, nil, zerolog.Nop(), nil, codexSvc, claudeSvc, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
 			if tt.expectErr {
 				require.Error(t, err, "NewRouter should return an error when encryption key is invalid")
 				require.Nil(t, router, "NewRouter should not construct a router with an invalid encryption key")
@@ -83,7 +83,7 @@ func TestNewRouter_GitHubAppConfigBuildsRouter(t *testing.T) {
 	codexSvc := codexauth.NewService(nil, zerolog.Nop())
 	claudeSvc := claudecodeauth.NewService(nil, zerolog.Nop())
 
-	router, _, _, _, _, err := NewRouter(cfg, nil, zerolog.Nop(), nil, codexSvc, claudeSvc, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+	router, _, _, _, _, err := NewRouter(cfg, nil, zerolog.Nop(), nil, codexSvc, claudeSvc, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
 	require.NoError(t, err, "NewRouter should build successfully when GitHub App credentials are valid")
 	require.NotNil(t, router, "NewRouter should construct a router when GitHub App credentials are valid")
 }
@@ -95,7 +95,7 @@ func TestNewRouter_WithRedisWiringBuildsRouter(t *testing.T) {
 	codexSvc := codexauth.NewService(nil, zerolog.Nop())
 	claudeSvc := claudecodeauth.NewService(nil, zerolog.Nop())
 
-	router, _, _, _, _, err := NewRouter(cfg, nil, zerolog.Nop(), nil, codexSvc, claudeSvc, nil, nil, nil, nil, nil, nil, nil, nil, nil, &cache.Client{}, &cache.SessionStreams{})
+	router, _, _, _, _, err := NewRouter(cfg, nil, zerolog.Nop(), nil, codexSvc, claudeSvc, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, &cache.Client{}, &cache.SessionStreams{})
 	require.NoError(t, err, "router construction should accept optional Redis dependencies")
 	require.NotNil(t, router, "router should still be constructed with Redis wiring enabled")
 }
@@ -124,7 +124,7 @@ func TestNewRouter_BuildsWithoutOptionalReviewWiring(t *testing.T) {
 	codexSvc := codexauth.NewService(nil, zerolog.Nop())
 	claudeSvc := claudecodeauth.NewService(nil, zerolog.Nop())
 
-	router, _, _, _, _, err := NewRouter(cfg, nil, zerolog.Nop(), nil, codexSvc, claudeSvc, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+	router, _, _, _, _, err := NewRouter(cfg, nil, zerolog.Nop(), nil, codexSvc, claudeSvc, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
 	require.NoError(t, err, "NewRouter should still construct the router without session-review wiring")
 	require.NotNil(t, router, "NewRouter should still construct the router without session-review wiring")
 }
@@ -140,7 +140,7 @@ func TestNewRouter_InternalPreviewRoutesSkipGlobalBodyLimit(t *testing.T) {
 	codexSvc := codexauth.NewService(nil, zerolog.Nop())
 	claudeSvc := claudecodeauth.NewService(nil, zerolog.Nop())
 
-	router, _, _, _, _, err := NewRouter(cfg, nil, zerolog.Nop(), nil, codexSvc, claudeSvc, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+	router, _, _, _, _, err := NewRouter(cfg, nil, zerolog.Nop(), nil, codexSvc, claudeSvc, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
 	require.NoError(t, err, "NewRouter should build successfully for worker preview route tests")
 	require.NotNil(t, router, "NewRouter should construct a router for worker preview route tests")
 
@@ -164,7 +164,7 @@ func TestNewRouter_InternalPreviewRoutesSkipGlobalRateLimit(t *testing.T) {
 	codexSvc := codexauth.NewService(nil, zerolog.Nop())
 	claudeSvc := claudecodeauth.NewService(nil, zerolog.Nop())
 
-	router, _, _, _, _, err := NewRouter(cfg, nil, zerolog.Nop(), nil, codexSvc, claudeSvc, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+	router, _, _, _, _, err := NewRouter(cfg, nil, zerolog.Nop(), nil, codexSvc, claudeSvc, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
 	require.NoError(t, err, "NewRouter should build successfully for worker preview route tests")
 	require.NotNil(t, router, "NewRouter should construct a router for worker preview route tests")
 

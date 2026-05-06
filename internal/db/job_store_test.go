@@ -122,6 +122,39 @@ func TestJobStore_Enqueue(t *testing.T) {
 	}
 }
 
+// TestJobStore_EnqueueWithOpts_PinsTargetNode verifies that EnqueueWithOpts
+// passes TargetNodeID through to the INSERT so node-affinity routing actually
+// records the pin. The plain Enqueue wrapper doesn't take a target — its
+// callers get NULL, the unpinned-claim case.
+func TestJobStore_EnqueueWithOpts_PinsTargetNode(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := NewJobStore(mock)
+	orgID := uuid.New()
+	generatedID := uuid.New()
+	target := "worker-host-c"
+
+	mock.ExpectQuery("INSERT INTO jobs").
+		WithArgs(orgID, "agent", "continue_session", pgxmock.AnyArg(), 5, jobDedupeKeyPtr("k"), &target).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(generatedID))
+
+	id, err := store.EnqueueWithOpts(context.Background(), orgID, EnqueueOpts{
+		Queue:        "agent",
+		JobType:      "continue_session",
+		Payload:      map[string]string{"session_id": "abc"},
+		Priority:     5,
+		DedupeKey:    jobDedupeKeyPtr("k"),
+		TargetNodeID: &target,
+	})
+	require.NoError(t, err)
+	require.Equal(t, generatedID, id, "EnqueueWithOpts should return the generated job id when the pin lands cleanly")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
 func TestJobStore_GetLatestFailedByType(t *testing.T) {
 	t.Parallel()
 
@@ -270,44 +303,44 @@ func TestJobStore_ClaimNextRunnable(t *testing.T) {
 				jobID := uuid.New()
 				orgID := uuid.New()
 				now := time.Now()
-				mock.ExpectQuery("WITH next_job AS[\\s\\S]*RETURNING j.id, j.org_id, j.queue, j.job_type").
-					WithArgs("worker-1", "worker-1", lockToken, int(leaseDuration.Seconds())).
+				mock.ExpectQuery("WITH dead_target_nodes AS[\\s\\S]*next_job AS[\\s\\S]*RETURNING j.id, j.org_id, j.queue, j.job_type").
+					WithArgs(pgxmock.AnyArg(), "worker-1", "worker-1", lockToken, int(leaseDuration.Seconds())).
 					WillReturnRows(pgxmock.NewRows([]string{
 						"id", "org_id", "queue", "job_type", "payload", "priority", "status",
 						"attempts", "max_attempts", "run_at", "locked_by_node_id", "locked_at",
 						"lease_expires_at", "lock_token", "run_owner_id", "last_error",
-						"dedupe_key", "created_at", "updated_at", "completed_at",
+						"dedupe_key", "target_node_id", "created_at", "updated_at", "completed_at",
 					}).AddRow(
 						jobID, orgID, "default", "run_agent", []byte(`{"session_id":"abc"}`), 5, "running",
-						1, 3, now, "worker-1", now, now.Add(leaseDuration), lockToken.String(), "worker-1", nil, nil, now, now, nil,
+						1, 3, now, "worker-1", now, now.Add(leaseDuration), lockToken.String(), "worker-1", nil, nil, nil, now, now, nil,
 					))
 			},
 		},
 		{
-			name: "hydrates optional persisted fields",
+			name: "hydrates optional persisted fields including target node",
 			setupMock: func(mock pgxmock.PgxPoolIface, leaseDuration time.Duration, lockToken uuid.UUID) {
 				jobID := uuid.New()
 				orgID := uuid.New()
 				now := time.Now()
 				completedAt := now.Add(time.Minute)
-				mock.ExpectQuery("WITH next_job AS[\\s\\S]*RETURNING j.id, j.org_id, j.queue, j.job_type").
-					WithArgs("worker-1", "worker-1", lockToken, int(leaseDuration.Seconds())).
+				mock.ExpectQuery("WITH dead_target_nodes AS[\\s\\S]*next_job AS[\\s\\S]*RETURNING j.id, j.org_id, j.queue, j.job_type").
+					WithArgs(pgxmock.AnyArg(), "worker-1", "worker-1", lockToken, int(leaseDuration.Seconds())).
 					WillReturnRows(pgxmock.NewRows([]string{
 						"id", "org_id", "queue", "job_type", "payload", "priority", "status",
 						"attempts", "max_attempts", "run_at", "locked_by_node_id", "locked_at",
 						"lease_expires_at", "lock_token", "run_owner_id", "last_error",
-						"dedupe_key", "created_at", "updated_at", "completed_at",
+						"dedupe_key", "target_node_id", "created_at", "updated_at", "completed_at",
 					}).AddRow(
 						jobID, orgID, "default", "run_agent", []byte(`{"session_id":"abc"}`), 5, "running",
-						1, 3, now, "worker-1", now, now.Add(leaseDuration), lockToken.String(), "worker-1", "boom", "dedupe-1", now, now, completedAt,
+						1, 3, now, "worker-1", now, now.Add(leaseDuration), lockToken.String(), "worker-1", "boom", "dedupe-1", "worker-1", now, now, completedAt,
 					))
 			},
 		},
 		{
 			name: "returns nil when no pending job exists",
 			setupMock: func(mock pgxmock.PgxPoolIface, leaseDuration time.Duration, lockToken uuid.UUID) {
-				mock.ExpectQuery("WITH next_job AS[\\s\\S]*RETURNING j.id, j.org_id, j.queue, j.job_type").
-					WithArgs("worker-1", "worker-1", lockToken, int(leaseDuration.Seconds())).
+				mock.ExpectQuery("WITH dead_target_nodes AS[\\s\\S]*next_job AS[\\s\\S]*RETURNING j.id, j.org_id, j.queue, j.job_type").
+					WithArgs(pgxmock.AnyArg(), "worker-1", "worker-1", lockToken, int(leaseDuration.Seconds())).
 					WillReturnError(pgx.ErrNoRows)
 			},
 			expectNil: true,
@@ -315,8 +348,8 @@ func TestJobStore_ClaimNextRunnable(t *testing.T) {
 		{
 			name: "returns query errors",
 			setupMock: func(mock pgxmock.PgxPoolIface, leaseDuration time.Duration, lockToken uuid.UUID) {
-				mock.ExpectQuery("WITH next_job AS[\\s\\S]*RETURNING j.id, j.org_id, j.queue, j.job_type").
-					WithArgs("worker-1", "worker-1", lockToken, int(leaseDuration.Seconds())).
+				mock.ExpectQuery("WITH dead_target_nodes AS[\\s\\S]*next_job AS[\\s\\S]*RETURNING j.id, j.org_id, j.queue, j.job_type").
+					WithArgs(pgxmock.AnyArg(), "worker-1", "worker-1", lockToken, int(leaseDuration.Seconds())).
 					WillReturnError(errors.New("db down"))
 			},
 			expectErr: true,
@@ -663,6 +696,69 @@ func TestJobStore_OldestPendingSessionJobAge_ReturnsWrappedErrors(t *testing.T) 
 	require.Contains(t, err.Error(), "oldest pending session job age", "OldestPendingSessionJobAge should preserve the operation context")
 	require.False(t, ok, "OldestPendingSessionJobAge should report no backlog measurement on query error")
 	require.Zero(t, age, "OldestPendingSessionJobAge should return a zero age on query error")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestJobStore_QueueHealthSamples(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewJobStore(mock)
+	mock.ExpectQuery("SELECT\\s+queue,\\s+job_type").
+		WillReturnRows(pgxmock.NewRows([]string{
+			"queue",
+			"job_type",
+			"pending_runnable",
+			"pending_deferred",
+			"running",
+			"dead_letter",
+			"oldest_runnable_age_seconds",
+		}).AddRow("agent", "run_agent", int64(3), int64(2), int64(1), int64(0), float64(42)).
+			AddRow("default", "open_pr", int64(0), int64(1), int64(0), int64(2), nil))
+
+	samples, err := store.QueueHealthSamples(context.Background())
+	require.NoError(t, err, "QueueHealthSamples should not return an error")
+	require.Equal(t, []JobQueueHealthSample{
+		{
+			Queue:                    "agent",
+			JobType:                  "run_agent",
+			PendingRunnable:          3,
+			PendingDeferred:          2,
+			Running:                  1,
+			DeadLetter:               0,
+			OldestRunnableAgeSeconds: 42,
+		},
+		{
+			Queue:                    "default",
+			JobType:                  "open_pr",
+			PendingRunnable:          0,
+			PendingDeferred:          1,
+			Running:                  0,
+			DeadLetter:               2,
+			OldestRunnableAgeSeconds: 0,
+		},
+	}, samples, "QueueHealthSamples should return grouped queue health rows")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestJobStore_QueueHealthSamples_ReturnsWrappedErrors(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewJobStore(mock)
+	mock.ExpectQuery("SELECT\\s+queue,\\s+job_type").
+		WillReturnError(errors.New("query failed"))
+
+	samples, err := store.QueueHealthSamples(context.Background())
+	require.Error(t, err, "QueueHealthSamples should return query errors")
+	require.Contains(t, err.Error(), "queue health samples", "QueueHealthSamples should wrap the operation context")
+	require.Nil(t, samples, "QueueHealthSamples should return nil samples on error")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 

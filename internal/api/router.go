@@ -41,7 +41,7 @@ import (
 	"github.com/assembledhq/143/internal/services/workspace"
 )
 
-func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, sentryReporter observability.Reporter, codexAuthSvc *codexauth.Service, claudeCodeAuthSvc *claudecodeauth.Service, llmClient llm.Client, fileReader sandbox.FileReader, canceller handlers.SessionCanceller, previewProvider preview.PreviewCapableProvider, snapshotExecutor preview.SnapshotExecutor, sandboxProvider agent.SandboxProvider, snapshotStore storage.SnapshotStore, orgSettingsInvalidator handlers.OrgSettingsInvalidator, shutdownCh <-chan struct{}, redisClient *cache.Client, sessionStreams *cache.SessionStreams, sharedCodingCredentialStore ...*db.CodingCredentialStore) (*chi.Mux, *http.Server, *preview.RecycleWorker, io.Closer, *preview.Manager, error) {
+func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, sentryReporter observability.Reporter, codexAuthSvc *codexauth.Service, claudeCodeAuthSvc *claudecodeauth.Service, llmClient llm.Client, fileReader sandbox.FileReader, canceller handlers.SessionCanceller, threadCanceller *agent.ThreadCancelRegistry, previewProvider preview.PreviewCapableProvider, snapshotExecutor preview.SnapshotExecutor, sandboxProvider agent.SandboxProvider, snapshotStore storage.SnapshotStore, orgSettingsInvalidator handlers.OrgSettingsInvalidator, shutdownCh <-chan struct{}, redisClient *cache.Client, sessionStreams *cache.SessionStreams, sharedCodingCredentialStore ...*db.CodingCredentialStore) (*chi.Mux, *http.Server, *preview.RecycleWorker, io.Closer, *preview.Manager, error) {
 	// Create stores
 	orgStore := db.NewOrganizationStore(pool)
 	userStore := db.NewUserStore(pool)
@@ -193,6 +193,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	issueHandler := handlers.NewIssueHandler(issueStore)
 	sessionMessageStore := db.NewSessionMessageStore(pool)
 	sessionThreadStore := db.NewSessionThreadStore(pool)
+	sessionThreadFileEventStore := db.NewSessionThreadFileEventStore(pool)
 	sessionViewStore := db.NewSessionViewStore(pool)
 	sessionComposerHandler := handlers.NewSessionComposerHandler(repoStore, prService)
 	pullRequestHandler := handlers.NewPullRequestHandler(prService)
@@ -228,12 +229,17 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 		Integrations:       integrationStore,
 		IntegrationsWriter: integrationStore,
 		Credentials:        credentialStore,
+		CredentialsWriter:  credentialStore,
 		Issues:             issueStore,
 		Sessions:           sessionStore,
 		IssueLinks:         sessionIssueLinkStore,
 		Orgs:               orgStore,
 		Jobs:               jobStore,
-		AppBaseURL:         cfg.FrontendURL,
+		OAuthClient: linear.OAuthClientCreds{
+			ClientID:     cfg.LinearOAuthClientID,
+			ClientSecret: cfg.LinearOAuthClientSecret,
+		},
+		AppBaseURL: cfg.FrontendURL,
 	})
 	if sessionStreams != nil {
 		// Republish session status on every link change so the detail view
@@ -276,7 +282,29 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 		jobStore,
 		logger,
 	)
+	threadSvc.SetFileEventStore(sessionThreadFileEventStore)
+	if threadCanceller != nil {
+		threadSvc.SetCanceller(threadCanceller)
+	}
+	// Wire review-comment resolution so SendThreadMessage can resolve
+	// comments atomically with the message create — same invariant the
+	// session-level SendMessage already enforces. Without this, the
+	// "submitted comments stick around for the next turn" bug surfaces on
+	// any session whose follow-up flows through a thread tab.
+	threadSvc.SetReviewCommentResolver(pool, sessionReviewCommentStore)
+	// Wire the question store so a follow-up sent to an awaiting_input
+	// session via a thread tab flips the latest pending question to
+	// 'answered' atomically with the message create — same invariant the
+	// session-level handler maintains. Without this, question state
+	// diverges from the resumed run on the thread surface.
+	threadSvc.SetQuestionStore(sessionQuestionStore)
 	sessionThreadHandler := handlers.NewSessionThreadHandler(threadSvc)
+	sessionThreadHandler.SetAuditEmitter(auditEmitter)
+	sessionThreadHandler.SetLogger(logger)
+	// Mirror sessionHandler.SetLinearLinker so Linear refs typed into a
+	// thread tab follow-up get the same fail-soft mid-session linking the
+	// legacy session surface already provides.
+	sessionThreadHandler.SetLinearLinker(linearService)
 	pmHandler := handlers.NewPMHandler(pmPlanStore, pmDecisionLogStore, jobStore, orgStore)
 	priorityHandler := handlers.NewPriorityHandler(priorityScoreStore, complexityEstimateStore, jobStore)
 	ingestionWebhookHandler := handlers.NewIngestionWebhookHandler(webhookDeliveryStore, integrationStore, credentialStore, ingestionSvc, logger)
@@ -316,6 +344,11 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	automationHandler := handlers.NewAutomationHandler(automationStore, automationRunStore)
 	automationHandler.SetJobStore(jobStore)
 	automationHandler.SetRepositoryStore(repoStore)
+	automationHandler.SetOrgStore(orgStore)
+	automationHandler.SetOrgCredentialStore(credentialStore)
+	automationHandler.SetUserCredentialStore(userCredentialStore)
+	automationHandler.SetCodingAuthStore(credentialStore)
+	automationHandler.SetCodingCredentialStore(codingCredentialStore)
 	automationHandler.SetPool(pool)
 	automationHandler.SetLogger(logger)
 
@@ -385,7 +418,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	auditLogHandler := handlers.NewAuditLogHandler(auditLogStore)
 	sessionReviewCommentHandler := handlers.NewSessionReviewCommentHandler(sessionReviewCommentStore, sessionStore, logger)
 	sessionReviewCommentHandler.SetAuditEmitter(auditEmitter)
-	sessionReviewCommentHandler.SetMessageAndJobStores(sessionMessageStore, jobStore)
+	sessionReviewCommentHandler.SetMessageAndJobStores(sessionMessageStore, sessionThreadStore, jobStore)
 	// Initialize the session-files snapshot cache so that file-context reads
 	// keep working after the live container is torn down. The cache is
 	// best-effort: a build error here is logged and the handler falls back
@@ -712,6 +745,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Get("/api/v1/sessions/{id}/threads/{tid}", sessionThreadHandler.GetThread)
 				r.Get("/api/v1/sessions/{id}/threads/{tid}/messages", sessionThreadHandler.GetThreadMessages)
 				r.Get("/api/v1/sessions/{id}/threads/{tid}/logs", sessionThreadHandler.GetThreadLogs)
+				r.Get("/api/v1/sessions/{id}/thread-file-events", sessionThreadHandler.ListThreadFileEvents)
 				r.Get("/api/v1/sessions/{id}/review-comments", sessionReviewCommentHandler.List)
 				r.Get("/api/v1/sessions/{id}/usage", usageHandler.ListBySession)
 				r.Get("/api/v1/usage", usageHandler.GetSummary)
@@ -778,6 +812,22 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Get("/api/v1/settings/codex-auth/subscriptions", codexAuthHandler.List)
 				r.Get("/api/v1/settings/claude-code-auth/subscriptions", claudeCodeAuthHandler.List)
 
+				// Codex / Claude OAuth subscription flows. Org-scope writes are
+				// admin-gated inside each handler (see resolveOAuthScope);
+				// personal-scope writes are available to any member because they
+				// target the caller's own credential rows. Routing both into the
+				// admin+member group lets a single endpoint serve both cases —
+				// the handler decides based on the request's scope param.
+				r.Post("/api/v1/settings/codex-auth/initiate", codexAuthHandler.Initiate)
+				r.Get("/api/v1/settings/codex-auth/status", codexAuthHandler.Status)
+				r.Post("/api/v1/settings/codex-auth/disconnect", codexAuthHandler.DisconnectAll) // legacy compat
+				r.Delete("/api/v1/settings/codex-auth/subscriptions/{id}", codexAuthHandler.DisconnectByPath)
+
+				r.Post("/api/v1/settings/claude-code-auth/initiate", claudeCodeAuthHandler.Initiate)
+				r.Post("/api/v1/settings/claude-code-auth/complete", claudeCodeAuthHandler.Complete)
+				r.Post("/api/v1/settings/claude-code-auth/disconnect", claudeCodeAuthHandler.DisconnectAll) // legacy compat
+				r.Delete("/api/v1/settings/claude-code-auth/subscriptions/{id}", claudeCodeAuthHandler.DisconnectByPath)
+
 				// Unified coding-credentials writes. Personal-scope mutations live in
 				// this group because they target the requester's own credentials and
 				// do not require admin privileges for members. The handler enforces
@@ -834,6 +884,9 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Post("/api/v1/sessions/{id}/threads", sessionThreadHandler.CreateThread)
 				r.Post("/api/v1/sessions/{id}/threads/{tid}/messages", sessionThreadHandler.SendThreadMessage)
 				r.Post("/api/v1/sessions/{id}/threads/{tid}/end", sessionThreadHandler.EndThread)
+				r.Post("/api/v1/sessions/{id}/threads/{tid}/cancel", sessionThreadHandler.CancelThread)
+				r.Post("/api/v1/sessions/{id}/threads/{tid}/fork", sessionThreadHandler.ForkThread)
+				r.Post("/api/v1/sessions/{id}/threads/{tid}/revert", sessionThreadHandler.RevertThread)
 				r.Post("/api/v1/sessions/{id}/review-comments", sessionReviewCommentHandler.Create)
 				r.Post("/api/v1/sessions/{id}/preview", previewHandler.StartPreview)
 				r.Delete("/api/v1/sessions/{id}/preview", previewHandler.StopPreview)
@@ -921,23 +974,11 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Put("/api/v1/settings/credentials/team/{provider}", userCredentialHandler.SetTeamDefault)
 				r.Delete("/api/v1/settings/credentials/team/{provider}", userCredentialHandler.DeleteTeamDefault)
 
-				// Codex (ChatGPT) OAuth device code auth. Subscription List is
-				// registered in the admin+member group so members can see which
-				// subscriptions are configured; everything else is admin-only.
-				r.Post("/api/v1/settings/codex-auth/initiate", codexAuthHandler.Initiate)
-				r.Get("/api/v1/settings/codex-auth/status", codexAuthHandler.Status)
-				r.Post("/api/v1/settings/codex-auth/disconnect", codexAuthHandler.DisconnectAll) // legacy compat
-				r.Delete("/api/v1/settings/codex-auth/subscriptions/{id}", codexAuthHandler.DisconnectByPath)
-
-				// Claude Code (Anthropic subscription) OAuth — PKCE authorization-code
-				// flow: initiate returns an authorize URL, user pastes back
-				// `<code>#<state>` which /complete exchanges for tokens. Subscription
-				// List sits in the admin+member group; everything else stays
-				// admin-only.
-				r.Post("/api/v1/settings/claude-code-auth/initiate", claudeCodeAuthHandler.Initiate)
-				r.Post("/api/v1/settings/claude-code-auth/complete", claudeCodeAuthHandler.Complete)
-				r.Post("/api/v1/settings/claude-code-auth/disconnect", claudeCodeAuthHandler.DisconnectAll) // legacy compat
-				r.Delete("/api/v1/settings/claude-code-auth/subscriptions/{id}", claudeCodeAuthHandler.DisconnectByPath)
+				// Codex / Claude OAuth subscription endpoints moved to the
+				// admin+member group above. The handlers' resolveOAuthScope
+				// keeps the admin gate on org-scope traffic, so members
+				// disconnecting their own personal subscription doesn't
+				// require elevating them to admin.
 
 				// Usage timeseries, breakdown, and export (admin-only)
 				r.Get("/api/v1/usage/timeseries", usageHandler.GetTimeseries)

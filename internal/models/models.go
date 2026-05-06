@@ -181,6 +181,7 @@ type Issue struct {
 // issue linked (zero-issue sessions are a first-class execution path).
 type Session struct {
 	ID                  uuid.UUID               `db:"id" json:"id"`
+	PrimaryThreadID     *uuid.UUID              `db:"-" json:"-"`
 	PrimaryIssueID      *uuid.UUID              `db:"primary_issue_id" json:"primary_issue_id"`
 	OrgID               uuid.UUID               `db:"org_id" json:"org_id"`
 	Origin              SessionOrigin           `db:"origin" json:"origin"`
@@ -361,6 +362,10 @@ type SessionIssueLink struct {
 	// links instead of the universal redirect path. Nil for non-Linear
 	// links and Linear links written before workspace caching landed.
 	IssueWorkspaceSlug *string `db:"issue_workspace_slug" json:"issue_workspace_slug,omitempty"`
+	// LinearLastSkippedReason is the latest state-sync skip reason from
+	// provider_state. Exposed so the session detail view can explain why a
+	// linked Linear issue did not move workflow state.
+	LinearLastSkippedReason *string `db:"linear_last_skipped_reason" json:"linear_last_skipped_reason,omitempty"`
 	// RawLinearPrimarySnapshot is the JSONB primary_snapshot cached in
 	// session_issue_link_provider_state at link time. It is internal-only:
 	// the orchestrator decodes it into SessionIssueSnapshotEntry fields when
@@ -646,26 +651,47 @@ type SessionMessage struct {
 // Each thread is one agent doing one piece of work. All threads in a session
 // share the same container and filesystem.
 type SessionThread struct {
-	ID                 uuid.UUID    `db:"id" json:"id"`
-	SessionID          uuid.UUID    `db:"session_id" json:"session_id"`
-	OrgID              uuid.UUID    `db:"org_id" json:"org_id"`
-	AgentType          AgentType    `db:"agent_type" json:"agent_type"`
-	ModelOverride      *string      `db:"model_override" json:"model_override,omitempty"`
-	Label              string       `db:"label" json:"label"`
-	Instructions       *string      `db:"instructions" json:"instructions,omitempty"`
-	FileScope          []string     `db:"file_scope" json:"file_scope,omitempty"`
-	Status             ThreadStatus `db:"status" json:"status"`
-	AgentSessionID     *string      `db:"agent_session_id" json:"agent_session_id,omitempty"`
-	CurrentTurn        int          `db:"current_turn" json:"current_turn"`
-	LastActivityAt     *time.Time   `db:"last_activity_at" json:"last_activity_at,omitempty"`
-	ConfidenceScore    *float64     `db:"confidence_score" json:"confidence_score,omitempty"`
-	ResultSummary      *string      `db:"result_summary" json:"result_summary,omitempty"`
-	Diff               *string      `db:"diff" json:"diff,omitempty"`
-	FailureExplanation *string      `db:"failure_explanation" json:"failure_explanation,omitempty"`
-	FailureCategory    *string      `db:"failure_category" json:"failure_category,omitempty"`
-	StartedAt          *time.Time   `db:"started_at" json:"started_at,omitempty"`
-	CompletedAt        *time.Time   `db:"completed_at" json:"completed_at,omitempty"`
-	CreatedAt          time.Time    `db:"created_at" json:"created_at"`
+	ID                  uuid.UUID    `db:"id" json:"id"`
+	SessionID           uuid.UUID    `db:"session_id" json:"session_id"`
+	OrgID               uuid.UUID    `db:"org_id" json:"org_id"`
+	AgentType           AgentType    `db:"agent_type" json:"agent_type"`
+	ModelOverride       *string      `db:"model_override" json:"model_override,omitempty"`
+	Label               string       `db:"label" json:"label"`
+	Instructions        *string      `db:"instructions" json:"instructions,omitempty"`
+	FileScope           []string     `db:"file_scope" json:"file_scope,omitempty"`
+	Status              ThreadStatus `db:"status" json:"status"`
+	AgentSessionID      *string      `db:"agent_session_id" json:"agent_session_id,omitempty"`
+	CurrentTurn         int          `db:"current_turn" json:"current_turn"`
+	LastActivityAt      *time.Time   `db:"last_activity_at" json:"last_activity_at,omitempty"`
+	ConfidenceScore     *float64     `db:"confidence_score" json:"confidence_score,omitempty"`
+	ResultSummary       *string      `db:"result_summary" json:"result_summary,omitempty"`
+	Diff                *string      `db:"diff" json:"diff,omitempty"`
+	FailureExplanation  *string      `db:"failure_explanation" json:"failure_explanation,omitempty"`
+	FailureCategory     *string      `db:"failure_category" json:"failure_category,omitempty"`
+	StartedAt           *time.Time   `db:"started_at" json:"started_at,omitempty"`
+	CompletedAt         *time.Time   `db:"completed_at" json:"completed_at,omitempty"`
+	CreatedAt           time.Time    `db:"created_at" json:"created_at"`
+	BaseSnapshotKey     *string      `db:"base_snapshot_key" json:"base_snapshot_key,omitempty"`
+	CostCents           float64      `db:"cost_cents" json:"cost_cents"`
+	PendingMessageCount int          `db:"pending_message_count" json:"pending_message_count"`
+	CancelRequestedAt   *time.Time   `db:"cancel_requested_at" json:"cancel_requested_at,omitempty"`
+}
+
+// SessionThreadFileEvent is operational write attribution: which thread
+// touched which path, with optional git blob hashes before/after. Used to
+// power overlap badges in the tab strip and the "Touched by tab" / "Overlap
+// with another tab" filters in the Changes view. Not security attribution.
+type SessionThreadFileEvent struct {
+	ID         int64      `db:"id" json:"id"`
+	OrgID      uuid.UUID  `db:"org_id" json:"org_id"`
+	SessionID  uuid.UUID  `db:"session_id" json:"session_id"`
+	ThreadID   *uuid.UUID `db:"thread_id" json:"thread_id,omitempty"`
+	Turn       int        `db:"turn" json:"turn"`
+	Path       string     `db:"path" json:"path"`
+	EventType  string     `db:"event_type" json:"event_type"`
+	BeforeHash *string    `db:"before_hash" json:"before_hash,omitempty"`
+	AfterHash  *string    `db:"after_hash" json:"after_hash,omitempty"`
+	ObservedAt time.Time  `db:"observed_at" json:"observed_at"`
 }
 
 // SessionQuestion represents a question the agent asks a human during a run.
@@ -782,9 +808,46 @@ type Job struct {
 	RunOwnerID     *string         `db:"run_owner_id" json:"run_owner_id,omitempty"`
 	LastError      *string         `db:"last_error" json:"last_error,omitempty"`
 	DedupeKey      *string         `db:"dedupe_key" json:"dedupe_key,omitempty"`
-	CreatedAt      time.Time       `db:"created_at" json:"created_at"`
-	UpdatedAt      time.Time       `db:"updated_at" json:"updated_at"`
-	CompletedAt    *time.Time      `db:"completed_at" json:"completed_at,omitempty"`
+	// TargetNodeID, when set, restricts the job to be claimed by this
+	// specific worker node. Used for sandbox-bound jobs (continue_session,
+	// open_pr, run_agent for resume) where the work must execute on the same
+	// docker daemon as the session's recorded container_id. NULL means any
+	// worker can claim. A pinned job becomes claimable by any worker if its
+	// target node is marked dead in the `nodes` table (starvation safety).
+	TargetNodeID *string    `db:"target_node_id" json:"target_node_id,omitempty"`
+	CreatedAt    time.Time  `db:"created_at" json:"created_at"`
+	UpdatedAt    time.Time  `db:"updated_at" json:"updated_at"`
+	CompletedAt  *time.Time `db:"completed_at" json:"completed_at,omitempty"`
+}
+
+// SessionWorkerTarget returns the worker_node_id to pin sandbox-bound jobs
+// (continue_session, open_pr, run_agent for resume) to, or nil if the
+// session has no live sandbox to be pinned to.
+//
+// Pinning is correct only when the session currently owns a sandbox (its
+// container_id and worker_node_id are both populated). After a snapshot —
+// either by reaper recycling, post-PR snapshot capture, or explicit user
+// stop — container_id is cleared and any worker can hydrate fresh, so the
+// caller wants nil. Both fields are checked because container_id without
+// worker_node_id is a transient state during the AcquireTurnHold → Set
+// WorkerNodeID handshake; pinning during that window would race the
+// owner-publishing CAS.
+//
+// The defensive empty-string check guards against a malformed row where the
+// pointer is non-nil but the value is the zero string — recording an empty
+// target would make every claim attempt mismatch and starve the job.
+func SessionWorkerTarget(s *Session) *string {
+	if s == nil {
+		return nil
+	}
+	if s.ContainerID == nil || *s.ContainerID == "" {
+		return nil
+	}
+	if s.WorkerNodeID == nil || *s.WorkerNodeID == "" {
+		return nil
+	}
+	owner := *s.WorkerNodeID
+	return &owner
 }
 
 // SessionReviewComment represents an inline review comment on a session diff.

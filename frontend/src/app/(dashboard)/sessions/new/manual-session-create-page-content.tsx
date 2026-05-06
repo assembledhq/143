@@ -36,6 +36,7 @@ export function ManualSessionCreatePageContent() {
           initialRepoId={repoId}
           showDropIndicator
           dataTestId="manual-session-dropzone"
+          textareaAriaLabel="Manual session prompt"
           className={cn("mx-auto flex w-full max-w-3xl flex-1")}
           innerClassName="max-w-3xl"
           onCreated={(id) => router.push(`/sessions/${id}${filterSuffix}`)}

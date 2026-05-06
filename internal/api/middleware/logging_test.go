@@ -169,6 +169,29 @@ func TestLogging_ErrorResponsesAreLoggedAtErrorLevel(t *testing.T) {
 	}
 }
 
+func TestLogging_EmitsNumericDurationMilliseconds(t *testing.T) {
+	t.Parallel()
+
+	var logBuffer bytes.Buffer
+	logger := zerolog.New(&logBuffer)
+	handler := Logging(logger, nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/test", nil)
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, req)
+
+	var logEvent map[string]any
+	require.NoError(t, json.Unmarshal(logBuffer.Bytes(), &logEvent), "logging middleware should emit valid JSON log event")
+	require.Contains(t, logEvent, "duration", "logging middleware should keep the existing zerolog duration field")
+	require.Equal(t, "2xx", logEvent["status_class"], "logging middleware should emit status_class for request-rate dashboards")
+	durationMS, ok := logEvent["duration_ms"].(float64)
+	require.True(t, ok, "logging middleware should emit numeric duration_ms for LogsQL percentile queries")
+	require.GreaterOrEqual(t, durationMS, float64(0), "duration_ms should be non-negative")
+}
+
 func TestLogging_CapturesOnlyServerErrorsForObservability(t *testing.T) {
 	t.Parallel()
 

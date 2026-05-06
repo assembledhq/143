@@ -419,13 +419,23 @@ func (c *graphQLClient) UpdateIssueState(ctx context.Context, issueID, stateID s
 // state within the given window. Reads from Linear's issue history; we only
 // count entries that look like state transitions performed by users (not
 // integrations or webhooks).
+//
+// Self-attribution guard: history entries whose actor matches the OAuth
+// token's own viewer are filtered out. Linear attributes API-driven moves
+// to the user who authorized the OAuth integration (with botActor=null), so
+// without this filter our own previous transition would read as a "human
+// edit" on the next milestone for the same session and skip every follow-up
+// move (e.g. session-start → "In Progress" suppresses the subsequent PR-open
+// → "In Review" within the 10-min window). The viewer lookup is folded into
+// the same GraphQL request to avoid an extra round trip.
 func (c *graphQLClient) IssueRecentHumanEdits(ctx context.Context, issueID string, since time.Time) (bool, error) {
 	query := `query($id: String!) {
+		viewer { id }
 		issue(id: $id) {
 			history(first: 10) {
 				nodes {
 					createdAt
-					actor { name displayName }
+					actor { id name displayName }
 					botActor { name }
 					fromState { id }
 					toState { id }
@@ -435,11 +445,15 @@ func (c *graphQLClient) IssueRecentHumanEdits(ctx context.Context, issueID strin
 	}`
 	var result struct {
 		Data struct {
+			Viewer *struct {
+				ID string `json:"id"`
+			} `json:"viewer"`
 			Issue *struct {
 				History struct {
 					Nodes []struct {
 						CreatedAt string `json:"createdAt"`
 						Actor     *struct {
+							ID          string `json:"id"`
 							Name        string `json:"name"`
 							DisplayName string `json:"displayName"`
 						} `json:"actor"`
@@ -463,6 +477,10 @@ func (c *graphQLClient) IssueRecentHumanEdits(ctx context.Context, issueID strin
 	if result.Data.Issue == nil {
 		return false, nil
 	}
+	selfActorID := ""
+	if result.Data.Viewer != nil {
+		selfActorID = result.Data.Viewer.ID
+	}
 	for _, h := range result.Data.Issue.History.Nodes {
 		if h.FromState == nil || h.ToState == nil {
 			continue
@@ -473,6 +491,11 @@ func (c *graphQLClient) IssueRecentHumanEdits(ctx context.Context, issueID strin
 		}
 		// Skip transitions performed by bots/integrations.
 		if h.BotActor != nil && h.BotActor.Name != "" {
+			continue
+		}
+		// Skip transitions attributed to our own OAuth actor — these are
+		// 143's prior writes, not human edits worth deferring to.
+		if h.Actor != nil && selfActorID != "" && h.Actor.ID == selfActorID {
 			continue
 		}
 		if h.Actor != nil && h.Actor.Name != "" {

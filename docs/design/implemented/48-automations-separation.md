@@ -140,6 +140,7 @@ When an automation fires, the scheduler creates a run, then creates a normal ses
 - **Automation detail page shows runs:** `/automations/:id` queries `automation_runs` and displays them as the run timeline.
 - **Manual "Run now"** creates a run with `triggered_by = 'manual'` + `triggered_by_user_id` set, so it shows up in the automation's history.
 - **Config snapshots** ensure you can always see what goal/config produced a given run, even if the automation has been edited since.
+- **Model selection is optional per automation.** The UI exposes an `Auto` default plus curated coding-model choices; when a model is chosen the backend infers and persists the matching `agent_type` so spawned sessions run under the correct adapter.
 - **Trend aggregation** queries `automation_runs` directly — each run has a clear identity.
 
 ### 4.3 Migration: existing scheduled projects

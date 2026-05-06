@@ -543,7 +543,7 @@ func (d *DockerPreviewProvider) PreviewStatus(ctx context.Context, handle string
 	for name, ih := range state.infra {
 		infraList = append(infraList, infraInfo{
 			name: name, template: ih.Template, containerID: ih.ContainerID,
-			host: ih.Host, port: ih.Port,
+			host: ih.Credential.Host, port: ih.Credential.Port,
 		})
 	}
 	d.mu.RUnlock()
@@ -588,15 +588,15 @@ func (d *DockerPreviewProvider) provisionInfra(
 		return nil, fmt.Errorf("resolve sandbox network: %w", err)
 	}
 
-	cred, err := generateInfraCredential(infraName)
-	if err != nil {
-		return nil, fmt.Errorf("generate credential for %q: %w", infraName, err)
-	}
 	handlePrefix := previewHandle
 	if len(handlePrefix) > 12 {
 		handlePrefix = handlePrefix[:12]
 	}
 	containerName := fmt.Sprintf("preview-%s-%s", infraName, handlePrefix)
+	cred, err := buildInfraCredential(infraName, containerName, tmpl.DefaultPort)
+	if err != nil {
+		return nil, fmt.Errorf("generate credential for %q: %w", infraName, err)
+	}
 
 	// Ensure the image is on the host before asking Docker to create the
 	// container. Worker hosts only pre-pull the 143-server / 143-sandbox /
@@ -650,8 +650,6 @@ func (d *DockerPreviewProvider) provisionInfra(
 		InfraName:   infraName,
 		Template:    infraCfg.Template,
 		ContainerID: resp.ID,
-		Host:        containerName,
-		Port:        tmpl.DefaultPort,
 		Credential:  cred,
 	}, nil
 }
@@ -756,39 +754,6 @@ func scanPullStreamForError(r io.Reader) error {
 		return fmt.Errorf("read pull stream: %w", err)
 	}
 	return firstErr
-}
-
-// EnsureInfraImages pre-pulls every supported infrastructure template image
-// in parallel, deduplicating via the same singleflight group as the
-// on-demand path. Best-effort: failures are logged but not returned, so a
-// transient registry hiccup doesn't block server startup. Worker boot calls
-// this in a background goroutine so the first preview that needs e.g.
-// postgres:17-alpine usually finds the image already on disk and answers
-// the HTTP request well within the server's WriteTimeout.
-//
-// Safe to call multiple times (singleflight collapses to one inspect each
-// after the first run).
-func (d *DockerPreviewProvider) EnsureInfraImages(ctx context.Context) {
-	images := preview.AllInfraImages()
-	if len(images) == 0 {
-		return
-	}
-	d.logger.Info().Strs("images", images).Msg("pre-pulling preview infra images in background")
-
-	var wg sync.WaitGroup
-	for _, ref := range images {
-		ref := ref
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			if err := d.ensureImage(ctx, ref); err != nil {
-				d.logger.Warn().Err(err).Str("image", ref).Msg("preview infra image pre-pull failed; will retry on first preview start")
-				return
-			}
-		}()
-	}
-	wg.Wait()
-	d.logger.Info().Msg("preview infra image pre-pull pass complete")
 }
 
 func (d *DockerPreviewProvider) buildInfraEnv(template string, cred preview.InfraCredential) []string {
@@ -1345,12 +1310,19 @@ func resolveCredentialTemplate(template string, cred preview.InfraCredential) st
 	return r.Replace(template)
 }
 
-func generateInfraCredential(infraName string) (preview.InfraCredential, error) {
+// buildInfraCredential constructs a fully-populated InfraCredential. All five
+// fields (Host, Port, Username, Password, Database) must be set on the
+// returned value — resolveCredentialTemplate substitutes every one of them
+// into the inject_env DSN and a zero Host/Port silently produces a broken URL
+// that the consuming service tries to dial against localhost.
+func buildInfraCredential(infraName, host string, port int) (preview.InfraCredential, error) {
 	password, err := preview.RandomHex(16)
 	if err != nil {
 		return preview.InfraCredential{}, fmt.Errorf("generate infra credential password: %w", err)
 	}
 	return preview.InfraCredential{
+		Host:     host,
+		Port:     port,
 		Username: fmt.Sprintf("preview_%s", infraName),
 		Password: password,
 		Database: "preview_db",

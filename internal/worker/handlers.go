@@ -68,6 +68,8 @@ func RegisterHandlers(w *Worker, stores *Stores, services *Services, retentionCf
 		w.Register("reconcile_pull_request_state", newReconcilePullRequestStateHandler(services, logger))
 		w.Register("enrich_pull_request_health", newEnrichPullRequestHealthHandler(services, logger))
 		w.Register("analyze_failure", newAnalyzeFailureHandler(stores, services, logger))
+		w.Register("fork_session_thread", newForkSessionThreadHandler(stores, services, logger))
+		w.Register("revert_session_thread", newRevertSessionThreadHandler(stores, services, logger))
 	}
 	if services != nil && services.Feedback != nil {
 		w.Register("process_review_comment", newProcessReviewCommentHandler(services, logger))
@@ -115,19 +117,20 @@ type Stores struct {
 	Webhooks            *db.WebhookDeliveryStore
 	PriorityScores      *db.PriorityScoreStore
 	ComplexityEstimates *db.ComplexityEstimateStore
-	Projects            *db.ProjectStore        // nil-safe: projects feature disabled if nil
-	ProjectTasks        *db.ProjectTaskStore    // nil-safe
-	Credentials         *db.OrgCredentialStore  // nil-safe: needed for sync_slack
-	AuditLogs           *db.AuditLogStore       // nil-safe: audit retention cleanup
-	Organizations       *db.OrganizationStore   // nil-safe: needed for audit retention
-	SessionLogs         *db.SessionLogStore     // nil-safe: data retention cleanup
-	EvalTasks           *db.EvalTaskStore       // nil-safe: eval feature
-	EvalRuns            *db.EvalRunStore        // nil-safe: eval feature
-	EvalBatches         *db.EvalBatchStore      // nil-safe: eval feature
-	EvalBootstraps      *db.EvalBootstrapStore  // nil-safe: eval bootstrap feature
-	Repositories        *db.RepositoryStore     // nil-safe: needed for eval repo lookup
-	SessionMessages     *db.SessionMessageStore // nil-safe: needed for title regeneration
-	SessionThreads      *db.SessionThreadStore  // nil-safe: needed for thread-scoped continuation status
+	Projects            *db.ProjectStore                // nil-safe: projects feature disabled if nil
+	ProjectTasks        *db.ProjectTaskStore            // nil-safe
+	Credentials         *db.OrgCredentialStore          // nil-safe: needed for sync_slack
+	AuditLogs           *db.AuditLogStore               // nil-safe: audit retention cleanup
+	Organizations       *db.OrganizationStore           // nil-safe: needed for audit retention
+	SessionLogs         *db.SessionLogStore             // nil-safe: data retention cleanup
+	EvalTasks           *db.EvalTaskStore               // nil-safe: eval feature
+	EvalRuns            *db.EvalRunStore                // nil-safe: eval feature
+	EvalBatches         *db.EvalBatchStore              // nil-safe: eval feature
+	EvalBootstraps      *db.EvalBootstrapStore          // nil-safe: eval bootstrap feature
+	Repositories        *db.RepositoryStore             // nil-safe: needed for eval repo lookup
+	SessionMessages     *db.SessionMessageStore         // nil-safe: needed for title regeneration
+	SessionThreads      *db.SessionThreadStore          // nil-safe: needed for thread-scoped continuation status
+	ThreadFileEvents    *db.SessionThreadFileEventStore // nil-safe: tab-level file write attribution
 	IssueSnapshots      *db.SessionTurnIssueSnapshotStore
 	Automations         *db.AutomationStore       // nil-safe: automations feature disabled if nil
 	AutomationRuns      *db.AutomationRunStore    // nil-safe: automations feature disabled if nil
@@ -203,6 +206,7 @@ type orchestratorService interface {
 	RunAgent(ctx context.Context, run *models.Session) error
 	ContinueSession(ctx context.Context, session *models.Session, opts *agent.ContinueSessionOptions) error
 	RecoverSession(ctx context.Context, session *models.Session) error
+	RevertThread(ctx context.Context, session *models.Session, thread *models.SessionThread) error
 	ResolveSessionTimeout(ctx context.Context, orgID uuid.UUID) time.Duration
 	ResolveAbsoluteRuntimeCeiling(ctx context.Context, orgID uuid.UUID) time.Duration
 }
@@ -541,10 +545,7 @@ func newAutomationRunHandler(stores *Stores, services *Services, logger zerolog.
 		// the job store rejects the second insert and the second handler
 		// returns cleanly without a duplicate agent run.
 		dedupeKey := db.RunAgentDedupeKey(session.ID)
-		agentPayload := map[string]string{
-			"session_id": session.ID.String(),
-			"org_id":     orgID.String(),
-		}
+		agentPayload := db.RunAgentPayload(session)
 		if _, err := stores.Jobs.Enqueue(ctx, orgID, "agent", "run_agent", agentPayload, 5, &dedupeKey); err != nil {
 			return fmt.Errorf("enqueue run_agent: %w", err)
 		}
@@ -852,6 +853,7 @@ func newRunAgentHandler(stores *Stores, services *Services, logger zerolog.Logge
 		var input struct {
 			SessionID string `json:"session_id"`
 			OrgID     string `json:"org_id"`
+			ThreadID  string `json:"thread_id"`
 		}
 		if err := json.Unmarshal(payload, &input); err != nil {
 			return fmt.Errorf("unmarshal run_agent payload: %w", err)
@@ -869,6 +871,22 @@ func newRunAgentHandler(stores *Stores, services *Services, logger zerolog.Logge
 		run, err := stores.Sessions.GetByID(ctx, orgID, runID)
 		if err != nil {
 			return fmt.Errorf("fetch agent run: %w", err)
+		}
+		if input.ThreadID != "" {
+			threadID, parseErr := uuid.Parse(input.ThreadID)
+			if parseErr != nil {
+				logger.Warn().Err(parseErr).Str("thread_id", input.ThreadID).Msg("invalid thread_id in run_agent payload")
+			} else {
+				run.PrimaryThreadID = &threadID
+			}
+		} else if stores.SessionThreads != nil {
+			threads, listErr := stores.SessionThreads.ListBySession(ctx, orgID, runID)
+			if listErr != nil {
+				logger.Warn().Err(listErr).Str("session_id", runID.String()).Msg("failed to load primary thread for run_agent")
+			} else if len(threads) > 0 {
+				threadID := threads[0].ID
+				run.PrimaryThreadID = &threadID
+			}
 		}
 
 		// Gate turn 1 on Linear pre-start preparation. If a session linked a
@@ -1027,6 +1045,7 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 		logger.Info().
 			Str("session_id", sessionID.String()).
 			Str("org_id", orgID.String()).
+			Str("thread_id", input.ThreadID).
 			Int("current_turn", session.CurrentTurn).
 			Dur("session_timeout", sessionTimeout).
 			Dur("runtime_ceiling", runtimeCeiling).
@@ -1037,6 +1056,12 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 		var hasThread bool
 		var continueOpts *agent.ContinueSessionOptions
 		var resultAgentSessionID string
+		// Captured by the OnTurnComplete callback so the post-success block
+		// below can persist per-thread result metadata (diff, summary,
+		// confidence) onto the thread row. Stays nil when the orchestrator
+		// short-circuited before completing a turn (cancel, policy stop) so
+		// we fall back to the status-only completion path.
+		var lastTurnResult *agent.AgentResult
 		if input.ThreadID != "" && stores.SessionThreads != nil {
 			parsedThreadID, parseErr := uuid.Parse(input.ThreadID)
 			if parseErr != nil {
@@ -1052,11 +1077,35 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 					return fmt.Errorf("session thread %s does not belong to session %s", threadID, sessionID)
 				}
 				threadTurnBefore = thread.CurrentTurn
+
+				// Phase 2: stamp the thread-start checkpoint before the first
+				// agent turn. The session's current SnapshotKey is the
+				// pre-thread-edit state from the user's perspective; using
+				// it as the thread's recovery baseline lets a "revert this
+				// tab" action restore the workspace to that point even if
+				// later sibling-tab turns overwrite session.SnapshotKey.
+				if thread.CurrentTurn == 0 && thread.BaseSnapshotKey == nil && session.SnapshotKey != nil && *session.SnapshotKey != "" {
+					if err := stores.SessionThreads.SetBaseSnapshot(ctx, orgID, threadID, *session.SnapshotKey); err != nil {
+						logger.Warn().Err(err).
+							Str("thread_id", threadID.String()).
+							Msg("failed to stamp thread-start checkpoint")
+					}
+				}
+
+				threadIDLocal := threadID
 				continueOpts = &agent.ContinueSessionOptions{
 					AgentType:            thread.AgentType,
 					ModelOverride:        thread.ModelOverride,
 					ThreadAgentSessionID: thread.AgentSessionID,
 					ResultAgentSessionID: &resultAgentSessionID,
+					ThreadID:             &threadIDLocal,
+					OnTurnComplete: func(result *agent.AgentResult) {
+						lastTurnResult = result
+						if result == nil {
+							return
+						}
+						emitThreadAttribution(ctx, stores, orgID, sessionID, threadIDLocal, threadTurnBefore+1, result.Diff, result.TokenUsage.TotalCostUSD, logger)
+					},
 				}
 			}
 		}
@@ -1076,6 +1125,23 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 					Str("session_id", sessionID.String()).
 					Err(err).
 					Msg("continue_session cleared stale orphan container_id; retrying against the clean row")
+				return &RetryableError{Err: err, RetryAfter: &retryAfter}
+			}
+			if errors.Is(err, agent.ErrSandboxOnDifferentNode) {
+				// We claimed a job whose session sandbox lives on a sibling
+				// worker. Release it so the correct node can pick it up. A
+				// 5s delay (longer than the stale-orphan path) avoids tight
+				// loops if the wrong-node worker keeps polling first while
+				// the right one is briefly busy. With node-affinity routing
+				// (target_node_id on jobs) in place this branch is rare —
+				// it only fires for jobs enqueued before the affinity rolled
+				// out, or as a defense-in-depth catch for bugs that bypass
+				// the pinning.
+				retryAfter := 5 * time.Second
+				logger.Info().
+					Str("session_id", sessionID.String()).
+					Err(err).
+					Msg("continue_session claimed on the wrong node; releasing for the correct worker")
 				return &RetryableError{Err: err, RetryAfter: &retryAfter}
 			}
 			if errors.Is(err, agent.ErrSandboxPreviewRace) {
@@ -1103,12 +1169,20 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 				return &FatalError{Err: err}
 			}
 			if hasThread {
-				if statusErr := stores.SessionThreads.UpdateStatus(ctx, orgID, threadID, models.ThreadStatusIdle); statusErr != nil {
+				// Detached context: this cleanup must land even when ctx was
+				// cancelled by worker drain mid-shutdown. Otherwise the
+				// thread is stuck in 'running' and the UI shows an orphaned
+				// "Agent is working..." indefinitely (until Phase 0.5b of
+				// the reaper picks it up — defense-in-depth, not the primary
+				// path). 10s is plenty for a single UPDATE.
+				cleanupCtx, cleanupCancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+				if statusErr := stores.SessionThreads.UpdateStatus(cleanupCtx, orgID, threadID, models.ThreadStatusIdle); statusErr != nil {
 					logger.Warn().Err(statusErr).
 						Str("session_id", sessionID.String()).
 						Str("thread_id", threadID.String()).
 						Msg("failed to release session thread after continue_session failure")
 				}
+				cleanupCancel()
 			}
 			return err
 		}
@@ -1118,11 +1192,39 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 			// thread's new current_turn is the same value once the assistant
 			// turn completes. The session's CurrentTurn is independent — it
 			// tracks the shared sandbox's total turns across all threads.
-			if err := stores.SessionThreads.CompleteTurn(ctx, orgID, threadID, threadTurnBefore+1, resultAgentSessionID); err != nil {
-				logger.Warn().Err(err).
-					Str("session_id", sessionID.String()).
-					Str("thread_id", threadID.String()).
-					Msg("failed to mark session thread turn complete")
+			//
+			// When OnTurnComplete fired we have the agent's result in hand,
+			// so persist diff/summary/confidence onto the thread row via
+			// UpdateTurnComplete — this is the data the revert action and
+			// the per-tab summary panel read. When the turn short-circuited
+			// before producing a result (cancel, policy stop) we fall back
+			// to CompleteTurn which only flips status.
+			if lastTurnResult != nil {
+				var summaryPtr, diffPtr *string
+				if lastTurnResult.Summary != "" {
+					summaryPtr = &lastTurnResult.Summary
+				}
+				if lastTurnResult.Diff != "" {
+					diffPtr = &lastTurnResult.Diff
+				}
+				threadResult := &models.SessionResult{
+					ConfidenceScore: &lastTurnResult.ConfidenceScore,
+					ResultSummary:   summaryPtr,
+					Diff:            diffPtr,
+				}
+				if err := stores.SessionThreads.UpdateTurnComplete(ctx, orgID, threadID, threadTurnBefore+1, threadResult, resultAgentSessionID); err != nil {
+					logger.Warn().Err(err).
+						Str("session_id", sessionID.String()).
+						Str("thread_id", threadID.String()).
+						Msg("failed to persist session thread turn result")
+				}
+			} else {
+				if err := stores.SessionThreads.CompleteTurn(ctx, orgID, threadID, threadTurnBefore+1, resultAgentSessionID); err != nil {
+					logger.Warn().Err(err).
+						Str("session_id", sessionID.String()).
+						Str("thread_id", threadID.String()).
+						Msg("failed to mark session thread turn complete")
+				}
 			}
 		}
 
@@ -1377,11 +1479,21 @@ func newOpenPRHandler(stores *Stores, services *Services, logger zerolog.Logger)
 
 		_, createErr := services.PR.CreatePR(ctx, &run, params...)
 		if createErr != nil {
-			// Always log the raw error — only a curated subset is shown in
-			// the UI, so the worker log is the source of truth for ops.
-			logger.Error().Err(createErr).
-				Str("session_id", runID.String()).
-				Msg("open_pr failed")
+			// ErrNoChanges is a benign terminal outcome (session ran fine
+			// but produced no diff), so log at info to keep `open_pr failed`
+			// a real-error signal that dashboards/alerts can key off without
+			// false positives.
+			if errors.Is(createErr, ghservice.ErrNoChanges) {
+				logger.Info().
+					Str("session_id", runID.String()).
+					Msg("open_pr: no changes to push")
+			} else {
+				// Always log the raw error — only a curated subset is shown in
+				// the UI, so the worker log is the source of truth for ops.
+				logger.Error().Err(createErr).
+					Str("session_id", runID.String()).
+					Msg("open_pr failed")
+			}
 			msg := userFacingPRError(createErr)
 			if stateErr := stores.Sessions.UpdatePRCreationState(ctx, orgID, runID, models.PRCreationStateFailed, msg); stateErr != nil {
 				logger.Error().Err(stateErr).Msg("failed to mark PR creation as failed")

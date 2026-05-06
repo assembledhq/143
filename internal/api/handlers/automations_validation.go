@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/assembledhq/143/internal/models"
 	"github.com/google/uuid"
 )
 
@@ -22,7 +23,7 @@ import (
 // than a Postgres constraint violation — the user-legible error.
 const (
 	automationNameMaxLength = 200
-	automationGoalMaxLength = 4000
+	automationGoalMaxLength = 8000
 )
 
 // validExecutionModes mirrors the chk_automations_execution_mode CHECK constraint.
@@ -98,4 +99,224 @@ func (h *AutomationHandler) resolveRepositoryID(ctx context.Context, orgID uuid.
 		}
 	}
 	return &parsed, nil
+}
+
+func cloneOptionalString(v *string) *string {
+	if v == nil {
+		return nil
+	}
+	trimmed := strings.TrimSpace(*v)
+	if trimmed == "" {
+		return nil
+	}
+	return &trimmed
+}
+
+func resolveAutomationAgentAndModel(currentAgentType, currentModel, reqAgentType, reqModel *string) (*string, *string, error) {
+	effectiveAgentType := cloneOptionalString(currentAgentType)
+	effectiveModel := cloneOptionalString(currentModel)
+
+	if reqAgentType != nil {
+		effectiveAgentType = cloneOptionalString(reqAgentType)
+		if effectiveAgentType != nil {
+			if err := models.AgentType(*effectiveAgentType).Validate(); err != nil {
+				return nil, nil, err
+			}
+		}
+	}
+
+	if reqModel != nil {
+		effectiveModel = cloneOptionalString(reqModel)
+	}
+
+	if effectiveModel == nil {
+		return effectiveAgentType, nil, nil
+	}
+
+	if effectiveAgentType == nil {
+		inferred := models.AgentTypeForModel(*effectiveModel)
+		if inferred == "" {
+			return nil, nil, fmt.Errorf("model %q is not recognized", *effectiveModel)
+		}
+		s := string(inferred)
+		effectiveAgentType = &s
+	}
+
+	if err := models.ValidateModelForAgentType(models.AgentType(*effectiveAgentType), *effectiveModel); err != nil {
+		return nil, nil, err
+	}
+
+	return effectiveAgentType, effectiveModel, nil
+}
+
+func (h *AutomationHandler) validateAutomationModelAvailability(ctx context.Context, orgID uuid.UUID, agentType *string, modelOverride *string) error {
+	if agentType == nil || modelOverride == nil {
+		return nil
+	}
+
+	available, err := h.isAutomationAgentAvailable(ctx, orgID, models.AgentType(*agentType))
+	if err != nil {
+		return err
+	}
+	if available {
+		return nil
+	}
+
+	return fmt.Errorf("model %q is not available for agent %q; configure a team-usable credential first", *modelOverride, *agentType)
+}
+
+func (h *AutomationHandler) isAutomationAgentAvailable(ctx context.Context, orgID uuid.UUID, agentType models.AgentType) (bool, error) {
+	if agentType == "" {
+		return false, nil
+	}
+
+	checkedAvailabilitySource := false
+
+	if h.orgStore != nil {
+		checkedAvailabilitySource = true
+		org, err := h.orgStore.GetByID(ctx, orgID)
+		if err != nil {
+			return false, fmt.Errorf("load organization settings: %w", err)
+		}
+		settings, err := models.ParseOrgSettings(org.Settings)
+		if err != nil {
+			return false, fmt.Errorf("parse organization settings: %w", err)
+		}
+		if hasAutomationAgentConfigKey(settings.AgentConfig, agentType) {
+			return true, nil
+		}
+	}
+
+	if h.codingAuthStore != nil {
+		checkedAvailabilitySource = true
+		rows, err := h.codingAuthStore.ListCodingAuths(ctx, orgID)
+		if err != nil {
+			return false, fmt.Errorf("list coding auths: %w", err)
+		}
+		for _, row := range rows {
+			if row.Agent == agentType && (row.Status == models.CodingAuthStatusHealthy || row.Status == models.CodingAuthStatusRateLimited) {
+				return true, nil
+			}
+		}
+	}
+
+	if h.codingCredentialStore != nil {
+		checkedAvailabilitySource = true
+		rows, err := h.codingCredentialStore.ListByScope(ctx, models.Scope{OrgID: orgID})
+		if err != nil {
+			return false, fmt.Errorf("list org coding credentials: %w", err)
+		}
+		for _, row := range rows {
+			if row.Status != models.CodingCredentialStatusActive {
+				continue
+			}
+			if codingCredentialAgentType(row.Provider) == agentType {
+				return true, nil
+			}
+		}
+	}
+
+	provider := automationProviderForAgent(agentType)
+	if provider == "" {
+		return false, nil
+	}
+
+	if h.userCredentialStore != nil {
+		checkedAvailabilitySource = true
+		rows, err := h.userCredentialStore.ListTeamDefaults(ctx, orgID)
+		if err != nil {
+			return false, fmt.Errorf("list team default credentials: %w", err)
+		}
+		for _, row := range rows {
+			if row.Provider == provider {
+				return true, nil
+			}
+		}
+	}
+
+	if h.orgCredentialStore != nil {
+		checkedAvailabilitySource = true
+		if creds, err := h.orgCredentialStore.ListByProvider(ctx, orgID, provider); err == nil {
+			for _, cred := range creds {
+				if cred.Config.MaskedSummary().MaskedKey != "" {
+					return true, nil
+				}
+			}
+		}
+		if cred, err := h.orgCredentialStore.Get(ctx, orgID, provider); err == nil && cred != nil && cred.Config.MaskedSummary().MaskedKey != "" {
+			return true, nil
+		}
+	}
+
+	if !checkedAvailabilitySource {
+		return true, nil
+	}
+
+	return false, nil
+}
+
+func hasAutomationAgentConfigKey(cfg models.AgentEnvConfig, agentType models.AgentType) bool {
+	if cfg == nil {
+		return false
+	}
+	keys, ok := cfg[string(agentType)]
+	if !ok {
+		return false
+	}
+	keyName := automationAgentConfigSecretKey(agentType)
+	if keyName == "" {
+		return false
+	}
+	return strings.TrimSpace(keys[keyName]) != ""
+}
+
+func automationAgentConfigSecretKey(agentType models.AgentType) string {
+	switch agentType {
+	case models.AgentTypeCodex:
+		return "OPENAI_API_KEY"
+	case models.AgentTypeClaudeCode:
+		return "ANTHROPIC_API_KEY"
+	case models.AgentTypeGeminiCLI:
+		return "GEMINI_API_KEY"
+	case models.AgentTypeAmp:
+		return "AMP_API_KEY"
+	case models.AgentTypePi:
+		return "PI_API_KEY"
+	default:
+		return ""
+	}
+}
+
+func automationProviderForAgent(agentType models.AgentType) models.ProviderName {
+	switch agentType {
+	case models.AgentTypeClaudeCode:
+		return models.ProviderAnthropic
+	case models.AgentTypeCodex:
+		return models.ProviderOpenAI
+	case models.AgentTypeGeminiCLI:
+		return models.ProviderGemini
+	case models.AgentTypeAmp:
+		return models.ProviderAmp
+	case models.AgentTypePi:
+		return models.ProviderPi
+	default:
+		return ""
+	}
+}
+
+func codingCredentialAgentType(provider models.ProviderName) models.AgentType {
+	switch provider {
+	case models.ProviderAnthropic, models.ProviderAnthropicSubscription:
+		return models.AgentTypeClaudeCode
+	case models.ProviderOpenAI, models.ProviderOpenAIChatGPT, models.ProviderOpenAISubscription:
+		return models.AgentTypeCodex
+	case models.ProviderGemini:
+		return models.AgentTypeGeminiCLI
+	case models.ProviderAmp:
+		return models.AgentTypeAmp
+	case models.ProviderPi:
+		return models.AgentTypePi
+	default:
+		return ""
+	}
 }

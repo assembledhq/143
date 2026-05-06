@@ -181,6 +181,9 @@ export interface Session {
     // Linear workspace slug (e.g. "acs"). Used to build deep links to
     // linear.app/<slug>/issue/<KEY>. Empty/undefined for non-Linear links.
     issue_workspace_slug?: string;
+    // Latest backend-recorded reason a Linear state sync was skipped for
+    // this link (if any). Used by the session detail debug chip.
+    linear_last_skipped_reason?: string;
   }>;
   // Linear-specific session policy flags. Frozen at session create.
   linear_private?: boolean;
@@ -261,6 +264,27 @@ export interface SessionThread {
   started_at?: string;
   completed_at?: string;
   created_at: string;
+  base_snapshot_key?: string;
+  cost_cents: number;
+  pending_message_count: number;
+  cancel_requested_at?: string;
+}
+
+export interface SessionThreadFileEvent {
+  id: number;
+  org_id: string;
+  session_id: string;
+  thread_id?: string;
+  turn: number;
+  path: string;
+  event_type: 'created' | 'modified' | 'deleted';
+  before_hash?: string;
+  after_hash?: string;
+  observed_at: string;
+}
+
+export interface ForkResult {
+  job_id: string;
 }
 
 export interface SessionDetail extends Session {

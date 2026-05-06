@@ -37,19 +37,45 @@ const (
 )
 
 type AutomationHandler struct {
-	automationStore    *db.AutomationStore
-	automationRunStore *db.AutomationRunStore
-	repoStore          automationRepoLookup
-	jobStore           *db.JobStore
-	audit              *db.AuditEmitter
-	pool               db.TxStarter // needed for transactional RunNow
-	logger             zerolog.Logger
+	automationStore       *db.AutomationStore
+	automationRunStore    *db.AutomationRunStore
+	repoStore             automationRepoLookup
+	orgStore              automationOrgLookup
+	orgCredentialStore    automationOrgCredentialLookup
+	userCredentialStore   automationUserCredentialLookup
+	codingAuthStore       automationCodingAuthLookup
+	codingCredentialStore automationCodingCredentialLookup
+	jobStore              *db.JobStore
+	audit                 *db.AuditEmitter
+	pool                  db.TxStarter // needed for transactional RunNow
+	logger                zerolog.Logger
 }
 
 // automationRepoLookup is the slice of *db.RepositoryStore needed to verify
 // that a repository_id supplied by the client belongs to the caller's org.
 type automationRepoLookup interface {
 	GetByID(ctx context.Context, orgID, repoID uuid.UUID) (models.Repository, error)
+}
+
+type automationOrgLookup interface {
+	GetByID(ctx context.Context, orgID uuid.UUID) (models.Organization, error)
+}
+
+type automationOrgCredentialLookup interface {
+	ListByProvider(ctx context.Context, orgID uuid.UUID, provider models.ProviderName) ([]models.DecryptedCredential, error)
+	Get(ctx context.Context, orgID uuid.UUID, provider models.ProviderName) (*models.DecryptedCredential, error)
+}
+
+type automationUserCredentialLookup interface {
+	ListTeamDefaults(ctx context.Context, orgID uuid.UUID) ([]models.DecryptedUserCredential, error)
+}
+
+type automationCodingAuthLookup interface {
+	ListCodingAuths(ctx context.Context, orgID uuid.UUID) ([]models.CodingAuth, error)
+}
+
+type automationCodingCredentialLookup interface {
+	ListByScope(ctx context.Context, scope models.Scope) ([]models.DecryptedCodingCredential, error)
 }
 
 func NewAutomationHandler(automationStore *db.AutomationStore, automationRunStore *db.AutomationRunStore) *AutomationHandler {
@@ -72,6 +98,26 @@ func (h *AutomationHandler) SetAuditEmitter(audit *db.AuditEmitter) {
 // belongs to the request org on Create/Update.
 func (h *AutomationHandler) SetRepositoryStore(repoStore automationRepoLookup) {
 	h.repoStore = repoStore
+}
+
+func (h *AutomationHandler) SetOrgStore(orgStore automationOrgLookup) {
+	h.orgStore = orgStore
+}
+
+func (h *AutomationHandler) SetOrgCredentialStore(store automationOrgCredentialLookup) {
+	h.orgCredentialStore = store
+}
+
+func (h *AutomationHandler) SetUserCredentialStore(store automationUserCredentialLookup) {
+	h.userCredentialStore = store
+}
+
+func (h *AutomationHandler) SetCodingAuthStore(store automationCodingAuthLookup) {
+	h.codingAuthStore = store
+}
+
+func (h *AutomationHandler) SetCodingCredentialStore(store automationCodingCredentialLookup) {
+	h.codingCredentialStore = store
 }
 
 // SetPool wires the transaction starter used by RunNow to create the run row
@@ -184,6 +230,21 @@ func (h *AutomationHandler) Create(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeError(w, r, http.StatusBadRequest, "INVALID_REPOSITORY_ID", err.Error())
+		return
+	}
+
+	agentType, modelOverride, err := resolveAutomationAgentAndModel(nil, nil, req.AgentType, req.Model)
+	if err != nil {
+		switch {
+		case strings.Contains(err.Error(), "model"):
+			writeError(w, r, http.StatusBadRequest, "INVALID_MODEL", err.Error())
+		default:
+			writeError(w, r, http.StatusBadRequest, "INVALID_AGENT_TYPE", err.Error())
+		}
+		return
+	}
+	if err := h.validateAutomationModelAvailability(r.Context(), orgID, agentType, modelOverride); err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_MODEL", err.Error())
 		return
 	}
 
@@ -308,8 +369,8 @@ func (h *AutomationHandler) Create(w http.ResponseWriter, r *http.Request) {
 		Name:           name,
 		Goal:           goal,
 		Scope:          req.Scope,
-		AgentType:      req.AgentType,
-		ModelOverride:  req.Model,
+		AgentType:      agentType,
+		ModelOverride:  modelOverride,
 		ExecutionMode:  execMode,
 		MaxConcurrent:  maxConcurrent,
 		BaseBranch:     baseBranch,
@@ -426,11 +487,24 @@ func (h *AutomationHandler) Update(w http.ResponseWriter, r *http.Request) {
 		}
 		automation.RepositoryID = repoID
 	}
-	if req.AgentType != nil {
-		automation.AgentType = req.AgentType
-	}
-	if req.Model != nil {
-		automation.ModelOverride = req.Model
+
+	if req.AgentType != nil || req.Model != nil {
+		agentType, modelOverride, err := resolveAutomationAgentAndModel(automation.AgentType, automation.ModelOverride, req.AgentType, req.Model)
+		if err != nil {
+			switch {
+			case strings.Contains(err.Error(), "model"):
+				writeError(w, r, http.StatusBadRequest, "INVALID_MODEL", err.Error())
+			default:
+				writeError(w, r, http.StatusBadRequest, "INVALID_AGENT_TYPE", err.Error())
+			}
+			return
+		}
+		automation.AgentType = agentType
+		automation.ModelOverride = modelOverride
+		if err := h.validateAutomationModelAvailability(r.Context(), orgID, automation.AgentType, automation.ModelOverride); err != nil {
+			writeError(w, r, http.StatusBadRequest, "INVALID_MODEL", err.Error())
+			return
+		}
 	}
 	if req.ExecutionMode != nil {
 		if !validExecutionModes[*req.ExecutionMode] {

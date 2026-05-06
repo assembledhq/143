@@ -26,6 +26,7 @@ import { availableAgentModelGroups, pmUsableResolvedCredentials } from "@/lib/ag
 import { queryKeys } from "@/lib/query-keys";
 import type {
   CodingAuth,
+  CodingCredentialSummary,
   ListResponse,
   Organization,
   OrgSettings,
@@ -93,13 +94,13 @@ export function RepoPMSettingsEditor({ repository }: RepoPMSettingsProps) {
     queryKey: queryKeys.credentials.teamDefaults,
     queryFn: () => api.userCredentials.listTeamDefaults(),
   });
-  const { data: codexAuthResponse } = useQuery({
-    queryKey: queryKeys.codexAuth.status,
-    queryFn: () => api.codexAuth.status(),
-  });
   const { data: codingAuthsResponse } = useQuery<ListResponse<CodingAuth>>({
     queryKey: ["coding-auths"],
     queryFn: () => api.codingAuths.list(),
+  });
+  const { data: orgCodingCredentialsResponse } = useQuery<ListResponse<CodingCredentialSummary>>({
+    queryKey: ["coding-credentials", "org"],
+    queryFn: () => api.codingCredentials.list("org"),
   });
 
   const orgSettings = (orgResponse?.data?.settings ?? {}) as OrgSettings;
@@ -141,7 +142,14 @@ export function RepoPMSettingsEditor({ repository }: RepoPMSettingsProps) {
     () => codingAuthsResponse?.data ?? [],
     [codingAuthsResponse],
   );
-  const codexAuthStatus = codexAuthResponse?.data;
+  const orgCodingCredentials = useMemo(
+    () => orgCodingCredentialsResponse?.data ?? [],
+    [orgCodingCredentialsResponse],
+  );
+  const pmCodingAuthAvailability = useMemo(
+    () => [...codingAuths, ...orgCodingCredentials],
+    [codingAuths, orgCodingCredentials],
+  );
   const pmResolvedCredentials = useMemo(
     () => pmUsableResolvedCredentials(resolvedCredentials, teamDefaultsResponse?.data ?? []),
     [resolvedCredentials, teamDefaultsResponse],
@@ -150,15 +158,15 @@ export function RepoPMSettingsEditor({ repository }: RepoPMSettingsProps) {
   const pmModelGroups = useMemo(() => {
     return availableAgentModelGroups(
       pmResolvedCredentials,
-      codexAuthStatus,
-      codingAuths,
+      null,
+      pmCodingAuthAvailability,
       orgSettings.default_agent_type || "codex",
       { orgAgentConfig: orgSettings.agent_config },
     );
-  }, [pmResolvedCredentials, codexAuthStatus, codingAuths, orgSettings.default_agent_type, orgSettings.agent_config]);
+  }, [pmResolvedCredentials, pmCodingAuthAvailability, orgSettings.default_agent_type, orgSettings.agent_config]);
 
   const credentialsLoaded = Boolean(
-    resolvedCredsResponse && teamDefaultsResponse && codexAuthResponse && codingAuthsResponse,
+    resolvedCredsResponse && teamDefaultsResponse && codingAuthsResponse && orgCodingCredentialsResponse,
   );
 
   const autosave = useAutosave<RepoPatch>({

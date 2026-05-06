@@ -32,6 +32,7 @@ const sessionIssueLinkSelectColumns = `sil.id, sil.org_id, sil.session_id, sil.i
 	i.description,
 	i.repository_id, i.status AS issue_status,
 	(provider_state.state->>'workspace_slug') AS issue_workspace_slug,
+	(provider_state.state->>'last_skipped_reason') AS linear_last_skipped_reason,
 	(provider_state.state->'primary_snapshot') AS linear_primary_snapshot`
 
 const sessionIssueLinkFromClause = `

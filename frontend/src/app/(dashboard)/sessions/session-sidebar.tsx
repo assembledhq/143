@@ -4,7 +4,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { notify as toast } from "@/lib/notify";
 import { Archive, ArchiveRestore, Plus, Search } from "lucide-react";
 import Link from "next/link";
-import { usePathname, useSelectedLayoutSegment } from "next/navigation";
+import { usePathname, useRouter, useSelectedLayoutSegment } from "next/navigation";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useQueryState, parseAsString } from "nuqs";
 import { PeopleFilter } from "@/components/people-filter";
@@ -36,7 +36,7 @@ import { getCountForTab, renderCount } from "@/lib/session-counts";
 const statusConfig: Record<string, { dot: string; label: string }> = {
   pending: { dot: "bg-muted-foreground/50", label: "Pending" },
   running: { dot: "bg-primary", label: "Running" },
-  idle: { dot: "bg-sky-500", label: "Idle" },
+  idle: { dot: "bg-primary", label: "Idle" },
   awaiting_input: { dot: "bg-amber-500", label: "Awaiting input" },
   needs_human_guidance: { dot: "bg-orange-500", label: "Needs guidance" },
   completed: { dot: "bg-emerald-500", label: "Completed" },
@@ -121,6 +121,19 @@ function SessionDiffBadge({ diffStats }: { diffStats?: { added: number; removed:
   );
 }
 
+function SessionLinearBadge({ session }: { session: SessionListItem }) {
+  const linearLabel =
+    session.linear_identifier_hint ??
+    session.linked_issues?.find((issue) => issue.issue_source === "linear")?.external_id;
+  if (!linearLabel) return null;
+
+  return (
+    <span className="inline-flex shrink-0 rounded-md border border-border/60 bg-muted/50 px-1.5 py-0.5 text-xs text-muted-foreground">
+      {linearLabel}
+    </span>
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Optimistic (unsaved) session row
 // ---------------------------------------------------------------------------
@@ -158,6 +171,7 @@ function OptimisticSessionRow({ session }: { session: OptimisticSession }) {
 // ---------------------------------------------------------------------------
 
 export function SessionSidebar() {
+  const router = useRouter();
   const pathname = usePathname();
   const selectedSegment = useSelectedLayoutSegment();
   const queryClient = useQueryClient();
@@ -474,6 +488,8 @@ export function SessionSidebar() {
           const hasUnread = isUnread(session);
           const ts = session.completed_at || session.started_at || session.created_at;
           const isArchived = !!session.archived_at;
+          const title = sessionTitle(session);
+          const sessionHref = `/sessions/${session.id}${filterSuffix}`;
 
           return (
             <SwipeActionRow
@@ -481,74 +497,98 @@ export function SessionSidebar() {
               className="mb-0.5"
               actionLabel={isArchived ? "Unarchive session" : "Archive session"}
               actionText={isArchived ? "Restore" : "Archive"}
+              desktopActionVisibility="hover"
               actionIcon={isArchived ? <ArchiveRestore className="h-4 w-4" /> : <Archive className="h-4 w-4" />}
               onAction={() => {
                 if (isArchived) {
-                  unarchiveMutation.mutate(session.id);
+                  return unarchiveMutation.mutateAsync(session.id);
                 } else {
-                  archiveMutation.mutate(session.id);
+                  return archiveMutation.mutateAsync(session.id);
                 }
               }}
             >
-              <Link
-                href={`/sessions/${session.id}${filterSuffix}`}
+              <div
                 className={cn(
-                  "block rounded-lg border border-border/50 bg-background px-3 py-2.5 shadow-sm transition-all duration-150 md:border-transparent md:bg-muted/30 md:shadow-none",
-                  isSelected
-                    ? "border-border/60 bg-background shadow-sm"
-                    : "hover:border-border/60 hover:bg-background md:hover:border-transparent md:hover:bg-background/60"
+                  "flex min-w-0 rounded-xl border border-transparent p-1 transition-all duration-150",
+                  isSelected && "cursor-pointer border-primary/20 bg-background shadow-sm ring-1 ring-primary/10",
                 )}
+                onClick={(event) => {
+                  if (!isSelected || event.defaultPrevented || event.target !== event.currentTarget) {
+                    return;
+                  }
+                  router.push(sessionHref);
+                }}
               >
-                <div className="flex items-start gap-2.5 min-w-0">
-                  {/* Unread / working indicator */}
-                  <div className="mt-1.5 shrink-0">
-                    {isWorkingSession ? (
-                      <StatusDot animate color="bg-primary" pingColor="bg-primary/60" />
-                    ) : hasUnread ? (
-                      <StatusDot color="bg-primary" />
-                    ) : (
-                      <span className="inline-flex rounded-full h-2 w-2" />
-                    )}
-                  </div>
-
-                {/* Content */}
-                <div className="min-w-0 flex-1">
-                  <div className="flex items-start justify-between gap-2">
-                    <p className={cn(
-                      "text-xs font-medium truncate leading-snug",
-                      hasUnread || isWorkingSession ? "text-foreground" : "text-muted-foreground"
-                    )}>
-                      {sessionTitle(session)}
-                    </p>
-                  </div>
-                  <div className="flex items-center justify-between mt-0.5">
-                    <div className="flex items-center gap-3 min-w-0">
-                      <span className="text-xs text-muted-foreground shrink-0">
-                        <span>{cfg.label}</span>
-                        {isWorkingSession && <AnimatedEllipsis />}
-                      </span>
-                      {session.pm_plan_id && !session.triggered_by_user_id && (
-                        <span className="inline-flex items-center rounded-full bg-primary/10 px-1.5 py-0.5 text-xs font-medium text-primary shrink-0">
-                          PM
-                        </span>
-                      )}
-                      <span className="text-xs text-muted-foreground/50 truncate">
-                        {formatTimeAgo(ts)}
-                      </span>
-                    </div>
-                    <div className="flex items-center gap-1.5 shrink-0">
-                      <PRStatusBadge prSummary={session.pr_summary} />
-                      <SessionDiffBadge diffStats={session.diff_stats} />
-                    </div>
-                  </div>
-                  {session.status === "failed" && (session.failure_explanation || session.error) && (
-                    <p className="text-xs text-destructive/70 truncate mt-0.5">
-                      {session.failure_explanation || session.error}
-                    </p>
+                <Link
+                  href={sessionHref}
+                  aria-current={isSelected ? "page" : undefined}
+                  className={cn(
+                    "relative block min-w-0 flex-1 overflow-hidden rounded-lg border border-border/50 bg-background px-3 py-2.5 shadow-sm transition-all duration-150 md:border-transparent md:bg-muted/30 md:shadow-none",
+                    isSelected
+                      ? "border-transparent bg-primary/5 shadow-none ring-0 md:border-transparent md:bg-primary/5 md:shadow-none"
+                      : "hover:border-border/60 hover:bg-background md:hover:border-transparent md:hover:bg-background/60"
                   )}
-                </div>
-                </div>
-              </Link>
+                >
+                  <span
+                    aria-hidden="true"
+                    className={cn(
+                      "absolute inset-y-2 left-1 w-0.5 rounded-full bg-primary/0 transition-colors duration-150",
+                      isSelected && "bg-primary/55",
+                    )}
+                  />
+                  <div className="flex items-start gap-2.5 min-w-0">
+                    <div className="mt-1.5 shrink-0">
+                      {isWorkingSession ? (
+                        <StatusDot animate color="bg-primary" pingColor="bg-primary/60" />
+                      ) : hasUnread ? (
+                        <StatusDot color="bg-primary" />
+                      ) : (
+                        <span className="inline-flex rounded-full h-2 w-2" />
+                      )}
+                    </div>
+
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-start justify-between gap-2">
+                        <p className={cn(
+                          "text-xs font-medium truncate leading-snug",
+                          hasUnread || isWorkingSession ? "text-foreground" : "text-muted-foreground"
+                        )}>
+                          {title}
+                        </p>
+                      </div>
+                      <div className="mt-0.5 flex min-w-0 items-center gap-2">
+                        <div
+                          data-testid={`session-row-meta-scroll-${session.id}`}
+                          className="min-w-0 flex-1 overflow-x-auto overflow-y-hidden scrollbar-hide"
+                        >
+                          <div className="flex min-w-max items-center gap-1.5 pr-1">
+                            <span className="text-xs text-muted-foreground shrink-0">
+                              <span>{cfg.label}</span>
+                              {isWorkingSession && <AnimatedEllipsis />}
+                            </span>
+                            {session.pm_plan_id && !session.triggered_by_user_id && (
+                              <span className="inline-flex items-center rounded-full bg-primary/10 px-1.5 py-0.5 text-xs font-medium text-primary shrink-0">
+                                PM
+                              </span>
+                            )}
+                            <SessionLinearBadge session={session} />
+                            <span className="text-xs text-muted-foreground/50 shrink-0">
+                              {formatTimeAgo(ts)}
+                            </span>
+                            <PRStatusBadge prSummary={session.pr_summary} />
+                            <SessionDiffBadge diffStats={session.diff_stats} />
+                          </div>
+                        </div>
+                      </div>
+                      {session.status === "failed" && (session.failure_explanation || session.error) && (
+                        <p className="text-xs text-destructive/70 truncate mt-0.5">
+                          {session.failure_explanation || session.error}
+                        </p>
+                      )}
+                    </div>
+                  </div>
+                </Link>
+              </div>
             </SwipeActionRow>
           );
         })}

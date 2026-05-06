@@ -110,6 +110,7 @@ var workerSessionThreadColumns = []string{
 	"label", "instructions", "file_scope", "status", "agent_session_id", "current_turn", "last_activity_at",
 	"confidence_score", "result_summary", "diff", "failure_explanation", "failure_category",
 	"started_at", "completed_at", "created_at",
+	"base_snapshot_key", "cost_cents", "pending_message_count", "cancel_requested_at",
 }
 
 func workerSessionThreadRow(threadID, sessionID, orgID uuid.UUID, agentType models.AgentType, modelOverride *string, status models.ThreadStatus) []any {
@@ -120,6 +121,7 @@ func workerSessionThreadRow(threadID, sessionID, orgID uuid.UUID, agentType mode
 		"Thread", nil, []string{}, status, nil, 1, nowPtr,
 		nil, nil, nil, nil, nil,
 		nowPtr, nil, now,
+		nil, float64(0), 0, nil,
 	}
 }
 
@@ -429,6 +431,7 @@ type orchestratorServiceStub struct {
 	recoverSessionCalls  int
 	runAgentFn           func(ctx context.Context, run *models.Session) error
 	continueSessionFn    func(ctx context.Context, session *models.Session, opts *agent.ContinueSessionOptions) error
+	revertThreadFn       func(ctx context.Context, session *models.Session, thread *models.SessionThread) error
 	recoverSessionFn     func(ctx context.Context, session *models.Session) error
 	sessionTimeout       time.Duration
 	runtimeCeiling       time.Duration
@@ -446,6 +449,13 @@ func (s *orchestratorServiceStub) ContinueSession(ctx context.Context, session *
 	s.continueSessionCalls++
 	if s.continueSessionFn != nil {
 		return s.continueSessionFn(ctx, session, opts)
+	}
+	return nil
+}
+
+func (s *orchestratorServiceStub) RevertThread(ctx context.Context, session *models.Session, thread *models.SessionThread) error {
+	if s.revertThreadFn != nil {
+		return s.revertThreadFn(ctx, session, thread)
 	}
 	return nil
 }
@@ -1006,10 +1016,10 @@ func TestLinearJobHandlers(t *testing.T) {
 			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 			WillReturnRows(pgxmock.NewRows([]string{
 				"id", "org_id", "session_id", "issue_id", "role", "position", "added_by_user_id", "created_at",
-				"issue_title", "issue_source", "external_id", "description", "repository_id", "issue_status", "issue_workspace_slug", "linear_primary_snapshot",
+				"issue_title", "issue_source", "external_id", "description", "repository_id", "issue_status", "issue_workspace_slug", "linear_last_skipped_reason", "linear_primary_snapshot",
 			}).AddRow(
 				linkID, orgID, sessionID, issueID, string(models.SessionIssueLinkRolePrimary), 0, nil, now,
-				&title, &source, &externalID, nil, nil, &status, nil, nil,
+				&title, &source, &externalID, nil, nil, &status, nil, nil, nil,
 			))
 		mock.ExpectQuery("SELECT .+ FROM issues WHERE id").
 			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
@@ -2089,10 +2099,10 @@ func TestOpenPRHandler_HydratesLinkedIssuesBeforeCreatePR(t *testing.T) {
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{
 			"id", "org_id", "session_id", "issue_id", "role", "position", "added_by_user_id", "created_at",
-			"issue_title", "issue_source", "external_id", "description", "repository_id", "issue_status", "issue_workspace_slug", "linear_primary_snapshot",
+			"issue_title", "issue_source", "external_id", "description", "repository_id", "issue_status", "issue_workspace_slug", "linear_last_skipped_reason", "linear_primary_snapshot",
 		}).AddRow(
 			linkID, orgID, sessionID, issueID, string(models.SessionIssueLinkRolePrimary), 0, nil, now,
-			&title, &source, &externalID, nil, nil, &status, nil, nil,
+			&title, &source, &externalID, nil, nil, &status, nil, nil, nil,
 		))
 	mock.ExpectQuery("UPDATE sessions").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
@@ -2560,6 +2570,9 @@ func TestAutomationRunHandler_HappyPath(t *testing.T) {
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at", "last_activity_at"}).AddRow(sessionID, now, now))
+	mock.ExpectQuery(`INSERT INTO session_threads`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
 	mock.ExpectCommit()
 
 	// 5. Enqueue run_agent (with dedupe key on the session ID).
@@ -3968,6 +3981,41 @@ func TestRunAgentHandler_PendingSessionUsesFreshRunPath(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+func TestRunAgentHandler_PassesPrimaryThreadIDFromPayload(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+
+	orgID := uuid.New()
+	runID := uuid.New()
+	threadID := uuid.New()
+	issueID := uuid.New()
+
+	mock.ExpectQuery("SELECT .* FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(workerSessionColumns).AddRow(
+				workerSessionRow(runID, issueID, orgID, string(models.SessionStatusPending), 0, nil, nil)...,
+			),
+		)
+
+	orch := &orchestratorServiceStub{
+		runAgentFn: func(_ context.Context, run *models.Session) error {
+			require.NotNil(t, run.PrimaryThreadID, "run_agent should set the primary thread ID on the orchestrator session")
+			require.Equal(t, threadID, *run.PrimaryThreadID, "run_agent should pass the primary thread ID to the orchestrator")
+			return nil
+		},
+	}
+	handler := newRunAgentHandler(stores, &Services{Orchestrator: orch}, zerolog.Nop())
+	payload := json.RawMessage(`{"session_id":"` + runID.String() + `","org_id":"` + orgID.String() + `","thread_id":"` + threadID.String() + `"}`)
+
+	err := handler(context.Background(), "run_agent", payload)
+	require.NoError(t, err, "run_agent should accept a primary thread ID payload")
+	require.Equal(t, 1, orch.runAgentCalls, "pending run_agent jobs should execute a fresh run")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func TestRunAgentHandler_RunningSessionUsesRecoveryPath(t *testing.T) {
 	t.Parallel()
 
@@ -4282,6 +4330,65 @@ func TestContinueSessionHandler_ReleasesThreadOnContinuationFailure(t *testing.T
 	require.ErrorIs(t, err, continuationErr, "continue_session should preserve the orchestrator failure")
 	require.Equal(t, 1, orch.continueSessionCalls, "continue_session should invoke the orchestrator once")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+// TestContinueSessionHandler_ResetsThreadEvenWhenCtxCancelled covers the
+// orphan fix: the handler's thread-status reset must succeed even when the
+// handler's ctx was cancelled mid-flight (worker drain hits its timeout
+// during a rolling deploy). Without the WithoutCancel detach, the UPDATE
+// is sent on a cancelled context and the thread row stays 'running'
+// forever — the production scenario behind the "Session is not active" +
+// "Agent is working..." UI orphan.
+func TestContinueSessionHandler_ResetsThreadEvenWhenCtxCancelled(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+	stores.SessionThreads = db.NewSessionThreadStore(mock)
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	threadID := uuid.New()
+	issueID := uuid.New()
+	threadModel := "gemini-2.5-pro"
+	continuationErr := errors.New("worker drain cancelled mid-turn")
+
+	mock.ExpectQuery("SELECT .* FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(workerSessionColumns).AddRow(
+				workerSessionRow(sessionID, issueID, orgID, string(models.SessionStatusIdle), 2, nil, nil)...,
+			),
+		)
+	mock.ExpectQuery("SELECT .* FROM session_threads").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(workerSessionThreadColumns).AddRow(
+			workerSessionThreadRow(threadID, sessionID, orgID, models.AgentTypeGeminiCLI, &threadModel, models.ThreadStatusRunning)...,
+		))
+	// The CRITICAL expectation: the UPDATE must still fire even though the
+	// handler's outer ctx is cancelled by the time the orchestrator returns.
+	// With ctx-based cleanup this would never reach the DB.
+	mock.ExpectExec("UPDATE session_threads SET status = @status").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	// Cancel the handler's ctx during the orchestrator call so the fetches
+	// above land normally but the cleanup path runs with a cancelled parent
+	// — exactly the rolling-deploy-mid-turn scenario.
+	ctx, cancel := context.WithCancel(context.Background())
+	orch := &orchestratorServiceStub{
+		continueSessionFn: func(_ context.Context, _ *models.Session, _ *agent.ContinueSessionOptions) error {
+			cancel()
+			return continuationErr
+		},
+	}
+	handler := newContinueSessionHandler(stores, &Services{Orchestrator: orch}, zerolog.Nop())
+	payload := json.RawMessage(`{"session_id":"` + sessionID.String() + `","org_id":"` + orgID.String() + `","thread_id":"` + threadID.String() + `"}`)
+
+	err := handler(ctx, "continue_session", payload)
+	require.ErrorIs(t, err, continuationErr, "handler should still surface the orchestrator failure")
+	require.NoError(t, mock.ExpectationsWereMet(),
+		"thread-status reset UPDATE must land even though the handler ctx was cancelled (WithoutCancel detach)")
 }
 
 // TestContinueSessionHandler_ThreadCompleteTurnUsesThreadTurn pins the

@@ -23,7 +23,9 @@ import {
   CollapsibleTrigger,
 } from "@/components/ui/collapsible";
 import { api } from "@/lib/api";
+import { AUTOMATION_GOAL_MAX_LENGTH, automationGoalLengthState } from "@/lib/automation-validation";
 import { BranchPicker } from "@/components/branch-picker";
+import { AutomationModelSelect } from "@/components/automation-model-select";
 import { NoReposWarning } from "@/components/no-repos-warning";
 import { PageContainer } from "@/components/page-container";
 import { PageHeader } from "@/components/page-header";
@@ -62,6 +64,7 @@ export default function NewAutomationPage() {
   const [timezone, setTimezone] = useState<string>(detectedTimezone);
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [baseBranchByRepoId, setBaseBranchByRepoId] = useState<Record<string, string>>({});
+  const [model, setModel] = useState<string | undefined>(undefined);
   const [priority, setPriority] = useState(50);
   const [redirecting, setRedirecting] = useState(false);
 
@@ -100,6 +103,7 @@ export default function NewAutomationPage() {
         interval_unit: intervalUnit,
         interval_run_at: `${intervalRunHour}:${intervalRunMinute}`,
         timezone,
+        model,
         base_branch: selectedBaseBranch.trim() || undefined,
         priority,
       }),
@@ -123,8 +127,12 @@ export default function NewAutomationPage() {
     );
   }
 
+  const goalLength = automationGoalLengthState(goal);
   const canSubmit =
-    name.trim().length > 0 && goal.trim().length > 0 && repoId.length > 0;
+    name.trim().length > 0 &&
+    goal.trim().length > 0 &&
+    !goalLength.isTooLong &&
+    repoId.length > 0;
 
   const featuredTemplates = automationTemplates.filter((template) =>
     featuredAutomationTemplateIDs.includes(template.id),
@@ -212,14 +220,29 @@ export default function NewAutomationPage() {
           </div>
 
           <div className="space-y-1.5">
-            <Label htmlFor="goal">Goal</Label>
+            <div className="flex items-center justify-between gap-3">
+              <Label htmlFor="goal">Goal</Label>
+              <span
+                className={cn(
+                  "text-xs tabular-nums",
+                  goalLength.isTooLong ? "text-destructive" : "text-muted-foreground",
+                )}
+              >
+                {goalLength.countText}
+              </span>
+            </div>
             <Textarea
               id="goal"
               value={goal}
               onChange={(e) => setGoal(e.target.value)}
               placeholder="Describe what the automation should do each run..."
               rows={3}
+              maxLength={AUTOMATION_GOAL_MAX_LENGTH}
+              aria-invalid={goalLength.isTooLong}
             />
+            <p className={cn("text-xs", goalLength.isTooLong ? "text-destructive" : "text-muted-foreground")}>
+              {goalLength.message ?? `Up to ${AUTOMATION_GOAL_MAX_LENGTH} characters.`}
+            </p>
           </div>
 
           <div className="space-y-1.5">
@@ -360,6 +383,15 @@ export default function NewAutomationPage() {
                   disabled={!repoId}
                   buttonClassName="w-full justify-between"
                   contentClassName="w-[var(--radix-popover-trigger-width)]"
+                />
+              </div>
+              <div className="space-y-1.5">
+                <Label htmlFor="automation-model">Model</Label>
+                <AutomationModelSelect
+                  id="automation-model"
+                  ariaLabel="Model"
+                  value={model}
+                  onValueChange={setModel}
                 />
               </div>
               <div className="space-y-1.5">

@@ -35,6 +35,9 @@ const mocks = vi.hoisted(() => ({
   createSessionMock: vi.fn().mockResolvedValue({
     data: { id: "new-sess" },
   }),
+  addOptimisticSessionMock: vi.fn().mockReturnValue("optimistic-1"),
+  removeOptimisticSessionMock: vi.fn(),
+  markOptimisticResolvedMock: vi.fn(),
   sessionComposerFilesMock: vi.fn().mockResolvedValue({ data: [] }),
   sessionComposerSlashCommandsMock: vi.fn().mockResolvedValue({
     groups: [
@@ -72,6 +75,9 @@ const mocks = vi.hoisted(() => ({
   codingAuthsListMock: vi.fn().mockResolvedValue({
     data: [],
   }),
+  codingCredentialsListMock: vi.fn().mockResolvedValue({
+    data: [],
+  }),
   codexAuthStatusMock: vi.fn().mockResolvedValue({ data: { status: "completed" } }),
   authMeMock: vi.fn().mockResolvedValue({
     data: {
@@ -83,6 +89,15 @@ const mocks = vi.hoisted(() => ({
       settings: {},
       created_at: "2026-01-01T00:00:00Z",
     },
+  }),
+  integrationsListMock: vi.fn().mockResolvedValue({
+    data: [
+      {
+        id: "integration-linear",
+        provider: "linear",
+        status: "active",
+      },
+    ],
   }),
   searchParamGetMock: vi.fn<(key: string) => string | null>().mockImplementation(() => null),
 }));
@@ -110,11 +125,17 @@ vi.mock("@/lib/api", () => ({
     codingAuths: {
       list: mocks.codingAuthsListMock,
     },
+    codingCredentials: {
+      list: mocks.codingCredentialsListMock,
+    },
     codexAuth: {
       status: mocks.codexAuthStatusMock,
     },
     auth: {
       me: mocks.authMeMock,
+    },
+    integrations: {
+      list: mocks.integrationsListMock,
     },
     sessions: {
       createManual: mocks.createSessionMock,
@@ -143,14 +164,14 @@ vi.mock("@/components/no-repos-warning", () => ({
 
 vi.mock("@/contexts/optimistic-sessions", () => ({
   useOptimisticSessions: () => ({
-    addOptimisticSession: vi.fn(),
-    removeOptimisticSession: vi.fn(),
-    markOptimisticResolved: vi.fn(),
+    addOptimisticSession: mocks.addOptimisticSessionMock,
+    removeOptimisticSession: mocks.removeOptimisticSessionMock,
+    markOptimisticResolved: mocks.markOptimisticResolvedMock,
   }),
   useOptimisticSessionsSafe: () => ({
-    addOptimisticSession: vi.fn(),
-    removeOptimisticSession: vi.fn(),
-    markOptimisticResolved: vi.fn(),
+    addOptimisticSession: mocks.addOptimisticSessionMock,
+    removeOptimisticSession: mocks.removeOptimisticSessionMock,
+    markOptimisticResolved: mocks.markOptimisticResolvedMock,
   }),
   OptimisticSessionsProvider: ({ children }: { children: React.ReactNode }) => children,
 }));
@@ -251,7 +272,7 @@ describe("ManualSessionCreatePageContent", () => {
   it("keeps the main message textarea at 16px on mobile", async () => {
     renderWithProviders(<ManualSessionCreatePageContent />);
 
-    const textarea = await screen.findByRole("textbox", { name: "Session prompt" });
+    const textarea = await screen.findByRole("textbox", { name: "Manual session prompt" });
     expect(textarea).toHaveClass("text-base");
     expect(textarea).toHaveClass("sm:text-xs");
   });
@@ -382,6 +403,62 @@ describe("ManualSessionCreatePageContent", () => {
     expect(await screen.findByRole("button", { name: "Preview uploaded-shot.png" })).toBeInTheDocument();
   });
 
+  it("uploads an image pasted into the prompt and shows it in the attachment strip", async () => {
+    renderWithProviders(<ManualSessionCreatePageContent />);
+
+    const textarea = await screen.findByPlaceholderText("Tell the agent what to do...");
+    const file = new File(["image-bytes"], "pasted-shot.png", { type: "image/png" });
+
+    fireEvent.paste(textarea, {
+      clipboardData: {
+        files: [file],
+        items: [{ kind: "file", type: "image/png", getAsFile: () => file }],
+        types: ["Files"],
+      },
+    });
+
+    await waitFor(() => {
+      expect(mocks.uploadMock).toHaveBeenCalledWith(file);
+    });
+    expect(await screen.findByRole("button", { name: "Preview uploaded-shot.png" })).toBeInTheDocument();
+  });
+
+  it("allows starting a mobile session with only an uploaded image", async () => {
+    const user = userEvent.setup();
+    setMobileViewport(true);
+    renderWithProviders(<ManualSessionCreatePageContent />);
+
+    const textarea = await screen.findByPlaceholderText("Tell the agent what to do...");
+    const file = new File(["image-bytes"], "mobile-shot.png", { type: "image/png" });
+
+    fireEvent.paste(textarea, {
+      clipboardData: {
+        files: [file],
+        items: [{ kind: "file", type: "image/png", getAsFile: () => file }],
+        types: ["Files"],
+      },
+    });
+
+    await waitFor(() => {
+      expect(mocks.uploadMock).toHaveBeenCalledWith(file);
+    });
+
+    const startButton = await screen.findByRole("button", { name: "Start session" });
+    expect(startButton).toBeEnabled();
+
+    await user.click(startButton);
+
+    await waitFor(() => {
+      expect(mocks.createSessionMock).toHaveBeenCalledWith(
+        expect.objectContaining({
+          message: "",
+          images: ["https://example.com/uploaded-shot.png"],
+        }),
+      );
+    });
+    expect(mocks.addOptimisticSessionMock).toHaveBeenCalledWith("Manual Session");
+  });
+
   it("shows slash command suggestions when the user types a slash trigger", async () => {
     const user = userEvent.setup();
     renderWithProviders(<ManualSessionCreatePageContent />);
@@ -394,6 +471,93 @@ describe("ManualSessionCreatePageContent", () => {
     });
     expect(await screen.findByText("/review")).toBeInTheDocument();
     expect(screen.getByText("Review pending changes")).toBeInTheDocument();
+  });
+
+  it("only shows the add linear issue action when Linear is integrated", async () => {
+    const user = userEvent.setup();
+    mocks.integrationsListMock.mockResolvedValueOnce({ data: [] });
+    renderWithProviders(<ManualSessionCreatePageContent />);
+
+    await user.click(await screen.findByRole("button", { name: "Add files or photos" }));
+
+    expect(screen.queryByRole("menuitem", { name: "Add linear issue" })).not.toBeInTheDocument();
+  });
+
+  it("adds a linked Linear issue as a chip instead of moving it into the prompt text", async () => {
+    const user = userEvent.setup();
+    renderWithProviders(<ManualSessionCreatePageContent />);
+
+    await user.click(await screen.findByRole("button", { name: "Add files or photos" }));
+    await user.click(await screen.findByRole("menuitem", { name: "Add linear issue" }));
+
+    const linearInput = await screen.findByRole("textbox", { name: "Linear issue id or URL" });
+    await user.type(linearInput, "ACS-1234");
+    await user.click(screen.getByRole("button", { name: "Add" }));
+
+    expect(await screen.findByText("ACS-1234")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Remove ACS-1234" })).toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "Manual session prompt" })).toHaveValue("");
+  });
+
+  it("submits the linked Linear issue as a structured reference", async () => {
+    const user = userEvent.setup();
+    renderWithProviders(<ManualSessionCreatePageContent />);
+
+    const textarea = await screen.findByRole("textbox", { name: "Manual session prompt" });
+    await user.type(textarea, "Investigate the rollout issue");
+    await user.click(screen.getByRole("button", { name: "Add files or photos" }));
+    await user.click(await screen.findByRole("menuitem", { name: "Add linear issue" }));
+
+    const linearInput = await screen.findByRole("textbox", { name: "Linear issue id or URL" });
+    await user.type(linearInput, "ACS-1234");
+    await user.click(screen.getByRole("button", { name: "Add" }));
+    await user.click((await screen.findAllByRole("button", { name: "Start session" }))[0]);
+
+    await waitFor(() => {
+      expect(mocks.createSessionMock).toHaveBeenCalledWith(
+        expect.objectContaining({
+          message: "Investigate the rollout issue",
+          references: [
+            {
+              kind: "app",
+              id: "ACS-1234",
+              display: "ACS-1234",
+            },
+          ],
+        }),
+      );
+    });
+  });
+
+  it("allows starting a session with only a linked Linear issue", async () => {
+    const user = userEvent.setup();
+    renderWithProviders(<ManualSessionCreatePageContent />);
+
+    await user.click(await screen.findByRole("button", { name: "Add files or photos" }));
+    await user.click(await screen.findByRole("menuitem", { name: "Add linear issue" }));
+
+    const linearInput = await screen.findByRole("textbox", { name: "Linear issue id or URL" });
+    await user.type(linearInput, "ACS-1234");
+    await user.click(screen.getByRole("button", { name: "Add" }));
+
+    const startButtons = await screen.findAllByRole("button", { name: "Start session" });
+    expect(startButtons[0]).toBeEnabled();
+    await user.click(startButtons[0]);
+
+    await waitFor(() => {
+      expect(mocks.createSessionMock).toHaveBeenCalledWith(
+        expect.objectContaining({
+          message: "",
+          references: [
+            {
+              kind: "app",
+              id: "ACS-1234",
+              display: "ACS-1234",
+            },
+          ],
+        }),
+      );
+    });
   });
 
   it("returns focus to the prompt after a dropped image finishes uploading", async () => {
@@ -435,6 +599,26 @@ describe("ManualSessionCreatePageContent", () => {
 
     await waitFor(() => {
       expect(screen.getByText("File too large (max 10 MB): too-large.png")).toBeInTheDocument();
+    });
+    expect(mocks.uploadMock).not.toHaveBeenCalled();
+  });
+
+  it("shows an inline validation error when a pasted file exceeds the size limit", async () => {
+    renderWithProviders(<ManualSessionCreatePageContent />);
+
+    const oversizedFile = new File([new Uint8Array(10 * 1024 * 1024 + 1)], "too-large-paste.png", { type: "image/png" });
+    const textarea = await screen.findByPlaceholderText("Tell the agent what to do...");
+
+    fireEvent.paste(textarea, {
+      clipboardData: {
+        files: [oversizedFile],
+        items: [{ kind: "file", type: "image/png", getAsFile: () => oversizedFile }],
+        types: ["Files"],
+      },
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText("File too large (max 10 MB): too-large-paste.png")).toBeInTheDocument();
     });
     expect(mocks.uploadMock).not.toHaveBeenCalled();
   });
@@ -749,6 +933,41 @@ describe("ManualSessionCreatePageContent", () => {
 
       await waitFor(() => {
         expect(modelSelect).toHaveTextContent("gpt-5.4");
+      });
+    });
+
+    it("preserves detached Linear issue chips when a repo query param conflicts with the saved draft", async () => {
+      mocks.searchParamGetMock.mockImplementation((key) => {
+        if (key === "repo") return "repo-1";
+        return null;
+      });
+      window.sessionStorage.setItem(
+        DRAFT_STORAGE_KEY,
+        JSON.stringify({
+          __v: 2,
+          message: "Previously typed prompt",
+          attachments: [],
+          references: [
+            {
+              kind: "app",
+              id: "ACS-1234",
+              display: "ACS-1234",
+            },
+          ],
+          commands: [],
+          selectedModel: "",
+          userSelectedRepoId: "repo-2",
+          branchByRepoId: {},
+          showImageInput: false,
+          imageURL: "",
+        }),
+      );
+
+      renderWithProviders(<ManualSessionCreatePageContent />);
+
+      expect(await screen.findByText("ACS-1234")).toBeInTheDocument();
+      await waitFor(() => {
+        expect(screen.getByRole("textbox", { name: "Manual session prompt" })).toHaveValue("Previously typed prompt");
       });
     });
 
