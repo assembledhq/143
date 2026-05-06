@@ -42,10 +42,6 @@ describe("code-review/index re-exports", () => {
     expect(CodeReview.DiffPane).toBeDefined();
   });
 
-  it("exports SessionFooter", () => {
-    expect(CodeReview.SessionFooter).toBeDefined();
-  });
-
   it("exports ContextExpander", () => {
     expect(CodeReview.ContextExpander).toBeDefined();
   });

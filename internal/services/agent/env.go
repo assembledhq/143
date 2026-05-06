@@ -18,11 +18,11 @@ import (
 )
 
 // ErrCodexAuthInvalid marks errors that genuinely indicate the user's ChatGPT
-// credential is unusable: refresh token revoked, refresh failed and cached
-// access token already expired, no usable subscription credential. Errors
-// from sandbox-side operations (Docker exec, file write) are NOT wrapped
-// with this sentinel. The orchestrator branches on errors.Is so that only
-// true auth failures show the "re-authenticate with ChatGPT" banner.
+// credential is unusable: refresh token revoked, reused, or missing after the
+// cached access token has expired. Store, network, OAuth server, and
+// sandbox-side operations (Docker exec, file write) are NOT wrapped with this
+// sentinel. The orchestrator branches on errors.Is so that only true auth
+// failures show the "re-authenticate with ChatGPT" banner.
 var ErrCodexAuthInvalid = errors.New("codex auth invalid")
 
 // wrapCodexAuthInvalid tags err as a genuine auth failure so callers can
@@ -33,6 +33,24 @@ func wrapCodexAuthInvalid(err error) error {
 		return nil
 	}
 	return fmt.Errorf("%w: %w", ErrCodexAuthInvalid, err)
+}
+
+type codexAuthInvalidReporter interface {
+	IsAuthInvalid(error) bool
+}
+
+func maybeWrapCodexAuthInvalid(source any, err error) error {
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, ErrCodexAuthInvalid) {
+		return err
+	}
+	reporter, ok := source.(codexAuthInvalidReporter)
+	if ok && reporter.IsAuthInvalid(err) {
+		return wrapCodexAuthInvalid(err)
+	}
+	return err
 }
 
 // AuthError is returned by CheckAuth and parsePlan's auth-detection heuristic
@@ -1028,7 +1046,7 @@ func (e *AgentEnv) InjectCodexAuthForUser(ctx context.Context, orgID uuid.UUID, 
 	// bypass round-robin entirely.
 	cfg, err := e.codexAuth.GetValidToken(ctx, orgID)
 	if err != nil {
-		return false, wrapCodexAuthInvalid(fmt.Errorf("get codex auth token: %w", err))
+		return false, maybeWrapCodexAuthInvalid(e.codexAuth, fmt.Errorf("get codex auth token: %w", err))
 	}
 	if cfg == nil {
 		// No OAuth token — not an error, agent will use API key.
@@ -1071,7 +1089,7 @@ func (e *AgentEnv) refreshCodexSubscriptionIfNeeded(ctx context.Context, scope m
 				Msg("codex subscription refresh failed; using cached token")
 			return &cfg, nil
 		}
-		return nil, wrapCodexAuthInvalid(fmt.Errorf("refresh codex subscription %s: %w", credID, err))
+		return nil, maybeWrapCodexAuthInvalid(refresher, fmt.Errorf("refresh codex subscription %s: %w", credID, err))
 	}
 	if refreshed == nil {
 		if !cfg.IsExpired() {

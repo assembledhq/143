@@ -874,6 +874,7 @@ type mockJobStore struct {
 	mu               sync.Mutex
 	enqueued         []string // job types
 	payloads         map[string]any
+	targets          map[string]*string // jobType -> last-seen TargetNodeID
 	oldestPendingAge time.Duration
 	hasPendingAge    bool
 }
@@ -887,6 +888,16 @@ func (m *mockJobStore) Enqueue(ctx context.Context, orgID uuid.UUID, queue, jobT
 	m.enqueued = append(m.enqueued, jobType)
 	m.payloads[jobType] = payload
 	return uuid.New(), nil
+}
+
+func (m *mockJobStore) EnqueueWithTarget(ctx context.Context, orgID uuid.UUID, queue, jobType string, payload any, priority int, dedupeKey *string, targetNodeID *string) (uuid.UUID, error) {
+	m.mu.Lock()
+	if m.targets == nil {
+		m.targets = make(map[string]*string)
+	}
+	m.targets[jobType] = targetNodeID
+	m.mu.Unlock()
+	return m.Enqueue(ctx, orgID, queue, jobType, payload, priority, dedupeKey)
 }
 
 func (m *mockJobStore) OldestPendingSessionJobAge(ctx context.Context) (time.Duration, bool, error) {
@@ -3181,6 +3192,10 @@ func TestContinueSession_RepairedSlashCommandsOnReusePath(t *testing.T) {
 // path historically misclassified the resulting Docker error as a Codex auth
 // expiry. Instead, ClearContainerID is called and ErrStaleSandboxIDCleared is
 // returned so the worker retries against a clean row.
+//
+// The probe is gated on session.WorkerNodeID matching this worker's node id;
+// see TestContinueSession_ReusePathBailsOutOnCrossNodeClaim for the wrong-node
+// path that the gate guards against.
 func TestContinueSession_ReusePathClearsStaleOrphanWhenContainerDead(t *testing.T) {
 	t.Parallel()
 
@@ -3192,9 +3207,12 @@ func TestContinueSession_ReusePathClearsStaleOrphanWhenContainerDead(t *testing.
 	session.CurrentTurn = 1
 	stale := "stale-container-8d0c678c"
 	session.ContainerID = &stale
+	thisNode := "worker-this-node"
+	session.WorkerNodeID = &thisNode
 	session.SandboxState = string(models.SandboxStateRunning)
 
 	d := defaultDeps()
+	d.nodeID = thisNode
 	d.issues.issue = issue
 	d.messages.messages = []models.SessionMessage{
 		{
@@ -3231,6 +3249,120 @@ func TestContinueSession_ReusePathClearsStaleOrphanWhenContainerDead(t *testing.
 	require.Equal(t, 1, d.sessions.clearContainerIDCalls, "ClearContainerID must be called exactly once")
 }
 
+// TestContinueSession_ReusePathBailsOutOnCrossNodeClaim verifies that when a
+// continue_session job is claimed by the wrong worker (session.worker_node_id
+// names a sibling node, e.g. before node-affinity job routing has rolled out
+// or as a defense-in-depth catch for bugs that bypass it), the orchestrator
+// returns ErrSandboxOnDifferentNode WITHOUT probing IsAlive or clearing
+// container_id. Probing on the wrong daemon false-reports dead, and clearing
+// would orphan the live container on its real host — both wrong moves.
+func TestContinueSession_ReusePathBailsOutOnCrossNodeClaim(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	issue.Source = models.IssueSourceManual
+	session := testRun(orgID, issue.ID)
+	session.Status = string(models.SessionStatusIdle)
+	session.CurrentTurn = 1
+	containerID := "preview-container-on-other-host"
+	session.ContainerID = &containerID
+	otherNode := "worker-host-c"
+	session.WorkerNodeID = &otherNode
+	session.SandboxState = string(models.SandboxStateRunning)
+
+	d := defaultDeps()
+	d.nodeID = "worker-host-7" // we are NOT the recorded owner
+	d.issues.issue = issue
+	d.messages.messages = []models.SessionMessage{
+		{
+			ID:         1,
+			SessionID:  session.ID,
+			OrgID:      orgID,
+			TurnNumber: 2,
+			Role:       models.MessageRoleUser,
+			Content:    "follow-up",
+		},
+	}
+	d.provider.IsAliveFn = func(context.Context, *agent.Sandbox) (bool, error) {
+		t.Fatalf("IsAlive must NOT be called on cross-node claim — probing the wrong daemon false-reports dead")
+		return false, nil
+	}
+	d.sessions.clearContainerIDFn = func(string) (bool, error) {
+		t.Fatalf("ClearContainerID must NOT be called on cross-node claim — would orphan the live container on its real host")
+		return false, nil
+	}
+	d.provider.CreateFn = func(context.Context, agent.SandboxConfig) (*agent.Sandbox, error) {
+		t.Fatalf("provider.Create must not run on cross-node claim — wrong worker")
+		return nil, nil
+	}
+	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
+		t.Fatalf("adapter.Execute must not run on cross-node claim")
+		return nil, nil
+	}
+
+	orch := buildOrchestrator(d)
+	err := orch.ContinueSession(context.Background(), session, nil)
+	require.Error(t, err)
+	require.ErrorIs(t, err, agent.ErrSandboxOnDifferentNode,
+		"cross-node continue_session claim must return ErrSandboxOnDifferentNode so the worker re-enqueues for the correct node")
+	require.Equal(t, 0, d.sessions.clearContainerIDCalls, "container_id must be untouched on cross-node bail-out")
+}
+
+func TestContinueSession_ReusePathClearsContainerForDeadTargetNodeRecovery(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	issue.Source = models.IssueSourceManual
+	session := testRun(orgID, issue.ID)
+	session.Status = string(models.SessionStatusIdle)
+	session.CurrentTurn = 1
+	containerID := "container-on-dead-worker"
+	session.ContainerID = &containerID
+	deadNode := "worker-dead"
+	session.WorkerNodeID = &deadNode
+	session.SandboxState = string(models.SandboxStateRunning)
+
+	d := defaultDeps()
+	d.nodeID = "worker-recovery"
+	d.issues.issue = issue
+	d.messages.messages = []models.SessionMessage{
+		{
+			ID:         1,
+			SessionID:  session.ID,
+			OrgID:      orgID,
+			TurnNumber: 2,
+			Role:       models.MessageRoleUser,
+			Content:    "follow-up",
+		},
+	}
+	d.provider.IsAliveFn = func(context.Context, *agent.Sandbox) (bool, error) {
+		t.Fatalf("IsAlive must not probe the recovery worker's daemon for a dead target node container")
+		return false, nil
+	}
+	d.sessions.clearContainerIDFn = func(expected string) (bool, error) {
+		require.Equal(t, containerID, expected, "dead-node recovery should CAS-clear the recorded container id")
+		return true, nil
+	}
+	d.provider.CreateFn = func(context.Context, agent.SandboxConfig) (*agent.Sandbox, error) {
+		t.Fatalf("provider.Create must not run until the retry observes the cleared container_id")
+		return nil, nil
+	}
+	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
+		t.Fatalf("adapter.Execute must not run until the retry observes the cleared container_id")
+		return nil, nil
+	}
+
+	orch := buildOrchestrator(d)
+	ctx := jobctx.WithDeadTargetNode(context.Background(), deadNode)
+	err := orch.ContinueSession(ctx, session, nil)
+	require.Error(t, err, "dead-node recovery should stop the current attempt after clearing the stale container")
+	require.ErrorIs(t, err, agent.ErrStaleSandboxIDCleared,
+		"dead-node recovery should retry so the next attempt hydrates on the recovery worker")
+	require.Equal(t, 1, d.sessions.clearContainerIDCalls, "dead-node recovery should clear the recorded container exactly once")
+}
+
 // TestContinueSession_ReusePathProceedsWhenIsAliveErrors covers the
 // conservative fallback: a transient docker / probe error must NOT trigger
 // the orphan-clear path. The reuse continues and any real failure surfaces
@@ -3247,9 +3379,12 @@ func TestContinueSession_ReusePathProceedsWhenIsAliveErrors(t *testing.T) {
 	session.CurrentTurn = 1
 	existing := "preview-container-abc"
 	session.ContainerID = &existing
+	thisNode := "worker-this-node"
+	session.WorkerNodeID = &thisNode
 	session.SandboxState = string(models.SandboxStateRunning)
 
 	d := defaultDeps()
+	d.nodeID = thisNode
 	d.issues.issue = issue
 	d.messages.messages = []models.SessionMessage{
 		{

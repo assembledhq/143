@@ -149,6 +149,10 @@ func (m *mockJobStore) Enqueue(ctx context.Context, orgID uuid.UUID, queue, jobT
 	return uuid.New(), nil
 }
 
+func (m *mockJobStore) EnqueueWithOpts(ctx context.Context, orgID uuid.UUID, opts db.EnqueueOpts) (uuid.UUID, error) {
+	return m.Enqueue(ctx, orgID, opts.Queue, opts.JobType, opts.Payload, opts.Priority, opts.DedupeKey)
+}
+
 // --- Helper to build the handler ---
 
 type threadTestDeps struct {

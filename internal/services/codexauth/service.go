@@ -69,6 +69,24 @@ type CredentialStore interface {
 // ErrCredentialNotFound is returned when no credential exists for the given org/provider.
 var ErrCredentialNotFound = fmt.Errorf("credential not found")
 
+// ErrAuthInvalid marks errors that genuinely mean the stored ChatGPT OAuth
+// credential cannot be used anymore and the user must re-authenticate. Store,
+// network, OAuth server 5xx, parse, and persistence failures must not wrap this
+// sentinel because those are infrastructure failures.
+var ErrAuthInvalid = errors.New("codex auth credential invalid")
+
+func wrapAuthInvalid(err error) error {
+	if err == nil {
+		return nil
+	}
+	return fmt.Errorf("%w: %w", ErrAuthInvalid, err)
+}
+
+// IsAuthInvalid reports whether err means the user needs to reconnect ChatGPT.
+func (s *Service) IsAuthInvalid(err error) bool {
+	return errors.Is(err, ErrAuthInvalid)
+}
+
 // PendingAuth tracks an in-progress device code auth flow.
 type PendingAuth struct {
 	DeviceAuthID    string
@@ -645,7 +663,7 @@ func (s *Service) RefreshTokenByID(ctx context.Context, scope models.Scope, cred
 	}
 
 	if cfg.RefreshToken == "" {
-		return nil, fmt.Errorf("no refresh token available — user must re-authenticate")
+		return nil, wrapAuthInvalid(fmt.Errorf("no refresh token available — user must re-authenticate"))
 	}
 
 	endpoint := s.issuer + "/oauth/token"
@@ -678,12 +696,12 @@ func (s *Service) RefreshTokenByID(ctx context.Context, scope models.Scope, cred
 	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
 		if strings.Contains(string(body), "refresh_token_reused") {
 			s.logger.Warn().Str("cred_id", credID.String()).Msg("refresh token already used by another client; access token may still be valid")
-			return nil, fmt.Errorf("refresh token already used by another client")
+			return nil, wrapAuthInvalid(fmt.Errorf("refresh token already used by another client"))
 		}
 		if err := s.credentials.UpdateStatusByID(ctx, scope, credID, "invalid"); err != nil {
 			s.logger.Warn().Err(err).Str("cred_id", credID.String()).Msg("failed to update credential status")
 		}
-		return nil, fmt.Errorf("refresh token revoked (status %d)", resp.StatusCode)
+		return nil, wrapAuthInvalid(fmt.Errorf("refresh token revoked (status %d)", resp.StatusCode))
 	}
 
 	if resp.StatusCode != http.StatusOK {

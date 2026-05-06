@@ -326,11 +326,13 @@ elif [ "$ROLE" = "redis" ]; then
   printf 'REDIS_PASSWORD=%s\nREDIS_PRIVATE_IP=%s\n' "$REDIS_PASSWORD" "$REDIS_PRIVATE_IP" \
     | ssh "${SSH_OPTS[@]}" root@"$HOST" 'cat > /opt/143/.env && chown deploy:deploy /opt/143/.env && chmod 600 /opt/143/.env'
 elif [ "$ROLE" = "worker" ]; then
-  # Workers only get the secrets they need — no age key or encrypted bundle.
-  # A worker compromise cannot decrypt the full production secret set, but it
-  # still needs GitHub App user-auth client creds to refresh user PR tokens.
-  printf 'DB_PASSWORD=%s\nDB_HOST=%s\nVICTORIALOGS_HOST=%s\nSERVER_ROLE=%s\nREDIS_TOPOLOGY=%s\nREDIS_PRIVATE_IP=%s\nREDIS_PASSWORD=%s\nGITHUB_APP_CLIENT_ID=%s\nGITHUB_APP_CLIENT_SECRET=%s\nWORKER_PROCESS_COUNT=%s\nSANDBOX_CPU_LIMIT=%s\nSANDBOX_MEMORY_LIMIT_MB=%s\nSANDBOX_DISK_LIMIT_GB=%s\n' \
-    "$DB_PASSWORD" "$DB_HOST" "$VICTORIALOGS_HOST" "$ROLE" "${REDIS_TOPOLOGY:-standalone}" "${REDIS_PRIVATE_IP:-}" "${REDIS_PASSWORD:-}" "${GITHUB_APP_CLIENT_ID:-}" "${GITHUB_APP_CLIENT_SECRET:-}" \
+  # Workers need the age key plus the encrypted production env bundle because
+  # the worker compose file bind-mounts .env.production.enc into the container
+  # and docker-entrypoint.sh decrypts it at boot. Provision the file before the
+  # first `docker compose up` — if the source path is missing, Docker creates a
+  # directory at /opt/143/.env.production.enc and later deploy-time scp fails.
+  printf 'SOPS_AGE_KEY=%s\nDB_PASSWORD=%s\nDB_HOST=%s\nVICTORIALOGS_HOST=%s\nSERVER_ROLE=%s\nREDIS_TOPOLOGY=%s\nREDIS_PRIVATE_IP=%s\nREDIS_PASSWORD=%s\nGITHUB_APP_CLIENT_ID=%s\nGITHUB_APP_CLIENT_SECRET=%s\nWORKER_PROCESS_COUNT=%s\nSANDBOX_CPU_LIMIT=%s\nSANDBOX_MEMORY_LIMIT_MB=%s\nSANDBOX_DISK_LIMIT_GB=%s\n' \
+    "$SOPS_AGE_KEY" "$DB_PASSWORD" "$DB_HOST" "$VICTORIALOGS_HOST" "$ROLE" "${REDIS_TOPOLOGY:-standalone}" "${REDIS_PRIVATE_IP:-}" "${REDIS_PASSWORD:-}" "${GITHUB_APP_CLIENT_ID:-}" "${GITHUB_APP_CLIENT_SECRET:-}" \
     "${WORKER_PROCESS_COUNT:-}" "${SANDBOX_CPU_LIMIT:-}" "${SANDBOX_MEMORY_LIMIT_MB:-}" "${SANDBOX_DISK_LIMIT_GB:-}" \
     | ssh "${SSH_OPTS[@]}" root@"$HOST" 'cat > /opt/143/.env && chown deploy:deploy /opt/143/.env && chmod 600 /opt/143/.env'
 
@@ -345,6 +347,11 @@ elif [ "$ROLE" = "worker" ]; then
   # when parsing docker-compose.worker.yml. deploy.sh repeats this on every
   # deploy.
   ssh "${SSH_OPTS[@]}" root@"$HOST" 'cat /opt/143/.env.local >> /opt/143/.env'
+
+  if [ -f "$ENC_FILE" ]; then
+    scp "${SCP_OPTS[@]}" "$ENC_FILE" root@"$HOST":/opt/143/
+    ssh "${SSH_OPTS[@]}" root@"$HOST" "chown deploy:deploy /opt/143/.env.production.enc && chmod 644 /opt/143/.env.production.enc"
+  fi
 else
   # App nodes get the full secret set for SOPS decryption
   printf 'SOPS_AGE_KEY=%s\nDB_PASSWORD=%s\nDB_HOST=%s\nVICTORIALOGS_HOST=%s\nSERVER_ROLE=%s\nREDIS_TOPOLOGY=%s\nREDIS_PRIVATE_IP=%s\nREDIS_PASSWORD=%s\n' "$SOPS_AGE_KEY" "$DB_PASSWORD" "$DB_HOST" "$VICTORIALOGS_HOST" "$ROLE" "${REDIS_TOPOLOGY:-standalone}" "${REDIS_PRIVATE_IP:-}" "${REDIS_PASSWORD:-}" \

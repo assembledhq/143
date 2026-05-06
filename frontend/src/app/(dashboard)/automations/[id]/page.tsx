@@ -1,6 +1,7 @@
 "use client";
 
 import { useMemo, useRef, useState } from "react";
+import dynamic from "next/dynamic";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Play, Pause, Loader2 } from "lucide-react";
 import { useParams, useRouter } from "next/navigation";
@@ -35,6 +36,15 @@ import {
   splitRunAt,
 } from "../schedule-time";
 import { TimezonePicker } from "../timezone-picker";
+
+// Defer recharts (the only dep here that's expensive) into its own chunk.
+const AutomationStatsCard = dynamic(
+  () => import("./automation-stats-card").then((m) => ({ default: m.AutomationStatsCard })),
+  {
+    ssr: false,
+    loading: () => <div className="h-48 bg-muted/20 animate-pulse rounded-lg" />,
+  },
+);
 
 // Single source of truth for interval unit values. Kept as a tuple so we can
 // derive the union type for state AND runtime-validate incoming Select values
