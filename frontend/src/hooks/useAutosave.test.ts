@@ -426,7 +426,7 @@ describe("useAutosave", () => {
     expect(callOrder).toEqual(["A", "B"]);
   });
 
-  it("shares status transitions across two hooks on the same queryKey", async () => {
+  it("scopes status transitions to the hook that originated the save", async () => {
     let resolveMutation: (() => void) | undefined;
     const mutationFn = vi.fn().mockImplementation(
       () =>
@@ -464,9 +464,8 @@ describe("useAutosave", () => {
       resultA.current.save({ settings: { v: 1 } });
     });
 
-    // Both hooks observe the "saving" transition even though only A dispatched.
     await waitFor(() => expect(resultA.current.status).toBe("saving"));
-    expect(resultB.current.status).toBe("saving");
+    expect(resultB.current.status).toBe("idle");
 
     await act(async () => {
       resolveMutation?.();
@@ -474,7 +473,7 @@ describe("useAutosave", () => {
     });
 
     await waitFor(() => expect(resultA.current.status).toBe("saved"));
-    expect(resultB.current.status).toBe("saved");
+    expect(resultB.current.status).toBe("idle");
   });
 
   it("flushes pending debounced payload on unmount so the edit isn't dropped", async () => {
