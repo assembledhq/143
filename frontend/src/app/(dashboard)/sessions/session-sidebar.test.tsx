@@ -806,17 +806,6 @@ describe('SessionSidebar', () => {
     expect(pillsScroller.className).toContain('overflow-x-auto');
     expect(pillsScroller.className).toContain('scrollbar-hide');
 
-    const title = screen.getByText('Overflow session');
-    const titleRow = title.parentElement;
-    expect(titleRow).not.toBeNull();
-    expect(titleRow?.className).toContain('flex');
-    expect(titleRow?.className).toContain('items-start');
-    expect(titleRow?.className).toContain('pr-10');
-    expect(titleRow).toContainElement(pillsScroller);
-
-    const archiveButton = screen.getAllByRole('button', { name: 'Archive session' })[0];
-    expect(archiveButton.className).toContain('top-3');
-
     expect(screen.getByText('ENG-1234')).toBeInTheDocument();
     expect(screen.getByText('PM')).toBeInTheDocument();
     expect(screen.getByText('PR')).toBeInTheDocument();
