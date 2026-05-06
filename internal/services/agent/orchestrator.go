@@ -2465,30 +2465,51 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 			cancel()
 			switch {
 			case aliveErr != nil:
+				// The probe was inconclusive: we can't tell whether the
+				// recorded container is alive on this daemon or genuinely
+				// gone (a docker daemon hiccup, a probe timeout against an
+				// unreachable container, etc.). Falling through to docker
+				// exec on a stale id surfaces a user-visible "No such
+				// container" failure, while clearing on an inconclusive
+				// signal would orphan a healthy live container if the
+				// daemon merely hiccuped — both are worse than retrying.
+				// Bounded by maxRetryableDuration so a permanently broken
+				// daemon still dead-letters through the normal path.
 				log.Warn().Err(aliveErr).
 					Str("container_id", *session.ContainerID).
-					Msg("IsAlive probe on recorded container_id failed during continue_session reuse; assuming alive and proceeding")
+					Msg("IsAlive probe on recorded container_id failed during continue_session reuse; abandoning attempt so the worker retries instead of attaching to an indeterminate container")
+				return o.abandonReuseForRetry(ctx, session, log, "isalive probe error")
 			case !alive:
 				cleared, clearErr := o.sessions.ClearContainerID(ctx, session.OrgID, session.ID, *session.ContainerID)
 				if clearErr != nil {
+					// DB error during the clear: container_id state is
+					// indeterminate. Abandon the attempt rather than
+					// proceeding to docker exec on a known-dead
+					// container, which would always surface a user-visible
+					// "No such container" failure.
 					log.Warn().Err(clearErr).
 						Str("stale_container_id", *session.ContainerID).
-						Msg("ClearContainerID failed during continue_session reuse liveness check; falling through to reuse path which will surface the underlying docker error")
-					break
+						Msg("ClearContainerID failed during continue_session reuse liveness check; abandoning attempt so the worker retries against the unchanged row")
+					return o.abandonReuseForRetry(ctx, session, log, "clear container_id db error")
 				}
 				if !cleared {
+					// CAS-lost: a peer (typically a preview's
+					// FinalizeContainerDestroy on a launch-failed
+					// instance) cleared or replaced container_id between
+					// our probe and clear. The in-memory
+					// session.ContainerID is now stale, so reusing it
+					// would attach to a no-longer-current container.
+					// Abandon so the next attempt re-fetches a fresh
+					// session row.
 					log.Info().
 						Str("stale_container_id", *session.ContainerID).
-						Msg("ClearContainerID CAS lost during continue_session reuse liveness check (a new holder acquired between probe and clear); proceeding with the now-active row")
-					break
+						Msg("ClearContainerID CAS lost during continue_session reuse liveness check (a new holder acquired between probe and clear); abandoning attempt so the worker re-fetches the now-active row")
+					return o.abandonReuseForRetry(ctx, session, log, "clear container_id cas lost")
 				}
 				log.Warn().
 					Str("stale_container_id", *session.ContainerID).
 					Msg("cleared stale orphan container_id during continue_session reuse liveness check; signaling retry to re-enter against the clean row")
-				if revertErr := o.sessions.UpdateStatus(ctx, session.OrgID, session.ID, string(models.SessionStatusPending)); revertErr != nil {
-					log.Error().Err(revertErr).Msg("failed to revert session to pending after stale container_id cleared")
-				}
-				return ErrStaleSandboxIDCleared
+				return o.abandonReuseForRetry(ctx, session, log, "stale container_id cleared")
 			}
 		}
 	}
@@ -3395,6 +3416,85 @@ func (o *Orchestrator) registerSandboxFailureMessage(ctx context.Context, sessio
 	})
 }
 
+// registerSandboxInfraFailure is the deferred companion to
+// failRunWithCategory: it queues the same failure bookkeeping
+// (status='failed', failure metadata + Linear milestone, user-visible
+// assistant message) on the dead-letter hook so transient retries don't
+// churn user state. Use this for failure modes the worker can recover
+// from on retry (docker hiccups, exec/file-write errors, sandbox
+// destroy/recreate races) — pairing the immediate failRunWithCategory
+// with retry produces a flicker (status="failed" → "running" → "failed"
+// …) and emits a Linear "failed" milestone on every attempt, even when
+// a later retry succeeds.
+//
+// Direct callers without a job registry get a no-op hook, mirroring
+// registerSandboxFailureMessage's existing semantics: such callers
+// should handle the returned error path themselves. Tests that want to
+// observe the deferred behavior must wrap the context with
+// jobctx.WithDeadLetterHooks and explicitly invoke RunDeadLetterHooks.
+//
+// session is captured by value so the hook isn't racing the caller's
+// later mutations to the same struct (e.g. AcquireTurnHold patches
+// CurrentTurn after this point).
+func (o *Orchestrator) registerSandboxInfraFailure(
+	ctx context.Context,
+	session *models.Session,
+	errMsg, category, explanation string,
+	nextSteps []string,
+	stage string,
+) {
+	sessionCopy := *session
+	jobctx.RegisterDeadLetterHook(ctx, func(hookCtx context.Context, _ error) {
+		// Detached + bounded: dead-letter hooks fire on the worker poll
+		// goroutine after the handler ctx has been cancelled (worker
+		// drain, retryable timeout). A fresh bounded context lets the
+		// terminal write land without racing the very cancellation
+		// that triggered the hook. 10s leaves room for both the failRun
+		// updates and the assistant message insert.
+		writeCtx, cancel := context.WithTimeout(context.WithoutCancel(hookCtx), 10*time.Second)
+		defer cancel()
+		o.failRunWithCategory(writeCtx, &sessionCopy, errMsg, category, explanation, nextSteps)
+		if o.sessionMessages != nil {
+			errEntry := &models.SessionMessage{
+				SessionID:  sessionCopy.ID,
+				OrgID:      sessionCopy.OrgID,
+				TurnNumber: sessionCopy.CurrentTurn + 1,
+				Role:       models.MessageRoleAssistant,
+				Content:    explanation,
+			}
+			if createErr := o.sessionMessages.Create(writeCtx, errEntry); createErr != nil {
+				o.logger.Error().Err(createErr).
+					Str("session_id", sessionCopy.ID.String()).
+					Str("org_id", sessionCopy.OrgID.String()).
+					Str("stage", stage).
+					Msg("failed to create dead-letter error message after sandbox infra failure")
+			}
+		}
+	})
+}
+
+// abandonReuseForRetry reverts the session row's transient state and
+// returns ErrStaleSandboxIDCleared so the worker re-enqueues the job
+// without consuming an attempt counter. Used by the continue_session
+// reuse-path liveness check whenever the IsAlive probe or its CAS-clear
+// is inconclusive: the safe move is to let the next attempt re-fetch the
+// session row and re-probe rather than attaching to a possibly-stale
+// container_id and surfacing a user-visible "No such container" error.
+//
+// The status revert mirrors the existing successful stale-clear path
+// (and the GitHub-auth retry paths above): pending lets a fresh worker
+// claim re-enter cleanly without tripping the "session is already
+// running" branches in the orchestrator's status checks. reason labels
+// the log line so on-call can tell the three abandon paths apart.
+func (o *Orchestrator) abandonReuseForRetry(ctx context.Context, session *models.Session, log zerolog.Logger, reason string) error {
+	if revertErr := o.sessions.UpdateStatus(ctx, session.OrgID, session.ID, string(models.SessionStatusPending)); revertErr != nil {
+		log.Error().Err(revertErr).
+			Str("reason", reason).
+			Msg("failed to revert session to pending after reuse-path abandon; the reaper will re-sync the row")
+	}
+	return ErrStaleSandboxIDCleared
+}
+
 // maxDiffCharsInPrompt is the maximum number of characters from a stored diff
 // to include in a resume prompt. Larger diffs are truncated to avoid blowing
 // up the agent's token budget.
@@ -3741,12 +3841,20 @@ func (o *Orchestrator) failTimedOutSession(run *models.Session, elapsed time.Dur
 }
 
 // ensureCodexAuth injects Codex auth credentials into the sandbox. On failure
-// it distinguishes between genuine auth invalidity (refresh-token revoked,
-// no usable credential) — surfaced as codex_auth_expired with a re-authenticate
-// CTA — and sandbox/transport errors during injection (Docker container gone,
-// exec/write failure) — surfaced as codex_auth_inject_failed with a retry CTA.
-// Auth-side errors are tagged at the source via wrapCodexAuthInvalid in env.go;
-// anything else is treated as transient infra.
+// it distinguishes three buckets:
+//
+//  1. Genuine auth invalidity (refresh-token revoked) — tagged at the source
+//     via wrapCodexAuthInvalid in env.go and surfaced as codex_auth_expired
+//     with a re-authenticate CTA. Permanent: marked failed inline since no
+//     retry will help.
+//  2. Sandbox/transport errors (Docker exec or file-write failure against a
+//     container that's gone or a daemon that's hiccuping) — surfaced as
+//     codex_auth_inject_failed with a retry CTA. Transient: deferred to the
+//     dead-letter hook so the failure bookkeeping (status='failed' + Linear
+//     "failed" milestone + user-visible assistant message) only fires when
+//     retries are exhausted. Otherwise every retry would emit a stale Linear
+//     "failed" ping and flicker session.status to "failed" mid-flight.
+//  3. No credential configured — permanent, marked failed inline.
 func (o *Orchestrator) ensureCodexAuth(ctx context.Context, run *models.Session, sandbox *Sandbox, env map[string]string) error {
 	if env["OPENAI_API_KEY"] != "" && o.env != nil && o.env.unifiedCodingCredentialIsAPIKey(ctx, run.OrgID, run.TriggeredByUserID, models.ProviderOpenAI) {
 		return nil
@@ -3763,11 +3871,16 @@ func (o *Orchestrator) ensureCodexAuth(ctx context.Context, run *models.Session,
 			)
 			return fmt.Errorf("codex auth injection: %w", err)
 		}
-		o.failRunWithCategory(ctx, run,
+		// Transient infra failure: defer the user-facing failure to the
+		// dead-letter hook so retries don't churn session.status, emit
+		// false Linear "failed" milestones, or flash a "failed" banner
+		// in the UI that snaps back when a later attempt succeeds.
+		o.registerSandboxInfraFailure(ctx, run,
 			fmt.Sprintf("codex auth injection failed: %s", err),
 			FailureCategoryCodexAuthInject,
 			"Could not inject ChatGPT credentials into the sandbox because of an infrastructure error (Docker exec or file write failed). Your ChatGPT authentication itself is still valid — retry the session.",
 			[]string{"Retry the session — the underlying sandbox error is usually transient", "If retries keep failing, check the worker logs for Docker errors"},
+			"codex auth injection",
 		)
 		return fmt.Errorf("codex auth injection: %w", err)
 	}
