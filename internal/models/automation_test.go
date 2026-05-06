@@ -35,6 +35,33 @@ func TestValidateAutomationScheduleType(t *testing.T) {
 	}
 }
 
+func TestAutomationIdentityScopeValidate(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		scope     AutomationIdentityScope
+		expectErr bool
+	}{
+		{name: "org is valid", scope: AutomationIdentityScopeOrg},
+		{name: "personal is valid", scope: AutomationIdentityScopePersonal},
+		{name: "empty defaults valid", scope: ""},
+		{name: "invalid", scope: "team", expectErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			err := tt.scope.Validate()
+			if tt.expectErr {
+				require.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+		})
+	}
+}
+
 func TestValidateCronExpression(t *testing.T) {
 	t.Parallel()
 
@@ -217,6 +244,7 @@ func TestBuildConfigSnapshot(t *testing.T) {
 		ModelOverride:   &model,
 		ReasoningEffort: &reasoning,
 		Scope:           &scope,
+		IdentityScope:   AutomationIdentityScopePersonal,
 		BaseBranch:      "main",
 	}
 
@@ -230,6 +258,7 @@ func TestBuildConfigSnapshot(t *testing.T) {
 	require.Equal(t, "opus-4-7", decoded["model_override"])
 	require.Equal(t, "xhigh", decoded["reasoning_effort"])
 	require.Equal(t, "src/", decoded["scope"])
+	require.Equal(t, string(AutomationIdentityScopePersonal), decoded["identity_scope"])
 	require.Equal(t, "main", decoded["base_branch"])
 }
 
@@ -246,5 +275,6 @@ func TestBuildConfigSnapshot_NilOptionalFields(t *testing.T) {
 	require.Nil(t, decoded["model_override"])
 	require.Nil(t, decoded["reasoning_effort"])
 	require.Nil(t, decoded["scope"])
+	require.Equal(t, string(AutomationIdentityScopeOrg), decoded["identity_scope"])
 	require.Equal(t, "develop", decoded["base_branch"])
 }

@@ -472,6 +472,28 @@ func newAutomationRunHandler(stores *Stores, services *Services, logger zerolog.
 			return nil
 		}
 
+		identityScope, err := automationRunIdentityScope(run, automation)
+		if err != nil {
+			now := time.Now()
+			summary := err.Error()
+			if _, updateErr := stores.AutomationRuns.TransitionStatusIf(ctx, orgID, runID, models.AutomationRunStatusPending, models.AutomationRunStatusFailed, &now, &summary); updateErr != nil {
+				log.Error().Err(updateErr).Msg("failed to mark run failed after invalid automation config snapshot")
+				return fmt.Errorf("mark run failed after invalid automation config snapshot: %w", updateErr)
+			}
+			return nil
+		}
+
+		sessionTriggeredByUserID, err := automationExecutionUserID(automation, identityScope)
+		if err != nil {
+			now := time.Now()
+			summary := err.Error()
+			if _, updateErr := stores.AutomationRuns.TransitionStatusIf(ctx, orgID, runID, models.AutomationRunStatusPending, models.AutomationRunStatusFailed, &now, &summary); updateErr != nil {
+				log.Error().Err(updateErr).Msg("failed to mark run failed after invalid automation identity")
+				return fmt.Errorf("mark run failed after invalid automation identity: %w", updateErr)
+			}
+			return nil
+		}
+
 		// Atomic claim: pending → running. Performed BEFORE session creation
 		// so a duplicate worker that loses the race never reaches the Sessions
 		// or Jobs stores at all. Once we own the row (transitioned=true), any
@@ -529,7 +551,7 @@ func newAutomationRunHandler(stores *Stores, services *Services, logger zerolog.
 			TokenMode:         "low",
 			ModelOverride:     automation.ModelOverride,
 			ReasoningEffort:   automation.ReasoningEffort,
-			TriggeredByUserID: run.TriggeredByUserID,
+			TriggeredByUserID: sessionTriggeredByUserID,
 			TargetBranch:      targetBranch,
 			RepositoryID:      automation.RepositoryID,
 			AutomationRunID:   &runID,
@@ -565,6 +587,40 @@ func newAutomationRunHandler(stores *Stores, services *Services, logger zerolog.
 			Str("agent_type", string(agentType)).
 			Msg("automation session dispatched")
 		return nil
+	}
+}
+
+func automationRunIdentityScope(run models.AutomationRun, automation models.Automation) (models.AutomationIdentityScope, error) {
+	if len(run.ConfigSnapshot) == 0 {
+		return automation.IdentityScope.OrDefault(), nil
+	}
+
+	var snapshot struct {
+		IdentityScope models.AutomationIdentityScope `json:"identity_scope"`
+	}
+	if err := json.Unmarshal(run.ConfigSnapshot, &snapshot); err != nil {
+		return "", fmt.Errorf("parse automation config snapshot: %w", err)
+	}
+	if snapshot.IdentityScope == "" {
+		return automation.IdentityScope.OrDefault(), nil
+	}
+	if err := snapshot.IdentityScope.Validate(); err != nil {
+		return "", err
+	}
+	return snapshot.IdentityScope.OrDefault(), nil
+}
+
+func automationExecutionUserID(automation models.Automation, identityScope models.AutomationIdentityScope) (*uuid.UUID, error) {
+	switch identityScope.OrDefault() {
+	case models.AutomationIdentityScopeOrg:
+		return nil, nil
+	case models.AutomationIdentityScopePersonal:
+		if automation.CreatedBy == nil {
+			return nil, fmt.Errorf("personal automation is missing created_by; cannot resolve execution identity")
+		}
+		return automation.CreatedBy, nil
+	default:
+		return nil, fmt.Errorf("automation has invalid identity_scope %q", identityScope)
 	}
 }
 
