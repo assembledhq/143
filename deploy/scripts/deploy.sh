@@ -46,8 +46,13 @@ esac
 
 echo "Deploying role=$ROLE tag=$TAG to $HOST..."
 
-SSH_OPTS=(-o StrictHostKeyChecking=accept-new -i "$SSH_KEY")
-SCP_OPTS=(-o StrictHostKeyChecking=accept-new -i "$SSH_KEY")
+# BatchMode=yes prevents ssh from falling through to interactive password auth
+# when the github-actions pubkey isn't in the host's authorized_keys yet — the
+# deploy fails immediately with `Permission denied (publickey)` instead of
+# looking like a stuck retry. Remediation when this fires:
+#   make sync-keys APPLY=true
+SSH_OPTS=(-o BatchMode=yes -o StrictHostKeyChecking=accept-new -i "$SSH_KEY")
+SCP_OPTS=(-o BatchMode=yes -o StrictHostKeyChecking=accept-new -i "$SSH_KEY")
 
 repair_deploy_sudoers() {
   bash "$SCRIPT_DIR/repair-deploy-sudoers.sh" "$ROLE" "$HOST" "$SSH_KEY"
