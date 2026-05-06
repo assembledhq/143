@@ -3,8 +3,10 @@ package integration
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -586,4 +588,142 @@ func TestLinearTaskManager_UpdateTask_LabelNotFound(t *testing.T) {
 	require.Error(t, err, "UpdateTask should fail when a label name can't be resolved")
 	require.Contains(t, err.Error(), `label "nonexistent" not found`,
 		"error should indicate which label wasn't found")
+}
+
+func TestLinearTaskManager_DoGraphQL_UnauthorizedMapsToErrLinearUnauthorized(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"errors":[{"message":"Authentication required, not authenticated"}]}`))
+	}))
+	defer server.Close()
+
+	tm := NewLinearTaskManager(LinearManagerConfig{
+		AuthToken: "dead-token",
+		APIURL:    server.URL,
+	})
+
+	_, err := tm.GetTask(context.Background(), "ENG-123")
+	require.Error(t, err, "GetTask should surface a 401 from Linear")
+	require.ErrorIs(t, err, ErrLinearUnauthorized,
+		"401 from Linear should map to ErrLinearUnauthorized so callers can detect dead tokens with errors.Is")
+	require.Contains(t, err.Error(), "Authentication required, not authenticated",
+		"401 from Linear should preserve the GraphQL auth detail for CLI and logs")
+}
+
+func TestLinearTaskManager_DoGraphQL_RateLimitReturnsTypedError(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Retry-After", "30")
+		w.WriteHeader(http.StatusTooManyRequests)
+	}))
+	defer server.Close()
+
+	tm := NewLinearTaskManager(LinearManagerConfig{
+		AuthToken: "test-token",
+		APIURL:    server.URL,
+	})
+
+	_, err := tm.GetTask(context.Background(), "ENG-123")
+	require.Error(t, err, "GetTask should surface a 429 from Linear")
+	var rl *LinearRateLimitError
+	require.True(t, errors.As(err, &rl),
+		"429 from Linear should map to *LinearRateLimitError so retry orchestration can read Retry-After")
+	require.Equal(t, "30", rl.RetryAfter, "RateLimitError should preserve the Retry-After header")
+}
+
+func TestLinearTaskManager_DoGraphQL_NonOKBodySurfacedInError(t *testing.T) {
+	t.Parallel()
+
+	// Linear sometimes returns a 4xx with a GraphQL error envelope explaining
+	// why the request was rejected (auth, schema, validation). The transport
+	// must read and surface that body so the next 4xx debug doesn't require
+	// reproducing the request locally to discover what Linear actually said.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"errors":[{"message":"Authentication required: invalid token"}]}`))
+	}))
+	defer server.Close()
+
+	tm := NewLinearTaskManager(LinearManagerConfig{
+		AuthToken: "test-token",
+		APIURL:    server.URL,
+	})
+
+	_, err := tm.GetTask(context.Background(), "ENG-123")
+	require.Error(t, err, "GetTask should surface a 400 from Linear")
+	require.Contains(t, err.Error(), "linear API returned 400",
+		"error should keep the status code so log searches by code still work")
+	require.Contains(t, err.Error(), "Authentication required: invalid token",
+		"error should include the GraphQL message Linear returned in the 4xx body")
+}
+
+func TestLinearTaskManager_DoGraphQL_NonOKPlainBodySurfaced(t *testing.T) {
+	t.Parallel()
+
+	// Non-GraphQL bodies (HTML error pages from edge proxies, plain-text
+	// nginx errors) should still be surfaced verbatim — they're often the
+	// only signal that the request never reached Linear's GraphQL handler.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+		_, _ = w.Write([]byte("upstream connect error"))
+	}))
+	defer server.Close()
+
+	tm := NewLinearTaskManager(LinearManagerConfig{
+		AuthToken: "test-token",
+		APIURL:    server.URL,
+	})
+
+	_, err := tm.GetTask(context.Background(), "ENG-123")
+	require.Error(t, err, "GetTask should surface a 502 from Linear")
+	require.Contains(t, err.Error(), "linear API returned 502")
+	require.Contains(t, err.Error(), "upstream connect error",
+		"non-JSON 4xx/5xx bodies should be included verbatim so edge-proxy failures are diagnosable")
+}
+
+func TestLinearTaskManager_DoGraphQL_GraphQLErrorIn200Surfaced(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"errors":[{"message":"Field 'foo' is not defined"}]}`))
+	}))
+	defer server.Close()
+
+	tm := NewLinearTaskManager(LinearManagerConfig{
+		AuthToken: "test-token",
+		APIURL:    server.URL,
+	})
+
+	_, err := tm.GetTask(context.Background(), "ENG-123")
+	require.Error(t, err, "GetTask should fail when Linear returns a GraphQL error envelope")
+	require.Contains(t, err.Error(), "linear graphql error",
+		"errors[].message in 200 responses should be surfaced via the existing prefix")
+	require.Contains(t, err.Error(), "Field 'foo' is not defined")
+}
+
+func TestLinearTaskManager_DoGraphQL_LongErrorMessagesAreTruncated(t *testing.T) {
+	t.Parallel()
+
+	long := strings.Repeat("X", 2000)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"errors":[{"message":"` + long + `"}]}`))
+	}))
+	defer server.Close()
+
+	tm := NewLinearTaskManager(LinearManagerConfig{
+		AuthToken: "test-token",
+		APIURL:    server.URL,
+	})
+
+	_, err := tm.GetTask(context.Background(), "ENG-123")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "[truncated]",
+		"oversize Linear error messages should be truncated to bound log line size")
+	require.Less(t, len(err.Error()), 1024,
+		"truncated error should fit comfortably inside a single log line")
 }

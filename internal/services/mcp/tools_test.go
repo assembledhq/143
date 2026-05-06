@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -504,6 +505,68 @@ func TestCallToolTaskManagerUnknownMethod(t *testing.T) {
 	}
 	if !strings.Contains(result.Content[0].Text, "unknown task manager method") {
 		t.Errorf("expected 'unknown task manager method', got: %s", result.Content[0].Text)
+	}
+}
+
+// unauthorizedTaskManager always returns ErrLinearUnauthorized to exercise the
+// dedicated reconnect-Linear path in taskManagerError. We use a fresh mock
+// rather than threading an error knob through mockTaskManager — the existing
+// mock's "always succeed" contract is what most tests rely on, and the
+// auth-error case is narrow enough that a separate mock keeps both readable.
+type unauthorizedTaskManager struct{ name string }
+
+func (u *unauthorizedTaskManager) Name() string { return u.name }
+func (u *unauthorizedTaskManager) ListTasks(_ context.Context, _ integration.TaskFilter) ([]integration.TaskSummary, error) {
+	return nil, fmt.Errorf("%w: Authentication required, not authenticated", integration.ErrLinearUnauthorized)
+}
+func (u *unauthorizedTaskManager) GetTask(_ context.Context, _ string) (*integration.TaskDetail, error) {
+	return nil, fmt.Errorf("%w: Authentication required, not authenticated", integration.ErrLinearUnauthorized)
+}
+func (u *unauthorizedTaskManager) FindRelated(_ context.Context, _ string) ([]integration.TaskSummary, error) {
+	return nil, fmt.Errorf("%w: Authentication required, not authenticated", integration.ErrLinearUnauthorized)
+}
+func (u *unauthorizedTaskManager) UpdateTask(_ context.Context, _ string, _ integration.TaskUpdate) error {
+	return fmt.Errorf("%w: Authentication required, not authenticated", integration.ErrLinearUnauthorized)
+}
+func (u *unauthorizedTaskManager) CreateTask(_ context.Context, _ integration.TaskCreateSpec) (*integration.TaskSummary, error) {
+	return nil, fmt.Errorf("%w: Authentication required, not authenticated", integration.ErrLinearUnauthorized)
+}
+
+func TestCallToolTaskManager_UnauthorizedSurfacesReconnectMessage(t *testing.T) {
+	t.Parallel()
+
+	reg := integration.NewRegistry()
+	reg.RegisterTaskManager(&unauthorizedTaskManager{name: "linear"})
+	tr := NewToolRegistry(reg)
+
+	cases := []struct {
+		tool string
+		args string
+	}{
+		{"linear_get_task", `{"task_id":"VIR-35"}`},
+		{"linear_list_tasks", `{}`},
+		{"linear_find_related_tasks", `{"task_id":"VIR-35"}`},
+		{"linear_update_task", `{"task_id":"VIR-35"}`},
+		{"linear_create_task", `{"title":"x"}`},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.tool, func(t *testing.T) {
+			t.Parallel()
+			result := tr.CallTool(context.Background(), tc.tool, json.RawMessage(tc.args))
+			require.True(t, result.IsError, "%s should return IsError when Linear is unauthorized", tc.tool)
+			require.Len(t, result.Content, 1)
+			text := result.Content[0].Text
+			// Stable, greppable prefix — workers tail sandbox stdout into
+			// VictoriaLogs, so this string is what ops will search for to
+			// find sessions blocked on a dead Linear token.
+			require.Contains(t, text, "linear unauthorized:",
+				"unauthorized errors should use the reserved 'linear unauthorized:' prefix so log queries can pick them out")
+			require.Contains(t, text, "reconnect linear",
+				"unauthorized error should explicitly tell the agent to ask the user to reconnect Linear")
+			require.Contains(t, text, "Authentication required, not authenticated",
+				"unauthorized error should preserve Linear's auth detail for sandbox CLI output")
+		})
 	}
 }
 
