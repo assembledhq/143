@@ -192,6 +192,14 @@ func (r *CancelRegistry) doCancel(sessionID uuid.UUID, entry *cancelEntry, grace
 	spec := entry.cancel
 	entry.mu.Unlock()
 
+	// We deliberately keep using `handle` past Detach. The runInteractiveCommand
+	// caller defers Close() then Detach(), so a Detach racing with this method
+	// implies Close() already ran or is about to. Every handle method below is
+	// idempotent and Close()-safe (sync.Once-guarded transport teardown,
+	// Interrupt returns ErrUnsupportedInterruptMethod or a write error on a
+	// closed conn, Kill is best-effort), so the worst case is one logged
+	// "failed to deliver graceful interrupt" line — never a panic or a stuck
+	// goroutine.
 	if handle == nil {
 		r.logger.Info().
 			Str("session_id", sessionID.String()).

@@ -261,6 +261,13 @@ func isClosedConnErr(err error) bool {
 // line discipline only converts 0x03 into SIGINT when a real TTY was
 // allocated. Callers that want byte-level cancellation should set both TTY
 // and OpenStdin in the spec.
+//
+// Lifetime: when ctx fires before the underlying Write completes, this
+// returns ctx.Err() but the writer goroutine stays parked on stdinW.Write
+// until the hijacked connection unblocks it — that happens at the latest
+// when Close() runs h.conn.Close(). The goroutine sends into a buffered
+// channel and exits on its own, so there is no leak beyond the handle's
+// own lifetime.
 func (h *dockerInteractiveHandle) WriteInput(ctx context.Context, data []byte) error {
 	if h.stdinW == nil {
 		return agent.ErrInputNotOpen

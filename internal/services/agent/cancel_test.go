@@ -238,5 +238,31 @@ func TestCancelRegistry_HandleAttacher_AttachAndDetach(t *testing.T) {
 	}, 2*time.Second, 10*time.Millisecond)
 }
 
+// TestCancelRegistry_GraceWindowExpiry_EscalatesToKill exercises the cancel-
+// mid-stream path: Interrupt is delivered to a handle whose underlying agent
+// keeps streaming output and never exits. After the grace window the registry
+// must escalate to handle.Kill and ctxCancel, even though the entry was never
+// Deregistered.
+func TestCancelRegistry_GraceWindowExpiry_EscalatesToKill(t *testing.T) {
+	t.Parallel()
+	reg := agent.NewCancelRegistry(zerolog.Nop())
+	id := uuid.New()
+
+	var ctxCancelled atomic.Bool
+	reg.Register(id, func() { ctxCancelled.Store(true) }, agent.DefaultCancellationSpec)
+	handle := newFakeHandle()
+	// Simulate a real agent that accepts the interrupt but keeps running:
+	// Interrupt returns nil, but the handle's Wait/closed never fires.
+	reg.AttachHandle(id, handle)
+
+	// Use RequestStop directly so we can pass a tiny grace window.
+	require.True(t, reg.RequestStop(id, agent.StopReasonUserCancel, 50*time.Millisecond))
+
+	require.Eventually(t, func() bool {
+		return handle.Killed() && ctxCancelled.Load()
+	}, 2*time.Second, 10*time.Millisecond, "grace expiry should escalate to Kill + ctxCancel when the agent ignores Interrupt")
+	require.Len(t, handle.Interrupts(), 1, "Interrupt should be delivered exactly once before Kill escalation")
+}
+
 // Compile-time check that fakeHandle satisfies the public handle contract.
 var _ agent.InteractiveCommandHandle = (*fakeHandle)(nil)

@@ -165,6 +165,48 @@ func newMockHijackedResponse(data string) types.HijackedResponse {
 	}
 }
 
+// capturingConn wraps mockConn and records every Write so tests can assert
+// on the bytes a handle sent to the agent's stdin (e.g. 0x1b for Escape).
+type capturingConn struct {
+	*mockConn
+	mu      sync.Mutex
+	written []byte
+}
+
+func newCapturingConn() *capturingConn {
+	return &capturingConn{mockConn: newMockConn("")}
+}
+
+func (c *capturingConn) Write(p []byte) (int, error) {
+	c.mu.Lock()
+	c.written = append(c.written, p...)
+	c.mu.Unlock()
+	return len(p), nil
+}
+
+func (c *capturingConn) Captured() []byte {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := make([]byte, len(c.written))
+	copy(out, c.written)
+	return out
+}
+
+// CloseWrite is what the handle's CloseInput calls to signal EOF on stdin.
+// Implementing it lets capturingConn satisfy the closeWriter interface in
+// docker_handle.go without tearing down stdout.
+func (c *capturingConn) CloseWrite() error { return nil }
+
+// newCapturingHijackedResponse wires a capturingConn into a HijackedResponse
+// so tests can both control stdout (none, here) and inspect stdin writes.
+func newCapturingHijackedResponse() (*capturingConn, types.HijackedResponse) {
+	conn := newCapturingConn()
+	return conn, types.HijackedResponse{
+		Conn:   conn,
+		Reader: bufio.NewReader(conn),
+	}
+}
+
 // dockerStreamFrame builds a single Docker multiplexed stream frame.
 // stream is 1 (stdout) or 2 (stderr); the payload is wrapped with the
 // 8-byte header stdcopy expects.
@@ -1422,6 +1464,46 @@ func TestDockerHandle_StartInteractiveCommand_TTY_AllocatesTTY(t *testing.T) {
 	defer handle.Close()
 	require.True(t, sawTTY, "TTY=true spec should allocate a real TTY")
 	require.True(t, sawStdin, "OpenStdin=true spec should attach stdin")
+}
+
+// TestDockerHandle_Interrupt_TTY_Escape_WritesEscByteToStdin pins the wire
+// behavior the Pi adapter relies on: when the spec asks for TTY+stdin and
+// CancellationMethodEscape, Interrupt must write a single 0x1b byte to the
+// hijacked stdin. Without this, Pi would never see the cancel signal because
+// it only honors Esc under raw-mode TTY input.
+func TestDockerHandle_Interrupt_TTY_Escape_WritesEscByteToStdin(t *testing.T) {
+	t.Parallel()
+
+	conn, hijacked := newCapturingHijackedResponse()
+	mock := &mockDockerClient{}
+	mock.containerExecCreateFn = func(ctx context.Context, containerID string, config container.ExecOptions) (container.ExecCreateResponse, error) {
+		return container.ExecCreateResponse{ID: "exec-pi"}, nil
+	}
+	mock.containerExecAttachFn = func(ctx context.Context, execID string, config container.ExecAttachOptions) (types.HijackedResponse, error) {
+		return hijacked, nil
+	}
+	mock.containerExecInspectFn = func(ctx context.Context, execID string) (container.ExecInspect, error) {
+		return container.ExecInspect{ExitCode: 0}, nil
+	}
+
+	p := NewDockerProvider(mock, newTestLogger())
+	sb := &agent.Sandbox{ID: "c1", Provider: "docker", WorkDir: "/workspace", HomeDir: "/home/sandbox"}
+
+	handle, err := p.StartInteractiveCommand(context.Background(), sb, agent.InteractiveCommandSpec{
+		Cmd:              "pi",
+		TTY:              true,
+		OpenStdin:        true,
+		CancellationSpec: agent.CancellationSpec{Method: agent.CancellationMethodEscape},
+	})
+	require.NoError(t, err)
+	defer handle.Close()
+
+	require.NoError(t, handle.Interrupt(context.Background(), agent.CancellationSpec{Method: agent.CancellationMethodEscape}))
+
+	require.Eventually(t, func() bool {
+		return bytes.Contains(conn.Captured(), []byte{0x1b})
+	}, 2*time.Second, 10*time.Millisecond, "Escape interrupt on a TTY+stdin handle must deliver 0x1b to stdin")
+	require.Equal(t, []byte{0x1b}, conn.Captured(), "exactly one Esc byte should reach stdin per Interrupt call")
 }
 
 // TestDockerHandle_PerHandlePIDFile verifies that two handles in the same

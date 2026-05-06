@@ -22,9 +22,12 @@ var DefaultCancellationSpec = CancellationSpec{Method: CancellationMethodCtrlC}
 // CancellationSpecProvider is an optional extension on top of AgentAdapter.
 // Adapters can implement it to override the default Ctrl+C cancellation path.
 //
-// Newer adapters should prefer RuntimeProfileProvider, which carries the same
-// information alongside transport requirements (TTY, open stdin). Both are
-// honored — RuntimeProfileProvider wins when both are implemented.
+// Deprecated: use RuntimeProfileProvider instead — it carries the same
+// information alongside transport requirements (TTY, open stdin) so
+// cancellation is expressed once per adapter. Both are honored for now —
+// RuntimeProfileProvider wins when both are implemented — but no production
+// adapter still implements this interface, and it will be removed once the
+// cancellation_test.go fixtures are migrated.
 type CancellationSpecProvider interface {
 	CancellationSpec() CancellationSpec
 }
