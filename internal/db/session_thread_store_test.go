@@ -298,7 +298,7 @@ func TestSessionThreadStore_UpdateStatus(t *testing.T) {
 		{
 			name:      "running sets started_at",
 			status:    models.ThreadStatusRunning,
-			expectSQL: "UPDATE session_threads SET status .+ started_at",
+			expectSQL: "UPDATE session_threads SET status .+ started_at .+ cancel_requested_at = NULL",
 		},
 		{
 			name:      "completed sets completed_at",
@@ -348,6 +348,32 @@ func TestSessionThreadStore_UpdateStatus(t *testing.T) {
 			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 		})
 	}
+}
+
+func TestSessionThreadStore_ClaimIdleForSessionClearsCancelRequestedAt(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewSessionThreadStore(mock)
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	threadID := uuid.New()
+	now := time.Now()
+
+	mock.ExpectQuery("UPDATE session_threads[\\s\\S]*SET status = 'running',[\\s\\S]*cancel_requested_at = NULL").
+		WithArgs(anyArgs(4)...).
+		WillReturnRows(
+			pgxmock.NewRows(sessionThreadTestColumns).
+				AddRow(newSessionThreadRow(threadID, sessionID, orgID, "Backend", now)...),
+		)
+
+	thread, err := store.ClaimIdleForSession(context.Background(), orgID, sessionID, threadID, models.MaxRunningThreadsPerSession)
+	require.NoError(t, err, "ClaimIdleForSession should not return an error for an eligible thread")
+	require.Equal(t, threadID, thread.ID, "ClaimIdleForSession should return the claimed thread")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
 func TestSessionThreadStore_ClaimIdle(t *testing.T) {
@@ -406,6 +432,40 @@ func TestSessionThreadStore_ClaimIdle(t *testing.T) {
 			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 		})
 	}
+}
+
+func TestSessionThreadStore_ClaimIdleForSessionRejectsAtLimit(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewSessionThreadStore(mock)
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	threadID := uuid.New()
+
+	// First query: the CTE-based UPDATE finds no eligible row because the
+	// session already has MaxRunningThreadsPerSession siblings active. Returns
+	// no rows.
+	mock.ExpectQuery("UPDATE session_threads").
+		WithArgs(anyArgs(4)...).
+		WillReturnRows(pgxmock.NewRows(sessionThreadTestColumns))
+
+	// Second query: isAtRunningLimit re-inspects state outside the FOR UPDATE
+	// lock. The target is still idle, sibling_active equals max_running, so
+	// the store maps the empty result to ErrThreadRunningLimitReached.
+	mock.ExpectQuery(`SELECT\s+COALESCE`).
+		WithArgs(anyArgs(3)...).
+		WillReturnRows(
+			pgxmock.NewRows([]string{"target_status", "sibling_active"}).
+				AddRow(string(models.ThreadStatusIdle), models.MaxRunningThreadsPerSession),
+		)
+
+	_, err = store.ClaimIdleForSession(context.Background(), orgID, sessionID, threadID, models.MaxRunningThreadsPerSession)
+	require.ErrorIs(t, err, ErrThreadRunningLimitReached, "ClaimIdleForSession should surface the running-limit sentinel when at cap")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
 func TestSessionThreadStore_ClaimIdleForSessionLocksSiblings(t *testing.T) {

@@ -204,6 +204,7 @@ type mockSessionStore struct {
 	countRunning           int
 	statusUpdates          []string
 	resultUpdates          []resultUpdate
+	workspaceUpdates       []workspaceUpdate
 	turnUpdates            []turnUpdate
 	runtimeBegins          []runtimeBegin
 	progressUpdates        []runtimeProgressUpdate
@@ -299,6 +300,11 @@ type resultUpdate struct {
 	result *models.SessionResult
 }
 
+type workspaceUpdate struct {
+	snapshotKey string
+	result      *models.SessionResult
+}
+
 type turnUpdate struct {
 	turn           int
 	result         *models.SessionResult
@@ -339,6 +345,16 @@ func (m *mockSessionStore) UpdateTurnComplete(ctx context.Context, orgID, sessio
 }
 
 func (m *mockSessionStore) UpdateSnapshotInfo(ctx context.Context, orgID, sessionID uuid.UUID, agentSessionID, snapshotKey string) error {
+	return nil
+}
+
+func (m *mockSessionStore) UpdateWorkspaceSnapshot(ctx context.Context, orgID, sessionID uuid.UUID, snapshotKey string, result *models.SessionResult) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.workspaceUpdates = append(m.workspaceUpdates, workspaceUpdate{
+		snapshotKey: snapshotKey,
+		result:      result,
+	})
 	return nil
 }
 
@@ -578,6 +594,14 @@ func (m *mockSessionStore) getTurnUpdates() []turnUpdate {
 	defer m.mu.Unlock()
 	out := make([]turnUpdate, len(m.turnUpdates))
 	copy(out, m.turnUpdates)
+	return out
+}
+
+func (m *mockSessionStore) getWorkspaceUpdates() []workspaceUpdate {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]workspaceUpdate, len(m.workspaceUpdates))
+	copy(out, m.workspaceUpdates)
 	return out
 }
 
@@ -2773,6 +2797,90 @@ func TestContinueSession_GatesOnPendingSnapshotKey(t *testing.T) {
 	err := orch.ContinueSession(context.Background(), session, nil)
 	require.ErrorIs(t, err, agent.ErrSnapshotPending, "ContinueSession should bail with ErrSnapshotPending when PendingSnapshotKey is set")
 	require.Empty(t, d.sessions.getStatusUpdates(), "ContinueSession must not mutate session state before the gate fires")
+}
+
+func TestRevertThread_UpdatesWorkspaceSnapshot(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	sessionID := uuid.New()
+	threadID := uuid.New()
+	snapshotKey := "snapshots/test/session.tar.zst"
+	baseCommitSHA := "base-sha"
+	threadDiff := "diff --git a/foo.txt b/foo.txt\n--- a/foo.txt\n+++ b/foo.txt\n@@ -1 +1 @@\n-old\n+new\n"
+
+	sessions := &mockSessionStore{}
+	snapshots := &mockSnapshotStore{
+		data: map[string][]byte{
+			snapshotKey: []byte("prior-snapshot"),
+		},
+	}
+	provider := testutil.NewMockSandboxProvider()
+	provider.RestoreFn = func(ctx context.Context, sb *agent.Sandbox, reader io.Reader) error {
+		_, err := io.ReadAll(reader)
+		return err
+	}
+	provider.SnapshotFn = func(ctx context.Context, sb *agent.Sandbox) (io.ReadCloser, error) {
+		return io.NopCloser(bytes.NewReader([]byte("post-revert-snapshot"))), nil
+	}
+	var appliedReversePatch bool
+	provider.ExecFn = func(ctx context.Context, sb *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
+		switch {
+		case cmd == "git rev-parse --is-inside-work-tree":
+			_, _ = io.WriteString(stdout, "true\n")
+			return 0, nil
+		case strings.HasPrefix(cmd, "git apply -R "):
+			appliedReversePatch = true
+			return 0, nil
+		case cmd == "git diff --find-renames --binary base-sha -- .":
+			_, _ = io.WriteString(stdout, "diff --git a/foo.txt b/foo.txt\n")
+			return 0, nil
+		case cmd == "git ls-files --others --exclude-standard -- .":
+			return 0, nil
+		case cmd == "git rev-parse HEAD":
+			_, _ = io.WriteString(stdout, "head-sha\n")
+			return 0, nil
+		case cmd == "git status --porcelain --untracked-files=all -- .":
+			_, _ = io.WriteString(stdout, " M foo.txt\n")
+			return 0, nil
+		default:
+			return 0, nil
+		}
+	}
+
+	orch := agent.NewOrchestrator(agent.OrchestratorConfig{
+		Provider:         provider,
+		Sessions:         sessions,
+		SessionLogs:      &mockSessionLogStore{},
+		SessionQuestions: &mockSessionQuestionStore{},
+		SessionMessages:  &mockSessionMessageStore{},
+		Snapshots:        snapshots,
+		Logger:           zerolog.Nop(),
+	})
+
+	session := &models.Session{
+		ID:            sessionID,
+		OrgID:         orgID,
+		Status:        string(models.SessionStatusIdle),
+		SnapshotKey:   &snapshotKey,
+		BaseCommitSHA: &baseCommitSHA,
+	}
+	thread := &models.SessionThread{
+		ID:        threadID,
+		SessionID: sessionID,
+		OrgID:     orgID,
+		Diff:      &threadDiff,
+	}
+
+	err := orch.RevertThread(context.Background(), session, thread)
+	require.NoError(t, err, "RevertThread should apply the reverse patch and persist the updated workspace state")
+	require.True(t, appliedReversePatch, "RevertThread should run git apply -R inside the sandbox")
+
+	updates := sessions.getWorkspaceUpdates()
+	require.Len(t, updates, 1, "RevertThread should persist one workspace snapshot update")
+	require.Equal(t, "snapshots/"+orgID.String()+"/"+sessionID.String()+"/workspace.tar.zst", updates[0].snapshotKey, "RevertThread should refresh the session snapshot key")
+	require.NotNil(t, updates[0].result.Diff, "RevertThread should persist the refreshed session diff")
+	require.Equal(t, "diff --git a/foo.txt b/foo.txt\n", *updates[0].result.Diff, "RevertThread should store the post-revert diff")
 }
 
 func TestContinueSession_UsesBuildRunResultInUpdateTurnComplete(t *testing.T) {

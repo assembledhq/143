@@ -115,7 +115,7 @@ import {
   resolveInitialSessionAnchor,
   writeStoredSessionScrollPosition,
 } from "@/lib/session-open-position";
-import type { ListResponse, Session, SessionDetail, SessionInputCommand, SessionInputReference, SessionLog, SessionMessage, SessionReviewComment, SessionThread, SessionTimelineEntry, User, Validation, CodexAuthStatus, PullRequestHealthResponse, SingleResponse } from "@/lib/types";
+import type { ListResponse, Session, SessionDetail, SessionInputCommand, SessionInputReference, SessionLog, SessionMessage, SessionReviewComment, SessionThread, SessionThreadFileEvent, SessionTimelineEntry, User, Validation, CodexAuthStatus, PullRequestHealthResponse, SingleResponse } from "@/lib/types";
 import { AgentTabStrip, computeThreadOverlap } from "./agent-tab-strip";
 import {
   ThreadAttributionFilter,
@@ -3168,19 +3168,42 @@ export function SessionDetailContent({ id }: { id: string }) {
   // the Changes-view attribution filters. Polled at the same cadence as the
   // session detail so a user-perceptible "tab touched a file" lands within
   // one polling cycle.
+  //
+  // Polling is incremental: the first request fetches the whole timeline,
+  // subsequent requests pass `?since=<latest observed_at>` so a long session
+  // does not retransfer hundreds of events every 5 seconds. The accumulated
+  // list lives in component state because React Query caches only the most
+  // recent response, which is now a delta.
+  const fileEventsSinceRef = useRef<string | undefined>(undefined);
+  const [accumulatedFileEvents, setAccumulatedFileEvents] = useState<SessionThreadFileEvent[]>([]);
   const fileEventsQuery = useQuery({
     queryKey: queryKeys.sessions.threadFileEvents(id),
-    queryFn: () => api.sessions.listThreadFileEvents(id),
+    queryFn: () => api.sessions.listThreadFileEvents(id, fileEventsSinceRef.current),
     enabled: threads.length > 0,
     refetchInterval: threads.some((t) => t.status === "running" || t.status === "pending") ? 5000 : false,
     staleTime: 2_000,
   });
+  useEffect(() => {
+    const incoming = fileEventsQuery.data?.data;
+    if (!incoming || incoming.length === 0) return;
+    setAccumulatedFileEvents((prev) => {
+      const byId = new Map<number, SessionThreadFileEvent>();
+      for (const e of prev) byId.set(e.id, e);
+      for (const e of incoming) byId.set(e.id, e);
+      return Array.from(byId.values()).sort((a, b) => b.observed_at.localeCompare(a.observed_at));
+    });
+    let max = fileEventsSinceRef.current;
+    for (const e of incoming) {
+      if (!max || e.observed_at > max) max = e.observed_at;
+    }
+    fileEventsSinceRef.current = max;
+  }, [fileEventsQuery.data]);
   const overlapsByThreadId = useMemo(
-    () => computeThreadOverlap(threads, fileEventsQuery.data?.data ?? []),
-    [threads, fileEventsQuery.data?.data],
+    () => computeThreadOverlap(threads, accumulatedFileEvents),
+    [threads, accumulatedFileEvents],
   );
   const [attributionFilter, setAttributionFilter] = useState<ThreadAttributionFilterValue>({ kind: "all" });
-  const attributionAllowedPaths = useAttributionAllowedPaths(attributionFilter, fileEventsQuery.data?.data);
+  const attributionAllowedPaths = useAttributionAllowedPaths(attributionFilter, accumulatedFileEvents);
   const visibleDiffFiles = useMemo(
     () =>
       attributionAllowedPaths == null

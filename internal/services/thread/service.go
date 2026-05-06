@@ -360,7 +360,7 @@ func (s *Service) SendMessage(ctx context.Context, input SendMessageInput) (*Sen
 	queueOnly := false
 	if err != nil {
 		if errors.Is(err, db.ErrThreadRunningLimitReached) {
-			return nil, ErrRunningLimitReached
+			return s.queueMessageOnIdleThread(ctx, input)
 		}
 		// Check if thread exists at all to provide a better error.
 		existing, lookupErr := s.threadStore.GetByID(ctx, input.OrgID, input.ThreadID)
@@ -521,6 +521,52 @@ func (s *Service) SendMessage(ctx context.Context, input SendMessageInput) (*Sen
 		ResolvedComments: resolvedComments,
 		AnsweredQuestion: answeredQuestion,
 	}, nil
+}
+
+// queueMessageOnIdleThread queues a follow-up against an idle thread that
+// could not get a running slot because the session-wide running-thread cap is
+// already saturated. The message is appended to the thread's pending queue
+// and pending_message_count is bumped so the composer can show "queued (N)";
+// no continue_session is enqueued because no slot is available — the next
+// sibling to finish will pick the work up via the orchestrator's drain.
+func (s *Service) queueMessageOnIdleThread(ctx context.Context, input SendMessageInput) (*SendMessageResult, error) {
+	thread, err := s.threadStore.GetByID(ctx, input.OrgID, input.ThreadID)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrThreadNotFound, err)
+	}
+	if thread.SessionID != input.SessionID {
+		return nil, ErrThreadNotFound
+	}
+	if thread.Status != models.ThreadStatusIdle {
+		return nil, ErrThreadNotIdle
+	}
+
+	content := input.Message
+	if input.PlanMode {
+		content = "[PLAN_MODE]\n" + content
+	}
+	msg := &models.SessionMessage{
+		SessionID:  thread.SessionID,
+		OrgID:      input.OrgID,
+		ThreadID:   &input.ThreadID,
+		UserID:     input.UserID,
+		TurnNumber: thread.CurrentTurn + 1,
+		Role:       models.MessageRoleUser,
+		Content:    content,
+		References: input.References,
+		Commands:   input.Commands,
+	}
+	if len(input.Images) > 0 {
+		msg.Attachments = input.Images
+	}
+
+	if err := s.messageStore.Create(ctx, msg); err != nil {
+		return nil, fmt.Errorf("create queued message: %w", err)
+	}
+	if err := s.threadStore.IncrementPendingMessages(ctx, input.OrgID, input.ThreadID); err != nil {
+		return nil, fmt.Errorf("increment queued message count: %w", err)
+	}
+	return &SendMessageResult{Message: msg}, nil
 }
 
 func threadStatusCanQueue(status models.ThreadStatus) bool {

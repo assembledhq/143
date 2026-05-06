@@ -43,17 +43,22 @@ const appendBatchChunkSize = 500
 // belt-and-suspenders check against a caller that mixes events from two
 // orgs into one slice — that would silently let one org write into
 // another's audit row otherwise.
+//
+// The caller's slice is never mutated. Each event MUST carry a non-nil OrgID
+// matching the orgID argument (or uuid.Nil for the orgID-from-argument
+// fallback path); we copy through to a per-row arg list rather than writing
+// back into the input so callers can reuse a borrowed buffer.
 func (s *SessionThreadFileEventStore) AppendBatch(ctx context.Context, orgID uuid.UUID, events []models.SessionThreadFileEvent) error {
 	if len(events) == 0 {
 		return nil
 	}
 	for i := range events {
-		if events[i].OrgID == uuid.Nil {
-			events[i].OrgID = orgID
+		eventOrg := events[i].OrgID
+		if eventOrg == uuid.Nil {
 			continue
 		}
-		if events[i].OrgID != orgID {
-			return fmt.Errorf("session_thread_file_events batch mixes orgs: event %d has %s, expected %s", i, events[i].OrgID, orgID)
+		if eventOrg != orgID {
+			return fmt.Errorf("session_thread_file_events batch mixes orgs: event %d has %s, expected %s", i, eventOrg, orgID)
 		}
 	}
 	for start := 0; start < len(events); start += appendBatchChunkSize {
@@ -61,7 +66,7 @@ func (s *SessionThreadFileEventStore) AppendBatch(ctx context.Context, orgID uui
 		if end > len(events) {
 			end = len(events)
 		}
-		if err := s.appendChunk(ctx, events[start:end]); err != nil {
+		if err := s.appendChunk(ctx, orgID, events[start:end]); err != nil {
 			return err
 		}
 	}
@@ -72,7 +77,11 @@ func (s *SessionThreadFileEventStore) AppendBatch(ctx context.Context, orgID uui
 // $N placeholders rather than unnest() so nullable columns (thread_id,
 // before_hash, after_hash) round-trip via pgx's standard pointer codecs
 // instead of relying on nullable-array encoding, which is fragile in pgx v5.
-func (s *SessionThreadFileEventStore) appendChunk(ctx context.Context, events []models.SessionThreadFileEvent) error {
+//
+// orgID is what gets persisted on every row. When event.OrgID is uuid.Nil we
+// fall back to the argument; AppendBatch already verified that any non-nil
+// event.OrgID matches.
+func (s *SessionThreadFileEventStore) appendChunk(ctx context.Context, orgID uuid.UUID, events []models.SessionThreadFileEvent) error {
 	if len(events) == 0 {
 		return nil
 	}
@@ -86,7 +95,11 @@ func (s *SessionThreadFileEventStore) appendChunk(ctx context.Context, events []
 		}
 		base := i * colsPerRow
 		fmt.Fprintf(&b, "($%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d)", base+1, base+2, base+3, base+4, base+5, base+6, base+7, base+8)
-		args = append(args, e.OrgID, e.SessionID, e.ThreadID, e.Turn, e.Path, e.EventType, e.BeforeHash, e.AfterHash)
+		eventOrg := e.OrgID
+		if eventOrg == uuid.Nil {
+			eventOrg = orgID
+		}
+		args = append(args, eventOrg, e.SessionID, e.ThreadID, e.Turn, e.Path, e.EventType, e.BeforeHash, e.AfterHash)
 	}
 	if _, err := s.db.Exec(ctx, b.String(), args...); err != nil {
 		return fmt.Errorf("append thread file events: %w", err)
@@ -114,4 +127,3 @@ func (s *SessionThreadFileEventStore) ListBySession(ctx context.Context, orgID, 
 	}
 	return pgx.CollectRows(rows, pgx.RowToStructByName[models.SessionThreadFileEvent])
 }
-

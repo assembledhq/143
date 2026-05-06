@@ -36,9 +36,7 @@ type forkSessionThreadInput struct {
 // its own snapshots) at the cost of losing in-progress edits that hadn't
 // been committed in the source. Fork is the right primitive for "diverge
 // safely from this branch state"; it is not a rollback or a checkpoint
-// share. If the source session has a SnapshotKey we record it as the
-// fork's base_snapshot_key on its first thread so a future revert in the
-// fork can still trace back, but we do not hydrate from it.
+// share.
 func newForkSessionThreadHandler(stores *Stores, services *Services, logger zerolog.Logger) JobHandler {
 	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
 		var input forkSessionThreadInput
@@ -144,14 +142,9 @@ type revertSessionThreadInput struct {
 	UserID    string `json:"user_id,omitempty"`
 }
 
-// newRevertSessionThreadHandler attempts to apply the thread's diff in
-// reverse against the shared sandbox. The orchestrator owns the actual git
-// exec (it is the only component with a live sandbox handle); when no
-// orchestrator is configured we fall back to an assistant message that
-// instructs the user to apply the reverse patch by hand.
-//
-// The handler always records a user-visible audit message in the source
-// thread so the action is legible regardless of execution path.
+// newRevertSessionThreadHandler applies a thread's stored diff in reverse
+// against the latest durable session snapshot through the orchestrator, then
+// posts a user-visible confirmation back into the source thread.
 func newRevertSessionThreadHandler(stores *Stores, services *Services, logger zerolog.Logger) JobHandler {
 	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
 		var input revertSessionThreadInput
@@ -180,12 +173,21 @@ func newRevertSessionThreadHandler(stores *Stores, services *Services, logger ze
 		if thread.Diff == nil || strings.TrimSpace(*thread.Diff) == "" {
 			return fmt.Errorf("thread has no diff to revert")
 		}
+		if stores.Sessions == nil {
+			return fmt.Errorf("session store is unavailable")
+		}
+		if services == nil || services.Orchestrator == nil {
+			return fmt.Errorf("orchestrator is unavailable")
+		}
+		session, err := stores.Sessions.GetByID(ctx, orgID, sessionID)
+		if err != nil {
+			return fmt.Errorf("fetch session: %w", err)
+		}
+		if err := services.Orchestrator.RevertThread(ctx, &session, &thread); err != nil {
+			return fmt.Errorf("revert thread: %w", err)
+		}
 
-		// We post an assistant message describing the revert request and
-		// containing the patch the user can apply locally. The actual
-		// in-sandbox `git apply -R` step is left to a Phase 4.5 follow-up
-		// that owns sandbox exec sequencing — this handler ensures the
-		// user-facing artifact is durable today.
+
 		if stores.SessionMessages != nil {
 			msg := &models.SessionMessage{
 				SessionID: sessionID,
@@ -196,16 +198,7 @@ func newRevertSessionThreadHandler(stores *Stores, services *Services, logger ze
 				// message in the thread timeline.
 				TurnNumber: thread.CurrentTurn + 1,
 				Role:       models.MessageRoleAssistant,
-				// Use a 4-backtick fence so a diff that itself contains a
-				// triple-backtick line (e.g. an MD edit) doesn't break the
-				// outer fence. CommonMark requires the opening run to
-				// match-or-shorter than the closing run.
-				Content: fmt.Sprintf(
-					"Revert prepared. Apply this patch in reverse to undo this tab's changes:\n\n"+
-						"````diff\n%s\n````\n\n"+
-						"Tip: `git apply -R` against this patch from the workspace root will roll back the listed paths.",
-					truncateDiffForDisplay(*thread.Diff),
-				),
+				Content:    fmt.Sprintf("Reverted this tab's changes and refreshed the session snapshot.\n\n````diff\n%s\n````", truncateDiffForDisplay(*thread.Diff)),
 			}
 			if err := stores.SessionMessages.Create(ctx, msg); err != nil {
 				logger.Warn().Err(err).Msg("failed to post revert message")
@@ -214,7 +207,7 @@ func newRevertSessionThreadHandler(stores *Stores, services *Services, logger ze
 		logger.Info().
 			Str("session_id", sessionID.String()).
 			Str("thread_id", threadID.String()).
-			Msg("revert thread artifact prepared")
+			Msg("reverted session thread")
 		return nil
 	}
 }
