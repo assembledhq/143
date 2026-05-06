@@ -1883,8 +1883,8 @@ function ChatPanel({
 
   const persistScrollPosition = useCallback((scrollTop: number) => {
     if (typeof window === "undefined" || !viewerScope) return;
-    writeStoredSessionScrollPosition(window.localStorage, sessionId, viewerScope, scrollTop);
-  }, [sessionId, viewerScope]);
+    writeStoredSessionScrollPosition(window.localStorage, sessionId, viewerScope, scrollTop, activeThreadId);
+  }, [activeThreadId, sessionId, viewerScope]);
 
   const schedulePersistScrollPosition = useCallback((scrollTop: number) => {
     if (saveScrollTimerRef.current) {
@@ -2036,7 +2036,7 @@ function ChatPanel({
 
   useEffect(() => {
     initialAnchorAppliedRef.current = false;
-  }, [sessionId]);
+  }, [activeThreadId, sessionId]);
 
   useEffect(() => {
     const currentScrollEl = scrollRef.current;
@@ -2059,7 +2059,7 @@ function ChatPanel({
     const storedScrollTop =
       typeof window === "undefined"
         ? null
-        : readStoredSessionScrollPosition(window.localStorage, sessionId, viewerScope);
+        : readStoredSessionScrollPosition(window.localStorage, sessionId, viewerScope, activeThreadId);
     const anchor = resolveInitialSessionAnchor({
       entries: timelineEntries,
       isActive: isRunning,
@@ -2085,7 +2085,7 @@ function ChatPanel({
 
     scrollToLiveEdgePosition();
     initialAnchorAppliedRef.current = true;
-  }, [hasLoadedTimelineInputs, isRunning, scrollToLiveEdgePosition, sessionId, syncScrollState, timelineEntries, viewerScope]);
+  }, [activeThreadId, hasLoadedTimelineInputs, isRunning, scrollToLiveEdgePosition, sessionId, syncScrollState, timelineEntries, viewerScope]);
 
   // Only auto-scroll to bottom when new entries arrive if the user is already near the bottom.
   useEffect(() => {
