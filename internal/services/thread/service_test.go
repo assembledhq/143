@@ -269,7 +269,7 @@ func TestService_CreateThread(t *testing.T) {
 			expectErr: ErrSessionNotFound,
 		},
 		{
-			name: "session in terminal state",
+			name: "success for completed session",
 			input: CreateThreadInput{
 				SessionID: sessionID,
 				OrgID:     orgID,
@@ -278,6 +278,24 @@ func TestService_CreateThread(t *testing.T) {
 			setupDeps: func(deps *testDeps) {
 				deps.sessionStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.Session, error) {
 					return models.Session{ID: sessionID, OrgID: orgID, Status: "completed", AgentType: models.AgentTypeClaudeCode}, nil
+				}
+				deps.threadStore.createFn = func(_ context.Context, t *models.SessionThread, _ int) error {
+					t.ID = threadID
+					t.CreatedAt = now
+					return nil
+				}
+			},
+		},
+		{
+			name: "session in non-resumable terminal state",
+			input: CreateThreadInput{
+				SessionID: sessionID,
+				OrgID:     orgID,
+				Label:     "Backend",
+			},
+			setupDeps: func(deps *testDeps) {
+				deps.sessionStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.Session, error) {
+					return models.Session{ID: sessionID, OrgID: orgID, Status: "skipped", AgentType: models.AgentTypeClaudeCode}, nil
 				}
 			},
 			expectErr: ErrSessionTerminal,
@@ -629,7 +647,7 @@ func TestService_UpdateThread(t *testing.T) {
 			},
 			setupDeps: func(deps *testDeps) {
 				deps.sessionStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.Session, error) {
-					return models.Session{ID: sessionID, OrgID: orgID, Status: "completed", AgentType: models.AgentTypeClaudeCode}, nil
+					return models.Session{ID: sessionID, OrgID: orgID, Status: "skipped", AgentType: models.AgentTypeClaudeCode}, nil
 				}
 			},
 			expectErr: ErrSessionTerminal,

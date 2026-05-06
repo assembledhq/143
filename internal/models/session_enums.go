@@ -36,6 +36,32 @@ func (s SessionStatus) Validate() error {
 	}
 }
 
+func (s SessionStatus) IsTerminal() bool {
+	switch s {
+	case SessionStatusCompleted,
+		SessionStatusPRCreated,
+		SessionStatusFailed,
+		SessionStatusCancelled,
+		SessionStatusSkipped:
+		return true
+	default:
+		return false
+	}
+}
+
+func (s SessionStatus) IsResumable() bool {
+	for _, resumable := range ResumableSessionStatuses {
+		if s == resumable {
+			return true
+		}
+	}
+	return false
+}
+
+func (s SessionStatus) CanAddThread() bool {
+	return !s.IsTerminal() || s.IsResumable()
+}
+
 // Status groups used by the frontend filter tabs. Defined here so the backend
 // is the source of truth; the frontend arrays must stay in sync.
 var (

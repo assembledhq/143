@@ -1823,7 +1823,7 @@ describe('SessionDetailPage', () => {
 
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
 
-    expect((await screen.findAllByText('PR closed')).length).toBeGreaterThanOrEqual(2);
+    expect((await screen.findAllByText('PR #42 closed')).length).toBeGreaterThanOrEqual(2);
     expect(screen.getByText('PR #42 was closed without merging.')).toBeInTheDocument();
     expect(screen.getByRole('link', { name: 'View PR' })).toBeInTheDocument();
     expect(screen.queryByText('PR health')).not.toBeInTheDocument();
@@ -1868,7 +1868,7 @@ describe('SessionDetailPage', () => {
     await user.click(mergeButton);
 
     await waitFor(() => expect(mergeCalled).toBe(true));
-    await waitFor(() => expect(toast.success).toHaveBeenCalledWith('PR merged', expect.any(Object)));
+    await waitFor(() => expect(toast.success).toHaveBeenCalledWith('PR #42 merged', expect.any(Object)));
   });
 
   it('renders external links for CI checks shown from the PR details hover card', async () => {
@@ -1942,8 +1942,7 @@ describe('SessionDetailPage', () => {
 
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
 
-    expect(await screen.findByText('PR merged')).toBeInTheDocument();
-    expect(screen.queryAllByText('PR merged')).toHaveLength(1);
+    expect((await screen.findAllByText('PR #42 merged')).length).toBeGreaterThanOrEqual(2);
     expect(screen.getByText('PR #42 was merged successfully.')).toHaveClass('text-xs');
     expect(screen.getByText('This change has landed. Open a follow-up session if you need to make another revision.')).toHaveClass('text-xs');
     expect(screen.getByRole('link', { name: 'View PR' })).toBeInTheDocument();
@@ -5761,6 +5760,30 @@ describe('SessionDetailPage', () => {
     });
   });
 
+  it('autofocuses the follow-up textarea on desktop session detail pages', async () => {
+    const idleSession: Session = {
+      ...mockSessions[0],
+      status: 'idle',
+      completed_at: undefined,
+      current_turn: 1,
+      sandbox_state: 'snapshotted',
+    };
+
+    setMobileViewport(false);
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({ data: idleSession } satisfies SingleResponse<Session>);
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id="session-desktop-autofocus" />);
+    const textarea = await screen.findByPlaceholderText('Send a follow-up message...');
+
+    await waitFor(() => {
+      expect(textarea).toHaveFocus();
+    });
+  });
+
   it('matches both trigger menus to the continue-session input width', async () => {
     const resumableSession: Session = {
       ...mockSessions[0],
@@ -5940,6 +5963,48 @@ describe('SessionDetailPage', () => {
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
     await screen.findAllByText('Fixed TypeError by adding null check');
     expect(screen.getByText('Unknown user')).toBeInTheDocument();
+  });
+
+  it('shows automation provenance in the overview tab for automation-created sessions', async () => {
+    const automationSession: Session = {
+      ...mockSessions[0],
+      origin: 'automation',
+      automation_run_id: 'automation-run-1',
+      triggered_by_user_id: undefined,
+    };
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({ data: automationSession } satisfies SingleResponse<Session>);
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+
+    await screen.findAllByText('Fixed TypeError by adding null check');
+    expect(screen.getByText('Created by automation')).toBeInTheDocument();
+    expect(screen.getByText('Automation run')).toBeInTheDocument();
+  });
+
+  it('does not show automation provenance for manually created sessions', async () => {
+    const manualSession: Session = {
+      ...mockSessions[0],
+      origin: 'manual',
+      automation_run_id: undefined,
+      triggered_by_user_id: mockMembers[0].id,
+    };
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({ data: manualSession } satisfies SingleResponse<Session>);
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+
+    await screen.findAllByText('Fixed TypeError by adding null check');
+    expect(screen.queryByText('Created by automation')).not.toBeInTheDocument();
+    expect(screen.queryByText('Automation run')).not.toBeInTheDocument();
   });
 
   it('falls back to github_login when triggering member has no display name', async () => {

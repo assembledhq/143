@@ -455,6 +455,9 @@ func (h *IntegrationHandler) StartLinearOAuth(w http.ResponseWriter, r *http.Req
 }
 
 func (h *IntegrationHandler) HandleLinearOAuthCallback(w http.ResponseWriter, r *http.Request) {
+	logger := zerolog.Ctx(r.Context())
+	logger.Info().Msg("linear oauth callback received")
+
 	code, ok := validateOAuthCallback(w, r, linearIntegrationOAuthStateCookie)
 	if !ok {
 		return
@@ -500,6 +503,11 @@ func (h *IntegrationHandler) HandleLinearOAuthCallback(w http.ResponseWriter, r 
 		return
 	}
 
+	logger.Info().
+		Str("org_id", orgID.String()).
+		Str("workspace_id", workspaceID).
+		Msg("linear oauth callback completed; credentials stored and integration active")
+
 	// Trigger an initial team-key refresh so detection's bare-identifier
 	// branch works on the very next session. Three-tier strategy:
 	//  1. Detached-context background refresh kicked off here so the OAuth
@@ -514,7 +522,6 @@ func (h *IntegrationHandler) HandleLinearOAuthCallback(w http.ResponseWriter, r 
 	//     is the last line of defense after that.
 	// All paths are nil-safe so test harnesses without these hooks still
 	// complete the OAuth flow normally.
-	logger := zerolog.Ctx(r.Context())
 	if h.linearTeamKeyRefresher != nil {
 		// context.WithoutCancel: a cancelled request context (the user
 		// closing the browser tab post-redirect) must not abort the
@@ -1226,7 +1233,6 @@ func (h *IntegrationHandler) ensureIntegration(ctx context.Context, orgID uuid.U
 	}
 
 	if len(reusableIntegrations) > 0 {
-		integration := reusableIntegrations[0]
 		// A reconnect flow lands here: if the row is errored (most often
 		// from a prior 401 the worker stamped) restore it to active and
 		// strip the auth-error markers so the settings UI's Reconnect CTA
@@ -1237,21 +1243,27 @@ func (h *IntegrationHandler) ensureIntegration(ctx context.Context, orgID uuid.U
 		// When both fields need to change we write atomically so the row
 		// can never be observed as "active with stale auth_error markers"
 		// (which would render no Reconnect CTA but also no Connect CTA).
-		clearedConfig, configChanged := stripAuthErrorMarkers(integration.Config)
-		statusErrored := integration.Status == models.IntegrationStatusError
-		switch {
-		case configChanged && statusErrored:
-			if err := h.integrationStore.UpdateStatusAndConfig(ctx, orgID, integration.ID, string(models.IntegrationStatusActive), clearedConfig); err == nil {
-				integration.Config = clearedConfig
-				integration.Status = models.IntegrationStatusActive
-			}
-		case configChanged:
-			if err := h.integrationStore.UpdateConfig(ctx, orgID, integration.ID, clearedConfig); err == nil {
-				integration.Config = clearedConfig
-			}
-		case statusErrored:
-			if err := h.integrationStore.UpdateStatus(ctx, orgID, integration.ID, string(models.IntegrationStatusActive)); err == nil {
-				integration.Status = models.IntegrationStatusActive
+		integration, err := h.convergeReusableRow(ctx, orgID, reusableIntegrations[0])
+		if err != nil {
+			return models.Integration{}, false, err
+		}
+		// Historical duplicates: rows created before ensureIntegration was
+		// the only write path can leave an orphan errored row alongside
+		// the canonical one. The integrations list endpoint surfaces
+		// auth_error from any row (so a worker-flipped active→error row
+		// keeps the Reconnect CTA visible), which means a stale errored
+		// duplicate continues to render the banner even after a clean
+		// reconnect against the canonical row. Converge them all so the
+		// next /api/v1/integrations response can't pull auth_error from a
+		// row we're not using. We only need the DB side effect here —
+		// callers see the canonical row, not the duplicates — so the
+		// returned converged value is discarded, but errors still
+		// propagate so a partial cleanup surfaces as 500 and the user
+		// retries instead of seeing a "successful" reconnect that left
+		// the orphan banner in place.
+		for i := 1; i < len(reusableIntegrations); i++ {
+			if _, err := h.convergeReusableRow(ctx, orgID, reusableIntegrations[i]); err != nil {
+				return models.Integration{}, false, err
 			}
 		}
 		return integration, false, nil
@@ -1270,6 +1282,39 @@ func (h *IntegrationHandler) ensureIntegration(ctx context.Context, orgID uuid.U
 	h.maybeEnqueuePMContext(ctx, orgID)
 
 	return *integration, true, nil
+}
+
+// convergeReusableRow flips an errored reusable row back to active and
+// strips any auth-error markers it carries, returning a new Integration
+// reflecting the post-converge state. Idempotent: if the row is already
+// active with no auth-error markers, no DB write fires and the returned
+// value equals the input. DB errors are surfaced to the caller —
+// swallowing them is what produced the stale-duplicate-row bug this
+// helper exists to fix; if the UPDATE fails, the OAuth flow should fail
+// loud (500) so the user retries instead of seeing a "successful"
+// reconnect that left the DB in an inconsistent state.
+func (h *IntegrationHandler) convergeReusableRow(ctx context.Context, orgID uuid.UUID, integration models.Integration) (models.Integration, error) {
+	clearedConfig, configChanged := stripAuthErrorMarkers(integration.Config)
+	statusErrored := integration.Status == models.IntegrationStatusError
+	switch {
+	case configChanged && statusErrored:
+		if err := h.integrationStore.UpdateStatusAndConfig(ctx, orgID, integration.ID, string(models.IntegrationStatusActive), clearedConfig); err != nil {
+			return integration, fmt.Errorf("converge integration %s: update status and config: %w", integration.ID, err)
+		}
+		integration.Config = clearedConfig
+		integration.Status = models.IntegrationStatusActive
+	case configChanged:
+		if err := h.integrationStore.UpdateConfig(ctx, orgID, integration.ID, clearedConfig); err != nil {
+			return integration, fmt.Errorf("converge integration %s: update config: %w", integration.ID, err)
+		}
+		integration.Config = clearedConfig
+	case statusErrored:
+		if err := h.integrationStore.UpdateStatus(ctx, orgID, integration.ID, string(models.IntegrationStatusActive)); err != nil {
+			return integration, fmt.Errorf("converge integration %s: update status: %w", integration.ID, err)
+		}
+		integration.Status = models.IntegrationStatusActive
+	}
+	return integration, nil
 }
 
 // stripAuthErrorMarkers removes the auth-error keys the linear service

@@ -317,6 +317,13 @@ export const handlers = [
     } satisfies ListResponse<SessionLog>);
   }),
 
+  http.get('/api/v1/sessions/:id/thread-file-events', () => {
+    return HttpResponse.json({
+      data: [],
+      meta: {},
+    });
+  }),
+
   http.get('/api/v1/sessions/:id/timeline', () => {
     return HttpResponse.json({
       data: [] as SessionTimelineEntry[],
