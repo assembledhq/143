@@ -1336,6 +1336,145 @@ func TestService_SendMessage_ResolvesReviewComments(t *testing.T) {
 		require.NoError(t, mock.ExpectationsWereMet())
 	})
 
+	t.Run("answers latest pending question when awaiting_input thread queues at running limit", func(t *testing.T) {
+		t.Parallel()
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err, "should create pgx mock")
+		defer mock.Close()
+
+		userID := uuid.New()
+		questionID := uuid.New()
+		answerText := "ship it"
+		answeredAt := now
+
+		mock.ExpectBegin()
+		mock.ExpectQuery("INSERT INTO session_messages").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+				pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+				pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(int64(21), now))
+		mock.ExpectQuery("UPDATE session_questions").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnRows(
+				pgxmock.NewRows([]string{
+					"id", "session_id", "org_id", "question_text", "options", "context",
+					"blocks_phase", "answer_text", "answered_by", "answered_at", "status", "created_at",
+				}).AddRow(questionID, sessionID, orgID, "continue?", []string{"ship it", "stop"}, (*string)(nil),
+					(*string)(nil), &answerText, &userID, &answeredAt, "answered", now),
+			)
+		mock.ExpectCommit()
+
+		svc, deps := newTestService(t)
+		deps.threadStore.claimIdleFn = func(_ context.Context, _, _, _ uuid.UUID) (models.SessionThread, error) {
+			return models.SessionThread{}, fmt.Errorf("no rows")
+		}
+		deps.threadStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
+			return models.SessionThread{ID: threadID, SessionID: sessionID, OrgID: orgID, CurrentTurn: 4, Status: models.ThreadStatusAwaitingInput}, nil
+		}
+		deps.threadStore.claimForResumeFn = func(_ context.Context, _, _, _ uuid.UUID) (models.SessionThread, error) {
+			return models.SessionThread{}, db.ErrThreadRunningLimitReached
+		}
+		deps.threadStore.incrementPendingFn = func(_ context.Context, _, tid uuid.UUID) error {
+			require.Equal(t, threadID, tid, "queued awaiting_input answer should increment the requested thread")
+			return nil
+		}
+		deps.jobStore.enqueueFn = func(_ context.Context, _ uuid.UUID, _, _ string, _ any, _ int, _ *string) (uuid.UUID, error) {
+			require.Fail(t, "queued awaiting_input answer should wait for a running slot instead of enqueueing immediately")
+			return uuid.Nil, nil
+		}
+		svc.SetReviewCommentResolver(mock, db.NewSessionReviewCommentStore(mock))
+		svc.SetQuestionStore(db.NewSessionQuestionStore(mock))
+
+		result, err := svc.SendMessage(context.Background(), SendMessageInput{
+			SessionID: sessionID,
+			OrgID:     orgID,
+			ThreadID:  threadID,
+			UserID:    &userID,
+			Message:   answerText,
+		})
+		require.NoError(t, err, "queued awaiting_input answer should be accepted")
+		require.NotNil(t, result, "queued awaiting_input answer should return a result")
+		require.NotNil(t, result.AnsweredQuestion, "queued awaiting_input answer should return the answered question for audit")
+		require.Equal(t, questionID, result.AnsweredQuestion.ID, "queued awaiting_input answer should report the answered question")
+		require.Equal(t, "answered", result.AnsweredQuestion.Status, "queued awaiting_input answer should mark the question answered")
+		require.NoError(t, mock.ExpectationsWereMet(), "all transaction expectations should be met")
+	})
+
+	t.Run("answers latest pending question when awaiting_input thread queues behind sibling", func(t *testing.T) {
+		t.Parallel()
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err, "should create pgx mock")
+		defer mock.Close()
+
+		userID := uuid.New()
+		questionID := uuid.New()
+		answerText := "continue"
+		answeredAt := now
+
+		mock.ExpectBegin()
+		mock.ExpectQuery("INSERT INTO session_messages").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+				pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+				pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(int64(22), now))
+		mock.ExpectQuery("UPDATE session_questions").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnRows(
+				pgxmock.NewRows([]string{
+					"id", "session_id", "org_id", "question_text", "options", "context",
+					"blocks_phase", "answer_text", "answered_by", "answered_at", "status", "created_at",
+				}).AddRow(questionID, sessionID, orgID, "continue?", []string{"continue", "stop"}, (*string)(nil),
+					(*string)(nil), &answerText, &userID, &answeredAt, "answered", now),
+			)
+		mock.ExpectCommit()
+
+		svc, deps := newTestService(t)
+		deps.threadStore.claimIdleFn = func(_ context.Context, _, _, _ uuid.UUID) (models.SessionThread, error) {
+			return models.SessionThread{}, fmt.Errorf("no rows")
+		}
+		deps.threadStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
+			return models.SessionThread{ID: threadID, SessionID: sessionID, OrgID: orgID, CurrentTurn: 2, Status: models.ThreadStatusAwaitingInput}, nil
+		}
+		deps.threadStore.claimForResumeFn = func(_ context.Context, _, _, _ uuid.UUID) (models.SessionThread, error) {
+			return models.SessionThread{ID: threadID, SessionID: sessionID, OrgID: orgID, CurrentTurn: 2, Status: models.ThreadStatusRunning}, nil
+		}
+		deps.sessionStore.claimIdleFn = func(_ context.Context, _, _ uuid.UUID) (models.Session, error) {
+			return models.Session{}, fmt.Errorf("session already running")
+		}
+		deps.sessionStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.Session, error) {
+			return models.Session{ID: sessionID, OrgID: orgID, Status: string(models.SessionStatusRunning)}, nil
+		}
+		deps.threadStore.updateStatusFn = func(_ context.Context, _, tid uuid.UUID, status models.ThreadStatus) error {
+			require.Equal(t, threadID, tid, "sibling-queued awaiting_input answer should release the claimed thread")
+			require.Equal(t, models.ThreadStatusIdle, status, "sibling-queued awaiting_input answer should leave the thread idle")
+			return nil
+		}
+		deps.threadStore.incrementPendingFn = func(_ context.Context, _, tid uuid.UUID) error {
+			require.Equal(t, threadID, tid, "sibling-queued awaiting_input answer should increment the requested thread")
+			return nil
+		}
+		deps.jobStore.enqueueFn = func(_ context.Context, _ uuid.UUID, _, _ string, _ any, _ int, _ *string) (uuid.UUID, error) {
+			require.Fail(t, "sibling-queued awaiting_input answer should not enqueue a second continue_session")
+			return uuid.Nil, nil
+		}
+		svc.SetReviewCommentResolver(mock, db.NewSessionReviewCommentStore(mock))
+		svc.SetQuestionStore(db.NewSessionQuestionStore(mock))
+
+		result, err := svc.SendMessage(context.Background(), SendMessageInput{
+			SessionID: sessionID,
+			OrgID:     orgID,
+			ThreadID:  threadID,
+			UserID:    &userID,
+			Message:   answerText,
+		})
+		require.NoError(t, err, "sibling-queued awaiting_input answer should be accepted")
+		require.NotNil(t, result, "sibling-queued awaiting_input answer should return a result")
+		require.NotNil(t, result.AnsweredQuestion, "sibling-queued awaiting_input answer should return the answered question for audit")
+		require.Equal(t, questionID, result.AnsweredQuestion.ID, "sibling-queued awaiting_input answer should report the answered question")
+		require.Equal(t, "answered", result.AnsweredQuestion.Status, "sibling-queued awaiting_input answer should mark the question answered")
+		require.NoError(t, mock.ExpectationsWereMet(), "all transaction expectations should be met")
+	})
+
 	t.Run("rolls back when a comment ID is not in the session", func(t *testing.T) {
 		t.Parallel()
 		mock, err := pgxmock.NewPool()

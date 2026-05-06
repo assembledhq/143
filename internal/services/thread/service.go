@@ -378,7 +378,7 @@ func (s *Service) SendMessage(ctx context.Context, input SendMessageInput) (*Sen
 		return nil, ErrReviewCommentsNotConfigured
 	}
 
-	thread, outcome, err := s.claimThreadForSend(ctx, input, resolvingComments)
+	thread, preClaimThreadStatus, outcome, err := s.claimThreadForSend(ctx, input, resolvingComments)
 	if err != nil {
 		return nil, err
 	}
@@ -408,7 +408,7 @@ func (s *Service) SendMessage(ctx context.Context, input SendMessageInput) (*Sen
 				s.releaseThread(ctx, input.OrgID, input.ThreadID, "sibling-queued thread cannot resolve comments")
 				return nil, ErrThreadNotIdle
 			}
-			return s.queueClaimedThreadBehindSibling(ctx, input, thread)
+			return s.queueClaimedThreadBehindSibling(ctx, input, thread, preClaimThreadStatus)
 		}
 	}
 
@@ -565,16 +565,17 @@ func (s *Service) queueMessageWaitingForSlot(ctx context.Context, input SendMess
 		msg.Attachments = input.Images
 	}
 
-	if err := s.messageStore.Create(ctx, msg); err != nil {
+	answeredQuestion, err := s.createQueuedMessage(ctx, msg, input, thread.Status)
+	if err != nil {
 		return nil, fmt.Errorf("create queued message: %w", err)
 	}
 	if err := s.threadStore.IncrementPendingMessages(ctx, input.OrgID, input.ThreadID); err != nil {
 		return nil, fmt.Errorf("increment queued message count: %w", err)
 	}
-	return &SendMessageResult{Message: msg}, nil
+	return &SendMessageResult{Message: msg, AnsweredQuestion: answeredQuestion}, nil
 }
 
-func (s *Service) queueClaimedThreadBehindSibling(ctx context.Context, input SendMessageInput, thread models.SessionThread) (*SendMessageResult, error) {
+func (s *Service) queueClaimedThreadBehindSibling(ctx context.Context, input SendMessageInput, thread models.SessionThread, preClaimStatus models.ThreadStatus) (*SendMessageResult, error) {
 	if err := s.threadStore.UpdateStatus(ctx, input.OrgID, input.ThreadID, models.ThreadStatusIdle); err != nil {
 		return nil, fmt.Errorf("release thread for queued sibling message: %w", err)
 	}
@@ -598,13 +599,22 @@ func (s *Service) queueClaimedThreadBehindSibling(ctx context.Context, input Sen
 		msg.Attachments = input.Images
 	}
 
-	if err := s.messageStore.Create(ctx, msg); err != nil {
+	answeredQuestion, err := s.createQueuedMessage(ctx, msg, input, preClaimStatus)
+	if err != nil {
 		return nil, fmt.Errorf("create queued sibling message: %w", err)
 	}
 	if err := s.threadStore.IncrementPendingMessages(ctx, input.OrgID, input.ThreadID); err != nil {
 		return nil, fmt.Errorf("increment queued sibling message count: %w", err)
 	}
-	return &SendMessageResult{Message: msg}, nil
+	return &SendMessageResult{Message: msg, AnsweredQuestion: answeredQuestion}, nil
+}
+
+func (s *Service) createQueuedMessage(ctx context.Context, msg *models.SessionMessage, input SendMessageInput, threadStatus models.ThreadStatus) (*models.SessionQuestion, error) {
+	if threadStatus != models.ThreadStatusAwaitingInput || input.UserID == nil || s.questionStore == nil {
+		return nil, s.messageStore.Create(ctx, msg)
+	}
+	_, answeredQuestion, err := s.createMessageInTx(ctx, msg, input, models.Session{}, true)
+	return answeredQuestion, err
 }
 
 func threadStatusCanQueue(status models.ThreadStatus) bool {
@@ -623,26 +633,27 @@ func threadStatusCanQueue(status models.ThreadStatus) bool {
 //
 // The four return paths (claimed-from-idle, claimed-from-resume,
 // queue-mid-turn, queue-limit-reached, error) are collapsed into a
-// (thread, outcome, err) triple so SendMessage can branch with a single
-// switch instead of three nested error checks. resolvingComments is passed
-// through because the queue-mid-turn path cannot honor comment resolution —
-// the resolution pass is keyed on the in-flight turn's pass number, and we
-// cannot atomically commit it alongside a queued message that will not be
-// consumed until a later turn. Resume claims do not have this problem
-// because the resumed turn IS the in-flight one.
-func (s *Service) claimThreadForSend(ctx context.Context, input SendMessageInput, resolvingComments bool) (models.SessionThread, threadClaimOutcome, error) {
+// return tuple also carries the pre-claim thread status so queued answer
+// paths can distinguish a thread resumed from awaiting_input from a generic
+// running thread. resolvingComments is passed through because the
+// queue-mid-turn path cannot honor comment resolution — the resolution pass
+// is keyed on the in-flight turn's pass number, and we cannot atomically
+// commit it alongside a queued message that will not be consumed until a
+// later turn. Resume claims do not have this problem because the resumed
+// turn IS the in-flight one.
+func (s *Service) claimThreadForSend(ctx context.Context, input SendMessageInput, resolvingComments bool) (models.SessionThread, models.ThreadStatus, threadClaimOutcome, error) {
 	// 1. Try the idle claim first — happy path for a thread that has been
 	//    sitting idle waiting for the next user message.
 	thread, err := s.threadStore.ClaimIdleForSession(ctx, input.OrgID, input.SessionID, input.ThreadID, models.MaxRunningThreadsPerSession)
 	if err == nil {
 		if thread.SessionID != input.SessionID {
 			s.releaseThread(ctx, input.OrgID, input.ThreadID, "session mismatch after idle claim")
-			return models.SessionThread{}, 0, ErrThreadNotFound
+			return models.SessionThread{}, "", 0, ErrThreadNotFound
 		}
-		return thread, threadClaimClaimed, nil
+		return thread, models.ThreadStatusIdle, threadClaimClaimed, nil
 	}
 	if errors.Is(err, db.ErrThreadRunningLimitReached) {
-		return models.SessionThread{}, threadClaimQueueLimitReached, nil
+		return models.SessionThread{}, "", threadClaimQueueLimitReached, nil
 	}
 
 	// 2. Idle claim failed for status reasons. Inspect the thread to decide
@@ -651,19 +662,19 @@ func (s *Service) claimThreadForSend(ctx context.Context, input SendMessageInput
 	//    DB failure and is surfaced as-is.
 	existing, lookupErr := s.threadStore.GetByID(ctx, input.OrgID, input.ThreadID)
 	if lookupErr != nil {
-		return models.SessionThread{}, 0, fmt.Errorf("%w: %w", ErrThreadNotFound, lookupErr)
+		return models.SessionThread{}, "", 0, fmt.Errorf("%w: %w", ErrThreadNotFound, lookupErr)
 	}
 	if existing.SessionID != input.SessionID {
-		return models.SessionThread{}, 0, ErrThreadNotFound
+		return models.SessionThread{}, "", 0, ErrThreadNotFound
 	}
 
 	// 3. Thread is mid-turn (pending/running): queue the message against the
 	//    in-flight turn. Comment resolution is not supported on this path.
 	if threadStatusCanQueue(existing.Status) {
 		if resolvingComments {
-			return models.SessionThread{}, 0, ErrThreadNotIdle
+			return models.SessionThread{}, "", 0, ErrThreadNotIdle
 		}
-		return existing, threadClaimQueueMidTurn, nil
+		return existing, existing.Status, threadClaimQueueMidTurn, nil
 	}
 
 	// 4. Thread is in a resumable terminal/paused status: try to bring it
@@ -671,23 +682,23 @@ func (s *Service) claimThreadForSend(ctx context.Context, input SendMessageInput
 	if threadStatusIsResumable(existing.Status) {
 		resumed, resumeErr := s.threadStore.ClaimForResumeInSession(ctx, input.OrgID, input.SessionID, input.ThreadID, models.MaxRunningThreadsPerSession)
 		if resumeErr == nil {
-			return resumed, threadClaimClaimed, nil
+			return resumed, existing.Status, threadClaimClaimed, nil
 		}
 		if errors.Is(resumeErr, db.ErrThreadRunningLimitReached) {
-			return models.SessionThread{}, threadClaimQueueLimitReached, nil
+			return models.SessionThread{}, "", threadClaimQueueLimitReached, nil
 		}
 		// pgx.ErrNoRows here means the status changed under us between the
 		// inspect and the resume claim (e.g. a sibling claim raced us). Map
 		// to ErrThreadNotIdle so the user sees a consistent affordance and
 		// can retry.
 		if errors.Is(resumeErr, pgx.ErrNoRows) {
-			return models.SessionThread{}, 0, ErrThreadNotIdle
+			return models.SessionThread{}, "", 0, ErrThreadNotIdle
 		}
-		return models.SessionThread{}, 0, fmt.Errorf("claim thread for resume: %w", resumeErr)
+		return models.SessionThread{}, "", 0, fmt.Errorf("claim thread for resume: %w", resumeErr)
 	}
 
 	// 5. Anything else (unexpected status) is treated as not-idle.
-	return models.SessionThread{}, 0, ErrThreadNotIdle
+	return models.SessionThread{}, "", 0, ErrThreadNotIdle
 }
 
 // releaseThread is a small wrapper around UpdateStatus(idle) so failure
