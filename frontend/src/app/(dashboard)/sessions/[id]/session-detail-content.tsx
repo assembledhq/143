@@ -2519,11 +2519,14 @@ export function SessionDetailContent({ id }: { id: string }) {
   });
   const prHealth = prHealthData?.data;
   const prStatus = prData?.data?.status;
-  const closedPRNumber = prData?.data?.github_pr_number;
+  const prNumber = prData?.data?.github_pr_number;
+  const closedPRNumber = prNumber;
+  const closedPRLabel = closedPRNumber ? `PR #${closedPRNumber} closed` : "PR closed";
   const closedPRSummary = closedPRNumber
     ? `PR #${closedPRNumber} was closed without merging.`
     : "This pull request was closed without merging.";
-  const mergedPRNumber = prData?.data?.github_pr_number;
+  const mergedPRNumber = prNumber;
+  const mergedPRLabel = mergedPRNumber ? `PR #${mergedPRNumber} merged` : "PR merged";
   const mergedPRSummary = mergedPRNumber
     ? `PR #${mergedPRNumber} was merged successfully.`
     : "This pull request was merged successfully.";
@@ -2657,7 +2660,7 @@ export function SessionDetailContent({ id }: { id: string }) {
       void queryClient.invalidateQueries({ queryKey: ["session", id] });
       void queryClient.invalidateQueries({ queryKey: ["session", id, "pr"] });
       void queryClient.invalidateQueries({ queryKey: ["sessions"] });
-      toast.success("PR merged", prUrl ? {
+      toast.success(mergedPRLabel, prUrl ? {
         action: { label: "View \u2197", onClick: () => window.open(prUrl, "_blank", "noopener,noreferrer") },
       } : undefined);
     },
@@ -3663,7 +3666,12 @@ export function SessionDetailContent({ id }: { id: string }) {
               <>
                 {prStatus === "closed" && (
                   <Badge variant="secondary" className="h-7 px-2 text-xs">
-                    PR closed
+                    {closedPRLabel}
+                  </Badge>
+                )}
+                {prStatus === "merged" && (
+                  <Badge variant="secondary" className="h-7 px-2 text-xs">
+                    {mergedPRLabel}
                   </Badge>
                 )}
                 <Button asChild variant="outline" size="sm" className="h-7 text-xs gap-1.5">
@@ -3775,7 +3783,7 @@ export function SessionDetailContent({ id }: { id: string }) {
                     <XCircle className="h-4 w-4" />
                   </div>
                   <div className="min-w-0 space-y-1">
-                    <div className="text-sm font-medium text-foreground">PR closed</div>
+                    <div className="text-sm font-medium text-foreground">{closedPRLabel}</div>
                     <p className="text-xs text-foreground">{closedPRSummary}</p>
                     <p className="text-xs text-muted-foreground">
                       This pull request is no longer active. Create a follow-up revision if you want to ship a new attempt.
@@ -3793,7 +3801,7 @@ export function SessionDetailContent({ id }: { id: string }) {
                     <CheckCircle2 className="h-4 w-4" />
                   </div>
                   <div className="min-w-0 space-y-1">
-                    <div className="text-sm font-medium text-foreground">PR merged</div>
+                    <div className="text-sm font-medium text-foreground">{mergedPRLabel}</div>
                     <p className="text-xs text-foreground">{mergedPRSummary}</p>
                     <p className="text-xs text-muted-foreground">
                       This change has landed. Open a follow-up session if you need to make another revision.
