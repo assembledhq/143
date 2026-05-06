@@ -208,6 +208,18 @@ if [ "$ROLE" = "worker" ]; then
   ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
     "mv /opt/143/deploy/scripts/sandbox-firewall.sh.new /opt/143/deploy/scripts/sandbox-firewall.sh \
      || { rm -f /opt/143/deploy/scripts/sandbox-firewall.sh.new; exit 1; }"
+
+  # Sync Dockerfile.dnsmasq alongside the worker compose file. The
+  # sandbox-dns service is built locally on each worker (see
+  # docker-compose.worker.yml) and the build context is /opt/143, so the
+  # Dockerfile must live next to the compose file before `docker compose
+  # up` runs. Atomic-rename via .new for the same ETXTBSY-class reasons
+  # noted on sandbox-firewall.sh above.
+  scp -p "${SCP_OPTS[@]}" "$PROJECT_DIR/Dockerfile.dnsmasq" \
+    deploy@"$HOST":/opt/143/Dockerfile.dnsmasq.new
+  ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
+    "mv /opt/143/Dockerfile.dnsmasq.new /opt/143/Dockerfile.dnsmasq \
+     || { rm -f /opt/143/Dockerfile.dnsmasq.new; exit 1; }"
 fi
 
 # --- Docker log rotation (idempotent) ---
