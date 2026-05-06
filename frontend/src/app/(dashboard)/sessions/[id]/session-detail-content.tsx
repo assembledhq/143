@@ -1,6 +1,7 @@
 "use client";
 
 import { memo, useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
+import dynamic from "next/dynamic";
 import { useRouter } from "next/navigation";
 import { useQueryState } from "nuqs";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
@@ -107,7 +108,7 @@ import {
   buildPullRequestStreamURL,
   buildSessionLogsStreamURL,
 } from "@/lib/sse";
-import { applyPlanModePrefix, buildTimeline, flattenTimelineResponse, sortTimelineEntries } from "@/lib/timeline";
+import { applyPlanModePrefix, buildTimeline, flattenTimelineResponse, sortTimelineEntries, type TimelineEntry } from "@/lib/timeline";
 import { parseDiffStats, type DiffFile } from "@/lib/diff-parser";
 import { formatReviewMessage } from "@/lib/format-review-message";
 import {
@@ -124,13 +125,12 @@ import {
 } from "./thread-attribution-filter";
 import { AuditLogTrigger } from "@/components/audit/audit-log-trigger";
 import { ResizeHandle } from "@/components/resize-handle";
-import { DiffStatsBadge, FileTree, CommentsSummary, ReviewDiffView, PassSelector, type DiffPassEntry, type PassRange } from "@/components/code-review";
+import { DiffStatsBadge, FileTree, CommentsSummary, PassSelector, type DiffPassEntry, type PassRange } from "@/components/code-review";
 import { LinkedIssueChips } from "./linked-issue-chips";
 import { useReviewComments } from "@/hooks/use-review-comments";
 import { useDiffViewState } from "@/hooks/use-diff-view-state";
 import { CodexDeviceCodeModal } from "@/components/codex-device-code-modal";
 import { AgentBadge } from "@/components/agent-badge";
-import { PreviewPanel } from "@/components/preview/preview-panel";
 import { PendingAttachmentStrip } from "@/components/pending-attachment-strip";
 import { PRHealthBanner } from "@/components/pr-health-banner";
 import { MobileBackButton } from "@/components/mobile-back-button";
@@ -140,6 +140,27 @@ import { useDocumentVisible } from "@/hooks/use-document-visible";
 import { prMergedAccent } from "@/lib/pr-status-styles";
 import { cn, sessionTitle, formatTimeAgo } from "@/lib/utils";
 import { activeSet, workingStatusesSet } from "@/lib/session-status-groups";
+
+// Defer the diff viewer (shiki + diff-parser) until the user actually opens
+// review mode. Saves ~100KB+ from the initial session-detail bundle for the
+// common case of just chatting with the agent.
+const ReviewDiffView = dynamic(
+  () => import("@/components/code-review/review-diff-view").then((m) => ({ default: m.ReviewDiffView })),
+  {
+    ssr: false,
+    loading: () => <div className="h-full w-full bg-muted/20 animate-pulse rounded-lg" />,
+  },
+);
+
+// Defer the preview panel (iframe wrapper + visual editing tooling) until
+// the user actually opens the preview tab.
+const PreviewPanel = dynamic(
+  () => import("@/components/preview/preview-panel").then((m) => ({ default: m.PreviewPanel })),
+  {
+    ssr: false,
+    loading: () => <div className="h-full w-full bg-muted/20 animate-pulse rounded-lg" />,
+  },
+);
 
 const PREVIEW_ORIGIN_TEMPLATE =
   process.env.NEXT_PUBLIC_PREVIEW_ORIGIN_TEMPLATE ||
@@ -1655,9 +1676,24 @@ const BASE_SSE_RECONNECT_DELAY_MS = 1000;
 const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10 MB
 const SCROLL_NEAR_BOTTOM_THRESHOLD = 100;
 const SCROLL_POSITION_SAVE_DEBOUNCE_MS = 150;
+// Sliding window for the SSE log overlay buffer. The persisted logs are
+// fetched separately via the timeline query; streamedLogs only holds the
+// not-yet-persisted overlay that bridges the gap between an SSE push and the
+// next DB fetch. A few thousand entries is enough headroom for any active
+// session, and capping it bounds both memory and the per-event filter cost.
+const STREAMED_LOGS_MAX = 2000;
 
 function isNearBottom(el: HTMLElement): boolean {
   return el.scrollHeight - el.scrollTop - el.clientHeight < SCROLL_NEAR_BOTTOM_THRESHOLD;
+}
+
+function normalizeTranscriptContent(content: string): string {
+  return content
+    .replace(/\r\n/g, "\n")
+    .split("\n")
+    .map((line) => line.replace(/[ \t\r]+$/g, ""))
+    .join("\n")
+    .replace(/\n+$/g, "");
 }
 
 function SessionTimelineSkeleton() {
@@ -1809,17 +1845,14 @@ function ChatPanel({
     return [{ kind: "message" as const, data: syntheticMsg }, ...entries];
   }, [activeThreadId, optimisticMessages, threadMessagesQuery.data?.data, threadLogsQuery.data?.data, timelineQuery.data?.data, issueQuery.data?.data?.description, sessionId, session.org_id, session.created_at]);
 
-  const timelineEntries = useMemo(() => {
+  // Walk baseTimelineEntries once when it changes to derive the dedup keys
+  // used to filter streamedLogs. Splitting this out of the timelineEntries
+  // memo means each new SSE log event no longer triggers an O(N) walk over
+  // the entire base timeline — only the O(M) filter over streamed logs.
+  const baseTimelineDedupKeys = useMemo(() => {
     const fetchedLogIds = new Set<number>();
     const assistantTranscriptByTurn = new Map<number, Set<string>>();
     const planModeSeedMessages: SessionMessage[] = [];
-    const normalizeTranscriptContent = (content: string) =>
-      content
-        .replace(/\r\n/g, "\n")
-        .split("\n")
-        .map((line) => line.replace(/[ \t\r]+$/g, ""))
-        .join("\n")
-        .replace(/\n+$/g, "");
 
     for (const entry of baseTimelineEntries) {
       switch (entry.kind) {
@@ -1854,6 +1887,12 @@ function ChatPanel({
       }
     }
 
+    return { fetchedLogIds, assistantTranscriptByTurn, planModeSeedMessages };
+  }, [baseTimelineEntries]);
+
+  const timelineEntries = useMemo(() => {
+    const { fetchedLogIds, assistantTranscriptByTurn, planModeSeedMessages } = baseTimelineDedupKeys;
+
     const overlayLogs = streamedLogs.filter((log) => {
       if (fetchedLogIds.has(log.id)) return false;
       if (log.level !== "output") return true;
@@ -1865,7 +1904,7 @@ function ChatPanel({
     if (overlayLogs.length === 0) return baseTimelineEntries;
     const overlayEntries = buildTimeline(planModeSeedMessages, overlayLogs).filter((entry) => entry.kind !== "message");
     return sortTimelineEntries([...baseTimelineEntries, ...overlayEntries]);
-  }, [baseTimelineEntries, streamedLogs]);
+  }, [baseTimelineEntries, baseTimelineDedupKeys, streamedLogs]);
   const hasLoadedTimelineInputs = activeThreadId
     ? threadMessagesQuery.isFetched && threadLogsQuery.isFetched
     : timelineQuery.isFetched && (!hasIssue || issueQuery.isFetched);
@@ -1915,6 +1954,14 @@ function ChatPanel({
     setShowJumpToLatest(false);
   }, [scrollToLiveEdgePosition]);
 
+  const getEntryContainerProps = useCallback(
+    (_entry: TimelineEntry, index: number) =>
+      ({
+        "data-session-entry-index": index,
+      }) as React.HTMLAttributes<HTMLDivElement> & Record<`data-${string}`, string | number | undefined>,
+    [],
+  );
+
   useEffect(() => {
     onRegisterScrollToLiveEdge?.(scrollToLiveEdge);
     return () => onRegisterScrollToLiveEdge?.(null);
@@ -1931,7 +1978,14 @@ function ChatPanel({
         }
       }
       if (toAdd.length === 0) return prev;
-      return [...prev, ...toAdd];
+      const next = [...prev, ...toAdd];
+      // Drop oldest entries once we exceed the cap so a long-running session
+      // can't grow the overlay buffer without bound. Older logs already exist
+      // in the persisted timeline once the next refetch lands.
+      if (next.length > STREAMED_LOGS_MAX) {
+        return next.slice(next.length - STREAMED_LOGS_MAX);
+      }
+      return next;
     });
   }, []);
 
@@ -2130,11 +2184,7 @@ function ChatPanel({
             onDiffClick={onDiffClick}
             onApprovePlan={canSendMessage ? onApprovePlan : undefined}
             onAdjustPlan={canSendMessage ? onAdjustPlan : undefined}
-            getEntryContainerProps={(_, index) =>
-              ({
-                "data-session-entry-index": index,
-              }) as React.HTMLAttributes<HTMLDivElement> & Record<`data-${string}`, string | number | undefined>
-            }
+            getEntryContainerProps={getEntryContainerProps}
           />
         )}
         {(activeThread?.status === "pending" || (!activeThread && session.status === "pending")) && (

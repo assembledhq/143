@@ -1,16 +1,27 @@
 "use client";
 
 import { useState, useCallback, useMemo } from "react";
+import dynamic from "next/dynamic";
 import { useQueryState, parseAsString } from "nuqs";
 import { Button } from "@/components/ui/button";
 import { PageHeader } from "@/components/page-header";
 import { PageContainer } from "@/components/page-container";
 import { UsageSummaryCards } from "./usage-summary-cards";
 import { UsageDatePicker, type DatePreset } from "./usage-date-picker";
-import { UsageTimeseriesChart } from "./usage-timeseries-chart";
 import { UsageBreakdownTable } from "./usage-breakdown-table";
 import { UsageExportButton } from "./usage-export-button";
 import { getDateRangePreset, formatDateForApi, nextDayIso, type MetricKey } from "./usage-helpers";
+
+// Move recharts into its own chunk — it's the heaviest dep on this page and
+// the rest of the layout (summary cards, breakdown table) can paint before
+// the chart bundle finishes loading.
+const UsageTimeseriesChart = dynamic(
+  () => import("./usage-timeseries-chart").then((m) => ({ default: m.UsageTimeseriesChart })),
+  {
+    ssr: false,
+    loading: () => <div className="h-72 bg-muted/20 animate-pulse rounded-lg" />,
+  },
+);
 
 export default function UsagePage() {
   const [preset, setPreset] = useState<DatePreset>("30d");
