@@ -123,7 +123,7 @@ function SettingsTab({ automation }: { automation: Automation }) {
           aria-invalid={goalLength.isTooLong}
         />
         <p className={cn("text-xs", goalLength.isTooLong ? "text-destructive" : "text-muted-foreground")}>
-          {goalLength.message ?? `Up to ${AUTOMATION_GOAL_MAX_LENGTH} characters.`}
+          {goalLength.message ?? `Up to ${AUTOMATION_GOAL_MAX_LENGTH.toLocaleString("en-US")} characters.`}
         </p>
       </div>
       <div className="space-y-1.5">
@@ -141,7 +141,7 @@ function SettingsTab({ automation }: { automation: Automation }) {
             role="group"
             aria-labelledby="schedule-label"
           >
-            <span className="text-sm text-muted-foreground">Run every</span>
+            <span className="text-sm font-medium leading-none text-muted-foreground">Run every</span>
             <Input
               id="interval-value"
               aria-label="Interval value"
@@ -170,7 +170,7 @@ function SettingsTab({ automation }: { automation: Automation }) {
             </Select>
           </div>
           <div className="flex flex-wrap items-start gap-2 sm:items-center">
-            <span className="text-sm text-muted-foreground">At</span>
+            <span className="text-sm font-medium leading-none text-muted-foreground">At</span>
             <Select value={intervalRunHour} onValueChange={setIntervalRunHour}>
               <SelectTrigger className="w-20" aria-label="Run at hour">
                 <SelectValue />
@@ -204,9 +204,6 @@ function SettingsTab({ automation }: { automation: Automation }) {
             />
           </div>
         </div>
-        <p className="text-xs text-muted-foreground">
-          Run time is in {timezone}, selectable in 5-minute increments.
-        </p>
       </div>
       <div className="space-y-1.5">
         <Label htmlFor="automation-model">Model</Label>
