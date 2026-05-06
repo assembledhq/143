@@ -383,7 +383,7 @@ func (s *Service) SendMessage(ctx context.Context, input SendMessageInput) (*Sen
 		return nil, err
 	}
 	if outcome == threadClaimQueueLimitReached {
-		return s.queueMessageOnIdleThread(ctx, input)
+		return s.queueMessageWaitingForSlot(ctx, input)
 	}
 	queueOnly := outcome == threadClaimQueueMidTurn
 
@@ -525,7 +525,7 @@ func (s *Service) SendMessage(ctx context.Context, input SendMessageInput) (*Sen
 	}, nil
 }
 
-// queueMessageOnIdleThread queues a follow-up against a thread that could
+// queueMessageWaitingForSlot queues a follow-up against a thread that could
 // not get a running slot because the session-wide running-thread cap is
 // already saturated. Accepts both idle threads and threads in a resumable
 // terminal/paused status — both behave identically from the queue's
@@ -534,7 +534,7 @@ func (s *Service) SendMessage(ctx context.Context, input SendMessageInput) (*Sen
 // no continue_session is enqueued because no slot is available — the next
 // sibling to finish will pick the work up via the orchestrator's drain,
 // which will idle-claim or resume-claim the thread as appropriate.
-func (s *Service) queueMessageOnIdleThread(ctx context.Context, input SendMessageInput) (*SendMessageResult, error) {
+func (s *Service) queueMessageWaitingForSlot(ctx context.Context, input SendMessageInput) (*SendMessageResult, error) {
 	thread, err := s.threadStore.GetByID(ctx, input.OrgID, input.ThreadID)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrThreadNotFound, err)

@@ -263,6 +263,19 @@ func (s *SessionThreadStore) ClaimIdle(ctx context.Context, orgID, threadID uuid
 // reached the maximum allowed number of concurrent running siblings.
 var ErrThreadRunningLimitReached = fmt.Errorf("session running thread limit reached")
 
+// claimMode names the two ways a thread row can transition into 'running': a
+// fresh claim from idle (the start of a new turn) versus a resume from a
+// terminal/paused status (continuing after the user sent a follow-up). The
+// SET clauses differ structurally between the two — the typed enum keeps the
+// branching compiler-checked and ensures the SQL fragment that lands in the
+// query never originates from caller-controlled input.
+type claimMode int
+
+const (
+	claimModeIdle claimMode = iota
+	claimModeResume
+)
+
 // ClaimIdleForSession atomically transitions an idle thread to running while
 // enforcing the session-wide running-thread cap. See claimForSession for the
 // shared CTE/cap mechanics.
@@ -278,8 +291,8 @@ func (s *SessionThreadStore) ClaimIdleForSession(ctx context.Context, orgID, ses
 		sessionID:         sessionID,
 		threadID:          threadID,
 		maxRunning:        maxRunning,
+		mode:              claimModeIdle,
 		claimableStatuses: []string{string(models.ThreadStatusIdle)},
-		extraSetClauses:   "started_at = now(),",
 	})
 }
 
@@ -296,33 +309,53 @@ func (s *SessionThreadStore) ClaimIdleForSession(ctx context.Context, orgID, ses
 // Does not reset started_at — the original thread start time remains the
 // authoritative "first activity" stamp. completed_at is cleared so the row
 // reflects the new in-flight turn rather than the previous terminal state.
+// failure_explanation and failure_category are intentionally preserved as
+// audit history of the prior run; mirrors SessionStore.ClaimForResume, which
+// also leaves session-level failure fields untouched on resume.
 func (s *SessionThreadStore) ClaimForResumeInSession(ctx context.Context, orgID, sessionID, threadID uuid.UUID, maxRunning int) (models.SessionThread, error) {
 	return s.claimForSession(ctx, claimForSessionArgs{
 		orgID:             orgID,
 		sessionID:         sessionID,
 		threadID:          threadID,
 		maxRunning:        maxRunning,
+		mode:              claimModeResume,
 		claimableStatuses: threadStatusStrings(models.ResumableThreadStatuses),
-		extraSetClauses:   "completed_at = NULL,",
 	})
 }
 
 // claimForSessionArgs bundles inputs for claimForSession so each call site
-// stays readable and additions (e.g. a future "preserve cancel_requested_at"
-// flag) don't ripple across positional argument lists.
+// stays readable and additions don't ripple across positional argument lists.
 type claimForSessionArgs struct {
 	orgID, sessionID, threadID uuid.UUID
 	maxRunning                 int
+	// mode selects the per-claim SET clause; see claimModeSetClause.
+	mode claimMode
 	// claimableStatuses is the set of current thread statuses from which the
 	// claim is allowed to fire. ClaimIdleForSession passes ['idle']; the
 	// resume path passes models.ResumableThreadStatuses.
 	claimableStatuses []string
-	// extraSetClauses is interpolated verbatim into the UPDATE SET clause and
-	// must end in a trailing comma when non-empty. Kept as a controlled string
-	// rather than a parameter list because the assignments differ structurally
-	// (started_at = now() vs completed_at = NULL); the values are not user
-	// input.
-	extraSetClauses string
+}
+
+// claimModeSetClause returns the mode-specific SQL fragment that goes into
+// the UPDATE SET clause of claimForSession's query. Concentrating the mapping
+// here keeps the query template free of branch-on-mode logic and makes it
+// trivially evident to a reader (and to a static analyzer) that no
+// caller-controlled string ever lands in the SQL.
+func claimModeSetClause(mode claimMode) string {
+	switch mode {
+	case claimModeIdle:
+		// Fresh claim of an idle row — record when this turn started so
+		// time-on-task surfaces have a precise begin stamp.
+		return "started_at = now(),"
+	case claimModeResume:
+		// Resume of a terminal/paused row — clear the stale completed_at
+		// from the previous turn so the row reflects the new in-flight one.
+		return "completed_at = NULL,"
+	default:
+		// Unreachable in normal code paths; panic is preferable to silently
+		// emitting an UPDATE that does the wrong thing.
+		panic(fmt.Sprintf("claimForSession: unknown claimMode %d", mode))
+	}
 }
 
 // claimForSession is the shared core of ClaimIdleForSession and
@@ -331,6 +364,12 @@ type claimForSessionArgs struct {
 // serialize on the database row locks. Allows up to maxRunning sibling tabs
 // (including this one) to be active at the same time; callers should pass
 // models.MaxRunningThreadsPerSession.
+//
+// Cap-math note: running_count excludes the target via id <> @id. A target
+// that is itself in an active status (awaiting_input is the only such case
+// in the resumable set) therefore does not count toward siblings — which is
+// correct, because resuming such a target does not increase the session's
+// total active occupancy. The cap is enforced strictly against siblings.
 func (s *SessionThreadStore) claimForSession(ctx context.Context, args claimForSessionArgs) (models.SessionThread, error) {
 	maxRunning := args.maxRunning
 	if maxRunning <= 0 {
@@ -360,7 +399,7 @@ func (s *SessionThreadStore) claimForSession(ctx context.Context, args claimForS
 		)
 		UPDATE session_threads
 		SET status = 'running',
-		    ` + args.extraSetClauses + `
+		    ` + claimModeSetClause(args.mode) + `
 		    last_activity_at = now(),
 		    cancel_requested_at = NULL
 		WHERE id = @id
