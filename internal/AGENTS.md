@@ -30,6 +30,19 @@ func (s *FooStore) ListByOrg(ctx context.Context, orgID uuid.UUID, f FooFilters)
 
 The existing test `internal/db/tenancy_test.go` is a third layer of defense: it reads every SQL literal and requires `org_id` in any query that touches a multi-tenant table.
 
+## Prefer Non-Mutating Code
+
+**Default to immutability.** When transforming data, return a new struct value rather than mutating the input in place.
+
+- Return a new struct (or `*T` constructed with `&T{...}`) from transformation functions instead of taking a pointer and writing through it.
+- Build new slices with `append` onto a fresh slice rather than mutating an argument; same for maps — copy then write.
+- Avoid setter methods that mutate the receiver — prefer `WithFoo(v) T` style that returns a copy.
+- Don't expose mutable references across package boundaries. If you must return a slice/map, return a copy or document that the caller must not mutate it.
+
+**Mutation is the exception, not the default.** Only reach for mutating code when there is a real, measured performance reason — e.g., a hot loop where allocations show up in a profile, or building a large structure incrementally where copying each step would be O(n²). When you do mutate, keep the mutation local and add a short comment explaining why immutability was rejected.
+
+When in doubt, write the immutable version first. It's almost always fast enough, and it eliminates an entire class of aliasing and data-race bugs (especially important for anything shared across goroutines).
+
 ## No N+1 Queries
 
 Never query the database inside a loop. Always batch using `ANY()`, JOINs, or bulk fetches. If a batch store method doesn't exist yet, create one using the `ANY()` pattern in the db package.
