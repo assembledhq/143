@@ -200,6 +200,43 @@ export function formatDuration(startedAt?: string, completedAt?: string): string
   return `${days}d ${hours % 24}h`;
 }
 
+type SessionOriginDisplay = {
+  badge: string;
+  title: string;
+  detail?: string;
+};
+
+function getSessionOriginDisplay(session: Session): SessionOriginDisplay | null {
+  switch (session.origin) {
+    case "automation":
+      return {
+        badge: "Automation",
+        title: "Created by automation",
+        detail: session.automation_run_id ? "Automation run" : "Scheduled or manually triggered automation",
+      };
+    case "project":
+      return {
+        badge: "Project",
+        title: "Created from project work",
+        detail: "Started as part of a tracked project task",
+      };
+    case "issue_trigger":
+      return {
+        badge: "Issue",
+        title: "Created from issue intake",
+        detail: "Started automatically from issue workflow",
+      };
+    case "revision":
+      return {
+        badge: "Revision",
+        title: "Created from a prior session",
+        detail: "Follow-up run spun out from an earlier session",
+      };
+    default:
+      return null;
+  }
+}
+
 const triggerPickerIconClassName = "h-4 w-4 shrink-0";
 const directoryTriggerIcon = <FolderTree className={triggerPickerIconClassName} />;
 const fileTriggerIcon = <FileCode2 className={triggerPickerIconClassName} />;
@@ -387,6 +424,7 @@ function OverviewTab({ session, members }: { session: Session; members: User[] }
 
   const status = statusConfig[session.status] || statusConfig.pending;
   const isActive = !terminalSessionStatuses.has(session.status);
+  const originDisplay = getSessionOriginDisplay(session);
 
   const triggeredByMember = session.triggered_by_user_id
     ? members.find((m) => m.id === session.triggered_by_user_id)
@@ -504,6 +542,21 @@ function OverviewTab({ session, members }: { session: Session; members: User[] }
             <span>{triggeredByLabel}</span>
           </span>
         </div>
+
+        {originDisplay && (
+          <div className="flex items-center gap-x-2 gap-y-1 flex-wrap text-xs text-muted-foreground">
+            <Badge variant="outline" className="h-5 rounded-full px-2 text-xs font-medium">
+              {originDisplay.badge}
+            </Badge>
+            <span className="font-medium text-foreground">{originDisplay.title}</span>
+            {originDisplay.detail && (
+              <>
+                <span aria-hidden="true" className="text-muted-foreground/50">·</span>
+                <span>{originDisplay.detail}</span>
+              </>
+            )}
+          </div>
+        )}
 
         {/* Timestamps + audit — secondary reference data, single unified row */}
         <div className="flex items-center gap-x-1.5 gap-y-1 flex-wrap text-xs text-muted-foreground">
