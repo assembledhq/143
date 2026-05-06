@@ -496,10 +496,11 @@ func (s *Service) SendMessage(ctx context.Context, input SendMessageInput) (*Sen
 	// Reuse the session continuation worker for phase 1. The latest user
 	// message carries thread_id, so the orchestrator attributes assistant
 	// messages and streamed logs back to this tab while still operating on the
-	// single shared sandbox. Dedupe at the session level — only one
-	// continue_session can hold the shared sandbox at a time, regardless of
-	// which thread fired it.
-	dedupeKey := db.ContinueSessionDedupeKey(thread.SessionID)
+	// single shared sandbox. Dedupe at the thread level so a concurrent send
+	// to a sibling tab is not silently swallowed by the partial unique index;
+	// worker-side AcquireTurnHold serializes the actual shared-sandbox
+	// execution when both threads run.
+	dedupeKey := db.ContinueSessionDedupeKey(thread.ID)
 	payload := map[string]string{
 		"session_id": thread.SessionID.String(),
 		"thread_id":  input.ThreadID.String(),

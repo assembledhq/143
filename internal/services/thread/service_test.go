@@ -540,7 +540,7 @@ func TestService_SendMessage(t *testing.T) {
 					require.IsType(t, map[string]string{}, payload, "thread message payload should be string keyed")
 					require.Equal(t, threadID.String(), payload.(map[string]string)["thread_id"], "thread id should be included for worker attribution")
 					require.NotNil(t, dedupeKey, "continue-session enqueue should carry a dedupe key")
-					require.Equal(t, db.ContinueSessionDedupeKey(sessionID), *dedupeKey, "continue-session dedupe should be keyed by session so concurrent tabs serialize on the shared sandbox")
+					require.Equal(t, db.ContinueSessionDedupeKey(threadID), *dedupeKey, "continue-session dedupe should be keyed by thread so a concurrent send to a sibling tab is not silently swallowed; worker-side AcquireTurnHold still serializes shared-sandbox execution")
 					return uuid.New(), nil
 				}
 			},
