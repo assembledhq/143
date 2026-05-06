@@ -280,6 +280,172 @@ describe("AutomationDetailPage", () => {
     });
   });
 
+  it("inserts selected @ mentions into the edit goal field", async () => {
+    const user = userEvent.setup();
+
+    server.use(
+      http.get("*/api/v1/automations/auto-1", () => HttpResponse.json({
+        data: {
+          id: "auto-1",
+          org_id: "org-1",
+          repository_id: "repo-1",
+          name: "Weekly audit",
+          goal: "Check release health",
+          scope: "",
+          interval_value: 1,
+          interval_unit: "weeks",
+          base_branch: "main",
+          enabled: true,
+          timezone: "UTC",
+          last_run_at: null,
+          next_run_at: null,
+          priority: 50,
+          created_at: "2026-01-01T00:00:00Z",
+          updated_at: "2026-01-01T00:00:00Z",
+        },
+      })),
+      http.get("*/api/v1/automations/auto-1/runs*", () => HttpResponse.json({ data: [], meta: {} })),
+      http.get("*/api/v1/automations/auto-1/stats*", () => HttpResponse.json({
+        data: {
+          since: "2026-01-01T00:00:00Z",
+          until: "2026-01-31T00:00:00Z",
+          buckets: [],
+          totals: {
+            total: 0,
+            completed: 0,
+            completed_noop: 0,
+            failed: 0,
+            skipped: 0,
+            running: 0,
+            pending: 0,
+            success_rate: 0,
+            avg_duration_seconds: 0,
+          },
+        },
+      })),
+      http.get("*/api/v1/session-composer/files", ({ request }) => {
+        const url = new URL(request.url);
+        if (!url.searchParams.get("q")) {
+          return HttpResponse.json({ data: [], meta: {} });
+        }
+
+        return HttpResponse.json({
+          data: [
+            {
+              kind: "directory",
+              token: "@internal/services",
+              path: "internal/services",
+              display: "internal/services",
+            },
+          ],
+          meta: {},
+        });
+      }),
+    );
+
+    renderWithProviders(<AutomationDetailPage />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Weekly audit")).toBeInTheDocument();
+    });
+
+    await user.click(screen.getByRole("tab", { name: "Settings" }));
+
+    const goalInput = screen.getByLabelText("Goal");
+    await user.clear(goalInput);
+    await user.type(goalInput, "Inspect @serv");
+    await user.click(await screen.findByRole("button", { name: "internal/services" }));
+
+    expect(goalInput).toHaveValue("Inspect @internal/services ");
+  });
+
+  it("inserts selected slash commands into the edit goal field", async () => {
+    const user = userEvent.setup();
+
+    server.use(
+      http.get("*/api/v1/settings", () => HttpResponse.json({
+        data: {
+          settings: {
+            default_agent_type: "codex",
+          },
+        },
+      })),
+      http.get("*/api/v1/automations/auto-1", () => HttpResponse.json({
+        data: {
+          id: "auto-1",
+          org_id: "org-1",
+          repository_id: "repo-1",
+          name: "Weekly audit",
+          goal: "Check release health",
+          scope: "",
+          interval_value: 1,
+          interval_unit: "weeks",
+          base_branch: "main",
+          enabled: true,
+          timezone: "UTC",
+          last_run_at: null,
+          next_run_at: null,
+          priority: 50,
+          created_at: "2026-01-01T00:00:00Z",
+          updated_at: "2026-01-01T00:00:00Z",
+        },
+      })),
+      http.get("*/api/v1/automations/auto-1/runs*", () => HttpResponse.json({ data: [], meta: {} })),
+      http.get("*/api/v1/automations/auto-1/stats*", () => HttpResponse.json({
+        data: {
+          since: "2026-01-01T00:00:00Z",
+          until: "2026-01-31T00:00:00Z",
+          buckets: [],
+          totals: {
+            total: 0,
+            completed: 0,
+            completed_noop: 0,
+            failed: 0,
+            skipped: 0,
+            running: 0,
+            pending: 0,
+            success_rate: 0,
+            avg_duration_seconds: 0,
+          },
+        },
+      })),
+      http.get("*/api/v1/session-composer/slash-commands", () => HttpResponse.json({
+        groups: [
+          {
+            source: "builtin",
+            label: "Codex commands",
+            items: [
+              {
+                kind: "command",
+                agent_type: "codex",
+                name: "review",
+                token: "/review",
+                display: "/review",
+                description: "Review pending changes",
+                source: "builtin",
+              },
+            ],
+          },
+        ],
+      })),
+    );
+
+    renderWithProviders(<AutomationDetailPage />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Weekly audit")).toBeInTheDocument();
+    });
+
+    await user.click(screen.getByRole("tab", { name: "Settings" }));
+
+    const goalInput = screen.getByLabelText("Goal");
+    await user.clear(goalInput);
+    await user.type(goalInput, "/rev");
+    await user.click(await screen.findByRole("button", { name: /\/review/i }));
+
+    expect(goalInput).toHaveValue("/review ");
+  });
+
   it("shows goal length validation and blocks saving when the goal exceeds the backend limit", async () => {
     server.use(
       http.get("*/api/v1/automations/auto-1", () => HttpResponse.json({
