@@ -220,6 +220,10 @@ export function getPendingEditableThreadUpdate(
   };
 }
 
+export function getInitialComposerSelectedModel(thread: SessionThread): string {
+  return thread.model_override ?? "";
+}
+
 export function trackInFlightAgentUpdate(
   ref: { current: Promise<unknown> | null },
   promise: Promise<unknown>,
@@ -3420,6 +3424,7 @@ export function SessionDetailContent({ id }: { id: string }) {
         };
       });
       setActiveThreadId(response.data.id);
+      setComposerSelectedModel(getInitialComposerSelectedModel(response.data));
       queryClient.invalidateQueries({ queryKey: ["session", id] });
     },
     onError: (err) => {

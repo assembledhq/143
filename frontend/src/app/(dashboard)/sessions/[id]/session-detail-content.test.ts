@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import {
   formatDuration,
+  getInitialComposerSelectedModel,
   getPendingEditableThreadUpdate,
   trackInFlightAgentUpdate,
 } from "./session-detail-content";
@@ -74,6 +75,29 @@ describe("getPendingEditableThreadUpdate", () => {
       label: "Codex 2",
       model: "gpt-5.4-mini",
     });
+  });
+});
+
+describe("getInitialComposerSelectedModel", () => {
+  const baseThread: SessionThread = {
+    id: "thread-1",
+    session_id: "session-1",
+    org_id: "org-1",
+    agent_type: "codex",
+    label: "Codex 2",
+    status: "idle",
+    current_turn: 0,
+    created_at: "2026-01-01T00:00:00.000Z",
+    cost_cents: 0,
+    pending_message_count: 0,
+  };
+
+  it("uses a created thread's inherited model override as the composer selection", () => {
+    expect(getInitialComposerSelectedModel({ ...baseThread, model_override: "gpt-5.4" })).toBe("gpt-5.4");
+  });
+
+  it("uses the default composer selection when the created thread has no override", () => {
+    expect(getInitialComposerSelectedModel(baseThread)).toBe("");
   });
 });
 
