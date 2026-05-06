@@ -130,9 +130,9 @@ type CreateThreadInput struct {
 }
 
 // UpdateThreadInput patches an editable (idle, current_turn=0) thread. Model
-// uses *string to distinguish three wire states:
-//   - nil:       field not present in the patch — keep the existing override
-//   - non-nil "": field present and empty — clear the override
+// uses *string to distinguish three states the handler maps from the wire:
+//   - nil:       field absent from the patch — keep the existing override
+//   - non-nil "": field present as JSON null or empty string — clear the override
 //   - non-nil v: field present with a value — set/validate to v
 type UpdateThreadInput struct {
 	SessionID uuid.UUID

@@ -517,6 +517,103 @@ func TestSessionThreadHandler_UpdateThread(t *testing.T) {
 	}
 }
 
+// TestSessionThreadHandler_UpdateThread_ModelWireEncoding pins the contract
+// the handler exposes for the optional `model` field: absence keeps, JSON
+// null clears, empty string clears, and a value sets. JSON null and "field
+// absent" decode to the same `*string` nil, so the handler distinguishes
+// them via json.RawMessage; this test would have caught the bug where
+// `{"model": null}` silently kept the existing override.
+func TestSessionThreadHandler_UpdateThread_ModelWireEncoding(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	threadID := uuid.New()
+
+	tests := []struct {
+		name             string
+		body             string
+		existingOverride *string
+		assertModel      func(t *testing.T, model *string)
+	}{
+		{
+			name:             "field absent keeps existing override",
+			body:             `{"label":"Codex 2"}`,
+			existingOverride: stringPtrTest(models.CodexModelGPT54Mini),
+			assertModel: func(t *testing.T, model *string) {
+				require.NotNil(t, model, "absent model field should keep the existing override")
+				require.Equal(t, models.CodexModelGPT54Mini, *model)
+			},
+		},
+		{
+			name:             "json null clears the override",
+			body:             `{"label":"Codex 2","model":null}`,
+			existingOverride: stringPtrTest(models.CodexModelGPT54Mini),
+			assertModel: func(t *testing.T, model *string) {
+				require.Nil(t, model, "explicit JSON null should clear the override")
+			},
+		},
+		{
+			name:             "empty string clears the override",
+			body:             `{"label":"Codex 2","model":""}`,
+			existingOverride: stringPtrTest(models.CodexModelGPT54Mini),
+			assertModel: func(t *testing.T, model *string) {
+				require.Nil(t, model, "explicit empty string should clear the override")
+			},
+		},
+		{
+			name:             "value sets the override",
+			body:             `{"label":"Codex 2","model":"` + models.CodexModelGPT54 + `"}`,
+			existingOverride: nil,
+			assertModel: func(t *testing.T, model *string) {
+				require.NotNil(t, model, "value should set the override")
+				require.Equal(t, models.CodexModelGPT54, *model)
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			handler, deps := newThreadHandler(t)
+			deps.sessionStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.Session, error) {
+				return models.Session{ID: sessionID, OrgID: orgID, Status: "running", AgentType: models.AgentTypeCodex}, nil
+			}
+			deps.threadStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
+				return models.SessionThread{
+					ID:            threadID,
+					SessionID:     sessionID,
+					OrgID:         orgID,
+					AgentType:     models.AgentTypeCodex,
+					ModelOverride: tt.existingOverride,
+					Label:         "Codex 2",
+					Status:        models.ThreadStatusIdle,
+					CurrentTurn:   0,
+				}, nil
+			}
+			var persistedModel *string
+			deps.threadStore.updateFn = func(_ context.Context, updated *models.SessionThread) error {
+				persistedModel = updated.ModelOverride
+				return nil
+			}
+
+			req := threadRequest(http.MethodPatch, "/api/v1/sessions/"+sessionID.String()+"/threads/"+threadID.String(), tt.body, orgID, map[string]string{
+				"id":  sessionID.String(),
+				"tid": threadID.String(),
+			})
+			w := httptest.NewRecorder()
+			handler.UpdateThread(w, req)
+			require.Equal(t, http.StatusOK, w.Code, "UpdateThread should return 200; body: %s", w.Body.String())
+			tt.assertModel(t, persistedModel)
+		})
+	}
+}
+
+func stringPtrTest(value string) *string {
+	return &value
+}
+
 func TestSessionThreadHandler_ListThreads(t *testing.T) {
 	t.Parallel()
 

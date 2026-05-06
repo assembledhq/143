@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -212,13 +213,14 @@ func (h *SessionThreadHandler) UpdateThread(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	// Model is *string so we can distinguish "field omitted" (keep existing
-	// override) from "field present and empty" (clear the override). A plain
-	// string would collapse both to "" and silently keep stale overrides.
+	// Model uses json.RawMessage so we can distinguish three wire states the
+	// way callers expect. A plain *string collapses JSON null and "field
+	// absent" to the same nil pointer, which silently keeps stale overrides
+	// when the client meant to clear them.
 	var body struct {
-		AgentType string  `json:"agent_type"`
-		Model     *string `json:"model"`
-		Label     string  `json:"label"`
+		AgentType string          `json:"agent_type"`
+		Model     json.RawMessage `json:"model"`
+		Label     string          `json:"label"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeError(w, r, http.StatusBadRequest, "INVALID_BODY", "invalid request body")
@@ -231,12 +233,33 @@ func (h *SessionThreadHandler) UpdateThread(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
+	// Wire convention:
+	//   - field absent           → keep existing override (nil)
+	//   - "model": null          → clear the override     (&"")
+	//   - "model": ""            → clear the override     (&"")
+	//   - "model": "value"       → set/validate the value (&value)
+	var modelInput *string
+	switch {
+	case len(body.Model) == 0:
+		modelInput = nil
+	case bytes.Equal(bytes.TrimSpace(body.Model), []byte("null")):
+		empty := ""
+		modelInput = &empty
+	default:
+		var modelValue string
+		if err := json.Unmarshal(body.Model, &modelValue); err != nil {
+			writeError(w, r, http.StatusBadRequest, "INVALID_BODY", "invalid model field")
+			return
+		}
+		modelInput = &modelValue
+	}
+
 	result, err := h.svc.UpdateThread(r.Context(), thread.UpdateThreadInput{
 		SessionID: sessionID,
 		OrgID:     orgID,
 		ThreadID:  threadID,
 		AgentType: body.AgentType,
-		Model:     body.Model,
+		Model:     modelInput,
 		Label:     body.Label,
 	})
 	if err != nil {
