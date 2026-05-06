@@ -3104,6 +3104,7 @@ func TestContinueSession_UsesThreadExecutionOptions(t *testing.T) {
 		ModelOverride:        &threadModel,
 		ThreadAgentSessionID: nil,
 		ResultAgentSessionID: &threadAgentSessionID,
+		ThreadID:             &threadID,
 	})
 	require.NoError(t, err, "ContinueSession should execute with the thread-selected adapter")
 	require.Equal(t, threadModel, createdCfg.Env["GEMINI_MODEL"], "ContinueSession should apply the thread model to the thread agent env")
@@ -4126,7 +4127,7 @@ func TestContinueSession_PersistsTurnResultAndReturnsToIdle(t *testing.T) {
 	}
 
 	orch := buildOrchestrator(d)
-	err := orch.ContinueSession(context.Background(), session, nil)
+	err := orch.ContinueSession(context.Background(), session, &agent.ContinueSessionOptions{ThreadID: &threadID})
 	require.NoError(t, err, "continue_session should succeed")
 
 	turnUpdates := d.sessions.getTurnUpdates()
@@ -4150,6 +4151,82 @@ func TestContinueSession_PersistsTurnResultAndReturnsToIdle(t *testing.T) {
 	require.Equal(t, threadID, *d.logs.logs[0].ThreadID, "persisted output logs should keep the triggering thread id")
 	require.NotNil(t, d.logs.markedThreadID, "duplicate marker should preserve the thread id")
 	require.Equal(t, threadID, *d.logs.markedThreadID, "duplicate marker should use the triggering thread id")
+}
+
+// TestContinueSession_RoutesToRequestedThreadAcrossSiblingTurns is the
+// regression test for the multi-tab dispatch bug: a sibling thread further
+// along in turns (Main on turn 9 with assistant replies through turn 11) used
+// to "win" the orchestrator's latest-user-message lookup over a brand-new
+// message on a younger thread (Codex 2 turn 2), causing the new message to be
+// orphaned and the wrong thread to be re-run. Locks the contract that when
+// the worker plumbs opts.ThreadID through, ContinueSession executes for that
+// thread and writes the assistant reply against it — even when sibling
+// threads have higher turn_numbers in the (turn_number, id)-ordered slice
+// returned by ListBySession.
+func TestContinueSession_RoutesToRequestedThreadAcrossSiblingTurns(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	mainThreadID := uuid.New()  // Main: many turns, last user already answered
+	codexThreadID := uuid.New() // Codex 2: brand-new tab, user just sent
+	issue := testIssue(orgID)
+	issue.Source = models.IssueSourceManual
+	session := testRun(orgID, issue.ID)
+	session.Origin = models.SessionOriginManual
+	session.InteractionMode = models.SessionInteractionModeInteractive
+	session.ValidationPolicy = models.SessionValidationPolicyOnSessionEnd
+	session.Status = string(models.SessionStatusIdle)
+	session.CurrentTurn = 11
+	session.SnapshotKey = strPtr("snapshots/test/session.tar")
+
+	d := defaultDeps()
+	d.issues.issue = issue
+	// Insertion order matches the ordering the real DB returns from
+	// ListBySession (ORDER BY turn_number ASC, id ASC). Each thread keeps its
+	// own turn counter, so the (turn=2, id=1052) row from Codex 2 sorts before
+	// the (turn=9, id=1046) row from Main even though Codex 2's message is
+	// chronologically newer. Pre-fix, latestUserMessage walked from the end
+	// of this slice and returned the Main turn-9 row — orphaning the Codex 2
+	// message and re-running an already-answered Main turn.
+	d.messages.messages = []models.SessionMessage{
+		{ID: 1052, SessionID: session.ID, OrgID: orgID, ThreadID: &codexThreadID, TurnNumber: 2, Role: models.MessageRoleUser, Content: "please fix the tests"},
+		{ID: 1046, SessionID: session.ID, OrgID: orgID, ThreadID: &mainThreadID, TurnNumber: 9, Role: models.MessageRoleUser, Content: "main turn 9 (already answered)"},
+		{ID: 1048, SessionID: session.ID, OrgID: orgID, ThreadID: &mainThreadID, TurnNumber: 9, Role: models.MessageRoleAssistant, Content: "main turn 9 reply"},
+		{ID: 1069, SessionID: session.ID, OrgID: orgID, ThreadID: &mainThreadID, TurnNumber: 11, Role: models.MessageRoleAssistant, Content: "main turn 11 reply"},
+	}
+	d.provider.RestoreFn = func(ctx context.Context, sb *agent.Sandbox, reader io.Reader) error {
+		_, err := io.ReadAll(reader)
+		return err
+	}
+	d.provider.SnapshotFn = func(ctx context.Context, sb *agent.Sandbox) (io.ReadCloser, error) {
+		return io.NopCloser(bytes.NewReader([]byte("next-snapshot"))), nil
+	}
+	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
+		require.Equal(t, "please fix the tests", prompt.UserMessage,
+			"continue_session for Codex 2 must run with Codex 2's user message, not the higher-turn Main message that sorts last in the (turn_number, id) ordering")
+		return &agent.AgentResult{
+			Summary:         "Codex 2 reply",
+			ConfidenceScore: 0.7,
+			ExitCode:        0,
+		}, nil
+	}
+	d.snapshots.data = map[string][]byte{
+		*session.SnapshotKey: []byte("restored-snapshot"),
+	}
+
+	err := buildOrchestrator(d).ContinueSession(context.Background(), session, &agent.ContinueSessionOptions{
+		ThreadID: &codexThreadID,
+	})
+	require.NoError(t, err, "ContinueSession should succeed for the Codex 2 thread")
+
+	messages := d.messages.getMessages()
+	require.Len(t, messages, 5, "an assistant reply should be appended to the timeline")
+	reply := messages[4]
+	require.Equal(t, models.MessageRoleAssistant, reply.Role)
+	require.Equal(t, "Codex 2 reply", reply.Content, "assistant reply content should come from the Codex 2 turn")
+	require.NotNil(t, reply.ThreadID, "assistant reply must be attributed to a thread, not session-level")
+	require.Equal(t, codexThreadID, *reply.ThreadID,
+		"assistant reply must be tagged with the Codex 2 thread, not Main — pre-fix this was the load-bearing assertion that failed in prod")
 }
 
 func TestContinueSession_FreshResumeClaudeTokenFailureFallsBackToAPIKey(t *testing.T) {
@@ -5036,7 +5113,7 @@ func TestContinueSession_SetWorkerNodeIDFailureResetsThread(t *testing.T) {
 	d.sessionThreads = &mockSessionThreadStore{}
 	d.issues.issue = issue
 	d.messages.messages = []models.SessionMessage{
-		{ID: 1, SessionID: session.ID, OrgID: orgID, TurnNumber: 2, Role: models.MessageRoleUser, Content: "retry me"},
+		{ID: 1, SessionID: session.ID, OrgID: orgID, ThreadID: &threadID, TurnNumber: 2, Role: models.MessageRoleUser, Content: "retry me"},
 	}
 
 	orch := buildOrchestrator(d)

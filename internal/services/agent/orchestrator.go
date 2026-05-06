@@ -972,6 +972,37 @@ func latestUserMessage(messages []models.SessionMessage) *models.SessionMessage 
 	return nil
 }
 
+// latestUserMessageInScope returns the most recent user message bound to the
+// requested scope. When threadID is nil the scope is the session-level
+// conversation (messages with no thread); when threadID is non-nil the scope
+// is that specific thread.
+//
+// The scoped form exists because session_messages.ListBySession orders rows by
+// (turn_number, id) — and per-thread turn counters are independent — so the
+// globally-last user row in the slice is not necessarily the last message the
+// user actually sent. ContinueSession must scope to the thread the worker
+// payload identified, otherwise a sibling thread with a higher turn_number
+// will steal the run.
+func latestUserMessageInScope(messages []models.SessionMessage, threadID *uuid.UUID) *models.SessionMessage {
+	matchesScope := func(m models.SessionMessage) bool {
+		if threadID == nil {
+			return m.ThreadID == nil
+		}
+		return m.ThreadID != nil && *m.ThreadID == *threadID
+	}
+	for i := len(messages) - 1; i >= 0; i-- {
+		m := messages[i]
+		if m.Role != models.MessageRoleUser {
+			continue
+		}
+		if !matchesScope(m) {
+			continue
+		}
+		return &messages[i]
+	}
+	return nil
+}
+
 // unprocessedUserMessages returns the consecutive trailing user messages for
 // a given thread scope — i.e. all user messages after the most recent
 // in-scope assistant message. When threadID is nil the scope is the
@@ -2205,7 +2236,23 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		return fmt.Errorf("fetch session messages: %w", err)
 	}
 
-	latestMsg := latestUserMessage(messages)
+	// Scope the latest-user-message lookup to the thread the worker enqueued
+	// for. ListBySession orders rows by (turn_number, id) and per-thread turn
+	// counters are independent, so the globally-last user row in the slice is
+	// not necessarily the most recently sent message — a sibling thread that's
+	// further along in turns can sit "after" a brand-new user message in the
+	// returned ordering. Without this scoping, ContinueSession would re-run
+	// the wrong (already-answered) thread and orphan the new message.
+	//
+	// When opts is nil (RecoverSession path: worker crash mid-turn rehydrates
+	// without a thread hint) we preserve the legacy global lookup so a
+	// threaded session can still recover its in-flight turn.
+	var latestMsg *models.SessionMessage
+	if opts != nil && opts.ThreadID != nil {
+		latestMsg = latestUserMessageInScope(messages, opts.ThreadID)
+	} else {
+		latestMsg = latestUserMessage(messages)
+	}
 	if latestMsg == nil || strings.TrimSpace(latestMsg.Content) == "" {
 		o.failRun(ctx, session, "no user message found for continue_session")
 		return fmt.Errorf("no user message found")
