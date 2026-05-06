@@ -26,12 +26,28 @@ import (
 // signal is provider-tagged in the output.
 func taskManagerError(action, providerName string, err error) *ToolCallResult {
 	if errors.Is(err, integration.ErrLinearUnauthorized) {
+		detail := taskManagerUnauthorizedDetail(providerName, err)
 		return ErrorResult(fmt.Sprintf(
-			"%s unauthorized: %s access token has expired or been revoked. Ask the user to reconnect %s in the integrations settings before retrying %s.",
-			providerName, providerName, providerName, action,
+			"%s unauthorized: %s. Ask the user to reconnect %s in the integrations settings before retrying %s.",
+			providerName, detail, providerName, action,
 		))
 	}
 	return ErrorResult(fmt.Sprintf("%s failed: %s", action, err))
+}
+
+func taskManagerUnauthorizedDetail(providerName string, err error) string {
+	fallback := fmt.Sprintf("%s access token has expired or been revoked", providerName)
+	text := strings.TrimSpace(err.Error())
+	sentinel := integration.ErrLinearUnauthorized.Error()
+	idx := strings.Index(text, sentinel)
+	if idx == -1 {
+		return fallback
+	}
+	detail := strings.TrimSpace(strings.TrimPrefix(text[idx+len(sentinel):], ":"))
+	if detail == "" {
+		return fallback
+	}
+	return detail
 }
 
 // ToolRegistry builds MCP tool definitions from an integration registry and

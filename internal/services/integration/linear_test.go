@@ -595,6 +595,7 @@ func TestLinearTaskManager_DoGraphQL_UnauthorizedMapsToErrLinearUnauthorized(t *
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"errors":[{"message":"Authentication required, not authenticated"}]}`))
 	}))
 	defer server.Close()
 
@@ -607,6 +608,8 @@ func TestLinearTaskManager_DoGraphQL_UnauthorizedMapsToErrLinearUnauthorized(t *
 	require.Error(t, err, "GetTask should surface a 401 from Linear")
 	require.ErrorIs(t, err, ErrLinearUnauthorized,
 		"401 from Linear should map to ErrLinearUnauthorized so callers can detect dead tokens with errors.Is")
+	require.Contains(t, err.Error(), "Authentication required, not authenticated",
+		"401 from Linear should preserve the GraphQL auth detail for CLI and logs")
 }
 
 func TestLinearTaskManager_DoGraphQL_RateLimitReturnsTypedError(t *testing.T) {

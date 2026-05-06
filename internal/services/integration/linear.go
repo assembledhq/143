@@ -510,6 +510,10 @@ func (l *LinearTaskManager) doGraphQL(ctx context.Context, query string, variabl
 		return &LinearRateLimitError{RetryAfter: resp.Header.Get("Retry-After")}
 	}
 	if resp.StatusCode == http.StatusUnauthorized {
+		bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, maxLinearErrorBodyBytes))
+		if msg := linearErrorBodyMessage(bodyBytes); msg != "" {
+			return fmt.Errorf("%w: %s", ErrLinearUnauthorized, truncateLinearErrorMessage(msg))
+		}
 		return ErrLinearUnauthorized
 	}
 	if resp.StatusCode != http.StatusOK {
@@ -520,11 +524,8 @@ func (l *LinearTaskManager) doGraphQL(ctx context.Context, query string, variabl
 		bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, maxLinearErrorBodyBytes))
 		// If the body is a GraphQL error envelope, prefer the structured
 		// message — it's far more readable than the raw JSON.
-		if msg := parseGraphQLErrorMessage(bodyBytes); msg != "" {
+		if msg := linearErrorBodyMessage(bodyBytes); msg != "" {
 			return fmt.Errorf("linear API returned %d: %s", resp.StatusCode, truncateLinearErrorMessage(msg))
-		}
-		if trimmed := bytes.TrimSpace(bodyBytes); len(trimmed) > 0 {
-			return fmt.Errorf("linear API returned %d: %s", resp.StatusCode, truncateLinearErrorMessage(string(trimmed)))
 		}
 		return fmt.Errorf("linear API returned %d", resp.StatusCode)
 	}
@@ -608,6 +609,16 @@ func parseGraphQLErrorMessage(body []byte) string {
 		if e.Message != "" {
 			return e.Message
 		}
+	}
+	return ""
+}
+
+func linearErrorBodyMessage(body []byte) string {
+	if msg := parseGraphQLErrorMessage(body); msg != "" {
+		return msg
+	}
+	if trimmed := bytes.TrimSpace(body); len(trimmed) > 0 {
+		return string(trimmed)
 	}
 	return ""
 }

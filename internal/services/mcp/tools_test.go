@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -516,19 +517,19 @@ type unauthorizedTaskManager struct{ name string }
 
 func (u *unauthorizedTaskManager) Name() string { return u.name }
 func (u *unauthorizedTaskManager) ListTasks(_ context.Context, _ integration.TaskFilter) ([]integration.TaskSummary, error) {
-	return nil, integration.ErrLinearUnauthorized
+	return nil, fmt.Errorf("%w: Authentication required, not authenticated", integration.ErrLinearUnauthorized)
 }
 func (u *unauthorizedTaskManager) GetTask(_ context.Context, _ string) (*integration.TaskDetail, error) {
-	return nil, integration.ErrLinearUnauthorized
+	return nil, fmt.Errorf("%w: Authentication required, not authenticated", integration.ErrLinearUnauthorized)
 }
 func (u *unauthorizedTaskManager) FindRelated(_ context.Context, _ string) ([]integration.TaskSummary, error) {
-	return nil, integration.ErrLinearUnauthorized
+	return nil, fmt.Errorf("%w: Authentication required, not authenticated", integration.ErrLinearUnauthorized)
 }
 func (u *unauthorizedTaskManager) UpdateTask(_ context.Context, _ string, _ integration.TaskUpdate) error {
-	return integration.ErrLinearUnauthorized
+	return fmt.Errorf("%w: Authentication required, not authenticated", integration.ErrLinearUnauthorized)
 }
 func (u *unauthorizedTaskManager) CreateTask(_ context.Context, _ integration.TaskCreateSpec) (*integration.TaskSummary, error) {
-	return nil, integration.ErrLinearUnauthorized
+	return nil, fmt.Errorf("%w: Authentication required, not authenticated", integration.ErrLinearUnauthorized)
 }
 
 func TestCallToolTaskManager_UnauthorizedSurfacesReconnectMessage(t *testing.T) {
@@ -563,6 +564,8 @@ func TestCallToolTaskManager_UnauthorizedSurfacesReconnectMessage(t *testing.T) 
 				"unauthorized errors should use the reserved 'linear unauthorized:' prefix so log queries can pick them out")
 			require.Contains(t, text, "reconnect linear",
 				"unauthorized error should explicitly tell the agent to ask the user to reconnect Linear")
+			require.Contains(t, text, "Authentication required, not authenticated",
+				"unauthorized error should preserve Linear's auth detail for sandbox CLI output")
 		})
 	}
 }
