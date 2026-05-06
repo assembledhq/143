@@ -3,12 +3,36 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
 
 	"github.com/assembledhq/143/internal/services/integration"
 )
+
+// taskManagerError formats a TaskManager error into an ErrorResult with a
+// dedicated branch for unauthorized integrations. The unauthorized variant
+// uses a stable, greppable prefix ("linear unauthorized:") so:
+//
+//  1. The agent gets a clear "stop trying Linear; ask the user to reconnect"
+//     signal instead of a generic "linear API returned 4xx".
+//  2. Sandbox stdout — captured into session logs and shipped to VictoriaLogs
+//     by the worker — is searchable for orgs whose Linear OAuth has fallen
+//     over, without a structured logger needing org_id (the sandbox doesn't
+//     have it).
+//
+// providerName is the integration name ("linear", future "jira", etc.) so the
+// signal is provider-tagged in the output.
+func taskManagerError(action, providerName string, err error) *ToolCallResult {
+	if errors.Is(err, integration.ErrLinearUnauthorized) {
+		return ErrorResult(fmt.Sprintf(
+			"%s unauthorized: %s access token has expired or been revoked. Ask the user to reconnect %s in the integrations settings before retrying %s.",
+			providerName, providerName, providerName, action,
+		))
+	}
+	return ErrorResult(fmt.Sprintf("%s failed: %s", action, err))
+}
 
 // ToolRegistry builds MCP tool definitions from an integration registry and
 // dispatches tool calls to the appropriate integration method.
@@ -447,7 +471,7 @@ func (tr *ToolRegistry) callTaskManager(ctx context.Context, tm integration.Task
 		}
 		results, err := tm.ListTasks(ctx, filter)
 		if err != nil {
-			return ErrorResult(fmt.Sprintf("list tasks failed: %s", err))
+			return taskManagerError("list tasks", tm.Name(), err)
 		}
 		return jsonResult(results)
 
@@ -460,7 +484,7 @@ func (tr *ToolRegistry) callTaskManager(ctx context.Context, tm integration.Task
 		}
 		detail, err := tm.GetTask(ctx, p.TaskID)
 		if err != nil {
-			return ErrorResult(fmt.Sprintf("get task failed: %s", err))
+			return taskManagerError("get task", tm.Name(), err)
 		}
 		return jsonResult(detail)
 
@@ -473,7 +497,7 @@ func (tr *ToolRegistry) callTaskManager(ctx context.Context, tm integration.Task
 		}
 		related, err := tm.FindRelated(ctx, p.TaskID)
 		if err != nil {
-			return ErrorResult(fmt.Sprintf("find related failed: %s", err))
+			return taskManagerError("find related", tm.Name(), err)
 		}
 		return jsonResult(related)
 
@@ -493,7 +517,7 @@ func (tr *ToolRegistry) callTaskManager(ctx context.Context, tm integration.Task
 			Comment:  p.Comment,
 		}
 		if err := tm.UpdateTask(ctx, p.TaskID, update); err != nil {
-			return ErrorResult(fmt.Sprintf("update task failed: %s", err))
+			return taskManagerError("update task", tm.Name(), err)
 		}
 		return TextResult("task updated successfully")
 
@@ -517,7 +541,7 @@ func (tr *ToolRegistry) callTaskManager(ctx context.Context, tm integration.Task
 		}
 		task, err := tm.CreateTask(ctx, spec)
 		if err != nil {
-			return ErrorResult(fmt.Sprintf("create task failed: %s", err))
+			return taskManagerError("create task", tm.Name(), err)
 		}
 		return jsonResult(task)
 
