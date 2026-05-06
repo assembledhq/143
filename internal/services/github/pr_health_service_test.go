@@ -249,6 +249,53 @@ func TestPRServiceBuildPullRequestHealthResponseNormalizesLegacyCheckStatuses(t 
 	require.NoError(t, mock.ExpectationsWereMet(), "all health current queries should be executed")
 }
 
+func TestPRServiceBuildPullRequestHealthResponseRespectsStoredChecksConfirmed(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create pgx mock pool")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	pullRequestID := uuid.New()
+	now := time.Now().UTC()
+	summaryJSON := []byte(`{
+		"merge_state":"clean",
+		"has_conflicts":false,
+		"failing_test_count":0,
+		"needs_agent_action":false,
+		"checks_confirmed":false,
+		"checks":[]
+	}`)
+
+	mock.ExpectQuery("SELECT .+ FROM pull_request_health_current WHERE org_id = .+ AND pull_request_id = .+").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": pullRequestID}).
+		WillReturnRows(pgxmock.NewRows(prHealthCurrentTestColumns).AddRow(
+			pullRequestID, orgID, int64(2), "head-new", "base-new", summaryJSON, summaryJSON, models.PullRequestHealthEnrichmentStatusNotRequested, nil, now, now,
+		))
+
+	service := &PRService{
+		pullRequests: db.NewPullRequestStore(mock),
+		logger:       zerolog.New(io.Discard),
+	}
+
+	resp, err := service.buildPullRequestHealthResponse(context.Background(), models.PullRequest{
+		ID:             pullRequestID,
+		OrgID:          orgID,
+		GitHubPRNumber: 42,
+		GitHubRepo:     "assembledhq/143",
+		GitHubPRURL:    "https://github.com/assembledhq/143/pull/42",
+		Status:         "open",
+		MergeState:     models.PullRequestMergeStateUnknown,
+		HealthVersion:  2,
+	})
+	require.NoError(t, err, "buildPullRequestHealthResponse should succeed")
+	require.False(t, resp.ChecksConfirmed, "response should preserve an unconfirmed check state from the stored summary")
+	require.False(t, resp.CanMerge, "response should keep merge disabled until checks are confirmed")
+	require.Contains(t, resp.Summary, "waiting for required checks", "response summary should describe the in-flight check state")
+	require.NoError(t, mock.ExpectationsWereMet(), "all health current queries should be executed")
+}
+
 func TestPRServiceBuildPullRequestHealthResponseMarksConfirmedZeroChecksMergeable(t *testing.T) {
 	t.Parallel()
 
@@ -264,6 +311,7 @@ func TestPRServiceBuildPullRequestHealthResponseMarksConfirmedZeroChecksMergeabl
 		"has_conflicts":false,
 		"failing_test_count":0,
 		"needs_agent_action":false,
+		"checks_confirmed":true,
 		"checks":[]
 	}`)
 
@@ -400,6 +448,9 @@ func TestPRServiceSyncPullRequestState(t *testing.T) {
 		WillReturnRows(pgxmock.NewRows(prTestRepoColumns).AddRow(
 			repoID, orgID, integrationID, int64(1), "assembledhq/143", "main", false, nil, nil, "https://github.com/assembledhq/143.git", int64(123), "active", nil, nil, []byte(`{}`), now, now,
 		))
+	mock.ExpectQuery("SELECT .+ FROM pull_request_health_current").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": pullRequestID}).
+		WillReturnRows(pgxmock.NewRows(prHealthCurrentTestColumns))
 	mock.ExpectBegin()
 	mock.ExpectQuery("SELECT .+ FROM pull_request_health_current").
 		WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": pullRequestID}).
@@ -614,6 +665,8 @@ func TestPRServiceSyncPullRequestStateSkipsIndeterminateMergeRegression(t *testi
 			_, _ = w.Write([]byte(`{"number":42,"html_url":"https://github.com/assembledhq/143/pull/42","state":"open","mergeable":null,"mergeable_state":"unknown","head":{"ref":"feature","sha":"head-flap"},"base":{"ref":"main","sha":"base-flap"}}`))
 		case "/repos/assembledhq/143/commits/head-flap/check-runs":
 			_, _ = w.Write([]byte(`{"check_runs":[]}`))
+		case "/repos/assembledhq/143/branches/main":
+			_, _ = w.Write([]byte(`{"protected":true,"protection":{"required_status_checks":{"contexts":["ci-build"]}}}`))
 		default:
 			http.NotFound(w, r)
 		}
@@ -1135,6 +1188,55 @@ func TestPRServiceFetchGitHubHelpers(t *testing.T) {
 	require.Nil(t, annotations, "fetchCheckRunAnnotations should return nil annotations for 404 responses")
 }
 
+func TestPRServiceBranchRequiresStatusChecks(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		body     string
+		expected bool
+	}{
+		{
+			name:     "protected branch with required contexts",
+			body:     `{"protected":true,"protection":{"required_status_checks":{"contexts":["ci-build"]}}}`,
+			expected: true,
+		},
+		{
+			name:     "protected branch without required contexts",
+			body:     `{"protected":true,"protection":{"required_status_checks":{"contexts":[]}}}`,
+			expected: false,
+		},
+		{
+			name:     "unprotected branch",
+			body:     `{"protected":false}`,
+			expected: false,
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				require.Equal(t, "/repos/assembledhq/143/branches/main", r.URL.Path, "branchRequiresStatusChecks should query the base branch endpoint")
+				_, _ = w.Write([]byte(tt.body))
+			}))
+			defer server.Close()
+
+			service := &PRService{
+				logger:     zerolog.New(io.Discard),
+				baseURL:    server.URL,
+				httpClient: server.Client(),
+			}
+
+			required, err := service.branchRequiresStatusChecks(context.Background(), "token", "assembledhq", "143", "main")
+			require.NoError(t, err, "branchRequiresStatusChecks should decode GitHub branch protection metadata")
+			require.Equal(t, tt.expected, required, "branchRequiresStatusChecks should classify required status checks correctly")
+		})
+	}
+}
+
 func TestPRServiceBuildRepairRevisionContextIncludesFailingChecks(t *testing.T) {
 	t.Parallel()
 
@@ -1254,6 +1356,9 @@ func TestPRServiceGetPullRequestHealthInlineSyncAndStartRepairErrors(t *testing.
 			WillReturnRows(pgxmock.NewRows(prTestRepoColumns).AddRow(
 				repoID, orgID, integrationID, int64(1), "assembledhq/143", "main", false, nil, nil, "https://github.com/assembledhq/143.git", int64(123), "active", nil, nil, []byte(`{}`), now, now,
 			))
+		mock.ExpectQuery("SELECT .+ FROM pull_request_health_current").
+			WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": pullRequestID}).
+			WillReturnRows(pgxmock.NewRows(prHealthCurrentTestColumns))
 		mock.ExpectBegin()
 		mock.ExpectQuery("SELECT .+ FROM pull_request_health_current").
 			WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": pullRequestID}).
