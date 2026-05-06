@@ -279,6 +279,53 @@ func TestShouldSkipIndeterminateSnapshotWrite(t *testing.T) {
 	}
 }
 
+func TestDetermineChecksConfirmed(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name                     string
+		checks                   []models.PullRequestCheckSummary
+		requiredChecksConfigured bool
+		expected                 bool
+	}{
+		{
+			name: "completed checks are confirmed",
+			checks: []models.PullRequestCheckSummary{
+				{Name: "unit tests", Category: models.PullRequestCheckCategoryTest, Status: models.PullRequestCheckStatusPassed},
+			},
+			expected: true,
+		},
+		{
+			name: "pending checks are not confirmed",
+			checks: []models.PullRequestCheckSummary{
+				{Name: "unit tests", Category: models.PullRequestCheckCategoryTest, Status: models.PullRequestCheckStatusPending},
+			},
+			expected: false,
+		},
+		{
+			name:                     "zero checks stay unconfirmed when base branch requires checks",
+			checks:                   nil,
+			requiredChecksConfigured: true,
+			expected:                 false,
+		},
+		{
+			name:                     "zero checks are confirmed when base branch has no required checks",
+			checks:                   nil,
+			requiredChecksConfigured: false,
+			expected:                 true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			confirmed := determineChecksConfirmed(tt.checks, tt.requiredChecksConfigured)
+			require.Equal(t, tt.expected, confirmed, "determineChecksConfirmed should classify check authority correctly")
+		})
+	}
+}
+
 func TestClassifyCheckRunCategory(t *testing.T) {
 	t.Parallel()
 
