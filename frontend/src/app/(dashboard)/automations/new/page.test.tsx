@@ -192,6 +192,68 @@ describe("NewAutomationPage", () => {
     });
   }, 20000);
 
+  it("submits an explicit reasoning override for supported automation agents", async () => {
+    const user = userEvent.setup();
+    let requestBody: Record<string, unknown> | null = null;
+
+    server.use(
+      http.get("*/api/v1/settings", () => HttpResponse.json({
+        data: {
+          id: "org-1",
+          name: "Test Org",
+          settings: { default_agent_type: "codex" },
+        },
+      })),
+      http.get("*/api/v1/settings/codex-auth/status", () => HttpResponse.json({
+        data: { status: "completed" },
+      })),
+      http.get("*/api/v1/settings/credentials/resolved", () => HttpResponse.json({
+        data: [{ provider: "openai", source: "org" }],
+        meta: {},
+      })),
+      http.get("*/api/v1/settings/credentials/team", () => HttpResponse.json({ data: [], meta: {} })),
+      http.get("*/api/v1/settings/coding-auths", () => HttpResponse.json({ data: [], meta: {} })),
+      http.get("*/api/v1/coding-credentials*", () => HttpResponse.json({ data: [], meta: {} })),
+      http.get("*/api/v1/repositories", () => HttpResponse.json({
+        data: [{
+          id: "repo-1",
+          org_id: "org-1",
+          integration_id: "int-1",
+          github_id: 1,
+          full_name: "acme/repo",
+          default_branch: "main",
+          private: false,
+          clone_url: "https://github.com/acme/repo.git",
+          installation_id: 10,
+          status: "active",
+          settings: {},
+          created_at: "2026-03-05T12:00:00Z",
+          updated_at: "2026-03-05T12:00:00Z",
+        }],
+        meta: {},
+      })),
+      http.post("*/api/v1/automations", async ({ request }) => {
+        requestBody = await request.json() as Record<string, unknown>;
+        return HttpResponse.json({ data: { id: "auto-1" } });
+      }),
+    );
+
+    renderWithProviders(<NewAutomationPage />);
+
+    await waitFor(() => {
+      expect(screen.getByDisplayValue("Security sweep")).toBeInTheDocument();
+    });
+
+    await user.click(screen.getByText("Advanced options"));
+    await user.click(screen.getByRole("combobox", { name: "Reasoning" }));
+    await user.click(await screen.findByText("Extra High"));
+    await user.click(screen.getByRole("button", { name: "Create automation" }));
+
+    await waitFor(() => {
+      expect(requestBody).toMatchObject({ reasoning_effort: "xhigh" });
+    });
+  });
+
   it("shows goal length validation and blocks submit when the goal exceeds the backend limit", async () => {
     const user = userEvent.setup();
 
