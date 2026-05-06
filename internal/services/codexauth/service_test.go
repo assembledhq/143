@@ -911,6 +911,9 @@ func TestGetValidToken_DBError(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for DB failure, got nil")
 	}
+	if svc.IsAuthInvalid(err) {
+		t.Fatalf("DB failures should not be classified as invalid ChatGPT auth: %v", err)
+	}
 }
 
 func TestPollForToken_RateLimited(t *testing.T) {
@@ -1326,6 +1329,38 @@ func TestGetValidToken_RefreshFailsTokenExpired(t *testing.T) {
 	_, err := svc.GetValidToken(context.Background(), orgID)
 	if err == nil {
 		t.Fatal("expected error when token expired and refresh fails")
+	}
+	if svc.IsAuthInvalid(err) {
+		t.Fatalf("expired token plus refresh infrastructure failure should not be classified as invalid ChatGPT auth: %v", err)
+	}
+}
+
+func TestGetValidToken_RefreshRevokedTokenExpiredIsAuthInvalid(t *testing.T) {
+	t.Parallel()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		w.Write([]byte(`{"error": "invalid_grant"}`))
+	}))
+	defer server.Close()
+
+	store := newMockCredentialStore()
+	svc := NewService(store, zerolog.Nop())
+	svc.SetHTTPClient(server.Client())
+	svc.SetIssuer(server.URL)
+
+	orgID := uuid.New()
+	store.Upsert(context.Background(), models.Scope{OrgID: orgID}, models.OpenAIChatGPTConfig{
+		AccessToken:  "cha_expired",
+		RefreshToken: "chr_revoked",
+		ExpiresAt:    time.Now().Add(-1 * time.Minute),
+	})
+
+	_, err := svc.GetValidToken(context.Background(), orgID)
+	if err == nil {
+		t.Fatal("expected error when token expired and refresh token was revoked")
+	}
+	if !svc.IsAuthInvalid(err) {
+		t.Fatalf("revoked refresh token should be classified as invalid ChatGPT auth: %v", err)
 	}
 }
 

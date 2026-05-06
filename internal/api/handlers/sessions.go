@@ -2004,13 +2004,22 @@ func (h *SessionHandler) SendMessage(w http.ResponseWriter, r *http.Request) {
 	// Enqueue continue_session job. Dedupe at the session level — only one
 	// continue_session can hold the shared sandbox at a time, so a duplicate
 	// would race AcquireTurnHold and dead-letter via the orchestrator's
-	// self-heal path.
+	// self-heal path. Pin to the worker that owns the live sandbox so the
+	// job can't be claimed by a sibling node whose docker daemon doesn't
+	// know about the container_id.
 	dedupeKey := db.ContinueSessionDedupeKey(sessionID)
 	payload := map[string]string{
 		"session_id": sessionID.String(),
 		"org_id":     orgID.String(),
 	}
-	if _, err := h.jobStore.EnqueueInTx(r.Context(), tx, orgID, "agent", "continue_session", payload, 5, &dedupeKey); err != nil {
+	if _, err := h.jobStore.EnqueueInTxWithOpts(r.Context(), tx, orgID, db.EnqueueOpts{
+		Queue:        "agent",
+		JobType:      "continue_session",
+		Payload:      payload,
+		Priority:     5,
+		DedupeKey:    &dedupeKey,
+		TargetNodeID: models.SessionWorkerTarget(&session),
+	}); err != nil {
 		writeError(w, r, http.StatusInternalServerError, "ENQUEUE_FAILED", "failed to enqueue continue_session job", err)
 		return
 	}

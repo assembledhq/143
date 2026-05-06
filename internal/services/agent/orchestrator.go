@@ -80,6 +80,20 @@ var ErrStaleSandboxIDCleared = errors.New("sandbox race: cleared stale orphan co
 // dead-lettering as a duplicate.
 var ErrSandboxPreviewRace = errors.New("sandbox race: preview holder attached first, retry")
 
+// ErrSandboxOnDifferentNode is returned from ContinueSession's reuse path
+// when the session's recorded worker_node_id points at a different worker
+// than the one running this job. Container ids are local to a docker
+// daemon, so we cannot exec into a sandbox owned by a sibling node — and
+// an IsAlive probe on the wrong daemon false-reports "not alive", which
+// would CAS-clear the row and orphan the live container on its real host.
+//
+// Worker handlers convert this to a RetryableError so the job is released
+// back to the queue with a short delay, giving the correctly-pinned
+// worker a chance to claim it. Once node-affinity routing is rolled out
+// (target_node_id on the jobs table) this branch becomes a defense-in-
+// depth safety net for any job enqueued before pinning landed.
+var ErrSandboxOnDifferentNode = errors.New("sandbox race: session sandbox lives on a different worker node, retry")
+
 // canonicalTimeoutLogMessage is the single log phrase emitted whenever a
 // session hits its configured deadline. Kept deliberately narrow so
 // Grafana alerts can key off one string across RunAgent and ContinueSession.
@@ -365,9 +379,16 @@ type RepositoryStore interface {
 	GetByID(ctx context.Context, orgID, repoID uuid.UUID) (models.Repository, error)
 }
 
-// JobStore defines the job enqueue operations.
+// JobStore defines the job enqueue operations. EnqueueWithTarget is the
+// node-affinity variant: when targetNodeID is non-nil, only the matching
+// worker (or workers picking up jobs released by a dead node) can claim
+// the row. Used for sandbox-bound jobs where the work must run on the
+// same docker daemon as the session's recorded container_id. The plain
+// Enqueue maps to NULL target — any worker can claim — which is correct
+// for unbound jobs (linear_milestone, sync_*, post-PR housekeeping).
 type JobStore interface {
 	Enqueue(ctx context.Context, orgID uuid.UUID, queue, jobType string, payload any, priority int, dedupeKey *string) (uuid.UUID, error)
+	EnqueueWithTarget(ctx context.Context, orgID uuid.UUID, queue, jobType string, payload any, priority int, dedupeKey *string, targetNodeID *string) (uuid.UUID, error)
 	OldestPendingSessionJobAge(ctx context.Context) (time.Duration, bool, error)
 }
 
@@ -2313,52 +2334,108 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		sandboxCfg.Env["HOME"] = sandboxCfg.HomeDir
 	}
 	reusedExisting := session.ContainerID != nil && *session.ContainerID != ""
-	// Liveness check on reuse: a recorded container_id only means "someone
-	// (preview, prior turn) wrote it" — it does NOT prove the container is
-	// still alive. If the container was destroyed without going through
-	// FinalizeContainerDestroy / ClearContainerID (worker rollover, docker
-	// daemon eviction, OOM kill, ad-hoc cleanup), the row holds a stale ID
-	// pointing at a dead container. The reuse branch below then builds a
-	// Sandbox{} from that ID and the first downstream Docker exec fails
-	// with "No such container", historically misclassified as a Codex auth
-	// expiry. Probe IsAlive up front; if dead, CAS-clear via ClearContainerID
-	// and return ErrStaleSandboxIDCleared so the worker retries against a
-	// clean row (the next attempt sees container_id=NULL and falls through
-	// to hydrate-from-snapshot or fresh-create).
+	// Liveness / cross-node check on reuse. A recorded container_id only
+	// means "someone (preview, prior turn) wrote it" — it does NOT prove
+	// the container is alive AND on this node's docker daemon. Two cases:
 	//
-	// On probe error we conservatively keep going (treat as alive) — the
-	// downstream operation will surface a real failure if the container is
-	// gone, and we'd rather not retry-loop against a transient docker hiccup.
+	//   (1) Cross-node claim. session.WorkerNodeID points at a different
+	//       worker. Container ids are local to a docker daemon, so any
+	//       Exec we issue here would fail "No such container" (historically
+	//       misclassified as Codex auth expiry). An IsAlive probe on the
+	//       wrong daemon also false-reports dead — running ClearContainerID
+	//       in that state would orphan the live container on its real host.
+	//       Bail with ErrSandboxOnDifferentNode so the worker re-enqueues;
+	//       the correctly-pinned worker (or a future retry post-rollout of
+	//       target_node_id job affinity) picks it up. This branch is
+	//       defense-in-depth once that affinity lands.
+	//
+	//   (2) Stale orphan. WorkerNodeID matches us (or is unset, e.g. a
+	//       legacy row from before SetWorkerNodeIDForContainer existed),
+	//       and the recorded container is gone (rollover, OOM, daemon
+	//       eviction). Probe IsAlive; if dead, CAS-clear via
+	//       ClearContainerID and return ErrStaleSandboxIDCleared so the
+	//       worker retries against a clean row.
+	//
+	// Probe-or-clear is gated on node match because the IsAlive signal is
+	// only authoritative on the daemon that created the container.
 	if reusedExisting {
-		probeCtx, cancel := context.WithTimeout(ctx, sandboxRaceProbeTimeout)
-		alive, aliveErr := o.provider.IsAlive(probeCtx, &Sandbox{ID: *session.ContainerID, Provider: "docker"})
-		cancel()
+		recordedNode := ""
+		if session.WorkerNodeID != nil {
+			recordedNode = *session.WorkerNodeID
+		}
 		switch {
-		case aliveErr != nil:
-			log.Warn().Err(aliveErr).
+		case recordedNode != "" && recordedNode != o.nodeID:
+			if deadTargetNode, ok := jobctx.DeadTargetNodeFromContext(ctx); ok && deadTargetNode == recordedNode {
+				cleared, clearErr := o.sessions.ClearContainerID(ctx, session.OrgID, session.ID, *session.ContainerID)
+				if clearErr != nil {
+					log.Warn().Err(clearErr).
+						Str("stale_container_id", *session.ContainerID).
+						Str("dead_target_node", deadTargetNode).
+						Msg("ClearContainerID failed during dead-node continue_session recovery; retrying for another recovery attempt")
+					if revertErr := o.sessions.UpdateStatus(ctx, session.OrgID, session.ID, string(models.SessionStatusPending)); revertErr != nil {
+						log.Error().Err(revertErr).Msg("failed to revert session to pending after dead-node recovery clear failure")
+					}
+					return ErrSandboxOnDifferentNode
+				}
+				if !cleared {
+					log.Info().
+						Str("stale_container_id", *session.ContainerID).
+						Str("dead_target_node", deadTargetNode).
+						Msg("ClearContainerID CAS lost during dead-node continue_session recovery; retrying against the current row")
+					if revertErr := o.sessions.UpdateStatus(ctx, session.OrgID, session.ID, string(models.SessionStatusPending)); revertErr != nil {
+						log.Error().Err(revertErr).Msg("failed to revert session to pending after dead-node recovery CAS miss")
+					}
+					return ErrStaleSandboxIDCleared
+				}
+				log.Warn().
+					Str("stale_container_id", *session.ContainerID).
+					Str("dead_target_node", deadTargetNode).
+					Msg("cleared container_id from dead-node continue_session recovery; signaling retry to hydrate on this worker")
+				if revertErr := o.sessions.UpdateStatus(ctx, session.OrgID, session.ID, string(models.SessionStatusPending)); revertErr != nil {
+					log.Error().Err(revertErr).Msg("failed to revert session to pending after dead-node recovery clear")
+				}
+				return ErrStaleSandboxIDCleared
+			}
+			log.Info().
 				Str("container_id", *session.ContainerID).
-				Msg("IsAlive probe on recorded container_id failed during continue_session reuse; assuming alive and proceeding")
-		case !alive:
-			cleared, clearErr := o.sessions.ClearContainerID(ctx, session.OrgID, session.ID, *session.ContainerID)
-			if clearErr != nil {
-				log.Warn().Err(clearErr).
-					Str("stale_container_id", *session.ContainerID).
-					Msg("ClearContainerID failed during continue_session reuse liveness check; falling through to reuse path which will surface the underlying docker error")
-				break
-			}
-			if !cleared {
-				log.Info().
-					Str("stale_container_id", *session.ContainerID).
-					Msg("ClearContainerID CAS lost during continue_session reuse liveness check (a new holder acquired between probe and clear); proceeding with the now-active row")
-				break
-			}
-			log.Warn().
-				Str("stale_container_id", *session.ContainerID).
-				Msg("cleared stale orphan container_id during continue_session reuse liveness check; signaling retry to re-enter against the clean row")
+				Str("recorded_node", recordedNode).
+				Str("this_node", o.nodeID).
+				Msg("continue_session claimed on the wrong worker; recorded container_id belongs to a sibling node — releasing for the correct worker to pick up")
 			if revertErr := o.sessions.UpdateStatus(ctx, session.OrgID, session.ID, string(models.SessionStatusPending)); revertErr != nil {
-				log.Error().Err(revertErr).Msg("failed to revert session to pending after stale container_id cleared")
+				log.Error().Err(revertErr).Msg("failed to revert session to pending after wrong-node detection")
 			}
-			return ErrStaleSandboxIDCleared
+			return ErrSandboxOnDifferentNode
+		default:
+			probeCtx, cancel := context.WithTimeout(ctx, sandboxRaceProbeTimeout)
+			alive, aliveErr := o.provider.IsAlive(probeCtx, &Sandbox{ID: *session.ContainerID, Provider: "docker"})
+			cancel()
+			switch {
+			case aliveErr != nil:
+				log.Warn().Err(aliveErr).
+					Str("container_id", *session.ContainerID).
+					Msg("IsAlive probe on recorded container_id failed during continue_session reuse; assuming alive and proceeding")
+			case !alive:
+				cleared, clearErr := o.sessions.ClearContainerID(ctx, session.OrgID, session.ID, *session.ContainerID)
+				if clearErr != nil {
+					log.Warn().Err(clearErr).
+						Str("stale_container_id", *session.ContainerID).
+						Msg("ClearContainerID failed during continue_session reuse liveness check; falling through to reuse path which will surface the underlying docker error")
+					break
+				}
+				if !cleared {
+					log.Info().
+						Str("stale_container_id", *session.ContainerID).
+						Msg("ClearContainerID CAS lost during continue_session reuse liveness check (a new holder acquired between probe and clear); proceeding with the now-active row")
+					break
+				}
+				log.Warn().
+					Str("stale_container_id", *session.ContainerID).
+					Msg("cleared stale orphan container_id during continue_session reuse liveness check; signaling retry to re-enter against the clean row")
+				if revertErr := o.sessions.UpdateStatus(ctx, session.OrgID, session.ID, string(models.SessionStatusPending)); revertErr != nil {
+					log.Error().Err(revertErr).Msg("failed to revert session to pending after stale container_id cleared")
+				}
+				return ErrStaleSandboxIDCleared
+			}
 		}
 	}
 	integrationSkills := o.BuildIntegrationSkills(ctx, session.OrgID)
@@ -3093,7 +3170,7 @@ func (o *Orchestrator) drainQueuedMessages(ctx context.Context, session *models.
 		payload["thread_id"] = threadID.String()
 	}
 	dedupeKey := continueSessionDrainDedupeKey(session.ID, processed.ID)
-	if _, err := o.jobs.Enqueue(ctx, session.OrgID, "agent", "continue_session", payload, 5, &dedupeKey); err != nil {
+	if _, err := o.jobs.EnqueueWithTarget(ctx, session.OrgID, "agent", "continue_session", payload, 5, &dedupeKey, models.SessionWorkerTarget(session)); err != nil {
 		log.Warn().Err(err).Msg("failed to enqueue continue_session for queued messages")
 	}
 }

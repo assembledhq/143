@@ -176,6 +176,27 @@ func containsUUID(ids []uuid.UUID, id uuid.UUID) bool {
 	return false
 }
 
+func envExpiredCodexSubscriptionCredential(orgID uuid.UUID) *envCodingCredentialProvider {
+	return &envCodingCredentialProvider{
+		resolvable: map[models.ProviderName][]models.DecryptedCodingCredential{
+			models.ProviderOpenAISubscription: {
+				{
+					ID:       uuid.New(),
+					OrgID:    orgID,
+					Provider: models.ProviderOpenAISubscription,
+					Status:   models.CodingCredentialStatusActive,
+					Config: models.OpenAISubscriptionConfig{
+						AccessToken:  "expired-access",
+						RefreshToken: "refresh-token",
+						IDToken:      "id-token",
+						ExpiresAt:    time.Now().Add(-time.Minute),
+					},
+				},
+			},
+		},
+	}
+}
+
 // MarkRateLimited / MarkAuthRejected satisfy CodingCredentialShedder so the
 // env tests can assert that ShedRateLimited / ShedAuthRejected forward the
 // recorded credential id.
@@ -206,6 +227,7 @@ type envCodexAuthProvider struct {
 	err           error
 	refreshToken  *models.OpenAIChatGPTConfig
 	refreshErr    error
+	authInvalid   bool
 	refreshIDs    []uuid.UUID
 	refreshScopes []models.Scope
 }
@@ -215,6 +237,10 @@ func (m envCodexAuthProvider) GetValidToken(_ context.Context, _ uuid.UUID) (*mo
 		return nil, m.err
 	}
 	return m.token, nil
+}
+
+func (m envCodexAuthProvider) IsAuthInvalid(_ error) bool {
+	return m.authInvalid
 }
 
 func (m *envCodexAuthProvider) RefreshTokenByID(_ context.Context, scope models.Scope, credID uuid.UUID) (*models.OpenAIChatGPTConfig, error) {
@@ -1505,13 +1531,34 @@ func TestAgentEnvInjectCodexAuth_ErrorClassification(t *testing.T) {
 		name          string
 		codexAuth     CodexAuthProvider
 		provider      *envSandboxProvider
+		codingCreds   *envCodingCredentialProvider
 		wantAuthError bool
 	}{
 		{
 			name:          "GetValidToken failure is auth-shaped",
-			codexAuth:     envCodexAuthProvider{err: errors.New("refresh token revoked")},
+			codexAuth:     envCodexAuthProvider{err: errors.New("refresh token revoked"), authInvalid: true},
 			provider:      &envSandboxProvider{},
 			wantAuthError: true,
+		},
+		{
+			name:          "GetValidToken infrastructure failure is NOT auth-shaped",
+			codexAuth:     envCodexAuthProvider{err: errors.New("db connection refused")},
+			provider:      &envSandboxProvider{},
+			wantAuthError: false,
+		},
+		{
+			name:          "expired unified subscription refresh auth failure is auth-shaped",
+			codexAuth:     &envCodexAuthProvider{refreshErr: errors.New("refresh token revoked"), authInvalid: true},
+			provider:      &envSandboxProvider{},
+			codingCreds:   envExpiredCodexSubscriptionCredential(orgID),
+			wantAuthError: true,
+		},
+		{
+			name:          "expired unified subscription refresh infrastructure failure is NOT auth-shaped",
+			codexAuth:     &envCodexAuthProvider{refreshErr: errors.New("oauth server 500")},
+			provider:      &envSandboxProvider{},
+			codingCreds:   envExpiredCodexSubscriptionCredential(orgID),
+			wantAuthError: false,
 		},
 		{
 			name:          "Docker exec failure is NOT auth-shaped",
@@ -1540,11 +1587,15 @@ func TestAgentEnvInjectCodexAuth_ErrorClassification(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			env := NewAgentEnv(AgentEnvDeps{
+			deps := AgentEnvDeps{
 				CodexAuth: tt.codexAuth,
 				Provider:  tt.provider,
 				Logger:    zerolog.Nop(),
-			})
+			}
+			if tt.codingCreds != nil {
+				deps.CodingCredentials = tt.codingCreds
+			}
+			env := NewAgentEnv(deps)
 
 			_, err := env.InjectCodexAuth(ctx, orgID, sandbox)
 			require.Error(t, err)
