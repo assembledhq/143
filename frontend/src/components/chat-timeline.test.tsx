@@ -215,6 +215,26 @@ describe("ChatTimeline", () => {
     expect(screen.getByAltText("Attached image")).toBeInTheDocument();
   });
 
+  it("renders a visible Linear issue tag for picker-added references in the transcript", () => {
+    const entries: TimelineEntry[] = [
+      {
+        kind: "message",
+        data: makeMessage({
+          id: 17,
+          role: "user",
+          content: "Please take this on.",
+          references: [{ kind: "app", id: "ACS-44", display: "linear issue" }],
+        }),
+      },
+    ];
+
+    render(<ChatTimeline entries={entries} isRunning={false} />);
+
+    expect(screen.getByText("Please take this on.")).toBeInTheDocument();
+    expect(screen.getByText("Linear")).toBeInTheDocument();
+    expect(screen.getByText("ACS-44")).toBeInTheDocument();
+  });
+
   it("renders non-image attachments as file links", () => {
     const entries: TimelineEntry[] = [
       {
