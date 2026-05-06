@@ -474,7 +474,7 @@ func main() {
 			ctx,
 			pool,
 			logger,
-			hostname,
+			cfg.NodeID,
 			workerCount,
 			stores,
 			services,
@@ -674,7 +674,7 @@ func startProcessWorkers(
 	ctx context.Context,
 	pool db.DBTX,
 	logger zerolog.Logger,
-	hostname string,
+	nodeID string,
 	workerCount int,
 	stores *worker.Stores,
 	services *worker.Services,
@@ -687,7 +687,7 @@ func startProcessWorkers(
 ) []*worker.Worker {
 	workers := make([]*worker.Worker, 0, workerCount)
 	for i := 0; i < workerCount; i++ {
-		w := worker.New(pool, logger, hostname)
+		w := worker.New(pool, logger, nodeID)
 		worker.RegisterHandlers(w, stores, services, retentionCfg, logger)
 		workers = append(workers, w)
 	}
