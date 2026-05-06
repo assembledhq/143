@@ -391,9 +391,34 @@ PULL_APP
       set -euo pipefail
       su - deploy -c 'docker pull ghcr.io/assembledhq/143-server:latest'
       su - deploy -c 'docker pull ghcr.io/assembledhq/143-sandbox:latest'
-      # Ensure the shared sandbox egress network exists (idempotent).
+      # Ensure the shared sandbox bridge exists with a pinned subnet.
+      #
+      # The subnet is hard-coded to 172.30.0.0/24 so sandbox-dns can be
+      # given the stable static IP 172.30.0.2 in docker-compose.worker.yml,
+      # which /etc/143/sandbox-resolv.conf below points at. Without a pinned
+      # subnet Docker auto-assigns from its default pool and the static IP
+      # mapping breaks.
+      #
       # enable_icc=false blocks one sandbox from TCP-connecting to another.
-      su - deploy -c 'docker network inspect 143-sandbox >/dev/null 2>&1 || docker network create --driver bridge --opt com.docker.network.bridge.enable_icc=false --label managed-by=143 143-sandbox'
+      # Intra-bridge traffic from a sandbox to preview-infra and to
+      # sandbox-dns is allowed by an explicit RETURN rule installed in
+      # DOCKER-USER by sandbox-firewall.sh.
+      # docker inspect returns "" on a missing network (with exit 1 swallowed
+      # by `|| true`) and the subnet string on an existing one. Distinguishing
+      # the two via a single call keeps us from spawning two `su - deploy`
+      # login shells per provision.
+      EXISTING_SANDBOX_SUBNET=$(su - deploy -c 'docker network inspect 143-sandbox -f "{{range .IPAM.Config}}{{.Subnet}}{{end}}" 2>/dev/null' || true)
+      if [ -z "$EXISTING_SANDBOX_SUBNET" ]; then
+        su - deploy -c 'docker network create --driver bridge --subnet 172.30.0.0/24 --opt com.docker.network.bridge.enable_icc=false --label managed-by=143 143-sandbox'
+      elif [ "$EXISTING_SANDBOX_SUBNET" != "172.30.0.0/24" ]; then
+        echo "ERROR: 143-sandbox network has subnet '$EXISTING_SANDBOX_SUBNET'; expected 172.30.0.0/24." >&2
+        echo "  This worker was provisioned before the pinned-subnet change. To upgrade:" >&2
+        echo "    1. docker compose -f /opt/143/docker-compose.worker.yml down" >&2
+        echo "    2. docker network rm 143-sandbox" >&2
+        echo "    3. Re-run provision-worker for this host." >&2
+        echo "  Step 1 will drain in-flight coding turns; plan for a maintenance window." >&2
+        exit 1
+      fi
       # Install iptables-persistent so the egress block survives reboots.
       apt-get install -y --no-install-recommends iptables-persistent >/dev/null 2>&1 || true
       # Apply sandbox egress firewall. Script is idempotent and reads the
@@ -405,13 +430,19 @@ PULL_APP
       # /etc/resolv.conf. Required because user-defined Docker networks inject
       # 127.0.0.11 (Docker's embedded DNS) into resolv.conf, and gVisor's
       # netstack can't reach it. HostConfig.DNS doesn't help — it only changes
-      # the upstream the embedded resolver forwards to. Bind-mounting our own
-      # resolv.conf bypasses 127.0.0.11 entirely. Future: point this at a
-      # host-local DNS forwarder (dnsmasq on 172.19.0.1) for filtering/logging.
+      # the upstream the embedded resolver forwards to.
+      #
+      # Points at the sandbox-dns container's static IP (172.30.0.2 on the
+      # 143-sandbox bridge). sandbox-dns is a non-gVisor container that CAN
+      # reach 127.0.0.11 normally and forwards every query there, so preview-
+      # infrastructure container names (preview-db-<handle>, etc.) resolve
+      # via Docker's embedded resolver while public lookups continue to work
+      # through the daemon's upstream forwarders. Bringing up sandbox-dns is
+      # gated by docker-compose.worker.yml depends_on, so by the time the
+      # worker is taking traffic this address is answering.
       mkdir -p /etc/143
       cat > /etc/143/sandbox-resolv.conf <<RESOLV
-nameserver 1.1.1.1
-nameserver 8.8.8.8
+nameserver 172.30.0.2
 options edns0 trust-ad ndots:0
 RESOLV
       chmod 644 /etc/143/sandbox-resolv.conf
