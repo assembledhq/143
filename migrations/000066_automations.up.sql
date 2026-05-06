@@ -65,8 +65,7 @@ ALTER TABLE automations
 -- persist a meaningless tz on an interval row.
 ALTER TABLE automations
     ADD CONSTRAINT chk_automations_timezone_interval CHECK (schedule_type = 'cron' OR timezone = 'UTC');
--- Cap lengths to avoid a 10MB name/goal being accepted silently. Values are
--- generous — the UI surface caps well below these.
+-- Cap lengths to avoid a 10MB name/goal being accepted silently.
 ALTER TABLE automations
     ADD CONSTRAINT chk_automations_name_length CHECK (char_length(name) BETWEEN 1 AND 200);
 ALTER TABLE automations

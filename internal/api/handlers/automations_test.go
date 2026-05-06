@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -278,6 +279,8 @@ func TestAutomationHandler_Get_NotFound(t *testing.T) {
 func TestAutomationHandler_Create_ValidationErrors(t *testing.T) {
 	t.Parallel()
 
+	longGoal := strings.Repeat("g", automationGoalMaxLength+1)
+
 	tests := []struct {
 		name string
 		body any
@@ -294,6 +297,7 @@ func TestAutomationHandler_Create_ValidationErrors(t *testing.T) {
 		{name: "invalid exec mode", body: map[string]any{"name": "n", "goal": "g", "execution_mode": "mayhem"}, code: http.StatusBadRequest},
 		{name: "invalid agent type", body: map[string]any{"name": "n", "goal": "g", "agent_type": "bogus"}, code: http.StatusBadRequest},
 		{name: "invalid model", body: map[string]any{"name": "n", "goal": "g", "model": "not-a-real-model"}, code: http.StatusBadRequest},
+		{name: "goal too long", body: map[string]any{"name": "n", "goal": longGoal}, code: http.StatusBadRequest},
 		{name: "max_concurrent too high", body: map[string]any{"name": "n", "goal": "g", "max_concurrent": 9999}, code: http.StatusBadRequest},
 		{name: "priority out of range", body: map[string]any{"name": "n", "goal": "g", "priority": 999}, code: http.StatusBadRequest},
 		// Cross-typed schedule fields are rejected up front so client bugs
@@ -589,6 +593,8 @@ func TestAutomationHandler_Create_RepoIDFailsClosedWhenNoStore(t *testing.T) {
 func TestAutomationHandler_Update_ValidationErrors(t *testing.T) {
 	t.Parallel()
 
+	longGoal := strings.Repeat("g", automationGoalMaxLength+1)
+
 	tests := []struct {
 		name string
 		body any
@@ -596,6 +602,7 @@ func TestAutomationHandler_Update_ValidationErrors(t *testing.T) {
 	}{
 		{name: "blank name", body: map[string]any{"name": "   "}, code: http.StatusBadRequest},
 		{name: "blank goal", body: map[string]any{"goal": "   "}, code: http.StatusBadRequest},
+		{name: "goal too long", body: map[string]any{"goal": longGoal}, code: http.StatusBadRequest},
 		{name: "invalid exec mode", body: map[string]any{"execution_mode": "x"}, code: http.StatusBadRequest},
 		{name: "invalid priority", body: map[string]any{"priority": 999}, code: http.StatusBadRequest},
 		{name: "cron invalid expression", body: map[string]any{"schedule_type": "cron", "cron_expression": "nope"}, code: http.StatusBadRequest},
