@@ -23,11 +23,12 @@ import (
 // --- Mock stores implementing the thread service interfaces ---
 
 type mockThreadStore struct {
-	createFn        func(ctx context.Context, t *models.SessionThread, max int) error
-	getByIDFn       func(ctx context.Context, orgID, threadID uuid.UUID) (models.SessionThread, error)
-	listBySessionFn func(ctx context.Context, orgID, sessionID uuid.UUID) ([]models.SessionThread, error)
-	claimIdleFn     func(ctx context.Context, orgID, sessionID, threadID uuid.UUID) (models.SessionThread, error)
-	updateStatusFn  func(ctx context.Context, orgID, threadID uuid.UUID, status models.ThreadStatus) error
+	createFn         func(ctx context.Context, t *models.SessionThread, max int) error
+	getByIDFn        func(ctx context.Context, orgID, threadID uuid.UUID) (models.SessionThread, error)
+	listBySessionFn  func(ctx context.Context, orgID, sessionID uuid.UUID) ([]models.SessionThread, error)
+	claimIdleFn      func(ctx context.Context, orgID, sessionID, threadID uuid.UUID) (models.SessionThread, error)
+	claimForResumeFn func(ctx context.Context, orgID, sessionID, threadID uuid.UUID) (models.SessionThread, error)
+	updateStatusFn   func(ctx context.Context, orgID, threadID uuid.UUID, status models.ThreadStatus) error
 }
 
 func (m *mockThreadStore) Create(ctx context.Context, t *models.SessionThread, max int) error {
@@ -56,6 +57,13 @@ func (m *mockThreadStore) ClaimIdleForSession(ctx context.Context, orgID, sessio
 		return m.claimIdleFn(ctx, orgID, sessionID, threadID)
 	}
 	return models.SessionThread{}, fmt.Errorf("not idle")
+}
+
+func (m *mockThreadStore) ClaimForResumeInSession(ctx context.Context, orgID, sessionID, threadID uuid.UUID, _ int) (models.SessionThread, error) {
+	if m.claimForResumeFn != nil {
+		return m.claimForResumeFn(ctx, orgID, sessionID, threadID)
+	}
+	return models.SessionThread{}, fmt.Errorf("not resumable")
 }
 
 func (m *mockThreadStore) UpdateStatus(ctx context.Context, orgID, threadID uuid.UUID, status models.ThreadStatus) error {
