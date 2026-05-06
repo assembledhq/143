@@ -541,13 +541,20 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
     fi
   fi
 
-  docker compose -f "$COMPOSE_FILE" pull
+  # --ignore-buildable: skip services whose image is built locally (sandbox-dns
+  # has both build: and image: 143-sandbox-dns:local in docker-compose.worker.yml,
+  # which pull would otherwise treat as a registry reference and fail on).
+  docker compose -f "$COMPOSE_FILE" pull --ignore-buildable
 
   # The sandbox image is referenced via SANDBOX_IMAGE env var, not as a compose
   # service, so `docker compose pull` doesn't fetch it. Pull it explicitly —
   # ContainerCreate doesn't auto-pull, so the worker would fail on first launch.
   if [ "$ROLE" = "worker" ]; then
     docker pull "ghcr.io/assembledhq/143-sandbox:$IMAGE_TAG"
+    # Build sandbox-dns explicitly. Compose's auto-build on `up` only fires when
+    # the local image is absent, so a Dockerfile.dnsmasq change wouldn't take
+    # effect on a host that already has 143-sandbox-dns:local from a prior deploy.
+    docker compose -f "$COMPOSE_FILE" build sandbox-dns
     # Ensure the shared sandbox egress network exists (idempotent). Older hosts
     # provisioned before this was added won't have it, and session creation
     # will fail until it does. enable_icc=false blocks one sandbox from
