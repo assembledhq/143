@@ -79,6 +79,7 @@ type ThreadStore interface {
 	GetByID(ctx context.Context, orgID, threadID uuid.UUID) (models.SessionThread, error)
 	ListBySession(ctx context.Context, orgID, sessionID uuid.UUID) ([]models.SessionThread, error)
 	ClaimIdleForSession(ctx context.Context, orgID, sessionID, threadID uuid.UUID, maxRunning int) (models.SessionThread, error)
+	ClaimForResumeInSession(ctx context.Context, orgID, sessionID, threadID uuid.UUID, maxRunning int) (models.SessionThread, error)
 	UpdateEditable(ctx context.Context, thread *models.SessionThread) error
 	UpdateStatus(ctx context.Context, orgID, threadID uuid.UUID, status models.ThreadStatus) error
 	IncrementPendingMessages(ctx context.Context, orgID, threadID uuid.UUID) error
@@ -397,23 +398,43 @@ func (s *Service) GetThread(ctx context.Context, orgID, sessionID, threadID uuid
 	return thread, nil
 }
 
-// SendMessage claims an idle thread, creates a message, and enqueues a
-// continue_session job. When ResolveReviewCommentIDs is non-empty, the
-// message create and the comment resolution share a single transaction so
-// the user-visible invariant — "submitted comments disappear once the
-// follow-up message is sent" — holds even if the request fails partway
-// through.
+// threadClaimOutcome enumerates the four possible results of
+// claimThreadForSend so the caller's branching is explicit. The "claimed"
+// outcomes are split from the "queue" outcomes because the post-claim flow
+// (session claim, message create, enqueue) only applies when the thread row
+// has actually moved to running.
+type threadClaimOutcome int
+
+const (
+	// threadClaimClaimed: thread row transitioned from idle (or a resumable
+	// terminal status) to running and is ready to receive a new turn.
+	threadClaimClaimed threadClaimOutcome = iota
+	// threadClaimQueueMidTurn: thread is mid-turn (pending/running); the
+	// orchestrator drains the message queue when the in-flight turn ends.
+	threadClaimQueueMidTurn
+	// threadClaimQueueLimitReached: thread is otherwise claimable but the
+	// session has already hit MaxRunningThreadsPerSession. Caller queues the
+	// message against the still-idle thread; the next sibling to finish will
+	// pick the work up via the orchestrator's drain.
+	threadClaimQueueLimitReached
+)
+
+// SendMessage claims an idle thread (or resumes a paused/terminal one),
+// creates a message, and enqueues a continue_session job. When
+// ResolveReviewCommentIDs is non-empty, the message create and the comment
+// resolution share a single transaction so the user-visible invariant —
+// "submitted comments disappear once the follow-up message is sent" — holds
+// even if the request fails partway through.
 //
-// ClaimIdleForSession serializes sibling-thread admission in the database
-// while allowing up to MaxRunningThreadsPerSession concurrent tabs. The
-// session-level claim mirrors the legacy session-message handler in
-// internal/api/handlers/sessions.go: try ClaimIdle first, fall back to
-// ClaimForResume for terminal/paused statuses (completed, pr_created,
-// failed, cancelled, awaiting_input, needs_human_guidance), and only return
-// ErrSessionNotResumable when neither succeeds. When another tab has already
-// moved the session into running state, ClaimIdle's failure is treated as a
-// no-op since the orchestrator's idempotent UpdateStatus("running") handles
-// the rest.
+// claimThreadForSend serializes sibling-thread admission in the database
+// while allowing up to MaxRunningThreadsPerSession concurrent tabs. It
+// mirrors the session-level claimSessionForSend ordering: try the idle
+// claim first, fall back to the resume claim for terminal/paused statuses
+// (completed, failed, cancelled, awaiting_input), and only fail with
+// ErrThreadNotIdle when neither succeeds. When another tab has already moved
+// the session into running state, ClaimIdle's failure is treated as a no-op
+// at the session layer since the orchestrator's idempotent
+// UpdateStatus("running") handles the rest.
 //
 // On any downstream failure (message create, comment resolve, question
 // answer, enqueue) we best-effort revert the thread to idle and the session
@@ -428,46 +449,14 @@ func (s *Service) SendMessage(ctx context.Context, input SendMessageInput) (*Sen
 		return nil, ErrReviewCommentsNotConfigured
 	}
 
-	thread, err := s.threadStore.ClaimIdleForSession(ctx, input.OrgID, input.SessionID, input.ThreadID, models.MaxRunningThreadsPerSession)
-	queueOnly := false
+	thread, preClaimThreadStatus, outcome, err := s.claimThreadForSend(ctx, input, resolvingComments)
 	if err != nil {
-		if errors.Is(err, db.ErrThreadRunningLimitReached) {
-			return s.queueMessageOnIdleThread(ctx, input)
-		}
-		// Check if thread exists at all to provide a better error.
-		existing, lookupErr := s.threadStore.GetByID(ctx, input.OrgID, input.ThreadID)
-		if lookupErr != nil {
-			return nil, fmt.Errorf("%w: %w", ErrThreadNotFound, lookupErr)
-		}
-		if existing.SessionID != input.SessionID {
-			return nil, ErrThreadNotFound
-		}
-		// The thread itself is busy with its own turn. Queue the message
-		// against the busy thread; the orchestrator drains pending messages
-		// when the in-flight turn completes (see ContinueSession). Resolving
-		// review comments while the thread is mid-turn is not supported —
-		// the resolution pass is keyed on the in-flight turn's pass number,
-		// and we cannot atomically commit it alongside a queued message
-		// that will not be consumed until a later turn.
-		if resolvingComments {
-			return nil, ErrThreadNotIdle
-		}
-		if !threadStatusCanQueue(existing.Status) {
-			return nil, ErrThreadNotIdle
-		}
-		thread = existing
-		queueOnly = true
+		return nil, err
 	}
-
-	// Verify thread belongs to the session.
-	if thread.SessionID != input.SessionID {
-		if !queueOnly {
-			if revertErr := s.threadStore.UpdateStatus(ctx, input.OrgID, input.ThreadID, models.ThreadStatusIdle); revertErr != nil {
-				s.logger.Error().Err(revertErr).Str("thread_id", input.ThreadID.String()).Msg("failed to revert thread to idle after session mismatch")
-			}
-		}
-		return nil, ErrThreadNotFound
+	if outcome == threadClaimQueueLimitReached {
+		return s.queueMessageWaitingForSlot(ctx, input)
 	}
+	queueOnly := outcome == threadClaimQueueMidTurn
 
 	// Try claiming an idle session first, then fall back to resuming a
 	// terminal/paused session — same order as sessions.SendMessage. revertStatus
@@ -482,19 +471,15 @@ func (s *Service) SendMessage(ctx context.Context, input SendMessageInput) (*Sen
 		var claimErr error
 		claimedSession, revertStatus, claimErr = s.claimSessionForSend(ctx, input.OrgID, input.SessionID)
 		if claimErr != nil {
-			if revertErr := s.threadStore.UpdateStatus(ctx, input.OrgID, input.ThreadID, models.ThreadStatusIdle); revertErr != nil {
-				s.logger.Error().Err(revertErr).Str("thread_id", input.ThreadID.String()).Msg("failed to revert thread to idle after parent session claim failure")
-			}
+			s.releaseThread(ctx, input.OrgID, input.ThreadID, "parent session claim failure")
 			return nil, claimErr
 		}
 		if revertStatus == "" {
 			if resolvingComments {
-				if revertErr := s.threadStore.UpdateStatus(ctx, input.OrgID, input.ThreadID, models.ThreadStatusIdle); revertErr != nil {
-					s.logger.Error().Err(revertErr).Str("thread_id", input.ThreadID.String()).Msg("failed to release sibling-queued thread after unsupported comment resolution")
-				}
+				s.releaseThread(ctx, input.OrgID, input.ThreadID, "sibling-queued thread cannot resolve comments")
 				return nil, ErrThreadNotIdle
 			}
-			return s.queueClaimedThreadBehindSibling(ctx, input, thread)
+			return s.queueClaimedThreadBehindSibling(ctx, input, thread, preClaimThreadStatus)
 		}
 	}
 
@@ -611,13 +596,16 @@ func (s *Service) SendMessage(ctx context.Context, input SendMessageInput) (*Sen
 	}, nil
 }
 
-// queueMessageOnIdleThread queues a follow-up against an idle thread that
-// could not get a running slot because the session-wide running-thread cap is
-// already saturated. The message is appended to the thread's pending queue
-// and pending_message_count is bumped so the composer can show "queued (N)";
+// queueMessageWaitingForSlot queues a follow-up against a thread that could
+// not get a running slot because the session-wide running-thread cap is
+// already saturated. Accepts both idle threads and threads in a resumable
+// terminal/paused status — both behave identically from the queue's
+// perspective: the message is appended to the thread's pending queue and
+// pending_message_count is bumped so the composer can show "queued (N)";
 // no continue_session is enqueued because no slot is available — the next
-// sibling to finish will pick the work up via the orchestrator's drain.
-func (s *Service) queueMessageOnIdleThread(ctx context.Context, input SendMessageInput) (*SendMessageResult, error) {
+// sibling to finish will pick the work up via the orchestrator's drain,
+// which will idle-claim or resume-claim the thread as appropriate.
+func (s *Service) queueMessageWaitingForSlot(ctx context.Context, input SendMessageInput) (*SendMessageResult, error) {
 	thread, err := s.threadStore.GetByID(ctx, input.OrgID, input.ThreadID)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrThreadNotFound, err)
@@ -625,7 +613,7 @@ func (s *Service) queueMessageOnIdleThread(ctx context.Context, input SendMessag
 	if thread.SessionID != input.SessionID {
 		return nil, ErrThreadNotFound
 	}
-	if thread.Status != models.ThreadStatusIdle {
+	if thread.Status != models.ThreadStatusIdle && !threadStatusIsResumable(thread.Status) {
 		return nil, ErrThreadNotIdle
 	}
 
@@ -648,16 +636,17 @@ func (s *Service) queueMessageOnIdleThread(ctx context.Context, input SendMessag
 		msg.Attachments = input.Images
 	}
 
-	if err := s.messageStore.Create(ctx, msg); err != nil {
+	answeredQuestion, err := s.createQueuedMessage(ctx, msg, input, thread.Status)
+	if err != nil {
 		return nil, fmt.Errorf("create queued message: %w", err)
 	}
 	if err := s.threadStore.IncrementPendingMessages(ctx, input.OrgID, input.ThreadID); err != nil {
 		return nil, fmt.Errorf("increment queued message count: %w", err)
 	}
-	return &SendMessageResult{Message: msg}, nil
+	return &SendMessageResult{Message: msg, AnsweredQuestion: answeredQuestion}, nil
 }
 
-func (s *Service) queueClaimedThreadBehindSibling(ctx context.Context, input SendMessageInput, thread models.SessionThread) (*SendMessageResult, error) {
+func (s *Service) queueClaimedThreadBehindSibling(ctx context.Context, input SendMessageInput, thread models.SessionThread, preClaimStatus models.ThreadStatus) (*SendMessageResult, error) {
 	if err := s.threadStore.UpdateStatus(ctx, input.OrgID, input.ThreadID, models.ThreadStatusIdle); err != nil {
 		return nil, fmt.Errorf("release thread for queued sibling message: %w", err)
 	}
@@ -681,13 +670,22 @@ func (s *Service) queueClaimedThreadBehindSibling(ctx context.Context, input Sen
 		msg.Attachments = input.Images
 	}
 
-	if err := s.messageStore.Create(ctx, msg); err != nil {
+	answeredQuestion, err := s.createQueuedMessage(ctx, msg, input, preClaimStatus)
+	if err != nil {
 		return nil, fmt.Errorf("create queued sibling message: %w", err)
 	}
 	if err := s.threadStore.IncrementPendingMessages(ctx, input.OrgID, input.ThreadID); err != nil {
 		return nil, fmt.Errorf("increment queued sibling message count: %w", err)
 	}
-	return &SendMessageResult{Message: msg}, nil
+	return &SendMessageResult{Message: msg, AnsweredQuestion: answeredQuestion}, nil
+}
+
+func (s *Service) createQueuedMessage(ctx context.Context, msg *models.SessionMessage, input SendMessageInput, threadStatus models.ThreadStatus) (*models.SessionQuestion, error) {
+	if threadStatus != models.ThreadStatusAwaitingInput || input.UserID == nil || s.questionStore == nil {
+		return nil, s.messageStore.Create(ctx, msg)
+	}
+	_, answeredQuestion, err := s.createMessageInTx(ctx, msg, input, models.Session{}, true)
+	return answeredQuestion, err
 }
 
 func threadStatusCanQueue(status models.ThreadStatus) bool {
@@ -697,6 +695,105 @@ func threadStatusCanQueue(status models.ThreadStatus) bool {
 	default:
 		return false
 	}
+}
+
+// claimThreadForSend is the thread-layer counterpart to claimSessionForSend:
+// try ClaimIdleForSession first, fall back to ClaimForResumeInSession when
+// the thread is in a resumable terminal/paused status, and otherwise route
+// the message to the appropriate queue path.
+//
+// The four return paths (claimed-from-idle, claimed-from-resume,
+// queue-mid-turn, queue-limit-reached, error) are collapsed into a
+// return tuple also carries the pre-claim thread status so queued answer
+// paths can distinguish a thread resumed from awaiting_input from a generic
+// running thread. resolvingComments is passed through because the
+// queue-mid-turn path cannot honor comment resolution — the resolution pass
+// is keyed on the in-flight turn's pass number, and we cannot atomically
+// commit it alongside a queued message that will not be consumed until a
+// later turn. Resume claims do not have this problem because the resumed
+// turn IS the in-flight one.
+func (s *Service) claimThreadForSend(ctx context.Context, input SendMessageInput, resolvingComments bool) (models.SessionThread, models.ThreadStatus, threadClaimOutcome, error) {
+	// 1. Try the idle claim first — happy path for a thread that has been
+	//    sitting idle waiting for the next user message.
+	thread, err := s.threadStore.ClaimIdleForSession(ctx, input.OrgID, input.SessionID, input.ThreadID, models.MaxRunningThreadsPerSession)
+	if err == nil {
+		if thread.SessionID != input.SessionID {
+			s.releaseThread(ctx, input.OrgID, input.ThreadID, "session mismatch after idle claim")
+			return models.SessionThread{}, "", 0, ErrThreadNotFound
+		}
+		return thread, models.ThreadStatusIdle, threadClaimClaimed, nil
+	}
+	if errors.Is(err, db.ErrThreadRunningLimitReached) {
+		return models.SessionThread{}, "", threadClaimQueueLimitReached, nil
+	}
+
+	// 2. Idle claim failed for status reasons. Inspect the thread to decide
+	//    between queueing mid-turn, resuming a paused/terminal status, or
+	//    rejecting the send outright. A non-ErrNoRows error here is a real
+	//    DB failure and is surfaced as-is.
+	existing, lookupErr := s.threadStore.GetByID(ctx, input.OrgID, input.ThreadID)
+	if lookupErr != nil {
+		return models.SessionThread{}, "", 0, fmt.Errorf("%w: %w", ErrThreadNotFound, lookupErr)
+	}
+	if existing.SessionID != input.SessionID {
+		return models.SessionThread{}, "", 0, ErrThreadNotFound
+	}
+
+	// 3. Thread is mid-turn (pending/running): queue the message against the
+	//    in-flight turn. Comment resolution is not supported on this path.
+	if threadStatusCanQueue(existing.Status) {
+		if resolvingComments {
+			return models.SessionThread{}, "", 0, ErrThreadNotIdle
+		}
+		return existing, existing.Status, threadClaimQueueMidTurn, nil
+	}
+
+	// 4. Thread is in a resumable terminal/paused status: try to bring it
+	//    back to running, mirroring SessionStore.ClaimForResume.
+	if threadStatusIsResumable(existing.Status) {
+		resumed, resumeErr := s.threadStore.ClaimForResumeInSession(ctx, input.OrgID, input.SessionID, input.ThreadID, models.MaxRunningThreadsPerSession)
+		if resumeErr == nil {
+			return resumed, existing.Status, threadClaimClaimed, nil
+		}
+		if errors.Is(resumeErr, db.ErrThreadRunningLimitReached) {
+			return models.SessionThread{}, "", threadClaimQueueLimitReached, nil
+		}
+		// pgx.ErrNoRows here means the status changed under us between the
+		// inspect and the resume claim (e.g. a sibling claim raced us). Map
+		// to ErrThreadNotIdle so the user sees a consistent affordance and
+		// can retry.
+		if errors.Is(resumeErr, pgx.ErrNoRows) {
+			return models.SessionThread{}, "", 0, ErrThreadNotIdle
+		}
+		return models.SessionThread{}, "", 0, fmt.Errorf("claim thread for resume: %w", resumeErr)
+	}
+
+	// 5. Anything else (unexpected status) is treated as not-idle.
+	return models.SessionThread{}, "", 0, ErrThreadNotIdle
+}
+
+// releaseThread is a small wrapper around UpdateStatus(idle) so failure
+// branches that need to undo a claim can do so without duplicating the
+// error-logging boilerplate. Failures here are always best-effort — the
+// caller already has a primary error to surface.
+func (s *Service) releaseThread(ctx context.Context, orgID, threadID uuid.UUID, reason string) {
+	if revertErr := s.threadStore.UpdateStatus(ctx, orgID, threadID, models.ThreadStatusIdle); revertErr != nil {
+		s.logger.Error().Err(revertErr).
+			Str("thread_id", threadID.String()).
+			Str("reason", reason).
+			Msg("failed to revert thread to idle")
+	}
+}
+
+// threadStatusIsResumable mirrors models.ResumableThreadStatuses without
+// allocating per-call: hot path of SendMessage on a non-idle thread.
+func threadStatusIsResumable(status models.ThreadStatus) bool {
+	for _, resumable := range models.ResumableThreadStatuses {
+		if status == resumable {
+			return true
+		}
+	}
+	return false
 }
 
 // claimSessionForSend mirrors the ClaimIdle → ClaimForResume → fail ordering

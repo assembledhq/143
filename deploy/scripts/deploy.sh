@@ -555,14 +555,31 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
     # the local image is absent, so a Dockerfile.dnsmasq change wouldn't take
     # effect on a host that already has 143-sandbox-dns:local from a prior deploy.
     docker compose -f "$COMPOSE_FILE" build sandbox-dns
-    # Ensure the shared sandbox egress network exists (idempotent). Older hosts
-    # provisioned before this was added won't have it, and session creation
-    # will fail until it does. enable_icc=false blocks one sandbox from
-    # TCP-connecting to another on the same bridge.
-    docker network inspect 143-sandbox >/dev/null 2>&1 || \
+    # Ensure the shared sandbox egress network exists with the pinned subnet
+    # 172.30.0.0/24 (idempotent). The subnet is pinned so sandbox-dns can claim
+    # the static IP 172.30.0.2 declared in docker-compose.worker.yml — without
+    # the pin, Docker auto-assigns from its default pool and `docker compose
+    # up sandbox-dns` fails with "no configured subnet contains IP address
+    # 172.30.0.2". enable_icc=false blocks one sandbox from TCP-connecting to
+    # another on the same bridge. Mirrors the logic in provision.sh; deploys
+    # must validate too because workers provisioned before the pin landed
+    # (PR #815) still have an auto-assigned subnet.
+    EXISTING_SANDBOX_SUBNET=$(docker network inspect 143-sandbox \
+      -f '{{range .IPAM.Config}}{{.Subnet}}{{end}}' 2>/dev/null || true)
+    if [ -z "$EXISTING_SANDBOX_SUBNET" ]; then
       docker network create --driver bridge \
+        --subnet 172.30.0.0/24 \
         --opt com.docker.network.bridge.enable_icc=false \
         --label managed-by=143 143-sandbox
+    elif [ "$EXISTING_SANDBOX_SUBNET" != "172.30.0.0/24" ]; then
+      echo "ERROR: 143-sandbox network has subnet '$EXISTING_SANDBOX_SUBNET'; expected 172.30.0.0/24." >&2
+      echo "  This worker was provisioned before the pinned-subnet change. To upgrade:" >&2
+      echo "    1. docker compose -f /opt/143/docker-compose.worker.yml down" >&2
+      echo "    2. docker network rm 143-sandbox" >&2
+      echo "    3. Re-run deploy (or provision-worker) for this host." >&2
+      echo "  Step 1 will drain in-flight coding turns; plan for a maintenance window." >&2
+      exit 1
+    fi
     # Install iptables-persistent on hosts that predate it (no-op otherwise).
     sudo apt-get install -y --no-install-recommends iptables-persistent >/dev/null 2>&1 || true
     # Re-apply sandbox egress firewall. Script is idempotent — safe to run

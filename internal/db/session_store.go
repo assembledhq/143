@@ -993,19 +993,22 @@ func (s *SessionStore) ClaimIdle(ctx context.Context, orgID, sessionID uuid.UUID
 // ClaimForResume atomically transitions a resumable paused session to running
 // so it can continue from a follow-up message. Used when a user sends a
 // message to a completed/failed/cancelled/pr_created session, or to a paused
-// session waiting on guidance/input.
+// session waiting on guidance/input. The set of resumable statuses lives in
+// models.ResumableSessionStatuses so the session and thread paths share a
+// single source of truth.
 // Sessions whose sandbox snapshot has been destroyed cannot be resumed.
 func (s *SessionStore) ClaimForResume(ctx context.Context, orgID, sessionID uuid.UUID) (models.Session, error) {
 	query := `
 		UPDATE sessions
 		SET status = 'running', completed_at = NULL, last_activity_at = now()
-		WHERE id = @id AND org_id = @org_id AND status IN ('completed', 'pr_created', 'failed', 'cancelled', 'awaiting_input', 'needs_human_guidance')
+		WHERE id = @id AND org_id = @org_id AND status = ANY(@statuses)
 		  AND sandbox_state != 'destroyed'
 		RETURNING ` + sessionSelectColumns
 
 	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
-		"id":     sessionID,
-		"org_id": orgID,
+		"id":       sessionID,
+		"org_id":   orgID,
+		"statuses": sessionStatusStrings(models.ResumableSessionStatuses),
 	})
 	if err != nil {
 		return models.Session{}, fmt.Errorf("claim terminal session for resume: %w", err)
@@ -1050,6 +1053,29 @@ func (s *SessionStore) UpdateRevisionContext(ctx context.Context, orgID, session
 		"revision_context": revisionContext,
 	})
 	return err
+}
+
+// sessionStatusStrings converts a slice of typed SessionStatus values into the
+// raw []string form pgx needs to bind a postgres text[] parameter. Used by
+// queries that match against models.ResumableSessionStatuses so the typed
+// constant remains the single source of truth.
+func sessionStatusStrings(statuses []models.SessionStatus) []string {
+	out := make([]string, len(statuses))
+	for i, s := range statuses {
+		out[i] = string(s)
+	}
+	return out
+}
+
+// threadStatusStrings is the thread-status counterpart to sessionStatusStrings.
+// Used by SessionThreadStore queries that match against
+// models.ResumableThreadStatuses.
+func threadStatusStrings(statuses []models.ThreadStatus) []string {
+	out := make([]string, len(statuses))
+	for i, s := range statuses {
+		out[i] = string(s)
+	}
+	return out
 }
 
 var (

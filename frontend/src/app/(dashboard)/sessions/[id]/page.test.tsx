@@ -140,6 +140,27 @@ describe('SessionDetailPage', () => {
     expect(screen.getAllByText(/Claude Code/).length).toBeGreaterThanOrEqual(1);
   });
 
+  it('renders the session Linear chip as an outbound link when only linear_identifier_hint is available', async () => {
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({
+          data: {
+            ...mockSessions[0],
+            linked_issues: [],
+            linear_identifier_hint: 'ENG-1234',
+          },
+        } satisfies SingleResponse<Session>);
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+
+    const link = await screen.findByRole('link', { name: 'ENG-1234' });
+    expect(link).toHaveAttribute('href', 'https://linear.app/issue/ENG-1234');
+    expect(link).toHaveAttribute('target', '_blank');
+    expect(link).toHaveAttribute('rel', 'noopener noreferrer');
+  });
+
   it('does not show a dedicated self-review button in session detail', async () => {
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
 

@@ -84,7 +84,7 @@ import {
 } from "@/lib/session-composer-mentions";
 import { queryKeys } from "@/lib/query-keys";
 import { api, ApiError } from "@/lib/api";
-import { AGENTS, AGENTS_BY_KEY, agentDisplayLabel } from "@/lib/agents";
+import { AGENTS, AGENTS_BY_KEY } from "@/lib/agents";
 import { getActiveOrgId } from "@/lib/active-org";
 import { maybeNotifySessionCompleted } from "@/lib/browser-notifications";
 import {
