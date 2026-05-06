@@ -105,7 +105,7 @@ func TestAutomationsGoalLengthMigrationRaisesConstraint(t *testing.T) {
 func TestAutomationsGoalLengthExpandMigrationRaisesConstraint(t *testing.T) {
 	t.Parallel()
 
-	body, err := os.ReadFile("../../migrations/000117_automation_goal_length_expand.down.sql")
+	body, err := os.ReadFile("../../migrations/000118_automation_goal_length_expand.down.sql")
 	require.NoError(t, err, "test should read the expanded automation goal length down migration")
 	downSQL := string(body)
 	require.Contains(t, downSQL, "DROP CONSTRAINT IF EXISTS chk_automations_goal_length",
@@ -113,7 +113,7 @@ func TestAutomationsGoalLengthExpandMigrationRaisesConstraint(t *testing.T) {
 	require.Contains(t, downSQL, "char_length(goal) BETWEEN 1 AND 8000",
 		"down migration should restore the previous 8000-character cap")
 
-	body, err = os.ReadFile("../../migrations/000117_automation_goal_length_expand.up.sql")
+	body, err = os.ReadFile("../../migrations/000118_automation_goal_length_expand.up.sql")
 	require.NoError(t, err, "test should read the expanded automation goal length up migration")
 	upSQL := string(body)
 	require.Contains(t, upSQL, "DROP CONSTRAINT IF EXISTS chk_automations_goal_length",
