@@ -548,13 +548,15 @@ export function SessionSidebar() {
                     </div>
 
                     <div className="min-w-0 flex-1">
-                      <div className="flex min-w-0 items-start gap-2 pr-10">
+                      <div className="flex items-start justify-between gap-2">
                         <p className={cn(
-                          "min-w-0 truncate text-xs font-medium leading-snug",
+                          "text-xs font-medium truncate leading-snug",
                           hasUnread || isWorkingSession ? "text-foreground" : "text-muted-foreground"
                         )}>
                           {title}
                         </p>
+                      </div>
+                      <div className="mt-0.5 flex min-w-0 items-center gap-2">
                         <div
                           data-testid={`session-row-meta-scroll-${session.id}`}
                           className="min-w-0 flex-1 overflow-x-auto overflow-y-hidden scrollbar-hide"

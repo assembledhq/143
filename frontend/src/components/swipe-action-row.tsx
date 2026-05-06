@@ -398,7 +398,7 @@ export function SwipeActionRow({
         aria-label={actionLabel}
         title={actionLabel}
         className={cn(
-          "absolute right-3 top-3 z-20 hidden border border-border/60 bg-background text-muted-foreground shadow-sm hover:text-foreground md:inline-flex",
+          "absolute right-2 top-2 z-20 hidden border border-border/60 bg-background text-muted-foreground shadow-sm hover:text-foreground md:inline-flex",
           desktopActionVisibility === "hover" &&
             "md:opacity-0 md:transition-opacity md:duration-150 md:group-hover:opacity-100 md:focus-visible:opacity-100",
         )}
