@@ -2779,6 +2779,49 @@ describe('SessionDetailPage', () => {
     });
   });
 
+  it('does not queue duplicate create PR requests from the keyboard while one is pending', async () => {
+    let createPRCalls = 0;
+
+    const sessionWithDiff: Session = {
+      ...mockSessions[0],
+      status: 'completed',
+      diff: '--- a/file.ts\n+++ b/file.ts\n@@ -1 +1 @@\n-old\n+new',
+      diff_stats: { added: 1, removed: 1, files_changed: 1 },
+      snapshot_key: 'snap-abc',
+      pr_creation_state: 'idle',
+    };
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({ data: sessionWithDiff } satisfies SingleResponse<Session>);
+      }),
+      http.get('/api/v1/sessions/:id/pr', () => {
+        return HttpResponse.json(
+          { error: { code: 'NOT_FOUND', message: 'pull request not found' } },
+          { status: 404 },
+        );
+      }),
+      http.post('/api/v1/sessions/:id/pr', () => {
+        createPRCalls += 1;
+        return HttpResponse.json({ status: 'queued' }, { status: 202 });
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+    await screen.findByRole('button', { name: /Create PR/ });
+    act(() => {
+      (document.activeElement as HTMLElement | null)?.blur();
+    });
+
+    await userEvent.keyboard('pc');
+    await waitFor(() => {
+      expect(createPRCalls).toBe(1);
+    });
+    await userEvent.keyboard('pc');
+
+    expect(createPRCalls).toBe(1);
+  });
+
   it('keeps the button in a pending state after create PR starts without server PR state fields', async () => {
     const legacySession: Session = {
       ...mockSessions[0],
@@ -2961,6 +3004,48 @@ describe('SessionDetailPage', () => {
     await waitFor(() => {
       expect(requestBodies).toEqual([undefined, { author_mode: 'app' }]);
     });
+  });
+
+  it('opens the GitHub auth prompt when pressing p c and PR authorship is required', async () => {
+    const sessionWithDiff: Session = {
+      ...mockSessions[0],
+      status: 'completed',
+      diff: '--- a/file.ts\n+++ b/file.ts\n@@ -1 +1 @@\n-old\n+new',
+      diff_stats: { added: 1, removed: 1, files_changed: 1 },
+      snapshot_key: 'snap-abc',
+      pr_creation_state: 'idle',
+    };
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({ data: sessionWithDiff } satisfies SingleResponse<Session>);
+      }),
+      http.get('/api/v1/sessions/:id/pr', () => {
+        return HttpResponse.json(
+          { error: { code: 'NOT_FOUND', message: 'pull request not found' } },
+          { status: 404 },
+        );
+      }),
+      http.get('/api/v1/users/me/github-status', () => {
+        return HttpResponse.json({
+          connected: false,
+          has_repo_scope: false,
+          pr_authorship_mode: 'user_required',
+          pr_draft_default: false,
+        });
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+    await screen.findByRole('button', { name: /Create PR/ });
+    act(() => {
+      (document.activeElement as HTMLElement | null)?.blur();
+    });
+
+    await userEvent.keyboard('pc');
+
+    expect(await screen.findByText('Open this pull request as yourself?')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Continue with GitHub' })).toBeInTheDocument();
   });
 
   it('auto-resumes PR creation after GitHub auth callback', async () => {
@@ -4588,6 +4673,36 @@ describe('SessionDetailPage', () => {
       expect(messageSent).toBe(true);
       expect(scroller.scrollTop).toBe(900);
     });
+  });
+
+  it('scrolls the transcript with keyboard shortcuts immediately after loading', async () => {
+    const idleSession: Session = {
+      ...mockSessions[0],
+      status: 'idle',
+      completed_at: undefined,
+      current_turn: 1,
+      sandbox_state: 'snapshotted',
+    };
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({ data: idleSession } satisfies SingleResponse<Session>);
+      }),
+    );
+
+    const { container } = renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+    await screen.findByPlaceholderText('Send a follow-up message...');
+    const scroller = getChatScroller(container);
+    const scrollBy = vi.fn();
+    Object.defineProperty(scroller, 'clientHeight', { configurable: true, value: 400 });
+    Object.defineProperty(scroller, 'scrollBy', { configurable: true, value: scrollBy });
+    act(() => {
+      scroller.focus();
+    });
+
+    await userEvent.keyboard('{PageDown}');
+
+    expect(scrollBy).toHaveBeenCalledWith({ top: 340, behavior: 'smooth' });
   });
 
   it('clears the jump-to-latest affordance when the viewed session changes', async () => {

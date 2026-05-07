@@ -888,4 +888,66 @@ describe('SessionSidebar', () => {
     expect(capturedPeople).toContain('user-1');
   });
 
+  it('supports roving keyboard navigation and opening the active session', async () => {
+    const user = userEvent.setup();
+    serveSessions([
+      makeSession({ id: 's1', result_summary: 'Alpha keyboard' }),
+      makeSession({ id: 's2', result_summary: 'Beta keyboard' }),
+      makeSession({ id: 's3', result_summary: 'Gamma keyboard' }),
+      makeSession({ id: 's4', result_summary: 'Delta keyboard' }),
+    ]);
+
+    renderWithProviders(<SessionSidebar />);
+    await screen.findByText('Alpha keyboard');
+
+    await user.keyboard('j');
+    expect(screen.queryByRole('listbox', { name: 'Sessions' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('option', { name: /Beta keyboard/ })).not.toBeInTheDocument();
+    expect(screen.getByText('Beta keyboard').closest('[role="listitem"]')).toHaveAttribute('data-active', 'true');
+
+    // Pressing j once more — now that the list itself is focused — must
+    // advance exactly one row. A single keystroke fires both the
+    // React-delegated list onKeyDown and the document keydown listener; the
+    // document handler has to bail when the event originated inside the list,
+    // otherwise the cursor jumps two rows.
+    await user.keyboard('j');
+    expect(screen.getByText('Gamma keyboard').closest('[role="listitem"]')).toHaveAttribute('data-active', 'true');
+    expect(screen.getByText('Delta keyboard').closest('[role="listitem"]')).not.toHaveAttribute('data-active');
+
+    await user.keyboard('{Enter}');
+    expect(mockRouterPush).toHaveBeenCalledWith('/sessions/s3');
+  });
+
+  it('focuses search, starts a new session, and archives the active session by shortcut', async () => {
+    const user = userEvent.setup();
+    let archiveCalls = 0;
+    serveSessions([
+      makeSession({ id: 's1', result_summary: 'Archive by key' }),
+    ]);
+    server.use(
+      http.post('/api/v1/sessions/s1/archive', () => {
+        archiveCalls += 1;
+        return HttpResponse.json({ status: 'archived' });
+      }),
+    );
+
+    renderWithProviders(<SessionSidebar />, {
+      searchParams: { repo: 'repo-1' },
+    });
+    await screen.findByText('Archive by key');
+
+    await user.keyboard('/');
+    expect(screen.getByPlaceholderText('Search sessions...')).toHaveFocus();
+
+    await user.keyboard('{Escape}');
+    await user.keyboard('n');
+    expect(mockRouterPush).toHaveBeenCalledWith('/sessions/new?repo=repo-1');
+
+    await user.keyboard('j');
+    await user.keyboard('a');
+    await waitFor(() => {
+      expect(archiveCalls).toBe(1);
+    });
+  });
+
 });

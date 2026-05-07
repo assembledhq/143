@@ -157,6 +157,7 @@ export function PRHealthBanner({
                       size="sm"
                       variant="outline"
                       disabled={pendingAction !== null}
+                      title="Resolve conflicts (p r)"
                       onClick={onResolveConflicts}
                     >
                       {pendingAction === "resolve_conflicts" ? (
@@ -172,6 +173,7 @@ export function PRHealthBanner({
                       size="sm"
                       variant="outline"
                       disabled={pendingAction !== null}
+                      title="Fix tests (p t)"
                       onClick={onFixTests}
                     >
                       {pendingAction === "fix_tests" ? (
@@ -187,6 +189,7 @@ export function PRHealthBanner({
                       size="sm"
                       variant="default"
                       disabled={pendingAction !== null}
+                      title="Merge PR (p m)"
                       onClick={onMerge}
                     >
                       {pendingAction === "merge" ? (
@@ -202,7 +205,8 @@ export function PRHealthBanner({
                       size="sm"
                       variant="outline"
                       disabled={pushChanges.disabled || pendingAction !== null}
-                      title={pushChanges.title}
+                      title={pushChanges.title ?? "Push changes (p p)"}
+                      aria-keyshortcuts="p p"
                       onClick={pushChanges.onClick}
                     >
                       {pushChanges.spinning ? (
