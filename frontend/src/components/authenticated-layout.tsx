@@ -307,6 +307,11 @@ type MobileTopBarProps = {
   menuOpen: boolean;
 };
 
+function isSessionDetailRoute(pathname: string): boolean {
+  const segments = pathname.split("/").filter(Boolean);
+  return segments.length === 2 && segments[0] === "sessions" && segments[1] !== "new";
+}
+
 function MobileTopBar({
   onOpenMenu,
   onPaletteOpen,
@@ -350,6 +355,7 @@ function MobileTopBar({
 
 export function AuthenticatedLayout({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
+  const hideMobileTopBar = isSessionDetailRoute(pathname);
   const router = useRouter();
   const {
     user,
@@ -550,12 +556,14 @@ export function AuthenticatedLayout({ children }: { children: React.ReactNode })
       </Sheet>
 
       <div className="flex min-w-0 flex-1 flex-col">
-        <MobileTopBar
-          menuOpen={mobileMenuOpen}
-          onOpenMenu={handleOpenMobileMenu}
-          onPaletteOpen={handlePaletteOpen}
-          onCreateSession={handleCreateSessionOpen}
-        />
+        {!hideMobileTopBar ? (
+          <MobileTopBar
+            menuOpen={mobileMenuOpen}
+            onOpenMenu={handleOpenMobileMenu}
+            onPaletteOpen={handlePaletteOpen}
+            onCreateSession={handleCreateSessionOpen}
+          />
+        ) : null}
         <main className="flex-1 overflow-auto bg-background relative flex flex-col">
           <div className="relative max-w-none px-4 sm:px-6 lg:px-10 py-5 sm:py-6 flex-1 min-h-0">
             {children}
