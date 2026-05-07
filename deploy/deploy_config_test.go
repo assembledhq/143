@@ -173,7 +173,7 @@ func TestProductionAlertsUseValidLogsQLRangeFilters(t *testing.T) {
 func TestLoggingDesignDocsTrackProvisionedDashboardsAndAlerts(t *testing.T) {
 	t.Parallel()
 
-	design, err := os.ReadFile("../docs/design/47-logging-victorialogs.md")
+	design, err := os.ReadFile("../docs/design/implemented/47-logging-victorialogs.md")
 	require.NoError(t, err, "test should read the VictoriaLogs design doc")
 
 	designText := string(design)
@@ -436,6 +436,7 @@ func TestSandboxDNSConfigAlignment(t *testing.T) {
 	provisionText := string(provisionScript)
 	require.Contains(t, provisionText, "--subnet "+sandboxSubnet, "provision.sh should create 143-sandbox with the pinned subnet so sandbox-dns gets a predictable static IP")
 	require.Contains(t, provisionText, `"$EXISTING_SANDBOX_SUBNET" != "`+sandboxSubnet+`"`, "provision.sh should fail loudly when an existing 143-sandbox network has a different subnet — silent reuse breaks the static-IP mapping")
+	require.NotContains(t, provisionText, "enable_icc=false", "provision.sh must not disable bridge ICC because sandboxes must reach sandbox-dns on the shared bridge")
 
 	// The sandbox resolv.conf writer is the single source of truth for the
 	// nameserver line. provision.sh and deploy.sh both call it so a content
@@ -452,6 +453,7 @@ func TestSandboxDNSConfigAlignment(t *testing.T) {
 	require.Contains(t, deployText, "run_sandbox_resolv_conf", "deploy.sh should wrap sandbox-resolv-conf.sh in a retryable helper so legacy workers missing the new sudoers grant self-repair")
 	require.Contains(t, deployText, "Retrying sandbox resolv.conf refresh after sudoers repair", "deploy.sh should retry sandbox-resolv-conf.sh after repairing sudoers so the first deploy that introduces the helper succeeds on legacy workers")
 	require.Contains(t, deployText, "sudo -n /opt/143/deploy/scripts/sandbox-resolv-conf.sh", "deploy.sh should invoke sandbox-resolv-conf.sh with sudo -n so missing sudoers fails fast instead of hanging in CI")
+	require.NotContains(t, deployText, "enable_icc=false", "deploy.sh must not create 143-sandbox with bridge ICC disabled because Docker blocks sandbox DNS before DOCKER-USER can carve it out")
 
 	compose, err := os.ReadFile("../docker-compose.worker.yml")
 	require.NoError(t, err, "test should read the worker compose file")
@@ -466,6 +468,7 @@ func TestSandboxDNSConfigAlignment(t *testing.T) {
 	require.Contains(t, cloudInitText, "--subnet "+sandboxSubnet, "worker cloud-init should create 143-sandbox with the same pinned subnet as provision.sh so sandbox-dns can claim its static IP")
 	require.Contains(t, cloudInitText, "/opt/143/deploy/scripts/sandbox-resolv-conf.sh", "worker cloud-init should write /etc/143/sandbox-resolv.conf through the shared writer before starting the worker")
 	require.Contains(t, cloudInitText, "cp /tmp/143-repo/Dockerfile.dnsmasq /opt/143/", "worker cloud-init should stage Dockerfile.dnsmasq before docker compose starts so sandbox-dns can build on first boot")
+	require.NotContains(t, cloudInitText, "enable_icc=false", "worker cloud-init must leave bridge ICC enabled so first-boot sandboxes can reach sandbox-dns")
 	require.Contains(t, provisionText, `"$PROJECT_DIR/Dockerfile.dnsmasq" root@"$HOST":/opt/143/`, "provision.sh should stage Dockerfile.dnsmasq before docker compose starts so sandbox-dns can build on fresh worker provisioning")
 
 	dockerfile, err := os.ReadFile("../Dockerfile.dnsmasq")

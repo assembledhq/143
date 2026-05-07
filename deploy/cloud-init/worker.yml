@@ -80,9 +80,9 @@ runcmd:
 
   # Create the shared sandbox egress network with the same pinned subnet used
   # by provision.sh and deploy.sh. The subnet lets sandbox-dns claim the static
-  # 172.30.0.2 IP that /etc/143/sandbox-resolv.conf points at. enable_icc=false
-  # blocks one sandbox from TCP-connecting to another on the same bridge.
-  - su - deploy -c 'docker network inspect 143-sandbox >/dev/null 2>&1 || docker network create --driver bridge --subnet 172.30.0.0/24 --opt com.docker.network.bridge.enable_icc=false --label managed-by=143 143-sandbox'
+  # 172.30.0.2 IP that /etc/143/sandbox-resolv.conf points at. Leave bridge ICC
+  # at Docker's default so gVisor sandboxes can reach sandbox-dns on the bridge.
+  - su - deploy -c 'docker network inspect 143-sandbox >/dev/null 2>&1 || docker network create --driver bridge --subnet 172.30.0.0/24 --label managed-by=143 143-sandbox'
 
   # Apply host-level egress rules: block sandbox traffic to cloud metadata
   # and RFC1918. Must run AFTER the network exists (reads its subnet).
