@@ -13,6 +13,10 @@ import (
 	"github.com/assembledhq/143/internal/services/agent"
 )
 
+func usesRawTaskPrompt(input *agent.AgentInput) bool {
+	return input != nil && (input.PromptStyle == agent.PromptStyleRawTask || input.Manual || (input.Issue != nil && input.Issue.Source == models.IssueSourceManual))
+}
+
 // buildSystemPrompt constructs the system prompt with instructions and context.
 func buildSystemPrompt(input *agent.AgentInput) string {
 	var b strings.Builder
@@ -20,8 +24,7 @@ func buildSystemPrompt(input *agent.AgentInput) string {
 	// Manual sessions skip the bug-fixing template — the user's raw message
 	// is the entire prompt. Only inject repo conventions and integration
 	// skills so the agent knows what tools and patterns are available.
-	isManual := input.Manual || (input.Issue != nil && input.Issue.Source == models.IssueSourceManual)
-	if !isManual {
+	if !usesRawTaskPrompt(input) {
 		base := prompts.CodingTaskPreamble()
 		b.WriteString(base)
 		if !strings.HasSuffix(base, "\n\n") {
@@ -112,7 +115,7 @@ func buildSystemPrompt(input *agent.AgentInput) string {
 	}
 
 	// PM context: inject PM guidance when available (never set for manual sessions).
-	if input.PMContext != nil {
+	if input.PMContext != nil && !usesRawTaskPrompt(input) {
 		b.WriteString("## Product Manager Analysis\n\n")
 		if input.PMContext.Reasoning != "" {
 			b.WriteString("**Why this is a priority:** ")
@@ -190,8 +193,7 @@ func buildSystemPrompt(input *agent.AgentInput) string {
 // buildUserPrompt constructs the user prompt with issue-specific details.
 func buildUserPrompt(input *agent.AgentInput) string {
 	// Manual sessions: pass through the user's raw message without any wrapping.
-	isManual := input.Manual || (input.Issue != nil && input.Issue.Source == models.IssueSourceManual)
-	if isManual {
+	if usesRawTaskPrompt(input) {
 		base := input.UserMessage
 		if strings.TrimSpace(base) == "" && input.Issue != nil {
 			base = input.Issue.Title
