@@ -44,7 +44,6 @@ import (
 	"github.com/assembledhq/143/internal/services/sandbox"
 	"github.com/assembledhq/143/internal/services/sandboxauth"
 	"github.com/assembledhq/143/internal/services/storage"
-	"github.com/assembledhq/143/internal/services/validation"
 	"github.com/assembledhq/143/internal/telemetry"
 	"github.com/assembledhq/143/internal/version"
 	"github.com/assembledhq/143/internal/worker"
@@ -332,7 +331,6 @@ func main() {
 		orgStore := db.NewOrganizationStore(pool)
 		repoStore := db.NewRepositoryStore(pool)
 		integrationStore := db.NewIntegrationStore(pool)
-		validationStore := db.NewValidationStore(pool)
 		pullRequestStore := db.NewPullRequestStore(pool)
 		deployStore := db.NewDeployStore(pool)
 		sessionMessageStore := db.NewSessionMessageStore(pool)
@@ -399,7 +397,7 @@ func main() {
 		var services *worker.Services
 		if canBuildServices(cfg, logger) {
 			services = buildServices(cfg, pool, logger, codexAuthSvc, claudeCodeAuthSvc, credentialStore, userCredentialStore, codingCredentialStore, issueStore, sessionStore,
-				jobStore, orgStore, repoStore, validationStore, pullRequestStore,
+				jobStore, orgStore, repoStore, pullRequestStore,
 				deployStore, priorityScoreStore, complexityEstimateStore, pmPlanStore, pmDecisionLogStore,
 				projectStore, projectTaskStore, projectCycleStore, pmDocumentStore, integrationStore,
 				sessionMessageStore, automationRunStore, snapshotStore, billingMetrics, cancelRegistry, threadCancelRegistry, orgSettingsCache)
@@ -823,7 +821,6 @@ func buildServices(
 	jobStore *db.JobStore,
 	orgStore *db.OrganizationStore,
 	repoStore *db.RepositoryStore,
-	validationStore *db.ValidationStore,
 	pullRequestStore *db.PullRequestStore,
 	deployStore *db.DeployStore,
 	priorityScoreStore *db.PriorityScoreStore,
@@ -984,16 +981,11 @@ func buildServices(
 		Logger:            logger,
 	})
 
-	// Validation service.
-	validationSvc := validation.NewService(
-		validationStore, issueStore, orgStore, jobStore, llmClient, sandboxProvider, logger,
-	)
-
 	// PR service.
 	prTemplateStore := db.NewPRTemplateStore(pool)
 	prService := ghservice.NewPRService(
 		ghSvc, pullRequestStore, sessionStore, issueStore,
-		deployStore, validationStore, repoStore, jobStore, logger,
+		deployStore, repoStore, jobStore, logger,
 	)
 	wireWorkerPRService(
 		prService,
@@ -1110,7 +1102,6 @@ func buildServices(
 
 	svc := &worker.Services{
 		Orchestrator:    orchestrator,
-		Validation:      validationSvc,
 		PR:              prService,
 		Failure:         failureSvc,
 		SandboxProvider: sandboxProvider,

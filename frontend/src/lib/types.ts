@@ -131,7 +131,6 @@ export interface Session {
   org_id: string;
   origin?: string;
   interaction_mode?: string;
-  validation_policy?: string;
   agent_type: string;
   status: string;
   autonomy_level: string;
@@ -219,27 +218,6 @@ export interface PRSummary {
 export interface SessionListItem extends Session {
   last_viewed_at?: string;
   pr_summary?: PRSummary;
-}
-
-export interface Validation {
-  id: string;
-  session_id: string;
-  org_id: string;
-  status: string;
-  direction_check: string | null;
-  direction_check_details: string | null;
-  correctness_check: string | null;
-  correctness_check_details: string | null;
-  quality_check: string | null;
-  quality_check_details: string | null;
-  security_scan: string | null;
-  security_scan_details: string | null;
-  regression_test_check: string | null;
-  regression_test_check_details: string | null;
-  ci_check: string | null;
-  ci_check_details: string | null;
-  created_at: string;
-  updated_at: string;
 }
 
 export type ThreadStatus = 'pending' | 'running' | 'idle' | 'awaiting_input' | 'completed' | 'failed' | 'cancelled';

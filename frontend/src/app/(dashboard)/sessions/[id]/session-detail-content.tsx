@@ -20,7 +20,6 @@ import {
   Check,
   XCircle,
   X,
-  MinusCircle,
   Square,
   PanelRightOpen,
   PanelRightClose,
@@ -48,7 +47,6 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from "@/components/ui/table";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import {
   Dialog,
@@ -108,7 +106,7 @@ import {
   resolveInitialSessionAnchor,
   writeStoredSessionScrollPosition,
 } from "@/lib/session-open-position";
-import type { ListResponse, Session, SessionDetail, SessionInputCommand, SessionInputReference, SessionLog, SessionMessage, SessionReviewComment, SessionThread, SessionThreadFileEvent, SessionTimelineEntry, User, Validation, CodexAuthStatus, PullRequestHealthResponse, SingleResponse } from "@/lib/types";
+import type { ListResponse, Session, SessionDetail, SessionInputCommand, SessionInputReference, SessionLog, SessionMessage, SessionReviewComment, SessionThread, SessionThreadFileEvent, SessionTimelineEntry, User, CodexAuthStatus, PullRequestHealthResponse, SingleResponse } from "@/lib/types";
 import { AgentTabStrip, computeThreadOverlap } from "./agent-tab-strip";
 import {
   ThreadAttributionFilter,
@@ -298,22 +296,6 @@ const triggerPickerIconClassName = "h-4 w-4 shrink-0";
 const directoryTriggerIcon = <FolderTree className={triggerPickerIconClassName} />;
 const fileTriggerIcon = <FileCode2 className={triggerPickerIconClassName} />;
 
-const validationChecks: { key: string; label: string }[] = [
-  { key: "direction_check", label: "Direction check" },
-  { key: "correctness_check", label: "Correctness check" },
-  { key: "quality_check", label: "Quality check" },
-  { key: "security_scan", label: "Security scan" },
-  { key: "regression_test_check", label: "Regression test check" },
-  { key: "ci_check", label: "CI check" },
-];
-
-function checkResultBadge(result: string | null) {
-  if (!result) return <Badge variant="secondary" className="text-xs">skipped</Badge>;
-  if (result === "pass") return <Badge variant="secondary" className="bg-emerald-50 text-emerald-700 dark:bg-emerald-950/30 dark:text-emerald-400 border-emerald-200/50 dark:border-emerald-800/30 text-xs">pass</Badge>;
-  if (result === "fail") return <Badge variant="secondary" className="bg-destructive/10 text-destructive border-destructive/20 text-xs">fail</Badge>;
-  return <Badge variant="secondary" className="text-xs">{result}</Badge>;
-}
-
 // AgentThreadTabs lived here in Phase 1. The replacement now lives in
 // agent-tab-strip.tsx (AgentTabStrip) and adds overlap badges, tab actions,
 // and cost surfacing. Status helpers moved with it; the statusConfig table
@@ -323,7 +305,7 @@ function checkResultBadge(result: string | null) {
 // Detail panel tabs (shown in right sidebar)
 // ---------------------------------------------------------------------------
 
-type DetailTab = "overview" | "changes" | "validation" | "preview";
+type DetailTab = "overview" | "changes" | "preview";
 type PRAuthorMode = "auto" | "user" | "app";
 
 type PRAuthInterceptDetails = {
@@ -670,93 +652,6 @@ function OverviewTab({ session, members, prStatus }: { session: Session; members
         </Card>
       )}
 
-    </div>
-  );
-}
-
-function ValidationTab({ sessionId }: { sessionId: string }) {
-  const { data, isLoading, error } = useQuery({
-    queryKey: ["session", sessionId, "validation"],
-    queryFn: () => api.sessions.getValidation(sessionId).catch((err) => {
-      // 404 means no validation exists yet — treat as empty data, not an error.
-      if (err?.code === "NOT_FOUND") return { data: null };
-      throw err;
-    }),
-  });
-
-  if (isLoading) {
-    return (
-      <div className="flex items-center justify-center py-12">
-        <div className="text-center space-y-2">
-          <Loader2 className="h-5 w-5 animate-spin text-muted-foreground/40 mx-auto" />
-          <p className="text-xs text-muted-foreground">Loading validation...</p>
-        </div>
-      </div>
-    );
-  }
-
-  const validation = data?.data;
-  if (error || !validation) {
-    return (
-      <div className="flex items-center justify-center py-12">
-        <div className="text-center space-y-2 max-w-[280px]">
-          <CheckCircle2 className="h-8 w-8 text-muted-foreground/40 mx-auto" />
-          <p className="text-xs font-medium text-muted-foreground">No validation data</p>
-          <p className="text-xs text-muted-foreground/60">Validation checks will appear here once the session produces results.</p>
-        </div>
-      </div>
-    );
-  }
-
-  const overallStatus = validation.status;
-
-  return (
-    <div className="space-y-4">
-      <div className="flex items-center gap-2">
-        <span className="text-xs font-medium">Overall:</span>
-        {overallStatus === "passed" && (
-          <Badge variant="secondary" className="bg-emerald-50 text-emerald-700 dark:bg-emerald-950/30 dark:text-emerald-400 border-emerald-200/50 dark:border-emerald-800/30">
-            <CheckCircle2 className="mr-1 h-3 w-3" /> Passed
-          </Badge>
-        )}
-        {overallStatus === "failed" && (
-          <Badge variant="secondary" className="bg-destructive/10 text-destructive border-destructive/20">
-            <XCircle className="mr-1 h-3 w-3" /> Failed
-          </Badge>
-        )}
-        {overallStatus !== "passed" && overallStatus !== "failed" && (
-          <Badge variant="secondary">
-            <MinusCircle className="mr-1 h-3 w-3" /> {overallStatus}
-          </Badge>
-        )}
-      </div>
-
-      <Card>
-        <CardContent className="p-0">
-          <Table>
-            <TableHeader>
-              <TableRow className="bg-muted/20">
-                <TableHead>Check</TableHead>
-                <TableHead>Result</TableHead>
-                <TableHead>Details</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {validationChecks.map(({ key, label }) => {
-                const result = validation[key as keyof Validation] as string | null;
-                const details = validation[`${key}_details` as keyof Validation] as string | null;
-                return (
-                  <TableRow key={key}>
-                    <TableCell className="font-medium">{label}</TableCell>
-                    <TableCell>{checkResultBadge(result)}</TableCell>
-                    <TableCell className="text-muted-foreground">{details || "-"}</TableCell>
-                  </TableRow>
-                );
-              })}
-            </TableBody>
-          </Table>
-        </CardContent>
-      </Card>
     </div>
   );
 }
@@ -3632,7 +3527,6 @@ export function SessionDetailContent({ id }: { id: string }) {
   }, []);
 
   const changesCount = diffStats?.filesChanged;
-  const showValidationTab = !session?.triggered_by_user_id;
   const detailTabsRef = useRef<HTMLDivElement>(null);
   const [detailTabsOverflow, setDetailTabsOverflow] = useState(false);
 
@@ -3672,7 +3566,6 @@ export function SessionDetailContent({ id }: { id: string }) {
     session?.id,
     session?.pr_creation_error,
     session?.pr_creation_state,
-    showValidationTab,
   ]);
   const isDedicatedMobileReview = centerMode === "review" && isMobileReviewViewport;
 
@@ -3883,9 +3776,6 @@ export function SessionDetailContent({ id }: { id: string }) {
                   </Badge>
                 )}
               </TabsTrigger>
-              {showValidationTab && (
-                <TabsTrigger value="validation">Validation</TabsTrigger>
-              )}
               <TabsTrigger value="preview">Preview</TabsTrigger>
             </TabsList>
           </div>
@@ -4037,11 +3927,6 @@ export function SessionDetailContent({ id }: { id: string }) {
           <OverviewTab session={session} members={members} prStatus={prStatus} />
         </div>
       </TabsContent>
-      {showValidationTab && (
-        <TabsContent value="validation" className="flex-1 overflow-y-auto scrollbar-hide p-4">
-          <ValidationTab sessionId={id} />
-        </TabsContent>
-      )}
       <TabsContent value="preview" className="flex-1 overflow-y-auto scrollbar-hide p-4">
         <PreviewPanel
           sessionId={id}
@@ -4308,7 +4193,7 @@ export function SessionDetailContent({ id }: { id: string }) {
         >
           <SheetTitle className="sr-only">Session details</SheetTitle>
           <SheetDescription className="sr-only">
-            Browse session details, changed files, validation, and preview on mobile.
+            Browse session details, changed files, and preview on mobile.
           </SheetDescription>
           {panelTabsEl}
         </SheetContent>
