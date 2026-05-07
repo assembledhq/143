@@ -33,18 +33,25 @@ func TestNormalizeMergeState(t *testing.T) {
 			hasConflicts: true,
 		},
 		{
-			name:         "blocked branch is conflicted",
+			name:         "blocked branch is blocked without conflicts",
 			mergeable:    boolPtr(false),
 			githubState:  "blocked",
-			expected:     models.PullRequestMergeStateConflicted,
-			hasConflicts: true,
+			expected:     models.PullRequestMergeStateBlocked,
+			hasConflicts: false,
 		},
 		{
-			name:         "non-mergeable branch is conflicted even without explicit dirty state",
-			mergeable:    boolPtr(false),
+			name:         "unstable branch is blocked without conflicts",
+			mergeable:    boolPtr(true),
 			githubState:  "unstable",
-			expected:     models.PullRequestMergeStateConflicted,
-			hasConflicts: true,
+			expected:     models.PullRequestMergeStateBlocked,
+			hasConflicts: false,
+		},
+		{
+			name:         "draft branch is blocked without conflicts",
+			mergeable:    boolPtr(false),
+			githubState:  "draft",
+			expected:     models.PullRequestMergeStateBlocked,
+			hasConflicts: false,
 		},
 		{
 			name:         "behind branch is normalized",
@@ -463,6 +470,18 @@ func TestBuildPRHealthSummaryText(t *testing.T) {
 			expected: "PR #184 is waiting for required checks to report passing.",
 		},
 		{
+			name: "blocked by merge requirements",
+			health: models.PullRequestHealthResponse{
+				PullRequestNumber: 184,
+				MergeState:        models.PullRequestMergeStateBlocked,
+				ChecksConfirmed:   true,
+				Checks: []models.PullRequestCheckSummary{
+					{Name: "unit tests", Category: models.PullRequestCheckCategoryTest, Status: models.PullRequestCheckStatusPassed},
+				},
+			},
+			expected: "PR #184 is blocked by GitHub merge requirements.",
+		},
+		{
 			name: "conflicts and tests",
 			health: models.PullRequestHealthResponse{
 				PullRequestNumber: 184,
@@ -521,6 +540,20 @@ func TestDerivePullRequestRepairActions(t *testing.T) {
 		expectCanFixTests      bool
 		expectCanMerge         bool
 	}{
+		{
+			name: "blocked PR cannot resolve conflicts or merge",
+			input: models.PullRequestHealthResponse{
+				Status:           "open",
+				MergeState:       models.PullRequestMergeStateBlocked,
+				ChecksConfirmed:  true,
+				Checks:           []models.PullRequestCheckSummary{{Name: "unit tests", Category: models.PullRequestCheckCategoryTest, Status: models.PullRequestCheckStatusPassed}},
+				HasConflicts:     false,
+				FailingTestCount: 0,
+			},
+			expectCanResolveConfli: false,
+			expectCanFixTests:      false,
+			expectCanMerge:         false,
+		},
 		{
 			name: "clean open PR with no checks is not mergeable until checks are confirmed",
 			input: models.PullRequestHealthResponse{
