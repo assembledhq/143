@@ -312,7 +312,7 @@ describe('SessionDetailPage', () => {
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
 
     await screen.findAllByText('Fixed TypeError by adding null check');
-    await user.click(screen.getByRole('button', { name: 'Open details' }));
+    await user.click(screen.getByRole('button', { name: 'Open session details' }));
 
     // panelTabsEl is rendered both inline (desktop) and inside the Sheet
     // (mobile), so we scope to the dialog Radix opens for the sheet to
@@ -5078,6 +5078,73 @@ describe('SessionDetailPage', () => {
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
   });
 
+  it('uses a single mobile top bar and moves thread controls into the session actions sheet', async () => {
+    vi.mocked(window.matchMedia).mockImplementation((query: string) => ({
+      matches: query === '(max-width: 767px)',
+      media: query,
+      onchange: null,
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      dispatchEvent: vi.fn(),
+    }));
+
+    const threads: SessionThread[] = [
+      {
+        id: 'thread-1',
+        session_id: 'session-abcdef12-3456-7890',
+        org_id: 'org-1',
+        agent_type: 'codex',
+        label: 'Main tab',
+        status: 'running',
+        current_turn: 1,
+        diff: 'diff --git a/src/app.ts b/src/app.ts',
+        created_at: '2026-02-17T07:00:00Z',
+        cost_cents: 15,
+        pending_message_count: 0,
+      },
+      {
+        id: 'thread-2',
+        session_id: 'session-abcdef12-3456-7890',
+        org_id: 'org-1',
+        agent_type: 'claude_code',
+        label: 'Review',
+        status: 'awaiting_input',
+        created_at: '2026-02-17T07:02:00Z',
+        current_turn: 1,
+        cost_cents: 10,
+        pending_message_count: 1,
+      },
+    ];
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({
+          data: {
+            ...mockSessions[0],
+            threads,
+          },
+        } satisfies SingleResponse<Session>);
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+    await screen.findAllByText('Fixed TypeError by adding null check');
+
+    expect(screen.getByRole('button', { name: 'Open session details' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Open session actions' })).toBeInTheDocument();
+
+    const user = userEvent.setup();
+    await user.click(screen.getByRole('button', { name: 'Open session actions' }));
+
+    const actionsSheet = await screen.findByRole('dialog', { name: 'Session actions' });
+    expect(within(actionsSheet).getByRole('button', { name: 'Switch to Main tab' })).toBeInTheDocument();
+    expect(within(actionsSheet).getByRole('button', { name: 'Switch to Review' })).toBeInTheDocument();
+    expect(within(actionsSheet).getByRole('button', { name: 'Add agent tab' })).toBeInTheDocument();
+    expect(within(actionsSheet).getByRole('button', { name: 'Rename session' })).toBeInTheDocument();
+  });
+
   it('opens a full-screen mobile diff when a file is selected from the Changes sheet', async () => {
     vi.mocked(window.matchMedia).mockImplementation((query: string) => ({
       matches: query === '(max-width: 767px)',
@@ -5106,7 +5173,7 @@ describe('SessionDetailPage', () => {
     await screen.findAllByText('Fixed TypeError by adding null check');
 
     const user = userEvent.setup();
-    await user.click(screen.getByRole('button', { name: 'Open details' }));
+    await user.click(screen.getByRole('button', { name: 'Open session details' }));
 
     const detailSheet = await screen.findByRole('dialog');
     await user.click(within(detailSheet).getByRole('tab', { name: /^Changes/ }));
@@ -5183,7 +5250,7 @@ describe('SessionDetailPage', () => {
     await screen.findAllByText('Fixed TypeError by adding null check');
 
     const user = userEvent.setup();
-    await user.click(screen.getByRole('button', { name: 'Open details' }));
+    await user.click(screen.getByRole('button', { name: 'Open session details' }));
 
     const detailSheet = await screen.findByRole('dialog');
     await user.click(within(detailSheet).getByRole('tab', { name: /^Changes/ }));
@@ -6391,7 +6458,7 @@ describe('SessionDetailPage', () => {
     );
 
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
-    expect(await screen.findByText('Custom session title')).toBeInTheDocument();
+    expect(await screen.findByRole('heading', { level: 1, name: 'Custom session title' })).toBeInTheDocument();
   });
 
   it('shows only pm_approach without pm_reasoning in PM context', async () => {
