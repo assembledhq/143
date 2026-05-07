@@ -2119,7 +2119,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 		if issueSnapshot != nil {
 			payload["issue_snapshot_id"] = issueSnapshot.ID.String()
 		}
-		o.enqueueJob(ctx, run.OrgID, "agent", "validate", payload)
+		o.enqueueJob(ctx, run.OrgID, "default", "open_pr", payload)
 	}
 
 	if run.PMPlanID != nil && o.decisionLog != nil {

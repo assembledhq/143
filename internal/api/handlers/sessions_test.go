@@ -122,7 +122,6 @@ func newSessionHandler(t *testing.T, mock pgxmock.PgxPoolIface) *SessionHandler 
 		db.NewSessionStore(mock),
 		db.NewSessionLogStore(mock),
 		db.NewSessionQuestionStore(mock),
-		db.NewValidationStore(mock),
 		db.NewPullRequestStore(mock),
 		db.NewIssueStore(mock),
 		db.NewRepositoryStore(mock),
@@ -1575,54 +1574,6 @@ func TestSessionHandler_TriggerFix(t *testing.T) {
 	}
 }
 
-func TestSessionHandler_GetValidation_Success(t *testing.T) {
-	t.Parallel()
-
-	mock, err := pgxmock.NewPool()
-	require.NoError(t, err, "should create pgxmock pool without error")
-	defer mock.Close()
-
-	orgID := uuid.New()
-	runID := uuid.New()
-	validationID := uuid.New()
-	now := time.Now()
-
-	handler := newSessionHandler(t, mock)
-
-	mock.ExpectQuery("SELECT .+ FROM validations WHERE").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnRows(
-			pgxmock.NewRows([]string{
-				"id", "session_id", "org_id", "status",
-				"direction_check", "correctness_check", "quality_check", "security_scan",
-				"regression_test_check", "coverage_delta", "ci_check", "details",
-				"started_at", "completed_at", "created_at",
-			}).AddRow(
-				validationID, runID, orgID, "passed",
-				"pass", "pass", "pass", "pass",
-				"skipped", nil, "pass", nil,
-				&now, &now, now,
-			),
-		)
-
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/runs/"+runID.String()+"/validation", nil)
-	rctx := chi.NewRouteContext()
-	rctx.URLParams.Add("id", runID.String())
-	ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
-	ctx = middleware.WithOrgID(ctx, orgID)
-	req = req.WithContext(ctx)
-	w := httptest.NewRecorder()
-
-	handler.GetValidation(w, req)
-	require.Equal(t, http.StatusOK, w.Code, "should return 200 OK for validation lookup")
-
-	var resp models.SingleResponse[models.Validation]
-	err = json.Unmarshal(w.Body.Bytes(), &resp)
-	require.NoError(t, err, "response body should be valid JSON")
-	require.Equal(t, "passed", resp.Data.Status, "should return the validation with passed status")
-	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
-}
-
 func TestSessionHandler_ListQuestions_Success(t *testing.T) {
 	t.Parallel()
 
@@ -1867,29 +1818,6 @@ func TestSessionHandler_GetPullRequest_InvalidID(t *testing.T) {
 	w := httptest.NewRecorder()
 
 	handler.GetPullRequest(w, req)
-	require.Equal(t, http.StatusBadRequest, w.Code, "should return 400 for invalid ID")
-	require.Contains(t, w.Body.String(), "INVALID_ID")
-}
-
-func TestSessionHandler_GetValidation_InvalidID(t *testing.T) {
-	t.Parallel()
-
-	mock, err := pgxmock.NewPool()
-	require.NoError(t, err)
-	defer mock.Close()
-
-	orgID := uuid.New()
-	handler := newSessionHandler(t, mock)
-
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/runs/bad-id/validation", nil)
-	rctx := chi.NewRouteContext()
-	rctx.URLParams.Add("id", "bad-id")
-	ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
-	ctx = middleware.WithOrgID(ctx, orgID)
-	req = req.WithContext(ctx)
-	w := httptest.NewRecorder()
-
-	handler.GetValidation(w, req)
 	require.Equal(t, http.StatusBadRequest, w.Code, "should return 400 for invalid ID")
 	require.Contains(t, w.Body.String(), "INVALID_ID")
 }
@@ -3937,7 +3865,7 @@ func TestSessionHandler_CreateManual(t *testing.T) {
 	}
 }
 
-func TestSessionHandler_EndSession_EnqueuesValidation(t *testing.T) {
+func TestSessionHandler_EndSession_EnqueuesOpenPR(t *testing.T) {
 	t.Parallel()
 
 	mock, err := pgxmock.NewPool()
@@ -4019,12 +3947,12 @@ func TestSessionHandler_EndSession_EnqueuesValidation(t *testing.T) {
 
 	handler.EndSession(w, req)
 
-	require.Equal(t, http.StatusOK, w.Code, "ending an idle non-manual session should enqueue validation")
+	require.Equal(t, http.StatusOK, w.Code, "ending an idle non-manual session should enqueue PR creation")
 	require.Contains(t, w.Body.String(), `"status":"completed"`, "response should return the completed session")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
-func TestSessionHandler_EndSession_ManualSkipsValidation(t *testing.T) {
+func TestSessionHandler_EndSession_ManualEnqueuesOpenPR(t *testing.T) {
 	t.Parallel()
 
 	mock, err := pgxmock.NewPool()
@@ -4111,7 +4039,7 @@ func TestSessionHandler_EndSession_ManualSkipsValidation(t *testing.T) {
 
 	handler.EndSession(w, req)
 
-	require.Equal(t, http.StatusOK, w.Code, "ending a manual session should skip validation and enqueue open_pr")
+	require.Equal(t, http.StatusOK, w.Code, "ending a manual session should enqueue open_pr")
 	require.Contains(t, w.Body.String(), `"status":"completed"`, "response should return the completed session")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
@@ -5997,7 +5925,6 @@ func TestSessionHandler_CreateManual_WithLLMTitle(t *testing.T) {
 		db.NewSessionStore(mock),
 		db.NewSessionLogStore(mock),
 		db.NewSessionQuestionStore(mock),
-		db.NewValidationStore(mock),
 		db.NewPullRequestStore(mock),
 		db.NewIssueStore(mock),
 		db.NewRepositoryStore(mock),
@@ -6073,7 +6000,6 @@ func TestSessionHandler_CreateManual_LLMError_Returns500(t *testing.T) {
 		db.NewSessionStore(mock),
 		db.NewSessionLogStore(mock),
 		db.NewSessionQuestionStore(mock),
-		db.NewValidationStore(mock),
 		db.NewPullRequestStore(mock),
 		db.NewIssueStore(mock),
 		db.NewRepositoryStore(mock),
