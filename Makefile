@@ -2,7 +2,7 @@
 SANDBOX_STAMP := sandbox/.build-stamp
 SANDBOX_SOURCES := sandbox/Dockerfile sandbox/versions.json
 
-.PHONY: dev dev-ngrok dev-local dev-frontend-only setup test test-race test-coverage test-pr test-coverage-diff test-main test-integration migrate-up migrate-down build frontend-dev frontend-lint frontend-typecheck frontend-check lint lint-bootstrap lint-schema lint-stores lint-tenancy hooks-install hooks-uninstall secrets-setup secrets-encrypt secrets-decrypt secrets-edit secrets-rotate provision-app provision-worker provision-db provision-logging provision-redis repair-deploy-sudoers deploy deploy-app deploy-worker deploy-db deploy-logging deploy-fleet logs logs-query setup-readonly-user db-psql db-query
+.PHONY: dev dev-ngrok dev-local dev-frontend-only setup test test-race test-coverage test-pr test-coverage-diff test-main test-integration migrate-up migrate-down build frontend-dev frontend-lint frontend-typecheck frontend-check lint lint-bootstrap lint-schema lint-stores lint-tenancy hooks-install hooks-uninstall secrets-setup secrets-encrypt secrets-decrypt secrets-edit secrets-rotate provision-app provision-worker provision-db provision-logging provision-redis repair-deploy-sudoers repair-sandbox-dns-network deploy deploy-app deploy-worker deploy-db deploy-logging deploy-fleet logs logs-query setup-readonly-user db-psql db-query
 
 GOLANGCI_LINT_VERSION ?= v2.10.1
 GOLANGCI_LINT_BIN := $(CURDIR)/bin/golangci-lint
@@ -409,6 +409,13 @@ repair-deploy-sudoers:
 	@test -n "$(HOST)" || { echo "HOST is required. Usage: make repair-deploy-sudoers ROLE=<app|worker|db|logging|redis> HOST=<ip> [SSH_KEY=<path>]"; exit 1; }
 	$(check-ssh-key)
 	bash ./deploy/scripts/repair-deploy-sudoers.sh $(ROLE) $(HOST) $(SSH_KEY)
+
+# Repair all worker 143-sandbox networks after a bad bridge ICC option broke
+# sandbox DNS. Dry-run by default; pass APPLY=true to stop/recreate worker
+# sandbox networks and verify DNS from runsc.
+repair-sandbox-dns-network:
+	$(check-ssh-key)
+	SSH_KEY="$(SSH_KEY)" APPLY="$(APPLY)" bash ./deploy/scripts/repair-sandbox-dns-network.sh
 
 # Deploy (update) an already-provisioned node.
 # HOST is optional — falls back to the matching role in FLEET_HOSTS from .env.production.enc.
