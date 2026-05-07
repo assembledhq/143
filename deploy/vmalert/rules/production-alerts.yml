@@ -122,6 +122,35 @@ groups:
           description: 'Workers logged {{ $value }} `push_pr_changes failed` errors in the last 15 minutes.'
           runbook: 'Filter VictoriaLogs for service=worker _msg="push_pr_changes failed". Common causes: snapshot hydration, git push (token / branch protection), or sandbox creation.'
 
+  - name: dns-health
+    type: vlogs
+    interval: 1m
+    rules:
+      # Each app + worker host runs the dns-probe container (see
+      # docker-compose.dns-probe.yml) which logs `dns probe failed` on
+      # every resolution failure. The 2026-05-07T04:15Z incident showed
+      # the cost of finding out about upstream DNS trouble via cascading
+      # symptoms (codex stream disconnects, git push errors); this alert
+      # fires directly off the probe.
+      - alert: DNSProbeFailures
+        # Group by (target, hostname) so an OpenAI-side outage doesn't pull
+        # github.com into the same alert and confuse the on-call ack, AND
+        # so a host-local issue (one worker's daemon.json missing the dns
+        # pin) is distinguishable from a fleet-wide upstream provider
+        # outage. >2 in 5m means at least three consecutive failures of
+        # the same target on the same host — the per-minute probe noise
+        # floor is 0.
+        expr: '_time:5m _msg:"dns probe failed" AND probe:dns | stats by (target, hostname) count() as failures | filter failures:>2 | fields target, hostname, failures'
+        for: 1m
+        labels:
+          severity: critical
+          team: platform
+          signal: logs
+        annotations:
+          summary: 'DNS probe failures for {{ $labels.target }} on {{ $labels.hostname }}'
+          description: 'The synthetic DNS probe on {{ $labels.hostname }} logged {{ $value }} failures resolving {{ $labels.target }} in the last 5 minutes.'
+          runbook: 'Check /etc/docker/daemon.json `dns` config and host upstream resolver. Correlate with worker `Could not resolve host` errors and sandbox stream disconnects. If multiple hosts fire for the same target, suspect the upstream provider; if a single host fires across multiple targets, suspect that host''s daemon.json or local resolver.'
+
   - name: session-problems
     type: vlogs
     interval: 1m

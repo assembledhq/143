@@ -42,7 +42,8 @@ Cmnd_Alias DEPLOY_CMDS = \
     /usr/bin/apt-get install -y --no-install-recommends iptables-persistent, \
     /opt/143/deploy/scripts/sandbox-firewall.sh 143-sandbox, \
     /opt/143/deploy/scripts/sandbox-resolv-conf.sh, \
-    /opt/143/deploy/scripts/install-log-rotation.sh *
+    /opt/143/deploy/scripts/install-log-rotation.sh *, \
+    /opt/143/deploy/scripts/install-docker-dns.sh *
 
 deploy ALL=(root) NOPASSWD: DEPLOY_CMDS
 SUDOERS
