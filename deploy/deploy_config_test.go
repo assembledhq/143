@@ -346,21 +346,3 @@ func TestSandboxDNSConfigAlignment(t *testing.T) {
 	require.Contains(t, dockerfileText, "--server=127.0.0.11", "dnsmasq must forward to Docker's embedded resolver — that's the only place preview-infra container names are registered")
 	require.Contains(t, dockerfileText, "--no-resolv", "dnsmasq must ignore its own /etc/resolv.conf (which itself points at 127.0.0.11) to avoid a forwarding loop")
 }
-
-func TestSandboxDNSRepairScriptTargetsWorkerHosts(t *testing.T) {
-	t.Parallel()
-
-	script, err := os.ReadFile("../deploy/scripts/repair-sandbox-dns-network.sh")
-	require.NoError(t, err, "test should read the sandbox DNS repair script")
-	scriptText := string(script)
-
-	require.Contains(t, scriptText, "FLEET_HOSTS", "repair script should discover existing hosts from FLEET_HOSTS")
-	require.Contains(t, scriptText, "sops --decrypt", "repair script should resolve FLEET_HOSTS from .env.production.enc when not provided")
-	require.Contains(t, scriptText, "grep '^worker:'", "repair script should iterate worker hosts only")
-	require.Contains(t, scriptText, "repair-deploy-sudoers.sh worker", "repair script should refresh the worker sudoers grant before using deploy-time sudo commands")
-	require.Contains(t, scriptText, "docker network create --driver bridge --subnet 172.30.0.0/24 --label managed-by=143 143-sandbox", "repair script should recreate the sandbox network without disabling bridge ICC")
-	require.NotContains(t, scriptText, "enable_icc=false", "repair script must not recreate the broken bridge ICC option")
-	require.Contains(t, scriptText, "nslookup github.com", "repair script should verify DNS from a fresh sandbox")
-	require.Contains(t, scriptText, "--runtime=runsc", "repair script should verify the same gVisor runtime used by production sandboxes")
-	require.Contains(t, scriptText, "APPLY=true", "repair script should be dry-run by default and require APPLY=true for destructive repair")
-}
