@@ -632,7 +632,7 @@ func TestCodexAdapter_Execute(t *testing.T) {
 
 			provider := testutil.NewMockSandboxProvider()
 			provider.ExecFn = func(ctx context.Context, sb *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
-				if strings.HasPrefix(cmd, "codex") {
+				if strings.Contains(cmd, "codex exec") {
 					_, _ = stdout.Write([]byte(tt.codexOutput))
 					if tt.stderrOutput != "" {
 						_, _ = stderr.Write([]byte(tt.stderrOutput))
@@ -681,6 +681,8 @@ func TestCodexAdapter_Execute(t *testing.T) {
 			promptData, exists := provider.Files["/home/sandbox/.143-prompt.md"]
 			require.True(t, exists, "prompt file should have been written")
 			require.Contains(t, string(promptData), "Fix the bug.")
+			require.NotContains(t, provider.ExecCalls[0], ".143-agent.pid", "codex adapter must not embed pidfile scaffolding (provider internal)")
+			require.NotContains(t, provider.ExecCalls[0], "& pid=$!", "codex adapter must not embed shell-shim wrapping (provider internal)")
 		})
 	}
 }
@@ -690,7 +692,7 @@ func TestCodexAdapter_Execute_ExecError(t *testing.T) {
 
 	provider := testutil.NewMockSandboxProvider()
 	provider.ExecFn = func(ctx context.Context, sb *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
-		if strings.HasPrefix(cmd, "codex") {
+		if strings.Contains(cmd, "codex exec") {
 			return 0, context.DeadlineExceeded
 		}
 		return 0, nil
@@ -818,7 +820,7 @@ func TestCodexAdapter_Execute_IncludesReasoningEffortOverride(t *testing.T) {
 
 	provider := testutil.NewMockSandboxProvider()
 	provider.ExecFn = func(ctx context.Context, sb *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
-		if strings.HasPrefix(cmd, "codex") {
+		if strings.Contains(cmd, "codex exec") {
 			_, _ = stdout.Write([]byte(`{"type":"message","content":"done"}`))
 			return 0, nil
 		}
@@ -855,7 +857,7 @@ func TestCodexAdapter_Execute_ContinuationWithResumeSessionIDIncludesReasoningEf
 
 	provider := testutil.NewMockSandboxProvider()
 	provider.ExecFn = func(ctx context.Context, sb *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
-		if strings.HasPrefix(cmd, "codex") {
+		if strings.Contains(cmd, "codex exec") {
 			_, _ = stdout.Write([]byte(`{"type":"message","content":"done"}`))
 			return 0, nil
 		}

@@ -9,7 +9,7 @@ import "fmt"
 // `prompted` event to it?").
 //
 // Vocabulary must stay in lockstep with the CHECK constraint in
-// migrations/000115_linear_agent.up.sql — the
+// migrations/000120_linear_agent.up.sql — the
 // TestLinearAgentSessionStateMigrationVocabularyMatchesGoEnum test parses the
 // migration and fails if the two drift.
 type LinearAgentSessionState string
@@ -61,7 +61,7 @@ func (s LinearAgentSessionState) Validate() error {
 
 // LinearAgentActivityType mirrors the Linear AgentActivity type vocabulary.
 // Vocabulary kept in lockstep with the CHECK constraint in
-// migrations/000115_linear_agent.up.sql.
+// migrations/000120_linear_agent.up.sql.
 type LinearAgentActivityType string
 
 const (
@@ -108,16 +108,17 @@ func (t LinearAgentActivityType) Validate() error {
 // Linear required-scopes for the agent feature. These are appended to the
 // pre-existing `read,write` set on the upgraded OAuth flow — Linear treats
 // scopes additively, so no scope is removed.
+//
+// Note: offline_access was attempted (PR #807) but reverted (PR #816)
+// because Linear rejects it as "Invalid scope" and refuses the authorize
+// redirect. Linear returns refresh_token automatically without any
+// special scope, so the refresh machinery in
+// internal/services/linear/refresh.go works without it.
 const (
 	LinearScopeRead           = "read"
 	LinearScopeWrite          = "write"
 	LinearScopeAppAssignable  = "app:assignable"
 	LinearScopeAppMentionable = "app:mentionable"
-	// LinearScopeOfflineAccess triggers refresh_token + expires_in in
-	// Linear's OAuth token response. Without it Linear issues a long-lived
-	// access token with no refresh path, so the refresh machinery in
-	// internal/services/linear/refresh.go can never rotate.
-	LinearScopeOfflineAccess = "offline_access"
 )
 
 // LinearAgentRequiredScopes is the canonical scope list for the agent OAuth
@@ -129,5 +130,4 @@ var LinearAgentRequiredScopes = []string{
 	LinearScopeWrite,
 	LinearScopeAppAssignable,
 	LinearScopeAppMentionable,
-	LinearScopeOfflineAccess,
 }

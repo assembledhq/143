@@ -83,6 +83,42 @@ describe("Agent settings page", () => {
     });
   });
 
+  it("capitalizes status and usage note in the details sheet", async () => {
+    const user = userEvent.setup();
+    installHandlers();
+    server.use(
+      http.get("/api/v1/settings/coding-auths", () =>
+        HttpResponse.json({
+          data: [
+            {
+              id: "auth-1",
+              org_id: "org-1",
+              priority: 1,
+              agent: "codex",
+              auth_type: "subscription",
+              label: "Team seat A",
+              scope: "organization",
+              provider: "openai_chatgpt",
+              status: "needs_reauth",
+              is_default: true,
+              usage_note: "chatgpt plus",
+              created_at: "2026-04-22T10:00:00Z",
+              updated_at: "2026-04-22T10:00:00Z",
+            },
+          ],
+          meta: {},
+        }),
+      ),
+    );
+
+    renderWithProviders(<AgentPage />);
+
+    await user.click((await screen.findAllByRole("button", { name: "Team seat A" }))[0]);
+
+    expect(screen.getByText("Needs Reauth")).toBeInTheDocument();
+    expect(screen.getByText("Chatgpt Plus")).toBeInTheDocument();
+  });
+
   it("shows expanded provider choices in the add auth modal", async () => {
     const user = userEvent.setup();
     installHandlers();

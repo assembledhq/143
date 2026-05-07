@@ -1,6 +1,6 @@
 # Design: Production Alerting
 
-> **Status:** Partially Implemented | **Last reviewed:** 2026-04-21
+> **Status:** Backlog | **Last reviewed:** 2026-05-06
 
 This document defines the recommended production alerting stack for 143.dev.
 
@@ -366,6 +366,6 @@ Best only if the team wants full commercial observability consolidation and acce
 
 ## Related Docs
 
-- [overall.md](overall.md)
+- [overall.md](../overall.md)
 - [09-observability.md](09-observability.md)
-- [47-logging-victorialogs.md](47-logging-victorialogs.md)
+- [47-logging-victorialogs.md](../implemented/47-logging-victorialogs.md)

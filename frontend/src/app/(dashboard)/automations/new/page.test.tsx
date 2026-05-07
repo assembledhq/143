@@ -1,8 +1,9 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import { http, HttpResponse } from "msw";
-import { renderWithProviders, screen, userEvent, waitFor } from "@/test/test-utils";
+import { fireEvent, renderWithProviders, screen, userEvent, waitFor } from "@/test/test-utils";
 import { server } from "@/test/mocks/server";
 import NewAutomationPage from "./page";
+import { AUTOMATION_GOAL_MAX_LENGTH } from "@/lib/automation-validation";
 
 const pushMock = vi.fn();
 const searchParams = new URLSearchParams("template=security-sweep");
@@ -52,9 +53,14 @@ describe("NewAutomationPage", () => {
 
     const timezoneButton = await screen.findByTitle(expectedTimezone);
     const scheduleRow = timezoneButton.parentElement;
+    const runEveryText = screen.getByText("Run every");
+    const atText = screen.getByText("At");
 
     expect(scheduleRow).toHaveClass("flex-wrap");
     expect(timezoneButton).toHaveClass("w-full", "sm:w-auto");
+    expect(runEveryText).toHaveClass("text-sm", "font-medium", "leading-none", "text-muted-foreground");
+    expect(atText).toHaveClass("text-sm", "font-medium", "leading-none", "text-muted-foreground");
+    expect(screen.queryByText(/Run time is in/i)).not.toBeInTheDocument();
   });
 
   it("prefills the form from the selected template and links to the full library", async () => {
@@ -98,6 +104,124 @@ describe("NewAutomationPage", () => {
     ).toContain(
       "Review the repository for concrete, actionable security risk",
     );
+  });
+
+  it("inserts selected @ mentions into the automation goal", async () => {
+    const user = userEvent.setup();
+
+    server.use(
+      http.get("/api/v1/repositories", () =>
+        HttpResponse.json({
+          data: [
+            {
+              id: "repo-1",
+              org_id: "org-1",
+              integration_id: "int-1",
+              github_id: 1,
+              full_name: "acme/repo",
+              default_branch: "main",
+              private: false,
+              clone_url: "https://github.com/acme/repo.git",
+              installation_id: 10,
+              status: "active",
+              settings: {},
+              created_at: "2026-03-05T12:00:00Z",
+              updated_at: "2026-03-05T12:00:00Z",
+            },
+          ],
+          meta: {},
+        }),
+      ),
+      http.get("/api/v1/session-composer/files", ({ request }) => {
+        const url = new URL(request.url);
+        if (!url.searchParams.get("q")) {
+          return HttpResponse.json({ data: [], meta: {} });
+        }
+
+        return HttpResponse.json({
+          data: [
+            {
+              kind: "file",
+              token: "@internal/services/automations.go",
+              path: "internal/services/automations.go",
+              display: "internal/services/automations.go",
+            },
+          ],
+          meta: {},
+        });
+      }),
+    );
+
+    renderWithProviders(<NewAutomationPage />);
+
+    const goalInput = await screen.findByLabelText("Goal");
+    await user.clear(goalInput);
+    await user.type(goalInput, "Review @auto");
+    await user.click(await screen.findByRole("button", { name: "internal/services/automations.go" }));
+
+    expect(goalInput).toHaveValue("Review @internal/services/automations.go ");
+  });
+
+  it("inserts selected slash commands into the automation goal", async () => {
+    const user = userEvent.setup();
+
+    server.use(
+      http.get("*/api/v1/settings", () => HttpResponse.json({
+        data: {
+          id: "org-1",
+          name: "Test Org",
+          settings: { default_agent_type: "codex" },
+        },
+      })),
+      http.get("*/api/v1/repositories", () => HttpResponse.json({
+        data: [
+          {
+            id: "repo-1",
+            org_id: "org-1",
+            integration_id: "int-1",
+            github_id: 1,
+            full_name: "acme/repo",
+            default_branch: "main",
+            private: false,
+            clone_url: "https://github.com/acme/repo.git",
+            installation_id: 10,
+            status: "active",
+            settings: {},
+            created_at: "2026-03-05T12:00:00Z",
+            updated_at: "2026-03-05T12:00:00Z",
+          },
+        ],
+        meta: {},
+      })),
+      http.get("*/api/v1/session-composer/slash-commands", () => HttpResponse.json({
+        groups: [
+          {
+            source: "builtin",
+            label: "Codex commands",
+            items: [
+              {
+                kind: "command",
+                agent_type: "codex",
+                name: "review",
+                token: "/review",
+                display: "/review",
+                description: "Review pending changes",
+                source: "builtin",
+              },
+            ],
+          },
+        ],
+      })),
+    );
+
+    renderWithProviders(<NewAutomationPage />);
+
+    const goalInput = await screen.findByLabelText("Goal");
+    await user.clear(goalInput);
+    await user.type(goalInput, "/rev");
+    await user.click(await screen.findByRole("button", { name: /\/review/i }));
+
+    expect(goalInput).toHaveValue("/review ");
   });
 
   it("submits the selected base branch from the branch picker", async () => {
@@ -187,8 +311,189 @@ describe("NewAutomationPage", () => {
       expect(requestBody).toMatchObject({
         repository_id: "repo-1",
         base_branch: "release/weekly",
+        identity_scope: "org",
       });
     });
   }, 20000);
+
+  it("submits a personal automation identity scope when selected", async () => {
+    const user = userEvent.setup();
+    let requestBody: Record<string, unknown> | null = null;
+
+    server.use(
+      http.get("*/api/v1/settings", () => HttpResponse.json({
+        data: {
+          id: "org-1",
+          name: "Test Org",
+          settings: { default_agent_type: "codex" },
+        },
+      })),
+      http.get("*/api/v1/settings/codex-auth/status", () => HttpResponse.json({
+        data: { status: "completed" },
+      })),
+      http.get("*/api/v1/settings/credentials/resolved", () => HttpResponse.json({
+        data: [{ provider: "openai", source: "org" }],
+        meta: {},
+      })),
+      http.get("*/api/v1/settings/credentials/team", () => HttpResponse.json({ data: [], meta: {} })),
+      http.get("*/api/v1/settings/coding-auths", () => HttpResponse.json({ data: [], meta: {} })),
+      http.get("*/api/v1/coding-credentials*", () => HttpResponse.json({ data: [], meta: {} })),
+      http.get("*/api/v1/repositories", () => HttpResponse.json({
+        data: [
+          {
+            id: "repo-1",
+            org_id: "org-1",
+            integration_id: "int-1",
+            github_id: 1,
+            full_name: "acme/repo",
+            default_branch: "main",
+            private: false,
+            clone_url: "https://github.com/acme/repo.git",
+            installation_id: 10,
+            status: "active",
+            settings: {},
+            created_at: "2026-03-05T12:00:00Z",
+            updated_at: "2026-03-05T12:00:00Z",
+          },
+        ],
+        meta: {},
+      })),
+      http.post("*/api/v1/automations", async ({ request }) => {
+        requestBody = await request.json() as Record<string, unknown>;
+        return HttpResponse.json({ data: { id: "auto-1" } });
+      }),
+    );
+
+    renderWithProviders(<NewAutomationPage />);
+
+    await waitFor(() => {
+      expect(screen.getByDisplayValue("Security sweep")).toBeInTheDocument();
+    });
+    await user.clear(screen.getByLabelText("Name"));
+    await user.type(screen.getByLabelText("Name"), "Personal sweep");
+    await user.clear(screen.getByLabelText("Goal"));
+    await user.type(screen.getByLabelText("Goal"), "Use my own credentials");
+    await user.click(screen.getByRole("combobox", { name: "Run as" }));
+    await user.click(await screen.findByText("Personal"));
+    await user.click(screen.getByRole("button", { name: "Create automation" }));
+
+    await waitFor(() => {
+      expect(requestBody).toMatchObject({ identity_scope: "personal" });
+    });
+  });
+
+  it("submits an explicit reasoning override for supported automation agents", async () => {
+    const user = userEvent.setup();
+    let requestBody: Record<string, unknown> | null = null;
+
+    server.use(
+      http.get("*/api/v1/settings", () => HttpResponse.json({
+        data: {
+          id: "org-1",
+          name: "Test Org",
+          settings: { default_agent_type: "codex" },
+        },
+      })),
+      http.get("*/api/v1/settings/codex-auth/status", () => HttpResponse.json({
+        data: { status: "completed" },
+      })),
+      http.get("*/api/v1/settings/credentials/resolved", () => HttpResponse.json({
+        data: [{ provider: "openai", source: "org" }],
+        meta: {},
+      })),
+      http.get("*/api/v1/settings/credentials/team", () => HttpResponse.json({ data: [], meta: {} })),
+      http.get("*/api/v1/settings/coding-auths", () => HttpResponse.json({ data: [], meta: {} })),
+      http.get("*/api/v1/coding-credentials*", () => HttpResponse.json({ data: [], meta: {} })),
+      http.get("*/api/v1/repositories", () => HttpResponse.json({
+        data: [{
+          id: "repo-1",
+          org_id: "org-1",
+          integration_id: "int-1",
+          github_id: 1,
+          full_name: "acme/repo",
+          default_branch: "main",
+          private: false,
+          clone_url: "https://github.com/acme/repo.git",
+          installation_id: 10,
+          status: "active",
+          settings: {},
+          created_at: "2026-03-05T12:00:00Z",
+          updated_at: "2026-03-05T12:00:00Z",
+        }],
+        meta: {},
+      })),
+      http.post("*/api/v1/automations", async ({ request }) => {
+        requestBody = await request.json() as Record<string, unknown>;
+        return HttpResponse.json({ data: { id: "auto-1" } });
+      }),
+    );
+
+    renderWithProviders(<NewAutomationPage />);
+
+    await waitFor(() => {
+      expect(screen.getByDisplayValue("Security sweep")).toBeInTheDocument();
+    });
+
+    await user.click(screen.getByText("Advanced options"));
+    await user.click(screen.getByRole("combobox", { name: "Reasoning" }));
+    await user.click(await screen.findByText("Extra High"));
+    await user.click(screen.getByRole("button", { name: "Create automation" }));
+
+    await waitFor(() => {
+      expect(requestBody).toMatchObject({ reasoning_effort: "xhigh" });
+    });
+  });
+
+  it("shows goal length validation and blocks submit when the goal exceeds the backend limit", async () => {
+    const user = userEvent.setup();
+
+    server.use(
+      http.get("/api/v1/repositories", () =>
+        HttpResponse.json({
+          data: [
+            {
+              id: "repo-1",
+              org_id: "org-1",
+              integration_id: "int-1",
+              github_id: 1,
+              full_name: "acme/repo",
+              default_branch: "main",
+              private: false,
+              clone_url: "https://github.com/acme/repo.git",
+              installation_id: 10,
+              status: "active",
+              settings: {},
+              created_at: "2026-03-05T12:00:00Z",
+              updated_at: "2026-03-05T12:00:00Z",
+            },
+          ],
+          meta: {},
+        }),
+      ),
+    );
+
+    renderWithProviders(<NewAutomationPage />);
+
+    await waitFor(() => {
+      expect(screen.getByDisplayValue("Security sweep")).toBeInTheDocument();
+    });
+
+    await user.clear(screen.getByLabelText("Name"));
+    await user.type(screen.getByLabelText("Name"), "Weekly audit");
+
+    fireEvent.change(screen.getByLabelText("Goal"), {
+      target: { value: "x".repeat(AUTOMATION_GOAL_MAX_LENGTH + 1) },
+    });
+
+    expect(
+      screen.getByText(`Goal must be at most ${AUTOMATION_GOAL_MAX_LENGTH.toLocaleString("en-US")} characters.`),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        `${(AUTOMATION_GOAL_MAX_LENGTH + 1).toLocaleString("en-US")} / ${AUTOMATION_GOAL_MAX_LENGTH.toLocaleString("en-US")}`,
+      ),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Create automation" })).toBeDisabled();
+  });
 
 });

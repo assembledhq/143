@@ -363,7 +363,7 @@ assume that a coding agent and GitHub are available.
 ## Relationship to Existing Documents and Code
 
 - Aligns with the operator workspace model in
-  [37-pm-agent-top-level-review.md](./37-pm-agent-top-level-review.md)
+  [37-pm-agent-top-level-review.md](../backlog/37-pm-agent-top-level-review.md)
 - The human/machine boundary (config footer vs. analysis) follows the
   steering vs. output distinction from doc 37
 - Settings placement (contextual steering on-page, admin settings in Settings)

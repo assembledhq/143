@@ -1,8 +1,8 @@
 # Design: Centralized Logging with VictoriaLogs
 
-> **Status:** Partially Implemented | **Last reviewed:** 2026-05-04
+> **Status:** Implemented | **Last reviewed:** 2026-05-06
 >
-> **Implementation notes:** VictoriaLogs/Grafana Docker Compose, Vector collector config, logging-node cloud-init, deploy/provision script support, `make logs` / `make logs-query`, provisioned Grafana error and platform health dashboards, and repo-owned `vmalert` alert rules are implemented. Scheduler heartbeat alerts remain follow-up operational work.
+> **Implementation notes:** VictoriaLogs/Grafana Docker Compose, Vector collector config, logging-node cloud-init, deploy/provision script support, `make logs` / `make logs-query`, provisioned Grafana error and platform health dashboards, and repo-owned `vmalert` alert rules are implemented. Scheduler heartbeat alerts are tracked as ongoing operational work outside this doc.
 
 Self-hosted VictoriaLogs + Grafana stack on a dedicated Hetzner logging server, with Vector collectors on the app, worker, and logging servers.
 

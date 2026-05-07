@@ -118,11 +118,63 @@ describe("RunCard click-through", () => {
     renderWithProviders(<RunCard run={run} />);
 
     expect(screen.getByRole("button", { name: /reply to agent/i })).toBeInTheDocument();
+    expect(screen.getByTestId("run-card-layout")).toHaveClass("flex-col", "sm:flex-row");
     // The headline copy should match the amber attention treatment, not
     // the red "Failed" treatment — both the run.status (failed) and the
     // session.status (needs_human_guidance) are present, and the linked
     // session wins.
     expect(screen.getByText(/needs your input/i)).toBeInTheDocument();
+  });
+
+  it("renders execution-row metadata for scheduled completed runs", () => {
+    const run = makeRun({
+      result_summary: "Removed 2 stale retries from payments spec",
+      session: {
+        id: "sess-pr",
+        title: "Removed 2 stale retries from payments spec",
+        status: "completed",
+        failure_retry_advised: false,
+        pr_creation_state: "succeeded",
+        diff_stats: { added: 12, removed: 4, files_changed: 3 },
+        pr: {
+          number: 412,
+          url: "https://github.com/example/repo/pull/412",
+          status: "open",
+          ci_status: "success",
+        },
+      },
+    });
+
+    renderWithProviders(<RunCard run={run} />);
+
+    expect(screen.getByText(/scheduled run/i)).toBeInTheDocument();
+    expect(screen.getByText(/linked session/i)).toBeInTheDocument();
+    expect(screen.getByText(/3 files changed/i)).toBeInTheDocument();
+    expect(screen.getByText(/pr #412/i)).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /review pr/i })).toBeInTheDocument();
+  });
+
+  it("renders manual-run metadata and failure detail in the row body", () => {
+    const run = makeRun({
+      status: "failed",
+      result_summary: "Security sweep found dependency issue",
+      session: {
+        id: "sess-fail",
+        status: "failed",
+        title: "Security sweep found dependency issue",
+        failure_explanation: "pnpm audit failed because lockfile was out of date",
+        failure_retry_advised: true,
+        pr_creation_state: "failed",
+      },
+      triggered_by: "manual",
+    });
+
+    renderWithProviders(<RunCard run={run} />);
+
+    expect(screen.getByText(/manual run/i)).toBeInTheDocument();
+    expect(screen.getByText(/linked session/i)).toBeInTheDocument();
+    expect(screen.getByText(/pnpm audit failed because lockfile was out of date/i)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /retry on session/i })).toBeInTheDocument();
   });
 
   it("renders a non-interactive thin row for completed_noop without a session", () => {
@@ -139,5 +191,17 @@ describe("RunCard click-through", () => {
     renderWithProviders(<RunCard run={run} />);
     expect(screen.queryByRole("button")).not.toBeInTheDocument();
     expect(screen.getByText(/pending/i)).toBeInTheDocument();
+  });
+
+  it("shows manual provenance for pending manual runs", () => {
+    const run = makeRun({
+      status: "pending",
+      completed_at: undefined,
+      triggered_by: "manual",
+    });
+
+    renderWithProviders(<RunCard run={run} />);
+
+    expect(screen.getByText(/manual run · waiting to start/i)).toBeInTheDocument();
   });
 });

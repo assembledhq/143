@@ -207,7 +207,7 @@ Manual admin adjustments to prioritization and eligibility. This table captures 
 
 ### `complexity_estimates`
 
-Pre-run complexity estimation for each issue. Computed after prioritization, before agent execution. See [12-smart-routing.md](12-smart-routing.md).
+Pre-run complexity estimation for each issue. Computed after prioritization, before agent execution. See [12-smart-routing.md](../backlog/12-smart-routing.md).
 
 | Column | Type | Notes |
 |--------|------|-------|
@@ -410,7 +410,7 @@ Tracks deploy events detected after PR merge.
 
 ### `review_comments`
 
-Individual review comments captured from 143-generated GitHub PRs, processed through a structural pre-filter and single LLM classification pass. See [11-review-feedback-loop.md](11-review-feedback-loop.md).
+Individual review comments captured from 143-generated GitHub PRs, processed through a structural pre-filter and single LLM classification pass. See [11-review-feedback-loop.md](../backlog/11-review-feedback-loop.md).
 
 | Column | Type | Notes |
 |--------|------|-------|

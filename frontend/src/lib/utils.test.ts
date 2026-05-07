@@ -1,5 +1,19 @@
 import { describe, it, expect } from "vitest";
-import { formatTimeAgo, isImageURL, fileNameFromURL } from "./utils";
+import { capitalizeWords, formatTimeAgo, isImageURL, fileNameFromURL } from "./utils";
+
+describe("capitalizeWords", () => {
+  it("capitalizes each word in a space-delimited string", () => {
+    expect(capitalizeWords("chatgpt plus")).toBe("Chatgpt Plus");
+  });
+
+  it("replaces underscores with spaces before capitalizing", () => {
+    expect(capitalizeWords("needs_reauth")).toBe("Needs Reauth");
+  });
+
+  it("returns an empty string unchanged", () => {
+    expect(capitalizeWords("")).toBe("");
+  });
+});
 
 describe("formatTimeAgo", () => {
   it("returns 'just now' for dates less than a minute ago", () => {
