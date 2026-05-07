@@ -418,6 +418,12 @@ describe('SessionDetailPage', () => {
           meta: {},
         });
       }),
+      http.get('/api/v1/sessions/:id/thread-file-events', () => {
+        return HttpResponse.json({
+          data: [],
+          meta: {},
+        });
+      }),
       http.post('/api/v1/sessions/:id/threads', async ({ request, params }) => {
         const body = await request.json() as { label: string; agent_type: string };
         createdThread = true;
@@ -464,16 +470,15 @@ describe('SessionDetailPage', () => {
     expect(await screen.findByText('Claude found a missing pagination cap.')).toBeInTheDocument();
 
     await user.click(screen.getByRole('button', { name: 'Add agent tab' }));
-    await user.type(screen.getByLabelText('Tab label'), 'Tests');
-    await user.click(screen.getByRole('button', { name: 'Create tab' }));
 
     await waitFor(() => {
       expect(createdThread).toBe(true);
     });
-    expect(await screen.findByRole('tab', { name: /Tests/ })).toBeInTheDocument();
-    expect(screen.getByPlaceholderText('Send a message to Codex...')).toBeInTheDocument();
+    expect(screen.queryByRole('dialog', { name: 'Add agent tab' })).not.toBeInTheDocument();
+    expect(await screen.findByRole('tab', { name: /Claude Code 3/ })).toBeInTheDocument();
+    expect(screen.getByPlaceholderText('Send a message to Claude Code 3...')).toBeInTheDocument();
 
-    await user.type(screen.getByPlaceholderText('Send a message to Codex...'), 'Run the frontend checks.');
+    await user.type(screen.getByPlaceholderText('Send a message to Claude Code 3...'), 'Run the frontend checks.');
     await user.click(screen.getByRole('button', { name: 'Send message' }));
 
     await waitFor(() => {
@@ -481,6 +486,217 @@ describe('SessionDetailPage', () => {
     });
     expect(sessionMessagePosted).toBe(false);
   }, 10000);
+
+  it('lets a blank new tab switch from Claude Code to Codex before the first message', async () => {
+    const sessionId = 'session-switch-agent-before-send';
+    const threads: SessionThread[] = [
+      {
+        id: 'thread-main',
+        session_id: sessionId,
+        org_id: 'org-1',
+        agent_type: 'claude_code',
+        label: 'Claude Code',
+        status: 'idle',
+        current_turn: 1,
+        created_at: '2026-02-17T07:00:00Z',
+        cost_cents: 0,
+        pending_message_count: 0,
+      },
+    ];
+    let patchBody: { agent_type?: string; label?: string; model?: string } | null = null;
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({
+          data: {
+            ...mockSessions[0],
+            id: sessionId,
+            status: 'idle',
+            agent_type: 'claude_code',
+            sandbox_state: 'ready',
+            threads,
+          },
+        } satisfies SingleResponse<Session & { threads: SessionThread[] }>);
+      }),
+      http.get('/api/v1/sessions/:id/threads/:threadId/messages', () => {
+        return HttpResponse.json({ data: [] as SessionMessage[], meta: {} } satisfies ListResponse<SessionMessage>);
+      }),
+      http.get('/api/v1/sessions/:id/threads/:threadId/logs', () => {
+        return HttpResponse.json({ data: [], meta: {} });
+      }),
+      http.get('/api/v1/sessions/:id/thread-file-events', () => {
+        return HttpResponse.json({ data: [], meta: {} });
+      }),
+      http.post('/api/v1/sessions/:id/threads', async ({ request, params }) => {
+        const body = await request.json() as { label: string; agent_type: string };
+        const thread: SessionThread = {
+          id: 'thread-new',
+          session_id: params.id as string,
+          org_id: 'org-1',
+          agent_type: body.agent_type as SessionThread['agent_type'],
+          label: body.label,
+          status: 'idle',
+          current_turn: 0,
+          created_at: '2026-02-17T07:04:00Z',
+          cost_cents: 0,
+          pending_message_count: 0,
+        };
+        threads.push(thread);
+        return HttpResponse.json({ data: thread } satisfies SingleResponse<SessionThread>, { status: 201 });
+      }),
+      http.patch('/api/v1/sessions/:id/threads/:threadId', async ({ request, params }) => {
+        patchBody = await request.json() as { agent_type?: string; label?: string; model?: string };
+        const updatedThread: SessionThread = {
+          id: params.threadId as string,
+          session_id: sessionId,
+          org_id: 'org-1',
+          agent_type: (patchBody.agent_type ?? 'codex') as SessionThread['agent_type'],
+          model_override: patchBody.model,
+          label: patchBody.label ?? 'Codex 2',
+          status: 'idle',
+          current_turn: 0,
+          created_at: '2026-02-17T07:04:00Z',
+          cost_cents: 0,
+          pending_message_count: 0,
+        };
+        threads[1] = updatedThread;
+        return HttpResponse.json({ data: updatedThread } satisfies SingleResponse<SessionThread>);
+      }),
+    );
+
+    const user = userEvent.setup();
+    renderWithProviders(<SessionDetailContent id={sessionId} />);
+
+    expect(await screen.findByPlaceholderText('Send a message to Claude Code...')).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: 'Add agent tab' }));
+    expect(await screen.findByPlaceholderText('Send a message to Claude Code 2...')).toBeInTheDocument();
+
+    await user.click(screen.getByLabelText('Agent'));
+    await user.click(await screen.findByRole('option', { name: 'Codex' }));
+
+    await waitFor(() => {
+      expect(patchBody).toEqual({ agent_type: 'codex', label: 'Codex 2' });
+    });
+    expect(screen.getByRole('tab', { name: /Codex 2/ })).toBeInTheDocument();
+    expect(screen.getByPlaceholderText('Send a message to Codex 2...')).toBeInTheDocument();
+  });
+
+  it('persists the selected model on a blank tab before the first thread send', async () => {
+    const sessionId = 'session-persist-model-before-first-send';
+    const threads: SessionThread[] = [
+      {
+        id: 'thread-main',
+        session_id: sessionId,
+        org_id: 'org-1',
+        agent_type: 'codex',
+        label: 'Codex',
+        status: 'idle',
+        current_turn: 1,
+        created_at: '2026-02-17T07:00:00Z',
+        cost_cents: 0,
+        pending_message_count: 0,
+      },
+    ];
+    const patchedBodies: Array<{ agent_type?: string; label?: string; model?: string }> = [];
+    let postedMessageBody: { message: string } | null = null;
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({
+          data: {
+            ...mockSessions[0],
+            id: sessionId,
+            status: 'idle',
+            agent_type: 'codex',
+            sandbox_state: 'ready',
+            threads,
+          },
+        } satisfies SingleResponse<Session & { threads: SessionThread[] }>);
+      }),
+      http.get('/api/v1/sessions/:id/threads/:threadId/messages', () => {
+        return HttpResponse.json({ data: [] as SessionMessage[], meta: {} } satisfies ListResponse<SessionMessage>);
+      }),
+      http.get('/api/v1/sessions/:id/threads/:threadId/logs', () => {
+        return HttpResponse.json({ data: [], meta: {} });
+      }),
+      http.get('/api/v1/sessions/:id/thread-file-events', () => {
+        return HttpResponse.json({ data: [], meta: {} });
+      }),
+      http.post('/api/v1/sessions/:id/threads', async ({ request, params }) => {
+        const body = await request.json() as { label: string; agent_type: string; model?: string };
+        const thread: SessionThread = {
+          id: 'thread-new',
+          session_id: params.id as string,
+          org_id: 'org-1',
+          agent_type: body.agent_type as SessionThread['agent_type'],
+          model_override: body.model,
+          label: body.label,
+          status: 'idle',
+          current_turn: 0,
+          created_at: '2026-02-17T07:04:00Z',
+          cost_cents: 0,
+          pending_message_count: 0,
+        };
+        threads.push(thread);
+        return HttpResponse.json({ data: thread } satisfies SingleResponse<SessionThread>, { status: 201 });
+      }),
+      http.patch('/api/v1/sessions/:id/threads/:threadId', async ({ request, params }) => {
+        const body = await request.json() as { agent_type?: string; label?: string; model?: string };
+        patchedBodies.push(body);
+        const updatedThread: SessionThread = {
+          id: params.threadId as string,
+          session_id: sessionId,
+          org_id: 'org-1',
+          agent_type: (body.agent_type ?? 'codex') as SessionThread['agent_type'],
+          model_override: body.model,
+          label: body.label ?? 'Codex 2',
+          status: 'idle',
+          current_turn: 0,
+          created_at: '2026-02-17T07:04:00Z',
+          cost_cents: 0,
+          pending_message_count: 0,
+        };
+        threads[1] = updatedThread;
+        return HttpResponse.json({ data: updatedThread } satisfies SingleResponse<SessionThread>);
+      }),
+      http.post('/api/v1/sessions/:id/threads/:threadId/messages', async ({ request, params }) => {
+        postedMessageBody = await request.json() as { message: string };
+        return HttpResponse.json({
+          data: {
+            id: 101,
+            session_id: params.id as string,
+            org_id: 'org-1',
+            thread_id: params.threadId as string,
+            turn_number: 1,
+            role: 'user',
+            content: postedMessageBody.message,
+            created_at: '2026-02-17T07:05:00Z',
+          },
+        } satisfies SingleResponse<SessionMessage>, { status: 201 });
+      }),
+    );
+
+    const user = userEvent.setup();
+    renderWithProviders(<SessionDetailContent id={sessionId} />);
+
+    expect(await screen.findByPlaceholderText('Send a message to Codex...')).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: 'Add agent tab' }));
+    expect(await screen.findByPlaceholderText('Send a message to Codex 2...')).toBeInTheDocument();
+
+    await user.click(screen.getByLabelText('Model override'));
+    await user.click(await screen.findByRole('option', { name: 'gpt-5.4-mini' }));
+    await user.type(screen.getByPlaceholderText('Send a message to Codex 2...'), 'Use the selected model.');
+    await user.click(screen.getByRole('button', { name: 'Send message' }));
+
+    await waitFor(() => {
+      expect(patchedBodies).toContainEqual({ label: 'Codex 2', model: 'gpt-5.4-mini' });
+    });
+    await waitFor(() => {
+      expect(postedMessageBody).toEqual({ message: 'Use the selected model.' });
+    });
+  });
 
   it('preserves thread tabs when session status SSE payload omits thread detail', async () => {
     const sessionId = 'session-abcdef12-3456-7890';
@@ -945,7 +1161,7 @@ describe('SessionDetailPage', () => {
     await waitFor(() => {
       expect(screen.queryByTestId('session-timeline-skeleton')).not.toBeInTheDocument();
     });
-    const composer = screen.getByPlaceholderText('Send a message to Codex...');
+    const composer = screen.getByPlaceholderText('Send a message to Codex 2...');
     expect(composer).toBeEnabled();
   });
 
@@ -1015,7 +1231,7 @@ describe('SessionDetailPage', () => {
     await waitFor(() => {
       expect(screen.queryByTestId('session-timeline-skeleton')).not.toBeInTheDocument();
     });
-    expect(screen.getByPlaceholderText('Send a message to Codex...')).toBeInTheDocument();
+    expect(screen.getByPlaceholderText('Send a message to Codex 2...')).toBeInTheDocument();
   });
 
   it('restores the saved scroll position when reopening an existing session', async () => {

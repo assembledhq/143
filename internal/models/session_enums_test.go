@@ -46,11 +46,11 @@ func TestSessionStatusHelpers(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name             string
-		status           SessionStatus
-		expectTerminal   bool
-		expectResumable  bool
-		expectCanAddTab  bool
+		name            string
+		status          SessionStatus
+		expectTerminal  bool
+		expectResumable bool
+		expectCanAddTab bool
 	}{
 		{
 			name:            "running session",

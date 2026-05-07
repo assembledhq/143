@@ -28,6 +28,7 @@ type mockThreadStore struct {
 	listBySessionFn  func(ctx context.Context, orgID, sessionID uuid.UUID) ([]models.SessionThread, error)
 	claimIdleFn      func(ctx context.Context, orgID, sessionID, threadID uuid.UUID) (models.SessionThread, error)
 	claimForResumeFn func(ctx context.Context, orgID, sessionID, threadID uuid.UUID) (models.SessionThread, error)
+	updateFn         func(ctx context.Context, t *models.SessionThread) error
 	updateStatusFn   func(ctx context.Context, orgID, threadID uuid.UUID, status models.ThreadStatus) error
 }
 
@@ -64,6 +65,13 @@ func (m *mockThreadStore) ClaimForResumeInSession(ctx context.Context, orgID, se
 		return m.claimForResumeFn(ctx, orgID, sessionID, threadID)
 	}
 	return models.SessionThread{}, fmt.Errorf("not resumable")
+}
+
+func (m *mockThreadStore) UpdateEditable(ctx context.Context, t *models.SessionThread) error {
+	if m.updateFn != nil {
+		return m.updateFn(ctx, t)
+	}
+	return nil
 }
 
 func (m *mockThreadStore) UpdateStatus(ctx context.Context, orgID, threadID uuid.UUID, status models.ThreadStatus) error {
@@ -360,6 +368,266 @@ func TestSessionThreadHandler_CreateThread(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestSessionThreadHandler_UpdateThread(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	threadID := uuid.New()
+
+	tests := []struct {
+		name           string
+		sessionIDParam string
+		threadIDParam  string
+		body           string
+		setupDeps      func(deps *threadTestDeps)
+		expectedCode   int
+		expectedError  string
+	}{
+		{
+			name:           "success",
+			sessionIDParam: sessionID.String(),
+			threadIDParam:  threadID.String(),
+			body:           `{"agent_type":"codex","label":"Codex 2"}`,
+			setupDeps: func(deps *threadTestDeps) {
+				deps.sessionStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.Session, error) {
+					return models.Session{ID: sessionID, OrgID: orgID, Status: "running", AgentType: models.AgentTypeClaudeCode}, nil
+				}
+				deps.threadStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
+					return models.SessionThread{
+						ID:          threadID,
+						SessionID:   sessionID,
+						OrgID:       orgID,
+						AgentType:   models.AgentTypeClaudeCode,
+						Label:       "Claude Code 2",
+						Status:      models.ThreadStatusIdle,
+						CurrentTurn: 0,
+					}, nil
+				}
+				deps.threadStore.updateFn = func(_ context.Context, updated *models.SessionThread) error {
+					require.Equal(t, models.AgentTypeCodex, updated.AgentType, "UpdateThread should persist the requested agent type")
+					require.Equal(t, "Codex 2", updated.Label, "UpdateThread should persist the requested label")
+					return nil
+				}
+			},
+			expectedCode: http.StatusOK,
+		},
+		{
+			name:           "invalid session ID",
+			sessionIDParam: "not-a-uuid",
+			threadIDParam:  threadID.String(),
+			body:           `{"agent_type":"codex","label":"Codex 2"}`,
+			setupDeps:      func(deps *threadTestDeps) {},
+			expectedCode:   http.StatusBadRequest,
+			expectedError:  "INVALID_ID",
+		},
+		{
+			name:           "invalid thread ID",
+			sessionIDParam: sessionID.String(),
+			threadIDParam:  "not-a-uuid",
+			body:           `{"agent_type":"codex","label":"Codex 2"}`,
+			setupDeps:      func(deps *threadTestDeps) {},
+			expectedCode:   http.StatusBadRequest,
+			expectedError:  "INVALID_ID",
+		},
+		{
+			name:           "invalid body",
+			sessionIDParam: sessionID.String(),
+			threadIDParam:  threadID.String(),
+			body:           `{invalid-json`,
+			setupDeps:      func(deps *threadTestDeps) {},
+			expectedCode:   http.StatusBadRequest,
+			expectedError:  "INVALID_BODY",
+		},
+		{
+			name:           "empty label rejected",
+			sessionIDParam: sessionID.String(),
+			threadIDParam:  threadID.String(),
+			body:           `{"agent_type":"codex","label":"   "}`,
+			setupDeps:      func(deps *threadTestDeps) {},
+			expectedCode:   http.StatusBadRequest,
+			expectedError:  "MISSING_LABEL",
+		},
+		{
+			name:           "thread not editable",
+			sessionIDParam: sessionID.String(),
+			threadIDParam:  threadID.String(),
+			body:           `{"agent_type":"codex","label":"Codex 2"}`,
+			setupDeps: func(deps *threadTestDeps) {
+				deps.sessionStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.Session, error) {
+					return models.Session{ID: sessionID, OrgID: orgID, Status: "running", AgentType: models.AgentTypeClaudeCode}, nil
+				}
+				deps.threadStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
+					return models.SessionThread{
+						ID:          threadID,
+						SessionID:   sessionID,
+						OrgID:       orgID,
+						AgentType:   models.AgentTypeClaudeCode,
+						Label:       "Claude Code 2",
+						Status:      models.ThreadStatusRunning,
+						CurrentTurn: 0,
+					}, nil
+				}
+			},
+			expectedCode:  http.StatusConflict,
+			expectedError: "THREAD_NOT_EDITABLE",
+		},
+		{
+			name:           "invalid agent type",
+			sessionIDParam: sessionID.String(),
+			threadIDParam:  threadID.String(),
+			body:           `{"agent_type":"pm_agent","label":"PM Agent 2"}`,
+			setupDeps: func(deps *threadTestDeps) {
+				deps.sessionStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.Session, error) {
+					return models.Session{ID: sessionID, OrgID: orgID, Status: "running", AgentType: models.AgentTypeClaudeCode}, nil
+				}
+				deps.threadStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
+					return models.SessionThread{
+						ID:          threadID,
+						SessionID:   sessionID,
+						OrgID:       orgID,
+						AgentType:   models.AgentTypeClaudeCode,
+						Label:       "Claude Code 2",
+						Status:      models.ThreadStatusIdle,
+						CurrentTurn: 0,
+					}, nil
+				}
+			},
+			expectedCode:  http.StatusBadRequest,
+			expectedError: "INVALID_AGENT_TYPE",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			handler, deps := newThreadHandler(t)
+			tt.setupDeps(deps)
+
+			req := threadRequest(http.MethodPatch, "/api/v1/sessions/"+tt.sessionIDParam+"/threads/"+tt.threadIDParam, tt.body, orgID, map[string]string{
+				"id":  tt.sessionIDParam,
+				"tid": tt.threadIDParam,
+			})
+			w := httptest.NewRecorder()
+
+			handler.UpdateThread(w, req)
+			require.Equal(t, tt.expectedCode, w.Code, "UpdateThread should return the expected status code")
+
+			if tt.expectedError != "" {
+				var errResp models.ErrorResponse
+				err := json.Unmarshal(w.Body.Bytes(), &errResp)
+				require.NoError(t, err, "response body should be valid JSON")
+				require.Equal(t, tt.expectedError, errResp.Error.Code, "UpdateThread should return the expected error code")
+				return
+			}
+
+			var resp models.SingleResponse[models.SessionThread]
+			err := json.Unmarshal(w.Body.Bytes(), &resp)
+			require.NoError(t, err, "response body should be valid JSON")
+			require.Equal(t, models.AgentTypeCodex, resp.Data.AgentType, "UpdateThread should return the updated agent type")
+			require.Equal(t, "Codex 2", resp.Data.Label, "UpdateThread should return the updated label")
+		})
+	}
+}
+
+// TestSessionThreadHandler_UpdateThread_ModelWireEncoding pins the contract
+// the handler exposes for the optional `model` field: absence keeps, JSON
+// null clears, empty string clears, and a value sets. JSON null and "field
+// absent" decode to the same `*string` nil, so the handler distinguishes
+// them via json.RawMessage; this test would have caught the bug where
+// `{"model": null}` silently kept the existing override.
+func TestSessionThreadHandler_UpdateThread_ModelWireEncoding(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	threadID := uuid.New()
+
+	tests := []struct {
+		name             string
+		body             string
+		existingOverride *string
+		assertModel      func(t *testing.T, model *string)
+	}{
+		{
+			name:             "field absent keeps existing override",
+			body:             `{"label":"Codex 2"}`,
+			existingOverride: stringPtrTest(models.CodexModelGPT54Mini),
+			assertModel: func(t *testing.T, model *string) {
+				require.NotNil(t, model, "absent model field should keep the existing override")
+				require.Equal(t, models.CodexModelGPT54Mini, *model)
+			},
+		},
+		{
+			name:             "json null clears the override",
+			body:             `{"label":"Codex 2","model":null}`,
+			existingOverride: stringPtrTest(models.CodexModelGPT54Mini),
+			assertModel: func(t *testing.T, model *string) {
+				require.Nil(t, model, "explicit JSON null should clear the override")
+			},
+		},
+		{
+			name:             "empty string clears the override",
+			body:             `{"label":"Codex 2","model":""}`,
+			existingOverride: stringPtrTest(models.CodexModelGPT54Mini),
+			assertModel: func(t *testing.T, model *string) {
+				require.Nil(t, model, "explicit empty string should clear the override")
+			},
+		},
+		{
+			name:             "value sets the override",
+			body:             `{"label":"Codex 2","model":"` + models.CodexModelGPT54 + `"}`,
+			existingOverride: nil,
+			assertModel: func(t *testing.T, model *string) {
+				require.NotNil(t, model, "value should set the override")
+				require.Equal(t, models.CodexModelGPT54, *model)
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			handler, deps := newThreadHandler(t)
+			deps.sessionStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.Session, error) {
+				return models.Session{ID: sessionID, OrgID: orgID, Status: "running", AgentType: models.AgentTypeCodex}, nil
+			}
+			deps.threadStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
+				return models.SessionThread{
+					ID:            threadID,
+					SessionID:     sessionID,
+					OrgID:         orgID,
+					AgentType:     models.AgentTypeCodex,
+					ModelOverride: tt.existingOverride,
+					Label:         "Codex 2",
+					Status:        models.ThreadStatusIdle,
+					CurrentTurn:   0,
+				}, nil
+			}
+			var persistedModel *string
+			deps.threadStore.updateFn = func(_ context.Context, updated *models.SessionThread) error {
+				persistedModel = updated.ModelOverride
+				return nil
+			}
+
+			req := threadRequest(http.MethodPatch, "/api/v1/sessions/"+sessionID.String()+"/threads/"+threadID.String(), tt.body, orgID, map[string]string{
+				"id":  sessionID.String(),
+				"tid": threadID.String(),
+			})
+			w := httptest.NewRecorder()
+			handler.UpdateThread(w, req)
+			require.Equal(t, http.StatusOK, w.Code, "UpdateThread should return 200; body: %s", w.Body.String())
+			tt.assertModel(t, persistedModel)
+		})
+	}
+}
+
+func stringPtrTest(value string) *string {
+	return &value
 }
 
 func TestSessionThreadHandler_ListThreads(t *testing.T) {

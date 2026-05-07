@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/pashagolub/pgxmock/v4"
 	"github.com/stretchr/testify/require"
 
@@ -345,6 +346,87 @@ func TestSessionThreadStore_UpdateStatus(t *testing.T) {
 			} else {
 				require.NoError(t, err, "UpdateStatus should not return an error")
 			}
+			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+		})
+	}
+}
+
+func TestSessionThreadStore_UpdateEditable(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		setupMock func(mock pgxmock.PgxPoolIface, orgID, sessionID, threadID uuid.UUID, now time.Time, model string)
+		expectErr error
+	}{
+		{
+			name: "updates blank idle threads",
+			setupMock: func(mock pgxmock.PgxPoolIface, orgID, sessionID, threadID uuid.UUID, now time.Time, model string) {
+				mock.ExpectQuery(`UPDATE session_threads[\s\S]*WHERE id = @id[\s\S]*org_id = @org_id[\s\S]*session_id = @session_id[\s\S]*status = 'idle'[\s\S]*current_turn = 0[\s\S]*RETURNING`).
+					WithArgs(anyArgs(6)...).
+					WillReturnRows(
+						pgxmock.NewRows(sessionThreadTestColumns).
+							AddRow(
+								threadID, sessionID, orgID, "codex", &model,
+								"Codex 2", nil, nil, "idle", nil,
+								0, nil,
+								nil, nil, nil, nil, nil,
+								nil, nil, now,
+								nil, float64(0), 0, nil,
+							),
+					)
+			},
+		},
+		{
+			name: "returns no rows when thread is no longer editable",
+			setupMock: func(mock pgxmock.PgxPoolIface, _ uuid.UUID, _ uuid.UUID, _ uuid.UUID, _ time.Time, _ string) {
+				mock.ExpectQuery(`UPDATE session_threads[\s\S]*WHERE id = @id[\s\S]*org_id = @org_id[\s\S]*session_id = @session_id[\s\S]*status = 'idle'[\s\S]*current_turn = 0[\s\S]*RETURNING`).
+					WithArgs(anyArgs(6)...).
+					WillReturnRows(pgxmock.NewRows(sessionThreadTestColumns))
+			},
+			expectErr: pgx.ErrNoRows,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "should create mock pool")
+			defer mock.Close()
+
+			store := NewSessionThreadStore(mock)
+			orgID := uuid.New()
+			sessionID := uuid.New()
+			threadID := uuid.New()
+			now := time.Now()
+			model := models.CodexModelGPT54
+
+			tt.setupMock(mock, orgID, sessionID, threadID, now, model)
+
+			thread := &models.SessionThread{
+				ID:            threadID,
+				SessionID:     sessionID,
+				OrgID:         orgID,
+				AgentType:     models.AgentTypeCodex,
+				ModelOverride: &model,
+				Label:         "Codex 2",
+				Status:        models.ThreadStatusIdle,
+			}
+
+			err = store.UpdateEditable(context.Background(), thread)
+			if tt.expectErr != nil {
+				require.ErrorIs(t, err, tt.expectErr, "UpdateEditable should surface the guarded-write miss")
+				require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+				return
+			}
+
+			require.NoError(t, err, "UpdateEditable should not return an error")
+			require.Equal(t, models.AgentTypeCodex, thread.AgentType, "UpdateEditable should preserve the updated agent type")
+			require.Equal(t, "Codex 2", thread.Label, "UpdateEditable should preserve the updated label")
+			require.NotNil(t, thread.ModelOverride, "UpdateEditable should preserve the updated model override")
+			require.Equal(t, model, *thread.ModelOverride, "UpdateEditable should preserve the updated model override")
 			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 		})
 	}
