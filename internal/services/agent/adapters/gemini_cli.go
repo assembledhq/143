@@ -58,6 +58,10 @@ func (a *GeminiCLIAdapter) PreparePrompt(ctx context.Context, input *agent.Agent
 		UserPrompt:   userPrompt,
 		MaxTokens:    maxTokens,
 		Files:        files,
+		UsageHint: agent.TokenUsageHint{
+			AgentType:   models.AgentTypeGeminiCLI,
+			BillingMode: agent.TokenBillingModeUnknown,
+		},
 	}, nil
 }
 
@@ -160,6 +164,8 @@ func (a *GeminiCLIAdapter) Execute(ctx context.Context, sandbox *agent.Sandbox, 
 		},
 	}
 
+	result.TokenUsage = agent.FinalizeTokenUsage(result.TokenUsage, prompt.UsageHint)
+
 	return result, nil
 }
 
@@ -201,10 +207,10 @@ func parseGeminiStreamLine(line []byte, result *agent.AgentResult, logCh chan<- 
 			*summaryParts = append(*summaryParts, legacy.Response)
 			tryExtractConfidence(legacy.Response, result)
 			if legacy.Stats != nil {
-				result.TokenUsage = agent.TokenUsage{
+				mergeTokenUsage(&result.TokenUsage, agent.TokenUsage{
 					InputTokens:  legacy.Stats.InputTokens,
 					OutputTokens: legacy.Stats.OutputTokens,
-				}
+				})
 			}
 			if legacy.Error != "" {
 				logCh <- agent.LogEntry{
@@ -306,15 +312,15 @@ func parseGeminiStreamLine(line []byte, result *agent.AgentResult, logCh chan<- 
 			tryExtractConfidence(content, result)
 		}
 		if event.Stats != nil {
-			result.TokenUsage = agent.TokenUsage{
+			mergeTokenUsage(&result.TokenUsage, agent.TokenUsage{
 				InputTokens:  event.Stats.InputTokens,
 				OutputTokens: event.Stats.OutputTokens,
-			}
+			})
 		}
 		if len(event.Result) > 0 {
 			var usage agent.TokenUsage
-			if err := json.Unmarshal(event.Result, &usage); err == nil && usage.InputTokens > 0 {
-				result.TokenUsage = usage
+			if err := json.Unmarshal(event.Result, &usage); err == nil {
+				mergeTokenUsage(&result.TokenUsage, usage)
 			}
 		}
 
@@ -357,10 +363,10 @@ func parseGeminiOutput(output []byte, result *agent.AgentResult, logCh chan<- ag
 		tryExtractConfidence(geminiResp.Response, result)
 
 		if geminiResp.Stats != nil {
-			result.TokenUsage = agent.TokenUsage{
+			mergeTokenUsage(&result.TokenUsage, agent.TokenUsage{
 				InputTokens:  geminiResp.Stats.InputTokens,
 				OutputTokens: geminiResp.Stats.OutputTokens,
-			}
+			})
 		}
 		if geminiResp.Error != "" {
 			logCh <- agent.LogEntry{
@@ -535,15 +541,15 @@ func parseGeminiStreamOutput(output []byte, result *agent.AgentResult, logCh cha
 				tryExtractConfidence(content, result)
 			}
 			if event.Stats != nil {
-				result.TokenUsage = agent.TokenUsage{
+				mergeTokenUsage(&result.TokenUsage, agent.TokenUsage{
 					InputTokens:  event.Stats.InputTokens,
 					OutputTokens: event.Stats.OutputTokens,
-				}
+				})
 			}
 			if len(event.Result) > 0 {
 				var usage agent.TokenUsage
-				if err := json.Unmarshal(event.Result, &usage); err == nil && usage.InputTokens > 0 {
-					result.TokenUsage = usage
+				if err := json.Unmarshal(event.Result, &usage); err == nil {
+					mergeTokenUsage(&result.TokenUsage, usage)
 				}
 			}
 

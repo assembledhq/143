@@ -58,6 +58,10 @@ func (a *CodexAdapter) PreparePrompt(ctx context.Context, input *agent.AgentInpu
 		MaxTokens:       maxTokens,
 		ReasoningEffort: input.ReasoningEffort,
 		Files:           files,
+		UsageHint: agent.TokenUsageHint{
+			AgentType:   models.AgentTypeCodex,
+			BillingMode: agent.TokenBillingModeUnknown,
+		},
 	}, nil
 }
 
@@ -176,6 +180,8 @@ func (a *CodexAdapter) Execute(ctx context.Context, sandbox *agent.Sandbox, prom
 		},
 	}
 
+	result.TokenUsage = agent.FinalizeTokenUsage(result.TokenUsage, prompt.UsageHint)
+
 	return result, nil
 }
 
@@ -231,10 +237,11 @@ func parseCodexStreamLine(line []byte, result *agent.AgentResult, logCh chan<- a
 			}
 			tryExtractConfidence(legacy.Response, result)
 			if legacy.Stats != nil {
-				result.TokenUsage = agent.TokenUsage{
+				mergeTokenUsage(&result.TokenUsage, agent.TokenUsage{
+					Reported:     true,
 					InputTokens:  legacy.Stats.InputTokens,
 					OutputTokens: legacy.Stats.OutputTokens,
-				}
+				})
 			}
 			return
 		}
@@ -358,15 +365,17 @@ func parseCodexStreamLine(line []byte, result *agent.AgentResult, logCh chan<- a
 			tryExtractConfidence(content, result)
 		}
 		if event.Stats != nil {
-			result.TokenUsage = agent.TokenUsage{
+			mergeTokenUsage(&result.TokenUsage, agent.TokenUsage{
+				Reported:     true,
 				InputTokens:  event.Stats.InputTokens,
 				OutputTokens: event.Stats.OutputTokens,
-			}
+			})
 		}
 		if len(event.Result) > 0 {
 			var usage agent.TokenUsage
-			if err := json.Unmarshal(event.Result, &usage); err == nil && usage.InputTokens > 0 {
-				result.TokenUsage = usage
+			if err := json.Unmarshal(event.Result, &usage); err == nil {
+				usage.Reported = true
+				mergeTokenUsage(&result.TokenUsage, usage)
 			}
 		}
 
@@ -427,11 +436,13 @@ func parseCodexStreamLine(line []byte, result *agent.AgentResult, logCh chan<- a
 				CachedInputTokens int `json:"cached_input_tokens"`
 				OutputTokens      int `json:"output_tokens"`
 			}
-			if err := json.Unmarshal(event.Usage, &usage); err == nil && usage.InputTokens > 0 {
-				result.TokenUsage = agent.TokenUsage{
-					InputTokens:  usage.InputTokens,
-					OutputTokens: usage.OutputTokens,
-				}
+			if err := json.Unmarshal(event.Usage, &usage); err == nil {
+				mergeTokenUsage(&result.TokenUsage, agent.TokenUsage{
+					Reported:          true,
+					InputTokens:       usage.InputTokens,
+					CachedInputTokens: usage.CachedInputTokens,
+					OutputTokens:      usage.OutputTokens,
+				})
 			}
 		}
 		logCh <- agent.LogEntry{
@@ -479,10 +490,11 @@ func parseCodexOutput(output []byte, result *agent.AgentResult, logCh chan<- age
 		tryExtractConfidence(codexResp.Response, result)
 
 		if codexResp.Stats != nil {
-			result.TokenUsage = agent.TokenUsage{
+			mergeTokenUsage(&result.TokenUsage, agent.TokenUsage{
+				Reported:     true,
 				InputTokens:  codexResp.Stats.InputTokens,
 				OutputTokens: codexResp.Stats.OutputTokens,
-			}
+			})
 		}
 		if codexResp.Error != "" {
 			logCh <- agent.LogEntry{

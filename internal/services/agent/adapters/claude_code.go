@@ -85,6 +85,10 @@ func (a *ClaudeCodeAdapter) PreparePrompt(ctx context.Context, input *agent.Agen
 		MaxTokens:       maxTokens,
 		ReasoningEffort: input.ReasoningEffort,
 		Files:           files,
+		UsageHint: agent.TokenUsageHint{
+			AgentType:   models.AgentTypeClaudeCode,
+			BillingMode: agent.TokenBillingModeUnknown,
+		},
 	}, nil
 }
 
@@ -208,11 +212,27 @@ func (a *ClaudeCodeAdapter) Execute(ctx context.Context, sandbox *agent.Sandbox,
 			}
 			summaryParts = append(summaryParts, event.Content)
 			tryExtractConfidence(event.Content, result)
+			if event.Usage != nil {
+				mergeTokenUsage(&result.TokenUsage, agent.TokenUsage{
+					Reported:            true,
+					InputTokens:         event.Usage.InputTokens,
+					CachedInputTokens:   event.Usage.CachedInputTokens,
+					CacheCreationTokens: event.Usage.CacheCreationTokens,
+					OutputTokens:        event.Usage.OutputTokens,
+				})
+			}
 			if len(event.Result) > 0 {
 				var usage agent.TokenUsage
-				if err := json.Unmarshal(event.Result, &usage); err == nil && usage.InputTokens > 0 {
-					result.TokenUsage = usage
+				if err := json.Unmarshal(event.Result, &usage); err == nil {
+					usage.Reported = true
+					mergeTokenUsage(&result.TokenUsage, usage)
 				}
+			}
+			if event.TotalCostUSD != nil {
+				setDirectUSDCost(&result.TokenUsage, *event.TotalCostUSD, "claude_result_total_cost_usd")
+			}
+			if event.CostUSD != nil {
+				setDirectUSDCost(&result.TokenUsage, *event.CostUSD, "claude_result_cost_usd")
 			}
 			// Extract session ID from result event if present.
 			if event.SessionID != "" {
@@ -273,6 +293,8 @@ func (a *ClaudeCodeAdapter) Execute(ctx context.Context, sandbox *agent.Sandbox,
 		},
 	}
 
+	result.TokenUsage = agent.FinalizeTokenUsage(result.TokenUsage, prompt.UsageHint)
+
 	return result, nil
 }
 
@@ -284,13 +306,21 @@ func WithSandboxProvider(ctx context.Context, p agent.SandboxProvider) context.C
 
 // claudeStreamEvent represents a single line of Claude Code's stream-json output.
 type claudeStreamEvent struct {
-	Type      string          `json:"type"`
-	Content   string          `json:"content,omitempty"`
-	Message   string          `json:"message,omitempty"`
-	Tool      string          `json:"tool,omitempty"`
-	Input     json.RawMessage `json:"input,omitempty"`
-	Result    json.RawMessage `json:"result,omitempty"`
-	SessionID string          `json:"session_id,omitempty"`
+	Type         string          `json:"type"`
+	Content      string          `json:"content,omitempty"`
+	Message      string          `json:"message,omitempty"`
+	Tool         string          `json:"tool,omitempty"`
+	Input        json.RawMessage `json:"input,omitempty"`
+	Result       json.RawMessage `json:"result,omitempty"`
+	SessionID    string          `json:"session_id,omitempty"`
+	TotalCostUSD *float64        `json:"total_cost_usd,omitempty"`
+	CostUSD      *float64        `json:"cost_usd,omitempty"`
+	Usage        *struct {
+		InputTokens         int `json:"input_tokens"`
+		CachedInputTokens   int `json:"cache_read_input_tokens"`
+		CacheCreationTokens int `json:"cache_creation_input_tokens"`
+		OutputTokens        int `json:"output_tokens"`
+	} `json:"usage,omitempty"`
 }
 
 // claudeToolUseMetadata builds the metadata map for a tool_use log entry,
@@ -381,12 +411,25 @@ func parseStreamOutput(output []byte, result *agent.AgentResult, logCh chan<- ag
 			}
 			summaryParts = append(summaryParts, event.Content)
 			tryExtractConfidence(event.Content, result)
-			// Parse token usage if present.
+			if event.Usage != nil {
+				mergeTokenUsage(&result.TokenUsage, agent.TokenUsage{
+					InputTokens:         event.Usage.InputTokens,
+					CachedInputTokens:   event.Usage.CachedInputTokens,
+					CacheCreationTokens: event.Usage.CacheCreationTokens,
+					OutputTokens:        event.Usage.OutputTokens,
+				})
+			}
 			if len(event.Result) > 0 {
 				var usage agent.TokenUsage
-				if err := json.Unmarshal(event.Result, &usage); err == nil && usage.InputTokens > 0 {
-					result.TokenUsage = usage
+				if err := json.Unmarshal(event.Result, &usage); err == nil {
+					mergeTokenUsage(&result.TokenUsage, usage)
 				}
+			}
+			if event.TotalCostUSD != nil {
+				setDirectUSDCost(&result.TokenUsage, *event.TotalCostUSD, "claude_result_total_cost_usd")
+			}
+			if event.CostUSD != nil {
+				setDirectUSDCost(&result.TokenUsage, *event.CostUSD, "claude_result_cost_usd")
 			}
 
 		default:

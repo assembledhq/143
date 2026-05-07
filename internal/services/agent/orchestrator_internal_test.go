@@ -218,6 +218,18 @@ func (p testInternalClaudeCodeAuthProvider) GetValidToken(context.Context, uuid.
 	return p.sub, &id, nil
 }
 
+type testInternalOrgStore struct {
+	org models.Organization
+	err error
+}
+
+func (s testInternalOrgStore) GetByID(context.Context, uuid.UUID) (models.Organization, error) {
+	if s.err != nil {
+		return models.Organization{}, s.err
+	}
+	return s.org, nil
+}
+
 func TestSetupFreshSandbox_CodexAPIKeyUsesResolvedEnv(t *testing.T) {
 	t.Parallel()
 
@@ -256,12 +268,111 @@ func TestSetupFreshSandbox_CodexAPIKeyUsesResolvedEnv(t *testing.T) {
 		TriggeredByUserID: &userID,
 	}
 
-	_, _, err := orch.setupFreshSandbox(context.Background(), session, &Sandbox{ID: "sandbox-1", HomeDir: "/home/sandbox", WorkDir: "/home/sandbox/work"}, map[string]string{
+	_, _, _, err := orch.setupFreshSandbox(context.Background(), session, &Sandbox{ID: "sandbox-1", HomeDir: "/home/sandbox", WorkDir: "/home/sandbox/work"}, map[string]string{
 		"OPENAI_API_KEY": "sk-openai",
 	})
 
 	require.NoError(t, err, "setupFreshSandbox should accept the already-resolved Codex API key")
 	require.NotContains(t, provider.writes, "/home/sandbox/.codex/auth.json", "setupFreshSandbox should not require Codex auth.json when the selected unified credential is an API key")
+}
+
+func TestSetupFreshSandbox_CodexLegacyAPIKeyFallbackUsesResolvedEnv(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.MustParse("10101010-1111-2222-3333-444444444444")
+	userID := uuid.MustParse("55555555-6666-7777-8888-999999999999")
+	provider := &testInternalSandboxProvider{}
+	env := NewAgentEnv(AgentEnvDeps{
+		Credentials: &envCredentialProvider{
+			creds: map[models.ProviderName]*models.DecryptedCredential{
+				models.ProviderOpenAI: {
+					OrgID:  orgID,
+					Status: models.CodingCredentialStatusActive,
+					Config: models.OpenAIConfig{APIKey: "sk-legacy-openai"},
+				},
+			},
+		},
+		Provider: provider,
+		Logger:   zerolog.Nop(),
+	})
+	orch := &Orchestrator{
+		env:      env,
+		provider: provider,
+		logger:   zerolog.Nop(),
+	}
+	session := &models.Session{
+		ID:                uuid.MustParse("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"),
+		OrgID:             orgID,
+		AgentType:         models.AgentTypeCodex,
+		TriggeredByUserID: &userID,
+	}
+	envVars := env.Resolve(context.Background(), orgID, models.AgentTypeCodex, &userID)
+
+	_, _, billingMode, err := orch.setupFreshSandbox(context.Background(), session, &Sandbox{ID: "sandbox-legacy", HomeDir: "/home/sandbox", WorkDir: "/home/sandbox/work"}, envVars)
+
+	require.NoError(t, err, "setupFreshSandbox should continue to honor the documented legacy OpenAI API-key fallback")
+	require.Equal(t, TokenBillingModeAPIKey, billingMode, "setupFreshSandbox should classify the legacy OpenAI credential as an API-key billing mode")
+	require.NotContains(t, provider.writes, "/home/sandbox/.codex/auth.json", "setupFreshSandbox should not require Codex auth.json when the legacy fallback resolved an OpenAI API key")
+}
+
+func TestBuildTokenUsageHint_PreservesExplicitClaudeSubscriptionBillingMode(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.MustParse("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
+	userID := uuid.MustParse("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb")
+	orch := &Orchestrator{logger: zerolog.Nop()}
+
+	actual := orch.buildTokenUsageHint(context.Background(), models.AgentTypeClaudeCode, orgID, &userID, map[string]string{
+		"ANTHROPIC_API_KEY": "sk-ant-fallback",
+		"ANTHROPIC_MODEL":   models.ClaudeCodeModelSonnet46,
+	}, TokenUsageHint{
+		AgentType:      models.AgentTypeClaudeCode,
+		EffectiveModel: models.ClaudeCodeModelSonnet46,
+		BillingMode:    TokenBillingModeSubscription,
+	})
+
+	require.Equal(t, TokenBillingModeSubscription, actual.BillingMode, "explicit billing mode from the auth path should not be overwritten by the fallback Anthropic API key env var")
+	require.Equal(t, models.ClaudeCodeModelSonnet46, actual.EffectiveModel, "buildTokenUsageHint should retain the effective model")
+}
+
+func TestBuildTokenUsageHint_UsesAgentConfigModelDefaultsWhenEnvOmitsThem(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.MustParse("cccccccc-cccc-cccc-cccc-cccccccccccc")
+	userID := uuid.MustParse("dddddddd-dddd-dddd-dddd-dddddddddddd")
+	orgSettings := json.RawMessage(`{"agent_config":{"codex":{"OPENAI_MODEL":"gpt-5.4"},"claude_code":{"ANTHROPIC_MODEL":"claude-sonnet-4-6"},"gemini_cli":{"GEMINI_MODEL":"gemini-2.5-pro"}}}`)
+	env := NewAgentEnv(AgentEnvDeps{
+		Orgs: testInternalOrgStore{
+			org: models.Organization{
+				ID:       orgID,
+				Settings: orgSettings,
+			},
+		},
+		Logger: zerolog.Nop(),
+	})
+	orch := &Orchestrator{
+		env:    env,
+		logger: zerolog.Nop(),
+	}
+
+	tests := []struct {
+		name      string
+		agentType models.AgentType
+		expected  string
+	}{
+		{name: "codex", agentType: models.AgentTypeCodex, expected: models.CodexModelGPT54},
+		{name: "claude", agentType: models.AgentTypeClaudeCode, expected: models.ClaudeCodeModelSonnet46},
+		{name: "gemini", agentType: models.AgentTypeGeminiCLI, expected: models.GeminiCLIModelGemini25Pro},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			actual := orch.buildTokenUsageHint(context.Background(), tt.agentType, orgID, &userID, map[string]string{}, TokenUsageHint{AgentType: tt.agentType})
+			require.Equal(t, tt.expected, actual.EffectiveModel, "buildTokenUsageHint should recover the agent_config model default when env injection is intentionally skipped")
+		})
+	}
 }
 
 func TestSetupFreshSandbox_CodexAPIKeyDoesNotRePickSubscriptionAtSamePriority(t *testing.T) {
@@ -320,7 +431,7 @@ func TestSetupFreshSandbox_CodexAPIKeyDoesNotRePickSubscriptionAtSamePriority(t 
 	}
 	envVars := env.Resolve(context.Background(), orgID, models.AgentTypeCodex, &userID)
 
-	_, _, err := orch.setupFreshSandbox(context.Background(), session, &Sandbox{ID: "sandbox-1", HomeDir: "/home/sandbox", WorkDir: "/home/sandbox/work"}, envVars)
+	_, _, _, err := orch.setupFreshSandbox(context.Background(), session, &Sandbox{ID: "sandbox-1", HomeDir: "/home/sandbox", WorkDir: "/home/sandbox/work"}, envVars)
 
 	require.NoError(t, err, "setupFreshSandbox should use the already-resolved Codex API key")
 	require.NotContains(t, provider.writes, "/home/sandbox/.codex/auth.json", "setupFreshSandbox should not re-pick a same-priority Codex subscription after env resolution selected an API key")
@@ -388,7 +499,7 @@ func TestSetupFreshSandbox_ClaudeAPIKeyDoesNotInjectLowerPrioritySubscription(t 
 		TriggeredByUserID: &userID,
 	}
 
-	_, _, err := orch.setupFreshSandbox(context.Background(), session, &Sandbox{ID: "sandbox-1", HomeDir: "/home/sandbox", WorkDir: "/home/sandbox/work"}, map[string]string{
+	_, _, _, err := orch.setupFreshSandbox(context.Background(), session, &Sandbox{ID: "sandbox-1", HomeDir: "/home/sandbox", WorkDir: "/home/sandbox/work"}, map[string]string{
 		"ANTHROPIC_API_KEY": "sk-ant-api-key",
 	})
 
@@ -459,7 +570,7 @@ func TestSetupFreshSandbox_ClaudeAPIKeyDoesNotRePickSubscriptionAtSamePriority(t
 	}
 	envVars := env.Resolve(context.Background(), orgID, models.AgentTypeClaudeCode, &userID)
 
-	_, _, err := orch.setupFreshSandbox(context.Background(), session, &Sandbox{ID: "sandbox-1", HomeDir: "/home/sandbox", WorkDir: "/home/sandbox/work"}, envVars)
+	_, _, _, err := orch.setupFreshSandbox(context.Background(), session, &Sandbox{ID: "sandbox-1", HomeDir: "/home/sandbox", WorkDir: "/home/sandbox/work"}, envVars)
 
 	require.NoError(t, err, "setupFreshSandbox should use the already-resolved Claude API key")
 	require.NotContains(t, provider.writes, "/home/sandbox/.claude/.credentials.json", "setupFreshSandbox should not re-pick a same-priority subscription after env resolution selected an API key")
@@ -520,12 +631,69 @@ func TestSetupFreshSandbox_ClaudeSubscriptionUsesUnifiedPickedToken(t *testing.T
 		TriggeredByUserID: &userID,
 	}
 
-	_, _, err := orch.setupFreshSandbox(context.Background(), session, &Sandbox{ID: "sandbox-1", HomeDir: "/home/sandbox", WorkDir: "/home/sandbox/work"}, map[string]string{})
+	_, _, _, err := orch.setupFreshSandbox(context.Background(), session, &Sandbox{ID: "sandbox-1", HomeDir: "/home/sandbox", WorkDir: "/home/sandbox/work"}, map[string]string{})
 
 	require.NoError(t, err, "setupFreshSandbox should inject the selected unified Claude subscription")
 	written := provider.writes["/home/sandbox/.claude/.credentials.json"]
 	require.Contains(t, string(written), "unified-access", "Claude credentials file should use the unified resolver's selected subscription")
 	require.NotContains(t, string(written), "legacy-access", "Claude credentials file should not fall back to the legacy org-wide subscription when unified selected a row")
+}
+
+func TestSetupFreshSandbox_ReturnsResolvedAuthBillingMode(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.MustParse("a1a1a1a1-a1a1-a1a1-a1a1-a1a1a1a1a1a1")
+	userID := uuid.MustParse("b2b2b2b2-b2b2-b2b2-b2b2-b2b2b2b2b2b2")
+	unifiedID := uuid.MustParse("c3c3c3c3-c3c3-c3c3-c3c3-c3c3c3c3c3c3")
+	unifiedRow := models.DecryptedCodingCredential{
+		ID:       unifiedID,
+		OrgID:    orgID,
+		UserID:   &userID,
+		Provider: models.ProviderAnthropicSubscription,
+		Priority: 1,
+		Status:   models.CodingCredentialStatusActive,
+		Config: models.AnthropicSubscriptionConfig{
+			AccessToken:  "fresh-auth-access",
+			RefreshToken: "fresh-auth-refresh",
+			ExpiresAt:    time.Now().Add(time.Hour),
+		},
+	}
+	coding := &testInternalQueuedCodingCredentialProvider{
+		resolvable: map[models.ProviderName][]models.DecryptedCodingCredential{
+			models.ProviderAnthropicSubscription: {unifiedRow},
+		},
+		picks: []models.DecryptedCodingCredential{unifiedRow},
+	}
+	provider := &testInternalSandboxProvider{}
+	env := NewAgentEnv(AgentEnvDeps{
+		CodingCredentials: coding,
+		Provider:          provider,
+		Logger:            zerolog.Nop(),
+	})
+	orch := &Orchestrator{
+		env:      env,
+		provider: provider,
+		logger:   zerolog.Nop(),
+		claudeCodeAuth: testInternalClaudeCodeAuthProvider{
+			id: unifiedID,
+			sub: &models.AnthropicSubscription{
+				AccessToken:  "fresh-auth-access",
+				RefreshToken: "fresh-auth-refresh",
+				ExpiresAt:    time.Now().Add(time.Hour),
+			},
+		},
+	}
+	session := &models.Session{
+		ID:                uuid.MustParse("d4d4d4d4-d4d4-d4d4-d4d4-d4d4d4d4d4d4"),
+		OrgID:             orgID,
+		AgentType:         models.AgentTypeClaudeCode,
+		TriggeredByUserID: &userID,
+	}
+
+	_, _, billingMode, err := orch.setupFreshSandbox(context.Background(), session, &Sandbox{ID: "sandbox-1", HomeDir: "/home/sandbox", WorkDir: "/home/sandbox/work"}, map[string]string{})
+
+	require.NoError(t, err, "setupFreshSandbox should succeed for a fresh Claude subscription run")
+	require.Equal(t, TokenBillingModeSubscription, billingMode, "setupFreshSandbox should return the auth-selected billing mode for fresh runs")
 }
 
 func TestCreateAssistantMessage_CarriesThreadID(t *testing.T) {
@@ -554,6 +722,60 @@ func TestCreateAssistantMessage_CarriesThreadID(t *testing.T) {
 	require.Equal(t, threadID, *logs.markedThreadID, "duplicate marker should use the provided thread id")
 	require.Equal(t, 4, logs.markedTurnNumber, "duplicate marker should use the provided turn number")
 	require.Equal(t, "Final answer", logs.markedMessage, "duplicate marker should target the assistant summary")
+}
+
+func TestCreateAssistantMessage_PersistsCacheOnlyAndNativeCostUsage(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.MustParse("eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee")
+	sessionID := uuid.MustParse("ffffffff-ffff-ffff-ffff-ffffffffffff")
+	messages := &testInternalSessionMessageStore{}
+	orch := &Orchestrator{
+		sessionMessages: messages,
+		logger:          zerolog.Nop(),
+	}
+
+	err := orch.createAssistantMessage(context.Background(), sessionID, orgID, nil, 2, &AgentResult{
+		Summary: "Cached reply",
+		TokenUsage: TokenUsage{
+			CachedInputTokens:   123,
+			CacheCreationTokens: 45,
+			NativeCost: &TokenCost{
+				Amount: 12.5,
+				Unit:   TokenCostUnitCredits,
+				Source: TokenCostSourceDerived,
+			},
+		},
+	})
+
+	require.NoError(t, err, "createAssistantMessage should persist assistant messages with cache-only/native-cost token usage")
+	require.Len(t, messages.messages, 1, "assistant message should be created")
+	require.NotNil(t, messages.messages[0].TokenUsage, "cache-only/native-cost usage should still be persisted on the assistant message")
+}
+
+func TestCreateAssistantMessage_DoesNotPersistUnavailableTokenUsage(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.MustParse("abababab-abab-abab-abab-abababababab")
+	sessionID := uuid.MustParse("cdcdcdcd-cdcd-cdcd-cdcd-cdcdcdcdcdcd")
+	messages := &testInternalSessionMessageStore{}
+	orch := &Orchestrator{
+		sessionMessages: messages,
+		logger:          zerolog.Nop(),
+	}
+
+	err := orch.createAssistantMessage(context.Background(), sessionID, orgID, nil, 3, &AgentResult{
+		Summary: "No usage reported",
+		TokenUsage: FinalizeTokenUsage(TokenUsage{}, TokenUsageHint{
+			AgentType:      models.AgentTypeCodex,
+			EffectiveModel: models.CodexModelGPT54,
+			BillingMode:    TokenBillingModeSubscription,
+		}),
+	})
+
+	require.NoError(t, err, "createAssistantMessage should not fail when token usage is unavailable")
+	require.Len(t, messages.messages, 1, "assistant message should be created")
+	require.Nil(t, messages.messages[0].TokenUsage, "assistant message should leave token usage nil when the provider reported no token payload")
 }
 
 func TestStreamLogs_CarriesThreadID(t *testing.T) {
@@ -765,7 +987,7 @@ func TestSetupFreshSandbox_WorkingBranchCheckoutFailures(t *testing.T) {
 				logger:       zerolog.Nop(),
 			}
 
-			_, _, err := orch.setupFreshSandbox(context.Background(), session, &Sandbox{ID: "sandbox-1", WorkDir: "/home/sandbox/backend", HomeDir: "/home/sandbox"}, nil)
+			_, _, _, err := orch.setupFreshSandbox(context.Background(), session, &Sandbox{ID: "sandbox-1", WorkDir: "/home/sandbox/backend", HomeDir: "/home/sandbox"}, nil)
 			require.Error(t, err, "setupFreshSandbox should fail when the working branch cannot be created")
 			require.Contains(t, err.Error(), tt.wantErr, "setupFreshSandbox should surface the working-branch checkout failure")
 		})

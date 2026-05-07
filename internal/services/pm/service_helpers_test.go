@@ -216,7 +216,7 @@ func TestServiceInjectRequiredAgentAuth(t *testing.T) {
 			t.Parallel()
 
 			svc := &Service{env: tt.env}
-			err := svc.injectRequiredAgentAuth(ctx, orgID, tt.agentType, sb, nil)
+			_, err := svc.injectRequiredAgentAuth(ctx, orgID, tt.agentType, sb, nil)
 			if tt.wantErr != "" {
 				require.Error(t, err, "injectRequiredAgentAuth should fail for %s", tt.name)
 				var authErr *agent.AuthError

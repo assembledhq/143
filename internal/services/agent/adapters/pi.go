@@ -57,6 +57,10 @@ func (a *PiAdapter) PreparePrompt(ctx context.Context, input *agent.AgentInput) 
 		UserPrompt:   userPrompt,
 		MaxTokens:    maxTokens,
 		Files:        files,
+		UsageHint: agent.TokenUsageHint{
+			AgentType:   models.AgentTypePi,
+			BillingMode: agent.TokenBillingModeUnknown,
+		},
 	}, nil
 }
 

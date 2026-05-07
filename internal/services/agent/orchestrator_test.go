@@ -3831,7 +3831,7 @@ func TestRunAgent_CodexUsesAuthJsonNotEnvVar(t *testing.T) {
 	require.Equal(t, "chatgpt-access-token", tokens["access_token"], "auth.json should contain the ChatGPT OAuth token")
 }
 
-func TestRunAgent_CodexOpenAIKeyAloneIsNotSufficient(t *testing.T) {
+func TestRunAgent_CodexLegacyOpenAIKeyFallbackDoesNotRequireOAuth(t *testing.T) {
 	t.Parallel()
 
 	orgID := testOrg()
@@ -3851,10 +3851,17 @@ func TestRunAgent_CodexOpenAIKeyAloneIsNotSufficient(t *testing.T) {
 		},
 	}
 
+	var capturedCfg agent.SandboxConfig
+	d.provider.CreateFn = func(ctx context.Context, cfg agent.SandboxConfig) (*agent.Sandbox, error) {
+		capturedCfg = cfg
+		return &agent.Sandbox{ID: "codex-legacy-api-key", Provider: "mock", WorkDir: cfg.WorkDir, HomeDir: cfg.HomeDir}, nil
+	}
+
 	orch := buildOrchestrator(d)
 	err := orch.RunAgent(context.Background(), run)
-	require.Error(t, err, "run should fail when only OpenAI API key exists (no ChatGPT OAuth)")
-	require.Contains(t, err.Error(), "no credentials", "error should mention missing credentials")
+	require.NoError(t, err, "run should succeed when the legacy OpenAI API-key fallback resolved an API key")
+	require.Equal(t, "sk-openai-key", capturedCfg.Env["OPENAI_API_KEY"], "sandbox env should carry the legacy OpenAI API key")
+	require.NotContains(t, d.provider.Files, "/home/sandbox/.codex/auth.json", "Codex OAuth auth.json should not be required when the legacy fallback resolved an API key")
 }
 
 func TestRunAgent_CodexUnifiedOpenAIKeyDoesNotRequireOAuth(t *testing.T) {
