@@ -45,6 +45,24 @@ describe("buildTimeline", () => {
     }
   });
 
+  it("pairs tool uses with matching call_id even when results are not adjacent", () => {
+    const logs = [
+      makeLog({ id: 1, created_at: "2026-01-01T00:00:01Z", level: "tool_use", message: "using tool: Read", metadata: { tool: "Read", call_id: "call-a" } }),
+      makeLog({ id: 2, created_at: "2026-01-01T00:00:02Z", level: "tool_use", message: "using tool: Bash", metadata: { tool: "Bash", call_id: "call-b" } }),
+      makeLog({ id: 3, created_at: "2026-01-01T00:00:03Z", level: "output", message: "read result", metadata: { type: "tool_result", call_id: "call-a" } }),
+      makeLog({ id: 4, created_at: "2026-01-01T00:00:04Z", level: "output", message: "bash result", metadata: { type: "tool_result", call_id: "call-b" } }),
+    ];
+    const result = buildTimeline([], logs);
+    expect(result).toHaveLength(2);
+    expect(result.map((entry) => entry.kind)).toEqual(["tool_group", "tool_group"]);
+    if (result[0].kind === "tool_group" && result[1].kind === "tool_group") {
+      expect(result[0].toolUse.id).toBe(1);
+      expect(result[0].toolResult?.id).toBe(3);
+      expect(result[1].toolUse.id).toBe(2);
+      expect(result[1].toolResult?.id).toBe(4);
+    }
+  });
+
   it("handles tool_use without a following tool_result", () => {
     const logs = [
       makeLog({ id: 1, created_at: "2026-01-01T00:00:01Z", level: "tool_use", message: "using tool: Write", metadata: { tool: "Write" } }),
