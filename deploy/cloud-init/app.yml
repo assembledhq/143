@@ -37,9 +37,17 @@ runcmd:
   # Set up GHCR access (token written to file to avoid leaking in cloud-init logs)
   - su - deploy -c 'cat /opt/143/.ghcr-token | docker login ghcr.io -u deploy --password-stdin && rm -f /opt/143/.ghcr-token'
 
-  # Clone repo to get compose files, Caddyfile, and configs.
+  # Clone repo to get compose files, Caddyfile, and configs. These copies
+  # are first-boot fanout: docker-compose.app.yml below is run before any
+  # operator `make provision-app` / `make deploy-app` step gets a chance,
+  # so every file the compose `include:` directive references must already
+  # be on disk here. provision.sh re-syncs the same files later (and is
+  # the canonical source for ongoing changes); the duplication is
+  # intentional, not dead weight.
   - su - deploy -c 'git clone --depth 1 ${REPO_URL} /tmp/143-repo'
   - su - deploy -c 'cp /tmp/143-repo/docker-compose.app.yml /opt/143/'
+  - su - deploy -c 'cp /tmp/143-repo/docker-compose.vector.yml /opt/143/'
+  - su - deploy -c 'cp /tmp/143-repo/docker-compose.dns-probe.yml /opt/143/'
   - su - deploy -c 'cp -r /tmp/143-repo/deploy /opt/143/deploy'
   - rm -rf /tmp/143-repo
 
