@@ -120,8 +120,14 @@ describe("AgentTabStrip", () => {
       />,
     );
 
-    expect(screen.getByRole("tablist", { name: "Agent tabs" })).toBeInTheDocument();
-    expect(screen.getByRole("tab", { name: /main tab/i })).toBeInTheDocument();
+    const tabList = screen.getByRole("tablist", { name: "Agent tabs" });
+    const activeTab = screen.getByRole("tab", { selected: true });
+
+    expect(tabList).toBeInTheDocument();
+    expect(tabList).toHaveAttribute("data-variant", "line");
+    expect(tabList).not.toHaveClass("bg-muted/60");
+    expect(activeTab).toHaveTextContent("Main tab");
+    expect(activeTab).toHaveClass("data-[state=active]:text-primary");
     expect(screen.getByRole("tab", { name: /review/i })).toBeInTheDocument();
   });
 });

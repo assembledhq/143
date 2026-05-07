@@ -1589,9 +1589,18 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 		Issue:        issue,
 		LinkedIssues: linkedIssues,
 		Manual:       run.Origin == models.SessionOriginManual,
+		PromptStyle: func() PromptStyle {
+			if run.Origin == models.SessionOriginManual || run.AutomationRunID != nil {
+				return PromptStyleRawTask
+			}
+			return PromptStyleIssueContext
+		}(),
 		UserMessage: func() string {
 			if msg := latestUserMessage(messages); msg != nil {
 				return msg.Content
+			}
+			if run.AutomationRunID != nil && run.PMApproach != nil {
+				return strings.TrimSpace(*run.PMApproach)
 			}
 			return ""
 		}(),
@@ -1632,7 +1641,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 		}
 	}
 
-	if run.PMApproach != nil || run.PMReasoning != nil {
+	if run.AutomationRunID == nil && (run.PMApproach != nil || run.PMReasoning != nil) {
 		pmCtx := &PMTaskContext{}
 		if run.PMApproach != nil {
 			pmCtx.Approach = *run.PMApproach
@@ -2907,7 +2916,13 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 				Issue:        promptIssue,
 				LinkedIssues: linkedIssues,
 				Manual:       session.Origin == models.SessionOriginManual,
-				UserMessage:  userMessage,
+				PromptStyle: func() PromptStyle {
+					if session.Origin == models.SessionOriginManual || session.AutomationRunID != nil {
+						return PromptStyleRawTask
+					}
+					return PromptStyleIssueContext
+				}(),
+				UserMessage: userMessage,
 				References: func() []models.SessionInputReference {
 					refs := canonicalReferences(latestMsg)
 					if len(refs) > 0 {
@@ -3000,7 +3015,13 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 			Issue:        &issue,
 			LinkedIssues: linkedIssues,
 			Manual:       session.Origin == models.SessionOriginManual,
-			UserMessage:  latestMsg.Content,
+			PromptStyle: func() PromptStyle {
+				if session.Origin == models.SessionOriginManual || session.AutomationRunID != nil {
+					return PromptStyleRawTask
+				}
+				return PromptStyleIssueContext
+			}(),
+			UserMessage: latestMsg.Content,
 			References: func() []models.SessionInputReference {
 				refs := canonicalReferences(latestMsg)
 				if len(refs) > 0 {
