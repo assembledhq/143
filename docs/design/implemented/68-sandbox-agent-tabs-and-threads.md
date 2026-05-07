@@ -207,6 +207,12 @@ transcript and composer fill the area below:
 The side details panel can summarize active tabs, but it should not be the
 primary navigation surface for switching between them.
 
+The multi-tab strip should visually match the rest of the session chrome
+instead of introducing a separate tray treatment. Use the shared line-tab
+pattern already used by adjacent session sub-navigation: transparent strip
+background, a clear active state, and the product's primary underline/accent
+language rather than a detached gray pill bar.
+
 ### Add Tab
 
 The v1 `+` action should be deliberately small. A new tab starts as an empty
