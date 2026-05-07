@@ -175,6 +175,9 @@ func (w *Worker) poll(ctx context.Context) {
 	handlerCtx := withJobOrgID(ctx, job.OrgID)
 	handlerCtx = jobctx.WithDeadLetterHooks(handlerCtx)
 	handlerCtx = jobctx.WithLockToken(handlerCtx, *job.LockToken)
+	if job.TargetNodeID != nil && *job.TargetNodeID != "" && *job.TargetNodeID != w.nodeID {
+		handlerCtx = jobctx.WithDeadTargetNode(handlerCtx, *job.TargetNodeID)
+	}
 	handlerCtx, cancelHandler := context.WithCancel(handlerCtx)
 	defer cancelHandler()
 

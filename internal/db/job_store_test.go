@@ -122,6 +122,39 @@ func TestJobStore_Enqueue(t *testing.T) {
 	}
 }
 
+// TestJobStore_EnqueueWithOpts_PinsTargetNode verifies that EnqueueWithOpts
+// passes TargetNodeID through to the INSERT so node-affinity routing actually
+// records the pin. The plain Enqueue wrapper doesn't take a target — its
+// callers get NULL, the unpinned-claim case.
+func TestJobStore_EnqueueWithOpts_PinsTargetNode(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := NewJobStore(mock)
+	orgID := uuid.New()
+	generatedID := uuid.New()
+	target := "worker-host-c"
+
+	mock.ExpectQuery("INSERT INTO jobs").
+		WithArgs(orgID, "agent", "continue_session", pgxmock.AnyArg(), 5, jobDedupeKeyPtr("k"), &target).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(generatedID))
+
+	id, err := store.EnqueueWithOpts(context.Background(), orgID, EnqueueOpts{
+		Queue:        "agent",
+		JobType:      "continue_session",
+		Payload:      map[string]string{"session_id": "abc"},
+		Priority:     5,
+		DedupeKey:    jobDedupeKeyPtr("k"),
+		TargetNodeID: &target,
+	})
+	require.NoError(t, err)
+	require.Equal(t, generatedID, id, "EnqueueWithOpts should return the generated job id when the pin lands cleanly")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
 func TestJobStore_GetLatestFailedByType(t *testing.T) {
 	t.Parallel()
 
@@ -270,44 +303,44 @@ func TestJobStore_ClaimNextRunnable(t *testing.T) {
 				jobID := uuid.New()
 				orgID := uuid.New()
 				now := time.Now()
-				mock.ExpectQuery("WITH next_job AS[\\s\\S]*RETURNING j.id, j.org_id, j.queue, j.job_type").
-					WithArgs("worker-1", "worker-1", lockToken, int(leaseDuration.Seconds())).
+				mock.ExpectQuery("WITH dead_target_nodes AS[\\s\\S]*next_job AS[\\s\\S]*RETURNING j.id, j.org_id, j.queue, j.job_type").
+					WithArgs(pgxmock.AnyArg(), "worker-1", "worker-1", lockToken, int(leaseDuration.Seconds())).
 					WillReturnRows(pgxmock.NewRows([]string{
 						"id", "org_id", "queue", "job_type", "payload", "priority", "status",
 						"attempts", "max_attempts", "run_at", "locked_by_node_id", "locked_at",
 						"lease_expires_at", "lock_token", "run_owner_id", "last_error",
-						"dedupe_key", "created_at", "updated_at", "completed_at",
+						"dedupe_key", "target_node_id", "created_at", "updated_at", "completed_at",
 					}).AddRow(
 						jobID, orgID, "default", "run_agent", []byte(`{"session_id":"abc"}`), 5, "running",
-						1, 3, now, "worker-1", now, now.Add(leaseDuration), lockToken.String(), "worker-1", nil, nil, now, now, nil,
+						1, 3, now, "worker-1", now, now.Add(leaseDuration), lockToken.String(), "worker-1", nil, nil, nil, now, now, nil,
 					))
 			},
 		},
 		{
-			name: "hydrates optional persisted fields",
+			name: "hydrates optional persisted fields including target node",
 			setupMock: func(mock pgxmock.PgxPoolIface, leaseDuration time.Duration, lockToken uuid.UUID) {
 				jobID := uuid.New()
 				orgID := uuid.New()
 				now := time.Now()
 				completedAt := now.Add(time.Minute)
-				mock.ExpectQuery("WITH next_job AS[\\s\\S]*RETURNING j.id, j.org_id, j.queue, j.job_type").
-					WithArgs("worker-1", "worker-1", lockToken, int(leaseDuration.Seconds())).
+				mock.ExpectQuery("WITH dead_target_nodes AS[\\s\\S]*next_job AS[\\s\\S]*RETURNING j.id, j.org_id, j.queue, j.job_type").
+					WithArgs(pgxmock.AnyArg(), "worker-1", "worker-1", lockToken, int(leaseDuration.Seconds())).
 					WillReturnRows(pgxmock.NewRows([]string{
 						"id", "org_id", "queue", "job_type", "payload", "priority", "status",
 						"attempts", "max_attempts", "run_at", "locked_by_node_id", "locked_at",
 						"lease_expires_at", "lock_token", "run_owner_id", "last_error",
-						"dedupe_key", "created_at", "updated_at", "completed_at",
+						"dedupe_key", "target_node_id", "created_at", "updated_at", "completed_at",
 					}).AddRow(
 						jobID, orgID, "default", "run_agent", []byte(`{"session_id":"abc"}`), 5, "running",
-						1, 3, now, "worker-1", now, now.Add(leaseDuration), lockToken.String(), "worker-1", "boom", "dedupe-1", now, now, completedAt,
+						1, 3, now, "worker-1", now, now.Add(leaseDuration), lockToken.String(), "worker-1", "boom", "dedupe-1", "worker-1", now, now, completedAt,
 					))
 			},
 		},
 		{
 			name: "returns nil when no pending job exists",
 			setupMock: func(mock pgxmock.PgxPoolIface, leaseDuration time.Duration, lockToken uuid.UUID) {
-				mock.ExpectQuery("WITH next_job AS[\\s\\S]*RETURNING j.id, j.org_id, j.queue, j.job_type").
-					WithArgs("worker-1", "worker-1", lockToken, int(leaseDuration.Seconds())).
+				mock.ExpectQuery("WITH dead_target_nodes AS[\\s\\S]*next_job AS[\\s\\S]*RETURNING j.id, j.org_id, j.queue, j.job_type").
+					WithArgs(pgxmock.AnyArg(), "worker-1", "worker-1", lockToken, int(leaseDuration.Seconds())).
 					WillReturnError(pgx.ErrNoRows)
 			},
 			expectNil: true,
@@ -315,8 +348,8 @@ func TestJobStore_ClaimNextRunnable(t *testing.T) {
 		{
 			name: "returns query errors",
 			setupMock: func(mock pgxmock.PgxPoolIface, leaseDuration time.Duration, lockToken uuid.UUID) {
-				mock.ExpectQuery("WITH next_job AS[\\s\\S]*RETURNING j.id, j.org_id, j.queue, j.job_type").
-					WithArgs("worker-1", "worker-1", lockToken, int(leaseDuration.Seconds())).
+				mock.ExpectQuery("WITH dead_target_nodes AS[\\s\\S]*next_job AS[\\s\\S]*RETURNING j.id, j.org_id, j.queue, j.job_type").
+					WithArgs(pgxmock.AnyArg(), "worker-1", "worker-1", lockToken, int(leaseDuration.Seconds())).
 					WillReturnError(errors.New("db down"))
 			},
 			expectErr: true,

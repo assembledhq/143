@@ -1,7 +1,7 @@
 "use client";
 
-import { useState, useCallback } from "react";
-import { ChevronRight, AlertTriangle, FileCode2, FileText, ClipboardList, Check, PenLine } from "lucide-react";
+import { memo, useState, useCallback } from "react";
+import { ChevronRight, AlertTriangle, FileCode2, FileText, ClipboardList, Check, PenLine, FolderTree } from "lucide-react";
 import Image from "next/image";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -13,9 +13,11 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { MarkdownContent } from "@/components/markdown";
+import { LinearIcon } from "@/components/linear-icon";
+import { looksLikeLinearRef } from "@/lib/linear-refs";
 import { PLAN_MODE_PREFIX } from "@/lib/timeline";
 import type { TimelineEntry } from "@/lib/timeline";
-import type { SessionMessage, SessionLog } from "@/lib/types";
+import type { SessionInputReference, SessionMessage, SessionLog } from "@/lib/types";
 import { isImageURL, fileNameFromURL } from "@/lib/utils";
 import { deriveToolDisplay, formatToolInput } from "@/lib/tool-label";
 import { ImageLightbox } from "@/components/image-lightbox";
@@ -109,7 +111,7 @@ function DaySeparator({ dateStr }: { dateStr: string }) {
   );
 }
 
-function ToolGroupEntry({ toolUse, toolResult }: { toolUse: SessionLog; toolResult?: SessionLog }) {
+const ToolGroupEntry = memo(function ToolGroupEntry({ toolUse, toolResult }: { toolUse: SessionLog; toolResult?: SessionLog }) {
   const [open, setOpen] = useState(false);
   const { label } = deriveToolDisplay(toolUse);
   const inputDetail = formatToolInput(toolUse);
@@ -154,9 +156,9 @@ function ToolGroupEntry({ toolUse, toolResult }: { toolUse: SessionLog; toolResu
       )}
     </div>
   );
-}
+});
 
-function ErrorEntry({ log }: { log: SessionLog }) {
+const ErrorEntry = memo(function ErrorEntry({ log }: { log: SessionLog }) {
   const [expanded, setExpanded] = useState(false);
   const isLong = log.message.length > 200;
   const displayMessage = !isLong || expanded ? log.message : log.message.slice(0, 200) + "...";
@@ -186,9 +188,9 @@ function ErrorEntry({ log }: { log: SessionLog }) {
       </div>
     </div>
   );
-}
+});
 
-function HiddenLogEntry({ log }: { log: SessionLog }) {
+const HiddenLogEntry = memo(function HiddenLogEntry({ log }: { log: SessionLog }) {
   return (
     <div className="flex items-start gap-2 px-2 py-0.5 text-xs font-mono text-muted-foreground/70 min-w-0">
       <TimestampLabel
@@ -205,7 +207,7 @@ function HiddenLogEntry({ log }: { log: SessionLog }) {
       <span className="min-w-0 flex-1 break-all">{log.message}</span>
     </div>
   );
-}
+});
 
 function HiddenLogsGroup({ logs }: { logs: SessionLog[] }) {
   const [open, setOpen] = useState(false);
@@ -261,7 +263,7 @@ export function formatMessageTime(dateStr: string): string {
   });
 }
 
-function AttachmentGrid({ attachments }: { attachments: string[] }) {
+const AttachmentGrid = memo(function AttachmentGrid({ attachments }: { attachments: string[] }) {
   const [lightboxSrc, setLightboxSrc] = useState<string | null>(null);
 
   const closeLightbox = useCallback(() => setLightboxSrc(null), []);
@@ -330,7 +332,7 @@ function AttachmentGrid({ attachments }: { attachments: string[] }) {
       )}
     </>
   );
-}
+});
 
 function AssistantBubble({ children }: { children: React.ReactNode }) {
   return (
@@ -342,7 +344,50 @@ function AssistantBubble({ children }: { children: React.ReactNode }) {
   );
 }
 
-function MessageBubble({ msg }: { msg: SessionMessage }) {
+function referenceTagLabel(reference: SessionInputReference): string {
+  if (reference.kind === "app" && looksLikeLinearRef(reference.token ?? reference.id ?? reference.display)) {
+    return reference.id?.trim() || reference.display.trim() || reference.token?.trim() || "Linear issue";
+  }
+  return reference.display.trim() || reference.path?.trim() || reference.id?.trim() || reference.token?.trim() || "Reference";
+}
+
+const ReferenceTags = memo(function ReferenceTags({ references }: { references: SessionInputReference[] }) {
+  if (references.length === 0) {
+    return null;
+  }
+
+  return (
+    <div className="mt-2 flex flex-wrap gap-1.5">
+      {references.map((reference) => {
+        const label = referenceTagLabel(reference);
+        const key = `${reference.kind}:${reference.path ?? reference.id ?? reference.token ?? reference.display}`;
+        const isLinear = reference.kind === "app" && looksLikeLinearRef(reference.token ?? reference.id ?? reference.display);
+
+        return (
+          <Badge
+            key={key}
+            variant="secondary"
+            className="gap-1.5 rounded-full border border-white/20 bg-white/12 px-2 py-0.5 text-xs font-medium text-white"
+          >
+            {isLinear ? (
+              <>
+                <LinearIcon className="h-3 w-3 shrink-0 dark:invert-0" />
+                <span className="uppercase tracking-wide text-white/80">Linear</span>
+              </>
+            ) : reference.kind === "directory" ? (
+              <FolderTree className="h-3 w-3 shrink-0 text-white/80" />
+            ) : (
+              <FileCode2 className="h-3 w-3 shrink-0 text-white/80" />
+            )}
+            <span className="max-w-[14rem] truncate">{label}</span>
+          </Badge>
+        );
+      })}
+    </div>
+  );
+});
+
+const MessageBubble = memo(function MessageBubble({ msg }: { msg: SessionMessage }) {
   // Strip plan mode prefix from user messages for display.
   const isPlanModeUser = msg.role === "user" && msg.content.startsWith(PLAN_MODE_PREFIX);
   const displayContent = isPlanModeUser
@@ -360,6 +405,9 @@ function MessageBubble({ msg }: { msg: SessionMessage }) {
             </div>
           )}
           {displayContent && <p className="whitespace-pre-wrap break-words">{displayContent}</p>}
+          {msg.references && msg.references.length > 0 && (
+            <ReferenceTags references={msg.references} />
+          )}
           {msg.attachments && msg.attachments.length > 0 && (
             <AttachmentGrid attachments={msg.attachments} />
           )}
@@ -386,7 +434,7 @@ function MessageBubble({ msg }: { msg: SessionMessage }) {
       />
     </AssistantBubble>
   );
-}
+});
 
 function PlanOutputBubble({
   children,
@@ -438,7 +486,7 @@ function PlanOutputBubble({
   );
 }
 
-function CodeDiffSummary({
+const CodeDiffSummary = memo(function CodeDiffSummary({
   added,
   removed,
   filesChanged,
@@ -469,7 +517,7 @@ function CodeDiffSummary({
       </Button>
     </div>
   );
-}
+});
 
 interface ChatTimelineProps {
   entries: TimelineEntry[];
@@ -484,7 +532,7 @@ interface ChatTimelineProps {
   ) => React.HTMLAttributes<HTMLDivElement> & Record<`data-${string}`, string | number | undefined>;
 }
 
-export function ChatTimeline({ entries, isRunning, diffStats, onDiffClick, onApprovePlan, onAdjustPlan, getEntryContainerProps }: ChatTimelineProps) {
+function ChatTimelineImpl({ entries, isRunning, diffStats, onDiffClick, onApprovePlan, onAdjustPlan, getEntryContainerProps }: ChatTimelineProps) {
   // Separate visible entries (messages, tool groups, errors) from hidden logs.
   // Group consecutive hidden logs together so they share a single "Show more" toggle.
   const rendered: React.ReactNode[] = [];
@@ -660,3 +708,24 @@ export function ChatTimeline({ entries, isRunning, diffStats, onDiffClick, onApp
     </TooltipProvider>
   );
 }
+
+function diffStatsEqual(
+  a: ChatTimelineProps["diffStats"],
+  b: ChatTimelineProps["diffStats"],
+): boolean {
+  if (a === b) return true;
+  if (!a || !b) return !a && !b;
+  return a.added === b.added && a.removed === b.removed && a.files_changed === b.files_changed;
+}
+
+export const ChatTimeline = memo(ChatTimelineImpl, (prev, next) => {
+  return (
+    prev.entries === next.entries &&
+    prev.isRunning === next.isRunning &&
+    prev.onDiffClick === next.onDiffClick &&
+    prev.onApprovePlan === next.onApprovePlan &&
+    prev.onAdjustPlan === next.onAdjustPlan &&
+    prev.getEntryContainerProps === next.getEntryContainerProps &&
+    diffStatsEqual(prev.diffStats, next.diffStats)
+  );
+});

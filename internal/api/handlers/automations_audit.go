@@ -16,8 +16,9 @@ import (
 // meaningful but a human-readable name + schedule context is.
 func automationAuditSnapshot(a *models.Automation) map[string]any {
 	snap := map[string]any{
-		"name":          a.Name,
-		"schedule_type": a.ScheduleType,
+		"name":           a.Name,
+		"identity_scope": a.IdentityScope.OrDefault(),
+		"schedule_type":  a.ScheduleType,
 	}
 	switch a.ScheduleType {
 	case models.AutomationScheduleInterval:
@@ -66,6 +67,7 @@ func automationAuditDiff(old, new_ *models.Automation) map[string]any {
 	track("execution_mode", old.ExecutionMode, new_.ExecutionMode)
 	track("max_concurrent", old.MaxConcurrent, new_.MaxConcurrent)
 	track("base_branch", old.BaseBranch, new_.BaseBranch)
+	track("identity_scope", old.IdentityScope.OrDefault(), new_.IdentityScope.OrDefault())
 	track("schedule_type", old.ScheduleType, new_.ScheduleType)
 	track("interval_value", optInt(old.IntervalValue), optInt(new_.IntervalValue))
 	track("interval_unit", optString(old.IntervalUnit), optString(new_.IntervalUnit))

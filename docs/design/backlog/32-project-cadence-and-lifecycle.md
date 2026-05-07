@@ -1,10 +1,10 @@
 # 32 - Project Cadence and Lifecycle (Evergreen + Finite)
 
-> **Status:** Partially Implemented | **Last reviewed:** 2026-04-21
+> **Status:** Backlog | **Last reviewed:** 2026-05-06
 >
 > **Implementation notes:** Scheduling fields exist (schedule_enabled, cadence_type, cadence_value, timezone). Missing: project type (finite/evergreen) distinction, run conditions, no-op cycle recording, quick actions tab.
 
-**Depends on**: [29-projects.md](29-projects.md), [30-pm-agent-ux-elevation.md](30-pm-agent-ux-elevation.md), [31-automations-tab.md](31-automations-tab.md)
+**Depends on**: [29-projects.md](../implemented/29-projects.md), [30-pm-agent-ux-elevation.md](30-pm-agent-ux-elevation.md), [31-automations-tab.md](../implemented/31-automations-tab.md)
 
 ## 1. Decision Summary
 

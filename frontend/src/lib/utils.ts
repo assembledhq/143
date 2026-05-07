@@ -6,6 +6,12 @@ export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs))
 }
 
+export function capitalizeWords(value: string): string {
+  return value
+    .replaceAll("_", " ")
+    .replace(/\b\w/g, (match) => match.toUpperCase())
+}
+
 export function sessionTitle(session: Session): string {
   if (session.title) return session.title;
   if (session.pm_approach) return session.pm_approach;

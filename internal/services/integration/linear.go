@@ -4,10 +4,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"regexp"
 	"time"
+	"unicode/utf8"
 
 	"github.com/assembledhq/143/internal/services/ingestion"
 )
@@ -503,26 +506,121 @@ func (l *LinearTaskManager) doGraphQL(ctx context.Context, query string, variabl
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode == http.StatusTooManyRequests {
+		return &LinearRateLimitError{RetryAfter: resp.Header.Get("Retry-After")}
+	}
+	if resp.StatusCode == http.StatusUnauthorized {
+		bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, maxLinearErrorBodyBytes))
+		if msg := linearErrorBodyMessage(bodyBytes); msg != "" {
+			return fmt.Errorf("%w: %s", ErrLinearUnauthorized, truncateLinearErrorMessage(msg))
+		}
+		return ErrLinearUnauthorized
+	}
 	if resp.StatusCode != http.StatusOK {
+		// Capture and surface what Linear actually said. The 4xx body is
+		// where the diagnosable detail lives — masking it as bare "linear API
+		// returned 400" forces ops into log spelunking that won't yield more
+		// than what the body already carries.
+		bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, maxLinearErrorBodyBytes))
+		// If the body is a GraphQL error envelope, prefer the structured
+		// message — it's far more readable than the raw JSON.
+		if msg := linearErrorBodyMessage(bodyBytes); msg != "" {
+			return fmt.Errorf("linear API returned %d: %s", resp.StatusCode, truncateLinearErrorMessage(msg))
+		}
 		return fmt.Errorf("linear API returned %d", resp.StatusCode)
 	}
 
-	// Check for GraphQL errors.
+	// Check for GraphQL errors in a 200 response body.
 	var raw json.RawMessage
 	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
 		return fmt.Errorf("decode linear response: %w", err)
 	}
 
-	var errCheck struct {
+	if msg := parseGraphQLErrorMessage(raw); msg != "" {
+		return fmt.Errorf("linear graphql error: %s", truncateLinearErrorMessage(msg))
+	}
+
+	return json.Unmarshal(raw, target)
+}
+
+// ErrLinearUnauthorized is returned when Linear rejects the access token with
+// a 401. Callers (and the sandbox CLI wrapper) match on this with errors.Is to
+// surface a "reconnect Linear" signal to the user instead of an opaque
+// "linear API returned 401" string.
+var ErrLinearUnauthorized = errors.New("linear unauthorized")
+
+// LinearRateLimitError carries the Retry-After hint from a 429 response so
+// retry orchestration upstream can space its attempts; matches the shape the
+// services/linear client uses so the two surfaces stay legible together.
+type LinearRateLimitError struct {
+	RetryAfter string
+}
+
+func (e *LinearRateLimitError) Error() string {
+	if e.RetryAfter != "" {
+		return fmt.Sprintf("linear rate limit exceeded (retry-after=%s)", e.RetryAfter)
+	}
+	return "linear rate limit exceeded"
+}
+
+// maxLinearErrorBodyBytes caps how much of a non-2xx response body we read
+// before composing an error. Linear can return small JSON envelopes or the
+// occasional HTML error page from its edge — 4 KiB is enough for the actual
+// message and keeps a wedged proxy from turning every retry into a megabyte
+// of error text in worker logs.
+const maxLinearErrorBodyBytes = 4 * 1024
+
+// maxLinearErrorMessageLen is the per-message cap applied after parsing.
+// Linear validation traces can run multi-KB; this keeps logs small while
+// retaining the operator-actionable head of the message.
+const maxLinearErrorMessageLen = 512
+
+func truncateLinearErrorMessage(s string) string {
+	if len(s) <= maxLinearErrorMessageLen {
+		return s
+	}
+	cut := maxLinearErrorMessageLen
+	// Step back to a valid UTF-8 rune boundary so the cap doesn't split a
+	// multi-byte rune and corrupt the error string.
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut] + "…[truncated]"
+}
+
+// parseGraphQLErrorMessage returns the first non-empty errors[].message from a
+// GraphQL response envelope, or "" if the body isn't an envelope or has no
+// errors. Used both for 200 responses (where Linear may report query errors
+// in the body) and for 4xx responses (where it sometimes returns the same
+// envelope with auth/validation errors).
+func parseGraphQLErrorMessage(body []byte) string {
+	if len(bytes.TrimSpace(body)) == 0 {
+		return ""
+	}
+	var envelope struct {
 		Errors []struct {
 			Message string `json:"message"`
 		} `json:"errors"`
 	}
-	if err := json.Unmarshal(raw, &errCheck); err == nil && len(errCheck.Errors) > 0 {
-		return fmt.Errorf("linear graphql error: %s", errCheck.Errors[0].Message)
+	if err := json.Unmarshal(body, &envelope); err != nil {
+		return ""
 	}
+	for _, e := range envelope.Errors {
+		if e.Message != "" {
+			return e.Message
+		}
+	}
+	return ""
+}
 
-	return json.Unmarshal(raw, target)
+func linearErrorBodyMessage(body []byte) string {
+	if msg := parseGraphQLErrorMessage(body); msg != "" {
+		return msg
+	}
+	if trimmed := bytes.TrimSpace(body); len(trimmed) > 0 {
+		return string(trimmed)
+	}
+	return ""
 }
 
 func linearNodeToSummary(node linearIssueNode) TaskSummary {

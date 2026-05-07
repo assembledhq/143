@@ -207,6 +207,22 @@ describe('LinkedIssueChips', () => {
     expect(container.firstChild).toBeNull();
   });
 
+  it('renders a clickable fallback Linear chip from linear_identifier_hint when linked issues are not hydrated yet', async () => {
+    const user = userEvent.setup();
+    const session = makeSession({ linear_identifier_hint: 'ENG-1234' });
+
+    render(<LinkedIssueChips session={session} />);
+
+    const link = screen.getByRole('link', { name: 'ENG-1234' });
+    expect(link).toHaveAttribute('href', 'https://linear.app/issue/ENG-1234');
+    expect(link).toHaveAttribute('target', '_blank');
+    expect(link).toHaveAttribute('rel', 'noopener noreferrer');
+
+    await user.hover(link);
+
+    expect(await screen.findByRole('tooltip')).toHaveTextContent('Open primary Linear issue in Linear');
+  });
+
   it('renders an explicit placeholder when a Linear link lacks an external_id', () => {
     const session = makeSession({
       linked_issues: [

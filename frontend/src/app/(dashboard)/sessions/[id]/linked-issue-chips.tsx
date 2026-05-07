@@ -5,6 +5,12 @@ import { Badge } from "@/components/ui/badge";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import type { Session } from "@/lib/types";
 
+function linearIssueURL(externalID: string, workspaceSlug?: string): string {
+  return workspaceSlug
+    ? `https://linear.app/${encodeURIComponent(workspaceSlug)}/issue/${encodeURIComponent(externalID)}`
+    : `https://linear.app/issue/${encodeURIComponent(externalID)}`;
+}
+
 function linearSkipReasonDetail(reason: string): string {
   switch (reason) {
     case "disabled_by_user":
@@ -54,7 +60,10 @@ function linearSkipReasonDetail(reason: string): string {
 export function LinkedIssueChips({ session }: { session: Session }) {
   const links = session.linked_issues ?? [];
   const prepareFailed = session.linear_prepare_state === "failed";
-  if (links.length === 0 && !prepareFailed) return null;
+  const linearIdentifierHint = session.linear_identifier_hint?.trim() ?? "";
+  const hasRenderableLinearLink = links.some((link) => link.issue_source === "linear" && Boolean(link.external_id));
+  const showFallbackLinearHint = linearIdentifierHint.length > 0 && !hasRenderableLinearLink;
+  if (links.length === 0 && !prepareFailed && !showFallbackLinearHint) return null;
 
   return (
     <TooltipProvider delayDuration={150}>
@@ -92,6 +101,27 @@ export function LinkedIssueChips({ session }: { session: Session }) {
               connection, or re-paste the Linear URL in a follow-up message to
               re-trigger detection.
             </TooltipContent>
+          </Tooltip>
+        )}
+        {showFallbackLinearHint && (
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Badge
+                asChild
+                variant="secondary"
+                className="bg-muted/80 text-foreground border-border/70 [a&]:hover:bg-accent/80"
+              >
+                <a
+                  href={linearIssueURL(linearIdentifierHint)}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                >
+                  <LinearIcon className="h-3 w-3 opacity-70" />
+                  <span>{linearIdentifierHint}</span>
+                </a>
+              </Badge>
+            </TooltipTrigger>
+            <TooltipContent sideOffset={6}>Open primary Linear issue in Linear</TooltipContent>
           </Tooltip>
         )}
         {links.map((link) => {
@@ -134,13 +164,8 @@ export function LinkedIssueChips({ session }: { session: Session }) {
             // Prefer the workspace-qualified URL when we cached the slug;
             // it resolves correctly regardless of which workspace the user
             // last viewed in Linear. Fall back to the universal redirect
-            // for legacy links written before slug caching landed. Both
-            // segments are URL-encoded defensively even though the backend
-            // already normalizes them — guards against future code paths
-            // that surface user-typed slug overrides.
-            const url = link.issue_workspace_slug
-              ? `https://linear.app/${encodeURIComponent(link.issue_workspace_slug)}/issue/${encodeURIComponent(link.external_id)}`
-              : `https://linear.app/issue/${encodeURIComponent(link.external_id)}`;
+            // for legacy links written before slug caching landed.
+            const url = linearIssueURL(link.external_id, link.issue_workspace_slug);
             // The link text (the Linear identifier) remains the accessible
             // name. Avoid overriding it with the long context string.
             return (

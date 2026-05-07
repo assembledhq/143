@@ -9,7 +9,6 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Textarea } from "@/components/ui/textarea";
 import {
   Select,
   SelectContent,
@@ -23,7 +22,10 @@ import {
   CollapsibleTrigger,
 } from "@/components/ui/collapsible";
 import { api } from "@/lib/api";
+import { agentTypeForModel } from "@/lib/agents";
+import { AUTOMATION_GOAL_MAX_LENGTH, automationGoalLengthState } from "@/lib/automation-validation";
 import { BranchPicker } from "@/components/branch-picker";
+import { AutomationGoalEditor } from "@/components/automation-goal-editor";
 import { AutomationModelSelect } from "@/components/automation-model-select";
 import { NoReposWarning } from "@/components/no-repos-warning";
 import { PageContainer } from "@/components/page-container";
@@ -34,6 +36,12 @@ import {
   featuredAutomationTemplateIDs,
   getAutomationTemplate,
 } from "@/lib/automation-templates";
+import {
+  getCodingAgentReasoningOptions,
+  supportsReasoningEffort,
+  toCodingAgentReasoningEffort,
+  type CodingAgentReasoningEffort,
+} from "@/lib/coding-agent-reasoning";
 import {
   browserTimezone,
   hourOptions,
@@ -64,8 +72,16 @@ export default function NewAutomationPage() {
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [baseBranchByRepoId, setBaseBranchByRepoId] = useState<Record<string, string>>({});
   const [model, setModel] = useState<string | undefined>(undefined);
+  const [identityScope, setIdentityScope] = useState<"org" | "personal">("org");
+  const [reasoningEffort, setReasoningEffort] = useState<CodingAgentReasoningEffort>("");
   const [priority, setPriority] = useState(50);
   const [redirecting, setRedirecting] = useState(false);
+
+  const { data: settingsResponse } = useQuery({
+    queryKey: ["settings"],
+    queryFn: () => api.settings.get(),
+  });
+  const settings = (settingsResponse?.data?.settings ?? {}) as { default_agent_type?: string };
 
   // Load repos
   const { data: reposData } = useQuery({
@@ -81,6 +97,10 @@ export default function NewAutomationPage() {
   const selectedBaseBranch = repoId
     ? baseBranchByRepoId[repoId] ?? selectedRepo?.default_branch ?? ""
     : "";
+  const defaultAgentType = settings.default_agent_type ?? "codex";
+  const effectiveAgentType = model ? agentTypeForModel(model) ?? defaultAgentType : defaultAgentType;
+  const showReasoningSelector = supportsReasoningEffort(effectiveAgentType);
+  const reasoningOptions = getCodingAgentReasoningOptions(effectiveAgentType);
 
   const applyTemplate = (templateId: string) => {
     const t = getAutomationTemplate(templateId);
@@ -103,6 +123,8 @@ export default function NewAutomationPage() {
         interval_run_at: `${intervalRunHour}:${intervalRunMinute}`,
         timezone,
         model,
+        identity_scope: identityScope,
+        ...(showReasoningSelector && reasoningEffort ? { reasoning_effort: reasoningEffort } : {}),
         base_branch: selectedBaseBranch.trim() || undefined,
         priority,
       }),
@@ -126,8 +148,12 @@ export default function NewAutomationPage() {
     );
   }
 
+  const goalLength = automationGoalLengthState(goal);
   const canSubmit =
-    name.trim().length > 0 && goal.trim().length > 0 && repoId.length > 0;
+    name.trim().length > 0 &&
+    goal.trim().length > 0 &&
+    !goalLength.isTooLong &&
+    repoId.length > 0;
 
   const featuredTemplates = automationTemplates.filter((template) =>
     featuredAutomationTemplateIDs.includes(template.id),
@@ -215,14 +241,31 @@ export default function NewAutomationPage() {
           </div>
 
           <div className="space-y-1.5">
-            <Label htmlFor="goal">Goal</Label>
-            <Textarea
+            <div className="flex items-center justify-between gap-3">
+              <Label htmlFor="goal">Goal</Label>
+              <span
+                className={cn(
+                  "text-xs tabular-nums",
+                  goalLength.isTooLong ? "text-destructive" : "text-muted-foreground",
+                )}
+              >
+                {goalLength.countText}
+              </span>
+            </div>
+            <AutomationGoalEditor
               id="goal"
               value={goal}
-              onChange={(e) => setGoal(e.target.value)}
+              onChange={setGoal}
+              repositoryId={repoId || undefined}
+              branch={selectedBaseBranch || selectedRepo?.default_branch || undefined}
+              agentType={effectiveAgentType}
               placeholder="Describe what the automation should do each run..."
               rows={3}
+              ariaInvalid={goalLength.isTooLong}
             />
+            <p className={cn("text-xs", goalLength.isTooLong ? "text-destructive" : "text-muted-foreground")}>
+              {goalLength.message ?? `Up to ${AUTOMATION_GOAL_MAX_LENGTH.toLocaleString("en-US")} characters.`}
+            </p>
           </div>
 
           <div className="space-y-1.5">
@@ -257,6 +300,22 @@ export default function NewAutomationPage() {
           </div>
 
           <div className="space-y-1.5">
+            <Label>Run as</Label>
+            <Select value={identityScope} onValueChange={(value: "org" | "personal") => setIdentityScope(value)}>
+              <SelectTrigger aria-label="Run as">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="org">Organization</SelectItem>
+                <SelectItem value="personal">Personal</SelectItem>
+              </SelectContent>
+            </Select>
+            <p className="text-xs text-muted-foreground">
+              Choose whether this automation runs with organization credentials and opens PRs as 143-bot, or uses the creator&apos;s coding-agent preferences and GitHub identity.
+            </p>
+          </div>
+
+          <div className="space-y-1.5">
             <Label id="schedule-label">Schedule</Label>
             <div className="grid gap-3 md:grid-cols-2">
               <div
@@ -264,7 +323,7 @@ export default function NewAutomationPage() {
                 role="group"
                 aria-labelledby="schedule-label"
               >
-                <span className="text-sm text-muted-foreground">Run every</span>
+                <span className="text-sm font-medium leading-none text-muted-foreground">Run every</span>
                 <Input
                   id="interval-value"
                   aria-label="Interval value"
@@ -299,7 +358,7 @@ export default function NewAutomationPage() {
                 </Select>
               </div>
               <div className="flex flex-wrap items-start gap-2 sm:items-center">
-                <span className="text-sm text-muted-foreground">At</span>
+                <span className="text-sm font-medium leading-none text-muted-foreground">At</span>
                 <Select value={intervalRunHour} onValueChange={setIntervalRunHour}>
                   <SelectTrigger className="w-20" aria-label="Run at hour">
                     <SelectValue />
@@ -333,9 +392,6 @@ export default function NewAutomationPage() {
                 />
               </div>
             </div>
-            <p className="text-xs text-muted-foreground">
-              Run time is in {timezone}, selectable in 5-minute increments.
-            </p>
           </div>
 
           {/* Advanced settings */}
@@ -374,6 +430,27 @@ export default function NewAutomationPage() {
                   onValueChange={setModel}
                 />
               </div>
+              {showReasoningSelector ? (
+                <div className="space-y-1.5">
+                  <Label htmlFor="automation-reasoning">Reasoning</Label>
+                  <Select
+                    value={reasoningEffort || "__default__"}
+                    onValueChange={(value) => setReasoningEffort(value === "__default__" ? "" : toCodingAgentReasoningEffort(value))}
+                  >
+                    <SelectTrigger id="automation-reasoning" aria-label="Reasoning">
+                      <SelectValue placeholder="Default reasoning" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="__default__">Default reasoning</SelectItem>
+                      {reasoningOptions.map((option) => (
+                        <SelectItem key={option.value} value={option.value}>
+                          {option.label}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+              ) : null}
               <div className="space-y-1.5">
                 <Label>Priority</Label>
                 <Select
