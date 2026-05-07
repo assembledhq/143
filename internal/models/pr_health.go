@@ -15,6 +15,7 @@ const (
 	PullRequestMergeStateClean      PullRequestMergeState = "clean"
 	PullRequestMergeStateConflicted PullRequestMergeState = "conflicted"
 	PullRequestMergeStateBehind     PullRequestMergeState = "behind"
+	PullRequestMergeStateBlocked    PullRequestMergeState = "blocked"
 )
 
 func (s PullRequestMergeState) Validate() error {
@@ -22,7 +23,8 @@ func (s PullRequestMergeState) Validate() error {
 	case PullRequestMergeStateUnknown,
 		PullRequestMergeStateClean,
 		PullRequestMergeStateConflicted,
-		PullRequestMergeStateBehind:
+		PullRequestMergeStateBehind,
+		PullRequestMergeStateBlocked:
 		return nil
 	default:
 		return fmt.Errorf("invalid PullRequestMergeState: %q", s)

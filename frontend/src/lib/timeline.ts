@@ -19,12 +19,25 @@ export type TimelineEntry =
   | { kind: "plan_output"; data: SessionLog; turnNumber: number }
   | { kind: "plan_message"; data: SessionMessage; turnNumber: number };
 
+type TaggedTimelineItem =
+  | { source: "message"; ts: string; data: SessionMessage }
+  | { source: "log"; ts: string; data: SessionLog };
+
 function isAssistantFinalMetadata(metadata: SessionLog["metadata"] | null | undefined): boolean {
   return metadata?.type === "assistant_final";
 }
 
 function isVisibleAssistantOutput(log: SessionLog): boolean {
   return log.level === "output" && (!log.metadata || !log.metadata.type || isAssistantFinalMetadata(log.metadata));
+}
+
+function metadataString(metadata: SessionLog["metadata"] | null | undefined, key: string): string | undefined {
+  const value = metadata?.[key];
+  return typeof value === "string" ? value : undefined;
+}
+
+function isToolResultLog(item: TaggedTimelineItem | undefined): item is Extract<TaggedTimelineItem, { source: "log" }> {
+  return item?.source === "log" && item.data.metadata?.type === "tool_result";
 }
 
 function normalizeTranscriptContent(content: string): string {
@@ -84,11 +97,7 @@ export function buildTimeline(
   }
 
   // Tag and merge into a single sortable list.
-  type Tagged =
-    | { source: "message"; ts: string; data: SessionMessage }
-    | { source: "log"; ts: string; data: SessionLog };
-
-  const items: Tagged[] = [
+  const items: TaggedTimelineItem[] = [
     ...messages.map(
       (m) => ({ source: "message" as const, ts: m.created_at, data: m })
     ),
@@ -102,10 +111,15 @@ export function buildTimeline(
   items.sort((a, b) => a.ts.localeCompare(b.ts));
 
   const entries: TimelineEntry[] = [];
+  const consumedLogIds = new Set<number>();
   let i = 0;
 
   while (i < items.length) {
     const item = items[i];
+    if (item.source === "log" && consumedLogIds.has(item.data.id)) {
+      i++;
+      continue;
+    }
 
     if (item.source === "message") {
       const msg = item.data;
@@ -123,23 +137,37 @@ export function buildTimeline(
     const log = item.data;
 
     if (log.level === "tool_use") {
-      // Look ahead for a matching tool_result.
-      const next = items[i + 1];
-      if (
-        next &&
-        next.source === "log" &&
-        next.data.metadata?.type === "tool_result"
-      ) {
+      const callId = metadataString(log.metadata, "call_id");
+      let toolResult: SessionLog | undefined;
+      if (callId) {
+        for (let j = i + 1; j < items.length; j++) {
+          const candidate = items[j];
+          if (!isToolResultLog(candidate) || consumedLogIds.has(candidate.data.id)) {
+            continue;
+          }
+          if (metadataString(candidate.data.metadata, "call_id") === callId) {
+            toolResult = candidate.data;
+            break;
+          }
+        }
+      } else {
+        const next = items[i + 1];
+        if (isToolResultLog(next) && !consumedLogIds.has(next.data.id)) {
+          toolResult = next.data;
+        }
+      }
+
+      if (toolResult) {
+        consumedLogIds.add(toolResult.id);
         entries.push({
           kind: "tool_group",
           toolUse: log,
-          toolResult: next.data,
+          toolResult,
         });
-        i += 2;
       } else {
         entries.push({ kind: "tool_group", toolUse: log });
-        i++;
       }
+      i++;
       continue;
     }
 

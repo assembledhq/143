@@ -102,9 +102,9 @@ export function RunsTab({ automationId }: { automationId: string }) {
   if (isLoading) return <RunsSkeleton />;
   if (allRuns.length === 0) {
     return (
-      <div className="rounded-lg border border-dashed border-border/60 bg-muted/20 px-4 py-10 text-center">
+      <div className="rounded-xl border border-dashed border-border/70 bg-muted/15 px-5 py-12 text-center">
         <p className="text-sm font-medium text-foreground">No runs yet</p>
-        <p className="mt-1 text-xs text-muted-foreground">
+        <p className="mt-1 text-sm text-muted-foreground">
           The first run will appear here after the scheduled time, or when you click <span className="font-medium">Run now</span>.
         </p>
       </div>
@@ -137,7 +137,7 @@ export function RunsTab({ automationId }: { automationId: string }) {
         <Button
           variant="ghost"
           size="sm"
-          className="w-full"
+          className="w-full rounded-xl border border-dashed border-border/70 bg-muted/10 text-muted-foreground hover:bg-muted/20 hover:text-foreground"
           onClick={() => loadMoreMutation.mutate()}
           disabled={loadMoreMutation.isPending}
         >
@@ -166,11 +166,11 @@ function QuietGroup({ group, open, onOpenChange, navigateTo }: QuietGroupProps) 
   const span = `last one ${formatTimeAgo(newest.triggered_at)}`;
 
   return (
-    <Collapsible open={open} onOpenChange={onOpenChange} className="rounded-md border border-border/60">
+    <Collapsible open={open} onOpenChange={onOpenChange} className="rounded-xl border border-border/70 bg-muted/10">
       <CollapsibleTrigger
         className={cn(
-          "group flex w-full items-center justify-between gap-3 rounded-md px-3 py-1.5 text-xs text-muted-foreground transition-colors",
-          "hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
+          "group flex w-full items-center justify-between gap-3 rounded-xl px-4 py-3 text-xs text-muted-foreground transition-colors",
+          "hover:bg-muted/25 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
         )}
         title={`${group.runs.length} runs from ${new Date(oldest.triggered_at).toLocaleString()} to ${new Date(newest.triggered_at).toLocaleString()}`}
       >
@@ -182,15 +182,15 @@ function QuietGroup({ group, open, onOpenChange, navigateTo }: QuietGroupProps) 
               open && "rotate-90",
             )}
           />
-          <span className="font-medium text-foreground/70">{summary}</span>
+          <span className="font-medium text-foreground/80">{summary}</span>
           <span>· {span}</span>
         </span>
-        <span className="text-xs uppercase tracking-wide text-muted-foreground/70">
+        <span className="text-xs uppercase tracking-[0.18em] text-muted-foreground/70">
           {open ? "Hide" : "Show"}
         </span>
       </CollapsibleTrigger>
       <CollapsibleContent>
-        <div className="space-y-1 px-2 pb-2 pt-1">
+        <div className="space-y-2 px-3 pb-3 pt-1">
           {group.runs.map((run) => (
             <QuietRunRow key={run.id} run={run} navigateTo={navigateTo} />
           ))}
@@ -220,8 +220,8 @@ function SkeletonCard({ tall = false }: { tall?: boolean }) {
   return (
     <div
       className={cn(
-        "rounded-lg border border-border/60 bg-muted/20 p-4",
-        tall ? "h-[88px]" : "h-[68px]",
+        "rounded-xl border border-border/60 bg-muted/20 p-4",
+        tall ? "h-[104px]" : "h-[76px]",
         "animate-pulse",
       )}
     />
@@ -229,5 +229,5 @@ function SkeletonCard({ tall = false }: { tall?: boolean }) {
 }
 
 function SkeletonRow() {
-  return <div className="h-6 animate-pulse rounded-md bg-muted/30" />;
+  return <div className="h-12 animate-pulse rounded-xl border border-border/50 bg-muted/20" />;
 }

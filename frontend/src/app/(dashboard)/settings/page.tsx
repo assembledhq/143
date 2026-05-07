@@ -25,6 +25,54 @@ const PR_AUTHORSHIP_OPTIONS = [
   { value: "user_required", label: "User required", description: "Require users to connect GitHub before creating PRs" },
 ] as const;
 
+const settingsTimestampFormatter = new Intl.DateTimeFormat("en-US", {
+  dateStyle: "long",
+  timeStyle: "short",
+  timeZone: "UTC",
+});
+
+function formatUpdatedAt(updatedAt: string | undefined): string | undefined {
+  if (!updatedAt) return undefined;
+  const date = new Date(updatedAt);
+  if (Number.isNaN(date.getTime())) return undefined;
+  return `${settingsTimestampFormatter.format(date)} UTC`;
+}
+
+function useOrgSettingsAutosave() {
+  const queryClient = useQueryClient();
+  return useAutosave<SettingsPatch>({
+    queryKey: queryKeys.settings.all,
+    mutationFn: async (payload) => {
+      const response = await api.settings.update(payload);
+      queryClient.setQueryData(queryKeys.settings.all, response);
+      if (payload.name !== undefined) {
+        queryClient.setQueryData<SingleResponse<MembershipsResponse> | undefined>(
+          queryKeys.auth.memberships,
+          (previous) => {
+            if (!previous?.data) return previous;
+            return {
+              ...previous,
+              data: {
+                ...previous.data,
+                memberships: previous.data.memberships.map((membership) =>
+                  membership.org_id === response.data.id
+                    ? { ...membership, org_name: response.data.name }
+                    : membership,
+                ),
+              },
+            };
+          },
+        );
+      }
+      void queryClient.invalidateQueries({ queryKey: ["audit-logs", "latest"] });
+      return response;
+    },
+    applyOptimistic: applyOrgSettingsPatch,
+    coalesce: coalesceSettingsPatch,
+    invalidateOnSettled: false,
+  });
+}
+
 function PRAuthorshipSettings() {
   const { data: settingsResponse } = useQuery<SingleResponse<Organization>>({
     queryKey: queryKeys.settings.all,
@@ -36,12 +84,7 @@ function PRAuthorshipSettings() {
   const currentDraftDefault = settings.pr_draft_default ?? false;
   const currentAutoArchive = settings.auto_archive_on_pr_close ?? false;
 
-  const { save, status } = useAutosave<SettingsPatch>({
-    queryKey: queryKeys.settings.all,
-    mutationFn: (payload) => api.settings.update(payload),
-    applyOptimistic: applyOrgSettingsPatch,
-    coalesce: coalesceSettingsPatch,
-  });
+  const { save, status } = useOrgSettingsAutosave();
 
   return (
     <section className="space-y-3">
@@ -119,39 +162,11 @@ function PRAuthorshipSettings() {
 
 export default function SettingsPage() {
   const { user } = useAuth();
-  const queryClient = useQueryClient();
   const { data: settings } = useQuery<SingleResponse<Organization>>({
     queryKey: queryKeys.settings.all,
     queryFn: () => api.settings.get(),
   });
-  const autosave = useAutosave<SettingsPatch>({
-    queryKey: queryKeys.settings.all,
-    mutationFn: async (payload) => {
-      const response = await api.settings.update(payload);
-      if (payload.name !== undefined) {
-        queryClient.setQueryData<SingleResponse<MembershipsResponse> | undefined>(
-          queryKeys.auth.memberships,
-          (previous) => {
-            if (!previous?.data) return previous;
-            return {
-              ...previous,
-              data: {
-                ...previous.data,
-                memberships: previous.data.memberships.map((membership) =>
-                  membership.org_id === response.data.id
-                    ? { ...membership, org_name: response.data.name }
-                    : membership,
-                ),
-              },
-            };
-          },
-        );
-      }
-      return response;
-    },
-    applyOptimistic: applyOrgSettingsPatch,
-    coalesce: coalesceSettingsPatch,
-  });
+  const autosave = useOrgSettingsAutosave();
 
   return (
     <PageContainer size="default">
@@ -159,6 +174,10 @@ export default function SettingsPage() {
         <PageHeader
           title="General settings"
           description="Manage your organization."
+          subtitle={(() => {
+            const formattedUpdatedAt = formatUpdatedAt(settings?.data?.updated_at);
+            return formattedUpdatedAt ? `Updated at ${formattedUpdatedAt}` : undefined;
+          })()}
         />
         <AuditLogTrigger
           filters={{ resource_type: "settings" }}

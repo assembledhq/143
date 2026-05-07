@@ -214,7 +214,15 @@ func (a *ClaudeCodeAdapter) Execute(ctx context.Context, sandbox *agent.Sandbox,
 }
 
 // parseClaudeStreamLine processes a single non-empty stdout line from the
-// Claude Code CLI. Extracted so Execute and parseStreamOutput share parsing.
+// Claude Code CLI's `--output-format stream-json` output.
+//
+// Claude Code wraps assistant text and tool_use blocks inside
+// `message.content[]` (an Anthropic-API-shaped array of typed blocks), and
+// echoes tool results back as `{"type":"user","message":{"content":[{"type":"tool_result",...}]}}`.
+// Treating the top-level event as if it carried a flat `content` string
+// produces empty assistant logs and dumps tool results as raw JSON cards in
+// the UI, so we walk the nested blocks here and emit one structured LogEntry
+// per block.
 func parseClaudeStreamLine(line []byte, result *agent.AgentResult, logCh chan<- agent.LogEntry, summaryParts *[]string, lastAssistant *string) {
 	var event claudeStreamEvent
 	if err := json.Unmarshal(line, &event); err != nil {
@@ -225,60 +233,52 @@ func parseClaudeStreamLine(line []byte, result *agent.AgentResult, logCh chan<- 
 		}
 		return
 	}
+	if event.SessionID != "" {
+		result.AgentSessionID = event.SessionID
+	}
 
 	switch event.Type {
+	case "system":
+		// Init metadata (model, tools available, mcp servers, etc.) — keep at
+		// debug so the timeline doesn't show a setup blob before any output.
+		logCh <- agent.LogEntry{
+			Timestamp: time.Now(),
+			Level:     "debug",
+			Message:   string(line),
+		}
+
 	case "assistant":
-		logCh <- agent.LogEntry{
-			Timestamp: time.Now(),
-			Level:     "output",
-			Message:   event.Content,
-		}
-		*lastAssistant = event.Content
-		tryExtractConfidence(event.Content, result)
+		emitClaudeAssistantBlocks(event, result, logCh, lastAssistant)
 
-	case "tool_use":
-		logCh <- agent.LogEntry{
-			Timestamp: time.Now(),
-			Level:     "tool_use",
-			Message:   fmt.Sprintf("using tool: %s", event.Tool),
-			Metadata:  claudeToolUseMetadata(event),
-		}
-
-	case "tool_result":
-		logCh <- agent.LogEntry{
-			Timestamp: time.Now(),
-			Level:     "output",
-			Message:   string(event.Result),
-			Metadata:  map[string]interface{}{"type": "tool_result"},
-		}
+	case "user":
+		emitClaudeUserBlocks(event, logCh)
 
 	case "error":
-		msg := event.Message
-		if msg == "" {
-			msg = event.Content
-		}
+		// `error` is not part of the documented stream-json schema but we keep
+		// the case so unexpected-but-typed errors still surface as errors
+		// rather than as raw debug blobs.
 		logCh <- agent.LogEntry{
 			Timestamp: time.Now(),
 			Level:     "error",
-			Message:   msg,
+			Message:   string(line),
 		}
 
 	case "result":
+		summary := decodeClaudeResultSummary(event.Result)
 		logCh <- agent.LogEntry{
 			Timestamp: time.Now(),
 			Level:     "info",
-			Message:   event.Content,
+			Message:   summary,
 		}
-		*summaryParts = append(*summaryParts, event.Content)
-		tryExtractConfidence(event.Content, result)
-		if len(event.Result) > 0 {
+		if summary != "" {
+			*summaryParts = append(*summaryParts, summary)
+			tryExtractConfidence(summary, result)
+		}
+		if len(event.Usage) > 0 {
 			var usage agent.TokenUsage
-			if err := json.Unmarshal(event.Result, &usage); err == nil && usage.InputTokens > 0 {
+			if err := json.Unmarshal(event.Usage, &usage); err == nil && (usage.InputTokens > 0 || usage.OutputTokens > 0) {
 				result.TokenUsage = usage
 			}
-		}
-		if event.SessionID != "" {
-			result.AgentSessionID = event.SessionID
 		}
 
 	default:
@@ -290,21 +290,160 @@ func parseClaudeStreamLine(line []byte, result *agent.AgentResult, logCh chan<- 
 	}
 }
 
+// emitClaudeAssistantBlocks fans out the `content[]` blocks inside an
+// `assistant` event into one LogEntry per block. A single assistant turn can
+// mix text and tool_use blocks, so we cannot collapse the array into one log.
+func emitClaudeAssistantBlocks(event claudeStreamEvent, result *agent.AgentResult, logCh chan<- agent.LogEntry, lastAssistant *string) {
+	if event.Message == nil || len(event.Message.Content) == 0 {
+		return
+	}
+	for _, block := range event.Message.Content {
+		switch block.Type {
+		case "text":
+			logCh <- agent.LogEntry{
+				Timestamp: time.Now(),
+				Level:     "output",
+				Message:   block.Text,
+			}
+			*lastAssistant = block.Text
+			tryExtractConfidence(block.Text, result)
+
+		case "tool_use":
+			logCh <- agent.LogEntry{
+				Timestamp: time.Now(),
+				Level:     "tool_use",
+				Message:   fmt.Sprintf("using tool: %s", block.Name),
+				Metadata:  claudeToolUseMetadata(block),
+			}
+
+		case "thinking":
+			logCh <- agent.LogEntry{
+				Timestamp: time.Now(),
+				Level:     "debug",
+				Message:   block.Thinking,
+				Metadata:  map[string]interface{}{"type": "thinking"},
+			}
+
+		default:
+			if blob, err := json.Marshal(block); err == nil {
+				logCh <- agent.LogEntry{
+					Timestamp: time.Now(),
+					Level:     "debug",
+					Message:   string(blob),
+				}
+			}
+		}
+	}
+}
+
+// emitClaudeUserBlocks turns tool_result blocks (echoed back inside
+// `{"type":"user",...}` events) into output logs tagged with
+// `metadata.type=tool_result` so the frontend pairs them with the preceding
+// tool_use card instead of rendering raw JSON.
+func emitClaudeUserBlocks(event claudeStreamEvent, logCh chan<- agent.LogEntry) {
+	if event.Message == nil {
+		return
+	}
+	for _, block := range event.Message.Content {
+		if block.Type != "tool_result" {
+			continue
+		}
+		metadata := map[string]interface{}{"type": "tool_result"}
+		if block.ToolUseID != "" {
+			metadata["call_id"] = block.ToolUseID
+		}
+		if block.IsError {
+			metadata["is_error"] = true
+		}
+		logCh <- agent.LogEntry{
+			Timestamp: time.Now(),
+			Level:     "output",
+			Message:   decodeClaudeToolResultContent(block.Content),
+			Metadata:  metadata,
+		}
+	}
+}
+
+// decodeClaudeResultSummary extracts the summary string from a `result`
+// event's `result` field, which is a JSON-encoded string in current versions
+// but historically has appeared as an object — fall back to the raw payload
+// rather than dropping the summary on the floor.
+func decodeClaudeResultSummary(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var s string
+	if err := json.Unmarshal(raw, &s); err == nil {
+		return s
+	}
+	return string(raw)
+}
+
+// decodeClaudeToolResultContent renders a tool_result `content` payload to a
+// printable string. The Anthropic schema allows either a bare string or an
+// array of `{type, text}` blocks; we accept both.
+func decodeClaudeToolResultContent(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var s string
+	if err := json.Unmarshal(raw, &s); err == nil {
+		return s
+	}
+	var blocks []struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	}
+	if err := json.Unmarshal(raw, &blocks); err == nil {
+		var b strings.Builder
+		for _, blk := range blocks {
+			b.WriteString(blk.Text)
+		}
+		return b.String()
+	}
+	return string(raw)
+}
+
 // WithSandboxProvider re-exports agent.WithSandboxProvider for backward compatibility.
 // Callers should prefer agent.WithSandboxProvider directly.
 func WithSandboxProvider(ctx context.Context, p agent.SandboxProvider) context.Context {
 	return agent.WithSandboxProvider(ctx, p)
 }
 
-// claudeStreamEvent represents a single line of Claude Code's stream-json output.
+// claudeStreamEvent represents a single line of Claude Code's stream-json
+// output. The shape mirrors the `--output-format stream-json` events: each
+// turn produces one or more `assistant` events whose `message.content` is an
+// Anthropic-API-shaped block array, with tool results echoed back via
+// `user` events and a terminal `result` event carrying the summary.
 type claudeStreamEvent struct {
+	Type      string             `json:"type"`
+	Subtype   string             `json:"subtype,omitempty"`
+	Message   *claudeMessageBody `json:"message,omitempty"`
+	SessionID string             `json:"session_id,omitempty"`
+	Result    json.RawMessage    `json:"result,omitempty"`
+	Usage     json.RawMessage    `json:"usage,omitempty"`
+	IsError   bool               `json:"is_error,omitempty"`
+}
+
+// claudeMessageBody is the inner Anthropic Messages API payload carried by
+// `assistant` and `user` events.
+type claudeMessageBody struct {
+	Role    string               `json:"role,omitempty"`
+	Content []claudeContentBlock `json:"content,omitempty"`
+}
+
+// claudeContentBlock is a single typed block. Field set varies by Type:
+// text / tool_use / tool_result / thinking each populate a different subset.
+type claudeContentBlock struct {
 	Type      string          `json:"type"`
-	Content   string          `json:"content,omitempty"`
-	Message   string          `json:"message,omitempty"`
-	Tool      string          `json:"tool,omitempty"`
+	Text      string          `json:"text,omitempty"`
+	Thinking  string          `json:"thinking,omitempty"`
+	ID        string          `json:"id,omitempty"`
+	Name      string          `json:"name,omitempty"`
 	Input     json.RawMessage `json:"input,omitempty"`
-	Result    json.RawMessage `json:"result,omitempty"`
-	SessionID string          `json:"session_id,omitempty"`
+	ToolUseID string          `json:"tool_use_id,omitempty"`
+	Content   json.RawMessage `json:"content,omitempty"`
+	IsError   bool            `json:"is_error,omitempty"`
 }
 
 // claudeToolUseMetadata builds the metadata map for a tool_use log entry,
@@ -312,21 +451,26 @@ type claudeStreamEvent struct {
 // consumers (UI, analytics) can render a descriptive label. Claude's Bash
 // tool includes an `input.description` field that the frontend surfaces as
 // the primary label — dropping Input here would discard that signal.
-func claudeToolUseMetadata(event claudeStreamEvent) map[string]interface{} {
-	metadata := map[string]interface{}{"tool": event.Tool}
-	if len(event.Input) > 0 {
+func claudeToolUseMetadata(block claudeContentBlock) map[string]interface{} {
+	metadata := map[string]interface{}{"tool": block.Name}
+	if len(block.Input) > 0 {
 		var inputMap map[string]interface{}
-		if err := json.Unmarshal(event.Input, &inputMap); err == nil {
+		if err := json.Unmarshal(block.Input, &inputMap); err == nil {
 			metadata["input"] = inputMap
 		}
+	}
+	if block.ID != "" {
+		metadata["call_id"] = block.ID
 	}
 	return metadata
 }
 
-// parseStreamOutput processes the streaming JSON output line by line,
-// populates the AgentResult, and sends log entries.
+// parseStreamOutput processes a buffer of streaming JSON output line by
+// line, delegating each line to parseClaudeStreamLine so the buffered and
+// streaming code paths can never disagree on event-shape interpretation.
 func parseStreamOutput(output []byte, result *agent.AgentResult, logCh chan<- agent.LogEntry) {
 	scanner := bufio.NewScanner(bytes.NewReader(output))
+	scanner.Buffer(make([]byte, 0, 64*1024), 10*1024*1024)
 	var summaryParts []string
 	var lastAssistantContent string
 
@@ -335,81 +479,7 @@ func parseStreamOutput(output []byte, result *agent.AgentResult, logCh chan<- ag
 		if len(bytes.TrimSpace(line)) == 0 {
 			continue
 		}
-
-		var event claudeStreamEvent
-		if err := json.Unmarshal(line, &event); err != nil {
-			// Not JSON — emit as raw output.
-			logCh <- agent.LogEntry{
-				Timestamp: time.Now(),
-				Level:     "output",
-				Message:   string(line),
-			}
-			continue
-		}
-
-		switch event.Type {
-		case "assistant":
-			logCh <- agent.LogEntry{
-				Timestamp: time.Now(),
-				Level:     "output",
-				Message:   event.Content,
-			}
-			// Individual assistant text blocks are persisted as separate output
-			// logs — don't merge them into the summary. Track the last one as
-			// a fallback in case no "result" event arrives.
-			lastAssistantContent = event.Content
-			tryExtractConfidence(event.Content, result)
-
-		case "tool_use":
-			logCh <- agent.LogEntry{
-				Timestamp: time.Now(),
-				Level:     "tool_use",
-				Message:   fmt.Sprintf("using tool: %s", event.Tool),
-				Metadata:  claudeToolUseMetadata(event),
-			}
-
-		case "tool_result":
-			logCh <- agent.LogEntry{
-				Timestamp: time.Now(),
-				Level:     "output",
-				Message:   string(event.Result),
-				Metadata:  map[string]interface{}{"type": "tool_result"},
-			}
-
-		case "error":
-			msg := event.Message
-			if msg == "" {
-				msg = event.Content
-			}
-			logCh <- agent.LogEntry{
-				Timestamp: time.Now(),
-				Level:     "error",
-				Message:   msg,
-			}
-
-		case "result":
-			logCh <- agent.LogEntry{
-				Timestamp: time.Now(),
-				Level:     "info",
-				Message:   event.Content,
-			}
-			summaryParts = append(summaryParts, event.Content)
-			tryExtractConfidence(event.Content, result)
-			// Parse token usage if present.
-			if len(event.Result) > 0 {
-				var usage agent.TokenUsage
-				if err := json.Unmarshal(event.Result, &usage); err == nil && usage.InputTokens > 0 {
-					result.TokenUsage = usage
-				}
-			}
-
-		default:
-			logCh <- agent.LogEntry{
-				Timestamp: time.Now(),
-				Level:     "debug",
-				Message:   string(line),
-			}
-		}
+		parseClaudeStreamLine(line, result, logCh, &summaryParts, &lastAssistantContent)
 	}
 
 	if len(summaryParts) > 0 {

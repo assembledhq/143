@@ -19,6 +19,7 @@ import (
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/services/agent"
 	"github.com/assembledhq/143/internal/services/github/identity"
+	"github.com/assembledhq/143/internal/services/linear"
 	"github.com/assembledhq/143/internal/services/sandboxauth"
 	"github.com/assembledhq/143/internal/services/storage"
 	"github.com/assembledhq/143/internal/testutil"
@@ -2265,6 +2266,73 @@ func TestRunAgent_PopulatesPMContext(t *testing.T) {
 	require.WithinDuration(t, now, time.Now(), time.Minute, "sanity check")
 }
 
+func TestRunAgent_UsesRawTaskPromptStyleForAutomation(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	runID := uuid.New()
+	repoID := uuid.New()
+	goal := "Review recently merged PRs and prepare a follow-up fix if an obvious regression appears."
+
+	run := &models.Session{
+		ID:              runID,
+		OrgID:           orgID,
+		AgentType:       "claude_code",
+		Status:          "pending",
+		TokenMode:       "low",
+		RepositoryID:    &repoID,
+		AutomationRunID: func() *uuid.UUID { id := uuid.New(); return &id }(),
+		PMApproach:      &goal,
+	}
+
+	mockRuns := &mockSessionStore{}
+	mockRepos := &mockRepositoryStore{repo: models.Repository{
+		ID:             repoID,
+		OrgID:          orgID,
+		CloneURL:       "https://example.com/repo.git",
+		DefaultBranch:  "main",
+		InstallationID: 123,
+	}}
+	mockOrgs := &mockOrgStore{org: models.Organization{ID: orgID}}
+	mockJobs := &mockJobStore{}
+	mockLogs := &mockSessionLogStore{}
+	mockQuestions := &mockSessionQuestionStore{}
+	mockDecisions := &mockDecisionLogStore{}
+	mockGH := &mockGitHubTokenProvider{token: "token"}
+	sandboxProvider := testutil.NewMockSandboxProvider()
+
+	capAdapter := &capturingAdapter{name: models.AgentTypeClaudeCode}
+
+	orchestrator := agent.NewOrchestrator(agent.OrchestratorConfig{
+		Provider:         sandboxProvider,
+		Adapters:         map[models.AgentType]agent.AgentAdapter{models.AgentTypeClaudeCode: capAdapter},
+		Sessions:         mockRuns,
+		SessionLogs:      mockLogs,
+		SessionQuestions: mockQuestions,
+		DecisionLog:      mockDecisions,
+		Repositories:     mockRepos,
+		Orgs:             mockOrgs,
+		Jobs:             mockJobs,
+		GitHub:           mockGH,
+		Credentials: &mockCredentialProvider{
+			byProvider: map[models.ProviderName]*models.DecryptedCredential{
+				models.ProviderAnthropic: {
+					Provider: models.ProviderAnthropic,
+					Config:   models.AnthropicConfig{APIKey: "sk-ant-automation-test"},
+				},
+			},
+		},
+		Logger: zerolog.Nop(),
+	})
+
+	err := orchestrator.RunAgent(context.Background(), run)
+	require.NoError(t, err, "RunAgent should succeed for automation sessions without a linked issue")
+	require.NotNil(t, capAdapter.captured, "adapter should capture input")
+	require.Equal(t, agent.PromptStyleRawTask, capAdapter.captured.PromptStyle, "automation sessions should use the raw-task prompt style")
+	require.Equal(t, goal, capAdapter.captured.UserMessage, "automation sessions should pass the stored goal through as the raw task text")
+	require.Nil(t, capAdapter.captured.PMContext, "automation sessions should not wrap the goal into PM analysis context")
+}
+
 func TestRunAgent_LegacySyntheticManualSessionUsesManualModeAndFallbackReferences(t *testing.T) {
 	t.Parallel()
 
@@ -3364,12 +3432,21 @@ func TestContinueSession_ReusePathClearsContainerForDeadTargetNodeRecovery(t *te
 	require.Equal(t, 1, d.sessions.clearContainerIDCalls, "dead-node recovery should clear the recorded container exactly once")
 }
 
-// TestContinueSession_ReusePathProceedsWhenIsAliveErrors covers the
-// conservative fallback: a transient docker / probe error must NOT trigger
-// the orphan-clear path. The reuse continues and any real failure surfaces
-// through the normal downstream code (so a brief docker hiccup doesn't tear
-// down a session row that's actually fine).
-func TestContinueSession_ReusePathProceedsWhenIsAliveErrors(t *testing.T) {
+// TestContinueSession_ReusePathRetriesWhenIsAliveProbeErrors locks in the
+// behavior that an inconclusive IsAlive probe (docker daemon hiccup, probe
+// timeout against an unreachable container) must NOT fall through to docker
+// exec on a possibly-stale container_id. Doing so historically surfaced a
+// user-visible "No such container" failure when the recorded id had already
+// been destroyed out-of-band — see the preview-launch-fail race that
+// motivated this change.
+//
+// We don't clear container_id on a probe error (would orphan a healthy live
+// container if the daemon merely hiccuped), but we do bail with
+// ErrStaleSandboxIDCleared so the worker re-enqueues without consuming an
+// attempt; the next attempt re-fetches the session row and re-probes.
+// Bounded by maxRetryableDuration so a permanently broken daemon still
+// dead-letters through the normal retryable-timeout path.
+func TestContinueSession_ReusePathRetriesWhenIsAliveProbeErrors(t *testing.T) {
 	t.Parallel()
 
 	orgID := testOrg()
@@ -3401,26 +3478,144 @@ func TestContinueSession_ReusePathProceedsWhenIsAliveErrors(t *testing.T) {
 		return false, errors.New("docker connection refused")
 	}
 	d.sessions.clearContainerIDFn = func(expected string) (bool, error) {
-		t.Fatalf("ClearContainerID must NOT be called when IsAlive errored; transient probe failures fall through")
+		t.Fatalf("ClearContainerID must NOT be called when IsAlive errored — clearing on an inconclusive probe would orphan a healthy live container if docker just hiccuped")
 		return false, nil
 	}
 	d.provider.CreateFn = func(context.Context, agent.SandboxConfig) (*agent.Sandbox, error) {
-		t.Fatalf("provider.Create must not be called on the reuse path")
+		t.Fatalf("provider.Create must not run when the reuse path bailed for retry")
 		return nil, nil
 	}
 	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
-		return &agent.AgentResult{
-			Summary:             "done",
-			ConfidenceScore:     0.9,
-			ConfidenceReasoning: "ok",
-			ExitCode:            0,
-		}, nil
+		t.Fatalf("adapter.Execute must not run when the reuse path bailed for retry — falling through would surface 'No such container' if the recorded id had been destroyed out-of-band")
+		return nil, nil
 	}
 
 	orch := buildOrchestrator(d)
 	err := orch.ContinueSession(context.Background(), session, nil)
-	require.NoError(t, err, "transient IsAlive probe error must NOT bail out — reuse continues so transient docker hiccups don't reset the session row")
+	require.Error(t, err)
+	require.ErrorIs(t, err, agent.ErrStaleSandboxIDCleared,
+		"inconclusive IsAlive probe must signal retry rather than fall through to docker exec on a possibly-stale container_id")
 	require.Equal(t, 0, d.sessions.clearContainerIDCalls, "ClearContainerID must not be invoked on probe-error path")
+	require.Contains(t, d.sessions.getStatusUpdates(), string(models.SessionStatusPending),
+		"reuse-path abandon must revert session status to pending so the next worker claim re-enters cleanly")
+}
+
+// TestContinueSession_ReusePathRetriesWhenClearContainerIDErrors covers the
+// case where ClearContainerID itself returns a DB error. With the recorded
+// container known dead (IsAlive returned false) and the clear unable to
+// land, the session row's container_id is in an indeterminate state — the
+// safe move is to bail rather than proceed to docker exec on a known-dead
+// container, which would always surface a user-visible "No such container"
+// failure.
+func TestContinueSession_ReusePathRetriesWhenClearContainerIDErrors(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	issue.Source = models.IssueSourceManual
+	session := testRun(orgID, issue.ID)
+	session.Status = string(models.SessionStatusIdle)
+	session.CurrentTurn = 1
+	stale := "stale-container-clear-err"
+	session.ContainerID = &stale
+	thisNode := "worker-this-node"
+	session.WorkerNodeID = &thisNode
+	session.SandboxState = string(models.SandboxStateRunning)
+
+	d := defaultDeps()
+	d.nodeID = thisNode
+	d.issues.issue = issue
+	d.messages.messages = []models.SessionMessage{
+		{
+			ID: 1, SessionID: session.ID, OrgID: orgID, TurnNumber: 2,
+			Role: models.MessageRoleUser, Content: "follow-up",
+		},
+	}
+	d.provider.IsAliveFn = func(ctx context.Context, sb *agent.Sandbox) (bool, error) {
+		require.Equal(t, stale, sb.ID, "IsAlive must probe the recorded container_id")
+		return false, nil
+	}
+	d.sessions.clearContainerIDFn = func(expected string) (bool, error) {
+		require.Equal(t, stale, expected, "ClearContainerID must guard the CAS on the recorded id")
+		return false, errors.New("postgres connection reset by peer")
+	}
+	d.provider.CreateFn = func(context.Context, agent.SandboxConfig) (*agent.Sandbox, error) {
+		t.Fatalf("provider.Create must not run when the reuse path bailed for retry")
+		return nil, nil
+	}
+	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
+		t.Fatalf("adapter.Execute must not run after a clear DB error — would surface 'No such container' on a known-dead container")
+		return nil, nil
+	}
+
+	orch := buildOrchestrator(d)
+	err := orch.ContinueSession(context.Background(), session, nil)
+	require.Error(t, err)
+	require.ErrorIs(t, err, agent.ErrStaleSandboxIDCleared,
+		"a ClearContainerID DB error during the reuse-path liveness check must signal retry rather than fall through to docker exec on a known-dead container")
+	require.Equal(t, 1, d.sessions.clearContainerIDCalls, "ClearContainerID must have been attempted exactly once")
+	require.Contains(t, d.sessions.getStatusUpdates(), string(models.SessionStatusPending),
+		"reuse-path abandon must revert session status to pending so the next worker claim re-enters cleanly")
+}
+
+// TestContinueSession_ReusePathRetriesWhenClearContainerIDCASLost covers the
+// race that produced the original incident: the IsAlive probe sees the
+// container as gone, but a peer (typically a preview's
+// FinalizeContainerDestroy on a launch-failed instance) has already cleared
+// container_id between our probe and clear, so the CAS loses (cleared=false).
+// The in-memory session.ContainerID is now stale, so reusing it would
+// attach to a no-longer-current container and surface a user-visible
+// "No such container" docker exec failure. Bail for retry instead so the
+// next attempt re-fetches a fresh session row.
+func TestContinueSession_ReusePathRetriesWhenClearContainerIDCASLost(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	issue.Source = models.IssueSourceManual
+	session := testRun(orgID, issue.ID)
+	session.Status = string(models.SessionStatusIdle)
+	session.CurrentTurn = 1
+	stale := "stale-container-cas-lost"
+	session.ContainerID = &stale
+	thisNode := "worker-this-node"
+	session.WorkerNodeID = &thisNode
+	session.SandboxState = string(models.SandboxStateRunning)
+
+	d := defaultDeps()
+	d.nodeID = thisNode
+	d.issues.issue = issue
+	d.messages.messages = []models.SessionMessage{
+		{
+			ID: 1, SessionID: session.ID, OrgID: orgID, TurnNumber: 2,
+			Role: models.MessageRoleUser, Content: "follow-up",
+		},
+	}
+	d.provider.IsAliveFn = func(ctx context.Context, sb *agent.Sandbox) (bool, error) {
+		require.Equal(t, stale, sb.ID, "IsAlive must probe the recorded container_id")
+		return false, nil
+	}
+	d.sessions.clearContainerIDFn = func(expected string) (bool, error) {
+		require.Equal(t, stale, expected, "ClearContainerID must guard the CAS on the recorded id")
+		return false, nil
+	}
+	d.provider.CreateFn = func(context.Context, agent.SandboxConfig) (*agent.Sandbox, error) {
+		t.Fatalf("provider.Create must not run when the reuse path bailed for retry")
+		return nil, nil
+	}
+	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
+		t.Fatalf("adapter.Execute must not run after a CAS-lost clear — would surface 'No such container' on a stale id")
+		return nil, nil
+	}
+
+	orch := buildOrchestrator(d)
+	err := orch.ContinueSession(context.Background(), session, nil)
+	require.Error(t, err)
+	require.ErrorIs(t, err, agent.ErrStaleSandboxIDCleared,
+		"CAS-lost ClearContainerID must signal retry so the next attempt re-fetches the now-active session row instead of attaching to the in-memory stale id")
+	require.Equal(t, 1, d.sessions.clearContainerIDCalls, "ClearContainerID must have been attempted exactly once")
+	require.Contains(t, d.sessions.getStatusUpdates(), string(models.SessionStatusPending),
+		"reuse-path abandon must revert session status to pending so the next worker claim re-enters cleanly")
 }
 
 func TestRunAgent_LogStreamingWithQuestion(t *testing.T) {
@@ -5421,6 +5616,403 @@ func TestContinueSession_DeadLetterHookIdempotent(t *testing.T) {
 		}
 	}
 	require.Equal(t, 1, assistantMessages, "repeated RunDeadLetterHooks must not produce duplicate messages")
+}
+
+// TestContinueSession_CodexAuthInjectInfraFailureDeferredToDeadLetter locks
+// in the deferred-failure behavior for transient codex auth injection
+// errors (the bug that motivated this change). When InjectCodexAuthForUser
+// fails with a non-auth-invalid error — typically a docker exec/file-write
+// error against a container that's been destroyed out-of-band — the
+// failure must NOT churn session state on every retry: each attempt
+// previously emitted a Linear "failed" milestone and flipped session
+// status to "failed", so two retries followed by a successful attempt
+// left Linear thinking the session had failed twice and the UI flashing
+// failed banners that snapped back when the third attempt succeeded.
+//
+// The new contract: during retries (registry present, hooks not fired),
+// the session row is left untouched (status stays "running" from the
+// orchestrator's prelude, no Linear ping, no inline assistant message).
+// On dead-letter (registry present, hooks fired), the full failure
+// bookkeeping fires exactly once.
+func TestContinueSession_CodexAuthInjectInfraFailureDeferredToDeadLetter(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name                      string
+		withRegistry              bool
+		runHooks                  bool
+		wantInlineLinearMilestone bool
+		wantInlineFailedResult    bool
+		wantInlineAssistantMsg    bool
+		wantPostHookLinearFail    bool
+		wantPostHookFailed        bool
+		wantPostHookAssistantMsg  bool
+	}{
+		{
+			name:         "direct caller without registry: failure not deferred (existing inline-fail semantics for tests/RecoverSession-without-registry)",
+			withRegistry: false,
+			// Without a registry, registerSandboxInfraFailure no-ops the
+			// hook (mirroring registerSandboxFailureMessage). The caller
+			// is expected to handle the returned error directly. We
+			// verify nothing is written either inline or post-hook so
+			// the missing-registry semantics are explicit.
+			wantInlineLinearMilestone: false,
+			wantInlineFailedResult:    false,
+			wantInlineAssistantMsg:    false,
+			wantPostHookLinearFail:    false,
+			wantPostHookFailed:        false,
+			wantPostHookAssistantMsg:  false,
+		},
+		{
+			name:                      "mid-retry (registry present, hooks not yet fired): zero session-state churn",
+			withRegistry:              true,
+			runHooks:                  false,
+			wantInlineLinearMilestone: false,
+			wantInlineFailedResult:    false,
+			wantInlineAssistantMsg:    false,
+			wantPostHookLinearFail:    false,
+			wantPostHookFailed:        false,
+			wantPostHookAssistantMsg:  false,
+		},
+		{
+			name:                      "dead-letter (hooks fired): exactly one Linear failed ping, one failed result, one assistant message",
+			withRegistry:              true,
+			runHooks:                  true,
+			wantInlineLinearMilestone: false,
+			wantInlineFailedResult:    false,
+			wantInlineAssistantMsg:    false,
+			wantPostHookLinearFail:    true,
+			wantPostHookFailed:        true,
+			wantPostHookAssistantMsg:  true,
+		},
+	}
+
+	for _, c := range cases {
+		c := c
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+
+			orgID := testOrg()
+			issue := testIssue(orgID)
+			session := testRun(orgID, issue.ID)
+			session.AgentType = models.AgentTypeCodex
+			session.Status = string(models.SessionStatusIdle)
+			session.CurrentTurn = 1
+			// Reuse-path setup: container exists on this node and is alive,
+			// so the orchestrator skips the IsAlive bail and proceeds to
+			// auth injection. That's the codepath where the bug bit.
+			containerID := "alive-container-on-this-node"
+			session.ContainerID = &containerID
+			thisNode := "worker-this-node"
+			session.WorkerNodeID = &thisNode
+			session.SandboxState = string(models.SandboxStateRunning)
+
+			d := defaultDeps()
+			d.nodeID = thisNode
+			d.adapter.name = models.AgentTypeCodex
+			d.issues.issue = issue
+			d.messages.messages = []models.SessionMessage{{
+				ID: 1, SessionID: session.ID, OrgID: orgID, TurnNumber: 2,
+				Role: models.MessageRoleUser, Content: "follow-up",
+			}}
+			// IsAlive returns true so the reuse path attaches and reaches
+			// the codex auth injection.
+			d.provider.IsAliveFn = func(context.Context, *agent.Sandbox) (bool, error) {
+				return true, nil
+			}
+			// Codex token resolves successfully — the failure we're
+			// exercising is the post-token sandbox-side write, not auth
+			// invalidity.
+			d.codexAuth = &mockCodexAuthProvider{
+				cfg: &models.OpenAIChatGPTConfig{
+					AccessToken:  "valid-access",
+					RefreshToken: "valid-refresh",
+					ExpiresAt:    time.Now().Add(time.Hour),
+				},
+			}
+			// Force the docker mkdir invocation in writeCodexAuth to
+			// fail the way docker reports a destroyed container. This
+			// is exactly the error that surfaced in the original
+			// incident, so the test pins the regression at the same
+			// shape.
+			d.provider.ExecFn = func(_ context.Context, _ *agent.Sandbox, cmd string, _, _ io.Writer) (int, error) {
+				if strings.Contains(cmd, ".codex") {
+					return 0, errors.New("Error response from daemon: No such container: alive-container-on-this-node")
+				}
+				return 0, nil
+			}
+
+			ctx := context.Background()
+			if c.withRegistry {
+				ctx = jobctx.WithDeadLetterHooks(ctx)
+			}
+
+			orch := buildOrchestrator(d)
+			err := orch.ContinueSession(ctx, session, nil)
+			require.Error(t, err)
+			require.Contains(t, err.Error(), "codex auth injection",
+				"caller-visible error must still wrap the codex auth injection prefix so worker logs and the session.last_error stay shaped the same as before")
+
+			countLinearFailed := func() int {
+				// linear.EnqueueMilestone packs the milestone name into
+				// the payload's "event" field. Filter on that so the
+				// assertion is meaningful even if a future change to
+				// ContinueSession also enqueues other milestone events
+				// (e.g. "started") on the same path.
+				payload, ok := d.jobs.getPayload("linear_milestone").(map[string]any)
+				if !ok {
+					return 0
+				}
+				if event, _ := payload["event"].(string); event == string(linear.MilestoneFailed) {
+					return 1
+				}
+				return 0
+			}
+			countFailedResult := func() int {
+				var n int
+				for _, r := range d.sessions.getResultUpdates() {
+					if r.status == "failed" {
+						n++
+					}
+				}
+				return n
+			}
+			countAssistant := func() int {
+				var n int
+				for _, m := range d.messages.getMessages() {
+					if m.Role == models.MessageRoleAssistant && m.SessionID == session.ID {
+						n++
+					}
+				}
+				return n
+			}
+
+			// Inline assertions (before any hook fires).
+			if c.wantInlineLinearMilestone {
+				require.Equal(t, 1, countLinearFailed(), "inline linear milestone expected before hook runs")
+			} else {
+				require.Zero(t, countLinearFailed(), "no Linear failed milestone should be enqueued inline — would emit a false 'failed' ping on every retry")
+			}
+			if c.wantInlineFailedResult {
+				require.Equal(t, 1, countFailedResult(), "inline failed result expected before hook runs")
+			} else {
+				require.Zero(t, countFailedResult(), "no failed result should be persisted inline — would flicker session.status mid-retry")
+			}
+			if c.wantInlineAssistantMsg {
+				require.Equal(t, 1, countAssistant(), "inline assistant message expected before hook runs")
+			} else {
+				require.Zero(t, countAssistant(), "no assistant message should be posted inline")
+			}
+
+			if c.runHooks {
+				jobctx.RunDeadLetterHooks(ctx, err)
+			}
+
+			// Post-hook assertions.
+			if c.wantPostHookLinearFail {
+				require.Equal(t, 1, countLinearFailed(), "dead-letter hook should enqueue exactly one linear_milestone:failed")
+			} else {
+				require.Zero(t, countLinearFailed(), "no Linear failed milestone should be enqueued when hook does not fire")
+			}
+			if c.wantPostHookFailed {
+				require.GreaterOrEqual(t, countFailedResult(), 1, "dead-letter hook should mark the session failed")
+			} else {
+				require.Zero(t, countFailedResult(), "session should not be marked failed when hook does not fire")
+			}
+			if c.wantPostHookAssistantMsg {
+				require.Equal(t, 1, countAssistant(), "dead-letter hook should post exactly one assistant message")
+			} else {
+				require.Zero(t, countAssistant(), "no assistant message should be posted when hook does not fire")
+			}
+		})
+	}
+}
+
+// TestContinueSession_CodexAuthInvalidStillFailsInline ensures the
+// permanent-auth-failure branch (refresh token revoked / no usable
+// credential) is unaffected by the deferred-infra-failure refactor. Auth
+// invalidity is not retryable, so retries would loop forever — the
+// failure must mark the session failed inline so the worker dead-letters
+// promptly and the user gets the re-authenticate CTA on first hit.
+func TestContinueSession_CodexAuthInvalidStillFailsInline(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	session := testRun(orgID, issue.ID)
+	session.AgentType = models.AgentTypeCodex
+	session.Status = string(models.SessionStatusIdle)
+	session.CurrentTurn = 1
+	containerID := "alive-container-on-this-node"
+	session.ContainerID = &containerID
+	thisNode := "worker-this-node"
+	session.WorkerNodeID = &thisNode
+	session.SandboxState = string(models.SandboxStateRunning)
+
+	d := defaultDeps()
+	d.nodeID = thisNode
+	d.adapter.name = models.AgentTypeCodex
+	d.issues.issue = issue
+	d.messages.messages = []models.SessionMessage{{
+		ID: 1, SessionID: session.ID, OrgID: orgID, TurnNumber: 2,
+		Role: models.MessageRoleUser, Content: "follow-up",
+	}}
+	d.provider.IsAliveFn = func(context.Context, *agent.Sandbox) (bool, error) {
+		return true, nil
+	}
+	// Refresh-token revoked: the codex auth provider returns an
+	// ErrCodexAuthInvalid-tagged error so InjectCodexAuthForUser
+	// surfaces auth invalidity, not transient infra.
+	d.codexAuth = &mockCodexAuthProvider{
+		err: agent.ErrCodexAuthInvalid,
+	}
+
+	ctx := jobctx.WithDeadLetterHooks(context.Background())
+	orch := buildOrchestrator(d)
+	err := orch.ContinueSession(ctx, session, nil)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "codex auth injection")
+
+	// Inline assertions: the session must be marked failed BEFORE any
+	// dead-letter hook fires. Auth invalidity is permanent — retrying
+	// won't help — so we want the worker to dead-letter on the next
+	// poll rather than burning attempts.
+	failedResults := 0
+	for _, r := range d.sessions.getResultUpdates() {
+		if r.status == "failed" {
+			failedResults++
+		}
+	}
+	require.GreaterOrEqual(t, failedResults, 1, "ErrCodexAuthInvalid must mark the session failed inline so the user gets the re-authenticate CTA without waiting for the retry budget to exhaust")
+
+	failedFailures := 0
+	for _, f := range d.sessions.getFailureUpdates() {
+		if f.category == agent.FailureCategoryCodexAuth {
+			failedFailures++
+		}
+	}
+	require.GreaterOrEqual(t, failedFailures, 1, "auth-invalid path must record the codex_auth_expired category inline")
+}
+
+// TestRunAgent_CodexAuthInjectInfraFailureDeferredToDeadLetter mirrors
+// TestContinueSession_CodexAuthInjectInfraFailureDeferredToDeadLetter for
+// the RunAgent call site (ensureCodexAuth at orchestrator.go:1908). Both
+// call sites share ensureCodexAuth, so the deferred behavior must hold
+// regardless of which orchestration entry point hit the failure.
+func TestRunAgent_CodexAuthInjectInfraFailureDeferredToDeadLetter(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name                     string
+		runHooks                 bool
+		wantInlineLinearFail     bool
+		wantInlineFailedResult   bool
+		wantPostHookLinearFail   bool
+		wantPostHookFailedResult bool
+	}{
+		{
+			name:                     "mid-retry: zero session-state churn",
+			runHooks:                 false,
+			wantInlineLinearFail:     false,
+			wantInlineFailedResult:   false,
+			wantPostHookLinearFail:   false,
+			wantPostHookFailedResult: false,
+		},
+		{
+			name:                     "dead-letter: failed result + Linear failed enqueued exactly once",
+			runHooks:                 true,
+			wantInlineLinearFail:     false,
+			wantInlineFailedResult:   false,
+			wantPostHookLinearFail:   true,
+			wantPostHookFailedResult: true,
+		},
+	}
+
+	for _, c := range cases {
+		c := c
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+
+			orgID := testOrg()
+			issue := testIssue(orgID)
+			run := testRun(orgID, issue.ID)
+			run.AgentType = models.AgentTypeCodex
+
+			d := defaultDeps()
+			d.adapter.name = models.AgentTypeCodex
+			d.issues.issue = issue
+			d.codexAuth = &mockCodexAuthProvider{
+				cfg: &models.OpenAIChatGPTConfig{
+					AccessToken:  "valid-access",
+					RefreshToken: "valid-refresh",
+					ExpiresAt:    time.Now().Add(time.Hour),
+				},
+			}
+			// Sandbox creation succeeds; the failure we exercise is
+			// the post-clone codex auth injection's docker exec.
+			d.provider.CreateFn = func(_ context.Context, cfg agent.SandboxConfig) (*agent.Sandbox, error) {
+				return &agent.Sandbox{ID: "sbx-1", Provider: "mock", WorkDir: cfg.WorkDir, HomeDir: cfg.HomeDir}, nil
+			}
+			d.provider.ExecFn = func(_ context.Context, _ *agent.Sandbox, cmd string, _, _ io.Writer) (int, error) {
+				if strings.Contains(cmd, ".codex") {
+					return 0, errors.New("Error response from daemon: No such container: sbx-1")
+				}
+				return 0, nil
+			}
+
+			ctx := jobctx.WithDeadLetterHooks(context.Background())
+			orch := buildOrchestrator(d)
+			err := orch.RunAgent(ctx, run)
+			require.Error(t, err)
+			require.Contains(t, err.Error(), "codex auth injection")
+
+			countLinearFailed := func() int {
+				payload, ok := d.jobs.getPayload("linear_milestone").(map[string]any)
+				if !ok {
+					return 0
+				}
+				if event, _ := payload["event"].(string); event == string(linear.MilestoneFailed) {
+					return 1
+				}
+				return 0
+			}
+			countFailedResult := func() int {
+				var n int
+				for _, r := range d.sessions.getResultUpdates() {
+					if r.status == "failed" {
+						n++
+					}
+				}
+				return n
+			}
+
+			if c.wantInlineLinearFail {
+				require.Equal(t, 1, countLinearFailed(), "inline linear_milestone:failed expected before hook runs")
+			} else {
+				require.Zero(t, countLinearFailed(), "no inline linear_milestone:failed should be enqueued during retry — would emit a false 'failed' ping on every attempt")
+			}
+			if c.wantInlineFailedResult {
+				require.Equal(t, 1, countFailedResult(), "inline failed result expected before hook runs")
+			} else {
+				require.Zero(t, countFailedResult(), "no inline failed result should be persisted during retry — would flicker session.status mid-flight")
+			}
+
+			if c.runHooks {
+				jobctx.RunDeadLetterHooks(ctx, err)
+			}
+
+			if c.wantPostHookLinearFail {
+				require.Equal(t, 1, countLinearFailed(), "dead-letter hook should enqueue exactly one linear_milestone:failed")
+			} else {
+				require.Zero(t, countLinearFailed(), "no linear_milestone:failed should be enqueued when hook does not fire")
+			}
+			if c.wantPostHookFailedResult {
+				require.GreaterOrEqual(t, countFailedResult(), 1, "dead-letter hook should mark the session failed")
+			} else {
+				require.Zero(t, countFailedResult(), "session should not be marked failed when hook does not fire")
+			}
+		})
+	}
 }
 
 // ---------------------------------------------------------------------------

@@ -8,7 +8,6 @@ import { useParams, useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Textarea } from "@/components/ui/textarea";
 import {
   Select,
   SelectContent,
@@ -20,6 +19,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { MobileBackButton } from "@/components/mobile-back-button";
 import { PageContainer } from "@/components/page-container";
 import { PageHeader } from "@/components/page-header";
+import { AutomationGoalEditor } from "@/components/automation-goal-editor";
 import { BranchPicker } from "@/components/branch-picker";
 import { AutomationModelSelect } from "@/components/automation-model-select";
 import { api } from "@/lib/api";
@@ -83,6 +83,7 @@ function SettingsTab({ automation }: { automation: Automation }) {
   const detectedTimezone = useMemo(() => browserTimezone(), []);
   const [baseBranch, setBaseBranch] = useState(automation.base_branch);
   const [model, setModel] = useState<string | undefined>(automation.model_override);
+  const [identityScope, setIdentityScope] = useState<"org" | "personal">(automation.identity_scope ?? "org");
   const [reasoningEffort, setReasoningEffort] = useState<CodingAgentReasoningEffort>(automation.reasoning_effort ?? "");
 
   const { data: settingsResponse } = useQuery({
@@ -109,6 +110,7 @@ function SettingsTab({ automation }: { automation: Automation }) {
         interval_run_at: `${intervalRunHour}:${intervalRunMinute}`,
         timezone,
         model: model ?? "",
+        identity_scope: identityScope,
         reasoning_effort: showReasoningSelector && reasoningEffort ? reasoningEffort : "",
         base_branch: baseBranch.trim() || undefined,
       }),
@@ -135,13 +137,15 @@ function SettingsTab({ automation }: { automation: Automation }) {
             {goalLength.countText}
           </span>
         </div>
-        <Textarea
+        <AutomationGoalEditor
           id="goal"
           value={goal}
-          onChange={(e) => setGoal(e.target.value)}
+          onChange={setGoal}
+          repositoryId={automation.repository_id ?? undefined}
+          branch={baseBranch?.trim() || automation.base_branch || undefined}
+          agentType={effectiveAgentType}
           rows={3}
-          maxLength={AUTOMATION_GOAL_MAX_LENGTH}
-          aria-invalid={goalLength.isTooLong}
+          ariaInvalid={goalLength.isTooLong}
         />
         <p className={cn("text-xs", goalLength.isTooLong ? "text-destructive" : "text-muted-foreground")}>
           {goalLength.message ?? `Up to ${AUTOMATION_GOAL_MAX_LENGTH.toLocaleString("en-US")} characters.`}
@@ -153,6 +157,21 @@ function SettingsTab({ automation }: { automation: Automation }) {
           <span className="text-muted-foreground font-normal">(optional)</span>
         </Label>
         <Input id="scope" value={scope} onChange={(e) => setScope(e.target.value)} />
+      </div>
+      <div className="space-y-1.5">
+        <Label>Run as</Label>
+        <Select value={identityScope} onValueChange={(value: "org" | "personal") => setIdentityScope(value)}>
+          <SelectTrigger aria-label="Run as">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="org">Organization automation</SelectItem>
+            <SelectItem value="personal">Personal automation</SelectItem>
+          </SelectContent>
+        </Select>
+        <p className="text-xs text-muted-foreground">
+          Organization automations use team credentials and open PRs as 143-bot. Personal automations use the creator&apos;s coding-agent preferences and GitHub identity.
+        </p>
       </div>
       <div className="space-y-1.5">
         <Label id="schedule-label">Schedule</Label>

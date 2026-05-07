@@ -343,7 +343,7 @@ func (c *graphQLClient) WorkflowStateForType(ctx context.Context, teamID string,
 	if teamID == "" || stateType == "" {
 		return nil, errors.New("teamID and stateType are required")
 	}
-	query := `query($teamID: String!) {
+	query := `query($teamID: ID!) {
 		workflowStates(filter: { team: { id: { eq: $teamID } } }, first: 50) {
 			nodes { id name type position }
 		}

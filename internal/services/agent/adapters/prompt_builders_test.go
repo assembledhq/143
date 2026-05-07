@@ -235,6 +235,38 @@ func TestBuildSystemPrompt_ManualSessionLinkedIssuesCarryTrustFence(t *testing.T
 	require.Contains(t, prompt, "untrusted external content", "trust_warning must call out untrusted external content")
 }
 
+func TestBuildSystemPrompt_AutomationRunMatchesSessionStyle(t *testing.T) {
+	t.Parallel()
+
+	input := &agent.AgentInput{
+		Issue:             &models.Issue{Title: "Nightly dependency refresh"},
+		PromptStyle:       agent.PromptStyleRawTask,
+		UserMessage:       "Update stale dependencies and run the focused test suite.",
+		ContextDocs:       []string{"Use Go 1.24"},
+		IntegrationSkills: "# Integration Tools\n\nUse 143-tools ...",
+		PMContext: &agent.PMTaskContext{
+			Approach:  "This should not appear",
+			Reasoning: "Neither should this",
+		},
+		LinkedIssues: []models.SessionIssueSnapshotEntry{
+			{
+				Role:        models.SessionIssueLinkRolePrimary,
+				Source:      models.IssueSourceLinear,
+				Title:       "Should stay out of automation prompts",
+				ExternalID:  "ENG-999",
+				Description: "Too much extra context.",
+			},
+		},
+	}
+
+	prompt := buildSystemPrompt(input)
+	require.NotContains(t, prompt, "Write tests that cover any new or changed behavior.", "automation runs should skip the issue-triage base template just like manual sessions")
+	require.Contains(t, prompt, "Repository Conventions", "automation runs should keep repository convention docs like normal sessions")
+	require.Contains(t, prompt, "Use Go 1.24", "automation runs should include repository convention content")
+	require.Contains(t, prompt, "# Integration Tools", "automation runs should keep integration skills like normal sessions")
+	require.NotContains(t, prompt, "Product Manager Analysis", "automation runs should not inject a PM analysis wrapper around the goal")
+}
+
 // ---------------------------------------------------------------------------
 // buildUserPrompt
 // ---------------------------------------------------------------------------
@@ -421,6 +453,26 @@ func TestBuildUserPrompt_ManualSessionPrependsMissingCommand(t *testing.T) {
 	prompt := buildUserPrompt(input)
 	require.Contains(t, prompt, "/review focus on auth", "missing command tokens should be prepended so the agent still sees them")
 	require.Contains(t, prompt, msg, "the original user message should still appear after the prepended commands")
+}
+
+func TestBuildUserPrompt_AutomationRunReturnsRawGoal(t *testing.T) {
+	t.Parallel()
+
+	goal := "Please review recently merged PRs, identify likely regressions, and open a follow-up fix if one is obvious."
+	input := &agent.AgentInput{
+		Issue:       &models.Issue{Title: "Nightly automation"},
+		PromptStyle: agent.PromptStyleRawTask,
+		UserMessage: goal,
+		PMContext: &agent.PMTaskContext{
+			Approach:  goal,
+			Reasoning: "This should not be wrapped into a PM section.",
+		},
+	}
+
+	prompt := buildUserPrompt(input)
+	require.Equal(t, goal, prompt, "automation runs should send only the raw goal as the user prompt")
+	require.NotContains(t, prompt, "## Issue:", "automation runs should not wrap the goal in issue headings")
+	require.NotContains(t, prompt, "### Description", "automation runs should not wrap the goal in a description section")
 }
 
 // ---------------------------------------------------------------------------
