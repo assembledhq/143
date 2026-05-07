@@ -17,7 +17,7 @@ import (
 // state on the same head SHA with a transient-blank snapshot.
 func detectIndeterminateSignals(mergeable *bool, githubState string, checkRuns []gitHubCheckRun) (mergeStateIndeterminate, testsIndeterminate bool) {
 	state := strings.ToLower(strings.TrimSpace(githubState))
-	mergeStateIndeterminate = mergeable == nil && state != "dirty" && state != "blocked"
+	mergeStateIndeterminate = mergeable == nil && state != "dirty" && state != "blocked" && state != "draft" && state != "unstable" && state != "has_hooks"
 	for _, check := range checkRuns {
 		if classifyCheckRunCategory(check.Name) != models.PullRequestCheckCategoryTest {
 			continue
@@ -81,8 +81,10 @@ func normalizeMergeState(mergeable *bool, githubState string) (models.PullReques
 		return models.PullRequestMergeStateUnknown, false
 	case state == "behind":
 		return models.PullRequestMergeStateBehind, false
-	case state == "dirty" || state == "blocked":
+	case state == "dirty":
 		return models.PullRequestMergeStateConflicted, true
+	case state == "blocked" || state == "draft" || state == "unstable" || state == "has_hooks":
+		return models.PullRequestMergeStateBlocked, false
 	case mergeable != nil && !*mergeable:
 		return models.PullRequestMergeStateConflicted, true
 	case mergeable != nil && *mergeable:
@@ -213,6 +215,8 @@ func buildPRHealthSummaryText(health models.PullRequestHealthResponse) string {
 		return fmt.Sprintf("PR #%d is blocked by conflicts and %d failing test jobs.", health.PullRequestNumber, health.FailingTestCount)
 	case conflicted:
 		return fmt.Sprintf("PR #%d is blocked by merge conflicts.", health.PullRequestNumber)
+	case health.MergeState == models.PullRequestMergeStateBlocked:
+		return fmt.Sprintf("PR #%d is blocked by GitHub merge requirements.", health.PullRequestNumber)
 	case health.FailingTestCount == 1:
 		return fmt.Sprintf("PR #%d has 1 failing test job.", health.PullRequestNumber)
 	case health.FailingTestCount > 1:
