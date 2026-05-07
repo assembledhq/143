@@ -391,7 +391,7 @@ This is a natural evolution of Idea 1, not a rewrite. But don't build it until t
 
 ## Implementation Considerations
 
-See [34-repo-ribbons-nav.md](design/34-repo-ribbons-nav.md) for the full PRD with API specs, SQL queries, frontend implementation details, and edge cases.
+See [34-repo-ribbons-nav.md](design/backlog/34-repo-ribbons-nav.md) for the full PRD with API specs, SQL queries, frontend implementation details, and edge cases.
 
 ---
 

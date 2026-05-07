@@ -204,7 +204,8 @@ if [ "$ROLE" = "db" ]; then
 Cmnd_Alias DEPLOY_CMDS = \
     /usr/bin/chown -R deploy\:deploy /opt/143/deploy/scripts, \
     /usr/bin/systemctl restart docker, \
-    /opt/143/deploy/scripts/install-log-rotation.sh *
+    /opt/143/deploy/scripts/install-log-rotation.sh *, \
+    /opt/143/deploy/scripts/install-docker-dns.sh *
 
 deploy ALL=(root) NOPASSWD: DEPLOY_CMDS
 SUDOERS
@@ -239,7 +240,8 @@ Cmnd_Alias DEPLOY_CMDS = \
     /usr/bin/chown -R deploy\:deploy /opt/143/deploy/vmalert, \
     /usr/bin/chown -R deploy\:deploy /opt/143/deploy/grafana, \
     /usr/bin/systemctl restart docker, \
-    /opt/143/deploy/scripts/install-log-rotation.sh *
+    /opt/143/deploy/scripts/install-log-rotation.sh *, \
+    /opt/143/deploy/scripts/install-docker-dns.sh *
 
 deploy ALL=(root) NOPASSWD: DEPLOY_CMDS
 SUDOERS
@@ -264,7 +266,8 @@ elif [ "$ROLE" = "redis" ]; then
 Cmnd_Alias DEPLOY_CMDS = \
     /usr/bin/chown -R deploy\:deploy /opt/143/deploy/scripts, \
     /usr/bin/systemctl restart docker, \
-    /opt/143/deploy/scripts/install-log-rotation.sh *
+    /opt/143/deploy/scripts/install-log-rotation.sh *, \
+    /opt/143/deploy/scripts/install-docker-dns.sh *
 
 deploy ALL=(root) NOPASSWD: DEPLOY_CMDS
 SUDOERS
@@ -288,8 +291,19 @@ if [ "$ROLE" = "app" ] || [ "$ROLE" = "worker" ] || [ "$ROLE" = "logging" ]; the
   # Vector collector is included from the main compose file
   scp "${SCP_OPTS[@]}" "$PROJECT_DIR/docker-compose.vector.yml" root@"$HOST":/opt/143/
 fi
+if [ "$ROLE" = "app" ] || [ "$ROLE" = "worker" ]; then
+  # DNS probe is included by both compose files; stage it so the include
+  # directive resolves on first `docker compose up`.
+  scp "${SCP_OPTS[@]}" "$PROJECT_DIR/docker-compose.dns-probe.yml" root@"$HOST":/opt/143/
+fi
+if [ "$ROLE" = "worker" ]; then
+  # sandbox-dns is built locally from docker-compose.worker.yml on first
+  # `docker compose up`, so fresh worker provisioning must stage its Dockerfile
+  # before Step 5 starts services. Routine deploys refresh this separately.
+  scp "${SCP_OPTS[@]}" "$PROJECT_DIR/Dockerfile.dnsmasq" root@"$HOST":/opt/143/
+fi
 scp "${SCP_OPTS[@]}" -r "$PROJECT_DIR/deploy" root@"$HOST":/opt/143/
-ssh "${SSH_OPTS[@]}" root@"$HOST" "chown -R deploy:deploy /opt/143 && chmod +x /opt/143/deploy/scripts/install-log-rotation.sh"
+ssh "${SSH_OPTS[@]}" root@"$HOST" "chown -R deploy:deploy /opt/143 && chmod +x /opt/143/deploy/scripts/install-log-rotation.sh /opt/143/deploy/scripts/install-docker-dns.sh"
 
 # Step 2a: Cap docker container log files (max-size/max-file in
 # /etc/docker/daemon.json) BEFORE step 5 starts services. Closes the
@@ -302,6 +316,16 @@ case "$ROLE" in
   *)  LOG_MAX_SIZE="100m" ;;
 esac
 ssh "${SSH_OPTS[@]}" root@"$HOST" "/opt/143/deploy/scripts/install-log-rotation.sh $LOG_MAX_SIZE 5"
+
+# Step 2a (continued): Pin Docker daemon DNS to multiple independent
+# resolvers. Without this, the embedded resolver at 127.0.0.11 inherits the
+# host's resolv.conf — usually a single provider DNS — so one upstream
+# outage takes the whole fleet's container DNS down at once. The
+# 2026-05-07T04:15Z incident hit three workers simultaneously this way.
+# Order is fastest first; Docker's embedded resolver falls through to the
+# next on a SERVFAIL/timeout. Cloudflare + Google + Quad9 are independent
+# operators and networks.
+ssh "${SSH_OPTS[@]}" root@"$HOST" "/opt/143/deploy/scripts/install-docker-dns.sh 1.1.1.1 8.8.8.8 9.9.9.9"
 
 # Step 2b: Sync authorized keys from deploy/authorized_keys/*.pub
 # Replaces authorized_keys on the host with exactly the keys in the repo.
@@ -399,17 +423,17 @@ PULL_APP
       # subnet Docker auto-assigns from its default pool and the static IP
       # mapping breaks.
       #
-      # enable_icc=false blocks one sandbox from TCP-connecting to another.
-      # Intra-bridge traffic from a sandbox to preview-infra and to
-      # sandbox-dns is allowed by an explicit RETURN rule installed in
-      # DOCKER-USER by sandbox-firewall.sh.
+      # Leave Docker's bridge ICC setting at its default. On some Docker /
+      # gVisor combinations, disabling bridge ICC blocks sandbox traffic to
+      # the sandbox-dns sidecar before DOCKER-USER can carve it out, which
+      # breaks all agent DNS resolution.
       # docker inspect returns "" on a missing network (with exit 1 swallowed
       # by `|| true`) and the subnet string on an existing one. Distinguishing
       # the two via a single call keeps us from spawning two `su - deploy`
       # login shells per provision.
       EXISTING_SANDBOX_SUBNET=$(su - deploy -c 'docker network inspect 143-sandbox -f "{{range .IPAM.Config}}{{.Subnet}}{{end}}" 2>/dev/null' || true)
       if [ -z "$EXISTING_SANDBOX_SUBNET" ]; then
-        su - deploy -c 'docker network create --driver bridge --subnet 172.30.0.0/24 --opt com.docker.network.bridge.enable_icc=false --label managed-by=143 143-sandbox'
+        su - deploy -c 'docker network create --driver bridge --subnet 172.30.0.0/24 --label managed-by=143 143-sandbox'
       elif [ "$EXISTING_SANDBOX_SUBNET" != "172.30.0.0/24" ]; then
         echo "ERROR: 143-sandbox network has subnet '$EXISTING_SANDBOX_SUBNET'; expected 172.30.0.0/24." >&2
         echo "  This worker was provisioned before the pinned-subnet change. To upgrade:" >&2
@@ -426,26 +450,12 @@ PULL_APP
       if [ -x /opt/143/deploy/scripts/sandbox-firewall.sh ]; then
         /opt/143/deploy/scripts/sandbox-firewall.sh 143-sandbox
       fi
-      # Provision /etc/143/sandbox-resolv.conf for sandboxes to bind-mount at
-      # /etc/resolv.conf. Required because user-defined Docker networks inject
-      # 127.0.0.11 (Docker's embedded DNS) into resolv.conf, and gVisor's
-      # netstack can't reach it. HostConfig.DNS doesn't help — it only changes
-      # the upstream the embedded resolver forwards to.
-      #
-      # Points at the sandbox-dns container's static IP (172.30.0.2 on the
-      # 143-sandbox bridge). sandbox-dns is a non-gVisor container that CAN
-      # reach 127.0.0.11 normally and forwards every query there, so preview-
-      # infrastructure container names (preview-db-<handle>, etc.) resolve
-      # via Docker's embedded resolver while public lookups continue to work
-      # through the daemon's upstream forwarders. Bringing up sandbox-dns is
-      # gated by docker-compose.worker.yml depends_on, so by the time the
-      # worker is taking traffic this address is answering.
-      mkdir -p /etc/143
-      cat > /etc/143/sandbox-resolv.conf <<RESOLV
-nameserver 172.30.0.2
-options edns0 trust-ad ndots:0
-RESOLV
-      chmod 644 /etc/143/sandbox-resolv.conf
+      # Provision /etc/143/sandbox-resolv.conf via the shared writer so the
+      # provisioning path and routine deploys agree byte-for-byte on its
+      # contents. See deploy/scripts/sandbox-resolv-conf.sh for the full
+      # rationale (gVisor + Docker embedded DNS + sandbox-dns sidecar). The
+      # file was scp'd to /opt/143 in Step 2 and runs as root here.
+      /opt/143/deploy/scripts/sandbox-resolv-conf.sh
       # Provision /var/run/143/sandbox-auth/ for the per-session GitHub
       # credential sockets. The worker container bind-mounts this path
       # in (see docker-compose.worker.yml); the orchestrator running as

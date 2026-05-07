@@ -400,8 +400,8 @@ func TestDockerProvider_EnsureNetwork(t *testing.T) {
 			require.Equal(t, "143-sandbox", name)
 			require.Equal(t, "bridge", options.Driver)
 			require.Equal(t, "143", options.Labels["managed-by"])
-			require.Equal(t, "false", options.Options["com.docker.network.bridge.enable_icc"],
-				"sandbox network must disable inter-container chatter")
+			require.NotContains(t, options.Options, "com.docker.network.bridge.enable_icc",
+				"sandbox network must leave bridge ICC at Docker's default so sandboxes can reach sandbox-dns")
 			return network.CreateResponse{ID: "net-id"}, nil
 		}
 		p := NewDockerProvider(mock, newTestLogger(), WithRuntime("runc"))

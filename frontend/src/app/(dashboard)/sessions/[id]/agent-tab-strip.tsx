@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo } from "react";
+import { RefObject, useMemo } from "react";
 import { Loader2, MoreVertical, Plus, Square, GitBranch, Undo2, AlertTriangle, X } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
@@ -103,6 +103,7 @@ interface AgentTabStripProps {
   onArchiveThread: (threadId: string) => void;
   cancelPendingThreadId: string | null;
   archivePendingThreadId: string | null;
+  addTabButtonRef?: RefObject<HTMLButtonElement | null>;
 }
 
 // AgentTabStrip is the user's primary surface for switching between tabs and
@@ -131,6 +132,7 @@ export function AgentTabStrip({
   onArchiveThread,
   cancelPendingThreadId,
   archivePendingThreadId,
+  addTabButtonRef,
 }: AgentTabStripProps) {
   const tabs = useMemo(() => threads, [threads]);
   if (tabs.length === 0 || !activeThreadId) {
@@ -173,8 +175,6 @@ export function AgentTabStrip({
                     aria-hidden
                   />
                   <span className="truncate text-sm font-medium text-foreground">{activeThread.label}</span>
-                  <span className="truncate text-xs text-muted-foreground">{agentLabel}</span>
-                  <span className="truncate text-xs text-muted-foreground">{statusLabel}</span>
                   {isCancelling && (
                     <Loader2
                       className="h-3.5 w-3.5 shrink-0 animate-spin text-muted-foreground"
@@ -240,12 +240,13 @@ export function AgentTabStrip({
               cancelPendingThreadId={cancelPendingThreadId}
             />
             <Button
+              ref={addTabButtonRef}
               type="button"
               size="icon"
               variant="ghost"
               className="h-8 w-8 shrink-0"
               aria-label="Add agent tab"
-              title="Add agent tab"
+              title="Add agent tab (t)"
               onClick={onAddTab}
             >
               <Plus className="h-4 w-4" />
@@ -297,7 +298,6 @@ export function AgentTabStrip({
                           aria-hidden
                         />
                         <span className="truncate">{thread.label}</span>
-                        <span className="hidden sm:inline text-muted-foreground">{" - "}{statusLabel}</span>
                         {isCancelling && (
                           <Loader2 className="h-3 w-3 animate-spin text-muted-foreground" aria-label="Cancelling" />
                         )}
@@ -365,12 +365,13 @@ export function AgentTabStrip({
             cancelPendingThreadId={cancelPendingThreadId}
           />
           <Button
+            ref={addTabButtonRef}
             type="button"
             size="icon"
             variant="ghost"
             className="h-8 w-8 shrink-0"
             aria-label="Add agent tab"
-            title="Add agent tab"
+            title="Add agent tab (t)"
             onClick={onAddTab}
             disabled={addTabPending}
           >

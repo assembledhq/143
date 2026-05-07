@@ -1,6 +1,6 @@
 # Design: Toast Notifications
 
-> **Status:** Proposed | **Last reviewed:** 2026-04-28
+> **Status:** Implemented | **Last reviewed:** 2026-05-06
 
 This document defines how toast notifications should look and behave across the platform.
 

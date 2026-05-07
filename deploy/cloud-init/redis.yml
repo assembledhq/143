@@ -13,6 +13,7 @@ users:
 packages:
   - docker.io
   - docker-compose-plugin
+  - jq
 
 write_files:
   - path: /opt/143/.env

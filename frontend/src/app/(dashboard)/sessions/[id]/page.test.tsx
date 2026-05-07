@@ -288,12 +288,12 @@ describe('SessionDetailPage', () => {
     expect(screen.getAllByText('Completed').length).toBeGreaterThanOrEqual(1);
   });
 
-  it('shows detail panel tabs for Overview, Changes, Validation', async () => {
+  it('shows detail panel tabs for Overview and Changes', async () => {
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
     await screen.findAllByText('Fixed TypeError by adding null check');
     expect(screen.getByRole('tab', { name: 'Overview' })).toBeInTheDocument();
     expect(screen.getByRole('tab', { name: 'Changes' })).toBeInTheDocument();
-    expect(screen.getByRole('tab', { name: 'Validation' })).toBeInTheDocument();
+    expect(screen.queryByRole('tab', { name: 'Validation' })).not.toBeInTheDocument();
   });
 
   it('uses a dedicated mobile close button that does not compete with PR actions', async () => {
@@ -312,7 +312,7 @@ describe('SessionDetailPage', () => {
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
 
     await screen.findAllByText('Fixed TypeError by adding null check');
-    await user.click(screen.getByRole('button', { name: 'Open details' }));
+    await user.click(screen.getByRole('button', { name: 'Open session details' }));
 
     // panelTabsEl is rendered both inline (desktop) and inside the Sheet
     // (mobile), so we scope to the dialog Radix opens for the sheet to
@@ -1762,19 +1762,13 @@ describe('SessionDetailPage', () => {
     expect(screen.getByText('Plan step 1')).toBeInTheDocument();
   });
 
-  it('shows validation tab with check results for non-manual sessions', async () => {
+  it('does not show a validation tab for non-manual sessions', async () => {
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
     await screen.findAllByText('Fixed TypeError by adding null check');
-    // Click the Validation tab button
-    const user = userEvent.setup();
-    const validationTab = screen.getByRole('tab', { name: 'Validation' });
-    await user.click(validationTab);
-    expect(await screen.findByText('Direction check')).toBeInTheDocument();
-    expect(screen.getByText('Correctness check')).toBeInTheDocument();
-    expect(screen.getByText('Changes align with issue description')).toBeInTheDocument();
+    expect(screen.queryByRole('tab', { name: 'Validation' })).not.toBeInTheDocument();
   });
 
-  it('hides validation tab for manual sessions', async () => {
+  it('does not show a validation tab for manual sessions', async () => {
     const manualSession: Session = {
       ...mockSessions[0],
       triggered_by_user_id: 'user-1',
@@ -2245,6 +2239,33 @@ describe('SessionDetailPage', () => {
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
 
     expect(await screen.findByRole('button', { name: /^Merge$/ })).toBeInTheDocument();
+  });
+
+  it('does not show Resolve conflicts when GitHub reports a non-conflict blocked PR', async () => {
+    server.use(
+      http.get('/api/v1/pull-requests/:id/health', () => {
+        return HttpResponse.json({
+          data: {
+            ...mockPRHealth,
+            merge_state: 'blocked' as const,
+            has_conflicts: false,
+            can_resolve_conflicts: false,
+            can_merge: false,
+            checks_confirmed: true,
+            checks: [
+              { name: 'unit tests', category: 'test' as const, status: 'passed' as const, summary: 'passed' },
+            ],
+            summary: 'PR #42 is blocked by GitHub merge requirements.',
+          },
+        } satisfies SingleResponse<typeof mockPRHealth>);
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+
+    expect(await screen.findByText('PR #42 is blocked by GitHub merge requirements.')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Resolve conflicts' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /^Merge$/ })).not.toBeInTheDocument();
   });
 
   it('routes to a new revision session after starting a PR repair action', async () => {
@@ -2842,6 +2863,49 @@ describe('SessionDetailPage', () => {
     });
   });
 
+  it('does not queue duplicate create PR requests from the keyboard while one is pending', async () => {
+    let createPRCalls = 0;
+
+    const sessionWithDiff: Session = {
+      ...mockSessions[0],
+      status: 'completed',
+      diff: '--- a/file.ts\n+++ b/file.ts\n@@ -1 +1 @@\n-old\n+new',
+      diff_stats: { added: 1, removed: 1, files_changed: 1 },
+      snapshot_key: 'snap-abc',
+      pr_creation_state: 'idle',
+    };
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({ data: sessionWithDiff } satisfies SingleResponse<Session>);
+      }),
+      http.get('/api/v1/sessions/:id/pr', () => {
+        return HttpResponse.json(
+          { error: { code: 'NOT_FOUND', message: 'pull request not found' } },
+          { status: 404 },
+        );
+      }),
+      http.post('/api/v1/sessions/:id/pr', () => {
+        createPRCalls += 1;
+        return HttpResponse.json({ status: 'queued' }, { status: 202 });
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+    await screen.findByRole('button', { name: /Create PR/ });
+    act(() => {
+      (document.activeElement as HTMLElement | null)?.blur();
+    });
+
+    await userEvent.keyboard('pc');
+    await waitFor(() => {
+      expect(createPRCalls).toBe(1);
+    });
+    await userEvent.keyboard('pc');
+
+    expect(createPRCalls).toBe(1);
+  });
+
   it('keeps the button in a pending state after create PR starts without server PR state fields', async () => {
     const legacySession: Session = {
       ...mockSessions[0],
@@ -3024,6 +3088,48 @@ describe('SessionDetailPage', () => {
     await waitFor(() => {
       expect(requestBodies).toEqual([undefined, { author_mode: 'app' }]);
     });
+  });
+
+  it('opens the GitHub auth prompt when pressing p c and PR authorship is required', async () => {
+    const sessionWithDiff: Session = {
+      ...mockSessions[0],
+      status: 'completed',
+      diff: '--- a/file.ts\n+++ b/file.ts\n@@ -1 +1 @@\n-old\n+new',
+      diff_stats: { added: 1, removed: 1, files_changed: 1 },
+      snapshot_key: 'snap-abc',
+      pr_creation_state: 'idle',
+    };
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({ data: sessionWithDiff } satisfies SingleResponse<Session>);
+      }),
+      http.get('/api/v1/sessions/:id/pr', () => {
+        return HttpResponse.json(
+          { error: { code: 'NOT_FOUND', message: 'pull request not found' } },
+          { status: 404 },
+        );
+      }),
+      http.get('/api/v1/users/me/github-status', () => {
+        return HttpResponse.json({
+          connected: false,
+          has_repo_scope: false,
+          pr_authorship_mode: 'user_required',
+          pr_draft_default: false,
+        });
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+    await screen.findByRole('button', { name: /Create PR/ });
+    act(() => {
+      (document.activeElement as HTMLElement | null)?.blur();
+    });
+
+    await userEvent.keyboard('pc');
+
+    expect(await screen.findByText('Open this pull request as yourself?')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Continue with GitHub' })).toBeInTheDocument();
   });
 
   it('auto-resumes PR creation after GitHub auth callback', async () => {
@@ -3811,103 +3917,6 @@ describe('SessionDetailPage', () => {
     expect(screen.getByText('my_custom_agent')).toBeInTheDocument();
   });
 
-  it('shows no validation data state when validation query returns error', async () => {
-    server.use(
-      http.get('/api/v1/sessions/:id/validation', () => {
-        return HttpResponse.json(
-          { error: { code: 'NOT_FOUND', message: 'not found' } },
-          { status: 404 },
-        );
-      }),
-    );
-
-    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
-    await screen.findAllByText('Fixed TypeError by adding null check');
-
-    const user = userEvent.setup();
-    const validationTab = screen.getByRole('tab', { name: 'Validation' });
-    await user.click(validationTab);
-
-    expect(await screen.findByText('No validation data')).toBeInTheDocument();
-  });
-
-  it('shows Failed badge when validation overall status is failed', async () => {
-    server.use(
-      http.get('/api/v1/sessions/:id/validation', () => {
-        return HttpResponse.json({
-          data: {
-            ...mockSessions[0],
-            id: 'val-2',
-            session_id: 'session-abcdef12-3456-7890',
-            org_id: 'org-1',
-            status: 'failed',
-            direction_check: 'fail',
-            direction_check_details: 'Bad direction',
-            correctness_check: null,
-            correctness_check_details: null,
-            quality_check: null,
-            quality_check_details: null,
-            security_scan: null,
-            security_scan_details: null,
-            regression_test_check: null,
-            regression_test_check_details: null,
-            ci_check: null,
-            ci_check_details: null,
-            created_at: '2026-02-17T07:06:00Z',
-            updated_at: '2026-02-17T07:06:00Z',
-          },
-        });
-      }),
-    );
-
-    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
-    await screen.findAllByText('Fixed TypeError by adding null check');
-
-    const user = userEvent.setup();
-    const validationTab = screen.getByRole('tab', { name: 'Validation' });
-    await user.click(validationTab);
-
-    expect(await screen.findByText('Failed')).toBeInTheDocument();
-  });
-
-  it('shows non-pass/fail overall validation status as-is', async () => {
-    server.use(
-      http.get('/api/v1/sessions/:id/validation', () => {
-        return HttpResponse.json({
-          data: {
-            id: 'val-3',
-            session_id: 'session-abcdef12-3456-7890',
-            org_id: 'org-1',
-            status: 'in_progress',
-            direction_check: null,
-            direction_check_details: null,
-            correctness_check: null,
-            correctness_check_details: null,
-            quality_check: null,
-            quality_check_details: null,
-            security_scan: null,
-            security_scan_details: null,
-            regression_test_check: null,
-            regression_test_check_details: null,
-            ci_check: null,
-            ci_check_details: null,
-            created_at: '2026-02-17T07:06:00Z',
-            updated_at: '2026-02-17T07:06:00Z',
-          },
-        });
-      }),
-    );
-
-    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
-    await screen.findAllByText('Fixed TypeError by adding null check');
-
-    const user = userEvent.setup();
-    const validationTab = screen.getByRole('tab', { name: 'Validation' });
-    await user.click(validationTab);
-
-    expect(await screen.findByText('in_progress')).toBeInTheDocument();
-  });
-
   it('shows codex auth failure with re-authenticate button', async () => {
     const codexAuthSession: Session = {
       ...mockSessions[1],
@@ -4653,6 +4662,36 @@ describe('SessionDetailPage', () => {
     });
   });
 
+  it('scrolls the transcript with keyboard shortcuts immediately after loading', async () => {
+    const idleSession: Session = {
+      ...mockSessions[0],
+      status: 'idle',
+      completed_at: undefined,
+      current_turn: 1,
+      sandbox_state: 'snapshotted',
+    };
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({ data: idleSession } satisfies SingleResponse<Session>);
+      }),
+    );
+
+    const { container } = renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+    await screen.findByPlaceholderText('Send a follow-up message...');
+    const scroller = getChatScroller(container);
+    const scrollBy = vi.fn();
+    Object.defineProperty(scroller, 'clientHeight', { configurable: true, value: 400 });
+    Object.defineProperty(scroller, 'scrollBy', { configurable: true, value: scrollBy });
+    act(() => {
+      scroller.focus();
+    });
+
+    await userEvent.keyboard('{PageDown}');
+
+    expect(scrollBy).toHaveBeenCalledWith({ top: 340, behavior: 'smooth' });
+  });
+
   it('clears the jump-to-latest affordance when the viewed session changes', async () => {
     const idleSessionA: Session = {
       ...mockSessions[0],
@@ -5141,6 +5180,73 @@ describe('SessionDetailPage', () => {
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
   });
 
+  it('uses a single mobile top bar and moves thread controls into the session actions sheet', async () => {
+    vi.mocked(window.matchMedia).mockImplementation((query: string) => ({
+      matches: query === '(max-width: 767px)',
+      media: query,
+      onchange: null,
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      dispatchEvent: vi.fn(),
+    }));
+
+    const threads: SessionThread[] = [
+      {
+        id: 'thread-1',
+        session_id: 'session-abcdef12-3456-7890',
+        org_id: 'org-1',
+        agent_type: 'codex',
+        label: 'Main tab',
+        status: 'running',
+        current_turn: 1,
+        diff: 'diff --git a/src/app.ts b/src/app.ts',
+        created_at: '2026-02-17T07:00:00Z',
+        cost_cents: 15,
+        pending_message_count: 0,
+      },
+      {
+        id: 'thread-2',
+        session_id: 'session-abcdef12-3456-7890',
+        org_id: 'org-1',
+        agent_type: 'claude_code',
+        label: 'Review',
+        status: 'awaiting_input',
+        created_at: '2026-02-17T07:02:00Z',
+        current_turn: 1,
+        cost_cents: 10,
+        pending_message_count: 1,
+      },
+    ];
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({
+          data: {
+            ...mockSessions[0],
+            threads,
+          },
+        } satisfies SingleResponse<Session>);
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+    await screen.findAllByText('Fixed TypeError by adding null check');
+
+    expect(screen.getByRole('button', { name: 'Open session details' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Open session actions' })).toBeInTheDocument();
+
+    const user = userEvent.setup();
+    await user.click(screen.getByRole('button', { name: 'Open session actions' }));
+
+    const actionsSheet = await screen.findByRole('dialog', { name: 'Session actions' });
+    expect(within(actionsSheet).getByRole('button', { name: 'Switch to Main tab' })).toBeInTheDocument();
+    expect(within(actionsSheet).getByRole('button', { name: 'Switch to Review' })).toBeInTheDocument();
+    expect(within(actionsSheet).getByRole('button', { name: 'Add agent tab' })).toBeInTheDocument();
+    expect(within(actionsSheet).getByRole('button', { name: 'Rename session' })).toBeInTheDocument();
+  });
+
   it('opens a full-screen mobile diff when a file is selected from the Changes sheet', async () => {
     vi.mocked(window.matchMedia).mockImplementation((query: string) => ({
       matches: query === '(max-width: 767px)',
@@ -5169,7 +5275,7 @@ describe('SessionDetailPage', () => {
     await screen.findAllByText('Fixed TypeError by adding null check');
 
     const user = userEvent.setup();
-    await user.click(screen.getByRole('button', { name: 'Open details' }));
+    await user.click(screen.getByRole('button', { name: 'Open session details' }));
 
     const detailSheet = await screen.findByRole('dialog');
     await user.click(within(detailSheet).getByRole('tab', { name: /^Changes/ }));
@@ -5215,7 +5321,7 @@ describe('SessionDetailPage', () => {
     await user.click(screen.getByRole('button', { name: 'Open files list' }));
     const detailSheet = await screen.findByRole('dialog');
     expect(within(detailSheet).getByText('2 files changed')).toBeInTheDocument();
-    expect(within(detailSheet).getByText('Browse session details, changed files, validation, and preview on mobile.')).toBeInTheDocument();
+    expect(within(detailSheet).getByText('Browse session details, changed files, and preview on mobile.')).toBeInTheDocument();
   });
 
   it('uses the Changes sheet as a mobile file index instead of showing a review-all action', async () => {
@@ -5246,7 +5352,7 @@ describe('SessionDetailPage', () => {
     await screen.findAllByText('Fixed TypeError by adding null check');
 
     const user = userEvent.setup();
-    await user.click(screen.getByRole('button', { name: 'Open details' }));
+    await user.click(screen.getByRole('button', { name: 'Open session details' }));
 
     const detailSheet = await screen.findByRole('dialog');
     await user.click(within(detailSheet).getByRole('tab', { name: /^Changes/ }));
@@ -5949,6 +6055,137 @@ describe('SessionDetailPage', () => {
     });
   });
 
+  it('focuses the continue-session textarea after creating a new tab', async () => {
+    const sessionId = 'session-create-tab-autofocus';
+    const threads: SessionThread[] = [
+      {
+        id: 'thread-main',
+        session_id: sessionId,
+        org_id: 'org-1',
+        agent_type: 'codex',
+        label: 'Codex',
+        status: 'idle',
+        current_turn: 1,
+        created_at: '2026-02-17T07:00:00Z',
+        cost_cents: 0,
+        pending_message_count: 0,
+      },
+    ];
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({
+          data: {
+            ...mockSessions[0],
+            id: sessionId,
+            status: 'idle',
+            sandbox_state: 'snapshotted',
+            threads,
+          },
+        } satisfies SingleResponse<Session & { threads: SessionThread[] }>);
+      }),
+      http.get('/api/v1/sessions/:id/threads/:threadId/messages', () => {
+        return HttpResponse.json({ data: [], meta: {} } satisfies ListResponse<SessionMessage>);
+      }),
+      http.get('/api/v1/sessions/:id/threads/:threadId/logs', () => {
+        return HttpResponse.json({ data: [], meta: {} });
+      }),
+      http.post('/api/v1/sessions/:id/threads', async () => {
+        const thread: SessionThread = {
+          id: 'thread-new',
+          session_id: sessionId,
+          org_id: 'org-1',
+          agent_type: 'codex',
+          label: 'Codex 2',
+          status: 'idle',
+          current_turn: 0,
+          created_at: '2026-02-17T07:04:00Z',
+          cost_cents: 0,
+          pending_message_count: 0,
+        };
+        threads.push(thread);
+        return HttpResponse.json({ data: thread } satisfies SingleResponse<SessionThread>, { status: 201 });
+      }),
+    );
+
+    const user = userEvent.setup();
+    renderWithProviders(<SessionDetailContent id={sessionId} />);
+
+    await screen.findByRole('button', { name: 'Add agent tab' });
+    await user.click(screen.getByRole('button', { name: 'Add agent tab' }));
+
+    const textarea = await screen.findByPlaceholderText('Send a message to Codex 2...');
+
+    await waitFor(() => {
+      expect(textarea).toHaveFocus();
+    });
+  });
+
+  it('keeps focus on the add-tab trigger after creating a tab when no composer is rendered', async () => {
+    const sessionId = 'session-create-tab-no-composer';
+    const threads: SessionThread[] = [
+      {
+        id: 'thread-main',
+        session_id: sessionId,
+        org_id: 'org-1',
+        agent_type: 'pm_agent',
+        label: 'Planner',
+        status: 'idle',
+        current_turn: 1,
+        created_at: '2026-02-17T07:00:00Z',
+        cost_cents: 0,
+        pending_message_count: 0,
+      },
+    ];
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({
+          data: {
+            ...mockSessions[0],
+            id: sessionId,
+            agent_type: 'pm_agent',
+            status: 'idle',
+            sandbox_state: 'snapshotted',
+            threads,
+          },
+        } satisfies SingleResponse<Session & { threads: SessionThread[] }>);
+      }),
+      http.get('/api/v1/sessions/:id/threads/:threadId/messages', () => {
+        return HttpResponse.json({ data: [], meta: {} } satisfies ListResponse<SessionMessage>);
+      }),
+      http.get('/api/v1/sessions/:id/threads/:threadId/logs', () => {
+        return HttpResponse.json({ data: [], meta: {} });
+      }),
+      http.post('/api/v1/sessions/:id/threads', async () => {
+        const thread: SessionThread = {
+          id: 'thread-new',
+          session_id: sessionId,
+          org_id: 'org-1',
+          agent_type: 'codex',
+          label: 'Codex 2',
+          status: 'idle',
+          current_turn: 0,
+          created_at: '2026-02-17T07:04:00Z',
+          cost_cents: 0,
+          pending_message_count: 0,
+        };
+        threads.push(thread);
+        return HttpResponse.json({ data: thread } satisfies SingleResponse<SessionThread>, { status: 201 });
+      }),
+    );
+
+    const user = userEvent.setup();
+    renderWithProviders(<SessionDetailContent id={sessionId} />);
+
+    const addButton = await screen.findByRole('button', { name: 'Add agent tab' });
+    await user.click(addButton);
+
+    await waitFor(() => {
+      expect(addButton).toHaveFocus();
+    });
+  });
+
   it('matches both trigger menus to the continue-session input width', async () => {
     const resumableSession: Session = {
       ...mockSessions[0],
@@ -6323,7 +6560,7 @@ describe('SessionDetailPage', () => {
     );
 
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
-    expect(await screen.findByText('Custom session title')).toBeInTheDocument();
+    expect(await screen.findByRole('heading', { level: 1, name: 'Custom session title' })).toBeInTheDocument();
   });
 
   it('shows only pm_approach without pm_reasoning in PM context', async () => {
@@ -6378,42 +6615,4 @@ describe('SessionDetailPage', () => {
     });
   });
 
-  it('shows validation check with unknown result type', async () => {
-    server.use(
-      http.get('/api/v1/sessions/:id/validation', () => {
-        return HttpResponse.json({
-          data: {
-            id: 'val-4',
-            session_id: 'session-abcdef12-3456-7890',
-            org_id: 'org-1',
-            status: 'passed',
-            direction_check: 'warning',
-            direction_check_details: 'Needs review',
-            correctness_check: 'pass',
-            correctness_check_details: null,
-            quality_check: null,
-            quality_check_details: null,
-            security_scan: null,
-            security_scan_details: null,
-            regression_test_check: null,
-            regression_test_check_details: null,
-            ci_check: null,
-            ci_check_details: null,
-            created_at: '2026-02-17T07:06:00Z',
-            updated_at: '2026-02-17T07:06:00Z',
-          },
-        });
-      }),
-    );
-
-    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
-    await screen.findAllByText('Fixed TypeError by adding null check');
-
-    const user = userEvent.setup();
-    const validationTab = screen.getByRole('tab', { name: 'Validation' });
-    await user.click(validationTab);
-
-    // "warning" is not "pass" or "fail", so checkResultBadge renders the raw value
-    expect(await screen.findByText('warning')).toBeInTheDocument();
-  });
 });

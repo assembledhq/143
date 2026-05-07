@@ -749,7 +749,7 @@ Recommended Datadog monitors (shipped as Terraform or JSON):
 
 ### Datadog as a Metrics Source for Experiments
 
-Datadog also serves as a source for Step 6 (observability/impact measurement). See [09-observability.md](09-observability.md) for details on how 143.dev queries Datadog metrics to evaluate experiment outcomes.
+Datadog also serves as a source for Step 6 (observability/impact measurement). See [09-observability.md](backlog/09-observability.md) for details on how 143.dev queries Datadog metrics to evaluate experiment outcomes.
 
 ## Observability (Fallback)
 

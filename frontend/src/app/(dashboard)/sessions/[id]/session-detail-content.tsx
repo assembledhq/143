@@ -20,11 +20,9 @@ import {
   Check,
   XCircle,
   X,
-  MinusCircle,
   Square,
   PanelRightOpen,
   PanelRightClose,
-  PanelBottomOpen,
   Clock,
   MessageSquare,
   Pencil,
@@ -49,8 +47,15 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from "@/components/ui/table";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import {
   Select,
   SelectContent,
@@ -101,7 +106,7 @@ import {
   resolveInitialSessionAnchor,
   writeStoredSessionScrollPosition,
 } from "@/lib/session-open-position";
-import type { ListResponse, Session, SessionDetail, SessionInputCommand, SessionInputReference, SessionLog, SessionMessage, SessionReviewComment, SessionThread, SessionThreadFileEvent, SessionTimelineEntry, User, Validation, CodexAuthStatus, PullRequestHealthResponse, SingleResponse } from "@/lib/types";
+import type { ListResponse, Session, SessionDetail, SessionInputCommand, SessionInputReference, SessionLog, SessionMessage, SessionReviewComment, SessionThread, SessionThreadFileEvent, SessionTimelineEntry, User, CodexAuthStatus, PullRequestHealthResponse, SingleResponse } from "@/lib/types";
 import { AgentTabStrip, computeThreadOverlap } from "./agent-tab-strip";
 import {
   ThreadAttributionFilter,
@@ -117,14 +122,20 @@ import { useDiffViewState } from "@/hooks/use-diff-view-state";
 import { CodexDeviceCodeModal } from "@/components/codex-device-code-modal";
 import { AgentBadge } from "@/components/agent-badge";
 import { PendingAttachmentStrip } from "@/components/pending-attachment-strip";
-import { PRHealthBanner } from "@/components/pr-health-banner";
-import { MobileBackButton } from "@/components/mobile-back-button";
+import { PRHealthBanner, prHealthAllowsMerge } from "@/components/pr-health-banner";
+import { SessionKeyboardHelpOverlay } from "@/components/session-keyboard-help-overlay";
 import { useAuth } from "@/hooks/use-auth";
 import { useMediaQuery } from "@/hooks/use-media-query";
 import { useDocumentVisible } from "@/hooks/use-document-visible";
+import {
+  useSessionKeyboardShortcuts,
+  type SessionDetailTab,
+  type UseSessionKeyboardShortcutsOptions,
+} from "@/hooks/use-session-keyboard-shortcuts";
 import { prMergedAccent } from "@/lib/pr-status-styles";
 import { cn, sessionTitle, formatTimeAgo } from "@/lib/utils";
 import { activeSet, workingStatusesSet } from "@/lib/session-status-groups";
+import { MobileSessionTopBar } from "./mobile-session-top-bar";
 
 // Defer the diff viewer (shiki + diff-parser) until the user actually opens
 // review mode. Saves ~100KB+ from the initial session-detail bundle for the
@@ -291,22 +302,6 @@ const triggerPickerIconClassName = "h-4 w-4 shrink-0";
 const directoryTriggerIcon = <FolderTree className={triggerPickerIconClassName} />;
 const fileTriggerIcon = <FileCode2 className={triggerPickerIconClassName} />;
 
-const validationChecks: { key: string; label: string }[] = [
-  { key: "direction_check", label: "Direction check" },
-  { key: "correctness_check", label: "Correctness check" },
-  { key: "quality_check", label: "Quality check" },
-  { key: "security_scan", label: "Security scan" },
-  { key: "regression_test_check", label: "Regression test check" },
-  { key: "ci_check", label: "CI check" },
-];
-
-function checkResultBadge(result: string | null) {
-  if (!result) return <Badge variant="secondary" className="text-xs">skipped</Badge>;
-  if (result === "pass") return <Badge variant="secondary" className="bg-emerald-50 text-emerald-700 dark:bg-emerald-950/30 dark:text-emerald-400 border-emerald-200/50 dark:border-emerald-800/30 text-xs">pass</Badge>;
-  if (result === "fail") return <Badge variant="secondary" className="bg-destructive/10 text-destructive border-destructive/20 text-xs">fail</Badge>;
-  return <Badge variant="secondary" className="text-xs">{result}</Badge>;
-}
-
 // AgentThreadTabs lived here in Phase 1. The replacement now lives in
 // agent-tab-strip.tsx (AgentTabStrip) and adds overlap badges, tab actions,
 // and cost surfacing. Status helpers moved with it; the statusConfig table
@@ -316,20 +311,19 @@ function checkResultBadge(result: string | null) {
 // Detail panel tabs (shown in right sidebar)
 // ---------------------------------------------------------------------------
 
-type DetailTab = "overview" | "changes" | "validation" | "preview";
+type DetailTab = SessionDetailTab;
 type PRAuthorMode = "auto" | "user" | "app";
 
 type PRAuthInterceptDetails = {
-  connect_url: string;
-  resume_token: string;
-  can_fallback_to_app: boolean;
+  connect_url?: string;
+  resume_token?: string;
+  can_fallback_to_app?: boolean;
 };
 
 // PRAuthPromptState is a discriminated union so merge prompts don't carry
-// create-PR-only fields (connect_url, resume_token, can_fallback_to_app).
-// create_pr and push_changes prompts come from the backend's auth interception
-// payload; merge prompts are always synthesized client-side and connect via
-// the hardcoded /github/connect endpoint with no resume token and no fallback.
+// create-PR-only fields. Create/push prompts may come from backend auth
+// interception or be synthesized from the current GitHub status before the
+// backend has rejected the action.
 type PRAuthPromptState =
   | ({ purpose: "create_pr" } & PRAuthInterceptDetails)
   | ({ purpose: "push_changes" } & PRAuthInterceptDetails)
@@ -663,93 +657,6 @@ function OverviewTab({ session, members, prStatus }: { session: Session; members
         </Card>
       )}
 
-    </div>
-  );
-}
-
-function ValidationTab({ sessionId }: { sessionId: string }) {
-  const { data, isLoading, error } = useQuery({
-    queryKey: ["session", sessionId, "validation"],
-    queryFn: () => api.sessions.getValidation(sessionId).catch((err) => {
-      // 404 means no validation exists yet — treat as empty data, not an error.
-      if (err?.code === "NOT_FOUND") return { data: null };
-      throw err;
-    }),
-  });
-
-  if (isLoading) {
-    return (
-      <div className="flex items-center justify-center py-12">
-        <div className="text-center space-y-2">
-          <Loader2 className="h-5 w-5 animate-spin text-muted-foreground/40 mx-auto" />
-          <p className="text-xs text-muted-foreground">Loading validation...</p>
-        </div>
-      </div>
-    );
-  }
-
-  const validation = data?.data;
-  if (error || !validation) {
-    return (
-      <div className="flex items-center justify-center py-12">
-        <div className="text-center space-y-2 max-w-[280px]">
-          <CheckCircle2 className="h-8 w-8 text-muted-foreground/40 mx-auto" />
-          <p className="text-xs font-medium text-muted-foreground">No validation data</p>
-          <p className="text-xs text-muted-foreground/60">Validation checks will appear here once the session produces results.</p>
-        </div>
-      </div>
-    );
-  }
-
-  const overallStatus = validation.status;
-
-  return (
-    <div className="space-y-4">
-      <div className="flex items-center gap-2">
-        <span className="text-xs font-medium">Overall:</span>
-        {overallStatus === "passed" && (
-          <Badge variant="secondary" className="bg-emerald-50 text-emerald-700 dark:bg-emerald-950/30 dark:text-emerald-400 border-emerald-200/50 dark:border-emerald-800/30">
-            <CheckCircle2 className="mr-1 h-3 w-3" /> Passed
-          </Badge>
-        )}
-        {overallStatus === "failed" && (
-          <Badge variant="secondary" className="bg-destructive/10 text-destructive border-destructive/20">
-            <XCircle className="mr-1 h-3 w-3" /> Failed
-          </Badge>
-        )}
-        {overallStatus !== "passed" && overallStatus !== "failed" && (
-          <Badge variant="secondary">
-            <MinusCircle className="mr-1 h-3 w-3" /> {overallStatus}
-          </Badge>
-        )}
-      </div>
-
-      <Card>
-        <CardContent className="p-0">
-          <Table>
-            <TableHeader>
-              <TableRow className="bg-muted/20">
-                <TableHead>Check</TableHead>
-                <TableHead>Result</TableHead>
-                <TableHead>Details</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {validationChecks.map(({ key, label }) => {
-                const result = validation[key as keyof Validation] as string | null;
-                const details = validation[`${key}_details` as keyof Validation] as string | null;
-                return (
-                  <TableRow key={key}>
-                    <TableCell className="font-medium">{label}</TableCell>
-                    <TableCell>{checkResultBadge(result)}</TableCell>
-                    <TableCell className="text-muted-foreground">{details || "-"}</TableCell>
-                  </TableRow>
-                );
-              })}
-            </TableBody>
-          </Table>
-        </CardContent>
-      </Card>
     </div>
   );
 }
@@ -1258,6 +1165,18 @@ function SessionComposer({
     if (pickerOpen && e.key === "Escape") {
       e.preventDefault();
       setTriggerDismissed(true);
+      return;
+    }
+    if (e.key === "Escape" && message.trim().length === 0) {
+      e.preventDefault();
+      e.currentTarget.blur();
+      return;
+    }
+    if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+      e.preventDefault();
+      if (!sendDisabled) {
+        onSend();
+      }
       return;
     }
     if (e.key === "Enter" && !e.shiftKey) {
@@ -1888,7 +1807,10 @@ type ChatPanelProps = {
   onApprovePlan?: () => void;
   onAdjustPlan?: () => void;
   onRegisterScrollToLiveEdge?: (scrollToLiveEdge: (() => void) | null) => void;
+  onRegisterKeyboardControls?: (controls: SessionTranscriptKeyboardControls | null) => void;
 };
+
+type SessionTranscriptKeyboardControls = NonNullable<UseSessionKeyboardShortcutsOptions["transcript"]>;
 
 function ChatPanel({
   session,
@@ -1900,6 +1822,7 @@ function ChatPanel({
   onApprovePlan,
   onAdjustPlan,
   onRegisterScrollToLiveEdge,
+  onRegisterKeyboardControls,
 }: ChatPanelProps) {
   const queryClient = useQueryClient();
   const { user } = useAuth();
@@ -2094,6 +2017,41 @@ function ChatPanel({
     setShowJumpToLatest(false);
   }, [scrollToLiveEdgePosition]);
 
+  const focusTranscript = useCallback(() => {
+    scrollRef.current?.focus({ preventScroll: true });
+  }, []);
+
+  const scrollTranscriptByStep = useCallback((direction: 1 | -1) => {
+    const el = scrollRef.current;
+    if (!el) return;
+    el.scrollBy?.({ top: direction * TRANSCRIPT_STEP_PX, behavior: "smooth" });
+    if (typeof el.scrollBy !== "function") {
+      el.scrollTop += direction * TRANSCRIPT_STEP_PX;
+    }
+  }, []);
+
+  const scrollTranscriptByPage = useCallback((direction: 1 | -1) => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const distance = Math.max(
+      TRANSCRIPT_PAGE_MIN_PX,
+      Math.floor(el.clientHeight * TRANSCRIPT_PAGE_VIEWPORT_RATIO),
+    );
+    el.scrollBy?.({ top: direction * distance, behavior: "smooth" });
+    if (typeof el.scrollBy !== "function") {
+      el.scrollTop += direction * distance;
+    }
+  }, []);
+
+  const scrollTranscriptToTop = useCallback(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    el.scrollTo?.({ top: 0, behavior: "smooth" });
+    if (typeof el.scrollTo !== "function") {
+      el.scrollTop = 0;
+    }
+  }, []);
+
   const getEntryContainerProps = useCallback(
     (_entry: TimelineEntry, index: number) =>
       ({
@@ -2106,6 +2064,24 @@ function ChatPanel({
     onRegisterScrollToLiveEdge?.(scrollToLiveEdge);
     return () => onRegisterScrollToLiveEdge?.(null);
   }, [onRegisterScrollToLiveEdge, scrollToLiveEdge]);
+
+  useEffect(() => {
+    onRegisterKeyboardControls?.({
+      focus: focusTranscript,
+      scrollByStep: scrollTranscriptByStep,
+      scrollByPage: scrollTranscriptByPage,
+      scrollToTop: scrollTranscriptToTop,
+      scrollToLatest: scrollToLiveEdge,
+    });
+    return () => onRegisterKeyboardControls?.(null);
+  }, [
+    focusTranscript,
+    onRegisterKeyboardControls,
+    scrollToLiveEdge,
+    scrollTranscriptByPage,
+    scrollTranscriptByStep,
+    scrollTranscriptToTop,
+  ]);
 
   // SSE streaming for real-time logs when the session is active.
   const mergeLogs = useCallback((newLogs: SessionLog[]) => {
@@ -2313,7 +2289,14 @@ function ChatPanel({
         </div>
       )}
       {/* Unified timeline */}
-      <div ref={scrollRef} onScroll={handleScroll} className="flex-1 overflow-y-auto space-y-2 p-4">
+      <div
+        ref={scrollRef}
+        onScroll={handleScroll}
+        tabIndex={0}
+        aria-label="Session conversation"
+        data-session-transcript-scroll="true"
+        className="flex-1 overflow-y-auto space-y-2 p-4 outline-none focus-visible:ring-2 focus-visible:ring-ring/30"
+      >
         {showLoadingSkeleton ? (
           <SessionTimelineSkeleton />
         ) : (
@@ -2362,6 +2345,7 @@ function areChatPanelPropsEqual(previous: ChatPanelProps, next: ChatPanelProps):
     previous.onApprovePlan === next.onApprovePlan &&
     previous.onAdjustPlan === next.onAdjustPlan &&
     previous.onRegisterScrollToLiveEdge === next.onRegisterScrollToLiveEdge &&
+    previous.onRegisterKeyboardControls === next.onRegisterKeyboardControls &&
     previous.session.id === next.session.id &&
     previous.session.status === next.session.status &&
     previous.session.sandbox_state === next.session.sandbox_state &&
@@ -2385,6 +2369,12 @@ const MIN_DETAIL = 280;
 const MAX_DETAIL = 600;
 const DEFAULT_DETAIL = 384;
 const MOBILE_REVIEW_MEDIA_QUERY = "(max-width: 767px)";
+// Transcript keyboard scroll tuning. Step matches a comfortable line-pair
+// jump; page distance follows browser conventions (~85% viewport with a
+// floor for very short panels).
+const TRANSCRIPT_STEP_PX = 72;
+const TRANSCRIPT_PAGE_MIN_PX = 160;
+const TRANSCRIPT_PAGE_VIEWPORT_RATIO = 0.85;
 
 export function SessionDetailContent({ id }: { id: string }) {
   const router = useRouter();
@@ -2404,6 +2394,8 @@ export function SessionDetailContent({ id }: { id: string }) {
   // matchMedia needed).
   const [mobileDetailOpen, setMobileDetailOpen] = useState(false);
   const [mobileReviewComposerOpen, setMobileReviewComposerOpen] = useState(false);
+  const [mobileRenameOpen, setMobileRenameOpen] = useState(false);
+  const [keyboardHelpOpen, setKeyboardHelpOpen] = useState(false);
   const [detailWidth, setDetailWidth] = useState(DEFAULT_DETAIL);
   const [activeFileIndex, setActiveFileIndex] = useState(0);
   const [isEditingTitle, setIsEditingTitle] = useState(false);
@@ -3069,6 +3061,12 @@ export function SessionDetailContent({ id }: { id: string }) {
   const [composerCommands, setComposerCommands] = useState<SessionInputCommand[]>([]);
   const [composerIsUploading, setComposerIsUploading] = useState(false);
   const [composerUploadError, setComposerUploadError] = useState<string | null>(null);
+  const [addThreadOpen, setAddThreadOpen] = useState(false);
+  const [newThreadAgentType, setNewThreadAgentType] = useState("codex");
+  const [newThreadModel, setNewThreadModel] = useState("");
+  const [newThreadLabel, setNewThreadLabel] = useState("");
+  const focusComposerAfterThreadCreateRef = useRef(false);
+  const addTabButtonRef = useRef<HTMLButtonElement>(null);
   const composerTextareaRef = useRef<HTMLTextAreaElement>(null);
   const composerUploadInputRef = useRef<HTMLInputElement>(null);
   // Tracks an in-flight agent-switch PATCH so the send-time PATCH can wait
@@ -3077,6 +3075,7 @@ export function SessionDetailContent({ id }: { id: string }) {
   // overwrite the new agent_type with the send-time {label, model} body.
   const inFlightAgentUpdateRef = useRef<Promise<unknown> | null>(null);
   const chatPanelScrollToLiveEdgeRef = useRef<(() => void) | null>(null);
+  const [chatPanelKeyboardControls, setChatPanelKeyboardControls] = useState<SessionTranscriptKeyboardControls | null>(null);
   // Open comments are the source of truth for what gets attached to the next
   // message — once a send succeeds, the backend marks them resolved in the
   // same transaction, the comments query is invalidated below, and the next
@@ -3107,6 +3106,8 @@ export function SessionDetailContent({ id }: { id: string }) {
     const agentType = AGENTS.find((agent) => agent.key === composerAgentType);
     return agentType?.models ?? [];
   }, [composerAgentType, session]);
+  const selectedNewThreadAgent = AGENTS_BY_KEY[newThreadAgentType] ?? AGENTS[0];
+  const selectedNewThreadModels = selectedNewThreadAgent?.models ?? [];
   const activeThreadLabel = activeThread?.label ?? (session ? AGENTS_BY_KEY[session.agent_type]?.label ?? session.agent_type : "agent");
   const buildThreadLabelForAgent = useCallback((agentType: string) => {
     const agent = AGENTS_BY_KEY[agentType] ?? AGENTS[0];
@@ -3122,6 +3123,14 @@ export function SessionDetailContent({ id }: { id: string }) {
       label: `${agent.label} ${threads.length + 1}`,
     };
   }, [activeThread?.agent_type, activeThread?.model_override, session?.agent_type, threads.length]);
+  const buildDialogThreadRequest = useCallback(() => {
+    const agent = AGENTS_BY_KEY[newThreadAgentType] ?? AGENTS[0];
+    return {
+      agent_type: agent.key,
+      model: newThreadModel || undefined,
+      label: newThreadLabel.trim() || `${agent.label} ${threads.length + 1}`,
+    };
+  }, [newThreadAgentType, newThreadLabel, newThreadModel, threads.length]);
   const pendingEditableThreadUpdate = useMemo(() => {
     return getPendingEditableThreadUpdate(activeThread, activeThreadIsEditable, composerSelectedModel);
   }, [activeThread, activeThreadIsEditable, composerSelectedModel]);
@@ -3526,6 +3535,10 @@ export function SessionDetailContent({ id }: { id: string }) {
           },
         };
       });
+      focusComposerAfterThreadCreateRef.current = true;
+      setAddThreadOpen(false);
+      setNewThreadLabel("");
+      setNewThreadModel("");
       setActiveThreadId(response.data.id);
       setComposerSelectedModel(getInitialComposerSelectedModel(response.data));
       queryClient.invalidateQueries({ queryKey: ["session", id] });
@@ -3534,6 +3547,34 @@ export function SessionDetailContent({ id }: { id: string }) {
       toast.error(err instanceof Error ? err.message : "Failed to create tab");
     },
   });
+
+  useEffect(() => {
+    if (!focusComposerAfterThreadCreateRef.current) {
+      return;
+    }
+
+    const rafID = window.requestAnimationFrame(() => {
+      focusComposerAfterThreadCreateRef.current = false;
+      const shouldFocusComposer = session?.agent_type !== "pm_agent"
+        && composerCanSendMessage
+        && composerTextareaRef.current !== null
+        && !composerTextareaRef.current.disabled;
+
+      if (shouldFocusComposer) {
+        composerTextareaRef.current?.focus();
+        return;
+      }
+
+      addTabButtonRef.current?.focus();
+    });
+
+    return () => window.cancelAnimationFrame(rafID);
+  }, [activeThread?.id, composerCanSendMessage, session?.agent_type]);
+
+  useEffect(() => {
+    setNewThreadModel("");
+  }, [newThreadAgentType]);
+
   const updateThreadMutation = useMutation({
     mutationFn: (vars: { threadId: string; body: { agent_type?: string; model?: string | null; label: string } }) =>
       api.sessions.updateThread(id, vars.threadId, vars.body),
@@ -3599,9 +3640,11 @@ export function SessionDetailContent({ id }: { id: string }) {
   const registerChatPanelScrollToLiveEdge = useCallback((scrollToLiveEdge: (() => void) | null) => {
     chatPanelScrollToLiveEdgeRef.current = scrollToLiveEdge;
   }, []);
+  const registerChatPanelKeyboardControls = useCallback((controls: SessionTranscriptKeyboardControls | null) => {
+    setChatPanelKeyboardControls(controls);
+  }, []);
 
   const changesCount = diffStats?.filesChanged;
-  const showValidationTab = !session?.triggered_by_user_id;
   const detailTabsRef = useRef<HTMLDivElement>(null);
   const [detailTabsOverflow, setDetailTabsOverflow] = useState(false);
 
@@ -3641,7 +3684,6 @@ export function SessionDetailContent({ id }: { id: string }) {
     session?.id,
     session?.pr_creation_error,
     session?.pr_creation_state,
-    showValidationTab,
   ]);
   const isDedicatedMobileReview = centerMode === "review" && isMobileReviewViewport;
 
@@ -3650,6 +3692,126 @@ export function SessionDetailContent({ id }: { id: string }) {
       setMobileReviewComposerOpen(false);
     }
   }, [isDedicatedMobileReview]);
+
+  const focusActiveDetailTab = useCallback(() => {
+    requestAnimationFrame(() => {
+      detailTabsRef.current?.querySelector<HTMLElement>('[role="tab"][data-state="active"]')?.focus();
+    });
+  }, []);
+
+  const toggleDetailsFromKeyboard = useCallback(() => {
+    if (centerMode === "review" && showDetailPanel) {
+      return;
+    }
+    if (isMobileReviewViewport) {
+      setMobileDetailOpen((open) => !open);
+      focusActiveDetailTab();
+      return;
+    }
+    setShowDetailPanel((open) => !open);
+    if (!showDetailPanel) {
+      focusActiveDetailTab();
+    }
+  }, [centerMode, focusActiveDetailTab, isMobileReviewViewport, showDetailPanel]);
+
+  const closeDetailsFromKeyboard = useCallback(() => {
+    if (isMobileReviewViewport) {
+      setMobileDetailOpen(false);
+      return;
+    }
+    if (!(centerMode === "review" && showDetailPanel)) {
+      setShowDetailPanel(false);
+    }
+  }, [centerMode, isMobileReviewViewport, showDetailPanel]);
+
+  const focusComposerFromKeyboard = useCallback(() => {
+    composerTextareaRef.current?.focus();
+    composerTextareaRef.current?.scrollIntoView({ block: "nearest" });
+  }, []);
+
+  const ghBlocked = ghStatus?.pr_authorship_mode === "user_required" && !ghStatus?.connected;
+
+  const createPRFromKeyboard = useCallback(() => {
+    if (localPRState !== "idle" || createPRMutation.isPending) {
+      return;
+    }
+    if (ghBlocked) {
+      setPRAuthPrompt({ purpose: "create_pr" });
+      return;
+    }
+    createPRMutation.mutate(undefined);
+  }, [createPRMutation, ghBlocked, localPRState]);
+
+  const pushChangesFromKeyboard = useCallback(() => {
+    if (localPushState !== "idle" || pushChangesMutation.isPending) {
+      return;
+    }
+    if (ghBlocked) {
+      setPRAuthPrompt({ purpose: "push_changes" });
+      return;
+    }
+    pushChangesMutation.mutate(undefined);
+  }, [ghBlocked, localPushState, pushChangesMutation]);
+
+  const viewPRFromKeyboard = useCallback(() => {
+    if (!prData?.data?.github_pr_url) {
+      return;
+    }
+    window.open(prData.data.github_pr_url, "_blank", "noopener,noreferrer");
+  }, [prData?.data?.github_pr_url]);
+
+  useSessionKeyboardShortcuts({
+    enabled: !isLoading && !!session,
+    reviewMode: centerMode === "review",
+    onShowHelp: () => setKeyboardHelpOpen(true),
+    onFocusComposer: focusComposerFromKeyboard,
+    transcript: chatPanelKeyboardControls,
+    agentTabs: threads.length > 0 && activeThreadIndex >= 0 ? {
+      activeIndex: activeThreadIndex,
+      count: threads.length,
+      onChange: (index) => {
+        const next = threads[index];
+        if (next) {
+          setActiveThreadId(next.id);
+          chatPanelKeyboardControls?.focus();
+        }
+      },
+      onAdd: () => {
+        if (!createThreadMutation.isPending) {
+          createThreadMutation.mutate(buildDefaultThreadRequest());
+        }
+      },
+    } : null,
+    details: {
+      open: isMobileReviewViewport ? mobileDetailOpen : showDetailPanel,
+      required: centerMode === "review" && showDetailPanel,
+      activeTab: detailTab,
+      availableTabs: ["overview", "changes", "preview"] as const,
+      onToggle: toggleDetailsFromKeyboard,
+      onClose: closeDetailsFromKeyboard,
+      onTabChange: handleDetailTabClick,
+      onOpenReview: () => {
+        if (visibleDiffFiles.length > 0) {
+          openReview();
+        }
+      },
+      onExitReview: exitReview,
+    },
+    pr: {
+      canCreate: canCreatePR && localPRState === "idle" && !createPRMutation.isPending,
+      canView: !!prData?.data?.github_pr_url,
+      canPush: hasPR && prStatus === "open" && !!session?.has_unpushed_changes && hasSnapshot && !isRunning && localPushState === "idle" && !pushChangesMutation.isPending,
+      canFixTests: !!prHealth?.can_fix_tests && pendingPRAction === null,
+      canResolveConflicts: !!prHealth?.can_resolve_conflicts && pendingPRAction === null,
+      canMerge: prHealthAllowsMerge(prHealth) && pendingPRAction === null,
+      onCreate: createPRFromKeyboard,
+      onView: viewPRFromKeyboard,
+      onPush: pushChangesFromKeyboard,
+      onFixTests: () => startRepairMutation.mutate("fix_tests"),
+      onResolveConflicts: () => startRepairMutation.mutate("resolve_conflicts"),
+      onMerge: handleMergeAction,
+    },
+  });
 
   if (isLoading) {
     return (
@@ -3688,7 +3850,6 @@ export function SessionDetailContent({ id }: { id: string }) {
     snapshotState,
     localPRActionError?.code ? localPRActionError.message : session.pr_creation_error,
   );
-  const ghBlocked = ghStatus?.pr_authorship_mode === "user_required" && !ghStatus?.connected;
   const succeededButNoPR = prState === "succeeded" && !hasPR;
   const prActionError = hasPR
     ? null
@@ -3814,6 +3975,16 @@ export function SessionDetailContent({ id }: { id: string }) {
     : showDetailPanel
       ? "Hide details"
       : "Show details";
+  const openAddThreadDialog = () => {
+    setNewThreadAgentType(session.agent_type || "codex");
+    setNewThreadModel("");
+    setNewThreadLabel("");
+    setAddThreadOpen(true);
+  };
+  const openMobileRenameDialog = () => {
+    setDraftTitle(currentTitle);
+    setMobileRenameOpen(true);
+  };
   // Right-panel content. Rendered inline on desktop and inside a bottom sheet
   // on mobile — the same JSX in both places so tab state stays consistent.
   const panelTabsEl = (
@@ -3842,9 +4013,6 @@ export function SessionDetailContent({ id }: { id: string }) {
                   </Badge>
                 )}
               </TabsTrigger>
-              {showValidationTab && (
-                <TabsTrigger value="validation">Validation</TabsTrigger>
-              )}
               <TabsTrigger value="preview">Preview</TabsTrigger>
             </TabsList>
           </div>
@@ -3856,7 +4024,7 @@ export function SessionDetailContent({ id }: { id: string }) {
                     {closedPRLabel}
                   </Badge>
                 )}
-                <Button asChild variant="outline" size="sm" className="h-7 text-xs gap-1.5">
+                <Button asChild variant="outline" size="sm" className="h-7 text-xs gap-1.5" title="View PR (p v)">
                   <a href={prData.data.github_pr_url} target="_blank" rel="noopener noreferrer">
                     <ExternalLink className="h-3 w-3" />
                     View PR
@@ -3870,7 +4038,7 @@ export function SessionDetailContent({ id }: { id: string }) {
                   size="sm"
                   className="h-7 text-xs gap-1.5"
                   disabled={prActionDisabled}
-                  title={prActionTitle}
+                  title={prActionTitle ? `${prActionTitle} (p c)` : `${prActionLabel} (p c)`}
                   onClick={() => createPRMutation.mutate(undefined)}
                 >
                   {prActionSpinning ? (
@@ -3996,11 +4164,6 @@ export function SessionDetailContent({ id }: { id: string }) {
           <OverviewTab session={session} members={members} prStatus={prStatus} />
         </div>
       </TabsContent>
-      {showValidationTab && (
-        <TabsContent value="validation" className="flex-1 overflow-y-auto scrollbar-hide p-4">
-          <ValidationTab sessionId={id} />
-        </TabsContent>
-      )}
       <TabsContent value="preview" className="flex-1 overflow-y-auto scrollbar-hide p-4">
         <PreviewPanel
           sessionId={id}
@@ -4015,105 +4178,111 @@ export function SessionDetailContent({ id }: { id: string }) {
       {/* Center area: chat or review diff view */}
       <div className="flex-1 min-w-0 flex flex-col">
         {!isDedicatedMobileReview ? (
-        <div className="border-b border-border px-4 py-3 bg-background flex items-center justify-between shrink-0">
-          <div className="min-w-0 flex-1 flex items-center gap-2">
-            <MobileBackButton to="/sessions" label="Back to sessions" />
-            {isEditingTitle ? (
+          <>
+            <MobileSessionTopBar
+              sessionTitle={sessionTitle(session)}
+              detailButtonLabel="Open session details"
+              backTo="/sessions"
+              threads={threads}
+              activeThreadId={activeThread?.id ?? null}
+              onOpenDetails={() => setMobileDetailOpen(true)}
+              onActiveThreadChange={setActiveThreadId}
+              onAddThread={openAddThreadDialog}
+              onRenameSession={openMobileRenameDialog}
+              onCancelThread={(tid) => cancelThreadMutation.mutate(tid)}
+              onForkThread={(tid) => forkThreadMutation.mutate(tid)}
+              onRevertThread={(tid) => revertThreadMutation.mutate(tid)}
+              cancelPendingThreadId={cancelThreadMutation.isPending ? cancelThreadMutation.variables ?? null : null}
+            />
+
+            <div className="hidden md:flex border-b border-border px-4 py-3 bg-background items-center justify-between shrink-0">
               <div className="min-w-0 flex-1 flex items-center gap-2">
-                <Input
-                  aria-label="Session title"
-                  value={draftTitle}
-                  onChange={(e) => setDraftTitle(e.target.value)}
-                  className="h-8 max-w-xl"
-                  disabled={updateSessionMutation.isPending}
-                />
-                <DisabledTooltip disabled={!canSaveTitle} content={saveTitleDisabledReason}>
-                  <Button
-                    size="icon"
-                    variant="ghost"
-                    aria-label="Save title"
-                    disabled={!canSaveTitle}
-                    onClick={() => updateSessionMutation.mutate(trimmedDraftTitle)}
-                  >
-                    <Check className="h-4 w-4" />
-                  </Button>
-                </DisabledTooltip>
-                <DisabledTooltip disabled={updateSessionMutation.isPending} content={titleEditPendingReason}>
-                  <Button
-                    size="icon"
-                    variant="ghost"
-                    aria-label="Cancel title"
-                    disabled={updateSessionMutation.isPending}
-                    onClick={() => {
-                      setDraftTitle(currentTitle);
-                      setIsEditingTitle(false);
-                    }}
-                  >
-                    <X className="h-4 w-4" />
-                  </Button>
-                </DisabledTooltip>
+                {isEditingTitle ? (
+                  <div className="min-w-0 flex-1 flex items-center gap-2">
+                    <Input
+                      aria-label="Session title"
+                      value={draftTitle}
+                      onChange={(e) => setDraftTitle(e.target.value)}
+                      className="h-8 max-w-xl"
+                      disabled={updateSessionMutation.isPending}
+                    />
+                    <DisabledTooltip disabled={!canSaveTitle} content={saveTitleDisabledReason}>
+                      <Button
+                        size="icon"
+                        variant="ghost"
+                        aria-label="Save title"
+                        disabled={!canSaveTitle}
+                        onClick={() => updateSessionMutation.mutate(trimmedDraftTitle)}
+                      >
+                        <Check className="h-4 w-4" />
+                      </Button>
+                    </DisabledTooltip>
+                    <DisabledTooltip disabled={updateSessionMutation.isPending} content={titleEditPendingReason}>
+                      <Button
+                        size="icon"
+                        variant="ghost"
+                        aria-label="Cancel title"
+                        disabled={updateSessionMutation.isPending}
+                        onClick={() => {
+                          setDraftTitle(currentTitle);
+                          setIsEditingTitle(false);
+                        }}
+                      >
+                        <X className="h-4 w-4" />
+                      </Button>
+                    </DisabledTooltip>
+                  </div>
+                ) : (
+                  <>
+                    <h1 className="text-sm font-medium text-foreground truncate">
+                      {sessionTitle(session)}
+                    </h1>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="h-8 w-8 shrink-0"
+                      aria-label="Edit session title"
+                      onClick={() => {
+                        setDraftTitle(currentTitle);
+                        setIsEditingTitle(true);
+                      }}
+                    >
+                      <Pencil className="h-4 w-4" />
+                    </Button>
+                  </>
+                )}
+                <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium shrink-0 ${status.color}`}>
+                  {status.label}
+                </span>
+                {diffStats && (
+                  <DiffStatsBadge
+                    added={diffStats.added}
+                    removed={diffStats.removed}
+                    className="shrink-0"
+                    onClick={() => openReview()}
+                  />
+                )}
+                <LinkedIssueChips session={session} />
               </div>
-            ) : (
-              <>
-                <h1 className="text-sm font-medium text-foreground truncate">
-                  {sessionTitle(session)}
-                </h1>
+              <DisabledTooltip disabled={centerMode === "review" && showDetailPanel} content={detailToggleTitle}>
                 <Button
                   variant="ghost"
                   size="icon"
-                  className="h-8 w-8 shrink-0"
-                  aria-label="Edit session title"
-                  onClick={() => {
-                    setDraftTitle(currentTitle);
-                    setIsEditingTitle(true);
-                  }}
+                  className={cn(centerMode === "review" && showDetailPanel && "opacity-30 cursor-not-allowed", "h-8 w-8 shrink-0")}
+                  disabled={centerMode === "review" && showDetailPanel}
+                  onClick={() => setShowDetailPanel(!showDetailPanel)}
+                  title={detailToggleTitle}
+                  aria-keyshortcuts="d"
                 >
-                  <Pencil className="h-4 w-4" />
+                  {showDetailPanel ? <PanelRightClose className="h-4 w-4" /> : <PanelRightOpen className="h-4 w-4" />}
                 </Button>
-              </>
-            )}
-            <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium shrink-0 ${status.color}`}>
-              {status.label}
-            </span>
-            {diffStats && (
-              <DiffStatsBadge
-                added={diffStats.added}
-                removed={diffStats.removed}
-                className="shrink-0"
-                onClick={() => openReview()}
-              />
-            )}
-            <LinkedIssueChips session={session} />
-          </div>
-          {/* Desktop toggle: hides/shows the inline right panel. */}
-          <DisabledTooltip disabled={centerMode === "review" && showDetailPanel} content={detailToggleTitle}>
-            <Button
-              variant="ghost"
-              size="icon"
-              className={cn("hidden md:inline-flex h-8 w-8 shrink-0", centerMode === "review" && showDetailPanel && "opacity-30 cursor-not-allowed")}
-              disabled={centerMode === "review" && showDetailPanel}
-              onClick={() => setShowDetailPanel(!showDetailPanel)}
-              title={detailToggleTitle}
-            >
-              {showDetailPanel ? <PanelRightClose className="h-4 w-4" /> : <PanelRightOpen className="h-4 w-4" />}
-            </Button>
-          </DisabledTooltip>
-          {/* Mobile toggle: opens the bottom sheet. */}
-          <Button
-            variant="ghost"
-            size="icon"
-            className="md:hidden h-9 w-9 shrink-0"
-            onClick={() => setMobileDetailOpen(true)}
-            aria-label="Open details"
-            aria-controls="session-detail-sheet"
-            aria-expanded={mobileDetailOpen}
-          >
-            <PanelBottomOpen className="h-5 w-5" />
-          </Button>
-        </div>
+              </DisabledTooltip>
+            </div>
+          </>
         ) : null}
 
         {!isDedicatedMobileReview ? (
+          <div className="hidden md:block">
           <AgentTabStrip
             threads={threads}
             activeThreadId={activeThread?.id ?? null}
@@ -4128,7 +4297,9 @@ export function SessionDetailContent({ id }: { id: string }) {
             onArchiveThread={(tid) => archiveThreadMutation.mutate(tid)}
             cancelPendingThreadId={cancelThreadMutation.isPending ? cancelThreadMutation.variables ?? null : null}
             archivePendingThreadId={archiveThreadMutation.isPending ? archiveThreadMutation.variables ?? null : null}
+            addTabButtonRef={addTabButtonRef}
           />
+          </div>
         ) : null}
         {/* Center content — either chat or diff review */}
         <div className="flex-1 min-h-0 relative">
@@ -4145,6 +4316,7 @@ export function SessionDetailContent({ id }: { id: string }) {
               onApprovePlan={handleApprovePlan}
               onAdjustPlan={handleAdjustPlan}
               onRegisterScrollToLiveEdge={registerChatPanelScrollToLiveEdge}
+              onRegisterKeyboardControls={registerChatPanelKeyboardControls}
             />
           </div>
           {/* Review diff view — mounted only when active */}
@@ -4262,7 +4434,7 @@ export function SessionDetailContent({ id }: { id: string }) {
         >
           <SheetTitle className="sr-only">Session details</SheetTitle>
           <SheetDescription className="sr-only">
-            Browse session details, changed files, validation, and preview on mobile.
+            Browse session details, changed files, and preview on mobile.
           </SheetDescription>
           {panelTabsEl}
         </SheetContent>
@@ -4338,6 +4510,129 @@ export function SessionDetailContent({ id }: { id: string }) {
           </SheetContent>
         </Sheet>
       ) : null}
+      <Dialog open={mobileRenameOpen} onOpenChange={setMobileRenameOpen}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Rename session</DialogTitle>
+            <DialogDescription>
+              Update the session title without crowding the mobile header.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-3">
+            <Label htmlFor="mobile-session-title">Session title</Label>
+            <Input
+              id="mobile-session-title"
+              aria-label="Session title"
+              value={draftTitle}
+              onChange={(e) => setDraftTitle(e.target.value)}
+              disabled={updateSessionMutation.isPending}
+            />
+          </div>
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => {
+                setDraftTitle(currentTitle);
+                setMobileRenameOpen(false);
+              }}
+              disabled={updateSessionMutation.isPending}
+            >
+              Cancel
+            </Button>
+            <DisabledTooltip disabled={!canSaveTitle} content={saveTitleDisabledReason}>
+              <Button
+                type="button"
+                onClick={() => updateSessionMutation.mutate(trimmedDraftTitle, {
+                  onSuccess: () => {
+                    setMobileRenameOpen(false);
+                  },
+                })}
+                disabled={!canSaveTitle}
+              >
+                Save title
+              </Button>
+            </DisabledTooltip>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+      <Dialog open={addThreadOpen} onOpenChange={setAddThreadOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Add agent tab</DialogTitle>
+            <DialogDescription>
+              Create a blank tab in this sandbox. It will not run until you send the first message.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4">
+            <div className="space-y-2">
+              <Label className="text-xs" htmlFor="new-thread-agent">Agent</Label>
+              <Select value={newThreadAgentType} onValueChange={setNewThreadAgentType}>
+                <SelectTrigger id="new-thread-agent" aria-label="Agent">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {AGENTS.map((agent) => (
+                    <SelectItem key={agent.key} value={agent.key}>
+                      {agent.label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            {selectedNewThreadModels.length > 0 && (
+              <div className="space-y-2">
+                <Label className="text-xs" htmlFor="new-thread-model">Model</Label>
+                <Select value={newThreadModel || "__default"} onValueChange={(value) => setNewThreadModel(value === "__default" ? "" : value)}>
+                  <SelectTrigger id="new-thread-model" aria-label="Model">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="__default">Default model</SelectItem>
+                    {selectedNewThreadModels.map((model) => (
+                      <SelectItem key={model} value={model}>
+                        {model}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+            )}
+            <div className="space-y-2">
+              <Label className="text-xs" htmlFor="new-thread-label">Tab label</Label>
+              <Input
+                id="new-thread-label"
+                aria-label="Tab label"
+                value={newThreadLabel}
+                onChange={(event) => setNewThreadLabel(event.target.value)}
+                placeholder={`${selectedNewThreadAgent?.label ?? "Agent"} ${threads.length + 1}`}
+              />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => setAddThreadOpen(false)}
+              disabled={createThreadMutation.isPending}
+            >
+              Cancel
+            </Button>
+            <Button
+              type="button"
+              onClick={() => createThreadMutation.mutate(buildDialogThreadRequest())}
+              disabled={createThreadMutation.isPending}
+            >
+              {createThreadMutation.isPending && <Loader2 className="h-4 w-4 animate-spin" />}
+              Create tab
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+      <SessionKeyboardHelpOverlay
+        open={keyboardHelpOpen}
+        onOpenChange={setKeyboardHelpOpen}
+      />
       <AlertDialog
         open={!!prAuthPrompt}
         onOpenChange={(open) => {
@@ -4357,8 +4652,12 @@ export function SessionDetailContent({ id }: { id: string }) {
               {prAuthPrompt?.purpose === "merge_pr"
                 ? "Authorize GitHub once to merge pull requests as you."
                 : prAuthPrompt?.purpose === "push_changes"
-                  ? "Authorize GitHub once to push as you. If you skip this, 143 can still push the commits as the app."
-                  : "Authorize GitHub once to open PRs as you. If you skip this, 143 can still open the PR as the app."}
+                  ? prAuthPrompt.can_fallback_to_app
+                    ? "Authorize GitHub once to push as you. If you skip this, 143 can still push the commits as the app."
+                    : "Authorize GitHub once to push as you."
+                  : prAuthPrompt?.can_fallback_to_app
+                    ? "Authorize GitHub once to open PRs as you. If you skip this, 143 can still open the PR as the app."
+                    : "Authorize GitHub once to open PRs as you."}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
