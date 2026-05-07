@@ -243,7 +243,7 @@ export function AgentTabStrip({
               variant="ghost"
               className="h-8 w-8 shrink-0"
               aria-label="Add agent tab"
-              title="Add agent tab"
+              title="Add agent tab (t)"
               onClick={onAddTab}
             >
               <Plus className="h-4 w-4" />
@@ -355,7 +355,7 @@ export function AgentTabStrip({
             variant="ghost"
             className="h-8 w-8 shrink-0"
             aria-label="Add agent tab"
-            title="Add agent tab"
+            title="Add agent tab (t)"
             onClick={onAddTab}
             disabled={addTabPending}
           >
