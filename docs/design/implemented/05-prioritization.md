@@ -112,7 +112,7 @@ An issue is `eligible_for_agent = true` if:
 
 ## Complexity Estimation
 
-After priority scoring and before agent eligibility determination, the system estimates the complexity of each eligible issue. See [12-smart-routing.md](12-smart-routing.md) for full details.
+After priority scoring and before agent eligibility determination, the system estimates the complexity of each eligible issue. See [12-smart-routing.md](../backlog/12-smart-routing.md) for full details.
 
 The complexity estimator classifies each issue into a tier (1-5: trivial → very complex) and an issue type (bug_fix, error_handling, performance, refactor, feature_gap, security). This classification:
 
@@ -161,7 +161,7 @@ Admins can:
 - **Set minimum score threshold** for agent eligibility
 - **Override priority** — manually boost or suppress specific issues
 - **Set autonomy level** — controls auto-triggering
-- **Set execution aggressiveness** — controls which complexity tiers are attempted (see [12-smart-routing.md](12-smart-routing.md))
+- **Set execution aggressiveness** — controls which complexity tiers are attempted (see [12-smart-routing.md](../backlog/12-smart-routing.md))
 - **Set confidence thresholds** — control when runs are auto-approved vs. paused for human review
 
 ## Score Explainability

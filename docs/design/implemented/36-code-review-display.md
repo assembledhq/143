@@ -1,8 +1,8 @@
 # 36 - Code Review Display
 
-> **Status:** Partially Implemented | **Last reviewed:** 2026-04-21
+> **Status:** Implemented | **Last reviewed:** 2026-05-06
 >
-> **Implementation notes:** The rich diff viewer is now largely shipped: parsed file/hunk rendering, unified and split modes, syntax highlighting, file tree navigation, inline review comments, keyboard navigation, repo explorer integration, basic between-hunk context expansion, and scroll-synced active-file highlighting between the diff pane and file tree are implemented in the frontend. PR creation has also moved onto snapshot-backed workspace pushes, which improves ship-path fidelity but leaves review-path diff provenance as a separate architecture concern. On `main`, review-path diff capture is still based on plain sandbox `git diff` output plus `diff_history` JSONB, so the main remaining gaps in this design area are (1) GitHub-style incremental context navigation from the current diff position and (2) stronger diff provenance so the rendered diff is explicitly tied to an immutable branch basis instead of an ad hoc stored patch. Both now live in [future/55-code-diff-context-navigation.md](future/55-code-diff-context-navigation.md).
+> **Implementation notes:** The rich diff viewer is shipped: parsed file/hunk rendering, unified and split modes, syntax highlighting, file tree navigation, inline review comments, keyboard navigation, repo explorer integration, basic between-hunk context expansion, and scroll-synced active-file highlighting between the diff pane and file tree. PR creation has also moved onto snapshot-backed workspace pushes. The two remaining design-area concerns — (1) GitHub-style incremental context navigation from the current diff position and (2) stronger diff provenance so the rendered diff is explicitly tied to an immutable branch basis instead of an ad hoc stored patch — were spun out into [55-code-diff-context-navigation.md](55-code-diff-context-navigation.md).
 
 > A rich, GitHub-quality code review experience embedded in each session, with inline commenting that feeds directly into the next agent pass.
 
