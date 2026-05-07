@@ -393,7 +393,7 @@ func TestPRService_SettersAndCheckRunHandler(t *testing.T) {
 	require.NoError(t, err, "should create pgxmock pool")
 	defer mock.Close()
 
-	service := NewPRService(nil, db.NewPullRequestStore(mock), nil, nil, nil, nil, nil, db.NewJobStore(mock), zerolog.Nop())
+	service := NewPRService(nil, db.NewPullRequestStore(mock), nil, nil, nil, nil, db.NewJobStore(mock), zerolog.Nop())
 	sessionMessages := db.NewSessionMessageStore(mock)
 	service.SetSessionMessageStore(sessionMessages)
 	require.Same(t, sessionMessages, service.sessionMessages, "SetSessionMessageStore should store the session message dependency")
@@ -473,7 +473,7 @@ func TestPRService_SettersAndCheckRunHandler(t *testing.T) {
 func TestPRService_IdentityResolverCachedAndInvalidated(t *testing.T) {
 	t.Parallel()
 
-	service := NewPRService(nil, nil, nil, nil, nil, nil, nil, nil, zerolog.Nop())
+	service := NewPRService(nil, nil, nil, nil, nil, nil, nil, zerolog.Nop())
 
 	first := service.identityResolver()
 	require.NotNil(t, first, "identityResolver should build on first use")
@@ -3254,42 +3254,42 @@ func TestPRServiceSetters(t *testing.T) {
 
 	t.Run("SetUserCredentialStore", func(t *testing.T) {
 		t.Parallel()
-		svc := NewPRService(nil, nil, nil, nil, nil, nil, nil, nil, logger)
+		svc := NewPRService(nil, nil, nil, nil, nil, nil, nil, logger)
 		svc.SetUserCredentialStore(nil)
 		require.Nil(t, svc.userCredentials)
 	})
 
 	t.Run("SetLLMClient", func(t *testing.T) {
 		t.Parallel()
-		svc := NewPRService(nil, nil, nil, nil, nil, nil, nil, nil, logger)
+		svc := NewPRService(nil, nil, nil, nil, nil, nil, nil, logger)
 		svc.SetLLMClient(nil)
 		require.Nil(t, svc.llmClient)
 	})
 
 	t.Run("SetUserStore", func(t *testing.T) {
 		t.Parallel()
-		svc := NewPRService(nil, nil, nil, nil, nil, nil, nil, nil, logger)
+		svc := NewPRService(nil, nil, nil, nil, nil, nil, nil, logger)
 		svc.SetUserStore(nil)
 		require.Nil(t, svc.users)
 	})
 
 	t.Run("SetOrgStore", func(t *testing.T) {
 		t.Parallel()
-		svc := NewPRService(nil, nil, nil, nil, nil, nil, nil, nil, logger)
+		svc := NewPRService(nil, nil, nil, nil, nil, nil, nil, logger)
 		svc.SetOrgStore(nil)
 		require.Nil(t, svc.orgs)
 	})
 
 	t.Run("SetPRTemplateStore", func(t *testing.T) {
 		t.Parallel()
-		svc := NewPRService(nil, nil, nil, nil, nil, nil, nil, nil, logger)
+		svc := NewPRService(nil, nil, nil, nil, nil, nil, nil, logger)
 		svc.SetPRTemplateStore(nil)
 		require.Nil(t, svc.prTemplates)
 	})
 
 	t.Run("SetSandboxPushDeps", func(t *testing.T) {
 		t.Parallel()
-		svc := NewPRService(nil, nil, nil, nil, nil, nil, nil, nil, logger)
+		svc := NewPRService(nil, nil, nil, nil, nil, nil, nil, logger)
 		svc.SetSandboxPushDeps(nil, nil)
 		require.Nil(t, svc.SandboxProvider(), "sandbox push deps setter should update the sandbox provider")
 		require.Nil(t, svc.SnapshotStore(), "sandbox push deps setter should update the snapshot store")

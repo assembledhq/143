@@ -52,7 +52,6 @@ type SessionHandler struct {
 	runStore           *db.SessionStore
 	logStore           *db.SessionLogStore
 	questionStore      *db.SessionQuestionStore
-	validationStore    *db.ValidationStore
 	pullRequestStore   *db.PullRequestStore
 	issueStore         *db.IssueStore
 	repoStore          *db.RepositoryStore
@@ -428,7 +427,6 @@ func NewSessionHandler(
 	runStore *db.SessionStore,
 	logStore *db.SessionLogStore,
 	questionStore *db.SessionQuestionStore,
-	validationStore *db.ValidationStore,
 	pullRequestStore *db.PullRequestStore,
 	issueStore *db.IssueStore,
 	repoStore *db.RepositoryStore,
@@ -443,7 +441,6 @@ func NewSessionHandler(
 		runStore:         runStore,
 		logStore:         logStore,
 		questionStore:    questionStore,
-		validationStore:  validationStore,
 		pullRequestStore: pullRequestStore,
 		issueStore:       issueStore,
 		repoStore:        repoStore,
@@ -1363,23 +1360,6 @@ func shouldSkipRedisLog(ctx context.Context, streamID string, lastDeliveredStrea
 	return "", false
 }
 
-// GetValidation returns the validation results for an agent run.
-func (h *SessionHandler) GetValidation(w http.ResponseWriter, r *http.Request) {
-	orgID := middleware.OrgIDFromContext(r.Context())
-	runID, err := uuid.Parse(chi.URLParam(r, "id"))
-	if err != nil {
-		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid run ID")
-		return
-	}
-
-	v, err := h.validationStore.GetBySessionID(r.Context(), orgID, runID)
-	if err != nil {
-		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "validation not found")
-		return
-	}
-	writeJSON(w, http.StatusOK, models.SingleResponse[models.Validation]{Data: v})
-}
-
 // GetPullRequest returns the PR associated with an agent run, or null if none exists.
 // "No PR yet" is a normal empty state for an active session, not a missing resource,
 // so we return 200 with a null body rather than 404.
@@ -2234,23 +2214,15 @@ func (h *SessionHandler) EndSession(w http.ResponseWriter, r *http.Request) {
 			payload["issue_snapshot_id"] = issueSnapshot.ID.String()
 		}
 	}
-	if session.ShouldValidateOnSessionEnd() || session.ValidationPolicy == models.SessionValidationPolicySkip {
-		dedupeKey := fmt.Sprintf("open_pr:%s", sessionID)
-		if _, err := h.jobStore.Enqueue(r.Context(), orgID, "default", "open_pr", payload, 5, &dedupeKey); err != nil {
-			writeError(w, r, http.StatusInternalServerError, "ENQUEUE_FAILED", "failed to enqueue PR creation", err)
-			return
-		}
-		if err := h.runStore.UpdatePRCreationState(r.Context(), orgID, sessionID, models.PRCreationStateQueued, ""); err != nil {
-			zerolog.Ctx(r.Context()).Warn().Err(err).
-				Str("session_id", sessionID.String()).
-				Msg("failed to mark PR creation as queued on session end")
-		}
-	} else {
-		dedupeKey := fmt.Sprintf("validate:%s", sessionID)
-		if _, err := h.jobStore.Enqueue(r.Context(), orgID, "agent", "validate", payload, 5, &dedupeKey); err != nil {
-			writeError(w, r, http.StatusInternalServerError, "ENQUEUE_FAILED", "failed to enqueue validation", err)
-			return
-		}
+	dedupeKey := fmt.Sprintf("open_pr:%s", sessionID)
+	if _, err := h.jobStore.Enqueue(r.Context(), orgID, "default", "open_pr", payload, 5, &dedupeKey); err != nil {
+		writeError(w, r, http.StatusInternalServerError, "ENQUEUE_FAILED", "failed to enqueue PR creation", err)
+		return
+	}
+	if err := h.runStore.UpdatePRCreationState(r.Context(), orgID, sessionID, models.PRCreationStateQueued, ""); err != nil {
+		zerolog.Ctx(r.Context()).Warn().Err(err).
+			Str("session_id", sessionID.String()).
+			Msg("failed to mark PR creation as queued on session end")
 	}
 
 	// Snapshot cleanup is handled by the reaper, which will find this session

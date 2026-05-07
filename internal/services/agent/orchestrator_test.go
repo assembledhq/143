@@ -1179,12 +1179,12 @@ func TestRunAgent_SuccessfulRun(t *testing.T) {
 	require.NotNil(t, results[0].result.ConfidenceScore)
 	require.InDelta(t, 0.9, *results[0].result.ConfidenceScore, 0.01)
 
-	// Validate job should be enqueued.
-	require.Contains(t, d.jobs.getEnqueued(), "validate")
-	validatePayload, ok := d.jobs.getPayload("validate").(map[string]interface{})
-	require.True(t, ok, "validate job payload should be a map")
-	require.Equal(t, run.ID.String(), validatePayload["session_id"], "validate payload should include agent run ID")
-	require.Equal(t, run.OrgID.String(), validatePayload["org_id"], "validate payload should include org ID")
+	// open_pr job should be enqueued.
+	require.Contains(t, d.jobs.getEnqueued(), "open_pr")
+	openPRPayload, ok := d.jobs.getPayload("open_pr").(map[string]interface{})
+	require.True(t, ok, "open_pr job payload should be a map")
+	require.Equal(t, run.ID.String(), openPRPayload["session_id"], "open_pr payload should include agent run ID")
+	require.Equal(t, run.OrgID.String(), openPRPayload["org_id"], "open_pr payload should include org ID")
 
 	// Logs should be persisted.
 	require.GreaterOrEqual(t, d.logs.getCount(), 2)
@@ -1450,7 +1450,7 @@ func TestRecoverSession_RestartsWhenNoDurableCheckpointExists(t *testing.T) {
 	results := d.sessions.getResultUpdates()
 	require.Len(t, results, 1, "restart should follow the normal run result path")
 	require.Equal(t, "completed", results[0].status, "restart should complete the run from scratch")
-	require.Contains(t, d.jobs.getEnqueued(), "validate", "restart should enqueue validation like a fresh run")
+	require.Contains(t, d.jobs.getEnqueued(), "open_pr", "restart should enqueue PR creation like a fresh run")
 }
 
 func TestRecoverSession_RestartsWithoutCountingOwnRunningSlot(t *testing.T) {
@@ -1499,7 +1499,7 @@ func TestRecoverSession_RestartsWithoutCountingOwnRunningSlot(t *testing.T) {
 	results := d.sessions.getResultUpdates()
 	require.Len(t, results, 1, "restart should still complete the run")
 	require.Equal(t, "completed", results[0].status, "restart should complete successfully under a single-slot concurrency limit")
-	require.Contains(t, d.jobs.getEnqueued(), "validate", "restart should enqueue validation like a fresh run")
+	require.Contains(t, d.jobs.getEnqueued(), "open_pr", "restart should enqueue PR creation like a fresh run")
 }
 
 func TestRecoverSession_PreservesRunningStatusWhenRuntimeInitFails(t *testing.T) {
@@ -2508,9 +2508,9 @@ func TestRunAgent_LowConfidence(t *testing.T) {
 	require.Len(t, results, 1)
 	require.Equal(t, "needs_human_guidance", results[0].status)
 
-	// No validate job should be enqueued.
+	// No open_pr job should be enqueued.
 	for _, jt := range d.jobs.getEnqueued() {
-		require.NotEqual(t, "validate", jt)
+		require.NotEqual(t, "open_pr", jt)
 	}
 }
 
@@ -2540,8 +2540,8 @@ func TestRunAgent_MediumConfidence(t *testing.T) {
 	require.Len(t, results, 1)
 	require.Equal(t, "completed", results[0].status)
 
-	// Validate job should be enqueued.
-	require.Contains(t, d.jobs.getEnqueued(), "validate")
+	// open_pr job should be enqueued.
+	require.Contains(t, d.jobs.getEnqueued(), "open_pr")
 }
 
 func TestRunAgent_ConcurrencyLimit(t *testing.T) {
@@ -3723,7 +3723,7 @@ func TestRunAgent_ExactConfidenceThreshold(t *testing.T) {
 	results := d.sessions.getResultUpdates()
 	require.Len(t, results, 1)
 	require.Equal(t, "completed", results[0].status)
-	require.Contains(t, d.jobs.getEnqueued(), "validate")
+	require.Contains(t, d.jobs.getEnqueued(), "open_pr")
 }
 
 func TestRunAgent_AgentCredentialsInjected(t *testing.T) {
@@ -4262,7 +4262,7 @@ func TestRunAgent_ManualSessionTransitionsToIdle(t *testing.T) {
 	require.Equal(t, models.MessageRoleAssistant, messages[0].Role, "assistant reply should be stored in session_messages")
 	require.Equal(t, 1, messages[0].TurnNumber, "assistant reply should be recorded for turn 1")
 
-	require.NotContains(t, d.jobs.getEnqueued(), "validate", "manual interactive run should wait for explicit end before validation")
+	require.NotContains(t, d.jobs.getEnqueued(), "open_pr", "manual interactive run should wait for explicit end before PR creation")
 }
 
 func TestContinueSession_PersistsTurnResultAndReturnsToIdle(t *testing.T) {
@@ -4333,7 +4333,7 @@ func TestContinueSession_PersistsTurnResultAndReturnsToIdle(t *testing.T) {
 	require.Equal(t, "Added the regression test", *turnUpdates[0].result.ResultSummary, "continue_session should store the latest assistant summary")
 	require.NotNil(t, turnUpdates[0].result.Diff, "continue_session should persist the latest diff")
 	require.Contains(t, d.sessions.getStatusUpdates(), "running", "continue_session should mark the session running while work is in progress")
-	require.NotContains(t, d.jobs.getEnqueued(), "validate", "continue_session should stay interactive until the user ends the session")
+	require.NotContains(t, d.jobs.getEnqueued(), "open_pr", "continue_session should stay interactive until the user ends the session")
 
 	messages := d.messages.getMessages()
 	require.Len(t, messages, 2, "continue_session should append an assistant reply")
