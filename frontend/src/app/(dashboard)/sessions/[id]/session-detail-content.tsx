@@ -2976,6 +2976,8 @@ export function SessionDetailContent({ id }: { id: string }) {
   const [newThreadAgentType, setNewThreadAgentType] = useState("codex");
   const [newThreadModel, setNewThreadModel] = useState("");
   const [newThreadLabel, setNewThreadLabel] = useState("");
+  const focusComposerAfterThreadCreateRef = useRef(false);
+  const addTabButtonRef = useRef<HTMLButtonElement>(null);
   const composerTextareaRef = useRef<HTMLTextAreaElement>(null);
   const composerUploadInputRef = useRef<HTMLInputElement>(null);
   const chatPanelScrollToLiveEdgeRef = useRef<(() => void) | null>(null);
@@ -3378,6 +3380,7 @@ export function SessionDetailContent({ id }: { id: string }) {
           },
         };
       });
+      focusComposerAfterThreadCreateRef.current = true;
       setActiveThreadId(response.data.id);
       setAddThreadOpen(false);
       setNewThreadLabel("");
@@ -3948,6 +3951,7 @@ export function SessionDetailContent({ id }: { id: string }) {
             onForkThread={(tid) => forkThreadMutation.mutate(tid)}
             onRevertThread={(tid) => revertThreadMutation.mutate(tid)}
             cancelPendingThreadId={cancelThreadMutation.isPending ? cancelThreadMutation.variables ?? null : null}
+            addTabButtonRef={addTabButtonRef}
           />
         ) : null}
         {/* Center content — either chat or diff review */}
@@ -4151,7 +4155,26 @@ export function SessionDetailContent({ id }: { id: string }) {
         </Sheet>
       ) : null}
       <Dialog open={addThreadOpen} onOpenChange={setAddThreadOpen}>
-        <DialogContent>
+        <DialogContent
+          onCloseAutoFocus={(event) => {
+            if (!focusComposerAfterThreadCreateRef.current) {
+              return;
+            }
+            focusComposerAfterThreadCreateRef.current = false;
+            const shouldFocusComposer = session.agent_type !== "pm_agent"
+              && composerCanSendMessage
+              && composerTextareaRef.current !== null
+              && !composerTextareaRef.current.disabled;
+            event.preventDefault();
+            window.requestAnimationFrame(() => {
+              if (shouldFocusComposer) {
+                composerTextareaRef.current?.focus();
+                return;
+              }
+              addTabButtonRef.current?.focus();
+            });
+          }}
+        >
           <DialogHeader>
             <DialogTitle>Add agent tab</DialogTitle>
             <DialogDescription>

@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo } from "react";
+import { RefObject, useMemo } from "react";
 import { Loader2, MoreVertical, Plus, Square, GitBranch, Undo2, AlertTriangle } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
@@ -100,6 +100,7 @@ interface AgentTabStripProps {
   onForkThread: (threadId: string) => void;
   onRevertThread: (threadId: string) => void;
   cancelPendingThreadId: string | null;
+  addTabButtonRef?: RefObject<HTMLButtonElement | null>;
 }
 
 // AgentTabStrip is the user's primary surface for switching between tabs and
@@ -125,6 +126,7 @@ export function AgentTabStrip({
   onForkThread,
   onRevertThread,
   cancelPendingThreadId,
+  addTabButtonRef,
 }: AgentTabStripProps) {
   const tabs = useMemo(() => threads, [threads]);
   if (tabs.length === 0 || !activeThreadId) {
@@ -233,6 +235,7 @@ export function AgentTabStrip({
               cancelPendingThreadId={cancelPendingThreadId}
             />
             <Button
+              ref={addTabButtonRef}
               type="button"
               size="icon"
               variant="ghost"
@@ -345,6 +348,7 @@ export function AgentTabStrip({
             cancelPendingThreadId={cancelPendingThreadId}
           />
           <Button
+            ref={addTabButtonRef}
             type="button"
             size="icon"
             variant="ghost"
