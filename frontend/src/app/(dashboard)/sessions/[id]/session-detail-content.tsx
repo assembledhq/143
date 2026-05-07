@@ -122,10 +122,12 @@ import { useDiffViewState } from "@/hooks/use-diff-view-state";
 import { CodexDeviceCodeModal } from "@/components/codex-device-code-modal";
 import { AgentBadge } from "@/components/agent-badge";
 import { PendingAttachmentStrip } from "@/components/pending-attachment-strip";
-import { PRHealthBanner } from "@/components/pr-health-banner";
+import { PRHealthBanner, prHealthAllowsMerge } from "@/components/pr-health-banner";
+import { SessionKeyboardHelpOverlay } from "@/components/session-keyboard-help-overlay";
 import { useAuth } from "@/hooks/use-auth";
 import { useMediaQuery } from "@/hooks/use-media-query";
 import { useDocumentVisible } from "@/hooks/use-document-visible";
+import { useSessionKeyboardShortcuts, type UseSessionKeyboardShortcutsOptions } from "@/hooks/use-session-keyboard-shortcuts";
 import { prMergedAccent } from "@/lib/pr-status-styles";
 import { cn, sessionTitle, formatTimeAgo } from "@/lib/utils";
 import { activeSet, workingStatusesSet } from "@/lib/session-status-groups";
@@ -309,16 +311,15 @@ type DetailTab = "overview" | "changes" | "preview";
 type PRAuthorMode = "auto" | "user" | "app";
 
 type PRAuthInterceptDetails = {
-  connect_url: string;
-  resume_token: string;
-  can_fallback_to_app: boolean;
+  connect_url?: string;
+  resume_token?: string;
+  can_fallback_to_app?: boolean;
 };
 
 // PRAuthPromptState is a discriminated union so merge prompts don't carry
-// create-PR-only fields (connect_url, resume_token, can_fallback_to_app).
-// create_pr and push_changes prompts come from the backend's auth interception
-// payload; merge prompts are always synthesized client-side and connect via
-// the hardcoded /github/connect endpoint with no resume token and no fallback.
+// create-PR-only fields. Create/push prompts may come from backend auth
+// interception or be synthesized from the current GitHub status before the
+// backend has rejected the action.
 type PRAuthPromptState =
   | ({ purpose: "create_pr" } & PRAuthInterceptDetails)
   | ({ purpose: "push_changes" } & PRAuthInterceptDetails)
@@ -1162,6 +1163,18 @@ function SessionComposer({
       setTriggerDismissed(true);
       return;
     }
+    if (e.key === "Escape" && message.trim().length === 0) {
+      e.preventDefault();
+      e.currentTarget.blur();
+      return;
+    }
+    if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+      e.preventDefault();
+      if (!sendDisabled) {
+        onSend();
+      }
+      return;
+    }
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
       if (!sendDisabled) {
@@ -1790,7 +1803,10 @@ type ChatPanelProps = {
   onApprovePlan?: () => void;
   onAdjustPlan?: () => void;
   onRegisterScrollToLiveEdge?: (scrollToLiveEdge: (() => void) | null) => void;
+  onRegisterKeyboardControls?: (controls: SessionTranscriptKeyboardControls | null) => void;
 };
+
+type SessionTranscriptKeyboardControls = NonNullable<UseSessionKeyboardShortcutsOptions["transcript"]>;
 
 function ChatPanel({
   session,
@@ -1802,6 +1818,7 @@ function ChatPanel({
   onApprovePlan,
   onAdjustPlan,
   onRegisterScrollToLiveEdge,
+  onRegisterKeyboardControls,
 }: ChatPanelProps) {
   const queryClient = useQueryClient();
   const { user } = useAuth();
@@ -1996,6 +2013,41 @@ function ChatPanel({
     setShowJumpToLatest(false);
   }, [scrollToLiveEdgePosition]);
 
+  const focusTranscript = useCallback(() => {
+    scrollRef.current?.focus({ preventScroll: true });
+  }, []);
+
+  const scrollTranscriptByStep = useCallback((direction: 1 | -1) => {
+    const el = scrollRef.current;
+    if (!el) return;
+    el.scrollBy?.({ top: direction * TRANSCRIPT_STEP_PX, behavior: "smooth" });
+    if (typeof el.scrollBy !== "function") {
+      el.scrollTop += direction * TRANSCRIPT_STEP_PX;
+    }
+  }, []);
+
+  const scrollTranscriptByPage = useCallback((direction: 1 | -1) => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const distance = Math.max(
+      TRANSCRIPT_PAGE_MIN_PX,
+      Math.floor(el.clientHeight * TRANSCRIPT_PAGE_VIEWPORT_RATIO),
+    );
+    el.scrollBy?.({ top: direction * distance, behavior: "smooth" });
+    if (typeof el.scrollBy !== "function") {
+      el.scrollTop += direction * distance;
+    }
+  }, []);
+
+  const scrollTranscriptToTop = useCallback(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    el.scrollTo?.({ top: 0, behavior: "smooth" });
+    if (typeof el.scrollTo !== "function") {
+      el.scrollTop = 0;
+    }
+  }, []);
+
   const getEntryContainerProps = useCallback(
     (_entry: TimelineEntry, index: number) =>
       ({
@@ -2008,6 +2060,24 @@ function ChatPanel({
     onRegisterScrollToLiveEdge?.(scrollToLiveEdge);
     return () => onRegisterScrollToLiveEdge?.(null);
   }, [onRegisterScrollToLiveEdge, scrollToLiveEdge]);
+
+  useEffect(() => {
+    onRegisterKeyboardControls?.({
+      focus: focusTranscript,
+      scrollByStep: scrollTranscriptByStep,
+      scrollByPage: scrollTranscriptByPage,
+      scrollToTop: scrollTranscriptToTop,
+      scrollToLatest: scrollToLiveEdge,
+    });
+    return () => onRegisterKeyboardControls?.(null);
+  }, [
+    focusTranscript,
+    onRegisterKeyboardControls,
+    scrollToLiveEdge,
+    scrollTranscriptByPage,
+    scrollTranscriptByStep,
+    scrollTranscriptToTop,
+  ]);
 
   // SSE streaming for real-time logs when the session is active.
   const mergeLogs = useCallback((newLogs: SessionLog[]) => {
@@ -2215,7 +2285,14 @@ function ChatPanel({
         </div>
       )}
       {/* Unified timeline */}
-      <div ref={scrollRef} onScroll={handleScroll} className="flex-1 overflow-y-auto space-y-2 p-4">
+      <div
+        ref={scrollRef}
+        onScroll={handleScroll}
+        tabIndex={0}
+        aria-label="Session conversation"
+        data-session-transcript-scroll="true"
+        className="flex-1 overflow-y-auto space-y-2 p-4 outline-none focus-visible:ring-2 focus-visible:ring-ring/30"
+      >
         {showLoadingSkeleton ? (
           <SessionTimelineSkeleton />
         ) : (
@@ -2264,6 +2341,7 @@ function areChatPanelPropsEqual(previous: ChatPanelProps, next: ChatPanelProps):
     previous.onApprovePlan === next.onApprovePlan &&
     previous.onAdjustPlan === next.onAdjustPlan &&
     previous.onRegisterScrollToLiveEdge === next.onRegisterScrollToLiveEdge &&
+    previous.onRegisterKeyboardControls === next.onRegisterKeyboardControls &&
     previous.session.id === next.session.id &&
     previous.session.status === next.session.status &&
     previous.session.sandbox_state === next.session.sandbox_state &&
@@ -2287,6 +2365,12 @@ const MIN_DETAIL = 280;
 const MAX_DETAIL = 600;
 const DEFAULT_DETAIL = 384;
 const MOBILE_REVIEW_MEDIA_QUERY = "(max-width: 767px)";
+// Transcript keyboard scroll tuning. Step matches a comfortable line-pair
+// jump; page distance follows browser conventions (~85% viewport with a
+// floor for very short panels).
+const TRANSCRIPT_STEP_PX = 72;
+const TRANSCRIPT_PAGE_MIN_PX = 160;
+const TRANSCRIPT_PAGE_VIEWPORT_RATIO = 0.85;
 
 export function SessionDetailContent({ id }: { id: string }) {
   const router = useRouter();
@@ -2307,6 +2391,7 @@ export function SessionDetailContent({ id }: { id: string }) {
   const [mobileDetailOpen, setMobileDetailOpen] = useState(false);
   const [mobileReviewComposerOpen, setMobileReviewComposerOpen] = useState(false);
   const [mobileRenameOpen, setMobileRenameOpen] = useState(false);
+  const [keyboardHelpOpen, setKeyboardHelpOpen] = useState(false);
   const [detailWidth, setDetailWidth] = useState(DEFAULT_DETAIL);
   const [activeFileIndex, setActiveFileIndex] = useState(0);
   const [isEditingTitle, setIsEditingTitle] = useState(false);
@@ -2986,6 +3071,7 @@ export function SessionDetailContent({ id }: { id: string }) {
   // overwrite the new agent_type with the send-time {label, model} body.
   const inFlightAgentUpdateRef = useRef<Promise<unknown> | null>(null);
   const chatPanelScrollToLiveEdgeRef = useRef<(() => void) | null>(null);
+  const [chatPanelKeyboardControls, setChatPanelKeyboardControls] = useState<SessionTranscriptKeyboardControls | null>(null);
   // Open comments are the source of truth for what gets attached to the next
   // message — once a send succeeds, the backend marks them resolved in the
   // same transaction, the comments query is invalidated below, and the next
@@ -3525,6 +3611,9 @@ export function SessionDetailContent({ id }: { id: string }) {
   const registerChatPanelScrollToLiveEdge = useCallback((scrollToLiveEdge: (() => void) | null) => {
     chatPanelScrollToLiveEdgeRef.current = scrollToLiveEdge;
   }, []);
+  const registerChatPanelKeyboardControls = useCallback((controls: SessionTranscriptKeyboardControls | null) => {
+    setChatPanelKeyboardControls(controls);
+  }, []);
 
   const changesCount = diffStats?.filesChanged;
   const detailTabsRef = useRef<HTMLDivElement>(null);
@@ -3575,6 +3664,128 @@ export function SessionDetailContent({ id }: { id: string }) {
     }
   }, [isDedicatedMobileReview]);
 
+  const focusActiveDetailTab = useCallback(() => {
+    requestAnimationFrame(() => {
+      detailTabsRef.current?.querySelector<HTMLElement>('[role="tab"][data-state="active"]')?.focus();
+    });
+  }, []);
+
+  const toggleDetailsFromKeyboard = useCallback(() => {
+    if (centerMode === "review" && showDetailPanel) {
+      return;
+    }
+    if (isMobileReviewViewport) {
+      setMobileDetailOpen((open) => !open);
+      focusActiveDetailTab();
+      return;
+    }
+    setShowDetailPanel((open) => !open);
+    if (!showDetailPanel) {
+      focusActiveDetailTab();
+    }
+  }, [centerMode, focusActiveDetailTab, isMobileReviewViewport, showDetailPanel]);
+
+  const closeDetailsFromKeyboard = useCallback(() => {
+    if (isMobileReviewViewport) {
+      setMobileDetailOpen(false);
+      return;
+    }
+    if (!(centerMode === "review" && showDetailPanel)) {
+      setShowDetailPanel(false);
+    }
+  }, [centerMode, isMobileReviewViewport, showDetailPanel]);
+
+  const focusComposerFromKeyboard = useCallback(() => {
+    composerTextareaRef.current?.focus();
+    composerTextareaRef.current?.scrollIntoView({ block: "nearest" });
+  }, []);
+
+  const ghBlocked = ghStatus?.pr_authorship_mode === "user_required" && !ghStatus?.connected;
+
+  const createPRFromKeyboard = useCallback(() => {
+    if (localPRState !== "idle" || createPRMutation.isPending) {
+      return;
+    }
+    if (ghBlocked) {
+      setPRAuthPrompt({ purpose: "create_pr" });
+      return;
+    }
+    createPRMutation.mutate(undefined);
+  }, [createPRMutation, ghBlocked, localPRState]);
+
+  const pushChangesFromKeyboard = useCallback(() => {
+    if (localPushState !== "idle" || pushChangesMutation.isPending) {
+      return;
+    }
+    if (ghBlocked) {
+      setPRAuthPrompt({ purpose: "push_changes" });
+      return;
+    }
+    pushChangesMutation.mutate(undefined);
+  }, [ghBlocked, localPushState, pushChangesMutation]);
+
+  const viewPRFromKeyboard = useCallback(() => {
+    if (!prData?.data?.github_pr_url) {
+      return;
+    }
+    window.open(prData.data.github_pr_url, "_blank", "noopener,noreferrer");
+  }, [prData?.data?.github_pr_url]);
+
+  useSessionKeyboardShortcuts({
+    enabled: !isLoading && !!session,
+    reviewMode: centerMode === "review",
+    onShowHelp: () => setKeyboardHelpOpen(true),
+    onFocusComposer: focusComposerFromKeyboard,
+    transcript: chatPanelKeyboardControls,
+    agentTabs: threads.length > 0 && activeThreadIndex >= 0 ? {
+      activeIndex: activeThreadIndex,
+      count: threads.length,
+      onChange: (index) => {
+        const next = threads[index];
+        if (next) {
+          setActiveThreadId(next.id);
+          chatPanelKeyboardControls?.focus();
+        }
+      },
+      onAdd: () => {
+        if (!createThreadMutation.isPending) {
+          createThreadMutation.mutate(buildDefaultThreadRequest());
+        }
+      },
+    } : null,
+    details: {
+      open: isMobileReviewViewport ? mobileDetailOpen : showDetailPanel,
+      required: centerMode === "review" && showDetailPanel,
+      activeTab: detailTab,
+      availableTabs: showValidationTab
+        ? (["overview", "changes", "validation", "preview"] as const)
+        : (["overview", "changes", "preview"] as const),
+      onToggle: toggleDetailsFromKeyboard,
+      onClose: closeDetailsFromKeyboard,
+      onTabChange: handleDetailTabClick,
+      onOpenReview: () => {
+        if (visibleDiffFiles.length > 0) {
+          openReview();
+        }
+      },
+      onExitReview: exitReview,
+    },
+    pr: {
+      canCreate: canCreatePR && localPRState === "idle" && !createPRMutation.isPending,
+      canView: !!prData?.data?.github_pr_url,
+      canPush: hasPR && prStatus === "open" && !!session?.has_unpushed_changes && hasSnapshot && !isRunning && localPushState === "idle" && !pushChangesMutation.isPending,
+      canFixTests: !!prHealth?.can_fix_tests && pendingPRAction === null,
+      canResolveConflicts: !!prHealth?.can_resolve_conflicts && pendingPRAction === null,
+      canMerge: prHealthAllowsMerge(prHealth) && pendingPRAction === null,
+      onCreate: createPRFromKeyboard,
+      onView: viewPRFromKeyboard,
+      onPush: pushChangesFromKeyboard,
+      onFixTests: () => startRepairMutation.mutate("fix_tests"),
+      onResolveConflicts: () => startRepairMutation.mutate("resolve_conflicts"),
+      onMerge: handleMergeAction,
+    },
+  });
+
   if (isLoading) {
     return (
       <div className="flex items-center justify-center h-full">
@@ -3612,7 +3823,6 @@ export function SessionDetailContent({ id }: { id: string }) {
     snapshotState,
     localPRActionError?.code ? localPRActionError.message : session.pr_creation_error,
   );
-  const ghBlocked = ghStatus?.pr_authorship_mode === "user_required" && !ghStatus?.connected;
   const succeededButNoPR = prState === "succeeded" && !hasPR;
   const prActionError = hasPR
     ? null
@@ -3787,7 +3997,7 @@ export function SessionDetailContent({ id }: { id: string }) {
                     {closedPRLabel}
                   </Badge>
                 )}
-                <Button asChild variant="outline" size="sm" className="h-7 text-xs gap-1.5">
+                <Button asChild variant="outline" size="sm" className="h-7 text-xs gap-1.5" title="View PR (p v)">
                   <a href={prData.data.github_pr_url} target="_blank" rel="noopener noreferrer">
                     <ExternalLink className="h-3 w-3" />
                     View PR
@@ -3801,7 +4011,7 @@ export function SessionDetailContent({ id }: { id: string }) {
                   size="sm"
                   className="h-7 text-xs gap-1.5"
                   disabled={prActionDisabled}
-                  title={prActionTitle}
+                  title={prActionTitle ? `${prActionTitle} (p c)` : `${prActionLabel} (p c)`}
                   onClick={() => createPRMutation.mutate(undefined)}
                 >
                   {prActionSpinning ? (
@@ -4035,6 +4245,7 @@ export function SessionDetailContent({ id }: { id: string }) {
                   disabled={centerMode === "review" && showDetailPanel}
                   onClick={() => setShowDetailPanel(!showDetailPanel)}
                   title={detailToggleTitle}
+                  aria-keyshortcuts="d"
                 >
                   {showDetailPanel ? <PanelRightClose className="h-4 w-4" /> : <PanelRightOpen className="h-4 w-4" />}
                 </Button>
@@ -4076,6 +4287,7 @@ export function SessionDetailContent({ id }: { id: string }) {
               onApprovePlan={handleApprovePlan}
               onAdjustPlan={handleAdjustPlan}
               onRegisterScrollToLiveEdge={registerChatPanelScrollToLiveEdge}
+              onRegisterKeyboardControls={registerChatPanelKeyboardControls}
             />
           </div>
           {/* Review diff view — mounted only when active */}
@@ -4388,6 +4600,10 @@ export function SessionDetailContent({ id }: { id: string }) {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+      <SessionKeyboardHelpOverlay
+        open={keyboardHelpOpen}
+        onOpenChange={setKeyboardHelpOpen}
+      />
       <AlertDialog
         open={!!prAuthPrompt}
         onOpenChange={(open) => {
@@ -4407,8 +4623,12 @@ export function SessionDetailContent({ id }: { id: string }) {
               {prAuthPrompt?.purpose === "merge_pr"
                 ? "Authorize GitHub once to merge pull requests as you."
                 : prAuthPrompt?.purpose === "push_changes"
-                  ? "Authorize GitHub once to push as you. If you skip this, 143 can still push the commits as the app."
-                  : "Authorize GitHub once to open PRs as you. If you skip this, 143 can still open the PR as the app."}
+                  ? prAuthPrompt.can_fallback_to_app
+                    ? "Authorize GitHub once to push as you. If you skip this, 143 can still push the commits as the app."
+                    : "Authorize GitHub once to push as you."
+                  : prAuthPrompt?.can_fallback_to_app
+                    ? "Authorize GitHub once to open PRs as you. If you skip this, 143 can still open the PR as the app."
+                    : "Authorize GitHub once to open PRs as you."}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
