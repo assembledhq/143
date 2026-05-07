@@ -4,7 +4,7 @@
 >
 > **Last reviewed:** 2026-04-24
 >
-> **Depends on:** [../overall.md](../overall.md), [../29-projects.md](../29-projects.md), [../34-repo-ribbons-nav.md](../34-repo-ribbons-nav.md), [../implemented/53-session-composer-mentions.md](../implemented/53-session-composer-mentions.md)
+> **Depends on:** [../overall.md](../overall.md), [29-projects.md](29-projects.md), [../backlog/34-repo-ribbons-nav.md](../backlog/34-repo-ribbons-nav.md), [../implemented/53-session-composer-mentions.md](../implemented/53-session-composer-mentions.md)
 
 ## Summary
 
