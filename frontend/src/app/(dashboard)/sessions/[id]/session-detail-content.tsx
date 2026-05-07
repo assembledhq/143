@@ -124,7 +124,7 @@ import { useDiffViewState } from "@/hooks/use-diff-view-state";
 import { CodexDeviceCodeModal } from "@/components/codex-device-code-modal";
 import { AgentBadge } from "@/components/agent-badge";
 import { PendingAttachmentStrip } from "@/components/pending-attachment-strip";
-import { PRHealthBanner } from "@/components/pr-health-banner";
+import { PRHealthBanner, prHealthAllowsMerge } from "@/components/pr-health-banner";
 import { SessionKeyboardHelpOverlay } from "@/components/session-keyboard-help-overlay";
 import { useAuth } from "@/hooks/use-auth";
 import { useMediaQuery } from "@/hooks/use-media-query";
@@ -2125,16 +2125,19 @@ function ChatPanel({
   const scrollTranscriptByStep = useCallback((direction: 1 | -1) => {
     const el = scrollRef.current;
     if (!el) return;
-    el.scrollBy?.({ top: direction * 72, behavior: "smooth" });
+    el.scrollBy?.({ top: direction * TRANSCRIPT_STEP_PX, behavior: "smooth" });
     if (typeof el.scrollBy !== "function") {
-      el.scrollTop += direction * 72;
+      el.scrollTop += direction * TRANSCRIPT_STEP_PX;
     }
   }, []);
 
   const scrollTranscriptByPage = useCallback((direction: 1 | -1) => {
     const el = scrollRef.current;
     if (!el) return;
-    const distance = Math.max(160, Math.floor(el.clientHeight * 0.85));
+    const distance = Math.max(
+      TRANSCRIPT_PAGE_MIN_PX,
+      Math.floor(el.clientHeight * TRANSCRIPT_PAGE_VIEWPORT_RATIO),
+    );
     el.scrollBy?.({ top: direction * distance, behavior: "smooth" });
     if (typeof el.scrollBy !== "function") {
       el.scrollTop += direction * distance;
@@ -2467,17 +2470,12 @@ const MIN_DETAIL = 280;
 const MAX_DETAIL = 600;
 const DEFAULT_DETAIL = 384;
 const MOBILE_REVIEW_MEDIA_QUERY = "(max-width: 767px)";
-
-function prHealthAllowsMerge(health: PullRequestHealthResponse | undefined): boolean {
-  if (!health?.can_merge) {
-    return false;
-  }
-  const checks = health.checks ?? [];
-  if (checks.length === 0) {
-    return health.checks_confirmed;
-  }
-  return checks.every((check) => check.status === "passed");
-}
+// Transcript keyboard scroll tuning. Step matches a comfortable line-pair
+// jump; page distance follows browser conventions (~85% viewport with a
+// floor for very short panels).
+const TRANSCRIPT_STEP_PX = 72;
+const TRANSCRIPT_PAGE_MIN_PX = 160;
+const TRANSCRIPT_PAGE_VIEWPORT_RATIO = 0.85;
 
 export function SessionDetailContent({ id }: { id: string }) {
   const router = useRouter();
@@ -3178,7 +3176,6 @@ export function SessionDetailContent({ id }: { id: string }) {
   // overwrite the new agent_type with the send-time {label, model} body.
   const inFlightAgentUpdateRef = useRef<Promise<unknown> | null>(null);
   const chatPanelScrollToLiveEdgeRef = useRef<(() => void) | null>(null);
-  const chatPanelKeyboardControlsRef = useRef<SessionTranscriptKeyboardControls | null>(null);
   const [chatPanelKeyboardControls, setChatPanelKeyboardControls] = useState<SessionTranscriptKeyboardControls | null>(null);
   // Open comments are the source of truth for what gets attached to the next
   // message — once a send succeeds, the backend marks them resolved in the
@@ -3720,7 +3717,6 @@ export function SessionDetailContent({ id }: { id: string }) {
     chatPanelScrollToLiveEdgeRef.current = scrollToLiveEdge;
   }, []);
   const registerChatPanelKeyboardControls = useCallback((controls: SessionTranscriptKeyboardControls | null) => {
-    chatPanelKeyboardControlsRef.current = controls;
     setChatPanelKeyboardControls(controls);
   }, []);
 
@@ -3855,7 +3851,7 @@ export function SessionDetailContent({ id }: { id: string }) {
         const next = threads[index];
         if (next) {
           setActiveThreadId(next.id);
-          chatPanelKeyboardControlsRef.current?.focus();
+          chatPanelKeyboardControls?.focus();
         }
       },
       onAdd: () => {

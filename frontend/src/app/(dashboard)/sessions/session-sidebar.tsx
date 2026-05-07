@@ -474,7 +474,10 @@ export function SessionSidebar() {
         event.preventDefault();
         openActiveSession();
         break;
-      case "a":
+      case "A":
+        // Shift+A archives — `a` alone is too easy to fire accidentally on
+        // the highlighted row.
+        if (!event.shiftKey) return;
         event.preventDefault();
         toggleArchiveActiveSession();
         break;
@@ -591,9 +594,12 @@ export function SessionSidebar() {
       {/* Session list */}
       <div
         ref={listContainerRef}
-        role="list"
+        role="listbox"
         tabIndex={0}
         aria-label="Sessions"
+        aria-activedescendant={
+          currentActiveSessionId ? `session-sidebar-option-${currentActiveSessionId}` : undefined
+        }
         className="flex-1 overflow-y-auto px-2 pt-1 pb-2 outline-none focus-visible:ring-2 focus-visible:ring-ring/30"
         onKeyDown={handleListKeyDown}
       >
@@ -673,7 +679,8 @@ export function SessionSidebar() {
                   }
                 }}
                 id={`session-sidebar-option-${session.id}`}
-                role="listitem"
+                role="option"
+                aria-selected={currentActiveSessionId === session.id}
                 data-active={currentActiveSessionId === session.id ? "true" : undefined}
                 className={cn(
                   "flex min-w-0 rounded-xl border border-transparent p-1 transition-all duration-150",

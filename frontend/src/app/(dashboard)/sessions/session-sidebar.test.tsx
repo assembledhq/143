@@ -901,9 +901,10 @@ describe('SessionSidebar', () => {
     await screen.findByText('Alpha keyboard');
 
     await user.keyboard('j');
-    expect(screen.queryByRole('listbox', { name: 'Sessions' })).not.toBeInTheDocument();
-    expect(screen.queryByRole('option', { name: /Beta keyboard/ })).not.toBeInTheDocument();
-    expect(screen.getByText('Beta keyboard').closest('[role="listitem"]')).toHaveAttribute('data-active', 'true');
+    const listbox = screen.getByRole('listbox', { name: 'Sessions' });
+    expect(listbox).toBeInTheDocument();
+    expect(listbox).toHaveAttribute('aria-activedescendant', 'session-sidebar-option-s2');
+    expect(screen.getByText('Beta keyboard').closest('[role="option"]')).toHaveAttribute('aria-selected', 'true');
 
     // Pressing j once more — now that the list itself is focused — must
     // advance exactly one row. A single keystroke fires both the
@@ -911,8 +912,8 @@ describe('SessionSidebar', () => {
     // document handler has to bail when the event originated inside the list,
     // otherwise the cursor jumps two rows.
     await user.keyboard('j');
-    expect(screen.getByText('Gamma keyboard').closest('[role="listitem"]')).toHaveAttribute('data-active', 'true');
-    expect(screen.getByText('Delta keyboard').closest('[role="listitem"]')).not.toHaveAttribute('data-active');
+    expect(screen.getByText('Gamma keyboard').closest('[role="option"]')).toHaveAttribute('aria-selected', 'true');
+    expect(screen.getByText('Delta keyboard').closest('[role="option"]')).toHaveAttribute('aria-selected', 'false');
 
     await user.keyboard('{Enter}');
     expect(mockRouterPush).toHaveBeenCalledWith('/sessions/s3');
@@ -944,7 +945,10 @@ describe('SessionSidebar', () => {
     expect(mockRouterPush).toHaveBeenCalledWith('/sessions/new?repo=repo-1');
 
     await user.keyboard('j');
+    // Plain `a` is a no-op — archive requires Shift to avoid accidental fires.
     await user.keyboard('a');
+    expect(archiveCalls).toBe(0);
+    await user.keyboard('{Shift>}A{/Shift}');
     await waitFor(() => {
       expect(archiveCalls).toBe(1);
     });

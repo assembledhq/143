@@ -270,6 +270,16 @@ function checksAllowMerge(
     : checks.every((check) => check.status === "passed");
 }
 
+// prHealthAllowsMerge mirrors the merge gating the banner uses internally so
+// callers outside the banner (keyboard shortcuts, command palette) can decide
+// whether to expose the merge action without re-deriving the rule.
+export function prHealthAllowsMerge(health: PullRequestHealthResponse | undefined): boolean {
+  if (!health?.can_merge) {
+    return false;
+  }
+  return checksAllowMerge(health.checks_confirmed, health.checks ?? []);
+}
+
 function checkStatusLabel(status: PullRequestCheckStatus) {
   switch (status) {
     case "failed":

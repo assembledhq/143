@@ -21,7 +21,7 @@ const shortcutGroups = [
       ["Enter", "Open active session"],
       ["/", "Focus session search"],
       ["n", "New session"],
-      ["a", "Archive active session"],
+      ["Shift+A", "Archive active session"],
     ],
   },
   {
