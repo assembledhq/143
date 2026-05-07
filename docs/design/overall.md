@@ -2,11 +2,11 @@
 
 > **Status:** Partially Implemented | **Last reviewed:** 2026-05-06
 
-[143.dev](http://143.dev) is an open-source platform that turns customer pain and production errors into safe, validated code fixes that ship automatically.
+[143.dev](http://143.dev) is an open-source platform that turns customer pain and production errors into safe code fixes that ship automatically.
 
 It’s an open-source platform that connects customer pain directly to code fixes.
 
-The system aggregates issues from support, Sentry, and Linear, prioritizes them by real business impact, runs a coding agent to generate a fix, validates it safely, opens a PR, and measures the customer impact after deploy.
+The system aggregates issues from support, Sentry, and Linear, prioritizes them by real business impact, runs a coding agent to generate a fix, opens a PR, and measures the customer impact after deploy. Repository-native CI/CD remains the source of truth for build, test, and deploy validation.
 
 # Overall flow
 
@@ -69,7 +69,7 @@ The system aggregates issues from support, Sentry, and Linear, prioritizes them 
     - Session detail treats an existing PR as the authoritative publish outcome. Once a PR record exists, the UI should prefer that over stale snapshot or PR-attempt error fields so users do not see false failure banners after the PR is already available.
     - Session detail keeps the manual `Merge PR` action hidden until GitHub has explicitly reported passing checks. A clean merge state without check confirmation is treated as still in-flight, not merge-ready. When GitHub reports zero checks, 143 treats that as merge-ready only if the PR base branch has no required status checks configured; otherwise the empty check set remains provisional until GitHub reports the required checks on the latest head SHA.
     - Manual session `@` mentions are persisted as **structured input references** alongside the visible prompt text. The backend stores canonical reference metadata on the initial session message and lets each agent adapter translate those references into the downstream agent's native prompt/input format.
-    - Manual sessions are **interactive by default**: after each turn the worker snapshots the sandbox + agent state, stores the latest diff/summary on the session, and returns the session to `idle` so the user can send a follow-up message. Follow-up messages also resume paused sessions such as `awaiting_input`, `needs_human_guidance`, and completed terminal states from the saved snapshot when one still exists. Validation/PR creation only start when the user explicitly ends the session.
+    - Manual sessions are **interactive by default**: after each turn the worker snapshots the sandbox + agent state, stores the latest diff/summary on the session, and returns the session to `idle` so the user can send a follow-up message. Follow-up messages also resume paused sessions such as `awaiting_input`, `needs_human_guidance`, and completed terminal states from the saved snapshot when one still exists. PR creation only starts when the user explicitly ends the session.
     - Manual-session cancel should interrupt the **actual agent CLI process**, not just the worker-side stream reader. The current implementation tracks provider runtime metadata plus a per-agent cancellation spec, and the long-term direction is a **provider-owned live command handle** with native stdin/interrupt support rather than adapter-side wrappers; see [future/70-live-agent-command-handles.md](future/70-live-agent-command-handles.md).
     - The shared follow-up composer on session detail should keep draft typing isolated from the transcript and detail-side render work. Typing in the textarea must not force the whole transcript, review surface, or side panel to rerender on every keystroke.
     - Session titles should remain **user-correctable** after creation. Editing the title from session detail updates the canonical session title used in list/detail surfaces and synchronously propagates that edit to any already-open GitHub PR title so the user-visible title stays aligned across the app and GitHub.
@@ -97,24 +97,18 @@ The system aggregates issues from support, Sentry, and Linear, prioritizes them 
     - Preview recycle state is persisted with the preview lifecycle record rather than held only in worker memory so long-lived previews can be safely recycled after API restarts or deploys.
 - Agent runtime credentials should be managed as visible, ordered auth stacks rather than hidden single-provider settings. The settings UX is a prioritized list of coding agent auths with an explicit default and fallback order across personal and organization scopes; see [implemented/57-coding-agent-settings-rethink.md](implemented/57-coding-agent-settings-rethink.md).
     - Amp and Pi now use these same coding-agent auth primitives instead of storing auth in `agent_config` or borrowing sibling-agent keys; the implementation notes live in [implemented/58-amp-pi-coding-agent-auth-alignment.md](implemented/58-amp-pi-coding-agent-auth-alignment.md).
-    - The agent outputs a **confidence score** with its fix. Low-confidence runs are paused for human review before proceeding to validation.
+    - The agent outputs a **confidence score** with its fix. Low-confidence runs are paused for human review before proceeding to PR creation.
     - If the agent asks a clarifying question during execution, the run pauses and the question surfaces in the Fix Queue. The user can answer in the UI, provide guidance, or **resume the session locally** via CLI (e.g., `143 resume <run-id>` or `claude --resume <session-id>`) to take over the sandbox interactively.
     - When a run fails, the system generates a **human-readable failure explanation** with actionable next steps — see [17-failure-communication.md](implemented/17-failure-communication.md). Failures are classified by sub-type and feed back into the system to improve future runs.
-- Step 4: Validate correctness
-    - The system checks the code and ensures that
-        1. it works towards the right product direction
-        2. the code is correct
-        3. the code is high quality and a simple, minimal diff
-        4. the fix includes a regression test that would have caught the original bug (required for Sentry errors and support tickets)
-        5. the code passes all CI/CD checks and coverage is not reduced
-- Step 5: Open PR and ship
+- Step 4: Open PR and ship
     - The system opens a new PR on github, using whatever Github template already exists. PR descriptions should preserve the repo template's structure and fill its existing fields as well as possible; the only content appended outside the template is a small 143.dev/session links footer. User-initiated PRs should prefer GitHub App user-to-server tokens so the PR is authored as the triggering human; unattended flows fall back to the installation token.
+    - Repository-native CI/CD is responsible for validating the branch after PR creation. 143 no longer runs a separate product-owned validation stage. See [implemented/71-remove-validation-stage.md](implemented/71-remove-validation-stage.md).
     - It makes sure to attach the relevant Linear issue to the PR title, or references the original sentry issue / customer complaint, while keeping title cleanup minimal and relying on the LLM to generate the reviewer-facing phrasing when available
     - Session detail now includes a compact **PR health** row near the existing top-of-Overview PR/error notice area, backed by synced GitHub state, reconciliation, and org-scoped SSE updates so operators can see conflicts or failing tests quickly and launch one-click repair actions like `Resolve conflicts` and `Fix tests`; see [implemented/61-pr-state-sync-and-repair-actions.md](implemented/61-pr-state-sync-and-repair-actions.md).
     - Failing-test badges in that PR health row should support a lightweight **CI job drilldown** on hover, listing the known check runs and whether each is `passed`, `failed`, or `pending` without forcing the user to open GitHub just to answer "what is red right now?"; see [implemented/65-pr-health-check-status-hover.md](implemented/65-pr-health-check-status-hover.md).
     - Linked PRs that are closed without merge should be treated as a clear terminal outcome in session surfaces rather than falling back to green/open-looking CI state. Sessions list rows render an explicit `Closed` PR badge, and session detail shows a compact terminal closed-state summary instead of open-only repair actions; see [implemented/62-pr-closed-state-ux.md](implemented/62-pr-closed-state-ux.md).
     - Sends the PR for human review (depending on the settings, could be a push notification or just puts it out for a group of reviewers).
-- Step 6: Observe impact and close the customer loop
+- Step 5: Observe impact and close the customer loop
     - After a fix is deployed, the system automatically evaluates whether it reduced real customer pain.
     - Each shipped PR captures baseline production metrics before deploy and an observation window after deploy. After a deploy, the system will do automated checks to attribute impact.
     - It will measure:
@@ -122,7 +116,7 @@ The system aggregates issues from support, Sentry, and Linear, prioritizes them 
         - support ticket volume changes
         - latency or reliability improvements
     - Finally the system classifies the outcomes as successful or not.
-- Step 7: PR review feedback → agent improvement loop
+- Step 6: PR review feedback → agent improvement loop
     - By default, review comments on 143-generated PRs are captured and run through a multi-stage filtering pipeline (structural pre-filter → merge-gate → adoption check → directive detection → classification → dedup). An org setting can expand this to all PRs.
     - When a reviewer requests changes on a 143-generated PR, the system offers to re-run the agent with that feedback incorporated (auto-apply), rather than making the human fix it manually.
     - Generalizable reviewer feedback is accumulated into a per-repo knowledge base and materialized as a `.143/learned-conventions.md` file in the repo — version-controlled, transparent, and editable by the team. The agent reads this file as part of its context for all future runs.
@@ -130,7 +124,7 @@ The system aggregates issues from support, Sentry, and Linear, prioritizes them 
     - Reviewer acceptance rates are tracked per issue type, so the system learns which categories of fixes the agent handles well vs. poorly.
     - This creates a flywheel: every human review makes every future agent run better.
 
-**The system tracks 7 steps, but the core demo is Steps 1-3-4-5: ingest a Sentry error → run an agent → validate → open a PR. Everything else is optimization on this loop.**
+**The system tracks 6 steps, but the core demo is Steps 1-3-4: ingest a Sentry error → run an agent → open a PR. Everything else is optimization on this loop.**
 
 # State Machines
 
