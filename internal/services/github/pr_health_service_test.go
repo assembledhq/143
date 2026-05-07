@@ -955,7 +955,7 @@ func TestPRHealthServiceHelpers(t *testing.T) {
 	require.Equal(t, "hello world", stripWhitespace("  hello   world \n"), "stripWhitespace should collapse repeated whitespace")
 	require.Equal(t, "Please resolve the conflicts.", repairPromptForAction(models.PullRequestRepairActionTypeResolveConflicts), "repairPromptForAction should specialize conflict repair prompts")
 	require.Equal(t, "Please repair this pull request.", repairPromptForAction("other"), "repairPromptForAction should provide a default prompt")
-	require.Equal(t, models.PullRequestMergeStateConflicted, normalizeRepairMergeState(models.PullRequestMergeStateUnknown, boolPtr(false), "blocked"), "normalizeRepairMergeState should prefer normalized GitHub state")
+	require.Equal(t, models.PullRequestMergeStateBlocked, normalizeRepairMergeState(models.PullRequestMergeStateUnknown, boolPtr(false), "blocked"), "normalizeRepairMergeState should preserve non-conflict blocked states")
 	require.Equal(t, models.PullRequestMergeStateBehind, normalizeRepairMergeState(models.PullRequestMergeStateBehind, nil, ""), "normalizeRepairMergeState should fall back to the existing state when GitHub mergeability is unknown")
 	require.True(t, isSessionTerminalStatus(string(models.SessionStatusCompleted)), "isSessionTerminalStatus should recognize completed sessions")
 	require.False(t, isSessionTerminalStatus(string(models.SessionStatusRunning)), "isSessionTerminalStatus should reject active sessions")
