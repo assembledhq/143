@@ -288,6 +288,12 @@ if [ "$ROLE" = "app" ] || [ "$ROLE" = "worker" ] || [ "$ROLE" = "logging" ]; the
   # Vector collector is included from the main compose file
   scp "${SCP_OPTS[@]}" "$PROJECT_DIR/docker-compose.vector.yml" root@"$HOST":/opt/143/
 fi
+if [ "$ROLE" = "worker" ]; then
+  # sandbox-dns is built locally from docker-compose.worker.yml on first
+  # `docker compose up`, so fresh worker provisioning must stage its Dockerfile
+  # before Step 5 starts services. Routine deploys refresh this separately.
+  scp "${SCP_OPTS[@]}" "$PROJECT_DIR/Dockerfile.dnsmasq" root@"$HOST":/opt/143/
+fi
 scp "${SCP_OPTS[@]}" -r "$PROJECT_DIR/deploy" root@"$HOST":/opt/143/
 ssh "${SSH_OPTS[@]}" root@"$HOST" "chown -R deploy:deploy /opt/143 && chmod +x /opt/143/deploy/scripts/install-log-rotation.sh"
 
@@ -426,26 +432,12 @@ PULL_APP
       if [ -x /opt/143/deploy/scripts/sandbox-firewall.sh ]; then
         /opt/143/deploy/scripts/sandbox-firewall.sh 143-sandbox
       fi
-      # Provision /etc/143/sandbox-resolv.conf for sandboxes to bind-mount at
-      # /etc/resolv.conf. Required because user-defined Docker networks inject
-      # 127.0.0.11 (Docker's embedded DNS) into resolv.conf, and gVisor's
-      # netstack can't reach it. HostConfig.DNS doesn't help — it only changes
-      # the upstream the embedded resolver forwards to.
-      #
-      # Points at the sandbox-dns container's static IP (172.30.0.2 on the
-      # 143-sandbox bridge). sandbox-dns is a non-gVisor container that CAN
-      # reach 127.0.0.11 normally and forwards every query there, so preview-
-      # infrastructure container names (preview-db-<handle>, etc.) resolve
-      # via Docker's embedded resolver while public lookups continue to work
-      # through the daemon's upstream forwarders. Bringing up sandbox-dns is
-      # gated by docker-compose.worker.yml depends_on, so by the time the
-      # worker is taking traffic this address is answering.
-      mkdir -p /etc/143
-      cat > /etc/143/sandbox-resolv.conf <<RESOLV
-nameserver 172.30.0.2
-options edns0 trust-ad ndots:0
-RESOLV
-      chmod 644 /etc/143/sandbox-resolv.conf
+      # Provision /etc/143/sandbox-resolv.conf via the shared writer so the
+      # provisioning path and routine deploys agree byte-for-byte on its
+      # contents. See deploy/scripts/sandbox-resolv-conf.sh for the full
+      # rationale (gVisor + Docker embedded DNS + sandbox-dns sidecar). The
+      # file was scp'd to /opt/143 in Step 2 and runs as root here.
+      /opt/143/deploy/scripts/sandbox-resolv-conf.sh
       # Provision /var/run/143/sandbox-auth/ for the per-session GitHub
       # credential sockets. The worker container bind-mounts this path
       # in (see docker-compose.worker.yml); the orchestrator running as
