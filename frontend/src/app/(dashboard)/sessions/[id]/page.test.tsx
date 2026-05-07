@@ -6178,11 +6178,11 @@ describe('SessionDetailPage', () => {
     const user = userEvent.setup();
     renderWithProviders(<SessionDetailContent id={sessionId} />);
 
-    const addButton = await screen.findByRole('button', { name: 'Add agent tab' });
-    await user.click(addButton);
+    await screen.findByRole('button', { name: 'Add agent tab' });
+    await user.click(screen.getByRole('button', { name: 'Add agent tab' }));
 
     await waitFor(() => {
-      expect(addButton).toHaveFocus();
+      expect(document.activeElement).toHaveAttribute('aria-label', 'Add agent tab');
     });
   });
 

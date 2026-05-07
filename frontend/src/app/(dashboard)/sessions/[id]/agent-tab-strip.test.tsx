@@ -60,8 +60,7 @@ describe("AgentTabStrip", () => {
     expect(idleDot).not.toBeNull();
     expect(screen.queryByRole("tablist", { name: "Agent tabs" })).not.toBeInTheDocument();
     expect(screen.getByText("Main tab")).toBeInTheDocument();
-    expect(screen.getByText("Codex")).toBeInTheDocument();
-    expect(screen.getByText("Idle")).toBeInTheDocument();
+    expect(screen.getByRole("group", { name: "Codex Idle" })).toBeInTheDocument();
 
     await user.hover(screen.getByText("Main tab"));
 
@@ -133,9 +132,9 @@ describe("AgentTabStrip", () => {
     expect(tabList).toHaveAttribute("data-variant", "line");
     expect(tabList).not.toHaveClass("bg-muted/60");
     expect(activeTab).toHaveTextContent(/Main tab/i);
-    expect(activeTab).toHaveTextContent(/Idle/i);
+    expect(activeTab).not.toHaveTextContent(/Idle/i);
     expect(activeTab).toHaveClass("data-[state=active]:text-primary");
-    expect(screen.getByRole("tab", { name: /review/i })).toHaveTextContent(/Completed/i);
+    expect(screen.getByRole("tab", { name: /review/i })).not.toHaveTextContent(/Completed/i);
     expect(screen.getByRole("button", { name: "Close Main tab" })).toBeInTheDocument();
   });
 
