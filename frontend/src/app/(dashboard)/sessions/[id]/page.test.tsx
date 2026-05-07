@@ -2157,6 +2157,33 @@ describe('SessionDetailPage', () => {
     expect(await screen.findByRole('button', { name: /^Merge$/ })).toBeInTheDocument();
   });
 
+  it('does not show Resolve conflicts when GitHub reports a non-conflict blocked PR', async () => {
+    server.use(
+      http.get('/api/v1/pull-requests/:id/health', () => {
+        return HttpResponse.json({
+          data: {
+            ...mockPRHealth,
+            merge_state: 'blocked' as const,
+            has_conflicts: false,
+            can_resolve_conflicts: false,
+            can_merge: false,
+            checks_confirmed: true,
+            checks: [
+              { name: 'unit tests', category: 'test' as const, status: 'passed' as const, summary: 'passed' },
+            ],
+            summary: 'PR #42 is blocked by GitHub merge requirements.',
+          },
+        } satisfies SingleResponse<typeof mockPRHealth>);
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+
+    expect(await screen.findByText('PR #42 is blocked by GitHub merge requirements.')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Resolve conflicts' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /^Merge$/ })).not.toBeInTheDocument();
+  });
+
   it('routes to a new revision session after starting a PR repair action', async () => {
     server.use(
       http.get('/api/v1/pull-requests/:id/health', () => {
