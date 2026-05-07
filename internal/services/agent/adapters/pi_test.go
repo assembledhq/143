@@ -49,7 +49,12 @@ func TestPiAdapter_Execute_StreamJSON(t *testing.T) {
 
 	provider := newMockProvider()
 	provider.ExecStreamFn = func(ctx context.Context, sb *agent.Sandbox, cmd string, onLine func(line []byte), stderr io.Writer) (int, error) {
-		require.True(t, strings.HasPrefix(cmd, "pi "), "command should invoke pi CLI, got: %s", cmd)
+		// Adapters no longer hand-roll PTY/pidfile glue — that lives in the
+		// provider-internal interactive handle. The adapter command is the
+		// raw CLI invocation only.
+		require.NotContains(t, cmd, ".143-agent.pid", "pi adapter must not embed pidfile scaffolding (provider internal)")
+		require.NotContains(t, cmd, ".143-agent.tty", "pi adapter must not embed ttyfile scaffolding (provider internal)")
+		require.NotContains(t, cmd, "python3 -c", "pi adapter must not embed PTY shim (provider internal)")
 		require.Contains(t, cmd, "--mode json")
 		require.Contains(t, cmd, "--api-key")
 		require.Contains(t, cmd, "PI_API_KEY", "must inject the dedicated Pi API key")
@@ -114,9 +119,14 @@ func TestPiAdapter_Execute_StreamJSON(t *testing.T) {
 func TestPiAdapter_Execute_NonZeroExit(t *testing.T) {
 	t.Parallel()
 
+	// Pi runs under a TTY, so stderr is merged into the visible stdout
+	// stream by the transport itself. The adapter is expected to surface
+	// the last visible line as the failure detail when the CLI exits
+	// non-zero — this test asserts that contract through the new handle
+	// transport (no wrapper-side PTY, no separate stderr writer).
 	provider := newMockProvider()
 	provider.ExecStreamFn = func(ctx context.Context, sb *agent.Sandbox, cmd string, onLine func(line []byte), stderr io.Writer) (int, error) {
-		_, _ = stderr.Write([]byte("pi: provider auth failed"))
+		onLine([]byte("pi: provider auth failed"))
 		return 2, nil
 	}
 
@@ -135,11 +145,39 @@ func TestPiAdapter_Execute_NonZeroExit(t *testing.T) {
 	require.Contains(t, result.Error, "provider auth failed")
 }
 
+func TestPiAdapter_Execute_NonZeroExit_IncludesMergedOutputWhenStderrEmpty(t *testing.T) {
+	t.Parallel()
+
+	provider := newMockProvider()
+	provider.ExecStreamFn = func(ctx context.Context, sb *agent.Sandbox, cmd string, onLine func(line []byte), stderr io.Writer) (int, error) {
+		onLine([]byte("pi: provider auth failed"))
+		return 2, nil
+	}
+
+	adapter := NewPiAdapter(zerolog.Nop())
+	logCh := make(chan agent.LogEntry, 10)
+	ctx := WithSandboxProvider(context.Background(), provider)
+
+	result, err := adapter.Execute(ctx, &agent.Sandbox{ID: "t", WorkDir: "/workspace", HomeDir: "/home/sandbox", Metadata: map[string]string{agent.SandboxMetadataBaseCommitSHA: "abc123"}}, &agent.AgentPrompt{
+		SystemPrompt: "x",
+		UserPrompt:   "y",
+		MaxTokens:    50_000,
+	}, logCh)
+	require.NoError(t, err)
+	require.Equal(t, 2, result.ExitCode)
+	require.Contains(t, result.Error, "exited with code 2", "non-zero exits should still surface the exit code")
+	require.Contains(t, result.Error, "provider auth failed",
+		"non-zero exits should preserve failure detail even when the wrapper only exposes it on the merged output stream")
+}
+
 func TestPiAdapter_Execute_ContinuationUsesUserMessage(t *testing.T) {
 	t.Parallel()
 
 	provider := newMockProvider()
 	provider.ExecStreamFn = func(ctx context.Context, sb *agent.Sandbox, cmd string, onLine func(line []byte), stderr io.Writer) (int, error) {
+		require.NotContains(t, cmd, ".143-agent.pid", "pi continuation must not embed pidfile scaffolding (provider internal)")
+		require.NotContains(t, cmd, ".143-agent.tty", "pi continuation must not embed ttyfile scaffolding (provider internal)")
+		require.NotContains(t, cmd, "python3 -c", "pi continuation must not embed PTY shim (provider internal)")
 		return 0, nil
 	}
 	provider.ExecFn = func(ctx context.Context, sb *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {

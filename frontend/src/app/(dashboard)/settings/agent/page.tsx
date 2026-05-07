@@ -31,6 +31,7 @@ import { ClaudeCodeAuthModal } from "@/components/claude-code-auth-modal";
 import { useAutosave } from "@/hooks/useAutosave";
 import { useAutosaveNumericField } from "@/hooks/useAutosaveNumericField";
 import { applyOrgSettingsPatch, coalesceSettingsPatch, type SettingsPatch } from "@/lib/settings-autosave";
+import { capitalizeWords } from "@/lib/utils";
 import {
   MAX_CONCURRENT_RUNS,
   MAX_SESSION_DURATION_MINUTES,
@@ -119,11 +120,6 @@ function defaultLabel(provider: ModalProvider, authType: AddFlowAuthType) {
     default:
       return "Coding auth";
   }
-}
-
-function capitalizeWord(value: string) {
-  if (!value) return value;
-  return value[0].toUpperCase() + value.slice(1);
 }
 
 export default function AgentPage() {
@@ -348,7 +344,7 @@ export default function AgentPage() {
                         </div>
                         <div>
                           <Badge variant="outline" className="text-xs">
-                            {capitalizeWord(row.status.replace(/_/g, " "))}
+                            {capitalizeWords(row.status)}
                           </Badge>
                         </div>
                       </div>
@@ -490,7 +486,7 @@ export default function AgentPage() {
                   <div className="grid gap-3 text-sm">
                     <div className="flex items-center justify-between">
                       <span className="text-muted-foreground">Status</span>
-                      <span className={authStatusTone(selected.status)}>{selected.status.replaceAll("_", " ")}</span>
+                      <span className={authStatusTone(selected.status)}>{capitalizeWords(selected.status)}</span>
                     </div>
                     <div className="flex items-center justify-between">
                       <span className="text-muted-foreground">Priority</span>
@@ -502,7 +498,7 @@ export default function AgentPage() {
                     </div>
                     <div className="flex items-center justify-between gap-4">
                       <span className="text-muted-foreground">Usage note</span>
-                      <span className="text-right">{selected.usage_note ?? "Unavailable"}</span>
+                      <span className="text-right">{selected.usage_note ? capitalizeWords(selected.usage_note) : "Unavailable"}</span>
                     </div>
                   </div>
 
@@ -620,7 +616,7 @@ export default function AgentPage() {
                       </SelectTrigger>
                       <SelectContent>
                         {AVAILABLE_AMP_MODES.map((mode) => (
-                          <SelectItem key={mode} value={mode}>{capitalizeWord(mode)}</SelectItem>
+                          <SelectItem key={mode} value={mode}>{capitalizeWords(mode)}</SelectItem>
                         ))}
                       </SelectContent>
                     </Select>

@@ -421,6 +421,19 @@ Always include `dark:` variants for banners that use **hardcoded Tailwind color 
 - Acronyms: PM, LLM, PR, API
 - The word after an acronym stays lowercase: "PM agent", "LLM model", "PR status"
 
+## Prefer Non-Mutating Code
+
+**Default to immutability.** When transforming data, return a new object/array rather than mutating the input in place. This is required for React rendering correctness (referential equality drives re-renders) and for TanStack Query cache integrity (mutating cached data breaks query invalidation).
+
+- Use spread to copy: `{ ...obj, foo: v }`, `[...arr, x]`.
+- Use array methods that return new arrays: `map`, `filter`, `concat`, `slice`, `toSorted`, `toReversed`. Avoid in-place mutators: `push`, `pop`, `splice`, `sort`, `reverse`, direct index assignment.
+- Never mutate props, `useState` values, or data returned from `useQuery`. Inside `setState`/`queryClient.setQueryData`, return a new value instead of mutating the previous one.
+- Prefer `const` and readonly types. If a value really needs to change, replace it rather than mutate it.
+
+**Mutation is the exception, not the default.** Only reach for mutating code when there is a real, measured performance reason — e.g., a hot loop building a large array where each spread would be O(n²). When you do mutate, keep the mutation strictly local to the function and add a short comment explaining why immutability was rejected.
+
+When in doubt, write the immutable version first. It's almost always fast enough and it sidesteps a whole class of stale-render and cache-corruption bugs.
+
 ## Error Reporting (Sentry)
 
 Errors are reported to Sentry via `@sentry/nextjs`. Three layers handle this automatically:

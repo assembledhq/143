@@ -288,6 +288,12 @@ if [ "$ROLE" = "app" ] || [ "$ROLE" = "worker" ] || [ "$ROLE" = "logging" ]; the
   # Vector collector is included from the main compose file
   scp "${SCP_OPTS[@]}" "$PROJECT_DIR/docker-compose.vector.yml" root@"$HOST":/opt/143/
 fi
+if [ "$ROLE" = "worker" ]; then
+  # sandbox-dns is built locally from docker-compose.worker.yml on first
+  # `docker compose up`, so fresh worker provisioning must stage its Dockerfile
+  # before Step 5 starts services. Routine deploys refresh this separately.
+  scp "${SCP_OPTS[@]}" "$PROJECT_DIR/Dockerfile.dnsmasq" root@"$HOST":/opt/143/
+fi
 scp "${SCP_OPTS[@]}" -r "$PROJECT_DIR/deploy" root@"$HOST":/opt/143/
 ssh "${SSH_OPTS[@]}" root@"$HOST" "chown -R deploy:deploy /opt/143 && chmod +x /opt/143/deploy/scripts/install-log-rotation.sh"
 
@@ -326,11 +332,13 @@ elif [ "$ROLE" = "redis" ]; then
   printf 'REDIS_PASSWORD=%s\nREDIS_PRIVATE_IP=%s\n' "$REDIS_PASSWORD" "$REDIS_PRIVATE_IP" \
     | ssh "${SSH_OPTS[@]}" root@"$HOST" 'cat > /opt/143/.env && chown deploy:deploy /opt/143/.env && chmod 600 /opt/143/.env'
 elif [ "$ROLE" = "worker" ]; then
-  # Workers only get the secrets they need — no age key or encrypted bundle.
-  # A worker compromise cannot decrypt the full production secret set, but it
-  # still needs GitHub App user-auth client creds to refresh user PR tokens.
-  printf 'DB_PASSWORD=%s\nDB_HOST=%s\nVICTORIALOGS_HOST=%s\nSERVER_ROLE=%s\nREDIS_TOPOLOGY=%s\nREDIS_PRIVATE_IP=%s\nREDIS_PASSWORD=%s\nGITHUB_APP_CLIENT_ID=%s\nGITHUB_APP_CLIENT_SECRET=%s\nWORKER_PROCESS_COUNT=%s\nSANDBOX_CPU_LIMIT=%s\nSANDBOX_MEMORY_LIMIT_MB=%s\nSANDBOX_DISK_LIMIT_GB=%s\n' \
-    "$DB_PASSWORD" "$DB_HOST" "$VICTORIALOGS_HOST" "$ROLE" "${REDIS_TOPOLOGY:-standalone}" "${REDIS_PRIVATE_IP:-}" "${REDIS_PASSWORD:-}" "${GITHUB_APP_CLIENT_ID:-}" "${GITHUB_APP_CLIENT_SECRET:-}" \
+  # Workers need the age key plus the encrypted production env bundle because
+  # the worker compose file bind-mounts .env.production.enc into the container
+  # and docker-entrypoint.sh decrypts it at boot. Provision the file before the
+  # first `docker compose up` — if the source path is missing, Docker creates a
+  # directory at /opt/143/.env.production.enc and later deploy-time scp fails.
+  printf 'SOPS_AGE_KEY=%s\nDB_PASSWORD=%s\nDB_HOST=%s\nVICTORIALOGS_HOST=%s\nSERVER_ROLE=%s\nREDIS_TOPOLOGY=%s\nREDIS_PRIVATE_IP=%s\nREDIS_PASSWORD=%s\nGITHUB_APP_CLIENT_ID=%s\nGITHUB_APP_CLIENT_SECRET=%s\nWORKER_PROCESS_COUNT=%s\nSANDBOX_CPU_LIMIT=%s\nSANDBOX_MEMORY_LIMIT_MB=%s\nSANDBOX_DISK_LIMIT_GB=%s\n' \
+    "$SOPS_AGE_KEY" "$DB_PASSWORD" "$DB_HOST" "$VICTORIALOGS_HOST" "$ROLE" "${REDIS_TOPOLOGY:-standalone}" "${REDIS_PRIVATE_IP:-}" "${REDIS_PASSWORD:-}" "${GITHUB_APP_CLIENT_ID:-}" "${GITHUB_APP_CLIENT_SECRET:-}" \
     "${WORKER_PROCESS_COUNT:-}" "${SANDBOX_CPU_LIMIT:-}" "${SANDBOX_MEMORY_LIMIT_MB:-}" "${SANDBOX_DISK_LIMIT_GB:-}" \
     | ssh "${SSH_OPTS[@]}" root@"$HOST" 'cat > /opt/143/.env && chown deploy:deploy /opt/143/.env && chmod 600 /opt/143/.env'
 
@@ -345,6 +353,11 @@ elif [ "$ROLE" = "worker" ]; then
   # when parsing docker-compose.worker.yml. deploy.sh repeats this on every
   # deploy.
   ssh "${SSH_OPTS[@]}" root@"$HOST" 'cat /opt/143/.env.local >> /opt/143/.env'
+
+  if [ -f "$ENC_FILE" ]; then
+    scp "${SCP_OPTS[@]}" "$ENC_FILE" root@"$HOST":/opt/143/
+    ssh "${SSH_OPTS[@]}" root@"$HOST" "chown deploy:deploy /opt/143/.env.production.enc && chmod 644 /opt/143/.env.production.enc"
+  fi
 else
   # App nodes get the full secret set for SOPS decryption
   printf 'SOPS_AGE_KEY=%s\nDB_PASSWORD=%s\nDB_HOST=%s\nVICTORIALOGS_HOST=%s\nSERVER_ROLE=%s\nREDIS_TOPOLOGY=%s\nREDIS_PRIVATE_IP=%s\nREDIS_PASSWORD=%s\n' "$SOPS_AGE_KEY" "$DB_PASSWORD" "$DB_HOST" "$VICTORIALOGS_HOST" "$ROLE" "${REDIS_TOPOLOGY:-standalone}" "${REDIS_PRIVATE_IP:-}" "${REDIS_PASSWORD:-}" \
@@ -384,9 +397,34 @@ PULL_APP
       set -euo pipefail
       su - deploy -c 'docker pull ghcr.io/assembledhq/143-server:latest'
       su - deploy -c 'docker pull ghcr.io/assembledhq/143-sandbox:latest'
-      # Ensure the shared sandbox egress network exists (idempotent).
+      # Ensure the shared sandbox bridge exists with a pinned subnet.
+      #
+      # The subnet is hard-coded to 172.30.0.0/24 so sandbox-dns can be
+      # given the stable static IP 172.30.0.2 in docker-compose.worker.yml,
+      # which /etc/143/sandbox-resolv.conf below points at. Without a pinned
+      # subnet Docker auto-assigns from its default pool and the static IP
+      # mapping breaks.
+      #
       # enable_icc=false blocks one sandbox from TCP-connecting to another.
-      su - deploy -c 'docker network inspect 143-sandbox >/dev/null 2>&1 || docker network create --driver bridge --opt com.docker.network.bridge.enable_icc=false --label managed-by=143 143-sandbox'
+      # Intra-bridge traffic from a sandbox to preview-infra and to
+      # sandbox-dns is allowed by an explicit RETURN rule installed in
+      # DOCKER-USER by sandbox-firewall.sh.
+      # docker inspect returns "" on a missing network (with exit 1 swallowed
+      # by `|| true`) and the subnet string on an existing one. Distinguishing
+      # the two via a single call keeps us from spawning two `su - deploy`
+      # login shells per provision.
+      EXISTING_SANDBOX_SUBNET=$(su - deploy -c 'docker network inspect 143-sandbox -f "{{range .IPAM.Config}}{{.Subnet}}{{end}}" 2>/dev/null' || true)
+      if [ -z "$EXISTING_SANDBOX_SUBNET" ]; then
+        su - deploy -c 'docker network create --driver bridge --subnet 172.30.0.0/24 --opt com.docker.network.bridge.enable_icc=false --label managed-by=143 143-sandbox'
+      elif [ "$EXISTING_SANDBOX_SUBNET" != "172.30.0.0/24" ]; then
+        echo "ERROR: 143-sandbox network has subnet '$EXISTING_SANDBOX_SUBNET'; expected 172.30.0.0/24." >&2
+        echo "  This worker was provisioned before the pinned-subnet change. To upgrade:" >&2
+        echo "    1. docker compose -f /opt/143/docker-compose.worker.yml down" >&2
+        echo "    2. docker network rm 143-sandbox" >&2
+        echo "    3. Re-run provision-worker for this host." >&2
+        echo "  Step 1 will drain in-flight coding turns; plan for a maintenance window." >&2
+        exit 1
+      fi
       # Install iptables-persistent so the egress block survives reboots.
       apt-get install -y --no-install-recommends iptables-persistent >/dev/null 2>&1 || true
       # Apply sandbox egress firewall. Script is idempotent and reads the
@@ -394,20 +432,12 @@ PULL_APP
       if [ -x /opt/143/deploy/scripts/sandbox-firewall.sh ]; then
         /opt/143/deploy/scripts/sandbox-firewall.sh 143-sandbox
       fi
-      # Provision /etc/143/sandbox-resolv.conf for sandboxes to bind-mount at
-      # /etc/resolv.conf. Required because user-defined Docker networks inject
-      # 127.0.0.11 (Docker's embedded DNS) into resolv.conf, and gVisor's
-      # netstack can't reach it. HostConfig.DNS doesn't help — it only changes
-      # the upstream the embedded resolver forwards to. Bind-mounting our own
-      # resolv.conf bypasses 127.0.0.11 entirely. Future: point this at a
-      # host-local DNS forwarder (dnsmasq on 172.19.0.1) for filtering/logging.
-      mkdir -p /etc/143
-      cat > /etc/143/sandbox-resolv.conf <<RESOLV
-nameserver 1.1.1.1
-nameserver 8.8.8.8
-options edns0 trust-ad ndots:0
-RESOLV
-      chmod 644 /etc/143/sandbox-resolv.conf
+      # Provision /etc/143/sandbox-resolv.conf via the shared writer so the
+      # provisioning path and routine deploys agree byte-for-byte on its
+      # contents. See deploy/scripts/sandbox-resolv-conf.sh for the full
+      # rationale (gVisor + Docker embedded DNS + sandbox-dns sidecar). The
+      # file was scp'd to /opt/143 in Step 2 and runs as root here.
+      /opt/143/deploy/scripts/sandbox-resolv-conf.sh
       # Provision /var/run/143/sandbox-auth/ for the per-session GitHub
       # credential sockets. The worker container bind-mounts this path
       # in (see docker-compose.worker.yml); the orchestrator running as

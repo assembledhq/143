@@ -2,6 +2,7 @@ package deploy_test
 
 import (
 	"encoding/json"
+	"net/netip"
 	"os"
 	"strings"
 	"testing"
@@ -26,13 +27,18 @@ func TestWorkerProvisioningIncludesGitHubAppUserAuthSecrets(t *testing.T) {
 
 	cloudInit, err := os.ReadFile("../deploy/cloud-init/worker.yml")
 	require.NoError(t, err, "test should read the worker cloud-init template")
+	require.Contains(t, string(cloudInit), "SOPS_AGE_KEY=${SOPS_AGE_KEY}", "worker cloud-init should provide SOPS_AGE_KEY so the container can decrypt .env.production.enc at boot")
 	require.Contains(t, string(cloudInit), "GITHUB_APP_CLIENT_ID=${GITHUB_APP_CLIENT_ID}", "worker cloud-init should provide the GitHub App user auth client ID")
 	require.Contains(t, string(cloudInit), "GITHUB_APP_CLIENT_SECRET=${GITHUB_APP_CLIENT_SECRET}", "worker cloud-init should provide the GitHub App user auth client secret")
+	require.Contains(t, string(cloudInit), "- path: /opt/143/.env.production.enc", "worker cloud-init should stage the encrypted production env file before docker compose starts")
+	require.Contains(t, string(cloudInit), "ENV_PRODUCTION_ENC_B64", "worker cloud-init should carry the encrypted production env payload as base64 input")
 
 	provisionScript, err := os.ReadFile("../deploy/scripts/provision.sh")
 	require.NoError(t, err, "test should read the provisioning script")
+	require.Contains(t, string(provisionScript), "SOPS_AGE_KEY=%s", "worker reprovision path should write SOPS_AGE_KEY into .env so docker-entrypoint.sh decrypts the encrypted env bundle")
 	require.Contains(t, string(provisionScript), "GITHUB_APP_CLIENT_ID=%s", "worker reprovision path should write the GitHub App user auth client ID into .env")
 	require.Contains(t, string(provisionScript), "GITHUB_APP_CLIENT_SECRET=%s", "worker reprovision path should write the GitHub App user auth client secret into .env")
+	require.Contains(t, string(provisionScript), `scp "${SCP_OPTS[@]}" "$ENC_FILE" root@"$HOST":/opt/143/`, "worker reprovision path should copy .env.production.enc to the host before starting docker compose so bind-mount source creation cannot turn it into a directory")
 }
 
 // Worker preview routing requires three per-host values: NODE_ID,
@@ -166,7 +172,9 @@ func TestProductionAlertsUseValidLogsQLRangeFilters(t *testing.T) {
 func TestLoggingDesignDocsTrackProvisionedDashboardsAndAlerts(t *testing.T) {
 	t.Parallel()
 
-	design, err := os.ReadFile("../docs/design/47-logging-victorialogs.md")
+	// PR #856 reorganized design docs into implemented/ and backlog/
+	// buckets; the VictoriaLogs doc was moved to implemented/.
+	design, err := os.ReadFile("../docs/design/implemented/47-logging-victorialogs.md")
 	require.NoError(t, err, "test should read the VictoriaLogs design doc")
 
 	designText := string(design)
@@ -264,4 +272,76 @@ func TestLoggingDeploySyncsProvisionedObservabilityConfig(t *testing.T) {
 	dashboardProvider, err := os.ReadFile("../deploy/grafana/provisioning/dashboards/dashboards.yml")
 	require.NoError(t, err, "test should read Grafana dashboard provider config")
 	require.Contains(t, string(dashboardProvider), "disableDeletion: false", "Grafana dashboard provisioning should remove dashboards deleted from the repo")
+}
+
+// Sandbox DNS resolution depends on three values agreeing across three
+// files:
+//
+//   - the bridge subnet pinned by provision.sh (so sandbox-dns can claim a
+//     stable IP),
+//   - the sandbox-dns container's static ipv4_address in the worker compose
+//     file,
+//   - the nameserver line written into /etc/143/sandbox-resolv.conf, which
+//     every sandbox bind-mounts as /etc/resolv.conf.
+//
+// If any of these drifts independently, sandboxes silently lose DNS for
+// preview-infrastructure container names and every preview start fails at
+// the first migration. Lock the alignment in CI so a future renumbering
+// has to touch all three files in the same PR.
+func TestSandboxDNSConfigAlignment(t *testing.T) {
+	t.Parallel()
+
+	const (
+		sandboxSubnet = "172.30.0.0/24"
+		sandboxDNSIP  = "172.30.0.2"
+	)
+
+	prefix, err := netip.ParsePrefix(sandboxSubnet)
+	require.NoError(t, err, "test constant for sandbox subnet should be a valid CIDR")
+	dnsAddr, err := netip.ParseAddr(sandboxDNSIP)
+	require.NoError(t, err, "test constant for sandbox-dns IP should be a valid address")
+	require.True(t, prefix.Contains(dnsAddr), "sandbox-dns IP %s must lie inside the pinned subnet %s", sandboxDNSIP, sandboxSubnet)
+
+	provisionScript, err := os.ReadFile("../deploy/scripts/provision.sh")
+	require.NoError(t, err, "test should read the provisioning script")
+	provisionText := string(provisionScript)
+	require.Contains(t, provisionText, "--subnet "+sandboxSubnet, "provision.sh should create 143-sandbox with the pinned subnet so sandbox-dns gets a predictable static IP")
+	require.Contains(t, provisionText, `"$EXISTING_SANDBOX_SUBNET" != "`+sandboxSubnet+`"`, "provision.sh should fail loudly when an existing 143-sandbox network has a different subnet — silent reuse breaks the static-IP mapping")
+
+	// The sandbox resolv.conf writer is the single source of truth for the
+	// nameserver line. provision.sh and deploy.sh both call it so a content
+	// change rolls out via routine deploys instead of requiring a fleet-wide
+	// reprovision maintenance window.
+	resolvScript, err := os.ReadFile("../deploy/scripts/sandbox-resolv-conf.sh")
+	require.NoError(t, err, "test should read the sandbox resolv.conf writer")
+	require.Contains(t, string(resolvScript), "nameserver "+sandboxDNSIP, "sandbox-resolv-conf.sh should write sandbox-dns's IP into /etc/143/sandbox-resolv.conf")
+	require.Contains(t, provisionText, "/opt/143/deploy/scripts/sandbox-resolv-conf.sh", "provision.sh should delegate to the shared writer instead of inlining the file content — keeps provision and deploy byte-aligned")
+	deployScript, err := os.ReadFile("../deploy/scripts/deploy.sh")
+	require.NoError(t, err, "test should read the deploy script")
+	deployText := string(deployScript)
+	require.Contains(t, deployText, "/opt/143/deploy/scripts/sandbox-resolv-conf.sh", "deploy.sh should refresh /etc/143/sandbox-resolv.conf on every worker deploy so a content change doesn't strand existing workers on stale DNS")
+	require.Contains(t, deployText, "run_sandbox_resolv_conf", "deploy.sh should wrap sandbox-resolv-conf.sh in a retryable helper so legacy workers missing the new sudoers grant self-repair")
+	require.Contains(t, deployText, "Retrying sandbox resolv.conf refresh after sudoers repair", "deploy.sh should retry sandbox-resolv-conf.sh after repairing sudoers so the first deploy that introduces the helper succeeds on legacy workers")
+	require.Contains(t, deployText, "sudo -n /opt/143/deploy/scripts/sandbox-resolv-conf.sh", "deploy.sh should invoke sandbox-resolv-conf.sh with sudo -n so missing sudoers fails fast instead of hanging in CI")
+
+	compose, err := os.ReadFile("../docker-compose.worker.yml")
+	require.NoError(t, err, "test should read the worker compose file")
+	composeText := string(compose)
+	require.Contains(t, composeText, "ipv4_address: "+sandboxDNSIP, "worker compose should pin sandbox-dns to the same static IP that sandbox-resolv.conf points at")
+	require.Contains(t, composeText, "name: 143-sandbox", "worker compose should attach sandbox-dns to the externally-managed 143-sandbox bridge, not a compose-private network")
+	require.Contains(t, composeText, "external: true", "worker compose should declare the sandbox network as external — the bridge is created by provision.sh, not compose")
+
+	cloudInit, err := os.ReadFile("../deploy/cloud-init/worker.yml")
+	require.NoError(t, err, "test should read the worker cloud-init template")
+	cloudInitText := string(cloudInit)
+	require.Contains(t, cloudInitText, "--subnet "+sandboxSubnet, "worker cloud-init should create 143-sandbox with the same pinned subnet as provision.sh so sandbox-dns can claim its static IP")
+	require.Contains(t, cloudInitText, "/opt/143/deploy/scripts/sandbox-resolv-conf.sh", "worker cloud-init should write /etc/143/sandbox-resolv.conf through the shared writer before starting the worker")
+	require.Contains(t, cloudInitText, "cp /tmp/143-repo/Dockerfile.dnsmasq /opt/143/", "worker cloud-init should stage Dockerfile.dnsmasq before docker compose starts so sandbox-dns can build on first boot")
+	require.Contains(t, provisionText, `"$PROJECT_DIR/Dockerfile.dnsmasq" root@"$HOST":/opt/143/`, "provision.sh should stage Dockerfile.dnsmasq before docker compose starts so sandbox-dns can build on fresh worker provisioning")
+
+	dockerfile, err := os.ReadFile("../Dockerfile.dnsmasq")
+	require.NoError(t, err, "test should read the dnsmasq Dockerfile")
+	dockerfileText := string(dockerfile)
+	require.Contains(t, dockerfileText, "--server=127.0.0.11", "dnsmasq must forward to Docker's embedded resolver — that's the only place preview-infra container names are registered")
+	require.Contains(t, dockerfileText, "--no-resolv", "dnsmasq must ignore its own /etc/resolv.conf (which itself points at 127.0.0.11) to avoid a forwarding loop")
 }

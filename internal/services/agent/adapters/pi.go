@@ -34,6 +34,17 @@ func (a *PiAdapter) Name() models.AgentType {
 	return models.AgentTypePi
 }
 
+// RuntimeProfile declares Pi's interactive runtime requirements. Pi only
+// honors Esc as a cancel signal under raw-mode TTY input, so the runtime
+// must allocate a TTY and keep stdin open for byte-level delivery.
+func (a *PiAdapter) RuntimeProfile() agent.AgentRuntimeProfile {
+	return agent.AgentRuntimeProfile{
+		Cancellation:      agent.CancellationSpec{Method: agent.CancellationMethodEscape},
+		RequiresTTY:       true,
+		RequiresOpenStdin: true,
+	}
+}
+
 // ResumeMode reports that Pi has no headless resume mechanism. Continuation
 // turns rely on the restored sandbox filesystem state.
 func (a *PiAdapter) ResumeMode() agent.SessionResumeMode {
@@ -86,5 +97,10 @@ var piStreamingConfig = streamingAgentConfig{
 		MessageAsAssistant: true,
 		DoneAsResult:       true,
 		CaptureToolModel:   true,
+	},
+	Profile: agent.AgentRuntimeProfile{
+		Cancellation:      agent.CancellationSpec{Method: agent.CancellationMethodEscape},
+		RequiresTTY:       true,
+		RequiresOpenStdin: true,
 	},
 }

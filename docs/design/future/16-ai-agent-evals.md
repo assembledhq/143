@@ -234,9 +234,9 @@ This creates compounding reliability over time.
 
 - [06-agent-orchestrator.md](06-agent-orchestrator.md): trace capture and execution metadata.
 - [07-validation.md](07-validation.md): deterministic executable checks.
-- [09-observability.md](09-observability.md): online outcomes and post-deploy impact.
-- [11-review-feedback-loop.md](11-review-feedback-loop.md): review failures as eval inputs.
-- [12-smart-routing.md](12-smart-routing.md): slice metrics by complexity and issue type.
+- [09-observability.md](../backlog/09-observability.md): online outcomes and post-deploy impact.
+- [11-review-feedback-loop.md](../backlog/11-review-feedback-loop.md): review failures as eval inputs.
+- [12-smart-routing.md](../backlog/12-smart-routing.md): slice metrics by complexity and issue type.
 - [14-codebase-context.md](14-codebase-context.md): context-quality failures and remediation.
 - [01-database-schema.md](01-database-schema.md): prompt/eval tables and encrypted example fields.
 - [02-api-server.md](02-api-server.md): prompt/eval endpoints, jobs, and scheduler hooks.

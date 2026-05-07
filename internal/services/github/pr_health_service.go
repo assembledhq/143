@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -47,6 +48,15 @@ type gitHubPullRequestDetails struct {
 
 type gitHubCheckRunsResponse struct {
 	CheckRuns []gitHubCheckRun `json:"check_runs"`
+}
+
+type gitHubBranchResponse struct {
+	Protected  bool `json:"protected"`
+	Protection struct {
+		RequiredStatusChecks *struct {
+			Contexts []string `json:"contexts"`
+		} `json:"required_status_checks"`
+	} `json:"protection"`
 }
 
 type gitHubCheckRun struct {
@@ -153,7 +163,7 @@ func (s *PRService) buildPullRequestHealthResponse(ctx context.Context, pr model
 				resp.HealthVersion = current.Version
 				resp.HeadSHA = current.HeadSHA
 				resp.BaseSHA = current.BaseSHA
-				resp.ChecksConfirmed = true
+				resp.ChecksConfirmed = summary.ChecksConfirmed || (len(summary.Checks) > 0 && determineChecksConfirmed(summary.Checks, false))
 				resp.EnrichmentStatus = current.EnrichmentStatus
 				resp.EnrichmentRequested = current.EnrichmentStatus == models.PullRequestHealthEnrichmentStatusPending
 				resp.EnrichmentReady = current.EnrichmentStatus == models.PullRequestHealthEnrichmentStatusReady
@@ -248,6 +258,25 @@ func (s *PRService) SyncPullRequestState(ctx context.Context, orgID, pullRequest
 		return err
 	}
 
+	requiredChecksConfigured := false
+	if len(checkRuns) == 0 {
+		requiredChecksConfigured, err = s.branchRequiresStatusChecks(ctx, token, owner, repoName, details.Base.Ref)
+		if err != nil {
+			return err
+		}
+	}
+
+	var prior *models.PullRequestHealthCurrent
+	priorCurrent, priorErr := s.pullRequests.GetHealthCurrent(ctx, orgID, pullRequestID)
+	switch {
+	case priorErr == nil:
+		prior = &priorCurrent
+	case errors.Is(priorErr, pgx.ErrNoRows):
+		prior = nil
+	default:
+		return priorErr
+	}
+
 	summary := models.PullRequestHealthSummary{
 		Checks: make([]models.PullRequestCheckSummary, 0),
 	}
@@ -267,12 +296,12 @@ func (s *PRService) SyncPullRequestState(ctx context.Context, orgID, pullRequest
 			Summary:    firstNonEmpty(check.Output.Title, truncateText(stripWhitespace(check.Output.Summary), 240)),
 		})
 	}
+	summary.ChecksConfirmed = determineChecksConfirmed(summary.Checks, requiredChecksConfigured)
 	summary.NeedsAgentAction = summary.HasConflicts || summary.FailingTestCount > 0
 
 	mergeStateIndeterminate, testsIndeterminate := detectIndeterminateSignals(details.Mergeable, details.MergeableState, checkRuns)
 	if mergeStateIndeterminate || testsIndeterminate {
-		prior, priorErr := s.pullRequests.GetHealthCurrent(ctx, orgID, pullRequestID)
-		if priorErr == nil && shouldSkipIndeterminateSnapshotWrite(mergeStateIndeterminate, testsIndeterminate, details.Head.SHA, summary.FailingTestCount, prior) {
+		if prior != nil && shouldSkipIndeterminateSnapshotWrite(mergeStateIndeterminate, testsIndeterminate, details.Head.SHA, summary.FailingTestCount, *prior) {
 			s.logger.Debug().
 				Str("pull_request_id", pullRequestID.String()).
 				Str("head_sha", details.Head.SHA).
@@ -601,7 +630,14 @@ func (s *PRService) resumeRepairSession(ctx context.Context, pr models.PullReque
 		"session_id": claimed.ID.String(),
 		"org_id":     pr.OrgID.String(),
 	}
-	if _, err := s.jobs.EnqueueInTx(ctx, tx, pr.OrgID, "agent", "continue_session", payload, 5, &continueDedupeKey); err != nil {
+	if _, err := s.jobs.EnqueueInTxWithOpts(ctx, tx, pr.OrgID, db.EnqueueOpts{
+		Queue:        "agent",
+		JobType:      "continue_session",
+		Payload:      payload,
+		Priority:     5,
+		DedupeKey:    &continueDedupeKey,
+		TargetNodeID: models.SessionWorkerTarget(&claimed),
+	}); err != nil {
 		return nil, err
 	}
 	repairRun := &models.PullRequestRepairRun{
@@ -770,6 +806,23 @@ func (s *PRService) listCheckRunsForRef(ctx context.Context, token, owner, repo,
 		return nil, fmt.Errorf("decode GitHub check runs: %w", err)
 	}
 	return dedupeCheckRunsByName(resp.CheckRuns), nil
+}
+
+func (s *PRService) branchRequiresStatusChecks(ctx context.Context, token, owner, repo, branch string) (bool, error) {
+	path := fmt.Sprintf("/repos/%s/%s/branches/%s", owner, repo, url.PathEscape(branch))
+	body, err := s.doGitHubRequest(ctx, token, http.MethodGet, path, nil)
+	if err != nil {
+		return false, err
+	}
+
+	var resp gitHubBranchResponse
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return false, fmt.Errorf("decode GitHub branch protection: %w", err)
+	}
+	if !resp.Protected || resp.Protection.RequiredStatusChecks == nil {
+		return false, nil
+	}
+	return len(resp.Protection.RequiredStatusChecks.Contexts) > 0, nil
 }
 
 // dedupeCheckRunsByName collapses check runs that share a display name down to

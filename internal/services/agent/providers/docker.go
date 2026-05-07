@@ -26,6 +26,7 @@ import (
 
 // Compile-time check that DockerProvider implements agent.SandboxProvider.
 var _ agent.SandboxProvider = (*DockerProvider)(nil)
+var _ agent.InteractiveSandboxProvider = (*DockerProvider)(nil)
 
 // defaultScratchDir is the exec-allowed scratch dir injected as $TMPDIR (and
 // $GOTMPDIR) for sandbox containers. /tmp is mounted noexec for defense in

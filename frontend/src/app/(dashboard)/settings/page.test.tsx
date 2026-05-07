@@ -5,20 +5,30 @@ import SettingsPage from './page';
 const {
   settingsGetMock,
   settingsUpdateMock,
+  auditLogsListMock,
+  teamListMembersMock,
   useAuthMock,
 } = vi.hoisted(() => ({
   settingsGetMock: vi.fn().mockResolvedValue({
     data: {
+      id: 'org-1',
       name: 'Test Org',
       settings: {},
+      created_at: '2026-05-01T12:00:00Z',
+      updated_at: '2026-05-01T12:00:00Z',
     },
   }),
   settingsUpdateMock: vi.fn().mockResolvedValue({
     data: {
+      id: 'org-1',
       name: 'Updated Org',
       settings: {},
+      created_at: '2026-05-01T12:00:00Z',
+      updated_at: '2026-05-06T15:30:00Z',
     },
   }),
+  auditLogsListMock: vi.fn().mockResolvedValue({ data: [] }),
+  teamListMembersMock: vi.fn().mockResolvedValue({ data: [] }),
   useAuthMock: vi.fn(() => ({
     user: { role: 'admin' },
   })),
@@ -29,6 +39,12 @@ vi.mock('@/lib/api', () => ({
     settings: {
       get: settingsGetMock,
       update: settingsUpdateMock,
+    },
+    auditLogs: {
+      list: auditLogsListMock,
+    },
+    team: {
+      listMembers: teamListMembersMock,
     },
   },
 }));
@@ -47,10 +63,15 @@ describe('SettingsPage', () => {
     });
     settingsGetMock.mockResolvedValue({
       data: {
+        id: 'org-1',
         name: 'Test Org',
         settings: {},
+        created_at: '2026-05-01T12:00:00Z',
+        updated_at: '2026-05-01T12:00:00Z',
       },
     });
+    auditLogsListMock.mockClear();
+    teamListMembersMock.mockClear();
   });
 
   afterEach(() => {
@@ -70,8 +91,11 @@ describe('SettingsPage', () => {
   it('displays the organization name from server', async () => {
     settingsGetMock.mockResolvedValue({
       data: {
+        id: 'org-1',
         name: 'My Org',
         settings: {},
+        created_at: '2026-05-01T12:00:00Z',
+        updated_at: '2026-05-01T12:00:00Z',
       },
     });
 
@@ -94,6 +118,58 @@ describe('SettingsPage', () => {
 
     await waitFor(() => {
       expect(settingsUpdateMock).toHaveBeenCalledWith({ name: 'Updated Org' });
+    });
+  });
+
+  it('updates the header timestamp after a successful settings save', async () => {
+    settingsGetMock.mockResolvedValue({
+      data: {
+        id: 'org-1',
+        name: 'Test Org',
+        settings: {},
+        created_at: '2026-05-01T12:00:00Z',
+        updated_at: '2026-05-01T12:00:00Z',
+      },
+    });
+    settingsUpdateMock.mockResolvedValue({
+      data: {
+        id: 'org-1',
+        name: 'Updated Org',
+        settings: {},
+        created_at: '2026-05-01T12:00:00Z',
+        updated_at: '2026-05-06T15:30:00Z',
+      },
+    });
+
+    renderWithProviders(<SettingsPage />);
+
+    expect(await screen.findByText(/Updated at .*May 1, 2026.*12:00 PM UTC/)).toBeInTheDocument();
+
+    const input = screen.getByLabelText('Organization name');
+    const user = userEvent.setup();
+    await user.click(input);
+    await user.keyboard('{Control>}a{/Control}Updated Org');
+    await user.tab();
+
+    await waitFor(() => {
+      expect(settingsUpdateMock).toHaveBeenCalledWith({ name: 'Updated Org' });
+    });
+    await waitFor(() => {
+      expect(screen.getByText(/Updated at .*May 6, 2026.*3:30 PM UTC/)).toBeInTheDocument();
+    });
+  });
+
+  it('shows a saved indicator only on the pull requests section after PR changes', async () => {
+    renderWithProviders(<SettingsPage />);
+
+    const user = userEvent.setup();
+    await user.click((await screen.findByText('App only')).closest('label') as HTMLElement);
+
+    await waitFor(() => {
+      expect(settingsUpdateMock).toHaveBeenCalledWith({ settings: { pr_authorship: 'app_only' } });
+    });
+    await waitFor(() => {
+      expect(screen.getAllByText('Saved')).toHaveLength(1);
     });
   });
 

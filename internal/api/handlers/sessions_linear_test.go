@@ -754,6 +754,150 @@ func TestSessionHandler_SendMessage_FiresMidSessionLinker(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+func TestSessionHandler_SendMessage_PassesStructuredLinearReferencesToMidSessionLinker(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	now := time.Now()
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	userID := uuid.New()
+
+	mock.ExpectQuery("SELECT .+ FROM sessions WHERE").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			addSessionRow(pgxmock.NewRows(sessionColumns),
+				sessionID, uuid.New(), orgID, "claude-code", "running", "semi", "low",
+				nil, nil, nil, nil,
+				nil, false, &now, nil, nil,
+				nil, nil, nil, false,
+				nil, nil, nil, nil, nil,
+				nil, nil, nil, nil,
+				nil, nil,
+				nil,
+				nil, 2, now, "running", nil,
+				nil,
+				nil,
+				nil,
+				nil,
+				nil,
+				nil,
+				nil, nil,
+				nil,
+				"idle",
+				(*string)(nil),
+				nil,
+				now,
+			),
+		)
+	mock.ExpectQuery("INSERT INTO session_messages").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(int64(1), now))
+
+	handler := newSessionHandler(t, mock)
+	linker := &fakeLinearLinker{}
+	handler.SetLinearLinker(linker)
+
+	body := `{"message":"Please link the issue from the picker","references":[{"kind":"app","id":"ACS-44","display":"Linear issue"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/"+sessionID.String()+"/messages", strings.NewReader(body))
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("id", sessionID.String())
+	ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
+	ctx = middleware.WithOrgID(ctx, orgID)
+	ctx = middleware.WithUser(ctx, &models.User{ID: userID, OrgID: orgID, Role: "member"})
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	handler.SendMessage(w, req)
+
+	require.Equal(t, http.StatusCreated, w.Code, "follow-up should still succeed")
+	require.Eventually(t, func() bool {
+		called, _ := linker.midSessionObservation()
+		return called == 1
+	}, time.Second, 5*time.Millisecond, "SendMessage should still invoke the mid-session linker for structured Linear references")
+	_, gotIn := linker.midSessionObservation()
+	require.Contains(t, gotIn.ReferenceText, "ACS-44", "structured reference ids should be forwarded so the linker can recognize picker-added Linear issues")
+	require.Equal(t, "Please link the issue from the picker", gotIn.MessageBody, "message body should still be preserved")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestSessionHandler_SendMessage_AllowsStructuredLinearReferenceWithoutMessage(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	now := time.Now()
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	userID := uuid.New()
+
+	mock.ExpectQuery("SELECT .+ FROM sessions WHERE").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			addSessionRow(pgxmock.NewRows(sessionColumns),
+				sessionID, uuid.New(), orgID, "claude-code", "running", "semi", "low",
+				nil, nil, nil, nil,
+				nil, false, &now, nil, nil,
+				nil, nil, nil, false,
+				nil, nil, nil, nil, nil,
+				nil, nil, nil, nil,
+				nil, nil,
+				nil,
+				nil, 2, now, "running", nil,
+				nil,
+				nil,
+				nil,
+				nil,
+				nil,
+				nil,
+				nil, nil,
+				nil,
+				"idle",
+				(*string)(nil),
+				nil,
+				now,
+			),
+		)
+	mock.ExpectQuery("INSERT INTO session_messages").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(int64(1), now))
+
+	handler := newSessionHandler(t, mock)
+	linker := &fakeLinearLinker{}
+	handler.SetLinearLinker(linker)
+
+	body := `{"message":"   ","references":[{"kind":"app","id":"ACS-44","display":"Linear issue"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/"+sessionID.String()+"/messages", strings.NewReader(body))
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("id", sessionID.String())
+	ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
+	ctx = middleware.WithOrgID(ctx, orgID)
+	ctx = middleware.WithUser(ctx, &models.User{ID: userID, OrgID: orgID, Role: "member"})
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	handler.SendMessage(w, req)
+
+	require.Equal(t, http.StatusCreated, w.Code, "a structured Linear reference should be enough to send a follow-up")
+	require.Eventually(t, func() bool {
+		called, _ := linker.midSessionObservation()
+		return called == 1
+	}, time.Second, 5*time.Millisecond, "reference-only follow-ups should still invoke the mid-session linker")
+	_, gotIn := linker.midSessionObservation()
+	require.Contains(t, gotIn.ReferenceText, "ACS-44", "the linker should receive the structured Linear reference even when message text is blank")
+	require.Equal(t, "", gotIn.MessageBody, "blank message bodies should stay blank rather than inventing placeholder text")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 // TestSessionHandler_SendMessage_SwallowsMidSessionLinkerError is the fail-
 // soft contract: even if the linker returns an error (Linear API outage,
 // allowlist DB hiccup), the user's follow-up message must still succeed and

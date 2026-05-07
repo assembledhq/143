@@ -8,20 +8,17 @@ import {
   CheckCircle2,
   ChevronRight,
   Loader2,
-  Minus,
   MessageCircleWarning,
+  Minus,
   RefreshCw,
 } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { DiffStatsBadge } from "@/components/code-review/diff-stats-badge";
+import { Card, CardContent } from "@/components/ui/card";
 import { cn, formatTimeAgo } from "@/lib/utils";
 import type { AutomationRun, AutomationRunStatus, PRCreationState } from "@/lib/types";
 
-// "Quiet" runs — no work was needed (or the schedule fired while paused).
-// Treated as low-signal: rendered as thin dim rows individually and
-// collapsed into a group when there are two or more in a row.
 export const QUIET_RUN_STATUSES: ReadonlyArray<AutomationRunStatus> = [
   "completed_noop",
   "skipped",
@@ -31,16 +28,6 @@ export function isQuietRun(run: AutomationRun): boolean {
   return QUIET_RUN_STATUSES.includes(run.status);
 }
 
-// FullCardKind enumerates the variants that render as the rich row card
-// (header + body + meta + action). The dispatcher in RunCard handles the
-// other two row shapes — quiet and pending — separately, so the helpers
-// below never need to consider them.
-//
-// "needs_input" is a pseudo-status the dispatcher derives when the run
-// itself reports failed/completed but the linked session is actually
-// waiting on the user. The hook in internal/services/automations/hooks.go
-// maps needs_human_guidance → run failed, which is correct for accounting
-// but wrong for UX — those runs need an answer, not a retry.
 type FullCardKind =
   | "running"
   | "needs_input"
@@ -69,9 +56,9 @@ interface RunCardProps {
   run: AutomationRun;
 }
 
+type Navigator = (path: string) => void;
+
 export function RunCard({ run }: RunCardProps) {
-  // useRouter is hoisted here once and threaded down so the three nested
-  // components don't each re-subscribe to the router context.
   const router = useRouter();
   const navigateTo = (path: string) => router.push(path);
 
@@ -80,12 +67,6 @@ export function RunCard({ run }: RunCardProps) {
   if (kind === "pending") return <PendingRow run={run} />;
   return <FullCard run={run} kind={kind} navigateTo={navigateTo} />;
 }
-
-type Navigator = (path: string) => void;
-
-// ---------------------------------------------------------------------------
-// Full-card variants (running / completed / failed / needs_input)
-// ---------------------------------------------------------------------------
 
 interface FullCardProps {
   run: AutomationRun;
@@ -105,101 +86,100 @@ function FullCard({ run, kind, navigateTo }: FullCardProps) {
     }
   };
 
-  // Use the user-facing label (e.g. "Completed", "Failed", "Needs your
-  // input") rather than the internal kind string — screen readers
-  // shouldn't be reading "completed with pr" out loud.
   const ariaLabel = navigate
     ? `Open session for ${headlineFor(kind).label.toLowerCase()} run from ${formatTimeAgo(run.triggered_at)}`
     : undefined;
 
   return (
-    <div
+    <Card
       role={navigate ? "button" : undefined}
       tabIndex={navigate ? 0 : undefined}
       aria-label={ariaLabel}
       onClick={navigate}
       onKeyDown={handleKeyDown}
       className={cn(
-        "group relative rounded-lg border p-4 transition-colors",
-        navigate && "cursor-pointer hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+        "group overflow-hidden border transition-all",
+        navigate && "cursor-pointer hover:border-border/90 hover:bg-muted/15 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
         cardSurfaceClass(kind),
       )}
     >
-      <div className="flex items-start justify-between gap-3">
-        <div className="min-w-0 flex-1 space-y-1">
-          <Header run={run} kind={kind} />
-          <Body run={run} kind={kind} />
+      <CardContent className="p-0">
+        <div
+          data-testid="run-card-layout"
+          className="flex flex-col gap-3 px-4 py-3.5 sm:flex-row sm:items-start sm:justify-between sm:px-5"
+        >
+          <div className="min-w-0 flex-1 space-y-2">
+            <Header run={run} kind={kind} />
+            <Body run={run} kind={kind} />
+            <MetadataRail run={run} kind={kind} />
+          </div>
+          <div className="flex w-full items-center justify-between gap-2 sm:w-auto sm:justify-start">
+            <PrimaryAction run={run} kind={kind} navigateTo={navigateTo} />
+            {navigate && (
+              <ChevronRight
+                aria-hidden
+                className="h-4 w-4 shrink-0 translate-x-0 text-muted-foreground/50 opacity-0 transition-all group-hover:translate-x-0.5 group-hover:opacity-100"
+              />
+            )}
+          </div>
         </div>
-        <div className="flex shrink-0 items-center gap-2">
-          <RowMeta run={run} kind={kind} />
-          <PrimaryAction run={run} kind={kind} navigateTo={navigateTo} />
-          {navigate && (
-            <ChevronRight
-              aria-hidden
-              className="hidden h-4 w-4 text-muted-foreground/60 transition-opacity opacity-0 group-hover:opacity-100 sm:block"
-            />
-          )}
-        </div>
-      </div>
-    </div>
+      </CardContent>
+    </Card>
   );
 }
 
 function cardSurfaceClass(kind: FullCardKind): string {
   switch (kind) {
     case "failed":
-      return "border-red-200 bg-red-50/40 dark:border-red-900/30 dark:bg-red-950/20";
+      return "border-red-200/80 bg-red-50/55 dark:border-red-900/40 dark:bg-red-950/20";
     case "needs_input":
-      return "border-amber-300/70 bg-amber-50/50 dark:border-amber-900/40 dark:bg-amber-950/20";
+      return "border-amber-300/80 bg-amber-50/60 dark:border-amber-900/45 dark:bg-amber-950/20";
     case "running":
-      return "border-blue-200/70 bg-blue-50/30 dark:border-blue-900/30 dark:bg-blue-950/20";
+      return "border-blue-200/80 bg-blue-50/50 dark:border-blue-900/40 dark:bg-blue-950/20";
     default:
-      return "border-border bg-background";
+      return "border-border/70 bg-card";
   }
 }
-
-// ---------------------------------------------------------------------------
-// Header (icon + label + timestamp + optional category badge)
-// ---------------------------------------------------------------------------
 
 function Header({ run, kind }: { run: AutomationRun; kind: FullCardKind }) {
   const headline = headlineFor(kind);
   const Icon = headline.icon;
+  const title = primaryLine(run, kind);
+
   return (
-    <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-      <Icon
-        aria-hidden
-        className={cn("h-4 w-4 shrink-0", headline.iconClass, kind === "running" && "animate-spin")}
-      />
-      <span className={cn("text-sm font-medium", headline.labelClass)}>{headline.label}</span>
-      <span
-        className="text-xs text-muted-foreground"
-        title={new Date(run.triggered_at).toLocaleString()}
-      >
-        {formatTimeAgo(run.triggered_at)}
-      </span>
-      {kind === "running" && <LiveDuration startedAt={run.triggered_at} />}
-      {kind !== "running" && run.completed_at && (
-        <span className="text-xs text-muted-foreground">
-          · {formatDuration(run.triggered_at, run.completed_at)}
-        </span>
-      )}
-      {run.session?.failure_category && (kind === "failed" || kind === "needs_input") && (
-        <Badge
-          variant={kind === "failed" ? "destructive" : "outline"}
-          className={cn(
-            "text-xs uppercase tracking-wide",
-            kind === "needs_input" && "border-amber-500/40 text-amber-700 dark:text-amber-400",
+    <div className="flex flex-col gap-1.5 sm:flex-row sm:items-start sm:justify-between">
+      <div className="min-w-0 space-y-1.5">
+        <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+          <Icon
+            aria-hidden
+            className={cn("h-4 w-4 shrink-0", headline.iconClass, kind === "running" && "animate-spin")}
+          />
+          <span className={cn("text-sm font-semibold", headline.labelClass)}>{headline.label}</span>
+          {run.session?.failure_category && (kind === "failed" || kind === "needs_input") && (
+            <Badge
+              variant={kind === "failed" ? "destructive" : "outline"}
+              className={cn(
+                "text-xs uppercase tracking-[0.18em]",
+                kind === "needs_input" && "border-amber-500/40 text-amber-700 dark:text-amber-400",
+              )}
+            >
+              {run.session.failure_category.replaceAll("_", " ")}
+            </Badge>
           )}
-        >
-          {run.session.failure_category.replaceAll("_", " ")}
-        </Badge>
-      )}
-      {run.triggered_by === "manual" && (
-        <Badge variant="outline" className="text-xs">
-          Manual
-        </Badge>
-      )}
+        </div>
+        {title && (
+          <p className="line-clamp-2 text-sm font-medium leading-5 text-foreground" title={title}>
+            {title}
+          </p>
+        )}
+      </div>
+      <div className="flex shrink-0 items-center gap-1.5 text-xs tabular-nums text-muted-foreground sm:pl-4">
+        <span title={new Date(run.triggered_at).toLocaleString()}>{formatTimeAgo(run.triggered_at)}</span>
+        {kind === "running" && <LiveDuration startedAt={run.triggered_at} />}
+        {kind !== "running" && run.completed_at && (
+          <span>· {formatDuration(run.triggered_at, run.completed_at)}</span>
+        )}
+      </div>
     </div>
   );
 }
@@ -243,36 +223,20 @@ function headlineFor(kind: FullCardKind): {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Body (title + summary + suggested next step)
-// ---------------------------------------------------------------------------
-
 function Body({ run, kind }: { run: AutomationRun; kind: FullCardKind }) {
-  // The row's primary "what happened" line. Prefer session title when we
-  // have it, fall back to the run's result_summary, and finally to the
-  // session's failure_explanation for failed runs without a title.
-  const headline = primaryLine(run, kind);
   const subline = secondaryLine(run, kind);
-  if (!headline && !subline) return null;
+  if (!subline) return null;
+
   return (
-    <div className="space-y-0.5">
-      {headline && (
-        <p
-          className="line-clamp-2 text-sm text-foreground"
-          title={headline}
-        >
-          {headline}
-        </p>
+    <p
+      className={cn(
+        "line-clamp-2 text-sm leading-5",
+        kind === "failed" ? "text-red-800/90 dark:text-red-200/90" : "text-muted-foreground",
       )}
-      {subline && (
-        <p
-          className="line-clamp-2 text-xs text-muted-foreground"
-          title={subline}
-        >
-          {subline}
-        </p>
-      )}
-    </div>
+      title={subline}
+    >
+      {subline}
+    </p>
   );
 }
 
@@ -281,21 +245,19 @@ function primaryLine(run: AutomationRun, kind: FullCardKind): string | null {
     return run.session?.title || run.result_summary || "Agent paused, waiting for your guidance.";
   }
   if (kind === "failed") {
-    return run.session?.failure_explanation || run.result_summary || run.session?.title || "Run failed.";
+    return run.session?.title || run.result_summary || "Run failed.";
   }
   if (kind === "running") {
     return run.session?.title || "Working on it…";
   }
-  // completed_with_pr | completed_no_pr
   return run.session?.title || run.result_summary || null;
 }
 
 function secondaryLine(run: AutomationRun, kind: FullCardKind): string | null {
-  // Surface the agent's first suggested next step on both failure and
-  // needs-input rows — both states are blocked on the user, and the
-  // session's failure_next_steps is the same field powering the session
-  // page's guidance UI, so users see a consistent hint either place.
   if (kind === "failed" || kind === "needs_input") {
+    if (run.session?.failure_explanation && run.session.failure_explanation !== run.session?.title) {
+      return run.session.failure_explanation;
+    }
     const next = run.session?.failure_next_steps?.[0];
     return next ? `Suggested next step: ${next}` : null;
   }
@@ -307,88 +269,53 @@ function secondaryLine(run: AutomationRun, kind: FullCardKind): string | null {
   return null;
 }
 
-// ---------------------------------------------------------------------------
-// Row meta (diff stats + PR pill) — sits next to the action button
-// ---------------------------------------------------------------------------
-
-function RowMeta({ run, kind }: { run: AutomationRun; kind: FullCardKind }) {
-  const diff = run.session?.diff_stats;
-  const pr = run.session?.pr;
-  const prState = run.session?.pr_creation_state;
-  const hasDiff = diff && (diff.added > 0 || diff.removed > 0);
-  const showInRow = kind === "completed_with_pr" || kind === "completed_no_pr";
-  if (!showInRow) return null;
+function MetadataRail({ run, kind }: { run: AutomationRun; kind: FullCardKind }) {
+  const items = metadataItems(run, kind);
+  if (items.length === 0) return null;
 
   return (
-    <div className="hidden items-center gap-2 sm:flex">
-      {hasDiff && <DiffStatsBadge added={diff.added} removed={diff.removed} />}
-      {pr ? (
-        <Badge
-          variant="outline"
-          className={cn(
-            "text-xs",
-            pr.status === "merged" && "border-purple-500/40 text-purple-700 dark:text-purple-300",
-            pr.status === "open" && "border-emerald-500/40 text-emerald-700 dark:text-emerald-300",
-          )}
-        >
-          PR #{pr.number} · {pr.status}
-        </Badge>
-      ) : (
-        // No PR row joined — distinguish "in flight" (the worker is
-        // pushing a branch / opening the PR) from "PR creation failed"
-        // from the everyday "session done, user hasn't asked for a PR
-        // yet" case. All three conditions read off pr_creation_state,
-        // which is now a typed PRCreationState union so the branches
-        // are exhaustive.
-        <PRCreationPill prState={prState} hasDiff={!!hasDiff} />
-      )}
+    <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
+      {items.map((item, index) => (
+        <span key={`${item}-${index}`} className="flex items-center gap-2">
+          {index > 0 && <span aria-hidden className="text-muted-foreground/40">·</span>}
+          <span>{item}</span>
+        </span>
+      ))}
     </div>
   );
 }
 
-function PRCreationPill({
-  prState,
-  hasDiff,
-}: {
-  prState: PRCreationState | undefined;
-  hasDiff: boolean;
-}) {
-  if (prState === "queued" || prState === "pushing") {
-    return (
-      <Badge
-        variant="outline"
-        className="gap-1 text-xs text-muted-foreground"
-        title="The worker is pushing the branch and opening a pull request."
-      >
-        <Loader2 aria-hidden className="h-3 w-3 animate-spin" />
-        Creating PR…
-      </Badge>
-    );
+function metadataItems(run: AutomationRun, kind: FullCardKind): string[] {
+  const items: string[] = [];
+  items.push(run.triggered_by === "manual" ? "Manual run" : "Scheduled run");
+  if (run.session?.id) items.push("Linked session");
+  if (run.session?.pr) items.push(`PR #${run.session.pr.number}`);
+
+  const filesChanged = run.session?.diff_stats?.files_changed;
+  if (typeof filesChanged === "number" && filesChanged > 0) {
+    items.push(`${filesChanged} file${filesChanged === 1 ? "" : "s"} changed`);
+  } else {
+    const diff = run.session?.diff_stats;
+    const hasDiff = diff && (diff.added > 0 || diff.removed > 0);
+    if (hasDiff && kind === "completed_no_pr") items.push("Code changes ready");
   }
-  if (prState === "failed") {
-    return (
-      <Badge
-        variant="outline"
-        className="border-red-500/40 text-xs text-red-700 dark:text-red-300"
-        title="PR creation failed. Open the session to retry."
-      >
-        PR creation failed
-      </Badge>
-    );
+
+  if (!run.session?.pr) {
+    const diff = run.session?.diff_stats;
+    const hasDiff = !!diff && (diff.added > 0 || diff.removed > 0);
+    const prLabel = prStateLabel(run.session?.pr_creation_state, hasDiff);
+    if (prLabel) items.push(prLabel);
   }
-  if (hasDiff) {
-    return (
-      <Badge variant="outline" className="text-xs text-muted-foreground">
-        No PR yet
-      </Badge>
-    );
-  }
-  return null;
+
+  return items;
 }
 
-// ---------------------------------------------------------------------------
-// Primary action button — varies by row state
-// ---------------------------------------------------------------------------
+function prStateLabel(prState: PRCreationState | undefined, hasDiff: boolean): string | null {
+  if (prState === "queued" || prState === "pushing") return "Creating PR…";
+  if (prState === "failed") return "PR creation failed";
+  if (hasDiff) return "No PR yet";
+  return null;
+}
 
 function PrimaryAction({
   run,
@@ -400,17 +327,11 @@ function PrimaryAction({
   navigateTo: Navigator;
 }) {
   const sessionId = run.session?.id;
-  // Stop card-level navigation from firing when the inner control handles
-  // the click — otherwise the user lands on the session page after we
-  // already opened the PR in a new tab.
   const stop = (e: React.MouseEvent | React.KeyboardEvent) => e.stopPropagation();
 
   if (kind === "completed_with_pr" && run.session?.pr) {
-    // Real anchor (rather than window.open) so middle-click and "open in
-    // new tab" work as users expect, and popup blockers don't intercept
-    // the click. Button asChild gives us the same visual treatment.
     return (
-      <Button asChild size="sm" variant="outline" className="shrink-0">
+      <Button asChild size="sm" variant="outline" className="w-full shrink-0 sm:w-auto">
         <a
           href={run.session.pr.url}
           target="_blank"
@@ -436,7 +357,7 @@ function PrimaryAction({
     <Button
       size="sm"
       variant={kind === "needs_input" ? "default" : "outline"}
-      className="shrink-0"
+      className="w-full shrink-0 sm:w-auto"
       onClick={(e) => {
         stop(e);
         navigateTo(`/sessions/${sessionId}`);
@@ -449,16 +370,14 @@ function PrimaryAction({
   );
 }
 
-// ---------------------------------------------------------------------------
-// Live duration tick — only mounts while the run is running
-// ---------------------------------------------------------------------------
-
 function LiveDuration({ startedAt }: { startedAt: string }) {
   const [now, setNow] = useState(() => Date.now());
+
   useEffect(() => {
     const id = window.setInterval(() => setNow(Date.now()), 1000);
     return () => window.clearInterval(id);
   }, []);
+
   const elapsedMs = Math.max(0, now - new Date(startedAt).getTime());
   return (
     <span className="text-xs tabular-nums text-muted-foreground">
@@ -484,22 +403,25 @@ function formatDuration(start: string, end: string): string {
   return formatElapsed(ms);
 }
 
-// ---------------------------------------------------------------------------
-// Pending — thin row, not clickable (no session yet)
-// ---------------------------------------------------------------------------
-
 function PendingRow({ run }: { run: AutomationRun }) {
+  const triggerLabel = run.triggered_by === "manual" ? "Manual run" : "Scheduled run";
   return (
-    <div className="flex items-center gap-2 rounded-md border border-dashed border-border/60 px-3 py-2 text-xs text-muted-foreground">
-      <Loader2 aria-hidden className="h-3.5 w-3.5 animate-spin" />
-      <span>Pending · queued {formatTimeAgo(run.triggered_at)}</span>
-    </div>
+    <Card className="border-dashed border-border/70 bg-muted/10">
+      <CardContent className="flex items-center justify-between gap-3 px-4 py-3">
+        <div className="flex min-w-0 items-center gap-2">
+          <Loader2 aria-hidden className="h-3.5 w-3.5 animate-spin text-muted-foreground" />
+          <div className="min-w-0">
+            <p className="text-sm font-medium text-foreground">Pending</p>
+            <p className="text-xs text-muted-foreground">{triggerLabel} · waiting to start</p>
+          </div>
+        </div>
+        <span className="shrink-0 text-xs tabular-nums text-muted-foreground">
+          {formatTimeAgo(run.triggered_at)}
+        </span>
+      </CardContent>
+    </Card>
   );
 }
-
-// ---------------------------------------------------------------------------
-// Quiet row — used both standalone and inside a quiet group
-// ---------------------------------------------------------------------------
 
 export function QuietRunRow({
   run,
@@ -514,7 +436,7 @@ export function QuietRunRow({
   const summary = run.result_summary;
 
   return (
-    <div
+    <Card
       role={navigate ? "button" : undefined}
       tabIndex={navigate ? 0 : undefined}
       onClick={navigate}
@@ -526,20 +448,44 @@ export function QuietRunRow({
         }
       }}
       className={cn(
-        "flex items-center gap-3 rounded-md border border-transparent px-3 py-1.5 text-xs text-muted-foreground transition-colors",
-        navigate && "cursor-pointer hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
+        "group border-border/70 bg-muted/10 transition-colors",
+        navigate && "cursor-pointer hover:border-border/90 hover:bg-muted/20 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
       )}
     >
-      <Minus aria-hidden className="h-3.5 w-3.5 shrink-0" />
-      <span className="font-medium text-foreground/70">{headline}</span>
-      <span title={new Date(run.triggered_at).toLocaleString()}>
-        {formatTimeAgo(run.triggered_at)}
-      </span>
-      {summary && (
-        <span className="truncate" title={summary}>
-          · {summary}
-        </span>
-      )}
-    </div>
+      <CardContent className="px-4 py-3">
+        <div className="flex items-center justify-between gap-3">
+          <div className="min-w-0 flex-1">
+            <div className="flex items-center gap-2">
+              <Minus aria-hidden className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+              <p className="truncate text-sm font-medium text-foreground/80">{headline}</p>
+            </div>
+            <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
+              <span>{run.triggered_by === "manual" ? "Manual run" : "Scheduled run"}</span>
+              {run.session?.id && (
+                <span className="flex items-center gap-2">
+                  <span aria-hidden className="text-muted-foreground/40">·</span>
+                  <span>Linked session</span>
+                </span>
+              )}
+            </div>
+            {summary && <p className="mt-1 truncate text-xs text-muted-foreground">{summary}</p>}
+          </div>
+          <div className="flex shrink-0 items-center gap-2">
+            <span
+              className="text-xs tabular-nums text-muted-foreground"
+              title={new Date(run.triggered_at).toLocaleString()}
+            >
+              {formatTimeAgo(run.triggered_at)}
+            </span>
+            {navigate && (
+              <ChevronRight
+                aria-hidden
+                className="h-3.5 w-3.5 text-muted-foreground/50 opacity-0 transition-opacity group-hover:opacity-100"
+              />
+            )}
+          </div>
+        </div>
+      </CardContent>
+    </Card>
   );
 }

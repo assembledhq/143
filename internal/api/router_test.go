@@ -8,6 +8,8 @@ import (
 	"encoding/pem"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"strings"
 	"testing"
 
 	"github.com/assembledhq/143/internal/cache"
@@ -58,6 +60,23 @@ func TestNewRouter_EncryptionKeyValidation(t *testing.T) {
 			require.NotNil(t, router, "NewRouter should construct a router when encryption key is unset")
 		})
 	}
+}
+
+func TestSessionThreadPatchRouteIsWriteOnly(t *testing.T) {
+	t.Parallel()
+
+	source, err := os.ReadFile("router.go")
+	require.NoError(t, err, "router.go should be readable for route grouping regression test")
+
+	readGroupStart := strings.Index(string(source), `RequireRole("admin", "member", "viewer")`)
+	writeGroupStart := strings.Index(string(source), `RequireRole("admin", "member")`)
+	patchRoute := strings.Index(string(source), `r.Patch("/api/v1/sessions/{id}/threads/{tid}", sessionThreadHandler.UpdateThread)`)
+
+	require.NotEqual(t, -1, readGroupStart, "router should still define a viewer-readable route group")
+	require.NotEqual(t, -1, writeGroupStart, "router should still define an admin/member write route group")
+	require.NotEqual(t, -1, patchRoute, "thread update PATCH route should be registered")
+	require.Greater(t, patchRoute, writeGroupStart, "thread update PATCH route should live in the admin/member write group")
+	require.Greater(t, writeGroupStart, readGroupStart, "write route group should follow the viewer-readable group")
 }
 
 func testRouterPrivateKeyPEM(t *testing.T) string {

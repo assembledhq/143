@@ -10,8 +10,10 @@ const { replaceMock, logoutMock, useAuthMock } = vi.hoisted(() => ({
   useAuthMock: vi.fn(),
 }));
 
+let mockPathname = "/autopilot";
+
 vi.mock("next/navigation", () => ({
-  usePathname: () => "/autopilot",
+  usePathname: () => mockPathname,
   useRouter: () => ({
     push: vi.fn(),
     replace: replaceMock,
@@ -37,6 +39,7 @@ const memberUser = {
 };
 
 beforeEach(() => {
+  mockPathname = "/autopilot";
   useAuthMock.mockReturnValue({
     user: adminUser,
     isLoading: false,
@@ -279,6 +282,18 @@ describe("AuthenticatedLayout", () => {
     );
 
     expect(screen.getAllByRole("button", { name: "New session" }).length).toBeGreaterThan(0);
+  });
+
+  it("hides the global mobile header on session detail routes", () => {
+    mockPathname = "/sessions/session-123";
+
+    renderWithProviders(
+      <AuthenticatedLayout>
+        <div>content</div>
+      </AuthenticatedLayout>
+    );
+
+    expect(screen.queryByRole("button", { name: "Open navigation menu" })).not.toBeInTheDocument();
   });
 
   it("opens create session dialog when new session button is clicked", async () => {

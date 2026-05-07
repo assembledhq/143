@@ -4,9 +4,9 @@
 >
 > **Implementation notes:** Core automations and `automation_runs` are implemented. Notification delivery and repeated-failure alerting were explicitly split out into [doc 49](../future/49-automation-notifications.md).
 >
-> **Supersedes:** [31-automations-tab.md](../31-automations-tab.md) (client-side MVP), [32-project-cadence-and-lifecycle.md](../32-project-cadence-and-lifecycle.md) (evergreen projects)
+> **Supersedes:** [31-automations-tab.md](31-automations-tab.md) (client-side MVP), [32-project-cadence-and-lifecycle.md](../backlog/32-project-cadence-and-lifecycle.md) (evergreen projects)
 >
-> **Depends on:** [29-projects.md](../29-projects.md)
+> **Depends on:** [29-projects.md](29-projects.md)
 
 ---
 

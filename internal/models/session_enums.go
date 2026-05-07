@@ -36,6 +36,32 @@ func (s SessionStatus) Validate() error {
 	}
 }
 
+func (s SessionStatus) IsTerminal() bool {
+	switch s {
+	case SessionStatusCompleted,
+		SessionStatusPRCreated,
+		SessionStatusFailed,
+		SessionStatusCancelled,
+		SessionStatusSkipped:
+		return true
+	default:
+		return false
+	}
+}
+
+func (s SessionStatus) IsResumable() bool {
+	for _, resumable := range ResumableSessionStatuses {
+		if s == resumable {
+			return true
+		}
+	}
+	return false
+}
+
+func (s SessionStatus) CanAddThread() bool {
+	return !s.IsTerminal() || s.IsResumable()
+}
+
 // Status groups used by the frontend filter tabs. Defined here so the backend
 // is the source of truth; the frontend arrays must stay in sync.
 var (
@@ -43,6 +69,19 @@ var (
 	ActiveStatuses = []SessionStatus{SessionStatusPending, SessionStatusRunning, SessionStatusIdle, SessionStatusAwaitingInput, SessionStatusNeedsHumanGuidance}
 	// DoneStatuses are terminal statuses.
 	DoneStatuses = []SessionStatus{SessionStatusCompleted, SessionStatusPRCreated, SessionStatusFailed, SessionStatusCancelled, SessionStatusSkipped}
+
+	// ResumableSessionStatuses are the non-idle statuses from which a session
+	// can be re-claimed via SessionStore.ClaimForResume to continue a follow-up
+	// message. Mirrors the SQL status list inline in ClaimForResume; both must
+	// stay in sync.
+	ResumableSessionStatuses = []SessionStatus{
+		SessionStatusCompleted,
+		SessionStatusPRCreated,
+		SessionStatusFailed,
+		SessionStatusCancelled,
+		SessionStatusAwaitingInput,
+		SessionStatusNeedsHumanGuidance,
+	}
 )
 
 // SessionOrigin captures how a session was created. This is provenance only;
@@ -304,6 +343,19 @@ func (s ThreadStatus) Validate() error {
 	default:
 		return fmt.Errorf("invalid ThreadStatus: %q", s)
 	}
+}
+
+// ResumableThreadStatuses are the non-idle thread statuses from which a thread
+// can be re-claimed to continue a follow-up message. Intentionally narrower
+// than ResumableSessionStatuses: threads do not have pr_created or
+// needs_human_guidance counterparts. Kept here so the thread store and service
+// share one source of truth, mirroring how ResumableSessionStatuses is wired
+// into the session path.
+var ResumableThreadStatuses = []ThreadStatus{
+	ThreadStatusCompleted,
+	ThreadStatusFailed,
+	ThreadStatusCancelled,
+	ThreadStatusAwaitingInput,
 }
 
 // MaxThreadsPerSession is the maximum number of threads allowed in a single session.
