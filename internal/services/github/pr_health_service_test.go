@@ -1700,7 +1700,7 @@ var prHealthSessionThreadColumns = []string{
 	"current_turn", "last_activity_at",
 	"confidence_score", "result_summary", "diff", "failure_explanation", "failure_category",
 	"started_at", "completed_at", "created_at",
-	"base_snapshot_key", "cost_cents", "pending_message_count", "cancel_requested_at",
+	"archived_at", "base_snapshot_key", "cost_cents", "pending_message_count", "cancel_requested_at",
 }
 
 var prHealthSessionColumns = []string{
@@ -1752,7 +1752,7 @@ func newPRHealthSessionThreadRow(threadID, sessionID, orgID uuid.UUID, now time.
 		0, nil,
 		nil, nil, nil, nil, nil,
 		nil, nil, now,
-		nil, float64(0), 0, nil,
+		nil, nil, float64(0), 0, nil,
 	}
 }
 

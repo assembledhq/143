@@ -1,7 +1,7 @@
 "use client";
 
 import { useMemo } from "react";
-import { Loader2, MoreVertical, Plus, Square, GitBranch, Undo2, AlertTriangle } from "lucide-react";
+import { Loader2, MoreVertical, Plus, Square, GitBranch, Undo2, AlertTriangle, X } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -100,7 +100,9 @@ interface AgentTabStripProps {
   onCancelThread: (threadId: string) => void;
   onForkThread: (threadId: string) => void;
   onRevertThread: (threadId: string) => void;
+  onArchiveThread: (threadId: string) => void;
   cancelPendingThreadId: string | null;
+  archivePendingThreadId: string | null;
 }
 
 // AgentTabStrip is the user's primary surface for switching between tabs and
@@ -126,7 +128,9 @@ export function AgentTabStrip({
   onCancelThread,
   onForkThread,
   onRevertThread,
+  onArchiveThread,
   cancelPendingThreadId,
+  archivePendingThreadId,
 }: AgentTabStripProps) {
   const tabs = useMemo(() => threads, [threads]);
   if (tabs.length === 0 || !activeThreadId) {
@@ -168,8 +172,9 @@ export function AgentTabStrip({
                     )}
                     aria-hidden
                   />
-                  <span className="truncate text-sm font-medium text-foreground">{agentLabel}</span>
-                  <span className="truncate text-sm text-muted-foreground">{statusLabel}</span>
+                  <span className="truncate text-sm font-medium text-foreground">{activeThread.label}</span>
+                  <span className="truncate text-xs text-muted-foreground">{agentLabel}</span>
+                  <span className="truncate text-xs text-muted-foreground">{statusLabel}</span>
                   {isCancelling && (
                     <Loader2
                       className="h-3.5 w-3.5 shrink-0 animate-spin text-muted-foreground"
@@ -292,7 +297,7 @@ export function AgentTabStrip({
                           aria-hidden
                         />
                         <span className="truncate">{thread.label}</span>
-                        <span className="hidden sm:inline text-muted-foreground">{"— "}{statusLabel.toLowerCase()}</span>
+                        <span className="hidden sm:inline text-muted-foreground">{" - "}{statusLabel}</span>
                         {isCancelling && (
                           <Loader2 className="h-3 w-3 animate-spin text-muted-foreground" aria-label="Cancelling" />
                         )}
@@ -314,7 +319,7 @@ export function AgentTabStrip({
                     </TooltipTrigger>
                     <TooltipContent side="bottom" className="max-w-sm text-xs">
                       <div className="space-y-1">
-                        <div className="font-medium">{thread.label} <span className="font-normal text-muted-foreground">— {agentLabel}</span></div>
+                        <div className="font-medium">{thread.label} <span className="font-normal text-muted-foreground">- {agentLabel}</span></div>
                         <div className="text-muted-foreground">{statusLabel}{queued > 0 ? ` · ${queued} message${queued === 1 ? "" : "s"} queued` : ""}</div>
                         {overlap.length > 0 && (
                           <div className="pt-1">
@@ -336,6 +341,20 @@ export function AgentTabStrip({
               })}
             </TabsList>
           </Tabs>
+          {tabs.length > 1 && !isActiveStatus(activeThread.status) && (
+            <Button
+              type="button"
+              size="icon"
+              variant="ghost"
+              className="h-8 w-8 shrink-0"
+              aria-label={`Close ${activeThread.label}${activeThread.label.toLowerCase().endsWith(" tab") ? "" : " tab"}`}
+              title={`Close ${activeThread.label}${activeThread.label.toLowerCase().endsWith(" tab") ? "" : " tab"}`}
+              disabled={archivePendingThreadId === activeThread.id}
+              onClick={() => onArchiveThread(activeThread.id)}
+            >
+              {archivePendingThreadId === activeThread.id ? <Loader2 className="h-4 w-4 animate-spin" /> : <X className="h-4 w-4" />}
+            </Button>
+          )}
 
           <ThreadActionsMenu
             threads={tabs}

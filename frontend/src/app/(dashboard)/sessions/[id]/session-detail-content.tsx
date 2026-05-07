@@ -3398,6 +3398,31 @@ export function SessionDetailContent({ id }: { id: string }) {
       toast.error(err instanceof Error ? err.message : "Failed to cancel tab");
     },
   });
+  const archiveThreadMutation = useMutation({
+    mutationFn: (threadId: string) => api.sessions.archiveThread(id, threadId),
+    onSuccess: (response, archivedThreadID) => {
+      queryClient.setQueryData<SingleResponse<SessionDetail>>(["session", id], (existing) => {
+        if (!existing) return existing;
+        const existingThreads = existing.data.threads ?? [];
+        return {
+          ...existing,
+          data: {
+            ...existing.data,
+            threads: existingThreads.filter((thread) => thread.id !== archivedThreadID),
+          },
+        };
+      });
+      if (activeThreadId === archivedThreadID) {
+        const fallback = threads.find((thread) => thread.id !== archivedThreadID);
+        setActiveThreadId(fallback?.id ?? null);
+      }
+      queryClient.invalidateQueries({ queryKey: ["session", id] });
+      toast.success(`Closed ${response.data.label}`);
+    },
+    onError: (err) => {
+      toast.error(err instanceof Error ? err.message : "Failed to close tab");
+    },
+  });
   const forkThreadMutation = useMutation({
     mutationFn: (threadId: string) => api.sessions.forkThread(id, threadId),
     onSuccess: () => {
@@ -4100,7 +4125,9 @@ export function SessionDetailContent({ id }: { id: string }) {
             onCancelThread={(tid) => cancelThreadMutation.mutate(tid)}
             onForkThread={(tid) => forkThreadMutation.mutate(tid)}
             onRevertThread={(tid) => revertThreadMutation.mutate(tid)}
+            onArchiveThread={(tid) => archiveThreadMutation.mutate(tid)}
             cancelPendingThreadId={cancelThreadMutation.isPending ? cancelThreadMutation.variables ?? null : null}
+            archivePendingThreadId={archiveThreadMutation.isPending ? archiveThreadMutation.variables ?? null : null}
           />
         ) : null}
         {/* Center content — either chat or diff review */}

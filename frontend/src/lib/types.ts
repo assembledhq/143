@@ -265,6 +265,7 @@ export interface SessionThread {
   started_at?: string;
   completed_at?: string;
   created_at: string;
+  archived_at?: string;
   base_snapshot_key?: string;
   cost_cents: number;
   pending_message_count: number;
