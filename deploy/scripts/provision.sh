@@ -204,7 +204,8 @@ if [ "$ROLE" = "db" ]; then
 Cmnd_Alias DEPLOY_CMDS = \
     /usr/bin/chown -R deploy\:deploy /opt/143/deploy/scripts, \
     /usr/bin/systemctl restart docker, \
-    /opt/143/deploy/scripts/install-log-rotation.sh *
+    /opt/143/deploy/scripts/install-log-rotation.sh *, \
+    /opt/143/deploy/scripts/install-docker-dns.sh *
 
 deploy ALL=(root) NOPASSWD: DEPLOY_CMDS
 SUDOERS
@@ -239,7 +240,8 @@ Cmnd_Alias DEPLOY_CMDS = \
     /usr/bin/chown -R deploy\:deploy /opt/143/deploy/vmalert, \
     /usr/bin/chown -R deploy\:deploy /opt/143/deploy/grafana, \
     /usr/bin/systemctl restart docker, \
-    /opt/143/deploy/scripts/install-log-rotation.sh *
+    /opt/143/deploy/scripts/install-log-rotation.sh *, \
+    /opt/143/deploy/scripts/install-docker-dns.sh *
 
 deploy ALL=(root) NOPASSWD: DEPLOY_CMDS
 SUDOERS
@@ -264,7 +266,8 @@ elif [ "$ROLE" = "redis" ]; then
 Cmnd_Alias DEPLOY_CMDS = \
     /usr/bin/chown -R deploy\:deploy /opt/143/deploy/scripts, \
     /usr/bin/systemctl restart docker, \
-    /opt/143/deploy/scripts/install-log-rotation.sh *
+    /opt/143/deploy/scripts/install-log-rotation.sh *, \
+    /opt/143/deploy/scripts/install-docker-dns.sh *
 
 deploy ALL=(root) NOPASSWD: DEPLOY_CMDS
 SUDOERS
@@ -288,6 +291,11 @@ if [ "$ROLE" = "app" ] || [ "$ROLE" = "worker" ] || [ "$ROLE" = "logging" ]; the
   # Vector collector is included from the main compose file
   scp "${SCP_OPTS[@]}" "$PROJECT_DIR/docker-compose.vector.yml" root@"$HOST":/opt/143/
 fi
+if [ "$ROLE" = "app" ] || [ "$ROLE" = "worker" ]; then
+  # DNS probe is included by both compose files; stage it so the include
+  # directive resolves on first `docker compose up`.
+  scp "${SCP_OPTS[@]}" "$PROJECT_DIR/docker-compose.dns-probe.yml" root@"$HOST":/opt/143/
+fi
 if [ "$ROLE" = "worker" ]; then
   # sandbox-dns is built locally from docker-compose.worker.yml on first
   # `docker compose up`, so fresh worker provisioning must stage its Dockerfile
@@ -295,7 +303,7 @@ if [ "$ROLE" = "worker" ]; then
   scp "${SCP_OPTS[@]}" "$PROJECT_DIR/Dockerfile.dnsmasq" root@"$HOST":/opt/143/
 fi
 scp "${SCP_OPTS[@]}" -r "$PROJECT_DIR/deploy" root@"$HOST":/opt/143/
-ssh "${SSH_OPTS[@]}" root@"$HOST" "chown -R deploy:deploy /opt/143 && chmod +x /opt/143/deploy/scripts/install-log-rotation.sh"
+ssh "${SSH_OPTS[@]}" root@"$HOST" "chown -R deploy:deploy /opt/143 && chmod +x /opt/143/deploy/scripts/install-log-rotation.sh /opt/143/deploy/scripts/install-docker-dns.sh"
 
 # Step 2a: Cap docker container log files (max-size/max-file in
 # /etc/docker/daemon.json) BEFORE step 5 starts services. Closes the
@@ -308,6 +316,16 @@ case "$ROLE" in
   *)  LOG_MAX_SIZE="100m" ;;
 esac
 ssh "${SSH_OPTS[@]}" root@"$HOST" "/opt/143/deploy/scripts/install-log-rotation.sh $LOG_MAX_SIZE 5"
+
+# Step 2a (continued): Pin Docker daemon DNS to multiple independent
+# resolvers. Without this, the embedded resolver at 127.0.0.11 inherits the
+# host's resolv.conf — usually a single provider DNS — so one upstream
+# outage takes the whole fleet's container DNS down at once. The
+# 2026-05-07T04:15Z incident hit three workers simultaneously this way.
+# Order is fastest first; Docker's embedded resolver falls through to the
+# next on a SERVFAIL/timeout. Cloudflare + Google + Quad9 are independent
+# operators and networks.
+ssh "${SSH_OPTS[@]}" root@"$HOST" "/opt/143/deploy/scripts/install-docker-dns.sh 1.1.1.1 8.8.8.8 9.9.9.9"
 
 # Step 2b: Sync authorized keys from deploy/authorized_keys/*.pub
 # Replaces authorized_keys on the host with exactly the keys in the repo.
