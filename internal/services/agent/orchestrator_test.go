@@ -2266,6 +2266,73 @@ func TestRunAgent_PopulatesPMContext(t *testing.T) {
 	require.WithinDuration(t, now, time.Now(), time.Minute, "sanity check")
 }
 
+func TestRunAgent_UsesRawTaskPromptStyleForAutomation(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	runID := uuid.New()
+	repoID := uuid.New()
+	goal := "Review recently merged PRs and prepare a follow-up fix if an obvious regression appears."
+
+	run := &models.Session{
+		ID:              runID,
+		OrgID:           orgID,
+		AgentType:       "claude_code",
+		Status:          "pending",
+		TokenMode:       "low",
+		RepositoryID:    &repoID,
+		AutomationRunID: func() *uuid.UUID { id := uuid.New(); return &id }(),
+		PMApproach:      &goal,
+	}
+
+	mockRuns := &mockSessionStore{}
+	mockRepos := &mockRepositoryStore{repo: models.Repository{
+		ID:             repoID,
+		OrgID:          orgID,
+		CloneURL:       "https://example.com/repo.git",
+		DefaultBranch:  "main",
+		InstallationID: 123,
+	}}
+	mockOrgs := &mockOrgStore{org: models.Organization{ID: orgID}}
+	mockJobs := &mockJobStore{}
+	mockLogs := &mockSessionLogStore{}
+	mockQuestions := &mockSessionQuestionStore{}
+	mockDecisions := &mockDecisionLogStore{}
+	mockGH := &mockGitHubTokenProvider{token: "token"}
+	sandboxProvider := testutil.NewMockSandboxProvider()
+
+	capAdapter := &capturingAdapter{name: models.AgentTypeClaudeCode}
+
+	orchestrator := agent.NewOrchestrator(agent.OrchestratorConfig{
+		Provider:         sandboxProvider,
+		Adapters:         map[models.AgentType]agent.AgentAdapter{models.AgentTypeClaudeCode: capAdapter},
+		Sessions:         mockRuns,
+		SessionLogs:      mockLogs,
+		SessionQuestions: mockQuestions,
+		DecisionLog:      mockDecisions,
+		Repositories:     mockRepos,
+		Orgs:             mockOrgs,
+		Jobs:             mockJobs,
+		GitHub:           mockGH,
+		Credentials: &mockCredentialProvider{
+			byProvider: map[models.ProviderName]*models.DecryptedCredential{
+				models.ProviderAnthropic: {
+					Provider: models.ProviderAnthropic,
+					Config:   models.AnthropicConfig{APIKey: "sk-ant-automation-test"},
+				},
+			},
+		},
+		Logger: zerolog.Nop(),
+	})
+
+	err := orchestrator.RunAgent(context.Background(), run)
+	require.NoError(t, err, "RunAgent should succeed for automation sessions without a linked issue")
+	require.NotNil(t, capAdapter.captured, "adapter should capture input")
+	require.Equal(t, agent.PromptStyleRawTask, capAdapter.captured.PromptStyle, "automation sessions should use the raw-task prompt style")
+	require.Equal(t, goal, capAdapter.captured.UserMessage, "automation sessions should pass the stored goal through as the raw task text")
+	require.Nil(t, capAdapter.captured.PMContext, "automation sessions should not wrap the goal into PM analysis context")
+}
+
 func TestRunAgent_LegacySyntheticManualSessionUsesManualModeAndFallbackReferences(t *testing.T) {
 	t.Parallel()
 

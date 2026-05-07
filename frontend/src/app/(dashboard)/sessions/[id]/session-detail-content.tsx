@@ -52,14 +52,6 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from "@/components/ui/table";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
-import {
   Select,
   SelectContent,
   SelectItem,
@@ -92,7 +84,7 @@ import {
 } from "@/lib/session-composer-mentions";
 import { queryKeys } from "@/lib/query-keys";
 import { api, ApiError } from "@/lib/api";
-import { AGENTS, AGENTS_BY_KEY, agentDisplayLabel } from "@/lib/agents";
+import { AGENTS, AGENTS_BY_KEY } from "@/lib/agents";
 import { getActiveOrgId } from "@/lib/active-org";
 import { maybeNotifySessionCompleted } from "@/lib/browser-notifications";
 import {
@@ -164,8 +156,18 @@ const PR_ERROR_TOAST_DURATION_MS = 10_000;
 const PR_ERROR_TOAST_MESSAGE = "PR creation failed";
 const MAX_RESOLVE_REVIEW_COMMENTS_PER_MESSAGE = 50;
 
+const EDITABLE_THREAD_AGENTS: ReadonlyArray<{ key: string; label: string }> =
+  AGENTS.map((agent) => ({ key: agent.key, label: agent.label }));
+
 type PendingFollowUpMessage = SessionMessage & {
   client_id: number;
+};
+
+type PendingEditableThreadUpdate = {
+  label: string;
+  // null clears an existing override; a string sets it. Field is always
+  // present on this path so the backend treats omission separately.
+  model: string | null;
 };
 
 const statusConfig: Record<string, { color: string; label: string }> = {
@@ -212,6 +214,40 @@ export function formatDuration(startedAt?: string, completedAt?: string): string
   if (hours < 24) return `${hours}h ${mins % 60}m`;
   const days = Math.floor(hours / 24);
   return `${days}d ${hours % 24}h`;
+}
+
+export function getPendingEditableThreadUpdate(
+  activeThread: SessionThread | undefined,
+  activeThreadIsEditable: boolean,
+  composerSelectedModel: string,
+): PendingEditableThreadUpdate | undefined {
+  if (!activeThread || !activeThreadIsEditable || composerSelectedModel === "") {
+    return undefined;
+  }
+  const existingModel = activeThread.model_override ?? null;
+  if (composerSelectedModel === existingModel) {
+    return undefined;
+  }
+  return {
+    label: activeThread.label,
+    model: composerSelectedModel,
+  };
+}
+
+export function getInitialComposerSelectedModel(thread: SessionThread): string {
+  return thread.model_override ?? "";
+}
+
+export function trackInFlightAgentUpdate(
+  ref: { current: Promise<unknown> | null },
+  promise: Promise<unknown>,
+): void {
+  ref.current = promise;
+  promise.catch(() => undefined).then(() => {
+    if (ref.current === promise) {
+      ref.current = null;
+    }
+  });
 }
 
 type SessionOriginDisplay = {
@@ -872,6 +908,10 @@ function SessionComposer({
   repositoryId,
   branch,
   agentType,
+  editableAgentType,
+  editableAgents,
+  onEditableAgentTypeChange,
+  agentUpdatePending,
   targetLabel,
 }: {
   message: string;
@@ -907,6 +947,10 @@ function SessionComposer({
   repositoryId?: string;
   branch?: string;
   agentType: string;
+  editableAgentType?: string;
+  editableAgents?: readonly { key: string; label: string }[];
+  onEditableAgentTypeChange?: (nextAgentType: string) => void;
+  agentUpdatePending: boolean;
   targetLabel?: string;
 }) {
   const isMobile = useMediaQuery("(max-width: 767px)");
@@ -1259,6 +1303,24 @@ function SessionComposer({
 
   const settingsControls = (
     <div className="space-y-4">
+      {editableAgents && editableAgents.length > 0 && editableAgentType && onEditableAgentTypeChange && (
+        <div className="space-y-2">
+          <Label className="text-xs uppercase tracking-[0.14em] text-muted-foreground">Agent</Label>
+          <Select value={editableAgentType} onValueChange={onEditableAgentTypeChange} disabled={agentUpdatePending}>
+            <SelectTrigger className="h-11 rounded-xl border-border/70 bg-background text-sm" aria-label="Agent">
+              <SelectValue placeholder="Select agent" />
+            </SelectTrigger>
+            <SelectContent>
+              {editableAgents.map((agent) => (
+                <SelectItem key={agent.key} value={agent.key}>
+                  {agent.label}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+      )}
+
       {availableModels.length > 0 && (
         <div className="space-y-2">
           <Label className="text-xs uppercase tracking-[0.14em] text-muted-foreground">Model</Label>
@@ -1639,6 +1701,21 @@ function SessionComposer({
                       {availableModels.map((model) => (
                         <SelectItem key={model} value={model}>
                           {model}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                )}
+
+                {editableAgents && editableAgents.length > 0 && editableAgentType && onEditableAgentTypeChange && (
+                  <Select value={editableAgentType} onValueChange={onEditableAgentTypeChange} disabled={agentUpdatePending}>
+                    <SelectTrigger className="h-8 w-auto gap-1.5 border-none bg-transparent px-2 text-xs text-muted-foreground shadow-none hover:text-foreground focus:ring-0" aria-label="Agent">
+                      <SelectValue placeholder="Agent" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {editableAgents.map((agent) => (
+                        <SelectItem key={agent.key} value={agent.key}>
+                          {agent.label}
                         </SelectItem>
                       ))}
                     </SelectContent>
@@ -2434,6 +2511,7 @@ export function SessionDetailContent({ id }: { id: string }) {
   const threads = useMemo(() => session?.threads ?? [], [session?.threads]);
   const [activeThreadId, setActiveThreadId] = useState<string | null>(null);
   const activeThread = threads.find((thread) => thread.id === activeThreadId) ?? threads[0];
+  const activeThreadIndex = activeThread ? threads.findIndex((thread) => thread.id === activeThread.id) : -1;
   const isActive = session ? !terminalStatuses.has(session.status) : false;
   const isRunning = session?.status === "running";
   const currentTitle = session ? sessionTitle(session) : "";
@@ -2466,6 +2544,10 @@ export function SessionDetailContent({ id }: { id: string }) {
       references?: SessionInputReference[];
       commands?: SessionInputCommand[];
       planMode?: boolean;
+    };
+    editableThreadUpdate?: {
+      label: string;
+      model: string | null;
     };
     model?: string;
     resolvedIDs: string[];
@@ -2987,12 +3069,13 @@ export function SessionDetailContent({ id }: { id: string }) {
   const [composerCommands, setComposerCommands] = useState<SessionInputCommand[]>([]);
   const [composerIsUploading, setComposerIsUploading] = useState(false);
   const [composerUploadError, setComposerUploadError] = useState<string | null>(null);
-  const [addThreadOpen, setAddThreadOpen] = useState(false);
-  const [newThreadAgentType, setNewThreadAgentType] = useState("codex");
-  const [newThreadModel, setNewThreadModel] = useState("");
-  const [newThreadLabel, setNewThreadLabel] = useState("");
   const composerTextareaRef = useRef<HTMLTextAreaElement>(null);
   const composerUploadInputRef = useRef<HTMLInputElement>(null);
+  // Tracks an in-flight agent-switch PATCH so the send-time PATCH can wait
+  // for it before issuing its own update. Without this, a fast send right
+  // after toggling the agent dropdown can race the agent-switch PATCH and
+  // overwrite the new agent_type with the send-time {label, model} body.
+  const inFlightAgentUpdateRef = useRef<Promise<unknown> | null>(null);
   const chatPanelScrollToLiveEdgeRef = useRef<(() => void) | null>(null);
   // Open comments are the source of truth for what gets attached to the next
   // message — once a send succeeds, the backend marks them resolved in the
@@ -3014,6 +3097,7 @@ export function SessionDetailContent({ id }: { id: string }) {
   const composerIsRunning = activeThread ? activeThread.status === "running" : session?.status === "running";
   const composerIsSnapshotExpired = session?.sandbox_state === "destroyed";
   const composerAgentType = activeThread?.agent_type ?? session?.agent_type ?? "codex";
+  const activeThreadIsEditable = !!activeThread && activeThread.status === "idle" && activeThread.current_turn === 0;
   const composerIsClaudeCode = composerAgentType === "claude_code";
   const composerLacksHeadlessResume = AGENTS_BY_KEY[composerAgentType]?.lacksHeadlessResume ?? false;
   const composerAvailableModels = useMemo(() => {
@@ -3023,11 +3107,24 @@ export function SessionDetailContent({ id }: { id: string }) {
     const agentType = AGENTS.find((agent) => agent.key === composerAgentType);
     return agentType?.models ?? [];
   }, [composerAgentType, session]);
-  const composerTargetLabel = activeThread
-    ? agentDisplayLabel(activeThread.agent_type)
-    : (session ? agentDisplayLabel(session.agent_type) : "agent");
-  const selectedNewThreadAgent = AGENTS_BY_KEY[newThreadAgentType] ?? AGENTS[0];
-  const selectedNewThreadModels = selectedNewThreadAgent?.models ?? [];
+  const activeThreadLabel = activeThread?.label ?? (session ? AGENTS_BY_KEY[session.agent_type]?.label ?? session.agent_type : "agent");
+  const buildThreadLabelForAgent = useCallback((agentType: string) => {
+    const agent = AGENTS_BY_KEY[agentType] ?? AGENTS[0];
+    const ordinal = activeThreadIndex >= 0 ? activeThreadIndex + 1 : threads.length + 1;
+    return `${agent.label} ${ordinal}`;
+  }, [activeThreadIndex, threads.length]);
+  const buildDefaultThreadRequest = useCallback(() => {
+    const agentType = activeThread?.agent_type ?? session?.agent_type ?? "codex";
+    const agent = AGENTS_BY_KEY[agentType] ?? AGENTS[0];
+    return {
+      agent_type: agent.key,
+      model: activeThread?.agent_type === agent.key ? activeThread.model_override : undefined,
+      label: `${agent.label} ${threads.length + 1}`,
+    };
+  }, [activeThread?.agent_type, activeThread?.model_override, session?.agent_type, threads.length]);
+  const pendingEditableThreadUpdate = useMemo(() => {
+    return getPendingEditableThreadUpdate(activeThread, activeThreadIsEditable, composerSelectedModel);
+  }, [activeThread, activeThreadIsEditable, composerSelectedModel]);
 
   async function uploadComposerFiles(files: File[]) {
     if (files.length === 0) return;
@@ -3067,20 +3164,37 @@ export function SessionDetailContent({ id }: { id: string }) {
   }, []);
 
   const sendMutation = useMutation({
-    mutationFn: (vars: SendMutationArgs) => {
+    mutationFn: async (vars: SendMutationArgs) => {
       if (vars.activeThreadId) {
-        return api.sessions.sendThreadMessage(id, vars.activeThreadId, {
+        // Drain a pending agent-switch PATCH first so the send-time PATCH
+        // doesn't clobber the new agent_type. Swallow its rejection — the
+        // agent-switch mutation already surfaces its own toast.
+        if (inFlightAgentUpdateRef.current) {
+          try {
+            await inFlightAgentUpdateRef.current;
+          } catch {
+            // already surfaced by the agent-switch mutation
+          }
+        }
+        if (vars.editableThreadUpdate) {
+          await updateThreadMutation.mutateAsync({
+            threadId: vars.activeThreadId,
+            body: vars.editableThreadUpdate,
+          });
+        }
+        const response = await api.sessions.sendThreadMessage(id, vars.activeThreadId, {
           ...vars.body,
           resolveReviewCommentIDs: vars.resolvedIDs.length > 0 ? vars.resolvedIDs : undefined,
-        })
-          .then((response) => ({ response, resolvedIDs: vars.resolvedIDs }));
+        });
+        return { response, resolvedIDs: vars.resolvedIDs };
       }
 
-      return api.sessions.sendMessage(id, {
+      const response = await api.sessions.sendMessage(id, {
         ...vars.body,
         model: vars.model,
         resolveReviewCommentIDs: vars.resolvedIDs.length > 0 ? vars.resolvedIDs : undefined,
-      }).then((response) => ({ response, resolvedIDs: vars.resolvedIDs }));
+      });
+      return { response, resolvedIDs: vars.resolvedIDs };
     },
     onMutate: (vars) => {
       setComposerUploadError(null);
@@ -3207,6 +3321,7 @@ export function SessionDetailContent({ id }: { id: string }) {
         commands: composerCommands.length > 0 ? composerCommands : undefined,
         planMode: isPlanRequest,
       },
+      editableThreadUpdate: activeThread?.id ? pendingEditableThreadUpdate : undefined,
       model: composerSelectedModel || undefined,
       resolvedIDs,
       optimisticMessage: {
@@ -3243,6 +3358,7 @@ export function SessionDetailContent({ id }: { id: string }) {
     composerSelectedModel,
     filteredFiles,
     id,
+    pendingEditableThreadUpdate,
     session,
     sendMutation,
   ]);
@@ -3372,15 +3488,7 @@ export function SessionDetailContent({ id }: { id: string }) {
   }, [activeFileIndex, visibleFilteredFiles.length]);
 
   const createThreadMutation = useMutation({
-    mutationFn: () => {
-      const agent = AGENTS_BY_KEY[newThreadAgentType] ?? AGENTS[0];
-      const label = newThreadLabel.trim() || `${agent.label} ${threads.length + 1}`;
-      return api.sessions.createThread(id, {
-        agent_type: agent.key,
-        model: newThreadModel || undefined,
-        label,
-      });
-    },
+    mutationFn: (body: { agent_type: string; model?: string; label: string }) => api.sessions.createThread(id, body),
     onSuccess: (response) => {
       queryClient.setQueryData<SingleResponse<SessionDetail>>(["session", id], (existing) => {
         if (!existing) return existing;
@@ -3394,19 +3502,58 @@ export function SessionDetailContent({ id }: { id: string }) {
         };
       });
       setActiveThreadId(response.data.id);
-      setAddThreadOpen(false);
-      setNewThreadLabel("");
-      setNewThreadModel("");
+      setComposerSelectedModel(getInitialComposerSelectedModel(response.data));
       queryClient.invalidateQueries({ queryKey: ["session", id] });
     },
     onError: (err) => {
       toast.error(err instanceof Error ? err.message : "Failed to create tab");
     },
   });
+  const updateThreadMutation = useMutation({
+    mutationFn: (vars: { threadId: string; body: { agent_type?: string; model?: string | null; label: string } }) =>
+      api.sessions.updateThread(id, vars.threadId, vars.body),
+    onSuccess: (response) => {
+      queryClient.setQueryData<SingleResponse<SessionDetail>>(["session", id], (existing) => {
+        if (!existing) return existing;
+        const existingThreads = existing.data.threads ?? [];
+        return {
+          ...existing,
+          data: {
+            ...existing.data,
+            threads: existingThreads.map((thread) => thread.id === response.data.id ? response.data : thread),
+          },
+        };
+      });
+    },
+    onError: (err) => {
+      toast.error(err instanceof Error ? err.message : "Failed to update tab");
+    },
+  });
 
-  useEffect(() => {
-    setNewThreadModel("");
-  }, [newThreadAgentType]);
+  const handleEditableAgentTypeChange = useCallback((nextAgentType: string) => {
+    if (!activeThread || !activeThreadIsEditable || nextAgentType === activeThread.agent_type) {
+      return;
+    }
+    setComposerPlanMode(false);
+    setComposerSelectedModel("");
+    // Only regenerate the label if it matches the autogenerated shape
+    // exactly — `${agent.label} <ordinal>`. A `startsWith` check would
+    // wrongly rename user-customized labels like "Codex deep dive".
+    const currentAgent = AGENTS_BY_KEY[activeThread.agent_type];
+    const autogenSuffix = currentAgent ? activeThread.label.slice(currentAgent.label.length + 1) : "";
+    const looksAutogenerated = !!currentAgent
+      && activeThread.label.startsWith(`${currentAgent.label} `)
+      && /^\d+$/.test(autogenSuffix);
+    const nextLabel = looksAutogenerated ? buildThreadLabelForAgent(nextAgentType) : activeThread.label;
+    const promise = updateThreadMutation.mutateAsync({
+      threadId: activeThread.id,
+      body: {
+        agent_type: nextAgentType,
+        label: nextLabel,
+      },
+    });
+    trackInFlightAgentUpdate(inFlightAgentUpdateRef, promise);
+  }, [activeThread, activeThreadIsEditable, buildThreadLabelForAgent, updateThreadMutation]);
 
   const handleApprovePlan = useCallback(() => {
     if (!composerCanSendMessageRef.current || sendPendingRef.current) return;
@@ -3948,12 +4095,8 @@ export function SessionDetailContent({ id }: { id: string }) {
             overlapsByThreadId={overlapsByThreadId}
             statusConfig={statusConfig}
             onActiveThreadChange={setActiveThreadId}
-            onAddTab={() => {
-              setNewThreadAgentType(session.agent_type || "codex");
-              setNewThreadModel("");
-              setNewThreadLabel("");
-              setAddThreadOpen(true);
-            }}
+            onAddTab={() => createThreadMutation.mutate(buildDefaultThreadRequest())}
+            addTabPending={createThreadMutation.isPending}
             onCancelThread={(tid) => cancelThreadMutation.mutate(tid)}
             onForkThread={(tid) => forkThreadMutation.mutate(tid)}
             onRevertThread={(tid) => revertThreadMutation.mutate(tid)}
@@ -4058,7 +4201,11 @@ export function SessionDetailContent({ id }: { id: string }) {
               repositoryId={session.repository_id}
               branch={session.target_branch}
               agentType={composerAgentType}
-              targetLabel={activeThread ? composerTargetLabel : undefined}
+              editableAgentType={activeThreadIsEditable ? composerAgentType : undefined}
+              editableAgents={activeThreadIsEditable ? EDITABLE_THREAD_AGENTS : undefined}
+              onEditableAgentTypeChange={activeThreadIsEditable ? handleEditableAgentTypeChange : undefined}
+              agentUpdatePending={updateThreadMutation.isPending}
+              targetLabel={activeThread ? activeThreadLabel : undefined}
             />
           </>
         )}
@@ -4155,84 +4302,15 @@ export function SessionDetailContent({ id }: { id: string }) {
               repositoryId={session.repository_id}
               branch={session.target_branch}
               agentType={composerAgentType}
-              targetLabel={activeThread ? composerTargetLabel : undefined}
+              editableAgentType={activeThreadIsEditable ? composerAgentType : undefined}
+              editableAgents={activeThreadIsEditable ? EDITABLE_THREAD_AGENTS : undefined}
+              onEditableAgentTypeChange={activeThreadIsEditable ? handleEditableAgentTypeChange : undefined}
+              agentUpdatePending={updateThreadMutation.isPending}
+              targetLabel={activeThread ? activeThreadLabel : undefined}
             />
           </SheetContent>
         </Sheet>
       ) : null}
-      <Dialog open={addThreadOpen} onOpenChange={setAddThreadOpen}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>Add agent tab</DialogTitle>
-            <DialogDescription>
-              Create a blank tab in this sandbox. It will not run until you send the first message.
-            </DialogDescription>
-          </DialogHeader>
-          <div className="space-y-4">
-            <div className="space-y-2">
-              <Label className="text-xs" htmlFor="new-thread-agent">Agent</Label>
-              <Select value={newThreadAgentType} onValueChange={setNewThreadAgentType}>
-                <SelectTrigger id="new-thread-agent" aria-label="Agent">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  {AGENTS.map((agent) => (
-                    <SelectItem key={agent.key} value={agent.key}>
-                      {agent.label}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-            {selectedNewThreadModels.length > 0 && (
-              <div className="space-y-2">
-                <Label className="text-xs" htmlFor="new-thread-model">Model</Label>
-                <Select value={newThreadModel || "__default"} onValueChange={(value) => setNewThreadModel(value === "__default" ? "" : value)}>
-                  <SelectTrigger id="new-thread-model" aria-label="Model">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="__default">Default model</SelectItem>
-                    {selectedNewThreadModels.map((model) => (
-                      <SelectItem key={model} value={model}>
-                        {model}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </div>
-            )}
-            <div className="space-y-2">
-              <Label className="text-xs" htmlFor="new-thread-label">Tab label</Label>
-              <Input
-                id="new-thread-label"
-                aria-label="Tab label"
-                value={newThreadLabel}
-                onChange={(event) => setNewThreadLabel(event.target.value)}
-                placeholder={`${selectedNewThreadAgent?.label ?? "Agent"} ${threads.length + 1}`}
-              />
-            </div>
-          </div>
-          <DialogFooter>
-            <Button
-              type="button"
-              variant="outline"
-              onClick={() => setAddThreadOpen(false)}
-              disabled={createThreadMutation.isPending}
-            >
-              Cancel
-            </Button>
-            <Button
-              type="button"
-              onClick={() => createThreadMutation.mutate()}
-              disabled={createThreadMutation.isPending}
-            >
-              {createThreadMutation.isPending && <Loader2 className="h-4 w-4 animate-spin" />}
-              Create tab
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
       <AlertDialog
         open={!!prAuthPrompt}
         onOpenChange={(open) => {

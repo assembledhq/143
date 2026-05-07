@@ -8,7 +8,6 @@ import { useParams, useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Textarea } from "@/components/ui/textarea";
 import {
   Select,
   SelectContent,
@@ -20,6 +19,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { MobileBackButton } from "@/components/mobile-back-button";
 import { PageContainer } from "@/components/page-container";
 import { PageHeader } from "@/components/page-header";
+import { AutomationGoalEditor } from "@/components/automation-goal-editor";
 import { BranchPicker } from "@/components/branch-picker";
 import { AutomationModelSelect } from "@/components/automation-model-select";
 import { api } from "@/lib/api";
@@ -137,13 +137,15 @@ function SettingsTab({ automation }: { automation: Automation }) {
             {goalLength.countText}
           </span>
         </div>
-        <Textarea
+        <AutomationGoalEditor
           id="goal"
           value={goal}
-          onChange={(e) => setGoal(e.target.value)}
+          onChange={setGoal}
+          repositoryId={automation.repository_id ?? undefined}
+          branch={baseBranch?.trim() || automation.base_branch || undefined}
+          agentType={effectiveAgentType}
           rows={3}
-          maxLength={AUTOMATION_GOAL_MAX_LENGTH}
-          aria-invalid={goalLength.isTooLong}
+          ariaInvalid={goalLength.isTooLong}
         />
         <p className={cn("text-xs", goalLength.isTooLong ? "text-destructive" : "text-muted-foreground")}>
           {goalLength.message ?? `Up to ${AUTOMATION_GOAL_MAX_LENGTH.toLocaleString("en-US")} characters.`}
