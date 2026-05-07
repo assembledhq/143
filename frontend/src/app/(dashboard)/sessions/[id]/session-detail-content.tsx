@@ -178,10 +178,24 @@ const statusConfig: Record<string, { color: string; label: string }> = {
   needs_human_guidance: { color: "bg-orange-50 text-orange-700 dark:bg-orange-950/30 dark:text-orange-400", label: "Needs guidance" },
   completed: { color: "bg-emerald-50 text-emerald-700 dark:bg-emerald-950/30 dark:text-emerald-400", label: "Completed" },
   pr_created: { color: "bg-emerald-50 text-emerald-700 dark:bg-emerald-950/30 dark:text-emerald-400", label: "PR created" },
+  pr_merged: { color: `${prMergedAccent.bg} ${prMergedAccent.text}`, label: "PR merged" },
+  pr_closed: { color: "bg-muted text-muted-foreground", label: "PR closed" },
   failed: { color: "bg-destructive/10 text-destructive", label: "Failed" },
   cancelled: { color: "bg-muted text-muted-foreground", label: "Cancelled" },
   skipped: { color: "bg-muted text-muted-foreground", label: "Skipped" },
 };
+
+function getDisplayStatus(sessionStatus: string, prStatus?: string | null): { color: string; label: string } {
+  if (sessionStatus === "pr_created") {
+    if (prStatus === "merged") {
+      return statusConfig.pr_merged;
+    }
+    if (prStatus === "closed") {
+      return statusConfig.pr_closed;
+    }
+  }
+  return statusConfig[sessionStatus] || statusConfig.pending;
+}
 
 function hasMeaningfulDuration(startedAt?: string, completedAt?: string): boolean {
   if (!startedAt || !completedAt) return false;
@@ -438,7 +452,7 @@ function prErrorTitle(snapshotState: PRSnapshotState | null, errorCode?: string)
   return "Couldn't create the PR";
 }
 
-function OverviewTab({ session, members }: { session: Session; members: User[] }) {
+function OverviewTab({ session, members, prStatus }: { session: Session; members: User[]; prStatus?: string | null }) {
   const queryClient = useQueryClient();
   const [showDeviceCodeModal, setShowDeviceCodeModal] = useState(false);
 
@@ -458,7 +472,7 @@ function OverviewTab({ session, members }: { session: Session; members: User[] }
     },
   });
 
-  const status = statusConfig[session.status] || statusConfig.pending;
+  const status = getDisplayStatus(session.status, prStatus);
   const isActive = !terminalSessionStatuses.has(session.status);
   const originDisplay = getSessionOriginDisplay(session);
 
@@ -2791,6 +2805,7 @@ export function SessionDetailContent({ id }: { id: string }) {
           return;
         }
 
+        void queryClient.invalidateQueries({ queryKey: ["session", id, "pr"] });
         void queryClient.invalidateQueries({ queryKey: ["pull-request", pullRequestId, "health"] });
       });
       eventSource.onerror = () => {
@@ -2814,7 +2829,7 @@ export function SessionDetailContent({ id }: { id: string }) {
         clearTimeout(reconnectTimer);
       }
     };
-  }, [apiBase, prData?.data?.status, pullRequestId, queryClient, isDocumentVisible]);
+  }, [apiBase, prData?.data?.status, pullRequestId, queryClient, isDocumentVisible, id]);
   const previousSessionStatusRef = useRef<string | undefined>(undefined);
   useEffect(() => {
     const currentStatus = session?.status;
@@ -3634,7 +3649,7 @@ export function SessionDetailContent({ id }: { id: string }) {
     );
   }
 
-  const status = statusConfig[session.status] || statusConfig.pending;
+  const status = getDisplayStatus(session.status, prStatus);
   const prState = session.pr_creation_state;
   const snapshotState = classifyPRSnapshotState({
     sessionSnapshotKey: session.snapshot_key,
@@ -3816,11 +3831,6 @@ export function SessionDetailContent({ id }: { id: string }) {
                     {closedPRLabel}
                   </Badge>
                 )}
-                {prStatus === "merged" && (
-                  <Badge variant="secondary" className="h-7 px-2 text-xs">
-                    {mergedPRLabel}
-                  </Badge>
-                )}
                 <Button asChild variant="outline" size="sm" className="h-7 text-xs gap-1.5">
                   <a href={prData.data.github_pr_url} target="_blank" rel="noopener noreferrer">
                     <ExternalLink className="h-3 w-3" />
@@ -3958,7 +3968,7 @@ export function SessionDetailContent({ id }: { id: string }) {
               </CardContent>
             </Card>
           )}
-          <OverviewTab session={session} members={members} />
+          <OverviewTab session={session} members={members} prStatus={prStatus} />
         </div>
       </TabsContent>
       {showValidationTab && (
