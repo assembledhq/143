@@ -5,7 +5,7 @@ import { notify as toast } from "@/lib/notify";
 import { Archive, ArchiveRestore, Plus, Search } from "lucide-react";
 import Link from "next/link";
 import { usePathname, useRouter, useSelectedLayoutSegment } from "next/navigation";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import { useQueryState, parseAsString } from "nuqs";
 import { PeopleFilter } from "@/components/people-filter";
 import { cn, formatTimeAgo, sessionTitle } from "@/lib/utils";
@@ -23,6 +23,7 @@ import { DiffStatsBadge } from "@/components/code-review/diff-stats-badge";
 import { NoReposWarning } from "@/components/no-repos-warning";
 import type { SessionListItem, User } from "@/lib/types";
 import { prMergedAccent } from "@/lib/pr-status-styles";
+import { hasSessionKeyboardTransientSurface, isSessionKeyboardTextEntryTarget } from "@/hooks/use-session-keyboard-shortcuts";
 import {
   workingSet,
   filterToStatusParam,
@@ -187,6 +188,10 @@ export function SessionSidebar() {
   const selectedId = selectedSegment && selectedSegment !== "new" ? selectedSegment : undefined;
   const [searchParam, setSearchParam] = useQueryState("search", parseAsString);
   const [search, setSearch] = useState(searchParam ?? "");
+  const searchInputRef = useRef<HTMLInputElement>(null);
+  const listContainerRef = useRef<HTMLDivElement>(null);
+  const optionRefs = useRef(new Map<string, HTMLDivElement>());
+  const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const searchRef = useRef(search);
   const skipNextSearchParamWriteRef = useRef(false);
   // Debounce the search query so rapid typing doesn't fire a request per
@@ -334,6 +339,18 @@ export function SessionSidebar() {
     return merged.filter((s) => sessionTitle(s).toLowerCase().includes(q));
   }, [firstPage, extraPages, search]);
 
+  const currentActiveSessionId = useMemo(() => {
+    if (displayedSessions.length === 0) {
+      return null;
+    }
+    if (activeSessionId && displayedSessions.some((session) => session.id === activeSessionId)) {
+      return activeSessionId;
+    }
+    if (selectedId && displayedSessions.some((session) => session.id === selectedId)) {
+      return selectedId;
+    }
+    return displayedSessions[0]?.id ?? null;
+  }, [activeSessionId, displayedSessions, selectedId]);
   // Hide optimistic rows whose real session is already in the list — prevents
   // the double-render flash between "optimistic added" and "server refetch
   // lands". Resolved-but-not-yet-visible rows stay until the real row arrives.
@@ -366,6 +383,141 @@ export function SessionSidebar() {
   const showDefaultEmptyState =
     currentFilter === "all" && !trimmedSearch && (!counts || counts.all === 0);
 
+  const focusSearch = useCallback(() => {
+    const input = searchInputRef.current;
+    if (!input) return;
+    input.focus();
+    input.select();
+  }, []);
+
+  const focusList = useCallback(() => {
+    listContainerRef.current?.focus({ preventScroll: true });
+  }, []);
+
+  const setActiveByIndex = useCallback((index: number) => {
+    if (displayedSessions.length === 0) return;
+    const boundedIndex = Math.min(Math.max(index, 0), displayedSessions.length - 1);
+    const next = displayedSessions[boundedIndex];
+    if (!next) return;
+    setActiveSessionId(next.id);
+    focusList();
+    requestAnimationFrame(() => {
+      optionRefs.current.get(next.id)?.scrollIntoView({ block: "nearest" });
+    });
+  }, [displayedSessions, focusList]);
+
+  const moveActiveSession = useCallback((delta: number) => {
+    if (displayedSessions.length === 0) return;
+    const currentIndex = currentActiveSessionId
+      ? displayedSessions.findIndex((session) => session.id === currentActiveSessionId)
+      : -1;
+    const baseIndex = currentIndex >= 0 ? currentIndex : 0;
+    setActiveByIndex(baseIndex + delta);
+  }, [currentActiveSessionId, displayedSessions, setActiveByIndex]);
+
+  const activeSession = useMemo(
+    () => displayedSessions.find((session) => session.id === currentActiveSessionId) ?? null,
+    [currentActiveSessionId, displayedSessions],
+  );
+
+  const openActiveSession = useCallback(() => {
+    if (!activeSession) return;
+    router.push(`/sessions/${activeSession.id}${filterSuffix}`);
+  }, [activeSession, filterSuffix, router]);
+
+  const toggleArchiveActiveSession = useCallback(() => {
+    if (!activeSession) return;
+    if (activeSession.archived_at) {
+      unarchiveMutation.mutate(activeSession.id);
+      return;
+    }
+    archiveMutation.mutate(activeSession.id);
+  }, [activeSession, archiveMutation, unarchiveMutation]);
+
+  const handleListKeyDown = useCallback((event: ReactKeyboardEvent<HTMLDivElement>) => {
+    switch (event.key) {
+      case "ArrowDown":
+      case "j":
+        event.preventDefault();
+        moveActiveSession(1);
+        break;
+      case "ArrowUp":
+      case "k":
+        event.preventDefault();
+        moveActiveSession(-1);
+        break;
+      case "Home":
+        event.preventDefault();
+        setActiveByIndex(0);
+        break;
+      case "End":
+        event.preventDefault();
+        setActiveByIndex(displayedSessions.length - 1);
+        break;
+      case "PageDown":
+        event.preventDefault();
+        moveActiveSession(8);
+        if (hasMore && displayedSessions.length > 0) {
+          const currentIndex = currentActiveSessionId
+            ? displayedSessions.findIndex((session) => session.id === currentActiveSessionId)
+            : 0;
+          if (currentIndex >= displayedSessions.length - 8) {
+            loadMoreMutation.mutate();
+          }
+        }
+        break;
+      case "PageUp":
+        event.preventDefault();
+        moveActiveSession(-8);
+        break;
+      case "Enter":
+        event.preventDefault();
+        openActiveSession();
+        break;
+      case "A":
+        // Shift+A archives — `a` alone is too easy to fire accidentally on
+        // the highlighted row.
+        if (!event.shiftKey) return;
+        event.preventDefault();
+        toggleArchiveActiveSession();
+        break;
+    }
+  }, [currentActiveSessionId, displayedSessions, hasMore, loadMoreMutation, moveActiveSession, openActiveSession, setActiveByIndex, toggleArchiveActiveSession]);
+
+  useEffect(() => {
+    function handleDocumentKeyDown(event: KeyboardEvent) {
+      if (isSessionKeyboardTextEntryTarget(event.target) || hasSessionKeyboardTransientSurface()) {
+        return;
+      }
+      if (event.metaKey || event.ctrlKey || event.altKey) {
+        return;
+      }
+      // The list container has its own keydown handler for j/k/Enter/a; skip
+      // those here to avoid the React-delegated handler and this document
+      // listener both firing on the same keystroke.
+      const list = listContainerRef.current;
+      if (list && event.target instanceof Node && list.contains(event.target)) {
+        return;
+      }
+      if (event.key === "j") {
+        event.preventDefault();
+        moveActiveSession(1);
+      } else if (event.key === "k") {
+        event.preventDefault();
+        moveActiveSession(-1);
+      } else if (event.key === "/") {
+        event.preventDefault();
+        focusSearch();
+      } else if (event.key === "n") {
+        event.preventDefault();
+        router.push(`/sessions/new${filterSuffix}`);
+      }
+    }
+
+    document.addEventListener("keydown", handleDocumentKeyDown);
+    return () => document.removeEventListener("keydown", handleDocumentKeyDown);
+  }, [filterSuffix, focusSearch, moveActiveSession, router]);
+
   return (
     <div className="w-full h-full border-r border-border bg-muted/30 flex flex-col">
       {/* Header */}
@@ -376,6 +528,7 @@ export function SessionSidebar() {
           <div className="relative flex-1 min-w-0">
             <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground/50" />
             <Input
+              ref={searchInputRef}
               placeholder="Search sessions..."
               value={search}
               onChange={(e) => setSearch(e.target.value)}
@@ -439,7 +592,17 @@ export function SessionSidebar() {
       </div>
 
       {/* Session list */}
-      <div className="flex-1 overflow-y-auto px-2 pt-1 pb-2">
+      <div
+        ref={listContainerRef}
+        role="listbox"
+        tabIndex={0}
+        aria-label="Sessions"
+        aria-activedescendant={
+          currentActiveSessionId ? `session-sidebar-option-${currentActiveSessionId}` : undefined
+        }
+        className="flex-1 overflow-y-auto px-2 pt-1 pb-2 outline-none focus-visible:ring-2 focus-visible:ring-ring/30"
+        onKeyDown={handleListKeyDown}
+      >
         {/* Ghost "New session" entry when creating */}
         {isNewSession && (
           <Link
@@ -508,8 +671,20 @@ export function SessionSidebar() {
               }}
             >
               <div
+                ref={(node) => {
+                  if (node) {
+                    optionRefs.current.set(session.id, node);
+                  } else {
+                    optionRefs.current.delete(session.id);
+                  }
+                }}
+                id={`session-sidebar-option-${session.id}`}
+                role="option"
+                aria-selected={currentActiveSessionId === session.id}
+                data-active={currentActiveSessionId === session.id ? "true" : undefined}
                 className={cn(
                   "flex min-w-0 rounded-xl border border-transparent p-1 transition-all duration-150",
+                  currentActiveSessionId === session.id && !isSelected && "border-border/70 bg-background/80 ring-1 ring-ring/20",
                   isSelected && "cursor-pointer border-primary/20 bg-background shadow-sm ring-1 ring-primary/10",
                 )}
                 onClick={(event) => {

@@ -1,6 +1,6 @@
 # Design: Session Keyboard Navigation
 
-> **Status:** Not Started | **Last reviewed:** 2026-05-07
+> **Status:** Implemented | **Last reviewed:** 2026-05-07
 >
 > **Depends on:** [../03-frontend.md](../03-frontend.md), [../implemented/45-global-command-palette.md](../implemented/45-global-command-palette.md), [../implemented/36-code-review-display.md](../implemented/36-code-review-display.md)
 
@@ -15,6 +15,16 @@ The Sessions area is an operator console, but the main session workflow still as
 - creating, pushing, repairing, viewing, or merging a PR
 - moving focus directly to the follow-up composer
 - discovering which shortcuts exist
+
+## Implementation Notes
+
+Implemented in May 2026 across the session shell and session detail surfaces:
+
+- `SessionSidebar` now exposes a roving session list with `j` / `k`, arrows, `Home` / `End`, `PageUp` / `PageDown`, `Enter`, `/`, `n`, and focused-list archive toggling.
+- `useSessionKeyboardShortcuts` centralizes session-detail shortcuts with text-entry and transient-surface guards so inputs, menus, dialogs, and review mode keep priority.
+- `ChatPanel` exposes a focusable `Session conversation` scroll region and keyboard scroll controls for arrows, page keys, `Home`, `End`, `.`, and space.
+- Session detail supports composer focus, agent tab cycling, add-tab, detail toggling and tab cycling, review entry, and PR two-key sequences routed through the same action callbacks as visible buttons.
+- `SessionKeyboardHelpOverlay` provides the session-shell `?` help surface with grouped shortcuts.
 
 The codebase already establishes a keyboard-first baseline in [../03-frontend.md](../03-frontend.md): list pages should support `j` / `k`, and the command palette should stay globally available via `Cmd+K` / `Ctrl+K`. The diff review surface has its own scoped shortcuts in `useDiffKeyboardNav`, but the broader session shell does not yet have an equivalent navigation model.
 
@@ -379,4 +389,3 @@ npm run build
 3. Add agent-tab shortcuts.
 4. Add PR command sequences with confirmation/disabled-state parity.
 5. Add tooltip and command palette hints only for shortcuts that shipped.
-
