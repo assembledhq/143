@@ -305,7 +305,22 @@ func TestSandboxDNSConfigAlignment(t *testing.T) {
 	provisionText := string(provisionScript)
 	require.Contains(t, provisionText, "--subnet "+sandboxSubnet, "provision.sh should create 143-sandbox with the pinned subnet so sandbox-dns gets a predictable static IP")
 	require.Contains(t, provisionText, `"$EXISTING_SANDBOX_SUBNET" != "`+sandboxSubnet+`"`, "provision.sh should fail loudly when an existing 143-sandbox network has a different subnet — silent reuse breaks the static-IP mapping")
-	require.Contains(t, provisionText, "nameserver "+sandboxDNSIP, "provision.sh should write sandbox-dns's IP into /etc/143/sandbox-resolv.conf")
+
+	// The sandbox resolv.conf writer is the single source of truth for the
+	// nameserver line. provision.sh and deploy.sh both call it so a content
+	// change rolls out via routine deploys instead of requiring a fleet-wide
+	// reprovision maintenance window.
+	resolvScript, err := os.ReadFile("../deploy/scripts/sandbox-resolv-conf.sh")
+	require.NoError(t, err, "test should read the sandbox resolv.conf writer")
+	require.Contains(t, string(resolvScript), "nameserver "+sandboxDNSIP, "sandbox-resolv-conf.sh should write sandbox-dns's IP into /etc/143/sandbox-resolv.conf")
+	require.Contains(t, provisionText, "/opt/143/deploy/scripts/sandbox-resolv-conf.sh", "provision.sh should delegate to the shared writer instead of inlining the file content — keeps provision and deploy byte-aligned")
+	deployScript, err := os.ReadFile("../deploy/scripts/deploy.sh")
+	require.NoError(t, err, "test should read the deploy script")
+	deployText := string(deployScript)
+	require.Contains(t, deployText, "/opt/143/deploy/scripts/sandbox-resolv-conf.sh", "deploy.sh should refresh /etc/143/sandbox-resolv.conf on every worker deploy so a content change doesn't strand existing workers on stale DNS")
+	require.Contains(t, deployText, "run_sandbox_resolv_conf", "deploy.sh should wrap sandbox-resolv-conf.sh in a retryable helper so legacy workers missing the new sudoers grant self-repair")
+	require.Contains(t, deployText, "Retrying sandbox resolv.conf refresh after sudoers repair", "deploy.sh should retry sandbox-resolv-conf.sh after repairing sudoers so the first deploy that introduces the helper succeeds on legacy workers")
+	require.Contains(t, deployText, "sudo -n /opt/143/deploy/scripts/sandbox-resolv-conf.sh", "deploy.sh should invoke sandbox-resolv-conf.sh with sudo -n so missing sudoers fails fast instead of hanging in CI")
 
 	compose, err := os.ReadFile("../docker-compose.worker.yml")
 	require.NoError(t, err, "test should read the worker compose file")
@@ -313,6 +328,14 @@ func TestSandboxDNSConfigAlignment(t *testing.T) {
 	require.Contains(t, composeText, "ipv4_address: "+sandboxDNSIP, "worker compose should pin sandbox-dns to the same static IP that sandbox-resolv.conf points at")
 	require.Contains(t, composeText, "name: 143-sandbox", "worker compose should attach sandbox-dns to the externally-managed 143-sandbox bridge, not a compose-private network")
 	require.Contains(t, composeText, "external: true", "worker compose should declare the sandbox network as external — the bridge is created by provision.sh, not compose")
+
+	cloudInit, err := os.ReadFile("../deploy/cloud-init/worker.yml")
+	require.NoError(t, err, "test should read the worker cloud-init template")
+	cloudInitText := string(cloudInit)
+	require.Contains(t, cloudInitText, "--subnet "+sandboxSubnet, "worker cloud-init should create 143-sandbox with the same pinned subnet as provision.sh so sandbox-dns can claim its static IP")
+	require.Contains(t, cloudInitText, "/opt/143/deploy/scripts/sandbox-resolv-conf.sh", "worker cloud-init should write /etc/143/sandbox-resolv.conf through the shared writer before starting the worker")
+	require.Contains(t, cloudInitText, "cp /tmp/143-repo/Dockerfile.dnsmasq /opt/143/", "worker cloud-init should stage Dockerfile.dnsmasq before docker compose starts so sandbox-dns can build on first boot")
+	require.Contains(t, provisionText, `"$PROJECT_DIR/Dockerfile.dnsmasq" root@"$HOST":/opt/143/`, "provision.sh should stage Dockerfile.dnsmasq before docker compose starts so sandbox-dns can build on fresh worker provisioning")
 
 	dockerfile, err := os.ReadFile("../Dockerfile.dnsmasq")
 	require.NoError(t, err, "test should read the dnsmasq Dockerfile")

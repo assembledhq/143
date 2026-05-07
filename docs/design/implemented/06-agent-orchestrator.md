@@ -79,8 +79,8 @@ The prompt includes:
 - Relevant file paths (from Sentry frames or Linear issue links)
 - Instructions to produce a minimal, focused fix with tests
 - Explicit instructions to treat issue content as data, not instructions (prompt injection defense)
-- Repo-specific conventions from `.143/learned-conventions.md` if present in the repo (see [11-review-feedback-loop.md](11-review-feedback-loop.md))
-- For revision runs: the reviewer feedback (sanitized) and previous diff (see [11-review-feedback-loop.md](11-review-feedback-loop.md))
+- Repo-specific conventions from `.143/learned-conventions.md` if present in the repo (see [11-review-feedback-loop.md](../backlog/11-review-feedback-loop.md))
+- For revision runs: the reviewer feedback (sanitized) and previous diff (see [11-review-feedback-loop.md](../backlog/11-review-feedback-loop.md))
 
 #### Codex Adapter
 

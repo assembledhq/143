@@ -1,5 +1,5 @@
 import { http, HttpResponse } from 'msw';
-import type { Issue, Session, SessionLog, SessionMessage, SessionReviewComment, SessionThread, SessionTimelineEntry, User, PullRequest, PullRequestHealthResponse, PullRequestRepairResponse, ListResponse, SingleResponse, PMStatus, PMDecisionsResponse, Project, ProjectDetail } from '@/lib/types';
+import type { Issue, Session, SessionLog, SessionMessage, SessionReviewComment, SessionThread, SessionThreadFileEvent, SessionTimelineEntry, User, PullRequest, PullRequestHealthResponse, PullRequestRepairResponse, ListResponse, SingleResponse, PMStatus, PMDecisionsResponse, Project, ProjectDetail } from '@/lib/types';
 
 export const mockIssues: Issue[] = [
   {
@@ -411,6 +411,13 @@ export const handlers = [
       data: [] as SessionLog[],
       meta: {},
     } satisfies ListResponse<SessionLog>);
+  }),
+
+  http.get('/api/v1/sessions/:id/thread-file-events', () => {
+    return HttpResponse.json({
+      data: [] as SessionThreadFileEvent[],
+      meta: {},
+    } satisfies ListResponse<SessionThreadFileEvent>);
   }),
 
   http.post('/api/v1/sessions/:id/threads/:threadId/messages', async ({ request, params }) => {

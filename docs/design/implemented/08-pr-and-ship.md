@@ -220,7 +220,7 @@ The system monitors PRs via GitHub webhooks:
 
 Status updates are reflected in the `pull_requests` table and the 143.dev dashboard.
 
-When a review is submitted on an in-scope PR (143-generated PRs by default; configurable to all PRs), the system triggers the **Review Feedback Loop** (see [11-review-feedback-loop.md](11-review-feedback-loop.md)). Comments are run through a multi-stage filtering pipeline before LLM classification. For 143-generated PRs with `changes_requested`, the system can automatically re-run the agent with the feedback incorporated — pushing new commits to the existing PR branch instead of requiring the human to fix it. Generalizable patterns from all in-scope reviews are accumulated into a `.143/learned-conventions.md` file in the repo.
+When a review is submitted on an in-scope PR (143-generated PRs by default; configurable to all PRs), the system triggers the **Review Feedback Loop** (see [11-review-feedback-loop.md](../backlog/11-review-feedback-loop.md)). Comments are run through a multi-stage filtering pipeline before LLM classification. For 143-generated PRs with `changes_requested`, the system can automatically re-run the agent with the feedback incorporated — pushing new commits to the existing PR branch instead of requiring the human to fix it. Generalizable patterns from all in-scope reviews are accumulated into a `.143/learned-conventions.md` file in the repo.
 
 ## Deploy Detection
 

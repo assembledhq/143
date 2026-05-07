@@ -65,6 +65,11 @@ warn_log_rotation_skipped() {
   echo "    make repair-deploy-sudoers ROLE=$ROLE HOST=$HOST SSH_KEY=$SSH_KEY"
 }
 
+run_sandbox_resolv_conf() {
+  ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
+    "sudo -n /opt/143/deploy/scripts/sandbox-resolv-conf.sh"
+}
+
 # --- Refresh secrets from .env.production.enc ---
 if [ -z "${SOPS_AGE_KEY:-}" ]; then
   AGE_KEY_FILE="${SOPS_AGE_KEY_FILE:-$HOME/.config/sops/age/keys.txt}"
@@ -213,6 +218,39 @@ if [ "$ROLE" = "worker" ]; then
   ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
     "mv /opt/143/deploy/scripts/sandbox-firewall.sh.new /opt/143/deploy/scripts/sandbox-firewall.sh \
      || { rm -f /opt/143/deploy/scripts/sandbox-firewall.sh.new; exit 1; }"
+
+  # Sync the sandbox-resolv.conf writer. This is the single source of truth
+  # for /etc/143/sandbox-resolv.conf, which gets bind-mounted into every
+  # sandbox at /etc/resolv.conf. The earlier chown above normalized
+  # ownership for the whole /opt/143/deploy/scripts dir, so re-using it
+  # here without another chown is fine. Atomic-rename via .new for the
+  # same ETXTBSY-class reasons noted on sandbox-firewall.sh above.
+  scp -p "${SCP_OPTS[@]}" "$PROJECT_DIR/deploy/scripts/sandbox-resolv-conf.sh" \
+    deploy@"$HOST":/opt/143/deploy/scripts/sandbox-resolv-conf.sh.new
+  ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
+    "mv /opt/143/deploy/scripts/sandbox-resolv-conf.sh.new /opt/143/deploy/scripts/sandbox-resolv-conf.sh \
+     && chmod +x /opt/143/deploy/scripts/sandbox-resolv-conf.sh \
+     || { rm -f /opt/143/deploy/scripts/sandbox-resolv-conf.sh.new; exit 1; }"
+
+  # Refresh /etc/143/sandbox-resolv.conf to match the version of the writer
+  # script in this deploy. This is required config, not optional hardening:
+  # stale DNS strands all new sandboxes on preview-infra lookups. Run it from
+  # the local deploy flow so legacy workers missing the new sudoers grant can
+  # use the same no-teardown repair path as other deploy-time sudo helpers.
+  echo "Refreshing sandbox resolv.conf..."
+  if ! run_sandbox_resolv_conf; then
+    echo "sandbox-resolv-conf.sh failed under deploy+sudo; trying no-teardown deploy sudoers repair..."
+    if repair_deploy_sudoers; then
+      echo "Retrying sandbox resolv.conf refresh after sudoers repair..."
+      run_sandbox_resolv_conf
+    else
+      echo "ERROR: sandbox-resolv-conf.sh failed and sudoers repair via root SSH did not complete."
+      echo "  Run once from a machine with root SSH access:"
+      echo "    make repair-deploy-sudoers ROLE=$ROLE HOST=$HOST SSH_KEY=$SSH_KEY"
+      echo "  Then re-run the deploy."
+      exit 1
+    fi
+  fi
 
   # Sync Dockerfile.dnsmasq alongside the worker compose file. The
   # sandbox-dns service is built locally on each worker (see

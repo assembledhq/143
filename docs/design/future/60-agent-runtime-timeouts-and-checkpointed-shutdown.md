@@ -2,7 +2,7 @@
 
 > **Status:** Future
 >
-> **Related docs:** [51-worker-deploy-safety.md](../51-worker-deploy-safety.md), [overall.md](../overall.md)
+> **Related docs:** [51-worker-deploy-safety.md](../backlog/51-worker-deploy-safety.md), [overall.md](../overall.md)
 
 ## Summary
 
@@ -129,7 +129,7 @@ This design does not promise:
 - uninterrupted live process continuation across host failure
 - perfect in-memory state migration for every agent CLI
 - solving deploy independence on its own without the durable executor work from
-  [51-worker-deploy-safety.md](../51-worker-deploy-safety.md)
+  [51-worker-deploy-safety.md](../backlog/51-worker-deploy-safety.md)
 
 ## Principles
 
@@ -722,7 +722,7 @@ Recommended derived metrics:
 ### Phase 4: Durable executors
 
 - combine this design with the per-session executor model from
-  [51-worker-deploy-safety.md](../51-worker-deploy-safety.md)
+  [51-worker-deploy-safety.md](../backlog/51-worker-deploy-safety.md)
 - move long-running process ownership out of the general worker lifecycle
 
 ## Recommended Product Decision

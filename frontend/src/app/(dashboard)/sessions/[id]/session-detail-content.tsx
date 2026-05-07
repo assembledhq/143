@@ -23,7 +23,6 @@ import {
   Square,
   PanelRightOpen,
   PanelRightClose,
-  PanelBottomOpen,
   Clock,
   MessageSquare,
   Pencil,
@@ -49,6 +48,14 @@ import {
 } from "@/components/ui/alert-dialog";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import {
   Select,
   SelectContent,
@@ -116,13 +123,13 @@ import { CodexDeviceCodeModal } from "@/components/codex-device-code-modal";
 import { AgentBadge } from "@/components/agent-badge";
 import { PendingAttachmentStrip } from "@/components/pending-attachment-strip";
 import { PRHealthBanner } from "@/components/pr-health-banner";
-import { MobileBackButton } from "@/components/mobile-back-button";
 import { useAuth } from "@/hooks/use-auth";
 import { useMediaQuery } from "@/hooks/use-media-query";
 import { useDocumentVisible } from "@/hooks/use-document-visible";
 import { prMergedAccent } from "@/lib/pr-status-styles";
 import { cn, sessionTitle, formatTimeAgo } from "@/lib/utils";
 import { activeSet, workingStatusesSet } from "@/lib/session-status-groups";
+import { MobileSessionTopBar } from "./mobile-session-top-bar";
 
 // Defer the diff viewer (shiki + diff-parser) until the user actually opens
 // review mode. Saves ~100KB+ from the initial session-detail bundle for the
@@ -176,10 +183,24 @@ const statusConfig: Record<string, { color: string; label: string }> = {
   needs_human_guidance: { color: "bg-orange-50 text-orange-700 dark:bg-orange-950/30 dark:text-orange-400", label: "Needs guidance" },
   completed: { color: "bg-emerald-50 text-emerald-700 dark:bg-emerald-950/30 dark:text-emerald-400", label: "Completed" },
   pr_created: { color: "bg-emerald-50 text-emerald-700 dark:bg-emerald-950/30 dark:text-emerald-400", label: "PR created" },
+  pr_merged: { color: `${prMergedAccent.bg} ${prMergedAccent.text}`, label: "PR merged" },
+  pr_closed: { color: "bg-muted text-muted-foreground", label: "PR closed" },
   failed: { color: "bg-destructive/10 text-destructive", label: "Failed" },
   cancelled: { color: "bg-muted text-muted-foreground", label: "Cancelled" },
   skipped: { color: "bg-muted text-muted-foreground", label: "Skipped" },
 };
+
+function getDisplayStatus(sessionStatus: string, prStatus?: string | null): { color: string; label: string } {
+  if (sessionStatus === "pr_created") {
+    if (prStatus === "merged") {
+      return statusConfig.pr_merged;
+    }
+    if (prStatus === "closed") {
+      return statusConfig.pr_closed;
+    }
+  }
+  return statusConfig[sessionStatus] || statusConfig.pending;
+}
 
 function hasMeaningfulDuration(startedAt?: string, completedAt?: string): boolean {
   if (!startedAt || !completedAt) return false;
@@ -420,7 +441,7 @@ function prErrorTitle(snapshotState: PRSnapshotState | null, errorCode?: string)
   return "Couldn't create the PR";
 }
 
-function OverviewTab({ session, members }: { session: Session; members: User[] }) {
+function OverviewTab({ session, members, prStatus }: { session: Session; members: User[]; prStatus?: string | null }) {
   const queryClient = useQueryClient();
   const [showDeviceCodeModal, setShowDeviceCodeModal] = useState(false);
 
@@ -440,7 +461,7 @@ function OverviewTab({ session, members }: { session: Session; members: User[] }
     },
   });
 
-  const status = statusConfig[session.status] || statusConfig.pending;
+  const status = getDisplayStatus(session.status, prStatus);
   const isActive = !terminalSessionStatuses.has(session.status);
   const originDisplay = getSessionOriginDisplay(session);
 
@@ -2285,6 +2306,7 @@ export function SessionDetailContent({ id }: { id: string }) {
   // matchMedia needed).
   const [mobileDetailOpen, setMobileDetailOpen] = useState(false);
   const [mobileReviewComposerOpen, setMobileReviewComposerOpen] = useState(false);
+  const [mobileRenameOpen, setMobileRenameOpen] = useState(false);
   const [detailWidth, setDetailWidth] = useState(DEFAULT_DETAIL);
   const [activeFileIndex, setActiveFileIndex] = useState(0);
   const [isEditingTitle, setIsEditingTitle] = useState(false);
@@ -2686,6 +2708,7 @@ export function SessionDetailContent({ id }: { id: string }) {
           return;
         }
 
+        void queryClient.invalidateQueries({ queryKey: ["session", id, "pr"] });
         void queryClient.invalidateQueries({ queryKey: ["pull-request", pullRequestId, "health"] });
       });
       eventSource.onerror = () => {
@@ -2709,7 +2732,7 @@ export function SessionDetailContent({ id }: { id: string }) {
         clearTimeout(reconnectTimer);
       }
     };
-  }, [apiBase, prData?.data?.status, pullRequestId, queryClient, isDocumentVisible]);
+  }, [apiBase, prData?.data?.status, pullRequestId, queryClient, isDocumentVisible, id]);
   const previousSessionStatusRef = useRef<string | undefined>(undefined);
   useEffect(() => {
     const currentStatus = session?.status;
@@ -2949,6 +2972,12 @@ export function SessionDetailContent({ id }: { id: string }) {
   const [composerCommands, setComposerCommands] = useState<SessionInputCommand[]>([]);
   const [composerIsUploading, setComposerIsUploading] = useState(false);
   const [composerUploadError, setComposerUploadError] = useState<string | null>(null);
+  const [addThreadOpen, setAddThreadOpen] = useState(false);
+  const [newThreadAgentType, setNewThreadAgentType] = useState("codex");
+  const [newThreadModel, setNewThreadModel] = useState("");
+  const [newThreadLabel, setNewThreadLabel] = useState("");
+  const focusComposerAfterThreadCreateRef = useRef(false);
+  const addTabButtonRef = useRef<HTMLButtonElement>(null);
   const composerTextareaRef = useRef<HTMLTextAreaElement>(null);
   const composerUploadInputRef = useRef<HTMLInputElement>(null);
   // Tracks an in-flight agent-switch PATCH so the send-time PATCH can wait
@@ -2987,6 +3016,8 @@ export function SessionDetailContent({ id }: { id: string }) {
     const agentType = AGENTS.find((agent) => agent.key === composerAgentType);
     return agentType?.models ?? [];
   }, [composerAgentType, session]);
+  const selectedNewThreadAgent = AGENTS_BY_KEY[newThreadAgentType] ?? AGENTS[0];
+  const selectedNewThreadModels = selectedNewThreadAgent?.models ?? [];
   const activeThreadLabel = activeThread?.label ?? (session ? AGENTS_BY_KEY[session.agent_type]?.label ?? session.agent_type : "agent");
   const buildThreadLabelForAgent = useCallback((agentType: string) => {
     const agent = AGENTS_BY_KEY[agentType] ?? AGENTS[0];
@@ -3002,6 +3033,14 @@ export function SessionDetailContent({ id }: { id: string }) {
       label: `${agent.label} ${threads.length + 1}`,
     };
   }, [activeThread?.agent_type, activeThread?.model_override, session?.agent_type, threads.length]);
+  const buildDialogThreadRequest = useCallback(() => {
+    const agent = AGENTS_BY_KEY[newThreadAgentType] ?? AGENTS[0];
+    return {
+      agent_type: agent.key,
+      model: newThreadModel || undefined,
+      label: newThreadLabel.trim() || `${agent.label} ${threads.length + 1}`,
+    };
+  }, [newThreadAgentType, newThreadLabel, newThreadModel, threads.length]);
   const pendingEditableThreadUpdate = useMemo(() => {
     return getPendingEditableThreadUpdate(activeThread, activeThreadIsEditable, composerSelectedModel);
   }, [activeThread, activeThreadIsEditable, composerSelectedModel]);
@@ -3381,6 +3420,10 @@ export function SessionDetailContent({ id }: { id: string }) {
           },
         };
       });
+      focusComposerAfterThreadCreateRef.current = true;
+      setAddThreadOpen(false);
+      setNewThreadLabel("");
+      setNewThreadModel("");
       setActiveThreadId(response.data.id);
       setComposerSelectedModel(getInitialComposerSelectedModel(response.data));
       queryClient.invalidateQueries({ queryKey: ["session", id] });
@@ -3389,6 +3432,34 @@ export function SessionDetailContent({ id }: { id: string }) {
       toast.error(err instanceof Error ? err.message : "Failed to create tab");
     },
   });
+
+  useEffect(() => {
+    if (!focusComposerAfterThreadCreateRef.current) {
+      return;
+    }
+
+    const rafID = window.requestAnimationFrame(() => {
+      focusComposerAfterThreadCreateRef.current = false;
+      const shouldFocusComposer = session?.agent_type !== "pm_agent"
+        && composerCanSendMessage
+        && composerTextareaRef.current !== null
+        && !composerTextareaRef.current.disabled;
+
+      if (shouldFocusComposer) {
+        composerTextareaRef.current?.focus();
+        return;
+      }
+
+      addTabButtonRef.current?.focus();
+    });
+
+    return () => window.cancelAnimationFrame(rafID);
+  }, [activeThread?.id, composerCanSendMessage, session?.agent_type]);
+
+  useEffect(() => {
+    setNewThreadModel("");
+  }, [newThreadAgentType]);
+
   const updateThreadMutation = useMutation({
     mutationFn: (vars: { threadId: string; body: { agent_type?: string; model?: string | null; label: string } }) =>
       api.sessions.updateThread(id, vars.threadId, vars.body),
@@ -3527,7 +3598,7 @@ export function SessionDetailContent({ id }: { id: string }) {
     );
   }
 
-  const status = statusConfig[session.status] || statusConfig.pending;
+  const status = getDisplayStatus(session.status, prStatus);
   const prState = session.pr_creation_state;
   const snapshotState = classifyPRSnapshotState({
     sessionSnapshotKey: session.snapshot_key,
@@ -3667,6 +3738,16 @@ export function SessionDetailContent({ id }: { id: string }) {
     : showDetailPanel
       ? "Hide details"
       : "Show details";
+  const openAddThreadDialog = () => {
+    setNewThreadAgentType(session.agent_type || "codex");
+    setNewThreadModel("");
+    setNewThreadLabel("");
+    setAddThreadOpen(true);
+  };
+  const openMobileRenameDialog = () => {
+    setDraftTitle(currentTitle);
+    setMobileRenameOpen(true);
+  };
   // Right-panel content. Rendered inline on desktop and inside a bottom sheet
   // on mobile — the same JSX in both places so tab state stays consistent.
   const panelTabsEl = (
@@ -3704,11 +3785,6 @@ export function SessionDetailContent({ id }: { id: string }) {
                 {prStatus === "closed" && (
                   <Badge variant="secondary" className="h-7 px-2 text-xs">
                     {closedPRLabel}
-                  </Badge>
-                )}
-                {prStatus === "merged" && (
-                  <Badge variant="secondary" className="h-7 px-2 text-xs">
-                    {mergedPRLabel}
                   </Badge>
                 )}
                 <Button asChild variant="outline" size="sm" className="h-7 text-xs gap-1.5">
@@ -3848,7 +3924,7 @@ export function SessionDetailContent({ id }: { id: string }) {
               </CardContent>
             </Card>
           )}
-          <OverviewTab session={session} members={members} />
+          <OverviewTab session={session} members={members} prStatus={prStatus} />
         </div>
       </TabsContent>
       <TabsContent value="preview" className="flex-1 overflow-y-auto scrollbar-hide p-4">
@@ -3865,105 +3941,110 @@ export function SessionDetailContent({ id }: { id: string }) {
       {/* Center area: chat or review diff view */}
       <div className="flex-1 min-w-0 flex flex-col">
         {!isDedicatedMobileReview ? (
-        <div className="border-b border-border px-4 py-3 bg-background flex items-center justify-between shrink-0">
-          <div className="min-w-0 flex-1 flex items-center gap-2">
-            <MobileBackButton to="/sessions" label="Back to sessions" />
-            {isEditingTitle ? (
+          <>
+            <MobileSessionTopBar
+              sessionTitle={sessionTitle(session)}
+              detailButtonLabel="Open session details"
+              backTo="/sessions"
+              threads={threads}
+              activeThreadId={activeThread?.id ?? null}
+              onOpenDetails={() => setMobileDetailOpen(true)}
+              onActiveThreadChange={setActiveThreadId}
+              onAddThread={openAddThreadDialog}
+              onRenameSession={openMobileRenameDialog}
+              onCancelThread={(tid) => cancelThreadMutation.mutate(tid)}
+              onForkThread={(tid) => forkThreadMutation.mutate(tid)}
+              onRevertThread={(tid) => revertThreadMutation.mutate(tid)}
+              cancelPendingThreadId={cancelThreadMutation.isPending ? cancelThreadMutation.variables ?? null : null}
+            />
+
+            <div className="hidden md:flex border-b border-border px-4 py-3 bg-background items-center justify-between shrink-0">
               <div className="min-w-0 flex-1 flex items-center gap-2">
-                <Input
-                  aria-label="Session title"
-                  value={draftTitle}
-                  onChange={(e) => setDraftTitle(e.target.value)}
-                  className="h-8 max-w-xl"
-                  disabled={updateSessionMutation.isPending}
-                />
-                <DisabledTooltip disabled={!canSaveTitle} content={saveTitleDisabledReason}>
-                  <Button
-                    size="icon"
-                    variant="ghost"
-                    aria-label="Save title"
-                    disabled={!canSaveTitle}
-                    onClick={() => updateSessionMutation.mutate(trimmedDraftTitle)}
-                  >
-                    <Check className="h-4 w-4" />
-                  </Button>
-                </DisabledTooltip>
-                <DisabledTooltip disabled={updateSessionMutation.isPending} content={titleEditPendingReason}>
-                  <Button
-                    size="icon"
-                    variant="ghost"
-                    aria-label="Cancel title"
-                    disabled={updateSessionMutation.isPending}
-                    onClick={() => {
-                      setDraftTitle(currentTitle);
-                      setIsEditingTitle(false);
-                    }}
-                  >
-                    <X className="h-4 w-4" />
-                  </Button>
-                </DisabledTooltip>
+                {isEditingTitle ? (
+                  <div className="min-w-0 flex-1 flex items-center gap-2">
+                    <Input
+                      aria-label="Session title"
+                      value={draftTitle}
+                      onChange={(e) => setDraftTitle(e.target.value)}
+                      className="h-8 max-w-xl"
+                      disabled={updateSessionMutation.isPending}
+                    />
+                    <DisabledTooltip disabled={!canSaveTitle} content={saveTitleDisabledReason}>
+                      <Button
+                        size="icon"
+                        variant="ghost"
+                        aria-label="Save title"
+                        disabled={!canSaveTitle}
+                        onClick={() => updateSessionMutation.mutate(trimmedDraftTitle)}
+                      >
+                        <Check className="h-4 w-4" />
+                      </Button>
+                    </DisabledTooltip>
+                    <DisabledTooltip disabled={updateSessionMutation.isPending} content={titleEditPendingReason}>
+                      <Button
+                        size="icon"
+                        variant="ghost"
+                        aria-label="Cancel title"
+                        disabled={updateSessionMutation.isPending}
+                        onClick={() => {
+                          setDraftTitle(currentTitle);
+                          setIsEditingTitle(false);
+                        }}
+                      >
+                        <X className="h-4 w-4" />
+                      </Button>
+                    </DisabledTooltip>
+                  </div>
+                ) : (
+                  <>
+                    <h1 className="text-sm font-medium text-foreground truncate">
+                      {sessionTitle(session)}
+                    </h1>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="h-8 w-8 shrink-0"
+                      aria-label="Edit session title"
+                      onClick={() => {
+                        setDraftTitle(currentTitle);
+                        setIsEditingTitle(true);
+                      }}
+                    >
+                      <Pencil className="h-4 w-4" />
+                    </Button>
+                  </>
+                )}
+                <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium shrink-0 ${status.color}`}>
+                  {status.label}
+                </span>
+                {diffStats && (
+                  <DiffStatsBadge
+                    added={diffStats.added}
+                    removed={diffStats.removed}
+                    className="shrink-0"
+                    onClick={() => openReview()}
+                  />
+                )}
+                <LinkedIssueChips session={session} />
               </div>
-            ) : (
-              <>
-                <h1 className="text-sm font-medium text-foreground truncate">
-                  {sessionTitle(session)}
-                </h1>
+              <DisabledTooltip disabled={centerMode === "review" && showDetailPanel} content={detailToggleTitle}>
                 <Button
                   variant="ghost"
                   size="icon"
-                  className="h-8 w-8 shrink-0"
-                  aria-label="Edit session title"
-                  onClick={() => {
-                    setDraftTitle(currentTitle);
-                    setIsEditingTitle(true);
-                  }}
+                  className={cn(centerMode === "review" && showDetailPanel && "opacity-30 cursor-not-allowed", "h-8 w-8 shrink-0")}
+                  disabled={centerMode === "review" && showDetailPanel}
+                  onClick={() => setShowDetailPanel(!showDetailPanel)}
+                  title={detailToggleTitle}
                 >
-                  <Pencil className="h-4 w-4" />
+                  {showDetailPanel ? <PanelRightClose className="h-4 w-4" /> : <PanelRightOpen className="h-4 w-4" />}
                 </Button>
-              </>
-            )}
-            <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium shrink-0 ${status.color}`}>
-              {status.label}
-            </span>
-            {diffStats && (
-              <DiffStatsBadge
-                added={diffStats.added}
-                removed={diffStats.removed}
-                className="shrink-0"
-                onClick={() => openReview()}
-              />
-            )}
-            <LinkedIssueChips session={session} />
-          </div>
-          {/* Desktop toggle: hides/shows the inline right panel. */}
-          <DisabledTooltip disabled={centerMode === "review" && showDetailPanel} content={detailToggleTitle}>
-            <Button
-              variant="ghost"
-              size="icon"
-              className={cn("hidden md:inline-flex h-8 w-8 shrink-0", centerMode === "review" && showDetailPanel && "opacity-30 cursor-not-allowed")}
-              disabled={centerMode === "review" && showDetailPanel}
-              onClick={() => setShowDetailPanel(!showDetailPanel)}
-              title={detailToggleTitle}
-            >
-              {showDetailPanel ? <PanelRightClose className="h-4 w-4" /> : <PanelRightOpen className="h-4 w-4" />}
-            </Button>
-          </DisabledTooltip>
-          {/* Mobile toggle: opens the bottom sheet. */}
-          <Button
-            variant="ghost"
-            size="icon"
-            className="md:hidden h-9 w-9 shrink-0"
-            onClick={() => setMobileDetailOpen(true)}
-            aria-label="Open details"
-            aria-controls="session-detail-sheet"
-            aria-expanded={mobileDetailOpen}
-          >
-            <PanelBottomOpen className="h-5 w-5" />
-          </Button>
-        </div>
+              </DisabledTooltip>
+            </div>
+          </>
         ) : null}
 
         {!isDedicatedMobileReview ? (
+          <div className="hidden md:block">
           <AgentTabStrip
             threads={threads}
             activeThreadId={activeThread?.id ?? null}
@@ -3976,7 +4057,9 @@ export function SessionDetailContent({ id }: { id: string }) {
             onForkThread={(tid) => forkThreadMutation.mutate(tid)}
             onRevertThread={(tid) => revertThreadMutation.mutate(tid)}
             cancelPendingThreadId={cancelThreadMutation.isPending ? cancelThreadMutation.variables ?? null : null}
+            addTabButtonRef={addTabButtonRef}
           />
+          </div>
         ) : null}
         {/* Center content — either chat or diff review */}
         <div className="flex-1 min-h-0 relative">
@@ -4186,6 +4269,125 @@ export function SessionDetailContent({ id }: { id: string }) {
           </SheetContent>
         </Sheet>
       ) : null}
+      <Dialog open={mobileRenameOpen} onOpenChange={setMobileRenameOpen}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Rename session</DialogTitle>
+            <DialogDescription>
+              Update the session title without crowding the mobile header.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-3">
+            <Label htmlFor="mobile-session-title">Session title</Label>
+            <Input
+              id="mobile-session-title"
+              aria-label="Session title"
+              value={draftTitle}
+              onChange={(e) => setDraftTitle(e.target.value)}
+              disabled={updateSessionMutation.isPending}
+            />
+          </div>
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => {
+                setDraftTitle(currentTitle);
+                setMobileRenameOpen(false);
+              }}
+              disabled={updateSessionMutation.isPending}
+            >
+              Cancel
+            </Button>
+            <DisabledTooltip disabled={!canSaveTitle} content={saveTitleDisabledReason}>
+              <Button
+                type="button"
+                onClick={() => updateSessionMutation.mutate(trimmedDraftTitle, {
+                  onSuccess: () => {
+                    setMobileRenameOpen(false);
+                  },
+                })}
+                disabled={!canSaveTitle}
+              >
+                Save title
+              </Button>
+            </DisabledTooltip>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+      <Dialog open={addThreadOpen} onOpenChange={setAddThreadOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Add agent tab</DialogTitle>
+            <DialogDescription>
+              Create a blank tab in this sandbox. It will not run until you send the first message.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4">
+            <div className="space-y-2">
+              <Label className="text-xs" htmlFor="new-thread-agent">Agent</Label>
+              <Select value={newThreadAgentType} onValueChange={setNewThreadAgentType}>
+                <SelectTrigger id="new-thread-agent" aria-label="Agent">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {AGENTS.map((agent) => (
+                    <SelectItem key={agent.key} value={agent.key}>
+                      {agent.label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            {selectedNewThreadModels.length > 0 && (
+              <div className="space-y-2">
+                <Label className="text-xs" htmlFor="new-thread-model">Model</Label>
+                <Select value={newThreadModel || "__default"} onValueChange={(value) => setNewThreadModel(value === "__default" ? "" : value)}>
+                  <SelectTrigger id="new-thread-model" aria-label="Model">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="__default">Default model</SelectItem>
+                    {selectedNewThreadModels.map((model) => (
+                      <SelectItem key={model} value={model}>
+                        {model}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+            )}
+            <div className="space-y-2">
+              <Label className="text-xs" htmlFor="new-thread-label">Tab label</Label>
+              <Input
+                id="new-thread-label"
+                aria-label="Tab label"
+                value={newThreadLabel}
+                onChange={(event) => setNewThreadLabel(event.target.value)}
+                placeholder={`${selectedNewThreadAgent?.label ?? "Agent"} ${threads.length + 1}`}
+              />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => setAddThreadOpen(false)}
+              disabled={createThreadMutation.isPending}
+            >
+              Cancel
+            </Button>
+            <Button
+              type="button"
+              onClick={() => createThreadMutation.mutate(buildDialogThreadRequest())}
+              disabled={createThreadMutation.isPending}
+            >
+              {createThreadMutation.isPending && <Loader2 className="h-4 w-4 animate-spin" />}
+              Create tab
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
       <AlertDialog
         open={!!prAuthPrompt}
         onOpenChange={(open) => {
