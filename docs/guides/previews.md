@@ -2,7 +2,7 @@
 
 A preview is a live, iframed view of your app running inside a 143 session. When an agent edits your frontend, you see the result next to the diff instead of having to pull the branch locally.
 
-This guide covers how to add preview support to a repo. For the underlying architecture (preview gateway, trust split, isolation model), see [`design/44-sandbox-preview-server.md`](design/44-sandbox-preview-server.md).
+This guide covers how to add preview support to a repo. For the underlying architecture (preview gateway, trust split, isolation model), see [`design/implemented/44-sandbox-preview-server.md`](design/implemented/44-sandbox-preview-server.md).
 
 ## Dogfood preview
 

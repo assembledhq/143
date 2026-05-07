@@ -2,7 +2,7 @@
 
 > **Status:** Not Started | **Last reviewed:** 2026-04-21
 >
-> **Depends on:** [01-database-schema.md](../01-database-schema.md), [03-frontend.md](../03-frontend.md), [20-security-architecture.md](../implemented/20-security-architecture.md), [34-repo-ribbons-nav.md](../34-repo-ribbons-nav.md)
+> **Depends on:** [01-database-schema.md](../01-database-schema.md), [03-frontend.md](../03-frontend.md), [20-security-architecture.md](../implemented/20-security-architecture.md), [34-repo-ribbons-nav.md](../backlog/34-repo-ribbons-nav.md)
 
 ## Problem
 

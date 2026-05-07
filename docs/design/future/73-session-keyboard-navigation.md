@@ -2,7 +2,7 @@
 
 > **Status:** Not Started | **Last reviewed:** 2026-05-07
 >
-> **Depends on:** [../03-frontend.md](../03-frontend.md), [../implemented/45-global-command-palette.md](../implemented/45-global-command-palette.md), [../36-code-review-display.md](../36-code-review-display.md)
+> **Depends on:** [../03-frontend.md](../03-frontend.md), [../implemented/45-global-command-palette.md](../implemented/45-global-command-palette.md), [../implemented/36-code-review-display.md](../implemented/36-code-review-display.md)
 
 ## Problem
 

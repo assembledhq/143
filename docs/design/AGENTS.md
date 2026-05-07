@@ -12,29 +12,19 @@ Every design document must include a status block immediately after the title he
 
 ### Valid statuses
 
-| Status | Meaning |
-|--------|---------|
-| `Implemented` | Feature is fully built and live. Design doc serves as historical reference. |
-| `Partially Implemented` | Core parts are built but significant gaps remain. Doc should note what's done vs outstanding. |
-| `Not Started` | Design is approved but no implementation exists yet. These docs live in `docs/design/future/`. |
+| Status | Meaning | Directory |
+|--------|---------|-----------|
+| `Implemented` | Feature is fully built and live. Design doc serves as historical reference. | `implemented/` |
+| `Partially Implemented` | Core parts are built and active work is ongoing. Doc should note what's done vs outstanding. | top level |
+| `Backlog` | Partially built but no active work expected for a while. The shipped portion is in production; the gaps are parked. Doc should note what's done vs outstanding. | `backlog/` |
+| `Not Started` | Design is approved but no implementation exists yet. | `future/` |
+
+The top level is reserved for **living architecture overviews** (`overall.md`, `03-frontend.md`, etc.) and a small number of features under active iteration. If a doc has been `Partially Implemented` for a while with no active work, move it to `backlog/`.
 
 ### Rules
 
-- When you finish implementing a feature described by a design doc, update its status to `Implemented` and set the review date.
-- When you begin work on a feature, move it from `future/` back to `docs/design/` and set status to `Partially Implemented`.
-- When creating a new design doc, start with status `Not Started` and place it in `docs/design/future/`.
-- The `Last reviewed` date should reflect when someone last verified the status is accurate.
-
-## Directory layout
-
-```
-docs/design/
-├── AGENTS.md              # This file — conventions for design docs
-├── overall.md             # High-level system overview
-├── 01-database-schema.md  # Implemented designs
-├── 02-api-server.md
-├── ...
-└── future/                # Not-yet-started designs
-    ├── 14-codebase-context.md
-    └── ...
-```
+- When you finish implementing a feature described by a design doc, update its status to `Implemented` and move the file into `implemented/`.
+- When you begin work on a feature, move it from `future/` (or `backlog/`) to the top level and set status to `Partially Implemented`.
+- When work on a `Partially Implemented` doc has been paused for more than ~a month, move it to `backlog/` and set status to `Backlog`.
+- When creating a new design doc, start with status `Not Started` and place it in `future/`.
+- The `Last reviewed` date should reflect when someone last verified the status is accurate. Update it whenever you change the status.

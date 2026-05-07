@@ -1,8 +1,8 @@
 # 31 - Automations Tab (On-Demand Workflows)
 
-> **Status:** Partially Implemented | **Last reviewed:** 2026-04-21
+> **Status:** Implemented | **Last reviewed:** 2026-05-06
 >
-> **Implementation notes:** Superseded by [48-automations-separation.md](implemented/48-automations-separation.md). The server-backed automations model, API, scheduler integration, and frontend surfaces now exist; this doc remains as the earlier MVP framing.
+> **Implementation notes:** Superseded by [48-automations-separation.md](48-automations-separation.md). The server-backed automations model, API, scheduler integration, and frontend surfaces now exist; this doc remains as the earlier MVP framing.
 
 > Add an `Automations` surface that lets teams define reusable workflows and run them on command, while staying aligned with the existing PM + jobs architecture.
 
