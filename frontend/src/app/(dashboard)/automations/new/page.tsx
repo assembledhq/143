@@ -9,7 +9,6 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Textarea } from "@/components/ui/textarea";
 import {
   Select,
   SelectContent,
@@ -26,6 +25,7 @@ import { api } from "@/lib/api";
 import { agentTypeForModel } from "@/lib/agents";
 import { AUTOMATION_GOAL_MAX_LENGTH, automationGoalLengthState } from "@/lib/automation-validation";
 import { BranchPicker } from "@/components/branch-picker";
+import { AutomationGoalEditor } from "@/components/automation-goal-editor";
 import { AutomationModelSelect } from "@/components/automation-model-select";
 import { NoReposWarning } from "@/components/no-repos-warning";
 import { PageContainer } from "@/components/page-container";
@@ -252,14 +252,16 @@ export default function NewAutomationPage() {
                 {goalLength.countText}
               </span>
             </div>
-            <Textarea
+            <AutomationGoalEditor
               id="goal"
               value={goal}
-              onChange={(e) => setGoal(e.target.value)}
+              onChange={setGoal}
+              repositoryId={repoId || undefined}
+              branch={selectedBaseBranch || selectedRepo?.default_branch || undefined}
+              agentType={effectiveAgentType}
               placeholder="Describe what the automation should do each run..."
               rows={3}
-              maxLength={AUTOMATION_GOAL_MAX_LENGTH}
-              aria-invalid={goalLength.isTooLong}
+              ariaInvalid={goalLength.isTooLong}
             />
             <p className={cn("text-xs", goalLength.isTooLong ? "text-destructive" : "text-muted-foreground")}>
               {goalLength.message ?? `Up to ${AUTOMATION_GOAL_MAX_LENGTH.toLocaleString("en-US")} characters.`}
