@@ -65,6 +65,22 @@ warn_log_rotation_skipped() {
   echo "    make repair-deploy-sudoers ROLE=$ROLE HOST=$HOST SSH_KEY=$SSH_KEY"
 }
 
+warn_docker_dns_skipped() {
+  echo "WARNING: docker daemon DNS pinning was not updated on this deploy; continuing."
+  echo "  The service deploy will continue, but the host may still depend on its inherited"
+  echo "  resolv.conf upstream — a single resolver outage will take all container DNS down."
+  echo "  To repair the host when root SSH is available, run:"
+  echo "    make repair-deploy-sudoers ROLE=$ROLE HOST=$HOST SSH_KEY=$SSH_KEY"
+}
+
+# Resolver list pinned into /etc/docker/daemon.json on every deploy. Three
+# independent operators / networks: Cloudflare (1.1.1.1), Google (8.8.8.8),
+# Quad9 (9.9.9.9). Order is fastest-first; Docker's embedded resolver at
+# 127.0.0.11 falls through on SERVFAIL/timeout. Lives in deploy.sh (not the
+# helper) so it's auditable in repo diff and trivially overridable for
+# testing without touching the script that runs as root.
+DOCKER_DNS_RESOLVERS=(1.1.1.1 8.8.8.8 9.9.9.9)
+
 run_sandbox_resolv_conf() {
   ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
     "sudo -n /opt/143/deploy/scripts/sandbox-resolv-conf.sh"
@@ -164,6 +180,12 @@ if [ "$ROLE" = "app" ] || [ "$ROLE" = "worker" ] || [ "$ROLE" = "logging" ]; the
   scp "${SCP_OPTS[@]}" "$PROJECT_DIR/docker-compose.vector.yml" deploy@"$HOST":/opt/143/
   ssh "${SSH_OPTS[@]}" deploy@"$HOST" "mkdir -p /opt/143/deploy /opt/143/deploy/scripts"
   scp "${SCP_OPTS[@]}" "$PROJECT_DIR/deploy/vector.yaml" deploy@"$HOST":/opt/143/deploy/
+fi
+# DNS probe is included by app and worker compose files (logging has its
+# own stack and doesn't include it). Stage the file so docker compose can
+# resolve the include directive.
+if [ "$ROLE" = "app" ] || [ "$ROLE" = "worker" ]; then
+  scp "${SCP_OPTS[@]}" "$PROJECT_DIR/docker-compose.dns-probe.yml" deploy@"$HOST":/opt/143/
 fi
 if [ "$ROLE" = "logging" ]; then
   # Older logging hosts may have root-owned vmalert/grafana dirs from a prior
@@ -332,6 +354,61 @@ if [ "$LOG_ROTATION_READY" -eq 1 ]; then
       fi
     else
       warn_log_rotation_skipped
+    fi
+  fi
+fi
+
+# --- Docker daemon DNS resolvers (idempotent) ---
+# Pin /etc/docker/daemon.json's `dns` list to multiple independent
+# resolvers so a single upstream DNS outage doesn't take every container's
+# outbound DNS down at once. The 2026-05-07T04:15Z incident hit three
+# workers simultaneously this way (sandboxes couldn't resolve chatgpt.com,
+# workers couldn't resolve github.com) because the embedded resolver at
+# 127.0.0.11 inherits a single host resolv.conf entry by default.
+#
+# Sync + invoke pattern mirrors install-log-rotation.sh above.
+DOCKER_DNS_READY=1
+
+ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
+  "sudo -n chown -R deploy:deploy /opt/143/deploy/scripts 2>&1 | sed 's/^/  chown: /' || true"
+if ! scp -p "${SCP_OPTS[@]}" "$PROJECT_DIR/deploy/scripts/install-docker-dns.sh" \
+    deploy@"$HOST":/opt/143/deploy/scripts/install-docker-dns.sh.new; then
+  echo "install-docker-dns.sh sync failed; trying no-teardown deploy sudoers repair..."
+  if repair_deploy_sudoers; then
+    ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
+      "sudo -n chown -R deploy:deploy /opt/143/deploy/scripts 2>&1 | sed 's/^/  chown: /' || true"
+    scp -p "${SCP_OPTS[@]}" "$PROJECT_DIR/deploy/scripts/install-docker-dns.sh" \
+      deploy@"$HOST":/opt/143/deploy/scripts/install-docker-dns.sh.new
+  else
+    warn_docker_dns_skipped
+    DOCKER_DNS_READY=0
+  fi
+fi
+if [ "$DOCKER_DNS_READY" -eq 1 ]; then
+  if ! ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
+    "mv /opt/143/deploy/scripts/install-docker-dns.sh.new /opt/143/deploy/scripts/install-docker-dns.sh \
+     && chmod +x /opt/143/deploy/scripts/install-docker-dns.sh \
+     || { rm -f /opt/143/deploy/scripts/install-docker-dns.sh.new; exit 1; }"; then
+    warn_docker_dns_skipped
+    DOCKER_DNS_READY=0
+  fi
+fi
+
+if [ "$DOCKER_DNS_READY" -eq 1 ]; then
+  echo "Ensuring docker daemon DNS resolvers (${DOCKER_DNS_RESOLVERS[*]})..."
+  run_docker_dns() {
+    ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
+      "sudo -n /opt/143/deploy/scripts/install-docker-dns.sh ${DOCKER_DNS_RESOLVERS[*]}"
+  }
+  if ! run_docker_dns; then
+    echo "install-docker-dns.sh failed under deploy+sudo; trying no-teardown deploy sudoers repair..."
+    if repair_deploy_sudoers; then
+      echo "Retrying docker daemon DNS pinning after sudoers repair..."
+      if ! run_docker_dns; then
+        warn_docker_dns_skipped
+      fi
+    else
+      warn_docker_dns_skipped
     fi
   fi
 fi
