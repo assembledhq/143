@@ -3069,6 +3069,8 @@ export function SessionDetailContent({ id }: { id: string }) {
   const [composerCommands, setComposerCommands] = useState<SessionInputCommand[]>([]);
   const [composerIsUploading, setComposerIsUploading] = useState(false);
   const [composerUploadError, setComposerUploadError] = useState<string | null>(null);
+  const focusComposerAfterThreadCreateRef = useRef(false);
+  const addTabButtonRef = useRef<HTMLButtonElement>(null);
   const composerTextareaRef = useRef<HTMLTextAreaElement>(null);
   const composerUploadInputRef = useRef<HTMLInputElement>(null);
   // Tracks an in-flight agent-switch PATCH so the send-time PATCH can wait
@@ -3501,6 +3503,7 @@ export function SessionDetailContent({ id }: { id: string }) {
           },
         };
       });
+      focusComposerAfterThreadCreateRef.current = true;
       setActiveThreadId(response.data.id);
       setComposerSelectedModel(getInitialComposerSelectedModel(response.data));
       queryClient.invalidateQueries({ queryKey: ["session", id] });
@@ -3509,6 +3512,30 @@ export function SessionDetailContent({ id }: { id: string }) {
       toast.error(err instanceof Error ? err.message : "Failed to create tab");
     },
   });
+
+  useEffect(() => {
+    if (!focusComposerAfterThreadCreateRef.current) {
+      return;
+    }
+
+    const rafID = window.requestAnimationFrame(() => {
+      focusComposerAfterThreadCreateRef.current = false;
+      const shouldFocusComposer = session?.agent_type !== "pm_agent"
+        && composerCanSendMessage
+        && composerTextareaRef.current !== null
+        && !composerTextareaRef.current.disabled;
+
+      if (shouldFocusComposer) {
+        composerTextareaRef.current?.focus();
+        return;
+      }
+
+      addTabButtonRef.current?.focus();
+    });
+
+    return () => window.cancelAnimationFrame(rafID);
+  }, [activeThread?.id, composerCanSendMessage, session?.agent_type]);
+
   const updateThreadMutation = useMutation({
     mutationFn: (vars: { threadId: string; body: { agent_type?: string; model?: string | null; label: string } }) =>
       api.sessions.updateThread(id, vars.threadId, vars.body),
@@ -4101,6 +4128,7 @@ export function SessionDetailContent({ id }: { id: string }) {
             onForkThread={(tid) => forkThreadMutation.mutate(tid)}
             onRevertThread={(tid) => revertThreadMutation.mutate(tid)}
             cancelPendingThreadId={cancelThreadMutation.isPending ? cancelThreadMutation.variables ?? null : null}
+            addTabButtonRef={addTabButtonRef}
           />
         ) : null}
         {/* Center content — either chat or diff review */}
