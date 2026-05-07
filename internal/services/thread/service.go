@@ -25,6 +25,7 @@ var (
 	ErrInvalidModel           = errors.New("invalid model")
 	ErrEnqueueFailed          = errors.New("enqueue failed")
 	ErrThreadNotFound         = errors.New("thread not found")
+	ErrThreadNotEditable      = errors.New("thread is not editable")
 	ErrThreadNotIdle          = errors.New("thread must be idle to send a message")
 	ErrActiveThreadExists     = errors.New("another thread is already active")
 	ErrThreadCannotBeEnded    = errors.New("thread cannot be ended in its current state")
@@ -79,6 +80,7 @@ type ThreadStore interface {
 	ListBySession(ctx context.Context, orgID, sessionID uuid.UUID) ([]models.SessionThread, error)
 	ClaimIdleForSession(ctx context.Context, orgID, sessionID, threadID uuid.UUID, maxRunning int) (models.SessionThread, error)
 	ClaimForResumeInSession(ctx context.Context, orgID, sessionID, threadID uuid.UUID, maxRunning int) (models.SessionThread, error)
+	UpdateEditable(ctx context.Context, thread *models.SessionThread) error
 	UpdateStatus(ctx context.Context, orgID, threadID uuid.UUID, status models.ThreadStatus) error
 	IncrementPendingMessages(ctx context.Context, orgID, threadID uuid.UUID) error
 	MarkCancelRequested(ctx context.Context, orgID, threadID uuid.UUID) error
@@ -125,6 +127,20 @@ type CreateThreadInput struct {
 	Label        string
 	Instructions string
 	FileScope    []string
+}
+
+// UpdateThreadInput patches an editable (idle, current_turn=0) thread. Model
+// uses *string to distinguish three states the handler maps from the wire:
+//   - nil:       field absent from the patch — keep the existing override
+//   - non-nil "": field present as JSON null or empty string — clear the override
+//   - non-nil v: field present with a value — set/validate to v
+type UpdateThreadInput struct {
+	SessionID uuid.UUID
+	OrgID     uuid.UUID
+	ThreadID  uuid.UUID
+	AgentType string
+	Model     *string
+	Label     string
 }
 
 // SendMessageInput holds the input for sending a message to a thread.
@@ -237,14 +253,6 @@ func (s *Service) SetQuestionStore(store QuestionStore) {
 	s.questionStore = store
 }
 
-func isTerminalStatus(status string) bool {
-	switch status {
-	case "completed", "pr_created", "failed", "cancelled", "skipped":
-		return true
-	}
-	return false
-}
-
 // CreateThread validates inputs and creates a blank idle thread.
 func (s *Service) CreateThread(ctx context.Context, input CreateThreadInput) (*models.SessionThread, error) {
 	// Verify session exists and belongs to org.
@@ -253,8 +261,11 @@ func (s *Service) CreateThread(ctx context.Context, input CreateThreadInput) (*m
 		return nil, fmt.Errorf("%w: %w", ErrSessionNotFound, err)
 	}
 
-	// Only allow adding threads to active sessions.
-	if isTerminalStatus(session.Status) {
+	// Allow blank tabs on active sessions and on the same terminal statuses
+	// the follow-up message path can already resume. This keeps "add tab"
+	// aligned with "continue session" while still rejecting non-resumable
+	// statuses such as skipped.
+	if !models.SessionStatus(session.Status).CanAddThread() {
 		return nil, ErrSessionTerminal
 	}
 
@@ -299,6 +310,61 @@ func (s *Service) CreateThread(ctx context.Context, input CreateThreadInput) (*m
 	}
 
 	return thread, nil
+}
+
+func (s *Service) UpdateThread(ctx context.Context, input UpdateThreadInput) (*models.SessionThread, error) {
+	session, err := s.sessionStore.GetByID(ctx, input.OrgID, input.SessionID)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrSessionNotFound, err)
+	}
+	if !models.SessionStatus(session.Status).CanAddThread() {
+		return nil, ErrSessionTerminal
+	}
+
+	thread, err := s.threadStore.GetByID(ctx, input.OrgID, input.ThreadID)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrThreadNotFound, err)
+	}
+	if thread.SessionID != input.SessionID {
+		return nil, ErrThreadNotFound
+	}
+	if thread.Status != models.ThreadStatusIdle || thread.CurrentTurn != 0 {
+		return nil, ErrThreadNotEditable
+	}
+
+	agentType := thread.AgentType
+	if input.AgentType != "" {
+		agentType = models.AgentType(input.AgentType)
+		if err := agentType.Validate(); err != nil {
+			return nil, fmt.Errorf("%w: %w", ErrInvalidAgentType, err)
+		}
+	}
+
+	thread.AgentType = agentType
+	thread.Label = input.Label
+	switch {
+	case input.Model != nil && *input.Model != "":
+		if err := models.ValidateModelForAgentType(agentType, *input.Model); err != nil {
+			return nil, fmt.Errorf("%w: %w", ErrInvalidModel, err)
+		}
+		model := *input.Model
+		thread.ModelOverride = &model
+	case input.Model != nil:
+		// Explicit empty model — user picked the agent default.
+		thread.ModelOverride = nil
+	case input.AgentType != "":
+		// Agent switched without an explicit model: drop the inherited override
+		// because it was scoped to the previous agent.
+		thread.ModelOverride = nil
+	}
+
+	if err := s.threadStore.UpdateEditable(ctx, &thread); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrThreadNotEditable
+		}
+		return nil, fmt.Errorf("update thread: %w", err)
+	}
+	return &thread, nil
 }
 
 // ListThreads returns all threads for a session.

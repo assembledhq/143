@@ -377,6 +377,10 @@ export const api = {
       get<import('./types').SingleResponse<import('./types').SessionThread>>(`/api/v1/sessions/${sessionId}/threads/${threadId}`),
     createThread: (sessionId: string, body: { agent_type?: string; model?: string; label: string; instructions?: string; file_scope?: string[] }) =>
       post<import('./types').SingleResponse<import('./types').SessionThread>>(`/api/v1/sessions/${sessionId}/threads`, body),
+    // model: omit to keep the existing override, pass null to clear it, pass a
+    // string to set/validate it. The backend distinguishes these three states.
+    updateThread: (sessionId: string, threadId: string, body: { agent_type?: string; model?: string | null; label: string }) =>
+      patch<import('./types').SingleResponse<import('./types').SessionThread>>(`/api/v1/sessions/${sessionId}/threads/${threadId}`, body),
     sendThreadMessage: (sessionId: string, threadId: string, body: { message: string; images?: string[]; references?: import('./types').SessionInputReference[]; commands?: import('./types').SessionInputCommand[]; planMode?: boolean; resolveReviewCommentIDs?: string[] }) =>
       post<import('./types').SingleResponse<import('./types').SessionMessage>>(
         `/api/v1/sessions/${sessionId}/threads/${threadId}/messages`,

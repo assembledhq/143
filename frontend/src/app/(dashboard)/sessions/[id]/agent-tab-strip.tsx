@@ -96,6 +96,7 @@ interface AgentTabStripProps {
   statusConfig: Record<string, { label: string }>;
   onActiveThreadChange: (threadId: string) => void;
   onAddTab: () => void;
+  addTabPending?: boolean;
   onCancelThread: (threadId: string) => void;
   onForkThread: (threadId: string) => void;
   onRevertThread: (threadId: string) => void;
@@ -121,6 +122,7 @@ export function AgentTabStrip({
   statusConfig,
   onActiveThreadChange,
   onAddTab,
+  addTabPending = false,
   onCancelThread,
   onForkThread,
   onRevertThread,
@@ -255,12 +257,11 @@ export function AgentTabStrip({
         <div className="flex items-center gap-2 min-w-0">
           <Tabs value={activeThreadId} onValueChange={onActiveThreadChange} className="min-w-0 flex-1">
             <TabsList
-              variant={tabs.length > 1 ? "default" : "line"}
+              variant="line"
               size="sm"
               aria-label="Agent tabs"
               className={cn(
-                "h-auto max-w-full justify-start gap-1 overflow-x-auto overflow-y-hidden",
-                tabs.length === 1 ? "border-b-0 bg-transparent p-0" : "bg-muted/60 p-1",
+                "h-auto max-w-full justify-start gap-1 overflow-x-auto overflow-y-hidden border-b-0 bg-transparent p-0",
               )}
             >
               {tabs.map((thread) => {
@@ -278,7 +279,7 @@ export function AgentTabStrip({
                       <TabsTrigger
                         value={thread.id}
                         className={cn(
-                          "h-8 max-w-[15rem] gap-1.5 rounded-md px-2 text-xs",
+                          "h-8 max-w-[15rem] gap-1.5 rounded-md px-2 text-xs data-[state=active]:text-primary",
                           tabs.length === 1 && "data-[state=active]:bg-transparent data-[state=active]:shadow-none",
                         )}
                       >
@@ -352,6 +353,7 @@ export function AgentTabStrip({
             aria-label="Add agent tab"
             title="Add agent tab"
             onClick={onAddTab}
+            disabled={addTabPending}
           >
             <Plus className="h-4 w-4" />
           </Button>
