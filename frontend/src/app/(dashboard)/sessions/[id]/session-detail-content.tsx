@@ -4416,8 +4416,9 @@ export function SessionDetailContent({ id }: { id: string }) {
         <div className="hidden md:flex">
           <ResizeHandle onResize={handleDetailResize} />
           <div
+            data-testid="session-detail-panel"
             style={{ width: detailWidth }}
-            className="border-l border-border bg-muted/20 flex flex-col shrink-0 overflow-hidden"
+            className="relative z-10 border-l border-border bg-background flex flex-col shrink-0 overflow-hidden"
           >
             {panelTabsEl}
           </div>

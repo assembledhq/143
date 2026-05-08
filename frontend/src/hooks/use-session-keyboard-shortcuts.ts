@@ -1,6 +1,6 @@
 import { useEffect, useRef } from "react";
 
-export type SessionDetailTab = "overview" | "changes" | "validation" | "preview";
+export type SessionDetailTab = "overview" | "changes" | "preview";
 
 type TranscriptControls = {
   focus: () => void;
