@@ -174,7 +174,7 @@ export function AgentTabStrip({
                     )}
                     aria-hidden
                   />
-                  <span className="truncate text-sm font-medium text-foreground">{activeThread.label}</span>
+                  <span className="truncate text-xs font-medium text-foreground">{activeThread.label}</span>
                   {isCancelling && (
                     <Loader2
                       className="h-3.5 w-3.5 shrink-0 animate-spin text-muted-foreground"
