@@ -9,9 +9,10 @@ interface ResizeHandleProps {
   /** Called continuously during drag with the delta in px (positive = right/down) */
   onResize: (delta: number) => void;
   className?: string;
+  testId?: string;
 }
 
-export function ResizeHandle({ direction = "horizontal", onResize, className }: ResizeHandleProps) {
+export function ResizeHandle({ direction = "horizontal", onResize, className, testId }: ResizeHandleProps) {
   const handleRef = useRef<HTMLDivElement>(null);
   const isDragging = useRef(false);
   const lastPos = useRef(0);
@@ -53,6 +54,9 @@ export function ResizeHandle({ direction = "horizontal", onResize, className }: 
     <div
       ref={handleRef}
       onMouseDown={handleMouseDown}
+      role="separator"
+      aria-orientation="vertical"
+      data-testid={testId}
       className={cn(
         "shrink-0 relative z-10 group",
         direction === "horizontal" && "w-0 cursor-col-resize",
