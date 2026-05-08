@@ -208,22 +208,34 @@ func TestGracefulShutdownUsesShortNodeDrainContext(t *testing.T) {
 	require.NoError(t, err, "main.go should be readable for shutdown ordering regression test")
 
 	body := string(src)
-	require.Contains(t, body, "const nodeDrainMarkTimeout = 5 * time.Second",
+	require.Contains(t, body, "nodeDrainMarkTimeout      = 5 * time.Second",
 		"node drain DB marking should use a short bounded timeout")
+	require.Contains(t, body, "httpDrainPropagationDelay = 7 * time.Second",
+		"HTTP drain propagation should cover Caddy's 2s health interval, 2s timeout, and DNS refresh slack")
+	require.Contains(t, body, "httpShutdownTimeout       = 100 * time.Second",
+		"HTTP shutdown should leave headroom inside docker-compose.app.yml stop_grace_period after drain propagation")
 	require.Contains(t, body, "nodeDrainCtx, nodeDrainCancel := context.WithTimeout(context.Background(), nodeDrainMarkTimeout)",
 		"node drain DB marking should not consume the worker job drain context")
 	require.Contains(t, body, "nodeManager.RequestDrain(nodeDrainCtx, time.Now())",
 		"node drain DB marking should use the short node-drain context")
 	require.Contains(t, body, "drainCtx, drainCancel := context.WithTimeout(context.Background(), cfg.WorkerDrainTimeout)",
 		"worker jobs should keep the full configured drain timeout")
+	require.Contains(t, body, "shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), httpShutdownTimeout)",
+		"HTTP shutdown should use the bounded timeout constant")
 
 	nodeDrain := strings.Index(body, "nodeManager.RequestDrain(nodeDrainCtx, time.Now())")
+	httpDrainSignal := strings.Index(body, "close(shutdownCh)")
+	httpDrainDelay := strings.Index(body, "time.Sleep(httpDrainPropagationDelay)")
 	workerDrain := strings.Index(body, "drainCtx, drainCancel := context.WithTimeout(context.Background(), cfg.WorkerDrainTimeout)")
 	activeJobLoop := strings.Index(body, "activeJobs := 0")
 	require.NotEqual(t, -1, nodeDrain, "shutdown should mark the node draining")
+	require.NotEqual(t, -1, httpDrainSignal, "shutdown should mark HTTP health as draining")
+	require.NotEqual(t, -1, httpDrainDelay, "shutdown should wait for proxy health propagation")
 	require.NotEqual(t, -1, workerDrain, "shutdown should create the worker drain context")
 	require.NotEqual(t, -1, activeJobLoop, "shutdown should wait for active jobs")
-	require.Less(t, nodeDrain, workerDrain, "node drain DB marking should happen before the worker drain budget starts")
+	require.Less(t, nodeDrain, httpDrainSignal, "node drain DB marking should happen before HTTP health drain begins")
+	require.Less(t, httpDrainSignal, httpDrainDelay, "HTTP health should be marked draining before waiting for proxy propagation")
+	require.Less(t, httpDrainDelay, workerDrain, "proxy propagation should finish before the worker drain budget starts")
 	require.Less(t, workerDrain, activeJobLoop, "the worker drain budget should be reserved for the active-job wait")
 }
 
