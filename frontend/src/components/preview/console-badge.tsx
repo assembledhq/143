@@ -55,11 +55,15 @@ export function ConsoleBadge({ sessionId }: ConsoleBadgeProps) {
     return () => document.removeEventListener("mousedown", handleClickOutside);
   }, [expanded]);
 
-  const { data: messages = [] } = useQuery({
+  const { data: rawMessages } = useQuery({
     queryKey: ["preview-console", sessionId],
     queryFn: () => api.sessions.preview.console(sessionId),
     refetchInterval: 10000,
   });
+  const messages = useMemo(
+    () => (Array.isArray(rawMessages) ? rawMessages : []),
+    [rawMessages],
+  );
 
   const { errorCount, warnCount } = useMemo(() => {
     let errors = 0;
