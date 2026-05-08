@@ -2443,11 +2443,32 @@ export function SessionDetailContent({ id }: { id: string }) {
   const [isEditingTitle, setIsEditingTitle] = useState(false);
   const [draftTitle, setDraftTitle] = useState("");
   const [isMobileReviewViewport, setIsMobileReviewViewport] = useState(false);
+  const previousReviewParamRef = useRef(reviewParam);
+  const suppressNextReviewParamClearRef = useRef(false);
   useEffect(() => {
     if (reviewParam === "active") {
       setCenterMode("review");
+    } else if (previousReviewParamRef.current === "active") {
+      if (suppressNextReviewParamClearRef.current) {
+        suppressNextReviewParamClearRef.current = false;
+      } else {
+        setCenterMode("chat");
+      }
     }
+    previousReviewParamRef.current = reviewParam;
   }, [reviewParam]);
+
+  useEffect(() => {
+    const syncReviewModeFromHistory = () => {
+      const nextReviewParam = new URLSearchParams(window.location.search).get("review");
+      suppressNextReviewParamClearRef.current = false;
+      previousReviewParamRef.current = nextReviewParam;
+      setCenterMode(nextReviewParam === "active" ? "review" : "chat");
+    };
+
+    window.addEventListener("popstate", syncReviewModeFromHistory);
+    return () => window.removeEventListener("popstate", syncReviewModeFromHistory);
+  }, []);
 
   useEffect(() => {
     if (typeof window === "undefined" || typeof window.matchMedia !== "function") {
@@ -2478,6 +2499,7 @@ export function SessionDetailContent({ id }: { id: string }) {
   const openReview = useCallback((fileIndex?: number) => {
     if (fileIndex !== undefined) setActiveFileIndex(fileIndex);
     setCenterMode("review");
+    suppressNextReviewParamClearRef.current = true;
     setReviewParam("active");
     setDetailTab("changes");
     setShowDetailPanel(true);
@@ -2495,6 +2517,7 @@ export function SessionDetailContent({ id }: { id: string }) {
 
   // --- Exit review mode ---
   const exitReview = useCallback(() => {
+    suppressNextReviewParamClearRef.current = false;
     setCenterMode("chat");
     setReviewParam(null);
   }, [setReviewParam]);

@@ -5407,6 +5407,34 @@ describe('SessionDetailPage', () => {
     });
   });
 
+  it('exits review mode when browser history removes the review query param', async () => {
+    const sessionWithDiff: Session = {
+      ...mockSessions[0],
+      diff: 'diff --git a/src/app.ts b/src/app.ts\n--- a/src/app.ts\n+++ b/src/app.ts\n@@ -1,3 +1,4 @@\n import express from "express";\n+import cors from "cors";\n const app = express();\n app.listen(3000);',
+      diff_stats: { added: 1, removed: 0, files_changed: 1 },
+    };
+
+    mockSessionDetailWithLazyDiff(sessionWithDiff);
+
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+    await screen.findAllByText('Fixed TypeError by adding null check');
+
+    const user = userEvent.setup();
+    await user.click(screen.getAllByTitle('View changes')[0]);
+    expect((await screen.findAllByText('src/app.ts')).length).toBeGreaterThan(0);
+    expect(screen.getByTitle('File tree required during review')).toBeInTheDocument();
+
+    act(() => {
+      window.history.pushState(null, '', '/sessions/session-abcdef12-3456-7890?review=active');
+      window.history.pushState(null, '', '/sessions/session-abcdef12-3456-7890');
+      window.dispatchEvent(new PopStateEvent('popstate'));
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTitle('Hide details')).toBeInTheDocument();
+    });
+  });
+
   it('shows review comment input in review mode for active session', async () => {
     const idleSessionWithDiff: Session = {
       ...mockSessions[0],
