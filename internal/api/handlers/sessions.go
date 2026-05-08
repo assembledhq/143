@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/assembledhq/143/internal/api/middleware"
 	"github.com/assembledhq/143/internal/api/sse"
@@ -2723,7 +2724,7 @@ func buildManualSessionDescription(message string, images []string) string {
 const defaultManualSessionTitle = "Manual Session"
 
 func manualSessionTitle(message string) string {
-	trimmed := strings.TrimSpace(message)
+	trimmed := strings.TrimSpace(strings.ToValidUTF8(message, ""))
 	if trimmed == "" {
 		return defaultManualSessionTitle
 	}
@@ -2732,11 +2733,18 @@ func manualSessionTitle(message string) string {
 		trimmed = trimmed[:idx]
 	}
 
-	if len(trimmed) <= 120 {
-		return trimmed
-	}
+	return truncateUTF8Title(trimmed, 120)
+}
 
-	return strings.TrimSpace(trimmed[:120]) + "..."
+func truncateUTF8Title(value string, maxBytes int) string {
+	if len(value) <= maxBytes {
+		return value
+	}
+	truncated := value[:maxBytes]
+	for len(truncated) > 0 && !utf8.ValidString(truncated) {
+		truncated = truncated[:len(truncated)-1]
+	}
+	return strings.TrimSpace(truncated) + "..."
 }
 
 // shouldOverrideTitleWithLinearIssue reports whether a Linear primary
