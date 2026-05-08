@@ -26,6 +26,8 @@ These patterns apply across every page. They are not optional — they define th
 - **Separator-led hierarchy** — Prefer subtle borders/dividers over heavy shadows for panel structure. Shadows are optional and minimal.
 - **App-shell first layout** — Dashboard pages should feel like a working surface: persistent sidebar, full-width content region, and reduced `max-width` constraints unless readability requires one.
 - **Operator-controlled pane widths** — Desktop shell navigation and two-pane entity list layouts should use draggable resize handles with conservative min/max bounds, default to the current product widths, and restore the user's last chosen widths from `localStorage` on return.
+- **Typing stays local** — Input-heavy surfaces such as session composers, search boxes, and settings forms must keep keystroke updates scoped to the input subtree. Adjacent chrome like pickers, tables, timelines, or other data-driven controls should sit behind memoized boundaries so polling or unrelated state does not degrade typing latency over time.
+- **Performance regressions get tests** — Any interactive screen with a realistic risk of render churn should carry a focused frontend performance test that types into the hot-path input and asserts unrelated expensive children do not rerender.
 
 ## Framework Decision: Next.js (React)
 
