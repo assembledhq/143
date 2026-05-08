@@ -411,6 +411,13 @@ export interface PullRequestCheckSummary {
   summary?: string;
 }
 
+export interface PullRequestActiveRepair {
+  action_type: "fix_tests" | "resolve_conflicts";
+  session_id: string;
+  session_status: string;
+  health_version: number;
+}
+
 export interface PullRequestHealthResponse {
   pull_request_id: string;
   pull_request_number: number;
@@ -431,6 +438,7 @@ export interface PullRequestHealthResponse {
   can_resolve_conflicts: boolean;
   can_fix_tests: boolean;
   can_merge: boolean;
+  active_repairs?: PullRequestActiveRepair[];
   enrichment_status: "not_requested" | "pending" | "ready" | "failed" | "stale";
   enrichment_requested: boolean;
   enrichment_ready: boolean;

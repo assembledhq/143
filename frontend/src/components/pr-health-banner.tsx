@@ -32,32 +32,45 @@ export type PushChangesAction = {
 
 type PRHealthBannerProps = {
   health: PullRequestHealthResponse;
+  currentSessionId?: string;
   pendingAction: PRBannerAction;
   repairError?: string | null;
   mergeAuthRequired?: boolean;
   onFixTests: () => void;
   onResolveConflicts: () => void;
   onMerge: () => void;
+  onOpenRepairSession?: (sessionId: string) => void;
   pushChanges?: PushChangesAction;
 };
 
 export function PRHealthBanner({
   health,
+  currentSessionId,
   pendingAction,
   repairError,
   mergeAuthRequired = false,
   onFixTests,
   onResolveConflicts,
   onMerge,
+  onOpenRepairSession,
   pushChanges,
 }: PRHealthBannerProps) {
-  const isHealthy = !health.can_fix_tests && !health.can_resolve_conflicts;
+  const activeRepairState = deriveActiveRepairState(health.active_repairs, currentSessionId);
+  const isHealthy = activeRepairState.label === null && !health.can_fix_tests && !health.can_resolve_conflicts;
   const orderedChecks = [...(health.checks ?? [])]
     .map((check) => ({ ...check, status: normalizeCheckStatus(check.status) }))
     .sort((a, b) => statusRank(a.status) - statusRank(b.status) || a.name.localeCompare(b.name));
-  const canShowMergeButton = health.can_merge && checksAllowMerge(health.checks_confirmed, orderedChecks);
+  const canShowResolveConflictsButton = health.can_resolve_conflicts && !activeRepairState.suppressResolveConflicts;
+  const canShowFixTestsButton = health.can_fix_tests && !activeRepairState.suppressFixTests;
+  const canShowMergeButton =
+    !activeRepairState.suppressMerge && health.can_merge && checksAllowMerge(health.checks_confirmed, orderedChecks);
   const hasActionableButton =
-    health.can_resolve_conflicts || health.can_fix_tests || canShowMergeButton || !!pushChanges;
+    !!activeRepairState.label ||
+    canShowResolveConflictsButton ||
+    canShowFixTestsButton ||
+    canShowMergeButton ||
+    !!pushChanges ||
+    !!activeRepairState.openSessionID;
   const failedChecks = orderedChecks.filter((check) => check.status === "failed").length;
   const failedSummaryLabel = orderedChecks.length > 0
     ? `${failedChecks}/${orderedChecks.length} failed`
@@ -151,8 +164,24 @@ export function PRHealthBanner({
 
             {hasActionableButton && (
               <div className="space-y-2">
+                {activeRepairState.label && pendingAction === null && (
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Badge variant="secondary" className="text-xs">
+                      {activeRepairState.label}
+                    </Badge>
+                    {activeRepairState.openSessionID && onOpenRepairSession && (
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() => onOpenRepairSession(activeRepairState.openSessionID!)}
+                      >
+                        Open repair session
+                      </Button>
+                    )}
+                  </div>
+                )}
                 <div className="flex flex-wrap gap-2">
-                  {health.can_resolve_conflicts && (
+                  {canShowResolveConflictsButton && (
                     <Button
                       size="sm"
                       variant="outline"
@@ -167,7 +196,7 @@ export function PRHealthBanner({
                       {pendingAction === "resolve_conflicts" ? "Opening repair session…" : "Resolve conflicts"}
                     </Button>
                   )}
-                  {health.can_fix_tests && (
+                  {canShowFixTestsButton && (
                     <Button
                       size="sm"
                       variant="outline"
@@ -216,7 +245,7 @@ export function PRHealthBanner({
                     </Button>
                   )}
                 </div>
-                {health.can_resolve_conflicts && health.can_fix_tests && (
+                {canShowResolveConflictsButton && canShowFixTestsButton && (
                   <p className="text-xs text-muted-foreground">
                     Resolve conflicts first. CI may need to rerun afterward.
                   </p>
@@ -233,6 +262,34 @@ export function PRHealthBanner({
       </CardContent>
     </Card>
   );
+}
+
+function deriveActiveRepairState(
+  activeRepairs: PullRequestHealthResponse["active_repairs"],
+  currentSessionId?: string,
+): {
+  label: string | null;
+  openSessionID: string | null;
+  suppressFixTests: boolean;
+  suppressResolveConflicts: boolean;
+  suppressMerge: boolean;
+} {
+  const repairs = activeRepairs ?? [];
+  const resolveConflicts = repairs.find((repair) => repair.action_type === "resolve_conflicts");
+  const fixTests = repairs.find((repair) => repair.action_type === "fix_tests");
+  const dominantRepair = resolveConflicts ?? fixTests ?? null;
+
+  return {
+    label: dominantRepair
+      ? dominantRepair.action_type === "resolve_conflicts"
+        ? "Resolve conflicts running"
+        : "Fix tests running"
+      : null,
+    openSessionID: dominantRepair && dominantRepair.session_id !== currentSessionId ? dominantRepair.session_id : null,
+    suppressFixTests: !!fixTests || !!resolveConflicts,
+    suppressResolveConflicts: !!resolveConflicts,
+    suppressMerge: repairs.length > 0,
+  };
 }
 
 function statusRank(status: PullRequestCheckStatus) {

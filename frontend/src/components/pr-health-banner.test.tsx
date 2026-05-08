@@ -31,6 +31,7 @@ const baseHealth: PullRequestHealthResponse = {
   conflict_detail_available: false,
   failing_test_detail_available: false,
   obsolete_active_repair_sessions: false,
+  active_repairs: [],
 };
 
 describe("PRHealthBanner", () => {
@@ -394,5 +395,100 @@ describe("PRHealthBanner", () => {
     const button = screen.getByRole("button", { name: /Pushing/ });
     expect(button).toBeDisabled();
     expect(button).toHaveAttribute("title", "Pushing changes to the PR branch");
+  });
+
+  it("replaces Fix tests with a running state and open-session action for an active fix-tests repair on another session", () => {
+    const onOpenRepairSession = vi.fn();
+
+    renderWithProviders(
+      <PRHealthBanner
+        health={{
+          ...baseHealth,
+          can_fix_tests: true,
+          can_merge: true,
+          active_repairs: [{
+            action_type: "fix_tests",
+            session_id: "session-repair-123",
+            session_status: "running",
+            health_version: 2,
+          }],
+        }}
+        currentSessionId="session-current"
+        pendingAction={null}
+        repairError={null}
+        mergeAuthRequired={false}
+        onFixTests={vi.fn()}
+        onResolveConflicts={vi.fn()}
+        onMerge={vi.fn()}
+        onOpenRepairSession={onOpenRepairSession}
+      />,
+    );
+
+    expect(screen.getByText("Fix tests running")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Fix tests" })).toBeNull();
+    expect(screen.queryByRole("button", { name: /^Merge$/ })).toBeNull();
+    expect(screen.getByRole("button", { name: "Open repair session" })).toBeInTheDocument();
+  });
+
+  it("suppresses both repair CTAs when resolve conflicts is already running for the current PR state", () => {
+    renderWithProviders(
+      <PRHealthBanner
+        health={{
+          ...baseHealth,
+          can_resolve_conflicts: true,
+          can_fix_tests: true,
+          active_repairs: [{
+            action_type: "resolve_conflicts",
+            session_id: "session-current",
+            session_status: "running",
+            health_version: 2,
+          }],
+        }}
+        currentSessionId="session-current"
+        pendingAction={null}
+        repairError={null}
+        mergeAuthRequired={false}
+        onFixTests={vi.fn()}
+        onResolveConflicts={vi.fn()}
+        onMerge={vi.fn()}
+        onOpenRepairSession={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("Resolve conflicts running")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Resolve conflicts" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Fix tests" })).toBeNull();
+    expect(screen.queryByRole("button", { name: /^Merge$/ })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Open repair session" })).toBeNull();
+    expect(screen.queryByText("Resolve conflicts first. CI may need to rerun afterward.")).toBeNull();
+  });
+
+  it("treats an active repair as non-healthy even when the repair action booleans are suppressed", () => {
+    const { container } = renderWithProviders(
+      <PRHealthBanner
+        health={{
+          ...baseHealth,
+          needs_agent_action: true,
+          summary: "PR #42 has an active repair session.",
+          active_repairs: [{
+            action_type: "fix_tests",
+            session_id: "session-current",
+            session_status: "running",
+            health_version: 2,
+          }],
+        }}
+        currentSessionId="session-current"
+        pendingAction={null}
+        repairError={null}
+        mergeAuthRequired={false}
+        onFixTests={vi.fn()}
+        onResolveConflicts={vi.fn()}
+        onMerge={vi.fn()}
+        onOpenRepairSession={vi.fn()}
+      />,
+    );
+
+    expect(container.querySelector("svg.lucide-git-pull-request")).toBeInTheDocument();
+    expect(container.querySelector("svg.lucide-check-circle-2")).toBeNull();
   });
 });

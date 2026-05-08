@@ -1,6 +1,6 @@
 # 74 - PR Repair In-Progress UX
 
-> **Status:** Proposed | **Last reviewed:** 2026-05-07
+> **Status:** Implemented | **Last reviewed:** 2026-05-07
 
 ## Goal
 

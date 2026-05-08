@@ -1,6 +1,6 @@
 # Design: 143.dev
 
-> **Status:** Partially Implemented | **Last reviewed:** 2026-05-06
+> **Status:** Partially Implemented | **Last reviewed:** 2026-05-07
 
 [143.dev](http://143.dev) is an open-source platform that turns customer pain and production errors into safe, validated code fixes that ship automatically.
 
@@ -27,6 +27,7 @@ The system aggregates issues from support, Sentry, and Linear, prioritizes them 
 - Manual session creation should accept attachments-only starts. If the user uploads screenshots, photos, or files without typing prompt text, the create action stays enabled, the initial turn persists those attachments, and the session can begin with a placeholder title until the agent or user adds more text.
 - Settings pages should not rely on desktop-only table layouts on phones. Shared headers should give actions a full-width mobile lane, and dense settings lists should collapse into stacked rows/cards with inline labels instead of forcing horizontal scanning.
 - Automation run history should use a clear execution-row layout: strong status-first rows, a consistent metadata rail, room for result or failure snippets, and collapsible quiet-run groupings for low-signal streaks. Scope this to `/automations/:id` first and leave `/sessions` unchanged while the pattern is validated. Wireframes: [future/72-execution-list-wireframes.md](future/72-execution-list-wireframes.md).
+- PR health repair actions should expose durable in-progress state from the server rather than relying on mutation-local button spinners. For the current PR `health_version`, the health response carries `active_repairs`, the session detail banner suppresses conflicting repair/merge CTAs, and operators can jump into the active repair session after refreshes, navigation, or multi-viewer handoff. Detailed design: [implemented/74-pr-repair-in-progress-ux.md](implemented/74-pr-repair-in-progress-ux.md).
 
 ## Autopilot workspace UX
 
