@@ -25,7 +25,7 @@ function makeOptions(overrides = {}) {
       open: true,
       required: false,
       activeTab: "overview" as const,
-      availableTabs: ["overview", "changes", "validation", "preview"] as const,
+      availableTabs: ["overview", "changes", "preview"] as const,
       onToggle: vi.fn(),
       onClose: vi.fn(),
       onTabChange: vi.fn(),
