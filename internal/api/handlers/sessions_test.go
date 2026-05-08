@@ -12,6 +12,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/alicebob/miniredis/v2"
 	"github.com/assembledhq/143/internal/api/middleware"
@@ -4193,13 +4194,19 @@ func TestManualSessionTitle(t *testing.T) {
 			message:  strings.Repeat("a", 200),
 			expected: strings.Repeat("a", 120) + "...",
 		},
+		{
+			name:     "long message truncates at utf8 boundary",
+			message:  strings.Repeat("a", 119) + "…" + strings.Repeat("b", 20),
+			expected: strings.Repeat("a", 119) + "...",
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			result := manualSessionTitle(tt.message)
-			require.Equal(t, tt.expected, result)
+			require.True(t, utf8.ValidString(result), "manualSessionTitle should always return valid UTF-8")
+			require.Equal(t, tt.expected, result, "manualSessionTitle should derive the expected display title")
 		})
 	}
 }
