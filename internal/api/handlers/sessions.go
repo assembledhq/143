@@ -560,6 +560,8 @@ func (h *SessionHandler) List(w http.ResponseWriter, r *http.Request) {
 	items := make([]models.SessionListItem, len(runs))
 	sessionIDs := make([]uuid.UUID, len(runs))
 	for i, s := range runs {
+		s.Diff = nil
+		s.DiffHistory = nil
 		h.enrichSessionLinks(r.Context(), orgID, &s)
 		items[i] = models.SessionListItem{Session: s}
 		sessionIDs[i] = s.ID
@@ -653,7 +655,7 @@ func (h *SessionHandler) Get(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	run, err := h.runStore.GetByID(r.Context(), orgID, runID)
+	run, err := h.runStore.GetAPIDetailByID(r.Context(), orgID, runID)
 	if err != nil {
 		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "run not found")
 		return
@@ -675,6 +677,23 @@ func (h *SessionHandler) Get(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, models.SingleResponse[models.SessionDetail]{Data: detail})
+}
+
+func (h *SessionHandler) GetDiff(w http.ResponseWriter, r *http.Request) {
+	orgID := middleware.OrgIDFromContext(r.Context())
+	sessionID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid session ID")
+		return
+	}
+
+	payload, err := h.runStore.GetDiffByID(r.Context(), orgID, sessionID)
+	if err != nil {
+		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "session diff not found")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, models.SingleResponse[models.SessionDiff]{Data: payload})
 }
 
 func (h *SessionHandler) Update(w http.ResponseWriter, r *http.Request) {

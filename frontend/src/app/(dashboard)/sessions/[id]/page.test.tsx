@@ -6,7 +6,7 @@ import { server } from '@/test/mocks/server';
 import { mockSessions, mockMembers, mockIssues, mockPR, mockPRHealth } from '@/test/mocks/handlers';
 import { SessionDetailContent } from './session-detail-content';
 import { api } from '@/lib/api';
-import type { Issue, PullRequest, Session, SessionMessage, SessionReviewComment, SessionThread, SessionTimelineEntry, User, SingleResponse, ListResponse } from '@/lib/types';
+import type { Issue, PullRequest, Session, SessionDiff, SessionMessage, SessionReviewComment, SessionThread, SessionTimelineEntry, User, SingleResponse, ListResponse } from '@/lib/types';
 
 const { toast } = vi.hoisted(() => ({
   toast: {
@@ -17,6 +17,33 @@ const { toast } = vi.hoisted(() => ({
 const { routerPush } = vi.hoisted(() => ({
   routerPush: vi.fn(),
 }));
+
+function sessionWithoutRawDiff(session: Session): Session {
+  const copy = { ...session };
+  delete copy.diff;
+  delete copy.diff_history;
+  return copy;
+}
+
+function mockSessionDetailWithLazyDiff(session: Session) {
+  server.use(
+    http.get('/api/v1/sessions/:id', () => {
+      return HttpResponse.json({ data: sessionWithoutRawDiff(session) } satisfies SingleResponse<Session>);
+    }),
+    http.get('/api/v1/sessions/:id/diff', () => {
+      return HttpResponse.json({
+        data: {
+          session_id: session.id,
+          diff: session.diff,
+          diff_stats: session.diff_stats,
+          diff_history: session.diff_history ?? [],
+          diff_truncated: false,
+          diff_history_truncated: false,
+        },
+      } satisfies SingleResponse<SessionDiff>);
+    }),
+  );
+}
 
 vi.mock('@/lib/notify', () => ({
   notify: toast,
@@ -2704,6 +2731,7 @@ describe('SessionDetailPage', () => {
     const sessionWithHistory: Session = {
       ...mockSessions[0],
       diff: pass2Diff,
+      diff_stats: { added: 2, removed: 0, files_changed: 2 },
       diff_history: [
         { pass: 1, diff: pass1Diff, diff_stats: { added: 1, removed: 0, files_changed: 1 }, created_at: '2026-03-19T10:00:00Z' },
         { pass: 2, diff: pass2Diff, diff_stats: { added: 2, removed: 0, files_changed: 2 }, created_at: '2026-03-19T10:05:00Z' },
@@ -2711,11 +2739,7 @@ describe('SessionDetailPage', () => {
       current_turn: 2,
     };
 
-    server.use(
-      http.get('/api/v1/sessions/:id', () => {
-        return HttpResponse.json({ data: sessionWithHistory } satisfies SingleResponse<Session>);
-      }),
-    );
+    mockSessionDetailWithLazyDiff(sessionWithHistory);
 
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
     await screen.findAllByText('Fixed TypeError by adding null check');
@@ -3871,20 +3895,19 @@ describe('SessionDetailPage', () => {
     const sessionWithDiff: Session = {
       ...mockSessions[0],
       diff: 'diff --git a/src/app.ts b/src/app.ts\n--- a/src/app.ts\n+++ b/src/app.ts\n@@ -1,3 +1,4 @@\n import express from "express";\n+import cors from "cors";\n const app = express();\n app.listen(3000);\ndiff --git a/src/new.ts b/src/new.ts\n--- /dev/null\n+++ b/src/new.ts\n@@ -0,0 +1 @@\n+export const x = 1;',
+      diff_stats: { added: 2, removed: 0, files_changed: 2 },
     };
 
-    server.use(
-      http.get('/api/v1/sessions/:id', () => {
-        return HttpResponse.json({ data: sessionWithDiff } satisfies SingleResponse<Session>);
-      }),
-    );
+    mockSessionDetailWithLazyDiff(sessionWithDiff);
 
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
     await screen.findAllByText('Fixed TypeError by adding null check');
 
     // Changes tab should show file count badge
     const changesTab = screen.getByRole('tab', { name: /^Changes/ });
-    expect(changesTab).toHaveTextContent('Changes2');
+    await waitFor(() => {
+      expect(changesTab).toHaveTextContent('Changes2');
+    });
   });
 
   it('reserves bottom space for the active Changes underline when the file count badge is shown', async () => {
@@ -3893,11 +3916,7 @@ describe('SessionDetailPage', () => {
       diff: 'diff --git a/src/app.ts b/src/app.ts\n--- a/src/app.ts\n+++ b/src/app.ts\n@@ -1,3 +1,4 @@\n import express from "express";\n+import cors from "cors";\n const app = express();\n app.listen(3000);\ndiff --git a/src/new.ts b/src/new.ts\n--- /dev/null\n+++ b/src/new.ts\n@@ -0,0 +1 @@\n+export const x = 1;',
     };
 
-    server.use(
-      http.get('/api/v1/sessions/:id', () => {
-        return HttpResponse.json({ data: sessionWithDiff } satisfies SingleResponse<Session>);
-      }),
-    );
+    mockSessionDetailWithLazyDiff(sessionWithDiff);
 
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
     await screen.findAllByText('Fixed TypeError by adding null check');
@@ -3918,19 +3937,16 @@ describe('SessionDetailPage', () => {
     const sessionWithDiff: Session = {
       ...mockSessions[0],
       diff: 'diff --git a/src/app.ts b/src/app.ts\n--- a/src/app.ts\n+++ b/src/app.ts\n@@ -1,3 +1,4 @@\n import express from "express";\n+import cors from "cors";\n const app = express();\n app.listen(3000);',
+      diff_stats: { added: 1, removed: 0, files_changed: 1 },
     };
 
-    server.use(
-      http.get('/api/v1/sessions/:id', () => {
-        return HttpResponse.json({ data: sessionWithDiff } satisfies SingleResponse<Session>);
-      }),
-    );
+    mockSessionDetailWithLazyDiff(sessionWithDiff);
 
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
     await screen.findAllByText('Fixed TypeError by adding null check');
 
     // Header and footer should show clickable diff stats badges
-    const viewChangesButtons = screen.getAllByTitle('View changes');
+    const viewChangesButtons = await screen.findAllByTitle('View changes');
     expect(viewChangesButtons.length).toBeGreaterThanOrEqual(1);
     expect(viewChangesButtons[0]).toHaveTextContent('+1');
   });
@@ -3939,19 +3955,16 @@ describe('SessionDetailPage', () => {
     const sessionWithDiff: Session = {
       ...mockSessions[0],
       diff: 'diff --git a/src/app.ts b/src/app.ts\n--- a/src/app.ts\n+++ b/src/app.ts\n@@ -1,3 +1,4 @@\n import express from "express";\n+import cors from "cors";\n const app = express();\n app.listen(3000);',
+      diff_stats: { added: 1, removed: 0, files_changed: 1 },
     };
 
-    server.use(
-      http.get('/api/v1/sessions/:id', () => {
-        return HttpResponse.json({ data: sessionWithDiff } satisfies SingleResponse<Session>);
-      }),
-    );
+    mockSessionDetailWithLazyDiff(sessionWithDiff);
 
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
     await screen.findAllByText('Fixed TypeError by adding null check');
 
     const user = userEvent.setup();
-    const viewChangesButtons = screen.getAllByTitle('View changes');
+    const viewChangesButtons = await screen.findAllByTitle('View changes');
     await user.click(viewChangesButtons[0]);
 
     // Should show the diff content in the Changes tab
@@ -4827,10 +4840,8 @@ describe('SessionDetailPage', () => {
     // attached comments in the same transaction as the message create.
     let comments: SessionReviewComment[] = [comment];
 
+    mockSessionDetailWithLazyDiff(idleSessionWithDiff);
     server.use(
-      http.get('/api/v1/sessions/:id', () => {
-        return HttpResponse.json({ data: idleSessionWithDiff } satisfies SingleResponse<Session>);
-      }),
       http.get('/api/v1/sessions/:id/review-comments', () => {
         return HttpResponse.json({
           data: comments,
@@ -4919,10 +4930,8 @@ describe('SessionDetailPage', () => {
     }));
     let comments = originalComments;
 
+    mockSessionDetailWithLazyDiff(idleSessionWithDiff);
     server.use(
-      http.get('/api/v1/sessions/:id', () => {
-        return HttpResponse.json({ data: idleSessionWithDiff } satisfies SingleResponse<Session>);
-      }),
       http.get('/api/v1/sessions/:id/review-comments', () => {
         return HttpResponse.json({
           data: comments,
@@ -5143,11 +5152,7 @@ describe('SessionDetailPage', () => {
       diff_stats: { added: 1, removed: 0, files_changed: 1 },
     };
 
-    server.use(
-      http.get('/api/v1/sessions/:id', () => {
-        return HttpResponse.json({ data: sessionWithDiff } satisfies SingleResponse<Session>);
-      }),
-    );
+    mockSessionDetailWithLazyDiff(sessionWithDiff);
 
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
     await screen.findAllByText('Fixed TypeError by adding null check');
@@ -5476,11 +5481,7 @@ describe('SessionDetailPage', () => {
       diff_stats: { added: 1, removed: 0, files_changed: 1 },
     };
 
-    server.use(
-      http.get('/api/v1/sessions/:id', () => {
-        return HttpResponse.json({ data: sessionWithDiff } satisfies SingleResponse<Session>);
-      }),
-    );
+    mockSessionDetailWithLazyDiff(sessionWithDiff);
 
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
     await screen.findAllByText('Fixed TypeError by adding null check');
@@ -5525,11 +5526,7 @@ describe('SessionDetailPage', () => {
       diff_stats: { added: 1, removed: 0, files_changed: 1 },
     };
 
-    server.use(
-      http.get('/api/v1/sessions/:id', () => {
-        return HttpResponse.json({ data: sessionWithDiff } satisfies SingleResponse<Session>);
-      }),
-    );
+    mockSessionDetailWithLazyDiff(sessionWithDiff);
 
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
     await screen.findAllByText('Fixed TypeError by adding null check');
@@ -5626,11 +5623,7 @@ describe('SessionDetailPage', () => {
       diff_stats: { added: 1, removed: 0, files_changed: 1 },
     };
 
-    server.use(
-      http.get('/api/v1/sessions/:id', () => {
-        return HttpResponse.json({ data: sessionWithDiff } satisfies SingleResponse<Session>);
-      }),
-    );
+    mockSessionDetailWithLazyDiff(sessionWithDiff);
 
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
     await screen.findAllByText('Fixed TypeError by adding null check');
@@ -5664,11 +5657,7 @@ describe('SessionDetailPage', () => {
       diff_stats: { added: 2, removed: 0, files_changed: 2 },
     };
 
-    server.use(
-      http.get('/api/v1/sessions/:id', () => {
-        return HttpResponse.json({ data: sessionWithDiff } satisfies SingleResponse<Session>);
-      }),
-    );
+    mockSessionDetailWithLazyDiff(sessionWithDiff);
 
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
     await screen.findAllByText('Fixed TypeError by adding null check');
@@ -5703,11 +5692,7 @@ describe('SessionDetailPage', () => {
       diff_stats: { added: 2, removed: 0, files_changed: 2 },
     };
 
-    server.use(
-      http.get('/api/v1/sessions/:id', () => {
-        return HttpResponse.json({ data: sessionWithDiff } satisfies SingleResponse<Session>);
-      }),
-    );
+    mockSessionDetailWithLazyDiff(sessionWithDiff);
 
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
     await screen.findAllByText('Fixed TypeError by adding null check');
@@ -5746,11 +5731,7 @@ describe('SessionDetailPage', () => {
       diff_stats: { added: 1, removed: 0, files_changed: 1 },
     };
 
-    server.use(
-      http.get('/api/v1/sessions/:id', () => {
-        return HttpResponse.json({ data: idleSessionWithDiff } satisfies SingleResponse<Session>);
-      }),
-    );
+    mockSessionDetailWithLazyDiff(idleSessionWithDiff);
 
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
     await screen.findByPlaceholderText('Send a follow-up message...');
@@ -5790,11 +5771,7 @@ describe('SessionDetailPage', () => {
       diff_stats: { added: 1, removed: 0, files_changed: 1 },
     };
 
-    server.use(
-      http.get('/api/v1/sessions/:id', () => {
-        return HttpResponse.json({ data: destroyedSessionWithDiff } satisfies SingleResponse<Session>);
-      }),
-    );
+    mockSessionDetailWithLazyDiff(destroyedSessionWithDiff);
 
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
     await screen.findByPlaceholderText('Session environment has expired and can no longer be continued');
@@ -5840,10 +5817,8 @@ describe('SessionDetailPage', () => {
       updated_at: '2026-02-17T07:04:00Z',
     }];
 
+    mockSessionDetailWithLazyDiff(sessionWithDiff);
     server.use(
-      http.get('/api/v1/sessions/:id', () => {
-        return HttpResponse.json({ data: sessionWithDiff } satisfies SingleResponse<Session>);
-      }),
       http.get('/api/v1/sessions/:id/review-comments', () => {
         return HttpResponse.json({
           data: comments,
@@ -5873,11 +5848,7 @@ describe('SessionDetailPage', () => {
       diff_stats: { added: 1, removed: 0, files_changed: 1 },
     };
 
-    server.use(
-      http.get('/api/v1/sessions/:id', () => {
-        return HttpResponse.json({ data: sessionWithDiff } satisfies SingleResponse<Session>);
-      }),
-    );
+    mockSessionDetailWithLazyDiff(sessionWithDiff);
 
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
     await screen.findAllByText('Fixed TypeError by adding null check');
@@ -5899,6 +5870,34 @@ describe('SessionDetailPage', () => {
     });
   });
 
+  it('exits review mode when browser history removes the review query param', async () => {
+    const sessionWithDiff: Session = {
+      ...mockSessions[0],
+      diff: 'diff --git a/src/app.ts b/src/app.ts\n--- a/src/app.ts\n+++ b/src/app.ts\n@@ -1,3 +1,4 @@\n import express from "express";\n+import cors from "cors";\n const app = express();\n app.listen(3000);',
+      diff_stats: { added: 1, removed: 0, files_changed: 1 },
+    };
+
+    mockSessionDetailWithLazyDiff(sessionWithDiff);
+
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+    await screen.findAllByText('Fixed TypeError by adding null check');
+
+    const user = userEvent.setup();
+    await user.click(screen.getAllByTitle('View changes')[0]);
+    expect((await screen.findAllByText('src/app.ts')).length).toBeGreaterThan(0);
+    expect(screen.getByTitle('File tree required during review')).toBeInTheDocument();
+
+    act(() => {
+      window.history.pushState(null, '', '/sessions/session-abcdef12-3456-7890?review=active');
+      window.history.pushState(null, '', '/sessions/session-abcdef12-3456-7890');
+      window.dispatchEvent(new PopStateEvent('popstate'));
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTitle('Hide details')).toBeInTheDocument();
+    });
+  });
+
   it('shows review comment input in review mode for active session', async () => {
     const idleSessionWithDiff: Session = {
       ...mockSessions[0],
@@ -5910,11 +5909,7 @@ describe('SessionDetailPage', () => {
       diff_stats: { added: 1, removed: 0, files_changed: 1 },
     };
 
-    server.use(
-      http.get('/api/v1/sessions/:id', () => {
-        return HttpResponse.json({ data: idleSessionWithDiff } satisfies SingleResponse<Session>);
-      }),
-    );
+    mockSessionDetailWithLazyDiff(idleSessionWithDiff);
 
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
     await screen.findByPlaceholderText('Send a follow-up message...');
@@ -5973,11 +5968,7 @@ describe('SessionDetailPage', () => {
       diff_stats: { added: 1, removed: 0, files_changed: 1 },
     };
 
-    server.use(
-      http.get('/api/v1/sessions/:id', () => {
-        return HttpResponse.json({ data: destroyedSessionWithDiff } satisfies SingleResponse<Session>);
-      }),
-    );
+    mockSessionDetailWithLazyDiff(destroyedSessionWithDiff);
 
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
     await screen.findByPlaceholderText('Session environment has expired and can no longer be continued');
@@ -6000,11 +5991,7 @@ describe('SessionDetailPage', () => {
       diff_stats: { added: 1, removed: 0, files_changed: 1 },
     };
 
-    server.use(
-      http.get('/api/v1/sessions/:id', () => {
-        return HttpResponse.json({ data: ampSessionWithDiff } satisfies SingleResponse<Session>);
-      }),
-    );
+    mockSessionDetailWithLazyDiff(ampSessionWithDiff);
 
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
     await screen.findByText(/doesn't support headless conversation resume/i);
@@ -6040,10 +6027,8 @@ describe('SessionDetailPage', () => {
       updated_at: '2026-02-17T07:10:00Z',
     }];
 
+    mockSessionDetailWithLazyDiff(idleSessionWithDiff);
     server.use(
-      http.get('/api/v1/sessions/:id', () => {
-        return HttpResponse.json({ data: idleSessionWithDiff } satisfies SingleResponse<Session>);
-      }),
       http.get('/api/v1/sessions/:id/review-comments', () => {
         return HttpResponse.json({
           data: comments,
@@ -6084,10 +6069,8 @@ describe('SessionDetailPage', () => {
       diff_stats: { added: 1, removed: 0, files_changed: 1 },
     };
 
+    mockSessionDetailWithLazyDiff(idleSessionWithDiff);
     server.use(
-      http.get('/api/v1/sessions/:id', () => {
-        return HttpResponse.json({ data: idleSessionWithDiff } satisfies SingleResponse<Session>);
-      }),
       http.post('/api/v1/sessions/:id/messages', async ({ request }) => {
         const body = await request.json() as { message: string };
         return HttpResponse.json({
@@ -6128,11 +6111,7 @@ describe('SessionDetailPage', () => {
       diff_stats: { added: 2, removed: 0, files_changed: 2 },
     };
 
-    server.use(
-      http.get('/api/v1/sessions/:id', () => {
-        return HttpResponse.json({ data: sessionWithDiff } satisfies SingleResponse<Session>);
-      }),
-    );
+    mockSessionDetailWithLazyDiff(sessionWithDiff);
 
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
     await screen.findAllByText('Fixed TypeError by adding null check');
@@ -6199,12 +6178,8 @@ describe('SessionDetailPage', () => {
       diff_stats: { added: 3, removed: 0, files_changed: 3 },
     };
 
+    mockSessionDetailWithLazyDiff(sessionWithThreadsAndDiff);
     server.use(
-      http.get('/api/v1/sessions/:id', () => {
-        return HttpResponse.json({
-          data: sessionWithThreadsAndDiff,
-        } satisfies SingleResponse<Session>);
-      }),
       http.get('/api/v1/sessions/:id/thread-file-events', () => {
         return HttpResponse.json({
           data: [
