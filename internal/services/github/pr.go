@@ -60,7 +60,6 @@ type PRService struct {
 	sessions        *db.SessionStore
 	issues          *db.IssueStore
 	deploys         *db.DeployStore
-	validations     *db.ValidationStore
 	repos           *db.RepositoryStore
 	jobs            *db.JobStore
 	reviewComments  *db.ReviewCommentStore
@@ -121,7 +120,6 @@ func NewPRService(
 	sessions *db.SessionStore,
 	issues *db.IssueStore,
 	deploys *db.DeployStore,
-	validations *db.ValidationStore,
 	repos *db.RepositoryStore,
 	jobs *db.JobStore,
 	logger zerolog.Logger,
@@ -132,7 +130,6 @@ func NewPRService(
 		sessions:      sessions,
 		issues:        issues,
 		deploys:       deploys,
-		validations:   validations,
 		repos:         repos,
 		jobs:          jobs,
 		logger:        logger,
@@ -2768,26 +2765,6 @@ func (s *PRService) generatePRContent(ctx context.Context, token, owner, repoNam
 		userData.IssueSeverity = issue.Severity
 	}
 
-	// Collect validation results.
-	if s.validations != nil {
-		if validation, err := s.validations.GetBySessionID(ctx, run.OrgID, run.ID); err == nil {
-			var checks []string
-			if validation.RegressionTestCheck == "pass" || validation.RegressionTestCheck == "passed" {
-				checks = append(checks, "Regression tests passed")
-			}
-			if validation.CorrectnessCheck == "pass" || validation.CorrectnessCheck == "passed" {
-				checks = append(checks, "Correctness check passed")
-			}
-			if validation.SecurityScan == "pass" || validation.SecurityScan == "passed" {
-				checks = append(checks, "Security scan passed")
-			}
-			if validation.CICheck == "pass" || validation.CICheck == "passed" {
-				checks = append(checks, "CI/CD passed")
-			}
-			userData.ValidationChecks = checks
-		}
-	}
-
 	// Include the diff — truncated to keep the prompt manageable.
 	if run.Diff != nil && *run.Diff != "" {
 		fileSummary, truncatedDiff := summarizeDiff(*run.Diff, 4000)
@@ -2909,7 +2886,7 @@ func (s *PRService) getOrFetchPRTemplate(ctx context.Context, token, owner, repo
 
 // formatPRBody builds the default PR body when no repo template is found.
 // It produces a minimal, scannable body: Summary, optional Issue info, and Test plan.
-func (s *PRService) formatPRBody(ctx context.Context, run *models.Session, issue *models.Issue) string {
+func (s *PRService) formatPRBody(_ context.Context, run *models.Session, issue *models.Issue) string {
 	var b strings.Builder
 
 	b.WriteString("## Summary\n\n")
@@ -2929,36 +2906,10 @@ func (s *PRService) formatPRBody(ctx context.Context, run *models.Session, issue
 		b.WriteString("\n\n")
 	}
 
-	// Test plan: summarize validation results if available, otherwise use a placeholder.
+	// Test plan: validation is handled in the repo's own CI/CD, so keep the
+	// fallback generic unless the session summary already captured specifics.
 	b.WriteString("## Test plan\n\n")
-	validationWritten := false
-	if s.validations != nil {
-		validation, err := s.validations.GetBySessionID(ctx, run.OrgID, run.ID)
-		if err == nil {
-			var checks []string
-			if validation.RegressionTestCheck == "pass" || validation.RegressionTestCheck == "passed" {
-				checks = append(checks, "Regression tests passed")
-			}
-			if validation.CorrectnessCheck == "pass" || validation.CorrectnessCheck == "passed" {
-				checks = append(checks, "Correctness check passed")
-			}
-			if validation.SecurityScan == "pass" || validation.SecurityScan == "passed" {
-				checks = append(checks, "Security scan passed")
-			}
-			if validation.CICheck == "pass" || validation.CICheck == "passed" {
-				checks = append(checks, "CI/CD passed")
-			}
-			if len(checks) > 0 {
-				for _, c := range checks {
-					fmt.Fprintf(&b, "- %s\n", c)
-				}
-				validationWritten = true
-			}
-		}
-	}
-	if !validationWritten {
-		b.WriteString("Validated by automated agent run.\n")
-	}
+	b.WriteString("Validated by automated agent run.\n")
 
 	b.WriteString("\n\n")
 	b.WriteString(s.formatPRFooterLinks(run))

@@ -44,13 +44,16 @@ import (
 	"github.com/assembledhq/143/internal/services/sandbox"
 	"github.com/assembledhq/143/internal/services/sandboxauth"
 	"github.com/assembledhq/143/internal/services/storage"
-	"github.com/assembledhq/143/internal/services/validation"
 	"github.com/assembledhq/143/internal/telemetry"
 	"github.com/assembledhq/143/internal/version"
 	"github.com/assembledhq/143/internal/worker"
 )
 
-const nodeDrainMarkTimeout = 5 * time.Second
+const (
+	nodeDrainMarkTimeout      = 5 * time.Second
+	httpDrainPropagationDelay = 7 * time.Second
+	httpShutdownTimeout       = 100 * time.Second
+)
 
 func main() {
 	cfg := config.Load()
@@ -332,7 +335,6 @@ func main() {
 		orgStore := db.NewOrganizationStore(pool)
 		repoStore := db.NewRepositoryStore(pool)
 		integrationStore := db.NewIntegrationStore(pool)
-		validationStore := db.NewValidationStore(pool)
 		pullRequestStore := db.NewPullRequestStore(pool)
 		deployStore := db.NewDeployStore(pool)
 		sessionMessageStore := db.NewSessionMessageStore(pool)
@@ -399,7 +401,7 @@ func main() {
 		var services *worker.Services
 		if canBuildServices(cfg, logger) {
 			services = buildServices(cfg, pool, logger, codexAuthSvc, claudeCodeAuthSvc, credentialStore, userCredentialStore, codingCredentialStore, issueStore, sessionStore,
-				jobStore, orgStore, repoStore, validationStore, pullRequestStore,
+				jobStore, orgStore, repoStore, pullRequestStore,
 				deployStore, priorityScoreStore, complexityEstimateStore, pmPlanStore, pmDecisionLogStore,
 				projectStore, projectTaskStore, projectCycleStore, pmDocumentStore, integrationStore,
 				sessionMessageStore, automationRunStore, snapshotStore, billingMetrics, cancelRegistry, threadCancelRegistry, orgSettingsCache)
@@ -554,9 +556,10 @@ func main() {
 	//     mid-execution produces orphaned thread rows when partial DB state
 	//     lands during the orchestrator's cleanup defers. The matching outer
 	//     bound is docker-compose.worker.yml stop_grace_period.
-	//   - HTTP API drain:      110s. Bounded by docker-compose.app.yml
-	//     stop_grace_period=120s with a 10s SIGKILL safety margin. Only
-	//     load-bearing on api/all modes.
+	//   - HTTP API drain:      100s. Bounded by docker-compose.app.yml
+	//     stop_grace_period=120s with room for node drain + Caddy health
+	//     propagation before Docker's SIGKILL deadline. Only load-bearing
+	//     on api/all modes.
 	//   - Preview gateway:     60s, in parallel with HTTP drain.
 	// On worker-only nodes the HTTP drain is a no-op (no traffic) so the
 	// long worker budget is the only thing the deploy actually waits on.
@@ -574,6 +577,14 @@ func main() {
 			logger.Warn().Err(err).Msg("failed to mark node draining")
 		}
 		nodeDrainCancel()
+
+		// Mark /healthz unhealthy before closing the listener. Caddy probes
+		// every 2s with a 2s timeout and refreshes dynamic upstream DNS every
+		// 2s, so this propagation window covers a full missed-probe cycle
+		// plus scheduling slack before Docker stops the old container.
+		close(shutdownCh)
+		time.Sleep(httpDrainPropagationDelay)
+
 		drainCtx, drainCancel := context.WithTimeout(context.Background(), cfg.WorkerDrainTimeout)
 		for {
 			activeJobs := 0
@@ -607,12 +618,6 @@ func main() {
 	drained:
 		drainCancel()
 
-		// Signal long-lived SSE handlers to return before calling Shutdown.
-		// Without this, Shutdown blocks on each open SSE connection until its
-		// deadline expires; the client then sees an abrupt reset rather than
-		// a clean EOF (which EventSource retries from on its own).
-		close(shutdownCh)
-
 		cancel() // stop worker
 		if recycleWorker != nil {
 			recycleWorker.Stop()
@@ -639,9 +644,9 @@ func main() {
 			}
 		}()
 
-		// Drain the main API server. 110s leaves ~10s of headroom before
+		// Drain the main API server. The timeout leaves headroom before
 		// Docker SIGKILLs the container at stop_grace_period=120s.
-		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 110*time.Second)
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), httpShutdownTimeout)
 		defer shutdownCancel()
 		if err := srv.Shutdown(shutdownCtx); err != nil {
 			logger.Error().Err(err).Msg("server shutdown failed")
@@ -823,7 +828,6 @@ func buildServices(
 	jobStore *db.JobStore,
 	orgStore *db.OrganizationStore,
 	repoStore *db.RepositoryStore,
-	validationStore *db.ValidationStore,
 	pullRequestStore *db.PullRequestStore,
 	deployStore *db.DeployStore,
 	priorityScoreStore *db.PriorityScoreStore,
@@ -984,16 +988,11 @@ func buildServices(
 		Logger:            logger,
 	})
 
-	// Validation service.
-	validationSvc := validation.NewService(
-		validationStore, issueStore, orgStore, jobStore, llmClient, sandboxProvider, logger,
-	)
-
 	// PR service.
 	prTemplateStore := db.NewPRTemplateStore(pool)
 	prService := ghservice.NewPRService(
 		ghSvc, pullRequestStore, sessionStore, issueStore,
-		deployStore, validationStore, repoStore, jobStore, logger,
+		deployStore, repoStore, jobStore, logger,
 	)
 	wireWorkerPRService(
 		prService,
@@ -1110,7 +1109,6 @@ func buildServices(
 
 	svc := &worker.Services{
 		Orchestrator:    orchestrator,
-		Validation:      validationSvc,
 		PR:              prService,
 		Failure:         failureSvc,
 		SandboxProvider: sandboxProvider,

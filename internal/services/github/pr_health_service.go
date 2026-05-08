@@ -188,8 +188,64 @@ func (s *PRService) buildPullRequestHealthResponse(ctx context.Context, pr model
 		return nil, err
 	}
 
+	if err := s.populateActiveRepairs(ctx, pr, resp); err != nil {
+		return nil, err
+	}
 	resp.Summary = buildPRHealthSummaryText(*resp)
 	return resp, nil
+}
+
+func (s *PRService) populateActiveRepairs(ctx context.Context, pr models.PullRequest, resp *models.PullRequestHealthResponse) error {
+	if resp.HealthVersion == 0 || s.sessions == nil {
+		return nil
+	}
+
+	runs, err := s.pullRequests.ListActiveRepairRuns(ctx, pr.OrgID, pr.ID, resp.HealthVersion)
+	if err != nil {
+		return err
+	}
+	if len(runs) == 0 {
+		return nil
+	}
+
+	sessionIDs := make([]uuid.UUID, 0, len(runs))
+	seenSessionIDs := make(map[uuid.UUID]struct{}, len(runs))
+	for _, run := range runs {
+		if _, ok := seenSessionIDs[run.SessionID]; ok {
+			continue
+		}
+		seenSessionIDs[run.SessionID] = struct{}{}
+		sessionIDs = append(sessionIDs, run.SessionID)
+	}
+
+	sessions, err := s.sessions.ListByIDs(ctx, pr.OrgID, sessionIDs)
+	if err != nil {
+		return fmt.Errorf("list repair sessions for pull request health: %w", err)
+	}
+	sessionsByID := make(map[uuid.UUID]models.Session, len(sessions))
+	for _, session := range sessions {
+		sessionsByID[session.ID] = session
+	}
+
+	activeRepairs := make([]models.PullRequestActiveRepair, 0, len(runs))
+	for _, run := range runs {
+		session, ok := sessionsByID[run.SessionID]
+		if !ok || isSessionTerminalStatus(session.Status) {
+			continue
+		}
+		activeRepairs = append(activeRepairs, models.PullRequestActiveRepair{
+			ActionType:    run.ActionType,
+			SessionID:     run.SessionID,
+			SessionStatus: session.Status,
+			HealthVersion: run.HealthVersion,
+		})
+	}
+
+	if len(activeRepairs) > 0 {
+		resp.ActiveRepairs = activeRepairs
+		resp.CanMerge = false
+	}
+	return nil
 }
 
 func derivePullRequestRepairActions(resp *models.PullRequestHealthResponse) {

@@ -1,6 +1,6 @@
 # Design: Frontend Architecture
 
-> **Status:** Partially Implemented | **Last reviewed:** 2026-04-21
+> **Status:** Partially Implemented | **Last reviewed:** 2026-05-08
 
 This document defines the frontend architecture for 143.dev.
 
@@ -25,6 +25,7 @@ These patterns apply across every page. They are not optional — they define th
 - **Neutral-first palette** — Keep surfaces mostly neutral (`background`/`muted`/`border`) and reserve saturated color for primary actions and meaningful state.
 - **Separator-led hierarchy** — Prefer subtle borders/dividers over heavy shadows for panel structure. Shadows are optional and minimal.
 - **App-shell first layout** — Dashboard pages should feel like a working surface: persistent sidebar, full-width content region, and reduced `max-width` constraints unless readability requires one.
+- **Operator-controlled pane widths** — Desktop shell navigation and two-pane entity list layouts should use draggable resize handles with conservative min/max bounds, default to the current product widths, and restore the user's last chosen widths from `localStorage` on return.
 
 ## Framework Decision: Next.js (React)
 

@@ -135,9 +135,24 @@ When actual billing integration exists (Stripe, etc.), we can add a "Billed cost
 
 LLM token usage is **already tracked** in the existing schema — no new instrumentation needed:
 
-- **`sessions.token_usage`** (JSONB): `{input_tokens, output_tokens, total_cost_usd}` — set by the orchestrator after each agent run. Every coding agent (Codex, Claude Code, Gemini) emits token counts in its streaming output; the adapter parses them and the orchestrator persists them.
+- **`sessions.token_usage`** (JSONB): normalized usage metadata written by the orchestrator after each agent run. The durable compatibility fields remain `{input_tokens, output_tokens, total_cost_usd}`, and the payload now also carries richer cost metadata when available: `cost` (normalized direct-or-derived USD cost), `native_cost` (provider-native non-USD units such as Codex credits), and `native_usage` (provider/model/billing-mode plus detailed token counters and a `reported` flag so downstream code can distinguish "provider emitted zeroes" from "provider emitted no usage payload at all").
 - **`session_messages.token_usage`** (JSONB): Same structure, per-message granularity for multi-turn sessions.
 - **`pm_plans.token_usage`** (JSONB): Token usage from PM agent runs.
+
+The agent adapters are intentionally split into two layers:
+
+- **Parsing layer:** Each adapter only parses the usage fields the provider actually emits.
+- **Normalization layer:** `FinalizeTokenUsage(...)` produces the persisted contract and records whether cost was **direct** (provider-emitted) or **derived** (computed from official provider pricing when the provider exposes tokens but not a session cost).
+
+This distinction matters because providers are not aligned:
+
+- Claude Code can emit a direct `total_cost_usd` on result events.
+- Codex commonly exposes token usage but subscription-backed runs are naturally denominated in **credits**, not USD.
+- Gemini commonly exposes token usage but not a built-in session USD cost.
+- Amp exposes token usage but not enough model identity to derive a safe cost.
+- Pi can often derive cost because its configured model is explicit (`provider/model`) and API-key-backed.
+
+For dashboard rollups, `total_llm_cost_usd` continues to aggregate `total_cost_usd` only. That keeps the existing UI stable while allowing us to preserve richer native billing metadata for later surfaces. The consequence is deliberate: subscription-backed Codex runs can retain a native credit estimate in `native_cost` without being misrepresented as a fake USD total.
 
 The rollup job joins `container_usage_events` with `sessions` to pull `token_usage` alongside container metrics. For the hourly bucket, we attribute tokens to the hour of `session.created_at` (or `session_messages.created_at` for per-message granularity).
 

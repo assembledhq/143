@@ -20,7 +20,6 @@ import {
   Check,
   XCircle,
   X,
-  MinusCircle,
   Square,
   PanelRightOpen,
   PanelRightClose,
@@ -48,7 +47,6 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from "@/components/ui/table";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import {
   Dialog,
@@ -104,11 +102,19 @@ import { applyPlanModePrefix, buildTimeline, flattenTimelineResponse, sortTimeli
 import type { DiffFile } from "@/lib/diff-parser";
 import { formatReviewMessage } from "@/lib/format-review-message";
 import {
+  readStoredSessionActiveThread,
   readStoredSessionScrollPosition,
+  resolveInitialSessionThreadId,
   resolveInitialSessionAnchor,
+  type SessionScrollViewerScope,
+  writeStoredSessionActiveThread,
   writeStoredSessionScrollPosition,
 } from "@/lib/session-open-position";
-import type { ListResponse, Session, SessionDetail, SessionInputCommand, SessionInputReference, SessionLog, SessionMessage, SessionReviewComment, SessionThread, SessionThreadFileEvent, SessionTimelineEntry, User, Validation, CodexAuthStatus, PullRequestHealthResponse, SingleResponse } from "@/lib/types";
+import {
+  readStoredViewedThreadIds,
+  writeStoredViewedThreadIds,
+} from "@/lib/session-thread-views";
+import type { ListResponse, Session, SessionDetail, SessionInputCommand, SessionInputReference, SessionLog, SessionMessage, SessionReviewComment, SessionThread, SessionThreadFileEvent, SessionTimelineEntry, User, CodexAuthStatus, PullRequestHealthResponse, SingleResponse } from "@/lib/types";
 import { AgentTabStrip, computeThreadOverlap } from "./agent-tab-strip";
 import {
   ThreadAttributionFilter,
@@ -124,10 +130,16 @@ import { useDiffViewState } from "@/hooks/use-diff-view-state";
 import { CodexDeviceCodeModal } from "@/components/codex-device-code-modal";
 import { AgentBadge } from "@/components/agent-badge";
 import { PendingAttachmentStrip } from "@/components/pending-attachment-strip";
-import { PRHealthBanner } from "@/components/pr-health-banner";
+import { PRHealthBanner, prHealthAllowsMerge } from "@/components/pr-health-banner";
+import { SessionKeyboardHelpOverlay } from "@/components/session-keyboard-help-overlay";
 import { useAuth } from "@/hooks/use-auth";
 import { useMediaQuery } from "@/hooks/use-media-query";
 import { useDocumentVisible } from "@/hooks/use-document-visible";
+import {
+  useSessionKeyboardShortcuts,
+  type SessionDetailTab,
+  type UseSessionKeyboardShortcutsOptions,
+} from "@/hooks/use-session-keyboard-shortcuts";
 import { prMergedAccent } from "@/lib/pr-status-styles";
 import { cn, sessionTitle, formatTimeAgo } from "@/lib/utils";
 import { activeSet, workingStatusesSet } from "@/lib/session-status-groups";
@@ -298,22 +310,6 @@ const triggerPickerIconClassName = "h-4 w-4 shrink-0";
 const directoryTriggerIcon = <FolderTree className={triggerPickerIconClassName} />;
 const fileTriggerIcon = <FileCode2 className={triggerPickerIconClassName} />;
 
-const validationChecks: { key: string; label: string }[] = [
-  { key: "direction_check", label: "Direction check" },
-  { key: "correctness_check", label: "Correctness check" },
-  { key: "quality_check", label: "Quality check" },
-  { key: "security_scan", label: "Security scan" },
-  { key: "regression_test_check", label: "Regression test check" },
-  { key: "ci_check", label: "CI check" },
-];
-
-function checkResultBadge(result: string | null) {
-  if (!result) return <Badge variant="secondary" className="text-xs">skipped</Badge>;
-  if (result === "pass") return <Badge variant="secondary" className="bg-emerald-50 text-emerald-700 dark:bg-emerald-950/30 dark:text-emerald-400 border-emerald-200/50 dark:border-emerald-800/30 text-xs">pass</Badge>;
-  if (result === "fail") return <Badge variant="secondary" className="bg-destructive/10 text-destructive border-destructive/20 text-xs">fail</Badge>;
-  return <Badge variant="secondary" className="text-xs">{result}</Badge>;
-}
-
 // AgentThreadTabs lived here in Phase 1. The replacement now lives in
 // agent-tab-strip.tsx (AgentTabStrip) and adds overlap badges, tab actions,
 // and cost surfacing. Status helpers moved with it; the statusConfig table
@@ -323,20 +319,19 @@ function checkResultBadge(result: string | null) {
 // Detail panel tabs (shown in right sidebar)
 // ---------------------------------------------------------------------------
 
-type DetailTab = "overview" | "changes" | "validation" | "preview";
+type DetailTab = SessionDetailTab;
 type PRAuthorMode = "auto" | "user" | "app";
 
 type PRAuthInterceptDetails = {
-  connect_url: string;
-  resume_token: string;
-  can_fallback_to_app: boolean;
+  connect_url?: string;
+  resume_token?: string;
+  can_fallback_to_app?: boolean;
 };
 
 // PRAuthPromptState is a discriminated union so merge prompts don't carry
-// create-PR-only fields (connect_url, resume_token, can_fallback_to_app).
-// create_pr and push_changes prompts come from the backend's auth interception
-// payload; merge prompts are always synthesized client-side and connect via
-// the hardcoded /github/connect endpoint with no resume token and no fallback.
+// create-PR-only fields. Create/push prompts may come from backend auth
+// interception or be synthesized from the current GitHub status before the
+// backend has rejected the action.
 type PRAuthPromptState =
   | ({ purpose: "create_pr" } & PRAuthInterceptDetails)
   | ({ purpose: "push_changes" } & PRAuthInterceptDetails)
@@ -674,93 +669,6 @@ function OverviewTab({ session, members, prStatus }: { session: Session; members
   );
 }
 
-function ValidationTab({ sessionId }: { sessionId: string }) {
-  const { data, isLoading, error } = useQuery({
-    queryKey: ["session", sessionId, "validation"],
-    queryFn: () => api.sessions.getValidation(sessionId).catch((err) => {
-      // 404 means no validation exists yet — treat as empty data, not an error.
-      if (err?.code === "NOT_FOUND") return { data: null };
-      throw err;
-    }),
-  });
-
-  if (isLoading) {
-    return (
-      <div className="flex items-center justify-center py-12">
-        <div className="text-center space-y-2">
-          <Loader2 className="h-5 w-5 animate-spin text-muted-foreground/40 mx-auto" />
-          <p className="text-xs text-muted-foreground">Loading validation...</p>
-        </div>
-      </div>
-    );
-  }
-
-  const validation = data?.data;
-  if (error || !validation) {
-    return (
-      <div className="flex items-center justify-center py-12">
-        <div className="text-center space-y-2 max-w-[280px]">
-          <CheckCircle2 className="h-8 w-8 text-muted-foreground/40 mx-auto" />
-          <p className="text-xs font-medium text-muted-foreground">No validation data</p>
-          <p className="text-xs text-muted-foreground/60">Validation checks will appear here once the session produces results.</p>
-        </div>
-      </div>
-    );
-  }
-
-  const overallStatus = validation.status;
-
-  return (
-    <div className="space-y-4">
-      <div className="flex items-center gap-2">
-        <span className="text-xs font-medium">Overall:</span>
-        {overallStatus === "passed" && (
-          <Badge variant="secondary" className="bg-emerald-50 text-emerald-700 dark:bg-emerald-950/30 dark:text-emerald-400 border-emerald-200/50 dark:border-emerald-800/30">
-            <CheckCircle2 className="mr-1 h-3 w-3" /> Passed
-          </Badge>
-        )}
-        {overallStatus === "failed" && (
-          <Badge variant="secondary" className="bg-destructive/10 text-destructive border-destructive/20">
-            <XCircle className="mr-1 h-3 w-3" /> Failed
-          </Badge>
-        )}
-        {overallStatus !== "passed" && overallStatus !== "failed" && (
-          <Badge variant="secondary">
-            <MinusCircle className="mr-1 h-3 w-3" /> {overallStatus}
-          </Badge>
-        )}
-      </div>
-
-      <Card>
-        <CardContent className="p-0">
-          <Table>
-            <TableHeader>
-              <TableRow className="bg-muted/20">
-                <TableHead>Check</TableHead>
-                <TableHead>Result</TableHead>
-                <TableHead>Details</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {validationChecks.map(({ key, label }) => {
-                const result = validation[key as keyof Validation] as string | null;
-                const details = validation[`${key}_details` as keyof Validation] as string | null;
-                return (
-                  <TableRow key={key}>
-                    <TableCell className="font-medium">{label}</TableCell>
-                    <TableCell>{checkResultBadge(result)}</TableCell>
-                    <TableCell className="text-muted-foreground">{details || "-"}</TableCell>
-                  </TableRow>
-                );
-              })}
-            </TableBody>
-          </Table>
-        </CardContent>
-      </Card>
-    </div>
-  );
-}
-
 function ChangesTab({
   filteredFiles,
   activeFileIndex,
@@ -944,6 +852,8 @@ function SessionComposer({
   onEditableAgentTypeChange,
   agentUpdatePending,
   targetLabel,
+  unavailableReason,
+  placeholderOverride,
 }: {
   message: string;
   onMessageChange: (value: string) => void;
@@ -983,6 +893,8 @@ function SessionComposer({
   onEditableAgentTypeChange?: (nextAgentType: string) => void;
   agentUpdatePending: boolean;
   targetLabel?: string;
+  unavailableReason?: string;
+  placeholderOverride?: string;
 }) {
   const isMobile = useMediaQuery("(max-width: 767px)");
   const [isTextareaFocused, setIsTextareaFocused] = useState(false);
@@ -1242,13 +1154,18 @@ function SessionComposer({
 
   const hasContent = message.trim() || attachments.length > 0 || openComments.length > 0;
   const sendDisabled = hasInvalidCommands || !hasContent || !canSendMessage || sendPending;
-  const inactiveSessionMessage = isSnapshotExpired
-    ? "Session environment has expired and can no longer be continued."
-    : "Session is not active.";
+  const defaultUnavailablePlaceholder = isSnapshotExpired
+    ? "Session environment has expired and can no longer be continued"
+    : "Session is not active";
+  const unavailableMessage = unavailableReason ?? (
+    isSnapshotExpired
+      ? "Session environment has expired and can no longer be continued."
+      : "Session is not active."
+  );
   const attachDisabledReason = isUploading
     ? "Uploading attachments..."
     : !canSendMessage
-      ? inactiveSessionMessage
+      ? unavailableMessage
       : undefined;
   const cancelDisabledReason = cancelPending ? "Cancelling session..." : undefined;
   const sendDisabledReason = hasInvalidCommands
@@ -1256,7 +1173,7 @@ function SessionComposer({
     : !hasContent
       ? "Add a message, attachment, or review comment before sending."
       : !canSendMessage
-        ? inactiveSessionMessage
+        ? unavailableMessage
           : sendPending
             ? (planMode ? "Sending plan request..." : "Sending message...")
             : undefined;
@@ -1289,6 +1206,18 @@ function SessionComposer({
     if (pickerOpen && e.key === "Escape") {
       e.preventDefault();
       setTriggerDismissed(true);
+      return;
+    }
+    if (e.key === "Escape" && message.trim().length === 0) {
+      e.preventDefault();
+      e.currentTarget.blur();
+      return;
+    }
+    if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+      e.preventDefault();
+      if (!sendDisabled) {
+        onSend();
+      }
       return;
     }
     if (e.key === "Enter" && !e.shiftKey) {
@@ -1488,15 +1417,15 @@ function SessionComposer({
             onKeyUp={(e) => setCaretPosition(e.currentTarget.selectionStart ?? message.length)}
             onSelect={(e) => setCaretPosition(e.currentTarget.selectionStart ?? message.length)}
             placeholder={
-              isSnapshotExpired
-                ? "Session environment has expired and can no longer be continued"
-                : !canSendMessage
-                  ? "Session is not active"
+              placeholderOverride ?? (
+                !canSendMessage
+                  ? unavailableReason ?? defaultUnavailablePlaceholder
                   : planMode
                     ? "Describe what you want to plan..."
                     : targetLabel
                       ? `Send a message to ${targetLabel}...`
                       : "Send a follow-up message..."
+              )
             }
             disabled={!canSendMessage || sendPending}
             rows={isMobile ? 1 : undefined}
@@ -1914,26 +1843,31 @@ type ChatPanelProps = {
   sessionId: string;
   activeThread?: SessionThread;
   isActive: boolean;
+  viewerScope: SessionScrollViewerScope | null;
   optimisticMessages: SessionMessage[];
   onDiffClick?: () => void;
   onApprovePlan?: () => void;
   onAdjustPlan?: () => void;
   onRegisterScrollToLiveEdge?: (scrollToLiveEdge: (() => void) | null) => void;
+  onRegisterKeyboardControls?: (controls: SessionTranscriptKeyboardControls | null) => void;
 };
+
+type SessionTranscriptKeyboardControls = NonNullable<UseSessionKeyboardShortcutsOptions["transcript"]>;
 
 function ChatPanel({
   session,
   sessionId,
   activeThread,
   isActive,
+  viewerScope,
   optimisticMessages,
   onDiffClick,
   onApprovePlan,
   onAdjustPlan,
   onRegisterScrollToLiveEdge,
+  onRegisterKeyboardControls,
 }: ChatPanelProps) {
   const queryClient = useQueryClient();
-  const { user } = useAuth();
   const [streamedLogs, setStreamedLogs] = useState<SessionLog[]>([]);
   const scrollRef = useRef<HTMLDivElement>(null);
   const isNearBottomRef = useRef(false);
@@ -1945,10 +1879,6 @@ function ChatPanel({
   const apiBase = process.env.NEXT_PUBLIC_API_URL || "";
   const [showJumpToLatest, setShowJumpToLatest] = useState(false);
   const isDocumentVisible = useDocumentVisible();
-  const viewerScope = useMemo(
-    () => (user ? { userId: user.id, orgId: user.org_id } : null),
-    [user],
-  );
 
   const activeThreadId = activeThread?.id;
   const isRunning = activeThread ? activeThread.status === "running" : session.status === "running";
@@ -2125,6 +2055,41 @@ function ChatPanel({
     setShowJumpToLatest(false);
   }, [scrollToLiveEdgePosition]);
 
+  const focusTranscript = useCallback(() => {
+    scrollRef.current?.focus({ preventScroll: true });
+  }, []);
+
+  const scrollTranscriptByStep = useCallback((direction: 1 | -1) => {
+    const el = scrollRef.current;
+    if (!el) return;
+    el.scrollBy?.({ top: direction * TRANSCRIPT_STEP_PX, behavior: "smooth" });
+    if (typeof el.scrollBy !== "function") {
+      el.scrollTop += direction * TRANSCRIPT_STEP_PX;
+    }
+  }, []);
+
+  const scrollTranscriptByPage = useCallback((direction: 1 | -1) => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const distance = Math.max(
+      TRANSCRIPT_PAGE_MIN_PX,
+      Math.floor(el.clientHeight * TRANSCRIPT_PAGE_VIEWPORT_RATIO),
+    );
+    el.scrollBy?.({ top: direction * distance, behavior: "smooth" });
+    if (typeof el.scrollBy !== "function") {
+      el.scrollTop += direction * distance;
+    }
+  }, []);
+
+  const scrollTranscriptToTop = useCallback(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    el.scrollTo?.({ top: 0, behavior: "smooth" });
+    if (typeof el.scrollTo !== "function") {
+      el.scrollTop = 0;
+    }
+  }, []);
+
   const getEntryContainerProps = useCallback(
     (_entry: TimelineEntry, index: number) =>
       ({
@@ -2137,6 +2102,24 @@ function ChatPanel({
     onRegisterScrollToLiveEdge?.(scrollToLiveEdge);
     return () => onRegisterScrollToLiveEdge?.(null);
   }, [onRegisterScrollToLiveEdge, scrollToLiveEdge]);
+
+  useEffect(() => {
+    onRegisterKeyboardControls?.({
+      focus: focusTranscript,
+      scrollByStep: scrollTranscriptByStep,
+      scrollByPage: scrollTranscriptByPage,
+      scrollToTop: scrollTranscriptToTop,
+      scrollToLatest: scrollToLiveEdge,
+    });
+    return () => onRegisterKeyboardControls?.(null);
+  }, [
+    focusTranscript,
+    onRegisterKeyboardControls,
+    scrollToLiveEdge,
+    scrollTranscriptByPage,
+    scrollTranscriptByStep,
+    scrollTranscriptToTop,
+  ]);
 
   // SSE streaming for real-time logs when the session is active.
   const mergeLogs = useCallback((newLogs: SessionLog[]) => {
@@ -2344,7 +2327,14 @@ function ChatPanel({
         </div>
       )}
       {/* Unified timeline */}
-      <div ref={scrollRef} onScroll={handleScroll} className="flex-1 overflow-y-auto space-y-2 p-4">
+      <div
+        ref={scrollRef}
+        onScroll={handleScroll}
+        tabIndex={0}
+        aria-label="Session conversation"
+        data-session-transcript-scroll="true"
+        className="flex-1 overflow-y-auto space-y-2 p-4 outline-none focus-visible:ring-2 focus-visible:ring-ring/30"
+      >
         {showLoadingSkeleton ? (
           <SessionTimelineSkeleton />
         ) : (
@@ -2388,11 +2378,14 @@ function sameDiffStats(
 function areChatPanelPropsEqual(previous: ChatPanelProps, next: ChatPanelProps): boolean {
   return previous.sessionId === next.sessionId &&
     previous.isActive === next.isActive &&
+    previous.viewerScope?.userId === next.viewerScope?.userId &&
+    previous.viewerScope?.orgId === next.viewerScope?.orgId &&
     previous.optimisticMessages === next.optimisticMessages &&
     previous.onDiffClick === next.onDiffClick &&
     previous.onApprovePlan === next.onApprovePlan &&
     previous.onAdjustPlan === next.onAdjustPlan &&
     previous.onRegisterScrollToLiveEdge === next.onRegisterScrollToLiveEdge &&
+    previous.onRegisterKeyboardControls === next.onRegisterKeyboardControls &&
     previous.session.id === next.session.id &&
     previous.session.status === next.session.status &&
     previous.session.sandbox_state === next.session.sandbox_state &&
@@ -2416,9 +2409,16 @@ const MIN_DETAIL = 280;
 const MAX_DETAIL = 600;
 const DEFAULT_DETAIL = 384;
 const MOBILE_REVIEW_MEDIA_QUERY = "(max-width: 767px)";
+// Transcript keyboard scroll tuning. Step matches a comfortable line-pair
+// jump; page distance follows browser conventions (~85% viewport with a
+// floor for very short panels).
+const TRANSCRIPT_STEP_PX = 72;
+const TRANSCRIPT_PAGE_MIN_PX = 160;
+const TRANSCRIPT_PAGE_VIEWPORT_RATIO = 0.85;
 
 export function SessionDetailContent({ id }: { id: string }) {
   const router = useRouter();
+  const { user, isLoading: isAuthLoading } = useAuth();
   const terminalStatuses = new Set(["completed", "pr_created", "failed", "cancelled", "skipped"]);
   const [reviewParam, setReviewParam] = useQueryState("review");
   const [previewParam, setPreviewParam] = useQueryState("preview");
@@ -2438,6 +2438,7 @@ export function SessionDetailContent({ id }: { id: string }) {
   const [mobileDetailOpen, setMobileDetailOpen] = useState(false);
   const [mobileReviewComposerOpen, setMobileReviewComposerOpen] = useState(false);
   const [mobileRenameOpen, setMobileRenameOpen] = useState(false);
+  const [keyboardHelpOpen, setKeyboardHelpOpen] = useState(false);
   const [detailWidth, setDetailWidth] = useState(DEFAULT_DETAIL);
   const [activeFileIndex, setActiveFileIndex] = useState(0);
   const [isEditingTitle, setIsEditingTitle] = useState(false);
@@ -2570,6 +2571,10 @@ export function SessionDetailContent({ id }: { id: string }) {
     queryFn: () => api.team.listMembers(),
   });
 
+  const viewerScope = useMemo<SessionScrollViewerScope | null>(
+    () => (user ? { userId: user.id, orgId: getActiveOrgId() ?? user.org_id } : null),
+    [user],
+  );
   const session = data?.data;
   const members = membersData?.data ?? [];
   const shouldLoadDiff = !!session && (
@@ -2603,7 +2608,14 @@ export function SessionDetailContent({ id }: { id: string }) {
   const sessionDiffPayload = diffData?.data;
   const threads = useMemo(() => session?.threads ?? [], [session?.threads]);
   const [activeThreadId, setActiveThreadId] = useState<string | null>(null);
-  const activeThread = threads.find((thread) => thread.id === activeThreadId) ?? threads[0];
+  const [hasResolvedInitialThreadSelection, setHasResolvedInitialThreadSelection] = useState(false);
+  const [viewedThreadIds, setViewedThreadIds] = useState<Set<string>>(() => (
+    typeof window === "undefined" ? new Set() : readStoredViewedThreadIds(window.localStorage, id)
+  ));
+  const [viewedThreadIdsLoadedForSessionId, setViewedThreadIdsLoadedForSessionId] = useState<string | null>(() => (
+    typeof window === "undefined" ? null : id
+  ));
+  const activeThread = threads.find((thread) => thread.id === activeThreadId) ?? null;
   const activeThreadIndex = activeThread ? threads.findIndex((thread) => thread.id === activeThread.id) : -1;
   const isActive = session ? !terminalStatuses.has(session.status) : false;
   const isRunning = session?.status === "running";
@@ -2614,20 +2626,92 @@ export function SessionDetailContent({ id }: { id: string }) {
   const [optimisticMessages, setOptimisticMessages] = useState<PendingFollowUpMessage[]>([]);
 
   useEffect(() => {
+    setHasResolvedInitialThreadSelection(false);
+    setActiveThreadId(null);
+  }, [id]);
+
+  useEffect(() => {
+    if (!session) {
+      return;
+    }
+
     if (threads.length === 0) {
       if (activeThreadId !== null) {
         setActiveThreadId(null);
       }
+      if (!hasResolvedInitialThreadSelection) {
+        setHasResolvedInitialThreadSelection(true);
+      }
       return;
     }
+
+    if (!hasResolvedInitialThreadSelection) {
+      if (!viewerScope || typeof window === "undefined") {
+        if (isAuthLoading) {
+          return;
+        }
+        setHasResolvedInitialThreadSelection(true);
+        setActiveThreadId(threads[0].id);
+        return;
+      }
+
+      const storedThreadId = readStoredSessionActiveThread(window.localStorage, id, viewerScope);
+      const nextThreadId = resolveInitialSessionThreadId(threads, storedThreadId);
+      setHasResolvedInitialThreadSelection(true);
+      if (activeThreadId !== nextThreadId) {
+        setActiveThreadId(nextThreadId);
+      }
+      return;
+    }
+
     if (!activeThreadId || !threads.some((thread) => thread.id === activeThreadId)) {
       setActiveThreadId(threads[0].id);
     }
-  }, [activeThreadId, threads]);
+  }, [activeThreadId, hasResolvedInitialThreadSelection, id, isAuthLoading, session, threads, viewerScope]);
+
+  useEffect(() => {
+    if (!hasResolvedInitialThreadSelection || !viewerScope || !activeThreadId || typeof window === "undefined") {
+      return;
+    }
+
+    writeStoredSessionActiveThread(window.localStorage, id, viewerScope, activeThreadId);
+  }, [activeThreadId, hasResolvedInitialThreadSelection, id, viewerScope]);
 
   useEffect(() => {
     setOptimisticMessages([]);
   }, [id]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+    setViewedThreadIds(readStoredViewedThreadIds(window.localStorage, id));
+    setViewedThreadIdsLoadedForSessionId(id);
+  }, [id]);
+
+  useEffect(() => {
+    if (!activeThread?.id) {
+      return;
+    }
+    setViewedThreadIds((current) => {
+      if (current.has(activeThread.id)) {
+        return current;
+      }
+      return new Set(current).add(activeThread.id);
+    });
+  }, [activeThread?.id]);
+
+  useEffect(() => {
+    if (typeof window === "undefined" || viewedThreadIdsLoadedForSessionId !== id) {
+      return;
+    }
+    const visibleThreadIDs = new Set(threads.map((thread) => thread.id));
+    writeStoredViewedThreadIds(
+      window.localStorage,
+      id,
+      [...viewedThreadIds].filter((threadId) => visibleThreadIDs.has(threadId)),
+    );
+  }, [id, threads, viewedThreadIds, viewedThreadIdsLoadedForSessionId]);
 
   type SendMutationArgs = {
     activeThreadId?: string;
@@ -2800,9 +2884,8 @@ export function SessionDetailContent({ id }: { id: string }) {
       setRepairActionError(null);
       setPendingPRAction(action);
     },
-    onSuccess: (response) => {
-      setPendingPRAction(null);
-      void queryClient.invalidateQueries({ queryKey: ["pull-request", pullRequestId, "health"] });
+    onSuccess: async (response) => {
+      const repairHealthQueryKey = ["pull-request", pullRequestId, "health"];
       void queryClient.invalidateQueries({ queryKey: ["session", id] });
       void queryClient.invalidateQueries({ queryKey: ["session", id, "timeline"] });
       void queryClient.invalidateQueries({ queryKey: ["session", id, "pr"] });
@@ -2810,6 +2893,11 @@ export function SessionDetailContent({ id }: { id: string }) {
       if (response.data.session_id !== id) {
         router.push(`/sessions/${response.data.session_id}`);
         return;
+      }
+      try {
+        await queryClient.refetchQueries({ queryKey: repairHealthQueryKey, type: "active" });
+      } finally {
+        setPendingPRAction(null);
       }
       // Same-session response: without explicit feedback the click looks
       // dead. Reused-in-flight is the common case (repair already running on
@@ -3201,6 +3289,7 @@ export function SessionDetailContent({ id }: { id: string }) {
   // overwrite the new agent_type with the send-time {label, model} body.
   const inFlightAgentUpdateRef = useRef<Promise<unknown> | null>(null);
   const chatPanelScrollToLiveEdgeRef = useRef<(() => void) | null>(null);
+  const [chatPanelKeyboardControls, setChatPanelKeyboardControls] = useState<SessionTranscriptKeyboardControls | null>(null);
   // Open comments are the source of truth for what gets attached to the next
   // message — once a send succeeds, the backend marks them resolved in the
   // same transaction, the comments query is invalidated below, and the next
@@ -3210,14 +3299,18 @@ export function SessionDetailContent({ id }: { id: string }) {
     () => comments.filter((comment) => !comment.resolved).slice(0, MAX_RESOLVE_REVIEW_COMMENTS_PER_MESSAGE),
     [comments],
   );
+  const isRestoringActiveThread = threads.length > 0 && activeThread === null;
   // Composer gating: messages may be sent at any point while the session or
   // thread is running. The backend queues mid-turn sends and the orchestrator
   // drains the queue once the in-flight turn completes. Pending/skipped at
   // the session level and a destroyed sandbox still block — those are
   // genuinely unrecoverable, not just busy.
-  const composerCanSendMessage = session?.status !== "skipped" &&
+  const composerCanSendMessage = !isRestoringActiveThread &&
+    session?.status !== "skipped" &&
     session?.status !== "pending" &&
     session?.sandbox_state !== "destroyed";
+  const composerUnavailableReason = isRestoringActiveThread ? "Thread is still loading." : undefined;
+  const composerPlaceholderOverride = isRestoringActiveThread ? "Loading thread..." : undefined;
   const composerIsRunning = activeThread ? activeThread.status === "running" : session?.status === "running";
   const composerIsSnapshotExpired = session?.sandbox_state === "destroyed";
   const composerAgentType = activeThread?.agent_type ?? session?.agent_type ?? "codex";
@@ -3257,7 +3350,7 @@ export function SessionDetailContent({ id }: { id: string }) {
     };
   }, [newThreadAgentType, newThreadLabel, newThreadModel, threads.length]);
   const pendingEditableThreadUpdate = useMemo(() => {
-    return getPendingEditableThreadUpdate(activeThread, activeThreadIsEditable, composerSelectedModel);
+    return getPendingEditableThreadUpdate(activeThread ?? undefined, activeThreadIsEditable, composerSelectedModel);
   }, [activeThread, activeThreadIsEditable, composerSelectedModel]);
 
   async function uploadComposerFiles(files: File[]) {
@@ -3435,6 +3528,7 @@ export function SessionDetailContent({ id }: { id: string }) {
 
   const queueSend = useCallback((opts: { planMode?: boolean; overrideMessage?: string } = {}) => {
     if (!session) return;
+    if (threads.length > 0 && !activeThread) return;
 
     const draftMessage = opts.overrideMessage ?? composerMessage;
     const userFacingMessage = attachedReviewComments.length > 0
@@ -3495,6 +3589,7 @@ export function SessionDetailContent({ id }: { id: string }) {
     pendingEditableThreadUpdate,
     session,
     sendMutation,
+    threads.length,
   ]);
   const queueSendRef = useRef(queueSend);
   const composerCanSendMessageRef = useRef(composerCanSendMessage);
@@ -3530,6 +3625,31 @@ export function SessionDetailContent({ id }: { id: string }) {
     },
     onError: (err) => {
       toast.error(err instanceof Error ? err.message : "Failed to cancel tab");
+    },
+  });
+  const archiveThreadMutation = useMutation({
+    mutationFn: (threadId: string) => api.sessions.archiveThread(id, threadId),
+    onSuccess: (response, archivedThreadID) => {
+      queryClient.setQueryData<SingleResponse<SessionDetail>>(["session", id], (existing) => {
+        if (!existing) return existing;
+        const existingThreads = existing.data.threads ?? [];
+        return {
+          ...existing,
+          data: {
+            ...existing.data,
+            threads: existingThreads.filter((thread) => thread.id !== archivedThreadID),
+          },
+        };
+      });
+      if (activeThreadId === archivedThreadID) {
+        const fallback = threads.find((thread) => thread.id !== archivedThreadID);
+        setActiveThreadId(fallback?.id ?? null);
+      }
+      queryClient.invalidateQueries({ queryKey: ["session", id] });
+      toast.success(`Closed ${response.data.label}`);
+    },
+    onError: (err) => {
+      toast.error(err instanceof Error ? err.message : "Failed to close tab");
     },
   });
   const forkThreadMutation = useMutation({
@@ -3740,9 +3860,11 @@ export function SessionDetailContent({ id }: { id: string }) {
   const registerChatPanelScrollToLiveEdge = useCallback((scrollToLiveEdge: (() => void) | null) => {
     chatPanelScrollToLiveEdgeRef.current = scrollToLiveEdge;
   }, []);
+  const registerChatPanelKeyboardControls = useCallback((controls: SessionTranscriptKeyboardControls | null) => {
+    setChatPanelKeyboardControls(controls);
+  }, []);
 
   const changesCount = diffStats?.filesChanged;
-  const showValidationTab = !session?.triggered_by_user_id;
   const detailTabsRef = useRef<HTMLDivElement>(null);
   const [detailTabsOverflow, setDetailTabsOverflow] = useState(false);
 
@@ -3782,7 +3904,6 @@ export function SessionDetailContent({ id }: { id: string }) {
     session?.id,
     session?.pr_creation_error,
     session?.pr_creation_state,
-    showValidationTab,
   ]);
   const isDedicatedMobileReview = centerMode === "review" && isMobileReviewViewport;
 
@@ -3791,6 +3912,126 @@ export function SessionDetailContent({ id }: { id: string }) {
       setMobileReviewComposerOpen(false);
     }
   }, [isDedicatedMobileReview]);
+
+  const focusActiveDetailTab = useCallback(() => {
+    requestAnimationFrame(() => {
+      detailTabsRef.current?.querySelector<HTMLElement>('[role="tab"][data-state="active"]')?.focus();
+    });
+  }, []);
+
+  const toggleDetailsFromKeyboard = useCallback(() => {
+    if (centerMode === "review" && showDetailPanel) {
+      return;
+    }
+    if (isMobileReviewViewport) {
+      setMobileDetailOpen((open) => !open);
+      focusActiveDetailTab();
+      return;
+    }
+    setShowDetailPanel((open) => !open);
+    if (!showDetailPanel) {
+      focusActiveDetailTab();
+    }
+  }, [centerMode, focusActiveDetailTab, isMobileReviewViewport, showDetailPanel]);
+
+  const closeDetailsFromKeyboard = useCallback(() => {
+    if (isMobileReviewViewport) {
+      setMobileDetailOpen(false);
+      return;
+    }
+    if (!(centerMode === "review" && showDetailPanel)) {
+      setShowDetailPanel(false);
+    }
+  }, [centerMode, isMobileReviewViewport, showDetailPanel]);
+
+  const focusComposerFromKeyboard = useCallback(() => {
+    composerTextareaRef.current?.focus();
+    composerTextareaRef.current?.scrollIntoView({ block: "nearest" });
+  }, []);
+
+  const ghBlocked = ghStatus?.pr_authorship_mode === "user_required" && !ghStatus?.connected;
+
+  const createPRFromKeyboard = useCallback(() => {
+    if (localPRState !== "idle" || createPRMutation.isPending) {
+      return;
+    }
+    if (ghBlocked) {
+      setPRAuthPrompt({ purpose: "create_pr" });
+      return;
+    }
+    createPRMutation.mutate(undefined);
+  }, [createPRMutation, ghBlocked, localPRState]);
+
+  const pushChangesFromKeyboard = useCallback(() => {
+    if (localPushState !== "idle" || pushChangesMutation.isPending) {
+      return;
+    }
+    if (ghBlocked) {
+      setPRAuthPrompt({ purpose: "push_changes" });
+      return;
+    }
+    pushChangesMutation.mutate(undefined);
+  }, [ghBlocked, localPushState, pushChangesMutation]);
+
+  const viewPRFromKeyboard = useCallback(() => {
+    if (!prData?.data?.github_pr_url) {
+      return;
+    }
+    window.open(prData.data.github_pr_url, "_blank", "noopener,noreferrer");
+  }, [prData?.data?.github_pr_url]);
+
+  useSessionKeyboardShortcuts({
+    enabled: !isLoading && !!session,
+    reviewMode: centerMode === "review",
+    onShowHelp: () => setKeyboardHelpOpen(true),
+    onFocusComposer: focusComposerFromKeyboard,
+    transcript: chatPanelKeyboardControls,
+    agentTabs: threads.length > 0 && activeThreadIndex >= 0 ? {
+      activeIndex: activeThreadIndex,
+      count: threads.length,
+      onChange: (index) => {
+        const next = threads[index];
+        if (next) {
+          setActiveThreadId(next.id);
+          chatPanelKeyboardControls?.focus();
+        }
+      },
+      onAdd: () => {
+        if (!createThreadMutation.isPending) {
+          createThreadMutation.mutate(buildDefaultThreadRequest());
+        }
+      },
+    } : null,
+    details: {
+      open: isMobileReviewViewport ? mobileDetailOpen : showDetailPanel,
+      required: centerMode === "review" && showDetailPanel,
+      activeTab: detailTab,
+      availableTabs: ["overview", "changes", "preview"] as const,
+      onToggle: toggleDetailsFromKeyboard,
+      onClose: closeDetailsFromKeyboard,
+      onTabChange: handleDetailTabClick,
+      onOpenReview: () => {
+        if (visibleDiffFiles.length > 0) {
+          openReview();
+        }
+      },
+      onExitReview: exitReview,
+    },
+    pr: {
+      canCreate: canCreatePR && localPRState === "idle" && !createPRMutation.isPending,
+      canView: !!prData?.data?.github_pr_url,
+      canPush: hasPR && prStatus === "open" && !!session?.has_unpushed_changes && hasSnapshot && !isRunning && localPushState === "idle" && !pushChangesMutation.isPending,
+      canFixTests: !!prHealth?.can_fix_tests && pendingPRAction === null,
+      canResolveConflicts: !!prHealth?.can_resolve_conflicts && pendingPRAction === null,
+      canMerge: prHealthAllowsMerge(prHealth) && pendingPRAction === null,
+      onCreate: createPRFromKeyboard,
+      onView: viewPRFromKeyboard,
+      onPush: pushChangesFromKeyboard,
+      onFixTests: () => startRepairMutation.mutate("fix_tests"),
+      onResolveConflicts: () => startRepairMutation.mutate("resolve_conflicts"),
+      onMerge: handleMergeAction,
+    },
+  });
 
   if (isLoading) {
     return (
@@ -3829,7 +4070,6 @@ export function SessionDetailContent({ id }: { id: string }) {
     snapshotState,
     localPRActionError?.code ? localPRActionError.message : session.pr_creation_error,
   );
-  const ghBlocked = ghStatus?.pr_authorship_mode === "user_required" && !ghStatus?.connected;
   const succeededButNoPR = prState === "succeeded" && !hasPR;
   const prActionError = hasPR
     ? null
@@ -3993,9 +4233,6 @@ export function SessionDetailContent({ id }: { id: string }) {
                   </Badge>
                 )}
               </TabsTrigger>
-              {showValidationTab && (
-                <TabsTrigger value="validation">Validation</TabsTrigger>
-              )}
               <TabsTrigger value="preview">Preview</TabsTrigger>
             </TabsList>
           </div>
@@ -4007,7 +4244,7 @@ export function SessionDetailContent({ id }: { id: string }) {
                     {closedPRLabel}
                   </Badge>
                 )}
-                <Button asChild variant="outline" size="sm" className="h-7 text-xs gap-1.5">
+                <Button asChild variant="outline" size="sm" className="h-7 text-xs gap-1.5" title="View PR (p v)">
                   <a href={prData.data.github_pr_url} target="_blank" rel="noopener noreferrer">
                     <ExternalLink className="h-3 w-3" />
                     View PR
@@ -4021,7 +4258,7 @@ export function SessionDetailContent({ id }: { id: string }) {
                   size="sm"
                   className="h-7 text-xs gap-1.5"
                   disabled={prActionDisabled}
-                  title={prActionTitle}
+                  title={prActionTitle ? `${prActionTitle} (p c)` : `${prActionLabel} (p c)`}
                   onClick={() => createPRMutation.mutate(undefined)}
                 >
                   {prActionSpinning ? (
@@ -4089,12 +4326,14 @@ export function SessionDetailContent({ id }: { id: string }) {
             prHealth ? (
               <PRHealthBanner
                 health={prHealth}
+                currentSessionId={id}
                 pendingAction={pendingPRAction}
                 repairError={repairActionError}
                 mergeAuthRequired={ghBlocked}
                 onFixTests={() => startRepairMutation.mutate("fix_tests")}
                 onResolveConflicts={() => startRepairMutation.mutate("resolve_conflicts")}
                 onMerge={handleMergeAction}
+                onOpenRepairSession={(sessionId) => router.push(`/sessions/${sessionId}`)}
                 pushChanges={showPushAction ? {
                   label: pushActionLabel,
                   disabled: pushActionDisabled,
@@ -4152,11 +4391,6 @@ export function SessionDetailContent({ id }: { id: string }) {
           <OverviewTab session={session} members={members} prStatus={prStatus} />
         </div>
       </TabsContent>
-      {showValidationTab && (
-        <TabsContent value="validation" className="flex-1 overflow-y-auto scrollbar-hide p-4">
-          <ValidationTab sessionId={id} />
-        </TabsContent>
-      )}
       <TabsContent value="preview" className="flex-1 overflow-y-auto scrollbar-hide p-4">
         <PreviewPanel
           sessionId={id}
@@ -4178,6 +4412,7 @@ export function SessionDetailContent({ id }: { id: string }) {
               backTo="/sessions"
               threads={threads}
               activeThreadId={activeThread?.id ?? null}
+              viewedThreadIds={viewedThreadIds}
               onOpenDetails={() => setMobileDetailOpen(true)}
               onActiveThreadChange={setActiveThreadId}
               onAddThread={openAddThreadDialog}
@@ -4185,7 +4420,9 @@ export function SessionDetailContent({ id }: { id: string }) {
               onCancelThread={(tid) => cancelThreadMutation.mutate(tid)}
               onForkThread={(tid) => forkThreadMutation.mutate(tid)}
               onRevertThread={(tid) => revertThreadMutation.mutate(tid)}
+              onArchiveThread={(tid) => archiveThreadMutation.mutate(tid)}
               cancelPendingThreadId={cancelThreadMutation.isPending ? cancelThreadMutation.variables ?? null : null}
+              archivePendingThreadId={archiveThreadMutation.isPending ? archiveThreadMutation.variables ?? null : null}
             />
 
             <div className="hidden md:flex border-b border-border px-4 py-3 bg-background items-center justify-between shrink-0">
@@ -4265,6 +4502,7 @@ export function SessionDetailContent({ id }: { id: string }) {
                   disabled={centerMode === "review" && showDetailPanel}
                   onClick={() => setShowDetailPanel(!showDetailPanel)}
                   title={detailToggleTitle}
+                  aria-keyshortcuts="d"
                 >
                   {showDetailPanel ? <PanelRightClose className="h-4 w-4" /> : <PanelRightOpen className="h-4 w-4" />}
                 </Button>
@@ -4278,6 +4516,7 @@ export function SessionDetailContent({ id }: { id: string }) {
           <AgentTabStrip
             threads={threads}
             activeThreadId={activeThread?.id ?? null}
+            viewedThreadIds={viewedThreadIds}
             overlapsByThreadId={overlapsByThreadId}
             statusConfig={statusConfig}
             onActiveThreadChange={setActiveThreadId}
@@ -4286,7 +4525,9 @@ export function SessionDetailContent({ id }: { id: string }) {
             onCancelThread={(tid) => cancelThreadMutation.mutate(tid)}
             onForkThread={(tid) => forkThreadMutation.mutate(tid)}
             onRevertThread={(tid) => revertThreadMutation.mutate(tid)}
+            onArchiveThread={(tid) => archiveThreadMutation.mutate(tid)}
             cancelPendingThreadId={cancelThreadMutation.isPending ? cancelThreadMutation.variables ?? null : null}
+            archivePendingThreadId={archiveThreadMutation.isPending ? archiveThreadMutation.variables ?? null : null}
             addTabButtonRef={addTabButtonRef}
           />
           </div>
@@ -4295,18 +4536,29 @@ export function SessionDetailContent({ id }: { id: string }) {
         <div className="flex-1 min-h-0 relative">
           {/* Chat panel — always mounted to preserve scroll, SSE connections, etc. */}
           <div className={cn("h-full", centerMode !== "chat" && "hidden")}>
-            <MemoizedChatPanel
-              key={activeThread ? `${id}:${activeThread.id}` : id}
-              session={session}
-              sessionId={id}
-              activeThread={activeThread}
-              isActive={isActive}
-              optimisticMessages={optimisticMessages}
-              onDiffClick={handleChatDiffClick}
-              onApprovePlan={handleApprovePlan}
-              onAdjustPlan={handleAdjustPlan}
-              onRegisterScrollToLiveEdge={registerChatPanelScrollToLiveEdge}
-            />
+            {threads.length > 0 && activeThread === null ? (
+              <div className="flex h-full items-center justify-center">
+                <div className="text-center space-y-2">
+                  <Loader2 className="h-5 w-5 animate-spin text-muted-foreground/40 mx-auto" />
+                  <p className="text-xs text-muted-foreground">Loading thread...</p>
+                </div>
+              </div>
+            ) : (
+              <MemoizedChatPanel
+                key={activeThread ? `${id}:${activeThread.id}` : id}
+                session={session}
+                sessionId={id}
+                activeThread={activeThread ?? undefined}
+                isActive={isActive}
+                viewerScope={viewerScope}
+                optimisticMessages={optimisticMessages}
+                onDiffClick={handleChatDiffClick}
+                onApprovePlan={handleApprovePlan}
+                onAdjustPlan={handleAdjustPlan}
+                onRegisterScrollToLiveEdge={registerChatPanelScrollToLiveEdge}
+                onRegisterKeyboardControls={registerChatPanelKeyboardControls}
+              />
+            )}
           </div>
           {/* Review diff view — mounted only when active */}
           {centerMode === "review" && (
@@ -4411,6 +4663,8 @@ export function SessionDetailContent({ id }: { id: string }) {
               onEditableAgentTypeChange={activeThreadIsEditable ? handleEditableAgentTypeChange : undefined}
               agentUpdatePending={updateThreadMutation.isPending}
               targetLabel={activeThread ? activeThreadLabel : undefined}
+              unavailableReason={composerUnavailableReason}
+              placeholderOverride={composerPlaceholderOverride}
             />
           </>
         )}
@@ -4422,8 +4676,9 @@ export function SessionDetailContent({ id }: { id: string }) {
         <div className="hidden md:flex">
           <ResizeHandle onResize={handleDetailResize} />
           <div
+            data-testid="session-detail-panel"
             style={{ width: detailWidth }}
-            className="border-l border-border bg-muted/20 flex flex-col shrink-0 overflow-hidden"
+            className="relative z-10 border-l border-border bg-background flex flex-col shrink-0 overflow-hidden"
           >
             {panelTabsEl}
           </div>
@@ -4440,7 +4695,7 @@ export function SessionDetailContent({ id }: { id: string }) {
         >
           <SheetTitle className="sr-only">Session details</SheetTitle>
           <SheetDescription className="sr-only">
-            Browse session details, changed files, validation, and preview on mobile.
+            Browse session details, changed files, and preview on mobile.
           </SheetDescription>
           {panelTabsEl}
         </SheetContent>
@@ -4512,6 +4767,8 @@ export function SessionDetailContent({ id }: { id: string }) {
               onEditableAgentTypeChange={activeThreadIsEditable ? handleEditableAgentTypeChange : undefined}
               agentUpdatePending={updateThreadMutation.isPending}
               targetLabel={activeThread ? activeThreadLabel : undefined}
+              unavailableReason={composerUnavailableReason}
+              placeholderOverride={composerPlaceholderOverride}
             />
           </SheetContent>
         </Sheet>
@@ -4635,6 +4892,10 @@ export function SessionDetailContent({ id }: { id: string }) {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+      <SessionKeyboardHelpOverlay
+        open={keyboardHelpOpen}
+        onOpenChange={setKeyboardHelpOpen}
+      />
       <AlertDialog
         open={!!prAuthPrompt}
         onOpenChange={(open) => {
@@ -4654,8 +4915,12 @@ export function SessionDetailContent({ id }: { id: string }) {
               {prAuthPrompt?.purpose === "merge_pr"
                 ? "Authorize GitHub once to merge pull requests as you."
                 : prAuthPrompt?.purpose === "push_changes"
-                  ? "Authorize GitHub once to push as you. If you skip this, 143 can still push the commits as the app."
-                  : "Authorize GitHub once to open PRs as you. If you skip this, 143 can still open the PR as the app."}
+                  ? prAuthPrompt.can_fallback_to_app
+                    ? "Authorize GitHub once to push as you. If you skip this, 143 can still push the commits as the app."
+                    : "Authorize GitHub once to push as you."
+                  : prAuthPrompt?.can_fallback_to_app
+                    ? "Authorize GitHub once to open PRs as you. If you skip this, 143 can still open the PR as the app."
+                    : "Authorize GitHub once to open PRs as you."}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>

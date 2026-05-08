@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import { fireEvent } from "@testing-library/react";
 import { renderWithProviders, screen, userEvent, waitFor, within } from "@/test/test-utils";
 import { AuthenticatedLayout } from "./authenticated-layout";
 import { http, HttpResponse } from "msw";
@@ -83,8 +84,42 @@ describe("AuthenticatedLayout", () => {
       </AuthenticatedLayout>
     );
 
-    const sidebar = container.querySelector("aside");
-    expect(sidebar).toHaveClass("w-[236px]");
+    const sidebar = container.querySelector("[data-testid='app-sidebar']");
+    expect(sidebar).toHaveStyle({ "--app-sidebar-w": "236px" });
+  });
+
+  it("restores the app sidebar width from localStorage after mount", async () => {
+    window.localStorage.setItem("143:app-sidebar-width", "280");
+
+    const { container } = renderWithProviders(
+      <AuthenticatedLayout>
+        <div>content</div>
+      </AuthenticatedLayout>
+    );
+
+    const sidebar = container.querySelector("[data-testid='app-sidebar']");
+    await waitFor(() => {
+      expect(sidebar).toHaveStyle({ "--app-sidebar-w": "280px" });
+    });
+  });
+
+  it("persists app sidebar resize and clamps it to the max", () => {
+    const { container } = renderWithProviders(
+      <AuthenticatedLayout>
+        <div>content</div>
+      </AuthenticatedLayout>
+    );
+
+    const sidebar = container.querySelector("[data-testid='app-sidebar']");
+    const handle = container.querySelector("[data-testid='app-sidebar-resize-handle']");
+    expect(handle).not.toBeNull();
+
+    fireEvent.mouseDown(handle!, { clientX: 100 });
+    fireEvent.mouseMove(document, { clientX: 220 });
+    fireEvent.mouseUp(document);
+
+    expect(sidebar).toHaveStyle({ "--app-sidebar-w": "300px" });
+    expect(window.localStorage.getItem("143:app-sidebar-width")).toBe("300");
   });
 
   it("uses a full-width content area with responsive padding", () => {
@@ -393,6 +428,25 @@ describe("AuthenticatedLayout", () => {
       await waitFor(() => {
         expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
       });
+    });
+
+    it("uses a compact close control in the mobile drawer header", async () => {
+      const user = userEvent.setup();
+
+      renderWithProviders(
+        <AuthenticatedLayout>
+          <div>content</div>
+        </AuthenticatedLayout>
+      );
+
+      await user.click(screen.getByRole("button", { name: "Open navigation menu" }));
+      await screen.findByRole("dialog");
+
+      const closeButton = screen.getByRole("button", { name: "Close navigation menu" });
+      expect(closeButton).toHaveClass("h-9", "w-9");
+
+      const closeIcon = closeButton.querySelector("svg");
+      expect(closeIcon).toHaveClass("h-4", "w-4");
     });
 
     it("does not close the drawer on modifier-clicks (cmd/ctrl/middle)", async () => {

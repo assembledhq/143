@@ -423,17 +423,17 @@ PULL_APP
       # subnet Docker auto-assigns from its default pool and the static IP
       # mapping breaks.
       #
-      # enable_icc=false blocks one sandbox from TCP-connecting to another.
-      # Intra-bridge traffic from a sandbox to preview-infra and to
-      # sandbox-dns is allowed by an explicit RETURN rule installed in
-      # DOCKER-USER by sandbox-firewall.sh.
+      # Leave Docker's bridge ICC setting at its default. On some Docker /
+      # gVisor combinations, disabling bridge ICC blocks sandbox traffic to
+      # the sandbox-dns sidecar before DOCKER-USER can carve it out, which
+      # breaks all agent DNS resolution.
       # docker inspect returns "" on a missing network (with exit 1 swallowed
       # by `|| true`) and the subnet string on an existing one. Distinguishing
       # the two via a single call keeps us from spawning two `su - deploy`
       # login shells per provision.
       EXISTING_SANDBOX_SUBNET=$(su - deploy -c 'docker network inspect 143-sandbox -f "{{range .IPAM.Config}}{{.Subnet}}{{end}}" 2>/dev/null' || true)
       if [ -z "$EXISTING_SANDBOX_SUBNET" ]; then
-        su - deploy -c 'docker network create --driver bridge --subnet 172.30.0.0/24 --opt com.docker.network.bridge.enable_icc=false --label managed-by=143 143-sandbox'
+        su - deploy -c 'docker network create --driver bridge --subnet 172.30.0.0/24 --label managed-by=143 143-sandbox'
       elif [ "$EXISTING_SANDBOX_SUBNET" != "172.30.0.0/24" ]; then
         echo "ERROR: 143-sandbox network has subnet '$EXISTING_SANDBOX_SUBNET'; expected 172.30.0.0/24." >&2
         echo "  This worker was provisioned before the pinned-subnet change. To upgrade:" >&2

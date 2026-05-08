@@ -55,7 +55,6 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	sessionIssueSnapshotStore := db.NewSessionTurnIssueSnapshotStore(pool)
 	sessionLogStore := db.NewSessionLogStore(pool)
 	sessionQuestionStore := db.NewSessionQuestionStore(pool)
-	validationStore := db.NewValidationStore(pool)
 	pullRequestStore := db.NewPullRequestStore(pool)
 	webhookDeliveryStore := db.NewWebhookDeliveryStore(pool)
 	jobStore := db.NewJobStore(pool)
@@ -131,7 +130,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 		} else {
 			prService = ghservice.NewPRService(
 				ghSvc, pullRequestStore, sessionStore, issueStore,
-				deployStore, validationStore, repoStore, jobStore, logger,
+				deployStore, repoStore, jobStore, logger,
 			)
 			prService.SetAppBaseURL(cfg.FrontendURL)
 			prService.SetReviewCommentStore(reviewCommentStore)
@@ -147,6 +146,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 
 	// Create handlers
 	healthHandler := handlers.NewHealthHandler(pool)
+	healthHandler.SetDrainingSignal(shutdownCh)
 	if redisClient != nil {
 		healthHandler.SetRedisHealthCheck(redisClient.Healthy)
 	}
@@ -202,7 +202,6 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 		sessionStore,
 		sessionLogStore,
 		sessionQuestionStore,
-		validationStore,
 		pullRequestStore,
 		issueStore,
 		repoStore,
@@ -737,7 +736,6 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Patch("/api/v1/sessions/{id}", sessionHandler.Update)
 				r.Get("/api/v1/sessions/{id}/logs", sessionHandler.GetLogs)
 				r.Get("/api/v1/sessions/{id}/logs/stream", sessionHandler.StreamLogs)
-				r.Get("/api/v1/sessions/{id}/validation", sessionHandler.GetValidation)
 				r.Get("/api/v1/sessions/{id}/pr", sessionHandler.GetPullRequest)
 				r.Get("/api/v1/sessions/{id}/questions", sessionHandler.ListQuestions)
 				r.Get("/api/v1/sessions/{id}/messages", sessionHandler.ListMessages)
@@ -884,6 +882,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Post("/api/v1/pull-requests/{id}/merge", pullRequestHandler.Merge)
 				r.Post("/api/v1/sessions/{id}/threads", sessionThreadHandler.CreateThread)
 				r.Patch("/api/v1/sessions/{id}/threads/{tid}", sessionThreadHandler.UpdateThread)
+				r.Post("/api/v1/sessions/{id}/threads/{tid}/archive", sessionThreadHandler.ArchiveThread)
 				r.Post("/api/v1/sessions/{id}/threads/{tid}/messages", sessionThreadHandler.SendThreadMessage)
 				r.Post("/api/v1/sessions/{id}/threads/{tid}/end", sessionThreadHandler.EndThread)
 				r.Post("/api/v1/sessions/{id}/threads/{tid}/cancel", sessionThreadHandler.CancelThread)

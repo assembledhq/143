@@ -10,6 +10,10 @@ Recommended default:
 2. Otherwise, if the session is currently active/streaming, open at the live edge (bottom).
 3. Otherwise, open at the **start of the latest assistant turn**, not the absolute bottom of the transcript.
 
+For multi-thread sessions, resolve the **last active thread first**, then apply
+the same per-thread scroll/open-position rules inside that thread rather than
+defaulting back to the primary tab.
+
 This keeps the behavior simple, quiet, and predictable while still respecting two very different intents: "continue work" and "re-read history."
 
 ## Problem
@@ -73,7 +77,10 @@ Because if a user has already been reading a session, their own prior position i
 
 This should be lightweight and forgiving:
 
-- Persist per user, per session.
+- Persist per user, per session, with scroll positions scoped per thread when a
+  session has multiple agent tabs.
+- Persist the last active thread per user and session so reopening a multi-tab
+  session restores the same conversation lane before reading scroll state.
 - Update on debounced scroll or on unmount.
 - Best effort only. If it is missing, fall back cleanly.
 
@@ -94,6 +101,8 @@ This matches established chat/log behavior and supports live monitoring.
 For non-active sessions:
 
 - Restore the user's last position if known.
+- In multi-thread sessions, reopen the last active thread first when that tab
+  still exists.
 - Otherwise scroll to the **start of the latest assistant turn**.
 - If the latest turn is missing or malformed, fall back to the bottom.
 

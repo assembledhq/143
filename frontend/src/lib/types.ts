@@ -131,7 +131,6 @@ export interface Session {
   org_id: string;
   origin?: string;
   interaction_mode?: string;
-  validation_policy?: string;
   agent_type: string;
   status: string;
   autonomy_level: string;
@@ -223,27 +222,6 @@ export interface SessionListItem extends Session {
   pr_summary?: PRSummary;
 }
 
-export interface Validation {
-  id: string;
-  session_id: string;
-  org_id: string;
-  status: string;
-  direction_check: string | null;
-  direction_check_details: string | null;
-  correctness_check: string | null;
-  correctness_check_details: string | null;
-  quality_check: string | null;
-  quality_check_details: string | null;
-  security_scan: string | null;
-  security_scan_details: string | null;
-  regression_test_check: string | null;
-  regression_test_check_details: string | null;
-  ci_check: string | null;
-  ci_check_details: string | null;
-  created_at: string;
-  updated_at: string;
-}
-
 export type ThreadStatus = 'pending' | 'running' | 'idle' | 'awaiting_input' | 'completed' | 'failed' | 'cancelled';
 
 export interface SessionThread {
@@ -267,6 +245,7 @@ export interface SessionThread {
   started_at?: string;
   completed_at?: string;
   created_at: string;
+  archived_at?: string;
   base_snapshot_key?: string;
   cost_cents: number;
   pending_message_count: number;
@@ -426,6 +405,13 @@ export interface PullRequestCheckSummary {
   summary?: string;
 }
 
+export interface PullRequestActiveRepair {
+  action_type: "fix_tests" | "resolve_conflicts";
+  session_id: string;
+  session_status: string;
+  health_version: number;
+}
+
 export interface PullRequestHealthResponse {
   pull_request_id: string;
   pull_request_number: number;
@@ -446,6 +432,7 @@ export interface PullRequestHealthResponse {
   can_resolve_conflicts: boolean;
   can_fix_tests: boolean;
   can_merge: boolean;
+  active_repairs?: PullRequestActiveRepair[];
   enrichment_status: "not_requested" | "pending" | "ready" | "failed" | "stale";
   enrichment_requested: boolean;
   enrichment_ready: boolean;

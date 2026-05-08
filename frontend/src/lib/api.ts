@@ -329,7 +329,6 @@ export const api = {
       patch<import('./types').SingleResponse<import('./types').Session>>(`/api/v1/sessions/${id}`, body),
     getLogs: (sessionId: string) => get<import('./types').ListResponse<import('./types').SessionLog>>(`/api/v1/sessions/${sessionId}/logs`),
     getTimeline: (sessionId: string) => get<import('./types').ListResponse<import('./types').SessionTimelineEntry>>(`/api/v1/sessions/${sessionId}/timeline`),
-    getValidation: (sessionId: string) => get<import('./types').SingleResponse<import('./types').Validation>>(`/api/v1/sessions/${sessionId}/validation`),
     getPR: (sessionId: string) => get<import('./types').SingleResponse<import('./types').PullRequest | null>>(`/api/v1/sessions/${sessionId}/pr`),
     createPR: (sessionId: string, options?: { draft?: boolean; authorMode?: 'auto' | 'user' | 'app'; resumeToken?: string }) =>
       post<{ status: string }>(`/api/v1/sessions/${sessionId}/pr`, options ? {
@@ -383,6 +382,8 @@ export const api = {
     // string to set/validate it. The backend distinguishes these three states.
     updateThread: (sessionId: string, threadId: string, body: { agent_type?: string; model?: string | null; label: string }) =>
       patch<import('./types').SingleResponse<import('./types').SessionThread>>(`/api/v1/sessions/${sessionId}/threads/${threadId}`, body),
+    archiveThread: (sessionId: string, threadId: string) =>
+      post<import('./types').SingleResponse<import('./types').SessionThread>>(`/api/v1/sessions/${sessionId}/threads/${threadId}/archive`, {}),
     sendThreadMessage: (sessionId: string, threadId: string, body: { message: string; images?: string[]; references?: import('./types').SessionInputReference[]; commands?: import('./types').SessionInputCommand[]; planMode?: boolean; resolveReviewCommentIDs?: string[] }) =>
       post<import('./types').SingleResponse<import('./types').SessionMessage>>(
         `/api/v1/sessions/${sessionId}/threads/${threadId}/messages`,

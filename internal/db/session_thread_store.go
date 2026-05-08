@@ -23,7 +23,7 @@ func NewSessionThreadStore(db DBTX) *SessionThreadStore {
 const sessionThreadSelectColumns = `id, session_id, org_id, agent_type, model_override,
 	label, instructions, file_scope, status, agent_session_id, current_turn, last_activity_at,
 	confidence_score, result_summary, diff, failure_explanation, failure_category,
-	started_at, completed_at, created_at,
+	started_at, completed_at, created_at, archived_at,
 	base_snapshot_key, cost_cents, pending_message_count, cancel_requested_at`
 
 // sessionThreadListColumns omits the raw diff while preserving a lightweight
@@ -49,7 +49,7 @@ func (s *SessionThreadStore) Create(ctx context.Context, thread *models.SessionT
 		)
 		SELECT @session_id, @org_id, @agent_type, @model_override,
 			@label, @instructions, @file_scope, @status
-		WHERE (SELECT count(*) FROM session_threads WHERE session_id = @session_id AND org_id = @org_id) < @max_threads
+		WHERE (SELECT count(*) FROM session_threads WHERE session_id = @session_id AND org_id = @org_id AND archived_at IS NULL) < @max_threads
 		RETURNING id, created_at`
 
 	args := pgx.NamedArgs{
@@ -79,7 +79,7 @@ func (s *SessionThreadStore) GetByID(ctx context.Context, orgID, threadID uuid.U
 	query := `
 		SELECT ` + sessionThreadSelectColumns + `
 		FROM session_threads
-		WHERE id = @id AND org_id = @org_id`
+		WHERE id = @id AND org_id = @org_id AND archived_at IS NULL`
 
 	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
 		"id":     threadID,
@@ -95,7 +95,7 @@ func (s *SessionThreadStore) ListBySession(ctx context.Context, orgID, sessionID
 	query := `
 		SELECT ` + sessionThreadListColumns + `
 		FROM session_threads
-		WHERE org_id = @org_id AND session_id = @session_id
+		WHERE org_id = @org_id AND session_id = @session_id AND archived_at IS NULL
 		ORDER BY created_at ASC`
 
 	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
@@ -111,10 +111,44 @@ func (s *SessionThreadStore) ListBySession(ctx context.Context, orgID, sessionID
 func (s *SessionThreadStore) CountBySession(ctx context.Context, orgID, sessionID uuid.UUID) (int, error) {
 	var count int
 	err := s.db.QueryRow(ctx,
-		`SELECT count(*) FROM session_threads WHERE org_id = @org_id AND session_id = @session_id`,
+		`SELECT count(*) FROM session_threads WHERE org_id = @org_id AND session_id = @session_id AND archived_at IS NULL`,
 		pgx.NamedArgs{"org_id": orgID, "session_id": sessionID},
 	).Scan(&count)
 	return count, err
+}
+
+func (s *SessionThreadStore) Archive(ctx context.Context, orgID, sessionID, threadID uuid.UUID) (models.SessionThread, error) {
+	query := `
+		WITH visible_threads AS (
+			SELECT id, status
+			FROM session_threads
+			WHERE session_id = @session_id
+			  AND org_id = @org_id
+			  AND archived_at IS NULL
+			FOR UPDATE
+		), visible_count AS (
+			SELECT count(*) AS count
+			FROM visible_threads
+		)
+		UPDATE session_threads
+		SET archived_at = now()
+		WHERE id = @id
+		  AND session_id = @session_id
+		  AND org_id = @org_id
+		  AND archived_at IS NULL
+		  AND (SELECT count FROM visible_count) > 1
+		  AND (SELECT status FROM visible_threads WHERE id = @id) NOT IN ('pending', 'running', 'awaiting_input')
+		RETURNING ` + sessionThreadSelectColumns
+
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
+		"id":         threadID,
+		"session_id": sessionID,
+		"org_id":     orgID,
+	})
+	if err != nil {
+		return models.SessionThread{}, fmt.Errorf("archive thread: %w", err)
+	}
+	return pgx.CollectOneRow(rows, pgx.RowToStructByName[models.SessionThread])
 }
 
 func (s *SessionThreadStore) UpdateStatus(ctx context.Context, orgID, threadID uuid.UUID, status models.ThreadStatus) error {
@@ -423,7 +457,7 @@ func (s *SessionThreadStore) claimForSession(ctx context.Context, args claimForS
 		WITH locked_threads AS (
 			SELECT id, status
 			FROM session_threads
-			WHERE org_id = @org_id AND session_id = @session_id
+			WHERE org_id = @org_id AND session_id = @session_id AND archived_at IS NULL
 			FOR UPDATE
 		), target_claimable AS (
 			SELECT 1
@@ -449,6 +483,7 @@ func (s *SessionThreadStore) claimForSession(ctx context.Context, args claimForS
 		WHERE id = @id
 		  AND org_id = @org_id
 		  AND session_id = @session_id
+		  AND archived_at IS NULL
 		  AND EXISTS (SELECT 1 FROM eligible)
 		RETURNING ` + sessionThreadSelectColumns
 
@@ -498,9 +533,10 @@ func (s *SessionThreadStore) isAtRunningLimit(ctx context.Context, orgID, sessio
 	var siblingActive int
 	err := s.db.QueryRow(ctx, `
 		SELECT
-		    COALESCE((SELECT status FROM session_threads WHERE id = @id AND org_id = @org_id), '') AS target_status,
+		    COALESCE((SELECT status FROM session_threads WHERE id = @id AND org_id = @org_id AND archived_at IS NULL), '') AS target_status,
 		    (SELECT count(*) FROM session_threads
 		        WHERE org_id = @org_id AND session_id = @session_id AND id <> @id
+		          AND archived_at IS NULL
 		          AND status IN ('pending', 'running', 'awaiting_input')) AS sibling_active
 	`, pgx.NamedArgs{"id": threadID, "org_id": orgID, "session_id": sessionID}).Scan(&targetStatus, &siblingActive)
 	if err != nil {
@@ -526,6 +562,7 @@ func (s *SessionThreadStore) CountActive(ctx context.Context, orgID, sessionID u
 		SELECT count(*)
 		FROM session_threads
 		WHERE org_id = @org_id AND session_id = @session_id
+		  AND archived_at IS NULL
 		  AND status IN ('pending', 'running', 'awaiting_input')
 	`, pgx.NamedArgs{"org_id": orgID, "session_id": sessionID}).Scan(&count)
 	return count, err

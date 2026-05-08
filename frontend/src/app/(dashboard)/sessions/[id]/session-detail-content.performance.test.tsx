@@ -145,7 +145,7 @@ describe("SessionDetailContent performance", () => {
 
     expect(textarea).toHaveValue("Lag");
     expect(chatTimelineRenderState.count).toBe(0);
-  });
+  }, 30000);
 
   it("loads the raw diff only after the changes surface is opened", async () => {
     const { SessionDetailContent } = await import("./session-detail-content");

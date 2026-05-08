@@ -20,8 +20,6 @@ import (
 	linearservice "github.com/assembledhq/143/internal/services/linear"
 	"github.com/assembledhq/143/internal/services/pm"
 	"github.com/assembledhq/143/internal/services/prioritization"
-	"github.com/assembledhq/143/internal/services/validation"
-	"github.com/assembledhq/143/internal/testutil"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/pashagolub/pgxmock/v4"
@@ -110,7 +108,7 @@ var workerSessionThreadColumns = []string{
 	"label", "instructions", "file_scope", "status", "agent_session_id", "current_turn", "last_activity_at",
 	"confidence_score", "result_summary", "diff", "failure_explanation", "failure_category",
 	"started_at", "completed_at", "created_at",
-	"base_snapshot_key", "cost_cents", "pending_message_count", "cancel_requested_at",
+	"archived_at", "base_snapshot_key", "cost_cents", "pending_message_count", "cancel_requested_at",
 }
 
 func workerSessionThreadRow(threadID, sessionID, orgID uuid.UUID, agentType models.AgentType, modelOverride *string, status models.ThreadStatus) []any {
@@ -121,7 +119,7 @@ func workerSessionThreadRow(threadID, sessionID, orgID uuid.UUID, agentType mode
 		"Thread", nil, []string{}, status, nil, 1, nowPtr,
 		nil, nil, nil, nil, nil,
 		nowPtr, nil, now,
-		nil, float64(0), 0, nil,
+		nil, nil, float64(0), 0, nil,
 	}
 }
 
@@ -1450,43 +1448,6 @@ func TestRunAgentHandler(t *testing.T) {
 	}
 }
 
-func TestValidateHandler_InvalidJSON(t *testing.T) {
-	t.Parallel()
-
-	stores, mock := newTestStores(t)
-	defer mock.Close()
-	logger := zerolog.Nop()
-
-	handler := newValidateHandler(stores, nil, logger)
-	payload := json.RawMessage(`{bad json}`)
-	err := handler(context.Background(), "validate", payload)
-
-	require.Error(t, err, "validate handler should return an error for invalid JSON")
-	require.Contains(t, err.Error(), "unmarshal validate payload", "error should indicate unmarshal failure")
-}
-
-func TestValidateHandler_UsesJobOrgIDWhenPayloadMissingOrgID(t *testing.T) {
-	t.Parallel()
-
-	stores, mock := newTestStores(t)
-	defer mock.Close()
-	logger := zerolog.Nop()
-
-	orgID := uuid.New()
-	runID := uuid.New()
-	mock.ExpectQuery("SELECT .* FROM sessions").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnError(context.Canceled)
-
-	handler := newValidateHandler(stores, nil, logger)
-	payload := json.RawMessage(`{"session_id":"` + runID.String() + `"}`)
-	err := handler(withJobOrgID(context.Background(), orgID), "validate", payload)
-
-	require.Error(t, err, "validate handler should return an error when run fetch fails")
-	require.Contains(t, err.Error(), "fetch agent run", "validate handler should use org ID from job context before failing run fetch")
-	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
-}
-
 func TestOpenPRHandler_InvalidJSON(t *testing.T) {
 	t.Parallel()
 
@@ -2450,7 +2411,6 @@ func TestRegisterHandlers_AllRegistered(t *testing.T) {
 	unexpectedHandlers := []string{
 		"prioritize",
 		"run_agent",
-		"validate",
 		"open_pr",
 		"analyze_failure",
 	}
@@ -3293,17 +3253,6 @@ func TestHasServiceHandlersDependencies(t *testing.T) {
 		{
 			name: "missing Orchestrator returns false",
 			services: &Services{
-				Validation:      &validation.Service{},
-				PR:              &ghservice.PRService{},
-				Failure:         &agent.FailureService{},
-				SandboxProvider: &stubSandboxProvider{},
-			},
-			expected: false,
-		},
-		{
-			name: "missing Validation returns false",
-			services: &Services{
-				Orchestrator:    &agent.Orchestrator{},
 				PR:              &ghservice.PRService{},
 				Failure:         &agent.FailureService{},
 				SandboxProvider: &stubSandboxProvider{},
@@ -3314,7 +3263,6 @@ func TestHasServiceHandlersDependencies(t *testing.T) {
 			name: "missing PR returns false",
 			services: &Services{
 				Orchestrator:    &agent.Orchestrator{},
-				Validation:      &validation.Service{},
 				Failure:         &agent.FailureService{},
 				SandboxProvider: &stubSandboxProvider{},
 			},
@@ -3324,7 +3272,6 @@ func TestHasServiceHandlersDependencies(t *testing.T) {
 			name: "missing Failure returns false",
 			services: &Services{
 				Orchestrator:    &agent.Orchestrator{},
-				Validation:      &validation.Service{},
 				PR:              &ghservice.PRService{},
 				SandboxProvider: &stubSandboxProvider{},
 			},
@@ -3334,7 +3281,6 @@ func TestHasServiceHandlersDependencies(t *testing.T) {
 			name: "missing SandboxProvider returns false",
 			services: &Services{
 				Orchestrator: &agent.Orchestrator{},
-				Validation:   &validation.Service{},
 				PR:           &ghservice.PRService{},
 				Failure:      &agent.FailureService{},
 			},
@@ -3344,7 +3290,6 @@ func TestHasServiceHandlersDependencies(t *testing.T) {
 			name: "all present returns true",
 			services: &Services{
 				Orchestrator:    &agent.Orchestrator{},
-				Validation:      &validation.Service{},
 				PR:              &ghservice.PRService{},
 				Failure:         &agent.FailureService{},
 				SandboxProvider: &stubSandboxProvider{},
@@ -3413,7 +3358,6 @@ func TestRegisterHandlers_WithAllServices(t *testing.T) {
 
 	services := &Services{
 		Orchestrator:    &agent.Orchestrator{},
-		Validation:      &validation.Service{},
 		PR:              &ghservice.PRService{},
 		Failure:         &agent.FailureService{},
 		SandboxProvider: &stubSandboxProvider{},
@@ -3433,7 +3377,6 @@ func TestRegisterHandlers_WithAllServices(t *testing.T) {
 		"prioritize",
 		"pm_analyze",
 		"run_agent",
-		"validate",
 		"open_pr",
 		"analyze_failure",
 		"process_review_comment",
@@ -3775,67 +3718,8 @@ func TestProcessReviewCommentHandler_GetCommentError(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Additional validate, open_pr, analyze_failure, run_agent handler tests
+// Additional open_pr, analyze_failure, run_agent handler tests
 // ---------------------------------------------------------------------------
-
-func TestValidateHandler_SessionFetchError(t *testing.T) {
-	t.Parallel()
-
-	stores, mock := newTestStores(t)
-	defer mock.Close()
-
-	orgID := uuid.New()
-	runID := uuid.New()
-	mock.ExpectQuery("SELECT .* FROM sessions").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnError(errors.New("session not found"))
-
-	handler := newValidateHandler(stores, nil, zerolog.Nop())
-	payload := json.RawMessage(`{"session_id":"` + runID.String() + `","org_id":"` + orgID.String() + `"}`)
-	err := handler(context.Background(), "validate", payload)
-	require.Error(t, err, "validate handler should return error when session fetch fails")
-	require.Contains(t, err.Error(), "fetch agent run", "error should mention run fetch")
-	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
-}
-
-func TestValidateHandler_InvalidOrgID(t *testing.T) {
-	t.Parallel()
-
-	stores, mock := newTestStores(t)
-	defer mock.Close()
-
-	handler := newValidateHandler(stores, nil, zerolog.Nop())
-	payload := json.RawMessage(`{"session_id":"` + uuid.New().String() + `","org_id":"not-a-uuid"}`)
-	err := handler(context.Background(), "validate", payload)
-	require.Error(t, err, "validate handler should return error for invalid org ID")
-	require.Contains(t, err.Error(), "parse org ID", "error should mention org ID")
-}
-
-func TestValidateHandler_InvalidRunID(t *testing.T) {
-	t.Parallel()
-
-	stores, mock := newTestStores(t)
-	defer mock.Close()
-
-	handler := newValidateHandler(stores, nil, zerolog.Nop())
-	payload := json.RawMessage(`{"session_id":"not-a-uuid","org_id":"` + uuid.New().String() + `"}`)
-	err := handler(context.Background(), "validate", payload)
-	require.Error(t, err, "validate handler should return error for invalid run ID")
-	require.Contains(t, err.Error(), "parse agent run ID", "error should mention run ID")
-}
-
-func TestValidateHandler_MissingOrgID(t *testing.T) {
-	t.Parallel()
-
-	stores, mock := newTestStores(t)
-	defer mock.Close()
-
-	handler := newValidateHandler(stores, nil, zerolog.Nop())
-	payload := json.RawMessage(`{"session_id":"` + uuid.New().String() + `"}`)
-	err := handler(context.Background(), "validate", payload)
-	require.Error(t, err, "validate handler should return error when org ID is missing from payload and context")
-	require.Contains(t, err.Error(), "parse org ID", "error should mention org ID")
-}
 
 func TestPrimaryIssueIDFromSnapshot(t *testing.T) {
 	t.Parallel()
@@ -3854,126 +3738,6 @@ func TestPrimaryIssueIDFromSnapshot(t *testing.T) {
 	require.Nil(t, primaryIssueIDFromSnapshot(&models.SessionTurnIssueSnapshot{
 		LinkedIssues: []models.SessionIssueSnapshotEntry{{IssueID: uuid.New(), Role: models.SessionIssueLinkRoleRelated}},
 	}), "primaryIssueIDFromSnapshot should return nil when there is no primary linked issue")
-}
-
-func TestValidateHandler_IssueSnapshotErrors(t *testing.T) {
-	t.Parallel()
-
-	t.Run("rejects invalid issue snapshot ids", func(t *testing.T) {
-		t.Parallel()
-
-		stores, mock := newTestStores(t)
-		defer mock.Close()
-
-		orgID := uuid.New()
-		sessionID := uuid.New()
-		now := time.Now().UTC()
-		snapshotKey := "snap-validate-invalid"
-		stores.IssueSnapshots = db.NewSessionTurnIssueSnapshotStore(mock)
-
-		mock.ExpectQuery("SELECT .* FROM sessions").
-			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-			WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(newWorkerSessionRow(sessionID, orgID, now, &snapshotKey)...))
-
-		services := &Services{
-			Validation:      &validation.Service{},
-			SandboxProvider: testutil.NewMockSandboxProvider(),
-		}
-
-		handler := newValidateHandler(stores, services, zerolog.Nop())
-		payload := json.RawMessage(`{"session_id":"` + sessionID.String() + `","org_id":"` + orgID.String() + `","issue_snapshot_id":"not-a-uuid"}`)
-		err := handler(context.Background(), "validate", payload)
-
-		require.Error(t, err, "validate should reject invalid issue snapshot ids")
-		require.Contains(t, err.Error(), "parse issue snapshot id", "validate should report snapshot id parse failures")
-		require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
-	})
-
-	t.Run("returns snapshot lookup errors", func(t *testing.T) {
-		t.Parallel()
-
-		stores, mock := newTestStores(t)
-		defer mock.Close()
-
-		orgID := uuid.New()
-		sessionID := uuid.New()
-		snapshotID := uuid.New()
-		now := time.Now().UTC()
-		snapshotKey := "snap-validate-missing"
-		stores.IssueSnapshots = db.NewSessionTurnIssueSnapshotStore(mock)
-
-		mock.ExpectQuery("SELECT .* FROM sessions").
-			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-			WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(newWorkerSessionRow(sessionID, orgID, now, &snapshotKey)...))
-		mock.ExpectQuery("SELECT .+ FROM session_turn_issue_snapshots").
-			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-			WillReturnError(context.Canceled)
-
-		services := &Services{
-			Validation:      &validation.Service{},
-			SandboxProvider: testutil.NewMockSandboxProvider(),
-		}
-
-		handler := newValidateHandler(stores, services, zerolog.Nop())
-		payload := json.RawMessage(`{"session_id":"` + sessionID.String() + `","org_id":"` + orgID.String() + `","issue_snapshot_id":"` + snapshotID.String() + `"}`)
-		err := handler(context.Background(), "validate", payload)
-
-		require.Error(t, err, "validate should return snapshot lookup errors")
-		require.Contains(t, err.Error(), "fetch issue snapshot for validation", "validate should wrap snapshot lookup failures")
-		require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
-	})
-
-	t.Run("uses turn snapshot and returns issue fetch errors", func(t *testing.T) {
-		t.Parallel()
-
-		stores, mock := newTestStores(t)
-		defer mock.Close()
-
-		orgID := uuid.New()
-		sessionID := uuid.New()
-		primaryIssueID := uuid.New()
-		now := time.Now().UTC()
-		snapshotKey := "snap-validate-turn"
-		stores.IssueSnapshots = db.NewSessionTurnIssueSnapshotStore(mock)
-
-		runRow := workerSessionTestRow(
-			sessionID, nil, orgID, "claude_code", "completed", "semi", "low",
-			nil, nil, nil, nil,
-			nil, nil, false, &now, &now, nil,
-			nil, nil, nil, false,
-			nil, nil, nil, nil, nil,
-			nil, nil, nil, nil, nil,
-			nil, nil,
-			nil, 2, now, "snapshotted", &snapshotKey,
-			nil, nil, nil, nil, nil, nil, nil,
-			nil, nil, nil, "queued", (*string)(nil), nil, nil, nil, now,
-		)
-		mock.ExpectQuery("SELECT .* FROM sessions").
-			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-			WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(runRow...))
-		mock.ExpectQuery("SELECT .+ FROM session_turn_issue_snapshots").
-			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-			WillReturnRows(
-				pgxmock.NewRows([]string{"id", "org_id", "session_id", "turn_number", "linked_issues", "created_at"}).
-					AddRow(uuid.New(), orgID, sessionID, 2, []byte(`[{"issue_id":"`+primaryIssueID.String()+`","role":"primary","position":0,"title":"Fix checkout timeout","source":"linear"}]`), now),
-			)
-		mock.ExpectQuery("SELECT .* FROM issues").
-			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-			WillReturnError(errors.New("issue missing"))
-
-		services := &Services{
-			Validation:      &validation.Service{},
-			SandboxProvider: testutil.NewMockSandboxProvider(),
-		}
-
-		handler := newValidateHandler(stores, services, zerolog.Nop())
-		payload := json.RawMessage(`{"session_id":"` + sessionID.String() + `","org_id":"` + orgID.String() + `"}`)
-		err := handler(context.Background(), "validate", payload)
-
-		require.Error(t, err, "validate should return issue fetch errors after resolving the turn snapshot")
-		require.Contains(t, err.Error(), "fetch issue for validation", "validate should wrap issue fetch failures")
-		require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
-	})
 }
 
 func TestOpenPRHandler_InvalidOrgID(t *testing.T) {
