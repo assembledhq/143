@@ -26,6 +26,17 @@ const sessionThreadSelectColumns = `id, session_id, org_id, agent_type, model_ov
 	started_at, completed_at, created_at, archived_at,
 	base_snapshot_key, cost_cents, pending_message_count, cancel_requested_at`
 
+// sessionThreadListColumns omits the raw diff while preserving a lightweight
+// truthy marker for UI affordances such as "Revert tab". Server-side actions
+// that need the real patch use GetByID and sessionThreadSelectColumns.
+const sessionThreadListColumns = `id, session_id, org_id, agent_type, model_override,
+	label, instructions, file_scope, status, agent_session_id, current_turn, last_activity_at,
+	confidence_score, result_summary,
+	CASE WHEN diff IS NULL THEN NULL ELSE '__diff_present__' END AS diff,
+	failure_explanation, failure_category,
+	started_at, completed_at, created_at,
+	base_snapshot_key, cost_cents, pending_message_count, cancel_requested_at`
+
 // ErrThreadLimitReached is returned when the maximum number of threads per session
 // has been reached and a new thread cannot be created.
 var ErrThreadLimitReached = fmt.Errorf("thread limit reached")
@@ -82,7 +93,7 @@ func (s *SessionThreadStore) GetByID(ctx context.Context, orgID, threadID uuid.U
 
 func (s *SessionThreadStore) ListBySession(ctx context.Context, orgID, sessionID uuid.UUID) ([]models.SessionThread, error) {
 	query := `
-		SELECT ` + sessionThreadSelectColumns + `
+		SELECT ` + sessionThreadListColumns + `
 		FROM session_threads
 		WHERE org_id = @org_id AND session_id = @session_id AND archived_at IS NULL
 		ORDER BY created_at ASC`
