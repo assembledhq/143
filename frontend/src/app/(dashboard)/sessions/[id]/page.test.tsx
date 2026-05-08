@@ -1461,6 +1461,253 @@ describe('SessionDetailPage', () => {
     });
   });
 
+  it('persists the last viewed thread when switching tabs in a session', async () => {
+    const threadSession: Session = {
+      ...mockSessions[0],
+      id: 'session-thread-last-viewed',
+      status: 'idle',
+      completed_at: undefined,
+      sandbox_state: 'snapshotted',
+      threads: [
+        {
+          id: 'thread-main',
+          session_id: 'session-thread-last-viewed',
+          org_id: 'org-1',
+          agent_type: 'codex',
+          label: 'Main',
+          status: 'idle',
+          current_turn: 1,
+          created_at: '2026-02-17T07:00:00Z',
+          cost_cents: 0,
+          pending_message_count: 0,
+        },
+        {
+          id: 'thread-codex-2',
+          session_id: 'session-thread-last-viewed',
+          org_id: 'org-1',
+          agent_type: 'codex',
+          label: 'Codex 2',
+          status: 'idle',
+          current_turn: 1,
+          created_at: '2026-02-17T07:03:00Z',
+          cost_cents: 0,
+          pending_message_count: 0,
+        },
+      ],
+    };
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({ data: threadSession } satisfies SingleResponse<Session>);
+      }),
+      http.get('/api/v1/sessions/:id/threads/:threadId/messages', ({ params }) => {
+        const assistantContent = params.threadId === 'thread-main' ? 'Main reply' : 'Codex 2 reply';
+        return HttpResponse.json({
+          data: [
+            {
+              id: params.threadId === 'thread-main' ? 1 : 2,
+              session_id: threadSession.id,
+              org_id: 'org-1',
+              thread_id: params.threadId as string,
+              turn_number: 1,
+              role: 'assistant',
+              content: assistantContent,
+              created_at: '2026-02-17T07:02:00Z',
+            },
+          ] as SessionMessage[],
+          meta: {},
+        } satisfies ListResponse<SessionMessage>);
+      }),
+      http.get('/api/v1/sessions/:id/threads/:threadId/logs', () => {
+        return HttpResponse.json({ data: [], meta: {} });
+      }),
+    );
+
+    const user = userEvent.setup();
+    renderWithProviders(<SessionDetailContent id={threadSession.id} />);
+    await screen.findByText('Main reply');
+
+    await user.click(screen.getByRole('tab', { name: /Codex 2/ }));
+    await screen.findByText('Codex 2 reply');
+
+    expect(window.localStorage.getItem(`session-active-thread:org-1:user-1:${threadSession.id}`)).toBe(
+      JSON.stringify({ version: 1, threadId: 'thread-codex-2' }),
+    );
+  });
+
+  it('reopens a threaded session on the last viewed tab and restores that tab scroll position', async () => {
+    const threadSession: Session = {
+      ...mockSessions[0],
+      id: 'session-thread-reopen-last-viewed',
+      status: 'idle',
+      completed_at: undefined,
+      sandbox_state: 'snapshotted',
+      threads: [
+        {
+          id: 'thread-main',
+          session_id: 'session-thread-reopen-last-viewed',
+          org_id: 'org-1',
+          agent_type: 'codex',
+          label: 'Main',
+          status: 'idle',
+          current_turn: 1,
+          created_at: '2026-02-17T07:00:00Z',
+          cost_cents: 0,
+          pending_message_count: 0,
+        },
+        {
+          id: 'thread-codex-2',
+          session_id: 'session-thread-reopen-last-viewed',
+          org_id: 'org-1',
+          agent_type: 'codex',
+          label: 'Codex 2',
+          status: 'idle',
+          current_turn: 1,
+          created_at: '2026-02-17T07:03:00Z',
+          cost_cents: 0,
+          pending_message_count: 0,
+        },
+      ],
+    };
+
+    window.localStorage.setItem(
+      `session-active-thread:org-1:user-1:${threadSession.id}`,
+      JSON.stringify({ version: 1, threadId: 'thread-codex-2' }),
+    );
+    window.localStorage.setItem(`session-scroll-position:org-1:user-1:${threadSession.id}:thread-main`, JSON.stringify({ version: 1, scrollTop: 120 }));
+    window.localStorage.setItem(`session-scroll-position:org-1:user-1:${threadSession.id}:thread-codex-2`, JSON.stringify({ version: 1, scrollTop: 410 }));
+    vi.spyOn(HTMLElement.prototype, 'scrollHeight', 'get').mockReturnValue(900);
+    vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockReturnValue(200);
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({ data: threadSession } satisfies SingleResponse<Session>);
+      }),
+      http.get('/api/v1/sessions/:id/threads/:threadId/messages', ({ params }) => {
+        const assistantContent = params.threadId === 'thread-main' ? 'Main reply' : 'Codex 2 reply';
+        return HttpResponse.json({
+          data: [
+            {
+              id: params.threadId === 'thread-main' ? 1 : 2,
+              session_id: threadSession.id,
+              org_id: 'org-1',
+              thread_id: params.threadId as string,
+              turn_number: 1,
+              role: 'assistant',
+              content: assistantContent,
+              created_at: '2026-02-17T07:02:00Z',
+            },
+          ] as SessionMessage[],
+          meta: {},
+        } satisfies ListResponse<SessionMessage>);
+      }),
+      http.get('/api/v1/sessions/:id/threads/:threadId/logs', () => {
+        return HttpResponse.json({ data: [], meta: {} });
+      }),
+    );
+
+    const { container } = renderWithProviders(<SessionDetailContent id={threadSession.id} />);
+    await screen.findByText('Codex 2 reply');
+
+    expect(screen.getByPlaceholderText('Send a message to Codex 2...')).toBeInTheDocument();
+    expect(screen.queryByText('Main reply')).not.toBeInTheDocument();
+
+    await waitFor(() => {
+      expect(getChatScroller(container).scrollTop).toBe(410);
+    });
+  });
+
+  it('disables the composer while restoring the saved active thread on reopen', async () => {
+    const threadSession: Session = {
+      ...mockSessions[0],
+      id: 'session-thread-restore-send-gate',
+      status: 'idle',
+      completed_at: undefined,
+      sandbox_state: 'snapshotted',
+      threads: [
+        {
+          id: 'thread-main',
+          session_id: 'session-thread-restore-send-gate',
+          org_id: 'org-1',
+          agent_type: 'codex',
+          label: 'Main',
+          status: 'idle',
+          current_turn: 1,
+          created_at: '2026-02-17T07:00:00Z',
+          cost_cents: 0,
+          pending_message_count: 0,
+        },
+        {
+          id: 'thread-codex-2',
+          session_id: 'session-thread-restore-send-gate',
+          org_id: 'org-1',
+          agent_type: 'codex',
+          label: 'Codex 2',
+          status: 'idle',
+          current_turn: 1,
+          created_at: '2026-02-17T07:03:00Z',
+          cost_cents: 0,
+          pending_message_count: 0,
+        },
+      ],
+    };
+
+    let releaseAuth = () => {};
+    const authReleased = new Promise<void>((resolve) => {
+      releaseAuth = resolve;
+    });
+
+    window.localStorage.setItem(
+      `session-active-thread:org-1:user-1:${threadSession.id}`,
+      JSON.stringify({ version: 1, threadId: 'thread-codex-2' }),
+    );
+
+    server.use(
+      http.get('/api/v1/auth/me', async () => {
+        await authReleased;
+        return HttpResponse.json({
+          data: mockMembers[0],
+        } satisfies SingleResponse<User>);
+      }),
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({ data: threadSession } satisfies SingleResponse<Session>);
+      }),
+      http.get('/api/v1/sessions/:id/threads/:threadId/messages', ({ params }) => {
+        const assistantContent = params.threadId === 'thread-main' ? 'Main reply' : 'Codex 2 reply';
+        return HttpResponse.json({
+          data: [
+            {
+              id: params.threadId === 'thread-main' ? 1 : 2,
+              session_id: threadSession.id,
+              org_id: 'org-1',
+              thread_id: params.threadId as string,
+              turn_number: 1,
+              role: 'assistant',
+              content: assistantContent,
+              created_at: '2026-02-17T07:02:00Z',
+            },
+          ] as SessionMessage[],
+          meta: {},
+        } satisfies ListResponse<SessionMessage>);
+      }),
+      http.get('/api/v1/sessions/:id/threads/:threadId/logs', () => {
+        return HttpResponse.json({ data: [], meta: {} });
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id={threadSession.id} />);
+
+    await screen.findByText('Loading thread...');
+    expect(screen.getByRole('textbox')).toBeDisabled();
+
+    releaseAuth();
+
+    expect(await screen.findByText('Codex 2 reply')).toBeInTheDocument();
+    await waitFor(() => {
+      expect(screen.getByPlaceholderText('Send a message to Codex 2...')).toBeEnabled();
+    });
+  });
+
   it('ignores a legacy saved top position and still opens a running session at the live edge', async () => {
     const runningSession: Session = {
       ...mockSessions[0],
