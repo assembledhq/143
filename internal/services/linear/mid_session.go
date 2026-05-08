@@ -12,19 +12,21 @@ import (
 )
 
 // MidSessionInput is the bounded set of inputs detection scans on a follow-up
-// message inside an existing session. Mid-session scope is strictly the
-// message body the user just posted; scanning historic context would re-
-// trigger linking on every send and surprise users by linking refs they
-// never typed in this turn.
+// message inside an existing session. Mid-session scope is strictly the user
+// input from the current turn: the free-form message body plus any detached
+// structured references submitted with that message. We still do not scan
+// historic context; that would re-trigger linking on every send and surprise
+// users by linking refs they never typed in this turn.
 //
 // AddedByUserID is forwarded so the resulting session_issue_links row attributes
 // the link to the human who sent the follow-up — matching the create path's
 // audit shape.
 type MidSessionInput struct {
-	OrgID       uuid.UUID
-	SessionID   uuid.UUID
-	MessageBody string
-	UserID      *uuid.UUID
+	OrgID         uuid.UUID
+	SessionID     uuid.UUID
+	MessageBody   string
+	ReferenceText string
+	UserID        *uuid.UUID
 }
 
 // ResolveAndLinkMidSession is the SendMessage entry point. It detects Linear
@@ -43,14 +45,21 @@ func (s *Service) ResolveAndLinkMidSession(ctx context.Context, in MidSessionInp
 	if s == nil || !s.Enabled(ctx, in.OrgID) {
 		return nil
 	}
-	if in.MessageBody == "" {
+	if in.MessageBody == "" && in.ReferenceText == "" {
 		return nil
 	}
 	allow, err := s.TeamKeyAllowlist(ctx, in.OrgID)
 	if err != nil {
 		return fmt.Errorf("load team key allowlist: %w", err)
 	}
-	hits := ScanInputs([]string{in.MessageBody}, allow)
+	inputs := make([]string, 0, 2)
+	if in.MessageBody != "" {
+		inputs = append(inputs, in.MessageBody)
+	}
+	if in.ReferenceText != "" {
+		inputs = append(inputs, in.ReferenceText)
+	}
+	hits := ScanInputs(inputs, allow)
 	if len(hits) == 0 {
 		return nil
 	}

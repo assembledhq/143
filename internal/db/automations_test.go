@@ -16,7 +16,8 @@ import (
 func automationColumnSlice() []string {
 	return []string{
 		"id", "org_id", "repository_id", "name", "goal", "scope",
-		"agent_type", "model_override", "execution_mode", "max_concurrent", "base_branch",
+		"agent_type", "model_override", "reasoning_effort", "execution_mode", "max_concurrent", "base_branch",
+		"identity_scope",
 		"schedule_type", "interval_value", "interval_unit", "interval_run_at", "cron_expression", "timezone",
 		"next_run_at", "last_run_at", "enabled", "created_by", "paused_by", "paused_at",
 		"priority", "created_at", "updated_at", "deleted_at",
@@ -26,7 +27,8 @@ func automationColumnSlice() []string {
 func addAutomationRow(rows *pgxmock.Rows, a models.Automation) *pgxmock.Rows {
 	return rows.AddRow(
 		a.ID, a.OrgID, a.RepositoryID, a.Name, a.Goal, a.Scope,
-		a.AgentType, a.ModelOverride, a.ExecutionMode, a.MaxConcurrent, a.BaseBranch,
+		a.AgentType, a.ModelOverride, a.ReasoningEffort, a.ExecutionMode, a.MaxConcurrent, a.BaseBranch,
+		a.IdentityScope.OrDefault(),
 		a.ScheduleType, a.IntervalValue, a.IntervalUnit, a.IntervalRunAt, a.CronExpression, a.Timezone,
 		a.NextRunAt, a.LastRunAt, a.Enabled, a.CreatedBy, a.PausedBy, a.PausedAt,
 		a.Priority, a.CreatedAt, a.UpdatedAt, a.DeletedAt,
@@ -69,7 +71,7 @@ func TestAutomationStore_Create(t *testing.T) {
 	}
 
 	mock.ExpectQuery("INSERT INTO automations").
-		WithArgs(anyArgs(20)...).
+		WithArgs(anyArgs(22)...).
 		WillReturnRows(
 			pgxmock.NewRows([]string{"id", "created_at", "updated_at"}).
 				AddRow(newID, now, now),
@@ -192,7 +194,7 @@ func TestAutomationStore_Update(t *testing.T) {
 	}
 
 	mock.ExpectExec("UPDATE automations SET").
-		WithArgs(anyArgs(22)...).
+		WithArgs(anyArgs(24)...).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
 	require.NoError(t, store.Update(context.Background(), a))

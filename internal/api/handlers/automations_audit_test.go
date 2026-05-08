@@ -19,6 +19,7 @@ func TestAutomationAuditSnapshot_Interval(t *testing.T) {
 	runAt := "09:35"
 	a := &models.Automation{
 		Name:          "Refresh caches",
+		IdentityScope: models.AutomationIdentityScopePersonal,
 		ScheduleType:  models.AutomationScheduleInterval,
 		IntervalValue: &v,
 		IntervalUnit:  &u,
@@ -27,6 +28,7 @@ func TestAutomationAuditSnapshot_Interval(t *testing.T) {
 	}
 	snap := automationAuditSnapshot(a)
 	require.Equal(t, "Refresh caches", snap["name"])
+	require.Equal(t, models.AutomationIdentityScopePersonal, snap["identity_scope"])
 	require.Equal(t, models.AutomationScheduleInterval, snap["schedule_type"])
 	require.Equal(t, 3, snap["interval_value"])
 	require.Equal(t, "days", snap["interval_unit"])
@@ -41,11 +43,13 @@ func TestAutomationAuditSnapshot_Cron(t *testing.T) {
 	expr := "0 9 * * 1"
 	a := &models.Automation{
 		Name:           "Monday briefing",
+		IdentityScope:  models.AutomationIdentityScopeOrg,
 		ScheduleType:   models.AutomationScheduleCron,
 		CronExpression: &expr,
 		Timezone:       "America/Los_Angeles",
 	}
 	snap := automationAuditSnapshot(a)
+	require.Equal(t, models.AutomationIdentityScopeOrg, snap["identity_scope"])
 	require.Equal(t, "0 9 * * 1", snap["cron_expression"])
 	require.Equal(t, "America/Los_Angeles", snap["timezone"])
 	_, hasInterval := snap["interval_value"]
@@ -59,24 +63,30 @@ func TestAutomationAuditDiff_OnlyChangedFields(t *testing.T) {
 	oldU, newU := "days", "days"
 	old := models.Automation{
 		Name: "a", Goal: "g", ExecutionMode: "sequential", MaxConcurrent: 1,
-		BaseBranch: "main", ScheduleType: models.AutomationScheduleInterval,
+		BaseBranch: "main", IdentityScope: models.AutomationIdentityScopeOrg, ScheduleType: models.AutomationScheduleInterval,
 		IntervalValue: &oldV, IntervalUnit: &oldU, Timezone: "UTC", Priority: 50,
 	}
 	new_ := old
 	new_.Name = "b"
+	new_.IdentityScope = models.AutomationIdentityScopePersonal
 	new_.IntervalValue = &newV
 	new_.IntervalUnit = &newU // unchanged
 	new_.Priority = 75
 
 	changes := automationAuditDiff(&old, &new_)
-	require.Len(t, changes, 3, "only name, interval_value, priority should change")
+	require.Len(t, changes, 4, "only name, identity_scope, interval_value, and priority should change")
 	require.Contains(t, changes, "name")
+	require.Contains(t, changes, "identity_scope")
 	require.Contains(t, changes, "interval_value")
 	require.Contains(t, changes, "priority")
 
 	nameChange := changes["name"].(map[string]any)
 	require.Equal(t, "a", nameChange["before"])
 	require.Equal(t, "b", nameChange["after"])
+
+	scopeChange := changes["identity_scope"].(map[string]any)
+	require.Equal(t, models.AutomationIdentityScopeOrg, scopeChange["before"])
+	require.Equal(t, models.AutomationIdentityScopePersonal, scopeChange["after"])
 
 	intervalChange := changes["interval_value"].(map[string]any)
 	require.Equal(t, 1, intervalChange["before"])

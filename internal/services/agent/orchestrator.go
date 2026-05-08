@@ -972,6 +972,37 @@ func latestUserMessage(messages []models.SessionMessage) *models.SessionMessage 
 	return nil
 }
 
+// latestUserMessageInScope returns the most recent user message bound to the
+// requested scope. When threadID is nil the scope is the session-level
+// conversation (messages with no thread); when threadID is non-nil the scope
+// is that specific thread.
+//
+// The scoped form exists because session_messages.ListBySession orders rows by
+// (turn_number, id) — and per-thread turn counters are independent — so the
+// globally-last user row in the slice is not necessarily the last message the
+// user actually sent. ContinueSession must scope to the thread the worker
+// payload identified, otherwise a sibling thread with a higher turn_number
+// will steal the run.
+func latestUserMessageInScope(messages []models.SessionMessage, threadID *uuid.UUID) *models.SessionMessage {
+	matchesScope := func(m models.SessionMessage) bool {
+		if threadID == nil {
+			return m.ThreadID == nil
+		}
+		return m.ThreadID != nil && *m.ThreadID == *threadID
+	}
+	for i := len(messages) - 1; i >= 0; i-- {
+		m := messages[i]
+		if m.Role != models.MessageRoleUser {
+			continue
+		}
+		if !matchesScope(m) {
+			continue
+		}
+		return &messages[i]
+	}
+	return nil
+}
+
 // unprocessedUserMessages returns the consecutive trailing user messages for
 // a given thread scope — i.e. all user messages after the most recent
 // in-scope assistant message. When threadID is nil the scope is the
@@ -1558,9 +1589,18 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 		Issue:        issue,
 		LinkedIssues: linkedIssues,
 		Manual:       run.Origin == models.SessionOriginManual,
+		PromptStyle: func() PromptStyle {
+			if run.Origin == models.SessionOriginManual || run.AutomationRunID != nil {
+				return PromptStyleRawTask
+			}
+			return PromptStyleIssueContext
+		}(),
 		UserMessage: func() string {
 			if msg := latestUserMessage(messages); msg != nil {
 				return msg.Content
+			}
+			if run.AutomationRunID != nil && run.PMApproach != nil {
+				return strings.TrimSpace(*run.PMApproach)
 			}
 			return ""
 		}(),
@@ -1601,7 +1641,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 		}
 	}
 
-	if run.PMApproach != nil || run.PMReasoning != nil {
+	if run.AutomationRunID == nil && (run.PMApproach != nil || run.PMReasoning != nil) {
 		pmCtx := &PMTaskContext{}
 		if run.PMApproach != nil {
 			pmCtx.Approach = *run.PMApproach
@@ -1785,9 +1825,13 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 		}
 	}
 
-	// Register sandbox with cancel registry so CancelSession can send SIGINT.
+	// Register the session with the cancel registry so RequestStop can
+	// deliver a graceful interrupt. The actual interactive command handle
+	// is attached lazily once the adapter starts it (see runInteractiveAgent
+	// in the adapters package); until that point CancelSession falls back
+	// to context cancellation.
 	if o.cancels != nil {
-		o.cancels.Register(run.ID, sandbox, o.provider, cancel)
+		o.cancels.Register(run.ID, cancel, ResolveCancellationSpec(adapter))
 	}
 
 	// 8. Clone repo into sandbox. This must happen before auth injection
@@ -1899,6 +1943,9 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 	}()
 
 	execCtx := WithSandboxProvider(ctx, o.provider)
+	if o.cancels != nil {
+		execCtx = WithInteractiveHandleAttacher(execCtx, o.cancels.HandleAttacher(run.ID))
+	}
 	result, err := adapter.Execute(execCtx, sandbox, prompt, logCh)
 	close(logCh)
 	logWg.Wait()
@@ -2086,7 +2133,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 		if issueSnapshot != nil {
 			payload["issue_snapshot_id"] = issueSnapshot.ID.String()
 		}
-		o.enqueueJob(ctx, run.OrgID, "agent", "validate", payload)
+		o.enqueueJob(ctx, run.OrgID, "default", "open_pr", payload)
 	}
 
 	if run.PMPlanID != nil && o.decisionLog != nil {
@@ -2210,7 +2257,23 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		return fmt.Errorf("fetch session messages: %w", err)
 	}
 
-	latestMsg := latestUserMessage(messages)
+	// Scope the latest-user-message lookup to the thread the worker enqueued
+	// for. ListBySession orders rows by (turn_number, id) and per-thread turn
+	// counters are independent, so the globally-last user row in the slice is
+	// not necessarily the most recently sent message — a sibling thread that's
+	// further along in turns can sit "after" a brand-new user message in the
+	// returned ordering. Without this scoping, ContinueSession would re-run
+	// the wrong (already-answered) thread and orphan the new message.
+	//
+	// When opts is nil (RecoverSession path: worker crash mid-turn rehydrates
+	// without a thread hint) we preserve the legacy global lookup so a
+	// threaded session can still recover its in-flight turn.
+	var latestMsg *models.SessionMessage
+	if opts != nil && opts.ThreadID != nil {
+		latestMsg = latestUserMessageInScope(messages, opts.ThreadID)
+	} else {
+		latestMsg = latestUserMessage(messages)
+	}
 	if latestMsg == nil || strings.TrimSpace(latestMsg.Content) == "" {
 		o.failRun(ctx, session, "no user message found for continue_session")
 		return fmt.Errorf("no user message found")
@@ -2416,30 +2479,51 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 			cancel()
 			switch {
 			case aliveErr != nil:
+				// The probe was inconclusive: we can't tell whether the
+				// recorded container is alive on this daemon or genuinely
+				// gone (a docker daemon hiccup, a probe timeout against an
+				// unreachable container, etc.). Falling through to docker
+				// exec on a stale id surfaces a user-visible "No such
+				// container" failure, while clearing on an inconclusive
+				// signal would orphan a healthy live container if the
+				// daemon merely hiccuped — both are worse than retrying.
+				// Bounded by maxRetryableDuration so a permanently broken
+				// daemon still dead-letters through the normal path.
 				log.Warn().Err(aliveErr).
 					Str("container_id", *session.ContainerID).
-					Msg("IsAlive probe on recorded container_id failed during continue_session reuse; assuming alive and proceeding")
+					Msg("IsAlive probe on recorded container_id failed during continue_session reuse; abandoning attempt so the worker retries instead of attaching to an indeterminate container")
+				return o.abandonReuseForRetry(ctx, session, log, "isalive probe error")
 			case !alive:
 				cleared, clearErr := o.sessions.ClearContainerID(ctx, session.OrgID, session.ID, *session.ContainerID)
 				if clearErr != nil {
+					// DB error during the clear: container_id state is
+					// indeterminate. Abandon the attempt rather than
+					// proceeding to docker exec on a known-dead
+					// container, which would always surface a user-visible
+					// "No such container" failure.
 					log.Warn().Err(clearErr).
 						Str("stale_container_id", *session.ContainerID).
-						Msg("ClearContainerID failed during continue_session reuse liveness check; falling through to reuse path which will surface the underlying docker error")
-					break
+						Msg("ClearContainerID failed during continue_session reuse liveness check; abandoning attempt so the worker retries against the unchanged row")
+					return o.abandonReuseForRetry(ctx, session, log, "clear container_id db error")
 				}
 				if !cleared {
+					// CAS-lost: a peer (typically a preview's
+					// FinalizeContainerDestroy on a launch-failed
+					// instance) cleared or replaced container_id between
+					// our probe and clear. The in-memory
+					// session.ContainerID is now stale, so reusing it
+					// would attach to a no-longer-current container.
+					// Abandon so the next attempt re-fetches a fresh
+					// session row.
 					log.Info().
 						Str("stale_container_id", *session.ContainerID).
-						Msg("ClearContainerID CAS lost during continue_session reuse liveness check (a new holder acquired between probe and clear); proceeding with the now-active row")
-					break
+						Msg("ClearContainerID CAS lost during continue_session reuse liveness check (a new holder acquired between probe and clear); abandoning attempt so the worker re-fetches the now-active row")
+					return o.abandonReuseForRetry(ctx, session, log, "clear container_id cas lost")
 				}
 				log.Warn().
 					Str("stale_container_id", *session.ContainerID).
 					Msg("cleared stale orphan container_id during continue_session reuse liveness check; signaling retry to re-enter against the clean row")
-				if revertErr := o.sessions.UpdateStatus(ctx, session.OrgID, session.ID, string(models.SessionStatusPending)); revertErr != nil {
-					log.Error().Err(revertErr).Msg("failed to revert session to pending after stale container_id cleared")
-				}
-				return ErrStaleSandboxIDCleared
+				return o.abandonReuseForRetry(ctx, session, log, "stale container_id cleared")
 			}
 		}
 	}
@@ -2779,9 +2863,10 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		}
 	}
 
-	// Register sandbox with cancel registry so CancelSession can send SIGINT.
+	// Register the session with the cancel registry. The interactive
+	// command handle is attached lazily by the adapter's runtime helper.
 	if o.cancels != nil {
-		o.cancels.Register(session.ID, sandbox, o.provider, cancel)
+		o.cancels.Register(session.ID, cancel, ResolveCancellationSpec(adapter))
 	}
 	// Mirror the registration on the thread-scoped registry so a per-tab
 	// cancel can unwind just this thread's run context. The session-level
@@ -2841,7 +2926,13 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 				Issue:        promptIssue,
 				LinkedIssues: linkedIssues,
 				Manual:       session.Origin == models.SessionOriginManual,
-				UserMessage:  userMessage,
+				PromptStyle: func() PromptStyle {
+					if session.Origin == models.SessionOriginManual || session.AutomationRunID != nil {
+						return PromptStyleRawTask
+					}
+					return PromptStyleIssueContext
+				}(),
+				UserMessage: userMessage,
 				References: func() []models.SessionInputReference {
 					refs := canonicalReferences(latestMsg)
 					if len(refs) > 0 {
@@ -2935,7 +3026,13 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 			Issue:        &issue,
 			LinkedIssues: linkedIssues,
 			Manual:       session.Origin == models.SessionOriginManual,
-			UserMessage:  latestMsg.Content,
+			PromptStyle: func() PromptStyle {
+				if session.Origin == models.SessionOriginManual || session.AutomationRunID != nil {
+					return PromptStyleRawTask
+				}
+				return PromptStyleIssueContext
+			}(),
+			UserMessage: latestMsg.Content,
 			References: func() []models.SessionInputReference {
 				refs := canonicalReferences(latestMsg)
 				if len(refs) > 0 {
@@ -2996,6 +3093,9 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	}()
 
 	execCtx := WithSandboxProvider(ctx, o.provider)
+	if o.cancels != nil {
+		execCtx = WithInteractiveHandleAttacher(execCtx, o.cancels.HandleAttacher(session.ID))
+	}
 	result, err := adapter.Execute(execCtx, sandbox, prompt, logCh)
 	close(logCh)
 	logWg.Wait()
@@ -3355,6 +3455,100 @@ func (o *Orchestrator) registerSandboxFailureMessage(ctx context.Context, sessio
 	})
 }
 
+// registerSandboxInfraFailure is the deferred companion to
+// failRunWithCategory: it queues the same failure bookkeeping
+// (status='failed', failure metadata + Linear milestone, user-visible
+// assistant message) on the dead-letter hook so transient retries don't
+// churn user state. Use this for failure modes the worker can recover
+// from on retry (docker hiccups, exec/file-write errors, sandbox
+// destroy/recreate races) — pairing the immediate failRunWithCategory
+// with retry produces a flicker (status="failed" → "running" → "failed"
+// …) and emits a Linear "failed" milestone on every attempt, even when
+// a later retry succeeds.
+//
+// Direct callers without a job registry get a no-op hook, mirroring
+// registerSandboxFailureMessage's existing semantics: such callers
+// should handle the returned error path themselves. Tests that want to
+// observe the deferred behavior must wrap the context with
+// jobctx.WithDeadLetterHooks and explicitly invoke RunDeadLetterHooks.
+//
+// session is captured by value at registration time so the hook reads
+// the same snapshot the caller just observed (turn number, container
+// id, etc.), regardless of any later mutations to the underlying
+// struct as the orchestrator advances through subsequent setup.
+func (o *Orchestrator) registerSandboxInfraFailure(
+	ctx context.Context,
+	session *models.Session,
+	errMsg, category, explanation string,
+	nextSteps []string,
+	stage string,
+) {
+	sessionCopy := *session
+	jobctx.RegisterDeadLetterHook(ctx, func(hookCtx context.Context, _ error) {
+		// Detached + bounded: dead-letter hooks fire on the worker poll
+		// goroutine after the handler ctx has been cancelled (worker
+		// drain, retryable timeout). A fresh bounded context lets the
+		// terminal write land without racing the very cancellation
+		// that triggered the hook. 10s leaves room for both the failRun
+		// updates and the assistant message insert.
+		writeCtx, cancel := context.WithTimeout(context.WithoutCancel(hookCtx), 10*time.Second)
+		defer cancel()
+		o.failRunWithCategory(writeCtx, &sessionCopy, errMsg, category, explanation, nextSteps)
+		if o.sessionMessages != nil {
+			errEntry := &models.SessionMessage{
+				SessionID:  sessionCopy.ID,
+				OrgID:      sessionCopy.OrgID,
+				TurnNumber: sessionCopy.CurrentTurn + 1,
+				Role:       models.MessageRoleAssistant,
+				Content:    explanation,
+			}
+			if createErr := o.sessionMessages.Create(writeCtx, errEntry); createErr != nil {
+				o.logger.Error().Err(createErr).
+					Str("session_id", sessionCopy.ID.String()).
+					Str("org_id", sessionCopy.OrgID.String()).
+					Str("stage", stage).
+					Msg("failed to create dead-letter error message after sandbox infra failure")
+			}
+		}
+	})
+}
+
+// abandonReuseForRetry reverts the session row's transient state and
+// returns ErrStaleSandboxIDCleared so the worker re-enqueues the job
+// without consuming an attempt counter. Used by the continue_session
+// reuse-path liveness check whenever the IsAlive probe or its CAS-clear
+// is inconclusive: the safe move is to let the next attempt re-fetch the
+// session row and re-probe rather than attaching to a possibly-stale
+// container_id and surfacing a user-visible "No such container" error.
+//
+// The status revert mirrors the existing successful stale-clear path
+// (and the GitHub-auth retry paths above): pending lets a fresh worker
+// claim re-enter cleanly without tripping the "session is already
+// running" branches in the orchestrator's status checks. reason labels
+// the log line so on-call can tell the three abandon paths apart.
+//
+// Deliberately does NOT revert sandbox_state. Sibling failure paths
+// (auth wiring, hydrate, sandbox-create around line ~2532 / ~2575 /
+// ~2615) revert it to "snapshotted" because they fire AFTER the
+// orchestrator has begun creating its own sandbox — there's a fresh
+// container to mark as gone. The reuse-path abandon fires BEFORE any
+// sandbox creation: container_id either still points at a peer holder
+// (aliveErr / CAS-lost) or was just CAS-cleared by us via
+// ClearContainerID. In the holder cases sandbox_state legitimately
+// remains "running" because someone else's container is still alive;
+// in the CAS-cleared case the next attempt's hydrate/create path will
+// transition sandbox_state correctly when it republishes container_id.
+// Setting "snapshotted" here would either lie about peer-held
+// containers or race the next attempt's own state writes.
+func (o *Orchestrator) abandonReuseForRetry(ctx context.Context, session *models.Session, log zerolog.Logger, reason string) error {
+	if revertErr := o.sessions.UpdateStatus(ctx, session.OrgID, session.ID, string(models.SessionStatusPending)); revertErr != nil {
+		log.Error().Err(revertErr).
+			Str("reason", reason).
+			Msg("failed to revert session to pending after reuse-path abandon; the reaper will re-sync the row")
+	}
+	return ErrStaleSandboxIDCleared
+}
+
 // maxDiffCharsInPrompt is the maximum number of characters from a stored diff
 // to include in a resume prompt. Larger diffs are truncated to avoid blowing
 // up the agent's token budget.
@@ -3701,12 +3895,23 @@ func (o *Orchestrator) failTimedOutSession(run *models.Session, elapsed time.Dur
 }
 
 // ensureCodexAuth injects Codex auth credentials into the sandbox. On failure
-// it distinguishes between genuine auth invalidity (refresh-token revoked,
-// no usable credential) — surfaced as codex_auth_expired with a re-authenticate
-// CTA — and sandbox/transport errors during injection (Docker container gone,
-// exec/write failure) — surfaced as codex_auth_inject_failed with a retry CTA.
-// Auth-side errors are tagged at the source via wrapCodexAuthInvalid in env.go;
-// anything else is treated as transient infra.
+// it distinguishes three buckets:
+//
+//  1. Genuine auth invalidity (refresh-token revoked) — tagged at the source
+//     via wrapCodexAuthInvalid in env.go and surfaced as codex_auth_expired
+//     with a re-authenticate CTA. Permanent: marked failed inline since no
+//     retry will help.
+//  2. Sandbox/transport errors (Docker exec or file-write failure against a
+//     container that's gone or a daemon that's hiccuping) — surfaced as
+//     codex_auth_inject_failed with a retry CTA. Transient: deferred to the
+//     dead-letter hook so the failure bookkeeping (status='failed' + Linear
+//     "failed" milestone + user-visible assistant message) only fires when
+//     retries are exhausted. Otherwise every retry would emit a stale Linear
+//     "failed" ping and flicker session.status to "failed" mid-flight.
+//  3. No credential configured — permanent, marked failed inline.
+//
+// It returns the resolved billing mode so downstream usage normalization can
+// distinguish direct provider-reported USD from derived subscription credits.
 func (o *Orchestrator) ensureCodexAuth(ctx context.Context, run *models.Session, sandbox *Sandbox, env map[string]string) (TokenBillingMode, error) {
 	// For Codex, OPENAI_API_KEY is only populated when AgentEnv resolved an
 	// OpenAI API-key credential. Subscription-backed Codex auth uses auth.json
@@ -3727,11 +3932,16 @@ func (o *Orchestrator) ensureCodexAuth(ctx context.Context, run *models.Session,
 			)
 			return TokenBillingModeUnknown, fmt.Errorf("codex auth injection: %w", err)
 		}
-		o.failRunWithCategory(ctx, run,
+		// Transient infra failure: defer the user-facing failure to the
+		// dead-letter hook so retries don't churn session.status, emit
+		// false Linear "failed" milestones, or flash a "failed" banner
+		// in the UI that snaps back when a later attempt succeeds.
+		o.registerSandboxInfraFailure(ctx, run,
 			fmt.Sprintf("codex auth injection failed: %s", err),
 			FailureCategoryCodexAuthInject,
 			"Could not inject ChatGPT credentials into the sandbox because of an infrastructure error (Docker exec or file write failed). Your ChatGPT authentication itself is still valid — retry the session.",
 			[]string{"Retry the session — the underlying sandbox error is usually transient", "If retries keep failing, check the worker logs for Docker errors"},
+			"codex auth injection",
 		)
 		return TokenBillingModeUnknown, fmt.Errorf("codex auth injection: %w", err)
 	}

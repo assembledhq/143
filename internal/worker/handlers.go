@@ -30,7 +30,6 @@ import (
 	"github.com/assembledhq/143/internal/services/linear"
 	"github.com/assembledhq/143/internal/services/pm"
 	"github.com/assembledhq/143/internal/services/prioritization"
-	"github.com/assembledhq/143/internal/services/validation"
 	"github.com/assembledhq/143/internal/version"
 )
 
@@ -61,7 +60,6 @@ func RegisterHandlers(w *Worker, stores *Stores, services *Services, retentionCf
 	if hasServiceHandlersDependencies(services) {
 		w.Register("run_agent", newRunAgentHandler(stores, services, logger))
 		w.Register("continue_session", newContinueSessionHandler(stores, services, logger))
-		w.Register("validate", newValidateHandler(stores, services, logger))
 		w.Register("open_pr", newOpenPRHandler(stores, services, logger))
 		w.Register("push_pr_changes", newPushPRChangesHandler(stores, services, logger))
 		w.Register("sync_pull_request_state", newSyncPullRequestStateHandler(services, logger))
@@ -102,7 +100,6 @@ func hasServiceHandlersDependencies(services *Services) bool {
 		return false
 	}
 	return services.Orchestrator != nil &&
-		services.Validation != nil &&
 		services.PR != nil &&
 		services.Failure != nil &&
 		services.SandboxProvider != nil
@@ -160,7 +157,6 @@ type prCreator interface {
 // Services holds the service dependencies needed by job handlers.
 type Services struct {
 	Orchestrator    orchestratorService
-	Validation      *validation.Service
 	PR              prCreator
 	Failure         *agent.FailureService
 	SandboxProvider agent.SandboxProvider
@@ -472,6 +468,28 @@ func newAutomationRunHandler(stores *Stores, services *Services, logger zerolog.
 			return nil
 		}
 
+		identityScope, err := automationRunIdentityScope(run, automation)
+		if err != nil {
+			now := time.Now()
+			summary := err.Error()
+			if _, updateErr := stores.AutomationRuns.TransitionStatusIf(ctx, orgID, runID, models.AutomationRunStatusPending, models.AutomationRunStatusFailed, &now, &summary); updateErr != nil {
+				log.Error().Err(updateErr).Msg("failed to mark run failed after invalid automation config snapshot")
+				return fmt.Errorf("mark run failed after invalid automation config snapshot: %w", updateErr)
+			}
+			return nil
+		}
+
+		sessionTriggeredByUserID, err := automationExecutionUserID(automation, identityScope)
+		if err != nil {
+			now := time.Now()
+			summary := err.Error()
+			if _, updateErr := stores.AutomationRuns.TransitionStatusIf(ctx, orgID, runID, models.AutomationRunStatusPending, models.AutomationRunStatusFailed, &now, &summary); updateErr != nil {
+				log.Error().Err(updateErr).Msg("failed to mark run failed after invalid automation identity")
+				return fmt.Errorf("mark run failed after invalid automation identity: %w", updateErr)
+			}
+			return nil
+		}
+
 		// Atomic claim: pending → running. Performed BEFORE session creation
 		// so a duplicate worker that loses the race never reaches the Sessions
 		// or Jobs stores at all. Once we own the row (transitioned=true), any
@@ -493,6 +511,15 @@ func newAutomationRunHandler(stores *Stores, services *Services, logger zerolog.
 				agentType = candidate
 			} else {
 				log.Warn().Err(err).Msg("invalid agent_type on automation, falling back to default")
+			}
+		} else if stores.Organizations != nil {
+			org, err := stores.Organizations.GetByID(ctx, orgID)
+			if err != nil {
+				log.Warn().Err(err).Msg("failed to load org settings for automation agent fallback")
+			} else if settings, err := models.ParseOrgSettings(org.Settings); err != nil {
+				log.Warn().Err(err).Msg("failed to parse org settings for automation agent fallback")
+			} else if settings.DefaultAgentType != "" {
+				agentType = settings.DefaultAgentType
 			}
 		}
 
@@ -519,7 +546,8 @@ func newAutomationRunHandler(stores *Stores, services *Services, logger zerolog.
 			AutonomyLevel:     string(models.DefaultSessionAutonomy),
 			TokenMode:         "low",
 			ModelOverride:     automation.ModelOverride,
-			TriggeredByUserID: run.TriggeredByUserID,
+			ReasoningEffort:   automation.ReasoningEffort,
+			TriggeredByUserID: sessionTriggeredByUserID,
 			TargetBranch:      targetBranch,
 			RepositoryID:      automation.RepositoryID,
 			AutomationRunID:   &runID,
@@ -555,6 +583,40 @@ func newAutomationRunHandler(stores *Stores, services *Services, logger zerolog.
 			Str("agent_type", string(agentType)).
 			Msg("automation session dispatched")
 		return nil
+	}
+}
+
+func automationRunIdentityScope(run models.AutomationRun, automation models.Automation) (models.AutomationIdentityScope, error) {
+	if len(run.ConfigSnapshot) == 0 {
+		return automation.IdentityScope.OrDefault(), nil
+	}
+
+	var snapshot struct {
+		IdentityScope models.AutomationIdentityScope `json:"identity_scope"`
+	}
+	if err := json.Unmarshal(run.ConfigSnapshot, &snapshot); err != nil {
+		return "", fmt.Errorf("parse automation config snapshot: %w", err)
+	}
+	if snapshot.IdentityScope == "" {
+		return automation.IdentityScope.OrDefault(), nil
+	}
+	if err := snapshot.IdentityScope.Validate(); err != nil {
+		return "", err
+	}
+	return snapshot.IdentityScope.OrDefault(), nil
+}
+
+func automationExecutionUserID(automation models.Automation, identityScope models.AutomationIdentityScope) (*uuid.UUID, error) {
+	switch identityScope.OrDefault() {
+	case models.AutomationIdentityScopeOrg:
+		return nil, nil
+	case models.AutomationIdentityScopePersonal:
+		if automation.CreatedBy == nil {
+			return nil, fmt.Errorf("personal automation is missing created_by; cannot resolve execution identity")
+		}
+		return automation.CreatedBy, nil
+	default:
+		return nil, fmt.Errorf("automation has invalid identity_scope %q", identityScope)
 	}
 }
 
@@ -1045,6 +1107,7 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 		logger.Info().
 			Str("session_id", sessionID.String()).
 			Str("org_id", orgID.String()).
+			Str("thread_id", input.ThreadID).
 			Int("current_turn", session.CurrentTurn).
 			Dur("session_timeout", sessionTimeout).
 			Dur("runtime_ceiling", runtimeCeiling).
@@ -1317,84 +1380,6 @@ func newEnrichPullRequestHealthHandler(services *Services, logger zerolog.Logger
 			Int64("version", input.Version).
 			Msg("starting enrich_pull_request_health job")
 		return services.PR.EnrichPullRequestHealth(ctx, orgID, pullRequestID, input.Version)
-	}
-}
-
-// validate handler runs validation checks on a completed agent run.
-func newValidateHandler(stores *Stores, services *Services, logger zerolog.Logger) JobHandler {
-	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
-		var input struct {
-			SessionID       string `json:"session_id"`
-			OrgID           string `json:"org_id"`
-			IssueSnapshotID string `json:"issue_snapshot_id,omitempty"`
-		}
-		if err := json.Unmarshal(payload, &input); err != nil {
-			return fmt.Errorf("unmarshal validate payload: %w", err)
-		}
-
-		orgID, err := parseOrgID(input.OrgID, ctx)
-		if err != nil {
-			return fmt.Errorf("parse org ID: %w", err)
-		}
-		runID, err := uuid.Parse(input.SessionID)
-		if err != nil {
-			return fmt.Errorf("parse agent run ID: %w", err)
-		}
-
-		run, err := stores.Sessions.GetByID(ctx, orgID, runID)
-		if err != nil {
-			return fmt.Errorf("fetch agent run: %w", err)
-		}
-
-		logger.Info().
-			Str("session_id", runID.String()).
-			Str("org_id", orgID.String()).
-			Msg("starting validate job")
-
-		// Create a sandbox for CI checks.
-		sandbox, err := services.SandboxProvider.Create(ctx, agent.DefaultSandboxConfig())
-		if err != nil {
-			return fmt.Errorf("create sandbox for validation: %w", err)
-		}
-		defer func() {
-			if destroyErr := services.SandboxProvider.Destroy(ctx, sandbox); destroyErr != nil {
-				logger.Error().Err(destroyErr).Msg("failed to destroy validation sandbox")
-			}
-		}()
-
-		var snapshot *models.SessionTurnIssueSnapshot
-		if stores.IssueSnapshots != nil {
-			if input.IssueSnapshotID != "" {
-				snapshotID, err := uuid.Parse(input.IssueSnapshotID)
-				if err != nil {
-					return fmt.Errorf("parse issue snapshot id: %w", err)
-				}
-				resolved, err := stores.IssueSnapshots.GetByID(ctx, orgID, snapshotID)
-				if err != nil {
-					return fmt.Errorf("fetch issue snapshot for validation: %w", err)
-				}
-				snapshot = &resolved
-			} else if run.CurrentTurn > 0 {
-				if resolved, err := stores.IssueSnapshots.GetByTurn(ctx, orgID, run.ID, run.CurrentTurn); err == nil {
-					snapshot = &resolved
-				}
-			}
-		}
-
-		if issueID := primaryIssueIDFromSnapshot(snapshot); issueID != nil {
-			run.PrimaryIssueID = issueID
-		}
-
-		var issue *models.Issue
-		if run.PrimaryIssueID != nil {
-			resolvedIssue, err := stores.Issues.GetByID(ctx, orgID, *run.PrimaryIssueID)
-			if err != nil {
-				return fmt.Errorf("fetch issue for validation: %w", err)
-			}
-			issue = &resolvedIssue
-		}
-
-		return services.Validation.Validate(ctx, &run, issue, sandbox)
 	}
 }
 

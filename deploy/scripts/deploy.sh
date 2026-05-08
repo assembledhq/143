@@ -46,8 +46,13 @@ esac
 
 echo "Deploying role=$ROLE tag=$TAG to $HOST..."
 
-SSH_OPTS=(-o StrictHostKeyChecking=accept-new -i "$SSH_KEY")
-SCP_OPTS=(-o StrictHostKeyChecking=accept-new -i "$SSH_KEY")
+# BatchMode=yes prevents ssh from falling through to interactive password auth
+# when the github-actions pubkey isn't in the host's authorized_keys yet — the
+# deploy fails immediately with `Permission denied (publickey)` instead of
+# looking like a stuck retry. Remediation when this fires:
+#   make sync-keys APPLY=true
+SSH_OPTS=(-o BatchMode=yes -o StrictHostKeyChecking=accept-new -i "$SSH_KEY")
+SCP_OPTS=(-o BatchMode=yes -o StrictHostKeyChecking=accept-new -i "$SSH_KEY")
 
 repair_deploy_sudoers() {
   bash "$SCRIPT_DIR/repair-deploy-sudoers.sh" "$ROLE" "$HOST" "$SSH_KEY"
@@ -58,6 +63,27 @@ warn_log_rotation_skipped() {
   echo "  The service deploy will continue, but local Docker json-file logs may remain unbounded."
   echo "  To repair the host when root SSH is available, run:"
   echo "    make repair-deploy-sudoers ROLE=$ROLE HOST=$HOST SSH_KEY=$SSH_KEY"
+}
+
+warn_docker_dns_skipped() {
+  echo "WARNING: docker daemon DNS pinning was not updated on this deploy; continuing."
+  echo "  The service deploy will continue, but the host may still depend on its inherited"
+  echo "  resolv.conf upstream — a single resolver outage will take all container DNS down."
+  echo "  To repair the host when root SSH is available, run:"
+  echo "    make repair-deploy-sudoers ROLE=$ROLE HOST=$HOST SSH_KEY=$SSH_KEY"
+}
+
+# Resolver list pinned into /etc/docker/daemon.json on every deploy. Three
+# independent operators / networks: Cloudflare (1.1.1.1), Google (8.8.8.8),
+# Quad9 (9.9.9.9). Order is fastest-first; Docker's embedded resolver at
+# 127.0.0.11 falls through on SERVFAIL/timeout. Lives in deploy.sh (not the
+# helper) so it's auditable in repo diff and trivially overridable for
+# testing without touching the script that runs as root.
+DOCKER_DNS_RESOLVERS=(1.1.1.1 8.8.8.8 9.9.9.9)
+
+run_sandbox_resolv_conf() {
+  ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
+    "sudo -n /opt/143/deploy/scripts/sandbox-resolv-conf.sh"
 }
 
 # --- Refresh secrets from .env.production.enc ---
@@ -155,6 +181,12 @@ if [ "$ROLE" = "app" ] || [ "$ROLE" = "worker" ] || [ "$ROLE" = "logging" ]; the
   ssh "${SSH_OPTS[@]}" deploy@"$HOST" "mkdir -p /opt/143/deploy /opt/143/deploy/scripts"
   scp "${SCP_OPTS[@]}" "$PROJECT_DIR/deploy/vector.yaml" deploy@"$HOST":/opt/143/deploy/
 fi
+# DNS probe is included by app and worker compose files (logging has its
+# own stack and doesn't include it). Stage the file so docker compose can
+# resolve the include directive.
+if [ "$ROLE" = "app" ] || [ "$ROLE" = "worker" ]; then
+  scp "${SCP_OPTS[@]}" "$PROJECT_DIR/docker-compose.dns-probe.yml" deploy@"$HOST":/opt/143/
+fi
 if [ "$ROLE" = "logging" ]; then
   # Older logging hosts may have root-owned vmalert/grafana dirs from a prior
   # provision step; without ownership the deploy user can't unlink the entries
@@ -208,6 +240,51 @@ if [ "$ROLE" = "worker" ]; then
   ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
     "mv /opt/143/deploy/scripts/sandbox-firewall.sh.new /opt/143/deploy/scripts/sandbox-firewall.sh \
      || { rm -f /opt/143/deploy/scripts/sandbox-firewall.sh.new; exit 1; }"
+
+  # Sync the sandbox-resolv.conf writer. This is the single source of truth
+  # for /etc/143/sandbox-resolv.conf, which gets bind-mounted into every
+  # sandbox at /etc/resolv.conf. The earlier chown above normalized
+  # ownership for the whole /opt/143/deploy/scripts dir, so re-using it
+  # here without another chown is fine. Atomic-rename via .new for the
+  # same ETXTBSY-class reasons noted on sandbox-firewall.sh above.
+  scp -p "${SCP_OPTS[@]}" "$PROJECT_DIR/deploy/scripts/sandbox-resolv-conf.sh" \
+    deploy@"$HOST":/opt/143/deploy/scripts/sandbox-resolv-conf.sh.new
+  ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
+    "mv /opt/143/deploy/scripts/sandbox-resolv-conf.sh.new /opt/143/deploy/scripts/sandbox-resolv-conf.sh \
+     && chmod +x /opt/143/deploy/scripts/sandbox-resolv-conf.sh \
+     || { rm -f /opt/143/deploy/scripts/sandbox-resolv-conf.sh.new; exit 1; }"
+
+  # Refresh /etc/143/sandbox-resolv.conf to match the version of the writer
+  # script in this deploy. This is required config, not optional hardening:
+  # stale DNS strands all new sandboxes on preview-infra lookups. Run it from
+  # the local deploy flow so legacy workers missing the new sudoers grant can
+  # use the same no-teardown repair path as other deploy-time sudo helpers.
+  echo "Refreshing sandbox resolv.conf..."
+  if ! run_sandbox_resolv_conf; then
+    echo "sandbox-resolv-conf.sh failed under deploy+sudo; trying no-teardown deploy sudoers repair..."
+    if repair_deploy_sudoers; then
+      echo "Retrying sandbox resolv.conf refresh after sudoers repair..."
+      run_sandbox_resolv_conf
+    else
+      echo "ERROR: sandbox-resolv-conf.sh failed and sudoers repair via root SSH did not complete."
+      echo "  Run once from a machine with root SSH access:"
+      echo "    make repair-deploy-sudoers ROLE=$ROLE HOST=$HOST SSH_KEY=$SSH_KEY"
+      echo "  Then re-run the deploy."
+      exit 1
+    fi
+  fi
+
+  # Sync Dockerfile.dnsmasq alongside the worker compose file. The
+  # sandbox-dns service is built locally on each worker (see
+  # docker-compose.worker.yml) and the build context is /opt/143, so the
+  # Dockerfile must live next to the compose file before `docker compose
+  # up` runs. Atomic-rename via .new for the same ETXTBSY-class reasons
+  # noted on sandbox-firewall.sh above.
+  scp -p "${SCP_OPTS[@]}" "$PROJECT_DIR/Dockerfile.dnsmasq" \
+    deploy@"$HOST":/opt/143/Dockerfile.dnsmasq.new
+  ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
+    "mv /opt/143/Dockerfile.dnsmasq.new /opt/143/Dockerfile.dnsmasq \
+     || { rm -f /opt/143/Dockerfile.dnsmasq.new; exit 1; }"
 fi
 
 # --- Docker log rotation (idempotent) ---
@@ -277,6 +354,61 @@ if [ "$LOG_ROTATION_READY" -eq 1 ]; then
       fi
     else
       warn_log_rotation_skipped
+    fi
+  fi
+fi
+
+# --- Docker daemon DNS resolvers (idempotent) ---
+# Pin /etc/docker/daemon.json's `dns` list to multiple independent
+# resolvers so a single upstream DNS outage doesn't take every container's
+# outbound DNS down at once. The 2026-05-07T04:15Z incident hit three
+# workers simultaneously this way (sandboxes couldn't resolve chatgpt.com,
+# workers couldn't resolve github.com) because the embedded resolver at
+# 127.0.0.11 inherits a single host resolv.conf entry by default.
+#
+# Sync + invoke pattern mirrors install-log-rotation.sh above.
+DOCKER_DNS_READY=1
+
+ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
+  "sudo -n chown -R deploy:deploy /opt/143/deploy/scripts 2>&1 | sed 's/^/  chown: /' || true"
+if ! scp -p "${SCP_OPTS[@]}" "$PROJECT_DIR/deploy/scripts/install-docker-dns.sh" \
+    deploy@"$HOST":/opt/143/deploy/scripts/install-docker-dns.sh.new; then
+  echo "install-docker-dns.sh sync failed; trying no-teardown deploy sudoers repair..."
+  if repair_deploy_sudoers; then
+    ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
+      "sudo -n chown -R deploy:deploy /opt/143/deploy/scripts 2>&1 | sed 's/^/  chown: /' || true"
+    scp -p "${SCP_OPTS[@]}" "$PROJECT_DIR/deploy/scripts/install-docker-dns.sh" \
+      deploy@"$HOST":/opt/143/deploy/scripts/install-docker-dns.sh.new
+  else
+    warn_docker_dns_skipped
+    DOCKER_DNS_READY=0
+  fi
+fi
+if [ "$DOCKER_DNS_READY" -eq 1 ]; then
+  if ! ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
+    "mv /opt/143/deploy/scripts/install-docker-dns.sh.new /opt/143/deploy/scripts/install-docker-dns.sh \
+     && chmod +x /opt/143/deploy/scripts/install-docker-dns.sh \
+     || { rm -f /opt/143/deploy/scripts/install-docker-dns.sh.new; exit 1; }"; then
+    warn_docker_dns_skipped
+    DOCKER_DNS_READY=0
+  fi
+fi
+
+if [ "$DOCKER_DNS_READY" -eq 1 ]; then
+  echo "Ensuring docker daemon DNS resolvers (${DOCKER_DNS_RESOLVERS[*]})..."
+  run_docker_dns() {
+    ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
+      "sudo -n /opt/143/deploy/scripts/install-docker-dns.sh ${DOCKER_DNS_RESOLVERS[*]}"
+  }
+  if ! run_docker_dns; then
+    echo "install-docker-dns.sh failed under deploy+sudo; trying no-teardown deploy sudoers repair..."
+    if repair_deploy_sudoers; then
+      echo "Retrying docker daemon DNS pinning after sudoers repair..."
+      if ! run_docker_dns; then
+        warn_docker_dns_skipped
+      fi
+    else
+      warn_docker_dns_skipped
     fi
   fi
 fi
@@ -524,21 +656,46 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
     fi
   fi
 
-  docker compose -f "$COMPOSE_FILE" pull
+  # --ignore-buildable: skip services whose image is built locally (sandbox-dns
+  # has both build: and image: 143-sandbox-dns:local in docker-compose.worker.yml,
+  # which pull would otherwise treat as a registry reference and fail on).
+  docker compose -f "$COMPOSE_FILE" pull --ignore-buildable
 
   # The sandbox image is referenced via SANDBOX_IMAGE env var, not as a compose
   # service, so `docker compose pull` doesn't fetch it. Pull it explicitly —
   # ContainerCreate doesn't auto-pull, so the worker would fail on first launch.
   if [ "$ROLE" = "worker" ]; then
     docker pull "ghcr.io/assembledhq/143-sandbox:$IMAGE_TAG"
-    # Ensure the shared sandbox egress network exists (idempotent). Older hosts
-    # provisioned before this was added won't have it, and session creation
-    # will fail until it does. enable_icc=false blocks one sandbox from
-    # TCP-connecting to another on the same bridge.
-    docker network inspect 143-sandbox >/dev/null 2>&1 || \
+    # Build sandbox-dns explicitly. Compose's auto-build on `up` only fires when
+    # the local image is absent, so a Dockerfile.dnsmasq change wouldn't take
+    # effect on a host that already has 143-sandbox-dns:local from a prior deploy.
+    docker compose -f "$COMPOSE_FILE" build sandbox-dns
+    # Ensure the shared sandbox egress network exists with the pinned subnet
+    # 172.30.0.0/24 (idempotent). The subnet is pinned so sandbox-dns can claim
+    # the static IP 172.30.0.2 declared in docker-compose.worker.yml — without
+    # the pin, Docker auto-assigns from its default pool and `docker compose
+    # up sandbox-dns` fails with "no configured subnet contains IP address
+    # 172.30.0.2". Do not disable bridge ICC here: on some Docker / gVisor
+    # combinations it blocks sandbox traffic to the sandbox-dns sidecar before
+    # DOCKER-USER rules can carve it out, which breaks all agent DNS.
+    # Mirrors the logic in provision.sh; deploys must validate too because
+    # workers provisioned before the pin landed (PR #815) still have an
+    # auto-assigned subnet.
+    EXISTING_SANDBOX_SUBNET=$(docker network inspect 143-sandbox \
+      -f '{{range .IPAM.Config}}{{.Subnet}}{{end}}' 2>/dev/null || true)
+    if [ -z "$EXISTING_SANDBOX_SUBNET" ]; then
       docker network create --driver bridge \
-        --opt com.docker.network.bridge.enable_icc=false \
+        --subnet 172.30.0.0/24 \
         --label managed-by=143 143-sandbox
+    elif [ "$EXISTING_SANDBOX_SUBNET" != "172.30.0.0/24" ]; then
+      echo "ERROR: 143-sandbox network has subnet '$EXISTING_SANDBOX_SUBNET'; expected 172.30.0.0/24." >&2
+      echo "  This worker was provisioned before the pinned-subnet change. To upgrade:" >&2
+      echo "    1. docker compose -f /opt/143/docker-compose.worker.yml down" >&2
+      echo "    2. docker network rm 143-sandbox" >&2
+      echo "    3. Re-run deploy (or provision-worker) for this host." >&2
+      echo "  Step 1 will drain in-flight coding turns; plan for a maintenance window." >&2
+      exit 1
+    fi
     # Install iptables-persistent on hosts that predate it (no-op otherwise).
     sudo apt-get install -y --no-install-recommends iptables-persistent >/dev/null 2>&1 || true
     # Re-apply sandbox egress firewall. Script is idempotent — safe to run

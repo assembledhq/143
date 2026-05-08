@@ -52,7 +52,6 @@ type SessionHandler struct {
 	runStore           *db.SessionStore
 	logStore           *db.SessionLogStore
 	questionStore      *db.SessionQuestionStore
-	validationStore    *db.ValidationStore
 	pullRequestStore   *db.PullRequestStore
 	issueStore         *db.IssueStore
 	repoStore          *db.RepositoryStore
@@ -219,6 +218,25 @@ func looksLikeLinearReference(refs []models.SessionInputReference) bool {
 		}
 	}
 	return false
+}
+
+func linearReferenceText(refs []models.SessionInputReference) string {
+	if len(refs) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(refs)*3)
+	for _, ref := range refs {
+		if ref.Display != "" {
+			parts = append(parts, ref.Display)
+		}
+		if ref.ID != "" && ref.ID != ref.Display {
+			parts = append(parts, ref.ID)
+		}
+		if ref.Token != "" && ref.Token != ref.Display && ref.Token != ref.ID {
+			parts = append(parts, ref.Token)
+		}
+	}
+	return strings.Join(parts, "\n")
 }
 
 // canBypassMissingMessageForLinear is the same check as looksLikeLinearReference
@@ -409,7 +427,6 @@ func NewSessionHandler(
 	runStore *db.SessionStore,
 	logStore *db.SessionLogStore,
 	questionStore *db.SessionQuestionStore,
-	validationStore *db.ValidationStore,
 	pullRequestStore *db.PullRequestStore,
 	issueStore *db.IssueStore,
 	repoStore *db.RepositoryStore,
@@ -424,7 +441,6 @@ func NewSessionHandler(
 		runStore:         runStore,
 		logStore:         logStore,
 		questionStore:    questionStore,
-		validationStore:  validationStore,
 		pullRequestStore: pullRequestStore,
 		issueStore:       issueStore,
 		repoStore:        repoStore,
@@ -1344,23 +1360,6 @@ func shouldSkipRedisLog(ctx context.Context, streamID string, lastDeliveredStrea
 	return "", false
 }
 
-// GetValidation returns the validation results for an agent run.
-func (h *SessionHandler) GetValidation(w http.ResponseWriter, r *http.Request) {
-	orgID := middleware.OrgIDFromContext(r.Context())
-	runID, err := uuid.Parse(chi.URLParam(r, "id"))
-	if err != nil {
-		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid run ID")
-		return
-	}
-
-	v, err := h.validationStore.GetBySessionID(r.Context(), orgID, runID)
-	if err != nil {
-		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "validation not found")
-		return
-	}
-	writeJSON(w, http.StatusOK, models.SingleResponse[models.Validation]{Data: v})
-}
-
 // GetPullRequest returns the PR associated with an agent run, or null if none exists.
 // "No PR yet" is a normal empty state for an active session, not a missing resource,
 // so we return 200 with a null body rather than 404.
@@ -1772,8 +1771,8 @@ func (h *SessionHandler) SendMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	body.Message = strings.TrimSpace(body.Message)
-	if body.Message == "" && len(body.Images) == 0 {
-		writeError(w, r, http.StatusBadRequest, "MISSING_MESSAGE", "message or images are required")
+	if body.Message == "" && len(body.Images) == 0 && len(body.References) == 0 {
+		writeError(w, r, http.StatusBadRequest, "MISSING_MESSAGE", "message, images, or references are required")
 		return
 	}
 	for _, reference := range body.References {
@@ -1876,7 +1875,7 @@ func (h *SessionHandler) SendMessage(w http.ResponseWriter, r *http.Request) {
 				writeError(w, r, http.StatusInternalServerError, "CREATE_FAILED", "failed to create message", err)
 				return
 			}
-			h.maybeLinkLinearMidSession(r.Context(), orgID, sessionID, body.Message, userID)
+			h.maybeLinkLinearMidSession(r.Context(), orgID, sessionID, body.Message, linearReferenceText(body.References), userID)
 			writeJSON(w, http.StatusCreated, models.SingleResponse[models.SessionMessage]{Data: *msg})
 			return
 		}
@@ -1918,7 +1917,7 @@ func (h *SessionHandler) SendMessage(w http.ResponseWriter, r *http.Request) {
 		committed = true
 
 		h.emitReviewCommentResolutionAudits(r, sessionID, msg.ID, resolvedComments)
-		h.maybeLinkLinearMidSession(r.Context(), orgID, sessionID, body.Message, userID)
+		h.maybeLinkLinearMidSession(r.Context(), orgID, sessionID, body.Message, linearReferenceText(body.References), userID)
 		writeJSON(w, http.StatusCreated, models.SingleResponse[models.SessionMessage]{Data: *msg})
 		return
 	}
@@ -2048,7 +2047,7 @@ func (h *SessionHandler) SendMessage(w http.ResponseWriter, r *http.Request) {
 			marshalAuditDetails(h.logger, questionDetails))
 	}
 	h.emitReviewCommentResolutionAudits(r, sessionID, msg.ID, resolvedComments)
-	h.maybeLinkLinearMidSession(r.Context(), orgID, sessionID, body.Message, userID)
+	h.maybeLinkLinearMidSession(r.Context(), orgID, sessionID, body.Message, linearReferenceText(body.References), userID)
 
 	writeJSON(w, http.StatusCreated, models.SingleResponse[models.SessionMessage]{Data: *msg})
 }
@@ -2068,7 +2067,7 @@ const midSessionLinkTimeout = 30 * time.Second
 // has already been committed and the agent will see Linear refs as text
 // regardless of whether the side-band link row gets created. This mirrors the
 // design 62 fail-soft contract on the async post-create catch-up path.
-func (h *SessionHandler) maybeLinkLinearMidSession(ctx context.Context, orgID, sessionID uuid.UUID, messageBody string, userID *uuid.UUID) {
+func (h *SessionHandler) maybeLinkLinearMidSession(ctx context.Context, orgID, sessionID uuid.UUID, messageBody, referenceText string, userID *uuid.UUID) {
 	linker := h.getLinearLinker()
 	if linker == nil {
 		return
@@ -2078,10 +2077,11 @@ func (h *SessionHandler) maybeLinkLinearMidSession(ctx context.Context, orgID, s
 		bgCtx, cancel := context.WithTimeout(detached, midSessionLinkTimeout)
 		defer cancel()
 		if err := linker.ResolveAndLinkMidSession(bgCtx, linear.MidSessionInput{
-			OrgID:       orgID,
-			SessionID:   sessionID,
-			MessageBody: messageBody,
-			UserID:      userID,
+			OrgID:         orgID,
+			SessionID:     sessionID,
+			MessageBody:   messageBody,
+			ReferenceText: referenceText,
+			UserID:        userID,
 		}); err != nil {
 			h.logger.Warn().Err(err).
 				Str("session_id", sessionID.String()).
@@ -2214,23 +2214,15 @@ func (h *SessionHandler) EndSession(w http.ResponseWriter, r *http.Request) {
 			payload["issue_snapshot_id"] = issueSnapshot.ID.String()
 		}
 	}
-	if session.ShouldValidateOnSessionEnd() || session.ValidationPolicy == models.SessionValidationPolicySkip {
-		dedupeKey := fmt.Sprintf("open_pr:%s", sessionID)
-		if _, err := h.jobStore.Enqueue(r.Context(), orgID, "default", "open_pr", payload, 5, &dedupeKey); err != nil {
-			writeError(w, r, http.StatusInternalServerError, "ENQUEUE_FAILED", "failed to enqueue PR creation", err)
-			return
-		}
-		if err := h.runStore.UpdatePRCreationState(r.Context(), orgID, sessionID, models.PRCreationStateQueued, ""); err != nil {
-			zerolog.Ctx(r.Context()).Warn().Err(err).
-				Str("session_id", sessionID.String()).
-				Msg("failed to mark PR creation as queued on session end")
-		}
-	} else {
-		dedupeKey := fmt.Sprintf("validate:%s", sessionID)
-		if _, err := h.jobStore.Enqueue(r.Context(), orgID, "agent", "validate", payload, 5, &dedupeKey); err != nil {
-			writeError(w, r, http.StatusInternalServerError, "ENQUEUE_FAILED", "failed to enqueue validation", err)
-			return
-		}
+	dedupeKey := fmt.Sprintf("open_pr:%s", sessionID)
+	if _, err := h.jobStore.Enqueue(r.Context(), orgID, "default", "open_pr", payload, 5, &dedupeKey); err != nil {
+		writeError(w, r, http.StatusInternalServerError, "ENQUEUE_FAILED", "failed to enqueue PR creation", err)
+		return
+	}
+	if err := h.runStore.UpdatePRCreationState(r.Context(), orgID, sessionID, models.PRCreationStateQueued, ""); err != nil {
+		zerolog.Ctx(r.Context()).Warn().Err(err).
+			Str("session_id", sessionID.String()).
+			Msg("failed to mark PR creation as queued on session end")
 	}
 
 	// Snapshot cleanup is handled by the reaper, which will find this session
@@ -2442,18 +2434,10 @@ func (h *SessionHandler) CreateManual(w http.ResponseWriter, r *http.Request) {
 		modelOverride = &body.Model
 	}
 
-	reasoningEffort := models.ReasoningEffort(body.ReasoningEffort)
-	if err := reasoningEffort.Validate(); err != nil {
+	reasoningOverride, err := parseReasoningEffortForAgent(agentType, body.ReasoningEffort)
+	if err != nil {
 		writeError(w, r, http.StatusBadRequest, "INVALID_REASONING_EFFORT", err.Error())
 		return
-	}
-	if reasoningEffort != "" && !agentType.SupportsReasoningEffortLevel(reasoningEffort) {
-		writeError(w, r, http.StatusBadRequest, "INVALID_REASONING_EFFORT", fmt.Sprintf("reasoning_effort is not supported for agent_type %q", agentType))
-		return
-	}
-	var reasoningOverride *models.ReasoningEffort
-	if reasoningEffort != "" {
-		reasoningOverride = &reasoningEffort
 	}
 
 	autonomyLevel := body.AutonomyLevel
@@ -2584,26 +2568,13 @@ func (h *SessionHandler) CreateManual(w http.ResponseWriter, r *http.Request) {
 	}
 	if linker != nil {
 		userID := manualTriggeredByUserID
-		referenceText := ""
-		if len(body.References) > 0 {
-			var refDisplays []string
-			for _, ref := range body.References {
-				if ref.Display != "" {
-					refDisplays = append(refDisplays, ref.Display)
-				}
-				if ref.ID != "" && ref.ID != ref.Display {
-					refDisplays = append(refDisplays, ref.ID)
-				}
-			}
-			referenceText = strings.Join(refDisplays, "\n")
-		}
 		linearResult, linkErr := linker.ResolveAndLinkAtCreate(r.Context(), linear.CreateInput{
 			OrgID:                   orgID,
 			SessionID:               session.ID,
 			MessageBody:             body.Message,
 			SessionTitle:            title,
 			BranchName:              body.Branch,
-			ReferenceText:           referenceText,
+			ReferenceText:           linearReferenceText(body.References),
 			UserID:                  userID,
 			LinearPrivate:           body.LinearPrivate,
 			LinearStateSyncDisabled: body.LinearStateSyncDisabled,

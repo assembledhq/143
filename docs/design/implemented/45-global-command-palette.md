@@ -2,7 +2,7 @@
 
 > **Status:** Implemented | **Last reviewed:** 2026-04-21
 >
-> **Depends on:** [03-frontend.md](../03-frontend.md), [34-repo-ribbons-nav.md](../34-repo-ribbons-nav.md)
+> **Depends on:** [03-frontend.md](../03-frontend.md), [34-repo-ribbons-nav.md](../backlog/34-repo-ribbons-nav.md)
 
 ## Problem
 

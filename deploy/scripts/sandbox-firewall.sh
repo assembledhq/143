@@ -6,6 +6,19 @@
 # otherwise pivot to internal infra (DB, monitoring, metadata API) that
 # happens to be reachable from the worker host.
 #
+# Carves out intra-bridge traffic via a RETURN rule so sandboxes can still
+# reach preview-infrastructure containers (postgres, etc.) and the
+# sandbox-dns resolver, all of which sit on the same 143-sandbox bridge.
+#
+# Verification after first deploy on a new worker:
+#
+#   docker exec -it <sandbox-container> sh -c 'nc -zv 172.30.0.2 53 && \
+#       nc -zv preview-db-<handle> 5432'
+#
+# If either connection refuses, confirm the 143-sandbox bridge was created
+# with Docker's default bridge ICC setting; disabling that option can block
+# sandbox DNS before these DOCKER-USER rules run.
+#
 # Idempotent: drops any prior rules tagged with our comment before re-adding.
 # Safe to call on every deploy and on boot.
 #
@@ -66,6 +79,21 @@ for dest in "${BLOCKED_DESTS[@]}"; do
   iptables -I DOCKER-USER -s "$SUBNET" -d "$dest" \
     -m comment --comment "$COMMENT_TAG" -j DROP
 done
+
+# Allow intra-bridge traffic so sandbox containers can reach the preview-
+# infrastructure containers (postgres, etc.) and the sandbox-dns resolver,
+# all of which sit on the same 143-sandbox bridge. The DROP rules above
+# block 172.16/12, which the bridge subnet itself is part of, so without
+# this carve-out every intra-bridge request gets dropped.
+#
+# RETURN — not ACCEPT — exits DOCKER-USER and returns to the FORWARD
+# chain so the rest of FORWARD still applies. The sandbox bridge intentionally
+# leaves Docker's ICC setting at its default because gVisor sandboxes need
+# same-bridge access to sandbox-dns.
+#
+# Inserted last so iptables -I lands it at position 1, ahead of the DROPs.
+iptables -I DOCKER-USER -s "$SUBNET" -d "$SUBNET" \
+  -m comment --comment "$COMMENT_TAG" -j RETURN
 
 # Persist across reboots if iptables-persistent is installed.
 if command -v netfilter-persistent >/dev/null 2>&1; then

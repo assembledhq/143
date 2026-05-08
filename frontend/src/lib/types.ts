@@ -131,7 +131,6 @@ export interface Session {
   org_id: string;
   origin?: string;
   interaction_mode?: string;
-  validation_policy?: string;
   agent_type: string;
   status: string;
   autonomy_level: string;
@@ -205,6 +204,7 @@ export interface Session {
   threads?: SessionThread[];
   archived_at?: string;
   archived_by_user_id?: string;
+  automation_run_id?: string;
   created_at: string;
 }
 
@@ -218,27 +218,6 @@ export interface PRSummary {
 export interface SessionListItem extends Session {
   last_viewed_at?: string;
   pr_summary?: PRSummary;
-}
-
-export interface Validation {
-  id: string;
-  session_id: string;
-  org_id: string;
-  status: string;
-  direction_check: string | null;
-  direction_check_details: string | null;
-  correctness_check: string | null;
-  correctness_check_details: string | null;
-  quality_check: string | null;
-  quality_check_details: string | null;
-  security_scan: string | null;
-  security_scan_details: string | null;
-  regression_test_check: string | null;
-  regression_test_check_details: string | null;
-  ci_check: string | null;
-  ci_check_details: string | null;
-  created_at: string;
-  updated_at: string;
 }
 
 export type ThreadStatus = 'pending' | 'running' | 'idle' | 'awaiting_input' | 'completed' | 'failed' | 'cancelled';
@@ -419,7 +398,7 @@ export interface PullRequestHealthResponse {
   head_sha: string;
   base_sha: string;
   health_version: number;
-  merge_state: "unknown" | "clean" | "conflicted" | "behind";
+  merge_state: "unknown" | "clean" | "conflicted" | "behind" | "blocked";
   has_conflicts: boolean;
   failing_test_count: number;
   needs_agent_action: boolean;
@@ -1379,6 +1358,7 @@ export interface UsageBreakdownRow {
 // Automation types
 export type AutomationScheduleType = 'interval' | 'cron';
 export type AutomationRunStatus = 'pending' | 'running' | 'completed' | 'completed_noop' | 'failed' | 'skipped';
+export type AutomationIdentityScope = 'org' | 'personal';
 
 export interface Automation {
   id: string;
@@ -1389,9 +1369,11 @@ export interface Automation {
   scope?: string;
   agent_type?: string;
   model_override?: string;
+  reasoning_effort?: Session["reasoning_effort"];
   execution_mode: string;
   max_concurrent: number;
   base_branch: string;
+  identity_scope: AutomationIdentityScope;
   schedule_type: AutomationScheduleType;
   interval_value?: number;
   interval_unit?: 'hours' | 'days' | 'weeks';

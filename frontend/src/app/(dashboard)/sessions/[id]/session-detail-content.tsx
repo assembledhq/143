@@ -20,23 +20,13 @@ import {
   Check,
   XCircle,
   X,
-  MinusCircle,
   Square,
   PanelRightOpen,
   PanelRightClose,
-  PanelBottomOpen,
   Clock,
   MessageSquare,
-  Paperclip,
   Pencil,
-  Plus,
 } from "lucide-react";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
 import { LinearIcon } from "@/components/linear-icon";
 import { looksLikeLinearRef } from "@/lib/linear-refs";
 import { getClipboardFiles } from "@/lib/clipboard-files";
@@ -57,7 +47,6 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from "@/components/ui/table";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import {
   Dialog,
@@ -85,6 +74,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { ChatTimeline } from "@/components/chat-timeline";
+import { SessionComposerAttachmentMenu } from "@/components/session-composer-attachment-menu";
 import { SessionComposerTriggerPicker, flattenGroups, type TriggerPickerGroup, type TriggerPickerPosition } from "@/components/session-composer-trigger-picker";
 import { useSessionComposerSlashCommands } from "@/hooks/use-session-composer-slash-commands";
 import {
@@ -99,7 +89,7 @@ import {
 } from "@/lib/session-composer-mentions";
 import { queryKeys } from "@/lib/query-keys";
 import { api, ApiError } from "@/lib/api";
-import { AGENTS, AGENTS_BY_KEY, agentDisplayLabel } from "@/lib/agents";
+import { AGENTS, AGENTS_BY_KEY } from "@/lib/agents";
 import { getActiveOrgId } from "@/lib/active-org";
 import { maybeNotifySessionCompleted } from "@/lib/browser-notifications";
 import {
@@ -116,7 +106,7 @@ import {
   resolveInitialSessionAnchor,
   writeStoredSessionScrollPosition,
 } from "@/lib/session-open-position";
-import type { ListResponse, Session, SessionDetail, SessionInputCommand, SessionInputReference, SessionLog, SessionMessage, SessionReviewComment, SessionThread, SessionThreadFileEvent, SessionTimelineEntry, User, Validation, CodexAuthStatus, PullRequestHealthResponse, SingleResponse } from "@/lib/types";
+import type { ListResponse, Session, SessionDetail, SessionInputCommand, SessionInputReference, SessionLog, SessionMessage, SessionReviewComment, SessionThread, SessionThreadFileEvent, SessionTimelineEntry, User, CodexAuthStatus, PullRequestHealthResponse, SingleResponse } from "@/lib/types";
 import { AgentTabStrip, computeThreadOverlap } from "./agent-tab-strip";
 import {
   ThreadAttributionFilter,
@@ -133,13 +123,13 @@ import { CodexDeviceCodeModal } from "@/components/codex-device-code-modal";
 import { AgentBadge } from "@/components/agent-badge";
 import { PendingAttachmentStrip } from "@/components/pending-attachment-strip";
 import { PRHealthBanner } from "@/components/pr-health-banner";
-import { MobileBackButton } from "@/components/mobile-back-button";
 import { useAuth } from "@/hooks/use-auth";
 import { useMediaQuery } from "@/hooks/use-media-query";
 import { useDocumentVisible } from "@/hooks/use-document-visible";
 import { prMergedAccent } from "@/lib/pr-status-styles";
 import { cn, sessionTitle, formatTimeAgo } from "@/lib/utils";
 import { activeSet, workingStatusesSet } from "@/lib/session-status-groups";
+import { MobileSessionTopBar } from "./mobile-session-top-bar";
 
 // Defer the diff viewer (shiki + diff-parser) until the user actually opens
 // review mode. Saves ~100KB+ from the initial session-detail bundle for the
@@ -171,8 +161,18 @@ const PR_ERROR_TOAST_DURATION_MS = 10_000;
 const PR_ERROR_TOAST_MESSAGE = "PR creation failed";
 const MAX_RESOLVE_REVIEW_COMMENTS_PER_MESSAGE = 50;
 
+const EDITABLE_THREAD_AGENTS: ReadonlyArray<{ key: string; label: string }> =
+  AGENTS.map((agent) => ({ key: agent.key, label: agent.label }));
+
 type PendingFollowUpMessage = SessionMessage & {
   client_id: number;
+};
+
+type PendingEditableThreadUpdate = {
+  label: string;
+  // null clears an existing override; a string sets it. Field is always
+  // present on this path so the backend treats omission separately.
+  model: string | null;
 };
 
 const statusConfig: Record<string, { color: string; label: string }> = {
@@ -183,10 +183,24 @@ const statusConfig: Record<string, { color: string; label: string }> = {
   needs_human_guidance: { color: "bg-orange-50 text-orange-700 dark:bg-orange-950/30 dark:text-orange-400", label: "Needs guidance" },
   completed: { color: "bg-emerald-50 text-emerald-700 dark:bg-emerald-950/30 dark:text-emerald-400", label: "Completed" },
   pr_created: { color: "bg-emerald-50 text-emerald-700 dark:bg-emerald-950/30 dark:text-emerald-400", label: "PR created" },
+  pr_merged: { color: `${prMergedAccent.bg} ${prMergedAccent.text}`, label: "PR merged" },
+  pr_closed: { color: "bg-muted text-muted-foreground", label: "PR closed" },
   failed: { color: "bg-destructive/10 text-destructive", label: "Failed" },
   cancelled: { color: "bg-muted text-muted-foreground", label: "Cancelled" },
   skipped: { color: "bg-muted text-muted-foreground", label: "Skipped" },
 };
+
+function getDisplayStatus(sessionStatus: string, prStatus?: string | null): { color: string; label: string } {
+  if (sessionStatus === "pr_created") {
+    if (prStatus === "merged") {
+      return statusConfig.pr_merged;
+    }
+    if (prStatus === "closed") {
+      return statusConfig.pr_closed;
+    }
+  }
+  return statusConfig[sessionStatus] || statusConfig.pending;
+}
 
 function hasMeaningfulDuration(startedAt?: string, completedAt?: string): boolean {
   if (!startedAt || !completedAt) return false;
@@ -207,25 +221,80 @@ export function formatDuration(startedAt?: string, completedAt?: string): string
   return `${days}d ${hours % 24}h`;
 }
 
+export function getPendingEditableThreadUpdate(
+  activeThread: SessionThread | undefined,
+  activeThreadIsEditable: boolean,
+  composerSelectedModel: string,
+): PendingEditableThreadUpdate | undefined {
+  if (!activeThread || !activeThreadIsEditable || composerSelectedModel === "") {
+    return undefined;
+  }
+  const existingModel = activeThread.model_override ?? null;
+  if (composerSelectedModel === existingModel) {
+    return undefined;
+  }
+  return {
+    label: activeThread.label,
+    model: composerSelectedModel,
+  };
+}
+
+export function getInitialComposerSelectedModel(thread: SessionThread): string {
+  return thread.model_override ?? "";
+}
+
+export function trackInFlightAgentUpdate(
+  ref: { current: Promise<unknown> | null },
+  promise: Promise<unknown>,
+): void {
+  ref.current = promise;
+  promise.catch(() => undefined).then(() => {
+    if (ref.current === promise) {
+      ref.current = null;
+    }
+  });
+}
+
+type SessionOriginDisplay = {
+  badge: string;
+  title: string;
+  detail?: string;
+};
+
+function getSessionOriginDisplay(session: Session): SessionOriginDisplay | null {
+  switch (session.origin) {
+    case "automation":
+      return {
+        badge: "Automation",
+        title: "Created by automation",
+        detail: session.automation_run_id ? "Automation run" : "Scheduled or manually triggered automation",
+      };
+    case "project":
+      return {
+        badge: "Project",
+        title: "Created from project work",
+        detail: "Started as part of a tracked project task",
+      };
+    case "issue_trigger":
+      return {
+        badge: "Issue",
+        title: "Created from issue intake",
+        detail: "Started automatically from issue workflow",
+      };
+    case "revision":
+      return {
+        badge: "Revision",
+        title: "Created from a prior session",
+        detail: "Follow-up run spun out from an earlier session",
+      };
+    default:
+      return null;
+  }
+}
+
 const triggerPickerIconClassName = "h-4 w-4 shrink-0";
 const directoryTriggerIcon = <FolderTree className={triggerPickerIconClassName} />;
 const fileTriggerIcon = <FileCode2 className={triggerPickerIconClassName} />;
-
-const validationChecks: { key: string; label: string }[] = [
-  { key: "direction_check", label: "Direction check" },
-  { key: "correctness_check", label: "Correctness check" },
-  { key: "quality_check", label: "Quality check" },
-  { key: "security_scan", label: "Security scan" },
-  { key: "regression_test_check", label: "Regression test check" },
-  { key: "ci_check", label: "CI check" },
-];
-
-function checkResultBadge(result: string | null) {
-  if (!result) return <Badge variant="secondary" className="text-xs">skipped</Badge>;
-  if (result === "pass") return <Badge variant="secondary" className="bg-emerald-50 text-emerald-700 dark:bg-emerald-950/30 dark:text-emerald-400 border-emerald-200/50 dark:border-emerald-800/30 text-xs">pass</Badge>;
-  if (result === "fail") return <Badge variant="secondary" className="bg-destructive/10 text-destructive border-destructive/20 text-xs">fail</Badge>;
-  return <Badge variant="secondary" className="text-xs">{result}</Badge>;
-}
 
 // AgentThreadTabs lived here in Phase 1. The replacement now lives in
 // agent-tab-strip.tsx (AgentTabStrip) and adds overlap badges, tab actions,
@@ -236,7 +305,7 @@ function checkResultBadge(result: string | null) {
 // Detail panel tabs (shown in right sidebar)
 // ---------------------------------------------------------------------------
 
-type DetailTab = "overview" | "changes" | "validation" | "preview";
+type DetailTab = "overview" | "changes" | "preview";
 type PRAuthorMode = "auto" | "user" | "app";
 
 type PRAuthInterceptDetails = {
@@ -372,7 +441,7 @@ function prErrorTitle(snapshotState: PRSnapshotState | null, errorCode?: string)
   return "Couldn't create the PR";
 }
 
-function OverviewTab({ session, members }: { session: Session; members: User[] }) {
+function OverviewTab({ session, members, prStatus }: { session: Session; members: User[]; prStatus?: string | null }) {
   const queryClient = useQueryClient();
   const [showDeviceCodeModal, setShowDeviceCodeModal] = useState(false);
 
@@ -392,8 +461,9 @@ function OverviewTab({ session, members }: { session: Session; members: User[] }
     },
   });
 
-  const status = statusConfig[session.status] || statusConfig.pending;
+  const status = getDisplayStatus(session.status, prStatus);
   const isActive = !terminalSessionStatuses.has(session.status);
+  const originDisplay = getSessionOriginDisplay(session);
 
   const triggeredByMember = session.triggered_by_user_id
     ? members.find((m) => m.id === session.triggered_by_user_id)
@@ -512,6 +582,21 @@ function OverviewTab({ session, members }: { session: Session; members: User[] }
           </span>
         </div>
 
+        {originDisplay && (
+          <div className="flex items-center gap-x-2 gap-y-1 flex-wrap text-xs text-muted-foreground">
+            <Badge variant="outline" className="h-5 rounded-full px-2 text-xs font-medium">
+              {originDisplay.badge}
+            </Badge>
+            <span className="font-medium text-foreground">{originDisplay.title}</span>
+            {originDisplay.detail && (
+              <>
+                <span aria-hidden="true" className="text-muted-foreground/50">·</span>
+                <span>{originDisplay.detail}</span>
+              </>
+            )}
+          </div>
+        )}
+
         {/* Timestamps + audit — secondary reference data, single unified row */}
         <div className="flex items-center gap-x-1.5 gap-y-1 flex-wrap text-xs text-muted-foreground">
           {terminalSessionStatuses.has(session.status) &&
@@ -567,93 +652,6 @@ function OverviewTab({ session, members }: { session: Session; members: User[] }
         </Card>
       )}
 
-    </div>
-  );
-}
-
-function ValidationTab({ sessionId }: { sessionId: string }) {
-  const { data, isLoading, error } = useQuery({
-    queryKey: ["session", sessionId, "validation"],
-    queryFn: () => api.sessions.getValidation(sessionId).catch((err) => {
-      // 404 means no validation exists yet — treat as empty data, not an error.
-      if (err?.code === "NOT_FOUND") return { data: null };
-      throw err;
-    }),
-  });
-
-  if (isLoading) {
-    return (
-      <div className="flex items-center justify-center py-12">
-        <div className="text-center space-y-2">
-          <Loader2 className="h-5 w-5 animate-spin text-muted-foreground/40 mx-auto" />
-          <p className="text-xs text-muted-foreground">Loading validation...</p>
-        </div>
-      </div>
-    );
-  }
-
-  const validation = data?.data;
-  if (error || !validation) {
-    return (
-      <div className="flex items-center justify-center py-12">
-        <div className="text-center space-y-2 max-w-[280px]">
-          <CheckCircle2 className="h-8 w-8 text-muted-foreground/40 mx-auto" />
-          <p className="text-xs font-medium text-muted-foreground">No validation data</p>
-          <p className="text-xs text-muted-foreground/60">Validation checks will appear here once the session produces results.</p>
-        </div>
-      </div>
-    );
-  }
-
-  const overallStatus = validation.status;
-
-  return (
-    <div className="space-y-4">
-      <div className="flex items-center gap-2">
-        <span className="text-xs font-medium">Overall:</span>
-        {overallStatus === "passed" && (
-          <Badge variant="secondary" className="bg-emerald-50 text-emerald-700 dark:bg-emerald-950/30 dark:text-emerald-400 border-emerald-200/50 dark:border-emerald-800/30">
-            <CheckCircle2 className="mr-1 h-3 w-3" /> Passed
-          </Badge>
-        )}
-        {overallStatus === "failed" && (
-          <Badge variant="secondary" className="bg-destructive/10 text-destructive border-destructive/20">
-            <XCircle className="mr-1 h-3 w-3" /> Failed
-          </Badge>
-        )}
-        {overallStatus !== "passed" && overallStatus !== "failed" && (
-          <Badge variant="secondary">
-            <MinusCircle className="mr-1 h-3 w-3" /> {overallStatus}
-          </Badge>
-        )}
-      </div>
-
-      <Card>
-        <CardContent className="p-0">
-          <Table>
-            <TableHeader>
-              <TableRow className="bg-muted/20">
-                <TableHead>Check</TableHead>
-                <TableHead>Result</TableHead>
-                <TableHead>Details</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {validationChecks.map(({ key, label }) => {
-                const result = validation[key as keyof Validation] as string | null;
-                const details = validation[`${key}_details` as keyof Validation] as string | null;
-                return (
-                  <TableRow key={key}>
-                    <TableCell className="font-medium">{label}</TableCell>
-                    <TableCell>{checkResultBadge(result)}</TableCell>
-                    <TableCell className="text-muted-foreground">{details || "-"}</TableCell>
-                  </TableRow>
-                );
-              })}
-            </TableBody>
-          </Table>
-        </CardContent>
-      </Card>
     </div>
   );
 }
@@ -789,6 +787,7 @@ function SessionComposer({
   isUploading,
   onUpload,
   onPasteFiles,
+  onAddAttachment,
   onRemoveAttachment,
   openComments,
   availableModels,
@@ -811,6 +810,10 @@ function SessionComposer({
   repositoryId,
   branch,
   agentType,
+  editableAgentType,
+  editableAgents,
+  onEditableAgentTypeChange,
+  agentUpdatePending,
   targetLabel,
 }: {
   message: string;
@@ -823,6 +826,7 @@ function SessionComposer({
   isUploading: boolean;
   onUpload: (event: React.ChangeEvent<HTMLInputElement>) => void;
   onPasteFiles: (files: File[]) => Promise<void>;
+  onAddAttachment: (url: string) => void;
   onRemoveAttachment: (url: string) => void;
   openComments: SessionReviewComment[];
   availableModels: readonly string[];
@@ -845,6 +849,10 @@ function SessionComposer({
   repositoryId?: string;
   branch?: string;
   agentType: string;
+  editableAgentType?: string;
+  editableAgents?: readonly { key: string; label: string }[];
+  onEditableAgentTypeChange?: (nextAgentType: string) => void;
+  agentUpdatePending: boolean;
   targetLabel?: string;
 }) {
   const isMobile = useMediaQuery("(max-width: 767px)");
@@ -856,6 +864,13 @@ function SessionComposer({
     || openComments.length > 0
     || references.length > 0
     || commands.length > 0;
+
+  useEffect(() => {
+    if (isMobile || !canSendMessage) {
+      return;
+    }
+    textareaRef.current?.focus();
+  }, [isMobile, canSendMessage, textareaRef]);
 
   useEffect(() => {
     const el = textareaRef.current;
@@ -876,6 +891,8 @@ function SessionComposer({
   const [triggerDismissed, setTriggerDismissed] = useState(false);
   const [pickerPosition, setPickerPosition] = useState<TriggerPickerPosition | null>(null);
   const [mobileSettingsOpen, setMobileSettingsOpen] = useState(false);
+  const [showImageInput, setShowImageInput] = useState(false);
+  const [imageURL, setImageURL] = useState("");
   const [showLinearInput, setShowLinearInput] = useState(false);
   const [linearInput, setLinearInput] = useState("");
   const [linearInputError, setLinearInputError] = useState<string | null>(null);
@@ -890,6 +907,19 @@ function SessionComposer({
       linearInputRef.current?.focus();
     }
   }, [showLinearInput]);
+
+  function addImageURL() {
+    const trimmed = imageURL.trim();
+    if (!trimmed) {
+      return;
+    }
+    onAddAttachment(trimmed);
+    setImageURL("");
+    setShowImageInput(false);
+    requestAnimationFrame(() => {
+      textareaRef.current?.focus();
+    });
+  }
 
   function addLinearLink() {
     const trimmed = linearInput.trim();
@@ -1175,6 +1205,24 @@ function SessionComposer({
 
   const settingsControls = (
     <div className="space-y-4">
+      {editableAgents && editableAgents.length > 0 && editableAgentType && onEditableAgentTypeChange && (
+        <div className="space-y-2">
+          <Label className="text-xs uppercase tracking-[0.14em] text-muted-foreground">Agent</Label>
+          <Select value={editableAgentType} onValueChange={onEditableAgentTypeChange} disabled={agentUpdatePending}>
+            <SelectTrigger className="h-11 rounded-xl border-border/70 bg-background text-sm" aria-label="Agent">
+              <SelectValue placeholder="Select agent" />
+            </SelectTrigger>
+            <SelectContent>
+              {editableAgents.map((agent) => (
+                <SelectItem key={agent.key} value={agent.key}>
+                  {agent.label}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+      )}
+
       {availableModels.length > 0 && (
         <div className="space-y-2">
           <Label className="text-xs uppercase tracking-[0.14em] text-muted-foreground">Model</Label>
@@ -1399,6 +1447,21 @@ function SessionComposer({
             className="px-3 pb-2"
           />
 
+          {showImageInput && (
+            <div className="flex items-center gap-2 px-3 pb-2">
+              <Input
+                value={imageURL}
+                onChange={(event) => setImageURL(event.target.value)}
+                placeholder="https://example.com/screenshot.png"
+                aria-label="Image URL"
+                className="h-8"
+              />
+              <Button type="button" variant="outline" size="sm" onClick={addImageURL}>
+                Add
+              </Button>
+            </div>
+          )}
+
           {showLinearInput && (
             <div className="flex flex-col gap-1 px-3 pb-2">
               <div className="flex items-center gap-2">
@@ -1443,34 +1506,16 @@ function SessionComposer({
               <>
                 <div className="flex items-center gap-2">
                   <DisabledTooltip disabled={!canSendMessage} content={attachDisabledReason}>
-                    <DropdownMenu>
-                      <DropdownMenuTrigger asChild>
-                        <Button
-                          type="button"
-                          size="icon"
-                          variant="ghost"
-                          className="h-8 w-8 shrink-0 rounded-lg text-muted-foreground hover:text-foreground"
-                          title="Add files, photos, or a Linear issue"
-                          aria-label="Add files, photos, or a Linear issue"
-                          disabled={!canSendMessage}
-                        >
-                          {isUploading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4" />}
-                        </Button>
-                      </DropdownMenuTrigger>
-                      <DropdownMenuContent align="start">
-                        <DropdownMenuItem
-                          disabled={isUploading}
-                          onClick={() => uploadInputRef.current?.click()}
-                        >
-                          <Paperclip className="mr-2 h-4 w-4" />
-                          Upload files or photos
-                        </DropdownMenuItem>
-                        <DropdownMenuItem onClick={() => setShowLinearInput(true)}>
-                          <LinearIcon className="mr-2 h-4 w-4" />
-                          Link Linear issue
-                        </DropdownMenuItem>
-                      </DropdownMenuContent>
-                    </DropdownMenu>
+                    <SessionComposerAttachmentMenu
+                      disabled={!canSendMessage}
+                      isUploading={isUploading}
+                      buttonAriaLabel="Add files, photos, or a Linear issue"
+                      buttonTitle="Add files, photos, or a Linear issue"
+                      buttonClassName="h-8 w-8 shrink-0 rounded-lg text-muted-foreground hover:text-foreground"
+                      onUploadFiles={() => uploadInputRef.current?.click()}
+                      onAddImageURL={() => setShowImageInput(true)}
+                      onAddLinearIssue={() => setShowLinearInput(true)}
+                    />
                   </DisabledTooltip>
                   <Button
                     type="button"
@@ -1537,34 +1582,16 @@ function SessionComposer({
             ) : (
               <div className="flex items-center gap-1">
                 <DisabledTooltip disabled={!canSendMessage} content={attachDisabledReason}>
-                  <DropdownMenu>
-                    <DropdownMenuTrigger asChild>
-                      <Button
-                        type="button"
-                        size="icon"
-                        variant="ghost"
-                        className="h-8 w-8 shrink-0 rounded-lg text-muted-foreground hover:text-foreground"
-                        title="Add files, photos, or a Linear issue"
-                        aria-label="Add files, photos, or a Linear issue"
-                        disabled={!canSendMessage}
-                      >
-                        {isUploading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4" />}
-                      </Button>
-                    </DropdownMenuTrigger>
-                    <DropdownMenuContent align="start">
-                      <DropdownMenuItem
-                        disabled={isUploading}
-                        onClick={() => uploadInputRef.current?.click()}
-                      >
-                        <Paperclip className="mr-2 h-4 w-4" />
-                        Upload files or photos
-                      </DropdownMenuItem>
-                      <DropdownMenuItem onClick={() => setShowLinearInput(true)}>
-                        <LinearIcon className="mr-2 h-4 w-4" />
-                        Link Linear issue
-                      </DropdownMenuItem>
-                    </DropdownMenuContent>
-                  </DropdownMenu>
+                  <SessionComposerAttachmentMenu
+                    disabled={!canSendMessage}
+                    isUploading={isUploading}
+                    buttonAriaLabel="Add files, photos, or a Linear issue"
+                    buttonTitle="Add files, photos, or a Linear issue"
+                    buttonClassName="h-8 w-8 shrink-0 rounded-lg text-muted-foreground hover:text-foreground"
+                    onUploadFiles={() => uploadInputRef.current?.click()}
+                    onAddImageURL={() => setShowImageInput(true)}
+                    onAddLinearIssue={() => setShowLinearInput(true)}
+                  />
                 </DisabledTooltip>
 
                 {availableModels.length > 0 && (
@@ -1576,6 +1603,21 @@ function SessionComposer({
                       {availableModels.map((model) => (
                         <SelectItem key={model} value={model}>
                           {model}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                )}
+
+                {editableAgents && editableAgents.length > 0 && editableAgentType && onEditableAgentTypeChange && (
+                  <Select value={editableAgentType} onValueChange={onEditableAgentTypeChange} disabled={agentUpdatePending}>
+                    <SelectTrigger className="h-8 w-auto gap-1.5 border-none bg-transparent px-2 text-xs text-muted-foreground shadow-none hover:text-foreground focus:ring-0" aria-label="Agent">
+                      <SelectValue placeholder="Agent" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {editableAgents.map((agent) => (
+                        <SelectItem key={agent.key} value={agent.key}>
+                          {agent.label}
                         </SelectItem>
                       ))}
                     </SelectContent>
@@ -2264,6 +2306,7 @@ export function SessionDetailContent({ id }: { id: string }) {
   // matchMedia needed).
   const [mobileDetailOpen, setMobileDetailOpen] = useState(false);
   const [mobileReviewComposerOpen, setMobileReviewComposerOpen] = useState(false);
+  const [mobileRenameOpen, setMobileRenameOpen] = useState(false);
   const [detailWidth, setDetailWidth] = useState(DEFAULT_DETAIL);
   const [activeFileIndex, setActiveFileIndex] = useState(0);
   const [isEditingTitle, setIsEditingTitle] = useState(false);
@@ -2371,6 +2414,7 @@ export function SessionDetailContent({ id }: { id: string }) {
   const threads = useMemo(() => session?.threads ?? [], [session?.threads]);
   const [activeThreadId, setActiveThreadId] = useState<string | null>(null);
   const activeThread = threads.find((thread) => thread.id === activeThreadId) ?? threads[0];
+  const activeThreadIndex = activeThread ? threads.findIndex((thread) => thread.id === activeThread.id) : -1;
   const isActive = session ? !terminalStatuses.has(session.status) : false;
   const isRunning = session?.status === "running";
   const currentTitle = session ? sessionTitle(session) : "";
@@ -2403,6 +2447,10 @@ export function SessionDetailContent({ id }: { id: string }) {
       references?: SessionInputReference[];
       commands?: SessionInputCommand[];
       planMode?: boolean;
+    };
+    editableThreadUpdate?: {
+      label: string;
+      model: string | null;
     };
     model?: string;
     resolvedIDs: string[];
@@ -2470,11 +2518,14 @@ export function SessionDetailContent({ id }: { id: string }) {
   });
   const prHealth = prHealthData?.data;
   const prStatus = prData?.data?.status;
-  const closedPRNumber = prData?.data?.github_pr_number;
+  const prNumber = prData?.data?.github_pr_number;
+  const closedPRNumber = prNumber;
+  const closedPRLabel = closedPRNumber ? `PR #${closedPRNumber} closed` : "PR closed";
   const closedPRSummary = closedPRNumber
     ? `PR #${closedPRNumber} was closed without merging.`
     : "This pull request was closed without merging.";
-  const mergedPRNumber = prData?.data?.github_pr_number;
+  const mergedPRNumber = prNumber;
+  const mergedPRLabel = mergedPRNumber ? `PR #${mergedPRNumber} merged` : "PR merged";
   const mergedPRSummary = mergedPRNumber
     ? `PR #${mergedPRNumber} was merged successfully.`
     : "This pull request was merged successfully.";
@@ -2608,7 +2659,7 @@ export function SessionDetailContent({ id }: { id: string }) {
       void queryClient.invalidateQueries({ queryKey: ["session", id] });
       void queryClient.invalidateQueries({ queryKey: ["session", id, "pr"] });
       void queryClient.invalidateQueries({ queryKey: ["sessions"] });
-      toast.success("PR merged", prUrl ? {
+      toast.success(mergedPRLabel, prUrl ? {
         action: { label: "View \u2197", onClick: () => window.open(prUrl, "_blank", "noopener,noreferrer") },
       } : undefined);
     },
@@ -2657,6 +2708,7 @@ export function SessionDetailContent({ id }: { id: string }) {
           return;
         }
 
+        void queryClient.invalidateQueries({ queryKey: ["session", id, "pr"] });
         void queryClient.invalidateQueries({ queryKey: ["pull-request", pullRequestId, "health"] });
       });
       eventSource.onerror = () => {
@@ -2680,7 +2732,7 @@ export function SessionDetailContent({ id }: { id: string }) {
         clearTimeout(reconnectTimer);
       }
     };
-  }, [apiBase, prData?.data?.status, pullRequestId, queryClient, isDocumentVisible]);
+  }, [apiBase, prData?.data?.status, pullRequestId, queryClient, isDocumentVisible, id]);
   const previousSessionStatusRef = useRef<string | undefined>(undefined);
   useEffect(() => {
     const currentStatus = session?.status;
@@ -2924,8 +2976,15 @@ export function SessionDetailContent({ id }: { id: string }) {
   const [newThreadAgentType, setNewThreadAgentType] = useState("codex");
   const [newThreadModel, setNewThreadModel] = useState("");
   const [newThreadLabel, setNewThreadLabel] = useState("");
+  const focusComposerAfterThreadCreateRef = useRef(false);
+  const addTabButtonRef = useRef<HTMLButtonElement>(null);
   const composerTextareaRef = useRef<HTMLTextAreaElement>(null);
   const composerUploadInputRef = useRef<HTMLInputElement>(null);
+  // Tracks an in-flight agent-switch PATCH so the send-time PATCH can wait
+  // for it before issuing its own update. Without this, a fast send right
+  // after toggling the agent dropdown can race the agent-switch PATCH and
+  // overwrite the new agent_type with the send-time {label, model} body.
+  const inFlightAgentUpdateRef = useRef<Promise<unknown> | null>(null);
   const chatPanelScrollToLiveEdgeRef = useRef<(() => void) | null>(null);
   // Open comments are the source of truth for what gets attached to the next
   // message — once a send succeeds, the backend marks them resolved in the
@@ -2947,6 +3006,7 @@ export function SessionDetailContent({ id }: { id: string }) {
   const composerIsRunning = activeThread ? activeThread.status === "running" : session?.status === "running";
   const composerIsSnapshotExpired = session?.sandbox_state === "destroyed";
   const composerAgentType = activeThread?.agent_type ?? session?.agent_type ?? "codex";
+  const activeThreadIsEditable = !!activeThread && activeThread.status === "idle" && activeThread.current_turn === 0;
   const composerIsClaudeCode = composerAgentType === "claude_code";
   const composerLacksHeadlessResume = AGENTS_BY_KEY[composerAgentType]?.lacksHeadlessResume ?? false;
   const composerAvailableModels = useMemo(() => {
@@ -2956,11 +3016,34 @@ export function SessionDetailContent({ id }: { id: string }) {
     const agentType = AGENTS.find((agent) => agent.key === composerAgentType);
     return agentType?.models ?? [];
   }, [composerAgentType, session]);
-  const composerTargetLabel = activeThread
-    ? agentDisplayLabel(activeThread.agent_type)
-    : (session ? agentDisplayLabel(session.agent_type) : "agent");
   const selectedNewThreadAgent = AGENTS_BY_KEY[newThreadAgentType] ?? AGENTS[0];
   const selectedNewThreadModels = selectedNewThreadAgent?.models ?? [];
+  const activeThreadLabel = activeThread?.label ?? (session ? AGENTS_BY_KEY[session.agent_type]?.label ?? session.agent_type : "agent");
+  const buildThreadLabelForAgent = useCallback((agentType: string) => {
+    const agent = AGENTS_BY_KEY[agentType] ?? AGENTS[0];
+    const ordinal = activeThreadIndex >= 0 ? activeThreadIndex + 1 : threads.length + 1;
+    return `${agent.label} ${ordinal}`;
+  }, [activeThreadIndex, threads.length]);
+  const buildDefaultThreadRequest = useCallback(() => {
+    const agentType = activeThread?.agent_type ?? session?.agent_type ?? "codex";
+    const agent = AGENTS_BY_KEY[agentType] ?? AGENTS[0];
+    return {
+      agent_type: agent.key,
+      model: activeThread?.agent_type === agent.key ? activeThread.model_override : undefined,
+      label: `${agent.label} ${threads.length + 1}`,
+    };
+  }, [activeThread?.agent_type, activeThread?.model_override, session?.agent_type, threads.length]);
+  const buildDialogThreadRequest = useCallback(() => {
+    const agent = AGENTS_BY_KEY[newThreadAgentType] ?? AGENTS[0];
+    return {
+      agent_type: agent.key,
+      model: newThreadModel || undefined,
+      label: newThreadLabel.trim() || `${agent.label} ${threads.length + 1}`,
+    };
+  }, [newThreadAgentType, newThreadLabel, newThreadModel, threads.length]);
+  const pendingEditableThreadUpdate = useMemo(() => {
+    return getPendingEditableThreadUpdate(activeThread, activeThreadIsEditable, composerSelectedModel);
+  }, [activeThread, activeThreadIsEditable, composerSelectedModel]);
 
   async function uploadComposerFiles(files: File[]) {
     if (files.length === 0) return;
@@ -2995,21 +3078,42 @@ export function SessionDetailContent({ id }: { id: string }) {
     setComposerAttachments((previous) => previous.filter((attachment) => attachment !== url));
   }, []);
 
+  const handleAddComposerAttachment = useCallback((url: string) => {
+    setComposerAttachments((previous) => [...previous, url]);
+  }, []);
+
   const sendMutation = useMutation({
-    mutationFn: (vars: SendMutationArgs) => {
+    mutationFn: async (vars: SendMutationArgs) => {
       if (vars.activeThreadId) {
-        return api.sessions.sendThreadMessage(id, vars.activeThreadId, {
+        // Drain a pending agent-switch PATCH first so the send-time PATCH
+        // doesn't clobber the new agent_type. Swallow its rejection — the
+        // agent-switch mutation already surfaces its own toast.
+        if (inFlightAgentUpdateRef.current) {
+          try {
+            await inFlightAgentUpdateRef.current;
+          } catch {
+            // already surfaced by the agent-switch mutation
+          }
+        }
+        if (vars.editableThreadUpdate) {
+          await updateThreadMutation.mutateAsync({
+            threadId: vars.activeThreadId,
+            body: vars.editableThreadUpdate,
+          });
+        }
+        const response = await api.sessions.sendThreadMessage(id, vars.activeThreadId, {
           ...vars.body,
           resolveReviewCommentIDs: vars.resolvedIDs.length > 0 ? vars.resolvedIDs : undefined,
-        })
-          .then((response) => ({ response, resolvedIDs: vars.resolvedIDs }));
+        });
+        return { response, resolvedIDs: vars.resolvedIDs };
       }
 
-      return api.sessions.sendMessage(id, {
+      const response = await api.sessions.sendMessage(id, {
         ...vars.body,
         model: vars.model,
         resolveReviewCommentIDs: vars.resolvedIDs.length > 0 ? vars.resolvedIDs : undefined,
-      }).then((response) => ({ response, resolvedIDs: vars.resolvedIDs }));
+      });
+      return { response, resolvedIDs: vars.resolvedIDs };
     },
     onMutate: (vars) => {
       setComposerUploadError(null);
@@ -3136,6 +3240,7 @@ export function SessionDetailContent({ id }: { id: string }) {
         commands: composerCommands.length > 0 ? composerCommands : undefined,
         planMode: isPlanRequest,
       },
+      editableThreadUpdate: activeThread?.id ? pendingEditableThreadUpdate : undefined,
       model: composerSelectedModel || undefined,
       resolvedIDs,
       optimisticMessage: {
@@ -3172,6 +3277,7 @@ export function SessionDetailContent({ id }: { id: string }) {
     composerSelectedModel,
     filteredFiles,
     id,
+    pendingEditableThreadUpdate,
     session,
     sendMutation,
   ]);
@@ -3301,15 +3407,7 @@ export function SessionDetailContent({ id }: { id: string }) {
   }, [activeFileIndex, visibleFilteredFiles.length]);
 
   const createThreadMutation = useMutation({
-    mutationFn: () => {
-      const agent = AGENTS_BY_KEY[newThreadAgentType] ?? AGENTS[0];
-      const label = newThreadLabel.trim() || `${agent.label} ${threads.length + 1}`;
-      return api.sessions.createThread(id, {
-        agent_type: agent.key,
-        model: newThreadModel || undefined,
-        label,
-      });
-    },
+    mutationFn: (body: { agent_type: string; model?: string; label: string }) => api.sessions.createThread(id, body),
     onSuccess: (response) => {
       queryClient.setQueryData<SingleResponse<SessionDetail>>(["session", id], (existing) => {
         if (!existing) return existing;
@@ -3322,10 +3420,12 @@ export function SessionDetailContent({ id }: { id: string }) {
           },
         };
       });
-      setActiveThreadId(response.data.id);
+      focusComposerAfterThreadCreateRef.current = true;
       setAddThreadOpen(false);
       setNewThreadLabel("");
       setNewThreadModel("");
+      setActiveThreadId(response.data.id);
+      setComposerSelectedModel(getInitialComposerSelectedModel(response.data));
       queryClient.invalidateQueries({ queryKey: ["session", id] });
     },
     onError: (err) => {
@@ -3334,8 +3434,77 @@ export function SessionDetailContent({ id }: { id: string }) {
   });
 
   useEffect(() => {
+    if (!focusComposerAfterThreadCreateRef.current) {
+      return;
+    }
+
+    const rafID = window.requestAnimationFrame(() => {
+      focusComposerAfterThreadCreateRef.current = false;
+      const shouldFocusComposer = session?.agent_type !== "pm_agent"
+        && composerCanSendMessage
+        && composerTextareaRef.current !== null
+        && !composerTextareaRef.current.disabled;
+
+      if (shouldFocusComposer) {
+        composerTextareaRef.current?.focus();
+        return;
+      }
+
+      addTabButtonRef.current?.focus();
+    });
+
+    return () => window.cancelAnimationFrame(rafID);
+  }, [activeThread?.id, composerCanSendMessage, session?.agent_type]);
+
+  useEffect(() => {
     setNewThreadModel("");
   }, [newThreadAgentType]);
+
+  const updateThreadMutation = useMutation({
+    mutationFn: (vars: { threadId: string; body: { agent_type?: string; model?: string | null; label: string } }) =>
+      api.sessions.updateThread(id, vars.threadId, vars.body),
+    onSuccess: (response) => {
+      queryClient.setQueryData<SingleResponse<SessionDetail>>(["session", id], (existing) => {
+        if (!existing) return existing;
+        const existingThreads = existing.data.threads ?? [];
+        return {
+          ...existing,
+          data: {
+            ...existing.data,
+            threads: existingThreads.map((thread) => thread.id === response.data.id ? response.data : thread),
+          },
+        };
+      });
+    },
+    onError: (err) => {
+      toast.error(err instanceof Error ? err.message : "Failed to update tab");
+    },
+  });
+
+  const handleEditableAgentTypeChange = useCallback((nextAgentType: string) => {
+    if (!activeThread || !activeThreadIsEditable || nextAgentType === activeThread.agent_type) {
+      return;
+    }
+    setComposerPlanMode(false);
+    setComposerSelectedModel("");
+    // Only regenerate the label if it matches the autogenerated shape
+    // exactly — `${agent.label} <ordinal>`. A `startsWith` check would
+    // wrongly rename user-customized labels like "Codex deep dive".
+    const currentAgent = AGENTS_BY_KEY[activeThread.agent_type];
+    const autogenSuffix = currentAgent ? activeThread.label.slice(currentAgent.label.length + 1) : "";
+    const looksAutogenerated = !!currentAgent
+      && activeThread.label.startsWith(`${currentAgent.label} `)
+      && /^\d+$/.test(autogenSuffix);
+    const nextLabel = looksAutogenerated ? buildThreadLabelForAgent(nextAgentType) : activeThread.label;
+    const promise = updateThreadMutation.mutateAsync({
+      threadId: activeThread.id,
+      body: {
+        agent_type: nextAgentType,
+        label: nextLabel,
+      },
+    });
+    trackInFlightAgentUpdate(inFlightAgentUpdateRef, promise);
+  }, [activeThread, activeThreadIsEditable, buildThreadLabelForAgent, updateThreadMutation]);
 
   const handleApprovePlan = useCallback(() => {
     if (!composerCanSendMessageRef.current || sendPendingRef.current) return;
@@ -3358,7 +3527,6 @@ export function SessionDetailContent({ id }: { id: string }) {
   }, []);
 
   const changesCount = diffStats?.filesChanged;
-  const showValidationTab = !session?.triggered_by_user_id;
   const detailTabsRef = useRef<HTMLDivElement>(null);
   const [detailTabsOverflow, setDetailTabsOverflow] = useState(false);
 
@@ -3398,7 +3566,6 @@ export function SessionDetailContent({ id }: { id: string }) {
     session?.id,
     session?.pr_creation_error,
     session?.pr_creation_state,
-    showValidationTab,
   ]);
   const isDedicatedMobileReview = centerMode === "review" && isMobileReviewViewport;
 
@@ -3431,7 +3598,7 @@ export function SessionDetailContent({ id }: { id: string }) {
     );
   }
 
-  const status = statusConfig[session.status] || statusConfig.pending;
+  const status = getDisplayStatus(session.status, prStatus);
   const prState = session.pr_creation_state;
   const snapshotState = classifyPRSnapshotState({
     sessionSnapshotKey: session.snapshot_key,
@@ -3571,6 +3738,16 @@ export function SessionDetailContent({ id }: { id: string }) {
     : showDetailPanel
       ? "Hide details"
       : "Show details";
+  const openAddThreadDialog = () => {
+    setNewThreadAgentType(session.agent_type || "codex");
+    setNewThreadModel("");
+    setNewThreadLabel("");
+    setAddThreadOpen(true);
+  };
+  const openMobileRenameDialog = () => {
+    setDraftTitle(currentTitle);
+    setMobileRenameOpen(true);
+  };
   // Right-panel content. Rendered inline on desktop and inside a bottom sheet
   // on mobile — the same JSX in both places so tab state stays consistent.
   const panelTabsEl = (
@@ -3599,9 +3776,6 @@ export function SessionDetailContent({ id }: { id: string }) {
                   </Badge>
                 )}
               </TabsTrigger>
-              {showValidationTab && (
-                <TabsTrigger value="validation">Validation</TabsTrigger>
-              )}
               <TabsTrigger value="preview">Preview</TabsTrigger>
             </TabsList>
           </div>
@@ -3610,7 +3784,7 @@ export function SessionDetailContent({ id }: { id: string }) {
               <>
                 {prStatus === "closed" && (
                   <Badge variant="secondary" className="h-7 px-2 text-xs">
-                    PR closed
+                    {closedPRLabel}
                   </Badge>
                 )}
                 <Button asChild variant="outline" size="sm" className="h-7 text-xs gap-1.5">
@@ -3722,7 +3896,7 @@ export function SessionDetailContent({ id }: { id: string }) {
                     <XCircle className="h-4 w-4" />
                   </div>
                   <div className="min-w-0 space-y-1">
-                    <div className="text-sm font-medium text-foreground">PR closed</div>
+                    <div className="text-sm font-medium text-foreground">{closedPRLabel}</div>
                     <p className="text-xs text-foreground">{closedPRSummary}</p>
                     <p className="text-xs text-muted-foreground">
                       This pull request is no longer active. Create a follow-up revision if you want to ship a new attempt.
@@ -3740,7 +3914,7 @@ export function SessionDetailContent({ id }: { id: string }) {
                     <CheckCircle2 className="h-4 w-4" />
                   </div>
                   <div className="min-w-0 space-y-1">
-                    <div className="text-sm font-medium text-foreground">PR merged</div>
+                    <div className="text-sm font-medium text-foreground">{mergedPRLabel}</div>
                     <p className="text-xs text-foreground">{mergedPRSummary}</p>
                     <p className="text-xs text-muted-foreground">
                       This change has landed. Open a follow-up session if you need to make another revision.
@@ -3750,14 +3924,9 @@ export function SessionDetailContent({ id }: { id: string }) {
               </CardContent>
             </Card>
           )}
-          <OverviewTab session={session} members={members} />
+          <OverviewTab session={session} members={members} prStatus={prStatus} />
         </div>
       </TabsContent>
-      {showValidationTab && (
-        <TabsContent value="validation" className="flex-1 overflow-y-auto scrollbar-hide p-4">
-          <ValidationTab sessionId={id} />
-        </TabsContent>
-      )}
       <TabsContent value="preview" className="flex-1 overflow-y-auto scrollbar-hide p-4">
         <PreviewPanel
           sessionId={id}
@@ -3772,122 +3941,125 @@ export function SessionDetailContent({ id }: { id: string }) {
       {/* Center area: chat or review diff view */}
       <div className="flex-1 min-w-0 flex flex-col">
         {!isDedicatedMobileReview ? (
-        <div className="border-b border-border px-4 py-3 bg-background flex items-center justify-between shrink-0">
-          <div className="min-w-0 flex-1 flex items-center gap-2">
-            <MobileBackButton to="/sessions" label="Back to sessions" />
-            {isEditingTitle ? (
+          <>
+            <MobileSessionTopBar
+              sessionTitle={sessionTitle(session)}
+              detailButtonLabel="Open session details"
+              backTo="/sessions"
+              threads={threads}
+              activeThreadId={activeThread?.id ?? null}
+              onOpenDetails={() => setMobileDetailOpen(true)}
+              onActiveThreadChange={setActiveThreadId}
+              onAddThread={openAddThreadDialog}
+              onRenameSession={openMobileRenameDialog}
+              onCancelThread={(tid) => cancelThreadMutation.mutate(tid)}
+              onForkThread={(tid) => forkThreadMutation.mutate(tid)}
+              onRevertThread={(tid) => revertThreadMutation.mutate(tid)}
+              cancelPendingThreadId={cancelThreadMutation.isPending ? cancelThreadMutation.variables ?? null : null}
+            />
+
+            <div className="hidden md:flex border-b border-border px-4 py-3 bg-background items-center justify-between shrink-0">
               <div className="min-w-0 flex-1 flex items-center gap-2">
-                <Input
-                  aria-label="Session title"
-                  value={draftTitle}
-                  onChange={(e) => setDraftTitle(e.target.value)}
-                  className="h-8 max-w-xl"
-                  disabled={updateSessionMutation.isPending}
-                />
-                <DisabledTooltip disabled={!canSaveTitle} content={saveTitleDisabledReason}>
-                  <Button
-                    size="icon"
-                    variant="ghost"
-                    aria-label="Save title"
-                    disabled={!canSaveTitle}
-                    onClick={() => updateSessionMutation.mutate(trimmedDraftTitle)}
-                  >
-                    <Check className="h-4 w-4" />
-                  </Button>
-                </DisabledTooltip>
-                <DisabledTooltip disabled={updateSessionMutation.isPending} content={titleEditPendingReason}>
-                  <Button
-                    size="icon"
-                    variant="ghost"
-                    aria-label="Cancel title"
-                    disabled={updateSessionMutation.isPending}
-                    onClick={() => {
-                      setDraftTitle(currentTitle);
-                      setIsEditingTitle(false);
-                    }}
-                  >
-                    <X className="h-4 w-4" />
-                  </Button>
-                </DisabledTooltip>
+                {isEditingTitle ? (
+                  <div className="min-w-0 flex-1 flex items-center gap-2">
+                    <Input
+                      aria-label="Session title"
+                      value={draftTitle}
+                      onChange={(e) => setDraftTitle(e.target.value)}
+                      className="h-8 max-w-xl"
+                      disabled={updateSessionMutation.isPending}
+                    />
+                    <DisabledTooltip disabled={!canSaveTitle} content={saveTitleDisabledReason}>
+                      <Button
+                        size="icon"
+                        variant="ghost"
+                        aria-label="Save title"
+                        disabled={!canSaveTitle}
+                        onClick={() => updateSessionMutation.mutate(trimmedDraftTitle)}
+                      >
+                        <Check className="h-4 w-4" />
+                      </Button>
+                    </DisabledTooltip>
+                    <DisabledTooltip disabled={updateSessionMutation.isPending} content={titleEditPendingReason}>
+                      <Button
+                        size="icon"
+                        variant="ghost"
+                        aria-label="Cancel title"
+                        disabled={updateSessionMutation.isPending}
+                        onClick={() => {
+                          setDraftTitle(currentTitle);
+                          setIsEditingTitle(false);
+                        }}
+                      >
+                        <X className="h-4 w-4" />
+                      </Button>
+                    </DisabledTooltip>
+                  </div>
+                ) : (
+                  <>
+                    <h1 className="text-sm font-medium text-foreground truncate">
+                      {sessionTitle(session)}
+                    </h1>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="h-8 w-8 shrink-0"
+                      aria-label="Edit session title"
+                      onClick={() => {
+                        setDraftTitle(currentTitle);
+                        setIsEditingTitle(true);
+                      }}
+                    >
+                      <Pencil className="h-4 w-4" />
+                    </Button>
+                  </>
+                )}
+                <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium shrink-0 ${status.color}`}>
+                  {status.label}
+                </span>
+                {diffStats && (
+                  <DiffStatsBadge
+                    added={diffStats.added}
+                    removed={diffStats.removed}
+                    className="shrink-0"
+                    onClick={() => openReview()}
+                  />
+                )}
+                <LinkedIssueChips session={session} />
               </div>
-            ) : (
-              <>
-                <h1 className="text-sm font-medium text-foreground truncate">
-                  {sessionTitle(session)}
-                </h1>
+              <DisabledTooltip disabled={centerMode === "review" && showDetailPanel} content={detailToggleTitle}>
                 <Button
                   variant="ghost"
                   size="icon"
-                  className="h-8 w-8 shrink-0"
-                  aria-label="Edit session title"
-                  onClick={() => {
-                    setDraftTitle(currentTitle);
-                    setIsEditingTitle(true);
-                  }}
+                  className={cn(centerMode === "review" && showDetailPanel && "opacity-30 cursor-not-allowed", "h-8 w-8 shrink-0")}
+                  disabled={centerMode === "review" && showDetailPanel}
+                  onClick={() => setShowDetailPanel(!showDetailPanel)}
+                  title={detailToggleTitle}
                 >
-                  <Pencil className="h-4 w-4" />
+                  {showDetailPanel ? <PanelRightClose className="h-4 w-4" /> : <PanelRightOpen className="h-4 w-4" />}
                 </Button>
-              </>
-            )}
-            <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium shrink-0 ${status.color}`}>
-              {status.label}
-            </span>
-            {diffStats && (
-              <DiffStatsBadge
-                added={diffStats.added}
-                removed={diffStats.removed}
-                className="shrink-0"
-                onClick={() => openReview()}
-              />
-            )}
-            <LinkedIssueChips session={session} />
-          </div>
-          {/* Desktop toggle: hides/shows the inline right panel. */}
-          <DisabledTooltip disabled={centerMode === "review" && showDetailPanel} content={detailToggleTitle}>
-            <Button
-              variant="ghost"
-              size="icon"
-              className={cn("hidden md:inline-flex h-8 w-8 shrink-0", centerMode === "review" && showDetailPanel && "opacity-30 cursor-not-allowed")}
-              disabled={centerMode === "review" && showDetailPanel}
-              onClick={() => setShowDetailPanel(!showDetailPanel)}
-              title={detailToggleTitle}
-            >
-              {showDetailPanel ? <PanelRightClose className="h-4 w-4" /> : <PanelRightOpen className="h-4 w-4" />}
-            </Button>
-          </DisabledTooltip>
-          {/* Mobile toggle: opens the bottom sheet. */}
-          <Button
-            variant="ghost"
-            size="icon"
-            className="md:hidden h-9 w-9 shrink-0"
-            onClick={() => setMobileDetailOpen(true)}
-            aria-label="Open details"
-            aria-controls="session-detail-sheet"
-            aria-expanded={mobileDetailOpen}
-          >
-            <PanelBottomOpen className="h-5 w-5" />
-          </Button>
-        </div>
+              </DisabledTooltip>
+            </div>
+          </>
         ) : null}
 
         {!isDedicatedMobileReview ? (
+          <div className="hidden md:block">
           <AgentTabStrip
             threads={threads}
             activeThreadId={activeThread?.id ?? null}
             overlapsByThreadId={overlapsByThreadId}
             statusConfig={statusConfig}
             onActiveThreadChange={setActiveThreadId}
-            onAddTab={() => {
-              setNewThreadAgentType(session.agent_type || "codex");
-              setNewThreadModel("");
-              setNewThreadLabel("");
-              setAddThreadOpen(true);
-            }}
+            onAddTab={() => createThreadMutation.mutate(buildDefaultThreadRequest())}
+            addTabPending={createThreadMutation.isPending}
             onCancelThread={(tid) => cancelThreadMutation.mutate(tid)}
             onForkThread={(tid) => forkThreadMutation.mutate(tid)}
             onRevertThread={(tid) => revertThreadMutation.mutate(tid)}
             cancelPendingThreadId={cancelThreadMutation.isPending ? cancelThreadMutation.variables ?? null : null}
+            addTabButtonRef={addTabButtonRef}
           />
+          </div>
         ) : null}
         {/* Center content — either chat or diff review */}
         <div className="flex-1 min-h-0 relative">
@@ -3964,6 +4136,7 @@ export function SessionDetailContent({ id }: { id: string }) {
               isUploading={composerIsUploading}
               onUpload={handleComposerUpload}
               onPasteFiles={uploadComposerFiles}
+              onAddAttachment={handleAddComposerAttachment}
               onRemoveAttachment={handleRemoveComposerAttachment}
               openComments={attachedReviewComments}
               availableModels={composerAvailableModels}
@@ -3986,7 +4159,11 @@ export function SessionDetailContent({ id }: { id: string }) {
               repositoryId={session.repository_id}
               branch={session.target_branch}
               agentType={composerAgentType}
-              targetLabel={activeThread ? composerTargetLabel : undefined}
+              editableAgentType={activeThreadIsEditable ? composerAgentType : undefined}
+              editableAgents={activeThreadIsEditable ? EDITABLE_THREAD_AGENTS : undefined}
+              onEditableAgentTypeChange={activeThreadIsEditable ? handleEditableAgentTypeChange : undefined}
+              agentUpdatePending={updateThreadMutation.isPending}
+              targetLabel={activeThread ? activeThreadLabel : undefined}
             />
           </>
         )}
@@ -4016,7 +4193,7 @@ export function SessionDetailContent({ id }: { id: string }) {
         >
           <SheetTitle className="sr-only">Session details</SheetTitle>
           <SheetDescription className="sr-only">
-            Browse session details, changed files, validation, and preview on mobile.
+            Browse session details, changed files, and preview on mobile.
           </SheetDescription>
           {panelTabsEl}
         </SheetContent>
@@ -4060,6 +4237,7 @@ export function SessionDetailContent({ id }: { id: string }) {
               isUploading={composerIsUploading}
               onUpload={handleComposerUpload}
               onPasteFiles={uploadComposerFiles}
+              onAddAttachment={handleAddComposerAttachment}
               onRemoveAttachment={handleRemoveComposerAttachment}
               openComments={attachedReviewComments}
               availableModels={composerAvailableModels}
@@ -4082,11 +4260,61 @@ export function SessionDetailContent({ id }: { id: string }) {
               repositoryId={session.repository_id}
               branch={session.target_branch}
               agentType={composerAgentType}
-              targetLabel={activeThread ? composerTargetLabel : undefined}
+              editableAgentType={activeThreadIsEditable ? composerAgentType : undefined}
+              editableAgents={activeThreadIsEditable ? EDITABLE_THREAD_AGENTS : undefined}
+              onEditableAgentTypeChange={activeThreadIsEditable ? handleEditableAgentTypeChange : undefined}
+              agentUpdatePending={updateThreadMutation.isPending}
+              targetLabel={activeThread ? activeThreadLabel : undefined}
             />
           </SheetContent>
         </Sheet>
       ) : null}
+      <Dialog open={mobileRenameOpen} onOpenChange={setMobileRenameOpen}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Rename session</DialogTitle>
+            <DialogDescription>
+              Update the session title without crowding the mobile header.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-3">
+            <Label htmlFor="mobile-session-title">Session title</Label>
+            <Input
+              id="mobile-session-title"
+              aria-label="Session title"
+              value={draftTitle}
+              onChange={(e) => setDraftTitle(e.target.value)}
+              disabled={updateSessionMutation.isPending}
+            />
+          </div>
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => {
+                setDraftTitle(currentTitle);
+                setMobileRenameOpen(false);
+              }}
+              disabled={updateSessionMutation.isPending}
+            >
+              Cancel
+            </Button>
+            <DisabledTooltip disabled={!canSaveTitle} content={saveTitleDisabledReason}>
+              <Button
+                type="button"
+                onClick={() => updateSessionMutation.mutate(trimmedDraftTitle, {
+                  onSuccess: () => {
+                    setMobileRenameOpen(false);
+                  },
+                })}
+                disabled={!canSaveTitle}
+              >
+                Save title
+              </Button>
+            </DisabledTooltip>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
       <Dialog open={addThreadOpen} onOpenChange={setAddThreadOpen}>
         <DialogContent>
           <DialogHeader>
@@ -4151,7 +4379,7 @@ export function SessionDetailContent({ id }: { id: string }) {
             </Button>
             <Button
               type="button"
-              onClick={() => createThreadMutation.mutate()}
+              onClick={() => createThreadMutation.mutate(buildDialogThreadRequest())}
               disabled={createThreadMutation.isPending}
             >
               {createThreadMutation.isPending && <Loader2 className="h-4 w-4 animate-spin" />}

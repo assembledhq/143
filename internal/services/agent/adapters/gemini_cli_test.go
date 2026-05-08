@@ -197,7 +197,7 @@ func TestGeminiCLIAdapter_Execute(t *testing.T) {
 
 			provider := newMockProvider()
 			provider.ExecFn = func(ctx context.Context, sb *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
-				if strings.HasPrefix(cmd, "gemini") {
+				if strings.Contains(cmd, "gemini ") {
 					_, _ = stdout.Write([]byte(tt.geminiOutput))
 					return tt.geminiExitCode, nil
 				}
@@ -249,6 +249,8 @@ func TestGeminiCLIAdapter_Execute(t *testing.T) {
 			promptData, exists := provider.Files["/home/sandbox/.143-prompt.md"]
 			require.True(t, exists, "prompt file should have been written")
 			require.Contains(t, string(promptData), "Fix the bug.", "prompt file should contain system prompt")
+			require.NotContains(t, provider.ExecCalls[0], ".143-agent.pid", "gemini adapter must not embed pidfile scaffolding (provider internal)")
+			require.NotContains(t, provider.ExecCalls[0], "& pid=$!", "gemini adapter must not embed shell-shim wrapping (provider internal)")
 		})
 	}
 }
@@ -278,7 +280,7 @@ func TestGeminiCLIAdapter_Execute_ExecError(t *testing.T) {
 
 	provider := newMockProvider()
 	provider.ExecFn = func(ctx context.Context, sb *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
-		if strings.HasPrefix(cmd, "gemini") {
+		if strings.Contains(cmd, "gemini ") {
 			return 0, context.DeadlineExceeded
 		}
 		return 0, nil
@@ -635,7 +637,7 @@ func TestGeminiCLIAdapter_Execute_StreamingOutput(t *testing.T) {
 
 	provider := newMockProvider()
 	provider.ExecFn = func(ctx context.Context, sb *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
-		if strings.HasPrefix(cmd, "gemini") {
+		if strings.Contains(cmd, "gemini ") {
 			_, _ = stdout.Write([]byte(streamOutput))
 			return 0, nil
 		}

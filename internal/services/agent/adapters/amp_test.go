@@ -57,7 +57,8 @@ func TestAmpAdapter_Execute_StreamJSON(t *testing.T) {
 
 	provider := newMockProvider()
 	provider.ExecStreamFn = func(ctx context.Context, sb *agent.Sandbox, cmd string, onLine func(line []byte), stderr io.Writer) (int, error) {
-		require.True(t, strings.HasPrefix(cmd, "amp "), "command should invoke amp CLI, got: %s", cmd)
+		require.NotContains(t, cmd, ".143-agent.pid", "amp adapter must not embed pidfile scaffolding (provider internal)")
+		require.NotContains(t, cmd, "& pid=$!", "amp adapter must not embed shell-shim wrapping (provider internal)")
 		require.Contains(t, cmd, "--stream-json")
 		require.Contains(t, cmd, "--dangerously-allow-all")
 		require.Contains(t, cmd, "-m \"${AMP_MODE:-smart}\"",
@@ -153,6 +154,8 @@ func TestAmpAdapter_Execute_ContinuationUsesUserMessage(t *testing.T) {
 
 	provider := newMockProvider()
 	provider.ExecStreamFn = func(ctx context.Context, sb *agent.Sandbox, cmd string, onLine func(line []byte), stderr io.Writer) (int, error) {
+		require.NotContains(t, cmd, ".143-agent.pid", "amp continuation must not embed pidfile scaffolding (provider internal)")
+		require.NotContains(t, cmd, "& pid=$!", "amp continuation must not embed shell-shim wrapping (provider internal)")
 		return 0, nil
 	}
 	provider.ExecFn = func(ctx context.Context, sb *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {

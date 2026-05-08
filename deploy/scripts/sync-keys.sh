@@ -51,7 +51,7 @@ if [ "$APPLY" = false ]; then
   echo ""
 fi
 
-SSH_OPTS=(-o StrictHostKeyChecking=accept-new -i "$SSH_KEY")
+SSH_OPTS=(-o BatchMode=yes -o StrictHostKeyChecking=accept-new -i "$SSH_KEY")
 
 FAILED=0
 for HOST in "${HOSTS[@]}"; do

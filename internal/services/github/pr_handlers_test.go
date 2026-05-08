@@ -75,7 +75,7 @@ func TestNewPRService(t *testing.T) {
 	t.Parallel()
 
 	logger := zerolog.Nop()
-	svc := NewPRService(nil, nil, nil, nil, nil, nil, nil, nil, logger)
+	svc := NewPRService(nil, nil, nil, nil, nil, nil, nil, logger)
 	require.NotNil(t, svc, "NewPRService should return a non-nil service")
 	require.Equal(t, defaultGitHubAPI, svc.baseURL, "NewPRService should set the default GitHub API base URL")
 	require.Equal(t, defaultAppBaseURL, svc.appBaseURL, "NewPRService should set the default app base URL for session deep-links")
@@ -1437,59 +1437,6 @@ func TestDoGitHubRequest_WithBody(t *testing.T) {
 	require.NoError(t, err, "doGitHubRequest should not return an error for valid POST request")
 	require.Equal(t, "application/json", capturedContentType, "doGitHubRequest should set Content-Type for POST requests with body")
 	require.Contains(t, string(body), "ok", "doGitHubRequest should return response body")
-}
-
-func TestFormatPRBody_WithValidationStore(t *testing.T) {
-	t.Parallel()
-
-	validationMock := newMockPool(t)
-	validationStore := db.NewValidationStore(validationMock)
-
-	logger := zerolog.Nop()
-	svc := &PRService{
-		validations: validationStore,
-		logger:      logger,
-	}
-
-	runID := uuid.New()
-	orgID := uuid.New()
-	summary := "Fixed the null pointer"
-	run := &models.Session{
-		ID:            runID,
-		OrgID:         orgID,
-		AgentType:     "claude-code",
-		ResultSummary: &summary,
-	}
-	issue := &models.Issue{
-		Source:                models.IssueSourceSentry,
-		Severity:              "high",
-		AffectedCustomerCount: 5,
-		OccurrenceCount:       20,
-	}
-
-	// Mock: GetBySessionID returns a validation.
-	validationColumns := []string{
-		"id", "session_id", "org_id", "status",
-		"direction_check", "correctness_check", "quality_check", "security_scan",
-		"regression_test_check", "coverage_delta", "ci_check", "details",
-		"started_at", "completed_at", "created_at",
-	}
-	now := time.Now()
-	validationMock.ExpectQuery("SELECT .+ FROM validations WHERE session_id").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnRows(
-			pgxmock.NewRows(validationColumns).
-				AddRow(uuid.New(), runID, orgID, "completed",
-					"pass", "pass", "pass", "pass",
-					"pass", json.RawMessage(`{}`), "pass", json.RawMessage(`{}`),
-					&now, &now, now),
-		)
-
-	body := svc.formatPRBody(context.Background(), run, issue)
-	require.Contains(t, body, "## Test plan", "PR body should contain Test plan section")
-	require.Contains(t, body, "Regression tests passed", "PR body should contain regression test status")
-	require.Contains(t, body, "Correctness check passed", "PR body should contain correctness check status")
-	require.Contains(t, body, "Security scan passed", "PR body should contain security scan status")
 }
 
 func TestHandlePullRequestEvent_MergedWithUpdateStatusError(t *testing.T) {

@@ -1,7 +1,6 @@
 package adapters
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -217,6 +216,7 @@ type streamingAgentConfig struct {
 	CLIName     string // "amp" / "pi" — used in the exec error message.
 	BuildCmd    func(escapedPromptPath string) string
 	ParseConfig streamParseConfig
+	Profile     agent.AgentRuntimeProfile
 }
 
 // runStreamingAgent implements the shared Execute flow for agents that (a)
@@ -270,30 +270,29 @@ func runStreamingAgent(
 	}
 
 	result := &agent.AgentResult{}
-	var stderr bytes.Buffer
 	var summaryParts []string
 	var lastAssistantContent string
 
-	exitCode, err := provider.ExecStream(ctx, sandbox, cmd, func(line []byte) {
-		if len(bytes.TrimSpace(line)) == 0 {
-			return
-		}
-		parseAgentStreamLine(line, cfg.ParseConfig, result, logCh, &summaryParts, &lastAssistantContent)
-	}, &stderr)
+	runResult, err := runInteractiveCommand(ctx, sandbox, InteractiveRunSpec{
+		Cmd:     cmd,
+		Profile: cfg.Profile,
+		OnStdout: func(line []byte) {
+			parseAgentStreamLine(line, cfg.ParseConfig, result, logCh, &summaryParts, &lastAssistantContent)
+		},
+	})
 	if err != nil {
-		// Surface any buffered stderr alongside the wrap error — otherwise the
-		// caller sees only "exec amp CLI: <exec-level error>" and loses the
-		// CLI's own diagnostics, which are often the actionable part.
-		if stderr.Len() > 0 {
+		if len(runResult.Stderr) > 0 {
 			logCh <- agent.LogEntry{
 				Timestamp: time.Now(),
 				Level:     "error",
-				Message:   stderr.String(),
+				Message:   string(runResult.Stderr),
 			}
 		}
 		return nil, fmt.Errorf("exec %s CLI: %w", cfg.CLIName, err)
 	}
 
+	exitCode := runResult.ExitCode
+	stderr := runResult.Stderr
 	result.ExitCode = exitCode
 	if len(summaryParts) > 0 {
 		result.Summary = strings.Join(summaryParts, "\n")
@@ -301,18 +300,28 @@ func runStreamingAgent(
 		result.Summary = lastAssistantContent
 	}
 
-	if stderr.Len() > 0 {
+	if len(stderr) > 0 {
 		logCh <- agent.LogEntry{
 			Timestamp: time.Now(),
 			Level:     "error",
-			Message:   stderr.String(),
+			Message:   string(stderr),
 		}
 	}
 
 	if exitCode != 0 {
 		result.Error = fmt.Sprintf("%s CLI exited with code %d", cfg.CLIName, exitCode)
-		if stderr.Len() > 0 {
-			result.Error += ": " + stderr.String()
+		errorDetail := strings.TrimSpace(string(stderr))
+		if errorDetail == "" {
+			// TTY transports merge stderr into the visible output stream, so
+			// preserve the last visible line as the best-effort failure detail.
+			if len(summaryParts) > 0 {
+				errorDetail = strings.TrimSpace(summaryParts[len(summaryParts)-1])
+			} else if lastAssistantContent != "" {
+				errorDetail = strings.TrimSpace(lastAssistantContent)
+			}
+		}
+		if errorDetail != "" {
+			result.Error += ": " + errorDetail
 		}
 	}
 
