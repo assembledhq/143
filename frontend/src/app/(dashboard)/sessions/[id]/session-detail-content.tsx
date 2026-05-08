@@ -106,6 +106,10 @@ import {
   resolveInitialSessionAnchor,
   writeStoredSessionScrollPosition,
 } from "@/lib/session-open-position";
+import {
+  readStoredViewedThreadIds,
+  writeStoredViewedThreadIds,
+} from "@/lib/session-thread-views";
 import type { ListResponse, Session, SessionDetail, SessionInputCommand, SessionInputReference, SessionLog, SessionMessage, SessionReviewComment, SessionThread, SessionThreadFileEvent, SessionTimelineEntry, User, CodexAuthStatus, PullRequestHealthResponse, SingleResponse } from "@/lib/types";
 import { AgentTabStrip, computeThreadOverlap } from "./agent-tab-strip";
 import {
@@ -2502,6 +2506,12 @@ export function SessionDetailContent({ id }: { id: string }) {
   const members = membersData?.data ?? [];
   const threads = useMemo(() => session?.threads ?? [], [session?.threads]);
   const [activeThreadId, setActiveThreadId] = useState<string | null>(null);
+  const [viewedThreadIds, setViewedThreadIds] = useState<Set<string>>(() => (
+    typeof window === "undefined" ? new Set() : readStoredViewedThreadIds(window.localStorage, id)
+  ));
+  const [viewedThreadIdsLoadedForSessionId, setViewedThreadIdsLoadedForSessionId] = useState<string | null>(() => (
+    typeof window === "undefined" ? null : id
+  ));
   const activeThread = threads.find((thread) => thread.id === activeThreadId) ?? threads[0];
   const activeThreadIndex = activeThread ? threads.findIndex((thread) => thread.id === activeThread.id) : -1;
   const isActive = session ? !terminalStatuses.has(session.status) : false;
@@ -2527,6 +2537,38 @@ export function SessionDetailContent({ id }: { id: string }) {
   useEffect(() => {
     setOptimisticMessages([]);
   }, [id]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+    setViewedThreadIds(readStoredViewedThreadIds(window.localStorage, id));
+    setViewedThreadIdsLoadedForSessionId(id);
+  }, [id]);
+
+  useEffect(() => {
+    if (!activeThread?.id) {
+      return;
+    }
+    setViewedThreadIds((current) => {
+      if (current.has(activeThread.id)) {
+        return current;
+      }
+      return new Set(current).add(activeThread.id);
+    });
+  }, [activeThread?.id]);
+
+  useEffect(() => {
+    if (typeof window === "undefined" || viewedThreadIdsLoadedForSessionId !== id) {
+      return;
+    }
+    const visibleThreadIDs = new Set(threads.map((thread) => thread.id));
+    writeStoredViewedThreadIds(
+      window.localStorage,
+      id,
+      [...viewedThreadIds].filter((threadId) => visibleThreadIDs.has(threadId)),
+    );
+  }, [id, threads, viewedThreadIds, viewedThreadIdsLoadedForSessionId]);
 
   type SendMutationArgs = {
     activeThreadId?: string;
@@ -4185,6 +4227,7 @@ export function SessionDetailContent({ id }: { id: string }) {
               backTo="/sessions"
               threads={threads}
               activeThreadId={activeThread?.id ?? null}
+              viewedThreadIds={viewedThreadIds}
               onOpenDetails={() => setMobileDetailOpen(true)}
               onActiveThreadChange={setActiveThreadId}
               onAddThread={openAddThreadDialog}
@@ -4192,7 +4235,9 @@ export function SessionDetailContent({ id }: { id: string }) {
               onCancelThread={(tid) => cancelThreadMutation.mutate(tid)}
               onForkThread={(tid) => forkThreadMutation.mutate(tid)}
               onRevertThread={(tid) => revertThreadMutation.mutate(tid)}
+              onArchiveThread={(tid) => archiveThreadMutation.mutate(tid)}
               cancelPendingThreadId={cancelThreadMutation.isPending ? cancelThreadMutation.variables ?? null : null}
+              archivePendingThreadId={archiveThreadMutation.isPending ? archiveThreadMutation.variables ?? null : null}
             />
 
             <div className="hidden md:flex border-b border-border px-4 py-3 bg-background items-center justify-between shrink-0">
@@ -4286,6 +4331,7 @@ export function SessionDetailContent({ id }: { id: string }) {
           <AgentTabStrip
             threads={threads}
             activeThreadId={activeThread?.id ?? null}
+            viewedThreadIds={viewedThreadIds}
             overlapsByThreadId={overlapsByThreadId}
             statusConfig={statusConfig}
             onActiveThreadChange={setActiveThreadId}

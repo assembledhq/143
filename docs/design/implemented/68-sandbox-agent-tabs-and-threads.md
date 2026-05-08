@@ -1,6 +1,6 @@
 # Design: Sandbox Agent Tabs and Threads
 
-> **Status:** Implemented | **Last reviewed:** 2026-05-05
+> **Status:** Implemented | **Last reviewed:** 2026-05-08
 >
 > Phases 0-4 are implemented. Phase 0 data model compatibility and Phase 1
 > single-running-thread tab UX shipped previously. Phase 2 added concurrent
@@ -17,6 +17,12 @@
 > this tab's changes" (enqueues `revert_session_thread`). The legacy
 > single-thread API stays as a compatibility alias; the new endpoints are
 > additive.
+
+Desktop tab-strip polish now also ships as part of the implemented surface:
+the selected tab uses the shared purple underline treatment, tabs expose
+per-tab archive `X` controls instead of a single strip-level close button,
+and the blue dot is reserved for running/pending work or tabs the user has
+not opened yet.
 
 ## Summary
 
