@@ -1,12 +1,13 @@
 "use client";
 
-import { useCallback, useState } from "react";
 import { ResizeHandle } from "@/components/resize-handle";
+import { usePersistedPanelWidth } from "@/hooks/use-persisted-panel-width";
 import { cn } from "@/lib/utils";
 
 const MIN_SIDEBAR = 240;
-const MAX_SIDEBAR = 480;
+const MAX_SIDEBAR = 400;
 const DEFAULT_SIDEBAR = 320;
+const STORAGE_KEY = "143:sidebar-layout-width";
 
 interface SidebarLayoutProps {
   sidebar: React.ReactNode;
@@ -19,11 +20,12 @@ interface SidebarLayoutProps {
 }
 
 export function SidebarLayout({ sidebar, children, mobileShow = "sidebar" }: SidebarLayoutProps) {
-  const [sidebarWidth, setSidebarWidth] = useState(DEFAULT_SIDEBAR);
-
-  const handleSidebarResize = useCallback((delta: number) => {
-    setSidebarWidth((w) => Math.min(MAX_SIDEBAR, Math.max(MIN_SIDEBAR, w + delta)));
-  }, []);
+  const { width: sidebarWidth, resizeBy: handleSidebarResize } = usePersistedPanelWidth({
+    storageKey: STORAGE_KEY,
+    defaultWidth: DEFAULT_SIDEBAR,
+    minWidth: MIN_SIDEBAR,
+    maxWidth: MAX_SIDEBAR,
+  });
 
   const sidebarHiddenOnMobile = mobileShow === "content";
   const contentHiddenOnMobile = mobileShow === "sidebar";
@@ -31,6 +33,7 @@ export function SidebarLayout({ sidebar, children, mobileShow = "sidebar" }: Sid
   return (
     <div className="absolute inset-0 flex overflow-hidden">
       <div
+        data-testid="sidebar-pane"
         style={{ "--sidebar-w": `${sidebarWidth}px` } as React.CSSProperties}
         className={cn(
           "shrink-0 h-full w-full md:w-[var(--sidebar-w)]",
@@ -41,7 +44,7 @@ export function SidebarLayout({ sidebar, children, mobileShow = "sidebar" }: Sid
       </div>
 
       <div className="hidden md:block">
-        <ResizeHandle onResize={handleSidebarResize} />
+        <ResizeHandle onResize={handleSidebarResize} testId="resize-handle" />
       </div>
 
       <div
