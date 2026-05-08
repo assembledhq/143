@@ -146,6 +146,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 
 	// Create handlers
 	healthHandler := handlers.NewHealthHandler(pool)
+	healthHandler.SetDrainingSignal(shutdownCh)
 	if redisClient != nil {
 		healthHandler.SetRedisHealthCheck(redisClient.Healthy)
 	}
