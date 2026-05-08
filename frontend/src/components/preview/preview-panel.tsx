@@ -355,13 +355,15 @@ export function PreviewPanel({
   });
 
   const instance = previewStatus?.instance;
+  const rawServices = previewStatus?.services;
+  const rawInfrastructure = previewStatus?.infrastructure;
   const services = useMemo(
-    () => previewStatus?.services ?? [],
-    [previewStatus?.services],
+    () => (Array.isArray(rawServices) ? rawServices : []),
+    [rawServices],
   );
   const infrastructure = useMemo(
-    () => previewStatus?.infrastructure ?? [],
-    [previewStatus?.infrastructure],
+    () => (Array.isArray(rawInfrastructure) ? rawInfrastructure : []),
+    [rawInfrastructure],
   );
   const status = instance?.status;
   const isActive =
@@ -706,7 +708,11 @@ export function PreviewPanel({
         )}
 
         {/* Console errors badge */}
-        {isReady && <ConsoleBadge sessionId={sessionId} />}
+        {isReady && (
+          <ErrorBoundary fallback={null}>
+            <ConsoleBadge sessionId={sessionId} />
+          </ErrorBoundary>
+        )}
 
         {/* TTL Warning */}
         {instance?.expires_at && isReady && (

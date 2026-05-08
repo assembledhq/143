@@ -451,10 +451,10 @@ export const api = {
       extend: (sessionId: string) => post(`/api/v1/sessions/${sessionId}/preview/extend`),
       services: (sessionId: string) =>
         get<import('./types').ListResponse<import('./preview-types').PreviewService>>(`/api/v1/sessions/${sessionId}/preview/services`)
-          .then(r => r.data),
+          .then(r => r.data ?? []),
       console: (sessionId: string) =>
         get<import('./types').ListResponse<import('./preview-types').ConsoleMessage>>(`/api/v1/sessions/${sessionId}/preview/console`)
-          .then(r => r.data),
+          .then(r => r.data ?? []),
       inspect: (sessionId: string, x: number, y: number) =>
         post<import('./types').SingleResponse<import('./preview-types').ElementInfo>>(`/api/v1/sessions/${sessionId}/preview/inspect`, { x, y })
           .then(r => r.data),

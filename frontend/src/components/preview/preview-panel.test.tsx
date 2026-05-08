@@ -17,6 +17,7 @@ const mockStart = vi.hoisted(() => vi.fn());
 const mockStop = vi.hoisted(() => vi.fn());
 const mockRestart = vi.hoisted(() => vi.fn());
 const mockBootstrap = vi.hoisted(() => vi.fn());
+const mockConsoleBadgeState = vi.hoisted(() => ({ shouldThrow: false }));
 
 vi.mock("@/lib/api", () => ({
   api: {
@@ -33,9 +34,12 @@ vi.mock("@/lib/api", () => ({
 }));
 
 vi.mock("./console-badge", () => ({
-  ConsoleBadge: ({ sessionId }: { sessionId: string }) => (
-    <div data-testid="console-badge">ConsoleBadge:{sessionId}</div>
-  ),
+  ConsoleBadge: ({ sessionId }: { sessionId: string }) => {
+    if (mockConsoleBadgeState.shouldThrow) {
+      throw new Error("console badge exploded");
+    }
+    return <div data-testid="console-badge">ConsoleBadge:{sessionId}</div>;
+  },
 }));
 
 vi.mock("./design-mode-overlay", () => ({
@@ -132,6 +136,7 @@ describe("PreviewPanel component", () => {
     mockStop.mockResolvedValue({});
     mockRestart.mockResolvedValue({});
     mockBootstrap.mockResolvedValue({ token: "tok-1" });
+    mockConsoleBadgeState.shouldThrow = false;
 
     class MockResizeObserver {
       constructor(callback: ResizeObserverCallback) {
@@ -380,6 +385,25 @@ describe("PreviewPanel component", () => {
     await waitFor(() => {
       expect(screen.getByTestId("console-badge")).toBeInTheDocument();
     });
+  });
+
+  it("keeps the preview panel usable if the console badge crashes", async () => {
+    const originalError = console.error;
+    console.error = vi.fn();
+    mockConsoleBadgeState.shouldThrow = true;
+    mockGet.mockResolvedValue(makePreviewStatus({ status: "ready" }));
+
+    try {
+      renderWithProviders(<PreviewPanel {...DEFAULT_PROPS} />);
+
+      await waitFor(() => {
+        expect(screen.getByText("Ready")).toBeInTheDocument();
+      });
+      expect(screen.getByTitle("Preview")).toBeInTheDocument();
+      expect(screen.queryByTestId("console-badge")).not.toBeInTheDocument();
+    } finally {
+      console.error = originalError;
+    }
   });
 
   it("renders TTLWarning when expires_at is set and preview is active", async () => {
