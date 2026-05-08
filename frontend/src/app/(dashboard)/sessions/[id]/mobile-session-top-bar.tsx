@@ -10,6 +10,7 @@ import {
   Plus,
   Square,
   Undo2,
+  X,
 } from "lucide-react";
 
 import { AGENTS_BY_KEY } from "@/lib/agents";
@@ -32,6 +33,7 @@ interface MobileSessionTopBarProps {
   backTo: string;
   threads: SessionThread[];
   activeThreadId: string | null;
+  viewedThreadIds: ReadonlySet<string>;
   onOpenDetails: () => void;
   onActiveThreadChange: (threadId: string) => void;
   onAddThread: () => void;
@@ -39,7 +41,9 @@ interface MobileSessionTopBarProps {
   onCancelThread: (threadId: string) => void;
   onForkThread: (threadId: string) => void;
   onRevertThread: (threadId: string) => void;
+  onArchiveThread: (threadId: string) => void;
   cancelPendingThreadId: string | null;
+  archivePendingThreadId: string | null;
 }
 
 function threadStatusLabel(status: string): string {
@@ -69,29 +73,20 @@ function threadStatusLabel(status: string): string {
   }
 }
 
-function threadStatusDotClass(status: string): string {
-  switch (status) {
-    case "running":
-      return "bg-primary";
-    case "pending":
-      return "bg-muted-foreground";
-    case "awaiting_input":
-      return "bg-amber-500";
-    case "failed":
-      return "bg-destructive";
-    case "completed":
-    case "pr_created":
-      return "bg-emerald-500";
-    case "cancelled":
-    case "skipped":
-      return "bg-muted-foreground/60";
-    default:
-      return "bg-primary/60";
-  }
-}
-
 function isActiveStatus(status: string): boolean {
   return status === "pending" || status === "running" || status === "awaiting_input";
+}
+
+function shouldShowUnreadDot(thread: SessionThread, viewedThreadIds: ReadonlySet<string>): boolean {
+  if (!viewedThreadIds.has(thread.id)) {
+    return true;
+  }
+
+  return thread.status === "pending" || thread.status === "running";
+}
+
+function canArchiveThread(thread: SessionThread, threadCount: number): boolean {
+  return threadCount > 1 && !isActiveStatus(thread.status);
 }
 
 export function MobileSessionTopBar({
@@ -100,6 +95,7 @@ export function MobileSessionTopBar({
   backTo,
   threads,
   activeThreadId,
+  viewedThreadIds,
   onOpenDetails,
   onActiveThreadChange,
   onAddThread,
@@ -107,7 +103,9 @@ export function MobileSessionTopBar({
   onCancelThread,
   onForkThread,
   onRevertThread,
+  onArchiveThread,
   cancelPendingThreadId,
+  archivePendingThreadId,
 }: MobileSessionTopBarProps) {
   const [actionsOpen, setActionsOpen] = useState(false);
 
@@ -179,41 +177,64 @@ export function MobileSessionTopBar({
                     const agent = AGENTS_BY_KEY[thread.agent_type];
                     const statusLabel = threadStatusLabel(thread.status);
                     const isActive = thread.id === activeThreadId;
+                    const showUnreadDot = shouldShowUnreadDot(thread, viewedThreadIds);
+                    const showArchiveButton = canArchiveThread(thread, threads.length);
+                    const closeLabel = `Close ${thread.label}${thread.label.toLowerCase().endsWith(" tab") ? "" : " tab"}`;
                     return (
-                      <Button
-                        key={thread.id}
-                        type="button"
-                        variant="ghost"
-                        className={cn(
-                          "h-auto w-full justify-start rounded-xl border px-3 py-3 text-left",
-                          isActive ? "border-primary/30 bg-primary/5" : "border-border bg-background",
-                        )}
-                        aria-label={`Switch to ${thread.label}`}
-                        onClick={() => {
-                          onActiveThreadChange(thread.id);
-                          setActionsOpen(false);
-                        }}
-                      >
-                        <div className="flex w-full items-start gap-3">
-                          <span
-                            className={cn(
-                              "mt-1.5 h-2 w-2 shrink-0 rounded-full",
-                              threadStatusDotClass(thread.status),
-                              thread.status === "running" && "animate-pulse",
+                      <div key={thread.id} className="flex items-center gap-2">
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          className={cn(
+                            "h-auto flex-1 justify-start rounded-xl border px-3 py-3 text-left",
+                            isActive ? "border-primary/30 bg-primary/5" : "border-border bg-background",
+                          )}
+                          aria-label={`Switch to ${thread.label}`}
+                          onClick={() => {
+                            onActiveThreadChange(thread.id);
+                            setActionsOpen(false);
+                          }}
+                        >
+                          <div className="flex w-full items-start gap-3">
+                            {showUnreadDot ? (
+                              <span
+                                className={cn(
+                                  "mt-1.5 h-2 w-2 shrink-0 rounded-full bg-primary",
+                                  thread.status === "running" && "animate-pulse",
+                                )}
+                                aria-hidden
+                              />
+                            ) : (
+                              <span className="mt-1.5 h-2 w-2 shrink-0" aria-hidden />
                             )}
-                            aria-hidden
-                          />
-                          <div className="min-w-0 flex-1">
-                            <div className="flex items-center gap-2">
-                              <span className="truncate text-sm font-medium text-foreground">{thread.label}</span>
-                              {isActive ? <Badge variant="secondary" className="text-xs">Active</Badge> : null}
+                            <div className="min-w-0 flex-1">
+                              <div className="flex items-center gap-2">
+                                <span className="truncate text-sm font-medium text-foreground">{thread.label}</span>
+                                {isActive ? <Badge variant="secondary" className="text-xs">Active</Badge> : null}
+                              </div>
+                              <p className="truncate text-xs text-muted-foreground">
+                                {(agent?.label ?? thread.agent_type)} · {statusLabel}
+                              </p>
                             </div>
-                            <p className="truncate text-xs text-muted-foreground">
-                              {(agent?.label ?? thread.agent_type)} · {statusLabel}
-                            </p>
                           </div>
-                        </div>
-                      </Button>
+                        </Button>
+                        {showArchiveButton ? (
+                          <Button
+                            type="button"
+                            size="icon"
+                            variant="ghost"
+                            className="h-10 w-10 rounded-xl border border-border bg-background"
+                            aria-label={closeLabel}
+                            disabled={archivePendingThreadId === thread.id}
+                            onClick={() => {
+                              onArchiveThread(thread.id);
+                              setActionsOpen(false);
+                            }}
+                          >
+                            {archivePendingThreadId === thread.id ? <Loader2 className="h-4 w-4 animate-spin" /> : <X className="h-4 w-4" />}
+                          </Button>
+                        ) : null}
+                      </div>
                     );
                   })}
                 </div>

@@ -1,3 +1,4 @@
+import { useMemo, useState } from "react";
 import { describe, expect, it, vi } from "vitest";
 import { screen } from "@testing-library/react";
 
@@ -41,6 +42,7 @@ describe("AgentTabStrip", () => {
       <AgentTabStrip
         threads={[thread]}
         activeThreadId={thread.id}
+        viewedThreadIds={new Set([thread.id])}
         overlapsByThreadId={new Map([[thread.id, ["frontend/src/app.tsx"]]])}
         statusConfig={statusConfig}
         onActiveThreadChange={vi.fn()}
@@ -58,7 +60,7 @@ describe("AgentTabStrip", () => {
     const addButton = screen.getByRole("button", { name: "Add agent tab" });
     const label = screen.getByText("Main tab");
 
-    expect(idleDot).not.toBeNull();
+    expect(idleDot).toBeNull();
     expect(screen.queryByRole("tablist", { name: "Agent tabs" })).not.toBeInTheDocument();
     expect(label).toBeInTheDocument();
     expect(label).toHaveClass("text-xs");
@@ -86,6 +88,7 @@ describe("AgentTabStrip", () => {
       <AgentTabStrip
         threads={[thread]}
         activeThreadId={thread.id}
+        viewedThreadIds={new Set([thread.id])}
         overlapsByThreadId={new Map([[thread.id, ["frontend/src/app.tsx"]]])}
         statusConfig={statusConfig}
         onActiveThreadChange={vi.fn()}
@@ -115,6 +118,7 @@ describe("AgentTabStrip", () => {
       <AgentTabStrip
         threads={threads}
         activeThreadId={threads[0].id}
+        viewedThreadIds={new Set([threads[0].id])}
         overlapsByThreadId={new Map()}
         statusConfig={statusConfig}
         onActiveThreadChange={vi.fn()}
@@ -137,8 +141,10 @@ describe("AgentTabStrip", () => {
     expect(activeTab).toHaveTextContent(/Main tab/i);
     expect(activeTab).not.toHaveTextContent(/Idle/i);
     expect(activeTab).toHaveClass("data-[state=active]:text-primary");
+    expect(activeTab).toHaveClass("data-[state=active]:bg-transparent");
     expect(screen.getByRole("tab", { name: /review/i })).not.toHaveTextContent(/Completed/i);
     expect(screen.getByRole("button", { name: "Close Main tab" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Close Review tab" })).toBeInTheDocument();
   });
 
   it("archives the selected non-running tab from the close affordance beside the strip", async () => {
@@ -153,6 +159,7 @@ describe("AgentTabStrip", () => {
       <AgentTabStrip
         threads={threads}
         activeThreadId={threads[1].id}
+        viewedThreadIds={new Set(threads.map((thread) => thread.id))}
         overlapsByThreadId={new Map()}
         statusConfig={statusConfig}
         onActiveThreadChange={vi.fn()}
@@ -169,5 +176,48 @@ describe("AgentTabStrip", () => {
     await user.click(screen.getByRole("button", { name: "Close Review tab" }));
 
     expect(onArchiveThread).toHaveBeenCalledWith("thread-2");
+  });
+
+  it("keeps a blue dot on unseen tabs until they are selected", async () => {
+    const user = userEvent.setup();
+    const threads = [
+      makeThread({ id: "thread-1", label: "Main tab" }),
+      makeThread({ id: "thread-2", label: "Review" }),
+    ];
+
+    function Harness() {
+      const [activeThreadId, setActiveThreadId] = useState(threads[0].id);
+      const [viewedThreadIds, setViewedThreadIds] = useState(() => new Set([threads[0].id]));
+      const viewed = useMemo(() => viewedThreadIds, [viewedThreadIds]);
+
+      return (
+        <AgentTabStrip
+          threads={threads}
+          activeThreadId={activeThreadId}
+          viewedThreadIds={viewed}
+          overlapsByThreadId={new Map()}
+          statusConfig={statusConfig}
+          onActiveThreadChange={(threadId) => {
+            setActiveThreadId(threadId);
+            setViewedThreadIds((current) => new Set(current).add(threadId));
+          }}
+          onAddTab={vi.fn()}
+          onCancelThread={vi.fn()}
+          onForkThread={vi.fn()}
+          onRevertThread={vi.fn()}
+          onArchiveThread={vi.fn()}
+          cancelPendingThreadId={null}
+          archivePendingThreadId={null}
+        />
+      );
+    }
+
+    const { container } = renderWithProviders(<Harness />);
+
+    expect(container.querySelectorAll(".bg-primary").length).toBe(1);
+
+    await user.click(screen.getByRole("tab", { name: "Review" }));
+
+    expect(container.querySelector(".bg-primary")).toBeNull();
   });
 });

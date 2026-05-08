@@ -46,6 +46,7 @@ describe("MobileSessionTopBar", () => {
           makeThread({ id: "thread-2", label: "Review", status: "running", agent_type: "claude_code" }),
         ]}
         activeThreadId="thread-1"
+        viewedThreadIds={new Set(["thread-1"])}
         onOpenDetails={vi.fn()}
         onActiveThreadChange={vi.fn()}
         onAddThread={vi.fn()}
@@ -53,7 +54,9 @@ describe("MobileSessionTopBar", () => {
         onCancelThread={vi.fn()}
         onForkThread={vi.fn()}
         onRevertThread={vi.fn()}
+        onArchiveThread={vi.fn()}
         cancelPendingThreadId={null}
+        archivePendingThreadId={null}
       />,
     );
 
@@ -91,6 +94,7 @@ describe("MobileSessionTopBar", () => {
           makeThread({ id: "thread-2", label: "Review", status: "awaiting_input", agent_type: "claude_code", diff: "" }),
         ]}
         activeThreadId="thread-1"
+        viewedThreadIds={new Set(["thread-1"])}
         onOpenDetails={vi.fn()}
         onActiveThreadChange={onActiveThreadChange}
         onAddThread={onAddThread}
@@ -98,7 +102,9 @@ describe("MobileSessionTopBar", () => {
         onCancelThread={onCancelThread}
         onForkThread={onForkThread}
         onRevertThread={onRevertThread}
+        onArchiveThread={vi.fn()}
         cancelPendingThreadId={null}
+        archivePendingThreadId={null}
       />,
     );
 
@@ -133,5 +139,45 @@ describe("MobileSessionTopBar", () => {
     expect(onCancelThread).toHaveBeenCalledWith("thread-1");
     expect(onForkThread).toHaveBeenCalledWith("thread-1");
     expect(onRevertThread).toHaveBeenCalledWith("thread-1");
+  });
+
+  it("shows a blue dot only for unseen mobile threads and exposes close actions for closable tabs", async () => {
+    const user = userEvent.setup();
+    const onArchiveThread = vi.fn();
+
+    renderWithProviders(
+      <MobileSessionTopBar
+        sessionTitle="Mobile session title"
+        detailButtonLabel="Open session details"
+        backTo="/sessions"
+        threads={[
+          makeThread({ id: "thread-1", label: "Main tab", status: "completed" }),
+          makeThread({ id: "thread-2", label: "Review", status: "completed", agent_type: "claude_code" }),
+        ]}
+        activeThreadId="thread-1"
+        viewedThreadIds={new Set(["thread-1"])}
+        onOpenDetails={vi.fn()}
+        onActiveThreadChange={vi.fn()}
+        onAddThread={vi.fn()}
+        onRenameSession={vi.fn()}
+        onCancelThread={vi.fn()}
+        onForkThread={vi.fn()}
+        onRevertThread={vi.fn()}
+        onArchiveThread={onArchiveThread}
+        cancelPendingThreadId={null}
+        archivePendingThreadId={null}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Open session actions" }));
+
+    const actionsSheet = await screen.findByRole("dialog", { name: "Session actions" });
+    expect(within(actionsSheet).getByRole("button", { name: "Close Main tab" })).toBeInTheDocument();
+    expect(within(actionsSheet).getByRole("button", { name: "Close Review tab" })).toBeInTheDocument();
+    expect(actionsSheet.querySelectorAll(".bg-primary").length).toBe(1);
+
+    await user.click(within(actionsSheet).getByRole("button", { name: "Close Review tab" }));
+
+    expect(onArchiveThread).toHaveBeenCalledWith("thread-2");
   });
 });
