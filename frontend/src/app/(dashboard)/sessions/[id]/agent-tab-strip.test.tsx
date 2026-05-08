@@ -56,13 +56,16 @@ describe("AgentTabStrip", () => {
 
     const idleDot = container.querySelector(".bg-primary");
     const addButton = screen.getByRole("button", { name: "Add agent tab" });
+    const label = screen.getByText("Main tab");
 
     expect(idleDot).not.toBeNull();
     expect(screen.queryByRole("tablist", { name: "Agent tabs" })).not.toBeInTheDocument();
-    expect(screen.getByText("Main tab")).toBeInTheDocument();
+    expect(label).toBeInTheDocument();
+    expect(label).toHaveClass("text-xs");
+    expect(label).not.toHaveClass("text-sm");
     expect(screen.getByRole("group", { name: "Codex Idle" })).toBeInTheDocument();
 
-    await user.hover(screen.getByText("Main tab"));
+    await user.hover(label);
 
     expect(await screen.findByRole("tooltip")).toHaveTextContent("Idle");
     expect(screen.getByRole("tooltip")).toHaveTextContent("2 messages queued");
