@@ -778,6 +778,31 @@ func TestCreateAssistantMessage_DoesNotPersistUnavailableTokenUsage(t *testing.T
 	require.Nil(t, messages.messages[0].TokenUsage, "assistant message should leave token usage nil when the provider reported no token payload")
 }
 
+func TestBuildRunResult_DoesNotPersistUnavailableTokenUsage(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.MustParse("12121212-3434-5656-7878-909090909090")
+	runID := uuid.MustParse("abababab-cdcd-efef-0101-121212121212")
+	orch := &Orchestrator{
+		logger: zerolog.Nop(),
+	}
+	run := &models.Session{
+		ID:    runID,
+		OrgID: orgID,
+	}
+
+	result := orch.buildRunResult(context.Background(), run, nil, &AgentResult{
+		Summary: "No usage reported",
+		TokenUsage: FinalizeTokenUsage(TokenUsage{}, TokenUsageHint{
+			AgentType:      models.AgentTypeCodex,
+			EffectiveModel: models.CodexModelGPT54,
+			BillingMode:    TokenBillingModeSubscription,
+		}),
+	})
+
+	require.Nil(t, result.TokenUsage, "buildRunResult should leave token usage nil when the provider reported no token payload")
+}
+
 func TestStreamLogs_CarriesThreadID(t *testing.T) {
 	t.Parallel()
 

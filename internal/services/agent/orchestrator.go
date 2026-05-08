@@ -4044,10 +4044,14 @@ func (o *Orchestrator) billingModeForAgent(
 
 // buildRunResult converts an AgentResult into the DB update struct.
 func (o *Orchestrator) buildRunResult(ctx context.Context, run *models.Session, sandbox *Sandbox, result *AgentResult) *models.SessionResult {
-	tokenUsage, err := json.Marshal(result.TokenUsage)
-	if err != nil {
-		o.logger.Warn().Err(err).Msg("failed to marshal token usage")
-		tokenUsage = nil
+	var tokenUsage []byte
+	if HasPersistableTokenUsage(result.TokenUsage) {
+		marshaled, err := json.Marshal(result.TokenUsage)
+		if err != nil {
+			o.logger.Warn().Err(err).Msg("failed to marshal token usage")
+		} else {
+			tokenUsage = marshaled
+		}
 	}
 
 	headSHA := o.captureCurrentHeadSHA(ctx, sandbox)
