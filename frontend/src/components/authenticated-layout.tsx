@@ -167,11 +167,11 @@ function SidebarBody({
           <SheetClose asChild>
             <Button
               variant="ghost"
-              size="icon"
-              className="h-11 w-11 rounded-md text-muted-foreground hover:text-foreground hover:bg-sidebar-accent"
+              size="icon-sm"
+              className="h-9 w-9 rounded-md text-muted-foreground hover:bg-sidebar-accent hover:text-foreground"
               aria-label="Close navigation menu"
             >
-              <X className="h-5 w-5" />
+              <X className="h-4 w-4" />
             </Button>
           </SheetClose>
         ) : (

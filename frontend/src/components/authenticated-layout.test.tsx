@@ -430,6 +430,25 @@ describe("AuthenticatedLayout", () => {
       });
     });
 
+    it("uses a compact close control in the mobile drawer header", async () => {
+      const user = userEvent.setup();
+
+      renderWithProviders(
+        <AuthenticatedLayout>
+          <div>content</div>
+        </AuthenticatedLayout>
+      );
+
+      await user.click(screen.getByRole("button", { name: "Open navigation menu" }));
+      await screen.findByRole("dialog");
+
+      const closeButton = screen.getByRole("button", { name: "Close navigation menu" });
+      expect(closeButton).toHaveClass("h-9", "w-9");
+
+      const closeIcon = closeButton.querySelector("svg");
+      expect(closeIcon).toHaveClass("h-4", "w-4");
+    });
+
     it("does not close the drawer on modifier-clicks (cmd/ctrl/middle)", async () => {
       const user = userEvent.setup();
 
