@@ -3757,9 +3757,7 @@ export function SessionDetailContent({ id }: { id: string }) {
       open: isMobileReviewViewport ? mobileDetailOpen : showDetailPanel,
       required: centerMode === "review" && showDetailPanel,
       activeTab: detailTab,
-      availableTabs: showValidationTab
-        ? (["overview", "changes", "validation", "preview"] as const)
-        : (["overview", "changes", "preview"] as const),
+      availableTabs: ["overview", "changes", "preview"] as const,
       onToggle: toggleDetailsFromKeyboard,
       onClose: closeDetailsFromKeyboard,
       onTabChange: handleDetailTabClick,
@@ -4387,8 +4385,9 @@ export function SessionDetailContent({ id }: { id: string }) {
         <div className="hidden md:flex">
           <ResizeHandle onResize={handleDetailResize} />
           <div
+            data-testid="session-detail-panel"
             style={{ width: detailWidth }}
-            className="border-l border-border bg-muted/20 flex flex-col shrink-0 overflow-hidden"
+            className="relative z-10 border-l border-border bg-background flex flex-col shrink-0 overflow-hidden"
           >
             {panelTabsEl}
           </div>

@@ -288,6 +288,17 @@ describe('SessionDetailPage', () => {
     expect(screen.getAllByText('Completed').length).toBeGreaterThanOrEqual(1);
   });
 
+  it('renders the desktop detail panel as an opaque surface above neighboring content', async () => {
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+    await screen.findAllByText('Fixed TypeError by adding null check');
+
+    const detailPanel = screen.getByTestId('session-detail-panel');
+
+    expect(detailPanel).toHaveClass('relative');
+    expect(detailPanel).toHaveClass('z-10');
+    expect(detailPanel).toHaveClass('bg-background');
+  });
+
   it('shows detail panel tabs for Overview and Changes', async () => {
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
     await screen.findAllByText('Fixed TypeError by adding null check');
