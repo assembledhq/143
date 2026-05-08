@@ -102,8 +102,12 @@ import { applyPlanModePrefix, buildTimeline, flattenTimelineResponse, sortTimeli
 import { parseDiffStats, type DiffFile } from "@/lib/diff-parser";
 import { formatReviewMessage } from "@/lib/format-review-message";
 import {
+  readStoredSessionActiveThread,
   readStoredSessionScrollPosition,
+  resolveInitialSessionThreadId,
   resolveInitialSessionAnchor,
+  type SessionScrollViewerScope,
+  writeStoredSessionActiveThread,
   writeStoredSessionScrollPosition,
 } from "@/lib/session-open-position";
 import {
@@ -824,6 +828,8 @@ function SessionComposer({
   onEditableAgentTypeChange,
   agentUpdatePending,
   targetLabel,
+  unavailableReason,
+  placeholderOverride,
 }: {
   message: string;
   onMessageChange: (value: string) => void;
@@ -863,6 +869,8 @@ function SessionComposer({
   onEditableAgentTypeChange?: (nextAgentType: string) => void;
   agentUpdatePending: boolean;
   targetLabel?: string;
+  unavailableReason?: string;
+  placeholderOverride?: string;
 }) {
   const isMobile = useMediaQuery("(max-width: 767px)");
   const [isTextareaFocused, setIsTextareaFocused] = useState(false);
@@ -1122,13 +1130,18 @@ function SessionComposer({
 
   const hasContent = message.trim() || attachments.length > 0 || openComments.length > 0;
   const sendDisabled = hasInvalidCommands || !hasContent || !canSendMessage || sendPending;
-  const inactiveSessionMessage = isSnapshotExpired
-    ? "Session environment has expired and can no longer be continued."
-    : "Session is not active.";
+  const defaultUnavailablePlaceholder = isSnapshotExpired
+    ? "Session environment has expired and can no longer be continued"
+    : "Session is not active";
+  const unavailableMessage = unavailableReason ?? (
+    isSnapshotExpired
+      ? "Session environment has expired and can no longer be continued."
+      : "Session is not active."
+  );
   const attachDisabledReason = isUploading
     ? "Uploading attachments..."
     : !canSendMessage
-      ? inactiveSessionMessage
+      ? unavailableMessage
       : undefined;
   const cancelDisabledReason = cancelPending ? "Cancelling session..." : undefined;
   const sendDisabledReason = hasInvalidCommands
@@ -1136,7 +1149,7 @@ function SessionComposer({
     : !hasContent
       ? "Add a message, attachment, or review comment before sending."
       : !canSendMessage
-        ? inactiveSessionMessage
+        ? unavailableMessage
           : sendPending
             ? (planMode ? "Sending plan request..." : "Sending message...")
             : undefined;
@@ -1380,15 +1393,15 @@ function SessionComposer({
             onKeyUp={(e) => setCaretPosition(e.currentTarget.selectionStart ?? message.length)}
             onSelect={(e) => setCaretPosition(e.currentTarget.selectionStart ?? message.length)}
             placeholder={
-              isSnapshotExpired
-                ? "Session environment has expired and can no longer be continued"
-                : !canSendMessage
-                  ? "Session is not active"
+              placeholderOverride ?? (
+                !canSendMessage
+                  ? unavailableReason ?? defaultUnavailablePlaceholder
                   : planMode
                     ? "Describe what you want to plan..."
                     : targetLabel
                       ? `Send a message to ${targetLabel}...`
                       : "Send a follow-up message..."
+              )
             }
             disabled={!canSendMessage || sendPending}
             rows={isMobile ? 1 : undefined}
@@ -1806,6 +1819,7 @@ type ChatPanelProps = {
   sessionId: string;
   activeThread?: SessionThread;
   isActive: boolean;
+  viewerScope: SessionScrollViewerScope | null;
   optimisticMessages: SessionMessage[];
   onDiffClick?: () => void;
   onApprovePlan?: () => void;
@@ -1821,6 +1835,7 @@ function ChatPanel({
   sessionId,
   activeThread,
   isActive,
+  viewerScope,
   optimisticMessages,
   onDiffClick,
   onApprovePlan,
@@ -1829,7 +1844,6 @@ function ChatPanel({
   onRegisterKeyboardControls,
 }: ChatPanelProps) {
   const queryClient = useQueryClient();
-  const { user } = useAuth();
   const [streamedLogs, setStreamedLogs] = useState<SessionLog[]>([]);
   const scrollRef = useRef<HTMLDivElement>(null);
   const isNearBottomRef = useRef(false);
@@ -1841,10 +1855,6 @@ function ChatPanel({
   const apiBase = process.env.NEXT_PUBLIC_API_URL || "";
   const [showJumpToLatest, setShowJumpToLatest] = useState(false);
   const isDocumentVisible = useDocumentVisible();
-  const viewerScope = useMemo(
-    () => (user ? { userId: user.id, orgId: user.org_id } : null),
-    [user],
-  );
 
   const activeThreadId = activeThread?.id;
   const isRunning = activeThread ? activeThread.status === "running" : session.status === "running";
@@ -2344,6 +2354,8 @@ function sameDiffStats(
 function areChatPanelPropsEqual(previous: ChatPanelProps, next: ChatPanelProps): boolean {
   return previous.sessionId === next.sessionId &&
     previous.isActive === next.isActive &&
+    previous.viewerScope?.userId === next.viewerScope?.userId &&
+    previous.viewerScope?.orgId === next.viewerScope?.orgId &&
     previous.optimisticMessages === next.optimisticMessages &&
     previous.onDiffClick === next.onDiffClick &&
     previous.onApprovePlan === next.onApprovePlan &&
@@ -2382,6 +2394,7 @@ const TRANSCRIPT_PAGE_VIEWPORT_RATIO = 0.85;
 
 export function SessionDetailContent({ id }: { id: string }) {
   const router = useRouter();
+  const { user, isLoading: isAuthLoading } = useAuth();
   const terminalStatuses = new Set(["completed", "pr_created", "failed", "cancelled", "skipped"]);
   const [reviewParam, setReviewParam] = useQueryState("review");
   const [previewParam, setPreviewParam] = useQueryState("preview");
@@ -2502,17 +2515,22 @@ export function SessionDetailContent({ id }: { id: string }) {
     queryFn: () => api.team.listMembers(),
   });
 
+  const viewerScope = useMemo<SessionScrollViewerScope | null>(
+    () => (user ? { userId: user.id, orgId: getActiveOrgId() ?? user.org_id } : null),
+    [user],
+  );
   const session = data?.data;
   const members = membersData?.data ?? [];
   const threads = useMemo(() => session?.threads ?? [], [session?.threads]);
   const [activeThreadId, setActiveThreadId] = useState<string | null>(null);
+  const [hasResolvedInitialThreadSelection, setHasResolvedInitialThreadSelection] = useState(false);
   const [viewedThreadIds, setViewedThreadIds] = useState<Set<string>>(() => (
     typeof window === "undefined" ? new Set() : readStoredViewedThreadIds(window.localStorage, id)
   ));
   const [viewedThreadIdsLoadedForSessionId, setViewedThreadIdsLoadedForSessionId] = useState<string | null>(() => (
     typeof window === "undefined" ? null : id
   ));
-  const activeThread = threads.find((thread) => thread.id === activeThreadId) ?? threads[0];
+  const activeThread = threads.find((thread) => thread.id === activeThreadId) ?? null;
   const activeThreadIndex = activeThread ? threads.findIndex((thread) => thread.id === activeThread.id) : -1;
   const isActive = session ? !terminalStatuses.has(session.status) : false;
   const isRunning = session?.status === "running";
@@ -2523,16 +2541,56 @@ export function SessionDetailContent({ id }: { id: string }) {
   const [optimisticMessages, setOptimisticMessages] = useState<PendingFollowUpMessage[]>([]);
 
   useEffect(() => {
+    setHasResolvedInitialThreadSelection(false);
+    setActiveThreadId(null);
+  }, [id]);
+
+  useEffect(() => {
+    if (!session) {
+      return;
+    }
+
     if (threads.length === 0) {
       if (activeThreadId !== null) {
         setActiveThreadId(null);
       }
+      if (!hasResolvedInitialThreadSelection) {
+        setHasResolvedInitialThreadSelection(true);
+      }
       return;
     }
+
+    if (!hasResolvedInitialThreadSelection) {
+      if (!viewerScope || typeof window === "undefined") {
+        if (isAuthLoading) {
+          return;
+        }
+        setHasResolvedInitialThreadSelection(true);
+        setActiveThreadId(threads[0].id);
+        return;
+      }
+
+      const storedThreadId = readStoredSessionActiveThread(window.localStorage, id, viewerScope);
+      const nextThreadId = resolveInitialSessionThreadId(threads, storedThreadId);
+      setHasResolvedInitialThreadSelection(true);
+      if (activeThreadId !== nextThreadId) {
+        setActiveThreadId(nextThreadId);
+      }
+      return;
+    }
+
     if (!activeThreadId || !threads.some((thread) => thread.id === activeThreadId)) {
       setActiveThreadId(threads[0].id);
     }
-  }, [activeThreadId, threads]);
+  }, [activeThreadId, hasResolvedInitialThreadSelection, id, isAuthLoading, session, threads, viewerScope]);
+
+  useEffect(() => {
+    if (!hasResolvedInitialThreadSelection || !viewerScope || !activeThreadId || typeof window === "undefined") {
+      return;
+    }
+
+    writeStoredSessionActiveThread(window.localStorage, id, viewerScope, activeThreadId);
+  }, [activeThreadId, hasResolvedInitialThreadSelection, id, viewerScope]);
 
   useEffect(() => {
     setOptimisticMessages([]);
@@ -3131,14 +3189,18 @@ export function SessionDetailContent({ id }: { id: string }) {
     () => comments.filter((comment) => !comment.resolved).slice(0, MAX_RESOLVE_REVIEW_COMMENTS_PER_MESSAGE),
     [comments],
   );
+  const isRestoringActiveThread = threads.length > 0 && activeThread === null;
   // Composer gating: messages may be sent at any point while the session or
   // thread is running. The backend queues mid-turn sends and the orchestrator
   // drains the queue once the in-flight turn completes. Pending/skipped at
   // the session level and a destroyed sandbox still block — those are
   // genuinely unrecoverable, not just busy.
-  const composerCanSendMessage = session?.status !== "skipped" &&
+  const composerCanSendMessage = !isRestoringActiveThread &&
+    session?.status !== "skipped" &&
     session?.status !== "pending" &&
     session?.sandbox_state !== "destroyed";
+  const composerUnavailableReason = isRestoringActiveThread ? "Thread is still loading." : undefined;
+  const composerPlaceholderOverride = isRestoringActiveThread ? "Loading thread..." : undefined;
   const composerIsRunning = activeThread ? activeThread.status === "running" : session?.status === "running";
   const composerIsSnapshotExpired = session?.sandbox_state === "destroyed";
   const composerAgentType = activeThread?.agent_type ?? session?.agent_type ?? "codex";
@@ -3178,7 +3240,7 @@ export function SessionDetailContent({ id }: { id: string }) {
     };
   }, [newThreadAgentType, newThreadLabel, newThreadModel, threads.length]);
   const pendingEditableThreadUpdate = useMemo(() => {
-    return getPendingEditableThreadUpdate(activeThread, activeThreadIsEditable, composerSelectedModel);
+    return getPendingEditableThreadUpdate(activeThread ?? undefined, activeThreadIsEditable, composerSelectedModel);
   }, [activeThread, activeThreadIsEditable, composerSelectedModel]);
 
   async function uploadComposerFiles(files: File[]) {
@@ -3356,6 +3418,7 @@ export function SessionDetailContent({ id }: { id: string }) {
 
   const queueSend = useCallback((opts: { planMode?: boolean; overrideMessage?: string } = {}) => {
     if (!session) return;
+    if (threads.length > 0 && !activeThread) return;
 
     const draftMessage = opts.overrideMessage ?? composerMessage;
     const userFacingMessage = attachedReviewComments.length > 0
@@ -3416,6 +3479,7 @@ export function SessionDetailContent({ id }: { id: string }) {
     pendingEditableThreadUpdate,
     session,
     sendMutation,
+    threads.length,
   ]);
   const queueSendRef = useRef(queueSend);
   const composerCanSendMessageRef = useRef(composerCanSendMessage);
@@ -4357,19 +4421,29 @@ export function SessionDetailContent({ id }: { id: string }) {
         <div className="flex-1 min-h-0 relative">
           {/* Chat panel — always mounted to preserve scroll, SSE connections, etc. */}
           <div className={cn("h-full", centerMode !== "chat" && "hidden")}>
-            <MemoizedChatPanel
-              key={activeThread ? `${id}:${activeThread.id}` : id}
-              session={session}
-              sessionId={id}
-              activeThread={activeThread}
-              isActive={isActive}
-              optimisticMessages={optimisticMessages}
-              onDiffClick={handleChatDiffClick}
-              onApprovePlan={handleApprovePlan}
-              onAdjustPlan={handleAdjustPlan}
-              onRegisterScrollToLiveEdge={registerChatPanelScrollToLiveEdge}
-              onRegisterKeyboardControls={registerChatPanelKeyboardControls}
-            />
+            {threads.length > 0 && activeThread === null ? (
+              <div className="flex h-full items-center justify-center">
+                <div className="text-center space-y-2">
+                  <Loader2 className="h-5 w-5 animate-spin text-muted-foreground/40 mx-auto" />
+                  <p className="text-xs text-muted-foreground">Loading thread...</p>
+                </div>
+              </div>
+            ) : (
+              <MemoizedChatPanel
+                key={activeThread ? `${id}:${activeThread.id}` : id}
+                session={session}
+                sessionId={id}
+                activeThread={activeThread ?? undefined}
+                isActive={isActive}
+                viewerScope={viewerScope}
+                optimisticMessages={optimisticMessages}
+                onDiffClick={handleChatDiffClick}
+                onApprovePlan={handleApprovePlan}
+                onAdjustPlan={handleAdjustPlan}
+                onRegisterScrollToLiveEdge={registerChatPanelScrollToLiveEdge}
+                onRegisterKeyboardControls={registerChatPanelKeyboardControls}
+              />
+            )}
           </div>
           {/* Review diff view — mounted only when active */}
           {centerMode === "review" && (
@@ -4457,6 +4531,8 @@ export function SessionDetailContent({ id }: { id: string }) {
               onEditableAgentTypeChange={activeThreadIsEditable ? handleEditableAgentTypeChange : undefined}
               agentUpdatePending={updateThreadMutation.isPending}
               targetLabel={activeThread ? activeThreadLabel : undefined}
+              unavailableReason={composerUnavailableReason}
+              placeholderOverride={composerPlaceholderOverride}
             />
           </>
         )}
@@ -4559,6 +4635,8 @@ export function SessionDetailContent({ id }: { id: string }) {
               onEditableAgentTypeChange={activeThreadIsEditable ? handleEditableAgentTypeChange : undefined}
               agentUpdatePending={updateThreadMutation.isPending}
               targetLabel={activeThread ? activeThreadLabel : undefined}
+              unavailableReason={composerUnavailableReason}
+              placeholderOverride={composerPlaceholderOverride}
             />
           </SheetContent>
         </Sheet>
