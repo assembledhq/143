@@ -306,13 +306,24 @@ func (h *IntegrationHandler) ListIntegrations(w http.ResponseWriter, r *http.Req
 	if integrations == nil {
 		integrations = []models.Integration{}
 	}
+	activeProviders := activeIntegrationProviders(integrations)
 	for i := range integrations {
-		h.deriveIntegrationStatus(r.Context(), &integrations[i])
+		h.deriveIntegrationStatus(r.Context(), &integrations[i], activeProviders)
 	}
 	writeJSON(w, http.StatusOK, models.ListResponse[models.Integration]{Data: integrations})
 }
 
-func (h *IntegrationHandler) deriveIntegrationStatus(ctx context.Context, integration *models.Integration) {
+func activeIntegrationProviders(integrations []models.Integration) map[models.IntegrationProvider]bool {
+	active := make(map[models.IntegrationProvider]bool)
+	for _, integration := range integrations {
+		if integration.Status == models.IntegrationStatusActive {
+			active[integration.Provider] = true
+		}
+	}
+	return active
+}
+
+func (h *IntegrationHandler) deriveIntegrationStatus(ctx context.Context, integration *models.Integration, activeProviders map[models.IntegrationProvider]bool) {
 	if integration == nil {
 		return
 	}
@@ -322,7 +333,12 @@ func (h *IntegrationHandler) deriveIntegrationStatus(ctx context.Context, integr
 	// that adopts the convention later. Read-only — never echo the rest of
 	// config (which holds tokens).
 	if authErr := readAuthErrorFromConfig(integration.Config); authErr != nil {
-		integration.AuthError = authErr
+		// Historical reconnect bugs could leave an errored duplicate row
+		// beside the active provider row. When an active row exists, the
+		// stale duplicate must not keep rendering a reconnect banner.
+		if integration.Status == models.IntegrationStatusActive || !activeProviders[integration.Provider] {
+			integration.AuthError = authErr
+		}
 	}
 
 	if integration.Provider != models.IntegrationProviderGitHub {
