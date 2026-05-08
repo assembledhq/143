@@ -132,6 +132,7 @@ import { AgentBadge } from "@/components/agent-badge";
 import { PendingAttachmentStrip } from "@/components/pending-attachment-strip";
 import { PRHealthBanner, prHealthAllowsMerge } from "@/components/pr-health-banner";
 import { SessionKeyboardHelpOverlay } from "@/components/session-keyboard-help-overlay";
+import { ErrorBoundary } from "@/components/error-boundary";
 import { useAuth } from "@/hooks/use-auth";
 import { useMediaQuery } from "@/hooks/use-media-query";
 import { useDocumentVisible } from "@/hooks/use-document-visible";
@@ -169,6 +170,24 @@ const PreviewPanel = dynamic(
 const PREVIEW_ORIGIN_TEMPLATE =
   process.env.NEXT_PUBLIC_PREVIEW_ORIGIN_TEMPLATE ||
   "http://{id}.preview.localhost:9090";
+
+function PreviewTabErrorFallback() {
+  return (
+    <Card className="border-destructive/20 bg-destructive/5">
+      <CardContent className="flex items-start gap-3 p-4">
+        <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-destructive" />
+        <div className="min-w-0 space-y-1">
+          <p className="text-sm font-medium text-destructive">
+            Preview panel could not be rendered
+          </p>
+          <p className="text-xs text-muted-foreground">
+            The rest of the session is still available. Refresh the page to try the preview again.
+          </p>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
 
 const FAILURE_CATEGORY_CODEX_AUTH = "codex_auth_expired";
 const PR_ERROR_TOAST_DURATION_MS = 10_000;
@@ -4392,10 +4411,12 @@ export function SessionDetailContent({ id }: { id: string }) {
         </div>
       </TabsContent>
       <TabsContent value="preview" className="flex-1 overflow-y-auto scrollbar-hide p-4">
-        <PreviewPanel
-          sessionId={id}
-          previewOriginTemplate={PREVIEW_ORIGIN_TEMPLATE}
-        />
+        <ErrorBoundary fallback={<PreviewTabErrorFallback />}>
+          <PreviewPanel
+            sessionId={id}
+            previewOriginTemplate={PREVIEW_ORIGIN_TEMPLATE}
+          />
+        </ErrorBoundary>
       </TabsContent>
     </Tabs>
   );

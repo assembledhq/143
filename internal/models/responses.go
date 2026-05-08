@@ -1,9 +1,19 @@
 package models
 
+import "encoding/json"
+
 // ListResponse is the standard envelope for list endpoints.
 type ListResponse[T any] struct {
 	Data []T            `json:"data"`
 	Meta PaginationMeta `json:"meta"`
+}
+
+func (r ListResponse[T]) MarshalJSON() ([]byte, error) {
+	type listResponse ListResponse[T]
+	if r.Data == nil {
+		r.Data = []T{}
+	}
+	return json.Marshal(listResponse(r))
 }
 
 // SingleResponse is the standard envelope for single-item endpoints.
