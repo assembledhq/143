@@ -16,20 +16,24 @@ import (
 // protocols (both Claude Code-compatible). Fields not present on a given event
 // are zero-valued.
 type agentStreamEvent struct {
-	Type      string          `json:"type"`
-	Content   string          `json:"content,omitempty"`
-	Message   string          `json:"message,omitempty"`
-	Tool      string          `json:"tool,omitempty"`
-	Name      string          `json:"name,omitempty"`
-	Input     json.RawMessage `json:"input,omitempty"`
-	Output    string          `json:"output,omitempty"`
-	Result    json.RawMessage `json:"result,omitempty"`
-	Error     string          `json:"error,omitempty"`
-	Model     string          `json:"model,omitempty"`
-	SessionID string          `json:"session_id,omitempty"`
-	Usage     *struct {
-		InputTokens  int `json:"input_tokens"`
-		OutputTokens int `json:"output_tokens"`
+	Type         string          `json:"type"`
+	Content      string          `json:"content,omitempty"`
+	Message      string          `json:"message,omitempty"`
+	Tool         string          `json:"tool,omitempty"`
+	Name         string          `json:"name,omitempty"`
+	Input        json.RawMessage `json:"input,omitempty"`
+	Output       string          `json:"output,omitempty"`
+	Result       json.RawMessage `json:"result,omitempty"`
+	Error        string          `json:"error,omitempty"`
+	Model        string          `json:"model,omitempty"`
+	SessionID    string          `json:"session_id,omitempty"`
+	TotalCostUSD *float64        `json:"total_cost_usd,omitempty"`
+	CostUSD      *float64        `json:"cost_usd,omitempty"`
+	Usage        *struct {
+		InputTokens         int `json:"input_tokens"`
+		CachedInputTokens   int `json:"cache_read_input_tokens"`
+		CacheCreationTokens int `json:"cache_creation_input_tokens"`
+		OutputTokens        int `json:"output_tokens"`
 	} `json:"usage,omitempty"`
 }
 
@@ -171,17 +175,26 @@ func parseAgentStreamLine(
 		// `result` payload that sometimes packs the same counters. Accept
 		// either; `result` is checked last so it wins when both are present.
 		if event.Usage != nil {
-			result.TokenUsage = agent.TokenUsage{
-				InputTokens:  event.Usage.InputTokens,
-				OutputTokens: event.Usage.OutputTokens,
-			}
+			mergeTokenUsage(&result.TokenUsage, agent.TokenUsage{
+				Reported:            true,
+				InputTokens:         event.Usage.InputTokens,
+				CachedInputTokens:   event.Usage.CachedInputTokens,
+				CacheCreationTokens: event.Usage.CacheCreationTokens,
+				OutputTokens:        event.Usage.OutputTokens,
+			})
 		}
 		if len(event.Result) > 0 {
 			var usage agent.TokenUsage
-			if err := json.Unmarshal(event.Result, &usage); err == nil &&
-				(usage.InputTokens > 0 || usage.OutputTokens > 0) {
-				result.TokenUsage = usage
+			if err := json.Unmarshal(event.Result, &usage); err == nil {
+				usage.Reported = true
+				mergeTokenUsage(&result.TokenUsage, usage)
 			}
+		}
+		if event.TotalCostUSD != nil {
+			setDirectUSDCost(&result.TokenUsage, *event.TotalCostUSD, "stream_event_total_cost_usd")
+		}
+		if event.CostUSD != nil {
+			setDirectUSDCost(&result.TokenUsage, *event.CostUSD, "stream_event_cost_usd")
 		}
 		if cfg.CaptureSessionID && event.SessionID != "" {
 			result.AgentSessionID = event.SessionID
@@ -328,6 +341,8 @@ func runStreamingAgent(
 			"confidence_score": result.ConfidenceScore,
 		},
 	}
+
+	result.TokenUsage = agent.FinalizeTokenUsage(result.TokenUsage, prompt.UsageHint)
 
 	return result, nil
 }

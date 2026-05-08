@@ -101,7 +101,8 @@ func (s *Service) AnalyzeProject(ctx context.Context, orgID, projectID uuid.UUID
 		}
 	}()
 
-	if err := s.injectRequiredAgentAuth(ctx, orgID, agentType, sb, sbCfg.Env); err != nil {
+	authBillingMode, err := s.injectRequiredAgentAuth(ctx, orgID, agentType, sb, sbCfg.Env)
+	if err != nil {
 		exitReason = containerExitReason(ctx, err)
 		return fmt.Errorf("inject codex auth: %w", err)
 	}
@@ -134,6 +135,7 @@ func (s *Service) AnalyzeProject(ctx context.Context, orgID, projectID uuid.UUID
 		SystemPrompt: buildProjectCycleSystemPrompt(&projectSummary),
 		UserPrompt:   string(contextJSON),
 		MaxTokens:    pmTokenLimit,
+		UsageHint:    buildPMTokenUsageHint(settings, agentType, sbCfg.Env, authBillingMode),
 	}
 
 	logCh := make(chan agent.LogEntry, 100)
@@ -167,7 +169,7 @@ func (s *Service) AnalyzeProject(ctx context.Context, orgID, projectID uuid.UUID
 		SkippedIssues: []byte("[]"),
 		TriggeredBy:   models.PMTriggerCron,
 	}
-	if result.TokenUsage != (agent.TokenUsage{}) {
+	if agent.HasPersistableTokenUsage(result.TokenUsage) {
 		tokenJSON, err := json.Marshal(result.TokenUsage)
 		if err != nil {
 			s.logger.Warn().Err(err).Msg("failed to marshal token usage")

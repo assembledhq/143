@@ -253,9 +253,10 @@ type AgentPrompt struct {
 	MaxTokens       int
 	ReasoningEffort models.ReasoningEffort
 	Files           []string // relevant files to focus on
-	Continuation    bool     // true when resuming an existing interactive session
-	ResumeSessionID string   // agent's session ID for --resume/--continue (set on subsequent turns)
-	UserMessage     string   // follow-up message from the user (set on subsequent turns)
+	UsageHint       TokenUsageHint
+	Continuation    bool   // true when resuming an existing interactive session
+	ResumeSessionID string // agent's session ID for --resume/--continue (set on subsequent turns)
+	UserMessage     string // follow-up message from the user (set on subsequent turns)
 	// RevisionContext carries revision/repair metadata into Execute.
 	// PreparePrompt is bypassed on continuation turns, so adapters that need
 	// repair-specific context read it from here. Nil for ordinary turns.
@@ -277,9 +278,64 @@ type AgentResult struct {
 
 // TokenUsage tracks LLM token consumption and cost for an agent run.
 type TokenUsage struct {
-	InputTokens  int     `json:"input_tokens"`
-	OutputTokens int     `json:"output_tokens"`
-	TotalCostUSD float64 `json:"total_cost_usd"`
+	InputTokens         int               `json:"input_tokens"`
+	CachedInputTokens   int               `json:"cached_input_tokens,omitempty"`
+	CacheCreationTokens int               `json:"cache_creation_input_tokens,omitempty"`
+	OutputTokens        int               `json:"output_tokens"`
+	TotalTokens         int               `json:"total_tokens,omitempty"`
+	TotalCostUSD        float64           `json:"total_cost_usd,omitempty"`
+	Cost                *TokenCost        `json:"cost,omitempty"`
+	NativeCost          *TokenCost        `json:"native_cost,omitempty"`
+	NativeUsage         *NativeTokenUsage `json:"native_usage,omitempty"`
+	Reported            bool              `json:"-"`
+}
+
+type TokenCostUnit string
+
+const (
+	TokenCostUnitUSD     TokenCostUnit = "usd"
+	TokenCostUnitCredits TokenCostUnit = "credits"
+)
+
+type TokenCostSource string
+
+const (
+	TokenCostSourceDirect      TokenCostSource = "direct"
+	TokenCostSourceDerived     TokenCostSource = "derived"
+	TokenCostSourceUnavailable TokenCostSource = "unavailable"
+)
+
+type TokenBillingMode string
+
+const (
+	TokenBillingModeUnknown      TokenBillingMode = "unknown"
+	TokenBillingModeAPIKey       TokenBillingMode = "api_key"
+	TokenBillingModeSubscription TokenBillingMode = "subscription"
+)
+
+type TokenCost struct {
+	Amount float64         `json:"amount"`
+	Unit   TokenCostUnit   `json:"unit"`
+	Source TokenCostSource `json:"source"`
+	Detail string          `json:"detail,omitempty"`
+}
+
+type NativeTokenUsage struct {
+	Reported            bool             `json:"reported"`
+	Provider            string           `json:"provider,omitempty"`
+	Model               string           `json:"model,omitempty"`
+	BillingMode         TokenBillingMode `json:"billing_mode,omitempty"`
+	InputTokens         int              `json:"input_tokens,omitempty"`
+	CachedInputTokens   int              `json:"cached_input_tokens,omitempty"`
+	CacheCreationTokens int              `json:"cache_creation_input_tokens,omitempty"`
+	OutputTokens        int              `json:"output_tokens,omitempty"`
+	TotalTokens         int              `json:"total_tokens,omitempty"`
+}
+
+type TokenUsageHint struct {
+	AgentType      models.AgentType
+	EffectiveModel string
+	BillingMode    TokenBillingMode
 }
 
 // LogEntry represents a single log line emitted during agent execution.
