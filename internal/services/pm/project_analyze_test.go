@@ -2,6 +2,7 @@ package pm
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"testing"
@@ -244,6 +245,63 @@ func TestAnalyzeProject_NilAdapter(t *testing.T) {
 	err := svc.AnalyzeProject(context.Background(), uuid.New(), uuid.New())
 	require.Error(t, err, "AnalyzeProject should fail when adapter is nil")
 	require.Contains(t, err.Error(), "not configured")
+}
+
+func TestAnalyzeProject_EnrichesTokenUsageHintOnPrompt(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	projectID := uuid.New()
+	repoID := uuid.New()
+	inner := &pmInnerAdapterMock{executeResult: &agent.AgentResult{
+		Summary: `{
+			"cycle_analysis": "Focused cycle",
+			"progress_pct": 25,
+			"current_phase": "implementation",
+			"status_recommendation": "",
+			"lessons_learned": [],
+			"new_tasks": [],
+			"skipped_tasks": []
+		}`,
+	}}
+	settingsJSON, err := json.Marshal(models.OrgSettings{
+		DefaultAgentType: "codex",
+		AgentConfig: models.AgentEnvConfig{
+			string(models.AgentTypeCodex): {
+				"OPENAI_MODEL": models.CodexModelGPT54,
+			},
+		},
+	})
+	require.NoError(t, err, "should marshal settings")
+
+	project := models.Project{
+		ID:           projectID,
+		OrgID:        orgID,
+		RepositoryID: &repoID,
+		Status:       models.ProjectStatusActive,
+		Title:        "Project",
+		Goal:         "Goal",
+	}
+	svc := &Service{
+		adapters:      testAdapterMap(inner),
+		env:           testAgentEnv(),
+		sandbox:       &mockSandbox{},
+		projects:      newMockProjectStore(project),
+		projectTasks:  &mockProjectTaskStore{},
+		projectCycles: &mockProjectCycleStore{},
+		orgs:          &gatherOrgStoreMock{org: models.Organization{ID: orgID, Settings: settingsJSON}},
+		repos:         &mockRepoStore{repos: []models.Repository{{ID: repoID, OrgID: orgID, Status: "active", CloneURL: "https://example.com/repo.git", DefaultBranch: "main"}}},
+		plans:         &mockPlanStore{},
+		logger:        zerolog.Nop(),
+	}
+
+	err = svc.AnalyzeProject(context.Background(), orgID, projectID)
+
+	require.NoError(t, err, "AnalyzeProject should succeed")
+	require.NotNil(t, inner.calledPrompt, "AnalyzeProject should pass a prompt to the inner agent")
+	require.Equal(t, models.AgentTypeCodex, inner.calledPrompt.UsageHint.AgentType, "AnalyzeProject should preserve the selected agent type in UsageHint")
+	require.Equal(t, models.CodexModelGPT54, inner.calledPrompt.UsageHint.EffectiveModel, "AnalyzeProject should propagate the effective model into UsageHint")
+	require.Equal(t, agent.TokenBillingModeSubscription, inner.calledPrompt.UsageHint.BillingMode, "AnalyzeProject should record subscription billing when Codex runs via ChatGPT auth")
 }
 
 func TestAnalyzeProject_NilProjectStores(t *testing.T) {

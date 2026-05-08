@@ -3,10 +3,12 @@ package pm
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"testing"
 
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
+	"github.com/assembledhq/143/internal/services/agent"
 	"github.com/google/uuid"
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
@@ -81,10 +83,12 @@ func (m *mockJobStore) Enqueue(ctx context.Context, orgID uuid.UUID, queue, jobT
 }
 
 type mockPlanStore struct {
+	created []*models.PMPlan
 	updated []*models.PMPlan
 }
 
 func (m *mockPlanStore) Create(ctx context.Context, plan *models.PMPlan) error {
+	m.created = append(m.created, plan)
 	return nil
 }
 
@@ -246,4 +250,102 @@ func TestAnalyze_FailSessionRecordsError(t *testing.T) {
 	require.Len(t, logStore.logs, 1, "should write one session log entry")
 	require.Equal(t, "error", logStore.logs[0].Level, "log should be error level")
 	require.Contains(t, logStore.logs[0].Message, "gather context", "log message should describe failure")
+}
+
+func TestAnalyze_DoesNotPersistUnavailableTokenUsage(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	repoID := uuid.New()
+	plans := &mockPlanStore{}
+	settingsJSON, err := json.Marshal(models.OrgSettings{MaxConcurrentRuns: 3, AutonomyLevel: "auto_all", DefaultAgentType: "codex"})
+	require.NoError(t, err, "should marshal settings")
+
+	issueID := uuid.New()
+	planOutput := fmt.Sprintf(`<pm-plan>
+{
+  "analysis": "unavailable usage",
+  "tasks": [{"rank":1,"issue_ids":["%s"],"title":"t","reasoning":"r","approach":"a","risk":"r","complexity":"simple","confidence":"high"}],
+  "clusters": [],
+  "skip": []
+}
+</pm-plan>`, issueID)
+
+	unavailableUsage := agent.FinalizeTokenUsage(agent.TokenUsage{}, agent.TokenUsageHint{
+		AgentType:      models.AgentTypeCodex,
+		EffectiveModel: models.CodexModelGPT54,
+		BillingMode:    agent.TokenBillingModeSubscription,
+	})
+
+	svc := &Service{
+		adapters: testAdapterMap(&pmInnerAdapterMock{executeResult: &agent.AgentResult{
+			Summary:    planOutput,
+			TokenUsage: unavailableUsage,
+		}}),
+		env:      testAgentEnv(),
+		sandbox:  &pmSandboxMock{},
+		repos:    &mockRepoStore{repos: []models.Repository{{ID: repoID, Status: "active", OrgID: orgID}}},
+		orgs:     &gatherOrgStoreMock{org: models.Organization{ID: orgID, Settings: settingsJSON}},
+		issues:   &gatherIssueStoreMock{byStatus: map[string][]models.Issue{}},
+		sessions: &gatherSessionStoreMock{byStatus: map[string][]models.Session{}, count: 0},
+		plans:    plans,
+		jobs:     &mockJobStore{},
+		logger:   zerolog.Nop(),
+	}
+
+	plan, err := svc.Analyze(context.Background(), orgID, models.PMTriggerCron, nil, nil)
+	require.NoError(t, err, "Analyze should succeed when token usage is unavailable")
+	require.NotNil(t, plan, "Analyze should return a plan")
+	require.Len(t, plans.created, 1, "Analyze should persist one PM plan")
+	require.Nil(t, plans.created[0].TokenUsage, "PM plan should leave token usage nil when the provider reported no token payload")
+}
+
+func TestAnalyze_EnrichesTokenUsageHintOnPrompt(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	repoID := uuid.New()
+	issueID := uuid.New()
+	inner := &pmInnerAdapterMock{executeResult: &agent.AgentResult{
+		Summary: fmt.Sprintf(`<pm-plan>
+{
+  "analysis": "usage hint",
+  "tasks": [{"rank":1,"issue_ids":["%s"],"title":"t","reasoning":"r","approach":"a","risk":"r","complexity":"simple","confidence":"high"}],
+  "clusters": [],
+  "skip": []
+}
+</pm-plan>`, issueID),
+	}}
+	settingsJSON, err := json.Marshal(models.OrgSettings{
+		MaxConcurrentRuns: 3,
+		AutonomyLevel:     "auto_all",
+		DefaultAgentType:  "codex",
+		AgentConfig: models.AgentEnvConfig{
+			string(models.AgentTypeCodex): {
+				"OPENAI_MODEL": models.CodexModelGPT54,
+			},
+		},
+	})
+	require.NoError(t, err, "should marshal settings")
+
+	svc := &Service{
+		adapters: testAdapterMap(inner),
+		env:      testAgentEnv(),
+		sandbox:  &pmSandboxMock{},
+		repos:    &mockRepoStore{repos: []models.Repository{{ID: repoID, Status: "active", OrgID: orgID}}},
+		orgs:     &gatherOrgStoreMock{org: models.Organization{ID: orgID, Settings: settingsJSON}},
+		issues:   &gatherIssueStoreMock{byStatus: map[string][]models.Issue{}},
+		sessions: &gatherSessionStoreMock{byStatus: map[string][]models.Session{}, count: 0},
+		plans:    &mockPlanStore{},
+		jobs:     &mockJobStore{},
+		logger:   zerolog.Nop(),
+	}
+
+	_, err = svc.Analyze(context.Background(), orgID, models.PMTriggerCron, nil, nil)
+
+	require.NoError(t, err, "Analyze should succeed")
+	require.NotNil(t, inner.calledPrompt, "Analyze should pass a prompt to the inner agent")
+	require.Equal(t, models.AgentTypeCodex, inner.calledPrompt.UsageHint.AgentType, "Analyze should preserve the selected agent type in UsageHint")
+	require.Equal(t, models.CodexModelGPT54, inner.calledPrompt.UsageHint.EffectiveModel, "Analyze should propagate the effective model into UsageHint")
+	require.Equal(t, agent.TokenBillingModeSubscription, inner.calledPrompt.UsageHint.BillingMode, "Analyze should record subscription billing when Codex runs via ChatGPT auth")
 }
