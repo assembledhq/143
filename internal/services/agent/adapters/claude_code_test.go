@@ -145,10 +145,10 @@ func TestClaudeCodeAdapter_Execute(t *testing.T) {
 	}{
 		{
 			name: "successful run with streaming JSON",
-			claudeOutput: `{"type":"assistant","content":"Analyzing the issue..."}
-{"type":"tool_use","tool":"edit_file"}
-{"type":"tool_result","result":"done"}
-{"type":"result","content":"Fixed the bug."}`,
+			claudeOutput: `{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Analyzing the issue..."}]},"session_id":"sess-1"}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"tu-1","name":"edit_file","input":{"path":"main.go"}}]},"session_id":"sess-1"}
+{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tu-1","content":"done"}]},"session_id":"sess-1"}
+{"type":"result","subtype":"success","is_error":false,"result":"Fixed the bug.","session_id":"sess-1"}`,
 			claudeExitCode: 0,
 			diffOutput:     "diff --git a/main.go b/main.go\n--- a/main.go\n+++ b/main.go\n",
 			diffExitCode:   0,
@@ -314,7 +314,7 @@ func TestClaudeCodeAdapter_Execute_ContinuationWithSessionIDUsesResumeByID(t *te
 	provider := testutil.NewMockSandboxProvider()
 	provider.ExecFn = func(ctx context.Context, sb *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
 		if strings.Contains(cmd, "claude --print") {
-			_, _ = stdout.Write([]byte(`{"type":"assistant","content":"continuing the session"}`))
+			_, _ = stdout.Write([]byte(`{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"continuing the session"}]}}`))
 			return 0, nil
 		}
 		if strings.HasPrefix(cmd, "git rev-parse") {
@@ -354,7 +354,7 @@ func TestClaudeCodeAdapter_Execute_ContinuationWithoutSessionIDFallsBackToFreshE
 	provider := testutil.NewMockSandboxProvider()
 	provider.ExecFn = func(ctx context.Context, sb *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
 		if strings.HasPrefix(cmd, "claude") {
-			_, _ = stdout.Write([]byte(`{"type":"assistant","content":"continuing the session"}`))
+			_, _ = stdout.Write([]byte(`{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"continuing the session"}]}}`))
 			return 0, nil
 		}
 		if strings.HasPrefix(cmd, "git rev-parse") {
@@ -403,8 +403,8 @@ func TestClaudeCodeAdapter_Execute_CapturesResultEventSessionID(t *testing.T) {
 	provider.ExecFn = func(ctx context.Context, sb *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
 		if strings.HasPrefix(cmd, "claude") {
 			// Claude Code emits the session id on its terminal `result` event.
-			_, _ = stdout.Write([]byte(`{"type":"assistant","content":"done"}` + "\n" +
-				`{"type":"result","content":"summary","session_id":"claude-session-xyz"}`))
+			_, _ = stdout.Write([]byte(`{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"done"}]}}` + "\n" +
+				`{"type":"result","subtype":"success","result":"summary","session_id":"claude-session-xyz"}`))
 			return 0, nil
 		}
 		if strings.HasPrefix(cmd, "git rev-parse") {
@@ -435,7 +435,7 @@ func TestClaudeCodeAdapter_Execute_IncludesReasoningEffortOverride(t *testing.T)
 	provider := testutil.NewMockSandboxProvider()
 	provider.ExecFn = func(ctx context.Context, sb *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
 		if strings.Contains(cmd, "claude --print") {
-			_, _ = stdout.Write([]byte(`{"type":"assistant","content":"done"}`))
+			_, _ = stdout.Write([]byte(`{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"done"}]}}`))
 			return 0, nil
 		}
 		if strings.HasPrefix(cmd, "git rev-parse") {
@@ -478,12 +478,11 @@ func TestParseStreamOutput(t *testing.T) {
 		checkResult func(t *testing.T, result *agent.AgentResult, logs []agent.LogEntry)
 	}{
 		{
-			name: "assistant events stay as separate logs, summary falls back to last",
-			output: `{"type":"assistant","content":"Investigating..."}
-{"type":"assistant","content":"Found the bug."}`,
+			name: "assistant text blocks stay as separate logs, summary falls back to last",
+			output: `{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Investigating..."}]}}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Found the bug."}]}}`,
 			checkResult: func(t *testing.T, result *agent.AgentResult, logs []agent.LogEntry) {
 				t.Helper()
-				// Assistant text blocks are kept as individual output logs.
 				require.Len(t, logs, 2)
 				require.Equal(t, "output", logs[0].Level)
 				require.Equal(t, "Investigating...", logs[0].Message)
@@ -493,19 +492,30 @@ func TestParseStreamOutput(t *testing.T) {
 			},
 		},
 		{
-			name:   "tool_use event",
-			output: `{"type":"tool_use","tool":"edit_file"}`,
+			name:   "system init event hidden as debug",
+			output: `{"type":"system","subtype":"init","tools":["Bash"],"session_id":"s"}`,
+			checkResult: func(t *testing.T, result *agent.AgentResult, logs []agent.LogEntry) {
+				t.Helper()
+				require.Len(t, logs, 1)
+				require.Equal(t, "debug", logs[0].Level)
+				require.Equal(t, "s", result.AgentSessionID)
+			},
+		},
+		{
+			name:   "assistant tool_use block",
+			output: `{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"tu-1","name":"edit_file","input":{}}]}}`,
 			checkResult: func(t *testing.T, result *agent.AgentResult, logs []agent.LogEntry) {
 				t.Helper()
 				require.Len(t, logs, 1)
 				require.Equal(t, "tool_use", logs[0].Level)
 				require.Contains(t, logs[0].Message, "edit_file")
 				require.Equal(t, "edit_file", logs[0].Metadata["tool"])
+				require.Equal(t, "tu-1", logs[0].Metadata["call_id"])
 			},
 		},
 		{
-			name:   "tool_use event with input preserves description",
-			output: `{"type":"tool_use","tool":"Bash","input":{"command":"ls -la","description":"List files"}}`,
+			name:   "assistant tool_use block with input preserves description",
+			output: `{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"tu-2","name":"Bash","input":{"command":"ls -la","description":"List files"}}]}}`,
 			checkResult: func(t *testing.T, result *agent.AgentResult, logs []agent.LogEntry) {
 				t.Helper()
 				require.Len(t, logs, 1)
@@ -517,48 +527,89 @@ func TestParseStreamOutput(t *testing.T) {
 			},
 		},
 		{
-			name:   "tool_result event",
-			output: `{"type":"tool_result","result":"file updated"}`,
+			name: "mixed text and tool_use blocks emit separate logs in order",
+			output: `{"type":"assistant","message":{"role":"assistant","content":[` +
+				`{"type":"text","text":"I'll edit the file."},` +
+				`{"type":"tool_use","id":"tu-3","name":"edit_file","input":{"path":"x.go"}}` +
+				`]}}`,
+			checkResult: func(t *testing.T, result *agent.AgentResult, logs []agent.LogEntry) {
+				t.Helper()
+				require.Len(t, logs, 2)
+				require.Equal(t, "output", logs[0].Level)
+				require.Equal(t, "I'll edit the file.", logs[0].Message)
+				require.Equal(t, "tool_use", logs[1].Level)
+				require.Equal(t, "edit_file", logs[1].Metadata["tool"])
+			},
+		},
+		{
+			name:   "user tool_result block (string content)",
+			output: `{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tu-1","content":"file updated"}]}}`,
 			checkResult: func(t *testing.T, result *agent.AgentResult, logs []agent.LogEntry) {
 				t.Helper()
 				require.Len(t, logs, 1)
 				require.Equal(t, "output", logs[0].Level)
+				require.Equal(t, "file updated", logs[0].Message)
+				require.Equal(t, "tool_result", logs[0].Metadata["type"])
+				require.Equal(t, "tu-1", logs[0].Metadata["call_id"])
+			},
+		},
+		{
+			name:   "user tool_result block (array content)",
+			output: `{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tu-1","content":[{"type":"text","text":"line1\n"},{"type":"text","text":"line2"}]}]}}`,
+			checkResult: func(t *testing.T, result *agent.AgentResult, logs []agent.LogEntry) {
+				t.Helper()
+				require.Len(t, logs, 1)
+				require.Equal(t, "output", logs[0].Level)
+				require.Equal(t, "line1\nline2", logs[0].Message)
 				require.Equal(t, "tool_result", logs[0].Metadata["type"])
 			},
 		},
 		{
-			name:   "error event with message field",
-			output: `{"type":"error","message":"rate limit exceeded"}`,
+			name:   "user tool_result block flagged as error",
+			output: `{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tu-1","content":"boom","is_error":true}]}}`,
 			checkResult: func(t *testing.T, result *agent.AgentResult, logs []agent.LogEntry) {
 				t.Helper()
 				require.Len(t, logs, 1)
-				require.Equal(t, "error", logs[0].Level)
-				require.Contains(t, logs[0].Message, "rate limit")
+				require.Equal(t, true, logs[0].Metadata["is_error"])
 			},
 		},
 		{
-			name:   "error event with content fallback",
-			output: `{"type":"error","content":"something failed"}`,
-			checkResult: func(t *testing.T, result *agent.AgentResult, logs []agent.LogEntry) {
-				t.Helper()
-				require.Len(t, logs, 1)
-				require.Equal(t, "error", logs[0].Level)
-				require.Contains(t, logs[0].Message, "something failed")
-			},
-		},
-		{
-			name:   "result event with token usage",
-			output: `{"type":"result","content":"Done.","result":{"input_tokens":1000,"output_tokens":500}}`,
+			name:   "result event with summary, usage, and session id",
+			output: `{"type":"result","subtype":"success","result":"Done.","session_id":"sess-z","usage":{"input_tokens":1000,"output_tokens":500}}`,
 			checkResult: func(t *testing.T, result *agent.AgentResult, logs []agent.LogEntry) {
 				t.Helper()
 				require.Contains(t, result.Summary, "Done.")
 				require.Equal(t, 1000, result.TokenUsage.InputTokens)
 				require.Equal(t, 500, result.TokenUsage.OutputTokens)
+				require.Equal(t, "sess-z", result.AgentSessionID)
 			},
 		},
 		{
-			name:   "result event with confidence",
-			output: `{"type":"result","content":"Fixed.\n{\"confidence_score\": 0.95, \"confidence_reasoning\": \"Straightforward\", \"risk_factors\": [\"none\"]}"}`,
+			name:   "result event with top level cost and usage",
+			output: `{"type":"result","content":"Done.","total_cost_usd":0.37,"usage":{"input_tokens":1000,"output_tokens":500,"cache_read_input_tokens":250,"cache_creation_input_tokens":125}}`,
+			checkResult: func(t *testing.T, result *agent.AgentResult, logs []agent.LogEntry) {
+				t.Helper()
+				require.Equal(t, 1000, result.TokenUsage.InputTokens)
+				require.Equal(t, 500, result.TokenUsage.OutputTokens)
+				require.Equal(t, 250, result.TokenUsage.CachedInputTokens)
+				require.Equal(t, 125, result.TokenUsage.CacheCreationTokens)
+				require.Equal(t, 0.37, result.TokenUsage.TotalCostUSD)
+				require.NotNil(t, result.TokenUsage.Cost)
+				require.Equal(t, agent.TokenCostSourceDirect, result.TokenUsage.Cost.Source)
+			},
+		},
+		{
+			name:   "result event accepts output-only usage",
+			output: `{"type":"result","subtype":"success","result":"Done.","usage":{"input_tokens":0,"output_tokens":42}}`,
+			checkResult: func(t *testing.T, result *agent.AgentResult, logs []agent.LogEntry) {
+				t.Helper()
+				require.Equal(t, 0, result.TokenUsage.InputTokens)
+				require.Equal(t, 42, result.TokenUsage.OutputTokens)
+			},
+		},
+		{
+			name:   "result event with confidence in summary",
+			output: `{"type":"result","subtype":"success","result":"Fixed.\n{\"confidence_score\": 0.95, \"confidence_reasoning\": \"Straightforward\", \"risk_factors\": [\"none\"]}"}`,
 			checkResult: func(t *testing.T, result *agent.AgentResult, logs []agent.LogEntry) {
 				t.Helper()
 				require.InDelta(t, 0.95, result.ConfidenceScore, 0.001)
@@ -567,7 +618,7 @@ func TestParseStreamOutput(t *testing.T) {
 		},
 		{
 			name:   "unknown event type logged as debug",
-			output: `{"type":"unknown_type","content":"blah"}`,
+			output: `{"type":"unknown_type","payload":{}}`,
 			checkResult: func(t *testing.T, result *agent.AgentResult, logs []agent.LogEntry) {
 				t.Helper()
 				require.Len(t, logs, 1)

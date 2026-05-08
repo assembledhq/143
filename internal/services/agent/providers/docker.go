@@ -198,13 +198,6 @@ func (d *DockerProvider) ensureNetwork(ctx context.Context) error {
 	_, err := d.client.NetworkCreate(ctx, d.network, network.CreateOptions{
 		Driver: "bridge",
 		Labels: map[string]string{"managed-by": "143"},
-		// Disable inter-container chatter so one sandbox can't TCP-connect
-		// to another on the same bridge. Existing networks created before
-		// this was added are NOT updated — Docker rejects option changes on
-		// existing networks, so the host provisioning path handles migration.
-		Options: map[string]string{
-			"com.docker.network.bridge.enable_icc": "false",
-		},
 	})
 	if err != nil && !cerrdefs.IsConflict(err) && !cerrdefs.IsAlreadyExists(err) {
 		return fmt.Errorf("create network %q: %w", d.network, err)

@@ -20,11 +20,9 @@ import {
   Check,
   XCircle,
   X,
-  MinusCircle,
   Square,
   PanelRightOpen,
   PanelRightClose,
-  PanelBottomOpen,
   Clock,
   MessageSquare,
   Pencil,
@@ -49,7 +47,6 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from "@/components/ui/table";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import {
   Dialog,
@@ -92,7 +89,7 @@ import {
 } from "@/lib/session-composer-mentions";
 import { queryKeys } from "@/lib/query-keys";
 import { api, ApiError } from "@/lib/api";
-import { AGENTS, AGENTS_BY_KEY, agentDisplayLabel } from "@/lib/agents";
+import { AGENTS, AGENTS_BY_KEY } from "@/lib/agents";
 import { getActiveOrgId } from "@/lib/active-org";
 import { maybeNotifySessionCompleted } from "@/lib/browser-notifications";
 import {
@@ -105,11 +102,19 @@ import { applyPlanModePrefix, buildTimeline, flattenTimelineResponse, sortTimeli
 import { parseDiffStats, type DiffFile } from "@/lib/diff-parser";
 import { formatReviewMessage } from "@/lib/format-review-message";
 import {
+  readStoredSessionActiveThread,
   readStoredSessionScrollPosition,
+  resolveInitialSessionThreadId,
   resolveInitialSessionAnchor,
+  type SessionScrollViewerScope,
+  writeStoredSessionActiveThread,
   writeStoredSessionScrollPosition,
 } from "@/lib/session-open-position";
-import type { ListResponse, Session, SessionDetail, SessionInputCommand, SessionInputReference, SessionLog, SessionMessage, SessionReviewComment, SessionThread, SessionThreadFileEvent, SessionTimelineEntry, User, Validation, CodexAuthStatus, PullRequestHealthResponse, SingleResponse } from "@/lib/types";
+import {
+  readStoredViewedThreadIds,
+  writeStoredViewedThreadIds,
+} from "@/lib/session-thread-views";
+import type { ListResponse, Session, SessionDetail, SessionInputCommand, SessionInputReference, SessionLog, SessionMessage, SessionReviewComment, SessionThread, SessionThreadFileEvent, SessionTimelineEntry, User, CodexAuthStatus, PullRequestHealthResponse, SingleResponse } from "@/lib/types";
 import { AgentTabStrip, computeThreadOverlap } from "./agent-tab-strip";
 import {
   ThreadAttributionFilter,
@@ -125,14 +130,20 @@ import { useDiffViewState } from "@/hooks/use-diff-view-state";
 import { CodexDeviceCodeModal } from "@/components/codex-device-code-modal";
 import { AgentBadge } from "@/components/agent-badge";
 import { PendingAttachmentStrip } from "@/components/pending-attachment-strip";
-import { PRHealthBanner } from "@/components/pr-health-banner";
-import { MobileBackButton } from "@/components/mobile-back-button";
+import { PRHealthBanner, prHealthAllowsMerge } from "@/components/pr-health-banner";
+import { SessionKeyboardHelpOverlay } from "@/components/session-keyboard-help-overlay";
 import { useAuth } from "@/hooks/use-auth";
 import { useMediaQuery } from "@/hooks/use-media-query";
 import { useDocumentVisible } from "@/hooks/use-document-visible";
+import {
+  useSessionKeyboardShortcuts,
+  type SessionDetailTab,
+  type UseSessionKeyboardShortcutsOptions,
+} from "@/hooks/use-session-keyboard-shortcuts";
 import { prMergedAccent } from "@/lib/pr-status-styles";
 import { cn, sessionTitle, formatTimeAgo } from "@/lib/utils";
 import { activeSet, workingStatusesSet } from "@/lib/session-status-groups";
+import { MobileSessionTopBar } from "./mobile-session-top-bar";
 
 // Defer the diff viewer (shiki + diff-parser) until the user actually opens
 // review mode. Saves ~100KB+ from the initial session-detail bundle for the
@@ -164,8 +175,18 @@ const PR_ERROR_TOAST_DURATION_MS = 10_000;
 const PR_ERROR_TOAST_MESSAGE = "PR creation failed";
 const MAX_RESOLVE_REVIEW_COMMENTS_PER_MESSAGE = 50;
 
+const EDITABLE_THREAD_AGENTS: ReadonlyArray<{ key: string; label: string }> =
+  AGENTS.map((agent) => ({ key: agent.key, label: agent.label }));
+
 type PendingFollowUpMessage = SessionMessage & {
   client_id: number;
+};
+
+type PendingEditableThreadUpdate = {
+  label: string;
+  // null clears an existing override; a string sets it. Field is always
+  // present on this path so the backend treats omission separately.
+  model: string | null;
 };
 
 const statusConfig: Record<string, { color: string; label: string }> = {
@@ -176,10 +197,24 @@ const statusConfig: Record<string, { color: string; label: string }> = {
   needs_human_guidance: { color: "bg-orange-50 text-orange-700 dark:bg-orange-950/30 dark:text-orange-400", label: "Needs guidance" },
   completed: { color: "bg-emerald-50 text-emerald-700 dark:bg-emerald-950/30 dark:text-emerald-400", label: "Completed" },
   pr_created: { color: "bg-emerald-50 text-emerald-700 dark:bg-emerald-950/30 dark:text-emerald-400", label: "PR created" },
+  pr_merged: { color: `${prMergedAccent.bg} ${prMergedAccent.text}`, label: "PR merged" },
+  pr_closed: { color: "bg-muted text-muted-foreground", label: "PR closed" },
   failed: { color: "bg-destructive/10 text-destructive", label: "Failed" },
   cancelled: { color: "bg-muted text-muted-foreground", label: "Cancelled" },
   skipped: { color: "bg-muted text-muted-foreground", label: "Skipped" },
 };
+
+function getDisplayStatus(sessionStatus: string, prStatus?: string | null): { color: string; label: string } {
+  if (sessionStatus === "pr_created") {
+    if (prStatus === "merged") {
+      return statusConfig.pr_merged;
+    }
+    if (prStatus === "closed") {
+      return statusConfig.pr_closed;
+    }
+  }
+  return statusConfig[sessionStatus] || statusConfig.pending;
+}
 
 function hasMeaningfulDuration(startedAt?: string, completedAt?: string): boolean {
   if (!startedAt || !completedAt) return false;
@@ -200,25 +235,80 @@ export function formatDuration(startedAt?: string, completedAt?: string): string
   return `${days}d ${hours % 24}h`;
 }
 
+export function getPendingEditableThreadUpdate(
+  activeThread: SessionThread | undefined,
+  activeThreadIsEditable: boolean,
+  composerSelectedModel: string,
+): PendingEditableThreadUpdate | undefined {
+  if (!activeThread || !activeThreadIsEditable || composerSelectedModel === "") {
+    return undefined;
+  }
+  const existingModel = activeThread.model_override ?? null;
+  if (composerSelectedModel === existingModel) {
+    return undefined;
+  }
+  return {
+    label: activeThread.label,
+    model: composerSelectedModel,
+  };
+}
+
+export function getInitialComposerSelectedModel(thread: SessionThread): string {
+  return thread.model_override ?? "";
+}
+
+export function trackInFlightAgentUpdate(
+  ref: { current: Promise<unknown> | null },
+  promise: Promise<unknown>,
+): void {
+  ref.current = promise;
+  promise.catch(() => undefined).then(() => {
+    if (ref.current === promise) {
+      ref.current = null;
+    }
+  });
+}
+
+type SessionOriginDisplay = {
+  badge: string;
+  title: string;
+  detail?: string;
+};
+
+function getSessionOriginDisplay(session: Session): SessionOriginDisplay | null {
+  switch (session.origin) {
+    case "automation":
+      return {
+        badge: "Automation",
+        title: "Created by automation",
+        detail: session.automation_run_id ? "Automation run" : "Scheduled or manually triggered automation",
+      };
+    case "project":
+      return {
+        badge: "Project",
+        title: "Created from project work",
+        detail: "Started as part of a tracked project task",
+      };
+    case "issue_trigger":
+      return {
+        badge: "Issue",
+        title: "Created from issue intake",
+        detail: "Started automatically from issue workflow",
+      };
+    case "revision":
+      return {
+        badge: "Revision",
+        title: "Created from a prior session",
+        detail: "Follow-up run spun out from an earlier session",
+      };
+    default:
+      return null;
+  }
+}
+
 const triggerPickerIconClassName = "h-4 w-4 shrink-0";
 const directoryTriggerIcon = <FolderTree className={triggerPickerIconClassName} />;
 const fileTriggerIcon = <FileCode2 className={triggerPickerIconClassName} />;
-
-const validationChecks: { key: string; label: string }[] = [
-  { key: "direction_check", label: "Direction check" },
-  { key: "correctness_check", label: "Correctness check" },
-  { key: "quality_check", label: "Quality check" },
-  { key: "security_scan", label: "Security scan" },
-  { key: "regression_test_check", label: "Regression test check" },
-  { key: "ci_check", label: "CI check" },
-];
-
-function checkResultBadge(result: string | null) {
-  if (!result) return <Badge variant="secondary" className="text-xs">skipped</Badge>;
-  if (result === "pass") return <Badge variant="secondary" className="bg-emerald-50 text-emerald-700 dark:bg-emerald-950/30 dark:text-emerald-400 border-emerald-200/50 dark:border-emerald-800/30 text-xs">pass</Badge>;
-  if (result === "fail") return <Badge variant="secondary" className="bg-destructive/10 text-destructive border-destructive/20 text-xs">fail</Badge>;
-  return <Badge variant="secondary" className="text-xs">{result}</Badge>;
-}
 
 // AgentThreadTabs lived here in Phase 1. The replacement now lives in
 // agent-tab-strip.tsx (AgentTabStrip) and adds overlap badges, tab actions,
@@ -229,20 +319,19 @@ function checkResultBadge(result: string | null) {
 // Detail panel tabs (shown in right sidebar)
 // ---------------------------------------------------------------------------
 
-type DetailTab = "overview" | "changes" | "validation" | "preview";
+type DetailTab = SessionDetailTab;
 type PRAuthorMode = "auto" | "user" | "app";
 
 type PRAuthInterceptDetails = {
-  connect_url: string;
-  resume_token: string;
-  can_fallback_to_app: boolean;
+  connect_url?: string;
+  resume_token?: string;
+  can_fallback_to_app?: boolean;
 };
 
 // PRAuthPromptState is a discriminated union so merge prompts don't carry
-// create-PR-only fields (connect_url, resume_token, can_fallback_to_app).
-// create_pr and push_changes prompts come from the backend's auth interception
-// payload; merge prompts are always synthesized client-side and connect via
-// the hardcoded /github/connect endpoint with no resume token and no fallback.
+// create-PR-only fields. Create/push prompts may come from backend auth
+// interception or be synthesized from the current GitHub status before the
+// backend has rejected the action.
 type PRAuthPromptState =
   | ({ purpose: "create_pr" } & PRAuthInterceptDetails)
   | ({ purpose: "push_changes" } & PRAuthInterceptDetails)
@@ -365,7 +454,7 @@ function prErrorTitle(snapshotState: PRSnapshotState | null, errorCode?: string)
   return "Couldn't create the PR";
 }
 
-function OverviewTab({ session, members }: { session: Session; members: User[] }) {
+function OverviewTab({ session, members, prStatus }: { session: Session; members: User[]; prStatus?: string | null }) {
   const queryClient = useQueryClient();
   const [showDeviceCodeModal, setShowDeviceCodeModal] = useState(false);
 
@@ -385,8 +474,9 @@ function OverviewTab({ session, members }: { session: Session; members: User[] }
     },
   });
 
-  const status = statusConfig[session.status] || statusConfig.pending;
+  const status = getDisplayStatus(session.status, prStatus);
   const isActive = !terminalSessionStatuses.has(session.status);
+  const originDisplay = getSessionOriginDisplay(session);
 
   const triggeredByMember = session.triggered_by_user_id
     ? members.find((m) => m.id === session.triggered_by_user_id)
@@ -505,6 +595,21 @@ function OverviewTab({ session, members }: { session: Session; members: User[] }
           </span>
         </div>
 
+        {originDisplay && (
+          <div className="flex items-center gap-x-2 gap-y-1 flex-wrap text-xs text-muted-foreground">
+            <Badge variant="outline" className="h-5 rounded-full px-2 text-xs font-medium">
+              {originDisplay.badge}
+            </Badge>
+            <span className="font-medium text-foreground">{originDisplay.title}</span>
+            {originDisplay.detail && (
+              <>
+                <span aria-hidden="true" className="text-muted-foreground/50">·</span>
+                <span>{originDisplay.detail}</span>
+              </>
+            )}
+          </div>
+        )}
+
         {/* Timestamps + audit — secondary reference data, single unified row */}
         <div className="flex items-center gap-x-1.5 gap-y-1 flex-wrap text-xs text-muted-foreground">
           {terminalSessionStatuses.has(session.status) &&
@@ -560,93 +665,6 @@ function OverviewTab({ session, members }: { session: Session; members: User[] }
         </Card>
       )}
 
-    </div>
-  );
-}
-
-function ValidationTab({ sessionId }: { sessionId: string }) {
-  const { data, isLoading, error } = useQuery({
-    queryKey: ["session", sessionId, "validation"],
-    queryFn: () => api.sessions.getValidation(sessionId).catch((err) => {
-      // 404 means no validation exists yet — treat as empty data, not an error.
-      if (err?.code === "NOT_FOUND") return { data: null };
-      throw err;
-    }),
-  });
-
-  if (isLoading) {
-    return (
-      <div className="flex items-center justify-center py-12">
-        <div className="text-center space-y-2">
-          <Loader2 className="h-5 w-5 animate-spin text-muted-foreground/40 mx-auto" />
-          <p className="text-xs text-muted-foreground">Loading validation...</p>
-        </div>
-      </div>
-    );
-  }
-
-  const validation = data?.data;
-  if (error || !validation) {
-    return (
-      <div className="flex items-center justify-center py-12">
-        <div className="text-center space-y-2 max-w-[280px]">
-          <CheckCircle2 className="h-8 w-8 text-muted-foreground/40 mx-auto" />
-          <p className="text-xs font-medium text-muted-foreground">No validation data</p>
-          <p className="text-xs text-muted-foreground/60">Validation checks will appear here once the session produces results.</p>
-        </div>
-      </div>
-    );
-  }
-
-  const overallStatus = validation.status;
-
-  return (
-    <div className="space-y-4">
-      <div className="flex items-center gap-2">
-        <span className="text-xs font-medium">Overall:</span>
-        {overallStatus === "passed" && (
-          <Badge variant="secondary" className="bg-emerald-50 text-emerald-700 dark:bg-emerald-950/30 dark:text-emerald-400 border-emerald-200/50 dark:border-emerald-800/30">
-            <CheckCircle2 className="mr-1 h-3 w-3" /> Passed
-          </Badge>
-        )}
-        {overallStatus === "failed" && (
-          <Badge variant="secondary" className="bg-destructive/10 text-destructive border-destructive/20">
-            <XCircle className="mr-1 h-3 w-3" /> Failed
-          </Badge>
-        )}
-        {overallStatus !== "passed" && overallStatus !== "failed" && (
-          <Badge variant="secondary">
-            <MinusCircle className="mr-1 h-3 w-3" /> {overallStatus}
-          </Badge>
-        )}
-      </div>
-
-      <Card>
-        <CardContent className="p-0">
-          <Table>
-            <TableHeader>
-              <TableRow className="bg-muted/20">
-                <TableHead>Check</TableHead>
-                <TableHead>Result</TableHead>
-                <TableHead>Details</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {validationChecks.map(({ key, label }) => {
-                const result = validation[key as keyof Validation] as string | null;
-                const details = validation[`${key}_details` as keyof Validation] as string | null;
-                return (
-                  <TableRow key={key}>
-                    <TableCell className="font-medium">{label}</TableCell>
-                    <TableCell>{checkResultBadge(result)}</TableCell>
-                    <TableCell className="text-muted-foreground">{details || "-"}</TableCell>
-                  </TableRow>
-                );
-              })}
-            </TableBody>
-          </Table>
-        </CardContent>
-      </Card>
     </div>
   );
 }
@@ -805,7 +823,13 @@ function SessionComposer({
   repositoryId,
   branch,
   agentType,
+  editableAgentType,
+  editableAgents,
+  onEditableAgentTypeChange,
+  agentUpdatePending,
   targetLabel,
+  unavailableReason,
+  placeholderOverride,
 }: {
   message: string;
   onMessageChange: (value: string) => void;
@@ -840,7 +864,13 @@ function SessionComposer({
   repositoryId?: string;
   branch?: string;
   agentType: string;
+  editableAgentType?: string;
+  editableAgents?: readonly { key: string; label: string }[];
+  onEditableAgentTypeChange?: (nextAgentType: string) => void;
+  agentUpdatePending: boolean;
   targetLabel?: string;
+  unavailableReason?: string;
+  placeholderOverride?: string;
 }) {
   const isMobile = useMediaQuery("(max-width: 767px)");
   const [isTextareaFocused, setIsTextareaFocused] = useState(false);
@@ -851,6 +881,13 @@ function SessionComposer({
     || openComments.length > 0
     || references.length > 0
     || commands.length > 0;
+
+  useEffect(() => {
+    if (isMobile || !canSendMessage) {
+      return;
+    }
+    textareaRef.current?.focus();
+  }, [isMobile, canSendMessage, textareaRef]);
 
   useEffect(() => {
     const el = textareaRef.current;
@@ -1093,13 +1130,18 @@ function SessionComposer({
 
   const hasContent = message.trim() || attachments.length > 0 || openComments.length > 0;
   const sendDisabled = hasInvalidCommands || !hasContent || !canSendMessage || sendPending;
-  const inactiveSessionMessage = isSnapshotExpired
-    ? "Session environment has expired and can no longer be continued."
-    : "Session is not active.";
+  const defaultUnavailablePlaceholder = isSnapshotExpired
+    ? "Session environment has expired and can no longer be continued"
+    : "Session is not active";
+  const unavailableMessage = unavailableReason ?? (
+    isSnapshotExpired
+      ? "Session environment has expired and can no longer be continued."
+      : "Session is not active."
+  );
   const attachDisabledReason = isUploading
     ? "Uploading attachments..."
     : !canSendMessage
-      ? inactiveSessionMessage
+      ? unavailableMessage
       : undefined;
   const cancelDisabledReason = cancelPending ? "Cancelling session..." : undefined;
   const sendDisabledReason = hasInvalidCommands
@@ -1107,7 +1149,7 @@ function SessionComposer({
     : !hasContent
       ? "Add a message, attachment, or review comment before sending."
       : !canSendMessage
-        ? inactiveSessionMessage
+        ? unavailableMessage
           : sendPending
             ? (planMode ? "Sending plan request..." : "Sending message...")
             : undefined;
@@ -1140,6 +1182,18 @@ function SessionComposer({
     if (pickerOpen && e.key === "Escape") {
       e.preventDefault();
       setTriggerDismissed(true);
+      return;
+    }
+    if (e.key === "Escape" && message.trim().length === 0) {
+      e.preventDefault();
+      e.currentTarget.blur();
+      return;
+    }
+    if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+      e.preventDefault();
+      if (!sendDisabled) {
+        onSend();
+      }
       return;
     }
     if (e.key === "Enter" && !e.shiftKey) {
@@ -1185,6 +1239,24 @@ function SessionComposer({
 
   const settingsControls = (
     <div className="space-y-4">
+      {editableAgents && editableAgents.length > 0 && editableAgentType && onEditableAgentTypeChange && (
+        <div className="space-y-2">
+          <Label className="text-xs uppercase tracking-[0.14em] text-muted-foreground">Agent</Label>
+          <Select value={editableAgentType} onValueChange={onEditableAgentTypeChange} disabled={agentUpdatePending}>
+            <SelectTrigger className="h-11 rounded-xl border-border/70 bg-background text-sm" aria-label="Agent">
+              <SelectValue placeholder="Select agent" />
+            </SelectTrigger>
+            <SelectContent>
+              {editableAgents.map((agent) => (
+                <SelectItem key={agent.key} value={agent.key}>
+                  {agent.label}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+      )}
+
       {availableModels.length > 0 && (
         <div className="space-y-2">
           <Label className="text-xs uppercase tracking-[0.14em] text-muted-foreground">Model</Label>
@@ -1321,15 +1393,15 @@ function SessionComposer({
             onKeyUp={(e) => setCaretPosition(e.currentTarget.selectionStart ?? message.length)}
             onSelect={(e) => setCaretPosition(e.currentTarget.selectionStart ?? message.length)}
             placeholder={
-              isSnapshotExpired
-                ? "Session environment has expired and can no longer be continued"
-                : !canSendMessage
-                  ? "Session is not active"
+              placeholderOverride ?? (
+                !canSendMessage
+                  ? unavailableReason ?? defaultUnavailablePlaceholder
                   : planMode
                     ? "Describe what you want to plan..."
                     : targetLabel
                       ? `Send a message to ${targetLabel}...`
                       : "Send a follow-up message..."
+              )
             }
             disabled={!canSendMessage || sendPending}
             rows={isMobile ? 1 : undefined}
@@ -1571,6 +1643,21 @@ function SessionComposer({
                   </Select>
                 )}
 
+                {editableAgents && editableAgents.length > 0 && editableAgentType && onEditableAgentTypeChange && (
+                  <Select value={editableAgentType} onValueChange={onEditableAgentTypeChange} disabled={agentUpdatePending}>
+                    <SelectTrigger className="h-8 w-auto gap-1.5 border-none bg-transparent px-2 text-xs text-muted-foreground shadow-none hover:text-foreground focus:ring-0" aria-label="Agent">
+                      <SelectValue placeholder="Agent" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {editableAgents.map((agent) => (
+                        <SelectItem key={agent.key} value={agent.key}>
+                          {agent.label}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                )}
+
                 {isClaudeCode && canSendMessage && !planMode && (
                   <button
                     onClick={() => onPlanModeChange(true)}
@@ -1732,26 +1819,31 @@ type ChatPanelProps = {
   sessionId: string;
   activeThread?: SessionThread;
   isActive: boolean;
+  viewerScope: SessionScrollViewerScope | null;
   optimisticMessages: SessionMessage[];
   onDiffClick?: () => void;
   onApprovePlan?: () => void;
   onAdjustPlan?: () => void;
   onRegisterScrollToLiveEdge?: (scrollToLiveEdge: (() => void) | null) => void;
+  onRegisterKeyboardControls?: (controls: SessionTranscriptKeyboardControls | null) => void;
 };
+
+type SessionTranscriptKeyboardControls = NonNullable<UseSessionKeyboardShortcutsOptions["transcript"]>;
 
 function ChatPanel({
   session,
   sessionId,
   activeThread,
   isActive,
+  viewerScope,
   optimisticMessages,
   onDiffClick,
   onApprovePlan,
   onAdjustPlan,
   onRegisterScrollToLiveEdge,
+  onRegisterKeyboardControls,
 }: ChatPanelProps) {
   const queryClient = useQueryClient();
-  const { user } = useAuth();
   const [streamedLogs, setStreamedLogs] = useState<SessionLog[]>([]);
   const scrollRef = useRef<HTMLDivElement>(null);
   const isNearBottomRef = useRef(false);
@@ -1763,10 +1855,6 @@ function ChatPanel({
   const apiBase = process.env.NEXT_PUBLIC_API_URL || "";
   const [showJumpToLatest, setShowJumpToLatest] = useState(false);
   const isDocumentVisible = useDocumentVisible();
-  const viewerScope = useMemo(
-    () => (user ? { userId: user.id, orgId: user.org_id } : null),
-    [user],
-  );
 
   const activeThreadId = activeThread?.id;
   const isRunning = activeThread ? activeThread.status === "running" : session.status === "running";
@@ -1943,6 +2031,41 @@ function ChatPanel({
     setShowJumpToLatest(false);
   }, [scrollToLiveEdgePosition]);
 
+  const focusTranscript = useCallback(() => {
+    scrollRef.current?.focus({ preventScroll: true });
+  }, []);
+
+  const scrollTranscriptByStep = useCallback((direction: 1 | -1) => {
+    const el = scrollRef.current;
+    if (!el) return;
+    el.scrollBy?.({ top: direction * TRANSCRIPT_STEP_PX, behavior: "smooth" });
+    if (typeof el.scrollBy !== "function") {
+      el.scrollTop += direction * TRANSCRIPT_STEP_PX;
+    }
+  }, []);
+
+  const scrollTranscriptByPage = useCallback((direction: 1 | -1) => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const distance = Math.max(
+      TRANSCRIPT_PAGE_MIN_PX,
+      Math.floor(el.clientHeight * TRANSCRIPT_PAGE_VIEWPORT_RATIO),
+    );
+    el.scrollBy?.({ top: direction * distance, behavior: "smooth" });
+    if (typeof el.scrollBy !== "function") {
+      el.scrollTop += direction * distance;
+    }
+  }, []);
+
+  const scrollTranscriptToTop = useCallback(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    el.scrollTo?.({ top: 0, behavior: "smooth" });
+    if (typeof el.scrollTo !== "function") {
+      el.scrollTop = 0;
+    }
+  }, []);
+
   const getEntryContainerProps = useCallback(
     (_entry: TimelineEntry, index: number) =>
       ({
@@ -1955,6 +2078,24 @@ function ChatPanel({
     onRegisterScrollToLiveEdge?.(scrollToLiveEdge);
     return () => onRegisterScrollToLiveEdge?.(null);
   }, [onRegisterScrollToLiveEdge, scrollToLiveEdge]);
+
+  useEffect(() => {
+    onRegisterKeyboardControls?.({
+      focus: focusTranscript,
+      scrollByStep: scrollTranscriptByStep,
+      scrollByPage: scrollTranscriptByPage,
+      scrollToTop: scrollTranscriptToTop,
+      scrollToLatest: scrollToLiveEdge,
+    });
+    return () => onRegisterKeyboardControls?.(null);
+  }, [
+    focusTranscript,
+    onRegisterKeyboardControls,
+    scrollToLiveEdge,
+    scrollTranscriptByPage,
+    scrollTranscriptByStep,
+    scrollTranscriptToTop,
+  ]);
 
   // SSE streaming for real-time logs when the session is active.
   const mergeLogs = useCallback((newLogs: SessionLog[]) => {
@@ -2162,7 +2303,14 @@ function ChatPanel({
         </div>
       )}
       {/* Unified timeline */}
-      <div ref={scrollRef} onScroll={handleScroll} className="flex-1 overflow-y-auto space-y-2 p-4">
+      <div
+        ref={scrollRef}
+        onScroll={handleScroll}
+        tabIndex={0}
+        aria-label="Session conversation"
+        data-session-transcript-scroll="true"
+        className="flex-1 overflow-y-auto space-y-2 p-4 outline-none focus-visible:ring-2 focus-visible:ring-ring/30"
+      >
         {showLoadingSkeleton ? (
           <SessionTimelineSkeleton />
         ) : (
@@ -2206,11 +2354,14 @@ function sameDiffStats(
 function areChatPanelPropsEqual(previous: ChatPanelProps, next: ChatPanelProps): boolean {
   return previous.sessionId === next.sessionId &&
     previous.isActive === next.isActive &&
+    previous.viewerScope?.userId === next.viewerScope?.userId &&
+    previous.viewerScope?.orgId === next.viewerScope?.orgId &&
     previous.optimisticMessages === next.optimisticMessages &&
     previous.onDiffClick === next.onDiffClick &&
     previous.onApprovePlan === next.onApprovePlan &&
     previous.onAdjustPlan === next.onAdjustPlan &&
     previous.onRegisterScrollToLiveEdge === next.onRegisterScrollToLiveEdge &&
+    previous.onRegisterKeyboardControls === next.onRegisterKeyboardControls &&
     previous.session.id === next.session.id &&
     previous.session.status === next.session.status &&
     previous.session.sandbox_state === next.session.sandbox_state &&
@@ -2234,9 +2385,16 @@ const MIN_DETAIL = 280;
 const MAX_DETAIL = 600;
 const DEFAULT_DETAIL = 384;
 const MOBILE_REVIEW_MEDIA_QUERY = "(max-width: 767px)";
+// Transcript keyboard scroll tuning. Step matches a comfortable line-pair
+// jump; page distance follows browser conventions (~85% viewport with a
+// floor for very short panels).
+const TRANSCRIPT_STEP_PX = 72;
+const TRANSCRIPT_PAGE_MIN_PX = 160;
+const TRANSCRIPT_PAGE_VIEWPORT_RATIO = 0.85;
 
 export function SessionDetailContent({ id }: { id: string }) {
   const router = useRouter();
+  const { user, isLoading: isAuthLoading } = useAuth();
   const terminalStatuses = new Set(["completed", "pr_created", "failed", "cancelled", "skipped"]);
   const [reviewParam, setReviewParam] = useQueryState("review");
   const [previewParam, setPreviewParam] = useQueryState("preview");
@@ -2253,6 +2411,8 @@ export function SessionDetailContent({ id }: { id: string }) {
   // matchMedia needed).
   const [mobileDetailOpen, setMobileDetailOpen] = useState(false);
   const [mobileReviewComposerOpen, setMobileReviewComposerOpen] = useState(false);
+  const [mobileRenameOpen, setMobileRenameOpen] = useState(false);
+  const [keyboardHelpOpen, setKeyboardHelpOpen] = useState(false);
   const [detailWidth, setDetailWidth] = useState(DEFAULT_DETAIL);
   const [activeFileIndex, setActiveFileIndex] = useState(0);
   const [isEditingTitle, setIsEditingTitle] = useState(false);
@@ -2355,11 +2515,23 @@ export function SessionDetailContent({ id }: { id: string }) {
     queryFn: () => api.team.listMembers(),
   });
 
+  const viewerScope = useMemo<SessionScrollViewerScope | null>(
+    () => (user ? { userId: user.id, orgId: getActiveOrgId() ?? user.org_id } : null),
+    [user],
+  );
   const session = data?.data;
   const members = membersData?.data ?? [];
   const threads = useMemo(() => session?.threads ?? [], [session?.threads]);
   const [activeThreadId, setActiveThreadId] = useState<string | null>(null);
-  const activeThread = threads.find((thread) => thread.id === activeThreadId) ?? threads[0];
+  const [hasResolvedInitialThreadSelection, setHasResolvedInitialThreadSelection] = useState(false);
+  const [viewedThreadIds, setViewedThreadIds] = useState<Set<string>>(() => (
+    typeof window === "undefined" ? new Set() : readStoredViewedThreadIds(window.localStorage, id)
+  ));
+  const [viewedThreadIdsLoadedForSessionId, setViewedThreadIdsLoadedForSessionId] = useState<string | null>(() => (
+    typeof window === "undefined" ? null : id
+  ));
+  const activeThread = threads.find((thread) => thread.id === activeThreadId) ?? null;
+  const activeThreadIndex = activeThread ? threads.findIndex((thread) => thread.id === activeThread.id) : -1;
   const isActive = session ? !terminalStatuses.has(session.status) : false;
   const isRunning = session?.status === "running";
   const currentTitle = session ? sessionTitle(session) : "";
@@ -2369,20 +2541,92 @@ export function SessionDetailContent({ id }: { id: string }) {
   const [optimisticMessages, setOptimisticMessages] = useState<PendingFollowUpMessage[]>([]);
 
   useEffect(() => {
+    setHasResolvedInitialThreadSelection(false);
+    setActiveThreadId(null);
+  }, [id]);
+
+  useEffect(() => {
+    if (!session) {
+      return;
+    }
+
     if (threads.length === 0) {
       if (activeThreadId !== null) {
         setActiveThreadId(null);
       }
+      if (!hasResolvedInitialThreadSelection) {
+        setHasResolvedInitialThreadSelection(true);
+      }
       return;
     }
+
+    if (!hasResolvedInitialThreadSelection) {
+      if (!viewerScope || typeof window === "undefined") {
+        if (isAuthLoading) {
+          return;
+        }
+        setHasResolvedInitialThreadSelection(true);
+        setActiveThreadId(threads[0].id);
+        return;
+      }
+
+      const storedThreadId = readStoredSessionActiveThread(window.localStorage, id, viewerScope);
+      const nextThreadId = resolveInitialSessionThreadId(threads, storedThreadId);
+      setHasResolvedInitialThreadSelection(true);
+      if (activeThreadId !== nextThreadId) {
+        setActiveThreadId(nextThreadId);
+      }
+      return;
+    }
+
     if (!activeThreadId || !threads.some((thread) => thread.id === activeThreadId)) {
       setActiveThreadId(threads[0].id);
     }
-  }, [activeThreadId, threads]);
+  }, [activeThreadId, hasResolvedInitialThreadSelection, id, isAuthLoading, session, threads, viewerScope]);
+
+  useEffect(() => {
+    if (!hasResolvedInitialThreadSelection || !viewerScope || !activeThreadId || typeof window === "undefined") {
+      return;
+    }
+
+    writeStoredSessionActiveThread(window.localStorage, id, viewerScope, activeThreadId);
+  }, [activeThreadId, hasResolvedInitialThreadSelection, id, viewerScope]);
 
   useEffect(() => {
     setOptimisticMessages([]);
   }, [id]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+    setViewedThreadIds(readStoredViewedThreadIds(window.localStorage, id));
+    setViewedThreadIdsLoadedForSessionId(id);
+  }, [id]);
+
+  useEffect(() => {
+    if (!activeThread?.id) {
+      return;
+    }
+    setViewedThreadIds((current) => {
+      if (current.has(activeThread.id)) {
+        return current;
+      }
+      return new Set(current).add(activeThread.id);
+    });
+  }, [activeThread?.id]);
+
+  useEffect(() => {
+    if (typeof window === "undefined" || viewedThreadIdsLoadedForSessionId !== id) {
+      return;
+    }
+    const visibleThreadIDs = new Set(threads.map((thread) => thread.id));
+    writeStoredViewedThreadIds(
+      window.localStorage,
+      id,
+      [...viewedThreadIds].filter((threadId) => visibleThreadIDs.has(threadId)),
+    );
+  }, [id, threads, viewedThreadIds, viewedThreadIdsLoadedForSessionId]);
 
   type SendMutationArgs = {
     activeThreadId?: string;
@@ -2392,6 +2636,10 @@ export function SessionDetailContent({ id }: { id: string }) {
       references?: SessionInputReference[];
       commands?: SessionInputCommand[];
       planMode?: boolean;
+    };
+    editableThreadUpdate?: {
+      label: string;
+      model: string | null;
     };
     model?: string;
     resolvedIDs: string[];
@@ -2459,11 +2707,14 @@ export function SessionDetailContent({ id }: { id: string }) {
   });
   const prHealth = prHealthData?.data;
   const prStatus = prData?.data?.status;
-  const closedPRNumber = prData?.data?.github_pr_number;
+  const prNumber = prData?.data?.github_pr_number;
+  const closedPRNumber = prNumber;
+  const closedPRLabel = closedPRNumber ? `PR #${closedPRNumber} closed` : "PR closed";
   const closedPRSummary = closedPRNumber
     ? `PR #${closedPRNumber} was closed without merging.`
     : "This pull request was closed without merging.";
-  const mergedPRNumber = prData?.data?.github_pr_number;
+  const mergedPRNumber = prNumber;
+  const mergedPRLabel = mergedPRNumber ? `PR #${mergedPRNumber} merged` : "PR merged";
   const mergedPRSummary = mergedPRNumber
     ? `PR #${mergedPRNumber} was merged successfully.`
     : "This pull request was merged successfully.";
@@ -2548,9 +2799,8 @@ export function SessionDetailContent({ id }: { id: string }) {
       setRepairActionError(null);
       setPendingPRAction(action);
     },
-    onSuccess: (response) => {
-      setPendingPRAction(null);
-      void queryClient.invalidateQueries({ queryKey: ["pull-request", pullRequestId, "health"] });
+    onSuccess: async (response) => {
+      const repairHealthQueryKey = ["pull-request", pullRequestId, "health"];
       void queryClient.invalidateQueries({ queryKey: ["session", id] });
       void queryClient.invalidateQueries({ queryKey: ["session", id, "timeline"] });
       void queryClient.invalidateQueries({ queryKey: ["session", id, "pr"] });
@@ -2558,6 +2808,11 @@ export function SessionDetailContent({ id }: { id: string }) {
       if (response.data.session_id !== id) {
         router.push(`/sessions/${response.data.session_id}`);
         return;
+      }
+      try {
+        await queryClient.refetchQueries({ queryKey: repairHealthQueryKey, type: "active" });
+      } finally {
+        setPendingPRAction(null);
       }
       // Same-session response: without explicit feedback the click looks
       // dead. Reused-in-flight is the common case (repair already running on
@@ -2597,7 +2852,7 @@ export function SessionDetailContent({ id }: { id: string }) {
       void queryClient.invalidateQueries({ queryKey: ["session", id] });
       void queryClient.invalidateQueries({ queryKey: ["session", id, "pr"] });
       void queryClient.invalidateQueries({ queryKey: ["sessions"] });
-      toast.success("PR merged", prUrl ? {
+      toast.success(mergedPRLabel, prUrl ? {
         action: { label: "View \u2197", onClick: () => window.open(prUrl, "_blank", "noopener,noreferrer") },
       } : undefined);
     },
@@ -2646,6 +2901,7 @@ export function SessionDetailContent({ id }: { id: string }) {
           return;
         }
 
+        void queryClient.invalidateQueries({ queryKey: ["session", id, "pr"] });
         void queryClient.invalidateQueries({ queryKey: ["pull-request", pullRequestId, "health"] });
       });
       eventSource.onerror = () => {
@@ -2669,7 +2925,7 @@ export function SessionDetailContent({ id }: { id: string }) {
         clearTimeout(reconnectTimer);
       }
     };
-  }, [apiBase, prData?.data?.status, pullRequestId, queryClient, isDocumentVisible]);
+  }, [apiBase, prData?.data?.status, pullRequestId, queryClient, isDocumentVisible, id]);
   const previousSessionStatusRef = useRef<string | undefined>(undefined);
   useEffect(() => {
     const currentStatus = session?.status;
@@ -2913,9 +3169,17 @@ export function SessionDetailContent({ id }: { id: string }) {
   const [newThreadAgentType, setNewThreadAgentType] = useState("codex");
   const [newThreadModel, setNewThreadModel] = useState("");
   const [newThreadLabel, setNewThreadLabel] = useState("");
+  const focusComposerAfterThreadCreateRef = useRef(false);
+  const addTabButtonRef = useRef<HTMLButtonElement>(null);
   const composerTextareaRef = useRef<HTMLTextAreaElement>(null);
   const composerUploadInputRef = useRef<HTMLInputElement>(null);
+  // Tracks an in-flight agent-switch PATCH so the send-time PATCH can wait
+  // for it before issuing its own update. Without this, a fast send right
+  // after toggling the agent dropdown can race the agent-switch PATCH and
+  // overwrite the new agent_type with the send-time {label, model} body.
+  const inFlightAgentUpdateRef = useRef<Promise<unknown> | null>(null);
   const chatPanelScrollToLiveEdgeRef = useRef<(() => void) | null>(null);
+  const [chatPanelKeyboardControls, setChatPanelKeyboardControls] = useState<SessionTranscriptKeyboardControls | null>(null);
   // Open comments are the source of truth for what gets attached to the next
   // message — once a send succeeds, the backend marks them resolved in the
   // same transaction, the comments query is invalidated below, and the next
@@ -2925,17 +3189,22 @@ export function SessionDetailContent({ id }: { id: string }) {
     () => comments.filter((comment) => !comment.resolved).slice(0, MAX_RESOLVE_REVIEW_COMMENTS_PER_MESSAGE),
     [comments],
   );
+  const isRestoringActiveThread = threads.length > 0 && activeThread === null;
   // Composer gating: messages may be sent at any point while the session or
   // thread is running. The backend queues mid-turn sends and the orchestrator
   // drains the queue once the in-flight turn completes. Pending/skipped at
   // the session level and a destroyed sandbox still block — those are
   // genuinely unrecoverable, not just busy.
-  const composerCanSendMessage = session?.status !== "skipped" &&
+  const composerCanSendMessage = !isRestoringActiveThread &&
+    session?.status !== "skipped" &&
     session?.status !== "pending" &&
     session?.sandbox_state !== "destroyed";
+  const composerUnavailableReason = isRestoringActiveThread ? "Thread is still loading." : undefined;
+  const composerPlaceholderOverride = isRestoringActiveThread ? "Loading thread..." : undefined;
   const composerIsRunning = activeThread ? activeThread.status === "running" : session?.status === "running";
   const composerIsSnapshotExpired = session?.sandbox_state === "destroyed";
   const composerAgentType = activeThread?.agent_type ?? session?.agent_type ?? "codex";
+  const activeThreadIsEditable = !!activeThread && activeThread.status === "idle" && activeThread.current_turn === 0;
   const composerIsClaudeCode = composerAgentType === "claude_code";
   const composerLacksHeadlessResume = AGENTS_BY_KEY[composerAgentType]?.lacksHeadlessResume ?? false;
   const composerAvailableModels = useMemo(() => {
@@ -2945,11 +3214,34 @@ export function SessionDetailContent({ id }: { id: string }) {
     const agentType = AGENTS.find((agent) => agent.key === composerAgentType);
     return agentType?.models ?? [];
   }, [composerAgentType, session]);
-  const composerTargetLabel = activeThread
-    ? agentDisplayLabel(activeThread.agent_type)
-    : (session ? agentDisplayLabel(session.agent_type) : "agent");
   const selectedNewThreadAgent = AGENTS_BY_KEY[newThreadAgentType] ?? AGENTS[0];
   const selectedNewThreadModels = selectedNewThreadAgent?.models ?? [];
+  const activeThreadLabel = activeThread?.label ?? (session ? AGENTS_BY_KEY[session.agent_type]?.label ?? session.agent_type : "agent");
+  const buildThreadLabelForAgent = useCallback((agentType: string) => {
+    const agent = AGENTS_BY_KEY[agentType] ?? AGENTS[0];
+    const ordinal = activeThreadIndex >= 0 ? activeThreadIndex + 1 : threads.length + 1;
+    return `${agent.label} ${ordinal}`;
+  }, [activeThreadIndex, threads.length]);
+  const buildDefaultThreadRequest = useCallback(() => {
+    const agentType = activeThread?.agent_type ?? session?.agent_type ?? "codex";
+    const agent = AGENTS_BY_KEY[agentType] ?? AGENTS[0];
+    return {
+      agent_type: agent.key,
+      model: activeThread?.agent_type === agent.key ? activeThread.model_override : undefined,
+      label: `${agent.label} ${threads.length + 1}`,
+    };
+  }, [activeThread?.agent_type, activeThread?.model_override, session?.agent_type, threads.length]);
+  const buildDialogThreadRequest = useCallback(() => {
+    const agent = AGENTS_BY_KEY[newThreadAgentType] ?? AGENTS[0];
+    return {
+      agent_type: agent.key,
+      model: newThreadModel || undefined,
+      label: newThreadLabel.trim() || `${agent.label} ${threads.length + 1}`,
+    };
+  }, [newThreadAgentType, newThreadLabel, newThreadModel, threads.length]);
+  const pendingEditableThreadUpdate = useMemo(() => {
+    return getPendingEditableThreadUpdate(activeThread ?? undefined, activeThreadIsEditable, composerSelectedModel);
+  }, [activeThread, activeThreadIsEditable, composerSelectedModel]);
 
   async function uploadComposerFiles(files: File[]) {
     if (files.length === 0) return;
@@ -2989,20 +3281,37 @@ export function SessionDetailContent({ id }: { id: string }) {
   }, []);
 
   const sendMutation = useMutation({
-    mutationFn: (vars: SendMutationArgs) => {
+    mutationFn: async (vars: SendMutationArgs) => {
       if (vars.activeThreadId) {
-        return api.sessions.sendThreadMessage(id, vars.activeThreadId, {
+        // Drain a pending agent-switch PATCH first so the send-time PATCH
+        // doesn't clobber the new agent_type. Swallow its rejection — the
+        // agent-switch mutation already surfaces its own toast.
+        if (inFlightAgentUpdateRef.current) {
+          try {
+            await inFlightAgentUpdateRef.current;
+          } catch {
+            // already surfaced by the agent-switch mutation
+          }
+        }
+        if (vars.editableThreadUpdate) {
+          await updateThreadMutation.mutateAsync({
+            threadId: vars.activeThreadId,
+            body: vars.editableThreadUpdate,
+          });
+        }
+        const response = await api.sessions.sendThreadMessage(id, vars.activeThreadId, {
           ...vars.body,
           resolveReviewCommentIDs: vars.resolvedIDs.length > 0 ? vars.resolvedIDs : undefined,
-        })
-          .then((response) => ({ response, resolvedIDs: vars.resolvedIDs }));
+        });
+        return { response, resolvedIDs: vars.resolvedIDs };
       }
 
-      return api.sessions.sendMessage(id, {
+      const response = await api.sessions.sendMessage(id, {
         ...vars.body,
         model: vars.model,
         resolveReviewCommentIDs: vars.resolvedIDs.length > 0 ? vars.resolvedIDs : undefined,
-      }).then((response) => ({ response, resolvedIDs: vars.resolvedIDs }));
+      });
+      return { response, resolvedIDs: vars.resolvedIDs };
     },
     onMutate: (vars) => {
       setComposerUploadError(null);
@@ -3109,6 +3418,7 @@ export function SessionDetailContent({ id }: { id: string }) {
 
   const queueSend = useCallback((opts: { planMode?: boolean; overrideMessage?: string } = {}) => {
     if (!session) return;
+    if (threads.length > 0 && !activeThread) return;
 
     const draftMessage = opts.overrideMessage ?? composerMessage;
     const userFacingMessage = attachedReviewComments.length > 0
@@ -3129,6 +3439,7 @@ export function SessionDetailContent({ id }: { id: string }) {
         commands: composerCommands.length > 0 ? composerCommands : undefined,
         planMode: isPlanRequest,
       },
+      editableThreadUpdate: activeThread?.id ? pendingEditableThreadUpdate : undefined,
       model: composerSelectedModel || undefined,
       resolvedIDs,
       optimisticMessage: {
@@ -3165,8 +3476,10 @@ export function SessionDetailContent({ id }: { id: string }) {
     composerSelectedModel,
     filteredFiles,
     id,
+    pendingEditableThreadUpdate,
     session,
     sendMutation,
+    threads.length,
   ]);
   const queueSendRef = useRef(queueSend);
   const composerCanSendMessageRef = useRef(composerCanSendMessage);
@@ -3202,6 +3515,31 @@ export function SessionDetailContent({ id }: { id: string }) {
     },
     onError: (err) => {
       toast.error(err instanceof Error ? err.message : "Failed to cancel tab");
+    },
+  });
+  const archiveThreadMutation = useMutation({
+    mutationFn: (threadId: string) => api.sessions.archiveThread(id, threadId),
+    onSuccess: (response, archivedThreadID) => {
+      queryClient.setQueryData<SingleResponse<SessionDetail>>(["session", id], (existing) => {
+        if (!existing) return existing;
+        const existingThreads = existing.data.threads ?? [];
+        return {
+          ...existing,
+          data: {
+            ...existing.data,
+            threads: existingThreads.filter((thread) => thread.id !== archivedThreadID),
+          },
+        };
+      });
+      if (activeThreadId === archivedThreadID) {
+        const fallback = threads.find((thread) => thread.id !== archivedThreadID);
+        setActiveThreadId(fallback?.id ?? null);
+      }
+      queryClient.invalidateQueries({ queryKey: ["session", id] });
+      toast.success(`Closed ${response.data.label}`);
+    },
+    onError: (err) => {
+      toast.error(err instanceof Error ? err.message : "Failed to close tab");
     },
   });
   const forkThreadMutation = useMutation({
@@ -3294,15 +3632,7 @@ export function SessionDetailContent({ id }: { id: string }) {
   }, [activeFileIndex, visibleFilteredFiles.length]);
 
   const createThreadMutation = useMutation({
-    mutationFn: () => {
-      const agent = AGENTS_BY_KEY[newThreadAgentType] ?? AGENTS[0];
-      const label = newThreadLabel.trim() || `${agent.label} ${threads.length + 1}`;
-      return api.sessions.createThread(id, {
-        agent_type: agent.key,
-        model: newThreadModel || undefined,
-        label,
-      });
-    },
+    mutationFn: (body: { agent_type: string; model?: string; label: string }) => api.sessions.createThread(id, body),
     onSuccess: (response) => {
       queryClient.setQueryData<SingleResponse<SessionDetail>>(["session", id], (existing) => {
         if (!existing) return existing;
@@ -3315,10 +3645,12 @@ export function SessionDetailContent({ id }: { id: string }) {
           },
         };
       });
-      setActiveThreadId(response.data.id);
+      focusComposerAfterThreadCreateRef.current = true;
       setAddThreadOpen(false);
       setNewThreadLabel("");
       setNewThreadModel("");
+      setActiveThreadId(response.data.id);
+      setComposerSelectedModel(getInitialComposerSelectedModel(response.data));
       queryClient.invalidateQueries({ queryKey: ["session", id] });
     },
     onError: (err) => {
@@ -3327,8 +3659,77 @@ export function SessionDetailContent({ id }: { id: string }) {
   });
 
   useEffect(() => {
+    if (!focusComposerAfterThreadCreateRef.current) {
+      return;
+    }
+
+    const rafID = window.requestAnimationFrame(() => {
+      focusComposerAfterThreadCreateRef.current = false;
+      const shouldFocusComposer = session?.agent_type !== "pm_agent"
+        && composerCanSendMessage
+        && composerTextareaRef.current !== null
+        && !composerTextareaRef.current.disabled;
+
+      if (shouldFocusComposer) {
+        composerTextareaRef.current?.focus();
+        return;
+      }
+
+      addTabButtonRef.current?.focus();
+    });
+
+    return () => window.cancelAnimationFrame(rafID);
+  }, [activeThread?.id, composerCanSendMessage, session?.agent_type]);
+
+  useEffect(() => {
     setNewThreadModel("");
   }, [newThreadAgentType]);
+
+  const updateThreadMutation = useMutation({
+    mutationFn: (vars: { threadId: string; body: { agent_type?: string; model?: string | null; label: string } }) =>
+      api.sessions.updateThread(id, vars.threadId, vars.body),
+    onSuccess: (response) => {
+      queryClient.setQueryData<SingleResponse<SessionDetail>>(["session", id], (existing) => {
+        if (!existing) return existing;
+        const existingThreads = existing.data.threads ?? [];
+        return {
+          ...existing,
+          data: {
+            ...existing.data,
+            threads: existingThreads.map((thread) => thread.id === response.data.id ? response.data : thread),
+          },
+        };
+      });
+    },
+    onError: (err) => {
+      toast.error(err instanceof Error ? err.message : "Failed to update tab");
+    },
+  });
+
+  const handleEditableAgentTypeChange = useCallback((nextAgentType: string) => {
+    if (!activeThread || !activeThreadIsEditable || nextAgentType === activeThread.agent_type) {
+      return;
+    }
+    setComposerPlanMode(false);
+    setComposerSelectedModel("");
+    // Only regenerate the label if it matches the autogenerated shape
+    // exactly — `${agent.label} <ordinal>`. A `startsWith` check would
+    // wrongly rename user-customized labels like "Codex deep dive".
+    const currentAgent = AGENTS_BY_KEY[activeThread.agent_type];
+    const autogenSuffix = currentAgent ? activeThread.label.slice(currentAgent.label.length + 1) : "";
+    const looksAutogenerated = !!currentAgent
+      && activeThread.label.startsWith(`${currentAgent.label} `)
+      && /^\d+$/.test(autogenSuffix);
+    const nextLabel = looksAutogenerated ? buildThreadLabelForAgent(nextAgentType) : activeThread.label;
+    const promise = updateThreadMutation.mutateAsync({
+      threadId: activeThread.id,
+      body: {
+        agent_type: nextAgentType,
+        label: nextLabel,
+      },
+    });
+    trackInFlightAgentUpdate(inFlightAgentUpdateRef, promise);
+  }, [activeThread, activeThreadIsEditable, buildThreadLabelForAgent, updateThreadMutation]);
 
   const handleApprovePlan = useCallback(() => {
     if (!composerCanSendMessageRef.current || sendPendingRef.current) return;
@@ -3349,9 +3750,11 @@ export function SessionDetailContent({ id }: { id: string }) {
   const registerChatPanelScrollToLiveEdge = useCallback((scrollToLiveEdge: (() => void) | null) => {
     chatPanelScrollToLiveEdgeRef.current = scrollToLiveEdge;
   }, []);
+  const registerChatPanelKeyboardControls = useCallback((controls: SessionTranscriptKeyboardControls | null) => {
+    setChatPanelKeyboardControls(controls);
+  }, []);
 
   const changesCount = diffStats?.filesChanged;
-  const showValidationTab = !session?.triggered_by_user_id;
   const detailTabsRef = useRef<HTMLDivElement>(null);
   const [detailTabsOverflow, setDetailTabsOverflow] = useState(false);
 
@@ -3391,7 +3794,6 @@ export function SessionDetailContent({ id }: { id: string }) {
     session?.id,
     session?.pr_creation_error,
     session?.pr_creation_state,
-    showValidationTab,
   ]);
   const isDedicatedMobileReview = centerMode === "review" && isMobileReviewViewport;
 
@@ -3400,6 +3802,126 @@ export function SessionDetailContent({ id }: { id: string }) {
       setMobileReviewComposerOpen(false);
     }
   }, [isDedicatedMobileReview]);
+
+  const focusActiveDetailTab = useCallback(() => {
+    requestAnimationFrame(() => {
+      detailTabsRef.current?.querySelector<HTMLElement>('[role="tab"][data-state="active"]')?.focus();
+    });
+  }, []);
+
+  const toggleDetailsFromKeyboard = useCallback(() => {
+    if (centerMode === "review" && showDetailPanel) {
+      return;
+    }
+    if (isMobileReviewViewport) {
+      setMobileDetailOpen((open) => !open);
+      focusActiveDetailTab();
+      return;
+    }
+    setShowDetailPanel((open) => !open);
+    if (!showDetailPanel) {
+      focusActiveDetailTab();
+    }
+  }, [centerMode, focusActiveDetailTab, isMobileReviewViewport, showDetailPanel]);
+
+  const closeDetailsFromKeyboard = useCallback(() => {
+    if (isMobileReviewViewport) {
+      setMobileDetailOpen(false);
+      return;
+    }
+    if (!(centerMode === "review" && showDetailPanel)) {
+      setShowDetailPanel(false);
+    }
+  }, [centerMode, isMobileReviewViewport, showDetailPanel]);
+
+  const focusComposerFromKeyboard = useCallback(() => {
+    composerTextareaRef.current?.focus();
+    composerTextareaRef.current?.scrollIntoView({ block: "nearest" });
+  }, []);
+
+  const ghBlocked = ghStatus?.pr_authorship_mode === "user_required" && !ghStatus?.connected;
+
+  const createPRFromKeyboard = useCallback(() => {
+    if (localPRState !== "idle" || createPRMutation.isPending) {
+      return;
+    }
+    if (ghBlocked) {
+      setPRAuthPrompt({ purpose: "create_pr" });
+      return;
+    }
+    createPRMutation.mutate(undefined);
+  }, [createPRMutation, ghBlocked, localPRState]);
+
+  const pushChangesFromKeyboard = useCallback(() => {
+    if (localPushState !== "idle" || pushChangesMutation.isPending) {
+      return;
+    }
+    if (ghBlocked) {
+      setPRAuthPrompt({ purpose: "push_changes" });
+      return;
+    }
+    pushChangesMutation.mutate(undefined);
+  }, [ghBlocked, localPushState, pushChangesMutation]);
+
+  const viewPRFromKeyboard = useCallback(() => {
+    if (!prData?.data?.github_pr_url) {
+      return;
+    }
+    window.open(prData.data.github_pr_url, "_blank", "noopener,noreferrer");
+  }, [prData?.data?.github_pr_url]);
+
+  useSessionKeyboardShortcuts({
+    enabled: !isLoading && !!session,
+    reviewMode: centerMode === "review",
+    onShowHelp: () => setKeyboardHelpOpen(true),
+    onFocusComposer: focusComposerFromKeyboard,
+    transcript: chatPanelKeyboardControls,
+    agentTabs: threads.length > 0 && activeThreadIndex >= 0 ? {
+      activeIndex: activeThreadIndex,
+      count: threads.length,
+      onChange: (index) => {
+        const next = threads[index];
+        if (next) {
+          setActiveThreadId(next.id);
+          chatPanelKeyboardControls?.focus();
+        }
+      },
+      onAdd: () => {
+        if (!createThreadMutation.isPending) {
+          createThreadMutation.mutate(buildDefaultThreadRequest());
+        }
+      },
+    } : null,
+    details: {
+      open: isMobileReviewViewport ? mobileDetailOpen : showDetailPanel,
+      required: centerMode === "review" && showDetailPanel,
+      activeTab: detailTab,
+      availableTabs: ["overview", "changes", "preview"] as const,
+      onToggle: toggleDetailsFromKeyboard,
+      onClose: closeDetailsFromKeyboard,
+      onTabChange: handleDetailTabClick,
+      onOpenReview: () => {
+        if (visibleDiffFiles.length > 0) {
+          openReview();
+        }
+      },
+      onExitReview: exitReview,
+    },
+    pr: {
+      canCreate: canCreatePR && localPRState === "idle" && !createPRMutation.isPending,
+      canView: !!prData?.data?.github_pr_url,
+      canPush: hasPR && prStatus === "open" && !!session?.has_unpushed_changes && hasSnapshot && !isRunning && localPushState === "idle" && !pushChangesMutation.isPending,
+      canFixTests: !!prHealth?.can_fix_tests && pendingPRAction === null,
+      canResolveConflicts: !!prHealth?.can_resolve_conflicts && pendingPRAction === null,
+      canMerge: prHealthAllowsMerge(prHealth) && pendingPRAction === null,
+      onCreate: createPRFromKeyboard,
+      onView: viewPRFromKeyboard,
+      onPush: pushChangesFromKeyboard,
+      onFixTests: () => startRepairMutation.mutate("fix_tests"),
+      onResolveConflicts: () => startRepairMutation.mutate("resolve_conflicts"),
+      onMerge: handleMergeAction,
+    },
+  });
 
   if (isLoading) {
     return (
@@ -3424,7 +3946,7 @@ export function SessionDetailContent({ id }: { id: string }) {
     );
   }
 
-  const status = statusConfig[session.status] || statusConfig.pending;
+  const status = getDisplayStatus(session.status, prStatus);
   const prState = session.pr_creation_state;
   const snapshotState = classifyPRSnapshotState({
     sessionSnapshotKey: session.snapshot_key,
@@ -3438,7 +3960,6 @@ export function SessionDetailContent({ id }: { id: string }) {
     snapshotState,
     localPRActionError?.code ? localPRActionError.message : session.pr_creation_error,
   );
-  const ghBlocked = ghStatus?.pr_authorship_mode === "user_required" && !ghStatus?.connected;
   const succeededButNoPR = prState === "succeeded" && !hasPR;
   const prActionError = hasPR
     ? null
@@ -3564,6 +4085,16 @@ export function SessionDetailContent({ id }: { id: string }) {
     : showDetailPanel
       ? "Hide details"
       : "Show details";
+  const openAddThreadDialog = () => {
+    setNewThreadAgentType(session.agent_type || "codex");
+    setNewThreadModel("");
+    setNewThreadLabel("");
+    setAddThreadOpen(true);
+  };
+  const openMobileRenameDialog = () => {
+    setDraftTitle(currentTitle);
+    setMobileRenameOpen(true);
+  };
   // Right-panel content. Rendered inline on desktop and inside a bottom sheet
   // on mobile — the same JSX in both places so tab state stays consistent.
   const panelTabsEl = (
@@ -3592,9 +4123,6 @@ export function SessionDetailContent({ id }: { id: string }) {
                   </Badge>
                 )}
               </TabsTrigger>
-              {showValidationTab && (
-                <TabsTrigger value="validation">Validation</TabsTrigger>
-              )}
               <TabsTrigger value="preview">Preview</TabsTrigger>
             </TabsList>
           </div>
@@ -3603,10 +4131,10 @@ export function SessionDetailContent({ id }: { id: string }) {
               <>
                 {prStatus === "closed" && (
                   <Badge variant="secondary" className="h-7 px-2 text-xs">
-                    PR closed
+                    {closedPRLabel}
                   </Badge>
                 )}
-                <Button asChild variant="outline" size="sm" className="h-7 text-xs gap-1.5">
+                <Button asChild variant="outline" size="sm" className="h-7 text-xs gap-1.5" title="View PR (p v)">
                   <a href={prData.data.github_pr_url} target="_blank" rel="noopener noreferrer">
                     <ExternalLink className="h-3 w-3" />
                     View PR
@@ -3620,7 +4148,7 @@ export function SessionDetailContent({ id }: { id: string }) {
                   size="sm"
                   className="h-7 text-xs gap-1.5"
                   disabled={prActionDisabled}
-                  title={prActionTitle}
+                  title={prActionTitle ? `${prActionTitle} (p c)` : `${prActionLabel} (p c)`}
                   onClick={() => createPRMutation.mutate(undefined)}
                 >
                   {prActionSpinning ? (
@@ -3683,12 +4211,14 @@ export function SessionDetailContent({ id }: { id: string }) {
             prHealth ? (
               <PRHealthBanner
                 health={prHealth}
+                currentSessionId={id}
                 pendingAction={pendingPRAction}
                 repairError={repairActionError}
                 mergeAuthRequired={ghBlocked}
                 onFixTests={() => startRepairMutation.mutate("fix_tests")}
                 onResolveConflicts={() => startRepairMutation.mutate("resolve_conflicts")}
                 onMerge={handleMergeAction}
+                onOpenRepairSession={(sessionId) => router.push(`/sessions/${sessionId}`)}
                 pushChanges={showPushAction ? {
                   label: pushActionLabel,
                   disabled: pushActionDisabled,
@@ -3715,7 +4245,7 @@ export function SessionDetailContent({ id }: { id: string }) {
                     <XCircle className="h-4 w-4" />
                   </div>
                   <div className="min-w-0 space-y-1">
-                    <div className="text-sm font-medium text-foreground">PR closed</div>
+                    <div className="text-sm font-medium text-foreground">{closedPRLabel}</div>
                     <p className="text-xs text-foreground">{closedPRSummary}</p>
                     <p className="text-xs text-muted-foreground">
                       This pull request is no longer active. Create a follow-up revision if you want to ship a new attempt.
@@ -3733,7 +4263,7 @@ export function SessionDetailContent({ id }: { id: string }) {
                     <CheckCircle2 className="h-4 w-4" />
                   </div>
                   <div className="min-w-0 space-y-1">
-                    <div className="text-sm font-medium text-foreground">PR merged</div>
+                    <div className="text-sm font-medium text-foreground">{mergedPRLabel}</div>
                     <p className="text-xs text-foreground">{mergedPRSummary}</p>
                     <p className="text-xs text-muted-foreground">
                       This change has landed. Open a follow-up session if you need to make another revision.
@@ -3743,14 +4273,9 @@ export function SessionDetailContent({ id }: { id: string }) {
               </CardContent>
             </Card>
           )}
-          <OverviewTab session={session} members={members} />
+          <OverviewTab session={session} members={members} prStatus={prStatus} />
         </div>
       </TabsContent>
-      {showValidationTab && (
-        <TabsContent value="validation" className="flex-1 overflow-y-auto scrollbar-hide p-4">
-          <ValidationTab sessionId={id} />
-        </TabsContent>
-      )}
       <TabsContent value="preview" className="flex-1 overflow-y-auto scrollbar-hide p-4">
         <PreviewPanel
           sessionId={id}
@@ -3765,139 +4290,160 @@ export function SessionDetailContent({ id }: { id: string }) {
       {/* Center area: chat or review diff view */}
       <div className="flex-1 min-w-0 flex flex-col">
         {!isDedicatedMobileReview ? (
-        <div className="border-b border-border px-4 py-3 bg-background flex items-center justify-between shrink-0">
-          <div className="min-w-0 flex-1 flex items-center gap-2">
-            <MobileBackButton to="/sessions" label="Back to sessions" />
-            {isEditingTitle ? (
+          <>
+            <MobileSessionTopBar
+              sessionTitle={sessionTitle(session)}
+              detailButtonLabel="Open session details"
+              backTo="/sessions"
+              threads={threads}
+              activeThreadId={activeThread?.id ?? null}
+              viewedThreadIds={viewedThreadIds}
+              onOpenDetails={() => setMobileDetailOpen(true)}
+              onActiveThreadChange={setActiveThreadId}
+              onAddThread={openAddThreadDialog}
+              onRenameSession={openMobileRenameDialog}
+              onCancelThread={(tid) => cancelThreadMutation.mutate(tid)}
+              onForkThread={(tid) => forkThreadMutation.mutate(tid)}
+              onRevertThread={(tid) => revertThreadMutation.mutate(tid)}
+              onArchiveThread={(tid) => archiveThreadMutation.mutate(tid)}
+              cancelPendingThreadId={cancelThreadMutation.isPending ? cancelThreadMutation.variables ?? null : null}
+              archivePendingThreadId={archiveThreadMutation.isPending ? archiveThreadMutation.variables ?? null : null}
+            />
+
+            <div className="hidden md:flex border-b border-border px-4 py-3 bg-background items-center justify-between shrink-0">
               <div className="min-w-0 flex-1 flex items-center gap-2">
-                <Input
-                  aria-label="Session title"
-                  value={draftTitle}
-                  onChange={(e) => setDraftTitle(e.target.value)}
-                  className="h-8 max-w-xl"
-                  disabled={updateSessionMutation.isPending}
-                />
-                <DisabledTooltip disabled={!canSaveTitle} content={saveTitleDisabledReason}>
-                  <Button
-                    size="icon"
-                    variant="ghost"
-                    aria-label="Save title"
-                    disabled={!canSaveTitle}
-                    onClick={() => updateSessionMutation.mutate(trimmedDraftTitle)}
-                  >
-                    <Check className="h-4 w-4" />
-                  </Button>
-                </DisabledTooltip>
-                <DisabledTooltip disabled={updateSessionMutation.isPending} content={titleEditPendingReason}>
-                  <Button
-                    size="icon"
-                    variant="ghost"
-                    aria-label="Cancel title"
-                    disabled={updateSessionMutation.isPending}
-                    onClick={() => {
-                      setDraftTitle(currentTitle);
-                      setIsEditingTitle(false);
-                    }}
-                  >
-                    <X className="h-4 w-4" />
-                  </Button>
-                </DisabledTooltip>
+                {isEditingTitle ? (
+                  <div className="min-w-0 flex-1 flex items-center gap-2">
+                    <Input
+                      aria-label="Session title"
+                      value={draftTitle}
+                      onChange={(e) => setDraftTitle(e.target.value)}
+                      className="h-8 max-w-xl"
+                      disabled={updateSessionMutation.isPending}
+                    />
+                    <DisabledTooltip disabled={!canSaveTitle} content={saveTitleDisabledReason}>
+                      <Button
+                        size="icon"
+                        variant="ghost"
+                        aria-label="Save title"
+                        disabled={!canSaveTitle}
+                        onClick={() => updateSessionMutation.mutate(trimmedDraftTitle)}
+                      >
+                        <Check className="h-4 w-4" />
+                      </Button>
+                    </DisabledTooltip>
+                    <DisabledTooltip disabled={updateSessionMutation.isPending} content={titleEditPendingReason}>
+                      <Button
+                        size="icon"
+                        variant="ghost"
+                        aria-label="Cancel title"
+                        disabled={updateSessionMutation.isPending}
+                        onClick={() => {
+                          setDraftTitle(currentTitle);
+                          setIsEditingTitle(false);
+                        }}
+                      >
+                        <X className="h-4 w-4" />
+                      </Button>
+                    </DisabledTooltip>
+                  </div>
+                ) : (
+                  <>
+                    <h1 className="text-sm font-medium text-foreground truncate">
+                      {sessionTitle(session)}
+                    </h1>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="h-8 w-8 shrink-0"
+                      aria-label="Edit session title"
+                      onClick={() => {
+                        setDraftTitle(currentTitle);
+                        setIsEditingTitle(true);
+                      }}
+                    >
+                      <Pencil className="h-4 w-4" />
+                    </Button>
+                  </>
+                )}
+                <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium shrink-0 ${status.color}`}>
+                  {status.label}
+                </span>
+                {diffStats && (
+                  <DiffStatsBadge
+                    added={diffStats.added}
+                    removed={diffStats.removed}
+                    className="shrink-0"
+                    onClick={() => openReview()}
+                  />
+                )}
+                <LinkedIssueChips session={session} />
               </div>
-            ) : (
-              <>
-                <h1 className="text-sm font-medium text-foreground truncate">
-                  {sessionTitle(session)}
-                </h1>
+              <DisabledTooltip disabled={centerMode === "review" && showDetailPanel} content={detailToggleTitle}>
                 <Button
                   variant="ghost"
                   size="icon"
-                  className="h-8 w-8 shrink-0"
-                  aria-label="Edit session title"
-                  onClick={() => {
-                    setDraftTitle(currentTitle);
-                    setIsEditingTitle(true);
-                  }}
+                  className={cn(centerMode === "review" && showDetailPanel && "opacity-30 cursor-not-allowed", "h-8 w-8 shrink-0")}
+                  disabled={centerMode === "review" && showDetailPanel}
+                  onClick={() => setShowDetailPanel(!showDetailPanel)}
+                  title={detailToggleTitle}
+                  aria-keyshortcuts="d"
                 >
-                  <Pencil className="h-4 w-4" />
+                  {showDetailPanel ? <PanelRightClose className="h-4 w-4" /> : <PanelRightOpen className="h-4 w-4" />}
                 </Button>
-              </>
-            )}
-            <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium shrink-0 ${status.color}`}>
-              {status.label}
-            </span>
-            {diffStats && (
-              <DiffStatsBadge
-                added={diffStats.added}
-                removed={diffStats.removed}
-                className="shrink-0"
-                onClick={() => openReview()}
-              />
-            )}
-            <LinkedIssueChips session={session} />
-          </div>
-          {/* Desktop toggle: hides/shows the inline right panel. */}
-          <DisabledTooltip disabled={centerMode === "review" && showDetailPanel} content={detailToggleTitle}>
-            <Button
-              variant="ghost"
-              size="icon"
-              className={cn("hidden md:inline-flex h-8 w-8 shrink-0", centerMode === "review" && showDetailPanel && "opacity-30 cursor-not-allowed")}
-              disabled={centerMode === "review" && showDetailPanel}
-              onClick={() => setShowDetailPanel(!showDetailPanel)}
-              title={detailToggleTitle}
-            >
-              {showDetailPanel ? <PanelRightClose className="h-4 w-4" /> : <PanelRightOpen className="h-4 w-4" />}
-            </Button>
-          </DisabledTooltip>
-          {/* Mobile toggle: opens the bottom sheet. */}
-          <Button
-            variant="ghost"
-            size="icon"
-            className="md:hidden h-9 w-9 shrink-0"
-            onClick={() => setMobileDetailOpen(true)}
-            aria-label="Open details"
-            aria-controls="session-detail-sheet"
-            aria-expanded={mobileDetailOpen}
-          >
-            <PanelBottomOpen className="h-5 w-5" />
-          </Button>
-        </div>
+              </DisabledTooltip>
+            </div>
+          </>
         ) : null}
 
         {!isDedicatedMobileReview ? (
+          <div className="hidden md:block">
           <AgentTabStrip
             threads={threads}
             activeThreadId={activeThread?.id ?? null}
+            viewedThreadIds={viewedThreadIds}
             overlapsByThreadId={overlapsByThreadId}
             statusConfig={statusConfig}
             onActiveThreadChange={setActiveThreadId}
-            onAddTab={() => {
-              setNewThreadAgentType(session.agent_type || "codex");
-              setNewThreadModel("");
-              setNewThreadLabel("");
-              setAddThreadOpen(true);
-            }}
+            onAddTab={() => createThreadMutation.mutate(buildDefaultThreadRequest())}
+            addTabPending={createThreadMutation.isPending}
             onCancelThread={(tid) => cancelThreadMutation.mutate(tid)}
             onForkThread={(tid) => forkThreadMutation.mutate(tid)}
             onRevertThread={(tid) => revertThreadMutation.mutate(tid)}
+            onArchiveThread={(tid) => archiveThreadMutation.mutate(tid)}
             cancelPendingThreadId={cancelThreadMutation.isPending ? cancelThreadMutation.variables ?? null : null}
+            archivePendingThreadId={archiveThreadMutation.isPending ? archiveThreadMutation.variables ?? null : null}
+            addTabButtonRef={addTabButtonRef}
           />
+          </div>
         ) : null}
         {/* Center content — either chat or diff review */}
         <div className="flex-1 min-h-0 relative">
           {/* Chat panel — always mounted to preserve scroll, SSE connections, etc. */}
           <div className={cn("h-full", centerMode !== "chat" && "hidden")}>
-            <MemoizedChatPanel
-              key={activeThread ? `${id}:${activeThread.id}` : id}
-              session={session}
-              sessionId={id}
-              activeThread={activeThread}
-              isActive={isActive}
-              optimisticMessages={optimisticMessages}
-              onDiffClick={handleChatDiffClick}
-              onApprovePlan={handleApprovePlan}
-              onAdjustPlan={handleAdjustPlan}
-              onRegisterScrollToLiveEdge={registerChatPanelScrollToLiveEdge}
-            />
+            {threads.length > 0 && activeThread === null ? (
+              <div className="flex h-full items-center justify-center">
+                <div className="text-center space-y-2">
+                  <Loader2 className="h-5 w-5 animate-spin text-muted-foreground/40 mx-auto" />
+                  <p className="text-xs text-muted-foreground">Loading thread...</p>
+                </div>
+              </div>
+            ) : (
+              <MemoizedChatPanel
+                key={activeThread ? `${id}:${activeThread.id}` : id}
+                session={session}
+                sessionId={id}
+                activeThread={activeThread ?? undefined}
+                isActive={isActive}
+                viewerScope={viewerScope}
+                optimisticMessages={optimisticMessages}
+                onDiffClick={handleChatDiffClick}
+                onApprovePlan={handleApprovePlan}
+                onAdjustPlan={handleAdjustPlan}
+                onRegisterScrollToLiveEdge={registerChatPanelScrollToLiveEdge}
+                onRegisterKeyboardControls={registerChatPanelKeyboardControls}
+              />
+            )}
           </div>
           {/* Review diff view — mounted only when active */}
           {centerMode === "review" && (
@@ -3980,7 +4526,13 @@ export function SessionDetailContent({ id }: { id: string }) {
               repositoryId={session.repository_id}
               branch={session.target_branch}
               agentType={composerAgentType}
-              targetLabel={activeThread ? composerTargetLabel : undefined}
+              editableAgentType={activeThreadIsEditable ? composerAgentType : undefined}
+              editableAgents={activeThreadIsEditable ? EDITABLE_THREAD_AGENTS : undefined}
+              onEditableAgentTypeChange={activeThreadIsEditable ? handleEditableAgentTypeChange : undefined}
+              agentUpdatePending={updateThreadMutation.isPending}
+              targetLabel={activeThread ? activeThreadLabel : undefined}
+              unavailableReason={composerUnavailableReason}
+              placeholderOverride={composerPlaceholderOverride}
             />
           </>
         )}
@@ -3992,8 +4544,9 @@ export function SessionDetailContent({ id }: { id: string }) {
         <div className="hidden md:flex">
           <ResizeHandle onResize={handleDetailResize} />
           <div
+            data-testid="session-detail-panel"
             style={{ width: detailWidth }}
-            className="border-l border-border bg-muted/20 flex flex-col shrink-0 overflow-hidden"
+            className="relative z-10 border-l border-border bg-background flex flex-col shrink-0 overflow-hidden"
           >
             {panelTabsEl}
           </div>
@@ -4010,7 +4563,7 @@ export function SessionDetailContent({ id }: { id: string }) {
         >
           <SheetTitle className="sr-only">Session details</SheetTitle>
           <SheetDescription className="sr-only">
-            Browse session details, changed files, validation, and preview on mobile.
+            Browse session details, changed files, and preview on mobile.
           </SheetDescription>
           {panelTabsEl}
         </SheetContent>
@@ -4077,11 +4630,63 @@ export function SessionDetailContent({ id }: { id: string }) {
               repositoryId={session.repository_id}
               branch={session.target_branch}
               agentType={composerAgentType}
-              targetLabel={activeThread ? composerTargetLabel : undefined}
+              editableAgentType={activeThreadIsEditable ? composerAgentType : undefined}
+              editableAgents={activeThreadIsEditable ? EDITABLE_THREAD_AGENTS : undefined}
+              onEditableAgentTypeChange={activeThreadIsEditable ? handleEditableAgentTypeChange : undefined}
+              agentUpdatePending={updateThreadMutation.isPending}
+              targetLabel={activeThread ? activeThreadLabel : undefined}
+              unavailableReason={composerUnavailableReason}
+              placeholderOverride={composerPlaceholderOverride}
             />
           </SheetContent>
         </Sheet>
       ) : null}
+      <Dialog open={mobileRenameOpen} onOpenChange={setMobileRenameOpen}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Rename session</DialogTitle>
+            <DialogDescription>
+              Update the session title without crowding the mobile header.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-3">
+            <Label htmlFor="mobile-session-title">Session title</Label>
+            <Input
+              id="mobile-session-title"
+              aria-label="Session title"
+              value={draftTitle}
+              onChange={(e) => setDraftTitle(e.target.value)}
+              disabled={updateSessionMutation.isPending}
+            />
+          </div>
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => {
+                setDraftTitle(currentTitle);
+                setMobileRenameOpen(false);
+              }}
+              disabled={updateSessionMutation.isPending}
+            >
+              Cancel
+            </Button>
+            <DisabledTooltip disabled={!canSaveTitle} content={saveTitleDisabledReason}>
+              <Button
+                type="button"
+                onClick={() => updateSessionMutation.mutate(trimmedDraftTitle, {
+                  onSuccess: () => {
+                    setMobileRenameOpen(false);
+                  },
+                })}
+                disabled={!canSaveTitle}
+              >
+                Save title
+              </Button>
+            </DisabledTooltip>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
       <Dialog open={addThreadOpen} onOpenChange={setAddThreadOpen}>
         <DialogContent>
           <DialogHeader>
@@ -4146,7 +4751,7 @@ export function SessionDetailContent({ id }: { id: string }) {
             </Button>
             <Button
               type="button"
-              onClick={() => createThreadMutation.mutate()}
+              onClick={() => createThreadMutation.mutate(buildDialogThreadRequest())}
               disabled={createThreadMutation.isPending}
             >
               {createThreadMutation.isPending && <Loader2 className="h-4 w-4 animate-spin" />}
@@ -4155,6 +4760,10 @@ export function SessionDetailContent({ id }: { id: string }) {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+      <SessionKeyboardHelpOverlay
+        open={keyboardHelpOpen}
+        onOpenChange={setKeyboardHelpOpen}
+      />
       <AlertDialog
         open={!!prAuthPrompt}
         onOpenChange={(open) => {
@@ -4174,8 +4783,12 @@ export function SessionDetailContent({ id }: { id: string }) {
               {prAuthPrompt?.purpose === "merge_pr"
                 ? "Authorize GitHub once to merge pull requests as you."
                 : prAuthPrompt?.purpose === "push_changes"
-                  ? "Authorize GitHub once to push as you. If you skip this, 143 can still push the commits as the app."
-                  : "Authorize GitHub once to open PRs as you. If you skip this, 143 can still open the PR as the app."}
+                  ? prAuthPrompt.can_fallback_to_app
+                    ? "Authorize GitHub once to push as you. If you skip this, 143 can still push the commits as the app."
+                    : "Authorize GitHub once to push as you."
+                  : prAuthPrompt?.can_fallback_to_app
+                    ? "Authorize GitHub once to open PRs as you. If you skip this, 143 can still open the PR as the app."
+                    : "Authorize GitHub once to open PRs as you."}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>

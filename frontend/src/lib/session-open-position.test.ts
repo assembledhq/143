@@ -3,9 +3,13 @@ import { buildTimeline, type TimelineEntry } from "./timeline";
 import type { SessionLog, SessionMessage } from "./types";
 import {
   findLatestAssistantTurnStartIndex,
+  getSessionActiveThreadStorageKey,
   getSessionScrollStorageKey,
+  readStoredSessionActiveThread,
   readStoredSessionScrollPosition,
+  resolveInitialSessionThreadId,
   resolveInitialSessionAnchor,
+  writeStoredSessionActiveThread,
   writeStoredSessionScrollPosition,
 } from "./session-open-position";
 
@@ -50,6 +54,12 @@ describe("session-open-position", () => {
     );
   });
 
+  it("builds a stable per-session active-thread storage key", () => {
+    expect(getSessionActiveThreadStorageKey("sess-123", viewerScope)).toBe(
+      "session-active-thread:org-1:user-1:sess-123",
+    );
+  });
+
   it("reads a stored thread-specific session position when present", () => {
     const storage = new Map<string, string>([
       ["session-scroll-position:org-1:user-1:sess-123:thread-a", JSON.stringify({ version: 1, scrollTop: 240 })],
@@ -57,6 +67,14 @@ describe("session-open-position", () => {
 
     expect(readStoredSessionScrollPosition(storage, "sess-123", viewerScope, "thread-a")).toBe(240);
     expect(readStoredSessionScrollPosition(storage, "sess-123", viewerScope, "thread-b")).toBeNull();
+  });
+
+  it("reads a stored active thread when present", () => {
+    const storage = new Map<string, string>([
+      ["session-active-thread:org-1:user-1:sess-123", JSON.stringify({ version: 1, threadId: "thread-b" })],
+    ]);
+
+    expect(readStoredSessionActiveThread(storage, "sess-123", viewerScope)).toBe("thread-b");
   });
 
   it("scopes storage keys by viewer identity", () => {
@@ -109,6 +127,34 @@ describe("session-open-position", () => {
     expect(storage.get("session-scroll-position:org-1:user-1:sess-123:thread-a")).toBe(
       JSON.stringify({ version: 1, scrollTop: 101 }),
     );
+  });
+
+  it("stores the active thread for a session", () => {
+    const storage = new Map<string, string>();
+
+    writeStoredSessionActiveThread(storage, "sess-123", viewerScope, "thread-b");
+
+    expect(storage.get("session-active-thread:org-1:user-1:sess-123")).toBe(
+      JSON.stringify({ version: 1, threadId: "thread-b" }),
+    );
+  });
+
+  it("prefers the stored active thread when it still exists", () => {
+    expect(
+      resolveInitialSessionThreadId(
+        [{ id: "thread-a" }, { id: "thread-b" }],
+        "thread-b",
+      ),
+    ).toBe("thread-b");
+  });
+
+  it("falls back to the first visible thread when the stored active thread is missing", () => {
+    expect(
+      resolveInitialSessionThreadId(
+        [{ id: "thread-a" }, { id: "thread-b" }],
+        "thread-z",
+      ),
+    ).toBe("thread-a");
   });
 
   it("does not read another viewer's saved session position", () => {

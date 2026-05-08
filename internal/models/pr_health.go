@@ -15,6 +15,7 @@ const (
 	PullRequestMergeStateClean      PullRequestMergeState = "clean"
 	PullRequestMergeStateConflicted PullRequestMergeState = "conflicted"
 	PullRequestMergeStateBehind     PullRequestMergeState = "behind"
+	PullRequestMergeStateBlocked    PullRequestMergeState = "blocked"
 )
 
 func (s PullRequestMergeState) Validate() error {
@@ -22,7 +23,8 @@ func (s PullRequestMergeState) Validate() error {
 	case PullRequestMergeStateUnknown,
 		PullRequestMergeStateClean,
 		PullRequestMergeStateConflicted,
-		PullRequestMergeStateBehind:
+		PullRequestMergeStateBehind,
+		PullRequestMergeStateBlocked:
 		return nil
 	default:
 		return fmt.Errorf("invalid PullRequestMergeState: %q", s)
@@ -178,12 +180,20 @@ type PullRequestHealthResponse struct {
 	CanResolveConflicts          bool                              `json:"can_resolve_conflicts"`
 	CanFixTests                  bool                              `json:"can_fix_tests"`
 	CanMerge                     bool                              `json:"can_merge"`
+	ActiveRepairs                []PullRequestActiveRepair         `json:"active_repairs,omitempty"`
 	EnrichmentStatus             PullRequestHealthEnrichmentStatus `json:"enrichment_status"`
 	EnrichmentRequested          bool                              `json:"enrichment_requested"`
 	EnrichmentReady              bool                              `json:"enrichment_ready"`
 	ConflictDetailAvailable      bool                              `json:"conflict_detail_available"`
 	FailingTestDetailAvailable   bool                              `json:"failing_test_detail_available"`
 	ObsoleteActiveRepairSessions bool                              `json:"obsolete_active_repair_sessions,omitempty"`
+}
+
+type PullRequestActiveRepair struct {
+	ActionType    PullRequestRepairActionType `json:"action_type"`
+	SessionID     uuid.UUID                   `json:"session_id"`
+	SessionStatus string                      `json:"session_status"`
+	HealthVersion int64                       `json:"health_version"`
 }
 
 type PullRequestRepairResponse struct {

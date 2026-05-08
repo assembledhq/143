@@ -24,7 +24,7 @@
           "DEMO_MODE": "true"
         },
         "ready": {
-          "http_path": "/api/v1/health",
+          "http_path": "/readyz",
           "timeout_seconds": 240
         }
       }

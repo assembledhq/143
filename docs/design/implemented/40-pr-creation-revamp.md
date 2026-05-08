@@ -1,10 +1,10 @@
 # Design: PR Creation Revamp — User-Authored PRs, Template Support, and Issueless Sessions
 
-> **Status:** Partially Implemented | **Last reviewed:** 2026-04-22
+> **Status:** Implemented | **Last reviewed:** 2026-05-06
 >
-> **Implementation notes:** PR template detection and caching implemented (`pr_templates` store). The on-demand `Create PR` authorization flow now uses encrypted `github_app_user` credentials with refresh-aware validation, app fallback, and frontend auto-resume after callback. The implementation reuses `/api/v1/users/me/github/*` routes for PR authorship instead of introducing separate `/github-app/*` endpoints. The session UI now distinguishes stale GitHub PR resume tokens from snapshot-unavailable PR creation states instead of collapsing both into a generic "session expired" banner. Remaining work: issueless session support and any deeper reconnect-policy refinements.
+> **Implementation notes:** PR template detection and caching implemented (`pr_templates` store). The on-demand `Create PR` authorization flow uses encrypted `github_app_user` credentials with refresh-aware validation, app fallback, and frontend auto-resume after callback. The implementation reuses `/api/v1/users/me/github/*` routes for PR authorship instead of introducing separate `/github-app/*` endpoints. The session UI distinguishes stale GitHub PR resume tokens from snapshot-unavailable PR creation states instead of collapsing both into a generic "session expired" banner. Issueless session support is tracked separately and is no longer considered part of this doc's scope.
 
-**Depends on**: [08-pr-and-ship.md](implemented/08-pr-and-ship.md), [13-repository-onboarding.md](implemented/13-repository-onboarding.md), [34-personal-team-coding-agents.md](implemented/34-personal-team-coding-agents.md)
+**Depends on**: [08-pr-and-ship.md](08-pr-and-ship.md), [13-repository-onboarding.md](13-repository-onboarding.md), [34-personal-team-coding-agents.md](34-personal-team-coding-agents.md)
 
 ---
 

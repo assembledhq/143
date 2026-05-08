@@ -1,4 +1,4 @@
-import { describe, expect, it, vi, beforeEach } from "vitest";
+import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 import {
   buildPreviewIframeSrc,
   PREVIEW_BOOTSTRAP_READY_EVENT,
@@ -123,12 +123,32 @@ describe("PreviewPanel bootstrap helpers", () => {
 /* ------------------------------------------------------------------ */
 
 describe("PreviewPanel component", () => {
+  let resizeObserverCallback: ResizeObserverCallback | null = null;
+  const originalResizeObserver = window.ResizeObserver;
+
   beforeEach(() => {
     vi.resetAllMocks();
     mockStart.mockResolvedValue({});
     mockStop.mockResolvedValue({});
     mockRestart.mockResolvedValue({});
     mockBootstrap.mockResolvedValue({ token: "tok-1" });
+
+    class MockResizeObserver {
+      constructor(callback: ResizeObserverCallback) {
+        resizeObserverCallback = callback;
+      }
+
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    }
+
+    window.ResizeObserver = MockResizeObserver as typeof ResizeObserver;
+  });
+
+  afterEach(() => {
+    resizeObserverCallback = null;
+    window.ResizeObserver = originalResizeObserver;
   });
 
   /* ---------- Loading state ---------- */
@@ -208,6 +228,60 @@ describe("PreviewPanel component", () => {
     expect(screen.getByRole("button", { name: "Stop preview" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Restart preview" })).toBeInTheDocument();
     expect(screen.queryByText("Start Preview")).not.toBeInTheDocument();
+  });
+
+  it("stacks startup phase tiles when the panel becomes narrow", async () => {
+    mockGet.mockResolvedValue(
+      makePreviewStatus(
+        { status: "starting" },
+        [],
+        [
+          {
+            id: "infra-1",
+            preview_instance_id: "prev-1",
+            infra_name: "postgres",
+            template: "postgres",
+            container_id: "ctr-1",
+            status: "provisioning",
+            host: "postgres",
+            port: 5432,
+            created_at: "2026-01-01T00:00:00Z",
+          },
+        ],
+      ),
+    );
+
+    renderWithProviders(<PreviewPanel {...DEFAULT_PROPS} />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Preparing preview")).toBeInTheDocument();
+    });
+
+    const phaseRail = screen.getByTestId("preview-startup-phase-rail");
+
+    resizeObserverCallback?.(
+      [
+        {
+          target: phaseRail,
+          contentRect: {
+            width: 220,
+            height: 0,
+            x: 0,
+            y: 0,
+            top: 0,
+            right: 220,
+            bottom: 0,
+            left: 0,
+            toJSON: () => ({}),
+          },
+        } as unknown as ResizeObserverEntry,
+      ],
+      {} as ResizeObserver,
+    );
+
+    await waitFor(() => {
+      expect(phaseRail).toHaveAttribute("data-layout", "stacked");
+    });
   });
 
   it("hides the Provisioning rail tile when the preview has no infrastructure", async () => {

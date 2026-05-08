@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -22,6 +23,8 @@ import (
 // ThreadService defines the interface for thread business logic.
 type ThreadService interface {
 	CreateThread(ctx context.Context, input thread.CreateThreadInput) (*models.SessionThread, error)
+	UpdateThread(ctx context.Context, input thread.UpdateThreadInput) (*models.SessionThread, error)
+	ArchiveThread(ctx context.Context, orgID, sessionID, threadID uuid.UUID) (models.SessionThread, error)
 	ListThreads(ctx context.Context, orgID, sessionID uuid.UUID) ([]models.SessionThread, error)
 	GetThread(ctx context.Context, orgID, sessionID, threadID uuid.UUID) (models.SessionThread, error)
 	SendMessage(ctx context.Context, input thread.SendMessageInput) (*thread.SendMessageResult, error)
@@ -196,6 +199,120 @@ func (h *SessionThreadHandler) CreateThread(w http.ResponseWriter, r *http.Reque
 	}
 
 	writeJSON(w, http.StatusCreated, models.SingleResponse[models.SessionThread]{Data: *result})
+}
+
+func (h *SessionThreadHandler) UpdateThread(w http.ResponseWriter, r *http.Request) {
+	orgID := middleware.OrgIDFromContext(r.Context())
+	sessionID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid session ID")
+		return
+	}
+	threadID, err := uuid.Parse(chi.URLParam(r, "tid"))
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid thread ID")
+		return
+	}
+
+	// Model uses json.RawMessage so we can distinguish three wire states the
+	// way callers expect. A plain *string collapses JSON null and "field
+	// absent" to the same nil pointer, which silently keeps stale overrides
+	// when the client meant to clear them.
+	var body struct {
+		AgentType string          `json:"agent_type"`
+		Model     json.RawMessage `json:"model"`
+		Label     string          `json:"label"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_BODY", "invalid request body")
+		return
+	}
+
+	body.Label = strings.TrimSpace(body.Label)
+	if body.Label == "" {
+		writeError(w, r, http.StatusBadRequest, "MISSING_LABEL", "label is required")
+		return
+	}
+
+	// Wire convention:
+	//   - field absent           → keep existing override (nil)
+	//   - "model": null          → clear the override     (&"")
+	//   - "model": ""            → clear the override     (&"")
+	//   - "model": "value"       → set/validate the value (&value)
+	var modelInput *string
+	switch {
+	case len(body.Model) == 0:
+		modelInput = nil
+	case bytes.Equal(bytes.TrimSpace(body.Model), []byte("null")):
+		empty := ""
+		modelInput = &empty
+	default:
+		var modelValue string
+		if err := json.Unmarshal(body.Model, &modelValue); err != nil {
+			writeError(w, r, http.StatusBadRequest, "INVALID_BODY", "invalid model field")
+			return
+		}
+		modelInput = &modelValue
+	}
+
+	result, err := h.svc.UpdateThread(r.Context(), thread.UpdateThreadInput{
+		SessionID: sessionID,
+		OrgID:     orgID,
+		ThreadID:  threadID,
+		AgentType: body.AgentType,
+		Model:     modelInput,
+		Label:     body.Label,
+	})
+	if err != nil {
+		switch {
+		case errors.Is(err, thread.ErrSessionNotFound), errors.Is(err, thread.ErrThreadNotFound):
+			writeError(w, r, http.StatusNotFound, "NOT_FOUND", "session or thread not found")
+		case errors.Is(err, thread.ErrSessionTerminal):
+			writeError(w, r, http.StatusConflict, "SESSION_TERMINAL", "cannot edit tabs on a completed session")
+		case errors.Is(err, thread.ErrThreadNotEditable):
+			writeError(w, r, http.StatusConflict, "THREAD_NOT_EDITABLE", "only blank idle tabs can be edited")
+		case errors.Is(err, thread.ErrInvalidAgentType):
+			writeError(w, r, http.StatusBadRequest, "INVALID_AGENT_TYPE", err.Error())
+		case errors.Is(err, thread.ErrInvalidModel):
+			writeError(w, r, http.StatusBadRequest, "INVALID_MODEL", err.Error())
+		default:
+			writeError(w, r, http.StatusInternalServerError, "UPDATE_FAILED", "failed to update thread", err)
+		}
+		return
+	}
+
+	writeJSON(w, http.StatusOK, models.SingleResponse[models.SessionThread]{Data: *result})
+}
+
+func (h *SessionThreadHandler) ArchiveThread(w http.ResponseWriter, r *http.Request) {
+	orgID := middleware.OrgIDFromContext(r.Context())
+	sessionID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid session ID")
+		return
+	}
+	threadID, err := uuid.Parse(chi.URLParam(r, "tid"))
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid thread ID")
+		return
+	}
+
+	result, err := h.svc.ArchiveThread(r.Context(), orgID, sessionID, threadID)
+	if err != nil {
+		switch {
+		case errors.Is(err, thread.ErrSessionNotFound), errors.Is(err, thread.ErrThreadNotFound):
+			writeError(w, r, http.StatusNotFound, "NOT_FOUND", "session or thread not found")
+		case errors.Is(err, thread.ErrCannotArchiveLastThread):
+			writeError(w, r, http.StatusConflict, "THREAD_LAST_VISIBLE", "cannot close the last remaining tab")
+		case errors.Is(err, thread.ErrThreadActive):
+			writeError(w, r, http.StatusConflict, "THREAD_ACTIVE", "cancel this tab before closing it")
+		default:
+			writeError(w, r, http.StatusInternalServerError, "ARCHIVE_FAILED", "failed to archive thread", err)
+		}
+		return
+	}
+
+	writeJSON(w, http.StatusOK, models.SingleResponse[models.SessionThread]{Data: result})
 }
 
 // ListThreads handles GET /sessions/{id}/threads — returns all threads for a session.

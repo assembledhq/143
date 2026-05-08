@@ -31,6 +31,7 @@ const health: PullRequestHealthResponse = {
   conflict_detail_available: false,
   failing_test_detail_available: false,
   obsolete_active_repair_sessions: false,
+  active_repairs: [],
 };
 
 describe("PRHealthBanner sync copy", () => {

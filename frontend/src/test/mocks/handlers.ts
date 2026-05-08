@@ -1,5 +1,5 @@
 import { http, HttpResponse } from 'msw';
-import type { Issue, Session, SessionLog, SessionMessage, SessionReviewComment, SessionThread, SessionTimelineEntry, User, Validation, PullRequest, PullRequestHealthResponse, PullRequestRepairResponse, ListResponse, SingleResponse, PMStatus, PMDecisionsResponse, Project, ProjectDetail } from '@/lib/types';
+import type { Issue, Session, SessionLog, SessionMessage, SessionReviewComment, SessionThread, SessionThreadFileEvent, SessionTimelineEntry, User, PullRequest, PullRequestHealthResponse, PullRequestRepairResponse, ListResponse, SingleResponse, PMStatus, PMDecisionsResponse, Project, ProjectDetail } from '@/lib/types';
 
 export const mockIssues: Issue[] = [
   {
@@ -79,27 +79,6 @@ export const mockSessions: Session[] = [
   },
 ];
 
-export const mockValidation: Validation = {
-  id: 'val-1',
-  session_id: 'session-abcdef12-3456-7890',
-  org_id: 'org-1',
-  status: 'passed',
-  direction_check: 'pass',
-  direction_check_details: 'Changes align with issue description',
-  correctness_check: 'pass',
-  correctness_check_details: 'Logic is correct',
-  quality_check: 'pass',
-  quality_check_details: null,
-  security_scan: 'pass',
-  security_scan_details: null,
-  regression_test_check: 'fail',
-  regression_test_check_details: 'One test regressed',
-  ci_check: null,
-  ci_check_details: null,
-  created_at: '2026-02-17T07:06:00Z',
-  updated_at: '2026-02-17T07:06:00Z',
-};
-
 export const mockPR: PullRequest = {
   id: 'pr-1',
   session_id: 'session-abcdef12-3456-7890',
@@ -139,6 +118,7 @@ export const mockPRHealth: PullRequestHealthResponse = {
   can_resolve_conflicts: false,
   can_fix_tests: false,
   can_merge: false,
+  active_repairs: [],
   enrichment_status: 'ready',
   enrichment_requested: false,
   enrichment_ready: true,
@@ -317,15 +297,18 @@ export const handlers = [
     } satisfies ListResponse<SessionLog>);
   }),
 
+  http.get('/api/v1/sessions/:id/thread-file-events', () => {
+    return HttpResponse.json({
+      data: [],
+      meta: {},
+    });
+  }),
+
   http.get('/api/v1/sessions/:id/timeline', () => {
     return HttpResponse.json({
       data: [] as SessionTimelineEntry[],
       meta: {},
     } satisfies ListResponse<SessionTimelineEntry>);
-  }),
-
-  http.get('/api/v1/sessions/:id/validation', () => {
-    return HttpResponse.json({ data: mockValidation } satisfies SingleResponse<Validation>);
   }),
 
   http.get('/api/v1/sessions/:id/pr', ({ params }) => {
@@ -398,6 +381,25 @@ export const handlers = [
     } satisfies SingleResponse<SessionThread>, { status: 201 });
   }),
 
+  http.patch('/api/v1/sessions/:id/threads/:threadId', async ({ request, params }) => {
+    const body = await request.json() as { label?: string; agent_type?: string; model?: string };
+    return HttpResponse.json({
+      data: {
+        id: params.threadId as string,
+        session_id: params.id as string,
+        org_id: 'org-1',
+        agent_type: body.agent_type || 'codex',
+        model_override: body.model || undefined,
+        label: body.label || 'Codex 2',
+        status: 'idle',
+        current_turn: 0,
+        created_at: '2026-02-17T07:12:00Z',
+        cost_cents: 0,
+        pending_message_count: 0,
+      },
+    } satisfies SingleResponse<SessionThread>);
+  }),
+
   http.get('/api/v1/sessions/:id/threads/:threadId/messages', () => {
     return HttpResponse.json({
       data: [] as SessionMessage[],
@@ -410,6 +412,13 @@ export const handlers = [
       data: [] as SessionLog[],
       meta: {},
     } satisfies ListResponse<SessionLog>);
+  }),
+
+  http.get('/api/v1/sessions/:id/thread-file-events', () => {
+    return HttpResponse.json({
+      data: [] as SessionThreadFileEvent[],
+      meta: {},
+    } satisfies ListResponse<SessionThreadFileEvent>);
   }),
 
   http.post('/api/v1/sessions/:id/threads/:threadId/messages', async ({ request, params }) => {

@@ -42,6 +42,58 @@ func TestSessionOrigin_Validate(t *testing.T) {
 	}
 }
 
+func TestSessionStatusHelpers(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name            string
+		status          SessionStatus
+		expectTerminal  bool
+		expectResumable bool
+		expectCanAddTab bool
+	}{
+		{
+			name:            "running session",
+			status:          SessionStatusRunning,
+			expectTerminal:  false,
+			expectResumable: false,
+			expectCanAddTab: true,
+		},
+		{
+			name:            "completed session",
+			status:          SessionStatusCompleted,
+			expectTerminal:  true,
+			expectResumable: true,
+			expectCanAddTab: true,
+		},
+		{
+			name:            "awaiting input session",
+			status:          SessionStatusAwaitingInput,
+			expectTerminal:  false,
+			expectResumable: true,
+			expectCanAddTab: true,
+		},
+		{
+			name:            "skipped session",
+			status:          SessionStatusSkipped,
+			expectTerminal:  true,
+			expectResumable: false,
+			expectCanAddTab: false,
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			require.Equal(t, tt.expectTerminal, tt.status.IsTerminal(), "IsTerminal should return the expected value")
+			require.Equal(t, tt.expectResumable, tt.status.IsResumable(), "IsResumable should return the expected value")
+			require.Equal(t, tt.expectCanAddTab, tt.status.CanAddThread(), "CanAddThread should return the expected value")
+		})
+	}
+}
+
 func TestSessionInteractionMode_Validate(t *testing.T) {
 	t.Parallel()
 

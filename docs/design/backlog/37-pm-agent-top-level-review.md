@@ -1,6 +1,6 @@
 # 35 - PM Agent: Operator Workspace
 
-> **Status:** Partially Implemented | **Last reviewed:** 2026-04-21
+> **Status:** Backlog | **Last reviewed:** 2026-05-06
 >
 > **Implementation notes:** Decision log model/API and PM handler exist. Missing: split-view workspace, autonomy model, PM as first-class nav item. Plans still exposed as concept.
 

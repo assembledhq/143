@@ -10,6 +10,7 @@ import (
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/pashagolub/pgxmock/v4"
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
@@ -21,8 +22,10 @@ type mockThreadStore struct {
 	createFn           func(ctx context.Context, t *models.SessionThread, max int) error
 	getByIDFn          func(ctx context.Context, orgID, threadID uuid.UUID) (models.SessionThread, error)
 	listBySessionFn    func(ctx context.Context, orgID, sessionID uuid.UUID) ([]models.SessionThread, error)
+	archiveFn          func(ctx context.Context, orgID, sessionID, threadID uuid.UUID) (models.SessionThread, error)
 	claimIdleFn        func(ctx context.Context, orgID, sessionID, threadID uuid.UUID) (models.SessionThread, error)
 	claimForResumeFn   func(ctx context.Context, orgID, sessionID, threadID uuid.UUID) (models.SessionThread, error)
+	updateFn           func(ctx context.Context, t *models.SessionThread) error
 	updateStatusFn     func(ctx context.Context, orgID, threadID uuid.UUID, status models.ThreadStatus) error
 	incrementPendingFn func(ctx context.Context, orgID, threadID uuid.UUID) error
 	pendingCalls       []uuid.UUID
@@ -49,6 +52,13 @@ func (m *mockThreadStore) ListBySession(ctx context.Context, orgID, sessionID uu
 	return nil, nil
 }
 
+func (m *mockThreadStore) Archive(ctx context.Context, orgID, sessionID, threadID uuid.UUID) (models.SessionThread, error) {
+	if m.archiveFn != nil {
+		return m.archiveFn(ctx, orgID, sessionID, threadID)
+	}
+	return models.SessionThread{}, fmt.Errorf("not archived")
+}
+
 func (m *mockThreadStore) ClaimIdleForSession(ctx context.Context, orgID, sessionID, threadID uuid.UUID, _ int) (models.SessionThread, error) {
 	if m.claimIdleFn != nil {
 		return m.claimIdleFn(ctx, orgID, sessionID, threadID)
@@ -61,6 +71,13 @@ func (m *mockThreadStore) ClaimForResumeInSession(ctx context.Context, orgID, se
 		return m.claimForResumeFn(ctx, orgID, sessionID, threadID)
 	}
 	return models.SessionThread{}, fmt.Errorf("not resumable")
+}
+
+func (m *mockThreadStore) UpdateEditable(ctx context.Context, t *models.SessionThread) error {
+	if m.updateFn != nil {
+		return m.updateFn(ctx, t)
+	}
+	return nil
 }
 
 func (m *mockThreadStore) UpdateStatus(ctx context.Context, orgID, threadID uuid.UUID, status models.ThreadStatus) error {
@@ -260,7 +277,7 @@ func TestService_CreateThread(t *testing.T) {
 			expectErr: ErrSessionNotFound,
 		},
 		{
-			name: "session in terminal state",
+			name: "success for completed session",
 			input: CreateThreadInput{
 				SessionID: sessionID,
 				OrgID:     orgID,
@@ -269,6 +286,24 @@ func TestService_CreateThread(t *testing.T) {
 			setupDeps: func(deps *testDeps) {
 				deps.sessionStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.Session, error) {
 					return models.Session{ID: sessionID, OrgID: orgID, Status: "completed", AgentType: models.AgentTypeClaudeCode}, nil
+				}
+				deps.threadStore.createFn = func(_ context.Context, t *models.SessionThread, _ int) error {
+					t.ID = threadID
+					t.CreatedAt = now
+					return nil
+				}
+			},
+		},
+		{
+			name: "session in non-resumable terminal state",
+			input: CreateThreadInput{
+				SessionID: sessionID,
+				OrgID:     orgID,
+				Label:     "Backend",
+			},
+			setupDeps: func(deps *testDeps) {
+				deps.sessionStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.Session, error) {
+					return models.Session{ID: sessionID, OrgID: orgID, Status: "skipped", AgentType: models.AgentTypeClaudeCode}, nil
 				}
 			},
 			expectErr: ErrSessionTerminal,
@@ -382,6 +417,513 @@ func TestService_CreateThreadDoesNotEnqueueOnCreate(t *testing.T) {
 	require.Equal(t, models.ThreadStatusIdle, result.Status, "blank tab should be idle")
 }
 
+func TestService_UpdateThread(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	threadID := uuid.New()
+
+	tests := []struct {
+		name          string
+		input         UpdateThreadInput
+		setupDeps     func(deps *testDeps)
+		expectErr     error
+		expectedType  models.AgentType
+		expectedLabel string
+		expectedModel *string
+	}{
+		{
+			name: "updates blank idle thread and clears inherited model override",
+			input: UpdateThreadInput{
+				SessionID: sessionID,
+				OrgID:     orgID,
+				ThreadID:  threadID,
+				AgentType: "codex",
+				Label:     "Codex 2",
+			},
+			setupDeps: func(deps *testDeps) {
+				model := models.ClaudeCodeModelSonnet46
+				deps.sessionStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.Session, error) {
+					return models.Session{ID: sessionID, OrgID: orgID, Status: "running", AgentType: models.AgentTypeClaudeCode}, nil
+				}
+				deps.threadStore.getByIDFn = func(_ context.Context, _, gotThreadID uuid.UUID) (models.SessionThread, error) {
+					require.Equal(t, threadID, gotThreadID, "UpdateThread should load the requested thread")
+					return models.SessionThread{
+						ID:            threadID,
+						SessionID:     sessionID,
+						OrgID:         orgID,
+						AgentType:     models.AgentTypeClaudeCode,
+						ModelOverride: &model,
+						Label:         "Claude Code 2",
+						Status:        models.ThreadStatusIdle,
+						CurrentTurn:   0,
+					}, nil
+				}
+				deps.threadStore.updateFn = func(_ context.Context, updated *models.SessionThread) error {
+					require.Equal(t, models.AgentTypeCodex, updated.AgentType, "UpdateThread should persist the replacement agent")
+					require.Nil(t, updated.ModelOverride, "UpdateThread should clear an incompatible inherited model override")
+					require.Equal(t, "Codex 2", updated.Label, "UpdateThread should persist the replacement label")
+					return nil
+				}
+			},
+			expectedType:  models.AgentTypeCodex,
+			expectedLabel: "Codex 2",
+		},
+		{
+			name: "accepts an explicit model override for the replacement agent",
+			input: UpdateThreadInput{
+				SessionID: sessionID,
+				OrgID:     orgID,
+				ThreadID:  threadID,
+				AgentType: "codex",
+				Model:     stringPtr(models.CodexModelGPT54Mini),
+				Label:     "Codex 2",
+			},
+			setupDeps: func(deps *testDeps) {
+				deps.sessionStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.Session, error) {
+					return models.Session{ID: sessionID, OrgID: orgID, Status: "running", AgentType: models.AgentTypeClaudeCode}, nil
+				}
+				deps.threadStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
+					return models.SessionThread{
+						ID:          threadID,
+						SessionID:   sessionID,
+						OrgID:       orgID,
+						AgentType:   models.AgentTypeClaudeCode,
+						Label:       "Claude Code 2",
+						Status:      models.ThreadStatusIdle,
+						CurrentTurn: 0,
+					}, nil
+				}
+				deps.threadStore.updateFn = func(_ context.Context, updated *models.SessionThread) error {
+					require.NotNil(t, updated.ModelOverride, "UpdateThread should persist the requested model override")
+					require.Equal(t, models.CodexModelGPT54Mini, *updated.ModelOverride, "UpdateThread should persist the requested model override")
+					return nil
+				}
+			},
+			expectedType:  models.AgentTypeCodex,
+			expectedLabel: "Codex 2",
+			expectedModel: stringPtr(models.CodexModelGPT54Mini),
+		},
+		{
+			name: "explicit empty model clears an existing override without switching agent",
+			input: UpdateThreadInput{
+				SessionID: sessionID,
+				OrgID:     orgID,
+				ThreadID:  threadID,
+				Model:     stringPtr(""),
+				Label:     "Codex 2",
+			},
+			setupDeps: func(deps *testDeps) {
+				existing := models.CodexModelGPT54Mini
+				deps.sessionStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.Session, error) {
+					return models.Session{ID: sessionID, OrgID: orgID, Status: "running", AgentType: models.AgentTypeCodex}, nil
+				}
+				deps.threadStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
+					return models.SessionThread{
+						ID:            threadID,
+						SessionID:     sessionID,
+						OrgID:         orgID,
+						AgentType:     models.AgentTypeCodex,
+						ModelOverride: &existing,
+						Label:         "Codex 2",
+						Status:        models.ThreadStatusIdle,
+						CurrentTurn:   0,
+					}, nil
+				}
+				deps.threadStore.updateFn = func(_ context.Context, updated *models.SessionThread) error {
+					require.Nil(t, updated.ModelOverride, "explicit empty model should clear the override")
+					return nil
+				}
+			},
+			expectedType:  models.AgentTypeCodex,
+			expectedLabel: "Codex 2",
+		},
+		{
+			name: "omitted model preserves an existing override on a label-only patch",
+			input: UpdateThreadInput{
+				SessionID: sessionID,
+				OrgID:     orgID,
+				ThreadID:  threadID,
+				Label:     "Codex 2 renamed",
+			},
+			setupDeps: func(deps *testDeps) {
+				existing := models.CodexModelGPT54Mini
+				deps.sessionStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.Session, error) {
+					return models.Session{ID: sessionID, OrgID: orgID, Status: "running", AgentType: models.AgentTypeCodex}, nil
+				}
+				deps.threadStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
+					return models.SessionThread{
+						ID:            threadID,
+						SessionID:     sessionID,
+						OrgID:         orgID,
+						AgentType:     models.AgentTypeCodex,
+						ModelOverride: &existing,
+						Label:         "Codex 2",
+						Status:        models.ThreadStatusIdle,
+						CurrentTurn:   0,
+					}, nil
+				}
+				deps.threadStore.updateFn = func(_ context.Context, updated *models.SessionThread) error {
+					require.NotNil(t, updated.ModelOverride, "label-only patch should preserve the existing model override")
+					require.Equal(t, models.CodexModelGPT54Mini, *updated.ModelOverride, "label-only patch should preserve the existing model override")
+					return nil
+				}
+			},
+			expectedType:  models.AgentTypeCodex,
+			expectedLabel: "Codex 2 renamed",
+			expectedModel: stringPtr(models.CodexModelGPT54Mini),
+		},
+		{
+			name: "rejects threads that have already started turns",
+			input: UpdateThreadInput{
+				SessionID: sessionID,
+				OrgID:     orgID,
+				ThreadID:  threadID,
+				AgentType: "codex",
+				Label:     "Codex 2",
+			},
+			setupDeps: func(deps *testDeps) {
+				deps.sessionStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.Session, error) {
+					return models.Session{ID: sessionID, OrgID: orgID, Status: "running", AgentType: models.AgentTypeClaudeCode}, nil
+				}
+				deps.threadStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
+					return models.SessionThread{
+						ID:          threadID,
+						SessionID:   sessionID,
+						OrgID:       orgID,
+						AgentType:   models.AgentTypeClaudeCode,
+						Label:       "Claude Code 2",
+						Status:      models.ThreadStatusIdle,
+						CurrentTurn: 1,
+					}, nil
+				}
+			},
+			expectErr: ErrThreadNotEditable,
+		},
+		{
+			name: "rejects non-idle threads",
+			input: UpdateThreadInput{
+				SessionID: sessionID,
+				OrgID:     orgID,
+				ThreadID:  threadID,
+				AgentType: "codex",
+				Label:     "Codex 2",
+			},
+			setupDeps: func(deps *testDeps) {
+				deps.sessionStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.Session, error) {
+					return models.Session{ID: sessionID, OrgID: orgID, Status: "running", AgentType: models.AgentTypeClaudeCode}, nil
+				}
+				deps.threadStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
+					return models.SessionThread{
+						ID:          threadID,
+						SessionID:   sessionID,
+						OrgID:       orgID,
+						AgentType:   models.AgentTypeClaudeCode,
+						Label:       "Claude Code 2",
+						Status:      models.ThreadStatusRunning,
+						CurrentTurn: 0,
+					}, nil
+				}
+			},
+			expectErr: ErrThreadNotEditable,
+		},
+		{
+			name: "session not found",
+			input: UpdateThreadInput{
+				SessionID: sessionID,
+				OrgID:     orgID,
+				ThreadID:  threadID,
+				AgentType: "codex",
+				Label:     "Codex 2",
+			},
+			setupDeps: func(deps *testDeps) {
+				deps.sessionStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.Session, error) {
+					return models.Session{}, fmt.Errorf("no rows")
+				}
+			},
+			expectErr: ErrSessionNotFound,
+		},
+		{
+			name: "session terminal",
+			input: UpdateThreadInput{
+				SessionID: sessionID,
+				OrgID:     orgID,
+				ThreadID:  threadID,
+				AgentType: "codex",
+				Label:     "Codex 2",
+			},
+			setupDeps: func(deps *testDeps) {
+				deps.sessionStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.Session, error) {
+					return models.Session{ID: sessionID, OrgID: orgID, Status: "skipped", AgentType: models.AgentTypeClaudeCode}, nil
+				}
+			},
+			expectErr: ErrSessionTerminal,
+		},
+		{
+			name: "thread not found",
+			input: UpdateThreadInput{
+				SessionID: sessionID,
+				OrgID:     orgID,
+				ThreadID:  threadID,
+				AgentType: "codex",
+				Label:     "Codex 2",
+			},
+			setupDeps: func(deps *testDeps) {
+				deps.sessionStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.Session, error) {
+					return models.Session{ID: sessionID, OrgID: orgID, Status: "running", AgentType: models.AgentTypeClaudeCode}, nil
+				}
+				deps.threadStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
+					return models.SessionThread{}, fmt.Errorf("no rows")
+				}
+			},
+			expectErr: ErrThreadNotFound,
+		},
+		{
+			name: "thread in another session is hidden as not found",
+			input: UpdateThreadInput{
+				SessionID: sessionID,
+				OrgID:     orgID,
+				ThreadID:  threadID,
+				AgentType: "codex",
+				Label:     "Codex 2",
+			},
+			setupDeps: func(deps *testDeps) {
+				deps.sessionStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.Session, error) {
+					return models.Session{ID: sessionID, OrgID: orgID, Status: "running", AgentType: models.AgentTypeClaudeCode}, nil
+				}
+				deps.threadStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
+					return models.SessionThread{
+						ID:          threadID,
+						SessionID:   uuid.New(),
+						OrgID:       orgID,
+						AgentType:   models.AgentTypeClaudeCode,
+						Label:       "Claude Code 2",
+						Status:      models.ThreadStatusIdle,
+						CurrentTurn: 0,
+					}, nil
+				}
+			},
+			expectErr: ErrThreadNotFound,
+		},
+		{
+			name: "invalid agent type",
+			input: UpdateThreadInput{
+				SessionID: sessionID,
+				OrgID:     orgID,
+				ThreadID:  threadID,
+				AgentType: "pm_agent",
+				Label:     "PM Agent 2",
+			},
+			setupDeps: func(deps *testDeps) {
+				deps.sessionStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.Session, error) {
+					return models.Session{ID: sessionID, OrgID: orgID, Status: "running", AgentType: models.AgentTypeClaudeCode}, nil
+				}
+				deps.threadStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
+					return models.SessionThread{
+						ID:          threadID,
+						SessionID:   sessionID,
+						OrgID:       orgID,
+						AgentType:   models.AgentTypeClaudeCode,
+						Label:       "Claude Code 2",
+						Status:      models.ThreadStatusIdle,
+						CurrentTurn: 0,
+					}, nil
+				}
+			},
+			expectErr: ErrInvalidAgentType,
+		},
+		{
+			name: "invalid model override",
+			input: UpdateThreadInput{
+				SessionID: sessionID,
+				OrgID:     orgID,
+				ThreadID:  threadID,
+				AgentType: "codex",
+				Model:     stringPtr(models.ClaudeCodeModelSonnet46),
+				Label:     "Codex 2",
+			},
+			setupDeps: func(deps *testDeps) {
+				deps.sessionStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.Session, error) {
+					return models.Session{ID: sessionID, OrgID: orgID, Status: "running", AgentType: models.AgentTypeClaudeCode}, nil
+				}
+				deps.threadStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
+					return models.SessionThread{
+						ID:          threadID,
+						SessionID:   sessionID,
+						OrgID:       orgID,
+						AgentType:   models.AgentTypeClaudeCode,
+						Label:       "Claude Code 2",
+						Status:      models.ThreadStatusIdle,
+						CurrentTurn: 0,
+					}, nil
+				}
+			},
+			expectErr: ErrInvalidModel,
+		},
+		{
+			name: "returns thread not editable when guarded update loses the race",
+			input: UpdateThreadInput{
+				SessionID: sessionID,
+				OrgID:     orgID,
+				ThreadID:  threadID,
+				AgentType: "codex",
+				Model:     stringPtr(models.CodexModelGPT54Mini),
+				Label:     "Codex 2",
+			},
+			setupDeps: func(deps *testDeps) {
+				deps.sessionStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.Session, error) {
+					return models.Session{ID: sessionID, OrgID: orgID, Status: "running", AgentType: models.AgentTypeClaudeCode}, nil
+				}
+				deps.threadStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
+					return models.SessionThread{
+						ID:          threadID,
+						SessionID:   sessionID,
+						OrgID:       orgID,
+						AgentType:   models.AgentTypeClaudeCode,
+						Label:       "Claude Code 2",
+						Status:      models.ThreadStatusIdle,
+						CurrentTurn: 0,
+					}, nil
+				}
+				deps.threadStore.updateFn = func(_ context.Context, _ *models.SessionThread) error {
+					return pgx.ErrNoRows
+				}
+			},
+			expectErr: ErrThreadNotEditable,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			svc, deps := newTestService(t)
+			tt.setupDeps(deps)
+
+			result, err := svc.UpdateThread(context.Background(), tt.input)
+			if tt.expectErr != nil {
+				require.ErrorIs(t, err, tt.expectErr, "UpdateThread should return the expected sentinel error")
+				return
+			}
+
+			require.NoError(t, err, "UpdateThread should succeed for blank idle threads")
+			require.Equal(t, tt.expectedType, result.AgentType, "UpdateThread should return the updated agent type")
+			require.Equal(t, tt.expectedLabel, result.Label, "UpdateThread should return the updated label")
+			require.Equal(t, tt.expectedModel, result.ModelOverride, "UpdateThread should return the updated model override")
+		})
+	}
+}
+
+func TestService_ArchiveThread(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	threadID := uuid.New()
+
+	tests := []struct {
+		name          string
+		setupDeps     func(deps *testDeps)
+		expectErr     error
+		expectedLabel string
+	}{
+		{
+			name: "archives a completed thread when another visible tab remains",
+			setupDeps: func(deps *testDeps) {
+				deps.sessionStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.Session, error) {
+					return models.Session{ID: sessionID, OrgID: orgID, Status: "completed"}, nil
+				}
+				deps.threadStore.listBySessionFn = func(_ context.Context, _, _ uuid.UUID) ([]models.SessionThread, error) {
+					return []models.SessionThread{
+						{ID: uuid.New(), SessionID: sessionID, OrgID: orgID, Status: models.ThreadStatusRunning, Label: "Main tab"},
+						{ID: threadID, SessionID: sessionID, OrgID: orgID, Status: models.ThreadStatusCompleted, Label: "Review"},
+					}, nil
+				}
+				deps.threadStore.archiveFn = func(_ context.Context, gotOrgID, gotSessionID, gotThreadID uuid.UUID) (models.SessionThread, error) {
+					require.Equal(t, orgID, gotOrgID, "ArchiveThread should archive within the requested org")
+					require.Equal(t, sessionID, gotSessionID, "ArchiveThread should archive within the requested session")
+					require.Equal(t, threadID, gotThreadID, "ArchiveThread should archive the requested thread")
+					now := time.Now()
+					return models.SessionThread{
+						ID:         threadID,
+						SessionID:  sessionID,
+						OrgID:      orgID,
+						Status:     models.ThreadStatusCompleted,
+						Label:      "Review",
+						ArchivedAt: &now,
+					}, nil
+				}
+			},
+			expectedLabel: "Review",
+		},
+		{
+			name: "rejects archiving the last visible tab",
+			setupDeps: func(deps *testDeps) {
+				deps.sessionStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.Session, error) {
+					return models.Session{ID: sessionID, OrgID: orgID, Status: "idle"}, nil
+				}
+				deps.threadStore.archiveFn = func(_ context.Context, _, _, _ uuid.UUID) (models.SessionThread, error) {
+					return models.SessionThread{}, pgx.ErrNoRows
+				}
+				deps.threadStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
+					return models.SessionThread{ID: threadID, SessionID: sessionID, OrgID: orgID, Status: models.ThreadStatusCompleted, Label: "Only tab"}, nil
+				}
+				deps.threadStore.listBySessionFn = func(_ context.Context, _, _ uuid.UUID) ([]models.SessionThread, error) {
+					return []models.SessionThread{
+						{ID: threadID, SessionID: sessionID, OrgID: orgID, Status: models.ThreadStatusCompleted, Label: "Only tab"},
+					}, nil
+				}
+			},
+			expectErr: ErrCannotArchiveLastThread,
+		},
+		{
+			name: "rejects archiving an active thread",
+			setupDeps: func(deps *testDeps) {
+				deps.sessionStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.Session, error) {
+					return models.Session{ID: sessionID, OrgID: orgID, Status: "running"}, nil
+				}
+				deps.threadStore.archiveFn = func(_ context.Context, _, _, _ uuid.UUID) (models.SessionThread, error) {
+					return models.SessionThread{}, pgx.ErrNoRows
+				}
+				deps.threadStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
+					return models.SessionThread{ID: threadID, SessionID: sessionID, OrgID: orgID, Status: models.ThreadStatusRunning, Label: "Busy tab"}, nil
+				}
+				deps.threadStore.listBySessionFn = func(_ context.Context, _, _ uuid.UUID) ([]models.SessionThread, error) {
+					return []models.SessionThread{
+						{ID: uuid.New(), SessionID: sessionID, OrgID: orgID, Status: models.ThreadStatusCompleted, Label: "Main tab"},
+						{ID: threadID, SessionID: sessionID, OrgID: orgID, Status: models.ThreadStatusRunning, Label: "Busy tab"},
+					}, nil
+				}
+			},
+			expectErr: ErrThreadActive,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			svc, deps := newTestService(t)
+			tt.setupDeps(deps)
+
+			result, err := svc.ArchiveThread(context.Background(), orgID, sessionID, threadID)
+			if tt.expectErr != nil {
+				require.ErrorIs(t, err, tt.expectErr, "ArchiveThread should return the expected sentinel error")
+				return
+			}
+
+			require.NoError(t, err, "ArchiveThread should succeed for inactive non-last tabs")
+			require.Equal(t, tt.expectedLabel, result.Label, "ArchiveThread should return the archived thread")
+			require.NotNil(t, result.ArchivedAt, "ArchiveThread should return the archived timestamp")
+		})
+	}
+}
+
+func stringPtr(value string) *string {
+	return &value
+}
+
 func TestService_ListThreads(t *testing.T) {
 	t.Parallel()
 
@@ -485,6 +1027,16 @@ func TestService_GetThread(t *testing.T) {
 			setupDeps: func(deps *testDeps) {
 				deps.threadStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
 					return models.SessionThread{ID: threadID, SessionID: uuid.New(), OrgID: orgID}, nil
+				}
+			},
+			expectErr: ErrThreadNotFound,
+		},
+		{
+			name: "archived thread is treated as not found",
+			setupDeps: func(deps *testDeps) {
+				deps.threadStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
+					now := time.Now()
+					return models.SessionThread{ID: threadID, SessionID: sessionID, OrgID: orgID, ArchivedAt: &now}, nil
 				}
 			},
 			expectErr: ErrThreadNotFound,
@@ -984,6 +1536,56 @@ func TestService_SendMessage(t *testing.T) {
 				}
 			},
 			expectErr: ErrSessionSnapshotExpired,
+		},
+		{
+			name: "resume race to running queues the message instead of rejecting it",
+			input: SendMessageInput{
+				SessionID: sessionID,
+				OrgID:     orgID,
+				ThreadID:  threadID,
+				Message:   "continue after race",
+			},
+			setupDeps: func(deps *testDeps) {
+				deps.threadStore.claimIdleFn = func(_ context.Context, _, _, _ uuid.UUID) (models.SessionThread, error) {
+					return models.SessionThread{}, fmt.Errorf("no rows")
+				}
+				readCount := 0
+				deps.threadStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
+					readCount++
+					if readCount == 1 {
+						return models.SessionThread{
+							ID:          threadID,
+							SessionID:   sessionID,
+							OrgID:       orgID,
+							CurrentTurn: 4,
+							Status:      models.ThreadStatusCompleted,
+						}, nil
+					}
+					return models.SessionThread{
+						ID:          threadID,
+						SessionID:   sessionID,
+						OrgID:       orgID,
+						CurrentTurn: 4,
+						Status:      models.ThreadStatusRunning,
+					}, nil
+				}
+				deps.threadStore.claimForResumeFn = func(_ context.Context, _, _, _ uuid.UUID) (models.SessionThread, error) {
+					return models.SessionThread{}, pgx.ErrNoRows
+				}
+				deps.messageStore.createFn = func(_ context.Context, msg *models.SessionMessage) error {
+					msg.ID = 88
+					require.Equal(t, 6, msg.TurnNumber, "race-queued message should land behind the in-flight turn")
+					return nil
+				}
+				deps.threadStore.incrementPendingFn = func(_ context.Context, _, tid uuid.UUID) error {
+					require.Equal(t, threadID, tid, "race-queued send should increment pending messages on the requested thread")
+					return nil
+				}
+				deps.jobStore.enqueueFn = func(_ context.Context, _ uuid.UUID, _, _ string, _ any, _ int, _ *string) (uuid.UUID, error) {
+					require.Fail(t, "race-queued send should not enqueue a concurrent continue_session job")
+					return uuid.Nil, nil
+				}
+			},
 		},
 		{
 			name: "preserves original status on message create failure after resume",
@@ -1589,6 +2191,16 @@ func TestService_EndThread(t *testing.T) {
 			},
 			expectErr: ErrThreadCannotBeEnded,
 		},
+		{
+			name: "archived thread is treated as not found",
+			setupDeps: func(deps *testDeps) {
+				deps.threadStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
+					now := time.Now()
+					return models.SessionThread{ID: threadID, SessionID: sessionID, OrgID: orgID, Status: models.ThreadStatusIdle, ArchivedAt: &now}, nil
+				}
+			},
+			expectErr: ErrThreadNotFound,
+		},
 	}
 
 	for _, tt := range tests {
@@ -1652,6 +2264,16 @@ func TestService_GetMessages(t *testing.T) {
 			},
 			expectErr: ErrThreadNotFound,
 		},
+		{
+			name: "archived thread is treated as not found",
+			setupDeps: func(deps *testDeps) {
+				deps.threadStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
+					now := time.Now()
+					return models.SessionThread{ID: threadID, SessionID: sessionID, OrgID: orgID, ArchivedAt: &now}, nil
+				}
+			},
+			expectErr: ErrThreadNotFound,
+		},
 	}
 
 	for _, tt := range tests {
@@ -1711,6 +2333,16 @@ func TestService_GetLogs(t *testing.T) {
 			setupDeps: func(deps *testDeps) {
 				deps.threadStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
 					return models.SessionThread{ID: threadID, SessionID: uuid.New(), OrgID: orgID}, nil
+				}
+			},
+			expectErr: ErrThreadNotFound,
+		},
+		{
+			name: "archived thread is treated as not found",
+			setupDeps: func(deps *testDeps) {
+				deps.threadStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
+					now := time.Now()
+					return models.SessionThread{ID: threadID, SessionID: sessionID, OrgID: orgID, ArchivedAt: &now}, nil
 				}
 			},
 			expectErr: ErrThreadNotFound,

@@ -15,7 +15,6 @@ export const queryKeys = {
       ["sessions", "counts", repo, peopleKey] as const,
     detail: (id: string) => ["session", id] as const,
     timeline: (id: string) => ["session", id, "timeline"] as const,
-    validation: (id: string) => ["session", id, "validation"] as const,
     pr: (id: string) => ["session", id, "pr"] as const,
     messages: (id: string) => ["session", id, "messages"] as const,
     threads: (id: string) => ["session", id, "threads"] as const,

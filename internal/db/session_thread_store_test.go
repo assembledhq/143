@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/pashagolub/pgxmock/v4"
 	"github.com/stretchr/testify/require"
 
@@ -19,7 +20,7 @@ var sessionThreadTestColumns = []string{
 	"current_turn", "last_activity_at",
 	"confidence_score", "result_summary", "diff", "failure_explanation", "failure_category",
 	"started_at", "completed_at", "created_at",
-	"base_snapshot_key", "cost_cents", "pending_message_count", "cancel_requested_at",
+	"archived_at", "base_snapshot_key", "cost_cents", "pending_message_count", "cancel_requested_at",
 }
 
 func newSessionThreadRow(threadID, sessionID, orgID uuid.UUID, label string, now time.Time) []interface{} {
@@ -29,7 +30,7 @@ func newSessionThreadRow(threadID, sessionID, orgID uuid.UUID, label string, now
 		0, nil,
 		nil, nil, nil, nil, nil,
 		nil, nil, now,
-		nil, float64(0), 0, nil,
+		nil, nil, float64(0), 0, nil,
 	}
 }
 
@@ -80,7 +81,7 @@ func TestSessionThreadStore_GetByID(t *testing.T) {
 				sessionID := uuid.New()
 				now := time.Now()
 				// GetByID has 2 named args: id, org_id
-				mock.ExpectQuery("SELECT .+ FROM session_threads WHERE id .+ AND org_id").
+				mock.ExpectQuery("SELECT .+ FROM session_threads WHERE id .+ AND org_id .+ archived_at IS NULL").
 					WithArgs(anyArgs(2)...).
 					WillReturnRows(
 						pgxmock.NewRows(sessionThreadTestColumns).
@@ -92,7 +93,7 @@ func TestSessionThreadStore_GetByID(t *testing.T) {
 		{
 			name: "returns error when not found",
 			setupMock: func(mock pgxmock.PgxPoolIface, orgID, threadID uuid.UUID) {
-				mock.ExpectQuery("SELECT .+ FROM session_threads WHERE id .+ AND org_id").
+				mock.ExpectQuery("SELECT .+ FROM session_threads WHERE id .+ AND org_id .+ archived_at IS NULL").
 					WithArgs(anyArgs(2)...).
 					WillReturnRows(pgxmock.NewRows(sessionThreadTestColumns))
 			},
@@ -142,7 +143,7 @@ func TestSessionThreadStore_ListBySession(t *testing.T) {
 			name: "returns threads for session",
 			setupMock: func(mock pgxmock.PgxPoolIface, orgID, sessionID uuid.UUID) {
 				// ListBySession has 2 named args: org_id, session_id
-				mock.ExpectQuery("SELECT .+ FROM session_threads WHERE org_id .+ AND session_id").
+				mock.ExpectQuery("SELECT .+ FROM session_threads WHERE org_id .+ AND session_id .+ archived_at IS NULL").
 					WithArgs(anyArgs(2)...).
 					WillReturnRows(
 						pgxmock.NewRows(sessionThreadTestColumns).
@@ -155,7 +156,7 @@ func TestSessionThreadStore_ListBySession(t *testing.T) {
 		{
 			name: "returns empty for session with no threads",
 			setupMock: func(mock pgxmock.PgxPoolIface, orgID, sessionID uuid.UUID) {
-				mock.ExpectQuery("SELECT .+ FROM session_threads WHERE org_id .+ AND session_id").
+				mock.ExpectQuery("SELECT .+ FROM session_threads WHERE org_id .+ AND session_id .+ archived_at IS NULL").
 					WithArgs(anyArgs(2)...).
 					WillReturnRows(pgxmock.NewRows(sessionThreadTestColumns))
 			},
@@ -164,7 +165,7 @@ func TestSessionThreadStore_ListBySession(t *testing.T) {
 		{
 			name: "returns error on db failure",
 			setupMock: func(mock pgxmock.PgxPoolIface, orgID, sessionID uuid.UUID) {
-				mock.ExpectQuery("SELECT .+ FROM session_threads WHERE org_id .+ AND session_id").
+				mock.ExpectQuery("SELECT .+ FROM session_threads WHERE org_id .+ AND session_id .+ archived_at IS NULL").
 					WithArgs(anyArgs(2)...).
 					WillReturnError(fmt.Errorf("connection refused"))
 			},
@@ -277,13 +278,47 @@ func TestSessionThreadStore_CountBySession(t *testing.T) {
 	sessionID := uuid.New()
 
 	// CountBySession has 2 named args: org_id, session_id
-	mock.ExpectQuery("SELECT count\\(\\*\\) FROM session_threads WHERE org_id .+ AND session_id").
+	mock.ExpectQuery("SELECT count\\(\\*\\) FROM session_threads WHERE org_id .+ AND session_id .+ archived_at IS NULL").
 		WithArgs(anyArgs(2)...).
 		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(3))
 
 	count, err := store.CountBySession(context.Background(), orgID, sessionID)
 	require.NoError(t, err, "CountBySession should not return an error")
 	require.Equal(t, 3, count, "should return the correct thread count")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestSessionThreadStore_Archive(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewSessionThreadStore(mock)
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	threadID := uuid.New()
+	now := time.Now()
+
+	mock.ExpectQuery(`WITH visible_threads AS[\s\S]*FOR UPDATE[\s\S]*UPDATE session_threads[\s\S]*SET archived_at = now\(\)[\s\S]*WHERE id = @id[\s\S]*session_id = @session_id[\s\S]*org_id = @org_id[\s\S]*archived_at IS NULL[\s\S]*RETURNING`).
+		WithArgs(anyArgs(3)...).
+		WillReturnRows(
+			pgxmock.NewRows(sessionThreadTestColumns).
+				AddRow(
+					threadID, sessionID, orgID, "claude_code", nil,
+					"Review", nil, nil, "completed", nil,
+					1, nil,
+					nil, nil, nil, nil, nil,
+					nil, nil, now,
+					&now, nil, float64(0), 0, nil,
+				),
+		)
+
+	thread, err := store.Archive(context.Background(), orgID, sessionID, threadID)
+	require.NoError(t, err, "Archive should not return an error")
+	require.Equal(t, threadID, thread.ID, "Archive should return the archived thread")
+	require.NotNil(t, thread.ArchivedAt, "Archive should return the archived timestamp")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
@@ -345,6 +380,87 @@ func TestSessionThreadStore_UpdateStatus(t *testing.T) {
 			} else {
 				require.NoError(t, err, "UpdateStatus should not return an error")
 			}
+			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+		})
+	}
+}
+
+func TestSessionThreadStore_UpdateEditable(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		setupMock func(mock pgxmock.PgxPoolIface, orgID, sessionID, threadID uuid.UUID, now time.Time, model string)
+		expectErr error
+	}{
+		{
+			name: "updates blank idle threads",
+			setupMock: func(mock pgxmock.PgxPoolIface, orgID, sessionID, threadID uuid.UUID, now time.Time, model string) {
+				mock.ExpectQuery(`UPDATE session_threads[\s\S]*WHERE id = @id[\s\S]*org_id = @org_id[\s\S]*session_id = @session_id[\s\S]*status = 'idle'[\s\S]*current_turn = 0[\s\S]*RETURNING`).
+					WithArgs(anyArgs(6)...).
+					WillReturnRows(
+						pgxmock.NewRows(sessionThreadTestColumns).
+							AddRow(
+								threadID, sessionID, orgID, "codex", &model,
+								"Codex 2", nil, nil, "idle", nil,
+								0, nil,
+								nil, nil, nil, nil, nil,
+								nil, nil, now,
+								nil, nil, float64(0), 0, nil,
+							),
+					)
+			},
+		},
+		{
+			name: "returns no rows when thread is no longer editable",
+			setupMock: func(mock pgxmock.PgxPoolIface, _ uuid.UUID, _ uuid.UUID, _ uuid.UUID, _ time.Time, _ string) {
+				mock.ExpectQuery(`UPDATE session_threads[\s\S]*WHERE id = @id[\s\S]*org_id = @org_id[\s\S]*session_id = @session_id[\s\S]*status = 'idle'[\s\S]*current_turn = 0[\s\S]*RETURNING`).
+					WithArgs(anyArgs(6)...).
+					WillReturnRows(pgxmock.NewRows(sessionThreadTestColumns))
+			},
+			expectErr: pgx.ErrNoRows,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "should create mock pool")
+			defer mock.Close()
+
+			store := NewSessionThreadStore(mock)
+			orgID := uuid.New()
+			sessionID := uuid.New()
+			threadID := uuid.New()
+			now := time.Now()
+			model := models.CodexModelGPT54
+
+			tt.setupMock(mock, orgID, sessionID, threadID, now, model)
+
+			thread := &models.SessionThread{
+				ID:            threadID,
+				SessionID:     sessionID,
+				OrgID:         orgID,
+				AgentType:     models.AgentTypeCodex,
+				ModelOverride: &model,
+				Label:         "Codex 2",
+				Status:        models.ThreadStatusIdle,
+			}
+
+			err = store.UpdateEditable(context.Background(), thread)
+			if tt.expectErr != nil {
+				require.ErrorIs(t, err, tt.expectErr, "UpdateEditable should surface the guarded-write miss")
+				require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+				return
+			}
+
+			require.NoError(t, err, "UpdateEditable should not return an error")
+			require.Equal(t, models.AgentTypeCodex, thread.AgentType, "UpdateEditable should preserve the updated agent type")
+			require.Equal(t, "Codex 2", thread.Label, "UpdateEditable should preserve the updated label")
+			require.NotNil(t, thread.ModelOverride, "UpdateEditable should preserve the updated model override")
+			require.Equal(t, model, *thread.ModelOverride, "UpdateEditable should preserve the updated model override")
 			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 		})
 	}
@@ -491,7 +607,7 @@ func TestSessionThreadStore_ClaimIdleForSessionLocksSiblings(t *testing.T) {
 	// active siblings, and admits only when the cap is not yet reached. A
 	// regression that drops the status check or reverses the cap inequality
 	// must not pass.
-	mock.ExpectQuery(`(?s)WITH locked_threads AS.*FOR UPDATE.*target_claimable.*status\s*=\s*ANY\(@claimable_statuses\).*running_count.*id\s*<>\s*@id.*'pending',\s*'running',\s*'awaiting_input'.*eligible.*running_count\.n\s*<\s*@max_running.*UPDATE session_threads\s+SET status = 'running'.*EXISTS\s*\(\s*SELECT 1 FROM eligible\s*\).*RETURNING`).
+	mock.ExpectQuery(`(?s)WITH locked_threads AS.*WHERE org_id = @org_id AND session_id = @session_id AND archived_at IS NULL.*FOR UPDATE.*target_claimable.*status\s*=\s*ANY\(@claimable_statuses\).*running_count.*id\s*<>\s*@id.*'pending',\s*'running',\s*'awaiting_input'.*eligible.*running_count\.n\s*<\s*@max_running.*UPDATE session_threads\s+SET status = 'running'.*archived_at IS NULL.*EXISTS\s*\(\s*SELECT 1 FROM eligible\s*\).*RETURNING`).
 		WithArgs(anyArgs(5)...).
 		WillReturnRows(pgxmock.NewRows(sessionThreadTestColumns).AddRow(row...))
 
@@ -525,7 +641,7 @@ func TestSessionThreadStore_ClaimForResumeInSession(t *testing.T) {
 	// thread start time stays meaningful), and only fire when status is in
 	// the resumable set. The 5 named args mirror ClaimIdleForSession;
 	// claimable_statuses carries models.ResumableThreadStatuses.
-	mock.ExpectQuery(`(?s)WITH locked_threads AS.*FOR UPDATE.*target_claimable.*status\s*=\s*ANY\(@claimable_statuses\).*UPDATE session_threads\s+SET status = 'running',\s+completed_at = NULL,\s+last_activity_at = now\(\),\s+cancel_requested_at = NULL.*EXISTS\s*\(\s*SELECT 1 FROM eligible\s*\).*RETURNING`).
+	mock.ExpectQuery(`(?s)WITH locked_threads AS.*WHERE org_id = @org_id AND session_id = @session_id AND archived_at IS NULL.*FOR UPDATE.*target_claimable.*status\s*=\s*ANY\(@claimable_statuses\).*UPDATE session_threads\s+SET status = 'running',\s+completed_at = NULL,\s+last_activity_at = now\(\),\s+cancel_requested_at = NULL.*archived_at IS NULL.*EXISTS\s*\(\s*SELECT 1 FROM eligible\s*\).*RETURNING`).
 		WithArgs(anyArgs(5)...).
 		WillReturnRows(pgxmock.NewRows(sessionThreadTestColumns).AddRow(row...))
 

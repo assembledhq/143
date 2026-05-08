@@ -59,6 +59,10 @@ func (a *AmpAdapter) PreparePrompt(ctx context.Context, input *agent.AgentInput)
 		UserPrompt:   userPrompt,
 		MaxTokens:    maxTokens,
 		Files:        files,
+		UsageHint: agent.TokenUsageHint{
+			AgentType:   models.AgentTypeAmp,
+			BillingMode: agent.TokenBillingModeUnknown,
+		},
 	}, nil
 }
 

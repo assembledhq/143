@@ -1,0 +1,61 @@
+# Synthetic DNS probe — included by app and worker compose files.
+#
+# Resolves a fixed list of hostnames once per interval and emits a
+# zerolog-style structured line per target. Vector ships those lines to
+# VictoriaLogs alongside service logs (no extra wiring); the
+# DNSProbeFailures alert in deploy/vmalert/rules/production-alerts.yml
+# fires when any single target fails twice in 5 minutes.
+#
+# Why this exists: the 2026-05-07T04:15Z incident was diagnosed only
+# retroactively, via cascading symptoms (`Could not resolve host:
+# github.com` from `git push` on workers, `stream disconnected` from
+# Codex inside sandboxes). A direct probe surfaces upstream DNS issues
+# at the source instead of waiting for user-visible failures.
+
+services:
+  dns-probe:
+    image: alpine:3.20
+    environment:
+      DNS_PROBE_TARGETS: ${DNS_PROBE_TARGETS:-chatgpt.com github.com api.openai.com api.anthropic.com}
+      DNS_PROBE_INTERVAL_SEC: ${DNS_PROBE_INTERVAL_SEC:-60}
+      DNS_PROBE_TIMEOUT_SEC: ${DNS_PROBE_TIMEOUT_SEC:-3}
+    entrypoint: ["/bin/sh", "-c"]
+    # busybox `nslookup` is built into alpine — no apk install at runtime,
+    # which would itself depend on working DNS. We log info-level "dns
+    # probe ok" lines too so a silent probe (broken container, dead loop)
+    # is distinguishable from a healthy one in Grafana.
+    command:
+      - |
+        set -eu
+        emit() {
+          ts=$$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+          # zerolog-style structured JSON: vector parses .message + .level
+          # and merges them to the log root, so the alert rule can match
+          # on _msg / level directly.
+          printf '{"level":"%s","time":"%s","message":"%s","probe":"dns","target":"%s"}\n' \
+            "$$1" "$$ts" "$$2" "$$3"
+        }
+        emit info "dns probe started" "$$DNS_PROBE_TARGETS"
+        while true; do
+          for target in $$DNS_PROBE_TARGETS; do
+            if timeout "$$DNS_PROBE_TIMEOUT_SEC" nslookup "$$target" >/dev/null 2>&1; then
+              emit info "dns probe ok" "$$target"
+            else
+              emit error "dns probe failed" "$$target"
+            fi
+          done
+          sleep "$$DNS_PROBE_INTERVAL_SEC"
+        done
+    # Same race-avoidance as disk-monitor in docker-compose.logging.yml: PID
+    # 1 is `sh` running `sleep`, which doesn't propagate SIGTERM, so a
+    # default `docker stop` hangs the full grace period before SIGKILL. The
+    # probe is stateless — SIGKILL with a 1s grace is safe and avoids a
+    # name-conflict race during `compose up --force-recreate`.
+    stop_signal: SIGKILL
+    stop_grace_period: 1s
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 32M
+          cpus: "0.05"
