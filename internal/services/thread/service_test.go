@@ -1538,6 +1538,56 @@ func TestService_SendMessage(t *testing.T) {
 			expectErr: ErrSessionSnapshotExpired,
 		},
 		{
+			name: "resume race to running queues the message instead of rejecting it",
+			input: SendMessageInput{
+				SessionID: sessionID,
+				OrgID:     orgID,
+				ThreadID:  threadID,
+				Message:   "continue after race",
+			},
+			setupDeps: func(deps *testDeps) {
+				deps.threadStore.claimIdleFn = func(_ context.Context, _, _, _ uuid.UUID) (models.SessionThread, error) {
+					return models.SessionThread{}, fmt.Errorf("no rows")
+				}
+				readCount := 0
+				deps.threadStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
+					readCount++
+					if readCount == 1 {
+						return models.SessionThread{
+							ID:          threadID,
+							SessionID:   sessionID,
+							OrgID:       orgID,
+							CurrentTurn: 4,
+							Status:      models.ThreadStatusCompleted,
+						}, nil
+					}
+					return models.SessionThread{
+						ID:          threadID,
+						SessionID:   sessionID,
+						OrgID:       orgID,
+						CurrentTurn: 4,
+						Status:      models.ThreadStatusRunning,
+					}, nil
+				}
+				deps.threadStore.claimForResumeFn = func(_ context.Context, _, _, _ uuid.UUID) (models.SessionThread, error) {
+					return models.SessionThread{}, pgx.ErrNoRows
+				}
+				deps.messageStore.createFn = func(_ context.Context, msg *models.SessionMessage) error {
+					msg.ID = 88
+					require.Equal(t, 6, msg.TurnNumber, "race-queued message should land behind the in-flight turn")
+					return nil
+				}
+				deps.threadStore.incrementPendingFn = func(_ context.Context, _, tid uuid.UUID) error {
+					require.Equal(t, threadID, tid, "race-queued send should increment pending messages on the requested thread")
+					return nil
+				}
+				deps.jobStore.enqueueFn = func(_ context.Context, _ uuid.UUID, _, _ string, _ any, _ int, _ *string) (uuid.UUID, error) {
+					require.Fail(t, "race-queued send should not enqueue a concurrent continue_session job")
+					return uuid.Nil, nil
+				}
+			},
+		},
+		{
 			name: "preserves original status on message create failure after resume",
 			input: SendMessageInput{
 				SessionID: sessionID,
