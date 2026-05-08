@@ -175,6 +175,34 @@ func TestScheduler_SchedulePullRequestReconciliation(t *testing.T) {
 	require.Contains(t, jobs.dedupeKeys[0], "reconcile_pull_request_state:"+orgIDs[0].String()+":2026042322", "dedupe key should include the org and UTC hour bucket")
 }
 
+func TestScheduler_ScheduleLinearTeamKeyRefresh_OncePerUTCDay(t *testing.T) {
+	t.Parallel()
+
+	orgIDs := []uuid.UUID{uuid.New(), uuid.New()}
+	jobs := &trackingJobs{}
+	s := &Scheduler{
+		jobs:   jobs,
+		logger: zerolog.Nop(),
+	}
+
+	firstTick := time.Date(2026, 5, 8, 10, 0, 0, 0, time.UTC)
+	secondTick := firstTick.Add(10 * time.Minute)
+	nextDay := firstTick.Add(24 * time.Hour)
+
+	s.scheduleLinearTeamKeyRefresh(context.Background(), orgIDs, firstTick)
+	s.scheduleLinearTeamKeyRefresh(context.Background(), orgIDs, secondTick)
+	s.scheduleLinearTeamKeyRefresh(context.Background(), orgIDs, nextDay)
+
+	require.Equal(t,
+		[]string{"refresh_linear_team_keys", "refresh_linear_team_keys", "refresh_linear_team_keys", "refresh_linear_team_keys"},
+		jobs.enqueued,
+		"linear team-key refresh should enqueue once per org per UTC day, not once per scheduler tick",
+	)
+	require.Len(t, jobs.dedupeKeys, 4, "should record one dedupe key per enqueued refresh job")
+	require.Contains(t, jobs.dedupeKeys[0], "refresh_linear_team_keys:"+orgIDs[0].String()+":2026-05-08", "first day dedupe key should include org and date")
+	require.Contains(t, jobs.dedupeKeys[2], "refresh_linear_team_keys:"+orgIDs[0].String()+":2026-05-09", "next day should schedule again with the new date")
+}
+
 func TestScheduler_ScheduleContextRefreshes_NoDoc(t *testing.T) {
 	t.Parallel()
 
