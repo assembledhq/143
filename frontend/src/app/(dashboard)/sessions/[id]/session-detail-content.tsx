@@ -2699,9 +2699,8 @@ export function SessionDetailContent({ id }: { id: string }) {
       setRepairActionError(null);
       setPendingPRAction(action);
     },
-    onSuccess: (response) => {
-      setPendingPRAction(null);
-      void queryClient.invalidateQueries({ queryKey: ["pull-request", pullRequestId, "health"] });
+    onSuccess: async (response) => {
+      const repairHealthQueryKey = ["pull-request", pullRequestId, "health"];
       void queryClient.invalidateQueries({ queryKey: ["session", id] });
       void queryClient.invalidateQueries({ queryKey: ["session", id, "timeline"] });
       void queryClient.invalidateQueries({ queryKey: ["session", id, "pr"] });
@@ -2709,6 +2708,11 @@ export function SessionDetailContent({ id }: { id: string }) {
       if (response.data.session_id !== id) {
         router.push(`/sessions/${response.data.session_id}`);
         return;
+      }
+      try {
+        await queryClient.refetchQueries({ queryKey: repairHealthQueryKey, type: "active" });
+      } finally {
+        setPendingPRAction(null);
       }
       // Same-session response: without explicit feedback the click looks
       // dead. Reused-in-flight is the common case (repair already running on
@@ -4101,12 +4105,14 @@ export function SessionDetailContent({ id }: { id: string }) {
             prHealth ? (
               <PRHealthBanner
                 health={prHealth}
+                currentSessionId={id}
                 pendingAction={pendingPRAction}
                 repairError={repairActionError}
                 mergeAuthRequired={ghBlocked}
                 onFixTests={() => startRepairMutation.mutate("fix_tests")}
                 onResolveConflicts={() => startRepairMutation.mutate("resolve_conflicts")}
                 onMerge={handleMergeAction}
+                onOpenRepairSession={(sessionId) => router.push(`/sessions/${sessionId}`)}
                 pushChanges={showPushAction ? {
                   label: pushActionLabel,
                   disabled: pushActionDisabled,

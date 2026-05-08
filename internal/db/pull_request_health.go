@@ -324,6 +324,27 @@ func (s *PullRequestStore) GetActiveRepairRun(ctx context.Context, orgID, pullRe
 	return pgx.CollectOneRow(rows, pgx.RowToStructByName[models.PullRequestRepairRun])
 }
 
+func (s *PullRequestStore) ListActiveRepairRuns(ctx context.Context, orgID, pullRequestID uuid.UUID, healthVersion int64) ([]models.PullRequestRepairRun, error) {
+	query := `
+		SELECT ` + prRepairRunSelectColumns + `
+		FROM pull_request_repair_runs
+		WHERE org_id = @org_id
+		  AND pull_request_id = @pull_request_id
+		  AND health_version = @health_version
+		  AND active = true
+		ORDER BY created_at DESC`
+
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
+		"org_id":          orgID,
+		"pull_request_id": pullRequestID,
+		"health_version":  healthVersion,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("list active pull request repair runs: %w", err)
+	}
+	return pgx.CollectRows(rows, pgx.RowToStructByName[models.PullRequestRepairRun])
+}
+
 func (s *PullRequestStore) CreateRepairRun(ctx context.Context, run *models.PullRequestRepairRun) error {
 	query := `
 		INSERT INTO pull_request_repair_runs (
