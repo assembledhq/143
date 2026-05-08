@@ -140,9 +140,9 @@ func TestOrganizationsHandler_Create_HappyPath(t *testing.T) {
 
 	var resp struct {
 		Data struct {
-			ID   uuid.UUID `json:"id"`
-			Name string    `json:"name"`
-			Role string    `json:"role"`
+			ID   uuid.UUID             `json:"id"`
+			Name string                `json:"name"`
+			Role models.MembershipRole `json:"role"`
 		} `json:"data"`
 	}
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))

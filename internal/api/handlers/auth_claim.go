@@ -47,9 +47,9 @@ func (h *AuthHandler) acceptValidatedInvitation(
 	ctx context.Context,
 	inv *models.Invitation,
 	userID uuid.UUID,
-	role string,
+	role models.MembershipRole,
 	opts acceptOptions,
-) (string, *invitationError, error) {
+) (models.MembershipRole, *invitationError, error) {
 	if h.pool == nil {
 		return "", nil, fmt.Errorf("auth handler pool is not configured")
 	}
@@ -125,7 +125,7 @@ func (h *AuthHandler) claimInvitationForExistingUser(
 	if acceptErr != nil {
 		return &inv, "", acceptErr, nil
 	}
-	return &inv, effectiveRole, nil, nil
+	return &inv, string(effectiveRole), nil, nil
 }
 
 // invitationOrNil returns &inv only when the invitation row was actually

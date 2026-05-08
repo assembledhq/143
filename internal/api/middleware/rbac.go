@@ -20,7 +20,7 @@ func RequireRole(roles ...string) func(http.Handler) http.Handler {
 				return
 			}
 
-			role := ActiveRoleFromContext(r.Context())
+			role := string(ActiveRoleFromContext(r.Context()))
 			if !slices.Contains(roles, role) {
 				writeError(w, http.StatusForbidden, "FORBIDDEN", "insufficient permissions")
 				return

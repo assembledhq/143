@@ -1399,11 +1399,11 @@ func (h *AuthHandler) createInvitedUserWithPassword(ctx context.Context, token, 
 // For an email-only invitation, the email must match. For a GitHub-only
 // invitation, the GitHub login must match. If both identifiers are set on the
 // invitation, either a matching email or a matching GitHub login is accepted.
-func (h *AuthHandler) validateInvitation(ctx context.Context, token, email, githubLogin string) (models.Invitation, uuid.UUID, string, *invitationError) {
+func (h *AuthHandler) validateInvitation(ctx context.Context, token, email, githubLogin string) (models.Invitation, uuid.UUID, models.MembershipRole, *invitationError) {
 	return h.validateInvitationWithStore(ctx, h.invitationStore, token, email, githubLogin)
 }
 
-func (h *AuthHandler) validateInvitationWithStore(ctx context.Context, invitationStore invitationLookupStore, token, email, githubLogin string) (models.Invitation, uuid.UUID, string, *invitationError) {
+func (h *AuthHandler) validateInvitationWithStore(ctx context.Context, invitationStore invitationLookupStore, token, email, githubLogin string) (models.Invitation, uuid.UUID, models.MembershipRole, *invitationError) {
 	if invitationStore == nil {
 		return models.Invitation{}, uuid.Nil, "", &invitationError{http.StatusInternalServerError, "INVITE_LOOKUP_FAILED", "failed to look up invitation"}
 	}

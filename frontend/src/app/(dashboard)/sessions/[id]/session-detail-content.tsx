@@ -2977,14 +2977,14 @@ export function SessionDetailContent({ id }: { id: string }) {
       // effect re-runs when these dependencies flip, so the replay still
       // happens — just on the next tick when the session is actually ready.
       const pushAvailable = hasPR && prStatus === "open" && !!session?.has_unpushed_changes;
-      if (!pushAvailable || !hasSnapshot || isRunning) return;
-      resumeAttemptRef.current = resumePRParam;
-      pushChangesMutation.mutate({ authorMode: "user", resumeToken: resumePRParam });
-      return;
-    }
-    if (!canCreatePR) return;
+    if (!pushAvailable || !hasSnapshot || isRunning) return;
     resumeAttemptRef.current = resumePRParam;
-    createPRMutation.mutate({ authorMode: "user", resumeToken: resumePRParam });
+    pushChangesMutation.mutate({ authorMode: "user", resumeToken: resumePRParam });
+    return;
+  }
+  if (!canCreatePR) return;
+  resumeAttemptRef.current = resumePRParam;
+  createPRMutation.mutate({ authorMode: "user", resumeToken: resumePRParam });
   }, [canCreatePR, createPRMutation, hasPR, hasSnapshot, isRunning, prStatus, pushChangesMutation, resumeActionParam, resumePRParam, session?.has_unpushed_changes]);
 
   const sessionDiff = session?.diff;

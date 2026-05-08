@@ -10,29 +10,29 @@ import (
 // Either Email or GitHubUsername must be set; both may be set when the inviter
 // provides both identifiers.
 type Invitation struct {
-	ID             uuid.UUID  `db:"id"              json:"id"`
-	OrgID          uuid.UUID  `db:"org_id"          json:"org_id"`
-	Email          *string    `db:"email"           json:"email,omitempty"`
-	GitHubUsername *string    `db:"github_username" json:"github_username,omitempty"`
-	Role           string     `db:"role"            json:"role"`
-	InvitedBy      uuid.UUID  `db:"invited_by"      json:"-"`
-	Token          string     `db:"token"           json:"-"`
-	Status         string     `db:"status"          json:"status"`
-	ExpiresAt      time.Time  `db:"expires_at"      json:"expires_at"`
-	CreatedAt      time.Time  `db:"created_at"      json:"created_at"`
-	AcceptedAt     *time.Time `db:"accepted_at"     json:"accepted_at,omitempty"`
+	ID             uuid.UUID      `db:"id"              json:"id"`
+	OrgID          uuid.UUID      `db:"org_id"          json:"org_id"`
+	Email          *string        `db:"email"           json:"email,omitempty"`
+	GitHubUsername *string        `db:"github_username" json:"github_username,omitempty"`
+	Role           MembershipRole `db:"role"            json:"role"`
+	InvitedBy      uuid.UUID      `db:"invited_by"      json:"-"`
+	Token          string         `db:"token"           json:"-"`
+	Status         string         `db:"status"          json:"status"`
+	ExpiresAt      time.Time      `db:"expires_at"      json:"expires_at"`
+	CreatedAt      time.Time      `db:"created_at"      json:"created_at"`
+	AcceptedAt     *time.Time     `db:"accepted_at"     json:"accepted_at,omitempty"`
 }
 
 // InvitationResponse is the API response type with the inviter expanded.
 type InvitationResponse struct {
-	ID             uuid.UUID `json:"id"`
-	Email          *string   `json:"email,omitempty"`
-	GitHubUsername *string   `json:"github_username,omitempty"`
-	Role           string    `json:"role"`
-	Status         string    `json:"status"`
-	InvitedBy      UserBrief `json:"invited_by"`
-	ExpiresAt      time.Time `json:"expires_at"`
-	CreatedAt      time.Time `json:"created_at"`
+	ID             uuid.UUID      `json:"id"`
+	Email          *string        `json:"email,omitempty"`
+	GitHubUsername *string        `json:"github_username,omitempty"`
+	Role           MembershipRole `json:"role"`
+	Status         string         `json:"status"`
+	InvitedBy      UserBrief      `json:"invited_by"`
+	ExpiresAt      time.Time      `json:"expires_at"`
+	CreatedAt      time.Time      `json:"created_at"`
 }
 
 // InvitationWithInviter is the result of joining invitations with users.
@@ -47,14 +47,14 @@ type InvitationWithInviter struct {
 // because the JSON shape and DB shape differ: the response embeds the
 // inviter as a UserBrief, the row carries the two scalar columns.
 type PendingInvitationForUserRow struct {
-	ID          uuid.UUID `db:"id"`
-	OrgID       uuid.UUID `db:"org_id"`
-	OrgName     string    `db:"org_name"`
-	Role        string    `db:"role"`
-	InvitedBy   uuid.UUID `db:"invited_by"`
-	InviterName string    `db:"inviter_name"`
-	ExpiresAt   time.Time `db:"expires_at"`
-	CreatedAt   time.Time `db:"created_at"`
+	ID          uuid.UUID      `db:"id"`
+	OrgID       uuid.UUID      `db:"org_id"`
+	OrgName     string         `db:"org_name"`
+	Role        MembershipRole `db:"role"`
+	InvitedBy   uuid.UUID      `db:"invited_by"`
+	InviterName string         `db:"inviter_name"`
+	ExpiresAt   time.Time      `db:"expires_at"`
+	CreatedAt   time.Time      `db:"created_at"`
 }
 
 // PendingInvitationForUser is the API response shape for an invitation
@@ -67,13 +67,13 @@ type PendingInvitationForUserRow struct {
 // (accept/decline are id-routed and re-validate against the session, so
 // the token never needs to leave server-side state).
 type PendingInvitationForUser struct {
-	ID        uuid.UUID `json:"id"`
-	OrgID     uuid.UUID `json:"org_id"`
-	OrgName   string    `json:"org_name"`
-	Role      string    `json:"role"`
-	InvitedBy UserBrief `json:"invited_by"`
-	ExpiresAt time.Time `json:"expires_at"`
-	CreatedAt time.Time `json:"created_at"`
+	ID        uuid.UUID      `json:"id"`
+	OrgID     uuid.UUID      `json:"org_id"`
+	OrgName   string         `json:"org_name"`
+	Role      MembershipRole `json:"role"`
+	InvitedBy UserBrief      `json:"invited_by"`
+	ExpiresAt time.Time      `json:"expires_at"`
+	CreatedAt time.Time      `json:"created_at"`
 }
 
 // UserBrief is a minimal user representation for embedding in responses.

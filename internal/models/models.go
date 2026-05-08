@@ -16,13 +16,13 @@ type Organization struct {
 }
 
 type User struct {
-	ID          uuid.UUID `db:"id" json:"id"`
-	OrgID       uuid.UUID `db:"org_id" json:"org_id"`
-	Email       string    `db:"email" json:"email"`
-	Name        string    `db:"name" json:"name"`
-	Role        string    `db:"role" json:"role"`
-	GitHubID    *int64    `db:"github_id" json:"github_id,omitempty"`
-	GitHubLogin *string   `db:"github_login" json:"github_login,omitempty"`
+	ID          uuid.UUID      `db:"id" json:"id"`
+	OrgID       uuid.UUID      `db:"org_id" json:"org_id"`
+	Email       string         `db:"email" json:"email"`
+	Name        string         `db:"name" json:"name"`
+	Role        MembershipRole `db:"role" json:"role"`
+	GitHubID    *int64         `db:"github_id" json:"github_id,omitempty"`
+	GitHubLogin *string        `db:"github_login" json:"github_login,omitempty"`
 	// GitHubNoreplyEmail is the address used to attribute git commits so they
 	// link back to the user's GitHub profile. Stored separately from Email
 	// (the human-facing contact address) because GitHub only links commits
@@ -37,17 +37,17 @@ type User struct {
 }
 
 type UserWithSettings struct {
-	ID          uuid.UUID    `db:"id" json:"id"`
-	OrgID       uuid.UUID    `db:"org_id" json:"org_id"`
-	Email       string       `db:"email" json:"email"`
-	Name        string       `db:"name" json:"name"`
-	Role        string       `db:"role" json:"role"`
-	GitHubID    *int64       `db:"github_id" json:"github_id,omitempty"`
-	GitHubLogin *string      `db:"github_login" json:"github_login,omitempty"`
-	AvatarURL   *string      `db:"avatar_url" json:"avatar_url,omitempty"`
-	GoogleID    *string      `db:"google_id" json:"google_id,omitempty"`
-	Settings    UserSettings `json:"settings"`
-	CreatedAt   time.Time    `db:"created_at" json:"created_at"`
+	ID          uuid.UUID      `db:"id" json:"id"`
+	OrgID       uuid.UUID      `db:"org_id" json:"org_id"`
+	Email       string         `db:"email" json:"email"`
+	Name        string         `db:"name" json:"name"`
+	Role        MembershipRole `db:"role" json:"role"`
+	GitHubID    *int64         `db:"github_id" json:"github_id,omitempty"`
+	GitHubLogin *string        `db:"github_login" json:"github_login,omitempty"`
+	AvatarURL   *string        `db:"avatar_url" json:"avatar_url,omitempty"`
+	GoogleID    *string        `db:"google_id" json:"google_id,omitempty"`
+	Settings    UserSettings   `json:"settings"`
+	CreatedAt   time.Time      `db:"created_at" json:"created_at"`
 }
 
 type AuthSession struct {

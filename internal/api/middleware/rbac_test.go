@@ -71,6 +71,17 @@ func TestRequireRole(t *testing.T) {
 			requestMethod: http.MethodPatch,
 			expectedCode:  http.StatusForbidden,
 		},
+		{
+			name:         "allows builder to access builder-enabled write route",
+			allowedRoles: []string{"admin", "member", "builder"},
+			user: &models.User{
+				ID:    uuid.MustParse("eeeeeeee-0000-0000-0000-000000000001"),
+				OrgID: uuid.MustParse("eeeeeeee-0000-0000-0000-000000000002"),
+				Role:  "builder",
+			},
+			requestMethod: http.MethodPost,
+			expectedCode:  http.StatusOK,
+		},
 	}
 
 	for _, tt := range tests {

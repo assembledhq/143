@@ -109,7 +109,7 @@ func (s *OrganizationMembershipStore) Get(ctx context.Context, userID, orgID uui
 // legitimately be a pre-existing membership, so ON CONFLICT DO NOTHING (or
 // GrantAtLeast's silent no-op) would mask a real bug. Invitation acceptance
 // and role-upgrade paths should use GrantAtLeast instead.
-func (s *OrganizationMembershipStore) Insert(ctx context.Context, userID, orgID uuid.UUID, role string) error {
+func (s *OrganizationMembershipStore) Insert(ctx context.Context, userID, orgID uuid.UUID, role models.MembershipRole) error {
 	if !models.IsValidRole(role) {
 		return fmt.Errorf("invalid role %q", role)
 	}
@@ -136,13 +136,13 @@ func (s *OrganizationMembershipStore) Insert(ctx context.Context, userID, orgID 
 // re-accept (e.g. a double-clicked link) must not downgrade an admin back to
 // the invite's original role, but a pending invite that legitimately upgrades
 // an existing member should apply. Privilege ordering is admin > member >
-// viewer; a request for a lower-or-equal role is a no-op at the DB level but
-// the returned role reflects the row that now exists.
+// builder > viewer; a request for a lower-or-equal role is a no-op at the DB
+// level but the returned role reflects the row that now exists.
 //
 // Use UpdateRole / UpdateRoleGuarded for explicit role changes (including
 // demotions) — those paths enforce the last-admin invariant, GrantAtLeast
 // does not because it can never demote.
-func (s *OrganizationMembershipStore) GrantAtLeast(ctx context.Context, userID, orgID uuid.UUID, role string) (string, error) {
+func (s *OrganizationMembershipStore) GrantAtLeast(ctx context.Context, userID, orgID uuid.UUID, role models.MembershipRole) (models.MembershipRole, error) {
 	if !models.IsValidRole(role) {
 		return "", fmt.Errorf("invalid role %q", role)
 	}
@@ -153,10 +153,12 @@ func (s *OrganizationMembershipStore) GrantAtLeast(ctx context.Context, userID, 
 		SET role = CASE
 			WHEN EXCLUDED.role = 'admin' THEN 'admin'
 			WHEN EXCLUDED.role = 'member' AND organization_memberships.role = 'viewer' THEN 'member'
+			WHEN EXCLUDED.role = 'member' AND organization_memberships.role = 'builder' THEN 'member'
+			WHEN EXCLUDED.role = 'builder' AND organization_memberships.role = 'viewer' THEN 'builder'
 			ELSE organization_memberships.role
 		END
 		RETURNING role`
-	var effective string
+	var effective models.MembershipRole
 	err := s.db.QueryRow(ctx, query, pgx.NamedArgs{
 		"user_id": userID,
 		"org_id":  orgID,
@@ -174,7 +176,7 @@ func (s *OrganizationMembershipStore) GrantAtLeast(ctx context.Context, userID, 
 // enforce_last_admin trigger rejects the update; that is translated to
 // ErrLastAdmin so callers get the same sentinel they'd see from
 // UpdateRoleGuarded.
-func (s *OrganizationMembershipStore) UpdateRole(ctx context.Context, userID, orgID uuid.UUID, role string) error {
+func (s *OrganizationMembershipStore) UpdateRole(ctx context.Context, userID, orgID uuid.UUID, role models.MembershipRole) error {
 	if !models.IsValidRole(role) {
 		return fmt.Errorf("invalid role %q", role)
 	}
@@ -362,7 +364,7 @@ func (s *OrganizationMembershipStore) lockAdminCount(ctx context.Context, tx pgx
 // Returns the previous role on success. Returns ErrLastAdmin if the change
 // would demote the only remaining admin, or pgx.ErrNoRows if the membership
 // does not exist.
-func (s *OrganizationMembershipStore) UpdateRoleGuarded(ctx context.Context, userID, orgID uuid.UUID, newRole string) (string, error) {
+func (s *OrganizationMembershipStore) UpdateRoleGuarded(ctx context.Context, userID, orgID uuid.UUID, newRole models.MembershipRole) (models.MembershipRole, error) {
 	if !models.IsValidRole(newRole) {
 		return "", fmt.Errorf("invalid role %q", newRole)
 	}
@@ -381,7 +383,7 @@ func (s *OrganizationMembershipStore) UpdateRoleGuarded(ctx context.Context, use
 		return "", err
 	}
 
-	var prevRole string
+	var prevRole models.MembershipRole
 	err = tx.QueryRow(ctx, `
 		SELECT role FROM organization_memberships
 		WHERE user_id = @user_id AND org_id = @org_id
@@ -394,7 +396,7 @@ func (s *OrganizationMembershipStore) UpdateRoleGuarded(ctx context.Context, use
 		return "", fmt.Errorf("read membership: %w", err)
 	}
 
-	if prevRole == "admin" && newRole != "admin" && adminCount <= 1 {
+	if prevRole == models.RoleAdmin && newRole != models.RoleAdmin && adminCount <= 1 {
 		return prevRole, ErrLastAdmin
 	}
 

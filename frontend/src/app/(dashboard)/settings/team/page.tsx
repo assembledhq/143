@@ -248,6 +248,8 @@ export default function TeamSettingsPage() {
         return "default" as const;
       case "member":
         return "secondary" as const;
+      case "builder":
+        return "outline" as const;
       default:
         return "outline" as const;
     }
@@ -386,6 +388,7 @@ export default function TeamSettingsPage() {
                             <SelectContent>
                               <SelectItem value="admin">Admin</SelectItem>
                               <SelectItem value="member">Member</SelectItem>
+                              <SelectItem value="builder">Builder</SelectItem>
                               <SelectItem value="viewer">Viewer</SelectItem>
                             </SelectContent>
                             </Select>
@@ -736,6 +739,7 @@ export default function TeamSettingsPage() {
                   <SelectContent>
                     <SelectItem value="admin">Admin</SelectItem>
                     <SelectItem value="member">Member</SelectItem>
+                    <SelectItem value="builder">Builder</SelectItem>
                     <SelectItem value="viewer">Viewer</SelectItem>
                   </SelectContent>
                 </Select>

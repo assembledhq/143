@@ -340,7 +340,7 @@ func TestInvitationStore_ListPendingForUser(t *testing.T) {
 	require.Len(t, rows, 2)
 	require.Equal(t, "Acme", rows[0].OrgName)
 	require.Equal(t, "Alice", rows[0].InviterName)
-	require.Equal(t, "member", rows[0].Role)
+	require.Equal(t, models.RoleMember, rows[0].Role)
 	require.Equal(t, "Globex", rows[1].OrgName)
 	require.Equal(t, "Bob", rows[1].InviterName)
 	require.NoError(t, mock.ExpectationsWereMet())

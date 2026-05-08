@@ -56,7 +56,7 @@ func (m *mockTeamUserStore) IsGitHubLoginMemberOfOrg(ctx context.Context, github
 
 type mockTeamMembershipStore struct {
 	getFn               func(ctx context.Context, userID, orgID uuid.UUID) (models.OrganizationMembership, error)
-	updateRoleGuardedFn func(ctx context.Context, userID, orgID uuid.UUID, role string) (string, error)
+	updateRoleGuardedFn func(ctx context.Context, userID, orgID uuid.UUID, role models.MembershipRole) (models.MembershipRole, error)
 	removeGuardedFn     func(ctx context.Context, userID, orgID uuid.UUID) (string, int, error)
 	countForUserFn      func(ctx context.Context, userID uuid.UUID) (int, error)
 }
@@ -67,11 +67,11 @@ func (m *mockTeamMembershipStore) Get(ctx context.Context, userID, orgID uuid.UU
 	}
 	return models.OrganizationMembership{}, pgx.ErrNoRows
 }
-func (m *mockTeamMembershipStore) UpdateRoleGuarded(ctx context.Context, userID, orgID uuid.UUID, role string) (string, error) {
+func (m *mockTeamMembershipStore) UpdateRoleGuarded(ctx context.Context, userID, orgID uuid.UUID, role models.MembershipRole) (models.MembershipRole, error) {
 	if m.updateRoleGuardedFn != nil {
 		return m.updateRoleGuardedFn(ctx, userID, orgID, role)
 	}
-	return "member", nil
+	return models.RoleMember, nil
 }
 func (m *mockTeamMembershipStore) RemoveGuarded(ctx context.Context, userID, orgID uuid.UUID) (string, int, error) {
 	if m.removeGuardedFn != nil {
@@ -464,7 +464,7 @@ func TestTeamHandler_ChangeRole(t *testing.T) {
 			body:        map[string]string{"role": "member"},
 			currentUser: adminUser,
 			memberships: &mockTeamMembershipStore{
-				updateRoleGuardedFn: func(_ context.Context, _, _ uuid.UUID, _ string) (string, error) {
+				updateRoleGuardedFn: func(_ context.Context, _, _ uuid.UUID, _ models.MembershipRole) (models.MembershipRole, error) {
 					return "", pgx.ErrNoRows
 				},
 			},
@@ -477,8 +477,8 @@ func TestTeamHandler_ChangeRole(t *testing.T) {
 			body:        map[string]string{"role": "member"},
 			currentUser: adminUser,
 			memberships: &mockTeamMembershipStore{
-				updateRoleGuardedFn: func(_ context.Context, _, _ uuid.UUID, _ string) (string, error) {
-					return "admin", db.ErrLastAdmin
+				updateRoleGuardedFn: func(_ context.Context, _, _ uuid.UUID, _ models.MembershipRole) (models.MembershipRole, error) {
+					return models.RoleAdmin, db.ErrLastAdmin
 				},
 			},
 			expectedCode: http.StatusBadRequest,
@@ -495,8 +495,8 @@ func TestTeamHandler_ChangeRole(t *testing.T) {
 				},
 			},
 			memberships: &mockTeamMembershipStore{
-				updateRoleGuardedFn: func(_ context.Context, _, _ uuid.UUID, _ string) (string, error) {
-					return "member", nil
+				updateRoleGuardedFn: func(_ context.Context, _, _ uuid.UUID, _ models.MembershipRole) (models.MembershipRole, error) {
+					return models.RoleMember, nil
 				},
 			},
 			expectedCode: http.StatusOK,
@@ -622,7 +622,7 @@ func TestTeamHandler_ChangeRole_LookupError(t *testing.T) {
 	memberID := uuid.New()
 
 	h := newTeamHandler(nil, &mockTeamMembershipStore{
-		updateRoleGuardedFn: func(_ context.Context, _, _ uuid.UUID, _ string) (string, error) {
+		updateRoleGuardedFn: func(_ context.Context, _, _ uuid.UUID, _ models.MembershipRole) (models.MembershipRole, error) {
 			return "", fmt.Errorf("boom")
 		},
 	}, nil, nil, nil)
@@ -658,8 +658,8 @@ func TestTeamHandler_ChangeRole_PostUpdateLookupFails(t *testing.T) {
 			},
 		},
 		&mockTeamMembershipStore{
-			updateRoleGuardedFn: func(_ context.Context, _, _ uuid.UUID, _ string) (string, error) {
-				return "member", nil
+			updateRoleGuardedFn: func(_ context.Context, _, _ uuid.UUID, _ models.MembershipRole) (models.MembershipRole, error) {
+				return models.RoleMember, nil
 			},
 		},
 		nil, nil, nil,
@@ -678,7 +678,7 @@ func TestTeamHandler_ChangeRole_PostUpdateLookupFails(t *testing.T) {
 	var resp models.SingleResponse[models.User]
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
 	require.Equal(t, memberID, resp.Data.ID)
-	require.Equal(t, "viewer", resp.Data.Role)
+	require.Equal(t, models.RoleViewer, resp.Data.Role)
 }
 
 // RemoveMember succeeds even when CountForUser fails afterward — the removal

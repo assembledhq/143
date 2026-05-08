@@ -83,8 +83,8 @@ func OrgIDFromContext(ctx context.Context) uuid.UUID {
 // gating behavior on role MUST prefer this over User.Role, because the
 // legacy user.Role only reflects the user's primary-org role and is not
 // authoritative in the multi-org world.
-func ActiveRoleFromContext(ctx context.Context) string {
-	role, _ := ctx.Value(activeRoleContextKey).(string)
+func ActiveRoleFromContext(ctx context.Context) models.MembershipRole {
+	role, _ := ctx.Value(activeRoleContextKey).(models.MembershipRole)
 	return role
 }
 
@@ -97,7 +97,7 @@ func WithOrgID(ctx context.Context, id uuid.UUID) context.Context {
 }
 
 // WithActiveRole stores the resolved active-org role on the request context.
-func WithActiveRole(ctx context.Context, role string) context.Context {
+func WithActiveRole(ctx context.Context, role models.MembershipRole) context.Context {
 	return context.WithValue(ctx, activeRoleContextKey, role)
 }
 
@@ -258,7 +258,7 @@ func handleToken(w http.ResponseWriter, r *http.Request, next http.Handler, stor
 // opaque (RevokedOrgHeader doc explains why).
 type membershipResolution struct {
 	orgID             uuid.UUID
-	role              string
+	role              models.MembershipRole
 	fromHeader        bool
 	membershipRevoked bool
 }

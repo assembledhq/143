@@ -114,9 +114,9 @@ func TestOrgIDFromContext(t *testing.T) {
 func TestActiveRoleFromContext(t *testing.T) {
 	t.Parallel()
 
-	require.Equal(t, "", ActiveRoleFromContext(context.Background()))
+	require.Equal(t, models.MembershipRole(""), ActiveRoleFromContext(context.Background()))
 	ctx := WithActiveRole(context.Background(), "admin")
-	require.Equal(t, "admin", ActiveRoleFromContext(ctx))
+	require.Equal(t, models.RoleAdmin, ActiveRoleFromContext(ctx))
 }
 
 func TestOrgContext(t *testing.T) {
@@ -227,11 +227,11 @@ func TestAuth_HeaderSelectsMembership(t *testing.T) {
 	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		nextCalled = true
 		require.Equal(t, testOrgB, OrgIDFromContext(r.Context()))
-		require.Equal(t, "member", ActiveRoleFromContext(r.Context()))
+		require.Equal(t, models.RoleMember, ActiveRoleFromContext(r.Context()))
 		u := UserFromContext(r.Context())
 		require.NotNil(t, u)
 		require.Equal(t, testUserID, u.ID)
-		require.Equal(t, "member", u.Role, "user.Role should reflect active membership role for compatibility")
+		require.Equal(t, models.RoleMember, u.Role, "user.Role should reflect active membership role for compatibility")
 		w.WriteHeader(http.StatusOK)
 	})
 
@@ -413,7 +413,7 @@ func TestAuth_SessionHintFallback(t *testing.T) {
 	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		nextCalled = true
 		require.Equal(t, testOrgA, OrgIDFromContext(r.Context()))
-		require.Equal(t, "admin", ActiveRoleFromContext(r.Context()))
+		require.Equal(t, models.RoleAdmin, ActiveRoleFromContext(r.Context()))
 		w.WriteHeader(http.StatusOK)
 	})
 
@@ -526,7 +526,7 @@ func TestAuth_ZeroMemberships_AllowsEmptyState(t *testing.T) {
 	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		nextCalled = true
 		require.Equal(t, uuid.Nil, OrgIDFromContext(r.Context()))
-		require.Equal(t, "", ActiveRoleFromContext(r.Context()))
+		require.Equal(t, models.MembershipRole(""), ActiveRoleFromContext(r.Context()))
 		w.WriteHeader(http.StatusOK)
 	})
 

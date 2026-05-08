@@ -118,8 +118,9 @@ func newTestUserCredHandler(store *mockUserCredentialStore) *UserCredentialHandl
 
 func withUserAndOrg(r *http.Request, userID, orgID uuid.UUID, role string) *http.Request {
 	ctx := middleware.WithOrgID(r.Context(), orgID)
-	ctx = middleware.WithUser(ctx, &models.User{ID: userID, OrgID: orgID, Role: role})
-	ctx = middleware.WithActiveRole(ctx, role)
+	typedRole := models.MembershipRole(role)
+	ctx = middleware.WithUser(ctx, &models.User{ID: userID, OrgID: orgID, Role: typedRole})
+	ctx = middleware.WithActiveRole(ctx, typedRole)
 	return r.WithContext(ctx)
 }
 

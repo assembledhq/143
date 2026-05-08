@@ -1,29 +1,46 @@
 package models
 
 import (
+	"fmt"
 	"time"
 
 	"github.com/google/uuid"
 )
 
+type MembershipRole string
+
 // Role constants for organization_memberships.role. These mirror the legacy
 // users.role values so behavior is identical during the compatibility window.
 const (
-	RoleAdmin  = "admin"
-	RoleMember = "member"
-	RoleViewer = "viewer"
+	RoleAdmin   MembershipRole = "admin"
+	RoleMember  MembershipRole = "member"
+	RoleBuilder MembershipRole = "builder"
+	RoleViewer  MembershipRole = "viewer"
 )
 
 // ValidRoles lists every legal membership role, in order of decreasing privilege.
-var ValidRoles = []string{RoleAdmin, RoleMember, RoleViewer}
+var ValidRoles = []MembershipRole{RoleAdmin, RoleMember, RoleBuilder, RoleViewer}
+
+func (r MembershipRole) Validate() error {
+	switch r {
+	case RoleAdmin, RoleMember, RoleBuilder, RoleViewer:
+		return nil
+	default:
+		return fmt.Errorf("invalid MembershipRole: %q", r)
+	}
+}
 
 // IsValidRole reports whether r is one of the known membership roles.
-func IsValidRole(r string) bool {
-	switch r {
-	case RoleAdmin, RoleMember, RoleViewer:
-		return true
+func IsValidRole[T ~string](r T) bool {
+	return MembershipRole(r).Validate() == nil
+}
+
+func ParseMembershipRole(raw string) (MembershipRole, error) {
+	role := MembershipRole(raw)
+	if err := role.Validate(); err != nil {
+		return "", err
 	}
-	return false
+	return role, nil
 }
 
 // OrganizationMembership is the join row between a user identity and an org.
@@ -33,19 +50,19 @@ func IsValidRole(r string) bool {
 // which membership is "active" for a given request via the X-Active-Org-ID
 // header (or falls back to the session's last_org_id).
 type OrganizationMembership struct {
-	UserID    uuid.UUID `db:"user_id"    json:"user_id"`
-	OrgID     uuid.UUID `db:"org_id"     json:"org_id"`
-	Role      string    `db:"role"       json:"role"`
-	CreatedAt time.Time `db:"created_at" json:"created_at"`
+	UserID    uuid.UUID      `db:"user_id"    json:"user_id"`
+	OrgID     uuid.UUID      `db:"org_id"     json:"org_id"`
+	Role      MembershipRole `db:"role"       json:"role"`
+	CreatedAt time.Time      `db:"created_at" json:"created_at"`
 }
 
 // MembershipSummary is the API representation of one entry in the list of
 // orgs a user belongs to. It includes the org name so the switcher UI can
 // render without a second round-trip.
 type MembershipSummary struct {
-	OrgID   uuid.UUID `db:"org_id"   json:"org_id"`
-	OrgName string    `db:"org_name" json:"org_name"`
-	Role    string    `db:"role"     json:"role"`
+	OrgID   uuid.UUID      `db:"org_id"   json:"org_id"`
+	OrgName string         `db:"org_name" json:"org_name"`
+	Role    MembershipRole `db:"role"     json:"role"`
 }
 
 // MembershipsResponse is the body of GET /api/v1/auth/memberships. It carries
@@ -58,6 +75,6 @@ type MembershipSummary struct {
 // org. ActiveRole is empty in the same case.
 type MembershipsResponse struct {
 	ActiveOrgID uuid.UUID           `json:"active_org_id"`
-	ActiveRole  string              `json:"active_role"`
+	ActiveRole  MembershipRole      `json:"active_role"`
 	Memberships []MembershipSummary `json:"memberships"`
 }

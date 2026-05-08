@@ -696,7 +696,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 			// Read-only routes (all roles: admin, member, viewer)
 			r.Group(func(r chi.Router) {
 				r.Use(middleware.OrgContext)
-				r.Use(middleware.RequireRole("admin", "member", "viewer"))
+				r.Use(middleware.RequireRole("admin", "member", "builder", "viewer"))
 
 				r.Get("/api/v1/version", healthHandler.Version)
 
@@ -793,7 +793,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 			// Write routes (admin and member only)
 			r.Group(func(r chi.Router) {
 				r.Use(middleware.OrgContext)
-				r.Use(middleware.RequireRole("admin", "member"))
+				r.Use(middleware.RequireRole("admin", "member", "builder"))
 
 				r.Patch("/api/v1/repositories/{id}", repoHandler.Update)
 				r.Post("/api/v1/repositories/{id}/disconnect", repoHandler.Disconnect)

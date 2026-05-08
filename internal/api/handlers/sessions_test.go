@@ -139,6 +139,26 @@ func newSessionHandler(t *testing.T, mock pgxmock.PgxPoolIface) *SessionHandler 
 	return h
 }
 
+var sessionThreadTestColumns = []string{
+	"id", "session_id", "org_id", "agent_type", "model_override",
+	"label", "instructions", "file_scope", "status", "agent_session_id",
+	"current_turn", "last_activity_at",
+	"confidence_score", "result_summary", "diff", "failure_explanation", "failure_category",
+	"started_at", "completed_at", "created_at",
+	"archived_at", "base_snapshot_key", "cost_cents", "pending_message_count", "cancel_requested_at",
+}
+
+func newSessionThreadRow(threadID, sessionID, orgID uuid.UUID, label, status string, now time.Time) []interface{} {
+	return []interface{}{
+		threadID, sessionID, orgID, "claude_code", nil,
+		label, nil, nil, status, nil,
+		0, nil,
+		nil, nil, nil, nil, nil,
+		nil, nil, now,
+		nil, nil, float64(0), 0, nil,
+	}
+}
+
 // sessionColumns is the standard column set for sessions queries.
 // Must match sessionSelectColumns in session_store.go. Update all inline
 // AddRow calls in this file when adding/removing/reordering columns.

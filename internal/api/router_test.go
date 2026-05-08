@@ -68,8 +68,8 @@ func TestSessionThreadPatchRouteIsWriteOnly(t *testing.T) {
 	source, err := os.ReadFile("router.go")
 	require.NoError(t, err, "router.go should be readable for route grouping regression test")
 
-	readGroupStart := strings.Index(string(source), `RequireRole("admin", "member", "viewer")`)
-	writeGroupStart := strings.Index(string(source), `RequireRole("admin", "member")`)
+	readGroupStart := strings.Index(string(source), `RequireRole("admin", "member", "builder", "viewer")`)
+	writeGroupStart := strings.Index(string(source), `RequireRole("admin", "member", "builder")`)
 	patchRoute := strings.Index(string(source), `r.Patch("/api/v1/sessions/{id}/threads/{tid}", sessionThreadHandler.UpdateThread)`)
 
 	require.NotEqual(t, -1, readGroupStart, "router should still define a viewer-readable route group")

@@ -1453,7 +1453,6 @@ func (h *SessionHandler) CreatePR(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusBadRequest, "INVALID_BODY", "invalid request body", err)
 		return
 	}
-
 	orgSettings := models.OrgSettings{PRAuthorship: models.PRAuthorshipUserPreferred}
 	if h.orgStore != nil {
 		if org, orgErr := h.orgStore.GetByID(r.Context(), orgID); orgErr == nil {

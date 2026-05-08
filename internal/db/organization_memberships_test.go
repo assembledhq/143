@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/assembledhq/143/internal/models"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/pashagolub/pgxmock/v4"
@@ -37,7 +38,7 @@ func TestOrganizationMembershipStore_ListByUser(t *testing.T) {
 	require.Len(t, memberships, 2)
 	require.Equal(t, orgA, memberships[0].OrgID)
 	require.Equal(t, "Org A", memberships[0].OrgName)
-	require.Equal(t, "admin", memberships[0].Role)
+	require.Equal(t, models.RoleAdmin, memberships[0].Role)
 	require.Equal(t, orgB, memberships[1].OrgID)
 	require.NoError(t, mock.ExpectationsWereMet())
 }
@@ -84,7 +85,7 @@ func TestOrganizationMembershipStore_Get(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, userID, m.UserID)
 	require.Equal(t, orgID, m.OrgID)
-	require.Equal(t, "admin", m.Role)
+	require.Equal(t, models.RoleAdmin, m.Role)
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
@@ -112,11 +113,11 @@ func TestOrganizationMembershipStore_GrantAtLeast(t *testing.T) {
 
 	tests := []struct {
 		name string
-		role string
+		role models.MembershipRole
 	}{
-		{"admin role", "admin"},
-		{"member role", "member"},
-		{"viewer role", "viewer"},
+		{"admin role", models.RoleAdmin},
+		{"member role", models.RoleMember},
+		{"viewer role", models.RoleViewer},
 	}
 
 	for _, tt := range tests {
@@ -154,7 +155,7 @@ func TestOrganizationMembershipStore_Insert(t *testing.T) {
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("INSERT", 1))
 
-	err = store.Insert(context.Background(), uuid.New(), uuid.New(), "admin")
+	err = store.Insert(context.Background(), uuid.New(), uuid.New(), models.RoleAdmin)
 	require.NoError(t, err)
 	require.NoError(t, mock.ExpectationsWereMet())
 }
@@ -168,7 +169,7 @@ func TestOrganizationMembershipStore_Insert_InvalidRole(t *testing.T) {
 
 	store := NewOrganizationMembershipStore(mock)
 
-	err = store.Insert(context.Background(), uuid.New(), uuid.New(), "owner")
+	err = store.Insert(context.Background(), uuid.New(), uuid.New(), models.MembershipRole("owner"))
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "invalid role")
 }
@@ -186,7 +187,7 @@ func TestOrganizationMembershipStore_Insert_ConflictFailsLoudly(t *testing.T) {
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnError(errors.New("duplicate key value"))
 
-	err = store.Insert(context.Background(), uuid.New(), uuid.New(), "admin")
+	err = store.Insert(context.Background(), uuid.New(), uuid.New(), models.RoleAdmin)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "duplicate")
 	require.NoError(t, mock.ExpectationsWereMet())
@@ -201,7 +202,7 @@ func TestOrganizationMembershipStore_GrantAtLeast_InvalidRole(t *testing.T) {
 
 	store := NewOrganizationMembershipStore(mock)
 
-	_, err = store.GrantAtLeast(context.Background(), uuid.New(), uuid.New(), "owner")
+	_, err = store.GrantAtLeast(context.Background(), uuid.New(), uuid.New(), models.MembershipRole("owner"))
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "invalid role")
 }
@@ -219,7 +220,7 @@ func TestOrganizationMembershipStore_UpdateRole(t *testing.T) {
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
-	err = store.UpdateRole(context.Background(), uuid.New(), uuid.New(), "admin")
+	err = store.UpdateRole(context.Background(), uuid.New(), uuid.New(), models.RoleAdmin)
 	require.NoError(t, err)
 	require.NoError(t, mock.ExpectationsWereMet())
 }
@@ -237,7 +238,7 @@ func TestOrganizationMembershipStore_UpdateRole_NotFound(t *testing.T) {
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
 
-	err = store.UpdateRole(context.Background(), uuid.New(), uuid.New(), "admin")
+	err = store.UpdateRole(context.Background(), uuid.New(), uuid.New(), models.RoleAdmin)
 	require.Error(t, err)
 	require.True(t, errors.Is(err, pgx.ErrNoRows))
 	require.NoError(t, mock.ExpectationsWereMet())
@@ -483,7 +484,7 @@ func TestOrganizationMembershipStore_OldestForUser(t *testing.T) {
 	m, err := store.OldestForUser(context.Background(), userID)
 	require.NoError(t, err)
 	require.Equal(t, orgID, m.OrgID)
-	require.Equal(t, "admin", m.Role)
+	require.Equal(t, models.RoleAdmin, m.Role)
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
@@ -594,7 +595,7 @@ func TestOrganizationMembershipStore_UpdateRole_NoRows(t *testing.T) {
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
 
-	err = NewOrganizationMembershipStore(mock).UpdateRole(context.Background(), uuid.New(), uuid.New(), "member")
+	err = NewOrganizationMembershipStore(mock).UpdateRole(context.Background(), uuid.New(), uuid.New(), models.RoleMember)
 	require.Error(t, err)
 	require.True(t, errors.Is(err, pgx.ErrNoRows))
 	require.NoError(t, mock.ExpectationsWereMet())
@@ -611,10 +612,10 @@ func TestOrganizationMembershipStore_RejectInvalidRole(t *testing.T) {
 
 	s := NewOrganizationMembershipStore(mock)
 
-	err = s.UpdateRole(context.Background(), uuid.New(), uuid.New(), "superadmin")
+	err = s.UpdateRole(context.Background(), uuid.New(), uuid.New(), models.MembershipRole("superadmin"))
 	require.Error(t, err)
 
-	_, err = s.GrantAtLeast(context.Background(), uuid.New(), uuid.New(), "guest")
+	_, err = s.GrantAtLeast(context.Background(), uuid.New(), uuid.New(), models.MembershipRole("guest"))
 	require.Error(t, err)
 }
 
@@ -631,7 +632,7 @@ func TestOrganizationMembershipStore_UpdateRole_ExecError(t *testing.T) {
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnError(errors.New("boom"))
 
-	err = NewOrganizationMembershipStore(mock).UpdateRole(context.Background(), uuid.New(), uuid.New(), "member")
+	err = NewOrganizationMembershipStore(mock).UpdateRole(context.Background(), uuid.New(), uuid.New(), models.RoleMember)
 	require.Error(t, err)
 	require.NoError(t, mock.ExpectationsWereMet())
 }
@@ -742,10 +743,10 @@ func TestOrganizationMembershipStore_UpdateRoleGuarded_Promote(t *testing.T) {
 	mock.ExpectCommit()
 
 	prev, err := NewOrganizationMembershipStore(mock).UpdateRoleGuarded(
-		context.Background(), uuid.New(), uuid.New(), "admin",
+		context.Background(), uuid.New(), uuid.New(), models.RoleAdmin,
 	)
 	require.NoError(t, err)
-	require.Equal(t, "member", prev)
+	require.Equal(t, models.RoleMember, prev)
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
@@ -768,10 +769,10 @@ func TestOrganizationMembershipStore_UpdateRoleGuarded_NoChange(t *testing.T) {
 	mock.ExpectCommit()
 
 	prev, err := NewOrganizationMembershipStore(mock).UpdateRoleGuarded(
-		context.Background(), uuid.New(), uuid.New(), "admin",
+		context.Background(), uuid.New(), uuid.New(), models.RoleAdmin,
 	)
 	require.NoError(t, err)
-	require.Equal(t, "admin", prev)
+	require.Equal(t, models.RoleAdmin, prev)
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
@@ -795,10 +796,10 @@ func TestOrganizationMembershipStore_UpdateRoleGuarded_LastAdmin(t *testing.T) {
 	mock.ExpectRollback()
 
 	prev, err := NewOrganizationMembershipStore(mock).UpdateRoleGuarded(
-		context.Background(), uuid.New(), uuid.New(), "member",
+		context.Background(), uuid.New(), uuid.New(), models.RoleMember,
 	)
 	require.ErrorIs(t, err, ErrLastAdmin)
-	require.Equal(t, "admin", prev)
+	require.Equal(t, models.RoleAdmin, prev)
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
@@ -821,7 +822,7 @@ func TestOrganizationMembershipStore_UpdateRoleGuarded_NoMembership(t *testing.T
 	mock.ExpectRollback()
 
 	_, err = NewOrganizationMembershipStore(mock).UpdateRoleGuarded(
-		context.Background(), uuid.New(), uuid.New(), "member",
+		context.Background(), uuid.New(), uuid.New(), models.RoleMember,
 	)
 	require.ErrorIs(t, err, pgx.ErrNoRows)
 	require.NoError(t, mock.ExpectationsWereMet())
@@ -835,7 +836,7 @@ func TestOrganizationMembershipStore_UpdateRoleGuarded_InvalidRole(t *testing.T)
 	defer mock.Close()
 
 	_, err = NewOrganizationMembershipStore(mock).UpdateRoleGuarded(
-		context.Background(), uuid.New(), uuid.New(), "owner",
+		context.Background(), uuid.New(), uuid.New(), models.MembershipRole("owner"),
 	)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "invalid role")

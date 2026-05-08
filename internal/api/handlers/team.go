@@ -46,7 +46,7 @@ type teamUserStore interface {
 // removal session cleanup decision).
 type teamMembershipStore interface {
 	Get(ctx context.Context, userID, orgID uuid.UUID) (models.OrganizationMembership, error)
-	UpdateRoleGuarded(ctx context.Context, userID, orgID uuid.UUID, newRole string) (string, error)
+	UpdateRoleGuarded(ctx context.Context, userID, orgID uuid.UUID, newRole models.MembershipRole) (models.MembershipRole, error)
 	RemoveGuarded(ctx context.Context, userID, orgID uuid.UUID) (prevRole string, revokedInvitations int, err error)
 	CountForUser(ctx context.Context, userID uuid.UUID) (int, error)
 }
@@ -217,8 +217,9 @@ func (h *TeamHandler) ChangeRole(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if !models.IsValidRole(body.Role) {
-		writeError(w, r, http.StatusBadRequest, "VALIDATION_ERROR", "invalid role: must be admin, member, or viewer")
+	newRole, err := models.ParseMembershipRole(body.Role)
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "VALIDATION_ERROR", "invalid role: must be admin, member, builder, or viewer")
 		return
 	}
 
@@ -230,7 +231,7 @@ func (h *TeamHandler) ChangeRole(w http.ResponseWriter, r *http.Request) {
 	// UpdateRoleGuarded is atomic: it locks the org's admin rows for the
 	// duration of the tx so two concurrent demotions can't both pass the
 	// "more than one admin" check and leave the org with zero admins.
-	prevRole, err := h.memberships.UpdateRoleGuarded(r.Context(), memberID, orgID, body.Role)
+	prevRole, err := h.memberships.UpdateRoleGuarded(r.Context(), memberID, orgID, newRole)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			writeError(w, r, http.StatusNotFound, "MEMBER_NOT_FOUND", "member not found in this organization")
@@ -245,7 +246,7 @@ func (h *TeamHandler) ChangeRole(w http.ResponseWriter, r *http.Request) {
 	}
 
 	memberIDStr := memberID.String()
-	details, marshalErr := json.Marshal(map[string]string{"new_role": body.Role, "previous_role": prevRole})
+	details, marshalErr := json.Marshal(map[string]string{"new_role": string(newRole), "previous_role": string(prevRole)})
 	if marshalErr != nil {
 		zerolog.Ctx(r.Context()).Warn().Err(marshalErr).Msg("failed to marshal audit details for role change")
 	}
@@ -258,11 +259,11 @@ func (h *TeamHandler) ChangeRole(w http.ResponseWriter, r *http.Request) {
 	member, err := h.users.GetByIDGlobal(r.Context(), memberID)
 	if err != nil {
 		zerolog.Ctx(r.Context()).Warn().Err(err).Str("member_id", memberIDStr).Msg("team: role updated but display lookup failed; returning minimal payload")
-		writeJSON(w, http.StatusOK, models.SingleResponse[models.User]{Data: models.User{ID: memberID, Role: body.Role}})
+		writeJSON(w, http.StatusOK, models.SingleResponse[models.User]{Data: models.User{ID: memberID, Role: newRole}})
 		return
 	}
 
-	member.Role = body.Role
+	member.Role = newRole
 	writeJSON(w, http.StatusOK, models.SingleResponse[models.User]{Data: member})
 }
 
@@ -386,10 +387,11 @@ func (h *TeamHandler) CreateInvitation(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if body.Role == "" {
-		body.Role = models.RoleMember
+		body.Role = string(models.RoleMember)
 	}
-	if !models.IsValidRole(body.Role) {
-		writeError(w, r, http.StatusBadRequest, "VALIDATION_ERROR", "invalid role: must be admin, member, or viewer")
+	role, err := models.ParseMembershipRole(body.Role)
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "VALIDATION_ERROR", "invalid role: must be admin, member, builder, or viewer")
 		return
 	}
 
@@ -433,7 +435,7 @@ func (h *TeamHandler) CreateInvitation(w http.ResponseWriter, r *http.Request) {
 
 	inv := &models.Invitation{
 		OrgID:     orgID,
-		Role:      body.Role,
+		Role:      role,
 		InvitedBy: currentUser.ID,
 		Token:     token,
 		ExpiresAt: time.Now().Add(7 * 24 * time.Hour),
@@ -458,7 +460,7 @@ func (h *TeamHandler) CreateInvitation(w http.ResponseWriter, r *http.Request) {
 	}
 
 	invIDStr := inv.ID.String()
-	auditPayload := map[string]string{"role": body.Role}
+	auditPayload := map[string]string{"role": string(role)}
 	if body.Email != "" {
 		auditPayload["email"] = body.Email
 	}
