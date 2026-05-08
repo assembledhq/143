@@ -752,6 +752,96 @@ describe('SessionDetailPage', () => {
     expect(screen.getByRole('group', { name: /Codex/ })).toBeInTheDocument();
   });
 
+  it('archives a closed thread and switches focus to a remaining tab', async () => {
+    const sessionId = 'session-archive-thread';
+    let threads: SessionThread[] = [
+      {
+        id: 'thread-main',
+        session_id: sessionId,
+        org_id: 'org-1',
+        agent_type: 'codex',
+        label: 'Main tab',
+        status: 'running',
+        current_turn: 1,
+        created_at: '2026-02-17T07:00:00Z',
+        cost_cents: 0,
+        pending_message_count: 0,
+      },
+      {
+        id: 'thread-review',
+        session_id: sessionId,
+        org_id: 'org-1',
+        agent_type: 'claude_code',
+        label: 'Review',
+        status: 'completed',
+        current_turn: 1,
+        created_at: '2026-02-17T07:02:00Z',
+        cost_cents: 0,
+        pending_message_count: 0,
+      },
+    ];
+    let archivedThreadId: string | null = null;
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({
+          data: {
+            ...mockSessions[0],
+            id: sessionId,
+            status: 'running',
+            sandbox_state: 'running',
+            agent_type: 'codex',
+            threads,
+          },
+        } satisfies SingleResponse<Session & { threads: SessionThread[] }>);
+      }),
+      http.get('/api/v1/sessions/:id/threads/:threadId/messages', () => {
+        return HttpResponse.json({ data: [] as SessionMessage[], meta: {} } satisfies ListResponse<SessionMessage>);
+      }),
+      http.get('/api/v1/sessions/:id/threads/:threadId/logs', () => {
+        return HttpResponse.json({ data: [], meta: {} });
+      }),
+      http.get('/api/v1/sessions/:id/thread-file-events', () => {
+        return HttpResponse.json({ data: [], meta: {} });
+      }),
+      http.post('/api/v1/sessions/:id/threads/:threadId/archive', ({ params }) => {
+        archivedThreadId = params.threadId as string;
+        threads = threads.filter((thread) => thread.id !== archivedThreadId);
+        return HttpResponse.json({
+          data: {
+            id: archivedThreadId,
+            session_id: sessionId,
+            org_id: 'org-1',
+            agent_type: 'claude_code',
+            label: 'Review',
+            status: 'completed',
+            current_turn: 1,
+            created_at: '2026-02-17T07:02:00Z',
+            archived_at: '2026-02-17T07:05:00Z',
+            cost_cents: 0,
+            pending_message_count: 0,
+          },
+        } satisfies SingleResponse<SessionThread>);
+      }),
+    );
+
+    const user = userEvent.setup();
+    renderWithProviders(<SessionDetailContent id={sessionId} />);
+
+    expect(await screen.findByRole('tab', { name: 'Review' })).toBeInTheDocument();
+
+    await user.click(screen.getByRole('tab', { name: 'Review' }));
+    await user.click(screen.getByRole('button', { name: 'Close Review tab' }));
+
+    await waitFor(() => {
+      expect(archivedThreadId).toBe('thread-review');
+    });
+    await waitFor(() => {
+      expect(screen.queryByRole('tab', { name: 'Review' })).not.toBeInTheDocument();
+    });
+    expect(screen.getByPlaceholderText('Send a message to Main tab...')).toBeInTheDocument();
+  });
+
   it('does not hide vertical overflow on the detail tablist', async () => {
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
     await screen.findAllByText('Fixed TypeError by adding null check');
@@ -6088,11 +6178,11 @@ describe('SessionDetailPage', () => {
     const user = userEvent.setup();
     renderWithProviders(<SessionDetailContent id={sessionId} />);
 
-    const addButton = await screen.findByRole('button', { name: 'Add agent tab' });
-    await user.click(addButton);
+    await screen.findByRole('button', { name: 'Add agent tab' });
+    await user.click(screen.getByRole('button', { name: 'Add agent tab' }));
 
     await waitFor(() => {
-      expect(addButton).toHaveFocus();
+      expect(document.activeElement).toHaveAttribute('aria-label', 'Add agent tab');
     });
   });
 
