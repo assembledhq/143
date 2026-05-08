@@ -840,13 +840,13 @@ shorter human supervision time for sessions where parallelism is appropriate.
 - This validates the UX, data model, message routing, and review filters without
   concurrent filesystem writes.
 
-> **Phase 1 composer divergence:** the shared composer is sendable while a
-> non-thread session is running (follow-ups queue behind the in-flight turn).
-> When a thread is selected, the composer is locked while the thread is
-> `running` because admission goes through `ClaimIdleForSession`, which
-> requires the thread to be idle. Phase 2/3 should restore queueing parity by
-> introducing a thread-scoped pending-message queue or by relaxing claim
-> semantics; until then, this is the intentional Phase 1 trade-off.
+> **Composer behavior:** the shared composer remains sendable while a selected
+> thread is already `pending` or `running`. Follow-up messages are appended to
+> the thread-scoped pending queue and drain after the in-flight turn
+> completes, including races where a resumable thread flips back to `running`
+> between inspection and resume-claim. Comment-resolution sends still require
+> an immediately claimable thread because that path must commit the message and
+> resolution atomically against the same turn.
 
 ### Phase 2: Concurrent tabs in one sandbox — Planned
 

@@ -801,10 +801,24 @@ func (s *Service) claimThreadForSend(ctx context.Context, input SendMessageInput
 			return models.SessionThread{}, "", threadClaimQueueLimitReached, nil
 		}
 		// pgx.ErrNoRows here means the status changed under us between the
-		// inspect and the resume claim (e.g. a sibling claim raced us). Map
-		// to ErrThreadNotIdle so the user sees a consistent affordance and
-		// can retry.
+		// inspect and the resume claim (e.g. a sibling claim raced us). If
+		// that race moved the thread into a mid-turn status, queue the
+		// message behind the in-flight turn instead of bouncing it.
 		if errors.Is(resumeErr, pgx.ErrNoRows) {
+			racedThread, racedErr := s.threadStore.GetByID(ctx, input.OrgID, input.ThreadID)
+			if racedErr != nil {
+				return models.SessionThread{}, "", 0, fmt.Errorf("%w: %w", ErrThreadNotFound, racedErr)
+			}
+			racedThread, racedErr = visibleThreadInSession(racedThread, input.SessionID)
+			if racedErr != nil {
+				return models.SessionThread{}, "", 0, racedErr
+			}
+			if threadStatusCanQueue(racedThread.Status) {
+				if resolvingComments {
+					return models.SessionThread{}, "", 0, ErrThreadNotIdle
+				}
+				return racedThread, racedThread.Status, threadClaimQueueMidTurn, nil
+			}
 			return models.SessionThread{}, "", 0, ErrThreadNotIdle
 		}
 		return models.SessionThread{}, "", 0, fmt.Errorf("claim thread for resume: %w", resumeErr)
