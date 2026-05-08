@@ -943,6 +943,60 @@ func TestWaitForReadiness_FailsFastWhenServiceStopped(t *testing.T) {
 	require.Contains(t, err.Error(), "stopped before becoming ready")
 }
 
+// TestStartPreview_ReadinessTimeoutSurfacesLiveTail verifies that a service
+// that keeps running but never passes its readiness probe still exposes the
+// current output tail. This is the dogfood-preview failure mode where the
+// server may still be compiling or migrating when the readiness budget expires.
+func TestStartPreview_ReadinessTimeoutSurfacesLiveTail(t *testing.T) {
+	t.Parallel()
+
+	release := make(chan struct{})
+	exec := &fakeServiceExecutor{
+		execStreamFn: func(ctx context.Context, _ string, onLine func([]byte)) (int, error) {
+			onLine([]byte("[143-preview] building binaries..."))
+			onLine([]byte("go: downloading google.golang.org/genproto/googleapis/rpc"))
+			select {
+			case <-release:
+			case <-ctx.Done():
+			}
+			return 0, nil
+		},
+		execFn: func(_ context.Context, _ string) (int, error) {
+			return 1, nil
+		},
+	}
+	d := NewDockerPreviewProvider(&mockDockerPreviewClient{}, exec, zerolog.Nop())
+	obs := &recordingObserver{}
+	cfg := &models.PreviewConfig{
+		Name:    "dogfood",
+		Primary: "server",
+		Services: map[string]models.ServiceConfig{
+			"server": {
+				Command: []string{"sh", ".143/preview-start.sh"},
+				Port:    8080,
+				Ready:   models.ReadinessProbe{HTTPPath: "/api/v1/health", TimeoutSeconds: 1},
+			},
+		},
+	}
+
+	_, err := d.StartPreview(context.Background(), &agent.Sandbox{ID: "sb"}, cfg, nil, obs)
+	close(release)
+
+	require.Error(t, err, "StartPreview should fail when readiness never passes")
+	require.Contains(t, err.Error(), "readiness probe timed out", "error should explain readiness timeout")
+	require.Contains(t, err.Error(), "[143-preview] building binaries...", "error should include live service output")
+	require.Contains(t, err.Error(), "go: downloading", "error should include the most recent live service output")
+
+	failed := obs.failed()
+	require.Len(t, failed, 1, "observer should persist timeout diagnostics")
+	require.Equal(t, "server", failed[0].name, "observer should identify the timed-out service")
+	require.Contains(t, failed[0].errMsg, "readiness probe timed out", "observer error should explain readiness timeout")
+	require.Equal(t, []string{
+		"[143-preview] building binaries...",
+		"go: downloading google.golang.org/genproto/googleapis/rpc",
+	}, failed[0].tail, "observer should receive the live output tail")
+}
+
 // TestStartPreview_StandardMode_NotifiesObserverPerService runs StartPreview
 // to completion in standard mode with two services, both of which become
 // ready promptly, and asserts the observer received one OnServiceReady per

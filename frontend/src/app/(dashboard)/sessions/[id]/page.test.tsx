@@ -2564,6 +2564,109 @@ describe('SessionDetailPage', () => {
     });
   });
 
+  it('keeps the repair CTA suppressed while navigating to a different repair session', async () => {
+    server.use(
+      http.get('/api/v1/pull-requests/:id/health', () => {
+        return HttpResponse.json({
+          data: {
+            ...mockPRHealth,
+            failing_test_count: 1,
+            can_fix_tests: true,
+            needs_agent_action: true,
+            summary: 'PR #42 has 1 failing test job.',
+            active_repairs: [],
+          },
+        } satisfies SingleResponse<typeof mockPRHealth>);
+      }),
+      http.post('/api/v1/pull-requests/:id/repair/fix-tests', () => {
+        return HttpResponse.json({
+          data: {
+            session_id: 'session-revision-123',
+            mode: 'revision',
+            reused_in_flight: false,
+            head_sha: 'head-sha',
+            base_sha: 'base-sha',
+            health_version: 1,
+            repair_action_type: 'fix_tests',
+          },
+        });
+      }),
+    );
+
+    const user = userEvent.setup();
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+
+    await user.click(await screen.findByRole('button', { name: 'Fix tests' }));
+
+    await waitFor(() => {
+      expect(routerPush).toHaveBeenCalledWith('/sessions/session-revision-123');
+    });
+    expect(screen.getByRole('button', { name: 'Opening repair session…' })).toBeDisabled();
+    expect(screen.queryByRole('button', { name: 'Fix tests' })).not.toBeInTheDocument();
+  });
+
+  it('replaces Fix tests with a durable running state after the repair launch succeeds', async () => {
+    let healthRequestCount = 0;
+    server.use(
+      http.get('/api/v1/pull-requests/:id/health', () => {
+        healthRequestCount += 1;
+        if (healthRequestCount === 1) {
+          return HttpResponse.json({
+            data: {
+              ...mockPRHealth,
+              failing_test_count: 1,
+              can_fix_tests: true,
+              needs_agent_action: true,
+              summary: 'PR #42 has 1 failing test job.',
+              active_repairs: [],
+            },
+          } satisfies SingleResponse<typeof mockPRHealth>);
+        }
+
+        return HttpResponse.json({
+          data: {
+            ...mockPRHealth,
+            failing_test_count: 1,
+            can_fix_tests: false,
+            can_merge: false,
+            needs_agent_action: true,
+            summary: 'PR #42 has 1 failing test job.',
+            active_repairs: [{
+              action_type: 'fix_tests' as const,
+              session_id: 'session-repair-123',
+              session_status: 'running',
+              health_version: 1,
+            }],
+          },
+        } satisfies SingleResponse<typeof mockPRHealth>);
+      }),
+      http.post('/api/v1/pull-requests/:id/repair/fix-tests', () => {
+        return HttpResponse.json({
+          data: {
+            session_id: 'session-abcdef12-3456-7890',
+            mode: 'existing',
+            reused_in_flight: false,
+            head_sha: 'head-sha',
+            base_sha: 'base-sha',
+            health_version: 1,
+            repair_action_type: 'fix_tests',
+          },
+        });
+      }),
+    );
+
+    const user = userEvent.setup();
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+
+    await user.click(await screen.findByRole('button', { name: 'Fix tests' }));
+
+    expect(await screen.findByText('Fix tests running')).toBeInTheDocument();
+    await waitFor(() => {
+      expect(screen.queryByRole('button', { name: 'Fix tests' })).not.toBeInTheDocument();
+    });
+    expect(screen.getByRole('button', { name: 'Open repair session' })).toBeInTheDocument();
+  });
+
   it('shows failure next steps and retry button', async () => {
     const failedSession: Session = {
       ...mockSessions[1],

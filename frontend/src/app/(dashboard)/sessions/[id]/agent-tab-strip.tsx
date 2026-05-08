@@ -24,27 +24,20 @@ function threadStatusLabel(status: string, statusConfig: Record<string, { label:
   return statusConfig[status]?.label ?? status.replace(/_/g, " ");
 }
 
-function threadStatusDotClass(status: string): string {
-  switch (status) {
-    case "running":
-      return "bg-primary";
-    case "pending":
-      return "bg-muted-foreground";
-    case "awaiting_input":
-      return "bg-amber-500";
-    case "failed":
-      return "bg-destructive";
-    case "completed":
-      return "bg-emerald-500";
-    case "cancelled":
-      return "bg-muted-foreground/60";
-    default:
-      return "bg-primary";
-  }
-}
-
 function isActiveStatus(status: string): boolean {
   return status === "pending" || status === "running" || status === "awaiting_input";
+}
+
+function shouldShowUnreadDot(thread: SessionThread, viewedThreadIds: ReadonlySet<string>): boolean {
+  if (!viewedThreadIds.has(thread.id)) {
+    return true;
+  }
+
+  return thread.status === "pending" || thread.status === "running";
+}
+
+function canArchiveThread(thread: SessionThread, threadCount: number): boolean {
+  return threadCount > 1 && !isActiveStatus(thread.status);
 }
 
 // Compute per-thread overlap: a path counts as an overlap when at least two
@@ -92,6 +85,7 @@ export function computeThreadOverlap(
 interface AgentTabStripProps {
   threads: SessionThread[];
   activeThreadId: string | null;
+  viewedThreadIds: ReadonlySet<string>;
   overlapsByThreadId: Map<string, string[]>;
   statusConfig: Record<string, { label: string }>;
   onActiveThreadChange: (threadId: string) => void;
@@ -121,6 +115,7 @@ interface AgentTabStripProps {
 export function AgentTabStrip({
   threads,
   activeThreadId,
+  viewedThreadIds,
   overlapsByThreadId,
   statusConfig,
   onActiveThreadChange,
@@ -153,6 +148,7 @@ export function AgentTabStrip({
     const queued = activeThread.pending_message_count ?? 0;
     const needsAttention =
       activeThread.status === "awaiting_input" || activeThread.status === "failed";
+    const showUnreadDot = shouldShowUnreadDot(activeThread, viewedThreadIds);
 
     return (
       <TooltipProvider delayDuration={150}>
@@ -166,15 +162,18 @@ export function AgentTabStrip({
                   aria-label={`${agentLabel} ${statusLabel}`}
                   className="flex min-w-0 flex-1 items-center gap-2 rounded-md px-1 py-1 outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
                 >
-                  <span
-                    className={cn(
-                      "h-2 w-2 shrink-0 rounded-full",
-                      threadStatusDotClass(activeThread.status),
-                      activeThread.status === "running" && !isCancelling && "animate-pulse",
-                    )}
-                    aria-hidden
-                  />
-                  <span className="truncate text-sm font-medium text-foreground">{activeThread.label}</span>
+                  {showUnreadDot ? (
+                    <span
+                      className={cn(
+                        "h-2 w-2 shrink-0 rounded-full bg-primary",
+                        activeThread.status === "running" && !isCancelling && "animate-pulse",
+                      )}
+                      aria-hidden
+                    />
+                  ) : (
+                    <span className="h-2 w-2 shrink-0" aria-hidden />
+                  )}
+                  <span className="truncate text-xs font-medium text-foreground">{activeThread.label}</span>
                   {isCancelling && (
                     <Loader2
                       className="h-3.5 w-3.5 shrink-0 animate-spin text-muted-foreground"
@@ -278,83 +277,96 @@ export function AgentTabStrip({
                 const overlap = overlapsByThreadId.get(thread.id) ?? [];
                 const isCancelling = thread.cancel_requested_at != null && isActiveStatus(thread.status);
                 const queued = thread.pending_message_count ?? 0;
+                const showUnreadDot = shouldShowUnreadDot(thread, viewedThreadIds);
+                const showArchiveButton = canArchiveThread(thread, tabs.length);
+                const closeLabel = `Close ${thread.label}${thread.label.toLowerCase().endsWith(" tab") ? "" : " tab"}`;
 
                 return (
-                  <Tooltip key={thread.id}>
-                    <TooltipTrigger asChild>
-                      <TabsTrigger
-                        value={thread.id}
-                        className={cn(
-                          "h-8 max-w-[15rem] gap-1.5 rounded-md px-2 text-xs data-[state=active]:text-primary",
-                          tabs.length === 1 && "data-[state=active]:bg-transparent data-[state=active]:shadow-none",
-                        )}
-                      >
-                        <span
+                  <div key={thread.id} className="group relative flex shrink-0 items-center">
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <TabsTrigger
+                          value={thread.id}
                           className={cn(
-                            "h-2 w-2 shrink-0 rounded-full",
-                            threadStatusDotClass(thread.status),
-                            thread.status === "running" && !isCancelling && "animate-pulse",
+                            "h-8 max-w-[15rem] gap-1.5 rounded-md px-2 text-xs data-[state=active]:bg-transparent data-[state=active]:text-primary data-[state=active]:shadow-none",
+                            "after:bg-primary after:bg-none data-[state=active]:after:opacity-100",
+                            showArchiveButton && "pr-8",
+                            tabs.length === 1 && "data-[state=active]:bg-transparent data-[state=active]:shadow-none",
                           )}
-                          aria-hidden
-                        />
-                        <span className="truncate">{thread.label}</span>
-                        {isCancelling && (
-                          <Loader2 className="h-3 w-3 animate-spin text-muted-foreground" aria-label="Cancelling" />
-                        )}
-                        {queued > 0 && (
-                          <Badge variant="secondary" className="h-4 px-1 text-xs leading-none">
-                            {queued}
-                          </Badge>
-                        )}
-                        {needsAttention && (
-                          <span className="h-1.5 w-1.5 rounded-full bg-amber-500" aria-label="Needs attention" />
-                        )}
-                        {overlap.length > 0 && (
-                          <AlertTriangle
-                            className="h-3 w-3 shrink-0 text-amber-600 dark:text-amber-400"
-                            aria-label={`Overlaps with another tab on ${overlap.length} file${overlap.length === 1 ? "" : "s"}`}
-                          />
-                        )}
-                      </TabsTrigger>
-                    </TooltipTrigger>
-                    <TooltipContent side="bottom" className="max-w-sm text-xs">
-                      <div className="space-y-1">
-                        <div className="font-medium">{thread.label} <span className="font-normal text-muted-foreground">- {agentLabel}</span></div>
-                        <div className="text-muted-foreground">{statusLabel}{queued > 0 ? ` · ${queued} message${queued === 1 ? "" : "s"} queued` : ""}</div>
-                        {overlap.length > 0 && (
-                          <div className="pt-1">
-                            <div className="font-medium text-amber-700 dark:text-amber-400">Overlap with another tab:</div>
-                            <ul className="text-muted-foreground">
-                              {overlap.slice(0, 5).map((p) => (
-                                <li key={p} className="truncate">{p}</li>
-                              ))}
-                              {overlap.length > 5 && (
-                                <li className="text-muted-foreground/80">…and {overlap.length - 5} more</li>
+                        >
+                          {showUnreadDot ? (
+                            <span
+                              className={cn(
+                                "h-2 w-2 shrink-0 rounded-full bg-primary",
+                                thread.status === "running" && !isCancelling && "animate-pulse",
                               )}
-                            </ul>
-                          </div>
-                        )}
-                      </div>
-                    </TooltipContent>
-                  </Tooltip>
+                              aria-hidden
+                            />
+                          ) : (
+                            <span className="h-2 w-2 shrink-0" aria-hidden />
+                          )}
+                          <span className="truncate">{thread.label}</span>
+                          {isCancelling && (
+                            <Loader2 className="h-3 w-3 animate-spin text-muted-foreground" aria-label="Cancelling" />
+                          )}
+                          {queued > 0 && (
+                            <Badge variant="secondary" className="h-4 px-1 text-xs leading-none">
+                              {queued}
+                            </Badge>
+                          )}
+                          {needsAttention && (
+                            <span className="h-1.5 w-1.5 rounded-full bg-amber-500" aria-label="Needs attention" />
+                          )}
+                          {overlap.length > 0 && (
+                            <AlertTriangle
+                              className="h-3 w-3 shrink-0 text-amber-600 dark:text-amber-400"
+                              aria-label={`Overlaps with another tab on ${overlap.length} file${overlap.length === 1 ? "" : "s"}`}
+                            />
+                          )}
+                        </TabsTrigger>
+                      </TooltipTrigger>
+                      <TooltipContent side="bottom" className="max-w-sm text-xs">
+                        <div className="space-y-1">
+                          <div className="font-medium">{thread.label} <span className="font-normal text-muted-foreground">- {agentLabel}</span></div>
+                          <div className="text-muted-foreground">{statusLabel}{queued > 0 ? ` · ${queued} message${queued === 1 ? "" : "s"} queued` : ""}</div>
+                          {overlap.length > 0 && (
+                            <div className="pt-1">
+                              <div className="font-medium text-amber-700 dark:text-amber-400">Overlap with another tab:</div>
+                              <ul className="text-muted-foreground">
+                                {overlap.slice(0, 5).map((p) => (
+                                  <li key={p} className="truncate">{p}</li>
+                                ))}
+                                {overlap.length > 5 && (
+                                  <li className="text-muted-foreground/80">…and {overlap.length - 5} more</li>
+                                )}
+                              </ul>
+                            </div>
+                          )}
+                        </div>
+                      </TooltipContent>
+                    </Tooltip>
+                    {showArchiveButton ? (
+                      <Button
+                        type="button"
+                        size="icon"
+                        variant="ghost"
+                        className="absolute right-1 top-1/2 h-6 w-6 -translate-y-1/2 rounded-sm opacity-70 hover:opacity-100 focus-visible:opacity-100"
+                        aria-label={closeLabel}
+                        title={closeLabel}
+                        disabled={archivePendingThreadId === thread.id}
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          onArchiveThread(thread.id);
+                        }}
+                      >
+                        {archivePendingThreadId === thread.id ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <X className="h-3.5 w-3.5" />}
+                      </Button>
+                    ) : null}
+                  </div>
                 );
               })}
             </TabsList>
           </Tabs>
-          {tabs.length > 1 && !isActiveStatus(activeThread.status) && (
-            <Button
-              type="button"
-              size="icon"
-              variant="ghost"
-              className="h-8 w-8 shrink-0"
-              aria-label={`Close ${activeThread.label}${activeThread.label.toLowerCase().endsWith(" tab") ? "" : " tab"}`}
-              title={`Close ${activeThread.label}${activeThread.label.toLowerCase().endsWith(" tab") ? "" : " tab"}`}
-              disabled={archivePendingThreadId === activeThread.id}
-              onClick={() => onArchiveThread(activeThread.id)}
-            >
-              {archivePendingThreadId === activeThread.id ? <Loader2 className="h-4 w-4 animate-spin" /> : <X className="h-4 w-4" />}
-            </Button>
-          )}
 
           <ThreadActionsMenu
             threads={tabs}

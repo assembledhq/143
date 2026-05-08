@@ -393,6 +393,9 @@ func TestPRServiceMergePullRequestRunsMergedFollowUps(t *testing.T) {
 		WillReturnRows(pgxmock.NewRows(prHealthCurrentTestColumns).AddRow(
 			prID, orgID, int64(1), "head-merge", "base-merge", summaryJSON, summaryJSON, models.PullRequestHealthEnrichmentStatusNotRequested, (*time.Time)(nil), now, now,
 		))
+	prMock.ExpectQuery("SELECT .+ FROM pull_request_repair_runs").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": prID, "health_version": int64(1)}).
+		WillReturnRows(pgxmock.NewRows(prRepairRunTestColumns))
 	repoMock.ExpectQuery("SELECT .+ FROM repositories WHERE org_id = .+ AND full_name = .+ AND status = 'active'").
 		WithArgs(pgx.NamedArgs{"org_id": orgID, "full_name": "assembledhq/143"}).
 		WillReturnRows(pgxmock.NewRows(prTestRepoColumns).AddRow(
@@ -401,11 +404,6 @@ func TestPRServiceMergePullRequestRunsMergedFollowUps(t *testing.T) {
 	prMock.ExpectExec("UPDATE pull_requests SET status = @status, merged_at = now\\(\\), updated_at = now\\(\\) WHERE id = @id AND org_id = @org_id").
 		WithArgs(pgx.NamedArgs{"id": prID, "org_id": orgID, "status": "merged"}).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
-	prMock.ExpectQuery("SELECT .+ FROM pull_request_health_current").
-		WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": prID}).
-		WillReturnRows(pgxmock.NewRows(prHealthCurrentTestColumns).AddRow(
-			prID, orgID, int64(1), "head-merge", "base-merge", summaryJSON, summaryJSON, models.PullRequestHealthEnrichmentStatusNotRequested, (*time.Time)(nil), now, now,
-		))
 
 	sessionRow := newPRHealthSessionRow(sessionID, orgID, now, string(models.SessionStatusCompleted))
 	setPRHealthSessionRowValue(sessionRow, "primary_issue_id", &issueID)

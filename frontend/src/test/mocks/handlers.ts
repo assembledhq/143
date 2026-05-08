@@ -118,6 +118,7 @@ export const mockPRHealth: PullRequestHealthResponse = {
   can_resolve_conflicts: false,
   can_fix_tests: false,
   can_merge: false,
+  active_repairs: [],
   enrichment_status: 'ready',
   enrichment_requested: false,
   enrichment_ready: true,

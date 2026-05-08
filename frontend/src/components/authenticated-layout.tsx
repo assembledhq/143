@@ -49,6 +49,8 @@ import { OrgSwitcher } from "@/components/org-switcher";
 import { CommandPalette } from "@/components/command-palette/command-palette";
 import { SidebarSettingsSection } from "@/components/sidebar-settings-section";
 import { CreateSessionDialog } from "@/components/create-session-dialog";
+import { ResizeHandle } from "@/components/resize-handle";
+import { usePersistedPanelWidth } from "@/hooks/use-persisted-panel-width";
 
 type SidebarUser = NonNullable<ReturnType<typeof useAuth>["user"]>;
 
@@ -67,7 +69,10 @@ function isPlainNavClick(e: React.MouseEvent): boolean {
 
 const buildSha = process.env.NEXT_PUBLIC_BUILD_SHA || "dev";
 const shortSha = buildSha === "dev" ? "dev" : buildSha.slice(0, 7);
-const APP_SIDEBAR_WIDTH_CLASS = "w-[236px]";
+const APP_SIDEBAR_DEFAULT_WIDTH = 236;
+const APP_SIDEBAR_MIN_WIDTH = 200;
+const APP_SIDEBAR_MAX_WIDTH = 300;
+const APP_SIDEBAR_STORAGE_KEY = "143:app-sidebar-width";
 
 function VersionMenuItem() {
   const [copied, setCopied] = useState(false);
@@ -379,6 +384,12 @@ export function AuthenticatedLayout({ children }: { children: React.ReactNode })
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [createOpen, setCreateOpen] = useState(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const { width: appSidebarWidth, resizeBy: resizeAppSidebar } = usePersistedPanelWidth({
+    storageKey: APP_SIDEBAR_STORAGE_KEY,
+    defaultWidth: APP_SIDEBAR_DEFAULT_WIDTH,
+    minWidth: APP_SIDEBAR_MIN_WIDTH,
+    maxWidth: APP_SIDEBAR_MAX_WIDTH,
+  });
 
   // Global Cmd+K / Ctrl+K shortcut
   useEffect(() => {
@@ -461,9 +472,10 @@ export function AuthenticatedLayout({ children }: { children: React.ReactNode })
     return (
       <div className="flex h-dvh">
         <aside
+          data-testid="app-sidebar"
+          style={{ "--app-sidebar-w": `${appSidebarWidth}px` } as React.CSSProperties}
           className={cn(
-            APP_SIDEBAR_WIDTH_CLASS,
-            "hidden md:flex border-r border-border bg-sidebar flex-col"
+            "hidden md:flex border-r border-border bg-sidebar flex-col w-[var(--app-sidebar-w)]"
           )}
         >
           <div className="px-4 py-4">
@@ -484,6 +496,9 @@ export function AuthenticatedLayout({ children }: { children: React.ReactNode })
             </div>
           </div>
         </aside>
+        <div className="hidden md:block">
+          <ResizeHandle onResize={resizeAppSidebar} testId="app-sidebar-resize-handle" />
+        </div>
         <div className="flex flex-1 min-w-0 flex-col">
           <header className="md:hidden flex h-14 items-center gap-2 border-b border-border/50 bg-background px-3">
             <div className="h-6 w-6 rounded bg-muted animate-pulse" />
@@ -517,9 +532,10 @@ export function AuthenticatedLayout({ children }: { children: React.ReactNode })
     <div className="flex h-dvh">
       {/* Desktop sidebar (md and up) */}
       <aside
+        data-testid="app-sidebar"
+        style={{ "--app-sidebar-w": `${appSidebarWidth}px` } as React.CSSProperties}
         className={cn(
-          APP_SIDEBAR_WIDTH_CLASS,
-          "hidden md:flex border-r border-border/50 bg-sidebar flex-col relative"
+          "hidden md:flex border-r border-border/50 bg-sidebar flex-col relative w-[var(--app-sidebar-w)]"
         )}
       >
         <SidebarBody
@@ -532,6 +548,9 @@ export function AuthenticatedLayout({ children }: { children: React.ReactNode })
           onLogout={logout}
         />
       </aside>
+      <div className="hidden md:block">
+        <ResizeHandle onResize={resizeAppSidebar} testId="app-sidebar-resize-handle" />
+      </div>
 
       {/* Mobile drawer (below md) */}
       <Sheet open={mobileMenuOpen} onOpenChange={setMobileMenuOpen}>
