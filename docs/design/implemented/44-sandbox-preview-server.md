@@ -628,7 +628,7 @@ Service startup order:
 3. The primary service starts last
 4. The preview is `ready` only when **all** services pass their readiness probes
 
-If any service fails to become ready within its timeout, the entire preview transitions to `failed` with a diagnostic indicating which service failed and why.
+If any service fails to become ready within its timeout, the entire preview transitions to `failed` with a diagnostic indicating which service failed and why. Readiness timeouts snapshot the service's live stdout/stderr tail before teardown, even if the process has not exited, so operators can tell whether startup was still compiling, downloading dependencies, migrating, seeding data, or blocked after the app server started.
 
 Service limits:
 
@@ -1043,6 +1043,7 @@ Known failure patterns the preview manager should detect and surface:
 | `MODULE_NOT_FOUND` or `Cannot find module` | "A required dependency is missing. Ensure `npm install` or equivalent runs during the Build phase." |
 | OOM kill (exit code 137) | "The preview process exceeded its memory limit ({limit}MB). Try a lighter dev server configuration or request a higher limit." |
 | Non-zero exit within 5 seconds of start | "The dev server exited immediately. Check the process output below for configuration errors." |
+| Readiness timeout with live output tail | "The {service} service did not become ready on port {port} before the timeout. Last output: {tail}" |
 | `ECONNREFUSED` on a support service port | "The {service} service is not responding on port {port}. It may have crashed or failed to start. Check the {service} process output." |
 | Support service ready but primary fails to connect | "The frontend cannot reach the backend at localhost:{port}. Ensure the backend service is configured to bind to `0.0.0.0`." |
 | Infrastructure container fails to start | "PostgreSQL failed to start. This is likely a platform issue — try restarting the preview." |

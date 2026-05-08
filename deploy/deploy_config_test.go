@@ -173,7 +173,7 @@ func TestProductionAlertsUseValidLogsQLRangeFilters(t *testing.T) {
 func TestLoggingDesignDocsTrackProvisionedDashboardsAndAlerts(t *testing.T) {
 	t.Parallel()
 
-	design, err := os.ReadFile("../docs/design/47-logging-victorialogs.md")
+	design, err := os.ReadFile("../docs/design/implemented/47-logging-victorialogs.md")
 	require.NoError(t, err, "test should read the VictoriaLogs design doc")
 
 	designText := string(design)
