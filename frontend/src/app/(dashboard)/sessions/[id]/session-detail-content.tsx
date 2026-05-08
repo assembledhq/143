@@ -101,7 +101,7 @@ import {
   buildSessionLogsStreamURL,
 } from "@/lib/sse";
 import { applyPlanModePrefix, buildTimeline, flattenTimelineResponse, sortTimelineEntries, type TimelineEntry } from "@/lib/timeline";
-import { parseDiffStats, type DiffFile } from "@/lib/diff-parser";
+import type { DiffFile } from "@/lib/diff-parser";
 import { formatReviewMessage } from "@/lib/format-review-message";
 import {
   readStoredSessionScrollPosition,
@@ -776,6 +776,9 @@ function ChangesTab({
   threads,
   attributionFilter,
   onAttributionFilterChange,
+  diffLoadErrorText,
+  diffTruncationText,
+  onRetryDiffLoad,
 }: {
   filteredFiles: DiffFile[];
   activeFileIndex: number;
@@ -791,8 +794,12 @@ function ChangesTab({
   threads: SessionThread[];
   attributionFilter: ThreadAttributionFilterValue;
   onAttributionFilterChange: (next: ThreadAttributionFilterValue) => void;
+  diffLoadErrorText?: string;
+  diffTruncationText?: string;
+  onRetryDiffLoad?: () => void;
 }) {
   const hasDiff = filteredFiles.length > 0;
+  const hasDiffLoadError = !!diffLoadErrorText;
 
   const handleFileClick = useCallback(
     (index: number) => {
@@ -840,15 +847,23 @@ function ChangesTab({
       {/* Main content: file tree or empty state */}
       {hasDiff ? (
         <div className="flex flex-col flex-1 min-h-0">
+          {diffTruncationText ? (
+            <div className="mx-4 mt-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-950 dark:border-amber-900/50 dark:bg-amber-950/20 dark:text-amber-100">
+              <p className="font-medium">Large diff truncated</p>
+              <p className="mt-1 text-amber-900/80 dark:text-amber-100/80">{diffTruncationText}</p>
+            </div>
+          ) : null}
           {!isMobile ? (
             <div className="px-4 py-3">
-              <button
+              <Button
+                type="button"
+                variant="outline"
                 onClick={() => onOpenReview()}
-                className="w-full flex items-center justify-center gap-2 px-3 py-2 rounded-md border border-border bg-background text-xs font-medium text-foreground hover:bg-muted/50 transition-colors"
+                className="w-full gap-2 text-xs"
               >
                 <FileCode2 className="h-3.5 w-3.5" />
                 Review {filteredFiles.length} {filteredFiles.length === 1 ? "file" : "files"}
-              </button>
+              </Button>
             </div>
           ) : null}
           <div className="flex-1 overflow-hidden">
@@ -863,13 +878,22 @@ function ChangesTab({
       ) : (
         <div className="flex-1 flex items-center justify-center py-12">
           <div className="text-center space-y-2 max-w-[280px]">
-            <FileCode2 className="h-8 w-8 text-muted-foreground/40 mx-auto" />
+            {hasDiffLoadError ? (
+              <AlertTriangle className="h-8 w-8 text-destructive/70 mx-auto" />
+            ) : (
+              <FileCode2 className="h-8 w-8 text-muted-foreground/40 mx-auto" />
+            )}
             <p className="text-xs font-medium text-muted-foreground">
-              No changes yet
+              {hasDiffLoadError ? "Couldn't load changes" : "No changes yet"}
             </p>
             <p className="text-xs text-muted-foreground/60">
-              {emptyStatusText}
+              {diffLoadErrorText ?? emptyStatusText}
             </p>
+            {hasDiffLoadError && onRetryDiffLoad ? (
+              <Button type="button" variant="outline" size="sm" className="mt-2" onClick={onRetryDiffLoad}>
+                Retry
+              </Button>
+            ) : null}
           </div>
         </div>
       )}
@@ -2401,7 +2425,9 @@ export function SessionDetailContent({ id }: { id: string }) {
   const [resumePRParam, setResumePRParam] = useQueryState("resume_pr");
   const [resumeActionParam, setResumeActionParam] = useQueryState("resume_action");
   const [githubPRParam, setGithubPRParam] = useQueryState("github_pr");
-  const centerMode = reviewParam === "active" ? "review" : "chat";
+  const [centerMode, setCenterMode] = useState<"chat" | "review">(
+    reviewParam === "active" ? "review" : "chat"
+  );
   const [detailTab, setDetailTab] = useState<DetailTab>(
     previewParam === "1" ? "preview" : "overview"
   );
@@ -2417,6 +2443,11 @@ export function SessionDetailContent({ id }: { id: string }) {
   const [isEditingTitle, setIsEditingTitle] = useState(false);
   const [draftTitle, setDraftTitle] = useState("");
   const [isMobileReviewViewport, setIsMobileReviewViewport] = useState(false);
+  useEffect(() => {
+    if (reviewParam === "active") {
+      setCenterMode("review");
+    }
+  }, [reviewParam]);
 
   useEffect(() => {
     if (typeof window === "undefined" || typeof window.matchMedia !== "function") {
@@ -2446,6 +2477,7 @@ export function SessionDetailContent({ id }: { id: string }) {
   // --- Enter review mode ---
   const openReview = useCallback((fileIndex?: number) => {
     if (fileIndex !== undefined) setActiveFileIndex(fileIndex);
+    setCenterMode("review");
     setReviewParam("active");
     setDetailTab("changes");
     setShowDetailPanel(true);
@@ -2463,6 +2495,7 @@ export function SessionDetailContent({ id }: { id: string }) {
 
   // --- Exit review mode ---
   const exitReview = useCallback(() => {
+    setCenterMode("chat");
     setReviewParam(null);
   }, [setReviewParam]);
 
@@ -2487,7 +2520,7 @@ export function SessionDetailContent({ id }: { id: string }) {
   const isDocumentVisible = useDocumentVisible();
 
   const { data, isLoading, error } = useQuery({
-    queryKey: ["session", id],
+    queryKey: queryKeys.sessions.detail(id),
     queryFn: () => api.sessions.get(id),
     refetchInterval: (q) => {
       const s = q.state.data?.data;
@@ -2516,6 +2549,35 @@ export function SessionDetailContent({ id }: { id: string }) {
 
   const session = data?.data;
   const members = membersData?.data ?? [];
+  const shouldLoadDiff = !!session && (
+    centerMode === "review" ||
+    detailTab === "changes"
+  );
+  const diffRevisionKey = useMemo(() => {
+    if (!session) return null;
+    return [
+      session.diff_collected_at ?? "",
+      session.latest_diff_snapshot_id ?? "",
+      session.diff_stats?.added ?? "",
+      session.diff_stats?.removed ?? "",
+      session.diff_stats?.files_changed ?? "",
+    ].join(":");
+  }, [session]);
+  const {
+    data: diffData,
+    isLoading: isDiffLoading,
+    isError: isDiffError,
+    error: diffError,
+    refetch: refetchDiff,
+  } = useQuery({
+    queryKey: queryKeys.sessions.diff(id, diffRevisionKey),
+    queryFn: () => api.sessions.getDiff(id),
+    enabled: shouldLoadDiff,
+    staleTime: Infinity,
+    refetchOnWindowFocus: false,
+    retry: false,
+  });
+  const sessionDiffPayload = diffData?.data;
   const threads = useMemo(() => session?.threads ?? [], [session?.threads]);
   const [activeThreadId, setActiveThreadId] = useState<string | null>(null);
   const activeThread = threads.find((thread) => thread.id === activeThreadId) ?? threads[0];
@@ -2999,17 +3061,42 @@ export function SessionDetailContent({ id }: { id: string }) {
     createPRMutation.mutate({ authorMode: "user", resumeToken: resumePRParam });
   }, [canCreatePR, createPRMutation, hasPR, hasSnapshot, isRunning, prStatus, pushChangesMutation, resumeActionParam, resumePRParam, session?.has_unpushed_changes]);
 
-  const sessionDiff = session?.diff;
   const diffStats = useMemo(() => {
-    if (!sessionDiff) return null;
-    return parseDiffStats(sessionDiff);
-  }, [sessionDiff]);
+    const stats = session?.diff_stats ?? sessionDiffPayload?.diff_stats;
+    if (!stats) return null;
+    return {
+      added: stats.added,
+      removed: stats.removed,
+      filesChanged: stats.files_changed,
+    };
+  }, [session?.diff_stats, sessionDiffPayload?.diff_stats]);
+  const diffLoadErrorText = isDiffError
+    ? diffError instanceof ApiError
+      ? diffError.message
+      : "Changes could not be loaded. Retry to fetch the diff again."
+    : undefined;
+  const diffTruncationText = useMemo(() => {
+    if (!sessionDiffPayload?.diff_truncated && !sessionDiffPayload?.diff_history_truncated) return undefined;
+    const originalChars = sessionDiffPayload.diff_chars?.toLocaleString();
+    const maxChars = sessionDiffPayload.diff_max_chars?.toLocaleString();
+    if (originalChars && maxChars) {
+      return `This diff is very large, so the viewer is showing the first ${maxChars} of ${originalChars} characters. Diff pass history may be omitted.`;
+    }
+    return "This diff is very large, so the viewer is showing a bounded preview. Diff pass history may be omitted.";
+  }, [sessionDiffPayload?.diff_chars, sessionDiffPayload?.diff_history_truncated, sessionDiffPayload?.diff_max_chars, sessionDiffPayload?.diff_truncated]);
 
   // --- Shared review state (lifted from old ChangesTab) ---
 
   // Hooks can't be called conditionally, so provide a stub when session hasn't loaded yet.
   // useDiffViewState only reads `diff` and `diff_history` — the stub satisfies that contract.
-  const diffViewState = useDiffViewState(session ?? { diff: null, diff_history: [] } as unknown as Session);
+  const diffSource = useMemo(
+    () => ({
+      diff: sessionDiffPayload?.diff ?? null,
+      diff_history: sessionDiffPayload?.diff_history ?? [],
+    }) as unknown as Session,
+    [sessionDiffPayload?.diff, sessionDiffPayload?.diff_history]
+  );
+  const diffViewState = useDiffViewState(diffSource);
   const {
     files: diffFiles,
     filteredFiles,
@@ -3958,7 +4045,9 @@ export function SessionDetailContent({ id }: { id: string }) {
           passRange={passRange}
           onPassRangeChange={setPassRange}
           emptyStatusText={
-            session.status === "running" || session.status === "pending"
+            isDiffLoading
+              ? "Loading changes..."
+              : session.status === "running" || session.status === "pending"
               ? "Changes will appear here as the agent modifies files."
               : "This session did not produce any file changes."
           }
@@ -3966,6 +4055,9 @@ export function SessionDetailContent({ id }: { id: string }) {
           threads={threads}
           attributionFilter={attributionFilter}
           onAttributionFilterChange={setAttributionFilter}
+          diffLoadErrorText={diffLoadErrorText}
+          diffTruncationText={diffTruncationText}
+          onRetryDiffLoad={() => { void refetchDiff(); }}
         />
       </TabsContent>
       <TabsContent value="overview" className="flex-1 overflow-y-auto scrollbar-hide p-4">
@@ -4197,26 +4289,43 @@ export function SessionDetailContent({ id }: { id: string }) {
           {centerMode === "review" && (
             <div className="h-full animate-in fade-in duration-150 flex flex-col">
               <div className="flex-1 min-h-0">
-                <ReviewDiffView
-                  sessionId={id}
-                  files={visibleFilteredFiles}
-                  allFiles={visibleDiffFiles}
-                  activeFileIndex={activeFileIndex}
-                  onFileChange={setActiveFileIndex}
-                  onBack={exitReview}
-                  isMobile={isMobileReviewViewport}
-                  onOpenFileList={openMobileFilesList}
-                  onOpenComposer={session.agent_type !== "pm_agent" ? () => setMobileReviewComposerOpen(true) : undefined}
-                  commentsByLine={commentsByLine}
-                  activeCommentLine={activeCommentLine}
-                  onAddComment={handleAddComment}
-                  onSubmitComment={handleSubmitComment}
-                  onCancelComment={handleCancelComment}
-                  onUpdateComment={updateComment}
-                  onDeleteComment={deleteComment}
-                  diffSearchQuery={diffSearchQuery}
-                  onDiffSearchChange={setDiffSearchQuery}
-                />
+                {isDiffLoading ? (
+                  <div className="h-full w-full bg-muted/20 animate-pulse rounded-lg" />
+                ) : diffLoadErrorText ? (
+                  <div className="flex h-full items-center justify-center p-6">
+                    <div className="max-w-sm space-y-3 text-center">
+                      <AlertTriangle className="mx-auto h-8 w-8 text-destructive/70" />
+                      <div className="space-y-1">
+                        <p className="text-sm font-medium text-foreground">Couldn&apos;t load changes</p>
+                        <p className="text-xs text-muted-foreground">{diffLoadErrorText}</p>
+                      </div>
+                      <Button type="button" variant="outline" size="sm" onClick={() => { void refetchDiff(); }}>
+                        Retry
+                      </Button>
+                    </div>
+                  </div>
+                ) : (
+                  <ReviewDiffView
+                    sessionId={id}
+                    files={visibleFilteredFiles}
+                    allFiles={visibleDiffFiles}
+                    activeFileIndex={activeFileIndex}
+                    onFileChange={setActiveFileIndex}
+                    onBack={exitReview}
+                    isMobile={isMobileReviewViewport}
+                    onOpenFileList={openMobileFilesList}
+                    onOpenComposer={session.agent_type !== "pm_agent" ? () => setMobileReviewComposerOpen(true) : undefined}
+                    commentsByLine={commentsByLine}
+                    activeCommentLine={activeCommentLine}
+                    onAddComment={handleAddComment}
+                    onSubmitComment={handleSubmitComment}
+                    onCancelComment={handleCancelComment}
+                    onUpdateComment={updateComment}
+                    onDeleteComment={deleteComment}
+                    diffSearchQuery={diffSearchQuery}
+                    onDiffSearchChange={setDiffSearchQuery}
+                  />
+                )}
               </div>
             </div>
           )}

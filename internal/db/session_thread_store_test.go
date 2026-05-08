@@ -209,6 +209,27 @@ func TestSessionThreadStore_ListBySession(t *testing.T) {
 	}
 }
 
+func TestSessionThreadStore_ListBySession_OmitsRawDiffPayloads(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewSessionThreadStore(mock)
+	orgID := uuid.New()
+	sessionID := uuid.New()
+
+	mock.ExpectQuery(`(?s)SELECT .+CASE WHEN diff IS NULL THEN NULL ELSE '__diff_present__' END AS diff.+FROM session_threads`).
+		WithArgs(anyArgs(2)...).
+		WillReturnRows(pgxmock.NewRows(sessionThreadTestColumns))
+
+	threads, err := store.ListBySession(context.Background(), orgID, sessionID)
+	require.NoError(t, err, "ListBySession should not return an error when selecting lightweight thread rows")
+	require.Empty(t, threads, "ListBySession should return no rows from the empty result set")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func TestSessionThreadStore_ListStuckRunningThreads(t *testing.T) {
 	t.Parallel()
 

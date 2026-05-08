@@ -14,6 +14,7 @@ export const queryKeys = {
     counts: (repo?: string | null, peopleKey?: string | null) =>
       ["sessions", "counts", repo, peopleKey] as const,
     detail: (id: string) => ["session", id] as const,
+    diff: (id: string, revision?: string | null) => ["session", id, "diff", revision ?? null] as const,
     timeline: (id: string) => ["session", id, "timeline"] as const,
     validation: (id: string) => ["session", id, "validation"] as const,
     pr: (id: string) => ["session", id, "pr"] as const,

@@ -202,6 +202,8 @@ export interface Session {
   diff?: string;
   diff_stats?: { added: number; removed: number; files_changed: number };
   diff_history?: Array<{ pass: number; diff: string; diff_stats: { added: number; removed: number; files_changed: number }; created_at: string }>;
+  diff_collected_at?: string;
+  latest_diff_snapshot_id?: string;
   threads?: SessionThread[];
   archived_at?: string;
   archived_by_user_id?: string;
@@ -290,6 +292,19 @@ export interface ForkResult {
 
 export interface SessionDetail extends Session {
   threads: SessionThread[];
+}
+
+export interface SessionDiff {
+  session_id: string;
+  diff?: string;
+  diff_stats?: { added: number; removed: number; files_changed: number };
+  diff_history?: Array<{ pass: number; diff: string; diff_stats: { added: number; removed: number; files_changed: number }; created_at: string }>;
+  diff_truncated: boolean;
+  diff_history_truncated: boolean;
+  diff_chars?: number;
+  diff_history_bytes?: number;
+  diff_max_chars?: number;
+  diff_history_max_bytes?: number;
 }
 
 export interface SessionLog {
