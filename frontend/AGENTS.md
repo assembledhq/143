@@ -463,6 +463,14 @@ if (!expectedData) {
 
 Use the `tags` parameter to add searchable context (feature name, endpoint, component). Do **not** call `Sentry.*` directly — always use the helpers so error reporting stays centralized.
 
+## Frontend Performance Guardrails
+
+- Treat text-entry surfaces as hot paths. Composers, search inputs, filters, and settings fields should update only the smallest subtree necessary for each keystroke.
+- When an input sits next to heavier chrome (repo pickers, tables, timelines, charts, drawers, syntax highlighters), isolate that chrome behind a memoized child boundary so unrelated controls do not rerender while typing.
+- Add a focused render-isolation test for interactive surfaces with known heavy siblings. The test should type into the input and assert that an unrelated expensive child did not rerender.
+- Prefer `*.performance.test.tsx` for these checks when the file is primarily about render churn, polling isolation, or typing latency rather than feature correctness.
+- If a component adds polling, subscriptions, `ResizeObserver`, `scroll` listeners, or large list filtering near an input path, call that out in the PR and verify cleanup behavior in tests.
+
 ## Anti-Patterns to Avoid
 
 1. **Hardcoded colors** — Never `text-gray-*`, `bg-white`, `border-gray-*` in dashboard. Use tokens.
