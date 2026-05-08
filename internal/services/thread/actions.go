@@ -24,8 +24,9 @@ func (s *Service) CancelThread(ctx context.Context, orgID, sessionID, threadID u
 	if err != nil {
 		return models.SessionThread{}, fmt.Errorf("%w: %w", ErrThreadNotFound, err)
 	}
-	if thread.SessionID != sessionID {
-		return models.SessionThread{}, ErrThreadNotFound
+	thread, err = visibleThreadInSession(thread, sessionID)
+	if err != nil {
+		return models.SessionThread{}, err
 	}
 	switch thread.Status {
 	case models.ThreadStatusPending, models.ThreadStatusRunning, models.ThreadStatusAwaitingInput:
@@ -100,8 +101,8 @@ func (s *Service) ForkThread(ctx context.Context, input ForkInput) (ForkResult, 
 	if err != nil {
 		return ForkResult{}, fmt.Errorf("%w: %w", ErrThreadNotFound, err)
 	}
-	if thread.SessionID != input.SourceSessionID {
-		return ForkResult{}, ErrThreadNotFound
+	if _, err := visibleThreadInSession(thread, input.SourceSessionID); err != nil {
+		return ForkResult{}, err
 	}
 	if _, err := s.sessionStore.GetByID(ctx, input.OrgID, input.SourceSessionID); err != nil {
 		return ForkResult{}, fmt.Errorf("%w: %w", ErrSessionNotFound, err)
@@ -134,8 +135,9 @@ func (s *Service) RevertThread(ctx context.Context, orgID, sessionID, threadID u
 	if err != nil {
 		return ForkResult{}, fmt.Errorf("%w: %w", ErrThreadNotFound, err)
 	}
-	if thread.SessionID != sessionID {
-		return ForkResult{}, ErrThreadNotFound
+	thread, err = visibleThreadInSession(thread, sessionID)
+	if err != nil {
+		return ForkResult{}, err
 	}
 	if thread.Diff == nil || strings.TrimSpace(*thread.Diff) == "" {
 		return ForkResult{}, errors.New("thread has no diff to revert")

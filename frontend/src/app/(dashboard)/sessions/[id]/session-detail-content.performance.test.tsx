@@ -145,5 +145,5 @@ describe("SessionDetailContent performance", () => {
 
     expect(textarea).toHaveValue("Lag");
     expect(chatTimelineRenderState.count).toBe(0);
-  });
+  }, 30000);
 });

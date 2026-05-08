@@ -48,7 +48,9 @@ describe("AgentTabStrip", () => {
         onCancelThread={vi.fn()}
         onForkThread={vi.fn()}
         onRevertThread={vi.fn()}
+        onArchiveThread={vi.fn()}
         cancelPendingThreadId={null}
+        archivePendingThreadId={null}
       />,
     );
 
@@ -57,11 +59,10 @@ describe("AgentTabStrip", () => {
 
     expect(idleDot).not.toBeNull();
     expect(screen.queryByRole("tablist", { name: "Agent tabs" })).not.toBeInTheDocument();
-    expect(screen.getByText("Codex")).toBeInTheDocument();
-    expect(screen.getByText("Idle")).toBeInTheDocument();
-    expect(screen.queryByText("Main tab")).not.toBeInTheDocument();
+    expect(screen.getByText("Main tab")).toBeInTheDocument();
+    expect(screen.getByRole("group", { name: "Codex Idle" })).toBeInTheDocument();
 
-    await user.hover(screen.getByText("Codex"));
+    await user.hover(screen.getByText("Main tab"));
 
     expect(await screen.findByRole("tooltip")).toHaveTextContent("Idle");
     expect(screen.getByRole("tooltip")).toHaveTextContent("2 messages queued");
@@ -89,7 +90,9 @@ describe("AgentTabStrip", () => {
         onCancelThread={vi.fn()}
         onForkThread={vi.fn()}
         onRevertThread={vi.fn()}
+        onArchiveThread={vi.fn()}
         cancelPendingThreadId={null}
+        archivePendingThreadId={null}
       />,
     );
 
@@ -102,7 +105,7 @@ describe("AgentTabStrip", () => {
   it("keeps the full tab strip once a second tab exists", () => {
     const threads = [
       makeThread({ id: "thread-1", label: "Main tab" }),
-      makeThread({ id: "thread-2", label: "Review", status: "running", agent_type: "claude_code" }),
+      makeThread({ id: "thread-2", label: "Review", status: "completed", agent_type: "claude_code" }),
     ];
 
     renderWithProviders(
@@ -116,7 +119,9 @@ describe("AgentTabStrip", () => {
         onCancelThread={vi.fn()}
         onForkThread={vi.fn()}
         onRevertThread={vi.fn()}
+        onArchiveThread={vi.fn()}
         cancelPendingThreadId={null}
+        archivePendingThreadId={null}
       />,
     );
 
@@ -126,8 +131,40 @@ describe("AgentTabStrip", () => {
     expect(tabList).toBeInTheDocument();
     expect(tabList).toHaveAttribute("data-variant", "line");
     expect(tabList).not.toHaveClass("bg-muted/60");
-    expect(activeTab).toHaveTextContent("Main tab");
+    expect(activeTab).toHaveTextContent(/Main tab/i);
+    expect(activeTab).not.toHaveTextContent(/Idle/i);
     expect(activeTab).toHaveClass("data-[state=active]:text-primary");
-    expect(screen.getByRole("tab", { name: /review/i })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: /review/i })).not.toHaveTextContent(/Completed/i);
+    expect(screen.getByRole("button", { name: "Close Main tab" })).toBeInTheDocument();
+  });
+
+  it("archives the selected non-running tab from the close affordance beside the strip", async () => {
+    const user = userEvent.setup();
+    const threads = [
+      makeThread({ id: "thread-1", label: "Main tab", status: "completed" }),
+      makeThread({ id: "thread-2", label: "Review", status: "completed" }),
+    ];
+    const onArchiveThread = vi.fn();
+
+    renderWithProviders(
+      <AgentTabStrip
+        threads={threads}
+        activeThreadId={threads[1].id}
+        overlapsByThreadId={new Map()}
+        statusConfig={statusConfig}
+        onActiveThreadChange={vi.fn()}
+        onAddTab={vi.fn()}
+        onCancelThread={vi.fn()}
+        onForkThread={vi.fn()}
+        onRevertThread={vi.fn()}
+        onArchiveThread={onArchiveThread}
+        cancelPendingThreadId={null}
+        archivePendingThreadId={null}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Close Review tab" }));
+
+    expect(onArchiveThread).toHaveBeenCalledWith("thread-2");
   });
 });

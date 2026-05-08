@@ -126,6 +126,16 @@ func TestService_CancelThread(t *testing.T) {
 			},
 			expectErr: ErrThreadNotFound,
 		},
+		{
+			name: "rejects an archived thread",
+			setup: func(deps *testDeps, tracker *markCancelTracker, canceller *mockCanceller) {
+				deps.threadStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
+					now := time.Now()
+					return models.SessionThread{ID: threadID, SessionID: sessionID, OrgID: orgID, Status: models.ThreadStatusRunning, ArchivedAt: &now}, nil
+				}
+			},
+			expectErr: ErrThreadNotFound,
+		},
 	}
 
 	for _, tt := range tests {

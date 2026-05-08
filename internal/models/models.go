@@ -652,6 +652,7 @@ type SessionThread struct {
 	StartedAt           *time.Time   `db:"started_at" json:"started_at,omitempty"`
 	CompletedAt         *time.Time   `db:"completed_at" json:"completed_at,omitempty"`
 	CreatedAt           time.Time    `db:"created_at" json:"created_at"`
+	ArchivedAt          *time.Time   `db:"archived_at" json:"archived_at,omitempty"`
 	BaseSnapshotKey     *string      `db:"base_snapshot_key" json:"base_snapshot_key,omitempty"`
 	CostCents           float64      `db:"cost_cents" json:"cost_cents"`
 	PendingMessageCount int          `db:"pending_message_count" json:"pending_message_count"`

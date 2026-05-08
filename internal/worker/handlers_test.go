@@ -108,7 +108,7 @@ var workerSessionThreadColumns = []string{
 	"label", "instructions", "file_scope", "status", "agent_session_id", "current_turn", "last_activity_at",
 	"confidence_score", "result_summary", "diff", "failure_explanation", "failure_category",
 	"started_at", "completed_at", "created_at",
-	"base_snapshot_key", "cost_cents", "pending_message_count", "cancel_requested_at",
+	"archived_at", "base_snapshot_key", "cost_cents", "pending_message_count", "cancel_requested_at",
 }
 
 func workerSessionThreadRow(threadID, sessionID, orgID uuid.UUID, agentType models.AgentType, modelOverride *string, status models.ThreadStatus) []any {
@@ -119,7 +119,7 @@ func workerSessionThreadRow(threadID, sessionID, orgID uuid.UUID, agentType mode
 		"Thread", nil, []string{}, status, nil, 1, nowPtr,
 		nil, nil, nil, nil, nil,
 		nowPtr, nil, now,
-		nil, float64(0), 0, nil,
+		nil, nil, float64(0), 0, nil,
 	}
 }
 

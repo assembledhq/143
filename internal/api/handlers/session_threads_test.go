@@ -16,6 +16,7 @@ import (
 	"github.com/assembledhq/143/internal/services/thread"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 )
@@ -26,6 +27,7 @@ type mockThreadStore struct {
 	createFn         func(ctx context.Context, t *models.SessionThread, max int) error
 	getByIDFn        func(ctx context.Context, orgID, threadID uuid.UUID) (models.SessionThread, error)
 	listBySessionFn  func(ctx context.Context, orgID, sessionID uuid.UUID) ([]models.SessionThread, error)
+	archiveFn        func(ctx context.Context, orgID, sessionID, threadID uuid.UUID) (models.SessionThread, error)
 	claimIdleFn      func(ctx context.Context, orgID, sessionID, threadID uuid.UUID) (models.SessionThread, error)
 	claimForResumeFn func(ctx context.Context, orgID, sessionID, threadID uuid.UUID) (models.SessionThread, error)
 	updateFn         func(ctx context.Context, t *models.SessionThread) error
@@ -51,6 +53,13 @@ func (m *mockThreadStore) ListBySession(ctx context.Context, orgID, sessionID uu
 		return m.listBySessionFn(ctx, orgID, sessionID)
 	}
 	return nil, nil
+}
+
+func (m *mockThreadStore) Archive(ctx context.Context, orgID, sessionID, threadID uuid.UUID) (models.SessionThread, error) {
+	if m.archiveFn != nil {
+		return m.archiveFn(ctx, orgID, sessionID, threadID)
+	}
+	return models.SessionThread{}, fmt.Errorf("not archived")
 }
 
 func (m *mockThreadStore) ClaimIdleForSession(ctx context.Context, orgID, sessionID, threadID uuid.UUID, _ int) (models.SessionThread, error) {
@@ -529,6 +538,116 @@ func TestSessionThreadHandler_UpdateThread(t *testing.T) {
 			require.NoError(t, err, "response body should be valid JSON")
 			require.Equal(t, models.AgentTypeCodex, resp.Data.AgentType, "UpdateThread should return the updated agent type")
 			require.Equal(t, "Codex 2", resp.Data.Label, "UpdateThread should return the updated label")
+		})
+	}
+}
+
+func TestSessionThreadHandler_ArchiveThread(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	threadID := uuid.New()
+
+	tests := []struct {
+		name           string
+		sessionIDParam string
+		threadIDParam  string
+		setupDeps      func(deps *threadTestDeps)
+		expectedCode   int
+		expectedError  string
+	}{
+		{
+			name:           "success",
+			sessionIDParam: sessionID.String(),
+			threadIDParam:  threadID.String(),
+			setupDeps: func(deps *threadTestDeps) {
+				deps.sessionStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.Session, error) {
+					return models.Session{ID: sessionID, OrgID: orgID, Status: "completed"}, nil
+				}
+				deps.threadStore.listBySessionFn = func(_ context.Context, _, _ uuid.UUID) ([]models.SessionThread, error) {
+					return []models.SessionThread{
+						{ID: uuid.New(), SessionID: sessionID, OrgID: orgID, Status: models.ThreadStatusRunning, Label: "Main tab"},
+						{ID: threadID, SessionID: sessionID, OrgID: orgID, Status: models.ThreadStatusCompleted, Label: "Review"},
+					}, nil
+				}
+				deps.threadStore.archiveFn = func(_ context.Context, _, _, gotThreadID uuid.UUID) (models.SessionThread, error) {
+					require.Equal(t, threadID, gotThreadID, "ArchiveThread should archive the requested thread")
+					archivedAt := time.Now()
+					return models.SessionThread{
+						ID:         threadID,
+						SessionID:  sessionID,
+						OrgID:      orgID,
+						Label:      "Review",
+						Status:     models.ThreadStatusCompleted,
+						ArchivedAt: &archivedAt,
+					}, nil
+				}
+			},
+			expectedCode: http.StatusOK,
+		},
+		{
+			name:           "invalid session id",
+			sessionIDParam: "not-a-uuid",
+			threadIDParam:  threadID.String(),
+			setupDeps:      func(deps *threadTestDeps) {},
+			expectedCode:   http.StatusBadRequest,
+			expectedError:  "INVALID_ID",
+		},
+		{
+			name:           "cannot archive last thread",
+			sessionIDParam: sessionID.String(),
+			threadIDParam:  threadID.String(),
+			setupDeps: func(deps *threadTestDeps) {
+				deps.sessionStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.Session, error) {
+					return models.Session{ID: sessionID, OrgID: orgID, Status: "idle"}, nil
+				}
+				deps.threadStore.archiveFn = func(_ context.Context, _, _, _ uuid.UUID) (models.SessionThread, error) {
+					return models.SessionThread{}, pgx.ErrNoRows
+				}
+				deps.threadStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
+					return models.SessionThread{ID: threadID, SessionID: sessionID, OrgID: orgID, Status: models.ThreadStatusCompleted, Label: "Only tab"}, nil
+				}
+				deps.threadStore.listBySessionFn = func(_ context.Context, _, _ uuid.UUID) ([]models.SessionThread, error) {
+					return []models.SessionThread{
+						{ID: threadID, SessionID: sessionID, OrgID: orgID, Status: models.ThreadStatusCompleted, Label: "Only tab"},
+					}, nil
+				}
+			},
+			expectedCode:  http.StatusConflict,
+			expectedError: "THREAD_LAST_VISIBLE",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			handler, deps := newThreadHandler(t)
+			tt.setupDeps(deps)
+
+			req := threadRequest(http.MethodPost, "/api/v1/sessions/"+tt.sessionIDParam+"/threads/"+tt.threadIDParam+"/archive", "", orgID, map[string]string{
+				"id":  tt.sessionIDParam,
+				"tid": tt.threadIDParam,
+			})
+			w := httptest.NewRecorder()
+
+			handler.ArchiveThread(w, req)
+			require.Equal(t, tt.expectedCode, w.Code, "ArchiveThread should return the expected status code")
+
+			if tt.expectedError != "" {
+				var errResp models.ErrorResponse
+				err := json.Unmarshal(w.Body.Bytes(), &errResp)
+				require.NoError(t, err, "response body should be valid JSON")
+				require.Equal(t, tt.expectedError, errResp.Error.Code, "ArchiveThread should return the expected error code")
+				return
+			}
+
+			var resp models.SingleResponse[models.SessionThread]
+			err := json.Unmarshal(w.Body.Bytes(), &resp)
+			require.NoError(t, err, "response body should be valid JSON")
+			require.Equal(t, "Review", resp.Data.Label, "ArchiveThread should return the archived thread")
+			require.NotNil(t, resp.Data.ArchivedAt, "ArchiveThread should return the archived timestamp")
 		})
 	}
 }

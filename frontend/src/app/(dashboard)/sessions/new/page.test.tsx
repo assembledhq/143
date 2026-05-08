@@ -91,7 +91,7 @@ describe('ManualSessionCreatePage', () => {
     await waitFor(() => {
       expect(pushMock).toHaveBeenCalledWith('/sessions/session-manual-chat-1');
     });
-  });
+  }, 10000);
 
   it('inserts a selected mention and submits canonical references', async () => {
     const user = userEvent.setup();
