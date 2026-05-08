@@ -381,6 +381,8 @@ export const api = {
     // string to set/validate it. The backend distinguishes these three states.
     updateThread: (sessionId: string, threadId: string, body: { agent_type?: string; model?: string | null; label: string }) =>
       patch<import('./types').SingleResponse<import('./types').SessionThread>>(`/api/v1/sessions/${sessionId}/threads/${threadId}`, body),
+    archiveThread: (sessionId: string, threadId: string) =>
+      post<import('./types').SingleResponse<import('./types').SessionThread>>(`/api/v1/sessions/${sessionId}/threads/${threadId}/archive`, {}),
     sendThreadMessage: (sessionId: string, threadId: string, body: { message: string; images?: string[]; references?: import('./types').SessionInputReference[]; commands?: import('./types').SessionInputCommand[]; planMode?: boolean; resolveReviewCommentIDs?: string[] }) =>
       post<import('./types').SingleResponse<import('./types').SessionMessage>>(
         `/api/v1/sessions/${sessionId}/threads/${threadId}/messages`,

@@ -127,7 +127,11 @@ import { SessionKeyboardHelpOverlay } from "@/components/session-keyboard-help-o
 import { useAuth } from "@/hooks/use-auth";
 import { useMediaQuery } from "@/hooks/use-media-query";
 import { useDocumentVisible } from "@/hooks/use-document-visible";
-import { useSessionKeyboardShortcuts, type UseSessionKeyboardShortcutsOptions } from "@/hooks/use-session-keyboard-shortcuts";
+import {
+  useSessionKeyboardShortcuts,
+  type SessionDetailTab,
+  type UseSessionKeyboardShortcutsOptions,
+} from "@/hooks/use-session-keyboard-shortcuts";
 import { prMergedAccent } from "@/lib/pr-status-styles";
 import { cn, sessionTitle, formatTimeAgo } from "@/lib/utils";
 import { activeSet, workingStatusesSet } from "@/lib/session-status-groups";
@@ -307,7 +311,7 @@ const fileTriggerIcon = <FileCode2 className={triggerPickerIconClassName} />;
 // Detail panel tabs (shown in right sidebar)
 // ---------------------------------------------------------------------------
 
-type DetailTab = "overview" | "changes" | "preview";
+type DetailTab = SessionDetailTab;
 type PRAuthorMode = "auto" | "user" | "app";
 
 type PRAuthInterceptDetails = {
@@ -3403,6 +3407,31 @@ export function SessionDetailContent({ id }: { id: string }) {
       toast.error(err instanceof Error ? err.message : "Failed to cancel tab");
     },
   });
+  const archiveThreadMutation = useMutation({
+    mutationFn: (threadId: string) => api.sessions.archiveThread(id, threadId),
+    onSuccess: (response, archivedThreadID) => {
+      queryClient.setQueryData<SingleResponse<SessionDetail>>(["session", id], (existing) => {
+        if (!existing) return existing;
+        const existingThreads = existing.data.threads ?? [];
+        return {
+          ...existing,
+          data: {
+            ...existing.data,
+            threads: existingThreads.filter((thread) => thread.id !== archivedThreadID),
+          },
+        };
+      });
+      if (activeThreadId === archivedThreadID) {
+        const fallback = threads.find((thread) => thread.id !== archivedThreadID);
+        setActiveThreadId(fallback?.id ?? null);
+      }
+      queryClient.invalidateQueries({ queryKey: ["session", id] });
+      toast.success(`Closed ${response.data.label}`);
+    },
+    onError: (err) => {
+      toast.error(err instanceof Error ? err.message : "Failed to close tab");
+    },
+  });
   const forkThreadMutation = useMutation({
     mutationFn: (threadId: string) => api.sessions.forkThread(id, threadId),
     onSuccess: () => {
@@ -3757,9 +3786,7 @@ export function SessionDetailContent({ id }: { id: string }) {
       open: isMobileReviewViewport ? mobileDetailOpen : showDetailPanel,
       required: centerMode === "review" && showDetailPanel,
       activeTab: detailTab,
-      availableTabs: showValidationTab
-        ? (["overview", "changes", "validation", "preview"] as const)
-        : (["overview", "changes", "preview"] as const),
+      availableTabs: ["overview", "changes", "preview"] as const,
       onToggle: toggleDetailsFromKeyboard,
       onClose: closeDetailsFromKeyboard,
       onTabChange: handleDetailTabClick,
@@ -4267,7 +4294,9 @@ export function SessionDetailContent({ id }: { id: string }) {
             onCancelThread={(tid) => cancelThreadMutation.mutate(tid)}
             onForkThread={(tid) => forkThreadMutation.mutate(tid)}
             onRevertThread={(tid) => revertThreadMutation.mutate(tid)}
+            onArchiveThread={(tid) => archiveThreadMutation.mutate(tid)}
             cancelPendingThreadId={cancelThreadMutation.isPending ? cancelThreadMutation.variables ?? null : null}
+            archivePendingThreadId={archiveThreadMutation.isPending ? archiveThreadMutation.variables ?? null : null}
             addTabButtonRef={addTabButtonRef}
           />
           </div>

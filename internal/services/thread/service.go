@@ -17,18 +17,20 @@ import (
 // Sentinel errors returned by the thread service. Handlers should match on
 // these with errors.Is rather than inspecting error strings.
 var (
-	ErrSessionNotFound        = errors.New("session not found")
-	ErrSessionTerminal        = errors.New("cannot add threads to a completed session")
-	ErrSessionNotResumable    = errors.New("session must be idle, running, awaiting input, need guidance, or otherwise resumable to send a message")
-	ErrSessionSnapshotExpired = errors.New("session sandbox snapshot has expired and can no longer be continued")
-	ErrInvalidAgentType       = errors.New("invalid agent type")
-	ErrInvalidModel           = errors.New("invalid model")
-	ErrEnqueueFailed          = errors.New("enqueue failed")
-	ErrThreadNotFound         = errors.New("thread not found")
-	ErrThreadNotEditable      = errors.New("thread is not editable")
-	ErrThreadNotIdle          = errors.New("thread must be idle to send a message")
-	ErrActiveThreadExists     = errors.New("another thread is already active")
-	ErrThreadCannotBeEnded    = errors.New("thread cannot be ended in its current state")
+	ErrSessionNotFound         = errors.New("session not found")
+	ErrSessionTerminal         = errors.New("cannot add threads to a completed session")
+	ErrSessionNotResumable     = errors.New("session must be idle, running, awaiting input, need guidance, or otherwise resumable to send a message")
+	ErrSessionSnapshotExpired  = errors.New("session sandbox snapshot has expired and can no longer be continued")
+	ErrInvalidAgentType        = errors.New("invalid agent type")
+	ErrInvalidModel            = errors.New("invalid model")
+	ErrEnqueueFailed           = errors.New("enqueue failed")
+	ErrThreadNotFound          = errors.New("thread not found")
+	ErrThreadNotEditable       = errors.New("thread is not editable")
+	ErrThreadNotIdle           = errors.New("thread must be idle to send a message")
+	ErrThreadActive            = errors.New("thread is active")
+	ErrCannotArchiveLastThread = errors.New("cannot archive the last visible thread")
+	ErrActiveThreadExists      = errors.New("another thread is already active")
+	ErrThreadCannotBeEnded     = errors.New("thread cannot be ended in its current state")
 	// ErrRunningLimitReached is returned when sending to an idle tab would
 	// exceed the per-session running-thread cap. The composer should fall
 	// back to queueing the message for delivery once an active sibling
@@ -78,6 +80,7 @@ type ThreadStore interface {
 	Create(ctx context.Context, thread *models.SessionThread, maxThreads int) error
 	GetByID(ctx context.Context, orgID, threadID uuid.UUID) (models.SessionThread, error)
 	ListBySession(ctx context.Context, orgID, sessionID uuid.UUID) ([]models.SessionThread, error)
+	Archive(ctx context.Context, orgID, sessionID, threadID uuid.UUID) (models.SessionThread, error)
 	ClaimIdleForSession(ctx context.Context, orgID, sessionID, threadID uuid.UUID, maxRunning int) (models.SessionThread, error)
 	ClaimForResumeInSession(ctx context.Context, orgID, sessionID, threadID uuid.UUID, maxRunning int) (models.SessionThread, error)
 	UpdateEditable(ctx context.Context, thread *models.SessionThread) error
@@ -325,8 +328,9 @@ func (s *Service) UpdateThread(ctx context.Context, input UpdateThreadInput) (*m
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrThreadNotFound, err)
 	}
-	if thread.SessionID != input.SessionID {
-		return nil, ErrThreadNotFound
+	thread, err = visibleThreadInSession(thread, input.SessionID)
+	if err != nil {
+		return nil, err
 	}
 	if thread.Status != models.ThreadStatusIdle || thread.CurrentTurn != 0 {
 		return nil, ErrThreadNotEditable
@@ -367,6 +371,46 @@ func (s *Service) UpdateThread(ctx context.Context, input UpdateThreadInput) (*m
 	return &thread, nil
 }
 
+func (s *Service) ArchiveThread(ctx context.Context, orgID, sessionID, threadID uuid.UUID) (models.SessionThread, error) {
+	if _, err := s.sessionStore.GetByID(ctx, orgID, sessionID); err != nil {
+		return models.SessionThread{}, fmt.Errorf("%w: %w", ErrSessionNotFound, err)
+	}
+
+	archived, err := s.threadStore.Archive(ctx, orgID, sessionID, threadID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			target, getErr := s.threadStore.GetByID(ctx, orgID, threadID)
+			if getErr != nil || target.SessionID != sessionID {
+				return models.SessionThread{}, ErrThreadNotFound
+			}
+			if target.ArchivedAt != nil {
+				return models.SessionThread{}, ErrThreadNotFound
+			}
+			if isActiveStatus(target.Status) {
+				return models.SessionThread{}, ErrThreadActive
+			}
+
+			threads, listErr := s.threadStore.ListBySession(ctx, orgID, sessionID)
+			if listErr != nil {
+				return models.SessionThread{}, fmt.Errorf("list threads: %w", listErr)
+			}
+			if len(threads) <= 1 {
+				return models.SessionThread{}, ErrCannotArchiveLastThread
+			}
+			return models.SessionThread{}, ErrThreadNotFound
+		}
+		return models.SessionThread{}, fmt.Errorf("archive thread: %w", err)
+	}
+	return archived, nil
+}
+
+func visibleThreadInSession(thread models.SessionThread, sessionID uuid.UUID) (models.SessionThread, error) {
+	if thread.SessionID != sessionID || thread.ArchivedAt != nil {
+		return models.SessionThread{}, ErrThreadNotFound
+	}
+	return thread, nil
+}
+
 // ListThreads returns all threads for a session.
 func (s *Service) ListThreads(ctx context.Context, orgID, sessionID uuid.UUID) ([]models.SessionThread, error) {
 	// Verify session exists and belongs to org.
@@ -387,10 +431,7 @@ func (s *Service) GetThread(ctx context.Context, orgID, sessionID, threadID uuid
 	if err != nil {
 		return models.SessionThread{}, fmt.Errorf("%w: %w", ErrThreadNotFound, err)
 	}
-	if thread.SessionID != sessionID {
-		return models.SessionThread{}, ErrThreadNotFound
-	}
-	return thread, nil
+	return visibleThreadInSession(thread, sessionID)
 }
 
 // threadClaimOutcome enumerates the four possible results of
@@ -413,6 +454,10 @@ const (
 	// pick the work up via the orchestrator's drain.
 	threadClaimQueueLimitReached
 )
+
+func isActiveStatus(status models.ThreadStatus) bool {
+	return status == models.ThreadStatusPending || status == models.ThreadStatusRunning || status == models.ThreadStatusAwaitingInput
+}
 
 // SendMessage claims an idle thread (or resumes a paused/terminal one),
 // creates a message, and enqueues a continue_session job. When
@@ -605,8 +650,9 @@ func (s *Service) queueMessageWaitingForSlot(ctx context.Context, input SendMess
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrThreadNotFound, err)
 	}
-	if thread.SessionID != input.SessionID {
-		return nil, ErrThreadNotFound
+	thread, err = visibleThreadInSession(thread, input.SessionID)
+	if err != nil {
+		return nil, err
 	}
 	if thread.Status != models.ThreadStatusIdle && !threadStatusIsResumable(thread.Status) {
 		return nil, ErrThreadNotIdle
@@ -730,8 +776,9 @@ func (s *Service) claimThreadForSend(ctx context.Context, input SendMessageInput
 	if lookupErr != nil {
 		return models.SessionThread{}, "", 0, fmt.Errorf("%w: %w", ErrThreadNotFound, lookupErr)
 	}
-	if existing.SessionID != input.SessionID {
-		return models.SessionThread{}, "", 0, ErrThreadNotFound
+	existing, lookupErr = visibleThreadInSession(existing, input.SessionID)
+	if lookupErr != nil {
+		return models.SessionThread{}, "", 0, lookupErr
 	}
 
 	// 3. Thread is mid-turn (pending/running): queue the message against the
@@ -963,9 +1010,9 @@ func (s *Service) EndThread(ctx context.Context, orgID, sessionID, threadID uuid
 	if err != nil {
 		return models.SessionThread{}, fmt.Errorf("%w: %w", ErrThreadNotFound, err)
 	}
-
-	if thread.SessionID != sessionID {
-		return models.SessionThread{}, ErrThreadNotFound
+	thread, err = visibleThreadInSession(thread, sessionID)
+	if err != nil {
+		return models.SessionThread{}, err
 	}
 
 	// Only pending, idle, running, or awaiting_input threads can be ended.
@@ -990,8 +1037,8 @@ func (s *Service) GetMessages(ctx context.Context, orgID, sessionID, threadID uu
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrThreadNotFound, err)
 	}
-	if thread.SessionID != sessionID {
-		return nil, ErrThreadNotFound
+	if _, err := visibleThreadInSession(thread, sessionID); err != nil {
+		return nil, err
 	}
 
 	messages, err := s.messageStore.ListByThread(ctx, orgID, threadID)
@@ -1007,8 +1054,8 @@ func (s *Service) GetLogs(ctx context.Context, orgID, sessionID, threadID uuid.U
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrThreadNotFound, err)
 	}
-	if thread.SessionID != sessionID {
-		return nil, ErrThreadNotFound
+	if _, err := visibleThreadInSession(thread, sessionID); err != nil {
+		return nil, err
 	}
 
 	logs, err := s.logStore.ListByThread(ctx, orgID, threadID)
