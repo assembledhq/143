@@ -467,6 +467,101 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
     return 1
   }
 
+  resolve_caddy_service_ips() {
+    local caddy_id="$1" service="$2"
+    docker exec "$caddy_id" sh -c '
+      service="$1"
+      if command -v getent >/dev/null 2>&1; then
+        getent hosts "$service" | while read -r ip _; do
+          case "$ip" in
+            *:*) ;;
+            *) echo "$ip" ;;
+          esac
+        done
+      elif command -v nslookup >/dev/null 2>&1; then
+        nslookup "$service" | while read -r first second third _; do
+          case "$first" in
+            Address:)
+              ip="$second"
+              ;;
+            Address)
+              case "$second" in
+                *:) ip="$third" ;;
+                *) continue ;;
+              esac
+              ;;
+            *)
+              continue
+              ;;
+          esac
+          case "$ip" in
+            ""|*:*) ;;
+            *) echo "$ip" ;;
+          esac
+        done
+      else
+        exit 127
+      fi
+    ' sh "$service" | sort -u
+  }
+
+  # wait_caddy_upstream_discovery SERVICE CONTAINER_ID - Docker health means the
+  # container is ready, but Caddy still needs to be able to reach it from the
+  # proxy container's network namespace. Keep the old app/frontend container
+  # serving until the same service-name DNS path Caddy uses includes the new
+  # upstream and Caddy can probe it directly.
+  wait_caddy_upstream_discovery() {
+    local service="$1" new_container="$2" port
+    case "$service" in
+      api) port="8080" ;;
+      frontend) port="3000" ;;
+      *) return 0 ;;
+    esac
+
+    local caddy_id
+    caddy_id="$(docker compose -f "$COMPOSE_FILE" ps -q caddy | head -1 || true)"
+    if [ -z "$caddy_id" ]; then
+      echo "ERROR: caddy container not found; refusing to drain old $service containers"
+      return 1
+    fi
+
+    local new_ip
+    new_ip="$(docker inspect --format '{{range .NetworkSettings.Networks}}{{if .IPAddress}}{{println .IPAddress}}{{end}}{{end}}' "$new_container" | head -1)"
+    if [ -z "$new_ip" ]; then
+      echo "ERROR: could not determine IP for new $service container ${new_container:0:12}"
+      return 1
+    fi
+
+    local attempts="${CADDY_UPSTREAM_DISCOVERY_ATTEMPTS:-10}"
+    local interval="${CADDY_UPSTREAM_DISCOVERY_INTERVAL_SECONDS:-1}"
+    local dynamic_refresh="${CADDY_DYNAMIC_REFRESH_SECONDS:-2}"
+    local url="http://$new_ip:$port/healthz"
+    local dns_seen=0
+
+    echo "Waiting for Caddy to reach healthy $service upstream at $new_ip:$port..."
+    for i in $(seq 1 "$attempts"); do
+      local service_ips
+      service_ips="$(resolve_caddy_service_ips "$caddy_id" "$service" || true)"
+      if printf '%s\n' "$service_ips" | grep -Fxq "$new_ip"; then
+        if [ "$dns_seen" -eq 0 ]; then
+          echo "Caddy service DNS resolves $service to new upstream $new_ip; waiting ${dynamic_refresh}s for dynamic upstream refresh..."
+          sleep "$dynamic_refresh"
+          dns_seen=1
+        fi
+        if docker exec "$caddy_id" sh -c 'if command -v wget >/dev/null 2>&1; then wget -qO- -T 2 "$1" >/dev/null; elif command -v curl >/dev/null 2>&1; then curl -fsS --max-time 2 "$1" >/dev/null; else exit 127; fi' sh "$url"; then
+          echo "Caddy discovered and reached new $service upstream on attempt $i."
+          return 0
+        fi
+      fi
+      if [ "$i" -lt "$attempts" ]; then
+        sleep "$interval"
+      fi
+    done
+
+    echo "ERROR: Caddy could not reach new $service upstream at $new_ip:$port after $attempts attempt(s)"
+    return 1
+  }
+
   # rolling_deploy_service SERVICE — roll a single service with zero-downtime:
   #   1. scale up by 1 alongside the existing container(s)
   #   2. wait for the new container's health check
@@ -537,6 +632,7 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
     fi
 
     if [ -n "$old_containers" ]; then
+      wait_caddy_upstream_discovery "$service" "$new_container"
       # Stop each old container with a long timeout so in-flight requests and
       # SSE streams have time to drain. Docker sends SIGTERM and only falls
       # back to SIGKILL once stop_grace_period (compose) / -t (CLI) expires.
