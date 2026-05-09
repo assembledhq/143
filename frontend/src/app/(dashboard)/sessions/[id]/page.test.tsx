@@ -507,7 +507,9 @@ describe('SessionDetailPage', () => {
     await user.click(screen.getByRole('tab', { name: /Claude review/ }));
     expect(await screen.findByText('Claude found a missing pagination cap.')).toBeInTheDocument();
 
-    await user.click(screen.getByRole('button', { name: 'Add agent tab' }));
+    const addTabButtons = screen.getAllByRole('button', { name: 'Add agent tab' });
+    const stripAddButton = addTabButtons[addTabButtons.length - 1] as HTMLButtonElement;
+    await user.click(stripAddButton);
 
     await waitFor(() => {
       expect(createdThread).toBe(true);
@@ -607,7 +609,9 @@ describe('SessionDetailPage', () => {
 
     expect(await screen.findByPlaceholderText('Send a message to Claude Code...')).toBeInTheDocument();
 
-    await user.click(screen.getByRole('button', { name: 'Add agent tab' }));
+    const addTabButtons = screen.getAllByRole('button', { name: 'Add agent tab' });
+    const stripAddButton = addTabButtons[addTabButtons.length - 1] as HTMLButtonElement;
+    await user.click(stripAddButton);
     expect(await screen.findByPlaceholderText('Send a message to Claude Code 2...')).toBeInTheDocument();
 
     await user.click(screen.getByLabelText('Agent'));
@@ -618,6 +622,81 @@ describe('SessionDetailPage', () => {
     });
     expect(screen.getByRole('tab', { name: /Codex 2/ })).toBeInTheDocument();
     expect(screen.getByPlaceholderText('Send a message to Codex 2...')).toBeInTheDocument();
+  });
+
+  it('shows a desktop header add-tab action that creates a tab directly', async () => {
+    const sessionId = 'session-header-new-tab';
+    const threads: SessionThread[] = [
+      {
+        id: 'thread-main',
+        session_id: sessionId,
+        org_id: 'org-1',
+        agent_type: 'codex',
+        label: 'Codex',
+        status: 'idle',
+        current_turn: 1,
+        created_at: '2026-02-17T07:00:00Z',
+        cost_cents: 0,
+        pending_message_count: 0,
+      },
+    ];
+    let createdThread = false;
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({
+          data: {
+            ...mockSessions[0],
+            id: sessionId,
+            status: 'idle',
+            agent_type: 'codex',
+            sandbox_state: 'ready',
+            threads,
+          },
+        } satisfies SingleResponse<Session & { threads: SessionThread[] }>);
+      }),
+      http.get('/api/v1/sessions/:id/threads/:threadId/messages', () => {
+        return HttpResponse.json({ data: [] as SessionMessage[], meta: {} } satisfies ListResponse<SessionMessage>);
+      }),
+      http.get('/api/v1/sessions/:id/threads/:threadId/logs', () => {
+        return HttpResponse.json({ data: [], meta: {} });
+      }),
+      http.get('/api/v1/sessions/:id/thread-file-events', () => {
+        return HttpResponse.json({ data: [], meta: {} });
+      }),
+      http.post('/api/v1/sessions/:id/threads', async ({ request, params }) => {
+        const body = await request.json() as { label: string; agent_type: string };
+        createdThread = true;
+        const thread: SessionThread = {
+          id: 'thread-new',
+          session_id: params.id as string,
+          org_id: 'org-1',
+          agent_type: body.agent_type as SessionThread['agent_type'],
+          label: body.label,
+          status: 'idle',
+          current_turn: 0,
+          created_at: '2026-02-17T07:04:00Z',
+          cost_cents: 0,
+          pending_message_count: 0,
+        };
+        threads.push(thread);
+        return HttpResponse.json({ data: thread } satisfies SingleResponse<SessionThread>, { status: 201 });
+      }),
+    );
+
+    const user = userEvent.setup();
+    renderWithProviders(<SessionDetailContent id={sessionId} />);
+
+    await screen.findByPlaceholderText('Send a message to Codex...');
+
+    const headerActions = screen.getByTestId('session-header-actions');
+    const newTabButton = within(headerActions).getByRole('button', { name: 'Add agent tab' });
+    await user.click(newTabButton);
+
+    await waitFor(() => {
+      expect(createdThread).toBe(true);
+    });
+    expect(await screen.findByRole('tab', { name: /Codex 2/ })).toBeInTheDocument();
   });
 
   it('persists the selected model on a blank tab before the first thread send', async () => {
@@ -720,7 +799,9 @@ describe('SessionDetailPage', () => {
 
     expect(await screen.findByPlaceholderText('Send a message to Codex...')).toBeInTheDocument();
 
-    await user.click(screen.getByRole('button', { name: 'Add agent tab' }));
+    const addTabButtons = screen.getAllByRole('button', { name: 'Add agent tab' });
+    const stripAddButton = addTabButtons[addTabButtons.length - 1] as HTMLButtonElement;
+    await user.click(stripAddButton);
     expect(await screen.findByPlaceholderText('Send a message to Codex 2...')).toBeInTheDocument();
 
     await user.click(screen.getByLabelText('Model override'));
@@ -6447,8 +6528,9 @@ describe('SessionDetailPage', () => {
     const user = userEvent.setup();
     renderWithProviders(<SessionDetailContent id={sessionId} />);
 
-    await screen.findByRole('button', { name: 'Add agent tab' });
-    await user.click(screen.getByRole('button', { name: 'Add agent tab' }));
+    const addTabButtons = await screen.findAllByRole('button', { name: 'Add agent tab' });
+    const stripAddButton = addTabButtons[addTabButtons.length - 1] as HTMLButtonElement;
+    await user.click(stripAddButton);
 
     const textarea = await screen.findByPlaceholderText('Send a message to Codex 2...');
 
@@ -6514,11 +6596,78 @@ describe('SessionDetailPage', () => {
     const user = userEvent.setup();
     renderWithProviders(<SessionDetailContent id={sessionId} />);
 
-    await screen.findByRole('button', { name: 'Add agent tab' });
-    await user.click(screen.getByRole('button', { name: 'Add agent tab' }));
+    const addTabButtons = await screen.findAllByRole('button', { name: 'Add agent tab' });
+    const stripAddButton = addTabButtons[addTabButtons.length - 1] as HTMLButtonElement;
+    await user.click(stripAddButton);
 
     await waitFor(() => {
-      expect(document.activeElement).toHaveAttribute('aria-label', 'Add agent tab');
+      expect(stripAddButton).toHaveFocus();
+    });
+  });
+
+  it('returns focus to the desktop header add-tab trigger when a new tab has no composer', async () => {
+    const sessionId = 'session-header-create-tab-no-composer';
+    const threads: SessionThread[] = [
+      {
+        id: 'thread-main',
+        session_id: sessionId,
+        org_id: 'org-1',
+        agent_type: 'pm_agent',
+        label: 'Planner',
+        status: 'idle',
+        current_turn: 1,
+        created_at: '2026-02-17T07:00:00Z',
+        cost_cents: 0,
+        pending_message_count: 0,
+      },
+    ];
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({
+          data: {
+            ...mockSessions[0],
+            id: sessionId,
+            agent_type: 'pm_agent',
+            status: 'idle',
+            sandbox_state: 'snapshotted',
+            threads,
+          },
+        } satisfies SingleResponse<Session & { threads: SessionThread[] }>);
+      }),
+      http.get('/api/v1/sessions/:id/threads/:threadId/messages', () => {
+        return HttpResponse.json({ data: [], meta: {} } satisfies ListResponse<SessionMessage>);
+      }),
+      http.get('/api/v1/sessions/:id/threads/:threadId/logs', () => {
+        return HttpResponse.json({ data: [], meta: {} });
+      }),
+      http.post('/api/v1/sessions/:id/threads', async () => {
+        const thread: SessionThread = {
+          id: 'thread-new',
+          session_id: sessionId,
+          org_id: 'org-1',
+          agent_type: 'codex',
+          label: 'Codex 2',
+          status: 'idle',
+          current_turn: 0,
+          created_at: '2026-02-17T07:04:00Z',
+          cost_cents: 0,
+          pending_message_count: 0,
+        };
+        threads.push(thread);
+        return HttpResponse.json({ data: thread } satisfies SingleResponse<SessionThread>, { status: 201 });
+      }),
+    );
+
+    const user = userEvent.setup();
+    renderWithProviders(<SessionDetailContent id={sessionId} />);
+
+    const headerActions = await screen.findByTestId('session-header-actions');
+    const headerAddButton = within(headerActions).getByRole('button', { name: 'Add agent tab' });
+    await user.click(headerAddButton);
+
+    await waitFor(() => {
+      expect(headerAddButton).toHaveFocus();
     });
   });
 
