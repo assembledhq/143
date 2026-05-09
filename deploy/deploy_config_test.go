@@ -376,6 +376,32 @@ func TestDNSProbeVectorAlertFieldNamesAlign(t *testing.T) {
 	}
 }
 
+func TestRollingDeployAllowsCaddyToDiscoverNewUpstreamBeforeDrainingOld(t *testing.T) {
+	t.Parallel()
+
+	deployScript, err := os.ReadFile("../deploy/scripts/deploy.sh")
+	require.NoError(t, err, "test should read deploy script")
+	deployText := string(deployScript)
+
+	require.Contains(t, deployText, `CADDY_UPSTREAM_DISCOVERY_ATTEMPTS:-10`, "rolling deploy should use a bounded readiness loop instead of a single blind sleep")
+	require.Contains(t, deployText, `for i in $(seq 1 "$attempts")`, "rolling deploy should retry Caddy reachability checks before old containers drain")
+	require.Contains(t, deployText, `docker exec "$caddy_id" sh -c`, "rolling deploy should probe from inside the Caddy container network namespace")
+	require.Contains(t, deployText, `resolve_caddy_service_ips "$caddy_id" "$service"`, "rolling deploy should verify Caddy's service-name DNS path includes the new upstream")
+	require.Contains(t, deployText, `grep -Fxq "$new_ip"`, "rolling deploy should wait until Docker DNS resolves the service name to the new container IP")
+	require.Contains(t, deployText, `CADDY_DYNAMIC_REFRESH_SECONDS:-2`, "rolling deploy should give Caddy one dynamic upstream refresh after DNS includes the new container")
+	require.Contains(t, deployText, `read -r first second third _`, "rolling deploy should parse BusyBox nslookup Address N rows by field position")
+	require.Contains(t, deployText, `Address)`, "rolling deploy should handle BusyBox nslookup rows like `Address 1: 172.20.0.5 api`")
+	require.NotContains(t, deployText, `ip="${line##* }"`, "rolling deploy must not parse nslookup answers from the trailing token because BusyBox may append the hostname after the IP")
+	require.Contains(t, deployText, `http://$new_ip:$port/healthz`, "rolling deploy should probe the new container's health endpoint directly")
+	require.Contains(t, deployText, `wait_caddy_upstream_discovery "$service" "$new_container"`, "rolling deploy should wait for Caddy to discover the new upstream before old containers drain")
+
+	waitIndex := strings.Index(deployText, `wait_caddy_upstream_discovery "$service" "$new_container"`)
+	drainIndex := strings.Index(deployText, `echo "Draining $old_count old $service container(s)`)
+	require.NotEqual(t, -1, waitIndex, "wait call should be present in deploy script")
+	require.NotEqual(t, -1, drainIndex, "old-container drain should be present in deploy script")
+	require.Less(t, waitIndex, drainIndex, "Caddy upstream discovery wait should happen before draining old containers")
+}
+
 func TestLoggingDeploySyncsProvisionedObservabilityConfig(t *testing.T) {
 	t.Parallel()
 

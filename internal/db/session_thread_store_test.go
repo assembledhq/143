@@ -230,6 +230,27 @@ func TestSessionThreadStore_ListBySession_OmitsRawDiffPayloads(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+func TestSessionThreadStore_ListBySession_SelectsArchivedAt(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewSessionThreadStore(mock)
+	orgID := uuid.New()
+	sessionID := uuid.New()
+
+	mock.ExpectQuery(`(?s)SELECT .+created_at,\s+archived_at,\s+base_snapshot_key.+FROM session_threads`).
+		WithArgs(anyArgs(2)...).
+		WillReturnRows(pgxmock.NewRows(sessionThreadTestColumns))
+
+	threads, err := store.ListBySession(context.Background(), orgID, sessionID)
+	require.NoError(t, err, "ListBySession should select every SessionThread field required for row decoding")
+	require.Empty(t, threads, "ListBySession should return no rows from the empty result set")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func TestSessionThreadStore_ListStuckRunningThreads(t *testing.T) {
 	t.Parallel()
 

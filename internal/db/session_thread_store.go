@@ -34,7 +34,7 @@ const sessionThreadListColumns = `id, session_id, org_id, agent_type, model_over
 	confidence_score, result_summary,
 	CASE WHEN diff IS NULL THEN NULL ELSE '__diff_present__' END AS diff,
 	failure_explanation, failure_category,
-	started_at, completed_at, created_at,
+	started_at, completed_at, created_at, archived_at,
 	base_snapshot_key, cost_cents, pending_message_count, cancel_requested_at`
 
 // ErrThreadLimitReached is returned when the maximum number of threads per session
