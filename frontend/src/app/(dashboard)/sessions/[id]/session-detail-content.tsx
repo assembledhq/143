@@ -20,6 +20,7 @@ import {
   Check,
   XCircle,
   X,
+  Plus,
   Square,
   PanelRightOpen,
   PanelRightClose,
@@ -360,6 +361,8 @@ type PRActionErrorState = {
   code?: string;
   message: string;
 };
+
+type AddTabTriggerSource = "strip" | "header";
 
 const terminalSessionStatuses = new Set(["completed", "pr_created", "failed", "cancelled", "skipped"]);
 const SNAPSHOT_EXPIRED_PR_MESSAGE =
@@ -3300,6 +3303,8 @@ export function SessionDetailContent({ id }: { id: string }) {
   const [newThreadLabel, setNewThreadLabel] = useState("");
   const focusComposerAfterThreadCreateRef = useRef(false);
   const addTabButtonRef = useRef<HTMLButtonElement>(null);
+  const headerAddTabButtonRef = useRef<HTMLButtonElement>(null);
+  const lastAddTabTriggerSourceRef = useRef<AddTabTriggerSource>("strip");
   const composerTextareaRef = useRef<HTMLTextAreaElement>(null);
   const composerUploadInputRef = useRef<HTMLInputElement>(null);
   // Tracks an in-flight agent-switch PATCH so the send-time PATCH can wait
@@ -3804,11 +3809,21 @@ export function SessionDetailContent({ id }: { id: string }) {
         return;
       }
 
+      if (lastAddTabTriggerSourceRef.current === "header") {
+        headerAddTabButtonRef.current?.focus();
+        return;
+      }
+
       addTabButtonRef.current?.focus();
     });
 
     return () => window.cancelAnimationFrame(rafID);
   }, [activeThread?.id, composerCanSendMessage, session?.agent_type]);
+
+  const handleCreateThreadFrom = useCallback((source: AddTabTriggerSource) => {
+    lastAddTabTriggerSourceRef.current = source;
+    createThreadMutation.mutate(buildDefaultThreadRequest());
+  }, [buildDefaultThreadRequest, createThreadMutation]);
 
   useEffect(() => {
     setNewThreadModel("");
@@ -4515,19 +4530,38 @@ export function SessionDetailContent({ id }: { id: string }) {
                 )}
                 <LinkedIssueChips session={session} />
               </div>
-              <DisabledTooltip disabled={centerMode === "review" && showDetailPanel} content={detailToggleTitle}>
+              <div className="flex items-center gap-2" data-testid="session-header-actions">
                 <Button
-                  variant="ghost"
+                  ref={headerAddTabButtonRef}
+                  type="button"
+                  variant="outline"
                   size="icon"
-                  className={cn(centerMode === "review" && showDetailPanel && "opacity-30 cursor-not-allowed", "h-8 w-8 shrink-0")}
-                  disabled={centerMode === "review" && showDetailPanel}
-                  onClick={() => setShowDetailPanel(!showDetailPanel)}
-                  title={detailToggleTitle}
-                  aria-keyshortcuts="d"
+                  className="h-8 w-8 shrink-0"
+                  aria-label="Add agent tab"
+                  title="Add agent tab"
+                  onClick={() => handleCreateThreadFrom("header")}
+                  disabled={createThreadMutation.isPending}
                 >
-                  {showDetailPanel ? <PanelRightClose className="h-4 w-4" /> : <PanelRightOpen className="h-4 w-4" />}
+                  {createThreadMutation.isPending ? (
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                  ) : (
+                    <Plus className="h-4 w-4" />
+                  )}
                 </Button>
-              </DisabledTooltip>
+                <DisabledTooltip disabled={centerMode === "review" && showDetailPanel} content={detailToggleTitle}>
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className={cn(centerMode === "review" && showDetailPanel && "opacity-30 cursor-not-allowed", "h-8 w-8 shrink-0")}
+                    disabled={centerMode === "review" && showDetailPanel}
+                    onClick={() => setShowDetailPanel(!showDetailPanel)}
+                    title={detailToggleTitle}
+                    aria-keyshortcuts="d"
+                  >
+                    {showDetailPanel ? <PanelRightClose className="h-4 w-4" /> : <PanelRightOpen className="h-4 w-4" />}
+                  </Button>
+                </DisabledTooltip>
+              </div>
             </div>
           </>
         ) : null}
@@ -4541,7 +4575,7 @@ export function SessionDetailContent({ id }: { id: string }) {
             overlapsByThreadId={overlapsByThreadId}
             statusConfig={statusConfig}
             onActiveThreadChange={setActiveThreadId}
-            onAddTab={() => createThreadMutation.mutate(buildDefaultThreadRequest())}
+            onAddTab={() => handleCreateThreadFrom("strip")}
             addTabPending={createThreadMutation.isPending}
             onCancelThread={(tid) => cancelThreadMutation.mutate(tid)}
             onForkThread={(tid) => forkThreadMutation.mutate(tid)}
