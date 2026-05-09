@@ -248,6 +248,7 @@ function SidebarBody({
           pathname={pathname}
           userRole={user?.role}
           onNavigate={onNavigate}
+          variant={variant}
         />
       </nav>
 
