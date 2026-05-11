@@ -23,7 +23,7 @@ This document describes the security controls that are part of the product today
 
 The worker runtime treats the sandbox as the main security boundary for agent execution.
 
-- gVisor (`runsc`) is checked on worker startup, and worker deployments set `SANDBOX_REQUIRE_GVISOR=true`
+- gVisor (`runsc`) is checked on worker startup by launching a small configurable health-check image under the runtime; worker deployments set `SANDBOX_REQUIRE_GVISOR=true`
 - sandbox containers run with dropped Linux capabilities
 - sandbox processes run as a non-root user
 - PID and resource limits are enforced
