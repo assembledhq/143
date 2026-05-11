@@ -2208,6 +2208,36 @@ func (s *SessionStore) ListOrphanedContainers(ctx context.Context, afterID uuid.
 	return sessions, nil
 }
 
+// ListReferencedContainerIDs returns every live container_id currently
+// referenced by a session row. It is used by worker-local Docker GC to avoid
+// deleting a container that any DB row still owns.
+// lint:allow-no-orgid reason="worker-local Docker GC reconciles host containers against all session container references"
+func (s *SessionStore) ListReferencedContainerIDs(ctx context.Context) ([]string, error) {
+	rows, err := s.db.Query(ctx, `
+		SELECT container_id
+		FROM sessions
+		WHERE container_id IS NOT NULL`)
+	if err != nil {
+		return nil, fmt.Errorf("list referenced container ids: %w", err)
+	}
+	defer rows.Close()
+
+	ids := make([]string, 0)
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("scan referenced container id: %w", err)
+		}
+		if id != "" {
+			ids = append(ids, id)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate referenced container ids: %w", err)
+	}
+	return ids, nil
+}
+
 // ListContainerHoldingSessions returns sessions with a preview hold owned by
 // workerNodeID whose container_id is set. Called on startup to rehydrate
 // per-session GitHub credential socket listeners for containers that survive

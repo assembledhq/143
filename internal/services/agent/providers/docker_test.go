@@ -30,11 +30,11 @@ import (
 // mockDockerClient implements DockerClient for testing.
 type mockDockerClient struct {
 	pingFn                 func(ctx context.Context) (types.Ping, error)
+	containerListFn        func(ctx context.Context, options container.ListOptions) ([]container.Summary, error)
 	containerCreateFn      func(ctx context.Context, config *container.Config, hostConfig *container.HostConfig, networkConfig *network.NetworkingConfig, platform *ocispec.Platform, containerName string) (container.CreateResponse, error)
 	containerStartFn       func(ctx context.Context, containerID string, options container.StartOptions) error
 	containerStopFn        func(ctx context.Context, containerID string, options container.StopOptions) error
 	containerRemoveFn      func(ctx context.Context, containerID string, options container.RemoveOptions) error
-	containerListFn        func(ctx context.Context, options container.ListOptions) ([]container.Summary, error)
 	containerInspectFn     func(ctx context.Context, containerID string) (container.InspectResponse, error)
 	containerStatsFn       func(ctx context.Context, containerID string, stream bool) (container.StatsResponseReader, error)
 	containerExecCreateFn  func(ctx context.Context, containerID string, config container.ExecOptions) (container.ExecCreateResponse, error)
@@ -49,6 +49,13 @@ func (m *mockDockerClient) Ping(ctx context.Context) (types.Ping, error) {
 		return m.pingFn(ctx)
 	}
 	return types.Ping{}, nil
+}
+
+func (m *mockDockerClient) ContainerList(ctx context.Context, options container.ListOptions) ([]container.Summary, error) {
+	if m.containerListFn != nil {
+		return m.containerListFn(ctx, options)
+	}
+	return nil, nil
 }
 
 func (m *mockDockerClient) ContainerCreate(ctx context.Context, config *container.Config, hostConfig *container.HostConfig, networkConfig *network.NetworkingConfig, platform *ocispec.Platform, containerName string) (container.CreateResponse, error) {
@@ -77,13 +84,6 @@ func (m *mockDockerClient) ContainerRemove(ctx context.Context, containerID stri
 		return m.containerRemoveFn(ctx, containerID, options)
 	}
 	return nil
-}
-
-func (m *mockDockerClient) ContainerList(ctx context.Context, options container.ListOptions) ([]container.Summary, error) {
-	if m.containerListFn != nil {
-		return m.containerListFn(ctx, options)
-	}
-	return nil, nil
 }
 
 func (m *mockDockerClient) ContainerInspect(ctx context.Context, containerID string) (container.InspectResponse, error) {
@@ -372,6 +372,99 @@ func TestDockerProvider_HealthCheck(t *testing.T) {
 		require.Contains(t, err.Error(), "failed to start test container")
 		require.True(t, removeCalled, "ContainerRemove should be called for cleanup even on start failure")
 	})
+
+	t.Run("requires disk quota support when configured", func(t *testing.T) {
+		t.Parallel()
+
+		var capturedStorageOpt map[string]string
+
+		mock := &mockDockerClient{}
+		mock.containerCreateFn = func(ctx context.Context, config *container.Config, hostConfig *container.HostConfig, networkConfig *network.NetworkingConfig, platform *ocispec.Platform, containerName string) (container.CreateResponse, error) {
+			capturedStorageOpt = hostConfig.StorageOpt
+			return container.CreateResponse{ID: "quota-check"}, nil
+		}
+		p := NewDockerProvider(mock, newTestLogger(), WithRuntime("runc"), WithRequireDiskQuota(true))
+
+		err := p.HealthCheck(context.Background())
+		require.NoError(t, err, "HealthCheck should pass when the quota probe container can be created")
+		require.Equal(t, "1G", capturedStorageOpt["size"], "HealthCheck should create a tiny quota probe when disk quota enforcement is required")
+	})
+
+	t.Run("fails health check when required disk quota is unsupported", func(t *testing.T) {
+		t.Parallel()
+
+		mock := &mockDockerClient{}
+		mock.containerCreateFn = func(ctx context.Context, config *container.Config, hostConfig *container.HostConfig, networkConfig *network.NetworkingConfig, platform *ocispec.Platform, containerName string) (container.CreateResponse, error) {
+			return container.CreateResponse{}, fmt.Errorf("storage-opt is supported only for overlay over xfs with pquota")
+		}
+		p := NewDockerProvider(mock, newTestLogger(), WithRuntime("runc"), WithRequireDiskQuota(true))
+
+		err := p.HealthCheck(context.Background())
+		require.ErrorIs(t, err, ErrDiskQuotaUnsupported, "HealthCheck should fail when required disk quota support is missing")
+	})
+}
+
+func TestDockerProvider_ListManagedSandboxes(t *testing.T) {
+	t.Parallel()
+
+	createdAt := time.Date(2026, 5, 9, 12, 0, 0, 0, time.UTC)
+	var capturedOptions container.ListOptions
+	mock := &mockDockerClient{
+		containerListFn: func(_ context.Context, options container.ListOptions) ([]container.Summary, error) {
+			capturedOptions = options
+			return []container.Summary{
+				{
+					ID:      "container-1",
+					Created: createdAt.Add(-time.Hour).Unix(),
+					Labels: map[string]string{
+						SandboxLabelManaged:   "true",
+						SandboxLabelType:      "sandbox",
+						SandboxLabelSessionID: "session-1",
+						SandboxLabelOrgID:     "org-1",
+						SandboxLabelPurpose:   "agent_run",
+						SandboxLabelCreatedAt: createdAt.Format(time.RFC3339Nano),
+					},
+				},
+				{
+					ID:      "container-2",
+					Created: createdAt.Add(-2 * time.Hour).Unix(),
+					Labels: map[string]string{
+						sandboxLabelLegacySandbox:   "true",
+						sandboxLabelLegacySessionID: "session-2",
+						sandboxLabelLegacyOrgID:     "org-2",
+						sandboxLabelLegacyPurpose:   "preview",
+					},
+				},
+				{
+					ID:      "container-3",
+					Created: createdAt.Add(-3 * time.Hour).Unix(),
+					Labels:  map[string]string{},
+				},
+			}, nil
+		},
+	}
+	p := NewDockerProvider(mock, newTestLogger())
+
+	containers, err := p.ListManagedSandboxes(context.Background())
+	require.NoError(t, err, "ListManagedSandboxes should return Docker-managed sandbox containers")
+	require.True(t, capturedOptions.All, "ListManagedSandboxes should include stopped containers")
+	require.Empty(t, capturedOptions.Filters.Get("label"), "ListManagedSandboxes should filter in-process so both current and legacy label schemes are eligible")
+	require.Equal(t, []agent.ManagedSandboxContainer{
+		{
+			ID:        "container-1",
+			SessionID: "session-1",
+			OrgID:     "org-1",
+			Purpose:   "agent_run",
+			CreatedAt: createdAt,
+		},
+		{
+			ID:        "container-2",
+			SessionID: "session-2",
+			OrgID:     "org-2",
+			Purpose:   "preview",
+			CreatedAt: createdAt.Add(-2 * time.Hour),
+		},
+	}, containers, "ListManagedSandboxes should map Docker summaries into GC metadata and fall back to Docker creation time")
 }
 
 func TestDockerProvider_EnsureNetwork(t *testing.T) {
@@ -591,7 +684,56 @@ func TestDockerProvider_Create(t *testing.T) {
 		require.Equal(t, "runsc", sb.Metadata["runtime"], "sandbox metadata should include runtime")
 	})
 
-	t.Run("falls back when StorageOpt unsupported", func(t *testing.T) {
+	t.Run("labels managed sandbox containers with tracing metadata", func(t *testing.T) {
+		t.Parallel()
+
+		var capturedLabels map[string]string
+
+		mock := &mockDockerClient{}
+		mock.containerCreateFn = func(ctx context.Context, config *container.Config, hostConfig *container.HostConfig, networkConfig *network.NetworkingConfig, platform *ocispec.Platform, containerName string) (container.CreateResponse, error) {
+			capturedLabels = config.Labels
+			return container.CreateResponse{ID: "labeled"}, nil
+		}
+		p := NewDockerProvider(mock, newTestLogger())
+
+		cfg := agent.DefaultSandboxConfig()
+		cfg.SessionID = "session-123"
+		cfg.OrgID = "org-456"
+		cfg.Purpose = "agent_run"
+		_, err := p.Create(context.Background(), cfg)
+		require.NoError(t, err, "Create should succeed for a labeled sandbox")
+
+		require.Equal(t, "143", capturedLabels["managed-by"], "sandbox containers should retain the legacy managed-by label")
+		require.Equal(t, "true", capturedLabels[sandboxLabelLegacySandbox], "sandbox containers should be labeled for live capacity checks")
+		require.Equal(t, "session-123", capturedLabels[sandboxLabelLegacySessionID], "legacy sandbox labels should include the session id when present")
+		require.Equal(t, "org-456", capturedLabels[sandboxLabelLegacyOrgID], "legacy sandbox labels should include the org id when present")
+		require.Equal(t, "agent_run", capturedLabels[sandboxLabelLegacyPurpose], "legacy sandbox labels should include the sandbox purpose")
+		require.Equal(t, "true", capturedLabels[SandboxLabelManaged], "sandbox containers should be labeled as 143-managed")
+		require.Equal(t, "sandbox", capturedLabels[SandboxLabelType], "sandbox containers should carry a type label for host-local GC")
+		require.Equal(t, "session-123", capturedLabels[SandboxLabelSessionID], "sandbox labels should include the session id when present")
+		require.Equal(t, "org-456", capturedLabels[SandboxLabelOrgID], "sandbox labels should include the org id when present")
+		require.Equal(t, "agent_run", capturedLabels[SandboxLabelPurpose], "sandbox labels should include the sandbox purpose")
+		require.NotEmpty(t, capturedLabels[SandboxLabelCreatedAt], "sandbox labels should include an RFC3339 creation timestamp for GC age decisions")
+	})
+
+	t.Run("returns error when required StorageOpt unsupported", func(t *testing.T) {
+		t.Parallel()
+
+		callCount := 0
+
+		mock := &mockDockerClient{}
+		mock.containerCreateFn = func(ctx context.Context, config *container.Config, hostConfig *container.HostConfig, networkConfig *network.NetworkingConfig, platform *ocispec.Platform, containerName string) (container.CreateResponse, error) {
+			callCount++
+			return container.CreateResponse{}, fmt.Errorf("--storage-opt is supported only for overlay over xfs with 'pquota' mount option")
+		}
+		p := NewDockerProvider(mock, newTestLogger(), WithRequireDiskQuota(true))
+
+		_, err := p.Create(context.Background(), agent.DefaultSandboxConfig())
+		require.ErrorIs(t, err, ErrDiskQuotaUnsupported, "Create should fail closed when disk quota is required but Docker rejects StorageOpt")
+		require.Equal(t, 1, callCount, "Create should not retry without StorageOpt when disk quota is required")
+	})
+
+	t.Run("falls back when StorageOpt unsupported and quota is not required", func(t *testing.T) {
 		t.Parallel()
 
 		callCount := 0

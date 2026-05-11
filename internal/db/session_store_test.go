@@ -2287,6 +2287,43 @@ func TestSessionStore_ListOrphanedContainers_QueryError(t *testing.T) {
 	require.Contains(t, err.Error(), "list orphaned containers")
 }
 
+func TestSessionStore_ListReferencedContainerIDs(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewSessionStore(mock)
+	mock.ExpectQuery(`SELECT container_id\s+FROM sessions\s+WHERE container_id IS NOT NULL`).
+		WillReturnRows(
+			pgxmock.NewRows([]string{"container_id"}).
+				AddRow("container-a").
+				AddRow("container-b"),
+		)
+
+	ids, err := store.ListReferencedContainerIDs(context.Background())
+	require.NoError(t, err, "ListReferencedContainerIDs should not return an error")
+	require.Equal(t, []string{"container-a", "container-b"}, ids, "ListReferencedContainerIDs should return every non-null session container id")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestSessionStore_ListReferencedContainerIDs_QueryError(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewSessionStore(mock)
+	mock.ExpectQuery(`SELECT container_id\s+FROM sessions\s+WHERE container_id IS NOT NULL`).
+		WillReturnError(errors.New("boom"))
+
+	_, err = store.ListReferencedContainerIDs(context.Background())
+	require.Error(t, err, "ListReferencedContainerIDs should surface query failures")
+	require.Contains(t, err.Error(), "list referenced container ids", "ListReferencedContainerIDs should wrap query failures with context")
+}
+
 // TestSessionStore_ListContainerHoldingSessions is the rehydrate-side
 // counterpart to ListOrphanedContainers: same paging, opposite predicate
 // (EXISTS preview hold instead of NOT EXISTS). The query must filter by

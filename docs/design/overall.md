@@ -1,6 +1,6 @@
 # Design: 143.dev
 
-> **Status:** Partially Implemented | **Last reviewed:** 2026-05-08
+> **Status:** Partially Implemented | **Last reviewed:** 2026-05-09
 
 [143.dev](http://143.dev) is an open-source platform that turns customer pain and production errors into safe code fixes that ship automatically.
 
@@ -93,6 +93,7 @@ The system aggregates issues from support, Sentry, and Linear, prioritizes them 
     - The `Changes` file list should keep the parsed diff's order aligned with the diff viewer. It uses a grouped tree when that tree can preserve the sequence, and falls back to a flat exact-order list when interleaved paths would otherwise force the grouped view to reorder files; see [implemented/68-consistent-review-file-ordering.md](implemented/68-consistent-review-file-ordering.md).
     - The agent runs in a sandboxed container and produces a code diff.
     - Production sandboxes share the `143-sandbox` bridge with preview infrastructure and a `sandbox-dns` sidecar at a pinned bridge IP. The bridge must leave Docker inter-container communication at its default so gVisor sandboxes can reach that DNS sidecar; host firewall rules provide the egress boundary for metadata and private-network destinations.
+    - Production workers treat sandbox disk usage as a first-class capacity boundary: deploys prune unused Docker artifacts after a healthy rollout, sandbox containers carry durable ownership labels, worker-local GC reconciles labeled host containers with DB session ownership, and worker startup fails closed when Docker cannot enforce `SANDBOX_DISK_LIMIT_GB`. Details: [implemented/76-sandbox-disk-guardrails.md](implemented/76-sandbox-disk-guardrails.md).
     - Sandbox GitHub write access uses a **per-session host credential socket plus in-sandbox `gh` wrapper**, not a long-lived token embedded in the container env. The auth path now follows sandbox lifetime: preview-held containers keep their credential socket alive across turns, while fresh/hydrated continue-session sandboxes recreate the socket and bootstrap on create.
     - Repo-backed sessions also treat the **session working branch as a guarded runtime invariant**: fresh runs create a canonical working branch, continue-session fresh clones recreate it, PR creation reuses it, and sandbox bootstrap installs a branch-specific `pre-push` hook so accidental pushes to the wrong branch fail locally before they reach GitHub. See [implemented/66-session-branch-guardrails.md](implemented/66-session-branch-guardrails.md).
     - Long-running sessions must survive routine platform deploys and worker restarts. Worker infrastructure therefore uses drain-before-deploy behavior, lease-based dead-worker recovery for in-flight jobs, and checkpoint-aware resume from the last committed turn after unplanned worker loss; see [51-worker-deploy-safety.md](backlog/51-worker-deploy-safety.md).
