@@ -664,6 +664,10 @@ func isLiveSandboxContainer(summary container.Summary) bool {
 	if summary.Labels != nil && (summary.Labels[sandboxLabelLegacySandbox] == "true" || isManagedSandboxLabels(summary.Labels)) {
 		return true
 	}
+	return isLegacySandboxImage(summary)
+}
+
+func isLegacySandboxImage(summary container.Summary) bool {
 	image := strings.ToLower(summary.Image)
 	return strings.Contains(image, "143-sandbox") && !strings.Contains(image, "143-sandbox-dns")
 }
@@ -692,7 +696,7 @@ func (d *DockerProvider) ListManagedSandboxes(ctx context.Context) ([]agent.Mana
 
 	out := make([]agent.ManagedSandboxContainer, 0, len(containers))
 	for _, c := range containers {
-		if !isManagedSandboxSummary(c) {
+		if !isManagedSandboxSummary(c, d.network) {
 			continue
 		}
 		createdAt := time.Unix(c.Created, 0).UTC()
@@ -712,12 +716,21 @@ func (d *DockerProvider) ListManagedSandboxes(ctx context.Context) ([]agent.Mana
 	return out, nil
 }
 
-func isManagedSandboxSummary(summary container.Summary) bool {
-	return summary.Labels != nil && (summary.Labels[sandboxLabelLegacySandbox] == "true" || isManagedSandboxLabels(summary.Labels))
+func isManagedSandboxSummary(summary container.Summary, sandboxNetwork string) bool {
+	return summary.Labels != nil && (summary.Labels[sandboxLabelLegacySandbox] == "true" || isManagedSandboxLabels(summary.Labels)) ||
+		(isLegacySandboxImage(summary) && isContainerAttachedToNetwork(summary, sandboxNetwork))
 }
 
 func isManagedSandboxLabels(labels map[string]string) bool {
 	return labels[SandboxLabelManaged] == "true" && labels[SandboxLabelType] == "sandbox"
+}
+
+func isContainerAttachedToNetwork(summary container.Summary, networkName string) bool {
+	if networkName == "" || summary.NetworkSettings == nil {
+		return false
+	}
+	_, ok := summary.NetworkSettings.Networks[networkName]
+	return ok
 }
 
 func firstLabelValue(labels map[string]string, keys ...string) string {
