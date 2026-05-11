@@ -13,7 +13,17 @@ import (
 
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
+
+	"github.com/assembledhq/143/internal/services/agent"
 )
+
+type mainTestLiveSandboxCounter struct {
+	count int
+}
+
+func (m mainTestLiveSandboxCounter) CountLiveSandboxes(context.Context) (int, error) {
+	return m.count, nil
+}
 
 func TestBuildBaseMetadata(t *testing.T) {
 	t.Parallel()
@@ -86,7 +96,7 @@ func TestBuildBaseMetadata(t *testing.T) {
 func TestBuildWorkerMetadataProvider_PreservesPreviewFields(t *testing.T) {
 	t.Parallel()
 
-	provider := buildWorkerMetadataProvider(nil, true, "http://worker-1:8080", func() bool { return true })
+	provider := buildWorkerMetadataProvider(nil, true, "http://worker-1:8080", func() bool { return true }, nil)
 
 	metadata := provider()
 
@@ -107,7 +117,7 @@ func TestBuildWorkerMetadataProvider_PreservesPreviewFields(t *testing.T) {
 func TestBuildWorkerMetadataProvider_NonPreviewCapable(t *testing.T) {
 	t.Parallel()
 
-	provider := buildWorkerMetadataProvider(nil, false, "", func() bool { return true })
+	provider := buildWorkerMetadataProvider(nil, false, "", func() bool { return true }, nil)
 
 	metadata := provider()
 
@@ -123,7 +133,7 @@ func TestBuildWorkerMetadataProvider_DelaysPreviewCapabilityUntilReady(t *testin
 	t.Parallel()
 
 	ready := false
-	provider := buildWorkerMetadataProvider(nil, true, "http://worker-1:8080", func() bool { return ready })
+	provider := buildWorkerMetadataProvider(nil, true, "http://worker-1:8080", func() bool { return ready }, nil)
 
 	metadata := provider()
 	require.NotContains(t, metadata, "preview_capable", "preview_capable should be hidden until the HTTP listener is bound")
@@ -132,6 +142,49 @@ func TestBuildWorkerMetadataProvider_DelaysPreviewCapabilityUntilReady(t *testin
 	ready = true
 	metadata = provider()
 	require.Equal(t, true, metadata["preview_capable"], "preview_capable should be advertised once routing is ready")
+}
+
+func TestResolveWorkerMaxActiveSandboxes(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name               string
+		workerProcessCount int
+		configured         int
+		expected           int
+	}{
+		{name: "explicit cap wins", workerProcessCount: 4, configured: 6, expected: 6},
+		{name: "zero cap derives from process count", workerProcessCount: 4, configured: 0, expected: 4},
+		{name: "invalid process count falls back to config default", workerProcessCount: 0, configured: 0, expected: 2},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			got := resolveWorkerMaxActiveSandboxes(tt.workerProcessCount, tt.configured)
+
+			require.Equal(t, tt.expected, got, "resolved live sandbox capacity should follow the configured precedence")
+		})
+	}
+}
+
+func TestBuildWorkerMetadataProvider_IncludesSandboxCapacity(t *testing.T) {
+	t.Parallel()
+
+	gate := agent.NewSandboxCapacityGate(agent.SandboxCapacityGateConfig{
+		Counter:   mainTestLiveSandboxCounter{count: 2},
+		MaxActive: 4,
+		NodeID:    "worker-1",
+		Logger:    zerolog.Nop(),
+	})
+	provider := buildWorkerMetadataProvider(nil, true, "http://worker-1:8080", func() bool { return true }, gate)
+
+	metadata := provider()
+
+	require.Equal(t, 2, metadata["live_sandbox_count"], "worker metadata should expose local live sandbox count")
+	require.Equal(t, 0, metadata["reserved_sandbox_count"], "worker metadata should expose in-flight sandbox reservations")
+	require.Equal(t, 4, metadata["max_active_sandboxes"], "worker metadata should expose the per-machine sandbox cap")
 }
 
 // TestMainStartupRunsRehydrateBeforeWorkers guards the sandbox-auth socket
