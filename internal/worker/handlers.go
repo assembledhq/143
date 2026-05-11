@@ -198,6 +198,10 @@ type Services struct {
 	// is disabled (interval <= 0 in config) or the provider can't report
 	// stats (e.g. a non-Docker provider in the future).
 	RuntimeSampler *agent.RuntimeSampler
+	// SandboxGC periodically reconciles provider-labeled local sandbox
+	// containers against DB ownership so leaked containers cannot accumulate
+	// indefinitely on worker disks. nil when disabled or unsupported.
+	SandboxGC *agent.SandboxGC
 }
 
 type orchestratorService interface {

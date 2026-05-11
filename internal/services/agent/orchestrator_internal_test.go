@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -15,6 +17,27 @@ import (
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/services/sandboxauth"
 )
+
+func TestRunAgentRecordsUsageOnlyAfterTurnHoldIsPublished(t *testing.T) {
+	t.Parallel()
+
+	src, err := os.ReadFile("orchestrator.go")
+	require.NoError(t, err, "orchestrator.go should be readable for lifecycle ordering regression test")
+
+	body := string(src)
+	runStart := strings.Index(body, "func (o *Orchestrator) RunAgent(")
+	continueStart := strings.Index(body, "func (o *Orchestrator) ContinueSession(")
+	require.NotEqual(t, -1, runStart, "RunAgent should exist")
+	require.NotEqual(t, -1, continueStart, "ContinueSession should exist")
+	require.Less(t, runStart, continueStart, "RunAgent should appear before ContinueSession in orchestrator.go")
+
+	runBody := body[runStart:continueStart]
+	hold := strings.Index(runBody, "o.sessions.AcquireTurnHold")
+	usage := strings.Index(runBody, "o.usageTracker.ContainerStarted")
+	require.NotEqual(t, -1, hold, "RunAgent should publish the turn hold")
+	require.NotEqual(t, -1, usage, "RunAgent should record container usage")
+	require.Less(t, hold, usage, "RunAgent should record usage only after the DB row owns the container so pre-hold crashes do not create open usage events for unowned containers")
+}
 
 type testInternalSessionLogStore struct {
 	logs             []models.SessionLog

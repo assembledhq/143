@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -232,7 +233,12 @@ func main() {
 
 			// Build sandbox+preview provider so worker-capable modes can start,
 			// stop, and hydrate previews locally.
-			sandboxExec := providers.NewDockerProvider(apiDockerCli, logger, providers.WithResolvConf(cfg.SandboxResolvConf))
+			sandboxExec := providers.NewDockerProvider(
+				apiDockerCli,
+				logger,
+				providers.WithResolvConf(cfg.SandboxResolvConf),
+				providers.WithRequireDiskQuota(cfg.SandboxRequireDiskQuota),
+			)
 			dockerPreviewProvider := previewproviders.NewDockerPreviewProvider(apiDockerCli, sandboxExec, logger)
 			pvProvider = dockerPreviewProvider
 			snapshotExec = sandboxExec
@@ -531,6 +537,9 @@ func main() {
 		// the provider doesn't expose stats.
 		if workerServices != nil && workerServices.RuntimeSampler != nil {
 			go workerServices.RuntimeSampler.Run(ctx)
+		}
+		if workerServices != nil && workerServices.SandboxGC != nil {
+			go workerServices.SandboxGC.Run(ctx)
 		}
 
 		// Upload reaper: clean up old uploaded files (local mode only; use S3 lifecycle rules for S3).
@@ -896,7 +905,13 @@ func buildServices(
 		logger.Error().Err(err).Msg("Docker not available — all Phase 3+ services disabled")
 		return nil
 	}
-	sandboxProvider := providers.NewDockerProvider(dockerCli, logger, providers.WithRuntime(cfg.SandboxRuntime), providers.WithResolvConf(cfg.SandboxResolvConf))
+	sandboxProvider := providers.NewDockerProvider(
+		dockerCli,
+		logger,
+		providers.WithRuntime(cfg.SandboxRuntime),
+		providers.WithResolvConf(cfg.SandboxResolvConf),
+		providers.WithRequireDiskQuota(cfg.SandboxRequireDiskQuota),
+	)
 
 	// Startup health check: verify Docker daemon connectivity and, for gVisor,
 	// that the runsc runtime is functional. Retry a few times because Docker and
@@ -917,9 +932,26 @@ func buildServices(
 			}
 		}
 		if healthErr != nil {
+			if errors.Is(healthErr, providers.ErrDiskQuotaUnsupported) {
+				logger.Error().Err(healthErr).Msg("sandbox disk quota is required but Docker storage cannot enforce it — all Phase 3+ services disabled")
+				return nil
+			}
 			if cfg.SandboxRuntime == "runsc" && !cfg.SandboxRequireGVisor {
 				logger.Warn().Err(healthErr).Msg("gVisor not available, falling back to runc — NOT RECOMMENDED FOR PRODUCTION")
-				sandboxProvider = providers.NewDockerProvider(dockerCli, logger, providers.WithRuntime("runc"), providers.WithResolvConf(cfg.SandboxResolvConf))
+				sandboxProvider = providers.NewDockerProvider(
+					dockerCli,
+					logger,
+					providers.WithRuntime("runc"),
+					providers.WithResolvConf(cfg.SandboxResolvConf),
+					providers.WithRequireDiskQuota(cfg.SandboxRequireDiskQuota),
+				)
+				healthCtx, healthCancel := context.WithTimeout(context.Background(), 30*time.Second)
+				fallbackErr := sandboxProvider.HealthCheck(healthCtx)
+				healthCancel()
+				if fallbackErr != nil {
+					logger.Error().Err(fallbackErr).Msg("fallback runc sandbox health check failed — Phase 3+ services disabled")
+					return nil
+				}
 			} else {
 				logger.Error().Err(healthErr).Msg("sandbox health check failed — Phase 3+ services disabled")
 				return nil
@@ -1144,6 +1176,19 @@ func buildServices(
 		}
 	}
 
+	var sandboxGC *agent.SandboxGC
+	if cfg.SandboxGCInterval > 0 {
+		if gcProvider, ok := any(sandboxProvider).(agent.SandboxGCProvider); ok {
+			sandboxGC = agent.NewSandboxGC(gcProvider, sessionStore, containerUsageStore, agent.SandboxGCConfig{
+				Interval:                cfg.SandboxGCInterval,
+				UnreferencedGracePeriod: cfg.SandboxGCGrace,
+				HardMaxAge:              cfg.SandboxGCHardMax,
+			}, logger)
+		} else {
+			logger.Info().Msg("sandbox provider does not support managed-container listing; sandbox GC disabled")
+		}
+	}
+
 	svc := &worker.Services{
 		Orchestrator:    orchestrator,
 		PR:              prService,
@@ -1157,6 +1202,7 @@ func buildServices(
 		TitleService:    titleService,
 		Linear:          linearService,
 		RuntimeSampler:  runtimeSampler,
+		SandboxGC:       sandboxGC,
 	}
 	if sandboxAuthServer != nil {
 		// Capture by value: the closure outlives buildServices, but the

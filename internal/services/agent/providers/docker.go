@@ -5,6 +5,7 @@ package providers
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"path/filepath"
@@ -28,6 +29,7 @@ import (
 // Compile-time check that DockerProvider implements agent.SandboxProvider.
 var _ agent.SandboxProvider = (*DockerProvider)(nil)
 var _ agent.InteractiveSandboxProvider = (*DockerProvider)(nil)
+var _ agent.SandboxGCProvider = (*DockerProvider)(nil)
 
 // defaultScratchDir is the exec-allowed scratch dir injected as $TMPDIR (and
 // $GOTMPDIR) for sandbox containers. /tmp is mounted noexec for defense in
@@ -37,6 +39,24 @@ var _ agent.InteractiveSandboxProvider = (*DockerProvider)(nil)
 // a separate writable+exec tmpfs so well-behaved tooling has a place to work
 // without weakening the /tmp hardening.
 const defaultScratchDir = "/var/tmp"
+
+const (
+	SandboxLabelManaged   = "com.assembledhq.143.managed"
+	SandboxLabelType      = "com.assembledhq.143.type"
+	SandboxLabelSessionID = "com.assembledhq.143.session_id"
+	SandboxLabelOrgID     = "com.assembledhq.143.org_id"
+	SandboxLabelPurpose   = "com.assembledhq.143.purpose"
+	SandboxLabelCreatedAt = "com.assembledhq.143.created_at"
+
+	sandboxLabelLegacySandbox   = "143.sandbox"
+	sandboxLabelLegacySessionID = "143.session_id"
+	sandboxLabelLegacyOrgID     = "143.org_id"
+	sandboxLabelLegacyPurpose   = "143.purpose"
+)
+
+// ErrDiskQuotaUnsupported is returned when Docker rejects the StorageOpt
+// quota needed to make SANDBOX_DISK_LIMIT_GB a real host-level limit.
+var ErrDiskQuotaUnsupported = errors.New("docker disk quota unsupported")
 
 // DockerClient defines the subset of the Docker API used by DockerProvider.
 type DockerClient interface {
@@ -58,11 +78,12 @@ type DockerClient interface {
 // DockerProvider implements SandboxProvider using Docker containers
 // with optional gVisor (runsc) runtime for enhanced isolation.
 type DockerProvider struct {
-	client     DockerClient
-	runtime    string // "runsc" (gVisor) or "runc" (standard Docker)
-	network    string // pre-created Docker network with egress restrictions
-	resolvConf string // host path bind-mounted at /etc/resolv.conf in sandboxes
-	logger     zerolog.Logger
+	client           DockerClient
+	runtime          string // "runsc" (gVisor) or "runc" (standard Docker)
+	network          string // pre-created Docker network with egress restrictions
+	resolvConf       string // host path bind-mounted at /etc/resolv.conf in sandboxes
+	requireDiskQuota bool
+	logger           zerolog.Logger
 }
 
 // DockerProviderOption configures a DockerProvider.
@@ -95,6 +116,14 @@ func WithResolvConf(path string) DockerProviderOption {
 	}
 }
 
+// WithRequireDiskQuota makes Docker StorageOpt quota support mandatory when
+// SandboxConfig.DiskLimitGB is non-zero.
+func WithRequireDiskQuota(required bool) DockerProviderOption {
+	return func(p *DockerProvider) {
+		p.requireDiskQuota = required
+	}
+}
+
 // NewDockerProvider creates a new DockerProvider with the given Docker client.
 func NewDockerProvider(cli DockerClient, logger zerolog.Logger, opts ...DockerProviderOption) *DockerProvider {
 	p := &DockerProvider{
@@ -120,6 +149,12 @@ func (d *DockerProvider) HealthCheck(ctx context.Context) error {
 
 	if err := d.ensureNetwork(ctx); err != nil {
 		return fmt.Errorf("docker health check: %w", err)
+	}
+
+	if d.requireDiskQuota {
+		if err := d.checkDiskQuotaSupport(ctx); err != nil {
+			return fmt.Errorf("docker health check: %w", err)
+		}
 	}
 
 	if d.runtime == "runc" {
@@ -178,6 +213,36 @@ func (d *DockerProvider) HealthCheck(ctx context.Context) error {
 			return nil
 		}
 	}
+}
+
+func (d *DockerProvider) checkDiskQuotaSupport(ctx context.Context) error {
+	resp, err := d.client.ContainerCreate(ctx, &container.Config{
+		Image: "busybox:latest",
+		Cmd:   []string{"true"},
+		Labels: map[string]string{
+			SandboxLabelManaged: "true",
+			SandboxLabelType:    "quota-probe",
+		},
+	}, &container.HostConfig{
+		Runtime: d.runtime,
+		StorageOpt: map[string]string{
+			"size": "1G",
+		},
+	}, nil, nil, "")
+	if err != nil {
+		if isDiskQuotaUnsupported(err) {
+			return fmt.Errorf("%w: %v", ErrDiskQuotaUnsupported, err)
+		}
+		return fmt.Errorf("quota probe create: %w", err)
+	}
+
+	cleanupCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := d.client.ContainerRemove(cleanupCtx, resp.ID, container.RemoveOptions{Force: true}); err != nil && !cerrdefs.IsNotFound(err) {
+		return fmt.Errorf("quota probe cleanup: %w", err)
+	}
+	d.logger.Info().Msg("docker disk quota health check passed")
+	return nil
 }
 
 // ensureNetwork verifies the configured sandbox network exists on the Docker
@@ -299,7 +364,7 @@ func (d *DockerProvider) Create(ctx context.Context, cfg agent.SandboxConfig) (*
 		User:       "sandbox",
 		Tty:        false,
 		Env:        envSlice,
-		Labels:     sandboxContainerLabels(cfg),
+		Labels:     sandboxContainerLabels(cfg, time.Now()),
 		// Keep container running with a long sleep so we can exec into it
 		Cmd: []string{"sleep", "infinity"},
 	}
@@ -390,7 +455,10 @@ func (d *DockerProvider) Create(ctx context.Context, cfg agent.SandboxConfig) (*
 	if err != nil {
 		// StorageOpt requires overlay2 with XFS+pquota. Fall back gracefully
 		// on hosts that don't support it (e.g. dev machines with ext4).
-		if strings.Contains(err.Error(), "storage-opt") || strings.Contains(err.Error(), "pquota") {
+		if isDiskQuotaUnsupported(err) {
+			if d.requireDiskQuota {
+				return nil, fmt.Errorf("create container with %dGB disk quota: %w: %v", cfg.DiskLimitGB, ErrDiskQuotaUnsupported, err)
+			}
 			log.Warn().Err(err).Msg("storage quota not supported by Docker storage driver; creating container without disk limit")
 			hostCfg.StorageOpt = nil
 			resp, err = d.client.ContainerCreate(ctx, containerCfg, hostCfg, networkCfg, platform, "")
@@ -456,19 +524,25 @@ func (d *DockerProvider) Create(ctx context.Context, cfg agent.SandboxConfig) (*
 	return sb, nil
 }
 
-func sandboxContainerLabels(cfg agent.SandboxConfig) map[string]string {
+func sandboxContainerLabels(cfg agent.SandboxConfig, createdAt time.Time) map[string]string {
 	labels := map[string]string{
-		"managed-by":  "143",
-		"143.sandbox": "true",
+		"managed-by":              "143",
+		sandboxLabelLegacySandbox: "true",
+		SandboxLabelManaged:       "true",
+		SandboxLabelType:          "sandbox",
+		SandboxLabelCreatedAt:     createdAt.UTC().Format(time.RFC3339Nano),
 	}
 	if cfg.SessionID != "" {
-		labels["143.session_id"] = cfg.SessionID
+		labels[sandboxLabelLegacySessionID] = cfg.SessionID
+		labels[SandboxLabelSessionID] = cfg.SessionID
 	}
 	if cfg.OrgID != "" {
-		labels["143.org_id"] = cfg.OrgID
+		labels[sandboxLabelLegacyOrgID] = cfg.OrgID
+		labels[SandboxLabelOrgID] = cfg.OrgID
 	}
 	if cfg.Purpose != "" {
-		labels["143.purpose"] = cfg.Purpose
+		labels[sandboxLabelLegacyPurpose] = cfg.Purpose
+		labels[SandboxLabelPurpose] = cfg.Purpose
 	}
 	return labels
 }
@@ -495,11 +569,72 @@ func (d *DockerProvider) CountLiveSandboxes(ctx context.Context) (int, error) {
 }
 
 func isLiveSandboxContainer(summary container.Summary) bool {
-	if summary.Labels != nil && summary.Labels["143.sandbox"] == "true" {
+	if summary.Labels != nil && (summary.Labels[sandboxLabelLegacySandbox] == "true" || isManagedSandboxLabels(summary.Labels)) {
 		return true
 	}
 	image := strings.ToLower(summary.Image)
 	return strings.Contains(image, "143-sandbox") && !strings.Contains(image, "143-sandbox-dns")
+}
+
+func isDiskQuotaUnsupported(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "storage-opt") ||
+		strings.Contains(msg, "pquota") ||
+		strings.Contains(msg, "project quota") ||
+		strings.Contains(msg, "overlay over xfs")
+}
+
+// ListManagedSandboxes returns every Docker container created by this provider
+// for sandbox execution, including stopped containers. It keys off sandbox
+// labels rather than image names so tag churn does not affect cleanup safety.
+func (d *DockerProvider) ListManagedSandboxes(ctx context.Context) ([]agent.ManagedSandboxContainer, error) {
+	containers, err := d.client.ContainerList(ctx, container.ListOptions{
+		All: true,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("list managed sandbox containers: %w", err)
+	}
+
+	out := make([]agent.ManagedSandboxContainer, 0, len(containers))
+	for _, c := range containers {
+		if !isManagedSandboxSummary(c) {
+			continue
+		}
+		createdAt := time.Unix(c.Created, 0).UTC()
+		if raw := c.Labels[SandboxLabelCreatedAt]; raw != "" {
+			if parsed, err := time.Parse(time.RFC3339Nano, raw); err == nil {
+				createdAt = parsed.UTC()
+			}
+		}
+		out = append(out, agent.ManagedSandboxContainer{
+			ID:        c.ID,
+			SessionID: firstLabelValue(c.Labels, SandboxLabelSessionID, sandboxLabelLegacySessionID),
+			OrgID:     firstLabelValue(c.Labels, SandboxLabelOrgID, sandboxLabelLegacyOrgID),
+			Purpose:   firstLabelValue(c.Labels, SandboxLabelPurpose, sandboxLabelLegacyPurpose),
+			CreatedAt: createdAt,
+		})
+	}
+	return out, nil
+}
+
+func isManagedSandboxSummary(summary container.Summary) bool {
+	return summary.Labels != nil && (summary.Labels[sandboxLabelLegacySandbox] == "true" || isManagedSandboxLabels(summary.Labels))
+}
+
+func isManagedSandboxLabels(labels map[string]string) bool {
+	return labels[SandboxLabelManaged] == "true" && labels[SandboxLabelType] == "sandbox"
+}
+
+func firstLabelValue(labels map[string]string, keys ...string) string {
+	for _, key := range keys {
+		if value := labels[key]; value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 // CloneRepo clones a repository into the sandbox's workspace using git.
