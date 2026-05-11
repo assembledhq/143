@@ -34,6 +34,7 @@ type mockDockerClient struct {
 	containerStartFn       func(ctx context.Context, containerID string, options container.StartOptions) error
 	containerStopFn        func(ctx context.Context, containerID string, options container.StopOptions) error
 	containerRemoveFn      func(ctx context.Context, containerID string, options container.RemoveOptions) error
+	containerListFn        func(ctx context.Context, options container.ListOptions) ([]container.Summary, error)
 	containerInspectFn     func(ctx context.Context, containerID string) (container.InspectResponse, error)
 	containerStatsFn       func(ctx context.Context, containerID string, stream bool) (container.StatsResponseReader, error)
 	containerExecCreateFn  func(ctx context.Context, containerID string, config container.ExecOptions) (container.ExecCreateResponse, error)
@@ -76,6 +77,13 @@ func (m *mockDockerClient) ContainerRemove(ctx context.Context, containerID stri
 		return m.containerRemoveFn(ctx, containerID, options)
 	}
 	return nil
+}
+
+func (m *mockDockerClient) ContainerList(ctx context.Context, options container.ListOptions) ([]container.Summary, error) {
+	if m.containerListFn != nil {
+		return m.containerListFn(ctx, options)
+	}
+	return nil, nil
 }
 
 func (m *mockDockerClient) ContainerInspect(ctx context.Context, containerID string) (container.InspectResponse, error) {
@@ -469,6 +477,59 @@ func TestDockerProvider_Name(t *testing.T) {
 	require.Equal(t, "docker", p.Name(), "provider name should be 'docker'")
 }
 
+func TestDockerProvider_CountLiveSandboxes(t *testing.T) {
+	t.Parallel()
+
+	mock := &mockDockerClient{}
+	mock.containerListFn = func(ctx context.Context, options container.ListOptions) ([]container.Summary, error) {
+		require.Contains(t, options.Filters.Get("network"), "143-sandbox", "CountLiveSandboxes should scope counting to the local sandbox network")
+		return []container.Summary{
+			{
+				ID:     "labeled-sandbox",
+				Image:  "busybox:latest",
+				Labels: map[string]string{"143.sandbox": "true"},
+			},
+			{
+				ID:     "legacy-sandbox",
+				Image:  "ghcr.io/assembledhq/143-sandbox:latest",
+				Labels: map[string]string{},
+			},
+			{
+				ID:     "dns-sidecar",
+				Image:  "143-sandbox-dns:local",
+				Labels: map[string]string{},
+			},
+			{
+				ID:     "worker",
+				Image:  "ghcr.io/assembledhq/143:latest",
+				Labels: map[string]string{},
+			},
+		}, nil
+	}
+	p := NewDockerProvider(mock, newTestLogger())
+
+	count, err := p.CountLiveSandboxes(context.Background())
+
+	require.NoError(t, err, "CountLiveSandboxes should return the Docker count without error")
+	require.Equal(t, 2, count, "CountLiveSandboxes should include labeled and legacy sandbox containers but skip sidecars")
+}
+
+func TestDockerProvider_CountLiveSandboxesListError(t *testing.T) {
+	t.Parallel()
+
+	listErr := errors.New("daemon unavailable")
+	mock := &mockDockerClient{}
+	mock.containerListFn = func(ctx context.Context, options container.ListOptions) ([]container.Summary, error) {
+		return nil, listErr
+	}
+	p := NewDockerProvider(mock, newTestLogger())
+
+	count, err := p.CountLiveSandboxes(context.Background())
+
+	require.ErrorIs(t, err, listErr, "CountLiveSandboxes should wrap Docker list failures")
+	require.Equal(t, 0, count, "CountLiveSandboxes should not return a partial count on list failure")
+}
+
 func TestDockerProvider_Create(t *testing.T) {
 	t.Parallel()
 
@@ -760,7 +821,9 @@ func TestDockerProvider_Create(t *testing.T) {
 		t.Parallel()
 
 		mock := &mockDockerClient{}
+		var createdCfg *container.Config
 		mock.containerCreateFn = func(ctx context.Context, config *container.Config, hostConfig *container.HostConfig, networkConfig *network.NetworkingConfig, platform *ocispec.Platform, containerName string) (container.CreateResponse, error) {
+			createdCfg = config
 			return container.CreateResponse{ID: "traced"}, nil
 		}
 		p := NewDockerProvider(mock, newTestLogger())
@@ -775,6 +838,10 @@ func TestDockerProvider_Create(t *testing.T) {
 		require.Equal(t, "sess-123", sb.SessionID, "SessionID should be copied from config")
 		require.Equal(t, "org-456", sb.OrgID, "OrgID should be copied from config")
 		require.Equal(t, "agent_run", sb.Purpose, "Purpose should be copied from config")
+		require.Equal(t, "true", createdCfg.Labels["143.sandbox"], "created containers should be labeled as 143 sandboxes for capacity and observability")
+		require.Equal(t, "sess-123", createdCfg.Labels["143.session_id"], "created containers should carry session ID labels")
+		require.Equal(t, "org-456", createdCfg.Labels["143.org_id"], "created containers should carry org ID labels")
+		require.Equal(t, "agent_run", createdCfg.Labels["143.purpose"], "created containers should carry purpose labels")
 	})
 
 	t.Run("bootstrap runs as sandbox user with no sudo or chown", func(t *testing.T) {

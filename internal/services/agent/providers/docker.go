@@ -14,6 +14,7 @@ import (
 	cerrdefs "github.com/containerd/errdefs"
 	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/container"
+	"github.com/docker/docker/api/types/filters"
 	"github.com/docker/docker/api/types/mount"
 	"github.com/docker/docker/api/types/network"
 	"github.com/docker/docker/pkg/stdcopy"
@@ -44,6 +45,7 @@ type DockerClient interface {
 	ContainerStart(ctx context.Context, containerID string, options container.StartOptions) error
 	ContainerStop(ctx context.Context, containerID string, options container.StopOptions) error
 	ContainerRemove(ctx context.Context, containerID string, options container.RemoveOptions) error
+	ContainerList(ctx context.Context, options container.ListOptions) ([]container.Summary, error)
 	ContainerInspect(ctx context.Context, containerID string) (container.InspectResponse, error)
 	ContainerStats(ctx context.Context, containerID string, stream bool) (container.StatsResponseReader, error)
 	ContainerExecCreate(ctx context.Context, containerID string, config container.ExecOptions) (container.ExecCreateResponse, error)
@@ -297,6 +299,7 @@ func (d *DockerProvider) Create(ctx context.Context, cfg agent.SandboxConfig) (*
 		User:       "sandbox",
 		Tty:        false,
 		Env:        envSlice,
+		Labels:     sandboxContainerLabels(cfg),
 		// Keep container running with a long sleep so we can exec into it
 		Cmd: []string{"sleep", "infinity"},
 	}
@@ -451,6 +454,52 @@ func (d *DockerProvider) Create(ctx context.Context, cfg agent.SandboxConfig) (*
 	}
 
 	return sb, nil
+}
+
+func sandboxContainerLabels(cfg agent.SandboxConfig) map[string]string {
+	labels := map[string]string{
+		"managed-by":  "143",
+		"143.sandbox": "true",
+	}
+	if cfg.SessionID != "" {
+		labels["143.session_id"] = cfg.SessionID
+	}
+	if cfg.OrgID != "" {
+		labels["143.org_id"] = cfg.OrgID
+	}
+	if cfg.Purpose != "" {
+		labels["143.purpose"] = cfg.Purpose
+	}
+	return labels
+}
+
+// CountLiveSandboxes counts running local sandbox containers attached to the
+// configured sandbox network. Labels are preferred for newly-created
+// containers; image-name matching keeps existing unlabeled sandboxes visible.
+func (d *DockerProvider) CountLiveSandboxes(ctx context.Context) (int, error) {
+	args := filters.NewArgs()
+	if d.network != "" {
+		args.Add("network", d.network)
+	}
+	containers, err := d.client.ContainerList(ctx, container.ListOptions{Filters: args})
+	if err != nil {
+		return 0, fmt.Errorf("list live sandbox containers: %w", err)
+	}
+	count := 0
+	for _, summary := range containers {
+		if isLiveSandboxContainer(summary) {
+			count++
+		}
+	}
+	return count, nil
+}
+
+func isLiveSandboxContainer(summary container.Summary) bool {
+	if summary.Labels != nil && summary.Labels["143.sandbox"] == "true" {
+		return true
+	}
+	image := strings.ToLower(summary.Image)
+	return strings.Contains(image, "143-sandbox") && !strings.Contains(image, "143-sandbox-dns")
 }
 
 // CloneRepo clones a repository into the sandbox's workspace using git.
