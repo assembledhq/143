@@ -61,6 +61,37 @@ func (f *switchableBlockingLiveSandboxCounter) CountLiveSandboxes(ctx context.Co
 	}
 }
 
+type staleDuringReleaseLiveSandboxCounter struct {
+	calls         atomic.Int64
+	secondStarted chan struct{}
+	unblockSecond chan struct{}
+}
+
+func newStaleDuringReleaseLiveSandboxCounter() *staleDuringReleaseLiveSandboxCounter {
+	return &staleDuringReleaseLiveSandboxCounter{
+		secondStarted: make(chan struct{}),
+		unblockSecond: make(chan struct{}),
+	}
+}
+
+func (f *staleDuringReleaseLiveSandboxCounter) CountLiveSandboxes(ctx context.Context) (int, error) {
+	call := f.calls.Add(1)
+	switch call {
+	case 1:
+		return 0, nil
+	case 2:
+		close(f.secondStarted)
+		select {
+		case <-f.unblockSecond:
+			return 0, nil
+		case <-ctx.Done():
+			return 0, ctx.Err()
+		}
+	default:
+		return 1, nil
+	}
+}
+
 func (f *fakeLiveSandboxCounter) CountLiveSandboxes(context.Context) (int, error) {
 	f.calls.Add(1)
 	if f.err != nil {
@@ -191,6 +222,55 @@ func TestSandboxCapacityGate_ReleaseDoesNotWaitForBlockedCount(t *testing.T) {
 	close(counter.unblock)
 	<-acquireDone
 	require.Equal(t, 0, gate.ReservedCount(), "all reservations should be released after the blocked acquire completes")
+}
+
+func TestSandboxCapacityGate_AcquireRejectsWhenCountStalesDuringRelease(t *testing.T) {
+	t.Parallel()
+
+	counter := newStaleDuringReleaseLiveSandboxCounter()
+	gate := agent.NewSandboxCapacityGate(agent.SandboxCapacityGateConfig{
+		Counter:      counter,
+		MaxActive:    1,
+		CountTimeout: time.Second,
+		NodeID:       "worker-1",
+		Logger:       zerolog.Nop(),
+	})
+	reservation, err := gate.Acquire(context.Background(), agent.SandboxCapacityRequest{Purpose: "agent_run"})
+	require.NoError(t, err, "first Acquire should reserve the only available slot")
+
+	type acquireResult struct {
+		reservation *agent.SandboxCapacityReservation
+		err         error
+	}
+	resultCh := make(chan acquireResult, 1)
+	go func() {
+		staleReservation, staleErr := gate.Acquire(context.Background(), agent.SandboxCapacityRequest{Purpose: "agent_run"})
+		resultCh <- acquireResult{reservation: staleReservation, err: staleErr}
+	}()
+
+	select {
+	case <-counter.secondStarted:
+	case <-time.After(100 * time.Millisecond):
+		require.Fail(t, "second Acquire should begin counting while the first reservation is still in-flight")
+	}
+
+	reservation.Release()
+	close(counter.unblockSecond)
+
+	var result acquireResult
+	select {
+	case result = <-resultCh:
+	case <-time.After(time.Second):
+		require.Fail(t, "second Acquire should finish after the stale count is released")
+	}
+	if result.reservation != nil {
+		result.reservation.Release()
+	}
+
+	require.ErrorIs(t, result.err, agent.ErrSandboxCapacity, "Acquire should reject after retrying a count that went stale during a reservation release")
+	require.Nil(t, result.reservation, "Acquire should not return a reservation when the refreshed live count is full")
+	require.Equal(t, 0, gate.ReservedCount(), "rejected stale acquire should not leak a reservation")
+	require.Equal(t, int64(3), counter.calls.Load(), "Acquire should recount after a reservation release invalidates the in-flight count")
 }
 
 func TestSandboxCapacityGate_ConcurrentAcquiresDoNotExceedCapacity(t *testing.T) {

@@ -56,6 +56,8 @@ type SandboxCapacityGate struct {
 
 	mu       sync.Mutex
 	reserved int
+	// releaseGeneration invalidates live counts taken before a reservation release completes.
+	releaseGeneration uint64
 }
 
 // NewSandboxCapacityGate constructs a local sandbox admission gate.
@@ -107,24 +109,39 @@ func (g *SandboxCapacityGate) Acquire(ctx context.Context, req SandboxCapacityRe
 		return nil, err
 	}
 
-	live, err := g.countLiveSandboxes(ctx)
-	if err != nil {
-		wrapped := fmt.Errorf("%w: count live sandboxes: %w", ErrSandboxCapacity, err)
-		g.logCapacity(req, 0, g.ReservedCount()).Err(err).Msg("failed to count live sandboxes; rejecting sandbox admission")
-		return nil, wrapped
-	}
+	for {
+		g.mu.Lock()
+		releaseGeneration := g.releaseGeneration
+		g.mu.Unlock()
 
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	total := live + g.reserved
-	if total >= g.maxActive {
-		err := fmt.Errorf("%w: %d/%d sandboxes active or reserved", ErrSandboxCapacity, total, g.maxActive)
-		g.logCapacity(req, live, g.reserved).Msg("sandbox capacity reached; rejecting sandbox admission")
-		return nil, err
+		live, err := g.countLiveSandboxes(ctx)
+		if err != nil {
+			wrapped := fmt.Errorf("%w: count live sandboxes: %w", ErrSandboxCapacity, err)
+			g.logCapacity(req, 0, g.ReservedCount()).Err(err).Msg("failed to count live sandboxes; rejecting sandbox admission")
+			return nil, wrapped
+		}
+
+		g.mu.Lock()
+		if releaseGeneration != g.releaseGeneration {
+			g.mu.Unlock()
+			continue
+		}
+
+		total := live + g.reserved
+		if total >= g.maxActive {
+			reserved := g.reserved
+			g.mu.Unlock()
+			err := fmt.Errorf("%w: %d/%d sandboxes active or reserved", ErrSandboxCapacity, total, g.maxActive)
+			g.logCapacity(req, live, reserved).Msg("sandbox capacity reached; rejecting sandbox admission")
+			return nil, err
+		}
+		g.reserved++
+		reserved := g.reserved
+		g.mu.Unlock()
+
+		g.logCapacity(req, live, reserved).Msg("sandbox capacity reserved")
+		return &SandboxCapacityReservation{gate: g}, nil
 	}
-	g.reserved++
-	g.logCapacity(req, live, g.reserved).Msg("sandbox capacity reserved")
-	return &SandboxCapacityReservation{gate: g}, nil
 }
 
 // Snapshot returns a best-effort point-in-time capacity view for metadata.
@@ -188,5 +205,6 @@ func (r *SandboxCapacityReservation) Release() {
 		if r.gate.reserved > 0 {
 			r.gate.reserved--
 		}
+		r.gate.releaseGeneration++
 	})
 }
