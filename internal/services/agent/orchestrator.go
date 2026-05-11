@@ -1735,11 +1735,6 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 		o.failRun(ctx, run, fmt.Sprintf("create sandbox: %s", err))
 		return fmt.Errorf("create sandbox: %w", err)
 	}
-	containerStartedAt := time.Now()
-	var usageEventID uuid.UUID
-	if o.usageTracker != nil {
-		usageEventID = o.usageTracker.ContainerStarted(ctx, run.OrgID, run.ID, sandbox, sandboxCfg, containerStartedAt)
-	}
 	// Record the turn hold so a concurrent StartPreview can attach to this
 	// container (same ID, same filesystem) instead of hydrating a duplicate.
 	// AcquireTurnHold uses COALESCE to publish only if no one has raced ahead;
@@ -1786,6 +1781,11 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 			}
 		}
 		return fmt.Errorf("%w: actual container %s != created %s", diagErr, actualContainerID, sandbox.ID)
+	}
+	containerStartedAt := time.Now()
+	var usageEventID uuid.UUID
+	if o.usageTracker != nil {
+		usageEventID = o.usageTracker.ContainerStarted(ctx, run.OrgID, run.ID, sandbox, sandboxCfg, containerStartedAt)
 	}
 	defer func() {
 		exitReason := containerExitReason(ctx, err)
