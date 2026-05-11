@@ -68,11 +68,31 @@ func parseWorkerNode(node models.Node) (WorkerNode, error) {
 	}, nil
 }
 
+func parseRoutableWorkerNode(node models.Node) (WorkerNode, error) {
+	var metadata WorkerNodeMetadata
+	if len(node.Metadata) > 0 {
+		if err := json.Unmarshal(node.Metadata, &metadata); err != nil {
+			return WorkerNode{}, fmt.Errorf("parse node metadata: %w", err)
+		}
+	}
+	baseURL := strings.TrimRight(metadata.PreviewInternalBaseURL, "/")
+	if baseURL == "" {
+		return WorkerNode{}, fmt.Errorf("node %s has no preview internal base url", node.ID)
+	}
+	return WorkerNode{
+		ID:      node.ID,
+		Mode:    node.Mode,
+		BaseURL: baseURL,
+	}, nil
+}
+
 func isResolvableNodeStatus(status string) bool {
 	return status == "active" || status == "draining"
 }
 
-// ResolveNode returns a preview-capable worker by ID.
+// ResolveNode returns a routable worker by ID. Existing previews and live
+// sandboxes stay pinned to their owning worker, so routing only requires the
+// internal base URL; cold-start selection still requires preview_capable.
 func (s *WorkerSelector) ResolveNode(ctx context.Context, nodeID string) (WorkerNode, error) {
 	node, err := s.nodes.GetByID(ctx, nodeID)
 	if err != nil {
@@ -81,7 +101,7 @@ func (s *WorkerSelector) ResolveNode(ctx context.Context, nodeID string) (Worker
 	if !isResolvableNodeStatus(node.Status) {
 		return WorkerNode{}, fmt.Errorf("node %s is not routable", nodeID)
 	}
-	return parseWorkerNode(*node)
+	return parseRoutableWorkerNode(*node)
 }
 
 // SelectStartNode picks the worker that should handle Start Preview for the session.

@@ -33,6 +33,8 @@ import (
 	"github.com/assembledhq/143/internal/version"
 )
 
+const sandboxCapacityRetryDelay = 10 * time.Second
+
 // DataRetentionConfig holds retention periods for the data cleanup handler.
 type DataRetentionConfig struct {
 	WebhookDays int
@@ -196,6 +198,10 @@ type Services struct {
 	// is disabled (interval <= 0 in config) or the provider can't report
 	// stats (e.g. a non-Docker provider in the future).
 	RuntimeSampler *agent.RuntimeSampler
+	// SandboxGC periodically reconciles provider-labeled local sandbox
+	// containers against DB ownership so leaked containers cannot accumulate
+	// indefinitely on worker disks. nil when disabled or unsupported.
+	SandboxGC *agent.SandboxGC
 }
 
 type orchestratorService interface {
@@ -1000,6 +1006,14 @@ func newRunAgentHandler(stores *Stores, services *Services, logger zerolog.Logge
 			runErr = services.Orchestrator.RunAgent(jobCtx, &run)
 		}
 		if err := runErr; err != nil {
+			if errors.Is(err, agent.ErrSandboxCapacity) {
+				retryAfter := sandboxCapacityRetryDelay
+				logger.Info().
+					Str("session_id", runID.String()).
+					Err(err).
+					Msg("local sandbox capacity reached; retrying run_agent")
+				return &RetryableError{Err: err, RetryAfter: &retryAfter}
+			}
 			if errors.Is(err, agent.ErrStaleSandboxIDCleared) {
 				// The orchestrator detected a stale orphan container_id from
 				// a crashed prior worker, CAS-cleared it, and signaled retry.
@@ -1173,6 +1187,14 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 		}
 
 		if err := services.Orchestrator.ContinueSession(jobCtx, &session, continueOpts); err != nil {
+			if errors.Is(err, agent.ErrSandboxCapacity) {
+				retryAfter := sandboxCapacityRetryDelay
+				logger.Info().
+					Str("session_id", sessionID.String()).
+					Err(err).
+					Msg("local sandbox capacity reached; retrying continue_session")
+				return &RetryableError{Err: err, RetryAfter: &retryAfter}
+			}
 			// A pending post-PR snapshot upload is a transient state — wrap
 			// in RetryableError so the job is requeued without consuming an
 			// attempt. The session row is unchanged at this point.

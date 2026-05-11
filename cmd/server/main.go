@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -223,6 +224,7 @@ func main() {
 	var pvProvider preview.PreviewCapableProvider
 	var snapshotExec preview.SnapshotExecutor
 	var apiSandboxProvider agent.SandboxProvider
+	var sandboxCapacity *agent.SandboxCapacityGate
 	if cfg.Mode != "api" {
 		apiDockerCli, dockerErr := dockerclient.NewClientWithOpts(dockerclient.FromEnv, dockerclient.WithAPIVersionNegotiation())
 		if dockerErr == nil {
@@ -236,11 +238,23 @@ func main() {
 				logger,
 				providers.WithResolvConf(cfg.SandboxResolvConf),
 				providers.WithHealthCheckImage(cfg.SandboxHealthCheckImage),
+				providers.WithRequireDiskQuota(cfg.SandboxRequireDiskQuota),
 			)
 			dockerPreviewProvider := previewproviders.NewDockerPreviewProvider(apiDockerCli, sandboxExec, logger)
 			pvProvider = dockerPreviewProvider
 			snapshotExec = sandboxExec
 			apiSandboxProvider = sandboxExec
+			maxActiveSandboxes := resolveWorkerMaxActiveSandboxes(cfg.WorkerProcessCount, cfg.WorkerMaxActiveSandboxes)
+			sandboxCapacity = agent.NewSandboxCapacityGate(agent.SandboxCapacityGateConfig{
+				Counter:   sandboxExec,
+				MaxActive: maxActiveSandboxes,
+				NodeID:    cfg.NodeID,
+				Logger:    logger,
+			})
+			logger.Info().
+				Int("max_active_sandboxes", maxActiveSandboxes).
+				Int("worker_process_count", cfg.WorkerProcessCount).
+				Msg("sandbox capacity gate enabled")
 		} else {
 			logger.Warn().Err(dockerErr).Msg("Docker not available — file browsing and preview provider disabled")
 		}
@@ -301,7 +315,7 @@ func main() {
 	// Closed when the process receives SIGTERM so long-lived handlers (SSE
 	// streams, etc.) can end their loops cleanly during graceful shutdown.
 	shutdownCh := make(chan struct{})
-	router, gwSrv, recycleWorker, inspectorCloser, previewManager, err := api.NewRouter(cfg, pool, logger, sentryReporter, codexAuthSvc, claudeCodeAuthSvc, llmClient, fileReader, cancelRegistry, threadCancelRegistry, pvProvider, snapshotExec, apiSandboxProvider, apiSnapshotStore, orgSettingsCache, shutdownCh, redisClient, sessionStreams, codingCredentialStore)
+	router, gwSrv, recycleWorker, inspectorCloser, previewManager, err := api.NewRouter(cfg, pool, logger, sentryReporter, codexAuthSvc, claudeCodeAuthSvc, llmClient, fileReader, cancelRegistry, threadCancelRegistry, pvProvider, snapshotExec, apiSandboxProvider, sandboxCapacity, apiSnapshotStore, orgSettingsCache, shutdownCh, redisClient, sessionStreams, codingCredentialStore)
 	if err != nil {
 		logger.Fatal().Err(err).Msg("failed to initialize API router")
 	}
@@ -409,7 +423,7 @@ func main() {
 				jobStore, orgStore, repoStore, pullRequestStore,
 				deployStore, priorityScoreStore, complexityEstimateStore, pmPlanStore, pmDecisionLogStore,
 				projectStore, projectTaskStore, projectCycleStore, pmDocumentStore, integrationStore,
-				sessionMessageStore, automationRunStore, snapshotStore, billingMetrics, cancelRegistry, threadCancelRegistry, orgSettingsCache)
+				sessionMessageStore, automationRunStore, snapshotStore, billingMetrics, cancelRegistry, threadCancelRegistry, orgSettingsCache, sandboxCapacity)
 			if services != nil {
 				sandboxAuthShutdown = services.SandboxAuthShutdown
 				// Wire eval pub/sub publishers so worker handlers can wake
@@ -491,6 +505,7 @@ func main() {
 			previewCapable,
 			cfg.PreviewInternalBaseURL,
 			previewRoutingReady.Load,
+			sandboxCapacity,
 		)
 
 		recoveryLoop := cluster.NewRecoveryLoop(nodeManager, jobStore, logger, 90*time.Second, 100)
@@ -523,6 +538,9 @@ func main() {
 		// the provider doesn't expose stats.
 		if workerServices != nil && workerServices.RuntimeSampler != nil {
 			go workerServices.RuntimeSampler.Run(ctx)
+		}
+		if workerServices != nil && workerServices.SandboxGC != nil {
+			go workerServices.SandboxGC.Run(ctx)
 		}
 
 		// Upload reaper: clean up old uploaded files (local mode only; use S3 lifecycle rules for S3).
@@ -694,6 +712,7 @@ func startProcessWorkers(
 	previewCapable bool,
 	previewInternalBaseURL string,
 	previewRoutingReady func() bool,
+	sandboxCapacity *agent.SandboxCapacityGate,
 ) []*worker.Worker {
 	workers := make([]*worker.Worker, 0, workerCount)
 	for i := 0; i < workerCount; i++ {
@@ -710,13 +729,23 @@ func startProcessWorkers(
 		})
 	}
 
-	nodeManager.SetMetadataProvider(buildWorkerMetadataProvider(workers, previewCapable, previewInternalBaseURL, previewRoutingReady))
+	nodeManager.SetMetadataProvider(buildWorkerMetadataProvider(workers, previewCapable, previewInternalBaseURL, previewRoutingReady, sandboxCapacity))
 
 	for i, w := range workers {
 		go w.Start(ctx)
 		logger.Info().Int("worker_index", i).Msg("worker started with registered handlers")
 	}
 	return workers
+}
+
+func resolveWorkerMaxActiveSandboxes(workerProcessCount, configured int) int {
+	if configured > 0 {
+		return configured
+	}
+	if workerProcessCount > 0 {
+		return workerProcessCount
+	}
+	return 2
 }
 
 // buildBaseMetadata returns the node metadata fields that must appear on every
@@ -737,7 +766,7 @@ func buildBaseMetadata(previewCapable bool, previewInternalBaseURL string) map[s
 	return metadata
 }
 
-func buildWorkerMetadataProvider(workers []*worker.Worker, previewCapable bool, previewInternalBaseURL string, previewRoutingReady func() bool) func() map[string]any {
+func buildWorkerMetadataProvider(workers []*worker.Worker, previewCapable bool, previewInternalBaseURL string, previewRoutingReady func() bool, sandboxCapacity *agent.SandboxCapacityGate) func() map[string]any {
 	return func() map[string]any {
 		advertisePreview := previewCapable
 		if previewRoutingReady != nil {
@@ -746,6 +775,17 @@ func buildWorkerMetadataProvider(workers []*worker.Worker, previewCapable bool, 
 		metadata := buildBaseMetadata(advertisePreview, previewInternalBaseURL)
 		metadata["active_job_count"] = totalActiveJobs(workers)
 		metadata["active_run_agent_count"] = totalActiveRunAgentJobs(workers)
+		if sandboxCapacity != nil {
+			snapshotCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			snapshot := sandboxCapacity.Snapshot(snapshotCtx)
+			cancel()
+			metadata["live_sandbox_count"] = snapshot.Live
+			metadata["reserved_sandbox_count"] = snapshot.Reserved
+			metadata["max_active_sandboxes"] = snapshot.MaxActive
+			if snapshot.CountError != "" {
+				metadata["live_sandbox_count_error"] = snapshot.CountError
+			}
+		}
 		return metadata
 	}
 }
@@ -851,6 +891,7 @@ func buildServices(
 	cancelRegistry *agent.CancelRegistry,
 	threadCancelRegistry *agent.ThreadCancelRegistry,
 	orgSettingsCache *agent.OrgSettingsCache,
+	sandboxCapacity *agent.SandboxCapacityGate,
 ) *worker.Services {
 	// GitHub App service (for installation tokens, PR creation).
 	ghSvc, err := ghservice.NewService(cfg.GitHubAppID, cfg.GitHubAppPrivateKey)
@@ -871,6 +912,7 @@ func buildServices(
 		providers.WithRuntime(cfg.SandboxRuntime),
 		providers.WithResolvConf(cfg.SandboxResolvConf),
 		providers.WithHealthCheckImage(cfg.SandboxHealthCheckImage),
+		providers.WithRequireDiskQuota(cfg.SandboxRequireDiskQuota),
 	)
 
 	// Startup health check: verify Docker daemon connectivity and, for gVisor,
@@ -892,6 +934,10 @@ func buildServices(
 			}
 		}
 		if healthErr != nil {
+			if errors.Is(healthErr, providers.ErrDiskQuotaUnsupported) {
+				logger.Error().Err(healthErr).Msg("sandbox disk quota is required but Docker storage cannot enforce it — all Phase 3+ services disabled")
+				return nil
+			}
 			if cfg.SandboxRuntime == "runsc" && !cfg.SandboxRequireGVisor {
 				logger.Warn().Err(healthErr).Msg("gVisor not available, falling back to runc — NOT RECOMMENDED FOR PRODUCTION")
 				sandboxProvider = providers.NewDockerProvider(
@@ -900,7 +946,15 @@ func buildServices(
 					providers.WithRuntime("runc"),
 					providers.WithResolvConf(cfg.SandboxResolvConf),
 					providers.WithHealthCheckImage(cfg.SandboxHealthCheckImage),
+					providers.WithRequireDiskQuota(cfg.SandboxRequireDiskQuota),
 				)
+				healthCtx, healthCancel := context.WithTimeout(context.Background(), 30*time.Second)
+				fallbackErr := sandboxProvider.HealthCheck(healthCtx)
+				healthCancel()
+				if fallbackErr != nil {
+					logger.Error().Err(fallbackErr).Msg("fallback runc sandbox health check failed — Phase 3+ services disabled")
+					return nil
+				}
 			} else {
 				logger.Error().Err(healthErr).Msg("sandbox health check failed — Phase 3+ services disabled")
 				return nil
@@ -995,6 +1049,7 @@ func buildServices(
 		CodingCredentials: codingCredentialStore,
 		Snapshots:         snapshotStore,
 		UsageTracker:      usageTracker,
+		SandboxCapacity:   sandboxCapacity,
 		Cancels:           cancelRegistry,
 		ThreadCancels:     threadCancelRegistry,
 		OrgSettingsCache:  orgSettingsCache,
@@ -1124,6 +1179,19 @@ func buildServices(
 		}
 	}
 
+	var sandboxGC *agent.SandboxGC
+	if cfg.SandboxGCInterval > 0 {
+		if gcProvider, ok := any(sandboxProvider).(agent.SandboxGCProvider); ok {
+			sandboxGC = agent.NewSandboxGC(gcProvider, sessionStore, containerUsageStore, agent.SandboxGCConfig{
+				Interval:                cfg.SandboxGCInterval,
+				UnreferencedGracePeriod: cfg.SandboxGCGrace,
+				HardMaxAge:              cfg.SandboxGCHardMax,
+			}, logger)
+		} else {
+			logger.Info().Msg("sandbox provider does not support managed-container listing; sandbox GC disabled")
+		}
+	}
+
 	svc := &worker.Services{
 		Orchestrator:    orchestrator,
 		PR:              prService,
@@ -1137,6 +1205,7 @@ func buildServices(
 		TitleService:    titleService,
 		Linear:          linearService,
 		RuntimeSampler:  runtimeSampler,
+		SandboxGC:       sandboxGC,
 	}
 	if sandboxAuthServer != nil {
 		// Capture by value: the closure outlives buildServices, but the

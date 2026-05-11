@@ -179,6 +179,30 @@ func (s *ContainerUsageStore) CloseOrphans(ctx context.Context, startedBefore ti
 	return tag.RowsAffected(), nil
 }
 
+// CloseOpenByContainerID closes open usage events for a container destroyed
+// outside the ordinary orchestrator defer path, such as worker-local sandbox
+// GC. The container ID is globally opaque enough for this system cleanup path.
+// lint:allow-no-orgid reason="system cleanup by opaque Docker container ID across all orgs"
+func (s *ContainerUsageStore) CloseOpenByContainerID(ctx context.Context, containerID string, stoppedAt time.Time, exitReason string) (int64, error) {
+	tag, err := s.db.Exec(ctx, `
+		UPDATE container_usage_events
+		SET stopped_at = @stopped_at,
+		    duration_ms = EXTRACT(EPOCH FROM (@stopped_at::timestamptz - started_at)) * 1000,
+		    container_minutes = EXTRACT(EPOCH FROM (@stopped_at::timestamptz - started_at)) / 60.0,
+		    exit_reason = @exit_reason
+		WHERE container_id = @container_id
+		  AND stopped_at IS NULL`,
+		pgx.NamedArgs{
+			"stopped_at":   stoppedAt,
+			"exit_reason":  exitReason,
+			"container_id": containerID,
+		})
+	if err != nil {
+		return 0, fmt.Errorf("close open usage by container id: %w", err)
+	}
+	return tag.RowsAffected(), nil
+}
+
 // CountActive returns the number of container usage events that have not been
 // stopped yet. Used by the observable gauge to report the true active count.
 // lint:allow-no-orgid reason="system-wide gauge counting active containers across all orgs"

@@ -457,6 +457,7 @@ type Orchestrator struct {
 	memory            MemoryService          // can be nil
 	snapshots         storage.SnapshotStore  // can be nil — multi-turn disabled if nil
 	usageTracker      UsageRecorder          // can be nil — billing tracking disabled if nil
+	sandboxCapacity   *SandboxCapacityGate   // can be nil — live local sandbox admission disabled
 	env               *AgentEnv              // owns env resolution, auth pre-flight, Codex auth injection
 	identityResolver  *identity.Resolver     // can be nil — falls back to legacy GITHUB_TOKEN env injection
 	sandboxAuth       SandboxAuthServer      // can be nil — paired with identityResolver
@@ -635,6 +636,7 @@ type OrchestratorConfig struct {
 	CodingCredentials CodingCredentialProvider // optional — preferred unified resolver; consulted before the legacy cascade
 	Snapshots         storage.SnapshotStore    // optional — enables multi-turn snapshot/restore
 	UsageTracker      UsageRecorder            // optional — enables billing observability
+	SandboxCapacity   *SandboxCapacityGate     // optional — gates new local sandbox creation
 	Cancels           *CancelRegistry          // optional — enables session cancellation from API
 	ThreadCancels     *ThreadCancelRegistry    // optional — enables per-tab cancellation from API
 	OrgSettingsCache  *OrgSettingsCache        // optional — caches Amp/Pi agent_config lookups across session starts
@@ -714,6 +716,7 @@ func NewOrchestrator(cfg OrchestratorConfig) *Orchestrator {
 		memory:            cfg.Memory,
 		snapshots:         cfg.Snapshots,
 		usageTracker:      cfg.UsageTracker,
+		sandboxCapacity:   cfg.SandboxCapacity,
 		env:               env,
 		identityResolver:  cfg.IdentityResolver,
 		sandboxAuth:       cfg.SandboxAuth,
@@ -1456,6 +1459,21 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 		return err
 	}
 
+	var capacityReservation *SandboxCapacityReservation
+	if o.sandboxCapacity != nil {
+		var capErr error
+		capacityReservation, capErr = o.sandboxCapacity.Acquire(ctx, SandboxCapacityRequest{
+			Purpose:   "agent_run",
+			SessionID: run.ID.String(),
+			OrgID:     run.OrgID.String(),
+		})
+		if capErr != nil {
+			log.Info().Err(capErr).Msg("sandbox capacity reached, run stays pending")
+			return capErr
+		}
+		defer capacityReservation.Release()
+	}
+
 	// 2. Update status to "running" (sets started_at in DB). We also capture
 	// the start time locally so the timeout branch below can log a
 	// meaningful elapsed duration regardless of whether run.StartedAt was
@@ -1707,17 +1725,15 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 		sandboxCfg.Env["HOME"] = sandboxCfg.HomeDir
 	}
 	sandbox, err := o.provider.Create(ctx, sandboxCfg)
+	if capacityReservation != nil {
+		capacityReservation.Release()
+	}
 	if err != nil {
 		if sandboxCfg.AuthSocketPath != "" {
 			o.closeSandboxAuth(run.ID, log)
 		}
 		o.failRun(ctx, run, fmt.Sprintf("create sandbox: %s", err))
 		return fmt.Errorf("create sandbox: %w", err)
-	}
-	containerStartedAt := time.Now()
-	var usageEventID uuid.UUID
-	if o.usageTracker != nil {
-		usageEventID = o.usageTracker.ContainerStarted(ctx, run.OrgID, run.ID, sandbox, sandboxCfg, containerStartedAt)
 	}
 	// Record the turn hold so a concurrent StartPreview can attach to this
 	// container (same ID, same filesystem) instead of hydrating a duplicate.
@@ -1765,6 +1781,11 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 			}
 		}
 		return fmt.Errorf("%w: actual container %s != created %s", diagErr, actualContainerID, sandbox.ID)
+	}
+	containerStartedAt := time.Now()
+	var usageEventID uuid.UUID
+	if o.usageTracker != nil {
+		usageEventID = o.usageTracker.ContainerStarted(ctx, run.OrgID, run.ID, sandbox, sandboxCfg, containerStartedAt)
 	}
 	defer func() {
 		exitReason := containerExitReason(ctx, err)
@@ -2216,6 +2237,22 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	hasSnapshot := session.SnapshotKey != nil && *session.SnapshotKey != "" &&
 		o.snapshots != nil &&
 		session.SandboxState != string(models.SandboxStateDestroyed)
+	reusedExisting := session.ContainerID != nil && *session.ContainerID != ""
+
+	var capacityReservation *SandboxCapacityReservation
+	if !reusedExisting && o.sandboxCapacity != nil {
+		var capErr error
+		capacityReservation, capErr = o.sandboxCapacity.Acquire(ctx, SandboxCapacityRequest{
+			Purpose:   "continue_session",
+			SessionID: session.ID.String(),
+			OrgID:     session.OrgID.String(),
+		})
+		if capErr != nil {
+			log.Info().Err(capErr).Msg("sandbox capacity reached, continue_session stays pending")
+			return capErr
+		}
+		defer capacityReservation.Release()
+	}
 
 	// 1. Update status to running. Capture wall-clock start locally so the
 	// timeout branch below can log a meaningful elapsed regardless of
@@ -2401,7 +2438,6 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	if _, ok := sandboxCfg.Env["HOME"]; !ok {
 		sandboxCfg.Env["HOME"] = sandboxCfg.HomeDir
 	}
-	reusedExisting := session.ContainerID != nil && *session.ContainerID != ""
 	// Liveness / cross-node check on reuse. A recorded container_id only
 	// means "someone (preview, prior turn) wrote it" — it does NOT prove
 	// the container is alive AND on this node's docker daemon. Two cases:
@@ -2641,6 +2677,9 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		log.Info().Str("container_id", sandbox.ID).Msg("reusing existing sandbox container (preview is holding it)")
 	case hasSnapshot:
 		sandbox, err = HydrateSandboxFromSnapshot(ctx, o.provider, o.snapshots, *session.SnapshotKey, sandboxCfg)
+		if capacityReservation != nil {
+			capacityReservation.Release()
+		}
 		if err != nil {
 			o.closeSandboxAuth(session.ID, log)
 			log.Error().Err(err).Msg("sandbox hydrate failed during continue_session")
@@ -2660,6 +2699,9 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		}
 	default:
 		sandbox, err = o.provider.Create(ctx, sandboxCfg)
+		if capacityReservation != nil {
+			capacityReservation.Release()
+		}
 		if err != nil {
 			o.closeSandboxAuth(session.ID, log)
 			log.Error().Err(err).Msg("sandbox creation failed during continue_session")

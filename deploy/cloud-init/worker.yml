@@ -121,6 +121,11 @@ write_files:
       GITHUB_APP_CLIENT_ID=${GITHUB_APP_CLIENT_ID}
       GITHUB_APP_CLIENT_SECRET=${GITHUB_APP_CLIENT_SECRET}
       CHROME_WS_URL=${CHROME_WS_URL}
+      SANDBOX_HEALTH_CHECK_IMAGE=busybox:1.36.1
+      SANDBOX_REQUIRE_DISK_QUOTA=true
+      SANDBOX_GC_INTERVAL=5m
+      SANDBOX_GC_GRACE=30m
+      SANDBOX_GC_HARD_MAX=24h
 
   # Per-host identity. Stays put across deploys — deploy.sh only rewrites
   # /opt/143/.env, then re-appends this file. If you re-IP the host or

@@ -53,6 +53,10 @@ type Config struct {
 	// server process when MODE is "worker" or "all". Increase this on larger
 	// hosts to process more jobs/sandboxes in parallel.
 	WorkerProcessCount int `env:"WORKER_PROCESS_COUNT" envDefault:"2"`
+	// WorkerMaxActiveSandboxes controls the live container admission cap for
+	// this worker node. 0 derives from the final WorkerProcessCount; values >0
+	// are explicit per-node caps.
+	WorkerMaxActiveSandboxes int `env:"WORKER_MAX_ACTIVE_SANDBOXES" envDefault:"0"`
 	// WorkerDrainTimeout is how long graceful shutdown waits for in-flight
 	// worker jobs to finish before cancelling the worker context. Coding
 	// turns routinely run 5–15 minutes (per-org cap is even higher), so a
@@ -139,6 +143,10 @@ type Config struct {
 	// hosts lazy-pull it if missing so fresh hosts do not depend on image cache
 	// state; override this to use a private mirror.
 	SandboxHealthCheckImage string `env:"SANDBOX_HEALTH_CHECK_IMAGE" envDefault:"busybox:1.36.1"`
+	// SandboxRequireDiskQuota fails sandbox startup when Docker cannot enforce
+	// SANDBOX_DISK_LIMIT_GB via StorageOpt. Production worker deploys set this
+	// true by default; local dev can leave it false for ext4 Docker installs.
+	SandboxRequireDiskQuota bool `env:"SANDBOX_REQUIRE_DISK_QUOTA" envDefault:"false"`
 	// SandboxResolvConf, when set, is bind-mounted read-only at /etc/resolv.conf
 	// inside every sandbox container. Required under runsc on user-defined
 	// networks because gVisor's netstack can't reach Docker's embedded DNS at
@@ -230,6 +238,13 @@ type Config struct {
 	// histograms. Operators use these to size SANDBOX_* limits against actual
 	// consumption rather than allocation. Set to 0 to disable sampling.
 	RuntimeStatsInterval time.Duration `env:"RUNTIME_STATS_INTERVAL" envDefault:"30s"`
+	// SandboxGCInterval controls worker-local cleanup of provider-labeled
+	// sandbox containers. The GC destroys old managed containers that no
+	// session row references and hard-expires idle referenced containers only
+	// after a DB finalize CAS wins. Set to 0 to disable.
+	SandboxGCInterval time.Duration `env:"SANDBOX_GC_INTERVAL" envDefault:"5m"`
+	SandboxGCGrace    time.Duration `env:"SANDBOX_GC_GRACE"    envDefault:"30m"`
+	SandboxGCHardMax  time.Duration `env:"SANDBOX_GC_HARD_MAX" envDefault:"24h"`
 
 	// Redis (optional)
 	RedisTopology   string `env:"REDIS_TOPOLOGY" envDefault:"standalone"`
@@ -275,6 +290,9 @@ func Load() *Config {
 	}
 	if cfg.WorkerProcessCount <= 0 {
 		cfg.WorkerProcessCount = 2
+	}
+	if cfg.WorkerMaxActiveSandboxes < 0 {
+		cfg.WorkerMaxActiveSandboxes = 0
 	}
 
 	// Fall back to SessionSecret for CSRF signing if not explicitly set.
