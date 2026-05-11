@@ -53,6 +53,10 @@ type Config struct {
 	// server process when MODE is "worker" or "all". Increase this on larger
 	// hosts to process more jobs/sandboxes in parallel.
 	WorkerProcessCount int `env:"WORKER_PROCESS_COUNT" envDefault:"2"`
+	// WorkerMaxActiveSandboxes controls the live container admission cap for
+	// this worker node. 0 derives from the final WorkerProcessCount; values >0
+	// are explicit per-node caps.
+	WorkerMaxActiveSandboxes int `env:"WORKER_MAX_ACTIVE_SANDBOXES" envDefault:"0"`
 	// WorkerDrainTimeout is how long graceful shutdown waits for in-flight
 	// worker jobs to finish before cancelling the worker context. Coding
 	// turns routinely run 5–15 minutes (per-org cap is even higher), so a
@@ -270,6 +274,9 @@ func Load() *Config {
 	}
 	if cfg.WorkerProcessCount <= 0 {
 		cfg.WorkerProcessCount = 2
+	}
+	if cfg.WorkerMaxActiveSandboxes < 0 {
+		cfg.WorkerMaxActiveSandboxes = 0
 	}
 
 	// Fall back to SessionSecret for CSRF signing if not explicitly set.

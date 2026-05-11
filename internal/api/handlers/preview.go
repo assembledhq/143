@@ -31,6 +31,7 @@ type PreviewHandler struct {
 	repoStore       *db.RepositoryStore
 	fileReader      sandbox.FileReader
 	sandboxProvider agent.SandboxProvider
+	sandboxCapacity *agent.SandboxCapacityGate
 	snapshots       storage.SnapshotStore
 	workerSelector  *preview.WorkerSelector
 	workerClient    *preview.WorkerPreviewClient
@@ -75,6 +76,12 @@ func (h *PreviewHandler) SetWorkerRuntime(selector *preview.WorkerSelector, clie
 	h.workerSelector = selector
 	h.workerClient = client
 	h.localNodeID = localNodeID
+}
+
+// SetSandboxCapacityGate injects the local live-sandbox admission gate used
+// before preview hydrate creates a container.
+func (h *PreviewHandler) SetSandboxCapacityGate(gate *agent.SandboxCapacityGate) {
+	h.sandboxCapacity = gate
 }
 
 type previewHTTPError struct {
@@ -345,6 +352,16 @@ func (h *PreviewHandler) acquireSandbox(ctx context.Context, orgID uuid.UUID, se
 		}
 	}
 
+	// Hydrate: build a SandboxConfig matching what the orchestrator uses so
+	// the restored container has consistent resource limits and paths.
+	// WorkDir resolves from the session's repo (HomeDir + "/" + slug) so
+	// downstream sandbox commands land in the same path the orchestrator uses.
+	sandboxCfg := agent.DefaultSandboxConfig()
+	sandboxCfg.WorkDir = workDir
+	sandboxCfg.SessionID = session.ID.String()
+	sandboxCfg.OrgID = session.OrgID.String()
+	sandboxCfg.Purpose = "preview_hydrate"
+
 	// Pre-hydrate race check: re-read just container_id and bail early if a
 	// peer (typically a continue_session turn) has published one since we
 	// read `session` at the top of startPreviewLocal. This is a *latency*
@@ -381,19 +398,27 @@ func (h *PreviewHandler) acquireSandbox(ctx context.Context, orgID uuid.UUID, se
 		}
 	}
 
-	// Hydrate: build a SandboxConfig matching what the orchestrator uses so
-	// the restored container has consistent resource limits and paths.
-	// WorkDir resolves from the session's repo (HomeDir + "/" + slug) so
-	// downstream sandbox commands — notably readWorkspacePreviewConfig's
-	// ReadFile against the repo config path under sb.WorkDir — land in the same
-	// path the orchestrator uses, not the legacy /workspace default.
-	sandboxCfg := agent.DefaultSandboxConfig()
-	sandboxCfg.WorkDir = workDir
-	sandboxCfg.SessionID = session.ID.String()
-	sandboxCfg.OrgID = session.OrgID.String()
-	sandboxCfg.Purpose = "preview_hydrate"
+	var capacityReservation *agent.SandboxCapacityReservation
+	if h.sandboxCapacity != nil {
+		var capErr error
+		capacityReservation, capErr = h.sandboxCapacity.Acquire(ctx, agent.SandboxCapacityRequest{
+			Purpose:   sandboxCfg.Purpose,
+			SessionID: sandboxCfg.SessionID,
+			OrgID:     sandboxCfg.OrgID,
+		})
+		if capErr != nil {
+			return acquireSandboxResult{
+				ErrCode: "PREVIEW_CAPACITY_REACHED",
+				Err:     fmt.Errorf("%w: %w", preview.ErrPreviewCapacity, capErr),
+			}
+		}
+		defer capacityReservation.Release()
+	}
 
 	sandbox, err := agent.HydrateSandboxFromSnapshot(ctx, h.sandboxProvider, h.snapshots, *session.SnapshotKey, sandboxCfg)
+	if capacityReservation != nil {
+		capacityReservation.Release()
+	}
 	if err != nil {
 		// The storage layer found no blob at the recorded snapshot key — the
 		// DB row is out of sync with the object store (reaped out-of-band,
@@ -631,6 +656,8 @@ func (h *PreviewHandler) startPreviewLocal(ctx context.Context, orgID, userID, s
 			return nil, newPreviewHTTPError(http.StatusConflict, acq.ErrCode, acq.Err.Error(), acq.Err)
 		case "SANDBOX_BUSY":
 			return nil, newPreviewHTTPError(http.StatusConflict, acq.ErrCode, acq.Err.Error(), acq.Err)
+		case "PREVIEW_CAPACITY_REACHED":
+			return nil, newPreviewHTTPError(http.StatusServiceUnavailable, acq.ErrCode, acq.Err.Error(), acq.Err)
 		default:
 			return nil, newPreviewHTTPError(http.StatusInternalServerError, "PREVIEW_HYDRATE_FAILED", "failed to hydrate sandbox for preview", acq.Err)
 		}

@@ -39,7 +39,16 @@ func TestWorkerProvisioningIncludesGitHubAppUserAuthSecrets(t *testing.T) {
 	require.Contains(t, string(provisionScript), "SOPS_AGE_KEY=%s", "worker reprovision path should write SOPS_AGE_KEY into .env so docker-entrypoint.sh decrypts the encrypted env bundle")
 	require.Contains(t, string(provisionScript), "GITHUB_APP_CLIENT_ID=%s", "worker reprovision path should write the GitHub App user auth client ID into .env")
 	require.Contains(t, string(provisionScript), "GITHUB_APP_CLIENT_SECRET=%s", "worker reprovision path should write the GitHub App user auth client secret into .env")
+	require.Contains(t, string(provisionScript), "WORKER_MAX_ACTIVE_SANDBOXES=%s", "worker reprovision path should write the per-machine live sandbox capacity cap into .env")
 	require.Contains(t, string(provisionScript), `scp "${SCP_OPTS[@]}" "$ENC_FILE" root@"$HOST":/opt/143/`, "worker reprovision path should copy .env.production.enc to the host before starting docker compose so bind-mount source creation cannot turn it into a directory")
+}
+
+func TestDeployWritesWorkerSandboxCapacityEnv(t *testing.T) {
+	t.Parallel()
+
+	deployScript, err := os.ReadFile("../deploy/scripts/deploy.sh")
+	require.NoError(t, err, "test should read deploy.sh")
+	require.Contains(t, string(deployScript), "WORKER_MAX_ACTIVE_SANDBOXES=%s", "worker deploy should write the per-machine live sandbox capacity cap into .env")
 }
 
 // Worker preview routing requires three per-host values: NODE_ID,

@@ -40,6 +40,7 @@ func TestLoad_UsesDefaults(t *testing.T) {
 	require.Equal(t, int64(0), cfg.GitHubAppID, "Load should default GitHub app ID to zero")
 	require.Equal(t, "all", cfg.Mode, "Load should default mode to all")
 	require.Equal(t, 2, cfg.WorkerProcessCount, "Load should default worker process count to 2")
+	require.Equal(t, 0, cfg.WorkerMaxActiveSandboxes, "Load should default worker max active sandboxes to derived mode")
 	require.Equal(t, "chat", cfg.OpenAIAPIType, "Load should default OpenAI API type to chat")
 	require.Equal(t, "143", cfg.OpenRouterAppName, "Load should default OpenRouter app name to 143")
 }
@@ -54,6 +55,7 @@ func TestLoad_UsesEnvironmentOverrides(t *testing.T) {
 	t.Setenv("CORS_ALLOWED_ORIGINS", "https://one.example.com,https://two.example.com")
 	t.Setenv("MODE", "worker")
 	t.Setenv("WORKER_PROCESS_COUNT", "4")
+	t.Setenv("WORKER_MAX_ACTIVE_SANDBOXES", "7")
 	t.Setenv("GITHUB_APP_ID", "12345")
 
 	cfg := Load()
@@ -67,6 +69,7 @@ func TestLoad_UsesEnvironmentOverrides(t *testing.T) {
 	require.Equal(t, int64(12345), cfg.GitHubAppID, "Load should parse GITHUB_APP_ID from the environment")
 	require.Equal(t, "worker", cfg.Mode, "Load should read MODE from the environment")
 	require.Equal(t, 4, cfg.WorkerProcessCount, "Load should parse WORKER_PROCESS_COUNT from the environment")
+	require.Equal(t, 7, cfg.WorkerMaxActiveSandboxes, "Load should parse WORKER_MAX_ACTIVE_SANDBOXES from the environment")
 }
 
 //nolint:paralleltest // uses t.Setenv

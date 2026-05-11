@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -386,6 +387,16 @@ func TestPreviewHandler_ExecuteInteraction_TooManySteps(t *testing.T) {
 type mockPreviewProvider struct {
 	startHandle *preview.PreviewHandle
 	startConfig *models.PreviewConfig
+}
+
+type previewFakeLiveSandboxCounter struct {
+	count int
+	calls atomic.Int64
+}
+
+func (p *previewFakeLiveSandboxCounter) CountLiveSandboxes(context.Context) (int, error) {
+	p.calls.Add(1)
+	return p.count, nil
 }
 
 func (m *mockPreviewProvider) StartPreview(_ context.Context, _ *agent.Sandbox, cfg *models.PreviewConfig, _ map[string]string, _ preview.ServiceObserver) (*preview.PreviewHandle, error) {
@@ -1594,6 +1605,57 @@ func TestPreviewHandler_StartPreview_HydrateFails(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
+func TestPreviewHandler_StartPreview_HydrateCapacityReached(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	orgID := uuid.New()
+	userID := uuid.New()
+	sessionID := uuid.New()
+	key := "snap-key"
+
+	mock.ExpectQuery("SELECT .+ FROM sessions WHERE id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(sessionRowColumns).
+				AddRow(sessionRowForHydrate(sessionID, orgID, &key, "snapshotted")...),
+		)
+	expectReserveSuccess(mock, sessionID, orgID, userID)
+	mock.ExpectQuery("SELECT COALESCE\\(container_id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"container_id"}).AddRow(""))
+	expectAbortReservationNoDestroy(mock)
+
+	h := newPreviewHandlerWithMock(mock)
+	h.sessionStore = db.NewSessionStore(mock)
+	h.sandboxCapacity = agent.NewSandboxCapacityGate(agent.SandboxCapacityGateConfig{
+		Counter:   &previewFakeLiveSandboxCounter{count: 1},
+		MaxActive: 1,
+		NodeID:    "worker-1",
+		Logger:    zerolog.Nop(),
+	})
+	sp := testutil.NewMockSandboxProvider()
+	sp.CreateFn = func(context.Context, agent.SandboxConfig) (*agent.Sandbox, error) {
+		t.Fatalf("provider.Create must not be called when live sandbox capacity is full")
+		return nil, nil
+	}
+	h.sandboxProvider = sp
+	h.snapshots = &fakeHydrateSnapshotStore{payload: []byte("snap")}
+
+	req := httptest.NewRequest(http.MethodPost, "/preview", strings.NewReader(""))
+	req = previewTestContextWithIDs(req, orgID, userID, sessionID.String())
+	w := httptest.NewRecorder()
+
+	h.StartPreview(w, req)
+
+	require.Equal(t, http.StatusServiceUnavailable, w.Code, "preview hydrate capacity should surface as 503")
+	require.Contains(t, w.Body.String(), "PREVIEW_CAPACITY_REACHED", "preview hydrate capacity should use the capacity error code")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 // TestPreviewHandler_StartPreview_PublishContainerIDFails covers the
 // PublishHydratedContainerID error branch that destroys the just-created
 // sandbox (preview.go: CAS failure in hydrate path).
@@ -1746,6 +1808,13 @@ func TestPreviewHandler_StartPreview_PrehydratePeekShortCircuit(t *testing.T) {
 
 	h := newPreviewHandlerWithMock(mock)
 	h.sessionStore = db.NewSessionStore(mock)
+	counter := &previewFakeLiveSandboxCounter{count: 99}
+	h.sandboxCapacity = agent.NewSandboxCapacityGate(agent.SandboxCapacityGateConfig{
+		Counter:   counter,
+		MaxActive: 1,
+		NodeID:    "worker-1",
+		Logger:    zerolog.Nop(),
+	})
 	sp := testutil.NewMockSandboxProvider()
 	h.sandboxProvider = sp
 	// Snapshot store presence required so we don't trip the NO_SANDBOX guard.
@@ -1760,6 +1829,7 @@ func TestPreviewHandler_StartPreview_PrehydratePeekShortCircuit(t *testing.T) {
 
 	require.Equal(t, http.StatusConflict, w.Code)
 	require.Contains(t, w.Body.String(), "SANDBOX_BUSY")
+	require.Equal(t, int64(0), counter.calls.Load(), "pre-hydrate peek should short-circuit before consuming live sandbox capacity")
 	require.Equal(t, 0, snaps.loadCalls, "must not load the snapshot when peek detects the race")
 	require.Equal(t, 0, sp.GetDestroyCalls(), "no container to destroy when peek short-circuits")
 	require.NoError(t, mock.ExpectationsWereMet())
