@@ -533,7 +533,35 @@ func TestDockerProvider_ListManagedSandboxes(t *testing.T) {
 				{
 					ID:      "container-3",
 					Created: createdAt.Add(-3 * time.Hour).Unix(),
+					Image:   "ghcr.io/assembledhq/143-sandbox:legacy",
 					Labels:  map[string]string{},
+					NetworkSettings: &container.NetworkSettingsSummary{
+						Networks: map[string]*network.EndpointSettings{
+							"143-sandbox": {},
+						},
+					},
+				},
+				{
+					ID:      "container-4",
+					Created: createdAt.Add(-4 * time.Hour).Unix(),
+					Image:   "143-sandbox-dns:local",
+					Labels:  map[string]string{},
+					NetworkSettings: &container.NetworkSettingsSummary{
+						Networks: map[string]*network.EndpointSettings{
+							"143-sandbox": {},
+						},
+					},
+				},
+				{
+					ID:      "container-5",
+					Created: createdAt.Add(-5 * time.Hour).Unix(),
+					Image:   "ghcr.io/assembledhq/143-sandbox:legacy",
+					Labels:  map[string]string{},
+					NetworkSettings: &container.NetworkSettingsSummary{
+						Networks: map[string]*network.EndpointSettings{
+							"other-network": {},
+						},
+					},
 				},
 			}, nil
 		},
@@ -559,7 +587,14 @@ func TestDockerProvider_ListManagedSandboxes(t *testing.T) {
 			Purpose:   "preview",
 			CreatedAt: createdAt.Add(-2 * time.Hour),
 		},
-	}, containers, "ListManagedSandboxes should map Docker summaries into GC metadata and fall back to Docker creation time")
+		{
+			ID:        "container-3",
+			SessionID: "",
+			OrgID:     "",
+			Purpose:   "",
+			CreatedAt: createdAt.Add(-3 * time.Hour),
+		},
+	}, containers, "ListManagedSandboxes should map Docker summaries into GC metadata, include legacy image-based sandboxes only on the sandbox network, skip DNS sidecars, and fall back to Docker creation time")
 }
 
 func TestDockerProvider_EnsureNetwork(t *testing.T) {
