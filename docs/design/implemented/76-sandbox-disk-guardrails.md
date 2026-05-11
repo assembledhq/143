@@ -38,7 +38,7 @@ It also carries provider-owned labels used by host-local GC:
 - `com.assembledhq.143.purpose`
 - `com.assembledhq.143.created_at`
 
-The worker-local GC accepts both label schemes and also treats legacy unlabeled containers whose image name contains `143-sandbox` as managed sandboxes, excluding the `143-sandbox-dns` sidecar. The image fallback is intentionally backward-compatible with older production sandboxes that predate ownership labels; new cleanup logic should prefer labels for safety, but must keep this fallback until those hosts no longer carry legacy containers.
+The worker-local GC accepts both label schemes and also treats legacy unlabeled containers whose image name contains `143-sandbox` as managed sandboxes when they are attached to the configured sandbox network, excluding the `143-sandbox-dns` sidecar. The image fallback is intentionally backward-compatible with older production sandboxes that predate ownership labels; new cleanup logic should prefer labels for safety, but must keep this fallback until those hosts no longer carry legacy containers.
 
 ## Worker-Local Sandbox GC
 
