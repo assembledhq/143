@@ -231,7 +231,12 @@ func main() {
 
 			// Build sandbox+preview provider so worker-capable modes can start,
 			// stop, and hydrate previews locally.
-			sandboxExec := providers.NewDockerProvider(apiDockerCli, logger, providers.WithResolvConf(cfg.SandboxResolvConf))
+			sandboxExec := providers.NewDockerProvider(
+				apiDockerCli,
+				logger,
+				providers.WithResolvConf(cfg.SandboxResolvConf),
+				providers.WithHealthCheckImage(cfg.SandboxHealthCheckImage),
+			)
 			dockerPreviewProvider := previewproviders.NewDockerPreviewProvider(apiDockerCli, sandboxExec, logger)
 			pvProvider = dockerPreviewProvider
 			snapshotExec = sandboxExec
@@ -860,7 +865,13 @@ func buildServices(
 		logger.Error().Err(err).Msg("Docker not available — all Phase 3+ services disabled")
 		return nil
 	}
-	sandboxProvider := providers.NewDockerProvider(dockerCli, logger, providers.WithRuntime(cfg.SandboxRuntime), providers.WithResolvConf(cfg.SandboxResolvConf))
+	sandboxProvider := providers.NewDockerProvider(
+		dockerCli,
+		logger,
+		providers.WithRuntime(cfg.SandboxRuntime),
+		providers.WithResolvConf(cfg.SandboxResolvConf),
+		providers.WithHealthCheckImage(cfg.SandboxHealthCheckImage),
+	)
 
 	// Startup health check: verify Docker daemon connectivity and, for gVisor,
 	// that the runsc runtime is functional. Retry a few times because Docker and
@@ -883,7 +894,13 @@ func buildServices(
 		if healthErr != nil {
 			if cfg.SandboxRuntime == "runsc" && !cfg.SandboxRequireGVisor {
 				logger.Warn().Err(healthErr).Msg("gVisor not available, falling back to runc — NOT RECOMMENDED FOR PRODUCTION")
-				sandboxProvider = providers.NewDockerProvider(dockerCli, logger, providers.WithRuntime("runc"), providers.WithResolvConf(cfg.SandboxResolvConf))
+				sandboxProvider = providers.NewDockerProvider(
+					dockerCli,
+					logger,
+					providers.WithRuntime("runc"),
+					providers.WithResolvConf(cfg.SandboxResolvConf),
+					providers.WithHealthCheckImage(cfg.SandboxHealthCheckImage),
+				)
 			} else {
 				logger.Error().Err(healthErr).Msg("sandbox health check failed — Phase 3+ services disabled")
 				return nil

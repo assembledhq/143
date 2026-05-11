@@ -134,6 +134,11 @@ type Config struct {
 	// Sandbox
 	SandboxRuntime       string `env:"SANDBOX_RUNTIME" envDefault:"runc"`
 	SandboxRequireGVisor bool   `env:"SANDBOX_REQUIRE_GVISOR" envDefault:"false"`
+	// SandboxHealthCheckImage is the small image used by worker startup to
+	// prove Docker can launch a container under the configured runtime. Worker
+	// hosts lazy-pull it if missing so fresh hosts do not depend on image cache
+	// state; override this to use a private mirror.
+	SandboxHealthCheckImage string `env:"SANDBOX_HEALTH_CHECK_IMAGE" envDefault:"busybox:1.36.1"`
 	// SandboxResolvConf, when set, is bind-mounted read-only at /etc/resolv.conf
 	// inside every sandbox container. Required under runsc on user-defined
 	// networks because gVisor's netstack can't reach Docker's embedded DNS at

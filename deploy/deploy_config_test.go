@@ -80,6 +80,17 @@ func TestWorkerPerHostIdentityIsPreservedAcrossDeploys(t *testing.T) {
 	require.Contains(t, string(deployScript), "/opt/143/.env.local is missing", "deploy.sh worker branch should abort loudly when .env.local is missing instead of coming up with empty NODE_ID and WORKER_PRIVATE_IP")
 }
 
+func TestWorkerGVisorPreflightPullsHealthImageOnlyWhenMissing(t *testing.T) {
+	t.Parallel()
+
+	compose, err := os.ReadFile("../docker-compose.worker.yml")
+	require.NoError(t, err, "test should read the worker compose file")
+	composeText := string(compose)
+
+	require.Contains(t, composeText, `SANDBOX_HEALTH_CHECK_IMAGE: ${SANDBOX_HEALTH_CHECK_IMAGE:-busybox:1.36.1}`, "worker compose should pass the configurable health-check image into the worker container")
+	require.Contains(t, composeText, `docker image inspect "$$HEALTHCHECK_IMAGE" >/dev/null 2>&1 || docker pull "$$HEALTHCHECK_IMAGE"`, "gVisor preflight should use the cached health image when present and only pull when missing")
+}
+
 // The auto-default for NODE_ID must use the full IP (dotted-to-dash), not
 // just the last octet — otherwise a fleet that spans multiple /24s would
 // silently produce duplicate NODE_IDs (10.0.0.4 and 10.0.1.4 both mapping
