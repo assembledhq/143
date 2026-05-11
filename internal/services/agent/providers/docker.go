@@ -3,8 +3,10 @@
 package providers
 
 import (
+	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -16,8 +18,10 @@ import (
 	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/filters"
+	"github.com/docker/docker/api/types/image"
 	"github.com/docker/docker/api/types/mount"
 	"github.com/docker/docker/api/types/network"
+	"github.com/docker/docker/client"
 	"github.com/docker/docker/pkg/stdcopy"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/rs/zerolog"
@@ -41,6 +45,9 @@ var _ agent.SandboxGCProvider = (*DockerProvider)(nil)
 const defaultScratchDir = "/var/tmp"
 
 const (
+	defaultHealthCheckImage     = "busybox:1.36.1"
+	healthCheckImagePullTimeout = 2 * time.Minute
+
 	SandboxLabelManaged   = "com.assembledhq.143.managed"
 	SandboxLabelType      = "com.assembledhq.143.type"
 	SandboxLabelSessionID = "com.assembledhq.143.session_id"
@@ -71,6 +78,8 @@ type DockerClient interface {
 	ContainerExecCreate(ctx context.Context, containerID string, config container.ExecOptions) (container.ExecCreateResponse, error)
 	ContainerExecAttach(ctx context.Context, execID string, config container.ExecAttachOptions) (types.HijackedResponse, error)
 	ContainerExecInspect(ctx context.Context, execID string) (container.ExecInspect, error)
+	ImageInspect(ctx context.Context, ref string, opts ...client.ImageInspectOption) (image.InspectResponse, error)
+	ImagePull(ctx context.Context, ref string, options image.PullOptions) (io.ReadCloser, error)
 	NetworkInspect(ctx context.Context, networkID string, options network.InspectOptions) (network.Inspect, error)
 	NetworkCreate(ctx context.Context, name string, options network.CreateOptions) (network.CreateResponse, error)
 }
@@ -82,6 +91,7 @@ type DockerProvider struct {
 	runtime          string // "runsc" (gVisor) or "runc" (standard Docker)
 	network          string // pre-created Docker network with egress restrictions
 	resolvConf       string // host path bind-mounted at /etc/resolv.conf in sandboxes
+	healthImage      string // small image used to verify the configured runtime can start containers
 	requireDiskQuota bool
 	logger           zerolog.Logger
 }
@@ -116,6 +126,16 @@ func WithResolvConf(path string) DockerProviderOption {
 	}
 }
 
+// WithHealthCheckImage sets the small image used for startup Docker probes.
+// Empty values keep the default pinned BusyBox tag.
+func WithHealthCheckImage(ref string) DockerProviderOption {
+	return func(p *DockerProvider) {
+		if strings.TrimSpace(ref) != "" {
+			p.healthImage = ref
+		}
+	}
+}
+
 // WithRequireDiskQuota makes Docker StorageOpt quota support mandatory when
 // SandboxConfig.DiskLimitGB is non-zero.
 func WithRequireDiskQuota(required bool) DockerProviderOption {
@@ -127,10 +147,11 @@ func WithRequireDiskQuota(required bool) DockerProviderOption {
 // NewDockerProvider creates a new DockerProvider with the given Docker client.
 func NewDockerProvider(cli DockerClient, logger zerolog.Logger, opts ...DockerProviderOption) *DockerProvider {
 	p := &DockerProvider{
-		client:  cli,
-		runtime: "runsc",
-		network: "143-sandbox",
-		logger:  logger,
+		client:      cli,
+		runtime:     "runsc",
+		network:     "143-sandbox",
+		healthImage: defaultHealthCheckImage,
+		logger:      logger,
 	}
 	for _, opt := range opts {
 		opt(p)
@@ -151,6 +172,12 @@ func (d *DockerProvider) HealthCheck(ctx context.Context) error {
 		return fmt.Errorf("docker health check: %w", err)
 	}
 
+	if d.runtime != "runc" || d.requireDiskQuota {
+		if err := d.ensureHealthCheckImage(ctx); err != nil {
+			return fmt.Errorf("docker health check: %w", err)
+		}
+	}
+
 	if d.requireDiskQuota {
 		if err := d.checkDiskQuotaSupport(ctx); err != nil {
 			return fmt.Errorf("docker health check: %w", err)
@@ -166,7 +193,7 @@ func (d *DockerProvider) HealthCheck(ctx context.Context) error {
 
 	pidsLimit := int64(64)
 	resp, err := d.client.ContainerCreate(ctx, &container.Config{
-		Image: "busybox:latest",
+		Image: d.healthImage,
 		Cmd:   []string{"echo", "runtime-ok"},
 	}, &container.HostConfig{
 		Runtime: d.runtime,
@@ -215,9 +242,74 @@ func (d *DockerProvider) HealthCheck(ctx context.Context) error {
 	}
 }
 
+func (d *DockerProvider) ensureHealthCheckImage(ctx context.Context) error {
+	if _, err := d.client.ImageInspect(ctx, d.healthImage); err == nil {
+		return nil
+	} else if !cerrdefs.IsNotFound(err) {
+		return fmt.Errorf("inspect health check image %q: %w", d.healthImage, err)
+	}
+
+	d.logger.Info().Str("image", d.healthImage).Msg("health check image missing on host; pulling from registry")
+	start := time.Now()
+
+	pullCtx, cancel := context.WithTimeout(ctx, healthCheckImagePullTimeout)
+	defer cancel()
+
+	rc, err := d.client.ImagePull(pullCtx, d.healthImage, image.PullOptions{})
+	if err != nil {
+		return fmt.Errorf("pull health check image %q: %w", d.healthImage, err)
+	}
+	defer rc.Close()
+
+	if pullErr := scanPullStreamForError(rc); pullErr != nil {
+		return fmt.Errorf("pull health check image %q: %w", d.healthImage, pullErr)
+	}
+
+	if _, err := d.client.ImageInspect(pullCtx, d.healthImage); err != nil {
+		return fmt.Errorf("health check image %q not present after pull: %w", d.healthImage, err)
+	}
+
+	d.logger.Info().Str("image", d.healthImage).Dur("elapsed", time.Since(start)).Msg("health check image pulled successfully")
+	return nil
+}
+
+func scanPullStreamForError(r io.Reader) error {
+	type pullEvent struct {
+		Error       string `json:"error"`
+		ErrorDetail struct {
+			Message string `json:"message"`
+		} `json:"errorDetail"`
+	}
+	var firstErr error
+	scanner := bufio.NewScanner(r)
+	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
+	for scanner.Scan() {
+		line := bytes.TrimSpace(scanner.Bytes())
+		if len(line) == 0 {
+			continue
+		}
+		var ev pullEvent
+		if err := json.Unmarshal(line, &ev); err != nil {
+			continue
+		}
+		if firstErr == nil {
+			switch {
+			case ev.ErrorDetail.Message != "":
+				firstErr = fmt.Errorf("%s", ev.ErrorDetail.Message)
+			case ev.Error != "":
+				firstErr = fmt.Errorf("%s", ev.Error)
+			}
+		}
+	}
+	if err := scanner.Err(); err != nil && firstErr == nil {
+		return fmt.Errorf("read pull stream: %w", err)
+	}
+	return firstErr
+}
+
 func (d *DockerProvider) checkDiskQuotaSupport(ctx context.Context) error {
 	resp, err := d.client.ContainerCreate(ctx, &container.Config{
-		Image: "busybox:latest",
+		Image: d.healthImage,
 		Cmd:   []string{"true"},
 		Labels: map[string]string{
 			SandboxLabelManaged: "true",

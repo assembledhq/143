@@ -517,6 +517,7 @@ All configuration via environment variables:
 | `SANDBOX_CPU_LIMIT` | No | `2` | CPU cores per sandbox |
 | `SANDBOX_MEMORY_LIMIT` | No | `4096` | Memory MB per sandbox |
 | `SANDBOX_REQUIRE_GVISOR` | No | `true` | If true, server refuses to start without gVisor in production |
+| `SANDBOX_HEALTH_CHECK_IMAGE` | No | `busybox:1.36.1` | Small image used for worker startup runtime probes; lazy-pulled if missing and overrideable for private mirrors |
 | `SANDBOX_IMAGE_DIGEST` | No | - | Expected digest for sandbox image verification |
 | `MAX_CONCURRENT_RUNS` | No | `3` | Max concurrent agent runs per org |
 | `E2B_API_KEY` | No | - | E2B API key (required if `SANDBOX_PROVIDER=e2b`) |

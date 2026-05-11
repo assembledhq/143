@@ -237,6 +237,7 @@ func main() {
 				apiDockerCli,
 				logger,
 				providers.WithResolvConf(cfg.SandboxResolvConf),
+				providers.WithHealthCheckImage(cfg.SandboxHealthCheckImage),
 				providers.WithRequireDiskQuota(cfg.SandboxRequireDiskQuota),
 			)
 			dockerPreviewProvider := previewproviders.NewDockerPreviewProvider(apiDockerCli, sandboxExec, logger)
@@ -910,6 +911,7 @@ func buildServices(
 		logger,
 		providers.WithRuntime(cfg.SandboxRuntime),
 		providers.WithResolvConf(cfg.SandboxResolvConf),
+		providers.WithHealthCheckImage(cfg.SandboxHealthCheckImage),
 		providers.WithRequireDiskQuota(cfg.SandboxRequireDiskQuota),
 	)
 
@@ -943,6 +945,7 @@ func buildServices(
 					logger,
 					providers.WithRuntime("runc"),
 					providers.WithResolvConf(cfg.SandboxResolvConf),
+					providers.WithHealthCheckImage(cfg.SandboxHealthCheckImage),
 					providers.WithRequireDiskQuota(cfg.SandboxRequireDiskQuota),
 				)
 				healthCtx, healthCancel := context.WithTimeout(context.Background(), 30*time.Second)

@@ -138,6 +138,11 @@ type Config struct {
 	// Sandbox
 	SandboxRuntime       string `env:"SANDBOX_RUNTIME" envDefault:"runc"`
 	SandboxRequireGVisor bool   `env:"SANDBOX_REQUIRE_GVISOR" envDefault:"false"`
+	// SandboxHealthCheckImage is the small image used by worker startup to
+	// prove Docker can launch a container under the configured runtime. Worker
+	// hosts lazy-pull it if missing so fresh hosts do not depend on image cache
+	// state; override this to use a private mirror.
+	SandboxHealthCheckImage string `env:"SANDBOX_HEALTH_CHECK_IMAGE" envDefault:"busybox:1.36.1"`
 	// SandboxRequireDiskQuota fails sandbox startup when Docker cannot enforce
 	// SANDBOX_DISK_LIMIT_GB via StorageOpt. Production worker deploys set this
 	// true by default; local dev can leave it false for ext4 Docker installs.
