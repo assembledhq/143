@@ -999,6 +999,7 @@ type testDeps struct {
 	orgs             *mockOrgStore
 	identityResolver *identity.Resolver
 	sandboxAuth      agent.SandboxAuthServer
+	sandboxCapacity  *agent.SandboxCapacityGate
 	users            agent.UserLookup
 	logger           *zerolog.Logger
 }
@@ -1119,6 +1120,7 @@ func buildOrchestrator(d testDeps) *agent.Orchestrator {
 		Orgs:              orgStore,
 		IdentityResolver:  d.identityResolver,
 		SandboxAuth:       d.sandboxAuth,
+		SandboxCapacity:   d.sandboxCapacity,
 		Users:             d.users,
 		NodeID:            d.nodeID,
 		Logger:            logger,
@@ -1191,6 +1193,31 @@ func TestRunAgent_SuccessfulRun(t *testing.T) {
 
 	// Sandbox should be destroyed.
 	require.Equal(t, 1, d.provider.GetDestroyCalls())
+}
+
+func TestRunAgent_SandboxCapacityRejectsBeforeCreate(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	run := testRun(orgID, issue.ID)
+
+	d := defaultDeps()
+	d.sandboxCapacity = agent.NewSandboxCapacityGate(agent.SandboxCapacityGateConfig{
+		Counter:   &fakeLiveSandboxCounter{count: 1},
+		MaxActive: 1,
+		NodeID:    "worker-1",
+		Logger:    zerolog.Nop(),
+	})
+	d.provider.CreateFn = func(context.Context, agent.SandboxConfig) (*agent.Sandbox, error) {
+		t.Fatalf("provider.Create must not be called when live sandbox capacity is full")
+		return nil, nil
+	}
+
+	err := buildOrchestrator(d).RunAgent(context.Background(), run)
+
+	require.ErrorIs(t, err, agent.ErrSandboxCapacity, "RunAgent should surface the live sandbox capacity sentinel")
+	require.Empty(t, d.sessions.getStatusUpdates(), "RunAgent should not mark the session running when capacity is unavailable")
 }
 
 func TestRunAgent_SuccessLogIncludesPlatformHealthFields(t *testing.T) {
@@ -2876,6 +2903,32 @@ func TestContinueSession_GatesOnPendingSnapshotKey(t *testing.T) {
 	err := orch.ContinueSession(context.Background(), session, nil)
 	require.ErrorIs(t, err, agent.ErrSnapshotPending, "ContinueSession should bail with ErrSnapshotPending when PendingSnapshotKey is set")
 	require.Empty(t, d.sessions.getStatusUpdates(), "ContinueSession must not mutate session state before the gate fires")
+}
+
+func TestContinueSession_SandboxCapacityRejectsFreshResumeBeforeCreate(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	session := testRun(orgID, issue.ID)
+	session.Status = string(models.SessionStatusIdle)
+
+	d := defaultDeps()
+	d.sandboxCapacity = agent.NewSandboxCapacityGate(agent.SandboxCapacityGateConfig{
+		Counter:   &fakeLiveSandboxCounter{count: 1},
+		MaxActive: 1,
+		NodeID:    "worker-1",
+		Logger:    zerolog.Nop(),
+	})
+	d.provider.CreateFn = func(context.Context, agent.SandboxConfig) (*agent.Sandbox, error) {
+		t.Fatalf("provider.Create must not be called when live sandbox capacity is full")
+		return nil, nil
+	}
+
+	err := buildOrchestrator(d).ContinueSession(context.Background(), session, nil)
+
+	require.ErrorIs(t, err, agent.ErrSandboxCapacity, "ContinueSession should surface the live sandbox capacity sentinel")
+	require.Empty(t, d.sessions.getStatusUpdates(), "ContinueSession should not mark the session running when capacity is unavailable")
 }
 
 func TestRevertThread_UpdatesWorkspaceSnapshot(t *testing.T) {
@@ -4736,6 +4789,13 @@ func TestContinueSession_ReusesExistingContainer(t *testing.T) {
 	// No SnapshotKey: proves the reuse branch takes precedence over hydrate.
 
 	d := defaultDeps()
+	counter := &fakeLiveSandboxCounter{count: 99}
+	d.sandboxCapacity = agent.NewSandboxCapacityGate(agent.SandboxCapacityGateConfig{
+		Counter:   counter,
+		MaxActive: 1,
+		NodeID:    "worker-1",
+		Logger:    zerolog.Nop(),
+	})
 	d.issues.issue = issue
 	d.messages.messages = []models.SessionMessage{
 		{
@@ -4777,6 +4837,7 @@ func TestContinueSession_ReusesExistingContainer(t *testing.T) {
 	require.NoError(t, orch.ContinueSession(context.Background(), session, nil))
 
 	require.Equal(t, 0, d.provider.GetDestroyCalls(), "sandbox must stay alive while preview holds it")
+	require.Equal(t, int64(0), counter.calls.Load(), "reused-container continuations should not consume live sandbox capacity")
 	require.Equal(t, 0, d.sessions.finalizeCalls, "FinalizeContainerDestroy must not run while preview holds")
 	require.GreaterOrEqual(t, d.sessions.acquireHoldCalls, 1)
 	require.GreaterOrEqual(t, d.sessions.releaseHoldCalls, 1)
