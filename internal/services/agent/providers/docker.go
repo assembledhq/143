@@ -572,6 +572,10 @@ func isLiveSandboxContainer(summary container.Summary) bool {
 	if summary.Labels != nil && (summary.Labels[sandboxLabelLegacySandbox] == "true" || isManagedSandboxLabels(summary.Labels)) {
 		return true
 	}
+	return isLegacySandboxImage(summary)
+}
+
+func isLegacySandboxImage(summary container.Summary) bool {
 	image := strings.ToLower(summary.Image)
 	return strings.Contains(image, "143-sandbox") && !strings.Contains(image, "143-sandbox-dns")
 }
@@ -621,7 +625,8 @@ func (d *DockerProvider) ListManagedSandboxes(ctx context.Context) ([]agent.Mana
 }
 
 func isManagedSandboxSummary(summary container.Summary) bool {
-	return summary.Labels != nil && (summary.Labels[sandboxLabelLegacySandbox] == "true" || isManagedSandboxLabels(summary.Labels))
+	return summary.Labels != nil && (summary.Labels[sandboxLabelLegacySandbox] == "true" || isManagedSandboxLabels(summary.Labels)) ||
+		isLegacySandboxImage(summary)
 }
 
 func isManagedSandboxLabels(labels map[string]string) bool {
