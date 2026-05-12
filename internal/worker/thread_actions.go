@@ -114,8 +114,8 @@ func newForkSessionThreadHandler(stores *Stores, services *Services, logger zero
 				TurnNumber: thread.CurrentTurn + 1,
 				Role:       models.MessageRoleAssistant,
 				Content: fmt.Sprintf(
-					"Forked this tab into a new session: **%s**.\n\n"+
-						"The new session shares the same repository%s but starts with a fresh sandbox so risky divergent work doesn't touch this branch.",
+					"Forked this tab out as **%s**.\n\n"+
+						"The fork shares the same repository%s but starts with a fresh sandbox so risky divergent work doesn't touch this branch.",
 					label,
 					branchHint,
 				),
