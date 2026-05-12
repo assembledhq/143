@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import {
   Sparkles,
@@ -27,6 +27,7 @@ import {
 } from "@/components/ui/collapsible";
 import { api } from "@/lib/api";
 import { AGENTS } from "@/lib/agents";
+import { useAuth } from "@/hooks/use-auth";
 import { BranchPicker } from "@/components/branch-picker";
 import { NoReposWarning } from "@/components/no-repos-warning";
 import { MobileBackButton } from "@/components/mobile-back-button";
@@ -48,6 +49,14 @@ function priorityLevelToNumeric(level: PriorityLevel): number {
 
 export default function NewProjectPage() {
   const router = useRouter();
+  const { user, isLoading } = useAuth();
+  const canManage = user?.role === "admin" || user?.role === "member";
+
+  useEffect(() => {
+    if (!isLoading && !canManage) {
+      router.replace("/projects");
+    }
+  }, [canManage, isLoading, router]);
 
   // AI description
   const [description, setDescription] = useState("");
@@ -149,6 +158,10 @@ export default function NewProjectPage() {
         generateMutation.mutate();
       }
     }
+  }
+
+  if (!isLoading && !canManage) {
+    return null;
   }
 
   const canSubmit =

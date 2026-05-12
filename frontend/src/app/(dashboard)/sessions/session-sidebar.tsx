@@ -185,6 +185,7 @@ export function SessionSidebar() {
     isResolved,
     setPeopleFilter,
   } = usePeopleFilter();
+  const canListTeamMembers = currentUser?.role === "admin" || currentUser?.role === "member";
   const selectedId = selectedSegment && selectedSegment !== "new" ? selectedSegment : undefined;
   const [searchParam, setSearchParam] = useQueryState("search", parseAsString);
   const [search, setSearch] = useState(searchParam ?? "");
@@ -237,6 +238,7 @@ export function SessionSidebar() {
   const { data: membersData } = useQuery({
     queryKey: ["team", "members"],
     queryFn: () => api.team.listMembers(),
+    enabled: canListTeamMembers,
   });
   const members = useMemo<User[]>(() => membersData?.data ?? [], [membersData?.data]);
 

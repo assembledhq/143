@@ -13,6 +13,7 @@ The system aggregates issues from support, Sentry, and Linear, prioritizes them 
 ## Identity and organization context
 
 - The current product is single-organization per user, but the intended long-term identity model is **one user identity, many organization memberships**. A user represents the human account (email, GitHub ID, Google ID); membership represents access to an organization and carries the user's role for that org.
+- Organization memberships now support a fourth assignable role, `builder`, alongside `admin`, `member`, and `viewer`. `Builder` is more constrained than `member`: it can use build/session workflows and personal coding-agent setup, but it does not inherit the broader member repo/settings/evals/project/PR-shipping surface until explicit builder guardrails exist.
 - All product data remains scoped to exactly one `org_id`. Multi-organization support should change how the active org is resolved for a request, not introduce cross-org views by default.
 - The detailed future design lives in [future/50-multi-organization-membership.md](future/50-multi-organization-membership.md). The key product guardrail is that single-org users should see no new UI or onboarding complexity.
 - Invitation acceptance is **token-driven and immediate**. Opening an invite while already signed in should claim it right away and switch the tab's active org to the invited org; unauthenticated invite flows should carry a prominent "invitation pending" callout with org and target identity so the auth screen never looks like a generic login.
