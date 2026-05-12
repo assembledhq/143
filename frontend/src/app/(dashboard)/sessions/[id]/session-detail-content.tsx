@@ -363,6 +363,10 @@ type PRActionErrorState = {
 };
 
 type AddTabTriggerSource = "strip" | "header";
+type PendingThreadPreview = Pick<
+  SessionThread,
+  "id" | "session_id" | "org_id" | "agent_type" | "label" | "status" | "current_turn" | "created_at" | "cost_cents" | "pending_message_count" | "model_override"
+>;
 
 const terminalSessionStatuses = new Set(["completed", "pr_created", "failed", "cancelled", "skipped"]);
 const SNAPSHOT_EXPIRED_PR_MESSAGE =
@@ -2629,6 +2633,17 @@ export function SessionDetailContent({ id }: { id: string }) {
   });
   const sessionDiffPayload = diffData?.data;
   const threads = useMemo(() => session?.threads ?? [], [session?.threads]);
+  const [pendingThreadPreview, setPendingThreadPreview] = useState<PendingThreadPreview | null>(null);
+  const chromeThreads = useMemo(() => {
+    if (!pendingThreadPreview || threads.some((thread) => thread.id === pendingThreadPreview.id)) {
+      return threads;
+    }
+    return [...threads, pendingThreadPreview];
+  }, [pendingThreadPreview, threads]);
+  const nonInteractiveThreadIds = useMemo(
+    () => new Set(pendingThreadPreview ? [pendingThreadPreview.id] : []),
+    [pendingThreadPreview],
+  );
   const [activeThreadId, setActiveThreadId] = useState<string | null>(null);
   const [hasResolvedInitialThreadSelection, setHasResolvedInitialThreadSelection] = useState(false);
   const [viewedThreadIds, setViewedThreadIds] = useState<Set<string>>(() => (
@@ -2650,6 +2665,7 @@ export function SessionDetailContent({ id }: { id: string }) {
   useEffect(() => {
     setHasResolvedInitialThreadSelection(false);
     setActiveThreadId(null);
+    setPendingThreadPreview(null);
   }, [id]);
 
   useEffect(() => {
@@ -3733,8 +3749,8 @@ export function SessionDetailContent({ id }: { id: string }) {
     fileEventsSinceRef.current = max;
   }, [fileEventsQuery.data]);
   const overlapsByThreadId = useMemo(
-    () => computeThreadOverlap(threads, accumulatedFileEvents),
-    [threads, accumulatedFileEvents],
+    () => computeThreadOverlap(chromeThreads, accumulatedFileEvents),
+    [chromeThreads, accumulatedFileEvents],
   );
   const [attributionFilter, setAttributionFilter] = useState<ThreadAttributionFilterValue>({ kind: "all" });
   const attributionAllowedPaths = useAttributionAllowedPaths(attributionFilter, accumulatedFileEvents);
@@ -3767,7 +3783,23 @@ export function SessionDetailContent({ id }: { id: string }) {
 
   const createThreadMutation = useMutation({
     mutationFn: (body: { agent_type: string; model?: string; label: string }) => api.sessions.createThread(id, body),
+    onMutate: (body) => {
+      setPendingThreadPreview({
+        id: "__pending-thread__",
+        session_id: id,
+        org_id: session?.org_id ?? "",
+        agent_type: body.agent_type as SessionThread["agent_type"],
+        label: body.label,
+        status: "pending",
+        current_turn: 0,
+        created_at: new Date().toISOString(),
+        cost_cents: 0,
+        pending_message_count: 0,
+        model_override: body.model,
+      });
+    },
     onSuccess: (response) => {
+      setPendingThreadPreview(null);
       queryClient.setQueryData<SingleResponse<SessionDetail>>(["session", id], (existing) => {
         if (!existing) return existing;
         const existingThreads = existing.data.threads ?? [];
@@ -3788,6 +3820,8 @@ export function SessionDetailContent({ id }: { id: string }) {
       queryClient.invalidateQueries({ queryKey: ["session", id] });
     },
     onError: (err) => {
+      setPendingThreadPreview(null);
+      queryClient.invalidateQueries({ queryKey: ["session", id] });
       toast.error(err instanceof Error ? err.message : "Failed to create tab");
     },
   });
@@ -4446,9 +4480,10 @@ export function SessionDetailContent({ id }: { id: string }) {
               sessionTitle={sessionTitle(session)}
               detailButtonLabel="Open session details"
               backTo="/sessions"
-              threads={threads}
+              threads={chromeThreads}
               activeThreadId={activeThread?.id ?? null}
               viewedThreadIds={viewedThreadIds}
+              nonInteractiveThreadIds={nonInteractiveThreadIds}
               onOpenDetails={() => setMobileDetailOpen(true)}
               onActiveThreadChange={setActiveThreadId}
               onAddThread={openAddThreadDialog}
@@ -4534,18 +4569,18 @@ export function SessionDetailContent({ id }: { id: string }) {
                 <Button
                   ref={headerAddTabButtonRef}
                   type="button"
-                  variant="outline"
+                  variant="ghost"
                   size="icon"
-                  className="h-8 w-8 shrink-0"
+                  className="h-7 w-7 shrink-0 rounded-sm text-muted-foreground opacity-70 transition-opacity hover:text-foreground hover:opacity-100 focus-visible:opacity-100"
                   aria-label="Add agent tab"
                   title="Add agent tab"
                   onClick={() => handleCreateThreadFrom("header")}
                   disabled={createThreadMutation.isPending}
                 >
                   {createThreadMutation.isPending ? (
-                    <Loader2 className="h-4 w-4 animate-spin" />
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
                   ) : (
-                    <Plus className="h-4 w-4" />
+                    <Plus className="h-3.5 w-3.5" />
                   )}
                 </Button>
                 <DisabledTooltip disabled={centerMode === "review" && showDetailPanel} content={detailToggleTitle}>
@@ -4569,9 +4604,10 @@ export function SessionDetailContent({ id }: { id: string }) {
         {!isDedicatedMobileReview ? (
           <div className="hidden md:block">
           <AgentTabStrip
-            threads={threads}
+            threads={chromeThreads}
             activeThreadId={activeThread?.id ?? null}
             viewedThreadIds={viewedThreadIds}
+            nonInteractiveThreadIds={nonInteractiveThreadIds}
             overlapsByThreadId={overlapsByThreadId}
             statusConfig={statusConfig}
             onActiveThreadChange={setActiveThreadId}
