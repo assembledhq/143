@@ -2,13 +2,11 @@
 
 import { useMemo, useState } from "react";
 import {
-  GitBranch,
   Loader2,
   MoreVertical,
   PanelBottomOpen,
   Pencil,
   Plus,
-  Square,
   Undo2,
   X,
 } from "lucide-react";
@@ -39,11 +37,8 @@ interface MobileSessionTopBarProps {
   onActiveThreadChange: (threadId: string) => void;
   onAddThread: () => void;
   onRenameSession: () => void;
-  onCancelThread: (threadId: string) => void;
-  onForkThread: (threadId: string) => void;
   onRevertThread: (threadId: string) => void;
   onArchiveThread: (threadId: string) => void;
-  cancelPendingThreadId: string | null;
   archivePendingThreadId: string | null;
 }
 
@@ -102,11 +97,8 @@ export function MobileSessionTopBar({
   onActiveThreadChange,
   onAddThread,
   onRenameSession,
-  onCancelThread,
-  onForkThread,
   onRevertThread,
   onArchiveThread,
-  cancelPendingThreadId,
   archivePendingThreadId,
 }: MobileSessionTopBarProps) {
   const [actionsOpen, setActionsOpen] = useState(false);
@@ -115,9 +107,7 @@ export function MobileSessionTopBar({
     () => threads.find((thread) => thread.id === activeThreadId) ?? null,
     [activeThreadId, threads],
   );
-  const canCancel = activeThread ? isActiveStatus(activeThread.status) : false;
   const canRevert = !!activeThread?.diff;
-  const isCancellingThis = activeThread ? cancelPendingThreadId === activeThread.id : false;
 
   return (
     <>
@@ -158,7 +148,7 @@ export function MobileSessionTopBar({
           <SheetHeader className="px-4 text-left">
             <SheetTitle>Session actions</SheetTitle>
             <SheetDescription>
-              Switch threads and manage this session without taking permanent space away from the conversation.
+              Switch tabs and manage this session without taking permanent space away from the conversation.
             </SheetDescription>
           </SheetHeader>
 
@@ -167,7 +157,7 @@ export function MobileSessionTopBar({
               <section className="px-4 py-4">
                 <div className="mb-3 flex items-center justify-between gap-2">
                   <div>
-                    <p className="text-sm font-medium text-foreground">Threads</p>
+                    <p className="text-sm font-medium text-foreground">Tabs</p>
                     <p className="text-xs text-muted-foreground">Switch the active conversation lane.</p>
                   </div>
                   <Badge variant="secondary" className="text-xs">
@@ -281,40 +271,12 @@ export function MobileSessionTopBar({
             {activeThread ? (
               <section className="border-t border-border px-4 py-4">
                 <div className="mb-3">
-                  <p className="text-sm font-medium text-foreground">Active thread</p>
+                  <p className="text-sm font-medium text-foreground">Active tab</p>
                   <p className="text-xs text-muted-foreground">
                     {activeThread.label} · {threadStatusLabel(activeThread.status)}
                   </p>
                 </div>
                 <div className="space-y-2">
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    className="h-11 w-full justify-start rounded-xl border border-border bg-background px-3"
-                    aria-label={isCancellingThis ? "Cancelling turn" : "Cancel turn"}
-                    disabled={!canCancel || isCancellingThis}
-                    onClick={() => {
-                      if (!canCancel) return;
-                      onCancelThread(activeThread.id);
-                      setActionsOpen(false);
-                    }}
-                  >
-                    {isCancellingThis ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Square className="mr-2 h-4 w-4" />}
-                    {isCancellingThis ? "Cancelling…" : "Cancel turn"}
-                  </Button>
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    className="h-11 w-full justify-start rounded-xl border border-border bg-background px-3"
-                    aria-label="Fork into new session"
-                    onClick={() => {
-                      onForkThread(activeThread.id);
-                      setActionsOpen(false);
-                    }}
-                  >
-                    <GitBranch className="mr-2 h-4 w-4" />
-                    Fork into new session
-                  </Button>
                   <Button
                     type="button"
                     variant="ghost"

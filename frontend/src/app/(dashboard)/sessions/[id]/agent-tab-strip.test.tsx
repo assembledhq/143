@@ -47,11 +47,8 @@ describe("AgentTabStrip", () => {
         statusConfig={statusConfig}
         onActiveThreadChange={vi.fn()}
         onAddTab={onAddTab}
-        onCancelThread={vi.fn()}
-        onForkThread={vi.fn()}
         onRevertThread={vi.fn()}
         onArchiveThread={vi.fn()}
-        cancelPendingThreadId={null}
         archivePendingThreadId={null}
       />,
     );
@@ -96,11 +93,8 @@ describe("AgentTabStrip", () => {
         statusConfig={statusConfig}
         onActiveThreadChange={vi.fn()}
         onAddTab={vi.fn()}
-        onCancelThread={vi.fn()}
-        onForkThread={vi.fn()}
         onRevertThread={vi.fn()}
         onArchiveThread={vi.fn()}
-        cancelPendingThreadId={null}
         archivePendingThreadId={null}
       />,
     );
@@ -126,11 +120,8 @@ describe("AgentTabStrip", () => {
         statusConfig={statusConfig}
         onActiveThreadChange={vi.fn()}
         onAddTab={vi.fn()}
-        onCancelThread={vi.fn()}
-        onForkThread={vi.fn()}
         onRevertThread={vi.fn()}
         onArchiveThread={vi.fn()}
-        cancelPendingThreadId={null}
         archivePendingThreadId={null}
       />,
     );
@@ -150,6 +141,35 @@ describe("AgentTabStrip", () => {
     expect(screen.getByRole("button", { name: "Close Review tab" })).toBeInTheDocument();
   });
 
+  it("shows only the revert action in the desktop tab actions menu", async () => {
+    const user = userEvent.setup();
+    const threads = [
+      makeThread({ id: "thread-1", label: "Main tab", diff: "diff --git a/a b/a" }),
+      makeThread({ id: "thread-2", label: "Review", status: "completed", agent_type: "claude_code" }),
+    ];
+
+    renderWithProviders(
+      <AgentTabStrip
+        threads={threads}
+        activeThreadId={threads[0].id}
+        viewedThreadIds={new Set([threads[0].id])}
+        overlapsByThreadId={new Map()}
+        statusConfig={statusConfig}
+        onActiveThreadChange={vi.fn()}
+        onAddTab={vi.fn()}
+        onRevertThread={vi.fn()}
+        onArchiveThread={vi.fn()}
+        archivePendingThreadId={null}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Tab actions" }));
+
+    expect(screen.queryByRole("menuitem", { name: "Cancel turn" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("menuitem", { name: "Fork this tab" })).not.toBeInTheDocument();
+    expect(screen.getByRole("menuitem", { name: "Revert this tab's changes" })).toBeInTheDocument();
+  });
+
   it("archives the selected non-running tab from the close affordance beside the strip", async () => {
     const user = userEvent.setup();
     const threads = [
@@ -167,11 +187,8 @@ describe("AgentTabStrip", () => {
         statusConfig={statusConfig}
         onActiveThreadChange={vi.fn()}
         onAddTab={vi.fn()}
-        onCancelThread={vi.fn()}
-        onForkThread={vi.fn()}
         onRevertThread={vi.fn()}
         onArchiveThread={onArchiveThread}
-        cancelPendingThreadId={null}
         archivePendingThreadId={null}
       />,
     );
@@ -205,11 +222,8 @@ describe("AgentTabStrip", () => {
             setViewedThreadIds((current) => new Set(current).add(threadId));
           }}
           onAddTab={vi.fn()}
-          onCancelThread={vi.fn()}
-          onForkThread={vi.fn()}
           onRevertThread={vi.fn()}
           onArchiveThread={vi.fn()}
-          cancelPendingThreadId={null}
           archivePendingThreadId={null}
         />
       );
