@@ -30,9 +30,10 @@ import (
 	"github.com/assembledhq/143/internal/services/linear"
 	"github.com/assembledhq/143/internal/services/pm"
 	"github.com/assembledhq/143/internal/services/prioritization"
-	"github.com/assembledhq/143/internal/services/validation"
 	"github.com/assembledhq/143/internal/version"
 )
+
+const sandboxCapacityRetryDelay = 10 * time.Second
 
 // DataRetentionConfig holds retention periods for the data cleanup handler.
 type DataRetentionConfig struct {
@@ -61,7 +62,6 @@ func RegisterHandlers(w *Worker, stores *Stores, services *Services, retentionCf
 	if hasServiceHandlersDependencies(services) {
 		w.Register("run_agent", newRunAgentHandler(stores, services, logger))
 		w.Register("continue_session", newContinueSessionHandler(stores, services, logger))
-		w.Register("validate", newValidateHandler(stores, services, logger))
 		w.Register("open_pr", newOpenPRHandler(stores, services, logger))
 		w.Register("push_pr_changes", newPushPRChangesHandler(stores, services, logger))
 		w.Register("sync_pull_request_state", newSyncPullRequestStateHandler(services, logger))
@@ -113,7 +113,6 @@ func hasServiceHandlersDependencies(services *Services) bool {
 		return false
 	}
 	return services.Orchestrator != nil &&
-		services.Validation != nil &&
 		services.PR != nil &&
 		services.Failure != nil &&
 		services.SandboxProvider != nil
@@ -171,7 +170,6 @@ type prCreator interface {
 // Services holds the service dependencies needed by job handlers.
 type Services struct {
 	Orchestrator    orchestratorService
-	Validation      *validation.Service
 	PR              prCreator
 	Failure         *agent.FailureService
 	SandboxProvider agent.SandboxProvider
@@ -216,6 +214,10 @@ type Services struct {
 	// is disabled (interval <= 0 in config) or the provider can't report
 	// stats (e.g. a non-Docker provider in the future).
 	RuntimeSampler *agent.RuntimeSampler
+	// SandboxGC periodically reconciles provider-labeled local sandbox
+	// containers against DB ownership so leaked containers cannot accumulate
+	// indefinitely on worker disks. nil when disabled or unsupported.
+	SandboxGC *agent.SandboxGC
 }
 
 type orchestratorService interface {
@@ -1020,6 +1022,14 @@ func newRunAgentHandler(stores *Stores, services *Services, logger zerolog.Logge
 			runErr = services.Orchestrator.RunAgent(jobCtx, &run)
 		}
 		if err := runErr; err != nil {
+			if errors.Is(err, agent.ErrSandboxCapacity) {
+				retryAfter := sandboxCapacityRetryDelay
+				logger.Info().
+					Str("session_id", runID.String()).
+					Err(err).
+					Msg("local sandbox capacity reached; retrying run_agent")
+				return &RetryableError{Err: err, RetryAfter: &retryAfter}
+			}
 			if errors.Is(err, agent.ErrStaleSandboxIDCleared) {
 				// The orchestrator detected a stale orphan container_id from
 				// a crashed prior worker, CAS-cleared it, and signaled retry.
@@ -1193,6 +1203,14 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 		}
 
 		if err := services.Orchestrator.ContinueSession(jobCtx, &session, continueOpts); err != nil {
+			if errors.Is(err, agent.ErrSandboxCapacity) {
+				retryAfter := sandboxCapacityRetryDelay
+				logger.Info().
+					Str("session_id", sessionID.String()).
+					Err(err).
+					Msg("local sandbox capacity reached; retrying continue_session")
+				return &RetryableError{Err: err, RetryAfter: &retryAfter}
+			}
 			// A pending post-PR snapshot upload is a transient state — wrap
 			// in RetryableError so the job is requeued without consuming an
 			// attempt. The session row is unchanged at this point.
@@ -1400,84 +1418,6 @@ func newEnrichPullRequestHealthHandler(services *Services, logger zerolog.Logger
 			Int64("version", input.Version).
 			Msg("starting enrich_pull_request_health job")
 		return services.PR.EnrichPullRequestHealth(ctx, orgID, pullRequestID, input.Version)
-	}
-}
-
-// validate handler runs validation checks on a completed agent run.
-func newValidateHandler(stores *Stores, services *Services, logger zerolog.Logger) JobHandler {
-	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
-		var input struct {
-			SessionID       string `json:"session_id"`
-			OrgID           string `json:"org_id"`
-			IssueSnapshotID string `json:"issue_snapshot_id,omitempty"`
-		}
-		if err := json.Unmarshal(payload, &input); err != nil {
-			return fmt.Errorf("unmarshal validate payload: %w", err)
-		}
-
-		orgID, err := parseOrgID(input.OrgID, ctx)
-		if err != nil {
-			return fmt.Errorf("parse org ID: %w", err)
-		}
-		runID, err := uuid.Parse(input.SessionID)
-		if err != nil {
-			return fmt.Errorf("parse agent run ID: %w", err)
-		}
-
-		run, err := stores.Sessions.GetByID(ctx, orgID, runID)
-		if err != nil {
-			return fmt.Errorf("fetch agent run: %w", err)
-		}
-
-		logger.Info().
-			Str("session_id", runID.String()).
-			Str("org_id", orgID.String()).
-			Msg("starting validate job")
-
-		// Create a sandbox for CI checks.
-		sandbox, err := services.SandboxProvider.Create(ctx, agent.DefaultSandboxConfig())
-		if err != nil {
-			return fmt.Errorf("create sandbox for validation: %w", err)
-		}
-		defer func() {
-			if destroyErr := services.SandboxProvider.Destroy(ctx, sandbox); destroyErr != nil {
-				logger.Error().Err(destroyErr).Msg("failed to destroy validation sandbox")
-			}
-		}()
-
-		var snapshot *models.SessionTurnIssueSnapshot
-		if stores.IssueSnapshots != nil {
-			if input.IssueSnapshotID != "" {
-				snapshotID, err := uuid.Parse(input.IssueSnapshotID)
-				if err != nil {
-					return fmt.Errorf("parse issue snapshot id: %w", err)
-				}
-				resolved, err := stores.IssueSnapshots.GetByID(ctx, orgID, snapshotID)
-				if err != nil {
-					return fmt.Errorf("fetch issue snapshot for validation: %w", err)
-				}
-				snapshot = &resolved
-			} else if run.CurrentTurn > 0 {
-				if resolved, err := stores.IssueSnapshots.GetByTurn(ctx, orgID, run.ID, run.CurrentTurn); err == nil {
-					snapshot = &resolved
-				}
-			}
-		}
-
-		if issueID := primaryIssueIDFromSnapshot(snapshot); issueID != nil {
-			run.PrimaryIssueID = issueID
-		}
-
-		var issue *models.Issue
-		if run.PrimaryIssueID != nil {
-			resolvedIssue, err := stores.Issues.GetByID(ctx, orgID, *run.PrimaryIssueID)
-			if err != nil {
-				return fmt.Errorf("fetch issue for validation: %w", err)
-			}
-			issue = &resolvedIssue
-		}
-
-		return services.Validation.Validate(ctx, &run, issue, sandbox)
 	}
 }
 

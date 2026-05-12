@@ -1,6 +1,6 @@
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { http, HttpResponse } from "msw";
-import { renderWithProviders, screen, userEvent } from "@/test/test-utils";
+import { renderWithProviders, screen, userEvent, waitFor } from "@/test/test-utils";
 import { server } from "@/test/mocks/server";
 import { mockSessions } from "@/test/mocks/handlers";
 import type { ListResponse, Session, SessionTimelineEntry, SingleResponse } from "@/lib/types";
@@ -145,5 +145,132 @@ describe("SessionDetailContent performance", () => {
 
     expect(textarea).toHaveValue("Lag");
     expect(chatTimelineRenderState.count).toBe(0);
+  }, 30000);
+
+  it("loads the raw diff only after the changes surface is opened", async () => {
+    const { SessionDetailContent } = await import("./session-detail-content");
+    const user = userEvent.setup();
+    let diffRequestCount = 0;
+
+    server.use(
+      http.get("/api/v1/sessions/:id", () => {
+        return HttpResponse.json({
+          data: {
+            ...mockSessions[0],
+            primary_issue_id: undefined,
+            sandbox_state: "ready",
+            diff: undefined,
+            diff_stats: { added: 34083, removed: 176, files_changed: 3594 },
+          },
+        } satisfies SingleResponse<Session>);
+      }),
+      http.get("/api/v1/sessions/:id/timeline", () => {
+        return HttpResponse.json({ data: [], meta: {} } satisfies ListResponse<SessionTimelineEntry>);
+      }),
+      http.get("/api/v1/sessions/:id/diff", () => {
+        diffRequestCount += 1;
+        return HttpResponse.json({
+          data: {
+            session_id: "session-abcdef12-3456-7890",
+            diff: "diff --git a/main.go b/main.go\n--- a/main.go\n+++ b/main.go\n@@ -1 +1 @@\n-old\n+new\n",
+            diff_stats: { added: 1, removed: 1, files_changed: 1 },
+            diff_history: [],
+            diff_truncated: false,
+            diff_history_truncated: false,
+          },
+        });
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+
+    await screen.findByPlaceholderText("Send a follow-up message...");
+    expect(diffRequestCount).toBe(0);
+
+    await user.click(screen.getByRole("tab", { name: /Changes/i }));
+
+    await waitFor(() => {
+      expect(diffRequestCount).toBe(1);
+    });
+  });
+
+  it("shows a retryable error when the lazy diff request fails", async () => {
+    const { SessionDetailContent } = await import("./session-detail-content");
+    const user = userEvent.setup();
+
+    server.use(
+      http.get("/api/v1/sessions/:id", () => {
+        return HttpResponse.json({
+          data: {
+            ...mockSessions[0],
+            primary_issue_id: undefined,
+            sandbox_state: "ready",
+            diff: undefined,
+            diff_stats: { added: 1, removed: 1, files_changed: 1 },
+          },
+        } satisfies SingleResponse<Session>);
+      }),
+      http.get("/api/v1/sessions/:id/timeline", () => {
+        return HttpResponse.json({ data: [], meta: {} } satisfies ListResponse<SessionTimelineEntry>);
+      }),
+      http.get("/api/v1/sessions/:id/diff", () => {
+        return HttpResponse.json(
+          { error: { code: "DIFF_LOAD_FAILED", message: "failed to load session diff" } },
+          { status: 503 }
+        );
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+
+    await screen.findByPlaceholderText("Send a follow-up message...");
+    await user.click(screen.getByRole("tab", { name: /Changes/i }));
+
+    expect(await screen.findByText("Couldn't load changes")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Retry" })).toBeInTheDocument();
+  });
+
+  it("shows a truncation notice when the lazy diff response is capped", async () => {
+    const { SessionDetailContent } = await import("./session-detail-content");
+    const user = userEvent.setup();
+
+    server.use(
+      http.get("/api/v1/sessions/:id", () => {
+        return HttpResponse.json({
+          data: {
+            ...mockSessions[0],
+            primary_issue_id: undefined,
+            sandbox_state: "ready",
+            diff: undefined,
+            diff_stats: { added: 34083, removed: 176, files_changed: 3594 },
+          },
+        } satisfies SingleResponse<Session>);
+      }),
+      http.get("/api/v1/sessions/:id/timeline", () => {
+        return HttpResponse.json({ data: [], meta: {} } satisfies ListResponse<SessionTimelineEntry>);
+      }),
+      http.get("/api/v1/sessions/:id/diff", () => {
+        return HttpResponse.json({
+          data: {
+            session_id: "session-abcdef12-3456-7890",
+            diff: "diff --git a/main.go b/main.go\n--- a/main.go\n+++ b/main.go\n@@ -1 +1 @@\n-old\n+new\n",
+            diff_stats: { added: 34083, removed: 176, files_changed: 3594 },
+            diff_history: [],
+            diff_truncated: true,
+            diff_history_truncated: true,
+            diff_chars: 9000000,
+            diff_max_chars: 2000000,
+          },
+        } satisfies SingleResponse<import("@/lib/types").SessionDiff>);
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+
+    await screen.findByPlaceholderText("Send a follow-up message...");
+    await user.click(screen.getByRole("tab", { name: /Changes/i }));
+
+    expect(await screen.findByText("Large diff truncated")).toBeInTheDocument();
+    expect(screen.getByText(/showing the first/)).toBeInTheDocument();
   });
 });

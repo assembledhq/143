@@ -585,6 +585,20 @@ func TestParseStreamOutput(t *testing.T) {
 			},
 		},
 		{
+			name:   "result event with top level cost and usage",
+			output: `{"type":"result","content":"Done.","total_cost_usd":0.37,"usage":{"input_tokens":1000,"output_tokens":500,"cache_read_input_tokens":250,"cache_creation_input_tokens":125}}`,
+			checkResult: func(t *testing.T, result *agent.AgentResult, logs []agent.LogEntry) {
+				t.Helper()
+				require.Equal(t, 1000, result.TokenUsage.InputTokens)
+				require.Equal(t, 500, result.TokenUsage.OutputTokens)
+				require.Equal(t, 250, result.TokenUsage.CachedInputTokens)
+				require.Equal(t, 125, result.TokenUsage.CacheCreationTokens)
+				require.Equal(t, 0.37, result.TokenUsage.TotalCostUSD)
+				require.NotNil(t, result.TokenUsage.Cost)
+				require.Equal(t, agent.TokenCostSourceDirect, result.TokenUsage.Cost.Source)
+			},
+		},
+		{
 			name:   "result event accepts output-only usage",
 			output: `{"type":"result","subtype":"success","result":"Done.","usage":{"input_tokens":0,"output_tokens":42}}`,
 			checkResult: func(t *testing.T, result *agent.AgentResult, logs []agent.LogEntry) {

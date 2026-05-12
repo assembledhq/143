@@ -1,4 +1,4 @@
-import { describe, expect, it, vi, beforeEach } from "vitest";
+import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 import {
   buildPreviewIframeSrc,
   PREVIEW_BOOTSTRAP_READY_EVENT,
@@ -17,6 +17,7 @@ const mockStart = vi.hoisted(() => vi.fn());
 const mockStop = vi.hoisted(() => vi.fn());
 const mockRestart = vi.hoisted(() => vi.fn());
 const mockBootstrap = vi.hoisted(() => vi.fn());
+const mockConsoleBadgeState = vi.hoisted(() => ({ shouldThrow: false }));
 
 vi.mock("@/lib/api", () => ({
   api: {
@@ -33,9 +34,12 @@ vi.mock("@/lib/api", () => ({
 }));
 
 vi.mock("./console-badge", () => ({
-  ConsoleBadge: ({ sessionId }: { sessionId: string }) => (
-    <div data-testid="console-badge">ConsoleBadge:{sessionId}</div>
-  ),
+  ConsoleBadge: ({ sessionId }: { sessionId: string }) => {
+    if (mockConsoleBadgeState.shouldThrow) {
+      throw new Error("console badge exploded");
+    }
+    return <div data-testid="console-badge">ConsoleBadge:{sessionId}</div>;
+  },
 }));
 
 vi.mock("./design-mode-overlay", () => ({
@@ -123,12 +127,33 @@ describe("PreviewPanel bootstrap helpers", () => {
 /* ------------------------------------------------------------------ */
 
 describe("PreviewPanel component", () => {
+  let resizeObserverCallback: ResizeObserverCallback | null = null;
+  const originalResizeObserver = window.ResizeObserver;
+
   beforeEach(() => {
     vi.resetAllMocks();
     mockStart.mockResolvedValue({});
     mockStop.mockResolvedValue({});
     mockRestart.mockResolvedValue({});
     mockBootstrap.mockResolvedValue({ token: "tok-1" });
+    mockConsoleBadgeState.shouldThrow = false;
+
+    class MockResizeObserver {
+      constructor(callback: ResizeObserverCallback) {
+        resizeObserverCallback = callback;
+      }
+
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    }
+
+    window.ResizeObserver = MockResizeObserver as typeof ResizeObserver;
+  });
+
+  afterEach(() => {
+    resizeObserverCallback = null;
+    window.ResizeObserver = originalResizeObserver;
   });
 
   /* ---------- Loading state ---------- */
@@ -208,6 +233,60 @@ describe("PreviewPanel component", () => {
     expect(screen.getByRole("button", { name: "Stop preview" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Restart preview" })).toBeInTheDocument();
     expect(screen.queryByText("Start Preview")).not.toBeInTheDocument();
+  });
+
+  it("stacks startup phase tiles when the panel becomes narrow", async () => {
+    mockGet.mockResolvedValue(
+      makePreviewStatus(
+        { status: "starting" },
+        [],
+        [
+          {
+            id: "infra-1",
+            preview_instance_id: "prev-1",
+            infra_name: "postgres",
+            template: "postgres",
+            container_id: "ctr-1",
+            status: "provisioning",
+            host: "postgres",
+            port: 5432,
+            created_at: "2026-01-01T00:00:00Z",
+          },
+        ],
+      ),
+    );
+
+    renderWithProviders(<PreviewPanel {...DEFAULT_PROPS} />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Preparing preview")).toBeInTheDocument();
+    });
+
+    const phaseRail = screen.getByTestId("preview-startup-phase-rail");
+
+    resizeObserverCallback?.(
+      [
+        {
+          target: phaseRail,
+          contentRect: {
+            width: 220,
+            height: 0,
+            x: 0,
+            y: 0,
+            top: 0,
+            right: 220,
+            bottom: 0,
+            left: 0,
+            toJSON: () => ({}),
+          },
+        } as unknown as ResizeObserverEntry,
+      ],
+      {} as ResizeObserver,
+    );
+
+    await waitFor(() => {
+      expect(phaseRail).toHaveAttribute("data-layout", "stacked");
+    });
   });
 
   it("hides the Provisioning rail tile when the preview has no infrastructure", async () => {
@@ -306,6 +385,25 @@ describe("PreviewPanel component", () => {
     await waitFor(() => {
       expect(screen.getByTestId("console-badge")).toBeInTheDocument();
     });
+  });
+
+  it("keeps the preview panel usable if the console badge crashes", async () => {
+    const originalError = console.error;
+    console.error = vi.fn();
+    mockConsoleBadgeState.shouldThrow = true;
+    mockGet.mockResolvedValue(makePreviewStatus({ status: "ready" }));
+
+    try {
+      renderWithProviders(<PreviewPanel {...DEFAULT_PROPS} />);
+
+      await waitFor(() => {
+        expect(screen.getByText("Ready")).toBeInTheDocument();
+      });
+      expect(screen.getByTitle("Preview")).toBeInTheDocument();
+      expect(screen.queryByTestId("console-badge")).not.toBeInTheDocument();
+    } finally {
+      console.error = originalError;
+    }
   });
 
   it("renders TTLWarning when expires_at is set and preview is active", async () => {

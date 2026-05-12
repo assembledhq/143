@@ -76,6 +76,26 @@ const STATUS_LABELS: Record<PreviewStatus, string> = {
 };
 
 const STARTUP_PHASES = ["Provisioning", "Starting", "Opening"] as const;
+const STARTUP_PHASE_RAIL_STACK_WIDTH = 300;
+const STARTUP_PHASE_RAIL_COMPACT_WIDTH = 420;
+
+type StartupPhaseRailLayout = "default" | "compact" | "stacked";
+
+function getStartupPhaseRailLayout(
+  width: number,
+  phaseCount: number,
+): StartupPhaseRailLayout {
+  if (phaseCount <= 1) {
+    return "default";
+  }
+  if (width < STARTUP_PHASE_RAIL_STACK_WIDTH) {
+    return "stacked";
+  }
+  if (phaseCount >= 3 && width < STARTUP_PHASE_RAIL_COMPACT_WIDTH) {
+    return "compact";
+  }
+  return "default";
+}
 
 function statusColor(status: PreviewStatus): string {
   switch (status) {
@@ -301,10 +321,12 @@ export function PreviewPanel({
 }: PreviewPanelProps) {
   const queryClient = useQueryClient();
   const iframeRef = useRef<HTMLIFrameElement>(null);
+  const startupPhaseRailRef = useRef<HTMLDivElement | null>(null);
   const [selectedWidth, setSelectedWidth] = useState<number>(0); // 0 = full
   const [designMode, setDesignMode] = useState(false);
   const [bootstrapComplete, setBootstrapComplete] = useState(false);
   const [mutationError, setMutationError] = useState<string | null>(null);
+  const [startupPhaseRailLayout, setStartupPhaseRailLayout] = useState<StartupPhaseRailLayout>("default");
 
   // Poll preview status every 3s when active
   const {
@@ -333,13 +355,15 @@ export function PreviewPanel({
   });
 
   const instance = previewStatus?.instance;
+  const rawServices = previewStatus?.services;
+  const rawInfrastructure = previewStatus?.infrastructure;
   const services = useMemo(
-    () => previewStatus?.services ?? [],
-    [previewStatus?.services],
+    () => (Array.isArray(rawServices) ? rawServices : []),
+    [rawServices],
   );
   const infrastructure = useMemo(
-    () => previewStatus?.infrastructure ?? [],
-    [previewStatus?.infrastructure],
+    () => (Array.isArray(rawInfrastructure) ? rawInfrastructure : []),
+    [rawInfrastructure],
   );
   const status = instance?.status;
   const isActive =
@@ -601,6 +625,35 @@ export function PreviewPanel({
     (phase) => phase !== "Provisioning" || infrastructure.length > 0,
   );
 
+  useEffect(() => {
+    const rail = startupPhaseRailRef.current;
+    if (!rail) {
+      return;
+    }
+
+    const updateLayout = (width: number) => {
+      setStartupPhaseRailLayout(
+        getStartupPhaseRailLayout(width, visibleStartupPhases.length),
+      );
+    };
+
+    updateLayout(rail.getBoundingClientRect().width);
+
+    if (typeof ResizeObserver === "undefined") {
+      return;
+    }
+
+    const observer = new ResizeObserver((entries) => {
+      const entry = entries[0];
+      if (!entry) {
+        return;
+      }
+      updateLayout(entry.contentRect.width);
+    });
+    observer.observe(rail);
+    return () => observer.disconnect();
+  }, [visibleStartupPhases.length]);
+
   if (statusLoading) {
     return (
       <div className="flex flex-col gap-3">
@@ -655,7 +708,11 @@ export function PreviewPanel({
         )}
 
         {/* Console errors badge */}
-        {isReady && <ConsoleBadge sessionId={sessionId} />}
+        {isReady && (
+          <ErrorBoundary fallback={null}>
+            <ConsoleBadge sessionId={sessionId} />
+          </ErrorBoundary>
+        )}
 
         {/* TTL Warning */}
         {instance?.expires_at && isReady && (
@@ -846,9 +903,18 @@ export function PreviewPanel({
                 <p className="text-sm text-muted-foreground">{startupSubtitle}</p>
               </div>
               <div
+                ref={startupPhaseRailRef}
+                data-testid="preview-startup-phase-rail"
+                data-layout={startupPhaseRailLayout}
                 className={cn(
                   "mt-8 grid w-full max-w-md gap-3",
-                  visibleStartupPhases.length === 3 ? "grid-cols-3" : "grid-cols-2",
+                  startupPhaseRailLayout === "stacked"
+                    ? "grid-cols-1"
+                    : startupPhaseRailLayout === "compact"
+                      ? "grid-cols-2"
+                      : visibleStartupPhases.length === 3
+                        ? "grid-cols-3"
+                        : "grid-cols-2",
                 )}
               >
                 {visibleStartupPhases.map((phase) => {
@@ -857,7 +923,7 @@ export function PreviewPanel({
                     <div
                       key={phase}
                       className={cn(
-                        "flex flex-col items-center gap-2 rounded-lg border bg-card/70 px-3 py-2.5 text-xs text-muted-foreground",
+                        "flex flex-col items-center gap-2 rounded-lg border bg-card/70 px-3.5 py-3 text-center text-xs leading-tight text-muted-foreground",
                         phaseState === "active" && "border-primary/30 text-foreground shadow-sm",
                         phaseState === "complete" && "text-emerald-600 dark:text-emerald-400",
                       )}
@@ -869,7 +935,7 @@ export function PreviewPanel({
                       ) : (
                         <Circle className="size-3.5" />
                       )}
-                      <span className={phaseState === "active" ? "font-medium" : undefined}>
+                      <span className={cn("text-balance", phaseState === "active" ? "font-medium" : undefined)}>
                         {phase}
                       </span>
                     </div>

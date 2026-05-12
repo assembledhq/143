@@ -341,6 +341,22 @@ type SessionDetail struct {
 	Threads []SessionThread `json:"threads"`
 }
 
+// SessionDiff is the large, lazily-loaded diff payload for a session. It is
+// intentionally separate from SessionDetail so opening a session does not
+// hydrate or marshal multi-megabyte diff blobs.
+type SessionDiff struct {
+	SessionID            uuid.UUID       `json:"session_id"`
+	Diff                 *string         `json:"diff,omitempty"`
+	DiffStats            json.RawMessage `json:"diff_stats,omitempty"`
+	DiffHistory          json.RawMessage `json:"diff_history,omitempty"`
+	DiffTruncated        bool            `json:"diff_truncated"`
+	DiffHistoryTruncated bool            `json:"diff_history_truncated"`
+	DiffChars            int64           `json:"diff_chars,omitempty"`
+	DiffHistoryBytes     int64           `json:"diff_history_bytes,omitempty"`
+	DiffMaxChars         int64           `json:"diff_max_chars,omitempty"`
+	DiffHistoryMaxBytes  int64           `json:"diff_history_max_bytes,omitempty"`
+}
+
 // SessionIssueLink is the live join model between a session and an issue.
 type SessionIssueLink struct {
 	ID            uuid.UUID            `db:"id" json:"id"`
@@ -527,25 +543,6 @@ type SessionDiffSnapshot struct {
 	CapturedAt     time.Time `db:"captured_at" json:"captured_at"`
 }
 
-// Validation represents validation results for an agent run.
-type Validation struct {
-	ID                  uuid.UUID       `db:"id" json:"id"`
-	SessionID           uuid.UUID       `db:"session_id" json:"session_id"`
-	OrgID               uuid.UUID       `db:"org_id" json:"org_id"`
-	Status              string          `db:"status" json:"status"`
-	DirectionCheck      string          `db:"direction_check" json:"direction_check"`
-	CorrectnessCheck    string          `db:"correctness_check" json:"correctness_check"`
-	QualityCheck        string          `db:"quality_check" json:"quality_check"`
-	SecurityScan        string          `db:"security_scan" json:"security_scan"`
-	RegressionTestCheck string          `db:"regression_test_check" json:"regression_test_check"`
-	CoverageDelta       json.RawMessage `db:"coverage_delta" json:"coverage_delta,omitempty"`
-	CICheck             string          `db:"ci_check" json:"ci_check"`
-	Details             json.RawMessage `db:"details" json:"details,omitempty"`
-	StartedAt           *time.Time      `db:"started_at" json:"started_at,omitempty"`
-	CompletedAt         *time.Time      `db:"completed_at" json:"completed_at,omitempty"`
-	CreatedAt           time.Time       `db:"created_at" json:"created_at"`
-}
-
 // PullRequest.Status values. Stored as a free-form string for historical
 // reasons (the webhook used to forward GitHub's raw state field). New code
 // should compare against these constants rather than literal strings so
@@ -671,6 +668,7 @@ type SessionThread struct {
 	StartedAt           *time.Time   `db:"started_at" json:"started_at,omitempty"`
 	CompletedAt         *time.Time   `db:"completed_at" json:"completed_at,omitempty"`
 	CreatedAt           time.Time    `db:"created_at" json:"created_at"`
+	ArchivedAt          *time.Time   `db:"archived_at" json:"archived_at,omitempty"`
 	BaseSnapshotKey     *string      `db:"base_snapshot_key" json:"base_snapshot_key,omitempty"`
 	CostCents           float64      `db:"cost_cents" json:"cost_cents"`
 	PendingMessageCount int          `db:"pending_message_count" json:"pending_message_count"`

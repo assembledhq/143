@@ -194,7 +194,6 @@ func newTestSessionHandler(pool *pgxpool.Pool) *handlers.SessionHandler {
 		db.NewSessionStore(pool),
 		db.NewSessionLogStore(pool),
 		db.NewSessionQuestionStore(pool),
-		nil, // validationStore — only EndSession with validate-on-turn touches it; not tested here
 		nil, // pullRequestStore
 		nil, // issueStore — set to nil; CreateManual without RepositoryID won't call it
 		db.NewRepositoryStore(pool),

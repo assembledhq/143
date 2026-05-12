@@ -194,7 +194,11 @@ function setMobileViewport(matches: boolean) {
 
 describe("ManualSessionCreatePageContent", () => {
   beforeEach(() => {
-    Object.values(mocks).forEach((m) => m.mockClear());
+    Object.values(mocks).forEach((value) => {
+      if (typeof value === "function" && "mockClear" in value) {
+        value.mockClear();
+      }
+    });
     mocks.searchParamGetMock.mockImplementation(() => null);
     window.sessionStorage.clear();
     setMobileViewport(false);
@@ -235,6 +239,15 @@ describe("ManualSessionCreatePageContent", () => {
     await waitFor(() => {
       expect(mocks.settingsGetMock).toHaveBeenCalled();
     });
+  });
+
+  it("keeps model controls visible on desktop when there are no repositories", async () => {
+    mocks.repositoriesListMock.mockResolvedValueOnce({ data: [] });
+
+    renderWithProviders(<ManualSessionCreatePageContent />);
+
+    expect(await screen.findByTestId("no-repos-warning")).toBeInTheDocument();
+    expect(screen.getByRole("combobox", { name: /Model override/i })).toBeInTheDocument();
   });
 
   it("uses a mobile settings sheet instead of inline repo and model controls on small screens", async () => {

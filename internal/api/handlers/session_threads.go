@@ -24,6 +24,7 @@ import (
 type ThreadService interface {
 	CreateThread(ctx context.Context, input thread.CreateThreadInput) (*models.SessionThread, error)
 	UpdateThread(ctx context.Context, input thread.UpdateThreadInput) (*models.SessionThread, error)
+	ArchiveThread(ctx context.Context, orgID, sessionID, threadID uuid.UUID) (models.SessionThread, error)
 	ListThreads(ctx context.Context, orgID, sessionID uuid.UUID) ([]models.SessionThread, error)
 	GetThread(ctx context.Context, orgID, sessionID, threadID uuid.UUID) (models.SessionThread, error)
 	SendMessage(ctx context.Context, input thread.SendMessageInput) (*thread.SendMessageResult, error)
@@ -281,6 +282,37 @@ func (h *SessionThreadHandler) UpdateThread(w http.ResponseWriter, r *http.Reque
 	}
 
 	writeJSON(w, http.StatusOK, models.SingleResponse[models.SessionThread]{Data: *result})
+}
+
+func (h *SessionThreadHandler) ArchiveThread(w http.ResponseWriter, r *http.Request) {
+	orgID := middleware.OrgIDFromContext(r.Context())
+	sessionID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid session ID")
+		return
+	}
+	threadID, err := uuid.Parse(chi.URLParam(r, "tid"))
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid thread ID")
+		return
+	}
+
+	result, err := h.svc.ArchiveThread(r.Context(), orgID, sessionID, threadID)
+	if err != nil {
+		switch {
+		case errors.Is(err, thread.ErrSessionNotFound), errors.Is(err, thread.ErrThreadNotFound):
+			writeError(w, r, http.StatusNotFound, "NOT_FOUND", "session or thread not found")
+		case errors.Is(err, thread.ErrCannotArchiveLastThread):
+			writeError(w, r, http.StatusConflict, "THREAD_LAST_VISIBLE", "cannot close the last remaining tab")
+		case errors.Is(err, thread.ErrThreadActive):
+			writeError(w, r, http.StatusConflict, "THREAD_ACTIVE", "cancel this tab before closing it")
+		default:
+			writeError(w, r, http.StatusInternalServerError, "ARCHIVE_FAILED", "failed to archive thread", err)
+		}
+		return
+	}
+
+	writeJSON(w, http.StatusOK, models.SingleResponse[models.SessionThread]{Data: result})
 }
 
 // ListThreads handles GET /sessions/{id}/threads — returns all threads for a session.

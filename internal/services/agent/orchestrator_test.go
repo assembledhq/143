@@ -999,6 +999,7 @@ type testDeps struct {
 	orgs             *mockOrgStore
 	identityResolver *identity.Resolver
 	sandboxAuth      agent.SandboxAuthServer
+	sandboxCapacity  *agent.SandboxCapacityGate
 	users            agent.UserLookup
 	logger           *zerolog.Logger
 }
@@ -1119,6 +1120,7 @@ func buildOrchestrator(d testDeps) *agent.Orchestrator {
 		Orgs:              orgStore,
 		IdentityResolver:  d.identityResolver,
 		SandboxAuth:       d.sandboxAuth,
+		SandboxCapacity:   d.sandboxCapacity,
 		Users:             d.users,
 		NodeID:            d.nodeID,
 		Logger:            logger,
@@ -1179,18 +1181,43 @@ func TestRunAgent_SuccessfulRun(t *testing.T) {
 	require.NotNil(t, results[0].result.ConfidenceScore)
 	require.InDelta(t, 0.9, *results[0].result.ConfidenceScore, 0.01)
 
-	// Validate job should be enqueued.
-	require.Contains(t, d.jobs.getEnqueued(), "validate")
-	validatePayload, ok := d.jobs.getPayload("validate").(map[string]interface{})
-	require.True(t, ok, "validate job payload should be a map")
-	require.Equal(t, run.ID.String(), validatePayload["session_id"], "validate payload should include agent run ID")
-	require.Equal(t, run.OrgID.String(), validatePayload["org_id"], "validate payload should include org ID")
+	// open_pr job should be enqueued.
+	require.Contains(t, d.jobs.getEnqueued(), "open_pr")
+	openPRPayload, ok := d.jobs.getPayload("open_pr").(map[string]interface{})
+	require.True(t, ok, "open_pr job payload should be a map")
+	require.Equal(t, run.ID.String(), openPRPayload["session_id"], "open_pr payload should include agent run ID")
+	require.Equal(t, run.OrgID.String(), openPRPayload["org_id"], "open_pr payload should include org ID")
 
 	// Logs should be persisted.
 	require.GreaterOrEqual(t, d.logs.getCount(), 2)
 
 	// Sandbox should be destroyed.
 	require.Equal(t, 1, d.provider.GetDestroyCalls())
+}
+
+func TestRunAgent_SandboxCapacityRejectsBeforeCreate(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	run := testRun(orgID, issue.ID)
+
+	d := defaultDeps()
+	d.sandboxCapacity = agent.NewSandboxCapacityGate(agent.SandboxCapacityGateConfig{
+		Counter:   &fakeLiveSandboxCounter{count: 1},
+		MaxActive: 1,
+		NodeID:    "worker-1",
+		Logger:    zerolog.Nop(),
+	})
+	d.provider.CreateFn = func(context.Context, agent.SandboxConfig) (*agent.Sandbox, error) {
+		t.Fatalf("provider.Create must not be called when live sandbox capacity is full")
+		return nil, nil
+	}
+
+	err := buildOrchestrator(d).RunAgent(context.Background(), run)
+
+	require.ErrorIs(t, err, agent.ErrSandboxCapacity, "RunAgent should surface the live sandbox capacity sentinel")
+	require.Empty(t, d.sessions.getStatusUpdates(), "RunAgent should not mark the session running when capacity is unavailable")
 }
 
 func TestRunAgent_SuccessLogIncludesPlatformHealthFields(t *testing.T) {
@@ -1450,7 +1477,7 @@ func TestRecoverSession_RestartsWhenNoDurableCheckpointExists(t *testing.T) {
 	results := d.sessions.getResultUpdates()
 	require.Len(t, results, 1, "restart should follow the normal run result path")
 	require.Equal(t, "completed", results[0].status, "restart should complete the run from scratch")
-	require.Contains(t, d.jobs.getEnqueued(), "validate", "restart should enqueue validation like a fresh run")
+	require.Contains(t, d.jobs.getEnqueued(), "open_pr", "restart should enqueue PR creation like a fresh run")
 }
 
 func TestRecoverSession_RestartsWithoutCountingOwnRunningSlot(t *testing.T) {
@@ -1499,7 +1526,7 @@ func TestRecoverSession_RestartsWithoutCountingOwnRunningSlot(t *testing.T) {
 	results := d.sessions.getResultUpdates()
 	require.Len(t, results, 1, "restart should still complete the run")
 	require.Equal(t, "completed", results[0].status, "restart should complete successfully under a single-slot concurrency limit")
-	require.Contains(t, d.jobs.getEnqueued(), "validate", "restart should enqueue validation like a fresh run")
+	require.Contains(t, d.jobs.getEnqueued(), "open_pr", "restart should enqueue PR creation like a fresh run")
 }
 
 func TestRecoverSession_PreservesRunningStatusWhenRuntimeInitFails(t *testing.T) {
@@ -2508,9 +2535,9 @@ func TestRunAgent_LowConfidence(t *testing.T) {
 	require.Len(t, results, 1)
 	require.Equal(t, "needs_human_guidance", results[0].status)
 
-	// No validate job should be enqueued.
+	// No open_pr job should be enqueued.
 	for _, jt := range d.jobs.getEnqueued() {
-		require.NotEqual(t, "validate", jt)
+		require.NotEqual(t, "open_pr", jt)
 	}
 }
 
@@ -2540,8 +2567,8 @@ func TestRunAgent_MediumConfidence(t *testing.T) {
 	require.Len(t, results, 1)
 	require.Equal(t, "completed", results[0].status)
 
-	// Validate job should be enqueued.
-	require.Contains(t, d.jobs.getEnqueued(), "validate")
+	// open_pr job should be enqueued.
+	require.Contains(t, d.jobs.getEnqueued(), "open_pr")
 }
 
 func TestRunAgent_ConcurrencyLimit(t *testing.T) {
@@ -2876,6 +2903,32 @@ func TestContinueSession_GatesOnPendingSnapshotKey(t *testing.T) {
 	err := orch.ContinueSession(context.Background(), session, nil)
 	require.ErrorIs(t, err, agent.ErrSnapshotPending, "ContinueSession should bail with ErrSnapshotPending when PendingSnapshotKey is set")
 	require.Empty(t, d.sessions.getStatusUpdates(), "ContinueSession must not mutate session state before the gate fires")
+}
+
+func TestContinueSession_SandboxCapacityRejectsFreshResumeBeforeCreate(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	session := testRun(orgID, issue.ID)
+	session.Status = string(models.SessionStatusIdle)
+
+	d := defaultDeps()
+	d.sandboxCapacity = agent.NewSandboxCapacityGate(agent.SandboxCapacityGateConfig{
+		Counter:   &fakeLiveSandboxCounter{count: 1},
+		MaxActive: 1,
+		NodeID:    "worker-1",
+		Logger:    zerolog.Nop(),
+	})
+	d.provider.CreateFn = func(context.Context, agent.SandboxConfig) (*agent.Sandbox, error) {
+		t.Fatalf("provider.Create must not be called when live sandbox capacity is full")
+		return nil, nil
+	}
+
+	err := buildOrchestrator(d).ContinueSession(context.Background(), session, nil)
+
+	require.ErrorIs(t, err, agent.ErrSandboxCapacity, "ContinueSession should surface the live sandbox capacity sentinel")
+	require.Empty(t, d.sessions.getStatusUpdates(), "ContinueSession should not mark the session running when capacity is unavailable")
 }
 
 func TestRevertThread_UpdatesWorkspaceSnapshot(t *testing.T) {
@@ -3723,7 +3776,7 @@ func TestRunAgent_ExactConfidenceThreshold(t *testing.T) {
 	results := d.sessions.getResultUpdates()
 	require.Len(t, results, 1)
 	require.Equal(t, "completed", results[0].status)
-	require.Contains(t, d.jobs.getEnqueued(), "validate")
+	require.Contains(t, d.jobs.getEnqueued(), "open_pr")
 }
 
 func TestRunAgent_AgentCredentialsInjected(t *testing.T) {
@@ -4027,7 +4080,7 @@ func TestRunAgent_CodexUsesAuthJsonNotEnvVar(t *testing.T) {
 	require.Equal(t, "chatgpt-access-token", tokens["access_token"], "auth.json should contain the ChatGPT OAuth token")
 }
 
-func TestRunAgent_CodexOpenAIKeyAloneIsNotSufficient(t *testing.T) {
+func TestRunAgent_CodexLegacyOpenAIKeyFallbackDoesNotRequireOAuth(t *testing.T) {
 	t.Parallel()
 
 	orgID := testOrg()
@@ -4047,10 +4100,17 @@ func TestRunAgent_CodexOpenAIKeyAloneIsNotSufficient(t *testing.T) {
 		},
 	}
 
+	var capturedCfg agent.SandboxConfig
+	d.provider.CreateFn = func(ctx context.Context, cfg agent.SandboxConfig) (*agent.Sandbox, error) {
+		capturedCfg = cfg
+		return &agent.Sandbox{ID: "codex-legacy-api-key", Provider: "mock", WorkDir: cfg.WorkDir, HomeDir: cfg.HomeDir}, nil
+	}
+
 	orch := buildOrchestrator(d)
 	err := orch.RunAgent(context.Background(), run)
-	require.Error(t, err, "run should fail when only OpenAI API key exists (no ChatGPT OAuth)")
-	require.Contains(t, err.Error(), "no credentials", "error should mention missing credentials")
+	require.NoError(t, err, "run should succeed when the legacy OpenAI API-key fallback resolved an API key")
+	require.Equal(t, "sk-openai-key", capturedCfg.Env["OPENAI_API_KEY"], "sandbox env should carry the legacy OpenAI API key")
+	require.NotContains(t, d.provider.Files, "/home/sandbox/.codex/auth.json", "Codex OAuth auth.json should not be required when the legacy fallback resolved an API key")
 }
 
 func TestRunAgent_CodexUnifiedOpenAIKeyDoesNotRequireOAuth(t *testing.T) {
@@ -4262,7 +4322,7 @@ func TestRunAgent_ManualSessionTransitionsToIdle(t *testing.T) {
 	require.Equal(t, models.MessageRoleAssistant, messages[0].Role, "assistant reply should be stored in session_messages")
 	require.Equal(t, 1, messages[0].TurnNumber, "assistant reply should be recorded for turn 1")
 
-	require.NotContains(t, d.jobs.getEnqueued(), "validate", "manual interactive run should wait for explicit end before validation")
+	require.NotContains(t, d.jobs.getEnqueued(), "open_pr", "manual interactive run should wait for explicit end before PR creation")
 }
 
 func TestContinueSession_PersistsTurnResultAndReturnsToIdle(t *testing.T) {
@@ -4333,7 +4393,7 @@ func TestContinueSession_PersistsTurnResultAndReturnsToIdle(t *testing.T) {
 	require.Equal(t, "Added the regression test", *turnUpdates[0].result.ResultSummary, "continue_session should store the latest assistant summary")
 	require.NotNil(t, turnUpdates[0].result.Diff, "continue_session should persist the latest diff")
 	require.Contains(t, d.sessions.getStatusUpdates(), "running", "continue_session should mark the session running while work is in progress")
-	require.NotContains(t, d.jobs.getEnqueued(), "validate", "continue_session should stay interactive until the user ends the session")
+	require.NotContains(t, d.jobs.getEnqueued(), "open_pr", "continue_session should stay interactive until the user ends the session")
 
 	messages := d.messages.getMessages()
 	require.Len(t, messages, 2, "continue_session should append an assistant reply")
@@ -4729,6 +4789,13 @@ func TestContinueSession_ReusesExistingContainer(t *testing.T) {
 	// No SnapshotKey: proves the reuse branch takes precedence over hydrate.
 
 	d := defaultDeps()
+	counter := &fakeLiveSandboxCounter{count: 99}
+	d.sandboxCapacity = agent.NewSandboxCapacityGate(agent.SandboxCapacityGateConfig{
+		Counter:   counter,
+		MaxActive: 1,
+		NodeID:    "worker-1",
+		Logger:    zerolog.Nop(),
+	})
 	d.issues.issue = issue
 	d.messages.messages = []models.SessionMessage{
 		{
@@ -4770,6 +4837,7 @@ func TestContinueSession_ReusesExistingContainer(t *testing.T) {
 	require.NoError(t, orch.ContinueSession(context.Background(), session, nil))
 
 	require.Equal(t, 0, d.provider.GetDestroyCalls(), "sandbox must stay alive while preview holds it")
+	require.Equal(t, int64(0), counter.calls.Load(), "reused-container continuations should not consume live sandbox capacity")
 	require.Equal(t, 0, d.sessions.finalizeCalls, "FinalizeContainerDestroy must not run while preview holds")
 	require.GreaterOrEqual(t, d.sessions.acquireHoldCalls, 1)
 	require.GreaterOrEqual(t, d.sessions.releaseHoldCalls, 1)

@@ -85,6 +85,10 @@ func (a *ClaudeCodeAdapter) PreparePrompt(ctx context.Context, input *agent.Agen
 		MaxTokens:       maxTokens,
 		ReasoningEffort: input.ReasoningEffort,
 		Files:           files,
+		UsageHint: agent.TokenUsageHint{
+			AgentType:   models.AgentTypeClaudeCode,
+			BillingMode: agent.TokenBillingModeUnknown,
+		},
 	}, nil
 }
 
@@ -210,6 +214,8 @@ func (a *ClaudeCodeAdapter) Execute(ctx context.Context, sandbox *agent.Sandbox,
 		},
 	}
 
+	result.TokenUsage = agent.FinalizeTokenUsage(result.TokenUsage, prompt.UsageHint)
+
 	return result, nil
 }
 
@@ -264,7 +270,7 @@ func parseClaudeStreamLine(line []byte, result *agent.AgentResult, logCh chan<- 
 		}
 
 	case "result":
-		summary := decodeClaudeResultSummary(event.Result)
+		summary := decodeClaudeResultSummary(event)
 		logCh <- agent.LogEntry{
 			Timestamp: time.Now(),
 			Level:     "info",
@@ -275,10 +281,13 @@ func parseClaudeStreamLine(line []byte, result *agent.AgentResult, logCh chan<- 
 			tryExtractConfidence(summary, result)
 		}
 		if len(event.Usage) > 0 {
-			var usage agent.TokenUsage
-			if err := json.Unmarshal(event.Usage, &usage); err == nil && (usage.InputTokens > 0 || usage.OutputTokens > 0) {
-				result.TokenUsage = usage
-			}
+			mergeTokenUsage(&result.TokenUsage, parseClaudeUsage(event.Usage))
+		}
+		if event.TotalCostUSD != nil {
+			setDirectUSDCost(&result.TokenUsage, *event.TotalCostUSD, "claude_result_total_cost_usd")
+		}
+		if event.CostUSD != nil {
+			setDirectUSDCost(&result.TokenUsage, *event.CostUSD, "claude_result_cost_usd")
 		}
 
 	default:
@@ -368,15 +377,15 @@ func emitClaudeUserBlocks(event claudeStreamEvent, logCh chan<- agent.LogEntry) 
 // event's `result` field, which is a JSON-encoded string in current versions
 // but historically has appeared as an object — fall back to the raw payload
 // rather than dropping the summary on the floor.
-func decodeClaudeResultSummary(raw json.RawMessage) string {
-	if len(raw) == 0 {
-		return ""
+func decodeClaudeResultSummary(event claudeStreamEvent) string {
+	if len(event.Result) == 0 {
+		return event.Content
 	}
 	var s string
-	if err := json.Unmarshal(raw, &s); err == nil {
+	if err := json.Unmarshal(event.Result, &s); err == nil {
 		return s
 	}
-	return string(raw)
+	return string(event.Result)
 }
 
 // decodeClaudeToolResultContent renders a tool_result `content` payload to a
@@ -404,6 +413,32 @@ func decodeClaudeToolResultContent(raw json.RawMessage) string {
 	return string(raw)
 }
 
+func parseClaudeUsage(raw json.RawMessage) agent.TokenUsage {
+	var usage struct {
+		InputTokens         int `json:"input_tokens"`
+		CachedInputTokens   int `json:"cached_input_tokens,omitempty"`
+		CacheReadTokens     int `json:"cache_read_input_tokens,omitempty"`
+		CacheCreationTokens int `json:"cache_creation_input_tokens,omitempty"`
+		OutputTokens        int `json:"output_tokens"`
+		TotalTokens         int `json:"total_tokens,omitempty"`
+	}
+	if err := json.Unmarshal(raw, &usage); err != nil {
+		return agent.TokenUsage{}
+	}
+	cachedInputTokens := usage.CachedInputTokens
+	if cachedInputTokens == 0 {
+		cachedInputTokens = usage.CacheReadTokens
+	}
+	return agent.TokenUsage{
+		Reported:            true,
+		InputTokens:         usage.InputTokens,
+		CachedInputTokens:   cachedInputTokens,
+		CacheCreationTokens: usage.CacheCreationTokens,
+		OutputTokens:        usage.OutputTokens,
+		TotalTokens:         usage.TotalTokens,
+	}
+}
+
 // WithSandboxProvider re-exports agent.WithSandboxProvider for backward compatibility.
 // Callers should prefer agent.WithSandboxProvider directly.
 func WithSandboxProvider(ctx context.Context, p agent.SandboxProvider) context.Context {
@@ -416,13 +451,16 @@ func WithSandboxProvider(ctx context.Context, p agent.SandboxProvider) context.C
 // Anthropic-API-shaped block array, with tool results echoed back via
 // `user` events and a terminal `result` event carrying the summary.
 type claudeStreamEvent struct {
-	Type      string             `json:"type"`
-	Subtype   string             `json:"subtype,omitempty"`
-	Message   *claudeMessageBody `json:"message,omitempty"`
-	SessionID string             `json:"session_id,omitempty"`
-	Result    json.RawMessage    `json:"result,omitempty"`
-	Usage     json.RawMessage    `json:"usage,omitempty"`
-	IsError   bool               `json:"is_error,omitempty"`
+	Type         string             `json:"type"`
+	Subtype      string             `json:"subtype,omitempty"`
+	Content      string             `json:"content,omitempty"`
+	Message      *claudeMessageBody `json:"message,omitempty"`
+	SessionID    string             `json:"session_id,omitempty"`
+	Result       json.RawMessage    `json:"result,omitempty"`
+	Usage        json.RawMessage    `json:"usage,omitempty"`
+	TotalCostUSD *float64           `json:"total_cost_usd,omitempty"`
+	CostUSD      *float64           `json:"cost_usd,omitempty"`
+	IsError      bool               `json:"is_error,omitempty"`
 }
 
 // claudeMessageBody is the inner Anthropic Messages API payload carried by
