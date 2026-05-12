@@ -357,6 +357,7 @@ export function PreviewPanel({
   const instance = previewStatus?.instance;
   const rawServices = previewStatus?.services;
   const rawInfrastructure = previewStatus?.infrastructure;
+  const runtimePreviewOrigin = previewStatus?.preview_origin;
   const services = useMemo(
     () => (Array.isArray(rawServices) ? rawServices : []),
     [rawServices],
@@ -495,9 +496,9 @@ export function PreviewPanel({
     bootstrapMutateRef.current = bootstrapMutation.mutate;
   }, [bootstrapMutation.mutate]);
 
-  const previewOrigin = instance
+  const previewOrigin = runtimePreviewOrigin || (instance
     ? previewOriginTemplate.replace("{id}", instance.id)
-    : "";
+    : "");
 
   // Cache the parsed origin to avoid re-parsing on every postMessage event
   const parsedOrigin = useMemo(() => {

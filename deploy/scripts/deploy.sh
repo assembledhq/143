@@ -210,6 +210,14 @@ if [ "$ROLE" = "app" ]; then
   # The remote compares the new hash against the currently running copy to
   # decide whether to restart Caddy (see `stage_caddy_config_if_changed` below).
   scp "${SCP_OPTS[@]}" "$PROJECT_DIR/deploy/Caddyfile" deploy@"$HOST":/opt/143/deploy/Caddyfile.new
+  # The app host builds a custom Caddy image locally so wildcard preview certs
+  # can use the Cloudflare DNS challenge. Stage the Dockerfile next to the
+  # compose file before `docker compose up` runs.
+  scp -p "${SCP_OPTS[@]}" "$PROJECT_DIR/Dockerfile.caddy" \
+    deploy@"$HOST":/opt/143/Dockerfile.caddy.new
+  ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
+    "mv /opt/143/Dockerfile.caddy.new /opt/143/Dockerfile.caddy \
+     || { rm -f /opt/143/Dockerfile.caddy.new; exit 1; }"
 fi
 if [ "$ROLE" = "worker" ]; then
   # Keep the sandbox firewall script in sync so every deploy can re-apply

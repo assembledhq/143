@@ -23,6 +23,36 @@ func TestFrontendContainerBindsAllInterfaces(t *testing.T) {
 	require.Contains(t, string(dockerfile), "ENV HOSTNAME=0.0.0.0", "frontend image should default Next standalone to bind all interfaces")
 }
 
+func TestPreviewWildcardTLSUsesCloudflareDNSChallenge(t *testing.T) {
+	t.Parallel()
+
+	compose, err := os.ReadFile("../docker-compose.app.yml")
+	require.NoError(t, err, "test should read the app compose file")
+	composeText := string(compose)
+	require.Contains(t, composeText, "build:", "app compose should build a custom Caddy image so the Cloudflare DNS provider module is available for wildcard preview certificates")
+	require.Contains(t, composeText, "Dockerfile.caddy", "app compose should point the Caddy build at Dockerfile.caddy")
+	require.Contains(t, composeText, "CLOUDFLARE_API_TOKEN", "app compose should pass the Cloudflare API token into the Caddy container for DNS-01 challenges")
+
+	caddyfile, err := os.ReadFile("../deploy/Caddyfile")
+	require.NoError(t, err, "test should read the Caddyfile")
+	caddyText := string(caddyfile)
+	require.Contains(t, caddyText, "*.preview.{$DOMAIN:143.dev}", "Caddyfile should keep a dedicated wildcard preview host block")
+	require.Contains(t, caddyText, "dns cloudflare", "preview wildcard host should use the Cloudflare DNS challenge for certificate issuance")
+	require.Contains(t, caddyText, "{env.CLOUDFLARE_API_TOKEN}", "preview wildcard host should read the Cloudflare API token from container env")
+
+	caddyDockerfile, err := os.ReadFile("../Dockerfile.caddy")
+	require.NoError(t, err, "test should read the custom Caddy Dockerfile")
+	require.Contains(t, string(caddyDockerfile), "github.com/caddy-dns/cloudflare", "custom Caddy image should compile in the Cloudflare DNS provider module")
+
+	deployScript, err := os.ReadFile("../deploy/scripts/deploy.sh")
+	require.NoError(t, err, "test should read deploy.sh")
+	require.Contains(t, string(deployScript), "Dockerfile.caddy", "app deploys should stage Dockerfile.caddy before docker compose up so remote builds can succeed")
+
+	provisionScript, err := os.ReadFile("../deploy/scripts/provision.sh")
+	require.NoError(t, err, "test should read provision.sh")
+	require.Contains(t, string(provisionScript), "Dockerfile.caddy", "fresh app provisioning should stage Dockerfile.caddy before the first docker compose up")
+}
+
 func TestWorkerProvisioningIncludesGitHubAppUserAuthSecrets(t *testing.T) {
 	t.Parallel()
 

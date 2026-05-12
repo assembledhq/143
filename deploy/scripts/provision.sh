@@ -308,6 +308,11 @@ if [ "$ROLE" = "worker" ]; then
   # before Step 5 starts services. Routine deploys refresh this separately.
   scp "${SCP_OPTS[@]}" "$PROJECT_DIR/Dockerfile.dnsmasq" root@"$HOST":/opt/143/
 fi
+if [ "$ROLE" = "app" ]; then
+  # Caddy is built locally on the app host so the Cloudflare DNS provider
+  # module is available for wildcard preview certificates on first boot.
+  scp "${SCP_OPTS[@]}" "$PROJECT_DIR/Dockerfile.caddy" root@"$HOST":/opt/143/
+fi
 scp "${SCP_OPTS[@]}" -r "$PROJECT_DIR/deploy" root@"$HOST":/opt/143/
 ssh "${SSH_OPTS[@]}" root@"$HOST" "chown -R deploy:deploy /opt/143 && chmod +x /opt/143/deploy/scripts/install-log-rotation.sh /opt/143/deploy/scripts/install-docker-dns.sh"
 
