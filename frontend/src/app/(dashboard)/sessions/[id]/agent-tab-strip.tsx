@@ -40,6 +40,10 @@ function canArchiveThread(thread: SessionThread, threadCount: number): boolean {
   return threadCount > 1 && !isActiveStatus(thread.status);
 }
 
+function addTabButtonClassName(): string {
+  return "h-7 w-7 shrink-0 rounded-sm text-muted-foreground opacity-70 transition-opacity hover:text-foreground hover:opacity-100 focus-visible:opacity-100";
+}
+
 // Compute per-thread overlap: a path counts as an overlap when at least two
 // distinct active threads have touched it. Computed client-side from the
 // session-wide file events so the tab strip can render a badge without an
@@ -86,6 +90,7 @@ interface AgentTabStripProps {
   threads: SessionThread[];
   activeThreadId: string | null;
   viewedThreadIds: ReadonlySet<string>;
+  nonInteractiveThreadIds?: ReadonlySet<string>;
   overlapsByThreadId: Map<string, string[]>;
   statusConfig: Record<string, { label: string }>;
   onActiveThreadChange: (threadId: string) => void;
@@ -116,6 +121,7 @@ export function AgentTabStrip({
   threads,
   activeThreadId,
   viewedThreadIds,
+  nonInteractiveThreadIds,
   overlapsByThreadId,
   statusConfig,
   onActiveThreadChange,
@@ -243,12 +249,12 @@ export function AgentTabStrip({
               type="button"
               size="icon"
               variant="ghost"
-              className="h-8 w-8 shrink-0"
+              className={addTabButtonClassName()}
               aria-label="Add agent tab"
               title="Add agent tab (t)"
               onClick={onAddTab}
             >
-              <Plus className="h-4 w-4" />
+              <Plus className="h-3.5 w-3.5" />
             </Button>
           </div>
         </div>
@@ -279,6 +285,7 @@ export function AgentTabStrip({
                 const queued = thread.pending_message_count ?? 0;
                 const showUnreadDot = shouldShowUnreadDot(thread, viewedThreadIds);
                 const showArchiveButton = canArchiveThread(thread, tabs.length);
+                const isNonInteractive = nonInteractiveThreadIds?.has(thread.id) ?? false;
                 const closeLabel = `Close ${thread.label}${thread.label.toLowerCase().endsWith(" tab") ? "" : " tab"}`;
 
                 return (
@@ -287,11 +294,13 @@ export function AgentTabStrip({
                       <TooltipTrigger asChild>
                         <TabsTrigger
                           value={thread.id}
+                          disabled={isNonInteractive}
                           className={cn(
                             "h-8 max-w-[15rem] gap-1.5 rounded-md px-2 text-xs data-[state=active]:bg-transparent data-[state=active]:text-primary data-[state=active]:shadow-none",
                             "after:bg-primary after:bg-none data-[state=active]:after:opacity-100",
                             showArchiveButton && "pr-8",
                             tabs.length === 1 && "data-[state=active]:bg-transparent data-[state=active]:shadow-none",
+                            isNonInteractive && "cursor-default opacity-60",
                           )}
                         >
                           {showUnreadDot ? (
@@ -381,13 +390,13 @@ export function AgentTabStrip({
             type="button"
             size="icon"
             variant="ghost"
-            className="h-8 w-8 shrink-0"
+            className={addTabButtonClassName()}
             aria-label="Add agent tab"
             title="Add agent tab (t)"
             onClick={onAddTab}
             disabled={addTabPending}
           >
-            <Plus className="h-4 w-4" />
+            <Plus className="h-3.5 w-3.5" />
           </Button>
         </div>
       </div>

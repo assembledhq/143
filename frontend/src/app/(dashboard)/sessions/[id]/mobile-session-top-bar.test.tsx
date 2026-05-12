@@ -57,6 +57,7 @@ describe("MobileSessionTopBar", () => {
         onArchiveThread={vi.fn()}
         cancelPendingThreadId={null}
         archivePendingThreadId={null}
+        nonInteractiveThreadIds={new Set()}
       />,
     );
 
@@ -105,6 +106,7 @@ describe("MobileSessionTopBar", () => {
         onArchiveThread={vi.fn()}
         cancelPendingThreadId={null}
         archivePendingThreadId={null}
+        nonInteractiveThreadIds={new Set()}
       />,
     );
 
@@ -166,6 +168,7 @@ describe("MobileSessionTopBar", () => {
         onArchiveThread={onArchiveThread}
         cancelPendingThreadId={null}
         archivePendingThreadId={null}
+        nonInteractiveThreadIds={new Set()}
       />,
     );
 
@@ -179,5 +182,46 @@ describe("MobileSessionTopBar", () => {
     await user.click(within(actionsSheet).getByRole("button", { name: "Close Review tab" }));
 
     expect(onArchiveThread).toHaveBeenCalledWith("thread-2");
+  });
+
+  it("does not allow switching to a pending preview thread from the actions sheet", async () => {
+    const user = userEvent.setup();
+    const onActiveThreadChange = vi.fn();
+
+    renderWithProviders(
+      <MobileSessionTopBar
+        sessionTitle="Mobile session title"
+        detailButtonLabel="Open session details"
+        backTo="/sessions"
+        threads={[
+          makeThread({ id: "thread-1", label: "Main tab" }),
+          makeThread({ id: "__pending-thread__", label: "Codex 2", status: "pending", current_turn: 0 }),
+        ]}
+        activeThreadId="thread-1"
+        viewedThreadIds={new Set(["thread-1"])}
+        onOpenDetails={vi.fn()}
+        onActiveThreadChange={onActiveThreadChange}
+        onAddThread={vi.fn()}
+        onRenameSession={vi.fn()}
+        onCancelThread={vi.fn()}
+        onForkThread={vi.fn()}
+        onRevertThread={vi.fn()}
+        onArchiveThread={vi.fn()}
+        cancelPendingThreadId={null}
+        archivePendingThreadId={null}
+        nonInteractiveThreadIds={new Set(["__pending-thread__"])}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Open session actions" }));
+
+    const actionsSheet = await screen.findByRole("dialog", { name: "Session actions" });
+    const pendingThreadButton = within(actionsSheet).getByRole("button", { name: "Switch to Codex 2" });
+
+    expect(pendingThreadButton).toBeDisabled();
+
+    await user.click(pendingThreadButton);
+
+    expect(onActiveThreadChange).not.toHaveBeenCalled();
   });
 });
