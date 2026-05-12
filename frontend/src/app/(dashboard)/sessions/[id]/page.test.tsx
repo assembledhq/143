@@ -920,6 +920,78 @@ describe('SessionDetailPage', () => {
     });
   });
 
+  it('shows the agent selector before model override on a new blank tab composer', async () => {
+    const sessionId = 'session-new-tab-agent-before-model';
+    const threads: SessionThread[] = [
+      {
+        id: 'thread-main',
+        session_id: sessionId,
+        org_id: 'org-1',
+        agent_type: 'codex',
+        label: 'Codex',
+        status: 'idle',
+        current_turn: 1,
+        created_at: '2026-02-17T07:00:00Z',
+        cost_cents: 0,
+        pending_message_count: 0,
+      },
+    ];
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({
+          data: {
+            ...mockSessions[0],
+            id: sessionId,
+            status: 'idle',
+            agent_type: 'codex',
+            sandbox_state: 'ready',
+            threads,
+          },
+        } satisfies SingleResponse<Session & { threads: SessionThread[] }>);
+      }),
+      http.get('/api/v1/sessions/:id/threads/:threadId/messages', () => {
+        return HttpResponse.json({ data: [] as SessionMessage[], meta: {} } satisfies ListResponse<SessionMessage>);
+      }),
+      http.get('/api/v1/sessions/:id/threads/:threadId/logs', () => {
+        return HttpResponse.json({ data: [], meta: {} });
+      }),
+      http.post('/api/v1/sessions/:id/threads', async ({ params }) => {
+        const thread: SessionThread = {
+          id: 'thread-new',
+          session_id: params.id as string,
+          org_id: 'org-1',
+          agent_type: 'codex',
+          label: 'Codex 2',
+          status: 'idle',
+          current_turn: 0,
+          created_at: '2026-02-17T07:04:00Z',
+          cost_cents: 0,
+          pending_message_count: 0,
+        };
+        threads.push(thread);
+        return HttpResponse.json({ data: thread } satisfies SingleResponse<SessionThread>, { status: 201 });
+      }),
+    );
+
+    const user = userEvent.setup();
+    renderWithProviders(<SessionDetailContent id={sessionId} />);
+
+    expect(await screen.findByPlaceholderText('Send a message to Codex...')).toBeInTheDocument();
+
+    const addTabButtons = screen.getAllByRole('button', { name: 'Add agent tab' });
+    const stripAddButton = addTabButtons[addTabButtons.length - 1] as HTMLButtonElement;
+    await user.click(stripAddButton);
+
+    expect(await screen.findByPlaceholderText('Send a message to Codex 2...')).toBeInTheDocument();
+
+    const inputSurface = screen.getByTestId('session-composer-input-surface');
+    const agentSelector = within(inputSurface).getByLabelText('Agent');
+    const modelSelector = within(inputSurface).getByLabelText('Model override');
+
+    expect(agentSelector.compareDocumentPosition(modelSelector) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
   it('preserves thread tabs when session status SSE payload omits thread detail', async () => {
     const sessionId = 'session-abcdef12-3456-7890';
     const thread: SessionThread = {
