@@ -442,6 +442,11 @@ const (
 	// stay strictly above it so the reaper doesn't kill legitimate
 	// long-running sessions before the orchestrator's own timeout fires.
 	MaxMaxSessionDurationSeconds = 2 * 60 * 60
+	// MaxAbsoluteRuntimeCeilingSeconds is the largest valid absolute runtime
+	// ceiling after automatic extensions. The worker watchdog adds its own
+	// cleanup buffer on top of this, so org settings must not promise a longer
+	// handler runtime than workers will keep renewing.
+	MaxAbsoluteRuntimeCeilingSeconds = MaxMaxSessionDurationSeconds + 15*60
 
 	DefaultNoProgressTimeoutSeconds        = 5 * 60
 	DefaultGracefulShutdownWindowSeconds   = 30
@@ -652,6 +657,8 @@ func ParseOrgSettings(raw json.RawMessage) (OrgSettings, error) {
 	}
 	if s.RuntimeBudgets.AbsoluteRuntimeCeilingSeconds < s.MaxSessionDurationSeconds {
 		s.RuntimeBudgets.AbsoluteRuntimeCeilingSeconds = s.MaxSessionDurationSeconds
+	} else if s.RuntimeBudgets.AbsoluteRuntimeCeilingSeconds > MaxAbsoluteRuntimeCeilingSeconds {
+		s.RuntimeBudgets.AbsoluteRuntimeCeilingSeconds = MaxAbsoluteRuntimeCeilingSeconds
 	}
 
 	// Linear automation defaults: ensure ReviewStateNamePreferences has a

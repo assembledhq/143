@@ -14,6 +14,7 @@ export const queryKeys = {
     counts: (repo?: string | null, peopleKey?: string | null) =>
       ["sessions", "counts", repo, peopleKey] as const,
     detail: (id: string) => ["session", id] as const,
+    diff: (id: string, revision?: string | null) => ["session", id, "diff", revision ?? null] as const,
     timeline: (id: string) => ["session", id, "timeline"] as const,
     pr: (id: string) => ["session", id, "pr"] as const,
     messages: (id: string) => ["session", id, "messages"] as const,
@@ -69,9 +70,9 @@ export const queryKeys = {
   usage: {
     summary: (params: { start: string; end: string }) =>
       ["usage", "summary", params] as const,
-    timeseries: (params: { start: string; end: string; group_by?: string; user_id?: string; capacity?: string }) =>
+    timeseries: (params: { start: string; end: string; group_by?: string; stack_by?: string; user_id?: string; capacity?: string; agent?: string; model?: string; reasoning?: string }) =>
       ["usage", "timeseries", params] as const,
-    breakdown: (params: { start: string; end: string; dimension?: string; sort?: string }) =>
+    breakdown: (params: { start: string; end: string; dimension?: string; sort?: string; agent?: string; model?: string; reasoning?: string }) =>
       ["usage", "breakdown", params] as const,
   },
   evals: {

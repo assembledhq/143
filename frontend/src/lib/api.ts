@@ -324,6 +324,7 @@ export const api = {
     },
     recordView: (sessionId: string) => post<{ status: string }>(`/api/v1/sessions/${sessionId}/view`, {}),
     get: (id: string) => get<import('./types').SingleResponse<import('./types').SessionDetail>>(`/api/v1/sessions/${id}`),
+    getDiff: (id: string) => get<import('./types').SingleResponse<import('./types').SessionDiff>>(`/api/v1/sessions/${id}/diff`),
     update: (id: string, body: { title: string }) =>
       patch<import('./types').SingleResponse<import('./types').Session>>(`/api/v1/sessions/${id}`, body),
     getLogs: (sessionId: string) => get<import('./types').ListResponse<import('./types').SessionLog>>(`/api/v1/sessions/${sessionId}/logs`),
@@ -450,10 +451,10 @@ export const api = {
       extend: (sessionId: string) => post(`/api/v1/sessions/${sessionId}/preview/extend`),
       services: (sessionId: string) =>
         get<import('./types').ListResponse<import('./preview-types').PreviewService>>(`/api/v1/sessions/${sessionId}/preview/services`)
-          .then(r => r.data),
+          .then(r => r.data ?? []),
       console: (sessionId: string) =>
         get<import('./types').ListResponse<import('./preview-types').ConsoleMessage>>(`/api/v1/sessions/${sessionId}/preview/console`)
-          .then(r => r.data),
+          .then(r => r.data ?? []),
       inspect: (sessionId: string, x: number, y: number) =>
         post<import('./types').SingleResponse<import('./preview-types').ElementInfo>>(`/api/v1/sessions/${sessionId}/preview/inspect`, { x, y })
           .then(r => r.data),
@@ -924,25 +925,35 @@ export const api = {
       const qs = searchParams.toString();
       return get<import('./types').SingleResponse<import('./types').UsageSummary>>(`/api/v1/usage${qs ? `?${qs}` : ''}`);
     },
-    getTimeseries: (params: { start: string; end: string; group_by?: string; user_id?: string; capacity?: string }) => {
+    getTimeseries: (params: { start: string; end: string; group_by?: string; stack_by?: string; user_id?: string; capacity?: string; agent?: string; model?: string; reasoning?: string }) => {
       const searchParams = new URLSearchParams({ start: params.start, end: params.end });
       if (params.group_by) searchParams.set('group_by', params.group_by);
+      if (params.stack_by) searchParams.set('stack_by', params.stack_by);
       if (params.user_id) searchParams.set('user_id', params.user_id);
       if (params.capacity) searchParams.set('capacity', params.capacity);
+      if (params.agent) searchParams.set('agent', params.agent);
+      if (params.model) searchParams.set('model', params.model);
+      if (params.reasoning) searchParams.set('reasoning', params.reasoning);
       return get<import('./types').SingleResponse<import('./types').UsageTimeseriesResponse>>(`/api/v1/usage/timeseries?${searchParams.toString()}`);
     },
-    getBreakdown: (params: { start: string; end: string; dimension?: string; sort?: string; limit?: number }) => {
+    getBreakdown: (params: { start: string; end: string; dimension?: string; sort?: string; limit?: number; agent?: string; model?: string; reasoning?: string }) => {
       const searchParams = new URLSearchParams({ start: params.start, end: params.end });
       if (params.dimension) searchParams.set('dimension', params.dimension);
       if (params.sort) searchParams.set('sort', params.sort);
       if (params.limit) searchParams.set('limit', String(params.limit));
+      if (params.agent) searchParams.set('agent', params.agent);
+      if (params.model) searchParams.set('model', params.model);
+      if (params.reasoning) searchParams.set('reasoning', params.reasoning);
       return get<import('./types').ListResponse<import('./types').UsageBreakdownRow>>(`/api/v1/usage/breakdown?${searchParams.toString()}`);
     },
-    getExportUrl: (params: { start: string; end: string; granularity?: string; dimension?: string; tz?: string }) => {
+    getExportUrl: (params: { start: string; end: string; granularity?: string; dimension?: string; tz?: string; agent?: string; model?: string; reasoning?: string }) => {
       const searchParams = new URLSearchParams({ start: params.start, end: params.end });
       if (params.granularity) searchParams.set('granularity', params.granularity);
       if (params.dimension) searchParams.set('dimension', params.dimension);
       if (params.tz) searchParams.set('tz', params.tz);
+      if (params.agent) searchParams.set('agent', params.agent);
+      if (params.model) searchParams.set('model', params.model);
+      if (params.reasoning) searchParams.set('reasoning', params.reasoning);
       // window.open() can't send X-Active-Org-ID, so for multi-org users the
       // backend's session-hint org may not match the actively-viewed org.
       // Pass org_id explicitly; backend membership-checks it.

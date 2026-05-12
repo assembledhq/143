@@ -68,9 +68,11 @@ export function ProjectSidebar() {
     void setSearchParam(search || null);
   }, [search, searchParam, setSearchParam]);
 
+  const canListTeamMembers = currentUser?.role === "admin" || currentUser?.role === "member";
   const { data: membersData } = useQuery({
     queryKey: ["team", "members"],
     queryFn: () => api.team.listMembers(),
+    enabled: canListTeamMembers,
   });
 
   const members = useMemo(() => membersData?.data ?? [], [membersData?.data]);
@@ -140,6 +142,7 @@ export function ProjectSidebar() {
     currentFilter === "all" &&
     !search.trim() &&
     displayedProjects.length === 0;
+  const canManage = canListTeamMembers;
 
   return (
     <div className="w-full h-full border-r border-border bg-muted/30 flex flex-col">
@@ -166,12 +169,14 @@ export function ProjectSidebar() {
         </div>
 
         {/* New project button */}
-        <Button asChild variant="outline" className="w-full gap-2 bg-background text-xs shadow-sm">
-          <Link href="/projects/new">
-            <Plus className="h-4 w-4" />
-            New project
-          </Link>
-        </Button>
+        {canManage && (
+          <Button asChild variant="outline" className="w-full gap-2 bg-background text-xs shadow-sm">
+            <Link href="/projects/new">
+              <Plus className="h-4 w-4" />
+              New project
+            </Link>
+          </Button>
+        )}
 
         {/* Filter tabs */}
         <Tabs
@@ -179,7 +184,7 @@ export function ProjectSidebar() {
           onValueChange={(v) => setActiveFilter(v === "all" ? null : v)}
           className="gap-0"
         >
-          <TabsList size="sm" className="overflow-x-auto overflow-y-hidden">
+          <TabsList variant="line" size="sm" className="overflow-x-auto overflow-y-visible pb-1">
             {filterTabs.map((tab) => {
               const count = tab.value === "active" ? activeCount : 0;
               return (
@@ -200,7 +205,7 @@ export function ProjectSidebar() {
       {/* Project list */}
       <div className="flex-1 overflow-y-auto px-2 pb-2">
         {/* Ghost "New project" entry when creating */}
-        {isNewProject && (
+        {canManage && isNewProject && (
           <Link
             href="/projects/new"
             className="block rounded-lg px-3 py-2.5 mb-0.5 bg-background shadow-sm border border-border/50"

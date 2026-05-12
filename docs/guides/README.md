@@ -4,6 +4,7 @@ How-tos for people using 143 to act on their repos. These apply whether you're u
 
 ## Guides
 
+- **[Repo config](repo-config.md)** — set up `.143/config.json`, understand each top-level section, and use the field reference at the bottom of the guide.
 - **[Preview environments](previews.md)** — configure `.143/config.json` so 143 can serve a live iframed preview of your app from inside a session.
 
 ---

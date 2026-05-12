@@ -8,6 +8,7 @@ export interface DailyBucket {
   peak_concurrent: number;
   total_input_tokens: number;
   total_output_tokens: number;
+  total_tokens: number;
   total_llm_cost_usd: number;
 }
 
@@ -35,6 +36,7 @@ export function groupByLocalDay(buckets: UsageTimeseriesBucket[]): DailyBucket[]
     peak_concurrent: max(hours, "peak_concurrent"),
     total_input_tokens: sum(hours, "total_input_tokens"),
     total_output_tokens: sum(hours, "total_output_tokens"),
+    total_tokens: sum(hours, "total_tokens"),
     total_llm_cost_usd: sum(hours, "total_llm_cost_usd"),
   }));
 }
@@ -64,6 +66,7 @@ export function fillMissingDays(
         peak_concurrent: 0,
         total_input_tokens: 0,
         total_output_tokens: 0,
+        total_tokens: 0,
         total_llm_cost_usd: 0,
       },
     );
@@ -117,6 +120,7 @@ export type MetricKey =
   | "total_sessions"
   | "total_container_starts"
   | "peak_concurrent"
+  | "total_tokens"
   | "total_input_tokens"
   | "total_output_tokens"
   | "total_llm_cost_usd";
@@ -126,6 +130,7 @@ export const metricOptions: { value: MetricKey; label: string }[] = [
   { value: "total_sessions", label: "Peak Hourly Sessions" },
   { value: "total_container_starts", label: "Container Starts" },
   { value: "peak_concurrent", label: "Peak Concurrent" },
+  { value: "total_tokens", label: "Total Tokens" },
   { value: "total_input_tokens", label: "Input Tokens" },
   { value: "total_output_tokens", label: "Output Tokens" },
   { value: "total_llm_cost_usd", label: "LLM Cost" },

@@ -165,6 +165,123 @@ func TestSessionStore_ListByOrg_WithoutRepositoryID(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+func TestSessionStore_ListByOrg_OmitsRawDiffPayloads(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewSessionStore(mock)
+	orgID := uuid.New()
+
+	mock.ExpectQuery(`(?s)SELECT .+NULL::text AS diff.+NULL::jsonb AS diff_history.+FROM sessions WHERE org_id`).
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(sessionTestColumns))
+
+	sessions, err := store.ListByOrg(context.Background(), orgID, SessionFilters{})
+	require.NoError(t, err, "ListByOrg should not return an error when selecting lightweight session rows")
+	require.Empty(t, sessions, "ListByOrg should return no rows from the empty result set")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestSessionStore_GetAPIDetailByID_OmitsRawDiffPayloads(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewSessionStore(mock)
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	now := time.Now()
+
+	mock.ExpectQuery(`(?s)SELECT .+NULL::text AS diff.+NULL::jsonb AS diff_history.+FROM sessions`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(sessionTestColumns).
+				AddRow(newAgentSessionRow(sessionID, uuid.Nil, orgID, now)...),
+		)
+
+	session, err := store.GetAPIDetailByID(context.Background(), orgID, sessionID)
+	require.NoError(t, err, "GetAPIDetailByID should not return an error")
+	require.Equal(t, sessionID, session.ID, "GetAPIDetailByID should return the requested session")
+	require.Nil(t, session.Diff, "API detail fetch should not hydrate the raw diff")
+	require.Nil(t, session.DiffHistory, "API detail fetch should not hydrate diff history")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestSessionStore_GetDiffByID_ReturnsDiffPayload(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewSessionStore(mock)
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	diff := "diff --git a/main.go b/main.go\n"
+	diffStats := json.RawMessage(`{"added":1,"removed":0,"files_changed":1}`)
+	diffHistory := json.RawMessage(`[{"pass":1,"diff":"diff --git a/main.go b/main.go\n","diff_stats":{"added":1,"removed":0,"files_changed":1},"created_at":"2026-01-01T00:00:00Z"}]`)
+
+	mock.ExpectQuery(`(?s)SELECT .+left\(diff, @diff_max_chars\).+pg_column_size\(diff_history\).+FROM sessions`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows([]string{
+				"diff", "diff_stats", "diff_history", "diff_truncated", "diff_history_truncated",
+				"diff_chars", "diff_history_bytes", "diff_max_chars", "diff_history_max_bytes",
+			}).
+				AddRow(&diff, diffStats, diffHistory, false, false, int64(len(diff)), int64(len(diffHistory)), int64(sessionDiffMaxChars), int64(sessionDiffHistoryMaxBytes)),
+		)
+
+	payload, err := store.GetDiffByID(context.Background(), orgID, sessionID)
+	require.NoError(t, err, "GetDiffByID should not return an error")
+	require.Equal(t, sessionID, payload.SessionID, "GetDiffByID should preserve the requested session ID")
+	require.Equal(t, &diff, payload.Diff, "GetDiffByID should return the raw diff")
+	require.Equal(t, diffStats, payload.DiffStats, "GetDiffByID should return persisted diff stats")
+	require.Equal(t, diffHistory, payload.DiffHistory, "GetDiffByID should return diff history")
+	require.False(t, payload.DiffTruncated, "GetDiffByID should report an untruncated diff when it fits")
+	require.False(t, payload.DiffHistoryTruncated, "GetDiffByID should report untruncated history when it fits")
+	require.Equal(t, int64(len(diff)), payload.DiffChars, "GetDiffByID should return the original diff size")
+	require.Equal(t, int64(sessionDiffMaxChars), payload.DiffMaxChars, "GetDiffByID should return the configured diff cap")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestSessionStore_GetDiffByID_ReturnsTruncationMetadata(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewSessionStore(mock)
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	truncatedDiff := strings.Repeat("+", 128)
+	diffStats := json.RawMessage(`{"added":99999,"removed":1,"files_changed":3000}`)
+
+	mock.ExpectQuery(`(?s)left\(diff, @diff_max_chars\).+CASE WHEN diff_history IS NULL THEN NULL.+pg_column_size\(diff_history\)`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows([]string{
+				"diff", "diff_stats", "diff_history", "diff_truncated", "diff_history_truncated",
+				"diff_chars", "diff_history_bytes", "diff_max_chars", "diff_history_max_bytes",
+			}).
+				AddRow(&truncatedDiff, diffStats, json.RawMessage(`[]`), true, true, int64(sessionDiffMaxChars+4096), int64(sessionDiffHistoryMaxBytes+4096), int64(sessionDiffMaxChars), int64(sessionDiffHistoryMaxBytes)),
+		)
+
+	payload, err := store.GetDiffByID(context.Background(), orgID, sessionID)
+	require.NoError(t, err, "GetDiffByID should not fail for an oversized diff")
+	require.Equal(t, &truncatedDiff, payload.Diff, "GetDiffByID should return the bounded diff prefix")
+	require.True(t, payload.DiffTruncated, "GetDiffByID should report when the raw diff was capped")
+	require.True(t, payload.DiffHistoryTruncated, "GetDiffByID should report when diff history was omitted")
+	require.Equal(t, int64(sessionDiffMaxChars+4096), payload.DiffChars, "GetDiffByID should preserve original diff size metadata")
+	require.Equal(t, int64(sessionDiffHistoryMaxBytes), payload.DiffHistoryMaxBytes, "GetDiffByID should return the configured history cap")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func TestSessionStore_QueryColumnsStayInSyncWithSessionModel(t *testing.T) {
 	t.Parallel()
 
@@ -818,7 +935,7 @@ func TestSessionStore_UpdateResult(t *testing.T) {
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg()).
+			pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows(sessionTestColumns).AddRow(
 				newAgentSessionRow(sessionID, uuid.New(), orgID, now)...,
@@ -828,6 +945,38 @@ func TestSessionStore_UpdateResult(t *testing.T) {
 	err = store.UpdateResult(context.Background(), orgID, sessionID, "completed", result)
 	require.NoError(t, err)
 	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestSessionStore_UpdateResult_PersistsModelUsed(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewSessionStore(mock)
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	modelUsed := "gpt-5.4"
+	now := time.Now()
+
+	mock.ExpectQuery(`UPDATE sessions[\s\S]+model_used = COALESCE\(@model_used, model_used\)`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(sessionTestColumns).AddRow(
+				newAgentSessionRow(sessionID, uuid.New(), orgID, now)...,
+			),
+		)
+
+	err = store.UpdateResult(context.Background(), orgID, sessionID, "completed", &models.SessionResult{
+		ModelUsed: &modelUsed,
+	})
+	require.NoError(t, err, "UpdateResult should persist model_used when provided")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
 func TestSessionStore_UpdateStatus_PublishesAndQueriesTerminalCleanup(t *testing.T) {
@@ -918,7 +1067,7 @@ func TestSessionStore_UpdateResult_ErrorBranches(t *testing.T) {
 				pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 				pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 				pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-				pgxmock.AnyArg()).
+				pgxmock.AnyArg(), pgxmock.AnyArg()).
 			WillReturnError(context.DeadlineExceeded)
 
 		err = store.UpdateResult(context.Background(), uuid.New(), uuid.New(), "completed", &models.SessionResult{})
@@ -960,7 +1109,7 @@ func TestSessionStore_UpdateResult_ErrorBranches(t *testing.T) {
 				pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 				pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 				pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-				pgxmock.AnyArg()).
+				pgxmock.AnyArg(), pgxmock.AnyArg()).
 			WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(sessionID))
 
 		err = store.UpdateResult(context.Background(), orgID, sessionID, "completed", &models.SessionResult{})
@@ -1426,7 +1575,7 @@ func TestSessionStore_UpdateTurnComplete(t *testing.T) {
 	mock.ExpectExec("UPDATE sessions.+SET status = 'idle'.+pr_creation_state = 'idle', pr_creation_error = NULL").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
 	err = store.UpdateTurnComplete(context.Background(), uuid.New(), uuid.New(), 2, result, "agent-123", "snap-key")
@@ -2168,6 +2317,43 @@ func TestSessionStore_ListOrphanedContainers_QueryError(t *testing.T) {
 	_, err = store.ListOrphanedContainers(context.Background(), uuid.Nil)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "list orphaned containers")
+}
+
+func TestSessionStore_ListReferencedContainerIDs(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewSessionStore(mock)
+	mock.ExpectQuery(`SELECT container_id\s+FROM sessions\s+WHERE container_id IS NOT NULL`).
+		WillReturnRows(
+			pgxmock.NewRows([]string{"container_id"}).
+				AddRow("container-a").
+				AddRow("container-b"),
+		)
+
+	ids, err := store.ListReferencedContainerIDs(context.Background())
+	require.NoError(t, err, "ListReferencedContainerIDs should not return an error")
+	require.Equal(t, []string{"container-a", "container-b"}, ids, "ListReferencedContainerIDs should return every non-null session container id")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestSessionStore_ListReferencedContainerIDs_QueryError(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewSessionStore(mock)
+	mock.ExpectQuery(`SELECT container_id\s+FROM sessions\s+WHERE container_id IS NOT NULL`).
+		WillReturnError(errors.New("boom"))
+
+	_, err = store.ListReferencedContainerIDs(context.Background())
+	require.Error(t, err, "ListReferencedContainerIDs should surface query failures")
+	require.Contains(t, err.Error(), "list referenced container ids", "ListReferencedContainerIDs should wrap query failures with context")
 }
 
 // TestSessionStore_ListContainerHoldingSessions is the rehydrate-side

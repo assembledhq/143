@@ -94,6 +94,75 @@ func TestIntegrationHandler_ListIntegrations_Success(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
+func TestIntegrationHandler_ListIntegrations_SuppressesStaleDuplicateAuthError(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should initialize")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	now := time.Now().UTC()
+	activeID := uuid.New()
+	staleID := uuid.New()
+	store := db.NewIntegrationStore(mock)
+	handler := NewIntegrationHandler(store, nil, "", "", "http://localhost:8080", "http://localhost:3000")
+
+	rows := pgxmock.NewRows([]string{"id", "org_id", "provider", "config", "status", "last_synced_at", "created_at"}).
+		AddRow(activeID, orgID, "linear", json.RawMessage(`{}`), "active", nil, now).
+		AddRow(staleID, orgID, "linear", json.RawMessage(`{"last_auth_error":"Linear rejected the access token (HTTP 401). Reconnect to continue syncing.","last_auth_error_at":"2026-05-05T22:49:11Z"}`), "error", nil, now.Add(-time.Hour))
+	mock.ExpectQuery("SELECT .+ FROM integrations WHERE org_id").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(rows)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/integrations", nil)
+	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+	w := httptest.NewRecorder()
+
+	handler.ListIntegrations(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "should return 200 for duplicate integration rows")
+	var resp models.ListResponse[models.Integration]
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp), "response should decode as integration list")
+	require.Len(t, resp.Data, 2, "response should preserve rows while deriving safe status fields")
+	require.Nil(t, resp.Data[0].AuthError, "active Linear row without markers should not have auth_error")
+	require.Nil(t, resp.Data[1].AuthError, "stale errored duplicate should not surface auth_error while an active Linear row exists")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestIntegrationHandler_ListIntegrations_SurfacesAuthErrorWhenNoActiveDuplicate(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should initialize")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	now := time.Now().UTC()
+	store := db.NewIntegrationStore(mock)
+	handler := NewIntegrationHandler(store, nil, "", "", "http://localhost:8080", "http://localhost:3000")
+
+	rows := pgxmock.NewRows([]string{"id", "org_id", "provider", "config", "status", "last_synced_at", "created_at"}).
+		AddRow(uuid.New(), orgID, "linear", json.RawMessage(`{"last_auth_error":"Linear rejected the access token (HTTP 401). Reconnect to continue syncing.","last_auth_error_at":"2026-05-05T22:49:11Z"}`), "error", nil, now)
+	mock.ExpectQuery("SELECT .+ FROM integrations WHERE org_id").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(rows)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/integrations", nil)
+	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+	w := httptest.NewRecorder()
+
+	handler.ListIntegrations(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "should return 200 for errored integration row")
+	var resp models.ListResponse[models.Integration]
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp), "response should decode as integration list")
+	require.Len(t, resp.Data, 1, "response should include the errored integration")
+	require.NotNil(t, resp.Data[0].AuthError, "auth_error should surface when there is no active Linear duplicate")
+	require.Equal(t, "Linear rejected the access token (HTTP 401). Reconnect to continue syncing.", resp.Data[0].AuthError.Reason, "auth_error reason should be preserved")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func TestIntegrationHandler_ListIntegrations_DerivesGitHubAppInstalled(t *testing.T) {
 	t.Parallel()
 

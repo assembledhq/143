@@ -4162,6 +4162,43 @@ func TestRunAgentHandler_StaleSandboxIDClearedRetries(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met (handler must not mutate the row)")
 }
 
+func TestRunAgentHandler_SandboxCapacityRetries(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+
+	orgID := uuid.New()
+	runID := uuid.New()
+	issueID := uuid.New()
+
+	mock.ExpectQuery("SELECT .* FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(workerSessionColumns).AddRow(
+				workerSessionRow(runID, issueID, orgID, string(models.SessionStatusPending), 0, nil, nil)...,
+			),
+		)
+
+	orch := &orchestratorServiceStub{
+		runAgentFn: func(ctx context.Context, run *models.Session) error {
+			return fmt.Errorf("capacity full: %w", agent.ErrSandboxCapacity)
+		},
+	}
+	handler := newRunAgentHandler(stores, &Services{Orchestrator: orch}, zerolog.Nop())
+	payload := json.RawMessage(`{"session_id":"` + runID.String() + `","org_id":"` + orgID.String() + `"}`)
+
+	err := handler(context.Background(), "run_agent", payload)
+
+	require.Error(t, err, "run_agent should return a retryable error when local sandbox capacity is full")
+	var retryable *RetryableError
+	require.ErrorAs(t, err, &retryable, "ErrSandboxCapacity must be wrapped as RetryableError so the attempt counter is not consumed")
+	require.NotNil(t, retryable.RetryAfter, "sandbox capacity retries should use a fixed short delay")
+	require.Equal(t, 10*time.Second, *retryable.RetryAfter, "sandbox capacity retries should wait briefly before checking the local host again")
+	require.ErrorIs(t, retryable.Err, agent.ErrSandboxCapacity, "the wrapped error must preserve the ErrSandboxCapacity sentinel")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 // TestRunAgentHandler_SandboxRaceLoserDeadLetters locks the self-heal contract
 // for duplicate run_agent jobs: when the orchestrator returns
 // ErrSandboxRaceLoser (this duplicate lost AcquireTurnHold to a winner that
@@ -4285,6 +4322,44 @@ func TestContinueSessionHandler_WrapsSnapshotPendingAsRetryable(t *testing.T) {
 	require.ErrorAs(t, err, &retryable, "ErrSnapshotPending must be wrapped as RetryableError so the worker requeues without consuming an attempt")
 	require.ErrorIs(t, retryable.Err, agent.ErrSnapshotPending, "the wrapped error must preserve the ErrSnapshotPending sentinel")
 	require.Equal(t, 1, orch.continueSessionCalls, "continue_session should call the orchestrator once before bailing")
+}
+
+func TestContinueSessionHandler_SandboxCapacityRetries(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	issueID := uuid.New()
+
+	mock.ExpectQuery("SELECT .* FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(workerSessionColumns).AddRow(
+				workerSessionRow(sessionID, issueID, orgID, string(models.SessionStatusIdle), 2, nil, nil)...,
+			),
+		)
+
+	orch := &orchestratorServiceStub{
+		continueSessionFn: func(ctx context.Context, session *models.Session, opts *agent.ContinueSessionOptions) error {
+			return fmt.Errorf("capacity full: %w", agent.ErrSandboxCapacity)
+		},
+	}
+	handler := newContinueSessionHandler(stores, &Services{Orchestrator: orch}, zerolog.Nop())
+	payload := json.RawMessage(`{"session_id":"` + sessionID.String() + `","org_id":"` + orgID.String() + `"}`)
+
+	err := handler(context.Background(), "continue_session", payload)
+
+	require.Error(t, err, "continue_session should return a retryable error when local sandbox capacity is full")
+	var retryable *RetryableError
+	require.ErrorAs(t, err, &retryable, "ErrSandboxCapacity must be wrapped as RetryableError so the attempt counter is not consumed")
+	require.NotNil(t, retryable.RetryAfter, "sandbox capacity retries should use a fixed short delay")
+	require.Equal(t, 10*time.Second, *retryable.RetryAfter, "sandbox capacity retries should wait briefly before checking the local host again")
+	require.ErrorIs(t, retryable.Err, agent.ErrSandboxCapacity, "the wrapped error must preserve the ErrSandboxCapacity sentinel")
+	require.Equal(t, 1, orch.continueSessionCalls, "continue_session should call the orchestrator once before returning the retry")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
 func TestContinueSessionHandler_WrapsPreviewRaceAsRetryable(t *testing.T) {

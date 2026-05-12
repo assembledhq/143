@@ -24,6 +24,14 @@ const VIEWER_BLOCKED_PATHS = new Set([
   "/settings/evals",
 ]);
 
+// Builders can access personal coding-agent setup, but they do not inherit the
+// broader member settings surface for team/evals/integrations management.
+const BUILDER_BLOCKED_PATHS = new Set([
+  "/settings/team",
+  "/settings/integrations",
+  "/settings/evals",
+]);
+
 function isAdminOnlyPath(pathname: string): boolean {
   if (ADMIN_ONLY_PATHS.has(pathname)) return true;
   for (const base of ADMIN_ONLY_PATHS) {
@@ -40,6 +48,14 @@ function isViewerBlockedPath(pathname: string): boolean {
   return false;
 }
 
+function isBuilderBlockedPath(pathname: string): boolean {
+  if (BUILDER_BLOCKED_PATHS.has(pathname)) return true;
+  for (const base of BUILDER_BLOCKED_PATHS) {
+    if (pathname.startsWith(base + "/")) return true;
+  }
+  return false;
+}
+
 export default function SettingsLayout({
   children,
 }: {
@@ -49,13 +65,15 @@ export default function SettingsLayout({
   const pathname = usePathname();
   const { user, isLoading } = useAuth();
 
-  const roleGuardedPath = isAdminOnlyPath(pathname) || isViewerBlockedPath(pathname);
+  const roleGuardedPath = isAdminOnlyPath(pathname) || isViewerBlockedPath(pathname) || isBuilderBlockedPath(pathname);
   const role = user?.role;
   let restricted = false;
   if (!isLoading && role !== undefined) {
     if (role !== "admin" && isAdminOnlyPath(pathname)) {
       restricted = true;
     } else if (role === "viewer" && isViewerBlockedPath(pathname)) {
+      restricted = true;
+    } else if (role === "builder" && isBuilderBlockedPath(pathname)) {
       restricted = true;
     }
   }

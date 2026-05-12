@@ -116,6 +116,7 @@ func TestOrganizationMembershipStore_GrantAtLeast(t *testing.T) {
 	}{
 		{"admin role", "admin"},
 		{"member role", "member"},
+		{"builder role", "builder"},
 		{"viewer role", "viewer"},
 	}
 
@@ -139,6 +140,25 @@ func TestOrganizationMembershipStore_GrantAtLeast(t *testing.T) {
 			require.NoError(t, mock.ExpectationsWereMet())
 		})
 	}
+}
+
+func TestOrganizationMembershipStore_GrantAtLeast_SQLSupportsBuilderUpgrade(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := NewOrganizationMembershipStore(mock)
+
+	mock.ExpectQuery(`(?s)INSERT INTO organization_memberships.+WHEN EXCLUDED\.role = 'builder' AND organization_memberships\.role = 'viewer' THEN 'builder'.+RETURNING role`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"role"}).AddRow("builder"))
+
+	effective, err := store.GrantAtLeast(context.Background(), uuid.New(), uuid.New(), "builder")
+	require.NoError(t, err)
+	require.Equal(t, "builder", effective)
+	require.NoError(t, mock.ExpectationsWereMet())
 }
 
 func TestOrganizationMembershipStore_Insert(t *testing.T) {

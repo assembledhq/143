@@ -174,6 +174,25 @@ func TestContainerUsageStore_CloseOrphans(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
+func TestContainerUsageStore_CloseOpenByContainerID(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewContainerUsageStore(mock)
+	stoppedAt := time.Date(2026, 5, 9, 12, 0, 0, 0, time.UTC)
+	mock.ExpectExec("UPDATE container_usage_events").
+		WithArgs(stoppedAt, "sandbox_gc_unreferenced", "container-123").
+		WillReturnResult(pgxmock.NewResult("UPDATE", 2))
+
+	closed, err := store.CloseOpenByContainerID(context.Background(), "container-123", stoppedAt, "sandbox_gc_unreferenced")
+	require.NoError(t, err, "CloseOpenByContainerID should close open usage rows for a destroyed container")
+	require.Equal(t, int64(2), closed, "CloseOpenByContainerID should return the number of rows it closed")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func TestContainerUsageStore_CountActive(t *testing.T) {
 	t.Parallel()
 

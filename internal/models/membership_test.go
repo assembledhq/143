@@ -15,6 +15,7 @@ func TestIsValidRole(t *testing.T) {
 		valid bool
 	}{
 		{name: "admin", role: RoleAdmin, valid: true},
+		{name: "builder", role: RoleBuilder, valid: true},
 		{name: "member", role: RoleMember, valid: true},
 		{name: "viewer", role: RoleViewer, valid: true},
 		{name: "empty", role: "", valid: false},
@@ -32,5 +33,5 @@ func TestIsValidRole(t *testing.T) {
 
 func TestValidRoles_OrderedByPrivilege(t *testing.T) {
 	t.Parallel()
-	require.Equal(t, []string{RoleAdmin, RoleMember, RoleViewer}, ValidRoles)
+	require.Equal(t, []string{RoleAdmin, RoleMember, RoleBuilder, RoleViewer}, ValidRoles)
 }

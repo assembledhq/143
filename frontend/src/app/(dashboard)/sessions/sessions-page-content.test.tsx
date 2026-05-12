@@ -6,12 +6,12 @@ import { SessionsPageContent } from './sessions-page-content';
 
 const mockAuthState: {
   isAuthenticated: boolean;
-  user: { id: string } | null;
+  user: { id: string; role: string } | null;
   isLoading: boolean;
   logout: ReturnType<typeof vi.fn>;
 } = {
   isAuthenticated: true,
-  user: { id: 'user-1' },
+  user: { id: 'user-1', role: 'member' },
   isLoading: false,
   logout: vi.fn(),
 };
@@ -30,7 +30,7 @@ vi.mock('@/hooks/use-auth', () => ({
 describe('SessionsPageContent', () => {
   beforeEach(() => {
     mockAuthState.isAuthenticated = true;
-    mockAuthState.user = { id: 'user-1' };
+    mockAuthState.user = { id: 'user-1', role: 'member' };
     mockAuthState.isLoading = false;
     mockAuthState.logout = vi.fn();
   });
@@ -57,5 +57,22 @@ describe('SessionsPageContent', () => {
     await new Promise((resolve) => setTimeout(resolve, 50));
     expect(requestCount).toBe(0);
     expect(screen.getByText('Loading sessions...')).toBeInTheDocument();
+  });
+
+  it('does not request the team roster for builders', async () => {
+    mockAuthState.user = { id: 'user-1', role: 'builder' };
+    let teamRequestCount = 0;
+
+    server.use(
+      http.get('/api/v1/team/members', () => {
+        teamRequestCount += 1;
+        return HttpResponse.json({ error: { code: 'FORBIDDEN', message: 'insufficient permissions' } }, { status: 403 });
+      }),
+    );
+
+    renderWithProviders(<SessionsPageContent />);
+
+    expect(await screen.findByText(/Fixed TypeError by adding null check/)).toBeInTheDocument();
+    expect(teamRequestCount).toBe(0);
   });
 });

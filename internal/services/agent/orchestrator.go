@@ -459,6 +459,7 @@ type Orchestrator struct {
 	memory            MemoryService          // can be nil
 	snapshots         storage.SnapshotStore  // can be nil — multi-turn disabled if nil
 	usageTracker      UsageRecorder          // can be nil — billing tracking disabled if nil
+	sandboxCapacity   *SandboxCapacityGate   // can be nil — live local sandbox admission disabled
 	env               *AgentEnv              // owns env resolution, auth pre-flight, Codex auth injection
 	identityResolver  *identity.Resolver     // can be nil — falls back to legacy GITHUB_TOKEN env injection
 	sandboxAuth       SandboxAuthServer      // can be nil — paired with identityResolver
@@ -637,6 +638,7 @@ type OrchestratorConfig struct {
 	CodingCredentials CodingCredentialProvider // optional — preferred unified resolver; consulted before the legacy cascade
 	Snapshots         storage.SnapshotStore    // optional — enables multi-turn snapshot/restore
 	UsageTracker      UsageRecorder            // optional — enables billing observability
+	SandboxCapacity   *SandboxCapacityGate     // optional — gates new local sandbox creation
 	Cancels           *CancelRegistry          // optional — enables session cancellation from API
 	ThreadCancels     *ThreadCancelRegistry    // optional — enables per-tab cancellation from API
 	OrgSettingsCache  *OrgSettingsCache        // optional — caches Amp/Pi agent_config lookups across session starts
@@ -716,6 +718,7 @@ func NewOrchestrator(cfg OrchestratorConfig) *Orchestrator {
 		memory:            cfg.Memory,
 		snapshots:         cfg.Snapshots,
 		usageTracker:      cfg.UsageTracker,
+		sandboxCapacity:   cfg.SandboxCapacity,
 		env:               env,
 		identityResolver:  cfg.IdentityResolver,
 		sandboxAuth:       cfg.SandboxAuth,
@@ -998,6 +1001,10 @@ func latestDurableCheckpoint(session *models.Session) (DurableCheckpoint, bool) 
 	return checkpoint, true
 }
 
+const retryableSnapshotSaveMaxAttempts = 3
+
+var retryableSnapshotSaveBackoff = 50 * time.Millisecond
+
 func latestUserMessage(messages []models.SessionMessage) *models.SessionMessage {
 	for i := len(messages) - 1; i >= 0; i-- {
 		if messages[i].Role == models.MessageRoleUser {
@@ -1005,6 +1012,49 @@ func latestUserMessage(messages []models.SessionMessage) *models.SessionMessage 
 		}
 	}
 	return nil
+}
+
+func shouldRetryClaudeResumeFromSnapshot(session *models.Session, prompt *AgentPrompt, result *AgentResult) bool {
+	if session == nil || session.AgentType != models.AgentTypeClaudeCode {
+		return false
+	}
+	if prompt == nil || !prompt.Continuation || prompt.ResumeSessionID == "" {
+		return false
+	}
+	if result == nil {
+		return false
+	}
+	if result.ExitCode != 1 {
+		return false
+	}
+	if strings.TrimSpace(result.Summary) != "" {
+		return false
+	}
+	if result.AgentSessionID != "" {
+		return false
+	}
+	return true
+}
+
+func isRetryableSnapshotSaveError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, ".git/objects/pack/") &&
+		strings.Contains(msg, "File removed before we read it")
+}
+
+func waitForRetryableSnapshotSave(ctx context.Context, attempt int) error {
+	backoff := time.Duration(attempt) * retryableSnapshotSaveBackoff
+	timer := time.NewTimer(backoff)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
 }
 
 // latestUserMessageInScope returns the most recent user message bound to the
@@ -1036,6 +1086,23 @@ func latestUserMessageInScope(messages []models.SessionMessage, threadID *uuid.U
 		return &messages[i]
 	}
 	return nil
+}
+
+func messagesInScope(messages []models.SessionMessage, threadID *uuid.UUID) []models.SessionMessage {
+	scoped := make([]models.SessionMessage, 0, len(messages))
+	for _, message := range messages {
+		if threadID == nil {
+			if message.ThreadID != nil {
+				continue
+			}
+		} else {
+			if message.ThreadID == nil || *message.ThreadID != *threadID {
+				continue
+			}
+		}
+		scoped = append(scoped, message)
+	}
+	return scoped
 }
 
 // unprocessedUserMessages returns the consecutive trailing user messages for
@@ -1491,6 +1558,21 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 		return err
 	}
 
+	var capacityReservation *SandboxCapacityReservation
+	if o.sandboxCapacity != nil {
+		var capErr error
+		capacityReservation, capErr = o.sandboxCapacity.Acquire(ctx, SandboxCapacityRequest{
+			Purpose:   "agent_run",
+			SessionID: run.ID.String(),
+			OrgID:     run.OrgID.String(),
+		})
+		if capErr != nil {
+			log.Info().Err(capErr).Msg("sandbox capacity reached, run stays pending")
+			return capErr
+		}
+		defer capacityReservation.Release()
+	}
+
 	// 2. Update status to "running" (sets started_at in DB). We also capture
 	// the start time locally so the timeout branch below can log a
 	// meaningful elapsed duration regardless of whether run.StartedAt was
@@ -1742,17 +1824,15 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 		sandboxCfg.Env["HOME"] = sandboxCfg.HomeDir
 	}
 	sandbox, err := o.provider.Create(ctx, sandboxCfg)
+	if capacityReservation != nil {
+		capacityReservation.Release()
+	}
 	if err != nil {
 		if sandboxCfg.AuthSocketPath != "" {
 			o.closeSandboxAuth(run.ID, log)
 		}
 		o.failRun(ctx, run, fmt.Sprintf("create sandbox: %s", err))
 		return fmt.Errorf("create sandbox: %w", err)
-	}
-	containerStartedAt := time.Now()
-	var usageEventID uuid.UUID
-	if o.usageTracker != nil {
-		usageEventID = o.usageTracker.ContainerStarted(ctx, run.OrgID, run.ID, sandbox, sandboxCfg, containerStartedAt)
 	}
 	// Record the turn hold so a concurrent StartPreview can attach to this
 	// container (same ID, same filesystem) instead of hydrating a duplicate.
@@ -1800,6 +1880,11 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 			}
 		}
 		return fmt.Errorf("%w: actual container %s != created %s", diagErr, actualContainerID, sandbox.ID)
+	}
+	containerStartedAt := time.Now()
+	var usageEventID uuid.UUID
+	if o.usageTracker != nil {
+		usageEventID = o.usageTracker.ContainerStarted(ctx, run.OrgID, run.ID, sandbox, sandboxCfg, containerStartedAt)
 	}
 	defer func() {
 		exitReason := containerExitReason(ctx, err)
@@ -2252,6 +2337,22 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	hasSnapshot := session.SnapshotKey != nil && *session.SnapshotKey != "" &&
 		o.snapshots != nil &&
 		session.SandboxState != string(models.SandboxStateDestroyed)
+	reusedExisting := session.ContainerID != nil && *session.ContainerID != ""
+
+	var capacityReservation *SandboxCapacityReservation
+	if !reusedExisting && o.sandboxCapacity != nil {
+		var capErr error
+		capacityReservation, capErr = o.sandboxCapacity.Acquire(ctx, SandboxCapacityRequest{
+			Purpose:   "continue_session",
+			SessionID: session.ID.String(),
+			OrgID:     session.OrgID.String(),
+		})
+		if capErr != nil {
+			log.Info().Err(capErr).Msg("sandbox capacity reached, continue_session stays pending")
+			return capErr
+		}
+		defer capacityReservation.Release()
+	}
 
 	// 1. Update status to running. Capture wall-clock start locally so the
 	// timeout branch below can log a meaningful elapsed regardless of
@@ -2315,6 +2416,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		return fmt.Errorf("no user message found")
 	}
 	threadID := latestMsg.ThreadID
+	scopedMessages := messagesInScope(messages, threadID)
 	// Bundle every trailing user message in scope into the prompt seed so
 	// rapid mid-turn sends are all delivered to the agent. The latest
 	// message remains the "carrier" for thread_id, references, and
@@ -2437,7 +2539,6 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	if _, ok := sandboxCfg.Env["HOME"]; !ok {
 		sandboxCfg.Env["HOME"] = sandboxCfg.HomeDir
 	}
-	reusedExisting := session.ContainerID != nil && *session.ContainerID != ""
 	// Liveness / cross-node check on reuse. A recorded container_id only
 	// means "someone (preview, prior turn) wrote it" — it does NOT prove
 	// the container is alive AND on this node's docker daemon. Two cases:
@@ -2677,6 +2778,9 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		log.Info().Str("container_id", sandbox.ID).Msg("reusing existing sandbox container (preview is holding it)")
 	case hasSnapshot:
 		sandbox, err = HydrateSandboxFromSnapshot(ctx, o.provider, o.snapshots, *session.SnapshotKey, sandboxCfg)
+		if capacityReservation != nil {
+			capacityReservation.Release()
+		}
 		if err != nil {
 			o.closeSandboxAuth(session.ID, log)
 			log.Error().Err(err).Msg("sandbox hydrate failed during continue_session")
@@ -2696,6 +2800,9 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		}
 	default:
 		sandbox, err = o.provider.Create(ctx, sandboxCfg)
+		if capacityReservation != nil {
+			capacityReservation.Release()
+		}
 		if err != nil {
 			o.closeSandboxAuth(session.ID, log)
 			log.Error().Err(err).Msg("sandbox creation failed during continue_session")
@@ -2920,6 +3027,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	//   - Fresh: no snapshot; clone repo fresh and build a reconstructed
 	//     prompt from the conversation history + stored diff.
 	var prompt *AgentPrompt
+	var restoredWorkspaceFallbackPrompt func() (*AgentPrompt, error)
 	authBillingMode := TokenBillingModeUnknown
 	if reusedExisting || hasSnapshot {
 		// Re-inject agent auth (Codex auth.json or Claude Code credentials.json).
@@ -3008,7 +3116,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 			// prior context when running a fresh exec. The snapshot already
 			// restored the workspace, so do not ask the agent to re-apply the
 			// stored diff.
-			basePrompt.UserPrompt = o.buildRestoredWorkspaceResumeContext(session, promptIssue, messages, userMessage)
+			basePrompt.UserPrompt = o.buildRestoredWorkspaceResumeContext(session, promptIssue, scopedMessages, userMessage)
 			basePrompt.Continuation = false
 			basePrompt.RevisionContext = revisionContext
 			prompt = basePrompt
@@ -3035,6 +3143,18 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 					return *session.ReasoningEffort
 				}(),
 				RevisionContext: revisionContext,
+			}
+			if !reusedExisting && session.AgentType == models.AgentTypeClaudeCode && resumeSessionID != "" {
+				restoredWorkspaceFallbackPrompt = func() (*AgentPrompt, error) {
+					basePrompt, err := adapter.PreparePrompt(ctx, buildSnapshotContinueInput())
+					if err != nil {
+						return nil, fmt.Errorf("prepare prompt for restored-workspace fallback: %w", err)
+					}
+					basePrompt.UserPrompt = o.buildRestoredWorkspaceResumeContext(session, promptIssue, scopedMessages, userMessage)
+					basePrompt.Continuation = false
+					basePrompt.RevisionContext = revisionContext
+					return basePrompt, nil
+				}
 			}
 		}
 
@@ -3134,6 +3254,33 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		execCtx = WithInteractiveHandleAttacher(execCtx, o.cancels.HandleAttacher(session.ID))
 	}
 	result, err := adapter.Execute(execCtx, sandbox, prompt, logCh)
+	if err == nil && restoredWorkspaceFallbackPrompt != nil && shouldRetryClaudeResumeFromSnapshot(session, prompt, result) {
+		log.Warn().
+			Str("resume_session_id", prompt.ResumeSessionID).
+			Int("exit_code", result.ExitCode).
+			Msg("claude resume failed against restored snapshot; retrying with reconstructed context")
+		fallbackPrompt, fallbackErr := restoredWorkspaceFallbackPrompt()
+		if fallbackErr != nil {
+			err = fallbackErr
+		} else {
+			fallbackResult, fallbackExecErr := adapter.Execute(execCtx, sandbox, fallbackPrompt, logCh)
+			if fallbackExecErr != nil {
+				err = fmt.Errorf("execute restored-workspace fallback after stale Claude resume: %w", fallbackExecErr)
+			} else if fallbackResult == nil {
+				err = errors.New("restored-workspace fallback after stale Claude resume returned no result")
+			} else if fallbackResult.ExitCode != 0 {
+				msg := strings.TrimSpace(fallbackResult.Error)
+				if msg == "" {
+					msg = fmt.Sprintf("claude fallback exited with code %d", fallbackResult.ExitCode)
+				}
+				err = fmt.Errorf("restored-workspace fallback after stale Claude resume failed: %s", msg)
+				result = fallbackResult
+			} else {
+				prompt = fallbackPrompt
+				result = fallbackResult
+			}
+		}
+	}
 	close(logCh)
 	logWg.Wait()
 
@@ -4082,6 +4229,7 @@ func (o *Orchestrator) billingModeForAgent(
 // buildRunResult converts an AgentResult into the DB update struct.
 func (o *Orchestrator) buildRunResult(ctx context.Context, run *models.Session, sandbox *Sandbox, result *AgentResult) *models.SessionResult {
 	var tokenUsage []byte
+	var modelUsed *string
 	if HasPersistableTokenUsage(result.TokenUsage) {
 		marshaled, err := json.Marshal(result.TokenUsage)
 		if err != nil {
@@ -4089,6 +4237,9 @@ func (o *Orchestrator) buildRunResult(ctx context.Context, run *models.Session, 
 		} else {
 			tokenUsage = marshaled
 		}
+	}
+	if result.TokenUsage.NativeUsage != nil && result.TokenUsage.NativeUsage.Model != "" {
+		modelUsed = strPtr(result.TokenUsage.NativeUsage.Model)
 	}
 
 	headSHA := o.captureCurrentHeadSHA(ctx, sandbox)
@@ -4099,6 +4250,7 @@ func (o *Orchestrator) buildRunResult(ctx context.Context, run *models.Session, 
 		ConfidenceReasoning: strPtr(result.ConfidenceReasoning),
 		RiskFactors:         result.RiskFactors,
 		TokenUsage:          tokenUsage,
+		ModelUsed:           modelUsed,
 		ResultSummary:       strPtr(result.Summary),
 		Diff:                strPtr(result.Diff),
 		Error:               strPtr(result.Error),
@@ -4588,22 +4740,42 @@ func (o *Orchestrator) snapshotSession(ctx context.Context, session *models.Sess
 
 	snapshotKey := fmt.Sprintf("snapshots/%s/%s/workspace.tar.zst", session.OrgID, session.ID)
 
-	reader, err := o.provider.Snapshot(ctx, sandbox)
-	if err != nil {
-		return "", 0, fmt.Errorf("snapshot sandbox: %w", err)
+	for attempt := 1; attempt <= retryableSnapshotSaveMaxAttempts; attempt++ {
+		reader, err := o.provider.Snapshot(ctx, sandbox)
+		if err != nil {
+			return "", 0, fmt.Errorf("snapshot sandbox: %w", err)
+		}
+
+		countingReader := &countingReadCloser{ReadCloser: reader}
+		saveErr := o.snapshots.Save(ctx, snapshotKey, countingReader)
+		closeErr := reader.Close()
+		if saveErr == nil && closeErr == nil {
+			// Store the snapshot key on the session for subsequent use.
+			session.SnapshotKey = &snapshotKey
+			return snapshotKey, countingReader.n, nil
+		}
+
+		if saveErr == nil {
+			saveErr = closeErr
+		}
+		if closeErr != nil && saveErr != closeErr {
+			o.logger.Warn().Err(closeErr).Int("attempt", attempt).Msg("snapshot reader close returned an additional error after save failure")
+		}
+		if !isRetryableSnapshotSaveError(saveErr) || attempt == retryableSnapshotSaveMaxAttempts {
+			return "", 0, fmt.Errorf("save snapshot to storage: %w", saveErr)
+		}
+		o.logger.Warn().
+			Err(saveErr).
+			Int("attempt", attempt).
+			Int("max_attempts", retryableSnapshotSaveMaxAttempts).
+			Str("snapshot_key", snapshotKey).
+			Msg("retrying snapshot after transient git pack churn")
+		if waitErr := waitForRetryableSnapshotSave(ctx, attempt); waitErr != nil {
+			return "", 0, fmt.Errorf("save snapshot to storage: %w", waitErr)
+		}
 	}
-	defer reader.Close()
 
-	countingReader := &countingReadCloser{ReadCloser: reader}
-
-	if err := o.snapshots.Save(ctx, snapshotKey, countingReader); err != nil {
-		return "", 0, fmt.Errorf("save snapshot to storage: %w", err)
-	}
-
-	// Store the snapshot key on the session for subsequent use.
-	session.SnapshotKey = &snapshotKey
-
-	return snapshotKey, countingReader.n, nil
+	return "", 0, fmt.Errorf("save snapshot to storage: retry loop exhausted for %s", snapshotKey)
 }
 
 type countingReadCloser struct {

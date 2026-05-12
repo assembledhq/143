@@ -14,6 +14,7 @@ import (
 type HealthHandler struct {
 	pool        *pgxpool.Pool
 	redisHealth func(context.Context) bool
+	draining    <-chan struct{}
 }
 
 func NewHealthHandler(pool *pgxpool.Pool) *HealthHandler {
@@ -24,8 +25,17 @@ func (h *HealthHandler) SetRedisHealthCheck(check func(context.Context) bool) {
 	h.redisHealth = check
 }
 
+func (h *HealthHandler) SetDrainingSignal(draining <-chan struct{}) {
+	h.draining = draining
+}
+
 func (h *HealthHandler) Healthz(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
+	if h.isDraining() {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte(`{"status":"draining"}`))
+		return
+	}
 	redisStatus := "unavailable"
 	if h.redisHealth != nil {
 		ctx, cancel := context.WithTimeout(r.Context(), time.Second)
@@ -35,6 +45,18 @@ func (h *HealthHandler) Healthz(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	_, _ = w.Write([]byte(`{"status":"ok","redis":"` + redisStatus + `"}`))
+}
+
+func (h *HealthHandler) isDraining() bool {
+	if h.draining == nil {
+		return false
+	}
+	select {
+	case <-h.draining:
+		return true
+	default:
+		return false
+	}
 }
 
 // Version returns the server deploy SHA and build metadata.

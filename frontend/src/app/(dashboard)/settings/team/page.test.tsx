@@ -230,6 +230,25 @@ describe('TeamSettingsPage', () => {
     });
   });
 
+  it('offers builder as an invite role option', async () => {
+    const user = userEvent.setup();
+    renderWithProviders(<TeamSettingsPage />);
+
+    await user.click(await screen.findByRole('button', { name: 'Invite' }));
+    await user.click(await screen.findByLabelText('Role'));
+
+    expect(await screen.findByRole('option', { name: 'Builder' })).toBeInTheDocument();
+  });
+
+  it('offers builder in the member role selector for admins', async () => {
+    const user = userEvent.setup();
+    renderWithProviders(<TeamSettingsPage />);
+
+    await user.click(await screen.findByLabelText('Role for Member User'));
+
+    expect(await screen.findByRole('option', { name: 'Builder' })).toBeInTheDocument();
+  });
+
   it('shows informative self action text instead of a dash placeholder', async () => {
     renderWithProviders(<TeamSettingsPage />);
 

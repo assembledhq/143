@@ -245,6 +245,22 @@ describe('SessionSidebar', () => {
     expect(screen.queryByRole('link', { name: 'Open session details for No extra open button' })).not.toBeInTheDocument();
   });
 
+  it('uses the line tab variant for the session status filters', async () => {
+    serveSessions([
+      makeSession({ id: 's1', result_summary: 'Status filter tabs' }),
+    ]);
+
+    renderWithProviders(<SessionSidebar />);
+    await screen.findByText('Status filter tabs');
+
+    const tabList = screen.getByRole('tablist');
+    expect(tabList).toHaveAttribute('data-variant', 'line');
+    expect(tabList.className).toContain('pb-1');
+    expect(tabList.className).toContain('justify-start');
+    expect(tabList.className).toContain('overflow-x-auto');
+    expect(tabList.className).toContain('overflow-y-visible');
+  });
+
   it('navigates when the selected row shell is tapped', async () => {
     mockSelectedSegment = 's1';
     serveSessions([

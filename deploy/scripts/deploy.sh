@@ -134,6 +134,11 @@ if [ -n "${SOPS_AGE_KEY:-}" ] && [ -f "$ENC_FILE" ]; then
     : "${DB_PASSWORD:?DB_PASSWORD is required for worker role (set it or add to .env.production.enc)}"
     : "${DB_HOST:?DB_HOST is required for worker role (set it or add to .env.production.enc)}"
     : "${VICTORIALOGS_HOST:?VICTORIALOGS_HOST is required for worker role (set it or add to .env.production.enc)}"
+    : "${SANDBOX_HEALTH_CHECK_IMAGE:=busybox:1.36.1}"
+    : "${SANDBOX_REQUIRE_DISK_QUOTA:=true}"
+    : "${SANDBOX_GC_INTERVAL:=5m}"
+    : "${SANDBOX_GC_GRACE:=30m}"
+    : "${SANDBOX_GC_HARD_MAX:=24h}"
     # Refresh the shared secrets in /opt/143/.env, then re-append the per-host
     # identity from /opt/143/.env.local (NODE_ID, WORKER_PRIVATE_IP,
     # PREVIEW_INTERNAL_BASE_URL) so docker compose can still interpolate them
@@ -141,9 +146,10 @@ if [ -n "${SOPS_AGE_KEY:-}" ] && [ -f "$ENC_FILE" ]; then
     # and we abort if it's missing instead of silently coming up with an
     # empty NODE_ID and WORKER_PRIVATE_IP=0.0.0.0 (would expose worker to
     # the public internet).
-    printf 'SOPS_AGE_KEY=%s\nDB_PASSWORD=%s\nDB_HOST=%s\nVICTORIALOGS_HOST=%s\nSERVER_ROLE=%s\nWORKER_PROCESS_COUNT=%s\nSANDBOX_CPU_LIMIT=%s\nSANDBOX_MEMORY_LIMIT_MB=%s\nSANDBOX_DISK_LIMIT_GB=%s\n' \
+    printf 'SOPS_AGE_KEY=%s\nDB_PASSWORD=%s\nDB_HOST=%s\nVICTORIALOGS_HOST=%s\nSERVER_ROLE=%s\nWORKER_PROCESS_COUNT=%s\nWORKER_MAX_ACTIVE_SANDBOXES=%s\nSANDBOX_CPU_LIMIT=%s\nSANDBOX_MEMORY_LIMIT_MB=%s\nSANDBOX_DISK_LIMIT_GB=%s\nSANDBOX_HEALTH_CHECK_IMAGE=%s\nSANDBOX_REQUIRE_DISK_QUOTA=%s\nSANDBOX_GC_INTERVAL=%s\nSANDBOX_GC_GRACE=%s\nSANDBOX_GC_HARD_MAX=%s\n' \
       "$SOPS_AGE_KEY" "$DB_PASSWORD" "$DB_HOST" "$VICTORIALOGS_HOST" "$ROLE" \
-      "${WORKER_PROCESS_COUNT:-}" "${SANDBOX_CPU_LIMIT:-}" "${SANDBOX_MEMORY_LIMIT_MB:-}" "${SANDBOX_DISK_LIMIT_GB:-}" \
+      "${WORKER_PROCESS_COUNT:-}" "${WORKER_MAX_ACTIVE_SANDBOXES:-}" "${SANDBOX_CPU_LIMIT:-}" "${SANDBOX_MEMORY_LIMIT_MB:-}" "${SANDBOX_DISK_LIMIT_GB:-}" \
+      "$SANDBOX_HEALTH_CHECK_IMAGE" "$SANDBOX_REQUIRE_DISK_QUOTA" "$SANDBOX_GC_INTERVAL" "$SANDBOX_GC_GRACE" "$SANDBOX_GC_HARD_MAX" \
       | ssh "${SSH_OPTS[@]}" deploy@"$HOST" '
           set -euo pipefail
           cat > /opt/143/.env
@@ -416,6 +422,9 @@ fi
 ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
   "COMPOSE_FILE=$COMPOSE_FILE" "HEALTH_SERVICE=$HEALTH_SERVICE" "ROLE=$ROLE" "IMAGE_TAG=$TAG" \
   "WORKER_DEPLOY_DETACH=${WORKER_DEPLOY_DETACH:-}" \
+  "DEPLOY_DOCKER_PRUNE=${DEPLOY_DOCKER_PRUNE:-1}" \
+  "DOCKER_PRUNE_UNTIL=${DOCKER_PRUNE_UNTIL:-24h}" \
+  "DEPLOY_DOCKER_VOLUME_PRUNE=${DEPLOY_DOCKER_VOLUME_PRUNE:-0}" \
   bash << 'REMOTE'
   set -euo pipefail
   cd /opt/143
@@ -464,6 +473,101 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
       return 0
     fi
     rm -f "$new_file"
+    return 1
+  }
+
+  resolve_caddy_service_ips() {
+    local caddy_id="$1" service="$2"
+    docker exec "$caddy_id" sh -c '
+      service="$1"
+      if command -v getent >/dev/null 2>&1; then
+        getent hosts "$service" | while read -r ip _; do
+          case "$ip" in
+            *:*) ;;
+            *) echo "$ip" ;;
+          esac
+        done
+      elif command -v nslookup >/dev/null 2>&1; then
+        nslookup "$service" | while read -r first second third _; do
+          case "$first" in
+            Address:)
+              ip="$second"
+              ;;
+            Address)
+              case "$second" in
+                *:) ip="$third" ;;
+                *) continue ;;
+              esac
+              ;;
+            *)
+              continue
+              ;;
+          esac
+          case "$ip" in
+            ""|*:*) ;;
+            *) echo "$ip" ;;
+          esac
+        done
+      else
+        exit 127
+      fi
+    ' sh "$service" | sort -u
+  }
+
+  # wait_caddy_upstream_discovery SERVICE CONTAINER_ID - Docker health means the
+  # container is ready, but Caddy still needs to be able to reach it from the
+  # proxy container's network namespace. Keep the old app/frontend container
+  # serving until the same service-name DNS path Caddy uses includes the new
+  # upstream and Caddy can probe it directly.
+  wait_caddy_upstream_discovery() {
+    local service="$1" new_container="$2" port
+    case "$service" in
+      api) port="8080" ;;
+      frontend) port="3000" ;;
+      *) return 0 ;;
+    esac
+
+    local caddy_id
+    caddy_id="$(docker compose -f "$COMPOSE_FILE" ps -q caddy | head -1 || true)"
+    if [ -z "$caddy_id" ]; then
+      echo "ERROR: caddy container not found; refusing to drain old $service containers"
+      return 1
+    fi
+
+    local new_ip
+    new_ip="$(docker inspect --format '{{range .NetworkSettings.Networks}}{{if .IPAddress}}{{println .IPAddress}}{{end}}{{end}}' "$new_container" | head -1)"
+    if [ -z "$new_ip" ]; then
+      echo "ERROR: could not determine IP for new $service container ${new_container:0:12}"
+      return 1
+    fi
+
+    local attempts="${CADDY_UPSTREAM_DISCOVERY_ATTEMPTS:-10}"
+    local interval="${CADDY_UPSTREAM_DISCOVERY_INTERVAL_SECONDS:-1}"
+    local dynamic_refresh="${CADDY_DYNAMIC_REFRESH_SECONDS:-2}"
+    local url="http://$new_ip:$port/healthz"
+    local dns_seen=0
+
+    echo "Waiting for Caddy to reach healthy $service upstream at $new_ip:$port..."
+    for i in $(seq 1 "$attempts"); do
+      local service_ips
+      service_ips="$(resolve_caddy_service_ips "$caddy_id" "$service" || true)"
+      if printf '%s\n' "$service_ips" | grep -Fxq "$new_ip"; then
+        if [ "$dns_seen" -eq 0 ]; then
+          echo "Caddy service DNS resolves $service to new upstream $new_ip; waiting ${dynamic_refresh}s for dynamic upstream refresh..."
+          sleep "$dynamic_refresh"
+          dns_seen=1
+        fi
+        if docker exec "$caddy_id" sh -c 'if command -v wget >/dev/null 2>&1; then wget -qO- -T 2 "$1" >/dev/null; elif command -v curl >/dev/null 2>&1; then curl -fsS --max-time 2 "$1" >/dev/null; else exit 127; fi' sh "$url"; then
+          echo "Caddy discovered and reached new $service upstream on attempt $i."
+          return 0
+        fi
+      fi
+      if [ "$i" -lt "$attempts" ]; then
+        sleep "$interval"
+      fi
+    done
+
+    echo "ERROR: Caddy could not reach new $service upstream at $new_ip:$port after $attempts attempt(s)"
     return 1
   }
 
@@ -537,6 +641,7 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
     fi
 
     if [ -n "$old_containers" ]; then
+      wait_caddy_upstream_discovery "$service" "$new_container"
       # Stop each old container with a long timeout so in-flight requests and
       # SSE streams have time to drain. Docker sends SIGTERM and only falls
       # back to SIGKILL once stop_grace_period (compose) / -t (CLI) expires.
@@ -590,6 +695,43 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
       docker inspect --format '{{if .State.Health}}{{range .State.Health.Log}}--- {{.Start}} ---
 {{.Output}}
 {{end}}{{else}}(no health check configured){{end}}' "$cid" 2>&1 || true
+    fi
+  }
+
+  # prune_docker_deploy_artifacts ROLE — reclaim Docker cache after a
+  # successful rollout. Runs only after the new service is healthy so the
+  # freshly pulled image is protected by a running container. Detached worker
+  # deploys embed and call this helper inside the detached rollover script for
+  # the same reason.
+  prune_docker_deploy_artifacts() {
+    local role="${1:-}"
+    if [ "${DEPLOY_DOCKER_PRUNE:-1}" = "0" ]; then
+      echo "Docker deploy prune skipped (DEPLOY_DOCKER_PRUNE=0)."
+      return 0
+    fi
+    case "$role" in
+      app|worker)
+        ;;
+      *)
+        echo "Docker deploy prune skipped for role=$role."
+        return 0
+        ;;
+    esac
+
+    local prune_until="${DOCKER_PRUNE_UNTIL:-24h}"
+    echo "Pruning unused Docker artifacts older than $prune_until..."
+    docker container prune -f --filter "until=$prune_until" || echo "WARNING: docker container prune failed; continuing."
+    docker image prune -af --filter "until=$prune_until" || echo "WARNING: docker image prune failed; continuing."
+    docker builder prune -af --filter "until=$prune_until" || echo "WARNING: docker builder prune failed; continuing."
+    if [ "$role" = "worker" ] && [ -n "${IMAGE_TAG:-}" ]; then
+      local sandbox_image="ghcr.io/assembledhq/143-sandbox:$IMAGE_TAG"
+      if ! docker image inspect "$sandbox_image" >/dev/null 2>&1; then
+        echo "Re-pulling required sandbox image after prune: $sandbox_image"
+        docker pull "$sandbox_image"
+      fi
+    fi
+    if [ "$role" = "worker" ] && [ "${DEPLOY_DOCKER_VOLUME_PRUNE:-0}" = "1" ]; then
+      docker volume prune -f || echo "WARNING: docker volume prune failed; continuing."
     fi
   }
 
@@ -784,10 +926,14 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
       cat > "$rollover_script" <<EOS
 #!/bin/bash
 set -euo pipefail
-$(declare -f drain_worker_service wait_container_healthy dump_diagnostics)
+$(declare -f drain_worker_service wait_container_healthy dump_diagnostics prune_docker_deploy_artifacts)
 COMPOSE_FILE='$COMPOSE_FILE'
 HEALTH_SERVICE='$HEALTH_SERVICE'
 STATUS_FILE='$status_file'
+IMAGE_TAG='$IMAGE_TAG'
+DEPLOY_DOCKER_PRUNE='${DEPLOY_DOCKER_PRUNE:-1}'
+DOCKER_PRUNE_UNTIL='${DOCKER_PRUNE_UNTIL:-24h}'
+DEPLOY_DOCKER_VOLUME_PRUNE='${DEPLOY_DOCKER_VOLUME_PRUNE:-0}'
 
 # Always write a status file so the verify step has a deterministic signal.
 # If we exit before the success line writes "ok", the trap leaves "fail".
@@ -812,6 +958,7 @@ cid="\$(docker compose -f "\$COMPOSE_FILE" ps -q "\$HEALTH_SERVICE" | head -1)"
 if [ -n "\$cid" ]; then
   wait_container_healthy "\$cid" 120 || { echo "[\$(date -u -Iseconds)] HEALTH CHECK FAILED"; exit 1; }
 fi
+prune_docker_deploy_artifacts worker
 echo "[\$(date -u -Iseconds)] rollover succeeded"
 echo "ok" > "\$STATUS_FILE"
 EOS
@@ -871,6 +1018,10 @@ EOS
       exit 1
     fi
     echo "Vector is running (status: $VECTOR_STATUS)."
+  fi
+
+  if [ "$ROLE" != "worker" ] || [ -z "${WORKER_DEPLOY_DETACH:-}" ]; then
+    prune_docker_deploy_artifacts "$ROLE"
   fi
 
   echo "Deploy complete ($ROLE)."

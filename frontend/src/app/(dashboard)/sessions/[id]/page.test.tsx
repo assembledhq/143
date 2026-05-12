@@ -6,7 +6,7 @@ import { server } from '@/test/mocks/server';
 import { mockSessions, mockMembers, mockIssues, mockPR, mockPRHealth } from '@/test/mocks/handlers';
 import { SessionDetailContent } from './session-detail-content';
 import { api } from '@/lib/api';
-import type { Issue, PullRequest, Session, SessionMessage, SessionReviewComment, SessionThread, SessionTimelineEntry, User, SingleResponse, ListResponse } from '@/lib/types';
+import type { Issue, PullRequest, Session, SessionDiff, SessionMessage, SessionReviewComment, SessionThread, SessionTimelineEntry, User, SingleResponse, ListResponse } from '@/lib/types';
 
 const { toast } = vi.hoisted(() => ({
   toast: {
@@ -17,6 +17,33 @@ const { toast } = vi.hoisted(() => ({
 const { routerPush } = vi.hoisted(() => ({
   routerPush: vi.fn(),
 }));
+
+function sessionWithoutRawDiff(session: Session): Session {
+  const copy = { ...session };
+  delete copy.diff;
+  delete copy.diff_history;
+  return copy;
+}
+
+function mockSessionDetailWithLazyDiff(session: Session) {
+  server.use(
+    http.get('/api/v1/sessions/:id', () => {
+      return HttpResponse.json({ data: sessionWithoutRawDiff(session) } satisfies SingleResponse<Session>);
+    }),
+    http.get('/api/v1/sessions/:id/diff', () => {
+      return HttpResponse.json({
+        data: {
+          session_id: session.id,
+          diff: session.diff,
+          diff_stats: session.diff_stats,
+          diff_history: session.diff_history ?? [],
+          diff_truncated: false,
+          diff_history_truncated: false,
+        },
+      } satisfies SingleResponse<SessionDiff>);
+    }),
+  );
+}
 
 vi.mock('@/lib/notify', () => ({
   notify: toast,
@@ -307,6 +334,14 @@ describe('SessionDetailPage', () => {
     expect(screen.queryByRole('tab', { name: 'Validation' })).not.toBeInTheDocument();
   });
 
+  it('uses the same desktop header height for the conversation and detail panels', async () => {
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+    await screen.findAllByText('Fixed TypeError by adding null check');
+
+    expect(screen.getByTestId('session-main-header')).toHaveClass('min-h-14');
+    expect(screen.getByTestId('session-detail-header')).toHaveClass('min-h-14');
+  });
+
   it('uses a dedicated mobile close button that does not compete with PR actions', async () => {
     vi.mocked(window.matchMedia).mockImplementation((query: string) => ({
       matches: query === '(max-width: 767px)',
@@ -480,7 +515,9 @@ describe('SessionDetailPage', () => {
     await user.click(screen.getByRole('tab', { name: /Claude review/ }));
     expect(await screen.findByText('Claude found a missing pagination cap.')).toBeInTheDocument();
 
-    await user.click(screen.getByRole('button', { name: 'Add agent tab' }));
+    const addTabButtons = screen.getAllByRole('button', { name: 'Add agent tab' });
+    const stripAddButton = addTabButtons[addTabButtons.length - 1] as HTMLButtonElement;
+    await user.click(stripAddButton);
 
     await waitFor(() => {
       expect(createdThread).toBe(true);
@@ -580,7 +617,9 @@ describe('SessionDetailPage', () => {
 
     expect(await screen.findByPlaceholderText('Send a message to Claude Code...')).toBeInTheDocument();
 
-    await user.click(screen.getByRole('button', { name: 'Add agent tab' }));
+    const addTabButtons = screen.getAllByRole('button', { name: 'Add agent tab' });
+    const stripAddButton = addTabButtons[addTabButtons.length - 1] as HTMLButtonElement;
+    await user.click(stripAddButton);
     expect(await screen.findByPlaceholderText('Send a message to Claude Code 2...')).toBeInTheDocument();
 
     await user.click(screen.getByLabelText('Agent'));
@@ -591,6 +630,176 @@ describe('SessionDetailPage', () => {
     });
     expect(screen.getByRole('tab', { name: /Codex 2/ })).toBeInTheDocument();
     expect(screen.getByPlaceholderText('Send a message to Codex 2...')).toBeInTheDocument();
+  });
+
+  it('shows a desktop header add-tab action that creates a tab directly', async () => {
+    const sessionId = 'session-header-new-tab';
+    const threads: SessionThread[] = [
+      {
+        id: 'thread-main',
+        session_id: sessionId,
+        org_id: 'org-1',
+        agent_type: 'codex',
+        label: 'Codex',
+        status: 'idle',
+        current_turn: 1,
+        created_at: '2026-02-17T07:00:00Z',
+        cost_cents: 0,
+        pending_message_count: 0,
+      },
+    ];
+    let createdThread = false;
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({
+          data: {
+            ...mockSessions[0],
+            id: sessionId,
+            status: 'idle',
+            agent_type: 'codex',
+            sandbox_state: 'ready',
+            threads,
+          },
+        } satisfies SingleResponse<Session & { threads: SessionThread[] }>);
+      }),
+      http.get('/api/v1/sessions/:id/threads/:threadId/messages', () => {
+        return HttpResponse.json({ data: [] as SessionMessage[], meta: {} } satisfies ListResponse<SessionMessage>);
+      }),
+      http.get('/api/v1/sessions/:id/threads/:threadId/logs', () => {
+        return HttpResponse.json({ data: [], meta: {} });
+      }),
+      http.get('/api/v1/sessions/:id/thread-file-events', () => {
+        return HttpResponse.json({ data: [], meta: {} });
+      }),
+      http.post('/api/v1/sessions/:id/threads', async ({ request, params }) => {
+        const body = await request.json() as { label: string; agent_type: string };
+        createdThread = true;
+        const thread: SessionThread = {
+          id: 'thread-new',
+          session_id: params.id as string,
+          org_id: 'org-1',
+          agent_type: body.agent_type as SessionThread['agent_type'],
+          label: body.label,
+          status: 'idle',
+          current_turn: 0,
+          created_at: '2026-02-17T07:04:00Z',
+          cost_cents: 0,
+          pending_message_count: 0,
+        };
+        threads.push(thread);
+        return HttpResponse.json({ data: thread } satisfies SingleResponse<SessionThread>, { status: 201 });
+      }),
+    );
+
+    const user = userEvent.setup();
+    renderWithProviders(<SessionDetailContent id={sessionId} />);
+
+    await screen.findByPlaceholderText('Send a message to Codex...');
+
+    const headerActions = screen.getByTestId('session-header-actions');
+    const newTabButton = within(headerActions).getByRole('button', { name: 'Add agent tab' });
+    await user.click(newTabButton);
+
+    await waitFor(() => {
+      expect(createdThread).toBe(true);
+    });
+    expect(await screen.findByRole('tab', { name: /Codex 2/ })).toBeInTheDocument();
+  });
+
+  it('shows the desktop agent tab row as soon as a second tab is being created', async () => {
+    const sessionId = 'session-show-tab-row-while-creating';
+    const threads: SessionThread[] = [
+      {
+        id: 'thread-main',
+        session_id: sessionId,
+        org_id: 'org-1',
+        agent_type: 'codex',
+        label: 'Codex',
+        status: 'idle',
+        current_turn: 1,
+        created_at: '2026-02-17T07:00:00Z',
+        cost_cents: 0,
+        pending_message_count: 0,
+      },
+    ];
+    let resolveCreateThread: ((thread: SessionThread) => void) | null = null;
+    const createThreadResponse = new Promise<SingleResponse<SessionThread>>((resolve) => {
+      resolveCreateThread = (thread) => resolve({ data: thread });
+    });
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({
+          data: {
+            ...mockSessions[0],
+            id: sessionId,
+            status: 'idle',
+            agent_type: 'codex',
+            sandbox_state: 'ready',
+            threads,
+          },
+        } satisfies SingleResponse<Session & { threads: SessionThread[] }>);
+      }),
+      http.get('/api/v1/sessions/:id/threads/:threadId/messages', () => {
+        return HttpResponse.json({ data: [] as SessionMessage[], meta: {} } satisfies ListResponse<SessionMessage>);
+      }),
+      http.get('/api/v1/sessions/:id/threads/:threadId/logs', () => {
+        return HttpResponse.json({ data: [], meta: {} });
+      }),
+      http.get('/api/v1/sessions/:id/thread-file-events', () => {
+        return HttpResponse.json({ data: [], meta: {} });
+      }),
+      http.post('/api/v1/sessions/:id/threads', async ({ params }) => {
+        const thread: SessionThread = {
+          id: 'thread-new',
+          session_id: params.id as string,
+          org_id: 'org-1',
+          agent_type: 'codex',
+          label: 'Codex 2',
+          status: 'idle',
+          current_turn: 0,
+          created_at: '2026-02-17T07:04:00Z',
+          cost_cents: 0,
+          pending_message_count: 0,
+        };
+        threads.push(thread);
+        const response = await createThreadResponse;
+        return HttpResponse.json(response, { status: 201 });
+      }),
+    );
+
+    const user = userEvent.setup();
+    renderWithProviders(<SessionDetailContent id={sessionId} />);
+
+    const addTabButtons = await screen.findAllByRole('button', { name: 'Add agent tab' });
+    const stripAddButton = addTabButtons[addTabButtons.length - 1] as HTMLButtonElement;
+    await user.click(stripAddButton);
+
+    expect(await screen.findByRole('tablist', { name: 'Agent tabs' })).toBeInTheDocument();
+    const pendingTab = screen.getByRole('tab', { name: /Codex 2/ });
+    expect(pendingTab).toBeDisabled();
+
+    await user.click(pendingTab);
+
+    expect(screen.getByPlaceholderText('Send a message to Codex...')).toBeInTheDocument();
+    expect(screen.queryByText('Loading thread...')).not.toBeInTheDocument();
+
+    expect(resolveCreateThread).not.toBeNull();
+    resolveCreateThread!({
+      id: 'thread-new',
+      session_id: sessionId,
+      org_id: 'org-1',
+      agent_type: 'codex',
+      label: 'Codex 2',
+      status: 'idle',
+      current_turn: 0,
+      created_at: '2026-02-17T07:04:00Z',
+      cost_cents: 0,
+      pending_message_count: 0,
+    });
+
+    expect(await screen.findByPlaceholderText('Send a message to Codex 2...')).toBeInTheDocument();
   });
 
   it('persists the selected model on a blank tab before the first thread send', async () => {
@@ -693,7 +902,9 @@ describe('SessionDetailPage', () => {
 
     expect(await screen.findByPlaceholderText('Send a message to Codex...')).toBeInTheDocument();
 
-    await user.click(screen.getByRole('button', { name: 'Add agent tab' }));
+    const addTabButtons = screen.getAllByRole('button', { name: 'Add agent tab' });
+    const stripAddButton = addTabButtons[addTabButtons.length - 1] as HTMLButtonElement;
+    await user.click(stripAddButton);
     expect(await screen.findByPlaceholderText('Send a message to Codex 2...')).toBeInTheDocument();
 
     await user.click(screen.getByLabelText('Model override'));
@@ -707,6 +918,78 @@ describe('SessionDetailPage', () => {
     await waitFor(() => {
       expect(postedMessageBody).toEqual({ message: 'Use the selected model.' });
     });
+  });
+
+  it('shows the agent selector before model override on a new blank tab composer', async () => {
+    const sessionId = 'session-new-tab-agent-before-model';
+    const threads: SessionThread[] = [
+      {
+        id: 'thread-main',
+        session_id: sessionId,
+        org_id: 'org-1',
+        agent_type: 'codex',
+        label: 'Codex',
+        status: 'idle',
+        current_turn: 1,
+        created_at: '2026-02-17T07:00:00Z',
+        cost_cents: 0,
+        pending_message_count: 0,
+      },
+    ];
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({
+          data: {
+            ...mockSessions[0],
+            id: sessionId,
+            status: 'idle',
+            agent_type: 'codex',
+            sandbox_state: 'ready',
+            threads,
+          },
+        } satisfies SingleResponse<Session & { threads: SessionThread[] }>);
+      }),
+      http.get('/api/v1/sessions/:id/threads/:threadId/messages', () => {
+        return HttpResponse.json({ data: [] as SessionMessage[], meta: {} } satisfies ListResponse<SessionMessage>);
+      }),
+      http.get('/api/v1/sessions/:id/threads/:threadId/logs', () => {
+        return HttpResponse.json({ data: [], meta: {} });
+      }),
+      http.post('/api/v1/sessions/:id/threads', async ({ params }) => {
+        const thread: SessionThread = {
+          id: 'thread-new',
+          session_id: params.id as string,
+          org_id: 'org-1',
+          agent_type: 'codex',
+          label: 'Codex 2',
+          status: 'idle',
+          current_turn: 0,
+          created_at: '2026-02-17T07:04:00Z',
+          cost_cents: 0,
+          pending_message_count: 0,
+        };
+        threads.push(thread);
+        return HttpResponse.json({ data: thread } satisfies SingleResponse<SessionThread>, { status: 201 });
+      }),
+    );
+
+    const user = userEvent.setup();
+    renderWithProviders(<SessionDetailContent id={sessionId} />);
+
+    expect(await screen.findByPlaceholderText('Send a message to Codex...')).toBeInTheDocument();
+
+    const addTabButtons = screen.getAllByRole('button', { name: 'Add agent tab' });
+    const stripAddButton = addTabButtons[addTabButtons.length - 1] as HTMLButtonElement;
+    await user.click(stripAddButton);
+
+    expect(await screen.findByPlaceholderText('Send a message to Codex 2...')).toBeInTheDocument();
+
+    const inputSurface = screen.getByTestId('session-composer-input-surface');
+    const agentSelector = within(inputSurface).getByLabelText('Agent');
+    const modelSelector = within(inputSurface).getByLabelText('Model override');
+
+    expect(agentSelector.compareDocumentPosition(modelSelector) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 
   it('preserves thread tabs when session status SSE payload omits thread detail', async () => {
@@ -1332,6 +1615,14 @@ describe('SessionDetailPage', () => {
     await waitFor(() => {
       expect(screen.queryByTestId('session-timeline-skeleton')).not.toBeInTheDocument();
     });
+    const freshTabCard = screen.getByText('No context in this tab yet.').closest('[data-slot="card"]');
+    expect(freshTabCard).not.toBeNull();
+    expect(within(freshTabCard as HTMLElement).getByText('New tab')).toBeInTheDocument();
+    expect(within(freshTabCard as HTMLElement).queryByText(/^Codex$/)).not.toBeInTheDocument();
+    expect(screen.queryByText('Fresh tab')).not.toBeInTheDocument();
+    expect(screen.queryByText('Fresh context')).not.toBeInTheDocument();
+    expect(screen.getByText('No context in this tab yet.')).toBeInTheDocument();
+    expect(screen.getByText('Send a task or add context to get started.')).toBeInTheDocument();
     expect(screen.getByPlaceholderText('Send a message to Codex 2...')).toBeInTheDocument();
   });
 
@@ -2704,6 +2995,7 @@ describe('SessionDetailPage', () => {
     const sessionWithHistory: Session = {
       ...mockSessions[0],
       diff: pass2Diff,
+      diff_stats: { added: 2, removed: 0, files_changed: 2 },
       diff_history: [
         { pass: 1, diff: pass1Diff, diff_stats: { added: 1, removed: 0, files_changed: 1 }, created_at: '2026-03-19T10:00:00Z' },
         { pass: 2, diff: pass2Diff, diff_stats: { added: 2, removed: 0, files_changed: 2 }, created_at: '2026-03-19T10:05:00Z' },
@@ -2711,11 +3003,7 @@ describe('SessionDetailPage', () => {
       current_turn: 2,
     };
 
-    server.use(
-      http.get('/api/v1/sessions/:id', () => {
-        return HttpResponse.json({ data: sessionWithHistory } satisfies SingleResponse<Session>);
-      }),
-    );
+    mockSessionDetailWithLazyDiff(sessionWithHistory);
 
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
     await screen.findAllByText('Fixed TypeError by adding null check');
@@ -2779,6 +3067,49 @@ describe('SessionDetailPage', () => {
     await screen.findAllByText('Fixed TypeError by adding null check');
     expect(await screen.findByRole('button', { name: /Create PR/ })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /Create PR/ })).not.toBeDisabled();
+  });
+
+  it('hides PR mutation controls and skips the team roster lookup for builders', async () => {
+    const sessionWithDiff: Session = {
+      ...mockSessions[0],
+      status: 'completed',
+      diff: '--- a/file.ts\n+++ b/file.ts\n@@ -1 +1 @@\n-old\n+new',
+      diff_stats: { added: 1, removed: 1, files_changed: 1 },
+      snapshot_key: 'snap-abc',
+    };
+    let teamRequestCount = 0;
+
+    server.use(
+      http.get('/api/v1/auth/me', () => {
+        return HttpResponse.json({
+          data: {
+            ...mockMembers[0],
+            role: 'builder',
+          },
+        } satisfies SingleResponse<User>);
+      }),
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({ data: sessionWithDiff } satisfies SingleResponse<Session>);
+      }),
+      http.get('/api/v1/sessions/:id/pr', () => {
+        return HttpResponse.json(
+          { error: { code: 'NOT_FOUND', message: 'pull request not found' } },
+          { status: 404 },
+        );
+      }),
+      http.get('/api/v1/team/members', () => {
+        teamRequestCount += 1;
+        return HttpResponse.json({ error: { code: 'FORBIDDEN', message: 'insufficient permissions' } }, { status: 403 });
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+
+    await screen.findAllByText('Fixed TypeError by adding null check');
+    await waitFor(() => {
+      expect(screen.queryByRole('button', { name: /Create PR/ })).not.toBeInTheDocument();
+    });
+    expect(teamRequestCount).toBe(0);
   });
 
   it('does not show Create PR button when PR already exists', async () => {
@@ -3871,20 +4202,19 @@ describe('SessionDetailPage', () => {
     const sessionWithDiff: Session = {
       ...mockSessions[0],
       diff: 'diff --git a/src/app.ts b/src/app.ts\n--- a/src/app.ts\n+++ b/src/app.ts\n@@ -1,3 +1,4 @@\n import express from "express";\n+import cors from "cors";\n const app = express();\n app.listen(3000);\ndiff --git a/src/new.ts b/src/new.ts\n--- /dev/null\n+++ b/src/new.ts\n@@ -0,0 +1 @@\n+export const x = 1;',
+      diff_stats: { added: 2, removed: 0, files_changed: 2 },
     };
 
-    server.use(
-      http.get('/api/v1/sessions/:id', () => {
-        return HttpResponse.json({ data: sessionWithDiff } satisfies SingleResponse<Session>);
-      }),
-    );
+    mockSessionDetailWithLazyDiff(sessionWithDiff);
 
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
     await screen.findAllByText('Fixed TypeError by adding null check');
 
     // Changes tab should show file count badge
     const changesTab = screen.getByRole('tab', { name: /^Changes/ });
-    expect(changesTab).toHaveTextContent('Changes2');
+    await waitFor(() => {
+      expect(changesTab).toHaveTextContent('Changes2');
+    });
   });
 
   it('reserves bottom space for the active Changes underline when the file count badge is shown', async () => {
@@ -3893,11 +4223,7 @@ describe('SessionDetailPage', () => {
       diff: 'diff --git a/src/app.ts b/src/app.ts\n--- a/src/app.ts\n+++ b/src/app.ts\n@@ -1,3 +1,4 @@\n import express from "express";\n+import cors from "cors";\n const app = express();\n app.listen(3000);\ndiff --git a/src/new.ts b/src/new.ts\n--- /dev/null\n+++ b/src/new.ts\n@@ -0,0 +1 @@\n+export const x = 1;',
     };
 
-    server.use(
-      http.get('/api/v1/sessions/:id', () => {
-        return HttpResponse.json({ data: sessionWithDiff } satisfies SingleResponse<Session>);
-      }),
-    );
+    mockSessionDetailWithLazyDiff(sessionWithDiff);
 
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
     await screen.findAllByText('Fixed TypeError by adding null check');
@@ -3918,19 +4244,16 @@ describe('SessionDetailPage', () => {
     const sessionWithDiff: Session = {
       ...mockSessions[0],
       diff: 'diff --git a/src/app.ts b/src/app.ts\n--- a/src/app.ts\n+++ b/src/app.ts\n@@ -1,3 +1,4 @@\n import express from "express";\n+import cors from "cors";\n const app = express();\n app.listen(3000);',
+      diff_stats: { added: 1, removed: 0, files_changed: 1 },
     };
 
-    server.use(
-      http.get('/api/v1/sessions/:id', () => {
-        return HttpResponse.json({ data: sessionWithDiff } satisfies SingleResponse<Session>);
-      }),
-    );
+    mockSessionDetailWithLazyDiff(sessionWithDiff);
 
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
     await screen.findAllByText('Fixed TypeError by adding null check');
 
     // Header and footer should show clickable diff stats badges
-    const viewChangesButtons = screen.getAllByTitle('View changes');
+    const viewChangesButtons = await screen.findAllByTitle('View changes');
     expect(viewChangesButtons.length).toBeGreaterThanOrEqual(1);
     expect(viewChangesButtons[0]).toHaveTextContent('+1');
   });
@@ -3939,19 +4262,16 @@ describe('SessionDetailPage', () => {
     const sessionWithDiff: Session = {
       ...mockSessions[0],
       diff: 'diff --git a/src/app.ts b/src/app.ts\n--- a/src/app.ts\n+++ b/src/app.ts\n@@ -1,3 +1,4 @@\n import express from "express";\n+import cors from "cors";\n const app = express();\n app.listen(3000);',
+      diff_stats: { added: 1, removed: 0, files_changed: 1 },
     };
 
-    server.use(
-      http.get('/api/v1/sessions/:id', () => {
-        return HttpResponse.json({ data: sessionWithDiff } satisfies SingleResponse<Session>);
-      }),
-    );
+    mockSessionDetailWithLazyDiff(sessionWithDiff);
 
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
     await screen.findAllByText('Fixed TypeError by adding null check');
 
     const user = userEvent.setup();
-    const viewChangesButtons = screen.getAllByTitle('View changes');
+    const viewChangesButtons = await screen.findAllByTitle('View changes');
     await user.click(viewChangesButtons[0]);
 
     // Should show the diff content in the Changes tab
@@ -4827,10 +5147,8 @@ describe('SessionDetailPage', () => {
     // attached comments in the same transaction as the message create.
     let comments: SessionReviewComment[] = [comment];
 
+    mockSessionDetailWithLazyDiff(idleSessionWithDiff);
     server.use(
-      http.get('/api/v1/sessions/:id', () => {
-        return HttpResponse.json({ data: idleSessionWithDiff } satisfies SingleResponse<Session>);
-      }),
       http.get('/api/v1/sessions/:id/review-comments', () => {
         return HttpResponse.json({
           data: comments,
@@ -4919,10 +5237,8 @@ describe('SessionDetailPage', () => {
     }));
     let comments = originalComments;
 
+    mockSessionDetailWithLazyDiff(idleSessionWithDiff);
     server.use(
-      http.get('/api/v1/sessions/:id', () => {
-        return HttpResponse.json({ data: idleSessionWithDiff } satisfies SingleResponse<Session>);
-      }),
       http.get('/api/v1/sessions/:id/review-comments', () => {
         return HttpResponse.json({
           data: comments,
@@ -5143,11 +5459,7 @@ describe('SessionDetailPage', () => {
       diff_stats: { added: 1, removed: 0, files_changed: 1 },
     };
 
-    server.use(
-      http.get('/api/v1/sessions/:id', () => {
-        return HttpResponse.json({ data: sessionWithDiff } satisfies SingleResponse<Session>);
-      }),
-    );
+    mockSessionDetailWithLazyDiff(sessionWithDiff);
 
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
     await screen.findAllByText('Fixed TypeError by adding null check');
@@ -5476,11 +5788,7 @@ describe('SessionDetailPage', () => {
       diff_stats: { added: 1, removed: 0, files_changed: 1 },
     };
 
-    server.use(
-      http.get('/api/v1/sessions/:id', () => {
-        return HttpResponse.json({ data: sessionWithDiff } satisfies SingleResponse<Session>);
-      }),
-    );
+    mockSessionDetailWithLazyDiff(sessionWithDiff);
 
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
     await screen.findAllByText('Fixed TypeError by adding null check');
@@ -5525,11 +5833,7 @@ describe('SessionDetailPage', () => {
       diff_stats: { added: 1, removed: 0, files_changed: 1 },
     };
 
-    server.use(
-      http.get('/api/v1/sessions/:id', () => {
-        return HttpResponse.json({ data: sessionWithDiff } satisfies SingleResponse<Session>);
-      }),
-    );
+    mockSessionDetailWithLazyDiff(sessionWithDiff);
 
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
     await screen.findAllByText('Fixed TypeError by adding null check');
@@ -5626,11 +5930,7 @@ describe('SessionDetailPage', () => {
       diff_stats: { added: 1, removed: 0, files_changed: 1 },
     };
 
-    server.use(
-      http.get('/api/v1/sessions/:id', () => {
-        return HttpResponse.json({ data: sessionWithDiff } satisfies SingleResponse<Session>);
-      }),
-    );
+    mockSessionDetailWithLazyDiff(sessionWithDiff);
 
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
     await screen.findAllByText('Fixed TypeError by adding null check');
@@ -5664,11 +5964,7 @@ describe('SessionDetailPage', () => {
       diff_stats: { added: 2, removed: 0, files_changed: 2 },
     };
 
-    server.use(
-      http.get('/api/v1/sessions/:id', () => {
-        return HttpResponse.json({ data: sessionWithDiff } satisfies SingleResponse<Session>);
-      }),
-    );
+    mockSessionDetailWithLazyDiff(sessionWithDiff);
 
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
     await screen.findAllByText('Fixed TypeError by adding null check');
@@ -5703,11 +5999,7 @@ describe('SessionDetailPage', () => {
       diff_stats: { added: 2, removed: 0, files_changed: 2 },
     };
 
-    server.use(
-      http.get('/api/v1/sessions/:id', () => {
-        return HttpResponse.json({ data: sessionWithDiff } satisfies SingleResponse<Session>);
-      }),
-    );
+    mockSessionDetailWithLazyDiff(sessionWithDiff);
 
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
     await screen.findAllByText('Fixed TypeError by adding null check');
@@ -5746,11 +6038,7 @@ describe('SessionDetailPage', () => {
       diff_stats: { added: 1, removed: 0, files_changed: 1 },
     };
 
-    server.use(
-      http.get('/api/v1/sessions/:id', () => {
-        return HttpResponse.json({ data: idleSessionWithDiff } satisfies SingleResponse<Session>);
-      }),
-    );
+    mockSessionDetailWithLazyDiff(idleSessionWithDiff);
 
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
     await screen.findByPlaceholderText('Send a follow-up message...');
@@ -5790,11 +6078,7 @@ describe('SessionDetailPage', () => {
       diff_stats: { added: 1, removed: 0, files_changed: 1 },
     };
 
-    server.use(
-      http.get('/api/v1/sessions/:id', () => {
-        return HttpResponse.json({ data: destroyedSessionWithDiff } satisfies SingleResponse<Session>);
-      }),
-    );
+    mockSessionDetailWithLazyDiff(destroyedSessionWithDiff);
 
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
     await screen.findByPlaceholderText('Session environment has expired and can no longer be continued');
@@ -5840,10 +6124,8 @@ describe('SessionDetailPage', () => {
       updated_at: '2026-02-17T07:04:00Z',
     }];
 
+    mockSessionDetailWithLazyDiff(sessionWithDiff);
     server.use(
-      http.get('/api/v1/sessions/:id', () => {
-        return HttpResponse.json({ data: sessionWithDiff } satisfies SingleResponse<Session>);
-      }),
       http.get('/api/v1/sessions/:id/review-comments', () => {
         return HttpResponse.json({
           data: comments,
@@ -5873,11 +6155,7 @@ describe('SessionDetailPage', () => {
       diff_stats: { added: 1, removed: 0, files_changed: 1 },
     };
 
-    server.use(
-      http.get('/api/v1/sessions/:id', () => {
-        return HttpResponse.json({ data: sessionWithDiff } satisfies SingleResponse<Session>);
-      }),
-    );
+    mockSessionDetailWithLazyDiff(sessionWithDiff);
 
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
     await screen.findAllByText('Fixed TypeError by adding null check');
@@ -5899,6 +6177,34 @@ describe('SessionDetailPage', () => {
     });
   });
 
+  it('exits review mode when browser history removes the review query param', async () => {
+    const sessionWithDiff: Session = {
+      ...mockSessions[0],
+      diff: 'diff --git a/src/app.ts b/src/app.ts\n--- a/src/app.ts\n+++ b/src/app.ts\n@@ -1,3 +1,4 @@\n import express from "express";\n+import cors from "cors";\n const app = express();\n app.listen(3000);',
+      diff_stats: { added: 1, removed: 0, files_changed: 1 },
+    };
+
+    mockSessionDetailWithLazyDiff(sessionWithDiff);
+
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+    await screen.findAllByText('Fixed TypeError by adding null check');
+
+    const user = userEvent.setup();
+    await user.click(screen.getAllByTitle('View changes')[0]);
+    expect((await screen.findAllByText('src/app.ts')).length).toBeGreaterThan(0);
+    expect(screen.getByTitle('File tree required during review')).toBeInTheDocument();
+
+    act(() => {
+      window.history.pushState(null, '', '/sessions/session-abcdef12-3456-7890?review=active');
+      window.history.pushState(null, '', '/sessions/session-abcdef12-3456-7890');
+      window.dispatchEvent(new PopStateEvent('popstate'));
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTitle('Hide details')).toBeInTheDocument();
+    });
+  });
+
   it('shows review comment input in review mode for active session', async () => {
     const idleSessionWithDiff: Session = {
       ...mockSessions[0],
@@ -5910,11 +6216,7 @@ describe('SessionDetailPage', () => {
       diff_stats: { added: 1, removed: 0, files_changed: 1 },
     };
 
-    server.use(
-      http.get('/api/v1/sessions/:id', () => {
-        return HttpResponse.json({ data: idleSessionWithDiff } satisfies SingleResponse<Session>);
-      }),
-    );
+    mockSessionDetailWithLazyDiff(idleSessionWithDiff);
 
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
     await screen.findByPlaceholderText('Send a follow-up message...');
@@ -5973,11 +6275,7 @@ describe('SessionDetailPage', () => {
       diff_stats: { added: 1, removed: 0, files_changed: 1 },
     };
 
-    server.use(
-      http.get('/api/v1/sessions/:id', () => {
-        return HttpResponse.json({ data: destroyedSessionWithDiff } satisfies SingleResponse<Session>);
-      }),
-    );
+    mockSessionDetailWithLazyDiff(destroyedSessionWithDiff);
 
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
     await screen.findByPlaceholderText('Session environment has expired and can no longer be continued');
@@ -6000,11 +6298,7 @@ describe('SessionDetailPage', () => {
       diff_stats: { added: 1, removed: 0, files_changed: 1 },
     };
 
-    server.use(
-      http.get('/api/v1/sessions/:id', () => {
-        return HttpResponse.json({ data: ampSessionWithDiff } satisfies SingleResponse<Session>);
-      }),
-    );
+    mockSessionDetailWithLazyDiff(ampSessionWithDiff);
 
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
     await screen.findByText(/doesn't support headless conversation resume/i);
@@ -6040,10 +6334,8 @@ describe('SessionDetailPage', () => {
       updated_at: '2026-02-17T07:10:00Z',
     }];
 
+    mockSessionDetailWithLazyDiff(idleSessionWithDiff);
     server.use(
-      http.get('/api/v1/sessions/:id', () => {
-        return HttpResponse.json({ data: idleSessionWithDiff } satisfies SingleResponse<Session>);
-      }),
       http.get('/api/v1/sessions/:id/review-comments', () => {
         return HttpResponse.json({
           data: comments,
@@ -6084,10 +6376,8 @@ describe('SessionDetailPage', () => {
       diff_stats: { added: 1, removed: 0, files_changed: 1 },
     };
 
+    mockSessionDetailWithLazyDiff(idleSessionWithDiff);
     server.use(
-      http.get('/api/v1/sessions/:id', () => {
-        return HttpResponse.json({ data: idleSessionWithDiff } satisfies SingleResponse<Session>);
-      }),
       http.post('/api/v1/sessions/:id/messages', async ({ request }) => {
         const body = await request.json() as { message: string };
         return HttpResponse.json({
@@ -6128,11 +6418,7 @@ describe('SessionDetailPage', () => {
       diff_stats: { added: 2, removed: 0, files_changed: 2 },
     };
 
-    server.use(
-      http.get('/api/v1/sessions/:id', () => {
-        return HttpResponse.json({ data: sessionWithDiff } satisfies SingleResponse<Session>);
-      }),
-    );
+    mockSessionDetailWithLazyDiff(sessionWithDiff);
 
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
     await screen.findAllByText('Fixed TypeError by adding null check');
@@ -6199,12 +6485,8 @@ describe('SessionDetailPage', () => {
       diff_stats: { added: 3, removed: 0, files_changed: 3 },
     };
 
+    mockSessionDetailWithLazyDiff(sessionWithThreadsAndDiff);
     server.use(
-      http.get('/api/v1/sessions/:id', () => {
-        return HttpResponse.json({
-          data: sessionWithThreadsAndDiff,
-        } satisfies SingleResponse<Session>);
-      }),
       http.get('/api/v1/sessions/:id/thread-file-events', () => {
         return HttpResponse.json({
           data: [
@@ -6472,8 +6754,9 @@ describe('SessionDetailPage', () => {
     const user = userEvent.setup();
     renderWithProviders(<SessionDetailContent id={sessionId} />);
 
-    await screen.findByRole('button', { name: 'Add agent tab' });
-    await user.click(screen.getByRole('button', { name: 'Add agent tab' }));
+    const addTabButtons = await screen.findAllByRole('button', { name: 'Add agent tab' });
+    const stripAddButton = addTabButtons[addTabButtons.length - 1] as HTMLButtonElement;
+    await user.click(stripAddButton);
 
     const textarea = await screen.findByPlaceholderText('Send a message to Codex 2...');
 
@@ -6539,11 +6822,78 @@ describe('SessionDetailPage', () => {
     const user = userEvent.setup();
     renderWithProviders(<SessionDetailContent id={sessionId} />);
 
-    await screen.findByRole('button', { name: 'Add agent tab' });
-    await user.click(screen.getByRole('button', { name: 'Add agent tab' }));
+    const addTabButtons = await screen.findAllByRole('button', { name: 'Add agent tab' });
+    const stripAddButton = addTabButtons[addTabButtons.length - 1] as HTMLButtonElement;
+    await user.click(stripAddButton);
 
     await waitFor(() => {
-      expect(document.activeElement).toHaveAttribute('aria-label', 'Add agent tab');
+      expect(stripAddButton).toHaveFocus();
+    });
+  });
+
+  it('returns focus to the desktop header add-tab trigger when a new tab has no composer', async () => {
+    const sessionId = 'session-header-create-tab-no-composer';
+    const threads: SessionThread[] = [
+      {
+        id: 'thread-main',
+        session_id: sessionId,
+        org_id: 'org-1',
+        agent_type: 'pm_agent',
+        label: 'Planner',
+        status: 'idle',
+        current_turn: 1,
+        created_at: '2026-02-17T07:00:00Z',
+        cost_cents: 0,
+        pending_message_count: 0,
+      },
+    ];
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({
+          data: {
+            ...mockSessions[0],
+            id: sessionId,
+            agent_type: 'pm_agent',
+            status: 'idle',
+            sandbox_state: 'snapshotted',
+            threads,
+          },
+        } satisfies SingleResponse<Session & { threads: SessionThread[] }>);
+      }),
+      http.get('/api/v1/sessions/:id/threads/:threadId/messages', () => {
+        return HttpResponse.json({ data: [], meta: {} } satisfies ListResponse<SessionMessage>);
+      }),
+      http.get('/api/v1/sessions/:id/threads/:threadId/logs', () => {
+        return HttpResponse.json({ data: [], meta: {} });
+      }),
+      http.post('/api/v1/sessions/:id/threads', async () => {
+        const thread: SessionThread = {
+          id: 'thread-new',
+          session_id: sessionId,
+          org_id: 'org-1',
+          agent_type: 'codex',
+          label: 'Codex 2',
+          status: 'idle',
+          current_turn: 0,
+          created_at: '2026-02-17T07:04:00Z',
+          cost_cents: 0,
+          pending_message_count: 0,
+        };
+        threads.push(thread);
+        return HttpResponse.json({ data: thread } satisfies SingleResponse<SessionThread>, { status: 201 });
+      }),
+    );
+
+    const user = userEvent.setup();
+    renderWithProviders(<SessionDetailContent id={sessionId} />);
+
+    const headerActions = await screen.findByTestId('session-header-actions');
+    const headerAddButton = within(headerActions).getByRole('button', { name: 'Add agent tab' });
+    await user.click(headerAddButton);
+
+    await waitFor(() => {
+      expect(headerAddButton).toHaveFocus();
     });
   });
 

@@ -46,6 +46,24 @@ func TestHealthz_WithRedisHealthy(t *testing.T) {
 	require.Contains(t, w.Body.String(), `"redis":"ok"`, "health response should report healthy Redis")
 }
 
+func TestHealthz_WhenDraining(t *testing.T) {
+	t.Parallel()
+
+	draining := make(chan struct{})
+	h := &HealthHandler{}
+	h.SetDrainingSignal(draining)
+	close(draining)
+
+	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	w := httptest.NewRecorder()
+
+	h.Healthz(w, req)
+
+	require.Equal(t, http.StatusServiceUnavailable, w.Code, "health check should fail while the process is draining")
+	require.Contains(t, w.Body.String(), `"status":"draining"`, "health response should report draining status")
+	require.Equal(t, "application/json", w.Header().Get("Content-Type"), "draining health response should set JSON content type")
+}
+
 func TestVersion(t *testing.T) {
 	t.Parallel()
 
