@@ -6,19 +6,30 @@ import NewAutomationPage from "./page";
 import { AUTOMATION_GOAL_MAX_LENGTH } from "@/lib/automation-validation";
 
 const pushMock = vi.fn();
+const replaceMock = vi.fn();
 const searchParams = new URLSearchParams("template=security-sweep");
+const currentUserRole = vi.hoisted(() => ({ value: "member" }));
 
 vi.mock("next/navigation", () => ({
   useRouter: () => ({
     push: pushMock,
-    replace: vi.fn(),
+    replace: replaceMock,
   }),
   useSearchParams: () => searchParams,
+}));
+
+vi.mock("@/hooks/use-auth", () => ({
+  useAuth: () => ({
+    user: { role: currentUserRole.value },
+    isLoading: false,
+  }),
 }));
 
 describe("NewAutomationPage", () => {
   beforeEach(() => {
     pushMock.mockReset();
+    replaceMock.mockReset();
+    currentUserRole.value = "member";
   });
 
   it("allows the timezone selector to wrap cleanly on mobile layouts", async () => {
@@ -222,6 +233,16 @@ describe("NewAutomationPage", () => {
     await user.click(await screen.findByRole("button", { name: /\/review/i }));
 
     expect(goalInput).toHaveValue("/review ");
+  });
+
+  it("redirects builders away from the new automation form", async () => {
+    currentUserRole.value = "builder";
+
+    renderWithProviders(<NewAutomationPage />);
+
+    await waitFor(() => {
+      expect(replaceMock).toHaveBeenCalledWith("/automations");
+    });
   });
 
   it("submits the selected base branch from the branch picker", async () => {

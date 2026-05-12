@@ -5,17 +5,27 @@ import { http, HttpResponse } from "msw";
 import NewProjectPage from "./page";
 
 const pushMock = vi.fn();
+const replaceMock = vi.fn();
+const currentUserRole = vi.hoisted(() => ({ value: "member" }));
 
 vi.mock("next/navigation", () => ({
   useRouter: () => ({
     push: pushMock,
-    replace: vi.fn(),
+    replace: replaceMock,
   }),
   useSearchParams: () => new URLSearchParams(),
 }));
 
+vi.mock("@/hooks/use-auth", () => ({
+  useAuth: () => ({
+    user: { role: currentUserRole.value },
+    isLoading: false,
+  }),
+}));
+
 describe("NewProjectPage", () => {
   it("submits the selected base branch from the branch picker", async () => {
+    currentUserRole.value = "member";
     const user = userEvent.setup();
     let requestBody: Record<string, unknown> | null = null;
 
@@ -73,6 +83,16 @@ describe("NewProjectPage", () => {
         repository_id: "repo-1",
         base_branch: "release/2026.04",
       });
+    });
+  });
+
+  it("redirects builders away from the new project form", async () => {
+    currentUserRole.value = "builder";
+
+    renderWithProviders(<NewProjectPage />);
+
+    await waitFor(() => {
+      expect(replaceMock).toHaveBeenCalledWith("/projects");
     });
   });
 });
