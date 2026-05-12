@@ -2435,6 +2435,7 @@ const MIN_DETAIL = 280;
 const MAX_DETAIL = 600;
 const DEFAULT_DETAIL = 384;
 const MOBILE_REVIEW_MEDIA_QUERY = "(max-width: 767px)";
+const SESSION_HEADER_HEIGHT_CLASSNAME = "min-h-14";
 // Transcript keyboard scroll tuning. Step matches a comfortable line-pair
 // jump; page distance follows browser conventions (~85% viewport with a
 // floor for very short panels).
@@ -4281,7 +4282,10 @@ export function SessionDetailContent({ id }: { id: string }) {
       onValueChange={(v) => handleDetailTabClick(v as DetailTab)}
       className="flex flex-col flex-1 min-h-0 gap-0"
     >
-      <div className="border-b border-border px-2 py-2 shrink-0">
+      <div
+        data-testid="session-detail-header"
+        className={cn("border-b border-border px-2 py-2 shrink-0", SESSION_HEADER_HEIGHT_CLASSNAME)}
+      >
         <div className="flex items-center gap-2 min-w-0">
           <div
             ref={detailTabsRef}
@@ -4496,7 +4500,13 @@ export function SessionDetailContent({ id }: { id: string }) {
               archivePendingThreadId={archiveThreadMutation.isPending ? archiveThreadMutation.variables ?? null : null}
             />
 
-            <div className="hidden md:flex border-b border-border px-4 py-3 bg-background items-center justify-between shrink-0">
+            <div
+              data-testid="session-main-header"
+              className={cn(
+                "hidden border-b border-border bg-background px-4 py-3 md:flex items-center justify-between shrink-0",
+                SESSION_HEADER_HEIGHT_CLASSNAME,
+              )}
+            >
               <div className="min-w-0 flex-1 flex items-center gap-2">
                 {isEditingTitle ? (
                   <div className="min-w-0 flex-1 flex items-center gap-2">
