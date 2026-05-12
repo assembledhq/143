@@ -4045,6 +4045,7 @@ func (o *Orchestrator) billingModeForAgent(
 // buildRunResult converts an AgentResult into the DB update struct.
 func (o *Orchestrator) buildRunResult(ctx context.Context, run *models.Session, sandbox *Sandbox, result *AgentResult) *models.SessionResult {
 	var tokenUsage []byte
+	var modelUsed *string
 	if HasPersistableTokenUsage(result.TokenUsage) {
 		marshaled, err := json.Marshal(result.TokenUsage)
 		if err != nil {
@@ -4052,6 +4053,9 @@ func (o *Orchestrator) buildRunResult(ctx context.Context, run *models.Session, 
 		} else {
 			tokenUsage = marshaled
 		}
+	}
+	if result.TokenUsage.NativeUsage != nil && result.TokenUsage.NativeUsage.Model != "" {
+		modelUsed = strPtr(result.TokenUsage.NativeUsage.Model)
 	}
 
 	headSHA := o.captureCurrentHeadSHA(ctx, sandbox)
@@ -4062,6 +4066,7 @@ func (o *Orchestrator) buildRunResult(ctx context.Context, run *models.Session, 
 		ConfidenceReasoning: strPtr(result.ConfidenceReasoning),
 		RiskFactors:         result.RiskFactors,
 		TokenUsage:          tokenUsage,
+		ModelUsed:           modelUsed,
 		ResultSummary:       strPtr(result.Summary),
 		Diff:                strPtr(result.Diff),
 		Error:               strPtr(result.Error),

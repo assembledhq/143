@@ -818,7 +818,7 @@ func TestSessionStore_UpdateResult(t *testing.T) {
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg()).
+			pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows(sessionTestColumns).AddRow(
 				newAgentSessionRow(sessionID, uuid.New(), orgID, now)...,
@@ -828,6 +828,38 @@ func TestSessionStore_UpdateResult(t *testing.T) {
 	err = store.UpdateResult(context.Background(), orgID, sessionID, "completed", result)
 	require.NoError(t, err)
 	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestSessionStore_UpdateResult_PersistsModelUsed(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewSessionStore(mock)
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	modelUsed := "gpt-5.4"
+	now := time.Now()
+
+	mock.ExpectQuery(`UPDATE sessions[\s\S]+model_used = COALESCE\(@model_used, model_used\)`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(sessionTestColumns).AddRow(
+				newAgentSessionRow(sessionID, uuid.New(), orgID, now)...,
+			),
+		)
+
+	err = store.UpdateResult(context.Background(), orgID, sessionID, "completed", &models.SessionResult{
+		ModelUsed: &modelUsed,
+	})
+	require.NoError(t, err, "UpdateResult should persist model_used when provided")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
 func TestSessionStore_UpdateStatus_PublishesAndQueriesTerminalCleanup(t *testing.T) {
@@ -918,7 +950,7 @@ func TestSessionStore_UpdateResult_ErrorBranches(t *testing.T) {
 				pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 				pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 				pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-				pgxmock.AnyArg()).
+				pgxmock.AnyArg(), pgxmock.AnyArg()).
 			WillReturnError(context.DeadlineExceeded)
 
 		err = store.UpdateResult(context.Background(), uuid.New(), uuid.New(), "completed", &models.SessionResult{})
@@ -960,7 +992,7 @@ func TestSessionStore_UpdateResult_ErrorBranches(t *testing.T) {
 				pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 				pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 				pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-				pgxmock.AnyArg()).
+				pgxmock.AnyArg(), pgxmock.AnyArg()).
 			WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(sessionID))
 
 		err = store.UpdateResult(context.Background(), orgID, sessionID, "completed", &models.SessionResult{})
@@ -1426,7 +1458,7 @@ func TestSessionStore_UpdateTurnComplete(t *testing.T) {
 	mock.ExpectExec("UPDATE sessions.+SET status = 'idle'.+pr_creation_state = 'idle', pr_creation_error = NULL").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
 	err = store.UpdateTurnComplete(context.Background(), uuid.New(), uuid.New(), 2, result, "agent-123", "snap-key")

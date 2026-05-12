@@ -1,23 +1,25 @@
 # Design: Usage Breakdown By Agent, Model, And Reasoning
 
-> **Status:** Proposed | **Last reviewed:** 2026-05-08
+> **Status:** Implemented | **Last reviewed:** 2026-05-08
 >
-> **Related docs:** [../overall.md](../overall.md), [../implemented/46-billing-usage-dashboard.md](../implemented/46-billing-usage-dashboard.md)
+> **Related docs:** [../overall.md](../overall.md), [46-billing-usage-dashboard.md](46-billing-usage-dashboard.md)
 
-The usage page should evolve from a lightweight billing report into a compact execution analytics surface for engineering leaders. It should answer questions like:
+The usage page has evolved from a lightweight billing report into a compact execution analytics surface for engineering leaders. It answers questions like:
 
 - Which coding agents are driving usage?
 - Which models are creating most of the token cost?
 - Are higher reasoning levels materially changing spend or runtime?
 
-This design makes two decisions:
+This design made two core decisions:
 
 1. Keep `usage_hourly` for fast org-total charts and summary cards.
 2. Add a second hourly execution rollup at the lowest useful non-user grain so the page can answer execution breakdown and filter questions without precomputing arbitrary materialized combinations.
 
-The goal is to add useful flexibility without turning `/settings/usage` into a BI tool, while still supporting charts like `total tokens stacked by model over time`.
+The shipped result adds useful flexibility without turning `/settings/usage` into a BI tool, while supporting charts like `total tokens stacked by model over time`.
 
 It also carries one presentation rule forward from the current usage-page cleanup: the UI should prefer explicit metric labels and short explanatory context over ambiguous `%`-only columns. If we show ratios, they should be named precisely, for example `Share of sessions` or `Share of token cost`.
+
+One implementation correction landed after the initial rollout: execution-backed analytics now distinguish between capacity-specific rows and synthetic all-capacities rows. Capacity views still read the capacity-specific rows, but agent/model/reasoning filters, stacked charts, and filtered CSV exports read the all-capacities rows so a session that changes capacity inside an hour is not counted twice in session or concurrency metrics.
 
 ## Product framing
 
@@ -47,26 +49,23 @@ The page should make these questions cheap to answer:
 
 This remains a settings-page analytics surface, not a warehouse UI.
 
-## Current state
+## Implemented state
 
-Today:
+Implemented:
 
 - `/settings/usage` supports breakdowns by `user` and `capacity`
 - `usage_hourly` is the main rollup store and is optimized for org totals plus a small fixed set of dimensions
 - the chart supports metric switching and day drill-down
 - the table supports one active dimension at a time
 
-Relevant session fields already exist:
+Relevant session fields now used by the rollup include:
 
 - `sessions.agent_type`
 - `sessions.reasoning_effort`
 - `sessions.token_usage`
+- `sessions.model_used`
 
-The important gap is model fidelity:
-
-- `sessions.model_override` is only a requested override
-- it does **not** reliably equal the effective runtime model
-- model breakdown must therefore use a persisted `model_used` or equivalent effective-model field
+Model breakdown now uses persisted effective-model data instead of `model_override`.
 
 ## Design principles
 
@@ -103,7 +102,7 @@ Keep:
 
 - `usage_hourly` as the authoritative org-total/hourly rollup for summary cards and the default chart
 
-Add:
+Added:
 
 - `usage_hourly_execution` as an hourly rollup at the lowest useful non-user execution grain
 
@@ -116,6 +115,8 @@ This gives the page a stable foundation for:
 without building a materialized cube of every projection or filtered view.
 
 ### New table: `usage_hourly_execution`
+
+Implemented in migration `000121_usage_hourly_execution`.
 
 ```sql
 CREATE TABLE usage_hourly_execution (
@@ -175,6 +176,27 @@ CREATE INDEX idx_usage_hourly_execution_org_reasoning_hour
 
 This shifts a bit more work to read time than a pure one-dimension-only rollup, but it avoids combinatorial write amplification and remains much smaller than raw sessions.
 
+### All-capacities execution rows
+
+The execution rollup now stores two row shapes for each observed execution combination:
+
+- one row per real `capacity_key`
+- one synthetic row with `capacity_key = "__all__"`
+
+The synthetic row is written from the same hourly event/token pass as the capacity rows and preserves the exact per-hour union across capacities for:
+
+- `total_sessions`
+- `total_container_starts`
+- `peak_concurrent`
+- token and cost totals
+
+Read-path rule:
+
+- `capacity` analytics query real capacity rows only
+- `agent`, `model`, `reasoning`, and filtered org-total execution analytics query `__all__` rows
+
+This keeps the common analytics path fast while avoiding session/concurrency inflation when a single execution moves across capacity tiers.
+
 ### Dimension semantics
 
 #### `agent`
@@ -217,12 +239,7 @@ Reasons:
 - Amp and Pi express model selection differently than Codex/Claude/Gemini
 - finance-oriented comparisons must reflect actual runtime choice
 
-If implementation sequencing forces a temporary intermediate state:
-
-- `Agent` and `Reasoning` may ship first
-- `Model` should remain hidden until `model_used` exists
-
-The UI must not show a fake model view derived from `model_override` and label it as authoritative.
+The shipped UI uses persisted `model_used`; it does not derive model analytics from `model_override`.
 
 ### User drilldowns
 
@@ -303,8 +320,7 @@ Avoid generic `%` headers because they force the user to infer the denominator.
 
 ### Empty and unavailable states
 
-- If `model_used` is not yet persisted, hide `Model` from the breakdown selector rather than showing a degraded approximation.
-- If a selected filter would produce no rows, keep the chart/table shell and show an explanatory empty state instead of clearing the whole page.
+- If a selected filter produces no rows, the chart/table shell remains visible with an explanatory empty state instead of clearing the whole page.
 
 ## Chart behavior
 
@@ -411,12 +427,12 @@ Reasoning:
 
 ## Rollout
 
-1. Add `usage_hourly_execution` and backfill `agent`, `reasoning`, and `capacity`.
-2. Ship `Agent` and `Reasoning` breakdowns plus `Agent` / `Reasoning` filters.
-3. Persist effective runtime model as `model_used`.
-4. Enable `Model` breakdown, `Model` filter, and stacked token-by-model charts.
+1. Added `usage_hourly_execution` and backfilled `agent`, `reasoning`, `model`, and `capacity` rollups through the existing hourly reroll path.
+2. Shipped `Agent` and `Reasoning` breakdowns plus execution filters.
+3. Persisted effective runtime model as `model_used`.
+4. Enabled `Model` breakdown, `Model` filter, and stacked token-by-model charts.
 
-Explicitly not in these phases:
+Still explicitly not part of this implementation:
 
 - any `usage_daily_user` or other scalable per-user rollup
 
@@ -558,6 +574,8 @@ Exports should honor active execution filters. This is important because enginee
 
 ### Phase 1
 
+Implemented.
+
 Ship:
 
 - `usage_hourly_execution`
@@ -572,6 +590,8 @@ Why first:
 - they validate whether leaders actually use execution analytics on this page
 
 ### Phase 2
+
+Implemented.
 
 Ship:
 

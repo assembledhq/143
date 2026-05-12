@@ -16,18 +16,37 @@ import { api } from "@/lib/api";
 interface UsageExportButtonProps {
   start: string;
   end: string;
+  dimension?: "capacity" | "agent" | "model" | "reasoning";
+  filters?: {
+    agent?: string | null;
+    model?: string | null;
+    reasoning?: string | null;
+  };
 }
 
-export function UsageExportButton({ start, end }: UsageExportButtonProps) {
+export function UsageExportButton({ start, end, dimension = "capacity", filters }: UsageExportButtonProps) {
   const [granularity, setGranularity] = useState<"daily" | "hourly">("daily");
-  const [dimension, setDimension] = useState<"none" | "user" | "capacity">("none");
+  const [exportDimension, setExportDimension] = useState<"none" | "capacity" | "agent" | "model" | "reasoning">(dimension);
   const [showOptions, setShowOptions] = useState(false);
   const panelRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
 
+  useEffect(() => {
+    setExportDimension(dimension);
+  }, [dimension]);
+
   const handleExport = () => {
     const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
-    const url = api.usage.getExportUrl({ start, end, granularity, dimension, tz });
+    const url = api.usage.getExportUrl({
+      start,
+      end,
+      granularity,
+      dimension: exportDimension,
+      tz,
+      ...(filters?.agent ? { agent: filters.agent } : {}),
+      ...(filters?.model ? { model: filters.model } : {}),
+      ...(filters?.reasoning ? { reasoning: filters.reasoning } : {}),
+    });
     // Try window.open first; fall back to location.href for popup-blocked
     // browsers. Since this is a file download, location.href won't navigate away.
     const w = window.open(url, "_blank");
@@ -104,14 +123,16 @@ export function UsageExportButton({ start, end }: UsageExportButtonProps) {
             </div>
             <div className="space-y-1.5">
               <Label className="text-xs font-medium text-muted-foreground">Breakdown</Label>
-              <Select value={dimension} onValueChange={(v) => setDimension(v as "none" | "user" | "capacity")}>
+              <Select value={exportDimension} onValueChange={(v) => setExportDimension(v as "none" | "capacity" | "agent" | "model" | "reasoning")}>
                 <SelectTrigger className="h-8 text-xs">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
                   <SelectItem value="none" className="text-xs">Org totals</SelectItem>
-                  <SelectItem value="user" className="text-xs">By User</SelectItem>
                   <SelectItem value="capacity" className="text-xs">By Capacity</SelectItem>
+                  <SelectItem value="agent" className="text-xs">By Agent</SelectItem>
+                  <SelectItem value="model" className="text-xs">By Model</SelectItem>
+                  <SelectItem value="reasoning" className="text-xs">By Reasoning</SelectItem>
                 </SelectContent>
               </Select>
             </div>
