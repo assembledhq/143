@@ -6,7 +6,6 @@
 package sandboxdeps
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -134,12 +133,4 @@ func logSummary(log zerolog.Logger, results []Result) {
 		event = event.Str("failures", strings.Join(failures, "; "))
 	}
 	event.Msg("sandbox dependencies applied")
-}
-
-// captureExecStderr runs cmd and returns (stdout, stderr, exitCode, err).
-// Helper for recipe authors that need both streams to build a useful error.
-func captureExecStderr(ctx context.Context, exec Executor, cmd string) (string, string, int, error) {
-	var stdout, stderr bytes.Buffer
-	code, err := exec(ctx, cmd, &stdout, &stderr)
-	return stdout.String(), stderr.String(), code, err
 }

@@ -1,8 +1,10 @@
 package sandboxdeps
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"regexp"
 	"strings"
 )
 
@@ -10,54 +12,36 @@ func init() {
 	Default.Register(golangciLint{})
 }
 
+// golangciLintVersion matches the version strings we accept (e.g. 1.64.8,
+// 2.0.0-beta.1). Anything else is rejected before we interpolate into shell.
+var golangciLintVersion = regexp.MustCompile(`^[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.\-]+)?$`)
+
 type golangciLint struct{}
 
 func (golangciLint) Name() string { return "golangci-lint" }
 
 func (golangciLint) Install(ctx context.Context, exec Executor, version string) error {
-	// The official install script is pinned to a Git tag, so we anchor on a
-	// release tag (v<version>) and direct it at the unprivileged
-	// ~/.local/bin that the Dockerfile already adds to PATH. -B/-b creates
-	// the directory if missing.
+	if !golangciLintVersion.MatchString(version) {
+		return fmt.Errorf("golangci-lint: invalid version pin %q", version)
+	}
+	// Install into ~/.local/bin because the sandbox user has no sudo;
+	// /usr/local/bin would be read-only at runtime. The Dockerfile already
+	// puts ~/.local/bin on PATH.
 	cmd := fmt.Sprintf(
-		"mkdir -p \"$HOME/.local/bin\" && curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b \"$HOME/.local/bin\" v%s",
-		shellEscapeSingleQuote(version),
+		`mkdir -p "$HOME/.local/bin" && curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b "$HOME/.local/bin" v%s`,
+		version,
 	)
-	stdout, stderr, code, err := captureExecStderr(ctx, exec, cmd)
+	var stdout, stderr bytes.Buffer
+	code, err := exec(ctx, cmd, &stdout, &stderr)
 	if err != nil {
 		return fmt.Errorf("golangci-lint install: %w", err)
 	}
 	if code != 0 {
-		return fmt.Errorf("golangci-lint install exited %d: %s", code, firstNonEmpty(stderr, stdout))
+		out := strings.TrimSpace(stderr.String())
+		if out == "" {
+			out = strings.TrimSpace(stdout.String())
+		}
+		return fmt.Errorf("golangci-lint install exited %d: %s", code, out)
 	}
 	return nil
-}
-
-// shellEscapeSingleQuote wraps s for safe interpolation inside a double-quoted
-// shell context. Versions come from .143/config.json which Parse already
-// trims and rejects empty/"latest", but a malformed pin shouldn't be able to
-// inject extra shell syntax.
-func shellEscapeSingleQuote(s string) string {
-	// Versions are a constrained alphabet (digits, dots, -beta etc.) so
-	// stripping anything outside [A-Za-z0-9._-] is safer and simpler than
-	// trying to quote-escape inside a double-quoted heredoc.
-	var b strings.Builder
-	for _, r := range s {
-		switch {
-		case r >= 'a' && r <= 'z',
-			r >= 'A' && r <= 'Z',
-			r >= '0' && r <= '9',
-			r == '.', r == '_', r == '-':
-			b.WriteRune(r)
-		}
-	}
-	return b.String()
-}
-
-func firstNonEmpty(a, b string) string {
-	a = strings.TrimSpace(a)
-	if a != "" {
-		return a
-	}
-	return strings.TrimSpace(b)
 }
