@@ -282,6 +282,41 @@ func TestWorker_Poll(t *testing.T) {
 	}
 }
 
+func TestWorker_Poll_LongRunningSessionJobContextHasWatchdog(t *testing.T) {
+	t.Parallel()
+
+	w, mock := newTestWorker(t)
+	defer mock.Close()
+
+	w.renewInterval = time.Hour
+	w.maxLongRunningJobDuration = 20 * time.Millisecond
+
+	jobID := uuid.New()
+	lockToken := uuid.New()
+	orgID := uuid.New()
+	handlerCancelled := make(chan struct{})
+
+	w.Register("run_agent", func(ctx context.Context, jobType string, got json.RawMessage) error {
+		<-ctx.Done()
+		close(handlerCancelled)
+		return nil
+	})
+
+	expectClaim(mock, jobID, orgID, "run_agent", json.RawMessage(`{}`), time.Now(), lockToken)
+	mock.ExpectExec("UPDATE jobs\\s+SET status = 'succeeded'").
+		WithArgs(jobID, lockToken).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	w.poll(context.Background())
+
+	select {
+	case <-handlerCancelled:
+	default:
+		t.Fatal("long-running session job handler should be cancelled by the worker watchdog")
+	}
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func TestWorker_Start_WakeTriggersPoll(t *testing.T) {
 	t.Parallel()
 

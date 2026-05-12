@@ -78,6 +78,8 @@ type jobLeaseStore interface {
 // from retrying indefinitely (e.g. when stuck behind a concurrency limit).
 const maxRetryableDuration = 8 * time.Minute
 
+var defaultMaxLongRunningJobDuration = time.Duration(models.MaxMaxSessionDurationSeconds)*time.Second + 2*time.Minute + 15*time.Minute
+
 type Worker struct {
 	jobs          jobLeaseStore
 	logger        zerolog.Logger
@@ -86,7 +88,11 @@ type Worker struct {
 	pollInterval  time.Duration
 	leaseDuration time.Duration
 	renewInterval time.Duration
-	wakeCh        chan struct{}
+	// maxLongRunningJobDuration is a worker-level lease-renewal watchdog for
+	// session jobs. Handler-owned contexts should normally stop first; this
+	// outer guard prevents a wedged handler from renewing a job forever.
+	maxLongRunningJobDuration time.Duration
+	wakeCh                    chan struct{}
 
 	draining           atomic.Bool
 	activeJobs         atomic.Int32
@@ -95,14 +101,15 @@ type Worker struct {
 
 func New(pool db.DBTX, logger zerolog.Logger, nodeID string) *Worker {
 	return &Worker{
-		jobs:          db.NewJobStore(pool),
-		logger:        logger,
-		nodeID:        nodeID,
-		handlers:      make(map[string]JobHandler),
-		pollInterval:  5 * time.Second,
-		leaseDuration: defaultLeaseDuration,
-		renewInterval: defaultRenewInterval,
-		wakeCh:        make(chan struct{}, 1),
+		jobs:                      db.NewJobStore(pool),
+		logger:                    logger,
+		nodeID:                    nodeID,
+		handlers:                  make(map[string]JobHandler),
+		pollInterval:              5 * time.Second,
+		leaseDuration:             defaultLeaseDuration,
+		renewInterval:             defaultRenewInterval,
+		maxLongRunningJobDuration: defaultMaxLongRunningJobDuration,
+		wakeCh:                    make(chan struct{}, 1),
 	}
 }
 
@@ -180,6 +187,11 @@ func (w *Worker) poll(ctx context.Context) {
 	}
 	handlerCtx, cancelHandler := context.WithCancel(handlerCtx)
 	defer cancelHandler()
+	if isLongRunningSessionJob(job.JobType) && w.maxLongRunningJobDuration > 0 {
+		var cancelWatchdog context.CancelFunc
+		handlerCtx, cancelWatchdog = context.WithTimeout(handlerCtx, w.maxLongRunningJobDuration)
+		defer cancelWatchdog()
+	}
 
 	var lostOwnership atomic.Bool
 	renewDone := make(chan struct{})

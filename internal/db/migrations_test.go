@@ -2,6 +2,8 @@ package db
 
 import (
 	"os"
+	"path/filepath"
+	"regexp"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -21,6 +23,24 @@ func TestCopyCodingCredentialsMigrationFiltersUserCredentialProviders(t *testing
 	require.Contains(t, sql,
 		"WHERE uc.is_team_default = true\n  AND uc.provider IN "+allowedProviders,
 		"team-default user credential copy should include only coding-agent providers")
+}
+
+func TestMigrationsDeclareSessionsModelUsedColumn(t *testing.T) {
+	t.Parallel()
+
+	files, err := filepath.Glob("../../migrations/*.up.sql")
+	require.NoError(t, err, "test should list up migrations")
+
+	re := regexp.MustCompile(`(?is)ALTER\s+TABLE\s+sessions\s+ADD\s+COLUMN(?:\s+IF\s+NOT\s+EXISTS)?\s+model_used\s+text\b`)
+	for _, file := range files {
+		body, readErr := os.ReadFile(file)
+		require.NoError(t, readErr, "test should read migration file")
+		if re.Match(body) {
+			return
+		}
+	}
+
+	require.Fail(t, "schema must add sessions.model_used because SessionStore.UpdateResult writes it")
 }
 
 // TestCopyCodingCredentialsMigrationStampsTeamDefaultMarker locks the
