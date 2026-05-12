@@ -262,7 +262,7 @@ export function AgentTabStrip({
               size="sm"
               aria-label="Agent tabs"
               className={cn(
-                "h-auto max-w-full justify-start gap-1 overflow-x-auto overflow-y-hidden border-b-0 bg-transparent p-0",
+                "h-auto max-w-full justify-start gap-1 overflow-x-auto overflow-y-visible border-b-0 bg-transparent p-0 pb-1",
               )}
             >
               {tabs.map((thread) => {
