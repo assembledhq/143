@@ -2048,6 +2048,12 @@ function ChatPanel({
     timelineEntries.length === 0 &&
     session.status !== "pending" &&
     (!hasLoadedTimelineInputs || expectingMoreContent);
+  const showFreshThreadShell =
+    !!activeThread &&
+    activeThread.status === "idle" &&
+    activeThread.current_turn === 0 &&
+    timelineEntries.length === 0 &&
+    !showLoadingSkeleton;
 
   const persistScrollPosition = useCallback((scrollTop: number) => {
     if (typeof window === "undefined" || !viewerScope) return;
@@ -2364,15 +2370,18 @@ function ChatPanel({
         {showLoadingSkeleton ? (
           <SessionTimelineSkeleton />
         ) : (
-          <ChatTimeline
-            entries={timelineEntries}
-            isRunning={isRunning}
-            diffStats={session.diff_stats}
-            onDiffClick={onDiffClick}
-            onApprovePlan={canSendMessage ? onApprovePlan : undefined}
-            onAdjustPlan={canSendMessage ? onAdjustPlan : undefined}
-            getEntryContainerProps={getEntryContainerProps}
-          />
+          <>
+            {showFreshThreadShell ? <FreshThreadShell thread={activeThread} /> : null}
+            <ChatTimeline
+              entries={timelineEntries}
+              isRunning={isRunning}
+              diffStats={session.diff_stats}
+              onDiffClick={onDiffClick}
+              onApprovePlan={canSendMessage ? onApprovePlan : undefined}
+              onAdjustPlan={canSendMessage ? onAdjustPlan : undefined}
+              getEntryContainerProps={getEntryContainerProps}
+            />
+          </>
         )}
         {(activeThread?.status === "pending" || (!activeThread && session.status === "pending")) && (
           <div className="flex items-center justify-center py-12">
@@ -2426,6 +2435,28 @@ function areChatPanelPropsEqual(previous: ChatPanelProps, next: ChatPanelProps):
 }
 
 const MemoizedChatPanel = memo(ChatPanel, areChatPanelPropsEqual);
+
+function FreshThreadShell({ thread }: { thread: SessionThread }) {
+  return (
+    <Card className="mx-auto max-w-2xl border-border/60 bg-muted/20 shadow-none">
+      <CardContent className="flex flex-col gap-3 p-4">
+        <div className="flex flex-wrap items-center gap-2">
+          <AgentBadge
+            agentType={thread.agent_type}
+            labelClassName="text-xs font-medium text-foreground"
+          />
+          <span className="text-sm font-medium text-foreground">New tab</span>
+        </div>
+        <div className="space-y-1">
+          <p className="text-sm text-foreground">No context in this tab yet.</p>
+          <p className="text-sm text-muted-foreground">
+            Send a task or add context to get started.
+          </p>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
 
 // ---------------------------------------------------------------------------
 // Main component
