@@ -443,6 +443,39 @@ func (s *SessionStore) GetByID(ctx context.Context, orgID, runID uuid.UUID) (mod
 	return session, nil
 }
 
+// SessionMessageAppendState is the small slice of a session needed to append
+// an inbound message without claiming a new turn. It intentionally avoids the
+// full sessionSelectColumns payload because running-session fast paths only
+// need status and turn numbering.
+type SessionMessageAppendState struct {
+	ID          uuid.UUID `db:"id"`
+	OrgID       uuid.UUID `db:"org_id"`
+	Status      string    `db:"status"`
+	CurrentTurn int       `db:"current_turn"`
+}
+
+// GetMessageAppendState returns the current status and turn number for a
+// session, scoped to org. Used by follow-up-message paths after a claim loses
+// a race to an already-running turn: the caller can append the message to the
+// running session without enqueueing a duplicate continuation.
+func (s *SessionStore) GetMessageAppendState(ctx context.Context, orgID, sessionID uuid.UUID) (SessionMessageAppendState, error) {
+	var state SessionMessageAppendState
+	err := s.db.QueryRow(ctx, `
+		SELECT id, org_id, status, current_turn
+		FROM sessions
+		WHERE id = @id
+		  AND org_id = @org_id
+		  AND deleted_at IS NULL`,
+		pgx.NamedArgs{
+			"id":     sessionID,
+			"org_id": orgID,
+		}).Scan(&state.ID, &state.OrgID, &state.Status, &state.CurrentTurn)
+	if err != nil {
+		return SessionMessageAppendState{}, err
+	}
+	return state, nil
+}
+
 func (s *SessionStore) GetAPIDetailByID(ctx context.Context, orgID, runID uuid.UUID) (models.Session, error) {
 	query := `
 		SELECT ` + sessionAPIDetailColumns + `

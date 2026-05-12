@@ -55,6 +55,7 @@ const (
 )
 
 type integrationCredentialStore interface {
+	Get(ctx context.Context, orgID uuid.UUID, provider models.ProviderName) (*models.DecryptedCredential, error)
 	Upsert(ctx context.Context, orgID uuid.UUID, cfg models.ProviderConfig) error
 }
 
@@ -547,6 +548,12 @@ func (h *IntegrationHandler) HandleLinearOAuthCallback(w http.ResponseWriter, r 
 	if token.ExpiresIn > 0 {
 		linearConfig.ExpiresAt = time.Now().Add(time.Duration(token.ExpiresIn) * time.Second)
 	}
+	mergedConfig, err := h.preserveExistingWebhookSecret(r.Context(), orgID, linearConfig)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "SAVE_CREDENTIAL_FAILED", "failed to preserve linear webhook secret", err)
+		return
+	}
+	linearConfig = mergedConfig.(models.LinearConfig)
 	if err := h.credentialStore.Upsert(r.Context(), orgID, linearConfig); err != nil {
 		writeError(w, r, http.StatusInternalServerError, "SAVE_CREDENTIAL_FAILED", "failed to store linear credential", err)
 		return
@@ -601,6 +608,47 @@ func (h *IntegrationHandler) HandleLinearOAuthCallback(w http.ResponseWriter, r 
 	}
 
 	http.Redirect(w, r, h.frontendURL+"/integrations?linear=connected", http.StatusTemporaryRedirect)
+}
+
+func (h *IntegrationHandler) preserveExistingWebhookSecret(ctx context.Context, orgID uuid.UUID, cfg models.ProviderConfig) (models.ProviderConfig, error) {
+	if h.credentialStore == nil {
+		return cfg, nil
+	}
+
+	switch next := cfg.(type) {
+	case models.LinearConfig:
+		if next.WebhookSecret != "" {
+			return cfg, nil
+		}
+		existing, err := h.credentialStore.Get(ctx, orgID, models.ProviderLinear)
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return cfg, nil
+			}
+			return nil, err
+		}
+		if prior, ok := existing.Config.(models.LinearConfig); ok && prior.WebhookSecret != "" {
+			next.WebhookSecret = prior.WebhookSecret
+		}
+		return next, nil
+	case models.SentryConfig:
+		if next.WebhookSecret != "" {
+			return cfg, nil
+		}
+		existing, err := h.credentialStore.Get(ctx, orgID, models.ProviderSentry)
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return cfg, nil
+			}
+			return nil, err
+		}
+		if prior, ok := existing.Config.(models.SentryConfig); ok && prior.WebhookSecret != "" {
+			next.WebhookSecret = prior.WebhookSecret
+		}
+		return next, nil
+	default:
+		return cfg, nil
+	}
 }
 
 func (h *IntegrationHandler) ConnectLinear(w http.ResponseWriter, r *http.Request) {
@@ -676,6 +724,12 @@ func (h *IntegrationHandler) HandleSentryOAuthCallback(w http.ResponseWriter, r 
 		OrgSlug:      orgSlug,
 		OrgName:      orgName,
 	}
+	mergedConfig, err := h.preserveExistingWebhookSecret(r.Context(), orgID, sentryConfig)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "SAVE_CREDENTIAL_FAILED", "failed to preserve sentry webhook secret", err)
+		return
+	}
+	sentryConfig = mergedConfig.(models.SentryConfig)
 	if err := h.credentialStore.Upsert(r.Context(), orgID, sentryConfig); err != nil {
 		writeError(w, r, http.StatusInternalServerError, "SAVE_CREDENTIAL_FAILED", "failed to store sentry credential", err)
 		return
