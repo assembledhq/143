@@ -350,6 +350,69 @@ describe('UsagePage', () => {
     expect(screen.getAllByText('By Model')).toHaveLength(2);
   });
 
+  it('offers user breakdown and does not expose capacity breakdown', async () => {
+    const user = userEvent.setup();
+    renderWithProviders(<UsagePage />);
+
+    await user.click(screen.getByLabelText('Break down by'));
+
+    expect(screen.getAllByText('By User').length).toBeGreaterThan(0);
+    expect(screen.queryByText('By Capacity')).not.toBeInTheDocument();
+  });
+
+  it('keeps the chart request valid when switching to user breakdown', async () => {
+    const user = userEvent.setup();
+    server.use(
+      http.get('*/api/v1/usage/timeseries', ({ request }) => {
+        const stackBy = new URL(request.url).searchParams.get('stack_by');
+        if (stackBy === 'user') {
+          return HttpResponse.json({ error: { code: 'INVALID_PARAM', message: 'stack_by=user is not supported' } }, { status: 400 });
+        }
+        return HttpResponse.json({
+          data: {
+            buckets: [],
+            period_start: '2026-03-13T00:00:00Z',
+            period_end: '2026-04-12T00:00:00Z',
+          },
+        });
+      }),
+      http.get('*/api/v1/usage/breakdown', ({ request }) => {
+        const dimension = new URL(request.url).searchParams.get('dimension');
+        if (dimension === 'user') {
+          return HttpResponse.json({
+            data: [
+              {
+                key: 'user-1',
+                label: 'alice@example.com',
+                total_container_minutes: 60,
+                total_sessions: 3,
+                total_container_starts: 3,
+                peak_concurrent: 1,
+                total_input_tokens: 5000,
+                total_output_tokens: 2000,
+                total_tokens: 7000,
+                total_llm_cost_usd: 0.5,
+                percentage: 100,
+              },
+            ],
+            meta: {},
+          });
+        }
+        return HttpResponse.json({ data: [], meta: {} });
+      })
+    );
+
+    renderWithProviders(<UsagePage />);
+
+    await user.click(screen.getByLabelText('Break down by'));
+    await user.click(screen.getByText('By User'));
+
+    await waitFor(() => {
+      expect(screen.getByText('alice@example.com')).toBeInTheDocument();
+    });
+    expect(screen.queryByText('Failed to load usage data. Please try again later.')).not.toBeInTheDocument();
+  });
+
   it('renders the footer disclaimer text', () => {
     renderWithProviders(<UsagePage />);
     expect(
@@ -413,6 +476,20 @@ describe('UsageExportButton', () => {
     expect(screen.getByText('Download')).toBeInTheDocument();
   });
 
+  it('offers user export breakdown and omits capacity export breakdown', async () => {
+    const user = userEvent.setup();
+    renderWithProviders(
+      <UsageExportButton start="2026-04-01T00:00:00Z" end="2026-04-30T00:00:00Z" />
+    );
+
+    await user.click(screen.getByText('Export CSV'));
+    const comboboxes = screen.getAllByRole('combobox');
+    await user.click(comboboxes[1]);
+
+    expect(screen.getAllByText('By User').length).toBeGreaterThan(0);
+    expect(screen.queryByText('By Capacity')).not.toBeInTheDocument();
+  });
+
   it('syncs the default export dimension when the parent prop changes', async () => {
     const user = userEvent.setup();
     const getExportUrlSpy = vi.spyOn(api.usage, 'getExportUrl').mockReturnValue('/api/v1/usage/export');
@@ -423,14 +500,14 @@ describe('UsageExportButton', () => {
     );
 
     rerender(
-      <UsageExportButton start="2026-04-01T00:00:00Z" end="2026-04-30T00:00:00Z" dimension="capacity" />
+      <UsageExportButton start="2026-04-01T00:00:00Z" end="2026-04-30T00:00:00Z" dimension="user" />
     );
 
     await user.click(screen.getByText('Export CSV'));
     await user.click(screen.getByText('Download'));
 
     expect(getExportUrlSpy).toHaveBeenCalledWith(
-      expect.objectContaining({ dimension: 'capacity' })
+      expect.objectContaining({ dimension: 'user' })
     );
     expect(windowOpenSpy).toHaveBeenCalledWith('/api/v1/usage/export', '_blank');
   });
