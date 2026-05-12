@@ -104,8 +104,9 @@ func (s *LinearAgentSessionStore) UpsertOnCreated(ctx context.Context, orgID uui
 		    updated_at             = now()
 		RETURNING
 			id, org_id, integration_id, linear_agent_session_id,
-			linear_issue_id, linear_issue_identifier,
-			linear_app_user_id, linear_creator_user_id,
+			linear_issue_id, COALESCE(linear_issue_identifier, '') AS linear_issue_identifier,
+			COALESCE(linear_app_user_id, '') AS linear_app_user_id,
+			COALESCE(linear_creator_user_id, '') AS linear_creator_user_id,
 			session_id, state, last_event_received_at,
 			created_at, updated_at,
 			(xmax = 0) AS inserted`,
@@ -148,8 +149,9 @@ func (s *LinearAgentSessionStore) Lookup(ctx context.Context, orgID uuid.UUID, l
 	var row LinearAgentSession
 	err := s.db.QueryRow(ctx, `
 		SELECT id, org_id, integration_id, linear_agent_session_id,
-		       linear_issue_id, linear_issue_identifier,
-		       linear_app_user_id, linear_creator_user_id,
+		       linear_issue_id, COALESCE(linear_issue_identifier, '') AS linear_issue_identifier,
+		       COALESCE(linear_app_user_id, '') AS linear_app_user_id,
+		       COALESCE(linear_creator_user_id, '') AS linear_creator_user_id,
 		       session_id, state, last_event_received_at,
 		       created_at, updated_at
 		FROM linear_agent_sessions
@@ -189,8 +191,9 @@ func (s *LinearAgentSessionStore) LookupBySessionID(ctx context.Context, orgID, 
 	var row LinearAgentSession
 	err := s.db.QueryRow(ctx, `
 		SELECT id, org_id, integration_id, linear_agent_session_id,
-		       linear_issue_id, linear_issue_identifier,
-		       linear_app_user_id, linear_creator_user_id,
+		       linear_issue_id, COALESCE(linear_issue_identifier, '') AS linear_issue_identifier,
+		       COALESCE(linear_app_user_id, '') AS linear_app_user_id,
+		       COALESCE(linear_creator_user_id, '') AS linear_creator_user_id,
 		       session_id, state, last_event_received_at,
 		       created_at, updated_at
 		FROM linear_agent_sessions
@@ -230,8 +233,9 @@ func (s *LinearAgentSessionStore) GetByID(ctx context.Context, orgID, agentSessi
 	var row LinearAgentSession
 	err := s.db.QueryRow(ctx, `
 		SELECT id, org_id, integration_id, linear_agent_session_id,
-		       linear_issue_id, linear_issue_identifier,
-		       linear_app_user_id, linear_creator_user_id,
+		       linear_issue_id, COALESCE(linear_issue_identifier, '') AS linear_issue_identifier,
+		       COALESCE(linear_app_user_id, '') AS linear_app_user_id,
+		       COALESCE(linear_creator_user_id, '') AS linear_creator_user_id,
 		       session_id, state, last_event_received_at,
 		       created_at, updated_at
 		FROM linear_agent_sessions
@@ -331,8 +335,9 @@ func (s *LinearAgentSessionStore) ListByOrg(ctx context.Context, orgID uuid.UUID
 	}
 	rows, err := s.db.Query(ctx, `
 		SELECT id, org_id, integration_id, linear_agent_session_id,
-		       linear_issue_id, linear_issue_identifier,
-		       linear_app_user_id, linear_creator_user_id,
+		       linear_issue_id, COALESCE(linear_issue_identifier, '') AS linear_issue_identifier,
+		       COALESCE(linear_app_user_id, '') AS linear_app_user_id,
+		       COALESCE(linear_creator_user_id, '') AS linear_creator_user_id,
 		       session_id, state, last_event_received_at,
 		       created_at, updated_at
 		FROM linear_agent_sessions
@@ -358,8 +363,9 @@ func (s *LinearAgentSessionStore) ListByOrg(ctx context.Context, orgID uuid.UUID
 func (s *LinearAgentSessionStore) ListPendingForRecovery(ctx context.Context, olderThan time.Duration, limit int) ([]LinearAgentSession, error) {
 	rows, err := s.db.Query(ctx, `
 		SELECT id, org_id, integration_id, linear_agent_session_id,
-		       linear_issue_id, linear_issue_identifier,
-		       linear_app_user_id, linear_creator_user_id,
+		       linear_issue_id, COALESCE(linear_issue_identifier, '') AS linear_issue_identifier,
+		       COALESCE(linear_app_user_id, '') AS linear_app_user_id,
+		       COALESCE(linear_creator_user_id, '') AS linear_creator_user_id,
 		       session_id, state, last_event_received_at,
 		       created_at, updated_at
 		FROM linear_agent_sessions

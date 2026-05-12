@@ -171,8 +171,11 @@ func (s *LinearTeamRepoMappingStore) Upsert(ctx context.Context, orgID uuid.UUID
 	err := s.db.QueryRow(ctx, `
 		INSERT INTO linear_team_repo_mappings
 			(org_id, linear_team_id, linear_project_id, repository_id, default_branch, priority)
-		VALUES
-			(@org_id, @linear_team_id, @linear_project_id, @repository_id, @default_branch, @priority)
+		SELECT
+			@org_id, @linear_team_id, @linear_project_id, r.id, @default_branch, @priority
+		FROM repositories r
+		WHERE r.id = @repository_id
+		  AND r.org_id = @org_id
 		ON CONFLICT (org_id, linear_team_id, COALESCE(linear_project_id, '')) DO UPDATE
 		SET repository_id  = EXCLUDED.repository_id,
 		    default_branch = EXCLUDED.default_branch,
@@ -199,6 +202,9 @@ func (s *LinearTeamRepoMappingStore) Upsert(ctx context.Context, orgID uuid.UUID
 		&row.CreatedAt,
 		&row.UpdatedAt,
 	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrLinearTeamRepoMappingNotFound
+	}
 	if err != nil {
 		return nil, fmt.Errorf("upsert linear_team_repo_mappings: %w", err)
 	}

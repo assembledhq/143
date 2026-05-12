@@ -180,6 +180,10 @@ func (h *LinearAgentSettingsHandler) UpsertMapping(w http.ResponseWriter, r *htt
 		Priority:        req.Priority,
 	})
 	if err != nil {
+		if errors.Is(err, db.ErrLinearTeamRepoMappingNotFound) {
+			writeError(w, r, http.StatusBadRequest, "INVALID_REQUEST", "repository_id was not found for this organization")
+			return
+		}
 		writeError(w, r, http.StatusInternalServerError, "UPSERT_FAILED", "failed to upsert linear team repo mapping", err)
 		return
 	}

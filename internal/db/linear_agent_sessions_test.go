@@ -58,6 +58,42 @@ func TestLinearAgentSessionStore_UpsertOnCreated(t *testing.T) {
 		require.NoError(t, mock.ExpectationsWereMet())
 	})
 
+	t.Run("coalesces optional nullable metadata in returning row", func(t *testing.T) {
+		t.Parallel()
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err, "test should create pgx mock")
+		defer mock.Close()
+
+		mock.ExpectQuery("COALESCE\\(linear_issue_identifier, ''\\).*COALESCE\\(linear_app_user_id, ''\\).*COALESCE\\(linear_creator_user_id, ''\\)").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+				pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnRows(pgxmock.NewRows([]string{
+				"id", "org_id", "integration_id", "linear_agent_session_id",
+				"linear_issue_id", "linear_issue_identifier",
+				"linear_app_user_id", "linear_creator_user_id",
+				"session_id", "state", "last_event_received_at",
+				"created_at", "updated_at", "inserted",
+			}).AddRow(
+				rowID, orgID, integrationID, "as_1",
+				"iss_1", "",
+				"", "",
+				nil, "pending", &now,
+				now, now, true,
+			))
+
+		store := NewLinearAgentSessionStore(mock)
+		row, created, err := store.UpsertOnCreated(context.Background(), orgID, UpsertOnCreatedInput{
+			OrgID:                orgID,
+			IntegrationID:        integrationID,
+			LinearAgentSessionID: "as_1",
+			LinearIssueID:        "iss_1",
+		})
+		require.NoError(t, err, "nullable optional metadata should scan as empty strings")
+		require.True(t, created, "first insert should still report created=true")
+		require.Equal(t, "", row.LinearAppUserID, "missing app user id should be represented as empty string")
+		require.NoError(t, mock.ExpectationsWereMet(), "upsert should coalesce all nullable string metadata in SQL")
+	})
+
 	t.Run("re-delivery returns created=false with existing session_id preserved", func(t *testing.T) {
 		t.Parallel()
 		mock, err := pgxmock.NewPool()

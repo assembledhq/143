@@ -64,6 +64,10 @@ func buildAgentSession(orgID uuid.UUID, repo linear.AgentRepoResolveResult, issu
 		title = identifier
 	}
 	approach := buildIssueApproachPrompt(fetched)
+	var targetBranch *string
+	if repo.DefaultBranch != "" {
+		targetBranch = &repo.DefaultBranch
+	}
 	return &models.Session{
 		OrgID:                orgID,
 		AgentType:            models.AgentTypeCodex,
@@ -77,6 +81,7 @@ func buildAgentSession(orgID uuid.UUID, repo linear.AgentRepoResolveResult, issu
 		LinearPrepareState:   models.LinearPrepareStateReady,
 		InteractionMode:      models.SessionInteractionModeSingleRun,
 		ValidationPolicy:     models.SessionValidationPolicyOnTurnComplete,
+		TargetBranch:         targetBranch,
 	}
 }
 

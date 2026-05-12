@@ -2,12 +2,18 @@ package handlers
 
 import (
 	"context"
+	"errors"
 	"testing"
+	"time"
 
+	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/services/linear"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+	"github.com/pashagolub/pgxmock/v4"
 	"github.com/rs/zerolog"
+	"github.com/stretchr/testify/require"
 )
 
 // fakeJobs records every Enqueue call so tests can pin the dedupe key,
@@ -68,10 +74,114 @@ func TestLinearAgentDispatcher_NonAgentEventIgnored(t *testing.T) {
 	}
 }
 
-// Prompted-without-created behavior is covered by the worker integration
-// tests (handlers_linear_agent_test.go). Here we only verify the
-// dispatcher's pre-store branches; the row-lookup path requires a real
-// store and is exercised end-to-end at a higher layer.
+func TestLinearAgentDispatcher_PromptedWithoutCreatedEnqueuesRetryableJob(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "test should create pgx mock")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	integrationID := uuid.New()
+	jobs := &fakeJobs{}
+	enabled := true
+	d := &LinearAgentDispatcher{
+		logger:        zerolog.Nop(),
+		agentSessions: db.NewLinearAgentSessionStore(mock),
+		jobs:          jobs,
+		settingsLoader: func(_ context.Context, _ uuid.UUID) (models.LinearAgentSettings, error) {
+			return models.LinearAgentSettings{Enabled: &enabled}, nil
+		},
+		featureEnabled: true,
+	}
+
+	mock.ExpectQuery("SELECT id, org_id").
+		WithArgs(orgID, "as_racing").
+		WillReturnError(pgx.ErrNoRows)
+
+	body := []byte(`{"type":"AgentSessionEvent","action":"prompted","payload":{"agentSession":{"id":"as_racing","issueId":"iss_1","commentId":"comment_1","issue":{"id":"iss_1","teamId":"team_1","projectId":"project_1"}}}}`)
+	res := d.Dispatch(context.Background(), &models.Integration{ID: integrationID, OrgID: orgID}, LinearAgentEventAgentSession, body)
+	require.Equal(t, "agent_dispatched", res.Status, "prompted race should still enqueue a worker retry job after webhook ack")
+	require.Len(t, jobs.calls, 1, "dispatcher should enqueue one prompted worker job")
+	require.Equal(t, "linear_agent_event:as_racing:prompted:comment_1", jobs.calls[0].DedupeKey, "dedupe should preserve the prompted comment id")
+	payload, ok := jobs.calls[0].Payload.(map[string]any)
+	require.True(t, ok, "dispatcher should enqueue a map payload")
+	require.Equal(t, "prompted", payload["action"], "worker payload should identify prompted action")
+	require.Equal(t, "as_racing", payload["linear_agent_session_id"], "worker payload should carry the Linear AgentSession id for retry lookup")
+	require.NoError(t, mock.ExpectationsWereMet(), "dispatcher should only attempt the row lookup before enqueueing the retry job")
+}
+
+func TestLinearAgentDispatcher_PerTeamEnableOverrideCanPassOrgDisabledGate(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "test should create pgx mock")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	integrationID := uuid.New()
+	rowID := uuid.New()
+	now := time.Now().UTC()
+	jobs := &fakeJobs{}
+	disabled := false
+	teamEnabled := true
+	d := &LinearAgentDispatcher{
+		logger:        zerolog.Nop(),
+		agentSessions: db.NewLinearAgentSessionStore(mock),
+		jobs:          jobs,
+		settingsLoader: func(_ context.Context, _ uuid.UUID) (models.LinearAgentSettings, error) {
+			return models.LinearAgentSettings{
+				Enabled:        &disabled,
+				PerTeamEnabled: map[string]*bool{"ACS": &teamEnabled},
+			}, nil
+		},
+		featureEnabled: true,
+	}
+
+	mock.ExpectQuery("INSERT INTO linear_agent_sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "org_id", "integration_id", "linear_agent_session_id",
+			"linear_issue_id", "linear_issue_identifier",
+			"linear_app_user_id", "linear_creator_user_id",
+			"session_id", "state", "last_event_received_at",
+			"created_at", "updated_at", "inserted",
+		}).AddRow(
+			rowID, orgID, integrationID, "as_1",
+			"iss_1", "ACS-1",
+			"", "",
+			nil, "pending", &now,
+			now, now, true,
+		))
+
+	body := []byte(`{"type":"AgentSessionEvent","action":"created","payload":{"agentSession":{"id":"as_1","issueId":"iss_1","issue":{"id":"iss_1","identifier":"ACS-1","teamId":"team_1"}}}}`)
+	res := d.Dispatch(context.Background(), &models.Integration{ID: integrationID, OrgID: orgID}, LinearAgentEventAgentSession, body)
+	require.Equal(t, "agent_dispatched", res.Status, "a true per-team override should pass the coarse dispatcher gate")
+	require.Len(t, jobs.calls, 1, "dispatcher should enqueue the created worker job so the worker can apply team-key gating")
+	require.NoError(t, mock.ExpectationsWereMet(), "dispatcher should upsert the AgentSession row")
+}
+
+func TestNewLinearAgentDispatcher_WiresBootstrapEmitterFromConfig(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "test should create pgx mock")
+	defer mock.Close()
+
+	d := NewLinearAgentDispatcher(LinearAgentDispatcherConfig{
+		Logger:         zerolog.Nop(),
+		AgentSessions:  db.NewLinearAgentSessionStore(mock),
+		Activities:     db.NewLinearAgentActivityLogStore(mock),
+		Jobs:           &fakeJobs{},
+		FeatureEnabled: true,
+		ClientForOrg: func(_ context.Context, _ uuid.UUID) (linear.Client, error) {
+			return nil, errors.New("not used by constructor")
+		},
+	})
+	require.NotNil(t, d, "constructor should return a dispatcher when required stores are configured")
+	require.NotNil(t, d.emitter, "constructor should wire the bootstrap emitter when activities and ClientForOrg are configured")
+}
 
 func TestSniffLinearEventType(t *testing.T) {
 	t.Parallel()
