@@ -1349,6 +1349,11 @@ export interface UsageTimeseriesBucket {
   user_id?: string;
   user_name?: string;
   capacity_tier?: string;
+  agent_type?: string;
+  model_used?: string;
+  reasoning_effort?: string;
+  series_key?: string;
+  series_label?: string;
   total_container_minutes: number;
   total_sessions: number;
   total_container_starts: number;
@@ -1357,6 +1362,7 @@ export interface UsageTimeseriesBucket {
   p95_duration_sec: number;
   total_input_tokens: number;
   total_output_tokens: number;
+  total_tokens: number;
   total_llm_cost_usd: number;
 }
 
@@ -1375,8 +1381,12 @@ export interface UsageBreakdownRow {
   peak_concurrent: number;
   total_input_tokens: number;
   total_output_tokens: number;
+  total_tokens: number;
   total_llm_cost_usd: number;
   percentage: number;
+  share_of_sessions?: number;
+  share_of_token_cost?: number;
+  share_of_tokens?: number;
 }
 
 // Automation types
