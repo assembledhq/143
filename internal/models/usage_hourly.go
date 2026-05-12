@@ -12,6 +12,11 @@ type UsageTimeseriesBucket struct {
 	UserID                *uuid.UUID `json:"user_id,omitempty"`
 	UserName              string     `json:"user_name,omitempty"`
 	CapacityTier          *string    `json:"capacity_tier,omitempty"`
+	AgentType             *string    `json:"agent_type,omitempty"`
+	ModelUsed             *string    `json:"model_used,omitempty"`
+	ReasoningEffort       *string    `json:"reasoning_effort,omitempty"`
+	SeriesKey             *string    `json:"series_key,omitempty"`
+	SeriesLabel           *string    `json:"series_label,omitempty"`
 	TotalContainerMinutes float64    `json:"total_container_minutes"`
 	TotalSessions         int        `json:"total_sessions"`
 	TotalContainerStarts  int        `json:"total_container_starts"`
@@ -20,6 +25,7 @@ type UsageTimeseriesBucket struct {
 	P95DurationSec        float64    `json:"p95_duration_sec"`
 	TotalInputTokens      int64      `json:"total_input_tokens"`
 	TotalOutputTokens     int64      `json:"total_output_tokens"`
+	TotalTokens           int64      `json:"total_tokens"`
 	TotalLLMCostUSD       float64    `json:"total_llm_cost_usd"`
 }
 
@@ -40,6 +46,10 @@ type UsageBreakdownRow struct {
 	PeakConcurrent        int     `json:"peak_concurrent"`
 	TotalInputTokens      int64   `json:"total_input_tokens"`
 	TotalOutputTokens     int64   `json:"total_output_tokens"`
+	TotalTokens           int64   `json:"total_tokens"`
 	TotalLLMCostUSD       float64 `json:"total_llm_cost_usd"`
 	Percentage            float64 `json:"percentage"`
+	ShareOfSessions       float64 `json:"share_of_sessions"`
+	ShareOfTokenCost      float64 `json:"share_of_token_cost"`
+	ShareOfTokens         float64 `json:"share_of_tokens"`
 }

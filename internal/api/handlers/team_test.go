@@ -501,6 +501,24 @@ func TestTeamHandler_ChangeRole(t *testing.T) {
 			},
 			expectedCode: http.StatusOK,
 		},
+		{
+			name:        "successfully changes role to builder",
+			memberID:    memberID.String(),
+			body:        map[string]string{"role": "builder"},
+			currentUser: adminUser,
+			users: &mockTeamUserStore{
+				getByIDGlobalFn: func(_ context.Context, _ uuid.UUID) (models.User, error) {
+					return models.User{ID: memberID, Email: "b@c.com", Name: "Bob"}, nil
+				},
+			},
+			memberships: &mockTeamMembershipStore{
+				updateRoleGuardedFn: func(_ context.Context, _, _ uuid.UUID, role string) (string, error) {
+					require.Equal(t, "builder", role, "ChangeRole should pass the builder role through to the membership store")
+					return "member", nil
+				},
+			},
+			expectedCode: http.StatusOK,
+		},
 	}
 
 	for _, tt := range tests {
@@ -679,6 +697,34 @@ func TestTeamHandler_ChangeRole_PostUpdateLookupFails(t *testing.T) {
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
 	require.Equal(t, memberID, resp.Data.ID)
 	require.Equal(t, "viewer", resp.Data.Role)
+}
+
+func TestTeamHandler_CreateInvitation_AcceptsBuilderRole(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	adminUser := &models.User{ID: uuid.New(), OrgID: orgID, Role: "admin", Name: "Admin User"}
+	createdRoles := make([]string, 0, 1)
+
+	h := newTeamHandler(nil, &mockTeamMembershipStore{}, nil, &mockTeamInvitationStore{
+		createFn: func(_ context.Context, inv *models.Invitation) error {
+			createdRoles = append(createdRoles, inv.Role)
+			inv.ID = uuid.New()
+			inv.Status = "pending"
+			inv.CreatedAt = time.Now()
+			return nil
+		},
+	}, nil)
+
+	body, _ := json.Marshal(map[string]string{"email": "builder@example.com", "role": "builder"})
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/team/invitations", bytes.NewReader(body))
+	req = req.WithContext(teamCtx(orgID, adminUser))
+	w := httptest.NewRecorder()
+
+	h.CreateInvitation(w, req)
+
+	require.Equal(t, http.StatusCreated, w.Code, "CreateInvitation should accept builder as a valid membership role")
+	require.Equal(t, []string{"builder"}, createdRoles, "CreateInvitation should persist the requested builder role")
 }
 
 // RemoveMember succeeds even when CountForUser fails afterward — the removal

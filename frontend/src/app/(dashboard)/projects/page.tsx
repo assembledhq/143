@@ -1,8 +1,14 @@
+"use client";
+
 import Link from "next/link";
 import { Plus } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { useAuth } from "@/hooks/use-auth";
 
 export default function ProjectsPage() {
+  const { user } = useAuth();
+  const canManage = user?.role === "admin" || user?.role === "member";
+
   return (
     <div className="hidden md:flex h-full items-center justify-center p-8">
       <div className="max-w-md text-center space-y-4">
@@ -10,12 +16,12 @@ export default function ProjectsPage() {
         <p className="text-sm text-muted-foreground">
           Start a new project, or open one from the list to continue.
         </p>
-        <Button asChild>
+        {canManage && <Button asChild>
           <Link href="/projects/new">
             <Plus className="h-4 w-4" />
             New project
           </Link>
-        </Button>
+        </Button>}
       </div>
     </div>
   );

@@ -28,9 +28,9 @@ interface SettingsItem {
   icon: LucideIcon;
   href: string;
   adminOnly?: boolean;
-  // Hides the entry from viewers. Backend rejects the underlying reads, so
-  // showing the link would land them on an empty/failed page.
-  hideForViewers?: boolean;
+  // Hides the entry from selected roles. Backend rejects the underlying reads,
+  // so showing the link would land them on an empty/failed page.
+  hideForRoles?: string[];
 }
 
 interface SettingsGroup {
@@ -48,18 +48,18 @@ const settingsGroups: SettingsGroup[] = [
   {
     label: "PLATFORM",
     items: [
-      { label: "Integrations", icon: Plug, href: "/settings/integrations", hideForViewers: true },
-      { label: "Coding agents", icon: Bot, href: "/settings/agent", hideForViewers: true },
+      { label: "Integrations", icon: Plug, href: "/settings/integrations", hideForRoles: ["viewer", "builder"] },
+      { label: "Coding agents", icon: Bot, href: "/settings/agent", hideForRoles: ["viewer"] },
       { label: "LLM", icon: Sparkles, href: "/settings/llm", adminOnly: true },
       { label: "Autopilot", icon: Target, href: "/settings/autopilot", adminOnly: true },
-      { label: "Evals", icon: FlaskConical, href: "/settings/evals", hideForViewers: true },
+      { label: "Evals", icon: FlaskConical, href: "/settings/evals", hideForRoles: ["viewer", "builder"] },
     ],
   },
   {
     label: "ORGANIZATION",
     items: [
       { label: "General", icon: Settings, href: "/settings", adminOnly: true },
-      { label: "Team", icon: Users, href: "/settings/team", hideForViewers: true },
+      { label: "Team", icon: Users, href: "/settings/team", hideForRoles: ["viewer", "builder"] },
       { label: "Usage", icon: BarChart3, href: "/settings/usage", adminOnly: true },
       { label: "Audit log", icon: ScrollText, href: "/settings/audit-log", adminOnly: true },
     ],
@@ -156,7 +156,7 @@ export function SidebarSettingsSection({
             {settingsGroups.map((group, groupIndex) => {
               const visibleItems = group.items.filter((item) => {
                 if (item.adminOnly && userRole !== "admin") return false;
-                if (item.hideForViewers && userRole === "viewer") return false;
+                if (item.hideForRoles?.includes(userRole ?? "")) return false;
                 return true;
               });
               if (visibleItems.length === 0) return null;

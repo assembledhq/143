@@ -62,21 +62,24 @@ func TestNewRouter_EncryptionKeyValidation(t *testing.T) {
 	}
 }
 
-func TestSessionThreadPatchRouteIsWriteOnly(t *testing.T) {
+func TestSessionThreadPatchRouteIsBuilderWorkflowOnly(t *testing.T) {
 	t.Parallel()
 
 	source, err := os.ReadFile("router.go")
 	require.NoError(t, err, "router.go should be readable for route grouping regression test")
 
-	readGroupStart := strings.Index(string(source), `RequireRole("admin", "member", "viewer")`)
-	writeGroupStart := strings.Index(string(source), `RequireRole("admin", "member")`)
+	readGroupStart := strings.Index(string(source), `RequireRole("admin", "builder", "member", "viewer")`)
+	builderGroupStart := strings.Index(string(source), `RequireRole("admin", "builder", "member")`)
+	memberWriteGroupStart := strings.Index(string(source), `RequireRole("admin", "member")`)
 	patchRoute := strings.Index(string(source), `r.Patch("/api/v1/sessions/{id}/threads/{tid}", sessionThreadHandler.UpdateThread)`)
 
-	require.NotEqual(t, -1, readGroupStart, "router should still define a viewer-readable route group")
-	require.NotEqual(t, -1, writeGroupStart, "router should still define an admin/member write route group")
+	require.NotEqual(t, -1, readGroupStart, "router should still define an all-roles readable route group")
+	require.NotEqual(t, -1, builderGroupStart, "router should still define a builder workflow route group")
+	require.NotEqual(t, -1, memberWriteGroupStart, "router should still define an admin/member-only route group")
 	require.NotEqual(t, -1, patchRoute, "thread update PATCH route should be registered")
-	require.Greater(t, patchRoute, writeGroupStart, "thread update PATCH route should live in the admin/member write group")
-	require.Greater(t, writeGroupStart, readGroupStart, "write route group should follow the viewer-readable group")
+	require.Greater(t, patchRoute, builderGroupStart, "thread update PATCH route should live in the builder workflow group")
+	require.Less(t, patchRoute, memberWriteGroupStart, "thread update PATCH route should not be widened into the admin/member-only settings group")
+	require.Greater(t, builderGroupStart, readGroupStart, "builder workflow route group should follow the all-roles readable group")
 }
 
 func testRouterPrivateKeyPEM(t *testing.T) string {
