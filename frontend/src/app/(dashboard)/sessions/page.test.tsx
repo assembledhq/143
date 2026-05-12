@@ -79,9 +79,11 @@ describe('SessionSidebar', () => {
     await screen.findByText('Fixed TypeError by adding null check');
 
     const tabList = screen.getByRole('tablist');
+    expect(tabList).toHaveAttribute('data-variant', 'line');
+    expect(tabList.className).toContain('pb-1');
     expect(tabList.className).toContain('justify-start');
     expect(tabList.className).toContain('overflow-x-auto');
-    expect(tabList.className).toContain('overflow-y-hidden');
+    expect(tabList.className).toContain('overflow-y-visible');
   });
 
   it('shows status indicators for sessions', async () => {
