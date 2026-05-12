@@ -132,6 +132,8 @@ describe("AgentTabStrip", () => {
     expect(tabList).toBeInTheDocument();
     expect(tabList).toHaveAttribute("data-variant", "line");
     expect(tabList).not.toHaveClass("bg-muted/60");
+    expect(tabList).toHaveClass("overflow-y-visible");
+    expect(tabList).toHaveClass("pb-1");
     expect(activeTab).toHaveTextContent(/Main tab/i);
     expect(activeTab).not.toHaveTextContent(/Idle/i);
     expect(activeTab).toHaveClass("data-[state=active]:text-primary");
