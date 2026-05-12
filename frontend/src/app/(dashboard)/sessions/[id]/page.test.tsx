@@ -3069,6 +3069,49 @@ describe('SessionDetailPage', () => {
     expect(screen.getByRole('button', { name: /Create PR/ })).not.toBeDisabled();
   });
 
+  it('hides PR mutation controls and skips the team roster lookup for builders', async () => {
+    const sessionWithDiff: Session = {
+      ...mockSessions[0],
+      status: 'completed',
+      diff: '--- a/file.ts\n+++ b/file.ts\n@@ -1 +1 @@\n-old\n+new',
+      diff_stats: { added: 1, removed: 1, files_changed: 1 },
+      snapshot_key: 'snap-abc',
+    };
+    let teamRequestCount = 0;
+
+    server.use(
+      http.get('/api/v1/auth/me', () => {
+        return HttpResponse.json({
+          data: {
+            ...mockMembers[0],
+            role: 'builder',
+          },
+        } satisfies SingleResponse<User>);
+      }),
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({ data: sessionWithDiff } satisfies SingleResponse<Session>);
+      }),
+      http.get('/api/v1/sessions/:id/pr', () => {
+        return HttpResponse.json(
+          { error: { code: 'NOT_FOUND', message: 'pull request not found' } },
+          { status: 404 },
+        );
+      }),
+      http.get('/api/v1/team/members', () => {
+        teamRequestCount += 1;
+        return HttpResponse.json({ error: { code: 'FORBIDDEN', message: 'insufficient permissions' } }, { status: 403 });
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+
+    await screen.findAllByText('Fixed TypeError by adding null check');
+    await waitFor(() => {
+      expect(screen.queryByRole('button', { name: /Create PR/ })).not.toBeInTheDocument();
+    });
+    expect(teamRequestCount).toBe(0);
+  });
+
   it('does not show Create PR button when PR already exists', async () => {
     const sessionWithDiff: Session = {
       ...mockSessions[0],

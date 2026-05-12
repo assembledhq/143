@@ -2471,6 +2471,8 @@ const TRANSCRIPT_PAGE_VIEWPORT_RATIO = 0.85;
 export function SessionDetailContent({ id }: { id: string }) {
   const router = useRouter();
   const { user, isLoading: isAuthLoading } = useAuth();
+  const canListTeamMembers = user?.role === "admin" || user?.role === "member";
+  const canShipPR = canListTeamMembers;
   const terminalStatuses = new Set(["completed", "pr_created", "failed", "cancelled", "skipped"]);
   const [reviewParam, setReviewParam] = useQueryState("review");
   const [previewParam, setPreviewParam] = useQueryState("preview");
@@ -2621,6 +2623,7 @@ export function SessionDetailContent({ id }: { id: string }) {
   const { data: membersData } = useQuery({
     queryKey: ["team", "members"],
     queryFn: () => api.team.listMembers(),
+    enabled: canListTeamMembers,
   });
 
   const viewerScope = useMemo<SessionScrollViewerScope | null>(
@@ -3104,7 +3107,7 @@ export function SessionDetailContent({ id }: { id: string }) {
   const hasPR = !!prData?.data;
   const hasSnapshot = !!session?.snapshot_key;
   const hasSessionChanges = !!session?.diff || !!session?.diff_stats;
-  const canCreatePR = hasSnapshot && !hasPR && !isRunning;
+  const canCreatePR = canShipPR && hasSnapshot && !hasPR && !isRunning;
   const isTerminalSession = terminalSessionStatuses.has(session?.status ?? "");
   const showExpiredPRAction = hasSessionChanges && !hasSnapshot && !hasPR && isTerminalSession;
   const needsGitHubStatus = canCreatePR || (hasPR && prData?.data?.status === "open");
@@ -4114,10 +4117,10 @@ export function SessionDetailContent({ id }: { id: string }) {
     pr: {
       canCreate: canCreatePR && localPRState === "idle" && !createPRMutation.isPending,
       canView: !!prData?.data?.github_pr_url,
-      canPush: hasPR && prStatus === "open" && !!session?.has_unpushed_changes && hasSnapshot && !isRunning && localPushState === "idle" && !pushChangesMutation.isPending,
-      canFixTests: !!prHealth?.can_fix_tests && pendingPRAction === null,
-      canResolveConflicts: !!prHealth?.can_resolve_conflicts && pendingPRAction === null,
-      canMerge: prHealthAllowsMerge(prHealth) && pendingPRAction === null,
+      canPush: canShipPR && hasPR && prStatus === "open" && !!session?.has_unpushed_changes && hasSnapshot && !isRunning && localPushState === "idle" && !pushChangesMutation.isPending,
+      canFixTests: canShipPR && !!prHealth?.can_fix_tests && pendingPRAction === null,
+      canResolveConflicts: canShipPR && !!prHealth?.can_resolve_conflicts && pendingPRAction === null,
+      canMerge: canShipPR && prHealthAllowsMerge(prHealth) && pendingPRAction === null,
       onCreate: createPRFromKeyboard,
       onView: viewPRFromKeyboard,
       onPush: pushChangesFromKeyboard,
@@ -4171,13 +4174,15 @@ export function SessionDetailContent({ id }: { id: string }) {
       (snapshotUnavailable ? snapshotMessage : null) ||
       (prState === "failed" ? session.pr_creation_error || PR_ERROR_TOAST_MESSAGE : null);
   const showPRAction =
-    canCreatePR ||
-    showExpiredPRAction ||
-    queueingPR ||
-    creatingPR ||
-    finalizingPR ||
-    prState === "failed" ||
-    Boolean(prActionError);
+    canShipPR && (
+      canCreatePR ||
+      showExpiredPRAction ||
+      queueingPR ||
+      creatingPR ||
+      finalizingPR ||
+      prState === "failed" ||
+      Boolean(prActionError)
+    );
 
   let prActionLabel = "Create PR";
   let prActionSpinning = false;
@@ -4225,8 +4230,8 @@ export function SessionDetailContent({ id }: { id: string }) {
     (localPushState === "queued" && pushState !== "failed" && pushState !== "succeeded") ||
     pushState === "queued" ||
     pushState === "pushing";
-  const canPushChanges = pushAvailable && hasSnapshot && !isRunning;
-  const showPushAction = pushAvailable && (canPushChanges || queueingPush || pushingChanges || pushState === "failed" || localPushActionError);
+  const canPushChanges = canShipPR && pushAvailable && hasSnapshot && !isRunning;
+  const showPushAction = canShipPR && pushAvailable && (canPushChanges || queueingPush || pushingChanges || pushState === "failed" || localPushActionError);
   let pushActionLabel = "Push changes";
   let pushActionSpinning = false;
   let pushActionDisabled = false;
@@ -5021,6 +5026,7 @@ export function SessionDetailContent({ id }: { id: string }) {
       <SessionKeyboardHelpOverlay
         open={keyboardHelpOpen}
         onOpenChange={setKeyboardHelpOpen}
+        canShipPR={canShipPR}
       />
       <AlertDialog
         open={!!prAuthPrompt}

@@ -40,13 +40,24 @@ func TestRequireRole(t *testing.T) {
 		},
 		{
 			name:         "allows request when user role matches one of the allowed roles",
-			allowedRoles: []string{"admin", "member"},
+			allowedRoles: []string{"admin", "builder", "member"},
 			user: &models.User{
 				ID:    uuid.MustParse("bbbbbbbb-0000-0000-0000-000000000001"),
 				OrgID: uuid.MustParse("bbbbbbbb-0000-0000-0000-000000000002"),
 				Role:  "member",
 			},
 			requestMethod: http.MethodGet,
+			expectedCode:  http.StatusOK,
+		},
+		{
+			name:         "allows builder to access member-grade route",
+			allowedRoles: []string{"admin", "builder", "member"},
+			user: &models.User{
+				ID:    uuid.MustParse("bcbcbcbc-0000-0000-0000-000000000001"),
+				OrgID: uuid.MustParse("bcbcbcbc-0000-0000-0000-000000000002"),
+				Role:  "builder",
+			},
+			requestMethod: http.MethodPost,
 			expectedCode:  http.StatusOK,
 		},
 		{
@@ -62,7 +73,7 @@ func TestRequireRole(t *testing.T) {
 		},
 		{
 			name:         "returns 403 when viewer tries to access write-only route",
-			allowedRoles: []string{"admin", "member"},
+			allowedRoles: []string{"admin", "builder", "member"},
 			user: &models.User{
 				ID:    uuid.MustParse("dddddddd-0000-0000-0000-000000000001"),
 				OrgID: uuid.MustParse("dddddddd-0000-0000-0000-000000000002"),

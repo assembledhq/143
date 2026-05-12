@@ -6,21 +6,23 @@ import (
 	"github.com/google/uuid"
 )
 
-// Role constants for organization_memberships.role. These mirror the legacy
-// users.role values so behavior is identical during the compatibility window.
+// Role constants for organization_memberships.role. Admin/member/viewer mirror
+// the legacy users.role values; builder is the new assignable non-admin role
+// that sits between member and viewer in the permission lattice.
 const (
-	RoleAdmin  = "admin"
-	RoleMember = "member"
-	RoleViewer = "viewer"
+	RoleAdmin   = "admin"
+	RoleMember  = "member"
+	RoleBuilder = "builder"
+	RoleViewer  = "viewer"
 )
 
 // ValidRoles lists every legal membership role, in order of decreasing privilege.
-var ValidRoles = []string{RoleAdmin, RoleMember, RoleViewer}
+var ValidRoles = []string{RoleAdmin, RoleMember, RoleBuilder, RoleViewer}
 
 // IsValidRole reports whether r is one of the known membership roles.
 func IsValidRole(r string) bool {
 	switch r {
-	case RoleAdmin, RoleMember, RoleViewer:
+	case RoleAdmin, RoleMember, RoleBuilder, RoleViewer:
 		return true
 	}
 	return false
