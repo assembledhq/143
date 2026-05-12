@@ -566,7 +566,7 @@ export function SessionSidebar() {
           onValueChange={(v) => setActiveFilter(v === "all" ? null : v)}
           className="gap-0"
         >
-          <TabsList size="sm" className="overflow-x-auto overflow-y-hidden">
+          <TabsList variant="line" size="sm" className="overflow-x-auto overflow-y-visible pb-1">
             {filterTabs.map((tab) => {
               const count = getCountForTab(tab.value, counts);
               const label = renderCount(count, counts);
