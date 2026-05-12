@@ -7,13 +7,11 @@
 > threads in one sandbox (relaxed `ClaimIdleForSession` admission with a
 > per-session running cap of 3, thread-start checkpoint stamping via
 > `base_snapshot_key`, file-touch attribution via `session_thread_file_events`,
-> and overlap badges in the tab strip). Phase 3 added thread-scoped
-> cancellation (`ThreadCancelRegistry` + per-tab `pkill -INT` of the agent
-> binary), per-tab cost accounting (`cost_cents`), the `Touched by tab` /
+> and overlap badges in the tab strip). Phase 3 added per-tab cost
+> accounting (`cost_cents`), the `Touched by tab` /
 > `Overlap` filter in the Changes view, and a queued-message counter
 > (`pending_message_count`). Phase 4 added "Summarize all tabs" (a side panel
-> that rolls up status + result_summary + touched files + overlap), "Fork this
-> tab into a separate sandbox" (enqueues `fork_session_thread`), and "Revert
+> that rolls up status + result_summary + touched files + overlap) and "Revert
 > this tab's changes" (enqueues `revert_session_thread`). The legacy
 > single-thread API stays as a compatibility alias; the new endpoints are
 > additive.
