@@ -353,6 +353,29 @@ describe("PreviewPanel component", () => {
     );
   });
 
+  it("uses the runtime preview origin from the status response when present", async () => {
+    mockGet.mockResolvedValue({
+      ...makePreviewStatus({ status: "ready", id: "prev-1" }),
+      preview_origin: "https://prev-1.preview.143.dev",
+    });
+
+    renderWithProviders(
+      <PreviewPanel
+        {...DEFAULT_PROPS}
+        previewOriginTemplate="http://{id}.preview.localhost:9090"
+      />,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText("Ready")).toBeInTheDocument();
+    });
+
+    expect(screen.getByTitle("Preview")).toHaveAttribute(
+      "src",
+      "https://prev-1.preview.143.dev/bootstrap",
+    );
+  });
+
   it("renders width preset buttons in ready state", async () => {
     mockGet.mockResolvedValue(makePreviewStatus({ status: "ready" }));
 
