@@ -1543,7 +1543,10 @@ describe('SessionDetailPage', () => {
     await waitFor(() => {
       expect(screen.queryByTestId('session-timeline-skeleton')).not.toBeInTheDocument();
     });
-    expect(screen.getByText('New tab')).toBeInTheDocument();
+    const freshTabCard = screen.getByText('No context in this tab yet.').closest('[data-slot="card"]');
+    expect(freshTabCard).not.toBeNull();
+    expect(within(freshTabCard as HTMLElement).getByText('New tab')).toBeInTheDocument();
+    expect(within(freshTabCard as HTMLElement).queryByText(/^Codex$/)).not.toBeInTheDocument();
     expect(screen.queryByText('Fresh tab')).not.toBeInTheDocument();
     expect(screen.queryByText('Fresh context')).not.toBeInTheDocument();
     expect(screen.getByText('No context in this tab yet.')).toBeInTheDocument();
