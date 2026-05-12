@@ -13,11 +13,12 @@ import (
 )
 
 // TestPromptedWithoutCreated covers the dispatcher race: Linear can
-// deliver `prompted` before its companion `created` event lands (or
-// `created` failed mid-flight). The handler's contract is to return nil
-// without touching the queue or the session — Linear's webhook retry
-// mechanism re-delivers after `created` lands, and busy-looping here
-// would hammer the queue.
+// deliver `prompted` before its companion `created` event lands. The
+// dispatcher already 200'd Linear so Linear will not redeliver, which
+// means only the worker job's retry path can keep the follow-up message
+// alive. The handler's contract is therefore to return a RetryableError
+// with a short fixed wait so the created handler has time to attach the
+// session_id; returning nil would silently drop the user's comment.
 func TestPromptedWithoutCreated(t *testing.T) {
 	t.Parallel()
 
@@ -31,7 +32,7 @@ func TestPromptedWithoutCreated(t *testing.T) {
 
 	// Lookup returns a row with session_id = NULL (created hasn't
 	// completed). The handler must short-circuit without invoking any
-	// other store.
+	// other store, but it must surface a retryable error.
 	mock.ExpectQuery("SELECT id, org_id").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{
@@ -64,8 +65,13 @@ func TestPromptedWithoutCreated(t *testing.T) {
 		LinearCommentID:      "comment_1",
 	}
 
-	require.NoError(t, handleLinearAgentPrompted(context.Background(), deps, store, payload, zerolog.Nop()),
-		"prompted-without-created must return nil so Linear's webhook retry takes over; non-nil would cascade-retry the worker job")
+	err = handleLinearAgentPrompted(context.Background(), deps, store, payload, zerolog.Nop())
+	var retryable *RetryableError
+	require.ErrorAs(t, err, &retryable,
+		"prompted-without-created must return a RetryableError so the worker re-runs the job; "+
+			"Linear already received 200 for the webhook and will not redeliver")
+	require.NotNil(t, retryable.RetryAfter,
+		"the retry must use a fixed short wait, not fall through to exponential backoff that would delay the follow-up comment for minutes")
 	require.NoError(t, mock.ExpectationsWereMet(),
 		"only the Lookup query should fire — no claims, no message inserts, no continue_session enqueue")
 }

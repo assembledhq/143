@@ -59,6 +59,19 @@ func (s LinearAgentSessionState) Validate() error {
 	}
 }
 
+// AllLinearAgentSessionStates returns every recognized state in a stable
+// order. Used by the migration-pin test to compare against the SQL CHECK
+// constraint vocabulary.
+func AllLinearAgentSessionStates() []LinearAgentSessionState {
+	return []LinearAgentSessionState{
+		LinearAgentSessionStatePending,
+		LinearAgentSessionStateInProgress,
+		LinearAgentSessionStateAwaitingInput,
+		LinearAgentSessionStateComplete,
+		LinearAgentSessionStateError,
+	}
+}
+
 // LinearAgentActivityType mirrors the Linear AgentActivity type vocabulary.
 // Vocabulary kept in lockstep with the CHECK constraint in
 // migrations/000121_linear_agent.up.sql.
@@ -102,6 +115,19 @@ func (t LinearAgentActivityType) Validate() error {
 		return nil
 	default:
 		return fmt.Errorf("invalid linear agent activity type: %q", t)
+	}
+}
+
+// AllLinearAgentActivityTypes returns every recognized type in a stable
+// order. Used by the migration-pin test to compare against the SQL CHECK
+// constraint vocabulary.
+func AllLinearAgentActivityTypes() []LinearAgentActivityType {
+	return []LinearAgentActivityType{
+		LinearAgentActivityThought,
+		LinearAgentActivityAction,
+		LinearAgentActivityElicitation,
+		LinearAgentActivityResponse,
+		LinearAgentActivityError,
 	}
 }
 

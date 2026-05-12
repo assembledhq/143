@@ -57,9 +57,7 @@ CREATE TABLE linear_agent_sessions (
 -- internal/models/linear_agent_enums.go via TestLinearAgentSessionStateMigrationVocabularyMatchesGoEnum.
 ALTER TABLE linear_agent_sessions
     ADD CONSTRAINT chk_linear_agent_sessions_state
-        CHECK (state IN ('pending', 'in_progress', 'awaiting_input', 'complete', 'error'))
-        NOT VALID;
-ALTER TABLE linear_agent_sessions VALIDATE CONSTRAINT chk_linear_agent_sessions_state;
+        CHECK (state IN ('pending', 'in_progress', 'awaiting_input', 'complete', 'error'));
 
 -- Operator-facing index: "show me all agent sessions for this 143 session".
 -- Sparse on session_id (nullable), so a partial index is the cheapest shape.
@@ -103,9 +101,7 @@ CREATE INDEX idx_linear_agent_activity_log_org_recent
 -- rather than silently storing an unknown value the dispatcher can't replay.
 ALTER TABLE linear_agent_activity_log
     ADD CONSTRAINT chk_linear_agent_activity_log_type
-        CHECK (activity_type IN ('thought', 'action', 'elicitation', 'response', 'error'))
-        NOT VALID;
-ALTER TABLE linear_agent_activity_log VALIDATE CONSTRAINT chk_linear_agent_activity_log_type;
+        CHECK (activity_type IN ('thought', 'action', 'elicitation', 'response', 'error'));
 
 -- ---------------------------------------------------------------------------
 -- linear_team_repo_mappings

@@ -132,6 +132,33 @@ func (s *LinearAgentActivityLogStore) Discard(ctx context.Context, orgID, rowID 
 	return nil
 }
 
+// DiscardByIdemKey removes a reserved-but-not-completed row addressed by
+// (agent_session_row, idem_key) — the same UNIQUE that Reserve writes
+// against. Lets the writer's strict-semantics path free a slot without
+// first listing every activity on the session. Race-safe: a concurrent
+// successful Complete sets linear_activity_id non-NULL and the predicate
+// turns this into a no-op.
+func (s *LinearAgentActivityLogStore) DiscardByIdemKey(ctx context.Context, orgID, agentSessionRowID uuid.UUID, idemKey string) error {
+	if idemKey == "" {
+		return errors.New("idem_key is required")
+	}
+	_, err := s.db.Exec(ctx, `
+		DELETE FROM linear_agent_activity_log
+		WHERE org_id = @org_id
+		  AND agent_session_row_id = @agent_session_row_id
+		  AND idem_key = @idem_key
+		  AND linear_activity_id IS NULL`,
+		pgx.NamedArgs{
+			"org_id":               orgID,
+			"agent_session_row_id": agentSessionRowID,
+			"idem_key":             idemKey,
+		})
+	if err != nil {
+		return fmt.Errorf("discard linear_agent_activity_log by idem_key: %w", err)
+	}
+	return nil
+}
+
 // ListForAgentSession returns activities for an AgentSession in chronological
 // order. Used by the operator debug surface and by replay-on-reconnect logic
 // that wants to confirm what's already been emitted.
