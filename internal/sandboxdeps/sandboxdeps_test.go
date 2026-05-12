@@ -12,16 +12,11 @@ import (
 
 type fakeDep struct {
 	name     string
-	present  bool
-	checkErr error
 	installs *int
 	failOn   string
 }
 
 func (f *fakeDep) Name() string { return f.name }
-func (f *fakeDep) Check(_ context.Context, _ Executor, _ string) (bool, error) {
-	return f.present, f.checkErr
-}
 func (f *fakeDep) Install(_ context.Context, _ Executor, version string) error {
 	if f.installs != nil {
 		*f.installs++
@@ -36,13 +31,13 @@ func noopExec(_ context.Context, _ string, _ io.Writer, _ io.Writer) (int, error
 	return 0, nil
 }
 
-func TestApply_InstallsAndSummarizes(t *testing.T) {
+func TestApply_InstallsEveryDependency(t *testing.T) {
 	t.Parallel()
 
 	r := NewRegistry()
 	installs := 0
 	r.Register(&fakeDep{name: "tool-a", installs: &installs})
-	r.Register(&fakeDep{name: "tool-b", present: true, installs: &installs})
+	r.Register(&fakeDep{name: "tool-b", installs: &installs})
 
 	results := Apply(context.Background(), zerolog.Nop(), r, noopExec, map[string]string{
 		"tool-a": "1.0.0",
@@ -50,13 +45,10 @@ func TestApply_InstallsAndSummarizes(t *testing.T) {
 	})
 
 	require.Len(t, results, 2, "Apply should record one result per declared dependency")
-	statuses := map[string]string{}
 	for _, res := range results {
-		statuses[res.Name] = res.Status
+		require.Equal(t, "installed", res.Status, "every known dependency should be installed unconditionally now that caching is gone")
 	}
-	require.Equal(t, "installed", statuses["tool-a"], "tool-a was not present so Apply should install it")
-	require.Equal(t, "already-present", statuses["tool-b"], "tool-b reported present so Apply should skip install")
-	require.Equal(t, 1, installs, "only the missing tool should be installed")
+	require.Equal(t, 2, installs, "every install recipe should run; we are intentionally not short-circuiting on already-present")
 }
 
 func TestApply_UnknownDependencyDoesNotAbort(t *testing.T) {
@@ -67,9 +59,9 @@ func TestApply_UnknownDependencyDoesNotAbort(t *testing.T) {
 	r.Register(&fakeDep{name: "tool-a", installs: &installs})
 
 	results := Apply(context.Background(), zerolog.Nop(), r, noopExec, map[string]string{
-		"tool-a":   "1.0.0",
-		"mystery":  "9.9.9",
-		"another":  "0.1.0",
+		"tool-a":  "1.0.0",
+		"mystery": "9.9.9",
+		"another": "0.1.0",
 	})
 
 	require.Len(t, results, 3, "Apply should record a result for every declared entry, including unknown ones")

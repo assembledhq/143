@@ -14,16 +14,6 @@ type golangciLint struct{}
 
 func (golangciLint) Name() string { return "golangci-lint" }
 
-func (golangciLint) Check(ctx context.Context, exec Executor, version string) (bool, error) {
-	stdout, _, code, err := captureExecStderr(ctx, exec, "golangci-lint --version")
-	if err != nil || code != 0 {
-		return false, err
-	}
-	// Output looks like:
-	//   golangci-lint has version 1.64.8 built from ...
-	return strings.Contains(stdout, " "+version+" ") || strings.Contains(stdout, " "+version+"\n"), nil
-}
-
 func (golangciLint) Install(ctx context.Context, exec Executor, version string) error {
 	// The official install script is pinned to a Git tag, so we anchor on a
 	// release tag (v<version>) and direct it at the unprivileged

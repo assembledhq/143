@@ -2,7 +2,7 @@
 // formatters, language toolchains) into a sandbox so bootstrap/validation
 // commands can call them. Repos declare what they want in
 // .143/config.json `dependencies` as {name: exact-version}; 143 owns how
-// each dependency is installed and how to detect when it is already present.
+// each dependency is installed.
 package sandboxdeps
 
 import (
@@ -21,12 +21,9 @@ import (
 // Returns the process exit code and any transport-level error.
 type Executor func(ctx context.Context, cmd string, stdout, stderr io.Writer) (int, error)
 
-// Dependency knows how to install one named tool at an exact version, and how
-// to verify that the desired version is already present so re-runs of Apply
-// short-circuit without re-downloading.
+// Dependency knows how to install one named tool at an exact version.
 type Dependency interface {
 	Name() string
-	Check(ctx context.Context, exec Executor, version string) (bool, error)
 	Install(ctx context.Context, exec Executor, version string) error
 }
 
@@ -57,7 +54,7 @@ var Default = NewRegistry()
 type Result struct {
 	Name    string
 	Version string
-	// Status is one of: "installed", "already-present", "unknown", "failed".
+	// Status is one of: "installed", "unknown", "failed".
 	Status string
 	Err    error
 }
@@ -95,16 +92,6 @@ func Apply(ctx context.Context, log zerolog.Logger, registry *Registry, exec Exe
 			continue
 		}
 
-		present, checkErr := dep.Check(ctx, exec, version)
-		if checkErr != nil {
-			log.Debug().Err(checkErr).Str("dependency", name).Str("version", version).Msg("dependency check errored; will attempt install")
-		}
-		if present {
-			res.Status = "already-present"
-			results = append(results, res)
-			continue
-		}
-
 		if err := dep.Install(ctx, exec, version); err != nil {
 			res.Status = "failed"
 			res.Err = err
@@ -121,14 +108,12 @@ func Apply(ctx context.Context, log zerolog.Logger, registry *Registry, exec Exe
 }
 
 func logSummary(log zerolog.Logger, results []Result) {
-	var installed, present, failed, unknown int
+	var installed, failed, unknown int
 	var failures []string
 	for _, r := range results {
 		switch r.Status {
 		case "installed":
 			installed++
-		case "already-present":
-			present++
 		case "failed":
 			failed++
 			failures = append(failures, fmt.Sprintf("%s@%s: %v", r.Name, r.Version, r.Err))
@@ -139,7 +124,6 @@ func logSummary(log zerolog.Logger, results []Result) {
 	}
 	event := log.Info().
 		Int("installed", installed).
-		Int("already_present", present).
 		Int("failed", failed).
 		Int("unknown", unknown)
 	if len(failures) > 0 {
@@ -148,15 +132,8 @@ func logSummary(log zerolog.Logger, results []Result) {
 	event.Msg("sandbox dependencies applied")
 }
 
-// captureExec is a small helper for recipe authors: runs cmd, returns
-// (stdoutString, exitCode, err). Discards stderr unless capture-stderr is
-// also requested via captureExecStderr.
-func captureExec(ctx context.Context, exec Executor, cmd string) (string, int, error) {
-	var stdout bytes.Buffer
-	code, err := exec(ctx, cmd, &stdout, io.Discard)
-	return stdout.String(), code, err
-}
-
+// captureExecStderr runs cmd and returns (stdout, stderr, exitCode, err).
+// Helper for recipe authors that need both streams to build a useful error.
 func captureExecStderr(ctx context.Context, exec Executor, cmd string) (string, string, int, error) {
 	var stdout, stderr bytes.Buffer
 	code, err := exec(ctx, cmd, &stdout, &stderr)
