@@ -4769,7 +4769,7 @@ export function SessionDetailContent({ id }: { id: string }) {
           <div
             data-testid="session-detail-panel"
             style={{ width: detailWidth }}
-            className="relative z-10 border-l border-border bg-background flex flex-col shrink-0 overflow-hidden"
+            className="relative z-10 bg-background flex flex-col shrink-0 overflow-hidden"
           >
             {panelTabsEl}
           </div>
