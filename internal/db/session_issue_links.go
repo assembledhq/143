@@ -28,7 +28,11 @@ func NewSessionIssueLinkStore(db DBTX) *SessionIssueLinkStore {
 const sessionIssueLinkSelectColumns = `sil.id, sil.org_id, sil.session_id, sil.issue_id, sil.role,
 	sil.position, sil.added_by_user_id, sil.created_at,
 	i.title AS issue_title, i.source AS issue_source,
-	COALESCE(provider_state.state->>'identifier', i.external_id) AS external_id,
+	COALESCE(
+		NULLIF(provider_state.state->>'identifier', ''),
+		CASE WHEN i.source = 'linear' THEN substring(i.title from '^([A-Z][A-Z0-9_]{0,9}-[0-9]+):') END,
+		i.external_id
+	) AS external_id,
 	i.description,
 	i.repository_id, i.status AS issue_status,
 	(provider_state.state->>'workspace_slug') AS issue_workspace_slug,
