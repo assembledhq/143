@@ -25,6 +25,7 @@ import { AutomationModelSelect } from "@/components/automation-model-select";
 import { api } from "@/lib/api";
 import { agentTypeForModel } from "@/lib/agents";
 import { AUTOMATION_GOAL_MAX_LENGTH, automationGoalLengthState } from "@/lib/automation-validation";
+import { useAuth } from "@/hooks/use-auth";
 import type { Automation } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import {
@@ -60,7 +61,7 @@ type IntervalUnit = (typeof INTERVAL_UNITS)[number];
 const toIntervalUnit = (v: string, fallback: IntervalUnit): IntervalUnit =>
   (INTERVAL_UNITS as readonly string[]).includes(v) ? (v as IntervalUnit) : fallback;
 
-function SettingsTab({ automation }: { automation: Automation }) {
+function SettingsTab({ automation, canManage }: { automation: Automation; canManage: boolean }) {
   const queryClient = useQueryClient();
   const [name, setName] = useState(automation.name);
   const [goal, setGoal] = useState(automation.goal);
@@ -287,21 +288,23 @@ function SettingsTab({ automation }: { automation: Automation }) {
           contentClassName="w-[var(--radix-popover-trigger-width)]"
         />
       </div>
-      <div className="flex items-center gap-3 pt-2">
-        <Button
-          onClick={() => updateMutation.mutate()}
-          disabled={updateMutation.isPending || goalLength.isTooLong}
-        >
-          {updateMutation.isPending && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
-          Save changes
-        </Button>
-        {updateMutation.isError && (
-          <p className="text-xs text-destructive">Failed to save changes.</p>
-        )}
-        {updateMutation.isSuccess && !updateMutation.isPending && (
-          <p className="text-xs text-muted-foreground">Saved.</p>
-        )}
-      </div>
+      {canManage && (
+        <div className="flex items-center gap-3 pt-2">
+          <Button
+            onClick={() => updateMutation.mutate()}
+            disabled={updateMutation.isPending || goalLength.isTooLong}
+          >
+            {updateMutation.isPending && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
+            Save changes
+          </Button>
+          {updateMutation.isError && (
+            <p className="text-xs text-destructive">Failed to save changes.</p>
+          )}
+          {updateMutation.isSuccess && !updateMutation.isPending && (
+            <p className="text-xs text-muted-foreground">Saved.</p>
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -310,7 +313,9 @@ export default function AutomationDetailPage() {
   const params = useParams();
   const router = useRouter();
   const queryClient = useQueryClient();
+  const { user } = useAuth();
   const automationId = params?.id as string;
+  const canManage = user?.role === "admin" || user?.role === "member";
 
   const { data, isLoading } = useQuery({
     queryKey: ["automation", automationId],
@@ -410,7 +415,7 @@ export default function AutomationDetailPage() {
         <PageHeader
           title={automation.name}
           description={headerDescription}
-          action={
+          action={canManage ? (
             <div className="flex items-center gap-2">
               {automation.enabled ? (
                 <Button
@@ -454,7 +459,7 @@ export default function AutomationDetailPage() {
                 Run now
               </Button>
             </div>
-          }
+          ) : undefined}
         />
 
         {headerError && (
@@ -478,7 +483,7 @@ export default function AutomationDetailPage() {
                 edit remounts SettingsTab, reseeding its useState-from-props
                 form fields. Without this, the visible values would drift
                 from the server until the user manually reopens the tab. */}
-            <SettingsTab key={automation.updated_at} automation={automation} />
+            <SettingsTab key={automation.updated_at} automation={automation} canManage={canManage} />
           </TabsContent>
         </Tabs>
       </div>

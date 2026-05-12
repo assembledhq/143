@@ -27,12 +27,10 @@ type reaperMockSessionLister struct {
 	listRunningErr       error
 	listExpiredErr       error
 	updateStatusErr      error
-	updateResultErr      error
 	updateFailureErr     error
 	updateSandboxErr     error
 
 	updatedStatuses  []statusUpdate
-	updatedResults   []resultUpdate
 	updatedFailures  []failureUpdate
 	updatedSandboxes []sandboxUpdate
 }
@@ -41,13 +39,6 @@ type statusUpdate struct {
 	orgID     uuid.UUID
 	sessionID uuid.UUID
 	status    string
-}
-
-type resultUpdate struct {
-	orgID     uuid.UUID
-	sessionID uuid.UUID
-	status    string
-	result    *models.SessionResult
 }
 
 type failureUpdate struct {
@@ -83,11 +74,6 @@ func (m *reaperMockSessionLister) ListExpiredSnapshots(_ context.Context, _ time
 func (m *reaperMockSessionLister) UpdateStatus(_ context.Context, orgID, sessionID uuid.UUID, status string) error {
 	m.updatedStatuses = append(m.updatedStatuses, statusUpdate{orgID: orgID, sessionID: sessionID, status: status})
 	return m.updateStatusErr
-}
-
-func (m *reaperMockSessionLister) UpdateResult(_ context.Context, orgID, sessionID uuid.UUID, status string, result *models.SessionResult) error {
-	m.updatedResults = append(m.updatedResults, resultUpdate{orgID: orgID, sessionID: sessionID, status: status, result: result})
-	return m.updateResultErr
 }
 
 func (m *reaperMockSessionLister) UpdateFailure(_ context.Context, orgID, sessionID uuid.UUID, explanation, category string, nextSteps []string, _ bool) error {
@@ -157,12 +143,12 @@ func TestReapPhase0_FailsStalePendingSessions(t *testing.T) {
 	reaper := NewSessionReaper(mock, snapStore, 30*time.Minute, 24*time.Hour, time.Minute, zerolog.Nop())
 	reaper.reap(context.Background())
 
-	// Phase 0 should mark both sessions as failed via UpdateResult.
-	require.Len(t, mock.updatedResults, 2)
-	assert.Equal(t, string(models.SessionStatusFailed), mock.updatedResults[0].status)
-	assert.Equal(t, sessionID1, mock.updatedResults[0].sessionID)
-	assert.Equal(t, string(models.SessionStatusFailed), mock.updatedResults[1].status)
-	assert.Equal(t, sessionID2, mock.updatedResults[1].sessionID)
+	// Phase 0 should mark both sessions as failed without bumping MRU result fields.
+	require.Len(t, mock.updatedStatuses, 2, "Phase 0 should mark both pending sessions failed via status-only updates")
+	require.Equal(t, string(models.SessionStatusFailed), mock.updatedStatuses[0].status, "first stale pending session should be marked failed")
+	require.Equal(t, sessionID1, mock.updatedStatuses[0].sessionID, "first stale pending session should be updated")
+	require.Equal(t, string(models.SessionStatusFailed), mock.updatedStatuses[1].status, "second stale pending session should be marked failed")
+	require.Equal(t, sessionID2, mock.updatedStatuses[1].sessionID, "second stale pending session should be updated")
 
 	// Phase 0 should also set failure details.
 	require.Len(t, mock.updatedFailures, 2)
@@ -189,12 +175,12 @@ func TestReapPhase0_5_FailsStaleRunningSessions(t *testing.T) {
 	reaper := NewSessionReaper(mock, snapStore, 30*time.Minute, 24*time.Hour, time.Minute, zerolog.Nop())
 	reaper.reap(context.Background())
 
-	// Phase 0.5 should fail both running sessions via UpdateResult.
-	require.Len(t, mock.updatedResults, 2)
-	assert.Equal(t, string(models.SessionStatusFailed), mock.updatedResults[0].status)
-	assert.Equal(t, sessionID1, mock.updatedResults[0].sessionID)
-	assert.Equal(t, string(models.SessionStatusFailed), mock.updatedResults[1].status)
-	assert.Equal(t, sessionID2, mock.updatedResults[1].sessionID)
+	// Phase 0.5 should fail both running sessions via status-only updates.
+	require.Len(t, mock.updatedStatuses, 2, "Phase 0.5 should mark both running sessions failed via status-only updates")
+	require.Equal(t, string(models.SessionStatusFailed), mock.updatedStatuses[0].status, "first stale running session should be marked failed")
+	require.Equal(t, sessionID1, mock.updatedStatuses[0].sessionID, "first stale running session should be updated")
+	require.Equal(t, string(models.SessionStatusFailed), mock.updatedStatuses[1].status, "second stale running session should be marked failed")
+	require.Equal(t, sessionID2, mock.updatedStatuses[1].sessionID, "second stale running session should be updated")
 
 	// Phase 0.5 should also set failure details with the stuck_running category.
 	require.Len(t, mock.updatedFailures, 2)
@@ -202,7 +188,7 @@ func TestReapPhase0_5_FailsStaleRunningSessions(t *testing.T) {
 	assert.Equal(t, FailureCategoryStuckRunning, mock.updatedFailures[1].category)
 }
 
-func TestReapPhase0_5_ContinuesOnUpdateResultError(t *testing.T) {
+func TestReapPhase0_5_ContinuesOnUpdateStatusError(t *testing.T) {
 	t.Parallel()
 
 	orgID := uuid.New()
@@ -215,17 +201,17 @@ func TestReapPhase0_5_ContinuesOnUpdateResultError(t *testing.T) {
 			{ID: sessionID1, OrgID: orgID, Status: string(models.SessionStatusRunning), StartedAt: &startedAt},
 			{ID: sessionID2, OrgID: orgID, Status: string(models.SessionStatusRunning), StartedAt: &startedAt},
 		},
-		updateResultErr: errors.New("db error"),
+		updateStatusErr: errors.New("db error"),
 	}
 	snapStore := &reaperMockSnapshotStore{}
 
 	reaper := NewSessionReaper(mock, snapStore, 30*time.Minute, 24*time.Hour, time.Minute, zerolog.Nop())
 	reaper.reap(context.Background())
 
-	// UpdateResult attempted for both, but since it errored, UpdateFailure
+	// UpdateStatus attempted for both, but since it errored, UpdateFailure
 	// should have been skipped via the `continue` branch.
-	require.Len(t, mock.updatedResults, 2)
-	assert.Empty(t, mock.updatedFailures, "UpdateFailure should be skipped when UpdateResult errors")
+	require.Len(t, mock.updatedStatuses, 2, "UpdateStatus should be attempted for all stale running sessions")
+	require.Empty(t, mock.updatedFailures, "UpdateFailure should be skipped when UpdateStatus errors")
 }
 
 func TestReapPhase0_5_ContinuesOnUpdateFailureError(t *testing.T) {
@@ -248,9 +234,9 @@ func TestReapPhase0_5_ContinuesOnUpdateFailureError(t *testing.T) {
 	reaper := NewSessionReaper(mock, snapStore, 30*time.Minute, 24*time.Hour, time.Minute, zerolog.Nop())
 	reaper.reap(context.Background())
 
-	// UpdateResult should have succeeded for both, UpdateFailure should have
+	// UpdateStatus should have succeeded for both, UpdateFailure should have
 	// been attempted but logged and continued (not breaking the loop).
-	require.Len(t, mock.updatedResults, 2)
+	require.Len(t, mock.updatedStatuses, 2, "UpdateStatus should be attempted for all stale running sessions")
 	require.Len(t, mock.updatedFailures, 2, "UpdateFailure should still be called for all sessions even if it errors")
 }
 
@@ -271,7 +257,7 @@ func TestReapPhase0_5_UsesStartedAtForElapsedLog(t *testing.T) {
 	reaper := NewSessionReaper(mock, snapStore, 30*time.Minute, 24*time.Hour, time.Minute, zerolog.Nop())
 	reaper.reap(context.Background())
 
-	require.Len(t, mock.updatedResults, 1)
+	require.Len(t, mock.updatedStatuses, 1, "UpdateStatus should be attempted for the stale running session")
 	require.Len(t, mock.updatedFailures, 1)
 }
 

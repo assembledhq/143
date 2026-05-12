@@ -185,6 +185,7 @@ export function SessionSidebar() {
     isResolved,
     setPeopleFilter,
   } = usePeopleFilter();
+  const canListTeamMembers = currentUser?.role === "admin" || currentUser?.role === "member";
   const selectedId = selectedSegment && selectedSegment !== "new" ? selectedSegment : undefined;
   const [searchParam, setSearchParam] = useQueryState("search", parseAsString);
   const [search, setSearch] = useState(searchParam ?? "");
@@ -237,6 +238,7 @@ export function SessionSidebar() {
   const { data: membersData } = useQuery({
     queryKey: ["team", "members"],
     queryFn: () => api.team.listMembers(),
+    enabled: canListTeamMembers,
   });
   const members = useMemo<User[]>(() => membersData?.data ?? [], [membersData?.data]);
 
@@ -566,7 +568,7 @@ export function SessionSidebar() {
           onValueChange={(v) => setActiveFilter(v === "all" ? null : v)}
           className="gap-0"
         >
-          <TabsList size="sm" className="overflow-x-auto overflow-y-hidden">
+          <TabsList variant="line" size="sm" className="overflow-x-auto overflow-y-visible pb-1">
             {filterTabs.map((tab) => {
               const count = getCountForTab(tab.value, counts);
               const label = renderCount(count, counts);

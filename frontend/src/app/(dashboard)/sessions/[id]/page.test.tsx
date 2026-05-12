@@ -334,6 +334,14 @@ describe('SessionDetailPage', () => {
     expect(screen.queryByRole('tab', { name: 'Validation' })).not.toBeInTheDocument();
   });
 
+  it('uses the same desktop header height for the conversation and detail panels', async () => {
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+    await screen.findAllByText('Fixed TypeError by adding null check');
+
+    expect(screen.getByTestId('session-main-header')).toHaveClass('min-h-14');
+    expect(screen.getByTestId('session-detail-header')).toHaveClass('min-h-14');
+  });
+
   it('uses a dedicated mobile close button that does not compete with PR actions', async () => {
     vi.mocked(window.matchMedia).mockImplementation((query: string) => ({
       matches: query === '(max-width: 767px)',
@@ -699,6 +707,101 @@ describe('SessionDetailPage', () => {
     expect(await screen.findByRole('tab', { name: /Codex 2/ })).toBeInTheDocument();
   });
 
+  it('shows the desktop agent tab row as soon as a second tab is being created', async () => {
+    const sessionId = 'session-show-tab-row-while-creating';
+    const threads: SessionThread[] = [
+      {
+        id: 'thread-main',
+        session_id: sessionId,
+        org_id: 'org-1',
+        agent_type: 'codex',
+        label: 'Codex',
+        status: 'idle',
+        current_turn: 1,
+        created_at: '2026-02-17T07:00:00Z',
+        cost_cents: 0,
+        pending_message_count: 0,
+      },
+    ];
+    let resolveCreateThread: ((thread: SessionThread) => void) | null = null;
+    const createThreadResponse = new Promise<SingleResponse<SessionThread>>((resolve) => {
+      resolveCreateThread = (thread) => resolve({ data: thread });
+    });
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({
+          data: {
+            ...mockSessions[0],
+            id: sessionId,
+            status: 'idle',
+            agent_type: 'codex',
+            sandbox_state: 'ready',
+            threads,
+          },
+        } satisfies SingleResponse<Session & { threads: SessionThread[] }>);
+      }),
+      http.get('/api/v1/sessions/:id/threads/:threadId/messages', () => {
+        return HttpResponse.json({ data: [] as SessionMessage[], meta: {} } satisfies ListResponse<SessionMessage>);
+      }),
+      http.get('/api/v1/sessions/:id/threads/:threadId/logs', () => {
+        return HttpResponse.json({ data: [], meta: {} });
+      }),
+      http.get('/api/v1/sessions/:id/thread-file-events', () => {
+        return HttpResponse.json({ data: [], meta: {} });
+      }),
+      http.post('/api/v1/sessions/:id/threads', async ({ params }) => {
+        const thread: SessionThread = {
+          id: 'thread-new',
+          session_id: params.id as string,
+          org_id: 'org-1',
+          agent_type: 'codex',
+          label: 'Codex 2',
+          status: 'idle',
+          current_turn: 0,
+          created_at: '2026-02-17T07:04:00Z',
+          cost_cents: 0,
+          pending_message_count: 0,
+        };
+        threads.push(thread);
+        const response = await createThreadResponse;
+        return HttpResponse.json(response, { status: 201 });
+      }),
+    );
+
+    const user = userEvent.setup();
+    renderWithProviders(<SessionDetailContent id={sessionId} />);
+
+    const addTabButtons = await screen.findAllByRole('button', { name: 'Add agent tab' });
+    const stripAddButton = addTabButtons[addTabButtons.length - 1] as HTMLButtonElement;
+    await user.click(stripAddButton);
+
+    expect(await screen.findByRole('tablist', { name: 'Agent tabs' })).toBeInTheDocument();
+    const pendingTab = screen.getByRole('tab', { name: /Codex 2/ });
+    expect(pendingTab).toBeDisabled();
+
+    await user.click(pendingTab);
+
+    expect(screen.getByPlaceholderText('Send a message to Codex...')).toBeInTheDocument();
+    expect(screen.queryByText('Loading thread...')).not.toBeInTheDocument();
+
+    expect(resolveCreateThread).not.toBeNull();
+    resolveCreateThread!({
+      id: 'thread-new',
+      session_id: sessionId,
+      org_id: 'org-1',
+      agent_type: 'codex',
+      label: 'Codex 2',
+      status: 'idle',
+      current_turn: 0,
+      created_at: '2026-02-17T07:04:00Z',
+      cost_cents: 0,
+      pending_message_count: 0,
+    });
+
+    expect(await screen.findByPlaceholderText('Send a message to Codex 2...')).toBeInTheDocument();
+  });
+
   it('persists the selected model on a blank tab before the first thread send', async () => {
     const sessionId = 'session-persist-model-before-first-send';
     const threads: SessionThread[] = [
@@ -815,6 +918,78 @@ describe('SessionDetailPage', () => {
     await waitFor(() => {
       expect(postedMessageBody).toEqual({ message: 'Use the selected model.' });
     });
+  });
+
+  it('shows the agent selector before model override on a new blank tab composer', async () => {
+    const sessionId = 'session-new-tab-agent-before-model';
+    const threads: SessionThread[] = [
+      {
+        id: 'thread-main',
+        session_id: sessionId,
+        org_id: 'org-1',
+        agent_type: 'codex',
+        label: 'Codex',
+        status: 'idle',
+        current_turn: 1,
+        created_at: '2026-02-17T07:00:00Z',
+        cost_cents: 0,
+        pending_message_count: 0,
+      },
+    ];
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({
+          data: {
+            ...mockSessions[0],
+            id: sessionId,
+            status: 'idle',
+            agent_type: 'codex',
+            sandbox_state: 'ready',
+            threads,
+          },
+        } satisfies SingleResponse<Session & { threads: SessionThread[] }>);
+      }),
+      http.get('/api/v1/sessions/:id/threads/:threadId/messages', () => {
+        return HttpResponse.json({ data: [] as SessionMessage[], meta: {} } satisfies ListResponse<SessionMessage>);
+      }),
+      http.get('/api/v1/sessions/:id/threads/:threadId/logs', () => {
+        return HttpResponse.json({ data: [], meta: {} });
+      }),
+      http.post('/api/v1/sessions/:id/threads', async ({ params }) => {
+        const thread: SessionThread = {
+          id: 'thread-new',
+          session_id: params.id as string,
+          org_id: 'org-1',
+          agent_type: 'codex',
+          label: 'Codex 2',
+          status: 'idle',
+          current_turn: 0,
+          created_at: '2026-02-17T07:04:00Z',
+          cost_cents: 0,
+          pending_message_count: 0,
+        };
+        threads.push(thread);
+        return HttpResponse.json({ data: thread } satisfies SingleResponse<SessionThread>, { status: 201 });
+      }),
+    );
+
+    const user = userEvent.setup();
+    renderWithProviders(<SessionDetailContent id={sessionId} />);
+
+    expect(await screen.findByPlaceholderText('Send a message to Codex...')).toBeInTheDocument();
+
+    const addTabButtons = screen.getAllByRole('button', { name: 'Add agent tab' });
+    const stripAddButton = addTabButtons[addTabButtons.length - 1] as HTMLButtonElement;
+    await user.click(stripAddButton);
+
+    expect(await screen.findByPlaceholderText('Send a message to Codex 2...')).toBeInTheDocument();
+
+    const inputSurface = screen.getByTestId('session-composer-input-surface');
+    const agentSelector = within(inputSurface).getByLabelText('Agent');
+    const modelSelector = within(inputSurface).getByLabelText('Model override');
+
+    expect(agentSelector.compareDocumentPosition(modelSelector) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 
   it('preserves thread tabs when session status SSE payload omits thread detail', async () => {
@@ -1440,6 +1615,14 @@ describe('SessionDetailPage', () => {
     await waitFor(() => {
       expect(screen.queryByTestId('session-timeline-skeleton')).not.toBeInTheDocument();
     });
+    const freshTabCard = screen.getByText('No context in this tab yet.').closest('[data-slot="card"]');
+    expect(freshTabCard).not.toBeNull();
+    expect(within(freshTabCard as HTMLElement).getByText('New tab')).toBeInTheDocument();
+    expect(within(freshTabCard as HTMLElement).queryByText(/^Codex$/)).not.toBeInTheDocument();
+    expect(screen.queryByText('Fresh tab')).not.toBeInTheDocument();
+    expect(screen.queryByText('Fresh context')).not.toBeInTheDocument();
+    expect(screen.getByText('No context in this tab yet.')).toBeInTheDocument();
+    expect(screen.getByText('Send a task or add context to get started.')).toBeInTheDocument();
     expect(screen.getByPlaceholderText('Send a message to Codex 2...')).toBeInTheDocument();
   });
 
@@ -2884,6 +3067,49 @@ describe('SessionDetailPage', () => {
     await screen.findAllByText('Fixed TypeError by adding null check');
     expect(await screen.findByRole('button', { name: /Create PR/ })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /Create PR/ })).not.toBeDisabled();
+  });
+
+  it('hides PR mutation controls and skips the team roster lookup for builders', async () => {
+    const sessionWithDiff: Session = {
+      ...mockSessions[0],
+      status: 'completed',
+      diff: '--- a/file.ts\n+++ b/file.ts\n@@ -1 +1 @@\n-old\n+new',
+      diff_stats: { added: 1, removed: 1, files_changed: 1 },
+      snapshot_key: 'snap-abc',
+    };
+    let teamRequestCount = 0;
+
+    server.use(
+      http.get('/api/v1/auth/me', () => {
+        return HttpResponse.json({
+          data: {
+            ...mockMembers[0],
+            role: 'builder',
+          },
+        } satisfies SingleResponse<User>);
+      }),
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({ data: sessionWithDiff } satisfies SingleResponse<Session>);
+      }),
+      http.get('/api/v1/sessions/:id/pr', () => {
+        return HttpResponse.json(
+          { error: { code: 'NOT_FOUND', message: 'pull request not found' } },
+          { status: 404 },
+        );
+      }),
+      http.get('/api/v1/team/members', () => {
+        teamRequestCount += 1;
+        return HttpResponse.json({ error: { code: 'FORBIDDEN', message: 'insufficient permissions' } }, { status: 403 });
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+
+    await screen.findAllByText('Fixed TypeError by adding null check');
+    await waitFor(() => {
+      expect(screen.queryByRole('button', { name: /Create PR/ })).not.toBeInTheDocument();
+    });
+    expect(teamRequestCount).toBe(0);
   });
 
   it('does not show Create PR button when PR already exists', async () => {

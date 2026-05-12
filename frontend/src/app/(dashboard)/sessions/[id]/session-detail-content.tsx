@@ -363,6 +363,10 @@ type PRActionErrorState = {
 };
 
 type AddTabTriggerSource = "strip" | "header";
+type PendingThreadPreview = Pick<
+  SessionThread,
+  "id" | "session_id" | "org_id" | "agent_type" | "label" | "status" | "current_turn" | "created_at" | "cost_cents" | "pending_message_count" | "model_override"
+>;
 
 const terminalSessionStatuses = new Set(["completed", "pr_created", "failed", "cancelled", "skipped"]);
 const SNAPSHOT_EXPIRED_PR_MESSAGE =
@@ -1674,21 +1678,6 @@ function SessionComposer({
                   />
                 </DisabledTooltip>
 
-                {availableModels.length > 0 && (
-                  <Select value={selectedModel} onValueChange={onSelectedModelChange}>
-                    <SelectTrigger className="h-8 w-auto gap-1.5 border-none bg-transparent px-2 text-xs text-muted-foreground shadow-none hover:text-foreground focus:ring-0" aria-label="Model override">
-                      <SelectValue placeholder="Default model" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {availableModels.map((model) => (
-                        <SelectItem key={model} value={model}>
-                          {model}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                )}
-
                 {editableAgents && editableAgents.length > 0 && editableAgentType && onEditableAgentTypeChange && (
                   <Select value={editableAgentType} onValueChange={onEditableAgentTypeChange} disabled={agentUpdatePending}>
                     <SelectTrigger className="h-8 w-auto gap-1.5 border-none bg-transparent px-2 text-xs text-muted-foreground shadow-none hover:text-foreground focus:ring-0" aria-label="Agent">
@@ -1698,6 +1687,21 @@ function SessionComposer({
                       {editableAgents.map((agent) => (
                         <SelectItem key={agent.key} value={agent.key}>
                           {agent.label}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                )}
+
+                {availableModels.length > 0 && (
+                  <Select value={selectedModel} onValueChange={onSelectedModelChange}>
+                    <SelectTrigger className="h-8 w-auto gap-1.5 border-none bg-transparent px-2 text-xs text-muted-foreground shadow-none hover:text-foreground focus:ring-0" aria-label="Model override">
+                      <SelectValue placeholder="Default model" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {availableModels.map((model) => (
+                        <SelectItem key={model} value={model}>
+                          {model}
                         </SelectItem>
                       ))}
                     </SelectContent>
@@ -2044,6 +2048,12 @@ function ChatPanel({
     timelineEntries.length === 0 &&
     session.status !== "pending" &&
     (!hasLoadedTimelineInputs || expectingMoreContent);
+  const showFreshThreadShell =
+    !!activeThread &&
+    activeThread.status === "idle" &&
+    activeThread.current_turn === 0 &&
+    timelineEntries.length === 0 &&
+    !showLoadingSkeleton;
 
   const persistScrollPosition = useCallback((scrollTop: number) => {
     if (typeof window === "undefined" || !viewerScope) return;
@@ -2360,15 +2370,18 @@ function ChatPanel({
         {showLoadingSkeleton ? (
           <SessionTimelineSkeleton />
         ) : (
-          <ChatTimeline
-            entries={timelineEntries}
-            isRunning={isRunning}
-            diffStats={session.diff_stats}
-            onDiffClick={onDiffClick}
-            onApprovePlan={canSendMessage ? onApprovePlan : undefined}
-            onAdjustPlan={canSendMessage ? onAdjustPlan : undefined}
-            getEntryContainerProps={getEntryContainerProps}
-          />
+          <>
+            {showFreshThreadShell ? <FreshThreadShell /> : null}
+            <ChatTimeline
+              entries={timelineEntries}
+              isRunning={isRunning}
+              diffStats={session.diff_stats}
+              onDiffClick={onDiffClick}
+              onApprovePlan={canSendMessage ? onApprovePlan : undefined}
+              onAdjustPlan={canSendMessage ? onAdjustPlan : undefined}
+              getEntryContainerProps={getEntryContainerProps}
+            />
+          </>
         )}
         {(activeThread?.status === "pending" || (!activeThread && session.status === "pending")) && (
           <div className="flex items-center justify-center py-12">
@@ -2423,6 +2436,22 @@ function areChatPanelPropsEqual(previous: ChatPanelProps, next: ChatPanelProps):
 
 const MemoizedChatPanel = memo(ChatPanel, areChatPanelPropsEqual);
 
+function FreshThreadShell() {
+  return (
+    <Card className="w-full max-w-[92%] border-border/60 bg-muted/20 shadow-none">
+      <CardContent className="flex flex-col gap-3 p-4">
+        <span className="text-sm font-medium text-foreground">New tab</span>
+        <div className="space-y-1">
+          <p className="text-sm text-foreground">No context in this tab yet.</p>
+          <p className="text-sm text-muted-foreground">
+            Send a task or add context to get started.
+          </p>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Main component
 // ---------------------------------------------------------------------------
@@ -2431,6 +2460,7 @@ const MIN_DETAIL = 280;
 const MAX_DETAIL = 600;
 const DEFAULT_DETAIL = 384;
 const MOBILE_REVIEW_MEDIA_QUERY = "(max-width: 767px)";
+const SESSION_HEADER_HEIGHT_CLASSNAME = "min-h-14";
 // Transcript keyboard scroll tuning. Step matches a comfortable line-pair
 // jump; page distance follows browser conventions (~85% viewport with a
 // floor for very short panels).
@@ -2441,6 +2471,8 @@ const TRANSCRIPT_PAGE_VIEWPORT_RATIO = 0.85;
 export function SessionDetailContent({ id }: { id: string }) {
   const router = useRouter();
   const { user, isLoading: isAuthLoading } = useAuth();
+  const canListTeamMembers = user?.role === "admin" || user?.role === "member";
+  const canShipPR = canListTeamMembers;
   const terminalStatuses = new Set(["completed", "pr_created", "failed", "cancelled", "skipped"]);
   const [reviewParam, setReviewParam] = useQueryState("review");
   const [previewParam, setPreviewParam] = useQueryState("preview");
@@ -2591,6 +2623,7 @@ export function SessionDetailContent({ id }: { id: string }) {
   const { data: membersData } = useQuery({
     queryKey: ["team", "members"],
     queryFn: () => api.team.listMembers(),
+    enabled: canListTeamMembers,
   });
 
   const viewerScope = useMemo<SessionScrollViewerScope | null>(
@@ -2629,6 +2662,17 @@ export function SessionDetailContent({ id }: { id: string }) {
   });
   const sessionDiffPayload = diffData?.data;
   const threads = useMemo(() => session?.threads ?? [], [session?.threads]);
+  const [pendingThreadPreview, setPendingThreadPreview] = useState<PendingThreadPreview | null>(null);
+  const chromeThreads = useMemo(() => {
+    if (!pendingThreadPreview || threads.some((thread) => thread.id === pendingThreadPreview.id)) {
+      return threads;
+    }
+    return [...threads, pendingThreadPreview];
+  }, [pendingThreadPreview, threads]);
+  const nonInteractiveThreadIds = useMemo(
+    () => new Set(pendingThreadPreview ? [pendingThreadPreview.id] : []),
+    [pendingThreadPreview],
+  );
   const [activeThreadId, setActiveThreadId] = useState<string | null>(null);
   const [hasResolvedInitialThreadSelection, setHasResolvedInitialThreadSelection] = useState(false);
   const [viewedThreadIds, setViewedThreadIds] = useState<Set<string>>(() => (
@@ -2650,6 +2694,7 @@ export function SessionDetailContent({ id }: { id: string }) {
   useEffect(() => {
     setHasResolvedInitialThreadSelection(false);
     setActiveThreadId(null);
+    setPendingThreadPreview(null);
   }, [id]);
 
   useEffect(() => {
@@ -3062,7 +3107,7 @@ export function SessionDetailContent({ id }: { id: string }) {
   const hasPR = !!prData?.data;
   const hasSnapshot = !!session?.snapshot_key;
   const hasSessionChanges = !!session?.diff || !!session?.diff_stats;
-  const canCreatePR = hasSnapshot && !hasPR && !isRunning;
+  const canCreatePR = canShipPR && hasSnapshot && !hasPR && !isRunning;
   const isTerminalSession = terminalSessionStatuses.has(session?.status ?? "");
   const showExpiredPRAction = hasSessionChanges && !hasSnapshot && !hasPR && isTerminalSession;
   const needsGitHubStatus = canCreatePR || (hasPR && prData?.data?.status === "open");
@@ -3638,19 +3683,6 @@ export function SessionDetailContent({ id }: { id: string }) {
     },
   });
 
-  // Thread-scoped mutations for Phase 3/4 actions. Kept as separate
-  // mutations rather than one polymorphic call so React Query can scope
-  // pending state per-action, which the menu reads to show a spinner only
-  // on the in-flight item.
-  const cancelThreadMutation = useMutation({
-    mutationFn: (threadId: string) => api.sessions.cancelThread(id, threadId),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["session", id] });
-    },
-    onError: (err) => {
-      toast.error(err instanceof Error ? err.message : "Failed to cancel tab");
-    },
-  });
   const archiveThreadMutation = useMutation({
     mutationFn: (threadId: string) => api.sessions.archiveThread(id, threadId),
     onSuccess: (response, archivedThreadID) => {
@@ -3674,16 +3706,6 @@ export function SessionDetailContent({ id }: { id: string }) {
     },
     onError: (err) => {
       toast.error(err instanceof Error ? err.message : "Failed to close tab");
-    },
-  });
-  const forkThreadMutation = useMutation({
-    mutationFn: (threadId: string) => api.sessions.forkThread(id, threadId),
-    onSuccess: () => {
-      toast.success("Fork queued — new session will appear in your list shortly");
-      queryClient.invalidateQueries({ queryKey: ["sessions"] });
-    },
-    onError: (err) => {
-      toast.error(err instanceof Error ? err.message : "Failed to fork tab");
     },
   });
   const revertThreadMutation = useMutation({
@@ -3733,8 +3755,8 @@ export function SessionDetailContent({ id }: { id: string }) {
     fileEventsSinceRef.current = max;
   }, [fileEventsQuery.data]);
   const overlapsByThreadId = useMemo(
-    () => computeThreadOverlap(threads, accumulatedFileEvents),
-    [threads, accumulatedFileEvents],
+    () => computeThreadOverlap(chromeThreads, accumulatedFileEvents),
+    [chromeThreads, accumulatedFileEvents],
   );
   const [attributionFilter, setAttributionFilter] = useState<ThreadAttributionFilterValue>({ kind: "all" });
   const attributionAllowedPaths = useAttributionAllowedPaths(attributionFilter, accumulatedFileEvents);
@@ -3767,7 +3789,23 @@ export function SessionDetailContent({ id }: { id: string }) {
 
   const createThreadMutation = useMutation({
     mutationFn: (body: { agent_type: string; model?: string; label: string }) => api.sessions.createThread(id, body),
+    onMutate: (body) => {
+      setPendingThreadPreview({
+        id: "__pending-thread__",
+        session_id: id,
+        org_id: session?.org_id ?? "",
+        agent_type: body.agent_type as SessionThread["agent_type"],
+        label: body.label,
+        status: "pending",
+        current_turn: 0,
+        created_at: new Date().toISOString(),
+        cost_cents: 0,
+        pending_message_count: 0,
+        model_override: body.model,
+      });
+    },
     onSuccess: (response) => {
+      setPendingThreadPreview(null);
       queryClient.setQueryData<SingleResponse<SessionDetail>>(["session", id], (existing) => {
         if (!existing) return existing;
         const existingThreads = existing.data.threads ?? [];
@@ -3788,6 +3826,8 @@ export function SessionDetailContent({ id }: { id: string }) {
       queryClient.invalidateQueries({ queryKey: ["session", id] });
     },
     onError: (err) => {
+      setPendingThreadPreview(null);
+      queryClient.invalidateQueries({ queryKey: ["session", id] });
       toast.error(err instanceof Error ? err.message : "Failed to create tab");
     },
   });
@@ -4054,10 +4094,10 @@ export function SessionDetailContent({ id }: { id: string }) {
     pr: {
       canCreate: canCreatePR && localPRState === "idle" && !createPRMutation.isPending,
       canView: !!prData?.data?.github_pr_url,
-      canPush: hasPR && prStatus === "open" && !!session?.has_unpushed_changes && hasSnapshot && !isRunning && localPushState === "idle" && !pushChangesMutation.isPending,
-      canFixTests: !!prHealth?.can_fix_tests && pendingPRAction === null,
-      canResolveConflicts: !!prHealth?.can_resolve_conflicts && pendingPRAction === null,
-      canMerge: prHealthAllowsMerge(prHealth) && pendingPRAction === null,
+      canPush: canShipPR && hasPR && prStatus === "open" && !!session?.has_unpushed_changes && hasSnapshot && !isRunning && localPushState === "idle" && !pushChangesMutation.isPending,
+      canFixTests: canShipPR && !!prHealth?.can_fix_tests && pendingPRAction === null,
+      canResolveConflicts: canShipPR && !!prHealth?.can_resolve_conflicts && pendingPRAction === null,
+      canMerge: canShipPR && prHealthAllowsMerge(prHealth) && pendingPRAction === null,
       onCreate: createPRFromKeyboard,
       onView: viewPRFromKeyboard,
       onPush: pushChangesFromKeyboard,
@@ -4111,13 +4151,15 @@ export function SessionDetailContent({ id }: { id: string }) {
       (snapshotUnavailable ? snapshotMessage : null) ||
       (prState === "failed" ? session.pr_creation_error || PR_ERROR_TOAST_MESSAGE : null);
   const showPRAction =
-    canCreatePR ||
-    showExpiredPRAction ||
-    queueingPR ||
-    creatingPR ||
-    finalizingPR ||
-    prState === "failed" ||
-    Boolean(prActionError);
+    canShipPR && (
+      canCreatePR ||
+      showExpiredPRAction ||
+      queueingPR ||
+      creatingPR ||
+      finalizingPR ||
+      prState === "failed" ||
+      Boolean(prActionError)
+    );
 
   let prActionLabel = "Create PR";
   let prActionSpinning = false;
@@ -4165,8 +4207,8 @@ export function SessionDetailContent({ id }: { id: string }) {
     (localPushState === "queued" && pushState !== "failed" && pushState !== "succeeded") ||
     pushState === "queued" ||
     pushState === "pushing";
-  const canPushChanges = pushAvailable && hasSnapshot && !isRunning;
-  const showPushAction = pushAvailable && (canPushChanges || queueingPush || pushingChanges || pushState === "failed" || localPushActionError);
+  const canPushChanges = canShipPR && pushAvailable && hasSnapshot && !isRunning;
+  const showPushAction = canShipPR && pushAvailable && (canPushChanges || queueingPush || pushingChanges || pushState === "failed" || localPushActionError);
   let pushActionLabel = "Push changes";
   let pushActionSpinning = false;
   let pushActionDisabled = false;
@@ -4247,7 +4289,10 @@ export function SessionDetailContent({ id }: { id: string }) {
       onValueChange={(v) => handleDetailTabClick(v as DetailTab)}
       className="flex flex-col flex-1 min-h-0 gap-0"
     >
-      <div className="border-b border-border px-2 py-2 shrink-0">
+      <div
+        data-testid="session-detail-header"
+        className={cn("border-b border-border px-2 py-2 shrink-0", SESSION_HEADER_HEIGHT_CLASSNAME)}
+      >
         <div className="flex items-center gap-2 min-w-0">
           <div
             ref={detailTabsRef}
@@ -4446,22 +4491,26 @@ export function SessionDetailContent({ id }: { id: string }) {
               sessionTitle={sessionTitle(session)}
               detailButtonLabel="Open session details"
               backTo="/sessions"
-              threads={threads}
+              threads={chromeThreads}
               activeThreadId={activeThread?.id ?? null}
               viewedThreadIds={viewedThreadIds}
+              nonInteractiveThreadIds={nonInteractiveThreadIds}
               onOpenDetails={() => setMobileDetailOpen(true)}
               onActiveThreadChange={setActiveThreadId}
               onAddThread={openAddThreadDialog}
               onRenameSession={openMobileRenameDialog}
-              onCancelThread={(tid) => cancelThreadMutation.mutate(tid)}
-              onForkThread={(tid) => forkThreadMutation.mutate(tid)}
               onRevertThread={(tid) => revertThreadMutation.mutate(tid)}
               onArchiveThread={(tid) => archiveThreadMutation.mutate(tid)}
-              cancelPendingThreadId={cancelThreadMutation.isPending ? cancelThreadMutation.variables ?? null : null}
               archivePendingThreadId={archiveThreadMutation.isPending ? archiveThreadMutation.variables ?? null : null}
             />
 
-            <div className="hidden md:flex border-b border-border px-4 py-3 bg-background items-center justify-between shrink-0">
+            <div
+              data-testid="session-main-header"
+              className={cn(
+                "hidden border-b border-border bg-background px-4 py-3 md:flex items-center justify-between shrink-0",
+                SESSION_HEADER_HEIGHT_CLASSNAME,
+              )}
+            >
               <div className="min-w-0 flex-1 flex items-center gap-2">
                 {isEditingTitle ? (
                   <div className="min-w-0 flex-1 flex items-center gap-2">
@@ -4534,18 +4583,18 @@ export function SessionDetailContent({ id }: { id: string }) {
                 <Button
                   ref={headerAddTabButtonRef}
                   type="button"
-                  variant="outline"
+                  variant="ghost"
                   size="icon"
-                  className="h-8 w-8 shrink-0"
+                  className="h-7 w-7 shrink-0 rounded-sm text-muted-foreground opacity-70 transition-opacity hover:text-foreground hover:opacity-100 focus-visible:opacity-100"
                   aria-label="Add agent tab"
                   title="Add agent tab"
                   onClick={() => handleCreateThreadFrom("header")}
                   disabled={createThreadMutation.isPending}
                 >
                   {createThreadMutation.isPending ? (
-                    <Loader2 className="h-4 w-4 animate-spin" />
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
                   ) : (
-                    <Plus className="h-4 w-4" />
+                    <Plus className="h-3.5 w-3.5" />
                   )}
                 </Button>
                 <DisabledTooltip disabled={centerMode === "review" && showDetailPanel} content={detailToggleTitle}>
@@ -4569,19 +4618,17 @@ export function SessionDetailContent({ id }: { id: string }) {
         {!isDedicatedMobileReview ? (
           <div className="hidden md:block">
           <AgentTabStrip
-            threads={threads}
+            threads={chromeThreads}
             activeThreadId={activeThread?.id ?? null}
             viewedThreadIds={viewedThreadIds}
+            nonInteractiveThreadIds={nonInteractiveThreadIds}
             overlapsByThreadId={overlapsByThreadId}
             statusConfig={statusConfig}
             onActiveThreadChange={setActiveThreadId}
             onAddTab={() => handleCreateThreadFrom("strip")}
             addTabPending={createThreadMutation.isPending}
-            onCancelThread={(tid) => cancelThreadMutation.mutate(tid)}
-            onForkThread={(tid) => forkThreadMutation.mutate(tid)}
             onRevertThread={(tid) => revertThreadMutation.mutate(tid)}
             onArchiveThread={(tid) => archiveThreadMutation.mutate(tid)}
-            cancelPendingThreadId={cancelThreadMutation.isPending ? cancelThreadMutation.variables ?? null : null}
             archivePendingThreadId={archiveThreadMutation.isPending ? archiveThreadMutation.variables ?? null : null}
             addTabButtonRef={addTabButtonRef}
           />
@@ -4733,7 +4780,7 @@ export function SessionDetailContent({ id }: { id: string }) {
           <div
             data-testid="session-detail-panel"
             style={{ width: detailWidth }}
-            className="relative z-10 border-l border-border bg-background flex flex-col shrink-0 overflow-hidden"
+            className="relative z-10 bg-background flex flex-col shrink-0 overflow-hidden"
           >
             {panelTabsEl}
           </div>
@@ -4950,6 +4997,7 @@ export function SessionDetailContent({ id }: { id: string }) {
       <SessionKeyboardHelpOverlay
         open={keyboardHelpOpen}
         onOpenChange={setKeyboardHelpOpen}
+        canShipPR={canShipPR}
       />
       <AlertDialog
         open={!!prAuthPrompt}

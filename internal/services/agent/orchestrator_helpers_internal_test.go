@@ -700,10 +700,16 @@ func (s *snapshotSessionStubProvider) ExecStream(context.Context, *Sandbox, stri
 // snapshotSessionRecordingStore is a SnapshotStore that records every
 // Save call so tests can assert that we did NOT save a corrupt archive.
 type snapshotSessionRecordingStore struct {
-	saves []string
+	saves     []string
+	saveCalls int
+	saveFn    func(ctx context.Context, key string, reader io.Reader) error
 }
 
 func (s *snapshotSessionRecordingStore) Save(ctx context.Context, key string, reader io.Reader) error {
+	s.saveCalls++
+	if s.saveFn != nil {
+		return s.saveFn(ctx, key, reader)
+	}
 	if _, err := io.Copy(io.Discard, reader); err != nil {
 		return err
 	}
@@ -768,6 +774,52 @@ func TestSnapshotSessionOnTurnSuccess_SnapshotsWhenAgentExitedClean(t *testing.T
 	require.NotNil(t, session.SnapshotKey)
 	require.Equal(t, key, *session.SnapshotKey)
 	require.Equal(t, int64(len("archive-bytes")), size)
+}
+
+func TestSnapshotSessionOnTurnSuccess_RetriesGitPackChurnSnapshotFailures(t *testing.T) {
+	t.Parallel()
+
+	provider := &snapshotSessionStubProvider{
+		snapshotFn: func(ctx context.Context, sb *Sandbox) (io.ReadCloser, error) {
+			return io.NopCloser(bytes.NewReader([]byte("archive-bytes"))), nil
+		},
+	}
+	attempts := 0
+	var store *snapshotSessionRecordingStore
+	store = &snapshotSessionRecordingStore{
+		saveFn: func(ctx context.Context, key string, reader io.Reader) error {
+			if _, err := io.Copy(io.Discard, reader); err != nil {
+				return err
+			}
+			attempts++
+			if attempts < 3 {
+				return errors.New(
+					"buffer snapshot snapshots/org/session/workspace.tar.zst: snapshot tar exited with code 1: " +
+						"tar: home/sandbox/143/.git/objects/pack/pack-123.pack: File removed before we read it",
+				)
+			}
+			store.saves = append(store.saves, key)
+			return nil
+		},
+	}
+	o := &Orchestrator{
+		provider:  provider,
+		snapshots: store,
+		logger:    zerolog.Nop(),
+	}
+
+	session := &models.Session{ID: uuid.New(), OrgID: uuid.New()}
+	sandbox := &Sandbox{ID: "sandbox-1"}
+	result := &AgentResult{ExitCode: 0}
+
+	key, size, err := o.snapshotSessionOnTurnSuccess(context.Background(), session, sandbox, result, zerolog.Nop())
+	require.NoError(t, err, "retryable git pack churn should not abort the turn snapshot")
+	require.Equal(t, 3, provider.calls(), "each retry should rebuild the snapshot from a fresh provider stream")
+	require.Equal(t, 3, store.saveCalls, "storage save should be retried for the recognized tar churn signature")
+	require.Equal(t, []string{key}, store.saves, "the snapshot should eventually persist after the retryable churn clears")
+	require.NotNil(t, session.SnapshotKey, "successful retry should still advance the session snapshot key")
+	require.Equal(t, key, *session.SnapshotKey)
+	require.Equal(t, int64(len("archive-bytes")), size, "successful attempt should report the final archive size")
 }
 
 func TestSnapshotSessionOnTurnSuccess_PassesNilResultThrough(t *testing.T) {

@@ -77,6 +77,8 @@ func TestWorkerProvisioningIncludesGitHubAppUserAuthSecrets(t *testing.T) {
 	require.Contains(t, string(cloudInit), "SOPS_AGE_KEY=${SOPS_AGE_KEY}", "worker cloud-init should provide SOPS_AGE_KEY so the container can decrypt .env.production.enc at boot")
 	require.Contains(t, string(cloudInit), "GITHUB_APP_CLIENT_ID=${GITHUB_APP_CLIENT_ID}", "worker cloud-init should provide the GitHub App user auth client ID")
 	require.Contains(t, string(cloudInit), "GITHUB_APP_CLIENT_SECRET=${GITHUB_APP_CLIENT_SECRET}", "worker cloud-init should provide the GitHub App user auth client secret")
+	require.Contains(t, string(cloudInit), "SANDBOX_HEALTH_CHECK_IMAGE=${SANDBOX_HEALTH_CHECK_IMAGE}", "worker cloud-init should allow first-boot workers to override the sandbox health-check image via envsubst")
+	require.NotContains(t, string(cloudInit), "SANDBOX_HEALTH_CHECK_IMAGE=busybox:1.36.1", "worker cloud-init should not hard-code the sandbox health-check image because private-mirror overrides must work before first compose up")
 	require.Contains(t, string(cloudInit), "SANDBOX_REQUIRE_DISK_QUOTA=true", "worker cloud-init should require Docker disk quota support by default")
 	require.Contains(t, string(cloudInit), "SANDBOX_GC_INTERVAL=5m", "worker cloud-init should enable worker-local sandbox GC")
 	require.Contains(t, string(cloudInit), "- path: /opt/143/.env.production.enc", "worker cloud-init should stage the encrypted production env file before docker compose starts")
@@ -88,6 +90,7 @@ func TestWorkerProvisioningIncludesGitHubAppUserAuthSecrets(t *testing.T) {
 	require.Contains(t, string(provisionScript), "GITHUB_APP_CLIENT_ID=%s", "worker reprovision path should write the GitHub App user auth client ID into .env")
 	require.Contains(t, string(provisionScript), "GITHUB_APP_CLIENT_SECRET=%s", "worker reprovision path should write the GitHub App user auth client secret into .env")
 	require.Contains(t, string(provisionScript), "WORKER_MAX_ACTIVE_SANDBOXES=%s", "worker reprovision path should write the per-machine live sandbox capacity cap into .env")
+	require.Contains(t, string(provisionScript), "SANDBOX_HEALTH_CHECK_IMAGE=%s", "worker reprovision path should write the sandbox health-check image into .env")
 	require.Contains(t, string(provisionScript), "SANDBOX_REQUIRE_DISK_QUOTA=%s", "worker reprovision path should write the disk-quota requirement into .env")
 	require.Contains(t, string(provisionScript), "SANDBOX_GC_INTERVAL=%s", "worker reprovision path should write the sandbox GC interval into .env")
 	require.Contains(t, string(provisionScript), `scp "${SCP_OPTS[@]}" "$ENC_FILE" root@"$HOST":/opt/143/`, "worker reprovision path should copy .env.production.enc to the host before starting docker compose so bind-mount source creation cannot turn it into a directory")
@@ -99,6 +102,7 @@ func TestDeployWritesWorkerSandboxCapacityEnv(t *testing.T) {
 	deployScript, err := os.ReadFile("../deploy/scripts/deploy.sh")
 	require.NoError(t, err, "test should read deploy.sh")
 	require.Contains(t, string(deployScript), "WORKER_MAX_ACTIVE_SANDBOXES=%s", "worker deploy should write the per-machine live sandbox capacity cap into .env")
+	require.Contains(t, string(deployScript), "SANDBOX_HEALTH_CHECK_IMAGE=%s", "worker deploy should write the sandbox health-check image into .env for compose preflight and app config")
 }
 
 // Worker preview routing requires three per-host values: NODE_ID,
@@ -137,6 +141,17 @@ func TestWorkerPerHostIdentityIsPreservedAcrossDeploys(t *testing.T) {
 	require.NoError(t, err, "test should read the deploy script")
 	require.Contains(t, string(deployScript), "cat /opt/143/.env.local >> /opt/143/.env", "deploy.sh worker branch should re-append .env.local into .env on every deploy — without this, every secret refresh wipes the per-host identity")
 	require.Contains(t, string(deployScript), "/opt/143/.env.local is missing", "deploy.sh worker branch should abort loudly when .env.local is missing instead of coming up with empty NODE_ID and WORKER_PRIVATE_IP")
+}
+
+func TestWorkerGVisorPreflightPullsHealthImageOnlyWhenMissing(t *testing.T) {
+	t.Parallel()
+
+	compose, err := os.ReadFile("../docker-compose.worker.yml")
+	require.NoError(t, err, "test should read the worker compose file")
+	composeText := string(compose)
+
+	require.Contains(t, composeText, `SANDBOX_HEALTH_CHECK_IMAGE: ${SANDBOX_HEALTH_CHECK_IMAGE:-busybox:1.36.1}`, "worker compose should pass the configurable health-check image into the worker container")
+	require.Contains(t, composeText, `docker image inspect "$$HEALTHCHECK_IMAGE" >/dev/null 2>&1 || docker pull "$$HEALTHCHECK_IMAGE"`, "gVisor preflight should use the cached health image when present and only pull when missing")
 }
 
 // The auto-default for NODE_ID must use the full IP (dotted-to-dash), not

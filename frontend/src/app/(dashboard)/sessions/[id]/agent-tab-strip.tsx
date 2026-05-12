@@ -1,7 +1,7 @@
 "use client";
 
 import { RefObject, useMemo } from "react";
-import { Loader2, MoreVertical, Plus, Square, GitBranch, Undo2, AlertTriangle, X } from "lucide-react";
+import { Loader2, MoreVertical, Plus, Undo2, AlertTriangle, X } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -11,7 +11,6 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
-  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
@@ -38,6 +37,10 @@ function shouldShowUnreadDot(thread: SessionThread, viewedThreadIds: ReadonlySet
 
 function canArchiveThread(thread: SessionThread, threadCount: number): boolean {
   return threadCount > 1 && !isActiveStatus(thread.status);
+}
+
+function addTabButtonClassName(): string {
+  return "h-7 w-7 shrink-0 rounded-sm text-muted-foreground opacity-70 transition-opacity hover:text-foreground hover:opacity-100 focus-visible:opacity-100";
 }
 
 // Compute per-thread overlap: a path counts as an overlap when at least two
@@ -86,16 +89,14 @@ interface AgentTabStripProps {
   threads: SessionThread[];
   activeThreadId: string | null;
   viewedThreadIds: ReadonlySet<string>;
+  nonInteractiveThreadIds?: ReadonlySet<string>;
   overlapsByThreadId: Map<string, string[]>;
   statusConfig: Record<string, { label: string }>;
   onActiveThreadChange: (threadId: string) => void;
   onAddTab: () => void;
   addTabPending?: boolean;
-  onCancelThread: (threadId: string) => void;
-  onForkThread: (threadId: string) => void;
   onRevertThread: (threadId: string) => void;
   onArchiveThread: (threadId: string) => void;
-  cancelPendingThreadId: string | null;
   archivePendingThreadId: string | null;
   addTabButtonRef?: RefObject<HTMLButtonElement | null>;
 }
@@ -116,16 +117,14 @@ export function AgentTabStrip({
   threads,
   activeThreadId,
   viewedThreadIds,
+  nonInteractiveThreadIds,
   overlapsByThreadId,
   statusConfig,
   onActiveThreadChange,
   onAddTab,
   addTabPending = false,
-  onCancelThread,
-  onForkThread,
   onRevertThread,
   onArchiveThread,
-  cancelPendingThreadId,
   archivePendingThreadId,
   addTabButtonRef,
 }: AgentTabStripProps) {
@@ -233,22 +232,19 @@ export function AgentTabStrip({
             <ThreadActionsMenu
               threads={tabs}
               activeThreadId={activeThreadId}
-              onCancel={onCancelThread}
-              onFork={onForkThread}
               onRevert={onRevertThread}
-              cancelPendingThreadId={cancelPendingThreadId}
             />
             <Button
               ref={addTabButtonRef}
               type="button"
               size="icon"
               variant="ghost"
-              className="h-8 w-8 shrink-0"
+              className={addTabButtonClassName()}
               aria-label="Add agent tab"
               title="Add agent tab (t)"
               onClick={onAddTab}
             >
-              <Plus className="h-4 w-4" />
+              <Plus className="h-3.5 w-3.5" />
             </Button>
           </div>
         </div>
@@ -266,7 +262,7 @@ export function AgentTabStrip({
               size="sm"
               aria-label="Agent tabs"
               className={cn(
-                "h-auto max-w-full justify-start gap-1 overflow-x-auto overflow-y-hidden border-b-0 bg-transparent p-0",
+                "h-auto max-w-full justify-start gap-1 overflow-x-auto overflow-y-visible border-b-0 bg-transparent p-0 pb-1",
               )}
             >
               {tabs.map((thread) => {
@@ -279,6 +275,7 @@ export function AgentTabStrip({
                 const queued = thread.pending_message_count ?? 0;
                 const showUnreadDot = shouldShowUnreadDot(thread, viewedThreadIds);
                 const showArchiveButton = canArchiveThread(thread, tabs.length);
+                const isNonInteractive = nonInteractiveThreadIds?.has(thread.id) ?? false;
                 const closeLabel = `Close ${thread.label}${thread.label.toLowerCase().endsWith(" tab") ? "" : " tab"}`;
 
                 return (
@@ -287,11 +284,13 @@ export function AgentTabStrip({
                       <TooltipTrigger asChild>
                         <TabsTrigger
                           value={thread.id}
+                          disabled={isNonInteractive}
                           className={cn(
                             "h-8 max-w-[15rem] gap-1.5 rounded-md px-2 text-xs data-[state=active]:bg-transparent data-[state=active]:text-primary data-[state=active]:shadow-none",
                             "after:bg-primary after:bg-none data-[state=active]:after:opacity-100",
                             showArchiveButton && "pr-8",
                             tabs.length === 1 && "data-[state=active]:bg-transparent data-[state=active]:shadow-none",
+                            isNonInteractive && "cursor-default opacity-60",
                           )}
                         >
                           {showUnreadDot ? (
@@ -371,23 +370,20 @@ export function AgentTabStrip({
           <ThreadActionsMenu
             threads={tabs}
             activeThreadId={activeThreadId}
-            onCancel={onCancelThread}
-            onFork={onForkThread}
             onRevert={onRevertThread}
-            cancelPendingThreadId={cancelPendingThreadId}
           />
           <Button
             ref={addTabButtonRef}
             type="button"
             size="icon"
             variant="ghost"
-            className="h-8 w-8 shrink-0"
+            className={addTabButtonClassName()}
             aria-label="Add agent tab"
             title="Add agent tab (t)"
             onClick={onAddTab}
             disabled={addTabPending}
           >
-            <Plus className="h-4 w-4" />
+            <Plus className="h-3.5 w-3.5" />
           </Button>
         </div>
       </div>
@@ -398,18 +394,13 @@ export function AgentTabStrip({
 interface ThreadActionsMenuProps {
   threads: SessionThread[];
   activeThreadId: string;
-  onCancel: (threadId: string) => void;
-  onFork: (threadId: string) => void;
   onRevert: (threadId: string) => void;
-  cancelPendingThreadId: string | null;
 }
 
-function ThreadActionsMenu({ threads, activeThreadId, onCancel, onFork, onRevert, cancelPendingThreadId }: ThreadActionsMenuProps) {
+function ThreadActionsMenu({ threads, activeThreadId, onRevert }: ThreadActionsMenuProps) {
   const active = threads.find((t) => t.id === activeThreadId);
   if (!active) return null;
-  const canCancel = isActiveStatus(active.status);
   const canRevert = !!active.diff && active.diff.length > 0;
-  const isCancellingThis = cancelPendingThreadId === active.id;
 
   return (
     <DropdownMenu>
@@ -426,18 +417,6 @@ function ThreadActionsMenu({ threads, activeThreadId, onCancel, onFork, onRevert
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end" className="w-56">
-        <DropdownMenuItem
-          onSelect={() => canCancel && onCancel(active.id)}
-          disabled={!canCancel || isCancellingThis}
-        >
-          {isCancellingThis ? <Loader2 className="h-4 w-4 animate-spin" /> : <Square className="h-4 w-4" />}
-          <span>{isCancellingThis ? "Cancelling…" : "Cancel turn"}</span>
-        </DropdownMenuItem>
-        <DropdownMenuSeparator />
-        <DropdownMenuItem onSelect={() => onFork(active.id)}>
-          <GitBranch className="h-4 w-4" />
-          <span>Fork into new session</span>
-        </DropdownMenuItem>
         <DropdownMenuItem
           onSelect={() => canRevert && onRevert(active.id)}
           disabled={!canRevert}

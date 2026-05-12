@@ -92,10 +92,10 @@ type ForkResult struct {
 }
 
 // ForkThread enqueues a job that copies a tab into a brand-new session with
-// its own sandbox. The new session inherits the source session's repo,
-// branch, and base snapshot so the forked tab boots from the same state the
-// reviewer was looking at. Use this when a tab's work has diverged enough to
-// deserve a separate PR.
+// its own sandbox. The new session inherits the source session's repo and
+// branch, but it starts from a fresh clone on that branch rather than
+// reusing the source session's in-progress sandbox state. Use this when a
+// tab's work has diverged enough to deserve a separate PR.
 func (s *Service) ForkThread(ctx context.Context, input ForkInput) (ForkResult, error) {
 	thread, err := s.threadStore.GetByID(ctx, input.OrgID, input.SourceThreadID)
 	if err != nil {

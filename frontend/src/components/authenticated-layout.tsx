@@ -476,7 +476,7 @@ export function AuthenticatedLayout({ children }: { children: React.ReactNode })
           data-testid="app-sidebar"
           style={{ "--app-sidebar-w": `${appSidebarWidth}px` } as React.CSSProperties}
           className={cn(
-            "hidden md:flex border-r border-border bg-sidebar flex-col w-[var(--app-sidebar-w)]"
+            "hidden md:flex bg-sidebar flex-col w-[var(--app-sidebar-w)]"
           )}
         >
           <div className="px-4 py-4">
@@ -536,7 +536,7 @@ export function AuthenticatedLayout({ children }: { children: React.ReactNode })
         data-testid="app-sidebar"
         style={{ "--app-sidebar-w": `${appSidebarWidth}px` } as React.CSSProperties}
         className={cn(
-          "hidden md:flex border-r border-border/50 bg-sidebar flex-col relative w-[var(--app-sidebar-w)]"
+          "hidden md:flex bg-sidebar flex-col relative w-[var(--app-sidebar-w)]"
         )}
       >
         <SidebarBody

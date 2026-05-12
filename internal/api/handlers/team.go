@@ -218,7 +218,7 @@ func (h *TeamHandler) ChangeRole(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if !models.IsValidRole(body.Role) {
-		writeError(w, r, http.StatusBadRequest, "VALIDATION_ERROR", "invalid role: must be admin, member, or viewer")
+		writeError(w, r, http.StatusBadRequest, "VALIDATION_ERROR", "invalid role: must be admin, builder, member, or viewer")
 		return
 	}
 
@@ -389,7 +389,7 @@ func (h *TeamHandler) CreateInvitation(w http.ResponseWriter, r *http.Request) {
 		body.Role = models.RoleMember
 	}
 	if !models.IsValidRole(body.Role) {
-		writeError(w, r, http.StatusBadRequest, "VALIDATION_ERROR", "invalid role: must be admin, member, or viewer")
+		writeError(w, r, http.StatusBadRequest, "VALIDATION_ERROR", "invalid role: must be admin, builder, member, or viewer")
 		return
 	}
 

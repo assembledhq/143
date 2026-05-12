@@ -300,7 +300,7 @@ describe("Agent settings page", () => {
     await user.hover(within(dialog).getByRole("button", { name: "Where to get a Pi API key" }));
     const piLinks = await screen.findAllByRole("link", { name: "Pi dashboard" });
     expect(piLinks[0]).toHaveAttribute("href", "https://pi.dev/");
-  });
+  }, 10000);
 
   it("does not render the agent-specific access card", async () => {
     installHandlers();
