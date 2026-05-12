@@ -2371,7 +2371,7 @@ function ChatPanel({
           <SessionTimelineSkeleton />
         ) : (
           <>
-            {showFreshThreadShell ? <FreshThreadShell thread={activeThread} /> : null}
+            {showFreshThreadShell ? <FreshThreadShell /> : null}
             <ChatTimeline
               entries={timelineEntries}
               isRunning={isRunning}
@@ -2436,17 +2436,11 @@ function areChatPanelPropsEqual(previous: ChatPanelProps, next: ChatPanelProps):
 
 const MemoizedChatPanel = memo(ChatPanel, areChatPanelPropsEqual);
 
-function FreshThreadShell({ thread }: { thread: SessionThread }) {
+function FreshThreadShell() {
   return (
-    <Card className="mx-auto max-w-2xl border-border/60 bg-muted/20 shadow-none">
+    <Card className="w-full max-w-[92%] border-border/60 bg-muted/20 shadow-none">
       <CardContent className="flex flex-col gap-3 p-4">
-        <div className="flex flex-wrap items-center gap-2">
-          <AgentBadge
-            agentType={thread.agent_type}
-            labelClassName="text-xs font-medium text-foreground"
-          />
-          <span className="text-sm font-medium text-foreground">New tab</span>
-        </div>
+        <span className="text-sm font-medium text-foreground">New tab</span>
         <div className="space-y-1">
           <p className="text-sm text-foreground">No context in this tab yet.</p>
           <p className="text-sm text-muted-foreground">
