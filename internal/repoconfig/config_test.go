@@ -50,12 +50,12 @@ func TestParse_TrimsCommandWhitespace(t *testing.T) {
 	t.Parallel()
 
 	cfg, err := Parse([]byte(`{
-		"environment": {"commands": ["  install-tool  "]},
+		"dependencies": {"golangci-lint": "  1.64.8  "},
 		"bootstrap": {"commands": ["  npm ci  "]},
 		"validation": {"commands": ["  npm run lint:js  "]}
 	}`))
 	require.NoError(t, err, "Parse should accept commands with leading and trailing whitespace")
-	require.Equal(t, []string{"install-tool"}, cfg.Environment.Commands, "Parse should trim environment command whitespace")
+	require.Equal(t, "1.64.8", cfg.Dependencies["golangci-lint"], "Parse should trim dependency version whitespace")
 	require.Equal(t, []string{"npm ci"}, cfg.Bootstrap.Commands, "Parse should trim bootstrap command whitespace")
 	require.Equal(t, []string{"npm run lint:js"}, cfg.Validation.Commands, "Parse should trim validation command whitespace")
 }
@@ -70,26 +70,34 @@ func TestParse_RejectsBlankCommand(t *testing.T) {
 	require.Contains(t, err.Error(), "validation.commands[0]", "Parse should identify the invalid command path")
 }
 
-func TestParse_PreservesEnvironmentCommands(t *testing.T) {
+func TestParse_PreservesDependencyPins(t *testing.T) {
 	t.Parallel()
 
 	cfg, err := Parse([]byte(`{
-		"environment": {
-			"commands": [
-				"curl -fsSL https://example.com/tool.tgz | tar -xz -C $HOME/.local/bin"
-			]
+		"dependencies": {
+			"golangci-lint": "1.64.8"
 		}
 	}`))
-	require.NoError(t, err, "Parse should accept an environment section with shell commands")
-	require.Equal(t, []string{"curl -fsSL https://example.com/tool.tgz | tar -xz -C $HOME/.local/bin"}, cfg.Environment.Commands, "Parse should preserve environment commands verbatim so repos can declare their own install scripts")
+	require.NoError(t, err, "Parse should accept a dependencies map with exact version pins")
+	require.Equal(t, "1.64.8", cfg.Dependencies["golangci-lint"], "Parse should preserve the exact dependency version pin so the install layer can key the cache on it")
 }
 
-func TestParse_RejectsBlankEnvironmentCommand(t *testing.T) {
+func TestParse_RejectsBlankDependencyVersion(t *testing.T) {
 	t.Parallel()
 
 	_, err := Parse([]byte(`{
-		"environment": {"commands": [""]}
+		"dependencies": {"golangci-lint": ""}
 	}`))
-	require.Error(t, err, "Parse should reject blank environment commands the same way it rejects blank bootstrap/validation commands")
-	require.Contains(t, err.Error(), "environment.commands[0]", "Parse should identify the invalid environment command path")
+	require.Error(t, err, "Parse should reject empty dependency versions so unpinned installs cannot slip through")
+	require.Contains(t, err.Error(), "dependencies.golangci-lint", "Parse should identify the offending dependency")
+}
+
+func TestParse_RejectsLatestDependencyVersion(t *testing.T) {
+	t.Parallel()
+
+	_, err := Parse([]byte(`{
+		"dependencies": {"golangci-lint": "latest"}
+	}`))
+	require.Error(t, err, "Parse should reject 'latest' so installs stay deterministic and cacheable by name@version")
+	require.Contains(t, err.Error(), "dependencies.golangci-lint", "Parse should identify the offending dependency")
 }

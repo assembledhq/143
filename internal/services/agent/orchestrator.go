@@ -19,6 +19,8 @@ import (
 	"github.com/assembledhq/143/internal/jobctx"
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/observability"
+	"github.com/assembledhq/143/internal/repoconfig"
+	"github.com/assembledhq/143/internal/sandboxdeps"
 	"github.com/assembledhq/143/internal/services/github/identity"
 	"github.com/assembledhq/143/internal/services/integration"
 	"github.com/assembledhq/143/internal/services/linear"
@@ -900,6 +902,39 @@ func (o *Orchestrator) runSandboxGitBootstrap(ctx context.Context, sandbox *Sand
 			Str("stderr", bootErr.String()).
 			Msg("git-bootstrap failed; agent will lack github push credentials")
 	}
+}
+
+// installSandboxDependencies reads .143/config.json from the sandbox
+// workspace and installs the tools the repo declared (golangci-lint, etc.)
+// before bootstrap/validation commands run. Best-effort: a missing config,
+// malformed config, unknown dependency name, or install failure is logged
+// but never aborts the session — the agent can still run, just without the
+// linter. See sandboxdeps for the install/check contract.
+func (o *Orchestrator) installSandboxDependencies(ctx context.Context, sandbox *Sandbox, workDir string, log zerolog.Logger) {
+	if sandbox == nil || workDir == "" {
+		return
+	}
+	cfgPath := path.Join(workDir, repoconfig.ConfigPath)
+	raw, err := o.provider.ReadFile(ctx, sandbox, cfgPath)
+	if err != nil {
+		if isSandboxFileMissing(err) {
+			return
+		}
+		log.Warn().Err(err).Str("path", cfgPath).Msg("could not read repo config; skipping sandbox dependency install")
+		return
+	}
+	cfg, err := repoconfig.Parse(raw)
+	if err != nil {
+		log.Warn().Err(err).Str("path", cfgPath).Msg("repo config failed to parse; skipping sandbox dependency install")
+		return
+	}
+	if len(cfg.Dependencies) == 0 {
+		return
+	}
+	exec := func(execCtx context.Context, cmd string, stdout, stderr io.Writer) (int, error) {
+		return o.provider.Exec(execCtx, sandbox, cmd, stdout, stderr)
+	}
+	sandboxdeps.Apply(ctx, log, sandboxdeps.Default, exec, cfg.Dependencies)
 }
 
 // RecoverSession resumes an interrupted session from its latest committed
@@ -1898,6 +1933,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 		// session resume. Skipped when the auth socket isn't bound (legacy
 		// or non-integration path).
 		o.runSandboxGitBootstrap(ctx, sandbox, sandboxCfg.WorkDir, log)
+		o.installSandboxDependencies(ctx, sandbox, sandboxCfg.WorkDir, log)
 		// 8d. Stamp git identity on the session row for audit. Best-effort —
 		// a failure here only affects post-hoc reporting, not the run.
 		if authState != nil && authState.source != "" {
@@ -2906,6 +2942,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		}
 		if !reusedExisting {
 			o.runSandboxGitBootstrap(ctx, sandbox, sandboxCfg.WorkDir, log)
+			o.installSandboxDependencies(ctx, sandbox, sandboxCfg.WorkDir, log)
 		}
 
 		commands := canonicalCommands(latestMsg, session.AgentType)

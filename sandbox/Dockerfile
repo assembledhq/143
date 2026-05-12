@@ -121,7 +121,7 @@ RUN userdel -r ubuntu 2>/dev/null || true \
     && useradd --uid 1000 --create-home --user-group --shell /bin/bash sandbox
 USER sandbox
 
-# Per-repo .143/config.json `environment.commands` install opt-in tooling
+# Per-repo .143/config.json `dependencies.commands` install opt-in tooling
 # (linters, formatters, language toolchains) at session start. Without sudo,
 # /usr/local/bin is off-limits at runtime, so installs land in the sandbox
 # user's ~/.local/bin — keep it on PATH so subsequent bootstrap/validation
