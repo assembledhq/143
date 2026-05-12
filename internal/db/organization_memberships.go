@@ -136,8 +136,8 @@ func (s *OrganizationMembershipStore) Insert(ctx context.Context, userID, orgID 
 // re-accept (e.g. a double-clicked link) must not downgrade an admin back to
 // the invite's original role, but a pending invite that legitimately upgrades
 // an existing member should apply. Privilege ordering is admin > member >
-// viewer; a request for a lower-or-equal role is a no-op at the DB level but
-// the returned role reflects the row that now exists.
+// builder > viewer; a request for a lower-or-equal role is a no-op at the DB
+// level but the returned role reflects the row that now exists.
 //
 // Use UpdateRole / UpdateRoleGuarded for explicit role changes (including
 // demotions) — those paths enforce the last-admin invariant, GrantAtLeast
@@ -152,7 +152,8 @@ func (s *OrganizationMembershipStore) GrantAtLeast(ctx context.Context, userID, 
 		ON CONFLICT (user_id, org_id) DO UPDATE
 		SET role = CASE
 			WHEN EXCLUDED.role = 'admin' THEN 'admin'
-			WHEN EXCLUDED.role = 'member' AND organization_memberships.role = 'viewer' THEN 'member'
+			WHEN EXCLUDED.role = 'member' AND organization_memberships.role IN ('builder', 'viewer') THEN 'member'
+			WHEN EXCLUDED.role = 'builder' AND organization_memberships.role = 'viewer' THEN 'builder'
 			ELSE organization_memberships.role
 		END
 		RETURNING role`

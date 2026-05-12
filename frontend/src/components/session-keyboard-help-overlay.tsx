@@ -11,6 +11,7 @@ import {
 type SessionKeyboardHelpOverlayProps = {
   open: boolean;
   onOpenChange: (open: boolean) => void;
+  canShipPR?: boolean;
 };
 
 const shortcutGroups = [
@@ -58,7 +59,15 @@ const shortcutGroups = [
   },
 ];
 
-export function SessionKeyboardHelpOverlay({ open, onOpenChange }: SessionKeyboardHelpOverlayProps) {
+export function SessionKeyboardHelpOverlay({
+  open,
+  onOpenChange,
+  canShipPR = true,
+}: SessionKeyboardHelpOverlayProps) {
+  const visibleShortcutGroups = canShipPR
+    ? shortcutGroups
+    : shortcutGroups.filter((group) => group.title !== "Ship PR");
+
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent
@@ -72,7 +81,7 @@ export function SessionKeyboardHelpOverlay({ open, onOpenChange }: SessionKeyboa
           </DialogDescription>
         </DialogHeader>
         <div className="grid gap-4 overflow-y-auto p-5 sm:grid-cols-2">
-          {shortcutGroups.map((group) => (
+          {visibleShortcutGroups.map((group) => (
             <section key={group.title} className="space-y-2">
               <h3 className="text-xs font-semibold uppercase tracking-[0.14em] text-muted-foreground">
                 {group.title}

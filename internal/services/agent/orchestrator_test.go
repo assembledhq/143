@@ -3161,6 +3161,177 @@ func TestContinueSession_EmbedsHistoryWhenResumeBySessionIDAdapterHasNoCapturedS
 	require.NotContains(t, promptSeen.UserPrompt, priorDiff, "snapshot fallback must not include the prior diff as work to re-apply")
 }
 
+func TestContinueSession_FallsBackToFreshClaudeExecWhenSnapshotResumeStateIsStale(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	issue.Source = models.IssueSourceManual
+	session := testRun(orgID, issue.ID)
+	session.AgentType = models.AgentTypeClaudeCode
+	session.Origin = models.SessionOriginManual
+	session.InteractionMode = models.SessionInteractionModeInteractive
+	session.ValidationPolicy = models.SessionValidationPolicyOnSessionEnd
+	session.Status = string(models.SessionStatusIdle)
+	session.CurrentTurn = 1
+	snapshotKey := "existing-snapshot"
+	session.SnapshotKey = &snapshotKey
+	session.AgentSessionID = strPtr("stale-claude-session")
+
+	d := defaultDeps()
+	d.adapter = &mockAgentAdapter{
+		name:       models.AgentTypeClaudeCode,
+		resumeMode: agent.ResumeBySessionID,
+	}
+	d.issues.issue = issue
+	d.messages.messages = []models.SessionMessage{
+		{
+			ID:         1,
+			SessionID:  session.ID,
+			OrgID:      orgID,
+			TurnNumber: 1,
+			Role:       models.MessageRoleUser,
+			Content:    "Please review my changes.",
+		},
+		{
+			ID:         2,
+			SessionID:  session.ID,
+			OrgID:      orgID,
+			TurnNumber: 1,
+			Role:       models.MessageRoleAssistant,
+			Content:    "I found two issues: a missing nil check and an unbounded loop.",
+		},
+		{
+			ID:         3,
+			SessionID:  session.ID,
+			OrgID:      orgID,
+			TurnNumber: 2,
+			Role:       models.MessageRoleUser,
+			Content:    "please fix both of these issues",
+		},
+	}
+	d.provider.RestoreFn = func(ctx context.Context, sb *agent.Sandbox, reader io.Reader) error {
+		_, err := io.ReadAll(reader)
+		return err
+	}
+	d.provider.SnapshotFn = func(ctx context.Context, sb *agent.Sandbox) (io.ReadCloser, error) {
+		return io.NopCloser(bytes.NewReader([]byte("next-snapshot"))), nil
+	}
+	d.snapshots.data = map[string][]byte{snapshotKey: []byte("restored-snapshot")}
+
+	var prompts []*agent.AgentPrompt
+	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
+		prompts = append(prompts, prompt)
+		if len(prompts) == 1 {
+			return &agent.AgentResult{
+				ExitCode: 1,
+				Error:    "claude CLI exited with code 1",
+			}, nil
+		}
+		return &agent.AgentResult{
+			Summary:         "fixed",
+			ConfidenceScore: 0.9,
+			ExitCode:        0,
+			AgentSessionID:  "fresh-claude-session",
+		}, nil
+	}
+
+	err := buildOrchestrator(d).ContinueSession(context.Background(), session, nil)
+	require.NoError(t, err, "ContinueSession should recover from a stale Claude resume id by retrying with reconstructed context")
+	require.Len(t, prompts, 2, "the Claude adapter should be executed once for the stale resume and once for the fresh-exec fallback")
+	require.True(t, prompts[0].Continuation, "the first attempt should use deterministic Claude resume")
+	require.Equal(t, "stale-claude-session", prompts[0].ResumeSessionID, "the first attempt should use the persisted Claude session id")
+	require.False(t, prompts[1].Continuation, "the fallback should run a fresh exec against the restored workspace")
+	require.Empty(t, prompts[1].ResumeSessionID, "the fallback must not retry the same stale Claude session id")
+	require.Contains(t, prompts[1].UserPrompt, "Previous conversation history", "the fallback should reconstruct prior conversation context")
+	require.Contains(t, prompts[1].UserPrompt, "Please review my changes.", "the fallback should include the earlier user turn")
+	require.Contains(t, prompts[1].UserPrompt, "missing nil check", "the fallback should include the earlier assistant summary")
+	require.Contains(t, prompts[1].UserPrompt, "please fix both of these issues", "the fallback should end with the new user message")
+
+	updates := d.sessions.getTurnUpdates()
+	require.Len(t, updates, 1, "ContinueSession should still persist a single completed turn")
+	require.Equal(t, "fresh-claude-session", updates[0].agentSessionID, "successful fallback should advance the stored Claude session id")
+	require.NotEmpty(t, updates[0].snapshotKey, "successful fallback should refresh the snapshot")
+
+	messages := d.messages.getMessages()
+	var assistantMessages []models.SessionMessage
+	for _, msg := range messages {
+		if msg.Role == models.MessageRoleAssistant {
+			assistantMessages = append(assistantMessages, msg)
+		}
+	}
+	require.Len(t, assistantMessages, 2, "only the original assistant message and the successful fallback reply should exist")
+	require.Equal(t, "fixed", assistantMessages[len(assistantMessages)-1].Content, "the session timeline should record only the successful fallback output")
+}
+
+func TestContinueSession_FallsBackToFreshClaudeExecWhenSnapshotResumeStateIsStale_ScopesHistoryToRequestedThread(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	mainThreadID := uuid.New()
+	codexThreadID := uuid.New()
+	issue := testIssue(orgID)
+	issue.Source = models.IssueSourceManual
+	session := testRun(orgID, issue.ID)
+	session.AgentType = models.AgentTypeClaudeCode
+	session.Origin = models.SessionOriginManual
+	session.InteractionMode = models.SessionInteractionModeInteractive
+	session.ValidationPolicy = models.SessionValidationPolicyOnSessionEnd
+	session.Status = string(models.SessionStatusIdle)
+	session.CurrentTurn = 2
+	snapshotKey := "existing-snapshot"
+	session.SnapshotKey = &snapshotKey
+	session.AgentSessionID = strPtr("stale-claude-session")
+
+	d := defaultDeps()
+	d.adapter = &mockAgentAdapter{
+		name:       models.AgentTypeClaudeCode,
+		resumeMode: agent.ResumeBySessionID,
+	}
+	d.issues.issue = issue
+	d.messages.messages = []models.SessionMessage{
+		{ID: 10, SessionID: session.ID, OrgID: orgID, ThreadID: &mainThreadID, TurnNumber: 1, Role: models.MessageRoleUser, Content: "main tab question"},
+		{ID: 11, SessionID: session.ID, OrgID: orgID, ThreadID: &mainThreadID, TurnNumber: 1, Role: models.MessageRoleAssistant, Content: "main tab answer"},
+		{ID: 20, SessionID: session.ID, OrgID: orgID, ThreadID: &codexThreadID, TurnNumber: 1, Role: models.MessageRoleUser, Content: "codex tab prior question"},
+		{ID: 21, SessionID: session.ID, OrgID: orgID, ThreadID: &codexThreadID, TurnNumber: 1, Role: models.MessageRoleAssistant, Content: "codex tab prior answer"},
+		{ID: 22, SessionID: session.ID, OrgID: orgID, ThreadID: &codexThreadID, TurnNumber: 2, Role: models.MessageRoleUser, Content: "please fix the failing test"},
+	}
+	d.provider.RestoreFn = func(ctx context.Context, sb *agent.Sandbox, reader io.Reader) error {
+		_, err := io.ReadAll(reader)
+		return err
+	}
+	d.provider.SnapshotFn = func(ctx context.Context, sb *agent.Sandbox) (io.ReadCloser, error) {
+		return io.NopCloser(bytes.NewReader([]byte("next-snapshot"))), nil
+	}
+	d.snapshots.data = map[string][]byte{snapshotKey: []byte("restored-snapshot")}
+
+	var prompts []*agent.AgentPrompt
+	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
+		prompts = append(prompts, prompt)
+		if len(prompts) == 1 {
+			return &agent.AgentResult{
+				ExitCode: 1,
+				Error:    "claude CLI exited with code 1",
+			}, nil
+		}
+		return &agent.AgentResult{
+			Summary:         "fixed",
+			ConfidenceScore: 0.9,
+			ExitCode:        0,
+			AgentSessionID:  "fresh-claude-session",
+		}, nil
+	}
+
+	err := buildOrchestrator(d).ContinueSession(context.Background(), session, &agent.ContinueSessionOptions{ThreadID: &codexThreadID})
+	require.NoError(t, err, "ContinueSession should recover from a stale Claude resume id on the requested thread")
+	require.Len(t, prompts, 2, "the Claude adapter should be executed once for the stale resume and once for the fresh-exec fallback")
+	require.Contains(t, prompts[1].UserPrompt, "codex tab prior question", "the fallback should include earlier history from the requested thread")
+	require.Contains(t, prompts[1].UserPrompt, "codex tab prior answer", "the fallback should include the requested thread's assistant history")
+	require.Contains(t, prompts[1].UserPrompt, "please fix the failing test", "the fallback should end with the new message from the requested thread")
+	require.NotContains(t, prompts[1].UserPrompt, "main tab question", "the fallback should not include sibling-thread user history")
+	require.NotContains(t, prompts[1].UserPrompt, "main tab answer", "the fallback should not include sibling-thread assistant history")
+}
+
 func TestContinueSession_UsesThreadExecutionOptions(t *testing.T) {
 	t.Parallel()
 

@@ -1678,21 +1678,6 @@ function SessionComposer({
                   />
                 </DisabledTooltip>
 
-                {availableModels.length > 0 && (
-                  <Select value={selectedModel} onValueChange={onSelectedModelChange}>
-                    <SelectTrigger className="h-8 w-auto gap-1.5 border-none bg-transparent px-2 text-xs text-muted-foreground shadow-none hover:text-foreground focus:ring-0" aria-label="Model override">
-                      <SelectValue placeholder="Default model" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {availableModels.map((model) => (
-                        <SelectItem key={model} value={model}>
-                          {model}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                )}
-
                 {editableAgents && editableAgents.length > 0 && editableAgentType && onEditableAgentTypeChange && (
                   <Select value={editableAgentType} onValueChange={onEditableAgentTypeChange} disabled={agentUpdatePending}>
                     <SelectTrigger className="h-8 w-auto gap-1.5 border-none bg-transparent px-2 text-xs text-muted-foreground shadow-none hover:text-foreground focus:ring-0" aria-label="Agent">
@@ -1702,6 +1687,21 @@ function SessionComposer({
                       {editableAgents.map((agent) => (
                         <SelectItem key={agent.key} value={agent.key}>
                           {agent.label}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                )}
+
+                {availableModels.length > 0 && (
+                  <Select value={selectedModel} onValueChange={onSelectedModelChange}>
+                    <SelectTrigger className="h-8 w-auto gap-1.5 border-none bg-transparent px-2 text-xs text-muted-foreground shadow-none hover:text-foreground focus:ring-0" aria-label="Model override">
+                      <SelectValue placeholder="Default model" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {availableModels.map((model) => (
+                        <SelectItem key={model} value={model}>
+                          {model}
                         </SelectItem>
                       ))}
                     </SelectContent>
@@ -2371,7 +2371,7 @@ function ChatPanel({
           <SessionTimelineSkeleton />
         ) : (
           <>
-            {showFreshThreadShell ? <FreshThreadShell thread={activeThread} /> : null}
+            {showFreshThreadShell ? <FreshThreadShell /> : null}
             <ChatTimeline
               entries={timelineEntries}
               isRunning={isRunning}
@@ -2436,17 +2436,11 @@ function areChatPanelPropsEqual(previous: ChatPanelProps, next: ChatPanelProps):
 
 const MemoizedChatPanel = memo(ChatPanel, areChatPanelPropsEqual);
 
-function FreshThreadShell({ thread }: { thread: SessionThread }) {
+function FreshThreadShell() {
   return (
-    <Card className="mx-auto max-w-2xl border-border/60 bg-muted/20 shadow-none">
+    <Card className="w-full max-w-[92%] border-border/60 bg-muted/20 shadow-none">
       <CardContent className="flex flex-col gap-3 p-4">
-        <div className="flex flex-wrap items-center gap-2">
-          <AgentBadge
-            agentType={thread.agent_type}
-            labelClassName="text-xs font-medium text-foreground"
-          />
-          <span className="text-sm font-medium text-foreground">New tab</span>
-        </div>
+        <span className="text-sm font-medium text-foreground">New tab</span>
         <div className="space-y-1">
           <p className="text-sm text-foreground">No context in this tab yet.</p>
           <p className="text-sm text-muted-foreground">
@@ -2477,6 +2471,8 @@ const TRANSCRIPT_PAGE_VIEWPORT_RATIO = 0.85;
 export function SessionDetailContent({ id }: { id: string }) {
   const router = useRouter();
   const { user, isLoading: isAuthLoading } = useAuth();
+  const canListTeamMembers = user?.role === "admin" || user?.role === "member";
+  const canShipPR = canListTeamMembers;
   const terminalStatuses = new Set(["completed", "pr_created", "failed", "cancelled", "skipped"]);
   const [reviewParam, setReviewParam] = useQueryState("review");
   const [previewParam, setPreviewParam] = useQueryState("preview");
@@ -2627,6 +2623,7 @@ export function SessionDetailContent({ id }: { id: string }) {
   const { data: membersData } = useQuery({
     queryKey: ["team", "members"],
     queryFn: () => api.team.listMembers(),
+    enabled: canListTeamMembers,
   });
 
   const viewerScope = useMemo<SessionScrollViewerScope | null>(
@@ -3110,7 +3107,7 @@ export function SessionDetailContent({ id }: { id: string }) {
   const hasPR = !!prData?.data;
   const hasSnapshot = !!session?.snapshot_key;
   const hasSessionChanges = !!session?.diff || !!session?.diff_stats;
-  const canCreatePR = hasSnapshot && !hasPR && !isRunning;
+  const canCreatePR = canShipPR && hasSnapshot && !hasPR && !isRunning;
   const isTerminalSession = terminalSessionStatuses.has(session?.status ?? "");
   const showExpiredPRAction = hasSessionChanges && !hasSnapshot && !hasPR && isTerminalSession;
   const needsGitHubStatus = canCreatePR || (hasPR && prData?.data?.status === "open");
@@ -4120,10 +4117,10 @@ export function SessionDetailContent({ id }: { id: string }) {
     pr: {
       canCreate: canCreatePR && localPRState === "idle" && !createPRMutation.isPending,
       canView: !!prData?.data?.github_pr_url,
-      canPush: hasPR && prStatus === "open" && !!session?.has_unpushed_changes && hasSnapshot && !isRunning && localPushState === "idle" && !pushChangesMutation.isPending,
-      canFixTests: !!prHealth?.can_fix_tests && pendingPRAction === null,
-      canResolveConflicts: !!prHealth?.can_resolve_conflicts && pendingPRAction === null,
-      canMerge: prHealthAllowsMerge(prHealth) && pendingPRAction === null,
+      canPush: canShipPR && hasPR && prStatus === "open" && !!session?.has_unpushed_changes && hasSnapshot && !isRunning && localPushState === "idle" && !pushChangesMutation.isPending,
+      canFixTests: canShipPR && !!prHealth?.can_fix_tests && pendingPRAction === null,
+      canResolveConflicts: canShipPR && !!prHealth?.can_resolve_conflicts && pendingPRAction === null,
+      canMerge: canShipPR && prHealthAllowsMerge(prHealth) && pendingPRAction === null,
       onCreate: createPRFromKeyboard,
       onView: viewPRFromKeyboard,
       onPush: pushChangesFromKeyboard,
@@ -4177,13 +4174,15 @@ export function SessionDetailContent({ id }: { id: string }) {
       (snapshotUnavailable ? snapshotMessage : null) ||
       (prState === "failed" ? session.pr_creation_error || PR_ERROR_TOAST_MESSAGE : null);
   const showPRAction =
-    canCreatePR ||
-    showExpiredPRAction ||
-    queueingPR ||
-    creatingPR ||
-    finalizingPR ||
-    prState === "failed" ||
-    Boolean(prActionError);
+    canShipPR && (
+      canCreatePR ||
+      showExpiredPRAction ||
+      queueingPR ||
+      creatingPR ||
+      finalizingPR ||
+      prState === "failed" ||
+      Boolean(prActionError)
+    );
 
   let prActionLabel = "Create PR";
   let prActionSpinning = false;
@@ -4231,8 +4230,8 @@ export function SessionDetailContent({ id }: { id: string }) {
     (localPushState === "queued" && pushState !== "failed" && pushState !== "succeeded") ||
     pushState === "queued" ||
     pushState === "pushing";
-  const canPushChanges = pushAvailable && hasSnapshot && !isRunning;
-  const showPushAction = pushAvailable && (canPushChanges || queueingPush || pushingChanges || pushState === "failed" || localPushActionError);
+  const canPushChanges = canShipPR && pushAvailable && hasSnapshot && !isRunning;
+  const showPushAction = canShipPR && pushAvailable && (canPushChanges || queueingPush || pushingChanges || pushState === "failed" || localPushActionError);
   let pushActionLabel = "Push changes";
   let pushActionSpinning = false;
   let pushActionDisabled = false;
@@ -5027,6 +5026,7 @@ export function SessionDetailContent({ id }: { id: string }) {
       <SessionKeyboardHelpOverlay
         open={keyboardHelpOpen}
         onOpenChange={setKeyboardHelpOpen}
+        canShipPR={canShipPR}
       />
       <AlertDialog
         open={!!prAuthPrompt}

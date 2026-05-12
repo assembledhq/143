@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { ChevronDown, Loader2 } from "lucide-react";
 import { useRouter, useSearchParams } from "next/navigation";
@@ -24,6 +24,7 @@ import {
 import { api } from "@/lib/api";
 import { agentTypeForModel } from "@/lib/agents";
 import { AUTOMATION_GOAL_MAX_LENGTH, automationGoalLengthState } from "@/lib/automation-validation";
+import { useAuth } from "@/hooks/use-auth";
 import { BranchPicker } from "@/components/branch-picker";
 import { AutomationGoalEditor } from "@/components/automation-goal-editor";
 import { AutomationModelSelect } from "@/components/automation-model-select";
@@ -52,7 +53,15 @@ import { TimezonePicker } from "../timezone-picker";
 export default function NewAutomationPage() {
   const router = useRouter();
   const searchParams = useSearchParams();
+  const { user, isLoading } = useAuth();
+  const canManage = user?.role === "admin" || user?.role === "member";
   const initialTemplate = getAutomationTemplate(searchParams.get("template") ?? "");
+
+  useEffect(() => {
+    if (!isLoading && !canManage) {
+      router.replace("/automations");
+    }
+  }, [canManage, isLoading, router]);
 
   // Form state
   const [name, setName] = useState(initialTemplate?.name ?? "");
@@ -133,6 +142,10 @@ export default function NewAutomationPage() {
       router.push(`/automations/${res.data.id}`);
     },
   });
+
+  if (!isLoading && !canManage) {
+    return null;
+  }
 
   if (repos.length === 0 && reposData) {
     return (

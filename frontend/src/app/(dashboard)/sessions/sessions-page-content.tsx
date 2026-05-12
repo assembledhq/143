@@ -211,6 +211,7 @@ export function SessionsPageContent() {
     isResolved,
     setPeopleFilter,
   } = usePeopleFilter();
+  const canListTeamMembers = currentUser?.role === "admin" || currentUser?.role === "member";
   const [activeFilter, setActiveFilter] = useQueryState("status", parseAsString);
   const [repo] = useQueryState("repo");
   const [sorting, setSorting] = useState<SortingState>([]);
@@ -281,6 +282,7 @@ export function SessionsPageContent() {
   const { data: membersData } = useQuery({
     queryKey: ["team", "members"],
     queryFn: () => api.team.listMembers(),
+    enabled: canListTeamMembers,
   });
 
   const members = useMemo(() => membersData?.data ?? [], [membersData?.data]);

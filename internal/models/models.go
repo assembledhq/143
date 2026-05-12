@@ -513,6 +513,7 @@ type SessionResult struct {
 	ConfidenceReasoning *string         `json:"confidence_reasoning,omitempty"`
 	RiskFactors         []string        `json:"risk_factors,omitempty"`
 	TokenUsage          json.RawMessage `json:"token_usage,omitempty"`
+	ModelUsed           *string         `json:"model_used,omitempty"`
 	ResultSummary       *string         `json:"result_summary,omitempty"`
 	Diff                *string         `json:"diff,omitempty"`
 	Error               *string         `json:"error,omitempty"`
