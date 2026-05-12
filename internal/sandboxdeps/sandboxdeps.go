@@ -15,9 +15,7 @@ import (
 	"github.com/rs/zerolog"
 )
 
-// Executor runs a shell command inside the sandbox and writes its stdout and
-// stderr to the provided writers. Either writer may be nil to discard.
-// Returns the process exit code and any transport-level error.
+// Executor runs a shell command inside the sandbox.
 type Executor func(ctx context.Context, cmd string, stdout, stderr io.Writer) (int, error)
 
 // Dependency knows how to install one named tool at an exact version.
@@ -26,109 +24,66 @@ type Dependency interface {
 	Install(ctx context.Context, exec Executor, version string) error
 }
 
-// Registry maps dependency names to their install recipe. The default
-// registry is populated via Register from package init blocks.
-type Registry struct {
+// registry holds the install recipes 143 ships built-in. Recipes register
+// themselves from their own init().
+type registry struct {
 	deps map[string]Dependency
 }
 
-func NewRegistry() *Registry {
-	return &Registry{deps: map[string]Dependency{}}
+func newRegistry() *registry {
+	return &registry{deps: map[string]Dependency{}}
 }
 
-func (r *Registry) Register(d Dependency) {
+func (r *registry) Register(d Dependency) {
 	r.deps[d.Name()] = d
 }
 
-func (r *Registry) Lookup(name string) (Dependency, bool) {
-	d, ok := r.deps[name]
-	return d, ok
-}
-
-// Default is the shared registry the orchestrator consults at session start.
-// Built-in recipes register themselves into Default in their own init().
-var Default = NewRegistry()
-
-// Result describes the outcome of installing one dependency.
-type Result struct {
-	Name    string
-	Version string
-	// Status is one of: "installed", "unknown", "failed".
-	Status string
-	Err    error
-}
+// DependencyRegistry holds the install recipes that recipe files (e.g.
+// golangci_lint.go) register into via init(). Apply consults it for every
+// declared dependency. Tests may swap it via t.Cleanup.
+var DependencyRegistry = newRegistry()
 
 // Apply installs every dependency in deps using exec. Unknown names and
-// install failures are recorded in the returned results but do not abort the
-// run — sandbox dependency setup is best-effort so a bad entry can't take
-// down a session. Callers should log the aggregated outcome.
+// install failures are logged but do not abort — sandbox dependency setup is
+// best-effort so a bad entry can't take down a session.
 //
 // Caching is intentionally absent. Every Apply call re-runs every recipe's
 // Install. This is fine while the registry is small (golangci-lint is a ~20MB
 // download). We should iterate when it becomes a bottleneck.
-func Apply(ctx context.Context, log zerolog.Logger, registry *Registry, exec Executor, deps map[string]string) []Result {
+func Apply(ctx context.Context, log zerolog.Logger, exec Executor, deps map[string]string) {
 	if len(deps) == 0 {
-		return nil
-	}
-	if registry == nil {
-		registry = Default
+		return
 	}
 
-	// Stable order so logs and tests don't flap.
+	// Stable order so logs don't flap.
 	names := make([]string, 0, len(deps))
 	for name := range deps {
 		names = append(names, name)
 	}
 	sort.Strings(names)
 
-	results := make([]Result, 0, len(names))
-	for _, name := range names {
-		version := deps[name]
-		res := Result{Name: name, Version: version}
-
-		dep, ok := registry.Lookup(name)
-		if !ok {
-			res.Status = "unknown"
-			res.Err = fmt.Errorf("no install recipe registered for dependency %q", name)
-			log.Warn().Str("dependency", name).Str("version", version).Msg("unknown sandbox dependency; skipping")
-			results = append(results, res)
-			continue
-		}
-
-		if err := dep.Install(ctx, exec, version); err != nil {
-			res.Status = "failed"
-			res.Err = err
-			log.Warn().Err(err).Str("dependency", name).Str("version", version).Msg("sandbox dependency install failed")
-			results = append(results, res)
-			continue
-		}
-		res.Status = "installed"
-		results = append(results, res)
-	}
-
-	logSummary(log, results)
-	return results
-}
-
-func logSummary(log zerolog.Logger, results []Result) {
 	var installed, failed, unknown int
 	var failures []string
-	for _, r := range results {
-		switch r.Status {
-		case "installed":
-			installed++
-		case "failed":
-			failed++
-			failures = append(failures, fmt.Sprintf("%s@%s: %v", r.Name, r.Version, r.Err))
-		case "unknown":
+
+	for _, name := range names {
+		version := deps[name]
+		dep, ok := DependencyRegistry.deps[name]
+		if !ok {
 			unknown++
-			failures = append(failures, fmt.Sprintf("%s@%s: unknown dependency", r.Name, r.Version))
+			failures = append(failures, fmt.Sprintf("%s@%s: no install recipe registered", name, version))
+			log.Warn().Str("dependency", name).Str("version", version).Msg("unknown sandbox dependency; skipping")
+			continue
 		}
+		if err := dep.Install(ctx, exec, version); err != nil {
+			failed++
+			failures = append(failures, fmt.Sprintf("%s@%s: %v", name, version, err))
+			log.Warn().Err(err).Str("dependency", name).Str("version", version).Msg("sandbox dependency install failed")
+			continue
+		}
+		installed++
 	}
-	event := log.Info().
-		Int("installed", installed).
-		Int("failed", failed).
-		Int("unknown", unknown)
+
+	event := log.Info().Int("installed", installed).Int("failed", failed).Int("unknown", unknown)
 	if len(failures) > 0 {
 		event = event.Str("failures", strings.Join(failures, "; "))
 	}

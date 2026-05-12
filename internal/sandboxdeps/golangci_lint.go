@@ -9,7 +9,7 @@ import (
 )
 
 func init() {
-	Default.Register(golangciLint{})
+	DependencyRegistry.Register(golangciLint{})
 }
 
 // golangciLintVersion matches the version strings we accept (e.g. 1.64.8,

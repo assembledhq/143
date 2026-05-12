@@ -934,7 +934,7 @@ func (o *Orchestrator) installSandboxDependencies(ctx context.Context, sandbox *
 	exec := func(execCtx context.Context, cmd string, stdout, stderr io.Writer) (int, error) {
 		return o.provider.Exec(execCtx, sandbox, cmd, stdout, stderr)
 	}
-	sandboxdeps.Apply(ctx, log, sandboxdeps.Default, exec, cfg.Dependencies)
+	sandboxdeps.Apply(ctx, log, exec, cfg.Dependencies)
 }
 
 // RecoverSession resumes an interrupted session from its latest committed
