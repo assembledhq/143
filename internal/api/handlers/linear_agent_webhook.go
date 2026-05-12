@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/url"
 	"strings"
 	"time"
 
@@ -334,10 +335,16 @@ func (d *LinearAgentDispatcher) Dispatch(ctx context.Context, integration *model
 	// 3. Enqueue the worker job. Dedupe on (agent_session_id, action) so
 	// re-deliveries collapse. For prompted events the dedupe also
 	// includes the comment id (when present) so a different follow-up
-	// comment doesn't collapse onto a previous prompted job.
-	dedupeParts := []string{"linear_agent_event", row.LinearAgentSessionID, string(action)}
+	// comment doesn't collapse onto a previous prompted job. Each
+	// dynamic part is URL-escaped so a Linear-side id that ever contains
+	// `:` can't smear two adjacent fields together.
+	dedupeParts := []string{
+		"linear_agent_event",
+		url.QueryEscape(row.LinearAgentSessionID),
+		url.QueryEscape(string(action)),
+	}
 	if action == linearAgentActionPrompted && env.Payload.AgentSession.CommentID != "" {
-		dedupeParts = append(dedupeParts, env.Payload.AgentSession.CommentID)
+		dedupeParts = append(dedupeParts, url.QueryEscape(env.Payload.AgentSession.CommentID))
 	}
 	dedupe := strings.Join(dedupeParts, ":")
 	jobPayload := map[string]any{

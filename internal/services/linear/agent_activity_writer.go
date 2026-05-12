@@ -215,17 +215,9 @@ func (w *AgentActivityWriter) recordEmit(ctx context.Context, activityType model
 
 // discardReservation deletes the in-flight reservation row for an
 // (agent_session, idem_key) pair when its linear_activity_id is still
-// NULL. Race-safe: a concurrent successful emit will have completed first,
-// at which point the row's id is non-NULL and the delete is a no-op.
+// NULL. Race-safe: a concurrent successful emit completes the row first,
+// at which point the predicate `linear_activity_id IS NULL` excludes it
+// and the delete is a no-op.
 func (w *AgentActivityWriter) discardReservation(ctx context.Context, orgID, agentSessionRowID uuid.UUID, idemKey string) error {
-	logs, err := w.activities.ListForAgentSession(ctx, orgID, agentSessionRowID)
-	if err != nil {
-		return err
-	}
-	for _, log := range logs {
-		if log.IdemKey == idemKey && log.LinearActivityID == "" {
-			return w.activities.Discard(ctx, orgID, log.ID)
-		}
-	}
-	return nil
+	return w.activities.DiscardByIdemKey(ctx, orgID, agentSessionRowID, idemKey)
 }

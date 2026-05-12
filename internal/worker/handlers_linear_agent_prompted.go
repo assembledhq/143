@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
@@ -11,6 +12,16 @@ import (
 	"github.com/google/uuid"
 	"github.com/rs/zerolog"
 )
+
+// promptedAwaitingCreateBackoff is the fixed wait used when a `prompted`
+// event lands before its sibling `created` handler has finished attaching
+// the 143 session. Linear delivered the prompted webhook to us and we
+// already 200'd the dispatcher, so Linear won't redeliver — the only way
+// the prompted survives is for the worker to retry. Picked to be long
+// enough that the typical created path (FetchIssue + session create + a
+// few inserts) completes, short enough that human-perceived latency on
+// the follow-up comment stays bounded.
+var promptedAwaitingCreateBackoff = 5 * time.Second
 
 // handleLinearAgentPrompted processes a `prompted` AgentSessionEvent.
 // Linear delivers this when a follow-up @mention or comment lands on an
@@ -45,12 +56,18 @@ func handleLinearAgentPrompted(ctx context.Context, deps LinearAgentEventHandler
 		return fmt.Errorf("lookup agent session: %w", err)
 	}
 	if row.SessionID == nil {
-		// `created` hasn't completed yet. Linear's webhook retry will
-		// re-deliver the prompted; backing off here turns the worker
-		// into a busy-loop that hammers the queue.
+		// `created` hasn't completed yet. The dispatcher already 200'd
+		// Linear so Linear won't redeliver — only the worker's retry
+		// loop can keep this prompted alive. Return a retryable error
+		// with a fixed short wait so we don't busy-loop or fall into
+		// exponential backoff that would defer the follow-up turn for
+		// minutes.
 		logger.Warn().Str("agent_session_id", payload.LinearAgentSessionID).
-			Msg("prompted received but 143 session not yet created; ignoring (created handler will catch up)")
-		return nil
+			Msg("prompted received but 143 session not yet created; retrying shortly")
+		return &RetryableError{
+			Err:        errors.New("linear_agent_event: prompted arrived before created handler attached session_id"),
+			RetryAfter: &promptedAwaitingCreateBackoff,
+		}
 	}
 	sessionID := *row.SessionID
 
