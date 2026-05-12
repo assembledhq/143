@@ -1535,6 +1535,11 @@ describe('SessionDetailPage', () => {
     await waitFor(() => {
       expect(screen.queryByTestId('session-timeline-skeleton')).not.toBeInTheDocument();
     });
+    expect(screen.getByText('New tab')).toBeInTheDocument();
+    expect(screen.queryByText('Fresh tab')).not.toBeInTheDocument();
+    expect(screen.queryByText('Fresh context')).not.toBeInTheDocument();
+    expect(screen.getByText('No context in this tab yet.')).toBeInTheDocument();
+    expect(screen.getByText('Send a task or add context to get started.')).toBeInTheDocument();
     expect(screen.getByPlaceholderText('Send a message to Codex 2...')).toBeInTheDocument();
   });
 
