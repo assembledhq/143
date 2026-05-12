@@ -187,6 +187,39 @@ func TestGrafanaProvisionedDashboardsUseValidDatasourcesAndRangeQueries(t *testi
 	}
 }
 
+func TestPlatformHealthDashboardTracksSessionSnapshotSize(t *testing.T) {
+	t.Parallel()
+
+	rawDashboard, err := os.ReadFile("../deploy/grafana/provisioning/dashboards/platform-health.json")
+	require.NoError(t, err, "test should read the platform health dashboard")
+
+	var dashboard struct {
+		Panels []struct {
+			Title   string `json:"title"`
+			Type    string `json:"type"`
+			Targets []struct {
+				QueryType string `json:"queryType"`
+				Expr      string `json:"expr"`
+			} `json:"targets"`
+		} `json:"panels"`
+	}
+	require.NoError(t, json.Unmarshal(rawDashboard, &dashboard), "platform health dashboard should be valid JSON")
+
+	foundSnapshotSizePanel := false
+	for _, panel := range dashboard.Panels {
+		if panel.Title != "Session snapshot size" {
+			continue
+		}
+		foundSnapshotSizePanel = true
+		require.Equal(t, "timeseries", panel.Type, "snapshot size should be graphed over time")
+		require.NotEmpty(t, panel.Targets, "snapshot size panel should have a LogsQL target")
+		require.Equal(t, "statsRange", panel.Targets[0].QueryType, "snapshot size panel should use a range query")
+		require.Contains(t, panel.Targets[0].Expr, `_msg:"session snapshot saved"`, "snapshot size panel should query the session snapshot success log")
+		require.Contains(t, panel.Targets[0].Expr, "snapshot_size_bytes", "snapshot size panel should aggregate the snapshot byte field")
+	}
+	require.True(t, foundSnapshotSizePanel, "platform health dashboard should include session snapshot size telemetry")
+}
+
 func TestProductionAlertsUseValidLogsQLRangeFilters(t *testing.T) {
 	t.Parallel()
 
