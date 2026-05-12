@@ -37,10 +37,10 @@ type UsageHandler struct {
 type usageRollupReader interface {
 	GetRollupSummary(ctx context.Context, orgID uuid.UUID, start, end time.Time) (db.RollupSummary, error)
 	GetTokenTotals(ctx context.Context, orgID uuid.UUID, start, end time.Time) (db.TokenTotals, error)
-	GetTimeseries(ctx context.Context, orgID uuid.UUID, start, end time.Time, groupBy string, userID *uuid.UUID, capacity *string) ([]models.UsageTimeseriesBucket, error)
-	GetBreakdown(ctx context.Context, orgID uuid.UUID, start, end time.Time, dimension, sortBy string, limit int) ([]models.UsageBreakdownRow, error)
-	GetExportRows(ctx context.Context, orgID uuid.UUID, start, end time.Time, dimension string) (pgx.Rows, error)
-	GetDailySessionCounts(ctx context.Context, orgID uuid.UUID, start, end time.Time, dimension, tzName string) ([]db.ExportDailySessionCountRow, error)
+	GetTimeseries(ctx context.Context, orgID uuid.UUID, start, end time.Time, groupBy, stackBy string, userID *uuid.UUID, capacity *string, filters db.UsageExecutionFilters) ([]models.UsageTimeseriesBucket, error)
+	GetBreakdown(ctx context.Context, orgID uuid.UUID, start, end time.Time, dimension, sortBy string, limit int, filters db.UsageExecutionFilters) ([]models.UsageBreakdownRow, error)
+	GetExportRows(ctx context.Context, orgID uuid.UUID, start, end time.Time, dimension string, filters db.UsageExecutionFilters) (pgx.Rows, error)
+	GetDailySessionCounts(ctx context.Context, orgID uuid.UUID, start, end time.Time, dimension, tzName string, filters db.UsageExecutionFilters) ([]db.ExportDailySessionCountRow, error)
 }
 
 // NewUsageHandler creates a UsageHandler.
@@ -112,6 +112,14 @@ func (h *UsageHandler) exportOrgID(r *http.Request) (uuid.UUID, error) {
 
 // maxTimeRange is the maximum allowed duration for usage queries.
 const maxTimeRange = 90 * 24 * time.Hour
+
+func parseExecutionFilters(r *http.Request) db.UsageExecutionFilters {
+	return db.UsageExecutionFilters{
+		Agent:     db.NormalizeUsageExecutionFilterValue(r.URL.Query().Get("agent")),
+		Model:     db.NormalizeUsageExecutionFilterValue(r.URL.Query().Get("model")),
+		Reasoning: db.NormalizeUsageExecutionFilterValue(r.URL.Query().Get("reasoning")),
+	}
+}
 
 // parseTimeRange extracts start/end from query params with defaults and validation.
 func parseTimeRange(w http.ResponseWriter, r *http.Request) (start, end time.Time, ok bool) {
@@ -266,6 +274,16 @@ func (h *UsageHandler) GetTimeseries(w http.ResponseWriter, r *http.Request) {
 	if c := r.URL.Query().Get("capacity"); c != "" {
 		capacity = &c
 	}
+	filters := parseExecutionFilters(r)
+	stackBy := r.URL.Query().Get("stack_by")
+	if stackBy != "" {
+		switch stackBy {
+		case "agent", "model", "reasoning", "capacity":
+		default:
+			writeError(w, r, http.StatusBadRequest, "INVALID_PARAM", "stack_by must be one of: agent, model, reasoning, capacity")
+			return
+		}
+	}
 
 	// user_id and capacity filters override group_by — reject conflicting combos
 	// so callers don't get silently surprising results.
@@ -273,8 +291,20 @@ func (h *UsageHandler) GetTimeseries(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusBadRequest, "INVALID_PARAM", "user_id and capacity filters are mutually exclusive")
 		return
 	}
+	if userID != nil && filters.HasAny() {
+		writeError(w, r, http.StatusBadRequest, "INVALID_PARAM", "user_id cannot be combined with execution filters")
+		return
+	}
+	if groupBy == "user" && (filters.HasAny() || stackBy != "") {
+		writeError(w, r, http.StatusBadRequest, "INVALID_PARAM", "group_by=user cannot be combined with execution filters or stack_by")
+		return
+	}
+	if groupBy == "capacity" && stackBy != "" {
+		writeError(w, r, http.StatusBadRequest, "INVALID_PARAM", "group_by=capacity cannot be combined with stack_by")
+		return
+	}
 
-	buckets, err := h.rollupStore.GetTimeseries(r.Context(), orgID, start, end, groupBy, userID, capacity)
+	buckets, err := h.rollupStore.GetTimeseries(r.Context(), orgID, start, end, groupBy, stackBy, userID, capacity, filters)
 	if err != nil {
 		writeError(w, r, http.StatusInternalServerError, "INTERNAL", "failed to fetch usage timeseries", err)
 		return
@@ -312,9 +342,14 @@ func (h *UsageHandler) GetBreakdown(w http.ResponseWriter, r *http.Request) {
 		dimension = "user"
 	}
 	switch dimension {
-	case "user", "capacity":
+	case "user", "capacity", "agent", "model", "reasoning":
 	default:
-		writeError(w, r, http.StatusBadRequest, "INVALID_PARAM", "dimension must be one of: user, capacity")
+		writeError(w, r, http.StatusBadRequest, "INVALID_PARAM", "dimension must be one of: user, capacity, agent, model, reasoning")
+		return
+	}
+	filters := parseExecutionFilters(r)
+	if dimension == "user" && filters.HasAny() {
+		writeError(w, r, http.StatusBadRequest, "INVALID_PARAM", "execution filters are not supported for user breakdowns")
 		return
 	}
 
@@ -330,7 +365,7 @@ func (h *UsageHandler) GetBreakdown(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	rows, err := h.rollupStore.GetBreakdown(r.Context(), orgID, start, end, dimension, sortBy, limit)
+	rows, err := h.rollupStore.GetBreakdown(r.Context(), orgID, start, end, dimension, sortBy, limit, filters)
 	if err != nil {
 		writeError(w, r, http.StatusInternalServerError, "INTERNAL", "failed to fetch usage breakdown", err)
 		return
@@ -382,9 +417,14 @@ func (h *UsageHandler) ExportCSV(w http.ResponseWriter, r *http.Request) {
 		dimension = "none"
 	}
 	switch dimension {
-	case "none", "user", "capacity":
+	case "none", "user", "capacity", "agent", "model", "reasoning":
 	default:
-		writeError(w, r, http.StatusBadRequest, "INVALID_PARAM", "dimension must be one of: none, user, capacity")
+		writeError(w, r, http.StatusBadRequest, "INVALID_PARAM", "dimension must be one of: none, user, capacity, agent, model, reasoning")
+		return
+	}
+	filters := parseExecutionFilters(r)
+	if dimension == "user" && filters.HasAny() {
+		writeError(w, r, http.StatusBadRequest, "INVALID_PARAM", "execution filters are not supported for user exports")
 		return
 	}
 
@@ -409,7 +449,7 @@ func (h *UsageHandler) ExportCSV(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	rows, err := h.rollupStore.GetExportRows(r.Context(), orgID, start, end, dimension)
+	rows, err := h.rollupStore.GetExportRows(r.Context(), orgID, start, end, dimension, filters)
 	if err != nil {
 		writeError(w, r, http.StatusInternalServerError, "INTERNAL", "failed to export usage", err)
 		return
@@ -433,6 +473,15 @@ func (h *UsageHandler) ExportCSV(w http.ResponseWriter, r *http.Request) {
 	}
 	if dimension == "capacity" {
 		header = append(header, "capacity_tier")
+	}
+	if dimension == "agent" {
+		header = append(header, "agent")
+	}
+	if dimension == "model" {
+		header = append(header, "model")
+	}
+	if dimension == "reasoning" {
+		header = append(header, "reasoning")
 	}
 	header = append(header, "container_minutes", "sessions", "container_starts", "peak_concurrent", "input_tokens", "output_tokens", "llm_cost_usd")
 	if err := cw.Write(header); err != nil {
@@ -463,7 +512,7 @@ func (h *UsageHandler) ExportCSV(w http.ResponseWriter, r *http.Request) {
 		var (
 			hourUTC      time.Time
 			userEmail    string
-			capacityTier string
+			dimensionKey string
 			minutes      float64
 			sessions     int
 			starts       int
@@ -472,7 +521,7 @@ func (h *UsageHandler) ExportCSV(w http.ResponseWriter, r *http.Request) {
 			outTok       int64
 			cost         float64
 		)
-		if err := rows.Scan(&hourUTC, &userEmail, &capacityTier, &minutes, &sessions, &starts, &peak, &inTok, &outTok, &cost); err != nil {
+		if err := rows.Scan(&hourUTC, &userEmail, &dimensionKey, &minutes, &sessions, &starts, &peak, &inTok, &outTok, &cost); err != nil {
 			logger.Error().Err(err).Msg("csv: failed to scan export row")
 			scanErr = err
 			break
@@ -487,7 +536,10 @@ func (h *UsageHandler) ExportCSV(w http.ResponseWriter, r *http.Request) {
 				record = append(record, userEmail)
 			}
 			if dimension == "capacity" {
-				record = append(record, capacityTier)
+				record = append(record, dimensionKey)
+			}
+			if dimension == "agent" || dimension == "model" || dimension == "reasoning" {
+				record = append(record, dimensionKey)
 			}
 			record = append(record,
 				fmt.Sprintf("%.2f", minutes),
@@ -503,7 +555,7 @@ func (h *UsageHandler) ExportCSV(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		} else {
-			key := dailyKey{date: dateStr, email: userEmail, capacity: capacityTier}
+			key := dailyKey{date: dateStr, email: userEmail, capacity: dimensionKey}
 			agg, ok := dailyAgg[key]
 			if !ok {
 				agg = &dailyRow{}
@@ -536,7 +588,7 @@ func (h *UsageHandler) ExportCSV(w http.ResponseWriter, r *http.Request) {
 		// Fetch accurate daily session counts from raw events instead of
 		// summing hourly rollups, which would double-count sessions that
 		// span multiple hours.
-		dailyCounts, err := h.rollupStore.GetDailySessionCounts(r.Context(), orgID, start, end, dimension, tzName)
+		dailyCounts, err := h.rollupStore.GetDailySessionCounts(r.Context(), orgID, start, end, dimension, tzName, filters)
 		if err != nil {
 			logger.Error().Err(err).Msg("csv: failed to fetch daily session counts")
 			// Write a warning row so the consumer knows session counts are approximate.
@@ -565,6 +617,9 @@ func (h *UsageHandler) ExportCSV(w http.ResponseWriter, r *http.Request) {
 				record = append(record, key.email)
 			}
 			if dimension == "capacity" {
+				record = append(record, key.capacity)
+			}
+			if dimension == "agent" || dimension == "model" || dimension == "reasoning" {
 				record = append(record, key.capacity)
 			}
 			record = append(record,
