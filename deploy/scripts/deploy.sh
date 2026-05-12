@@ -483,6 +483,53 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
     return 1
   }
 
+  # reconcile_caddy_service — applies app-edge Caddy changes with the least
+  # disruptive path available:
+  #   1. `docker compose up -d --no-deps caddy` so compose can recreate the
+  #      container when the built image or env/config changed.
+  #   2. If the container did NOT need recreation but deploy/Caddyfile did
+  #      change, run `caddy reload` in place so ports 80/443 stay bound.
+  # This closes the gap where Dockerfile.caddy / compose env changes could be
+  # deployed without ever replacing the running Caddy container.
+  reconcile_caddy_service() {
+    local caddy_config_changed=0
+    if stage_caddy_config_if_changed; then
+      caddy_config_changed=1
+    fi
+
+    local old_caddy_id new_caddy_id
+    old_caddy_id="$(docker compose -f "$COMPOSE_FILE" ps -q caddy | head -1 || true)"
+
+    echo "Reconciling Caddy service..."
+    docker compose -f "$COMPOSE_FILE" up -d --no-deps caddy
+
+    new_caddy_id="$(docker compose -f "$COMPOSE_FILE" ps -q caddy | head -1 || true)"
+    if [ -z "$new_caddy_id" ]; then
+      echo "ERROR: caddy container not found after docker compose up"
+      return 1
+    fi
+
+    if [ -z "$old_caddy_id" ]; then
+      echo "Caddy started successfully."
+      return 0
+    fi
+
+    if [ "$old_caddy_id" != "$new_caddy_id" ]; then
+      echo "Caddy container recreated to pick up image/env changes."
+      return 0
+    fi
+
+    if [ "$caddy_config_changed" -eq 1 ]; then
+      echo "Caddyfile changed without container recreate — reloading caddy in place..."
+      if ! docker exec "$new_caddy_id" caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile; then
+        echo "In-place reload failed — forcing container recreate."
+        docker compose -f "$COMPOSE_FILE" up -d --no-deps --force-recreate caddy
+      fi
+    else
+      echo "Caddy image/env/config unchanged — leaving caddy running."
+    fi
+  }
+
   resolve_caddy_service_ips() {
     local caddy_id="$1" service="$2"
     docker exec "$caddy_id" sh -c '
@@ -853,6 +900,13 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
     if [ -x /opt/143/deploy/scripts/sandbox-firewall.sh ]; then
       sudo /opt/143/deploy/scripts/sandbox-firewall.sh 143-sandbox
     fi
+  elif [ "$ROLE" = "app" ]; then
+    # Caddy is built locally (Dockerfile.caddy), so neither `docker compose pull`
+    # nor an in-place `caddy reload` would pick up Dockerfile/base-image changes.
+    # Build it before the rolling app/frontend work so a broken edge image fails
+    # the deploy before we rotate user-facing services.
+    echo "Building custom Caddy image..."
+    docker compose -f "$COMPOSE_FILE" build caddy
   fi
 
   # Run migrations BEFORE restarting the app so the DB schema is ready when
@@ -888,24 +942,7 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
     rolling_deploy_service api
     rolling_deploy_service frontend
 
-    # Caddy: only restart when the Caddyfile contents actually changed. This
-    # keeps deploys invisible at the edge for the common case (code-only
-    # change). When the config changed, we prefer an in-place SIGUSR1 reload
-    # over a container restart so ports 80/443 stay bound throughout.
-    if stage_caddy_config_if_changed; then
-      CADDY_ID="$(docker compose -f "$COMPOSE_FILE" ps -q caddy | head -1 || true)"
-      if [ -n "$CADDY_ID" ]; then
-        echo "Caddyfile changed — reloading caddy in place..."
-        if ! docker exec "$CADDY_ID" caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile; then
-          echo "In-place reload failed — falling back to container recreate."
-          docker compose -f "$COMPOSE_FILE" up -d --no-deps --force-recreate caddy
-        fi
-      else
-        docker compose -f "$COMPOSE_FILE" up -d --no-deps caddy
-      fi
-    else
-      echo "Caddyfile unchanged — leaving caddy running."
-    fi
+    reconcile_caddy_service
 
   elif [ "$ROLE" = "worker" ]; then
     # Workers remain single-replica, but we drain the old replica before

@@ -46,7 +46,17 @@ func TestPreviewWildcardTLSUsesCloudflareDNSChallenge(t *testing.T) {
 
 	deployScript, err := os.ReadFile("../deploy/scripts/deploy.sh")
 	require.NoError(t, err, "test should read deploy.sh")
-	require.Contains(t, string(deployScript), "Dockerfile.caddy", "app deploys should stage Dockerfile.caddy before docker compose up so remote builds can succeed")
+	deployText := string(deployScript)
+	require.Contains(t, deployText, "Dockerfile.caddy", "app deploys should stage Dockerfile.caddy before docker compose up so remote builds can succeed")
+	require.Contains(t, deployText, `docker compose -f "$COMPOSE_FILE" build caddy`, "app deploys should explicitly build the custom Caddy image so Dockerfile.caddy changes and base-image refreshes reach the host")
+	require.Contains(t, deployText, `docker compose -f "$COMPOSE_FILE" up -d --no-deps caddy`, "app deploys should reconcile the running Caddy container against the freshly built image and current env")
+	buildIndex := strings.Index(deployText, `echo "Building custom Caddy image..."`)
+	reconcileCallIndex := strings.LastIndex(deployText, `reconcile_caddy_service`)
+	reloadIndex := strings.LastIndex(deployText, `caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile`)
+	require.NotEqual(t, -1, buildIndex, "deploy.sh should build caddy in the app-role execution path")
+	require.NotEqual(t, -1, reconcileCallIndex, "deploy.sh should reconcile caddy after rolling the app/frontend services")
+	require.NotEqual(t, -1, reloadIndex, "deploy.sh should still support in-place Caddyfile reloads")
+	require.Less(t, buildIndex, reconcileCallIndex, "deploy.sh should build the custom caddy image before reconciling the running container")
 
 	provisionScript, err := os.ReadFile("../deploy/scripts/provision.sh")
 	require.NoError(t, err, "test should read provision.sh")
