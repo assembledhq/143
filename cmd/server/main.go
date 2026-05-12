@@ -368,6 +368,7 @@ func main() {
 		pmDocumentStore := db.NewPMDocumentStore(pool)
 		automationStore := db.NewAutomationStore(pool)
 		automationRunStore := db.NewAutomationRunStore(pool)
+		previewStore := db.NewPreviewStore(pool)
 		// Reuse the snapshot store built for the API so both paths agree on
 		// SnapshotStorageDir without duplicating configuration.
 		snapshotStore := apiSnapshotStore
@@ -426,6 +427,20 @@ func main() {
 				sessionMessageStore, automationRunStore, snapshotStore, billingMetrics, cancelRegistry, threadCancelRegistry, orgSettingsCache, sandboxCapacity)
 			if services != nil {
 				sandboxAuthShutdown = services.SandboxAuthShutdown
+				if previewManager != nil && pvProvider != nil {
+					services.PreviewStarter = preview.NewStartRunner(preview.StartRunnerConfig{
+						Manager:         previewManager,
+						Previews:        previewStore,
+						Sessions:        sessionStore,
+						Repositories:    repoStore,
+						FileReader:      fileReader,
+						SandboxProvider: apiSandboxProvider,
+						SandboxCapacity: sandboxCapacity,
+						Snapshots:       snapshotStore,
+						NodeID:          cfg.NodeID,
+						Logger:          logger,
+					})
+				}
 				// Wire eval pub/sub publishers so worker handlers can wake
 				// the API SSE subscribers on every state transition without
 				// the API having to poll Postgres.
