@@ -53,6 +53,14 @@ func handleLinearAgentPrompted(ctx context.Context, deps LinearAgentEventHandler
 	}
 	row, err := agentSessions.Lookup(ctx, orgID, payload.LinearAgentSessionID)
 	if err != nil {
+		if errors.Is(err, db.ErrLinearAgentSessionNotFound) {
+			logger.Warn().Str("agent_session_id", payload.LinearAgentSessionID).
+				Msg("prompted received before created row exists; retrying shortly")
+			return &RetryableError{
+				Err:        errors.New("linear_agent_event: prompted arrived before created handler recorded session row"),
+				RetryAfter: &promptedAwaitingCreateBackoff,
+			}
+		}
 		return fmt.Errorf("lookup agent session: %w", err)
 	}
 	if row.SessionID == nil {
@@ -72,6 +80,14 @@ func handleLinearAgentPrompted(ctx context.Context, deps LinearAgentEventHandler
 	sessionID := *row.SessionID
 
 	commentBody := resolvePromptedCommentBody(ctx, deps, payload, orgID, logger)
+	allowRevision := true
+	if deps.SettingsLoader != nil {
+		settings, err := deps.SettingsLoader(ctx, orgID)
+		if err != nil {
+			return fmt.Errorf("load agent settings: %w", err)
+		}
+		allowRevision = settings.EffectiveAllowRevisionPerPrompt()
+	}
 
 	// Claim the session for a follow-up turn. ClaimIdle is the happy
 	// path; if the session has already wrapped up (PR merged + completed)
@@ -80,8 +96,22 @@ func handleLinearAgentPrompted(ctx context.Context, deps LinearAgentEventHandler
 	// regardless of whether the prior run technically finished.
 	session, err := deps.Stores.Sessions.ClaimIdle(ctx, orgID, sessionID)
 	if err != nil {
+		if !allowRevision {
+			if err := respondRevisionPromptDisabled(ctx, deps, agentSessions, row, orgID, logger); err != nil {
+				return err
+			}
+			logger.Info().
+				Str("agent_session_id", payload.LinearAgentSessionID).
+				Str("session_id", sessionID.String()).
+				Msg("linear_agent_event: prompted ignored because revisions are disabled")
+			return nil
+		}
 		session, err = deps.Stores.Sessions.ClaimForResume(ctx, orgID, sessionID)
 		if err != nil {
+			appendState, stateErr := deps.Stores.Sessions.GetMessageAppendState(ctx, orgID, sessionID)
+			if stateErr == nil && appendState.Status == string(models.SessionStatusRunning) {
+				return appendPromptedMessageToRunningSession(ctx, deps, orgID, appendState, payload, commentBody, logger)
+			}
 			return fmt.Errorf("claim session for prompted turn: %w", err)
 		}
 	}
@@ -101,12 +131,18 @@ func handleLinearAgentPrompted(ctx context.Context, deps LinearAgentEventHandler
 		// we couldn't persist the message. Falling back to "idle" keeps
 		// the system from showing a "running" session that nobody is
 		// actually working on.
-		_ = deps.Stores.Sessions.UpdateStatus(ctx, orgID, sessionID, "idle")
+		if updateErr := deps.Stores.Sessions.UpdateStatus(ctx, orgID, sessionID, "idle"); updateErr != nil {
+			logger.Warn().Err(updateErr).Str("session_id", sessionID.String()).
+				Msg("prompted: failed to revert session status after message create failure")
+		}
 		return fmt.Errorf("create session message: %w", err)
 	}
 
-	if err := enqueueContinueForLinearAgent(ctx, deps.Stores, orgID, sessionID); err != nil {
-		_ = deps.Stores.Sessions.UpdateStatus(ctx, orgID, sessionID, "idle")
+	if err := enqueueContinueForLinearAgent(ctx, deps.Stores, orgID, session); err != nil {
+		if updateErr := deps.Stores.Sessions.UpdateStatus(ctx, orgID, sessionID, "idle"); updateErr != nil {
+			logger.Warn().Err(updateErr).Str("session_id", sessionID.String()).
+				Msg("prompted: failed to revert session status after enqueue failure")
+		}
 		return fmt.Errorf("enqueue continue_session: %w", err)
 	}
 
@@ -115,6 +151,56 @@ func handleLinearAgentPrompted(ctx context.Context, deps LinearAgentEventHandler
 		Str("session_id", sessionID.String()).
 		Int("turn_number", msg.TurnNumber).
 		Msg("linear_agent_event: prompted -> turn appended + continue_session enqueued")
+	return nil
+}
+
+func respondRevisionPromptDisabled(ctx context.Context, deps LinearAgentEventHandlerDeps, agentSessions *db.LinearAgentSessionStore, row *db.LinearAgentSession, orgID uuid.UUID, logger zerolog.Logger) error {
+	if deps.Linear == nil || deps.Linear.AgentActivityStore() == nil || deps.ClientForOrg == nil {
+		return nil
+	}
+	client, err := deps.ClientForOrg(ctx, orgID)
+	if err != nil {
+		return fmt.Errorf("resolve linear client for disabled revision prompt: %w", err)
+	}
+	activity := linear.AgentMilestoneActivity{
+		Type:            models.LinearAgentActivityResponse,
+		Body:            "This @143 session has already ended, and this workspace has disabled automatic revisions from late prompts.",
+		IdemKey:         "prompted:revision_disabled",
+		PinSessionState: "complete",
+	}
+	if err := emitOnce(ctx, client, deps.Linear.AgentActivityStore(), orgID, row.ID, row.LinearAgentSessionID, activity, logger); err != nil {
+		return fmt.Errorf("emit disabled revision prompt response: %w", err)
+	}
+	return agentSessions.SetState(ctx, orgID, row.ID, models.LinearAgentSessionStateComplete)
+}
+
+func appendPromptedMessageToRunningSession(
+	ctx context.Context,
+	deps LinearAgentEventHandlerDeps,
+	orgID uuid.UUID,
+	appendState db.SessionMessageAppendState,
+	payload linearAgentEventPayload,
+	commentBody string,
+	logger zerolog.Logger,
+) error {
+	if deps.Stores.SessionMessages == nil {
+		return errors.New("session_messages store unavailable")
+	}
+	msg := &models.SessionMessage{
+		SessionID:  appendState.ID,
+		OrgID:      orgID,
+		TurnNumber: appendState.CurrentTurn + 1,
+		Role:       models.MessageRoleUser,
+		Content:    commentBody,
+	}
+	if err := deps.Stores.SessionMessages.Create(ctx, msg); err != nil {
+		return fmt.Errorf("create running session message: %w", err)
+	}
+	logger.Info().
+		Str("agent_session_id", payload.LinearAgentSessionID).
+		Str("session_id", appendState.ID.String()).
+		Int("turn_number", msg.TurnNumber).
+		Msg("linear_agent_event: prompted -> message appended to running session")
 	return nil
 }
 
@@ -169,11 +255,21 @@ func fetchLinearComment(ctx context.Context, client linear.Client, commentID str
 // path so retries collapse cleanly. Different queue ("agent" vs the
 // dispatcher's "linear") because continue_session is owned by the
 // agent worker bundle.
-func enqueueContinueForLinearAgent(ctx context.Context, stores *Stores, orgID, sessionID uuid.UUID) error {
-	dedupe := "continue_session:" + sessionID.String()
-	_, err := stores.Jobs.Enqueue(ctx, orgID, "agent", "continue_session", map[string]any{
-		"org_id":     orgID.String(),
-		"session_id": sessionID.String(),
-	}, 5, &dedupe)
+func enqueueContinueForLinearAgent(ctx context.Context, stores *Stores, orgID uuid.UUID, session models.Session) error {
+	if stores == nil || stores.Jobs == nil {
+		return errors.New("jobs store unavailable")
+	}
+	dedupe := db.ContinueSessionDedupeKey(session.ID)
+	_, err := stores.Jobs.EnqueueWithOpts(ctx, orgID, db.EnqueueOpts{
+		Queue:   "agent",
+		JobType: "continue_session",
+		Payload: map[string]any{
+			"org_id":     orgID.String(),
+			"session_id": session.ID.String(),
+		},
+		Priority:     5,
+		DedupeKey:    &dedupe,
+		TargetNodeID: models.SessionWorkerTarget(&session),
+	})
 	return err
 }

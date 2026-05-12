@@ -149,6 +149,7 @@ func NewLinearAgentDispatcher(cfg LinearAgentDispatcherConfig) *LinearAgentDispa
 		agentSessions:  cfg.AgentSessions,
 		activities:     cfg.Activities,
 		jobs:           cfg.Jobs,
+		emitter:        newLinearAgentBootstrapWriter(cfg.ClientForOrg, cfg.Activities, cfg.Logger),
 		settingsLoader: cfg.SettingsLoader,
 		clientForOrg:   cfg.ClientForOrg,
 		metrics:        cfg.Metrics,
@@ -246,7 +247,7 @@ func (d *LinearAgentDispatcher) Dispatch(ctx context.Context, integration *model
 				Msg("failed to load agent settings; ignoring event")
 			return DispatchResult{Status: "feature_off"}
 		}
-		if !settings.EffectiveEnabled() {
+		if !settings.EffectiveEnabled() && !hasEnabledTeamOverride(settings) {
 			d.logger.Debug().
 				Str("org_id", integration.OrgID.String()).
 				Msg("agent feature not enabled for org; ignoring event")
@@ -281,23 +282,28 @@ func (d *LinearAgentDispatcher) Dispatch(ctx context.Context, integration *model
 		}
 	} else {
 		// 1b. Prompted event: lookup-only. The corresponding `created`
-		// already created the row + 143 session. If we don't have a
-		// row, this `prompted` is racing the `created` (Linear can
-		// deliver out of order under recovery). Return ignored;
-		// Linear's webhook retry will re-deliver after `created`
-		// lands.
+		// usually created the row + 143 session. If we don't have a row,
+		// this `prompted` is racing the `created` (Linear can deliver out
+		// of order under recovery). Still enqueue the worker job; it will
+		// retry until the created path records and attaches the session.
 		row, err = d.agentSessions.Lookup(ctx, integration.OrgID, env.Payload.AgentSession.ID)
 		if err != nil {
 			if errors.Is(err, db.ErrLinearAgentSessionNotFound) {
 				d.logger.Warn().
 					Str("agent_session_id", env.Payload.AgentSession.ID).
-					Msg("prompted event arrived before created; ignoring (Linear retry will re-deliver)")
+					Msg("prompted event arrived before created; enqueueing retryable worker job")
+				row = &db.LinearAgentSession{
+					OrgID:                integration.OrgID,
+					IntegrationID:        integration.ID,
+					LinearAgentSessionID: env.Payload.AgentSession.ID,
+					LinearIssueID:        env.Payload.AgentSession.IssueID,
+				}
+			} else {
+				d.logger.Error().Err(err).
+					Str("agent_session_id", env.Payload.AgentSession.ID).
+					Msg("failed to lookup linear_agent_sessions; ignoring prompted event")
 				return DispatchResult{Status: "ignored"}
 			}
-			d.logger.Error().Err(err).
-				Str("agent_session_id", env.Payload.AgentSession.ID).
-				Msg("failed to lookup linear_agent_sessions; ignoring prompted event")
-			return DispatchResult{Status: "ignored"}
 		}
 	}
 
@@ -390,4 +396,42 @@ func (d *LinearAgentDispatcher) SetBootstrapEmitter(e linearAgentBootstrapEmitte
 		return
 	}
 	d.emitter = e
+}
+
+func hasEnabledTeamOverride(settings models.LinearAgentSettings) bool {
+	for _, enabled := range settings.PerTeamEnabled {
+		if enabled != nil && *enabled {
+			return true
+		}
+	}
+	return false
+}
+
+type linearAgentBootstrapWriter struct {
+	clientForOrg func(ctx context.Context, orgID uuid.UUID) (linear.Client, error)
+	activities   *db.LinearAgentActivityLogStore
+	logger       zerolog.Logger
+}
+
+func newLinearAgentBootstrapWriter(
+	clientForOrg func(ctx context.Context, orgID uuid.UUID) (linear.Client, error),
+	activities *db.LinearAgentActivityLogStore,
+	logger zerolog.Logger,
+) linearAgentBootstrapEmitter {
+	if clientForOrg == nil || activities == nil {
+		return nil
+	}
+	return &linearAgentBootstrapWriter{
+		clientForOrg: clientForOrg,
+		activities:   activities,
+		logger:       logger,
+	}
+}
+
+func (w *linearAgentBootstrapWriter) Emit(ctx context.Context, in linear.EmitInput) (linear.EmitResult, error) {
+	client, err := w.clientForOrg(ctx, in.OrgID)
+	if err != nil {
+		return linear.EmitResult{}, err
+	}
+	return linear.NewAgentActivityWriter(client, w.activities, nil, w.logger).Emit(ctx, in)
 }

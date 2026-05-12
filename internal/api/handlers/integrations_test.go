@@ -498,6 +498,7 @@ func TestIntegrationHandler_HandleLinearOAuthCallback_PersistsRefreshTokenAndExp
 	var capturedConfigBytes []byte
 	configCapture := pgxmock.QueryMatcherFunc(func(_ string, _ string) error { return nil })
 	_ = configCapture
+	expectNoExistingCredentialLookup(mock)
 	mock.ExpectQuery("INSERT INTO org_credentials").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), capturingArg(&capturedConfigBytes), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
@@ -540,11 +541,84 @@ func TestIntegrationHandler_HandleLinearOAuthCallback_PersistsRefreshTokenAndExp
 	require.WithinDuration(t, time.Now().Add(2*time.Hour), persisted.ExpiresAt, 30*time.Second, "ExpiresAt must reflect expires_in=7200")
 }
 
+func TestIntegrationHandler_HandleLinearOAuthCallback_PreservesWebhookSecretOnReauth(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	integrationID := uuid.New()
+	credentialID := uuid.New()
+	now := time.Now().UTC()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "test should create pgx mock")
+	defer mock.Close()
+
+	store := db.NewIntegrationStore(mock)
+	credentialStore := db.NewOrgCredentialStore(mock, nil)
+
+	transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		switch req.URL.String() {
+		case "https://api.linear.app/oauth/token":
+			respBody := `{"access_token":"lin_at_new","refresh_token":"lin_rt_new","token_type":"Bearer","scope":"read,write","expires_in":7200}`
+			return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(bytes.NewBufferString(respBody))}, nil
+		case "https://api.linear.app/graphql":
+			return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(bytes.NewBufferString(`{"data":{"viewer":{"organization":{"id":"lin-org-1","name":"Acme"}}}}`))}, nil
+		default:
+			return nil, errors.New("unexpected request URL")
+		}
+	})
+
+	handler := NewIntegrationHandler(store, credentialStore, "linear-client-id", "linear-client-secret", "http://localhost:8080", "http://localhost:3000")
+	handler.client = &http.Client{Transport: transport}
+
+	existingConfig := crypto.DevEncrypt([]byte(`{"webhook_secret":"lin_whsec_existing","access_token":"lin_at_old"}`))
+	mock.ExpectQuery("SELECT id, org_id, provider, label, config").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "org_id", "provider", "label", "config", "status", "last_verified_at", "last_used_at", "created_by", "created_at", "updated_at"}).
+			AddRow(credentialID, orgID, string(models.ProviderLinear), "", existingConfig, "active", nil, nil, nil, now, now))
+
+	var capturedConfigBytes []byte
+	mock.ExpectQuery("INSERT INTO org_credentials").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), capturingArg(&capturedConfigBytes), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(credentialID))
+
+	mock.ExpectQuery("SELECT .+ FROM integrations .+ provider = @provider .+ status IN \\('active', 'error'\\)").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "org_id", "provider", "config", "status", "last_synced_at", "created_at"}))
+
+	mock.ExpectQuery("INSERT INTO integrations").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(integrationID, now))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/integrations/linear/callback?code=test-code&state=test-state", nil)
+	req.AddCookie(&http.Cookie{Name: "linear_integration_oauth_state", Value: "test-state"})
+	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+	w := httptest.NewRecorder()
+
+	handler.HandleLinearOAuthCallback(w, req)
+
+	require.Equal(t, http.StatusTemporaryRedirect, w.Code, "callback should redirect after successful Linear OAuth")
+	require.NoError(t, mock.ExpectationsWereMet(), "callback should read existing credential before upserting the refreshed config")
+
+	plaintext, err := crypto.DevDecrypt(capturedConfigBytes)
+	require.NoError(t, err, "captured bytes should be DevEncrypt'd")
+	var persisted models.LinearConfig
+	require.NoError(t, json.Unmarshal(plaintext, &persisted), "persisted config should decode as LinearConfig")
+	require.Equal(t, "lin_whsec_existing", persisted.WebhookSecret, "Linear webhook secret must survive OAuth reauthorization")
+	require.Equal(t, "lin_at_new", persisted.AccessToken, "OAuth callback should still persist the new access token")
+}
+
 // capturingArg returns a pgxmock argument matcher that records the value
 // it sees into the supplied byte slice pointer. Used for asserting on
 // encrypted config payloads that we want to decrypt and inspect.
 func capturingArg(dest *[]byte) pgxmock.Argument {
 	return capturingArgImpl{dest: dest}
+}
+
+func expectNoExistingCredentialLookup(mock pgxmock.PgxPoolIface) {
+	mock.ExpectQuery("SELECT id, org_id, provider, label, config").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "org_id", "provider", "label", "config", "status", "last_verified_at", "last_used_at", "created_by", "created_at", "updated_at"}))
 }
 
 type capturingArgImpl struct {
@@ -601,6 +675,7 @@ func TestIntegrationHandler_HandleLinearOAuthCallback_SavesCredentialAndIntegrat
 	handler := NewIntegrationHandler(store, credentialStore, "linear-client-id", "linear-client-secret", "http://localhost:8080", "http://localhost:3000")
 	handler.client = &http.Client{Transport: transport}
 
+	expectNoExistingCredentialLookup(mock)
 	mock.ExpectQuery("INSERT INTO org_credentials").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
@@ -681,6 +756,7 @@ func TestIntegrationHandler_HandleLinearOAuthCallback_AsyncRefreshAndEnqueue(t *
 		return nil
 	})
 
+	expectNoExistingCredentialLookup(mock)
 	mock.ExpectQuery("INSERT INTO org_credentials").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
@@ -1130,6 +1206,7 @@ func TestIntegrationHandler_HandleSentryOAuthCallback_SavesCredentialAndIntegrat
 	)
 	handler.client = &http.Client{Transport: transport}
 
+	expectNoExistingCredentialLookup(mock)
 	mock.ExpectQuery("INSERT INTO org_credentials").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
@@ -1152,6 +1229,77 @@ func TestIntegrationHandler_HandleSentryOAuthCallback_SavesCredentialAndIntegrat
 	require.Equal(t, http.StatusTemporaryRedirect, w.Code)
 	require.Equal(t, "http://localhost:3000/integrations?sentry=connected", w.Header().Get("Location"))
 	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestIntegrationHandler_HandleSentryOAuthCallback_PreservesWebhookSecretOnReauth(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	integrationID := uuid.New()
+	credentialID := uuid.New()
+	now := time.Now().UTC()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "test should create pgx mock")
+	defer mock.Close()
+
+	store := db.NewIntegrationStore(mock)
+	credentialStore := db.NewOrgCredentialStore(mock, nil)
+
+	transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		switch {
+		case req.URL.String() == "https://sentry.io/oauth/token/":
+			respBody := `{"access_token":"sentry-access-token-new","refresh_token":"sentry-refresh-token-new","token_type":"bearer","scope":"org:read project:read event:read"}`
+			return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(bytes.NewBufferString(respBody))}, nil
+		case req.URL.String() == "https://sentry.io/api/0/organizations/":
+			respBody := `[{"slug":"acme-corp","name":"Acme Corp"}]`
+			return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(bytes.NewBufferString(respBody))}, nil
+		default:
+			return nil, errors.New("unexpected request URL: " + req.URL.String())
+		}
+	})
+
+	handler := NewIntegrationHandler(
+		store, credentialStore, "", "", "http://localhost:8080", "http://localhost:3000",
+		WithSentryOAuth("sentry-client-id", "sentry-client-secret"),
+	)
+	handler.client = &http.Client{Transport: transport}
+
+	existingConfig := crypto.DevEncrypt([]byte(`{"webhook_secret":"sentry_whsec_existing","access_token":"sentry-access-token-old"}`))
+	mock.ExpectQuery("SELECT id, org_id, provider, label, config").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "org_id", "provider", "label", "config", "status", "last_verified_at", "last_used_at", "created_by", "created_at", "updated_at"}).
+			AddRow(credentialID, orgID, string(models.ProviderSentry), "", existingConfig, "active", nil, nil, nil, now, now))
+
+	var capturedConfigBytes []byte
+	mock.ExpectQuery("INSERT INTO org_credentials").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), capturingArg(&capturedConfigBytes), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(credentialID))
+
+	mock.ExpectQuery("SELECT .+ FROM integrations .+ provider = @provider .+ status IN \\('active', 'error'\\)").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "org_id", "provider", "config", "status", "last_synced_at", "created_at"}))
+
+	mock.ExpectQuery("INSERT INTO integrations").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(integrationID, now))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/integrations/sentry/callback?code=sentry-auth-code&state=test-state", nil)
+	req.AddCookie(&http.Cookie{Name: "sentry_integration_oauth_state", Value: "test-state"})
+	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+	w := httptest.NewRecorder()
+
+	handler.HandleSentryOAuthCallback(w, req)
+
+	require.Equal(t, http.StatusTemporaryRedirect, w.Code, "callback should redirect after successful Sentry OAuth")
+	require.NoError(t, mock.ExpectationsWereMet(), "callback should read existing credential before upserting the refreshed config")
+
+	plaintext, err := crypto.DevDecrypt(capturedConfigBytes)
+	require.NoError(t, err, "captured bytes should be DevEncrypt'd")
+	var persisted models.SentryConfig
+	require.NoError(t, json.Unmarshal(plaintext, &persisted), "persisted config should decode as SentryConfig")
+	require.Equal(t, "sentry_whsec_existing", persisted.WebhookSecret, "Sentry webhook secret must survive OAuth reauthorization")
+	require.Equal(t, "sentry-access-token-new", persisted.AccessToken, "OAuth callback should still persist the new access token")
 }
 
 func TestIntegrationHandler_HandleSentryOAuthCallback_StateMismatch(t *testing.T) {

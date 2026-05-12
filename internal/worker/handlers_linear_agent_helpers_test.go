@@ -30,7 +30,7 @@ func TestBuildAgentSession(t *testing.T) {
 		Description: "It's broken",
 		TeamID:      "team_1",
 	}
-	repo := linear.AgentRepoResolveResult{RepositoryID: repoID, Source: "team_default_mapping"}
+	repo := linear.AgentRepoResolveResult{RepositoryID: repoID, DefaultBranch: "release/2026-05", Source: "team_default_mapping"}
 
 	session := buildAgentSession(orgID, repo, issue, fetched)
 	require.Equal(t, orgID, session.OrgID, "session inherits org from caller, not from the issue (defense against cross-org bugs)")
@@ -40,6 +40,8 @@ func TestBuildAgentSession(t *testing.T) {
 	require.Equal(t, issue.ID, *session.PrimaryIssueID)
 	require.NotNil(t, session.RepositoryID)
 	require.Equal(t, repoID, *session.RepositoryID)
+	require.NotNil(t, session.TargetBranch, "mapped default branch should become the session target branch")
+	require.Equal(t, "release/2026-05", *session.TargetBranch, "session target branch should honor the team repo mapping override")
 	require.NotNil(t, session.LinearIdentifierHint)
 	require.Equal(t, "ACS-42", *session.LinearIdentifierHint,
 		"identifier hint feeds the branch-naming logic and the PR title prefix")
