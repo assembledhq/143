@@ -105,7 +105,7 @@ func (s *UsageRollupStore) RollupHour(ctx context.Context, orgID uuid.UUID, hour
 			e.session_id,
 			COALESCE(s.triggered_by_user_id, '00000000-0000-0000-0000-000000000000'::uuid) AS user_id,
 			s.agent_type,
-			s.model_used,
+			s.model_override AS model_used,
 			s.reasoning_effort,
 			s.token_usage,
 			e.cpu_limit,
@@ -254,7 +254,7 @@ func (s *UsageRollupStore) RollupHour(ctx context.Context, orgID uuid.UUID, hour
 		SELECT
 			COALESCE(s.triggered_by_user_id, '00000000-0000-0000-0000-000000000000'::uuid) AS user_id,
 			s.agent_type,
-			s.model_used,
+			s.model_override AS model_used,
 			s.reasoning_effort,
 			s.token_usage,
 			COALESCE((
@@ -1534,7 +1534,7 @@ func computeDurationStats(durations []float64) (avg, p95 float64) {
 }
 
 func normalizedSessionModelSQL(alias string) string {
-	return fmt.Sprintf("COALESCE(NULLIF(%s.model_used, ''), COALESCE(%s.token_usage->'native_usage'->>'model', 'unknown'))", alias, alias)
+	return fmt.Sprintf("COALESCE(NULLIF(%s.model_override, ''), COALESCE(%s.token_usage->'native_usage'->>'model', 'unknown'))", alias, alias)
 }
 
 func normalizedSessionReasoningSQL(alias string) string {
