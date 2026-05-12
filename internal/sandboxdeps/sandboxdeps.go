@@ -63,6 +63,10 @@ type Result struct {
 // install failures are recorded in the returned results but do not abort the
 // run — sandbox dependency setup is best-effort so a bad entry can't take
 // down a session. Callers should log the aggregated outcome.
+//
+// Caching is intentionally absent. Every Apply call re-runs every recipe's
+// Install. This is fine while the registry is small (golangci-lint is a ~20MB
+// download). We should iterate when it becomes a bottleneck.
 func Apply(ctx context.Context, log zerolog.Logger, registry *Registry, exec Executor, deps map[string]string) []Result {
 	if len(deps) == 0 {
 		return nil
