@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/assembledhq/143/internal/models"
@@ -155,6 +156,23 @@ func TestParseConfig_FromRepoConfigPreviewSection(t *testing.T) {
 	require.NoError(t, err, "ParseConfig should accept nested preview config inside .143/config.json")
 	require.Equal(t, "web", cfg.Primary, "ParseConfig should parse the nested preview section")
 	require.Contains(t, cfg.Services, "web", "ParseConfig should preserve services from the nested preview section")
+}
+
+func TestDogfoodPreviewConfig_ServerUsesRegisteredReadinessPath(t *testing.T) {
+	t.Parallel()
+
+	_, file, _, ok := runtime.Caller(0)
+	require.True(t, ok, "test should resolve its source file path")
+	repoRoot := filepath.Clean(filepath.Join(filepath.Dir(file), "..", "..", ".."))
+
+	raw, err := os.ReadFile(filepath.Join(repoRoot, ".143", "config.json"))
+	require.NoError(t, err, "dogfood preview config should be readable")
+
+	cfg, err := ParseConfig(raw)
+	require.NoError(t, err, "dogfood preview config should parse")
+	server, ok := cfg.Services["server"]
+	require.True(t, ok, "dogfood preview config should define the server service")
+	require.Equal(t, "/readyz", server.Ready.HTTPPath, "server readiness probe should hit the registered public readiness endpoint")
 }
 
 func TestParseConfig_RepoConfigWithoutPreviewSection(t *testing.T) {

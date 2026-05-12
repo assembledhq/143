@@ -5,6 +5,7 @@
 
 include:
   - docker-compose.vector.yml
+  - docker-compose.dns-probe.yml
 
 services:
   caddy:

@@ -175,29 +175,95 @@ func (s *Service) finalizeSandboxEnv(agentType models.AgentType, env map[string]
 	return s.env.CheckAuth(agentType, env)
 }
 
-func (s *Service) injectRequiredAgentAuth(ctx context.Context, orgID uuid.UUID, agentType models.AgentType, sb *agent.Sandbox, env map[string]string) error {
-	if agentType != models.AgentTypeCodex {
-		return nil
-	}
+func (s *Service) injectRequiredAgentAuth(ctx context.Context, orgID uuid.UUID, agentType models.AgentType, sb *agent.Sandbox, env map[string]string) (agent.TokenBillingMode, error) {
+	switch agentType {
+	case models.AgentTypeCodex:
+		if env["OPENAI_API_KEY"] != "" {
+			return agent.TokenBillingModeAPIKey, nil
+		}
 
-	if env["OPENAI_API_KEY"] != "" {
-		return nil
+		injected, err := s.env.InjectCodexAuth(ctx, orgID, sb)
+		if err != nil {
+			return agent.TokenBillingModeUnknown, &agent.AuthError{
+				AgentType: agentType,
+				Detail:    fmt.Sprintf("failed to prepare ChatGPT authentication for Codex: %v", err),
+			}
+		}
+		if !injected {
+			return agent.TokenBillingModeUnknown, &agent.AuthError{
+				AgentType: agentType,
+				Detail:    "No ChatGPT credentials are configured for Codex. Connect ChatGPT before running PM with Codex.",
+			}
+		}
+		return agent.TokenBillingModeSubscription, nil
+	case models.AgentTypeClaudeCode:
+		if env["ANTHROPIC_API_KEY"] != "" {
+			return agent.TokenBillingModeAPIKey, nil
+		}
+		return agent.TokenBillingModeUnknown, nil
+	case models.AgentTypeGeminiCLI, models.AgentTypeAmp, models.AgentTypePi:
+		return agent.TokenBillingModeAPIKey, nil
+	default:
+		return agent.TokenBillingModeUnknown, nil
 	}
+}
 
-	injected, err := s.env.InjectCodexAuth(ctx, orgID, sb)
-	if err != nil {
-		return &agent.AuthError{
-			AgentType: agentType,
-			Detail:    fmt.Sprintf("failed to prepare ChatGPT authentication for Codex: %v", err),
+func buildPMTokenUsageHint(settings models.OrgSettings, agentType models.AgentType, env map[string]string, billingMode agent.TokenBillingMode) agent.TokenUsageHint {
+	return agent.TokenUsageHint{
+		AgentType:      agentType,
+		EffectiveModel: effectivePMAgentModel(settings, agentType, env),
+		BillingMode:    effectivePMBillingMode(agentType, env, billingMode),
+	}
+}
+
+func effectivePMAgentModel(settings models.OrgSettings, agentType models.AgentType, env map[string]string) string {
+	if env == nil {
+		env = map[string]string{}
+	}
+	switch agentType {
+	case models.AgentTypePi:
+		if env["PI_MODEL_CUSTOM"] != "" {
+			return env["PI_MODEL_CUSTOM"]
+		}
+	case models.AgentTypeAmp:
+		if env["AMP_MODE"] == "" {
+			if cfg := settings.AgentConfig[string(agentType)]; cfg != nil && cfg["AMP_MODE"] != "" {
+				return cfg["AMP_MODE"]
+			}
+			return models.AmpModeSmart
 		}
 	}
-	if !injected {
-		return &agent.AuthError{
-			AgentType: agentType,
-			Detail:    "No ChatGPT credentials are configured for Codex. Connect ChatGPT before running PM with Codex.",
+	if envVar := models.ModelEnvVarForAgentType(agentType); envVar != "" && env[envVar] != "" {
+		return env[envVar]
+	}
+	if envVar := models.ModelEnvVarForAgentType(agentType); envVar != "" {
+		if cfg := settings.AgentConfig[string(agentType)]; cfg != nil {
+			return cfg[envVar]
 		}
 	}
-	return nil
+	return ""
+}
+
+func effectivePMBillingMode(agentType models.AgentType, env map[string]string, fallback agent.TokenBillingMode) agent.TokenBillingMode {
+	if fallback != "" && fallback != agent.TokenBillingModeUnknown {
+		return fallback
+	}
+	switch agentType {
+	case models.AgentTypeCodex:
+		if env["OPENAI_API_KEY"] != "" {
+			return agent.TokenBillingModeAPIKey
+		}
+		return agent.TokenBillingModeSubscription
+	case models.AgentTypeClaudeCode:
+		if env["ANTHROPIC_API_KEY"] != "" {
+			return agent.TokenBillingModeAPIKey
+		}
+		return agent.TokenBillingModeUnknown
+	case models.AgentTypeGeminiCLI, models.AgentTypeAmp, models.AgentTypePi:
+		return agent.TokenBillingModeAPIKey
+	default:
+		return agent.TokenBillingModeUnknown
+	}
 }
 
 func NewService(
@@ -426,7 +492,8 @@ func (s *Service) Analyze(ctx context.Context, orgID uuid.UUID, trigger models.P
 		}
 	}()
 
-	if err := s.injectRequiredAgentAuth(ctx, orgID, agentType, sb, sbCfg.Env); err != nil {
+	authBillingMode, err := s.injectRequiredAgentAuth(ctx, orgID, agentType, sb, sbCfg.Env)
+	if err != nil {
 		exitReason = containerExitReason(ctx, err)
 		return nil, failSession("inject codex auth", err)
 	}
@@ -488,6 +555,7 @@ func (s *Service) Analyze(ctx context.Context, orgID uuid.UUID, trigger models.P
 		SystemPrompt: buildPMSystemPrompt(available, ctxBundle.pmContext.MaxConcurrentRuns, len(ctxBundle.pmContext.ActiveProjects)),
 		UserPrompt:   string(contextJSON),
 		MaxTokens:    pmTokenLimit,
+		UsageHint:    buildPMTokenUsageHint(ctxBundle.settings, agentType, sbCfg.Env, authBillingMode),
 	}
 
 	// Stream PM agent logs into session_logs (same pattern as orchestrator.streamLogs).
@@ -532,7 +600,7 @@ func (s *Service) Analyze(ctx context.Context, orgID uuid.UUID, trigger models.P
 	plan.Status = models.PMPlanStatusExecuting
 	plan.TriggeredBy = trigger
 	plan.IssuesReviewed = len(ctxBundle.pmContext.OpenIssues)
-	if result.TokenUsage != (agent.TokenUsage{}) {
+	if agent.HasPersistableTokenUsage(result.TokenUsage) {
 		tokenJSON, err := json.Marshal(result.TokenUsage)
 		if err != nil {
 			s.logger.Warn().Err(err).Msg("failed to marshal token usage")

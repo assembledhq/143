@@ -59,9 +59,16 @@ runcmd:
   # Set up GHCR access (token written to file to avoid leaking in cloud-init logs)
   - su - deploy -c 'cat /opt/143/.ghcr-token | docker login ghcr.io -u deploy --password-stdin && rm -f /opt/143/.ghcr-token'
 
-  # Clone repo to get compose files
+  # Clone repo to get compose files. These copies are first-boot fanout:
+  # the compose `up` below runs before any operator `make provision-worker`
+  # / `make deploy-worker` step, so every file the `include:` directive
+  # references (vector, dns-probe) must already be on disk. provision.sh
+  # re-syncs the same files later and is the canonical source for ongoing
+  # changes — duplication is intentional.
   - su - deploy -c 'git clone --depth 1 ${REPO_URL} /tmp/143-repo'
   - su - deploy -c 'cp /tmp/143-repo/docker-compose.worker.yml /opt/143/'
+  - su - deploy -c 'cp /tmp/143-repo/docker-compose.vector.yml /opt/143/'
+  - su - deploy -c 'cp /tmp/143-repo/docker-compose.dns-probe.yml /opt/143/'
   - su - deploy -c 'cp /tmp/143-repo/Dockerfile.dnsmasq /opt/143/'
   - su - deploy -c 'cp -r /tmp/143-repo/deploy /opt/143/deploy'
   - rm -rf /tmp/143-repo
@@ -73,9 +80,9 @@ runcmd:
 
   # Create the shared sandbox egress network with the same pinned subnet used
   # by provision.sh and deploy.sh. The subnet lets sandbox-dns claim the static
-  # 172.30.0.2 IP that /etc/143/sandbox-resolv.conf points at. enable_icc=false
-  # blocks one sandbox from TCP-connecting to another on the same bridge.
-  - su - deploy -c 'docker network inspect 143-sandbox >/dev/null 2>&1 || docker network create --driver bridge --subnet 172.30.0.0/24 --opt com.docker.network.bridge.enable_icc=false --label managed-by=143 143-sandbox'
+  # 172.30.0.2 IP that /etc/143/sandbox-resolv.conf points at. Leave bridge ICC
+  # at Docker's default so gVisor sandboxes can reach sandbox-dns on the bridge.
+  - su - deploy -c 'docker network inspect 143-sandbox >/dev/null 2>&1 || docker network create --driver bridge --subnet 172.30.0.0/24 --label managed-by=143 143-sandbox'
 
   # Apply host-level egress rules: block sandbox traffic to cloud metadata
   # and RFC1918. Must run AFTER the network exists (reads its subnet).
@@ -114,6 +121,11 @@ write_files:
       GITHUB_APP_CLIENT_ID=${GITHUB_APP_CLIENT_ID}
       GITHUB_APP_CLIENT_SECRET=${GITHUB_APP_CLIENT_SECRET}
       CHROME_WS_URL=${CHROME_WS_URL}
+      SANDBOX_HEALTH_CHECK_IMAGE=${SANDBOX_HEALTH_CHECK_IMAGE}
+      SANDBOX_REQUIRE_DISK_QUOTA=true
+      SANDBOX_GC_INTERVAL=5m
+      SANDBOX_GC_GRACE=30m
+      SANDBOX_GC_HARD_MAX=24h
 
   # Per-host identity. Stays put across deploys — deploy.sh only rewrites
   # /opt/143/.env, then re-appends this file. If you re-IP the host or

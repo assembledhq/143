@@ -297,6 +297,38 @@ func TestPullRequestStore_UpdateHealthEnrichmentAndRepairRuns(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all enrichment and repair run expectations should be met")
 }
 
+func TestPullRequestStore_ListActiveRepairRuns(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewPullRequestStore(mock)
+	orgID := uuid.New()
+	prID := uuid.New()
+	sessionA := uuid.New()
+	sessionB := uuid.New()
+	now := time.Now().UTC()
+
+	mock.ExpectQuery("SELECT .+ FROM pull_request_repair_runs").
+		WithArgs(pgx.NamedArgs{
+			"org_id":          orgID,
+			"pull_request_id": prID,
+			"health_version":  int64(9),
+		}).
+		WillReturnRows(pgxmock.NewRows(prRepairRunColumns).
+			AddRow(uuid.New(), orgID, prID, sessionA, models.PullRequestRepairActionTypeFixTests, int64(9), true, nil, now, now).
+			AddRow(uuid.New(), orgID, prID, sessionB, models.PullRequestRepairActionTypeResolveConflicts, int64(9), true, nil, now, now))
+
+	runs, err := store.ListActiveRepairRuns(context.Background(), orgID, prID, 9)
+	require.NoError(t, err, "ListActiveRepairRuns should return active repair runs for the current health version")
+	require.Len(t, runs, 2, "ListActiveRepairRuns should return every active repair run for the pull request health version")
+	require.Equal(t, sessionA, runs[0].SessionID, "ListActiveRepairRuns should decode the first repair session")
+	require.Equal(t, sessionB, runs[1].SessionID, "ListActiveRepairRuns should decode the second repair session")
+	require.NoError(t, mock.ExpectationsWereMet(), "all active repair run expectations should be met")
+}
+
 func TestPullRequestStore_beginTxRequiresTxStarter(t *testing.T) {
 	t.Parallel()
 

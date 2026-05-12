@@ -85,6 +85,13 @@ else
 fi
 
 apply_worker_bucket_overrides "$ROLE" "$HOST"
+if [ "$ROLE" = "worker" ]; then
+  : "${SANDBOX_HEALTH_CHECK_IMAGE:=busybox:1.36.1}"
+  : "${SANDBOX_REQUIRE_DISK_QUOTA:=true}"
+  : "${SANDBOX_GC_INTERVAL:=5m}"
+  : "${SANDBOX_GC_GRACE:=30m}"
+  : "${SANDBOX_GC_HARD_MAX:=24h}"
+fi
 
 # Validate required secrets are available (from env or .env.production.enc)
 if [ "$ROLE" != "logging" ] && [ "$ROLE" != "redis" ]; then
@@ -204,7 +211,8 @@ if [ "$ROLE" = "db" ]; then
 Cmnd_Alias DEPLOY_CMDS = \
     /usr/bin/chown -R deploy\:deploy /opt/143/deploy/scripts, \
     /usr/bin/systemctl restart docker, \
-    /opt/143/deploy/scripts/install-log-rotation.sh *
+    /opt/143/deploy/scripts/install-log-rotation.sh *, \
+    /opt/143/deploy/scripts/install-docker-dns.sh *
 
 deploy ALL=(root) NOPASSWD: DEPLOY_CMDS
 SUDOERS
@@ -239,7 +247,8 @@ Cmnd_Alias DEPLOY_CMDS = \
     /usr/bin/chown -R deploy\:deploy /opt/143/deploy/vmalert, \
     /usr/bin/chown -R deploy\:deploy /opt/143/deploy/grafana, \
     /usr/bin/systemctl restart docker, \
-    /opt/143/deploy/scripts/install-log-rotation.sh *
+    /opt/143/deploy/scripts/install-log-rotation.sh *, \
+    /opt/143/deploy/scripts/install-docker-dns.sh *
 
 deploy ALL=(root) NOPASSWD: DEPLOY_CMDS
 SUDOERS
@@ -264,7 +273,8 @@ elif [ "$ROLE" = "redis" ]; then
 Cmnd_Alias DEPLOY_CMDS = \
     /usr/bin/chown -R deploy\:deploy /opt/143/deploy/scripts, \
     /usr/bin/systemctl restart docker, \
-    /opt/143/deploy/scripts/install-log-rotation.sh *
+    /opt/143/deploy/scripts/install-log-rotation.sh *, \
+    /opt/143/deploy/scripts/install-docker-dns.sh *
 
 deploy ALL=(root) NOPASSWD: DEPLOY_CMDS
 SUDOERS
@@ -288,6 +298,11 @@ if [ "$ROLE" = "app" ] || [ "$ROLE" = "worker" ] || [ "$ROLE" = "logging" ]; the
   # Vector collector is included from the main compose file
   scp "${SCP_OPTS[@]}" "$PROJECT_DIR/docker-compose.vector.yml" root@"$HOST":/opt/143/
 fi
+if [ "$ROLE" = "app" ] || [ "$ROLE" = "worker" ]; then
+  # DNS probe is included by both compose files; stage it so the include
+  # directive resolves on first `docker compose up`.
+  scp "${SCP_OPTS[@]}" "$PROJECT_DIR/docker-compose.dns-probe.yml" root@"$HOST":/opt/143/
+fi
 if [ "$ROLE" = "worker" ]; then
   # sandbox-dns is built locally from docker-compose.worker.yml on first
   # `docker compose up`, so fresh worker provisioning must stage its Dockerfile
@@ -295,7 +310,7 @@ if [ "$ROLE" = "worker" ]; then
   scp "${SCP_OPTS[@]}" "$PROJECT_DIR/Dockerfile.dnsmasq" root@"$HOST":/opt/143/
 fi
 scp "${SCP_OPTS[@]}" -r "$PROJECT_DIR/deploy" root@"$HOST":/opt/143/
-ssh "${SSH_OPTS[@]}" root@"$HOST" "chown -R deploy:deploy /opt/143 && chmod +x /opt/143/deploy/scripts/install-log-rotation.sh"
+ssh "${SSH_OPTS[@]}" root@"$HOST" "chown -R deploy:deploy /opt/143 && chmod +x /opt/143/deploy/scripts/install-log-rotation.sh /opt/143/deploy/scripts/install-docker-dns.sh"
 
 # Step 2a: Cap docker container log files (max-size/max-file in
 # /etc/docker/daemon.json) BEFORE step 5 starts services. Closes the
@@ -308,6 +323,16 @@ case "$ROLE" in
   *)  LOG_MAX_SIZE="100m" ;;
 esac
 ssh "${SSH_OPTS[@]}" root@"$HOST" "/opt/143/deploy/scripts/install-log-rotation.sh $LOG_MAX_SIZE 5"
+
+# Step 2a (continued): Pin Docker daemon DNS to multiple independent
+# resolvers. Without this, the embedded resolver at 127.0.0.11 inherits the
+# host's resolv.conf — usually a single provider DNS — so one upstream
+# outage takes the whole fleet's container DNS down at once. The
+# 2026-05-07T04:15Z incident hit three workers simultaneously this way.
+# Order is fastest first; Docker's embedded resolver falls through to the
+# next on a SERVFAIL/timeout. Cloudflare + Google + Quad9 are independent
+# operators and networks.
+ssh "${SSH_OPTS[@]}" root@"$HOST" "/opt/143/deploy/scripts/install-docker-dns.sh 1.1.1.1 8.8.8.8 9.9.9.9"
 
 # Step 2b: Sync authorized keys from deploy/authorized_keys/*.pub
 # Replaces authorized_keys on the host with exactly the keys in the repo.
@@ -337,9 +362,10 @@ elif [ "$ROLE" = "worker" ]; then
   # and docker-entrypoint.sh decrypts it at boot. Provision the file before the
   # first `docker compose up` — if the source path is missing, Docker creates a
   # directory at /opt/143/.env.production.enc and later deploy-time scp fails.
-  printf 'SOPS_AGE_KEY=%s\nDB_PASSWORD=%s\nDB_HOST=%s\nVICTORIALOGS_HOST=%s\nSERVER_ROLE=%s\nREDIS_TOPOLOGY=%s\nREDIS_PRIVATE_IP=%s\nREDIS_PASSWORD=%s\nGITHUB_APP_CLIENT_ID=%s\nGITHUB_APP_CLIENT_SECRET=%s\nWORKER_PROCESS_COUNT=%s\nSANDBOX_CPU_LIMIT=%s\nSANDBOX_MEMORY_LIMIT_MB=%s\nSANDBOX_DISK_LIMIT_GB=%s\n' \
+  printf 'SOPS_AGE_KEY=%s\nDB_PASSWORD=%s\nDB_HOST=%s\nVICTORIALOGS_HOST=%s\nSERVER_ROLE=%s\nREDIS_TOPOLOGY=%s\nREDIS_PRIVATE_IP=%s\nREDIS_PASSWORD=%s\nGITHUB_APP_CLIENT_ID=%s\nGITHUB_APP_CLIENT_SECRET=%s\nWORKER_PROCESS_COUNT=%s\nWORKER_MAX_ACTIVE_SANDBOXES=%s\nSANDBOX_CPU_LIMIT=%s\nSANDBOX_MEMORY_LIMIT_MB=%s\nSANDBOX_DISK_LIMIT_GB=%s\nSANDBOX_HEALTH_CHECK_IMAGE=%s\nSANDBOX_REQUIRE_DISK_QUOTA=%s\nSANDBOX_GC_INTERVAL=%s\nSANDBOX_GC_GRACE=%s\nSANDBOX_GC_HARD_MAX=%s\n' \
     "$SOPS_AGE_KEY" "$DB_PASSWORD" "$DB_HOST" "$VICTORIALOGS_HOST" "$ROLE" "${REDIS_TOPOLOGY:-standalone}" "${REDIS_PRIVATE_IP:-}" "${REDIS_PASSWORD:-}" "${GITHUB_APP_CLIENT_ID:-}" "${GITHUB_APP_CLIENT_SECRET:-}" \
-    "${WORKER_PROCESS_COUNT:-}" "${SANDBOX_CPU_LIMIT:-}" "${SANDBOX_MEMORY_LIMIT_MB:-}" "${SANDBOX_DISK_LIMIT_GB:-}" \
+    "${WORKER_PROCESS_COUNT:-}" "${WORKER_MAX_ACTIVE_SANDBOXES:-}" "${SANDBOX_CPU_LIMIT:-}" "${SANDBOX_MEMORY_LIMIT_MB:-}" "${SANDBOX_DISK_LIMIT_GB:-}" \
+    "$SANDBOX_HEALTH_CHECK_IMAGE" "$SANDBOX_REQUIRE_DISK_QUOTA" "$SANDBOX_GC_INTERVAL" "$SANDBOX_GC_GRACE" "$SANDBOX_GC_HARD_MAX" \
     | ssh "${SSH_OPTS[@]}" root@"$HOST" 'cat > /opt/143/.env && chown deploy:deploy /opt/143/.env && chmod 600 /opt/143/.env'
 
   # Per-host identity (NODE_ID, WORKER_PRIVATE_IP, PREVIEW_INTERNAL_BASE_URL)
@@ -405,17 +431,17 @@ PULL_APP
       # subnet Docker auto-assigns from its default pool and the static IP
       # mapping breaks.
       #
-      # enable_icc=false blocks one sandbox from TCP-connecting to another.
-      # Intra-bridge traffic from a sandbox to preview-infra and to
-      # sandbox-dns is allowed by an explicit RETURN rule installed in
-      # DOCKER-USER by sandbox-firewall.sh.
+      # Leave Docker's bridge ICC setting at its default. On some Docker /
+      # gVisor combinations, disabling bridge ICC blocks sandbox traffic to
+      # the sandbox-dns sidecar before DOCKER-USER can carve it out, which
+      # breaks all agent DNS resolution.
       # docker inspect returns "" on a missing network (with exit 1 swallowed
       # by `|| true`) and the subnet string on an existing one. Distinguishing
       # the two via a single call keeps us from spawning two `su - deploy`
       # login shells per provision.
       EXISTING_SANDBOX_SUBNET=$(su - deploy -c 'docker network inspect 143-sandbox -f "{{range .IPAM.Config}}{{.Subnet}}{{end}}" 2>/dev/null' || true)
       if [ -z "$EXISTING_SANDBOX_SUBNET" ]; then
-        su - deploy -c 'docker network create --driver bridge --subnet 172.30.0.0/24 --opt com.docker.network.bridge.enable_icc=false --label managed-by=143 143-sandbox'
+        su - deploy -c 'docker network create --driver bridge --subnet 172.30.0.0/24 --label managed-by=143 143-sandbox'
       elif [ "$EXISTING_SANDBOX_SUBNET" != "172.30.0.0/24" ]; then
         echo "ERROR: 143-sandbox network has subnet '$EXISTING_SANDBOX_SUBNET'; expected 172.30.0.0/24." >&2
         echo "  This worker was provisioned before the pinned-subnet change. To upgrade:" >&2

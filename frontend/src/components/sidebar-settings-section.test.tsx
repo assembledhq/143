@@ -3,6 +3,14 @@ import { renderWithProviders, screen } from '@/test/test-utils';
 import { SidebarSettingsSection } from './sidebar-settings-section';
 
 describe('SidebarSettingsSection', () => {
+  it('uses the same touch target sizing as other mobile nav tabs', () => {
+    renderWithProviders(
+      <SidebarSettingsSection pathname="/sessions" userRole="admin" variant="mobile" />
+    );
+
+    expect(screen.getByRole('button', { name: /Settings/ })).toHaveClass('px-2.5', 'py-3', 'text-sm');
+  });
+
   it('shows admin-only entries when role is admin', () => {
     renderWithProviders(
       <SidebarSettingsSection pathname="/settings" userRole="admin" />

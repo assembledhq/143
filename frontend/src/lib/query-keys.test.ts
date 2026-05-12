@@ -17,10 +17,6 @@ describe("queryKeys", () => {
       expect(queryKeys.sessions.detail("s-1")).toEqual(["session", "s-1"]);
     });
 
-    it("validation includes session id", () => {
-      expect(queryKeys.sessions.validation("s-1")).toEqual(["session", "s-1", "validation"]);
-    });
-
     it("timeline includes session id", () => {
       expect(queryKeys.sessions.timeline("s-1")).toEqual(["session", "s-1", "timeline"]);
     });

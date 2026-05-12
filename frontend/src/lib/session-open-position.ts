@@ -1,6 +1,7 @@
 import type { TimelineEntry } from "./timeline";
 
 export const SESSION_SCROLL_STORAGE_PREFIX = "session-scroll-position:";
+export const SESSION_ACTIVE_THREAD_STORAGE_PREFIX = "session-active-thread:";
 
 export interface SessionScrollViewerScope {
   userId: string;
@@ -21,6 +22,11 @@ interface StoredSessionScrollPosition {
   scrollTop: number;
 }
 
+interface StoredSessionActiveThread {
+  version: 1;
+  threadId: string;
+}
+
 interface ResolveInitialSessionAnchorInput {
   entries: TimelineEntry[];
   isActive: boolean;
@@ -39,6 +45,14 @@ export function getSessionScrollStorageKey(
   const orgPart = viewerScope.orgId ?? "no-org";
   const threadSuffix = threadId ? `:${threadId}` : "";
   return `${SESSION_SCROLL_STORAGE_PREFIX}${orgPart}:${viewerScope.userId}:${sessionId}${threadSuffix}`;
+}
+
+export function getSessionActiveThreadStorageKey(
+  sessionId: string,
+  viewerScope: SessionScrollViewerScope,
+): string {
+  const orgPart = viewerScope.orgId ?? "no-org";
+  return `${SESSION_ACTIVE_THREAD_STORAGE_PREFIX}${orgPart}:${viewerScope.userId}:${sessionId}`;
 }
 
 export function readStoredSessionScrollPosition(
@@ -96,6 +110,67 @@ export function writeStoredSessionScrollPosition(
   }
 
   storage.set(key, normalizedValue);
+}
+
+export function readStoredSessionActiveThread(
+  storage: Pick<Storage, "getItem"> | ScrollStorageReader,
+  sessionId: string,
+  viewerScope: SessionScrollViewerScope,
+): string | null {
+  const key = getSessionActiveThreadStorageKey(sessionId, viewerScope);
+  const rawValue =
+    "getItem" in storage ? storage.getItem(key) : storage.get(key) ?? null;
+
+  if (!rawValue) return null;
+
+  if (rawValue.startsWith("{")) {
+    try {
+      const parsed = JSON.parse(rawValue) as Partial<StoredSessionActiveThread>;
+      if (parsed.version !== 1 || typeof parsed.threadId !== "string" || parsed.threadId.length === 0) {
+        return null;
+      }
+      return parsed.threadId;
+    } catch {
+      return null;
+    }
+  }
+
+  return rawValue.length > 0 ? rawValue : null;
+}
+
+export function writeStoredSessionActiveThread(
+  storage: Pick<Storage, "setItem"> | ScrollStorageWriter,
+  sessionId: string,
+  viewerScope: SessionScrollViewerScope,
+  threadId: string,
+): void {
+  if (threadId.length === 0) {
+    return;
+  }
+
+  const key = getSessionActiveThreadStorageKey(sessionId, viewerScope);
+  const normalizedValue = JSON.stringify({
+    version: 1,
+    threadId,
+  } satisfies StoredSessionActiveThread);
+
+  if ("setItem" in storage) {
+    storage.setItem(key, normalizedValue);
+    return;
+  }
+
+  storage.set(key, normalizedValue);
+}
+
+export function resolveInitialSessionThreadId(
+  threads: Array<{ id: string }>,
+  storedThreadId: string | null,
+): string | null {
+  if (storedThreadId && threads.some((thread) => thread.id === storedThreadId)) {
+    return storedThreadId;
+  }
+
+  return threads[0]?.id ?? null;
 }
 
 export function findLatestAssistantTurnStartIndex(entries: TimelineEntry[]): number | null {
