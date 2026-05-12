@@ -140,6 +140,7 @@ export interface PreviewStatusResponse {
   instance: PreviewInstance;
   services: PreviewService[];
   infrastructure?: PreviewInfrastructure[];
+  preview_origin?: string;
 }
 
 // Console messages
