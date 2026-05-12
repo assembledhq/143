@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"os"
-	"strings"
 	"testing"
 	"time"
 
@@ -634,9 +633,8 @@ func TestJobStore_ReclaimLostRunningJobs_IncludesLegacyNullLeaseRows(t *testing.
 
 	sql := string(body)
 	require.Contains(t, sql, "j.lease_expires_at IS NULL", "recovery query should include legacy running jobs without a lease expiry")
-	require.True(t,
-		strings.Contains(sql, "j.locked_at < $1") || strings.Contains(sql, "j.locked_at <= $1"),
-		"legacy null-lease recovery should be bounded by the stale node cutoff")
+	require.Contains(t, sql, "OR (j.lease_expires_at IS NULL AND d.id IS NOT NULL)", "legacy null-lease recovery should only reclaim jobs owned by dead or stale nodes")
+	require.NotContains(t, sql, "j.lease_expires_at IS NULL AND j.locked_at < $1", "legacy null-lease recovery must not reclaim active live-node jobs using the node heartbeat cutoff")
 }
 
 func TestJobStore_ReclaimLostRunningJobs_ReturnsWrappedErrors(t *testing.T) {

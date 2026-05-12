@@ -78,7 +78,7 @@ type jobLeaseStore interface {
 // from retrying indefinitely (e.g. when stuck behind a concurrency limit).
 const maxRetryableDuration = 8 * time.Minute
 
-var defaultMaxLongRunningJobDuration = time.Duration(models.MaxMaxSessionDurationSeconds)*time.Second + 2*time.Minute + 15*time.Minute
+var defaultMaxLongRunningJobDuration = time.Duration(models.MaxAbsoluteRuntimeCeilingSeconds)*time.Second + 2*time.Minute
 
 type Worker struct {
 	jobs          jobLeaseStore

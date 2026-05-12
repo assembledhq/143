@@ -16,6 +16,7 @@ import (
 
 	"github.com/assembledhq/143/internal/jobctx"
 	"github.com/assembledhq/143/internal/models"
+	"github.com/assembledhq/143/internal/services/agent"
 )
 
 type wakeTestStore struct {
@@ -315,6 +316,13 @@ func TestWorker_Poll_LongRunningSessionJobContextHasWatchdog(t *testing.T) {
 		t.Fatal("long-running session job handler should be cancelled by the worker watchdog")
 	}
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestDefaultMaxLongRunningJobDuration_CoversConfiguredRuntimeCeiling(t *testing.T) {
+	t.Parallel()
+
+	expectedMinimum := time.Duration(models.MaxAbsoluteRuntimeCeilingSeconds)*time.Second + agent.HandlerCleanupBuffer
+	require.GreaterOrEqual(t, defaultMaxLongRunningJobDuration, expectedMinimum, "worker watchdog should not fire before the largest valid handler runtime")
 }
 
 func TestWorker_Start_WakeTriggersPoll(t *testing.T) {

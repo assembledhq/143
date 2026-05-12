@@ -663,7 +663,7 @@ func (s *JobStore) ReclaimLostRunningJobs(ctx context.Context, staleBefore time.
 			WHERE j.status = 'running'
 			  AND (
 				j.lease_expires_at < now()
-				OR (j.lease_expires_at IS NULL AND j.locked_at < $1)
+				OR (j.lease_expires_at IS NULL AND d.id IS NOT NULL)
 				OR d.id IS NOT NULL
 			  )
 		),
