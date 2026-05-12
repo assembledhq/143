@@ -16,7 +16,7 @@ import { api } from "@/lib/api";
 interface UsageExportButtonProps {
   start: string;
   end: string;
-  dimension?: "capacity" | "agent" | "model" | "reasoning";
+  dimension?: "user" | "agent" | "model" | "reasoning";
   filters?: {
     agent?: string | null;
     model?: string | null;
@@ -24,9 +24,9 @@ interface UsageExportButtonProps {
   };
 }
 
-export function UsageExportButton({ start, end, dimension = "capacity", filters }: UsageExportButtonProps) {
+export function UsageExportButton({ start, end, dimension = "user", filters }: UsageExportButtonProps) {
   const [granularity, setGranularity] = useState<"daily" | "hourly">("daily");
-  const [exportDimension, setExportDimension] = useState<"none" | "capacity" | "agent" | "model" | "reasoning">(dimension);
+  const [exportDimension, setExportDimension] = useState<"none" | "user" | "agent" | "model" | "reasoning">(dimension);
   const [showOptions, setShowOptions] = useState(false);
   const panelRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
@@ -123,13 +123,13 @@ export function UsageExportButton({ start, end, dimension = "capacity", filters 
             </div>
             <div className="space-y-1.5">
               <Label className="text-xs font-medium text-muted-foreground">Breakdown</Label>
-              <Select value={exportDimension} onValueChange={(v) => setExportDimension(v as "none" | "capacity" | "agent" | "model" | "reasoning")}>
+              <Select value={exportDimension} onValueChange={(v) => setExportDimension(v as "none" | "user" | "agent" | "model" | "reasoning")}>
                 <SelectTrigger className="h-8 text-xs">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
                   <SelectItem value="none" className="text-xs">Org totals</SelectItem>
-                  <SelectItem value="capacity" className="text-xs">By Capacity</SelectItem>
+                  <SelectItem value="user" className="text-xs">By User</SelectItem>
                   <SelectItem value="agent" className="text-xs">By Agent</SelectItem>
                   <SelectItem value="model" className="text-xs">By Model</SelectItem>
                   <SelectItem value="reasoning" className="text-xs">By Reasoning</SelectItem>
