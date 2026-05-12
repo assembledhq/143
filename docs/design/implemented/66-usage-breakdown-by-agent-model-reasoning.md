@@ -63,9 +63,9 @@ Relevant session fields now used by the rollup include:
 - `sessions.agent_type`
 - `sessions.reasoning_effort`
 - `sessions.token_usage`
-- `sessions.model_used`
+- `sessions.model_override`
 
-Model breakdown now uses persisted effective-model data instead of `model_override`.
+Model breakdown persists normalized model buckets in `usage_hourly_execution.model_used`. The rollup derives that bucket from provider-reported `sessions.token_usage.native_usage.model` when available, falling back to `sessions.model_override` and then `unknown`.
 
 ## Design principles
 
@@ -218,10 +218,10 @@ Reasoning needs explicit bucket semantics:
 
 #### `model`
 
-- Source: persisted effective runtime model
+- Source: normalized model bucket stored on `usage_hourly_execution.model_used`
 - Purpose: cost-driver analysis
 
-This dimension requires a new persisted field such as `sessions.model_used`.
+The rollup source is provider-reported token metadata when present, then the session's configured `model_override`, then `unknown`.
 
 #### `capacity`
 
@@ -230,7 +230,7 @@ This dimension requires a new persisted field such as `sessions.model_used`.
 
 ### Model fidelity requirement
 
-Model breakdown should not launch until the system persists the effective runtime model used by the session.
+Model breakdown should use a persisted rollup bucket rather than deriving rows from request-time session scans.
 
 Reasons:
 
@@ -239,7 +239,7 @@ Reasons:
 - Amp and Pi express model selection differently than Codex/Claude/Gemini
 - finance-oriented comparisons must reflect actual runtime choice
 
-The shipped UI uses persisted `model_used`; it does not derive model analytics from `model_override`.
+The shipped UI reads persisted `usage_hourly_execution.model_used`. The hourly rollup may use `model_override` only as a fallback when provider token metadata does not report the runtime model.
 
 ### User drilldowns
 
@@ -429,7 +429,7 @@ Reasoning:
 
 1. Added `usage_hourly_execution` and backfilled `agent`, `reasoning`, `model`, and `capacity` rollups through the existing hourly reroll path.
 2. Shipped `Agent` and `Reasoning` breakdowns plus execution filters.
-3. Persisted effective runtime model as `model_used`.
+3. Persisted normalized model buckets as `usage_hourly_execution.model_used`.
 4. Enabled `Model` breakdown, `Model` filter, and stacked token-by-model charts.
 
 Still explicitly not part of this implementation:
@@ -595,7 +595,7 @@ Implemented.
 
 Ship:
 
-- persisted `model_used`
+- persisted `usage_hourly_execution.model_used`
 - `Model` breakdown
 - `Model` filter
 - stacked `total tokens by model` chart
@@ -633,7 +633,7 @@ Users may assume the model view is authoritative before it is.
 
 Mitigation:
 
-- do not expose `Model` until `model_used` exists
+- do not expose `Model` until `usage_hourly_execution.model_used` is populated by the hourly rollup
 
 ### Risk: filter complexity overwhelms casual users
 

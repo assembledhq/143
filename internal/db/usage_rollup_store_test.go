@@ -9,6 +9,8 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/pashagolub/pgxmock/v4"
 	"github.com/stretchr/testify/require"
+
+	"github.com/assembledhq/143/internal/models"
 )
 
 func TestComputePeakConcurrent_Empty(t *testing.T) {
@@ -559,6 +561,38 @@ func TestRollupHour_NoEvents(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
+func TestRollupHour_UsesSessionModelOverrideColumn(t *testing.T) {
+	t.Parallel()
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "mock pool should be created")
+	defer mock.Close()
+
+	store := NewUsageRollupStore(mock)
+	orgID := uuid.New()
+	hour := time.Date(2026, 4, 1, 10, 0, 0, 0, time.UTC)
+
+	eventCols := []string{"id", "session_id", "user_id", "agent_type", "model_used", "reasoning_effort", "token_usage", "cpu_limit", "memory_limit_mb", "started_at", "stopped_at", "container_minutes", "duration_ms"}
+	mock.ExpectQuery("s\\.model_override").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "hour_start": hour, "hour_end": hour.Add(time.Hour), "now": pgxmock.AnyArg()}).
+		WillReturnRows(pgxmock.NewRows(eventCols))
+
+	tokenCols := []string{"user_id", "agent_type", "model_used", "reasoning_effort", "token_usage", "capacity_key", "input_tokens", "output_tokens", "cost_usd"}
+	mock.ExpectQuery("s\\.model_override").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "hour": hour, "hour_start": hour, "hour_end": hour.Add(time.Hour), "now": pgxmock.AnyArg(), "unknown_capacity": usageUnknownCapacityKey}).
+		WillReturnRows(pgxmock.NewRows(tokenCols))
+
+	mock.ExpectBegin()
+	eb := mock.ExpectBatch()
+	eb.ExpectExec("INSERT INTO usage_hourly").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("INSERT", 1))
+	mock.ExpectCommit()
+
+	err = store.RollupHour(context.Background(), orgID, hour)
+	require.NoError(t, err, "RollupHour should query the real sessions model column")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func TestRollupHour_TokenQueryError(t *testing.T) {
 	t.Parallel()
 	mock, err := pgxmock.NewPool()
@@ -1034,6 +1068,63 @@ func TestGetBreakdown_AgentDimension_UsesAllCapacityRollups(t *testing.T) {
 	require.Len(t, rows, 1)
 	require.Equal(t, 2, rows[0].TotalSessions)
 	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestGetBreakdown_ModelDimension_UsesSessionModelOverrideColumn(t *testing.T) {
+	t.Parallel()
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "mock pool should be created")
+	defer mock.Close()
+
+	store := NewUsageRollupStore(mock)
+	orgID := uuid.New()
+	start := time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)
+	end := time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC)
+
+	mock.ExpectQuery("SELECT\\s+COALESCE\\(SUM\\(uhe.total_container_minutes\\), 0\\),").
+		WithArgs(pgx.NamedArgs{
+			"org_id":       orgID,
+			"start":        start,
+			"end":          end,
+			"limit":        10,
+			"all_capacity": usageAllCapacityKey,
+		}).
+		WillReturnRows(pgxmock.NewRows([]string{"total_minutes", "total_tokens", "total_cost"}).AddRow(100.0, 3000.0, 1.0))
+
+	mock.ExpectQuery("NULLIF\\(s\\.model_override").
+		WithArgs(pgx.NamedArgs{
+			"org_id":       orgID,
+			"start":        start,
+			"end":          end,
+			"limit":        10,
+			"all_capacity": usageAllCapacityKey,
+		}).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"key", "label",
+			"total_container_minutes", "total_sessions", "total_container_starts",
+			"peak_concurrent", "total_input_tokens", "total_output_tokens", "total_tokens", "total_llm_cost_usd",
+		}).AddRow("gpt-5.4", "gpt-5.4", 100.0, 2, 3, 2, int64(2000), int64(1000), int64(3000), 1.0))
+
+	rows, err := store.GetBreakdown(context.Background(), orgID, start, end, "model", "tokens_desc", 10, UsageExecutionFilters{})
+	require.NoError(t, err, "model breakdown should query the real sessions model column")
+	require.Equal(t, []models.UsageBreakdownRow{
+		{
+			Key:                   "gpt-5.4",
+			Label:                 "gpt-5.4",
+			TotalContainerMinutes: 100,
+			TotalSessions:         2,
+			TotalContainerStarts:  3,
+			PeakConcurrent:        2,
+			TotalInputTokens:      2000,
+			TotalOutputTokens:     1000,
+			TotalTokens:           3000,
+			TotalLLMCostUSD:       1,
+			Percentage:            100,
+			ShareOfTokenCost:      100,
+			ShareOfTokens:         100,
+		},
+	}, rows, "model breakdown should return normalized model rows")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
 func TestGetBreakdown_QueryError(t *testing.T) {
