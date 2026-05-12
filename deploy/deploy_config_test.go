@@ -50,6 +50,9 @@ func TestPreviewWildcardTLSUsesCloudflareDNSChallenge(t *testing.T) {
 	require.Contains(t, deployText, "Dockerfile.caddy", "app deploys should stage Dockerfile.caddy before docker compose up so remote builds can succeed")
 	require.Contains(t, deployText, `docker compose -f "$COMPOSE_FILE" build caddy`, "app deploys should explicitly build the custom Caddy image so Dockerfile.caddy changes and base-image refreshes reach the host")
 	require.Contains(t, deployText, `docker compose -f "$COMPOSE_FILE" up -d --no-deps caddy`, "app deploys should reconcile the running Caddy container against the freshly built image and current env")
+	require.Contains(t, deployText, "CLOUDFLARE_API_TOKEN=%s", "app deploys should project the Cloudflare DNS-challenge token into /opt/143/.env for compose interpolation")
+	require.Contains(t, deployText, "PREVIEW_ORIGIN_TEMPLATE=%s", "app deploys should project the preview origin template into /opt/143/.env so the app host can override the production preview domain")
+	require.Contains(t, deployText, "NEXT_PUBLIC_PREVIEW_ORIGIN_TEMPLATE=%s", "app deploys should project the frontend preview-origin fallback into /opt/143/.env on the app host")
 	buildIndex := strings.Index(deployText, `echo "Building custom Caddy image..."`)
 	reconcileCallIndex := strings.LastIndex(deployText, `reconcile_caddy_service`)
 	reloadIndex := strings.LastIndex(deployText, `caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile`)
@@ -61,6 +64,9 @@ func TestPreviewWildcardTLSUsesCloudflareDNSChallenge(t *testing.T) {
 	provisionScript, err := os.ReadFile("../deploy/scripts/provision.sh")
 	require.NoError(t, err, "test should read provision.sh")
 	require.Contains(t, string(provisionScript), "Dockerfile.caddy", "fresh app provisioning should stage Dockerfile.caddy before the first docker compose up")
+	require.Contains(t, string(provisionScript), "CLOUDFLARE_API_TOKEN=%s", "fresh app provisioning should project the Cloudflare DNS-challenge token into /opt/143/.env for compose interpolation")
+	require.Contains(t, string(provisionScript), "PREVIEW_ORIGIN_TEMPLATE=%s", "fresh app provisioning should project the preview origin template into /opt/143/.env so the app host can override the production preview domain")
+	require.Contains(t, string(provisionScript), "NEXT_PUBLIC_PREVIEW_ORIGIN_TEMPLATE=%s", "fresh app provisioning should project the frontend preview-origin fallback into /opt/143/.env on the app host")
 }
 
 func TestWorkerProvisioningIncludesGitHubAppUserAuthSecrets(t *testing.T) {
