@@ -82,7 +82,7 @@ export function ResizeHandle({ direction = "horizontal", onResize, className, te
       data-testid={testId}
       data-dragging={isDragging ? "true" : "false"}
       className={cn(
-        "group relative z-10 shrink-0 touch-none select-none",
+        "group relative z-10 h-full shrink-0 touch-none select-none",
         direction === "horizontal" && "-mx-1.5 w-3 cursor-col-resize",
         className,
       )}
@@ -90,12 +90,12 @@ export function ResizeHandle({ direction = "horizontal", onResize, className, te
       <div
         data-testid="resize-handle-rail"
         aria-hidden="true"
-        className="absolute inset-y-0 left-1/2 w-px -translate-x-1/2 bg-border/80 transition-colors duration-150 group-hover:bg-border group-data-[dragging=true]:bg-primary/50"
+        className="absolute inset-y-0 left-1/2 w-px -translate-x-1/2 bg-border/45 transition-colors duration-150 group-hover:bg-border/80 group-data-[dragging=true]:bg-primary/50"
       />
       <div
         data-testid="resize-handle-grip"
         aria-hidden="true"
-        className="absolute left-1/2 top-1/2 h-14 w-1.5 -translate-x-1/2 -translate-y-1/2 rounded-full bg-border/90 shadow-sm transition-colors duration-150 group-hover:bg-muted-foreground/80 group-data-[dragging=true]:bg-primary"
+        className="absolute left-1/2 top-1/2 h-14 w-1.5 -translate-x-1/2 -translate-y-1/2 rounded-full bg-border/90 opacity-0 shadow-sm transition-[background-color,opacity] duration-150 group-hover:opacity-100 group-focus-visible:opacity-100 group-data-[dragging=true]:bg-primary group-data-[dragging=true]:opacity-100"
       />
     </div>
   );
