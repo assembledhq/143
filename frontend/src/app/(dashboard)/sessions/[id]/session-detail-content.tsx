@@ -1678,21 +1678,6 @@ function SessionComposer({
                   />
                 </DisabledTooltip>
 
-                {availableModels.length > 0 && (
-                  <Select value={selectedModel} onValueChange={onSelectedModelChange}>
-                    <SelectTrigger className="h-8 w-auto gap-1.5 border-none bg-transparent px-2 text-xs text-muted-foreground shadow-none hover:text-foreground focus:ring-0" aria-label="Model override">
-                      <SelectValue placeholder="Default model" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {availableModels.map((model) => (
-                        <SelectItem key={model} value={model}>
-                          {model}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                )}
-
                 {editableAgents && editableAgents.length > 0 && editableAgentType && onEditableAgentTypeChange && (
                   <Select value={editableAgentType} onValueChange={onEditableAgentTypeChange} disabled={agentUpdatePending}>
                     <SelectTrigger className="h-8 w-auto gap-1.5 border-none bg-transparent px-2 text-xs text-muted-foreground shadow-none hover:text-foreground focus:ring-0" aria-label="Agent">
@@ -1702,6 +1687,21 @@ function SessionComposer({
                       {editableAgents.map((agent) => (
                         <SelectItem key={agent.key} value={agent.key}>
                           {agent.label}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                )}
+
+                {availableModels.length > 0 && (
+                  <Select value={selectedModel} onValueChange={onSelectedModelChange}>
+                    <SelectTrigger className="h-8 w-auto gap-1.5 border-none bg-transparent px-2 text-xs text-muted-foreground shadow-none hover:text-foreground focus:ring-0" aria-label="Model override">
+                      <SelectValue placeholder="Default model" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {availableModels.map((model) => (
+                        <SelectItem key={model} value={model}>
+                          {model}
                         </SelectItem>
                       ))}
                     </SelectContent>
