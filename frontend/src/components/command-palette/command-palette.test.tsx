@@ -63,7 +63,8 @@ describe("CommandPalette", () => {
 
   it("excludes admin-only items for non-admin users", async () => {
     renderPalette({ userRole: "member" });
-    await screen.findByText("General");
+    await screen.findByText("Account");
+    expect(screen.queryByText("General")).not.toBeInTheDocument();
     expect(screen.queryByText("Audit log")).not.toBeInTheDocument();
     expect(screen.getAllByText("Autopilot")).toHaveLength(1);
   });

@@ -246,6 +246,7 @@ export default function TeamSettingsPage() {
     switch (role) {
       case "admin":
         return "default" as const;
+      case "builder":
       case "member":
         return "secondary" as const;
       default:
@@ -386,6 +387,7 @@ export default function TeamSettingsPage() {
                             <SelectContent>
                               <SelectItem value="admin">Admin</SelectItem>
                               <SelectItem value="member">Member</SelectItem>
+                              <SelectItem value="builder">Builder</SelectItem>
                               <SelectItem value="viewer">Viewer</SelectItem>
                             </SelectContent>
                             </Select>
@@ -736,6 +738,7 @@ export default function TeamSettingsPage() {
                   <SelectContent>
                     <SelectItem value="admin">Admin</SelectItem>
                     <SelectItem value="member">Member</SelectItem>
+                    <SelectItem value="builder">Builder</SelectItem>
                     <SelectItem value="viewer">Viewer</SelectItem>
                   </SelectContent>
                 </Select>
