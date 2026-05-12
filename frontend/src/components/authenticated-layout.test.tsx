@@ -114,9 +114,9 @@ describe("AuthenticatedLayout", () => {
     const handle = container.querySelector("[data-testid='app-sidebar-resize-handle']");
     expect(handle).not.toBeNull();
 
-    fireEvent.mouseDown(handle!, { clientX: 100 });
-    fireEvent.mouseMove(document, { clientX: 220 });
-    fireEvent.mouseUp(document);
+    fireEvent.pointerDown(handle!, { clientX: 100, pointerId: 1, button: 0 });
+    fireEvent.pointerMove(document, { clientX: 220, pointerId: 1 });
+    fireEvent.pointerUp(document, { pointerId: 1 });
 
     expect(sidebar).toHaveStyle({ "--app-sidebar-w": "300px" });
     expect(window.localStorage.getItem("143:app-sidebar-width")).toBe("300");
