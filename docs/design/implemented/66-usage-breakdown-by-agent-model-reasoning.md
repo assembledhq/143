@@ -53,10 +53,11 @@ This remains a settings-page analytics surface, not a warehouse UI.
 
 Implemented:
 
-- `/settings/usage` supports breakdowns by `user` and `capacity`
+- `/settings/usage` supports breakdowns by `user`, `agent`, `model`, and `reasoning`
 - `usage_hourly` is the main rollup store and is optimized for org totals plus a small fixed set of dimensions
 - the chart supports metric switching and day drill-down
 - the table supports one active dimension at a time
+- capacity remains available in backend rollups and exports, but is no longer a primary breakdown surfaced on the page
 
 Relevant session fields now used by the rollup include:
 
@@ -243,19 +244,23 @@ The shipped UI reads persisted `usage_hourly_execution.model_used`. The hourly r
 
 ### User drilldowns
 
-User-level analytics should remain outside this implementation.
+User-level analytics stay on the original `usage_hourly` path rather than the lower-cardinality execution rollup.
 
 Why:
 
 - `user` is the one dimension that can grow into the thousands for large engineering organizations
 - forcing user into the same hourly execution rollup would dominate row and index growth
-- the first product value is in execution analytics, not large-cardinality per-user exploration
+- the current product need is straightforward per-user attribution, not cross-filtered warehouse-style user exploration
+
+Current behavior:
+
+- `/settings/usage` exposes a `By User` table breakout again
+- user rows come from `usage_hourly` per-user rollups
+- execution filters (`agent`, `model`, `reasoning`) are intentionally not supported for the user dimension
 
 Future improvement:
 
-- add a dedicated `usage_daily_user` or similarly coarse user rollup if leadership needs scalable user drilldowns later
-
-That future table is explicitly **not** part of the implementation phases in this design.
+- add a dedicated `usage_daily_user` or similarly coarse user rollup if leadership needs scalable filtered user drilldowns later
 
 ## UX direction
 
