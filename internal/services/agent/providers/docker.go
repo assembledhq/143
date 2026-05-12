@@ -3,8 +3,11 @@
 package providers
 
 import (
+	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"path/filepath"
@@ -14,8 +17,11 @@ import (
 	cerrdefs "github.com/containerd/errdefs"
 	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/container"
+	"github.com/docker/docker/api/types/filters"
+	"github.com/docker/docker/api/types/image"
 	"github.com/docker/docker/api/types/mount"
 	"github.com/docker/docker/api/types/network"
+	"github.com/docker/docker/client"
 	"github.com/docker/docker/pkg/stdcopy"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/rs/zerolog"
@@ -27,6 +33,7 @@ import (
 // Compile-time check that DockerProvider implements agent.SandboxProvider.
 var _ agent.SandboxProvider = (*DockerProvider)(nil)
 var _ agent.InteractiveSandboxProvider = (*DockerProvider)(nil)
+var _ agent.SandboxGCProvider = (*DockerProvider)(nil)
 
 // defaultScratchDir is the exec-allowed scratch dir injected as $TMPDIR (and
 // $GOTMPDIR) for sandbox containers. /tmp is mounted noexec for defense in
@@ -37,6 +44,27 @@ var _ agent.InteractiveSandboxProvider = (*DockerProvider)(nil)
 // without weakening the /tmp hardening.
 const defaultScratchDir = "/var/tmp"
 
+const (
+	defaultHealthCheckImage     = "busybox:1.36.1"
+	healthCheckImagePullTimeout = 2 * time.Minute
+
+	SandboxLabelManaged   = "com.assembledhq.143.managed"
+	SandboxLabelType      = "com.assembledhq.143.type"
+	SandboxLabelSessionID = "com.assembledhq.143.session_id"
+	SandboxLabelOrgID     = "com.assembledhq.143.org_id"
+	SandboxLabelPurpose   = "com.assembledhq.143.purpose"
+	SandboxLabelCreatedAt = "com.assembledhq.143.created_at"
+
+	sandboxLabelLegacySandbox   = "143.sandbox"
+	sandboxLabelLegacySessionID = "143.session_id"
+	sandboxLabelLegacyOrgID     = "143.org_id"
+	sandboxLabelLegacyPurpose   = "143.purpose"
+)
+
+// ErrDiskQuotaUnsupported is returned when Docker rejects the StorageOpt
+// quota needed to make SANDBOX_DISK_LIMIT_GB a real host-level limit.
+var ErrDiskQuotaUnsupported = errors.New("docker disk quota unsupported")
+
 // DockerClient defines the subset of the Docker API used by DockerProvider.
 type DockerClient interface {
 	Ping(ctx context.Context) (types.Ping, error)
@@ -44,11 +72,14 @@ type DockerClient interface {
 	ContainerStart(ctx context.Context, containerID string, options container.StartOptions) error
 	ContainerStop(ctx context.Context, containerID string, options container.StopOptions) error
 	ContainerRemove(ctx context.Context, containerID string, options container.RemoveOptions) error
+	ContainerList(ctx context.Context, options container.ListOptions) ([]container.Summary, error)
 	ContainerInspect(ctx context.Context, containerID string) (container.InspectResponse, error)
 	ContainerStats(ctx context.Context, containerID string, stream bool) (container.StatsResponseReader, error)
 	ContainerExecCreate(ctx context.Context, containerID string, config container.ExecOptions) (container.ExecCreateResponse, error)
 	ContainerExecAttach(ctx context.Context, execID string, config container.ExecAttachOptions) (types.HijackedResponse, error)
 	ContainerExecInspect(ctx context.Context, execID string) (container.ExecInspect, error)
+	ImageInspect(ctx context.Context, ref string, opts ...client.ImageInspectOption) (image.InspectResponse, error)
+	ImagePull(ctx context.Context, ref string, options image.PullOptions) (io.ReadCloser, error)
 	NetworkInspect(ctx context.Context, networkID string, options network.InspectOptions) (network.Inspect, error)
 	NetworkCreate(ctx context.Context, name string, options network.CreateOptions) (network.CreateResponse, error)
 }
@@ -56,11 +87,13 @@ type DockerClient interface {
 // DockerProvider implements SandboxProvider using Docker containers
 // with optional gVisor (runsc) runtime for enhanced isolation.
 type DockerProvider struct {
-	client     DockerClient
-	runtime    string // "runsc" (gVisor) or "runc" (standard Docker)
-	network    string // pre-created Docker network with egress restrictions
-	resolvConf string // host path bind-mounted at /etc/resolv.conf in sandboxes
-	logger     zerolog.Logger
+	client           DockerClient
+	runtime          string // "runsc" (gVisor) or "runc" (standard Docker)
+	network          string // pre-created Docker network with egress restrictions
+	resolvConf       string // host path bind-mounted at /etc/resolv.conf in sandboxes
+	healthImage      string // small image used to verify the configured runtime can start containers
+	requireDiskQuota bool
+	logger           zerolog.Logger
 }
 
 // DockerProviderOption configures a DockerProvider.
@@ -93,13 +126,32 @@ func WithResolvConf(path string) DockerProviderOption {
 	}
 }
 
+// WithHealthCheckImage sets the small image used for startup Docker probes.
+// Empty values keep the default pinned BusyBox tag.
+func WithHealthCheckImage(ref string) DockerProviderOption {
+	return func(p *DockerProvider) {
+		if strings.TrimSpace(ref) != "" {
+			p.healthImage = ref
+		}
+	}
+}
+
+// WithRequireDiskQuota makes Docker StorageOpt quota support mandatory when
+// SandboxConfig.DiskLimitGB is non-zero.
+func WithRequireDiskQuota(required bool) DockerProviderOption {
+	return func(p *DockerProvider) {
+		p.requireDiskQuota = required
+	}
+}
+
 // NewDockerProvider creates a new DockerProvider with the given Docker client.
 func NewDockerProvider(cli DockerClient, logger zerolog.Logger, opts ...DockerProviderOption) *DockerProvider {
 	p := &DockerProvider{
-		client:  cli,
-		runtime: "runsc",
-		network: "143-sandbox",
-		logger:  logger,
+		client:      cli,
+		runtime:     "runsc",
+		network:     "143-sandbox",
+		healthImage: defaultHealthCheckImage,
+		logger:      logger,
 	}
 	for _, opt := range opts {
 		opt(p)
@@ -120,6 +172,18 @@ func (d *DockerProvider) HealthCheck(ctx context.Context) error {
 		return fmt.Errorf("docker health check: %w", err)
 	}
 
+	if d.runtime != "runc" || d.requireDiskQuota {
+		if err := d.ensureHealthCheckImage(ctx); err != nil {
+			return fmt.Errorf("docker health check: %w", err)
+		}
+	}
+
+	if d.requireDiskQuota {
+		if err := d.checkDiskQuotaSupport(ctx); err != nil {
+			return fmt.Errorf("docker health check: %w", err)
+		}
+	}
+
 	if d.runtime == "runc" {
 		d.logger.Info().Msg("docker health check passed (runc)")
 		return nil
@@ -129,7 +193,7 @@ func (d *DockerProvider) HealthCheck(ctx context.Context) error {
 
 	pidsLimit := int64(64)
 	resp, err := d.client.ContainerCreate(ctx, &container.Config{
-		Image: "busybox:latest",
+		Image: d.healthImage,
 		Cmd:   []string{"echo", "runtime-ok"},
 	}, &container.HostConfig{
 		Runtime: d.runtime,
@@ -178,6 +242,101 @@ func (d *DockerProvider) HealthCheck(ctx context.Context) error {
 	}
 }
 
+func (d *DockerProvider) ensureHealthCheckImage(ctx context.Context) error {
+	if _, err := d.client.ImageInspect(ctx, d.healthImage); err == nil {
+		return nil
+	} else if !cerrdefs.IsNotFound(err) {
+		return fmt.Errorf("inspect health check image %q: %w", d.healthImage, err)
+	}
+
+	d.logger.Info().Str("image", d.healthImage).Msg("health check image missing on host; pulling from registry")
+	start := time.Now()
+
+	pullCtx, cancel := context.WithTimeout(ctx, healthCheckImagePullTimeout)
+	defer cancel()
+
+	rc, err := d.client.ImagePull(pullCtx, d.healthImage, image.PullOptions{})
+	if err != nil {
+		return fmt.Errorf("pull health check image %q: %w", d.healthImage, err)
+	}
+	defer rc.Close()
+
+	if pullErr := scanPullStreamForError(rc); pullErr != nil {
+		return fmt.Errorf("pull health check image %q: %w", d.healthImage, pullErr)
+	}
+
+	if _, err := d.client.ImageInspect(pullCtx, d.healthImage); err != nil {
+		return fmt.Errorf("health check image %q not present after pull: %w", d.healthImage, err)
+	}
+
+	d.logger.Info().Str("image", d.healthImage).Dur("elapsed", time.Since(start)).Msg("health check image pulled successfully")
+	return nil
+}
+
+func scanPullStreamForError(r io.Reader) error {
+	type pullEvent struct {
+		Error       string `json:"error"`
+		ErrorDetail struct {
+			Message string `json:"message"`
+		} `json:"errorDetail"`
+	}
+	var firstErr error
+	scanner := bufio.NewScanner(r)
+	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
+	for scanner.Scan() {
+		line := bytes.TrimSpace(scanner.Bytes())
+		if len(line) == 0 {
+			continue
+		}
+		var ev pullEvent
+		if err := json.Unmarshal(line, &ev); err != nil {
+			continue
+		}
+		if firstErr == nil {
+			switch {
+			case ev.ErrorDetail.Message != "":
+				firstErr = fmt.Errorf("%s", ev.ErrorDetail.Message)
+			case ev.Error != "":
+				firstErr = fmt.Errorf("%s", ev.Error)
+			}
+		}
+	}
+	if err := scanner.Err(); err != nil && firstErr == nil {
+		return fmt.Errorf("read pull stream: %w", err)
+	}
+	return firstErr
+}
+
+func (d *DockerProvider) checkDiskQuotaSupport(ctx context.Context) error {
+	resp, err := d.client.ContainerCreate(ctx, &container.Config{
+		Image: d.healthImage,
+		Cmd:   []string{"true"},
+		Labels: map[string]string{
+			SandboxLabelManaged: "true",
+			SandboxLabelType:    "quota-probe",
+		},
+	}, &container.HostConfig{
+		Runtime: d.runtime,
+		StorageOpt: map[string]string{
+			"size": "1G",
+		},
+	}, nil, nil, "")
+	if err != nil {
+		if isDiskQuotaUnsupported(err) {
+			return fmt.Errorf("%w: %v", ErrDiskQuotaUnsupported, err)
+		}
+		return fmt.Errorf("quota probe create: %w", err)
+	}
+
+	cleanupCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := d.client.ContainerRemove(cleanupCtx, resp.ID, container.RemoveOptions{Force: true}); err != nil && !cerrdefs.IsNotFound(err) {
+		return fmt.Errorf("quota probe cleanup: %w", err)
+	}
+	d.logger.Info().Msg("docker disk quota health check passed")
+	return nil
+}
+
 // ensureNetwork verifies the configured sandbox network exists on the Docker
 // host, creating a plain bridge network if it does not. This is idempotent:
 // concurrent calls that race past the inspect will converge because the
@@ -198,13 +357,6 @@ func (d *DockerProvider) ensureNetwork(ctx context.Context) error {
 	_, err := d.client.NetworkCreate(ctx, d.network, network.CreateOptions{
 		Driver: "bridge",
 		Labels: map[string]string{"managed-by": "143"},
-		// Disable inter-container chatter so one sandbox can't TCP-connect
-		// to another on the same bridge. Existing networks created before
-		// this was added are NOT updated — Docker rejects option changes on
-		// existing networks, so the host provisioning path handles migration.
-		Options: map[string]string{
-			"com.docker.network.bridge.enable_icc": "false",
-		},
 	})
 	if err != nil && !cerrdefs.IsConflict(err) && !cerrdefs.IsAlreadyExists(err) {
 		return fmt.Errorf("create network %q: %w", d.network, err)
@@ -304,6 +456,7 @@ func (d *DockerProvider) Create(ctx context.Context, cfg agent.SandboxConfig) (*
 		User:       "sandbox",
 		Tty:        false,
 		Env:        envSlice,
+		Labels:     sandboxContainerLabels(cfg, time.Now()),
 		// Keep container running with a long sleep so we can exec into it
 		Cmd: []string{"sleep", "infinity"},
 	}
@@ -394,7 +547,10 @@ func (d *DockerProvider) Create(ctx context.Context, cfg agent.SandboxConfig) (*
 	if err != nil {
 		// StorageOpt requires overlay2 with XFS+pquota. Fall back gracefully
 		// on hosts that don't support it (e.g. dev machines with ext4).
-		if strings.Contains(err.Error(), "storage-opt") || strings.Contains(err.Error(), "pquota") {
+		if isDiskQuotaUnsupported(err) {
+			if d.requireDiskQuota {
+				return nil, fmt.Errorf("create container with %dGB disk quota: %w: %v", cfg.DiskLimitGB, ErrDiskQuotaUnsupported, err)
+			}
 			log.Warn().Err(err).Msg("storage quota not supported by Docker storage driver; creating container without disk limit")
 			hostCfg.StorageOpt = nil
 			resp, err = d.client.ContainerCreate(ctx, containerCfg, hostCfg, networkCfg, platform, "")
@@ -458,6 +614,132 @@ func (d *DockerProvider) Create(ctx context.Context, cfg agent.SandboxConfig) (*
 	}
 
 	return sb, nil
+}
+
+func sandboxContainerLabels(cfg agent.SandboxConfig, createdAt time.Time) map[string]string {
+	labels := map[string]string{
+		"managed-by":              "143",
+		sandboxLabelLegacySandbox: "true",
+		SandboxLabelManaged:       "true",
+		SandboxLabelType:          "sandbox",
+		SandboxLabelCreatedAt:     createdAt.UTC().Format(time.RFC3339Nano),
+	}
+	if cfg.SessionID != "" {
+		labels[sandboxLabelLegacySessionID] = cfg.SessionID
+		labels[SandboxLabelSessionID] = cfg.SessionID
+	}
+	if cfg.OrgID != "" {
+		labels[sandboxLabelLegacyOrgID] = cfg.OrgID
+		labels[SandboxLabelOrgID] = cfg.OrgID
+	}
+	if cfg.Purpose != "" {
+		labels[sandboxLabelLegacyPurpose] = cfg.Purpose
+		labels[SandboxLabelPurpose] = cfg.Purpose
+	}
+	return labels
+}
+
+// CountLiveSandboxes counts running local sandbox containers attached to the
+// configured sandbox network. Labels are preferred for newly-created
+// containers; image-name matching keeps existing unlabeled sandboxes visible.
+func (d *DockerProvider) CountLiveSandboxes(ctx context.Context) (int, error) {
+	args := filters.NewArgs()
+	if d.network != "" {
+		args.Add("network", d.network)
+	}
+	containers, err := d.client.ContainerList(ctx, container.ListOptions{Filters: args})
+	if err != nil {
+		return 0, fmt.Errorf("list live sandbox containers: %w", err)
+	}
+	count := 0
+	for _, summary := range containers {
+		if isLiveSandboxContainer(summary) {
+			count++
+		}
+	}
+	return count, nil
+}
+
+func isLiveSandboxContainer(summary container.Summary) bool {
+	if summary.Labels != nil && (summary.Labels[sandboxLabelLegacySandbox] == "true" || isManagedSandboxLabels(summary.Labels)) {
+		return true
+	}
+	return isLegacySandboxImage(summary)
+}
+
+func isLegacySandboxImage(summary container.Summary) bool {
+	image := strings.ToLower(summary.Image)
+	return strings.Contains(image, "143-sandbox") && !strings.Contains(image, "143-sandbox-dns")
+}
+
+func isDiskQuotaUnsupported(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "storage-opt") ||
+		strings.Contains(msg, "pquota") ||
+		strings.Contains(msg, "project quota") ||
+		strings.Contains(msg, "overlay over xfs")
+}
+
+// ListManagedSandboxes returns every Docker container created by this provider
+// for sandbox execution, including stopped containers. It keys off sandbox
+// labels rather than image names so tag churn does not affect cleanup safety.
+func (d *DockerProvider) ListManagedSandboxes(ctx context.Context) ([]agent.ManagedSandboxContainer, error) {
+	containers, err := d.client.ContainerList(ctx, container.ListOptions{
+		All: true,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("list managed sandbox containers: %w", err)
+	}
+
+	out := make([]agent.ManagedSandboxContainer, 0, len(containers))
+	for _, c := range containers {
+		if !isManagedSandboxSummary(c, d.network) {
+			continue
+		}
+		createdAt := time.Unix(c.Created, 0).UTC()
+		if raw := c.Labels[SandboxLabelCreatedAt]; raw != "" {
+			if parsed, err := time.Parse(time.RFC3339Nano, raw); err == nil {
+				createdAt = parsed.UTC()
+			}
+		}
+		out = append(out, agent.ManagedSandboxContainer{
+			ID:        c.ID,
+			SessionID: firstLabelValue(c.Labels, SandboxLabelSessionID, sandboxLabelLegacySessionID),
+			OrgID:     firstLabelValue(c.Labels, SandboxLabelOrgID, sandboxLabelLegacyOrgID),
+			Purpose:   firstLabelValue(c.Labels, SandboxLabelPurpose, sandboxLabelLegacyPurpose),
+			CreatedAt: createdAt,
+		})
+	}
+	return out, nil
+}
+
+func isManagedSandboxSummary(summary container.Summary, sandboxNetwork string) bool {
+	return summary.Labels != nil && (summary.Labels[sandboxLabelLegacySandbox] == "true" || isManagedSandboxLabels(summary.Labels)) ||
+		(isLegacySandboxImage(summary) && isContainerAttachedToNetwork(summary, sandboxNetwork))
+}
+
+func isManagedSandboxLabels(labels map[string]string) bool {
+	return labels[SandboxLabelManaged] == "true" && labels[SandboxLabelType] == "sandbox"
+}
+
+func isContainerAttachedToNetwork(summary container.Summary, networkName string) bool {
+	if networkName == "" || summary.NetworkSettings == nil {
+		return false
+	}
+	_, ok := summary.NetworkSettings.Networks[networkName]
+	return ok
+}
+
+func firstLabelValue(labels map[string]string, keys ...string) string {
+	for _, key := range keys {
+		if value := labels[key]; value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 // CloneRepo clones a repository into the sandbox's workspace using git.

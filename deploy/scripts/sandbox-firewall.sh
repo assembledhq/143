@@ -10,15 +10,14 @@
 # reach preview-infrastructure containers (postgres, etc.) and the
 # sandbox-dns resolver, all of which sit on the same 143-sandbox bridge.
 #
-# Verification after first deploy on a new worker (the RETURN rule only
-# helps if intra-bridge traffic actually traverses DOCKER-USER — some
-# Docker versions enforce enable_icc=false in an earlier chain):
+# Verification after first deploy on a new worker:
 #
 #   docker exec -it <sandbox-container> sh -c 'nc -zv 172.30.0.2 53 && \
 #       nc -zv preview-db-<handle> 5432'
 #
-# If either connection refuses, the fix is to remove enable_icc=false from
-# the network and rely on these iptables rules alone for sandbox isolation.
+# If either connection refuses, confirm the 143-sandbox bridge was created
+# with Docker's default bridge ICC setting; disabling that option can block
+# sandbox DNS before these DOCKER-USER rules run.
 #
 # Idempotent: drops any prior rules tagged with our comment before re-adding.
 # Safe to call on every deploy and on boot.
@@ -88,9 +87,9 @@ done
 # this carve-out every intra-bridge request gets dropped.
 #
 # RETURN — not ACCEPT — exits DOCKER-USER and returns to the FORWARD
-# chain so the rest of FORWARD still applies. The bridge is created with
-# enable_icc=false to isolate sandbox-from-sandbox; this rule operates
-# below that layer and does not undo it.
+# chain so the rest of FORWARD still applies. The sandbox bridge intentionally
+# leaves Docker's ICC setting at its default because gVisor sandboxes need
+# same-bridge access to sandbox-dns.
 #
 # Inserted last so iptables -I lands it at position 1, ahead of the DROPs.
 iptables -I DOCKER-USER -s "$SUBNET" -d "$SUBNET" \

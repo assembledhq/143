@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/assembledhq/143/internal/api/middleware"
 	"github.com/assembledhq/143/internal/api/sse"
@@ -52,7 +53,6 @@ type SessionHandler struct {
 	runStore           *db.SessionStore
 	logStore           *db.SessionLogStore
 	questionStore      *db.SessionQuestionStore
-	validationStore    *db.ValidationStore
 	pullRequestStore   *db.PullRequestStore
 	issueStore         *db.IssueStore
 	repoStore          *db.RepositoryStore
@@ -428,7 +428,6 @@ func NewSessionHandler(
 	runStore *db.SessionStore,
 	logStore *db.SessionLogStore,
 	questionStore *db.SessionQuestionStore,
-	validationStore *db.ValidationStore,
 	pullRequestStore *db.PullRequestStore,
 	issueStore *db.IssueStore,
 	repoStore *db.RepositoryStore,
@@ -443,7 +442,6 @@ func NewSessionHandler(
 		runStore:         runStore,
 		logStore:         logStore,
 		questionStore:    questionStore,
-		validationStore:  validationStore,
 		pullRequestStore: pullRequestStore,
 		issueStore:       issueStore,
 		repoStore:        repoStore,
@@ -562,6 +560,8 @@ func (h *SessionHandler) List(w http.ResponseWriter, r *http.Request) {
 	items := make([]models.SessionListItem, len(runs))
 	sessionIDs := make([]uuid.UUID, len(runs))
 	for i, s := range runs {
+		s.Diff = nil
+		s.DiffHistory = nil
 		h.enrichSessionLinks(r.Context(), orgID, &s)
 		items[i] = models.SessionListItem{Session: s}
 		sessionIDs[i] = s.ID
@@ -655,7 +655,7 @@ func (h *SessionHandler) Get(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	run, err := h.runStore.GetByID(r.Context(), orgID, runID)
+	run, err := h.runStore.GetAPIDetailByID(r.Context(), orgID, runID)
 	if err != nil {
 		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "run not found")
 		return
@@ -677,6 +677,23 @@ func (h *SessionHandler) Get(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, models.SingleResponse[models.SessionDetail]{Data: detail})
+}
+
+func (h *SessionHandler) GetDiff(w http.ResponseWriter, r *http.Request) {
+	orgID := middleware.OrgIDFromContext(r.Context())
+	sessionID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid session ID")
+		return
+	}
+
+	payload, err := h.runStore.GetDiffByID(r.Context(), orgID, sessionID)
+	if err != nil {
+		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "session diff not found")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, models.SingleResponse[models.SessionDiff]{Data: payload})
 }
 
 func (h *SessionHandler) Update(w http.ResponseWriter, r *http.Request) {
@@ -1361,23 +1378,6 @@ func shouldSkipRedisLog(ctx context.Context, streamID string, lastDeliveredStrea
 		return lastDeliveredStreamID, true
 	}
 	return "", false
-}
-
-// GetValidation returns the validation results for an agent run.
-func (h *SessionHandler) GetValidation(w http.ResponseWriter, r *http.Request) {
-	orgID := middleware.OrgIDFromContext(r.Context())
-	runID, err := uuid.Parse(chi.URLParam(r, "id"))
-	if err != nil {
-		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid run ID")
-		return
-	}
-
-	v, err := h.validationStore.GetBySessionID(r.Context(), orgID, runID)
-	if err != nil {
-		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "validation not found")
-		return
-	}
-	writeJSON(w, http.StatusOK, models.SingleResponse[models.Validation]{Data: v})
 }
 
 // GetPullRequest returns the PR associated with an agent run, or null if none exists.
@@ -2234,23 +2234,15 @@ func (h *SessionHandler) EndSession(w http.ResponseWriter, r *http.Request) {
 			payload["issue_snapshot_id"] = issueSnapshot.ID.String()
 		}
 	}
-	if session.ShouldValidateOnSessionEnd() || session.ValidationPolicy == models.SessionValidationPolicySkip {
-		dedupeKey := fmt.Sprintf("open_pr:%s", sessionID)
-		if _, err := h.jobStore.Enqueue(r.Context(), orgID, "default", "open_pr", payload, 5, &dedupeKey); err != nil {
-			writeError(w, r, http.StatusInternalServerError, "ENQUEUE_FAILED", "failed to enqueue PR creation", err)
-			return
-		}
-		if err := h.runStore.UpdatePRCreationState(r.Context(), orgID, sessionID, models.PRCreationStateQueued, ""); err != nil {
-			zerolog.Ctx(r.Context()).Warn().Err(err).
-				Str("session_id", sessionID.String()).
-				Msg("failed to mark PR creation as queued on session end")
-		}
-	} else {
-		dedupeKey := fmt.Sprintf("validate:%s", sessionID)
-		if _, err := h.jobStore.Enqueue(r.Context(), orgID, "agent", "validate", payload, 5, &dedupeKey); err != nil {
-			writeError(w, r, http.StatusInternalServerError, "ENQUEUE_FAILED", "failed to enqueue validation", err)
-			return
-		}
+	dedupeKey := fmt.Sprintf("open_pr:%s", sessionID)
+	if _, err := h.jobStore.Enqueue(r.Context(), orgID, "default", "open_pr", payload, 5, &dedupeKey); err != nil {
+		writeError(w, r, http.StatusInternalServerError, "ENQUEUE_FAILED", "failed to enqueue PR creation", err)
+		return
+	}
+	if err := h.runStore.UpdatePRCreationState(r.Context(), orgID, sessionID, models.PRCreationStateQueued, ""); err != nil {
+		zerolog.Ctx(r.Context()).Warn().Err(err).
+			Str("session_id", sessionID.String()).
+			Msg("failed to mark PR creation as queued on session end")
 	}
 
 	// Snapshot cleanup is handled by the reaper, which will find this session
@@ -2751,7 +2743,7 @@ func buildManualSessionDescription(message string, images []string) string {
 const defaultManualSessionTitle = "Manual Session"
 
 func manualSessionTitle(message string) string {
-	trimmed := strings.TrimSpace(message)
+	trimmed := strings.TrimSpace(strings.ToValidUTF8(message, ""))
 	if trimmed == "" {
 		return defaultManualSessionTitle
 	}
@@ -2760,11 +2752,18 @@ func manualSessionTitle(message string) string {
 		trimmed = trimmed[:idx]
 	}
 
-	if len(trimmed) <= 120 {
-		return trimmed
-	}
+	return truncateUTF8Title(trimmed, 120)
+}
 
-	return strings.TrimSpace(trimmed[:120]) + "..."
+func truncateUTF8Title(value string, maxBytes int) string {
+	if len(value) <= maxBytes {
+		return value
+	}
+	truncated := value[:maxBytes]
+	for len(truncated) > 0 && !utf8.ValidString(truncated) {
+		truncated = truncated[:len(truncated)-1]
+	}
+	return strings.TrimSpace(truncated) + "..."
 }
 
 // shouldOverrideTitleWithLinearIssue reports whether a Linear primary

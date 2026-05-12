@@ -83,12 +83,15 @@ export function SidebarSettingsSection({
   pathname,
   userRole,
   onNavigate,
+  variant = "desktop",
 }: {
   pathname: string;
   userRole: string | undefined;
   onNavigate?: () => void;
+  variant?: "desktop" | "mobile";
 }) {
   const onSettingsPage = isSettingsPath(pathname);
+  const isMobile = variant === "mobile";
 
   // Default to expanded if on a settings page to avoid flicker; otherwise
   // start collapsed and let the mount effect restore the persisted value.
@@ -126,7 +129,8 @@ export function SidebarSettingsSection({
         <button
           type="button"
           className={cn(
-            "flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-xs font-medium transition-colors duration-150",
+            "flex w-full items-center rounded-md px-2.5 font-medium transition-colors duration-150",
+            isMobile ? "gap-2.5 py-3 text-sm" : "gap-2 py-1.5 text-xs",
             onSettingsPage
               ? "bg-sidebar-accent text-sidebar-accent-foreground"
               : "text-muted-foreground hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
@@ -136,7 +140,8 @@ export function SidebarSettingsSection({
           <span className="flex-1 text-left">Settings</span>
           <ChevronRight
             className={cn(
-              "h-3.5 w-3.5 shrink-0 opacity-50 transition-transform duration-200",
+              "shrink-0 opacity-50 transition-transform duration-200",
+              isMobile ? "h-4 w-4" : "h-3.5 w-3.5",
               isOpen && "rotate-90"
             )}
           />

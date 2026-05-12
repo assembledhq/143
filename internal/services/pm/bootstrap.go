@@ -97,7 +97,7 @@ func (s *Service) runAgentInSandbox(ctx context.Context, params sandboxRunParams
 			s.logger.Warn().Err(destroyErr).Str("source", params.logName).Msg("failed to destroy sandbox")
 		}
 	}
-	if err := s.injectRequiredAgentAuth(ctx, params.orgID, agentType, sb, sbCfg.Env); err != nil {
+	if _, err := s.injectRequiredAgentAuth(ctx, params.orgID, agentType, sb, sbCfg.Env); err != nil {
 		exitReason = containerExitReason(ctx, err)
 		cleanup()
 		return nil, noop, fmt.Errorf("inject codex auth: %w", err)

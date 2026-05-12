@@ -295,8 +295,10 @@ func (d *DockerPreviewProvider) StartPreview(ctx context.Context, sb *agent.Sand
 				timeout = time.Duration(primaryCfg.Ready.TimeoutSeconds) * time.Second
 			}
 			if err := d.waitForReadiness(ctx, state, cfg.Primary, primaryCfg.Port, primaryCfg.Ready.HTTPPath, timeout); err != nil {
+				errMsg, tail := d.recordServiceReadinessFailure(state, cfg.Primary, err)
+				notifyServiceFailed(observer, cfg.Primary, errMsg, tail)
 				d.cleanupState(handle)
-				return nil, fmt.Errorf("%w: primary service %q (port %d): %v", preview.ErrServiceNotReady, cfg.Primary, primaryCfg.Port, err)
+				return nil, fmt.Errorf("%w: primary service %q (port %d): %s", preview.ErrServiceNotReady, cfg.Primary, primaryCfg.Port, errMsg)
 			}
 			d.mu.Lock()
 			state.services[cfg.Primary].status = models.PreviewServiceStatusReady
@@ -321,16 +323,9 @@ func (d *DockerPreviewProvider) StartPreview(ctx context.Context, sb *agent.Sand
 				}
 				bgCtx, cancel := context.WithTimeout(svcCtx, timeout)
 				if err := d.waitForReadiness(bgCtx, state, name, svcCfg.Port, svcCfg.Ready.HTTPPath, timeout); err != nil {
-					d.logger.Warn().Err(err).Str("service", name).Msg("support service readiness failed (progressive)")
-					d.mu.Lock()
-					var tail []string
-					if ss, ok := state.services[name]; ok {
-						ss.status = models.PreviewServiceStatusFailed
-						ss.err = err.Error()
-						tail = append([]string(nil), ss.outputTail...)
-					}
-					d.mu.Unlock()
-					notifyServiceFailed(observer, name, err.Error(), tail)
+					errMsg, tail := d.recordServiceReadinessFailure(state, name, err)
+					d.logger.Warn().Err(err).Str("service", name).Strs("output_tail", tail).Msg("support service readiness failed (progressive)")
+					notifyServiceFailed(observer, name, errMsg, tail)
 				} else {
 					d.mu.Lock()
 					var pid int
@@ -353,8 +348,10 @@ func (d *DockerPreviewProvider) StartPreview(ctx context.Context, sb *agent.Sand
 				timeout = time.Duration(svcCfg.Ready.TimeoutSeconds) * time.Second
 			}
 			if err := d.waitForReadiness(ctx, state, name, svcCfg.Port, svcCfg.Ready.HTTPPath, timeout); err != nil {
+				errMsg, tail := d.recordServiceReadinessFailure(state, name, err)
+				notifyServiceFailed(observer, name, errMsg, tail)
 				d.cleanupState(handle)
-				return nil, fmt.Errorf("%w: service %q (port %d): %v", preview.ErrServiceNotReady, name, svcCfg.Port, err)
+				return nil, fmt.Errorf("%w: service %q (port %d): %s", preview.ErrServiceNotReady, name, svcCfg.Port, errMsg)
 			}
 			d.mu.Lock()
 			state.services[name].status = models.PreviewServiceStatusReady
@@ -914,6 +911,31 @@ func notifyServiceFailed(observer preview.ServiceObserver, name, errMsg string, 
 		return
 	}
 	observer.OnServiceFailed(name, errMsg, tail)
+}
+
+// recordServiceReadinessFailure snapshots the live service output before
+// cleanup cancels the process. A timeout usually means the process is still
+// running, so this is the only point where we can preserve boot progress such
+// as "building binaries", "running migrations", or dependency downloads.
+func (d *DockerPreviewProvider) recordServiceReadinessFailure(state *previewState, name string, err error) (string, []string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	if ss, ok := state.services[name]; ok {
+		ss.status = models.PreviewServiceStatusFailed
+		ss.err = formatServiceReadinessError(err, ss.outputTail)
+		return ss.err, append([]string(nil), ss.outputTail...)
+	}
+	return err.Error(), nil
+}
+
+func formatServiceReadinessError(err error, outputTail []string) string {
+	base := err.Error()
+	tail := truncatedTail(outputTail, serviceExitTailLines, serviceExitTailRunes)
+	if tail == "" {
+		return base
+	}
+	return base + "; last output: " + tail
 }
 
 // formatServiceExitError builds a human-readable exit message from a service's

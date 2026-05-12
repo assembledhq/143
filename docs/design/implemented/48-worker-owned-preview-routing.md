@@ -85,6 +85,8 @@ Preview-capable workers publish the following metadata through `nodes.metadata`:
 
 Workers only advertise `preview_capable = true` after boot-time local recovery work is complete and the HTTP listener is bound. This prevents app nodes from routing preview lifecycle calls to a worker that is registered in the cluster but not yet accepting internal preview RPC.
 
+`preview_capable` gates cold-start worker selection. Existing previews and live session sandboxes remain pinned by `worker_node_id`; app nodes may resolve that owner with `preview_internal_base_url` even during the short interval before the worker re-advertises cold-start capability, so deployment readiness races do not orphan already-created preview rows.
+
 Startup recovery is worker-scoped. A worker only rehydrates sandbox-auth sockets for preview-held sessions whose active `preview_instances.worker_node_id` matches its own `NODE_ID`; it must not scan or rebind sockets for containers owned by peer workers.
 
 ## Deployment Contract
