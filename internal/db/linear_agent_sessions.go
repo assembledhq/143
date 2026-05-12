@@ -223,6 +223,46 @@ func (s *LinearAgentSessionStore) LookupBySessionID(ctx context.Context, orgID, 
 	return &row, nil
 }
 
+// GetByID returns the row with the given primary key, scoped to org. Used
+// by the debug surface to render a single agent session by its uuid.
+// Returns ErrLinearAgentSessionNotFound when no row exists.
+func (s *LinearAgentSessionStore) GetByID(ctx context.Context, orgID, agentSessionRowID uuid.UUID) (*LinearAgentSession, error) {
+	var row LinearAgentSession
+	err := s.db.QueryRow(ctx, `
+		SELECT id, org_id, integration_id, linear_agent_session_id,
+		       linear_issue_id, linear_issue_identifier,
+		       linear_app_user_id, linear_creator_user_id,
+		       session_id, state, last_event_received_at,
+		       created_at, updated_at
+		FROM linear_agent_sessions
+		WHERE id = @id AND org_id = @org_id`,
+		pgx.NamedArgs{
+			"id":     agentSessionRowID,
+			"org_id": orgID,
+		}).Scan(
+		&row.ID,
+		&row.OrgID,
+		&row.IntegrationID,
+		&row.LinearAgentSessionID,
+		&row.LinearIssueID,
+		&row.LinearIssueIdentifier,
+		&row.LinearAppUserID,
+		&row.LinearCreatorUserID,
+		&row.SessionID,
+		&row.State,
+		&row.LastEventReceivedAt,
+		&row.CreatedAt,
+		&row.UpdatedAt,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrLinearAgentSessionNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("query linear_agent_sessions by id: %w", err)
+	}
+	return &row, nil
+}
+
 // AttachSession links a freshly-created 143 session to the AgentSession row.
 // Idempotent: if session_id is already set to the same value, this is a
 // no-op; if set to a different value, returns ErrLinearAgentSessionMismatch

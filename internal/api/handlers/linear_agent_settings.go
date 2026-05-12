@@ -306,39 +306,24 @@ func (h *LinearAgentSettingsHandler) GetSession(w http.ResponseWriter, r *http.R
 		return
 	}
 	// The {id} path parameter accepts either the row id (uuid) or the
-	// Linear AgentSessionID (a Linear-issued string). We try the uuid
-	// shape first because that's what the /sessions list endpoint
-	// returns; fallback to Linear ID lookup keeps the URL space stable
-	// across UI refactors.
+	// Linear AgentSessionID (a Linear-issued string). Try the uuid
+	// shape first — it's what the /sessions list endpoint returns; the
+	// Linear ID fallback keeps log-pasted ids working.
 	var (
 		row *db.LinearAgentSession
 		err error
 	)
 	if rowID, parseErr := uuid.Parse(idStr); parseErr == nil {
-		// Lookup-by-row-id: scan a bounded org page and filter. Bounded
-		// because the operator surface only exposes recently-updated
-		// rows; older sessions are accessed by Linear AgentSessionID
-		// from logs, which routes through the second branch below.
-		rows, listErr := h.agentSessions.ListByOrg(r.Context(), orgID, 200)
-		if listErr != nil {
-			writeError(w, r, http.StatusInternalServerError, "GET_FAILED", "failed to load agent session", listErr)
-			return
-		}
-		for i := range rows {
-			if rows[i].ID == rowID {
-				row = &rows[i]
-				break
-			}
-		}
-		err = errors.New("not found")
-		if row != nil {
-			err = nil
-		}
+		row, err = h.agentSessions.GetByID(r.Context(), orgID, rowID)
 	} else {
 		row, err = h.agentSessions.Lookup(r.Context(), orgID, idStr)
 	}
-	if err != nil || row == nil {
+	if errors.Is(err, db.ErrLinearAgentSessionNotFound) {
 		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "agent session not found")
+		return
+	}
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "GET_FAILED", "failed to load agent session", err)
 		return
 	}
 	activities, err := h.activities.ListForAgentSession(r.Context(), orgID, row.ID)

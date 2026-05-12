@@ -143,14 +143,14 @@ func enqueueRunAgentForLinearAgent(ctx context.Context, stores *Stores, orgID, s
 // finalizeUnsupported is the close-AgentSession-with-explanation path
 // invoked when the team is disabled or the resolver gives up. Emits a
 // `response` activity and pins state to the supplied terminal value.
-func finalizeUnsupported(ctx context.Context, client linear.Client, sessions *db.LinearAgentSessionStore, activities *db.LinearAgentActivityLogStore, row *db.LinearAgentSession, orgID uuid.UUID, body string, state models.LinearAgentSessionState) error {
+func finalizeUnsupported(ctx context.Context, client linear.Client, sessions *db.LinearAgentSessionStore, activities *db.LinearAgentActivityLogStore, row *db.LinearAgentSession, orgID uuid.UUID, body string, state models.LinearAgentSessionState, logger zerolog.Logger) error {
 	activity := linear.AgentMilestoneActivity{
 		Type:            models.LinearAgentActivityResponse,
 		Body:            body,
 		IdemKey:         "bootstrap:not_supported",
 		PinSessionState: "complete",
 	}
-	if err := emitOnce(ctx, client, activities, orgID, row.ID, row.LinearAgentSessionID, activity); err != nil {
+	if err := emitOnce(ctx, client, activities, orgID, row.ID, row.LinearAgentSessionID, activity, logger); err != nil {
 		return fmt.Errorf("emit close activity: %w", err)
 	}
 	return sessions.SetState(ctx, orgID, row.ID, state)
@@ -159,11 +159,14 @@ func finalizeUnsupported(ctx context.Context, client linear.Client, sessions *db
 // emitOnce is a tiny wrapper that constructs an AgentActivityWriter on
 // demand and calls Emit. Used by the worker for one-off close activities;
 // HandleAgentMilestone uses its own writer for the milestone fan-out.
-func emitOnce(ctx context.Context, client linear.Client, activities *db.LinearAgentActivityLogStore, orgID, rowID uuid.UUID, agentSessionID string, activity linear.AgentMilestoneActivity) error {
+// The caller's logger is passed through so writer-internal warnings
+// (e.g. failed best-effort AgentSessionUpdate pins) surface in operator
+// logs instead of disappearing into a Nop sink.
+func emitOnce(ctx context.Context, client linear.Client, activities *db.LinearAgentActivityLogStore, orgID, rowID uuid.UUID, agentSessionID string, activity linear.AgentMilestoneActivity, logger zerolog.Logger) error {
 	if activities == nil {
 		return errors.New("activity log store not configured")
 	}
-	writer := linear.NewAgentActivityWriter(client, activities, nil, zerolog.Nop())
+	writer := linear.NewAgentActivityWriter(client, activities, nil, logger)
 	_, err := writer.Emit(ctx, linear.EmitInput{
 		OrgID:             orgID,
 		AgentSessionRowID: rowID,

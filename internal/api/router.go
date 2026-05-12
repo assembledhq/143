@@ -320,6 +320,10 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	pmHandler := handlers.NewPMHandler(pmPlanStore, pmDecisionLogStore, jobStore, orgStore)
 	priorityHandler := handlers.NewPriorityHandler(priorityScoreStore, complexityEstimateStore, jobStore)
 	ingestionWebhookHandler := handlers.NewIngestionWebhookHandler(webhookDeliveryStore, integrationStore, credentialStore, ingestionSvc, logger)
+	// Reject unsigned webhook deliveries in production. Local dev keeps
+	// the historical fail-open behavior so loopback test POSTs work
+	// without configuring credentials.
+	ingestionWebhookHandler.SetRequireSecret(cfg.Env == "production")
 
 	// Linear inbound-agent dispatcher. Wired here so HandleLinear can branch
 	// AgentSessionEvent webhooks into the agent path. Behind the feature

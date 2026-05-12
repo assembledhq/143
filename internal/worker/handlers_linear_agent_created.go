@@ -58,11 +58,13 @@ func handleLinearAgentCreated(
 		return fmt.Errorf("lookup linear_agent_sessions: %w", err)
 	}
 	if row.SessionID != nil {
-		logger.Info().
-			Str("agent_session_id", payload.LinearAgentSessionID).
-			Str("session_id", row.SessionID.String()).
-			Msg("linear_agent_event: session already created on a prior delivery; skipping")
-		return nil
+		// A prior delivery already created the 143 session and bound it
+		// to this bridge row. Re-run the idempotent tail steps
+		// (provider-state merge, run_agent enqueue) in case the prior
+		// delivery died between AttachSession and those writes — without
+		// this reconciliation a transient failure of writeAgentProviderState
+		// would silently drop every milestone for this session.
+		return reconcileLinearAgentCreated(ctx, deps, row, *row.SessionID, payload, logger)
 	}
 
 	// 2. Resolve the integration's Linear client. Required for both
@@ -103,7 +105,7 @@ func handleLinearAgentCreated(
 				Msg("linear_agent_event: team disabled by org settings; closing AgentSession")
 			return finalizeUnsupported(ctx, client, agentSessions, activities, row, orgID,
 				"This Linear team is not currently enabled for the @143 agent.",
-				models.LinearAgentSessionStateComplete)
+				models.LinearAgentSessionStateComplete, logger)
 		}
 	}
 
@@ -127,7 +129,7 @@ func handleLinearAgentCreated(
 		// message and close the AgentSession so the user knows what
 		// to do.
 		activity := linear.UnmappedRepoActivity(fetched.TeamName)
-		emitErr := emitOnce(ctx, client, activities, orgID, row.ID, row.LinearAgentSessionID, activity)
+		emitErr := emitOnce(ctx, client, activities, orgID, row.ID, row.LinearAgentSessionID, activity, logger)
 		if emitErr != nil {
 			logger.Warn().Err(emitErr).Msg("linear_agent_event: failed to emit unmapped-repo response; replays will short-circuit")
 		}
@@ -158,29 +160,24 @@ func handleLinearAgentCreated(
 		return fmt.Errorf("create session: %w", err)
 	}
 
-	// 8. Persist the AgentSessionID on the provider-state row so
-	// HandleMilestone's fan-out can find it. This is what flips
-	// HandleAgentMilestone from "skip" to "emit" for subsequent
-	// milestones on this session.
-	if err := writeAgentProviderState(ctx, deps.Stores, deps.ProviderState, orgID, session.ID, issue.ID, payload.LinearAgentSessionID, fetched); err != nil {
-		logger.Warn().Err(err).
-			Str("session_id", session.ID.String()).
-			Msg("linear_agent_event: failed to record agent_session_id in provider_state; agent activities for this session will silently drop")
+	// 8. Update the bridge row so subsequent webhooks (prompted /
+	// recovery sweeps) can find this 143 session. Done before the
+	// idempotent tail steps so that if either of them fails the retry
+	// path enters via reconcileLinearAgentCreated — re-running them
+	// individually instead of attempting to recreate the session.
+	if err := agentSessions.AttachSession(ctx, orgID, row.ID, session.ID); err != nil {
+		return fmt.Errorf("attach session to linear_agent_sessions: %w", err)
 	}
 
-	// 9. Update the bridge row so subsequent webhooks (prompted /
-	// recovery sweeps) can find this 143 session.
-	if err := agentSessions.AttachSession(ctx, orgID, row.ID, session.ID); err != nil {
-		// AttachSession is the only piece that, if it fails, produces
-		// a hard inconsistency between Linear and 143. Surface as a
-		// job error so the worker retries. The session row is already
-		// created; the retry path re-enters this handler where the
-		// session_id-already-set guard takes the right short-circuit.
-		return fmt.Errorf("attach session to linear_agent_sessions: %w", err)
+	// 9. Persist the AgentSessionID on the provider-state row so
+	// HandleMilestone's fan-out can find it. Idempotent (Merge).
+	if err := writeAgentProviderState(ctx, deps.Stores, deps.ProviderState, orgID, session.ID, issue.ID, payload.LinearAgentSessionID, fetched); err != nil {
+		return fmt.Errorf("record agent_session_id in provider state: %w", err)
 	}
 
 	// 10. Enqueue run_agent. The orchestrator picks it up and streams
 	// milestones back through HandleMilestone + HandleAgentMilestone.
+	// Idempotent via the run_agent:<session_id> dedupe key.
 	if err := enqueueRunAgentForLinearAgent(ctx, deps.Stores, orgID, session.ID); err != nil {
 		return fmt.Errorf("enqueue run_agent: %w", err)
 	}
@@ -194,5 +191,65 @@ func handleLinearAgentCreated(
 		Str("repository_id", repoResult.RepositoryID.String()).
 		Str("repo_resolution", repoResult.Source).
 		Msg("linear_agent_event: session created")
+	return nil
+}
+
+// reconcileLinearAgentCreated re-runs the idempotent tail of the created
+// handler — provider-state merge + run_agent enqueue — for a bridge row
+// that already has its session_id attached. Called from the step-1
+// short-circuit so a retry that lost the race between AttachSession and
+// the tail writes does not leave the Linear AgentSession permanently
+// blind to milestone activity.
+//
+// Both downstream calls are idempotent:
+//   - writeAgentProviderState uses LinearProviderStateStore.Merge.
+//   - enqueueRunAgentForLinearAgent dedupes on run_agent:<session_id>.
+//
+// The function re-fetches the Linear issue because the provider-state
+// Merge needs the canonical identifier/team/workspace fields and those
+// aren't kept on the bridge row.
+func reconcileLinearAgentCreated(ctx context.Context, deps LinearAgentEventHandlerDeps, row *db.LinearAgentSession, sessionID uuid.UUID, payload linearAgentEventPayload, logger zerolog.Logger) error {
+	orgID := row.OrgID
+	session, err := deps.Stores.Sessions.GetByID(ctx, orgID, sessionID)
+	if err != nil {
+		return fmt.Errorf("reconcile: lookup session: %w", err)
+	}
+	if session.PrimaryIssueID == nil {
+		// Session was created without a primary issue link. Nothing on
+		// the provider-state side to reconcile; just guarantee run_agent
+		// is enqueued and move on.
+		logger.Warn().Str("session_id", sessionID.String()).
+			Msg("linear_agent_event: reconcile found no primary issue id; only re-enqueuing run_agent")
+		if err := enqueueRunAgentForLinearAgent(ctx, deps.Stores, orgID, sessionID); err != nil {
+			return fmt.Errorf("reconcile run_agent enqueue: %w", err)
+		}
+		return nil
+	}
+
+	client, err := deps.ClientForOrg(ctx, orgID)
+	if err != nil {
+		return fmt.Errorf("reconcile: resolve linear client: %w", err)
+	}
+	issueIdent := row.LinearIssueIdentifier
+	if issueIdent == "" {
+		issueIdent = payload.LinearIssueID
+	}
+	fetched, err := client.FetchIssue(ctx, issueIdent)
+	if err != nil {
+		return fmt.Errorf("reconcile: fetch linear issue %q: %w", issueIdent, err)
+	}
+	if fetched == nil {
+		return errors.New("reconcile: fetch linear issue returned nil")
+	}
+	if err := writeAgentProviderState(ctx, deps.Stores, deps.ProviderState, orgID, sessionID, *session.PrimaryIssueID, payload.LinearAgentSessionID, fetched); err != nil {
+		return fmt.Errorf("reconcile provider state: %w", err)
+	}
+	if err := enqueueRunAgentForLinearAgent(ctx, deps.Stores, orgID, sessionID); err != nil {
+		return fmt.Errorf("reconcile run_agent enqueue: %w", err)
+	}
+	logger.Info().
+		Str("agent_session_id", payload.LinearAgentSessionID).
+		Str("session_id", sessionID.String()).
+		Msg("linear_agent_event: reconciled existing session")
 	return nil
 }

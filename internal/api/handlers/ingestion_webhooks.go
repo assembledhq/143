@@ -38,6 +38,13 @@ type IngestionWebhookHandler struct {
 	// existing ingestion adapter sees them. nil-safe: when unset, the
 	// existing ingestion behavior is preserved exactly.
 	linearAgent *LinearAgentDispatcher
+
+	// requireSecret rejects webhook requests when the per-org secret is
+	// missing or unverifiable. Off in development so a fresh local install
+	// can accept loopback test deliveries without configuring credentials;
+	// on in production where an unsigned webhook is always an attack
+	// (anyone can POST to the public ingestion URL).
+	requireSecret bool
 }
 
 func NewIngestionWebhookHandler(
@@ -54,6 +61,14 @@ func NewIngestionWebhookHandler(
 		ingestionSvc:     ingestionSvc,
 		logger:           logger,
 	}
+}
+
+// SetRequireSecret toggles fail-closed signature verification. Callers
+// wire this to `cfg.Env == "production"` from main/router so prod
+// rejects unsigned webhooks while local dev can still loop-test without
+// configuring credentials.
+func (h *IngestionWebhookHandler) SetRequireSecret(require bool) {
+	h.requireSecret = require
 }
 
 // SetLinearAgentDispatcher wires the inbound-agent dispatcher
@@ -240,7 +255,10 @@ func (h *IngestionWebhookHandler) verifyProviderSignature(
 	headers http.Header,
 ) error {
 	if h.credStore == nil {
-		return nil // no credential store — skip verification
+		if h.requireSecret {
+			return fmt.Errorf("webhook credential store not configured")
+		}
+		return nil
 	}
 
 	// Map provider string to models.ProviderName
@@ -251,13 +269,18 @@ func (h *IngestionWebhookHandler) verifyProviderSignature(
 	case "linear":
 		providerName = models.ProviderLinear
 	default:
+		if h.requireSecret {
+			return fmt.Errorf("unknown provider %q", provider)
+		}
 		return nil
 	}
 
 	cred, err := h.credStore.Get(ctx, orgID, providerName)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			// No credential configured — skip verification (dev mode)
+			if h.requireSecret {
+				return fmt.Errorf("no webhook credential configured for %s", provider)
+			}
 			zerolog.Ctx(ctx).Debug().Err(err).Str("provider", provider).Msg("no webhook credential configured, skipping signature verification")
 			return nil
 		}
@@ -273,11 +296,17 @@ func (h *IngestionWebhookHandler) verifyProviderSignature(
 	case models.LinearConfig:
 		secret = cfg.WebhookSecret
 	default:
+		if h.requireSecret {
+			return fmt.Errorf("credential for %s has unexpected config type", provider)
+		}
 		return nil
 	}
 
 	if secret == "" {
-		return nil // empty secret — skip verification
+		if h.requireSecret {
+			return fmt.Errorf("webhook secret for %s is empty", provider)
+		}
+		return nil
 	}
 
 	headerName := providerSignatureHeader[provider]
