@@ -34,6 +34,7 @@ interface MobileSessionTopBarProps {
   threads: SessionThread[];
   activeThreadId: string | null;
   viewedThreadIds: ReadonlySet<string>;
+  nonInteractiveThreadIds?: ReadonlySet<string>;
   onOpenDetails: () => void;
   onActiveThreadChange: (threadId: string) => void;
   onAddThread: () => void;
@@ -96,6 +97,7 @@ export function MobileSessionTopBar({
   threads,
   activeThreadId,
   viewedThreadIds,
+  nonInteractiveThreadIds,
   onOpenDetails,
   onActiveThreadChange,
   onAddThread,
@@ -179,6 +181,7 @@ export function MobileSessionTopBar({
                     const isActive = thread.id === activeThreadId;
                     const showUnreadDot = shouldShowUnreadDot(thread, viewedThreadIds);
                     const showArchiveButton = canArchiveThread(thread, threads.length);
+                    const isNonInteractive = nonInteractiveThreadIds?.has(thread.id) ?? false;
                     const closeLabel = `Close ${thread.label}${thread.label.toLowerCase().endsWith(" tab") ? "" : " tab"}`;
                     return (
                       <div key={thread.id} className="flex items-center gap-2">
@@ -190,7 +193,9 @@ export function MobileSessionTopBar({
                             isActive ? "border-primary/30 bg-primary/5" : "border-border bg-background",
                           )}
                           aria-label={`Switch to ${thread.label}`}
+                          disabled={isNonInteractive}
                           onClick={() => {
+                            if (isNonInteractive) return;
                             onActiveThreadChange(thread.id);
                             setActionsOpen(false);
                           }}

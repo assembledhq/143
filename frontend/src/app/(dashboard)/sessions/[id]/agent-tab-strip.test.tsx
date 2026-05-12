@@ -66,6 +66,9 @@ describe("AgentTabStrip", () => {
     expect(label).toHaveClass("text-xs");
     expect(label).not.toHaveClass("text-sm");
     expect(screen.getByRole("group", { name: "Codex Idle" })).toBeInTheDocument();
+    expect(addButton).toHaveClass("h-7");
+    expect(addButton).toHaveClass("w-7");
+    expect(addButton).toHaveClass("opacity-70");
 
     await user.hover(label);
 
