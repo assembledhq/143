@@ -138,7 +138,13 @@ func TestSessionIssueLinkStore_CreateAllowingNullRepo_ReturnsExistingOnConflict(
 func TestSessionIssueLinkSelectColumns_UsesLinearIdentifierForExternalID(t *testing.T) {
 	t.Parallel()
 
-	require.Contains(t, sessionIssueLinkSelectColumns, "COALESCE(provider_state.state->>'identifier', i.external_id) AS external_id", "linked issue enrichment should expose the human Linear key when provider state has it")
+	require.Contains(t, sessionIssueLinkSelectColumns, "NULLIF(provider_state.state->>'identifier', '')", "linked issue enrichment should expose the human Linear key when provider state has it")
+}
+
+func TestSessionIssueLinkSelectColumns_FallsBackToLinearTitleIdentifier(t *testing.T) {
+	t.Parallel()
+
+	require.Contains(t, sessionIssueLinkSelectColumns, "CASE WHEN i.source = 'linear' THEN substring(i.title from '^([A-Z][A-Z0-9_]{0,9}-[0-9]+):') END", "issue-triggered Linear sessions should expose the human Linear key even when provider state was never seeded")
 }
 
 func TestSessionIssueLinkSelectColumns_ExposesLinearLastSkippedReason(t *testing.T) {
