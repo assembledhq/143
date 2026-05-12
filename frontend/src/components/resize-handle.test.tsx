@@ -9,15 +9,21 @@ describe("ResizeHandle", () => {
     expect(container.firstChild).toBeTruthy();
   });
 
-  it("renders a visible desktop rail with a wider hit target", () => {
+  it("renders a full-height desktop rail with a wider hit target", () => {
     const onResize = vi.fn();
     const { container } = render(<ResizeHandle onResize={onResize} />);
     const handle = container.firstChild as HTMLElement;
+    const grip = handle.querySelector("[data-testid='resize-handle-grip']");
 
     expect(handle.className).toContain("w-3");
+    expect(handle.className).toContain("h-full");
     expect(handle.className).toContain("cursor-col-resize");
     expect(handle.querySelector("[data-testid='resize-handle-rail']")).toBeTruthy();
-    expect(handle.querySelector("[data-testid='resize-handle-grip']")).toBeTruthy();
+    expect(grip).toBeTruthy();
+    expect(grip?.className).toContain("opacity-0");
+    expect(grip?.className).toContain("group-hover:opacity-100");
+    expect(grip?.className).toContain("group-focus-visible:opacity-100");
+    expect(grip?.className).toContain("group-data-[dragging=true]:opacity-100");
   });
 
   it("calls onResize with delta during drag", () => {
