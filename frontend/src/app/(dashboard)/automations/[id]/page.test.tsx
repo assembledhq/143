@@ -30,6 +30,10 @@ vi.mock("@/hooks/use-auth", () => ({
   }),
 }));
 
+vi.mock("./automation-stats-card", () => ({
+  AutomationStatsCard: () => <div data-testid="automation-stats-card" />,
+}));
+
 describe("AutomationDetailPage", () => {
   beforeEach(() => {
     currentUserRole.value = "member";
