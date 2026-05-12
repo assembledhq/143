@@ -129,22 +129,22 @@ export function MobileSessionTopBar({
           size="icon"
           variant="ghost"
           className="h-9 w-9 shrink-0"
-          aria-label={detailButtonLabel}
-          aria-controls="session-detail-sheet"
-          onClick={onOpenDetails}
+          aria-label="Open session actions"
+          aria-expanded={actionsOpen}
+          onClick={() => setActionsOpen(true)}
         >
-          <PanelBottomOpen className="h-5 w-5" />
+          <MoreVertical className="h-5 w-5" />
         </Button>
         <Button
           type="button"
           size="icon"
           variant="ghost"
           className="h-9 w-9 shrink-0"
-          aria-label="Open session actions"
-          aria-expanded={actionsOpen}
-          onClick={() => setActionsOpen(true)}
+          aria-label={detailButtonLabel}
+          aria-controls="session-detail-sheet"
+          onClick={onOpenDetails}
         >
-          <MoreVertical className="h-5 w-5" />
+          <PanelBottomOpen className="h-5 w-5" />
         </Button>
       </div>
 

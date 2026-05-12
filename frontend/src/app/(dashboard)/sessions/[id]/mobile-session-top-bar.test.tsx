@@ -75,6 +75,35 @@ describe("MobileSessionTopBar", () => {
     expect(within(actionsSheet).getByRole("button", { name: "Rename session" })).toBeInTheDocument();
   });
 
+  it("places the session actions button to the left of the session details button in the mobile header", () => {
+    const { container } = renderWithProviders(
+      <MobileSessionTopBar
+        sessionTitle="Mobile session title"
+        detailButtonLabel="Open session details"
+        backTo="/sessions"
+        threads={[makeThread({ id: "thread-1", label: "Main tab" })]}
+        activeThreadId="thread-1"
+        viewedThreadIds={new Set(["thread-1"])}
+        onOpenDetails={vi.fn()}
+        onActiveThreadChange={vi.fn()}
+        onAddThread={vi.fn()}
+        onRenameSession={vi.fn()}
+        onCancelThread={vi.fn()}
+        onForkThread={vi.fn()}
+        onRevertThread={vi.fn()}
+        onArchiveThread={vi.fn()}
+        cancelPendingThreadId={null}
+        archivePendingThreadId={null}
+      />,
+    );
+
+    const headerButtons = Array.from(container.querySelectorAll("div.sticky button")).map((button) =>
+      button.getAttribute("aria-label"),
+    );
+
+    expect(headerButtons).toEqual(["Open session actions", "Open session details"]);
+  });
+
   it("routes thread switching and thread actions through the session actions sheet", async () => {
     const user = userEvent.setup();
     const onActiveThreadChange = vi.fn();
