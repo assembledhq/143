@@ -22,6 +22,7 @@ type Registry struct {
 	codeReviewSources map[string]CodeReviewSource
 	issueCreators     map[string]IssueCreator
 	projectProposers  map[string]ProjectProposer
+	ciTestInsights    map[string]CITestInsights
 }
 
 // NewRegistry creates an empty integration registry.
@@ -34,6 +35,7 @@ func NewRegistry() *Registry {
 		codeReviewSources: make(map[string]CodeReviewSource),
 		issueCreators:     make(map[string]IssueCreator),
 		projectProposers:  make(map[string]ProjectProposer),
+		ciTestInsights:    make(map[string]CITestInsights),
 	}
 }
 
@@ -240,6 +242,35 @@ func (r *Registry) ProjectProposer(name string) (ProjectProposer, error) {
 	return pp, nil
 }
 
+// RegisterCITestInsights adds a CI test insights provider (e.g. CircleCI).
+func (r *Registry) RegisterCITestInsights(provider CITestInsights) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.ciTestInsights[provider.Name()] = provider
+}
+
+// CITestInsightsProviders returns all registered CI test insights providers.
+func (r *Registry) CITestInsightsProviders() []CITestInsights {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	result := make([]CITestInsights, 0, len(r.ciTestInsights))
+	for _, p := range r.ciTestInsights {
+		result = append(result, p)
+	}
+	return result
+}
+
+// CITestInsightsProvider returns a specific CI test insights provider by name.
+func (r *Registry) CITestInsightsProvider(name string) (CITestInsights, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	p, ok := r.ciTestInsights[name]
+	if !ok {
+		return nil, fmt.Errorf("ci test insights %q not registered", name)
+	}
+	return p, nil
+}
+
 // HasAny returns true if at least one provider is registered.
 func (r *Registry) HasAny() bool {
 	r.mu.RLock()
@@ -250,7 +281,8 @@ func (r *Registry) HasAny() bool {
 		len(r.messageSources) > 0 ||
 		len(r.codeReviewSources) > 0 ||
 		len(r.issueCreators) > 0 ||
-		len(r.projectProposers) > 0
+		len(r.projectProposers) > 0 ||
+		len(r.ciTestInsights) > 0
 }
 
 // Summary returns a human-readable summary of registered providers.
@@ -278,6 +310,9 @@ func (r *Registry) Summary() map[string][]string {
 	}
 	for name := range r.projectProposers {
 		m["project_proposers"] = append(m["project_proposers"], name)
+	}
+	for name := range r.ciTestInsights {
+		m["ci_test_insights"] = append(m["ci_test_insights"], name)
 	}
 	return m
 }

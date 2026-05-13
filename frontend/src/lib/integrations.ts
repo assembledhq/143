@@ -1,4 +1,4 @@
-export type IntegrationKey = "github" | "sentry" | "linear" | "slack" | "notion";
+export type IntegrationKey = "github" | "sentry" | "linear" | "slack" | "notion" | "circleci";
 
 export type IntegrationDefinition = {
   key: IntegrationKey;
@@ -37,6 +37,12 @@ export const INTEGRATIONS: IntegrationDefinition[] = [
     name: "Notion",
     description: "Sync product docs, roadmaps, and knowledge base.",
     logoSrc: "/integrations/notion.svg",
+  },
+  {
+    key: "circleci",
+    name: "CircleCI",
+    description: "Surface flaky tests so agents can investigate and fix them.",
+    logoSrc: "/integrations/circleci.svg",
   },
 ];
 
