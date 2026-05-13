@@ -344,6 +344,17 @@ export const api = {
     getQuestions: (sessionId: string) => get<import('./types').ListResponse<import('./types').SessionQuestion>>(`/api/v1/sessions/${sessionId}/questions`),
     answerQuestion: (sessionId: string, questionId: string, answer: string) =>
       post<import('./types').SingleResponse<import('./types').SessionQuestion>>(`/api/v1/sessions/${sessionId}/questions/${questionId}/answer`, { answer }),
+    getHumanInputRequests: (sessionId: string, params?: { status?: string; threadId?: string | null }) => {
+      const searchParams = new URLSearchParams();
+      if (params?.status) searchParams.set('status', params.status);
+      if (params?.threadId) searchParams.set('thread_id', params.threadId);
+      const qs = searchParams.toString();
+      return get<import('./types').ListResponse<import('./types').HumanInputRequest>>(`/api/v1/sessions/${sessionId}/human-input-requests${qs ? `?${qs}` : ''}`);
+    },
+    answerHumanInputRequest: (sessionId: string, requestId: string, body: import('./types').HumanInputAnswerBody) =>
+      post<import('./types').SingleResponse<import('./types').HumanInputRequest>>(`/api/v1/sessions/${sessionId}/human-input-requests/${requestId}/answer`, body),
+    cancelHumanInputRequest: (sessionId: string, requestId: string) =>
+      post<import('./types').SingleResponse<import('./types').HumanInputRequest>>(`/api/v1/sessions/${sessionId}/human-input-requests/${requestId}/cancel`, {}),
     createManual: (body: { message: string; images?: string[]; references?: import('./types').SessionInputReference[]; commands?: import('./types').SessionInputCommand[]; agent_type?: string; model?: string; reasoning_effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max'; autonomy_level?: string; token_mode?: string; repository_id?: string; branch?: string; linear_private?: boolean; linear_state_sync_disabled?: boolean }) =>
       post<import('./types').SingleResponse<import('./types').Session>>('/api/v1/sessions/manual', body),
     getMessages: (sessionId: string) =>

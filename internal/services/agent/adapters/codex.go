@@ -365,6 +365,25 @@ func parseCodexStreamLine(line []byte, result *agent.AgentResult, logCh chan<- a
 			Message:   msg,
 		}
 
+	case "human_input_request", "human_input", "question", "approval_request", "tool_approval", "action_choice":
+		req, ok := normalizeGenericHumanInputEvent(line, models.AgentTypeCodex)
+		if !ok {
+			logCh <- agent.LogEntry{
+				Timestamp: time.Now(),
+				Level:     "debug",
+				Message:   string(line),
+			}
+			return
+		}
+		result.RequiresHumanInput = true
+		logCh <- agent.LogEntry{
+			Timestamp:  time.Now(),
+			Level:      "human_input",
+			Message:    req.Body,
+			Metadata:   map[string]interface{}{"provider": string(models.AgentTypeCodex), "request_kind": string(req.Kind), "title": req.Title},
+			HumanInput: &req,
+		}
+
 	case "usage", "result":
 		content := event.Content
 		logCh <- agent.LogEntry{

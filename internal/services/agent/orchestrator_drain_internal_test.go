@@ -199,7 +199,50 @@ func (t *drainStubThreads) ClearPendingMessages(_ context.Context, _, threadID u
 	return nil
 }
 
-func newDrainOrchestrator(messages *drainStubMessages, sessions *drainStubSessions, jobs *drainStubJobs, threads *drainStubThreads) *Orchestrator {
+type drainStubHumanInputs struct {
+	request        models.HumanInputRequest
+	sessionAnswers []drainStubHumanInputAnswer
+	threadAnswers  []drainStubHumanInputAnswer
+}
+
+type drainStubHumanInputAnswer struct {
+	orgID      uuid.UUID
+	sessionID  uuid.UUID
+	threadID   uuid.UUID
+	answerText string
+	answeredBy uuid.UUID
+}
+
+func (h *drainStubHumanInputs) Create(context.Context, *models.HumanInputRequest) error {
+	return nil
+}
+
+func (h *drainStubHumanInputs) GetByID(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) (models.HumanInputRequest, error) {
+	return h.request, nil
+}
+
+func (h *drainStubHumanInputs) AnswerLatestPendingFreeTextBySession(_ context.Context, orgID, sessionID uuid.UUID, answerText string, answeredBy uuid.UUID) (models.HumanInputRequest, error) {
+	h.sessionAnswers = append(h.sessionAnswers, drainStubHumanInputAnswer{
+		orgID:      orgID,
+		sessionID:  sessionID,
+		answerText: answerText,
+		answeredBy: answeredBy,
+	})
+	return h.request, nil
+}
+
+func (h *drainStubHumanInputs) AnswerLatestPendingFreeTextByThread(_ context.Context, orgID, sessionID, threadID uuid.UUID, answerText string, answeredBy uuid.UUID) (models.HumanInputRequest, error) {
+	h.threadAnswers = append(h.threadAnswers, drainStubHumanInputAnswer{
+		orgID:      orgID,
+		sessionID:  sessionID,
+		threadID:   threadID,
+		answerText: answerText,
+		answeredBy: answeredBy,
+	})
+	return h.request, nil
+}
+
+func newDrainOrchestrator(messages *drainStubMessages, sessions *drainStubSessions, jobs *drainStubJobs, threads *drainStubThreads, humanInputs ...*drainStubHumanInputs) *Orchestrator {
 	o := &Orchestrator{
 		sessionMessages: messages,
 		sessions:        sessions,
@@ -208,6 +251,9 @@ func newDrainOrchestrator(messages *drainStubMessages, sessions *drainStubSessio
 	}
 	if threads != nil {
 		o.sessionThreads = threads
+	}
+	if len(humanInputs) > 0 {
+		o.humanInputRequests = humanInputs[0]
 	}
 	return o
 }
@@ -307,6 +353,43 @@ func TestDrainQueuedMessages_ThreadScopeClearsAndEnqueues(t *testing.T) {
 	require.Len(t, jobs.enqueues, 1, "thread-scope drain must enqueue continue_session")
 	payload := jobs.enqueues[0].payload.(map[string]string)
 	require.Equal(t, threadA.String(), payload["thread_id"], "thread-scope drain must propagate thread_id")
+}
+
+func TestDrainQueuedMessages_ThreadScopeAnswersPendingHumanInput(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	threadID := uuid.New()
+	userID := uuid.New()
+	requestID := uuid.New()
+	processed := &models.SessionMessage{ID: 5, OrgID: orgID, SessionID: sessionID, Role: models.MessageRoleUser, ThreadID: &threadID}
+
+	messages := &drainStubMessages{messages: []models.SessionMessage{
+		{ID: 5, OrgID: orgID, SessionID: sessionID, Role: models.MessageRoleUser, ThreadID: &threadID},
+		{ID: 6, OrgID: orgID, SessionID: sessionID, Role: models.MessageRoleUser, ThreadID: &threadID, UserID: &userID, Content: "Use the existing table."},
+	}}
+	sessions := &drainStubSessions{session: models.Session{Status: "idle"}}
+	jobs := &drainStubJobs{}
+	threads := &drainStubThreads{}
+	humanInputs := &drainStubHumanInputs{request: models.HumanInputRequest{
+		ID:        requestID,
+		OrgID:     orgID,
+		SessionID: sessionID,
+		ThreadID:  &threadID,
+		Status:    models.HumanInputRequestStatusAnswered,
+	}}
+	o := newDrainOrchestrator(messages, sessions, jobs, threads, humanInputs)
+
+	o.drainQueuedMessages(context.Background(), &models.Session{ID: sessionID, OrgID: orgID}, processed, &threadID, zerolog.Nop())
+
+	require.Len(t, humanInputs.threadAnswers, 1, "thread-scope drain should answer the pending human-input request with the queued user message")
+	require.Equal(t, threadID, humanInputs.threadAnswers[0].threadID, "thread-scope drain should answer the request for the drained thread")
+	require.Equal(t, "Use the existing table.", humanInputs.threadAnswers[0].answerText, "thread-scope drain should persist the queued message text as the answer")
+	require.Equal(t, userID, humanInputs.threadAnswers[0].answeredBy, "thread-scope drain should attribute the answer to the queued message user")
+	require.Len(t, jobs.enqueues, 1, "thread-scope drain should enqueue continue_session")
+	payload := jobs.enqueues[0].payload.(map[string]string)
+	require.Equal(t, requestID.String(), payload["human_input_request_id"], "thread-scope drain should carry the answered request id into the resume job")
 }
 
 func TestDrainQueuedMessages_SkipsTerminalSessionStatus(t *testing.T) {

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 
@@ -692,6 +693,21 @@ func (m *mockSessionQuestionStore) Create(ctx context.Context, q *models.Session
 	defer m.mu.Unlock()
 	m.questions = append(m.questions, *q)
 	return nil
+}
+
+func (m *mockSessionQuestionStore) AnswerLatestPendingBySessionAndQuestion(_ context.Context, orgID, sessionID uuid.UUID, questionText, answerText string, answeredBy uuid.UUID) (models.SessionQuestion, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for i := len(m.questions) - 1; i >= 0; i-- {
+		q := m.questions[i]
+		if q.OrgID == orgID && q.SessionID == sessionID && q.Status == "pending" && q.QuestionText == questionText {
+			m.questions[i].Status = "answered"
+			m.questions[i].AnswerText = &answerText
+			m.questions[i].AnsweredBy = &answeredBy
+			return m.questions[i], nil
+		}
+	}
+	return models.SessionQuestion{}, pgx.ErrNoRows
 }
 
 func (m *mockSessionQuestionStore) getQuestions() []models.SessionQuestion {
@@ -6765,6 +6781,37 @@ func TestRunAgent_DoesNotPublishCheckpointWithoutSnapshotStore(t *testing.T) {
 	err := buildOrchestrator(d).RunAgent(context.Background(), run)
 	require.NoError(t, err, "RunAgent should succeed without a snapshot store configured")
 	require.Empty(t, d.sessions.getCheckpointUpdates(), "RunAgent should not publish checkpoint metadata when no snapshot was actually persisted")
+}
+
+func TestRunAgent_PublishesCheckpointForHumanInputPauseWithNonZeroExit(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	run := testRun(orgID, issue.ID)
+
+	d := defaultDeps()
+	d.provider.SnapshotFn = func(ctx context.Context, sb *agent.Sandbox) (io.ReadCloser, error) {
+		return io.NopCloser(bytes.NewReader([]byte("human-input-checkpoint"))), nil
+	}
+	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
+		return &agent.AgentResult{
+			RequiresHumanInput: true,
+			AgentSessionID:     "agent-human-input-1",
+			ExitCode:           1,
+			Error:              "deferred human input",
+		}, nil
+	}
+
+	err := buildOrchestrator(d).RunAgent(context.Background(), run)
+	require.NoError(t, err, "human-input pauses should be handled internally")
+
+	checkpoints := d.sessions.getCheckpointUpdates()
+	require.NotEmpty(t, checkpoints, "human-input pause should publish checkpoint metadata even when the provider exits non-zero")
+	require.Equal(t, models.CheckpointKindGracefulStop, checkpoints[len(checkpoints)-1].kind, "human-input pause should publish a graceful-stop checkpoint")
+	require.Equal(t, "agent-human-input-1", checkpoints[len(checkpoints)-1].agentSessionID, "checkpoint should preserve provider session id for resume")
+	require.NotEmpty(t, checkpoints[len(checkpoints)-1].snapshotKey, "human-input pause should persist the checkpoint snapshot key")
+	require.Contains(t, d.sessions.getStatusUpdates(), string(models.SessionStatusAwaitingInput), "human-input pause should leave the session awaiting input")
 }
 
 func TestRunAgent_RevertsToPendingWhenRuntimeInitFails(t *testing.T) {

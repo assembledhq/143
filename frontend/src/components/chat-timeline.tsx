@@ -13,11 +13,12 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { MarkdownContent } from "@/components/markdown";
+import { HumanInputRequestCard } from "@/components/human-input-request-card";
 import { LinearIcon } from "@/components/linear-icon";
 import { looksLikeLinearRef } from "@/lib/linear-refs";
 import { PLAN_MODE_PREFIX } from "@/lib/timeline";
 import type { TimelineEntry } from "@/lib/timeline";
-import type { SessionInputReference, SessionMessage, SessionLog } from "@/lib/types";
+import type { HumanInputAnswerBody, HumanInputRequest, SessionInputReference, SessionMessage, SessionLog } from "@/lib/types";
 import { isImageURL, fileNameFromURL } from "@/lib/utils";
 import { deriveToolDisplay, formatToolInput } from "@/lib/tool-label";
 import { ImageLightbox } from "@/components/image-lightbox";
@@ -526,13 +527,18 @@ interface ChatTimelineProps {
   onDiffClick?: () => void;
   onApprovePlan?: () => void;
   onAdjustPlan?: () => void;
+  humanInputSubmittingId?: string | null;
+  autoOpenHumanInputId?: string | null;
+  onAnswerHumanInput?: (request: HumanInputRequest, body: HumanInputAnswerBody) => Promise<void> | void;
+  onCancelHumanInput?: (request: HumanInputRequest) => Promise<void> | void;
+  onDismissHumanInputAutoOpen?: (request: HumanInputRequest) => void;
   getEntryContainerProps?: (
     entry: TimelineEntry,
     index: number,
   ) => React.HTMLAttributes<HTMLDivElement> & Record<`data-${string}`, string | number | undefined>;
 }
 
-function ChatTimelineImpl({ entries, isRunning, diffStats, onDiffClick, onApprovePlan, onAdjustPlan, getEntryContainerProps }: ChatTimelineProps) {
+function ChatTimelineImpl({ entries, isRunning, diffStats, onDiffClick, onApprovePlan, onAdjustPlan, humanInputSubmittingId, autoOpenHumanInputId, onAnswerHumanInput, onCancelHumanInput, onDismissHumanInputAutoOpen, getEntryContainerProps }: ChatTimelineProps) {
   // Separate visible entries (messages, tool groups, errors) from hidden logs.
   // Group consecutive hidden logs together so they share a single "Show more" toggle.
   const rendered: React.ReactNode[] = [];
@@ -668,6 +674,24 @@ function ChatTimelineImpl({ entries, isRunning, diffStats, onDiffClick, onApprov
           ),
         );
         break;
+      case "human_input":
+        rendered.push(
+          wrapEntry(
+            <HumanInputRequestCard
+              key={`human-input-${entry.data.id}`}
+              request={entry.data}
+              autoOpen={autoOpenHumanInputId === entry.data.id}
+              submitting={humanInputSubmittingId === entry.data.id}
+              onAnswer={(body) => onAnswerHumanInput?.(entry.data, body)}
+              onCancel={onCancelHumanInput ? () => onCancelHumanInput(entry.data) : undefined}
+              onAutoOpenDismiss={() => onDismissHumanInputAutoOpen?.(entry.data)}
+            />,
+            entry,
+            index,
+            `human-input-${entry.data.id}`,
+          ),
+        );
+        break;
     }
   }
 
@@ -725,6 +749,11 @@ export const ChatTimeline = memo(ChatTimelineImpl, (prev, next) => {
     prev.onDiffClick === next.onDiffClick &&
     prev.onApprovePlan === next.onApprovePlan &&
     prev.onAdjustPlan === next.onAdjustPlan &&
+    prev.humanInputSubmittingId === next.humanInputSubmittingId &&
+    prev.autoOpenHumanInputId === next.autoOpenHumanInputId &&
+    prev.onAnswerHumanInput === next.onAnswerHumanInput &&
+    prev.onCancelHumanInput === next.onCancelHumanInput &&
+    prev.onDismissHumanInputAutoOpen === next.onDismissHumanInputAutoOpen &&
     prev.getEntryContainerProps === next.getEntryContainerProps &&
     diffStatsEqual(prev.diffStats, next.diffStats)
   );
