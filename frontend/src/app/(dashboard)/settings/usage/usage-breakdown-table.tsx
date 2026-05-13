@@ -8,7 +8,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { formatCost, formatMinutes, formatNumber, formatTokenCount } from "./usage-helpers";
 import { cn } from "@/lib/utils";
 
-export type UsageBreakdownDimension = "capacity" | "agent" | "model" | "reasoning";
+export type UsageBreakdownDimension = "user" | "capacity" | "agent" | "model" | "reasoning";
 
 interface UsageBreakdownTableProps {
   start: string;
@@ -25,6 +25,8 @@ interface UsageBreakdownTableProps {
 
 function leadingLabel(dimension: UsageBreakdownDimension): string {
   switch (dimension) {
+    case "user":
+      return "User";
     case "capacity":
       return "Capacity";
     case "agent":

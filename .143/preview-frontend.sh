@@ -25,4 +25,7 @@ if [ ! -d node_modules ]; then
 fi
 
 echo '[143-preview] starting next dev server...'
-exec npm run dev
+# Next defaults can be localhost-only depending on version/config. The preview
+# worker proxies to the sandbox container IP, so the dev server must bind all
+# interfaces, not just loopback.
+exec npm run dev -- --hostname 0.0.0.0

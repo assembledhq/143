@@ -405,6 +405,7 @@ type PreviewStatusResponse struct {
 	Instance       *PreviewInstance        `json:"instance"`
 	Services       []PreviewService        `json:"services"`
 	Infrastructure []PreviewInfrastructure `json:"infrastructure,omitempty"`
+	PreviewOrigin  string                  `json:"preview_origin,omitempty"`
 }
 
 // PreviewDetectionResult is the API response for GET /repos/{owner}/{repo}/preview/detect.

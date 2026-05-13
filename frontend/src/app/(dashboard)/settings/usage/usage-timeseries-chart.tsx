@@ -135,7 +135,7 @@ export function UsageTimeseriesChart({
   filters,
   onDayClick,
 }: UsageTimeseriesChartProps) {
-  const stackBy = chartMode === "stacked" ? dimension : undefined;
+  const stackBy = chartMode === "stacked" && dimension !== "user" ? dimension : undefined;
   const { data, isLoading, isError } = useQuery({
     queryKey: queryKeys.usage.timeseries({
       start,
@@ -178,13 +178,13 @@ export function UsageTimeseriesChart({
                 ))}
               </SelectContent>
             </Select>
-            <Select value={chartMode} onValueChange={(v) => onChartModeChange(v as ChartMode)}>
+              <Select value={chartMode} onValueChange={(v) => onChartModeChange(v as ChartMode)}>
               <SelectTrigger className="h-8 w-32 text-xs">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
                 <SelectItem value="totals" className="text-xs">Totals</SelectItem>
-                <SelectItem value="stacked" className="text-xs">Stacked bars</SelectItem>
+                <SelectItem value="stacked" className="text-xs" disabled={dimension === "user"}>Stacked bars</SelectItem>
               </SelectContent>
             </Select>
           </div>

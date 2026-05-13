@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"errors"
+	"os"
 	"testing"
 	"time"
 
@@ -622,6 +623,18 @@ func TestJobStore_ReclaimLostRunningJobs(t *testing.T) {
 	require.NoError(t, err, "ReclaimLostRunningJobs should not return an error")
 	require.Equal(t, int64(3), reclaimed, "ReclaimLostRunningJobs should return the number of reclaimed jobs")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestJobStore_ReclaimLostRunningJobs_IncludesLegacyNullLeaseRows(t *testing.T) {
+	t.Parallel()
+
+	body, err := os.ReadFile("jobs.go")
+	require.NoError(t, err, "test should read jobs.go")
+
+	sql := string(body)
+	require.Contains(t, sql, "j.lease_expires_at IS NULL", "recovery query should include legacy running jobs without a lease expiry")
+	require.Contains(t, sql, "OR (j.lease_expires_at IS NULL AND d.id IS NOT NULL)", "legacy null-lease recovery should only reclaim jobs owned by dead or stale nodes")
+	require.NotContains(t, sql, "j.lease_expires_at IS NULL AND j.locked_at < $1", "legacy null-lease recovery must not reclaim active live-node jobs using the node heartbeat cutoff")
 }
 
 func TestJobStore_ReclaimLostRunningJobs_ReturnsWrappedErrors(t *testing.T) {

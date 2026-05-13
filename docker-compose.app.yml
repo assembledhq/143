@@ -9,13 +9,17 @@ include:
 
 services:
   caddy:
-    # caddy:2-alpine floats to latest Caddy 2.x. The Caddyfile uses
-    # `dynamic a`, which requires Caddy >= 2.6 — do not downgrade below that
-    # without also removing the dynamic upstream blocks in deploy/Caddyfile.
-    image: caddy:2-alpine
+    # Build a custom Caddy image with the Cloudflare DNS provider module so
+    # wildcard preview certificates can use the ACME DNS challenge.
+    build:
+      context: .
+      dockerfile: Dockerfile.caddy
     ports:
       - "80:80"
       - "443:443"
+    environment:
+      DOMAIN: ${DOMAIN:-143.dev}
+      CLOUDFLARE_API_TOKEN: ${CLOUDFLARE_API_TOKEN:?set in .env.production.enc for wildcard preview certificates}
     volumes:
       - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data
