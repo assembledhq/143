@@ -214,6 +214,16 @@ func reconcileLinearAgentCreated(ctx context.Context, deps LinearAgentEventHandl
 	if err != nil {
 		return fmt.Errorf("reconcile: lookup session: %w", err)
 	}
+	// session is a value type, so it cannot be nil. Confirm GetByID
+	// actually populated it — pgx.CollectOneRow should return an error
+	// when no row matches, but a corrupted scan path (e.g. a future
+	// schema change that drops a NOT NULL guarantee) could surface as a
+	// zero-value session here, and dereferencing PrimaryIssueID below
+	// would silently follow the "no primary issue" branch on a real
+	// session that never loaded.
+	if session.ID == uuid.Nil {
+		return fmt.Errorf("reconcile: session %s loaded as zero-value", sessionID)
+	}
 	if session.PrimaryIssueID == nil {
 		// Session was created without a primary issue link. Nothing on
 		// the provider-state side to reconcile; just guarantee run_agent

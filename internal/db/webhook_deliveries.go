@@ -2,11 +2,20 @@ package db
 
 import (
 	"context"
+	"errors"
 
 	"github.com/jackc/pgx/v5"
 
 	"github.com/assembledhq/143/internal/models"
 )
+
+// ErrWebhookDeliveryReplay is returned by Create when a row with the
+// same (provider, delivery_id) already exists. The schema enforces this
+// via the partial unique index idx_webhook_deliveries_idempotency. Lets
+// the ingestion handler short-circuit replay attempts before they reach
+// downstream dispatchers (which then can't double-emit bootstrap
+// activities or double-enqueue worker jobs).
+var ErrWebhookDeliveryReplay = errors.New("webhook delivery already recorded for (provider, delivery_id)")
 
 type WebhookDeliveryStore struct {
 	db DBTX
@@ -35,7 +44,13 @@ func (s *WebhookDeliveryStore) Create(ctx context.Context, d *models.WebhookDeli
 	}
 
 	row := s.db.QueryRow(ctx, query, args)
-	return row.Scan(&d.ID, &d.ReceivedAt, &d.CreatedAt)
+	if err := row.Scan(&d.ID, &d.ReceivedAt, &d.CreatedAt); err != nil {
+		if isUniqueViolation(err) {
+			return ErrWebhookDeliveryReplay
+		}
+		return err
+	}
+	return nil
 }
 
 func (s *WebhookDeliveryStore) MarkProcessed(ctx context.Context, d *models.WebhookDelivery, errMsg *string) error {
