@@ -607,7 +607,8 @@ describe('UsageBreakdownTable', () => {
               total_output_tokens: 2000,
               total_tokens: 7000,
               total_llm_cost_usd: 0.5,
-              percentage: 100.0,
+              percentage: 60.0,
+              share_of_tokens: 87.5,
             },
           ],
           meta: {},
@@ -625,8 +626,13 @@ describe('UsageBreakdownTable', () => {
       expect(screen.getByText('alice@example.com')).toBeInTheDocument();
     });
     expect(screen.getByText('1.0h')).toBeInTheDocument();
+    expect(screen.getByText('20.0m')).toBeInTheDocument();
     expect(screen.getByText('7.0K')).toBeInTheDocument();
+    expect(screen.getByText('2.3K')).toBeInTheDocument();
     expect(screen.getByText('Share of Tokens')).toBeInTheDocument();
+    expect(screen.getByText('Minutes / Session')).toBeInTheDocument();
+    expect(screen.getByText('Tokens / Session')).toBeInTheDocument();
+    expect(screen.getByText('87.5%')).toBeInTheDocument();
   });
 });
 

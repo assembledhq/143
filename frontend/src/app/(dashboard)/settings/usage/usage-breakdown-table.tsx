@@ -93,28 +93,38 @@ export function UsageBreakdownTable({ start, end, dimension, filters, onRowClick
                   <TableHead className="pl-4 text-xs">{leadingLabel(dimension)}</TableHead>
                   <TableHead className="text-right text-xs">Sessions</TableHead>
                   <TableHead className="text-right text-xs">Container Minutes</TableHead>
+                  <TableHead className="text-right text-xs">Minutes / Session</TableHead>
                   <TableHead className="text-right text-xs">Total Tokens</TableHead>
+                  <TableHead className="text-right text-xs">Tokens / Session</TableHead>
                   <TableHead className="text-right text-xs">Est. Cost</TableHead>
                   <TableHead className="pr-4 text-right text-xs">Share of Tokens</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {rows.map((row) => (
-                  <TableRow
-                    key={row.key}
-                    className={cn(onRowClick && "cursor-pointer hover:bg-muted/50", selectedKey === row.key && "bg-muted/50")}
-                    onClick={() => onRowClick?.({ dimension, key: row.key })}
-                  >
-                    <TableCell className="pl-4 text-[13px] font-medium">{row.label}</TableCell>
-                    <TableCell className="text-right text-[13px] tabular-nums">{formatNumber(row.total_sessions)}</TableCell>
-                    <TableCell className="text-right text-[13px] tabular-nums">{formatMinutes(row.total_container_minutes)}</TableCell>
-                    <TableCell className="text-right text-[13px] tabular-nums">{formatTokenCount(row.total_tokens)}</TableCell>
-                    <TableCell className="text-right text-[13px] tabular-nums">{formatCost(row.total_llm_cost_usd)}</TableCell>
-                    <TableCell className="pr-4 text-right text-[13px] tabular-nums">
-                      {(row.share_of_tokens ?? row.percentage).toFixed(1)}%
-                    </TableCell>
-                  </TableRow>
-                ))}
+                {rows.map((row) => {
+                  const minutesPerSession = row.total_sessions > 0 ? row.total_container_minutes / row.total_sessions : 0;
+                  const tokensPerSession = row.total_sessions > 0 ? row.total_tokens / row.total_sessions : 0;
+                  const shareOfTokens = row.share_of_tokens ?? row.percentage ?? 0;
+
+                  return (
+                    <TableRow
+                      key={row.key}
+                      className={cn(onRowClick && "cursor-pointer hover:bg-muted/50", selectedKey === row.key && "bg-muted/50")}
+                      onClick={() => onRowClick?.({ dimension, key: row.key })}
+                    >
+                      <TableCell className="pl-4 text-[13px] font-medium">{row.label}</TableCell>
+                      <TableCell className="text-right text-[13px] tabular-nums">{formatNumber(row.total_sessions)}</TableCell>
+                      <TableCell className="text-right text-[13px] tabular-nums">{formatMinutes(row.total_container_minutes)}</TableCell>
+                      <TableCell className="text-right text-[13px] tabular-nums">{formatMinutes(minutesPerSession)}</TableCell>
+                      <TableCell className="text-right text-[13px] tabular-nums">{formatTokenCount(row.total_tokens)}</TableCell>
+                      <TableCell className="text-right text-[13px] tabular-nums">{formatTokenCount(tokensPerSession)}</TableCell>
+                      <TableCell className="text-right text-[13px] tabular-nums">{formatCost(row.total_llm_cost_usd)}</TableCell>
+                      <TableCell className="pr-4 text-right text-[13px] tabular-nums">
+                        {shareOfTokens.toFixed(1)}%
+                      </TableCell>
+                    </TableRow>
+                  );
+                })}
               </TableBody>
             </Table>
           </div>
