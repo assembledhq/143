@@ -184,6 +184,20 @@ describe("PreviewPanel component", () => {
     expect(screen.getByRole("button", { name: "Start Preview" })).toBeInTheDocument();
   });
 
+  it("keeps no-preview status quiet when no preview has ever been created", async () => {
+    const err = new Error("no active preview") as Error & { code?: string };
+    err.code = "NO_ACTIVE_PREVIEW";
+    mockGet.mockRejectedValueOnce(err);
+
+    renderWithProviders(<PreviewPanel {...DEFAULT_PROPS} />);
+
+    await waitFor(() => {
+      expect(screen.getByText("No preview running")).toBeInTheDocument();
+    });
+    expect(screen.queryByText("no active preview")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Start Preview" })).toBeInTheDocument();
+  });
+
   it('shows idle state when phase is "stopped"', async () => {
     mockGet.mockResolvedValue(makePreviewStatus({ status: "stopped" }));
 
@@ -195,6 +209,28 @@ describe("PreviewPanel component", () => {
 
     // Should also render the status badge
     expect(screen.getByText("Stopped")).toBeInTheDocument();
+  });
+
+  it("treats async start success as startup in progress and resumes polling", async () => {
+    const user = userEvent.setup();
+    mockGet
+      .mockResolvedValueOnce(makePreviewStatus({ status: "stopped" }))
+      .mockResolvedValueOnce(makePreviewStatus({ status: "starting" }));
+    mockStart.mockResolvedValueOnce(makePreviewStatus({ status: "starting" }).instance);
+
+    renderWithProviders(<PreviewPanel {...DEFAULT_PROPS} />);
+
+    await waitFor(() => {
+      expect(screen.getByText("No preview running")).toBeInTheDocument();
+    });
+
+    await user.click(screen.getByRole("button", { name: "Start Preview" }));
+
+    await waitFor(() => {
+      expect(screen.getByText("Preparing preview")).toBeInTheDocument();
+    });
+    expect(mockStart).toHaveBeenCalledTimes(1);
+    expect(mockGet).toHaveBeenCalledTimes(2);
   });
 
   /* ---------- Starting status ---------- */
@@ -350,6 +386,29 @@ describe("PreviewPanel component", () => {
     expect(iframe).toHaveAttribute(
       "src",
       "http://prev-1.preview.test/bootstrap",
+    );
+  });
+
+  it("uses the runtime preview origin from the status response when present", async () => {
+    mockGet.mockResolvedValue({
+      ...makePreviewStatus({ status: "ready", id: "prev-1" }),
+      preview_origin: "https://prev-1.preview.143.dev",
+    });
+
+    renderWithProviders(
+      <PreviewPanel
+        {...DEFAULT_PROPS}
+        previewOriginTemplate="http://{id}.preview.localhost:9090"
+      />,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText("Ready")).toBeInTheDocument();
+    });
+
+    expect(screen.getByTitle("Preview")).toHaveAttribute(
+      "src",
+      "https://prev-1.preview.143.dev/bootstrap",
     );
   });
 

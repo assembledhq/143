@@ -383,10 +383,15 @@ The runtime now emits startup logs with:
 
 Structured logs should continue to distinguish:
 
+- successful session snapshot saves, including `snapshot_key` and `snapshot_size_bytes`
 - snapshot save failures
 - snapshot load failures
 - snapshot delete failures
 - snapshot not found
+
+The platform health Grafana dashboard tracks session snapshot size from the
+`session snapshot saved` event so capacity planning can see p95 and largest
+recent checkpoint sizes before adding workers in more regions or providers.
 
 The important operational distinction is:
 

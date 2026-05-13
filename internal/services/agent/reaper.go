@@ -72,7 +72,6 @@ type StaleSessionLister interface {
 	ListStaleRunningSessions(ctx context.Context, startedBefore time.Time) ([]models.Session, error)
 	ListExpiredSnapshots(ctx context.Context, olderThan time.Time) ([]models.Session, error)
 	UpdateStatus(ctx context.Context, orgID, sessionID uuid.UUID, status string) error
-	UpdateResult(ctx context.Context, orgID, runID uuid.UUID, status string, result *models.SessionResult) error
 	UpdateFailure(ctx context.Context, orgID, runID uuid.UUID, explanation, category string, nextSteps []string, retryAdvised bool) error
 	UpdateSandboxState(ctx context.Context, orgID, sessionID uuid.UUID, state string) error
 }
@@ -234,11 +233,7 @@ func (r *SessionReaper) reap(ctx context.Context) {
 		r.logger.Error().Err(err).Msg("reaper: failed to list stale pending sessions")
 	} else {
 		for _, s := range stalePending {
-			errMsg := fmt.Sprintf("session timed out after %s in pending state without starting", r.maxPendingAge)
-			result := &models.SessionResult{
-				Error: strPtr(errMsg),
-			}
-			if err := r.sessions.UpdateResult(ctx, s.OrgID, s.ID, string(models.SessionStatusFailed), result); err != nil {
+			if err := r.sessions.UpdateStatus(ctx, s.OrgID, s.ID, string(models.SessionStatusFailed)); err != nil {
 				r.logger.Error().Err(err).Str("session_id", s.ID.String()).Msg("reaper: failed to mark stale pending session as failed")
 				continue
 			}
@@ -276,11 +271,7 @@ func (r *SessionReaper) reap(ctx context.Context) {
 		r.logger.Error().Err(err).Msg("reaper: failed to list stale running sessions")
 	} else {
 		for _, s := range staleRunning {
-			errMsg := fmt.Sprintf("session stuck in running state for more than %s — no status update from worker", r.maxRunningAge)
-			result := &models.SessionResult{
-				Error: strPtr(errMsg),
-			}
-			if err := r.sessions.UpdateResult(ctx, s.OrgID, s.ID, string(models.SessionStatusFailed), result); err != nil {
+			if err := r.sessions.UpdateStatus(ctx, s.OrgID, s.ID, string(models.SessionStatusFailed)); err != nil {
 				r.logger.Error().Err(err).Str("session_id", s.ID.String()).Msg("reaper: failed to mark stale running session as failed")
 				continue
 			}

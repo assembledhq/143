@@ -23,6 +23,52 @@ func TestFrontendContainerBindsAllInterfaces(t *testing.T) {
 	require.Contains(t, string(dockerfile), "ENV HOSTNAME=0.0.0.0", "frontend image should default Next standalone to bind all interfaces")
 }
 
+func TestPreviewWildcardTLSUsesCloudflareDNSChallenge(t *testing.T) {
+	t.Parallel()
+
+	compose, err := os.ReadFile("../docker-compose.app.yml")
+	require.NoError(t, err, "test should read the app compose file")
+	composeText := string(compose)
+	require.Contains(t, composeText, "build:", "app compose should build a custom Caddy image so the Cloudflare DNS provider module is available for wildcard preview certificates")
+	require.Contains(t, composeText, "Dockerfile.caddy", "app compose should point the Caddy build at Dockerfile.caddy")
+	require.Contains(t, composeText, "CLOUDFLARE_API_TOKEN", "app compose should pass the Cloudflare API token into the Caddy container for DNS-01 challenges")
+
+	caddyfile, err := os.ReadFile("../deploy/Caddyfile")
+	require.NoError(t, err, "test should read the Caddyfile")
+	caddyText := string(caddyfile)
+	require.Contains(t, caddyText, "*.preview.{$DOMAIN:143.dev}", "Caddyfile should keep a dedicated wildcard preview host block")
+	require.Contains(t, caddyText, "dns cloudflare", "preview wildcard host should use the Cloudflare DNS challenge for certificate issuance")
+	require.Contains(t, caddyText, "{env.CLOUDFLARE_API_TOKEN}", "preview wildcard host should read the Cloudflare API token from container env")
+
+	caddyDockerfile, err := os.ReadFile("../Dockerfile.caddy")
+	require.NoError(t, err, "test should read the custom Caddy Dockerfile")
+	require.Contains(t, string(caddyDockerfile), "github.com/caddy-dns/cloudflare", "custom Caddy image should compile in the Cloudflare DNS provider module")
+
+	deployScript, err := os.ReadFile("../deploy/scripts/deploy.sh")
+	require.NoError(t, err, "test should read deploy.sh")
+	deployText := string(deployScript)
+	require.Contains(t, deployText, "Dockerfile.caddy", "app deploys should stage Dockerfile.caddy before docker compose up so remote builds can succeed")
+	require.Contains(t, deployText, `docker compose -f "$COMPOSE_FILE" build caddy`, "app deploys should explicitly build the custom Caddy image so Dockerfile.caddy changes and base-image refreshes reach the host")
+	require.Contains(t, deployText, `docker compose -f "$COMPOSE_FILE" up -d --no-deps caddy`, "app deploys should reconcile the running Caddy container against the freshly built image and current env")
+	require.Contains(t, deployText, "CLOUDFLARE_API_TOKEN=%s", "app deploys should project the Cloudflare DNS-challenge token into /opt/143/.env for compose interpolation")
+	require.Contains(t, deployText, "PREVIEW_ORIGIN_TEMPLATE=%s", "app deploys should project the preview origin template into /opt/143/.env so the app host can override the production preview domain")
+	require.Contains(t, deployText, "NEXT_PUBLIC_PREVIEW_ORIGIN_TEMPLATE=%s", "app deploys should project the frontend preview-origin fallback into /opt/143/.env on the app host")
+	buildIndex := strings.Index(deployText, `echo "Building custom Caddy image..."`)
+	reconcileCallIndex := strings.LastIndex(deployText, `reconcile_caddy_service`)
+	reloadIndex := strings.LastIndex(deployText, `caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile`)
+	require.NotEqual(t, -1, buildIndex, "deploy.sh should build caddy in the app-role execution path")
+	require.NotEqual(t, -1, reconcileCallIndex, "deploy.sh should reconcile caddy after rolling the app/frontend services")
+	require.NotEqual(t, -1, reloadIndex, "deploy.sh should still support in-place Caddyfile reloads")
+	require.Less(t, buildIndex, reconcileCallIndex, "deploy.sh should build the custom caddy image before reconciling the running container")
+
+	provisionScript, err := os.ReadFile("../deploy/scripts/provision.sh")
+	require.NoError(t, err, "test should read provision.sh")
+	require.Contains(t, string(provisionScript), "Dockerfile.caddy", "fresh app provisioning should stage Dockerfile.caddy before the first docker compose up")
+	require.Contains(t, string(provisionScript), "CLOUDFLARE_API_TOKEN=%s", "fresh app provisioning should project the Cloudflare DNS-challenge token into /opt/143/.env for compose interpolation")
+	require.Contains(t, string(provisionScript), "PREVIEW_ORIGIN_TEMPLATE=%s", "fresh app provisioning should project the preview origin template into /opt/143/.env so the app host can override the production preview domain")
+	require.Contains(t, string(provisionScript), "NEXT_PUBLIC_PREVIEW_ORIGIN_TEMPLATE=%s", "fresh app provisioning should project the frontend preview-origin fallback into /opt/143/.env on the app host")
+}
+
 func TestWorkerProvisioningIncludesGitHubAppUserAuthSecrets(t *testing.T) {
 	t.Parallel()
 
@@ -185,6 +231,39 @@ func TestGrafanaProvisionedDashboardsUseValidDatasourcesAndRangeQueries(t *testi
 			}
 		}
 	}
+}
+
+func TestPlatformHealthDashboardTracksSessionSnapshotSize(t *testing.T) {
+	t.Parallel()
+
+	rawDashboard, err := os.ReadFile("../deploy/grafana/provisioning/dashboards/platform-health.json")
+	require.NoError(t, err, "test should read the platform health dashboard")
+
+	var dashboard struct {
+		Panels []struct {
+			Title   string `json:"title"`
+			Type    string `json:"type"`
+			Targets []struct {
+				QueryType string `json:"queryType"`
+				Expr      string `json:"expr"`
+			} `json:"targets"`
+		} `json:"panels"`
+	}
+	require.NoError(t, json.Unmarshal(rawDashboard, &dashboard), "platform health dashboard should be valid JSON")
+
+	foundSnapshotSizePanel := false
+	for _, panel := range dashboard.Panels {
+		if panel.Title != "Session snapshot size" {
+			continue
+		}
+		foundSnapshotSizePanel = true
+		require.Equal(t, "timeseries", panel.Type, "snapshot size should be graphed over time")
+		require.NotEmpty(t, panel.Targets, "snapshot size panel should have a LogsQL target")
+		require.Equal(t, "statsRange", panel.Targets[0].QueryType, "snapshot size panel should use a range query")
+		require.Contains(t, panel.Targets[0].Expr, `_msg:"session snapshot saved"`, "snapshot size panel should query the session snapshot success log")
+		require.Contains(t, panel.Targets[0].Expr, "snapshot_size_bytes", "snapshot size panel should aggregate the snapshot byte field")
+	}
+	require.True(t, foundSnapshotSizePanel, "platform health dashboard should include session snapshot size telemetry")
 }
 
 func TestProductionAlertsUseValidLogsQLRangeFilters(t *testing.T) {

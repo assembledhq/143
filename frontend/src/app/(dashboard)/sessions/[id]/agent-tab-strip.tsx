@@ -1,7 +1,7 @@
 "use client";
 
 import { RefObject, useMemo } from "react";
-import { Loader2, MoreVertical, Plus, Square, GitBranch, Undo2, AlertTriangle, X } from "lucide-react";
+import { Loader2, MoreVertical, Plus, Undo2, AlertTriangle, X } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -11,7 +11,6 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
-  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
@@ -96,11 +95,8 @@ interface AgentTabStripProps {
   onActiveThreadChange: (threadId: string) => void;
   onAddTab: () => void;
   addTabPending?: boolean;
-  onCancelThread: (threadId: string) => void;
-  onForkThread: (threadId: string) => void;
   onRevertThread: (threadId: string) => void;
   onArchiveThread: (threadId: string) => void;
-  cancelPendingThreadId: string | null;
   archivePendingThreadId: string | null;
   addTabButtonRef?: RefObject<HTMLButtonElement | null>;
 }
@@ -127,11 +123,8 @@ export function AgentTabStrip({
   onActiveThreadChange,
   onAddTab,
   addTabPending = false,
-  onCancelThread,
-  onForkThread,
   onRevertThread,
   onArchiveThread,
-  cancelPendingThreadId,
   archivePendingThreadId,
   addTabButtonRef,
 }: AgentTabStripProps) {
@@ -239,10 +232,7 @@ export function AgentTabStrip({
             <ThreadActionsMenu
               threads={tabs}
               activeThreadId={activeThreadId}
-              onCancel={onCancelThread}
-              onFork={onForkThread}
               onRevert={onRevertThread}
-              cancelPendingThreadId={cancelPendingThreadId}
             />
             <Button
               ref={addTabButtonRef}
@@ -272,7 +262,7 @@ export function AgentTabStrip({
               size="sm"
               aria-label="Agent tabs"
               className={cn(
-                "h-auto max-w-full justify-start gap-1 overflow-x-auto overflow-y-hidden border-b-0 bg-transparent p-0",
+                "h-auto max-w-full justify-start gap-1 overflow-x-auto overflow-y-visible border-b-0 bg-transparent p-0 pb-1",
               )}
             >
               {tabs.map((thread) => {
@@ -380,10 +370,7 @@ export function AgentTabStrip({
           <ThreadActionsMenu
             threads={tabs}
             activeThreadId={activeThreadId}
-            onCancel={onCancelThread}
-            onFork={onForkThread}
             onRevert={onRevertThread}
-            cancelPendingThreadId={cancelPendingThreadId}
           />
           <Button
             ref={addTabButtonRef}
@@ -407,18 +394,13 @@ export function AgentTabStrip({
 interface ThreadActionsMenuProps {
   threads: SessionThread[];
   activeThreadId: string;
-  onCancel: (threadId: string) => void;
-  onFork: (threadId: string) => void;
   onRevert: (threadId: string) => void;
-  cancelPendingThreadId: string | null;
 }
 
-function ThreadActionsMenu({ threads, activeThreadId, onCancel, onFork, onRevert, cancelPendingThreadId }: ThreadActionsMenuProps) {
+function ThreadActionsMenu({ threads, activeThreadId, onRevert }: ThreadActionsMenuProps) {
   const active = threads.find((t) => t.id === activeThreadId);
   if (!active) return null;
-  const canCancel = isActiveStatus(active.status);
   const canRevert = !!active.diff && active.diff.length > 0;
-  const isCancellingThis = cancelPendingThreadId === active.id;
 
   return (
     <DropdownMenu>
@@ -435,18 +417,6 @@ function ThreadActionsMenu({ threads, activeThreadId, onCancel, onFork, onRevert
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end" className="w-56">
-        <DropdownMenuItem
-          onSelect={() => canCancel && onCancel(active.id)}
-          disabled={!canCancel || isCancellingThis}
-        >
-          {isCancellingThis ? <Loader2 className="h-4 w-4 animate-spin" /> : <Square className="h-4 w-4" />}
-          <span>{isCancellingThis ? "Cancelling…" : "Cancel turn"}</span>
-        </DropdownMenuItem>
-        <DropdownMenuSeparator />
-        <DropdownMenuItem onSelect={() => onFork(active.id)}>
-          <GitBranch className="h-4 w-4" />
-          <span>Fork into new session</span>
-        </DropdownMenuItem>
         <DropdownMenuItem
           onSelect={() => canRevert && onRevert(active.id)}
           disabled={!canRevert}

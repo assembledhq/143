@@ -365,7 +365,14 @@ func TestGetStatus_Success(t *testing.T) {
 	require.NoError(t, err)
 	defer mock.Close()
 
-	mgr := newTestManager(mock, &mockProvider{})
+	store := db.NewPreviewStore(mock)
+	mgr := NewManager(ManagerConfig{
+		Store:                 store,
+		Provider:              &mockProvider{},
+		Logger:                zerolog.Nop(),
+		WorkerNodeID:          "worker-1",
+		PreviewOriginTemplate: "https://{id}.preview.143.dev",
+	})
 
 	orgID := uuid.New()
 	previewID := uuid.New()
@@ -398,6 +405,7 @@ func TestGetStatus_Success(t *testing.T) {
 	resp, err := mgr.GetStatus(context.Background(), orgID, previewID)
 	require.NoError(t, err)
 	require.Equal(t, previewID, resp.Instance.ID)
+	require.Equal(t, "https://"+previewID.String()+".preview.143.dev", resp.PreviewOrigin, "status response should expose the runtime preview origin")
 	require.Len(t, resp.Services, 1)
 	require.Len(t, resp.Infrastructure, 0)
 	require.NoError(t, mock.ExpectationsWereMet())
