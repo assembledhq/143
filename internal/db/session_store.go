@@ -544,6 +544,26 @@ func (s *SessionStore) GetDiffByID(ctx context.Context, orgID, sessionID uuid.UU
 }
 
 func (s *SessionStore) Create(ctx context.Context, run *models.Session) error {
+	tx, err := s.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin session create transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	if err := createSessionRows(ctx, tx, run); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit session create transaction: %w", err)
+	}
+	return nil
+}
+
+func (s *SessionStore) CreateInTx(ctx context.Context, tx pgx.Tx, run *models.Session) error {
+	return createSessionRows(ctx, tx, run)
+}
+
+func createSessionRows(ctx context.Context, q DBTX, run *models.Session) error {
 	if run.Origin == "" {
 		run.Origin = models.SessionOriginIssueTrigger
 	}
@@ -553,13 +573,6 @@ func (s *SessionStore) Create(ctx context.Context, run *models.Session) error {
 	if run.ValidationPolicy == "" {
 		run.ValidationPolicy = models.SessionValidationPolicyOnTurnComplete
 	}
-
-	tx, err := s.Begin(ctx)
-	if err != nil {
-		return fmt.Errorf("begin session create transaction: %w", err)
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-
 	if run.LinearPrepareState == "" {
 		run.LinearPrepareState = models.LinearPrepareStateNone
 	}
@@ -609,7 +622,7 @@ func (s *SessionStore) Create(ctx context.Context, run *models.Session) error {
 		"linear_prepare_state":       run.LinearPrepareState,
 	}
 
-	row := tx.QueryRow(ctx, query, args)
+	row := q.QueryRow(ctx, query, args)
 	if err := row.Scan(&run.ID, &run.CreatedAt, &run.LastActivityAt); err != nil {
 		return err
 	}
@@ -620,7 +633,7 @@ func (s *SessionStore) Create(ctx context.Context, run *models.Session) error {
 	// "every session row implies at least one thread row" cannot be violated
 	// by a partial failure between session insert and thread insert.
 	var primaryThreadID uuid.UUID
-	if err := tx.QueryRow(ctx, `
+	if err := q.QueryRow(ctx, `
 		INSERT INTO session_threads (
 			session_id, org_id, agent_type, model_override, label, status
 		)
@@ -639,7 +652,7 @@ func (s *SessionStore) Create(ctx context.Context, run *models.Session) error {
 	run.PrimaryThreadID = &primaryThreadID
 
 	if run.PrimaryIssueID != nil {
-		if _, err := tx.Exec(ctx, `
+		if _, err := q.Exec(ctx, `
 			INSERT INTO session_issue_links (org_id, session_id, issue_id, role, position, added_by_user_id)
 			VALUES (@org_id, @session_id, @issue_id, 'primary', 0, @added_by_user_id)
 			ON CONFLICT (session_id, issue_id) DO NOTHING
@@ -651,9 +664,6 @@ func (s *SessionStore) Create(ctx context.Context, run *models.Session) error {
 		}); err != nil {
 			return fmt.Errorf("insert session issue link: %w", err)
 		}
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("commit session create transaction: %w", err)
 	}
 	return nil
 }
