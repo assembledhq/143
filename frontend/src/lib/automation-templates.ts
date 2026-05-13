@@ -74,18 +74,22 @@ export const automationTemplates: AutomationTemplate[] = [
     category: "reliability",
     summary: "Investigate recent nondeterministic test failures, identify the real source of instability, and suggest the smallest durable fix.",
     goal: `What to do
+- Start with CI/CD evidence before editing code when a CI provider exposes test metadata. Current GitHub PR tools can provide PR and review context, but do not expose flaky-test signals or check-run logs directly.
+- If CircleCI evidence is available, prioritize its Test Insights flaky-test signal. CircleCI marks tests flaky when they both pass and fail on the same commit within a 14-day window; use that signal as evidence, then verify the likely root cause in the repo.
 - Investigate recent test failures and identify the tests or suites that appear flaky rather than consistently broken.
 - Reproduce the instability when possible, then trace it back to the underlying source: timing assumptions, shared state, ordering, random seeds, network dependency, or environment drift.
 - Reuse existing testing patterns in this repository instead of introducing new abstractions unless they are clearly needed.
 
 Output requirements
 - Return a ranked list of the most credible flaky tests, including the evidence that made each one suspicious.
+- Include the CI source for each candidate when available: provider, workflow/job/check name, PR or commit, failure signature, and whether the same test also passed on the same commit.
 - For each item, explain the likely root cause, the smallest durable fix, and whether the fix belongs in test code, product code, or CI configuration.
 - If nothing is convincingly flaky, say so explicitly and list the highest-signal follow-up checks worth scheduling next.
 
 Verification
 - Note which commands, suites, retries, or historical signals you used to validate the flake.
 - Distinguish clearly between "reproduced", "high-confidence inference", and "possible but unconfirmed".
+- Do not classify a test as flaky from one failed run alone. Look for same-commit pass/fail evidence, repeated nondeterministic signatures, or a successful local reproduction of the race/order dependency.
 - Prefer fixes that make the test deterministic over increasing retries or widening timeouts.`,
     outcomes: [
       "Ranked flaky-test candidates with evidence",
