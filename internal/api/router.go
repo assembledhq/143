@@ -1045,6 +1045,8 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Delete("/api/v1/integrations/slack/disconnect", integrationHandler.DisconnectIntegration)
 				r.Post("/api/v1/integrations/notion/connect", integrationHandler.ConnectNotion)
 				r.Delete("/api/v1/integrations/notion/disconnect", integrationHandler.DisconnectIntegration)
+				r.Post("/api/v1/integrations/circleci/connect", integrationHandler.ConnectCircleCI)
+				r.Delete("/api/v1/integrations/circleci/disconnect", integrationHandler.DisconnectIntegration)
 
 				// Eval write routes (admin-only — creating tasks shapes org-wide eval setup).
 				r.Post("/api/v1/evals/tasks", evalHandler.CreateTask)
