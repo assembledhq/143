@@ -164,14 +164,6 @@ func (h *PreviewHandler) getActivePreview(w http.ResponseWriter, r *http.Request
 	return instance, true
 }
 
-func (h *PreviewHandler) getActivePreviewBySession(ctx context.Context, orgID, sessionID uuid.UUID) (*models.PreviewInstance, error) {
-	instance, err := h.store.GetActivePreviewForSession(ctx, orgID, sessionID)
-	if err != nil {
-		return nil, err
-	}
-	return instance, nil
-}
-
 func (h *PreviewHandler) resolvePreviewWorker(ctx context.Context, workerNodeID string) (preview.WorkerNode, error) {
 	if h.workerSelector == nil {
 		return preview.WorkerNode{}, fmt.Errorf("worker selector is not configured")
