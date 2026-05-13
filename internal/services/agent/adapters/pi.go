@@ -12,7 +12,7 @@ import (
 	"github.com/assembledhq/143/internal/services/agent"
 )
 
-// PiAdapter runs the Pi CLI (npm: @mariozechner/pi-coding-agent) inside a sandbox.
+// PiAdapter runs the Pi CLI (npm: @earendil-works/pi-coding-agent) inside a sandbox.
 //
 // Pi can route to many providers (Anthropic, OpenAI, Google, Moonshot, etc.)
 // using a single CLI. The active model is selected via the --model flag, with

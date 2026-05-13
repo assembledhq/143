@@ -230,6 +230,26 @@
       "options": { "showHeader": true },
       "fieldConfig": { "defaults": { "custom": { "align": "auto", "displayMode": "auto" } }, "overrides": [] },
       "targets": [{ "refId": "A", "queryType": "stats", "expr": "(level:error OR level:warn) AND (_msg:~\"sandbox auth\" OR _msg:~\"auth wiring\" OR _msg:~\"credential\" OR _msg:~\"installation token\") | stats by (_msg) count() as count | sort by (count desc) | limit 25" }]
+    },
+    {
+      "type": "timeseries",
+      "id": 44,
+      "title": "Session snapshot size",
+      "datasource": { "type": "victoriametrics-logs-datasource", "uid": "victorialogs" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 73 },
+      "fieldConfig": { "defaults": { "unit": "bytes", "color": { "mode": "palette-classic" }, "custom": { "drawStyle": "line", "fillOpacity": 10, "lineInterpolation": "linear", "lineWidth": 1, "pointSize": 5, "showPoints": "never", "stacking": { "group": "A", "mode": "none" } } }, "overrides": [] },
+      "options": { "legend": { "calcs": ["lastNotNull"], "displayMode": "list", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [{ "refId": "A", "queryType": "statsRange", "expr": "_msg:\"session snapshot saved\" | stats quantile(0.95, snapshot_size_bytes) as p95_bytes, avg(snapshot_size_bytes) as avg_bytes", "step": "$__interval" }]
+    },
+    {
+      "type": "table",
+      "id": 45,
+      "title": "Largest recent session snapshots",
+      "datasource": { "type": "victoriametrics-logs-datasource", "uid": "victorialogs" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 73 },
+      "options": { "showHeader": true },
+      "fieldConfig": { "defaults": { "custom": { "align": "auto", "displayMode": "auto" } }, "overrides": [] },
+      "targets": [{ "refId": "A", "queryType": "stats", "expr": "_msg:\"session snapshot saved\" | stats by (session_id, org_id, sandbox_id, snapshot_key) max(snapshot_size_bytes) as snapshot_size_bytes | sort by (snapshot_size_bytes desc) | limit 25" }]
     }
   ],
   "refresh": "1m",

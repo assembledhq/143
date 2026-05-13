@@ -12,8 +12,12 @@ import (
 	"time"
 
 	"github.com/assembledhq/143/internal/api/middleware"
+	"github.com/assembledhq/143/internal/cache"
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
+	"github.com/assembledhq/143/internal/services/sandbox"
+	"github.com/assembledhq/143/internal/services/workspace"
+	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/rs/zerolog"
 )
@@ -39,6 +43,9 @@ type sessionComposerRepoTreeService interface {
 type SessionComposerHandler struct {
 	repoStore       *db.RepositoryStore
 	repoTree        sessionComposerRepoTreeService
+	workspace       *sessionWorkspaceResolver
+	mentionIndexes  *workspace.MentionIndexCache
+	logger          zerolog.Logger
 	clock           func() time.Time
 	cacheMu         sync.RWMutex
 	treeCache       map[string]cachedSessionComposerTree
@@ -57,9 +64,24 @@ type cachedSessionComposerCommandContent struct {
 }
 
 func NewSessionComposerHandler(repoStore *db.RepositoryStore, repoTree sessionComposerRepoTreeService) *SessionComposerHandler {
+	return NewSessionComposerHandlerWithWorkspace(repoStore, nil, repoTree, nil, nil, nil, zerolog.Nop())
+}
+
+func NewSessionComposerHandlerWithWorkspace(
+	repoStore *db.RepositoryStore,
+	sessionStore *db.SessionStore,
+	repoTree sessionComposerRepoTreeService,
+	fileReader sandbox.FileReader,
+	snapshotCache *workspace.SnapshotCache,
+	redisClient *cache.Client,
+	logger zerolog.Logger,
+) *SessionComposerHandler {
 	return &SessionComposerHandler{
 		repoStore:       repoStore,
 		repoTree:        repoTree,
+		workspace:       newSessionWorkspaceResolver(sessionStore, repoStore, fileReader, snapshotCache, logger),
+		mentionIndexes:  workspace.NewMentionIndexCache(workspace.MentionIndexCacheConfig{Redis: redisClient, Logger: logger}),
+		logger:          logger,
 		clock:           time.Now,
 		treeCache:       make(map[string]cachedSessionComposerTree),
 		commandContents: make(map[string]cachedSessionComposerCommandContent),
@@ -124,6 +146,22 @@ func (h *SessionComposerHandler) ListFileMentions(w http.ResponseWriter, r *http
 }
 
 func rankSessionComposerReferences(query string, tree []models.RepositoryTreeEntry) []models.SessionInputReference {
+	entries := make([]workspace.MentionIndexEntry, 0, len(tree))
+	for _, entry := range tree {
+		if entry.Path == "" {
+			continue
+		}
+		switch entry.Type {
+		case models.RepositoryTreeEntryTypeFile:
+			entries = append(entries, workspace.MentionIndexEntry{Kind: string(models.SessionInputReferenceKindFile), Path: entry.Path})
+		case models.RepositoryTreeEntryTypeDirectory:
+			entries = append(entries, workspace.MentionIndexEntry{Kind: string(models.SessionInputReferenceKindDirectory), Path: entry.Path})
+		}
+	}
+	return rankSessionComposerIndexEntries(query, entries)
+}
+
+func rankSessionComposerIndexEntries(query string, entries []workspace.MentionIndexEntry) []models.SessionInputReference {
 	type rankedReference struct {
 		reference    models.SessionInputReference
 		pathPrefix   bool
@@ -133,17 +171,17 @@ func rankSessionComposerReferences(query string, tree []models.RepositoryTreeEnt
 	}
 
 	queryLower := strings.ToLower(query)
-	ranked := make([]rankedReference, 0, len(tree))
-	for _, entry := range tree {
+	ranked := make([]rankedReference, 0, len(entries))
+	for _, entry := range entries {
 		if entry.Path == "" {
 			continue
 		}
 
 		var kind models.SessionInputReferenceKind
-		switch entry.Type {
-		case models.RepositoryTreeEntryTypeFile:
+		switch entry.Kind {
+		case string(models.SessionInputReferenceKindFile):
 			kind = models.SessionInputReferenceKindFile
-		case models.RepositoryTreeEntryTypeDirectory:
+		case string(models.SessionInputReferenceKindDirectory):
 			kind = models.SessionInputReferenceKindDirectory
 		default:
 			continue
@@ -205,6 +243,65 @@ func rankSessionComposerReferences(query string, tree []models.RepositoryTreeEnt
 		results = append(results, item.reference)
 	}
 	return results
+}
+
+func (h *SessionComposerHandler) ListSessionFileMentions(w http.ResponseWriter, r *http.Request) {
+	query := strings.TrimSpace(r.URL.Query().Get("q"))
+	if query == "" {
+		writeJSON(w, http.StatusOK, models.ListResponse[models.SessionInputReference]{Data: []models.SessionInputReference{}})
+		return
+	}
+
+	sessionID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid session ID")
+		return
+	}
+
+	orgID := middleware.OrgIDFromContext(r.Context())
+	session, err := h.workspace.loadSession(r.Context(), orgID, sessionID)
+	if err != nil {
+		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "session not found")
+		return
+	}
+
+	reader, _, err := h.workspace.resolveReaderForSession(r.Context(), &session)
+	if err != nil {
+		switch {
+		case errors.Is(err, workspace.ErrSnapshotMissing):
+			writeError(w, r, http.StatusConflict, "NO_SANDBOX", "session has no active sandbox container or snapshot")
+		case errors.Is(err, errRepoLookupFailed):
+			writeError(w, r, http.StatusInternalServerError, "WORKDIR_UNAVAILABLE", "could not resolve session workspace path")
+		default:
+			writeError(w, r, http.StatusInternalServerError, "SNAPSHOT_UNAVAILABLE", "session workspace could not be loaded")
+		}
+		return
+	}
+
+	cacheSession := session
+	if session.ContainerID != nil && *session.ContainerID != "" && h.workspace.fileReader != nil {
+		cacheSession.SnapshotKey = nil
+	}
+	cacheKey := workspace.SessionMentionIndexCacheKey(&cacheSession)
+	index, err := h.mentionIndexes.GetOrBuild(r.Context(), cacheKey, func(ctx context.Context) (workspace.MentionIndex, error) {
+		return workspace.BuildMentionIndex(ctx, reader)
+	})
+	if err != nil {
+		h.logger.Warn().Err(err).Str("session_id", sessionID.String()).Msg("failed to build session workspace mention index")
+		switch {
+		case errors.Is(err, workspace.ErrSnapshotMissing):
+			writeError(w, r, http.StatusConflict, "NO_SANDBOX", "session has no active sandbox container or snapshot")
+		case errors.Is(err, workspace.ErrSnapshotUnreadable):
+			writeError(w, r, http.StatusInternalServerError, "SNAPSHOT_UNREADABLE", "session snapshot exists but cannot be read")
+		default:
+			writeError(w, r, http.StatusInternalServerError, "SNAPSHOT_UNAVAILABLE", "session workspace could not be loaded")
+		}
+		return
+	}
+
+	writeJSON(w, http.StatusOK, models.ListResponse[models.SessionInputReference]{
+		Data: rankSessionComposerIndexEntries(query, index.Entries),
+	})
 }
 
 func (h *SessionComposerHandler) repositoryTree(ctx context.Context, repo models.Repository, owner, name, branch string) ([]models.RepositoryTreeEntry, error) {

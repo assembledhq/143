@@ -84,6 +84,7 @@ export default function UsagePage() {
     model: selectedModel,
     reasoning: selectedReasoning,
   };
+  const exportDimension = dimension === "capacity" ? "user" : dimension;
 
   return (
     <PageContainer size="wide">
@@ -125,17 +126,26 @@ export default function UsagePage() {
                 Clear filters
               </Button>
             )}
-            <UsageExportButton start={start} end={end} dimension={dimension} filters={filters} />
+            <UsageExportButton start={start} end={end} dimension={exportDimension} filters={filters} />
           </div>
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
-          <Select value={dimension} onValueChange={(v) => setDimension(v as UsageBreakdownDimension)}>
+          <Select
+            value={dimension}
+            onValueChange={(v) => {
+              const nextDimension = v as UsageBreakdownDimension;
+              setDimension(nextDimension);
+              if (nextDimension === "user") {
+                setChartMode("totals");
+              }
+            }}
+          >
             <SelectTrigger className="h-8 w-40 text-xs" aria-label="Break down by">
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
-              <SelectItem value="capacity" className="text-xs">By Capacity</SelectItem>
+              <SelectItem value="user" className="text-xs">By User</SelectItem>
               <SelectItem value="agent" className="text-xs">By Agent</SelectItem>
               <SelectItem value="model" className="text-xs">By Model</SelectItem>
               <SelectItem value="reasoning" className="text-xs">By Reasoning</SelectItem>

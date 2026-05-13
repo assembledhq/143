@@ -19,6 +19,7 @@ import (
 	ghservice "github.com/assembledhq/143/internal/services/github"
 	linearservice "github.com/assembledhq/143/internal/services/linear"
 	"github.com/assembledhq/143/internal/services/pm"
+	previewsvc "github.com/assembledhq/143/internal/services/preview"
 	"github.com/assembledhq/143/internal/services/prioritization"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -2435,6 +2436,51 @@ func TestRegisterHandlers_AutomationRunRegisteredWithoutPMService(t *testing.T) 
 
 	_, ok := w.handlers[models.JobTypeAutomationRun]
 	require.True(t, ok, "automation_run handler should be registered when automation stores are available")
+}
+
+type mockPreviewStarter struct {
+	called  bool
+	payload previewsvc.StartPreviewJobPayload
+}
+
+func (m *mockPreviewStarter) StartReservedPreview(ctx context.Context, payload previewsvc.StartPreviewJobPayload) error {
+	m.called = true
+	m.payload = payload
+	return nil
+}
+
+func TestRegisterHandlers_StartPreviewRegisteredWithPreviewStarter(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+	logger := zerolog.Nop()
+	starter := &mockPreviewStarter{}
+	services := &Services{PreviewStarter: starter}
+	w := New(nil, logger, "test-node")
+
+	RegisterHandlers(w, stores, services, DataRetentionConfig{}, logger)
+
+	handler, ok := w.handlers[models.JobTypeStartPreview]
+	require.True(t, ok, "start_preview handler should be registered when preview starter is available")
+
+	orgID := uuid.New()
+	userID := uuid.New()
+	sessionID := uuid.New()
+	previewID := uuid.New()
+	payload := previewsvc.StartPreviewJobPayload{
+		OrgID:     orgID,
+		UserID:    userID,
+		SessionID: sessionID,
+		PreviewID: previewID,
+	}
+	raw, err := json.Marshal(payload)
+	require.NoError(t, err, "start_preview payload should marshal")
+
+	err = handler(context.Background(), models.JobTypeStartPreview, raw)
+	require.NoError(t, err, "start_preview handler should delegate successfully")
+	require.True(t, starter.called, "start_preview handler should call the preview starter")
+	require.Equal(t, payload, starter.payload, "start_preview handler should pass the decoded payload")
 }
 
 // automationRunRowColumns returns the column list used by scanAutomationRun in

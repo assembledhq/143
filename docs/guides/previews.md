@@ -272,6 +272,12 @@ Any service using a destination or `credentials.mode != "none"` makes the previe
 
 The frontend proxies `/api/*` to the server at `localhost:8080`. The server gets `DATABASE_URL` injected and uses a shell `command` to chain `migrate` then `server` — the ready probe only passes once `server` is listening, so ordering is enforced naturally.
 
+For production preview domains such as `<preview-id>.preview.143.dev`, the public wildcard DNS must resolve to the app node and the edge proxy must be able to obtain a wildcard certificate. In 143's production setup that means:
+
+1. `*.preview.<your-domain>` points at the app node that runs Caddy.
+2. `PREVIEW_ORIGIN_TEMPLATE` is set to `https://{id}.preview.<your-domain>`.
+3. Caddy is built with a DNS provider plugin and the wildcard host uses the ACME DNS challenge. For Cloudflare, provide a scoped API token with `Zone:Read` and `DNS:Edit` on the zone and set `CLOUDFLARE_API_TOKEN` in the app host env bundle.
+
 ## Platform-Injected Env
 
 Every service receives:
@@ -335,4 +341,4 @@ Practical implication: if you want the agent to be able to iterate on `command`/
 
 **Does the preview use my production secrets?** No. Secrets come from admin-configured credential sets, never from the repo or agent. Without a `credentials` block, the preview has no secrets at all.
 
-**What if my app needs to know its public URL?** Use the injected `PREVIEW_ORIGIN` env var. If your framework expects a different variable name such as `BASE_URL` or `FRONTEND_URL`, map it in your service startup flow.
+**What if my app needs to know its public URL?** For most frameworks, relative URLs work. When an app needs an absolute origin, use the platform-injected `PREVIEW_ORIGIN` env var as the external base URL for the preview so redirects and absolute links resolve back to the isolated preview host instead of `localhost`.

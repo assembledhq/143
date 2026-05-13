@@ -695,7 +695,7 @@ function OverviewTab({ session, members, prStatus }: { session: Session; members
   );
 }
 
-function ChangesTab({
+const ChangesTab = memo(function ChangesTab({
   filteredFiles,
   activeFileIndex,
   onFileSelect,
@@ -833,13 +833,16 @@ function ChangesTab({
       )}
     </div>
   );
-}
+});
+
+ChangesTab.displayName = "ChangesTab";
 
 // ---------------------------------------------------------------------------
 // Shared session composer (used in both chat and review mode)
 // ---------------------------------------------------------------------------
 
 function SessionComposer({
+  sessionId,
   message,
   onMessageChange,
   planMode,
@@ -881,6 +884,7 @@ function SessionComposer({
   unavailableReason,
   placeholderOverride,
 }: {
+  sessionId: string;
   message: string;
   onMessageChange: (value: string) => void;
   planMode: boolean;
@@ -1035,8 +1039,8 @@ function SessionComposer({
   const pickerOpen = showMentionPicker || showCommandPicker;
 
   const fileMentionsQuery = useQuery<ListResponse<SessionInputReference>>({
-    queryKey: queryKeys.sessionComposer.files(repositoryId ?? "", branch ?? "", deferredMentionQuery),
-    queryFn: () => api.sessionComposer.files(repositoryId ?? "", branch ?? "", deferredMentionQuery),
+    queryKey: queryKeys.sessions.composerFiles(sessionId, deferredMentionQuery),
+    queryFn: () => api.sessions.composerFiles(sessionId, deferredMentionQuery),
     enabled: showMentionPicker,
     staleTime: 30 * 1000,
   });
@@ -2569,6 +2573,9 @@ export function SessionDetailContent({ id }: { id: string }) {
     setDetailTab("changes");
     setMobileDetailOpen(true);
   }, []);
+  const openMobileReviewComposer = useCallback(() => {
+    setMobileReviewComposerOpen(true);
+  }, []);
 
   // --- Exit review mode ---
   const exitReview = useCallback(() => {
@@ -2660,6 +2667,9 @@ export function SessionDetailContent({ id }: { id: string }) {
     refetchOnWindowFocus: false,
     retry: false,
   });
+  const retryDiffLoad = useCallback(() => {
+    void refetchDiff();
+  }, [refetchDiff]);
   const sessionDiffPayload = diffData?.data;
   const threads = useMemo(() => session?.threads ?? [], [session?.threads]);
   const [pendingThreadPreview, setPendingThreadPreview] = useState<PendingThreadPreview | null>(null);
@@ -3682,20 +3692,14 @@ export function SessionDetailContent({ id }: { id: string }) {
       queryClient.invalidateQueries({ queryKey: ["session", id] });
     },
   });
+  const cancelSession = cancelMutation.mutate;
+  const handleCancelSession = useCallback(() => {
+    cancelSession();
+  }, [cancelSession]);
+  const handleComposerSend = useCallback(() => {
+    queueSend();
+  }, [queueSend]);
 
-  // Thread-scoped mutations for Phase 3/4 actions. Kept as separate
-  // mutations rather than one polymorphic call so React Query can scope
-  // pending state per-action, which the menu reads to show a spinner only
-  // on the in-flight item.
-  const cancelThreadMutation = useMutation({
-    mutationFn: (threadId: string) => api.sessions.cancelThread(id, threadId),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["session", id] });
-    },
-    onError: (err) => {
-      toast.error(err instanceof Error ? err.message : "Failed to cancel tab");
-    },
-  });
   const archiveThreadMutation = useMutation({
     mutationFn: (threadId: string) => api.sessions.archiveThread(id, threadId),
     onSuccess: (response, archivedThreadID) => {
@@ -3719,16 +3723,6 @@ export function SessionDetailContent({ id }: { id: string }) {
     },
     onError: (err) => {
       toast.error(err instanceof Error ? err.message : "Failed to close tab");
-    },
-  });
-  const forkThreadMutation = useMutation({
-    mutationFn: (threadId: string) => api.sessions.forkThread(id, threadId),
-    onSuccess: () => {
-      toast.success("Fork queued — new session will appear in your list shortly");
-      queryClient.invalidateQueries({ queryKey: ["sessions"] });
-    },
-    onError: (err) => {
-      toast.error(err instanceof Error ? err.message : "Failed to fork tab");
     },
   });
   const revertThreadMutation = useMutation({
@@ -4419,7 +4413,7 @@ export function SessionDetailContent({ id }: { id: string }) {
           onAttributionFilterChange={setAttributionFilter}
           diffLoadErrorText={diffLoadErrorText}
           diffTruncationText={diffTruncationText}
-          onRetryDiffLoad={() => { void refetchDiff(); }}
+          onRetryDiffLoad={retryDiffLoad}
         />
       </TabsContent>
       <TabsContent value="overview" className="flex-1 overflow-y-auto scrollbar-hide p-4">
@@ -4522,11 +4516,8 @@ export function SessionDetailContent({ id }: { id: string }) {
               onActiveThreadChange={setActiveThreadId}
               onAddThread={openAddThreadDialog}
               onRenameSession={openMobileRenameDialog}
-              onCancelThread={(tid) => cancelThreadMutation.mutate(tid)}
-              onForkThread={(tid) => forkThreadMutation.mutate(tid)}
               onRevertThread={(tid) => revertThreadMutation.mutate(tid)}
               onArchiveThread={(tid) => archiveThreadMutation.mutate(tid)}
-              cancelPendingThreadId={cancelThreadMutation.isPending ? cancelThreadMutation.variables ?? null : null}
               archivePendingThreadId={archiveThreadMutation.isPending ? archiveThreadMutation.variables ?? null : null}
             />
 
@@ -4653,11 +4644,8 @@ export function SessionDetailContent({ id }: { id: string }) {
             onActiveThreadChange={setActiveThreadId}
             onAddTab={() => handleCreateThreadFrom("strip")}
             addTabPending={createThreadMutation.isPending}
-            onCancelThread={(tid) => cancelThreadMutation.mutate(tid)}
-            onForkThread={(tid) => forkThreadMutation.mutate(tid)}
             onRevertThread={(tid) => revertThreadMutation.mutate(tid)}
             onArchiveThread={(tid) => archiveThreadMutation.mutate(tid)}
-            cancelPendingThreadId={cancelThreadMutation.isPending ? cancelThreadMutation.variables ?? null : null}
             archivePendingThreadId={archiveThreadMutation.isPending ? archiveThreadMutation.variables ?? null : null}
             addTabButtonRef={addTabButtonRef}
           />
@@ -4705,7 +4693,7 @@ export function SessionDetailContent({ id }: { id: string }) {
                         <p className="text-sm font-medium text-foreground">Couldn&apos;t load changes</p>
                         <p className="text-xs text-muted-foreground">{diffLoadErrorText}</p>
                       </div>
-                      <Button type="button" variant="outline" size="sm" onClick={() => { void refetchDiff(); }}>
+                      <Button type="button" variant="outline" size="sm" onClick={retryDiffLoad}>
                         Retry
                       </Button>
                     </div>
@@ -4720,7 +4708,7 @@ export function SessionDetailContent({ id }: { id: string }) {
                     onBack={exitReview}
                     isMobile={isMobileReviewViewport}
                     onOpenFileList={openMobileFilesList}
-                    onOpenComposer={session.agent_type !== "pm_agent" ? () => setMobileReviewComposerOpen(true) : undefined}
+                    onOpenComposer={session.agent_type !== "pm_agent" ? openMobileReviewComposer : undefined}
                     commentsByLine={commentsByLine}
                     activeCommentLine={activeCommentLine}
                     onAddComment={handleAddComment}
@@ -4756,6 +4744,7 @@ export function SessionDetailContent({ id }: { id: string }) {
               </div>
             )}
             <SessionComposer
+              sessionId={session.id}
               message={composerMessage}
               onMessageChange={setComposerMessage}
               planMode={composerPlanMode}
@@ -4778,8 +4767,8 @@ export function SessionDetailContent({ id }: { id: string }) {
               sendError={sendMutation.error}
               cancelPending={cancelMutation.isPending}
               uploadError={composerUploadError}
-              onCancelSession={() => cancelMutation.mutate()}
-              onSend={() => queueSend()}
+              onCancelSession={handleCancelSession}
+              onSend={handleComposerSend}
               textareaRef={composerTextareaRef}
               uploadInputRef={composerUploadInputRef}
               references={composerReferences}
@@ -4860,6 +4849,7 @@ export function SessionDetailContent({ id }: { id: string }) {
               </div>
             ) : null}
             <SessionComposer
+              sessionId={session.id}
               message={composerMessage}
               onMessageChange={setComposerMessage}
               planMode={composerPlanMode}
@@ -4882,8 +4872,8 @@ export function SessionDetailContent({ id }: { id: string }) {
               sendError={sendMutation.error}
               cancelPending={cancelMutation.isPending}
               uploadError={composerUploadError}
-              onCancelSession={() => cancelMutation.mutate()}
-              onSend={() => queueSend()}
+              onCancelSession={handleCancelSession}
+              onSend={handleComposerSend}
               textareaRef={composerTextareaRef}
               uploadInputRef={composerUploadInputRef}
               references={composerReferences}

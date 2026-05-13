@@ -13,6 +13,9 @@ import (
 	"github.com/assembledhq/143/internal/api/middleware"
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
+	"github.com/assembledhq/143/internal/services/sandbox"
+	"github.com/assembledhq/143/internal/services/storage"
+	"github.com/assembledhq/143/internal/services/workspace"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/pashagolub/pgxmock/v4"
@@ -204,6 +207,266 @@ func TestSessionComposerHandler_ListFileMentions_EmptyQueryReturnsEmptyList(t *t
 	require.NoError(t, err, "response should decode")
 	require.Empty(t, resp.Data, "empty query should avoid GitHub work and return no suggestions")
 	require.NoError(t, mock.ExpectationsWereMet(), "no database calls should be made")
+}
+
+func TestSessionComposerHandler_ListSessionFileMentions(t *testing.T) {
+	t.Parallel()
+
+	t.Run("returns snapshot-backed results for the current session workspace", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err, "pgxmock pool should be created")
+		defer mock.Close()
+
+		orgID := uuid.New()
+		sessionID := uuid.New()
+		key := "snapshots/o/s/workspace.tar.zst"
+		setupSessionMockWithSnapshot(mock, orgID, sessionID, nil, &key)
+
+		cacheDir := stageSnapshotForHandlerTest(t, key, "workspace", map[string]string{
+			"docs/new-guide.md":        "hello",
+			"docs/generated/output.md": "generated",
+			"internal/services/api.go": "package services",
+			"internal/services/git.go": "package services",
+			"tmp/ignore.txt":           "tmp",
+		})
+
+		handler := NewSessionComposerHandlerWithWorkspace(
+			nil,
+			db.NewSessionStore(mock),
+			nil,
+			&mockFileReader{},
+			cacheDir,
+			nil,
+			zerolog.Nop(),
+		)
+
+		req := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/api/v1/sessions/%s/composer/files?q=guide", sessionID), nil)
+		req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+		w := httptest.NewRecorder()
+
+		withSessionComposerRoute(handler.ListSessionFileMentions).ServeHTTP(w, req)
+		require.Equal(t, http.StatusOK, w.Code, "snapshot-backed mention search should succeed")
+
+		var resp models.ListResponse[models.SessionInputReference]
+		err = json.Unmarshal(w.Body.Bytes(), &resp)
+		require.NoError(t, err, "response should decode")
+		require.Equal(t, []models.SessionInputReference{
+			{Kind: models.SessionInputReferenceKindFile, Token: "@docs/new-guide.md", Path: "docs/new-guide.md", Display: "docs/new-guide.md"},
+		}, resp.Data, "snapshot-backed mention search should find files created in the current workspace")
+		require.NoError(t, mock.ExpectationsWereMet(), "database expectations should be met")
+	})
+
+	t.Run("falls back to the live container when no snapshot exists", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err, "pgxmock pool should be created")
+		defer mock.Close()
+
+		orgID := uuid.New()
+		sessionID := uuid.New()
+		containerID := "ctr-123"
+		setupSessionMockWithSnapshot(mock, orgID, sessionID, &containerID, nil)
+
+		handler := NewSessionComposerHandlerWithWorkspace(
+			nil,
+			db.NewSessionStore(mock),
+			nil,
+			&mockFileReader{
+				listDirFn: func(ctx context.Context, gotContainerID, workDir, dirPath string) ([]sandbox.FileEntry, error) {
+					require.Equal(t, containerID, gotContainerID, "ListSessionFileMentions should read from the live session container")
+					switch dirPath {
+					case ".":
+						return []sandbox.FileEntry{
+							{Type: "dir", Path: "docs"},
+							{Type: "file", Path: "README.md"},
+						}, nil
+					case "docs":
+						return []sandbox.FileEntry{
+							{Type: "file", Path: "docs/follow-up-guide.md"},
+						}, nil
+					default:
+						return []sandbox.FileEntry{}, nil
+					}
+				},
+			},
+			nil,
+			nil,
+			zerolog.Nop(),
+		)
+
+		req := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/api/v1/sessions/%s/composer/files?q=follow", sessionID), nil)
+		req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+		w := httptest.NewRecorder()
+
+		withSessionComposerRoute(handler.ListSessionFileMentions).ServeHTTP(w, req)
+		require.Equal(t, http.StatusOK, w.Code, "live-container mention search should succeed without a snapshot")
+
+		var resp models.ListResponse[models.SessionInputReference]
+		err = json.Unmarshal(w.Body.Bytes(), &resp)
+		require.NoError(t, err, "response should decode")
+		require.Equal(t, []models.SessionInputReference{
+			{Kind: models.SessionInputReferenceKindFile, Token: "@docs/follow-up-guide.md", Path: "docs/follow-up-guide.md", Display: "docs/follow-up-guide.md"},
+		}, resp.Data, "live-container mention search should surface files from the current workspace")
+		require.NoError(t, mock.ExpectationsWereMet(), "database expectations should be met")
+	})
+
+	t.Run("prefers the live container over a stale snapshot when both are available", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err, "pgxmock pool should be created")
+		defer mock.Close()
+
+		orgID := uuid.New()
+		sessionID := uuid.New()
+		containerID := "ctr-live"
+		snapshotKey := "snapshots/o/s/workspace.tar.zst"
+		setupSessionMockWithSnapshot(mock, orgID, sessionID, &containerID, &snapshotKey)
+
+		cacheDir := stageSnapshotForHandlerTest(t, snapshotKey, "workspace", map[string]string{
+			"docs/from-snapshot.md": "stale",
+		})
+
+		handler := NewSessionComposerHandlerWithWorkspace(
+			nil,
+			db.NewSessionStore(mock),
+			nil,
+			&mockFileReader{
+				listDirFn: func(ctx context.Context, gotContainerID, workDir, dirPath string) ([]sandbox.FileEntry, error) {
+					require.Equal(t, containerID, gotContainerID, "ListSessionFileMentions should prefer the live container when it exists")
+					switch dirPath {
+					case ".":
+						return []sandbox.FileEntry{{Type: "dir", Path: "docs"}}, nil
+					case "docs":
+						return []sandbox.FileEntry{{Type: "file", Path: "docs/from-live.md"}}, nil
+					default:
+						return []sandbox.FileEntry{}, nil
+					}
+				},
+			},
+			cacheDir,
+			nil,
+			zerolog.Nop(),
+		)
+
+		req := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/api/v1/sessions/%s/composer/files?q=live", sessionID), nil)
+		req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+		w := httptest.NewRecorder()
+
+		withSessionComposerRoute(handler.ListSessionFileMentions).ServeHTTP(w, req)
+		require.Equal(t, http.StatusOK, w.Code, "mention search should use the live container when both live and snapshot workspaces exist")
+
+		var resp models.ListResponse[models.SessionInputReference]
+		err = json.Unmarshal(w.Body.Bytes(), &resp)
+		require.NoError(t, err, "response should decode")
+		require.Equal(t, []models.SessionInputReference{
+			{Kind: models.SessionInputReferenceKindFile, Token: "@docs/from-live.md", Path: "docs/from-live.md", Display: "docs/from-live.md"},
+		}, resp.Data, "mention search should return the current live workspace contents instead of stale snapshot results")
+		require.NoError(t, mock.ExpectationsWereMet(), "database expectations should be met")
+	})
+
+	t.Run("does not reuse snapshot cache entry when live container is selected", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err, "pgxmock pool should be created")
+		defer mock.Close()
+
+		orgID := uuid.New()
+		sessionID := uuid.New()
+		containerID := "ctr-live-cache"
+		snapshotKey := "snapshots/o/s/workspace.tar.zst"
+		setupSessionMockWithSnapshot(mock, orgID, sessionID, &containerID, &snapshotKey)
+
+		handler := NewSessionComposerHandlerWithWorkspace(
+			nil,
+			db.NewSessionStore(mock),
+			nil,
+			&mockFileReader{
+				listDirFn: func(ctx context.Context, gotContainerID, workDir, dirPath string) ([]sandbox.FileEntry, error) {
+					require.Equal(t, containerID, gotContainerID, "ListSessionFileMentions should build from the live container even when snapshot cache is warm")
+					switch dirPath {
+					case ".":
+						return []sandbox.FileEntry{{Type: "dir", Path: "docs"}}, nil
+					case "docs":
+						return []sandbox.FileEntry{{Type: "file", Path: "docs/from-live-cache.md"}}, nil
+					default:
+						return []sandbox.FileEntry{}, nil
+					}
+				},
+			},
+			nil,
+			nil,
+			zerolog.Nop(),
+		)
+
+		cacheSession := models.Session{ID: sessionID, OrgID: orgID, SnapshotKey: &snapshotKey}
+		err = handler.mentionIndexes.Warm(context.Background(), workspace.SessionMentionIndexCacheKey(&cacheSession), workspace.MentionIndex{
+			Entries: []workspace.MentionIndexEntry{
+				{Kind: string(models.SessionInputReferenceKindFile), Path: "docs/from-snapshot-cache.md"},
+			},
+		})
+		require.NoError(t, err, "stale snapshot mention index should warm successfully")
+
+		req := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/api/v1/sessions/%s/composer/files?q=live-cache", sessionID), nil)
+		req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+		w := httptest.NewRecorder()
+
+		withSessionComposerRoute(handler.ListSessionFileMentions).ServeHTTP(w, req)
+		require.Equal(t, http.StatusOK, w.Code, "mention search should succeed when live container and stale snapshot cache both exist")
+
+		var resp models.ListResponse[models.SessionInputReference]
+		err = json.Unmarshal(w.Body.Bytes(), &resp)
+		require.NoError(t, err, "response should decode")
+		require.Equal(t, []models.SessionInputReference{
+			{Kind: models.SessionInputReferenceKindFile, Token: "@docs/from-live-cache.md", Path: "docs/from-live-cache.md", Display: "docs/from-live-cache.md"},
+		}, resp.Data, "mention search should ignore the snapshot cache entry when the live container is selected")
+		require.NoError(t, mock.ExpectationsWereMet(), "database expectations should be met")
+	})
+
+	t.Run("returns NO_SANDBOX when the referenced snapshot is missing", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err, "pgxmock pool should be created")
+		defer mock.Close()
+
+		orgID := uuid.New()
+		sessionID := uuid.New()
+		snapshotKey := "snapshots/o/s/missing"
+		setupSessionMockWithSnapshot(mock, orgID, sessionID, nil, &snapshotKey)
+
+		emptyCache, err := workspace.NewSnapshotCache(storage.NewFileSnapshotStore(t.TempDir()), t.TempDir(), 0, zerolog.Nop())
+		require.NoError(t, err, "snapshot cache should initialize")
+
+		handler := NewSessionComposerHandlerWithWorkspace(
+			nil,
+			db.NewSessionStore(mock),
+			nil,
+			&mockFileReader{},
+			emptyCache,
+			nil,
+			zerolog.Nop(),
+		)
+
+		req := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/api/v1/sessions/%s/composer/files?q=guide", sessionID), nil)
+		req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+		w := httptest.NewRecorder()
+
+		withSessionComposerRoute(handler.ListSessionFileMentions).ServeHTTP(w, req)
+		require.Equal(t, http.StatusConflict, w.Code, "missing snapshots should degrade to NO_SANDBOX for mention search")
+		require.Contains(t, w.Body.String(), "NO_SANDBOX", "missing snapshot responses should preserve the existing structured error code")
+		require.NoError(t, mock.ExpectationsWereMet(), "database expectations should be met")
+	})
+}
+
+func withSessionComposerRoute(handler http.HandlerFunc) http.Handler {
+	r := chi.NewRouter()
+	r.Get("/api/v1/sessions/{id}/composer/files", handler)
+	return r
 }
 
 func TestSessionComposerHandler_ListFileMentions_UsesRequestedBranch(t *testing.T) {

@@ -42,7 +42,7 @@ When `Start Preview` is requested:
 2. Otherwise reuse `sessions.worker_node_id` if the session has a live container.
 3. Otherwise pick the least-loaded active preview-capable worker, using `CountActivePreviewsByWorker`.
 
-Cold starts may retry another worker when the selected worker returns preview-capacity exhaustion. Live-container reuse never retries onto a different worker.
+Cold starts reserve a `starting` preview row and enqueue durable startup work to the selected worker. Live-container reuse never retries onto a different worker; if a pinned startup worker is later declared dead before claim, the job target-node fallback allows another worker to claim and reassign the reserved preview.
 
 ## Internal Auth
 
