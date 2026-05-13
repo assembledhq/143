@@ -79,7 +79,14 @@ func handleLinearAgentPrompted(ctx context.Context, deps LinearAgentEventHandler
 	}
 	sessionID := *row.SessionID
 
-	commentBody := resolvePromptedCommentBody(ctx, deps, payload, orgID, logger)
+	commentBody, err := resolvePromptedCommentBody(ctx, deps, payload, orgID, logger)
+	if err != nil {
+		// Transient Linear error (rate limit, 5xx, transient unauthorized).
+		// Surface the retryable error so the worker reschedules instead of
+		// silently advancing the session with a placeholder while Linear is
+		// flapping.
+		return err
+	}
 	allowRevision := true
 	if deps.SettingsLoader != nil {
 		settings, err := deps.SettingsLoader(ctx, orgID)
@@ -205,30 +212,90 @@ func appendPromptedMessageToRunningSession(
 }
 
 // resolvePromptedCommentBody fetches the user's follow-up Linear comment
-// so we can surface it verbatim into the 143 session's next turn. Returns
-// a non-empty body in all cases — failures fall back to a deterministic
-// placeholder so the session still advances rather than getting stuck
-// waiting on Linear.
-func resolvePromptedCommentBody(ctx context.Context, deps LinearAgentEventHandlerDeps, payload linearAgentEventPayload, orgID uuid.UUID, logger zerolog.Logger) string {
+// so we can surface it verbatim into the 143 session's next turn.
+//
+// Errors are split into two buckets:
+//
+//   - Transient (rate limit, transient unauthorized, 5xx, network). The
+//     function returns a retryable error so the worker reschedules. We
+//     don't want to advance the session with a placeholder while Linear is
+//     flapping — the user typed a real message and a placeholder corrupts
+//     the conversation.
+//   - Permanent (comment deleted, no client wired, empty id). Falls back
+//     to a deterministic placeholder so the session can advance. The
+//     placeholder is detectable in operator logs via the original error.
+func resolvePromptedCommentBody(ctx context.Context, deps LinearAgentEventHandlerDeps, payload linearAgentEventPayload, orgID uuid.UUID, logger zerolog.Logger) (string, error) {
 	const placeholder = "(Linear follow-up — see the linked issue for the full message.)"
 	if payload.LinearCommentID == "" {
-		return placeholder
+		return placeholder, nil
 	}
 	client, err := deps.ClientForOrg(ctx, orgID)
 	if err != nil {
+		// Treat client-resolution errors as permanent for this attempt —
+		// they typically indicate a missing token or decryption failure
+		// and retrying right away won't help.
 		logger.Warn().Err(err).Msg("prompted: failed to resolve linear client; using placeholder comment text")
-		return placeholder
+		return placeholder, nil
 	}
 	body, err := fetchLinearComment(ctx, client, payload.LinearCommentID)
 	if err != nil {
+		if linearFetchErrorIsTransient(err) {
+			logger.Warn().Err(err).Str("comment_id", payload.LinearCommentID).
+				Msg("prompted: transient linear failure fetching comment; deferring turn")
+			retryAfter := linearTransientRetryAfter(err)
+			return "", &RetryableError{
+				Err:        fmt.Errorf("fetch linear comment: %w", err),
+				RetryAfter: retryAfter,
+			}
+		}
 		logger.Warn().Err(err).Str("comment_id", payload.LinearCommentID).
-			Msg("prompted: failed to fetch linear comment; using placeholder")
-		return placeholder
+			Msg("prompted: permanent linear failure fetching comment; using placeholder")
+		return placeholder, nil
 	}
 	if body == "" {
-		return placeholder
+		return placeholder, nil
 	}
-	return body
+	return body, nil
+}
+
+// linearFetchErrorIsTransient classifies a Linear client error so we can
+// distinguish "Linear is flapping, retry" from "the comment is gone, fall
+// back". 5xx is treated as transient via the generic "linear API returned"
+// substring — the client wraps non-200 responses with that prefix.
+func linearFetchErrorIsTransient(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, linear.ErrCommentNotFound) {
+		return false
+	}
+	if errors.Is(err, linear.ErrUnauthorized) {
+		// Unauthorized may resolve after a token refresh; retry once.
+		return true
+	}
+	var rl *linear.RateLimitError
+	if errors.As(err, &rl) {
+		return true
+	}
+	// Network errors (DNS, connect, EOF) and 5xx responses both surface
+	// here without a sentinel — assume transient. Permanent 4xx other than
+	// 401 / 404 are rare on FetchComment; safest to retry once and let the
+	// worker's retry budget bound the cost.
+	return true
+}
+
+// linearTransientRetryAfter pulls a Retry-After hint off Linear's rate-
+// limit error when present. Falls back to nil so the worker uses its
+// default backoff curve.
+func linearTransientRetryAfter(err error) *time.Duration {
+	var rl *linear.RateLimitError
+	if !errors.As(err, &rl) || rl.RetryAfter == "" {
+		return nil
+	}
+	if secs, parseErr := time.ParseDuration(rl.RetryAfter + "s"); parseErr == nil && secs > 0 {
+		return &secs
+	}
+	return nil
 }
 
 // fetchLinearComment pulls the body of a single Linear comment so we can

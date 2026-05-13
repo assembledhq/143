@@ -86,6 +86,36 @@ type EmitResult struct {
 // The activity's Ephemeral flag is normalized against the type — Linear
 // only honors ephemeral on thought/action and the writer enforces this so
 // we don't get a runtime GraphQL rejection.
+//
+// Failure modes (read carefully — they are not symmetric):
+//
+//	Linear emit fails             → reservation row stays present without
+//	                                 linear_activity_id; replays short-
+//	                                 circuit on UNIQUE collision, so we
+//	                                 will not duplicate-deliver, but we
+//	                                 also will not retry. Returns the
+//	                                 error to the caller.
+//	Linear succeeds, Complete fails → activity DID land in Linear, but the
+//	                                 reservation row is left in the
+//	                                 "reserved without id" state, exactly
+//	                                 like the Linear-failure case above.
+//	                                 A subsequent replay sees the UNIQUE
+//	                                 collision and short-circuits without
+//	                                 re-emitting (correct — Linear already
+//	                                 has it), but the operator debug
+//	                                 surface (rows where
+//	                                 linear_activity_id IS NULL) cannot
+//	                                 distinguish "delivered to Linear but
+//	                                 we lost the id" from "never reached
+//	                                 Linear". Returns nil — milestone
+//	                                 emission already succeeded from the
+//	                                 user's perspective.
+//
+// This trade-off is deliberate for milestone activities: avoiding
+// duplicate "PR merged" notifications is more important than perfect
+// observability. EmitOrDiscard inverts the priority for activity types
+// (e.g. elicitations) where missing emission is more visible than a
+// duplicate.
 func (w *AgentActivityWriter) Emit(ctx context.Context, in EmitInput) (EmitResult, error) {
 	if w == nil || w.client == nil || w.activities == nil {
 		return EmitResult{}, errors.New("agent activity writer not configured")

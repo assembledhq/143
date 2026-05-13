@@ -79,6 +79,12 @@ const (
 	linearAgentActionPrompted linearAgentEventAction = "prompted"
 )
 
+// bootstrapEmitTimeout caps the synchronous Linear roundtrip during
+// dispatch. Picked well under the 5s ack SLA so a slow Linear can't
+// blow our webhook timeout. The worker re-emits the same idempotent
+// activity on its first run, so a clipped emit is recoverable.
+const bootstrapEmitTimeout = 1500 * time.Millisecond
+
 // linearAgentJobEnqueuer is the narrow surface the dispatcher needs from
 // the JobStore. Pulled into an interface so tests can verify the dedupe key
 // and payload shape without standing up Postgres.
@@ -292,6 +298,13 @@ func (d *LinearAgentDispatcher) Dispatch(ctx context.Context, integration *model
 				d.logger.Warn().
 					Str("agent_session_id", env.Payload.AgentSession.ID).
 					Msg("prompted event arrived before created; enqueueing retryable worker job")
+				// Synthetic in-memory row carries no DB id (uuid.Nil). The
+				// prompted worker (handlers_linear_agent_prompted.go) re-
+				// looks-up the row by LinearAgentSessionID rather than by
+				// row.ID, so the nil id propagated into the job payload
+				// below is intentionally never read on this branch. Do
+				// not thread row.ID through new prompted-path code without
+				// first persisting the row here.
 				row = &db.LinearAgentSession{
 					OrgID:                integration.OrgID,
 					IntegrationID:        integration.ID,
@@ -318,12 +331,20 @@ func (d *LinearAgentDispatcher) Dispatch(ctx context.Context, integration *model
 	if action == linearAgentActionCreated && d.emitter != nil {
 		bootstrap := linear.BootstrapActivity(env.Payload.AgentSession.Issue.Identifier)
 		bootstrapStart := time.Now()
-		emitRes, emitErr := d.emitter.Emit(ctx, linear.EmitInput{
+		// Hard sub-second cap on the synchronous Linear roundtrip. The
+		// outer Linear webhook ack SLA is 5s and we still owe an enqueue
+		// after this; without a bounded timeout a slow Linear stalls the
+		// dispatcher and Linear retries the delivery, fanning the work
+		// out further. The worker's first run re-emits this thought via
+		// the same idem_key, so a clipped emit just defers it by seconds.
+		emitCtx, cancel := context.WithTimeout(ctx, bootstrapEmitTimeout)
+		emitRes, emitErr := d.emitter.Emit(emitCtx, linear.EmitInput{
 			OrgID:             integration.OrgID,
 			AgentSessionRowID: row.ID,
 			AgentSessionID:    row.LinearAgentSessionID,
 			Activity:          bootstrap,
 		})
+		cancel()
 		// Latency includes the Reserve INSERT + the GraphQL emit. Tracked
 		// here (rather than inside the writer) because the dispatcher
 		// owns the 10s SLA contract and the latency budget is
@@ -353,10 +374,26 @@ func (d *LinearAgentDispatcher) Dispatch(ctx context.Context, integration *model
 		dedupeParts = append(dedupeParts, url.QueryEscape(env.Payload.AgentSession.CommentID))
 	}
 	dedupe := strings.Join(dedupeParts, ":")
+	// Surface payload context that's missing from the webhook envelope so
+	// operators can spot misconfigured Linear webhook subscriptions in
+	// production logs. The worker tolerates empty values (FetchIssue
+	// re-derives them), but a chronically-empty team_id usually means the
+	// workspace is sending a slimmer payload than we expect.
+	if env.Payload.AgentSession.Issue.TeamID == "" || env.Payload.AgentSession.Issue.ProjectID == "" {
+		d.logger.Debug().
+			Str("agent_session_id", row.LinearAgentSessionID).
+			Bool("missing_team_id", env.Payload.AgentSession.Issue.TeamID == "").
+			Bool("missing_project_id", env.Payload.AgentSession.Issue.ProjectID == "").
+			Msg("agent event payload missing optional issue context; worker will derive from FetchIssue")
+	}
 	jobPayload := map[string]any{
-		"action":                  string(action),
-		"org_id":                  integration.OrgID.String(),
-		"integration_id":          integration.ID.String(),
+		"action":         string(action),
+		"org_id":         integration.OrgID.String(),
+		"integration_id": integration.ID.String(),
+		// agent_session_row_id is uuid.Nil on the prompted-before-created
+		// branch (see comment in the lookup block above). Worker handlers
+		// must keep re-looking-up by linear_agent_session_id, never by
+		// this id, so the nil value stays inert.
 		"agent_session_row_id":    row.ID.String(),
 		"linear_agent_session_id": row.LinearAgentSessionID,
 		"linear_issue_id":         env.Payload.AgentSession.IssueID,
