@@ -86,6 +86,7 @@ export function useReviewComments(sessionId: string): UseReviewCommentsResult {
     }) => api.sessions.createReviewComment(sessionId, body),
     onSuccess: invalidate,
   });
+  const { mutate: createReviewComment, isPending: isCreating } = createMutation;
 
   const updateMutation = useMutation({
     mutationFn: ({
@@ -97,12 +98,14 @@ export function useReviewComments(sessionId: string): UseReviewCommentsResult {
     }) => api.sessions.updateReviewComment(sessionId, commentId, data),
     onSuccess: invalidate,
   });
+  const { mutate: updateReviewComment } = updateMutation;
 
   const deleteMutation = useMutation({
     mutationFn: (commentId: string) =>
       api.sessions.deleteReviewComment(sessionId, commentId),
     onSuccess: invalidate,
   });
+  const { mutate: deleteReviewComment } = deleteMutation;
 
   const createComment = useCallback(
     (data: {
@@ -111,23 +114,23 @@ export function useReviewComments(sessionId: string): UseReviewCommentsResult {
       side?: DiffSide;
       body: string;
     }) => {
-      createMutation.mutate(data);
+      createReviewComment(data);
     },
-    [createMutation]
+    [createReviewComment]
   );
 
   const updateComment = useCallback(
     (commentId: string, data: { body?: string; resolved?: boolean }) => {
-      updateMutation.mutate({ commentId, data });
+      updateReviewComment({ commentId, data });
     },
-    [updateMutation]
+    [updateReviewComment]
   );
 
   const deleteComment = useCallback(
     (commentId: string) => {
-      deleteMutation.mutate(commentId);
+      deleteReviewComment(commentId);
     },
-    [deleteMutation]
+    [deleteReviewComment]
   );
 
   // Derive error from per-mutation state so concurrent mutations don't clear each other's errors.
@@ -148,6 +151,6 @@ export function useReviewComments(sessionId: string): UseReviewCommentsResult {
     createComment,
     updateComment,
     deleteComment,
-    isCreating: createMutation.isPending,
+    isCreating,
   };
 }
