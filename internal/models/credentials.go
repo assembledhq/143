@@ -38,6 +38,7 @@ const (
 	ProviderLinear                ProviderName = "linear"
 	ProviderSlack                 ProviderName = "slack"
 	ProviderNotion                ProviderName = "notion"
+	ProviderCircleCI              ProviderName = "circleci"
 )
 
 // AllProviders is the canonical list of credential providers.
@@ -47,6 +48,7 @@ var AllProviders = []ProviderName{
 	ProviderGemini, ProviderAmp, ProviderPi, ProviderOpenRouter,
 	ProviderGitHubApp, ProviderGitHubAppUser, ProviderGitHubOAuth,
 	ProviderSentry, ProviderLinear, ProviderSlack, ProviderNotion,
+	ProviderCircleCI,
 }
 
 // LLMProviders is the subset of providers that serve LLM completions.
@@ -255,6 +257,19 @@ type NotionConfig struct {
 	WorkspaceName string `json:"workspace_name,omitempty"`
 }
 
+// CircleCIConfig stores a CircleCI personal API token plus the
+// VCS-prefixed project slug (e.g. "gh/org/repo") that all flaky-test queries
+// need. CircleCI doesn't offer a clean OAuth flow for the v2 Insights API,
+// so the user pastes a personal token via the integrations page rather than
+// going through an OAuth redirect.
+type CircleCIConfig struct {
+	AuthToken   string `json:"auth_token"` // #nosec G117 -- JSON config field
+	ProjectSlug string `json:"project_slug"`
+	// BaseURL allows pointing at a CircleCI Server install. Empty defaults
+	// to "https://circleci.com".
+	BaseURL string `json:"base_url,omitempty"`
+}
+
 type OpenAIChatGPTConfig struct {
 	AccessToken  string    `json:"access_token"`       // #nosec G117 -- JSON config field
 	RefreshToken string    `json:"refresh_token"`      // #nosec G117 -- JSON config field
@@ -314,6 +329,7 @@ func (c GitHubAppUserConfig) Provider() ProviderName { return ProviderGitHubAppU
 func (c GitHubOAuthConfig) Provider() ProviderName   { return ProviderGitHubOAuth }
 func (c SentryConfig) Provider() ProviderName        { return ProviderSentry }
 func (c LinearConfig) Provider() ProviderName        { return ProviderLinear }
+func (c CircleCIConfig) Provider() ProviderName      { return ProviderCircleCI }
 func (c SlackConfig) Provider() ProviderName         { return ProviderSlack }
 func (c NotionConfig) Provider() ProviderName        { return ProviderNotion }
 func (c OpenAIChatGPTConfig) Provider() ProviderName { return ProviderOpenAIChatGPT }
@@ -442,6 +458,16 @@ func (c NotionConfig) Validate() error {
 	return nil
 }
 
+func (c CircleCIConfig) Validate() error {
+	if c.AuthToken == "" {
+		return errors.New("auth_token is required")
+	}
+	if c.ProjectSlug == "" {
+		return errors.New("project_slug is required (e.g. gh/org/repo)")
+	}
+	return nil
+}
+
 func (c OpenAIChatGPTConfig) Validate() error {
 	if c.AccessToken == "" {
 		return errors.New("access_token is required")
@@ -566,6 +592,14 @@ func (c NotionConfig) MaskedSummary() CredentialSummary {
 	}
 }
 
+func (c CircleCIConfig) MaskedSummary() CredentialSummary {
+	return CredentialSummary{
+		Provider:   ProviderCircleCI,
+		Configured: true,
+		MaskedKey:  MaskKey(c.AuthToken),
+	}
+}
+
 func (c OpenAIChatGPTConfig) MaskedSummary() CredentialSummary {
 	return CredentialSummary{
 		Provider:    ProviderOpenAIChatGPT,
@@ -678,6 +712,12 @@ func ParseProviderConfig(provider ProviderName, data []byte) (ProviderConfig, er
 		var cfg NotionConfig
 		if err := json.Unmarshal(data, &cfg); err != nil {
 			return nil, fmt.Errorf("parse notion config: %w", err)
+		}
+		return cfg, nil
+	case ProviderCircleCI:
+		var cfg CircleCIConfig
+		if err := json.Unmarshal(data, &cfg); err != nil {
+			return nil, fmt.Errorf("parse circleci config: %w", err)
 		}
 		return cfg, nil
 	default:

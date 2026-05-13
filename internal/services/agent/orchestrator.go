@@ -4598,6 +4598,14 @@ func (o *Orchestrator) BuildIntegrationSkills(ctx context.Context, orgID uuid.UU
 		})
 		reg.RegisterDocumentStore(store)
 	}
+	if ic.CircleCI != nil && ic.CircleCI.AuthToken != "" && ic.CircleCI.ProjectSlug != "" {
+		provider := integration.NewCircleCITestInsights(integration.CircleCIConfig{
+			AuthToken:   ic.CircleCI.AuthToken,
+			ProjectSlug: ic.CircleCI.ProjectSlug,
+			BaseURL:     ic.CircleCI.BaseURL,
+		})
+		reg.RegisterCITestInsights(provider)
+	}
 
 	// Register a stub GitHub code review source for skills doc generation.
 	// This only describes available tools — actual API calls use real credentials

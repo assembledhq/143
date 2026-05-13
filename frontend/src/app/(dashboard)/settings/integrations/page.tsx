@@ -162,6 +162,28 @@ export default function IntegrationsPage() {
     },
   });
 
+  // CircleCI token + project slug dialog state. CircleCI doesn't expose the
+  // v2 Insights API via OAuth, so we use a paste-the-token form like Notion.
+  const [circleciDialogOpen, setCircleciDialogOpen] = useState(false);
+  const [circleciToken, setCircleciToken] = useState("");
+  const [circleciProjectSlug, setCircleciProjectSlug] = useState("");
+  const [circleciError, setCircleciError] = useState<string | null>(null);
+
+  const circleciConnectMutation = useMutation({
+    mutationFn: ({ token, projectSlug }: { token: string; projectSlug: string }) =>
+      api.integrations.connectCircleCI(token, projectSlug),
+    onSuccess: () => {
+      setCircleciDialogOpen(false);
+      setCircleciToken("");
+      setCircleciProjectSlug("");
+      setCircleciError(null);
+      queryClient.invalidateQueries({ queryKey: ["integrations"] });
+    },
+    onError: (err: Error) => {
+      setCircleciError(err.message || "Failed to connect CircleCI. Check your token and project slug.");
+    },
+  });
+
   const githubIntegration = integrationsResp?.data?.find(
     (integration) => integration.provider === "github" && integration.status === "active"
   );
@@ -185,6 +207,9 @@ export default function IntegrationsPage() {
   );
   const notionIntegration = integrationsResp?.data?.find(
     (integration) => integration.provider === "notion" && integration.status === "active"
+  );
+  const circleciIntegration = integrationsResp?.data?.find(
+    (integration) => integration.provider === "circleci" && integration.status === "active"
   );
 
   const githubRepos = (reposResp?.data ?? []).map((r) => ({
@@ -223,6 +248,8 @@ export default function IntegrationsPage() {
         slackConnected={Boolean(slackIntegration)}
         notionConnected={Boolean(notionIntegration)}
         notionLoading={notionConnectMutation.isPending}
+        circleciConnected={Boolean(circleciIntegration)}
+        circleciLoading={circleciConnectMutation.isPending}
         onConnectGitHub={() => api.integrations.loginGitHub()}
         onConnectSentry={() => api.auth.loginSentry()}
         onConnectLinear={() => api.integrations.loginLinear()}
@@ -231,6 +258,12 @@ export default function IntegrationsPage() {
           setNotionError(null);
           setNotionToken("");
           setNotionDialogOpen(true);
+        }}
+        onConnectCircleCI={() => {
+          setCircleciError(null);
+          setCircleciToken("");
+          setCircleciProjectSlug("");
+          setCircleciDialogOpen(true);
         }}
         onDisconnect={(provider) => disconnectMutation.mutate(provider)}
         disconnectingProvider={disconnectMutation.isPending ? disconnectMutation.variables : null}
@@ -280,6 +313,77 @@ export default function IntegrationsPage() {
               onClick={() => notionConnectMutation.mutate(notionToken)}
               disabled={!notionToken.trim() || notionConnectMutation.isPending}
               loading={notionConnectMutation.isPending}
+            >
+              Connect
+            </Button>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <AlertDialog open={circleciDialogOpen} onOpenChange={setCircleciDialogOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Connect CircleCI</AlertDialogTitle>
+            <AlertDialogDescription>
+              Paste a CircleCI personal API token and the VCS-prefixed project slug
+              (for example <code>gh/your-org/your-repo</code>). Create a token at{" "}
+              <a
+                href="https://app.circleci.com/settings/user/tokens"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="underline"
+              >
+                app.circleci.com/settings/user/tokens
+              </a>
+              . The token needs read access to the project.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <div className="grid gap-3">
+            <div className="grid gap-1.5">
+              <Label htmlFor="circleci-token">Personal API Token</Label>
+              <Input
+                id="circleci-token"
+                type="password"
+                placeholder="CCI-..."
+                value={circleciToken}
+                onChange={(e) => {
+                  setCircleciToken(e.target.value);
+                  setCircleciError(null);
+                }}
+              />
+            </div>
+            <div className="grid gap-1.5">
+              <Label htmlFor="circleci-project-slug">Project Slug</Label>
+              <Input
+                id="circleci-project-slug"
+                type="text"
+                placeholder="gh/your-org/your-repo"
+                value={circleciProjectSlug}
+                onChange={(e) => {
+                  setCircleciProjectSlug(e.target.value);
+                  setCircleciError(null);
+                }}
+              />
+            </div>
+            {circleciError && (
+              <p className="text-xs text-destructive">{circleciError}</p>
+            )}
+          </div>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <Button
+              onClick={() =>
+                circleciConnectMutation.mutate({
+                  token: circleciToken.trim(),
+                  projectSlug: circleciProjectSlug.trim(),
+                })
+              }
+              disabled={
+                !circleciToken.trim() ||
+                !circleciProjectSlug.trim() ||
+                circleciConnectMutation.isPending
+              }
+              loading={circleciConnectMutation.isPending}
             >
               Connect
             </Button>

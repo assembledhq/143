@@ -61,10 +61,13 @@ type AdditionalIntegrationCardsProps = IntegrationCallbacks & {
   slackConnected: boolean;
   notionConnected: boolean;
   notionLoading?: boolean;
+  circleciConnected: boolean;
+  circleciLoading?: boolean;
   onConnectSentry: () => void;
   onConnectLinear: () => void;
   onConnectSlack: () => void;
   onConnectNotion: () => void;
+  onConnectCircleCI: () => void;
 };
 
 // readOnly hides connect/disconnect buttons on every card and the per-repo
@@ -272,6 +275,7 @@ const DISCONNECT_DESCRIPTIONS: Record<IntegrationKey, string> = {
   linear: "This will disconnect Linear from your organization. Issues will no longer sync.",
   slack: "This will disconnect Slack from your organization. Channel monitoring will stop.",
   notion: "This will disconnect Notion from your organization. Product docs will no longer sync.",
+  circleci: "This will disconnect CircleCI from your organization. Flaky-test data will no longer be available to agents.",
 };
 
 function IntegrationAction({
@@ -462,10 +466,13 @@ export function AdditionalIntegrationCards({
   slackConnected,
   notionConnected,
   notionLoading,
+  circleciConnected,
+  circleciLoading,
   onConnectSentry,
   onConnectLinear,
   onConnectSlack,
   onConnectNotion,
+  onConnectCircleCI,
   onDisconnect,
   disconnectingProvider,
   disconnectErrorProvider,
@@ -476,6 +483,7 @@ export function AdditionalIntegrationCards({
   const linear = getIntegrationByKey("linear");
   const slack = getIntegrationByKey("slack");
   const notion = getIntegrationByKey("notion");
+  const circleci = getIntegrationByKey("circleci");
 
   return (
     <IntegrationsCard
@@ -560,6 +568,26 @@ export function AdditionalIntegrationCards({
             />
           ),
         },
+        {
+          id: circleci.key,
+          title: circleci.name,
+          description: circleci.description,
+          logo: <IntegrationLogo name={circleci.name} src={circleci.logoSrc} />,
+          badge: <Badge variant="secondary" className="text-xs">Optional</Badge>,
+          action: (
+            <IntegrationAction
+              connected={circleciConnected}
+              integrationKey="circleci"
+              integrationName={circleci.name}
+              onConnect={onConnectCircleCI}
+              onDisconnect={onDisconnect}
+              disconnecting={disconnectingProvider === "circleci"}
+              disconnectError={disconnectErrorProvider === "circleci" ? disconnectError : null}
+              loading={circleciLoading}
+              readOnly={readOnly}
+            />
+          ),
+        },
       ]}
     />
   );
@@ -571,6 +599,7 @@ export function AllIntegrationCards({
   onConnectLinear,
   onConnectSlack,
   onConnectNotion,
+  onConnectCircleCI,
   onDisconnect,
   disconnectingProvider,
   disconnectErrorProvider,
@@ -584,6 +613,8 @@ export function AllIntegrationCards({
   slackConnected,
   notionConnected,
   notionLoading,
+  circleciConnected,
+  circleciLoading,
   onDisconnectRepo,
   onReconnectRepo,
   pendingRepoID,
@@ -594,6 +625,7 @@ export function AllIntegrationCards({
   const linear = getIntegrationByKey("linear");
   const slack = getIntegrationByKey("slack");
   const notion = getIntegrationByKey("notion");
+  const circleci = getIntegrationByKey("circleci");
 
   return (
     <IntegrationsCard
@@ -701,6 +733,26 @@ export function AllIntegrationCards({
               disconnecting={disconnectingProvider === "notion"}
               disconnectError={disconnectErrorProvider === "notion" ? disconnectError : null}
               loading={notionLoading}
+              readOnly={readOnly}
+            />
+          ),
+        },
+        {
+          id: circleci.key,
+          title: circleci.name,
+          description: circleci.description,
+          logo: <IntegrationLogo name={circleci.name} src={circleci.logoSrc} />,
+          badge: <Badge variant="secondary" className="text-xs">Optional</Badge>,
+          action: (
+            <IntegrationAction
+              connected={circleciConnected}
+              integrationKey="circleci"
+              integrationName={circleci.name}
+              onConnect={onConnectCircleCI}
+              onDisconnect={onDisconnect}
+              disconnecting={disconnectingProvider === "circleci"}
+              disconnectError={disconnectErrorProvider === "circleci" ? disconnectError : null}
+              loading={circleciLoading}
               readOnly={readOnly}
             />
           ),

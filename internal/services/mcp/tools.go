@@ -748,6 +748,21 @@ func (tr *ToolRegistry) callMessageSource(ctx context.Context, ms integration.Me
 	}
 }
 
+// ciTestInsightsError formats a CITestInsights error into an ErrorResult. As
+// with taskManagerError, an unauthorized variant gets a stable, greppable
+// prefix so the agent sees a clear "stop retrying; ask the user to
+// reconnect" signal instead of a generic 4xx string.
+func ciTestInsightsError(action, providerName string, err error) *ToolCallResult {
+	if errors.Is(err, integration.ErrCircleCIUnauthorized) {
+		detail := strings.TrimSpace(err.Error())
+		return ErrorResult(fmt.Sprintf(
+			"%s unauthorized: %s. Ask the user to reconnect %s in the integrations settings before retrying %s.",
+			providerName, detail, providerName, action,
+		))
+	}
+	return ErrorResult(fmt.Sprintf("%s failed: %s", action, err))
+}
+
 // --------------------------------------------------------------------------
 // CI test insights dispatch
 // --------------------------------------------------------------------------
@@ -770,7 +785,7 @@ func (tr *ToolRegistry) callCITestInsights(ctx context.Context, ci integration.C
 		}
 		results, err := ci.ListFlakyTests(ctx, filter)
 		if err != nil {
-			return ErrorResult(fmt.Sprintf("list flaky tests failed: %s", err))
+			return ciTestInsightsError("list flaky tests", ci.Name(), err)
 		}
 		return jsonResult(results)
 
@@ -786,7 +801,7 @@ func (tr *ToolRegistry) callCITestInsights(ctx context.Context, ci integration.C
 		}
 		results, err := ci.GetTestResults(ctx, integration.JobRef{JobNumber: p.JobNumber})
 		if err != nil {
-			return ErrorResult(fmt.Sprintf("get job test results failed: %s", err))
+			return ciTestInsightsError("get job test results", ci.Name(), err)
 		}
 		return jsonResult(results)
 
@@ -804,7 +819,7 @@ func (tr *ToolRegistry) callCITestInsights(ctx context.Context, ci integration.C
 		}
 		failures, err := ci.GetRecentFailures(ctx, p.Classname, p.TestName, p.Limit)
 		if err != nil {
-			return ErrorResult(fmt.Sprintf("get recent test failures failed: %s", err))
+			return ciTestInsightsError("get recent test failures", ci.Name(), err)
 		}
 		return jsonResult(failures)
 

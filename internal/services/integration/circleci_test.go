@@ -204,3 +204,148 @@ func TestCircleCI_ListFlakyTests_RequiresProjectSlug(t *testing.T) {
 	_, err := ci.ListFlakyTests(context.Background(), FlakyTestFilter{})
 	require.Error(t, err, "missing project_slug should be a clear error, not a 404")
 }
+
+func TestCircleCI_GetTestResults_FollowsPagination(t *testing.T) {
+	t.Parallel()
+
+	calls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.Header().Set("Content-Type", "application/json")
+		token := r.URL.Query().Get("page-token")
+		switch calls {
+		case 1:
+			require.Equal(t, "", token, "first page must not send a page-token")
+			_, _ = w.Write([]byte(`{"items":[{"name":"A","result":"failure","message":"a"}],"next_page_token":"PAGE2"}`))
+		case 2:
+			require.Equal(t, "PAGE2", token, "second call should pass the prior next_page_token")
+			_, _ = w.Write([]byte(`{"items":[{"name":"B","result":"failure","message":"b"}],"next_page_token":""}`))
+		default:
+			t.Fatalf("unexpected extra call %d", calls)
+		}
+	}))
+	defer server.Close()
+
+	ci := NewCircleCITestInsights(CircleCIConfig{
+		BaseURL:     server.URL,
+		AuthToken:   "tok",
+		ProjectSlug: "gh/octocat/hello",
+	})
+
+	results, err := ci.GetTestResults(context.Background(), JobRef{JobNumber: 42})
+	require.NoError(t, err)
+	require.Len(t, results, 2, "pagination should collect both pages")
+	require.Equal(t, "A", results[0].TestName)
+	require.Equal(t, "B", results[1].TestName)
+	require.Equal(t, 2, calls)
+}
+
+func TestCircleCI_Unauthorized_ReturnsSentinel(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"message":"Permission denied"}`))
+	}))
+	defer server.Close()
+
+	ci := NewCircleCITestInsights(CircleCIConfig{
+		BaseURL:     server.URL,
+		AuthToken:   "bad-tok",
+		ProjectSlug: "gh/octocat/hello",
+	})
+
+	_, err := ci.ListFlakyTests(context.Background(), FlakyTestFilter{})
+	require.Error(t, err)
+	require.ErrorIs(t, err, ErrCircleCIUnauthorized,
+		"401 should wrap ErrCircleCIUnauthorized so tool dispatch can prompt for a reconnect")
+	require.Contains(t, err.Error(), "Permission denied",
+		"error should preserve the upstream body, not just the status code")
+}
+
+func TestCircleCI_NonOKErrorIncludesBody(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"message":"invalid project slug"}`))
+	}))
+	defer server.Close()
+
+	ci := NewCircleCITestInsights(CircleCIConfig{
+		BaseURL:     server.URL,
+		AuthToken:   "tok",
+		ProjectSlug: "gh/octocat/hello",
+	})
+
+	_, err := ci.ListFlakyTests(context.Background(), FlakyTestFilter{})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "invalid project slug",
+		"non-2xx errors should include the upstream message for debugging")
+}
+
+func TestCircleCI_GetRecentFailures_SurfacesUnauthorized(t *testing.T) {
+	t.Parallel()
+
+	// flaky-tests returns happy data, but the per-job /tests call 401s.
+	// Previously GetRecentFailures would silently return [] — the agent
+	// would believe "no flakes." With the fix, it must bubble the auth error.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if strings.HasSuffix(r.URL.Path, "/flaky-tests") {
+			_, _ = w.Write([]byte(`{"flaky-tests":[{"test-name":"TF","classname":"c","job-number":1}]}`))
+			return
+		}
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer server.Close()
+
+	ci := NewCircleCITestInsights(CircleCIConfig{
+		BaseURL:     server.URL,
+		AuthToken:   "tok",
+		ProjectSlug: "gh/octocat/hello",
+	})
+
+	_, err := ci.GetRecentFailures(context.Background(), "c", "TF", 5)
+	require.Error(t, err)
+	require.ErrorIs(t, err, ErrCircleCIUnauthorized,
+		"if every job dive 401s, the unauthorized error must propagate — agents must not see []")
+}
+
+func TestCircleCI_GetRecentFailures_SurfacesAllDivesFailed(t *testing.T) {
+	t.Parallel()
+
+	// Per-job /tests returns 500 every time. Previously we returned [] —
+	// the agent would believe "no flakes." With the fix, we surface the
+	// underlying error so the agent doesn't draw the wrong conclusion.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if strings.HasSuffix(r.URL.Path, "/flaky-tests") {
+			_, _ = w.Write([]byte(`{"flaky-tests":[{"test-name":"TF","classname":"c","job-number":1}]}`))
+			return
+		}
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`upstream down`))
+	}))
+	defer server.Close()
+
+	ci := NewCircleCITestInsights(CircleCIConfig{
+		BaseURL:     server.URL,
+		AuthToken:   "tok",
+		ProjectSlug: "gh/octocat/hello",
+	})
+
+	_, err := ci.GetRecentFailures(context.Background(), "c", "TF", 5)
+	require.Error(t, err, "if no successful dive returns failures, the dive error must surface")
+}
+
+func TestCircleCI_IsFailureResult_OnlyDocumentedValues(t *testing.T) {
+	t.Parallel()
+	require.True(t, isFailureResult("failure"))
+	require.True(t, isFailureResult("error"))
+	require.True(t, isFailureResult("FAILURE"))
+	require.False(t, isFailureResult("success"))
+	require.False(t, isFailureResult("skipped"))
+	require.False(t, isFailureResult("failed"),
+		"'failed' is not part of CircleCI's documented enum (success/failure/skipped/error)")
+}

@@ -581,6 +581,11 @@ export const api = {
       body: JSON.stringify({ channel_ids: channelIds }),
     }),
     connectNotion: (accessToken: string) => post<import('./types').SingleResponse<import('./types').Integration>>('/api/v1/integrations/notion/connect', { access_token: accessToken }),
+    connectCircleCI: (authToken: string, projectSlug: string) =>
+      post<import('./types').SingleResponse<import('./types').Integration>>('/api/v1/integrations/circleci/connect', {
+        auth_token: authToken,
+        project_slug: projectSlug,
+      }),
     disconnect: (provider: string) => del(`/api/v1/integrations/${provider}/disconnect`),
     syncGitHub: () => post<{ data: { repos_synced: number; errors: number } }>('/api/v1/integrations/github/sync'),
   },

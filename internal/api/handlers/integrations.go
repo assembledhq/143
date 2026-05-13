@@ -1722,3 +1722,106 @@ func (h *IntegrationHandler) validateNotionToken(ctx context.Context, token stri
 
 	return result.Bot.WorkspaceName, nil
 }
+
+// ──────────────────────────────────────────────────────────────────────────────
+// CircleCI Integration
+// ──────────────────────────────────────────────────────────────────────────────
+
+// ConnectCircleCI accepts a CircleCI personal API token and project slug,
+// validates them against the CircleCI v2 Insights API (cheapest authenticated
+// call: GET /me), stores the credential, and creates an active integration
+// record.
+//
+// Like Notion, CircleCI uses a paste-the-token flow rather than OAuth — the
+// v2 Insights API isn't exposed via CircleCI's OAuth scopes, so a personal
+// API token is the documented path.
+func (h *IntegrationHandler) ConnectCircleCI(w http.ResponseWriter, r *http.Request) {
+	orgID := middleware.OrgIDFromContext(r.Context())
+
+	var req struct {
+		AuthToken   string `json:"auth_token"`
+		ProjectSlug string `json:"project_slug"`
+		BaseURL     string `json:"base_url"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_JSON", "invalid request body")
+		return
+	}
+	req.AuthToken = strings.TrimSpace(req.AuthToken)
+	req.ProjectSlug = strings.Trim(strings.TrimSpace(req.ProjectSlug), "/")
+	req.BaseURL = strings.TrimSpace(req.BaseURL)
+	if req.AuthToken == "" {
+		writeError(w, r, http.StatusBadRequest, "MISSING_TOKEN", "auth_token is required")
+		return
+	}
+	if req.ProjectSlug == "" {
+		writeError(w, r, http.StatusBadRequest, "MISSING_PROJECT_SLUG", "project_slug is required (e.g. gh/org/repo)")
+		return
+	}
+	if strings.Count(req.ProjectSlug, "/") != 2 {
+		writeError(w, r, http.StatusBadRequest, "INVALID_PROJECT_SLUG", "project_slug must look like gh/org/repo")
+		return
+	}
+
+	// Validate the token against the CircleCI API.
+	if err := h.validateCircleCIToken(r.Context(), req.AuthToken, req.BaseURL); err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_TOKEN", "failed to validate CircleCI token: "+err.Error())
+		return
+	}
+
+	cfg := models.CircleCIConfig{
+		AuthToken:   req.AuthToken,
+		ProjectSlug: req.ProjectSlug,
+		BaseURL:     req.BaseURL,
+	}
+	if err := h.credentialStore.Upsert(r.Context(), orgID, cfg); err != nil {
+		writeError(w, r, http.StatusInternalServerError, "CREDENTIAL_SAVE_FAILED", "failed to save CircleCI credentials", err)
+		return
+	}
+
+	integration, created, err := h.ensureIntegration(r.Context(), orgID, models.IntegrationProviderCircleCI)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "CONNECT_CIRCLECI_FAILED", "failed to create CircleCI integration", err)
+		return
+	}
+
+	if created {
+		writeJSON(w, http.StatusCreated, models.SingleResponse[models.Integration]{Data: integration})
+		return
+	}
+	writeJSON(w, http.StatusOK, models.SingleResponse[models.Integration]{Data: integration})
+}
+
+// validateCircleCIToken calls CircleCI's /api/v2/me endpoint to verify the
+// token is valid. /me is the standard "is this token good?" call — it's
+// org-agnostic so it works before the user has scoped to a project slug.
+func (h *IntegrationHandler) validateCircleCIToken(ctx context.Context, token, baseURL string) error {
+	if baseURL == "" {
+		baseURL = "https://circleci.com"
+	}
+	baseURL = strings.TrimRight(baseURL, "/")
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/api/v2/me", nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Circle-Token", token)
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := h.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		return fmt.Errorf("invalid or expired token")
+	}
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("circleci API returned %d", resp.StatusCode)
+	}
+	// We don't actually need anything from the body — a 200 from /me is the
+	// signal the token is good. Drain to allow connection reuse.
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<16))
+	return nil
+}
