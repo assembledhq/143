@@ -23,8 +23,17 @@ describe("frontend CI guardrails", () => {
       path.join(repoRoot, ".github", "workflows", "ci.yml"),
       "utf8"
     );
+    const frontendTestJob = workflow.match(
+      /  frontend-test:\n[\s\S]*?(?=\n  [a-z0-9-]+:|\n$)/
+    )?.[0];
 
-    expect(workflow).toContain("frontend-test:");
-    expect(workflow).toContain("- run: npm run lint");
+    expect(frontendTestJob).toBeDefined();
+    if (!frontendTestJob) {
+      throw new Error("frontend-test job should exist in CI workflow");
+    }
+    expect(frontendTestJob).toContain("- run: npm run lint");
+    expect(frontendTestJob.indexOf("- run: npm run lint")).toBeLessThan(
+      frontendTestJob.indexOf("npx vitest run")
+    );
   });
 });
