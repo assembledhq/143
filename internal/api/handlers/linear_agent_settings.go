@@ -104,9 +104,27 @@ type LinearAgentInstallStatus struct {
 	HasLinearIntegration bool `json:"has_linear_integration"`
 }
 
+// requireOrgID is the defense-in-depth gate every settings endpoint runs
+// before doing org-scoped work. The router wires middleware.OrgContext
+// upstream, but a misconfigured route — or a future regression that drops
+// that middleware — would silently fall through to uuid.Nil and serve
+// cross-org data on a string-id table that allows uuid.Nil. Returning a
+// 401 here makes the failure mode loud instead of silently leaking.
+func (h *LinearAgentSettingsHandler) requireOrgID(w http.ResponseWriter, r *http.Request) (uuid.UUID, bool) {
+	orgID := middleware.OrgIDFromContext(r.Context())
+	if orgID == uuid.Nil {
+		writeError(w, r, http.StatusUnauthorized, "UNAUTHORIZED", "org context missing")
+		return uuid.Nil, false
+	}
+	return orgID, true
+}
+
 // GetStatus returns the install / enabled state.
 func (h *LinearAgentSettingsHandler) GetStatus(w http.ResponseWriter, r *http.Request) {
-	orgID := middleware.OrgIDFromContext(r.Context())
+	orgID, ok := h.requireOrgID(w, r)
+	if !ok {
+		return
+	}
 
 	status := LinearAgentInstallStatus{}
 	if h.credentials != nil {
@@ -132,7 +150,10 @@ func (h *LinearAgentSettingsHandler) GetStatus(w http.ResponseWriter, r *http.Re
 
 // ListMappings returns all team→repo mappings for the org.
 func (h *LinearAgentSettingsHandler) ListMappings(w http.ResponseWriter, r *http.Request) {
-	orgID := middleware.OrgIDFromContext(r.Context())
+	orgID, ok := h.requireOrgID(w, r)
+	if !ok {
+		return
+	}
 	mappings, err := h.mappings.ListByOrg(r.Context(), orgID)
 	if err != nil {
 		writeError(w, r, http.StatusInternalServerError, "LIST_FAILED", "failed to list linear team repo mappings", err)
@@ -155,7 +176,10 @@ type upsertMappingRequest struct {
 // only semantics should pre-check via List first. The simpler upsert API
 // is what the settings UI's edit flow expects.
 func (h *LinearAgentSettingsHandler) UpsertMapping(w http.ResponseWriter, r *http.Request) {
-	orgID := middleware.OrgIDFromContext(r.Context())
+	orgID, ok := h.requireOrgID(w, r)
+	if !ok {
+		return
+	}
 
 	var req upsertMappingRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -204,7 +228,10 @@ func (h *LinearAgentSettingsHandler) PatchSettings(w http.ResponseWriter, r *htt
 		writeError(w, r, http.StatusServiceUnavailable, "ORG_WRITER_UNAVAILABLE", "agent settings writer not configured")
 		return
 	}
-	orgID := middleware.OrgIDFromContext(r.Context())
+	orgID, ok := h.requireOrgID(w, r)
+	if !ok {
+		return
+	}
 	var req PatchEnableRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, r, http.StatusBadRequest, "INVALID_JSON", "failed to parse request body", err)
@@ -245,7 +272,10 @@ func (h *LinearAgentSettingsHandler) ListSessions(w http.ResponseWriter, r *http
 		writeError(w, r, http.StatusServiceUnavailable, "FEATURE_OFF", "agent feature not enabled in this deployment")
 		return
 	}
-	orgID := middleware.OrgIDFromContext(r.Context())
+	orgID, ok := h.requireOrgID(w, r)
+	if !ok {
+		return
+	}
 	limit := parseLimitParam(r, 50, 200)
 	rows, err := h.agentSessions.ListByOrg(r.Context(), orgID, limit)
 	if err != nil {
@@ -303,7 +333,10 @@ func (h *LinearAgentSettingsHandler) GetSession(w http.ResponseWriter, r *http.R
 		writeError(w, r, http.StatusServiceUnavailable, "FEATURE_OFF", "agent feature not enabled in this deployment")
 		return
 	}
-	orgID := middleware.OrgIDFromContext(r.Context())
+	orgID, ok := h.requireOrgID(w, r)
+	if !ok {
+		return
+	}
 	idStr := r.PathValue("id")
 	if idStr == "" {
 		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "id is required")
@@ -355,7 +388,10 @@ func (h *LinearAgentSettingsHandler) GetSession(w http.ResponseWriter, r *http.R
 
 // DeleteMapping removes a mapping by id.
 func (h *LinearAgentSettingsHandler) DeleteMapping(w http.ResponseWriter, r *http.Request) {
-	orgID := middleware.OrgIDFromContext(r.Context())
+	orgID, ok := h.requireOrgID(w, r)
+	if !ok {
+		return
+	}
 
 	idStr := r.PathValue("id")
 	if idStr == "" {

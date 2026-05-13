@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
@@ -96,6 +97,24 @@ var providerSignatureHeader = map[string]string{
 	"linear": "X-Linear-Signature",
 }
 
+// providerDeliveryIDHeader maps provider name to the HTTP header carrying
+// the per-delivery unique id we use as the replay-protection key. When
+// present it gets persisted as webhook_deliveries.delivery_id, where the
+// partial UNIQUE INDEX (provider, delivery_id) WHERE delivery_id IS NOT
+// NULL guarantees that a re-signed replay collides on insert and the
+// ingestion handler returns 200 "replay" without touching downstream
+// dispatchers. Providers absent from this map fall back to the existing
+// (no-replay-protection) flow — HMAC verification still applies.
+//
+// Sentry is intentionally absent: their webhook headers don't include a
+// stable per-delivery uuid, and its inbound side is idempotent at the
+// issue-fingerprint layer, so the additional protection isn't worth a
+// header guess. Add only when the upstream provider documents a stable
+// delivery id.
+var providerDeliveryIDHeader = map[string]string{
+	"linear": "Linear-Delivery",
+}
+
 func (h *IngestionWebhookHandler) handleProvider(w http.ResponseWriter, r *http.Request, provider string) {
 	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20)) // 1MB limit
 	if err != nil {
@@ -128,16 +147,32 @@ func (h *IngestionWebhookHandler) handleProvider(w http.ResponseWriter, r *http.
 		return
 	}
 
-	// Record webhook delivery
+	// Record webhook delivery. delivery_id (when the provider supplies a
+	// stable per-delivery header) makes Create return ErrWebhookDeliveryReplay
+	// on a duplicate signed body — we ack 200 and skip dispatch so a
+	// replayed payload can't double-fire bootstrap activities or worker
+	// jobs. HMAC verification has already passed at this point, so we
+	// know the body is authentic; replay detection is the orthogonal
+	// "we've already processed this exact authentic body" check.
+	deliveryID := readDeliveryID(provider, r.Header)
 	delivery := &models.WebhookDelivery{
 		OrgID:         integration.OrgID,
 		IntegrationID: integrationID,
 		Provider:      provider,
+		DeliveryID:    deliveryID,
 		EventType:     r.Header.Get("X-Event-Type"),
 		Payload:       json.RawMessage(body),
 		Status:        "received",
 	}
 	if err := h.webhookStore.Create(r.Context(), delivery); err != nil {
+		if errors.Is(err, db.ErrWebhookDeliveryReplay) {
+			zerolog.Ctx(r.Context()).Info().
+				Str("provider", provider).
+				Str("delivery_id", deliveryIDLogValue(deliveryID)).
+				Msg("ignoring replayed webhook delivery")
+			writeJSON(w, http.StatusOK, map[string]string{"status": "replay_ignored"})
+			return
+		}
 		zerolog.Ctx(r.Context()).Error().Err(err).Msg("failed to record webhook delivery")
 	}
 
@@ -213,6 +248,32 @@ func (h *IngestionWebhookHandler) handleProvider(w http.ResponseWriter, r *http.
 		zerolog.Ctx(r.Context()).Warn().Err(err).Msg("failed to mark webhook processed")
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "processed"})
+}
+
+// readDeliveryID extracts the per-delivery unique id for replay
+// protection. Returns nil when the provider has no header registered or
+// the header is absent — Create then writes NULL into delivery_id and the
+// partial UNIQUE INDEX excludes the row from collision checks (the
+// existing no-replay-protection behavior).
+func readDeliveryID(provider string, headers http.Header) *string {
+	header, ok := providerDeliveryIDHeader[provider]
+	if !ok {
+		return nil
+	}
+	value := strings.TrimSpace(headers.Get(header))
+	if value == "" {
+		return nil
+	}
+	return &value
+}
+
+// deliveryIDLogValue defangs nil delivery ids for logging without
+// branching at every call site.
+func deliveryIDLogValue(id *string) string {
+	if id == nil {
+		return ""
+	}
+	return *id
 }
 
 // sniffLinearEventType inspects the JSON envelope's top-level `type` field

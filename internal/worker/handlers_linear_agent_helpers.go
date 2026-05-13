@@ -79,9 +79,16 @@ func buildAgentSession(orgID uuid.UUID, repo linear.AgentRepoResolveResult, issu
 		PrimaryIssueID:       &primaryIssueID,
 		LinearIdentifierHint: &identifier,
 		LinearPrepareState:   models.LinearPrepareStateReady,
-		InteractionMode:      models.SessionInteractionModeSingleRun,
-		ValidationPolicy:     models.SessionValidationPolicyOnTurnComplete,
-		TargetBranch:         targetBranch,
+		// SingleRun is hardcoded for issue-triggered sessions because the
+		// inbound model is request/response: Linear sends `created`, the
+		// agent runs once and posts a PR. Follow-up @-mentions arrive as
+		// distinct `prompted` events and append a new turn — we do not
+		// want the agent to keep iterating between user replies on its
+		// own. Org-level interaction defaults intentionally do not apply
+		// here; agent-triggered sessions have their own UX contract.
+		InteractionMode:  models.SessionInteractionModeSingleRun,
+		ValidationPolicy: models.SessionValidationPolicyOnTurnComplete,
+		TargetBranch:     targetBranch,
 	}
 }
 
