@@ -545,6 +545,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 
 	previewHandler := handlers.NewPreviewHandler(previewManager, previewStore, sessionStore, repoStore, fileReader, sandboxProvider, snapshotStore, logger)
 	previewHandler.SetAuditEmitter(auditEmitter)
+	previewHandler.SetJobStore(jobStore)
 	previewHandler.SetWorkerRuntime(workerSelector, workerClient, cfg.NodeID)
 	previewHandler.SetSandboxCapacityGate(sandboxCapacity)
 	internalPreviewHandler := handlers.NewInternalPreviewHandler(previewHandler, previewManager, cfg.NodeID, cfg.SessionSecret, logger)
