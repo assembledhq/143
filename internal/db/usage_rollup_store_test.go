@@ -728,6 +728,23 @@ func TestRollupHour_WithEvents(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
+func TestNormalizeUsageModel_PrefersNativeUsageModelOverOverride(t *testing.T) {
+	t.Parallel()
+
+	override := "gpt-4.1"
+	model := normalizeUsageModel(&override, []byte(`{"native_usage":{"model":"gpt-5.4"}}`))
+
+	require.Equal(t, "gpt-5.4", model)
+}
+
+func TestNormalizedSessionModelSQL_PrefersNativeUsageBeforeOverride(t *testing.T) {
+	t.Parallel()
+
+	sql := normalizedSessionModelSQL("s")
+
+	require.Equal(t, "COALESCE(NULLIF(s.token_usage->'native_usage'->>'model', ''), NULLIF(s.model_override, ''), 'unknown')", sql)
+}
+
 func TestRollupRange_Empty(t *testing.T) {
 	t.Parallel()
 	mock, err := pgxmock.NewPool()

@@ -76,9 +76,6 @@ func normalizeUsageReasoning(reasoning *models.ReasoningEffort) string {
 }
 
 func normalizeUsageModel(modelUsed *string, tokenUsageRaw []byte) string {
-	if modelUsed != nil && strings.TrimSpace(*modelUsed) != "" {
-		return strings.TrimSpace(*modelUsed)
-	}
 	var payload struct {
 		NativeUsage *struct {
 			Model string `json:"model"`
@@ -88,6 +85,9 @@ func normalizeUsageModel(modelUsed *string, tokenUsageRaw []byte) string {
 		if model := strings.TrimSpace(payload.NativeUsage.Model); model != "" {
 			return model
 		}
+	}
+	if modelUsed != nil && strings.TrimSpace(*modelUsed) != "" {
+		return strings.TrimSpace(*modelUsed)
 	}
 	return "unknown"
 }
@@ -1534,7 +1534,7 @@ func computeDurationStats(durations []float64) (avg, p95 float64) {
 }
 
 func normalizedSessionModelSQL(alias string) string {
-	return fmt.Sprintf("COALESCE(NULLIF(%s.model_override, ''), COALESCE(%s.token_usage->'native_usage'->>'model', 'unknown'))", alias, alias)
+	return fmt.Sprintf("COALESCE(NULLIF(%s.token_usage->'native_usage'->>'model', ''), NULLIF(%s.model_override, ''), 'unknown')", alias, alias)
 }
 
 func normalizedSessionReasoningSQL(alias string) string {

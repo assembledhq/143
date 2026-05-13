@@ -865,6 +865,7 @@ func (m *Manager) GetStatus(ctx context.Context, orgID, previewID uuid.UUID) (*m
 		Instance:       instance,
 		Services:       services,
 		Infrastructure: infra,
+		PreviewOrigin:  m.previewOrigin(previewID),
 	}, nil
 }
 
@@ -1224,6 +1225,14 @@ func (m *Manager) platformEnv(previewID uuid.UUID) map[string]string {
 	}
 	origin := strings.ReplaceAll(m.previewOriginTemplate, "{id}", previewID.String())
 	return map[string]string{"PREVIEW_ORIGIN": origin}
+}
+
+func (m *Manager) previewOrigin(previewID uuid.UUID) string {
+	env := m.platformEnv(previewID)
+	if env == nil {
+		return ""
+	}
+	return env["PREVIEW_ORIGIN"]
 }
 
 // =============================================================================
