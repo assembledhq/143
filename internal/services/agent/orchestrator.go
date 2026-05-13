@@ -3033,6 +3033,9 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 			}
 			authBillingMode = mode
 		case models.AgentTypeClaudeCode:
+			if err := o.restoreClaudeCodeConfigFromBackup(ctx, sandbox); err != nil {
+				log.Warn().Err(err).Msg("failed to restore Claude Code config from backup; continuing with existing sandbox state")
+			}
 			mode, err := o.ensureClaudeCodeAuth(ctx, session, sandbox, sandboxCfg.Env)
 			if err != nil {
 				return err
@@ -4586,6 +4589,33 @@ func (o *Orchestrator) removeClaudeCodeCredentialsFile(ctx context.Context, sand
 	}
 	if exitCode != 0 {
 		return fmt.Errorf("remove stale claude credentials: exited with code %d: %s", exitCode, stderr.String())
+	}
+	return nil
+}
+
+func (o *Orchestrator) restoreClaudeCodeConfigFromBackup(ctx context.Context, sandbox *Sandbox) error {
+	if sandbox == nil || sandbox.HomeDir == "" {
+		return nil
+	}
+
+	configPath := path.Join(sandbox.HomeDir, ".claude.json")
+	backupDir := path.Join(sandbox.HomeDir, ".claude", "backups")
+	cmd := fmt.Sprintf(
+		"if [ ! -f '%s' ] && [ -d '%s' ]; then latest=$(ls -t '%s'/.claude.json.backup.* 2>/dev/null | head -n 1); if [ -n \"$latest\" ]; then cp \"$latest\" '%s' && chmod 600 '%s'; fi; fi",
+		shellEscapeSingleQuote(configPath),
+		shellEscapeSingleQuote(backupDir),
+		shellEscapeSingleQuote(backupDir),
+		shellEscapeSingleQuote(configPath),
+		shellEscapeSingleQuote(configPath),
+	)
+
+	var stdout, stderr bytes.Buffer
+	exitCode, err := o.provider.Exec(ctx, sandbox, cmd, &stdout, &stderr)
+	if err != nil {
+		return fmt.Errorf("restore claude config backup: %w", err)
+	}
+	if exitCode != 0 {
+		return fmt.Errorf("restore claude config backup: exited with code %d: %s", exitCode, stderr.String())
 	}
 	return nil
 }

@@ -1307,6 +1307,7 @@ func TestDockerProvider_Snapshot(t *testing.T) {
 		tarCmd := gotCmd[2]
 		require.Contains(t, tarCmd, "'home/sandbox/backend'", "tar should include the WorkDir relative path")
 		require.Contains(t, tarCmd, "'home/sandbox/.claude'", "tar should include the .claude dir under HomeDir")
+		require.Contains(t, tarCmd, "'home/sandbox/.claude.json'", "tar should include Claude Code's top-level config file under HomeDir")
 		require.Contains(t, tarCmd, "'home/sandbox/.codex'", "tar should include the .codex dir under HomeDir")
 		require.Contains(t, tarCmd, "'home/sandbox/.gemini'", "tar should include the .gemini dir under HomeDir")
 		require.NotContains(t, tarCmd, "2>/dev/null", "tar stderr must not be silenced — we capture it for diagnostics")
