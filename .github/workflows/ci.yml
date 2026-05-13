@@ -93,6 +93,7 @@ jobs:
           --health-retries 5
     env:
       DATABASE_URL: postgres://onefortythree:dev@localhost:5432/onefortythree?sslmode=disable
+      GOTMPDIR: ${{ runner.temp }}
     steps:
       - uses: actions/checkout@v6
         with:
