@@ -786,6 +786,7 @@ const (
 	JobTypePMContextRefresh = "pm_context_refresh"
 	JobTypeProjectCycle     = "project_cycle"
 	JobTypeAutomationRun    = "automation_run"
+	JobTypeStartPreview     = "start_preview"
 )
 
 // Job represents an async work queue item.

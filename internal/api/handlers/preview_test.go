@@ -1373,7 +1373,7 @@ func TestPreviewHandler_StartPreview_CapacityReached(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
-func TestPreviewHandler_StartPreview_ColdStartRetriesAnotherWorkerOnCapacity(t *testing.T) {
+func TestPreviewHandler_StartPreview_WorkerRoutedEnqueuesStartPreviewJob(t *testing.T) {
 	t.Parallel()
 
 	mock, err := pgxmock.NewPool()
@@ -1383,60 +1383,28 @@ func TestPreviewHandler_StartPreview_ColdStartRetriesAnotherWorkerOnCapacity(t *
 	orgID := uuid.New()
 	userID := uuid.New()
 	sessionID := uuid.New()
-	now := time.Now()
-	worker1Calls := 0
-	worker2Calls := 0
-
-	worker1 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		worker1Calls++
-		require.Equal(t, http.MethodPost, r.Method, "worker one should receive a start request")
-		w.WriteHeader(http.StatusServiceUnavailable)
-		require.NoError(t, json.NewEncoder(w).Encode(models.ErrorResponse{
-			Error: models.ErrorDetail{
-				Code:    "PREVIEW_CAPACITY_REACHED",
-				Message: "all preview slots are in use",
-			},
-		}), "worker one should encode the capacity error")
-	}))
-	defer worker1.Close()
-
-	returnedPreviewID := uuid.New()
-	worker2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		worker2Calls++
-		require.Equal(t, http.MethodPost, r.Method, "worker two should receive a start request")
-		w.WriteHeader(http.StatusCreated)
-		require.NoError(t, json.NewEncoder(w).Encode(models.SingleResponse[*models.PreviewInstance]{
-			Data: &models.PreviewInstance{
-				ID:           returnedPreviewID,
-				SessionID:    sessionID,
-				OrgID:        orgID,
-				UserID:       userID,
-				Status:       models.PreviewStatusReady,
-				WorkerNodeID: "worker-2",
-			},
-		}), "worker two should encode the preview response")
-	}))
-	defer worker2.Close()
+	previewID := uuid.New()
+	now := time.Now().UTC()
 
 	sessionStore := db.NewSessionStore(mock)
 	previewStore := db.NewPreviewStore(mock)
 	nodeStore := db.NewNodeStore(mock)
+	jobStore := db.NewJobStore(mock)
 
-	h := newPreviewTestHandlerWithManager()
-	h.store = previewStore
-	h.sessionStore = sessionStore
+	mgr := preview.NewManager(preview.ManagerConfig{
+		Store:        previewStore,
+		Logger:       zerolog.Nop(),
+		WorkerNodeID: "api-node",
+	})
+	h := NewPreviewHandler(mgr, previewStore, sessionStore, nil, sandbox.NoOpFileReader{}, nil, nil, zerolog.Nop())
+	h.jobStore = jobStore
 	h.SetWorkerRuntime(preview.NewWorkerSelector(nodeStore, previewStore), preview.NewWorkerPreviewClient("test-secret"), "api-node")
 
-	worker1Meta, err := json.Marshal(preview.WorkerNodeMetadata{
+	workerMeta, err := json.Marshal(preview.WorkerNodeMetadata{
 		PreviewCapable:         true,
-		PreviewInternalBaseURL: worker1.URL,
+		PreviewInternalBaseURL: "http://worker-a.internal",
 	})
-	require.NoError(t, err, "should marshal worker one metadata")
-	worker2Meta, err := json.Marshal(preview.WorkerNodeMetadata{
-		PreviewCapable:         true,
-		PreviewInternalBaseURL: worker2.URL,
-	})
-	require.NoError(t, err, "should marshal worker two metadata")
+	require.NoError(t, err, "should marshal worker metadata")
 
 	mock.ExpectQuery("SELECT .+ FROM sessions WHERE id").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
@@ -1447,30 +1415,40 @@ func TestPreviewHandler_StartPreview_ColdStartRetriesAnotherWorkerOnCapacity(t *
 	mock.ExpectQuery("SELECT .+ FROM preview_instances").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(previewInstanceTestCols))
+	mock.ExpectQuery("SELECT .+ FROM nodes WHERE status = 'active' ORDER BY id ASC").
+		WillReturnRows(
+			pgxmock.NewRows(handlerNodeTestCols).
+				AddRow("worker-a", "worker", "worker-a", "active", workerMeta, now, now),
+		)
+	mock.ExpectQuery("SELECT COUNT\\(\\*\\) FROM preview_instances WHERE worker_node_id").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
+	mock.ExpectBegin()
 	mock.ExpectQuery("SELECT .+ FROM preview_instances").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(previewInstanceTestCols))
-	mock.ExpectQuery("SELECT .+ FROM nodes WHERE status = 'active' ORDER BY id ASC").
-		WillReturnRows(
-			pgxmock.NewRows(handlerNodeTestCols).
-				AddRow("worker-1", "worker", "worker-1.internal", "active", worker1Meta, now, now).
-				AddRow("worker-2", "worker", "worker-2.internal", "active", worker2Meta, now, now),
-		)
-	mock.ExpectQuery("SELECT COUNT").
+	mock.ExpectQuery("SELECT COUNT\\(\\*\\) FROM preview_instances WHERE org_id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
+	mock.ExpectQuery("SELECT COUNT\\(\\*\\) FROM preview_instances WHERE org_id").
 		WithArgs(pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
-	mock.ExpectQuery("SELECT COUNT").
+	mock.ExpectQuery("SELECT COUNT\\(\\*\\) FROM preview_instances WHERE worker_node_id").
 		WithArgs(pgxmock.AnyArg()).
-		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(1))
-	mock.ExpectQuery("SELECT .+ FROM nodes WHERE status = 'active' ORDER BY id ASC").
+		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
+	mock.ExpectQuery("INSERT INTO preview_instances").
+		WithArgs(previewAnyArgs(19)...).
 		WillReturnRows(
-			pgxmock.NewRows(handlerNodeTestCols).
-				AddRow("worker-1", "worker", "worker-1.internal", "active", worker1Meta, now, now).
-				AddRow("worker-2", "worker", "worker-2.internal", "active", worker2Meta, now, now),
+			pgxmock.NewRows(previewInstanceTestCols).
+				AddRow(newReservedPreviewRow(previewID, sessionID, orgID, userID, now)...),
 		)
-	mock.ExpectQuery("SELECT COUNT").
-		WithArgs(pgxmock.AnyArg()).
-		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(1))
+	mock.ExpectQuery("UPDATE preview_instances").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"session_id"}).AddRow(sessionID))
+	mock.ExpectQuery("INSERT INTO jobs \\(org_id, queue, job_type, payload, priority, dedupe_key, target_node_id\\)").
+		WithArgs(previewAnyArgs(7)...).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
+	mock.ExpectCommit()
 
 	req := httptest.NewRequest(http.MethodPost, "/preview", strings.NewReader(""))
 	req = previewTestContextWithIDs(req, orgID, userID, sessionID.String())
@@ -1478,13 +1456,11 @@ func TestPreviewHandler_StartPreview_ColdStartRetriesAnotherWorkerOnCapacity(t *
 
 	h.StartPreview(w, req)
 
-	require.Equal(t, http.StatusCreated, w.Code, "cold-start preview should retry another worker after capacity races")
+	require.Equal(t, http.StatusAccepted, w.Code, "worker-routed start should return 202 after enqueueing startup: %s", w.Body.String())
 	var resp models.SingleResponse[*models.PreviewInstance]
-	require.NoError(t, json.NewDecoder(w.Body).Decode(&resp), "response should decode")
-	require.NotNil(t, resp.Data, "response should include a preview instance")
-	require.Equal(t, returnedPreviewID, resp.Data.ID, "response should return the preview started on the retry worker")
-	require.Equal(t, 1, worker1Calls, "first worker should be tried once")
-	require.Equal(t, 1, worker2Calls, "second worker should be tried once after capacity")
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&resp), "response should decode as a preview instance")
+	require.Equal(t, previewID, resp.Data.ID, "response should return the reserved preview")
+	require.Equal(t, models.PreviewStatusStarting, resp.Data.Status, "response should show startup in progress")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
@@ -2141,13 +2117,16 @@ func TestPreviewHandler_GetActivePreview_NoActivePreview(t *testing.T) {
 	mock.ExpectQuery("SELECT .+ FROM preview_instances").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(previewInstanceTestCols))
+	mock.ExpectQuery("SELECT [\\s\\S]+ FROM preview_instances[\\s\\S]+status = 'failed'").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(previewInstanceTestCols))
 
 	req := httptest.NewRequest(http.MethodGet, "/preview", nil)
 	req = previewTestContextWithIDs(req, orgID, userID, sessionID.String())
 	w := httptest.NewRecorder()
 
 	h.GetPreview(w, req)
-	require.Equal(t, http.StatusNotFound, w.Code)
+	require.Equal(t, http.StatusNotFound, w.Code, "no active or failed preview should return 404: %s", w.Body.String())
 
 	var resp models.ErrorResponse
 	err = json.NewDecoder(w.Body).Decode(&resp)

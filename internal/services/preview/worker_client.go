@@ -49,6 +49,18 @@ type RemoteStartPreviewRequest struct {
 	ProfileName   string                `json:"profile_name,omitempty"`
 }
 
+// StartPreviewJobPayload is the durable worker job payload for completing a
+// previously reserved preview startup.
+type StartPreviewJobPayload struct {
+	OrgID         uuid.UUID             `json:"org_id"`
+	UserID        uuid.UUID             `json:"user_id"`
+	SessionID     uuid.UUID             `json:"session_id"`
+	PreviewID     uuid.UUID             `json:"preview_id"`
+	Config        *models.PreviewConfig `json:"config,omitempty"`
+	BaseCommitSHA string                `json:"base_commit_sha,omitempty"`
+	ProfileName   string                `json:"profile_name,omitempty"`
+}
+
 // RemoteStopActivePreviewForSessionRequest targets preview teardown by session.
 type RemoteStopActivePreviewForSessionRequest struct {
 	OrgID     uuid.UUID `json:"org_id"`

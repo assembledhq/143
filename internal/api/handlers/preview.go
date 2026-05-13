@@ -27,6 +27,7 @@ import (
 type PreviewHandler struct {
 	manager         *preview.Manager
 	store           *db.PreviewStore
+	jobStore        *db.JobStore
 	sessionStore    *db.SessionStore
 	repoStore       *db.RepositoryStore
 	fileReader      sandbox.FileReader
@@ -57,6 +58,7 @@ func NewPreviewHandler(manager *preview.Manager, store *db.PreviewStore, session
 	return &PreviewHandler{
 		manager:         manager,
 		store:           store,
+		jobStore:        nil,
 		sessionStore:    sessionStore,
 		repoStore:       repoStore,
 		fileReader:      fileReader,
@@ -69,6 +71,11 @@ func NewPreviewHandler(manager *preview.Manager, store *db.PreviewStore, session
 // SetAuditEmitter injects the audit emitter for logging preview events.
 func (h *PreviewHandler) SetAuditEmitter(audit *db.AuditEmitter) {
 	h.audit = audit
+}
+
+// SetJobStore injects the durable job queue used for async preview startup.
+func (h *PreviewHandler) SetJobStore(jobStore *db.JobStore) {
+	h.jobStore = jobStore
 }
 
 // SetWorkerRuntime wires worker routing for app-node preview execution.
@@ -155,14 +162,6 @@ func (h *PreviewHandler) getActivePreview(w http.ResponseWriter, r *http.Request
 	}
 
 	return instance, true
-}
-
-func (h *PreviewHandler) getActivePreviewBySession(ctx context.Context, orgID, sessionID uuid.UUID) (*models.PreviewInstance, error) {
-	instance, err := h.store.GetActivePreviewForSession(ctx, orgID, sessionID)
-	if err != nil {
-		return nil, err
-	}
-	return instance, nil
 }
 
 func (h *PreviewHandler) resolvePreviewWorker(ctx context.Context, workerNodeID string) (preview.WorkerNode, error) {
@@ -501,53 +500,8 @@ func classifyLaunchError(err error) *previewHTTPError {
 	if err == nil {
 		return nil
 	}
-	cause := err.Error()
-	switch {
-	case errors.Is(err, preview.ErrInfraImageUnavailable):
-		return newPreviewHTTPError(
-			http.StatusUnprocessableEntity,
-			"PREVIEW_INFRA_IMAGE_UNAVAILABLE",
-			"preview infrastructure image is not available on this worker. The image could not be pulled from its registry — check the worker's network egress and registry credentials. Details: "+cause,
-			err,
-		)
-	case errors.Is(err, preview.ErrInfraStartFailed):
-		return newPreviewHTTPError(
-			http.StatusUnprocessableEntity,
-			"PREVIEW_INFRA_START_FAILED",
-			"preview infrastructure container failed to start. Details: "+cause,
-			err,
-		)
-	case errors.Is(err, preview.ErrInfraUnhealthy):
-		return newPreviewHTTPError(
-			http.StatusUnprocessableEntity,
-			"PREVIEW_INFRA_UNHEALTHY",
-			"preview infrastructure container did not become healthy in time. The container started but its health check (e.g. pg_isready) never passed. Details: "+cause,
-			err,
-		)
-	case errors.Is(err, preview.ErrInitScriptFailed):
-		return newPreviewHTTPError(
-			http.StatusUnprocessableEntity,
-			"PREVIEW_INIT_SCRIPT_FAILED",
-			"preview init script failed. Check the script referenced in .143/config.json. Details: "+cause,
-			err,
-		)
-	case errors.Is(err, preview.ErrServiceNotReady):
-		return newPreviewHTTPError(
-			http.StatusUnprocessableEntity,
-			"PREVIEW_SERVICE_NOT_READY",
-			"preview service did not pass its readiness probe. The service may have crashed at boot, taken too long to start, or be listening on a different port than declared in .143/config.json. Details: "+cause,
-			err,
-		)
-	default:
-		// Pass the underlying cause through as the message so the frontend
-		// shows something actionable instead of "failed to start preview".
-		return newPreviewHTTPError(
-			http.StatusUnprocessableEntity,
-			"PREVIEW_START_FAILED",
-			"failed to start preview: "+cause,
-			err,
-		)
-	}
+	classified := preview.ClassifyLaunchFailure(err)
+	return newPreviewHTTPError(http.StatusUnprocessableEntity, classified.Code, classified.Message, err)
 }
 
 // =============================================================================
@@ -590,6 +544,66 @@ func (h *PreviewHandler) decodeStartPreviewBody(r *http.Request) (startPreviewRe
 		}
 	}
 	return body, nil
+}
+
+func (h *PreviewHandler) enqueueStartPreviewJob(ctx context.Context, orgID, userID uuid.UUID, session models.Session, worker preview.WorkerNode, body startPreviewRequest) (*models.PreviewInstance, *previewHTTPError) {
+	if h.jobStore == nil {
+		return nil, newPreviewHTTPError(http.StatusInternalServerError, "PREVIEW_START_QUEUE_UNAVAILABLE", "preview start queue is not configured", nil)
+	}
+	initialConfig := body.Config
+	if initialConfig == nil {
+		initialConfig = reservationPlaceholderConfig()
+	}
+	input := preview.StartPreviewInput{
+		SessionID:     session.ID,
+		OrgID:         orgID,
+		UserID:        userID,
+		Config:        initialConfig,
+		BaseCommitSHA: body.BaseCommitSHA,
+		ProfileName:   body.ProfileName,
+	}
+
+	tx, err := h.store.Begin(ctx)
+	if err != nil {
+		return nil, newPreviewHTTPError(http.StatusInternalServerError, "PREVIEW_START_FAILED", "failed to start preview", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	reservation, err := h.manager.ReservePreviewForWorkerInTx(ctx, tx, input, worker.ID)
+	if err != nil {
+		h.logger.Warn().Err(err).Str("session_id", session.ID.String()).Msg("preview reserve failed")
+		if errors.Is(err, preview.ErrPreviewCapacity) {
+			return nil, newPreviewHTTPError(http.StatusServiceUnavailable, "PREVIEW_CAPACITY_REACHED", err.Error(), err)
+		}
+		return nil, newPreviewHTTPError(http.StatusUnprocessableEntity, "PREVIEW_START_FAILED", "failed to start preview", err)
+	}
+
+	dedupeKey := "start_preview:" + session.ID.String()
+	targetNodeID := worker.ID
+	jobID, err := h.jobStore.EnqueueInTxWithOpts(ctx, tx, orgID, db.EnqueueOpts{
+		Queue:   "preview",
+		JobType: models.JobTypeStartPreview,
+		Payload: preview.StartPreviewJobPayload{
+			OrgID:         orgID,
+			UserID:        userID,
+			SessionID:     session.ID,
+			PreviewID:     reservation.ID,
+			Config:        body.Config,
+			BaseCommitSHA: body.BaseCommitSHA,
+			ProfileName:   body.ProfileName,
+		},
+		Priority:     5,
+		DedupeKey:    &dedupeKey,
+		TargetNodeID: &targetNodeID,
+	})
+	if err != nil {
+		return nil, newPreviewHTTPError(http.StatusInternalServerError, "PREVIEW_START_ENQUEUE_FAILED", "failed to enqueue preview startup", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, newPreviewHTTPError(http.StatusInternalServerError, "PREVIEW_START_FAILED", "failed to start preview", err)
+	}
+	h.jobStore.Notify(ctx, jobID)
+	return reservation, nil
 }
 
 func (h *PreviewHandler) startPreviewLocal(ctx context.Context, orgID, userID, sessionID uuid.UUID, body startPreviewRequest) (*models.PreviewInstance, *previewHTTPError) {
@@ -755,14 +769,6 @@ func (h *PreviewHandler) StartPreview(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusNotFound, "SESSION_NOT_FOUND", "session not found")
 		return
 	}
-	activePreview, err := h.getActivePreviewBySession(r.Context(), orgID, sessionID)
-	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
-		writeError(w, r, http.StatusInternalServerError, "PREVIEW_WORKER_SELECTION_FAILED", "failed to inspect current preview state", err)
-		return
-	}
-	coldStart := errors.Is(err, pgx.ErrNoRows) &&
-		(session.ContainerID == nil || *session.ContainerID == "" || session.SandboxState != string(models.SandboxStateRunning))
-
 	worker, err := h.workerSelector.SelectStartNode(r.Context(), orgID, &session)
 	if err != nil {
 		switch {
@@ -775,45 +781,12 @@ func (h *PreviewHandler) StartPreview(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	if h.isLocalWorker(worker) {
-		instance, localErr := h.startPreviewLocal(r.Context(), orgID, user.ID, sessionID, body)
-		if localErr != nil {
-			writePreviewHTTPError(w, r, localErr)
-			return
-		}
-		writeJSON(w, http.StatusCreated, models.SingleResponse[*models.PreviewInstance]{Data: instance})
+	instance, asyncErr := h.enqueueStartPreviewJob(r.Context(), orgID, user.ID, session, worker, body)
+	if asyncErr != nil {
+		writePreviewHTTPError(w, r, asyncErr)
 		return
 	}
-
-	triedWorkers := map[string]struct{}{}
-	for {
-		instance, err := h.workerClient.StartPreview(r.Context(), worker, preview.RemoteStartPreviewRequest{
-			OrgID:         orgID,
-			UserID:        user.ID,
-			SessionID:     sessionID,
-			Config:        body.Config,
-			BaseCommitSHA: body.BaseCommitSHA,
-			ProfileName:   body.ProfileName,
-		})
-		if err == nil {
-			writeJSON(w, http.StatusCreated, models.SingleResponse[*models.PreviewInstance]{Data: instance})
-			return
-		}
-
-		reqErr, ok := preview.AsWorkerRequestError(err)
-		if !coldStart || !ok || reqErr.Code != "PREVIEW_CAPACITY_REACHED" || activePreview != nil {
-			h.writeWorkerClientError(w, r, err)
-			return
-		}
-
-		triedWorkers[worker.ID] = struct{}{}
-		nextWorker, selectErr := h.workerSelector.SelectLeastLoadedNodeExcept(r.Context(), triedWorkers)
-		if selectErr != nil {
-			h.writeWorkerClientError(w, r, err)
-			return
-		}
-		worker = nextWorker
-	}
+	writeJSON(w, http.StatusAccepted, models.SingleResponse[*models.PreviewInstance]{Data: instance})
 }
 
 // =============================================================================
@@ -825,9 +798,26 @@ func (h *PreviewHandler) GetPreview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	orgID := middleware.OrgIDFromContext(r.Context())
-	instance, ok := h.getActivePreview(w, r)
-	if !ok {
+	sessionID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_SESSION_ID", "invalid session ID")
 		return
+	}
+	instance, err := h.store.GetActivePreviewForSession(r.Context(), orgID, sessionID)
+	if err != nil {
+		if !errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, r, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to get preview", err)
+			return
+		}
+		instance, err = h.store.GetLatestFailedPreviewForSession(r.Context(), orgID, sessionID)
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				writeError(w, r, http.StatusNotFound, "NO_ACTIVE_PREVIEW", "no active preview for this session")
+			} else {
+				writeError(w, r, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to get preview", err)
+			}
+			return
+		}
 	}
 
 	status, err := h.manager.GetStatus(r.Context(), orgID, instance.ID)
