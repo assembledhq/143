@@ -132,8 +132,13 @@ describe("AgentTabStrip", () => {
     expect(tabList).toBeInTheDocument();
     expect(tabList).toHaveAttribute("data-variant", "line");
     expect(tabList).not.toHaveClass("bg-muted/60");
-    expect(tabList).toHaveClass("overflow-y-visible");
-    expect(tabList).toHaveClass("pb-1");
+
+    // The scroll/clip wrapper lives on the parent div so the active-tab
+    // underline (positioned just below the trigger) isn't clipped.
+    const scrollWrapper = tabList.parentElement;
+    expect(scrollWrapper).toHaveClass("overflow-x-auto");
+    expect(scrollWrapper).toHaveClass("overflow-y-hidden");
+    expect(scrollWrapper).toHaveClass("pb-1");
     expect(activeTab).toHaveTextContent(/Main tab/i);
     expect(activeTab).not.toHaveTextContent(/Idle/i);
     expect(activeTab).toHaveClass("data-[state=active]:text-primary");
@@ -141,6 +146,77 @@ describe("AgentTabStrip", () => {
     expect(screen.getByRole("tab", { name: /review/i })).not.toHaveTextContent(/Completed/i);
     expect(screen.getByRole("button", { name: "Close Main tab" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Close Review tab" })).toBeInTheDocument();
+  });
+
+  it("keeps the bar at the same height in single-tab and multi-tab modes", () => {
+    // Regression guard: the bar's vertical sizing comes from `py-2` on the outer
+    // wrapper and `min-h-9` on the inner flex. Both modes must apply the same
+    // height-determining classes; otherwise the bar visibly jumps when a second
+    // tab appears (which is what happened before #893/#910 — the active-tab
+    // underline needed bottom padding that only existed in multi-tab mode).
+    const baseProps = {
+      viewedThreadIds: new Set<string>(),
+      overlapsByThreadId: new Map<string, string[]>(),
+      statusConfig,
+      onActiveThreadChange: vi.fn(),
+      onAddTab: vi.fn(),
+      onRevertThread: vi.fn(),
+      onArchiveThread: vi.fn(),
+      archivePendingThreadId: null,
+    };
+
+    const heightOnlyClasses = (el: HTMLElement) =>
+      el.className
+        .split(/\s+/)
+        .filter((cls) => /^(h-|min-h-|max-h-|py-|pt-|pb-)\S/.test(cls))
+        .sort()
+        .join(" ");
+
+    const captureBarShell = () => {
+      const addBtn = screen.getByRole("button", { name: "Add agent tab" });
+      const innerFlex = addBtn.parentElement;
+      const outerWrapper = innerFlex?.parentElement;
+      if (!innerFlex || !outerWrapper) {
+        throw new Error("Could not locate bar shell from add-tab button");
+      }
+      return {
+        outer: heightOnlyClasses(outerWrapper),
+        inner: heightOnlyClasses(innerFlex),
+      };
+    };
+
+    const single = renderWithProviders(
+      <AgentTabStrip
+        threads={[makeThread({ id: "thread-1", label: "Solo tab" })]}
+        activeThreadId="thread-1"
+        {...baseProps}
+      />,
+    );
+    const singleShell = captureBarShell();
+    single.unmount();
+
+    renderWithProviders(
+      <AgentTabStrip
+        threads={[
+          makeThread({ id: "thread-1", label: "Main tab" }),
+          makeThread({ id: "thread-2", label: "Review", agent_type: "claude_code" }),
+        ]}
+        activeThreadId="thread-1"
+        {...baseProps}
+      />,
+    );
+    const multiShell = captureBarShell();
+
+    // Height-determining classes must agree across modes — that's what keeps
+    // the bar from jumping. The specific value isn't sacred; the equality is.
+    expect(multiShell.outer).toBe(singleShell.outer);
+    expect(multiShell.inner).toBe(singleShell.inner);
+
+    // The inner flex must keep *some* explicit height affordance — without
+    // one, single-tab collapses to the icon-button intrinsic height (32px)
+    // while multi-tab grows to fit the underline (36px).
+    expect(singleShell.inner).not.toBe("");
+    expect(multiShell.inner).not.toBe("");
   });
 
   it("shows only the revert action in the desktop tab actions menu", async () => {
