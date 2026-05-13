@@ -27,8 +27,8 @@ const UsageTimeseriesChart = dynamic(
 export default function UsagePage() {
   const [preset, setPreset] = useState<DatePreset>("30d");
   const [metric, setMetric] = useState<MetricKey>("total_tokens");
-  const [dimension, setDimension] = useState<UsageBreakdownDimension>("model");
-  const [chartMode, setChartMode] = useState<"totals" | "stacked">("stacked");
+  const [dimension, setDimension] = useState<UsageBreakdownDimension>("user");
+  const [chartMode, setChartMode] = useState<"totals" | "stacked">("totals");
   const [selectedAgent, setSelectedAgent] = useQueryState("agent", parseAsString);
   const [selectedModel, setSelectedModel] = useQueryState("model", parseAsString);
   const [selectedReasoning, setSelectedReasoning] = useQueryState("reasoning", parseAsString);
