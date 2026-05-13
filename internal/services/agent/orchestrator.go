@@ -4715,6 +4715,13 @@ func (o *Orchestrator) snapshotSession(ctx context.Context, session *models.Sess
 		if saveErr == nil && closeErr == nil {
 			// Store the snapshot key on the session for subsequent use.
 			session.SnapshotKey = &snapshotKey
+			o.logger.Info().
+				Str("session_id", session.ID.String()).
+				Str("org_id", session.OrgID.String()).
+				Str("sandbox_id", sandbox.ID).
+				Str("snapshot_key", snapshotKey).
+				Int64("snapshot_size_bytes", countingReader.n).
+				Msg("session snapshot saved")
 			return snapshotKey, countingReader.n, nil
 		}
 
