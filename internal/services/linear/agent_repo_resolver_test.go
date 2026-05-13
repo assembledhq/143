@@ -107,6 +107,7 @@ func TestAgentRepoResolver_PriorityFallthrough(t *testing.T) {
 	t.Parallel()
 
 	t.Run("label override wins over everything else", func(t *testing.T) {
+		t.Parallel()
 		rig := newResolverRig(t)
 		labelRepo := models.Repository{ID: uuid.New(), FullName: "org/labelled"}
 		rig.repos.byFullName["org/labelled"] = labelRepo
@@ -127,6 +128,7 @@ func TestAgentRepoResolver_PriorityFallthrough(t *testing.T) {
 	})
 
 	t.Run("falls through to team+project mapping when label is absent", func(t *testing.T) {
+		t.Parallel()
 		rig := newResolverRig(t)
 		project := "proj_Y"
 		repoID := uuid.New()
@@ -145,6 +147,7 @@ func TestAgentRepoResolver_PriorityFallthrough(t *testing.T) {
 	})
 
 	t.Run("falls through to team default when no project mapping exists", func(t *testing.T) {
+		t.Parallel()
 		rig := newResolverRig(t)
 		repoID := uuid.New()
 		// projectID nil on the row => linear_project_id IS NULL =>
@@ -163,6 +166,7 @@ func TestAgentRepoResolver_PriorityFallthrough(t *testing.T) {
 	})
 
 	t.Run("falls through to org default when no mapping rows match", func(t *testing.T) {
+		t.Parallel()
 		rig := newResolverRig(t)
 		expectMappingMiss(t, rig.mock)
 		orgRepo := uuid.New()
@@ -180,6 +184,7 @@ func TestAgentRepoResolver_PriorityFallthrough(t *testing.T) {
 	})
 
 	t.Run("returns ErrAgentRepoUnmapped when every tier misses", func(t *testing.T) {
+		t.Parallel()
 		rig := newResolverRig(t)
 		expectMappingMiss(t, rig.mock)
 		// settings.DefaultRepoID stays nil -> org default also misses.
@@ -195,6 +200,7 @@ func TestAgentRepoResolver_PriorityFallthrough(t *testing.T) {
 	})
 
 	t.Run("unknown label falls through instead of erroring", func(t *testing.T) {
+		t.Parallel()
 		// Regression guard for the documented "label that points to a
 		// repo the org doesn't have is a user error, not a system error"
 		// branch in resolveLabelOverride.
