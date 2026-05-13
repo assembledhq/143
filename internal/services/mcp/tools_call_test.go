@@ -135,10 +135,7 @@ func (m *mockCITestInsights) GetTestResults(_ context.Context, ref integration.J
 	}, nil
 }
 
-func (m *mockCITestInsights) GetRecentFailures(_ context.Context, _, testName string, limit int) ([]integration.TestResult, error) {
-	if limit <= 0 {
-		limit = 5
-	}
+func (m *mockCITestInsights) GetRecentFailures(_ context.Context, _, testName string, _ int) ([]integration.TestResult, error) {
 	return []integration.TestResult{
 		{TestName: testName, Result: "failure", Message: "failure A"},
 		{TestName: testName, Result: "failure", Message: "failure B"},
