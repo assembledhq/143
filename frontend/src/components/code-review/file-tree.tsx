@@ -1,6 +1,6 @@
 "use client";
 
-import { memo, useMemo, useState } from "react";
+import { memo, useCallback, useMemo, useState } from "react";
 import { ChevronDown, ChevronRight, Search, FileText } from "lucide-react";
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
@@ -190,7 +190,7 @@ const TreeDirectory = memo(function TreeDirectory({
   );
 });
 
-export function FileTree({
+export const FileTree = memo(function FileTree({
   files,
   activeFileIndex,
   onFileSelect,
@@ -234,12 +234,12 @@ export function FileTree({
   const filteredActiveIndex = filteredIndexMap.get(activeFileIndex) ?? activeFileIndex;
 
   // When a file is selected in the filtered tree, convert back to original index.
-  const handleFileSelect = (filteredIdx: number) => {
+  const handleFileSelect = useCallback((filteredIdx: number) => {
     const file = filteredFiles[filteredIdx];
     if (!file) return;
     const origIdx = fileToOrigIndex.get(file) ?? -1;
     if (origIdx >= 0) onFileSelect(origIdx);
-  };
+  }, [fileToOrigIndex, filteredFiles, onFileSelect]);
 
   return (
     <div className="flex flex-col h-full">
@@ -284,4 +284,6 @@ export function FileTree({
       </div>
     </div>
   );
-}
+});
+
+FileTree.displayName = "FileTree";

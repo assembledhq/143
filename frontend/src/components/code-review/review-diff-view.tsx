@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useRef, useState } from "react";
 import { FileCode2 } from "lucide-react";
 import type { DiffFile } from "@/lib/diff-parser";
 import type { SessionReviewComment } from "@/lib/types";
@@ -40,7 +40,7 @@ interface ReviewDiffViewProps {
   onDiffSearchChange: (q: string) => void;
 }
 
-export function ReviewDiffView({
+export const ReviewDiffView = memo(function ReviewDiffView({
   sessionId,
   files,
   allFiles,
@@ -372,4 +372,6 @@ export function ReviewDiffView({
       <KeyboardHelpOverlay open={showKeyboardHelp} onClose={toggleShowHelp} />
     </div>
   );
-}
+});
+
+ReviewDiffView.displayName = "ReviewDiffView";
