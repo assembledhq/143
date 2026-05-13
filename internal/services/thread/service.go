@@ -110,6 +110,15 @@ type MessageStore interface {
 	ListByThread(ctx context.Context, orgID, threadID uuid.UUID) ([]models.SessionMessage, error)
 }
 
+// ThreadInboxStore defines the durable per-thread inbox abstraction.
+type ThreadInboxStore interface {
+	Create(ctx context.Context, entry *models.ThreadInboxEntry) error
+}
+
+type ThreadRuntimeStore interface {
+	GetByThread(ctx context.Context, orgID, threadID uuid.UUID) (models.ThreadRuntime, error)
+}
+
 // LogStore defines the log DB operations needed by the thread service.
 type LogStore interface {
 	ListByThread(ctx context.Context, orgID, threadID uuid.UUID) ([]models.SessionLog, error)
@@ -189,6 +198,8 @@ type Service struct {
 	threadStore        ThreadStore
 	sessionStore       SessionStore
 	messageStore       MessageStore
+	inboxStore         ThreadInboxStore
+	runtimeStore       ThreadRuntimeStore
 	logStore           LogStore
 	jobStore           JobStore
 	fileEvents         FileEventStore                // optional — enables overlap and attribution surfaces
@@ -197,6 +208,18 @@ type Service struct {
 	reviewCommentStore *db.SessionReviewCommentStore // optional — required for SendMessage with ResolveReviewCommentIDs
 	questionStore      QuestionStore                 // optional — required to answer pending questions on awaiting_input resume
 	logger             zerolog.Logger
+}
+
+// SetInboxStore wires the durable per-thread inbox. In production this should
+// be paired with SetReviewCommentResolver(pool, ...) so message + inbox writes
+// share a transaction; when txStarter is absent the service falls back to a
+// best-effort append after message creation.
+func (s *Service) SetInboxStore(store ThreadInboxStore) {
+	s.inboxStore = store
+}
+
+func (s *Service) SetRuntimeStore(store ThreadRuntimeStore) {
+	s.runtimeStore = store
 }
 
 // NewService creates a new thread service. fileEvents and canceller are
@@ -244,6 +267,13 @@ func (s *Service) SetCanceller(c ThreadCanceller) {
 func (s *Service) SetReviewCommentResolver(txStarter db.TxStarter, store *db.SessionReviewCommentStore) {
 	s.txStarter = txStarter
 	s.reviewCommentStore = store
+}
+
+// SetTxStarter wires transactional support for thread message writes even
+// when review-comment resolution is not configured. This lets the common
+// message+inbox path preserve atomicity without requiring the comment store.
+func (s *Service) SetTxStarter(txStarter db.TxStarter) {
+	s.txStarter = txStarter
 }
 
 // SetQuestionStore wires the optional clarifying-question store. When wired,
@@ -562,10 +592,14 @@ func (s *Service) SendMessage(ctx context.Context, input SendMessageInput) (*Sen
 		resolvedComments []models.SessionReviewComment
 		answeredQuestion *models.SessionQuestion
 	)
-	if resolvingComments || answerPendingQuestion {
+	useTransactionalMessageWrite := s.shouldUseTransactionalMessageWrite(msg, resolvingComments, answerPendingQuestion)
+	if useTransactionalMessageWrite {
 		resolvedComments, answeredQuestion, err = s.createMessageInTx(ctx, msg, input, claimedSession, answerPendingQuestion)
 	} else {
 		err = s.messageStore.Create(ctx, msg)
+		if err == nil {
+			err = s.appendInboxEntry(ctx, msg)
+		}
 	}
 	if err != nil {
 		if !queueOnly {
@@ -592,6 +626,7 @@ func (s *Service) SendMessage(ctx context.Context, input SendMessageInput) (*Sen
 				Str("thread_id", input.ThreadID.String()).
 				Msg("failed to increment pending_message_count for queued message")
 		}
+		s.notifyLiveRuntime(ctx, input.OrgID, input.ThreadID)
 		return &SendMessageResult{
 			Message:          msg,
 			ResolvedComments: resolvedComments,
@@ -684,6 +719,7 @@ func (s *Service) queueMessageWaitingForSlot(ctx context.Context, input SendMess
 	if err := s.threadStore.IncrementPendingMessages(ctx, input.OrgID, input.ThreadID); err != nil {
 		return nil, fmt.Errorf("increment queued message count: %w", err)
 	}
+	s.notifyLiveRuntime(ctx, input.OrgID, input.ThreadID)
 	return &SendMessageResult{Message: msg, AnsweredQuestion: answeredQuestion}, nil
 }
 
@@ -718,15 +754,75 @@ func (s *Service) queueClaimedThreadBehindSibling(ctx context.Context, input Sen
 	if err := s.threadStore.IncrementPendingMessages(ctx, input.OrgID, input.ThreadID); err != nil {
 		return nil, fmt.Errorf("increment queued sibling message count: %w", err)
 	}
+	s.notifyLiveRuntime(ctx, input.OrgID, input.ThreadID)
 	return &SendMessageResult{Message: msg, AnsweredQuestion: answeredQuestion}, nil
 }
 
 func (s *Service) createQueuedMessage(ctx context.Context, msg *models.SessionMessage, input SendMessageInput, threadStatus models.ThreadStatus) (*models.SessionQuestion, error) {
-	if threadStatus != models.ThreadStatusAwaitingInput || input.UserID == nil || s.questionStore == nil {
-		return nil, s.messageStore.Create(ctx, msg)
+	answerPendingQuestion := threadStatus == models.ThreadStatusAwaitingInput && input.UserID != nil && s.questionStore != nil
+	if s.shouldUseTransactionalMessageWrite(msg, false, answerPendingQuestion) {
+		_, answeredQuestion, err := s.createMessageInTx(ctx, msg, input, models.Session{}, answerPendingQuestion)
+		return answeredQuestion, err
+	}
+	if !answerPendingQuestion {
+		if err := s.messageStore.Create(ctx, msg); err != nil {
+			return nil, err
+		}
+		return nil, s.appendInboxEntry(ctx, msg)
 	}
 	_, answeredQuestion, err := s.createMessageInTx(ctx, msg, input, models.Session{}, true)
 	return answeredQuestion, err
+}
+
+func (s *Service) shouldUseTransactionalMessageWrite(msg *models.SessionMessage, resolvingComments, answerPendingQuestion bool) bool {
+	if resolvingComments || answerPendingQuestion {
+		return true
+	}
+	return s.txStarter != nil && s.inboxStore != nil && msg != nil && msg.ThreadID != nil
+}
+
+func (s *Service) appendInboxEntry(ctx context.Context, msg *models.SessionMessage) error {
+	if s.inboxStore == nil || msg == nil || msg.ThreadID == nil {
+		return nil
+	}
+	entry := &models.ThreadInboxEntry{
+		OrgID:     msg.OrgID,
+		SessionID: msg.SessionID,
+		ThreadID:  *msg.ThreadID,
+		MessageID: msg.ID,
+		EntryType: models.ThreadInboxEntryTypeUserMessage,
+	}
+	if err := s.inboxStore.Create(ctx, entry); err != nil {
+		return fmt.Errorf("append thread inbox entry: %w", err)
+	}
+	return nil
+}
+
+func (s *Service) notifyLiveRuntime(ctx context.Context, orgID, threadID uuid.UUID) {
+	if s.runtimeStore == nil || s.jobStore == nil {
+		return
+	}
+	runtime, err := s.runtimeStore.GetByThread(ctx, orgID, threadID)
+	if err != nil {
+		return
+	}
+	if runtime.Status != models.ThreadRuntimeStatusLive || runtime.OwnerNodeID == "" || time.Now().UTC().After(runtime.LeaseExpiresAt) {
+		return
+	}
+	dedupeKey := "deliver_thread_inbox:" + threadID.String()
+	if _, err := s.jobStore.EnqueueWithOpts(ctx, orgID, db.EnqueueOpts{
+		Queue:     "agent",
+		JobType:   "deliver_thread_inbox",
+		Payload:   map[string]string{"org_id": orgID.String(), "thread_id": threadID.String()},
+		Priority:  5,
+		DedupeKey: &dedupeKey,
+		TargetNodeID: func() *string {
+			owner := runtime.OwnerNodeID
+			return &owner
+		}(),
+	}); err != nil {
+		s.logger.Debug().Err(err).Str("thread_id", threadID.String()).Msg("failed to notify live thread runtime")
+	}
 }
 
 func threadStatusCanQueue(status models.ThreadStatus) bool {
@@ -934,6 +1030,18 @@ func (s *Service) createMessageInTx(
 	txMessageStore := db.NewSessionMessageStore(tx)
 	if err := txMessageStore.Create(ctx, msg); err != nil {
 		return nil, nil, err
+	}
+	if s.inboxStore != nil && msg.ThreadID != nil {
+		txInboxStore := db.NewThreadInboxStore(tx)
+		if err := txInboxStore.Create(ctx, &models.ThreadInboxEntry{
+			OrgID:     msg.OrgID,
+			SessionID: msg.SessionID,
+			ThreadID:  *msg.ThreadID,
+			MessageID: msg.ID,
+			EntryType: models.ThreadInboxEntryTypeUserMessage,
+		}); err != nil {
+			return nil, nil, fmt.Errorf("append thread inbox entry: %w", err)
+		}
 	}
 
 	var resolved []models.SessionReviewComment

@@ -136,6 +136,29 @@ func TestWorker_Poll(t *testing.T) {
 			},
 		},
 		{
+			name: "worker node is exposed to handler context",
+			setupMock: func(t *testing.T, w *Worker, mock pgxmock.PgxPoolIface) {
+				t.Helper()
+
+				jobID := uuid.New()
+				lockToken := uuid.New()
+				orgID := uuid.New()
+				now := time.Now()
+
+				w.Register("node_context_job", func(ctx context.Context, jobType string, got json.RawMessage) error {
+					nodeID, ok := jobctx.WorkerNodeFromContext(ctx)
+					require.True(t, ok, "handler context should include the current worker node id")
+					require.Equal(t, "test-node", nodeID, "handler context should expose the current worker node id")
+					return nil
+				})
+
+				expectClaim(mock, jobID, orgID, "node_context_job", json.RawMessage(`{}`), now, lockToken)
+				mock.ExpectExec("UPDATE jobs\\s+SET status = 'succeeded'").
+					WithArgs(jobID, lockToken).
+					WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+			},
+		},
+		{
 			name: "unknown job type is marked failed behind the fencing token",
 			setupMock: func(t *testing.T, w *Worker, mock pgxmock.PgxPoolIface) {
 				t.Helper()

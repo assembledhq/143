@@ -192,6 +192,8 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	issueHandler := handlers.NewIssueHandler(issueStore)
 	sessionMessageStore := db.NewSessionMessageStore(pool)
 	sessionThreadStore := db.NewSessionThreadStore(pool)
+	threadInboxStore := db.NewThreadInboxStore(pool)
+	threadRuntimeStore := db.NewThreadRuntimeStore(pool)
 	sessionThreadFileEventStore := db.NewSessionThreadFileEventStore(pool)
 	sessionViewStore := db.NewSessionViewStore(pool)
 	sessionComposerHandler := handlers.NewSessionComposerHandler(repoStore, prService)
@@ -281,6 +283,8 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 		logger,
 	)
 	threadSvc.SetFileEventStore(sessionThreadFileEventStore)
+	threadSvc.SetInboxStore(threadInboxStore)
+	threadSvc.SetRuntimeStore(threadRuntimeStore)
 	if threadCanceller != nil {
 		threadSvc.SetCanceller(threadCanceller)
 	}

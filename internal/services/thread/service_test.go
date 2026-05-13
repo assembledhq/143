@@ -155,6 +155,30 @@ func (m *mockMessageStore) ListByThread(ctx context.Context, orgID, threadID uui
 	return nil, nil
 }
 
+type mockInboxStore struct {
+	createFn func(ctx context.Context, entry *models.ThreadInboxEntry) error
+	created  []*models.ThreadInboxEntry
+}
+
+func (m *mockInboxStore) Create(ctx context.Context, entry *models.ThreadInboxEntry) error {
+	m.created = append(m.created, entry)
+	if m.createFn != nil {
+		return m.createFn(ctx, entry)
+	}
+	return nil
+}
+
+type mockRuntimeStore struct {
+	getByThreadFn func(ctx context.Context, orgID, threadID uuid.UUID) (models.ThreadRuntime, error)
+}
+
+func (m *mockRuntimeStore) GetByThread(ctx context.Context, orgID, threadID uuid.UUID) (models.ThreadRuntime, error) {
+	if m.getByThreadFn != nil {
+		return m.getByThreadFn(ctx, orgID, threadID)
+	}
+	return models.ThreadRuntime{}, pgx.ErrNoRows
+}
+
 type mockLogStore struct {
 	listByThreadFn func(ctx context.Context, orgID, threadID uuid.UUID) ([]models.SessionLog, error)
 }
@@ -192,6 +216,7 @@ type testDeps struct {
 	threadStore  *mockThreadStore
 	sessionStore *mockSessionStore
 	messageStore *mockMessageStore
+	inboxStore   *mockInboxStore
 	logStore     *mockLogStore
 	jobStore     *mockJobStore
 }
@@ -202,11 +227,81 @@ func newTestService(t *testing.T) (*Service, *testDeps) {
 		threadStore:  &mockThreadStore{},
 		sessionStore: &mockSessionStore{},
 		messageStore: &mockMessageStore{},
+		inboxStore:   &mockInboxStore{},
 		logStore:     &mockLogStore{},
 		jobStore:     &mockJobStore{},
 	}
 	svc := NewService(deps.threadStore, deps.sessionStore, deps.messageStore, deps.logStore, deps.jobStore, zerolog.Nop())
 	return svc, deps
+}
+
+func TestService_NotifyLiveRuntime_AllowsMissingJobStore(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	threadID := uuid.New()
+	runtimeStore := &mockRuntimeStore{
+		getByThreadFn: func(_ context.Context, gotOrgID, gotThreadID uuid.UUID) (models.ThreadRuntime, error) {
+			require.Equal(t, orgID, gotOrgID, "notifyLiveRuntime should look up the runtime for the requested org")
+			require.Equal(t, threadID, gotThreadID, "notifyLiveRuntime should look up the runtime for the requested thread")
+			return models.ThreadRuntime{
+				ThreadID:       threadID,
+				OrgID:          orgID,
+				Status:         models.ThreadRuntimeStatusLive,
+				OwnerNodeID:    "worker-1",
+				LeaseExpiresAt: time.Now().UTC().Add(time.Minute),
+			}, nil
+		},
+	}
+	svc := NewService(&mockThreadStore{}, &mockSessionStore{}, &mockMessageStore{}, &mockLogStore{}, nil, zerolog.Nop())
+	svc.SetRuntimeStore(runtimeStore)
+
+	require.NotPanics(t, func() {
+		svc.notifyLiveRuntime(context.Background(), orgID, threadID)
+	}, "notifyLiveRuntime should no-op when live runtime notification has no job store")
+}
+
+func TestService_SendMessage_AppendsInboxEntryForAcceptedFollowUp(t *testing.T) {
+	t.Parallel()
+
+	svc, deps := newTestService(t)
+	svc.SetInboxStore(deps.inboxStore)
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	threadID := uuid.New()
+
+	deps.threadStore.claimIdleFn = func(_ context.Context, _, _, _ uuid.UUID) (models.SessionThread, error) {
+		return models.SessionThread{
+			ID:          threadID,
+			SessionID:   sessionID,
+			OrgID:       orgID,
+			Status:      models.ThreadStatusRunning,
+			CurrentTurn: 2,
+		}, nil
+	}
+	deps.sessionStore.claimIdleFn = func(_ context.Context, _, _ uuid.UUID) (models.Session, error) {
+		return models.Session{ID: sessionID, OrgID: orgID, Status: string(models.SessionStatusRunning)}, nil
+	}
+	deps.messageStore.createFn = func(_ context.Context, msg *models.SessionMessage) error {
+		msg.ID = 99
+		return nil
+	}
+	deps.jobStore.enqueueWithOptsFn = func(_ context.Context, _ uuid.UUID, opts db.EnqueueOpts) (uuid.UUID, error) {
+		return uuid.New(), nil
+	}
+
+	result, err := svc.SendMessage(context.Background(), SendMessageInput{
+		SessionID: sessionID,
+		OrgID:     orgID,
+		ThreadID:  threadID,
+		Message:   "please continue",
+	})
+	require.NoError(t, err, "SendMessage should not return an error")
+	require.NotNil(t, result, "SendMessage should return a result")
+	require.Len(t, deps.inboxStore.created, 1, "SendMessage should append exactly one durable inbox entry")
+	require.Equal(t, int64(99), deps.inboxStore.created[0].MessageID, "SendMessage should point the inbox entry at the created session message")
+	require.Equal(t, models.ThreadInboxEntryTypeUserMessage, deps.inboxStore.created[0].EntryType, "SendMessage should classify follow-ups as user_message inbox entries")
+	require.Equal(t, threadID, deps.inboxStore.created[0].ThreadID, "SendMessage should scope the inbox entry to the requested thread")
 }
 
 func TestService_CreateThread(t *testing.T) {
@@ -1866,6 +1961,78 @@ func TestService_SendMessage_ResolvesReviewComments(t *testing.T) {
 		require.True(t, result.ResolvedComments[0].Resolved)
 		require.Equal(t, 2, *result.ResolvedComments[0].ResolvedByPass, "pass should match session.CurrentTurn at send time")
 		require.NoError(t, mock.ExpectationsWereMet())
+	})
+
+	t.Run("writes message and inbox entry atomically when tx starter is configured", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err, "should create pgx mock")
+		defer mock.Close()
+
+		mock.ExpectBegin()
+		mock.ExpectQuery("INSERT INTO session_messages").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+				pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+				pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(int64(13), now))
+		mock.ExpectQuery("INSERT INTO thread_inbox_entries").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnRows(pgxmock.NewRows([]string{"id", "sequence_no", "delivery_state", "accepted_at"}).AddRow(uuid.New(), int64(4), string(models.ThreadInboxDeliveryStatePending), now))
+		mock.ExpectCommit()
+
+		svc, deps := newTestService(t)
+		primeClaim(deps)
+		svc.SetTxStarter(mock)
+		svc.SetInboxStore(deps.inboxStore)
+		deps.jobStore.enqueueWithOptsFn = func(_ context.Context, _ uuid.UUID, opts db.EnqueueOpts) (uuid.UUID, error) {
+			return uuid.New(), nil
+		}
+
+		result, err := svc.SendMessage(context.Background(), SendMessageInput{
+			SessionID: sessionID,
+			OrgID:     orgID,
+			ThreadID:  threadID,
+			Message:   "continue",
+		})
+		require.NoError(t, err, "thread send should succeed when message and inbox writes commit together")
+		require.NotNil(t, result, "thread send should return the created message")
+		require.Equal(t, int64(13), result.Message.ID, "thread send should return the committed message id")
+		require.NoError(t, mock.ExpectationsWereMet(), "message and inbox writes should happen in one transaction")
+	})
+
+	t.Run("rolls back message when inbox append fails inside tx", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err, "should create pgx mock")
+		defer mock.Close()
+
+		mock.ExpectBegin()
+		mock.ExpectQuery("INSERT INTO session_messages").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+				pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+				pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(int64(14), now))
+		mock.ExpectQuery("INSERT INTO thread_inbox_entries").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnError(fmt.Errorf("duplicate sequence"))
+		mock.ExpectRollback()
+
+		svc, deps := newTestService(t)
+		primeClaim(deps)
+		svc.SetTxStarter(mock)
+		svc.SetInboxStore(deps.inboxStore)
+
+		result, err := svc.SendMessage(context.Background(), SendMessageInput{
+			SessionID: sessionID,
+			OrgID:     orgID,
+			ThreadID:  threadID,
+			Message:   "continue",
+		})
+		require.Nil(t, result, "thread send should not return a result when the inbox append fails")
+		require.Error(t, err, "thread send should fail when the inbox append fails")
+		require.NoError(t, mock.ExpectationsWereMet(), "the message insert should be rolled back when the inbox append fails")
 	})
 
 	t.Run("answers latest pending question when resuming awaiting_input", func(t *testing.T) {

@@ -199,7 +199,28 @@ func (t *drainStubThreads) ClearPendingMessages(_ context.Context, _, threadID u
 	return nil
 }
 
-func newDrainOrchestrator(messages *drainStubMessages, sessions *drainStubSessions, jobs *drainStubJobs, threads *drainStubThreads) *Orchestrator {
+type drainStubThreadInbox struct {
+	sequenceByMessage map[int64]int64
+	countAfter        int
+	sequenceErr       error
+	countErr          error
+}
+
+func (s *drainStubThreadInbox) SequenceForMessage(_ context.Context, _ uuid.UUID, _ uuid.UUID, messageID int64) (int64, error) {
+	if s.sequenceErr != nil {
+		return 0, s.sequenceErr
+	}
+	return s.sequenceByMessage[messageID], nil
+}
+
+func (s *drainStubThreadInbox) CountUnackedAfter(context.Context, uuid.UUID, uuid.UUID, int64) (int, error) {
+	if s.countErr != nil {
+		return 0, s.countErr
+	}
+	return s.countAfter, nil
+}
+
+func newDrainOrchestrator(messages *drainStubMessages, sessions *drainStubSessions, jobs *drainStubJobs, threads *drainStubThreads, inbox *drainStubThreadInbox) *Orchestrator {
 	o := &Orchestrator{
 		sessionMessages: messages,
 		sessions:        sessions,
@@ -208,6 +229,9 @@ func newDrainOrchestrator(messages *drainStubMessages, sessions *drainStubSessio
 	}
 	if threads != nil {
 		o.sessionThreads = threads
+	}
+	if inbox != nil {
+		o.threadInbox = inbox
 	}
 	return o
 }
@@ -224,7 +248,7 @@ func TestDrainQueuedMessages_NoNewerMessages(t *testing.T) {
 	}}
 	sessions := &drainStubSessions{session: models.Session{Status: "idle"}}
 	jobs := &drainStubJobs{}
-	o := newDrainOrchestrator(messages, sessions, jobs, nil)
+	o := newDrainOrchestrator(messages, sessions, jobs, nil, nil)
 
 	o.drainQueuedMessages(context.Background(), &models.Session{ID: sessionID, OrgID: orgID}, processed, nil, zerolog.Nop())
 
@@ -244,7 +268,7 @@ func TestDrainQueuedMessages_EnqueuesForSessionScope(t *testing.T) {
 	}}
 	sessions := &drainStubSessions{session: models.Session{Status: "idle"}}
 	jobs := &drainStubJobs{}
-	o := newDrainOrchestrator(messages, sessions, jobs, nil)
+	o := newDrainOrchestrator(messages, sessions, jobs, nil, nil)
 
 	o.drainQueuedMessages(context.Background(), &models.Session{ID: sessionID, OrgID: orgID}, processed, nil, zerolog.Nop())
 
@@ -276,7 +300,7 @@ func TestDrainQueuedMessages_ThreadScopeIgnoresOtherThreads(t *testing.T) {
 	sessions := &drainStubSessions{session: models.Session{Status: "idle"}}
 	jobs := &drainStubJobs{}
 	threads := &drainStubThreads{}
-	o := newDrainOrchestrator(messages, sessions, jobs, threads)
+	o := newDrainOrchestrator(messages, sessions, jobs, threads, nil)
 
 	o.drainQueuedMessages(context.Background(), &models.Session{ID: sessionID, OrgID: orgID}, processed, &threadA, zerolog.Nop())
 
@@ -299,7 +323,11 @@ func TestDrainQueuedMessages_ThreadScopeClearsAndEnqueues(t *testing.T) {
 	sessions := &drainStubSessions{session: models.Session{Status: "idle"}}
 	jobs := &drainStubJobs{}
 	threads := &drainStubThreads{}
-	o := newDrainOrchestrator(messages, sessions, jobs, threads)
+	inbox := &drainStubThreadInbox{
+		sequenceByMessage: map[int64]int64{5: 10},
+		countAfter:        1,
+	}
+	o := newDrainOrchestrator(messages, sessions, jobs, threads, inbox)
 
 	o.drainQueuedMessages(context.Background(), &models.Session{ID: sessionID, OrgID: orgID}, processed, &threadA, zerolog.Nop())
 
@@ -322,7 +350,7 @@ func TestDrainQueuedMessages_SkipsTerminalSessionStatus(t *testing.T) {
 	}}
 	sessions := &drainStubSessions{session: models.Session{Status: "failed"}}
 	jobs := &drainStubJobs{}
-	o := newDrainOrchestrator(messages, sessions, jobs, nil)
+	o := newDrainOrchestrator(messages, sessions, jobs, nil, nil)
 
 	o.drainQueuedMessages(context.Background(), &models.Session{ID: sessionID, OrgID: orgID}, processed, nil, zerolog.Nop())
 
@@ -333,9 +361,32 @@ func TestDrainQueuedMessages_NilProcessedNoOp(t *testing.T) {
 	t.Parallel()
 
 	jobs := &drainStubJobs{}
-	o := newDrainOrchestrator(&drainStubMessages{}, &drainStubSessions{}, jobs, nil)
+	o := newDrainOrchestrator(&drainStubMessages{}, &drainStubSessions{}, jobs, nil, nil)
 
 	o.drainQueuedMessages(context.Background(), &models.Session{}, nil, nil, zerolog.Nop())
 
 	require.Empty(t, jobs.enqueues, "drain must no-op when no message was processed")
+}
+
+func TestDrainQueuedMessages_ThreadScopeSkipsCurrentUnackedMessage(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	threadID := uuid.New()
+	processed := &models.SessionMessage{ID: 5, OrgID: orgID, SessionID: sessionID, Role: models.MessageRoleUser, ThreadID: &threadID}
+
+	sessions := &drainStubSessions{session: models.Session{Status: "idle"}}
+	jobs := &drainStubJobs{}
+	threads := &drainStubThreads{}
+	inbox := &drainStubThreadInbox{
+		sequenceByMessage: map[int64]int64{5: 10},
+		countAfter:        0,
+	}
+	o := newDrainOrchestrator(&drainStubMessages{}, sessions, jobs, threads, inbox)
+
+	o.drainQueuedMessages(context.Background(), &models.Session{ID: sessionID, OrgID: orgID}, processed, &threadID, zerolog.Nop())
+
+	require.Empty(t, jobs.enqueues, "thread-scope drain must not re-enqueue when only the currently processing inbox entry is still unacked")
+	require.Empty(t, threads.clearedThreadIDs, "thread-scope drain must not clear pending counts when no later inbox entries exist")
 }

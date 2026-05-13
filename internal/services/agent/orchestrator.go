@@ -349,6 +349,11 @@ type SessionThreadStore interface {
 	ClearPendingMessages(ctx context.Context, orgID, threadID uuid.UUID) error
 }
 
+type ThreadInboxCounter interface {
+	SequenceForMessage(ctx context.Context, orgID, threadID uuid.UUID, messageID int64) (int64, error)
+	CountUnackedAfter(ctx context.Context, orgID, threadID uuid.UUID, afterSequence int64) (int, error)
+}
+
 type SessionIssueLinkStore interface {
 	ListBySession(ctx context.Context, orgID, sessionID uuid.UUID) ([]models.SessionIssueLink, error)
 }
@@ -442,6 +447,7 @@ type Orchestrator struct {
 	agentRunQuestions SessionQuestionStore
 	sessionMessages   SessionMessageStore
 	sessionThreads    SessionThreadStore
+	threadInbox       ThreadInboxCounter
 	sessionIssueLinks SessionIssueLinkStore
 	issueSnapshots    SessionIssueSnapshotStore
 	decisionLog       DecisionLogStore
@@ -617,6 +623,7 @@ type OrchestratorConfig struct {
 	SessionQuestions  SessionQuestionStore
 	SessionMessages   SessionMessageStore
 	SessionThreads    SessionThreadStore
+	ThreadInbox       ThreadInboxCounter
 	SessionIssueLinks SessionIssueLinkStore
 	IssueSnapshots    SessionIssueSnapshotStore
 	DecisionLog       DecisionLogStore
@@ -699,6 +706,7 @@ func NewOrchestrator(cfg OrchestratorConfig) *Orchestrator {
 		agentRunQuestions: cfg.SessionQuestions,
 		sessionMessages:   cfg.SessionMessages,
 		sessionThreads:    cfg.SessionThreads,
+		threadInbox:       cfg.ThreadInbox,
 		sessionIssueLinks: cfg.SessionIssueLinks,
 		issueSnapshots:    cfg.IssueSnapshots,
 		decisionLog:       cfg.DecisionLog,
@@ -3226,6 +3234,45 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 // queued message anyway.
 func (o *Orchestrator) drainQueuedMessages(ctx context.Context, session *models.Session, processed *models.SessionMessage, threadID *uuid.UUID, log zerolog.Logger) {
 	if processed == nil || o.jobs == nil || o.sessionMessages == nil {
+		return
+	}
+	if threadID != nil && o.threadInbox != nil {
+		processedSequence, err := o.threadInbox.SequenceForMessage(ctx, session.OrgID, *threadID, processed.ID)
+		if err != nil {
+			log.Warn().Err(err).Str("thread_id", threadID.String()).Int64("message_id", processed.ID).Msg("failed to look up processed thread inbox sequence for post-turn drain")
+			return
+		}
+		hasQueuedCount, err := o.threadInbox.CountUnackedAfter(ctx, session.OrgID, *threadID, processedSequence)
+		if err != nil {
+			log.Warn().Err(err).Str("thread_id", threadID.String()).Int64("after_sequence", processedSequence).Msg("failed to count queued thread inbox entries for post-turn drain")
+			return
+		}
+		if hasQueuedCount == 0 {
+			return
+		}
+
+		current, getErr := o.sessions.GetByID(ctx, session.OrgID, session.ID)
+		if getErr != nil {
+			log.Warn().Err(getErr).Msg("failed to fetch session for queue drain status check")
+			return
+		}
+		if !drainAcceptableStatus(current.Status) {
+			return
+		}
+		if o.sessionThreads != nil {
+			if err := o.sessionThreads.ClearPendingMessages(ctx, session.OrgID, *threadID); err != nil {
+				log.Warn().Err(err).Str("thread_id", threadID.String()).Msg("failed to clear pending_message_count after drain")
+			}
+		}
+		payload := map[string]string{
+			"session_id": session.ID.String(),
+			"org_id":     session.OrgID.String(),
+			"thread_id":  threadID.String(),
+		}
+		dedupeKey := continueSessionDrainDedupeKey(session.ID, processed.ID)
+		if _, err := o.jobs.EnqueueWithTarget(ctx, session.OrgID, "agent", "continue_session", payload, 5, &dedupeKey, models.SessionWorkerTarget(session)); err != nil {
+			log.Warn().Err(err).Msg("failed to enqueue continue_session for queued thread inbox messages")
+		}
 		return
 	}
 	messages, err := o.sessionMessages.ListBySession(ctx, session.OrgID, session.ID)

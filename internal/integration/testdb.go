@@ -130,6 +130,8 @@ var truncatedTables = []string{
 	"session_messages",
 	"session_logs",
 	"session_questions",
+	"thread_inbox_entries",
+	"thread_runtimes",
 	"session_threads",
 	"session_issue_links",
 	"session_turn_issue_snapshots",

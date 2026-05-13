@@ -60,6 +60,9 @@ func RegisterHandlers(w *Worker, stores *Stores, services *Services, retentionCf
 	if hasServiceHandlersDependencies(services) {
 		w.Register("run_agent", newRunAgentHandler(stores, services, logger))
 		w.Register("continue_session", newContinueSessionHandler(stores, services, logger))
+		if stores.ThreadInbox != nil && stores.ThreadRuntimes != nil {
+			w.Register("deliver_thread_inbox", newDeliverThreadInboxHandler(stores, logger))
+		}
 		w.Register("open_pr", newOpenPRHandler(stores, services, logger))
 		w.Register("push_pr_changes", newPushPRChangesHandler(stores, services, logger))
 		w.Register("sync_pull_request_state", newSyncPullRequestStateHandler(services, logger))
@@ -127,6 +130,8 @@ type Stores struct {
 	Repositories        *db.RepositoryStore             // nil-safe: needed for eval repo lookup
 	SessionMessages     *db.SessionMessageStore         // nil-safe: needed for title regeneration
 	SessionThreads      *db.SessionThreadStore          // nil-safe: needed for thread-scoped continuation status
+	ThreadInbox         *db.ThreadInboxStore            // nil-safe: durable thread follow-up inbox
+	ThreadRuntimes      *db.ThreadRuntimeStore          // nil-safe: durable live-thread ownership registry
 	ThreadFileEvents    *db.SessionThreadFileEventStore // nil-safe: tab-level file write attribution
 	IssueSnapshots      *db.SessionTurnIssueSnapshotStore
 	Automations         *db.AutomationStore       // nil-safe: automations feature disabled if nil
@@ -196,6 +201,50 @@ type Services struct {
 	// is disabled (interval <= 0 in config) or the provider can't report
 	// stats (e.g. a non-Docker provider in the future).
 	RuntimeSampler *agent.RuntimeSampler
+}
+
+func newDeliverThreadInboxHandler(stores *Stores, logger zerolog.Logger) JobHandler {
+	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
+		var input struct {
+			OrgID    string `json:"org_id"`
+			ThreadID string `json:"thread_id"`
+		}
+		if err := json.Unmarshal(payload, &input); err != nil {
+			return fmt.Errorf("unmarshal deliver_thread_inbox payload: %w", err)
+		}
+		orgID, err := uuid.Parse(input.OrgID)
+		if err != nil {
+			return fmt.Errorf("parse org ID: %w", err)
+		}
+		threadID, err := uuid.Parse(input.ThreadID)
+		if err != nil {
+			return fmt.Errorf("parse thread ID: %w", err)
+		}
+		runtime, err := stores.ThreadRuntimes.GetByThread(ctx, orgID, threadID)
+		if err != nil {
+			return nil
+		}
+		if runtime.Status != models.ThreadRuntimeStatusLive || runtime.OwnerNodeID == "" || time.Now().UTC().After(runtime.LeaseExpiresAt) {
+			return nil
+		}
+		entries, err := stores.ThreadInbox.ListPendingAfter(ctx, orgID, threadID, runtime.LastDeliveredSequence, 100)
+		if err != nil {
+			return fmt.Errorf("list pending thread inbox entries: %w", err)
+		}
+		var maxDelivered int64
+		for _, entry := range entries {
+			if err := stores.ThreadInbox.MarkDelivered(ctx, orgID, threadID, entry.SequenceNo, runtime.OwnerNodeID); err != nil {
+				return fmt.Errorf("mark thread inbox entry delivered: %w", err)
+			}
+			maxDelivered = entry.SequenceNo
+		}
+		if maxDelivered > 0 {
+			if err := stores.ThreadRuntimes.AdvanceCursors(ctx, orgID, threadID, runtime.OwnerNodeID, runtime.LeaseToken, maxDelivered, runtime.LastAckedSequence); err != nil {
+				logger.Debug().Err(err).Str("thread_id", threadID.String()).Msg("failed to advance thread runtime delivery cursor")
+			}
+		}
+		return nil
+	}
 }
 
 type orchestratorService interface {
@@ -1073,6 +1122,8 @@ func newRunAgentHandler(stores *Stores, services *Services, logger zerolog.Logge
 // continue_session handler continues a multi-turn session with a follow-up message.
 func newContinueSessionHandler(stores *Stores, services *Services, logger zerolog.Logger) JobHandler {
 	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
+		const threadRuntimeLeaseTTL = 30 * time.Second
+
 		var input struct {
 			SessionID string `json:"session_id"`
 			OrgID     string `json:"org_id"`
@@ -1116,8 +1167,12 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 		var threadID uuid.UUID
 		var threadTurnBefore int
 		var hasThread bool
+		var preRunAckSequence int64
 		var continueOpts *agent.ContinueSessionOptions
 		var resultAgentSessionID string
+		var runtimeLeaseToken uuid.UUID
+		var runtimeOwnerNodeID string
+		var runtimeLeaseActive bool
 		// Captured by the OnTurnComplete callback so the post-success block
 		// below can persist per-thread result metadata (diff, summary,
 		// confidence) onto the thread row. Stays nil when the orchestrator
@@ -1168,6 +1223,76 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 						}
 						emitThreadAttribution(ctx, stores, orgID, sessionID, threadIDLocal, threadTurnBefore+1, result.Diff, result.TokenUsage.TotalCostUSD, logger)
 					},
+				}
+
+				if stores.ThreadInbox != nil && stores.ThreadRuntimes != nil {
+					if nodeID, ok := jobctx.WorkerNodeFromContext(ctx); ok {
+						runtimeOwnerNodeID = nodeID
+					} else if session.WorkerNodeID != nil && *session.WorkerNodeID != "" {
+						runtimeOwnerNodeID = *session.WorkerNodeID
+					}
+				}
+				if stores.ThreadInbox != nil && stores.ThreadRuntimes != nil && runtimeOwnerNodeID != "" {
+					existing, getErr := stores.ThreadRuntimes.GetByThread(ctx, orgID, threadID)
+					if getErr != nil {
+						existing = models.ThreadRuntime{}
+					}
+					runtimeLeaseToken = uuid.New()
+					runtime := &models.ThreadRuntime{
+						ThreadID:              threadID,
+						OrgID:                 orgID,
+						SessionID:             sessionID,
+						RuntimeID:             uuid.NewString(),
+						OwnerNodeID:           runtimeOwnerNodeID,
+						LeaseToken:            runtimeLeaseToken,
+						LeaseExpiresAt:        time.Now().UTC().Add(threadRuntimeLeaseTTL),
+						Status:                models.ThreadRuntimeStatusLive,
+						SandboxID:             session.ContainerID,
+						AgentType:             thread.AgentType,
+						Model:                 thread.ModelOverride,
+						LastDeliveredSequence: existing.LastDeliveredSequence,
+						LastAckedSequence:     existing.LastAckedSequence,
+					}
+					if upsertErr := stores.ThreadRuntimes.Upsert(ctx, runtime); upsertErr != nil {
+						logger.Warn().Err(upsertErr).Str("thread_id", threadID.String()).Msg("failed to upsert thread runtime row")
+					} else {
+						runtimeLeaseToken = runtime.LeaseToken
+						runtimeLeaseActive = true
+						entries, listErr := stores.ThreadInbox.ListPendingAfter(ctx, orgID, threadID, runtime.LastAckedSequence, 100)
+						if listErr != nil {
+							logger.Warn().Err(listErr).Str("thread_id", threadID.String()).Msg("failed to list pre-run thread inbox entries")
+						} else {
+							for _, entry := range entries {
+								if markErr := stores.ThreadInbox.MarkDelivered(ctx, orgID, threadID, entry.SequenceNo, runtimeOwnerNodeID); markErr != nil {
+									logger.Warn().Err(markErr).Str("thread_id", threadID.String()).Int64("sequence_no", entry.SequenceNo).Msg("failed to mark pre-run thread inbox entry delivered")
+									continue
+								}
+								preRunAckSequence = entry.SequenceNo
+							}
+							if preRunAckSequence > 0 {
+								if advanceErr := stores.ThreadRuntimes.AdvanceCursors(ctx, orgID, threadID, runtimeOwnerNodeID, runtimeLeaseToken, preRunAckSequence, runtime.LastAckedSequence); advanceErr != nil {
+									logger.Debug().Err(advanceErr).Str("thread_id", threadID.String()).Msg("failed to advance pre-run thread runtime cursor")
+								}
+							}
+						}
+
+						heartbeatCtx, heartbeatCancel := context.WithCancel(ctx)
+						defer heartbeatCancel()
+						go func() {
+							ticker := time.NewTicker(threadRuntimeLeaseTTL / 3)
+							defer ticker.Stop()
+							for {
+								select {
+								case <-heartbeatCtx.Done():
+									return
+								case <-ticker.C:
+									if err := stores.ThreadRuntimes.Heartbeat(context.WithoutCancel(heartbeatCtx), orgID, threadID, runtimeOwnerNodeID, runtimeLeaseToken, time.Now().UTC().Add(threadRuntimeLeaseTTL)); err != nil {
+										logger.Debug().Err(err).Str("thread_id", threadID.String()).Msg("failed to heartbeat thread runtime lease")
+									}
+								}
+							}
+						}()
+					}
 				}
 			}
 		}
@@ -1246,10 +1371,29 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 				}
 				cleanupCancel()
 			}
+			if runtimeLeaseActive && stores.ThreadRuntimes != nil {
+				status := models.ThreadRuntimeStatusLost
+				if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+					status = models.ThreadRuntimeStatusDraining
+				}
+				if closeErr := stores.ThreadRuntimes.Close(context.WithoutCancel(ctx), orgID, threadID, runtimeOwnerNodeID, runtimeLeaseToken, status); closeErr != nil {
+					logger.Debug().Err(closeErr).Str("thread_id", threadID.String()).Msg("failed to close thread runtime row after continuation failure")
+				}
+			}
 			return err
 		}
 
 		if hasThread {
+			if runtimeLeaseActive && stores.ThreadInbox != nil && preRunAckSequence > 0 {
+				if err := stores.ThreadInbox.MarkAckedThrough(ctx, orgID, threadID, preRunAckSequence, runtimeOwnerNodeID); err != nil {
+					logger.Warn().Err(err).Str("thread_id", threadID.String()).Int64("sequence_no", preRunAckSequence).Msg("failed to ack thread inbox entries after turn completion")
+				}
+			}
+			if runtimeLeaseActive && stores.ThreadRuntimes != nil {
+				if err := stores.ThreadRuntimes.AdvanceCursors(ctx, orgID, threadID, runtimeOwnerNodeID, runtimeLeaseToken, preRunAckSequence, preRunAckSequence); err != nil {
+					logger.Debug().Err(err).Str("thread_id", threadID.String()).Msg("failed to advance acked thread runtime cursor")
+				}
+			}
 			// The user message was inserted at thread.CurrentTurn + 1, so the
 			// thread's new current_turn is the same value once the assistant
 			// turn completes. The session's CurrentTurn is independent — it
@@ -1286,6 +1430,11 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 						Str("session_id", sessionID.String()).
 						Str("thread_id", threadID.String()).
 						Msg("failed to mark session thread turn complete")
+				}
+			}
+			if runtimeLeaseActive && stores.ThreadRuntimes != nil {
+				if err := stores.ThreadRuntimes.Close(ctx, orgID, threadID, runtimeOwnerNodeID, runtimeLeaseToken, models.ThreadRuntimeStatusClosed); err != nil {
+					logger.Debug().Err(err).Str("thread_id", threadID.String()).Msg("failed to close thread runtime row after turn completion")
 				}
 			}
 		}
