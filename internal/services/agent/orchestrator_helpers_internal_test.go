@@ -3,6 +3,7 @@ package agent
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"sync/atomic"
@@ -774,6 +775,44 @@ func TestSnapshotSessionOnTurnSuccess_SnapshotsWhenAgentExitedClean(t *testing.T
 	require.NotNil(t, session.SnapshotKey)
 	require.Equal(t, key, *session.SnapshotKey)
 	require.Equal(t, int64(len("archive-bytes")), size)
+}
+
+func TestSnapshotSessionOnTurnSuccess_LogsSnapshotSize(t *testing.T) {
+	t.Parallel()
+
+	provider := &snapshotSessionStubProvider{
+		snapshotFn: func(ctx context.Context, sb *Sandbox) (io.ReadCloser, error) {
+			return io.NopCloser(bytes.NewReader([]byte("archive-bytes"))), nil
+		},
+	}
+	store := &snapshotSessionRecordingStore{}
+	var logs bytes.Buffer
+	o := &Orchestrator{
+		provider:  provider,
+		snapshots: store,
+		logger:    zerolog.New(&logs),
+	}
+
+	session := &models.Session{ID: uuid.New(), OrgID: uuid.New()}
+	result := &AgentResult{ExitCode: 0}
+
+	key, size, err := o.snapshotSessionOnTurnSuccess(context.Background(), session, &Sandbox{ID: "sandbox-1"}, result, zerolog.Nop())
+	require.NoError(t, err, "snapshotSessionOnTurnSuccess should save the clean snapshot")
+	require.Equal(t, int64(len("archive-bytes")), size, "snapshotSessionOnTurnSuccess should report the exact archive size")
+
+	var event struct {
+		Message           string `json:"message"`
+		SessionID         string `json:"session_id"`
+		OrgID             string `json:"org_id"`
+		SnapshotKey       string `json:"snapshot_key"`
+		SnapshotSizeBytes int64  `json:"snapshot_size_bytes"`
+	}
+	require.NoError(t, json.Unmarshal(bytes.TrimSpace(logs.Bytes()), &event), "snapshot success log should be valid JSON")
+	require.Equal(t, "session snapshot saved", event.Message, "snapshot success log should use the dashboard event name")
+	require.Equal(t, session.ID.String(), event.SessionID, "snapshot success log should include the session id")
+	require.Equal(t, session.OrgID.String(), event.OrgID, "snapshot success log should include the org id")
+	require.Equal(t, key, event.SnapshotKey, "snapshot success log should include the saved object key")
+	require.Equal(t, size, event.SnapshotSizeBytes, "snapshot success log should expose the exact byte count for Grafana")
 }
 
 func TestSnapshotSessionOnTurnSuccess_RetriesGitPackChurnSnapshotFailures(t *testing.T) {
