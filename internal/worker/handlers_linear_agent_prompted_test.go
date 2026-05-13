@@ -108,7 +108,7 @@ func TestPromptedLookupMissRetriesForOutOfOrderCreated(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "handler should only lookup the agent session before retrying")
 }
 
-func TestPromptedRunningSessionAppendsWithoutContinuationJob(t *testing.T) {
+func TestPromptedRunningSessionAppendsUnderSessionLockWithoutContinuationJob(t *testing.T) {
 	t.Parallel()
 
 	mock, err := pgxmock.NewPool()
@@ -142,9 +142,15 @@ func TestPromptedRunningSessionAppendsWithoutContinuationJob(t *testing.T) {
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "org_id", "status", "current_turn"}).
 			AddRow(sessionID, orgID, string(models.SessionStatusRunning), 3))
+	mock.ExpectBegin()
+	mock.ExpectQuery(`(?s)SELECT\s+id, org_id, status, current_turn\s+FROM sessions.*FOR UPDATE`).
+		WithArgs(sessionID, orgID).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "org_id", "status", "current_turn"}).
+			AddRow(sessionID, orgID, string(models.SessionStatusRunning), 3))
 	mock.ExpectQuery("INSERT INTO session_messages").
 		WithArgs(sessionID, orgID, pgxmock.AnyArg(), pgxmock.AnyArg(), 4, models.MessageRoleUser, pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(int64(42), now))
+	mock.ExpectCommit()
 
 	deps := LinearAgentEventHandlerDeps{
 		Stores: &Stores{
@@ -160,8 +166,8 @@ func TestPromptedRunningSessionAppendsWithoutContinuationJob(t *testing.T) {
 		OrgID:                orgID.String(),
 		LinearAgentSessionID: "as_running",
 	}, zerolog.Nop())
-	require.NoError(t, err, "running-session prompted comments should append without trying to enqueue another continuation")
-	require.NoError(t, mock.ExpectationsWereMet(), "running-session fast path should create one message and no job")
+	require.NoError(t, err, "running-session prompted comments should append under a session lock without trying to enqueue another continuation")
+	require.NoError(t, mock.ExpectationsWereMet(), "running-session fast path should create one message transactionally and no job")
 }
 
 func TestPromptedRunningSessionAppendsWhenRevisionPromptsDisabled(t *testing.T) {
@@ -199,9 +205,15 @@ func TestPromptedRunningSessionAppendsWhenRevisionPromptsDisabled(t *testing.T) 
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "org_id", "status", "current_turn"}).
 			AddRow(sessionID, orgID, string(models.SessionStatusRunning), 5))
+	mock.ExpectBegin()
+	mock.ExpectQuery(`(?s)SELECT\s+id, org_id, status, current_turn\s+FROM sessions.*FOR UPDATE`).
+		WithArgs(sessionID, orgID).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "org_id", "status", "current_turn"}).
+			AddRow(sessionID, orgID, string(models.SessionStatusRunning), 5))
 	mock.ExpectQuery("INSERT INTO session_messages").
 		WithArgs(sessionID, orgID, pgxmock.AnyArg(), pgxmock.AnyArg(), 6, models.MessageRoleUser, pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(int64(43), now))
+	mock.ExpectCommit()
 
 	deps := LinearAgentEventHandlerDeps{
 		Stores: &Stores{
@@ -223,6 +235,67 @@ func TestPromptedRunningSessionAppendsWhenRevisionPromptsDisabled(t *testing.T) 
 	}, zerolog.Nop())
 	require.NoError(t, err, "revision-disabled settings should not block comments while the session is still running")
 	require.NoError(t, mock.ExpectationsWereMet(), "handler should check running append state before applying the revision-disabled terminal response")
+}
+
+func TestPromptedRunningSessionRetriesWhenTurnCompletesBeforeAppend(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "test should create pgx mock")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	rowID := uuid.New()
+	sessionID := uuid.New()
+	now := time.Now().UTC()
+
+	mock.ExpectQuery("SELECT id, org_id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "org_id", "integration_id", "linear_agent_session_id",
+			"linear_issue_id", "linear_issue_identifier",
+			"linear_app_user_id", "linear_creator_user_id",
+			"session_id", "state", "last_event_received_at",
+			"created_at", "updated_at",
+		}).AddRow(
+			rowID, orgID, uuid.New(), "as_race",
+			"iss_1", "ACS-1",
+			"", "",
+			&sessionID, "in_progress", &now,
+			now, now,
+		))
+	mock.ExpectQuery("(?s)UPDATE sessions.*status = 'idle'").
+		WithArgs(sessionID, orgID).
+		WillReturnError(pgx.ErrNoRows)
+	mock.ExpectQuery(`(?s)SELECT\s+id, org_id, status, current_turn`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "org_id", "status", "current_turn"}).
+			AddRow(sessionID, orgID, string(models.SessionStatusRunning), 3))
+	mock.ExpectBegin()
+	mock.ExpectQuery(`(?s)SELECT\s+id, org_id, status, current_turn\s+FROM sessions.*FOR UPDATE`).
+		WithArgs(sessionID, orgID).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "org_id", "status", "current_turn"}).
+			AddRow(sessionID, orgID, string(models.SessionStatusIdle), 4))
+	mock.ExpectRollback()
+
+	deps := LinearAgentEventHandlerDeps{
+		Stores: &Stores{
+			Sessions:        db.NewSessionStore(mock),
+			SessionMessages: db.NewSessionMessageStore(mock),
+			Jobs:            db.NewJobStore(mock),
+		},
+		Logger: zerolog.Nop(),
+	}
+	store := db.NewLinearAgentSessionStore(mock)
+	err = handleLinearAgentPrompted(context.Background(), deps, store, linearAgentEventPayload{
+		Action:               "prompted",
+		OrgID:                orgID.String(),
+		LinearAgentSessionID: "as_race",
+	}, zerolog.Nop())
+	var retryable *RetryableError
+	require.ErrorAs(t, err, &retryable, "prompted race should retry instead of inserting a message after the turn already went idle")
+	require.NotNil(t, retryable.RetryAfter, "running-to-idle race retry should use a short bounded delay")
+	require.NoError(t, mock.ExpectationsWereMet(), "handler should not insert a message or enqueue a job after the locked status is no longer running")
 }
 
 func TestPromptedTerminalSessionRespectsDisabledRevisionPrompts(t *testing.T) {

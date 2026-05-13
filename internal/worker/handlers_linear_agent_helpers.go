@@ -55,7 +55,10 @@ func upsertLinearIssueForAgent(ctx context.Context, stores *Stores, orgID uuid.U
 // writeAgentProviderState after Create) rather than on the session row,
 // because not all sessions are agent-triggered and we don't want to pay
 // schema cost on the hot sessions table for a provider-specific field.
-func buildAgentSession(orgID uuid.UUID, repo linear.AgentRepoResolveResult, issue *models.Issue, fetched *linear.FetchedIssue) *models.Session {
+func buildAgentSession(orgID uuid.UUID, repo linear.AgentRepoResolveResult, issue *models.Issue, fetched *linear.FetchedIssue, agentType models.AgentType) *models.Session {
+	if agentType == "" {
+		agentType = models.DefaultDefaultAgentType
+	}
 	primaryIssueID := issue.ID
 	repoID := repo.RepositoryID
 	identifier := fetched.Identifier
@@ -70,7 +73,7 @@ func buildAgentSession(orgID uuid.UUID, repo linear.AgentRepoResolveResult, issu
 	}
 	return &models.Session{
 		OrgID:                orgID,
-		AgentType:            models.AgentTypeCodex,
+		AgentType:            agentType,
 		Status:               string(models.SessionStatusPending),
 		Origin:               models.SessionOriginIssueTrigger,
 		Title:                &title,
@@ -90,6 +93,20 @@ func buildAgentSession(orgID uuid.UUID, repo linear.AgentRepoResolveResult, issu
 		ValidationPolicy: models.SessionValidationPolicyOnTurnComplete,
 		TargetBranch:     targetBranch,
 	}
+}
+
+func resolveLinearAgentSessionAgentType(ctx context.Context, deps LinearAgentEventHandlerDeps, orgID uuid.UUID) (models.AgentType, error) {
+	if deps.OrgSettingsLoader == nil {
+		return models.DefaultDefaultAgentType, nil
+	}
+	settings, err := deps.OrgSettingsLoader(ctx, orgID)
+	if err != nil {
+		return "", fmt.Errorf("load org settings: %w", err)
+	}
+	if settings.DefaultAgentType == "" {
+		return models.DefaultDefaultAgentType, nil
+	}
+	return settings.DefaultAgentType, nil
 }
 
 // buildIssueApproachPrompt is the deterministic prompt body 143 hands the
@@ -144,8 +161,8 @@ func writeAgentProviderState(ctx context.Context, stores *Stores, providerState 
 // freshly-created session. Same dedupe shape as the manual path so retries
 // collapse cleanly.
 func enqueueRunAgentForLinearAgent(ctx context.Context, stores *Stores, orgID, sessionID uuid.UUID) error {
-	dedupe := "run_agent:" + sessionID.String()
-	_, err := stores.Jobs.Enqueue(ctx, orgID, "default", "run_agent", map[string]any{
+	dedupe := db.RunAgentDedupeKey(sessionID)
+	_, err := stores.Jobs.Enqueue(ctx, orgID, "agent", "run_agent", map[string]any{
 		"org_id":     orgID.String(),
 		"session_id": sessionID.String(),
 	}, 5, &dedupe)
@@ -160,12 +177,16 @@ func finalizeUnsupported(ctx context.Context, client linear.Client, sessions *db
 		Type:            models.LinearAgentActivityResponse,
 		Body:            body,
 		IdemKey:         "bootstrap:not_supported",
-		PinSessionState: "complete",
+		PinSessionState: linearAgentPinSessionState(state),
 	}
 	if err := emitOnce(ctx, client, activities, orgID, row.ID, row.LinearAgentSessionID, activity, logger); err != nil {
 		return fmt.Errorf("emit close activity: %w", err)
 	}
 	return sessions.SetState(ctx, orgID, row.ID, state)
+}
+
+func linearAgentPinSessionState(state models.LinearAgentSessionState) string {
+	return string(state)
 }
 
 // emitOnce is a tiny wrapper that constructs an AgentActivityWriter on

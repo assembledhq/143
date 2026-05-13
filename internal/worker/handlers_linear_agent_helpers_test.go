@@ -1,12 +1,15 @@
 package worker
 
 import (
+	"context"
 	"strings"
 	"testing"
 
+	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/services/linear"
 	"github.com/google/uuid"
+	"github.com/pashagolub/pgxmock/v4"
 	"github.com/stretchr/testify/require"
 )
 
@@ -32,8 +35,9 @@ func TestBuildAgentSession(t *testing.T) {
 	}
 	repo := linear.AgentRepoResolveResult{RepositoryID: repoID, DefaultBranch: "release/2026-05", Source: "team_default_mapping"}
 
-	session := buildAgentSession(orgID, repo, issue, fetched)
+	session := buildAgentSession(orgID, repo, issue, fetched, models.AgentTypePi)
 	require.Equal(t, orgID, session.OrgID, "session inherits org from caller, not from the issue (defense against cross-org bugs)")
+	require.Equal(t, models.AgentTypePi, session.AgentType, "Linear-triggered sessions should honor the org default agent type resolved by the caller")
 	require.Equal(t, models.SessionOriginIssueTrigger, session.Origin,
 		"origin must mark this as an inbound trigger, not a manual session — drives downstream PM/automation behavior")
 	require.NotNil(t, session.PrimaryIssueID, "primary issue link is what makes HandleAgentMilestone fire")
@@ -62,10 +66,84 @@ func TestBuildAgentSession_FallsBackToIdentifierWhenTitleEmpty(t *testing.T) {
 		Identifier: "ACS-42",
 		// Title intentionally empty
 	}
-	session := buildAgentSession(orgID, linear.AgentRepoResolveResult{RepositoryID: uuid.New()}, issue, fetched)
+	session := buildAgentSession(orgID, linear.AgentRepoResolveResult{RepositoryID: uuid.New()}, issue, fetched, models.AgentTypeCodex)
 	require.NotNil(t, session.Title)
 	require.Equal(t, "ACS-42", *session.Title,
 		"empty title falls back to identifier so the sessions list never shows a blank row")
+}
+
+func TestResolveLinearAgentSessionAgentType(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	tests := []struct {
+		name      string
+		loader    func(context.Context, uuid.UUID) (models.OrgSettings, error)
+		expected  models.AgentType
+		expectErr bool
+	}{
+		{
+			name:     "missing loader falls back to platform default",
+			expected: models.DefaultDefaultAgentType,
+		},
+		{
+			name: "uses org default",
+			loader: func(context.Context, uuid.UUID) (models.OrgSettings, error) {
+				return models.OrgSettings{DefaultAgentType: models.AgentTypePi}, nil
+			},
+			expected: models.AgentTypePi,
+		},
+		{
+			name: "empty org default falls back",
+			loader: func(context.Context, uuid.UUID) (models.OrgSettings, error) {
+				return models.OrgSettings{}, nil
+			},
+			expected: models.DefaultDefaultAgentType,
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			got, err := resolveLinearAgentSessionAgentType(context.Background(), LinearAgentEventHandlerDeps{OrgSettingsLoader: tt.loader}, orgID)
+			if tt.expectErr {
+				require.Error(t, err, "agent type loader errors should propagate to the worker retry path")
+				return
+			}
+			require.NoError(t, err, "agent type resolution should succeed")
+			require.Equal(t, tt.expected, got, "agent type resolution should match the org default fallback rules")
+		})
+	}
+}
+
+func TestEnqueueRunAgentForLinearAgentUsesAgentQueue(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "test should create pgx mock")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	jobID := uuid.New()
+	dedupe := db.RunAgentDedupeKey(sessionID)
+
+	mock.ExpectQuery("INSERT INTO jobs").
+		WithArgs(orgID, "agent", "run_agent", pgxmock.AnyArg(), 5, &dedupe).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(jobID))
+
+	err = enqueueRunAgentForLinearAgent(context.Background(), &Stores{Jobs: db.NewJobStore(mock)}, orgID, sessionID)
+	require.NoError(t, err, "run_agent enqueue should succeed")
+	require.NoError(t, mock.ExpectationsWereMet(), "Linear-created run_agent jobs should use the agent worker queue")
+}
+
+func TestLinearAgentPinSessionStateUsesRequestedState(t *testing.T) {
+	t.Parallel()
+
+	require.Equal(t, "error", linearAgentPinSessionState(models.LinearAgentSessionStateError),
+		"unsupported-session finalization should pin Linear to the supplied terminal state")
 }
 
 func TestBuildIssueApproachPrompt(t *testing.T) {
