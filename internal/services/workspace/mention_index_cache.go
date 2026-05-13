@@ -84,7 +84,9 @@ func (c *MentionIndexCache) GetOrBuild(ctx context.Context, key string, build fu
 			return MentionIndex{}, err
 		}
 		c.putLocal(key, index)
-		c.putShared(ctx, key, index)
+		if err := c.putShared(ctx, key, index); err != nil {
+			c.logger.Warn().Err(err).Str("key", key).Msg("failed to write rebuilt mention index to shared cache")
+		}
 		return index, nil
 	})
 	if err != nil {
