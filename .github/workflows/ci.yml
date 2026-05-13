@@ -6,6 +6,10 @@ on:
   push:
     branches: [main]
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 env:
   GO_VERSION: "1.26"
   GOFLAGS: "-buildvcs=false"
@@ -298,27 +302,35 @@ jobs:
   docker-build:
     name: Docker Build
     needs: changes
-    if: needs.changes.outputs.docker == 'true' || needs.changes.outputs.ci == 'true' || github.event_name == 'push'
+    if: github.event_name == 'pull_request' && (needs.changes.outputs.docker == 'true' || needs.changes.outputs.ci == 'true')
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - name: app
+            context: .
+            file: Dockerfile
+            tags: 143-app:latest
+          - name: sandbox
+            context: .
+            file: sandbox/Dockerfile
+            tags: 143-sandbox:latest
+          - name: frontend
+            context: .
+            file: Dockerfile.frontend
+            tags: 143-frontend:latest
     steps:
       - uses: actions/checkout@v6
       - uses: docker/setup-buildx-action@v3
-      - name: Build app Docker image
+      - name: Build ${{ matrix.name }} Docker image
         uses: docker/build-push-action@v6
         with:
-          context: .
+          context: ${{ matrix.context }}
+          file: ${{ matrix.file }}
           push: false
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-      - name: Build sandbox Docker image
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: sandbox/Dockerfile
-          push: false
-          tags: 143-sandbox:latest
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          tags: ${{ matrix.tags }}
+          cache-from: type=gha,scope=${{ matrix.name }}
+          cache-to: type=gha,scope=${{ matrix.name }},mode=max
 
   security:
     name: Security Scan
