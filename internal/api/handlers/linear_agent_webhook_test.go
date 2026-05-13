@@ -162,6 +162,64 @@ func TestLinearAgentDispatcher_PerTeamEnableOverrideCanPassOrgDisabledGate(t *te
 	require.NoError(t, mock.ExpectationsWereMet(), "dispatcher should upsert the AgentSession row")
 }
 
+func TestLinearAgentDispatcher_UsesParsedEnvelopeWhenProvided(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "test should create pgx mock")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	integrationID := uuid.New()
+	rowID := uuid.New()
+	now := time.Now().UTC()
+	jobs := &fakeJobs{}
+	enabled := true
+	d := &LinearAgentDispatcher{
+		logger:        zerolog.Nop(),
+		agentSessions: db.NewLinearAgentSessionStore(mock),
+		jobs:          jobs,
+		settingsLoader: func(_ context.Context, _ uuid.UUID) (models.LinearAgentSettings, error) {
+			return models.LinearAgentSettings{Enabled: &enabled}, nil
+		},
+		featureEnabled: true,
+	}
+
+	mock.ExpectQuery("INSERT INTO linear_agent_sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "org_id", "integration_id", "linear_agent_session_id",
+			"linear_issue_id", "linear_issue_identifier",
+			"linear_app_user_id", "linear_creator_user_id",
+			"session_id", "state", "last_event_received_at",
+			"created_at", "updated_at", "inserted",
+		}).AddRow(
+			rowID, orgID, integrationID, "as_parsed",
+			"iss_1", "ACS-1",
+			"", "user_1",
+			nil, "pending", &now,
+			now, now, true,
+		))
+
+	var env linearAgentEventEnvelope
+	env.Type = string(LinearAgentEventAgentSession)
+	env.Action = string(linearAgentActionCreated)
+	env.Payload.AgentSession.ID = "as_parsed"
+	env.Payload.AgentSession.IssueID = "iss_1"
+	env.Payload.AgentSession.Issue.ID = "iss_1"
+	env.Payload.AgentSession.Issue.Identifier = "ACS-1"
+	env.Payload.AgentSession.Creator.ID = "user_1"
+
+	res := d.Dispatch(context.Background(), &models.Integration{ID: integrationID, OrgID: orgID}, LinearAgentEventAgentSession, []byte(`not json`), &env)
+	require.Equal(t, "agent_dispatched", res.Status, "dispatcher should reuse the parsed envelope instead of reparsing the body")
+	require.Len(t, jobs.calls, 1, "dispatcher should enqueue one worker job from the parsed envelope")
+	payload, ok := jobs.calls[0].Payload.(map[string]any)
+	require.True(t, ok, "dispatcher should enqueue a map payload")
+	require.Equal(t, "as_parsed", payload["linear_agent_session_id"], "worker payload should come from the parsed envelope")
+	require.NoError(t, mock.ExpectationsWereMet(), "dispatcher should upsert the AgentSession row using the parsed envelope")
+}
+
 func TestNewLinearAgentDispatcher_WiresBootstrapEmitterFromConfig(t *testing.T) {
 	t.Parallel()
 

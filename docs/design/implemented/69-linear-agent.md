@@ -1,6 +1,6 @@
 # 69 - Linear Agent (inbound assignment / @-mention triggering)
 
-> **Status:** Implemented (phases 1–4) | **Last reviewed:** 2026-05-02
+> **Status:** Implemented (phases 1–4) | **Last reviewed:** 2026-05-13
 >
 > **Depends on:** [./62-linear-session-linking.md](./62-linear-session-linking.md), [./04-ingestion.md](./04-ingestion.md)
 
@@ -40,15 +40,17 @@ worker job linear_agent_event
   │    - resolve repo via team→repo mapping (label override → exact →
   │      team default → org default → fail-with-message)
   │    - upsert issues row
-  │    - create models.Session (Origin = SessionOriginIssueTrigger)
+  │    - create models.Session (Origin = SessionOriginIssueTrigger,
+  │      AgentType = OrgSettings.DefaultAgentType)
   │    - link primary issue, persist AgentSessionID in provider_state
   │    - attach session_id to linear_agent_sessions row
-  │    - enqueue run_agent
+  │    - enqueue run_agent on the agent queue
   │  case "prompted":
   │    - lookup linked 143 session
   │    - fetch the comment body via FetchComment
-  │    - claim idle/resumable session, append turn message
-  │    - enqueue continue_session
+  │    - claim idle/resumable session, append turn message, enqueue
+  │      continue_session; if the session is still running, append under
+  │      a session row lock so the in-flight turn drains the message
   ▼
 agent.Orchestrator (existing) → enqueueLinearMilestone
   │  HandleMilestone — durable attachment + rolling comment (existing)
@@ -115,6 +117,12 @@ per_team_enabled }`. Per-org opt-in; `enabled` defaults to false. The
 process-wide `LINEAR_AGENT_ENABLED` env var is the kill switch above
 the per-org toggle.
 
+The per-team `enabled` gate is applied when the `created` event starts a
+new session. `prompted` follow-ups on an existing AgentSession do not
+re-apply `EnabledFor(team)`; disabling a team should prevent new inbound
+sessions without yanking or stranding in-flight work. Terminal-session
+follow-ups are still governed by `allow_revision_per_prompt`.
+
 ## Activity stream
 
 | 143 moment | AgentActivity | Idem key |
@@ -141,8 +149,14 @@ the per-org toggle.
   resume from "fetch the issue".
 - **Re-delivery of created**: row UNIQUE collides, returns the
   existing `session_id`, worker handler short-circuits.
-- **Prompted before created**: lookup misses, dispatcher returns
-  ignored, Linear retries the webhook after `created` lands.
+- **Prompted before created**: lookup misses, dispatcher still enqueues
+  a retryable worker job. The worker re-checks the bridge row and backs
+  off briefly until `created` attaches the 143 session.
+- **Prompted while a turn is finishing**: the running-session append path
+  locks the session row before inserting the user message. If the turn is
+  still running, the finisher's post-turn drain sees the message; if the
+  turn already went idle/terminal, the prompted job retries through the
+  normal idle/resume branch so no message is left without a continuation.
 - **Repo unmapped**: `response` activity + AgentSession state pinned
   to `complete`. Treated as a benign user-actionable state, not a
   system error.

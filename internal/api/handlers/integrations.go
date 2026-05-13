@@ -483,7 +483,7 @@ func (h *IntegrationHandler) StartLinearOAuth(w http.ResponseWriter, r *http.Req
 	// actor=app provisions a dedicated agent user (`@143`) in the workspace
 	// and ties subsequent token-authored writes to it. Workspace-admin
 	// privileges are required by Linear; the install copy in the frontend
-	// must reflect that. See docs/design/help-me-understand-what-melodic-bengio.md
+	// must reflect that. See docs/design/implemented/69-linear-agent.md
 	// §"OAuth flow — single upgraded install" for the rationale on a single
 	// flow vs parallel flows.
 	params := url.Values{

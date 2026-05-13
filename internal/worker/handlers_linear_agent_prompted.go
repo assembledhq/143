@@ -24,6 +24,12 @@ import (
 // the follow-up comment stays bounded.
 var promptedAwaitingCreateBackoff = 5 * time.Second
 
+// promptedAppendRaceBackoff is the short retry used when a prompted event
+// initially observes a running session, but the turn finishes before the
+// handler can append under the row lock. Retrying re-enters the normal
+// idle/resume path and atomically enqueues continue_session.
+var promptedAppendRaceBackoff = 500 * time.Millisecond
+
 // handleLinearAgentPrompted processes a `prompted` AgentSessionEvent.
 // Linear delivers this when a follow-up @mention or comment lands on an
 // issue whose AgentSession is already alive. We turn-append the comment
@@ -94,6 +100,11 @@ func handleLinearAgentPrompted(ctx context.Context, deps LinearAgentEventHandler
 		if err != nil {
 			return fmt.Errorf("load agent settings: %w", err)
 		}
+		// Do not re-apply EnabledFor(team) on prompted events. The created
+		// event already passed the per-team gate; follow-up @143 mentions are
+		// treated as part of that ongoing session so disabling a team does not
+		// strand in-flight work. The revision knob below still controls whether
+		// late prompts may reopen terminal sessions.
 		allowRevision = settings.EffectiveAllowRevisionPerPrompt()
 	}
 
@@ -220,25 +231,74 @@ func appendPromptedMessageToRunningSession(
 	commentBody string,
 	logger zerolog.Logger,
 ) error {
+	if deps.Stores == nil || deps.Stores.Sessions == nil {
+		return errors.New("sessions store unavailable")
+	}
 	if deps.Stores.SessionMessages == nil {
 		return errors.New("session_messages store unavailable")
 	}
+	tx, err := deps.Stores.Sessions.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin running-session prompted append transaction: %w", err)
+	}
+	committed := false
+	defer func() {
+		if committed {
+			return
+		}
+		_ = tx.Rollback(ctx)
+	}()
+
+	lockedState, err := lockSessionAppendStateForUpdate(ctx, tx, orgID, appendState.ID)
+	if err != nil {
+		return fmt.Errorf("lock running session append state: %w", err)
+	}
+	if lockedState.Status != string(models.SessionStatusRunning) {
+		return &RetryableError{
+			Err:        fmt.Errorf("linear_agent_event: prompted append raced with session status %q", lockedState.Status),
+			RetryAfter: &promptedAppendRaceBackoff,
+		}
+	}
+
 	msg := &models.SessionMessage{
-		SessionID:  appendState.ID,
+		SessionID:  lockedState.ID,
 		OrgID:      orgID,
-		TurnNumber: appendState.CurrentTurn + 1,
+		TurnNumber: lockedState.CurrentTurn + 1,
 		Role:       models.MessageRoleUser,
 		Content:    commentBody,
 	}
-	if err := deps.Stores.SessionMessages.Create(ctx, msg); err != nil {
+	if err := db.NewSessionMessageStore(tx).Create(ctx, msg); err != nil {
 		return fmt.Errorf("create running session message: %w", err)
 	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit running-session prompted append transaction: %w", err)
+	}
+	committed = true
 	logger.Info().
 		Str("agent_session_id", payload.LinearAgentSessionID).
-		Str("session_id", appendState.ID.String()).
+		Str("session_id", lockedState.ID.String()).
 		Int("turn_number", msg.TurnNumber).
 		Msg("linear_agent_event: prompted -> message appended to running session")
 	return nil
+}
+
+func lockSessionAppendStateForUpdate(ctx context.Context, tx pgx.Tx, orgID, sessionID uuid.UUID) (db.SessionMessageAppendState, error) {
+	var state db.SessionMessageAppendState
+	err := tx.QueryRow(ctx, `
+		SELECT id, org_id, status, current_turn
+		FROM sessions
+		WHERE id = @id
+		  AND org_id = @org_id
+		  AND deleted_at IS NULL
+		FOR UPDATE`,
+		pgx.NamedArgs{
+			"id":     sessionID,
+			"org_id": orgID,
+		}).Scan(&state.ID, &state.OrgID, &state.Status, &state.CurrentTurn)
+	if err != nil {
+		return db.SessionMessageAppendState{}, err
+	}
+	return state, nil
 }
 
 // resolvePromptedCommentBody fetches the user's follow-up Linear comment
