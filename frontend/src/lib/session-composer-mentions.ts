@@ -148,11 +148,13 @@ function insertTokenAtCaret(text: string, mention: ActiveMention, token: string)
 }
 
 export function syncReferencesWithMessage(text: string, references: SessionInputReference[]): SessionInputReference[] {
-  return references.filter((reference) => messageContainsToken(text, tokenForReference(reference)));
+  const next = references.filter((reference) => messageContainsToken(text, tokenForReference(reference)));
+  return next.length === references.length ? references : next;
 }
 
 export function syncCommandsWithMessage(text: string, commands: SessionInputCommand[]): SessionInputCommand[] {
-  return commands.filter((command) => messageContainsCommandToken(text, tokenForCommand(command)));
+  const next = commands.filter((command) => messageContainsCommandToken(text, tokenForCommand(command)));
+  return next.length === commands.length ? commands : next;
 }
 
 export function removeMentionReference(text: string, reference: SessionInputReference): string {

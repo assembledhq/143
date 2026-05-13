@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { Profiler } from "react";
 import { FileTree } from "./file-tree";
 import type { DiffFile } from "@/lib/diff-parser";
 
@@ -97,6 +98,27 @@ describe("FileTree", () => {
     expect(screen.getByText("app.ts")).toBeInTheDocument();
     expect(screen.getByText("helpers.ts")).toBeInTheDocument();
     expect(screen.getByText("README.md")).toBeInTheDocument();
+  });
+
+  it("does not rerender when parent props are unchanged", () => {
+    const onFileSelect = vi.fn();
+    const onRender = vi.fn();
+    const { rerender } = render(
+      <Profiler id="file-tree" onRender={onRender}>
+        <FileTree files={files} activeFileIndex={0} onFileSelect={onFileSelect} />
+      </Profiler>
+    );
+    const mountDuration = onRender.mock.calls[0]?.[2] as number;
+    onRender.mockClear();
+
+    rerender(
+      <Profiler id="file-tree" onRender={onRender}>
+        <FileTree files={files} activeFileIndex={0} onFileSelect={onFileSelect} />
+      </Profiler>
+    );
+
+    const updateDuration = onRender.mock.calls[0]?.[2] as number;
+    expect(updateDuration).toBeLessThan(Math.max(0.1, mountDuration * 0.1));
   });
 
   it('shows "N files changed" count', () => {
