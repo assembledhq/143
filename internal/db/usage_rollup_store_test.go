@@ -981,7 +981,7 @@ func TestGetBreakdown_UserDimension(t *testing.T) {
 	// Grand total query
 	mock.ExpectQuery("SELECT COALESCE\\(SUM").
 		WithArgs(args).
-		WillReturnRows(pgxmock.NewRows([]string{"total"}).AddRow(100.0))
+		WillReturnRows(pgxmock.NewRows([]string{"total_minutes", "total_tokens", "total_cost"}).AddRow(100.0, 2700.0, 0.80))
 
 	cols := []string{
 		"key", "label",
@@ -999,8 +999,24 @@ func TestGetBreakdown_UserDimension(t *testing.T) {
 	require.Len(t, rows, 2)
 	require.Equal(t, "alice@test.com", rows[0].Label)
 	require.Equal(t, 60.0, rows[0].Percentage) // 60/100 * 100 = 60.0%
+	require.Equal(t, 55.6, rows[0].ShareOfTokens)
+	require.Equal(t, 62.5, rows[0].ShareOfTokenCost)
 	require.Equal(t, 40.0, rows[1].Percentage) // 40/100 * 100 = 40.0%
+	require.Equal(t, 44.4, rows[1].ShareOfTokens)
+	require.Equal(t, 37.5, rows[1].ShareOfTokenCost)
 	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestUsageTokenCostSQL_UsesUSDObjectFallbacks(t *testing.T) {
+	t.Parallel()
+
+	sql := usageTokenCostSQL("s")
+
+	require.Contains(t, sql, "s.token_usage->>'total_cost_usd'", "cost extraction should keep the canonical total_cost_usd field")
+	require.Contains(t, sql, "s.token_usage->'cost'->>'amount'", "cost extraction should support persisted USD cost objects")
+	require.Contains(t, sql, "s.token_usage->'native_cost'->>'amount'", "cost extraction should support persisted native USD cost objects")
+	require.Contains(t, sql, "lower(s.token_usage->'cost'->>'unit') = 'usd'", "cost object fallback should only use USD costs")
+	require.Contains(t, sql, "lower(s.token_usage->'native_cost'->>'unit') = 'usd'", "native cost object fallback should only use USD costs")
 }
 
 func TestGetBreakdown_CapacityDimension(t *testing.T) {
@@ -1160,7 +1176,7 @@ func TestGetBreakdown_QueryError(t *testing.T) {
 	// Grand total query succeeds
 	mock.ExpectQuery("SELECT COALESCE\\(SUM").
 		WithArgs(args).
-		WillReturnRows(pgxmock.NewRows([]string{"total"}).AddRow(100.0))
+		WillReturnRows(pgxmock.NewRows([]string{"total_minutes", "total_tokens", "total_cost"}).AddRow(100.0, 0.0, 0.0))
 
 	// Main breakdown query fails
 	mock.ExpectQuery("SELECT\\s+uh.user_id::text AS key").
@@ -1278,7 +1294,7 @@ func TestGetBreakdown_EmptyResult(t *testing.T) {
 	// Grand total query
 	mock.ExpectQuery("SELECT COALESCE\\(SUM").
 		WithArgs(args).
-		WillReturnRows(pgxmock.NewRows([]string{"total"}).AddRow(0.0))
+		WillReturnRows(pgxmock.NewRows([]string{"total_minutes", "total_tokens", "total_cost"}).AddRow(0.0, 0.0, 0.0))
 
 	cols := []string{
 		"key", "label",

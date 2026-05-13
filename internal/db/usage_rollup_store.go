@@ -92,6 +92,21 @@ func normalizeUsageModel(modelUsed *string, tokenUsageRaw []byte) string {
 	return "unknown"
 }
 
+func usageTokenCostSQL(alias string) string {
+	return `COALESCE(
+				NULLIF(` + alias + `.token_usage->>'total_cost_usd', '')::double precision,
+				CASE
+					WHEN lower(` + alias + `.token_usage->'cost'->>'unit') = 'usd'
+					THEN NULLIF(` + alias + `.token_usage->'cost'->>'amount', '')::double precision
+				END,
+				CASE
+					WHEN lower(` + alias + `.token_usage->'native_cost'->>'unit') = 'usd'
+					THEN NULLIF(` + alias + `.token_usage->'native_cost'->>'amount', '')::double precision
+				END,
+				0
+			)`
+}
+
 // RollupHour computes and upserts hourly aggregates for a single org and hour.
 // It writes rows at multiple dimensional levels: org-total, per-user, per-tier.
 func (s *UsageRollupStore) RollupHour(ctx context.Context, orgID uuid.UUID, hour time.Time) error {
@@ -272,7 +287,7 @@ func (s *UsageRollupStore) RollupHour(ctx context.Context, orgID uuid.UUID, hour
 			), @unknown_capacity) AS capacity_key,
 			COALESCE((s.token_usage->>'input_tokens')::bigint, 0) AS input_tokens,
 			COALESCE((s.token_usage->>'output_tokens')::bigint, 0) AS output_tokens,
-			COALESCE((s.token_usage->>'total_cost_usd')::double precision, 0) AS cost_usd
+			`+usageTokenCostSQL("s")+` AS cost_usd
 		FROM sessions s
 		WHERE s.org_id = @org_id
 		  AND s.token_usage IS NOT NULL
@@ -940,12 +955,15 @@ func (s *UsageRollupStore) GetBreakdown(ctx context.Context, orgID uuid.UUID, st
 	}
 
 	if dimension == "user" {
-		var grandTotalMinutes float64
+		var grandTotalMinutes, grandTotalTokens, grandTotalCost float64
 		if err := s.db.QueryRow(ctx, `
-			SELECT COALESCE(SUM(uh.total_container_minutes), 0)
+			SELECT
+				COALESCE(SUM(uh.total_container_minutes), 0),
+				COALESCE(SUM(uh.total_input_tokens + uh.total_output_tokens), 0),
+				COALESCE(SUM(uh.total_llm_cost_usd), 0)
 			FROM usage_hourly uh
 			WHERE uh.org_id = @org_id AND uh.hour_utc >= @start AND uh.hour_utc < @end
-			  AND uh.user_id IS NOT NULL AND uh.capacity_tier IS NULL`, args).Scan(&grandTotalMinutes); err != nil {
+			  AND uh.user_id IS NOT NULL AND uh.capacity_tier IS NULL`, args).Scan(&grandTotalMinutes, &grandTotalTokens, &grandTotalCost); err != nil {
 			return nil, fmt.Errorf("query breakdown grand total: %w", err)
 		}
 		query := fmt.Sprintf(`
@@ -987,7 +1005,7 @@ func (s *UsageRollupStore) GetBreakdown(ctx context.Context, orgID uuid.UUID, st
 			return nil, fmt.Errorf("query breakdown: %w", err)
 		}
 		defer rows.Close()
-		return scanUsageBreakdownRows(rows, grandTotalMinutes, 0, 0)
+		return scanUsageBreakdownRows(rows, grandTotalMinutes, grandTotalTokens, grandTotalCost)
 	}
 
 	keyExpr := "uhe.capacity_key"
