@@ -568,28 +568,30 @@ export function SessionSidebar() {
           onValueChange={(v) => setActiveFilter(v === "all" ? null : v)}
           className="gap-0"
         >
-          <TabsList variant="line" size="sm" className="overflow-x-auto overflow-y-visible pb-1">
-            {filterTabs.map((tab) => {
-              const count = getCountForTab(tab.value, counts);
-              const label = renderCount(count, counts);
-              // Active uses the existing attention-grabbing pill; All/Archived get a
-              // muted inline number so totals are visible without being loud.
-              // Zero buckets render nothing — a "0" badge is noise.
-              const isActivePill = tab.value === "active" && count !== undefined && count > 0;
-              const isMutedNumber = !isActivePill && label !== undefined && count !== undefined && count > 0;
-              return (
-                <TabsTrigger key={tab.value} value={tab.value}>
-                  {tab.label}
-                  {isActivePill && (
-                    <span className="rounded-full text-white text-xs leading-none px-1.5 py-0.5 bg-primary">{label}</span>
-                  )}
-                  {isMutedNumber && (
-                    <span className="text-xs leading-none text-muted-foreground/60 tabular-nums">{label}</span>
-                  )}
-                </TabsTrigger>
-              );
-            })}
-          </TabsList>
+          <div className="overflow-x-auto overflow-y-hidden pb-1">
+            <TabsList variant="line" size="sm">
+              {filterTabs.map((tab) => {
+                const count = getCountForTab(tab.value, counts);
+                const label = renderCount(count, counts);
+                // Active uses the existing attention-grabbing pill; All/Archived get a
+                // muted inline number so totals are visible without being loud.
+                // Zero buckets render nothing — a "0" badge is noise.
+                const isActivePill = tab.value === "active" && count !== undefined && count > 0;
+                const isMutedNumber = !isActivePill && label !== undefined && count !== undefined && count > 0;
+                return (
+                  <TabsTrigger key={tab.value} value={tab.value}>
+                    {tab.label}
+                    {isActivePill && (
+                      <span className="rounded-full text-white text-xs leading-none px-1.5 py-0.5 bg-primary">{label}</span>
+                    )}
+                    {isMutedNumber && (
+                      <span className="text-xs leading-none text-muted-foreground/60 tabular-nums">{label}</span>
+                    )}
+                  </TabsTrigger>
+                );
+              })}
+            </TabsList>
+          </div>
         </Tabs>
       </div>
 

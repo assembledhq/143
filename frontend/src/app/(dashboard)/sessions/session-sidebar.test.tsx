@@ -255,10 +255,14 @@ describe('SessionSidebar', () => {
 
     const tabList = screen.getByRole('tablist');
     expect(tabList).toHaveAttribute('data-variant', 'line');
-    expect(tabList.className).toContain('pb-1');
     expect(tabList.className).toContain('justify-start');
-    expect(tabList.className).toContain('overflow-x-auto');
-    expect(tabList.className).toContain('overflow-y-visible');
+
+    // The scroll/clip wrapper lives on the parent div so the active-tab
+    // underline (positioned just below the trigger) isn't clipped.
+    const scrollWrapper = tabList.parentElement;
+    expect(scrollWrapper?.className).toContain('overflow-x-auto');
+    expect(scrollWrapper?.className).toContain('overflow-y-hidden');
+    expect(scrollWrapper?.className).toContain('pb-1');
   });
 
   it('navigates when the selected row shell is tapped', async () => {

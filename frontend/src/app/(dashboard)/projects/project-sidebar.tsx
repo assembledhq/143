@@ -184,21 +184,23 @@ export function ProjectSidebar() {
           onValueChange={(v) => setActiveFilter(v === "all" ? null : v)}
           className="gap-0"
         >
-          <TabsList variant="line" size="sm" className="overflow-x-auto overflow-y-visible pb-1">
-            {filterTabs.map((tab) => {
-              const count = tab.value === "active" ? activeCount : 0;
-              return (
-                <TabsTrigger key={tab.value} value={tab.value}>
-                  {tab.label}
-                  {count > 0 && (
-                    <span className="rounded-full text-white text-xs leading-none px-1.5 py-0.5 bg-primary">
-                      {count}
-                    </span>
-                  )}
-                </TabsTrigger>
-              );
-            })}
-          </TabsList>
+          <div className="overflow-x-auto overflow-y-hidden pb-1">
+            <TabsList variant="line" size="sm">
+              {filterTabs.map((tab) => {
+                const count = tab.value === "active" ? activeCount : 0;
+                return (
+                  <TabsTrigger key={tab.value} value={tab.value}>
+                    {tab.label}
+                    {count > 0 && (
+                      <span className="rounded-full text-white text-xs leading-none px-1.5 py-0.5 bg-primary">
+                        {count}
+                      </span>
+                    )}
+                  </TabsTrigger>
+                );
+              })}
+            </TabsList>
+          </div>
         </Tabs>
       </div>
 
