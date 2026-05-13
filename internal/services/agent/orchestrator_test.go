@@ -4842,6 +4842,67 @@ func TestContinueSession_ClaudeTokenFailureRemovesStaleCredentialsBeforeAPIKeyFa
 	require.Len(t, d.sessions.getFailureUpdates(), 0, "successful fallback should not record a Claude auth failure")
 }
 
+func TestContinueSession_ClaudeSnapshotRestoresTopLevelConfigFromBackup(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	issue.Source = models.IssueSourceManual
+	session := testRun(orgID, issue.ID)
+	session.Origin = models.SessionOriginManual
+	session.InteractionMode = models.SessionInteractionModeInteractive
+	session.ValidationPolicy = models.SessionValidationPolicyOnSessionEnd
+	session.Status = string(models.SessionStatusIdle)
+	session.CurrentTurn = 1
+	session.SnapshotKey = strPtr("snapshots/test/session-with-claude-backup.tar")
+	session.AgentSessionID = strPtr("claude-session-abc")
+
+	d := defaultDeps()
+	d.issues.issue = issue
+	d.messages.messages = []models.SessionMessage{
+		{
+			ID:         1,
+			SessionID:  session.ID,
+			OrgID:      orgID,
+			TurnNumber: 2,
+			Role:       models.MessageRoleUser,
+			Content:    "Keep going.",
+		},
+	}
+	d.provider.RestoreFn = func(ctx context.Context, sb *agent.Sandbox, reader io.Reader) error {
+		_, err := io.ReadAll(reader)
+		return err
+	}
+	d.provider.SnapshotFn = func(ctx context.Context, sb *agent.Sandbox) (io.ReadCloser, error) {
+		return io.NopCloser(bytes.NewReader([]byte("next-snapshot"))), nil
+	}
+	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
+		require.True(t, prompt.Continuation, "snapshot-backed Claude resume should use continuation mode when an agent session id exists")
+		return &agent.AgentResult{
+			Summary:         "continued",
+			ConfidenceScore: 0.82,
+			ExitCode:        0,
+		}, nil
+	}
+	d.snapshots.data = map[string][]byte{
+		*session.SnapshotKey: []byte("restored-snapshot"),
+	}
+
+	orch := buildOrchestrator(d)
+	err := orch.ContinueSession(context.Background(), session, nil)
+	require.NoError(t, err, "snapshot resume should succeed after restoring Claude config from backup")
+
+	var restoreCmd string
+	for _, cmd := range d.provider.ExecCalls {
+		if strings.Contains(cmd, ".claude.json.backup.*") {
+			restoreCmd = cmd
+			break
+		}
+	}
+	require.NotEmpty(t, restoreCmd, "snapshot-backed Claude resume should attempt to restore ~/.claude.json from the newest backup")
+	require.Contains(t, restoreCmd, "cp \"$latest\" '/home/sandbox/.claude.json'", "restore command should copy Claude's newest backup to the top-level config path")
+}
+
 // errForcedCreateFailure is used by tests that short-circuit provider.Create so
 // the test can inspect the SandboxConfig without running the full sandbox
 // lifecycle. Named so grep picks it up and future refactors don't silently
