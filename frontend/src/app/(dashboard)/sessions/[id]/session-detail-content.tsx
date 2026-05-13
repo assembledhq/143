@@ -840,6 +840,7 @@ function ChangesTab({
 // ---------------------------------------------------------------------------
 
 function SessionComposer({
+  sessionId,
   message,
   onMessageChange,
   planMode,
@@ -881,6 +882,7 @@ function SessionComposer({
   unavailableReason,
   placeholderOverride,
 }: {
+  sessionId: string;
   message: string;
   onMessageChange: (value: string) => void;
   planMode: boolean;
@@ -1035,8 +1037,8 @@ function SessionComposer({
   const pickerOpen = showMentionPicker || showCommandPicker;
 
   const fileMentionsQuery = useQuery<ListResponse<SessionInputReference>>({
-    queryKey: queryKeys.sessionComposer.files(repositoryId ?? "", branch ?? "", deferredMentionQuery),
-    queryFn: () => api.sessionComposer.files(repositoryId ?? "", branch ?? "", deferredMentionQuery),
+    queryKey: queryKeys.sessions.composerFiles(sessionId, deferredMentionQuery),
+    queryFn: () => api.sessions.composerFiles(sessionId, deferredMentionQuery),
     enabled: showMentionPicker,
     staleTime: 30 * 1000,
   });
@@ -4757,6 +4759,7 @@ export function SessionDetailContent({ id }: { id: string }) {
               </div>
             )}
             <SessionComposer
+              sessionId={session.id}
               message={composerMessage}
               onMessageChange={setComposerMessage}
               planMode={composerPlanMode}
@@ -4861,6 +4864,7 @@ export function SessionDetailContent({ id }: { id: string }) {
               </div>
             ) : null}
             <SessionComposer
+              sessionId={session.id}
               message={composerMessage}
               onMessageChange={setComposerMessage}
               planMode={composerPlanMode}

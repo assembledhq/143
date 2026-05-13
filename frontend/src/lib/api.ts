@@ -422,6 +422,10 @@ export const api = {
       del(`/api/v1/sessions/${sessionId}/review-comments/${commentId}`),
     sendReviewComments: (sessionId: string) =>
       post<import('./types').SingleResponse<{ message: string; sent: boolean }>>(`/api/v1/sessions/${sessionId}/review-comments/send`),
+    composerFiles: (sessionId: string, query: string) => {
+      const params = new URLSearchParams({ q: query });
+      return get<import('./types').ListResponse<import('./types').SessionInputReference>>(`/api/v1/sessions/${sessionId}/composer/files?${params.toString()}`);
+    },
     listFiles: (sessionId: string, path?: string) => {
       const params = new URLSearchParams();
       if (path) params.set('path', path);

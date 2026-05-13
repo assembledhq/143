@@ -23,8 +23,10 @@ import (
 	"github.com/assembledhq/143/internal/services/integration"
 	"github.com/assembledhq/143/internal/services/linear"
 	"github.com/assembledhq/143/internal/services/mcp"
+	"github.com/assembledhq/143/internal/services/sandbox"
 	"github.com/assembledhq/143/internal/services/sandboxauth"
 	"github.com/assembledhq/143/internal/services/storage"
+	"github.com/assembledhq/143/internal/services/workspace"
 )
 
 const (
@@ -456,12 +458,14 @@ type Orchestrator struct {
 	credentials       CredentialProvider     // can be nil — disables integration-skills doc generation
 	memory            MemoryService          // can be nil
 	snapshots         storage.SnapshotStore  // can be nil — multi-turn disabled if nil
-	usageTracker      UsageRecorder          // can be nil — billing tracking disabled if nil
-	sandboxCapacity   *SandboxCapacityGate   // can be nil — live local sandbox admission disabled
-	env               *AgentEnv              // owns env resolution, auth pre-flight, Codex auth injection
-	identityResolver  *identity.Resolver     // can be nil — falls back to legacy GITHUB_TOKEN env injection
-	sandboxAuth       SandboxAuthServer      // can be nil — paired with identityResolver
-	users             UserLookup             // can be nil — needed for App-token Co-authored-by trailer
+	fileReader        sandbox.FileReader     // can be nil — disables proactive mention-index warmup
+	mentionIndexes    *workspace.MentionIndexCache
+	usageTracker      UsageRecorder        // can be nil — billing tracking disabled if nil
+	sandboxCapacity   *SandboxCapacityGate // can be nil — live local sandbox admission disabled
+	env               *AgentEnv            // owns env resolution, auth pre-flight, Codex auth injection
+	identityResolver  *identity.Resolver   // can be nil — falls back to legacy GITHUB_TOKEN env injection
+	sandboxAuth       SandboxAuthServer    // can be nil — paired with identityResolver
+	users             UserLookup           // can be nil — needed for App-token Co-authored-by trailer
 	logger            zerolog.Logger
 	maxConcurrent     int
 	cancels           *CancelRegistry
@@ -635,11 +639,13 @@ type OrchestratorConfig struct {
 	UserCredentials   UserCredentialProvider   // optional — enables legacy personal/team credential resolution
 	CodingCredentials CodingCredentialProvider // optional — preferred unified resolver; consulted before the legacy cascade
 	Snapshots         storage.SnapshotStore    // optional — enables multi-turn snapshot/restore
-	UsageTracker      UsageRecorder            // optional — enables billing observability
-	SandboxCapacity   *SandboxCapacityGate     // optional — gates new local sandbox creation
-	Cancels           *CancelRegistry          // optional — enables session cancellation from API
-	ThreadCancels     *ThreadCancelRegistry    // optional — enables per-tab cancellation from API
-	OrgSettingsCache  *OrgSettingsCache        // optional — caches Amp/Pi agent_config lookups across session starts
+	FileReader        sandbox.FileReader       // optional — enables proactive mention-index warmup
+	MentionIndexes    *workspace.MentionIndexCache
+	UsageTracker      UsageRecorder         // optional — enables billing observability
+	SandboxCapacity   *SandboxCapacityGate  // optional — gates new local sandbox creation
+	Cancels           *CancelRegistry       // optional — enables session cancellation from API
+	ThreadCancels     *ThreadCancelRegistry // optional — enables per-tab cancellation from API
+	OrgSettingsCache  *OrgSettingsCache     // optional — caches Amp/Pi agent_config lookups across session starts
 	// Env owns env resolution + auth pre-flight + Codex auth injection,
 	// shared with the PM service. Optional: when nil, NewOrchestrator
 	// constructs an AgentEnv from the other OrchestratorConfig fields so
@@ -715,6 +721,8 @@ func NewOrchestrator(cfg OrchestratorConfig) *Orchestrator {
 		credentials:       cfg.Credentials,
 		memory:            cfg.Memory,
 		snapshots:         cfg.Snapshots,
+		fileReader:        cfg.FileReader,
+		mentionIndexes:    cfg.MentionIndexes,
 		usageTracker:      cfg.UsageTracker,
 		sandboxCapacity:   cfg.SandboxCapacity,
 		env:               env,
@@ -727,6 +735,24 @@ func NewOrchestrator(cfg OrchestratorConfig) *Orchestrator {
 		maxConcurrent:     maxConcurrent,
 		nodeID:            cfg.NodeID,
 		isDraining:        cfg.IsDraining,
+	}
+}
+
+func (o *Orchestrator) warmMentionIndexFromSandbox(ctx context.Context, session *models.Session, liveSandbox *Sandbox, snapshotKey string, log zerolog.Logger) {
+	if o == nil || o.mentionIndexes == nil || o.fileReader == nil || session == nil || liveSandbox == nil || snapshotKey == "" {
+		return
+	}
+
+	cacheSession := *session
+	cacheSession.SnapshotKey = &snapshotKey
+	reader := workspace.NewLiveContainerReader(o.fileReader, liveSandbox.ID, liveSandbox.WorkDir)
+	index, err := workspace.BuildMentionIndex(ctx, reader)
+	if err != nil {
+		log.Warn().Err(err).Str("snapshot_key", snapshotKey).Msg("failed to build proactive mention index from live sandbox")
+		return
+	}
+	if err := o.mentionIndexes.Warm(ctx, workspace.SessionMentionIndexCacheKey(&cacheSession), index); err != nil {
+		log.Warn().Err(err).Str("snapshot_key", snapshotKey).Msg("failed to warm proactive mention index")
 	}
 }
 
@@ -2060,6 +2086,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 		if _, err := o.sessions.PublishCheckpoint(ctx, run.OrgID, run.ID, lockToken, result.AgentSessionID, snapshotKey, models.CheckpointKindTurnComplete, checkpointCapabilityForAgent(run.AgentType), snapshotSize, time.Now().UTC(), nil, models.RuntimeStopReasonNone); err != nil {
 			log.Warn().Err(err).Msg("failed to publish checkpoint metadata")
 		}
+		o.warmMentionIndexFromSandbox(ctx, run, sandbox, snapshotKey, log)
 	}
 
 	// Fetch org settings for confidence thresholds.
@@ -3231,6 +3258,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		if _, err := o.sessions.PublishCheckpoint(ctx, session.OrgID, session.ID, lockToken, result.AgentSessionID, newSnapshotKey, models.CheckpointKindTurnComplete, checkpointCapabilityForAgent(session.AgentType), snapshotSize, time.Now().UTC(), nil, models.RuntimeStopReasonNone); err != nil {
 			log.Warn().Err(err).Msg("failed to publish checkpoint metadata after continue")
 		}
+		o.warmMentionIndexFromSandbox(ctx, session, sandbox, newSnapshotKey, log)
 	}
 
 	// 9. Update turn complete — sets status to idle.
@@ -4535,6 +4563,7 @@ func (o *Orchestrator) handleCancelledSession(ctx context.Context, session *mode
 		if _, err := o.sessions.PublishCheckpoint(bgCtx, session.OrgID, session.ID, lockToken, agentSessionID, snapshotKey, models.CheckpointKindGracefulStop, checkpointCapabilityForAgent(session.AgentType), snapshotSize, checkpointedAt, nil, models.RuntimeStopReasonUserCancel); err != nil {
 			log.Warn().Err(err).Msg("failed to publish cancelled-session checkpoint metadata")
 		}
+		o.warmMentionIndexFromSandbox(bgCtx, session, sandbox, snapshotKey, log)
 		if err := o.sessions.UpdateTurnComplete(bgCtx, session.OrgID, session.ID, turnNumber, nil, agentSessionID, snapshotKey); err != nil {
 			log.Warn().Err(err).Msg("failed to return cancelled session to idle")
 			_ = o.sessions.UpdateStatus(bgCtx, session.OrgID, session.ID, string(models.SessionStatusCancelled))
@@ -4660,6 +4689,9 @@ func (o *Orchestrator) handlePolicyStoppedSession(ctx context.Context, session *
 	if snapshotKey != "" || checkpointErrText != nil {
 		if _, err := o.sessions.PublishCheckpoint(bgCtx, session.OrgID, session.ID, lockToken, agentSessionID, snapshotKey, models.CheckpointKindGracefulStop, checkpointCapabilityForAgent(session.AgentType), snapshotSize, checkpointedAt, checkpointErrText, stopReasonToRuntime(reason)); err != nil {
 			log.Warn().Err(err).Msg("failed to publish graceful-stop checkpoint metadata")
+		}
+		if snapshotKey != "" {
+			o.warmMentionIndexFromSandbox(bgCtx, session, sandbox, snapshotKey, log)
 		}
 	}
 

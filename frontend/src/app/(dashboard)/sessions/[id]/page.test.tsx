@@ -6795,7 +6795,8 @@ describe('SessionDetailPage', () => {
       http.get('/api/v1/sessions/:id', () => {
         return HttpResponse.json({ data: resumableSession } satisfies SingleResponse<Session>);
       }),
-      http.get('/api/v1/session-composer/files', () => {
+      http.get('/api/v1/sessions/:id/composer/files', ({ params }) => {
+        expect(params.id).toBe('session-abcdef12-3456-7890');
         return HttpResponse.json({
           data: [
             {

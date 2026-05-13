@@ -45,6 +45,7 @@ import (
 	"github.com/assembledhq/143/internal/services/sandbox"
 	"github.com/assembledhq/143/internal/services/sandboxauth"
 	"github.com/assembledhq/143/internal/services/storage"
+	"github.com/assembledhq/143/internal/services/workspace"
 	"github.com/assembledhq/143/internal/telemetry"
 	"github.com/assembledhq/143/internal/version"
 	"github.com/assembledhq/143/internal/worker"
@@ -423,7 +424,7 @@ func main() {
 				jobStore, orgStore, repoStore, pullRequestStore,
 				deployStore, priorityScoreStore, complexityEstimateStore, pmPlanStore, pmDecisionLogStore,
 				projectStore, projectTaskStore, projectCycleStore, pmDocumentStore, integrationStore,
-				sessionMessageStore, automationRunStore, snapshotStore, billingMetrics, cancelRegistry, threadCancelRegistry, orgSettingsCache, sandboxCapacity)
+				sessionMessageStore, automationRunStore, snapshotStore, billingMetrics, cancelRegistry, threadCancelRegistry, orgSettingsCache, sandboxCapacity, redisClient, fileReader)
 			if services != nil {
 				sandboxAuthShutdown = services.SandboxAuthShutdown
 				// Wire eval pub/sub publishers so worker handlers can wake
@@ -892,6 +893,8 @@ func buildServices(
 	threadCancelRegistry *agent.ThreadCancelRegistry,
 	orgSettingsCache *agent.OrgSettingsCache,
 	sandboxCapacity *agent.SandboxCapacityGate,
+	redisClient *cache.Client,
+	fileReader sandbox.FileReader,
 ) *worker.Services {
 	// GitHub App service (for installation tokens, PR creation).
 	ghSvc, err := ghservice.NewService(cfg.GitHubAppID, cfg.GitHubAppPrivateKey)
@@ -914,6 +917,10 @@ func buildServices(
 		providers.WithHealthCheckImage(cfg.SandboxHealthCheckImage),
 		providers.WithRequireDiskQuota(cfg.SandboxRequireDiskQuota),
 	)
+	mentionIndexCache := workspace.NewMentionIndexCache(workspace.MentionIndexCacheConfig{
+		Redis:  redisClient,
+		Logger: logger,
+	})
 
 	// Startup health check: verify Docker daemon connectivity and, for gVisor,
 	// that the runsc runtime is functional. Retry a few times because Docker and
@@ -1048,6 +1055,8 @@ func buildServices(
 		UserCredentials:   userCredentialStore,
 		CodingCredentials: codingCredentialStore,
 		Snapshots:         snapshotStore,
+		FileReader:        fileReader,
+		MentionIndexes:    mentionIndexCache,
 		UsageTracker:      usageTracker,
 		SandboxCapacity:   sandboxCapacity,
 		Cancels:           cancelRegistry,
