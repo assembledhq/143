@@ -257,17 +257,11 @@ type NotionConfig struct {
 	WorkspaceName string `json:"workspace_name,omitempty"`
 }
 
-// CircleCIConfig stores a CircleCI personal API token plus the
-// VCS-prefixed project slug (e.g. "gh/org/repo") that all flaky-test queries
-// need. CircleCI doesn't offer a clean OAuth flow for the v2 Insights API,
-// so the user pastes a personal token via the integrations page rather than
-// going through an OAuth redirect.
+// CircleCIConfig stores a CircleCI personal API token plus the VCS-prefixed
+// project slug (e.g. "gh/org/repo") used for all flaky-test queries.
 type CircleCIConfig struct {
 	AuthToken   string `json:"auth_token"` // #nosec G117 -- JSON config field
 	ProjectSlug string `json:"project_slug"`
-	// BaseURL allows pointing at a CircleCI Server install. Empty defaults
-	// to "https://circleci.com".
-	BaseURL string `json:"base_url,omitempty"`
 }
 
 type OpenAIChatGPTConfig struct {

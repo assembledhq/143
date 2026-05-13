@@ -3,9 +3,11 @@ package integration
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -337,6 +339,78 @@ func TestCircleCI_GetRecentFailures_SurfacesAllDivesFailed(t *testing.T) {
 
 	_, err := ci.GetRecentFailures(context.Background(), "c", "TF", 5)
 	require.Error(t, err, "if no successful dive returns failures, the dive error must surface")
+}
+
+// Concurrent dives must still return the same matching failures and respect
+// the unauthorized sentinel as the previous serial implementation.
+func TestCircleCI_GetRecentFailures_ConcurrentDives(t *testing.T) {
+	t.Parallel()
+
+	const wantTestName = "TF"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if strings.HasSuffix(r.URL.Path, "/flaky-tests") {
+			_, _ = w.Write([]byte(`{"flaky-tests":[
+				{"test-name":"TF","classname":"c","job-number":1,"workflow-created-at":"2024-01-01T00:00:00Z"},
+				{"test-name":"TF","classname":"c","job-number":2,"workflow-created-at":"2024-01-02T00:00:00Z"},
+				{"test-name":"TF","classname":"c","job-number":3,"workflow-created-at":"2024-01-03T00:00:00Z"}
+			]}`))
+			return
+		}
+		_, _ = fmt.Fprintf(w, `{"items":[{"name":"TF","classname":"c","result":"failure","message":"boom-%s"}]}`, r.URL.Path)
+	}))
+	defer server.Close()
+
+	ci := NewCircleCITestInsights(CircleCIConfig{
+		BaseURL:     server.URL,
+		AuthToken:   "tok",
+		ProjectSlug: "gh/octocat/hello",
+	})
+
+	failures, err := ci.GetRecentFailures(context.Background(), "c", wantTestName, 5)
+	require.NoError(t, err)
+	require.Len(t, failures, 3, "all three matching dives should contribute")
+	require.Equal(t, wantTestName, failures[0].TestName)
+}
+
+// maxJobDives must cap the dive fan-out even when the flaky-tests list
+// contains more matching jobs than the cap.
+func TestCircleCI_GetRecentFailures_RespectsMaxJobDives(t *testing.T) {
+	t.Parallel()
+
+	var diveCalls int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if strings.HasSuffix(r.URL.Path, "/flaky-tests") {
+			b := strings.Builder{}
+			b.WriteString(`{"flaky-tests":[`)
+			for i := 1; i <= 10; i++ {
+				if i > 1 {
+					b.WriteString(",")
+				}
+				fmt.Fprintf(&b, `{"test-name":"TF","classname":"c","job-number":%d}`, i)
+			}
+			b.WriteString(`]}`)
+			_, _ = w.Write([]byte(b.String()))
+			return
+		}
+		atomic.AddInt32(&diveCalls, 1)
+		_, _ = w.Write([]byte(`{"items":[{"name":"TF","classname":"c","result":"failure","message":"x"}]}`))
+	}))
+	defer server.Close()
+
+	ci := NewCircleCITestInsights(CircleCIConfig{
+		BaseURL:     server.URL,
+		AuthToken:   "tok",
+		ProjectSlug: "gh/octocat/hello",
+	})
+	ci.maxJobDives = 3
+
+	failures, err := ci.GetRecentFailures(context.Background(), "c", "TF", 50)
+	require.NoError(t, err)
+	require.Len(t, failures, 3, "cap should limit which jobs we dive into")
+	require.Equal(t, int32(3), atomic.LoadInt32(&diveCalls),
+		"maxJobDives must short-circuit the dive scheduling, not just the result count")
 }
 
 func TestCircleCI_IsFailureResult_OnlyDocumentedValues(t *testing.T) {

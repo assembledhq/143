@@ -1,6 +1,7 @@
 package integration
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -9,48 +10,47 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
+
+	"golang.org/x/sync/errgroup"
 )
 
-// ErrCircleCIUnauthorized is returned when CircleCI responds with 401/403.
-// Tool dispatch wraps this to tell the agent "stop retrying; ask the user to
-// reconnect", mirroring the ErrLinearUnauthorized pattern.
+// ErrCircleCIUnauthorized is the sentinel for 401/403 from CircleCI. Tool
+// dispatch matches on this to prompt the user to reconnect rather than
+// retry a doomed call (parallels ErrLinearUnauthorized).
 var ErrCircleCIUnauthorized = errors.New("circleci unauthorized")
 
-// circleCIMaxPages caps how many pages of test results we follow on a single
-// job — 10 pages * 250 per page = 2500 tests, enough to cover most real CI
-// jobs without runaway pagination if CircleCI returns broken next tokens.
-const circleCIMaxPages = 10
+// CircleCI test result enum, as documented by CircleCI's /tests endpoint.
+const (
+	ccResultSuccess = "success"
+	ccResultFailure = "failure"
+	ccResultSkipped = "skipped"
+	ccResultError   = "error"
+)
 
-// circleCIMaxJobDives caps how many distinct jobs GetRecentFailures will
-// fetch test results from. Each dive is one extra HTTP call, so this bounds
-// the worst-case fan-out from a single CLI invocation.
-const circleCIMaxJobDives = 20
+// Default caps. These bound the worst-case fan-out when CircleCI returns
+// runaway pagination or a popular flaky test with many job hits; exposed as
+// fields so tests can drive the cap paths.
+const (
+	defaultCircleCIMaxPages    = 10 // 10 * 250 per page = 2500 tests per job
+	defaultCircleCIMaxJobDives = 20
+	defaultCircleCIDiveConc    = 4 // concurrent /tests requests per GetRecentFailures call
+)
 
-// CircleCITestInsights implements CITestInsights for CircleCI. It uses the
-// CircleCI v2 Insights API to surface flaky tests and the v2 project test
-// metadata endpoint to fetch the actual failure messages for a specific job.
-//
-// API endpoints used:
-//
-//   - GET /api/v2/insights/{project-slug}/flaky-tests
-//     returns the provider's flaky-test detection results (CircleCI flags a
-//     test as flaky when the same test on the same commit/git ref flips
-//     between pass and fail).
-//   - GET /api/v2/project/{project-slug}/{job-number}/tests
-//     returns the per-test results (with failure message and run time) for
-//     a specific job — used to read what a flaky test actually looked like
-//     when it failed. Paginated via `next_page_token`.
-//
-// Authentication: CircleCI personal API tokens, sent in the Circle-Token
-// header. The same token works for both endpoints. Token scope: read access
-// to the project. 401/403 responses are converted to ErrCircleCIUnauthorized
-// so the CLI surface can prompt the user to reconnect.
+// CircleCITestInsights implements CITestInsights using CircleCI's v2 API:
+// the Insights flaky-tests endpoint to find candidates, and the per-job
+// /tests endpoint (paginated via next_page_token) to read failure messages.
+// Auth is a personal API token in the Circle-Token header.
 type CircleCITestInsights struct {
 	httpClient  *http.Client
 	baseURL     string
 	authToken   string
 	projectSlug string // e.g. "gh/assembledhq/143" or "github/assembledhq/143"
+
+	maxPages    int
+	maxJobDives int
+	diveConc    int
 }
 
 // CircleCIConfig holds the connection details for a CircleCI provider.
@@ -62,29 +62,23 @@ type CircleCIConfig struct {
 
 // NewCircleCITestInsights creates a CircleCI CITestInsights provider.
 func NewCircleCITestInsights(cfg CircleCIConfig) *CircleCITestInsights {
-	baseURL := cfg.BaseURL
-	if baseURL == "" {
-		baseURL = "https://circleci.com"
-	}
-	baseURL = strings.TrimRight(baseURL, "/")
-
+	baseURL := strings.TrimRight(cmp.Or(cfg.BaseURL, "https://circleci.com"), "/")
 	return &CircleCITestInsights{
 		httpClient:  &http.Client{Timeout: 30 * time.Second},
 		baseURL:     baseURL,
 		authToken:   cfg.AuthToken,
 		projectSlug: cfg.ProjectSlug,
+		maxPages:    defaultCircleCIMaxPages,
+		maxJobDives: defaultCircleCIMaxJobDives,
+		diveConc:    defaultCircleCIDiveConc,
 	}
 }
 
 func (c *CircleCITestInsights) Name() string { return "circleci" }
 
-// ListFlakyTests fetches CircleCI's flaky-test detector output for the
-// configured project. CircleCI flags a test as flaky when it has flipped
-// pass/fail on the same commit within the analysed window (default 14 days).
-//
-// Note: the upstream endpoint does not support a server-side `limit`
-// parameter, so filter.Limit is enforced client-side by truncating the
-// returned slice.
+// ListFlakyTests returns CircleCI's flaky-test detector output. Note: the
+// upstream endpoint has no server-side limit param, so filter.Limit is
+// applied client-side.
 func (c *CircleCITestInsights) ListFlakyTests(ctx context.Context, filter FlakyTestFilter) ([]FlakyTest, error) {
 	if c.projectSlug == "" {
 		return nil, errors.New("circleci: project_slug not configured")
@@ -98,8 +92,7 @@ func (c *CircleCITestInsights) ListFlakyTests(ctx context.Context, filter FlakyT
 		params.Set("workflow-name", filter.WorkflowName)
 	}
 
-	endpoint := fmt.Sprintf("%s/api/v2/insights/%s/flaky-tests",
-		c.baseURL, c.projectSlug)
+	endpoint := fmt.Sprintf("%s/api/v2/insights/%s/flaky-tests", c.baseURL, c.projectSlug)
 	if encoded := params.Encode(); encoded != "" {
 		endpoint += "?" + encoded
 	}
@@ -139,16 +132,12 @@ func (c *CircleCITestInsights) ListFlakyTests(ctx context.Context, filter FlakyT
 	return results, nil
 }
 
-// GetTestResults fetches individual test results for a single CircleCI job,
-// following `next_page_token` until exhausted (capped at circleCIMaxPages).
-// The response includes per-test pass/fail status and (for failed tests) the
-// failure message — the agent uses this to read what the flaky test failure
-// actually looked like before deciding how to fix it.
+// GetTestResults fetches per-test results for a single CircleCI job,
+// following next_page_token until exhausted (capped at maxPages).
 //
 // CircleCI returns an empty page for jobs that didn't upload JUnit XML via
-// `store_test_results`, or for jobs whose results exceed 250MB. In those
-// cases this method returns an empty slice with no error; the caller should
-// treat that as "no structured test data available for this job".
+// `store_test_results`, or whose results exceed 250MB — callers see an
+// empty slice with no error in those cases.
 func (c *CircleCITestInsights) GetTestResults(ctx context.Context, ref JobRef) ([]TestResult, error) {
 	if c.projectSlug == "" {
 		return nil, errors.New("circleci: project_slug not configured")
@@ -159,13 +148,12 @@ func (c *CircleCITestInsights) GetTestResults(ctx context.Context, ref JobRef) (
 
 	var all []TestResult
 	pageToken := ""
-	for page := 0; page < circleCIMaxPages; page++ {
+	for page := 0; page < c.maxPages; page++ {
 		params := url.Values{}
 		if pageToken != "" {
 			params.Set("page-token", pageToken)
 		}
-		endpoint := fmt.Sprintf("%s/api/v2/project/%s/%d/tests",
-			c.baseURL, c.projectSlug, ref.JobNumber)
+		endpoint := fmt.Sprintf("%s/api/v2/project/%s/%d/tests", c.baseURL, c.projectSlug, ref.JobNumber)
 		if encoded := params.Encode(); encoded != "" {
 			endpoint += "?" + encoded
 		}
@@ -173,8 +161,8 @@ func (c *CircleCITestInsights) GetTestResults(ctx context.Context, ref JobRef) (
 		var resp ccJobTestsResponse
 		if err := c.doGet(ctx, endpoint, &resp); err != nil {
 			if len(all) > 0 {
-				// Return partial results rather than nothing — the agent can
-				// still reason about what we did fetch.
+				// Return partial results so the agent has *some* data to
+				// reason about rather than just an opaque failure.
 				return all, fmt.Errorf("get test results (after page %d): %w", page, err)
 			}
 			return nil, fmt.Errorf("get test results: %w", err)
@@ -201,19 +189,13 @@ func (c *CircleCITestInsights) GetTestResults(ctx context.Context, ref JobRef) (
 }
 
 // GetRecentFailures finds recent failed occurrences of a single flaky test
-// across recent jobs in the project. The agent uses this to compare multiple
-// failure messages and identify a root cause rather than reacting to a single
-// failure.
+// across recent jobs. CircleCI's API doesn't expose "failures across jobs
+// for one test" directly — we fetch the flaky-tests list, pick the jobs
+// where this test appears, and dive into each job's /tests endpoint for
+// the failure message. Dives run with bounded concurrency.
 //
-// Implementation: the flaky-tests endpoint already groups occurrences by test,
-// so we re-fetch it and pull the matching test's recent failure messages from
-// its associated job. CircleCI's API doesn't expose a single "failures across
-// jobs for one test" endpoint, so we cap the dive at circleCIMaxJobDives
-// distinct jobs and stop when we've collected `limit` failures.
-//
-// If every dive into a job fails (e.g. revoked token, rate-limited) we return
-// the underlying error rather than silently returning [] — the agent needs to
-// distinguish "no flakes recently" from "auth broken".
+// If every dive fails we return the underlying error rather than [] — the
+// agent must be able to distinguish "no flakes" from "auth broken".
 func (c *CircleCITestInsights) GetRecentFailures(ctx context.Context, classname, testName string, limit int) ([]TestResult, error) {
 	if testName == "" {
 		return nil, errors.New("circleci: test_name is required")
@@ -222,109 +204,164 @@ func (c *CircleCITestInsights) GetRecentFailures(ctx context.Context, classname,
 		limit = 5
 	}
 
-	endpoint := fmt.Sprintf("%s/api/v2/insights/%s/flaky-tests",
-		c.baseURL, c.projectSlug)
-
+	endpoint := fmt.Sprintf("%s/api/v2/insights/%s/flaky-tests", c.baseURL, c.projectSlug)
 	var resp ccFlakyTestsResponse
 	if err := c.doGet(ctx, endpoint, &resp); err != nil {
 		return nil, fmt.Errorf("get recent failures: %w", err)
 	}
 
-	var failures []TestResult
-	seenJobs := make(map[int]bool)
-	dives := 0
-	var lastDiveErr error
-	for _, t := range resp.FlakyTests {
+	jobs := c.flakyJobsFor(resp.FlakyTests, classname, testName)
+	failures, err := c.collectFailuresFromJobs(ctx, jobs, classname, testName, limit)
+	if err != nil {
+		return nil, err
+	}
+	return failures, nil
+}
+
+// flakyJobsFor returns the deduped (job-number, workflow-time) pairs for a
+// given test, in flaky-tests response order, capped at maxJobDives.
+func (c *CircleCITestInsights) flakyJobsFor(flakies []ccFlakyTest, classname, testName string) []flakyJobRef {
+	var jobs []flakyJobRef
+	seen := make(map[int]bool)
+	for _, t := range flakies {
 		if t.TestName != testName {
 			continue
 		}
 		if classname != "" && t.Classname != classname {
 			continue
 		}
-		if t.JobNumber <= 0 || seenJobs[t.JobNumber] {
+		if t.JobNumber <= 0 || seen[t.JobNumber] {
 			continue
 		}
-		if dives >= circleCIMaxJobDives {
+		seen[t.JobNumber] = true
+		jobs = append(jobs, flakyJobRef{
+			JobNumber: t.JobNumber,
+			RunAt:     parseCircleCITime(t.WorkflowCreatedAt),
+		})
+		if len(jobs) >= c.maxJobDives {
 			break
 		}
-		seenJobs[t.JobNumber] = true
-		dives++
+	}
+	return jobs
+}
 
-		jobResults, err := c.GetTestResults(ctx, JobRef{JobNumber: t.JobNumber})
-		if err != nil {
-			// Remember the most recent error so we can surface it if no
-			// successful dive turns up anything. Authorization failures get
-			// special handling: bail immediately so the agent gets the
-			// "reconnect" signal instead of empty results.
-			lastDiveErr = err
-			if errors.Is(err, ErrCircleCIUnauthorized) {
-				return nil, err
+type flakyJobRef struct {
+	JobNumber int
+	RunAt     time.Time
+}
+
+// collectFailuresFromJobs dives into each job's /tests endpoint concurrently
+// (bounded by diveConc), gathers failures matching the test, and returns at
+// most `limit` results. Unauthorized errors short-circuit the whole call.
+// If every dive errors and we collected nothing, the dive error is surfaced.
+func (c *CircleCITestInsights) collectFailuresFromJobs(ctx context.Context, jobs []flakyJobRef, classname, testName string, limit int) ([]TestResult, error) {
+	if len(jobs) == 0 {
+		return nil, nil
+	}
+
+	type jobOutcome struct {
+		idx     int
+		matches []TestResult
+		err     error
+	}
+	outcomes := make([]jobOutcome, len(jobs))
+
+	gctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	var unauthOnce sync.Once
+	var unauthErr error
+
+	g, gctx := errgroup.WithContext(gctx)
+	g.SetLimit(c.diveConc)
+
+	for i, job := range jobs {
+		g.Go(func() error {
+			results, err := c.GetTestResults(gctx, JobRef{JobNumber: job.JobNumber})
+			if err != nil {
+				if errors.Is(err, ErrCircleCIUnauthorized) {
+					unauthOnce.Do(func() {
+						unauthErr = err
+						cancel()
+					})
+				}
+				outcomes[i] = jobOutcome{idx: i, err: err}
+				return nil
 			}
+			matches := make([]TestResult, 0)
+			for _, r := range results {
+				if r.TestName != testName {
+					continue
+				}
+				if classname != "" && r.Classname != classname {
+					continue
+				}
+				if !isFailureResult(r.Result) {
+					continue
+				}
+				r.RunAt = job.RunAt
+				matches = append(matches, r)
+			}
+			outcomes[i] = jobOutcome{idx: i, matches: matches}
+			return nil
+		})
+	}
+	_ = g.Wait()
+
+	if unauthErr != nil {
+		return nil, unauthErr
+	}
+
+	// Preserve flaky-tests response order so "most recent" stays first.
+	var failures []TestResult
+	var lastErr error
+	for _, o := range outcomes {
+		if o.err != nil {
+			lastErr = o.err
 			continue
 		}
-		for _, r := range jobResults {
-			if r.TestName != testName {
-				continue
-			}
-			if classname != "" && r.Classname != classname {
-				continue
-			}
-			if !isFailureResult(r.Result) {
-				continue
-			}
-			r.RunAt = parseCircleCITime(t.WorkflowCreatedAt)
-			failures = append(failures, r)
+		for _, m := range o.matches {
+			failures = append(failures, m)
 			if len(failures) >= limit {
 				return failures, nil
 			}
 		}
 	}
-
-	if len(failures) == 0 && lastDiveErr != nil {
-		// Every job dive failed AND we found no failures from any
-		// successful dive. The empty slice is misleading — surface the
-		// underlying error so the agent doesn't conclude "no flakes".
-		return nil, fmt.Errorf("get recent failures: all job dives failed: %w", lastDiveErr)
+	if len(failures) == 0 && lastErr != nil {
+		return nil, fmt.Errorf("get recent failures: all job dives failed: %w", lastErr)
 	}
 	return failures, nil
 }
 
-// isFailureResult reports whether a CircleCI test result string represents
-// a failure. CircleCI documents the result enum as success / failure /
-// skipped / error.
+// isFailureResult reports whether a CircleCI test result represents a failure.
 func isFailureResult(r string) bool {
 	switch strings.ToLower(strings.TrimSpace(r)) {
-	case "failure", "error":
+	case ccResultFailure, ccResultError:
 		return true
 	default:
 		return false
 	}
 }
 
-// jobWebURL builds a UI link for a CircleCI job. CircleCI URLs require the
-// VCS host + org + repo, which our project slug supplies in either
-// "gh/org/repo" or "github/org/repo" form. We normalise to "gh" for the URL.
+// vcsShortPrefix maps CircleCI's accepted long-form VCS names to the short
+// form expected by app.circleci.com pipeline URLs.
+var vcsShortPrefix = map[string]string{
+	"github":    "gh",
+	"bitbucket": "bb",
+}
+
 func (c *CircleCITestInsights) jobWebURL(jobNumber int) string {
 	parts := strings.SplitN(c.projectSlug, "/", 3)
 	if len(parts) < 3 {
 		return ""
 	}
-	vcs := parts[0]
-	switch vcs {
-	case "github":
-		vcs = "gh"
-	case "bitbucket":
-		vcs = "bb"
-	}
-	return fmt.Sprintf("https://app.circleci.com/pipelines/%s/%s/%s/jobs/%d",
-		vcs, parts[1], parts[2], jobNumber)
+	vcs := cmp.Or(vcsShortPrefix[parts[0]], parts[0])
+	return fmt.Sprintf("https://app.circleci.com/pipelines/%s/%s/%s/jobs/%d", vcs, parts[1], parts[2], jobNumber)
 }
 
-// doGet performs an authenticated GET request and decodes the JSON response.
-// 401/403 errors are wrapped in ErrCircleCIUnauthorized so callers can
-// distinguish "reconnect" from generic API failures. For other non-2xx
-// statuses, the response body is preserved (capped at 4KB) in the error
-// message so the agent sees CircleCI's actual diagnostic, not just a code.
+// doGet performs an authenticated GET and decodes JSON. 401/403 wrap
+// ErrCircleCIUnauthorized; other non-2xx errors preserve up to 4KB of body
+// so the agent sees CircleCI's diagnostic, not just a status code.
 func (c *CircleCITestInsights) doGet(ctx context.Context, urlStr string, target any) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, urlStr, nil)
 	if err != nil {
@@ -357,8 +394,6 @@ func (c *CircleCITestInsights) doGet(ctx context.Context, urlStr string, target 
 	return json.NewDecoder(resp.Body).Decode(target)
 }
 
-// readBodySnippet reads up to 4KB of the response body and trims it. Used to
-// preserve CircleCI's error JSON in failure messages without unbounded reads.
 func readBodySnippet(r io.Reader) string {
 	const max = 4 << 10
 	data, err := io.ReadAll(io.LimitReader(r, max))
@@ -368,10 +403,6 @@ func readBodySnippet(r io.Reader) string {
 	return strings.TrimSpace(string(data))
 }
 
-// parseCircleCITime parses an ISO-8601 timestamp. CircleCI returns RFC3339
-// with sub-second precision; RFC3339Nano already accepts plain RFC3339, so
-// one parser handles both cases. Zero time is returned on failure so the
-// caller can omit the field.
 func parseCircleCITime(s string) time.Time {
 	if s == "" {
 		return time.Time{}
@@ -384,9 +415,8 @@ func parseCircleCITime(s string) time.Time {
 
 // --- response shapes ---
 
-// ccFlakyTestsResponse handles both `flaky-tests` and `flaky_tests` because
-// CircleCI's docs and live API have been inconsistent about which form they
-// emit. UnmarshalJSON picks whichever is present.
+// ccFlakyTestsResponse handles both "flaky-tests" and "flaky_tests" because
+// CircleCI's docs and live API have shipped both forms over time.
 type ccFlakyTestsResponse struct {
 	FlakyTests []ccFlakyTest
 }
@@ -407,8 +437,6 @@ func (r *ccFlakyTestsResponse) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-// ccFlakyTest defines both hyphenated and snake_case tags so a custom
-// UnmarshalJSON can fall back gracefully if CircleCI emits the other form.
 type ccFlakyTest struct {
 	TestName          string
 	Classname         string
@@ -445,31 +473,17 @@ func (t *ccFlakyTest) UnmarshalJSON(data []byte) error {
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return err
 	}
-	t.TestName = firstNonEmpty(raw.TestNameHyphen, raw.TestNameSnake)
+	t.TestName = cmp.Or(raw.TestNameHyphen, raw.TestNameSnake)
 	t.Classname = raw.Classname
 	t.File = raw.File
-	t.JobName = firstNonEmpty(raw.JobNameHyphen, raw.JobNameSnake)
-	t.JobNumber = firstNonZero(raw.JobNumberHyphen, raw.JobNumberSnake)
-	t.WorkflowName = firstNonEmpty(raw.WorkflowNameHyphen, raw.WorkflowNameSnake)
-	t.WorkflowCreatedAt = firstNonEmpty(raw.WorkflowCreatedAtH, raw.WorkflowCreatedAtS)
-	t.PipelineNumber = firstNonZero(raw.PipelineNumberH, raw.PipelineNumberS)
-	t.TimesFlaked = firstNonZero(raw.TimesFlakedHyphen, raw.TimesFlakedSnake)
+	t.JobName = cmp.Or(raw.JobNameHyphen, raw.JobNameSnake)
+	t.JobNumber = cmp.Or(raw.JobNumberHyphen, raw.JobNumberSnake)
+	t.WorkflowName = cmp.Or(raw.WorkflowNameHyphen, raw.WorkflowNameSnake)
+	t.WorkflowCreatedAt = cmp.Or(raw.WorkflowCreatedAtH, raw.WorkflowCreatedAtS)
+	t.PipelineNumber = cmp.Or(raw.PipelineNumberH, raw.PipelineNumberS)
+	t.TimesFlaked = cmp.Or(raw.TimesFlakedHyphen, raw.TimesFlakedSnake)
 	t.Source = raw.Source
 	return nil
-}
-
-func firstNonEmpty(a, b string) string {
-	if a != "" {
-		return a
-	}
-	return b
-}
-
-func firstNonZero(a, b int) int {
-	if a != 0 {
-		return a
-	}
-	return b
 }
 
 type ccJobTestsResponse struct {

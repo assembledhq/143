@@ -1728,20 +1728,16 @@ func (h *IntegrationHandler) validateNotionToken(ctx context.Context, token stri
 // ──────────────────────────────────────────────────────────────────────────────
 
 // ConnectCircleCI accepts a CircleCI personal API token and project slug,
-// validates them against the CircleCI v2 Insights API (cheapest authenticated
-// call: GET /me), stores the credential, and creates an active integration
-// record.
-//
-// Like Notion, CircleCI uses a paste-the-token flow rather than OAuth — the
-// v2 Insights API isn't exposed via CircleCI's OAuth scopes, so a personal
-// API token is the documented path.
+// validates them against /api/v2/me (cheapest authenticated call), stores the
+// credential, and creates an active integration record. CircleCI uses a
+// paste-the-token flow because the v2 Insights API isn't exposed through
+// CircleCI's OAuth scopes.
 func (h *IntegrationHandler) ConnectCircleCI(w http.ResponseWriter, r *http.Request) {
 	orgID := middleware.OrgIDFromContext(r.Context())
 
 	var req struct {
 		AuthToken   string `json:"auth_token"`
 		ProjectSlug string `json:"project_slug"`
-		BaseURL     string `json:"base_url"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, r, http.StatusBadRequest, "INVALID_JSON", "invalid request body")
@@ -1749,7 +1745,6 @@ func (h *IntegrationHandler) ConnectCircleCI(w http.ResponseWriter, r *http.Requ
 	}
 	req.AuthToken = strings.TrimSpace(req.AuthToken)
 	req.ProjectSlug = strings.Trim(strings.TrimSpace(req.ProjectSlug), "/")
-	req.BaseURL = strings.TrimSpace(req.BaseURL)
 	if req.AuthToken == "" {
 		writeError(w, r, http.StatusBadRequest, "MISSING_TOKEN", "auth_token is required")
 		return
@@ -1763,8 +1758,7 @@ func (h *IntegrationHandler) ConnectCircleCI(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	// Validate the token against the CircleCI API.
-	if err := h.validateCircleCIToken(r.Context(), req.AuthToken, req.BaseURL); err != nil {
+	if err := h.validateCircleCIToken(r.Context(), req.AuthToken); err != nil {
 		writeError(w, r, http.StatusBadRequest, "INVALID_TOKEN", "failed to validate CircleCI token: "+err.Error())
 		return
 	}
@@ -1772,7 +1766,6 @@ func (h *IntegrationHandler) ConnectCircleCI(w http.ResponseWriter, r *http.Requ
 	cfg := models.CircleCIConfig{
 		AuthToken:   req.AuthToken,
 		ProjectSlug: req.ProjectSlug,
-		BaseURL:     req.BaseURL,
 	}
 	if err := h.credentialStore.Upsert(r.Context(), orgID, cfg); err != nil {
 		writeError(w, r, http.StatusInternalServerError, "CREDENTIAL_SAVE_FAILED", "failed to save CircleCI credentials", err)
@@ -1792,16 +1785,8 @@ func (h *IntegrationHandler) ConnectCircleCI(w http.ResponseWriter, r *http.Requ
 	writeJSON(w, http.StatusOK, models.SingleResponse[models.Integration]{Data: integration})
 }
 
-// validateCircleCIToken calls CircleCI's /api/v2/me endpoint to verify the
-// token is valid. /me is the standard "is this token good?" call — it's
-// org-agnostic so it works before the user has scoped to a project slug.
-func (h *IntegrationHandler) validateCircleCIToken(ctx context.Context, token, baseURL string) error {
-	if baseURL == "" {
-		baseURL = "https://circleci.com"
-	}
-	baseURL = strings.TrimRight(baseURL, "/")
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/api/v2/me", nil)
+func (h *IntegrationHandler) validateCircleCIToken(ctx context.Context, token string) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://circleci.com/api/v2/me", nil)
 	if err != nil {
 		return err
 	}
@@ -1820,8 +1805,6 @@ func (h *IntegrationHandler) validateCircleCIToken(ctx context.Context, token, b
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("circleci API returned %d", resp.StatusCode)
 	}
-	// We don't actually need anything from the body — a 200 from /me is the
-	// signal the token is good. Drain to allow connection reuse.
-	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<16))
+	_, _ = io.Copy(io.Discard, resp.Body)
 	return nil
 }

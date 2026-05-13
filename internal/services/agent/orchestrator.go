@@ -4602,7 +4602,6 @@ func (o *Orchestrator) BuildIntegrationSkills(ctx context.Context, orgID uuid.UU
 		provider := integration.NewCircleCITestInsights(integration.CircleCIConfig{
 			AuthToken:   ic.CircleCI.AuthToken,
 			ProjectSlug: ic.CircleCI.ProjectSlug,
-			BaseURL:     ic.CircleCI.BaseURL,
 		})
 		reg.RegisterCITestInsights(provider)
 	}

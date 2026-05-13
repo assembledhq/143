@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api";
 import { AllIntegrationCards } from "@/components/integration-connection-cards";
@@ -125,6 +125,74 @@ function SlackChannelPicker() {
   );
 }
 
+type TokenDialogField = {
+  id: string;
+  label: string;
+  placeholder?: string;
+  type?: "text" | "password";
+};
+
+type TokenDialogProps = {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  title: string;
+  description: ReactNode;
+  fields: TokenDialogField[];
+  submitting: boolean;
+  error: string | null;
+  onSubmit: (values: Record<string, string>) => void;
+};
+
+// Generic paste-the-credential dialog. Shared by Notion (token only) and
+// CircleCI (token + project slug); the next provider that needs a manual
+// credential drops in by adding a field to its `fields` array.
+function TokenDialog({ open, onOpenChange, title, description, fields, submitting, error, onSubmit }: TokenDialogProps) {
+  const [values, setValues] = useState<Record<string, string>>({});
+
+  const handleOpenChange = (next: boolean) => {
+    if (!next) setValues({});
+    onOpenChange(next);
+  };
+  const trimmedValues = Object.fromEntries(fields.map((f) => [f.id, (values[f.id] ?? "").trim()]));
+  const ready = fields.every((f) => trimmedValues[f.id] !== "");
+
+  return (
+    <AlertDialog open={open} onOpenChange={handleOpenChange}>
+      <AlertDialogContent>
+        <AlertDialogHeader>
+          <AlertDialogTitle>{title}</AlertDialogTitle>
+          <AlertDialogDescription>{description}</AlertDialogDescription>
+        </AlertDialogHeader>
+        <div className="space-y-3">
+          {fields.map((f) => (
+            <div key={f.id} className="grid gap-1.5">
+              <Label htmlFor={f.id}>{f.label}</Label>
+              <Input
+                id={f.id}
+                type={f.type ?? "password"}
+                placeholder={f.placeholder}
+                value={values[f.id] ?? ""}
+                onChange={(e) => setValues((prev) => ({ ...prev, [f.id]: e.target.value }))}
+              />
+            </div>
+          ))}
+          {error && <p className="text-xs text-destructive">{error}</p>}
+        </div>
+        <AlertDialogFooter>
+          <AlertDialogCancel>Cancel</AlertDialogCancel>
+          <Button
+            onClick={() => onSubmit(trimmedValues)}
+            disabled={!ready || submitting}
+            loading={submitting}
+          >
+            Connect
+          </Button>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
+  );
+}
+
 export default function IntegrationsPage() {
   const queryClient = useQueryClient();
   const { user } = useAuth();
@@ -144,16 +212,12 @@ export default function IntegrationsPage() {
   const disconnectRepoMutation = useDisconnectRepository();
   const reconnectRepoMutation = useReconnectRepository();
 
-  // Notion token dialog state.
   const [notionDialogOpen, setNotionDialogOpen] = useState(false);
-  const [notionToken, setNotionToken] = useState("");
   const [notionError, setNotionError] = useState<string | null>(null);
-
   const notionConnectMutation = useMutation({
     mutationFn: (token: string) => api.integrations.connectNotion(token),
     onSuccess: () => {
       setNotionDialogOpen(false);
-      setNotionToken("");
       setNotionError(null);
       queryClient.invalidateQueries({ queryKey: ["integrations"] });
     },
@@ -162,20 +226,13 @@ export default function IntegrationsPage() {
     },
   });
 
-  // CircleCI token + project slug dialog state. CircleCI doesn't expose the
-  // v2 Insights API via OAuth, so we use a paste-the-token form like Notion.
   const [circleciDialogOpen, setCircleciDialogOpen] = useState(false);
-  const [circleciToken, setCircleciToken] = useState("");
-  const [circleciProjectSlug, setCircleciProjectSlug] = useState("");
   const [circleciError, setCircleciError] = useState<string | null>(null);
-
   const circleciConnectMutation = useMutation({
     mutationFn: ({ token, projectSlug }: { token: string; projectSlug: string }) =>
       api.integrations.connectCircleCI(token, projectSlug),
     onSuccess: () => {
       setCircleciDialogOpen(false);
-      setCircleciToken("");
-      setCircleciProjectSlug("");
       setCircleciError(null);
       queryClient.invalidateQueries({ queryKey: ["integrations"] });
     },
@@ -256,13 +313,10 @@ export default function IntegrationsPage() {
         onConnectSlack={() => api.integrations.loginSlack()}
         onConnectNotion={() => {
           setNotionError(null);
-          setNotionToken("");
           setNotionDialogOpen(true);
         }}
         onConnectCircleCI={() => {
           setCircleciError(null);
-          setCircleciToken("");
-          setCircleciProjectSlug("");
           setCircleciDialogOpen(true);
         }}
         onDisconnect={(provider) => disconnectMutation.mutate(provider)}
@@ -274,122 +328,59 @@ export default function IntegrationsPage() {
       {slackIntegration && isAdmin && <SlackChannelPicker />}
       </div>
 
-      <AlertDialog open={notionDialogOpen} onOpenChange={setNotionDialogOpen}>
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>Connect Notion</AlertDialogTitle>
-            <AlertDialogDescription>
-              Enter your Notion internal integration token. You can create one at{" "}
-              <a
-                href="https://www.notion.so/my-integrations"
-                target="_blank"
-                rel="noopener noreferrer"
-                className="underline"
-              >
-                notion.so/my-integrations
-              </a>
-              . Make sure to share the pages you want accessible with the integration.
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <div className="grid gap-1.5">
-            <Label htmlFor="notion-token">Integration Token</Label>
-            <Input
-              id="notion-token"
-              type="password"
-              placeholder="ntn_..."
-              value={notionToken}
-              onChange={(e) => {
-                setNotionToken(e.target.value);
-                setNotionError(null);
-              }}
-            />
-            {notionError && (
-              <p className="text-xs text-destructive">{notionError}</p>
-            )}
-          </div>
-          <AlertDialogFooter>
-            <AlertDialogCancel>Cancel</AlertDialogCancel>
-            <Button
-              onClick={() => notionConnectMutation.mutate(notionToken)}
-              disabled={!notionToken.trim() || notionConnectMutation.isPending}
-              loading={notionConnectMutation.isPending}
+      <TokenDialog
+        open={notionDialogOpen}
+        onOpenChange={setNotionDialogOpen}
+        title="Connect Notion"
+        description={
+          <>
+            Enter your Notion internal integration token. You can create one at{" "}
+            <a
+              href="https://www.notion.so/my-integrations"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="underline"
             >
-              Connect
-            </Button>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
+              notion.so/my-integrations
+            </a>
+            . Make sure to share the pages you want accessible with the integration.
+          </>
+        }
+        fields={[{ id: "token", label: "Integration Token", placeholder: "ntn_..." }]}
+        submitting={notionConnectMutation.isPending}
+        error={notionError}
+        onSubmit={(values) => notionConnectMutation.mutate(values.token)}
+      />
 
-      <AlertDialog open={circleciDialogOpen} onOpenChange={setCircleciDialogOpen}>
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>Connect CircleCI</AlertDialogTitle>
-            <AlertDialogDescription>
-              Paste a CircleCI personal API token and the VCS-prefixed project slug
-              (for example <code>gh/your-org/your-repo</code>). Create a token at{" "}
-              <a
-                href="https://app.circleci.com/settings/user/tokens"
-                target="_blank"
-                rel="noopener noreferrer"
-                className="underline"
-              >
-                app.circleci.com/settings/user/tokens
-              </a>
-              . The token needs read access to the project.
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <div className="grid gap-3">
-            <div className="grid gap-1.5">
-              <Label htmlFor="circleci-token">Personal API Token</Label>
-              <Input
-                id="circleci-token"
-                type="password"
-                placeholder="CCI-..."
-                value={circleciToken}
-                onChange={(e) => {
-                  setCircleciToken(e.target.value);
-                  setCircleciError(null);
-                }}
-              />
-            </div>
-            <div className="grid gap-1.5">
-              <Label htmlFor="circleci-project-slug">Project Slug</Label>
-              <Input
-                id="circleci-project-slug"
-                type="text"
-                placeholder="gh/your-org/your-repo"
-                value={circleciProjectSlug}
-                onChange={(e) => {
-                  setCircleciProjectSlug(e.target.value);
-                  setCircleciError(null);
-                }}
-              />
-            </div>
-            {circleciError && (
-              <p className="text-xs text-destructive">{circleciError}</p>
-            )}
-          </div>
-          <AlertDialogFooter>
-            <AlertDialogCancel>Cancel</AlertDialogCancel>
-            <Button
-              onClick={() =>
-                circleciConnectMutation.mutate({
-                  token: circleciToken.trim(),
-                  projectSlug: circleciProjectSlug.trim(),
-                })
-              }
-              disabled={
-                !circleciToken.trim() ||
-                !circleciProjectSlug.trim() ||
-                circleciConnectMutation.isPending
-              }
-              loading={circleciConnectMutation.isPending}
+      <TokenDialog
+        open={circleciDialogOpen}
+        onOpenChange={setCircleciDialogOpen}
+        title="Connect CircleCI"
+        description={
+          <>
+            Paste a CircleCI personal API token and the VCS-prefixed project slug
+            (for example <code>gh/your-org/your-repo</code>). Create a token at{" "}
+            <a
+              href="https://app.circleci.com/settings/user/tokens"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="underline"
             >
-              Connect
-            </Button>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
+              app.circleci.com/settings/user/tokens
+            </a>
+            . The token needs read access to the project.
+          </>
+        }
+        fields={[
+          { id: "token", label: "Personal API Token", placeholder: "CCI-..." },
+          { id: "projectSlug", label: "Project Slug", placeholder: "gh/your-org/your-repo", type: "text" },
+        ]}
+        submitting={circleciConnectMutation.isPending}
+        error={circleciError}
+        onSubmit={(values) =>
+          circleciConnectMutation.mutate({ token: values.token, projectSlug: values.projectSlug })
+        }
+      />
     </PageContainer>
   );
 }

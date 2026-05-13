@@ -559,9 +559,6 @@ func (e *AgentEnv) Resolve(ctx context.Context, orgID uuid.UUID, agentType model
 		if ic.CircleCI.ProjectSlug != "" {
 			merged["CIRCLECI_PROJECT_SLUG"] = ic.CircleCI.ProjectSlug
 		}
-		if ic.CircleCI.BaseURL != "" {
-			merged["CIRCLECI_BASE_URL"] = ic.CircleCI.BaseURL
-		}
 	}
 
 	// Apply per-agent env overrides from org settings (agent_config.<type>.*).

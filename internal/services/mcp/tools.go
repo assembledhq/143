@@ -748,10 +748,8 @@ func (tr *ToolRegistry) callMessageSource(ctx context.Context, ms integration.Me
 	}
 }
 
-// ciTestInsightsError formats a CITestInsights error into an ErrorResult. As
-// with taskManagerError, an unauthorized variant gets a stable, greppable
-// prefix so the agent sees a clear "stop retrying; ask the user to
-// reconnect" signal instead of a generic 4xx string.
+// ciTestInsightsError surfaces auth failures with a "reconnect" prompt so
+// the agent stops retrying a doomed call instead of seeing a generic 4xx.
 func ciTestInsightsError(action, providerName string, err error) *ToolCallResult {
 	if errors.Is(err, integration.ErrCircleCIUnauthorized) {
 		detail := strings.TrimSpace(err.Error())

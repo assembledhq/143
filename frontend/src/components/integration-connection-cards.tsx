@@ -458,306 +458,96 @@ export function SourceControlIntegrationCard({
   );
 }
 
-export function AdditionalIntegrationCards({
-  sentryConnected,
-  linearConnected,
-  linearLoading,
-  linearAuthError,
-  slackConnected,
-  notionConnected,
-  notionLoading,
-  circleciConnected,
-  circleciLoading,
-  onConnectSentry,
-  onConnectLinear,
-  onConnectSlack,
-  onConnectNotion,
-  onConnectCircleCI,
-  onDisconnect,
-  disconnectingProvider,
-  disconnectErrorProvider,
-  disconnectError,
-  readOnly,
-}: AdditionalIntegrationCardsPropsWithReadOnly) {
-  const sentry = getIntegrationByKey("sentry");
-  const linear = getIntegrationByKey("linear");
-  const slack = getIntegrationByKey("slack");
-  const notion = getIntegrationByKey("notion");
-  const circleci = getIntegrationByKey("circleci");
+// Describes one optional integration card. Used by both AdditionalIntegrationCards
+// (the setup-checklist row) and AllIntegrationCards (the full settings page),
+// which kept drifting apart whenever a new provider was added.
+type OptionalIntegrationDescriptor = {
+  key: IntegrationKey;
+  connected: boolean;
+  loading?: boolean;
+  authError?: IntegrationAuthErrorInfo | null;
+  onConnect: () => void;
+};
 
+function buildOptionalIntegrationItems(
+  descriptors: OptionalIntegrationDescriptor[],
+  shared: IntegrationCallbacks & ReadOnlyProps,
+) {
+  return descriptors.map((d) => {
+    const meta = getIntegrationByKey(d.key);
+    return {
+      id: meta.key,
+      title: meta.name,
+      description: meta.description,
+      logo: <IntegrationLogo name={meta.name} src={meta.logoSrc} />,
+      badge: <Badge variant="secondary" className="text-xs">Optional</Badge>,
+      extra: d.authError ? <IntegrationAuthErrorAlert info={d.authError} /> : undefined,
+      action: (
+        <IntegrationAction
+          connected={d.connected}
+          integrationKey={d.key}
+          integrationName={meta.name}
+          onConnect={d.onConnect}
+          onDisconnect={shared.onDisconnect}
+          disconnecting={shared.disconnectingProvider === d.key}
+          disconnectError={shared.disconnectErrorProvider === d.key ? shared.disconnectError : null}
+          loading={d.loading}
+          readOnly={shared.readOnly}
+          authErrored={Boolean(d.authError)}
+        />
+      ),
+    };
+  });
+}
+
+function optionalDescriptorsFromProps(
+  p: AdditionalIntegrationCardsPropsWithReadOnly,
+): OptionalIntegrationDescriptor[] {
+  return [
+    { key: "sentry", connected: p.sentryConnected, onConnect: p.onConnectSentry },
+    { key: "linear", connected: p.linearConnected, loading: p.linearLoading, authError: p.linearAuthError ?? null, onConnect: p.onConnectLinear },
+    { key: "slack", connected: p.slackConnected, onConnect: p.onConnectSlack },
+    { key: "notion", connected: p.notionConnected, loading: p.notionLoading, onConnect: p.onConnectNotion },
+    { key: "circleci", connected: p.circleciConnected, loading: p.circleciLoading, onConnect: p.onConnectCircleCI },
+  ];
+}
+
+export function AdditionalIntegrationCards(props: AdditionalIntegrationCardsPropsWithReadOnly) {
   return (
-    <IntegrationsCard
-      items={[
-        {
-          id: sentry.key,
-          title: sentry.name,
-          description: sentry.description,
-          logo: <IntegrationLogo name={sentry.name} src={sentry.logoSrc} />,
-          badge: <Badge variant="secondary" className="text-xs">Optional</Badge>,
-          action: (
-            <IntegrationAction
-              connected={sentryConnected}
-              integrationKey="sentry"
-              integrationName={sentry.name}
-              onConnect={onConnectSentry}
-              onDisconnect={onDisconnect}
-              disconnecting={disconnectingProvider === "sentry"}
-              disconnectError={disconnectErrorProvider === "sentry" ? disconnectError : null}
-              readOnly={readOnly}
-            />
-          ),
-        },
-        {
-          id: linear.key,
-          title: linear.name,
-          description: linear.description,
-          logo: <IntegrationLogo name={linear.name} src={linear.logoSrc} />,
-          badge: <Badge variant="secondary" className="text-xs">Optional</Badge>,
-          extra: linearAuthError ? <IntegrationAuthErrorAlert info={linearAuthError} /> : undefined,
-          action: (
-            <IntegrationAction
-              connected={linearConnected}
-              integrationKey="linear"
-              integrationName={linear.name}
-              onConnect={onConnectLinear}
-              onDisconnect={onDisconnect}
-              disconnecting={disconnectingProvider === "linear"}
-              disconnectError={disconnectErrorProvider === "linear" ? disconnectError : null}
-              loading={linearLoading}
-              readOnly={readOnly}
-              authErrored={Boolean(linearAuthError)}
-            />
-          ),
-        },
-        {
-          id: slack.key,
-          title: slack.name,
-          description: slack.description,
-          logo: <IntegrationLogo name={slack.name} src={slack.logoSrc} />,
-          badge: <Badge variant="secondary" className="text-xs">Optional</Badge>,
-          action: (
-            <IntegrationAction
-              connected={slackConnected}
-              integrationKey="slack"
-              integrationName={slack.name}
-              onConnect={onConnectSlack}
-              onDisconnect={onDisconnect}
-              disconnecting={disconnectingProvider === "slack"}
-              disconnectError={disconnectErrorProvider === "slack" ? disconnectError : null}
-              readOnly={readOnly}
-            />
-          ),
-        },
-        {
-          id: notion.key,
-          title: notion.name,
-          description: notion.description,
-          logo: <IntegrationLogo name={notion.name} src={notion.logoSrc} />,
-          badge: <Badge variant="secondary" className="text-xs">Optional</Badge>,
-          action: (
-            <IntegrationAction
-              connected={notionConnected}
-              integrationKey="notion"
-              integrationName={notion.name}
-              onConnect={onConnectNotion}
-              onDisconnect={onDisconnect}
-              disconnecting={disconnectingProvider === "notion"}
-              disconnectError={disconnectErrorProvider === "notion" ? disconnectError : null}
-              loading={notionLoading}
-              readOnly={readOnly}
-            />
-          ),
-        },
-        {
-          id: circleci.key,
-          title: circleci.name,
-          description: circleci.description,
-          logo: <IntegrationLogo name={circleci.name} src={circleci.logoSrc} />,
-          badge: <Badge variant="secondary" className="text-xs">Optional</Badge>,
-          action: (
-            <IntegrationAction
-              connected={circleciConnected}
-              integrationKey="circleci"
-              integrationName={circleci.name}
-              onConnect={onConnectCircleCI}
-              onDisconnect={onDisconnect}
-              disconnecting={disconnectingProvider === "circleci"}
-              disconnectError={disconnectErrorProvider === "circleci" ? disconnectError : null}
-              loading={circleciLoading}
-              readOnly={readOnly}
-            />
-          ),
-        },
-      ]}
-    />
+    <IntegrationsCard items={buildOptionalIntegrationItems(optionalDescriptorsFromProps(props), props)} />
   );
 }
 
-export function AllIntegrationCards({
-  onConnectGitHub,
-  onConnectSentry,
-  onConnectLinear,
-  onConnectSlack,
-  onConnectNotion,
-  onConnectCircleCI,
-  onDisconnect,
-  disconnectingProvider,
-  disconnectErrorProvider,
-  disconnectError,
-  githubConnected,
-  githubRepos = [],
-  sentryConnected,
-  linearConnected,
-  linearLoading,
-  linearAuthError,
-  slackConnected,
-  notionConnected,
-  notionLoading,
-  circleciConnected,
-  circleciLoading,
-  onDisconnectRepo,
-  onReconnectRepo,
-  pendingRepoID,
-  readOnly,
-}: AllIntegrationCardsProps) {
+export function AllIntegrationCards(props: AllIntegrationCardsProps) {
   const github = getIntegrationByKey("github");
-  const sentry = getIntegrationByKey("sentry");
-  const linear = getIntegrationByKey("linear");
-  const slack = getIntegrationByKey("slack");
-  const notion = getIntegrationByKey("notion");
-  const circleci = getIntegrationByKey("circleci");
-
+  const githubItem = {
+    id: github.key,
+    title: github.name,
+    description: github.description,
+    logo: <IntegrationLogo name={github.name} src={github.logoSrc} />,
+    badge: <Badge variant="outline" className="text-xs">Required</Badge>,
+    extra: props.githubConnected ? (
+      <ConnectedReposList
+        repos={props.githubRepos ?? []}
+        onDisconnectRepo={props.readOnly ? undefined : props.onDisconnectRepo}
+        onReconnectRepo={props.readOnly ? undefined : props.onReconnectRepo}
+        pendingRepoID={props.pendingRepoID}
+      />
+    ) : undefined,
+    action: (
+      <IntegrationAction
+        connected={props.githubConnected}
+        integrationKey="github"
+        integrationName={github.name}
+        onConnect={props.onConnectGitHub}
+        onDisconnect={props.onDisconnect}
+        disconnecting={props.disconnectingProvider === "github"}
+        disconnectError={props.disconnectErrorProvider === "github" ? props.disconnectError : null}
+        readOnly={props.readOnly}
+      />
+    ),
+  };
   return (
-    <IntegrationsCard
-      items={[
-        {
-          id: github.key,
-          title: github.name,
-          description: github.description,
-          logo: <IntegrationLogo name={github.name} src={github.logoSrc} />,
-          badge: <Badge variant="outline" className="text-xs">Required</Badge>,
-          extra: githubConnected ? (
-            <ConnectedReposList
-              repos={githubRepos}
-              onDisconnectRepo={readOnly ? undefined : onDisconnectRepo}
-              onReconnectRepo={readOnly ? undefined : onReconnectRepo}
-              pendingRepoID={pendingRepoID}
-            />
-          ) : undefined,
-          action: (
-            <IntegrationAction
-              connected={githubConnected}
-              integrationKey="github"
-              integrationName={github.name}
-              onConnect={onConnectGitHub}
-              onDisconnect={onDisconnect}
-              disconnecting={disconnectingProvider === "github"}
-              disconnectError={disconnectErrorProvider === "github" ? disconnectError : null}
-              readOnly={readOnly}
-            />
-          ),
-        },
-        {
-          id: sentry.key,
-          title: sentry.name,
-          description: sentry.description,
-          logo: <IntegrationLogo name={sentry.name} src={sentry.logoSrc} />,
-          badge: <Badge variant="secondary" className="text-xs">Optional</Badge>,
-          action: (
-            <IntegrationAction
-              connected={sentryConnected}
-              integrationKey="sentry"
-              integrationName={sentry.name}
-              onConnect={onConnectSentry}
-              onDisconnect={onDisconnect}
-              disconnecting={disconnectingProvider === "sentry"}
-              disconnectError={disconnectErrorProvider === "sentry" ? disconnectError : null}
-              readOnly={readOnly}
-            />
-          ),
-        },
-        {
-          id: linear.key,
-          title: linear.name,
-          description: linear.description,
-          logo: <IntegrationLogo name={linear.name} src={linear.logoSrc} />,
-          badge: <Badge variant="secondary" className="text-xs">Optional</Badge>,
-          extra: linearAuthError ? <IntegrationAuthErrorAlert info={linearAuthError} /> : undefined,
-          action: (
-            <IntegrationAction
-              connected={linearConnected}
-              integrationKey="linear"
-              integrationName={linear.name}
-              onConnect={onConnectLinear}
-              onDisconnect={onDisconnect}
-              disconnecting={disconnectingProvider === "linear"}
-              disconnectError={disconnectErrorProvider === "linear" ? disconnectError : null}
-              loading={linearLoading}
-              readOnly={readOnly}
-              authErrored={Boolean(linearAuthError)}
-            />
-          ),
-        },
-        {
-          id: slack.key,
-          title: slack.name,
-          description: slack.description,
-          logo: <IntegrationLogo name={slack.name} src={slack.logoSrc} />,
-          badge: <Badge variant="secondary" className="text-xs">Optional</Badge>,
-          action: (
-            <IntegrationAction
-              connected={slackConnected}
-              integrationKey="slack"
-              integrationName={slack.name}
-              onConnect={onConnectSlack}
-              onDisconnect={onDisconnect}
-              disconnecting={disconnectingProvider === "slack"}
-              disconnectError={disconnectErrorProvider === "slack" ? disconnectError : null}
-              readOnly={readOnly}
-            />
-          ),
-        },
-        {
-          id: notion.key,
-          title: notion.name,
-          description: notion.description,
-          logo: <IntegrationLogo name={notion.name} src={notion.logoSrc} />,
-          badge: <Badge variant="secondary" className="text-xs">Optional</Badge>,
-          action: (
-            <IntegrationAction
-              connected={notionConnected}
-              integrationKey="notion"
-              integrationName={notion.name}
-              onConnect={onConnectNotion}
-              onDisconnect={onDisconnect}
-              disconnecting={disconnectingProvider === "notion"}
-              disconnectError={disconnectErrorProvider === "notion" ? disconnectError : null}
-              loading={notionLoading}
-              readOnly={readOnly}
-            />
-          ),
-        },
-        {
-          id: circleci.key,
-          title: circleci.name,
-          description: circleci.description,
-          logo: <IntegrationLogo name={circleci.name} src={circleci.logoSrc} />,
-          badge: <Badge variant="secondary" className="text-xs">Optional</Badge>,
-          action: (
-            <IntegrationAction
-              connected={circleciConnected}
-              integrationKey="circleci"
-              integrationName={circleci.name}
-              onConnect={onConnectCircleCI}
-              onDisconnect={onDisconnect}
-              disconnecting={disconnectingProvider === "circleci"}
-              disconnectError={disconnectErrorProvider === "circleci" ? disconnectError : null}
-              loading={circleciLoading}
-              readOnly={readOnly}
-            />
-          ),
-        },
-      ]}
-    />
+    <IntegrationsCard items={[githubItem, ...buildOptionalIntegrationItems(optionalDescriptorsFromProps(props), props)]} />
   );
 }
