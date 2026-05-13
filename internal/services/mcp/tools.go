@@ -283,6 +283,48 @@ func (tr *ToolRegistry) ListTools() []Tool {
 		)
 	}
 
+	for _, ci := range tr.integrations.CITestInsightsProviders() {
+		prefix := ci.Name()
+		tools = append(tools,
+			Tool{
+				Name:        prefix + "_list_flaky_tests",
+				Description: fmt.Sprintf("List flaky tests detected by %s. Returns each flaky test's name, file, classname, owning job, and times-flaked count. Use this to find tests to investigate and fix.", prefix),
+				InputSchema: ToolSchema{
+					Type: "object",
+					Properties: map[string]SchemaProperty{
+						"branch":        {Type: "string", Description: "Restrict to flakes seen on this branch (optional)"},
+						"workflow_name": {Type: "string", Description: "Restrict to a specific workflow (optional)"},
+						"limit":         {Type: "number", Description: "Max results (default: provider's full list)", Default: 25},
+					},
+				},
+			},
+			Tool{
+				Name:        prefix + "_get_job_test_results",
+				Description: fmt.Sprintf("Fetch individual test results for a single %s job, including failure messages. Use this to read the actual failure output for a flaky test occurrence.", prefix),
+				InputSchema: ToolSchema{
+					Type: "object",
+					Properties: map[string]SchemaProperty{
+						"job_number": {Type: "number", Description: "The CI job number"},
+					},
+					Required: []string{"job_number"},
+				},
+			},
+			Tool{
+				Name:        prefix + "_get_recent_test_failures",
+				Description: fmt.Sprintf("Get recent failure occurrences of a single flaky test in %s, with the failure message from each occurrence. Use this to compare multiple failures and identify a root cause before fixing.", prefix),
+				InputSchema: ToolSchema{
+					Type: "object",
+					Properties: map[string]SchemaProperty{
+						"test_name": {Type: "string", Description: "The test function/case name"},
+						"classname": {Type: "string", Description: "Class or file grouping (optional, recommended to disambiguate)"},
+						"limit":     {Type: "number", Description: "Max failure occurrences to return (default: 5)", Default: 5},
+					},
+					Required: []string{"test_name"},
+				},
+			},
+		)
+	}
+
 	for _, ms := range tr.integrations.MessageSources() {
 		prefix := ms.Name()
 		tools = append(tools,
@@ -352,6 +394,15 @@ func (tr *ToolRegistry) CallTool(ctx context.Context, name string, args json.Raw
 		}
 		method := name[len(prefix):]
 		return tr.callCodeReviewSource(ctx, cr, method, args)
+	}
+
+	for _, ci := range tr.integrations.CITestInsightsProviders() {
+		prefix := ci.Name() + "_"
+		if len(name) <= len(prefix) || name[:len(prefix)] != prefix {
+			continue
+		}
+		method := name[len(prefix):]
+		return tr.callCITestInsights(ctx, ci, method, args)
 	}
 
 	for _, ms := range tr.integrations.MessageSources() {
@@ -694,6 +745,71 @@ func (tr *ToolRegistry) callMessageSource(ctx context.Context, ms integration.Me
 
 	default:
 		return ErrorResult(fmt.Sprintf("unknown message source method: %s", method))
+	}
+}
+
+// --------------------------------------------------------------------------
+// CI test insights dispatch
+// --------------------------------------------------------------------------
+
+func (tr *ToolRegistry) callCITestInsights(ctx context.Context, ci integration.CITestInsights, method string, args json.RawMessage) *ToolCallResult {
+	switch method {
+	case "list_flaky_tests":
+		var p struct {
+			Branch       string `json:"branch"`
+			WorkflowName string `json:"workflow_name"`
+			Limit        int    `json:"limit"`
+		}
+		if err := json.Unmarshal(args, &p); err != nil && len(args) > 0 {
+			return ErrorResult(fmt.Sprintf("invalid arguments: %s", err))
+		}
+		filter := integration.FlakyTestFilter{
+			Branch:       p.Branch,
+			WorkflowName: p.WorkflowName,
+			Limit:        p.Limit,
+		}
+		results, err := ci.ListFlakyTests(ctx, filter)
+		if err != nil {
+			return ErrorResult(fmt.Sprintf("list flaky tests failed: %s", err))
+		}
+		return jsonResult(results)
+
+	case "get_job_test_results":
+		var p struct {
+			JobNumber int `json:"job_number"`
+		}
+		if err := json.Unmarshal(args, &p); err != nil {
+			return ErrorResult(fmt.Sprintf("invalid arguments: %s", err))
+		}
+		if p.JobNumber <= 0 {
+			return ErrorResult("job_number is required and must be positive")
+		}
+		results, err := ci.GetTestResults(ctx, integration.JobRef{JobNumber: p.JobNumber})
+		if err != nil {
+			return ErrorResult(fmt.Sprintf("get job test results failed: %s", err))
+		}
+		return jsonResult(results)
+
+	case "get_recent_test_failures":
+		var p struct {
+			TestName  string `json:"test_name"`
+			Classname string `json:"classname"`
+			Limit     int    `json:"limit"`
+		}
+		if err := json.Unmarshal(args, &p); err != nil {
+			return ErrorResult(fmt.Sprintf("invalid arguments: %s", err))
+		}
+		if p.TestName == "" {
+			return ErrorResult("test_name is required")
+		}
+		failures, err := ci.GetRecentFailures(ctx, p.Classname, p.TestName, p.Limit)
+		if err != nil {
+			return ErrorResult(fmt.Sprintf("get recent test failures failed: %s", err))
+		}
+		return jsonResult(failures)
+
+	default:
+		return ErrorResult(fmt.Sprintf("unknown ci test insights method: %s", method))
 	}
 }
 
