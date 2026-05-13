@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/assembledhq/143/internal/models"
 	"github.com/google/uuid"
@@ -92,4 +93,38 @@ func TestLinearAgentActivityLogStore_Complete(t *testing.T) {
 	store := NewLinearAgentActivityLogStore(mock)
 	require.NoError(t, store.Complete(context.Background(), orgID, rowID, "linear_act_123"))
 	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestLinearAgentActivityLogStore_ListForAgentSessionHandlesUnconfirmedActivity(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "test should create pgx mock")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	agentSessionRowID := uuid.New()
+	activityID := uuid.New()
+	now := time.Now().UTC()
+
+	mock.ExpectQuery("COALESCE\\(linear_activity_id, ''\\)").
+		WithArgs(orgID, agentSessionRowID).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "org_id", "agent_session_row_id", "idem_key", "activity_type", "linear_activity_id", "created_at",
+		}).AddRow(
+			activityID, orgID, agentSessionRowID, "milestone:reserved", models.LinearAgentActivityThought, "", now,
+		))
+
+	activities, err := NewLinearAgentActivityLogStore(mock).ListForAgentSession(context.Background(), orgID, agentSessionRowID)
+	require.NoError(t, err, "reserved-but-unconfirmed activities should be listable for the debug surface")
+	require.Equal(t, []LinearAgentActivityLog{{
+		ID:                activityID,
+		OrgID:             orgID,
+		AgentSessionRowID: agentSessionRowID,
+		IdemKey:           "milestone:reserved",
+		ActivityType:      models.LinearAgentActivityThought,
+		LinearActivityID:  "",
+		CreatedAt:         now,
+	}}, activities, "list should include the unconfirmed activity with an empty linear activity id")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }

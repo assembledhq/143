@@ -156,26 +156,17 @@ func handleLinearAgentCreated(
 	// PMApproach carries the issue body so run_agent has all the
 	// context it needs without re-fetching Linear data.
 	session := buildAgentSession(orgID, repoResult, issue, fetched)
-	if err := deps.Stores.Sessions.Create(ctx, session); err != nil {
-		return fmt.Errorf("create session: %w", err)
+	if err := createAndAttachLinearAgentSession(ctx, deps.Stores, orgID, row.ID, session); err != nil {
+		return err
 	}
 
-	// 8. Update the bridge row so subsequent webhooks (prompted /
-	// recovery sweeps) can find this 143 session. Done before the
-	// idempotent tail steps so that if either of them fails the retry
-	// path enters via reconcileLinearAgentCreated — re-running them
-	// individually instead of attempting to recreate the session.
-	if err := agentSessions.AttachSession(ctx, orgID, row.ID, session.ID); err != nil {
-		return fmt.Errorf("attach session to linear_agent_sessions: %w", err)
-	}
-
-	// 9. Persist the AgentSessionID on the provider-state row so
+	// 8. Persist the AgentSessionID on the provider-state row so
 	// HandleMilestone's fan-out can find it. Idempotent (Merge).
 	if err := writeAgentProviderState(ctx, deps.Stores, deps.ProviderState, orgID, session.ID, issue.ID, payload.LinearAgentSessionID, fetched); err != nil {
 		return fmt.Errorf("record agent_session_id in provider state: %w", err)
 	}
 
-	// 10. Enqueue run_agent. The orchestrator picks it up and streams
+	// 9. Enqueue run_agent. The orchestrator picks it up and streams
 	// milestones back through HandleMilestone + HandleAgentMilestone.
 	// Idempotent via the run_agent:<session_id> dedupe key.
 	if err := enqueueRunAgentForLinearAgent(ctx, deps.Stores, orgID, session.ID); err != nil {
@@ -191,6 +182,35 @@ func handleLinearAgentCreated(
 		Str("repository_id", repoResult.RepositoryID.String()).
 		Str("repo_resolution", repoResult.Source).
 		Msg("linear_agent_event: session created")
+	return nil
+}
+
+func createAndAttachLinearAgentSession(ctx context.Context, stores *Stores, orgID, agentSessionRowID uuid.UUID, session *models.Session) error {
+	if stores == nil || stores.Sessions == nil {
+		return errors.New("sessions store unavailable")
+	}
+	tx, err := stores.Sessions.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin linear agent session create transaction: %w", err)
+	}
+	committed := false
+	defer func() {
+		if committed {
+			return
+		}
+		_ = tx.Rollback(ctx)
+	}()
+
+	if err := stores.Sessions.CreateInTx(ctx, tx, session); err != nil {
+		return fmt.Errorf("create session: %w", err)
+	}
+	if err := db.NewLinearAgentSessionStore(tx).AttachSession(ctx, orgID, agentSessionRowID, session.ID); err != nil {
+		return fmt.Errorf("attach session to linear_agent_sessions: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit linear agent session create transaction: %w", err)
+	}
+	committed = true
 	return nil
 }
 

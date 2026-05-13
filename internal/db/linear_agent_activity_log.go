@@ -164,7 +164,8 @@ func (s *LinearAgentActivityLogStore) DiscardByIdemKey(ctx context.Context, orgI
 // that wants to confirm what's already been emitted.
 func (s *LinearAgentActivityLogStore) ListForAgentSession(ctx context.Context, orgID, agentSessionRowID uuid.UUID) ([]LinearAgentActivityLog, error) {
 	rows, err := s.db.Query(ctx, `
-		SELECT id, org_id, agent_session_row_id, idem_key, activity_type, linear_activity_id, created_at
+		SELECT id, org_id, agent_session_row_id, idem_key, activity_type,
+		       COALESCE(linear_activity_id, '') AS linear_activity_id, created_at
 		FROM linear_agent_activity_log
 		WHERE org_id = @org_id
 		  AND agent_session_row_id = @agent_session_row_id

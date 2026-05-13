@@ -10,6 +10,7 @@ import (
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/services/linear"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/rs/zerolog"
 )
 
@@ -103,6 +104,10 @@ func handleLinearAgentPrompted(ctx context.Context, deps LinearAgentEventHandler
 	// regardless of whether the prior run technically finished.
 	session, err := deps.Stores.Sessions.ClaimIdle(ctx, orgID, sessionID)
 	if err != nil {
+		appendState, stateErr := deps.Stores.Sessions.GetMessageAppendState(ctx, orgID, sessionID)
+		if stateErr == nil && appendState.Status == string(models.SessionStatusRunning) {
+			return appendPromptedMessageToRunningSession(ctx, deps, orgID, appendState, payload, commentBody, logger)
+		}
 		if !allowRevision {
 			if err := respondRevisionPromptDisabled(ctx, deps, agentSessions, row, orgID, logger); err != nil {
 				return err
@@ -115,10 +120,6 @@ func handleLinearAgentPrompted(ctx context.Context, deps LinearAgentEventHandler
 		}
 		session, err = deps.Stores.Sessions.ClaimForResume(ctx, orgID, sessionID)
 		if err != nil {
-			appendState, stateErr := deps.Stores.Sessions.GetMessageAppendState(ctx, orgID, sessionID)
-			if stateErr == nil && appendState.Status == string(models.SessionStatusRunning) {
-				return appendPromptedMessageToRunningSession(ctx, deps, orgID, appendState, payload, commentBody, logger)
-			}
 			return fmt.Errorf("claim session for prompted turn: %w", err)
 		}
 	}
@@ -133,24 +134,16 @@ func handleLinearAgentPrompted(ctx context.Context, deps LinearAgentEventHandler
 		Role:       models.MessageRoleUser,
 		Content:    commentBody,
 	}
-	if err := deps.Stores.SessionMessages.Create(ctx, msg); err != nil {
+	if err := appendPromptedMessageAndEnqueueContinue(ctx, deps.Stores, orgID, session, msg); err != nil {
 		// Best-effort revert: the session is now claimed (running) but
-		// we couldn't persist the message. Falling back to "idle" keeps
-		// the system from showing a "running" session that nobody is
-		// actually working on.
+		// we couldn't atomically persist the message and queue the
+		// continuation. Falling back to "idle" keeps the system from
+		// showing a "running" session that nobody is actually working on.
 		if updateErr := deps.Stores.Sessions.UpdateStatus(ctx, orgID, sessionID, "idle"); updateErr != nil {
 			logger.Warn().Err(updateErr).Str("session_id", sessionID.String()).
-				Msg("prompted: failed to revert session status after message create failure")
+				Msg("prompted: failed to revert session status after append/enqueue failure")
 		}
-		return fmt.Errorf("create session message: %w", err)
-	}
-
-	if err := enqueueContinueForLinearAgent(ctx, deps.Stores, orgID, session); err != nil {
-		if updateErr := deps.Stores.Sessions.UpdateStatus(ctx, orgID, sessionID, "idle"); updateErr != nil {
-			logger.Warn().Err(updateErr).Str("session_id", sessionID.String()).
-				Msg("prompted: failed to revert session status after enqueue failure")
-		}
-		return fmt.Errorf("enqueue continue_session: %w", err)
+		return err
 	}
 
 	logger.Info().
@@ -158,6 +151,43 @@ func handleLinearAgentPrompted(ctx context.Context, deps LinearAgentEventHandler
 		Str("session_id", sessionID.String()).
 		Int("turn_number", msg.TurnNumber).
 		Msg("linear_agent_event: prompted -> turn appended + continue_session enqueued")
+	return nil
+}
+
+func appendPromptedMessageAndEnqueueContinue(ctx context.Context, stores *Stores, orgID uuid.UUID, session models.Session, msg *models.SessionMessage) error {
+	if stores == nil || stores.Sessions == nil {
+		return errors.New("sessions store unavailable")
+	}
+	if stores.SessionMessages == nil {
+		return errors.New("session_messages store unavailable")
+	}
+	if stores.Jobs == nil {
+		return errors.New("jobs store unavailable")
+	}
+	tx, err := stores.Sessions.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin prompted append transaction: %w", err)
+	}
+	committed := false
+	defer func() {
+		if committed {
+			return
+		}
+		_ = tx.Rollback(ctx)
+	}()
+
+	if err := db.NewSessionMessageStore(tx).Create(ctx, msg); err != nil {
+		return fmt.Errorf("create session message: %w", err)
+	}
+	jobID, err := enqueueContinueForLinearAgentInTx(ctx, stores.Jobs, tx, orgID, session)
+	if err != nil {
+		return fmt.Errorf("enqueue continue_session: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit prompted append transaction: %w", err)
+	}
+	committed = true
+	stores.Jobs.Notify(ctx, jobID)
 	return nil
 }
 
@@ -326,8 +356,20 @@ func enqueueContinueForLinearAgent(ctx context.Context, stores *Stores, orgID uu
 	if stores == nil || stores.Jobs == nil {
 		return errors.New("jobs store unavailable")
 	}
+	_, err := stores.Jobs.EnqueueWithOpts(ctx, orgID, continueLinearAgentEnqueueOpts(orgID, session))
+	return err
+}
+
+func enqueueContinueForLinearAgentInTx(ctx context.Context, jobs *db.JobStore, tx pgx.Tx, orgID uuid.UUID, session models.Session) (uuid.UUID, error) {
+	if jobs == nil {
+		return uuid.Nil, errors.New("jobs store unavailable")
+	}
+	return jobs.EnqueueInTxWithOpts(ctx, tx, orgID, continueLinearAgentEnqueueOpts(orgID, session))
+}
+
+func continueLinearAgentEnqueueOpts(orgID uuid.UUID, session models.Session) db.EnqueueOpts {
 	dedupe := db.ContinueSessionDedupeKey(session.ID)
-	_, err := stores.Jobs.EnqueueWithOpts(ctx, orgID, db.EnqueueOpts{
+	return db.EnqueueOpts{
 		Queue:   "agent",
 		JobType: "continue_session",
 		Payload: map[string]any{
@@ -337,6 +379,5 @@ func enqueueContinueForLinearAgent(ctx context.Context, stores *Stores, orgID uu
 		Priority:     5,
 		DedupeKey:    &dedupe,
 		TargetNodeID: models.SessionWorkerTarget(&session),
-	})
-	return err
+	}
 }

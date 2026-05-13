@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -137,11 +138,8 @@ func TestPromptedRunningSessionAppendsWithoutContinuationJob(t *testing.T) {
 	mock.ExpectQuery("(?s)UPDATE sessions.*status = 'idle'").
 		WithArgs(sessionID, orgID).
 		WillReturnError(pgx.ErrNoRows)
-	mock.ExpectQuery("(?s)UPDATE sessions.*status = ANY").
-		WithArgs(sessionID, orgID, pgxmock.AnyArg()).
-		WillReturnError(pgx.ErrNoRows)
-	mock.ExpectQuery("SELECT id, org_id, status, current_turn").
-		WithArgs(sessionID, orgID).
+	mock.ExpectQuery(`(?s)SELECT\s+id, org_id, status, current_turn`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "org_id", "status", "current_turn"}).
 			AddRow(sessionID, orgID, string(models.SessionStatusRunning), 3))
 	mock.ExpectQuery("INSERT INTO session_messages").
@@ -164,6 +162,67 @@ func TestPromptedRunningSessionAppendsWithoutContinuationJob(t *testing.T) {
 	}, zerolog.Nop())
 	require.NoError(t, err, "running-session prompted comments should append without trying to enqueue another continuation")
 	require.NoError(t, mock.ExpectationsWereMet(), "running-session fast path should create one message and no job")
+}
+
+func TestPromptedRunningSessionAppendsWhenRevisionPromptsDisabled(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "test should create pgx mock")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	rowID := uuid.New()
+	sessionID := uuid.New()
+	now := time.Now().UTC()
+	allowRevision := false
+
+	mock.ExpectQuery("SELECT id, org_id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "org_id", "integration_id", "linear_agent_session_id",
+			"linear_issue_id", "linear_issue_identifier",
+			"linear_app_user_id", "linear_creator_user_id",
+			"session_id", "state", "last_event_received_at",
+			"created_at", "updated_at",
+		}).AddRow(
+			rowID, orgID, uuid.New(), "as_running_no_revision",
+			"iss_1", "ACS-1",
+			"", "",
+			&sessionID, "in_progress", &now,
+			now, now,
+		))
+	mock.ExpectQuery("(?s)UPDATE sessions.*status = 'idle'").
+		WithArgs(sessionID, orgID).
+		WillReturnError(pgx.ErrNoRows)
+	mock.ExpectQuery(`(?s)SELECT\s+id, org_id, status, current_turn`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "org_id", "status", "current_turn"}).
+			AddRow(sessionID, orgID, string(models.SessionStatusRunning), 5))
+	mock.ExpectQuery("INSERT INTO session_messages").
+		WithArgs(sessionID, orgID, pgxmock.AnyArg(), pgxmock.AnyArg(), 6, models.MessageRoleUser, pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(int64(43), now))
+
+	deps := LinearAgentEventHandlerDeps{
+		Stores: &Stores{
+			Sessions:        db.NewSessionStore(mock),
+			SessionMessages: db.NewSessionMessageStore(mock),
+			Jobs:            db.NewJobStore(mock),
+		},
+		SettingsLoader: func(_ context.Context, gotOrgID uuid.UUID) (models.LinearAgentSettings, error) {
+			require.Equal(t, orgID, gotOrgID, "settings loader should be scoped to the prompted event org")
+			return models.LinearAgentSettings{AllowRevisionPerPrompt: &allowRevision}, nil
+		},
+		Logger: zerolog.Nop(),
+	}
+	store := db.NewLinearAgentSessionStore(mock)
+	err = handleLinearAgentPrompted(context.Background(), deps, store, linearAgentEventPayload{
+		Action:               "prompted",
+		OrgID:                orgID.String(),
+		LinearAgentSessionID: "as_running_no_revision",
+	}, zerolog.Nop())
+	require.NoError(t, err, "revision-disabled settings should not block comments while the session is still running")
+	require.NoError(t, mock.ExpectationsWereMet(), "handler should check running append state before applying the revision-disabled terminal response")
 }
 
 func TestPromptedTerminalSessionRespectsDisabledRevisionPrompts(t *testing.T) {
@@ -197,6 +256,10 @@ func TestPromptedTerminalSessionRespectsDisabledRevisionPrompts(t *testing.T) {
 	mock.ExpectQuery("(?s)UPDATE sessions.*status = 'idle'").
 		WithArgs(sessionID, orgID).
 		WillReturnError(pgx.ErrNoRows)
+	mock.ExpectQuery(`(?s)SELECT\s+id, org_id, status, current_turn`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "org_id", "status", "current_turn"}).
+			AddRow(sessionID, orgID, string(models.SessionStatusCompleted), 9))
 
 	deps := LinearAgentEventHandlerDeps{
 		Stores: &Stores{
@@ -217,7 +280,75 @@ func TestPromptedTerminalSessionRespectsDisabledRevisionPrompts(t *testing.T) {
 		LinearAgentSessionID: "as_done",
 	}, zerolog.Nop())
 	require.NoError(t, err, "disabled revision prompts should be ignored instead of reopening a terminal session")
-	require.NoError(t, mock.ExpectationsWereMet(), "handler should stop after ClaimIdle fails and must not ClaimForResume")
+	require.NoError(t, mock.ExpectationsWereMet(), "handler should check append state then stop after disabled revision without ClaimForResume")
+}
+
+func TestPromptedIdleSessionRollsBackMessageWhenContinueEnqueueFails(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "test should create pgx mock")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	rowID := uuid.New()
+	sessionID := uuid.New()
+	issueID := uuid.New()
+	now := time.Now().UTC()
+	enqueueErr := errors.New("enqueue failed")
+
+	mock.ExpectQuery("SELECT id, org_id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "org_id", "integration_id", "linear_agent_session_id",
+			"linear_issue_id", "linear_issue_identifier",
+			"linear_app_user_id", "linear_creator_user_id",
+			"session_id", "state", "last_event_received_at",
+			"created_at", "updated_at",
+		}).AddRow(
+			rowID, orgID, uuid.New(), "as_idle",
+			"iss_1", "ACS-1",
+			"", "",
+			&sessionID, "in_progress", &now,
+			now, now,
+		))
+	mock.ExpectQuery("(?s)UPDATE sessions.*status = 'idle'").
+		WithArgs(sessionID, orgID).
+		WillReturnRows(pgxmock.NewRows(workerSessionColumns).
+			AddRow(workerSessionRow(sessionID, issueID, orgID, string(models.SessionStatusRunning), 7, nil, nil)...))
+	mock.ExpectBegin()
+	mock.ExpectQuery("INSERT INTO session_messages").
+		WithArgs(sessionID, orgID, pgxmock.AnyArg(), pgxmock.AnyArg(), 8, models.MessageRoleUser, pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(int64(44), now))
+	mock.ExpectQuery("INSERT INTO jobs").
+		WithArgs(
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+		).
+		WillReturnError(enqueueErr)
+	mock.ExpectRollback()
+	mock.ExpectQuery("UPDATE sessions SET status = @status").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(workerSessionColumns).
+			AddRow(workerSessionRow(sessionID, issueID, orgID, string(models.SessionStatusIdle), 7, nil, nil)...))
+
+	deps := LinearAgentEventHandlerDeps{
+		Stores: &Stores{
+			Sessions:        db.NewSessionStore(mock),
+			SessionMessages: db.NewSessionMessageStore(mock),
+			Jobs:            db.NewJobStore(mock),
+		},
+		Logger: zerolog.Nop(),
+	}
+	store := db.NewLinearAgentSessionStore(mock)
+	err = handleLinearAgentPrompted(context.Background(), deps, store, linearAgentEventPayload{
+		Action:               "prompted",
+		OrgID:                orgID.String(),
+		LinearAgentSessionID: "as_idle",
+	}, zerolog.Nop())
+	require.Error(t, err, "enqueue failure should surface so the worker retries the prompted job")
+	require.Contains(t, err.Error(), "enqueue continue_session", "error should identify the failed atomic append/enqueue step")
+	require.NoError(t, mock.ExpectationsWereMet(), "message insert and enqueue should happen inside one transaction that rolls back on enqueue failure")
 }
 
 func TestEnqueueContinueForLinearAgentPinsSandboxOwner(t *testing.T) {
