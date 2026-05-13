@@ -155,7 +155,11 @@ func handleLinearAgentCreated(
 	// hooks know it's an external trigger, not a user-initiated run.
 	// PMApproach carries the issue body so run_agent has all the
 	// context it needs without re-fetching Linear data.
-	session := buildAgentSession(orgID, repoResult, issue, fetched)
+	agentType, err := resolveLinearAgentSessionAgentType(ctx, deps, orgID)
+	if err != nil {
+		return err
+	}
+	session := buildAgentSession(orgID, repoResult, issue, fetched, agentType)
 	if err := createAndAttachLinearAgentSession(ctx, deps.Stores, orgID, row.ID, session); err != nil {
 		return err
 	}

@@ -188,11 +188,12 @@ func (h *IngestionWebhookHandler) handleProvider(w http.ResponseWriter, r *http.
 	// Total budget well under 1s under normal load.
 	if provider == "linear" && h.linearAgent != nil {
 		eventType := LinearAgentEventType(r.Header.Get("Linear-Event"))
+		var parsedEnvelope *linearAgentEventEnvelope
 		if eventType == "" {
-			eventType = sniffLinearEventType(body)
+			eventType, parsedEnvelope = sniffLinearEventEnvelope(body)
 		}
 		if eventType == LinearAgentEventAgentSession || eventType == LinearAgentEventAppUserNotification {
-			result := h.linearAgent.Dispatch(r.Context(), &integration, eventType, body)
+			result := h.linearAgent.Dispatch(r.Context(), &integration, eventType, body, parsedEnvelope)
 			if err := h.webhookStore.MarkProcessed(r.Context(), delivery, nil); err != nil {
 				zerolog.Ctx(r.Context()).Warn().Err(err).Msg("failed to mark webhook processed")
 			}
@@ -276,33 +277,28 @@ func deliveryIDLogValue(id *string) string {
 	return *id
 }
 
-// sniffLinearEventType inspects the JSON envelope's top-level `type` field
-// to decide whether this is an agent event when the `Linear-Event` header
-// is missing. Bounded to the first 256 bytes — Linear puts `type` at the
-// top of the document, so a small read avoids parsing the whole payload
-// twice. Returns "" when the type can't be determined; the caller falls
+// sniffLinearEventType inspects the JSON envelope's top-level `type` field to
+// decide whether this is an agent event when the `Linear-Event` header is
+// missing. Returns "" when the type can't be determined; the caller falls
 // through to ingestion.
 func sniffLinearEventType(body []byte) LinearAgentEventType {
-	const maxScan = 256
-	scan := body
-	if len(scan) > maxScan {
-		scan = scan[:maxScan]
+	eventType, _ := sniffLinearEventEnvelope(body)
+	return eventType
+}
+
+// sniffLinearEventEnvelope parses the Linear event envelope once so the
+// dispatcher can reuse it instead of reparsing the webhook body after the
+// missing-header fallback has already identified an agent event.
+func sniffLinearEventEnvelope(body []byte) (LinearAgentEventType, *linearAgentEventEnvelope) {
+	var env linearAgentEventEnvelope
+	if err := json.Unmarshal(body, &env); err != nil {
+		return "", nil
 	}
-	var head struct {
-		Type string `json:"type"`
-	}
-	if err := json.Unmarshal(scan, &head); err != nil {
-		// Truncated body may not parse cleanly; that's fine, fall back
-		// to a full unmarshal of the original payload.
-		if err := json.Unmarshal(body, &head); err != nil {
-			return ""
-		}
-	}
-	switch LinearAgentEventType(head.Type) {
+	switch LinearAgentEventType(env.Type) {
 	case LinearAgentEventAgentSession, LinearAgentEventAppUserNotification:
-		return LinearAgentEventType(head.Type)
+		return LinearAgentEventType(env.Type), &env
 	}
-	return ""
+	return "", nil
 }
 
 // verifyProviderSignature looks up the per-org webhook secret from the DB and

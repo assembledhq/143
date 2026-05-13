@@ -1303,6 +1303,13 @@ func buildServices(
 				}
 				return parsed.LinearAgent, nil
 			},
+			OrgSettingsLoader: func(ctx context.Context, orgID uuid.UUID) (models.OrgSettings, error) {
+				org, err := orgStore.GetByID(ctx, orgID)
+				if err != nil {
+					return models.OrgSettings{}, err
+				}
+				return models.ParseOrgSettings(org.Settings)
+			},
 			ClientForOrg: func(ctx context.Context, orgID uuid.UUID) (linear.Client, error) {
 				return linearService.ClientForOrg(ctx, orgID)
 			},

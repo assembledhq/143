@@ -186,7 +186,7 @@ type DispatchResult struct {
 // to a 200 OK with an explanatory status string in DispatchResult.Status.
 // The 5s Linear SLA for ack is much tighter than 200 vs 4xx semantic
 // fidelity; ack first, log loudly, work asynchronously.
-func (d *LinearAgentDispatcher) Dispatch(ctx context.Context, integration *models.Integration, eventType LinearAgentEventType, body []byte) (result DispatchResult) {
+func (d *LinearAgentDispatcher) Dispatch(ctx context.Context, integration *models.Integration, eventType LinearAgentEventType, body []byte, parsedEnvelope ...*linearAgentEventEnvelope) (result DispatchResult) {
 	if d == nil {
 		// Nil-receiver short-circuit. We intentionally return *before*
 		// registering the deferred metrics record below — d.metrics
@@ -226,9 +226,13 @@ func (d *LinearAgentDispatcher) Dispatch(ctx context.Context, integration *model
 	}
 
 	var env linearAgentEventEnvelope
-	if err := json.Unmarshal(body, &env); err != nil {
-		d.logger.Warn().Err(err).Msg("failed to parse linear agent event envelope")
-		return DispatchResult{Status: "ignored"}
+	if len(parsedEnvelope) > 0 && parsedEnvelope[0] != nil {
+		env = *parsedEnvelope[0]
+	} else {
+		if err := json.Unmarshal(body, &env); err != nil {
+			d.logger.Warn().Err(err).Msg("failed to parse linear agent event envelope")
+			return DispatchResult{Status: "ignored"}
+		}
 	}
 
 	action = linearAgentEventAction(env.Action)

@@ -40,7 +40,11 @@ type LinearAgentEventHandlerDeps struct {
 	RepoResolver   *linear.AgentRepoResolver
 	ProviderState  *db.LinearProviderStateStore
 	SettingsLoader func(ctx context.Context, orgID uuid.UUID) (models.LinearAgentSettings, error)
-	ClientForOrg   func(ctx context.Context, orgID uuid.UUID) (linear.Client, error)
+	// OrgSettingsLoader resolves full org settings for session construction
+	// choices that live outside the LinearAgent subdocument, such as the
+	// default coding-agent type.
+	OrgSettingsLoader func(ctx context.Context, orgID uuid.UUID) (models.OrgSettings, error)
+	ClientForOrg      func(ctx context.Context, orgID uuid.UUID) (linear.Client, error)
 	// Metrics records per-session-created counters. Optional; nil
 	// silently skips recording.
 	Metrics LinearAgentWorkerMetricsRecorder
