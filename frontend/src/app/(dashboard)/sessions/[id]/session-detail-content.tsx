@@ -2863,8 +2863,10 @@ export function SessionDetailContent({ id }: { id: string }) {
     queryKey: ["pull-request", pullRequestId, "health"],
     queryFn: () => api.pullRequests.getHealth(pullRequestId!),
     enabled: !!pullRequestId && prData?.data?.status === "open",
-    // Pushed via the PULL_REQUEST_UPDATED SSE event, so a longer staleTime is
-    // safe — refetches on focus/remount won't fire a redundant network call.
+    // Pushed via the PULL_REQUEST_UPDATED SSE event. The stream onopen handler
+    // below also reconciles once because Redis pub/sub does not replay PR row
+    // or health events missed while the tab was hidden or the EventSource was
+    // reconnecting.
     staleTime: 30_000,
   });
   const prHealth = prHealthData?.data;
@@ -3051,6 +3053,8 @@ export function SessionDetailContent({ id }: { id: string }) {
       eventSource = new EventSource(buildPullRequestStreamURL(apiBase, getActiveOrgId()), { withCredentials: true });
       eventSource.onopen = () => {
         reconnectAttempts = 0;
+        void queryClient.invalidateQueries({ queryKey: ["session", id, "pr"] });
+        void queryClient.invalidateQueries({ queryKey: ["pull-request", pullRequestId, "health"] });
       };
       addSSEListener(eventSource, SSE_EVENT.PULL_REQUEST_UPDATED, (event) => {
         if (event.pull_request_id !== pullRequestId) {
