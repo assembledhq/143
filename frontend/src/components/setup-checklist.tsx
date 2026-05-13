@@ -222,6 +222,7 @@ export function SetupChecklist() {
   const linearIntegration = integrations.find((integration) => integration.provider === "linear" && integration.status === "active");
   const slackIntegration = integrations.find((integration) => integration.provider === "slack" && integration.status === "active");
   const notionIntegration = integrations.find((integration) => integration.provider === "notion" && integration.status === "active");
+  const circleciIntegration = integrations.find((integration) => integration.provider === "circleci" && integration.status === "active");
 
   const githubConnected = Boolean(githubIntegration);
   const githubReady = githubConnected && repositories.length > 0;
@@ -251,11 +252,13 @@ export function SetupChecklist() {
             linearConnected={Boolean(linearIntegration)}
             slackConnected={Boolean(slackIntegration)}
             notionConnected={Boolean(notionIntegration)}
+            circleciConnected={Boolean(circleciIntegration)}
             linearLoading={false}
             onConnectSentry={() => api.auth.loginSentry()}
             onConnectLinear={() => api.integrations.loginLinear()}
             onConnectSlack={() => api.integrations.loginSlack()}
             onConnectNotion={() => { /* Notion requires token input — use the Integrations page */ }}
+            onConnectCircleCI={() => { /* CircleCI requires token + slug input — use the Integrations page */ }}
             onDisconnect={(provider) => disconnectMutation.mutate(provider)}
             disconnectingProvider={disconnectMutation.isPending ? disconnectMutation.variables : null}
             disconnectErrorProvider={disconnectMutation.isError ? disconnectMutation.variables ?? null : null}

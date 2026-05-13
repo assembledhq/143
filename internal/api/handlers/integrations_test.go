@@ -2030,3 +2030,136 @@ func TestIntegrationHandler_ConnectNotion_InvalidJSON(t *testing.T) {
 	require.Equal(t, http.StatusBadRequest, w.Code)
 	require.Contains(t, w.Body.String(), "INVALID_JSON")
 }
+
+func TestIntegrationHandler_ConnectCircleCI_Success(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	orgID := uuid.New()
+	integrationID := uuid.New()
+	now := time.Now()
+
+	store := db.NewIntegrationStore(mock)
+	credentialStore := db.NewOrgCredentialStore(mock, nil)
+
+	transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		require.Equal(t, "https://circleci.com/api/v2/me", req.URL.String())
+		require.Equal(t, "cci_token", req.Header.Get("Circle-Token"))
+
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(bytes.NewBufferString(`{"id":"abc","login":"octocat"}`)),
+		}, nil
+	})
+
+	handler := NewIntegrationHandler(
+		store, credentialStore, "", "", "http://localhost:8080", "http://localhost:3000",
+	)
+	handler.client = &http.Client{Transport: transport}
+
+	mock.ExpectQuery("INSERT INTO org_credentials").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
+
+	mock.ExpectQuery("SELECT .+ FROM integrations .+ provider = @provider .+ status IN \\('active', 'error'\\)").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "org_id", "provider", "config", "status", "last_synced_at", "created_at"}))
+
+	mock.ExpectQuery("INSERT INTO integrations").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(integrationID, now))
+
+	body := `{"auth_token":"cci_token","project_slug":"gh/octocat/hello"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/integrations/circleci/connect", bytes.NewBufferString(body))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+	w := httptest.NewRecorder()
+
+	handler.ConnectCircleCI(w, req)
+
+	require.Equal(t, http.StatusCreated, w.Code, "body=%s", w.Body.String())
+	require.Contains(t, w.Body.String(), `"provider":"circleci"`)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestIntegrationHandler_ConnectCircleCI_MissingProjectSlug(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := db.NewIntegrationStore(mock)
+	handler := NewIntegrationHandler(store, nil, "", "", "http://localhost:8080", "http://localhost:3000")
+
+	body := `{"auth_token":"tok"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/integrations/circleci/connect", bytes.NewBufferString(body))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(middleware.WithOrgID(req.Context(), uuid.New()))
+	w := httptest.NewRecorder()
+
+	handler.ConnectCircleCI(w, req)
+
+	require.Equal(t, http.StatusBadRequest, w.Code)
+	require.Contains(t, w.Body.String(), "MISSING_PROJECT_SLUG",
+		"a token alone is not enough — CircleCI needs the VCS-prefixed project slug")
+}
+
+func TestIntegrationHandler_ConnectCircleCI_RejectsMalformedSlug(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := db.NewIntegrationStore(mock)
+	handler := NewIntegrationHandler(store, nil, "", "", "http://localhost:8080", "http://localhost:3000")
+
+	body := `{"auth_token":"tok","project_slug":"octocat/hello"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/integrations/circleci/connect", bytes.NewBufferString(body))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(middleware.WithOrgID(req.Context(), uuid.New()))
+	w := httptest.NewRecorder()
+
+	handler.ConnectCircleCI(w, req)
+
+	require.Equal(t, http.StatusBadRequest, w.Code)
+	require.Contains(t, w.Body.String(), "INVALID_PROJECT_SLUG",
+		"two-segment slugs miss the VCS prefix CircleCI requires (gh/org/repo)")
+}
+
+func TestIntegrationHandler_ConnectCircleCI_InvalidToken(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := db.NewIntegrationStore(mock)
+
+	transport := roundTripFunc(func(_ *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusUnauthorized,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(bytes.NewBufferString(`{"message":"Permission denied"}`)),
+		}, nil
+	})
+
+	handler := NewIntegrationHandler(store, nil, "", "", "http://localhost:8080", "http://localhost:3000")
+	handler.client = &http.Client{Transport: transport}
+
+	body := `{"auth_token":"bad","project_slug":"gh/octocat/hello"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/integrations/circleci/connect", bytes.NewBufferString(body))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(middleware.WithOrgID(req.Context(), uuid.New()))
+	w := httptest.NewRecorder()
+
+	handler.ConnectCircleCI(w, req)
+
+	require.Equal(t, http.StatusBadRequest, w.Code)
+	require.Contains(t, w.Body.String(), "INVALID_TOKEN")
+}
