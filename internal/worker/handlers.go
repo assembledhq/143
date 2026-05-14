@@ -24,6 +24,7 @@ import (
 	"github.com/assembledhq/143/internal/prompts"
 	"github.com/assembledhq/143/internal/services"
 	"github.com/assembledhq/143/internal/services/agent"
+	"github.com/assembledhq/143/internal/services/automations"
 	"github.com/assembledhq/143/internal/services/feedback"
 	ghservice "github.com/assembledhq/143/internal/services/github"
 	"github.com/assembledhq/143/internal/services/ingestion"
@@ -1041,12 +1042,20 @@ func newRunAgentHandler(stores *Stores, services *Services, logger zerolog.Logge
 		}
 		if err := runErr; err != nil {
 			if errors.Is(err, agent.ErrSandboxCapacity) {
+				registerRunAgentSandboxCapacityDeadLetter(ctx, stores, logger, run)
 				retryAfter := sandboxCapacityRetryDelay
 				logger.Info().
 					Str("session_id", runID.String()).
 					Err(err).
 					Msg("local sandbox capacity reached; retrying run_agent")
 				return &RetryableError{Err: err, RetryAfter: &retryAfter}
+			}
+			if errors.Is(err, agent.ErrRecoveryAttemptsExhausted) {
+				logger.Warn().
+					Str("session_id", runID.String()).
+					Err(err).
+					Msg("run_agent recovery exhausted; dead-lettering without another restart")
+				return &FatalError{Err: err}
 			}
 			if errors.Is(err, agent.ErrStaleSandboxIDCleared) {
 				// The orchestrator detected a stale orphan container_id from
@@ -1115,6 +1124,87 @@ func newRunAgentHandler(stores *Stores, services *Services, logger zerolog.Logge
 			return err
 		}
 		return nil
+	}
+}
+
+func registerRunAgentSandboxCapacityDeadLetter(ctx context.Context, stores *Stores, logger zerolog.Logger, run models.Session) {
+	if stores == nil || stores.Sessions == nil {
+		return
+	}
+
+	session := run
+	jobctx.RegisterDeadLetterHook(ctx, func(hookCtx context.Context, finalErr error) {
+		writeCtx, cancel := context.WithTimeout(context.WithoutCancel(hookCtx), 10*time.Second)
+		defer cancel()
+
+		errMsg := "Session could not start because sandbox capacity stayed full until the retry budget was exhausted."
+		explanation := "The session could not start or recover because every sandbox slot on the assigned worker stayed occupied until the retry budget expired. Any in-flight work without a durable checkpoint was stopped instead of being retried indefinitely."
+		nextSteps := []string{
+			"Retry the session when worker capacity is available",
+			"Cancel sessions that are no longer needed to free sandbox slots",
+			"Check worker capacity and stuck-running sessions if this affects multiple sessions",
+		}
+
+		if updateErr := stores.Sessions.UpdateResult(writeCtx, session.OrgID, session.ID, string(models.SessionStatusFailed), &models.SessionResult{
+			Error: &errMsg,
+		}); updateErr != nil {
+			logger.Error().Err(updateErr).
+				Err(finalErr).
+				Str("session_id", session.ID.String()).
+				Msg("failed to mark run_agent dead-lettered by sandbox capacity as failed")
+			return
+		}
+
+		session.Status = string(models.SessionStatusFailed)
+		session.Error = &errMsg
+		runAgentTerminalSideEffects(writeCtx, stores, logger, &session, string(models.SessionStatusFailed))
+
+		if failureErr := stores.Sessions.UpdateFailure(writeCtx, session.OrgID, session.ID, explanation, agent.FailureCategorySandboxCapacity, nextSteps, true); failureErr != nil {
+			logger.Error().Err(failureErr).
+				Err(finalErr).
+				Str("session_id", session.ID.String()).
+				Msg("failed to record sandbox-capacity failure metadata")
+		}
+
+		if stores.SessionThreads == nil || session.PrimaryThreadID == nil || *session.PrimaryThreadID == uuid.Nil {
+			return
+		}
+		category := agent.FailureCategorySandboxCapacity
+		if threadErr := stores.SessionThreads.UpdateResult(writeCtx, session.OrgID, *session.PrimaryThreadID, models.ThreadStatusFailed, &models.SessionResult{
+			Error:           &explanation,
+			FailureCategory: &category,
+		}); threadErr != nil {
+			logger.Warn().Err(threadErr).
+				Err(finalErr).
+				Str("session_id", session.ID.String()).
+				Str("thread_id", session.PrimaryThreadID.String()).
+				Msg("failed to mark primary thread failed after sandbox-capacity dead-letter")
+		}
+	})
+}
+
+func runAgentTerminalSideEffects(ctx context.Context, stores *Stores, logger zerolog.Logger, session *models.Session, status string) {
+	if stores == nil || session == nil {
+		return
+	}
+	if session.ProjectTaskID != nil && stores.ProjectTasks != nil && stores.Projects != nil {
+		if err := pm.NewProjectHooks(stores.ProjectTasks, stores.Projects, logger).OnSessionComplete(ctx, session, status); err != nil {
+			logger.Warn().Err(err).
+				Str("session_id", session.ID.String()).
+				Str("project_task_id", session.ProjectTaskID.String()).
+				Msg("failed to update project task after run_agent terminal failure")
+		}
+	}
+	if session.AutomationRunID != nil && stores.AutomationRuns != nil {
+		if err := automations.NewAutomationHooks(stores.AutomationRuns, logger).OnSessionComplete(ctx, session, status); err != nil {
+			logger.Warn().Err(err).
+				Str("session_id", session.ID.String()).
+				Str("automation_run_id", session.AutomationRunID.String()).
+				Msg("failed to update automation run after run_agent terminal failure")
+		}
+	}
+	if status == string(models.SessionStatusFailed) {
+		linear.EnqueueMilestone(ctx, stores.Jobs, logger, session.OrgID, session.ID, "failed", 0)
 	}
 }
 
