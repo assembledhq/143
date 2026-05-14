@@ -1204,12 +1204,21 @@ make provision-worker \
 
 The worker writes `WORKER_PRIVATE_IP=<tailscale ip -4>` and
 `PREVIEW_INTERNAL_BASE_URL=http://<tailscale-ip>:8080` into `/opt/143/.env.local`.
-App nodes use that URL for signed internal preview RPC. The database node must
-also bind Postgres to an explicit primary private address with `DB_BIND_IP`
-rather than `0.0.0.0`. Keep the default in-region `DB_HOST` pointed at that
-private address so Ashburn app/worker nodes retain a direct DB path if the
-tailnet control plane or tunnels are unavailable. To add cross-region workers,
-enroll the database node or an Ashburn subnet router with
+App nodes use that URL for signed internal preview RPC, so every app node that
+can route previews to tailnet-backed workers must also be enrolled in Tailscale:
+
+```bash
+make provision-app \
+  HOST=<app-public-management-ip> \
+  TS_AUTH_KEY=<tagged-auth-key> \
+  TS_TAG=tag:prod-app
+```
+
+The database node must also bind Postgres to an explicit primary private address
+with `DB_BIND_IP` rather than `0.0.0.0`. Keep the default in-region `DB_HOST`
+pointed at that private address so Ashburn app/worker nodes retain a direct DB
+path if the tailnet control plane or tunnels are unavailable. To add
+cross-region workers, enroll the database node or an Ashburn subnet router with
 `TS_ADVERTISE_ROUTES=<db private ip>/32`, approve the route in Tailscale, and
 keep the out-of-region workers on the same `DB_HOST=<db private ip>` with
 `TS_ACCEPT_ROUTES=true` so Linux installs the advertised route. If the overlay

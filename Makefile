@@ -345,6 +345,7 @@ secrets-rotate:
 #
 # Example with overrides:
 #   make provision-worker HOST=87.99.158.39 WORKER_PRIVATE_IP=10.0.0.4 NODE_ID=worker-1
+#   make provision-app HOST=<public-ip> TS_AUTH_KEY=tskey-auth-... TS_TAG=tag:prod-app
 #   make provision-db HOST=<public-ip> DB_BIND_IP=10.0.0.3 TS_AUTH_KEY=tskey-auth-... TS_TAG=tag:prod-db TS_ADVERTISE_ROUTES=10.0.0.3/32
 #   make provision-worker HOST=<public-ip> TS_AUTH_KEY=tskey-auth-... TS_ACCEPT_ROUTES=true WORKER_PRIVATE_IP_SOURCE=tailscale NODE_ID=worker-usw-1
 #
