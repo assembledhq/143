@@ -41,3 +41,26 @@ func (s IntegrationStatus) Validate() error {
 		return fmt.Errorf("invalid IntegrationStatus: %q", s)
 	}
 }
+
+// GitHubRepositoryClaimStatus describes a repository's active ownership from
+// the perspective of the current 143 organization.
+type GitHubRepositoryClaimStatus string
+
+const (
+	GitHubRepositoryClaimStatusUnclaimed                GitHubRepositoryClaimStatus = "unclaimed"
+	GitHubRepositoryClaimStatusOwnedByCurrentOrg        GitHubRepositoryClaimStatus = "owned_by_current_org"
+	GitHubRepositoryClaimStatusOwnedByOtherOrg          GitHubRepositoryClaimStatus = "owned_by_other_org"
+	GitHubRepositoryClaimStatusDisconnectedInCurrentOrg GitHubRepositoryClaimStatus = "disconnected_in_current_org"
+)
+
+func (s GitHubRepositoryClaimStatus) Validate() error {
+	switch s {
+	case GitHubRepositoryClaimStatusUnclaimed,
+		GitHubRepositoryClaimStatusOwnedByCurrentOrg,
+		GitHubRepositoryClaimStatusOwnedByOtherOrg,
+		GitHubRepositoryClaimStatusDisconnectedInCurrentOrg:
+		return nil
+	default:
+		return fmt.Errorf("invalid GitHubRepositoryClaimStatus: %q", s)
+	}
+}

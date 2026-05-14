@@ -51,6 +51,43 @@ func TestPullRequestStore_GetByRepoAndNumber(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
+func TestPullRequestStore_GetByOrgRepoAndNumber(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should initialize")
+	defer mock.Close()
+
+	store := NewPullRequestStore(mock)
+
+	cols := []string{
+		"id", "session_id", "org_id", "github_pr_number", "github_pr_url", "github_repo",
+		"title", "body", "status", "review_status", "authored_by", "ci_status", "head_sha", "head_ref", "base_sha",
+		"merge_state", "has_conflicts", "failing_test_count", "needs_agent_action", "github_state_synced_at",
+		"health_version", "merged_at", "created_at", "updated_at",
+	}
+
+	prID := uuid.New()
+	sessionID := uuid.New()
+	orgID := uuid.New()
+	now := time.Now()
+
+	mock.ExpectQuery("SELECT .+ FROM pull_requests WHERE org_id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(cols).
+				AddRow(prID, &sessionID, orgID, 42, "https://github.com/org/repo/pull/42", "org/repo",
+					"Fix bug", ptrStr("Description"), "open", "pending", "user1", "", nil, nil, nil,
+					models.PullRequestMergeStateUnknown, false, 0, false, nil, int64(0), nil, now, now),
+		)
+
+	pr, err := store.GetByOrgRepoAndNumber(context.Background(), orgID, "org/repo", 42)
+	require.NoError(t, err, "GetByOrgRepoAndNumber should find the org-scoped pull request")
+	require.Equal(t, prID, pr.ID, "GetByOrgRepoAndNumber should return the matching pull request")
+	require.Equal(t, orgID, pr.OrgID, "GetByOrgRepoAndNumber should preserve the owning org")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func TestPullRequestStore_UpdateCIStatus(t *testing.T) {
 	t.Parallel()
 

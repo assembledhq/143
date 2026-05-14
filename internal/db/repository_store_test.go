@@ -535,6 +535,68 @@ func TestRepositoryStore_UpsertFromGitHub(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+func TestRepositoryStore_GetActiveOwnerByGitHubID(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewRepositoryStore(mock)
+	repoID := uuid.New()
+	orgID := uuid.New()
+
+	mock.ExpectQuery("JOIN organizations").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows([]string{"repository_id", "org_id", "org_name", "github_id", "full_name", "status"}).
+				AddRow(repoID, orgID, "Assembled", int64(67890), "assembledhq/143", "active"),
+		)
+
+	owner, err := store.GetActiveOwnerByGitHubID(context.Background(), 67890)
+	require.NoError(t, err, "GetActiveOwnerByGitHubID should return the active owner")
+	require.Equal(t, repoID, owner.RepositoryID, "active owner should include repository id")
+	require.Equal(t, orgID, owner.OrgID, "active owner should include owning org id")
+	require.Equal(t, "Assembled", owner.OrgName, "active owner should include owning org name")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestRepositoryStore_ClaimFromGitHub_ReactivatesDisconnectedRepo(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewRepositoryStore(mock)
+	now := time.Now()
+	repoID := uuid.New()
+	repo := &models.Repository{
+		OrgID:          uuid.New(),
+		IntegrationID:  uuid.New(),
+		GitHubID:       67890,
+		FullName:       "assembledhq/143",
+		DefaultBranch:  "main",
+		CloneURL:       "https://github.com/assembledhq/143.git",
+		InstallationID: 12345,
+		Settings:       json.RawMessage(`{}`),
+	}
+
+	mock.ExpectQuery("INSERT INTO repositories").
+		WithArgs(
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+		).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at", "updated_at"}).AddRow(repoID, now, now))
+
+	err = store.ClaimFromGitHub(context.Background(), repo)
+	require.NoError(t, err, "ClaimFromGitHub should activate the repository for the org")
+	require.Equal(t, repoID, repo.ID, "ClaimFromGitHub should scan the repository id")
+	require.Equal(t, string(models.RepositoryStatusActive), repo.Status, "ClaimFromGitHub should mark the repo active")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func TestRepositoryStore_GetSummary(t *testing.T) {
 	t.Parallel()
 

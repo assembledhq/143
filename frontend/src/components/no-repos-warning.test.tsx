@@ -59,11 +59,17 @@ describe("NoReposWarning", () => {
     );
   });
 
-  it("shows warning when GitHub is connected but no repos", async () => {
+  it("directs GitHub App users to repository selection when no repos are claimed", async () => {
     server.use(
       http.get("/api/v1/integrations", () => {
         return HttpResponse.json({
-          data: [{ id: "int-1", provider: "github", status: "active", github_app_installed: true }],
+          data: [{
+            id: "int-1",
+            provider: "github",
+            status: "active",
+            github_app_installed: true,
+            github_repo_selection_required: true,
+          }],
           meta: {},
         });
       }),
@@ -71,7 +77,7 @@ describe("NoReposWarning", () => {
         return HttpResponse.json({ data: [], meta: {} });
       }),
       http.post("/api/v1/integrations/github/sync", () => {
-        return HttpResponse.json({ data: { repos_synced: 0, errors: 0 } });
+        return HttpResponse.json({ data: { repos_synced: 0, repos_seen: 2, errors: 0 } });
       })
     );
 
@@ -79,16 +85,17 @@ describe("NoReposWarning", () => {
 
     await waitFor(() => {
       expect(
-        screen.getByText(/no repositories are synced/i)
+        screen.getByText(/choose repositories in integrations/i)
       ).toBeInTheDocument();
     });
+    expect(screen.getByRole("link", { name: /choose repositories/i })).toHaveAttribute("href", "/settings/integrations?select_repos=1");
   });
 
-  it("shows Sync repositories button", async () => {
+  it("shows Sync repositories button for legacy GitHub integrations without an app install", async () => {
     server.use(
       http.get("/api/v1/integrations", () => {
         return HttpResponse.json({
-          data: [{ id: "int-1", provider: "github", status: "active", github_app_installed: true }],
+          data: [{ id: "int-1", provider: "github", status: "active", github_app_installed: false }],
           meta: {},
         });
       }),
@@ -107,6 +114,7 @@ describe("NoReposWarning", () => {
         screen.getByText(/no repositories are synced/i)
       ).toBeInTheDocument();
     });
+    expect(screen.getByRole("button", { name: /sync repositories/i })).toBeInTheDocument();
   });
 
   it("keeps neutral copy when github integration exists without an app installation", async () => {
@@ -119,6 +127,9 @@ describe("NoReposWarning", () => {
       }),
       http.get("/api/v1/repositories", () => {
         return HttpResponse.json({ data: [], meta: {} });
+      }),
+      http.post("/api/v1/integrations/github/sync", () => {
+        return HttpResponse.json({ data: { repos_synced: 0, errors: 0 } });
       }),
     );
 

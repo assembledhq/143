@@ -1324,9 +1324,10 @@ func shellQuote(s string) string {
 
 // PullRequestEvent represents a GitHub pull_request webhook event.
 type PullRequestEvent struct {
-	Action string `json:"action"`
-	Number int    `json:"number"`
-	PR     struct {
+	Action     string     `json:"action"`
+	Number     int        `json:"number"`
+	OwnerOrgID *uuid.UUID `json:"-"`
+	PR         struct {
 		Merged         bool   `json:"merged"`
 		HTMLURL        string `json:"html_url"`
 		MergedAt       string `json:"merged_at"`
@@ -1336,13 +1337,14 @@ type PullRequestEvent struct {
 		} `json:"head"`
 	} `json:"pull_request"`
 	Repository struct {
+		ID       int64  `json:"id"`
 		FullName string `json:"full_name"`
 	} `json:"repository"`
 }
 
 // HandlePullRequestEvent processes pull_request webhook events.
 func (s *PRService) HandlePullRequestEvent(ctx context.Context, event PullRequestEvent) error {
-	pr, err := s.pullRequests.GetByRepoAndNumber(ctx, event.Repository.FullName, event.Number)
+	pr, err := s.getWebhookPullRequest(ctx, event.OwnerOrgID, event.Repository.FullName, event.Number)
 	if err != nil {
 		// Not a 143-generated PR — ignore.
 		return nil
@@ -1364,6 +1366,13 @@ func (s *PRService) HandlePullRequestEvent(ctx context.Context, event PullReques
 
 	s.enqueuePullRequestStateSync(ctx, pr)
 	return nil
+}
+
+func (s *PRService) getWebhookPullRequest(ctx context.Context, ownerOrgID *uuid.UUID, repo string, number int) (models.PullRequest, error) {
+	if ownerOrgID != nil {
+		return s.pullRequests.GetByOrgRepoAndNumber(ctx, *ownerOrgID, repo, number)
+	}
+	return s.pullRequests.GetByRepoAndNumber(ctx, repo, number)
 }
 
 // applyClosedPRTransition flips a PR's status to merged/closed and runs the
@@ -1591,8 +1600,9 @@ func (s *PRService) teardownPRPreview(ctx context.Context, pr models.PullRequest
 
 // PullRequestReviewEvent represents a GitHub pull_request_review webhook event.
 type PullRequestReviewEvent struct {
-	Action string `json:"action"`
-	Review struct {
+	Action     string     `json:"action"`
+	OwnerOrgID *uuid.UUID `json:"-"`
+	Review     struct {
 		ID    int64  `json:"id"`
 		State string `json:"state"`
 		Body  string `json:"body"`
@@ -1604,6 +1614,7 @@ type PullRequestReviewEvent struct {
 		Number int `json:"number"`
 	} `json:"pull_request"`
 	Repository struct {
+		ID       int64  `json:"id"`
 		FullName string `json:"full_name"`
 	} `json:"repository"`
 }
@@ -1614,7 +1625,7 @@ func (s *PRService) HandlePullRequestReviewEvent(ctx context.Context, event Pull
 		return nil
 	}
 
-	pr, err := s.pullRequests.GetByRepoAndNumber(ctx, event.Repository.FullName, event.PullRequest.Number)
+	pr, err := s.getWebhookPullRequest(ctx, event.OwnerOrgID, event.Repository.FullName, event.PullRequest.Number)
 	if err != nil {
 		// Not a 143-generated PR — ignore.
 		return nil
@@ -1667,8 +1678,9 @@ func (s *PRService) HandlePullRequestReviewEvent(ctx context.Context, event Pull
 
 // PullRequestReviewCommentEvent represents a GitHub pull_request_review_comment webhook event.
 type PullRequestReviewCommentEvent struct {
-	Action  string `json:"action"`
-	Comment struct {
+	Action     string     `json:"action"`
+	OwnerOrgID *uuid.UUID `json:"-"`
+	Comment    struct {
 		ID       int64  `json:"id"`
 		Body     string `json:"body"`
 		Path     string `json:"path"`
@@ -1681,6 +1693,7 @@ type PullRequestReviewCommentEvent struct {
 		Number int `json:"number"`
 	} `json:"pull_request"`
 	Repository struct {
+		ID       int64  `json:"id"`
 		FullName string `json:"full_name"`
 	} `json:"repository"`
 }
@@ -1692,7 +1705,7 @@ func (s *PRService) HandlePullRequestReviewCommentEvent(ctx context.Context, eve
 		return nil
 	}
 
-	pr, err := s.pullRequests.GetByRepoAndNumber(ctx, event.Repository.FullName, event.PullRequest.Number)
+	pr, err := s.getWebhookPullRequest(ctx, event.OwnerOrgID, event.Repository.FullName, event.PullRequest.Number)
 	if err != nil {
 		// Not a 143-generated PR — ignore.
 		return nil
@@ -2937,7 +2950,8 @@ func buildLabels(issue *models.Issue) []string {
 
 // CheckSuiteEvent represents a GitHub check_suite webhook payload.
 type CheckSuiteEvent struct {
-	Action     string `json:"action"`
+	Action     string     `json:"action"`
+	OwnerOrgID *uuid.UUID `json:"-"`
 	CheckSuite struct {
 		Conclusion   *string `json:"conclusion"`
 		HeadBranch   string  `json:"head_branch"`
@@ -2946,6 +2960,7 @@ type CheckSuiteEvent struct {
 		} `json:"pull_requests"`
 	} `json:"check_suite"`
 	Repository struct {
+		ID       int64  `json:"id"`
 		FullName string `json:"full_name"`
 	} `json:"repository"`
 }
@@ -2957,7 +2972,7 @@ func (s *PRService) HandleCheckSuiteEvent(ctx context.Context, event CheckSuiteE
 	}
 
 	for _, prRef := range event.CheckSuite.PullRequests {
-		pr, err := s.pullRequests.GetByRepoAndNumber(ctx, event.Repository.FullName, prRef.Number)
+		pr, err := s.getWebhookPullRequest(ctx, event.OwnerOrgID, event.Repository.FullName, prRef.Number)
 		if err != nil {
 			continue // Not a 143-managed PR.
 		}
@@ -2981,13 +2996,15 @@ func (s *PRService) HandleCheckSuiteEvent(ctx context.Context, event CheckSuiteE
 
 // CheckRunEvent represents a GitHub check_run webhook payload.
 type CheckRunEvent struct {
-	Action   string `json:"action"`
-	CheckRun struct {
+	Action     string     `json:"action"`
+	OwnerOrgID *uuid.UUID `json:"-"`
+	CheckRun   struct {
 		PullRequests []struct {
 			Number int `json:"number"`
 		} `json:"pull_requests"`
 	} `json:"check_run"`
 	Repository struct {
+		ID       int64  `json:"id"`
 		FullName string `json:"full_name"`
 	} `json:"repository"`
 }
@@ -2999,7 +3016,7 @@ func (s *PRService) HandleCheckRunEvent(ctx context.Context, event CheckRunEvent
 	}
 
 	for _, prRef := range event.CheckRun.PullRequests {
-		pr, err := s.pullRequests.GetByRepoAndNumber(ctx, event.Repository.FullName, prRef.Number)
+		pr, err := s.getWebhookPullRequest(ctx, event.OwnerOrgID, event.Repository.FullName, prRef.Number)
 		if err != nil {
 			continue // Not a 143-managed PR.
 		}
