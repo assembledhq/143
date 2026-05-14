@@ -127,16 +127,42 @@ func TestEnqueueRunAgentForLinearAgentUsesAgentQueue(t *testing.T) {
 
 	orgID := uuid.New()
 	sessionID := uuid.New()
+	issueID := uuid.New()
 	jobID := uuid.New()
 	dedupe := db.RunAgentDedupeKey(sessionID)
 
+	mock.ExpectQuery("SELECT .* FROM sessions").
+		WithArgs(sessionID, orgID).
+		WillReturnRows(pgxmock.NewRows(workerSessionColumns).
+			AddRow(workerSessionRow(sessionID, issueID, orgID, string(models.SessionStatusPending), 0, nil, nil)...))
 	mock.ExpectQuery("INSERT INTO jobs").
 		WithArgs(orgID, "agent", "run_agent", pgxmock.AnyArg(), 5, &dedupe).
 		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(jobID))
 
-	err = enqueueRunAgentForLinearAgent(context.Background(), &Stores{Jobs: db.NewJobStore(mock)}, orgID, sessionID)
+	err = enqueueRunAgentForLinearAgent(context.Background(), &Stores{Sessions: db.NewSessionStore(mock), Jobs: db.NewJobStore(mock)}, orgID, sessionID)
 	require.NoError(t, err, "run_agent enqueue should succeed")
 	require.NoError(t, mock.ExpectationsWereMet(), "Linear-created run_agent jobs should use the agent worker queue")
+}
+
+func TestEnqueueRunAgentForLinearAgentSkipsTerminalSessions(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "test should create pgx mock")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	issueID := uuid.New()
+
+	mock.ExpectQuery("SELECT .* FROM sessions").
+		WithArgs(sessionID, orgID).
+		WillReturnRows(pgxmock.NewRows(workerSessionColumns).
+			AddRow(workerSessionRow(sessionID, issueID, orgID, string(models.SessionStatusCompleted), 1, nil, nil)...))
+
+	err = enqueueRunAgentForLinearAgent(context.Background(), &Stores{Sessions: db.NewSessionStore(mock), Jobs: db.NewJobStore(mock)}, orgID, sessionID)
+	require.NoError(t, err, "terminal Linear agent reconciliation should be a no-op instead of enqueueing duplicate completed work")
+	require.NoError(t, mock.ExpectationsWereMet(), "completed sessions should only be loaded; no run_agent job should be inserted")
 }
 
 func TestLinearAgentPinSessionStateUsesRequestedState(t *testing.T) {

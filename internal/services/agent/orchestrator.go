@@ -30,7 +30,8 @@ import (
 )
 
 const (
-	defaultMaxConcurrent = 10
+	defaultMaxConcurrent    = 10
+	mentionIndexWarmTimeout = 2 * time.Second
 )
 
 // ErrConcurrencyLimit is returned when an org has reached its maximum
@@ -754,6 +755,30 @@ func (o *Orchestrator) warmMentionIndexFromSandbox(ctx context.Context, session 
 	if err := o.mentionIndexes.Warm(ctx, workspace.SessionMentionIndexCacheKey(&cacheSession), index); err != nil {
 		log.Warn().Err(err).Str("snapshot_key", snapshotKey).Msg("failed to warm proactive mention index")
 	}
+}
+
+func (o *Orchestrator) warmMentionIndexFromSandboxAsync(ctx context.Context, session *models.Session, liveSandbox *Sandbox, snapshotKey string, log zerolog.Logger) {
+	if o == nil || o.mentionIndexes == nil || o.fileReader == nil || session == nil || liveSandbox == nil || snapshotKey == "" {
+		return
+	}
+
+	sessionCopy := *session
+	sandboxCopy := *liveSandbox
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Warn().Interface("panic", r).Str("snapshot_key", snapshotKey).Msg("panic warming proactive mention index")
+			}
+		}()
+
+		baseCtx := context.Background()
+		if ctx != nil {
+			baseCtx = context.WithoutCancel(ctx)
+		}
+		warmCtx, cancel := context.WithTimeout(baseCtx, mentionIndexWarmTimeout)
+		defer cancel()
+		o.warmMentionIndexFromSandbox(warmCtx, &sessionCopy, &sandboxCopy, snapshotKey, log)
+	}()
 }
 
 func defaultSandboxPATH() string {
@@ -2150,7 +2175,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 		if _, err := o.sessions.PublishCheckpoint(ctx, run.OrgID, run.ID, lockToken, result.AgentSessionID, snapshotKey, models.CheckpointKindTurnComplete, checkpointCapabilityForAgent(run.AgentType), snapshotSize, time.Now().UTC(), nil, models.RuntimeStopReasonNone); err != nil {
 			log.Warn().Err(err).Msg("failed to publish checkpoint metadata")
 		}
-		o.warmMentionIndexFromSandbox(ctx, run, sandbox, snapshotKey, log)
+		o.warmMentionIndexFromSandboxAsync(ctx, run, sandbox, snapshotKey, log)
 	}
 
 	// Fetch org settings for confidence thresholds.
@@ -3363,7 +3388,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		if _, err := o.sessions.PublishCheckpoint(ctx, session.OrgID, session.ID, lockToken, result.AgentSessionID, newSnapshotKey, models.CheckpointKindTurnComplete, checkpointCapabilityForAgent(session.AgentType), snapshotSize, time.Now().UTC(), nil, models.RuntimeStopReasonNone); err != nil {
 			log.Warn().Err(err).Msg("failed to publish checkpoint metadata after continue")
 		}
-		o.warmMentionIndexFromSandbox(ctx, session, sandbox, newSnapshotKey, log)
+		o.warmMentionIndexFromSandboxAsync(ctx, session, sandbox, newSnapshotKey, log)
 	}
 
 	// 9. Update turn complete — sets status to idle.
@@ -4673,7 +4698,7 @@ func (o *Orchestrator) handleCancelledSession(ctx context.Context, session *mode
 		if _, err := o.sessions.PublishCheckpoint(bgCtx, session.OrgID, session.ID, lockToken, agentSessionID, snapshotKey, models.CheckpointKindGracefulStop, checkpointCapabilityForAgent(session.AgentType), snapshotSize, checkpointedAt, nil, models.RuntimeStopReasonUserCancel); err != nil {
 			log.Warn().Err(err).Msg("failed to publish cancelled-session checkpoint metadata")
 		}
-		o.warmMentionIndexFromSandbox(bgCtx, session, sandbox, snapshotKey, log)
+		o.warmMentionIndexFromSandboxAsync(bgCtx, session, sandbox, snapshotKey, log)
 		if err := o.sessions.UpdateTurnComplete(bgCtx, session.OrgID, session.ID, turnNumber, nil, agentSessionID, snapshotKey); err != nil {
 			log.Warn().Err(err).Msg("failed to return cancelled session to idle")
 			_ = o.sessions.UpdateStatus(bgCtx, session.OrgID, session.ID, string(models.SessionStatusCancelled))
@@ -4828,7 +4853,7 @@ func (o *Orchestrator) handlePolicyStoppedSession(ctx context.Context, session *
 			log.Warn().Err(err).Msg("failed to publish graceful-stop checkpoint metadata")
 		}
 		if snapshotKey != "" {
-			o.warmMentionIndexFromSandbox(bgCtx, session, sandbox, snapshotKey, log)
+			o.warmMentionIndexFromSandboxAsync(bgCtx, session, sandbox, snapshotKey, log)
 		}
 	}
 

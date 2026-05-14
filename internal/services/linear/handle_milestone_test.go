@@ -1,6 +1,7 @@
 package linear
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"strings"
@@ -9,7 +10,9 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/pashagolub/pgxmock/v4"
 	"github.com/rs/zerolog"
+	"github.com/stretchr/testify/require"
 
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
@@ -110,6 +113,7 @@ type fakeLinearClient struct {
 	hasGitHubErr           error
 	findOrphanCommentID    string
 	findOrphanCommentErr   error
+	agentSessionUpdateErr  error
 }
 
 func newFakeLinearClient() *fakeLinearClient {
@@ -197,7 +201,7 @@ func (f *fakeLinearClient) AgentActivityCreate(context.Context, AgentActivityInp
 }
 
 func (f *fakeLinearClient) AgentSessionUpdate(context.Context, AgentSessionUpdateInput) error {
-	return nil
+	return f.agentSessionUpdateErr
 }
 
 func (f *fakeLinearClient) AgentSessionGet(context.Context, string) (*FetchedAgentSession, error) {
@@ -264,6 +268,60 @@ func newPrimaryLink() models.SessionIssueLink {
 
 func newSession() *models.Session {
 	return &models.Session{ID: uuid.New(), OrgID: uuid.New()}
+}
+
+func TestHandleAgentMilestoneLogsExternalURLPinFailures(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "test should create pgx mock")
+	defer mock.Close()
+
+	var logs bytes.Buffer
+	client := newFakeLinearClient()
+	client.agentSessionUpdateErr = errors.New("linear update failed")
+	svc, _, _ := buildTestService(t, client)
+	svc.logger = zerolog.New(&logs)
+	svc.agentSessions = db.NewLinearAgentSessionStore(mock)
+	svc.agentActivities = db.NewLinearAgentActivityLogStore(mock)
+
+	session := newSession()
+	rowID := uuid.New()
+	integrationID := uuid.New()
+	now := time.Now().UTC()
+	sessionID := session.ID
+
+	mock.ExpectQuery("SELECT id, org_id").
+		WithArgs(session.OrgID, session.ID).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "org_id", "integration_id", "linear_agent_session_id",
+			"linear_issue_id", "linear_issue_identifier",
+			"linear_app_user_id", "linear_creator_user_id",
+			"session_id", "state", "last_event_received_at",
+			"created_at", "updated_at",
+		}).AddRow(
+			rowID, session.OrgID, integrationID, "as_1",
+			"iss_1", "ACS-1",
+			"app_1", "user_1",
+			&sessionID, "pending", &now,
+			now, now,
+		))
+	mock.ExpectQuery("INSERT INTO linear_agent_activity_log").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "inserted"}).AddRow(uuid.New(), true))
+	mock.ExpectExec("UPDATE linear_agent_activity_log").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	err = svc.HandleAgentMilestone(context.Background(), MilestoneInput{
+		Event:    MilestonePROpened,
+		Session:  session,
+		Link:     newPrimaryLink(),
+		PRNumber: 42,
+	})
+	require.NoError(t, err, "agent milestone external URL pin failures should remain best-effort")
+	require.Contains(t, logs.String(), "agent milestone: failed to pin external URLs on AgentSession", "best-effort AgentSessionUpdate failures should be logged for operators")
+	require.NoError(t, mock.ExpectationsWereMet(), "agent milestone should emit the activity before attempting the external URL pin")
 }
 
 func TestMilestoneFormattingAndStateHelpers(t *testing.T) {
