@@ -60,20 +60,30 @@ const (
 // unified endpoint share the same upper bound.
 const CodingCredentialLabelMax = 100
 
+// CodingCredentialRateLimit carries a temporary upstream rate-limit marker
+// for a credential. Until is the time the credential may be picked again.
+type CodingCredentialRateLimit struct {
+	Until   time.Time
+	Message string
+}
+
 // CodingCredential is the DB row representation. Config is encrypted bytea.
 type CodingCredential struct {
-	ID             uuid.UUID    `db:"id"`
-	OrgID          uuid.UUID    `db:"org_id"`
-	UserID         *uuid.UUID   `db:"user_id"`
-	Provider       ProviderName `db:"provider"`
-	Label          string       `db:"label"`
-	Config         []byte       `db:"config"`
-	Priority       int          `db:"priority"`
-	Status         string       `db:"status"`
-	CreatedBy      *uuid.UUID   `db:"created_by"`
-	LastVerifiedAt *time.Time   `db:"last_verified_at"`
-	CreatedAt      time.Time    `db:"created_at"`
-	UpdatedAt      time.Time    `db:"updated_at"`
+	ID                    uuid.UUID    `db:"id"`
+	OrgID                 uuid.UUID    `db:"org_id"`
+	UserID                *uuid.UUID   `db:"user_id"`
+	Provider              ProviderName `db:"provider"`
+	Label                 string       `db:"label"`
+	Config                []byte       `db:"config"`
+	Priority              int          `db:"priority"`
+	Status                string       `db:"status"`
+	CreatedBy             *uuid.UUID   `db:"created_by"`
+	LastVerifiedAt        *time.Time   `db:"last_verified_at"`
+	RateLimitedUntil      *time.Time   `db:"rate_limited_until"`
+	RateLimitedObservedAt *time.Time   `db:"rate_limited_observed_at"`
+	RateLimitMessage      *string      `db:"rate_limit_message"`
+	CreatedAt             time.Time    `db:"created_at"`
+	UpdatedAt             time.Time    `db:"updated_at"`
 }
 
 // DecryptedCodingCredential pairs DB metadata with the strongly-typed,
@@ -81,18 +91,21 @@ type CodingCredential struct {
 // directly — callers convert to CodingCredentialSummary before crossing
 // the API boundary.
 type DecryptedCodingCredential struct {
-	ID             uuid.UUID      `json:"id"`
-	OrgID          uuid.UUID      `json:"org_id"`
-	UserID         *uuid.UUID     `json:"user_id,omitempty"`
-	Provider       ProviderName   `json:"provider"`
-	Label          string         `json:"label"`
-	Config         ProviderConfig `json:"-"`
-	Priority       int            `json:"priority"`
-	Status         string         `json:"status"`
-	CreatedBy      *uuid.UUID     `json:"created_by,omitempty"`
-	LastVerifiedAt *time.Time     `json:"last_verified_at,omitempty"`
-	CreatedAt      time.Time      `json:"created_at"`
-	UpdatedAt      time.Time      `json:"updated_at"`
+	ID                    uuid.UUID      `json:"id"`
+	OrgID                 uuid.UUID      `json:"org_id"`
+	UserID                *uuid.UUID     `json:"user_id,omitempty"`
+	Provider              ProviderName   `json:"provider"`
+	Label                 string         `json:"label"`
+	Config                ProviderConfig `json:"-"`
+	Priority              int            `json:"priority"`
+	Status                string         `json:"status"`
+	CreatedBy             *uuid.UUID     `json:"created_by,omitempty"`
+	LastVerifiedAt        *time.Time     `json:"last_verified_at,omitempty"`
+	RateLimitedUntil      *time.Time     `json:"rate_limited_until,omitempty"`
+	RateLimitedObservedAt *time.Time     `json:"rate_limited_observed_at,omitempty"`
+	RateLimitMessage      *string        `json:"rate_limit_message,omitempty"`
+	CreatedAt             time.Time      `json:"created_at"`
+	UpdatedAt             time.Time      `json:"updated_at"`
 }
 
 // Scope returns the Scope this credential belongs to.
@@ -104,22 +117,24 @@ func (c DecryptedCodingCredential) Scope() Scope {
 // of CodingAuth (the existing org-only summary) but adds scope/user_id so
 // the same row component can render personal and org stacks.
 type CodingCredentialSummary struct {
-	ID             uuid.UUID        `json:"id"`
-	OrgID          uuid.UUID        `json:"org_id"`
-	UserID         *uuid.UUID       `json:"user_id,omitempty"`
-	Scope          string           `json:"scope"` // "org" | "personal"
-	Priority       int              `json:"priority"`
-	Agent          AgentType        `json:"agent"`
-	AuthType       CodingAuthType   `json:"auth_type"`
-	Provider       ProviderName     `json:"provider"`
-	Label          string           `json:"label"`
-	Status         CodingAuthStatus `json:"status"`
-	IsDefault      bool             `json:"is_default"` // first runnable in this scope's stack
-	UsageNote      string           `json:"usage_note,omitempty"`
-	LastVerifiedAt *time.Time       `json:"last_verified_at,omitempty"`
-	CreatedBy      *uuid.UUID       `json:"created_by,omitempty"`
-	CreatedAt      time.Time        `json:"created_at"`
-	UpdatedAt      time.Time        `json:"updated_at"`
+	ID               uuid.UUID        `json:"id"`
+	OrgID            uuid.UUID        `json:"org_id"`
+	UserID           *uuid.UUID       `json:"user_id,omitempty"`
+	Scope            string           `json:"scope"` // "org" | "personal"
+	Priority         int              `json:"priority"`
+	Agent            AgentType        `json:"agent"`
+	AuthType         CodingAuthType   `json:"auth_type"`
+	Provider         ProviderName     `json:"provider"`
+	Label            string           `json:"label"`
+	Status           CodingAuthStatus `json:"status"`
+	IsDefault        bool             `json:"is_default"` // first runnable in this scope's stack
+	UsageNote        string           `json:"usage_note,omitempty"`
+	LastVerifiedAt   *time.Time       `json:"last_verified_at,omitempty"`
+	RateLimitedUntil *time.Time       `json:"rate_limited_until,omitempty"`
+	RateLimitMessage *string          `json:"rate_limit_message,omitempty"`
+	CreatedBy        *uuid.UUID       `json:"created_by,omitempty"`
+	CreatedAt        time.Time        `json:"created_at"`
+	UpdatedAt        time.Time        `json:"updated_at"`
 }
 
 // CreateCodingCredentialInput is the API body for POST /coding-credentials

@@ -508,6 +508,7 @@ type Sandbox struct {
 	Provider string            // which provider created this sandbox
 	WorkDir  string            // path to the repo checkout inside the sandbox
 	HomeDir  string            // sandbox user's home dir (HOME env); distinct from WorkDir
+	Env      map[string]string `json:"-"` // environment passed to agent CLI execs; never persist secrets
 	Metadata map[string]string // provider-specific metadata
 
 	// Tracing identifiers copied from SandboxConfig at Create time. Providers

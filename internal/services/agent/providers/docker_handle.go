@@ -139,6 +139,7 @@ func (d *DockerProvider) StartInteractiveCommand(ctx context.Context, sb *agent.
 		AttachStdin:  wantStdin,
 		Tty:          wantTTY,
 		WorkingDir:   workingDir,
+		Env:          envSliceFromMap(sb.Env),
 	}
 
 	execResp, err := d.client.ContainerExecCreate(ctx, sb.ID, execCfg)

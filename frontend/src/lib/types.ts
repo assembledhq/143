@@ -830,6 +830,8 @@ export interface CodingAuth {
   status: CodingAuthStatus;
   is_default: boolean;
   last_verified_at?: string;
+  rate_limited_until?: string;
+  rate_limit_message?: string;
   last_used_at?: string;
   usage_note?: string;
   created_by?: string;
@@ -859,6 +861,8 @@ export interface CodingCredentialSummary {
   is_default: boolean;
   usage_note?: string;
   last_verified_at?: string;
+  rate_limited_until?: string;
+  rate_limit_message?: string;
   created_by?: string;
   created_at: string;
   updated_at: string;

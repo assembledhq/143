@@ -497,17 +497,17 @@ func TestListToolsAllIntegrations(t *testing.T) {
 	}
 
 	expected := map[string]bool{
-		"github_list_recent_prs":             false,
-		"github_get_pr_reviews":              false,
-		"notion_search_documents":            false,
-		"notion_get_document":                false,
-		"slack_search_messages":              false,
-		"slack_get_thread":                   false,
-		"issue_create":                       false,
-		"project_propose":                    false,
-		"circleci_list_flaky_tests":          false,
-		"circleci_get_job_test_results":      false,
-		"circleci_get_recent_test_failures":  false,
+		"github_list_recent_prs":            false,
+		"github_get_pr_reviews":             false,
+		"notion_search_documents":           false,
+		"notion_get_document":               false,
+		"slack_search_messages":             false,
+		"slack_get_thread":                  false,
+		"issue_create":                      false,
+		"project_propose":                   false,
+		"circleci_list_flaky_tests":         false,
+		"circleci_get_job_test_results":     false,
+		"circleci_get_recent_test_failures": false,
 	}
 	for _, tool := range tools {
 		if _, ok := expected[tool.Name]; ok {

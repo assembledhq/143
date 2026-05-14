@@ -9,6 +9,7 @@ import (
 	"io"
 	"path"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -1825,6 +1826,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 		o.failRun(ctx, run, fmt.Sprintf("create sandbox: %s", err))
 		return fmt.Errorf("create sandbox: %w", err)
 	}
+	sandbox.Env = cloneStringMap(sandboxCfg.Env)
 	// Record the turn hold so a concurrent StartPreview can attach to this
 	// container (same ID, same filesystem) instead of hydrating a duplicate.
 	// AcquireTurnHold uses COALESCE to publish only if no one has raced ahead;
@@ -2068,7 +2070,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 	// the (possibly retried) result indicates a credential-level failure.
 	// No-ops cleanly for agent types whose auth flows do not pass through
 	// the unified resolver (e.g. Codex subscription via codexauth.Service).
-	o.shedOnRunResult(run.AgentType, run.OrgID, run.TriggeredByUserID, result, err, log)
+	o.shedOnRunResult(ctx, run.AgentType, run.OrgID, run.TriggeredByUserID, result, err, log)
 
 	// 11. Handle result.
 	stopReason := StopReasonNone
@@ -2482,7 +2484,19 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		sandboxCfg.Env[sandboxauth.WorkingBranchEnvVar] = branch
 	}
 	if authErr := o.env.CheckAuth(session.AgentType, sandboxCfg.Env); authErr != nil {
-		log.Error().Err(authErr).Msg("agent auth pre-flight failed during continue_session")
+		authLog := log.Error().Err(authErr).
+			Str("session_id", session.ID.String()).
+			Str("agent_type", string(session.AgentType))
+		var structuredAuthErr *AuthError
+		if errors.As(authErr, &structuredAuthErr) {
+			authLog = authLog.
+				Str("provider", string(structuredAuthErr.Provider)).
+				Bool("fallback_candidates_unavailable", structuredAuthErr.FallbackCandidatesUnavailable)
+			if structuredAuthErr.RateLimitedUntil != nil {
+				authLog = authLog.Time("rate_limited_until", *structuredAuthErr.RateLimitedUntil)
+			}
+		}
+		authLog.Msg("agent auth pre-flight failed during continue_session")
 		if revertErr := o.sessions.UpdateStatus(ctx, session.OrgID, session.ID, string(models.SessionStatusIdle)); revertErr != nil {
 			log.Error().Err(revertErr).Msg("failed to revert session to idle after auth pre-flight failure")
 		}
@@ -2812,6 +2826,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 			return fmt.Errorf("create sandbox: %w", err)
 		}
 	}
+	sandbox.Env = cloneStringMap(sandboxCfg.Env)
 	// Re-populate sandbox.Metadata["base_commit_sha"] from the DB so that
 	// sessiondiff.Collect can compute `git diff <base> -- .` (the cumulative
 	// session diff against the immutable base) instead of falling back to a
@@ -3283,7 +3298,21 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	// 6c. Shed the just-picked credential when the (post-retry) result shows
 	// rate-limit or auth-rejected signals. Same semantics as the entry-turn
 	// path above; see shedOnRunResult.
-	o.shedOnRunResult(session.AgentType, session.OrgID, session.TriggeredByUserID, result, err, log)
+	if parseCredentialFailureSignal(result, time.Now()).RateLimited {
+		o.shedOnRunResult(ctx, session.AgentType, session.OrgID, session.TriggeredByUserID, result, err, log)
+		var retried bool
+		result, err, retried = o.retryContinueOnCredentialRateLimit(ctx, session, threadID, turnNumber, sandboxCfg, sandbox, adapter, execCtx, prompt, result, err, log)
+		if retried && parseCredentialFailureSignal(result, time.Now()).RateLimited {
+			o.shedOnRunResult(ctx, session.AgentType, session.OrgID, session.TriggeredByUserID, result, err, log)
+			if authErr := o.blockedContinueAfterRateLimitExhaustion(ctx, session, threadID, sandboxCfg, log); authErr != nil {
+				err = authErr
+			}
+		} else {
+			o.shedOnRunResult(ctx, session.AgentType, session.OrgID, session.TriggeredByUserID, result, err, log)
+		}
+	} else {
+		o.shedOnRunResult(ctx, session.AgentType, session.OrgID, session.TriggeredByUserID, result, err, log)
+	}
 
 	stopReason := StopReasonNone
 	if o.cancels != nil {
@@ -4316,6 +4345,17 @@ func (o *Orchestrator) enqueueJob(ctx context.Context, orgID uuid.UUID, queue, j
 	}
 }
 
+func cloneStringMap(in map[string]string) map[string]string {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
+}
+
 // injectClaudeCodeAuth writes a ~/.claude/.credentials.json file into the
 // sandbox if an active Claude Code subscription exists for this org. The
 // Claude Code CLI prefers the credentials file over ANTHROPIC_API_KEY env
@@ -4589,6 +4629,27 @@ func (o *Orchestrator) removeClaudeCodeCredentialsFile(ctx context.Context, sand
 	}
 	if exitCode != 0 {
 		return fmt.Errorf("remove stale claude credentials: exited with code %d: %s", exitCode, stderr.String())
+	}
+	return nil
+}
+
+func (o *Orchestrator) removeCodexAuthFile(ctx context.Context, sandbox *Sandbox) error {
+	authPath := path.Join(sandbox.HomeDir, ".codex", "auth.json")
+	if _, err := o.provider.ReadFile(ctx, sandbox, authPath); err != nil {
+		if isSandboxFileMissing(err) {
+			return nil
+		}
+		return fmt.Errorf("check stale codex auth: %w", err)
+	}
+
+	cmd := fmt.Sprintf("rm -f '%s'", shellEscapeSingleQuote(authPath))
+	var stdout, stderr bytes.Buffer
+	exitCode, err := o.provider.Exec(ctx, sandbox, cmd, &stdout, &stderr)
+	if err != nil {
+		return fmt.Errorf("remove stale codex auth: %w", err)
+	}
+	if exitCode != 0 {
+		return fmt.Errorf("remove stale codex auth: exited with code %d: %s", exitCode, stderr.String())
 	}
 	return nil
 }
@@ -5249,6 +5310,175 @@ func (o *Orchestrator) retryOnTokenExpired(
 	return result, err
 }
 
+func (o *Orchestrator) retryContinueOnCredentialRateLimit(
+	ctx context.Context,
+	session *models.Session,
+	threadID *uuid.UUID,
+	turnNumber int,
+	sandboxCfg SandboxConfig,
+	sandbox *Sandbox,
+	adapter AgentAdapter,
+	execCtx context.Context,
+	prompt *AgentPrompt,
+	result *AgentResult,
+	err error,
+	log zerolog.Logger,
+) (*AgentResult, error, bool) {
+	signal := parseCredentialFailureSignal(result, time.Now())
+	if !signal.RateLimited {
+		return result, err, false
+	}
+
+	refreshedEnv := o.resolveContinueCredentialEnv(ctx, session, sandboxCfg)
+	if authErr := o.env.CheckAuth(session.AgentType, refreshedEnv); authErr != nil {
+		logCredentialRateLimitBlockedContinue(log, session, authErr)
+		o.createContinueAuthFailureMessage(ctx, session, threadID, authErr, log)
+		return result, authErr, false
+	}
+
+	sandbox.Env = cloneStringMap(refreshedEnv)
+	if authErr := o.prepareAgentAuthForRetry(ctx, session, sandbox, refreshedEnv); authErr != nil {
+		return result, authErr, false
+	}
+	prompt.UsageHint = o.buildTokenUsageHint(ctx, session.AgentType, session.OrgID, session.TriggeredByUserID, refreshedEnv, prompt.UsageHint)
+
+	log.Info().
+		Str("session_id", session.ID.String()).
+		Str("agent_type", string(session.AgentType)).
+		Msg("retrying continue_session with fallback credential after rate-limit signal")
+
+	retryLogCh := make(chan LogEntry, 100)
+	var retryLogWg sync.WaitGroup
+	retryLogWg.Add(1)
+	go func() {
+		defer retryLogWg.Done()
+		o.streamLogs(ctx, session.ID, session.OrgID, threadID, turnNumber, retryLogCh, nil)
+	}()
+	retryResult, retryErr := adapter.Execute(execCtx, sandbox, prompt, retryLogCh)
+	close(retryLogCh)
+	retryLogWg.Wait()
+
+	retryResult, retryErr = o.retryOnTokenExpired(ctx, session.AgentType, session.OrgID, session.TriggeredByUserID, session.ID, threadID, turnNumber, sandbox, adapter, execCtx, prompt, retryResult, retryErr, log)
+	return retryResult, retryErr, true
+}
+
+func (o *Orchestrator) blockedContinueAfterRateLimitExhaustion(ctx context.Context, session *models.Session, threadID *uuid.UUID, sandboxCfg SandboxConfig, log zerolog.Logger) error {
+	refreshedEnv := o.resolveContinueCredentialEnv(ctx, session, sandboxCfg)
+	authErr := o.env.CheckAuth(session.AgentType, refreshedEnv)
+	if authErr == nil {
+		return nil
+	}
+	logCredentialRateLimitBlockedContinue(log, session, authErr)
+	o.createContinueAuthFailureMessage(ctx, session, threadID, authErr, log)
+	return authErr
+}
+
+func (o *Orchestrator) resolveContinueCredentialEnv(ctx context.Context, session *models.Session, sandboxCfg SandboxConfig) map[string]string {
+	refreshedEnv := refreshAgentCredentialEnv(sandboxCfg.Env, o.env.Resolve(ctx, session.OrgID, session.AgentType, session.TriggeredByUserID), session.AgentType)
+	if refreshedEnv == nil {
+		refreshedEnv = make(map[string]string)
+	}
+	if session.ModelOverride != nil && *session.ModelOverride != "" {
+		if envVar := models.ModelEnvVarForAgentType(session.AgentType); envVar != "" {
+			refreshedEnv[envVar] = *session.ModelOverride
+		}
+	}
+	if branch := sandboxCfg.Env[sandboxauth.WorkingBranchEnvVar]; branch != "" {
+		refreshedEnv[sandboxauth.WorkingBranchEnvVar] = branch
+	}
+	if _, ok := refreshedEnv["HOME"]; !ok {
+		refreshedEnv["HOME"] = sandboxCfg.HomeDir
+	}
+	return refreshedEnv
+}
+
+func refreshAgentCredentialEnv(current, resolved map[string]string, agentType models.AgentType) map[string]string {
+	out := cloneStringMap(current)
+	if out == nil {
+		out = make(map[string]string)
+	}
+	clearAgentCredentialEnv(out, agentType)
+	for k, v := range resolved {
+		out[k] = v
+	}
+	return out
+}
+
+func clearAgentCredentialEnv(env map[string]string, agentType models.AgentType) {
+	for _, key := range []string{
+		internalAuthBlockedKey,
+		internalAuthBlockedProviderKey,
+		internalAuthBlockedRateLimitedUntilKey,
+		internalAuthBlockedFallbackCandidatesUnavailableKey,
+	} {
+		delete(env, key)
+	}
+	switch agentType {
+	case models.AgentTypeClaudeCode:
+		delete(env, "ANTHROPIC_API_KEY")
+		delete(env, "ANTHROPIC_BASE_URL")
+	case models.AgentTypeCodex:
+		delete(env, "OPENAI_API_KEY")
+		delete(env, "OPENAI_BASE_URL")
+	case models.AgentTypeGeminiCLI:
+		delete(env, "GEMINI_API_KEY")
+		delete(env, "GEMINI_MODEL")
+	case models.AgentTypeAmp:
+		delete(env, "AMP_API_KEY")
+	case models.AgentTypePi:
+		delete(env, "PI_API_KEY")
+	}
+}
+
+func (o *Orchestrator) prepareAgentAuthForRetry(ctx context.Context, session *models.Session, sandbox *Sandbox, env map[string]string) error {
+	switch session.AgentType {
+	case models.AgentTypeCodex:
+		if env["OPENAI_API_KEY"] != "" {
+			return o.removeCodexAuthFile(ctx, sandbox)
+		}
+		_, err := o.ensureCodexAuth(ctx, session, sandbox, env)
+		return err
+	case models.AgentTypeClaudeCode:
+		_, err := o.ensureClaudeCodeAuth(ctx, session, sandbox, env)
+		return err
+	default:
+		return nil
+	}
+}
+
+func logCredentialRateLimitBlockedContinue(log zerolog.Logger, session *models.Session, authErr error) {
+	authLog := log.Error().Err(authErr).
+		Str("session_id", session.ID.String()).
+		Str("agent_type", string(session.AgentType))
+	var structuredAuthErr *AuthError
+	if errors.As(authErr, &structuredAuthErr) {
+		authLog = authLog.
+			Str("provider", string(structuredAuthErr.Provider)).
+			Bool("fallback_candidates_unavailable", structuredAuthErr.FallbackCandidatesUnavailable)
+		if structuredAuthErr.RateLimitedUntil != nil {
+			authLog = authLog.Time("rate_limited_until", *structuredAuthErr.RateLimitedUntil)
+		}
+	}
+	authLog.Msg("continue_session fallback credentials unavailable after rate-limit signal")
+}
+
+func (o *Orchestrator) createContinueAuthFailureMessage(ctx context.Context, session *models.Session, threadID *uuid.UUID, authErr error, log zerolog.Logger) {
+	if o.sessionMessages == nil {
+		return
+	}
+	errMsg := &models.SessionMessage{
+		SessionID:  session.ID,
+		OrgID:      session.OrgID,
+		ThreadID:   threadID,
+		TurnNumber: session.CurrentTurn + 1,
+		Role:       models.MessageRoleAssistant,
+		Content:    authErr.Error(),
+	}
+	if createErr := o.sessionMessages.Create(ctx, errMsg); createErr != nil {
+		log.Error().Err(createErr).Msg("failed to create error message for auth pre-flight failure")
+	}
+}
+
 // shedOnRunResult forwards rate-limit / auth-rejected signals from a finished
 // run back into the unified credential store's in-process health cache so the
 // next pickFromCodingProvider walk for the same (orgID, userID, provider)
@@ -5262,7 +5492,7 @@ func (o *Orchestrator) retryOnTokenExpired(
 // uses codexauth.Service's own selector; because that path records no
 // ProviderOpenAI pick, the shed call below remains a no-op for subscription
 // runs.
-func (o *Orchestrator) shedOnRunResult(agentType models.AgentType, orgID uuid.UUID, userID *uuid.UUID, result *AgentResult, runErr error, log zerolog.Logger) {
+func (o *Orchestrator) shedOnRunResult(ctx context.Context, agentType models.AgentType, orgID uuid.UUID, userID *uuid.UUID, result *AgentResult, runErr error, log zerolog.Logger) {
 	if o.env == nil || result == nil {
 		return
 	}
@@ -5270,22 +5500,45 @@ func (o *Orchestrator) shedOnRunResult(agentType models.AgentType, orgID uuid.UU
 	if provider == "" {
 		return
 	}
-	errMsg := strings.ToLower(result.Error)
+	signal := parseCredentialFailureSignal(result, time.Now())
 	switch {
-	case isAuthRejectedError(errMsg):
+	case signal.AuthRejected:
 		log.Warn().
 			Str("agent_type", string(agentType)).
 			Str("provider", string(provider)).
 			Msg("shedding credential after auth-rejected signal in run result")
-		o.env.ShedAuthRejected(orgID, userID, provider)
-	case isRateLimitedError(errMsg):
+		o.env.ShedAuthRejectedWithContext(ctx, orgID, userID, provider)
+	case signal.RateLimited:
 		log.Warn().
 			Str("agent_type", string(agentType)).
 			Str("provider", string(provider)).
+			Time("rate_limited_until", signal.RateLimitedUntil).
 			Msg("shedding credential after rate-limit signal in run result")
-		o.env.ShedRateLimited(orgID, userID, provider)
+		o.env.ShedRateLimitedWithSignal(ctx, orgID, userID, provider, signal)
 	}
 	_ = runErr // accepted for symmetry with the call sites; the result.Error string is the canonical signal today
+}
+
+const defaultCredentialRateLimitTTL = 15 * time.Minute
+
+func parseCredentialFailureSignal(result *AgentResult, now time.Time) CredentialFailureSignal {
+	if result == nil {
+		return CredentialFailureSignal{}
+	}
+	msg := strings.TrimSpace(result.Error)
+	lower := strings.ToLower(msg)
+	switch {
+	case isAuthRejectedError(lower):
+		return CredentialFailureSignal{AuthRejected: true, Message: msg}
+	case isRateLimitedError(lower):
+		until := parseCredentialRateLimitUntil(lower, now)
+		if until.IsZero() {
+			until = now.Add(defaultCredentialRateLimitTTL)
+		}
+		return CredentialFailureSignal{RateLimited: true, RateLimitedUntil: until, Message: msg}
+	default:
+		return CredentialFailureSignal{}
+	}
 }
 
 // codingProviderForAgent maps an agent type to the unified provider name its
@@ -5317,7 +5570,9 @@ func isRateLimitedError(errMsg string) bool {
 	return strings.Contains(errMsg, "rate limit") ||
 		strings.Contains(errMsg, "rate_limit") ||
 		strings.Contains(errMsg, "429") ||
-		strings.Contains(errMsg, "too many requests")
+		strings.Contains(errMsg, "too many requests") ||
+		strings.Contains(errMsg, "quota exceeded") ||
+		strings.Contains(errMsg, "usage limit")
 }
 
 // isAuthRejectedError detects 401-class signals indicating the credential is
@@ -5330,12 +5585,83 @@ func isAuthRejectedError(errMsg string) bool {
 		return false
 	}
 	return strings.Contains(errMsg, "refresh_token_reused") ||
+		strings.Contains(errMsg, "token_revoked") ||
+		strings.Contains(errMsg, "token_invalidated") ||
+		strings.Contains(errMsg, "access token could not be refreshed") ||
 		strings.Contains(errMsg, "invalid_grant") ||
 		strings.Contains(errMsg, "invalid api key") ||
 		strings.Contains(errMsg, "invalid_api_key") ||
+		strings.Contains(errMsg, "invalid api token") ||
+		isInvalidAuthTokenMessage(errMsg) ||
 		strings.Contains(errMsg, "401 unauthorized") ||
 		strings.Contains(errMsg, "401 unauthenticated") ||
 		strings.Contains(errMsg, "authentication_error")
+}
+
+func isInvalidAuthTokenMessage(errMsg string) bool {
+	if !strings.Contains(errMsg, "invalid token") {
+		return false
+	}
+	return strings.Contains(errMsg, "401") ||
+		strings.Contains(errMsg, "unauthorized") ||
+		strings.Contains(errMsg, "unauthenticated") ||
+		strings.Contains(errMsg, "authentication") ||
+		strings.Contains(errMsg, "auth") ||
+		strings.Contains(errMsg, "api")
+}
+
+var (
+	retryAfterRe     = regexp.MustCompile(`retry-after[=: ]+([0-9]+)`)
+	tryAgainAtRe     = regexp.MustCompile(`try again at ([0-9]{1,2})(?::([0-9]{2}))?\s*(am|pm)?`)
+	resetInSecondsRe = regexp.MustCompile(`(?:reset|retry)[^0-9]{0,20}in ([0-9]+) seconds?`)
+)
+
+func parseCredentialRateLimitUntil(msg string, now time.Time) time.Time {
+	if match := retryAfterRe.FindStringSubmatch(msg); len(match) == 2 {
+		if seconds, err := strconv.Atoi(match[1]); err == nil && seconds > 0 {
+			return now.Add(time.Duration(seconds) * time.Second)
+		}
+	}
+	if match := resetInSecondsRe.FindStringSubmatch(msg); len(match) == 2 {
+		if seconds, err := strconv.Atoi(match[1]); err == nil && seconds > 0 {
+			return now.Add(time.Duration(seconds) * time.Second)
+		}
+	}
+	if match := tryAgainAtRe.FindStringSubmatch(msg); len(match) >= 2 {
+		hour, err := strconv.Atoi(match[1])
+		if err != nil {
+			return time.Time{}
+		}
+		minute := 0
+		if len(match) > 2 && match[2] != "" {
+			parsedMinute, minuteErr := strconv.Atoi(match[2])
+			if minuteErr != nil {
+				return time.Time{}
+			}
+			minute = parsedMinute
+		}
+		if len(match) > 3 {
+			switch match[3] {
+			case "pm":
+				if hour < 12 {
+					hour += 12
+				}
+			case "am":
+				if hour == 12 {
+					hour = 0
+				}
+			}
+		}
+		if hour < 0 || hour > 23 || minute < 0 || minute > 59 {
+			return time.Time{}
+		}
+		candidate := time.Date(now.Year(), now.Month(), now.Day(), hour, minute, 0, 0, now.Location())
+		if !candidate.After(now) {
+			candidate = candidate.Add(24 * time.Hour)
+		}
+		return candidate
+	}
+	return time.Time{}
 }
 
 // containerExitReason determines a granular exit reason for billing metadata
