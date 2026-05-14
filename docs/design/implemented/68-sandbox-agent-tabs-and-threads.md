@@ -252,18 +252,20 @@ multi-tab model when it lands.
 
 - **Fix tests** — already implemented as a PR-health repair action that
   spawns a session-level fix when checks are failing (see
-  [implemented/61-pr-state-sync-and-repair-actions.md](61-pr-state-sync-and-repair-actions.md)).
+  [implemented/61-pr-state-sync-and-repair-actions.md](../implemented/61-pr-state-sync-and-repair-actions.md)).
   When multi-tab is available, the action should reuse the existing repair
   codepath and prompt template, but route the launch into a new tab inside
   the current sandbox rather than spawning a separate session operation.
   Same checkpoint capture as `Add Tab`; the pre-seeded message is placed in
   the new tab's composer for the user to review and send.
 
-Other quick actions — for example, a **Review this work** action that opens
-a reviewer tab pre-seeded with the current diff and a different provider — are
-deferred to a later phase. The bare `+` is sufficient for those workflows in
-v1; promote a dedicated button only after usage confirms the pattern deserves
-one.
+- **Review** — starts a bounded review/fix loop in the current sandbox. The
+  action creates or reuses one review-loop tab, runs the selected agent's native
+  `/review` command against the live working tree, lets that same agent fix its
+  own findings, and repeats sequentially until the agent reports clean or the
+  configured pass limit is reached. This is the primary orchestrated tab helper
+  we are targeting, not just a blank tab preset. The detailed behavior lives in
+  [78-review-agent-loops.md](../future/78-review-agent-loops.md).
 
 ### Layout Modes
 
@@ -861,6 +863,8 @@ shorter human supervision time for sessions where parallelism is appropriate.
 
 ### Phase 4: Orchestration helpers — Planned
 
+- Add the session `Review` loop: one review-loop tab runs native `/review`,
+  fixes its own findings, and repeats sequentially under a pass budget.
 - Add "summarize all tabs."
 - Add "fork this tab into a separate sandbox" for risky divergent work.
 - Add "revert this tab's changes" where reverse patches are clean.
