@@ -29,9 +29,12 @@ import (
 	"github.com/assembledhq/143/internal/services/ingestion"
 	"github.com/assembledhq/143/internal/services/linear"
 	"github.com/assembledhq/143/internal/services/pm"
+	previewsvc "github.com/assembledhq/143/internal/services/preview"
 	"github.com/assembledhq/143/internal/services/prioritization"
 	"github.com/assembledhq/143/internal/version"
 )
+
+const sandboxCapacityRetryDelay = 10 * time.Second
 
 // DataRetentionConfig holds retention periods for the data cleanup handler.
 type DataRetentionConfig struct {
@@ -56,6 +59,9 @@ func RegisterHandlers(w *Worker, stores *Stores, services *Services, retentionCf
 	}
 	if stores.Automations != nil && stores.AutomationRuns != nil {
 		w.Register(models.JobTypeAutomationRun, newAutomationRunHandler(stores, services, logger))
+	}
+	if services != nil && services.PreviewStarter != nil {
+		w.Register(models.JobTypeStartPreview, newStartPreviewHandler(services, logger))
 	}
 	if hasServiceHandlersDependencies(services) {
 		w.Register("run_agent", newRunAgentHandler(stores, services, logger))
@@ -196,6 +202,17 @@ type Services struct {
 	// is disabled (interval <= 0 in config) or the provider can't report
 	// stats (e.g. a non-Docker provider in the future).
 	RuntimeSampler *agent.RuntimeSampler
+	// SandboxGC periodically reconciles provider-labeled local sandbox
+	// containers against DB ownership so leaked containers cannot accumulate
+	// indefinitely on worker disks. nil when disabled or unsupported.
+	SandboxGC *agent.SandboxGC
+	// PreviewStarter completes durable preview startup jobs. nil when this
+	// node has no preview provider.
+	PreviewStarter previewStarter
+}
+
+type previewStarter interface {
+	StartReservedPreview(ctx context.Context, payload previewsvc.StartPreviewJobPayload) error
 }
 
 type orchestratorService interface {
@@ -238,6 +255,29 @@ func newIngestWebhookHandler(stores *Stores, logger zerolog.Logger) JobHandler {
 		// In a full implementation, this would re-fetch the webhook delivery,
 		// parse it through the appropriate adapter, and call IngestNormalized.
 		// For now, ingestion happens synchronously in the webhook handler.
+		return nil
+	}
+}
+
+func newStartPreviewHandler(services *Services, logger zerolog.Logger) JobHandler {
+	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
+		if services == nil || services.PreviewStarter == nil {
+			return &FatalError{Err: fmt.Errorf("preview starter is not configured")}
+		}
+		var input previewsvc.StartPreviewJobPayload
+		if err := json.Unmarshal(payload, &input); err != nil {
+			return &FatalError{Err: fmt.Errorf("unmarshal start_preview payload: %w", err)}
+		}
+		if input.OrgID == uuid.Nil || input.SessionID == uuid.Nil || input.PreviewID == uuid.Nil || input.UserID == uuid.Nil {
+			return &FatalError{Err: fmt.Errorf("start_preview payload missing required ids")}
+		}
+		logger.Info().
+			Str("preview_id", input.PreviewID.String()).
+			Str("session_id", input.SessionID.String()).
+			Msg("processing start_preview job")
+		if err := services.PreviewStarter.StartReservedPreview(ctx, input); err != nil {
+			return &FatalError{Err: err}
+		}
 		return nil
 	}
 }
@@ -1000,6 +1040,14 @@ func newRunAgentHandler(stores *Stores, services *Services, logger zerolog.Logge
 			runErr = services.Orchestrator.RunAgent(jobCtx, &run)
 		}
 		if err := runErr; err != nil {
+			if errors.Is(err, agent.ErrSandboxCapacity) {
+				retryAfter := sandboxCapacityRetryDelay
+				logger.Info().
+					Str("session_id", runID.String()).
+					Err(err).
+					Msg("local sandbox capacity reached; retrying run_agent")
+				return &RetryableError{Err: err, RetryAfter: &retryAfter}
+			}
 			if errors.Is(err, agent.ErrStaleSandboxIDCleared) {
 				// The orchestrator detected a stale orphan container_id from
 				// a crashed prior worker, CAS-cleared it, and signaled retry.
@@ -1173,6 +1221,14 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 		}
 
 		if err := services.Orchestrator.ContinueSession(jobCtx, &session, continueOpts); err != nil {
+			if errors.Is(err, agent.ErrSandboxCapacity) {
+				retryAfter := sandboxCapacityRetryDelay
+				logger.Info().
+					Str("session_id", sessionID.String()).
+					Err(err).
+					Msg("local sandbox capacity reached; retrying continue_session")
+				return &RetryableError{Err: err, RetryAfter: &retryAfter}
+			}
 			// A pending post-PR snapshot upload is a transient state — wrap
 			// in RetryableError so the job is requeued without consuming an
 			// attempt. The session row is unchanged at this point.

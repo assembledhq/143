@@ -398,9 +398,10 @@ func (e *AgentEnv) ShedAuthRejected(orgID uuid.UUID, userID *uuid.UUID, provider
 
 // integrationCredentials holds the resolved Sentry, Linear, and Notion configs for an org.
 type integrationCredentials struct {
-	Sentry *models.SentryConfig
-	Linear *models.LinearConfig
-	Notion *models.NotionConfig
+	Sentry   *models.SentryConfig
+	Linear   *models.LinearConfig
+	Notion   *models.NotionConfig
+	CircleCI *models.CircleCIConfig
 }
 
 // fetchIntegrationCredentials retrieves the Sentry, Linear, and Notion configs
@@ -426,6 +427,11 @@ func (e *AgentEnv) fetchIntegrationCredentials(ctx context.Context, orgID uuid.U
 	if cred, err := e.credentials.Get(ctx, orgID, models.ProviderNotion); err == nil && cred != nil {
 		if cfg, ok := cred.Config.(models.NotionConfig); ok {
 			ic.Notion = &cfg
+		}
+	}
+	if cred, err := e.credentials.Get(ctx, orgID, models.ProviderCircleCI); err == nil && cred != nil {
+		if cfg, ok := cred.Config.(models.CircleCIConfig); ok {
+			ic.CircleCI = &cfg
 		}
 	}
 	return ic
@@ -544,6 +550,14 @@ func (e *AgentEnv) Resolve(ctx context.Context, orgID uuid.UUID, agentType model
 	if ic.Notion != nil {
 		if ic.Notion.AccessToken != "" {
 			merged["NOTION_ACCESS_TOKEN"] = ic.Notion.AccessToken
+		}
+	}
+	if ic.CircleCI != nil {
+		if ic.CircleCI.AuthToken != "" {
+			merged["CIRCLECI_TOKEN"] = ic.CircleCI.AuthToken
+		}
+		if ic.CircleCI.ProjectSlug != "" {
+			merged["CIRCLECI_PROJECT_SLUG"] = ic.CircleCI.ProjectSlug
 		}
 	}
 

@@ -2,42 +2,35 @@
 
 import { useMemo } from "react";
 import { useQuery } from "@tanstack/react-query";
-import {
-  BarChart,
-  Bar,
-  XAxis,
-  YAxis,
-  CartesianGrid,
-  Tooltip,
-  ResponsiveContainer,
-} from "recharts";
+import { Bar, BarChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { api } from "@/lib/api";
 import { queryKeys } from "@/lib/query-keys";
+import type { UsageTimeseriesBucket } from "@/lib/types";
 import { Card, CardContent } from "@/components/ui/card";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
-import {
-  groupByLocalDay,
-  fillMissingDays,
-  formatDayLabel,
-  formatMinutes,
-  formatTokenCount,
-  formatCost,
-  metricOptions,
-  type MetricKey,
-} from "./usage-helpers";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { fillMissingDays, formatCost, formatDayLabel, formatMinutes, formatTokenCount, groupByLocalDay, metricOptions, type MetricKey } from "./usage-helpers";
+import type { UsageBreakdownDimension } from "./usage-breakdown-table";
+
+type ChartMode = "totals" | "stacked";
+
+interface UsageChartData {
+  rows: Array<Record<string, number | string>>;
+  series: Array<{ key: string; label: string }>;
+}
 
 interface UsageTimeseriesChartProps {
   start: string;
   end: string;
   metric: MetricKey;
   onMetricChange: (metric: MetricKey) => void;
-  userId?: string | null;
+  dimension: UsageBreakdownDimension;
+  chartMode: ChartMode;
+  onChartModeChange: (mode: ChartMode) => void;
+  filters?: {
+    agent?: string | null;
+    model?: string | null;
+    reasoning?: string | null;
+  };
   onDayClick?: (day: string) => void;
 }
 
@@ -47,6 +40,7 @@ function formatMetricValue(value: number, metric: MetricKey): string {
       return formatMinutes(value);
     case "total_input_tokens":
     case "total_output_tokens":
+    case "total_tokens":
       return formatTokenCount(value);
     case "total_llm_cost_usd":
       return formatCost(value);
@@ -55,43 +49,79 @@ function formatMetricValue(value: number, metric: MetricKey): string {
   }
 }
 
-function getBarColor(metric: MetricKey): string {
-  switch (metric) {
-    case "total_container_minutes":
-      return "hsl(var(--primary))";
-    case "total_sessions":
-    case "total_container_starts":
-      return "hsl(220, 70%, 55%)";
-    case "peak_concurrent":
-      return "hsl(350, 70%, 55%)";
-    case "total_input_tokens":
-    case "total_output_tokens":
-      return "hsl(160, 60%, 45%)";
-    case "total_llm_cost_usd":
-      return "hsl(40, 80%, 50%)";
-    default:
-      return "hsl(var(--primary))";
+function seriesColor(index: number): string {
+  const palette = [
+    "hsl(var(--primary))",
+    "hsl(20 80% 52%)",
+    "hsl(160 60% 42%)",
+    "hsl(220 65% 55%)",
+    "hsl(40 85% 54%)",
+  ];
+  return palette[index % palette.length];
+}
+
+function daysInRange(start: string, end: string): string[] {
+  const days: string[] = [];
+  const cursor = new Date(start);
+  const endDate = new Date(end);
+  cursor.setUTCHours(0, 0, 0, 0);
+  endDate.setUTCHours(0, 0, 0, 0);
+  while (cursor < endDate) {
+    days.push(cursor.toISOString().slice(0, 10));
+    cursor.setUTCDate(cursor.getUTCDate() + 1);
   }
+  return days;
 }
 
-interface ChartTooltipProps {
-  active?: boolean;
-  payload?: Array<{ value: number; dataKey: string }>;
-  label?: string;
-  metric: MetricKey;
-}
+export function buildUsageChartData(
+  buckets: UsageTimeseriesBucket[],
+  start: string,
+  end: string,
+  metric: MetricKey,
+  chartMode: ChartMode
+): UsageChartData {
+  if (chartMode === "stacked") {
+    if (buckets.length === 0) {
+      return { rows: [], series: [] };
+    }
+    const dayMap = new Map<string, Record<string, number | string>>();
+    const seriesMap = new Map<string, string>();
+    for (const bucket of buckets) {
+      const hourUTC = bucket.hour_utc;
+      if (typeof hourUTC !== "string") {
+        continue
+      }
+      const day = new Date(hourUTC).toLocaleDateString("en-CA");
+      const row = dayMap.get(day) ?? { day, label: formatDayLabel(day), total: 0 };
+      const key = typeof bucket.series_key === "string" && bucket.series_key !== "" ? bucket.series_key : "unknown";
+      const metricValue = Number(bucket[metric] ?? 0);
+      row[key] = Number(row[key] ?? 0) + metricValue;
+      row.total = Number(row.total) + metricValue;
+      dayMap.set(day, row);
+      const label = typeof bucket.series_label === "string" && bucket.series_label !== "" ? bucket.series_label : key;
+      seriesMap.set(key, label);
+    }
+    const series = [...seriesMap.entries()].map(([key, label]) => ({ key, label }));
+    const rows = daysInRange(start, end).map((day) => {
+      const existing = dayMap.get(day) ?? { day, label: formatDayLabel(day), total: 0 };
+      const row: Record<string, number | string> = { ...existing };
+      for (const item of series) {
+        row[item.key] = Number(row[item.key] ?? 0);
+      }
+      row.total = Number(row.total ?? 0);
+      return row;
+    });
+    return { rows, series };
+  }
 
-function ChartTooltip({ active, payload, label, metric }: ChartTooltipProps) {
-  if (!active || !payload?.length) return null;
-
-  return (
-    <div className="rounded-lg border bg-background px-3 py-2 shadow-sm">
-      <p className="text-xs font-medium text-foreground">{label}</p>
-      <p className="text-sm font-semibold mt-0.5">
-        {formatMetricValue(payload[0].value, metric)}
-      </p>
-    </div>
-  );
+  if (buckets.length === 0) {
+    return { rows: [], series: [] };
+  }
+  const grouped = groupByLocalDay(buckets);
+  return {
+    rows: fillMissingDays(grouped, start, end).map((d) => ({ ...d, label: formatDayLabel(d.day) })),
+    series: [],
+  };
 }
 
 export function UsageTimeseriesChart({
@@ -99,67 +129,81 @@ export function UsageTimeseriesChart({
   end,
   metric,
   onMetricChange,
-  userId,
+  dimension,
+  chartMode,
+  onChartModeChange,
+  filters,
   onDayClick,
 }: UsageTimeseriesChartProps) {
+  const stackBy = chartMode === "stacked" && dimension !== "user" ? dimension : undefined;
   const { data, isLoading, isError } = useQuery({
     queryKey: queryKeys.usage.timeseries({
       start,
       end,
-      ...(userId ? { user_id: userId } : {}),
+      ...(stackBy ? { stack_by: stackBy } : {}),
+      ...(filters?.agent ? { agent: filters.agent } : {}),
+      ...(filters?.model ? { model: filters.model } : {}),
+      ...(filters?.reasoning ? { reasoning: filters.reasoning } : {}),
     }),
     queryFn: () =>
       api.usage.getTimeseries({
         start,
         end,
-        ...(userId ? { user_id: userId } : {}),
+        ...(stackBy ? { stack_by: stackBy } : {}),
+        ...(filters?.agent ? { agent: filters.agent } : {}),
+        ...(filters?.model ? { model: filters.model } : {}),
+        ...(filters?.reasoning ? { reasoning: filters.reasoning } : {}),
       }),
   });
 
-  const dailyData = useMemo(() => {
-    const grouped = data?.data?.buckets ? groupByLocalDay(data.data.buckets) : [];
-    if (grouped.length === 0) return [];
-    return fillMissingDays(grouped, start, end).map((d) => ({
-      ...d,
-      label: formatDayLabel(d.day),
-    }));
-  }, [data, start, end]);
-
-  const metricLabel = metricOptions.find((o) => o.value === metric)?.label ?? metric;
+  const chartData = useMemo(() => {
+    return buildUsageChartData(data?.data?.buckets ?? [], start, end, metric, chartMode);
+  }, [chartMode, data, end, metric, start]);
 
   return (
     <Card>
       <CardContent className="p-4">
-        <div className="flex items-center justify-between mb-4">
+        <div className="mb-4 flex flex-wrap items-center justify-between gap-2">
           <h3 className="text-sm font-medium">Daily Usage</h3>
-          <Select value={metric} onValueChange={(v) => onMetricChange(v as MetricKey)}>
-            <SelectTrigger className="h-8 w-48 text-xs">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              {metricOptions.map((opt) => (
-                <SelectItem key={opt.value} value={opt.value} className="text-xs">
-                  {opt.label}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
+          <div className="flex items-center gap-2">
+            <Select value={metric} onValueChange={(v) => onMetricChange(v as MetricKey)}>
+              <SelectTrigger className="h-8 w-40 text-xs">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {metricOptions.map((opt) => (
+                  <SelectItem key={opt.value} value={opt.value} className="text-xs">
+                    {opt.label}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+              <Select value={chartMode} onValueChange={(v) => onChartModeChange(v as ChartMode)}>
+              <SelectTrigger className="h-8 w-32 text-xs">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="totals" className="text-xs">Totals</SelectItem>
+                <SelectItem value="stacked" className="text-xs" disabled={dimension === "user"}>Stacked bars</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
         </div>
 
         {isLoading ? (
-          <div className="h-64 bg-muted/30 animate-pulse rounded" />
+          <div className="h-64 animate-pulse rounded bg-muted/30" />
         ) : isError ? (
-          <div className="h-64 flex items-center justify-center text-sm text-destructive">
+          <div className="flex h-64 items-center justify-center text-sm text-destructive">
             Failed to load usage data. Please try again later.
           </div>
-        ) : dailyData.length === 0 ? (
-          <div className="h-64 flex items-center justify-center text-sm text-muted-foreground">
+        ) : chartData.rows.length === 0 ? (
+          <div className="flex h-64 items-center justify-center text-sm text-muted-foreground">
             No usage data for this period
           </div>
         ) : (
           <ResponsiveContainer width="100%" height={280}>
             <BarChart
-              data={dailyData}
+              data={chartData.rows}
               margin={{ top: 4, right: 4, bottom: 0, left: 4 }}
               onClick={(e: Record<string, unknown>) => {
                 if (!e?.activePayload || !Array.isArray(e.activePayload)) return;
@@ -171,40 +215,16 @@ export function UsageTimeseriesChart({
               }}
             >
               <CartesianGrid strokeDasharray="3 3" className="stroke-border/50" vertical={false} />
-              <XAxis
-                dataKey="label"
-                tick={{ fontSize: 11, fill: "hsl(var(--muted-foreground))" }}
-                tickLine={false}
-                axisLine={false}
-                interval="preserveStartEnd"
-              />
-              <YAxis
-                tick={{ fontSize: 11, fill: "hsl(var(--muted-foreground))" }}
-                tickLine={false}
-                axisLine={false}
-                width={48}
-                tickFormatter={(v) => formatMetricValue(v, metric)}
-              />
-              <Tooltip
-                content={({ active, payload, label }) => (
-                  <ChartTooltip
-                    active={active}
-                    payload={payload as unknown as ChartTooltipProps["payload"]}
-                    label={label as string}
-                    metric={metric}
-                  />
-                )}
-                cursor={false}
-              />
-              <Bar
-                dataKey={metric}
-                fill={getBarColor(metric)}
-                radius={[3, 3, 0, 0]}
-                maxBarSize={40}
-                name={metricLabel}
-                activeBar={{ fill: getBarColor(metric), fillOpacity: 0.75 }}
-                style={{ cursor: onDayClick ? "pointer" : "default" }}
-              />
+              <XAxis dataKey="label" tick={{ fontSize: 11, fill: "hsl(var(--muted-foreground))" }} tickLine={false} axisLine={false} interval="preserveStartEnd" />
+              <YAxis tick={{ fontSize: 11, fill: "hsl(var(--muted-foreground))" }} tickLine={false} axisLine={false} width={48} tickFormatter={(v) => formatMetricValue(Number(v), metric)} />
+              <Tooltip formatter={(value, name) => [formatMetricValue(Number(value ?? 0), metric), String(name)]} />
+              {chartMode === "stacked"
+                ? chartData.series.map((series, index) => (
+                    <Bar key={series.key} dataKey={series.key} stackId="usage" fill={seriesColor(index)} radius={index === chartData.series.length - 1 ? [3, 3, 0, 0] : [0, 0, 0, 0]} name={series.label} />
+                  ))
+                : (
+                    <Bar dataKey={metric} fill={seriesColor(0)} radius={[3, 3, 0, 0]} maxBarSize={40} style={{ cursor: onDayClick ? "pointer" : "default" }} />
+                  )}
             </BarChart>
           </ResponsiveContainer>
         )}

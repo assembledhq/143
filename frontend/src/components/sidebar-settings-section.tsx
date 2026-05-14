@@ -28,9 +28,9 @@ interface SettingsItem {
   icon: LucideIcon;
   href: string;
   adminOnly?: boolean;
-  // Hides the entry from viewers. Backend rejects the underlying reads, so
-  // showing the link would land them on an empty/failed page.
-  hideForViewers?: boolean;
+  // Hides the entry from selected roles. Backend rejects the underlying reads,
+  // so showing the link would land them on an empty/failed page.
+  hideForRoles?: string[];
 }
 
 interface SettingsGroup {
@@ -48,18 +48,18 @@ const settingsGroups: SettingsGroup[] = [
   {
     label: "PLATFORM",
     items: [
-      { label: "Integrations", icon: Plug, href: "/settings/integrations", hideForViewers: true },
-      { label: "Coding agents", icon: Bot, href: "/settings/agent", hideForViewers: true },
+      { label: "Integrations", icon: Plug, href: "/settings/integrations", hideForRoles: ["viewer", "builder"] },
+      { label: "Coding agents", icon: Bot, href: "/settings/agent", hideForRoles: ["viewer"] },
       { label: "LLM", icon: Sparkles, href: "/settings/llm", adminOnly: true },
       { label: "Autopilot", icon: Target, href: "/settings/autopilot", adminOnly: true },
-      { label: "Evals", icon: FlaskConical, href: "/settings/evals", hideForViewers: true },
+      { label: "Evals", icon: FlaskConical, href: "/settings/evals", hideForRoles: ["viewer", "builder"] },
     ],
   },
   {
     label: "ORGANIZATION",
     items: [
       { label: "General", icon: Settings, href: "/settings", adminOnly: true },
-      { label: "Team", icon: Users, href: "/settings/team", hideForViewers: true },
+      { label: "Team", icon: Users, href: "/settings/team", hideForRoles: ["viewer", "builder"] },
       { label: "Usage", icon: BarChart3, href: "/settings/usage", adminOnly: true },
       { label: "Audit log", icon: ScrollText, href: "/settings/audit-log", adminOnly: true },
     ],
@@ -83,12 +83,15 @@ export function SidebarSettingsSection({
   pathname,
   userRole,
   onNavigate,
+  variant = "desktop",
 }: {
   pathname: string;
   userRole: string | undefined;
   onNavigate?: () => void;
+  variant?: "desktop" | "mobile";
 }) {
   const onSettingsPage = isSettingsPath(pathname);
+  const isMobile = variant === "mobile";
 
   // Default to expanded if on a settings page to avoid flicker; otherwise
   // start collapsed and let the mount effect restore the persisted value.
@@ -126,7 +129,8 @@ export function SidebarSettingsSection({
         <button
           type="button"
           className={cn(
-            "flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-xs font-medium transition-colors duration-150",
+            "flex w-full items-center rounded-md px-2.5 font-medium transition-colors duration-150",
+            isMobile ? "gap-2.5 py-3 text-sm" : "gap-2 py-1.5 text-xs",
             onSettingsPage
               ? "bg-sidebar-accent text-sidebar-accent-foreground"
               : "text-muted-foreground hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
@@ -136,7 +140,8 @@ export function SidebarSettingsSection({
           <span className="flex-1 text-left">Settings</span>
           <ChevronRight
             className={cn(
-              "h-3.5 w-3.5 shrink-0 opacity-50 transition-transform duration-200",
+              "shrink-0 opacity-50 transition-transform duration-200",
+              isMobile ? "h-4 w-4" : "h-3.5 w-3.5",
               isOpen && "rotate-90"
             )}
           />
@@ -151,7 +156,7 @@ export function SidebarSettingsSection({
             {settingsGroups.map((group, groupIndex) => {
               const visibleItems = group.items.filter((item) => {
                 if (item.adminOnly && userRole !== "admin") return false;
-                if (item.hideForViewers && userRole === "viewer") return false;
+                if (item.hideForRoles?.includes(userRole ?? "")) return false;
                 return true;
               });
               if (visibleItems.length === 0) return null;

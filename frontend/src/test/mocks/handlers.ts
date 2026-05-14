@@ -1,5 +1,5 @@
 import { http, HttpResponse } from 'msw';
-import type { Issue, Session, SessionLog, SessionMessage, SessionReviewComment, SessionThread, SessionThreadFileEvent, SessionTimelineEntry, User, PullRequest, PullRequestHealthResponse, PullRequestRepairResponse, ListResponse, SingleResponse, PMStatus, PMDecisionsResponse, Project, ProjectDetail, AutopilotQueueResponse } from '@/lib/types';
+import type { Issue, Session, SessionDiff, SessionLog, SessionMessage, SessionReviewComment, SessionThread, SessionThreadFileEvent, SessionTimelineEntry, User, PullRequest, PullRequestHealthResponse, PullRequestRepairResponse, ListResponse, SingleResponse, PMStatus, PMDecisionsResponse, Project, ProjectDetail, AutopilotQueueResponse } from '@/lib/types';
 
 export const mockIssues: Issue[] = [
   {
@@ -345,6 +345,26 @@ export const handlers = [
       );
     }
     return HttpResponse.json({ data: session } satisfies SingleResponse<Session>);
+  }),
+
+  http.get('/api/v1/sessions/:id/diff', ({ params }) => {
+    const session = mockSessions.find((s) => s.id === params.id);
+    if (!session) {
+      return HttpResponse.json(
+        { error: { code: 'NOT_FOUND', message: 'Session diff not found' } },
+        { status: 404 },
+      );
+    }
+    return HttpResponse.json({
+      data: {
+        session_id: session.id,
+        diff: session.diff,
+        diff_stats: session.diff_stats,
+        diff_history: session.diff_history ?? [],
+        diff_truncated: false,
+        diff_history_truncated: false,
+      },
+    } satisfies SingleResponse<SessionDiff>);
   }),
 
   http.patch('/api/v1/sessions/:id', async ({ request, params }) => {

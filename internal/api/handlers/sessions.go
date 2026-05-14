@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/assembledhq/143/internal/api/middleware"
 	"github.com/assembledhq/143/internal/api/sse"
@@ -559,6 +560,8 @@ func (h *SessionHandler) List(w http.ResponseWriter, r *http.Request) {
 	items := make([]models.SessionListItem, len(runs))
 	sessionIDs := make([]uuid.UUID, len(runs))
 	for i, s := range runs {
+		s.Diff = nil
+		s.DiffHistory = nil
 		h.enrichSessionLinks(r.Context(), orgID, &s)
 		items[i] = models.SessionListItem{Session: s}
 		sessionIDs[i] = s.ID
@@ -652,7 +655,7 @@ func (h *SessionHandler) Get(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	run, err := h.runStore.GetByID(r.Context(), orgID, runID)
+	run, err := h.runStore.GetAPIDetailByID(r.Context(), orgID, runID)
 	if err != nil {
 		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "run not found")
 		return
@@ -674,6 +677,23 @@ func (h *SessionHandler) Get(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, models.SingleResponse[models.SessionDetail]{Data: detail})
+}
+
+func (h *SessionHandler) GetDiff(w http.ResponseWriter, r *http.Request) {
+	orgID := middleware.OrgIDFromContext(r.Context())
+	sessionID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid session ID")
+		return
+	}
+
+	payload, err := h.runStore.GetDiffByID(r.Context(), orgID, sessionID)
+	if err != nil {
+		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "session diff not found")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, models.SingleResponse[models.SessionDiff]{Data: payload})
 }
 
 func (h *SessionHandler) Update(w http.ResponseWriter, r *http.Request) {
@@ -2723,7 +2743,7 @@ func buildManualSessionDescription(message string, images []string) string {
 const defaultManualSessionTitle = "Manual Session"
 
 func manualSessionTitle(message string) string {
-	trimmed := strings.TrimSpace(message)
+	trimmed := strings.TrimSpace(strings.ToValidUTF8(message, ""))
 	if trimmed == "" {
 		return defaultManualSessionTitle
 	}
@@ -2732,11 +2752,18 @@ func manualSessionTitle(message string) string {
 		trimmed = trimmed[:idx]
 	}
 
-	if len(trimmed) <= 120 {
-		return trimmed
-	}
+	return truncateUTF8Title(trimmed, 120)
+}
 
-	return strings.TrimSpace(trimmed[:120]) + "..."
+func truncateUTF8Title(value string, maxBytes int) string {
+	if len(value) <= maxBytes {
+		return value
+	}
+	truncated := value[:maxBytes]
+	for len(truncated) > 0 && !utf8.ValidString(truncated) {
+		truncated = truncated[:len(truncated)-1]
+	}
+	return strings.TrimSpace(truncated) + "..."
 }
 
 // shouldOverrideTitleWithLinearIssue reports whether a Linear primary

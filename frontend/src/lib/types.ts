@@ -275,6 +275,8 @@ export interface Session {
   diff?: string;
   diff_stats?: { added: number; removed: number; files_changed: number };
   diff_history?: Array<{ pass: number; diff: string; diff_stats: { added: number; removed: number; files_changed: number }; created_at: string }>;
+  diff_collected_at?: string;
+  latest_diff_snapshot_id?: string;
   threads?: SessionThread[];
   archived_at?: string;
   archived_by_user_id?: string;
@@ -343,6 +345,19 @@ export interface ForkResult {
 
 export interface SessionDetail extends Session {
   threads: SessionThread[];
+}
+
+export interface SessionDiff {
+  session_id: string;
+  diff?: string;
+  diff_stats?: { added: number; removed: number; files_changed: number };
+  diff_history?: Array<{ pass: number; diff: string; diff_stats: { added: number; removed: number; files_changed: number }; created_at: string }>;
+  diff_truncated: boolean;
+  diff_history_truncated: boolean;
+  diff_chars?: number;
+  diff_history_bytes?: number;
+  diff_max_chars?: number;
+  diff_history_max_bytes?: number;
 }
 
 export interface SessionLog {
@@ -1408,6 +1423,11 @@ export interface UsageTimeseriesBucket {
   user_id?: string;
   user_name?: string;
   capacity_tier?: string;
+  agent_type?: string;
+  model_used?: string;
+  reasoning_effort?: string;
+  series_key?: string;
+  series_label?: string;
   total_container_minutes: number;
   total_sessions: number;
   total_container_starts: number;
@@ -1416,6 +1436,7 @@ export interface UsageTimeseriesBucket {
   p95_duration_sec: number;
   total_input_tokens: number;
   total_output_tokens: number;
+  total_tokens: number;
   total_llm_cost_usd: number;
 }
 
@@ -1434,8 +1455,12 @@ export interface UsageBreakdownRow {
   peak_concurrent: number;
   total_input_tokens: number;
   total_output_tokens: number;
+  total_tokens: number;
   total_llm_cost_usd: number;
   percentage: number;
+  share_of_sessions?: number;
+  share_of_token_cost?: number;
+  share_of_tokens?: number;
 }
 
 // Automation types

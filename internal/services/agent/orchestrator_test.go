@@ -999,6 +999,7 @@ type testDeps struct {
 	orgs             *mockOrgStore
 	identityResolver *identity.Resolver
 	sandboxAuth      agent.SandboxAuthServer
+	sandboxCapacity  *agent.SandboxCapacityGate
 	users            agent.UserLookup
 	logger           *zerolog.Logger
 }
@@ -1119,6 +1120,7 @@ func buildOrchestrator(d testDeps) *agent.Orchestrator {
 		Orgs:              orgStore,
 		IdentityResolver:  d.identityResolver,
 		SandboxAuth:       d.sandboxAuth,
+		SandboxCapacity:   d.sandboxCapacity,
 		Users:             d.users,
 		NodeID:            d.nodeID,
 		Logger:            logger,
@@ -1191,6 +1193,31 @@ func TestRunAgent_SuccessfulRun(t *testing.T) {
 
 	// Sandbox should be destroyed.
 	require.Equal(t, 1, d.provider.GetDestroyCalls())
+}
+
+func TestRunAgent_SandboxCapacityRejectsBeforeCreate(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	run := testRun(orgID, issue.ID)
+
+	d := defaultDeps()
+	d.sandboxCapacity = agent.NewSandboxCapacityGate(agent.SandboxCapacityGateConfig{
+		Counter:   &fakeLiveSandboxCounter{count: 1},
+		MaxActive: 1,
+		NodeID:    "worker-1",
+		Logger:    zerolog.Nop(),
+	})
+	d.provider.CreateFn = func(context.Context, agent.SandboxConfig) (*agent.Sandbox, error) {
+		t.Fatalf("provider.Create must not be called when live sandbox capacity is full")
+		return nil, nil
+	}
+
+	err := buildOrchestrator(d).RunAgent(context.Background(), run)
+
+	require.ErrorIs(t, err, agent.ErrSandboxCapacity, "RunAgent should surface the live sandbox capacity sentinel")
+	require.Empty(t, d.sessions.getStatusUpdates(), "RunAgent should not mark the session running when capacity is unavailable")
 }
 
 func TestRunAgent_SuccessLogIncludesPlatformHealthFields(t *testing.T) {
@@ -2878,6 +2905,32 @@ func TestContinueSession_GatesOnPendingSnapshotKey(t *testing.T) {
 	require.Empty(t, d.sessions.getStatusUpdates(), "ContinueSession must not mutate session state before the gate fires")
 }
 
+func TestContinueSession_SandboxCapacityRejectsFreshResumeBeforeCreate(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	session := testRun(orgID, issue.ID)
+	session.Status = string(models.SessionStatusIdle)
+
+	d := defaultDeps()
+	d.sandboxCapacity = agent.NewSandboxCapacityGate(agent.SandboxCapacityGateConfig{
+		Counter:   &fakeLiveSandboxCounter{count: 1},
+		MaxActive: 1,
+		NodeID:    "worker-1",
+		Logger:    zerolog.Nop(),
+	})
+	d.provider.CreateFn = func(context.Context, agent.SandboxConfig) (*agent.Sandbox, error) {
+		t.Fatalf("provider.Create must not be called when live sandbox capacity is full")
+		return nil, nil
+	}
+
+	err := buildOrchestrator(d).ContinueSession(context.Background(), session, nil)
+
+	require.ErrorIs(t, err, agent.ErrSandboxCapacity, "ContinueSession should surface the live sandbox capacity sentinel")
+	require.Empty(t, d.sessions.getStatusUpdates(), "ContinueSession should not mark the session running when capacity is unavailable")
+}
+
 func TestRevertThread_UpdatesWorkspaceSnapshot(t *testing.T) {
 	t.Parallel()
 
@@ -3106,6 +3159,177 @@ func TestContinueSession_EmbedsHistoryWhenResumeBySessionIDAdapterHasNoCapturedS
 	require.NotContains(t, promptSeen.UserPrompt, "starting from a fresh clone", "snapshot fallback must not claim the restored workspace is a fresh clone")
 	require.NotContains(t, promptSeen.UserPrompt, "Please re-apply these changes", "snapshot fallback must not ask the agent to re-apply a diff that is already present in the restored snapshot")
 	require.NotContains(t, promptSeen.UserPrompt, priorDiff, "snapshot fallback must not include the prior diff as work to re-apply")
+}
+
+func TestContinueSession_FallsBackToFreshClaudeExecWhenSnapshotResumeStateIsStale(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	issue.Source = models.IssueSourceManual
+	session := testRun(orgID, issue.ID)
+	session.AgentType = models.AgentTypeClaudeCode
+	session.Origin = models.SessionOriginManual
+	session.InteractionMode = models.SessionInteractionModeInteractive
+	session.ValidationPolicy = models.SessionValidationPolicyOnSessionEnd
+	session.Status = string(models.SessionStatusIdle)
+	session.CurrentTurn = 1
+	snapshotKey := "existing-snapshot"
+	session.SnapshotKey = &snapshotKey
+	session.AgentSessionID = strPtr("stale-claude-session")
+
+	d := defaultDeps()
+	d.adapter = &mockAgentAdapter{
+		name:       models.AgentTypeClaudeCode,
+		resumeMode: agent.ResumeBySessionID,
+	}
+	d.issues.issue = issue
+	d.messages.messages = []models.SessionMessage{
+		{
+			ID:         1,
+			SessionID:  session.ID,
+			OrgID:      orgID,
+			TurnNumber: 1,
+			Role:       models.MessageRoleUser,
+			Content:    "Please review my changes.",
+		},
+		{
+			ID:         2,
+			SessionID:  session.ID,
+			OrgID:      orgID,
+			TurnNumber: 1,
+			Role:       models.MessageRoleAssistant,
+			Content:    "I found two issues: a missing nil check and an unbounded loop.",
+		},
+		{
+			ID:         3,
+			SessionID:  session.ID,
+			OrgID:      orgID,
+			TurnNumber: 2,
+			Role:       models.MessageRoleUser,
+			Content:    "please fix both of these issues",
+		},
+	}
+	d.provider.RestoreFn = func(ctx context.Context, sb *agent.Sandbox, reader io.Reader) error {
+		_, err := io.ReadAll(reader)
+		return err
+	}
+	d.provider.SnapshotFn = func(ctx context.Context, sb *agent.Sandbox) (io.ReadCloser, error) {
+		return io.NopCloser(bytes.NewReader([]byte("next-snapshot"))), nil
+	}
+	d.snapshots.data = map[string][]byte{snapshotKey: []byte("restored-snapshot")}
+
+	var prompts []*agent.AgentPrompt
+	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
+		prompts = append(prompts, prompt)
+		if len(prompts) == 1 {
+			return &agent.AgentResult{
+				ExitCode: 1,
+				Error:    "claude CLI exited with code 1",
+			}, nil
+		}
+		return &agent.AgentResult{
+			Summary:         "fixed",
+			ConfidenceScore: 0.9,
+			ExitCode:        0,
+			AgentSessionID:  "fresh-claude-session",
+		}, nil
+	}
+
+	err := buildOrchestrator(d).ContinueSession(context.Background(), session, nil)
+	require.NoError(t, err, "ContinueSession should recover from a stale Claude resume id by retrying with reconstructed context")
+	require.Len(t, prompts, 2, "the Claude adapter should be executed once for the stale resume and once for the fresh-exec fallback")
+	require.True(t, prompts[0].Continuation, "the first attempt should use deterministic Claude resume")
+	require.Equal(t, "stale-claude-session", prompts[0].ResumeSessionID, "the first attempt should use the persisted Claude session id")
+	require.False(t, prompts[1].Continuation, "the fallback should run a fresh exec against the restored workspace")
+	require.Empty(t, prompts[1].ResumeSessionID, "the fallback must not retry the same stale Claude session id")
+	require.Contains(t, prompts[1].UserPrompt, "Previous conversation history", "the fallback should reconstruct prior conversation context")
+	require.Contains(t, prompts[1].UserPrompt, "Please review my changes.", "the fallback should include the earlier user turn")
+	require.Contains(t, prompts[1].UserPrompt, "missing nil check", "the fallback should include the earlier assistant summary")
+	require.Contains(t, prompts[1].UserPrompt, "please fix both of these issues", "the fallback should end with the new user message")
+
+	updates := d.sessions.getTurnUpdates()
+	require.Len(t, updates, 1, "ContinueSession should still persist a single completed turn")
+	require.Equal(t, "fresh-claude-session", updates[0].agentSessionID, "successful fallback should advance the stored Claude session id")
+	require.NotEmpty(t, updates[0].snapshotKey, "successful fallback should refresh the snapshot")
+
+	messages := d.messages.getMessages()
+	var assistantMessages []models.SessionMessage
+	for _, msg := range messages {
+		if msg.Role == models.MessageRoleAssistant {
+			assistantMessages = append(assistantMessages, msg)
+		}
+	}
+	require.Len(t, assistantMessages, 2, "only the original assistant message and the successful fallback reply should exist")
+	require.Equal(t, "fixed", assistantMessages[len(assistantMessages)-1].Content, "the session timeline should record only the successful fallback output")
+}
+
+func TestContinueSession_FallsBackToFreshClaudeExecWhenSnapshotResumeStateIsStale_ScopesHistoryToRequestedThread(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	mainThreadID := uuid.New()
+	codexThreadID := uuid.New()
+	issue := testIssue(orgID)
+	issue.Source = models.IssueSourceManual
+	session := testRun(orgID, issue.ID)
+	session.AgentType = models.AgentTypeClaudeCode
+	session.Origin = models.SessionOriginManual
+	session.InteractionMode = models.SessionInteractionModeInteractive
+	session.ValidationPolicy = models.SessionValidationPolicyOnSessionEnd
+	session.Status = string(models.SessionStatusIdle)
+	session.CurrentTurn = 2
+	snapshotKey := "existing-snapshot"
+	session.SnapshotKey = &snapshotKey
+	session.AgentSessionID = strPtr("stale-claude-session")
+
+	d := defaultDeps()
+	d.adapter = &mockAgentAdapter{
+		name:       models.AgentTypeClaudeCode,
+		resumeMode: agent.ResumeBySessionID,
+	}
+	d.issues.issue = issue
+	d.messages.messages = []models.SessionMessage{
+		{ID: 10, SessionID: session.ID, OrgID: orgID, ThreadID: &mainThreadID, TurnNumber: 1, Role: models.MessageRoleUser, Content: "main tab question"},
+		{ID: 11, SessionID: session.ID, OrgID: orgID, ThreadID: &mainThreadID, TurnNumber: 1, Role: models.MessageRoleAssistant, Content: "main tab answer"},
+		{ID: 20, SessionID: session.ID, OrgID: orgID, ThreadID: &codexThreadID, TurnNumber: 1, Role: models.MessageRoleUser, Content: "codex tab prior question"},
+		{ID: 21, SessionID: session.ID, OrgID: orgID, ThreadID: &codexThreadID, TurnNumber: 1, Role: models.MessageRoleAssistant, Content: "codex tab prior answer"},
+		{ID: 22, SessionID: session.ID, OrgID: orgID, ThreadID: &codexThreadID, TurnNumber: 2, Role: models.MessageRoleUser, Content: "please fix the failing test"},
+	}
+	d.provider.RestoreFn = func(ctx context.Context, sb *agent.Sandbox, reader io.Reader) error {
+		_, err := io.ReadAll(reader)
+		return err
+	}
+	d.provider.SnapshotFn = func(ctx context.Context, sb *agent.Sandbox) (io.ReadCloser, error) {
+		return io.NopCloser(bytes.NewReader([]byte("next-snapshot"))), nil
+	}
+	d.snapshots.data = map[string][]byte{snapshotKey: []byte("restored-snapshot")}
+
+	var prompts []*agent.AgentPrompt
+	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
+		prompts = append(prompts, prompt)
+		if len(prompts) == 1 {
+			return &agent.AgentResult{
+				ExitCode: 1,
+				Error:    "claude CLI exited with code 1",
+			}, nil
+		}
+		return &agent.AgentResult{
+			Summary:         "fixed",
+			ConfidenceScore: 0.9,
+			ExitCode:        0,
+			AgentSessionID:  "fresh-claude-session",
+		}, nil
+	}
+
+	err := buildOrchestrator(d).ContinueSession(context.Background(), session, &agent.ContinueSessionOptions{ThreadID: &codexThreadID})
+	require.NoError(t, err, "ContinueSession should recover from a stale Claude resume id on the requested thread")
+	require.Len(t, prompts, 2, "the Claude adapter should be executed once for the stale resume and once for the fresh-exec fallback")
+	require.Contains(t, prompts[1].UserPrompt, "codex tab prior question", "the fallback should include earlier history from the requested thread")
+	require.Contains(t, prompts[1].UserPrompt, "codex tab prior answer", "the fallback should include the requested thread's assistant history")
+	require.Contains(t, prompts[1].UserPrompt, "please fix the failing test", "the fallback should end with the new message from the requested thread")
+	require.NotContains(t, prompts[1].UserPrompt, "main tab question", "the fallback should not include sibling-thread user history")
+	require.NotContains(t, prompts[1].UserPrompt, "main tab answer", "the fallback should not include sibling-thread assistant history")
 }
 
 func TestContinueSession_UsesThreadExecutionOptions(t *testing.T) {
@@ -4618,6 +4842,67 @@ func TestContinueSession_ClaudeTokenFailureRemovesStaleCredentialsBeforeAPIKeyFa
 	require.Len(t, d.sessions.getFailureUpdates(), 0, "successful fallback should not record a Claude auth failure")
 }
 
+func TestContinueSession_ClaudeSnapshotRestoresTopLevelConfigFromBackup(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	issue.Source = models.IssueSourceManual
+	session := testRun(orgID, issue.ID)
+	session.Origin = models.SessionOriginManual
+	session.InteractionMode = models.SessionInteractionModeInteractive
+	session.ValidationPolicy = models.SessionValidationPolicyOnSessionEnd
+	session.Status = string(models.SessionStatusIdle)
+	session.CurrentTurn = 1
+	session.SnapshotKey = strPtr("snapshots/test/session-with-claude-backup.tar")
+	session.AgentSessionID = strPtr("claude-session-abc")
+
+	d := defaultDeps()
+	d.issues.issue = issue
+	d.messages.messages = []models.SessionMessage{
+		{
+			ID:         1,
+			SessionID:  session.ID,
+			OrgID:      orgID,
+			TurnNumber: 2,
+			Role:       models.MessageRoleUser,
+			Content:    "Keep going.",
+		},
+	}
+	d.provider.RestoreFn = func(ctx context.Context, sb *agent.Sandbox, reader io.Reader) error {
+		_, err := io.ReadAll(reader)
+		return err
+	}
+	d.provider.SnapshotFn = func(ctx context.Context, sb *agent.Sandbox) (io.ReadCloser, error) {
+		return io.NopCloser(bytes.NewReader([]byte("next-snapshot"))), nil
+	}
+	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
+		require.True(t, prompt.Continuation, "snapshot-backed Claude resume should use continuation mode when an agent session id exists")
+		return &agent.AgentResult{
+			Summary:         "continued",
+			ConfidenceScore: 0.82,
+			ExitCode:        0,
+		}, nil
+	}
+	d.snapshots.data = map[string][]byte{
+		*session.SnapshotKey: []byte("restored-snapshot"),
+	}
+
+	orch := buildOrchestrator(d)
+	err := orch.ContinueSession(context.Background(), session, nil)
+	require.NoError(t, err, "snapshot resume should succeed after restoring Claude config from backup")
+
+	var restoreCmd string
+	for _, cmd := range d.provider.ExecCalls {
+		if strings.Contains(cmd, ".claude.json.backup.*") {
+			restoreCmd = cmd
+			break
+		}
+	}
+	require.NotEmpty(t, restoreCmd, "snapshot-backed Claude resume should attempt to restore ~/.claude.json from the newest backup")
+	require.Contains(t, restoreCmd, "cp \"$latest\" '/home/sandbox/.claude.json'", "restore command should copy Claude's newest backup to the top-level config path")
+}
+
 // errForcedCreateFailure is used by tests that short-circuit provider.Create so
 // the test can inspect the SandboxConfig without running the full sandbox
 // lifecycle. Named so grep picks it up and future refactors don't silently
@@ -4736,6 +5021,13 @@ func TestContinueSession_ReusesExistingContainer(t *testing.T) {
 	// No SnapshotKey: proves the reuse branch takes precedence over hydrate.
 
 	d := defaultDeps()
+	counter := &fakeLiveSandboxCounter{count: 99}
+	d.sandboxCapacity = agent.NewSandboxCapacityGate(agent.SandboxCapacityGateConfig{
+		Counter:   counter,
+		MaxActive: 1,
+		NodeID:    "worker-1",
+		Logger:    zerolog.Nop(),
+	})
 	d.issues.issue = issue
 	d.messages.messages = []models.SessionMessage{
 		{
@@ -4777,6 +5069,7 @@ func TestContinueSession_ReusesExistingContainer(t *testing.T) {
 	require.NoError(t, orch.ContinueSession(context.Background(), session, nil))
 
 	require.Equal(t, 0, d.provider.GetDestroyCalls(), "sandbox must stay alive while preview holds it")
+	require.Equal(t, int64(0), counter.calls.Load(), "reused-container continuations should not consume live sandbox capacity")
 	require.Equal(t, 0, d.sessions.finalizeCalls, "FinalizeContainerDestroy must not run while preview holds")
 	require.GreaterOrEqual(t, d.sessions.acquireHoldCalls, 1)
 	require.GreaterOrEqual(t, d.sessions.releaseHoldCalls, 1)

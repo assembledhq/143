@@ -7,13 +7,11 @@
 > threads in one sandbox (relaxed `ClaimIdleForSession` admission with a
 > per-session running cap of 3, thread-start checkpoint stamping via
 > `base_snapshot_key`, file-touch attribution via `session_thread_file_events`,
-> and overlap badges in the tab strip). Phase 3 added thread-scoped
-> cancellation (`ThreadCancelRegistry` + per-tab `pkill -INT` of the agent
-> binary), per-tab cost accounting (`cost_cents`), the `Touched by tab` /
+> and overlap badges in the tab strip). Phase 3 added per-tab cost
+> accounting (`cost_cents`), the `Touched by tab` /
 > `Overlap` filter in the Changes view, and a queued-message counter
 > (`pending_message_count`). Phase 4 added "Summarize all tabs" (a side panel
-> that rolls up status + result_summary + touched files + overlap), "Fork this
-> tab into a separate sandbox" (enqueues `fork_session_thread`), and "Revert
+> that rolls up status + result_summary + touched files + overlap) and "Revert
 > this tab's changes" (enqueues `revert_session_thread`). The legacy
 > single-thread API stays as a compatibility alias; the new endpoints are
 > additive.
@@ -840,13 +838,13 @@ shorter human supervision time for sessions where parallelism is appropriate.
 - This validates the UX, data model, message routing, and review filters without
   concurrent filesystem writes.
 
-> **Phase 1 composer divergence:** the shared composer is sendable while a
-> non-thread session is running (follow-ups queue behind the in-flight turn).
-> When a thread is selected, the composer is locked while the thread is
-> `running` because admission goes through `ClaimIdleForSession`, which
-> requires the thread to be idle. Phase 2/3 should restore queueing parity by
-> introducing a thread-scoped pending-message queue or by relaxing claim
-> semantics; until then, this is the intentional Phase 1 trade-off.
+> **Composer behavior:** the shared composer remains sendable while a selected
+> thread is already `pending` or `running`. Follow-up messages are appended to
+> the thread-scoped pending queue and drain after the in-flight turn
+> completes, including races where a resumable thread flips back to `running`
+> between inspection and resume-claim. Comment-resolution sends still require
+> an immediately claimable thread because that path must commit the message and
+> resolution atomically against the same turn.
 
 ### Phase 2: Concurrent tabs in one sandbox — Planned
 

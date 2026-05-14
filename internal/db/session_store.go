@@ -149,15 +149,44 @@ const sessionSelectColumns = `id,
 	linear_private, linear_state_sync_disabled, linear_identifier_hint, linear_prepare_state,
 	deleted_at, git_identity_source, git_identity_user_id, created_at`
 
-// sessionListColumns excludes large JSONB blobs (diff_history) from list queries
-// to avoid returning multi-megabyte payloads when listing many sessions.
+const (
+	sessionDiffMaxChars        = 2 * 1024 * 1024
+	sessionDiffHistoryMaxBytes = 512 * 1024
+)
+
+// sessionListColumns excludes raw diff payloads and large JSONB blobs
+// (diff_history) from list queries to avoid returning multi-megabyte payloads
+// when listing many sessions.
 const sessionListColumns = `id,
 	` + sessionPrimaryIssueIDColumn + `,
 	org_id, origin, interaction_mode, validation_policy, agent_type, status, autonomy_level, token_mode,
 	complexity_tier, confidence_score, confidence_reasoning, risk_factors,
 	container_id, worker_node_id, turn_holding_container, started_at, completed_at, token_usage,
 	failure_explanation, failure_category, failure_next_steps, failure_retry_advised,
-	parent_session_id, revision_context, error, result_summary, diff,
+	parent_session_id, revision_context, error, result_summary, NULL::text AS diff,
+	pm_plan_id, title, pm_approach, pm_reasoning, project_task_id,
+	model_override, reasoning_effort, triggered_by_user_id, agent_session_id, current_turn, last_activity_at,
+	sandbox_state, snapshot_key, pending_snapshot_key, pending_snapshot_set_at, runtime_soft_deadline_at, runtime_hard_deadline_at,
+	runtime_last_progress_at, runtime_last_progress_type, runtime_last_progress_strength,
+	runtime_extension_count, runtime_extension_seconds, runtime_stop_reason, runtime_graceful_stop_at,
+	checkpointed_at, checkpoint_kind, checkpoint_capability, checkpoint_size_bytes, checkpoint_error,
+	recovery_state, recovery_queued_at, recovery_started_at, recovery_attempt_count,
+	target_branch, working_branch, base_commit_sha, repository_id, diff_stats, NULL::jsonb AS diff_history, input_manifest, archived_at, archived_by_user_id, automation_run_id, pr_creation_state, pr_creation_error, pr_push_state, pr_push_error, diff_collected_at, latest_diff_snapshot_id,
+	` + hasUnpushedChangesColumn + `,
+	linear_private, linear_state_sync_disabled, linear_identifier_hint, linear_prepare_state,
+	deleted_at, git_identity_source, git_identity_user_id, created_at`
+
+// sessionAPIDetailColumns is used by the session-detail HTTP endpoint. It keeps
+// the same metadata as a full session fetch, but leaves the large diff payloads
+// for /sessions/{id}/diff so an accidentally huge diff cannot OOM the API while
+// opening the session transcript.
+const sessionAPIDetailColumns = `id,
+	` + sessionPrimaryIssueIDColumn + `,
+	org_id, origin, interaction_mode, validation_policy, agent_type, status, autonomy_level, token_mode,
+	complexity_tier, confidence_score, confidence_reasoning, risk_factors,
+	container_id, worker_node_id, turn_holding_container, started_at, completed_at, token_usage,
+	failure_explanation, failure_category, failure_next_steps, failure_retry_advised,
+	parent_session_id, revision_context, error, result_summary, NULL::text AS diff,
 	pm_plan_id, title, pm_approach, pm_reasoning, project_task_id,
 	model_override, reasoning_effort, triggered_by_user_id, agent_session_id, current_turn, last_activity_at,
 	sandbox_state, snapshot_key, pending_snapshot_key, pending_snapshot_set_at, runtime_soft_deadline_at, runtime_hard_deadline_at,
@@ -412,6 +441,73 @@ func (s *SessionStore) GetByID(ctx context.Context, orgID, runID uuid.UUID) (mod
 	}
 	hydrateSessionPolicy(&session)
 	return session, nil
+}
+
+func (s *SessionStore) GetAPIDetailByID(ctx context.Context, orgID, runID uuid.UUID) (models.Session, error) {
+	query := `
+		SELECT ` + sessionAPIDetailColumns + `
+		FROM sessions
+		WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL`
+
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
+		"id":     runID,
+		"org_id": orgID,
+	})
+	if err != nil {
+		return models.Session{}, fmt.Errorf("query session API detail: %w", err)
+	}
+	session, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.Session])
+	if err != nil {
+		return models.Session{}, err
+	}
+	hydrateSessionPolicy(&session)
+	return session, nil
+}
+
+func (s *SessionStore) GetDiffByID(ctx context.Context, orgID, sessionID uuid.UUID) (models.SessionDiff, error) {
+	query := `
+		SELECT
+			CASE
+				WHEN diff IS NULL THEN NULL
+				WHEN length(diff) > @diff_max_chars THEN left(diff, @diff_max_chars)
+				ELSE diff
+			END AS diff,
+			diff_stats,
+			CASE
+				WHEN diff_history IS NULL THEN NULL
+				WHEN pg_column_size(diff_history) > @diff_history_max_bytes THEN '[]'::jsonb
+				ELSE diff_history
+			END AS diff_history,
+			COALESCE(length(diff), 0) > @diff_max_chars AS diff_truncated,
+			COALESCE(pg_column_size(diff_history), 0) > @diff_history_max_bytes AS diff_history_truncated,
+			COALESCE(length(diff), 0)::bigint AS diff_chars,
+			COALESCE(pg_column_size(diff_history), 0)::bigint AS diff_history_bytes,
+			@diff_max_chars::bigint AS diff_max_chars,
+			@diff_history_max_bytes::bigint AS diff_history_max_bytes
+		FROM sessions
+		WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL`
+
+	var payload models.SessionDiff
+	payload.SessionID = sessionID
+	if err := s.db.QueryRow(ctx, query, pgx.NamedArgs{
+		"id":                     sessionID,
+		"org_id":                 orgID,
+		"diff_max_chars":         sessionDiffMaxChars,
+		"diff_history_max_bytes": sessionDiffHistoryMaxBytes,
+	}).Scan(
+		&payload.Diff,
+		&payload.DiffStats,
+		&payload.DiffHistory,
+		&payload.DiffTruncated,
+		&payload.DiffHistoryTruncated,
+		&payload.DiffChars,
+		&payload.DiffHistoryBytes,
+		&payload.DiffMaxChars,
+		&payload.DiffHistoryMaxBytes,
+	); err != nil {
+		return models.SessionDiff{}, err
+	}
+	return payload, nil
 }
 
 func (s *SessionStore) Create(ctx context.Context, run *models.Session) error {
@@ -889,6 +985,7 @@ func (s *SessionStore) updateResultRow(ctx context.Context, db DBTX, orgID, runI
 		    END,
 		    confidence_score = @confidence_score, confidence_reasoning = @confidence_reasoning,
 		    risk_factors = @risk_factors, token_usage = @token_usage,
+		    model_used = COALESCE(@model_used, model_used),
 		    result_summary = @result_summary,
 		    diff = COALESCE(@diff, diff),
 		    error = @error,
@@ -906,6 +1003,7 @@ func (s *SessionStore) updateResultRow(ctx context.Context, db DBTX, orgID, runI
 		"confidence_reasoning": result.ConfidenceReasoning,
 		"risk_factors":         result.RiskFactors,
 		"token_usage":          result.TokenUsage,
+		"model_used":           result.ModelUsed,
 		"result_summary":       result.ResultSummary,
 		"diff":                 result.Diff,
 		"error":                result.Error,
@@ -1299,6 +1397,7 @@ func (s *SessionStore) updateTurnCompleteRow(ctx context.Context, db DBTX, orgID
 		    pr_push_error = CASE WHEN pr_push_state IN ('queued', 'pushing') THEN pr_push_error ELSE NULL END,
 		    confidence_score = @confidence_score, confidence_reasoning = @confidence_reasoning,
 		    risk_factors = @risk_factors, token_usage = @token_usage,
+		    model_used = COALESCE(@model_used, model_used),
 		    result_summary = @result_summary,
 		    diff = COALESCE(@diff, diff),
 		    error = @error,
@@ -1318,6 +1417,7 @@ func (s *SessionStore) updateTurnCompleteRow(ctx context.Context, db DBTX, orgID
 		"confidence_reasoning": result.ConfidenceReasoning,
 		"risk_factors":         result.RiskFactors,
 		"token_usage":          result.TokenUsage,
+		"model_used":           result.ModelUsed,
 		"result_summary":       result.ResultSummary,
 		"diff":                 result.Diff,
 		"error":                result.Error,
@@ -2110,6 +2210,36 @@ func (s *SessionStore) ListOrphanedContainers(ctx context.Context, afterID uuid.
 		hydrateSessionPolicy(&sessions[i])
 	}
 	return sessions, nil
+}
+
+// ListReferencedContainerIDs returns every live container_id currently
+// referenced by a session row. It is used by worker-local Docker GC to avoid
+// deleting a container that any DB row still owns.
+// lint:allow-no-orgid reason="worker-local Docker GC reconciles host containers against all session container references"
+func (s *SessionStore) ListReferencedContainerIDs(ctx context.Context) ([]string, error) {
+	rows, err := s.db.Query(ctx, `
+		SELECT container_id
+		FROM sessions
+		WHERE container_id IS NOT NULL`)
+	if err != nil {
+		return nil, fmt.Errorf("list referenced container ids: %w", err)
+	}
+	defer rows.Close()
+
+	ids := make([]string, 0)
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("scan referenced container id: %w", err)
+		}
+		if id != "" {
+			ids = append(ids, id)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate referenced container ids: %w", err)
+	}
+	return ids, nil
 }
 
 // ListContainerHoldingSessions returns sessions with a preview hold owned by

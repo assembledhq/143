@@ -42,7 +42,7 @@ When `Start Preview` is requested:
 2. Otherwise reuse `sessions.worker_node_id` if the session has a live container.
 3. Otherwise pick the least-loaded active preview-capable worker, using `CountActivePreviewsByWorker`.
 
-Cold starts may retry another worker when the selected worker returns preview-capacity exhaustion. Live-container reuse never retries onto a different worker.
+Cold starts reserve a `starting` preview row and enqueue durable startup work to the selected worker. Live-container reuse never retries onto a different worker; if a pinned startup worker is later declared dead before claim, the job target-node fallback allows another worker to claim and reassign the reserved preview.
 
 ## Internal Auth
 
@@ -84,6 +84,8 @@ Preview-capable workers publish the following metadata through `nodes.metadata`:
 `NODE_ID` must be stable in production so ownership written to the database remains routable across deploys and restarts.
 
 Workers only advertise `preview_capable = true` after boot-time local recovery work is complete and the HTTP listener is bound. This prevents app nodes from routing preview lifecycle calls to a worker that is registered in the cluster but not yet accepting internal preview RPC.
+
+`preview_capable` gates cold-start worker selection. Existing previews and live session sandboxes remain pinned by `worker_node_id`; app nodes may resolve that owner with `preview_internal_base_url` even during the short interval before the worker re-advertises cold-start capability, so deployment readiness races do not orphan already-created preview rows.
 
 Startup recovery is worker-scoped. A worker only rehydrates sandbox-auth sockets for preview-held sessions whose active `preview_instances.worker_node_id` matches its own `NODE_ID`; it must not scan or rebind sockets for containers owned by peer workers.
 

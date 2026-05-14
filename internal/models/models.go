@@ -341,6 +341,22 @@ type SessionDetail struct {
 	Threads []SessionThread `json:"threads"`
 }
 
+// SessionDiff is the large, lazily-loaded diff payload for a session. It is
+// intentionally separate from SessionDetail so opening a session does not
+// hydrate or marshal multi-megabyte diff blobs.
+type SessionDiff struct {
+	SessionID            uuid.UUID       `json:"session_id"`
+	Diff                 *string         `json:"diff,omitempty"`
+	DiffStats            json.RawMessage `json:"diff_stats,omitempty"`
+	DiffHistory          json.RawMessage `json:"diff_history,omitempty"`
+	DiffTruncated        bool            `json:"diff_truncated"`
+	DiffHistoryTruncated bool            `json:"diff_history_truncated"`
+	DiffChars            int64           `json:"diff_chars,omitempty"`
+	DiffHistoryBytes     int64           `json:"diff_history_bytes,omitempty"`
+	DiffMaxChars         int64           `json:"diff_max_chars,omitempty"`
+	DiffHistoryMaxBytes  int64           `json:"diff_history_max_bytes,omitempty"`
+}
+
 // SessionIssueLink is the live join model between a session and an issue.
 type SessionIssueLink struct {
 	ID            uuid.UUID            `db:"id" json:"id"`
@@ -497,6 +513,7 @@ type SessionResult struct {
 	ConfidenceReasoning *string         `json:"confidence_reasoning,omitempty"`
 	RiskFactors         []string        `json:"risk_factors,omitempty"`
 	TokenUsage          json.RawMessage `json:"token_usage,omitempty"`
+	ModelUsed           *string         `json:"model_used,omitempty"`
 	ResultSummary       *string         `json:"result_summary,omitempty"`
 	Diff                *string         `json:"diff,omitempty"`
 	Error               *string         `json:"error,omitempty"`
@@ -769,6 +786,7 @@ const (
 	JobTypePMContextRefresh = "pm_context_refresh"
 	JobTypeProjectCycle     = "project_cycle"
 	JobTypeAutomationRun    = "automation_run"
+	JobTypeStartPreview     = "start_preview"
 )
 
 // Job represents an async work queue item.

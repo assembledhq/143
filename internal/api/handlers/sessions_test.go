@@ -12,6 +12,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/alicebob/miniredis/v2"
 	"github.com/assembledhq/143/internal/api/middleware"
@@ -1010,6 +1011,39 @@ func TestSessionHandler_List_EmitsCursorWhenFull(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, now.Equal(decodedTime), "cursor time must be last_activity_at of last row")
 	require.Equal(t, runID, decodedID, "cursor id must be id of last row")
+}
+
+func TestSessionHandler_List_DoesNotMarshalRawDiffPayloads(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create pgxmock pool without error")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	handler := newSessionHandler(t, mock)
+	now := time.Now().UTC()
+	runID := uuid.New()
+	largeDiffMarker := "diff --git a/huge b/huge\n+raw payload must not reach session list"
+	diffHistory := json.RawMessage(`[{"pass":1,"diff":"raw history must not reach session list","diff_stats":{"added":1,"removed":0,"files_changed":1},"created_at":"2026-01-01T00:00:00Z"}]`)
+
+	mock.ExpectQuery("SELECT .+ FROM sessions WHERE org_id").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pushSessionRow(runID, uuid.Nil, orgID, now, pushSessionRowOpts{
+			diff:        &largeDiffMarker,
+			diffHistory: diffHistory,
+		}))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/sessions", nil)
+	ctx := middleware.WithOrgID(req.Context(), orgID)
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	handler.List(w, req)
+	require.Equal(t, http.StatusOK, w.Code, "session list should succeed: %s", w.Body.String())
+	require.NotContains(t, w.Body.String(), "raw payload must not reach session list", "session list should not marshal raw diff content")
+	require.NotContains(t, w.Body.String(), "raw history must not reach session list", "session list should not marshal raw diff history")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
 func TestSessionHandler_List_InvalidCursor(t *testing.T) {
@@ -4121,13 +4155,19 @@ func TestManualSessionTitle(t *testing.T) {
 			message:  strings.Repeat("a", 200),
 			expected: strings.Repeat("a", 120) + "...",
 		},
+		{
+			name:     "long message truncates at utf8 boundary",
+			message:  strings.Repeat("a", 119) + "…" + strings.Repeat("b", 20),
+			expected: strings.Repeat("a", 119) + "...",
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			result := manualSessionTitle(tt.message)
-			require.Equal(t, tt.expected, result)
+			require.True(t, utf8.ValidString(result), "manualSessionTitle should always return valid UTF-8")
+			require.Equal(t, tt.expected, result, "manualSessionTitle should derive the expected display title")
 		})
 	}
 }
@@ -7274,6 +7314,8 @@ type pushSessionRowOpts struct {
 	sandboxState       string // defaults to "none"
 	pushState          string // defaults to "idle"
 	status             string // defaults to "completed"
+	diff               *string
+	diffHistory        any
 }
 
 // pushSessionRow builds a fully-padded session row (matching sessionColumns
@@ -7339,7 +7381,7 @@ func pushSessionRow(sessionID, issueID, orgID uuid.UUID, now time.Time, opts pus
 		"revision_context":               nil,
 		"error":                          nil,
 		"result_summary":                 nil,
-		"diff":                           nil,
+		"diff":                           opts.diff,
 		"pm_plan_id":                     nil,
 		"title":                          nil,
 		"pm_approach":                    nil,
@@ -7378,7 +7420,7 @@ func pushSessionRow(sessionID, issueID, orgID uuid.UUID, now time.Time, opts pus
 		"base_commit_sha":                nil,
 		"repository_id":                  nil,
 		"diff_stats":                     nil,
-		"diff_history":                   nil,
+		"diff_history":                   opts.diffHistory,
 		"input_manifest":                 nil,
 		"archived_at":                    nil,
 		"archived_by_user_id":            nil,

@@ -484,6 +484,21 @@ func TestParseOrgSettings_RuntimeBudgets_ClampToSoftBudgetAndCeiling(t *testing.
 	require.Equal(t, 300, s.RuntimeBudgets.MaxAutomaticExtensionSeconds, "max automatic extension should clamp to the available headroom")
 }
 
+func TestParseOrgSettings_RuntimeBudgets_ClampsAbsoluteCeilingToWorkerWatchdog(t *testing.T) {
+	t.Parallel()
+
+	raw := json.RawMessage(`{
+		"max_session_duration_seconds": 7200,
+		"runtime_budgets": {
+			"absolute_runtime_ceiling_seconds": 21600
+		}
+	}`)
+
+	s, err := ParseOrgSettings(raw)
+	require.NoError(t, err, "ParseOrgSettings should clamp oversized absolute runtime ceilings")
+	require.Equal(t, MaxAbsoluteRuntimeCeilingSeconds, s.RuntimeBudgets.AbsoluteRuntimeCeilingSeconds, "absolute runtime ceiling should not exceed the worker-supported ceiling")
+}
+
 func TestParseOrgSettings_RuntimeBudgets_NegativeMaxAutomaticExtensionClampsToZero(t *testing.T) {
 	t.Parallel()
 

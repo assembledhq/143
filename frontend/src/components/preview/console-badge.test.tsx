@@ -35,6 +35,18 @@ describe("ConsoleBadge", () => {
     expect(container.innerHTML).toBe("");
   });
 
+  it("treats a null console payload as no messages", async () => {
+    consoleGetMock.mockResolvedValue(null);
+    const { container } = renderWithProviders(
+      <ConsoleBadge sessionId="sess-1" />
+    );
+
+    await waitFor(() => {
+      expect(consoleGetMock).toHaveBeenCalledWith("sess-1");
+    });
+    expect(container.innerHTML).toBe("");
+  });
+
   it("shows error badge when errors are present", async () => {
     consoleGetMock.mockResolvedValue([
       { level: "error", text: "TypeError: x is not a function", source: "app.js", line: 42, timestamp: new Date().toISOString() },

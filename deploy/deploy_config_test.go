@@ -23,6 +23,52 @@ func TestFrontendContainerBindsAllInterfaces(t *testing.T) {
 	require.Contains(t, string(dockerfile), "ENV HOSTNAME=0.0.0.0", "frontend image should default Next standalone to bind all interfaces")
 }
 
+func TestPreviewWildcardTLSUsesCloudflareDNSChallenge(t *testing.T) {
+	t.Parallel()
+
+	compose, err := os.ReadFile("../docker-compose.app.yml")
+	require.NoError(t, err, "test should read the app compose file")
+	composeText := string(compose)
+	require.Contains(t, composeText, "build:", "app compose should build a custom Caddy image so the Cloudflare DNS provider module is available for wildcard preview certificates")
+	require.Contains(t, composeText, "Dockerfile.caddy", "app compose should point the Caddy build at Dockerfile.caddy")
+	require.Contains(t, composeText, "CLOUDFLARE_API_TOKEN", "app compose should pass the Cloudflare API token into the Caddy container for DNS-01 challenges")
+
+	caddyfile, err := os.ReadFile("../deploy/Caddyfile")
+	require.NoError(t, err, "test should read the Caddyfile")
+	caddyText := string(caddyfile)
+	require.Contains(t, caddyText, "*.preview.{$DOMAIN:143.dev}", "Caddyfile should keep a dedicated wildcard preview host block")
+	require.Contains(t, caddyText, "dns cloudflare", "preview wildcard host should use the Cloudflare DNS challenge for certificate issuance")
+	require.Contains(t, caddyText, "{env.CLOUDFLARE_API_TOKEN}", "preview wildcard host should read the Cloudflare API token from container env")
+
+	caddyDockerfile, err := os.ReadFile("../Dockerfile.caddy")
+	require.NoError(t, err, "test should read the custom Caddy Dockerfile")
+	require.Contains(t, string(caddyDockerfile), "github.com/caddy-dns/cloudflare", "custom Caddy image should compile in the Cloudflare DNS provider module")
+
+	deployScript, err := os.ReadFile("../deploy/scripts/deploy.sh")
+	require.NoError(t, err, "test should read deploy.sh")
+	deployText := string(deployScript)
+	require.Contains(t, deployText, "Dockerfile.caddy", "app deploys should stage Dockerfile.caddy before docker compose up so remote builds can succeed")
+	require.Contains(t, deployText, `docker compose -f "$COMPOSE_FILE" build caddy`, "app deploys should explicitly build the custom Caddy image so Dockerfile.caddy changes and base-image refreshes reach the host")
+	require.Contains(t, deployText, `docker compose -f "$COMPOSE_FILE" up -d --no-deps caddy`, "app deploys should reconcile the running Caddy container against the freshly built image and current env")
+	require.Contains(t, deployText, "CLOUDFLARE_API_TOKEN=%s", "app deploys should project the Cloudflare DNS-challenge token into /opt/143/.env for compose interpolation")
+	require.Contains(t, deployText, "PREVIEW_ORIGIN_TEMPLATE=%s", "app deploys should project the preview origin template into /opt/143/.env so the app host can override the production preview domain")
+	require.Contains(t, deployText, "NEXT_PUBLIC_PREVIEW_ORIGIN_TEMPLATE=%s", "app deploys should project the frontend preview-origin fallback into /opt/143/.env on the app host")
+	buildIndex := strings.Index(deployText, `echo "Building custom Caddy image..."`)
+	reconcileCallIndex := strings.LastIndex(deployText, `reconcile_caddy_service`)
+	reloadIndex := strings.LastIndex(deployText, `caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile`)
+	require.NotEqual(t, -1, buildIndex, "deploy.sh should build caddy in the app-role execution path")
+	require.NotEqual(t, -1, reconcileCallIndex, "deploy.sh should reconcile caddy after rolling the app/frontend services")
+	require.NotEqual(t, -1, reloadIndex, "deploy.sh should still support in-place Caddyfile reloads")
+	require.Less(t, buildIndex, reconcileCallIndex, "deploy.sh should build the custom caddy image before reconciling the running container")
+
+	provisionScript, err := os.ReadFile("../deploy/scripts/provision.sh")
+	require.NoError(t, err, "test should read provision.sh")
+	require.Contains(t, string(provisionScript), "Dockerfile.caddy", "fresh app provisioning should stage Dockerfile.caddy before the first docker compose up")
+	require.Contains(t, string(provisionScript), "CLOUDFLARE_API_TOKEN=%s", "fresh app provisioning should project the Cloudflare DNS-challenge token into /opt/143/.env for compose interpolation")
+	require.Contains(t, string(provisionScript), "PREVIEW_ORIGIN_TEMPLATE=%s", "fresh app provisioning should project the preview origin template into /opt/143/.env so the app host can override the production preview domain")
+	require.Contains(t, string(provisionScript), "NEXT_PUBLIC_PREVIEW_ORIGIN_TEMPLATE=%s", "fresh app provisioning should project the frontend preview-origin fallback into /opt/143/.env on the app host")
+}
+
 func TestWorkerProvisioningIncludesGitHubAppUserAuthSecrets(t *testing.T) {
 	t.Parallel()
 
@@ -31,6 +77,10 @@ func TestWorkerProvisioningIncludesGitHubAppUserAuthSecrets(t *testing.T) {
 	require.Contains(t, string(cloudInit), "SOPS_AGE_KEY=${SOPS_AGE_KEY}", "worker cloud-init should provide SOPS_AGE_KEY so the container can decrypt .env.production.enc at boot")
 	require.Contains(t, string(cloudInit), "GITHUB_APP_CLIENT_ID=${GITHUB_APP_CLIENT_ID}", "worker cloud-init should provide the GitHub App user auth client ID")
 	require.Contains(t, string(cloudInit), "GITHUB_APP_CLIENT_SECRET=${GITHUB_APP_CLIENT_SECRET}", "worker cloud-init should provide the GitHub App user auth client secret")
+	require.Contains(t, string(cloudInit), "SANDBOX_HEALTH_CHECK_IMAGE=${SANDBOX_HEALTH_CHECK_IMAGE}", "worker cloud-init should allow first-boot workers to override the sandbox health-check image via envsubst")
+	require.NotContains(t, string(cloudInit), "SANDBOX_HEALTH_CHECK_IMAGE=busybox:1.36.1", "worker cloud-init should not hard-code the sandbox health-check image because private-mirror overrides must work before first compose up")
+	require.Contains(t, string(cloudInit), "SANDBOX_REQUIRE_DISK_QUOTA=true", "worker cloud-init should require Docker disk quota support by default")
+	require.Contains(t, string(cloudInit), "SANDBOX_GC_INTERVAL=5m", "worker cloud-init should enable worker-local sandbox GC")
 	require.Contains(t, string(cloudInit), "- path: /opt/143/.env.production.enc", "worker cloud-init should stage the encrypted production env file before docker compose starts")
 	require.Contains(t, string(cloudInit), "ENV_PRODUCTION_ENC_B64", "worker cloud-init should carry the encrypted production env payload as base64 input")
 
@@ -39,7 +89,20 @@ func TestWorkerProvisioningIncludesGitHubAppUserAuthSecrets(t *testing.T) {
 	require.Contains(t, string(provisionScript), "SOPS_AGE_KEY=%s", "worker reprovision path should write SOPS_AGE_KEY into .env so docker-entrypoint.sh decrypts the encrypted env bundle")
 	require.Contains(t, string(provisionScript), "GITHUB_APP_CLIENT_ID=%s", "worker reprovision path should write the GitHub App user auth client ID into .env")
 	require.Contains(t, string(provisionScript), "GITHUB_APP_CLIENT_SECRET=%s", "worker reprovision path should write the GitHub App user auth client secret into .env")
+	require.Contains(t, string(provisionScript), "WORKER_MAX_ACTIVE_SANDBOXES=%s", "worker reprovision path should write the per-machine live sandbox capacity cap into .env")
+	require.Contains(t, string(provisionScript), "SANDBOX_HEALTH_CHECK_IMAGE=%s", "worker reprovision path should write the sandbox health-check image into .env")
+	require.Contains(t, string(provisionScript), "SANDBOX_REQUIRE_DISK_QUOTA=%s", "worker reprovision path should write the disk-quota requirement into .env")
+	require.Contains(t, string(provisionScript), "SANDBOX_GC_INTERVAL=%s", "worker reprovision path should write the sandbox GC interval into .env")
 	require.Contains(t, string(provisionScript), `scp "${SCP_OPTS[@]}" "$ENC_FILE" root@"$HOST":/opt/143/`, "worker reprovision path should copy .env.production.enc to the host before starting docker compose so bind-mount source creation cannot turn it into a directory")
+}
+
+func TestDeployWritesWorkerSandboxCapacityEnv(t *testing.T) {
+	t.Parallel()
+
+	deployScript, err := os.ReadFile("../deploy/scripts/deploy.sh")
+	require.NoError(t, err, "test should read deploy.sh")
+	require.Contains(t, string(deployScript), "WORKER_MAX_ACTIVE_SANDBOXES=%s", "worker deploy should write the per-machine live sandbox capacity cap into .env")
+	require.Contains(t, string(deployScript), "SANDBOX_HEALTH_CHECK_IMAGE=%s", "worker deploy should write the sandbox health-check image into .env for compose preflight and app config")
 }
 
 // Worker preview routing requires three per-host values: NODE_ID,
@@ -78,6 +141,17 @@ func TestWorkerPerHostIdentityIsPreservedAcrossDeploys(t *testing.T) {
 	require.NoError(t, err, "test should read the deploy script")
 	require.Contains(t, string(deployScript), "cat /opt/143/.env.local >> /opt/143/.env", "deploy.sh worker branch should re-append .env.local into .env on every deploy — without this, every secret refresh wipes the per-host identity")
 	require.Contains(t, string(deployScript), "/opt/143/.env.local is missing", "deploy.sh worker branch should abort loudly when .env.local is missing instead of coming up with empty NODE_ID and WORKER_PRIVATE_IP")
+}
+
+func TestWorkerGVisorPreflightPullsHealthImageOnlyWhenMissing(t *testing.T) {
+	t.Parallel()
+
+	compose, err := os.ReadFile("../docker-compose.worker.yml")
+	require.NoError(t, err, "test should read the worker compose file")
+	composeText := string(compose)
+
+	require.Contains(t, composeText, `SANDBOX_HEALTH_CHECK_IMAGE: ${SANDBOX_HEALTH_CHECK_IMAGE:-busybox:1.36.1}`, "worker compose should pass the configurable health-check image into the worker container")
+	require.Contains(t, composeText, `docker image inspect "$$HEALTHCHECK_IMAGE" >/dev/null 2>&1 || docker pull "$$HEALTHCHECK_IMAGE"`, "gVisor preflight should use the cached health image when present and only pull when missing")
 }
 
 // The auto-default for NODE_ID must use the full IP (dotted-to-dash), not
@@ -157,6 +231,39 @@ func TestGrafanaProvisionedDashboardsUseValidDatasourcesAndRangeQueries(t *testi
 			}
 		}
 	}
+}
+
+func TestPlatformHealthDashboardTracksSessionSnapshotSize(t *testing.T) {
+	t.Parallel()
+
+	rawDashboard, err := os.ReadFile("../deploy/grafana/provisioning/dashboards/platform-health.json")
+	require.NoError(t, err, "test should read the platform health dashboard")
+
+	var dashboard struct {
+		Panels []struct {
+			Title   string `json:"title"`
+			Type    string `json:"type"`
+			Targets []struct {
+				QueryType string `json:"queryType"`
+				Expr      string `json:"expr"`
+			} `json:"targets"`
+		} `json:"panels"`
+	}
+	require.NoError(t, json.Unmarshal(rawDashboard, &dashboard), "platform health dashboard should be valid JSON")
+
+	foundSnapshotSizePanel := false
+	for _, panel := range dashboard.Panels {
+		if panel.Title != "Session snapshot size" {
+			continue
+		}
+		foundSnapshotSizePanel = true
+		require.Equal(t, "timeseries", panel.Type, "snapshot size should be graphed over time")
+		require.NotEmpty(t, panel.Targets, "snapshot size panel should have a LogsQL target")
+		require.Equal(t, "statsRange", panel.Targets[0].QueryType, "snapshot size panel should use a range query")
+		require.Contains(t, panel.Targets[0].Expr, `_msg:"session snapshot saved"`, "snapshot size panel should query the session snapshot success log")
+		require.Contains(t, panel.Targets[0].Expr, "snapshot_size_bytes", "snapshot size panel should aggregate the snapshot byte field")
+	}
+	require.True(t, foundSnapshotSizePanel, "platform health dashboard should include session snapshot size telemetry")
 }
 
 func TestProductionAlertsUseValidLogsQLRangeFilters(t *testing.T) {
@@ -244,6 +351,28 @@ func TestDeployConfiguresDockerLogRotation(t *testing.T) {
 	makefile, err := os.ReadFile("../Makefile")
 	require.NoError(t, err, "test should read Makefile")
 	require.Contains(t, string(makefile), "repair-deploy-sudoers:", "Makefile should expose the no-teardown sudoers repair as an operator target")
+}
+
+func TestDeployPrunesDockerArtifactsAfterSuccessfulRollout(t *testing.T) {
+	t.Parallel()
+
+	deployScript, err := os.ReadFile("../deploy/scripts/deploy.sh")
+	require.NoError(t, err, "test should read deploy script")
+	deployText := string(deployScript)
+
+	require.Contains(t, deployText, "prune_docker_deploy_artifacts()", "deploy.sh should define one prune helper so app, worker, and detached worker paths stay aligned")
+	require.Contains(t, deployText, `docker container prune -f --filter "until=$prune_until"`, "deploy prune should remove stopped containers after a successful rollout")
+	require.Contains(t, deployText, `docker image prune -af --filter "until=$prune_until"`, "deploy prune should remove old unused SHA-tagged images after a successful rollout")
+	require.Contains(t, deployText, `docker builder prune -af --filter "until=$prune_until"`, "deploy prune should remove unused build cache after a successful rollout")
+	require.Contains(t, deployText, `"DEPLOY_DOCKER_PRUNE=${DEPLOY_DOCKER_PRUNE:-1}"`, "deploy should pass the prune enable/disable knob through SSH to the remote host")
+	require.Contains(t, deployText, `"DOCKER_PRUNE_UNTIL=${DOCKER_PRUNE_UNTIL:-24h}"`, "deploy should pass the prune age window through SSH to the remote host")
+	require.Contains(t, deployText, `docker image inspect "$sandbox_image"`, "worker prune should verify the sandbox image survived image pruning")
+	require.Contains(t, deployText, `docker pull "$sandbox_image"`, "worker prune should re-pull the sandbox image when image pruning removes it")
+	require.Contains(t, deployText, `$(declare -f drain_worker_service wait_container_healthy dump_diagnostics prune_docker_deploy_artifacts)`, "detached worker rollovers should embed the prune helper in the host-side script")
+	require.Contains(t, deployText, `IMAGE_TAG='$IMAGE_TAG'`, "detached worker rollovers should bake IMAGE_TAG so the prune helper can protect the sandbox image")
+	require.Contains(t, deployText, `prune_docker_deploy_artifacts worker`, "detached worker rollovers should prune only after the new worker is healthy")
+	require.Contains(t, deployText, `prune_docker_deploy_artifacts "$ROLE"`, "synchronous deploy paths should prune after the rollout and health checks succeed")
+	require.Contains(t, deployText, `DEPLOY_DOCKER_PRUNE=0`, "operators should have an explicit escape hatch for incident response or rollback-cache preservation")
 }
 
 // Pin the multi-resolver Docker DNS wiring so a future refactor doesn't
@@ -374,6 +503,32 @@ func TestDNSProbeVectorAlertFieldNamesAlign(t *testing.T) {
 	for _, field := range []string{"probe", "target", "message"} {
 		require.NotContains(t, vectorText, "protected_"+field+" = .", fmt.Sprintf("vector.yaml must not protect `%s` — the probe writes it and the alert depends on the probe's value flowing through unmodified", field))
 	}
+}
+
+func TestRollingDeployAllowsCaddyToDiscoverNewUpstreamBeforeDrainingOld(t *testing.T) {
+	t.Parallel()
+
+	deployScript, err := os.ReadFile("../deploy/scripts/deploy.sh")
+	require.NoError(t, err, "test should read deploy script")
+	deployText := string(deployScript)
+
+	require.Contains(t, deployText, `CADDY_UPSTREAM_DISCOVERY_ATTEMPTS:-10`, "rolling deploy should use a bounded readiness loop instead of a single blind sleep")
+	require.Contains(t, deployText, `for i in $(seq 1 "$attempts")`, "rolling deploy should retry Caddy reachability checks before old containers drain")
+	require.Contains(t, deployText, `docker exec "$caddy_id" sh -c`, "rolling deploy should probe from inside the Caddy container network namespace")
+	require.Contains(t, deployText, `resolve_caddy_service_ips "$caddy_id" "$service"`, "rolling deploy should verify Caddy's service-name DNS path includes the new upstream")
+	require.Contains(t, deployText, `grep -Fxq "$new_ip"`, "rolling deploy should wait until Docker DNS resolves the service name to the new container IP")
+	require.Contains(t, deployText, `CADDY_DYNAMIC_REFRESH_SECONDS:-2`, "rolling deploy should give Caddy one dynamic upstream refresh after DNS includes the new container")
+	require.Contains(t, deployText, `read -r first second third _`, "rolling deploy should parse BusyBox nslookup Address N rows by field position")
+	require.Contains(t, deployText, `Address)`, "rolling deploy should handle BusyBox nslookup rows like `Address 1: 172.20.0.5 api`")
+	require.NotContains(t, deployText, `ip="${line##* }"`, "rolling deploy must not parse nslookup answers from the trailing token because BusyBox may append the hostname after the IP")
+	require.Contains(t, deployText, `http://$new_ip:$port/healthz`, "rolling deploy should probe the new container's health endpoint directly")
+	require.Contains(t, deployText, `wait_caddy_upstream_discovery "$service" "$new_container"`, "rolling deploy should wait for Caddy to discover the new upstream before old containers drain")
+
+	waitIndex := strings.Index(deployText, `wait_caddy_upstream_discovery "$service" "$new_container"`)
+	drainIndex := strings.Index(deployText, `echo "Draining $old_count old $service container(s)`)
+	require.NotEqual(t, -1, waitIndex, "wait call should be present in deploy script")
+	require.NotEqual(t, -1, drainIndex, "old-container drain should be present in deploy script")
+	require.Less(t, waitIndex, drainIndex, "Caddy upstream discovery wait should happen before draining old containers")
 }
 
 func TestLoggingDeploySyncsProvisionedObservabilityConfig(t *testing.T) {

@@ -1,6 +1,6 @@
 "use client";
 
-import { useDeferredValue, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { memo, useCallback, useDeferredValue, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   ArrowUp,
@@ -163,6 +163,121 @@ export interface ManualSessionComposerProps {
   /** Test id placed on the outer drop-target div. */
   dataTestId?: string;
 }
+
+type ComposerSettingsControlsProps = {
+  repositories: Repository[];
+  selectedRepoId: string;
+  selectedRepo?: Repository;
+  selectedBranch: string;
+  modelGroups: ReturnType<typeof availableAgentModelGroups>;
+  selectedModel: string;
+  showReasoningSelector: boolean;
+  effectiveReasoningOverride: CodingAgentReasoningEffort;
+  defaultReasoningEffort: CodingAgentReasoningEffort;
+  reasoningOptions: ReturnType<typeof getCodingAgentReasoningOptions>;
+  onRepoChange: (id: string) => void;
+  onBranchChange: (branch: string) => void;
+  onModelChange: (value: string) => void;
+  onReasoningChange: (value: string) => void;
+};
+
+const ComposerSettingsControls = memo(function ComposerSettingsControls({
+  repositories,
+  selectedRepoId,
+  selectedRepo,
+  selectedBranch,
+  modelGroups,
+  selectedModel,
+  showReasoningSelector,
+  effectiveReasoningOverride,
+  defaultReasoningEffort,
+  reasoningOptions,
+  onRepoChange,
+  onBranchChange,
+  onModelChange,
+  onReasoningChange,
+}: ComposerSettingsControlsProps) {
+  return (
+    <>
+      {repositories.length > 0 && (
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-8 gap-1.5 rounded-full px-3 text-xs text-muted-foreground hover:text-foreground"
+            >
+              <GitBranch className="h-3.5 w-3.5" />
+              <span>{selectedRepo ? selectedRepo.full_name.split("/").pop() : "Select repo"}</span>
+              <ChevronDown className="h-3 w-3 opacity-50" />
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="start" className="w-72">
+            {repositories.map((repo) => (
+              <DropdownMenuItem
+                key={repo.id}
+                onClick={() => onRepoChange(repo.id)}
+                className={selectedRepoId === repo.id ? "font-medium" : ""}
+              >
+                <GitBranch className="mr-2 h-3.5 w-3.5 text-muted-foreground shrink-0" />
+                <span className="truncate">{repo.full_name}</span>
+              </DropdownMenuItem>
+            ))}
+          </DropdownMenuContent>
+        </DropdownMenu>
+      )}
+
+      {selectedRepo && (
+        <BranchPicker
+          repositoryId={selectedRepoId}
+          value={selectedBranch}
+          defaultBranch={selectedRepo.default_branch}
+          onValueChange={onBranchChange}
+          label="Target branch"
+          buttonClassName="h-8 rounded-full border-none bg-transparent px-3 text-xs text-muted-foreground shadow-none hover:bg-accent hover:text-foreground"
+          contentClassName="w-72"
+        />
+      )}
+
+      <Select value={selectedModel} onValueChange={onModelChange}>
+        <SelectTrigger className="h-8 w-auto gap-1.5 border-none bg-transparent px-2 text-xs text-muted-foreground shadow-none hover:text-foreground focus:ring-0" aria-label="Model override">
+          <SelectValue placeholder="Default model" />
+        </SelectTrigger>
+        <SelectContent>
+          <SelectItem value="__default__">Default model</SelectItem>
+          {modelGroups.map((group) => (
+            <SelectGroup key={group.key}>
+              <SelectLabel>{group.label}</SelectLabel>
+              {group.models.map((model) => (
+                <SelectItem key={model} value={model}>
+                  {model}
+                </SelectItem>
+              ))}
+            </SelectGroup>
+          ))}
+        </SelectContent>
+      </Select>
+
+      {showReasoningSelector ? (
+        <Select value={effectiveReasoningOverride || "__default__"} onValueChange={onReasoningChange}>
+          <SelectTrigger className="h-8 w-auto gap-1.5 border-none bg-transparent px-2 text-xs text-muted-foreground shadow-none hover:text-foreground focus:ring-0" aria-label="Reasoning override">
+            <SelectValue placeholder="Reasoning" />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="__default__">
+              {defaultReasoningEffort ? `Default (${defaultReasoningEffort})` : "Default"}
+            </SelectItem>
+            {reasoningOptions.map((option) => (
+              <SelectItem key={option.value} value={option.value}>
+                {option.label}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+      ) : null}
+    </>
+  );
+});
 
 export function ManualSessionComposer({
   onCreated,
@@ -462,15 +577,6 @@ export function ManualSessionComposer({
   });
   const fileMentions = useMemo(() => fileMentionsResponse?.data ?? [], [fileMentionsResponse]);
 
-  const setSelectedRepoId = (id: string) => {
-    setUserSelectedRepoId(id);
-  };
-
-  const setSelectedBranch = (branch: string) => {
-    if (!selectedRepoId) return;
-    setBranchByRepoId((prev) => ({ ...prev, [selectedRepoId]: branch }));
-  };
-
   const codexAuthStatus = codexAuthResponse?.data;
   const codingAuths = useMemo(() => codingAuthsResponse?.data ?? [], [codingAuthsResponse]);
   // Sessions run under the user's own credentials, so we don't pass
@@ -505,8 +611,28 @@ export function ManualSessionComposer({
   const effectiveReasoningEffort = effectiveReasoningOverride || defaultReasoningEffort;
   const showReasoningSelector = supportsReasoningEffort(effectiveAgentType);
   const submittedReasoningEffort = showReasoningSelector ? effectiveReasoningEffort : "";
-  const reasoningOptions = getCodingAgentReasoningOptions(effectiveAgentType);
+  const reasoningOptions = useMemo(
+    () => getCodingAgentReasoningOptions(effectiveAgentType),
+    [effectiveAgentType],
+  );
   const hasAgentCredentials = isAgentAvailable(effectiveAgentType, resolvedCredentials, codexAuthStatus, codingAuths);
+
+  const handleRepoChange = useCallback((id: string) => {
+    setUserSelectedRepoId(id);
+  }, []);
+
+  const handleBranchChange = useCallback((branch: string) => {
+    if (!selectedRepoId) return;
+    setBranchByRepoId((prev) => ({ ...prev, [selectedRepoId]: branch }));
+  }, [selectedRepoId]);
+
+  const handleModelChange = useCallback((value: string) => {
+    setSelectedModel(value === "__default__" ? "" : value);
+  }, []);
+
+  const handleReasoningChange = useCallback((value: string) => {
+    setReasoningOverride(value === "__default__" ? "" : toCodingAgentReasoningEffort(value));
+  }, []);
 
   const slashCommandsQuery = useSessionComposerSlashCommands({
     agentType: effectiveAgentType,
@@ -991,7 +1117,7 @@ export function ManualSessionComposer({
               {repositories.map((repo) => (
                 <DropdownMenuItem
                   key={repo.id}
-                  onClick={() => setSelectedRepoId(repo.id)}
+                  onClick={() => handleRepoChange(repo.id)}
                   className={selectedRepoId === repo.id ? "font-medium" : ""}
                 >
                   <GitBranch className="mr-2 h-3.5 w-3.5 shrink-0 text-muted-foreground" />
@@ -1010,7 +1136,7 @@ export function ManualSessionComposer({
             repositoryId={selectedRepoId}
             value={selectedBranch}
             defaultBranch={selectedRepo.default_branch}
-            onValueChange={setSelectedBranch}
+            onValueChange={handleBranchChange}
             label="Target branch"
             buttonClassName="h-11 w-full justify-between rounded-xl border border-border/70 bg-background px-3 text-left text-sm shadow-none hover:bg-accent/60"
             contentClassName="w-72"
@@ -1020,7 +1146,7 @@ export function ManualSessionComposer({
 
       <div className="space-y-2">
         <Label className="text-xs uppercase tracking-[0.14em] text-muted-foreground">Model</Label>
-        <Select value={selectedModel} onValueChange={(v) => setSelectedModel(v === "__default__" ? "" : v)}>
+        <Select value={selectedModel} onValueChange={handleModelChange}>
           <SelectTrigger className="h-11 rounded-xl border-border/70 bg-background text-sm" aria-label="Model override">
             <SelectValue placeholder="Default model" />
           </SelectTrigger>
@@ -1043,7 +1169,7 @@ export function ManualSessionComposer({
       {showReasoningSelector ? (
         <div className="space-y-2">
           <Label className="text-xs uppercase tracking-[0.14em] text-muted-foreground">Reasoning</Label>
-          <Select value={effectiveReasoningOverride || "__default__"} onValueChange={(v) => setReasoningOverride(v === "__default__" ? "" : toCodingAgentReasoningEffort(v))}>
+          <Select value={effectiveReasoningOverride || "__default__"} onValueChange={handleReasoningChange}>
             <SelectTrigger className="h-11 rounded-xl border-border/70 bg-background text-sm" aria-label="Reasoning override">
               <SelectValue placeholder="Default reasoning" />
             </SelectTrigger>
@@ -1384,82 +1510,22 @@ export function ManualSessionComposer({
                       onAddLinearIssue={() => setShowLinearInput(true)}
                     />
 
-                    {repositories.length > 0 && (
-                      <DropdownMenu>
-                        <DropdownMenuTrigger asChild>
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            className="h-8 gap-1.5 rounded-full px-3 text-xs text-muted-foreground hover:text-foreground"
-                          >
-                            <GitBranch className="h-3.5 w-3.5" />
-                            <span>{selectedRepo ? selectedRepo.full_name.split("/").pop() : "Select repo"}</span>
-                            <ChevronDown className="h-3 w-3 opacity-50" />
-                          </Button>
-                        </DropdownMenuTrigger>
-                        <DropdownMenuContent align="start" className="w-72">
-                          {repositories.map((repo) => (
-                            <DropdownMenuItem
-                              key={repo.id}
-                              onClick={() => setSelectedRepoId(repo.id)}
-                              className={selectedRepoId === repo.id ? "font-medium" : ""}
-                            >
-                              <GitBranch className="mr-2 h-3.5 w-3.5 text-muted-foreground shrink-0" />
-                              <span className="truncate">{repo.full_name}</span>
-                            </DropdownMenuItem>
-                          ))}
-                        </DropdownMenuContent>
-                      </DropdownMenu>
-                    )}
-
-                    {selectedRepo && (
-                      <BranchPicker
-                        repositoryId={selectedRepoId}
-                        value={selectedBranch}
-                        defaultBranch={selectedRepo.default_branch}
-                        onValueChange={setSelectedBranch}
-                        label="Target branch"
-                        buttonClassName="h-8 rounded-full border-none bg-transparent px-3 text-xs text-muted-foreground shadow-none hover:bg-accent hover:text-foreground"
-                        contentClassName="w-72"
-                      />
-                    )}
-
-                    <Select value={selectedModel} onValueChange={(v) => setSelectedModel(v === "__default__" ? "" : v)}>
-                      <SelectTrigger className="h-8 w-auto gap-1.5 border-none bg-transparent px-2 text-xs text-muted-foreground shadow-none hover:text-foreground focus:ring-0" aria-label="Model override">
-                        <SelectValue placeholder="Default model" />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="__default__">Default model</SelectItem>
-                        {modelGroups.map((group) => (
-                          <SelectGroup key={group.key}>
-                            <SelectLabel>{group.label}</SelectLabel>
-                            {group.models.map((model) => (
-                              <SelectItem key={model} value={model}>
-                                {model}
-                              </SelectItem>
-                            ))}
-                          </SelectGroup>
-                        ))}
-                      </SelectContent>
-                    </Select>
-
-                    {showReasoningSelector ? (
-                      <Select value={effectiveReasoningOverride || "__default__"} onValueChange={(v) => setReasoningOverride(v === "__default__" ? "" : toCodingAgentReasoningEffort(v))}>
-                        <SelectTrigger className="h-8 w-auto gap-1.5 border-none bg-transparent px-2 text-xs text-muted-foreground shadow-none hover:text-foreground focus:ring-0" aria-label="Reasoning override">
-                          <SelectValue placeholder="Reasoning" />
-                        </SelectTrigger>
-                        <SelectContent>
-                          <SelectItem value="__default__">
-                            {defaultReasoningEffort ? `Default (${defaultReasoningEffort})` : "Default"}
-                          </SelectItem>
-                          {reasoningOptions.map((option) => (
-                            <SelectItem key={option.value} value={option.value}>
-                              {option.label}
-                            </SelectItem>
-                          ))}
-                        </SelectContent>
-                      </Select>
-                    ) : null}
+                    <ComposerSettingsControls
+                      repositories={repositories}
+                      selectedRepoId={selectedRepoId}
+                      selectedRepo={selectedRepo}
+                      selectedBranch={selectedBranch}
+                      modelGroups={modelGroups}
+                      selectedModel={selectedModel}
+                      showReasoningSelector={showReasoningSelector}
+                      effectiveReasoningOverride={effectiveReasoningOverride}
+                      defaultReasoningEffort={defaultReasoningEffort}
+                      reasoningOptions={reasoningOptions}
+                      onRepoChange={handleRepoChange}
+                      onBranchChange={handleBranchChange}
+                      onModelChange={handleModelChange}
+                      onReasoningChange={handleReasoningChange}
+                    />
 
                     <Button
                       type="button"

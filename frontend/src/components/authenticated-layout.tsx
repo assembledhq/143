@@ -167,11 +167,11 @@ function SidebarBody({
           <SheetClose asChild>
             <Button
               variant="ghost"
-              size="icon"
-              className="h-11 w-11 rounded-md text-muted-foreground hover:text-foreground hover:bg-sidebar-accent"
+              size="icon-sm"
+              className="h-9 w-9 rounded-md text-muted-foreground hover:bg-sidebar-accent hover:text-foreground"
               aria-label="Close navigation menu"
             >
-              <X className="h-5 w-5" />
+              <X className="h-4 w-4" />
             </Button>
           </SheetClose>
         ) : (
@@ -248,6 +248,7 @@ function SidebarBody({
           pathname={pathname}
           userRole={user?.role}
           onNavigate={onNavigate}
+          variant={variant}
         />
       </nav>
 
@@ -475,7 +476,7 @@ export function AuthenticatedLayout({ children }: { children: React.ReactNode })
           data-testid="app-sidebar"
           style={{ "--app-sidebar-w": `${appSidebarWidth}px` } as React.CSSProperties}
           className={cn(
-            "hidden md:flex border-r border-border bg-sidebar flex-col w-[var(--app-sidebar-w)]"
+            "hidden md:flex bg-sidebar flex-col w-[var(--app-sidebar-w)]"
           )}
         >
           <div className="px-4 py-4">
@@ -535,7 +536,7 @@ export function AuthenticatedLayout({ children }: { children: React.ReactNode })
         data-testid="app-sidebar"
         style={{ "--app-sidebar-w": `${appSidebarWidth}px` } as React.CSSProperties}
         className={cn(
-          "hidden md:flex border-r border-border/50 bg-sidebar flex-col relative w-[var(--app-sidebar-w)]"
+          "hidden md:flex bg-sidebar flex-col relative w-[var(--app-sidebar-w)]"
         )}
       >
         <SidebarBody

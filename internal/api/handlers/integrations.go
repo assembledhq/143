@@ -306,13 +306,24 @@ func (h *IntegrationHandler) ListIntegrations(w http.ResponseWriter, r *http.Req
 	if integrations == nil {
 		integrations = []models.Integration{}
 	}
+	activeProviders := activeIntegrationProviders(integrations)
 	for i := range integrations {
-		h.deriveIntegrationStatus(r.Context(), &integrations[i])
+		h.deriveIntegrationStatus(r.Context(), &integrations[i], activeProviders)
 	}
 	writeJSON(w, http.StatusOK, models.ListResponse[models.Integration]{Data: integrations})
 }
 
-func (h *IntegrationHandler) deriveIntegrationStatus(ctx context.Context, integration *models.Integration) {
+func activeIntegrationProviders(integrations []models.Integration) map[models.IntegrationProvider]bool {
+	active := make(map[models.IntegrationProvider]bool)
+	for _, integration := range integrations {
+		if integration.Status == models.IntegrationStatusActive {
+			active[integration.Provider] = true
+		}
+	}
+	return active
+}
+
+func (h *IntegrationHandler) deriveIntegrationStatus(ctx context.Context, integration *models.Integration, activeProviders map[models.IntegrationProvider]bool) {
 	if integration == nil {
 		return
 	}
@@ -322,7 +333,12 @@ func (h *IntegrationHandler) deriveIntegrationStatus(ctx context.Context, integr
 	// that adopts the convention later. Read-only — never echo the rest of
 	// config (which holds tokens).
 	if authErr := readAuthErrorFromConfig(integration.Config); authErr != nil {
-		integration.AuthError = authErr
+		// Historical reconnect bugs could leave an errored duplicate row
+		// beside the active provider row. When an active row exists, the
+		// stale duplicate must not keep rendering a reconnect banner.
+		if integration.Status == models.IntegrationStatusActive || !activeProviders[integration.Provider] {
+			integration.AuthError = authErr
+		}
 	}
 
 	if integration.Provider != models.IntegrationProviderGitHub {
@@ -1705,4 +1721,90 @@ func (h *IntegrationHandler) validateNotionToken(ctx context.Context, token stri
 	}
 
 	return result.Bot.WorkspaceName, nil
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// CircleCI Integration
+// ──────────────────────────────────────────────────────────────────────────────
+
+// ConnectCircleCI accepts a CircleCI personal API token and project slug,
+// validates them against /api/v2/me (cheapest authenticated call), stores the
+// credential, and creates an active integration record. CircleCI uses a
+// paste-the-token flow because the v2 Insights API isn't exposed through
+// CircleCI's OAuth scopes.
+func (h *IntegrationHandler) ConnectCircleCI(w http.ResponseWriter, r *http.Request) {
+	orgID := middleware.OrgIDFromContext(r.Context())
+
+	var req struct {
+		AuthToken   string `json:"auth_token"`
+		ProjectSlug string `json:"project_slug"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_JSON", "invalid request body")
+		return
+	}
+	req.AuthToken = strings.TrimSpace(req.AuthToken)
+	req.ProjectSlug = strings.Trim(strings.TrimSpace(req.ProjectSlug), "/")
+	if req.AuthToken == "" {
+		writeError(w, r, http.StatusBadRequest, "MISSING_TOKEN", "auth_token is required")
+		return
+	}
+	if req.ProjectSlug == "" {
+		writeError(w, r, http.StatusBadRequest, "MISSING_PROJECT_SLUG", "project_slug is required (e.g. gh/org/repo)")
+		return
+	}
+	if strings.Count(req.ProjectSlug, "/") != 2 {
+		writeError(w, r, http.StatusBadRequest, "INVALID_PROJECT_SLUG", "project_slug must look like gh/org/repo")
+		return
+	}
+
+	if err := h.validateCircleCIToken(r.Context(), req.AuthToken); err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_TOKEN", "failed to validate CircleCI token: "+err.Error())
+		return
+	}
+
+	cfg := models.CircleCIConfig{
+		AuthToken:   req.AuthToken,
+		ProjectSlug: req.ProjectSlug,
+	}
+	if err := h.credentialStore.Upsert(r.Context(), orgID, cfg); err != nil {
+		writeError(w, r, http.StatusInternalServerError, "CREDENTIAL_SAVE_FAILED", "failed to save CircleCI credentials", err)
+		return
+	}
+
+	integration, created, err := h.ensureIntegration(r.Context(), orgID, models.IntegrationProviderCircleCI)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "CONNECT_CIRCLECI_FAILED", "failed to create CircleCI integration", err)
+		return
+	}
+
+	if created {
+		writeJSON(w, http.StatusCreated, models.SingleResponse[models.Integration]{Data: integration})
+		return
+	}
+	writeJSON(w, http.StatusOK, models.SingleResponse[models.Integration]{Data: integration})
+}
+
+func (h *IntegrationHandler) validateCircleCIToken(ctx context.Context, token string) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://circleci.com/api/v2/me", nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Circle-Token", token)
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := h.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		return fmt.Errorf("invalid or expired token")
+	}
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("circleci API returned %d", resp.StatusCode)
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	return nil
 }
