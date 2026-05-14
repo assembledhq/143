@@ -330,14 +330,6 @@ func (e *AgentEnv) recordPickWithCredential(orgID uuid.UUID, userID *uuid.UUID, 
 	e.recentPicks[key] = pickRecord{credID: credID, credential: cred, at: now}
 }
 
-func (e *AgentEnv) lookupRecentPick(orgID uuid.UUID, userID *uuid.UUID, provider models.ProviderName) (uuid.UUID, bool) {
-	rec, ok := e.lookupRecentPickRecord(orgID, userID, provider)
-	if !ok {
-		return uuid.Nil, false
-	}
-	return rec.credID, true
-}
-
 func (e *AgentEnv) lookupRecentCredential(orgID uuid.UUID, userID *uuid.UUID, provider models.ProviderName) (models.DecryptedCodingCredential, bool) {
 	rec, ok := e.lookupRecentPickRecord(orgID, userID, provider)
 	if !ok || rec.credential == nil {
