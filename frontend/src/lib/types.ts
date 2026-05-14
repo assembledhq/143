@@ -125,6 +125,80 @@ export interface Issue {
   updated_at: string;
 }
 
+export type AutopilotRunState =
+  | 'not_started'
+  | 'queued'
+  | 'running'
+  | 'awaiting_input'
+  | 'needs_review'
+  | 'pr_open'
+  | 'merged'
+  | 'failed'
+  | 'skipped';
+
+export type AutopilotQueueAction =
+  | 'start_run'
+  | 'view_run'
+  | 'review'
+  | 'open_pr'
+  | 'retry'
+  | 'blocked';
+
+export interface AutopilotQueueRow {
+  id: string;
+  rank: number;
+  source: { type: string; key: string };
+  title: string;
+  repo?: { id: string; name: string };
+  issue_status: string;
+  customer_impact: { label: string; count: number };
+  implementation_ease: string;
+  low_hanging_fruit: {
+    label: string;
+    reasons: string[];
+    cluster_size: number;
+  };
+  display_run_state: AutopilotRunState;
+  latest_session?: {
+    id: string;
+    title: string;
+    updated_at: string;
+  };
+  latest_agent_run?: {
+    id: string;
+    status: string;
+    trigger_mode: 'auto' | 'manual';
+    started_at?: string;
+  };
+  latest_pr?: {
+    id: string;
+    number: number;
+    url: string;
+    status: string;
+    merged_at?: string;
+  };
+  available_action: AutopilotQueueAction;
+  action_disabled_reason?: string | null;
+}
+
+export interface AutopilotQueueSummary {
+  top_issue_id?: string;
+  autorunnable_count: number;
+  needs_review_count: number;
+  open_pr_count: number;
+  active_run_count: number;
+  ranked_issue_count: number;
+  analyzed_at?: string;
+}
+
+export interface AutopilotQueueResponse {
+  data: AutopilotQueueRow[];
+  meta: {
+    next_cursor?: string;
+    summary: AutopilotQueueSummary;
+  };
+}
+
 export interface Session {
   id: string;
   primary_issue_id?: string | null;
