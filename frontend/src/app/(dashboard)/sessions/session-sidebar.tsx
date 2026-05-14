@@ -21,7 +21,7 @@ import { queryKeys } from "@/lib/query-keys";
 import { useOptimisticSessions, type OptimisticSession } from "@/contexts/optimistic-sessions";
 import { DiffStatsBadge } from "@/components/code-review/diff-stats-badge";
 import { NoReposWarning } from "@/components/no-repos-warning";
-import type { SessionListItem, User } from "@/lib/types";
+import type { ListResponse, SessionListItem, User } from "@/lib/types";
 import { prMergedAccent } from "@/lib/pr-status-styles";
 import { hasSessionKeyboardTransientSurface, isSessionKeyboardTextEntryTarget } from "@/hooks/use-session-keyboard-shortcuts";
 import {
@@ -318,9 +318,28 @@ export function SessionSidebar() {
     queryClient.invalidateQueries({ queryKey: queryKeys.sessions.all });
   };
 
+  const removeSessionFromCachedLists = (sessionId: string) => {
+    queryClient.setQueriesData<ListResponse<SessionListItem>>(
+      { queryKey: queryKeys.sessions.all },
+      (current) => {
+        if (!current || !Array.isArray(current.data)) {
+          return current;
+        }
+        const nextData = current.data.filter((session) => session.id !== sessionId);
+        if (nextData.length === current.data.length) {
+          return current;
+        }
+        return { ...current, data: nextData };
+      },
+    );
+  };
+
   const archiveMutation = useMutation({
     mutationFn: (sessionId: string) => api.sessions.archive(sessionId),
-    onSuccess: invalidateSessions,
+    onSuccess: (_response, sessionId) => {
+      removeSessionFromCachedLists(sessionId);
+      invalidateSessions();
+    },
     onError: () => {
       toast.error("Failed to archive session");
     },
@@ -328,7 +347,10 @@ export function SessionSidebar() {
 
   const unarchiveMutation = useMutation({
     mutationFn: (sessionId: string) => api.sessions.unarchive(sessionId),
-    onSuccess: invalidateSessions,
+    onSuccess: (_response, sessionId) => {
+      removeSessionFromCachedLists(sessionId);
+      invalidateSessions();
+    },
     onError: () => {
       toast.error("Failed to unarchive session");
     },
