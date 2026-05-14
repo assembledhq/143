@@ -314,19 +314,33 @@ secrets-rotate:
 #   make provision-db     HOST=87.99.157.55
 #   make provision-redis  HOST=10.0.0.50
 #
+# DB-only env vars:
+#   DB_BIND_IP                   — required for db role. Set to the db node's
+#                                  private or Tailscale IP; Postgres binds only
+#                                  to this address, never 0.0.0.0.
+#
 # Worker-only env vars (per-host identity, written to /opt/143/.env.local
 # and preserved across deploys):
 #   WORKER_PRIVATE_IP            — auto-detected via SSH if unset. Multi-homed
 #                                  hosts (cluster NIC + storage VLAN, etc.)
 #                                  abort with the candidate list so you can
 #                                  pick the one app nodes will reach.
+#   WORKER_PRIVATE_IP_SOURCE     — set to "tailscale" to auto-detect the
+#                                  worker's `tailscale ip -4` address instead
+#                                  of a Hetzner private-network RFC1918 IP.
 #   NODE_ID                      — defaults to "worker-<WORKER_PRIVATE_IP with
 #                                  dots replaced by dashes>" (e.g. worker-10-0-0-4),
 #                                  unique across the full RFC1918 space.
 #   PREVIEW_INTERNAL_BASE_URL    — defaults to "http://${WORKER_PRIVATE_IP}:8080"
 #
+# Optional Tailscale provisioning env vars:
+#   TS_AUTH_KEY                  — when set, provision.sh enrolls the host.
+#   TS_TAG                       — defaults to tag:prod-<role>.
+#   TS_HOSTNAME                  — defaults to 143-<role>-<HOST with dots as dashes>.
+#
 # Example with overrides:
 #   make provision-worker HOST=87.99.158.39 WORKER_PRIVATE_IP=10.0.0.4 NODE_ID=worker-1
+#   make provision-worker HOST=<public-ip> TS_AUTH_KEY=tskey-auth-... WORKER_PRIVATE_IP_SOURCE=tailscale NODE_ID=worker-usw-1
 #
 # To tear down and reprovision an existing node:
 #   make provision-app    HOST=87.99.150.138  REPROVISION=true
@@ -363,8 +377,13 @@ REPROVISION ?=
 # auto-detects WORKER_PRIVATE_IP via SSH when unset and derives NODE_ID and
 # PREVIEW_INTERNAL_BASE_URL from it.
 export WORKER_PRIVATE_IP
+export WORKER_PRIVATE_IP_SOURCE
 export NODE_ID
 export PREVIEW_INTERNAL_BASE_URL
+export DB_BIND_IP
+export TS_AUTH_KEY
+export TS_TAG
+export TS_HOSTNAME
 
 # Auto-detect SSH key: use ~/.ssh/143-deploy if it exists.
 SSH_KEY ?= $(wildcard ~/.ssh/143-deploy)

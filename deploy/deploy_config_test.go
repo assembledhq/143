@@ -173,6 +173,59 @@ func TestWorkerProvisioningHandlesAddressingEdgeCases(t *testing.T) {
 	require.Contains(t, string(provisionScript), "private IPv4 addresses on real interfaces", "provision.sh should detect multi-homed hosts and require the operator to set WORKER_PRIVATE_IP explicitly rather than silently picking a NIC")
 }
 
+func TestTailscaleReadyPrivateServiceBinding(t *testing.T) {
+	t.Parallel()
+
+	dbCompose, err := os.ReadFile("../docker-compose.db.yml")
+	require.NoError(t, err, "test should read db compose file")
+	dbComposeText := string(dbCompose)
+	require.Contains(t, dbComposeText, "${DB_BIND_IP:?", "db compose should require an explicit private bind IP instead of defaulting Postgres to the public interface")
+	require.NotContains(t, dbComposeText, "0.0.0.0:5432:5432", "db compose must not expose Postgres on every interface when cross-region workers use an overlay network")
+
+	pgHBA, err := os.ReadFile("../deploy/postgres/pg_hba.conf")
+	require.NoError(t, err, "test should read pg_hba.conf")
+	require.Contains(t, string(pgHBA), "100.64.0.0/10", "Postgres should allow Tailscale tailnet clients after Tailscale ACLs have admitted the nodes")
+
+	provisionScript, err := os.ReadFile("../deploy/scripts/provision.sh")
+	require.NoError(t, err, "test should read provision.sh")
+	provisionText := string(provisionScript)
+	require.Contains(t, provisionText, `: "${DB_BIND_IP:?DB_BIND_IP is required for db role`, "db provisioning should fail loudly until the operator chooses the private or Tailscale bind address")
+	require.Contains(t, provisionText, "DB_BIND_IP=%s", "db provisioning should write DB_BIND_IP into /opt/143/.env for compose interpolation")
+
+	deployScript, err := os.ReadFile("../deploy/scripts/deploy.sh")
+	require.NoError(t, err, "test should read deploy.sh")
+	deployText := string(deployScript)
+	require.Contains(t, deployText, `: "${DB_BIND_IP:?DB_BIND_IP is required for db role`, "db deploy should fail loudly until the operator chooses the private or Tailscale bind address")
+	require.Contains(t, deployText, "DB_BIND_IP=%s", "db deploy should preserve DB_BIND_IP in /opt/143/.env for compose interpolation")
+}
+
+func TestProvisioningCanInstallAndUseTailscaleAddresses(t *testing.T) {
+	t.Parallel()
+
+	installScript, err := os.ReadFile("../deploy/scripts/install-tailscale.sh")
+	require.NoError(t, err, "install-tailscale.sh should exist as the shared Tailscale host setup helper")
+	installText := string(installScript)
+	require.Contains(t, installText, "TS_AUTH_KEY", "Tailscale install helper should use an auth key for non-interactive server enrollment")
+	require.Contains(t, installText, "--advertise-tags", "Tailscale install helper should support tagged production nodes for ACLs")
+	require.Contains(t, installText, "--accept-dns=false", "Tailscale install helper should not let tailnet DNS rewrite host resolver state")
+	require.Contains(t, installText, "tailscale ip -4", "Tailscale install helper should print the assigned IPv4 address for provisioning")
+
+	provisionScript, err := os.ReadFile("../deploy/scripts/provision.sh")
+	require.NoError(t, err, "test should read provision.sh")
+	provisionText := string(provisionScript)
+	require.Contains(t, provisionText, "install-tailscale.sh", "provisioning should run the shared Tailscale setup helper when TS_AUTH_KEY is provided")
+	require.Contains(t, provisionText, "WORKER_PRIVATE_IP_SOURCE", "worker provisioning should let operators explicitly choose Tailscale address discovery")
+	require.Contains(t, provisionText, "tailscale ip -4", "worker provisioning should be able to discover the worker's Tailscale IPv4 address")
+	require.Contains(t, provisionText, "100.64.0.0/10", "worker provisioning comments/errors should make the Tailscale address range explicit")
+
+	cloudInit, err := os.ReadFile("../deploy/cloud-init/worker.yml")
+	require.NoError(t, err, "test should read worker cloud-init template")
+	cloudInitText := string(cloudInit)
+	require.Contains(t, cloudInitText, "TS_AUTH_KEY", "worker cloud-init should support first-boot Tailscale enrollment")
+	require.Contains(t, cloudInitText, "tailscale up", "worker cloud-init should bring Tailscale up before starting the worker")
+	require.Contains(t, cloudInitText, "--accept-dns=false", "worker cloud-init Tailscale setup should not rewrite host DNS")
+}
+
 func TestGrafanaProvisionedDashboardsUseValidDatasourcesAndRangeQueries(t *testing.T) {
 	t.Parallel()
 

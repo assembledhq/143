@@ -16,6 +16,9 @@
 #   export NODE_ID="worker-1"
 #   export WORKER_PRIVATE_IP="10.0.0.12"            # this worker's private IPv4
 #   export PREVIEW_INTERNAL_BASE_URL="http://10.0.0.12:8080"  # usually http://${WORKER_PRIVATE_IP}:8080
+#   export TS_AUTH_KEY="tskey-auth-..."             # optional: enroll this host in Tailscale
+#   export TS_TAG="tag:prod-worker"                 # optional: Tailscale ACL tag
+#   export TS_HOSTNAME="$NODE_ID"                   # optional: Tailscale device name
 #   export CHROME_WS_URL="ws://chrome:9222"
 #   export ENV_PRODUCTION_ENC_B64="$(base64 < .env.production.enc)"
 #   export REPO_URL="https://github.com/assembledhq/143.git"
@@ -49,6 +52,25 @@ packages:
   - iptables-persistent
 
 runcmd:
+  # Optional Tailscale enrollment for cross-region workers. WORKER_PRIVATE_IP
+  # should be set to the resulting `tailscale ip -4` value when this node's
+  # internal preview endpoint must be reachable outside the Hetzner datacenter.
+  - |
+    TS_AUTH_KEY_VALUE="${TS_AUTH_KEY}"
+    if [ -n "$TS_AUTH_KEY_VALUE" ]; then
+      curl -fsSL https://tailscale.com/install.sh | sh
+      TS_HOSTNAME_VALUE="${TS_HOSTNAME}"
+      if [ -z "$TS_HOSTNAME_VALUE" ]; then
+        TS_HOSTNAME_VALUE="${NODE_ID}"
+      fi
+      TS_TAG_VALUE="${TS_TAG}"
+      if [ -z "$TS_TAG_VALUE" ]; then
+        TS_TAG_VALUE="tag:prod-worker"
+      fi
+      tailscale up --auth-key="$TS_AUTH_KEY_VALUE" --hostname="$TS_HOSTNAME_VALUE" --advertise-tags="$TS_TAG_VALUE" --accept-dns=false
+      tailscale ip -4
+    fi
+
   # Install gVisor
   - curl -fsSL https://gvisor.dev/archive.key | gpg --dearmor -o /usr/share/keyrings/gvisor-archive-keyring.gpg
   - echo "deb [arch=amd64 signed-by=/usr/share/keyrings/gvisor-archive-keyring.gpg] https://storage.googleapis.com/gvisor/releases release main" > /etc/apt/sources.list.d/gvisor.list
