@@ -459,6 +459,7 @@ func TestParseOrgSettings_RuntimeBudgets_Defaults(t *testing.T) {
 	s, err := ParseOrgSettings(nil)
 	require.NoError(t, err, "ParseOrgSettings should apply runtime budget defaults")
 	require.Equal(t, DefaultNoProgressTimeoutSeconds, s.RuntimeBudgets.NoProgressTimeoutSeconds, "no-progress timeout should default")
+	require.Equal(t, 15*60, s.RuntimeBudgets.NoProgressTimeoutSeconds, "no-progress timeout should default to fifteen minutes")
 	require.Equal(t, DefaultGracefulShutdownWindowSeconds, s.RuntimeBudgets.GracefulShutdownWindowSeconds, "graceful shutdown window should default")
 	require.Equal(t, DefaultCheckpointFinalizeWindowSeconds, s.RuntimeBudgets.CheckpointFinalizationWindowSeconds, "checkpoint finalization window should default")
 	require.Equal(t, DefaultAutomaticExtensionSeconds, s.RuntimeBudgets.AutomaticExtensionSeconds, "automatic extension window should default")

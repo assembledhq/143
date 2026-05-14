@@ -174,7 +174,7 @@ The correct escalation order is:
 Recommended defaults:
 
 - **Soft runtime budget:** 25 minutes
-- **No-progress timeout:** 5 minutes without meaningful progress
+- **No-progress timeout:** 15 minutes without meaningful progress
 - **Graceful shutdown window:** 30 seconds
 - **Checkpoint finalization window:** 30 seconds
 - **Absolute runtime ceiling:** 90 minutes by default, with org-configurable cap
@@ -182,7 +182,7 @@ Recommended defaults:
 Rationale:
 
 - 25 minutes is still a good default threshold for "this run is getting long"
-- 5 minutes of no output/tool activity is a better stuckness signal than raw
+- 15 minutes of no output/tool activity is a better stuckness signal than raw
   wall clock
 - 90 minutes is long enough for legitimately heavy repo work, but still bounded
   for shared infrastructure
@@ -199,6 +199,11 @@ A run should count as making progress when any of these move recently:
 - command completion events
 - diff growth
 - explicit agent checkpoint event
+
+An active tool or shell command is not treated as idle just because it is
+temporarily quiet. The no-progress timer applies when the agent is between
+tools or otherwise not emitting output; long-running active commands remain
+bounded by the soft budget, extension policy, and absolute ceiling.
 
 Not all signals are equally strong. The system should classify them as:
 
