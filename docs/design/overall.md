@@ -35,12 +35,16 @@ The system aggregates issues from support, Sentry, and Linear, prioritizes them 
 
 ## Autopilot workspace UX
 
-- `Autopilot` is the primary operating surface. It leads with one recommendation hero, a compact evidence row, and a summary-first `Your Direction` section so users can understand what the system sees and what it wants to do next without reading a dense settings form.
-- When prerequisites are missing, `Autopilot` falls back to a progressive, low-friction setup sequence: (1) choose coding agent, (2) connect GitHub, (3) add optional integrations.
+- `Sessions` is the main operating surface for active work: watching runs, reviewing diffs, following PR state, and giving agents guidance.
+- `Autopilot` is a supporting background automation surface. It has shifted from a recommendation-first briefing page to a unified **issue-and-run queue** that shows what the system is likely to work on automatically, what already ran, and what is available for manual kick-off. Detailed design: [implemented/75-autopilot-issue-and-run-queue.md](implemented/75-autopilot-issue-and-run-queue.md).
+- The Autopilot queue should sort **low-hanging fruit** to the top by combining impact and implementation straightforwardness, so teams can quickly inspect what background automation should pick up next.
+- Each Autopilot issue row should make automation state explicit: whether it autoran, is queued/running, needs review, opened a PR, failed, or is ready for a manual kick-off.
+- The previous recommendation hero remains useful, but only as a compact summary strip above the queue rather than the dominant page artifact.
+- When required prerequisites are missing, route the user to `/onboarding` for the progressive setup sequence: (1) choose coding agent, (2) connect GitHub, (3) add optional integrations. The post-setup `Autopilot` surface stays focused on the issue-and-run queue.
 - Coding agent selection uses a **single card with an agent dropdown** (default `Codex`) instead of multiple parallel agent cards. This reduces first-run decision fatigue and keeps focus on the primary onboarding path.
 - The selected agent card always presents one clear next action: sign in (Codex) or configure credentials (Claude/Gemini), with a persistent settings entrypoint.
 - Codex remains visually recommended to guide most users toward the quickest "time to first fix" path while preserving flexibility for teams with existing Anthropic/Google setups.
-- Contextual PM steering lives on `Autopilot` as compact summaries edited in side sheets, while low-frequency PM admin controls like model selection and cadence live in `Autopilot settings`.
+- Contextual PM steering still lives on `Autopilot`, but it should stay secondary to the issue queue as compact summaries, filters, and side-sheet detail rather than displacing the ranked table. Low-frequency PM admin controls like model selection and cadence live in `Autopilot settings`.
 
 - Step 0: Connect repositories and build codebase context
     - Users sign in with GitHub OAuth and install the 143.dev GitHub App on their organization/repos. The GitHub App (same auth model used by Codex web, Claude Code web, and other modern AI coding platforms) provides fine-grained, short-lived installation tokens for repo access, and can also mint user-to-server tokens when a human authorizes PR creation on their behalf. No personal access tokens are required.

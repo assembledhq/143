@@ -264,6 +264,21 @@ export const api = {
     triggerFix: (issueId: string, options?: { agent_type?: string; autonomy_level?: string; token_mode?: string }) =>
       post<import('./types').SingleResponse<import('./types').Session>>(`/api/v1/issues/${issueId}/fix`, options),
   },
+  autopilot: {
+    queue: (params?: { cursor?: string; limit?: number; source?: string | null; run_state?: string | null; automation?: string | null; repo_id?: string | null; q?: string | null; sort?: string | null }) => {
+      const searchParams = new URLSearchParams();
+      if (params?.cursor) searchParams.set('cursor', params.cursor);
+      if (params?.limit) searchParams.set('limit', String(params.limit));
+      if (params?.source) searchParams.set('source', params.source);
+      if (params?.run_state) searchParams.set('run_state', params.run_state);
+      if (params?.automation) searchParams.set('automation', params.automation);
+      if (params?.repo_id) searchParams.set('repo_id', params.repo_id);
+      if (params?.q) searchParams.set('q', params.q);
+      if (params?.sort) searchParams.set('sort', params.sort);
+      const qs = searchParams.toString();
+      return get<import('./types').AutopilotQueueResponse>(`/api/v1/autopilot/queue${qs ? `?${qs}` : ''}`);
+    },
+  },
   pm: {
     // Cursor format for /pm/plans: "<created_at RFC3339Nano>|<uuid>" (treat as opaque).
     analyze: () => post<{ data: { job_id: string } }>('/api/v1/pm/analyze'),
