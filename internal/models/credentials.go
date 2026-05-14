@@ -817,22 +817,24 @@ func (s CodingAuthStatus) Validate() error {
 }
 
 type CodingAuth struct {
-	ID             uuid.UUID        `json:"id"`
-	OrgID          uuid.UUID        `json:"org_id"`
-	Priority       int              `json:"priority"`
-	Agent          AgentType        `json:"agent"`
-	AuthType       CodingAuthType   `json:"auth_type"`
-	Label          string           `json:"label"`
-	Scope          string           `json:"scope"`
-	Provider       ProviderName     `json:"provider"`
-	Status         CodingAuthStatus `json:"status"`
-	IsDefault      bool             `json:"is_default"`
-	LastVerifiedAt *time.Time       `json:"last_verified_at,omitempty"`
-	LastUsedAt     *time.Time       `json:"last_used_at,omitempty"`
-	UsageNote      string           `json:"usage_note,omitempty"`
-	CreatedBy      *uuid.UUID       `json:"created_by,omitempty"`
-	CreatedAt      time.Time        `json:"created_at"`
-	UpdatedAt      time.Time        `json:"updated_at"`
+	ID               uuid.UUID        `json:"id"`
+	OrgID            uuid.UUID        `json:"org_id"`
+	Priority         int              `json:"priority"`
+	Agent            AgentType        `json:"agent"`
+	AuthType         CodingAuthType   `json:"auth_type"`
+	Label            string           `json:"label"`
+	Scope            string           `json:"scope"`
+	Provider         ProviderName     `json:"provider"`
+	Status           CodingAuthStatus `json:"status"`
+	IsDefault        bool             `json:"is_default"`
+	LastVerifiedAt   *time.Time       `json:"last_verified_at,omitempty"`
+	RateLimitedUntil *time.Time       `json:"rate_limited_until,omitempty"`
+	RateLimitMessage *string          `json:"rate_limit_message,omitempty"`
+	LastUsedAt       *time.Time       `json:"last_used_at,omitempty"`
+	UsageNote        string           `json:"usage_note,omitempty"`
+	CreatedBy        *uuid.UUID       `json:"created_by,omitempty"`
+	CreatedAt        time.Time        `json:"created_at"`
+	UpdatedAt        time.Time        `json:"updated_at"`
 }
 
 type CreateCodingAuthInput struct {

@@ -8,6 +8,7 @@ import (
 	"io"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/assembledhq/143/internal/models"
 	"github.com/google/uuid"
@@ -991,9 +992,23 @@ func TestShedOnRunResultDispatch(t *testing.T) {
 		{
 			name:             "codex api key rate limit error sheds rate limited",
 			agentType:        models.AgentTypeCodex,
-			result:           &AgentResult{Error: "rate limit hit"},
+			result:           &AgentResult{Error: "You've hit your usage limit. Visit https://chatgpt.com/codex/settings/usage to purchase more credits or try again at 8:50 AM."},
 			wantRateLimited:  true,
 			wantAuthRejected: false,
+		},
+		{
+			name:             "gemini quota error sheds rate limited",
+			agentType:        models.AgentTypeGeminiCLI,
+			result:           &AgentResult{Error: "quota exceeded: retry-after=90"},
+			wantRateLimited:  true,
+			wantAuthRejected: false,
+		},
+		{
+			name:             "amp invalid token sheds auth rejected",
+			agentType:        models.AgentTypeAmp,
+			result:           &AgentResult{Error: "401 Unauthorized: invalid token"},
+			wantRateLimited:  false,
+			wantAuthRejected: true,
 		},
 		{
 			name:             "nil result is a silent no-op",
@@ -1039,7 +1054,7 @@ func TestShedOnRunResultDispatch(t *testing.T) {
 			}
 
 			o := &Orchestrator{env: env, logger: zerolog.Nop()}
-			o.shedOnRunResult(tc.agentType, orgID, &userID, tc.result, tc.runErr, zerolog.Nop())
+			o.shedOnRunResult(context.Background(), tc.agentType, orgID, &userID, tc.result, tc.runErr, zerolog.Nop())
 
 			require.Equal(t, tc.wantRateLimited, len(coding.rateLimitedIDs) > 0,
 				"rate-limit shedding state mismatch for %q", tc.name)
@@ -1091,6 +1106,8 @@ func TestIsRateLimitedError(t *testing.T) {
 		{"snake-case rate_limit code", `{"code":"rate_limit_exceeded"}`, true},
 		{"http 429 status", "got status 429 from upstream", true},
 		{"too many requests phrase", "Error: too many requests; retry later", true},
+		{"quota exceeded phrase", "quota exceeded for this account", true},
+		{"codex usage limit phrase", "you've hit your usage limit. try again at 8:50 am.", true},
 	}
 	for _, tc := range cases {
 		tc := tc
@@ -1115,9 +1132,14 @@ func TestIsAuthRejectedError(t *testing.T) {
 		{"empty string is not auth rejected", "", false},
 		{"unrelated error is not auth rejected", "context canceled", false},
 		{"refresh token reused", `error code: refresh_token_reused`, true},
+		{"codex token revoked", `auth error code: token_revoked`, true},
+		{"codex token invalidated", `auth error code: token_invalidated`, true},
+		{"codex access refresh failed", "your access token could not be refreshed because you have since logged out", true},
 		{"invalid grant", `oauth: invalid_grant`, true},
 		{"invalid api key human form", "the provider returned: invalid api key", true},
 		{"invalid api key snake-case", `{"error":"invalid_api_key"}`, true},
+		{"invalid token with auth context", "401 unauthorized: provider returned invalid token", true},
+		{"invalid token count is not auth rejected", "invalid token count for request", false},
 		{"401 unauthorized", "received 401 unauthorized from upstream", true},
 		{"401 unauthenticated", "401 unauthenticated: token expired and refresh failed", true},
 		{"authentication_error code", `{"type":"authentication_error"}`, true},
@@ -1127,6 +1149,38 @@ func TestIsAuthRejectedError(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			require.Equal(t, tc.want, isAuthRejectedError(tc.in))
+		})
+	}
+}
+
+func TestParseCredentialFailureSignalRateLimitMetadata(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 5, 13, 8, 0, 0, 0, time.Local)
+	cases := []struct {
+		name      string
+		errorText string
+		wantUntil time.Time
+	}{
+		{
+			name:      "retry after seconds",
+			errorText: "quota exceeded retry-after=90",
+			wantUntil: now.Add(90 * time.Second),
+		},
+		{
+			name:      "codex try again wall clock",
+			errorText: "You've hit your usage limit. try again at 8:50 AM.",
+			wantUntil: time.Date(now.Year(), now.Month(), now.Day(), 8, 50, 0, 0, now.Location()),
+		},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			signal := parseCredentialFailureSignal(&AgentResult{Error: tc.errorText}, now)
+			require.True(t, signal.RateLimited, "signal should classify rate limits")
+			require.Equal(t, tc.wantUntil, signal.RateLimitedUntil, "signal should preserve reset metadata")
+			require.Equal(t, tc.errorText, signal.Message, "signal should preserve the original message")
 		})
 	}
 }

@@ -61,6 +61,28 @@ const (
 	sandboxLabelLegacyPurpose   = "143.purpose"
 )
 
+func cloneEnv(env map[string]string) map[string]string {
+	if len(env) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(env))
+	for k, v := range env {
+		out[k] = v
+	}
+	return out
+}
+
+func envSliceFromMap(env map[string]string) []string {
+	if len(env) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(env))
+	for k, v := range env {
+		out = append(out, k+"="+v)
+	}
+	return out
+}
+
 // ErrDiskQuotaUnsupported is returned when Docker rejects the StorageOpt
 // quota needed to make SANDBOX_DISK_LIMIT_GB a real host-level limit.
 var ErrDiskQuotaUnsupported = errors.New("docker disk quota unsupported")
@@ -578,6 +600,7 @@ func (d *DockerProvider) Create(ctx context.Context, cfg agent.SandboxConfig) (*
 		Provider: "docker",
 		WorkDir:  cfg.WorkDir,
 		HomeDir:  cfg.HomeDir,
+		Env:      cloneEnv(cfg.Env),
 		Metadata: map[string]string{
 			"runtime": d.runtime,
 			"network": d.network,
@@ -806,6 +829,7 @@ func (d *DockerProvider) Exec(ctx context.Context, sb *agent.Sandbox, cmd string
 		AttachStdout: true,
 		AttachStderr: true,
 		WorkingDir:   sb.WorkDir,
+		Env:          envSliceFromMap(sb.Env),
 	}
 
 	execResp, err := d.client.ContainerExecCreate(ctx, sb.ID, execCfg)
