@@ -161,12 +161,27 @@ func writeAgentProviderState(ctx context.Context, stores *Stores, providerState 
 // freshly-created session. Same dedupe shape as the manual path so retries
 // collapse cleanly.
 func enqueueRunAgentForLinearAgent(ctx context.Context, stores *Stores, orgID, sessionID uuid.UUID) error {
+	if stores == nil || stores.Sessions == nil || stores.Jobs == nil {
+		return errors.New("linear agent run enqueue stores unavailable")
+	}
+	session, err := stores.Sessions.GetByID(ctx, orgID, sessionID)
+	if err != nil {
+		return fmt.Errorf("load session before run_agent enqueue: %w", err)
+	}
+	if !linearAgentCreatedShouldEnqueueRun(models.SessionStatus(session.Status)) {
+		return nil
+	}
+
 	dedupe := db.RunAgentDedupeKey(sessionID)
-	_, err := stores.Jobs.Enqueue(ctx, orgID, "agent", "run_agent", map[string]any{
+	_, err = stores.Jobs.Enqueue(ctx, orgID, "agent", "run_agent", map[string]any{
 		"org_id":     orgID.String(),
 		"session_id": sessionID.String(),
 	}, 5, &dedupe)
 	return err
+}
+
+func linearAgentCreatedShouldEnqueueRun(status models.SessionStatus) bool {
+	return status == models.SessionStatusPending || status == models.SessionStatusRunning
 }
 
 // finalizeUnsupported is the close-AgentSession-with-explanation path

@@ -339,8 +339,9 @@ func (d *LinearAgentDispatcher) Dispatch(ctx context.Context, integration *model
 		// outer Linear webhook ack SLA is 5s and we still owe an enqueue
 		// after this; without a bounded timeout a slow Linear stalls the
 		// dispatcher and Linear retries the delivery, fanning the work
-		// out further. The worker's first run re-emits this thought via
-		// the same idem_key, so a clipped emit just defers it by seconds.
+		// out further. The bootstrap writer discards failed reservations
+		// so a webhook retry can re-emit instead of short-circuiting on a
+		// dead idem_key.
 		emitCtx, cancel := context.WithTimeout(ctx, bootstrapEmitTimeout)
 		emitRes, emitErr := d.emitter.Emit(emitCtx, linear.EmitInput{
 			OrgID:             integration.OrgID,
@@ -358,7 +359,7 @@ func (d *LinearAgentDispatcher) Dispatch(ctx context.Context, integration *model
 		if emitErr != nil {
 			d.logger.Warn().Err(emitErr).
 				Str("agent_session_id", row.LinearAgentSessionID).
-				Msg("agent bootstrap activity emit failed; worker will retry on first run")
+				Msg("agent bootstrap activity emit failed; reservation discarded so webhook retry can re-emit")
 		}
 		result.BootstrapEmitSkipped = emitRes.Skipped
 	}
@@ -474,5 +475,5 @@ func (w *linearAgentBootstrapWriter) Emit(ctx context.Context, in linear.EmitInp
 	if err != nil {
 		return linear.EmitResult{}, err
 	}
-	return linear.NewAgentActivityWriter(client, w.activities, nil, w.logger).Emit(ctx, in)
+	return linear.NewAgentActivityWriter(client, w.activities, nil, w.logger).EmitOrDiscard(ctx, in)
 }

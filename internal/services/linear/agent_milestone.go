@@ -102,12 +102,17 @@ func (s *Service) HandleAgentMilestone(ctx context.Context, in MilestoneInput) e
 	// URL via the PR store and add it here as a second entry, at which
 	// point the set genuinely deserves the slice shape.
 	if in.Event == MilestonePROpened && in.PRNumber > 0 {
-		_ = client.AgentSessionUpdate(ctx, AgentSessionUpdateInput{
+		if err := client.AgentSessionUpdate(ctx, AgentSessionUpdateInput{
 			AgentSessionID: row.LinearAgentSessionID,
 			ExternalURLs: []AgentSessionExternalURL{
 				{URL: s.SessionURL(in.Session.ID), Title: "143 session"},
 			},
-		})
+		}); err != nil {
+			s.logger.Warn().Err(err).
+				Str("session_id", in.Session.ID.String()).
+				Str("agent_session_id", row.LinearAgentSessionID).
+				Msg("agent milestone: failed to pin external URLs on AgentSession")
+		}
 	}
 
 	// Update the cached state for terminal events so the dispatcher's
