@@ -334,12 +334,12 @@ describe('SessionDetailPage', () => {
     expect(screen.queryByRole('tab', { name: 'Validation' })).not.toBeInTheDocument();
   });
 
-  it('uses the same desktop header height for the conversation and detail panels', async () => {
+  it('uses the same desktop header bar height for the conversation and detail panels', async () => {
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
     await screen.findAllByText('Fixed TypeError by adding null check');
 
-    expect(screen.getByTestId('session-main-header')).toHaveClass('min-h-14');
-    expect(screen.getByTestId('session-detail-header')).toHaveClass('min-h-14');
+    expect(screen.getByTestId('session-main-header')).toHaveClass('h-14');
+    expect(screen.getByTestId('session-detail-header-bar')).toHaveClass('h-14');
   });
 
   it('uses a dedicated mobile close button that does not compete with PR actions', async () => {
