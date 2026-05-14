@@ -178,6 +178,7 @@ type IntegrationHandler struct {
 	linearJobStore                *db.JobStore
 	linearTeamKeyRefresher        func(ctx context.Context, orgID uuid.UUID) error
 	linearTeamKeyCacheInvalidator func(orgID uuid.UUID)
+	linearAgentBootstrapper       func(ctx context.Context, orgID uuid.UUID) error
 }
 
 // SetLinearJobStore wires a JobStore so the OAuth callback can enqueue an

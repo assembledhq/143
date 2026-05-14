@@ -260,6 +260,28 @@ func TestDrainQueuedMessages_EnqueuesForSessionScope(t *testing.T) {
 	require.False(t, hasThread, "session-scope drain must not include a thread_id")
 }
 
+func TestDrainQueuedMessagesAfterProcessedID_EnqueuesInitialRunQueuedPrompt(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+
+	messages := &drainStubMessages{messages: []models.SessionMessage{
+		{ID: 6, OrgID: orgID, SessionID: sessionID, Role: models.MessageRoleUser, Content: "queued during initial run"},
+	}}
+	sessions := &drainStubSessions{session: models.Session{Status: "idle"}}
+	jobs := &drainStubJobs{}
+	o := newDrainOrchestrator(messages, sessions, jobs, nil)
+
+	o.drainQueuedMessagesAfterProcessedID(context.Background(), &models.Session{ID: sessionID, OrgID: orgID}, 0, nil, zerolog.Nop())
+
+	require.Len(t, jobs.enqueues, 1, "initial run drain should enqueue continue_session for a prompted message appended while run_agent was active")
+	require.Equal(t, continueSessionDrainDedupeKey(sessionID, 0), jobs.enqueues[0].dedupeKey, "initial run drain should use a drain-specific dedupe key")
+	payload, ok := jobs.enqueues[0].payload.(map[string]string)
+	require.True(t, ok, "initial run drain payload should be string-keyed")
+	require.Equal(t, sessionID.String(), payload["session_id"], "initial run drain payload should target the original session")
+}
+
 func TestDrainQueuedMessages_ThreadScopeIgnoresOtherThreads(t *testing.T) {
 	t.Parallel()
 
@@ -309,7 +331,7 @@ func TestDrainQueuedMessages_ThreadScopeClearsAndEnqueues(t *testing.T) {
 	require.Equal(t, threadA.String(), payload["thread_id"], "thread-scope drain must propagate thread_id")
 }
 
-func TestDrainQueuedMessages_SkipsTerminalSessionStatus(t *testing.T) {
+func TestDrainQueuedMessages_SkipsNonResumableTerminalSessionStatus(t *testing.T) {
 	t.Parallel()
 
 	orgID := uuid.New()
@@ -320,13 +342,13 @@ func TestDrainQueuedMessages_SkipsTerminalSessionStatus(t *testing.T) {
 		{ID: 5, OrgID: orgID, SessionID: sessionID, Role: models.MessageRoleUser},
 		{ID: 6, OrgID: orgID, SessionID: sessionID, Role: models.MessageRoleUser, Content: "queued"},
 	}}
-	sessions := &drainStubSessions{session: models.Session{Status: "failed"}}
+	sessions := &drainStubSessions{session: models.Session{Status: "skipped"}}
 	jobs := &drainStubJobs{}
 	o := newDrainOrchestrator(messages, sessions, jobs, nil)
 
 	o.drainQueuedMessages(context.Background(), &models.Session{ID: sessionID, OrgID: orgID}, processed, nil, zerolog.Nop())
 
-	require.Empty(t, jobs.enqueues, "drain must skip enqueue when the session has reached a terminal status")
+	require.Empty(t, jobs.enqueues, "drain must skip enqueue when the session has reached a non-resumable terminal status")
 }
 
 func TestDrainQueuedMessages_NilProcessedNoOp(t *testing.T) {

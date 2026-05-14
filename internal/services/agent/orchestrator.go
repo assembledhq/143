@@ -1639,6 +1639,8 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 		o.failRun(ctx, run, fmt.Sprintf("resolve issue context: %s", err))
 		return fmt.Errorf("resolve issue context: %w", err)
 	}
+	drainInitialQueuedMessages := false
+	initialProcessedMessageID := int64(0)
 	var messages []models.SessionMessage
 	if o.sessionMessages != nil {
 		messages, err = o.sessionMessages.ListBySession(ctx, run.OrgID, run.ID)
@@ -1647,7 +1649,11 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 			return fmt.Errorf("fetch session messages: %w", err)
 		}
 	}
-	issue, linkedIssues, err := o.resolvePromptSeed(ctx, run, latestUserMessage(messages), issueSnapshot)
+	initialLatestMsg := latestUserMessage(messages)
+	if initialLatestMsg != nil {
+		initialProcessedMessageID = initialLatestMsg.ID
+	}
+	issue, linkedIssues, err := o.resolvePromptSeed(ctx, run, initialLatestMsg, issueSnapshot)
 	if err != nil {
 		o.failRun(ctx, run, fmt.Sprintf("resolve prompt seed: %s", err))
 		return fmt.Errorf("resolve prompt seed: %w", err)
@@ -1902,6 +1908,14 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 	if o.usageTracker != nil {
 		usageEventID = o.usageTracker.ContainerStarted(ctx, run.OrgID, run.ID, sandbox, sandboxCfg, containerStartedAt)
 	}
+	defer func() {
+		if !drainInitialQueuedMessages {
+			return
+		}
+		drainCtx, drainCancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+		defer drainCancel()
+		o.drainQueuedMessagesAfterProcessedID(drainCtx, run, initialProcessedMessageID, nil, log)
+	}()
 	defer func() {
 		exitReason := containerExitReason(ctx, err)
 		if o.usageTracker != nil {
@@ -2229,6 +2243,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 				Float64("confidence", result.ConfidenceScore).
 				Float64("threshold", confidenceThresholds.AutoProceed)
 		})
+		drainInitialQueuedMessages = true
 		return nil
 	}
 
@@ -2300,6 +2315,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 		}
 	}
 
+	drainInitialQueuedMessages = true
 	return nil
 }
 
@@ -3428,6 +3444,13 @@ func (o *Orchestrator) drainQueuedMessages(ctx context.Context, session *models.
 	if processed == nil || o.jobs == nil || o.sessionMessages == nil {
 		return
 	}
+	o.drainQueuedMessagesAfterProcessedID(ctx, session, processed.ID, threadID, log)
+}
+
+func (o *Orchestrator) drainQueuedMessagesAfterProcessedID(ctx context.Context, session *models.Session, processedMessageID int64, threadID *uuid.UUID, log zerolog.Logger) {
+	if o.jobs == nil || o.sessionMessages == nil {
+		return
+	}
 	messages, err := o.sessionMessages.ListBySession(ctx, session.OrgID, session.ID)
 	if err != nil {
 		log.Warn().Err(err).Msg("failed to fetch messages for post-turn queue drain")
@@ -3435,7 +3458,7 @@ func (o *Orchestrator) drainQueuedMessages(ctx context.Context, session *models.
 	}
 	hasQueued := false
 	for _, m := range messages {
-		if m.Role != models.MessageRoleUser || m.ID <= processed.ID {
+		if m.Role != models.MessageRoleUser || m.ID <= processedMessageID {
 			continue
 		}
 		// On the thread path, a queued message is bound to the same thread —
@@ -3458,9 +3481,8 @@ func (o *Orchestrator) drainQueuedMessages(ctx context.Context, session *models.
 
 	// Confirm the session is in a state that can accept another turn before
 	// enqueueing. Skipping the GetByID would still be safe (the worker would
-	// refuse a job for a terminal session), but it would create a noisy
-	// dead-letter trail on every cancelled run that left the session marked
-	// failed/cancelled.
+	// refuse a job for a non-resumable terminal session), but it would create a
+	// noisy dead-letter trail on skipped sessions and future terminal states.
 	current, getErr := o.sessions.GetByID(ctx, session.OrgID, session.ID)
 	if getErr != nil {
 		log.Warn().Err(getErr).Msg("failed to fetch session for queue drain status check")
@@ -3482,18 +3504,16 @@ func (o *Orchestrator) drainQueuedMessages(ctx context.Context, session *models.
 	if threadID != nil {
 		payload["thread_id"] = threadID.String()
 	}
-	dedupeKey := continueSessionDrainDedupeKey(session.ID, processed.ID)
+	dedupeKey := continueSessionDrainDedupeKey(session.ID, processedMessageID)
 	if _, err := o.jobs.EnqueueWithTarget(ctx, session.OrgID, "agent", "continue_session", payload, 5, &dedupeKey, models.SessionWorkerTarget(session)); err != nil {
 		log.Warn().Err(err).Msg("failed to enqueue continue_session for queued messages")
 	}
 }
 
 // drainAcceptableStatus returns true for session states that can absorb
-// another continue_session turn: running (the in-flight job will pick the
-// queued message up via latest-message reads) and idle (a fresh
-// continue_session can claim it). Terminal states are skipped — a queued
-// message after a failed/cancelled session waits for the user to take an
-// explicit action.
+// another continue_session turn. Running and idle are the common paths; the
+// resumable statuses cover prompts that arrived during an initial run_agent
+// and must be picked up after that run lands in a terminal or paused state.
 func drainAcceptableStatus(status string) bool {
 	switch status {
 	case string(models.SessionStatusIdle),
@@ -3502,7 +3522,7 @@ func drainAcceptableStatus(status string) bool {
 		string(models.SessionStatusNeedsHumanGuidance):
 		return true
 	}
-	return false
+	return models.SessionStatus(status).IsResumable()
 }
 
 // continueSessionDedupeKey mirrors db.ContinueSessionDedupeKey. The agent
