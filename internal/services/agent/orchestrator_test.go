@@ -643,13 +643,19 @@ type mockSessionLogStore struct {
 	markedSessionID      uuid.UUID
 	markDuplicateInvoked bool
 	markDuplicateErr     error
+	onCreate             func(models.SessionLog)
 }
 
 func (m *mockSessionLogStore) Create(ctx context.Context, log *models.SessionLog) error {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	m.logs = append(m.logs, *log)
 	m.count++
+	onCreate := m.onCreate
+	snapshot := *log
+	m.mu.Unlock()
+	if onCreate != nil {
+		onCreate(snapshot)
+	}
 	return nil
 }
 
@@ -715,6 +721,71 @@ func (m *mockSessionQuestionStore) getQuestions() []models.SessionQuestion {
 	defer m.mu.Unlock()
 	out := make([]models.SessionQuestion, len(m.questions))
 	copy(out, m.questions)
+	return out
+}
+
+// mockSessionHumanInputRequestStore implements agent.SessionHumanInputRequestStore.
+type mockSessionHumanInputRequestStore struct {
+	mu       sync.Mutex
+	requests []models.HumanInputRequest
+}
+
+func (m *mockSessionHumanInputRequestStore) Create(_ context.Context, req *models.HumanInputRequest) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if req.ID == uuid.Nil {
+		req.ID = uuid.New()
+	}
+	m.requests = append(m.requests, *req)
+	return nil
+}
+
+func (m *mockSessionHumanInputRequestStore) GetByID(_ context.Context, orgID, sessionID, id uuid.UUID) (models.HumanInputRequest, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, req := range m.requests {
+		if req.OrgID == orgID && req.SessionID == sessionID && req.ID == id {
+			return req, nil
+		}
+	}
+	return models.HumanInputRequest{}, pgx.ErrNoRows
+}
+
+func (m *mockSessionHumanInputRequestStore) AnswerLatestPendingFreeTextBySession(_ context.Context, orgID, sessionID uuid.UUID, answerText string, answeredBy uuid.UUID) (models.HumanInputRequest, error) {
+	return m.answerLatestPendingFreeText(orgID, sessionID, nil, answerText, answeredBy)
+}
+
+func (m *mockSessionHumanInputRequestStore) AnswerLatestPendingFreeTextByThread(_ context.Context, orgID, sessionID, threadID uuid.UUID, answerText string, answeredBy uuid.UUID) (models.HumanInputRequest, error) {
+	return m.answerLatestPendingFreeText(orgID, sessionID, &threadID, answerText, answeredBy)
+}
+
+func (m *mockSessionHumanInputRequestStore) answerLatestPendingFreeText(orgID, sessionID uuid.UUID, threadID *uuid.UUID, answerText string, answeredBy uuid.UUID) (models.HumanInputRequest, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for i := len(m.requests) - 1; i >= 0; i-- {
+		req := m.requests[i]
+		if req.OrgID != orgID || req.SessionID != sessionID || req.Status != models.HumanInputRequestStatusPending || req.Kind != models.HumanInputRequestKindFreeText {
+			continue
+		}
+		if threadID != nil && (req.ThreadID == nil || *req.ThreadID != *threadID) {
+			continue
+		}
+		answer := strings.TrimSpace(answerText)
+		now := time.Now()
+		m.requests[i].Status = models.HumanInputRequestStatusAnswered
+		m.requests[i].AnswerText = &answer
+		m.requests[i].AnsweredBy = &answeredBy
+		m.requests[i].AnsweredAt = &now
+		return m.requests[i], nil
+	}
+	return models.HumanInputRequest{}, pgx.ErrNoRows
+}
+
+func (m *mockSessionHumanInputRequestStore) getRequests() []models.HumanInputRequest {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]models.HumanInputRequest, len(m.requests))
+	copy(out, m.requests)
 	return out
 }
 
@@ -1001,6 +1072,7 @@ type testDeps struct {
 	repos            *mockRepositoryStore
 	logs             *mockSessionLogStore
 	questions        *mockSessionQuestionStore
+	humanInputs      *mockSessionHumanInputRequestStore
 	messages         *mockSessionMessageStore
 	decisions        *mockDecisionLogStore
 	jobs             *mockJobStore
@@ -1075,6 +1147,9 @@ func defaultDeps() testDeps {
 		repos:     &mockRepositoryStore{repo: testRepo(orgID)},
 		logs:      &mockSessionLogStore{},
 		questions: &mockSessionQuestionStore{},
+		humanInputs: &mockSessionHumanInputRequestStore{
+			requests: make([]models.HumanInputRequest, 0),
+		},
 		messages:  &mockSessionMessageStore{},
 		decisions: &mockDecisionLogStore{},
 		jobs:      &mockJobStore{},
@@ -1114,33 +1189,34 @@ func buildOrchestrator(d testDeps) *agent.Orchestrator {
 		sessionThreads = d.sessionThreads
 	}
 	return agent.NewOrchestrator(agent.OrchestratorConfig{
-		Provider:          d.provider,
-		Adapters:          map[models.AgentType]agent.AgentAdapter{d.adapter.Name(): d.adapter},
-		Sessions:          d.sessions,
-		SessionThreads:    sessionThreads,
-		SessionLogs:       d.logs,
-		SessionQuestions:  d.questions,
-		SessionMessages:   d.messages,
-		DecisionLog:       d.decisions,
-		ProjectTasks:      d.projects,
-		Issues:            d.issues,
-		Repositories:      d.repos,
-		Jobs:              d.jobs,
-		GitHub:            d.github,
-		CodexAuth:         d.codexAuth,
-		ClaudeCodeAuth:    d.claudeCodeAuth,
-		Credentials:       d.creds,
-		CodingCredentials: d.codingCreds,
-		Snapshots:         snapshotStore,
-		Cancels:           d.cancels,
-		Orgs:              orgStore,
-		IdentityResolver:  d.identityResolver,
-		SandboxAuth:       d.sandboxAuth,
-		SandboxCapacity:   d.sandboxCapacity,
-		Users:             d.users,
-		NodeID:            d.nodeID,
-		Logger:            logger,
-		MaxConcurrent:     3,
+		Provider:           d.provider,
+		Adapters:           map[models.AgentType]agent.AgentAdapter{d.adapter.Name(): d.adapter},
+		Sessions:           d.sessions,
+		SessionThreads:     sessionThreads,
+		SessionLogs:        d.logs,
+		SessionQuestions:   d.questions,
+		HumanInputRequests: d.humanInputs,
+		SessionMessages:    d.messages,
+		DecisionLog:        d.decisions,
+		ProjectTasks:       d.projects,
+		Issues:             d.issues,
+		Repositories:       d.repos,
+		Jobs:               d.jobs,
+		GitHub:             d.github,
+		CodexAuth:          d.codexAuth,
+		ClaudeCodeAuth:     d.claudeCodeAuth,
+		Credentials:        d.creds,
+		CodingCredentials:  d.codingCreds,
+		Snapshots:          snapshotStore,
+		Cancels:            d.cancels,
+		Orgs:               orgStore,
+		IdentityResolver:   d.identityResolver,
+		SandboxAuth:        d.sandboxAuth,
+		SandboxCapacity:    d.sandboxCapacity,
+		Users:              d.users,
+		NodeID:             d.nodeID,
+		Logger:             logger,
+		MaxConcurrent:      3,
 	})
 }
 
@@ -3716,10 +3792,9 @@ func TestRunAgent_LogStreamingWithQuestion(t *testing.T) {
 			Message:   "completed",
 		}
 		return &agent.AgentResult{
-			Diff:            "--- a/fix.go\n+++ b/fix.go",
-			Summary:         "Fixed it",
-			ConfidenceScore: 0.85,
-			ExitCode:        0,
+			RequiresHumanInput: true,
+			AgentSessionID:     "agent-question-1",
+			ExitCode:           0,
 		}, nil
 	}
 
@@ -3736,7 +3811,7 @@ func TestRunAgent_LogStreamingWithQuestion(t *testing.T) {
 	require.Equal(t, "Should I refactor this function too?", questions[0].QuestionText)
 	require.Equal(t, "pending", questions[0].Status)
 
-	// Status should have been set to "awaiting_input" for the question.
+	// Status should have been set to "awaiting_input" after the pause checkpoint.
 	statuses := d.sessions.getStatusUpdates()
 	require.Contains(t, statuses, "awaiting_input")
 }
@@ -6812,6 +6887,88 @@ func TestRunAgent_PublishesCheckpointForHumanInputPauseWithNonZeroExit(t *testin
 	require.Equal(t, "agent-human-input-1", checkpoints[len(checkpoints)-1].agentSessionID, "checkpoint should preserve provider session id for resume")
 	require.NotEmpty(t, checkpoints[len(checkpoints)-1].snapshotKey, "human-input pause should persist the checkpoint snapshot key")
 	require.Contains(t, d.sessions.getStatusUpdates(), string(models.SessionStatusAwaitingInput), "human-input pause should leave the session awaiting input")
+}
+
+func TestRunAgent_DoesNotExposeHumanInputAsAnswerableBeforeCheckpoint(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	run := testRun(orgID, issue.ID)
+	logPersisted := make(chan struct{})
+	allowAdapterReturn := make(chan struct{})
+	runDone := make(chan error, 1)
+	var logOnce sync.Once
+	released := false
+	doneRead := false
+
+	d := defaultDeps()
+	d.logs = &mockSessionLogStore{
+		onCreate: func(log models.SessionLog) {
+			if log.Level == "human_input" {
+				logOnce.Do(func() { close(logPersisted) })
+			}
+		},
+	}
+	d.provider.SnapshotFn = func(ctx context.Context, sb *agent.Sandbox) (io.ReadCloser, error) {
+		return io.NopCloser(bytes.NewReader([]byte("human-input-checkpoint"))), nil
+	}
+	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
+		logCh <- agent.LogEntry{
+			Timestamp: time.Now(),
+			Level:     "human_input",
+			Message:   "Approve Bash?",
+			HumanInput: &agent.HumanInputRequest{
+				ProviderRequestID: "toolu_early",
+				Kind:              models.HumanInputRequestKindToolApproval,
+				Title:             "Approve Bash?",
+				Body:              "Claude needs approval before it can continue.",
+				Choices: []models.HumanInputChoice{
+					{ID: "approve", Label: "Approve"},
+					{ID: "deny", Label: "Deny"},
+				},
+			},
+		}
+		<-allowAdapterReturn
+		return &agent.AgentResult{
+			RequiresHumanInput: true,
+			AgentSessionID:     "agent-human-input-early",
+			ExitCode:           1,
+			Error:              "deferred human input",
+		}, nil
+	}
+
+	go func() {
+		runDone <- buildOrchestrator(d).RunAgent(context.Background(), run)
+	}()
+	t.Cleanup(func() {
+		if !released {
+			close(allowAdapterReturn)
+		}
+		if !doneRead {
+			require.NoError(t, <-runDone, "RunAgent should finish after the blocked adapter is released")
+		}
+	})
+
+	require.Eventually(t, func() bool {
+		select {
+		case <-logPersisted:
+			return true
+		default:
+			return false
+		}
+	}, time.Second, 10*time.Millisecond, "human-input request log should be persisted while the adapter is still paused")
+
+	require.Len(t, d.humanInputs.getRequests(), 1, "RunAgent should persist the human-input request as soon as the provider emits it")
+	require.NotContains(t, d.sessions.getStatusUpdates(), string(models.SessionStatusAwaitingInput), "RunAgent should not mark the session answerable before the pause checkpoint is published")
+
+	close(allowAdapterReturn)
+	released = true
+	err := <-runDone
+	doneRead = true
+	require.NoError(t, err, "RunAgent should handle the deferred human-input pause internally")
+	require.NotEmpty(t, d.sessions.getCheckpointUpdates(), "RunAgent should publish a checkpoint before making the request answerable")
+	require.Contains(t, d.sessions.getStatusUpdates(), string(models.SessionStatusAwaitingInput), "RunAgent should mark the session awaiting input after checkpoint publication")
 }
 
 func TestRunAgent_RevertsToPendingWhenRuntimeInitFails(t *testing.T) {

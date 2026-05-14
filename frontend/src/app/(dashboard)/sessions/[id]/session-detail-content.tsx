@@ -209,6 +209,14 @@ type PendingEditableThreadUpdate = {
   model: string | null;
 };
 
+type QueryInvalidator = {
+  invalidateQueries: (filters: { queryKey: readonly unknown[] }) => unknown;
+};
+
+export function invalidateSessionHumanInputRequests(queryClient: QueryInvalidator, sessionId: string): void {
+  queryClient.invalidateQueries({ queryKey: ["session", sessionId, "human-input-requests"] });
+}
+
 const statusConfig: Record<string, { color: string; label: string }> = {
   pending: { color: "bg-muted text-muted-foreground", label: "Pending" },
   running: { color: "bg-primary/10 text-primary", label: "Running" },
@@ -1947,10 +1955,13 @@ function ChatPanel({
       return !request.thread_id;
     });
   }, [activeThreadId, humanInputQuery.data?.data]);
-  const autoOpenHumanInputId = pendingHumanInputs.find((request) => !dismissedHumanInputIds.has(request.id))?.id ?? null;
+  const canAnswerHumanInput = session.status === "awaiting_input" || activeThread?.status === "awaiting_input";
+  const autoOpenHumanInputId = canAnswerHumanInput
+    ? pendingHumanInputs.find((request) => !dismissedHumanInputIds.has(request.id))?.id ?? null
+    : null;
 
   const invalidateHumanInput = useCallback(() => {
-    queryClient.invalidateQueries({ queryKey: ["session", sessionId, "human-input-requests"] });
+    invalidateSessionHumanInputRequests(queryClient, sessionId);
     queryClient.invalidateQueries({ queryKey: ["session", sessionId] });
     queryClient.invalidateQueries({ queryKey: ["session", sessionId, "timeline"] });
     if (activeThreadId) {
@@ -2295,17 +2306,17 @@ function ChatPanel({
           mergeLogs([log]);
         }
         if (log.level === "human_input") {
-          queryClient.invalidateQueries({ queryKey: queryKeys.sessions.humanInputRequests(sessionId, "pending", activeThreadId ?? null) });
+          invalidateSessionHumanInputRequests(queryClient, sessionId);
         }
       });
 
       addSSEListener(eventSource, SSE_EVENT.HUMAN_INPUT_CREATED, () => {
-        queryClient.invalidateQueries({ queryKey: queryKeys.sessions.humanInputRequests(sessionId, "pending", activeThreadId ?? null) });
+        invalidateSessionHumanInputRequests(queryClient, sessionId);
         queryClient.invalidateQueries({ queryKey: ["session", sessionId, "timeline"] });
       });
 
       addSSEListener(eventSource, SSE_EVENT.HUMAN_INPUT_UPDATED, () => {
-        queryClient.invalidateQueries({ queryKey: queryKeys.sessions.humanInputRequests(sessionId, "pending", activeThreadId ?? null) });
+        invalidateSessionHumanInputRequests(queryClient, sessionId);
         queryClient.invalidateQueries({ queryKey: ["session", sessionId, "timeline"] });
         if (activeThreadId) {
           queryClient.invalidateQueries({ queryKey: queryKeys.sessions.threadMessages(sessionId, activeThreadId) });
@@ -2320,7 +2331,7 @@ function ChatPanel({
         // message posted by the backend is displayed immediately.
         if (updated.status !== "running") {
           queryClient.invalidateQueries({ queryKey: ["session", sessionId, "timeline"] });
-          queryClient.invalidateQueries({ queryKey: queryKeys.sessions.humanInputRequests(sessionId, "pending", activeThreadId ?? null) });
+          invalidateSessionHumanInputRequests(queryClient, sessionId);
           if (activeThreadId) {
             queryClient.invalidateQueries({ queryKey: queryKeys.sessions.threadMessages(sessionId, activeThreadId) });
             queryClient.invalidateQueries({ queryKey: queryKeys.sessions.threadLogs(sessionId, activeThreadId) });
@@ -2332,7 +2343,7 @@ function ChatPanel({
         mergeSessionStatusUpdate(updated);
         eventSource?.close();
         queryClient.invalidateQueries({ queryKey: ["session", sessionId, "timeline"] });
-        queryClient.invalidateQueries({ queryKey: queryKeys.sessions.humanInputRequests(sessionId, "pending", activeThreadId ?? null) });
+        invalidateSessionHumanInputRequests(queryClient, sessionId);
         if (activeThreadId) {
           queryClient.invalidateQueries({ queryKey: queryKeys.sessions.threadMessages(sessionId, activeThreadId) });
           queryClient.invalidateQueries({ queryKey: queryKeys.sessions.threadLogs(sessionId, activeThreadId) });
@@ -2481,6 +2492,7 @@ function ChatPanel({
                     : null
               }
               autoOpenHumanInputId={autoOpenHumanInputId}
+              humanInputAnswerable={canAnswerHumanInput}
               onAnswerHumanInput={handleAnswerHumanInput}
               onCancelHumanInput={handleCancelHumanInput}
               onDismissHumanInputAutoOpen={handleDismissHumanInputAutoOpen}
@@ -3666,7 +3678,7 @@ export function SessionDetailContent({ id }: { id: string }) {
       }
       queryClient.invalidateQueries({ queryKey: ["session", id] });
       queryClient.invalidateQueries({ queryKey: ["session", id, "timeline"] });
-      queryClient.invalidateQueries({ queryKey: queryKeys.sessions.humanInputRequests(id, "pending", vars.activeThreadId ?? null) });
+      invalidateSessionHumanInputRequests(queryClient, id);
       if (vars.activeThreadId) {
         queryClient.invalidateQueries({ queryKey: queryKeys.sessions.threadMessages(id, vars.activeThreadId) });
         queryClient.invalidateQueries({ queryKey: queryKeys.sessions.threadLogs(id, vars.activeThreadId) });

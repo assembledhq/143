@@ -529,6 +529,7 @@ interface ChatTimelineProps {
   onAdjustPlan?: () => void;
   humanInputSubmittingId?: string | null;
   autoOpenHumanInputId?: string | null;
+  humanInputAnswerable?: boolean;
   onAnswerHumanInput?: (request: HumanInputRequest, body: HumanInputAnswerBody) => Promise<void> | void;
   onCancelHumanInput?: (request: HumanInputRequest) => Promise<void> | void;
   onDismissHumanInputAutoOpen?: (request: HumanInputRequest) => void;
@@ -538,7 +539,7 @@ interface ChatTimelineProps {
   ) => React.HTMLAttributes<HTMLDivElement> & Record<`data-${string}`, string | number | undefined>;
 }
 
-function ChatTimelineImpl({ entries, isRunning, diffStats, onDiffClick, onApprovePlan, onAdjustPlan, humanInputSubmittingId, autoOpenHumanInputId, onAnswerHumanInput, onCancelHumanInput, onDismissHumanInputAutoOpen, getEntryContainerProps }: ChatTimelineProps) {
+function ChatTimelineImpl({ entries, isRunning, diffStats, onDiffClick, onApprovePlan, onAdjustPlan, humanInputSubmittingId, autoOpenHumanInputId, humanInputAnswerable = true, onAnswerHumanInput, onCancelHumanInput, onDismissHumanInputAutoOpen, getEntryContainerProps }: ChatTimelineProps) {
   // Separate visible entries (messages, tool groups, errors) from hidden logs.
   // Group consecutive hidden logs together so they share a single "Show more" toggle.
   const rendered: React.ReactNode[] = [];
@@ -681,6 +682,7 @@ function ChatTimelineImpl({ entries, isRunning, diffStats, onDiffClick, onApprov
               key={`human-input-${entry.data.id}`}
               request={entry.data}
               autoOpen={autoOpenHumanInputId === entry.data.id}
+              answerable={humanInputAnswerable}
               submitting={humanInputSubmittingId === entry.data.id}
               onAnswer={(body) => onAnswerHumanInput?.(entry.data, body)}
               onCancel={onCancelHumanInput ? () => onCancelHumanInput(entry.data) : undefined}
@@ -751,6 +753,7 @@ export const ChatTimeline = memo(ChatTimelineImpl, (prev, next) => {
     prev.onAdjustPlan === next.onAdjustPlan &&
     prev.humanInputSubmittingId === next.humanInputSubmittingId &&
     prev.autoOpenHumanInputId === next.autoOpenHumanInputId &&
+    prev.humanInputAnswerable === next.humanInputAnswerable &&
     prev.onAnswerHumanInput === next.onAnswerHumanInput &&
     prev.onCancelHumanInput === next.onCancelHumanInput &&
     prev.onDismissHumanInputAutoOpen === next.onDismissHumanInputAutoOpen &&

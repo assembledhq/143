@@ -3986,14 +3986,6 @@ func (o *Orchestrator) handleHumanInputRequest(
 		}
 	}
 
-	if err := o.sessions.UpdateStatus(ctx, orgID, sessionID, string(models.SessionStatusAwaitingInput)); err != nil {
-		o.logger.Error().Err(err).Str("session_id", sessionID.String()).Msg("failed to update session status to awaiting_input")
-	}
-	if threadID != nil && o.sessionThreads != nil {
-		if err := o.sessionThreads.UpdateStatus(ctx, orgID, *threadID, models.ThreadStatusAwaitingInput); err != nil {
-			o.logger.Error().Err(err).Str("session_id", sessionID.String()).Str("thread_id", threadID.String()).Msg("failed to update thread status to awaiting_input")
-		}
-	}
 	return created
 }
 

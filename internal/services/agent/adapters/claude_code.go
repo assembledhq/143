@@ -265,7 +265,10 @@ func prepareClaudeHumanInputHooks(ctx context.Context, provider agent.SandboxPro
 		return "", "", fmt.Errorf("write Claude settings: %w", err)
 	}
 
-	envPrefix := ""
+	envPrefix := fmt.Sprintf(
+		"CLAUDE_143_HUMAN_INPUT_TOOLS='%s' ",
+		shellEscapeSingle(strings.Join(claudeHumanInputHookMatchers, ",")),
+	)
 	if prompt != nil && prompt.HumanInputAnswer != nil {
 		answerPath := fmt.Sprintf("%s/.143-claude-human-input-answer.json", sandbox.HomeDir)
 		answerJSON, err := json.Marshal(prompt.HumanInputAnswer)
@@ -275,7 +278,7 @@ func prepareClaudeHumanInputHooks(ctx context.Context, provider agent.SandboxPro
 		if err := provider.WriteFile(ctx, sandbox, answerPath, answerJSON); err != nil {
 			return "", "", fmt.Errorf("write Claude human input answer: %w", err)
 		}
-		envPrefix = fmt.Sprintf("CLAUDE_143_HUMAN_INPUT_ANSWER='%s' ", shellEscapeSingle(answerPath))
+		envPrefix += fmt.Sprintf("CLAUDE_143_HUMAN_INPUT_ANSWER='%s' ", shellEscapeSingle(answerPath))
 	}
 
 	return fmt.Sprintf(" --settings '%s'", shellEscapeSingle(settingsPath)), envPrefix, nil
@@ -310,16 +313,12 @@ try {
 }
 
 const toolName = event.tool_name || event.toolName || event.name || "";
-const interceptedTools = new Set([
-  "AskUserQuestion",
-  "Bash",
-  "Edit",
-  "MultiEdit",
-  "Write",
-  "WebFetch",
-  "WebSearch",
-  "NotebookEdit"
-]);
+const interceptedTools = new Set(
+  String(process.env.CLAUDE_143_HUMAN_INPUT_TOOLS || "")
+    .split(",")
+    .map((tool) => tool.trim())
+    .filter(Boolean)
+);
 if (!interceptedTools.has(toolName)) {
   process.exit(0);
 }

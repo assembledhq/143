@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useId, useMemo, useState } from "react";
 import {
   AlertTriangle,
   CheckCircle2,
@@ -29,6 +29,7 @@ import { cn } from "@/lib/utils";
 interface HumanInputRequestCardProps {
   request: HumanInputRequest;
   autoOpen?: boolean;
+  answerable?: boolean;
   submitting?: boolean;
   onAnswer: (body: HumanInputAnswerBody) => Promise<void> | void;
   onCancel?: () => Promise<void> | void;
@@ -38,11 +39,13 @@ interface HumanInputRequestCardProps {
 export function HumanInputRequestCard({
   request,
   autoOpen,
+  answerable = true,
   submitting,
   onAnswer,
   onCancel,
   onAutoOpenDismiss,
 }: HumanInputRequestCardProps) {
+  const payloadFieldId = useId();
   const [open, setOpen] = useState(false);
   const [answerText, setAnswerText] = useState("");
   const [payloadText, setPayloadText] = useState("");
@@ -53,6 +56,9 @@ export function HumanInputRequestCard({
   const hasChoices = request.choices.length > 0;
   const isMulti = request.request_kind === "multi_choice";
   const isFreeText = request.request_kind === "free_text";
+  const requiresDecision =
+    request.request_kind === "tool_approval" ||
+    request.request_kind === "action_choice";
   const sensitive =
     request.request_kind === "tool_approval" ||
     request.choices.some((choice) => choice.destructive);
@@ -61,13 +67,21 @@ export function HumanInputRequestCard({
     : selectedChoice
       ? [selectedChoice]
       : [];
-  const canSubmit = isFreeText
-    ? answerText.trim().length > 0
-    : selectedIDs.length > 0 ||
-      answerText.trim().length > 0 ||
-      payloadText.trim().length > 0;
+  const selectedChoiceDetails = request.choices.filter((choice) =>
+    selectedIDs.includes(choice.id),
+  );
+  const payloadEditor = getPayloadEditorState(request, selectedChoiceDetails);
+  const hasAnswerText = answerText.trim().length > 0;
+  const hasPayloadText = payloadText.trim().length > 0;
+  const hasBaseAnswer = isFreeText
+    ? hasAnswerText
+    : requiresDecision
+      ? selectedIDs.length > 0 || (!hasChoices && hasPayloadText)
+      : selectedIDs.length > 0 || hasAnswerText || hasPayloadText;
+  const canSubmit =
+    answerable && hasBaseAnswer && (!payloadEditor.required || hasPayloadText);
   const Icon = sensitive ? ShieldAlert : hasChoices ? CheckCircle2 : CircleHelp;
-  const dialogOpen = isPending && (open || Boolean(autoOpen));
+  const dialogOpen = isPending && answerable && (open || Boolean(autoOpen));
 
   const kindLabel = useMemo(
     () => request.request_kind.replaceAll("_", " "),
@@ -82,7 +96,7 @@ export function HumanInputRequestCard({
   }
 
   async function submit() {
-    if (!canSubmit || submitting) return;
+    if (!canSubmit || submitting || !answerable) return;
     setPayloadError(null);
     const parsedPayload = parsePayloadText(payloadText);
     if (parsedPayload instanceof Error) {
@@ -180,12 +194,17 @@ export function HumanInputRequestCard({
           className="min-h-24"
         />
       ) : null}
-      {request.response_schema && !hasChoices ? (
+      {payloadEditor.visible ? (
         <div className="space-y-2">
+          <Label htmlFor={payloadFieldId} className="text-xs font-medium">
+            Response payload
+          </Label>
           <Textarea
+            id={payloadFieldId}
+            aria-label="Structured response payload"
             value={payloadText}
             onChange={(event) => setPayloadText(event.target.value)}
-            placeholder='{"decision":"approve"}'
+            placeholder={payloadEditor.placeholder}
             className="min-h-24 font-mono text-xs"
           />
           {payloadError ? (
@@ -227,7 +246,12 @@ export function HumanInputRequestCard({
             ))}
             {isPending ? (
               <div className="flex flex-wrap gap-2">
-                <Button type="button" size="sm" onClick={() => setOpen(true)}>
+                <Button
+                  type="button"
+                  size="sm"
+                  onClick={() => setOpen(true)}
+                  disabled={!answerable}
+                >
                   Respond
                 </Button>
                 {onCancel ? (
@@ -236,6 +260,7 @@ export function HumanInputRequestCard({
                     size="sm"
                     variant="ghost"
                     onClick={() => void onCancel()}
+                    disabled={!answerable}
                   >
                     Cancel
                   </Button>
@@ -258,7 +283,7 @@ export function HumanInputRequestCard({
                 type="button"
                 variant="ghost"
                 onClick={() => void onCancel()}
-                disabled={submitting}
+                disabled={!answerable || submitting}
               >
                 Cancel request
               </Button>
@@ -316,6 +341,88 @@ function buildAnswerPayload({
     payload.reason = reason;
   }
   return Object.keys(payload).length > 0 ? payload : undefined;
+}
+
+type PayloadEditorState = {
+  visible: boolean;
+  required: boolean;
+  placeholder: string;
+};
+
+const implicitPayloadFields = new Set(["decision", "reason", "cancelled"]);
+
+function getPayloadEditorState(
+  request: HumanInputRequest,
+  selectedChoices: HumanInputRequest["choices"],
+): PayloadEditorState {
+  const schemaFields = responseSchemaFields(request.response_schema);
+  const structuredFields = schemaFields.properties.filter(
+    (field) => !implicitPayloadFields.has(field),
+  );
+  const requiredStructuredFields = schemaFields.required.filter(
+    (field) => !implicitPayloadFields.has(field),
+  );
+  const selectedEditChoice = selectedChoices.find(isEditChoice);
+  const visible =
+    Boolean(request.response_schema) &&
+    (request.choices.length === 0 ||
+      Boolean(selectedEditChoice) ||
+      structuredFields.length > 0);
+
+  return {
+    visible,
+    required:
+      visible &&
+      (Boolean(selectedEditChoice) || requiredStructuredFields.length > 0),
+    placeholder: payloadPlaceholder(structuredFields, selectedEditChoice),
+  };
+}
+
+function responseSchemaFields(schema: unknown): {
+  properties: string[];
+  required: string[];
+} {
+  if (!schema || typeof schema !== "object" || Array.isArray(schema)) {
+    return { properties: [], required: [] };
+  }
+  const record = schema as Record<string, unknown>;
+  const properties =
+    record.properties &&
+    typeof record.properties === "object" &&
+    !Array.isArray(record.properties)
+      ? Object.keys(record.properties as Record<string, unknown>)
+      : [];
+  const required = Array.isArray(record.required)
+    ? record.required.filter((field): field is string => typeof field === "string")
+    : [];
+  return { properties, required };
+}
+
+function isEditChoice(choice: HumanInputRequest["choices"][number]): boolean {
+  const haystack = [choice.id, choice.kind ?? "", choice.label]
+    .join(" ")
+    .toLowerCase();
+  return haystack.includes("edit");
+}
+
+function payloadPlaceholder(
+  structuredFields: string[],
+  selectedEditChoice?: HumanInputRequest["choices"][number],
+): string {
+  if (structuredFields.includes("edited_command")) {
+    return `{"edited_command":"${escapeJSONPlaceholder(selectedEditChoice?.preview ?? "")}"}`;
+  }
+  if (structuredFields.includes("edited_input")) {
+    return '{"edited_input":{}}';
+  }
+  if (selectedEditChoice?.preview) {
+    return `{"edited_command":"${escapeJSONPlaceholder(selectedEditChoice.preview)}"}`;
+  }
+  return '{"decision":"approve"}';
+}
+
+function escapeJSONPlaceholder(value: string): string {
+  return value.replaceAll("\\", "\\\\").replaceAll('"', '\\"');
 }
 
 function ChoiceText({

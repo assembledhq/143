@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import type { HumanInputRequest } from "@/lib/types";
-import { renderWithProviders, screen, userEvent } from "@/test/test-utils";
+import { fireEvent, renderWithProviders, screen, userEvent } from "@/test/test-utils";
 
 import { HumanInputRequestCard } from "./human-input-request-card";
 
@@ -31,6 +31,40 @@ const baseRequest: HumanInputRequest = {
 };
 
 describe("HumanInputRequestCard", () => {
+  it("requires an explicit decision before submitting tool approval requests", async () => {
+    const onAnswer = vi.fn();
+    const user = userEvent.setup();
+
+    renderWithProviders(
+      <HumanInputRequestCard
+        request={baseRequest}
+        autoOpen
+        onAnswer={onAnswer}
+      />,
+    );
+
+    await user.type(screen.getByPlaceholderText("Type your answer..."), "please be careful");
+
+    expect(screen.getByRole("button", { name: "Submit answer" })).toBeDisabled();
+    expect(onAnswer).not.toHaveBeenCalled();
+  });
+
+  it("keeps response controls disabled until the checkpoint is answerable", () => {
+    const onAnswer = vi.fn();
+
+    renderWithProviders(
+      <HumanInputRequestCard
+        request={baseRequest}
+        autoOpen
+        answerable={false}
+        onAnswer={onAnswer}
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: "Respond" })).toBeDisabled();
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+
   it("submits tool approval decisions as structured answer payloads", async () => {
     const onAnswer = vi.fn();
     const user = userEvent.setup();
@@ -50,6 +84,54 @@ describe("HumanInputRequestCard", () => {
       answer_text: undefined,
       selected_choice_ids: ["deny"],
       answer_payload: { decision: "deny" },
+    });
+  });
+
+  it("lets users provide structured edit payloads for edit-style choices", async () => {
+    const onAnswer = vi.fn();
+    const user = userEvent.setup();
+    const request: HumanInputRequest = {
+      ...baseRequest,
+      choices: [
+        {
+          id: "edit_command",
+          label: "Edit command",
+          kind: "edit",
+          preview: "npm test",
+        },
+        { id: "approve", label: "Run as-is", kind: "positive" },
+        { id: "deny", label: "Deny", kind: "negative" },
+      ],
+      response_schema: {
+        type: "object",
+        required: ["decision", "edited_command"],
+        properties: {
+          decision: {
+            type: "string",
+            enum: ["edit_command", "approve", "deny"],
+          },
+          edited_command: { type: "string" },
+        },
+      },
+    };
+
+    renderWithProviders(
+      <HumanInputRequestCard request={request} autoOpen onAnswer={onAnswer} />,
+    );
+
+    await user.click(screen.getByRole("radio", { name: "Edit command" }));
+    fireEvent.change(screen.getByLabelText("Structured response payload"), {
+      target: { value: '{"edited_command":"npm test -- --watch=false"}' },
+    });
+    await user.click(screen.getByRole("button", { name: "Submit answer" }));
+
+    expect(onAnswer).toHaveBeenCalledWith({
+      answer_text: undefined,
+      selected_choice_ids: ["edit_command"],
+      answer_payload: {
+        decision: "edit_command",
+        edited_command: "npm test -- --watch=false",
+      },
     });
   });
 });

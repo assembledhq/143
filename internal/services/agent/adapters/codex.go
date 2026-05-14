@@ -76,6 +76,65 @@ func (a *CodexAdapter) RuntimeProfile() agent.AgentRuntimeProfile {
 	return codexRuntimeProfile
 }
 
+type codexHumanInputAnswer struct {
+	RequestID         string                         `json:"request_id"`
+	ProviderRequestID string                         `json:"provider_request_id,omitempty"`
+	Kind              models.HumanInputRequestKind   `json:"kind"`
+	Status            models.HumanInputRequestStatus `json:"status"`
+	AnswerText        *string                        `json:"answer_text,omitempty"`
+	SelectedChoiceIDs []string                       `json:"selected_choice_ids,omitempty"`
+	AnswerPayload     json.RawMessage                `json:"answer_payload,omitempty"`
+	Choices           []models.HumanInputChoice      `json:"choices,omitempty"`
+}
+
+func buildCodexResumeMessage(prompt *agent.AgentPrompt) (string, error) {
+	if prompt == nil {
+		return "", fmt.Errorf("agent prompt is required")
+	}
+	return appendCodexHumanInputAnswer(prompt.UserMessage, prompt.HumanInputAnswer)
+}
+
+func buildCodexPromptContent(prompt *agent.AgentPrompt) (string, error) {
+	if prompt == nil {
+		return "", fmt.Errorf("agent prompt is required")
+	}
+	userPrompt, err := appendCodexHumanInputAnswer(prompt.UserPrompt, prompt.HumanInputAnswer)
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%s\n\n---\n\n%s", prompt.SystemPrompt, userPrompt), nil
+}
+
+func appendCodexHumanInputAnswer(message string, answer *agent.HumanInputAnswer) (string, error) {
+	if answer == nil {
+		return message, nil
+	}
+	if strings.TrimSpace(message) == "" {
+		message = "Answered human input request."
+	}
+
+	payload := codexHumanInputAnswer{
+		RequestID:         answer.RequestID.String(),
+		ProviderRequestID: answer.ProviderRequestID,
+		Kind:              answer.Kind,
+		Status:            answer.Status,
+		AnswerText:        answer.AnswerText,
+		SelectedChoiceIDs: answer.SelectedChoiceIDs,
+		AnswerPayload:     answer.AnswerPayload,
+		Choices:           answer.Choices,
+	}
+	answerJSON, err := json.Marshal(payload)
+	if err != nil {
+		return "", fmt.Errorf("marshal Codex human input answer: %w", err)
+	}
+
+	return fmt.Sprintf(
+		"%s\n\nHuman input answer:\n```json\n%s\n```\n\nUse the structured answer above to continue the blocked request. If the status is cancelled, stop the blocked action and explain what was cancelled.",
+		message,
+		answerJSON,
+	), nil
+}
+
 // Execute runs the Codex CLI inside the sandbox and streams output.
 func (a *CodexAdapter) Execute(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
 	provider := agent.SandboxProviderFromContext(ctx)
@@ -98,7 +157,11 @@ func (a *CodexAdapter) Execute(ctx context.Context, sandbox *agent.Sandbox, prom
 		// event. We avoid `codex exec resume --last` because `--last` reads
 		// whichever rollout file is newest in ~/.codex/sessions, which is
 		// non-deterministic when stale entries are present.
-		msg := shellEscapeDouble(prompt.UserMessage)
+		resumeMessage, err := buildCodexResumeMessage(prompt)
+		if err != nil {
+			return nil, err
+		}
+		msg := shellEscapeDouble(resumeMessage)
 		cmd = fmt.Sprintf(
 			"codex exec resume --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check --json%s %s \"%s\"",
 			reasoningArg,
@@ -110,7 +173,10 @@ func (a *CodexAdapter) Execute(ctx context.Context, sandbox *agent.Sandbox, prom
 		// continuation turns when the session ID was never captured (the
 		// orchestrator embeds the prior conversation history into UserPrompt
 		// in that case so the agent has the full context).
-		promptContent := fmt.Sprintf("%s\n\n---\n\n%s", prompt.SystemPrompt, prompt.UserPrompt)
+		promptContent, err := buildCodexPromptContent(prompt)
+		if err != nil {
+			return nil, err
+		}
 		promptPath := fmt.Sprintf("%s/.143-prompt.md", sandbox.HomeDir)
 		if err := provider.WriteFile(ctx, sandbox, promptPath, []byte(promptContent)); err != nil {
 			return nil, fmt.Errorf("write prompt file: %w", err)

@@ -440,7 +440,6 @@ func (h *SessionHandler) SetHumanInputRequestStore(store *db.SessionHumanInputRe
 		h.messageStore,
 		h.threadStore,
 		h.jobStore,
-		h.logger,
 	)
 }
 
@@ -1983,6 +1982,8 @@ func writeHumanInputServiceError(w http.ResponseWriter, r *http.Request, err err
 		writeError(w, r, http.StatusConflict, "NOT_PENDING", "human input request is no longer pending")
 	case errors.Is(err, humaninputsvc.ErrRunningLimit):
 		writeError(w, r, http.StatusConflict, "RUNNING_LIMIT", "this session already has the maximum number of tabs running concurrently")
+	case errors.Is(err, humaninputsvc.ErrCheckpointPending):
+		writeError(w, r, http.StatusConflict, "CHECKPOINT_PENDING", "the agent is still saving its pause checkpoint; try again once the session is awaiting input")
 	case errors.Is(err, humaninputsvc.ErrNotResumable):
 		writeError(w, r, http.StatusConflict, "NOT_RESUMABLE", "session must be awaiting input or otherwise resumable to answer human input")
 	default:

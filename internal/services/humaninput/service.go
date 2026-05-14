@@ -11,18 +11,18 @@ import (
 	"github.com/assembledhq/143/internal/models"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
-	"github.com/rs/zerolog"
 )
 
 type RequestFilters = db.HumanInputRequestFilters
 
 var (
-	ErrNotFound        = errors.New("human input request not found")
-	ErrInvalidAnswer   = errors.New("invalid human input answer")
-	ErrNotPending      = errors.New("human input request is not pending")
-	ErrNotResumable    = errors.New("session is not resumable")
-	ErrSnapshotExpired = errors.New("session snapshot expired")
-	ErrRunningLimit    = errors.New("session running thread limit reached")
+	ErrNotFound          = errors.New("human input request not found")
+	ErrInvalidAnswer     = errors.New("invalid human input answer")
+	ErrNotPending        = errors.New("human input request is not pending")
+	ErrNotResumable      = errors.New("session is not resumable")
+	ErrSnapshotExpired   = errors.New("session snapshot expired")
+	ErrCheckpointPending = errors.New("session human input checkpoint is not ready")
+	ErrRunningLimit      = errors.New("session running thread limit reached")
 )
 
 type Repository interface {
@@ -46,12 +46,11 @@ type Tx interface {
 }
 
 type Service struct {
-	repo   Repository
-	logger zerolog.Logger
+	repo Repository
 }
 
-func New(repo Repository, logger zerolog.Logger) *Service {
-	return &Service{repo: repo, logger: logger}
+func New(repo Repository) *Service {
+	return &Service{repo: repo}
 }
 
 func NewDBService(
@@ -61,7 +60,6 @@ func NewDBService(
 	messageStore *db.SessionMessageStore,
 	threadStore *db.SessionThreadStore,
 	jobStore *db.JobStore,
-	logger zerolog.Logger,
 ) *Service {
 	return New(&dbRepository{
 		sessions:  sessionStore,
@@ -70,7 +68,7 @@ func NewDBService(
 		messages:  messageStore,
 		threads:   threadStore,
 		jobs:      jobStore,
-	}, logger)
+	})
 }
 
 type AnswerInput struct {
@@ -251,7 +249,23 @@ func (s *Service) lockValidPendingRequest(ctx context.Context, tx Tx, orgID, ses
 	if request.Status != models.HumanInputRequestStatusPending {
 		return models.Session{}, models.HumanInputRequest{}, ErrNotPending
 	}
+	if err := validateCheckpointReady(session); err != nil {
+		return models.Session{}, models.HumanInputRequest{}, err
+	}
 	return session, request, nil
+}
+
+func validateCheckpointReady(session models.Session) error {
+	if models.SessionStatus(session.Status) != models.SessionStatusAwaitingInput {
+		return ErrCheckpointPending
+	}
+	if session.PendingSnapshotKey != nil && strings.TrimSpace(*session.PendingSnapshotKey) != "" {
+		return ErrCheckpointPending
+	}
+	if session.SnapshotKey == nil || strings.TrimSpace(*session.SnapshotKey) == "" {
+		return ErrCheckpointPending
+	}
+	return nil
 }
 
 func claimForProviderResume(ctx context.Context, tx Tx, orgID, sessionID uuid.UUID, threadID *uuid.UUID) (models.Session, int, error) {

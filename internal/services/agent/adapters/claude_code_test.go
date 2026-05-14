@@ -355,8 +355,12 @@ func TestPrepareClaudeHumanInputHooks_ConfiguresActionableToolApprovals(t *testi
 	provider := testutil.NewMockSandboxProvider()
 	sandbox := &agent.Sandbox{ID: "s1", WorkDir: "/workspace", HomeDir: "/home/sandbox"}
 
-	_, _, err := prepareClaudeHumanInputHooks(context.Background(), provider, sandbox, &agent.AgentPrompt{})
+	_, envPrefix, err := prepareClaudeHumanInputHooks(context.Background(), provider, sandbox, &agent.AgentPrompt{})
 	require.NoError(t, err, "prepareClaudeHumanInputHooks should write hook settings")
+	require.Contains(t, envPrefix, "CLAUDE_143_HUMAN_INPUT_TOOLS=", "hook command environment should carry the shared tool matcher list")
+	for _, matcher := range claudeHumanInputHookMatchers {
+		require.Contains(t, envPrefix, matcher, "hook command environment should include matcher %s", matcher)
+	}
 
 	settingsBytes := provider.Files["/home/sandbox/.143-claude-settings.json"]
 	require.NotEmpty(t, settingsBytes, "Claude settings should be written into the sandbox home")
@@ -383,7 +387,7 @@ func TestClaudeCodeAdapter_Execute_ContinuationWithoutSessionIDFallsBackToFreshE
 
 	provider := testutil.NewMockSandboxProvider()
 	provider.ExecFn = func(ctx context.Context, sb *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
-		if strings.HasPrefix(cmd, "claude") {
+		if strings.Contains(cmd, "claude --print") {
 			_, _ = stdout.Write([]byte(`{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"continuing the session"}]}}`))
 			return 0, nil
 		}
@@ -431,7 +435,7 @@ func TestClaudeCodeAdapter_Execute_CapturesResultEventSessionID(t *testing.T) {
 
 	provider := testutil.NewMockSandboxProvider()
 	provider.ExecFn = func(ctx context.Context, sb *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
-		if strings.HasPrefix(cmd, "claude") {
+		if strings.Contains(cmd, "claude --print") {
 			// Claude Code emits the session id on its terminal `result` event.
 			_, _ = stdout.Write([]byte(`{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"done"}]}}` + "\n" +
 				`{"type":"result","subtype":"success","result":"summary","session_id":"claude-session-xyz"}`))

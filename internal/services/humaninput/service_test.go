@@ -9,7 +9,6 @@ import (
 	"github.com/assembledhq/143/internal/models"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
-	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 )
 
@@ -22,6 +21,7 @@ func TestService_AnswerSyncsCompatibilityQuestionAndEnqueuesResume(t *testing.T)
 	userID := uuid.New()
 	jobID := uuid.New()
 	choice := models.HumanInputChoice{ID: "react", Label: "React"}
+	snapshotKey := "snapshots/session-human-input.tar.zst"
 	repo := &fakeRepository{
 		session: models.Session{
 			ID:           sessionID,
@@ -29,6 +29,7 @@ func TestService_AnswerSyncsCompatibilityQuestionAndEnqueuesResume(t *testing.T)
 			Status:       string(models.SessionStatusAwaitingInput),
 			CurrentTurn:  4,
 			SandboxState: string(models.SandboxStateRunning),
+			SnapshotKey:  &snapshotKey,
 		},
 		request: models.HumanInputRequest{
 			ID:        requestID,
@@ -50,7 +51,7 @@ func TestService_AnswerSyncsCompatibilityQuestionAndEnqueuesResume(t *testing.T)
 		jobID: jobID,
 	}
 
-	svc := New(repo, zerolog.Nop())
+	svc := New(repo)
 	result, err := svc.Answer(context.Background(), AnswerInput{
 		OrgID:     orgID,
 		SessionID: sessionID,
@@ -79,6 +80,7 @@ func TestService_CancelDeniesProviderAndEnqueuesResume(t *testing.T) {
 	requestID := uuid.New()
 	userID := uuid.New()
 	providerRequestID := "toolu_123"
+	snapshotKey := "snapshots/session-human-input.tar.zst"
 	repo := &fakeRepository{
 		session: models.Session{
 			ID:           sessionID,
@@ -86,6 +88,7 @@ func TestService_CancelDeniesProviderAndEnqueuesResume(t *testing.T) {
 			Status:       string(models.SessionStatusAwaitingInput),
 			CurrentTurn:  2,
 			SandboxState: string(models.SandboxStateRunning),
+			SnapshotKey:  &snapshotKey,
 		},
 		request: models.HumanInputRequest{
 			ID:                requestID,
@@ -106,7 +109,7 @@ func TestService_CancelDeniesProviderAndEnqueuesResume(t *testing.T) {
 		jobID:          uuid.New(),
 	}
 
-	svc := New(repo, zerolog.Nop())
+	svc := New(repo)
 	result, err := svc.Cancel(context.Background(), CancelInput{
 		OrgID:     orgID,
 		SessionID: sessionID,
@@ -122,6 +125,97 @@ func TestService_CancelDeniesProviderAndEnqueuesResume(t *testing.T) {
 	require.NoError(t, json.Unmarshal(repo.cancelPayload, &payload), "Cancel should persist a structured denial payload")
 	require.Equal(t, "deny", payload["decision"], "Cancel should deny provider-side approval prompts")
 	require.Equal(t, true, payload["cancelled"], "Cancel should preserve cancellation intent in the payload")
+}
+
+func TestService_AnswerRejectsBeforeCheckpointReady(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	requestID := uuid.New()
+	userID := uuid.New()
+	snapshotKey := "snapshots/session-human-input.tar.zst"
+	pendingSnapshotKey := "snapshots/session-human-input.pending.tar.zst"
+
+	tests := []struct {
+		name    string
+		session models.Session
+	}{
+		{
+			name: "session still running",
+			session: models.Session{
+				ID:           sessionID,
+				OrgID:        orgID,
+				Status:       string(models.SessionStatusRunning),
+				CurrentTurn:  2,
+				SandboxState: string(models.SandboxStateRunning),
+				SnapshotKey:  &snapshotKey,
+			},
+		},
+		{
+			name: "awaiting input without a checkpoint",
+			session: models.Session{
+				ID:           sessionID,
+				OrgID:        orgID,
+				Status:       string(models.SessionStatusAwaitingInput),
+				CurrentTurn:  2,
+				SandboxState: string(models.SandboxStateRunning),
+			},
+		},
+		{
+			name: "awaiting input while snapshot upload is pending",
+			session: models.Session{
+				ID:                 sessionID,
+				OrgID:              orgID,
+				Status:             string(models.SessionStatusAwaitingInput),
+				CurrentTurn:        2,
+				SandboxState:       string(models.SandboxStateRunning),
+				SnapshotKey:        &snapshotKey,
+				PendingSnapshotKey: &pendingSnapshotKey,
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			repo := &fakeRepository{
+				session: tt.session,
+				request: models.HumanInputRequest{
+					ID:        requestID,
+					OrgID:     orgID,
+					SessionID: sessionID,
+					Kind:      models.HumanInputRequestKindToolApproval,
+					Status:    models.HumanInputRequestStatusPending,
+					Title:     "Approve Bash?",
+					Body:      "Claude needs approval before it can continue.",
+					Choices: []models.HumanInputChoice{
+						{ID: "approve", Label: "Approve"},
+						{ID: "deny", Label: "Deny"},
+					},
+					CreatedAt: time.Now(),
+				},
+				claimedSession: models.Session{ID: sessionID, OrgID: orgID, Status: string(models.SessionStatusRunning), CurrentTurn: 2},
+				jobID:          uuid.New(),
+			}
+
+			_, err := New(repo).Answer(context.Background(), AnswerInput{
+				OrgID:     orgID,
+				SessionID: sessionID,
+				RequestID: requestID,
+				UserID:    userID,
+				Answer: models.HumanInputAnswerInput{
+					SelectedChoiceIDs: []string{"approve"},
+				},
+			})
+
+			require.ErrorIs(t, err, ErrCheckpointPending, "Answer should reject requests before the pause checkpoint is durable")
+			require.False(t, repo.committed, "Answer should not commit when the session is not checkpoint-ready")
+			require.Equal(t, uuid.Nil, repo.enqueuedHumanInputRequestID, "Answer should not enqueue a resume before the checkpoint is ready")
+			require.Equal(t, uuid.Nil, repo.notifiedJobID, "Answer should not notify a job before a resume is enqueued")
+		})
+	}
 }
 
 type fakeRepository struct {
