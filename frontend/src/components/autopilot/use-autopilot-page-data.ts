@@ -1,7 +1,7 @@
 "use client";
 
 import { useMemo } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
 import { api } from "@/lib/api";
 import { queryKeys } from "@/lib/query-keys";
 import { deriveAutopilotViewModel, DEFAULT_PRIORITY_WEIGHTS } from "./autopilot-helpers";
@@ -28,7 +28,7 @@ const DEFAULT_PM_STATUS: PMStatus = {
   total_delegated: 0,
 };
 
-export function useAutopilotPageData() {
+export function useAutopilotPageData(queueParams?: { source?: string | null; run_state?: string | null; automation?: string | null; sort?: string | null; q?: string | null }) {
   const { isLoading: setupLoading, isSetupComplete } = useSetupStatus();
 
   const { data: settingsResponse, isLoading: settingsLoading } = useQuery<SingleResponse<Organization>>({
@@ -50,6 +50,29 @@ export function useAutopilotPageData() {
     queryKey: queryKeys.pm.documents,
     queryFn: () => api.pm.listDocuments(),
   });
+
+  const {
+    data: queuePages,
+    isLoading: queueLoading,
+    hasNextPage: hasNextQueuePage,
+    fetchNextPage: fetchNextQueuePage,
+    isFetchingNextPage: isFetchingNextQueuePage,
+  } = useInfiniteQuery({
+    queryKey: queryKeys.autopilot.queue(queueParams ?? {}),
+    queryFn: ({ pageParam }) => api.autopilot.queue({ ...queueParams, cursor: pageParam, limit: 50 }),
+    initialPageParam: undefined as string | undefined,
+    getNextPageParam: (lastPage) => lastPage.meta.next_cursor || undefined,
+    enabled: isSetupComplete,
+  });
+
+  const queue = useMemo(() => {
+    if (!queuePages) return undefined;
+    const lastPage = queuePages.pages[queuePages.pages.length - 1];
+    return {
+      data: queuePages.pages.flatMap((page) => page.data),
+      meta: lastPage?.meta ?? queuePages.pages[0]?.meta,
+    };
+  }, [queuePages]);
 
   const rawSettings = settingsResponse?.data?.settings;
   const mergedSettings = useMemo<OrgSettings>(() => {
@@ -89,5 +112,10 @@ export function useAutopilotPageData() {
     settings: mergedSettings,
     pmStatus,
     viewModel,
+    queue,
+    queueLoading,
+    hasNextQueuePage,
+    fetchNextQueuePage,
+    isFetchingNextQueuePage,
   };
 }

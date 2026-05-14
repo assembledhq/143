@@ -52,6 +52,9 @@ export const queryKeys = {
     all: ["integrations"] as const,
     slackChannels: ["slack-channels"] as const,
   },
+  autopilot: {
+    queue: (params: Record<string, string | number | null | undefined>) => ["autopilot", "queue", params] as const,
+  },
   pm: {
     status: ["pm", "status"] as const,
     latest: ["pm", "latest"] as const,
