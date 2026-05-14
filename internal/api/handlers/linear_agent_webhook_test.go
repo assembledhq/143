@@ -241,6 +241,40 @@ func TestNewLinearAgentDispatcher_WiresBootstrapEmitterFromConfig(t *testing.T) 
 	require.NotNil(t, d.emitter, "constructor should wire the bootstrap emitter when activities and ClientForOrg are configured")
 }
 
+func TestLinearAgentBootstrapWriterDiscardsReservationOnFailedEmit(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "test should create pgx mock")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	rowID := uuid.New()
+	mock.ExpectQuery("INSERT INTO linear_agent_activity_log").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "inserted"}).AddRow(uuid.New(), true))
+	mock.ExpectExec("DELETE FROM linear_agent_activity_log").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("DELETE", 1))
+
+	writer := newLinearAgentBootstrapWriter(
+		func(context.Context, uuid.UUID) (linear.Client, error) {
+			return bootstrapWriterLinearClient{agentActivityErr: errors.New("linear timeout")}, nil
+		},
+		db.NewLinearAgentActivityLogStore(mock),
+		zerolog.Nop(),
+	)
+
+	_, err = writer.Emit(context.Background(), linear.EmitInput{
+		OrgID:             orgID,
+		AgentSessionRowID: rowID,
+		AgentSessionID:    "as_1",
+		Activity:          linear.BootstrapActivity("ACS-1"),
+	})
+	require.Error(t, err, "bootstrap emit should still surface Linear failures to the dispatcher")
+	require.NoError(t, mock.ExpectationsWereMet(), "failed bootstrap emits should discard the reserved idem slot so webhook retries can re-emit")
+}
+
 func TestSniffLinearEventType(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -301,4 +335,67 @@ func newDispatcherForTest(t *testing.T, jobs linearAgentJobEnqueuer, featureEnab
 		featureEnabled: featureEnabled,
 	}
 	return d
+}
+
+type bootstrapWriterLinearClient struct {
+	agentActivityErr error
+}
+
+func (c bootstrapWriterLinearClient) FetchIssue(context.Context, string) (*linear.FetchedIssue, error) {
+	return nil, errors.New("not used")
+}
+
+func (c bootstrapWriterLinearClient) ListTeamKeys(context.Context) ([]linear.TeamKeyInfo, error) {
+	return nil, errors.New("not used")
+}
+
+func (c bootstrapWriterLinearClient) CreateOrUpdateAttachment(context.Context, linear.AttachmentWriteInput) (linear.AttachmentResult, error) {
+	return linear.AttachmentResult{}, errors.New("not used")
+}
+
+func (c bootstrapWriterLinearClient) CreateComment(context.Context, string, string) (string, error) {
+	return "", errors.New("not used")
+}
+
+func (c bootstrapWriterLinearClient) UpdateComment(context.Context, string, string) error {
+	return errors.New("not used")
+}
+
+func (c bootstrapWriterLinearClient) FindRecentBotCommentByURL(context.Context, string, string) (string, error) {
+	return "", errors.New("not used")
+}
+
+func (c bootstrapWriterLinearClient) WorkflowStateForType(context.Context, string, []string, string) (*linear.WorkflowState, error) {
+	return nil, errors.New("not used")
+}
+
+func (c bootstrapWriterLinearClient) UpdateIssueState(context.Context, string, string) error {
+	return errors.New("not used")
+}
+
+func (c bootstrapWriterLinearClient) IssueRecentHumanEdits(context.Context, string, time.Time) (bool, error) {
+	return false, errors.New("not used")
+}
+
+func (c bootstrapWriterLinearClient) HasGitHubIntegrationAttachment(context.Context, string) (bool, error) {
+	return false, errors.New("not used")
+}
+
+func (c bootstrapWriterLinearClient) AgentActivityCreate(context.Context, linear.AgentActivityInput) (linear.AgentActivityResult, error) {
+	if c.agentActivityErr != nil {
+		return linear.AgentActivityResult{}, c.agentActivityErr
+	}
+	return linear.AgentActivityResult{ActivityID: "act_1"}, nil
+}
+
+func (c bootstrapWriterLinearClient) AgentSessionUpdate(context.Context, linear.AgentSessionUpdateInput) error {
+	return nil
+}
+
+func (c bootstrapWriterLinearClient) AgentSessionGet(context.Context, string) (*linear.FetchedAgentSession, error) {
+	return nil, linear.ErrAgentSessionNotFound
+}
+
+func (c bootstrapWriterLinearClient) FetchComment(context.Context, string) (*linear.FetchedComment, error) {
+	return nil, linear.ErrCommentNotFound
 }
