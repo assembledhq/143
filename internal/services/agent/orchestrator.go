@@ -45,6 +45,12 @@ var ErrConcurrencyLimit = fmt.Errorf("concurrency limit reached")
 // without resorting to error-string matching.
 var ErrSessionTimedOut = errors.New("session timed out")
 
+// ErrRecoveryAttemptsExhausted is returned from RecoverSession when repeated
+// worker-loss recovery attempts have already restarted a session without any
+// durable checkpoint. The worker treats this as terminal because another retry
+// would restart the same turn from scratch again.
+var ErrRecoveryAttemptsExhausted = errors.New("session recovery attempts exhausted")
+
 // ErrSnapshotPending is returned from ContinueSession when the session has a
 // non-empty pending_snapshot_key — i.e. a post-PR snapshot upload is still
 // in flight. Hydrating from the previous SnapshotKey would restore the stale
@@ -101,6 +107,8 @@ var ErrSandboxOnDifferentNode = errors.New("sandbox race: session sandbox lives 
 // session hits its configured deadline. Kept deliberately narrow so
 // Grafana alerts can key off one string across RunAgent and ContinueSession.
 const canonicalTimeoutLogMessage = "session exceeded configured timeout"
+
+const maxNoCheckpointRecoveryAttempts = 3
 
 // sandboxRaceProbeTimeout bounds the IsAlive probe at the AcquireTurnHold
 // race-loss diagnosis site. Short enough that a docker-daemon hiccup can't
@@ -940,6 +948,32 @@ func (o *Orchestrator) RecoverSession(ctx context.Context, session *models.Sessi
 		Str("session_id", session.ID.String()).
 		Str("org_id", session.OrgID.String()).
 		Logger()
+	checkpoint, ok := latestDurableCheckpoint(session)
+	if !ok && session.RecoveryAttemptCount >= maxNoCheckpointRecoveryAttempts {
+		errMsg := "Session recovery stopped after repeated worker interruptions before any durable checkpoint was available."
+		explanation := "The platform tried to recover this session multiple times, but each recovery would have restarted the first turn from scratch because no checkpoint had been saved yet. The session was stopped to avoid repeating the same work indefinitely."
+		nextSteps := []string{
+			"Retry the session when worker capacity is stable",
+			"Split the task into a smaller first turn so a checkpoint can be saved sooner",
+			"Check worker deploy and sandbox-capacity logs if this affects multiple sessions",
+		}
+		log.Warn().
+			Int("recovery_attempt_count", session.RecoveryAttemptCount).
+			Int("max_recovery_attempts", maxNoCheckpointRecoveryAttempts).
+			Msg("no-checkpoint recovery exhausted; failing session")
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		o.failRunWithCategory(cleanupCtx, session, errMsg, FailureCategoryRecovery, explanation, nextSteps)
+		o.updatePrimaryThreadTerminal(cleanupCtx, session, models.ThreadStatusFailed, &models.SessionResult{
+			Error:           &explanation,
+			FailureCategory: strPtr(FailureCategoryRecovery),
+		}, log)
+		if err := o.sessions.UpdateRecoveryState(cleanupCtx, session.OrgID, session.ID, models.RecoveryStateNone, nil, nil, false); err != nil {
+			log.Warn().Err(err).Msg("failed to clear recovery state after exhausting no-checkpoint recovery")
+		}
+		return fmt.Errorf("%w: no durable checkpoint after %d attempts", ErrRecoveryAttemptsExhausted, session.RecoveryAttemptCount)
+	}
+
 	startedAt := time.Now().UTC()
 	if err := o.sessions.UpdateRecoveryState(ctx, session.OrgID, session.ID, models.RecoveryStateRecovering, nil, &startedAt, true); err != nil {
 		log.Warn().Err(err).Msg("failed to mark session recovery as in progress")
@@ -950,7 +984,6 @@ func (o *Orchestrator) RecoverSession(ctx context.Context, session *models.Sessi
 		}
 	}()
 
-	checkpoint, ok := latestDurableCheckpoint(session)
 	if !ok {
 		log.Info().Msg("recovery requested with no durable checkpoint; restarting session from scratch")
 		return o.RunAgent(ctx, session)

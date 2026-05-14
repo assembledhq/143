@@ -36,8 +36,6 @@ import (
 
 const sandboxCapacityRetryDelay = 10 * time.Second
 
-const sandboxCapacityFailureCategory = "sandbox_capacity_timeout"
-
 func registerSandboxCapacityDeadLetter(ctx context.Context, stores *Stores, services *Services, logger zerolog.Logger, session models.Session, threadID *uuid.UUID, jobType string) {
 	if stores == nil || stores.Sessions == nil {
 		return
@@ -53,7 +51,7 @@ func registerSandboxCapacityDeadLetter(ctx context.Context, stores *Stores, serv
 			"Cancel sessions that are no longer needed to free up capacity",
 		}
 		failedSession := session
-		failureCategory := sandboxCapacityFailureCategory
+		failureCategory := agent.FailureCategorySandboxCapacity
 		failedSession.Status = string(models.SessionStatusFailed)
 		failedSession.Error = &errMsg
 		failedSession.FailureExplanation = &explanation
@@ -77,7 +75,7 @@ func registerSandboxCapacityDeadLetter(ctx context.Context, stores *Stores, serv
 				Msg("failed to mark session failed after sandbox capacity dead-letter")
 			return
 		}
-		if err := stores.Sessions.UpdateFailure(writeCtx, session.OrgID, session.ID, explanation, sandboxCapacityFailureCategory, nextSteps, true); err != nil {
+		if err := stores.Sessions.UpdateFailure(writeCtx, session.OrgID, session.ID, explanation, agent.FailureCategorySandboxCapacity, nextSteps, true); err != nil {
 			logger.Error().
 				Err(err).
 				Str("session_id", session.ID.String()).
@@ -85,7 +83,7 @@ func registerSandboxCapacityDeadLetter(ctx context.Context, stores *Stores, serv
 				Msg("failed to persist sandbox capacity failure details")
 		}
 		if threadID != nil && *threadID != uuid.Nil && stores.SessionThreads != nil {
-			threadCategory := sandboxCapacityFailureCategory
+			threadCategory := agent.FailureCategorySandboxCapacity
 			threadResult := &models.SessionResult{
 				Error:           &errMsg,
 				FailureCategory: &threadCategory,
@@ -1137,6 +1135,13 @@ func newRunAgentHandler(stores *Stores, services *Services, logger zerolog.Logge
 					Err(err).
 					Msg("local sandbox capacity reached; retrying run_agent")
 				return &RetryableError{Err: err, RetryAfter: &retryAfter}
+			}
+			if errors.Is(err, agent.ErrRecoveryAttemptsExhausted) {
+				logger.Warn().
+					Str("session_id", runID.String()).
+					Err(err).
+					Msg("run_agent recovery exhausted; dead-lettering without another restart")
+				return &FatalError{Err: err}
 			}
 			if errors.Is(err, agent.ErrStaleSandboxIDCleared) {
 				// The orchestrator detected a stale orphan container_id from
