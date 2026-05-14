@@ -1030,7 +1030,13 @@ func (m *mockSessionThreadStore) CompleteTurn(_ context.Context, _, _ uuid.UUID,
 	return nil
 }
 
-func (m *mockSessionThreadStore) UpdateResult(_ context.Context, _, _ uuid.UUID, _ models.ThreadStatus, _ *models.SessionResult) error {
+func (m *mockSessionThreadStore) UpdateResult(_ context.Context, _, threadID uuid.UUID, status models.ThreadStatus, _ *models.SessionResult) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.updateStatusCalls = append(m.updateStatusCalls, struct {
+		threadID uuid.UUID
+		status   models.ThreadStatus
+	}{threadID: threadID, status: status})
 	return nil
 }
 
@@ -1478,6 +1484,42 @@ func TestRecoverSession_RestartsWhenNoDurableCheckpointExists(t *testing.T) {
 	require.Len(t, results, 1, "restart should follow the normal run result path")
 	require.Equal(t, "completed", results[0].status, "restart should complete the run from scratch")
 	require.Contains(t, d.jobs.getEnqueued(), "open_pr", "restart should enqueue PR creation like a fresh run")
+}
+
+func TestRecoverSession_FailsAfterRepeatedNoCheckpointRecovery(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	run := testRun(orgID, issue.ID)
+	run.Status = string(models.SessionStatusRunning)
+	run.RecoveryAttemptCount = 3
+	threadID := uuid.New()
+	run.PrimaryThreadID = &threadID
+
+	d := defaultDeps()
+	d.sessionThreads = &mockSessionThreadStore{}
+	d.adapter.executeFn = func(context.Context, *agent.Sandbox, *agent.AgentPrompt, chan<- agent.LogEntry) (*agent.AgentResult, error) {
+		t.Fatal("RecoverSession must not restart the agent again after the no-checkpoint recovery budget is exhausted")
+		return nil, nil
+	}
+
+	err := buildOrchestrator(d).RecoverSession(context.Background(), run)
+	require.Error(t, err, "RecoverSession should stop retrying no-checkpoint restarts after the recovery budget is exhausted")
+	require.ErrorIs(t, err, agent.ErrRecoveryAttemptsExhausted, "exhausted recovery should return a typed sentinel for worker handling")
+
+	results := d.sessions.getResultUpdates()
+	require.Len(t, results, 1, "exhausted recovery should mark the session failed")
+	require.Equal(t, "failed", results[0].status, "exhausted recovery should be terminal")
+
+	failures := d.sessions.getFailureUpdates()
+	require.Len(t, failures, 1, "exhausted recovery should record structured failure metadata")
+	require.Equal(t, agent.FailureCategoryRecovery, failures[0].category, "recovery failures should be classified distinctly from agent/tool failures")
+
+	require.Empty(t, d.sessions.getStatusUpdates(), "exhausted recovery should not transition back to running")
+	require.Empty(t, d.sessions.getTurnUpdates(), "exhausted recovery should not advance the turn")
+	require.Empty(t, d.sessions.getCheckpointUpdates(), "exhausted recovery should not publish checkpoint metadata")
+	require.Equal(t, []models.ThreadStatus{models.ThreadStatusFailed}, d.sessionThreads.statuses(), "exhausted recovery should fail the active thread so the UI does not stay stuck")
 }
 
 func TestRecoverSession_RestartsWithoutCountingOwnRunningSlot(t *testing.T) {
