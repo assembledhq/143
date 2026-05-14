@@ -968,9 +968,10 @@ func (d *DockerProvider) Snapshot(ctx context.Context, sb *agent.Sandbox) (io.Re
 		Str("container_id", sb.ID).
 		Msg("snapshotting sandbox")
 
-	// Tar workspace + agent state dirs. --ignore-failed-read handles missing dirs gracefully.
-	// Agent state dirs (.claude/, .codex/, .gemini/) live under HomeDir, not WorkDir —
-	// HOME is set to the sandbox user's home so CLI configs resolve there.
+	// Tar workspace + agent state. --ignore-failed-read handles missing paths gracefully.
+	// Agent state dirs (.claude/, .codex/, .gemini/) and Claude Code's top-level
+	// .claude.json live under HomeDir, not WorkDir; HOME is set to the sandbox
+	// user's home so CLI configs resolve there.
 	//
 	// Stderr is intentionally NOT redirected to /dev/null inside the shell so
 	// diagnostic messages from a failing tar reach our caller via the docker
@@ -978,8 +979,8 @@ func (d *DockerProvider) Snapshot(ctx context.Context, sb *agent.Sandbox) (io.Re
 	workDirRel := strings.TrimPrefix(sb.WorkDir, "/")
 	homeDirRel := strings.TrimPrefix(sb.HomeDir, "/")
 	cmd := fmt.Sprintf(
-		"tar czf - --ignore-failed-read -C / '%s' '%s/.claude' '%s/.codex' '%s/.gemini'",
-		workDirRel, homeDirRel, homeDirRel, homeDirRel,
+		"tar czf - --ignore-failed-read -C / '%s' '%s/.claude' '%s/.claude.json' '%s/.codex' '%s/.gemini'",
+		workDirRel, homeDirRel, homeDirRel, homeDirRel, homeDirRel,
 	)
 
 	execCfg := container.ExecOptions{

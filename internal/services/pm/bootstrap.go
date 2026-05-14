@@ -281,10 +281,11 @@ func (s *Service) buildBootstrapSeed(ctx context.Context, orgID uuid.UUID, repo 
 // integrationCredentials holds fetched credentials for all integration providers.
 // Fetched once per bootstrap/refresh run to avoid redundant DB lookups.
 type integrationCredentials struct {
-	github bool // true if GitHub App is configured (token is fetched separately)
-	sentry *models.DecryptedCredential
-	linear *models.DecryptedCredential
-	notion *models.DecryptedCredential
+	github   bool // true if GitHub App is configured (token is fetched separately)
+	sentry   *models.DecryptedCredential
+	linear   *models.DecryptedCredential
+	notion   *models.DecryptedCredential
+	circleci *models.DecryptedCredential
 }
 
 // fetchIntegrationCredentials fetches all integration credentials for an org in one pass.
@@ -301,6 +302,9 @@ func (s *Service) fetchIntegrationCredentials(ctx context.Context, orgID uuid.UU
 	}
 	if c, err := s.credentials.Get(ctx, orgID, models.ProviderNotion); err == nil {
 		creds.notion = c
+	}
+	if c, err := s.credentials.Get(ctx, orgID, models.ProviderCircleCI); err == nil {
+		creds.circleci = c
 	}
 	return creds
 }
@@ -319,6 +323,9 @@ func (creds *integrationCredentials) connectedProviderNames() []string {
 	}
 	if creds.notion != nil {
 		names = append(names, string(models.ProviderNotion))
+	}
+	if creds.circleci != nil {
+		names = append(names, string(models.ProviderCircleCI))
 	}
 	return names
 }

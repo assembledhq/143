@@ -193,10 +193,21 @@ describe('SessionSidebar', () => {
 
   it('archives a session from the swipe action', async () => {
     let archiveCalls = 0;
-    serveSessions([
-      makeSession({ id: 's1', result_summary: 'Swipe me' }),
-    ]);
+    let resolveArchiveRefetch: (() => void) | undefined;
     server.use(
+      http.get('/api/v1/sessions', () => {
+        if (archiveCalls === 0) {
+          return HttpResponse.json({
+            data: [makeSession({ id: 's1', result_summary: 'Swipe me' })],
+            meta: {},
+          });
+        }
+        return new Promise((resolve) => {
+          resolveArchiveRefetch = () => {
+            resolve(HttpResponse.json({ data: [], meta: {} }));
+          };
+        });
+      }),
       http.post('/api/v1/sessions/s1/archive', () => {
         archiveCalls += 1;
         return HttpResponse.json({ status: 'archived' });
@@ -216,6 +227,62 @@ describe('SessionSidebar', () => {
 
     await waitFor(() => {
       expect(archiveCalls).toBe(1);
+    });
+    expect(screen.queryByText('Swipe me')).not.toBeInTheDocument();
+    resolveArchiveRefetch?.();
+  });
+
+  it('keeps a committed mobile archive row displaced until the backend removes it', async () => {
+    let archiveCalls = 0;
+    let archiveSettled = false;
+    let resolveArchive: (() => void) | undefined;
+    server.use(
+      http.get('/api/v1/sessions', () => {
+        if (archiveSettled) {
+          return HttpResponse.json({ data: [], meta: {} });
+        }
+        return HttpResponse.json({
+          data: [makeSession({ id: 's1', result_summary: 'Swipe pending' })],
+          meta: {},
+        });
+      }),
+      http.post('/api/v1/sessions/s1/archive', () => {
+        archiveCalls += 1;
+        return new Promise((resolve) => {
+          resolveArchive = () => {
+            archiveSettled = true;
+            resolve(HttpResponse.json({ status: 'archived' }));
+          };
+        });
+      }),
+    );
+
+    renderWithProviders(<SessionSidebar />);
+    const row = await screen.findByText('Swipe pending');
+    const surface = row.closest('[data-swipe-surface="true"]') as HTMLElement | null;
+    expect(surface).not.toBeNull();
+    const container = surface!.parentElement;
+    expect(container).not.toBeNull();
+    Object.defineProperty(container!, 'offsetWidth', {
+      configurable: true,
+      value: 390,
+    });
+
+    fireEvent.touchStart(surface!, { touches: [{ clientX: 320, clientY: 24 }] });
+    fireEvent.touchMove(surface!, { touches: [{ clientX: 170, clientY: 26 }] });
+    fireEvent.touchEnd(surface!);
+
+    await waitFor(() => {
+      expect(archiveCalls).toBe(1);
+    });
+    expect(screen.getByText('Swipe pending')).toBeInTheDocument();
+    expect(container).toHaveAttribute('data-swipe-state', 'committed');
+    expect(surface!.style.transform).toBe('translateX(-390px)');
+
+    resolveArchive?.();
+
+    await waitFor(() => {
+      expect(screen.queryByText('Swipe pending')).not.toBeInTheDocument();
     });
   });
 
@@ -255,10 +322,14 @@ describe('SessionSidebar', () => {
 
     const tabList = screen.getByRole('tablist');
     expect(tabList).toHaveAttribute('data-variant', 'line');
-    expect(tabList.className).toContain('pb-1');
     expect(tabList.className).toContain('justify-start');
-    expect(tabList.className).toContain('overflow-x-auto');
-    expect(tabList.className).toContain('overflow-y-visible');
+
+    // The scroll/clip wrapper lives on the parent div so the active-tab
+    // underline (positioned just below the trigger) isn't clipped.
+    const scrollWrapper = tabList.parentElement;
+    expect(scrollWrapper?.className).toContain('overflow-x-auto');
+    expect(scrollWrapper?.className).toContain('overflow-y-hidden');
+    expect(scrollWrapper?.className).toContain('pb-1');
   });
 
   it('navigates when the selected row shell is tapped', async () => {

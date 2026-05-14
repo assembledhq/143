@@ -347,7 +347,35 @@ describe('UsagePage', () => {
     expect(screen.getByText('Last 30d')).toBeInTheDocument();
     expect(screen.getByText('This month')).toBeInTheDocument();
     expect(screen.getByText('Breakdown')).toBeInTheDocument();
-    expect(screen.getAllByText('By Model')).toHaveLength(2);
+    expect(screen.getAllByText('By User')).toHaveLength(2);
+  });
+
+  it('defaults the breakdown request to user totals', async () => {
+    const breakdownDimensions: Array<string | null> = [];
+    const timeseriesStackBy: Array<string | null> = [];
+    server.use(
+      http.get('*/api/v1/usage/timeseries', ({ request }) => {
+        timeseriesStackBy.push(new URL(request.url).searchParams.get('stack_by'));
+        return HttpResponse.json({
+          data: {
+            buckets: [],
+            period_start: '2026-03-13T00:00:00Z',
+            period_end: '2026-04-12T00:00:00Z',
+          },
+        });
+      }),
+      http.get('*/api/v1/usage/breakdown', ({ request }) => {
+        breakdownDimensions.push(new URL(request.url).searchParams.get('dimension'));
+        return HttpResponse.json({ data: [], meta: {} });
+      })
+    );
+
+    renderWithProviders(<UsagePage />);
+
+    await waitFor(() => {
+      expect(breakdownDimensions).toContain('user');
+    });
+    expect(timeseriesStackBy).toContain(null);
   });
 
   it('offers user breakdown and does not expose capacity breakdown', async () => {
@@ -360,8 +388,7 @@ describe('UsagePage', () => {
     expect(screen.queryByText('By Capacity')).not.toBeInTheDocument();
   });
 
-  it('keeps the chart request valid when switching to user breakdown', async () => {
-    const user = userEvent.setup();
+  it('keeps the chart request valid for the default user breakdown', async () => {
     server.use(
       http.get('*/api/v1/usage/timeseries', ({ request }) => {
         const stackBy = new URL(request.url).searchParams.get('stack_by');
@@ -403,9 +430,6 @@ describe('UsagePage', () => {
     );
 
     renderWithProviders(<UsagePage />);
-
-    await user.click(screen.getByLabelText('Break down by'));
-    await user.click(screen.getByText('By User'));
 
     await waitFor(() => {
       expect(screen.getByText('alice@example.com')).toBeInTheDocument();
@@ -607,7 +631,8 @@ describe('UsageBreakdownTable', () => {
               total_output_tokens: 2000,
               total_tokens: 7000,
               total_llm_cost_usd: 0.5,
-              percentage: 100.0,
+              percentage: 60.0,
+              share_of_tokens: 87.5,
             },
           ],
           meta: {},
@@ -625,8 +650,13 @@ describe('UsageBreakdownTable', () => {
       expect(screen.getByText('alice@example.com')).toBeInTheDocument();
     });
     expect(screen.getByText('1.0h')).toBeInTheDocument();
+    expect(screen.getByText('20.0m')).toBeInTheDocument();
     expect(screen.getByText('7.0K')).toBeInTheDocument();
+    expect(screen.getByText('2.3K')).toBeInTheDocument();
     expect(screen.getByText('Share of Tokens')).toBeInTheDocument();
+    expect(screen.getByText('Minutes / Session')).toBeInTheDocument();
+    expect(screen.getByText('Tokens / Session')).toBeInTheDocument();
+    expect(screen.getByText('87.5%')).toBeInTheDocument();
   });
 });
 

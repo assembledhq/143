@@ -2504,6 +2504,68 @@ describe('SessionDetailPage', () => {
     await waitFor(() => expect(toast.success).toHaveBeenCalledWith('PR #42 merged', expect.any(Object)));
   });
 
+  it('reconciles open PR health when the PR stream opens after a missed update', async () => {
+    let healthRequestCount = 0;
+    let prRequestCount = 0;
+    server.use(
+      http.get('/api/v1/sessions/:id/pr', () => {
+        prRequestCount += 1;
+        return HttpResponse.json({
+          data: {
+            ...mockPR,
+            status: 'open',
+          },
+        } satisfies SingleResponse<PullRequest>);
+      }),
+      http.get('/api/v1/pull-requests/:id/health', () => {
+        healthRequestCount += 1;
+        if (healthRequestCount === 1) {
+          return HttpResponse.json({
+            data: {
+              ...mockPRHealth,
+              can_merge: false,
+              checks_confirmed: false,
+              checks: [
+                { name: 'unit tests', category: 'test' as const, status: 'pending' as const, summary: 'running' },
+              ],
+              summary: 'PR #42 is waiting for required checks to report passing.',
+            },
+          } satisfies SingleResponse<typeof mockPRHealth>);
+        }
+
+        return HttpResponse.json({
+          data: {
+            ...mockPRHealth,
+            can_merge: true,
+            checks_confirmed: true,
+            checks: [
+              { name: 'unit tests', category: 'test' as const, status: 'passed' as const, summary: 'passed' },
+            ],
+            summary: 'PR #42 is mergeable and all required test checks are passing.',
+          },
+        } satisfies SingleResponse<typeof mockPRHealth>);
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+
+    expect(await screen.findByText('PR #42 is waiting for required checks to report passing.')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /^Merge$/ })).not.toBeInTheDocument();
+
+    await waitFor(() => {
+      expect(MockEventSource.instances.some((source) => source.url.includes('/api/v1/pull-requests/stream'))).toBe(true);
+    });
+    const prStream = MockEventSource.instances.find((source) => source.url.includes('/api/v1/pull-requests/stream'));
+
+    act(() => {
+      prStream?.onopen?.(new Event('open'));
+    });
+
+    expect(await screen.findByRole('button', { name: /^Merge$/ })).toBeInTheDocument();
+    expect(healthRequestCount).toBeGreaterThanOrEqual(2);
+    expect(prRequestCount).toBeGreaterThanOrEqual(2);
+  });
+
   it('renders external links for CI checks shown from the PR details hover card', async () => {
     server.use(
       http.get('/api/v1/pull-requests/:id/health', () => {
@@ -6913,7 +6975,8 @@ describe('SessionDetailPage', () => {
       http.get('/api/v1/sessions/:id', () => {
         return HttpResponse.json({ data: resumableSession } satisfies SingleResponse<Session>);
       }),
-      http.get('/api/v1/session-composer/files', () => {
+      http.get('/api/v1/sessions/:id/composer/files', ({ params }) => {
+        expect(params.id).toBe('session-abcdef12-3456-7890');
         return HttpResponse.json({
           data: [
             {

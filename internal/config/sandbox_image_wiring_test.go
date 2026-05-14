@@ -39,7 +39,8 @@ func TestSandboxImageWiring(t *testing.T) {
 			name: "ci builds the sandbox image",
 			path: ".github/workflows/ci.yml",
 			patterns: []string{
-				"name: Build sandbox Docker image",
+				"name: sandbox",
+				"name: Build ${{ matrix.name }} Docker image",
 				"file: sandbox/Dockerfile",
 				"tags: 143-sandbox:latest",
 			},

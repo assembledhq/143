@@ -37,6 +37,8 @@ describe("integration connection cards", () => {
         onConnectLinear={onConnectLinear}
         onConnectSlack={vi.fn()}
         onConnectNotion={vi.fn()}
+        circleciConnected={false}
+        onConnectCircleCI={vi.fn()}
       />
     );
 
@@ -131,6 +133,8 @@ describe("integration connection cards", () => {
         onConnectLinear={vi.fn()}
         onConnectSlack={vi.fn()}
         onConnectNotion={vi.fn()}
+        circleciConnected={false}
+        onConnectCircleCI={vi.fn()}
       />
     );
 
@@ -149,6 +153,8 @@ describe("integration connection cards", () => {
         onConnectLinear={vi.fn()}
         onConnectSlack={vi.fn()}
         onConnectNotion={vi.fn()}
+        circleciConnected={false}
+        onConnectCircleCI={vi.fn()}
       />
     );
 
@@ -169,6 +175,8 @@ describe("integration connection cards", () => {
         onConnectLinear={vi.fn()}
         onConnectSlack={vi.fn()}
         onConnectNotion={vi.fn()}
+        circleciConnected={false}
+        onConnectCircleCI={vi.fn()}
       />
     );
 
@@ -190,6 +198,8 @@ describe("integration connection cards", () => {
         onConnectLinear={vi.fn()}
         onConnectSlack={onConnectSlack}
         onConnectNotion={vi.fn()}
+        circleciConnected={false}
+        onConnectCircleCI={vi.fn()}
       />
     );
 
@@ -267,6 +277,8 @@ describe("integration connection cards", () => {
         onConnectLinear={vi.fn()}
         onConnectSlack={vi.fn()}
         onConnectNotion={vi.fn()}
+        circleciConnected={false}
+        onConnectCircleCI={vi.fn()}
         onDisconnect={vi.fn()}
       />
     );
@@ -310,6 +322,8 @@ describe("integration connection cards", () => {
         onConnectLinear={onConnectLinear}
         onConnectSlack={vi.fn()}
         onConnectNotion={vi.fn()}
+        circleciConnected={false}
+        onConnectCircleCI={vi.fn()}
       />
     );
 
@@ -344,6 +358,8 @@ describe("integration connection cards", () => {
         onConnectLinear={vi.fn()}
         onConnectSlack={vi.fn()}
         onConnectNotion={vi.fn()}
+        circleciConnected={false}
+        onConnectCircleCI={vi.fn()}
         readOnly
       />
     );
@@ -369,6 +385,8 @@ describe("integration connection cards", () => {
         onConnectLinear={vi.fn()}
         onConnectSlack={vi.fn()}
         onConnectNotion={vi.fn()}
+        circleciConnected={false}
+        onConnectCircleCI={vi.fn()}
         onDisconnect={vi.fn()}
         onDisconnectRepo={vi.fn()}
         readOnly

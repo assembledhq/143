@@ -842,6 +842,7 @@ ChangesTab.displayName = "ChangesTab";
 // ---------------------------------------------------------------------------
 
 function SessionComposer({
+  sessionId,
   message,
   onMessageChange,
   planMode,
@@ -883,6 +884,7 @@ function SessionComposer({
   unavailableReason,
   placeholderOverride,
 }: {
+  sessionId: string;
   message: string;
   onMessageChange: (value: string) => void;
   planMode: boolean;
@@ -1037,8 +1039,8 @@ function SessionComposer({
   const pickerOpen = showMentionPicker || showCommandPicker;
 
   const fileMentionsQuery = useQuery<ListResponse<SessionInputReference>>({
-    queryKey: queryKeys.sessionComposer.files(repositoryId ?? "", branch ?? "", deferredMentionQuery),
-    queryFn: () => api.sessionComposer.files(repositoryId ?? "", branch ?? "", deferredMentionQuery),
+    queryKey: queryKeys.sessions.composerFiles(sessionId, deferredMentionQuery),
+    queryFn: () => api.sessions.composerFiles(sessionId, deferredMentionQuery),
     enabled: showMentionPicker,
     staleTime: 30 * 1000,
   });
@@ -2861,8 +2863,10 @@ export function SessionDetailContent({ id }: { id: string }) {
     queryKey: ["pull-request", pullRequestId, "health"],
     queryFn: () => api.pullRequests.getHealth(pullRequestId!),
     enabled: !!pullRequestId && prData?.data?.status === "open",
-    // Pushed via the PULL_REQUEST_UPDATED SSE event, so a longer staleTime is
-    // safe — refetches on focus/remount won't fire a redundant network call.
+    // Pushed via the PULL_REQUEST_UPDATED SSE event. The stream onopen handler
+    // below also reconciles once because Redis pub/sub does not replay PR row
+    // or health events missed while the tab was hidden or the EventSource was
+    // reconnecting.
     staleTime: 30_000,
   });
   const prHealth = prHealthData?.data;
@@ -3049,6 +3053,8 @@ export function SessionDetailContent({ id }: { id: string }) {
       eventSource = new EventSource(buildPullRequestStreamURL(apiBase, getActiveOrgId()), { withCredentials: true });
       eventSource.onopen = () => {
         reconnectAttempts = 0;
+        void queryClient.invalidateQueries({ queryKey: ["session", id, "pr"] });
+        void queryClient.invalidateQueries({ queryKey: ["pull-request", pullRequestId, "health"] });
       };
       addSSEListener(eventSource, SSE_EVENT.PULL_REQUEST_UPDATED, (event) => {
         if (event.pull_request_id !== pullRequestId) {
@@ -4742,6 +4748,7 @@ export function SessionDetailContent({ id }: { id: string }) {
               </div>
             )}
             <SessionComposer
+              sessionId={session.id}
               message={composerMessage}
               onMessageChange={setComposerMessage}
               planMode={composerPlanMode}
@@ -4846,6 +4853,7 @@ export function SessionDetailContent({ id }: { id: string }) {
               </div>
             ) : null}
             <SessionComposer
+              sessionId={session.id}
               message={composerMessage}
               onMessageChange={setComposerMessage}
               planMode={composerPlanMode}

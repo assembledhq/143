@@ -422,6 +422,10 @@ export const api = {
       del(`/api/v1/sessions/${sessionId}/review-comments/${commentId}`),
     sendReviewComments: (sessionId: string) =>
       post<import('./types').SingleResponse<{ message: string; sent: boolean }>>(`/api/v1/sessions/${sessionId}/review-comments/send`),
+    composerFiles: (sessionId: string, query: string) => {
+      const params = new URLSearchParams({ q: query });
+      return get<import('./types').ListResponse<import('./types').SessionInputReference>>(`/api/v1/sessions/${sessionId}/composer/files?${params.toString()}`);
+    },
     listFiles: (sessionId: string, path?: string) => {
       const params = new URLSearchParams();
       if (path) params.set('path', path);
@@ -581,6 +585,11 @@ export const api = {
       body: JSON.stringify({ channel_ids: channelIds }),
     }),
     connectNotion: (accessToken: string) => post<import('./types').SingleResponse<import('./types').Integration>>('/api/v1/integrations/notion/connect', { access_token: accessToken }),
+    connectCircleCI: (authToken: string, projectSlug: string) =>
+      post<import('./types').SingleResponse<import('./types').Integration>>('/api/v1/integrations/circleci/connect', {
+        auth_token: authToken,
+        project_slug: projectSlug,
+      }),
     disconnect: (provider: string) => del(`/api/v1/integrations/${provider}/disconnect`),
     syncGitHub: () => post<{ data: { repos_synced: number; errors: number } }>('/api/v1/integrations/github/sync'),
   },

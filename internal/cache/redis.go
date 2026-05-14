@@ -174,6 +174,40 @@ func (c *Client) raw() redis.UniversalClient {
 	return c.rdb
 }
 
+func (c *Client) GetBytes(ctx context.Context, key string) ([]byte, error) {
+	if c == nil || c.rdb == nil {
+		return nil, errors.New("redis unavailable")
+	}
+	if !c.breaker.Allow() {
+		return nil, errors.New("redis breaker open")
+	}
+
+	var value []byte
+	start := time.Now()
+	result, err := c.rdb.Get(ctx, key).Bytes()
+	c.metrics.RecordCommand(ctx, "get", time.Since(start).Seconds())
+	if err != nil {
+		if errors.Is(err, redis.Nil) {
+			return nil, err
+		}
+		c.breaker.RecordFailure()
+		return nil, err
+	}
+	c.breaker.RecordSuccess()
+	value = result
+	return value, nil
+}
+
+func (c *Client) SetBytes(ctx context.Context, key string, value []byte, ttl time.Duration) error {
+	if c == nil || c.rdb == nil {
+		return errors.New("redis unavailable")
+	}
+
+	return c.doCommand(ctx, "set", func() error {
+		return c.rdb.Set(ctx, key, value, ttl).Err()
+	})
+}
+
 func ParseAddrs(raw string) []string {
 	if raw == "" {
 		return nil

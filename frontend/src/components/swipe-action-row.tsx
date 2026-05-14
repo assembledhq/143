@@ -366,13 +366,10 @@ export function SwipeActionRow({
             aria-hidden={trailingActionHidden}
             tabIndex={trailingActionHidden ? -1 : 0}
             className="relative h-full w-full rounded-none rounded-r-lg bg-transparent px-0 text-white shadow-none hover:bg-transparent hover:text-white active:bg-transparent"
-            onClick={() => {
-              close();
-              try {
-                handleActionPromise(onAction());
-              } catch (error) {
-                throw error;
-              }
+            onClick={(event) => {
+              event.preventDefault();
+              event.stopPropagation();
+              commitAction(containerRef.current?.offsetWidth || gestureWidth);
             }}
           >
             <span className="relative flex h-full w-full flex-col items-center justify-center gap-0.5 px-4 text-center">
