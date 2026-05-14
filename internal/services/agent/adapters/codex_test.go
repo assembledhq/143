@@ -681,6 +681,8 @@ func TestCodexAdapter_Execute(t *testing.T) {
 			promptData, exists := provider.Files["/home/sandbox/.143-prompt.md"]
 			require.True(t, exists, "prompt file should have been written")
 			require.Contains(t, string(promptData), "Fix the bug.")
+			require.Contains(t, provider.ExecCalls[0], " - < '/home/sandbox/.143-prompt.md'", "codex should read the initial prompt from stdin to avoid appending Docker exec stdin")
+			require.NotContains(t, provider.ExecCalls[0], "\"$(cat '/home/sandbox/.143-prompt.md')\"", "codex should not pass the initial prompt as an argv argument")
 			require.NotContains(t, provider.ExecCalls[0], ".143-agent.pid", "codex adapter must not embed pidfile scaffolding (provider internal)")
 			require.NotContains(t, provider.ExecCalls[0], "& pid=$!", "codex adapter must not embed shell-shim wrapping (provider internal)")
 		})
@@ -782,6 +784,7 @@ func TestCodexAdapter_Execute_ContinuationWithoutSessionIDFallsBackToFreshExec(t
 	require.NotContains(t, provider.ExecCalls[0], "codex exec resume", "continuation without a session ID must not use the non-deterministic resume path")
 	require.NotContains(t, provider.ExecCalls[0], "--last", "the --last fallback must not be used")
 	require.Contains(t, provider.ExecCalls[0], "codex exec --dangerously-bypass-approvals-and-sandbox", "continuation without a session ID should run a fresh codex exec")
+	require.Contains(t, provider.ExecCalls[0], " - < '/home/sandbox/.143-prompt.md'", "fresh fallback should feed the embedded-history prompt over stdin")
 	contents, exists := provider.Files["/home/sandbox/.143-prompt.md"]
 	require.True(t, exists, "fresh exec must write the system+user prompt to a file")
 	require.Contains(t, string(contents), "history-embedded user prompt", "prompt file should carry the orchestrator-provided history-embedded user prompt")
@@ -888,8 +891,12 @@ func TestCodexAdapter_Execute_ContinuationWithResumeSessionIDIncludesReasoningEf
 	require.NotNil(t, result, "continuation should return a result")
 	require.Contains(t, provider.ExecCalls[0], `codex exec resume --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check --json`, "continuation should use explicit resume mode")
 	require.Contains(t, provider.ExecCalls[0], "session-123", "continuation should target the provided Codex session ID")
+	require.Contains(t, provider.ExecCalls[0], " - < '/home/sandbox/.143-followup-prompt.md'", "continuation should feed the follow-up prompt over stdin")
 	require.Contains(t, provider.ExecCalls[0], "model_reasoning_effort", "continuation should include the reasoning override config")
 	require.Contains(t, provider.ExecCalls[0], "xhigh", "continuation should include the requested reasoning effort")
+	contents, exists := provider.Files["/home/sandbox/.143-followup-prompt.md"]
+	require.True(t, exists, "continuation should write the follow-up prompt file")
+	require.Equal(t, "Please continue.", string(contents), "follow-up prompt file should contain the user message exactly")
 }
 
 func TestIsDuplicateOutput(t *testing.T) {
@@ -1095,6 +1102,44 @@ func TestFilterRefreshTokenLines(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			require.Equal(t, tt.expect, filterRefreshTokenLines(tt.input))
+		})
+	}
+}
+
+func TestFilterCodexStderrLines(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		input  string
+		expect string
+	}{
+		{
+			name:   "removes benign stdin diagnostic",
+			input:  "Reading additional input from stdin...",
+			expect: "",
+		},
+		{
+			name:   "removes benign stdin diagnostic while preserving real stderr",
+			input:  "Reading additional input from stdin...\nreal error line",
+			expect: "real error line",
+		},
+		{
+			name:   "keeps other stdin errors",
+			input:  "failed reading from stdin: permission denied",
+			expect: "failed reading from stdin: permission denied",
+		},
+		{
+			name:   "still removes refresh token errors",
+			input:  "Reading additional input from stdin...\nERROR codex_core::auth: Failed to refresh token: refresh_token_reused",
+			expect: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			require.Equal(t, tt.expect, filterCodexStderrLines(tt.input), "codex stderr filtering should only remove known benign diagnostics")
 		})
 	}
 }
