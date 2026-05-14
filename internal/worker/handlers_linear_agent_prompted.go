@@ -113,11 +113,15 @@ func handleLinearAgentPrompted(ctx context.Context, deps LinearAgentEventHandler
 	// we fall back to ClaimForResume which lifts terminal sessions back
 	// to running. The user's intent is "respond to my new message",
 	// regardless of whether the prior run technically finished.
+	revertStatus := string(models.SessionStatusIdle)
 	session, err := deps.Stores.Sessions.ClaimIdle(ctx, orgID, sessionID)
 	if err != nil {
 		appendState, stateErr := deps.Stores.Sessions.GetMessageAppendState(ctx, orgID, sessionID)
 		if stateErr == nil && appendState.Status == string(models.SessionStatusRunning) {
 			return appendPromptedMessageToRunningSession(ctx, deps, orgID, appendState, payload, commentBody, logger)
+		}
+		if stateErr != nil {
+			return fmt.Errorf("inspect session append state for prompted turn: %w", stateErr)
 		}
 		if !allowRevision {
 			if err := respondRevisionPromptDisabled(ctx, deps, agentSessions, row, orgID, logger); err != nil {
@@ -133,6 +137,7 @@ func handleLinearAgentPrompted(ctx context.Context, deps LinearAgentEventHandler
 		if err != nil {
 			return fmt.Errorf("claim session for prompted turn: %w", err)
 		}
+		revertStatus = appendState.Status
 	}
 
 	if deps.Stores.SessionMessages == nil {
@@ -148,9 +153,9 @@ func handleLinearAgentPrompted(ctx context.Context, deps LinearAgentEventHandler
 	if err := appendPromptedMessageAndEnqueueContinue(ctx, deps.Stores, orgID, session, msg); err != nil {
 		// Best-effort revert: the session is now claimed (running) but
 		// we couldn't atomically persist the message and queue the
-		// continuation. Falling back to "idle" keeps the system from
-		// showing a "running" session that nobody is actually working on.
-		if updateErr := deps.Stores.Sessions.UpdateStatus(ctx, orgID, sessionID, "idle"); updateErr != nil {
+		// continuation. Restore the pre-claim status so terminal or paused
+		// sessions do not get corrupted to idle.
+		if updateErr := deps.Stores.Sessions.UpdateStatus(ctx, orgID, sessionID, revertStatus); updateErr != nil {
 			logger.Warn().Err(updateErr).Str("session_id", sessionID.String()).
 				Msg("prompted: failed to revert session status after append/enqueue failure")
 		}
