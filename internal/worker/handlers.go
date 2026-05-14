@@ -36,6 +36,93 @@ import (
 
 const sandboxCapacityRetryDelay = 10 * time.Second
 
+const sandboxCapacityFailureCategory = "sandbox_capacity_timeout"
+
+func registerSandboxCapacityDeadLetter(ctx context.Context, stores *Stores, services *Services, logger zerolog.Logger, session models.Session, threadID *uuid.UUID, jobType string) {
+	if stores == nil || stores.Sessions == nil {
+		return
+	}
+	jobctx.RegisterDeadLetterHook(ctx, func(hookCtx context.Context, deadLetterErr error) {
+		writeCtx, cancel := context.WithTimeout(context.WithoutCancel(hookCtx), 10*time.Second)
+		defer cancel()
+
+		errMsg := "Session stopped because sandbox capacity stayed full until the retry window expired."
+		explanation := "The worker could not acquire local sandbox capacity before the job retry window expired. This can happen during deploys or when other sessions are holding all sandbox slots."
+		nextSteps := []string{
+			"Retry the session when sandbox capacity is available",
+			"Cancel sessions that are no longer needed to free up capacity",
+		}
+		failedSession := session
+		failureCategory := sandboxCapacityFailureCategory
+		failedSession.Status = string(models.SessionStatusFailed)
+		failedSession.Error = &errMsg
+		failedSession.FailureExplanation = &explanation
+		failedSession.FailureCategory = &failureCategory
+		failedSession.FailureNextSteps = nextSteps
+		failedSession.FailureRetryAdvised = true
+		if deadLetterErr != nil {
+			logger.Warn().
+				Err(deadLetterErr).
+				Str("session_id", session.ID.String()).
+				Str("job_type", jobType).
+				Msg("session job dead-lettered after sandbox capacity retries")
+		}
+
+		result := &models.SessionResult{Error: &errMsg}
+		if err := stores.Sessions.UpdateResult(writeCtx, session.OrgID, session.ID, string(models.SessionStatusFailed), result); err != nil {
+			logger.Error().
+				Err(err).
+				Str("session_id", session.ID.String()).
+				Str("job_type", jobType).
+				Msg("failed to mark session failed after sandbox capacity dead-letter")
+			return
+		}
+		if err := stores.Sessions.UpdateFailure(writeCtx, session.OrgID, session.ID, explanation, sandboxCapacityFailureCategory, nextSteps, true); err != nil {
+			logger.Error().
+				Err(err).
+				Str("session_id", session.ID.String()).
+				Str("job_type", jobType).
+				Msg("failed to persist sandbox capacity failure details")
+		}
+		if threadID != nil && *threadID != uuid.Nil && stores.SessionThreads != nil {
+			threadCategory := sandboxCapacityFailureCategory
+			threadResult := &models.SessionResult{
+				Error:           &errMsg,
+				FailureCategory: &threadCategory,
+			}
+			if err := stores.SessionThreads.UpdateResult(writeCtx, session.OrgID, *threadID, models.ThreadStatusFailed, threadResult); err != nil {
+				logger.Error().
+					Err(err).
+					Str("session_id", session.ID.String()).
+					Str("thread_id", threadID.String()).
+					Str("job_type", jobType).
+					Msg("failed to mark session thread failed after sandbox capacity dead-letter")
+			}
+		}
+		if services != nil && services.ProjectTasks != nil && failedSession.ProjectTaskID != nil {
+			if err := services.ProjectTasks.OnSessionComplete(writeCtx, &failedSession, string(models.SessionStatusFailed)); err != nil {
+				logger.Warn().
+					Err(err).
+					Str("session_id", failedSession.ID.String()).
+					Str("job_type", jobType).
+					Msg("failed to update project task after sandbox capacity dead-letter")
+			}
+		}
+		if services != nil && services.AutomationRuns != nil && failedSession.AutomationRunID != nil {
+			if err := services.AutomationRuns.OnSessionComplete(writeCtx, &failedSession, string(models.SessionStatusFailed)); err != nil {
+				logger.Warn().
+					Err(err).
+					Str("session_id", failedSession.ID.String()).
+					Str("job_type", jobType).
+					Msg("failed to update automation run after sandbox capacity dead-letter")
+			}
+		}
+		if stores.Jobs != nil {
+			linear.EnqueueMilestone(writeCtx, stores.Jobs, logger, failedSession.OrgID, failedSession.ID, "failed", 0)
+		}
+	})
+}
+
 // DataRetentionConfig holds retention periods for the data cleanup handler.
 type DataRetentionConfig struct {
 	WebhookDays int
@@ -166,6 +253,8 @@ type Services struct {
 	PR              prCreator
 	Failure         *agent.FailureService
 	SandboxProvider agent.SandboxProvider
+	ProjectTasks    agent.ProjectTaskUpdater   // nil-safe: updates project tasks on terminal session fallback paths
+	AutomationRuns  agent.AutomationRunUpdater // nil-safe: updates automation runs on terminal session fallback paths
 	Prioritization  *prioritization.Service
 	Feedback        *feedback.Service
 	PM              pmService
@@ -1042,6 +1131,7 @@ func newRunAgentHandler(stores *Stores, services *Services, logger zerolog.Logge
 		if err := runErr; err != nil {
 			if errors.Is(err, agent.ErrSandboxCapacity) {
 				retryAfter := sandboxCapacityRetryDelay
+				registerSandboxCapacityDeadLetter(ctx, stores, services, logger, run, run.PrimaryThreadID, "run_agent")
 				logger.Info().
 					Str("session_id", runID.String()).
 					Err(err).
@@ -1223,6 +1313,12 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 		if err := services.Orchestrator.ContinueSession(jobCtx, &session, continueOpts); err != nil {
 			if errors.Is(err, agent.ErrSandboxCapacity) {
 				retryAfter := sandboxCapacityRetryDelay
+				var capacityThreadID *uuid.UUID
+				if hasThread {
+					threadIDLocal := threadID
+					capacityThreadID = &threadIDLocal
+				}
+				registerSandboxCapacityDeadLetter(ctx, stores, services, logger, session, capacityThreadID, "continue_session")
 				logger.Info().
 					Str("session_id", sessionID.String()).
 					Err(err).

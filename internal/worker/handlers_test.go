@@ -424,6 +424,14 @@ func newTestStores(t *testing.T) (*Stores, pgxmock.PgxPoolIface) {
 	return stores, mock
 }
 
+func workerAnyArgs(n int) []interface{} {
+	args := make([]interface{}, n)
+	for i := range args {
+		args[i] = pgxmock.AnyArg()
+	}
+	return args
+}
+
 type orchestratorServiceStub struct {
 	runAgentCalls        int
 	continueSessionCalls int
@@ -434,6 +442,26 @@ type orchestratorServiceStub struct {
 	recoverSessionFn     func(ctx context.Context, session *models.Session) error
 	sessionTimeout       time.Duration
 	runtimeCeiling       time.Duration
+}
+
+type sessionCompleteRecorder struct {
+	calls []sessionCompleteCall
+	err   error
+}
+
+type sessionCompleteCall struct {
+	sessionID uuid.UUID
+	status    string
+	errText   string
+}
+
+func (r *sessionCompleteRecorder) OnSessionComplete(_ context.Context, run *models.Session, status string) error {
+	call := sessionCompleteCall{sessionID: run.ID, status: status}
+	if run.Error != nil {
+		call.errText = *run.Error
+	}
+	r.calls = append(r.calls, call)
+	return r.err
 }
 
 func (s *orchestratorServiceStub) RunAgent(ctx context.Context, run *models.Session) error {
@@ -4245,6 +4273,82 @@ func TestRunAgentHandler_SandboxCapacityRetries(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+func TestRunAgentHandler_SandboxCapacityDeadLetterFailsSessionAndThread(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+	stores.SessionThreads = db.NewSessionThreadStore(mock)
+
+	orgID := uuid.New()
+	runID := uuid.New()
+	threadID := uuid.New()
+	issueID := uuid.New()
+	projectTaskID := uuid.New()
+	automationRunID := uuid.New()
+	runRow := workerSessionRow(runID, issueID, orgID, string(models.SessionStatusRunning), 0, nil, nil)
+	setWorkerSessionColumnValue(runRow, "project_task_id", &projectTaskID)
+	setWorkerSessionColumnValue(runRow, "automation_run_id", &automationRunID)
+
+	mock.ExpectQuery("SELECT .* FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(workerSessionColumns).AddRow(
+				runRow...,
+			),
+		)
+
+	orch := &orchestratorServiceStub{
+		recoverSessionFn: func(ctx context.Context, run *models.Session) error {
+			require.NotNil(t, run.PrimaryThreadID, "run_agent recovery should carry the payload thread ID into the orchestrator")
+			require.Equal(t, threadID, *run.PrimaryThreadID, "run_agent recovery should preserve the primary thread ID from the job payload")
+			return fmt.Errorf("capacity full: %w", agent.ErrSandboxCapacity)
+		},
+	}
+	projectHooks := &sessionCompleteRecorder{}
+	automationHooks := &sessionCompleteRecorder{}
+	handler := newRunAgentHandler(stores, &Services{
+		Orchestrator:   orch,
+		ProjectTasks:   projectHooks,
+		AutomationRuns: automationHooks,
+	}, zerolog.Nop())
+	handlerCtx := jobctx.WithDeadLetterHooks(context.Background())
+	payload := json.RawMessage(`{"session_id":"` + runID.String() + `","org_id":"` + orgID.String() + `","thread_id":"` + threadID.String() + `"}`)
+
+	err := handler(handlerCtx, "run_agent", payload)
+
+	require.Error(t, err, "run_agent should stay retryable while capacity may recover")
+	var retryable *RetryableError
+	require.ErrorAs(t, err, &retryable, "sandbox capacity should remain retryable before queue exhaustion")
+
+	mock.ExpectQuery("UPDATE sessions").
+		WithArgs(workerAnyArgs(14)...).
+		WillReturnRows(
+			pgxmock.NewRows(workerSessionColumns).AddRow(
+				workerSessionRow(runID, issueID, orgID, string(models.SessionStatusFailed), 0, nil, nil)...,
+			),
+		)
+	mock.ExpectExec("UPDATE sessions[\\s\\S]+failure_explanation").
+		WithArgs(workerAnyArgs(6)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectExec("UPDATE session_threads").
+		WithArgs(workerAnyArgs(8)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectQuery("INSERT INTO jobs").
+		WithArgs(workerAnyArgs(6)...).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
+
+	jobctx.RunDeadLetterHooks(handlerCtx, err)
+	expectedCompletionCalls := []sessionCompleteCall{{
+		sessionID: runID,
+		status:    string(models.SessionStatusFailed),
+		errText:   "Session stopped because sandbox capacity stayed full until the retry window expired.",
+	}}
+	require.Equal(t, expectedCompletionCalls, projectHooks.calls, "dead-letter hook should update the owning project task")
+	require.Equal(t, expectedCompletionCalls, automationHooks.calls, "dead-letter hook should update the owning automation run")
+	require.NoError(t, mock.ExpectationsWereMet(), "dead-letter hook should fail both the session and primary thread after capacity retry exhaustion")
+}
+
 // TestRunAgentHandler_SandboxRaceLoserDeadLetters locks the self-heal contract
 // for duplicate run_agent jobs: when the orchestrator returns
 // ErrSandboxRaceLoser (this duplicate lost AcquireTurnHold to a winner that
@@ -4406,6 +4510,87 @@ func TestContinueSessionHandler_SandboxCapacityRetries(t *testing.T) {
 	require.ErrorIs(t, retryable.Err, agent.ErrSandboxCapacity, "the wrapped error must preserve the ErrSandboxCapacity sentinel")
 	require.Equal(t, 1, orch.continueSessionCalls, "continue_session should call the orchestrator once before returning the retry")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestContinueSessionHandler_SandboxCapacityDeadLetterFailsSessionAndThread(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+	stores.SessionThreads = db.NewSessionThreadStore(mock)
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	threadID := uuid.New()
+	issueID := uuid.New()
+	projectTaskID := uuid.New()
+	automationRunID := uuid.New()
+	sessionRow := workerSessionRow(sessionID, issueID, orgID, string(models.SessionStatusRunning), 2, nil, nil)
+	setWorkerSessionColumnValue(sessionRow, "project_task_id", &projectTaskID)
+	setWorkerSessionColumnValue(sessionRow, "automation_run_id", &automationRunID)
+
+	mock.ExpectQuery("SELECT .* FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(workerSessionColumns).AddRow(
+				sessionRow...,
+			),
+		)
+	mock.ExpectQuery("SELECT .* FROM session_threads").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(workerSessionThreadColumns).AddRow(
+				workerSessionThreadRow(threadID, sessionID, orgID, models.AgentTypeCodex, nil, models.ThreadStatusRunning)...,
+			),
+		)
+
+	orch := &orchestratorServiceStub{
+		continueSessionFn: func(ctx context.Context, session *models.Session, opts *agent.ContinueSessionOptions) error {
+			return fmt.Errorf("capacity full: %w", agent.ErrSandboxCapacity)
+		},
+	}
+	projectHooks := &sessionCompleteRecorder{}
+	automationHooks := &sessionCompleteRecorder{}
+	handler := newContinueSessionHandler(stores, &Services{
+		Orchestrator:   orch,
+		ProjectTasks:   projectHooks,
+		AutomationRuns: automationHooks,
+	}, zerolog.Nop())
+	handlerCtx := jobctx.WithDeadLetterHooks(context.Background())
+	payload := json.RawMessage(`{"session_id":"` + sessionID.String() + `","org_id":"` + orgID.String() + `","thread_id":"` + threadID.String() + `"}`)
+
+	err := handler(handlerCtx, "continue_session", payload)
+
+	require.Error(t, err, "continue_session should stay retryable while capacity may recover")
+	var retryable *RetryableError
+	require.ErrorAs(t, err, &retryable, "sandbox capacity should remain retryable before queue exhaustion")
+
+	mock.ExpectQuery("UPDATE sessions").
+		WithArgs(workerAnyArgs(14)...).
+		WillReturnRows(
+			pgxmock.NewRows(workerSessionColumns).AddRow(
+				workerSessionRow(sessionID, issueID, orgID, string(models.SessionStatusFailed), 2, nil, nil)...,
+			),
+		)
+	mock.ExpectExec("UPDATE sessions[\\s\\S]+failure_explanation").
+		WithArgs(workerAnyArgs(6)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectExec("UPDATE session_threads").
+		WithArgs(workerAnyArgs(8)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectQuery("INSERT INTO jobs").
+		WithArgs(workerAnyArgs(6)...).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
+
+	jobctx.RunDeadLetterHooks(handlerCtx, err)
+	expectedCompletionCalls := []sessionCompleteCall{{
+		sessionID: sessionID,
+		status:    string(models.SessionStatusFailed),
+		errText:   "Session stopped because sandbox capacity stayed full until the retry window expired.",
+	}}
+	require.Equal(t, expectedCompletionCalls, projectHooks.calls, "dead-letter hook should update the owning project task")
+	require.Equal(t, expectedCompletionCalls, automationHooks.calls, "dead-letter hook should update the owning automation run")
+	require.NoError(t, mock.ExpectationsWereMet(), "dead-letter hook should fail both the session and thread after capacity retry exhaustion")
 }
 
 func TestContinueSessionHandler_WrapsPreviewRaceAsRetryable(t *testing.T) {
