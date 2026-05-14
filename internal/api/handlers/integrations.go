@@ -271,8 +271,8 @@ func WithGitHubAppSlug(slug string) IntegrationHandlerOption {
 	}
 }
 
-// WithGitHubApp injects the GitHub App service and repo store so that
-// HandleGitHubAppInstalled can fetch repos from the GitHub API.
+// WithGitHubApp injects the GitHub App service and repo store used by
+// repository selection, explicit claims, and legacy sync status endpoints.
 func WithGitHubApp(svc githubAppService, repoStore *db.RepositoryStore) IntegrationHandlerOption {
 	return func(h *IntegrationHandler) {
 		h.githubService = svc
@@ -740,10 +740,8 @@ func (h *IntegrationHandler) ConnectSentry(w http.ResponseWriter, r *http.Reques
 
 func (h *IntegrationHandler) StartGitHubOAuth(w http.ResponseWriter, r *http.Request) {
 	// If a GitHub App slug is configured, redirect to the App installation page
-	// instead of the OAuth flow. The App installation triggers a webhook that
-	// registers repos automatically. We still set the OAuth state cookie so
-	// the callback can validate the redirect when GitHub returns the user with
-	// a code (GitHub Apps pass the state parameter through).
+	// instead of the OAuth flow. Repositories are claimed explicitly after setup;
+	// the signed state binds the callback to the intended user and org.
 	if h.githubAppSlug != "" {
 		state, err := h.setGitHubSetupState(w, r)
 		if err != nil {
@@ -781,7 +779,7 @@ func (h *IntegrationHandler) HandleGitHubOAuthCallback(w http.ResponseWriter, r 
 	// When a GitHub App has "Request user authorization during installation"
 	// enabled, GitHub redirects here with installation_id and setup_action
 	// instead of the Setup URL. Delegate to the App installation handler
-	// which stores the installation_id and syncs repos.
+	// which stores the installation link and redirects to repository selection.
 	if r.URL.Query().Get("installation_id") != "" && isGitHubAppSetupAction(r.URL.Query().Get("setup_action")) {
 		h.HandleGitHubAppInstalled(w, r)
 		return
@@ -864,9 +862,8 @@ func (h *IntegrationHandler) HandleGitHubAppInstalled(w http.ResponseWriter, r *
 	}
 
 	// GitHub redirects here with ?installation_id=<id>&setup_action=install.
-	// Store the installation_id in the integration config so webhooks can
-	// resolve the integration later, and fetch repos via the API so the user
-	// doesn't have to wait for the webhook.
+	// Store the installation_id in the integration config and link it to the
+	// target 143 org. Repository rows are activated later through explicit claims.
 	accountLogin := r.URL.Query().Get("account_login")
 	if accountLogin == "" {
 		accountLogin = "unknown"
@@ -923,48 +920,8 @@ func isGitHubAppSetupAction(action string) bool {
 	}
 }
 
-// syncInstallationRepos fetches repos for a GitHub App installation and
-// upserts them into the database. Errors are logged but not surfaced to
-// the caller — the webhook provides a fallback if this fails.
-func (h *IntegrationHandler) syncInstallationRepos(ctx context.Context, orgID uuid.UUID, integrationID uuid.UUID, installationID int64) {
-	token, err := h.githubService.GetInstallationToken(ctx, installationID)
-	if err != nil {
-		return
-	}
-
-	repos, err := h.listInstallationRepos(ctx, token)
-	if err != nil {
-		return
-	}
-
-	for _, ghRepo := range repos {
-		repo := &models.Repository{
-			OrgID:          orgID,
-			IntegrationID:  integrationID,
-			GitHubID:       ghRepo.ID,
-			FullName:       ghRepo.FullName,
-			DefaultBranch:  ghRepo.DefaultBranch,
-			Private:        ghRepo.Private,
-			CloneURL:       ghRepo.CloneURL,
-			InstallationID: installationID,
-			Status:         "active",
-			Settings:       json.RawMessage(`{}`),
-		}
-		if repo.DefaultBranch == "" {
-			repo.DefaultBranch = "main"
-		}
-		if repo.CloneURL == "" {
-			repo.CloneURL = "https://github.com/" + ghRepo.FullName + ".git"
-		}
-		if err := h.repoStore.UpsertFromGitHub(ctx, repo); err != nil {
-			zerolog.Ctx(ctx).Warn().Err(err).Str("repo", ghRepo.FullName).Msg("failed to upsert repo from GitHub")
-			continue
-		}
-	}
-}
-
-// SyncGitHubRepos re-syncs repositories from a GitHub App installation.
-// This is a recovery mechanism for when the initial webhook-based sync fails.
+// SyncGitHubRepos reports repositories visible to the GitHub App installation.
+// It no longer imports repositories; admins claim repositories explicitly.
 func (h *IntegrationHandler) SyncGitHubRepos(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	orgID := middleware.OrgIDFromContext(ctx)
