@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -31,6 +33,7 @@ import (
 type mockAgentAdapter struct {
 	name       models.AgentType
 	resumeMode agent.SessionResumeMode
+	prepareFn  func(ctx context.Context, input *agent.AgentInput) (*agent.AgentPrompt, error)
 	executeFn  func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error)
 }
 
@@ -39,6 +42,9 @@ func (m *mockAgentAdapter) Name() models.AgentType { return m.name }
 func (m *mockAgentAdapter) ResumeMode() agent.SessionResumeMode { return m.resumeMode }
 
 func (m *mockAgentAdapter) PreparePrompt(ctx context.Context, input *agent.AgentInput) (*agent.AgentPrompt, error) {
+	if m.prepareFn != nil {
+		return m.prepareFn(ctx, input)
+	}
 	return &agent.AgentPrompt{
 		SystemPrompt:    "test system prompt",
 		UserPrompt:      "test user prompt",
@@ -801,6 +807,43 @@ func (m *mockSessionMessageStore) ListBySession(ctx context.Context, orgID, sess
 	return out, nil
 }
 
+type mockUploadStore struct {
+	mu      sync.Mutex
+	files   map[string]mockUploadFile
+	opened  []string
+	openErr error
+}
+
+type mockUploadFile struct {
+	body        []byte
+	contentType string
+}
+
+func (m *mockUploadStore) Save(context.Context, string, io.Reader, string) (string, error) {
+	return "", errors.New("not implemented")
+}
+
+func (m *mockUploadStore) URL(key string) string {
+	return "/api/v1/uploads/files/" + key
+}
+
+func (m *mockUploadStore) Serve(http.ResponseWriter, *http.Request, string) {
+}
+
+func (m *mockUploadStore) Open(_ context.Context, key string) (io.ReadCloser, string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.opened = append(m.opened, key)
+	if m.openErr != nil {
+		return nil, "", m.openErr
+	}
+	file, ok := m.files[key]
+	if !ok {
+		return nil, "", os.ErrNotExist
+	}
+	return io.NopCloser(bytes.NewReader(file.body)), file.contentType, nil
+}
+
 func (m *mockSessionMessageStore) getMessages() []models.SessionMessage {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -1059,6 +1102,7 @@ type testDeps struct {
 	creds            *mockCredentialProvider
 	codingCreds      agent.CodingCredentialProvider
 	snapshots        *mockSnapshotStore
+	uploads          *mockUploadStore
 	cancels          *agent.CancelRegistry
 	nodeID           string
 	orgs             *mockOrgStore
@@ -1187,6 +1231,7 @@ func buildOrchestrator(d testDeps) *agent.Orchestrator {
 		Credentials:       d.creds,
 		CodingCredentials: d.codingCreds,
 		Snapshots:         snapshotStore,
+		Uploads:           d.uploads,
 		Cancels:           d.cancels,
 		Orgs:              orgStore,
 		IdentityResolver:  d.identityResolver,
@@ -1264,6 +1309,125 @@ func TestRunAgent_SuccessfulRun(t *testing.T) {
 
 	// Sandbox should be destroyed.
 	require.Equal(t, 1, d.provider.GetDestroyCalls())
+}
+
+func TestRunAgent_MaterializesUploadedAttachments(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	run := testRun(orgID, issue.ID)
+	run.Origin = models.SessionOriginManual
+	attachmentURL := "/api/v1/uploads/files/" + orgID.String() + "/2026-05/screenshot.png"
+	attachmentBody := []byte("png-data")
+
+	d := defaultDeps()
+	d.uploads = &mockUploadStore{
+		files: map[string]mockUploadFile{
+			orgID.String() + "/2026-05/screenshot.png": {
+				body:        attachmentBody,
+				contentType: "image/png",
+			},
+		},
+	}
+	d.messages.messages = []models.SessionMessage{{
+		ID:          1,
+		SessionID:   run.ID,
+		OrgID:       orgID,
+		TurnNumber:  0,
+		Role:        models.MessageRoleUser,
+		Content:     "This is the error.",
+		Attachments: []string{attachmentURL},
+	}}
+
+	var capturedAttachments []agent.AgentAttachment
+	d.adapter.prepareFn = func(ctx context.Context, input *agent.AgentInput) (*agent.AgentPrompt, error) {
+		capturedAttachments = append([]agent.AgentAttachment(nil), input.Attachments...)
+		return &agent.AgentPrompt{
+			SystemPrompt: "system",
+			UserPrompt:   "attachments:\n" + input.Attachments[0].LocalPath,
+			MaxTokens:    50000,
+		}, nil
+	}
+	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
+		require.Contains(t, prompt.UserPrompt, "/home/sandbox/.143/attachments/turn-1/attachment-1-screenshot.png", "RunAgent should include sandbox-local attachment paths in the prompt")
+		return &agent.AgentResult{Summary: "done", ConfidenceScore: 0.9, ExitCode: 0}, nil
+	}
+
+	err := buildOrchestrator(d).RunAgent(context.Background(), run)
+
+	require.NoError(t, err, "RunAgent should succeed with uploaded attachments")
+	require.Len(t, capturedAttachments, 1, "RunAgent should pass one materialized attachment to the adapter")
+	require.Equal(t, attachmentURL, capturedAttachments[0].OriginalURL, "RunAgent should preserve the original attachment URL")
+	require.Equal(t, "image/png", capturedAttachments[0].ContentType, "RunAgent should preserve the upload content type")
+	require.Equal(t, attachmentBody, d.provider.Files[capturedAttachments[0].LocalPath], "RunAgent should copy uploaded bytes into the sandbox")
+}
+
+func TestRunAgent_WarnsAndContinuesWhenUploadedAttachmentCannotBeRead(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	run := testRun(orgID, issue.ID)
+	attachmentURL := "/api/v1/uploads/files/" + orgID.String() + "/2026-05/missing.png"
+
+	d := defaultDeps()
+	d.uploads = &mockUploadStore{openErr: errors.New("s3 unavailable")}
+	d.messages.messages = []models.SessionMessage{{
+		ID:          1,
+		SessionID:   run.ID,
+		OrgID:       orgID,
+		TurnNumber:  0,
+		Role:        models.MessageRoleUser,
+		Content:     "This is the error.",
+		Attachments: []string{attachmentURL},
+	}}
+
+	var capturedAttachments []agent.AgentAttachment
+	d.adapter.prepareFn = func(ctx context.Context, input *agent.AgentInput) (*agent.AgentPrompt, error) {
+		capturedAttachments = append([]agent.AgentAttachment(nil), input.Attachments...)
+		return &agent.AgentPrompt{SystemPrompt: "system", UserPrompt: input.Attachments[0].Error, MaxTokens: 50000}, nil
+	}
+
+	err := buildOrchestrator(d).RunAgent(context.Background(), run)
+
+	require.NoError(t, err, "RunAgent should continue when an uploaded attachment cannot be read")
+	require.Len(t, capturedAttachments, 1, "RunAgent should pass an unresolved attachment warning to the adapter")
+	require.Contains(t, capturedAttachments[0].Error, "s3 unavailable", "warning should include the read failure")
+}
+
+func TestRunAgent_DoesNotFetchExternalAttachmentURLs(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	run := testRun(orgID, issue.ID)
+
+	d := defaultDeps()
+	d.uploads = &mockUploadStore{}
+	d.messages.messages = []models.SessionMessage{{
+		ID:          1,
+		SessionID:   run.ID,
+		OrgID:       orgID,
+		TurnNumber:  0,
+		Role:        models.MessageRoleUser,
+		Content:     "Please inspect the linked screenshot.",
+		Attachments: []string{"https://example.com/api/v1/uploads/files/" + orgID.String() + "/2026-05/screenshot.png"},
+	}}
+
+	var capturedAttachments []agent.AgentAttachment
+	d.adapter.prepareFn = func(ctx context.Context, input *agent.AgentInput) (*agent.AgentPrompt, error) {
+		capturedAttachments = append([]agent.AgentAttachment(nil), input.Attachments...)
+		return &agent.AgentPrompt{SystemPrompt: "system", UserPrompt: input.Attachments[0].OriginalURL, MaxTokens: 50000}, nil
+	}
+
+	err := buildOrchestrator(d).RunAgent(context.Background(), run)
+
+	require.NoError(t, err, "RunAgent should continue when an attachment is an external URL")
+	require.Len(t, capturedAttachments, 1, "RunAgent should pass external attachment context to the adapter")
+	require.Equal(t, "https://example.com/api/v1/uploads/files/"+orgID.String()+"/2026-05/screenshot.png", capturedAttachments[0].OriginalURL, "RunAgent should preserve the external URL")
+	require.Contains(t, capturedAttachments[0].Error, "external attachments are not fetched", "external attachment should be marked as unfetched")
+	require.Empty(t, d.uploads.opened, "RunAgent should not fetch external URLs through upload storage")
 }
 
 func TestRunAgent_SandboxCapacityRejectsBeforeCreate(t *testing.T) {
@@ -2257,6 +2421,116 @@ func TestContinueSession_FreshResumeWiresSandboxAuth(t *testing.T) {
 	require.Contains(t, createdCfg.Env["PATH"], "/home/sandbox/.local/bin", "ContinueSession should prepend the gh wrapper directory to PATH")
 	require.Contains(t, d.provider.ExecCalls, "143-tools git-bootstrap --workdir=/home/sandbox/backend", "ContinueSession should rerun git-bootstrap after cloning the fresh workspace")
 	require.Equal(t, 1, authStub.closeCalls, "ContinueSession should close the sandbox auth socket when the fresh container is destroyed at turn end")
+}
+
+func TestContinueSession_MaterializesUploadedAttachmentInResumeMessage(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	session := testRun(orgID, issue.ID)
+	session.Status = string(models.SessionStatusIdle)
+	session.CurrentTurn = 1
+	snapshotKey := "snapshots/session.tar"
+	agentSessionID := "agent-session-1"
+	session.SnapshotKey = &snapshotKey
+	session.AgentSessionID = &agentSessionID
+	attachmentURL := "/api/v1/uploads/files/" + orgID.String() + "/2026-05/error.png"
+	attachmentBody := []byte("png-data")
+
+	d := defaultDeps()
+	d.uploads = &mockUploadStore{
+		files: map[string]mockUploadFile{
+			orgID.String() + "/2026-05/error.png": {
+				body:        attachmentBody,
+				contentType: "image/png",
+			},
+		},
+	}
+	d.messages.messages = []models.SessionMessage{
+		{
+			ID:         1,
+			SessionID:  session.ID,
+			OrgID:      orgID,
+			TurnNumber: 1,
+			Role:       models.MessageRoleAssistant,
+			Content:    "previous response",
+		},
+		{
+			ID:          2,
+			SessionID:   session.ID,
+			OrgID:       orgID,
+			TurnNumber:  2,
+			Role:        models.MessageRoleUser,
+			Content:     "This is the error.",
+			Attachments: []string{attachmentURL},
+		},
+	}
+	d.adapter.resumeMode = agent.ResumeBySessionID
+	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
+		require.True(t, prompt.Continuation, "ContinueSession should use resume mode when an agent session id exists")
+		require.Contains(t, prompt.UserMessage, "/home/sandbox/.143/attachments/turn-2/attachment-1-error.png", "ContinueSession should include sandbox-local attachment paths in the resume message")
+		return &agent.AgentResult{Summary: "continued", ConfidenceScore: 0.9, ExitCode: 0}, nil
+	}
+
+	err := buildOrchestrator(d).ContinueSession(context.Background(), session, nil)
+
+	require.NoError(t, err, "ContinueSession should succeed with uploaded attachments")
+	require.Equal(t, attachmentBody, d.provider.Files["/home/sandbox/.143/attachments/turn-2/attachment-1-error.png"], "ContinueSession should copy uploaded bytes into the sandbox")
+}
+
+func TestContinueSession_MaterializesAttachmentsFromMultiplePendingMessages(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	session := testRun(orgID, issue.ID)
+	session.Status = string(models.SessionStatusIdle)
+	session.CurrentTurn = 1
+	snapshotKey := "snapshots/session.tar"
+	agentSessionID := "agent-session-1"
+	session.SnapshotKey = &snapshotKey
+	session.AgentSessionID = &agentSessionID
+	firstURL := "/api/v1/uploads/files/" + orgID.String() + "/2026-05/first.png"
+	secondURL := "/api/v1/uploads/files/" + orgID.String() + "/2026-05/second.png"
+
+	d := defaultDeps()
+	d.uploads = &mockUploadStore{
+		files: map[string]mockUploadFile{
+			orgID.String() + "/2026-05/first.png":  {body: []byte("first"), contentType: "image/png"},
+			orgID.String() + "/2026-05/second.png": {body: []byte("second"), contentType: "image/png"},
+		},
+	}
+	d.messages.messages = []models.SessionMessage{
+		{
+			ID:          2,
+			SessionID:   session.ID,
+			OrgID:       orgID,
+			TurnNumber:  2,
+			Role:        models.MessageRoleUser,
+			Content:     "First queued message.",
+			Attachments: []string{firstURL},
+		},
+		{
+			ID:          3,
+			SessionID:   session.ID,
+			OrgID:       orgID,
+			TurnNumber:  2,
+			Role:        models.MessageRoleUser,
+			Content:     "Second queued message.",
+			Attachments: []string{secondURL},
+		},
+	}
+	d.adapter.resumeMode = agent.ResumeBySessionID
+	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
+		require.Contains(t, prompt.UserMessage, "attachment-1-first.png", "ContinueSession should include the first pending message attachment")
+		require.Contains(t, prompt.UserMessage, "attachment-2-second.png", "ContinueSession should include the second pending message attachment")
+		return &agent.AgentResult{Summary: "continued", ConfidenceScore: 0.9, ExitCode: 0}, nil
+	}
+
+	err := buildOrchestrator(d).ContinueSession(context.Background(), session, nil)
+
+	require.NoError(t, err, "ContinueSession should succeed with attachments from multiple pending messages")
 }
 
 func TestContinueSession_RateLimitRetriesWithFallbackCredential(t *testing.T) {

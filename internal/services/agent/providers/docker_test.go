@@ -1,6 +1,7 @@
 package providers
 
 import (
+	"archive/tar"
 	"bufio"
 	"bytes"
 	"context"
@@ -2389,26 +2390,50 @@ func TestDockerProvider_ShellInjection(t *testing.T) {
 		require.NotContains(t, shellCmd, "cat /workspace/foo;", "bare semicolon should not appear outside quotes")
 	})
 
-	t.Run("WriteFile escapes malicious path", func(t *testing.T) {
+	t.Run("WriteFile streams tar without shell interpolation", func(t *testing.T) {
 		t.Parallel()
 
 		var capturedCmd []string
+		conn := newCapturingConn()
 
 		mock := &mockDockerClient{}
 		mock.containerExecCreateFn = func(ctx context.Context, containerID string, config container.ExecOptions) (container.ExecCreateResponse, error) {
 			capturedCmd = config.Cmd
 			return container.ExecCreateResponse{ID: "exec-inject"}, nil
 		}
+		mock.containerExecAttachFn = func(ctx context.Context, execID string, config container.ExecAttachOptions) (types.HijackedResponse, error) {
+			return types.HijackedResponse{Conn: conn, Reader: bufio.NewReader(conn)}, nil
+		}
 		mock.containerExecInspectFn = func(ctx context.Context, execID string) (container.ExecInspect, error) {
 			return container.ExecInspect{ExitCode: 0}, nil
 		}
 		p := NewDockerProvider(mock, newTestLogger())
-		sb := &agent.Sandbox{ID: "test-container", Provider: "docker", WorkDir: "/workspace"}
+		sb := &agent.Sandbox{ID: "test-container", Provider: "docker", WorkDir: "/workspace", HomeDir: "/home/sandbox"}
 
-		_ = p.WriteFile(context.Background(), sb, "/workspace/$(rm -rf /)", []byte("data"))
+		err := p.WriteFile(context.Background(), sb, "/home/sandbox/.143/attachments/turn-1/$(touch pwned).txt", []byte("data"))
+		require.NoError(t, err, "WriteFile should stream the tar payload successfully")
 
-		shellCmd := capturedCmd[2]
-		require.Contains(t, shellCmd, "'/workspace/$(rm -rf /)'", "path with command substitution should be single-quoted")
+		require.Equal(t, []string{"tar", "xf", "-", "-C", "/home/sandbox"}, capturedCmd, "WriteFile should exec tar directly without a shell")
+
+		tr := tar.NewReader(bytes.NewReader(conn.Captured()))
+		var foundFile bool
+		for {
+			hdr, readErr := tr.Next()
+			if errors.Is(readErr, io.EOF) {
+				break
+			}
+			require.NoError(t, readErr, "tar payload should be readable")
+			require.NotEqual(t, "home/", hdr.Name, "tar payload should not rewrite the root-owned /home directory")
+			require.NotEqual(t, "home/sandbox/", hdr.Name, "tar payload should not rewrite the existing sandbox home directory")
+			if hdr.Name != ".143/attachments/turn-1/$(touch pwned).txt" {
+				continue
+			}
+			foundFile = true
+			body, readErr := io.ReadAll(tr)
+			require.NoError(t, readErr, "tar file body should be readable")
+			require.Equal(t, []byte("data"), body, "tar payload should contain the requested file bytes")
+		}
+		require.True(t, foundFile, "tar payload should preserve the literal destination path")
 	})
 }
 
