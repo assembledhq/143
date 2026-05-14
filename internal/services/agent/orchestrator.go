@@ -2588,7 +2588,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	} else {
 		latestMsg = latestUserMessage(messages)
 	}
-	if latestMsg == nil || strings.TrimSpace(latestMsg.Content) == "" {
+	if latestMsg == nil || (strings.TrimSpace(latestMsg.Content) == "" && len(latestMsg.Attachments) == 0) {
 		o.failRun(ctx, session, "no user message found for continue_session")
 		return fmt.Errorf("no user message found")
 	}

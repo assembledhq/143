@@ -2479,6 +2479,63 @@ func TestContinueSession_MaterializesUploadedAttachmentInResumeMessage(t *testin
 	require.Equal(t, attachmentBody, d.provider.Files["/home/sandbox/.143/attachments/turn-2/attachment-1-error.png"], "ContinueSession should copy uploaded bytes into the sandbox")
 }
 
+func TestContinueSession_AllowsAttachmentOnlyFollowUp(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	session := testRun(orgID, issue.ID)
+	session.Status = string(models.SessionStatusIdle)
+	session.CurrentTurn = 1
+	snapshotKey := "snapshots/session.tar"
+	agentSessionID := "agent-session-1"
+	session.SnapshotKey = &snapshotKey
+	session.AgentSessionID = &agentSessionID
+	attachmentURL := "/api/v1/uploads/files/" + orgID.String() + "/2026-05/follow-up.png"
+	attachmentBody := []byte("png-data")
+
+	d := defaultDeps()
+	d.uploads = &mockUploadStore{
+		files: map[string]mockUploadFile{
+			orgID.String() + "/2026-05/follow-up.png": {
+				body:        attachmentBody,
+				contentType: "image/png",
+			},
+		},
+	}
+	d.messages.messages = []models.SessionMessage{
+		{
+			ID:         1,
+			SessionID:  session.ID,
+			OrgID:      orgID,
+			TurnNumber: 1,
+			Role:       models.MessageRoleAssistant,
+			Content:    "previous response",
+		},
+		{
+			ID:          2,
+			SessionID:   session.ID,
+			OrgID:       orgID,
+			TurnNumber:  2,
+			Role:        models.MessageRoleUser,
+			Content:     "",
+			Attachments: []string{attachmentURL},
+		},
+	}
+	d.adapter.resumeMode = agent.ResumeBySessionID
+	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
+		require.True(t, prompt.Continuation, "ContinueSession should use resume mode when an agent session id exists")
+		require.Contains(t, prompt.UserMessage, "## Attached files", "attachment-only follow-up should still include an attachment section")
+		require.Contains(t, prompt.UserMessage, "/home/sandbox/.143/attachments/turn-2/attachment-1-follow-up.png", "attachment-only follow-up should include sandbox-local attachment paths")
+		return &agent.AgentResult{Summary: "continued", ConfidenceScore: 0.9, ExitCode: 0}, nil
+	}
+
+	err := buildOrchestrator(d).ContinueSession(context.Background(), session, nil)
+
+	require.NoError(t, err, "ContinueSession should succeed when a follow-up has attachments but no text")
+	require.Equal(t, attachmentBody, d.provider.Files["/home/sandbox/.143/attachments/turn-2/attachment-1-follow-up.png"], "ContinueSession should copy attachment-only follow-up bytes into the sandbox")
+}
+
 func TestContinueSession_MaterializesAttachmentsFromMultiplePendingMessages(t *testing.T) {
 	t.Parallel()
 
