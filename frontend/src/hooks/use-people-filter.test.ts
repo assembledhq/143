@@ -61,7 +61,7 @@ describe("usePeopleFilter helpers", () => {
   it("builds compact labels for custom selections", () => {
     expect(peopleFilterLabel("mine", ["user-1"], members, currentUser)).toBe("Mine");
     expect(peopleFilterLabel("all", [], members, currentUser)).toBe("Everyone");
-    expect(peopleFilterLabel("custom", ["user-2"], members, currentUser)).toBe("Grace");
-    expect(peopleFilterLabel("custom", ["user-2", "user-3"], members, currentUser)).toBe("Grace +1");
+    expect(peopleFilterLabel("custom", ["user-2"], members, currentUser)).toBe("Grace Hopper");
+    expect(peopleFilterLabel("custom", ["user-2", "user-3"], members, currentUser)).toBe("Grace Hopper +1 other");
   });
 });
