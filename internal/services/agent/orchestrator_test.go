@@ -20,8 +20,10 @@ import (
 	"github.com/assembledhq/143/internal/services/agent"
 	"github.com/assembledhq/143/internal/services/github/identity"
 	"github.com/assembledhq/143/internal/services/linear"
+	"github.com/assembledhq/143/internal/services/sandbox"
 	"github.com/assembledhq/143/internal/services/sandboxauth"
 	"github.com/assembledhq/143/internal/services/storage"
+	"github.com/assembledhq/143/internal/services/workspace"
 	"github.com/assembledhq/143/internal/testutil"
 )
 
@@ -286,6 +288,7 @@ type mockSessionStore struct {
 	countRunningErr        error
 	beginRuntimeErr        error
 	updateRevisionErr      error
+	eventHook              func(string)
 	acquireHoldFn          func(proposedContainerID string) (string, error)
 	acquireHoldErr         error
 	setWorkerNodeErr       error
@@ -388,6 +391,9 @@ func (m *mockSessionStore) UpdateStatus(ctx context.Context, orgID, runID uuid.U
 func (m *mockSessionStore) UpdateResult(ctx context.Context, orgID, runID uuid.UUID, status string, result *models.SessionResult) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.eventHook != nil {
+		m.eventHook("session_result:" + status)
+	}
 	m.resultUpdates = append(m.resultUpdates, resultUpdate{status: status, result: result})
 	return nil
 }
@@ -528,6 +534,9 @@ func (m *mockSessionStore) UpdateRevisionContext(ctx context.Context, orgID, ses
 func (m *mockSessionStore) UpdateFailure(ctx context.Context, orgID, runID uuid.UUID, explanation, category string, nextSteps []string, retryAdvised bool) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.eventHook != nil {
+		m.eventHook("session_failure")
+	}
 	m.failureUpdates = append(m.failureUpdates, failureUpdate{
 		explanation:  explanation,
 		category:     category,
@@ -843,6 +852,33 @@ func (m *mockSnapshotStore) Delete(ctx context.Context, key string) error {
 	return nil
 }
 
+type mockFileReader struct {
+	listDirFn         func(ctx context.Context, containerID, workDir, dirPath string) ([]sandbox.FileEntry, error)
+	readFileFn        func(ctx context.Context, containerID, workDir, filePath string) (string, bool, error)
+	readFileContextFn func(ctx context.Context, containerID, workDir, filePath string, line, above, below int) (sandbox.FileContextResult, error)
+}
+
+func (m *mockFileReader) ListDir(ctx context.Context, containerID, workDir, dirPath string) ([]sandbox.FileEntry, error) {
+	if m.listDirFn != nil {
+		return m.listDirFn(ctx, containerID, workDir, dirPath)
+	}
+	return nil, errors.New("list dir not stubbed")
+}
+
+func (m *mockFileReader) ReadFile(ctx context.Context, containerID, workDir, filePath string) (string, bool, error) {
+	if m.readFileFn != nil {
+		return m.readFileFn(ctx, containerID, workDir, filePath)
+	}
+	return "", false, errors.New("read file not stubbed")
+}
+
+func (m *mockFileReader) ReadFileContext(ctx context.Context, containerID, workDir, filePath string, line, above, below int) (sandbox.FileContextResult, error) {
+	if m.readFileContextFn != nil {
+		return m.readFileContextFn(ctx, containerID, workDir, filePath, line, above, below)
+	}
+	return sandbox.FileContextResult{}, errors.New("read file context not stubbed")
+}
+
 // mockDecisionLogStore implements agent.DecisionLogStore.
 type mockDecisionLogStore struct {
 	mu       sync.Mutex
@@ -1059,6 +1095,8 @@ type testDeps struct {
 	creds            *mockCredentialProvider
 	codingCreds      agent.CodingCredentialProvider
 	snapshots        *mockSnapshotStore
+	fileReader       sandbox.FileReader
+	mentionIndexes   *workspace.MentionIndexCache
 	cancels          *agent.CancelRegistry
 	nodeID           string
 	orgs             *mockOrgStore
@@ -1187,6 +1225,8 @@ func buildOrchestrator(d testDeps) *agent.Orchestrator {
 		Credentials:       d.creds,
 		CodingCredentials: d.codingCreds,
 		Snapshots:         snapshotStore,
+		FileReader:        d.fileReader,
+		MentionIndexes:    d.mentionIndexes,
 		Cancels:           d.cancels,
 		Orgs:              orgStore,
 		IdentityResolver:  d.identityResolver,
@@ -1212,6 +1252,15 @@ func findLogEvent(t *testing.T, logs *bytes.Buffer, message string) map[string]a
 		}
 	}
 	return nil
+}
+
+func indexOfEvent(events []string, target string) int {
+	for i, event := range events {
+		if event == target {
+			return i
+		}
+	}
+	return -1
 }
 
 // --- Tests ---
@@ -7233,6 +7282,78 @@ func TestRunAgent_GracefullyStopsAndPreservesCheckpointOnNoProgress(t *testing.T
 	require.NotNil(t, completion, "policy-stopped RunAgent should emit agent run finished log")
 	require.Equal(t, "runtime_policy_stopped", completion["outcome"], "policy stop completion log should include policy outcome")
 	require.Equal(t, string(models.RuntimeStopReasonNoProgress), completion["stop_reason"], "policy stop completion log should include runtime stop reason")
+}
+
+func TestRunAgent_PolicyStopPersistsTerminalStateBeforeMentionWarmup(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	run := testRun(orgID, issue.ID)
+
+	settings, err := json.Marshal(map[string]any{
+		"max_session_duration_seconds": 30,
+		"runtime_budgets": map[string]any{
+			"no_progress_timeout_seconds":            1,
+			"graceful_shutdown_window_seconds":       1,
+			"checkpoint_finalization_window_seconds": 1,
+			"automatic_extension_seconds":            2,
+			"max_automatic_extension_seconds":        2,
+			"absolute_runtime_ceiling_seconds":       5,
+		},
+	})
+	require.NoError(t, err, "runtime settings JSON should marshal")
+
+	var (
+		eventMu sync.Mutex
+		events  []string
+	)
+	recordEvent := func(event string) {
+		eventMu.Lock()
+		defer eventMu.Unlock()
+		events = append(events, event)
+	}
+
+	cancelReg := agent.NewCancelRegistry(zerolog.Nop())
+	d := defaultDeps()
+	d.cancels = cancelReg
+	d.orgs = &mockOrgStore{org: models.Organization{ID: orgID, Settings: settings}}
+	d.sessions.eventHook = recordEvent
+	d.mentionIndexes = workspace.NewMentionIndexCache(workspace.MentionIndexCacheConfig{})
+	d.fileReader = &mockFileReader{
+		listDirFn: func(ctx context.Context, containerID, workDir, dirPath string) ([]sandbox.FileEntry, error) {
+			recordEvent("mention_warm")
+			return nil, errors.New("mention warm should not block terminal status")
+		},
+	}
+	d.provider.SnapshotFn = func(ctx context.Context, sb *agent.Sandbox) (io.ReadCloser, error) {
+		return io.NopCloser(bytes.NewReader([]byte("checkpoint-before-warm"))), nil
+	}
+	d.provider.ExecFn = func(ctx context.Context, sb *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
+		if strings.HasPrefix(cmd, "git ") {
+			return 0, nil
+		}
+		return 1, errors.New("exec not available in test")
+	}
+	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
+		<-ctx.Done()
+		return &agent.AgentResult{
+			Summary:         "Interrupted cleanly",
+			ConfidenceScore: 0.4,
+			AgentSessionID:  "agent-checkpoint-before-warm",
+			ExitCode:        1,
+		}, ctx.Err()
+	}
+
+	err = buildOrchestrator(d).RunAgent(context.Background(), run)
+	require.NoError(t, err, "policy stop should be handled internally after terminal state is persisted")
+
+	eventMu.Lock()
+	gotEvents := append([]string(nil), events...)
+	eventMu.Unlock()
+	require.Contains(t, gotEvents, "session_failure", "policy stop should persist session failure details")
+	require.Contains(t, gotEvents, "mention_warm", "policy stop should still attempt mention-index warmup after checkpointing")
+	require.Less(t, indexOfEvent(gotEvents, "session_failure"), indexOfEvent(gotEvents, "mention_warm"), "terminal session state should be persisted before mention-index warmup")
 }
 
 func TestRunAgent_DoesNotPublishCheckpointWithoutSnapshotStore(t *testing.T) {
