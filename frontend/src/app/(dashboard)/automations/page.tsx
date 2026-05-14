@@ -77,11 +77,12 @@ function AutomationCard({ automation, canManage }: { automation: Automation; can
       <div className="flex items-start gap-3 p-4 sm:gap-4">
         <Link href={`/automations/${automation.id}`} className="flex-1 min-w-0">
           <div className="flex items-start gap-2.5">
-            {automation.enabled ? (
-              <RefreshCw className="h-4 w-4 text-blue-500 shrink-0" />
-            ) : (
-              <Pause className="h-4 w-4 text-muted-foreground shrink-0" />
-            )}
+            <span
+              className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-border bg-card text-lg leading-none"
+              aria-label={`Automation icon for ${automation.name}`}
+            >
+              {automation.icon_value || "⚙️"}
+            </span>
             <div className="min-w-0 flex-1 space-y-2">
               <div className="space-y-1 sm:flex sm:items-start sm:justify-between sm:gap-3 sm:space-y-0">
                 <h3 className="break-words text-sm font-medium leading-5 text-foreground">

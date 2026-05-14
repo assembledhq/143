@@ -2543,6 +2543,7 @@ func automationRunRowColumns() []string {
 func automationRowColumns() []string {
 	return []string{
 		"id", "org_id", "repository_id", "name", "goal", "scope",
+		"icon_type", "icon_value",
 		"agent_type", "model_override", "reasoning_effort", "execution_mode", "max_concurrent", "base_branch",
 		"identity_scope",
 		"schedule_type", "interval_value", "interval_unit", "interval_run_at", "cron_expression", "timezone",
@@ -2590,6 +2591,7 @@ func TestAutomationRunHandler_HappyPath(t *testing.T) {
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(automationRowColumns()).AddRow(
 			automationID, orgID, &repoID, "nightly", "cleanup", nil,
+			models.AutomationIconTypeEmoji, "⚙️",
 			&agentType, nil, &reasoningEffort, "sequential", 1, "main", models.AutomationIdentityScopeOrg,
 			models.AutomationScheduleInterval, nil, nil, nil, nil, "UTC",
 			nil, nil, true, nil, nil, nil,
@@ -2681,6 +2683,7 @@ func TestAutomationRunHandler_LosesRaceClaimingPendingRow(t *testing.T) {
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(automationRowColumns()).AddRow(
 			automationID, orgID, &repoID, "nightly", "cleanup", nil,
+			models.AutomationIconTypeEmoji, "⚙️",
 			nil, nil, nil, "sequential", 1, "main", models.AutomationIdentityScopeOrg,
 			models.AutomationScheduleInterval, nil, nil, nil, nil, "UTC",
 			nil, nil, true, nil, nil, nil,
@@ -2816,6 +2819,7 @@ func TestAutomationRunHandler_MarksSkippedWhenAutomationPaused(t *testing.T) {
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(automationRowColumns()).AddRow(
 			automationID, orgID, nil, "nightly", "cleanup", nil,
+			models.AutomationIconTypeEmoji, "⚙️",
 			nil, nil, nil, "sequential", 1, "main", models.AutomationIdentityScopeOrg,
 			models.AutomationScheduleInterval, nil, nil, nil, nil, "UTC",
 			nil, nil, false, nil, nil, nil,
@@ -2869,6 +2873,7 @@ func TestAutomationRunHandler_PersonalAutomationRunsAsCreator(t *testing.T) {
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(automationRowColumns()).AddRow(
 			automationID, orgID, nil, "nightly", "cleanup", nil,
+			models.AutomationIconTypeEmoji, "⚙️",
 			nil, nil, nil, "sequential", 1, "main", models.AutomationIdentityScopePersonal,
 			models.AutomationScheduleInterval, nil, nil, nil, nil, "UTC",
 			nil, nil, true, &creatorID, nil, nil,
@@ -2941,6 +2946,7 @@ func TestAutomationRunHandler_OrgAutomationIgnoresManualClickerForSessionIdentit
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(automationRowColumns()).AddRow(
 			automationID, orgID, nil, "nightly", "cleanup", nil,
+			models.AutomationIconTypeEmoji, "⚙️",
 			nil, nil, nil, "sequential", 1, "main", models.AutomationIdentityScopeOrg,
 			models.AutomationScheduleInterval, nil, nil, nil, nil, "UTC",
 			nil, nil, true, &clickerID, nil, nil,
@@ -3019,6 +3025,7 @@ func TestAutomationRunHandler_UsesIdentityScopeFromRunSnapshot(t *testing.T) {
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(automationRowColumns()).AddRow(
 			automationID, orgID, nil, "nightly", "cleanup", nil,
+			models.AutomationIconTypeEmoji, "⚙️",
 			nil, nil, nil, "sequential", 1, "main", models.AutomationIdentityScopeOrg,
 			models.AutomationScheduleInterval, nil, nil, nil, nil, "UTC",
 			nil, nil, true, &creatorID, nil, nil,
@@ -3089,6 +3096,7 @@ func TestAutomationRunHandler_MissingCreatorMarksPersonalRunFailedWithoutRetry(t
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(automationRowColumns()).AddRow(
 			automationID, orgID, nil, "nightly", "cleanup", nil,
+			models.AutomationIconTypeEmoji, "⚙️",
 			nil, nil, nil, "sequential", 1, "main", models.AutomationIdentityScopePersonal,
 			models.AutomationScheduleInterval, nil, nil, nil, nil, "UTC",
 			nil, nil, true, nil, nil, nil,

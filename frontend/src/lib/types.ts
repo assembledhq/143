@@ -1479,6 +1479,8 @@ export interface Automation {
   name: string;
   goal: string;
   scope?: string;
+  icon_type: 'emoji';
+  icon_value: string;
   agent_type?: string;
   model_override?: string;
   reasoning_effort?: Session["reasoning_effort"];
