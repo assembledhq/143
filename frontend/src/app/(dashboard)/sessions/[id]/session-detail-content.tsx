@@ -2464,7 +2464,7 @@ const MIN_DETAIL = 280;
 const MAX_DETAIL = 600;
 const DEFAULT_DETAIL = 384;
 const MOBILE_REVIEW_MEDIA_QUERY = "(max-width: 767px)";
-const SESSION_HEADER_HEIGHT_CLASSNAME = "min-h-14";
+const SESSION_HEADER_HEIGHT_CLASSNAME = "h-14";
 // Transcript keyboard scroll tuning. Step matches a comfortable line-pair
 // jump; page distance follows browser conventions (~85% viewport with a
 // floor for very short panels).
@@ -4312,9 +4312,12 @@ export function SessionDetailContent({ id }: { id: string }) {
     >
       <div
         data-testid="session-detail-header"
-        className={cn("border-b border-border px-2 py-2 shrink-0", SESSION_HEADER_HEIGHT_CLASSNAME)}
+        className="border-b border-border shrink-0"
       >
-        <div className="flex items-center gap-2 min-w-0">
+        <div
+          data-testid="session-detail-header-bar"
+          className={cn("flex items-center gap-2 min-w-0 px-2", SESSION_HEADER_HEIGHT_CLASSNAME)}
+        >
           <div
             ref={detailTabsRef}
             aria-label="Session detail tabs"
