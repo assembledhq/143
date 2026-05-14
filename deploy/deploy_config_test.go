@@ -179,7 +179,8 @@ func TestTailscaleReadyPrivateServiceBinding(t *testing.T) {
 	dbCompose, err := os.ReadFile("../docker-compose.db.yml")
 	require.NoError(t, err, "test should read db compose file")
 	dbComposeText := string(dbCompose)
-	require.Contains(t, dbComposeText, "${DB_BIND_IP:?", "db compose should require an explicit private bind IP instead of defaulting Postgres to the public interface")
+	require.Contains(t, dbComposeText, "${DB_BIND_IP:?", "db compose should require an explicit primary private bind IP instead of defaulting Postgres to the public interface")
+	require.NotContains(t, dbComposeText, "DB_TAILSCALE_BIND_IP", "db compose should not make Postgres startup depend on a Tailscale interface address")
 	require.NotContains(t, dbComposeText, "0.0.0.0:5432:5432", "db compose must not expose Postgres on every interface when cross-region workers use an overlay network")
 
 	pgHBA, err := os.ReadFile("../deploy/postgres/pg_hba.conf")
@@ -189,13 +190,14 @@ func TestTailscaleReadyPrivateServiceBinding(t *testing.T) {
 	provisionScript, err := os.ReadFile("../deploy/scripts/provision.sh")
 	require.NoError(t, err, "test should read provision.sh")
 	provisionText := string(provisionScript)
-	require.Contains(t, provisionText, `: "${DB_BIND_IP:?DB_BIND_IP is required for db role`, "db provisioning should fail loudly until the operator chooses the private or Tailscale bind address")
+	require.Contains(t, provisionText, `: "${DB_BIND_IP:?DB_BIND_IP is required for db role`, "db provisioning should fail loudly until the operator chooses the primary private bind address")
 	require.Contains(t, provisionText, "DB_BIND_IP=%s", "db provisioning should write DB_BIND_IP into /opt/143/.env for compose interpolation")
+	require.Contains(t, provisionText, "TS_ADVERTISE_ROUTES", "db provisioning should be able to advertise the private DB route over Tailscale without changing the DB listener")
 
 	deployScript, err := os.ReadFile("../deploy/scripts/deploy.sh")
 	require.NoError(t, err, "test should read deploy.sh")
 	deployText := string(deployScript)
-	require.Contains(t, deployText, `: "${DB_BIND_IP:?DB_BIND_IP is required for db role`, "db deploy should fail loudly until the operator chooses the private or Tailscale bind address")
+	require.Contains(t, deployText, `: "${DB_BIND_IP:?DB_BIND_IP is required for db role`, "db deploy should fail loudly until the operator chooses the primary private bind address")
 	require.Contains(t, deployText, "DB_BIND_IP=%s", "db deploy should preserve DB_BIND_IP in /opt/143/.env for compose interpolation")
 }
 
@@ -207,6 +209,9 @@ func TestProvisioningCanInstallAndUseTailscaleAddresses(t *testing.T) {
 	installText := string(installScript)
 	require.Contains(t, installText, "TS_AUTH_KEY", "Tailscale install helper should use an auth key for non-interactive server enrollment")
 	require.Contains(t, installText, "--advertise-tags", "Tailscale install helper should support tagged production nodes for ACLs")
+	require.Contains(t, installText, "--advertise-routes", "Tailscale install helper should support private subnet route advertisement for cross-region DB access")
+	require.Contains(t, installText, "net.ipv4.ip_forward", "Tailscale install helper should enable forwarding when a node advertises subnet routes")
+	require.Contains(t, installText, "--accept-routes=true", "Tailscale install helper should let remote workers accept advertised DB routes")
 	require.Contains(t, installText, "--accept-dns=false", "Tailscale install helper should not let tailnet DNS rewrite host resolver state")
 	require.Contains(t, installText, "tailscale ip -4", "Tailscale install helper should print the assigned IPv4 address for provisioning")
 
@@ -214,6 +219,7 @@ func TestProvisioningCanInstallAndUseTailscaleAddresses(t *testing.T) {
 	require.NoError(t, err, "test should read provision.sh")
 	provisionText := string(provisionScript)
 	require.Contains(t, provisionText, "install-tailscale.sh", "provisioning should run the shared Tailscale setup helper when TS_AUTH_KEY is provided")
+	require.Contains(t, provisionText, "TS_ACCEPT_ROUTES", "provisioning should pass route acceptance through to Tailscale enrollment")
 	require.Contains(t, provisionText, "WORKER_PRIVATE_IP_SOURCE", "worker provisioning should let operators explicitly choose Tailscale address discovery")
 	require.Contains(t, provisionText, "tailscale ip -4", "worker provisioning should be able to discover the worker's Tailscale IPv4 address")
 	require.Contains(t, provisionText, "100.64.0.0/10", "worker provisioning comments/errors should make the Tailscale address range explicit")
@@ -223,6 +229,7 @@ func TestProvisioningCanInstallAndUseTailscaleAddresses(t *testing.T) {
 	cloudInitText := string(cloudInit)
 	require.Contains(t, cloudInitText, "TS_AUTH_KEY", "worker cloud-init should support first-boot Tailscale enrollment")
 	require.Contains(t, cloudInitText, "tailscale up", "worker cloud-init should bring Tailscale up before starting the worker")
+	require.Contains(t, cloudInitText, "TS_ACCEPT_ROUTES", "worker cloud-init should support accepting advertised private routes")
 	require.Contains(t, cloudInitText, "--accept-dns=false", "worker cloud-init Tailscale setup should not rewrite host DNS")
 }
 

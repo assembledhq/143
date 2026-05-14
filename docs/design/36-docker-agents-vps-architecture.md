@@ -1197,6 +1197,7 @@ make provision-worker \
   HOST=<public-management-ip> \
   TS_AUTH_KEY=<tagged-auth-key> \
   TS_TAG=tag:prod-worker \
+  TS_ACCEPT_ROUTES=true \
   WORKER_PRIVATE_IP_SOURCE=tailscale \
   NODE_ID=worker-usw-1
 ```
@@ -1204,9 +1205,17 @@ make provision-worker \
 The worker writes `WORKER_PRIVATE_IP=<tailscale ip -4>` and
 `PREVIEW_INTERNAL_BASE_URL=http://<tailscale-ip>:8080` into `/opt/143/.env.local`.
 App nodes use that URL for signed internal preview RPC. The database node must
-also bind Postgres to an explicit private address with `DB_BIND_IP` rather than
-`0.0.0.0`; for a tailnet-only rollout, set `DB_BIND_IP` and `DB_HOST` to the
-database node's Tailscale IPv4 address.
+also bind Postgres to an explicit primary private address with `DB_BIND_IP`
+rather than `0.0.0.0`. Keep the default in-region `DB_HOST` pointed at that
+private address so Ashburn app/worker nodes retain a direct DB path if the
+tailnet control plane or tunnels are unavailable. To add cross-region workers,
+enroll the database node or an Ashburn subnet router with
+`TS_ADVERTISE_ROUTES=<db private ip>/32`, approve the route in Tailscale, and
+keep the out-of-region workers on the same `DB_HOST=<db private ip>` with
+`TS_ACCEPT_ROUTES=true` so Linux installs the advertised route. If the overlay
+is down, those out-of-region workers stop reaching Postgres, but same-datacenter
+nodes keep connecting over the private network because Docker and Postgres do
+not depend on the Tailscale address being present.
 
 **Worker VPS sizing:**
 

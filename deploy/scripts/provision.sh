@@ -107,7 +107,7 @@ if [ "$ROLE" = "logging" ]; then
   GRAFANA_ALERTS_CRITICAL_WEBHOOK_URL="${GRAFANA_ALERTS_CRITICAL_WEBHOOK_URL:-$DISABLED_CRITICAL_WEBHOOK_URL}"
 fi
 if [ "$ROLE" = "db" ]; then
-  : "${DB_BIND_IP:?DB_BIND_IP is required for db role (set it to the db node private or Tailscale IP)}"
+  : "${DB_BIND_IP:?DB_BIND_IP is required for db role (set it to the db node primary private IP)}"
 fi
 if [ "$ROLE" = "redis" ]; then
   : "${REDIS_PASSWORD:?REDIS_PASSWORD is required for redis role (set it or add to .env.production.enc)}"
@@ -127,14 +127,18 @@ configure_tailscale_if_requested() {
 
   local ts_hostname="${TS_HOSTNAME:-143-${ROLE}-${HOST//./-}}"
   local ts_tag="${TS_TAG:-tag:prod-${ROLE}}"
+  local ts_advertise_routes="${TS_ADVERTISE_ROUTES:-}"
+  local ts_accept_routes="${TS_ACCEPT_ROUTES:-false}"
   echo "--- Configuring Tailscale ($ts_hostname, $ts_tag) ---"
-  printf '%s\n%s\n%s\n' "$TS_AUTH_KEY" "$ts_hostname" "$ts_tag" \
+  printf '%s\n%s\n%s\n%s\n%s\n' "$TS_AUTH_KEY" "$ts_hostname" "$ts_tag" "$ts_advertise_routes" "$ts_accept_routes" \
     | ssh "${SSH_OPTS[@]}" root@"$HOST" '
         set -euo pipefail
         read -r TS_AUTH_KEY
         read -r TS_HOSTNAME
         read -r TS_TAG
-        export TS_AUTH_KEY TS_HOSTNAME TS_TAG
+        read -r TS_ADVERTISE_ROUTES
+        read -r TS_ACCEPT_ROUTES
+        export TS_AUTH_KEY TS_HOSTNAME TS_TAG TS_ADVERTISE_ROUTES TS_ACCEPT_ROUTES
         /opt/143/deploy/scripts/install-tailscale.sh
       '
 }

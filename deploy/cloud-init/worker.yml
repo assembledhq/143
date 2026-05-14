@@ -19,6 +19,7 @@
 #   export TS_AUTH_KEY="tskey-auth-..."             # optional: enroll this host in Tailscale
 #   export TS_TAG="tag:prod-worker"                 # optional: Tailscale ACL tag
 #   export TS_HOSTNAME="$NODE_ID"                   # optional: Tailscale device name
+#   export TS_ACCEPT_ROUTES="true"                  # optional: accept DB subnet routes
 #   export CHROME_WS_URL="ws://chrome:9222"
 #   export ENV_PRODUCTION_ENC_B64="$(base64 < .env.production.enc)"
 #   export REPO_URL="https://github.com/assembledhq/143.git"
@@ -67,7 +68,12 @@ runcmd:
       if [ -z "$TS_TAG_VALUE" ]; then
         TS_TAG_VALUE="tag:prod-worker"
       fi
-      tailscale up --auth-key="$TS_AUTH_KEY_VALUE" --hostname="$TS_HOSTNAME_VALUE" --advertise-tags="$TS_TAG_VALUE" --accept-dns=false
+      TS_ACCEPT_ROUTES_VALUE="${TS_ACCEPT_ROUTES}"
+      TS_ACCEPT_ROUTES_ARG=""
+      if [ "$TS_ACCEPT_ROUTES_VALUE" = "true" ]; then
+        TS_ACCEPT_ROUTES_ARG="--accept-routes=true"
+      fi
+      tailscale up --auth-key="$TS_AUTH_KEY_VALUE" --hostname="$TS_HOSTNAME_VALUE" --advertise-tags="$TS_TAG_VALUE" --accept-dns=false $TS_ACCEPT_ROUTES_ARG
       tailscale ip -4
     fi
 

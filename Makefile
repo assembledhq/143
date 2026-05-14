@@ -316,8 +316,8 @@ secrets-rotate:
 #
 # DB-only env vars:
 #   DB_BIND_IP                   — required for db role. Set to the db node's
-#                                  private or Tailscale IP; Postgres binds only
-#                                  to this address, never 0.0.0.0.
+#                                  primary private IP so same-datacenter nodes
+#                                  keep a DB path if Tailscale is unavailable.
 #
 # Worker-only env vars (per-host identity, written to /opt/143/.env.local
 # and preserved across deploys):
@@ -337,10 +337,16 @@ secrets-rotate:
 #   TS_AUTH_KEY                  — when set, provision.sh enrolls the host.
 #   TS_TAG                       — defaults to tag:prod-<role>.
 #   TS_HOSTNAME                  — defaults to 143-<role>-<HOST with dots as dashes>.
+#   TS_ADVERTISE_ROUTES          — optional comma-separated routes. Use the db
+#                                  private IP as /32 to let remote workers reach
+#                                  Postgres without changing the DB listener.
+#   TS_ACCEPT_ROUTES             — set to "true" on remote workers that should
+#                                  use advertised private routes.
 #
 # Example with overrides:
 #   make provision-worker HOST=87.99.158.39 WORKER_PRIVATE_IP=10.0.0.4 NODE_ID=worker-1
-#   make provision-worker HOST=<public-ip> TS_AUTH_KEY=tskey-auth-... WORKER_PRIVATE_IP_SOURCE=tailscale NODE_ID=worker-usw-1
+#   make provision-db HOST=<public-ip> DB_BIND_IP=10.0.0.3 TS_AUTH_KEY=tskey-auth-... TS_TAG=tag:prod-db TS_ADVERTISE_ROUTES=10.0.0.3/32
+#   make provision-worker HOST=<public-ip> TS_AUTH_KEY=tskey-auth-... TS_ACCEPT_ROUTES=true WORKER_PRIVATE_IP_SOURCE=tailscale NODE_ID=worker-usw-1
 #
 # To tear down and reprovision an existing node:
 #   make provision-app    HOST=87.99.150.138  REPROVISION=true
@@ -384,6 +390,8 @@ export DB_BIND_IP
 export TS_AUTH_KEY
 export TS_TAG
 export TS_HOSTNAME
+export TS_ADVERTISE_ROUTES
+export TS_ACCEPT_ROUTES
 
 # Auto-detect SSH key: use ~/.ssh/143-deploy if it exists.
 SSH_KEY ?= $(wildcard ~/.ssh/143-deploy)

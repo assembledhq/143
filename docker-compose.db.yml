@@ -16,7 +16,7 @@ services:
       - ./deploy/postgres/pg_hba.conf:/etc/postgresql/conf.d/pg_hba.conf:ro
     command: postgres -c config_file=/etc/postgresql/conf.d/custom.conf -c hba_file=/etc/postgresql/conf.d/pg_hba.conf
     ports:
-      - "${DB_BIND_IP:?DB_BIND_IP must be this node's private or Tailscale IP}:5432:5432"
+      - "${DB_BIND_IP:?DB_BIND_IP must be this node's primary private IP}:5432:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U onefortythree"]
       interval: 10s
