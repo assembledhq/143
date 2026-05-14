@@ -281,7 +281,7 @@ func (s *Service) buildBootstrapSeed(ctx context.Context, orgID uuid.UUID, repo 
 // integrationCredentials holds fetched credentials for all integration providers.
 // Fetched once per bootstrap/refresh run to avoid redundant DB lookups.
 type integrationCredentials struct {
-	github bool // true if GitHub App is configured (token is fetched separately)
+	github   bool // true if GitHub App is configured (token is fetched separately)
 	sentry   *models.DecryptedCredential
 	linear   *models.DecryptedCredential
 	notion   *models.DecryptedCredential

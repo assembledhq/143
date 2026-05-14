@@ -123,9 +123,12 @@ func (m *mockCodexAuthProvider) RefreshTokenByID(_ context.Context, _ models.Sco
 }
 
 type mockCodingCredentialProvider struct {
-	resolvable     map[models.ProviderName][]models.DecryptedCodingCredential
-	err            error
-	requiredUserID *uuid.UUID
+	resolvable      map[models.ProviderName][]models.DecryptedCodingCredential
+	err             error
+	requiredUserID  *uuid.UUID
+	mu              sync.Mutex
+	rateLimitedIDs  map[uuid.UUID]models.CodingCredentialRateLimit
+	authRejectedIDs map[uuid.UUID]bool
 }
 
 func (m *mockCodingCredentialProvider) ListResolvable(ctx context.Context, orgID uuid.UUID, userID *uuid.UUID, provider models.ProviderName) ([]models.DecryptedCodingCredential, error) {
@@ -141,6 +144,68 @@ func (m *mockCodingCredentialProvider) ListResolvable(ctx context.Context, orgID
 		return nil, nil
 	}
 	return m.resolvable[provider], nil
+}
+
+func (m *mockCodingCredentialProvider) PickRunnableMulti(ctx context.Context, orgIDScope models.Scope, providers []models.ProviderName) (*models.DecryptedCodingCredential, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, provider := range providers {
+		for _, cred := range m.resolvable[provider] {
+			if cred.Status != models.CodingCredentialStatusActive {
+				continue
+			}
+			if m.authRejectedIDs != nil && m.authRejectedIDs[cred.ID] {
+				continue
+			}
+			if limit, ok := m.rateLimitedIDs[cred.ID]; ok && limit.Until.After(time.Now()) {
+				continue
+			}
+			picked := cred
+			return &picked, nil
+		}
+	}
+	return nil, errors.New("all eligible coding credentials are currently shed")
+}
+
+func (m *mockCodingCredentialProvider) MarkRateLimitedForScope(_ context.Context, _ models.Scope, id uuid.UUID, limit models.CodingCredentialRateLimit) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.rateLimitedIDs == nil {
+		m.rateLimitedIDs = make(map[uuid.UUID]models.CodingCredentialRateLimit)
+	}
+	m.rateLimitedIDs[id] = limit
+	for provider, creds := range m.resolvable {
+		for i := range creds {
+			if creds[i].ID == id {
+				until := limit.Until
+				observedAt := time.Now()
+				message := limit.Message
+				creds[i].RateLimitedUntil = &until
+				creds[i].RateLimitedObservedAt = &observedAt
+				creds[i].RateLimitMessage = &message
+			}
+		}
+		m.resolvable[provider] = creds
+	}
+	return nil
+}
+
+func (m *mockCodingCredentialProvider) MarkAuthRejectedForScope(_ context.Context, _ models.Scope, id uuid.UUID) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.authRejectedIDs == nil {
+		m.authRejectedIDs = make(map[uuid.UUID]bool)
+	}
+	m.authRejectedIDs[id] = true
+	return nil
+}
+
+func (m *mockCodingCredentialProvider) MarkRateLimited(id uuid.UUID) {
+	_ = m.MarkRateLimitedForScope(context.Background(), models.Scope{}, id, models.CodingCredentialRateLimit{Until: time.Now().Add(time.Minute)})
+}
+
+func (m *mockCodingCredentialProvider) MarkAuthRejected(id uuid.UUID) {
+	_ = m.MarkAuthRejectedForScope(context.Background(), models.Scope{}, id)
 }
 
 // mockClaudeCodeAuthProvider implements agent.ClaudeCodeAuthProvider.
@@ -2150,6 +2215,159 @@ func TestContinueSession_FreshResumeWiresSandboxAuth(t *testing.T) {
 	require.Contains(t, createdCfg.Env["PATH"], "/home/sandbox/.local/bin", "ContinueSession should prepend the gh wrapper directory to PATH")
 	require.Contains(t, d.provider.ExecCalls, "143-tools git-bootstrap --workdir=/home/sandbox/backend", "ContinueSession should rerun git-bootstrap after cloning the fresh workspace")
 	require.Equal(t, 1, authStub.closeCalls, "ContinueSession should close the sandbox auth socket when the fresh container is destroyed at turn end")
+}
+
+func TestContinueSession_RateLimitRetriesWithFallbackCredential(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	issue.Source = models.IssueSourceManual
+	session := testRun(orgID, issue.ID)
+	session.AgentType = models.AgentTypeAmp
+	session.Status = string(models.SessionStatusIdle)
+	session.CurrentTurn = 1
+	session.SnapshotKey = nil
+
+	firstCredID := uuid.New()
+	secondCredID := uuid.New()
+	d := defaultDeps()
+	d.adapter = &mockAgentAdapter{name: models.AgentTypeAmp}
+	d.codingCreds = &mockCodingCredentialProvider{
+		resolvable: map[models.ProviderName][]models.DecryptedCodingCredential{
+			models.ProviderAmp: {
+				{
+					ID:        firstCredID,
+					OrgID:     orgID,
+					Provider:  models.ProviderAmp,
+					Config:    models.AmpConfig{APIKey: "amp-first"},
+					Priority:  1,
+					Status:    models.CodingCredentialStatusActive,
+					CreatedAt: time.Now(),
+				},
+				{
+					ID:        secondCredID,
+					OrgID:     orgID,
+					Provider:  models.ProviderAmp,
+					Config:    models.AmpConfig{APIKey: "amp-fallback"},
+					Priority:  2,
+					Status:    models.CodingCredentialStatusActive,
+					CreatedAt: time.Now(),
+				},
+			},
+		},
+	}
+	d.orgs = &mockOrgStore{org: models.Organization{ID: orgID}}
+	d.identityResolver = identity.NewResolver(d.github, zerolog.Nop())
+	d.sandboxAuth = &fakeSandboxAuthServer{}
+	d.users = fakeUserStore{}
+	d.issues.issue = issue
+	d.messages.messages = []models.SessionMessage{
+		{
+			ID:         1,
+			SessionID:  session.ID,
+			OrgID:      orgID,
+			TurnNumber: 2,
+			Role:       models.MessageRoleUser,
+			Content:    "Please continue.",
+		},
+	}
+	d.provider.CreateFn = func(ctx context.Context, cfg agent.SandboxConfig) (*agent.Sandbox, error) {
+		return &agent.Sandbox{ID: "resume-sandbox", Provider: "mock", WorkDir: cfg.WorkDir, HomeDir: cfg.HomeDir}, nil
+	}
+	var seenKeys []string
+	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
+		seenKeys = append(seenKeys, sandbox.Env["AMP_API_KEY"])
+		if len(seenKeys) == 1 {
+			return &agent.AgentResult{ExitCode: 1, Error: "rate limit exceeded retry-after=60"}, errors.New("rate limit exceeded")
+		}
+		return &agent.AgentResult{
+			Summary:         "continued with fallback",
+			ConfidenceScore: 0.9,
+			ExitCode:        0,
+		}, nil
+	}
+
+	err := buildOrchestrator(d).ContinueSession(context.Background(), session, nil)
+	require.NoError(t, err, "ContinueSession should retry with a fallback credential after a rate-limit result")
+	require.Equal(t, []string{"amp-first", "amp-fallback"}, seenKeys, "ContinueSession should refresh agent credentials before retrying")
+	require.Len(t, d.sessions.turnUpdates, 1, "ContinueSession should persist a single successful turn after fallback retry")
+}
+
+func TestContinueSession_RateLimitFallbackExhaustionCreatesBlockedMessage(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	issue.Source = models.IssueSourceManual
+	session := testRun(orgID, issue.ID)
+	session.AgentType = models.AgentTypeAmp
+	session.Status = string(models.SessionStatusIdle)
+	session.CurrentTurn = 1
+	session.SnapshotKey = nil
+
+	firstCredID := uuid.New()
+	secondCredID := uuid.New()
+	d := defaultDeps()
+	d.adapter = &mockAgentAdapter{name: models.AgentTypeAmp}
+	d.codingCreds = &mockCodingCredentialProvider{
+		resolvable: map[models.ProviderName][]models.DecryptedCodingCredential{
+			models.ProviderAmp: {
+				{
+					ID:        firstCredID,
+					OrgID:     orgID,
+					Provider:  models.ProviderAmp,
+					Config:    models.AmpConfig{APIKey: "amp-first"},
+					Priority:  1,
+					Status:    models.CodingCredentialStatusActive,
+					CreatedAt: time.Now(),
+				},
+				{
+					ID:        secondCredID,
+					OrgID:     orgID,
+					Provider:  models.ProviderAmp,
+					Config:    models.AmpConfig{APIKey: "amp-fallback"},
+					Priority:  2,
+					Status:    models.CodingCredentialStatusActive,
+					CreatedAt: time.Now(),
+				},
+			},
+		},
+	}
+	d.orgs = &mockOrgStore{org: models.Organization{ID: orgID}}
+	d.identityResolver = identity.NewResolver(d.github, zerolog.Nop())
+	d.sandboxAuth = &fakeSandboxAuthServer{}
+	d.users = fakeUserStore{}
+	d.issues.issue = issue
+	d.messages.messages = []models.SessionMessage{
+		{
+			ID:         1,
+			SessionID:  session.ID,
+			OrgID:      orgID,
+			TurnNumber: 2,
+			Role:       models.MessageRoleUser,
+			Content:    "Please continue.",
+		},
+	}
+	d.provider.CreateFn = func(ctx context.Context, cfg agent.SandboxConfig) (*agent.Sandbox, error) {
+		return &agent.Sandbox{ID: "resume-sandbox", Provider: "mock", WorkDir: cfg.WorkDir, HomeDir: cfg.HomeDir}, nil
+	}
+	var seenKeys []string
+	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
+		seenKeys = append(seenKeys, sandbox.Env["AMP_API_KEY"])
+		return &agent.AgentResult{ExitCode: 1, Error: "rate limit exceeded retry-after=60"}, errors.New("rate limit exceeded")
+	}
+
+	err := buildOrchestrator(d).ContinueSession(context.Background(), session, nil)
+	require.Error(t, err, "ContinueSession should fail when every fallback credential is rate limited")
+	require.Contains(t, err.Error(), "all Amp auths are rate limited", "ContinueSession should return the clear blocked-auth message")
+	require.Equal(t, []string{"amp-first", "amp-fallback"}, seenKeys, "ContinueSession should try the next credential before blocking")
+
+	messages := d.messages.getMessages()
+	require.Len(t, messages, 2, "ContinueSession should append one assistant message for the blocked continue")
+	require.Equal(t, models.MessageRoleAssistant, messages[1].Role, "blocked continue message should be assistant-authored")
+	require.Contains(t, messages[1].Content, "all Amp auths are rate limited", "blocked continue message should explain the rate-limit exhaustion")
+	require.Empty(t, d.sessions.turnUpdates, "ContinueSession should not persist a successful turn after all credentials are rate limited")
 }
 
 func TestContinueSession_FreshResumeLegacyGitHubAuthStillBootstrapsBranchGuard(t *testing.T) {

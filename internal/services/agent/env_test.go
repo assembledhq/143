@@ -114,6 +114,7 @@ type envCodingCredentialProvider struct {
 	errs            map[models.ProviderName]error
 	rateLimitedIDs  []uuid.UUID
 	authRejectedIDs []uuid.UUID
+	rateLimits      []models.CodingCredentialRateLimit
 }
 
 func (m *envCodingCredentialProvider) ListResolvable(_ context.Context, _ uuid.UUID, _ *uuid.UUID, provider models.ProviderName) ([]models.DecryptedCodingCredential, error) {
@@ -206,6 +207,17 @@ func (m *envCodingCredentialProvider) MarkRateLimited(id uuid.UUID) {
 
 func (m *envCodingCredentialProvider) MarkAuthRejected(id uuid.UUID) {
 	m.authRejectedIDs = append(m.authRejectedIDs, id)
+}
+
+func (m *envCodingCredentialProvider) MarkRateLimitedForScope(_ context.Context, _ models.Scope, id uuid.UUID, limit models.CodingCredentialRateLimit) error {
+	m.rateLimitedIDs = append(m.rateLimitedIDs, id)
+	m.rateLimits = append(m.rateLimits, limit)
+	return nil
+}
+
+func (m *envCodingCredentialProvider) MarkAuthRejectedForScope(_ context.Context, _ models.Scope, id uuid.UUID) error {
+	m.authRejectedIDs = append(m.authRejectedIDs, id)
+	return nil
 }
 
 type envOrgStore struct {
@@ -1056,6 +1068,20 @@ func TestAgentEnvCheckAuth(t *testing.T) {
 	require.Contains(t, err.Error(), "PI_API_KEY", "CheckAuth should explain the missing Pi credential")
 
 	require.NoError(t, env.CheckAuth(models.AgentTypePi, map[string]string{"PI_API_KEY": "pi-key"}), "CheckAuth should accept Pi runs with PI_API_KEY configured")
+
+	until := time.Date(2026, 5, 13, 15, 50, 0, 0, time.UTC)
+	err = env.CheckAuth(models.AgentTypeClaudeCode, map[string]string{
+		internalAuthBlockedKey:                              "all Claude Code auths are rate limited until 8:50 AM",
+		internalAuthBlockedProviderKey:                      string(models.ProviderAnthropic),
+		internalAuthBlockedRateLimitedUntilKey:              until.Format(time.RFC3339Nano),
+		internalAuthBlockedFallbackCandidatesUnavailableKey: "true",
+	})
+	require.Error(t, err, "CheckAuth should reject internally blocked credential stacks")
+	var authErr *AuthError
+	require.ErrorAs(t, err, &authErr, "CheckAuth should return structured AuthError metadata")
+	require.Equal(t, models.ProviderAnthropic, authErr.Provider, "AuthError should preserve the blocked provider")
+	require.Equal(t, until, *authErr.RateLimitedUntil, "AuthError should preserve the blocked reset time")
+	require.True(t, authErr.FallbackCandidatesUnavailable, "AuthError should report unavailable fallback candidates")
 }
 
 // TestAgentEnvShedAfterPick verifies that the shed-on-failure wiring forwards

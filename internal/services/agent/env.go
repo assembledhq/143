@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"path"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -59,8 +60,11 @@ func maybeWrapCodexAuthInvalid(source any, err error) error {
 // descriptive failure on the plan record so the UI can show actionable guidance
 // ("PM paused: configure Codex") instead of an opaque parse error.
 type AuthError struct {
-	AgentType models.AgentType
-	Detail    string
+	AgentType                     models.AgentType
+	Detail                        string
+	Provider                      models.ProviderName
+	RateLimitedUntil              *time.Time
+	FallbackCandidatesUnavailable bool
 }
 
 func (e *AuthError) Error() string {
@@ -107,8 +111,10 @@ type AgentEnv struct {
 	// the same scope race to write the slot, which is acceptable per the
 	// design's eventual-consistency note (`docs/design/future/65-…` § health
 	// cache).
-	recentPicks   map[pickKey]pickRecord
-	recentPicksMu sync.Mutex
+	recentPicks        map[pickKey]pickRecord
+	recentPicksMu      sync.Mutex
+	credentialBlocks   map[pickKey]credentialBlock
+	credentialBlocksMu sync.Mutex
 }
 
 type pickKey struct {
@@ -121,6 +127,23 @@ type pickRecord struct {
 	credID     uuid.UUID
 	credential *models.DecryptedCodingCredential
 	at         time.Time
+}
+
+type credentialBlock struct {
+	detail                        string
+	provider                      models.ProviderName
+	rateLimitedUntil              *time.Time
+	fallbackCandidatesUnavailable bool
+	at                            time.Time
+}
+
+// CredentialFailureSignal is the normalized credential-level failure parsed
+// from an agent runtime result.
+type CredentialFailureSignal struct {
+	RateLimited      bool
+	AuthRejected     bool
+	RateLimitedUntil time.Time
+	Message          string
 }
 
 // pickTrackerTTL bounds how long after a pick a Shed call still applies.
@@ -191,6 +214,7 @@ func NewAgentEnv(deps AgentEnvDeps) *AgentEnv {
 		provider:          deps.Provider,
 		logger:            deps.Logger,
 		recentPicks:       make(map[pickKey]pickRecord),
+		credentialBlocks:  make(map[pickKey]credentialBlock),
 	}
 }
 
@@ -217,6 +241,13 @@ type CodingCredentialShedder interface {
 	MarkAuthRejected(id uuid.UUID)
 }
 
+// CodingCredentialPersistentShedder is implemented by the unified store when
+// runtime credential failures should be persisted across workers.
+type CodingCredentialPersistentShedder interface {
+	MarkRateLimitedForScope(ctx context.Context, scope models.Scope, id uuid.UUID, limit models.CodingCredentialRateLimit) error
+	MarkAuthRejectedForScope(ctx context.Context, scope models.Scope, id uuid.UUID) error
+}
+
 // CodexAuthRefresher is the optional capability implemented by the Codex auth
 // service. Unified subscription resolution chooses a concrete credential id;
 // this interface lets auth.json injection refresh that exact row before
@@ -239,6 +270,13 @@ type CodexAuthRefresher interface {
 type CodingCredentialMultiPicker interface {
 	PickRunnableMulti(ctx context.Context, scope models.Scope, providers []models.ProviderName) (*models.DecryptedCodingCredential, error)
 }
+
+const (
+	internalAuthBlockedKey                              = "__143_AUTH_BLOCKED_DETAIL"
+	internalAuthBlockedProviderKey                      = "__143_AUTH_BLOCKED_PROVIDER"
+	internalAuthBlockedRateLimitedUntilKey              = "__143_AUTH_BLOCKED_RATE_LIMITED_UNTIL"
+	internalAuthBlockedFallbackCandidatesUnavailableKey = "__143_AUTH_BLOCKED_FALLBACK_CANDIDATES_UNAVAILABLE"
+)
 
 // codingShedder type-asserts the configured CodingCredentialProvider into the
 // shed-capable interface. Returns nil when the provider does not implement
@@ -290,14 +328,6 @@ func (e *AgentEnv) recordPickWithCredential(orgID uuid.UUID, userID *uuid.UUID, 
 		e.evictOldestPickLocked()
 	}
 	e.recentPicks[key] = pickRecord{credID: credID, credential: cred, at: now}
-}
-
-func (e *AgentEnv) lookupRecentPick(orgID uuid.UUID, userID *uuid.UUID, provider models.ProviderName) (uuid.UUID, bool) {
-	rec, ok := e.lookupRecentPickRecord(orgID, userID, provider)
-	if !ok {
-		return uuid.Nil, false
-	}
-	return rec.credID, true
 }
 
 func (e *AgentEnv) lookupRecentCredential(orgID uuid.UUID, userID *uuid.UUID, provider models.ProviderName) (models.DecryptedCodingCredential, bool) {
@@ -365,15 +395,32 @@ func (e *AgentEnv) evictOldestPickLocked() {
 //
 // userID may be nil for org-scope picks.
 func (e *AgentEnv) ShedRateLimited(orgID uuid.UUID, userID *uuid.UUID, provider models.ProviderName) {
+	e.ShedRateLimitedWithSignal(context.Background(), orgID, userID, provider, CredentialFailureSignal{})
+}
+
+func (e *AgentEnv) ShedRateLimitedWithSignal(ctx context.Context, orgID uuid.UUID, userID *uuid.UUID, provider models.ProviderName, signal CredentialFailureSignal) {
 	shedder := e.codingShedder()
 	if shedder == nil {
 		return
 	}
-	credID, ok := e.lookupRecentPick(orgID, userID, provider)
+	rec, ok := e.lookupRecentPickRecord(orgID, userID, provider)
 	if !ok {
 		return
 	}
-	shedder.MarkRateLimited(credID)
+	limit := models.CodingCredentialRateLimit{Until: signal.RateLimitedUntil, Message: signal.Message}
+	if limit.Until.IsZero() {
+		limit.Until = time.Now().Add(75 * time.Second)
+	}
+	if persistent, ok := shedder.(CodingCredentialPersistentShedder); ok && rec.credential != nil {
+		if err := persistent.MarkRateLimitedForScope(ctx, rec.credential.Scope(), rec.credID, limit); err != nil {
+			e.logger.Warn().Err(err).
+				Str("cred_id", rec.credID.String()).
+				Str("provider", string(provider)).
+				Msg("failed to persist coding credential rate-limit marker")
+		}
+		return
+	}
+	shedder.MarkRateLimited(rec.credID)
 }
 
 // ShedAuthRejected surfaces a 401 / token_expired from an upstream provider
@@ -385,15 +432,28 @@ func (e *AgentEnv) ShedRateLimited(orgID uuid.UUID, userID *uuid.UUID, provider 
 //
 // userID may be nil for org-scope picks.
 func (e *AgentEnv) ShedAuthRejected(orgID uuid.UUID, userID *uuid.UUID, provider models.ProviderName) {
+	e.ShedAuthRejectedWithContext(context.Background(), orgID, userID, provider)
+}
+
+func (e *AgentEnv) ShedAuthRejectedWithContext(ctx context.Context, orgID uuid.UUID, userID *uuid.UUID, provider models.ProviderName) {
 	shedder := e.codingShedder()
 	if shedder == nil {
 		return
 	}
-	credID, ok := e.lookupRecentPick(orgID, userID, provider)
+	rec, ok := e.lookupRecentPickRecord(orgID, userID, provider)
 	if !ok {
 		return
 	}
-	shedder.MarkAuthRejected(credID)
+	if persistent, ok := shedder.(CodingCredentialPersistentShedder); ok && rec.credential != nil {
+		if err := persistent.MarkAuthRejectedForScope(ctx, rec.credential.Scope(), rec.credID); err != nil {
+			e.logger.Warn().Err(err).
+				Str("cred_id", rec.credID.String()).
+				Str("provider", string(provider)).
+				Msg("failed to persist coding credential auth rejection")
+		}
+		return
+	}
+	shedder.MarkAuthRejected(rec.credID)
 }
 
 // integrationCredentials holds the resolved Sentry, Linear, and Notion configs for an org.
@@ -460,6 +520,8 @@ func (e *AgentEnv) Resolve(ctx context.Context, orgID uuid.UUID, agentType model
 			if ac.BaseURL != "" {
 				merged["ANTHROPIC_BASE_URL"] = ac.BaseURL
 			}
+		} else if block, ok := e.lookupCredentialBlock(orgID, userID, models.ProviderAnthropic); ok {
+			setAuthBlockedEnv(merged, block)
 		}
 	case models.AgentTypeCodex:
 		// Codex CLI authenticates via ~/.codex/auth.json (injected by
@@ -479,6 +541,8 @@ func (e *AgentEnv) Resolve(ctx context.Context, orgID uuid.UUID, agentType model
 			if oc.BaseURL != "" {
 				merged["OPENAI_BASE_URL"] = oc.BaseURL
 			}
+		} else if block, ok := e.lookupCredentialBlock(orgID, userID, models.ProviderOpenAI); ok {
+			setAuthBlockedEnv(merged, block)
 		}
 		// Skip Codex CLI's internal bwrap (bubblewrap) sandboxing. The
 		// container is already isolated by Docker + gVisor (dropped caps,
@@ -495,16 +559,22 @@ func (e *AgentEnv) Resolve(ctx context.Context, orgID uuid.UUID, agentType model
 			if gc.Model != "" {
 				merged["GEMINI_MODEL"] = gc.Model
 			}
+		} else if block, ok := e.lookupCredentialBlock(orgID, userID, models.ProviderGemini); ok {
+			setAuthBlockedEnv(merged, block)
 		}
 	case models.AgentTypeAmp:
 		cfg := e.resolveProviderConfig(ctx, orgID, userID, models.ProviderAmp)
 		if amp, ok := cfg.(models.AmpConfig); ok && amp.APIKey != "" {
 			merged["AMP_API_KEY"] = amp.APIKey
+		} else if block, ok := e.lookupCredentialBlock(orgID, userID, models.ProviderAmp); ok {
+			setAuthBlockedEnv(merged, block)
 		}
 	case models.AgentTypePi:
 		cfg := e.resolveProviderConfig(ctx, orgID, userID, models.ProviderPi)
 		if pi, ok := cfg.(models.PiConfig); ok && pi.APIKey != "" {
 			merged["PI_API_KEY"] = pi.APIKey
+		} else if block, ok := e.lookupCredentialBlock(orgID, userID, models.ProviderPi); ok {
+			setAuthBlockedEnv(merged, block)
 		}
 	}
 
@@ -590,6 +660,20 @@ func (e *AgentEnv) Resolve(ctx context.Context, orgID uuid.UUID, agentType model
 // Resolve has run (which layers agent_config overrides on top of resolved
 // provider creds) and after any per-run ModelOverride has been applied.
 func (e *AgentEnv) CheckAuth(agentType models.AgentType, env map[string]string) error {
+	if detail := env[internalAuthBlockedKey]; detail != "" {
+		authErr := &AuthError{
+			AgentType:                     agentType,
+			Detail:                        detail,
+			Provider:                      models.ProviderName(env[internalAuthBlockedProviderKey]),
+			FallbackCandidatesUnavailable: env[internalAuthBlockedFallbackCandidatesUnavailableKey] == "true",
+		}
+		if rawUntil := env[internalAuthBlockedRateLimitedUntilKey]; rawUntil != "" {
+			if until, err := time.Parse(time.RFC3339Nano, rawUntil); err == nil {
+				authErr.RateLimitedUntil = &until
+			}
+		}
+		return authErr
+	}
 	switch agentType {
 	case models.AgentTypeAmp:
 		if env["AMP_API_KEY"] == "" {
@@ -607,6 +691,19 @@ func (e *AgentEnv) CheckAuth(agentType models.AgentType, env map[string]string) 
 		}
 	}
 	return nil
+}
+
+func setAuthBlockedEnv(env map[string]string, block credentialBlock) {
+	env[internalAuthBlockedKey] = block.detail
+	if block.provider != "" {
+		env[internalAuthBlockedProviderKey] = string(block.provider)
+	}
+	if block.rateLimitedUntil != nil {
+		env[internalAuthBlockedRateLimitedUntilKey] = block.rateLimitedUntil.Format(time.RFC3339Nano)
+	}
+	if block.fallbackCandidatesUnavailable {
+		env[internalAuthBlockedFallbackCandidatesUnavailableKey] = "true"
+	}
 }
 
 // applyAgentConfigOverrides layers agent_config.<agentType>.* entries from org
@@ -740,10 +837,13 @@ func (e *AgentEnv) pickFromCodingProviderSet(ctx context.Context, orgID uuid.UUI
 			// pickErr discriminates between "no candidate exists" (config
 			// error) and "every candidate is currently shed" (transient) via
 			// db.ErrCodingCredentialNotFound vs db.ErrAllCredentialsShed.
-			// The runtime has no retry hook today, so both fall through the
-			// same way — the wrapped error makes the distinction visible in
-			// logs.
+			// When the whole stack is rate-limited, record a structured block
+			// so CheckAuth can produce a clear user-facing continue-session
+			// failure instead of a generic missing-key error.
 			e.logger.Warn().Err(pickErr).Str("provider", string(requestedProvider)).Msg("coding credential picker found no eligible credential")
+			if isAllCredentialsShedError(pickErr) {
+				e.recordCredentialBlock(orgID, userID, rateLimitBlockForProvider(requestedProvider, rowsByProvider, providers))
+			}
 			return nil, nil, true
 		}
 		if picked == nil {
@@ -778,6 +878,92 @@ func (e *AgentEnv) pickFromCodingProviderSet(ctx context.Context, orgID uuid.UUI
 		}
 	}
 	return nil, nil, true
+}
+
+func (e *AgentEnv) recordCredentialBlock(orgID uuid.UUID, userID *uuid.UUID, block credentialBlock) {
+	if block.detail == "" || block.provider == "" {
+		return
+	}
+	key := pickKey{orgID: orgID, provider: block.provider}
+	if userID != nil {
+		key.userID = *userID
+	}
+	e.credentialBlocksMu.Lock()
+	defer e.credentialBlocksMu.Unlock()
+	if e.credentialBlocks == nil {
+		e.credentialBlocks = make(map[pickKey]credentialBlock)
+	}
+	block.at = time.Now()
+	e.credentialBlocks[key] = block
+}
+
+func isAllCredentialsShedError(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "all eligible coding credentials are currently shed")
+}
+
+func (e *AgentEnv) lookupCredentialBlock(orgID uuid.UUID, userID *uuid.UUID, provider models.ProviderName) (credentialBlock, bool) {
+	key := pickKey{orgID: orgID, provider: provider}
+	if userID != nil {
+		key.userID = *userID
+	}
+	e.credentialBlocksMu.Lock()
+	defer e.credentialBlocksMu.Unlock()
+	block, ok := e.credentialBlocks[key]
+	if !ok {
+		return credentialBlock{}, false
+	}
+	if time.Since(block.at) > pickTrackerTTL {
+		delete(e.credentialBlocks, key)
+		return credentialBlock{}, false
+	}
+	return block, true
+}
+
+func rateLimitBlockForProvider(provider models.ProviderName, rowsByProvider map[models.ProviderName][]models.DecryptedCodingCredential, providers []models.ProviderName) credentialBlock {
+	var earliest *time.Time
+	rateLimitedCandidates := 0
+	now := time.Now()
+	for _, p := range providers {
+		for _, cred := range rowsByProvider[p] {
+			if cred.RateLimitedUntil == nil || !cred.RateLimitedUntil.After(now) {
+				continue
+			}
+			rateLimitedCandidates++
+			if earliest == nil || cred.RateLimitedUntil.Before(*earliest) {
+				t := *cred.RateLimitedUntil
+				earliest = &t
+			}
+		}
+	}
+	label := agentLabelForProvider(provider)
+	block := credentialBlock{
+		provider:                      provider,
+		rateLimitedUntil:              earliest,
+		fallbackCandidatesUnavailable: rateLimitedCandidates > 1,
+	}
+	if earliest != nil {
+		block.detail = fmt.Sprintf("all %s auths are rate limited until %s. Try again then or add another %s auth.", label, earliest.Format(time.Kitchen), label)
+		return block
+	}
+	block.detail = fmt.Sprintf("all %s auths are temporarily unavailable. Try again shortly or add another %s auth.", label, label)
+	return block
+}
+
+func agentLabelForProvider(provider models.ProviderName) string {
+	switch provider {
+	case models.ProviderOpenAI:
+		return "Codex"
+	case models.ProviderAnthropic:
+		return "Claude Code"
+	case models.ProviderGemini:
+		return "Gemini"
+	case models.ProviderAmp:
+		return "Amp"
+	case models.ProviderPi:
+		return "Pi"
+	default:
+		return string(provider)
+	}
 }
 
 func (e *AgentEnv) listCodingProviderRows(ctx context.Context, orgID uuid.UUID, userID *uuid.UUID, providers []models.ProviderName) (map[models.ProviderName][]models.DecryptedCodingCredential, bool, bool) {
