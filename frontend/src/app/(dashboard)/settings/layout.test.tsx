@@ -248,4 +248,19 @@ describe('SettingsLayout', () => {
 
     expect(screen.queryByRole('link')).not.toBeInTheDocument();
   });
+
+  it('adds shared bottom scroll padding for settings page containers', () => {
+    useAuthMock.mockReturnValue({ user: { role: 'admin' }, isLoading: false });
+
+    const { container } = renderWithProviders(
+      <SettingsLayout>
+        <div data-slot="page-container">settings content</div>
+      </SettingsLayout>
+    );
+
+    const paddingScope = container.querySelector('[data-slot="settings-layout-padding-scope"]');
+    expect(paddingScope).not.toBeNull();
+    expect(paddingScope).toHaveClass('[&_[data-slot=page-container]]:pb-24');
+    expect(paddingScope).toHaveClass('md:[&_[data-slot=page-container]]:pb-20');
+  });
 });
