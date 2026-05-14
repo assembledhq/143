@@ -49,6 +49,7 @@ import {
   minuteOptions,
 } from "../schedule-time";
 import { TimezonePicker } from "../timezone-picker";
+import { AutomationEmojiPicker } from "../automation-emoji-picker";
 
 export default function NewAutomationPage() {
   const router = useRouter();
@@ -66,6 +67,7 @@ export default function NewAutomationPage() {
   // Form state
   const [name, setName] = useState(initialTemplate?.name ?? "");
   const [goal, setGoal] = useState(initialTemplate?.goal ?? "");
+  const [iconValue, setIconValue] = useState("⚙️");
   const [scope, setScope] = useState("");
   const [selectedRepoId, setSelectedRepoId] = useState("");
   const [intervalValue, setIntervalValue] = useState(initialTemplate?.defaultInterval ?? 1);
@@ -125,6 +127,8 @@ export default function NewAutomationPage() {
       api.automations.create({
         name: name.trim(),
         goal: goal.trim(),
+        icon_type: "emoji",
+        icon_value: iconValue,
         repository_id: repoId,
         scope: scope.trim() || undefined,
         interval_value: intervalValue,
@@ -243,6 +247,11 @@ export default function NewAutomationPage() {
 
         {/* Main form */}
         <div className="space-y-4 rounded-lg border border-border bg-card p-5">
+          <div className="space-y-1.5">
+            <Label>Emoji</Label>
+            <AutomationEmojiPicker value={iconValue} onChange={setIconValue} className="w-full sm:w-64" />
+          </div>
+
           <div className="space-y-1.5">
             <Label htmlFor="name">Name</Label>
             <Input

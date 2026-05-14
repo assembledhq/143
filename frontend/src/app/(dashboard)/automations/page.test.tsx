@@ -26,6 +26,8 @@ describe("AutomationsPage", () => {
             name: "Weekly release hardening sweep for mobile checkout reliability",
             goal: "Keep the mobile checkout stable",
             scope: "",
+            icon_type: "emoji",
+            icon_value: "🧪",
             execution_mode: "async",
             max_concurrent: 1,
             base_branch: "main",
@@ -69,6 +71,7 @@ describe("AutomationsPage", () => {
 
     const title = await screen.findByText("Weekly release hardening sweep for mobile checkout reliability");
     expect(title).toHaveClass("break-words", "leading-5");
+    expect(screen.getByLabelText("Automation icon for Weekly release hardening sweep for mobile checkout reliability")).toHaveTextContent("🧪");
 
     const schedule = screen.getByText(/every 2 weeks at/);
     expect(schedule).toHaveClass("block", "break-words", "leading-5", "sm:max-w-[18rem]", "sm:text-right");

@@ -50,6 +50,8 @@ describe("AutomationDetailPage", () => {
           name: "Weekly audit",
           goal: "Check release health",
           scope: "",
+          icon_type: "emoji",
+          icon_value: "🧪",
           interval_value: 1,
           interval_unit: "weeks",
           base_branch: "main",
@@ -88,6 +90,7 @@ describe("AutomationDetailPage", () => {
     await waitFor(() => {
       expect(screen.getByText("Weekly audit")).toBeInTheDocument();
     });
+    expect(screen.getByLabelText("Automation icon for Weekly audit")).toHaveTextContent("🧪");
 
     await userEvent.setup().click(screen.getByRole("tab", { name: "Settings" }));
 
@@ -351,6 +354,74 @@ describe("AutomationDetailPage", () => {
 
     await waitFor(() => {
       expect(updateBody).toMatchObject({ identity_scope: "personal" });
+    });
+  });
+
+  it("saves the selected automation emoji", async () => {
+    const user = userEvent.setup();
+    let updateBody: Record<string, unknown> | null = null;
+
+    server.use(
+      http.get("*/api/v1/automations/auto-1", () => HttpResponse.json({
+        data: {
+          id: "auto-1",
+          org_id: "org-1",
+          repository_id: "repo-1",
+          name: "Weekly audit",
+          goal: "Check release health",
+          scope: "",
+          icon_type: "emoji",
+          icon_value: "🧪",
+          interval_value: 1,
+          interval_unit: "weeks",
+          base_branch: "main",
+          enabled: true,
+          timezone: "UTC",
+          last_run_at: null,
+          next_run_at: null,
+          priority: 50,
+          created_at: "2026-01-01T00:00:00Z",
+          updated_at: "2026-01-01T00:00:00Z",
+        },
+      })),
+      http.get("*/api/v1/automations/auto-1/runs*", () => HttpResponse.json({ data: [], meta: {} })),
+      http.get("*/api/v1/automations/auto-1/stats*", () => HttpResponse.json({
+        data: {
+          since: "2026-01-01T00:00:00Z",
+          until: "2026-01-31T00:00:00Z",
+          buckets: [],
+          totals: {
+            total: 0,
+            completed: 0,
+            completed_noop: 0,
+            failed: 0,
+            skipped: 0,
+            running: 0,
+            pending: 0,
+            success_rate: 0,
+            avg_duration_seconds: 0,
+          },
+        },
+      })),
+      http.patch("*/api/v1/automations/auto-1", async ({ request }) => {
+        updateBody = await request.json() as Record<string, unknown>;
+        return HttpResponse.json({ data: { id: "auto-1" } });
+      }),
+    );
+
+    renderWithProviders(<AutomationDetailPage />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Weekly audit")).toBeInTheDocument();
+    });
+
+    await user.click(screen.getByRole("tab", { name: "Settings" }));
+    await user.click(screen.getByRole("button", { name: "Automation emoji" }));
+    await user.click(await screen.findByRole("option", { name: /Rocket/ }));
+    await user.click(screen.getByRole("button", { name: "Save changes" }));
+
+    await waitFor(() => {
+      expect(updateBody).toMatchObject({ icon_type: "emoji", icon_value: "🚀" });
     });
   });
 
