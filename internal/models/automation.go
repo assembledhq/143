@@ -19,6 +19,8 @@ type Automation struct {
 	Name            string                  `db:"name"             json:"name"`
 	Goal            string                  `db:"goal"             json:"goal"`
 	Scope           *string                 `db:"scope"            json:"scope,omitempty"`
+	IconType        AutomationIconType      `db:"icon_type"        json:"icon_type"`
+	IconValue       string                  `db:"icon_value"       json:"icon_value"`
 	AgentType       *string                 `db:"agent_type"       json:"agent_type,omitempty"`
 	ModelOverride   *string                 `db:"model_override"   json:"model_override,omitempty"`
 	ReasoningEffort *ReasoningEffort        `db:"reasoning_effort" json:"reasoning_effort,omitempty"`
@@ -147,6 +149,40 @@ func (s AutomationIdentityScope) OrDefault() AutomationIdentityScope {
 		return AutomationIdentityScopeOrg
 	}
 	return s
+}
+
+// AutomationIconType is intentionally separated from IconValue so future
+// image-backed automation icons can reuse the same API shape without changing
+// callers that already persist a typed visual identity.
+type AutomationIconType string
+
+const (
+	AutomationIconTypeEmoji AutomationIconType = "emoji"
+
+	DefaultAutomationIconValue = "⚙️"
+)
+
+func (t AutomationIconType) Validate() error {
+	switch t {
+	case "", AutomationIconTypeEmoji:
+		return nil
+	default:
+		return fmt.Errorf("invalid icon_type: %q (must be emoji)", t)
+	}
+}
+
+func (t AutomationIconType) OrDefault() AutomationIconType {
+	if t == "" {
+		return AutomationIconTypeEmoji
+	}
+	return t
+}
+
+func AutomationIconValueOrDefault(v string) string {
+	if v == "" {
+		return DefaultAutomationIconValue
+	}
+	return v
 }
 
 // BuildConfigSnapshot returns the JSON config snapshot for an automation run.
