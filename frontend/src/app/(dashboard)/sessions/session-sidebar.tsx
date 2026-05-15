@@ -53,6 +53,7 @@ const filterTabs = [
   { value: "archived", label: "Archived" },
 ];
 
+const newSessionOptionId = "new-session";
 
 // ---------------------------------------------------------------------------
 // Unread indicator logic
@@ -192,7 +193,7 @@ export function SessionSidebar() {
   const searchInputRef = useRef<HTMLInputElement>(null);
   const listContainerRef = useRef<HTMLDivElement>(null);
   const optionRefs = useRef(new Map<string, HTMLDivElement>());
-  const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
+  const [activeSessionFocus, setActiveSessionFocus] = useState<{ id: string; pathname: string } | null>(null);
   const searchRef = useRef(search);
   const skipNextSearchParamWriteRef = useRef(false);
   // Debounce the search query so rapid typing doesn't fire a request per
@@ -363,8 +364,15 @@ export function SessionSidebar() {
     return merged.filter((s) => sessionTitle(s).toLowerCase().includes(q));
   }, [firstPage, extraPages, search]);
 
+  const isNewSession = pathname === "/sessions/new";
+  const activeSessionId = activeSessionFocus?.id ?? null;
+  const hasNavigatedFromNewSessionDraft = isNewSession && activeSessionFocus?.pathname === pathname;
+
   const currentActiveSessionId = useMemo(() => {
     if (displayedSessions.length === 0) {
+      return null;
+    }
+    if (isNewSession && !hasNavigatedFromNewSessionDraft) {
       return null;
     }
     if (activeSessionId && displayedSessions.some((session) => session.id === activeSessionId)) {
@@ -374,7 +382,7 @@ export function SessionSidebar() {
       return selectedId;
     }
     return displayedSessions[0]?.id ?? null;
-  }, [activeSessionId, displayedSessions, selectedId]);
+  }, [activeSessionId, displayedSessions, hasNavigatedFromNewSessionDraft, isNewSession, selectedId]);
   // Hide optimistic rows whose real session is already in the list — prevents
   // the double-render flash between "optimistic added" and "server refetch
   // lands". Resolved-but-not-yet-visible rows stay until the real row arrives.
@@ -403,9 +411,11 @@ export function SessionSidebar() {
   // doesn't reset the scope back to "Mine".
   const filterSuffix = useFilterSuffix(serializedPeopleParam, activeFilter, repo, search || null);
 
-  const isNewSession = pathname === "/sessions/new";
   const showDefaultEmptyState =
     currentFilter === "all" && !trimmedSearch && (!counts || counts.all === 0);
+  const activeOptionId = isNewSession && !currentActiveSessionId
+    ? newSessionOptionId
+    : currentActiveSessionId;
 
   const focusSearch = useCallback(() => {
     const input = searchInputRef.current;
@@ -423,21 +433,25 @@ export function SessionSidebar() {
     const boundedIndex = Math.min(Math.max(index, 0), displayedSessions.length - 1);
     const next = displayedSessions[boundedIndex];
     if (!next) return;
-    setActiveSessionId(next.id);
+    setActiveSessionFocus({ id: next.id, pathname });
     focusList();
     requestAnimationFrame(() => {
       optionRefs.current.get(next.id)?.scrollIntoView({ block: "nearest" });
     });
-  }, [displayedSessions, focusList]);
+  }, [displayedSessions, focusList, pathname]);
 
   const moveActiveSession = useCallback((delta: number) => {
     if (displayedSessions.length === 0) return;
+    if (isNewSession && !hasNavigatedFromNewSessionDraft) {
+      setActiveByIndex(delta >= 0 ? 0 : displayedSessions.length - 1);
+      return;
+    }
     const currentIndex = currentActiveSessionId
       ? displayedSessions.findIndex((session) => session.id === currentActiveSessionId)
       : -1;
     const baseIndex = currentIndex >= 0 ? currentIndex : 0;
     setActiveByIndex(baseIndex + delta);
-  }, [currentActiveSessionId, displayedSessions, setActiveByIndex]);
+  }, [currentActiveSessionId, displayedSessions, hasNavigatedFromNewSessionDraft, isNewSession, setActiveByIndex]);
 
   const activeSession = useMemo(
     () => displayedSessions.find((session) => session.id === currentActiveSessionId) ?? null,
@@ -624,24 +638,43 @@ export function SessionSidebar() {
         tabIndex={0}
         aria-label="Sessions"
         aria-activedescendant={
-          currentActiveSessionId ? `session-sidebar-option-${currentActiveSessionId}` : undefined
+          activeOptionId ? `session-sidebar-option-${activeOptionId}` : undefined
         }
         className="flex-1 overflow-y-auto px-2 pt-1 pb-2 outline-none focus-visible:ring-2 focus-visible:ring-ring/30"
         onKeyDown={handleListKeyDown}
       >
         {/* Ghost "New session" entry when creating */}
         {isNewSession && (
-          <Link
-            href={`/sessions/new${filterSuffix}`}
-            className="block rounded-lg px-3 py-2.5 mb-0.5 bg-background shadow-sm border border-border/50"
+          <div
+            id={`session-sidebar-option-${newSessionOptionId}`}
+            role="option"
+            aria-label="New session draft"
+            aria-selected={!currentActiveSessionId}
+            className="mb-2 border-b border-border/60 pb-2"
           >
-            <div className="flex items-center gap-2.5 min-w-0">
-              <span className="inline-flex rounded-full h-2 w-2 border border-muted-foreground/30 shrink-0" />
-              <p className="text-xs text-muted-foreground/50 italic">
-                New session
-              </p>
-            </div>
-          </Link>
+            <Link
+              href={`/sessions/new${filterSuffix}`}
+              aria-current="page"
+              className={cn(
+                "block rounded-lg border px-3 py-2.5 transition-all duration-150",
+                !currentActiveSessionId
+                  ? "border-primary/20 bg-primary/5 shadow-sm ring-1 ring-primary/10"
+                  : "border-border/50 bg-background text-muted-foreground hover:bg-background/80",
+              )}
+            >
+              <div className="flex items-center gap-2.5 min-w-0">
+                <span
+                  className={cn(
+                    "inline-flex rounded-full h-2 w-2 shrink-0",
+                    !currentActiveSessionId ? "bg-primary/55" : "border border-muted-foreground/30",
+                  )}
+                />
+                <p className={cn("text-xs font-medium", !currentActiveSessionId ? "text-foreground" : "text-muted-foreground")}>
+                  New session
+                </p>
+              </div>
+            </Link>
+          </div>
         )}
 
         {(currentFilter === "all" || currentFilter === "active") &&
