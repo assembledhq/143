@@ -123,6 +123,9 @@ services:
     # expose 8080 on the public IP for monitoring.
     ports:
       - "${WORKER_PRIVATE_IP:?missing in /opt/143/.env.local}:8080:8080"
+    networks:
+      default: {}
+      sandbox: {}
     group_add:
       - ${DOCKER_GID:-988}
     volumes:
