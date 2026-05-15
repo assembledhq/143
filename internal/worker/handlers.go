@@ -35,6 +35,66 @@ import (
 )
 
 const sandboxCapacityRetryDelay = 10 * time.Second
+const failureCategoryStaleSandbox = "stale_sandbox"
+
+func registerStaleSandboxDeadLetter(ctx context.Context, stores *Stores, logger zerolog.Logger, session models.Session, threadID *uuid.UUID, jobType string) {
+	if stores == nil || stores.Sessions == nil {
+		return
+	}
+	jobctx.RegisterDeadLetterHook(ctx, func(hookCtx context.Context, deadLetterErr error) {
+		writeCtx, cancel := context.WithTimeout(context.WithoutCancel(hookCtx), 10*time.Second)
+		defer cancel()
+
+		errMsg := "Session stopped after cleaning up a stale sandbox but the retry could not be scheduled."
+		explanation := "The worker found a stale sandbox container reference from an earlier interrupted attempt and cleared it, but the job dead-lettered before a fresh attempt could start."
+		nextSteps := []string{
+			"Retry the session to start with a clean sandbox",
+			"Check worker and sandbox logs if this repeats across sessions",
+		}
+		if deadLetterErr != nil {
+			logger.Warn().
+				Err(deadLetterErr).
+				Str("session_id", session.ID.String()).
+				Str("job_type", jobType).
+				Msg("session job dead-lettered after stale sandbox cleanup")
+		}
+
+		result := &models.SessionResult{Error: &errMsg}
+		if err := stores.Sessions.UpdateResult(writeCtx, session.OrgID, session.ID, string(models.SessionStatusFailed), result); err != nil {
+			logger.Error().
+				Err(err).
+				Str("session_id", session.ID.String()).
+				Str("job_type", jobType).
+				Msg("failed to mark session failed after stale sandbox cleanup dead-letter")
+			return
+		}
+		if err := stores.Sessions.UpdateFailure(writeCtx, session.OrgID, session.ID, explanation, failureCategoryStaleSandbox, nextSteps, true); err != nil {
+			logger.Error().
+				Err(err).
+				Str("session_id", session.ID.String()).
+				Str("job_type", jobType).
+				Msg("failed to persist stale sandbox failure details")
+		}
+		if threadID != nil && *threadID != uuid.Nil && stores.SessionThreads != nil {
+			threadCategory := failureCategoryStaleSandbox
+			threadResult := &models.SessionResult{
+				Error:           &errMsg,
+				FailureCategory: &threadCategory,
+			}
+			if err := stores.SessionThreads.UpdateResult(writeCtx, session.OrgID, *threadID, models.ThreadStatusFailed, threadResult); err != nil {
+				logger.Error().
+					Err(err).
+					Str("session_id", session.ID.String()).
+					Str("thread_id", threadID.String()).
+					Str("job_type", jobType).
+					Msg("failed to mark session thread failed after stale sandbox cleanup dead-letter")
+			}
+		}
+		if stores.Jobs != nil {
+			linear.EnqueueMilestone(writeCtx, stores.Jobs, logger, session.OrgID, session.ID, "failed", 0)
+		}
+	})
+}
 
 func registerSandboxCapacityDeadLetter(ctx context.Context, stores *Stores, services *Services, logger zerolog.Logger, session models.Session, threadID *uuid.UUID, jobType string) {
 	if stores == nil || stores.Sessions == nil {
@@ -1152,11 +1212,12 @@ func newRunAgentHandler(stores *Stores, services *Services, logger zerolog.Logge
 				// sees a clean row and creates a fresh sandbox. A short
 				// backoff lets any in-flight cleanup settle.
 				retryAfter := 2 * time.Second
+				registerStaleSandboxDeadLetter(ctx, stores, logger, run, run.PrimaryThreadID, "run_agent")
 				logger.Info().
 					Str("session_id", runID.String()).
 					Err(err).
 					Msg("run_agent cleared stale orphan container_id; retrying against the clean row")
-				return &RetryableError{Err: err, RetryAfter: &retryAfter}
+				return &RetryableError{Err: err, RetryAfter: &retryAfter, BypassMaxRetryDuration: true}
 			}
 			if errors.Is(err, agent.ErrSandboxPreviewRace) {
 				// A preview hydrate published the live container first. There is

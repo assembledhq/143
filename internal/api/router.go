@@ -49,6 +49,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	membershipStore := db.NewOrganizationMembershipStore(pool)
 	repoStore := db.NewRepositoryStore(pool)
 	integrationStore := db.NewIntegrationStore(pool)
+	githubInstallationStore := db.NewGitHubInstallationStore(pool)
 	issueStore := db.NewIssueStore(pool)
 	autopilotQueueStore := db.NewAutopilotQueueStore(pool)
 	sessionStore := db.NewSessionStore(pool)
@@ -161,15 +162,21 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 		handlers.WithSentryOAuth(cfg.SentryOAuthClientID, cfg.SentryOAuthClientSecret),
 		handlers.WithGitHubIntegrationOAuth(cfg.GitHubOAuthClientID, cfg.GitHubOAuthClientSecret),
 		handlers.WithGitHubAppSlug(cfg.GitHubAppSlug),
+		handlers.WithGitHubInstallationStore(githubInstallationStore),
+		handlers.WithIntegrationMembershipStore(membershipStore),
+		handlers.WithGitHubSetupSigningKey(firstNonEmpty(cfg.CSRFSigningKey, cfg.SessionSecret)),
 		handlers.WithSlackOAuth(cfg.SlackOAuthClientID, cfg.SlackOAuthClientSecret),
 	}
-	// If the GitHub App service is available, let the integration handler
-	// fetch repos directly from the API during the install redirect.
+	// If the GitHub App service is available, let the integration handler list
+	// installation repos for explicit repository claims.
 	if cfg.GitHubAppID != 0 && cfg.GitHubAppPrivateKey != "" {
 		ghSvc, err := ghservice.NewService(cfg.GitHubAppID, cfg.GitHubAppPrivateKey)
 		if err == nil {
 			integrationOpts = append(integrationOpts, handlers.WithGitHubApp(ghSvc, repoStore))
 		}
+	}
+	if appUserAuthSvc != nil {
+		integrationOpts = append(integrationOpts, handlers.WithGitHubAppUserAuth(appUserAuthSvc))
 	}
 	integrationOpts = append(integrationOpts, handlers.WithPMContextAutoTrigger(jobStore, pmDocumentStore, logger))
 	integrationHandler := handlers.NewIntegrationHandler(
@@ -183,6 +190,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	)
 	integrationHandler.SetLinearJobStore(jobStore)
 	webhookHandler := handlers.NewWebhookHandler(cfg, orgStore, userStore, repoStore, integrationStore, prService)
+	webhookHandler.SetGitHubInstallationStore(githubInstallationStore)
 	containerUsageStore := db.NewContainerUsageStore(pool)
 	usageRollupStore := db.NewUsageRollupStore(pool)
 	usageHandler := handlers.NewUsageHandler(
@@ -670,6 +678,12 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 			r.Get("/api/v1/auth/memberships", authHandler.Memberships)
 			r.Post("/api/v1/auth/active-org", authHandler.SetActiveOrg)
 			r.Post("/api/v1/auth/logout", authHandler.Logout)
+			// GitHub App setup callbacks are validated against a signed setup
+			// intent inside the handler. Keep them outside OrgContext so a
+			// stale active org in another tab cannot block linking to the
+			// intended org recorded in the state token.
+			r.Get("/api/v1/integrations/github/callback", integrationHandler.HandleGitHubOAuthCallback)
+			r.Get("/api/v1/integrations/github/installed", integrationHandler.HandleGitHubAppInstalled)
 			// Available to any authenticated user (no RequireRole) — an invited
 			// user may not yet have a role in the target org when they claim.
 			// Rate-limited per-IP and per-user at 10/minute: the endpoint is a
@@ -1036,10 +1050,10 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Get("/api/v1/integrations/sentry/callback", integrationHandler.HandleSentryOAuthCallback)
 				r.Post("/api/v1/integrations/sentry/connect", integrationHandler.ConnectSentry)
 				r.Get("/api/v1/integrations/github/login", integrationHandler.StartGitHubOAuth)
-				r.Get("/api/v1/integrations/github/callback", integrationHandler.HandleGitHubOAuthCallback)
-				r.Get("/api/v1/integrations/github/installed", integrationHandler.HandleGitHubAppInstalled)
 				r.Post("/api/v1/integrations/github/connect", integrationHandler.ConnectGitHub)
 				r.Post("/api/v1/integrations/github/sync", integrationHandler.SyncGitHubRepos)
+				r.Get("/api/v1/integrations/github/repositories", integrationHandler.ListGitHubInstallationRepositories)
+				r.Post("/api/v1/integrations/github/repositories/claim", integrationHandler.ClaimGitHubInstallationRepositories)
 				r.Get("/api/v1/integrations/slack/login", integrationHandler.StartSlackOAuth)
 				r.Get("/api/v1/integrations/slack/callback", integrationHandler.HandleSlackOAuthCallback)
 				r.Post("/api/v1/integrations/slack/connect", integrationHandler.ConnectSlack)
@@ -1076,4 +1090,13 @@ func resolveRouterCodingCredentialStore(pool *pgxpool.Pool, cryptoSvc *crypto.Se
 		return shared[0]
 	}
 	return db.NewCodingCredentialStore(pool, cryptoSvc)
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
 }

@@ -29,8 +29,13 @@ type JobHandler func(ctx context.Context, jobType string, payload json.RawMessag
 // than a bare time.Duration) is used so callers can request an explicit
 // zero-delay retry without colliding with the "unset, use backoff" sentinel.
 type RetryableError struct {
-	Err        error
-	RetryAfter *time.Duration
+	Err error
+	// BypassMaxRetryDuration lets narrowly-scoped self-healing retries run even
+	// when the job row is older than maxRetryableDuration. Use this only when a
+	// successful retry is expected immediately after the current attempt repaired
+	// durable state, not for capacity/backlog gates.
+	BypassMaxRetryDuration bool
+	RetryAfter             *time.Duration
 }
 
 func (e *RetryableError) Error() string { return e.Err.Error() }
@@ -226,7 +231,7 @@ func (w *Worker) poll(ctx context.Context) {
 
 	var retryable *RetryableError
 	if errors.As(err, &retryable) {
-		if time.Since(job.CreatedAt) > maxRetryableDuration {
+		if !retryable.BypassMaxRetryDuration && time.Since(job.CreatedAt) > maxRetryableDuration {
 			w.logger.Error().Err(err).
 				Str("job_id", job.ID.String()).
 				Dur("age", time.Since(job.CreatedAt)).

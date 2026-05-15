@@ -140,7 +140,8 @@ func (m *MockSandboxProvider) Restore(ctx context.Context, sb *agent.Sandbox, re
 	if m.RestoreFn != nil {
 		return m.RestoreFn(ctx, sb, reader)
 	}
-	return nil
+	_, err := io.Copy(io.Discard, reader)
+	return err
 }
 
 func (m *MockSandboxProvider) IsAlive(ctx context.Context, sb *agent.Sandbox) (bool, error) {

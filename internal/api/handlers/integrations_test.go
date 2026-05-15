@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 	"time"
 
@@ -17,6 +18,7 @@ import (
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/pashagolub/pgxmock/v4"
 	"github.com/stretchr/testify/require"
 )
@@ -25,6 +27,42 @@ type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 	return f(req)
+}
+
+type fakeGitHubAppService struct {
+	token string
+	err   error
+}
+
+func (f *fakeGitHubAppService) GetInstallationToken(context.Context, int64) (string, error) {
+	if f.err != nil {
+		return "", f.err
+	}
+	return f.token, nil
+}
+
+type fakeGitHubAppUserAuth struct {
+	credential *models.GitHubAppUserConfig
+	err        error
+}
+
+func (f fakeGitHubAppUserAuth) GetValidCredential(context.Context, uuid.UUID, uuid.UUID) (*models.GitHubAppUserConfig, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
+	return f.credential, nil
+}
+
+type fakeGitHubMembershipStore struct {
+	membership models.OrganizationMembership
+	err        error
+}
+
+func (f fakeGitHubMembershipStore) Get(context.Context, uuid.UUID, uuid.UUID) (models.OrganizationMembership, error) {
+	if f.err != nil {
+		return models.OrganizationMembership{}, f.err
+	}
+	return f.membership, nil
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -219,6 +257,8 @@ func TestIntegrationHandler_ListIntegrations_DerivesGitHubAppInstalled_FromRepoF
 	store := db.NewIntegrationStore(mock)
 	handler := NewIntegrationHandler(store, nil, "", "", "http://localhost:8080", "http://localhost:3000")
 	handler.repoStore = db.NewRepositoryStore(mock)
+	handler.githubInstallations = db.NewGitHubInstallationStore(mock)
+	handler.githubInstallations = db.NewGitHubInstallationStore(mock)
 
 	rows := pgxmock.NewRows([]string{"id", "org_id", "provider", "config", "status", "last_synced_at", "created_at"}).
 		AddRow(uuid.New(), orgID, "github", []byte(`{}`), "active", nil, now)
@@ -288,6 +328,7 @@ func TestIntegrationHandler_DisconnectIntegration_DisconnectsGitHubRepos(t *test
 	store := db.NewIntegrationStore(mock)
 	handler := NewIntegrationHandler(store, nil, "", "", "http://localhost:8080", "http://localhost:3000")
 	handler.repoStore = db.NewRepositoryStore(mock)
+	handler.githubInstallations = db.NewGitHubInstallationStore(mock)
 
 	rows := pgxmock.NewRows([]string{"id", "org_id", "provider", "config", "status", "last_synced_at", "created_at"}).
 		AddRow(integrationID, orgID, "github", []byte(`{"installation_id":12345}`), "active", nil, now)
@@ -300,6 +341,9 @@ func TestIntegrationHandler_DisconnectIntegration_DisconnectsGitHubRepos(t *test
 	mock.ExpectExec("UPDATE repositories SET status = 'disconnected', updated_at = now\\(\\) WHERE org_id = @org_id AND integration_id = @integration_id").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 2))
+	mock.ExpectExec("UPDATE github_installation_org_links").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/integrations/github/disconnect", nil)
 	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
@@ -1414,6 +1458,8 @@ func TestIntegrationHandler_StartGitHubOAuth_NotConfigured(t *testing.T) {
 func TestIntegrationHandler_StartGitHubOAuth_AppSlugSetsStateCookie(t *testing.T) {
 	t.Parallel()
 
+	orgID := uuid.New()
+	userID := uuid.New()
 	mock, err := pgxmock.NewPool()
 	require.NoError(t, err)
 	defer mock.Close()
@@ -1426,6 +1472,9 @@ func TestIntegrationHandler_StartGitHubOAuth_AppSlugSetsStateCookie(t *testing.T
 	)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/integrations/github/login", nil)
+	ctx := middleware.WithOrgID(req.Context(), orgID)
+	ctx = middleware.WithUser(ctx, &models.User{ID: userID, OrgID: orgID, Role: models.RoleAdmin})
+	req = req.WithContext(ctx)
 	w := httptest.NewRecorder()
 
 	handler.StartGitHubOAuth(w, req)
@@ -1444,6 +1493,46 @@ func TestIntegrationHandler_StartGitHubOAuth_AppSlugSetsStateCookie(t *testing.T
 
 	setCookie := w.Result().Header.Get("Set-Cookie")
 	require.Contains(t, setCookie, "github_integration_oauth_state=", "state cookie must be set so the callback can validate it")
+}
+
+func TestIntegrationHandler_ListInstallationRepos_FollowsPagination(t *testing.T) {
+	t.Parallel()
+
+	handler := NewIntegrationHandler(nil, nil, "", "", "http://localhost:8080", "http://localhost:3000")
+	requested := make([]string, 0, 2)
+	handler.client = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		requested = append(requested, req.URL.String())
+		switch len(requested) {
+		case 1:
+			require.Equal(t, githubAPIURL+"/installation/repositories?per_page=100", req.URL.String(), "first page should request installation repositories")
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header: http.Header{
+					"Link": []string{`<` + githubAPIURL + `/installation/repositories?per_page=100&page=2>; rel="next"`},
+				},
+				Body: io.NopCloser(strings.NewReader(`{"repositories":[{"id":1,"full_name":"org/one"}]}`)),
+			}, nil
+		case 2:
+			require.Equal(t, githubAPIURL+"/installation/repositories?per_page=100&page=2", req.URL.String(), "second page should follow GitHub Link header")
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{},
+				Body:       io.NopCloser(strings.NewReader(`{"repositories":[{"id":2,"full_name":"org/two"}]}`)),
+			}, nil
+		default:
+			require.Fail(t, "listInstallationRepos should not request more than two pages")
+			return nil, errors.New("unexpected request")
+		}
+	})}
+
+	repos, err := handler.listInstallationRepos(context.Background(), "installation-token")
+
+	require.NoError(t, err, "listInstallationRepos should read every GitHub page")
+	require.Equal(t, []githubInstallationRepo{
+		{ID: 1, FullName: "org/one"},
+		{ID: 2, FullName: "org/two"},
+	}, repos, "listInstallationRepos should concatenate paginated repositories")
+	require.Len(t, requested, 2, "listInstallationRepos should request exactly two pages")
 }
 
 func TestIntegrationHandler_HandleGitHubOAuthCallback_SavesCredentialAndIntegration(t *testing.T) {
@@ -1588,6 +1677,7 @@ func TestIntegrationHandler_HandleGitHubOAuthCallback_DelegatesToAppInstalled(t 
 	t.Parallel()
 
 	orgID := uuid.New()
+	userID := uuid.New()
 	integrationID := uuid.New()
 	now := time.Now().UTC()
 
@@ -1599,9 +1689,21 @@ func TestIntegrationHandler_HandleGitHubOAuthCallback_DelegatesToAppInstalled(t 
 	handler := NewIntegrationHandler(
 		store, nil, "", "", "http://localhost:8080", "http://localhost:3000",
 		WithGitHubIntegrationOAuth("gh-id", "gh-secret"),
+		WithIntegrationMembershipStore(fakeGitHubMembershipStore{membership: models.OrganizationMembership{
+			UserID: userID,
+			OrgID:  orgID,
+			Role:   models.RoleAdmin,
+		}}),
 	)
+	state, err := handler.signGitHubSetupState(githubSetupStatePayload{
+		Nonce:     "nonce",
+		UserID:    userID,
+		OrgID:     orgID,
+		ExpiresAt: time.Now().UTC().Add(time.Minute),
+	})
+	require.NoError(t, err, "test should create a valid setup state")
 
-	// When installation_id and setup_action=install are present, the callback
+	// When installation_id and setup_action=update are present, the callback
 	// handler should delegate to HandleGitHubAppInstalled instead of trying
 	// to exchange a code. Expect the ensureIntegration + UpdateConfig queries.
 	mock.ExpectQuery("SELECT .+ FROM integrations .+ provider = @provider .+ status IN \\('active', 'error'\\)").
@@ -1617,15 +1719,87 @@ func TestIntegrationHandler_HandleGitHubOAuthCallback_DelegatesToAppInstalled(t 
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
 	req := httptest.NewRequest(http.MethodGet,
-		"/api/v1/integrations/github/callback?code=some-code&installation_id=12345&setup_action=install&state=test-state", nil)
+		"/api/v1/integrations/github/callback?code=some-code&installation_id=12345&setup_action=update&state="+url.QueryEscape(state), nil)
+	req.AddCookie(&http.Cookie{Name: githubIntegrationOAuthStateCookie, Value: state})
 	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
 	w := httptest.NewRecorder()
 
 	handler.HandleGitHubOAuthCallback(w, req)
 
 	require.Equal(t, http.StatusTemporaryRedirect, w.Code)
-	require.Equal(t, "http://localhost:3000/integrations?github=connected", w.Header().Get("Location"))
+	require.Equal(t, "http://localhost:3000/settings/integrations?github=connected&select_repos=1", w.Header().Get("Location"))
 	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestIntegrationHandler_HandleGitHubAppInstalled_RejectsMissingInstallationIDBeforeCreatingIntegration(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	userID := uuid.New()
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should initialize")
+	defer mock.Close()
+
+	handler := NewIntegrationHandler(
+		db.NewIntegrationStore(mock),
+		nil,
+		"",
+		"",
+		"http://localhost:8080",
+		"http://localhost:3000",
+		WithIntegrationMembershipStore(fakeGitHubMembershipStore{membership: models.OrganizationMembership{
+			UserID: userID,
+			OrgID:  orgID,
+			Role:   models.RoleAdmin,
+		}}),
+	)
+	state, err := handler.signGitHubSetupState(githubSetupStatePayload{
+		Nonce:     "nonce",
+		UserID:    userID,
+		OrgID:     orgID,
+		ExpiresAt: time.Now().UTC().Add(time.Minute),
+	})
+	require.NoError(t, err, "test should create a valid setup state")
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/integrations/github/installed?setup_action=install&state="+url.QueryEscape(state), nil)
+	req.AddCookie(&http.Cookie{Name: githubIntegrationOAuthStateCookie, Value: state})
+	w := httptest.NewRecorder()
+
+	handler.HandleGitHubAppInstalled(w, req)
+
+	require.Equal(t, http.StatusBadRequest, w.Code, "setup callback should reject missing installation id")
+	require.Contains(t, w.Body.String(), "MISSING_INSTALLATION_ID", "response should identify missing installation id")
+	require.NoError(t, mock.ExpectationsWereMet(), "missing installation id should not create an integration")
+}
+
+func TestIntegrationHandler_HandleGitHubOAuthCallback_RejectsInvalidAppSetupState(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should initialize")
+	defer mock.Close()
+
+	handler := NewIntegrationHandler(
+		db.NewIntegrationStore(mock),
+		nil,
+		"",
+		"",
+		"http://localhost:8080",
+		"http://localhost:3000",
+		WithGitHubIntegrationOAuth("gh-id", "gh-secret"),
+	)
+
+	req := httptest.NewRequest(http.MethodGet,
+		"/api/v1/integrations/github/callback?code=some-code&installation_id=12345&setup_action=install&state=missing-cookie", nil)
+	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+	w := httptest.NewRecorder()
+
+	handler.HandleGitHubOAuthCallback(w, req)
+
+	require.Equal(t, http.StatusBadRequest, w.Code, "app setup callback should reject missing setup state")
+	require.Contains(t, w.Body.String(), "INVALID_GITHUB_SETUP_STATE", "response should identify invalid setup state")
+	require.NoError(t, mock.ExpectationsWereMet(), "invalid setup state should not touch the database")
 }
 
 func TestIntegrationHandler_ConnectGitHub_CreatesIntegration(t *testing.T) {
@@ -1662,6 +1836,122 @@ func TestIntegrationHandler_ConnectGitHub_CreatesIntegration(t *testing.T) {
 	require.Equal(t, models.IntegrationProviderGitHub, resp.Data.Provider)
 	require.Equal(t, models.IntegrationStatusActive, resp.Data.Status)
 	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestIntegrationHandler_ClaimGitHubInstallationRepositories_RequiresUserAuth(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should initialize")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	userID := uuid.New()
+	handler := NewIntegrationHandler(
+		db.NewIntegrationStore(mock),
+		nil,
+		"",
+		"",
+		"http://localhost:8080",
+		"http://localhost:3000",
+		WithGitHubApp(&fakeGitHubAppService{token: "installation-token"}, db.NewRepositoryStore(mock)),
+	)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/integrations/github/repositories/claim", strings.NewReader(`{"installation_id":12345,"github_ids":[67890]}`))
+	ctx := middleware.WithOrgID(req.Context(), orgID)
+	ctx = middleware.WithUser(ctx, &models.User{ID: userID, OrgID: orgID, Email: "admin@example.com", Name: "Admin", Role: models.RoleAdmin})
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	handler.ClaimGitHubInstallationRepositories(w, req)
+
+	require.Equal(t, http.StatusBadRequest, w.Code, "claim should reject requests when GitHub user auth is not wired")
+	require.Contains(t, w.Body.String(), "GITHUB_USER_AUTH_REQUIRED", "claim should return an actionable GitHub user auth error")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestIntegrationHandler_ClaimGitHubInstallationRepositories_MapsUniqueOwnershipRaceToConflict(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should initialize")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	userID := uuid.New()
+	integrationID := uuid.New()
+	otherOrgID := uuid.New()
+	otherRepoID := uuid.New()
+	now := time.Now().UTC()
+
+	handler := NewIntegrationHandler(
+		db.NewIntegrationStore(mock),
+		nil,
+		"",
+		"",
+		"http://localhost:8080",
+		"http://localhost:3000",
+		WithGitHubApp(&fakeGitHubAppService{token: "installation-token"}, db.NewRepositoryStore(mock)),
+		WithGitHubAppUserAuth(fakeGitHubAppUserAuth{credential: &models.GitHubAppUserConfig{AccessToken: "ghu_user"}}),
+	)
+	handler.client = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		switch req.URL.String() {
+		case githubAPIURL + "/installation/repositories?per_page=100":
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     make(http.Header),
+				Body: io.NopCloser(strings.NewReader(`{"repositories":[{
+					"id":67890,
+					"full_name":"acme/api",
+					"default_branch":"main",
+					"private":true,
+					"clone_url":"https://github.com/acme/api.git"
+				}]}`)),
+			}, nil
+		case githubAPIURL + "/repos/acme/api":
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader(`{}`)),
+			}, nil
+		default:
+			return nil, errors.New("unexpected request URL: " + req.URL.String())
+		}
+	})}
+
+	mock.ExpectQuery("SELECT id, org_id, provider, config, status, last_synced_at, created_at FROM integrations WHERE org_id = @org_id AND provider = @provider AND status = 'active'").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "org_id", "provider", "config", "status", "last_synced_at", "created_at"}).
+			AddRow(integrationID, orgID, "github", json.RawMessage(`{"installation_id":12345,"account_login":"acme"}`), "active", nil, now))
+	mock.ExpectQuery("SELECT r.id AS repository_id").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"repository_id", "org_id", "org_name", "github_id", "full_name", "status"}))
+	mock.ExpectBegin()
+	mock.ExpectQuery("INSERT INTO repositories").
+		WithArgs(
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+		).
+		WillReturnError(&pgconn.PgError{Code: "23505", ConstraintName: "idx_repositories_active_github_id"})
+	mock.ExpectRollback()
+	mock.ExpectQuery("SELECT r.id AS repository_id").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"repository_id", "org_id", "org_name", "github_id", "full_name", "status"}).
+			AddRow(otherRepoID, otherOrgID, "Platform", int64(67890), "acme/api", "active"))
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/integrations/github/repositories/claim", strings.NewReader(`{"github_ids":[67890]}`))
+	ctx := middleware.WithOrgID(req.Context(), orgID)
+	ctx = middleware.WithUser(ctx, &models.User{ID: userID, OrgID: orgID, Email: "admin@example.com", Name: "Admin", Role: models.RoleAdmin})
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	handler.ClaimGitHubInstallationRepositories(w, req)
+
+	require.Equal(t, http.StatusConflict, w.Code, "claim should map concurrent active-owner uniqueness violations to a conflict")
+	require.Contains(t, w.Body.String(), "REPOSITORY_OWNERSHIP_CONFLICT", "claim conflict should return the ownership conflict code")
+	require.Contains(t, w.Body.String(), "Platform", "claim conflict should include the current owner when it can be reloaded")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
 func TestIntegrationHandler_ConnectGitHub_ReturnsExisting(t *testing.T) {
