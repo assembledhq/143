@@ -3,7 +3,7 @@
 import { useMemo, useRef, useState } from "react";
 import dynamic from "next/dynamic";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { Play, Pause, Loader2 } from "lucide-react";
+import { Play, Pause, Loader2, Minus, Plus } from "lucide-react";
 import { useParams, useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -87,6 +87,7 @@ function SettingsTab({ automation, canManage }: { automation: Automation; canMan
   const [baseBranch, setBaseBranch] = useState(automation.base_branch);
   const [model, setModel] = useState<string | undefined>(automation.model_override);
   const [identityScope, setIdentityScope] = useState<"org" | "personal">(automation.identity_scope ?? "org");
+  const [prePRReviewLoops, setPrePRReviewLoops] = useState(automation.pre_pr_review_loops ?? 0);
   const [reasoningEffort, setReasoningEffort] = useState<CodingAgentReasoningEffort>(automation.reasoning_effort ?? "");
 
   const { data: settingsResponse } = useQuery({
@@ -116,6 +117,7 @@ function SettingsTab({ automation, canManage }: { automation: Automation; canMan
         timezone,
         model: model ?? "",
         identity_scope: identityScope,
+        pre_pr_review_loops: prePRReviewLoops,
         reasoning_effort: showReasoningSelector && reasoningEffort ? reasoningEffort : "",
         base_branch: baseBranch.trim() || undefined,
       }),
@@ -295,6 +297,48 @@ function SettingsTab({ automation, canManage }: { automation: Automation; canMan
           buttonClassName="w-full justify-between"
           contentClassName="w-[var(--radix-popover-trigger-width)]"
         />
+      </div>
+      <div className="space-y-1.5">
+        <Label htmlFor="pre-pr-review-loops">Pre-PR review</Label>
+        <div className="flex items-center gap-2">
+          <Button
+            type="button"
+            variant="outline"
+            size="icon"
+            aria-label="Decrease review passes"
+            onClick={() => setPrePRReviewLoops((value) => Math.max(0, value - 1))}
+            disabled={!canManage}
+          >
+            <Minus className="h-4 w-4" />
+          </Button>
+          <Input
+            id="pre-pr-review-loops"
+            aria-label="Review passes"
+            type="number"
+            min={0}
+            max={5}
+            value={prePRReviewLoops}
+            onChange={(e) => {
+              const parsed = parseInt(e.target.value, 10);
+              setPrePRReviewLoops(Number.isNaN(parsed) ? 0 : Math.min(5, Math.max(0, parsed)));
+            }}
+            disabled={!canManage}
+            className="w-20 text-center"
+          />
+          <Button
+            type="button"
+            variant="outline"
+            size="icon"
+            aria-label="Increase review passes"
+            onClick={() => setPrePRReviewLoops((value) => Math.min(5, value + 1))}
+            disabled={!canManage}
+          >
+            <Plus className="h-4 w-4" />
+          </Button>
+        </div>
+        <p className="text-xs text-muted-foreground">
+          {prePRReviewLoops === 0 ? "Off" : "Runs the coding agent's review/fix loop before opening a PR."}
+        </p>
       </div>
       {canManage && (
         <div className="flex items-center gap-3 pt-2">

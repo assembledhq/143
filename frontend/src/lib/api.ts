@@ -429,6 +429,14 @@ export const api = {
     },
     listReviewComments: (sessionId: string) =>
       get<import('./types').ListResponse<import('./types').SessionReviewComment>>(`/api/v1/sessions/${sessionId}/review-comments`),
+    listReviewLoops: (sessionId: string) =>
+      get<import('./types').ListResponse<import('./types').SessionReviewLoop>>(`/api/v1/sessions/${sessionId}/review-loops`),
+    startReviewLoop: (sessionId: string, body: { agent_type?: string; model?: string; max_passes: number }) =>
+      post<import('./types').SingleResponse<import('./types').SessionReviewLoop>>(`/api/v1/sessions/${sessionId}/review-loops`, body),
+    getReviewLoop: (sessionId: string, loopId: string) =>
+      get<import('./types').SingleResponse<import('./types').SessionReviewLoop>>(`/api/v1/sessions/${sessionId}/review-loops/${loopId}`),
+    cancelReviewLoop: (sessionId: string, loopId: string) =>
+      post<{ status: string }>(`/api/v1/sessions/${sessionId}/review-loops/${loopId}/cancel`, {}),
     createReviewComment: (sessionId: string, body: { file_path: string; line_number: number; side?: string; body: string }) =>
       post<import('./types').SingleResponse<import('./types').SessionReviewComment>>(`/api/v1/sessions/${sessionId}/review-comments`, body),
     updateReviewComment: (sessionId: string, commentId: string, body: { body?: string; resolved?: boolean }) =>

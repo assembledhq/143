@@ -44,9 +44,11 @@ import (
 	"github.com/assembledhq/143/internal/services/preview"
 	previewproviders "github.com/assembledhq/143/internal/services/preview/providers"
 	"github.com/assembledhq/143/internal/services/prioritization"
+	reviewloopservice "github.com/assembledhq/143/internal/services/reviewloop"
 	"github.com/assembledhq/143/internal/services/sandbox"
 	"github.com/assembledhq/143/internal/services/sandboxauth"
 	"github.com/assembledhq/143/internal/services/storage"
+	threadservice "github.com/assembledhq/143/internal/services/thread"
 	"github.com/assembledhq/143/internal/services/workspace"
 	"github.com/assembledhq/143/internal/telemetry"
 	"github.com/assembledhq/143/internal/version"
@@ -414,6 +416,7 @@ func main() {
 			ThreadFileEvents:    db.NewSessionThreadFileEventStore(pool),
 			Automations:         automationStore,
 			AutomationRuns:      automationRunStore,
+			ReviewLoops:         db.NewSessionReviewLoopStore(pool),
 			SessionIssueLinks:   db.NewSessionIssueLinkStore(pool),
 		}
 
@@ -1018,6 +1021,7 @@ func buildServices(
 	sessionLogStore := db.NewSessionLogStore(pool)
 	sessionQuestionStore := db.NewSessionQuestionStore(pool)
 	sessionThreadStore := db.NewSessionThreadStore(pool)
+	reviewLoopStore := db.NewSessionReviewLoopStore(pool)
 	projectTaskUpdater := pm.NewProjectHooks(projectTaskStore, projectStore, logger)
 	automationRunUpdater := automations.NewAutomationHooks(automationRunStore, logger)
 	containerUsageStore := db.NewContainerUsageStore(pool)
@@ -1140,6 +1144,21 @@ func buildServices(
 	pmSvc.SetSessionLogStore(sessionLogStore)
 	pmSvc.SetInternalAPI(cfg.BaseURL+"/api/v1/internal", cfg.SessionSecret)
 	pmSvc.SetSkillsBuilder(orchestrator)
+	threadSvc := threadservice.NewService(
+		sessionThreadStore,
+		sessionStore,
+		sessionMessageStore,
+		sessionLogStore,
+		jobStore,
+		logger,
+	)
+	reviewLoopSvc := reviewloopservice.NewService(
+		reviewLoopStore,
+		reviewloopservice.RuntimeAdapter{
+			Sessions: sessionStore,
+			Threads:  threadSvc,
+		},
+	)
 
 	logger.Info().
 		Int("adapters", len(agentAdapters)).
@@ -1235,6 +1254,7 @@ func buildServices(
 		GitHub:          ghSvc,
 		TitleService:    titleService,
 		Linear:          linearService,
+		ReviewLoops:     reviewLoopSvc,
 		RuntimeSampler:  runtimeSampler,
 		SandboxGC:       sandboxGC,
 	}
