@@ -94,7 +94,7 @@ func (h *IngestionWebhookHandler) HandleLinear(w http.ResponseWriter, r *http.Re
 // webhook signature.
 var providerSignatureHeader = map[string]string{
 	"sentry": "X-Sentry-Hook-Signature",
-	"linear": "X-Linear-Signature",
+	"linear": "Linear-Signature",
 }
 
 // providerDeliveryIDHeader maps provider name to the HTTP header carrying

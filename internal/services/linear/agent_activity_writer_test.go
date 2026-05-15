@@ -30,6 +30,7 @@ type agentWriterFake struct {
 	agentCreateCalls int
 	agentCreateErr   error
 	agentCreateRet   AgentActivityResult
+	agentCreateLast  AgentActivityInput
 	stateUpdateCalls int
 	stateUpdateLast  AgentSessionUpdateInput
 }
@@ -41,10 +42,11 @@ func newAgentWriterFake() *agentWriterFake {
 	}
 }
 
-func (f *agentWriterFake) AgentActivityCreate(_ context.Context, _ AgentActivityInput) (AgentActivityResult, error) {
+func (f *agentWriterFake) AgentActivityCreate(_ context.Context, in AgentActivityInput) (AgentActivityResult, error) {
 	f.agentMu.Lock()
 	defer f.agentMu.Unlock()
 	f.agentCreateCalls++
+	f.agentCreateLast = in
 	if f.agentCreateErr != nil {
 		return AgentActivityResult{}, f.agentCreateErr
 	}
@@ -220,8 +222,8 @@ func TestAgentActivityWriter_PinSessionStatePropagates(t *testing.T) {
 		AgentSessionID:    "as_1",
 		Activity: AgentMilestoneActivity{
 			Type:            models.LinearAgentActivityAction,
-			Body:            "PR merged",
 			Action:          "pr_merged",
+			Parameter:       "PR #42 merged",
 			IdemKey:         "milestone:pr_merged",
 			PinSessionState: "complete",
 		},
@@ -230,6 +232,8 @@ func TestAgentActivityWriter_PinSessionStatePropagates(t *testing.T) {
 	require.Equal(t, 1, rig.client.stateUpdateCalls,
 		"PinSessionState must trigger an AgentSessionUpdate so Linear's UI flips state immediately")
 	require.Equal(t, "complete", rig.client.stateUpdateLast.State)
+	require.Equal(t, "PR #42 merged", rig.client.agentCreateLast.Parameter,
+		"action milestones must pass Linear's required parameter field through the writer")
 	require.NoError(t, rig.mock.ExpectationsWereMet())
 }
 

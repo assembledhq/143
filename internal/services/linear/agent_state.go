@@ -15,12 +15,16 @@ type AgentMilestoneActivity struct {
 	// constants in models.LinearAgentActivityType* to construct it.
 	Type models.LinearAgentActivityType
 	// Body is the rendered prose. For thought/elicitation/response/error
-	// this is shown directly; for action it's the descriptive caption.
+	// this is shown directly. Action activities use Parameter/Result
+	// instead because Linear rejects body on action content.
 	Body string
 	// Action is set only on Type=action — the human-readable name of the
 	// tool the agent invoked. Linear's GraphQL schema rejects this field
 	// on other types.
 	Action string
+	// Parameter is set only on Type=action — the action input Linear
+	// requires for action content.
+	Parameter string
 	// Ephemeral marks the activity as transient (it scrolls out of the
 	// activity feed quickly). Linear only honors this for thought/action;
 	// the writer enforces this so we don't get a runtime GraphQL rejection.
@@ -66,7 +70,7 @@ func MilestoneActivity(event MilestoneEvent, prNumber int) (AgentMilestoneActivi
 		return AgentMilestoneActivity{
 			Type:            models.LinearAgentActivityAction,
 			Action:          "start_coding_session",
-			Body:            "Starting coding session.",
+			Parameter:       "Starting coding session",
 			Ephemeral:       false,
 			IdemKey:         milestoneIdemKey(event),
 			PinSessionState: "active",
@@ -91,7 +95,7 @@ func MilestoneActivity(event MilestoneEvent, prNumber int) (AgentMilestoneActivi
 		return AgentMilestoneActivity{
 			Type:            models.LinearAgentActivityAction,
 			Action:          "pr_merged",
-			Body:            body,
+			Parameter:       body,
 			Ephemeral:       false,
 			IdemKey:         milestoneIdemKey(event),
 			PinSessionState: "complete",
