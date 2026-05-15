@@ -431,6 +431,7 @@ func TestPRService_SettersAndCheckRunHandler(t *testing.T) {
 			}{{Number: 42}},
 		},
 		Repository: struct {
+			ID       int64  `json:"id"`
 			FullName string `json:"full_name"`
 		}{
 			FullName: repoName,
@@ -456,6 +457,7 @@ func TestPRService_SettersAndCheckRunHandler(t *testing.T) {
 			}{{Number: 99}},
 		},
 		Repository: struct {
+			ID       int64  `json:"id"`
 			FullName string `json:"full_name"`
 		}{
 			FullName: repoName,

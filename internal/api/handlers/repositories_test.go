@@ -454,7 +454,7 @@ func TestRepositoryHandler_Disconnect_Success(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
-func TestRepositoryHandler_Reconnect_Success(t *testing.T) {
+func TestRepositoryHandler_Reconnect_RequiresClaimFlow(t *testing.T) {
 	t.Parallel()
 
 	mock, err := pgxmock.NewPool()
@@ -463,19 +463,6 @@ func TestRepositoryHandler_Reconnect_Success(t *testing.T) {
 
 	orgID := uuid.New()
 	repoID := uuid.New()
-	integrationID := uuid.New()
-	now := time.Now()
-
-	mock.ExpectQuery("UPDATE repositories").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnRows(
-			pgxmock.NewRows(repoColumns()).AddRow(
-				repoID, orgID, integrationID, int64(1001), "test-org/repo1", "main",
-				false, nil, nil, "https://github.com/test-org/repo1.git", int64(12345), "active",
-				nil, nil, json.RawMessage(`{}`), now, now,
-			),
-		)
-
 	store := db.NewRepositoryStore(mock)
 	handler := NewRepositoryHandler(store)
 
@@ -488,8 +475,8 @@ func TestRepositoryHandler_Reconnect_Success(t *testing.T) {
 	w := httptest.NewRecorder()
 
 	handler.Reconnect(w, req)
-	require.Equal(t, http.StatusOK, w.Code, "reconnect should return 200")
-	require.Contains(t, w.Body.String(), "active", "response should echo new status")
+	require.Equal(t, http.StatusConflict, w.Code, "reconnect should force GitHub repos through claim flow")
+	require.Contains(t, w.Body.String(), "GITHUB_REPO_CLAIM_REQUIRED", "response should explain how to reactivate the repo")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 

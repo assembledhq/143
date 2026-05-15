@@ -52,7 +52,7 @@ func TestWebhook_HandleGitHub(t *testing.T) {
 		expectedBody string
 	}{
 		{
-			name:   "installation created provisions org and repo",
+			name:   "installation created records installation without auto-claiming repos",
 			secret: "test-secret",
 			event:  "installation",
 			payload: `{
@@ -68,58 +68,12 @@ func TestWebhook_HandleGitHub(t *testing.T) {
 			signature: func(secret string, body []byte) string {
 				return computeTestSignature(secret, body)
 			},
-			setupMock: func(mock pgxmock.PgxPoolIface) {
-				now := time.Now()
-				orgID := uuid.New()
-				integrationID := uuid.New()
-
-				// 1. GetByGitHubInstallationID -> no existing integration
-				mock.ExpectQuery("SELECT .+ FROM integrations WHERE provider").
-					WithArgs(pgxmock.AnyArg()).
-					WillReturnRows(
-						pgxmock.NewRows([]string{"id", "org_id", "provider", "config", "status", "last_synced_at", "created_at"}),
-					)
-
-				// 2. GetByGitHubID -> no user found (empty rows)
-				mock.ExpectQuery("SELECT .+ FROM users WHERE github_id").
-					WithArgs(pgxmock.AnyArg()).
-					WillReturnRows(
-						pgxmock.NewRows([]string{"id", "org_id", "email", "name", "role", "github_id", "github_login", "github_noreply_email", "avatar_url", "password_hash", "google_id", "created_at"}),
-					)
-
-				// 3. Create org (2 named args)
-				mock.ExpectQuery("INSERT INTO organizations").
-					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-					WillReturnRows(
-						pgxmock.NewRows([]string{"id", "created_at", "updated_at"}).
-							AddRow(orgID, now, now),
-					)
-
-				// 4. Create integration (4 named args)
-				mock.ExpectQuery("INSERT INTO integrations").
-					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-					WillReturnRows(
-						pgxmock.NewRows([]string{"id", "created_at"}).
-							AddRow(integrationID, now),
-					)
-
-				// 5. UpsertFromGitHub repo (12 named args)
-				mock.ExpectQuery("INSERT INTO repositories").
-					WithArgs(
-						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-					).
-					WillReturnRows(
-						pgxmock.NewRows([]string{"id", "created_at", "updated_at"}).
-							AddRow(uuid.New(), now, now),
-					)
-			},
+			setupMock:    func(mock pgxmock.PgxPoolIface) {},
 			expectedCode: http.StatusOK,
 			expectedBody: "installation created",
 		},
 		{
-			name:   "installation created reuses existing integration",
+			name:   "installation created does not provision repos from webhook",
 			secret: "test-secret",
 			event:  "installation",
 			payload: `{
@@ -135,39 +89,7 @@ func TestWebhook_HandleGitHub(t *testing.T) {
 			signature: func(secret string, body []byte) string {
 				return computeTestSignature(secret, body)
 			},
-			setupMock: func(mock pgxmock.PgxPoolIface) {
-				now := time.Now()
-				orgID := uuid.New()
-				integrationID := uuid.New()
-
-				// 1. GetByGitHubInstallationID -> finds existing integration
-				mock.ExpectQuery("SELECT .+ FROM integrations WHERE provider").
-					WithArgs(pgxmock.AnyArg()).
-					WillReturnRows(
-						pgxmock.NewRows([]string{"id", "org_id", "provider", "config", "status", "last_synced_at", "created_at"}).
-							AddRow(integrationID, orgID, "github", []byte(`{"installation_id":12345}`), "active", nil, now),
-					)
-
-				// 2. GetByID org -> found
-				mock.ExpectQuery("SELECT .+ FROM organizations WHERE id").
-					WithArgs(pgxmock.AnyArg()).
-					WillReturnRows(
-						pgxmock.NewRows([]string{"id", "name", "settings", "created_at", "updated_at"}).
-							AddRow(orgID, "Test Org", []byte(`{}`), now, now),
-					)
-
-				// 3. UpsertFromGitHub repo (12 named args) — no integration created
-				mock.ExpectQuery("INSERT INTO repositories").
-					WithArgs(
-						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-					).
-					WillReturnRows(
-						pgxmock.NewRows([]string{"id", "created_at", "updated_at"}).
-							AddRow(uuid.New(), now, now),
-					)
-			},
+			setupMock:    func(mock pgxmock.PgxPoolIface) {},
 			expectedCode: http.StatusOK,
 			expectedBody: "installation created",
 		},
@@ -231,7 +153,7 @@ func TestWebhook_HandleGitHub(t *testing.T) {
 			expectedBody: "INVALID_JSON",
 		},
 		{
-			name:   "installation_repositories event adds repos",
+			name:   "installation_repositories event does not auto-claim added repos",
 			secret: "test-secret",
 			event:  "installation_repositories",
 			payload: `{
@@ -248,31 +170,7 @@ func TestWebhook_HandleGitHub(t *testing.T) {
 			signature: func(secret string, body []byte) string {
 				return computeTestSignature(secret, body)
 			},
-			setupMock: func(mock pgxmock.PgxPoolIface) {
-				now := time.Now()
-				orgID := uuid.New()
-				integrationID := uuid.New()
-
-				// 1. GetByGitHubInstallationID -> returns integration
-				mock.ExpectQuery("SELECT .+ FROM integrations WHERE provider").
-					WithArgs(pgxmock.AnyArg()).
-					WillReturnRows(
-						pgxmock.NewRows([]string{"id", "org_id", "provider", "config", "status", "last_synced_at", "created_at"}).
-							AddRow(integrationID, orgID, "github", []byte(`{"installation_id":12345}`), "active", nil, now),
-					)
-
-				// 2. UpsertFromGitHub repo (12 named args)
-				mock.ExpectQuery("INSERT INTO repositories").
-					WithArgs(
-						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-					).
-					WillReturnRows(
-						pgxmock.NewRows([]string{"id", "created_at", "updated_at"}).
-							AddRow(uuid.New(), now, now),
-					)
-			},
+			setupMock:    func(mock pgxmock.PgxPoolIface) {},
 			expectedCode: http.StatusOK,
 			expectedBody: "repositories updated",
 		},
@@ -343,19 +241,6 @@ func TestWebhook_HandleGitHub(t *testing.T) {
 				return computeTestSignature(secret, body)
 			},
 			setupMock: func(mock pgxmock.PgxPoolIface) {
-				now := time.Now()
-				orgID := uuid.New()
-				integrationID := uuid.New()
-
-				// 1. GetByGitHubInstallationID -> returns integration
-				mock.ExpectQuery("SELECT .+ FROM integrations WHERE provider").
-					WithArgs(pgxmock.AnyArg()).
-					WillReturnRows(
-						pgxmock.NewRows([]string{"id", "org_id", "provider", "config", "status", "last_synced_at", "created_at"}).
-							AddRow(integrationID, orgID, "github", []byte(`{"installation_id":12345}`), "active", nil, now),
-					)
-
-				// 2. DisconnectByGitHubID
 				mock.ExpectExec("UPDATE repositories").
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnResult(pgxmock.NewResult("UPDATE", 1))
@@ -437,4 +322,76 @@ func TestWebhook_HandleCheckRun(t *testing.T) {
 	handler.handleCheckRun(rr, req, []byte(`{"action":"queued","repository":{"full_name":"assembledhq/143"},"check_run":{"pull_requests":[]}}`))
 	require.Equal(t, http.StatusOK, rr.Code, "handleCheckRun should accept successfully processed events")
 	require.Contains(t, rr.Body.String(), "processed", "handleCheckRun should acknowledge processed events")
+}
+
+func TestWebhook_HandleInstallationDeleted_DeactivatesInstallationLinks(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should initialize")
+	defer mock.Close()
+
+	handler := setupWebhookHandler(t, mock, "")
+	handler.SetGitHubInstallationStore(db.NewGitHubInstallationStore(mock))
+
+	mock.ExpectExec("UPDATE github_installations").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectExec("UPDATE github_installation_org_links").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 2))
+	mock.ExpectExec("UPDATE repositories").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 3))
+
+	body := []byte(`{"action":"deleted","installation":{"id":12345,"account":{"id":100,"login":"test-org"}}}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/webhooks/github", strings.NewReader(string(body)))
+	req.Header.Set("X-GitHub-Event", "installation")
+	rr := httptest.NewRecorder()
+
+	handler.HandleGitHub(rr, req)
+
+	require.Equal(t, http.StatusOK, rr.Code, "installation deleted webhook should be acknowledged")
+	require.Contains(t, rr.Body.String(), "installation deleted", "response should describe deleted installation")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestWebhook_HandlePullRequestScopesLookupToActiveOwner(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should initialize")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	repoID := uuid.New()
+	prID := uuid.New()
+	now := time.Now().UTC()
+	prService := ghservice.NewPRService(nil, db.NewPullRequestStore(mock), nil, nil, nil, nil, nil, zerolog.Nop())
+	handler := NewWebhookHandler(&config.Config{}, db.NewOrganizationStore(mock), db.NewUserStore(mock), db.NewRepositoryStore(mock), db.NewIntegrationStore(mock), prService)
+
+	mock.ExpectQuery("SELECT r.id AS repository_id").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"repository_id", "org_id", "org_name", "github_id", "full_name", "status"}).
+			AddRow(repoID, orgID, "Owning Org", int64(1001), "assembledhq/143", "active"))
+	mock.ExpectQuery("SELECT .+ FROM pull_requests[\\s\\S]*WHERE org_id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "session_id", "org_id", "github_pr_number", "github_pr_url", "github_repo",
+			"title", "body", "status", "review_status", "authored_by", "ci_status", "head_sha", "head_ref", "base_sha",
+			"merge_state", "has_conflicts", "failing_test_count", "needs_agent_action", "github_state_synced_at",
+			"health_version", "merged_at", "created_at", "updated_at",
+		}).AddRow(prID, nil, orgID, 42, "https://github.com/assembledhq/143/pull/42", "assembledhq/143",
+			"Fix bug", nil, "open", "pending", "app", "", nil, nil, nil,
+			"unknown", false, 0, false, nil, int64(0), nil, now, now))
+
+	body := []byte(`{"action":"opened","number":42,"repository":{"id":1001,"full_name":"assembledhq/143"},"pull_request":{"head":{"sha":"abc"}}}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/webhooks/github", strings.NewReader(string(body)))
+	rr := httptest.NewRecorder()
+
+	handler.handlePullRequest(rr, req, body)
+
+	require.Equal(t, http.StatusOK, rr.Code, "pull request webhook should be acknowledged")
+	require.Contains(t, rr.Body.String(), "processed", "pull request webhook should be processed")
+	require.NoError(t, mock.ExpectationsWereMet(), "webhook should scope pull request lookup to the active owner org")
 }
