@@ -8,6 +8,7 @@ import (
 
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
+	"github.com/assembledhq/143/internal/services/linear"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/pashagolub/pgxmock/v4"
@@ -106,6 +107,22 @@ func TestPromptedLookupMissRetriesForOutOfOrderCreated(t *testing.T) {
 	require.ErrorAs(t, err, &retryable, "missing AgentSession row should retry because prompted can beat created delivery")
 	require.NotNil(t, retryable.RetryAfter, "lookup-miss retry should use the short prompted-created race backoff")
 	require.NoError(t, mock.ExpectationsWereMet(), "handler should only lookup the agent session before retrying")
+}
+
+func TestResolvePromptedCommentBodyPrefersWebhookAgentActivityBody(t *testing.T) {
+	t.Parallel()
+
+	body, err := resolvePromptedCommentBody(context.Background(), LinearAgentEventHandlerDeps{
+		ClientForOrg: func(context.Context, uuid.UUID) (linear.Client, error) {
+			return nil, errors.New("must not fetch Linear when webhook carries the prompt body")
+		},
+	}, linearAgentEventPayload{
+		LinearCommentID:  "comment_1",
+		LinearPromptBody: "Please add regression coverage.",
+	}, uuid.New(), zerolog.Nop())
+
+	require.NoError(t, err, "prompt body from webhook should not require a Linear comment fetch")
+	require.Equal(t, "Please add regression coverage.", body, "prompted handler should use Linear's agentActivity.body verbatim")
 }
 
 func TestPromptedRunningSessionAppendsUnderSessionLockWithoutContinuationJob(t *testing.T) {

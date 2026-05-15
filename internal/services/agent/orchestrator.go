@@ -2109,6 +2109,12 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 	// the unified resolver (e.g. Codex subscription via codexauth.Service).
 	o.shedOnRunResult(run.AgentType, run.OrgID, run.TriggeredByUserID, result, err, log)
 
+	// From this point every exit releases the initial turn hold and leaves the
+	// session in a drainable post-execution state. Prompts appended while
+	// run_agent was active need a continuation even when this turn fails,
+	// times out, or is cancelled.
+	drainInitialQueuedMessages = true
+
 	// 11. Handle result.
 	stopReason := StopReasonNone
 	if o.cancels != nil {
@@ -2243,7 +2249,6 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 				Float64("confidence", result.ConfidenceScore).
 				Float64("threshold", confidenceThresholds.AutoProceed)
 		})
-		drainInitialQueuedMessages = true
 		return nil
 	}
 
@@ -2315,7 +2320,6 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 		}
 	}
 
-	drainInitialQueuedMessages = true
 	return nil
 }
 

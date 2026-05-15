@@ -129,7 +129,7 @@ follow-ups are still governed by `allow_revision_per_prompt`.
 |---|---|---|
 | Dispatcher (after `created`) | `thought` ephemeral: "Reading {KEY}…" | `bootstrap:opened` |
 | `MilestoneLinked` | (suppressed — bootstrap already covered it) | — |
-| `MilestoneStarted` | `action`: "Starting coding session" + state pin `inProgress` | `milestone:started` |
+| `MilestoneStarted` | `action`: "Starting coding session" + state pin `active` | `milestone:started` |
 | `MilestonePROpened` | `response`: "Opened PR #N." | `milestone:pr_opened` |
 | `MilestonePRMerged` | `action`: "PR #N merged." + state pin `complete` | `milestone:pr_merged` |
 | `MilestoneEndedNoPR` | `response`: "Done — no code changes were needed." + state pin `complete` | `milestone:ended_no_pr` |

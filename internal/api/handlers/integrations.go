@@ -208,6 +208,17 @@ func (h *IntegrationHandler) SetLinearTeamKeyCacheInvalidator(fn func(orgID uuid
 	h.linearTeamKeyCacheInvalidator = fn
 }
 
+// SetLinearAgentBootstrapper wires the hook that runs after a successful
+// Linear OAuth callback that granted agent scopes. The hook flips the
+// per-org agent toggle to enabled when the admin hasn't expressed an
+// opinion yet and picks an org-default repo when the org has exactly one
+// connected GitHub repo — both are convenience defaults that remove the
+// "I re-authorized but nothing happens" cliff without overriding any
+// explicit user choice. Nil-safe.
+func (h *IntegrationHandler) SetLinearAgentBootstrapper(fn func(ctx context.Context, orgID uuid.UUID) error) {
+	h.linearAgentBootstrapper = fn
+}
+
 // IntegrationOAuthConfig holds all integration OAuth credentials.
 type IntegrationOAuthConfig struct {
 	LinearClientID string
@@ -560,15 +571,45 @@ func (h *IntegrationHandler) HandleLinearOAuthCallback(w http.ResponseWriter, r 
 		return
 	}
 
-	if _, _, err := h.ensureIntegration(r.Context(), orgID, models.IntegrationProviderLinear); err != nil {
+	integration, _, err := h.ensureIntegration(r.Context(), orgID, models.IntegrationProviderLinear)
+	if err != nil {
 		writeError(w, r, http.StatusInternalServerError, "CONNECT_LINEAR_FAILED", "failed to connect linear integration", err)
 		return
+	}
+
+	// Persist the Linear workspace id on integrations.config so the
+	// multi-tenant webhook handler can resolve org-by-workspace at request
+	// time. A single Linear OAuth app has one webhook URL across every
+	// workspace it's installed in; the payload's `organizationId` field is
+	// the only org-identifying signal available pre-HMAC. This is a
+	// best-effort write — if it fails, the OAuth flow still succeeds and
+	// the per-install URL fallback (integration_id query param) still
+	// routes correctly for self-hosted setups.
+	if viewer.WorkspaceID != "" {
+		if err := h.integrationStore.SetLinearWorkspaceID(r.Context(), orgID, integration.ID, viewer.WorkspaceID); err != nil {
+			logger.Warn().Err(err).
+				Str("org_id", orgID.String()).
+				Str("workspace_id", viewer.WorkspaceID).
+				Msg("failed to persist linear workspace_id on integration; multi-tenant webhook routing will require the integration_id query param fallback")
+		}
 	}
 
 	logger.Info().
 		Str("org_id", orgID.String()).
 		Str("workspace_id", viewer.WorkspaceID).
 		Msg("linear oauth callback completed; credentials stored and integration active")
+
+	// Auto-enable the agent and pick an org-default repo when the install
+	// just acquired agent scopes. Best-effort: failures here are logged but
+	// don't break the OAuth flow — the admin can always toggle/configure
+	// manually from Settings → Integrations → Linear → Agent.
+	if linearConfig.HasAgentScopes() && h.linearAgentBootstrapper != nil {
+		if err := h.linearAgentBootstrapper(r.Context(), orgID); err != nil {
+			logger.Warn().Err(err).
+				Str("org_id", orgID.String()).
+				Msg("linear agent bootstrap (enable + default repo) failed; admin can configure manually")
+		}
+	}
 
 	// Trigger an initial team-key refresh so detection's bare-identifier
 	// branch works on the very next session. Three-tier strategy:
