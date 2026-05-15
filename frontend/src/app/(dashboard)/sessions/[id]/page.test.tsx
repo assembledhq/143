@@ -909,7 +909,9 @@ describe('SessionDetailPage', () => {
 
     await user.click(screen.getByLabelText('Model override'));
     await user.click(await screen.findByRole('option', { name: 'gpt-5.4-mini' }));
-    await user.type(screen.getByPlaceholderText('Send a message to Codex 2...'), 'Use the selected model.');
+    fireEvent.change(screen.getByPlaceholderText('Send a message to Codex 2...'), {
+      target: { value: 'Use the selected model.' },
+    });
     await user.click(screen.getByRole('button', { name: 'Send message' }));
 
     await waitFor(() => {
