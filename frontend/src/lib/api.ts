@@ -730,7 +730,7 @@ export const api = {
     removeMember: (id: string) => del<void>(`/api/v1/team/members/${id}`),
     listInvitations: () =>
       get<import('./types').ListResponse<import('./types').InvitationResponse>>('/api/v1/team/invitations'),
-    createInvitation: (body: { email?: string; github_username?: string; role: string }) =>
+    createInvitation: (body: { email?: string; github_username?: string; acceptance_method?: 'email' | 'github' | 'either'; role: string }) =>
       post<import('./types').SingleResponse<import('./types').InvitationResponse>>('/api/v1/team/invitations', body),
     revokeInvitation: (id: string) => del<void>(`/api/v1/team/invitations/${id}`),
     githubInviteStatus: () =>
