@@ -2,7 +2,7 @@
 
 import { useState, type ReactNode } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { api } from "@/lib/api";
+import { ApiError, api } from "@/lib/api";
 import { AllIntegrationCards } from "@/components/integration-connection-cards";
 import { AutosaveIndicator } from "@/components/AutosaveIndicator";
 import { PageHeader } from "@/components/page-header";
@@ -83,6 +83,8 @@ function GitHubRepositoryClaims({
   const actionable = repos.filter((repo) =>
     repo.status === "unclaimed" || repo.status === "disconnected_in_current_org" || (repo.status === "owned_by_other_org" && repo.can_transfer)
   );
+  const claimError = claimMutation.error;
+  const needsGitHubUserAuth = claimError instanceof ApiError && claimError.code === "GITHUB_USER_AUTH_REQUIRED";
 
   return (
     <>
@@ -137,9 +139,16 @@ function GitHubRepositoryClaims({
                 );
               })}
               {claimMutation.isError && (
-                <p className="text-sm text-destructive">
-                  {claimMutation.error instanceof Error ? claimMutation.error.message : "Failed to claim repository."}
-                </p>
+                <div className="flex flex-col items-start gap-2 rounded-md border border-destructive/30 bg-destructive/5 p-3">
+                  <p className="text-sm text-destructive">
+                    {claimError instanceof Error ? claimError.message : "Failed to claim repository."}
+                  </p>
+                  {needsGitHubUserAuth && (
+                    <Button size="sm" variant="outline" onClick={() => api.githubStatus.connect()}>
+                      Connect GitHub account
+                    </Button>
+                  )}
+                </div>
               )}
               {actionable.length === 0 && (
                 <p className="text-xs text-muted-foreground">All available repositories are already accounted for.</p>

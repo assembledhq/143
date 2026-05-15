@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"regexp"
 	"strings"
@@ -12,6 +13,7 @@ import (
 	"github.com/assembledhq/143/internal/models"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/pashagolub/pgxmock/v4"
 	"github.com/stretchr/testify/require"
 )
@@ -594,6 +596,39 @@ func TestRepositoryStore_ClaimFromGitHub_ReactivatesDisconnectedRepo(t *testing.
 	require.NoError(t, err, "ClaimFromGitHub should activate the repository for the org")
 	require.Equal(t, repoID, repo.ID, "ClaimFromGitHub should scan the repository id")
 	require.Equal(t, string(models.RepositoryStatusActive), repo.Status, "ClaimFromGitHub should mark the repo active")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestRepositoryStore_ClaimFromGitHub_MapsActiveOwnerUniqueViolation(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewRepositoryStore(mock)
+	repo := &models.Repository{
+		OrgID:          uuid.New(),
+		IntegrationID:  uuid.New(),
+		GitHubID:       67890,
+		FullName:       "assembledhq/143",
+		DefaultBranch:  "main",
+		CloneURL:       "https://github.com/assembledhq/143.git",
+		InstallationID: 12345,
+		Settings:       json.RawMessage(`{}`),
+	}
+
+	mock.ExpectQuery("INSERT INTO repositories").
+		WithArgs(
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+		).
+		WillReturnError(&pgconn.PgError{Code: "23505", ConstraintName: "idx_repositories_active_github_id"})
+
+	err = store.ClaimFromGitHub(context.Background(), repo)
+	require.ErrorIs(t, err, ErrActiveGitHubRepositoryOwnershipConflict, "ClaimFromGitHub should map the active GitHub owner unique index to a typed conflict")
+	require.True(t, errors.As(err, new(*pgconn.PgError)), "ClaimFromGitHub should retain the underlying postgres error for diagnostics")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
