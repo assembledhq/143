@@ -642,7 +642,9 @@ func TestWorkerCanReachSandboxBridge(t *testing.T) {
 
 	var parsed struct {
 		Services map[string]struct {
-			Networks map[string]any `yaml:"networks"`
+			Networks map[string]struct {
+				GatewayPriority int `yaml:"gw_priority"`
+			} `yaml:"networks"`
 		} `yaml:"services"`
 	}
 	require.NoError(t, yaml.Unmarshal(compose, &parsed), "worker compose should be valid YAML")
@@ -651,4 +653,5 @@ func TestWorkerCanReachSandboxBridge(t *testing.T) {
 	require.True(t, ok, "worker compose should define the worker service")
 	require.Contains(t, worker.Networks, "default", "worker must stay on the default compose network so it can reach chrome and other local services")
 	require.Contains(t, worker.Networks, "sandbox", "worker must join 143-sandbox so preview proxy dials can reach sandbox container IPs")
+	require.Greater(t, worker.Networks["default"].GatewayPriority, worker.Networks["sandbox"].GatewayPriority, "worker default gateway must stay on the compose default network so DB/private-fleet traffic does not route through the sandbox bridge")
 }
