@@ -366,6 +366,32 @@ func TestGraphQLClientAgentSessionUpdateUsesLinearInteractionShape(t *testing.T)
 	require.NoError(t, err, "AgentSessionUpdate should accept Linear's successful response")
 }
 
+func TestGraphQLClientAgentActivityCreateUsesLinearActionShape(t *testing.T) {
+	t.Parallel()
+
+	client := newGraphQLClientForTest(t, func(t *testing.T, req linearGraphQLRequest, w http.ResponseWriter) {
+		require.Contains(t, req.Query, "agentActivityCreate(input: $input)", "AgentActivityCreate should use Linear's agent activity mutation")
+		require.Contains(t, string(req.Variables), `"agentSessionId":"as_1"`, "AgentActivityCreate should pass the target session id")
+		require.Contains(t, string(req.Variables), `"type":"action"`, "action activities should declare the action content type")
+		require.Contains(t, string(req.Variables), `"action":"Searched"`, "action activities should include Linear's required action field")
+		require.Contains(t, string(req.Variables), `"parameter":"San Francisco Weather"`, "action activities should include Linear's required parameter field")
+		require.Contains(t, string(req.Variables), `"result":"12C, mostly clear"`, "action activities should include optional result when present")
+		require.NotContains(t, string(req.Variables), `"body":"this field is invalid for actions"`, "action activities must not send a body field")
+		writeGraphQLResponse(t, w, `{"data":{"agentActivityCreate":{"success":true,"agentActivity":{"id":"act_1"}}}}`)
+	})
+
+	got, err := client.AgentActivityCreate(context.Background(), AgentActivityInput{
+		AgentSessionID: "as_1",
+		Type:           "action",
+		Action:         "Searched",
+		Parameter:      "San Francisco Weather",
+		Result:         "12C, mostly clear",
+		Body:           "this field is invalid for actions",
+	})
+	require.NoError(t, err, "AgentActivityCreate should accept Linear's successful response")
+	require.Equal(t, AgentActivityResult{ActivityID: "act_1"}, got, "AgentActivityCreate should return the Linear activity id")
+}
+
 func TestGraphQLClientWorkflowStateForType(t *testing.T) {
 	t.Parallel()
 

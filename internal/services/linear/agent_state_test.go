@@ -10,13 +10,14 @@ import (
 func TestMilestoneActivity(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name      string
-		event     MilestoneEvent
-		prNumber  int
-		wantOK    bool
-		wantType  models.LinearAgentActivityType
-		wantState string
-		bodyHas   string
+		name         string
+		event        MilestoneEvent
+		prNumber     int
+		wantOK       bool
+		wantType     models.LinearAgentActivityType
+		wantState    string
+		bodyHas      string
+		parameterHas string
 	}{
 		{
 			name:   "linked is suppressed (dispatcher already emitted bootstrap)",
@@ -24,11 +25,12 @@ func TestMilestoneActivity(t *testing.T) {
 			wantOK: false,
 		},
 		{
-			name:      "started emits action with state pin",
-			event:     MilestoneStarted,
-			wantOK:    true,
-			wantType:  models.LinearAgentActivityAction,
-			wantState: "active",
+			name:         "started emits action with state pin",
+			event:        MilestoneStarted,
+			wantOK:       true,
+			wantType:     models.LinearAgentActivityAction,
+			wantState:    "active",
+			parameterHas: "coding session",
 		},
 		{
 			name:     "pr_opened emits response with PR number",
@@ -39,13 +41,13 @@ func TestMilestoneActivity(t *testing.T) {
 			bodyHas:  "PR #42",
 		},
 		{
-			name:      "pr_merged pins state=complete",
-			event:     MilestonePRMerged,
-			prNumber:  42,
-			wantOK:    true,
-			wantType:  models.LinearAgentActivityAction,
-			wantState: "complete",
-			bodyHas:   "PR #42",
+			name:         "pr_merged pins state=complete",
+			event:        MilestonePRMerged,
+			prNumber:     42,
+			wantOK:       true,
+			wantType:     models.LinearAgentActivityAction,
+			wantState:    "complete",
+			parameterHas: "PR #42",
 		},
 		{
 			name:      "ended_no_pr is response, state=complete",
@@ -81,6 +83,9 @@ func TestMilestoneActivity(t *testing.T) {
 			}
 			if tc.bodyHas != "" && !strings.Contains(activity.Body, tc.bodyHas) {
 				t.Errorf("Body=%q want substring %q", activity.Body, tc.bodyHas)
+			}
+			if tc.parameterHas != "" && !strings.Contains(activity.Parameter, tc.parameterHas) {
+				t.Errorf("Parameter=%q want substring %q", activity.Parameter, tc.parameterHas)
 			}
 			// idem_key must be stable + match the milestone:<event> shape so
 			// concurrent emits collide on the activity-log UNIQUE.

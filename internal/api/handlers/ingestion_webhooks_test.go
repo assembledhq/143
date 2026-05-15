@@ -782,3 +782,69 @@ func TestIngestionWebhook_SignatureVerification(t *testing.T) {
 		require.NoError(t, mock.ExpectationsWereMet())
 	})
 }
+
+func TestIngestionWebhook_HandleLinear_UsesDocumentedSignatureHeader(t *testing.T) {
+	t.Parallel()
+
+	secret := "linear-webhook-secret"
+	orgID := uuid.New()
+	integrationID := uuid.New()
+	now := time.Now()
+	body := `{"action":"create","type":"Issue","data":{"id":"LIN-1","title":"Bug","priority":1,"createdAt":"2024-01-01T00:00:00Z","updatedAt":"2024-01-02T00:00:00Z"}}`
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "test should create pgx mock")
+	defer mock.Close()
+
+	credMock := &mockWebhookSecretLookup{
+		cred: &models.DecryptedCredential{
+			ID:       uuid.New(),
+			OrgID:    orgID,
+			Provider: models.ProviderLinear,
+			Config:   models.LinearConfig{WebhookSecret: secret},
+			Status:   "active",
+		},
+	}
+	handler := setupIngestionHandler(t, mock, credMock)
+
+	mock.ExpectQuery("SELECT .+ FROM integrations WHERE id").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows([]string{"id", "org_id", "provider", "config", "status", "last_synced_at", "created_at"}).
+				AddRow(integrationID, orgID, "linear", json.RawMessage(`{}`), "active", nil, now),
+		)
+	mock.ExpectQuery("INSERT INTO webhook_deliveries").
+		WithArgs(
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+		).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "received_at", "created_at"}).AddRow(uuid.New(), now, now))
+	mock.ExpectQuery("INSERT INTO issues").
+		WithArgs(
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+		).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at", "updated_at"}).AddRow(uuid.New(), now, now))
+	mock.ExpectQuery("INSERT INTO jobs").
+		WithArgs(
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+		).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
+	mock.ExpectExec("UPDATE webhook_deliveries").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/webhooks/linear?integration_id="+integrationID.String(), strings.NewReader(body))
+	req.Header.Set("Linear-Signature", signBody(secret, []byte(body)))
+	w := httptest.NewRecorder()
+
+	handler.HandleLinear(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "documented Linear-Signature header should verify successfully")
+	require.Contains(t, w.Body.String(), "processed", "verified Linear webhook should process normally")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
