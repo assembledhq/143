@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -159,4 +160,19 @@ func TestGitHubInstallationClaimsMigrationDeduplicatesInstallationsBeforeUpsert(
 		"migration should preserve the earliest integration timestamp for installation created_at")
 	require.Contains(t, sql, "WHERE candidate_rank = 1",
 		"migration should only upsert the selected candidate per installation")
+}
+
+func TestGitHubInstallationClaimsDownMigrationDropsChildLinksFirst(t *testing.T) {
+	t.Parallel()
+
+	body, err := os.ReadFile("../../migrations/000126_github_installation_repo_claims.down.sql")
+	require.NoError(t, err, "test should read the GitHub installation claims down migration")
+
+	sql := string(body)
+	linkDrop := strings.Index(sql, "DROP TABLE IF EXISTS github_installation_org_links")
+	installationDrop := strings.Index(sql, "DROP TABLE IF EXISTS github_installations")
+	require.NotEqual(t, -1, linkDrop, "down migration should drop github_installation_org_links")
+	require.NotEqual(t, -1, installationDrop, "down migration should drop github_installations")
+	require.Less(t, linkDrop, installationDrop,
+		"down migration should drop child org-link table before parent installations table")
 }
