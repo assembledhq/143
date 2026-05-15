@@ -557,8 +557,10 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	previewHandler.SetAuditEmitter(auditEmitter)
 	previewHandler.SetJobStore(jobStore)
 	previewHandler.SetWorkerRuntime(workerSelector, workerClient, cfg.NodeID)
+	sessionHandler.SetWorkerRuntime(workerSelector, workerClient, cfg.NodeID)
 	previewHandler.SetSandboxCapacityGate(sandboxCapacity)
 	internalPreviewHandler := handlers.NewInternalPreviewHandler(previewHandler, previewManager, cfg.NodeID, cfg.SessionSecret, logger)
+	internalPreviewHandler.SetSessionCancelRuntime(sessionStore, canceller)
 	previewStopper := preview.NewWorkerStopper(previewStore, workerSelector, workerClient, cfg.NodeID, previewManager)
 	if prService != nil {
 		prService.SetPreviewTeardown(previewStore, previewStopper)
@@ -598,6 +600,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	r.Get("/readyz", healthHandler.Readyz)
 	r.Handle("/metrics", promhttp.Handler())
 	if cfg.Mode == "worker" || cfg.Mode == "all" {
+		r.Post("/internal/sessions/{sessionID}/cancel", internalPreviewHandler.CancelSession)
 		r.Post("/internal/preview/start", internalPreviewHandler.StartPreview)
 		r.Post("/internal/preview/stop-session", internalPreviewHandler.StopActivePreviewForSession)
 		r.Post("/internal/preview/{previewID}/stop", internalPreviewHandler.StopPreview)
