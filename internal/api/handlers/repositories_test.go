@@ -185,8 +185,15 @@ func TestRepositoryHandler_Update(t *testing.T) {
 		expectedBody string
 	}{
 		{
-			name: "updates repository status successfully",
-			body: `{"status":"paused"}`,
+			name:         "rejects repository status updates",
+			body:         `{"status":"paused"}`,
+			setupMock:    func(mock pgxmock.PgxPoolIface, orgID uuid.UUID, repoID uuid.UUID) {},
+			expectedCode: http.StatusBadRequest,
+			expectedBody: "REPOSITORY_STATUS_IMMUTABLE",
+		},
+		{
+			name: "updates repository settings successfully",
+			body: `{"settings":{"pm":{"pm_schedule_hours":4}}}`,
 			setupMock: func(mock pgxmock.PgxPoolIface, orgID uuid.UUID, repoID uuid.UUID) {
 				now := time.Now()
 				integrationID := uuid.New()
@@ -208,7 +215,7 @@ func TestRepositoryHandler_Update(t *testing.T) {
 					)
 			},
 			expectedCode: http.StatusOK,
-			expectedBody: "paused",
+			expectedBody: "pm_schedule_hours",
 		},
 		{
 			name:         "returns bad request for invalid JSON body",

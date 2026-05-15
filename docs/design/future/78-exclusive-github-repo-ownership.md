@@ -38,6 +38,20 @@ Claiming requires:
 
 If user auth is missing, the API returns `GITHUB_USER_AUTH_REQUIRED`.
 
+## Rollout Preflight
+
+Before applying the migration that creates the active-owner partial unique index, run:
+
+```sql
+SELECT github_id, count(*) AS active_rows
+FROM repositories
+WHERE status = 'active' AND github_id IS NOT NULL
+GROUP BY github_id
+HAVING count(*) > 1;
+```
+
+The migration intentionally fails if this query returns rows. Resolve each duplicate with an explicit disconnect or transfer decision before deploying the index.
+
 ## Webhooks
 
 GitHub installation webhooks update installation metadata only. `installation_repositories.added` does not auto-claim repos. Removed repositories and deleted installations disconnect affected active repository rows.
