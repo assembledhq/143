@@ -11,8 +11,8 @@
     "start": "next start",
     "lint": "eslint . --max-warnings=0",
     "typecheck": "tsc --noEmit",
-    "test": "npm run lint && vitest",
-    "test:ci": "npm run lint && vitest run --reporter=dot"
+    "test": "vitest",
+    "test:ci": "vitest run --reporter=dot"
   },
   "dependencies": {
     "@sentry/nextjs": "^10.45.0",

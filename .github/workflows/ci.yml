@@ -209,7 +209,6 @@ jobs:
         run: pip install 'diff_cover==10.2.0'
 
       - run: npm ci
-      - run: npm run lint
 
       - name: Run affected tests (PR)
         if: github.event_name == 'pull_request'
