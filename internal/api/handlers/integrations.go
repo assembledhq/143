@@ -1237,21 +1237,52 @@ func (h *IntegrationHandler) ClaimGitHubInstallationRepositories(w http.Response
 		})
 	}
 	if len(conflicts) > 0 {
-		writeJSON(w, http.StatusConflict, map[string]any{
-			"error": map[string]any{
-				"code":    "REPOSITORY_OWNERSHIP_CONFLICT",
-				"message": "one or more repositories are already owned by another organization",
-				"details": map[string]any{"repositories": conflicts},
-			},
-		})
+		writeGitHubRepositoryClaimConflict(w, conflicts)
 		return
 	}
 
 	if err := h.repoStore.ApplyGitHubClaims(ctx, orgID, claimRepos, transferOwners); err != nil {
+		if errors.Is(err, db.ErrActiveGitHubRepositoryOwnershipConflict) {
+			writeGitHubRepositoryClaimConflict(w, h.githubClaimConflictCandidates(ctx, orgID, claimRepos))
+			return
+		}
 		writeError(w, r, http.StatusInternalServerError, "CLAIM_FAILED", "failed to claim github repositories", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"data": map[string]any{"claimed": len(claimRepos)}})
+}
+
+func writeGitHubRepositoryClaimConflict(w http.ResponseWriter, conflicts []models.GitHubRepositoryClaimCandidate) {
+	writeJSON(w, http.StatusConflict, map[string]any{
+		"error": map[string]any{
+			"code":    "REPOSITORY_OWNERSHIP_CONFLICT",
+			"message": "one or more repositories are already owned by another organization",
+			"details": map[string]any{"repositories": conflicts},
+		},
+	})
+}
+
+func (h *IntegrationHandler) githubClaimConflictCandidates(ctx context.Context, orgID uuid.UUID, repos []*models.Repository) []models.GitHubRepositoryClaimCandidate {
+	conflicts := make([]models.GitHubRepositoryClaimCandidate, 0, len(repos))
+	for _, repo := range repos {
+		owner, err := h.repoStore.GetActiveOwnerByGitHubID(ctx, repo.GitHubID)
+		if err != nil || owner.OrgID == orgID {
+			continue
+		}
+		conflicts = append(conflicts, models.GitHubRepositoryClaimCandidate{
+			GitHubID:       repo.GitHubID,
+			FullName:       repo.FullName,
+			DefaultBranch:  defaultBranchOrMain(repo.DefaultBranch),
+			Private:        repo.Private,
+			CloneURL:       defaultCloneURL(repo.FullName, repo.CloneURL),
+			InstallationID: repo.InstallationID,
+			Status:         models.GitHubRepositoryClaimStatusOwnedByOtherOrg,
+			RepositoryID:   &owner.RepositoryID,
+			OwnerOrgID:     &owner.OrgID,
+			OwnerOrgName:   &owner.OrgName,
+		})
+	}
+	return conflicts
 }
 
 func (h *IntegrationHandler) githubInstallationLinkForRequest(w http.ResponseWriter, r *http.Request, orgID uuid.UUID) (models.GitHubInstallationOrgLink, bool) {
