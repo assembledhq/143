@@ -453,6 +453,9 @@ type orchestratorServiceStub struct {
 	runAgentCalls        int
 	continueSessionCalls int
 	recoverSessionCalls  int
+	cancelSessionCalls   int
+	cancelSessionID      uuid.UUID
+	cancelSessionResult  bool
 	runAgentFn           func(ctx context.Context, run *models.Session) error
 	continueSessionFn    func(ctx context.Context, session *models.Session, opts *agent.ContinueSessionOptions) error
 	revertThreadFn       func(ctx context.Context, session *models.Session, thread *models.SessionThread) error
@@ -512,6 +515,12 @@ func (s *orchestratorServiceStub) RecoverSession(ctx context.Context, session *m
 	return nil
 }
 
+func (s *orchestratorServiceStub) CancelSessionByID(sessionID uuid.UUID) bool {
+	s.cancelSessionCalls++
+	s.cancelSessionID = sessionID
+	return s.cancelSessionResult
+}
+
 func (s *orchestratorServiceStub) ResolveSessionTimeout(ctx context.Context, orgID uuid.UUID) time.Duration {
 	if s.sessionTimeout > 0 {
 		return s.sessionTimeout
@@ -524,6 +533,48 @@ func (s *orchestratorServiceStub) ResolveAbsoluteRuntimeCeiling(ctx context.Cont
 		return s.runtimeCeiling
 	}
 	return 90 * time.Minute
+}
+
+func TestCancelSessionHandler_InterruptsLocalOrchestratorSession(t *testing.T) {
+	t.Parallel()
+
+	sessionID := uuid.New()
+	orgID := uuid.New()
+	orch := &orchestratorServiceStub{cancelSessionResult: true}
+	handler := newCancelSessionHandler(nil, &Services{Orchestrator: orch}, zerolog.Nop())
+	payload := []byte(fmt.Sprintf(`{"session_id":%q,"org_id":%q}`, sessionID.String(), orgID.String()))
+
+	err := handler(context.Background(), "cancel_session", payload)
+
+	require.NoError(t, err, "cancel_session should succeed when the local orchestrator accepts the cancel")
+	require.Equal(t, 1, orch.cancelSessionCalls, "cancel_session should call the orchestrator once")
+	require.Equal(t, sessionID, orch.cancelSessionID, "cancel_session should target the payload session")
+}
+
+func TestCancelSessionHandler_ConsumesDeliveredCancelWithDetachedContext(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	sessionID := uuid.New()
+	orgID := uuid.New()
+	orch := &orchestratorServiceStub{cancelSessionResult: true}
+	handler := newCancelSessionHandler(&Stores{Sessions: db.NewSessionStore(mock)}, &Services{Orchestrator: orch}, zerolog.Nop())
+	payload := []byte(fmt.Sprintf(`{"session_id":%q,"org_id":%q}`, sessionID.String(), orgID.String()))
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	mock.ExpectExec("UPDATE session_cancel_requests").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	err = handler(ctx, "cancel_session", payload)
+
+	require.NoError(t, err, "cancel_session should clear delivered cancel intent even after job context cancellation")
+	require.Equal(t, 1, orch.cancelSessionCalls, "cancel_session should still call the orchestrator")
+	require.NoError(t, mock.ExpectationsWereMet(), "delivered cancel request should be consumed")
 }
 
 func workerSessionRow(sessionID, issueID, orgID uuid.UUID, status string, currentTurn int, agentSessionID, snapshotKey *string) []any {
