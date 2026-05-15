@@ -62,7 +62,13 @@ type IntervalUnit = (typeof INTERVAL_UNITS)[number];
 const toIntervalUnit = (v: string, fallback: IntervalUnit): IntervalUnit =>
   (INTERVAL_UNITS as readonly string[]).includes(v) ? (v as IntervalUnit) : fallback;
 
-function SettingsTab({ automation, canManage }: { automation: Automation; canManage: boolean }) {
+function SettingsTab({
+  automation,
+  canManage,
+}: {
+  automation: Automation;
+  canManage: boolean;
+}) {
   const queryClient = useQueryClient();
   const [name, setName] = useState(automation.name);
   const [goal, setGoal] = useState(automation.goal);
@@ -128,7 +134,11 @@ function SettingsTab({ automation, canManage }: { automation: Automation; canMan
     <div className="space-y-4 rounded-lg border border-border bg-card p-5">
       <div className="space-y-1.5">
         <Label>Emoji</Label>
-        <AutomationEmojiPicker value={iconValue} onChange={setIconValue} className="w-full sm:w-64" />
+        <AutomationEmojiPicker
+          value={iconValue}
+          onChange={setIconValue}
+          className="w-full sm:w-64"
+        />
       </div>
       <div className="space-y-1.5">
         <Label htmlFor="name">Name</Label>
@@ -367,6 +377,41 @@ export default function AutomationDetailPage() {
     onSuccess: () => router.push("/automations"),
   });
 
+  const iconMutation = useMutation({
+    mutationFn: (iconValue: string) =>
+      api.automations.update(automationId, {
+        icon_type: "emoji",
+        icon_value: iconValue,
+      }),
+    onMutate: async (iconValue: string) => {
+      await queryClient.cancelQueries({ queryKey: ["automation", automationId] });
+      const previous = queryClient.getQueryData<typeof data>(["automation", automationId]);
+      queryClient.setQueryData<typeof data>(["automation", automationId], (current) => {
+        if (!current?.data) return current;
+        return {
+          ...current,
+          data: {
+            ...current.data,
+            icon_type: "emoji",
+            icon_value: iconValue,
+          },
+        };
+      });
+      return { previous };
+    },
+    onError: (_err, _iconValue, context) => {
+      if (context?.previous) {
+        queryClient.setQueryData(["automation", automationId], context.previous);
+      }
+    },
+    onSuccess: (updated) => {
+      queryClient.setQueryData(["automation", automationId], updated);
+    },
+    onSettled: () => {
+      queryClient.invalidateQueries({ queryKey: ["automation", automationId] });
+    },
+  });
+
   if (isLoading) {
     return (
       <PageContainer size="default">
@@ -413,6 +458,7 @@ export default function AutomationDetailPage() {
     pauseMutation.isError ? "Failed to pause automation." :
     resumeMutation.isError ? "Failed to resume automation." :
     runNowMutation.isError ? "Failed to trigger run." :
+    iconMutation.isError ? "Failed to update automation emoji." :
     deleteMutation.isError ? "Failed to delete automation." :
     null;
 
@@ -423,12 +469,22 @@ export default function AutomationDetailPage() {
         <PageHeader
           title={
             <span className="inline-flex min-w-0 items-center gap-3">
-              <span
-                className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md border border-border bg-card text-lg leading-none"
-                aria-label={`Automation icon for ${automation.name}`}
-              >
-                {automation.icon_value || "⚙️"}
-              </span>
+              {canManage ? (
+                <AutomationEmojiPicker
+                  value={automation.icon_value || "⚙️"}
+                  onChange={(iconValue) => iconMutation.mutate(iconValue)}
+                  trigger="icon"
+                  triggerLabel="Change automation emoji"
+                  disabled={iconMutation.isPending}
+                />
+              ) : (
+                <span
+                  className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md border border-border bg-card text-lg leading-none"
+                  aria-label={`Automation icon for ${automation.name}`}
+                >
+                  {automation.icon_value || "⚙️"}
+                </span>
+              )}
               <span className="min-w-0 truncate">{automation.name}</span>
             </span>
           }
