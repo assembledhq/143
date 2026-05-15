@@ -329,6 +329,11 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	// the historical fail-open behavior so loopback test POSTs work
 	// without configuring credentials.
 	ingestionWebhookHandler.SetRequireSecret(cfg.Env == "production")
+	// Shared per-OAuth-app HMAC secret for Linear. Used by the SaaS
+	// deployment where one Linear OAuth app handles every workspace.
+	// Self-hosted deployments leave this empty and store per-org
+	// overrides on LinearConfig.WebhookSecret instead.
+	ingestionWebhookHandler.SetGlobalLinearWebhookSecret(cfg.LinearWebhookSigningSecret)
 
 	// Linear inbound-agent dispatcher. Wired here so HandleLinear can branch
 	// AgentSessionEvent webhooks into the agent path. Behind the feature

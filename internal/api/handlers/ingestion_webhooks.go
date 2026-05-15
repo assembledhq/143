@@ -46,6 +46,16 @@ type IngestionWebhookHandler struct {
 	// on in production where an unsigned webhook is always an attack
 	// (anyone can POST to the public ingestion URL).
 	requireSecret bool
+
+	// globalLinearWebhookSecret is the per-OAuth-app HMAC secret Linear
+	// issues once at OAuth-app creation. The same secret signs every
+	// webhook from every workspace the app is installed in — a property
+	// of the OAuth app, not the install. The signature verifier falls
+	// back to this when the per-org LinearConfig.WebhookSecret is empty,
+	// which is the SaaS / multi-tenant case where one shared OAuth app
+	// is installed across many workspaces. Empty in self-hosted single-
+	// app deployments where each org pastes its own per-install secret.
+	globalLinearWebhookSecret string
 }
 
 func NewIngestionWebhookHandler(
@@ -70,6 +80,15 @@ func NewIngestionWebhookHandler(
 // configuring credentials.
 func (h *IngestionWebhookHandler) SetRequireSecret(require bool) {
 	h.requireSecret = require
+}
+
+// SetGlobalLinearWebhookSecret wires the per-OAuth-app HMAC secret used
+// to verify webhooks in the SaaS / multi-tenant deployment. See the
+// globalLinearWebhookSecret field for the precedence semantics. Empty
+// string is valid and means "no global secret configured" (single-app
+// self-hosted deployments).
+func (h *IngestionWebhookHandler) SetGlobalLinearWebhookSecret(secret string) {
+	h.globalLinearWebhookSecret = secret
 }
 
 // SetLinearAgentDispatcher wires the inbound-agent dispatcher
@@ -320,9 +339,24 @@ func sniffLinearEventEnvelope(body []byte) (LinearAgentEventType, *linearAgentEv
 	return "", nil
 }
 
-// verifyProviderSignature looks up the per-org webhook secret from the DB and
-// verifies the HMAC-SHA256 signature. If no credential is configured, verification
-// is skipped (dev mode).
+// verifyProviderSignature resolves the HMAC secret for this delivery and
+// verifies the signature. The secret comes from one of two places, in order:
+//
+//  1. Per-org override: org_credentials.config.webhook_secret. Used when a
+//     self-hosted deployment runs its own provider OAuth app and the admin
+//     pasted the app's signing secret into the org credential at install
+//     time.
+//
+//  2. Process-wide default (Linear only today): the
+//     LINEAR_WEBHOOK_SIGNING_SECRET env var, threaded in via
+//     SetGlobalLinearWebhookSecret. Used in the SaaS / multi-tenant case
+//     where one shared Linear OAuth app handles every workspace and the
+//     secret is a property of the app, not the install.
+//
+// If neither is set and requireSecret is true, the delivery is rejected; if
+// requireSecret is false (dev), verification is skipped. Sentry has no
+// global-secret notion today — its OAuth app is always per-install — so the
+// fallback only fires for Linear.
 func (h *IngestionWebhookHandler) verifyProviderSignature(
 	ctx context.Context,
 	orgID uuid.UUID,
@@ -330,58 +364,15 @@ func (h *IngestionWebhookHandler) verifyProviderSignature(
 	body []byte,
 	headers http.Header,
 ) error {
-	if h.credStore == nil {
-		if h.requireSecret {
-			return fmt.Errorf("webhook credential store not configured")
-		}
-		return nil
-	}
-
-	// Map provider string to models.ProviderName
-	var providerName models.ProviderName
-	switch provider {
-	case "sentry":
-		providerName = models.ProviderSentry
-	case "linear":
-		providerName = models.ProviderLinear
-	default:
-		if h.requireSecret {
-			return fmt.Errorf("unknown provider %q", provider)
-		}
-		return nil
-	}
-
-	cred, err := h.credStore.Get(ctx, orgID, providerName)
+	secret, err := h.resolveWebhookSecret(ctx, orgID, provider)
 	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			if h.requireSecret {
-				return fmt.Errorf("no webhook credential configured for %s", provider)
-			}
-			zerolog.Ctx(ctx).Debug().Err(err).Str("provider", provider).Msg("no webhook credential configured, skipping signature verification")
-			return nil
-		}
-		zerolog.Ctx(ctx).Error().Err(err).Str("provider", provider).Msg("failed to load webhook credential")
-		return fmt.Errorf("failed to load webhook credential")
+		return err
 	}
-
-	// Extract webhook_secret from the typed config.
-	var secret string
-	switch cfg := cred.Config.(type) {
-	case models.SentryConfig:
-		secret = cfg.WebhookSecret
-	case models.LinearConfig:
-		secret = cfg.WebhookSecret
-	default:
-		if h.requireSecret {
-			return fmt.Errorf("credential for %s has unexpected config type", provider)
-		}
-		return nil
-	}
-
 	if secret == "" {
 		if h.requireSecret {
 			return fmt.Errorf("webhook secret for %s is empty", provider)
 		}
+		zerolog.Ctx(ctx).Debug().Str("provider", provider).Msg("no webhook secret configured, skipping signature verification")
 		return nil
 	}
 
@@ -396,6 +387,68 @@ func (h *IngestionWebhookHandler) verifyProviderSignature(
 	}
 
 	return nil
+}
+
+// resolveWebhookSecret returns the HMAC secret to verify this delivery
+// against. Returns "" without error when no secret is available from any
+// source — verifyProviderSignature then decides whether that's a 401 (prod)
+// or a pass-through (dev). Errors are reserved for genuine infrastructure
+// failures (credential store unreachable, unknown provider when
+// requireSecret is on) so the dev-mode pass-through can't accidentally
+// suppress them.
+func (h *IngestionWebhookHandler) resolveWebhookSecret(
+	ctx context.Context,
+	orgID uuid.UUID,
+	provider string,
+) (string, error) {
+	// Map provider string to models.ProviderName so the credential store
+	// query is typed. Unknown providers are only fatal under requireSecret
+	// — dev mode preserves the historical pass-through behavior.
+	var providerName models.ProviderName
+	switch provider {
+	case "sentry":
+		providerName = models.ProviderSentry
+	case "linear":
+		providerName = models.ProviderLinear
+	default:
+		if h.requireSecret {
+			return "", fmt.Errorf("unknown provider %q", provider)
+		}
+		return "", nil
+	}
+
+	// Per-org override. Missing-row is not an error here; it just means
+	// "no per-org override" and we fall through to the global secret.
+	perOrgSecret := ""
+	if h.credStore != nil {
+		cred, err := h.credStore.Get(ctx, orgID, providerName)
+		switch {
+		case err == nil:
+			switch cfg := cred.Config.(type) {
+			case models.SentryConfig:
+				perOrgSecret = cfg.WebhookSecret
+			case models.LinearConfig:
+				perOrgSecret = cfg.WebhookSecret
+			}
+		case errors.Is(err, pgx.ErrNoRows):
+			// Per-org credential never written; fall through to global.
+		default:
+			zerolog.Ctx(ctx).Error().Err(err).Str("provider", provider).Msg("failed to load webhook credential")
+			return "", fmt.Errorf("failed to load webhook credential")
+		}
+	}
+	if perOrgSecret != "" {
+		return perOrgSecret, nil
+	}
+
+	// Provider-specific global fallback. Linear has one secret per OAuth
+	// app, set in the Linear dashboard once. Sentry has no equivalent
+	// today; if/when its multi-tenant story changes, this is the seam.
+	if provider == "linear" && h.globalLinearWebhookSecret != "" {
+		return h.globalLinearWebhookSecret, nil
+	}
+
+	return "", nil
 }
 
 // verifyHMACSHA256 computes HMAC-SHA256 of body with the given key and compares

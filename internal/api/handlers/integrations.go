@@ -582,15 +582,13 @@ func (h *IntegrationHandler) HandleLinearOAuthCallback(w http.ResponseWriter, r 
 	// time. A single Linear OAuth app has one webhook URL across every
 	// workspace it's installed in; the payload's `organizationId` field is
 	// the only org-identifying signal available pre-HMAC. This is a
-	// best-effort write — if it fails, the OAuth flow still succeeds and
-	// the per-install URL fallback (integration_id query param) still
-	// routes correctly for self-hosted setups.
+	// Required write: if it fails, the shared Linear webhook URL would keep
+	// routing to an old org (or to no org), so the OAuth callback must not
+	// report a successful connection.
 	if viewer.WorkspaceID != "" {
 		if err := h.integrationStore.SetLinearWorkspaceID(r.Context(), orgID, integration.ID, viewer.WorkspaceID); err != nil {
-			logger.Warn().Err(err).
-				Str("org_id", orgID.String()).
-				Str("workspace_id", viewer.WorkspaceID).
-				Msg("failed to persist linear workspace_id on integration; multi-tenant webhook routing will require the integration_id query param fallback")
+			writeError(w, r, http.StatusInternalServerError, "CONNECT_LINEAR_FAILED", "failed to persist linear workspace routing key", err)
+			return
 		}
 	}
 
