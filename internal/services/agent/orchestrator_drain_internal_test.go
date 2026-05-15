@@ -65,6 +65,12 @@ func (s *drainStubSessions) UpdateSnapshotInfo(context.Context, uuid.UUID, uuid.
 func (s *drainStubSessions) BeginRuntime(context.Context, uuid.UUID, uuid.UUID, models.CheckpointCapability, time.Time, time.Time, time.Time) error {
 	return nil
 }
+func (s *drainStubSessions) RequestCancel(context.Context, uuid.UUID, uuid.UUID) error {
+	return nil
+}
+func (s *drainStubSessions) ConsumeCancelRequest(context.Context, uuid.UUID, uuid.UUID) (bool, error) {
+	return false, nil
+}
 func (s *drainStubSessions) RecordRuntimeProgress(context.Context, uuid.UUID, uuid.UUID, models.RuntimeProgressType, models.RuntimeProgressStrength, time.Time) error {
 	return nil
 }

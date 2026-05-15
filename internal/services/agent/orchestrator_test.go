@@ -288,6 +288,8 @@ type mockSessionStore struct {
 	countRunningErr        error
 	beginRuntimeErr        error
 	updateRevisionErr      error
+	pendingCancel          bool
+	consumeCancelCalls     int
 	eventHook              func(string)
 	acquireHoldFn          func(proposedContainerID string) (string, error)
 	acquireHoldErr         error
@@ -440,6 +442,21 @@ func (m *mockSessionStore) BeginRuntime(ctx context.Context, orgID, sessionID uu
 		observedAt:   observedAt,
 	})
 	return m.beginRuntimeErr
+}
+
+func (m *mockSessionStore) RequestCancel(context.Context, uuid.UUID, uuid.UUID) error {
+	return nil
+}
+
+func (m *mockSessionStore) ConsumeCancelRequest(context.Context, uuid.UUID, uuid.UUID) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.consumeCancelCalls++
+	if !m.pendingCancel {
+		return false, nil
+	}
+	m.pendingCancel = false
+	return true, nil
 }
 
 func (m *mockSessionStore) RecordRuntimeProgress(ctx context.Context, orgID, sessionID uuid.UUID, progressType models.RuntimeProgressType, strength models.RuntimeProgressStrength, observedAt time.Time) error {
@@ -1321,6 +1338,7 @@ func TestRunAgent_SandboxCapacityRejectsBeforeCreate(t *testing.T) {
 	orgID := testOrg()
 	issue := testIssue(orgID)
 	run := testRun(orgID, issue.ID)
+	run.InteractionMode = models.SessionInteractionModeInteractive
 
 	d := defaultDeps()
 	d.sandboxCapacity = agent.NewSandboxCapacityGate(agent.SandboxCapacityGateConfig{
@@ -2955,6 +2973,50 @@ func TestRunAgent_SandboxCleanupOnCloneFailure(t *testing.T) {
 
 	// Sandbox was created so Destroy must be called.
 	require.Equal(t, 1, d.provider.GetDestroyCalls())
+}
+
+func TestRunAgent_PendingCancelIsDeliveredAfterSetup(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	run := testRun(orgID, issue.ID)
+
+	d := defaultDeps()
+	d.cancels = agent.NewCancelRegistry(zerolog.Nop())
+	d.sessions.pendingCancel = true
+	var cloneCtxErr error
+	d.provider.CloneRepoFn = func(ctx context.Context, sb *agent.Sandbox, repoURL, branch, token string) error {
+		select {
+		case <-ctx.Done():
+			cloneCtxErr = ctx.Err()
+			return ctx.Err()
+		case <-time.After(50 * time.Millisecond):
+			cloneCtxErr = ctx.Err()
+		}
+		return nil
+	}
+	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
+		select {
+		case <-ctx.Done():
+			require.ErrorIs(t, ctx.Err(), context.Canceled, "pending cancel should be delivered at the execution boundary")
+			return nil, ctx.Err()
+		case <-time.After(time.Second):
+			t.Fatal("pending cancel should be delivered at the execution boundary")
+			return nil, context.Canceled
+		}
+	}
+
+	orch := buildOrchestrator(d)
+	err := orch.RunAgent(context.Background(), run)
+
+	require.Error(t, err, "RunAgent should return the cancellation error")
+	require.ErrorIs(t, err, context.Canceled, "RunAgent should report cancellation")
+	require.NoError(t, cloneCtxErr, "pending cancel should not cancel setup before repository clone completes")
+	require.Equal(t, 1, d.sessions.consumeCancelCalls, "RunAgent should consume the pending cancel request once")
+	require.Len(t, d.sessions.getTurnUpdates(), 1, "cancelled interactive run should return to idle through turn completion after snapshot")
+	results := d.sessions.getResultUpdates()
+	require.Empty(t, results, "pending cancel during setup should not mark the session failed")
 }
 
 func TestRunAgent_CapturesAndPersistsBaseCommitSHA(t *testing.T) {

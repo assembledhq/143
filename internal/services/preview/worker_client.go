@@ -67,6 +67,15 @@ type RemoteStopActivePreviewForSessionRequest struct {
 	SessionID uuid.UUID `json:"session_id"`
 }
 
+type RemoteCancelSessionRequest struct {
+	OrgID     uuid.UUID `json:"org_id"`
+	SessionID uuid.UUID `json:"session_id"`
+}
+
+type RemoteCancelSessionResponse struct {
+	Accepted bool `json:"accepted"`
+}
+
 // RemoteInspectElementRequest targets DOM inspection by coordinates.
 type RemoteInspectElementRequest struct {
 	X int `json:"x"`
@@ -401,4 +410,23 @@ func (c *WorkerPreviewClient) StopActivePreviewForSession(ctx context.Context, w
 		return false, err
 	}
 	return result.Stopped, nil
+}
+
+func (c *WorkerPreviewClient) CancelSession(ctx context.Context, worker WorkerNode, reqBody RemoteCancelSessionRequest) (*RemoteCancelSessionResponse, error) {
+	sessionID := reqBody.SessionID
+	req, err := c.newRequest(ctx, http.MethodPost, fmt.Sprintf("%s/internal/sessions/%s/cancel", worker.BaseURL, sessionID), auth.PreviewTokenClaims{
+		OrgID:        reqBody.OrgID,
+		TargetNodeID: worker.ID,
+		SessionID:    &sessionID,
+		Action:       "cancel_session",
+		ExpiresAt:    time.Now().Add(previewWorkerTokenTTL),
+	}, reqBody)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("cancel session on worker: %w", err)
+	}
+	return decodeWorkerResponse[RemoteCancelSessionResponse](resp)
 }

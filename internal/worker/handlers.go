@@ -151,6 +151,7 @@ func RegisterHandlers(w *Worker, stores *Stores, services *Services, retentionCf
 	if hasServiceHandlersDependencies(services) {
 		w.Register("run_agent", newRunAgentHandler(stores, services, logger))
 		w.Register("continue_session", newContinueSessionHandler(stores, services, logger))
+		w.Register("cancel_session", newCancelSessionHandler(stores, services, logger))
 		w.Register("open_pr", newOpenPRHandler(stores, services, logger))
 		w.Register("push_pr_changes", newPushPRChangesHandler(stores, services, logger))
 		w.Register("sync_pull_request_state", newSyncPullRequestStateHandler(services, logger))
@@ -306,6 +307,7 @@ type orchestratorService interface {
 	RunAgent(ctx context.Context, run *models.Session) error
 	ContinueSession(ctx context.Context, session *models.Session, opts *agent.ContinueSessionOptions) error
 	RecoverSession(ctx context.Context, session *models.Session) error
+	CancelSessionByID(sessionID uuid.UUID) bool
 	RevertThread(ctx context.Context, session *models.Session, thread *models.SessionThread) error
 	ResolveSessionTimeout(ctx context.Context, orgID uuid.UUID) time.Duration
 	ResolveAbsoluteRuntimeCeiling(ctx context.Context, orgID uuid.UUID) time.Duration
@@ -1208,6 +1210,44 @@ func newRunAgentHandler(stores *Stores, services *Services, logger zerolog.Logge
 				return &RetryableError{Err: err}
 			}
 			return err
+		}
+		return nil
+	}
+}
+
+func newCancelSessionHandler(stores *Stores, services *Services, logger zerolog.Logger) JobHandler {
+	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
+		if services == nil || services.Orchestrator == nil {
+			return &FatalError{Err: fmt.Errorf("orchestrator is not configured")}
+		}
+		var input struct {
+			SessionID string `json:"session_id"`
+			OrgID     string `json:"org_id"`
+		}
+		if err := json.Unmarshal(payload, &input); err != nil {
+			return fmt.Errorf("unmarshal cancel_session payload: %w", err)
+		}
+		orgID, err := parseOrgID(input.OrgID, ctx)
+		if err != nil {
+			return fmt.Errorf("parse org ID: %w", err)
+		}
+		sessionID, err := uuid.Parse(input.SessionID)
+		if err != nil {
+			return fmt.Errorf("parse session ID: %w", err)
+		}
+		accepted := services.Orchestrator.CancelSessionByID(sessionID)
+		if accepted && stores != nil && stores.Sessions != nil {
+			consumeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+			defer cancel()
+			if _, err := stores.Sessions.ConsumeCancelRequest(consumeCtx, orgID, sessionID); err != nil {
+				logger.Warn().Err(err).Str("session_id", sessionID.String()).Msg("failed to consume delivered session cancel request")
+			}
+		}
+		if !accepted {
+			logger.Warn().
+				Str("session_id", sessionID.String()).
+				Str("org_id", orgID.String()).
+				Msg("cancel_session job found no live local cancel registry entry")
 		}
 		return nil
 	}

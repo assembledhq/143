@@ -281,6 +281,8 @@ type SessionStore interface {
 	UpdateTurnComplete(ctx context.Context, orgID, sessionID uuid.UUID, turn int, result *models.SessionResult, agentSessionID, snapshotKey string) error
 	UpdateSnapshotInfo(ctx context.Context, orgID, sessionID uuid.UUID, agentSessionID, snapshotKey string) error
 	BeginRuntime(ctx context.Context, orgID, sessionID uuid.UUID, capability models.CheckpointCapability, softDeadline, hardDeadline, observedAt time.Time) error
+	RequestCancel(ctx context.Context, orgID, sessionID uuid.UUID) error
+	ConsumeCancelRequest(ctx context.Context, orgID, sessionID uuid.UUID) (bool, error)
 	RecordRuntimeProgress(ctx context.Context, orgID, sessionID uuid.UUID, progressType models.RuntimeProgressType, strength models.RuntimeProgressStrength, observedAt time.Time) error
 	GrantRuntimeExtension(ctx context.Context, orgID, sessionID uuid.UUID, lockToken uuid.UUID, expectedSoftDeadline, newSoftDeadline, hardDeadline time.Time, extensionSeconds int) (bool, error)
 	PublishCheckpoint(ctx context.Context, orgID, sessionID uuid.UUID, lockToken uuid.UUID, agentSessionID, snapshotKey string, kind models.CheckpointKind, capability models.CheckpointCapability, sizeBytes int64, checkpointedAt time.Time, checkpointErr *string, stopReason models.RuntimeStopReason) (bool, error)
@@ -492,6 +494,33 @@ func (o *Orchestrator) CancelThreadByID(threadID uuid.UUID) bool {
 		return false
 	}
 	return o.threadCancels.CancelThread(threadID)
+}
+
+// CancelSessionByID asks the session-scoped cancel registry to interrupt the
+// in-flight agent for the given session. It is used by worker-targeted cancel
+// jobs when the public API process is not the worker that owns the live handle.
+func (o *Orchestrator) CancelSessionByID(sessionID uuid.UUID) bool {
+	if o.cancels == nil {
+		return false
+	}
+	return o.cancels.CancelSession(sessionID)
+}
+
+func (o *Orchestrator) honorPendingCancelRequest(ctx context.Context, orgID, sessionID uuid.UUID, log zerolog.Logger) {
+	if o.cancels == nil || o.sessions == nil {
+		return
+	}
+	pending, err := o.sessions.ConsumeCancelRequest(ctx, orgID, sessionID)
+	if err != nil {
+		log.Warn().Err(err).Msg("failed to consume pending session cancel request")
+		return
+	}
+	if !pending {
+		return
+	}
+	if !o.cancels.CancelSession(sessionID) {
+		log.Warn().Msg("pending session cancel request found no local cancel registry entry")
+	}
 }
 
 type workspaceSnapshotUpdater interface {
@@ -2080,6 +2109,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 	prompt.UsageHint = o.buildTokenUsageHint(ctx, run.AgentType, run.OrgID, run.TriggeredByUserID, sandboxCfg.Env, prompt.UsageHint)
 
 	// 10. Execute agent with log streaming.
+	o.honorPendingCancelRequest(ctx, run.OrgID, run.ID, log)
 	logCh := make(chan LogEntry, 100)
 	var logWg sync.WaitGroup
 	logWg.Add(1)
@@ -3306,6 +3336,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	if o.cancels != nil {
 		execCtx = WithInteractiveHandleAttacher(execCtx, o.cancels.HandleAttacher(session.ID))
 	}
+	o.honorPendingCancelRequest(ctx, session.OrgID, session.ID, log)
 	result, err := adapter.Execute(execCtx, sandbox, prompt, logCh)
 	if err == nil && restoredWorkspaceFallbackPrompt != nil && shouldRetryClaudeResumeFromSnapshot(session, prompt, result) {
 		log.Warn().
