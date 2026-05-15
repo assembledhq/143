@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"os"
+	"os/exec"
 	"strings"
 	"testing"
 
@@ -380,6 +382,86 @@ func TestPrepareClaudeHumanInputHooks_ConfiguresActionableToolApprovals(t *testi
 	for _, matcher := range []string{"AskUserQuestion", "Bash", "Edit", "MultiEdit", "Write", "WebFetch", "WebSearch"} {
 		require.True(t, matchers[matcher], "PreToolUse hooks should route %s approvals through 143", matcher)
 	}
+}
+
+func TestClaudeHumanInputHookScopesResumeAnswerToMatchingToolUse(t *testing.T) {
+	t.Parallel()
+
+	answer := map[string]any{
+		"ProviderRequestID": "toolu_expected",
+		"Status":            string(models.HumanInputRequestStatusAnswered),
+		"SelectedChoiceIDs": []string{"approve"},
+		"AnswerPayload":     map[string]any{"decision": "approve"},
+	}
+	output := runClaudeHumanInputHookForTest(t, map[string]any{
+		"tool_name":   "Bash",
+		"tool_use_id": "toolu_other",
+		"tool_input": map[string]any{
+			"command": "echo unrelated",
+		},
+	}, answer)
+
+	hookOutput := output["hookSpecificOutput"].(map[string]any)
+	require.Equal(t, "defer", hookOutput["permissionDecision"], "hook should defer unrelated tool uses instead of replaying another request answer")
+}
+
+func TestClaudeHumanInputHookConsumesMatchedResumeAnswer(t *testing.T) {
+	t.Parallel()
+
+	answerPath := writeClaudeHumanInputAnswerForTest(t, map[string]any{
+		"ProviderRequestID": "toolu_expected",
+		"Status":            string(models.HumanInputRequestStatusAnswered),
+		"SelectedChoiceIDs": []string{"approve"},
+		"AnswerPayload":     map[string]any{"decision": "approve"},
+	})
+	output := runClaudeHumanInputHookWithAnswerPathForTest(t, map[string]any{
+		"tool_name":   "Bash",
+		"tool_use_id": "toolu_expected",
+		"tool_input": map[string]any{
+			"command": "echo ok",
+		},
+	}, answerPath)
+
+	hookOutput := output["hookSpecificOutput"].(map[string]any)
+	require.Equal(t, "allow", hookOutput["permissionDecision"], "hook should apply the answer to the matching tool use")
+	_, err := os.Stat(answerPath)
+	require.True(t, os.IsNotExist(err), "hook should consume the answer file once it applies the matching answer")
+}
+
+func runClaudeHumanInputHookForTest(t *testing.T, event map[string]any, answer map[string]any) map[string]any {
+	t.Helper()
+	answerPath := writeClaudeHumanInputAnswerForTest(t, answer)
+	return runClaudeHumanInputHookWithAnswerPathForTest(t, event, answerPath)
+}
+
+func writeClaudeHumanInputAnswerForTest(t *testing.T, answer map[string]any) string {
+	t.Helper()
+	answerPath := t.TempDir() + "/answer.json"
+	answerBytes, err := json.Marshal(answer)
+	require.NoError(t, err, "test answer should marshal as JSON")
+	require.NoError(t, os.WriteFile(answerPath, answerBytes, 0o600), "test answer file should be written")
+	return answerPath
+}
+
+func runClaudeHumanInputHookWithAnswerPathForTest(t *testing.T, event map[string]any, answerPath string) map[string]any {
+	t.Helper()
+	hookPath := t.TempDir() + "/hook.mjs"
+	require.NoError(t, os.WriteFile(hookPath, []byte(claudeHumanInputHookScript), 0o700), "Claude human-input hook should be written for execution")
+
+	eventBytes, err := json.Marshal(event)
+	require.NoError(t, err, "test hook event should marshal as JSON")
+	cmd := exec.Command("node", hookPath)
+	cmd.Env = append(os.Environ(),
+		"CLAUDE_143_HUMAN_INPUT_TOOLS=AskUserQuestion,Bash,Edit,MultiEdit,Write,WebFetch,WebSearch",
+		"CLAUDE_143_HUMAN_INPUT_ANSWER="+answerPath,
+	)
+	cmd.Stdin = strings.NewReader(string(eventBytes))
+	outputBytes, err := cmd.CombinedOutput()
+	require.NoError(t, err, "Claude human-input hook should execute successfully: %s", string(outputBytes))
+
+	var output map[string]any
+	require.NoError(t, json.Unmarshal(outputBytes, &output), "Claude human-input hook should output valid JSON")
+	return output
 }
 
 func TestClaudeCodeAdapter_Execute_ContinuationWithoutSessionIDFallsBackToFreshExec(t *testing.T) {

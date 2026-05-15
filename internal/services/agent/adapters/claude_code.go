@@ -355,26 +355,78 @@ function selectedLabels(answer, input) {
   return labels;
 }
 
-const answerPath = process.env.CLAUDE_143_HUMAN_INPUT_ANSWER;
-if (!answerPath) {
+function normalizedString(value) {
+  return String(value || "").trim();
+}
+
+function collectEventRequestIDs(event, input) {
+  return new Set([
+    event.tool_use_id,
+    event.toolUseID,
+    event.tool_call_id,
+    event.toolCallID,
+    event.request_id,
+    event.requestID,
+    event.provider_request_id,
+    event.providerRequestID,
+    event.id,
+    input.tool_use_id,
+    input.toolUseID,
+    input.tool_call_id,
+    input.toolCallID,
+    input.request_id,
+    input.requestID,
+    input.provider_request_id,
+    input.providerRequestID,
+    input.id
+  ].map(normalizedString).filter(Boolean));
+}
+
+function answerProviderRequestID(answer) {
+  return normalizedString(
+    answer.provider_request_id ||
+    answer.ProviderRequestID ||
+    answer.providerRequestID
+  );
+}
+
+function deferForHumanInput(reason) {
   output({
     hookSpecificOutput: {
       hookEventName: "PreToolUse",
       permissionDecision: "defer",
-      permissionDecisionReason: "143.dev will ask the user."
+      permissionDecisionReason: reason || "143.dev will ask the user."
     }
   });
+}
+
+const answerPath = process.env.CLAUDE_143_HUMAN_INPUT_ANSWER;
+if (!answerPath) {
+  deferForHumanInput("143.dev will ask the user.");
   process.exit(0);
 }
 
 let answer = {};
+let answerLoaded = false;
 try {
   answer = JSON.parse(fs.readFileSync(answerPath, "utf8"));
+  answerLoaded = true;
 } catch {
   answer = {};
 }
 
 const input = event.tool_input || event.toolInput || {};
+if (!answerLoaded) {
+  deferForHumanInput("143.dev will ask the user.");
+  process.exit(0);
+}
+
+const expectedRequestID = answerProviderRequestID(answer);
+if (expectedRequestID && !collectEventRequestIDs(event, input).has(expectedRequestID)) {
+  deferForHumanInput("143.dev will ask the user.");
+  process.exit(0);
+}
+
 const updatedInput = { ...input };
 const answerText = answer.answer_text || answer.AnswerText || null;
 const selected = answer.selected_choice_ids || answer.SelectedChoiceIDs || [];
@@ -399,6 +451,13 @@ if (payload.edited_input && typeof payload.edited_input === "object") {
 }
 if (payload.edited_command && typeof payload.edited_command === "string") {
   updatedInput.command = payload.edited_command;
+}
+
+try {
+  fs.rmSync(answerPath, { force: true });
+} catch {
+  // Best effort: if the sandbox filesystem refuses deletion, still apply the
+  // matching answer so the resumed Claude turn can complete.
 }
 
 if (denied) {

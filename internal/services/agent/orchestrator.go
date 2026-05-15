@@ -2387,7 +2387,12 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 	}
 	if result != nil && result.RequiresHumanInput {
 		log.Info().Msg("agent requested human input, snapshotting and pausing session")
-		o.handleHumanInputPause(ctx, run, sandbox, result, run.CurrentTurn+1, primaryThreadID, log)
+		if err := o.handleHumanInputPause(ctx, run, sandbox, result, run.CurrentTurn+1, primaryThreadID, log); err != nil {
+			logAgentRunFailed(log, run, err, "failed", runStartedAt, func(event *zerolog.Event) {
+				event.Str("status", string(models.SessionStatusFailed))
+			})
+			return err
+		}
 		logAgentRunFinished(log, run, "awaiting_input", runStartedAt, func(event *zerolog.Event) {
 			event.Str("status", string(models.SessionStatusAwaitingInput))
 		})
@@ -3643,7 +3648,9 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	}
 	if result != nil && result.RequiresHumanInput {
 		log.Info().Msg("agent requested human input during continue, snapshotting and pausing session")
-		o.handleHumanInputPause(ctx, session, sandbox, result, turnNumber, threadID, log)
+		if err := o.handleHumanInputPause(ctx, session, sandbox, result, turnNumber, threadID, log); err != nil {
+			return err
+		}
 		return nil
 	}
 
@@ -5431,7 +5438,7 @@ func (o *Orchestrator) handleCancelledSession(ctx context.Context, session *mode
 	}
 }
 
-func (o *Orchestrator) handleHumanInputPause(ctx context.Context, session *models.Session, sandbox *Sandbox, result *AgentResult, turnNumber int, threadID *uuid.UUID, log zerolog.Logger) {
+func (o *Orchestrator) handleHumanInputPause(ctx context.Context, session *models.Session, sandbox *Sandbox, result *AgentResult, turnNumber int, threadID *uuid.UUID, log zerolog.Logger) error {
 	bgCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
@@ -5450,19 +5457,37 @@ func (o *Orchestrator) handleHumanInputPause(ctx context.Context, session *model
 	snapshotKey, snapshotSize, snapshotErr := o.snapshotSession(bgCtx, session, sandbox, result)
 	if snapshotErr != nil {
 		log.Warn().Err(snapshotErr).Msg("failed to snapshot session while awaiting human input")
+		err := fmt.Errorf("human input checkpoint snapshot: %w", snapshotErr)
+		return o.failHumanInputPause(bgCtx, session, threadID, err, log)
 	}
-	if snapshotKey != "" {
-		checkpointedAt := time.Now().UTC()
-		if _, err := o.sessions.PublishCheckpoint(bgCtx, session.OrgID, session.ID, lockToken, agentSessionID, snapshotKey, models.CheckpointKindGracefulStop, checkpointCapabilityForAgent(session.AgentType), snapshotSize, checkpointedAt, nil, models.RuntimeStopReasonNone); err != nil {
-			log.Warn().Err(err).Msg("failed to publish human-input checkpoint metadata")
-		}
-		if err := o.sessions.UpdateSnapshotInfo(bgCtx, session.OrgID, session.ID, agentSessionID, snapshotKey); err != nil {
-			log.Warn().Err(err).Msg("failed to persist human-input snapshot metadata")
-		}
+	if snapshotKey == "" {
+		err := errors.New("human input checkpoint snapshot was not persisted")
+		log.Warn().Msg(err.Error())
+		return o.failHumanInputPause(bgCtx, session, threadID, err, log)
+	}
+
+	checkpointedAt := time.Now().UTC()
+	published, err := o.sessions.PublishCheckpoint(bgCtx, session.OrgID, session.ID, lockToken, agentSessionID, snapshotKey, models.CheckpointKindGracefulStop, checkpointCapabilityForAgent(session.AgentType), snapshotSize, checkpointedAt, nil, models.RuntimeStopReasonNone)
+	if err != nil {
+		wrappedErr := fmt.Errorf("human input checkpoint metadata: %w", err)
+		log.Warn().Err(wrappedErr).Msg("failed to publish human-input checkpoint metadata")
+		return o.failHumanInputPause(bgCtx, session, threadID, wrappedErr, log)
+	}
+	if !published {
+		err := errors.New("human input checkpoint metadata was rejected")
+		log.Warn().Msg(err.Error())
+		return o.failHumanInputPause(bgCtx, session, threadID, err, log)
+	}
+	if err := o.sessions.UpdateSnapshotInfo(bgCtx, session.OrgID, session.ID, agentSessionID, snapshotKey); err != nil {
+		wrappedErr := fmt.Errorf("human input snapshot metadata: %w", err)
+		log.Warn().Err(wrappedErr).Msg("failed to persist human-input snapshot metadata")
+		return o.failHumanInputPause(bgCtx, session, threadID, wrappedErr, log)
 	}
 
 	if err := o.sessions.UpdateStatus(bgCtx, session.OrgID, session.ID, string(models.SessionStatusAwaitingInput)); err != nil {
 		log.Warn().Err(err).Msg("failed to mark session awaiting human input")
+		wrappedErr := fmt.Errorf("human input awaiting status: %w", err)
+		return o.failHumanInputPause(bgCtx, session, threadID, wrappedErr, log)
 	}
 	if threadID != nil && o.sessionThreads != nil {
 		if err := o.sessionThreads.UpdateStatus(bgCtx, session.OrgID, *threadID, models.ThreadStatusAwaitingInput); err != nil {
@@ -5470,6 +5495,22 @@ func (o *Orchestrator) handleHumanInputPause(ctx context.Context, session *model
 		}
 	}
 	log.Info().Int("turn", turnNumber).Bool("snapshot", snapshotKey != "").Msg("session paused for human input")
+	return nil
+}
+
+func (o *Orchestrator) failHumanInputPause(ctx context.Context, session *models.Session, threadID *uuid.UUID, err error, log zerolog.Logger) error {
+	o.failRun(ctx, session, err.Error())
+	failedThreadID := threadID
+	if failedThreadID == nil || *failedThreadID == uuid.Nil {
+		failedThreadID = session.PrimaryThreadID
+	}
+	if o.sessionThreads != nil && failedThreadID != nil && *failedThreadID != uuid.Nil {
+		result := &models.SessionResult{Error: strPtr(err.Error())}
+		if threadErr := o.sessionThreads.UpdateResult(ctx, session.OrgID, *failedThreadID, models.ThreadStatusFailed, result); threadErr != nil {
+			log.Warn().Err(threadErr).Str("thread_id", failedThreadID.String()).Msg("failed to mark thread failed after human-input pause failure")
+		}
+	}
+	return err
 }
 
 // snapshotSessionOnTurnSuccess wraps snapshotSession with the guard the

@@ -274,7 +274,11 @@ func (s *SessionHumanInputRequestStore) AnswerLatestPendingFreeTextBySession(ctx
 		    answered_by = @answered_by,
 		    answered_at = now(),
 		    status = 'answered'
-		WHERE id = (
+		WHERE org_id = @org_id
+		  AND session_id = @session_id
+		  AND thread_id IS NULL
+		  AND status = 'pending'
+		  AND id = (
 			SELECT id
 			FROM session_human_input_requests
 			WHERE org_id = @org_id
@@ -319,7 +323,11 @@ func (s *SessionHumanInputRequestStore) AnswerLatestPendingFreeTextByThread(ctx 
 		    answered_by = @answered_by,
 		    answered_at = now(),
 		    status = 'answered'
-		WHERE id = (
+		WHERE org_id = @org_id
+		  AND session_id = @session_id
+		  AND thread_id IS NOT DISTINCT FROM @thread_id
+		  AND status = 'pending'
+		  AND id = (
 			SELECT id
 			FROM session_human_input_requests
 			WHERE org_id = @org_id

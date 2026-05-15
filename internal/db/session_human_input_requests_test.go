@@ -174,7 +174,7 @@ func TestSessionHumanInputRequestStore_AnswerLatestPendingFreeTextBySessionRequi
 	row[18] = &userID
 	row[19] = &now
 
-	mock.ExpectQuery(`UPDATE session_human_input_requests(?s).*thread_id IS NULL`).
+	mock.ExpectQuery(`(?s)UPDATE session_human_input_requests.*WHERE org_id = @org_id\s+AND session_id = @session_id\s+AND thread_id IS NULL\s+AND status = 'pending'\s+AND id = \(`).
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(humanInputRequestColumns).AddRow(row...))
 
@@ -212,7 +212,7 @@ func TestSessionHumanInputRequestStore_AnswerLatestPendingFreeTextByThread(t *te
 	row[18] = &userID
 	row[19] = &now
 
-	mock.ExpectQuery("UPDATE session_human_input_requests").
+	mock.ExpectQuery(`(?s)UPDATE session_human_input_requests.*WHERE org_id = @org_id\s+AND session_id = @session_id\s+AND thread_id IS NOT DISTINCT FROM @thread_id\s+AND status = 'pending'\s+AND id = \(`).
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(humanInputRequestColumns).AddRow(row...))
 
