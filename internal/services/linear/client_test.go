@@ -342,6 +342,30 @@ func TestGraphQLClientCommentAndStateMutations(t *testing.T) {
 	}
 }
 
+func TestGraphQLClientAgentSessionUpdateUsesLinearInteractionShape(t *testing.T) {
+	t.Parallel()
+
+	client := newGraphQLClientForTest(t, func(t *testing.T, req linearGraphQLRequest, w http.ResponseWriter) {
+		require.Contains(t, req.Query, "agentSessionUpdate(id: $agentSessionId, input: $input)", "AgentSessionUpdate should pass the session id separately from the input")
+		require.NotContains(t, string(req.Variables), `"id":"as_1"`, "AgentSessionUpdateInput should not contain id")
+		require.Contains(t, string(req.Variables), `"agentSessionId":"as_1"`, "AgentSessionUpdate should pass the id variable")
+		require.Contains(t, string(req.Variables), `"label":"143 session"`, "external URLs should use Linear's label field")
+		require.Contains(t, string(req.Variables), `"url":"https://app.test/sessions/sess_1"`, "external URLs should include the target URL")
+		require.Contains(t, string(req.Variables), `"state":"active"`, "AgentSessionUpdate should use Linear's active state vocabulary")
+		writeGraphQLResponse(t, w, `{"data":{"agentSessionUpdate":{"success":true}}}`)
+	})
+
+	err := client.AgentSessionUpdate(context.Background(), AgentSessionUpdateInput{
+		AgentSessionID: "as_1",
+		ExternalURLs: []AgentSessionExternalURL{{
+			Title: "143 session",
+			URL:   "https://app.test/sessions/sess_1",
+		}},
+		State: "active",
+	})
+	require.NoError(t, err, "AgentSessionUpdate should accept Linear's successful response")
+}
+
 func TestGraphQLClientWorkflowStateForType(t *testing.T) {
 	t.Parallel()
 

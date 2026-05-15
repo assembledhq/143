@@ -28,7 +28,7 @@ func TestMilestoneActivity(t *testing.T) {
 			event:     MilestoneStarted,
 			wantOK:    true,
 			wantType:  models.LinearAgentActivityAction,
-			wantState: "inProgress",
+			wantState: "active",
 		},
 		{
 			name:     "pr_opened emits response with PR number",

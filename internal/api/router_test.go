@@ -2,21 +2,27 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
+	"encoding/json"
 	"encoding/pem"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/assembledhq/143/internal/cache"
 	"github.com/assembledhq/143/internal/config"
 	"github.com/assembledhq/143/internal/db"
+	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/services/claudecodeauth"
 	"github.com/assembledhq/143/internal/services/codexauth"
+	"github.com/google/uuid"
+	"github.com/pashagolub/pgxmock/v4"
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 )
@@ -199,4 +205,209 @@ func TestNewRouter_InternalPreviewRoutesSkipGlobalRateLimit(t *testing.T) {
 
 		require.Equal(t, http.StatusUnauthorized, rr.Code, "internal preview routes should bypass the global IP limiter on every request")
 	}
+}
+
+// repoRowCols is the column list LinearAgent bootstrap tests use when mocking
+// the repositories table. Kept in one place so reordering models.Repository
+// doesn't silently desync the test fixtures.
+var repoRowCols = []string{
+	"id", "org_id", "integration_id", "github_id", "full_name", "default_branch",
+	"private", "language", "description", "clone_url", "installation_id", "status",
+	"last_synced_at", "context_quality", "settings", "created_at", "updated_at",
+}
+
+func repoRow(id, orgID uuid.UUID, fullName string) []any {
+	now := time.Now().UTC()
+	return []any{
+		id, orgID, uuid.New(), int64(1), fullName, "main",
+		false, nil, nil, "https://github.com/" + fullName + ".git", int64(1), "active",
+		nil, nil, json.RawMessage(`{}`), now, now,
+	}
+}
+
+// TestLinearAgentBootstrapAdapter_AutoEnablesWhenUnset pins the convenience
+// default: on a fresh install (Enabled == nil) the adapter flips it to true.
+// Re-auth that hits this path again is idempotent — the second pass sees
+// Enabled = &true and leaves it alone.
+func TestLinearAgentBootstrapAdapter_AutoEnablesWhenUnset(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	now := time.Now().UTC()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	// First call: settings have no LinearAgent at all. Expect a SELECT, a
+	// repo list returning 0 rows (so DefaultRepoID stays nil), and an
+	// UPDATE that flips Enabled to true.
+	mock.ExpectQuery("SELECT .+ FROM organizations").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "name", "settings", "created_at", "updated_at"}).
+			AddRow(orgID, "Acme", json.RawMessage(`{}`), now, now))
+	mock.ExpectQuery("SELECT .+ FROM repositories").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(repoRowCols))
+	var capturedSettings []byte
+	mock.ExpectExec("UPDATE organizations SET settings").
+		WithArgs(capturingArgRouter(&capturedSettings), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	adapter := linearAgentBootstrapAdapter{
+		orgs:   db.NewOrganizationStore(mock),
+		repos:  db.NewRepositoryStore(mock),
+		logger: zerolog.Nop(),
+	}
+	require.NoError(t, adapter.Bootstrap(context.Background(), orgID))
+
+	var got models.OrgSettings
+	require.NoError(t, json.Unmarshal(capturedSettings, &got))
+	require.NotNil(t, got.LinearAgent.Enabled, "Enabled must be set so future calls treat the choice as explicit and idempotent")
+	require.True(t, *got.LinearAgent.Enabled, "fresh install should auto-enable the inbound agent")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+// TestLinearAgentBootstrapAdapter_PreservesExplicitDisable proves that an
+// admin who turned the agent off does not get retro-enabled by a later
+// re-authorize. The pointer-vs-zero distinction is load-bearing here: nil
+// means "no opinion", &false means "the admin said no".
+func TestLinearAgentBootstrapAdapter_PreservesExplicitDisable(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	now := time.Now().UTC()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	priorSettings := json.RawMessage(`{"linear_agent":{"enabled":false}}`)
+	mock.ExpectQuery("SELECT .+ FROM organizations").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "name", "settings", "created_at", "updated_at"}).
+			AddRow(orgID, "Acme", priorSettings, now, now))
+	mock.ExpectQuery("SELECT .+ FROM repositories").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(repoRowCols))
+	// No UPDATE expected — nothing mutated, so no DB write should fire.
+
+	adapter := linearAgentBootstrapAdapter{
+		orgs:   db.NewOrganizationStore(mock),
+		repos:  db.NewRepositoryStore(mock),
+		logger: zerolog.Nop(),
+	}
+	require.NoError(t, adapter.Bootstrap(context.Background(), orgID))
+	require.NoError(t, mock.ExpectationsWereMet(), "no UPDATE should fire when neither Enabled nor DefaultRepoID changed")
+}
+
+// TestLinearAgentBootstrapAdapter_AutoPicksSoleRepoAsDefault pins the
+// "easy setup" affordance for the team→repo mapping: when the org has
+// exactly one connected GitHub repo, that repo becomes DefaultRepoID so
+// the agent works on the very first assignment without any manual
+// mapping configuration.
+func TestLinearAgentBootstrapAdapter_AutoPicksSoleRepoAsDefault(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	repoID := uuid.New()
+	now := time.Now().UTC()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	mock.ExpectQuery("SELECT .+ FROM organizations").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "name", "settings", "created_at", "updated_at"}).
+			AddRow(orgID, "Acme", json.RawMessage(`{}`), now, now))
+	rows := pgxmock.NewRows(repoRowCols).AddRow(repoRow(repoID, orgID, "acme/web")...)
+	mock.ExpectQuery("SELECT .+ FROM repositories").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(rows)
+	var capturedSettings []byte
+	mock.ExpectExec("UPDATE organizations SET settings").
+		WithArgs(capturingArgRouter(&capturedSettings), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	adapter := linearAgentBootstrapAdapter{
+		orgs:   db.NewOrganizationStore(mock),
+		repos:  db.NewRepositoryStore(mock),
+		logger: zerolog.Nop(),
+	}
+	require.NoError(t, adapter.Bootstrap(context.Background(), orgID))
+
+	var got models.OrgSettings
+	require.NoError(t, json.Unmarshal(capturedSettings, &got))
+	require.NotNil(t, got.LinearAgent.DefaultRepoID, "single-repo org should auto-set DefaultRepoID")
+	require.Equal(t, repoID, *got.LinearAgent.DefaultRepoID, "DefaultRepoID must point at the lone connected repo")
+	require.NotNil(t, got.LinearAgent.Enabled, "Enabled flip should still happen alongside the default-repo set")
+	require.True(t, *got.LinearAgent.Enabled)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+// TestLinearAgentBootstrapAdapter_SkipsDefaultRepoWhenMultipleRepos asserts
+// the no-surprise rule: with 2+ repos, the adapter refuses to guess and
+// leaves DefaultRepoID nil. Admins pick explicitly in that case.
+func TestLinearAgentBootstrapAdapter_SkipsDefaultRepoWhenMultipleRepos(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	now := time.Now().UTC()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	mock.ExpectQuery("SELECT .+ FROM organizations").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "name", "settings", "created_at", "updated_at"}).
+			AddRow(orgID, "Acme", json.RawMessage(`{}`), now, now))
+	rows := pgxmock.NewRows(repoRowCols).
+		AddRow(repoRow(uuid.New(), orgID, "acme/web")...).
+		AddRow(repoRow(uuid.New(), orgID, "acme/api")...)
+	mock.ExpectQuery("SELECT .+ FROM repositories").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(rows)
+	var capturedSettings []byte
+	mock.ExpectExec("UPDATE organizations SET settings").
+		WithArgs(capturingArgRouter(&capturedSettings), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	adapter := linearAgentBootstrapAdapter{
+		orgs:   db.NewOrganizationStore(mock),
+		repos:  db.NewRepositoryStore(mock),
+		logger: zerolog.Nop(),
+	}
+	require.NoError(t, adapter.Bootstrap(context.Background(), orgID))
+
+	var got models.OrgSettings
+	require.NoError(t, json.Unmarshal(capturedSettings, &got))
+	require.Nil(t, got.LinearAgent.DefaultRepoID, "multi-repo org must NOT have a guessed default — admin picks explicitly")
+	require.NotNil(t, got.LinearAgent.Enabled, "Enabled flip is independent of repo-count guard")
+	require.True(t, *got.LinearAgent.Enabled)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+// capturingArgRouter mirrors handlers.capturingArg for use inside router_test.go.
+// Captures the matched pgxmock arg into the target so assertions can inspect
+// the post-merge settings JSON written by the bootstrap adapter.
+func capturingArgRouter(dst *[]byte) pgxmock.Argument {
+	return capturingArgRouterImpl{dst: dst}
+}
+
+type capturingArgRouterImpl struct{ dst *[]byte }
+
+func (c capturingArgRouterImpl) Match(v any) bool {
+	switch b := v.(type) {
+	case []byte:
+		*c.dst = append((*c.dst)[:0], b...)
+	case json.RawMessage:
+		*c.dst = append((*c.dst)[:0], b...)
+	case string:
+		*c.dst = append((*c.dst)[:0], b...)
+	default:
+		return false
+	}
+	return true
 }

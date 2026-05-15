@@ -273,6 +273,12 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	// disconnected so post-disconnect session creates can't admit
 	// bare-identifier matches via a stale cache.
 	integrationHandler.SetLinearTeamKeyCacheInvalidator(linearService.InvalidateTeamKeyCache)
+	// Auto-enable the inbound agent + auto-pick the org's only repo as the
+	// default mapping when the OAuth callback grants agent scopes. Both are
+	// idempotent and only apply when the admin hasn't already configured
+	// the corresponding field — re-auth never clobbers an explicit choice.
+	linearAgentBootstrap := linearAgentBootstrapAdapter{orgs: orgStore, repos: repoStore, logger: logger}
+	integrationHandler.SetLinearAgentBootstrapper(linearAgentBootstrap.Bootstrap)
 	sessionHandler.SetShutdownSignal(shutdownCh)
 	sessionHandler.SetSnapshotStore(snapshotStore)
 	sessionHandler.SetPRCredentialStore(userCredentialStore)
@@ -1185,6 +1191,68 @@ func (a linearAgentOrgWriterAdapter) SetLinearAgentEnabled(ctx context.Context, 
 		return fmt.Errorf("parse org settings: %w", err)
 	}
 	parsed.LinearAgent.Enabled = &enabled
+	encoded, err := json.Marshal(parsed)
+	if err != nil {
+		return fmt.Errorf("encode org settings: %w", err)
+	}
+	return a.orgs.UpdateSettings(ctx, orgID, encoded)
+}
+
+// linearAgentBootstrapAdapter applies the post-OAuth convenience defaults
+// for the inbound agent feature. Two independent steps, both gated on
+// "admin hasn't expressed an opinion yet" so an idempotent re-auth never
+// overrides an explicit user choice:
+//
+//  1. Flip LinearAgent.Enabled to true when it is still nil. Once the admin
+//     has explicitly disabled (or re-enabled) the agent, that wins.
+//  2. Set LinearAgent.DefaultRepoID to the org's lone connected repo when
+//     the org has exactly one and no default is configured yet. Multi-repo
+//     orgs intentionally fall through — picking arbitrarily would surprise.
+type linearAgentBootstrapAdapter struct {
+	orgs   *db.OrganizationStore
+	repos  *db.RepositoryStore
+	logger zerolog.Logger
+}
+
+func (a linearAgentBootstrapAdapter) Bootstrap(ctx context.Context, orgID uuid.UUID) error {
+	if a.orgs == nil {
+		return fmt.Errorf("organization store unavailable")
+	}
+	org, err := a.orgs.GetByID(ctx, orgID)
+	if err != nil {
+		return fmt.Errorf("load org: %w", err)
+	}
+	parsed, err := models.ParseOrgSettings(org.Settings)
+	if err != nil {
+		return fmt.Errorf("parse org settings: %w", err)
+	}
+
+	mutated := false
+	if parsed.LinearAgent.Enabled == nil {
+		enabled := true
+		parsed.LinearAgent.Enabled = &enabled
+		mutated = true
+	}
+
+	if parsed.LinearAgent.DefaultRepoID == nil && a.repos != nil {
+		repos, err := a.repos.ListByOrg(ctx, orgID, db.RepositoryFilters{})
+		if err != nil {
+			// Don't fail the whole bootstrap — the enable flip is still
+			// valuable on its own, and the default-repo picker is a pure
+			// convenience.
+			a.logger.Warn().Err(err).Str("org_id", orgID.String()).
+				Msg("linear agent bootstrap: failed to list repos; skipping default-repo auto-set")
+		} else if len(repos) == 1 {
+			repoID := repos[0].ID
+			parsed.LinearAgent.DefaultRepoID = &repoID
+			mutated = true
+		}
+	}
+
+	if !mutated {
+		return nil
+	}
+
 	encoded, err := json.Marshal(parsed)
 	if err != nil {
 		return fmt.Errorf("encode org settings: %w", err)

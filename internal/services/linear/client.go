@@ -800,7 +800,7 @@ type AgentSessionExternalURL struct {
 type AgentSessionUpdateInput struct {
 	AgentSessionID string
 	ExternalURLs   []AgentSessionExternalURL
-	// State is one of "pending", "inProgress", "awaitingInput", "complete",
+	// State is one of "pending", "active", "awaitingInput", "complete",
 	// "error" — Linear's vocabulary, not 143's. Empty string means "leave
 	// the existing state alone".
 	State string
@@ -818,15 +818,13 @@ func (c *graphQLClient) AgentSessionUpdate(ctx context.Context, in AgentSessionU
 		// casing.
 		return nil
 	}
-	input := map[string]any{
-		"id": in.AgentSessionID,
-	}
+	input := map[string]any{}
 	if len(in.ExternalURLs) > 0 {
 		urls := make([]map[string]string, 0, len(in.ExternalURLs))
 		for _, u := range in.ExternalURLs {
 			urls = append(urls, map[string]string{
 				"url":   u.URL,
-				"title": u.Title,
+				"label": u.Title,
 			})
 		}
 		input["externalUrls"] = urls
@@ -834,8 +832,8 @@ func (c *graphQLClient) AgentSessionUpdate(ctx context.Context, in AgentSessionU
 	if in.State != "" {
 		input["state"] = in.State
 	}
-	const query = `mutation AgentSessionUpdate($input: AgentSessionUpdateInput!) {
-		agentSessionUpdate(input: $input) {
+	const query = `mutation AgentSessionUpdate($agentSessionId: String!, $input: AgentSessionUpdateInput!) {
+		agentSessionUpdate(id: $agentSessionId, input: $input) {
 			success
 		}
 	}`
@@ -846,7 +844,11 @@ func (c *graphQLClient) AgentSessionUpdate(ctx context.Context, in AgentSessionU
 			} `json:"agentSessionUpdate"`
 		} `json:"data"`
 	}
-	if err := c.do(ctx, query, map[string]any{"input": input}, &result); err != nil {
+	variables := map[string]any{
+		"agentSessionId": in.AgentSessionID,
+		"input":          input,
+	}
+	if err := c.do(ctx, query, variables, &result); err != nil {
 		return err
 	}
 	if !result.Data.AgentSessionUpdate.Success {
