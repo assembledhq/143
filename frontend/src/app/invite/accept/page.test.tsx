@@ -81,6 +81,37 @@ describe('AcceptInvitationPage', () => {
     });
   });
 
+  it('passes GitHub acceptance context to login for GitHub-locked notification-email invites', async () => {
+    searchParamsMock.set('token', 'invite-gh');
+    meMock.mockRejectedValue({ code: 'UNAUTHORIZED' });
+    vi.spyOn(global, 'fetch').mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        data: {
+          action: 'login',
+          email: 'notify@example.com',
+          github_username: 'octocat',
+          acceptance_method: 'github',
+          org_name: 'TestCo',
+        },
+      }),
+    } as Response);
+
+    const user = userEvent.setup();
+    renderWithProviders(<AcceptInvitationPage />);
+
+    await screen.findByRole('button', { name: 'Sign in to join TestCo' });
+    expect(screen.getAllByText(/@octocat/).length).toBeGreaterThan(0);
+
+    await user.click(screen.getByRole('button', { name: 'Sign in to join TestCo' }));
+
+    await waitFor(() => {
+      expect(pushMock).toHaveBeenCalledWith(
+        '/login?invitation=invite-gh&email=notify%40example.com&github_username=octocat&acceptance_method=github&org=TestCo'
+      );
+    });
+  });
+
   it('shows error when API returns error', async () => {
     searchParamsMock.set('token', 'expired-token');
     meMock.mockRejectedValue({ code: 'UNAUTHORIZED' });

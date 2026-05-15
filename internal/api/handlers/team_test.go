@@ -1178,6 +1178,32 @@ func TestTeamHandler_CreateInvitation(t *testing.T) {
 			expectedCode: http.StatusCreated,
 		},
 		{
+			name: "github invitation keeps email as durable notification address and requires github acceptance",
+			body: map[string]string{"email": "new@b.com", "github_username": "octocat", "role": "member"},
+			users: &mockTeamUserStore{
+				getByEmailFn: func(_ context.Context, _ string) (models.User, error) {
+					return models.User{}, pgx.ErrNoRows
+				},
+				isGitHubLoginMemberOfOrgFn: func(_ context.Context, _ string, _ uuid.UUID) (bool, error) {
+					return false, nil
+				},
+			},
+			invitations: &mockTeamInvitationStore{
+				createFn: func(_ context.Context, inv *models.Invitation) error {
+					require.NotNil(t, inv.Email, "CreateInvitation should preserve the notification email on github invites")
+					require.Equal(t, "new@b.com", *inv.Email, "CreateInvitation should store the durable notification email")
+					require.NotNil(t, inv.GitHubUsername, "CreateInvitation should store the required GitHub username")
+					require.Equal(t, "octocat", *inv.GitHubUsername, "CreateInvitation should store the normalized GitHub username")
+					require.Equal(t, models.InvitationAcceptanceMethodGitHub, inv.AcceptanceMethod, "CreateInvitation should require GitHub acceptance when a GitHub username is present")
+					inv.ID = uuid.New()
+					inv.Status = "pending"
+					inv.CreatedAt = time.Now()
+					return nil
+				},
+			},
+			expectedCode: http.StatusCreated,
+		},
+		{
 			name: "defaults role to member",
 			body: map[string]string{"email": "new@b.com"},
 			users: &mockTeamUserStore{

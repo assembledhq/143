@@ -847,6 +847,7 @@ export interface InvitationResponse {
   id: string;
   email?: string | null;
   github_username?: string | null;
+  acceptance_method: 'email' | 'github' | 'either';
   role: string;
   status: string;
   invited_by: {
