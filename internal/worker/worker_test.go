@@ -195,6 +195,32 @@ func TestWorker_Poll(t *testing.T) {
 			},
 		},
 		{
+			name: "retryable max duration bypass retries old job",
+			setupMock: func(t *testing.T, w *Worker, mock pgxmock.PgxPoolIface) {
+				t.Helper()
+
+				jobID := uuid.New()
+				lockToken := uuid.New()
+				orgID := uuid.New()
+				oldCreatedAt := time.Now().Add(-maxRetryableDuration - time.Minute)
+				retryAfter := time.Second
+				handlerErr := &RetryableError{
+					Err:                    errors.New("stale orphan cleared"),
+					RetryAfter:             &retryAfter,
+					BypassMaxRetryDuration: true,
+				}
+
+				w.Register("stale_retry_job", func(ctx context.Context, jobType string, got json.RawMessage) error {
+					return handlerErr
+				})
+
+				expectClaim(mock, jobID, orgID, "stale_retry_job", json.RawMessage(`{}`), oldCreatedAt, lockToken)
+				mock.ExpectExec("attempts = GREATEST\\(attempts - 1, 0\\)").
+					WithArgs(handlerErr.Error(), pgxmock.AnyArg(), jobID, lockToken).
+					WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+			},
+		},
+		{
 			name: "fatal failure dead-letters immediately",
 			setupMock: func(t *testing.T, w *Worker, mock pgxmock.PgxPoolIface) {
 				t.Helper()

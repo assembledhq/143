@@ -4489,6 +4489,73 @@ func TestRunAgentHandler_SandboxRaceLoserDeadLetters(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met (loser must not mutate the row)")
 }
 
+func TestRunAgentHandler_StaleSandboxClearRetriesPastJobAgeAndFailsOnDeadLetter(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+	stores.SessionThreads = db.NewSessionThreadStore(mock)
+
+	orgID := uuid.New()
+	runID := uuid.New()
+	issueID := uuid.New()
+	threadID := uuid.New()
+
+	mock.ExpectQuery("SELECT .* FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(workerSessionColumns).AddRow(
+				workerSessionRow(runID, issueID, orgID, string(models.SessionStatusPending), 0, nil, nil)...,
+			),
+		)
+
+	orch := &orchestratorServiceStub{
+		runAgentFn: func(ctx context.Context, run *models.Session) error {
+			require.NotNil(t, run.PrimaryThreadID, "run_agent should carry the payload thread ID into the stale-clear path")
+			require.Equal(t, threadID, *run.PrimaryThreadID, "run_agent should preserve the primary thread ID from the job payload")
+			return fmt.Errorf("cleared stale container: %w", agent.ErrStaleSandboxIDCleared)
+		},
+	}
+	var logBuf bytes.Buffer
+	handler := newRunAgentHandler(stores, &Services{Orchestrator: orch}, zerolog.New(&logBuf))
+	handlerCtx := jobctx.WithDeadLetterHooks(context.Background())
+	payload := json.RawMessage(`{"session_id":"` + runID.String() + `","org_id":"` + orgID.String() + `","thread_id":"` + threadID.String() + `"}`)
+
+	err := handler(handlerCtx, "run_agent", payload)
+	require.Error(t, err, "stale sandbox clear should ask the worker to retry")
+	var retryable *RetryableError
+	require.ErrorAs(t, err, &retryable, "stale sandbox clear should remain retryable")
+	require.True(t, retryable.BypassMaxRetryDuration, "stale sandbox clear should retry even when the job was created before the generic retry window")
+	require.NoError(t, mock.ExpectationsWereMet(), "stale-clear retry should not mark the session failed before dead-letter")
+
+	errMsg := "Session stopped after cleaning up a stale sandbox but the retry could not be scheduled."
+	mock.ExpectQuery("UPDATE sessions").
+		WithArgs(
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(),
+		).
+		WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(
+			workerSessionRow(runID, issueID, orgID, string(models.SessionStatusFailed), 0, nil, nil)...,
+		))
+	mock.ExpectExec("UPDATE sessions[\\s\\S]+SET failure_explanation").
+		WithArgs(
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+		).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectExec("UPDATE session_threads[\\s\\S]+SET status = @status").
+		WithArgs(
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+		).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	jobctx.RunDeadLetterHooks(handlerCtx, errors.New(errMsg))
+	require.NoError(t, mock.ExpectationsWereMet(), "dead-letter hook should fail the session and thread with a visible stale-sandbox explanation; logs: %s", logBuf.String())
+}
+
 func TestContinueSessionHandler_UsesRuntimeCeilingDeadline(t *testing.T) {
 	t.Parallel()
 
