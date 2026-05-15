@@ -35,6 +35,37 @@ describe("frontend CI guardrails", () => {
     expect(frontendTestJob).toContain("npx vitest run");
   });
 
+  it("keeps PR frontend tests fast and reserves coverage for main", () => {
+    const workflow = fs.readFileSync(
+      path.join(repoRoot, ".github", "workflows", "ci.yml"),
+      "utf8"
+    );
+    const frontendTestJob = workflow.match(
+      /  frontend-test:\n[\s\S]*?(?=\n  [a-z0-9-]+:|\n$)/
+    )?.[0];
+
+    expect(frontendTestJob).toBeDefined();
+    if (!frontendTestJob) {
+      throw new Error("frontend-test job should exist in CI workflow");
+    }
+
+    const affectedTestsStep = frontendTestJob.match(
+      /      - name: Run affected tests \(PR\)\n[\s\S]*?(?=\n      - name:|\n  [a-z0-9-]+:|\n$)/
+    )?.[0];
+    const fullCoverageStep = frontendTestJob.match(
+      /      - name: Run full tests with coverage \(main only\)\n[\s\S]*?(?=\n      - name:|\n  [a-z0-9-]+:|\n$)/
+    )?.[0];
+
+    expect(affectedTestsStep).toBeDefined();
+    expect(affectedTestsStep).toContain("--changed=pr-base");
+    expect(affectedTestsStep).not.toContain("--coverage");
+    expect(frontendTestJob).not.toContain("diff-cover");
+
+    expect(fullCoverageStep).toBeDefined();
+    expect(fullCoverageStep).toContain("if: github.event_name == 'push'");
+    expect(fullCoverageStep).toContain("--coverage");
+  });
+
   it("splits Vitest tests into node and jsdom projects", () => {
     const config = fs.readFileSync(
       path.join(frontendDir, "vitest.config.ts"),

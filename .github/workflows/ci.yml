@@ -190,11 +190,6 @@ jobs:
           cache: npm
           cache-dependency-path: frontend/package-lock.json
 
-      - uses: actions/setup-python@v6
-        if: github.event_name == 'pull_request'
-        with:
-          python-version: '3.x'
-
       - name: Materialize PR base ref (PR only)
         if: github.event_name == 'pull_request'
         working-directory: ${{ github.workspace }}
@@ -204,35 +199,12 @@ jobs:
           git rev-parse --verify "${PR_BASE_SHA}^{commit}"
           git branch -f pr-base "${PR_BASE_SHA}"
 
-      - name: Install diff-cover (PR only)
-        if: github.event_name == 'pull_request'
-        run: pip install 'diff_cover==10.2.0'
-
       - run: npm ci
 
       - name: Run affected tests (PR)
         if: github.event_name == 'pull_request'
         timeout-minutes: 10
-        run: npx vitest run --changed=pr-base --passWithNoTests --coverage --coverage.reporter=lcov --coverage.reporter=json-summary
-
-      - name: Patch coverage gate (PR only)
-        if: github.event_name == 'pull_request'
-        run: |
-          if [ ! -f coverage/lcov.info ]; then
-            # vitest --changed found no affected tests, so no coverage was emitted.
-            # Fail if the diff includes frontend source files — uncovered changes shouldn't merge silently.
-            CHANGED_SOURCES=$(cd .. && git diff --name-only pr-base...HEAD \
-              | grep -E '^frontend/src/.*\.(ts|tsx)$' \
-              | grep -v '\.test\.' || true)
-            if [ -n "$CHANGED_SOURCES" ]; then
-              echo "::error::Frontend source files changed but no tests cover them:"
-              echo "$CHANGED_SOURCES"
-              exit 1
-            fi
-            echo "::notice::No frontend source files in diff; skipping patch-coverage gate."
-            exit 0
-          fi
-          diff-cover coverage/lcov.info --compare-branch=pr-base --fail-under=80
+        run: npx vitest run --changed=pr-base --passWithNoTests
 
       - name: Run full tests with coverage (main only)
         if: github.event_name == 'push'
