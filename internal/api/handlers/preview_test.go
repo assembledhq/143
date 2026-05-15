@@ -2320,6 +2320,50 @@ func TestPreviewHandler_GetLogs_Success(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
+func TestPreviewHandler_GetLogs_UsesLatestFailedPreviewWhenNoActivePreview(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "test should create pgx mock")
+	defer mock.Close()
+
+	h := newPreviewHandlerWithMock(mock)
+	sessionID := uuid.New()
+	orgID := uuid.New()
+	userID := uuid.New()
+	previewID := uuid.New()
+	now := time.Now()
+	failedRow := newActivePreviewRow(previewID, sessionID, orgID, userID, now)
+	failedRow[6] = "failed"
+	failedRow[22] = "preview service failed"
+
+	mock.ExpectQuery("SELECT .+ FROM preview_instances").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(previewInstanceTestCols))
+	mock.ExpectQuery("SELECT [\\s\\S]+ FROM preview_instances[\\s\\S]+status = 'failed'").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(previewInstanceTestCols).
+				AddRow(failedRow...),
+		)
+	mock.ExpectQuery("SELECT .+ FROM preview_logs").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(handlerPreviewLogTestCols).
+				AddRow(uuid.New(), previewID, orgID, "error", "start", "full preview startup log", json.RawMessage("{}"), now),
+		)
+
+	req := httptest.NewRequest(http.MethodGet, "/preview/logs", nil)
+	req = previewTestContextWithIDs(req, orgID, userID, sessionID.String())
+	w := httptest.NewRecorder()
+
+	h.GetLogs(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "failed previews should expose persisted startup logs")
+	require.Contains(t, w.Body.String(), "full preview startup log", "response should include the persisted preview log")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func TestPreviewHandler_GetServices_Success(t *testing.T) {
 	t.Parallel()
 
