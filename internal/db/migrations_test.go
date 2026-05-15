@@ -141,3 +141,22 @@ func TestAutomationsGoalLengthExpandMigrationRaisesConstraint(t *testing.T) {
 	require.Contains(t, upSQL, "char_length(goal) BETWEEN 1 AND 64000",
 		"up migration should raise the automation goal cap to 64000 characters")
 }
+
+func TestGitHubInstallationClaimsMigrationDeduplicatesInstallationsBeforeUpsert(t *testing.T) {
+	t.Parallel()
+
+	body, err := os.ReadFile("../../migrations/000126_github_installation_repo_claims.up.sql")
+	require.NoError(t, err, "test should read the GitHub installation claims migration")
+
+	sql := string(body)
+	require.Contains(t, sql, "WITH installation_candidates AS",
+		"migration should stage installation candidates before the upsert")
+	require.Contains(t, sql, "ROW_NUMBER() OVER",
+		"migration should rank candidates so each installation_id is upserted once")
+	require.Contains(t, sql, "PARTITION BY installation_id",
+		"migration should deduplicate by installation_id before ON CONFLICT DO UPDATE")
+	require.Contains(t, sql, "MIN(created_at) OVER (PARTITION BY installation_id) AS first_seen_created_at",
+		"migration should preserve the earliest integration timestamp for installation created_at")
+	require.Contains(t, sql, "WHERE candidate_rank = 1",
+		"migration should only upsert the selected candidate per installation")
+}
