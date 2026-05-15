@@ -4329,51 +4329,6 @@ func (o *Orchestrator) streamLogs(ctx context.Context, runID, orgID uuid.UUID, a
 	}
 }
 
-// handleQuestion creates an SessionQuestion and updates the run status to awaiting_input.
-func (o *Orchestrator) handleQuestion(ctx context.Context, runID, orgID uuid.UUID, threadID *uuid.UUID, entry LogEntry) {
-	q := &models.SessionQuestion{
-		SessionID:    runID,
-		OrgID:        orgID,
-		QuestionText: entry.Message,
-		Status:       "pending",
-	}
-
-	// Extract structured question fields from metadata if present.
-	if opts, ok := entry.Metadata["options"]; ok {
-		if optSlice, ok := opts.([]interface{}); ok {
-			for _, opt := range optSlice {
-				if s, ok := opt.(string); ok {
-					q.Options = append(q.Options, s)
-				}
-			}
-		}
-	}
-	if ctxVal, ok := entry.Metadata["context"]; ok {
-		if s, ok := ctxVal.(string); ok {
-			q.Context = &s
-		}
-	}
-	if phase, ok := entry.Metadata["blocks_phase"]; ok {
-		if s, ok := phase.(string); ok {
-			q.BlocksPhase = &s
-		}
-	}
-
-	if err := o.agentRunQuestions.Create(ctx, q); err != nil {
-		o.logger.Error().Err(err).Str("run_id", runID.String()).Msg("failed to create agent run question")
-		return
-	}
-
-	if err := o.sessions.UpdateStatus(ctx, orgID, runID, "awaiting_input"); err != nil {
-		o.logger.Error().Err(err).Str("run_id", runID.String()).Msg("failed to update run status to awaiting_input")
-	}
-	if threadID != nil && o.sessionThreads != nil {
-		if err := o.sessionThreads.UpdateStatus(ctx, orgID, *threadID, models.ThreadStatusAwaitingInput); err != nil {
-			o.logger.Error().Err(err).Str("run_id", runID.String()).Str("thread_id", threadID.String()).Msg("failed to update thread status to awaiting_input")
-		}
-	}
-}
-
 func (o *Orchestrator) handleHumanInputRequest(
 	ctx context.Context,
 	sessionID, orgID uuid.UUID,
