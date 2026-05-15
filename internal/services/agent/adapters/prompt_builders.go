@@ -202,10 +202,10 @@ func buildUserPrompt(input *agent.AgentInput) string {
 			}
 		}
 		base = EnsureSlashCommandsInPrompt(base, input.Commands)
-		if len(input.References) == 0 {
-			return base
+		if len(input.References) > 0 {
+			base = buildManualPromptWithReferences(base, input.References)
 		}
-		return buildManualPromptWithReferences(base, input.References)
+		return appendAttachmentSection(base, input.Attachments)
 	}
 
 	if input.Issue == nil {
@@ -252,6 +252,40 @@ func buildUserPrompt(input *agent.AgentInput) string {
 		b.WriteString(fmt.Sprintf("- Reasoning: %s\n\n", input.ComplexityEstimate.Reasoning))
 	}
 
+	return appendAttachmentSection(b.String(), input.Attachments)
+}
+
+func appendAttachmentSection(prompt string, attachments []agent.AgentAttachment) string {
+	if len(attachments) == 0 {
+		return prompt
+	}
+	var b strings.Builder
+	b.WriteString(strings.TrimSpace(prompt))
+	b.WriteString("\n\n## Attached files\n")
+	for _, attachment := range attachments {
+		b.WriteString("- ")
+		if attachment.LocalPath != "" {
+			b.WriteString("`")
+			b.WriteString(attachment.LocalPath)
+			b.WriteString("`")
+			if attachment.ContentType != "" {
+				b.WriteString(" (")
+				b.WriteString(attachment.ContentType)
+				b.WriteString(")")
+			}
+		} else {
+			b.WriteString("unavailable")
+		}
+		if attachment.OriginalURL != "" {
+			b.WriteString(" from ")
+			b.WriteString(attachment.OriginalURL)
+		}
+		if attachment.Error != "" {
+			b.WriteString(" - warning: ")
+			b.WriteString(attachment.Error)
+		}
+		b.WriteString("\n")
+	}
 	return b.String()
 }
 
