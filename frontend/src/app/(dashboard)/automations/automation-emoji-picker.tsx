@@ -31,32 +31,58 @@ export function AutomationEmojiPicker({
   value,
   onChange,
   className,
+  open,
+  onOpenChange,
+  trigger = "select",
+  triggerLabel = "Automation emoji",
+  disabled = false,
 }: {
   value: string;
   onChange: (value: string) => void;
   className?: string;
+  open?: boolean;
+  onOpenChange?: (open: boolean) => void;
+  trigger?: "select" | "icon";
+  triggerLabel?: string;
+  disabled?: boolean;
 }) {
-  const [open, setOpen] = useState(false);
+  const [internalOpen, setInternalOpen] = useState(false);
+  const pickerOpen = open ?? internalOpen;
+  const setPickerOpen = onOpenChange ?? setInternalOpen;
   const selected = useMemo(
     () => AUTOMATION_EMOJIS.find((item) => item.emoji === value) ?? AUTOMATION_EMOJIS[0],
     [value],
   );
 
   return (
-    <Popover open={open} onOpenChange={setOpen}>
+    <Popover open={pickerOpen} onOpenChange={setPickerOpen}>
       <PopoverTrigger asChild>
-        <Button
-          type="button"
-          variant="outline"
-          aria-label="Automation emoji"
-          className={cn("h-10 justify-between", className)}
-        >
-          <span className="flex min-w-0 items-center gap-2">
-            <span className="text-lg leading-none" aria-hidden="true">{selected.emoji}</span>
-            <span className="truncate">{selected.label}</span>
-          </span>
-          <ChevronsUpDown className="h-4 w-4 shrink-0 text-muted-foreground" />
-        </Button>
+        {trigger === "icon" ? (
+          <Button
+            type="button"
+            variant="outline"
+            size="icon-lg"
+            aria-label={triggerLabel}
+            disabled={disabled}
+            className={cn("text-lg leading-none", className)}
+          >
+            {selected.emoji}
+          </Button>
+        ) : (
+          <Button
+            type="button"
+            variant="outline"
+            aria-label={triggerLabel}
+            disabled={disabled}
+            className={cn("h-10 justify-between", className)}
+          >
+            <span className="flex min-w-0 items-center gap-2">
+              <span className="text-lg leading-none" aria-hidden="true">{selected.emoji}</span>
+              <span className="truncate">{selected.label}</span>
+            </span>
+            <ChevronsUpDown className="h-4 w-4 shrink-0 text-muted-foreground" />
+          </Button>
+        )}
       </PopoverTrigger>
       <PopoverContent className="w-72 p-0" align="start">
         <Command>
@@ -71,7 +97,7 @@ export function AutomationEmojiPicker({
                   checked={item.emoji === selected.emoji}
                   onSelect={() => {
                     onChange(item.emoji);
-                    setOpen(false);
+                    setPickerOpen(false);
                   }}
                 >
                   <span className="text-lg leading-none" aria-hidden="true">{item.emoji}</span>
