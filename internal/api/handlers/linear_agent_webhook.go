@@ -61,6 +61,9 @@ type linearAgentEventEnvelope struct {
 				ID string `json:"id,omitempty"`
 			} `json:"creator,omitempty"`
 		} `json:"agentSession"`
+		AgentActivity struct {
+			Body string `json:"body,omitempty"`
+		} `json:"agentActivity,omitempty"`
 	} `json:"payload"`
 	// AppUserID is the id of our @143 agent user as Linear sees it. We
 	// use it to filter out webhooks delivered to other apps that share a
@@ -176,6 +179,7 @@ type DispatchResult struct {
 	JobID                uuid.UUID
 	AgentSessionID       string
 	BootstrapEmitSkipped bool
+	Err                  error
 }
 
 // Dispatch is the single entry point invoked by HandleLinear. body is the
@@ -406,6 +410,7 @@ func (d *LinearAgentDispatcher) Dispatch(ctx context.Context, integration *model
 		"linear_issue_project_id": env.Payload.AgentSession.Issue.ProjectID,
 		"linear_creator_user_id":  env.Payload.AgentSession.Creator.ID,
 		"linear_comment_id":       env.Payload.AgentSession.CommentID,
+		"linear_prompt_body":      env.Payload.AgentActivity.Body,
 	}
 	jobID, err := d.jobs.Enqueue(ctx, integration.OrgID, "linear", "linear_agent_event", jobPayload, 5, &dedupe)
 	if err != nil {
@@ -413,6 +418,8 @@ func (d *LinearAgentDispatcher) Dispatch(ctx context.Context, integration *model
 			Str("agent_session_id", row.LinearAgentSessionID).
 			Bool("created", created).
 			Msg("failed to enqueue linear_agent_event; webhook delivery recorded but session creation will not happen")
+		result.Status = "enqueue_failed"
+		result.Err = err
 		return result
 	}
 	result.JobID = jobID

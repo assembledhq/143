@@ -26,6 +26,7 @@ type linearAgentEventPayload struct {
 	LinearIssueProjectID string `json:"linear_issue_project_id"`
 	LinearCreatorUserID  string `json:"linear_creator_user_id"`
 	LinearCommentID      string `json:"linear_comment_id"`
+	LinearPromptBody     string `json:"linear_prompt_body"`
 }
 
 // LinearAgentEventHandlerDeps captures the wiring the handler needs. The

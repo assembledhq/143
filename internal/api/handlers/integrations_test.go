@@ -829,6 +829,111 @@ func TestIntegrationHandler_HandleLinearOAuthCallback_MissingCode(t *testing.T) 
 	require.Contains(t, w.Body.String(), "MISSING_CODE")
 }
 
+// TestIntegrationHandler_HandleLinearOAuthCallback_BootstrapperFiresWhenAgentScopesGranted
+// pins the contract that the OAuth callback invokes the agent bootstrapper
+// (auto-enable + auto-default-repo) exactly when the returned token carries
+// the agent scopes. The bootstrapper is best-effort: a failure from it must
+// not break the OAuth redirect, since the admin can always configure
+// manually from Settings → Integrations → Linear → Agent.
+func TestIntegrationHandler_HandleLinearOAuthCallback_BootstrapperFiresWhenAgentScopesGranted(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name           string
+		scope          string
+		bootstrapErr   error
+		expectFired    bool
+		expectRedirect int
+	}{
+		{
+			name:           "agent scopes granted → bootstrapper fires",
+			scope:          "read,write,app:assignable,app:mentionable",
+			expectFired:    true,
+			expectRedirect: http.StatusTemporaryRedirect,
+		},
+		{
+			name:           "legacy scopes only → bootstrapper does not fire",
+			scope:          "read,write",
+			expectFired:    false,
+			expectRedirect: http.StatusTemporaryRedirect,
+		},
+		{
+			name:           "agent scopes granted, bootstrapper errors → callback still redirects",
+			scope:          "read,write,app:assignable,app:mentionable",
+			bootstrapErr:   errors.New("boom"),
+			expectFired:    true,
+			expectRedirect: http.StatusTemporaryRedirect,
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			orgID := uuid.New()
+			integrationID := uuid.New()
+			now := time.Now().UTC()
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err)
+			defer mock.Close()
+
+			store := db.NewIntegrationStore(mock)
+			credentialStore := db.NewOrgCredentialStore(mock, nil)
+
+			tokenBody := `{"access_token":"lin_at","token_type":"Bearer","scope":"` + tt.scope + `"}`
+			viewerBody := `{"data":{"viewer":{"organization":{"id":"lin-org-1","name":"Acme"},"id":"appuser-1","name":"143"}}}`
+			transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				switch req.URL.String() {
+				case "https://api.linear.app/oauth/token":
+					return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(bytes.NewBufferString(tokenBody))}, nil
+				case "https://api.linear.app/graphql":
+					return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(bytes.NewBufferString(viewerBody))}, nil
+				default:
+					return nil, errors.New("unexpected request URL")
+				}
+			})
+
+			handler := NewIntegrationHandler(store, credentialStore, "linear-client-id", "linear-client-secret", "http://localhost:8080", "http://localhost:3000")
+			handler.client = &http.Client{Transport: transport}
+
+			var fired bool
+			var firedOrgID uuid.UUID
+			handler.SetLinearAgentBootstrapper(func(_ context.Context, gotOrg uuid.UUID) error {
+				fired = true
+				firedOrgID = gotOrg
+				return tt.bootstrapErr
+			})
+
+			expectNoExistingCredentialLookup(mock)
+			mock.ExpectQuery("INSERT INTO org_credentials").
+				WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+				WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
+			mock.ExpectQuery("SELECT .+ FROM integrations .+ provider = @provider .+ status IN \\('active', 'error'\\)").
+				WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+				WillReturnRows(pgxmock.NewRows([]string{"id", "org_id", "provider", "config", "status", "last_synced_at", "created_at"}))
+			mock.ExpectQuery("INSERT INTO integrations").
+				WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+				WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(integrationID, now))
+
+			req := httptest.NewRequest(http.MethodGet, "/api/v1/integrations/linear/callback?code=test-code&state=test-state", nil)
+			req.AddCookie(&http.Cookie{Name: "linear_integration_oauth_state", Value: "test-state"})
+			req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+			w := httptest.NewRecorder()
+
+			handler.HandleLinearOAuthCallback(w, req)
+
+			require.Equal(t, tt.expectRedirect, w.Code, "OAuth callback should redirect regardless of bootstrap outcome — bootstrapper is best-effort")
+			require.Equal(t, tt.expectFired, fired, "bootstrapper firing must be gated on HasAgentScopes()")
+			if tt.expectFired {
+				require.Equal(t, orgID, firedOrgID, "bootstrapper must receive the callback's org id")
+			}
+			require.NoError(t, mock.ExpectationsWereMet())
+		})
+	}
+}
+
 func TestIntegrationHandler_ConnectLinear_CreatesIntegrationWhenMissing(t *testing.T) {
 	t.Parallel()
 

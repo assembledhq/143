@@ -16,13 +16,17 @@ the issue.
 
 2. **Map your Linear teams to GitHub repos** at Settings →
    Integrations → Linear → Agent. Each row says "issues from team X
-   (and optionally project Y) get worked on in repo Z". Without a
-   mapping, the agent posts a "configure a mapping" response and
-   closes the AgentSession; nothing breaks, but no work happens.
+   (and optionally project Y) get worked on in repo Z". If your org
+   has exactly one connected GitHub repo at re-authorize time it gets
+   set as the org-default automatically, so single-repo setups need
+   zero mapping configuration. Without any mapping or default, the
+   agent posts a "configure a mapping" response and closes the
+   AgentSession; nothing breaks, but no work happens.
 
-3. **Enable the agent** for your org via the toggle on the same page.
-   Default is off — you have to opt in explicitly. Per-team overrides
-   let you enable specific teams while leaving the rest off.
+3. **Agent toggle.** The agent is auto-enabled when a workspace admin
+   completes the OAuth flow with agent scopes. If you ever turn it
+   off explicitly, re-authorize will not retro-enable it — your
+   choice is preserved.
 
 ## Using it
 

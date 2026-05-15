@@ -122,24 +122,39 @@ func (h *IngestionWebhookHandler) handleProvider(w http.ResponseWriter, r *http.
 		return
 	}
 
-	// Get integration ID from query param or header
-	integrationIDStr := r.URL.Query().Get("integration_id")
-	if integrationIDStr == "" {
-		writeError(w, r, http.StatusBadRequest, "MISSING_INTEGRATION", "integration_id query parameter required")
-		return
-	}
-	integrationID, err := uuid.Parse(integrationIDStr)
+	// Resolve which integration this delivery belongs to. Two paths:
+	//
+	//   1. Per-install URL (`?integration_id=<uuid>`) — the original
+	//      self-hosted model where each customer pastes their unique
+	//      webhook URL into the provider dashboard. Always honored when
+	//      present; takes priority so existing installs don't change
+	//      behavior.
+	//
+	//   2. Payload-driven workspace lookup — required for a single
+	//      multi-tenant Linear OAuth app, which Linear forces to use one
+	//      shared webhook URL across every workspace it's installed in.
+	//      The payload's `organizationId` (the Linear workspace id) is
+	//      matched against integrations.config->>'workspace_id' via the
+	//      partial UNIQUE index `idx_integrations_linear_workspace`.
+	//
+	// SECURITY: lookup runs *before* HMAC verification because we need
+	// the integration to know which org's secret to verify against. The
+	// integration row itself contains no secrets and the lookup is bounded
+	// by an indexed equality match, so the pre-auth surface is just "an
+	// attacker can probe whether a workspace id is connected." That's the
+	// same surface the existing `?integration_id=` path exposes (probing
+	// whether an integration uuid exists), so this isn't a regression.
+	integration, err := h.resolveIntegrationForWebhook(r, provider, body)
 	if err != nil {
-		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid integration_id")
+		var resolveErr *webhookIntegrationLookupError
+		if errors.As(err, &resolveErr) {
+			writeError(w, r, resolveErr.status, resolveErr.code, resolveErr.message)
+			return
+		}
+		writeError(w, r, http.StatusInternalServerError, "INTEGRATION_LOOKUP_FAILED", "failed to resolve integration", err)
 		return
 	}
-
-	// Look up integration to get org_id
-	integration, err := h.integrationStore.GetByID(r.Context(), integrationID)
-	if err != nil {
-		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "integration not found")
-		return
-	}
+	integrationID := integration.ID
 
 	// Verify webhook signature using per-org credential from DB.
 	if err := h.verifyProviderSignature(r.Context(), integration.OrgID, provider, body, r.Header); err != nil {
@@ -194,6 +209,10 @@ func (h *IngestionWebhookHandler) handleProvider(w http.ResponseWriter, r *http.
 		}
 		if eventType == LinearAgentEventAgentSession || eventType == LinearAgentEventAppUserNotification {
 			result := h.linearAgent.Dispatch(r.Context(), &integration, eventType, body, parsedEnvelope)
+			if result.Err != nil {
+				writeError(w, r, http.StatusInternalServerError, "DISPATCH_FAILED", "failed to dispatch linear agent event", result.Err)
+				return
+			}
 			if err := h.webhookStore.MarkProcessed(r.Context(), delivery, nil); err != nil {
 				zerolog.Ctx(r.Context()).Warn().Err(err).Msg("failed to mark webhook processed")
 			}
@@ -386,4 +405,91 @@ func verifyHMACSHA256(secret string, body []byte, signature string) bool {
 	mac.Write(body)
 	expected := hex.EncodeToString(mac.Sum(nil))
 	return hmac.Equal([]byte(signature), []byte(expected))
+}
+
+// webhookIntegrationLookupError is returned by resolveIntegrationForWebhook
+// to communicate a structured HTTP error back to the caller without coupling
+// the resolver to http.ResponseWriter. The handler converts it into a
+// writeError call. Concrete codes mirror the previous inline behavior so
+// metrics/dashboards on `code` continue to work.
+type webhookIntegrationLookupError struct {
+	status  int
+	code    string
+	message string
+}
+
+func (e *webhookIntegrationLookupError) Error() string { return e.message }
+
+func newWebhookLookupErr(status int, code, message string) *webhookIntegrationLookupError {
+	return &webhookIntegrationLookupError{status: status, code: code, message: message}
+}
+
+// linearWebhookEnvelopePreamble is the minimal shape we need to sniff out
+// of an inbound Linear webhook body to determine which org owns it. Linear
+// puts `organizationId` at the top level of every webhook payload
+// regardless of event type; this avoids dragging in the agent-specific
+// envelope just to do org resolution.
+type linearWebhookEnvelopePreamble struct {
+	OrganizationID string `json:"organizationId"`
+}
+
+// resolveIntegrationForWebhook returns the integration owning this inbound
+// webhook delivery. Order of precedence:
+//
+//  1. `?integration_id=<uuid>` query param — the per-install URL from
+//     the existing self-hosted model. Honored when present so existing
+//     URLs keep working unchanged.
+//  2. For Linear: body sniff of `organizationId` → look up the active
+//     integration whose stored Linear workspace_id matches. Required to
+//     support a single multi-tenant OAuth app where Linear sends every
+//     workspace's events to the same URL.
+//
+// SECURITY: the body is already bounded to 1MB by the io.LimitReader in
+// handleProvider, so the sniff allocates O(payload size) at worst. We parse
+// just the minimal preamble (not the full envelope) so a malformed agent
+// payload still resolves to the right org and gets logged as a parse
+// failure further down the path. Lookups never reveal anything secret —
+// the integration row is metadata only.
+func (h *IngestionWebhookHandler) resolveIntegrationForWebhook(r *http.Request, provider string, body []byte) (models.Integration, error) {
+	if raw := r.URL.Query().Get("integration_id"); raw != "" {
+		integrationID, err := uuid.Parse(raw)
+		if err != nil {
+			return models.Integration{}, newWebhookLookupErr(http.StatusBadRequest, "INVALID_ID", "invalid integration_id")
+		}
+		integration, err := h.integrationStore.GetByID(r.Context(), integrationID)
+		if err != nil {
+			return models.Integration{}, newWebhookLookupErr(http.StatusNotFound, "NOT_FOUND", "integration not found")
+		}
+		return integration, nil
+	}
+
+	if provider == "linear" {
+		var pre linearWebhookEnvelopePreamble
+		if err := json.Unmarshal(body, &pre); err != nil || pre.OrganizationID == "" {
+			// Distinguish "missing org id" from "broken JSON" only in the
+			// log — to the caller both look the same. Either way they can't
+			// route the delivery. Linear's `organizationId` is a uuid string,
+			// not a structured object, so a malformed payload is the only
+			// realistic way this branch fires.
+			return models.Integration{}, newWebhookLookupErr(http.StatusBadRequest, "MISSING_INTEGRATION",
+				"could not resolve linear org: payload missing organizationId and no integration_id query param provided")
+		}
+		integration, err := h.integrationStore.GetActiveLinearByWorkspaceID(r.Context(), pre.OrganizationID)
+		if err != nil {
+			// 401 rather than 404: from the caller's perspective an
+			// unrecognized workspace id is functionally equivalent to "no
+			// authorized credential" — the install was never completed (or
+			// has been disconnected). Using 401 keeps the response shape
+			// consistent with what a bad HMAC would produce and avoids
+			// leaking which workspace ids are connected.
+			zerolog.Ctx(r.Context()).Info().
+				Str("workspace_id", pre.OrganizationID).
+				Err(err).
+				Msg("linear webhook references workspace_id with no active integration; rejecting")
+			return models.Integration{}, newWebhookLookupErr(http.StatusUnauthorized, "UNAUTHORIZED", "no active integration for the request payload")
+		}
+		return integration, nil
+	}
+
+	return models.Integration{}, newWebhookLookupErr(http.StatusBadRequest, "MISSING_INTEGRATION", "integration_id query parameter required")
 }

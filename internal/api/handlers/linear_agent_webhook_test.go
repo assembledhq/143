@@ -20,6 +20,7 @@ import (
 // queue, and payload without exercising the real JobStore.
 type fakeJobs struct {
 	calls []fakeEnqueue
+	err   error
 }
 
 type fakeEnqueue struct {
@@ -37,6 +38,9 @@ func (f *fakeJobs) Enqueue(_ context.Context, orgID uuid.UUID, queue, jobType st
 		c.DedupeKey = *dedupeKey
 	}
 	f.calls = append(f.calls, c)
+	if f.err != nil {
+		return uuid.Nil, f.err
+	}
 	return uuid.New(), nil
 }
 
@@ -99,7 +103,7 @@ func TestLinearAgentDispatcher_PromptedWithoutCreatedEnqueuesRetryableJob(t *tes
 		WithArgs(orgID, "as_racing").
 		WillReturnError(pgx.ErrNoRows)
 
-	body := []byte(`{"type":"AgentSessionEvent","action":"prompted","payload":{"agentSession":{"id":"as_racing","issueId":"iss_1","commentId":"comment_1","issue":{"id":"iss_1","teamId":"team_1","projectId":"project_1"}}}}`)
+	body := []byte(`{"type":"AgentSessionEvent","action":"prompted","payload":{"agentSession":{"id":"as_racing","issueId":"iss_1","commentId":"comment_1","issue":{"id":"iss_1","teamId":"team_1","projectId":"project_1"}},"agentActivity":{"body":"Please add regression coverage."}}}`)
 	res := d.Dispatch(context.Background(), &models.Integration{ID: integrationID, OrgID: orgID}, LinearAgentEventAgentSession, body)
 	require.Equal(t, "agent_dispatched", res.Status, "prompted race should still enqueue a worker retry job after webhook ack")
 	require.Len(t, jobs.calls, 1, "dispatcher should enqueue one prompted worker job")
@@ -108,7 +112,56 @@ func TestLinearAgentDispatcher_PromptedWithoutCreatedEnqueuesRetryableJob(t *tes
 	require.True(t, ok, "dispatcher should enqueue a map payload")
 	require.Equal(t, "prompted", payload["action"], "worker payload should identify prompted action")
 	require.Equal(t, "as_racing", payload["linear_agent_session_id"], "worker payload should carry the Linear AgentSession id for retry lookup")
+	require.Equal(t, "Please add regression coverage.", payload["linear_prompt_body"], "worker payload should carry Linear's prompted agentActivity.body")
 	require.NoError(t, mock.ExpectationsWereMet(), "dispatcher should only attempt the row lookup before enqueueing the retry job")
+}
+
+func TestLinearAgentDispatcher_EnqueueFailureReturnsRetryableStatus(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "test should create pgx mock")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	integrationID := uuid.New()
+	rowID := uuid.New()
+	now := time.Now().UTC()
+	jobs := &fakeJobs{err: errors.New("job store down")}
+	enabled := true
+	d := &LinearAgentDispatcher{
+		logger:        zerolog.Nop(),
+		agentSessions: db.NewLinearAgentSessionStore(mock),
+		jobs:          jobs,
+		settingsLoader: func(_ context.Context, _ uuid.UUID) (models.LinearAgentSettings, error) {
+			return models.LinearAgentSettings{Enabled: &enabled}, nil
+		},
+		featureEnabled: true,
+	}
+
+	mock.ExpectQuery("INSERT INTO linear_agent_sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "org_id", "integration_id", "linear_agent_session_id",
+			"linear_issue_id", "linear_issue_identifier",
+			"linear_app_user_id", "linear_creator_user_id",
+			"session_id", "state", "last_event_received_at",
+			"created_at", "updated_at", "inserted",
+		}).AddRow(
+			rowID, orgID, integrationID, "as_enqueue_fail",
+			"iss_1", "ACS-1",
+			"", "",
+			nil, "pending", &now,
+			now, now, true,
+		))
+
+	body := []byte(`{"type":"AgentSessionEvent","action":"created","payload":{"agentSession":{"id":"as_enqueue_fail","issueId":"iss_1","issue":{"id":"iss_1","identifier":"ACS-1","teamId":"team_1"}}}}`)
+	res := d.Dispatch(context.Background(), &models.Integration{ID: integrationID, OrgID: orgID}, LinearAgentEventAgentSession, body)
+	require.Equal(t, "enqueue_failed", res.Status, "enqueue failure must be visible to the webhook handler so the delivery is not marked processed")
+	require.Error(t, res.Err, "enqueue failure should be returned in the dispatch result for logging/response handling")
+	require.Len(t, jobs.calls, 1, "dispatcher should have attempted exactly one enqueue")
+	require.NoError(t, mock.ExpectationsWereMet(), "dispatcher should upsert before attempting the enqueue")
 }
 
 func TestLinearAgentDispatcher_PerTeamEnableOverrideCanPassOrgDisabledGate(t *testing.T) {

@@ -321,6 +321,9 @@ func lockSessionAppendStateForUpdate(ctx context.Context, tx pgx.Tx, orgID, sess
 //     placeholder is detectable in operator logs via the original error.
 func resolvePromptedCommentBody(ctx context.Context, deps LinearAgentEventHandlerDeps, payload linearAgentEventPayload, orgID uuid.UUID, logger zerolog.Logger) (string, error) {
 	const placeholder = "(Linear follow-up — see the linked issue for the full message.)"
+	if payload.LinearPromptBody != "" {
+		return payload.LinearPromptBody, nil
+	}
 	if payload.LinearCommentID == "" {
 		return placeholder, nil
 	}

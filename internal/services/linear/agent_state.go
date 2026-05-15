@@ -69,7 +69,7 @@ func MilestoneActivity(event MilestoneEvent, prNumber int) (AgentMilestoneActivi
 			Body:            "Starting coding session.",
 			Ephemeral:       false,
 			IdemKey:         milestoneIdemKey(event),
-			PinSessionState: "inProgress",
+			PinSessionState: "active",
 		}, true
 
 	case MilestonePROpened:
