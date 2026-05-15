@@ -155,6 +155,7 @@ func (w *AgentActivityWriter) Emit(ctx context.Context, in EmitInput) (EmitResul
 		Type:           string(in.Activity.Type),
 		Body:           in.Activity.Body,
 		Action:         in.Activity.Action,
+		Parameter:      in.Activity.Parameter,
 		Ephemeral:      ephemeral,
 	})
 	if err != nil {

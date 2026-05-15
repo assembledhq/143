@@ -673,14 +673,15 @@ type AgentActivityInput struct {
 	// Type is the activity kind. Use the typed constants in
 	// internal/models/linear_agent_enums.go to avoid typos.
 	Type string
-	// Body is the human-visible message. For thought/action/response/error
-	// this is the rendered text; for elicitation it is the question.
+	// Body is the human-visible message. For thought/response/error this
+	// is the rendered text; for elicitation it is the question. Action
+	// activities use Parameter/Result instead.
 	Body string
 	// Action is the human-readable name of the tool the agent invoked.
 	// Only set on type=action; the GraphQL schema rejects it otherwise.
 	Action string
-	// Parameter is the action's input parameter, free-text. Optional; the
-	// writer leaves this empty for milestone-driven actions.
+	// Parameter is the action's input parameter, free-text. Required when
+	// Type is action.
 	Parameter string
 	// Result is the action's output. Optional, only meaningful on
 	// type=action. Limit ~4KB — Linear truncates large bodies and the value
@@ -728,18 +729,14 @@ func (c *graphQLClient) AgentActivityCreate(ctx context.Context, in AgentActivit
 			content["ephemeral"] = true
 		}
 	case "action":
-		// action is required by Linear; Body is optional human-readable
-		// description of the action.
 		if in.Action == "" {
 			return AgentActivityResult{}, errors.New("action.action is required")
 		}
+		if in.Parameter == "" {
+			return AgentActivityResult{}, errors.New("action.parameter is required")
+		}
 		content["action"] = in.Action
-		if in.Body != "" {
-			content["body"] = in.Body
-		}
-		if in.Parameter != "" {
-			content["parameter"] = in.Parameter
-		}
+		content["parameter"] = in.Parameter
 		if in.Result != "" {
 			content["result"] = in.Result
 		}
