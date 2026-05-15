@@ -921,9 +921,27 @@ func (h *PreviewHandler) RestartPreview(w http.ResponseWriter, r *http.Request) 
 
 func (h *PreviewHandler) GetLogs(w http.ResponseWriter, r *http.Request) {
 	orgID := middleware.OrgIDFromContext(r.Context())
-	instance, ok := h.getActivePreview(w, r)
-	if !ok {
+	sessionID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_SESSION_ID", "invalid session ID")
 		return
+	}
+
+	instance, err := h.store.GetActivePreviewForSession(r.Context(), orgID, sessionID)
+	if err != nil {
+		if !errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, r, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to get preview", err)
+			return
+		}
+		instance, err = h.store.GetLatestFailedPreviewForSession(r.Context(), orgID, sessionID)
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				writeError(w, r, http.StatusNotFound, "NO_ACTIVE_PREVIEW", "no active preview for this session")
+			} else {
+				writeError(w, r, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to get preview", err)
+			}
+			return
+		}
 	}
 
 	logs, err := h.store.ListLogsByPreview(r.Context(), orgID, instance.ID, nil)
