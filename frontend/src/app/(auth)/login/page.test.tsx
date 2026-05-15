@@ -348,6 +348,30 @@ describe('LoginPage', () => {
     expect(screen.getByText(/@megan-assembled/)).toBeInTheDocument();
   });
 
+  it('treats GitHub-locked invites with notification email as GitHub identity invites', async () => {
+    searchParamsMock.set('invitation', 'invite-gh');
+    searchParamsMock.set('email', 'notify@example.com');
+    searchParamsMock.set('github_username', 'megan-assembled');
+    searchParamsMock.set('acceptance_method', 'github');
+    searchParamsMock.set('org', 'Acme');
+
+    const user = userEvent.setup();
+    renderWithProviders(<LoginPage />);
+
+    expect(screen.getByText('Invitation pending')).toBeInTheDocument();
+    expect(screen.getByText(/@megan-assembled/)).toBeInTheDocument();
+    expect(screen.queryByText(/as notify@example\.com/)).not.toBeInTheDocument();
+
+    const signinEmail = document.getElementById('signin-email');
+    expect(signinEmail).toHaveValue('');
+    expect(signinEmail).not.toHaveAttribute('readonly');
+
+    await user.click(screen.getByRole('tab', { name: 'Sign up' }));
+    const signupEmail = document.getElementById('signup-email');
+    expect(signupEmail).toHaveValue('');
+    expect(signupEmail).not.toHaveAttribute('readonly');
+  });
+
   it('renders the login form instead of redirecting when switch_account is requested', () => {
     searchParamsMock.set('invitation', 'invite-123');
     searchParamsMock.set('email', 'invitee@example.com');
