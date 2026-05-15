@@ -31,23 +31,28 @@ function LoginPageContent() {
   const invitation = searchParams.get("invitation") ?? undefined;
   const invitedEmail = searchParams.get("email") ?? "";
   const invitedGitHubUsername = searchParams.get("github_username") ?? "";
+  const acceptanceMethod = searchParams.get("acceptance_method") ?? "";
   const invitedOrg = searchParams.get("org") ?? "";
   const isSwitchAccount = searchParams.get("switch_account") === "1";
+  const isGitHubLockedInvite = acceptanceMethod === "github";
+  const identityEmail = isGitHubLockedInvite ? "" : invitedEmail;
   const postEmailSignInHref = invitation
     ? `/invite/accept?token=${encodeURIComponent(invitation)}`
     : "/sessions";
-  const inviteTarget = invitedEmail || (invitedGitHubUsername ? `@${invitedGitHubUsername}` : "");
+  const inviteTarget = isGitHubLockedInvite && invitedGitHubUsername
+    ? `@${invitedGitHubUsername}`
+    : invitedEmail || (invitedGitHubUsername ? `@${invitedGitHubUsername}` : "");
   const [tab, setTab] = useState(searchParams.get("tab") === "signup" ? "signup" : "signin");
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
   // Sign in form
-  const [signInEmail, setSignInEmail] = useState(invitedEmail);
+  const [signInEmail, setSignInEmail] = useState(identityEmail);
   const [signInPassword, setSignInPassword] = useState("");
 
   // Sign up form
   const [signUpName, setSignUpName] = useState("");
-  const [signUpEmail, setSignUpEmail] = useState(invitedEmail);
+  const [signUpEmail, setSignUpEmail] = useState(identityEmail);
   const [signUpPassword, setSignUpPassword] = useState("");
 
   useEffect(() => {
@@ -57,11 +62,11 @@ function LoginPageContent() {
   }, [authLoading, isAuthenticated, isSwitchAccount, router]);
 
   useEffect(() => {
-    if (invitedEmail) {
-      setSignInEmail(invitedEmail);
-      setSignUpEmail(invitedEmail);
+    if (identityEmail) {
+      setSignInEmail(identityEmail);
+      setSignUpEmail(identityEmail);
     }
-  }, [invitedEmail]);
+  }, [identityEmail]);
 
   const handleSignIn = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -148,7 +153,9 @@ function LoginPageContent() {
                     {" "}as <span className="font-medium text-foreground">{inviteTarget}</span>
                   </>
                 ) : null}
-                . Sign in if you already have an account, or create one to accept the invitation.
+                {isGitHubLockedInvite
+                  ? ". Continue with GitHub using the invited account to accept the invitation."
+                  : ". Sign in if you already have an account, or create one to accept the invitation."}
               </CardDescription>
             </div>
           )}
@@ -231,7 +238,7 @@ function LoginPageContent() {
                     placeholder="you@example.com"
                     value={signInEmail}
                     onChange={(e) => setSignInEmail(e.target.value)}
-                    readOnly={Boolean(invitation && invitedEmail)}
+                    readOnly={Boolean(invitation && identityEmail)}
                     required
                   />
                 </div>
@@ -272,7 +279,7 @@ function LoginPageContent() {
                     placeholder="you@example.com"
                     value={signUpEmail}
                     onChange={(e) => setSignUpEmail(e.target.value)}
-                    readOnly={Boolean(invitation && invitedEmail)}
+                    readOnly={Boolean(invitation && identityEmail)}
                     required
                   />
                 </div>

@@ -37,6 +37,7 @@ function AcceptInvitationContent() {
   const [orgName, setOrgName] = useState("");
   const [invitedEmail, setInvitedEmail] = useState("");
   const [invitedGitHubUsername, setInvitedGitHubUsername] = useState("");
+  const [acceptanceMethod, setAcceptanceMethod] = useState("");
 
   const isUnauthorized = (err: unknown) =>
     typeof err === "object" &&
@@ -78,6 +79,9 @@ function AcceptInvitationContent() {
         }
         if (data?.github_username) {
           setInvitedGitHubUsername(data.github_username);
+        }
+        if (data?.acceptance_method) {
+          setAcceptanceMethod(data.acceptance_method);
         }
 
         try {
@@ -124,12 +128,15 @@ function AcceptInvitationContent() {
 
   const invitationSummary = orgName || invitedEmail || invitedGitHubUsername;
   const joinLabel = orgName ? `Join ${orgName}` : "Accept invitation";
-  const accountTarget = invitedEmail || (invitedGitHubUsername ? `@${invitedGitHubUsername}` : "");
+  const isGitHubLockedInvite = acceptanceMethod === "github";
+  const accountTarget = isGitHubLockedInvite && invitedGitHubUsername
+    ? `@${invitedGitHubUsername}`
+    : invitedEmail || (invitedGitHubUsername ? `@${invitedGitHubUsername}` : "");
   const invitationParams = `${invitedEmail ? `&email=${encodeURIComponent(invitedEmail)}` : ""}${
     invitedGitHubUsername
       ? `&github_username=${encodeURIComponent(invitedGitHubUsername)}`
       : ""
-  }${orgName ? `&org=${encodeURIComponent(orgName)}` : ""}`;
+  }${acceptanceMethod ? `&acceptance_method=${encodeURIComponent(acceptanceMethod)}` : ""}${orgName ? `&org=${encodeURIComponent(orgName)}` : ""}`;
   const loginHref = token
     ? `/login?invitation=${encodeURIComponent(token)}${invitationParams}`
     : "/login";
