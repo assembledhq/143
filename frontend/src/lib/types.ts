@@ -84,6 +84,10 @@ export interface Integration {
   org_id: string;
   provider: string;
   github_app_installed?: boolean;
+  github_installation_id?: number;
+  github_account_login?: string;
+  github_repo_selection_required?: boolean;
+  github_active_repo_count?: number;
   /**
    * Surfaced by the backend when a provider rejects our access token (e.g.
    * Linear returns 401). Populated by deriveIntegrationStatus on the server
@@ -98,6 +102,26 @@ export interface Integration {
   status: string;
   last_synced_at?: string;
   created_at: string;
+}
+
+export type GitHubRepositoryClaimStatus =
+  | "unclaimed"
+  | "owned_by_current_org"
+  | "owned_by_other_org"
+  | "disconnected_in_current_org";
+
+export interface GitHubRepositoryClaimCandidate {
+  github_id: number;
+  full_name: string;
+  default_branch: string;
+  private: boolean;
+  clone_url: string;
+  installation_id: number;
+  status: GitHubRepositoryClaimStatus;
+  repository_id?: string;
+  owner_org_id?: string;
+  owner_org_name?: string;
+  can_transfer: boolean;
 }
 
 export interface Issue {
@@ -1479,6 +1503,8 @@ export interface Automation {
   name: string;
   goal: string;
   scope?: string;
+  icon_type: 'emoji';
+  icon_value: string;
   agent_type?: string;
   model_override?: string;
   reasoning_effort?: Session["reasoning_effort"];

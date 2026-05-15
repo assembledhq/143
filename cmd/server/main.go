@@ -1226,6 +1226,8 @@ func buildServices(
 		PR:              prService,
 		Failure:         failureSvc,
 		SandboxProvider: sandboxProvider,
+		ProjectTasks:    projectTaskUpdater,
+		AutomationRuns:  automationRunUpdater,
 		Prioritization:  prioritizationSvc,
 		PM:              pmSvc,
 		SlackSummarizer: slackSummarizer,

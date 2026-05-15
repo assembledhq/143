@@ -43,6 +43,7 @@ import {
   splitRunAt,
 } from "../schedule-time";
 import { TimezonePicker } from "../timezone-picker";
+import { AutomationEmojiPicker } from "../automation-emoji-picker";
 
 // Defer recharts (the only dep here that's expensive) into its own chunk.
 const AutomationStatsCard = dynamic(
@@ -65,6 +66,7 @@ function SettingsTab({ automation, canManage }: { automation: Automation; canMan
   const queryClient = useQueryClient();
   const [name, setName] = useState(automation.name);
   const [goal, setGoal] = useState(automation.goal);
+  const [iconValue, setIconValue] = useState(automation.icon_value || "⚙️");
   const [scope, setScope] = useState(automation.scope ?? "");
   const [intervalValue, setIntervalValue] = useState(automation.interval_value ?? 1);
   const [intervalUnit, setIntervalUnit] = useState<IntervalUnit>(
@@ -105,6 +107,8 @@ function SettingsTab({ automation, canManage }: { automation: Automation; canMan
       api.automations.update(automation.id, {
         name: name.trim(),
         goal: goal.trim(),
+        icon_type: "emoji",
+        icon_value: iconValue,
         scope: scope.trim() || undefined,
         interval_value: intervalValue,
         interval_unit: intervalUnit,
@@ -122,6 +126,10 @@ function SettingsTab({ automation, canManage }: { automation: Automation; canMan
 
   return (
     <div className="space-y-4 rounded-lg border border-border bg-card p-5">
+      <div className="space-y-1.5">
+        <Label>Emoji</Label>
+        <AutomationEmojiPicker value={iconValue} onChange={setIconValue} className="w-full sm:w-64" />
+      </div>
       <div className="space-y-1.5">
         <Label htmlFor="name">Name</Label>
         <Input id="name" value={name} onChange={(e) => setName(e.target.value)} />
@@ -413,7 +421,17 @@ export default function AutomationDetailPage() {
       <div className="space-y-6">
         <MobileBackButton to="/automations" label="Back to automations" />
         <PageHeader
-          title={automation.name}
+          title={
+            <span className="inline-flex min-w-0 items-center gap-3">
+              <span
+                className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md border border-border bg-card text-lg leading-none"
+                aria-label={`Automation icon for ${automation.name}`}
+              >
+                {automation.icon_value || "⚙️"}
+              </span>
+              <span className="min-w-0 truncate">{automation.name}</span>
+            </span>
+          }
           description={headerDescription}
           action={canManage ? (
             <div className="flex items-center gap-2">

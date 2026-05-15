@@ -2276,6 +2276,9 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 		//      classification to the async analyze_failure job.
 		if wasCancelled || (stopReason == StopReasonNone && errors.Is(ctx.Err(), context.Canceled)) {
 			log.Info().Msg("session cancelled by user")
+			if o.cancels != nil {
+				o.cancels.Deregister(run.ID)
+			}
 			o.handleCancelledSession(ctx, run, sandbox, result, run.CurrentTurn+1, log)
 			logAgentRunFinished(log, run, "cancelled", runStartedAt, func(event *zerolog.Event) {
 				event.Str("stop_reason", string(models.RuntimeStopReasonUserCancel))
@@ -2284,6 +2287,9 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 		}
 		if stopReason != StopReasonNone {
 			log.Info().Str("stop_reason", string(stopReason)).Msg("session stopped by runtime policy")
+			if o.cancels != nil {
+				o.cancels.Deregister(run.ID)
+			}
 			o.handlePolicyStoppedSession(ctx, run, sandbox, result, run.CurrentTurn+1, stopReason, log)
 			logAgentRunFinished(log, run, "runtime_policy_stopped", runStartedAt, func(event *zerolog.Event) {
 				event.Str("stop_reason", string(stopReason))
@@ -2311,6 +2317,9 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 	// the workspace and return the session to idle so it can be continued.
 	if wasCancelled {
 		log.Info().Msg("agent exited after cancel, snapshotting and returning to idle")
+		if o.cancels != nil {
+			o.cancels.Deregister(run.ID)
+		}
 		o.handleCancelledSession(ctx, run, sandbox, result, run.CurrentTurn+1, log)
 		logAgentRunFinished(log, run, "cancelled", runStartedAt, func(event *zerolog.Event) {
 			event.Str("stop_reason", string(models.RuntimeStopReasonUserCancel))
@@ -2319,6 +2328,9 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 	}
 	if stopReason != StopReasonNone {
 		log.Info().Str("stop_reason", string(stopReason)).Msg("agent exited after runtime policy stop")
+		if o.cancels != nil {
+			o.cancels.Deregister(run.ID)
+		}
 		o.handlePolicyStoppedSession(ctx, run, sandbox, result, run.CurrentTurn+1, stopReason, log)
 		logAgentRunFinished(log, run, "runtime_policy_stopped", runStartedAt, func(event *zerolog.Event) {
 			event.Str("stop_reason", string(stopReason))
@@ -3512,12 +3524,18 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		// deadline is classified as a cancel, not a timeout.
 		if wasCancelled || (stopReason == StopReasonNone && errors.Is(ctx.Err(), context.Canceled)) {
 			log.Info().Msg("session cancelled by user during continue")
+			if o.cancels != nil {
+				o.cancels.Deregister(session.ID)
+			}
 			o.handleCancelledSession(ctx, session, sandbox, result, turnNumber, log)
 			drainAfterRelease = true
 			return fmt.Errorf("session cancelled: %w", ctx.Err())
 		}
 		if stopReason != StopReasonNone {
 			log.Info().Str("stop_reason", string(stopReason)).Msg("session stopped by runtime policy during continue")
+			if o.cancels != nil {
+				o.cancels.Deregister(session.ID)
+			}
 			o.handlePolicyStoppedSession(ctx, session, sandbox, result, turnNumber, stopReason, log)
 			return nil
 		}
@@ -3533,12 +3551,18 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	// 6c. If cancelled but agent exited gracefully, snapshot and return to idle.
 	if wasCancelled {
 		log.Info().Msg("agent exited after cancel during continue, returning to idle")
+		if o.cancels != nil {
+			o.cancels.Deregister(session.ID)
+		}
 		o.handleCancelledSession(ctx, session, sandbox, result, turnNumber, log)
 		drainAfterRelease = true
 		return nil
 	}
 	if stopReason != StopReasonNone {
 		log.Info().Str("stop_reason", string(stopReason)).Msg("agent exited after runtime policy stop during continue")
+		if o.cancels != nil {
+			o.cancels.Deregister(session.ID)
+		}
 		o.handlePolicyStoppedSession(ctx, session, sandbox, result, turnNumber, stopReason, log)
 		return nil
 	}
@@ -5133,8 +5157,8 @@ func truncateForLog(s string, max int) string {
 }
 
 func (o *Orchestrator) handlePolicyStoppedSession(ctx context.Context, session *models.Session, sandbox *Sandbox, result *AgentResult, turnNumber int, reason StopReason, log zerolog.Logger) {
-	bgCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
+	checkpointCtx, checkpointCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer checkpointCancel()
 
 	lockToken, _ := jobctx.LockTokenFromContext(ctx)
 	checkpointedAt := time.Now().UTC()
@@ -5145,27 +5169,32 @@ func (o *Orchestrator) handlePolicyStoppedSession(ctx context.Context, session *
 		agentSessionID = *session.AgentSessionID
 	}
 
-	snapshotKey, snapshotSize, snapshotErr := o.snapshotSession(bgCtx, session, sandbox, result)
+	snapshotKey, snapshotSize, snapshotErr := o.snapshotSession(checkpointCtx, session, sandbox, result)
 	var checkpointErrText *string
 	if snapshotErr != nil {
 		errMsg := snapshotErr.Error()
 		checkpointErrText = &errMsg
 	}
 	if snapshotKey != "" || checkpointErrText != nil {
-		if _, err := o.sessions.PublishCheckpoint(bgCtx, session.OrgID, session.ID, lockToken, agentSessionID, snapshotKey, models.CheckpointKindGracefulStop, checkpointCapabilityForAgent(session.AgentType), snapshotSize, checkpointedAt, checkpointErrText, stopReasonToRuntime(reason)); err != nil {
+		if _, err := o.sessions.PublishCheckpoint(checkpointCtx, session.OrgID, session.ID, lockToken, agentSessionID, snapshotKey, models.CheckpointKindGracefulStop, checkpointCapabilityForAgent(session.AgentType), snapshotSize, checkpointedAt, checkpointErrText, stopReasonToRuntime(reason)); err != nil {
 			log.Warn().Err(err).Msg("failed to publish graceful-stop checkpoint metadata")
-		}
-		if snapshotKey != "" {
-			o.warmMentionIndexFromSandbox(bgCtx, session, sandbox, snapshotKey, log)
 		}
 	}
 
 	errMsg, explanation, nextSteps := gracefulStopFailure(reason, snapshotKey != "", session.SnapshotKey != nil && *session.SnapshotKey != "")
-	o.failRunWithCategory(bgCtx, session, errMsg, FailureCategoryTimeout, explanation, nextSteps)
-	o.updatePrimaryThreadTerminal(bgCtx, session, models.ThreadStatusFailed, &models.SessionResult{
+	terminalCtx, terminalCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer terminalCancel()
+	o.failRunWithCategory(terminalCtx, session, errMsg, FailureCategoryTimeout, explanation, nextSteps)
+	o.updatePrimaryThreadTerminal(terminalCtx, session, models.ThreadStatusFailed, &models.SessionResult{
 		Error:           &explanation,
 		FailureCategory: strPtr(FailureCategoryTimeout),
 	}, log)
+
+	if snapshotKey != "" {
+		warmCtx, warmCancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer warmCancel()
+		o.warmMentionIndexFromSandbox(warmCtx, session, sandbox, snapshotKey, log)
+	}
 }
 
 func gracefulStopFailure(reason StopReason, checkpointedThisTurn, hadPriorCheckpoint bool) (string, string, []string) {

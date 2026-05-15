@@ -98,12 +98,15 @@ func (a *CodexAdapter) Execute(ctx context.Context, sandbox *agent.Sandbox, prom
 		// event. We avoid `codex exec resume --last` because `--last` reads
 		// whichever rollout file is newest in ~/.codex/sessions, which is
 		// non-deterministic when stale entries are present.
-		msg := shellEscapeDouble(prompt.UserMessage)
+		promptPath := fmt.Sprintf("%s/.143-followup-prompt.md", sandbox.HomeDir)
+		if err := provider.WriteFile(ctx, sandbox, promptPath, []byte(prompt.UserMessage)); err != nil {
+			return nil, fmt.Errorf("write follow-up prompt file: %w", err)
+		}
 		cmd = fmt.Sprintf(
-			"codex exec resume --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check --json%s %s \"%s\"",
+			"codex exec resume --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check --json%s '%s' - < '%s'",
 			reasoningArg,
 			shellEscapeCodex(prompt.ResumeSessionID),
-			msg,
+			shellEscapeCodex(promptPath),
 		)
 	} else {
 		// Fresh exec — used for first turns and as the fallback for
@@ -116,7 +119,7 @@ func (a *CodexAdapter) Execute(ctx context.Context, sandbox *agent.Sandbox, prom
 			return nil, fmt.Errorf("write prompt file: %w", err)
 		}
 		cmd = fmt.Sprintf(
-			"codex exec --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check --json%s \"$(cat '%s')\"",
+			"codex exec --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check --json%s - < '%s'",
 			reasoningArg,
 			shellEscapeCodex(promptPath),
 		)
@@ -157,7 +160,7 @@ func (a *CodexAdapter) Execute(ctx context.Context, sandbox *agent.Sandbox, prom
 	// Filter refresh-token errors once and reuse the result.
 	var filteredStderr string
 	if len(stderr) > 0 {
-		filteredStderr = filterRefreshTokenLines(string(stderr))
+		filteredStderr = filterCodexStderrLines(string(stderr))
 		if filteredStderr != "" {
 			logCh <- agent.LogEntry{
 				Timestamp: time.Now(),
@@ -614,26 +617,38 @@ func isRefreshTokenError(msg string) bool {
 		strings.Contains(msg, "invalid_grant")
 }
 
-// filterRefreshTokenLines removes refresh-token error lines from stderr
-// output. Splits by newline and removes only lines matching refresh-token
-// errors, preserving any real error lines mixed in.
+// filterRefreshTokenLines preserves the previous helper name for tests and
+// callers that only care about refresh-token suppression.
 func filterRefreshTokenLines(stderr string) string {
+	return filterCodexStderrLines(stderr)
+}
+
+// filterCodexStderrLines removes known benign Codex CLI diagnostics from
+// stderr while preserving real failures. Codex prints the stdin notice when a
+// prompt argument is provided under non-TTY stdin; it is informational and the
+// CLI can still exit 0 after a successful turn.
+func filterCodexStderrLines(stderr string) string {
 	lines := strings.Split(stderr, "\n")
 	var kept []string
 	for _, line := range lines {
 		if strings.TrimSpace(line) == "" {
 			continue
 		}
-		if !isRefreshTokenError(line) {
-			kept = append(kept, line)
+		if isBenignCodexDiagnostic(line) || isRefreshTokenError(line) {
+			continue
 		}
+		kept = append(kept, line)
 	}
 	return strings.Join(kept, "\n")
 }
 
-// shellEscapeCodex escapes single quotes in a path for use inside a
-// single-quoted shell string. It is only used on internally-generated
-// file paths (e.g. promptPath), never on user-supplied input.
+func isBenignCodexDiagnostic(msg string) bool {
+	return strings.TrimSpace(msg) == "Reading additional input from stdin..."
+}
+
+// shellEscapeCodex escapes single quotes for use inside a single-quoted shell
+// string. It is only used on internally-generated values such as prompt paths
+// and Codex session IDs, never on user-supplied prompt text.
 func shellEscapeCodex(s string) string {
 	return strings.ReplaceAll(s, "'", "'\\''")
 }

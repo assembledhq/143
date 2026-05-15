@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"sync"
 	"time"
 
@@ -93,6 +94,7 @@ type runtimeProgressTracker struct {
 	lastStrength     models.RuntimeProgressStrength
 	lastStrongAt     time.Time
 	lastPersistedAt  time.Time
+	activeToolAt     time.Time
 }
 
 func newRuntimeProgressTracker(now time.Time) *runtimeProgressTracker {
@@ -116,12 +118,26 @@ func (t *runtimeProgressTracker) Record(progressType models.RuntimeProgressType,
 	if strength == models.RuntimeProgressStrengthStrong {
 		t.lastStrongAt = observedAt
 	}
+	switch progressType {
+	case models.RuntimeProgressTypeToolUse:
+		if t.activeToolAt.IsZero() {
+			t.activeToolAt = observedAt
+		}
+	case models.RuntimeProgressTypeToolResult, models.RuntimeProgressTypeQuestionBlocked, models.RuntimeProgressTypeCheckpoint:
+		t.activeToolAt = time.Time{}
+	}
 }
 
 func (t *runtimeProgressTracker) Snapshot() (time.Time, time.Time, models.RuntimeProgressType, models.RuntimeProgressStrength) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	return t.lastProgressAt, t.lastStrongAt, t.lastProgressType, t.lastStrength
+}
+
+func (t *runtimeProgressTracker) ToolActive() bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return !t.activeToolAt.IsZero()
 }
 
 func (t *runtimeProgressTracker) ShouldPersist() bool {
@@ -140,6 +156,9 @@ func (t *runtimeProgressTracker) ShouldPersist() bool {
 func runtimeProgressFromLog(entry LogEntry) (models.RuntimeProgressType, models.RuntimeProgressStrength, bool) {
 	switch entry.Level {
 	case "tool_use":
+		if isTerminalCommandExecution(entry.Metadata) {
+			return models.RuntimeProgressTypeToolResult, models.RuntimeProgressStrengthStrong, true
+		}
 		return models.RuntimeProgressTypeToolUse, models.RuntimeProgressStrengthWeak, true
 	case "question":
 		return models.RuntimeProgressTypeQuestionBlocked, models.RuntimeProgressStrengthStrong, true
@@ -151,10 +170,46 @@ func runtimeProgressFromLog(entry LogEntry) (models.RuntimeProgressType, models.
 		}
 		return models.RuntimeProgressTypeAssistantOutput, models.RuntimeProgressStrengthWeak, true
 	case "debug":
+		if isCommandExecutionStart(entry.Message) {
+			return models.RuntimeProgressTypeToolUse, models.RuntimeProgressStrengthWeak, true
+		}
 		return models.RuntimeProgressTypeAssistantReason, models.RuntimeProgressStrengthWeak, true
 	default:
 		return models.RuntimeProgressTypeNone, models.RuntimeProgressStrengthNone, false
 	}
+}
+
+func isTerminalCommandExecution(metadata map[string]any) bool {
+	if metadata == nil {
+		return false
+	}
+	tool, _ := metadata["tool"].(string)
+	if tool != "command_execution" {
+		return false
+	}
+	status, _ := metadata["status"].(string)
+	switch status {
+	case "completed", "failed", "cancelled":
+		return true
+	default:
+		return false
+	}
+}
+
+func isCommandExecutionStart(message string) bool {
+	if message == "" {
+		return false
+	}
+	var event struct {
+		Type string `json:"type"`
+		Item struct {
+			Type string `json:"type"`
+		} `json:"item"`
+	}
+	if err := json.Unmarshal([]byte(message), &event); err != nil {
+		return false
+	}
+	return event.Type == "item.started" && event.Item.Type == "command_execution"
 }
 
 type runtimeController struct {
@@ -244,6 +299,7 @@ func (c *runtimeController) RequestStop(reason StopReason) {
 
 func (c *runtimeController) tick(ctx context.Context, now time.Time) {
 	lastProgressAt, lastStrongAt, progressType, progressStrength := c.tracker.Snapshot()
+	toolActive := c.tracker.ToolActive()
 	if !lastProgressAt.IsZero() && c.tracker.ShouldPersist() {
 		if err := c.sessions.RecordRuntimeProgress(ctx, c.orgID, c.sessionID, progressType, progressStrength, lastProgressAt); err != nil {
 			c.logger.Debug().Err(err).Msg("failed to persist runtime progress")
@@ -259,7 +315,7 @@ func (c *runtimeController) tick(ctx context.Context, now time.Time) {
 		return
 	}
 
-	if c.cfg.NoProgressTimeout > 0 && !lastProgressAt.IsZero() && now.Sub(lastProgressAt) >= c.cfg.NoProgressTimeout {
+	if c.cfg.NoProgressTimeout > 0 && !toolActive && !lastProgressAt.IsZero() && now.Sub(lastProgressAt) >= c.cfg.NoProgressTimeout {
 		c.RequestStop(StopReasonNoProgress)
 		return
 	}
