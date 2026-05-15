@@ -99,6 +99,10 @@ func (h *RepositoryHandler) Update(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusBadRequest, "INVALID_JSON", "invalid request body")
 		return
 	}
+	if req.Status != nil {
+		writeError(w, r, http.StatusBadRequest, "REPOSITORY_STATUS_IMMUTABLE", "repository status changes must use the dedicated connect or disconnect flow")
+		return
+	}
 
 	repo, err := h.repoStore.GetByID(r.Context(), orgID, repoID)
 	if err != nil {
@@ -106,9 +110,6 @@ func (h *RepositoryHandler) Update(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if req.Status != nil {
-		repo.Status = *req.Status
-	}
 	if req.Settings != nil {
 		// Validate PM settings if present.
 		repoSettings, parseErr := models.ParseRepoSettings(*req.Settings)

@@ -3,13 +3,18 @@ package db
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgerrcode"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/assembledhq/143/internal/models"
 )
+
+var ErrActiveGitHubRepositoryOwnershipConflict = errors.New("active github repository is already owned")
 
 type RepositoryStore struct {
 	db   DBTX
@@ -263,10 +268,20 @@ func (s *RepositoryStore) ClaimFromGitHub(ctx context.Context, repo *models.Repo
 		"settings":        settings,
 	}).Scan(&repo.ID, &repo.CreatedAt, &repo.UpdatedAt)
 	if err != nil {
+		if isActiveGitHubRepositoryOwnershipConflict(err) {
+			return fmt.Errorf("%w: %w", ErrActiveGitHubRepositoryOwnershipConflict, err)
+		}
 		return fmt.Errorf("claim github repository: %w", err)
 	}
 	repo.Status = string(models.RepositoryStatusActive)
 	return nil
+}
+
+func isActiveGitHubRepositoryOwnershipConflict(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) &&
+		pgErr.Code == pgerrcode.UniqueViolation &&
+		(pgErr.ConstraintName == "idx_repositories_active_github_id" || pgErr.ConstraintName == "")
 }
 
 func (s *RepositoryStore) ApplyGitHubClaims(ctx context.Context, orgID uuid.UUID, repos []*models.Repository, transferOwners map[int64]uuid.UUID) error {

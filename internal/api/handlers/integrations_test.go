@@ -18,6 +18,7 @@ import (
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/pashagolub/pgxmock/v4"
 	"github.com/stretchr/testify/require"
 )
@@ -38,6 +39,18 @@ func (f *fakeGitHubAppService) GetInstallationToken(context.Context, int64) (str
 		return "", f.err
 	}
 	return f.token, nil
+}
+
+type fakeGitHubAppUserAuth struct {
+	credential *models.GitHubAppUserConfig
+	err        error
+}
+
+func (f fakeGitHubAppUserAuth) GetValidCredential(context.Context, uuid.UUID, uuid.UUID) (*models.GitHubAppUserConfig, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
+	return f.credential, nil
 }
 
 type fakeGitHubMembershipStore struct {
@@ -1854,6 +1867,90 @@ func TestIntegrationHandler_ClaimGitHubInstallationRepositories_RequiresUserAuth
 
 	require.Equal(t, http.StatusBadRequest, w.Code, "claim should reject requests when GitHub user auth is not wired")
 	require.Contains(t, w.Body.String(), "GITHUB_USER_AUTH_REQUIRED", "claim should return an actionable GitHub user auth error")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestIntegrationHandler_ClaimGitHubInstallationRepositories_MapsUniqueOwnershipRaceToConflict(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should initialize")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	userID := uuid.New()
+	integrationID := uuid.New()
+	otherOrgID := uuid.New()
+	otherRepoID := uuid.New()
+	now := time.Now().UTC()
+
+	handler := NewIntegrationHandler(
+		db.NewIntegrationStore(mock),
+		nil,
+		"",
+		"",
+		"http://localhost:8080",
+		"http://localhost:3000",
+		WithGitHubApp(&fakeGitHubAppService{token: "installation-token"}, db.NewRepositoryStore(mock)),
+		WithGitHubAppUserAuth(fakeGitHubAppUserAuth{credential: &models.GitHubAppUserConfig{AccessToken: "ghu_user"}}),
+	)
+	handler.client = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		switch req.URL.String() {
+		case githubAPIURL + "/installation/repositories?per_page=100":
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     make(http.Header),
+				Body: io.NopCloser(strings.NewReader(`{"repositories":[{
+					"id":67890,
+					"full_name":"acme/api",
+					"default_branch":"main",
+					"private":true,
+					"clone_url":"https://github.com/acme/api.git"
+				}]}`)),
+			}, nil
+		case githubAPIURL + "/repos/acme/api":
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader(`{}`)),
+			}, nil
+		default:
+			return nil, errors.New("unexpected request URL: " + req.URL.String())
+		}
+	})}
+
+	mock.ExpectQuery("SELECT id, org_id, provider, config, status, last_synced_at, created_at FROM integrations WHERE org_id = @org_id AND provider = @provider AND status = 'active'").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "org_id", "provider", "config", "status", "last_synced_at", "created_at"}).
+			AddRow(integrationID, orgID, "github", json.RawMessage(`{"installation_id":12345,"account_login":"acme"}`), "active", nil, now))
+	mock.ExpectQuery("SELECT r.id AS repository_id").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"repository_id", "org_id", "org_name", "github_id", "full_name", "status"}))
+	mock.ExpectBegin()
+	mock.ExpectQuery("INSERT INTO repositories").
+		WithArgs(
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+		).
+		WillReturnError(&pgconn.PgError{Code: "23505", ConstraintName: "idx_repositories_active_github_id"})
+	mock.ExpectRollback()
+	mock.ExpectQuery("SELECT r.id AS repository_id").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"repository_id", "org_id", "org_name", "github_id", "full_name", "status"}).
+			AddRow(otherRepoID, otherOrgID, "Platform", int64(67890), "acme/api", "active"))
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/integrations/github/repositories/claim", strings.NewReader(`{"github_ids":[67890]}`))
+	ctx := middleware.WithOrgID(req.Context(), orgID)
+	ctx = middleware.WithUser(ctx, &models.User{ID: userID, OrgID: orgID, Email: "admin@example.com", Name: "Admin", Role: models.RoleAdmin})
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	handler.ClaimGitHubInstallationRepositories(w, req)
+
+	require.Equal(t, http.StatusConflict, w.Code, "claim should map concurrent active-owner uniqueness violations to a conflict")
+	require.Contains(t, w.Body.String(), "REPOSITORY_OWNERSHIP_CONFLICT", "claim conflict should return the ownership conflict code")
+	require.Contains(t, w.Body.String(), "Platform", "claim conflict should include the current owner when it can be reloaded")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
