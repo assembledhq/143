@@ -9,6 +9,7 @@ import (
 
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/repoconfig"
+	"github.com/assembledhq/143/internal/services/agent"
 )
 
 // =============================================================================
@@ -409,8 +410,22 @@ func DetectReadiness(cfg *models.PreviewConfig) models.PreviewDetectionResult {
 
 // ResolveResourceLimits returns the appropriate resource limits based on config.
 func ResolveResourceLimits(cfg *models.PreviewConfig) models.ResourceLimits {
+	if len(cfg.Services) > 1 && len(cfg.Infrastructure) > 0 {
+		return models.ResourceLimits{MemoryMB: 2048, CPUMillis: 2000}
+	}
 	if len(cfg.Services) > 1 {
 		return models.ResourceLimits{MemoryMB: 1024, CPUMillis: 1000}
 	}
 	return models.ResourceLimits{MemoryMB: 512, CPUMillis: 500}
+}
+
+// ApplyResourceLimitsToSandboxConfig maps preview topology limits onto the
+// container resource config used when hydrating a preview sandbox.
+func ApplyResourceLimitsToSandboxConfig(sandboxCfg *agent.SandboxConfig, cfg *models.PreviewConfig) {
+	if sandboxCfg == nil || cfg == nil {
+		return
+	}
+	limits := ResolveResourceLimits(cfg)
+	sandboxCfg.MemoryLimitMB = limits.MemoryMB
+	sandboxCfg.CPULimit = float64(limits.CPUMillis) / 1000
 }
