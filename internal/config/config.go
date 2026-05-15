@@ -87,6 +87,17 @@ type Config struct {
 	LinearOAuthClientID     string `env:"LINEAR_OAUTH_CLIENT_ID"`
 	LinearOAuthClientSecret string `env:"LINEAR_OAUTH_CLIENT_SECRET"`
 
+	// LinearWebhookSigningSecret is the per-OAuth-app HMAC secret Linear
+	// shows once in the OAuth application dashboard. The same secret signs
+	// every webhook delivery from every workspace the app is installed in —
+	// it is a property of the OAuth app, not of the install. In the SaaS /
+	// multi-tenant deployment this lives here next to the OAuth client
+	// credentials. Self-hosted deployments may instead store a per-org
+	// override in LinearConfig.WebhookSecret; verifyProviderSignature falls
+	// back to this global secret when the per-org override is empty so both
+	// deployment shapes work simultaneously.
+	LinearWebhookSigningSecret string `env:"LINEAR_WEBHOOK_SIGNING_SECRET"`
+
 	// LinearAgentEnabled is a process-wide kill switch for the Linear agent
 	// feature (issue assignment / @-mention triggers a 143 session). When
 	// false, the dispatcher records the webhook delivery for audit and

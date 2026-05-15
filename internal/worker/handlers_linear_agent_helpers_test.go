@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -10,8 +11,18 @@ import (
 	"github.com/assembledhq/143/internal/services/linear"
 	"github.com/google/uuid"
 	"github.com/pashagolub/pgxmock/v4"
+	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 )
+
+type emitOnceRetryClient struct {
+	linear.Client
+	err error
+}
+
+func (c *emitOnceRetryClient) AgentActivityCreate(context.Context, linear.AgentActivityInput) (linear.AgentActivityResult, error) {
+	return linear.AgentActivityResult{}, c.err
+}
 
 // These tests cover the pure helpers in handlers_linear_agent_helpers.go.
 // The full created-path closure relies on too many concrete stores to
@@ -170,6 +181,41 @@ func TestLinearAgentPinSessionStateUsesRequestedState(t *testing.T) {
 
 	require.Equal(t, "error", linearAgentPinSessionState(models.LinearAgentSessionStateError),
 		"unsupported-session finalization should pin Linear to the supplied terminal state")
+}
+
+func TestEmitOnceDiscardsReservationOnLinearFailure(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "test should create pgx mock")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	rowID := uuid.New()
+
+	mock.ExpectQuery("INSERT INTO linear_agent_activity_log").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "inserted"}).AddRow(uuid.New(), true))
+	mock.ExpectExec("DELETE FROM linear_agent_activity_log").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("DELETE", 1))
+
+	err = emitOnce(
+		context.Background(),
+		&emitOnceRetryClient{err: errors.New("linear unavailable")},
+		db.NewLinearAgentActivityLogStore(mock),
+		orgID,
+		rowID,
+		"as_1",
+		linear.AgentMilestoneActivity{
+			Type:    models.LinearAgentActivityResponse,
+			Body:    "This session cannot start.",
+			IdemKey: "bootstrap:not_supported",
+		},
+		zerolog.Nop(),
+	)
+	require.Error(t, err, "Linear emit failure should still surface to the worker retry path")
+	require.NoError(t, mock.ExpectationsWereMet(), "terminal response emits should discard failed reservations so retries can re-emit")
 }
 
 func TestBuildIssueApproachPrompt(t *testing.T) {

@@ -510,6 +510,7 @@ func TestIntegrationHandler_HandleLinearOAuthCallback_PersistsRefreshTokenAndExp
 	mock.ExpectQuery("INSERT INTO integrations").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(integrationID, now))
+	expectLinearWorkspaceIDPersist(mock)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/integrations/linear/callback?code=test-code&state=test-state", nil)
 	req.AddCookie(&http.Cookie{Name: "linear_integration_oauth_state", Value: "test-state"})
@@ -589,6 +590,7 @@ func TestIntegrationHandler_HandleLinearOAuthCallback_PreservesWebhookSecretOnRe
 	mock.ExpectQuery("INSERT INTO integrations").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(integrationID, now))
+	expectLinearWorkspaceIDPersist(mock)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/integrations/linear/callback?code=test-code&state=test-state", nil)
 	req.AddCookie(&http.Cookie{Name: "linear_integration_oauth_state", Value: "test-state"})
@@ -619,6 +621,12 @@ func expectNoExistingCredentialLookup(mock pgxmock.PgxPoolIface) {
 	mock.ExpectQuery("SELECT id, org_id, provider, label, config").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "org_id", "provider", "label", "config", "status", "last_verified_at", "last_used_at", "created_by", "created_at", "updated_at"}))
+}
+
+func expectLinearWorkspaceIDPersist(mock pgxmock.PgxPoolIface) {
+	mock.ExpectExec("UPDATE integrations").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 }
 
 type capturingArgImpl struct {
@@ -687,6 +695,7 @@ func TestIntegrationHandler_HandleLinearOAuthCallback_SavesCredentialAndIntegrat
 	mock.ExpectQuery("INSERT INTO integrations").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(integrationID, now))
+	expectLinearWorkspaceIDPersist(mock)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/integrations/linear/callback?code=test-code&state=test-state", nil)
 	req.AddCookie(&http.Cookie{Name: "linear_integration_oauth_state", Value: "test-state"})
@@ -697,6 +706,73 @@ func TestIntegrationHandler_HandleLinearOAuthCallback_SavesCredentialAndIntegrat
 
 	require.Equal(t, http.StatusTemporaryRedirect, w.Code, "HandleLinearOAuthCallback should redirect after successful OAuth")
 	require.Equal(t, "http://localhost:3000/integrations?linear=connected", w.Header().Get("Location"), "HandleLinearOAuthCallback should redirect to integrations page with success state")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestIntegrationHandler_HandleLinearOAuthCallback_FailsWhenWorkspaceIDPersistenceFails(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	integrationID := uuid.New()
+	now := time.Now().UTC()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := db.NewIntegrationStore(mock)
+	credentialStore := db.NewOrgCredentialStore(mock, nil)
+
+	transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		switch req.URL.String() {
+		case "https://api.linear.app/oauth/token":
+			respBody := `{"access_token":"linear-access-token","token_type":"Bearer","scope":"read"}`
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(bytes.NewBufferString(respBody)),
+			}, nil
+		case "https://api.linear.app/graphql":
+			respBody := `{"data":{"viewer":{"organization":{"id":"lin-org-1","name":"Acme"}}}}`
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(bytes.NewBufferString(respBody)),
+			}, nil
+		default:
+			return nil, errors.New("unexpected request URL")
+		}
+	})
+
+	handler := NewIntegrationHandler(store, credentialStore, "linear-client-id", "linear-client-secret", "http://localhost:8080", "http://localhost:3000")
+	handler.client = &http.Client{Transport: transport}
+
+	expectNoExistingCredentialLookup(mock)
+	mock.ExpectQuery("INSERT INTO org_credentials").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
+
+	mock.ExpectQuery("SELECT .+ FROM integrations .+ provider = @provider .+ status IN \\('active', 'error'\\)").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "org_id", "provider", "config", "status", "last_synced_at", "created_at"}))
+
+	mock.ExpectQuery("INSERT INTO integrations").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(integrationID, now))
+
+	mock.ExpectExec("UPDATE integrations").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnError(errors.New("duplicate workspace binding"))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/integrations/linear/callback?code=test-code&state=test-state", nil)
+	req.AddCookie(&http.Cookie{Name: "linear_integration_oauth_state", Value: "test-state"})
+	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+	w := httptest.NewRecorder()
+
+	handler.HandleLinearOAuthCallback(w, req)
+
+	require.Equal(t, http.StatusInternalServerError, w.Code, "callback should fail when workspace_id cannot be persisted")
+	require.Contains(t, w.Body.String(), "CONNECT_LINEAR_FAILED", "response should make the Linear connection failure explicit")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
@@ -767,6 +843,7 @@ func TestIntegrationHandler_HandleLinearOAuthCallback_AsyncRefreshAndEnqueue(t *
 	mock.ExpectQuery("INSERT INTO integrations").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(integrationID, now))
+	expectLinearWorkspaceIDPersist(mock)
 	// Worker enqueue always fires now: redirect must not block on inline
 	// refresh, so the worker job is the durable fallback.
 	mock.ExpectQuery("INSERT INTO jobs").
@@ -916,6 +993,7 @@ func TestIntegrationHandler_HandleLinearOAuthCallback_BootstrapperFiresWhenAgent
 			mock.ExpectQuery("INSERT INTO integrations").
 				WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 				WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(integrationID, now))
+			expectLinearWorkspaceIDPersist(mock)
 
 			req := httptest.NewRequest(http.MethodGet, "/api/v1/integrations/linear/callback?code=test-code&state=test-state", nil)
 			req.AddCookie(&http.Cookie{Name: "linear_integration_oauth_state", Value: "test-state"})

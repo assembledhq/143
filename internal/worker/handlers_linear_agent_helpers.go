@@ -205,8 +205,10 @@ func linearAgentPinSessionState(state models.LinearAgentSessionState) string {
 }
 
 // emitOnce is a tiny wrapper that constructs an AgentActivityWriter on
-// demand and calls Emit. Used by the worker for one-off close activities;
-// HandleAgentMilestone uses its own writer for the milestone fan-out.
+// demand and calls EmitOrDiscard. Used by the worker for one-off close
+// activities where missing the response leaves the user without an
+// explanation; HandleAgentMilestone uses its own writer for at-most-once
+// milestone fan-out.
 // The caller's logger is passed through so writer-internal warnings
 // (e.g. failed best-effort AgentSessionUpdate pins) surface in operator
 // logs instead of disappearing into a Nop sink.
@@ -215,7 +217,7 @@ func emitOnce(ctx context.Context, client linear.Client, activities *db.LinearAg
 		return errors.New("activity log store not configured")
 	}
 	writer := linear.NewAgentActivityWriter(client, activities, nil, logger)
-	_, err := writer.Emit(ctx, linear.EmitInput{
+	_, err := writer.EmitOrDiscard(ctx, linear.EmitInput{
 		OrgID:             orgID,
 		AgentSessionRowID: rowID,
 		AgentSessionID:    agentSessionID,
