@@ -105,6 +105,30 @@ describe("AgentTabStrip", () => {
     expect(screen.getByRole("tooltip")).toHaveTextContent("1 message queued");
   });
 
+  it("keeps the single-agent tooltip trigger scoped to the visible tab label", () => {
+    const thread = makeThread({ label: "Main" });
+
+    renderWithProviders(
+      <AgentTabStrip
+        threads={[thread]}
+        activeThreadId={thread.id}
+        viewedThreadIds={new Set([thread.id])}
+        overlapsByThreadId={new Map()}
+        statusConfig={statusConfig}
+        onActiveThreadChange={vi.fn()}
+        onAddTab={vi.fn()}
+        onRevertThread={vi.fn()}
+        onArchiveThread={vi.fn()}
+        archivePendingThreadId={null}
+      />,
+    );
+
+    const trigger = screen.getByRole("group", { name: "Codex Idle" });
+
+    expect(trigger).not.toHaveClass("flex-1");
+    expect(trigger.parentElement).toHaveClass("flex-1");
+  });
+
   it("keeps the full tab strip once a second tab exists", () => {
     const threads = [
       makeThread({ id: "thread-1", label: "Main tab" }),
