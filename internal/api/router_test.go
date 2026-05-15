@@ -88,6 +88,24 @@ func TestSessionThreadPatchRouteIsBuilderWorkflowOnly(t *testing.T) {
 	require.Greater(t, builderGroupStart, readGroupStart, "builder workflow route group should follow the all-roles readable group")
 }
 
+func TestNewRouter_WiresLinearWebhookSigningSecret(t *testing.T) {
+	t.Parallel()
+
+	source, err := os.ReadFile("router.go")
+	require.NoError(t, err, "router.go should be readable for webhook wiring regression test")
+
+	handlerConstruction := strings.Index(string(source), `handlers.NewIngestionWebhookHandler`)
+	require.NotEqual(t, -1, handlerConstruction, "router should construct the ingestion webhook handler")
+
+	setRequireSecret := strings.Index(string(source), `ingestionWebhookHandler.SetRequireSecret(cfg.Env == "production")`)
+	setGlobalSecret := strings.Index(string(source), `ingestionWebhookHandler.SetGlobalLinearWebhookSecret(cfg.LinearWebhookSigningSecret)`)
+
+	require.NotEqual(t, -1, setRequireSecret, "router should still wire production signature enforcement")
+	require.NotEqual(t, -1, setGlobalSecret, "router should wire LINEAR_WEBHOOK_SIGNING_SECRET into Linear webhook verification")
+	require.Greater(t, setGlobalSecret, handlerConstruction, "global Linear webhook secret should be set after handler construction")
+	require.Greater(t, setGlobalSecret, setRequireSecret, "global Linear webhook secret wiring should live with the webhook verification setup")
+}
+
 func testRouterPrivateKeyPEM(t *testing.T) string {
 	t.Helper()
 

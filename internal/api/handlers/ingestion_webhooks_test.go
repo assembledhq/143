@@ -848,3 +848,210 @@ func TestIngestionWebhook_HandleLinear_UsesDocumentedSignatureHeader(t *testing.
 	require.Contains(t, w.Body.String(), "processed", "verified Linear webhook should process normally")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
+
+// TestIngestionWebhook_GlobalLinearSecretFallback pins the SaaS-deployment
+// contract: when no per-org Linear webhook secret is configured, the
+// signature verifier falls back to the shared LINEAR_WEBHOOK_SIGNING_SECRET
+// — the per-OAuth-app secret Linear shows once at app-creation time. Without
+// this fallback, the multi-tenant deployment can't verify any inbound
+// webhook because there's no install-time UI for entering the per-app
+// secret.
+//
+// The fallback is Linear-specific by design: Sentry's OAuth flow gives each
+// install its own webhook secret, so applying a process-wide override to
+// Sentry would be a regression.
+func TestIngestionWebhook_GlobalLinearSecretFallback(t *testing.T) {
+	t.Parallel()
+
+	globalSecret := "global-linear-app-secret"
+	perOrgSecret := "per-org-override"
+	orgID := uuid.New()
+	integrationID := uuid.New()
+	now := time.Now()
+	body := `{"action":"create","type":"Issue","data":{"id":"LIN-1","title":"Bug","priority":1,"createdAt":"2024-01-01T00:00:00Z","updatedAt":"2024-01-02T00:00:00Z"}}`
+
+	// Helpers — every subtest exercises the same downstream path once the
+	// signature check resolves, so the DB expectations are shared.
+	expectIntegrationLookup := func(mock pgxmock.PgxPoolIface) {
+		mock.ExpectQuery("SELECT .+ FROM integrations WHERE id").
+			WithArgs(pgxmock.AnyArg()).
+			WillReturnRows(
+				pgxmock.NewRows([]string{"id", "org_id", "provider", "config", "status", "last_synced_at", "created_at"}).
+					AddRow(integrationID, orgID, "linear", json.RawMessage(`{}`), "active", nil, now),
+			)
+	}
+	expectProcessed := func(mock pgxmock.PgxPoolIface) {
+		mock.ExpectQuery("INSERT INTO webhook_deliveries").
+			WithArgs(
+				pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+				pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+				pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			).
+			WillReturnRows(pgxmock.NewRows([]string{"id", "received_at", "created_at"}).AddRow(uuid.New(), now, now))
+		mock.ExpectQuery("INSERT INTO issues").
+			WithArgs(
+				pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+				pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+				pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+				pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			).
+			WillReturnRows(pgxmock.NewRows([]string{"id", "created_at", "updated_at"}).AddRow(uuid.New(), now, now))
+		mock.ExpectQuery("INSERT INTO jobs").
+			WithArgs(
+				pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+				pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			).
+			WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
+		mock.ExpectExec("UPDATE webhook_deliveries").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	}
+
+	t.Run("global secret verifies when per-org credential missing", func(t *testing.T) {
+		t.Parallel()
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err)
+		defer mock.Close()
+
+		// credStore returns ErrNoRows — the SaaS case where the org never
+		// pasted its own secret because there isn't one to paste.
+		credMock := &mockWebhookSecretLookup{err: fmt.Errorf("get linear credential: %w", pgx.ErrNoRows)}
+		handler := setupIngestionHandler(t, mock, credMock)
+		handler.SetGlobalLinearWebhookSecret(globalSecret)
+		handler.SetRequireSecret(true)
+
+		expectIntegrationLookup(mock)
+		expectProcessed(mock)
+
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/webhooks/linear?integration_id="+integrationID.String(), strings.NewReader(body))
+		req.Header.Set("Linear-Signature", signBody(globalSecret, []byte(body)))
+		w := httptest.NewRecorder()
+
+		handler.HandleLinear(w, req)
+		require.Equal(t, http.StatusOK, w.Code, "global secret must verify when no per-org credential exists")
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+
+	t.Run("global secret verifies when per-org credential has empty webhook_secret", func(t *testing.T) {
+		t.Parallel()
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err)
+		defer mock.Close()
+
+		// Per-org row exists (Linear OAuth completed) but has no
+		// WebhookSecret — exactly the state after an OAuth callback in a
+		// SaaS deployment, since the OAuth code never has access to the
+		// app-level signing secret.
+		credMock := &mockWebhookSecretLookup{
+			cred: &models.DecryptedCredential{
+				ID: uuid.New(), OrgID: orgID, Provider: models.ProviderLinear,
+				Config: models.LinearConfig{WebhookSecret: ""}, Status: "active",
+			},
+		}
+		handler := setupIngestionHandler(t, mock, credMock)
+		handler.SetGlobalLinearWebhookSecret(globalSecret)
+		handler.SetRequireSecret(true)
+
+		expectIntegrationLookup(mock)
+		expectProcessed(mock)
+
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/webhooks/linear?integration_id="+integrationID.String(), strings.NewReader(body))
+		req.Header.Set("Linear-Signature", signBody(globalSecret, []byte(body)))
+		w := httptest.NewRecorder()
+
+		handler.HandleLinear(w, req)
+		require.Equal(t, http.StatusOK, w.Code, "global secret must fill in when per-org override is empty")
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+
+	t.Run("per-org secret wins when both are set", func(t *testing.T) {
+		t.Parallel()
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err)
+		defer mock.Close()
+
+		credMock := &mockWebhookSecretLookup{
+			cred: &models.DecryptedCredential{
+				ID: uuid.New(), OrgID: orgID, Provider: models.ProviderLinear,
+				Config: models.LinearConfig{WebhookSecret: perOrgSecret}, Status: "active",
+			},
+		}
+		handler := setupIngestionHandler(t, mock, credMock)
+		handler.SetGlobalLinearWebhookSecret(globalSecret)
+		handler.SetRequireSecret(true)
+
+		expectIntegrationLookup(mock)
+		expectProcessed(mock)
+
+		// Sign with the *per-org* secret. If precedence ever flipped this
+		// would fail with 401 because the global secret would be used for
+		// verification.
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/webhooks/linear?integration_id="+integrationID.String(), strings.NewReader(body))
+		req.Header.Set("Linear-Signature", signBody(perOrgSecret, []byte(body)))
+		w := httptest.NewRecorder()
+
+		handler.HandleLinear(w, req)
+		require.Equal(t, http.StatusOK, w.Code, "per-org override must take precedence over the global secret")
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+
+	t.Run("no per-org and no global with requireSecret=true returns 401", func(t *testing.T) {
+		t.Parallel()
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err)
+		defer mock.Close()
+
+		credMock := &mockWebhookSecretLookup{err: fmt.Errorf("get linear credential: %w", pgx.ErrNoRows)}
+		handler := setupIngestionHandler(t, mock, credMock)
+		// Global left unset.
+		handler.SetRequireSecret(true)
+
+		expectIntegrationLookup(mock)
+
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/webhooks/linear?integration_id="+integrationID.String(), strings.NewReader(body))
+		req.Header.Set("Linear-Signature", signBody(globalSecret, []byte(body)))
+		w := httptest.NewRecorder()
+
+		handler.HandleLinear(w, req)
+		require.Equal(t, http.StatusUnauthorized, w.Code, "no secret + requireSecret=true must reject")
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+
+	t.Run("global secret does NOT apply to Sentry", func(t *testing.T) {
+		t.Parallel()
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err)
+		defer mock.Close()
+
+		// Sentry credential has no webhook_secret. The Linear global
+		// fallback must not leak into Sentry verification — Sentry's
+		// per-install secret is the right thing there, and a
+		// process-wide fallback would silently authorize forged Sentry
+		// webhooks if the Linear secret leaked.
+		credMock := &mockWebhookSecretLookup{
+			cred: &models.DecryptedCredential{
+				ID: uuid.New(), OrgID: orgID, Provider: models.ProviderSentry,
+				Config: models.SentryConfig{WebhookSecret: ""}, Status: "active",
+			},
+		}
+		handler := setupIngestionHandler(t, mock, credMock)
+		handler.SetGlobalLinearWebhookSecret(globalSecret)
+		handler.SetRequireSecret(true)
+
+		mock.ExpectQuery("SELECT .+ FROM integrations WHERE id").
+			WithArgs(pgxmock.AnyArg()).
+			WillReturnRows(
+				pgxmock.NewRows([]string{"id", "org_id", "provider", "config", "status", "last_synced_at", "created_at"}).
+					AddRow(integrationID, orgID, "sentry", json.RawMessage(`{}`), "active", nil, now),
+			)
+
+		sentryBody := `{"action":"created","data":{}}`
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/webhooks/sentry?integration_id="+integrationID.String(), strings.NewReader(sentryBody))
+		req.Header.Set("X-Sentry-Hook-Signature", signBody(globalSecret, []byte(sentryBody)))
+		w := httptest.NewRecorder()
+
+		handler.HandleSentry(w, req)
+		require.Equal(t, http.StatusUnauthorized, w.Code, "global Linear secret must not be applied to Sentry verification")
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+}
