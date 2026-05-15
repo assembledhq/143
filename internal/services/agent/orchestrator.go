@@ -2047,6 +2047,10 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 			if revertErr := o.sessions.UpdateStatus(ctx, run.OrgID, run.ID, string(models.SessionStatusPending)); revertErr != nil {
 				log.Error().Err(revertErr).Msg("failed to revert session to pending after preview won sandbox race")
 			}
+		} else if errors.Is(diagErr, ErrStaleSandboxIDCleared) {
+			if revertErr := o.sessions.UpdateStatus(ctx, run.OrgID, run.ID, string(models.SessionStatusPending)); revertErr != nil {
+				log.Error().Err(revertErr).Msg("failed to revert session to pending after stale sandbox cleanup")
+			}
 		}
 		return fmt.Errorf("%w: actual container %s != created %s", diagErr, actualContainerID, sandbox.ID)
 	}

@@ -2049,6 +2049,7 @@ func TestRunAgent_AcquireHoldLosesRaceClearsStaleOrphan(t *testing.T) {
 	require.Equal(t, 1, d.sessions.clearContainerIDCalls, "must CAS-clear the stale orphan")
 	require.Equal(t, "stale-orphan-container", clearedID, "must clear the exact ID returned by AcquireTurnHold")
 	require.Equal(t, 1, d.provider.GetDestroyCalls(), "must still destroy the losing sandbox")
+	require.Contains(t, d.sessions.statusUpdates, string(models.SessionStatusPending), "stale-orphan path must revert the session to pending so the retry re-enters the fresh run path")
 	for _, ru := range d.sessions.resultUpdates {
 		require.NotEqual(t, "failed", ru.status, "stale-orphan path must not mark the session failed")
 	}
