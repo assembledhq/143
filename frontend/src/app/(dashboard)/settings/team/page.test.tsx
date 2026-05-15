@@ -41,6 +41,7 @@ const {
       {
         id: 'inv-1',
         email: 'new@example.com',
+        acceptance_method: 'email',
         role: 'member',
         status: 'pending',
         invited_by: { id: 'user-1', name: 'Admin User' },
@@ -228,6 +229,25 @@ describe('TeamSettingsPage', () => {
     await waitFor(() => {
       expect(createInvitationMock).toHaveBeenCalledWith({ email: 'newuser@test.com', role: 'member' });
     });
+  });
+
+  it('offers builder as an invite role option', async () => {
+    const user = userEvent.setup();
+    renderWithProviders(<TeamSettingsPage />);
+
+    await user.click(await screen.findByRole('button', { name: 'Invite' }));
+    await user.click(await screen.findByLabelText('Role'));
+
+    expect(await screen.findByRole('option', { name: 'Builder' })).toBeInTheDocument();
+  });
+
+  it('offers builder in the member role selector for admins', async () => {
+    const user = userEvent.setup();
+    renderWithProviders(<TeamSettingsPage />);
+
+    await user.click(await screen.findByLabelText('Role for Member User'));
+
+    expect(await screen.findByRole('option', { name: 'Builder' })).toBeInTheDocument();
   });
 
   it('shows informative self action text instead of a dash placeholder', async () => {
@@ -428,6 +448,33 @@ describe('TeamSettingsPage', () => {
     await waitFor(() => {
       expect(createInvitationMock).toHaveBeenCalledWith({
         github_username: 'octocat',
+        acceptance_method: 'github',
+        role: 'member',
+      });
+    });
+  });
+
+  it('sends GitHub invites with a durable notification email while requiring GitHub acceptance', async () => {
+    const user = userEvent.setup();
+    renderWithProviders(<TeamSettingsPage />);
+
+    await user.click(await screen.findByRole('button', { name: 'Invite' }));
+    await user.click(screen.getByRole('tab', { name: 'GitHub username' }));
+
+    await user.type(screen.getByPlaceholderText('octocat'), 'octocat');
+    await user.type(screen.getByLabelText('Notification email'), 'octo@example.com');
+    await user.click(screen.getByRole('button', { name: 'Add GitHub username' }));
+
+    expect(await screen.findByText('@octocat')).toBeInTheDocument();
+    expect(screen.getByText(/octo@example\.com/)).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: 'Send invite to @octocat' }));
+
+    await waitFor(() => {
+      expect(createInvitationMock).toHaveBeenCalledWith({
+        email: 'octo@example.com',
+        github_username: 'octocat',
+        acceptance_method: 'github',
         role: 'member',
       });
     });
@@ -473,6 +520,7 @@ describe('TeamSettingsPage', () => {
     await waitFor(() => {
       expect(createInvitationMock).toHaveBeenCalledWith({
         github_username: 'octocat',
+        acceptance_method: 'github',
         role: 'member',
       });
     });
@@ -505,6 +553,7 @@ describe('TeamSettingsPage', () => {
           id: 'inv-2',
           email: null,
           github_username: 'octocat',
+          acceptance_method: 'github',
           role: 'member',
           status: 'pending',
           invited_by: { id: 'user-1', name: 'Admin User' },

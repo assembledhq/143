@@ -459,6 +459,7 @@ func TestParseOrgSettings_RuntimeBudgets_Defaults(t *testing.T) {
 	s, err := ParseOrgSettings(nil)
 	require.NoError(t, err, "ParseOrgSettings should apply runtime budget defaults")
 	require.Equal(t, DefaultNoProgressTimeoutSeconds, s.RuntimeBudgets.NoProgressTimeoutSeconds, "no-progress timeout should default")
+	require.Equal(t, 15*60, s.RuntimeBudgets.NoProgressTimeoutSeconds, "no-progress timeout should default to fifteen minutes")
 	require.Equal(t, DefaultGracefulShutdownWindowSeconds, s.RuntimeBudgets.GracefulShutdownWindowSeconds, "graceful shutdown window should default")
 	require.Equal(t, DefaultCheckpointFinalizeWindowSeconds, s.RuntimeBudgets.CheckpointFinalizationWindowSeconds, "checkpoint finalization window should default")
 	require.Equal(t, DefaultAutomaticExtensionSeconds, s.RuntimeBudgets.AutomaticExtensionSeconds, "automatic extension window should default")
@@ -482,6 +483,21 @@ func TestParseOrgSettings_RuntimeBudgets_ClampToSoftBudgetAndCeiling(t *testing.
 	require.Equal(t, 1200, s.MaxSessionDurationSeconds, "soft budget should preserve the configured value")
 	require.Equal(t, 1500, s.RuntimeBudgets.AbsoluteRuntimeCeilingSeconds, "absolute runtime ceiling should preserve the configured value")
 	require.Equal(t, 300, s.RuntimeBudgets.MaxAutomaticExtensionSeconds, "max automatic extension should clamp to the available headroom")
+}
+
+func TestParseOrgSettings_RuntimeBudgets_ClampsAbsoluteCeilingToWorkerWatchdog(t *testing.T) {
+	t.Parallel()
+
+	raw := json.RawMessage(`{
+		"max_session_duration_seconds": 7200,
+		"runtime_budgets": {
+			"absolute_runtime_ceiling_seconds": 21600
+		}
+	}`)
+
+	s, err := ParseOrgSettings(raw)
+	require.NoError(t, err, "ParseOrgSettings should clamp oversized absolute runtime ceilings")
+	require.Equal(t, MaxAbsoluteRuntimeCeilingSeconds, s.RuntimeBudgets.AbsoluteRuntimeCeilingSeconds, "absolute runtime ceiling should not exceed the worker-supported ceiling")
 }
 
 func TestParseOrgSettings_RuntimeBudgets_NegativeMaxAutomaticExtensionClampsToZero(t *testing.T) {

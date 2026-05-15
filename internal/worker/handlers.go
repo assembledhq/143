@@ -29,11 +29,157 @@ import (
 	"github.com/assembledhq/143/internal/services/ingestion"
 	"github.com/assembledhq/143/internal/services/linear"
 	"github.com/assembledhq/143/internal/services/pm"
+	previewsvc "github.com/assembledhq/143/internal/services/preview"
 	"github.com/assembledhq/143/internal/services/prioritization"
 	"github.com/assembledhq/143/internal/version"
 )
 
 const sandboxCapacityRetryDelay = 10 * time.Second
+const failureCategoryStaleSandbox = "stale_sandbox"
+
+func registerStaleSandboxDeadLetter(ctx context.Context, stores *Stores, logger zerolog.Logger, session models.Session, threadID *uuid.UUID, jobType string) {
+	if stores == nil || stores.Sessions == nil {
+		return
+	}
+	jobctx.RegisterDeadLetterHook(ctx, func(hookCtx context.Context, deadLetterErr error) {
+		writeCtx, cancel := context.WithTimeout(context.WithoutCancel(hookCtx), 10*time.Second)
+		defer cancel()
+
+		errMsg := "Session stopped after cleaning up a stale sandbox but the retry could not be scheduled."
+		explanation := "The worker found a stale sandbox container reference from an earlier interrupted attempt and cleared it, but the job dead-lettered before a fresh attempt could start."
+		nextSteps := []string{
+			"Retry the session to start with a clean sandbox",
+			"Check worker and sandbox logs if this repeats across sessions",
+		}
+		if deadLetterErr != nil {
+			logger.Warn().
+				Err(deadLetterErr).
+				Str("session_id", session.ID.String()).
+				Str("job_type", jobType).
+				Msg("session job dead-lettered after stale sandbox cleanup")
+		}
+
+		result := &models.SessionResult{Error: &errMsg}
+		if err := stores.Sessions.UpdateResult(writeCtx, session.OrgID, session.ID, string(models.SessionStatusFailed), result); err != nil {
+			logger.Error().
+				Err(err).
+				Str("session_id", session.ID.String()).
+				Str("job_type", jobType).
+				Msg("failed to mark session failed after stale sandbox cleanup dead-letter")
+			return
+		}
+		if err := stores.Sessions.UpdateFailure(writeCtx, session.OrgID, session.ID, explanation, failureCategoryStaleSandbox, nextSteps, true); err != nil {
+			logger.Error().
+				Err(err).
+				Str("session_id", session.ID.String()).
+				Str("job_type", jobType).
+				Msg("failed to persist stale sandbox failure details")
+		}
+		if threadID != nil && *threadID != uuid.Nil && stores.SessionThreads != nil {
+			threadCategory := failureCategoryStaleSandbox
+			threadResult := &models.SessionResult{
+				Error:           &errMsg,
+				FailureCategory: &threadCategory,
+			}
+			if err := stores.SessionThreads.UpdateResult(writeCtx, session.OrgID, *threadID, models.ThreadStatusFailed, threadResult); err != nil {
+				logger.Error().
+					Err(err).
+					Str("session_id", session.ID.String()).
+					Str("thread_id", threadID.String()).
+					Str("job_type", jobType).
+					Msg("failed to mark session thread failed after stale sandbox cleanup dead-letter")
+			}
+		}
+		if stores.Jobs != nil {
+			linear.EnqueueMilestone(writeCtx, stores.Jobs, logger, session.OrgID, session.ID, "failed", 0)
+		}
+	})
+}
+
+func registerSandboxCapacityDeadLetter(ctx context.Context, stores *Stores, services *Services, logger zerolog.Logger, session models.Session, threadID *uuid.UUID, jobType string) {
+	if stores == nil || stores.Sessions == nil {
+		return
+	}
+	jobctx.RegisterDeadLetterHook(ctx, func(hookCtx context.Context, deadLetterErr error) {
+		writeCtx, cancel := context.WithTimeout(context.WithoutCancel(hookCtx), 10*time.Second)
+		defer cancel()
+
+		errMsg := "Session stopped because sandbox capacity stayed full until the retry window expired."
+		explanation := "The worker could not acquire local sandbox capacity before the job retry window expired. This can happen during deploys or when other sessions are holding all sandbox slots."
+		nextSteps := []string{
+			"Retry the session when sandbox capacity is available",
+			"Cancel sessions that are no longer needed to free up capacity",
+		}
+		failedSession := session
+		failureCategory := agent.FailureCategorySandboxCapacity
+		failedSession.Status = string(models.SessionStatusFailed)
+		failedSession.Error = &errMsg
+		failedSession.FailureExplanation = &explanation
+		failedSession.FailureCategory = &failureCategory
+		failedSession.FailureNextSteps = nextSteps
+		failedSession.FailureRetryAdvised = true
+		if deadLetterErr != nil {
+			logger.Warn().
+				Err(deadLetterErr).
+				Str("session_id", session.ID.String()).
+				Str("job_type", jobType).
+				Msg("session job dead-lettered after sandbox capacity retries")
+		}
+
+		result := &models.SessionResult{Error: &errMsg}
+		if err := stores.Sessions.UpdateResult(writeCtx, session.OrgID, session.ID, string(models.SessionStatusFailed), result); err != nil {
+			logger.Error().
+				Err(err).
+				Str("session_id", session.ID.String()).
+				Str("job_type", jobType).
+				Msg("failed to mark session failed after sandbox capacity dead-letter")
+			return
+		}
+		if err := stores.Sessions.UpdateFailure(writeCtx, session.OrgID, session.ID, explanation, agent.FailureCategorySandboxCapacity, nextSteps, true); err != nil {
+			logger.Error().
+				Err(err).
+				Str("session_id", session.ID.String()).
+				Str("job_type", jobType).
+				Msg("failed to persist sandbox capacity failure details")
+		}
+		if threadID != nil && *threadID != uuid.Nil && stores.SessionThreads != nil {
+			threadCategory := agent.FailureCategorySandboxCapacity
+			threadResult := &models.SessionResult{
+				Error:           &errMsg,
+				FailureCategory: &threadCategory,
+			}
+			if err := stores.SessionThreads.UpdateResult(writeCtx, session.OrgID, *threadID, models.ThreadStatusFailed, threadResult); err != nil {
+				logger.Error().
+					Err(err).
+					Str("session_id", session.ID.String()).
+					Str("thread_id", threadID.String()).
+					Str("job_type", jobType).
+					Msg("failed to mark session thread failed after sandbox capacity dead-letter")
+			}
+		}
+		if services != nil && services.ProjectTasks != nil && failedSession.ProjectTaskID != nil {
+			if err := services.ProjectTasks.OnSessionComplete(writeCtx, &failedSession, string(models.SessionStatusFailed)); err != nil {
+				logger.Warn().
+					Err(err).
+					Str("session_id", failedSession.ID.String()).
+					Str("job_type", jobType).
+					Msg("failed to update project task after sandbox capacity dead-letter")
+			}
+		}
+		if services != nil && services.AutomationRuns != nil && failedSession.AutomationRunID != nil {
+			if err := services.AutomationRuns.OnSessionComplete(writeCtx, &failedSession, string(models.SessionStatusFailed)); err != nil {
+				logger.Warn().
+					Err(err).
+					Str("session_id", failedSession.ID.String()).
+					Str("job_type", jobType).
+					Msg("failed to update automation run after sandbox capacity dead-letter")
+			}
+		}
+		if stores.Jobs != nil {
+			linear.EnqueueMilestone(writeCtx, stores.Jobs, logger, failedSession.OrgID, failedSession.ID, "failed", 0)
+		}
+	})
+}
 
 // DataRetentionConfig holds retention periods for the data cleanup handler.
 type DataRetentionConfig struct {
@@ -59,9 +205,13 @@ func RegisterHandlers(w *Worker, stores *Stores, services *Services, retentionCf
 	if stores.Automations != nil && stores.AutomationRuns != nil {
 		w.Register(models.JobTypeAutomationRun, newAutomationRunHandler(stores, services, logger))
 	}
+	if services != nil && services.PreviewStarter != nil {
+		w.Register(models.JobTypeStartPreview, newStartPreviewHandler(services, logger))
+	}
 	if hasServiceHandlersDependencies(services) {
 		w.Register("run_agent", newRunAgentHandler(stores, services, logger))
 		w.Register("continue_session", newContinueSessionHandler(stores, services, logger))
+		w.Register("cancel_session", newCancelSessionHandler(stores, services, logger))
 		w.Register("open_pr", newOpenPRHandler(stores, services, logger))
 		w.Register("push_pr_changes", newPushPRChangesHandler(stores, services, logger))
 		w.Register("sync_pull_request_state", newSyncPullRequestStateHandler(services, logger))
@@ -162,6 +312,8 @@ type Services struct {
 	PR              prCreator
 	Failure         *agent.FailureService
 	SandboxProvider agent.SandboxProvider
+	ProjectTasks    agent.ProjectTaskUpdater   // nil-safe: updates project tasks on terminal session fallback paths
+	AutomationRuns  agent.AutomationRunUpdater // nil-safe: updates automation runs on terminal session fallback paths
 	Prioritization  *prioritization.Service
 	Feedback        *feedback.Service
 	PM              pmService
@@ -202,12 +354,20 @@ type Services struct {
 	// containers against DB ownership so leaked containers cannot accumulate
 	// indefinitely on worker disks. nil when disabled or unsupported.
 	SandboxGC *agent.SandboxGC
+	// PreviewStarter completes durable preview startup jobs. nil when this
+	// node has no preview provider.
+	PreviewStarter previewStarter
+}
+
+type previewStarter interface {
+	StartReservedPreview(ctx context.Context, payload previewsvc.StartPreviewJobPayload) error
 }
 
 type orchestratorService interface {
 	RunAgent(ctx context.Context, run *models.Session) error
 	ContinueSession(ctx context.Context, session *models.Session, opts *agent.ContinueSessionOptions) error
 	RecoverSession(ctx context.Context, session *models.Session) error
+	CancelSessionByID(sessionID uuid.UUID) bool
 	RevertThread(ctx context.Context, session *models.Session, thread *models.SessionThread) error
 	ResolveSessionTimeout(ctx context.Context, orgID uuid.UUID) time.Duration
 	ResolveAbsoluteRuntimeCeiling(ctx context.Context, orgID uuid.UUID) time.Duration
@@ -244,6 +404,29 @@ func newIngestWebhookHandler(stores *Stores, logger zerolog.Logger) JobHandler {
 		// In a full implementation, this would re-fetch the webhook delivery,
 		// parse it through the appropriate adapter, and call IngestNormalized.
 		// For now, ingestion happens synchronously in the webhook handler.
+		return nil
+	}
+}
+
+func newStartPreviewHandler(services *Services, logger zerolog.Logger) JobHandler {
+	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
+		if services == nil || services.PreviewStarter == nil {
+			return &FatalError{Err: fmt.Errorf("preview starter is not configured")}
+		}
+		var input previewsvc.StartPreviewJobPayload
+		if err := json.Unmarshal(payload, &input); err != nil {
+			return &FatalError{Err: fmt.Errorf("unmarshal start_preview payload: %w", err)}
+		}
+		if input.OrgID == uuid.Nil || input.SessionID == uuid.Nil || input.PreviewID == uuid.Nil || input.UserID == uuid.Nil {
+			return &FatalError{Err: fmt.Errorf("start_preview payload missing required ids")}
+		}
+		logger.Info().
+			Str("preview_id", input.PreviewID.String()).
+			Str("session_id", input.SessionID.String()).
+			Msg("processing start_preview job")
+		if err := services.PreviewStarter.StartReservedPreview(ctx, input); err != nil {
+			return &FatalError{Err: err}
+		}
 		return nil
 	}
 }
@@ -1009,11 +1192,19 @@ func newRunAgentHandler(stores *Stores, services *Services, logger zerolog.Logge
 		if err := runErr; err != nil {
 			if errors.Is(err, agent.ErrSandboxCapacity) {
 				retryAfter := sandboxCapacityRetryDelay
+				registerSandboxCapacityDeadLetter(ctx, stores, services, logger, run, run.PrimaryThreadID, "run_agent")
 				logger.Info().
 					Str("session_id", runID.String()).
 					Err(err).
 					Msg("local sandbox capacity reached; retrying run_agent")
 				return &RetryableError{Err: err, RetryAfter: &retryAfter}
+			}
+			if errors.Is(err, agent.ErrRecoveryAttemptsExhausted) {
+				logger.Warn().
+					Str("session_id", runID.String()).
+					Err(err).
+					Msg("run_agent recovery exhausted; dead-lettering without another restart")
+				return &FatalError{Err: err}
 			}
 			if errors.Is(err, agent.ErrStaleSandboxIDCleared) {
 				// The orchestrator detected a stale orphan container_id from
@@ -1022,11 +1213,12 @@ func newRunAgentHandler(stores *Stores, services *Services, logger zerolog.Logge
 				// sees a clean row and creates a fresh sandbox. A short
 				// backoff lets any in-flight cleanup settle.
 				retryAfter := 2 * time.Second
+				registerStaleSandboxDeadLetter(ctx, stores, logger, run, run.PrimaryThreadID, "run_agent")
 				logger.Info().
 					Str("session_id", runID.String()).
 					Err(err).
 					Msg("run_agent cleared stale orphan container_id; retrying against the clean row")
-				return &RetryableError{Err: err, RetryAfter: &retryAfter}
+				return &RetryableError{Err: err, RetryAfter: &retryAfter, BypassMaxRetryDuration: true}
 			}
 			if errors.Is(err, agent.ErrSandboxPreviewRace) {
 				// A preview hydrate published the live container first. There is
@@ -1080,6 +1272,44 @@ func newRunAgentHandler(stores *Stores, services *Services, logger zerolog.Logge
 				return &RetryableError{Err: err}
 			}
 			return err
+		}
+		return nil
+	}
+}
+
+func newCancelSessionHandler(stores *Stores, services *Services, logger zerolog.Logger) JobHandler {
+	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
+		if services == nil || services.Orchestrator == nil {
+			return &FatalError{Err: fmt.Errorf("orchestrator is not configured")}
+		}
+		var input struct {
+			SessionID string `json:"session_id"`
+			OrgID     string `json:"org_id"`
+		}
+		if err := json.Unmarshal(payload, &input); err != nil {
+			return fmt.Errorf("unmarshal cancel_session payload: %w", err)
+		}
+		orgID, err := parseOrgID(input.OrgID, ctx)
+		if err != nil {
+			return fmt.Errorf("parse org ID: %w", err)
+		}
+		sessionID, err := uuid.Parse(input.SessionID)
+		if err != nil {
+			return fmt.Errorf("parse session ID: %w", err)
+		}
+		accepted := services.Orchestrator.CancelSessionByID(sessionID)
+		if accepted && stores != nil && stores.Sessions != nil {
+			consumeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+			defer cancel()
+			if _, err := stores.Sessions.ConsumeCancelRequest(consumeCtx, orgID, sessionID); err != nil {
+				logger.Warn().Err(err).Str("session_id", sessionID.String()).Msg("failed to consume delivered session cancel request")
+			}
+		}
+		if !accepted {
+			logger.Warn().
+				Str("session_id", sessionID.String()).
+				Str("org_id", orgID.String()).
+				Msg("cancel_session job found no live local cancel registry entry")
 		}
 		return nil
 	}
@@ -1206,6 +1436,12 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 		if err := services.Orchestrator.ContinueSession(jobCtx, &session, continueOpts); err != nil {
 			if errors.Is(err, agent.ErrSandboxCapacity) {
 				retryAfter := sandboxCapacityRetryDelay
+				var capacityThreadID *uuid.UUID
+				if hasThread {
+					threadIDLocal := threadID
+					capacityThreadID = &threadIDLocal
+				}
+				registerSandboxCapacityDeadLetter(ctx, stores, services, logger, session, capacityThreadID, "continue_session")
 				logger.Info().
 					Str("session_id", sessionID.String()).
 					Err(err).

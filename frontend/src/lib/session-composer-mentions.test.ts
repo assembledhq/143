@@ -105,6 +105,12 @@ describe("session composer mentions", () => {
   it("keeps references when the token is followed by punctuation", () => {
     expect(syncReferencesWithMessage("Inspect @internal/api/handlers/sessions.go,", [fileReference])).toEqual([fileReference]);
   });
+
+  it("keeps the same references array when no references are removed", () => {
+    const references = [fileReference];
+
+    expect(syncReferencesWithMessage("Inspect @internal/api/handlers/sessions.go now", references)).toBe(references);
+  });
 });
 
 describe("session composer slash command triggers", () => {
@@ -154,6 +160,12 @@ describe("session composer slash command triggers", () => {
 
   it("syncs commands with the message text", () => {
     expect(syncCommandsWithMessage("/review focus on auth", [reviewCommand, clearCommand])).toEqual([reviewCommand]);
+  });
+
+  it("keeps the same commands array when no commands are removed", () => {
+    const commands = [reviewCommand];
+
+    expect(syncCommandsWithMessage("/review focus on auth", commands)).toBe(commands);
   });
 
   it("drops commands that only appear mid-line", () => {

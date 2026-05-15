@@ -12,6 +12,8 @@ import (
 	"syscall"
 	"time"
 
+	awsconfig "github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
 	dockerclient "github.com/docker/docker/client"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/rs/zerolog"
@@ -45,6 +47,7 @@ import (
 	"github.com/assembledhq/143/internal/services/sandbox"
 	"github.com/assembledhq/143/internal/services/sandboxauth"
 	"github.com/assembledhq/143/internal/services/storage"
+	"github.com/assembledhq/143/internal/services/workspace"
 	"github.com/assembledhq/143/internal/telemetry"
 	"github.com/assembledhq/143/internal/version"
 	"github.com/assembledhq/143/internal/worker"
@@ -368,6 +371,7 @@ func main() {
 		pmDocumentStore := db.NewPMDocumentStore(pool)
 		automationStore := db.NewAutomationStore(pool)
 		automationRunStore := db.NewAutomationRunStore(pool)
+		previewStore := db.NewPreviewStore(pool)
 		// Reuse the snapshot store built for the API so both paths agree on
 		// SnapshotStorageDir without duplicating configuration.
 		snapshotStore := apiSnapshotStore
@@ -423,9 +427,23 @@ func main() {
 				jobStore, orgStore, repoStore, pullRequestStore,
 				deployStore, priorityScoreStore, complexityEstimateStore, pmPlanStore, pmDecisionLogStore,
 				projectStore, projectTaskStore, projectCycleStore, pmDocumentStore, integrationStore,
-				sessionMessageStore, automationRunStore, snapshotStore, billingMetrics, cancelRegistry, threadCancelRegistry, orgSettingsCache, sandboxCapacity)
+				sessionMessageStore, automationRunStore, snapshotStore, billingMetrics, cancelRegistry, threadCancelRegistry, orgSettingsCache, sandboxCapacity, redisClient, fileReader)
 			if services != nil {
 				sandboxAuthShutdown = services.SandboxAuthShutdown
+				if previewManager != nil && pvProvider != nil {
+					services.PreviewStarter = preview.NewStartRunner(preview.StartRunnerConfig{
+						Manager:         previewManager,
+						Previews:        previewStore,
+						Sessions:        sessionStore,
+						Repositories:    repoStore,
+						FileReader:      fileReader,
+						SandboxProvider: apiSandboxProvider,
+						SandboxCapacity: sandboxCapacity,
+						Snapshots:       snapshotStore,
+						NodeID:          cfg.NodeID,
+						Logger:          logger,
+					})
+				}
 				// Wire eval pub/sub publishers so worker handlers can wake
 				// the API SSE subscribers on every state transition without
 				// the API having to poll Postgres.
@@ -892,6 +910,8 @@ func buildServices(
 	threadCancelRegistry *agent.ThreadCancelRegistry,
 	orgSettingsCache *agent.OrgSettingsCache,
 	sandboxCapacity *agent.SandboxCapacityGate,
+	redisClient *cache.Client,
+	fileReader sandbox.FileReader,
 ) *worker.Services {
 	// GitHub App service (for installation tokens, PR creation).
 	ghSvc, err := ghservice.NewService(cfg.GitHubAppID, cfg.GitHubAppPrivateKey)
@@ -914,6 +934,10 @@ func buildServices(
 		providers.WithHealthCheckImage(cfg.SandboxHealthCheckImage),
 		providers.WithRequireDiskQuota(cfg.SandboxRequireDiskQuota),
 	)
+	mentionIndexCache := workspace.NewMentionIndexCache(workspace.MentionIndexCacheConfig{
+		Redis:  redisClient,
+		Logger: logger,
+	})
 
 	// Startup health check: verify Docker daemon connectivity and, for gVisor,
 	// that the runsc runtime is functional. Retry a few times because Docker and
@@ -1024,6 +1048,8 @@ func buildServices(
 			Msg("sandbox auth: SANDBOX_AUTH_SOCKET_DIR is empty; per-session credential socket disabled — sandbox `git push` will require GITHUB_TOKEN env fallback")
 	}
 
+	uploadStore := buildUploadStore(context.Background(), cfg, logger)
+
 	orchestrator := agent.NewOrchestrator(agent.OrchestratorConfig{
 		Provider:           sandboxProvider,
 		Adapters:           agentAdapters,
@@ -1050,6 +1076,9 @@ func buildServices(
 		UserCredentials:    userCredentialStore,
 		CodingCredentials:  codingCredentialStore,
 		Snapshots:          snapshotStore,
+		Uploads:            uploadStore,
+		FileReader:         fileReader,
+		MentionIndexes:     mentionIndexCache,
 		UsageTracker:       usageTracker,
 		SandboxCapacity:    sandboxCapacity,
 		Cancels:            cancelRegistry,
@@ -1199,6 +1228,8 @@ func buildServices(
 		PR:              prService,
 		Failure:         failureSvc,
 		SandboxProvider: sandboxProvider,
+		ProjectTasks:    projectTaskUpdater,
+		AutomationRuns:  automationRunUpdater,
 		Prioritization:  prioritizationSvc,
 		PM:              pmSvc,
 		SlackSummarizer: slackSummarizer,
@@ -1217,6 +1248,19 @@ func buildServices(
 		svc.SandboxAuthSweep = s.SweepStaleSessionDirs
 	}
 	return svc
+}
+
+func buildUploadStore(ctx context.Context, cfg *config.Config, logger zerolog.Logger) storage.UploadStore {
+	if cfg.UploadS3Bucket == "" {
+		return storage.NewFileUploadStore(cfg.UploadStorageDir, "/api/v1/uploads/files")
+	}
+	awsCfg, err := awsconfig.LoadDefaultConfig(ctx, awsconfig.WithRegion(cfg.UploadS3Region))
+	if err != nil {
+		logger.Warn().Err(err).Msg("failed to load AWS config for upload S3 — falling back to file uploads")
+		return storage.NewFileUploadStore(cfg.UploadStorageDir, "/api/v1/uploads/files")
+	}
+	logger.Info().Str("bucket", cfg.UploadS3Bucket).Str("prefix", cfg.UploadS3Prefix).Msg("upload S3 store configured for worker attachment reads")
+	return storage.NewS3UploadStore(s3.NewFromConfig(awsCfg), cfg.UploadS3Bucket, cfg.UploadS3Prefix)
 }
 
 func wireWorkerPRService(

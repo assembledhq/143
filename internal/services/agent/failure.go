@@ -29,6 +29,12 @@ const (
 	// wall-clock limit. Set explicitly by the orchestrator timeout path so
 	// classification does not depend on error-text matching in classifyFailure.
 	FailureCategoryTimeout = "session_timeout"
+	// FailureCategoryRecovery marks a session that could not be safely recovered
+	// after repeated worker losses before any durable checkpoint existed.
+	FailureCategoryRecovery = "recovery_exhausted"
+	// FailureCategorySandboxCapacity marks a session whose job exhausted its
+	// retry budget while waiting for a sandbox slot.
+	FailureCategorySandboxCapacity = "sandbox_capacity"
 )
 
 // FailureSummary holds a human-readable explanation of why an agent run failed,

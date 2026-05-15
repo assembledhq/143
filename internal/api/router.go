@@ -49,7 +49,9 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	membershipStore := db.NewOrganizationMembershipStore(pool)
 	repoStore := db.NewRepositoryStore(pool)
 	integrationStore := db.NewIntegrationStore(pool)
+	githubInstallationStore := db.NewGitHubInstallationStore(pool)
 	issueStore := db.NewIssueStore(pool)
+	autopilotQueueStore := db.NewAutopilotQueueStore(pool)
 	sessionStore := db.NewSessionStore(pool)
 	sessionIssueLinkStore := db.NewSessionIssueLinkStore(pool)
 	sessionIssueSnapshotStore := db.NewSessionTurnIssueSnapshotStore(pool)
@@ -161,15 +163,21 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 		handlers.WithSentryOAuth(cfg.SentryOAuthClientID, cfg.SentryOAuthClientSecret),
 		handlers.WithGitHubIntegrationOAuth(cfg.GitHubOAuthClientID, cfg.GitHubOAuthClientSecret),
 		handlers.WithGitHubAppSlug(cfg.GitHubAppSlug),
+		handlers.WithGitHubInstallationStore(githubInstallationStore),
+		handlers.WithIntegrationMembershipStore(membershipStore),
+		handlers.WithGitHubSetupSigningKey(firstNonEmpty(cfg.CSRFSigningKey, cfg.SessionSecret)),
 		handlers.WithSlackOAuth(cfg.SlackOAuthClientID, cfg.SlackOAuthClientSecret),
 	}
-	// If the GitHub App service is available, let the integration handler
-	// fetch repos directly from the API during the install redirect.
+	// If the GitHub App service is available, let the integration handler list
+	// installation repos for explicit repository claims.
 	if cfg.GitHubAppID != 0 && cfg.GitHubAppPrivateKey != "" {
 		ghSvc, err := ghservice.NewService(cfg.GitHubAppID, cfg.GitHubAppPrivateKey)
 		if err == nil {
 			integrationOpts = append(integrationOpts, handlers.WithGitHubApp(ghSvc, repoStore))
 		}
+	}
+	if appUserAuthSvc != nil {
+		integrationOpts = append(integrationOpts, handlers.WithGitHubAppUserAuth(appUserAuthSvc))
 	}
 	integrationOpts = append(integrationOpts, handlers.WithPMContextAutoTrigger(jobStore, pmDocumentStore, logger))
 	integrationHandler := handlers.NewIntegrationHandler(
@@ -183,6 +191,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	)
 	integrationHandler.SetLinearJobStore(jobStore)
 	webhookHandler := handlers.NewWebhookHandler(cfg, orgStore, userStore, repoStore, integrationStore, prService)
+	webhookHandler.SetGitHubInstallationStore(githubInstallationStore)
 	containerUsageStore := db.NewContainerUsageStore(pool)
 	usageRollupStore := db.NewUsageRollupStore(pool)
 	usageHandler := handlers.NewUsageHandler(
@@ -192,11 +201,11 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	)
 	settingsHandler := handlers.NewSettingsHandler(orgStore, cfg.SafeLLMEnv())
 	issueHandler := handlers.NewIssueHandler(issueStore)
+	autopilotHandler := handlers.NewAutopilotHandler(autopilotQueueStore)
 	sessionMessageStore := db.NewSessionMessageStore(pool)
 	sessionThreadStore := db.NewSessionThreadStore(pool)
 	sessionThreadFileEventStore := db.NewSessionThreadFileEventStore(pool)
 	sessionViewStore := db.NewSessionViewStore(pool)
-	sessionComposerHandler := handlers.NewSessionComposerHandler(repoStore, prService)
 	pullRequestHandler := handlers.NewPullRequestHandler(prService)
 	prHealthStreams := cache.NewPullRequestStreams(redisClient, logger)
 	sessionHandler := handlers.NewSessionHandler(
@@ -437,6 +446,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 			sessionFilesSnapshotCache = sc
 		}
 	}
+	sessionComposerHandler := handlers.NewSessionComposerHandlerWithWorkspace(repoStore, sessionStore, prService, fileReader, sessionFilesSnapshotCache, redisClient, logger)
 	sessionFileHandler := handlers.NewSessionFileHandler(sessionStore, repoStore, fileReader, sessionFilesSnapshotCache, logger)
 
 	// Preview system: inspector, snapshot cache, HMR watcher, manager, recycler, gateway.
@@ -551,9 +561,12 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 
 	previewHandler := handlers.NewPreviewHandler(previewManager, previewStore, sessionStore, repoStore, fileReader, sandboxProvider, snapshotStore, logger)
 	previewHandler.SetAuditEmitter(auditEmitter)
+	previewHandler.SetJobStore(jobStore)
 	previewHandler.SetWorkerRuntime(workerSelector, workerClient, cfg.NodeID)
+	sessionHandler.SetWorkerRuntime(workerSelector, workerClient, cfg.NodeID)
 	previewHandler.SetSandboxCapacityGate(sandboxCapacity)
 	internalPreviewHandler := handlers.NewInternalPreviewHandler(previewHandler, previewManager, cfg.NodeID, cfg.SessionSecret, logger)
+	internalPreviewHandler.SetSessionCancelRuntime(sessionStore, canceller)
 	previewStopper := preview.NewWorkerStopper(previewStore, workerSelector, workerClient, cfg.NodeID, previewManager)
 	if prService != nil {
 		prService.SetPreviewTeardown(previewStore, previewStopper)
@@ -593,6 +606,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	r.Get("/readyz", healthHandler.Readyz)
 	r.Handle("/metrics", promhttp.Handler())
 	if cfg.Mode == "worker" || cfg.Mode == "all" {
+		r.Post("/internal/sessions/{sessionID}/cancel", internalPreviewHandler.CancelSession)
 		r.Post("/internal/preview/start", internalPreviewHandler.StartPreview)
 		r.Post("/internal/preview/stop-session", internalPreviewHandler.StopActivePreviewForSession)
 		r.Post("/internal/preview/{previewID}/stop", internalPreviewHandler.StopPreview)
@@ -670,6 +684,12 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 			r.Get("/api/v1/auth/memberships", authHandler.Memberships)
 			r.Post("/api/v1/auth/active-org", authHandler.SetActiveOrg)
 			r.Post("/api/v1/auth/logout", authHandler.Logout)
+			// GitHub App setup callbacks are validated against a signed setup
+			// intent inside the handler. Keep them outside OrgContext so a
+			// stale active org in another tab cannot block linking to the
+			// intended org recorded in the state token.
+			r.Get("/api/v1/integrations/github/callback", integrationHandler.HandleGitHubOAuthCallback)
+			r.Get("/api/v1/integrations/github/installed", integrationHandler.HandleGitHubAppInstalled)
 			// Available to any authenticated user (no RequireRole) — an invited
 			// user may not yet have a role in the target org when they claim.
 			// Rate-limited per-IP and per-user at 10/minute: the endpoint is a
@@ -701,10 +721,10 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 			// process; context.Background() is the right lifetime here.
 			r.With(middleware.CreateOrgRateLimit(context.Background(), 5)).Post("/api/v1/organizations", organizationsHandler.Create)
 
-			// Read-only routes (all roles: admin, member, viewer)
+			// Read-only routes (all roles: admin, builder, member, viewer)
 			r.Group(func(r chi.Router) {
 				r.Use(middleware.OrgContext)
-				r.Use(middleware.RequireRole("admin", "member", "viewer"))
+				r.Use(middleware.RequireRole("admin", "builder", "member", "viewer"))
 
 				r.Get("/api/v1/version", healthHandler.Version)
 
@@ -729,6 +749,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Get("/api/v1/session-composer/slash-commands", sessionComposerHandler.ListSlashCommands)
 				r.Get("/api/v1/session-composer/slash-commands/details", sessionComposerHandler.GetSlashCommandDetail)
 				r.Get("/api/v1/integrations", integrationHandler.ListIntegrations)
+				r.Get("/api/v1/autopilot/queue", autopilotHandler.Queue)
 				r.Get("/api/v1/issues", issueHandler.List)
 				r.Get("/api/v1/issues/{id}", issueHandler.Get)
 				r.Get("/api/v1/issues/{id}/priority", priorityHandler.GetPriorityScore)
@@ -768,6 +789,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Get("/api/v1/sessions/{id}/files", sessionFileHandler.ListFiles)
 				r.Get("/api/v1/sessions/{id}/files/content", sessionFileHandler.GetFileContent)
 				r.Get("/api/v1/sessions/{id}/files/context", sessionFileHandler.GetFileContext)
+				r.Get("/api/v1/sessions/{id}/composer/files", sessionComposerHandler.ListSessionFileMentions)
 				r.Get("/api/v1/settings", settingsHandler.Get)
 				r.Get("/api/v1/settings/llm-defaults", settingsHandler.GetLLMDefaults)
 				r.Get("/api/v1/settings/llm-models", settingsHandler.GetLLMModels)
@@ -800,31 +822,27 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 
 			})
 
-			// Write routes (admin and member only)
+			// Builder workflow routes. Builders can create and iterate on work,
+			// plus manage their personal coding-agent/auth setup, but they do not
+			// inherit the broader member settings/repo/project mutation surface.
 			r.Group(func(r chi.Router) {
 				r.Use(middleware.OrgContext)
-				r.Use(middleware.RequireRole("admin", "member"))
+				r.Use(middleware.RequireRole("admin", "builder", "member"))
 
-				r.Patch("/api/v1/repositories/{id}", repoHandler.Update)
-				r.Post("/api/v1/repositories/{id}/disconnect", repoHandler.Disconnect)
-				r.Post("/api/v1/repositories/{id}/reconnect", repoHandler.Reconnect)
-
-				// Team roster read — sits in the admin+member group (not the
-				// all-roles read group) so viewers cannot enumerate org members.
-				r.Get("/api/v1/team/members", teamHandler.ListMembers)
-
-				// Coding-agents config reads. Members can view what's configured
-				// (so /settings/agent renders read-only); mutations stay admin-only.
+				// Coding-agents config reads. Builders and members can view what's
+				// configured (so /settings/agent renders read-only when needed);
+				// org-scope mutations stay admin-only.
 				r.Get("/api/v1/settings/coding-auths", codingAuthHandler.List)
 				r.Get("/api/v1/settings/codex-auth/subscriptions", codexAuthHandler.List)
 				r.Get("/api/v1/settings/claude-code-auth/subscriptions", claudeCodeAuthHandler.List)
 
 				// Codex / Claude OAuth subscription flows. Org-scope writes are
 				// admin-gated inside each handler (see resolveOAuthScope);
-				// personal-scope writes are available to any member because they
-				// target the caller's own credential rows. Routing both into the
-				// admin+member group lets a single endpoint serve both cases —
-				// the handler decides based on the request's scope param.
+				// personal-scope writes are available to builders and members
+				// because they target the caller's own credential rows. Routing
+				// both into the builder workflow group lets a single endpoint
+				// serve both cases — the handler decides based on the request's
+				// scope param.
 				r.Post("/api/v1/settings/codex-auth/initiate", codexAuthHandler.Initiate)
 				r.Get("/api/v1/settings/codex-auth/status", codexAuthHandler.Status)
 				r.Post("/api/v1/settings/codex-auth/disconnect", codexAuthHandler.DisconnectAll) // legacy compat
@@ -835,31 +853,19 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Post("/api/v1/settings/claude-code-auth/disconnect", claudeCodeAuthHandler.DisconnectAll) // legacy compat
 				r.Delete("/api/v1/settings/claude-code-auth/subscriptions/{id}", claudeCodeAuthHandler.DisconnectByPath)
 
-				// Unified coding-credentials writes. Personal-scope mutations live in
-				// this group because they target the requester's own credentials and
-				// do not require admin privileges for members. The handler enforces
-				// "admin only when scope=org" via resolveScopeFromBody; per-row Move
-				// and bulk Reorder both rely on that gate, so both can sit here
-				// without allowing members to reorder the org stack.
+				// Unified coding-credentials writes. Personal-scope mutations live
+				// in this group because they target the requester's own credentials
+				// and do not require admin privileges for builders or members. The
+				// handler enforces "admin only when scope=org" via
+				// resolveScopeFromBody; per-row Move and bulk Reorder both rely on
+				// that gate, so both can sit here without allowing non-admins to
+				// reorder the org stack.
 				// See docs/design/future/65-unified-coding-credentials.md.
 				r.Post("/api/v1/coding-credentials", codingCredentialHandler.Create)
 				r.Patch("/api/v1/coding-credentials/{id}", codingCredentialHandler.Update)
 				r.Delete("/api/v1/coding-credentials/{id}", codingCredentialHandler.Delete)
 				r.Patch("/api/v1/coding-credentials/{id}/move", codingCredentialHandler.Move)
 				r.Patch("/api/v1/coding-credentials/reorder", codingCredentialHandler.Reorder)
-
-				// Eval reads — admin+member only so viewers cannot enumerate eval
-				// tasks or runs. Eval writes are gated even more tightly (admin-only)
-				// further down.
-				r.Get("/api/v1/evals/tasks", evalHandler.ListTasks)
-				r.Get("/api/v1/evals/tasks/{id}", evalHandler.GetTask)
-				r.Get("/api/v1/evals/tasks/{id}/runs", evalHandler.ListRuns)
-				r.Get("/api/v1/evals/runs/{runId}", evalHandler.GetRun)
-				r.Get("/api/v1/evals/batch", evalHandler.ListBatches)
-				r.Get("/api/v1/evals/batch/{batchId}", evalHandler.GetBatch)
-				r.Get("/api/v1/evals/batch/{batchId}/stream", evalHandler.StreamBatchUpdates)
-				r.Get("/api/v1/evals/bootstrap/candidates", evalHandler.GetBootstrapCandidates)
-				r.Get("/api/v1/evals/bootstrap/{runId}/stream", evalHandler.StreamBootstrapUpdates)
 
 				// Personal credential management
 				r.Put("/api/v1/settings/credentials/personal/{provider}", userCredentialHandler.UpsertPersonal)
@@ -885,11 +891,6 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Post("/api/v1/sessions/{id}/cancel", sessionHandler.CancelSession)
 				r.Post("/api/v1/sessions/{id}/archive", sessionHandler.ArchiveSession)
 				r.Post("/api/v1/sessions/{id}/unarchive", sessionHandler.UnarchiveSession)
-				r.Post("/api/v1/sessions/{id}/pr", sessionHandler.CreatePR)
-				r.Post("/api/v1/sessions/{id}/pr/push", sessionHandler.PushChangesToPR)
-				r.Post("/api/v1/pull-requests/{id}/repair/fix-tests", pullRequestHandler.FixTests)
-				r.Post("/api/v1/pull-requests/{id}/repair/resolve-conflicts", pullRequestHandler.ResolveConflicts)
-				r.Post("/api/v1/pull-requests/{id}/merge", pullRequestHandler.Merge)
 				r.Post("/api/v1/sessions/{id}/threads", sessionThreadHandler.CreateThread)
 				r.Patch("/api/v1/sessions/{id}/threads/{tid}", sessionThreadHandler.UpdateThread)
 				r.Post("/api/v1/sessions/{id}/threads/{tid}/archive", sessionThreadHandler.ArchiveThread)
@@ -914,6 +915,44 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Post("/api/v1/sessions/{id}/review-comments/send", sessionReviewCommentHandler.SendToAgent)
 				r.Patch("/api/v1/sessions/{id}/review-comments/{commentId}", sessionReviewCommentHandler.Update)
 				r.Delete("/api/v1/sessions/{id}/review-comments/{commentId}", sessionReviewCommentHandler.Delete)
+
+			})
+
+			// Member settings / operations routes. Builders do not inherit this
+			// broader org-management and PR-shipping surface until dedicated
+			// guardrails are in place.
+			r.Group(func(r chi.Router) {
+				r.Use(middleware.OrgContext)
+				r.Use(middleware.RequireRole("admin", "member"))
+
+				r.Patch("/api/v1/repositories/{id}", repoHandler.Update)
+				r.Post("/api/v1/repositories/{id}/disconnect", repoHandler.Disconnect)
+				r.Post("/api/v1/repositories/{id}/reconnect", repoHandler.Reconnect)
+
+				// Team roster read — sits in the admin+member group (not the
+				// all-roles read group) so viewers and builders cannot enumerate
+				// org members.
+				r.Get("/api/v1/team/members", teamHandler.ListMembers)
+
+				// Eval reads — admin+member only so viewers/builders cannot
+				// enumerate eval tasks or runs. Eval writes are gated even more
+				// tightly (admin-only) further down.
+				r.Get("/api/v1/evals/tasks", evalHandler.ListTasks)
+				r.Get("/api/v1/evals/tasks/{id}", evalHandler.GetTask)
+				r.Get("/api/v1/evals/tasks/{id}/runs", evalHandler.ListRuns)
+				r.Get("/api/v1/evals/runs/{runId}", evalHandler.GetRun)
+				r.Get("/api/v1/evals/batch", evalHandler.ListBatches)
+				r.Get("/api/v1/evals/batch/{batchId}", evalHandler.GetBatch)
+				r.Get("/api/v1/evals/batch/{batchId}/stream", evalHandler.StreamBatchUpdates)
+				r.Get("/api/v1/evals/bootstrap/candidates", evalHandler.GetBootstrapCandidates)
+				r.Get("/api/v1/evals/bootstrap/{runId}/stream", evalHandler.StreamBootstrapUpdates)
+
+				r.Post("/api/v1/sessions/{id}/pr", sessionHandler.CreatePR)
+				r.Post("/api/v1/sessions/{id}/pr/push", sessionHandler.PushChangesToPR)
+				r.Post("/api/v1/pull-requests/{id}/repair/fix-tests", pullRequestHandler.FixTests)
+				r.Post("/api/v1/pull-requests/{id}/repair/resolve-conflicts", pullRequestHandler.ResolveConflicts)
+				r.Post("/api/v1/pull-requests/{id}/merge", pullRequestHandler.Merge)
+
 				// Automations (write)
 				r.Post("/api/v1/automations", automationHandler.Create)
 				r.Patch("/api/v1/automations/{id}", automationHandler.Update)
@@ -949,7 +988,6 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Post("/api/v1/pm/documents/{docId}/sync", pmDocumentHandler.SyncFromNotion)
 				r.Post("/api/v1/pm/documents/{docId}/restore", pmDocumentHandler.RestoreVersion)
 				r.Post("/api/v1/pm/document-set-pins", pmDocumentHandler.CreateDocumentSetPin)
-
 			})
 
 			// Admin-only routes
@@ -1021,10 +1059,10 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Get("/api/v1/integrations/sentry/callback", integrationHandler.HandleSentryOAuthCallback)
 				r.Post("/api/v1/integrations/sentry/connect", integrationHandler.ConnectSentry)
 				r.Get("/api/v1/integrations/github/login", integrationHandler.StartGitHubOAuth)
-				r.Get("/api/v1/integrations/github/callback", integrationHandler.HandleGitHubOAuthCallback)
-				r.Get("/api/v1/integrations/github/installed", integrationHandler.HandleGitHubAppInstalled)
 				r.Post("/api/v1/integrations/github/connect", integrationHandler.ConnectGitHub)
 				r.Post("/api/v1/integrations/github/sync", integrationHandler.SyncGitHubRepos)
+				r.Get("/api/v1/integrations/github/repositories", integrationHandler.ListGitHubInstallationRepositories)
+				r.Post("/api/v1/integrations/github/repositories/claim", integrationHandler.ClaimGitHubInstallationRepositories)
 				r.Get("/api/v1/integrations/slack/login", integrationHandler.StartSlackOAuth)
 				r.Get("/api/v1/integrations/slack/callback", integrationHandler.HandleSlackOAuthCallback)
 				r.Post("/api/v1/integrations/slack/connect", integrationHandler.ConnectSlack)
@@ -1036,6 +1074,8 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Delete("/api/v1/integrations/slack/disconnect", integrationHandler.DisconnectIntegration)
 				r.Post("/api/v1/integrations/notion/connect", integrationHandler.ConnectNotion)
 				r.Delete("/api/v1/integrations/notion/disconnect", integrationHandler.DisconnectIntegration)
+				r.Post("/api/v1/integrations/circleci/connect", integrationHandler.ConnectCircleCI)
+				r.Delete("/api/v1/integrations/circleci/disconnect", integrationHandler.DisconnectIntegration)
 
 				// Eval write routes (admin-only — creating tasks shapes org-wide eval setup).
 				r.Post("/api/v1/evals/tasks", evalHandler.CreateTask)
@@ -1059,4 +1099,13 @@ func resolveRouterCodingCredentialStore(pool *pgxpool.Pool, cryptoSvc *crypto.Se
 		return shared[0]
 	}
 	return db.NewCodingCredentialStore(pool, cryptoSvc)
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
 }

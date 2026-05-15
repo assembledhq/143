@@ -232,6 +232,34 @@ func TestValidateAutomationRunStatus(t *testing.T) {
 	}
 }
 
+func TestAutomationIconTypeValidate(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		icon    AutomationIconType
+		wantErr bool
+	}{
+		{name: "empty uses default", icon: "", wantErr: false},
+		{name: "emoji is supported", icon: AutomationIconTypeEmoji, wantErr: false},
+		{name: "image is not enabled yet", icon: AutomationIconType("image"), wantErr: true},
+		{name: "unknown is rejected", icon: AutomationIconType("color"), wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			err := tt.icon.Validate()
+			if tt.wantErr {
+				require.Error(t, err, "unsupported automation icon types should be rejected")
+				return
+			}
+			require.NoError(t, err, "supported automation icon types should validate")
+		})
+	}
+}
+
 func TestBuildConfigSnapshot(t *testing.T) {
 	t.Parallel()
 

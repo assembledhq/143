@@ -252,6 +252,68 @@ func TestSessionStore_PublishCheckpoint(t *testing.T) {
 	}
 }
 
+func TestSessionStore_RequestCancelAndConsumeCancelRequest(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+
+	tests := []struct {
+		name          string
+		run           func(context.Context, *SessionStore) (bool, error)
+		expectQuery   string
+		rowsAffected  int64
+		expectPending bool
+	}{
+		{
+			name: "request upserts pending cancel intent",
+			run: func(ctx context.Context, store *SessionStore) (bool, error) {
+				return false, store.RequestCancel(ctx, orgID, sessionID)
+			},
+			expectQuery:  `INSERT INTO session_cancel_requests`,
+			rowsAffected: 1,
+		},
+		{
+			name: "consume returns true for pending cancel intent",
+			run: func(ctx context.Context, store *SessionStore) (bool, error) {
+				return store.ConsumeCancelRequest(ctx, orgID, sessionID)
+			},
+			expectQuery:   `UPDATE session_cancel_requests`,
+			rowsAffected:  1,
+			expectPending: true,
+		},
+		{
+			name: "consume returns false when no pending cancel intent exists",
+			run: func(ctx context.Context, store *SessionStore) (bool, error) {
+				return store.ConsumeCancelRequest(ctx, orgID, sessionID)
+			},
+			expectQuery:   `UPDATE session_cancel_requests`,
+			rowsAffected:  0,
+			expectPending: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "should create mock pool")
+			defer mock.Close()
+
+			mock.ExpectExec(tt.expectQuery).
+				WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+				WillReturnResult(pgxmock.NewResult("UPDATE", tt.rowsAffected))
+
+			pending, err := tt.run(context.Background(), NewSessionStore(mock))
+
+			require.NoError(t, err, "cancel request store operation should succeed")
+			require.Equal(t, tt.expectPending, pending, "consume should report whether a pending request was claimed")
+			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+		})
+	}
+}
+
 func TestSessionStore_UpdateRecoveryState(t *testing.T) {
 	t.Parallel()
 

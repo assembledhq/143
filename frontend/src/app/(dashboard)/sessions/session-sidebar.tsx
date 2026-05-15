@@ -21,7 +21,7 @@ import { queryKeys } from "@/lib/query-keys";
 import { useOptimisticSessions, type OptimisticSession } from "@/contexts/optimistic-sessions";
 import { DiffStatsBadge } from "@/components/code-review/diff-stats-badge";
 import { NoReposWarning } from "@/components/no-repos-warning";
-import type { SessionListItem, User } from "@/lib/types";
+import type { ListResponse, SessionListItem, User } from "@/lib/types";
 import { prMergedAccent } from "@/lib/pr-status-styles";
 import { hasSessionKeyboardTransientSurface, isSessionKeyboardTextEntryTarget } from "@/hooks/use-session-keyboard-shortcuts";
 import {
@@ -185,6 +185,7 @@ export function SessionSidebar() {
     isResolved,
     setPeopleFilter,
   } = usePeopleFilter();
+  const canListTeamMembers = currentUser?.role === "admin" || currentUser?.role === "member";
   const selectedId = selectedSegment && selectedSegment !== "new" ? selectedSegment : undefined;
   const [searchParam, setSearchParam] = useQueryState("search", parseAsString);
   const [search, setSearch] = useState(searchParam ?? "");
@@ -237,6 +238,7 @@ export function SessionSidebar() {
   const { data: membersData } = useQuery({
     queryKey: ["team", "members"],
     queryFn: () => api.team.listMembers(),
+    enabled: canListTeamMembers,
   });
   const members = useMemo<User[]>(() => membersData?.data ?? [], [membersData?.data]);
 
@@ -316,9 +318,28 @@ export function SessionSidebar() {
     queryClient.invalidateQueries({ queryKey: queryKeys.sessions.all });
   };
 
+  const removeSessionFromCachedLists = (sessionId: string) => {
+    queryClient.setQueriesData<ListResponse<SessionListItem>>(
+      { queryKey: queryKeys.sessions.all },
+      (current) => {
+        if (!current || !Array.isArray(current.data)) {
+          return current;
+        }
+        const nextData = current.data.filter((session) => session.id !== sessionId);
+        if (nextData.length === current.data.length) {
+          return current;
+        }
+        return { ...current, data: nextData };
+      },
+    );
+  };
+
   const archiveMutation = useMutation({
     mutationFn: (sessionId: string) => api.sessions.archive(sessionId),
-    onSuccess: invalidateSessions,
+    onSuccess: (_response, sessionId) => {
+      removeSessionFromCachedLists(sessionId);
+      invalidateSessions();
+    },
     onError: () => {
       toast.error("Failed to archive session");
     },
@@ -326,7 +347,10 @@ export function SessionSidebar() {
 
   const unarchiveMutation = useMutation({
     mutationFn: (sessionId: string) => api.sessions.unarchive(sessionId),
-    onSuccess: invalidateSessions,
+    onSuccess: (_response, sessionId) => {
+      removeSessionFromCachedLists(sessionId);
+      invalidateSessions();
+    },
     onError: () => {
       toast.error("Failed to unarchive session");
     },
@@ -566,28 +590,30 @@ export function SessionSidebar() {
           onValueChange={(v) => setActiveFilter(v === "all" ? null : v)}
           className="gap-0"
         >
-          <TabsList variant="line" size="sm" className="overflow-x-auto overflow-y-visible pb-1">
-            {filterTabs.map((tab) => {
-              const count = getCountForTab(tab.value, counts);
-              const label = renderCount(count, counts);
-              // Active uses the existing attention-grabbing pill; All/Archived get a
-              // muted inline number so totals are visible without being loud.
-              // Zero buckets render nothing — a "0" badge is noise.
-              const isActivePill = tab.value === "active" && count !== undefined && count > 0;
-              const isMutedNumber = !isActivePill && label !== undefined && count !== undefined && count > 0;
-              return (
-                <TabsTrigger key={tab.value} value={tab.value}>
-                  {tab.label}
-                  {isActivePill && (
-                    <span className="rounded-full text-white text-xs leading-none px-1.5 py-0.5 bg-primary">{label}</span>
-                  )}
-                  {isMutedNumber && (
-                    <span className="text-xs leading-none text-muted-foreground/60 tabular-nums">{label}</span>
-                  )}
-                </TabsTrigger>
-              );
-            })}
-          </TabsList>
+          <div className="overflow-x-auto overflow-y-hidden pb-1">
+            <TabsList variant="line" size="sm">
+              {filterTabs.map((tab) => {
+                const count = getCountForTab(tab.value, counts);
+                const label = renderCount(count, counts);
+                // Active uses the existing attention-grabbing pill; All/Archived get a
+                // muted inline number so totals are visible without being loud.
+                // Zero buckets render nothing — a "0" badge is noise.
+                const isActivePill = tab.value === "active" && count !== undefined && count > 0;
+                const isMutedNumber = !isActivePill && label !== undefined && count !== undefined && count > 0;
+                return (
+                  <TabsTrigger key={tab.value} value={tab.value}>
+                    {tab.label}
+                    {isActivePill && (
+                      <span className="rounded-full text-white text-xs leading-none px-1.5 py-0.5 bg-primary">{label}</span>
+                    )}
+                    {isMutedNumber && (
+                      <span className="text-xs leading-none text-muted-foreground/60 tabular-nums">{label}</span>
+                    )}
+                  </TabsTrigger>
+                );
+              })}
+            </TabsList>
+          </div>
         </Tabs>
       </div>
 

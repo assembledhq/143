@@ -23,6 +23,7 @@ func NewAutomationStore(db TxStarter) *AutomationStore {
 }
 
 const automationColumns = `id, org_id, repository_id, name, goal, scope,
+	icon_type, icon_value,
 	agent_type, model_override, reasoning_effort, execution_mode, max_concurrent, base_branch,
 	identity_scope, schedule_type, interval_value, interval_unit, interval_run_at, cron_expression, timezone,
 	next_run_at, last_run_at, enabled, created_by, paused_by, paused_at,
@@ -40,6 +41,7 @@ func scanAutomation(row pgx.Row) (models.Automation, error) {
 	var a models.Automation
 	err := row.Scan(
 		&a.ID, &a.OrgID, &a.RepositoryID, &a.Name, &a.Goal, &a.Scope,
+		&a.IconType, &a.IconValue,
 		&a.AgentType, &a.ModelOverride, &a.ReasoningEffort, &a.ExecutionMode, &a.MaxConcurrent, &a.BaseBranch,
 		&a.IdentityScope, &a.ScheduleType, &a.IntervalValue, &a.IntervalUnit, &a.IntervalRunAt, &a.CronExpression, &a.Timezone,
 		&a.NextRunAt, &a.LastRunAt, &a.Enabled, &a.CreatedBy, &a.PausedBy, &a.PausedAt,
@@ -64,11 +66,13 @@ func (s *AutomationStore) Create(ctx context.Context, a *models.Automation) erro
 	query := `
 		INSERT INTO automations (
 			org_id, repository_id, name, goal, scope,
+			icon_type, icon_value,
 			agent_type, model_override, reasoning_effort, execution_mode, max_concurrent, base_branch,
 			identity_scope, schedule_type, interval_value, interval_unit, interval_run_at, cron_expression, timezone,
 			next_run_at, enabled, created_by, priority
 		) VALUES (
 			@org_id, @repository_id, @name, @goal, @scope,
+			@icon_type, @icon_value,
 			@agent_type, @model_override, @reasoning_effort, @execution_mode, @max_concurrent, @base_branch,
 			@identity_scope, @schedule_type, @interval_value, @interval_unit, @interval_run_at, @cron_expression, @timezone,
 			@next_run_at, @enabled, @created_by, @priority
@@ -80,6 +84,8 @@ func (s *AutomationStore) Create(ctx context.Context, a *models.Automation) erro
 		"name":             a.Name,
 		"goal":             a.Goal,
 		"scope":            a.Scope,
+		"icon_type":        a.IconType.OrDefault(),
+		"icon_value":       models.AutomationIconValueOrDefault(a.IconValue),
 		"agent_type":       a.AgentType,
 		"model_override":   a.ModelOverride,
 		"reasoning_effort": a.ReasoningEffort,
@@ -176,6 +182,7 @@ func (s *AutomationStore) Update(ctx context.Context, a *models.Automation) erro
 	query := `
 		UPDATE automations SET
 			name = @name, goal = @goal, scope = @scope, repository_id = @repository_id,
+			icon_type = @icon_type, icon_value = @icon_value,
 			agent_type = @agent_type, model_override = @model_override, reasoning_effort = @reasoning_effort,
 			execution_mode = @execution_mode, max_concurrent = @max_concurrent,
 			base_branch = @base_branch, identity_scope = @identity_scope,
@@ -193,6 +200,8 @@ func (s *AutomationStore) Update(ctx context.Context, a *models.Automation) erro
 		"goal":             a.Goal,
 		"scope":            a.Scope,
 		"repository_id":    a.RepositoryID,
+		"icon_type":        a.IconType.OrDefault(),
+		"icon_value":       models.AutomationIconValueOrDefault(a.IconValue),
 		"agent_type":       a.AgentType,
 		"model_override":   a.ModelOverride,
 		"reasoning_effort": a.ReasoningEffort,

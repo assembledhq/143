@@ -191,6 +191,8 @@ func (h *AutomationHandler) Create(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Name            string                          `json:"name"`
 		Goal            string                          `json:"goal"`
+		IconType        models.AutomationIconType       `json:"icon_type"`
+		IconValue       string                          `json:"icon_value"`
 		RepositoryID    string                          `json:"repository_id"`
 		Scope           *string                         `json:"scope"`
 		AgentType       *models.AgentType               `json:"agent_type"`
@@ -222,6 +224,11 @@ func (h *AutomationHandler) Create(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := validateAutomationNameAndGoal(name, goal); err != nil {
 		writeError(w, r, http.StatusBadRequest, "INVALID_FIELD", err.Error())
+		return
+	}
+	iconType, iconValue, err := resolveAutomationIcon(req.IconType, req.IconValue)
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_ICON", err.Error())
 		return
 	}
 
@@ -394,6 +401,8 @@ func (h *AutomationHandler) Create(w http.ResponseWriter, r *http.Request) {
 		RepositoryID:    repoID,
 		Name:            name,
 		Goal:            goal,
+		IconType:        iconType,
+		IconValue:       iconValue,
 		Scope:           req.Scope,
 		AgentType:       agentType,
 		ModelOverride:   modelOverride,
@@ -434,6 +443,19 @@ func (h *AutomationHandler) Create(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, models.SingleResponse[models.Automation]{Data: automation})
 }
 
+func resolveAutomationIcon(iconType models.AutomationIconType, iconValue string) (models.AutomationIconType, string, error) {
+	if err := iconType.Validate(); err != nil {
+		return "", "", err
+	}
+	resolvedType := iconType.OrDefault()
+	resolvedValue := strings.TrimSpace(iconValue)
+	resolvedValue = models.AutomationIconValueOrDefault(resolvedValue)
+	if len([]rune(resolvedValue)) > 16 {
+		return "", "", fmt.Errorf("icon_value must be at most 16 characters")
+	}
+	return resolvedType, resolvedValue, nil
+}
+
 func (h *AutomationHandler) Update(w http.ResponseWriter, r *http.Request) {
 	orgID := middleware.OrgIDFromContext(r.Context())
 	automationID, err := uuid.Parse(chi.URLParam(r, "id"))
@@ -455,6 +477,8 @@ func (h *AutomationHandler) Update(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Name            *string                         `json:"name"`
 		Goal            *string                         `json:"goal"`
+		IconType        *models.AutomationIconType      `json:"icon_type"`
+		IconValue       *string                         `json:"icon_value"`
 		Scope           *string                         `json:"scope"`
 		RepositoryID    *string                         `json:"repository_id"`
 		AgentType       *models.AgentType               `json:"agent_type"`
@@ -504,6 +528,23 @@ func (h *AutomationHandler) Update(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Scope != nil {
 		automation.Scope = req.Scope
+	}
+	if req.IconType != nil || req.IconValue != nil {
+		iconType := automation.IconType
+		iconValue := automation.IconValue
+		if req.IconType != nil {
+			iconType = *req.IconType
+		}
+		if req.IconValue != nil {
+			iconValue = *req.IconValue
+		}
+		resolvedType, resolvedValue, err := resolveAutomationIcon(iconType, iconValue)
+		if err != nil {
+			writeError(w, r, http.StatusBadRequest, "INVALID_ICON", err.Error())
+			return
+		}
+		automation.IconType = resolvedType
+		automation.IconValue = resolvedValue
 	}
 	if req.RepositoryID != nil {
 		repoID, err := h.resolveRepositoryID(r.Context(), orgID, *req.RepositoryID)

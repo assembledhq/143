@@ -20,12 +20,12 @@ let mockPathname = '/projects';
 let mockSelectedSegment: string | null = null;
 const mockAuthState: {
   isAuthenticated: boolean;
-  user: { id: string } | null;
+  user: { id: string; role: string } | null;
   isLoading: boolean;
   logout: ReturnType<typeof vi.fn>;
 } = {
   isAuthenticated: true,
-  user: { id: 'user-1' },
+  user: { id: 'user-1', role: 'member' },
   isLoading: false,
   logout: vi.fn(),
 };
@@ -52,7 +52,7 @@ describe('ProjectSidebar', () => {
     mockPathname = '/projects';
     mockSelectedSegment = null;
     mockAuthState.isAuthenticated = true;
-    mockAuthState.user = { id: 'user-1' };
+    mockAuthState.user = { id: 'user-1', role: 'member' };
     mockAuthState.isLoading = false;
     mockAuthState.logout = vi.fn();
     notifyError.mockReset();
@@ -133,6 +133,32 @@ describe('ProjectSidebar', () => {
     renderWithProviders(<ProjectSidebar />);
     const link = screen.getByRole('link', { name: /New project/ });
     expect(link).toHaveAttribute('href', '/projects/new');
+  });
+
+  it('hides the New project entry for builders', async () => {
+    mockAuthState.user = { id: 'user-1', role: 'builder' };
+
+    renderWithProviders(<ProjectSidebar />);
+    await screen.findByText('Test Project');
+
+    expect(screen.queryByRole('link', { name: /New project/ })).not.toBeInTheDocument();
+  });
+
+  it('does not request the team roster for builders', async () => {
+    mockAuthState.user = { id: 'user-1', role: 'builder' };
+    let teamRequestCount = 0;
+
+    server.use(
+      http.get('*/api/v1/team/members', () => {
+        teamRequestCount += 1;
+        return HttpResponse.json({ error: { code: 'FORBIDDEN', message: 'insufficient permissions' } }, { status: 403 });
+      }),
+    );
+
+    renderWithProviders(<ProjectSidebar />);
+    await screen.findByText('Test Project');
+
+    expect(teamRequestCount).toBe(0);
   });
 
   it('shows empty state when API returns no projects', async () => {
@@ -283,10 +309,12 @@ describe('ProjectSidebar', () => {
 
     const tabList = screen.getByRole('tablist');
     expect(tabList).toHaveAttribute('data-variant', 'line');
-    expect(tabList.className).toContain('pb-1');
     expect(tabList.className).toContain('justify-start');
-    expect(tabList.className).toContain('overflow-x-auto');
-    expect(tabList.className).toContain('overflow-y-visible');
+
+    const scrollWrapper = tabList.parentElement;
+    expect(scrollWrapper?.className).toContain('overflow-x-auto');
+    expect(scrollWrapper?.className).toContain('overflow-y-hidden');
+    expect(scrollWrapper?.className).toContain('pb-1');
   });
 
   it('has search input', () => {
@@ -327,6 +355,17 @@ describe('ProjectSidebar', () => {
     const newProjectTexts = screen.getAllByText('New project');
     // At least 2: the top "+ New project" link + the ghost entry
     expect(newProjectTexts.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it('hides the ghost New project entry for builders', async () => {
+    mockAuthState.user = { id: 'user-1', role: 'builder' };
+    mockPathname = '/projects/new';
+    mockSelectedSegment = 'new';
+
+    renderWithProviders(<ProjectSidebar />);
+    await screen.findByText('Test Project');
+
+    expect(screen.queryByText('New project')).not.toBeInTheDocument();
   });
 
   it('highlights the selected project from the active layout segment', async () => {

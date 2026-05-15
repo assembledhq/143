@@ -2,6 +2,8 @@
 
 A preview is a live, iframed view of your app running inside a 143 session. When an agent edits your frontend, you see the result next to the diff instead of having to pull the branch locally.
 
+This guide is specifically about the `preview` section inside `.143/config.json`. For the repo-level file overview, including `bootstrap` and `validation`, see [Repo config](./repo-config.md).
+
 This guide covers how to add preview support to a repo. For the underlying architecture (preview gateway, trust split, isolation model), see [`design/implemented/44-sandbox-preview-server.md`](design/implemented/44-sandbox-preview-server.md).
 
 ## Dogfood preview
@@ -81,12 +83,46 @@ Services share the sandbox's filesystem and `localhost` network namespace, so th
 
 | Field | Required | Notes |
 |-------|----------|-------|
-| `preview.name` | yes | Human label shown in the UI |
-| `preview.primary` | yes | Key from `preview.services` that the gateway proxies browser traffic to |
-| `preview.services` | yes | Map of service name → [service config](#services) |
+| `preview.version` | no | Optional version marker. |
+| `preview.name` | no | Human label shown in the UI. Recommended. |
+| `preview.primary` | yes for multi-service | Key from `preview.services` that the gateway proxies browser traffic to. |
+| `preview.services` | yes for multi-service | Map of service name → [service config](#services). |
 | `preview.infrastructure` | no | Map of infra name → [infrastructure config](#infrastructure). Max 2. |
 | `preview.credentials` | yes | [Credential config](#credentials). Use `{"mode": "none"}` if no secrets needed. |
 | `preview.network` | yes | [Network config](#network). Use `{"mode": "managed"}` for the default sandbox egress policy. |
+| `preview.progressive` | no | When `true`, a multi-service preview can become partially ready as soon as the primary service is ready. |
+| `preview.command` | yes for single-service | Single-service shorthand only. |
+| `preview.cwd` | no | Single-service shorthand only. |
+| `preview.port` | yes for single-service | Single-service shorthand only. |
+| `preview.env` | no | Single-service shorthand only. |
+| `preview.ready` | no | Single-service shorthand only. Defaults to `/` and `90` seconds when omitted. |
+
+143 supports two valid preview shapes:
+
+- single-service shorthand using top-level `command` / `port` / `ready`
+- multi-service config using `primary` + `services`
+
+Do not mix both shapes in the same config.
+
+### Single-service shorthand
+
+This is valid when your preview is just one service:
+
+```json
+{
+  "preview": {
+    "name": "frontend",
+    "command": ["npm", "run", "dev"],
+    "cwd": "frontend",
+    "port": 3000,
+    "ready": { "http_path": "/" },
+    "credentials": { "mode": "none" },
+    "network": { "mode": "managed" }
+  }
+}
+```
+
+143 normalizes this internally into a single-entry `services` map.
 
 ### Services
 
@@ -236,6 +272,12 @@ Any service using a destination or `credentials.mode != "none"` makes the previe
 
 The frontend proxies `/api/*` to the server at `localhost:8080`. The server gets `DATABASE_URL` injected and uses a shell `command` to chain `migrate` then `server` — the ready probe only passes once `server` is listening, so ordering is enforced naturally.
 
+For production preview domains such as `<preview-id>.preview.143.dev`, the public wildcard DNS must resolve to the app node and the edge proxy must be able to obtain a wildcard certificate. In 143's production setup that means:
+
+1. `*.preview.<your-domain>` points at the app node that runs Caddy.
+2. `PREVIEW_ORIGIN_TEMPLATE` is set to `https://{id}.preview.<your-domain>`.
+3. Caddy is built with a DNS provider plugin and the wildcard host uses the ACME DNS challenge. For Cloudflare, provide a scoped API token with `Zone:Read` and `DNS:Edit` on the zone and set `CLOUDFLARE_API_TOKEN` in the app host env bundle.
+
 ## Platform-Injected Env
 
 Every service receives:
@@ -299,4 +341,4 @@ Practical implication: if you want the agent to be able to iterate on `command`/
 
 **Does the preview use my production secrets?** No. Secrets come from admin-configured credential sets, never from the repo or agent. Without a `credentials` block, the preview has no secrets at all.
 
-**What if my app needs to know its public URL?** For most frameworks, relative URLs work — the preview gateway rewrites traffic transparently. If your app needs an absolute origin (e.g., OAuth callbacks), set it via `env` in the service config. Passing the dynamic preview URL through is planned but not yet implemented.
+**What if my app needs to know its public URL?** For most frameworks, relative URLs work. When an app needs an absolute origin, use the platform-injected `PREVIEW_ORIGIN` env var as the external base URL for the preview so redirects and absolute links resolve back to the isolated preview host instead of `localhost`.

@@ -78,6 +78,7 @@ type AgentInput struct {
 	Manual             bool
 	PromptStyle        PromptStyle
 	UserMessage        string
+	Attachments        []AgentAttachment
 	RepoURL            string
 	RepoBranch         string
 	References         []models.SessionInputReference
@@ -92,6 +93,18 @@ type AgentInput struct {
 	PMContextJSON      string                // serialized PM context for PM agent runs
 	IntegrationSkills  string                // auto-generated CLI skills doc for integration tools
 	ContextLimits      *models.ContextLimits // org-specific token limits (nil = use defaults)
+}
+
+// AgentAttachment describes a user-uploaded attachment after the server has
+// attempted to make it available to the sandbox. LocalPath is set when the
+// file was copied successfully; Error is set when the attachment should be
+// surfaced to the agent as unavailable.
+type AgentAttachment struct {
+	OriginalURL  string
+	LocalPath    string
+	ContentType  string
+	Error        string
+	MessageIndex int
 }
 
 // PMTaskContext carries the PM agent's analysis into the coding agent's prompt.
@@ -538,6 +551,7 @@ type Sandbox struct {
 	Provider string            // which provider created this sandbox
 	WorkDir  string            // path to the repo checkout inside the sandbox
 	HomeDir  string            // sandbox user's home dir (HOME env); distinct from WorkDir
+	Env      map[string]string `json:"-"` // environment passed to agent CLI execs; never persist secrets
 	Metadata map[string]string // provider-specific metadata
 
 	// Tracing identifiers copied from SandboxConfig at Create time. Providers

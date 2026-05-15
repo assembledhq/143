@@ -3,8 +3,8 @@ import { INTEGRATIONS, getIntegrationByKey } from "./integrations";
 import type { IntegrationKey } from "./integrations";
 
 describe("INTEGRATIONS", () => {
-  it("contains exactly 5 integrations", () => {
-    expect(INTEGRATIONS).toHaveLength(5);
+  it("contains exactly 6 integrations", () => {
+    expect(INTEGRATIONS).toHaveLength(6);
   });
 
   it("has unique keys", () => {
@@ -23,7 +23,7 @@ describe("INTEGRATIONS", () => {
 });
 
 describe("getIntegrationByKey", () => {
-  it.each(["github", "sentry", "linear", "slack", "notion"] as IntegrationKey[])(
+  it.each(["github", "sentry", "linear", "slack", "notion", "circleci"] as IntegrationKey[])(
     "returns the correct integration for %s",
     (key) => {
       const result = getIntegrationByKey(key);

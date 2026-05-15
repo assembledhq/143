@@ -52,7 +52,7 @@ import type {
 
 type InviteDraft =
   | { mode: "email"; value: string }
-  | { mode: "github"; value: string; avatarUrl?: string };
+  | { mode: "github"; value: string; avatarUrl?: string; notificationEmail?: string };
 
 export default function TeamSettingsPage() {
   const queryClient = useQueryClient();
@@ -62,6 +62,7 @@ export default function TeamSettingsPage() {
   const [inviteRole, setInviteRole] = useState("member");
   const [inviteMode, setInviteMode] = useState<"email" | "github">("email");
   const [inviteDraft, setInviteDraft] = useState<InviteDraft | null>(null);
+  const [githubNotificationEmail, setGithubNotificationEmail] = useState("");
   const [inviteError, setInviteError] = useState("");
   const [actionError, setActionError] = useState("");
   const [isInviteDialogOpen, setIsInviteDialogOpen] = useState(false);
@@ -141,7 +142,7 @@ export default function TeamSettingsPage() {
   });
 
   const inviteMutation = useMutation({
-    mutationFn: (body: { email?: string; github_username?: string; role: string }) =>
+    mutationFn: (body: { email?: string; github_username?: string; acceptance_method?: "email" | "github" | "either"; role: string }) =>
       api.team.createInvitation(body),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["team-invitations"] });
@@ -176,6 +177,7 @@ export default function TeamSettingsPage() {
     setInviteRole("member");
     setInviteMode("email");
     setInviteDraft(null);
+    setGithubNotificationEmail("");
     setInviteError("");
     setGhSearchQuery("");
     setDebouncedGhQuery("");
@@ -199,12 +201,18 @@ export default function TeamSettingsPage() {
 
   const addGitHubDraft = (username: string, avatarUrl?: string) => {
     const normalizedUsername = username.trim().replace(/^@/, "");
+    const notificationEmail = githubNotificationEmail.trim();
     if (!normalizedUsername) {
       setInviteError("Add a GitHub username to the invite.");
       return;
     }
 
-    setInviteDraft({ mode: "github", value: normalizedUsername, avatarUrl });
+    setInviteDraft({
+      mode: "github",
+      value: normalizedUsername,
+      avatarUrl,
+      notificationEmail: notificationEmail || undefined,
+    });
     setInviteError("");
     setGhSearchQuery("");
     setDebouncedGhQuery("");
@@ -228,7 +236,9 @@ export default function TeamSettingsPage() {
     }
 
     inviteMutation.mutate({
+      ...(inviteDraft.notificationEmail ? { email: inviteDraft.notificationEmail } : {}),
       github_username: inviteDraft.value,
+      acceptance_method: "github",
       role: inviteRole,
     });
   }
@@ -246,6 +256,7 @@ export default function TeamSettingsPage() {
     switch (role) {
       case "admin":
         return "default" as const;
+      case "builder":
       case "member":
         return "secondary" as const;
       default:
@@ -386,6 +397,7 @@ export default function TeamSettingsPage() {
                             <SelectContent>
                               <SelectItem value="admin">Admin</SelectItem>
                               <SelectItem value="member">Member</SelectItem>
+                              <SelectItem value="builder">Builder</SelectItem>
                               <SelectItem value="viewer">Viewer</SelectItem>
                             </SelectContent>
                             </Select>
@@ -502,6 +514,7 @@ export default function TeamSettingsPage() {
                   setInviteMode(nextMode);
                   setInviteError("");
                   setInviteDraft(null);
+                  setGithubNotificationEmail("");
                 }}
               >
                 <TabsList className="w-full">
@@ -655,6 +668,24 @@ export default function TeamSettingsPage() {
                         </>
                       )}
                     </div>
+                    <div className="space-y-1.5">
+                      <Label htmlFor="invite-github-notification-email">Notification email</Label>
+                      <Input
+                        id="invite-github-notification-email"
+                        type="email"
+                        placeholder="colleague@company.com"
+                        value={githubNotificationEmail}
+                        disabled={githubDraftActive}
+                        onChange={(e) => {
+                          setGithubNotificationEmail(e.target.value);
+                          setInviteError("");
+                        }}
+                        className="h-9"
+                      />
+                      <p className="text-xs text-muted-foreground">
+                        We&apos;ll send the invite link here, but acceptance still requires the matching GitHub account.
+                      </p>
+                    </div>
                   </div>
                 </TabsContent>
               </Tabs>
@@ -704,7 +735,9 @@ export default function TeamSettingsPage() {
                       </p>
                       <p className="text-xs text-muted-foreground">
                         {inviteDraft.mode === "github"
-                          ? "GitHub invitee added to this invite."
+                          ? inviteDraft.notificationEmail
+                            ? `Email notification will go to ${inviteDraft.notificationEmail}.`
+                            : "GitHub invitee added to this invite."
                           : "Email invitee added to this invite."}
                       </p>
                     </div>
@@ -736,6 +769,7 @@ export default function TeamSettingsPage() {
                   <SelectContent>
                     <SelectItem value="admin">Admin</SelectItem>
                     <SelectItem value="member">Member</SelectItem>
+                    <SelectItem value="builder">Builder</SelectItem>
                     <SelectItem value="viewer">Viewer</SelectItem>
                   </SelectContent>
                 </Select>

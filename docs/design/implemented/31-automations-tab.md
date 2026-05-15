@@ -3,6 +3,8 @@
 > **Status:** Implemented | **Last reviewed:** 2026-05-06
 >
 > **Implementation notes:** Superseded by [48-automations-separation.md](48-automations-separation.md). The server-backed automations model, API, scheduler integration, and frontend surfaces now exist; this doc remains as the earlier MVP framing.
+>
+> **2026-05-14 update:** Automations now include `icon_type`/`icon_value` identity fields. The supported type is `emoji`; the split is deliberate so image-backed icons can be added later without changing list/detail API consumers.
 
 > Add an `Automations` surface that lets teams define reusable workflows and run them on command, while staying aligned with the existing PM + jobs architecture.
 

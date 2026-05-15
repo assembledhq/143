@@ -29,4 +29,16 @@ describe("automation template catalog", () => {
     expect(getAutomationTemplate("security-sweep")?.name).toBe("Security sweep");
     expect(getAutomationTemplate("missing-template")).toBeUndefined();
   });
+
+  it("guides flaky-test automations to use CI evidence before editing tests", () => {
+    const template = getAutomationTemplate("flaky-tests");
+
+    expect(template?.goal).toContain("CI/CD evidence");
+    expect(template?.goal).toContain("Current GitHub PR tools");
+    expect(template?.goal).toContain("do not expose flaky-test signals or check-run logs directly");
+    expect(template?.goal).toContain("CircleCI");
+    expect(template?.goal).toContain("same commit");
+    expect(template?.goal).toContain("14-day window");
+    expect(template?.goal).toContain("Do not classify a test as flaky from one failed run alone");
+  });
 });

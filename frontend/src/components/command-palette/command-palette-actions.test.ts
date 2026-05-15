@@ -17,6 +17,16 @@ describe("command-palette-actions", () => {
     expect(actions.find((a) => a.id === "settings-audit-log")).toBeUndefined();
   });
 
+  it("hides member-only settings and eval actions for builders", () => {
+    const actions = getFilteredActions("builder");
+    expect(actions.find((a) => a.id === "settings-integrations")).toBeUndefined();
+    expect(actions.find((a) => a.id === "settings-evals")).toBeUndefined();
+    expect(actions.find((a) => a.id === "settings-team")).toBeUndefined();
+    expect(actions.find((a) => a.id === "action-new-project")).toBeUndefined();
+    expect(actions.find((a) => a.id === "action-new-eval")).toBeUndefined();
+    expect(actions.find((a) => a.id === "settings-agents")).toBeDefined();
+  });
+
   it("all static actions have unique ids", () => {
     const ids = staticActions.map((a) => a.id);
     expect(new Set(ids).size).toBe(ids.length);

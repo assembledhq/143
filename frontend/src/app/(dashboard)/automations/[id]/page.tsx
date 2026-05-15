@@ -25,6 +25,7 @@ import { AutomationModelSelect } from "@/components/automation-model-select";
 import { api } from "@/lib/api";
 import { agentTypeForModel } from "@/lib/agents";
 import { AUTOMATION_GOAL_MAX_LENGTH, automationGoalLengthState } from "@/lib/automation-validation";
+import { useAuth } from "@/hooks/use-auth";
 import type { Automation } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import {
@@ -42,6 +43,7 @@ import {
   splitRunAt,
 } from "../schedule-time";
 import { TimezonePicker } from "../timezone-picker";
+import { AutomationEmojiPicker } from "../automation-emoji-picker";
 
 // Defer recharts (the only dep here that's expensive) into its own chunk.
 const AutomationStatsCard = dynamic(
@@ -60,10 +62,11 @@ type IntervalUnit = (typeof INTERVAL_UNITS)[number];
 const toIntervalUnit = (v: string, fallback: IntervalUnit): IntervalUnit =>
   (INTERVAL_UNITS as readonly string[]).includes(v) ? (v as IntervalUnit) : fallback;
 
-function SettingsTab({ automation }: { automation: Automation }) {
+function SettingsTab({ automation, canManage }: { automation: Automation; canManage: boolean }) {
   const queryClient = useQueryClient();
   const [name, setName] = useState(automation.name);
   const [goal, setGoal] = useState(automation.goal);
+  const [iconValue, setIconValue] = useState(automation.icon_value || "⚙️");
   const [scope, setScope] = useState(automation.scope ?? "");
   const [intervalValue, setIntervalValue] = useState(automation.interval_value ?? 1);
   const [intervalUnit, setIntervalUnit] = useState<IntervalUnit>(
@@ -104,6 +107,8 @@ function SettingsTab({ automation }: { automation: Automation }) {
       api.automations.update(automation.id, {
         name: name.trim(),
         goal: goal.trim(),
+        icon_type: "emoji",
+        icon_value: iconValue,
         scope: scope.trim() || undefined,
         interval_value: intervalValue,
         interval_unit: intervalUnit,
@@ -121,6 +126,10 @@ function SettingsTab({ automation }: { automation: Automation }) {
 
   return (
     <div className="space-y-4 rounded-lg border border-border bg-card p-5">
+      <div className="space-y-1.5">
+        <Label>Emoji</Label>
+        <AutomationEmojiPicker value={iconValue} onChange={setIconValue} className="w-full sm:w-64" />
+      </div>
       <div className="space-y-1.5">
         <Label htmlFor="name">Name</Label>
         <Input id="name" value={name} onChange={(e) => setName(e.target.value)} />
@@ -287,21 +296,23 @@ function SettingsTab({ automation }: { automation: Automation }) {
           contentClassName="w-[var(--radix-popover-trigger-width)]"
         />
       </div>
-      <div className="flex items-center gap-3 pt-2">
-        <Button
-          onClick={() => updateMutation.mutate()}
-          disabled={updateMutation.isPending || goalLength.isTooLong}
-        >
-          {updateMutation.isPending && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
-          Save changes
-        </Button>
-        {updateMutation.isError && (
-          <p className="text-xs text-destructive">Failed to save changes.</p>
-        )}
-        {updateMutation.isSuccess && !updateMutation.isPending && (
-          <p className="text-xs text-muted-foreground">Saved.</p>
-        )}
-      </div>
+      {canManage && (
+        <div className="flex items-center gap-3 pt-2">
+          <Button
+            onClick={() => updateMutation.mutate()}
+            disabled={updateMutation.isPending || goalLength.isTooLong}
+          >
+            {updateMutation.isPending && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
+            Save changes
+          </Button>
+          {updateMutation.isError && (
+            <p className="text-xs text-destructive">Failed to save changes.</p>
+          )}
+          {updateMutation.isSuccess && !updateMutation.isPending && (
+            <p className="text-xs text-muted-foreground">Saved.</p>
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -310,7 +321,9 @@ export default function AutomationDetailPage() {
   const params = useParams();
   const router = useRouter();
   const queryClient = useQueryClient();
+  const { user } = useAuth();
   const automationId = params?.id as string;
+  const canManage = user?.role === "admin" || user?.role === "member";
 
   const { data, isLoading } = useQuery({
     queryKey: ["automation", automationId],
@@ -408,9 +421,19 @@ export default function AutomationDetailPage() {
       <div className="space-y-6">
         <MobileBackButton to="/automations" label="Back to automations" />
         <PageHeader
-          title={automation.name}
+          title={
+            <span className="inline-flex min-w-0 items-center gap-3">
+              <span
+                className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md border border-border bg-card text-lg leading-none"
+                aria-label={`Automation icon for ${automation.name}`}
+              >
+                {automation.icon_value || "⚙️"}
+              </span>
+              <span className="min-w-0 truncate">{automation.name}</span>
+            </span>
+          }
           description={headerDescription}
-          action={
+          action={canManage ? (
             <div className="flex items-center gap-2">
               {automation.enabled ? (
                 <Button
@@ -454,7 +477,7 @@ export default function AutomationDetailPage() {
                 Run now
               </Button>
             </div>
-          }
+          ) : undefined}
         />
 
         {headerError && (
@@ -478,7 +501,7 @@ export default function AutomationDetailPage() {
                 edit remounts SettingsTab, reseeding its useState-from-props
                 form fields. Without this, the visible values would drift
                 from the server until the user manually reopens the tab. */}
-            <SettingsTab key={automation.updated_at} automation={automation} />
+            <SettingsTab key={automation.updated_at} automation={automation} canManage={canManage} />
           </TabsContent>
         </Tabs>
       </div>

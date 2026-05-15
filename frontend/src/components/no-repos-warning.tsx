@@ -56,6 +56,7 @@ export function NoReposWarning({
     (i) => i.provider === "github" && i.status === "active"
   );
   const githubAppInstalled = Boolean(githubIntegration?.github_app_installed);
+  const repoSelectionRequired = Boolean(githubIntegration?.github_repo_selection_required);
   const repos = reposResp?.data ?? [];
   const hasRepos = repos.length > 0;
 
@@ -63,10 +64,14 @@ export function NoReposWarning({
     useGitHubRepoSync();
 
   const needsReinstall = isReinstallError(syncError);
+  const shouldChooseRepos =
+    githubAppInstalled ||
+    repoSelectionRequired ||
+    ((syncResult?.repos_seen ?? 0) > 0 && syncResult?.repos_synced === 0);
 
   useEffect(() => {
-    autoSyncIfNeeded(githubAppInstalled, hasRepos);
-  }, [githubAppInstalled, hasRepos, autoSyncIfNeeded]);
+    autoSyncIfNeeded(hasGitHub && !githubAppInstalled, hasRepos);
+  }, [hasGitHub, githubAppInstalled, hasRepos, autoSyncIfNeeded]);
 
   if (!hasGitHub) {
     if (!showDisconnectedState) return null;
@@ -119,7 +124,9 @@ export function NoReposWarning({
       <AlertTriangle className="h-4 w-4 shrink-0 text-amber-600 dark:text-amber-400" />
       <div className="flex-1 min-w-0">
         <p className="text-xs text-amber-700 dark:text-amber-300">
-          GitHub is connected but no repositories are synced. Sessions won&apos;t have access to your code.
+          {shouldChooseRepos
+            ? "GitHub is connected, but no repositories are claimed for this organization. Choose repositories in integrations before creating sessions or projects."
+            : "GitHub is connected but no repositories are synced. Sessions won't have access to your code."}
         </p>
         {syncError && needsReinstall && (
           <p className="mt-1 text-xs text-amber-600 dark:text-amber-400">
@@ -131,7 +138,7 @@ export function NoReposWarning({
             {syncError instanceof Error ? syncError.message : "Sync failed. Please try again."}
           </p>
         )}
-        {syncResult && syncResult.repos_synced === 0 && (
+        {syncResult && syncResult.repos_synced === 0 && !shouldChooseRepos && (
           <p className="mt-1 text-xs text-amber-600 dark:text-amber-400">
             No repositories found. Make sure the GitHub App has access to at least one repository.
           </p>
@@ -152,6 +159,10 @@ export function NoReposWarning({
           className="shrink-0 gap-1.5"
         >
           Reconnect GitHub
+        </Button>
+      ) : shouldChooseRepos ? (
+        <Button size="sm" variant="outline" asChild className="shrink-0 gap-1.5">
+          <Link href="/settings/integrations?select_repos=1">Choose repositories</Link>
         </Button>
       ) : (
         <Button

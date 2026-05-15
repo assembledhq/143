@@ -47,11 +47,8 @@ describe("AgentTabStrip", () => {
         statusConfig={statusConfig}
         onActiveThreadChange={vi.fn()}
         onAddTab={onAddTab}
-        onCancelThread={vi.fn()}
-        onForkThread={vi.fn()}
         onRevertThread={vi.fn()}
         onArchiveThread={vi.fn()}
-        cancelPendingThreadId={null}
         archivePendingThreadId={null}
       />,
     );
@@ -96,11 +93,8 @@ describe("AgentTabStrip", () => {
         statusConfig={statusConfig}
         onActiveThreadChange={vi.fn()}
         onAddTab={vi.fn()}
-        onCancelThread={vi.fn()}
-        onForkThread={vi.fn()}
         onRevertThread={vi.fn()}
         onArchiveThread={vi.fn()}
-        cancelPendingThreadId={null}
         archivePendingThreadId={null}
       />,
     );
@@ -109,6 +103,30 @@ describe("AgentTabStrip", () => {
 
     expect(await screen.findByRole("tooltip")).toHaveTextContent("Idle");
     expect(screen.getByRole("tooltip")).toHaveTextContent("1 message queued");
+  });
+
+  it("keeps the single-agent tooltip trigger scoped to the visible tab label", () => {
+    const thread = makeThread({ label: "Main" });
+
+    renderWithProviders(
+      <AgentTabStrip
+        threads={[thread]}
+        activeThreadId={thread.id}
+        viewedThreadIds={new Set([thread.id])}
+        overlapsByThreadId={new Map()}
+        statusConfig={statusConfig}
+        onActiveThreadChange={vi.fn()}
+        onAddTab={vi.fn()}
+        onRevertThread={vi.fn()}
+        onArchiveThread={vi.fn()}
+        archivePendingThreadId={null}
+      />,
+    );
+
+    const trigger = screen.getByRole("group", { name: "Codex Idle" });
+
+    expect(trigger).not.toHaveClass("flex-1");
+    expect(trigger.parentElement).toHaveClass("flex-1");
   });
 
   it("keeps the full tab strip once a second tab exists", () => {
@@ -126,11 +144,8 @@ describe("AgentTabStrip", () => {
         statusConfig={statusConfig}
         onActiveThreadChange={vi.fn()}
         onAddTab={vi.fn()}
-        onCancelThread={vi.fn()}
-        onForkThread={vi.fn()}
         onRevertThread={vi.fn()}
         onArchiveThread={vi.fn()}
-        cancelPendingThreadId={null}
         archivePendingThreadId={null}
       />,
     );
@@ -141,13 +156,122 @@ describe("AgentTabStrip", () => {
     expect(tabList).toBeInTheDocument();
     expect(tabList).toHaveAttribute("data-variant", "line");
     expect(tabList).not.toHaveClass("bg-muted/60");
+
+    // The scroll/clip wrapper lives on the parent div so the active-tab
+    // underline (positioned just below the trigger) isn't clipped.
+    const scrollWrapper = tabList.parentElement;
+    expect(scrollWrapper).toHaveClass("overflow-x-auto");
+    expect(scrollWrapper).toHaveClass("overflow-y-hidden");
+    expect(scrollWrapper).toHaveClass("pb-1");
     expect(activeTab).toHaveTextContent(/Main tab/i);
     expect(activeTab).not.toHaveTextContent(/Idle/i);
     expect(activeTab).toHaveClass("data-[state=active]:text-primary");
     expect(activeTab).toHaveClass("data-[state=active]:bg-transparent");
+    expect(activeTab).toHaveClass("after:bg-[image:var(--gradient-primary)]");
+    expect(activeTab).not.toHaveClass("after:bg-none");
     expect(screen.getByRole("tab", { name: /review/i })).not.toHaveTextContent(/Completed/i);
     expect(screen.getByRole("button", { name: "Close Main tab" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Close Review tab" })).toBeInTheDocument();
+  });
+
+  it("keeps the bar at the same height in single-tab and multi-tab modes", () => {
+    // Regression guard: the bar's vertical sizing comes from `py-2` on the outer
+    // wrapper and `min-h-9` on the inner flex. Both modes must apply the same
+    // height-determining classes; otherwise the bar visibly jumps when a second
+    // tab appears (which is what happened before #893/#910 — the active-tab
+    // underline needed bottom padding that only existed in multi-tab mode).
+    const baseProps = {
+      viewedThreadIds: new Set<string>(),
+      overlapsByThreadId: new Map<string, string[]>(),
+      statusConfig,
+      onActiveThreadChange: vi.fn(),
+      onAddTab: vi.fn(),
+      onRevertThread: vi.fn(),
+      onArchiveThread: vi.fn(),
+      archivePendingThreadId: null,
+    };
+
+    const heightOnlyClasses = (el: HTMLElement) =>
+      el.className
+        .split(/\s+/)
+        .filter((cls) => /^(h-|min-h-|max-h-|py-|pt-|pb-)\S/.test(cls))
+        .sort()
+        .join(" ");
+
+    const captureBarShell = () => {
+      const addBtn = screen.getByRole("button", { name: "Add agent tab" });
+      const innerFlex = addBtn.parentElement;
+      const outerWrapper = innerFlex?.parentElement;
+      if (!innerFlex || !outerWrapper) {
+        throw new Error("Could not locate bar shell from add-tab button");
+      }
+      return {
+        outer: heightOnlyClasses(outerWrapper),
+        inner: heightOnlyClasses(innerFlex),
+      };
+    };
+
+    const single = renderWithProviders(
+      <AgentTabStrip
+        threads={[makeThread({ id: "thread-1", label: "Solo tab" })]}
+        activeThreadId="thread-1"
+        {...baseProps}
+      />,
+    );
+    const singleShell = captureBarShell();
+    single.unmount();
+
+    renderWithProviders(
+      <AgentTabStrip
+        threads={[
+          makeThread({ id: "thread-1", label: "Main tab" }),
+          makeThread({ id: "thread-2", label: "Review", agent_type: "claude_code" }),
+        ]}
+        activeThreadId="thread-1"
+        {...baseProps}
+      />,
+    );
+    const multiShell = captureBarShell();
+
+    // Height-determining classes must agree across modes — that's what keeps
+    // the bar from jumping. The specific value isn't sacred; the equality is.
+    expect(multiShell.outer).toBe(singleShell.outer);
+    expect(multiShell.inner).toBe(singleShell.inner);
+
+    // The inner flex must keep *some* explicit height affordance — without
+    // one, single-tab collapses to the icon-button intrinsic height (32px)
+    // while multi-tab grows to fit the underline (36px).
+    expect(singleShell.inner).not.toBe("");
+    expect(multiShell.inner).not.toBe("");
+  });
+
+  it("shows only the revert action in the desktop tab actions menu", async () => {
+    const user = userEvent.setup();
+    const threads = [
+      makeThread({ id: "thread-1", label: "Main tab", diff: "diff --git a/a b/a" }),
+      makeThread({ id: "thread-2", label: "Review", status: "completed", agent_type: "claude_code" }),
+    ];
+
+    renderWithProviders(
+      <AgentTabStrip
+        threads={threads}
+        activeThreadId={threads[0].id}
+        viewedThreadIds={new Set([threads[0].id])}
+        overlapsByThreadId={new Map()}
+        statusConfig={statusConfig}
+        onActiveThreadChange={vi.fn()}
+        onAddTab={vi.fn()}
+        onRevertThread={vi.fn()}
+        onArchiveThread={vi.fn()}
+        archivePendingThreadId={null}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Tab actions" }));
+
+    expect(screen.queryByRole("menuitem", { name: "Cancel turn" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("menuitem", { name: "Fork this tab" })).not.toBeInTheDocument();
+    expect(screen.getByRole("menuitem", { name: "Revert this tab's changes" })).toBeInTheDocument();
   });
 
   it("archives the selected non-running tab from the close affordance beside the strip", async () => {
@@ -167,11 +291,8 @@ describe("AgentTabStrip", () => {
         statusConfig={statusConfig}
         onActiveThreadChange={vi.fn()}
         onAddTab={vi.fn()}
-        onCancelThread={vi.fn()}
-        onForkThread={vi.fn()}
         onRevertThread={vi.fn()}
         onArchiveThread={onArchiveThread}
-        cancelPendingThreadId={null}
         archivePendingThreadId={null}
       />,
     );
@@ -205,11 +326,8 @@ describe("AgentTabStrip", () => {
             setViewedThreadIds((current) => new Set(current).add(threadId));
           }}
           onAddTab={vi.fn()}
-          onCancelThread={vi.fn()}
-          onForkThread={vi.fn()}
           onRevertThread={vi.fn()}
           onArchiveThread={vi.fn()}
-          cancelPendingThreadId={null}
           archivePendingThreadId={null}
         />
       );

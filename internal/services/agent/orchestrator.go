@@ -7,8 +7,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"path"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -24,8 +26,10 @@ import (
 	"github.com/assembledhq/143/internal/services/integration"
 	"github.com/assembledhq/143/internal/services/linear"
 	"github.com/assembledhq/143/internal/services/mcp"
+	"github.com/assembledhq/143/internal/services/sandbox"
 	"github.com/assembledhq/143/internal/services/sandboxauth"
 	"github.com/assembledhq/143/internal/services/storage"
+	"github.com/assembledhq/143/internal/services/workspace"
 )
 
 const (
@@ -43,6 +47,12 @@ var ErrConcurrencyLimit = fmt.Errorf("concurrency limit reached")
 // to distinguish timeout failures from user cancellations and other errors
 // without resorting to error-string matching.
 var ErrSessionTimedOut = errors.New("session timed out")
+
+// ErrRecoveryAttemptsExhausted is returned from RecoverSession when repeated
+// worker-loss recovery attempts have already restarted a session without any
+// durable checkpoint. The worker treats this as terminal because another retry
+// would restart the same turn from scratch again.
+var ErrRecoveryAttemptsExhausted = errors.New("session recovery attempts exhausted")
 
 // ErrSnapshotPending is returned from ContinueSession when the session has a
 // non-empty pending_snapshot_key — i.e. a post-PR snapshot upload is still
@@ -100,6 +110,8 @@ var ErrSandboxOnDifferentNode = errors.New("sandbox race: session sandbox lives 
 // session hits its configured deadline. Kept deliberately narrow so
 // Grafana alerts can key off one string across RunAgent and ContinueSession.
 const canonicalTimeoutLogMessage = "session exceeded configured timeout"
+
+const maxNoCheckpointRecoveryAttempts = 3
 
 // sandboxRaceProbeTimeout bounds the IsAlive probe at the AcquireTurnHold
 // race-loss diagnosis site. Short enough that a docker-daemon hiccup can't
@@ -272,6 +284,8 @@ type SessionStore interface {
 	UpdateTurnComplete(ctx context.Context, orgID, sessionID uuid.UUID, turn int, result *models.SessionResult, agentSessionID, snapshotKey string) error
 	UpdateSnapshotInfo(ctx context.Context, orgID, sessionID uuid.UUID, agentSessionID, snapshotKey string) error
 	BeginRuntime(ctx context.Context, orgID, sessionID uuid.UUID, capability models.CheckpointCapability, softDeadline, hardDeadline, observedAt time.Time) error
+	RequestCancel(ctx context.Context, orgID, sessionID uuid.UUID) error
+	ConsumeCancelRequest(ctx context.Context, orgID, sessionID uuid.UUID) (bool, error)
 	RecordRuntimeProgress(ctx context.Context, orgID, sessionID uuid.UUID, progressType models.RuntimeProgressType, strength models.RuntimeProgressStrength, observedAt time.Time) error
 	GrantRuntimeExtension(ctx context.Context, orgID, sessionID uuid.UUID, lockToken uuid.UUID, expectedSoftDeadline, newSoftDeadline, hardDeadline time.Time, extensionSeconds int) (bool, error)
 	PublishCheckpoint(ctx context.Context, orgID, sessionID uuid.UUID, lockToken uuid.UUID, agentSessionID, snapshotKey string, kind models.CheckpointKind, capability models.CheckpointCapability, sizeBytes int64, checkpointedAt time.Time, checkpointErr *string, stopReason models.RuntimeStopReason) (bool, error)
@@ -467,12 +481,15 @@ type Orchestrator struct {
 	credentials        CredentialProvider     // can be nil — disables integration-skills doc generation
 	memory             MemoryService          // can be nil
 	snapshots          storage.SnapshotStore  // can be nil — multi-turn disabled if nil
-	usageTracker       UsageRecorder          // can be nil — billing tracking disabled if nil
-	sandboxCapacity    *SandboxCapacityGate   // can be nil — live local sandbox admission disabled
-	env                *AgentEnv              // owns env resolution, auth pre-flight, Codex auth injection
-	identityResolver   *identity.Resolver     // can be nil — falls back to legacy GITHUB_TOKEN env injection
-	sandboxAuth        SandboxAuthServer      // can be nil — paired with identityResolver
-	users              UserLookup             // can be nil — needed for App-token Co-authored-by trailer
+	uploads            storage.UploadStore    // can be nil — uploaded attachments remain warnings if nil
+	fileReader         sandbox.FileReader     // can be nil — disables proactive mention-index warmup
+	mentionIndexes     *workspace.MentionIndexCache
+	usageTracker       UsageRecorder        // can be nil — billing tracking disabled if nil
+	sandboxCapacity    *SandboxCapacityGate // can be nil — live local sandbox admission disabled
+	env                *AgentEnv            // owns env resolution, auth pre-flight, Codex auth injection
+	identityResolver   *identity.Resolver   // can be nil — falls back to legacy GITHUB_TOKEN env injection
+	sandboxAuth        SandboxAuthServer    // can be nil — paired with identityResolver
+	users              UserLookup           // can be nil — needed for App-token Co-authored-by trailer
 	logger             zerolog.Logger
 	maxConcurrent      int
 	cancels            *CancelRegistry
@@ -490,6 +507,33 @@ func (o *Orchestrator) CancelThreadByID(threadID uuid.UUID) bool {
 		return false
 	}
 	return o.threadCancels.CancelThread(threadID)
+}
+
+// CancelSessionByID asks the session-scoped cancel registry to interrupt the
+// in-flight agent for the given session. It is used by worker-targeted cancel
+// jobs when the public API process is not the worker that owns the live handle.
+func (o *Orchestrator) CancelSessionByID(sessionID uuid.UUID) bool {
+	if o.cancels == nil {
+		return false
+	}
+	return o.cancels.CancelSession(sessionID)
+}
+
+func (o *Orchestrator) honorPendingCancelRequest(ctx context.Context, orgID, sessionID uuid.UUID, log zerolog.Logger) {
+	if o.cancels == nil || o.sessions == nil {
+		return
+	}
+	pending, err := o.sessions.ConsumeCancelRequest(ctx, orgID, sessionID)
+	if err != nil {
+		log.Warn().Err(err).Msg("failed to consume pending session cancel request")
+		return
+	}
+	if !pending {
+		return
+	}
+	if !o.cancels.CancelSession(sessionID) {
+		log.Warn().Msg("pending session cancel request found no local cancel registry entry")
+	}
 }
 
 type workspaceSnapshotUpdater interface {
@@ -648,11 +692,14 @@ type OrchestratorConfig struct {
 	UserCredentials    UserCredentialProvider   // optional — enables legacy personal/team credential resolution
 	CodingCredentials  CodingCredentialProvider // optional — preferred unified resolver; consulted before the legacy cascade
 	Snapshots          storage.SnapshotStore    // optional — enables multi-turn snapshot/restore
-	UsageTracker       UsageRecorder            // optional — enables billing observability
-	SandboxCapacity    *SandboxCapacityGate     // optional — gates new local sandbox creation
-	Cancels            *CancelRegistry          // optional — enables session cancellation from API
-	ThreadCancels      *ThreadCancelRegistry    // optional — enables per-tab cancellation from API
-	OrgSettingsCache   *OrgSettingsCache        // optional — caches Amp/Pi agent_config lookups across session starts
+	Uploads            storage.UploadStore      // optional — resolves session uploads into sandbox files
+	FileReader         sandbox.FileReader       // optional — enables proactive mention-index warmup
+	MentionIndexes     *workspace.MentionIndexCache
+	UsageTracker       UsageRecorder         // optional — enables billing observability
+	SandboxCapacity    *SandboxCapacityGate  // optional — gates new local sandbox creation
+	Cancels            *CancelRegistry       // optional — enables session cancellation from API
+	ThreadCancels      *ThreadCancelRegistry // optional — enables per-tab cancellation from API
+	OrgSettingsCache   *OrgSettingsCache     // optional — caches Amp/Pi agent_config lookups across session starts
 	// Env owns env resolution + auth pre-flight + Codex auth injection,
 	// shared with the PM service. Optional: when nil, NewOrchestrator
 	// constructs an AgentEnv from the other OrchestratorConfig fields so
@@ -729,6 +776,9 @@ func NewOrchestrator(cfg OrchestratorConfig) *Orchestrator {
 		credentials:        cfg.Credentials,
 		memory:             cfg.Memory,
 		snapshots:          cfg.Snapshots,
+		uploads:            cfg.Uploads,
+		fileReader:         cfg.FileReader,
+		mentionIndexes:     cfg.MentionIndexes,
 		usageTracker:       cfg.UsageTracker,
 		sandboxCapacity:    cfg.SandboxCapacity,
 		env:                env,
@@ -741,6 +791,24 @@ func NewOrchestrator(cfg OrchestratorConfig) *Orchestrator {
 		maxConcurrent:      maxConcurrent,
 		nodeID:             cfg.NodeID,
 		isDraining:         cfg.IsDraining,
+	}
+}
+
+func (o *Orchestrator) warmMentionIndexFromSandbox(ctx context.Context, session *models.Session, liveSandbox *Sandbox, snapshotKey string, log zerolog.Logger) {
+	if o == nil || o.mentionIndexes == nil || o.fileReader == nil || session == nil || liveSandbox == nil || snapshotKey == "" {
+		return
+	}
+
+	cacheSession := *session
+	cacheSession.SnapshotKey = &snapshotKey
+	reader := workspace.NewLiveContainerReader(o.fileReader, liveSandbox.ID, liveSandbox.WorkDir)
+	index, err := workspace.BuildMentionIndex(ctx, reader)
+	if err != nil {
+		log.Warn().Err(err).Str("snapshot_key", snapshotKey).Msg("failed to build proactive mention index from live sandbox")
+		return
+	}
+	if err := o.mentionIndexes.Warm(ctx, workspace.SessionMentionIndexCacheKey(&cacheSession), index); err != nil {
+		log.Warn().Err(err).Str("snapshot_key", snapshotKey).Msg("failed to warm proactive mention index")
 	}
 }
 
@@ -927,6 +995,32 @@ func (o *Orchestrator) RecoverSession(ctx context.Context, session *models.Sessi
 		Str("session_id", session.ID.String()).
 		Str("org_id", session.OrgID.String()).
 		Logger()
+	checkpoint, ok := latestDurableCheckpoint(session)
+	if !ok && session.RecoveryAttemptCount >= maxNoCheckpointRecoveryAttempts {
+		errMsg := "Session recovery stopped after repeated worker interruptions before any durable checkpoint was available."
+		explanation := "The platform tried to recover this session multiple times, but each recovery would have restarted the first turn from scratch because no checkpoint had been saved yet. The session was stopped to avoid repeating the same work indefinitely."
+		nextSteps := []string{
+			"Retry the session when worker capacity is stable",
+			"Split the task into a smaller first turn so a checkpoint can be saved sooner",
+			"Check worker deploy and sandbox-capacity logs if this affects multiple sessions",
+		}
+		log.Warn().
+			Int("recovery_attempt_count", session.RecoveryAttemptCount).
+			Int("max_recovery_attempts", maxNoCheckpointRecoveryAttempts).
+			Msg("no-checkpoint recovery exhausted; failing session")
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		o.failRunWithCategory(cleanupCtx, session, errMsg, FailureCategoryRecovery, explanation, nextSteps)
+		o.updatePrimaryThreadTerminal(cleanupCtx, session, models.ThreadStatusFailed, &models.SessionResult{
+			Error:           &explanation,
+			FailureCategory: strPtr(FailureCategoryRecovery),
+		}, log)
+		if err := o.sessions.UpdateRecoveryState(cleanupCtx, session.OrgID, session.ID, models.RecoveryStateNone, nil, nil, false); err != nil {
+			log.Warn().Err(err).Msg("failed to clear recovery state after exhausting no-checkpoint recovery")
+		}
+		return fmt.Errorf("%w: no durable checkpoint after %d attempts", ErrRecoveryAttemptsExhausted, session.RecoveryAttemptCount)
+	}
+
 	startedAt := time.Now().UTC()
 	if err := o.sessions.UpdateRecoveryState(ctx, session.OrgID, session.ID, models.RecoveryStateRecovering, nil, &startedAt, true); err != nil {
 		log.Warn().Err(err).Msg("failed to mark session recovery as in progress")
@@ -937,7 +1031,6 @@ func (o *Orchestrator) RecoverSession(ctx context.Context, session *models.Sessi
 		}
 	}()
 
-	checkpoint, ok := latestDurableCheckpoint(session)
 	if !ok {
 		log.Info().Msg("recovery requested with no durable checkpoint; restarting session from scratch")
 		return o.RunAgent(ctx, session)
@@ -980,6 +1073,15 @@ func latestDurableCheckpoint(session *models.Session) (DurableCheckpoint, bool) 
 	return checkpoint, true
 }
 
+const retryableSnapshotSaveMaxAttempts = 3
+
+var retryableSnapshotSaveBackoff = 50 * time.Millisecond
+
+const (
+	uploadFilesURLPrefix           = "/api/v1/uploads/files/"
+	maxMaterializedAttachmentBytes = 10 << 20
+)
+
 func latestUserMessage(messages []models.SessionMessage) *models.SessionMessage {
 	for i := len(messages) - 1; i >= 0; i-- {
 		if messages[i].Role == models.MessageRoleUser {
@@ -987,6 +1089,188 @@ func latestUserMessage(messages []models.SessionMessage) *models.SessionMessage 
 		}
 	}
 	return nil
+}
+
+func derefMessage(msg *models.SessionMessage) models.SessionMessage {
+	if msg == nil {
+		return models.SessionMessage{}
+	}
+	return *msg
+}
+
+func (o *Orchestrator) materializeAttachmentsForMessages(ctx context.Context, orgID uuid.UUID, sandbox *Sandbox, turnNumber int, messages []models.SessionMessage, log zerolog.Logger) []AgentAttachment {
+	var attachments []AgentAttachment
+	attachmentNumber := 0
+	for messageIndex, msg := range messages {
+		for _, rawURL := range msg.Attachments {
+			rawURL = strings.TrimSpace(rawURL)
+			if rawURL == "" {
+				continue
+			}
+			attachmentNumber++
+			attachment := AgentAttachment{
+				OriginalURL:  rawURL,
+				MessageIndex: messageIndex + 1,
+			}
+			key, firstParty, err := uploadKeyFromAttachmentURL(rawURL, orgID)
+			if err != nil {
+				attachment.Error = err.Error()
+				attachments = append(attachments, attachment)
+				continue
+			}
+			if !firstParty {
+				attachment.Error = "external attachments are not fetched in v1"
+				attachments = append(attachments, attachment)
+				continue
+			}
+			if o.uploads == nil {
+				attachment.Error = "upload storage is not configured for worker-side attachment reads"
+				attachments = append(attachments, attachment)
+				continue
+			}
+			reader, contentType, err := o.uploads.Open(ctx, key)
+			if err != nil {
+				attachment.Error = fmt.Sprintf("failed to read uploaded attachment: %s", err)
+				attachments = append(attachments, attachment)
+				continue
+			}
+			data, readErr := io.ReadAll(io.LimitReader(reader, maxMaterializedAttachmentBytes+1))
+			closeErr := reader.Close()
+			if readErr != nil {
+				attachment.Error = fmt.Sprintf("failed to read uploaded attachment: %s", readErr)
+				attachments = append(attachments, attachment)
+				continue
+			}
+			if closeErr != nil {
+				attachment.Error = fmt.Sprintf("failed to close uploaded attachment: %s", closeErr)
+				attachments = append(attachments, attachment)
+				continue
+			}
+			if len(data) > maxMaterializedAttachmentBytes {
+				attachment.Error = "uploaded attachment exceeds 10MB limit"
+				attachments = append(attachments, attachment)
+				continue
+			}
+			localPath := materializedAttachmentPath(sandbox, turnNumber, attachmentNumber, key)
+			if err := o.provider.WriteFile(ctx, sandbox, localPath, data); err != nil {
+				attachment.Error = fmt.Sprintf("failed to copy uploaded attachment into sandbox: %s", err)
+				attachments = append(attachments, attachment)
+				continue
+			}
+			attachment.LocalPath = localPath
+			attachment.ContentType = contentType
+			attachments = append(attachments, attachment)
+			log.Debug().
+				Str("attachment_url", rawURL).
+				Str("local_path", localPath).
+				Int("bytes", len(data)).
+				Msg("materialized session attachment into sandbox")
+		}
+	}
+	return attachments
+}
+
+func uploadKeyFromAttachmentURL(raw string, orgID uuid.UUID) (string, bool, error) {
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return "", false, fmt.Errorf("invalid attachment URL")
+	}
+	attachmentPath := raw
+	if parsed.Scheme != "" || parsed.Host != "" {
+		return "", false, nil
+	}
+	if !strings.HasPrefix(attachmentPath, uploadFilesURLPrefix) {
+		return "", false, nil
+	}
+	key := strings.TrimPrefix(attachmentPath, uploadFilesURLPrefix)
+	if key == "" {
+		return "", true, fmt.Errorf("uploaded attachment URL is missing a file key")
+	}
+	pathOrg, _, ok := strings.Cut(key, "/")
+	if !ok {
+		return "", true, fmt.Errorf("uploaded attachment URL has an invalid file key")
+	}
+	parsedOrgID, err := uuid.Parse(pathOrg)
+	if err != nil {
+		return "", true, fmt.Errorf("uploaded attachment URL has an invalid org id")
+	}
+	if parsedOrgID != orgID {
+		return "", true, fmt.Errorf("uploaded attachment belongs to a different organization")
+	}
+	return key, true, nil
+}
+
+func materializedAttachmentPath(sandbox *Sandbox, turnNumber, attachmentNumber int, key string) string {
+	homeDir := "/home/sandbox"
+	if sandbox != nil && sandbox.HomeDir != "" {
+		homeDir = sandbox.HomeDir
+	}
+	fileName := sanitizeAttachmentFileName(path.Base(key), attachmentNumber)
+	return path.Join(homeDir, ".143", "attachments", fmt.Sprintf("turn-%d", turnNumber), fmt.Sprintf("attachment-%d-%s", attachmentNumber, fileName))
+}
+
+func sanitizeAttachmentFileName(name string, attachmentNumber int) string {
+	name = strings.TrimSpace(name)
+	var b strings.Builder
+	for _, r := range name {
+		switch {
+		case r >= 'a' && r <= 'z',
+			r >= 'A' && r <= 'Z',
+			r >= '0' && r <= '9',
+			r == '.', r == '-', r == '_':
+			b.WriteRune(r)
+		default:
+			b.WriteByte('_')
+		}
+	}
+	cleaned := strings.Trim(b.String(), "._-")
+	if cleaned == "" {
+		return fmt.Sprintf("file-%d", attachmentNumber)
+	}
+	return cleaned
+}
+
+func shouldRetryClaudeResumeFromSnapshot(session *models.Session, prompt *AgentPrompt, result *AgentResult) bool {
+	if session == nil || session.AgentType != models.AgentTypeClaudeCode {
+		return false
+	}
+	if prompt == nil || !prompt.Continuation || prompt.ResumeSessionID == "" {
+		return false
+	}
+	if result == nil {
+		return false
+	}
+	if result.ExitCode != 1 {
+		return false
+	}
+	if strings.TrimSpace(result.Summary) != "" {
+		return false
+	}
+	if result.AgentSessionID != "" {
+		return false
+	}
+	return true
+}
+
+func isRetryableSnapshotSaveError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, ".git/objects/pack/") &&
+		strings.Contains(msg, "File removed before we read it")
+}
+
+func waitForRetryableSnapshotSave(ctx context.Context, attempt int) error {
+	backoff := time.Duration(attempt) * retryableSnapshotSaveBackoff
+	timer := time.NewTimer(backoff)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
 }
 
 // latestUserMessageInScope returns the most recent user message bound to the
@@ -1018,6 +1302,23 @@ func latestUserMessageInScope(messages []models.SessionMessage, threadID *uuid.U
 		return &messages[i]
 	}
 	return nil
+}
+
+func messagesInScope(messages []models.SessionMessage, threadID *uuid.UUID) []models.SessionMessage {
+	scoped := make([]models.SessionMessage, 0, len(messages))
+	for _, message := range messages {
+		if threadID == nil {
+			if message.ThreadID != nil {
+				continue
+			}
+		} else {
+			if message.ThreadID == nil || *message.ThreadID != *threadID {
+				continue
+			}
+		}
+		scoped = append(scoped, message)
+	}
+	return scoped
 }
 
 // unprocessedUserMessages returns the consecutive trailing user messages for
@@ -1546,7 +1847,8 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 			return fmt.Errorf("fetch session messages: %w", err)
 		}
 	}
-	issue, linkedIssues, err := o.resolvePromptSeed(ctx, run, latestUserMessage(messages), issueSnapshot)
+	latestMsg := latestUserMessage(messages)
+	issue, linkedIssues, err := o.resolvePromptSeed(ctx, run, latestMsg, issueSnapshot)
 	if err != nil {
 		o.failRun(ctx, run, fmt.Sprintf("resolve prompt seed: %s", err))
 		return fmt.Errorf("resolve prompt seed: %w", err)
@@ -1628,8 +1930,8 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 			return PromptStyleIssueContext
 		}(),
 		UserMessage: func() string {
-			if msg := latestUserMessage(messages); msg != nil {
-				return msg.Content
+			if latestMsg != nil {
+				return latestMsg.Content
 			}
 			if run.AutomationRunID != nil && run.PMApproach != nil {
 				return strings.TrimSpace(*run.PMApproach)
@@ -1639,13 +1941,13 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 		RepoURL:    repoURL,
 		RepoBranch: branch,
 		References: func() []models.SessionInputReference {
-			refs := canonicalReferences(latestUserMessage(messages))
+			refs := canonicalReferences(latestMsg)
 			if len(refs) > 0 {
 				return refs
 			}
 			return manualSessionReferences(issue)
 		}(),
-		Commands: canonicalCommands(latestUserMessage(messages), run.AgentType),
+		Commands: canonicalCommands(latestMsg, run.AgentType),
 		ReasoningEffort: func() models.ReasoningEffort {
 			if run.ReasoningEffort == nil {
 				return ""
@@ -1691,12 +1993,6 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 		log.Warn().Err(revErr).Msg("failed to parse session revision context")
 	} else {
 		input.RevisionContext = revisionContext
-	}
-
-	prompt, err := adapter.PreparePrompt(ctx, input)
-	if err != nil {
-		o.failRun(ctx, run, fmt.Sprintf("prepare prompt: %s", err))
-		return fmt.Errorf("prepare prompt: %w", err)
 	}
 
 	// 7. Create sandbox with agent-specific env vars (API keys).
@@ -1749,6 +2045,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 		o.failRun(ctx, run, fmt.Sprintf("create sandbox: %s", err))
 		return fmt.Errorf("create sandbox: %w", err)
 	}
+	sandbox.Env = cloneStringMap(sandboxCfg.Env)
 	// Record the turn hold so a concurrent StartPreview can attach to this
 	// container (same ID, same filesystem) instead of hydrating a duplicate.
 	// AcquireTurnHold uses COALESCE to publish only if no one has raced ahead;
@@ -1792,6 +2089,10 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 		if errors.Is(diagErr, ErrSandboxPreviewRace) {
 			if revertErr := o.sessions.UpdateStatus(ctx, run.OrgID, run.ID, string(models.SessionStatusPending)); revertErr != nil {
 				log.Error().Err(revertErr).Msg("failed to revert session to pending after preview won sandbox race")
+			}
+		} else if errors.Is(diagErr, ErrStaleSandboxIDCleared) {
+			if revertErr := o.sessions.UpdateStatus(ctx, run.OrgID, run.ID, string(models.SessionStatusPending)); revertErr != nil {
+				log.Error().Err(revertErr).Msg("failed to revert session to pending after stale sandbox cleanup")
 			}
 		}
 		return fmt.Errorf("%w: actual container %s != created %s", diagErr, actualContainerID, sandbox.ID)
@@ -1947,28 +2248,37 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 	//    - Codex: auth.json is the primary (and only) auth mechanism.
 	//    - Claude Code: subscription credentials file is preferred, with
 	//      ANTHROPIC_API_KEY env var as the fallback.
+	authBillingMode := TokenBillingModeUnknown
 	switch run.AgentType {
 	case models.AgentTypeCodex:
 		mode, err := o.ensureCodexAuth(ctx, run, sandbox, sandboxCfg.Env)
 		if err != nil {
 			return err
 		}
-		prompt.UsageHint.BillingMode = mode
+		authBillingMode = mode
 	case models.AgentTypeClaudeCode:
 		mode, err := o.ensureClaudeCodeAuth(ctx, run, sandbox, sandboxCfg.Env)
 		if err != nil {
 			return err
 		}
-		prompt.UsageHint.BillingMode = mode
+		authBillingMode = mode
 	}
 
 	// 9b. Integration tools (143-tools CLI) are pre-installed in the container
 	// image. Credentials are injected via env vars (AgentEnv.Resolve), and the
 	// skills doc is injected into the prompt (BuildIntegrationSkills). No
 	// per-CLI config file injection needed — all agents can shell out directly.
+	input.Attachments = o.materializeAttachmentsForMessages(ctx, run.OrgID, sandbox, turnNumber, []models.SessionMessage{derefMessage(latestMsg)}, log)
+	prompt, err := adapter.PreparePrompt(ctx, input)
+	if err != nil {
+		o.failRun(ctx, run, fmt.Sprintf("prepare prompt: %s", err))
+		return fmt.Errorf("prepare prompt: %w", err)
+	}
+	prompt.UsageHint.BillingMode = authBillingMode
 	prompt.UsageHint = o.buildTokenUsageHint(ctx, run.AgentType, run.OrgID, run.TriggeredByUserID, sandboxCfg.Env, prompt.UsageHint)
 
 	// 10. Execute agent with log streaming.
+	o.honorPendingCancelRequest(ctx, run.OrgID, run.ID, log)
 	logCh := make(chan LogEntry, 100)
 	var logWg sync.WaitGroup
 	logWg.Add(1)
@@ -1992,7 +2302,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 	// the (possibly retried) result indicates a credential-level failure.
 	// No-ops cleanly for agent types whose auth flows do not pass through
 	// the unified resolver (e.g. Codex subscription via codexauth.Service).
-	o.shedOnRunResult(run.AgentType, run.OrgID, run.TriggeredByUserID, result, err, log)
+	o.shedOnRunResult(ctx, run.AgentType, run.OrgID, run.TriggeredByUserID, result, err, log)
 
 	// 11. Handle result.
 	stopReason := StopReasonNone
@@ -2014,6 +2324,9 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 		//      classification to the async analyze_failure job.
 		if wasCancelled || (stopReason == StopReasonNone && errors.Is(ctx.Err(), context.Canceled)) {
 			log.Info().Msg("session cancelled by user")
+			if o.cancels != nil {
+				o.cancels.Deregister(run.ID)
+			}
 			o.handleCancelledSession(ctx, run, sandbox, result, run.CurrentTurn+1, log)
 			logAgentRunFinished(log, run, "cancelled", runStartedAt, func(event *zerolog.Event) {
 				event.Str("stop_reason", string(models.RuntimeStopReasonUserCancel))
@@ -2022,6 +2335,9 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 		}
 		if stopReason != StopReasonNone {
 			log.Info().Str("stop_reason", string(stopReason)).Msg("session stopped by runtime policy")
+			if o.cancels != nil {
+				o.cancels.Deregister(run.ID)
+			}
 			o.handlePolicyStoppedSession(ctx, run, sandbox, result, run.CurrentTurn+1, stopReason, log)
 			logAgentRunFinished(log, run, "runtime_policy_stopped", runStartedAt, func(event *zerolog.Event) {
 				event.Str("stop_reason", string(stopReason))
@@ -2049,6 +2365,9 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 	// the workspace and return the session to idle so it can be continued.
 	if wasCancelled {
 		log.Info().Msg("agent exited after cancel, snapshotting and returning to idle")
+		if o.cancels != nil {
+			o.cancels.Deregister(run.ID)
+		}
 		o.handleCancelledSession(ctx, run, sandbox, result, run.CurrentTurn+1, log)
 		logAgentRunFinished(log, run, "cancelled", runStartedAt, func(event *zerolog.Event) {
 			event.Str("stop_reason", string(models.RuntimeStopReasonUserCancel))
@@ -2057,6 +2376,9 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 	}
 	if stopReason != StopReasonNone {
 		log.Info().Str("stop_reason", string(stopReason)).Msg("agent exited after runtime policy stop")
+		if o.cancels != nil {
+			o.cancels.Deregister(run.ID)
+		}
 		o.handlePolicyStoppedSession(ctx, run, sandbox, result, run.CurrentTurn+1, stopReason, log)
 		logAgentRunFinished(log, run, "runtime_policy_stopped", runStartedAt, func(event *zerolog.Event) {
 			event.Str("stop_reason", string(stopReason))
@@ -2082,6 +2404,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 		if _, err := o.sessions.PublishCheckpoint(ctx, run.OrgID, run.ID, lockToken, result.AgentSessionID, snapshotKey, models.CheckpointKindTurnComplete, checkpointCapabilityForAgent(run.AgentType), snapshotSize, time.Now().UTC(), nil, models.RuntimeStopReasonNone); err != nil {
 			log.Warn().Err(err).Msg("failed to publish checkpoint metadata")
 		}
+		o.warmMentionIndexFromSandbox(ctx, run, sandbox, snapshotKey, log)
 	}
 
 	// Fetch org settings for confidence thresholds.
@@ -2333,11 +2656,12 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	} else {
 		latestMsg = latestUserMessage(messages)
 	}
-	if latestMsg == nil || strings.TrimSpace(latestMsg.Content) == "" {
+	if latestMsg == nil || (strings.TrimSpace(latestMsg.Content) == "" && len(latestMsg.Attachments) == 0) {
 		o.failRun(ctx, session, "no user message found for continue_session")
 		return fmt.Errorf("no user message found")
 	}
 	threadID := latestMsg.ThreadID
+	scopedMessages := messagesInScope(messages, threadID)
 	// Bundle every trailing user message in scope into the prompt seed so
 	// rapid mid-turn sends are all delivered to the agent. The latest
 	// message remains the "carrier" for thread_id, references, and
@@ -2429,7 +2753,19 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		sandboxCfg.Env[sandboxauth.WorkingBranchEnvVar] = branch
 	}
 	if authErr := o.env.CheckAuth(session.AgentType, sandboxCfg.Env); authErr != nil {
-		log.Error().Err(authErr).Msg("agent auth pre-flight failed during continue_session")
+		authLog := log.Error().Err(authErr).
+			Str("session_id", session.ID.String()).
+			Str("agent_type", string(session.AgentType))
+		var structuredAuthErr *AuthError
+		if errors.As(authErr, &structuredAuthErr) {
+			authLog = authLog.
+				Str("provider", string(structuredAuthErr.Provider)).
+				Bool("fallback_candidates_unavailable", structuredAuthErr.FallbackCandidatesUnavailable)
+			if structuredAuthErr.RateLimitedUntil != nil {
+				authLog = authLog.Time("rate_limited_until", *structuredAuthErr.RateLimitedUntil)
+			}
+		}
+		authLog.Msg("agent auth pre-flight failed during continue_session")
 		if revertErr := o.sessions.UpdateStatus(ctx, session.OrgID, session.ID, string(models.SessionStatusIdle)); revertErr != nil {
 			log.Error().Err(revertErr).Msg("failed to revert session to idle after auth pre-flight failure")
 		}
@@ -2759,6 +3095,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 			return fmt.Errorf("create sandbox: %w", err)
 		}
 	}
+	sandbox.Env = cloneStringMap(sandboxCfg.Env)
 	// Re-populate sandbox.Metadata["base_commit_sha"] from the DB so that
 	// sessiondiff.Collect can compute `git diff <base> -- .` (the cumulative
 	// session diff against the immutable base) instead of falling back to a
@@ -2965,7 +3302,9 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	//   - Fresh: no snapshot; clone repo fresh and build a reconstructed
 	//     prompt from the conversation history + stored diff.
 	var prompt *AgentPrompt
+	var restoredWorkspaceFallbackPrompt func() (*AgentPrompt, error)
 	authBillingMode := TokenBillingModeUnknown
+	materializedAttachments := o.materializeAttachmentsForMessages(ctx, session.OrgID, sandbox, turnNumber, pendingMsgs, log)
 	if reusedExisting || hasSnapshot {
 		// Re-inject agent auth (Codex auth.json or Claude Code credentials.json).
 		// Cheap, and catches the case where the file was cleared or drifted
@@ -2979,6 +3318,9 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 			}
 			authBillingMode = mode
 		case models.AgentTypeClaudeCode:
+			if err := o.restoreClaudeCodeConfigFromBackup(ctx, sandbox); err != nil {
+				log.Warn().Err(err).Msg("failed to restore Claude Code config from backup; continuing with existing sandbox state")
+			}
 			mode, err := o.ensureClaudeCodeAuth(ctx, session, sandbox, sandboxCfg.Env)
 			if err != nil {
 				return err
@@ -3014,6 +3356,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 					return PromptStyleIssueContext
 				}(),
 				UserMessage: userMessage,
+				Attachments: materializedAttachments,
 				References: func() []models.SessionInputReference {
 					refs := canonicalReferences(latestMsg)
 					if len(refs) > 0 {
@@ -3052,7 +3395,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 			// prior context when running a fresh exec. The snapshot already
 			// restored the workspace, so do not ask the agent to re-apply the
 			// stored diff.
-			basePrompt.UserPrompt = o.buildRestoredWorkspaceResumeContext(session, promptIssue, messages, userMessage)
+			basePrompt.UserPrompt = appendAgentAttachmentSection(o.buildRestoredWorkspaceResumeContext(session, promptIssue, scopedMessages, userMessage), materializedAttachments)
 			basePrompt.Continuation = false
 			basePrompt.RevisionContext = revisionContext
 			prompt = basePrompt
@@ -3070,7 +3413,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 			prompt = &AgentPrompt{
 				Continuation:    true,
 				ResumeSessionID: resumeSessionID,
-				UserMessage:     EnsureSlashCommandsInPrompt(userMessage, commands),
+				UserMessage:     appendAgentAttachmentSection(EnsureSlashCommandsInPrompt(userMessage, commands), materializedAttachments),
 				MaxTokens:       tokenLimitForMode(session.TokenMode),
 				ReasoningEffort: func() models.ReasoningEffort {
 					if session.ReasoningEffort == nil {
@@ -3079,6 +3422,18 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 					return *session.ReasoningEffort
 				}(),
 				RevisionContext: revisionContext,
+			}
+			if !reusedExisting && session.AgentType == models.AgentTypeClaudeCode && resumeSessionID != "" {
+				restoredWorkspaceFallbackPrompt = func() (*AgentPrompt, error) {
+					basePrompt, err := adapter.PreparePrompt(ctx, buildSnapshotContinueInput())
+					if err != nil {
+						return nil, fmt.Errorf("prepare prompt for restored-workspace fallback: %w", err)
+					}
+					basePrompt.UserPrompt = appendAgentAttachmentSection(o.buildRestoredWorkspaceResumeContext(session, promptIssue, scopedMessages, userMessage), materializedAttachments)
+					basePrompt.Continuation = false
+					basePrompt.RevisionContext = revisionContext
+					return basePrompt, nil
+				}
 			}
 		}
 
@@ -3114,6 +3469,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 				return PromptStyleIssueContext
 			}(),
 			UserMessage: latestMsg.Content,
+			Attachments: materializedAttachments,
 			References: func() []models.SessionInputReference {
 				refs := canonicalReferences(latestMsg)
 				if len(refs) > 0 {
@@ -3151,7 +3507,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		}
 
 		// Override UserPrompt with resume context (conversation history + diff).
-		basePrompt.UserPrompt = o.buildResumeContext(session, &issue, messages, userMessage)
+		basePrompt.UserPrompt = appendAgentAttachmentSection(o.buildResumeContext(session, &issue, messages, userMessage), materializedAttachments)
 		basePrompt.Continuation = false
 		basePrompt.RevisionContext = revisionContext
 		prompt = basePrompt
@@ -3178,7 +3534,35 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	if o.cancels != nil {
 		execCtx = WithInteractiveHandleAttacher(execCtx, o.cancels.HandleAttacher(session.ID))
 	}
+	o.honorPendingCancelRequest(ctx, session.OrgID, session.ID, log)
 	result, err := adapter.Execute(execCtx, sandbox, prompt, logCh)
+	if err == nil && restoredWorkspaceFallbackPrompt != nil && shouldRetryClaudeResumeFromSnapshot(session, prompt, result) {
+		log.Warn().
+			Str("resume_session_id", prompt.ResumeSessionID).
+			Int("exit_code", result.ExitCode).
+			Msg("claude resume failed against restored snapshot; retrying with reconstructed context")
+		fallbackPrompt, fallbackErr := restoredWorkspaceFallbackPrompt()
+		if fallbackErr != nil {
+			err = fallbackErr
+		} else {
+			fallbackResult, fallbackExecErr := adapter.Execute(execCtx, sandbox, fallbackPrompt, logCh)
+			if fallbackExecErr != nil {
+				err = fmt.Errorf("execute restored-workspace fallback after stale Claude resume: %w", fallbackExecErr)
+			} else if fallbackResult == nil {
+				err = errors.New("restored-workspace fallback after stale Claude resume returned no result")
+			} else if fallbackResult.ExitCode != 0 {
+				msg := strings.TrimSpace(fallbackResult.Error)
+				if msg == "" {
+					msg = fmt.Sprintf("claude fallback exited with code %d", fallbackResult.ExitCode)
+				}
+				err = fmt.Errorf("restored-workspace fallback after stale Claude resume failed: %s", msg)
+				result = fallbackResult
+			} else {
+				prompt = fallbackPrompt
+				result = fallbackResult
+			}
+		}
+	}
 	close(logCh)
 	logWg.Wait()
 
@@ -3188,7 +3572,21 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	// 6c. Shed the just-picked credential when the (post-retry) result shows
 	// rate-limit or auth-rejected signals. Same semantics as the entry-turn
 	// path above; see shedOnRunResult.
-	o.shedOnRunResult(session.AgentType, session.OrgID, session.TriggeredByUserID, result, err, log)
+	if parseCredentialFailureSignal(result, time.Now()).RateLimited {
+		o.shedOnRunResult(ctx, session.AgentType, session.OrgID, session.TriggeredByUserID, result, err, log)
+		var retried bool
+		result, err, retried = o.retryContinueOnCredentialRateLimit(ctx, session, threadID, turnNumber, sandboxCfg, sandbox, adapter, execCtx, prompt, result, err, log)
+		if retried && parseCredentialFailureSignal(result, time.Now()).RateLimited {
+			o.shedOnRunResult(ctx, session.AgentType, session.OrgID, session.TriggeredByUserID, result, err, log)
+			if authErr := o.blockedContinueAfterRateLimitExhaustion(ctx, session, threadID, sandboxCfg, log); authErr != nil {
+				err = authErr
+			}
+		} else {
+			o.shedOnRunResult(ctx, session.AgentType, session.OrgID, session.TriggeredByUserID, result, err, log)
+		}
+	} else {
+		o.shedOnRunResult(ctx, session.AgentType, session.OrgID, session.TriggeredByUserID, result, err, log)
+	}
 
 	stopReason := StopReasonNone
 	if o.cancels != nil {
@@ -3201,12 +3599,18 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		// deadline is classified as a cancel, not a timeout.
 		if wasCancelled || (stopReason == StopReasonNone && errors.Is(ctx.Err(), context.Canceled)) {
 			log.Info().Msg("session cancelled by user during continue")
+			if o.cancels != nil {
+				o.cancels.Deregister(session.ID)
+			}
 			o.handleCancelledSession(ctx, session, sandbox, result, turnNumber, log)
 			drainAfterRelease = true
 			return fmt.Errorf("session cancelled: %w", ctx.Err())
 		}
 		if stopReason != StopReasonNone {
 			log.Info().Str("stop_reason", string(stopReason)).Msg("session stopped by runtime policy during continue")
+			if o.cancels != nil {
+				o.cancels.Deregister(session.ID)
+			}
 			o.handlePolicyStoppedSession(ctx, session, sandbox, result, turnNumber, stopReason, log)
 			return nil
 		}
@@ -3222,12 +3626,18 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	// 6c. If cancelled but agent exited gracefully, snapshot and return to idle.
 	if wasCancelled {
 		log.Info().Msg("agent exited after cancel during continue, returning to idle")
+		if o.cancels != nil {
+			o.cancels.Deregister(session.ID)
+		}
 		o.handleCancelledSession(ctx, session, sandbox, result, turnNumber, log)
 		drainAfterRelease = true
 		return nil
 	}
 	if stopReason != StopReasonNone {
 		log.Info().Str("stop_reason", string(stopReason)).Msg("agent exited after runtime policy stop during continue")
+		if o.cancels != nil {
+			o.cancels.Deregister(session.ID)
+		}
 		o.handlePolicyStoppedSession(ctx, session, sandbox, result, turnNumber, stopReason, log)
 		return nil
 	}
@@ -3276,6 +3686,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		if _, err := o.sessions.PublishCheckpoint(ctx, session.OrgID, session.ID, lockToken, result.AgentSessionID, newSnapshotKey, models.CheckpointKindTurnComplete, checkpointCapabilityForAgent(session.AgentType), snapshotSize, time.Now().UTC(), nil, models.RuntimeStopReasonNone); err != nil {
 			log.Warn().Err(err).Msg("failed to publish checkpoint metadata after continue")
 		}
+		o.warmMentionIndexFromSandbox(ctx, session, sandbox, newSnapshotKey, log)
 	}
 
 	// 9. Update turn complete — sets status to idle.
@@ -3739,6 +4150,40 @@ func (o *Orchestrator) buildRestoredWorkspaceResumeContext(session *models.Sessi
 	return b.String()
 }
 
+func appendAgentAttachmentSection(prompt string, attachments []AgentAttachment) string {
+	if len(attachments) == 0 {
+		return prompt
+	}
+	var b strings.Builder
+	b.WriteString(strings.TrimSpace(prompt))
+	b.WriteString("\n\n## Attached files\n")
+	for _, attachment := range attachments {
+		b.WriteString("- ")
+		if attachment.LocalPath != "" {
+			b.WriteString("`")
+			b.WriteString(attachment.LocalPath)
+			b.WriteString("`")
+			if attachment.ContentType != "" {
+				b.WriteString(" (")
+				b.WriteString(attachment.ContentType)
+				b.WriteString(")")
+			}
+		} else {
+			b.WriteString("unavailable")
+		}
+		if attachment.OriginalURL != "" {
+			b.WriteString(" from ")
+			b.WriteString(attachment.OriginalURL)
+		}
+		if attachment.Error != "" {
+			b.WriteString(" - warning: ")
+			b.WriteString(attachment.Error)
+		}
+		b.WriteString("\n")
+	}
+	return b.String()
+}
+
 func writeResumeIssueAndHistory(b *bytes.Buffer, issue *models.Issue, messages []models.SessionMessage) {
 	// Include the original issue description for context (especially
 	// important for non-manual sessions that may have no prior messages).
@@ -3759,6 +4204,15 @@ func writeResumeIssueAndHistory(b *bytes.Buffer, issue *models.Issue, messages [
 				role = "Assistant"
 			}
 			b.WriteString(fmt.Sprintf("**%s:** %s\n\n", role, msg.Content))
+			if len(msg.Attachments) > 0 {
+				b.WriteString("Attachments:\n")
+				for _, attachment := range msg.Attachments {
+					b.WriteString("- ")
+					b.WriteString(attachment)
+					b.WriteString("\n")
+				}
+				b.WriteString("\n")
+			}
 		}
 	}
 }
@@ -4439,6 +4893,7 @@ func (o *Orchestrator) billingModeForAgent(
 // buildRunResult converts an AgentResult into the DB update struct.
 func (o *Orchestrator) buildRunResult(ctx context.Context, run *models.Session, sandbox *Sandbox, result *AgentResult) *models.SessionResult {
 	var tokenUsage []byte
+	var modelUsed *string
 	if HasPersistableTokenUsage(result.TokenUsage) {
 		marshaled, err := json.Marshal(result.TokenUsage)
 		if err != nil {
@@ -4446,6 +4901,9 @@ func (o *Orchestrator) buildRunResult(ctx context.Context, run *models.Session, 
 		} else {
 			tokenUsage = marshaled
 		}
+	}
+	if result.TokenUsage.NativeUsage != nil && result.TokenUsage.NativeUsage.Model != "" {
+		modelUsed = strPtr(result.TokenUsage.NativeUsage.Model)
 	}
 
 	headSHA := o.captureCurrentHeadSHA(ctx, sandbox)
@@ -4456,6 +4914,7 @@ func (o *Orchestrator) buildRunResult(ctx context.Context, run *models.Session, 
 		ConfidenceReasoning: strPtr(result.ConfidenceReasoning),
 		RiskFactors:         result.RiskFactors,
 		TokenUsage:          tokenUsage,
+		ModelUsed:           modelUsed,
 		ResultSummary:       strPtr(result.Summary),
 		Diff:                strPtr(result.Diff),
 		Error:               strPtr(result.Error),
@@ -4525,6 +4984,17 @@ func (o *Orchestrator) enqueueJob(ctx context.Context, orgID uuid.UUID, queue, j
 			Str("job_type", jobType).
 			Msg("failed to enqueue follow-up job")
 	}
+}
+
+func cloneStringMap(in map[string]string) map[string]string {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
 }
 
 // injectClaudeCodeAuth writes a ~/.claude/.credentials.json file into the
@@ -4804,6 +5274,54 @@ func (o *Orchestrator) removeClaudeCodeCredentialsFile(ctx context.Context, sand
 	return nil
 }
 
+func (o *Orchestrator) removeCodexAuthFile(ctx context.Context, sandbox *Sandbox) error {
+	authPath := path.Join(sandbox.HomeDir, ".codex", "auth.json")
+	if _, err := o.provider.ReadFile(ctx, sandbox, authPath); err != nil {
+		if isSandboxFileMissing(err) {
+			return nil
+		}
+		return fmt.Errorf("check stale codex auth: %w", err)
+	}
+
+	cmd := fmt.Sprintf("rm -f '%s'", shellEscapeSingleQuote(authPath))
+	var stdout, stderr bytes.Buffer
+	exitCode, err := o.provider.Exec(ctx, sandbox, cmd, &stdout, &stderr)
+	if err != nil {
+		return fmt.Errorf("remove stale codex auth: %w", err)
+	}
+	if exitCode != 0 {
+		return fmt.Errorf("remove stale codex auth: exited with code %d: %s", exitCode, stderr.String())
+	}
+	return nil
+}
+
+func (o *Orchestrator) restoreClaudeCodeConfigFromBackup(ctx context.Context, sandbox *Sandbox) error {
+	if sandbox == nil || sandbox.HomeDir == "" {
+		return nil
+	}
+
+	configPath := path.Join(sandbox.HomeDir, ".claude.json")
+	backupDir := path.Join(sandbox.HomeDir, ".claude", "backups")
+	cmd := fmt.Sprintf(
+		"if [ ! -f '%s' ] && [ -d '%s' ]; then latest=$(ls -t '%s'/.claude.json.backup.* 2>/dev/null | head -n 1); if [ -n \"$latest\" ]; then cp \"$latest\" '%s' && chmod 600 '%s'; fi; fi",
+		shellEscapeSingleQuote(configPath),
+		shellEscapeSingleQuote(backupDir),
+		shellEscapeSingleQuote(backupDir),
+		shellEscapeSingleQuote(configPath),
+		shellEscapeSingleQuote(configPath),
+	)
+
+	var stdout, stderr bytes.Buffer
+	exitCode, err := o.provider.Exec(ctx, sandbox, cmd, &stdout, &stderr)
+	if err != nil {
+		return fmt.Errorf("restore claude config backup: %w", err)
+	}
+	if exitCode != 0 {
+		return fmt.Errorf("restore claude config backup: exited with code %d: %s", exitCode, stderr.String())
+	}
+	return nil
+}
+
 func isSandboxFileMissing(err error) bool {
 	msg := strings.ToLower(err.Error())
 	return strings.Contains(msg, "file not found") || strings.Contains(msg, "no such file")
@@ -4839,6 +5357,13 @@ func (o *Orchestrator) BuildIntegrationSkills(ctx context.Context, orgID uuid.UU
 			AuthToken: ic.Notion.AccessToken,
 		})
 		reg.RegisterDocumentStore(store)
+	}
+	if ic.CircleCI != nil && ic.CircleCI.AuthToken != "" && ic.CircleCI.ProjectSlug != "" {
+		provider := integration.NewCircleCITestInsights(integration.CircleCIConfig{
+			AuthToken:   ic.CircleCI.AuthToken,
+			ProjectSlug: ic.CircleCI.ProjectSlug,
+		})
+		reg.RegisterCITestInsights(provider)
 	}
 
 	// Register a stub GitHub code review source for skills doc generation.
@@ -4887,6 +5412,7 @@ func (o *Orchestrator) handleCancelledSession(ctx context.Context, session *mode
 		if _, err := o.sessions.PublishCheckpoint(bgCtx, session.OrgID, session.ID, lockToken, agentSessionID, snapshotKey, models.CheckpointKindGracefulStop, checkpointCapabilityForAgent(session.AgentType), snapshotSize, checkpointedAt, nil, models.RuntimeStopReasonUserCancel); err != nil {
 			log.Warn().Err(err).Msg("failed to publish cancelled-session checkpoint metadata")
 		}
+		o.warmMentionIndexFromSandbox(bgCtx, session, sandbox, snapshotKey, log)
 		if err := o.sessions.UpdateTurnComplete(bgCtx, session.OrgID, session.ID, turnNumber, nil, agentSessionID, snapshotKey); err != nil {
 			log.Warn().Err(err).Msg("failed to return cancelled session to idle")
 			_ = o.sessions.UpdateStatus(bgCtx, session.OrgID, session.ID, string(models.SessionStatusCancelled))
@@ -4986,22 +5512,49 @@ func (o *Orchestrator) snapshotSession(ctx context.Context, session *models.Sess
 
 	snapshotKey := fmt.Sprintf("snapshots/%s/%s/workspace.tar.zst", session.OrgID, session.ID)
 
-	reader, err := o.provider.Snapshot(ctx, sandbox)
-	if err != nil {
-		return "", 0, fmt.Errorf("snapshot sandbox: %w", err)
+	for attempt := 1; attempt <= retryableSnapshotSaveMaxAttempts; attempt++ {
+		reader, err := o.provider.Snapshot(ctx, sandbox)
+		if err != nil {
+			return "", 0, fmt.Errorf("snapshot sandbox: %w", err)
+		}
+
+		countingReader := &countingReadCloser{ReadCloser: reader}
+		saveErr := o.snapshots.Save(ctx, snapshotKey, countingReader)
+		closeErr := reader.Close()
+		if saveErr == nil && closeErr == nil {
+			// Store the snapshot key on the session for subsequent use.
+			session.SnapshotKey = &snapshotKey
+			o.logger.Info().
+				Str("session_id", session.ID.String()).
+				Str("org_id", session.OrgID.String()).
+				Str("sandbox_id", sandbox.ID).
+				Str("snapshot_key", snapshotKey).
+				Int64("snapshot_size_bytes", countingReader.n).
+				Msg("session snapshot saved")
+			return snapshotKey, countingReader.n, nil
+		}
+
+		if saveErr == nil {
+			saveErr = closeErr
+		}
+		if closeErr != nil && saveErr != closeErr {
+			o.logger.Warn().Err(closeErr).Int("attempt", attempt).Msg("snapshot reader close returned an additional error after save failure")
+		}
+		if !isRetryableSnapshotSaveError(saveErr) || attempt == retryableSnapshotSaveMaxAttempts {
+			return "", 0, fmt.Errorf("save snapshot to storage: %w", saveErr)
+		}
+		o.logger.Warn().
+			Err(saveErr).
+			Int("attempt", attempt).
+			Int("max_attempts", retryableSnapshotSaveMaxAttempts).
+			Str("snapshot_key", snapshotKey).
+			Msg("retrying snapshot after transient git pack churn")
+		if waitErr := waitForRetryableSnapshotSave(ctx, attempt); waitErr != nil {
+			return "", 0, fmt.Errorf("save snapshot to storage: %w", waitErr)
+		}
 	}
-	defer reader.Close()
 
-	countingReader := &countingReadCloser{ReadCloser: reader}
-
-	if err := o.snapshots.Save(ctx, snapshotKey, countingReader); err != nil {
-		return "", 0, fmt.Errorf("save snapshot to storage: %w", err)
-	}
-
-	// Store the snapshot key on the session for subsequent use.
-	session.SnapshotKey = &snapshotKey
-
-	return snapshotKey, countingReader.n, nil
+	return "", 0, fmt.Errorf("save snapshot to storage: retry loop exhausted for %s", snapshotKey)
 }
 
 type countingReadCloser struct {
@@ -5032,8 +5585,8 @@ func truncateForLog(s string, max int) string {
 }
 
 func (o *Orchestrator) handlePolicyStoppedSession(ctx context.Context, session *models.Session, sandbox *Sandbox, result *AgentResult, turnNumber int, reason StopReason, log zerolog.Logger) {
-	bgCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
+	checkpointCtx, checkpointCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer checkpointCancel()
 
 	lockToken, _ := jobctx.LockTokenFromContext(ctx)
 	checkpointedAt := time.Now().UTC()
@@ -5044,24 +5597,32 @@ func (o *Orchestrator) handlePolicyStoppedSession(ctx context.Context, session *
 		agentSessionID = *session.AgentSessionID
 	}
 
-	snapshotKey, snapshotSize, snapshotErr := o.snapshotSession(bgCtx, session, sandbox, result)
+	snapshotKey, snapshotSize, snapshotErr := o.snapshotSession(checkpointCtx, session, sandbox, result)
 	var checkpointErrText *string
 	if snapshotErr != nil {
 		errMsg := snapshotErr.Error()
 		checkpointErrText = &errMsg
 	}
 	if snapshotKey != "" || checkpointErrText != nil {
-		if _, err := o.sessions.PublishCheckpoint(bgCtx, session.OrgID, session.ID, lockToken, agentSessionID, snapshotKey, models.CheckpointKindGracefulStop, checkpointCapabilityForAgent(session.AgentType), snapshotSize, checkpointedAt, checkpointErrText, stopReasonToRuntime(reason)); err != nil {
+		if _, err := o.sessions.PublishCheckpoint(checkpointCtx, session.OrgID, session.ID, lockToken, agentSessionID, snapshotKey, models.CheckpointKindGracefulStop, checkpointCapabilityForAgent(session.AgentType), snapshotSize, checkpointedAt, checkpointErrText, stopReasonToRuntime(reason)); err != nil {
 			log.Warn().Err(err).Msg("failed to publish graceful-stop checkpoint metadata")
 		}
 	}
 
 	errMsg, explanation, nextSteps := gracefulStopFailure(reason, snapshotKey != "", session.SnapshotKey != nil && *session.SnapshotKey != "")
-	o.failRunWithCategory(bgCtx, session, errMsg, FailureCategoryTimeout, explanation, nextSteps)
-	o.updatePrimaryThreadTerminal(bgCtx, session, models.ThreadStatusFailed, &models.SessionResult{
+	terminalCtx, terminalCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer terminalCancel()
+	o.failRunWithCategory(terminalCtx, session, errMsg, FailureCategoryTimeout, explanation, nextSteps)
+	o.updatePrimaryThreadTerminal(terminalCtx, session, models.ThreadStatusFailed, &models.SessionResult{
 		Error:           &explanation,
 		FailureCategory: strPtr(FailureCategoryTimeout),
 	}, log)
+
+	if snapshotKey != "" {
+		warmCtx, warmCancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer warmCancel()
+		o.warmMentionIndexFromSandbox(warmCtx, session, sandbox, snapshotKey, log)
+	}
 }
 
 func gracefulStopFailure(reason StopReason, checkpointedThisTurn, hadPriorCheckpoint bool) (string, string, []string) {
@@ -5436,6 +5997,175 @@ func (o *Orchestrator) retryOnTokenExpired(
 	return result, err
 }
 
+func (o *Orchestrator) retryContinueOnCredentialRateLimit(
+	ctx context.Context,
+	session *models.Session,
+	threadID *uuid.UUID,
+	turnNumber int,
+	sandboxCfg SandboxConfig,
+	sandbox *Sandbox,
+	adapter AgentAdapter,
+	execCtx context.Context,
+	prompt *AgentPrompt,
+	result *AgentResult,
+	err error,
+	log zerolog.Logger,
+) (*AgentResult, error, bool) {
+	signal := parseCredentialFailureSignal(result, time.Now())
+	if !signal.RateLimited {
+		return result, err, false
+	}
+
+	refreshedEnv := o.resolveContinueCredentialEnv(ctx, session, sandboxCfg)
+	if authErr := o.env.CheckAuth(session.AgentType, refreshedEnv); authErr != nil {
+		logCredentialRateLimitBlockedContinue(log, session, authErr)
+		o.createContinueAuthFailureMessage(ctx, session, threadID, authErr, log)
+		return result, authErr, false
+	}
+
+	sandbox.Env = cloneStringMap(refreshedEnv)
+	if authErr := o.prepareAgentAuthForRetry(ctx, session, sandbox, refreshedEnv); authErr != nil {
+		return result, authErr, false
+	}
+	prompt.UsageHint = o.buildTokenUsageHint(ctx, session.AgentType, session.OrgID, session.TriggeredByUserID, refreshedEnv, prompt.UsageHint)
+
+	log.Info().
+		Str("session_id", session.ID.String()).
+		Str("agent_type", string(session.AgentType)).
+		Msg("retrying continue_session with fallback credential after rate-limit signal")
+
+	retryLogCh := make(chan LogEntry, 100)
+	var retryLogWg sync.WaitGroup
+	retryLogWg.Add(1)
+	go func() {
+		defer retryLogWg.Done()
+		o.streamLogs(ctx, session.ID, session.OrgID, session.AgentType, threadID, turnNumber, retryLogCh, nil)
+	}()
+	retryResult, retryErr := adapter.Execute(execCtx, sandbox, prompt, retryLogCh)
+	close(retryLogCh)
+	retryLogWg.Wait()
+
+	retryResult, retryErr = o.retryOnTokenExpired(ctx, session.AgentType, session.OrgID, session.TriggeredByUserID, session.ID, threadID, turnNumber, sandbox, adapter, execCtx, prompt, retryResult, retryErr, log)
+	return retryResult, retryErr, true
+}
+
+func (o *Orchestrator) blockedContinueAfterRateLimitExhaustion(ctx context.Context, session *models.Session, threadID *uuid.UUID, sandboxCfg SandboxConfig, log zerolog.Logger) error {
+	refreshedEnv := o.resolveContinueCredentialEnv(ctx, session, sandboxCfg)
+	authErr := o.env.CheckAuth(session.AgentType, refreshedEnv)
+	if authErr == nil {
+		return nil
+	}
+	logCredentialRateLimitBlockedContinue(log, session, authErr)
+	o.createContinueAuthFailureMessage(ctx, session, threadID, authErr, log)
+	return authErr
+}
+
+func (o *Orchestrator) resolveContinueCredentialEnv(ctx context.Context, session *models.Session, sandboxCfg SandboxConfig) map[string]string {
+	refreshedEnv := refreshAgentCredentialEnv(sandboxCfg.Env, o.env.Resolve(ctx, session.OrgID, session.AgentType, session.TriggeredByUserID), session.AgentType)
+	if refreshedEnv == nil {
+		refreshedEnv = make(map[string]string)
+	}
+	if session.ModelOverride != nil && *session.ModelOverride != "" {
+		if envVar := models.ModelEnvVarForAgentType(session.AgentType); envVar != "" {
+			refreshedEnv[envVar] = *session.ModelOverride
+		}
+	}
+	if branch := sandboxCfg.Env[sandboxauth.WorkingBranchEnvVar]; branch != "" {
+		refreshedEnv[sandboxauth.WorkingBranchEnvVar] = branch
+	}
+	if _, ok := refreshedEnv["HOME"]; !ok {
+		refreshedEnv["HOME"] = sandboxCfg.HomeDir
+	}
+	return refreshedEnv
+}
+
+func refreshAgentCredentialEnv(current, resolved map[string]string, agentType models.AgentType) map[string]string {
+	out := cloneStringMap(current)
+	if out == nil {
+		out = make(map[string]string)
+	}
+	clearAgentCredentialEnv(out, agentType)
+	for k, v := range resolved {
+		out[k] = v
+	}
+	return out
+}
+
+func clearAgentCredentialEnv(env map[string]string, agentType models.AgentType) {
+	for _, key := range []string{
+		internalAuthBlockedKey,
+		internalAuthBlockedProviderKey,
+		internalAuthBlockedRateLimitedUntilKey,
+		internalAuthBlockedFallbackCandidatesUnavailableKey,
+	} {
+		delete(env, key)
+	}
+	switch agentType {
+	case models.AgentTypeClaudeCode:
+		delete(env, "ANTHROPIC_API_KEY")
+		delete(env, "ANTHROPIC_BASE_URL")
+	case models.AgentTypeCodex:
+		delete(env, "OPENAI_API_KEY")
+		delete(env, "OPENAI_BASE_URL")
+	case models.AgentTypeGeminiCLI:
+		delete(env, "GEMINI_API_KEY")
+		delete(env, "GEMINI_MODEL")
+	case models.AgentTypeAmp:
+		delete(env, "AMP_API_KEY")
+	case models.AgentTypePi:
+		delete(env, "PI_API_KEY")
+	}
+}
+
+func (o *Orchestrator) prepareAgentAuthForRetry(ctx context.Context, session *models.Session, sandbox *Sandbox, env map[string]string) error {
+	switch session.AgentType {
+	case models.AgentTypeCodex:
+		if env["OPENAI_API_KEY"] != "" {
+			return o.removeCodexAuthFile(ctx, sandbox)
+		}
+		_, err := o.ensureCodexAuth(ctx, session, sandbox, env)
+		return err
+	case models.AgentTypeClaudeCode:
+		_, err := o.ensureClaudeCodeAuth(ctx, session, sandbox, env)
+		return err
+	default:
+		return nil
+	}
+}
+
+func logCredentialRateLimitBlockedContinue(log zerolog.Logger, session *models.Session, authErr error) {
+	authLog := log.Error().Err(authErr).
+		Str("session_id", session.ID.String()).
+		Str("agent_type", string(session.AgentType))
+	var structuredAuthErr *AuthError
+	if errors.As(authErr, &structuredAuthErr) {
+		authLog = authLog.
+			Str("provider", string(structuredAuthErr.Provider)).
+			Bool("fallback_candidates_unavailable", structuredAuthErr.FallbackCandidatesUnavailable)
+		if structuredAuthErr.RateLimitedUntil != nil {
+			authLog = authLog.Time("rate_limited_until", *structuredAuthErr.RateLimitedUntil)
+		}
+	}
+	authLog.Msg("continue_session fallback credentials unavailable after rate-limit signal")
+}
+
+func (o *Orchestrator) createContinueAuthFailureMessage(ctx context.Context, session *models.Session, threadID *uuid.UUID, authErr error, log zerolog.Logger) {
+	if o.sessionMessages == nil {
+		return
+	}
+	errMsg := &models.SessionMessage{
+		SessionID:  session.ID,
+		OrgID:      session.OrgID,
+		ThreadID:   threadID,
+		TurnNumber: session.CurrentTurn + 1,
+		Role:       models.MessageRoleAssistant,
+		Content:    authErr.Error(),
+	}
+	if createErr := o.sessionMessages.Create(ctx, errMsg); createErr != nil {
+		log.Error().Err(createErr).Msg("failed to create error message for auth pre-flight failure")
+	}
+}
+
 // shedOnRunResult forwards rate-limit / auth-rejected signals from a finished
 // run back into the unified credential store's in-process health cache so the
 // next pickFromCodingProvider walk for the same (orgID, userID, provider)
@@ -5449,7 +6179,7 @@ func (o *Orchestrator) retryOnTokenExpired(
 // uses codexauth.Service's own selector; because that path records no
 // ProviderOpenAI pick, the shed call below remains a no-op for subscription
 // runs.
-func (o *Orchestrator) shedOnRunResult(agentType models.AgentType, orgID uuid.UUID, userID *uuid.UUID, result *AgentResult, runErr error, log zerolog.Logger) {
+func (o *Orchestrator) shedOnRunResult(ctx context.Context, agentType models.AgentType, orgID uuid.UUID, userID *uuid.UUID, result *AgentResult, runErr error, log zerolog.Logger) {
 	if o.env == nil || result == nil {
 		return
 	}
@@ -5457,22 +6187,45 @@ func (o *Orchestrator) shedOnRunResult(agentType models.AgentType, orgID uuid.UU
 	if provider == "" {
 		return
 	}
-	errMsg := strings.ToLower(result.Error)
+	signal := parseCredentialFailureSignal(result, time.Now())
 	switch {
-	case isAuthRejectedError(errMsg):
+	case signal.AuthRejected:
 		log.Warn().
 			Str("agent_type", string(agentType)).
 			Str("provider", string(provider)).
 			Msg("shedding credential after auth-rejected signal in run result")
-		o.env.ShedAuthRejected(orgID, userID, provider)
-	case isRateLimitedError(errMsg):
+		o.env.ShedAuthRejectedWithContext(ctx, orgID, userID, provider)
+	case signal.RateLimited:
 		log.Warn().
 			Str("agent_type", string(agentType)).
 			Str("provider", string(provider)).
+			Time("rate_limited_until", signal.RateLimitedUntil).
 			Msg("shedding credential after rate-limit signal in run result")
-		o.env.ShedRateLimited(orgID, userID, provider)
+		o.env.ShedRateLimitedWithSignal(ctx, orgID, userID, provider, signal)
 	}
 	_ = runErr // accepted for symmetry with the call sites; the result.Error string is the canonical signal today
+}
+
+const defaultCredentialRateLimitTTL = 15 * time.Minute
+
+func parseCredentialFailureSignal(result *AgentResult, now time.Time) CredentialFailureSignal {
+	if result == nil {
+		return CredentialFailureSignal{}
+	}
+	msg := strings.TrimSpace(result.Error)
+	lower := strings.ToLower(msg)
+	switch {
+	case isAuthRejectedError(lower):
+		return CredentialFailureSignal{AuthRejected: true, Message: msg}
+	case isRateLimitedError(lower):
+		until := parseCredentialRateLimitUntil(lower, now)
+		if until.IsZero() {
+			until = now.Add(defaultCredentialRateLimitTTL)
+		}
+		return CredentialFailureSignal{RateLimited: true, RateLimitedUntil: until, Message: msg}
+	default:
+		return CredentialFailureSignal{}
+	}
 }
 
 // codingProviderForAgent maps an agent type to the unified provider name its
@@ -5504,7 +6257,9 @@ func isRateLimitedError(errMsg string) bool {
 	return strings.Contains(errMsg, "rate limit") ||
 		strings.Contains(errMsg, "rate_limit") ||
 		strings.Contains(errMsg, "429") ||
-		strings.Contains(errMsg, "too many requests")
+		strings.Contains(errMsg, "too many requests") ||
+		strings.Contains(errMsg, "quota exceeded") ||
+		strings.Contains(errMsg, "usage limit")
 }
 
 // isAuthRejectedError detects 401-class signals indicating the credential is
@@ -5517,12 +6272,83 @@ func isAuthRejectedError(errMsg string) bool {
 		return false
 	}
 	return strings.Contains(errMsg, "refresh_token_reused") ||
+		strings.Contains(errMsg, "token_revoked") ||
+		strings.Contains(errMsg, "token_invalidated") ||
+		strings.Contains(errMsg, "access token could not be refreshed") ||
 		strings.Contains(errMsg, "invalid_grant") ||
 		strings.Contains(errMsg, "invalid api key") ||
 		strings.Contains(errMsg, "invalid_api_key") ||
+		strings.Contains(errMsg, "invalid api token") ||
+		isInvalidAuthTokenMessage(errMsg) ||
 		strings.Contains(errMsg, "401 unauthorized") ||
 		strings.Contains(errMsg, "401 unauthenticated") ||
 		strings.Contains(errMsg, "authentication_error")
+}
+
+func isInvalidAuthTokenMessage(errMsg string) bool {
+	if !strings.Contains(errMsg, "invalid token") {
+		return false
+	}
+	return strings.Contains(errMsg, "401") ||
+		strings.Contains(errMsg, "unauthorized") ||
+		strings.Contains(errMsg, "unauthenticated") ||
+		strings.Contains(errMsg, "authentication") ||
+		strings.Contains(errMsg, "auth") ||
+		strings.Contains(errMsg, "api")
+}
+
+var (
+	retryAfterRe     = regexp.MustCompile(`retry-after[=: ]+([0-9]+)`)
+	tryAgainAtRe     = regexp.MustCompile(`try again at ([0-9]{1,2})(?::([0-9]{2}))?\s*(am|pm)?`)
+	resetInSecondsRe = regexp.MustCompile(`(?:reset|retry)[^0-9]{0,20}in ([0-9]+) seconds?`)
+)
+
+func parseCredentialRateLimitUntil(msg string, now time.Time) time.Time {
+	if match := retryAfterRe.FindStringSubmatch(msg); len(match) == 2 {
+		if seconds, err := strconv.Atoi(match[1]); err == nil && seconds > 0 {
+			return now.Add(time.Duration(seconds) * time.Second)
+		}
+	}
+	if match := resetInSecondsRe.FindStringSubmatch(msg); len(match) == 2 {
+		if seconds, err := strconv.Atoi(match[1]); err == nil && seconds > 0 {
+			return now.Add(time.Duration(seconds) * time.Second)
+		}
+	}
+	if match := tryAgainAtRe.FindStringSubmatch(msg); len(match) >= 2 {
+		hour, err := strconv.Atoi(match[1])
+		if err != nil {
+			return time.Time{}
+		}
+		minute := 0
+		if len(match) > 2 && match[2] != "" {
+			parsedMinute, minuteErr := strconv.Atoi(match[2])
+			if minuteErr != nil {
+				return time.Time{}
+			}
+			minute = parsedMinute
+		}
+		if len(match) > 3 {
+			switch match[3] {
+			case "pm":
+				if hour < 12 {
+					hour += 12
+				}
+			case "am":
+				if hour == 12 {
+					hour = 0
+				}
+			}
+		}
+		if hour < 0 || hour > 23 || minute < 0 || minute > 59 {
+			return time.Time{}
+		}
+		candidate := time.Date(now.Year(), now.Month(), now.Day(), hour, minute, 0, 0, now.Location())
+		if !candidate.After(now) {
+			candidate = candidate.Add(24 * time.Hour)
+		}
+		return candidate
+	}
+	return time.Time{}
 }
 
 // containerExitReason determines a granular exit reason for billing metadata

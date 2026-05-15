@@ -21,6 +21,8 @@ import (
 const (
 	defaultLowTokenMax  = 50_000
 	defaultHighTokenMax = 200_000
+
+	claudeCodeFileEditPermissionArg = " --permission-mode acceptEdits"
 )
 
 // resolveTokenLimit returns the appropriate max token limit based on
@@ -116,6 +118,10 @@ func (a *ClaudeCodeAdapter) Execute(ctx context.Context, sandbox *agent.Sandbox,
 	if prompt.ReasoningEffort != "" {
 		effortArg = fmt.Sprintf(" --effort %s", shellEscapeSingle(string(prompt.ReasoningEffort)))
 	}
+	// Auto-approve file edits in the per-session gVisor sandbox without
+	// bypassing every Claude Code permission check. This removes the
+	// file-by-file approval loop while preserving Claude's remaining tool
+	// checks for network-capable actions such as WebFetch and arbitrary Bash.
 	if prompt.Continuation && prompt.ResumeSessionID != "" {
 		settingsArg, envPrefix, err := prepareClaudeHumanInputHooks(ctx, provider, sandbox, prompt)
 		if err != nil {
@@ -128,10 +134,11 @@ func (a *ClaudeCodeAdapter) Execute(ctx context.Context, sandbox *agent.Sandbox,
 		// are present.
 		msg := shellEscapeDouble(prompt.UserMessage)
 		cmd = fmt.Sprintf(
-			"%sclaude --print --output-format stream-json --verbose%s%s --resume %s \"%s\"",
+			"%sclaude --print --output-format stream-json --verbose%s%s%s --resume %s \"%s\"",
 			envPrefix,
 			effortArg,
 			settingsArg,
+			claudeCodeFileEditPermissionArg,
 			shellEscapeSingle(prompt.ResumeSessionID),
 			msg,
 		)
@@ -152,10 +159,11 @@ func (a *ClaudeCodeAdapter) Execute(ctx context.Context, sandbox *agent.Sandbox,
 			return nil, err
 		}
 		cmd = fmt.Sprintf(
-			"%sclaude --print --output-format stream-json --verbose%s%s < %s",
+			"%sclaude --print --output-format stream-json --verbose%s%s%s < %s",
 			envPrefix,
 			effortArg,
 			settingsArg,
+			claudeCodeFileEditPermissionArg,
 			promptPath,
 		)
 	}

@@ -180,6 +180,33 @@ describe('SettingsLayout', () => {
     expect(replaceMock).not.toHaveBeenCalled();
   });
 
+  it('redirects builders away from /settings/team', async () => {
+    useAuthMock.mockReturnValue({ user: { role: 'builder' }, isLoading: false });
+    pathnameMock.value = '/settings/team';
+
+    renderWithProviders(
+      <SettingsLayout>
+        <div>team roster</div>
+      </SettingsLayout>
+    );
+
+    await waitFor(() => expect(replaceMock).toHaveBeenCalledWith('/settings/account'));
+  });
+
+  it('lets builders through to /settings/agent', () => {
+    useAuthMock.mockReturnValue({ user: { role: 'builder' }, isLoading: false });
+    pathnameMock.value = '/settings/agent';
+
+    renderWithProviders(
+      <SettingsLayout>
+        <div>agent settings</div>
+      </SettingsLayout>
+    );
+
+    expect(screen.getByText('agent settings')).toBeInTheDocument();
+    expect(replaceMock).not.toHaveBeenCalled();
+  });
+
   it('does not mount children for access-controlled pages while auth is still loading', () => {
     useAuthMock.mockReturnValue({ user: null, isLoading: true });
     pathnameMock.value = '/settings/team';
@@ -220,5 +247,20 @@ describe('SettingsLayout', () => {
     );
 
     expect(screen.queryByRole('link')).not.toBeInTheDocument();
+  });
+
+  it('adds shared bottom scroll padding for settings page containers', () => {
+    useAuthMock.mockReturnValue({ user: { role: 'admin' }, isLoading: false });
+
+    const { container } = renderWithProviders(
+      <SettingsLayout>
+        <div data-slot="page-container">settings content</div>
+      </SettingsLayout>
+    );
+
+    const paddingScope = container.querySelector('[data-slot="settings-layout-padding-scope"]');
+    expect(paddingScope).not.toBeNull();
+    expect(paddingScope).toHaveClass('[&_[data-slot=page-container]]:pb-24');
+    expect(paddingScope).toHaveClass('md:[&_[data-slot=page-container]]:pb-20');
   });
 });

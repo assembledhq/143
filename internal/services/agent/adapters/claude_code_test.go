@@ -423,6 +423,67 @@ func TestClaudeCodeAdapter_Execute_ContinuationWithoutSessionIDFallsBackToFreshE
 	require.Contains(t, string(contents), "history-embedded user prompt", "prompt file should carry the orchestrator-provided history-embedded user prompt")
 }
 
+func TestClaudeCodeAdapter_Execute_AcceptsFileEditsWithoutBypassingAllPermissions(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		prompt *agent.AgentPrompt
+	}{
+		{
+			name: "fresh turn",
+			prompt: &agent.AgentPrompt{
+				SystemPrompt: "system",
+				UserPrompt:   "user prompt",
+				MaxTokens:    50_000,
+			},
+		},
+		{
+			name: "resume by session id",
+			prompt: &agent.AgentPrompt{
+				UserMessage:     "Please continue.",
+				MaxTokens:       50_000,
+				Continuation:    true,
+				ResumeSessionID: "claude-session-abc",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			provider := testutil.NewMockSandboxProvider()
+			provider.ExecFn = func(ctx context.Context, sb *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
+				if strings.HasPrefix(cmd, "claude") {
+					_, _ = stdout.Write([]byte(`{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"done"}]}}`))
+					return 0, nil
+				}
+				if strings.HasPrefix(cmd, "git rev-parse") {
+					_, _ = stdout.Write([]byte("true\n"))
+					return 0, nil
+				}
+				if strings.HasPrefix(cmd, "git diff") {
+					return 0, nil
+				}
+				return 0, nil
+			}
+
+			adapter := NewClaudeCodeAdapter(zerolog.Nop())
+			sandbox := &agent.Sandbox{ID: "test", WorkDir: "/workspace", HomeDir: "/home/sandbox", Metadata: map[string]string{agent.SandboxMetadataBaseCommitSHA: "abc123"}}
+			logCh := make(chan agent.LogEntry, 10)
+			ctx := WithSandboxProvider(context.Background(), provider)
+
+			result, err := adapter.Execute(ctx, sandbox, tt.prompt, logCh)
+			require.NoError(t, err, "execute should succeed")
+			require.NotNil(t, result, "execute should return a result")
+			require.NotEmpty(t, provider.ExecCalls, "execute should invoke the Claude CLI")
+			require.Contains(t, provider.ExecCalls[0], "--permission-mode acceptEdits", "Claude CLI should auto-approve file edits inside the gVisor sandbox")
+			require.NotContains(t, provider.ExecCalls[0], "--dangerously-skip-permissions", "Claude CLI should not bypass every permission check while public internet egress is available")
+		})
+	}
+}
+
 func TestClaudeCodeAdapter_ResumeMode(t *testing.T) {
 	t.Parallel()
 

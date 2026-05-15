@@ -786,3 +786,25 @@ func TestParseConfig_CommittedDogfoodConfig(t *testing.T) {
 		dir = parent
 	}
 }
+
+func TestCommittedDogfoodFrontendScriptBindsExternally(t *testing.T) {
+	t.Parallel()
+
+	// Walk up from the package dir to the repo root (where `.143/` lives).
+	dir, err := os.Getwd()
+	require.NoError(t, err, "test should resolve the package working directory")
+	for {
+		candidate := filepath.Join(dir, ".143", "preview-frontend.sh")
+		if _, err := os.Stat(candidate); err == nil {
+			raw, err := os.ReadFile(candidate)
+			require.NoError(t, err, "test should read committed dogfood frontend preview script")
+			require.Contains(t, string(raw), "--hostname 0.0.0.0", "dogfood Next preview must bind externally so the worker proxy can dial the sandbox IP")
+			return
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			t.Skip("repo root .143/preview-frontend.sh not found from test working directory")
+		}
+		dir = parent
+	}
+}

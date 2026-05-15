@@ -79,4 +79,30 @@ describe('SidebarSettingsSection', () => {
       expect(screen.queryByText(hidden)).not.toBeInTheDocument();
     }
   });
+
+  it('shows only builder-safe settings entries for builders', () => {
+    renderWithProviders(
+      <SidebarSettingsSection pathname="/settings/account" userRole="builder" />
+    );
+
+    for (const visible of [
+      'Account',
+      'Coding agents',
+    ]) {
+      expect(screen.getByText(visible)).toBeInTheDocument();
+    }
+
+    for (const hidden of [
+      'Integrations',
+      'Evals',
+      'Team',
+      'LLM',
+      'Autopilot',
+      'General',
+      'Usage',
+      'Audit log',
+    ]) {
+      expect(screen.queryByText(hidden)).not.toBeInTheDocument();
+    }
+  });
 });

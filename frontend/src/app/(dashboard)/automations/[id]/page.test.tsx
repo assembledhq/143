@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from "vitest";
+import { beforeEach, describe, it, expect, vi } from "vitest";
 import { fireEvent, renderWithProviders, screen, userEvent, waitFor } from "@/test/test-utils";
 import { server } from "@/test/mocks/server";
 import { http, HttpResponse } from "msw";
@@ -6,6 +6,7 @@ import AutomationDetailPage from "./page";
 import { AUTOMATION_GOAL_MAX_LENGTH } from "@/lib/automation-validation";
 
 const pushMock = vi.fn();
+const currentUserRole = vi.hoisted(() => ({ value: "member" }));
 
 vi.mock("next/link", () => ({
   default: ({ children, href, ...props }: React.ComponentProps<"a"> & { href: string }) => (
@@ -22,8 +23,98 @@ vi.mock("next/navigation", () => ({
   useSearchParams: () => new URLSearchParams("tab=paused"),
 }));
 
+vi.mock("@/hooks/use-auth", () => ({
+  useAuth: () => ({
+    user: { role: currentUserRole.value },
+    isLoading: false,
+  }),
+}));
+
+vi.mock("./automation-stats-card", () => ({
+  AutomationStatsCard: () => <div data-testid="automation-stats-card" />,
+}));
+
 describe("AutomationDetailPage", () => {
+  beforeEach(() => {
+    currentUserRole.value = "member";
+    pushMock.mockReset();
+  });
+
   it("matches the schedule controls and labels to the app input sizing", async () => {
+    server.use(
+      http.get("*/api/v1/automations/auto-1", () => HttpResponse.json({
+        data: {
+          id: "auto-1",
+          org_id: "org-1",
+          repository_id: "repo-1",
+          name: "Weekly audit",
+          goal: "Check release health",
+          scope: "",
+          icon_type: "emoji",
+          icon_value: "🧪",
+          interval_value: 1,
+          interval_unit: "weeks",
+          base_branch: "main",
+          enabled: true,
+          timezone: "UTC",
+          last_run_at: null,
+          next_run_at: null,
+          priority: 50,
+          created_at: "2026-01-01T00:00:00Z",
+          updated_at: "2026-01-01T00:00:00Z",
+        },
+      })),
+      http.get("*/api/v1/automations/auto-1/runs*", () => HttpResponse.json({ data: [], meta: {} })),
+      http.get("*/api/v1/automations/auto-1/stats*", () => HttpResponse.json({
+        data: {
+          since: "2026-01-01T00:00:00Z",
+          until: "2026-01-31T00:00:00Z",
+          buckets: [],
+          totals: {
+            total: 0,
+            completed: 0,
+            completed_noop: 0,
+            failed: 0,
+            skipped: 0,
+            running: 0,
+            pending: 0,
+            success_rate: 0,
+            avg_duration_seconds: 0,
+          },
+        },
+      })),
+    );
+
+    renderWithProviders(<AutomationDetailPage />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Weekly audit")).toBeInTheDocument();
+    });
+    expect(screen.getByLabelText("Automation icon for Weekly audit")).toHaveTextContent("🧪");
+
+    await userEvent.setup().click(screen.getByRole("tab", { name: "Settings" }));
+
+    const timezoneButton = screen.getByTitle("UTC");
+    const scheduleRow = timezoneButton.parentElement;
+    const runEveryText = screen.getByText("Run every");
+    const atText = screen.getByText("At");
+    const intervalUnitTrigger = screen.getByLabelText("Interval unit");
+    const hourTrigger = screen.getByLabelText("Run at hour");
+    const minuteTrigger = screen.getByLabelText("Run at minute");
+
+    expect(scheduleRow).toHaveClass("flex-wrap");
+    expect(timezoneButton).toHaveClass("w-full", "sm:w-auto");
+    expect(intervalUnitTrigger).toHaveClass("h-9", "text-xs");
+    expect(hourTrigger).toHaveClass("h-9", "text-xs");
+    expect(minuteTrigger).toHaveClass("h-9", "text-xs");
+    expect(timezoneButton).toHaveClass("h-9", "text-xs");
+    expect(runEveryText).toHaveClass("text-xs", "font-medium", "leading-none", "text-muted-foreground");
+    expect(atText).toHaveClass("text-xs", "font-medium", "leading-none", "text-muted-foreground");
+    expect(screen.queryByText(/Run time is in/i)).not.toBeInTheDocument();
+  });
+
+  it("hides member-only automation actions from builders", async () => {
+    currentUserRole.value = "builder";
     server.use(
       http.get("*/api/v1/automations/auto-1", () => HttpResponse.json({
         data: {
@@ -72,25 +163,11 @@ describe("AutomationDetailPage", () => {
       expect(screen.getByText("Weekly audit")).toBeInTheDocument();
     });
 
+    expect(screen.queryByRole("button", { name: "Pause" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Run now" })).not.toBeInTheDocument();
+
     await userEvent.setup().click(screen.getByRole("tab", { name: "Settings" }));
-
-    const timezoneButton = screen.getByTitle("UTC");
-    const scheduleRow = timezoneButton.parentElement;
-    const runEveryText = screen.getByText("Run every");
-    const atText = screen.getByText("At");
-    const intervalUnitTrigger = screen.getByLabelText("Interval unit");
-    const hourTrigger = screen.getByLabelText("Run at hour");
-    const minuteTrigger = screen.getByLabelText("Run at minute");
-
-    expect(scheduleRow).toHaveClass("flex-wrap");
-    expect(timezoneButton).toHaveClass("w-full", "sm:w-auto");
-    expect(intervalUnitTrigger).toHaveClass("h-9", "text-xs");
-    expect(hourTrigger).toHaveClass("h-9", "text-xs");
-    expect(minuteTrigger).toHaveClass("h-9", "text-xs");
-    expect(timezoneButton).toHaveClass("h-9", "text-xs");
-    expect(runEveryText).toHaveClass("text-xs", "font-medium", "leading-none", "text-muted-foreground");
-    expect(atText).toHaveClass("text-xs", "font-medium", "leading-none", "text-muted-foreground");
-    expect(screen.queryByText(/Run time is in/i)).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Save changes" })).not.toBeInTheDocument();
   });
 
   it("renders a back button to the automations list preserving query params", async () => {
@@ -277,6 +354,74 @@ describe("AutomationDetailPage", () => {
 
     await waitFor(() => {
       expect(updateBody).toMatchObject({ identity_scope: "personal" });
+    });
+  });
+
+  it("saves the selected automation emoji", async () => {
+    const user = userEvent.setup();
+    let updateBody: Record<string, unknown> | null = null;
+
+    server.use(
+      http.get("*/api/v1/automations/auto-1", () => HttpResponse.json({
+        data: {
+          id: "auto-1",
+          org_id: "org-1",
+          repository_id: "repo-1",
+          name: "Weekly audit",
+          goal: "Check release health",
+          scope: "",
+          icon_type: "emoji",
+          icon_value: "🧪",
+          interval_value: 1,
+          interval_unit: "weeks",
+          base_branch: "main",
+          enabled: true,
+          timezone: "UTC",
+          last_run_at: null,
+          next_run_at: null,
+          priority: 50,
+          created_at: "2026-01-01T00:00:00Z",
+          updated_at: "2026-01-01T00:00:00Z",
+        },
+      })),
+      http.get("*/api/v1/automations/auto-1/runs*", () => HttpResponse.json({ data: [], meta: {} })),
+      http.get("*/api/v1/automations/auto-1/stats*", () => HttpResponse.json({
+        data: {
+          since: "2026-01-01T00:00:00Z",
+          until: "2026-01-31T00:00:00Z",
+          buckets: [],
+          totals: {
+            total: 0,
+            completed: 0,
+            completed_noop: 0,
+            failed: 0,
+            skipped: 0,
+            running: 0,
+            pending: 0,
+            success_rate: 0,
+            avg_duration_seconds: 0,
+          },
+        },
+      })),
+      http.patch("*/api/v1/automations/auto-1", async ({ request }) => {
+        updateBody = await request.json() as Record<string, unknown>;
+        return HttpResponse.json({ data: { id: "auto-1" } });
+      }),
+    );
+
+    renderWithProviders(<AutomationDetailPage />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Weekly audit")).toBeInTheDocument();
+    });
+
+    await user.click(screen.getByRole("tab", { name: "Settings" }));
+    await user.click(screen.getByRole("button", { name: "Automation emoji" }));
+    await user.click(await screen.findByRole("option", { name: /Rocket/ }));
+    await user.click(screen.getByRole("button", { name: "Save changes" }));
+
+    await waitFor(() => {
+      expect(updateBody).toMatchObject({ icon_type: "emoji", icon_value: "🚀" });
     });
   });
 

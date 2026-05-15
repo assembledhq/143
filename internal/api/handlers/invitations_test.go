@@ -24,7 +24,7 @@ import (
 // GetByToken / GetByID — duplicated here rather than imported because the
 // test file lives in the handlers package, not internal/db.
 var invitationRowColumns = []string{
-	"id", "org_id", "email", "github_username", "role",
+	"id", "org_id", "email", "github_username", "acceptance_method", "role",
 	"invited_by", "token", "status", "expires_at", "created_at", "accepted_at",
 }
 
@@ -170,7 +170,7 @@ func TestAuthHandler_AcceptInvitationByID_Success(t *testing.T) {
 		WithArgs(pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows(invitationRowColumns).
-				AddRow(invID, invOrgID, strPtr("u@example.com"), nil, "member", uuid.New(), "tok", "pending", now.Add(time.Hour), now, nil),
+				AddRow(invID, invOrgID, strPtr("u@example.com"), nil, models.InvitationAcceptanceMethodEither, "member", uuid.New(), "tok", "pending", now.Add(time.Hour), now, nil),
 		)
 	mock.ExpectBegin()
 	mock.ExpectExec("UPDATE invitations SET status = 'accepted'").
@@ -222,7 +222,7 @@ func TestAuthHandler_AcceptInvitationByID_Mismatch_Returns403(t *testing.T) {
 		WithArgs(pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows(invitationRowColumns).
-				AddRow(invID, uuid.New(), strPtr("someone-else@example.com"), nil, "member", uuid.New(), "tok", "pending", now.Add(time.Hour), now, nil),
+				AddRow(invID, uuid.New(), strPtr("someone-else@example.com"), nil, models.InvitationAcceptanceMethodEither, "member", uuid.New(), "tok", "pending", now.Add(time.Hour), now, nil),
 		)
 
 	handler := NewAuthHandler(&config.Config{}, mock, db.NewUserStore(mock), nil, db.NewInvitationStore(mock), db.NewOrganizationMembershipStore(mock))
@@ -254,7 +254,7 @@ func TestAuthHandler_AcceptInvitationByID_Expired_Returns410(t *testing.T) {
 		WithArgs(pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows(invitationRowColumns).
-				AddRow(invID, uuid.New(), strPtr("u@example.com"), nil, "member", uuid.New(), "tok", "pending", now.Add(-time.Hour), now.Add(-2*time.Hour), nil),
+				AddRow(invID, uuid.New(), strPtr("u@example.com"), nil, models.InvitationAcceptanceMethodEither, "member", uuid.New(), "tok", "pending", now.Add(-time.Hour), now.Add(-2*time.Hour), nil),
 		)
 
 	handler := NewAuthHandler(&config.Config{}, mock, db.NewUserStore(mock), nil, db.NewInvitationStore(mock), db.NewOrganizationMembershipStore(mock))
@@ -287,7 +287,7 @@ func TestAuthHandler_AcceptInvitationByID_AcceptRace_Returns410(t *testing.T) {
 		WithArgs(pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows(invitationRowColumns).
-				AddRow(invID, uuid.New(), strPtr("u@example.com"), nil, "member", uuid.New(), "tok", "pending", now.Add(time.Hour), now, nil),
+				AddRow(invID, uuid.New(), strPtr("u@example.com"), nil, models.InvitationAcceptanceMethodEither, "member", uuid.New(), "tok", "pending", now.Add(time.Hour), now, nil),
 		)
 	mock.ExpectBegin()
 	mock.ExpectExec("UPDATE invitations SET status = 'accepted'").
@@ -337,7 +337,7 @@ func TestAuthHandler_AcceptInvitationByID_DoesNotUpdateLastOrgID(t *testing.T) {
 		WithArgs(pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows(invitationRowColumns).
-				AddRow(invID, uuid.New(), strPtr("u@example.com"), nil, "member", uuid.New(), "tok", "pending", now.Add(time.Hour), now, nil),
+				AddRow(invID, uuid.New(), strPtr("u@example.com"), nil, models.InvitationAcceptanceMethodEither, "member", uuid.New(), "tok", "pending", now.Add(time.Hour), now, nil),
 		)
 	mock.ExpectBegin()
 	mock.ExpectExec("UPDATE invitations SET status = 'accepted'").
@@ -378,7 +378,7 @@ func TestAuthHandler_DeclineInvitationByID_Success(t *testing.T) {
 		WithArgs(pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows(invitationRowColumns).
-				AddRow(invID, invOrgID, strPtr("u@example.com"), nil, "member", uuid.New(), "tok", "pending", now.Add(time.Hour), now, nil),
+				AddRow(invID, invOrgID, strPtr("u@example.com"), nil, models.InvitationAcceptanceMethodEither, "member", uuid.New(), "tok", "pending", now.Add(time.Hour), now, nil),
 		)
 	mock.ExpectExec("UPDATE invitations SET status = 'revoked'").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
@@ -423,7 +423,7 @@ func TestAuthHandler_DeclineInvitationByID_Mismatch_Returns403(t *testing.T) {
 		WithArgs(pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows(invitationRowColumns).
-				AddRow(invID, uuid.New(), strPtr("someone-else@example.com"), nil, "member", uuid.New(), "tok", "pending", now.Add(time.Hour), now, nil),
+				AddRow(invID, uuid.New(), strPtr("someone-else@example.com"), nil, models.InvitationAcceptanceMethodEither, "member", uuid.New(), "tok", "pending", now.Add(time.Hour), now, nil),
 		)
 
 	handler := NewAuthHandler(&config.Config{}, mock, db.NewUserStore(mock), nil, db.NewInvitationStore(mock), db.NewOrganizationMembershipStore(mock))
@@ -454,7 +454,7 @@ func TestAuthHandler_DeclineInvitationByID_AlreadyResolved_Returns410(t *testing
 		WithArgs(pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows(invitationRowColumns).
-				AddRow(invID, uuid.New(), strPtr("u@example.com"), nil, "member", uuid.New(), "tok", "pending", now.Add(time.Hour), now, nil),
+				AddRow(invID, uuid.New(), strPtr("u@example.com"), nil, models.InvitationAcceptanceMethodEither, "member", uuid.New(), "tok", "pending", now.Add(time.Hour), now, nil),
 		)
 	mock.ExpectExec("UPDATE invitations SET status = 'revoked'").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
@@ -492,7 +492,7 @@ func TestAuthHandler_DeclineInvitationByID_Expired_AllowsDismissal(t *testing.T)
 		WithArgs(pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows(invitationRowColumns).
-				AddRow(invID, invOrgID, strPtr("u@example.com"), nil, "member", uuid.New(), "tok", "pending", now.Add(-time.Hour), now.Add(-2*time.Hour), nil),
+				AddRow(invID, invOrgID, strPtr("u@example.com"), nil, models.InvitationAcceptanceMethodEither, "member", uuid.New(), "tok", "pending", now.Add(-time.Hour), now.Add(-2*time.Hour), nil),
 		)
 	mock.ExpectExec("UPDATE invitations SET status = 'revoked'").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
@@ -538,7 +538,7 @@ func TestAuthHandler_AcceptInvitationByID_Expired_Still410(t *testing.T) {
 		WithArgs(pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows(invitationRowColumns).
-				AddRow(invID, uuid.New(), strPtr("u@example.com"), nil, "member", uuid.New(), "tok", "pending", now.Add(-time.Hour), now.Add(-2*time.Hour), nil),
+				AddRow(invID, uuid.New(), strPtr("u@example.com"), nil, models.InvitationAcceptanceMethodEither, "member", uuid.New(), "tok", "pending", now.Add(-time.Hour), now.Add(-2*time.Hour), nil),
 		)
 
 	handler := NewAuthHandler(&config.Config{}, mock, db.NewUserStore(mock), nil, db.NewInvitationStore(mock), db.NewOrganizationMembershipStore(mock))

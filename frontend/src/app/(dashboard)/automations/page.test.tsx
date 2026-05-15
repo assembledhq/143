@@ -1,11 +1,21 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { http, HttpResponse } from "msw";
 import { renderWithProviders, screen } from "@/test/test-utils";
 import { server } from "@/test/mocks/server";
 import AutomationsPage from "./page";
 
+const currentUserRole = vi.hoisted(() => ({ value: "member" }));
+
+vi.mock("@/hooks/use-auth", () => ({
+  useAuth: () => ({
+    user: { role: currentUserRole.value },
+    isLoading: false,
+  }),
+}));
+
 describe("AutomationsPage", () => {
   it("renders automation cards with mobile-friendly stacked details", async () => {
+    currentUserRole.value = "member";
     server.use(
       http.get("*/api/v1/automations", () => HttpResponse.json({
         data: [
@@ -16,6 +26,8 @@ describe("AutomationsPage", () => {
             name: "Weekly release hardening sweep for mobile checkout reliability",
             goal: "Keep the mobile checkout stable",
             scope: "",
+            icon_type: "emoji",
+            icon_value: "🧪",
             execution_mode: "async",
             max_concurrent: 1,
             base_branch: "main",
@@ -59,6 +71,7 @@ describe("AutomationsPage", () => {
 
     const title = await screen.findByText("Weekly release hardening sweep for mobile checkout reliability");
     expect(title).toHaveClass("break-words", "leading-5");
+    expect(screen.getByLabelText("Automation icon for Weekly release hardening sweep for mobile checkout reliability")).toHaveTextContent("🧪");
 
     const schedule = screen.getByText(/every 2 weeks at/);
     expect(schedule).toHaveClass("block", "break-words", "leading-5", "sm:max-w-[18rem]", "sm:text-right");
@@ -71,5 +84,40 @@ describe("AutomationsPage", () => {
       name: "More options for Weekly release hardening sweep for mobile checkout reliability",
     });
     expect(menuButton).toHaveClass("self-start", "shrink-0");
+  });
+
+  it("hides member-only create and mutation controls from builders", async () => {
+    currentUserRole.value = "builder";
+    server.use(
+      http.get("*/api/v1/automations", () => HttpResponse.json({
+        data: [
+          {
+            id: "auto-enabled",
+            org_id: "org-1",
+            repository_id: "repo-1",
+            name: "Weekly sweep",
+            goal: "Keep things healthy",
+            scope: "",
+            execution_mode: "async",
+            max_concurrent: 1,
+            base_branch: "main",
+            schedule_type: "interval",
+            interval_value: 1,
+            interval_unit: "weeks",
+            enabled: true,
+            priority: 50,
+            created_at: "2026-04-01T00:00:00Z",
+            updated_at: "2026-04-01T00:00:00Z",
+          },
+        ],
+        meta: {},
+      })),
+    );
+
+    renderWithProviders(<AutomationsPage />);
+
+    await screen.findByText("Weekly sweep");
+    expect(screen.queryByRole("link", { name: /new/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /more options for weekly sweep/i })).not.toBeInTheDocument();
   });
 });

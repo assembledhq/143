@@ -221,6 +221,34 @@ func TestPreviewStore_GetActivePreviewForSession(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
+func TestPreviewStore_GetLatestFailedPreviewForSession(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	store := NewPreviewStore(mock)
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	previewID := uuid.New()
+	userID := uuid.New()
+	now := time.Now()
+
+	mock.ExpectQuery("SELECT .+ FROM preview_instances.+status = 'failed'.+ORDER BY created_at DESC").
+		WithArgs(previewAnyArgs(2)...).
+		WillReturnRows(
+			pgxmock.NewRows(previewInstanceTestCols).
+				AddRow(newPreviewInstanceRow(previewID, sessionID, orgID, userID, now)...),
+		)
+
+	instance, err := store.GetLatestFailedPreviewForSession(context.Background(), orgID, sessionID)
+	require.NoError(t, err, "GetLatestFailedPreviewForSession should return the latest failed preview")
+	require.Equal(t, previewID, instance.ID, "GetLatestFailedPreviewForSession should return the expected preview")
+	require.Equal(t, orgID, instance.OrgID, "GetLatestFailedPreviewForSession should preserve org scoping")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func TestPreviewStore_UpdatePreviewStatus(t *testing.T) {
 	t.Parallel()
 

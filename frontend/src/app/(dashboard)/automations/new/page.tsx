@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { ChevronDown, Loader2 } from "lucide-react";
 import { useRouter, useSearchParams } from "next/navigation";
@@ -24,6 +24,7 @@ import {
 import { api } from "@/lib/api";
 import { agentTypeForModel } from "@/lib/agents";
 import { AUTOMATION_GOAL_MAX_LENGTH, automationGoalLengthState } from "@/lib/automation-validation";
+import { useAuth } from "@/hooks/use-auth";
 import { BranchPicker } from "@/components/branch-picker";
 import { AutomationGoalEditor } from "@/components/automation-goal-editor";
 import { AutomationModelSelect } from "@/components/automation-model-select";
@@ -48,15 +49,25 @@ import {
   minuteOptions,
 } from "../schedule-time";
 import { TimezonePicker } from "../timezone-picker";
+import { AutomationEmojiPicker } from "../automation-emoji-picker";
 
 export default function NewAutomationPage() {
   const router = useRouter();
   const searchParams = useSearchParams();
+  const { user, isLoading } = useAuth();
+  const canManage = user?.role === "admin" || user?.role === "member";
   const initialTemplate = getAutomationTemplate(searchParams.get("template") ?? "");
+
+  useEffect(() => {
+    if (!isLoading && !canManage) {
+      router.replace("/automations");
+    }
+  }, [canManage, isLoading, router]);
 
   // Form state
   const [name, setName] = useState(initialTemplate?.name ?? "");
   const [goal, setGoal] = useState(initialTemplate?.goal ?? "");
+  const [iconValue, setIconValue] = useState("⚙️");
   const [scope, setScope] = useState("");
   const [selectedRepoId, setSelectedRepoId] = useState("");
   const [intervalValue, setIntervalValue] = useState(initialTemplate?.defaultInterval ?? 1);
@@ -116,6 +127,8 @@ export default function NewAutomationPage() {
       api.automations.create({
         name: name.trim(),
         goal: goal.trim(),
+        icon_type: "emoji",
+        icon_value: iconValue,
         repository_id: repoId,
         scope: scope.trim() || undefined,
         interval_value: intervalValue,
@@ -133,6 +146,10 @@ export default function NewAutomationPage() {
       router.push(`/automations/${res.data.id}`);
     },
   });
+
+  if (!isLoading && !canManage) {
+    return null;
+  }
 
   if (repos.length === 0 && reposData) {
     return (
@@ -230,6 +247,11 @@ export default function NewAutomationPage() {
 
         {/* Main form */}
         <div className="space-y-4 rounded-lg border border-border bg-card p-5">
+          <div className="space-y-1.5">
+            <Label>Emoji</Label>
+            <AutomationEmojiPicker value={iconValue} onChange={setIconValue} className="w-full sm:w-64" />
+          </div>
+
           <div className="space-y-1.5">
             <Label htmlFor="name">Name</Label>
             <Input

@@ -143,6 +143,16 @@ describe("ReviewDiffView", () => {
     expect(screen.getByTestId("keyboard-help")).toBeInTheDocument();
   });
 
+  it("does not rerender the diff pane when parent props are unchanged", () => {
+    const props = defaultProps();
+    const { rerender } = render(<ReviewDiffView {...props} />);
+    const initialRenderCount = mockDiffPaneRender.mock.calls.length;
+
+    rerender(<ReviewDiffView {...props} />);
+
+    expect(mockDiffPaneRender).toHaveBeenCalledTimes(initialRenderCount);
+  });
+
   it("passes an active file change handler to DiffPane", () => {
     const props = defaultProps();
     render(<ReviewDiffView {...props} />);

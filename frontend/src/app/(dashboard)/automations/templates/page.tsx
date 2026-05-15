@@ -4,6 +4,7 @@ import Link from "next/link";
 import { ArrowRight } from "lucide-react";
 import { PageContainer } from "@/components/page-container";
 import { PageHeader } from "@/components/page-header";
+import { useAuth } from "@/hooks/use-auth";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -14,19 +15,22 @@ import {
 } from "@/lib/automation-templates";
 
 export default function AutomationTemplatesPage() {
+  const { user } = useAuth();
+  const canManage = user?.role === "admin" || user?.role === "member";
+
   return (
     <PageContainer size="default">
       <div className="space-y-6">
         <PageHeader
           title="Automation templates"
           description="Browse examples and richer prompts for recurring agent work. These templates favor clear scope, concrete outputs, and explicit verification."
-          action={
+          action={canManage ? (
             <Button asChild size="sm">
               <Link href="/automations/new">
                 New automation
               </Link>
             </Button>
-          }
+          ) : undefined}
         />
 
         <Card className="border-dashed">
@@ -112,12 +116,14 @@ export default function AutomationTemplatesPage() {
                             </div>
                           </div>
 
-                          <Button asChild variant="outline" size="sm">
-                            <Link href={`/automations/new?template=${template.id}`}>
-                              Use template
-                              <ArrowRight className="ml-1.5 h-3.5 w-3.5" />
-                            </Link>
-                          </Button>
+                          {canManage ? (
+                            <Button asChild variant="outline" size="sm">
+                              <Link href={`/automations/new?template=${template.id}`}>
+                                Use template
+                                <ArrowRight className="ml-1.5 h-3.5 w-3.5" />
+                              </Link>
+                            </Button>
+                          ) : null}
                         </CardContent>
                       </Card>
                     );

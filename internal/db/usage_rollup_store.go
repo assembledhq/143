@@ -2,10 +2,12 @@ package db
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -54,6 +56,57 @@ type tokenAggregate struct {
 	costUSD      float64
 }
 
+type executionKey struct {
+	agentType       string
+	modelUsed       string
+	reasoningEffort string
+	capacityKey     string
+}
+
+const (
+	usageUnknownCapacityKey = "unknown"
+	usageAllCapacityKey     = "__all__"
+)
+
+func normalizeUsageReasoning(reasoning *models.ReasoningEffort) string {
+	if reasoning == nil || *reasoning == "" {
+		return "default"
+	}
+	return string(*reasoning)
+}
+
+func normalizeUsageModel(modelUsed *string, tokenUsageRaw []byte) string {
+	var payload struct {
+		NativeUsage *struct {
+			Model string `json:"model"`
+		} `json:"native_usage"`
+	}
+	if len(tokenUsageRaw) > 0 && json.Unmarshal(tokenUsageRaw, &payload) == nil && payload.NativeUsage != nil {
+		if model := strings.TrimSpace(payload.NativeUsage.Model); model != "" {
+			return model
+		}
+	}
+	if modelUsed != nil && strings.TrimSpace(*modelUsed) != "" {
+		return strings.TrimSpace(*modelUsed)
+	}
+	return "unknown"
+}
+
+func usageTokenCostSQL(alias string) string {
+	return `COALESCE(
+				NULLIF(` + alias + `.token_usage->>'total_cost_usd', '')::double precision,
+				CASE
+					WHEN lower(` + alias + `.token_usage->'cost'->>'unit') = 'usd'
+					THEN NULLIF(` + alias + `.token_usage->'cost'->>'amount', '')::double precision
+				END,
+				CASE
+					WHEN lower(` + alias + `.token_usage->'native_cost'->>'unit') = 'usd'
+					THEN NULLIF(` + alias + `.token_usage->'native_cost'->>'amount', '')::double precision
+				END,
+				0
+			)`
+}
+
 // RollupHour computes and upserts hourly aggregates for a single org and hour.
 // It writes rows at multiple dimensional levels: org-total, per-user, per-tier.
 func (s *UsageRollupStore) RollupHour(ctx context.Context, orgID uuid.UUID, hour time.Time) error {
@@ -66,6 +119,10 @@ func (s *UsageRollupStore) RollupHour(ctx context.Context, orgID uuid.UUID, hour
 			e.id,
 			e.session_id,
 			COALESCE(s.triggered_by_user_id, '00000000-0000-0000-0000-000000000000'::uuid) AS user_id,
+			s.agent_type,
+			s.model_override AS model_used,
+			s.reasoning_effort,
+			s.token_usage,
 			e.cpu_limit,
 			e.memory_limit_mb,
 			e.started_at,
@@ -95,20 +152,27 @@ func (s *UsageRollupStore) RollupHour(ctx context.Context, orgID uuid.UUID, hour
 		capacityTier string
 	}
 	aggregates := make(map[dimKey]*containerAggregate)
+	executionAgg := make(map[executionKey]*containerAggregate)
 
 	for rows.Next() {
 		var (
-			eventID    uuid.UUID
-			sessionID  uuid.UUID
-			userID     uuid.UUID
-			cpuLimit   float64
-			memoryMB   int
-			startedAt  time.Time
-			stoppedAt  time.Time
-			minutes    float64
-			durationMs float64
+			eventID         uuid.UUID
+			sessionID       uuid.UUID
+			userID          uuid.UUID
+			agentType       string
+			modelUsed       *string
+			reasoningEffort *models.ReasoningEffort
+			tokenUsageRaw   []byte
+			cpuLimit        float64
+			memoryMB        int
+			startedAt       time.Time
+			stoppedAt       time.Time
+			minutes         float64
+			durationMs      float64
 		)
-		if err := rows.Scan(&eventID, &sessionID, &userID, &cpuLimit, &memoryMB,
+		if err := rows.Scan(&eventID, &sessionID, &userID,
+			&agentType, &modelUsed, &reasoningEffort, &tokenUsageRaw,
+			&cpuLimit, &memoryMB,
 			&startedAt, &stoppedAt, &minutes, &durationMs); err != nil {
 			return fmt.Errorf("scan container event: %w", err)
 		}
@@ -153,6 +217,44 @@ func (s *UsageRollupStore) RollupHour(ctx context.Context, orgID uuid.UUID, hour
 		}
 		agg.durations = append(agg.durations, clippedDurationSec)
 		agg.intervals = append(agg.intervals, timeInterval{start: clippedStart, stop: clippedStop})
+
+		execKey := executionKey{
+			agentType:       agentType,
+			modelUsed:       normalizeUsageModel(modelUsed, tokenUsageRaw),
+			reasoningEffort: normalizeUsageReasoning(reasoningEffort),
+			capacityKey:     tier,
+		}
+		execAgg, ok := executionAgg[execKey]
+		if !ok {
+			execAgg = &containerAggregate{sessionIDs: make(map[uuid.UUID]struct{})}
+			executionAgg[execKey] = execAgg
+		}
+		execAgg.totalMinutes += clippedMinutes
+		if !startedAt.Before(hour) && startedAt.Before(hourEnd) {
+			execAgg.totalStarts++
+		}
+		execAgg.sessionIDs[sessionID] = struct{}{}
+		execAgg.durations = append(execAgg.durations, clippedDurationSec)
+		execAgg.intervals = append(execAgg.intervals, timeInterval{start: clippedStart, stop: clippedStop})
+
+		allCapacityKey := executionKey{
+			agentType:       agentType,
+			modelUsed:       normalizeUsageModel(modelUsed, tokenUsageRaw),
+			reasoningEffort: normalizeUsageReasoning(reasoningEffort),
+			capacityKey:     usageAllCapacityKey,
+		}
+		allCapacityAgg, ok := executionAgg[allCapacityKey]
+		if !ok {
+			allCapacityAgg = &containerAggregate{sessionIDs: make(map[uuid.UUID]struct{})}
+			executionAgg[allCapacityKey] = allCapacityAgg
+		}
+		allCapacityAgg.totalMinutes += clippedMinutes
+		if !startedAt.Before(hour) && startedAt.Before(hourEnd) {
+			allCapacityAgg.totalStarts++
+		}
+		allCapacityAgg.sessionIDs[sessionID] = struct{}{}
+		allCapacityAgg.durations = append(allCapacityAgg.durations, clippedDurationSec)
+		allCapacityAgg.intervals = append(allCapacityAgg.intervals, timeInterval{start: clippedStart, stop: clippedStop})
 	}
 	if err := rows.Err(); err != nil {
 		return fmt.Errorf("iterate container events: %w", err)
@@ -166,17 +268,38 @@ func (s *UsageRollupStore) RollupHour(ctx context.Context, orgID uuid.UUID, hour
 	tokenRows, err := s.db.Query(ctx, `
 		SELECT
 			COALESCE(s.triggered_by_user_id, '00000000-0000-0000-0000-000000000000'::uuid) AS user_id,
+			s.agent_type,
+			s.model_override AS model_used,
+			s.reasoning_effort,
+			s.token_usage,
+			COALESCE((
+				SELECT format('%scpu_%smb', round(e.cpu_limit)::int, e.memory_limit_mb)
+				FROM container_usage_events e
+				WHERE e.org_id = s.org_id
+				  AND e.session_id = s.id
+				  AND e.started_at < @hour_end
+				  AND COALESCE(e.stopped_at, @now) > @hour_start
+				GROUP BY round(e.cpu_limit)::int, e.memory_limit_mb
+				ORDER BY SUM(EXTRACT(EPOCH FROM (
+					LEAST(COALESCE(e.stopped_at, @now), @hour_end) - GREATEST(e.started_at, @hour_start)
+				))) DESC
+				LIMIT 1
+			), @unknown_capacity) AS capacity_key,
 			COALESCE((s.token_usage->>'input_tokens')::bigint, 0) AS input_tokens,
 			COALESCE((s.token_usage->>'output_tokens')::bigint, 0) AS output_tokens,
-			COALESCE((s.token_usage->>'total_cost_usd')::double precision, 0) AS cost_usd
+			`+usageTokenCostSQL("s")+` AS cost_usd
 		FROM sessions s
 		WHERE s.org_id = @org_id
 		  AND s.token_usage IS NOT NULL
 		  AND s.completed_at IS NOT NULL
 		  AND date_trunc('hour', s.completed_at) = @hour`,
 		pgx.NamedArgs{
-			"org_id": orgID,
-			"hour":   hour,
+			"org_id":           orgID,
+			"hour":             hour,
+			"hour_start":       hour,
+			"hour_end":         hourEnd,
+			"now":              time.Now().UTC(),
+			"unknown_capacity": usageUnknownCapacityKey,
 		},
 	)
 	if err != nil {
@@ -186,10 +309,18 @@ func (s *UsageRollupStore) RollupHour(ctx context.Context, orgID uuid.UUID, hour
 
 	// Aggregate tokens by user_id.
 	tokensByUser := make(map[uuid.UUID]*tokenAggregate)
+	tokensByExecution := make(map[executionKey]*tokenAggregate)
 	for tokenRows.Next() {
 		var userID uuid.UUID
+		var (
+			agentType       string
+			modelUsed       *string
+			reasoningEffort *models.ReasoningEffort
+			tokenUsageRaw   []byte
+			capacityKey     string
+		)
 		var ta tokenAggregate
-		if err := tokenRows.Scan(&userID, &ta.inputTokens, &ta.outputTokens, &ta.costUSD); err != nil {
+		if err := tokenRows.Scan(&userID, &agentType, &modelUsed, &reasoningEffort, &tokenUsageRaw, &capacityKey, &ta.inputTokens, &ta.outputTokens, &ta.costUSD); err != nil {
 			return fmt.Errorf("scan token usage: %w", err)
 		}
 		existing, ok := tokensByUser[userID]
@@ -199,6 +330,36 @@ func (s *UsageRollupStore) RollupHour(ctx context.Context, orgID uuid.UUID, hour
 			existing.inputTokens += ta.inputTokens
 			existing.outputTokens += ta.outputTokens
 			existing.costUSD += ta.costUSD
+		}
+		key := executionKey{
+			agentType:       agentType,
+			modelUsed:       normalizeUsageModel(modelUsed, tokenUsageRaw),
+			reasoningEffort: normalizeUsageReasoning(reasoningEffort),
+			capacityKey:     capacityKey,
+		}
+		existingByExecution, ok := tokensByExecution[key]
+		if !ok {
+			copyTA := ta
+			tokensByExecution[key] = &copyTA
+		} else {
+			existingByExecution.inputTokens += ta.inputTokens
+			existingByExecution.outputTokens += ta.outputTokens
+			existingByExecution.costUSD += ta.costUSD
+		}
+		allCapacityKey := executionKey{
+			agentType:       agentType,
+			modelUsed:       normalizeUsageModel(modelUsed, tokenUsageRaw),
+			reasoningEffort: normalizeUsageReasoning(reasoningEffort),
+			capacityKey:     usageAllCapacityKey,
+		}
+		existingAllCapacity, ok := tokensByExecution[allCapacityKey]
+		if !ok {
+			copyTA := ta
+			tokensByExecution[allCapacityKey] = &copyTA
+		} else {
+			existingAllCapacity.inputTokens += ta.inputTokens
+			existingAllCapacity.outputTokens += ta.outputTokens
+			existingAllCapacity.costUSD += ta.costUSD
 		}
 	}
 	if err := tokenRows.Err(); err != nil {
@@ -219,8 +380,19 @@ func (s *UsageRollupStore) RollupHour(ctx context.Context, orgID uuid.UUID, hour
 		outputTokens int64
 		costUSD      float64
 	}
+	type executionUpsertRow struct {
+		key          executionKey
+		minutes      float64
+		sessions     int
+		starts       int
+		peak         int
+		inputTokens  int64
+		outputTokens int64
+		costUSD      float64
+	}
 
 	var upserts []upsertRow
+	executionUpserts := make([]executionUpsertRow, 0, len(executionAgg)+len(tokensByExecution))
 
 	// Level 1: Per-user-tier (finest grain).
 	// Token counts are intentionally zero at this level — tokens are attributed
@@ -383,6 +555,34 @@ func (s *UsageRollupStore) RollupHour(ctx context.Context, orgID uuid.UUID, hour
 		costUSD:      orgTokens.costUSD,
 	})
 
+	for key, agg := range executionAgg {
+		tokens := tokensByExecution[key]
+		row := executionUpsertRow{
+			key:      key,
+			minutes:  agg.totalMinutes,
+			sessions: len(agg.sessionIDs),
+			starts:   agg.totalStarts,
+			peak:     computePeakConcurrent(agg.intervals),
+		}
+		if tokens != nil {
+			row.inputTokens = tokens.inputTokens
+			row.outputTokens = tokens.outputTokens
+			row.costUSD = tokens.costUSD
+		}
+		executionUpserts = append(executionUpserts, row)
+	}
+	for key, tokens := range tokensByExecution {
+		if _, ok := executionAgg[key]; ok {
+			continue
+		}
+		executionUpserts = append(executionUpserts, executionUpsertRow{
+			key:          key,
+			inputTokens:  tokens.inputTokens,
+			outputTokens: tokens.outputTokens,
+			costUSD:      tokens.costUSD,
+		})
+	}
+
 	// Upsert all rows using a batch to avoid N individual round-trips.
 	const upsertSQL = `
 		INSERT INTO usage_hourly (
@@ -428,6 +628,44 @@ func (s *UsageRollupStore) RollupHour(ctx context.Context, orgID uuid.UUID, hour
 			"total_llm_cost_usd":      row.costUSD,
 		})
 	}
+	const executionUpsertSQL = `
+		INSERT INTO usage_hourly_execution (
+			org_id, hour_utc, agent_type, model_used, reasoning_effort, capacity_key,
+			total_container_minutes, total_sessions, total_container_starts, peak_concurrent,
+			total_input_tokens, total_output_tokens, total_tokens, total_llm_cost_usd, updated_at
+		) VALUES (
+			@org_id, @hour_utc, @agent_type, @model_used, @reasoning_effort, @capacity_key,
+			@total_container_minutes, @total_sessions, @total_container_starts, @peak_concurrent,
+			@total_input_tokens, @total_output_tokens, @total_tokens, @total_llm_cost_usd, now()
+		)
+		ON CONFLICT (org_id, hour_utc, agent_type, model_used, reasoning_effort, capacity_key) DO UPDATE SET
+			total_container_minutes = EXCLUDED.total_container_minutes,
+			total_sessions = EXCLUDED.total_sessions,
+			total_container_starts = EXCLUDED.total_container_starts,
+			peak_concurrent = EXCLUDED.peak_concurrent,
+			total_input_tokens = EXCLUDED.total_input_tokens,
+			total_output_tokens = EXCLUDED.total_output_tokens,
+			total_tokens = EXCLUDED.total_tokens,
+			total_llm_cost_usd = EXCLUDED.total_llm_cost_usd,
+			updated_at = now()`
+	for _, row := range executionUpserts {
+		batch.Queue(executionUpsertSQL, pgx.NamedArgs{
+			"org_id":                  orgID,
+			"hour_utc":                hour,
+			"agent_type":              row.key.agentType,
+			"model_used":              row.key.modelUsed,
+			"reasoning_effort":        row.key.reasoningEffort,
+			"capacity_key":            row.key.capacityKey,
+			"total_container_minutes": row.minutes,
+			"total_sessions":          row.sessions,
+			"total_container_starts":  row.starts,
+			"peak_concurrent":         row.peak,
+			"total_input_tokens":      row.inputTokens,
+			"total_output_tokens":     row.outputTokens,
+			"total_tokens":            row.inputTokens + row.outputTokens,
+			"total_llm_cost_usd":      row.costUSD,
+		})
+	}
 
 	// Wrap the batch in a transaction so a partial failure doesn't leave
 	// inconsistent dimensional rows (e.g. per-user rows without an org-total).
@@ -440,10 +678,10 @@ func (s *UsageRollupStore) RollupHour(ctx context.Context, orgID uuid.UUID, hour
 		defer tx.Rollback(ctx) //nolint:errcheck
 
 		br := tx.SendBatch(ctx, batch)
-		for i := 0; i < len(upserts); i++ {
+		for i := 0; i < len(upserts)+len(executionUpserts); i++ {
 			if _, err := br.Exec(); err != nil {
 				_ = br.Close()
-				return fmt.Errorf("upsert usage_hourly (batch item %d): %w", i, err)
+				return fmt.Errorf("upsert usage rollups (batch item %d): %w", i, err)
 			}
 		}
 		_ = br.Close()
@@ -453,9 +691,9 @@ func (s *UsageRollupStore) RollupHour(ctx context.Context, orgID uuid.UUID, hour
 	// Fallback for DBTX implementations that don't support transactions (tests).
 	br := s.db.SendBatch(ctx, batch)
 	defer br.Close()
-	for i := 0; i < len(upserts); i++ {
+	for i := 0; i < len(upserts)+len(executionUpserts); i++ {
 		if _, err := br.Exec(); err != nil {
-			return fmt.Errorf("upsert usage_hourly (batch item %d): %w", i, err)
+			return fmt.Errorf("upsert usage rollups (batch item %d): %w", i, err)
 		}
 	}
 
@@ -526,7 +764,7 @@ func (s *UsageRollupStore) RollupAllOrgs(ctx context.Context, hour time.Time) er
 }
 
 // GetTimeseries returns hourly usage buckets for the given org and time range.
-func (s *UsageRollupStore) GetTimeseries(ctx context.Context, orgID uuid.UUID, start, end time.Time, groupBy string, userID *uuid.UUID, capacity *string) ([]models.UsageTimeseriesBucket, error) {
+func (s *UsageRollupStore) GetTimeseries(ctx context.Context, orgID uuid.UUID, start, end time.Time, groupBy, stackBy string, userID *uuid.UUID, capacity *string, filters UsageExecutionFilters) ([]models.UsageTimeseriesBucket, error) {
 	var query string
 	args := pgx.NamedArgs{
 		"org_id": orgID,
@@ -534,24 +772,98 @@ func (s *UsageRollupStore) GetTimeseries(ctx context.Context, orgID uuid.UUID, s
 		"end":    end,
 	}
 
-	switch groupBy {
-	case "user":
+	useExecution := stackBy != "" || filters.HasAny() || (capacity != nil && groupBy == "hour")
+	executionSeriesBy := stackBy
+	if executionSeriesBy == "" && groupBy == "capacity" {
+		executionSeriesBy = "capacity"
+	}
+	switch {
+	case useExecution:
+		where := `
+			WHERE uhe.org_id = @org_id AND uhe.hour_utc >= @start AND uhe.hour_utc < @end`
+		where = applyUsageExecutionFilters(where, args, "uhe", filters)
+		args["all_capacity"] = usageAllCapacityKey
+		if executionSeriesBy == "capacity" || capacity != nil {
+			where += ` AND uhe.capacity_key <> @all_capacity`
+			args["unknown_capacity"] = usageUnknownCapacityKey
+		} else {
+			where += ` AND uhe.capacity_key = @all_capacity`
+		}
+		if capacity != nil {
+			where += ` AND uhe.capacity_key = @capacity`
+			args["capacity"] = *capacity
+		}
+		seriesKeyExpr := `NULL::text`
+		seriesLabelExpr := `NULL::text`
+		capacityExpr := `NULL::text`
+		agentExpr := `NULL::text`
+		modelExpr := `NULL::text`
+		reasoningExpr := `NULL::text`
+		if executionSeriesBy == "capacity" || capacity != nil {
+			capacityExpr = `NULLIF(uhe.capacity_key, @unknown_capacity)`
+		}
+		switch executionSeriesBy {
+		case "agent":
+			seriesKeyExpr = `uhe.agent_type`
+			seriesLabelExpr = breakdownLabelSQL("agent", "uhe.agent_type")
+			agentExpr = `uhe.agent_type`
+		case "model":
+			seriesKeyExpr = `uhe.model_used`
+			seriesLabelExpr = breakdownLabelSQL("model", "uhe.model_used")
+			modelExpr = `uhe.model_used`
+		case "reasoning":
+			seriesKeyExpr = `uhe.reasoning_effort`
+			seriesLabelExpr = breakdownLabelSQL("reasoning", "uhe.reasoning_effort")
+			reasoningExpr = `uhe.reasoning_effort`
+		case "capacity":
+			seriesKeyExpr = `uhe.capacity_key`
+			seriesLabelExpr = `NULLIF(uhe.capacity_key, @unknown_capacity)`
+		}
+		groupBy := []string{"uhe.hour_utc", "series_key", "series_label"}
+		query = `
+			SELECT
+				uhe.hour_utc,
+				NULL::uuid AS user_id,
+				'' AS user_name,
+				` + capacityExpr + ` AS capacity_tier,
+				` + agentExpr + ` AS agent_type,
+				` + modelExpr + ` AS model_used,
+				` + reasoningExpr + ` AS reasoning_effort,
+				` + seriesKeyExpr + ` AS series_key,
+				` + seriesLabelExpr + ` AS series_label,
+				SUM(uhe.total_container_minutes) AS total_container_minutes,
+				SUM(uhe.total_sessions) AS total_sessions,
+				SUM(uhe.total_container_starts) AS total_container_starts,
+				MAX(uhe.peak_concurrent) AS peak_concurrent,
+				0::double precision AS avg_duration_sec,
+				0::double precision AS p95_duration_sec,
+				SUM(uhe.total_input_tokens) AS total_input_tokens,
+				SUM(uhe.total_output_tokens) AS total_output_tokens,
+				SUM(uhe.total_tokens) AS total_tokens,
+				SUM(uhe.total_llm_cost_usd) AS total_llm_cost_usd
+			FROM usage_hourly_execution uhe
+			` + where + `
+			GROUP BY ` + strings.Join(groupBy, ", ") + `
+			ORDER BY uhe.hour_utc, series_label`
+	case groupBy == "user":
 		query = `
 			SELECT uh.hour_utc, uh.user_id, COALESCE(u.name, u.email, '') AS user_name, uh.capacity_tier,
+				NULL::text AS agent_type, NULL::text AS model_used, NULL::text AS reasoning_effort, NULL::text AS series_key, NULL::text AS series_label,
 				uh.total_container_minutes, uh.total_sessions, uh.total_container_starts,
 				uh.peak_concurrent, uh.avg_duration_sec, uh.p95_duration_sec,
-				uh.total_input_tokens, uh.total_output_tokens, uh.total_llm_cost_usd
+				uh.total_input_tokens, uh.total_output_tokens, uh.total_input_tokens + uh.total_output_tokens AS total_tokens, uh.total_llm_cost_usd
 			FROM usage_hourly uh
 			LEFT JOIN users u ON u.id = uh.user_id
 			WHERE uh.org_id = @org_id AND uh.hour_utc >= @start AND uh.hour_utc < @end
 			  AND uh.user_id IS NOT NULL AND uh.capacity_tier IS NULL
 			ORDER BY uh.hour_utc`
-	case "capacity":
+	case groupBy == "capacity":
 		query = `
 			SELECT uh.hour_utc, uh.user_id, '' AS user_name, uh.capacity_tier,
+				NULL::text AS agent_type, NULL::text AS model_used, NULL::text AS reasoning_effort, NULL::text AS series_key, NULL::text AS series_label,
 				uh.total_container_minutes, uh.total_sessions, uh.total_container_starts,
 				uh.peak_concurrent, uh.avg_duration_sec, uh.p95_duration_sec,
-				uh.total_input_tokens, uh.total_output_tokens, uh.total_llm_cost_usd
+				uh.total_input_tokens, uh.total_output_tokens, uh.total_input_tokens + uh.total_output_tokens AS total_tokens, uh.total_llm_cost_usd
 			FROM usage_hourly uh
 			WHERE uh.org_id = @org_id AND uh.hour_utc >= @start AND uh.hour_utc < @end
 			  AND uh.user_id IS NULL AND uh.capacity_tier IS NOT NULL
@@ -559,9 +871,10 @@ func (s *UsageRollupStore) GetTimeseries(ctx context.Context, orgID uuid.UUID, s
 	default: // "hour" or empty — org-level totals
 		query = `
 			SELECT uh.hour_utc, uh.user_id, '' AS user_name, uh.capacity_tier,
+				NULL::text AS agent_type, NULL::text AS model_used, NULL::text AS reasoning_effort, NULL::text AS series_key, NULL::text AS series_label,
 				uh.total_container_minutes, uh.total_sessions, uh.total_container_starts,
 				uh.peak_concurrent, uh.avg_duration_sec, uh.p95_duration_sec,
-				uh.total_input_tokens, uh.total_output_tokens, uh.total_llm_cost_usd
+				uh.total_input_tokens, uh.total_output_tokens, uh.total_input_tokens + uh.total_output_tokens AS total_tokens, uh.total_llm_cost_usd
 			FROM usage_hourly uh
 			WHERE uh.org_id = @org_id AND uh.hour_utc >= @start AND uh.hour_utc < @end
 			  AND uh.user_id IS NULL AND uh.capacity_tier IS NULL
@@ -574,21 +887,23 @@ func (s *UsageRollupStore) GetTimeseries(ctx context.Context, orgID uuid.UUID, s
 	if userID != nil {
 		query = `
 			SELECT uh.hour_utc, uh.user_id, COALESCE(u.name, u.email, '') AS user_name, uh.capacity_tier,
+				NULL::text AS agent_type, NULL::text AS model_used, NULL::text AS reasoning_effort, NULL::text AS series_key, NULL::text AS series_label,
 				uh.total_container_minutes, uh.total_sessions, uh.total_container_starts,
 				uh.peak_concurrent, uh.avg_duration_sec, uh.p95_duration_sec,
-				uh.total_input_tokens, uh.total_output_tokens, uh.total_llm_cost_usd
+				uh.total_input_tokens, uh.total_output_tokens, uh.total_input_tokens + uh.total_output_tokens AS total_tokens, uh.total_llm_cost_usd
 			FROM usage_hourly uh
 			LEFT JOIN users u ON u.id = uh.user_id
 			WHERE uh.org_id = @org_id AND uh.hour_utc >= @start AND uh.hour_utc < @end
 			  AND uh.user_id = @user_id AND uh.capacity_tier IS NULL
 			ORDER BY uh.hour_utc`
 		args["user_id"] = *userID
-	} else if capacity != nil {
+	} else if capacity != nil && !useExecution {
 		query = `
 			SELECT uh.hour_utc, uh.user_id, '' AS user_name, uh.capacity_tier,
+				NULL::text AS agent_type, NULL::text AS model_used, NULL::text AS reasoning_effort, NULL::text AS series_key, NULL::text AS series_label,
 				uh.total_container_minutes, uh.total_sessions, uh.total_container_starts,
 				uh.peak_concurrent, uh.avg_duration_sec, uh.p95_duration_sec,
-				uh.total_input_tokens, uh.total_output_tokens, uh.total_llm_cost_usd
+				uh.total_input_tokens, uh.total_output_tokens, uh.total_input_tokens + uh.total_output_tokens AS total_tokens, uh.total_llm_cost_usd
 			FROM usage_hourly uh
 			WHERE uh.org_id = @org_id AND uh.hour_utc >= @start AND uh.hour_utc < @end
 			  AND uh.user_id IS NULL AND uh.capacity_tier = @capacity
@@ -607,9 +922,10 @@ func (s *UsageRollupStore) GetTimeseries(ctx context.Context, orgID uuid.UUID, s
 		var b models.UsageTimeseriesBucket
 		if err := rows.Scan(
 			&b.HourUTC, &b.UserID, &b.UserName, &b.CapacityTier,
+			&b.AgentType, &b.ModelUsed, &b.ReasoningEffort, &b.SeriesKey, &b.SeriesLabel,
 			&b.TotalContainerMinutes, &b.TotalSessions, &b.TotalContainerStarts,
 			&b.PeakConcurrent, &b.AvgDurationSec, &b.P95DurationSec,
-			&b.TotalInputTokens, &b.TotalOutputTokens, &b.TotalLLMCostUSD,
+			&b.TotalInputTokens, &b.TotalOutputTokens, &b.TotalTokens, &b.TotalLLMCostUSD,
 		); err != nil {
 			return nil, fmt.Errorf("scan timeseries bucket: %w", err)
 		}
@@ -619,100 +935,49 @@ func (s *UsageRollupStore) GetTimeseries(ctx context.Context, orgID uuid.UUID, s
 }
 
 // GetBreakdown returns dimensional breakdown rows for the given org, range, and dimension.
-func (s *UsageRollupStore) GetBreakdown(ctx context.Context, orgID uuid.UUID, start, end time.Time, dimension, sortBy string, limit int) ([]models.UsageBreakdownRow, error) {
-	var query string
-	now := time.Now().UTC()
+func (s *UsageRollupStore) GetBreakdown(ctx context.Context, orgID uuid.UUID, start, end time.Time, dimension, sortBy string, limit int, filters UsageExecutionFilters) ([]models.UsageBreakdownRow, error) {
 	args := pgx.NamedArgs{
 		"org_id": orgID,
 		"start":  start,
 		"end":    end,
 		"limit":  limit,
-		"now":    now,
 	}
 
-	// Allowlist of valid sort options — reject anything unexpected to prevent
-	// accidental SQL injection if a caller passes unvalidated user input.
 	allowedSorts := map[string]string{
 		"minutes_desc":  "ORDER BY total_container_minutes DESC",
 		"sessions_desc": "ORDER BY total_sessions DESC",
-		"tokens_desc":   "ORDER BY total_input_tokens + total_output_tokens DESC",
+		"tokens_desc":   "ORDER BY total_tokens DESC",
+		"cost_desc":     "ORDER BY total_llm_cost_usd DESC",
 	}
 	orderClause, ok := allowedSorts[sortBy]
 	if !ok {
 		orderClause = allowedSorts["minutes_desc"]
 	}
 
-	// First, query the grand total of container minutes across ALL dimensions
-	// (not just the LIMIT'd top N) so percentages reflect share of org total.
-	var grandTotalQuery string
-	switch dimension {
-	case "capacity":
-		grandTotalQuery = `
-			SELECT COALESCE(SUM(uh.total_container_minutes), 0)
-			FROM usage_hourly uh
-			WHERE uh.org_id = @org_id AND uh.hour_utc >= @start AND uh.hour_utc < @end
-			  AND uh.user_id IS NULL AND uh.capacity_tier IS NOT NULL`
-	default:
-		grandTotalQuery = `
-			SELECT COALESCE(SUM(uh.total_container_minutes), 0)
-			FROM usage_hourly uh
-			WHERE uh.org_id = @org_id AND uh.hour_utc >= @start AND uh.hour_utc < @end
-			  AND uh.user_id IS NOT NULL AND uh.capacity_tier IS NULL`
-	}
-
-	var grandTotalMinutes float64
-	if err := s.db.QueryRow(ctx, grandTotalQuery, args).Scan(&grandTotalMinutes); err != nil {
-		return nil, fmt.Errorf("query breakdown grand total: %w", err)
-	}
-
-	// Session counts are computed in a single CTE over raw events (one scan of
-	// container_usage_events) and then joined, instead of per-row LATERAL
-	// subqueries which would re-scan the events table for every group.
-	// NOTE: '%%' in format() calls below is Go's fmt.Sprintf escaping — Postgres
-	// receives single '%'. Postgres format() only accepts %s/%I/%L, so the
-	// cpu_limit is rounded+cast to int before formatting with %s to match the
-	// Go-side rollup's "Ncpu_Mmb" string.
-	switch dimension {
-	case "capacity":
-		query = fmt.Sprintf(`
-			WITH session_counts AS (
-				SELECT
-					format('%%scpu_%%smb', round(e.cpu_limit)::int, e.memory_limit_mb) AS capacity_tier,
-					COUNT(DISTINCT e.session_id) AS distinct_sessions
-				FROM container_usage_events e
-				WHERE e.org_id = @org_id
-				  AND e.started_at < @end
-				  AND COALESCE(e.stopped_at, @now) > @start
-				GROUP BY format('%%scpu_%%smb', round(e.cpu_limit)::int, e.memory_limit_mb)
-			)
+	if dimension == "user" {
+		var grandTotalMinutes, grandTotalTokens, grandTotalCost float64
+		if err := s.db.QueryRow(ctx, `
 			SELECT
-				uh.capacity_tier AS key,
-				uh.capacity_tier AS label,
-				SUM(uh.total_container_minutes) AS total_container_minutes,
-				COALESCE(sc.distinct_sessions, 0) AS total_sessions,
-				SUM(uh.total_container_starts) AS total_container_starts,
-				MAX(uh.peak_concurrent) AS peak_concurrent,
-				SUM(uh.total_input_tokens) AS total_input_tokens,
-				SUM(uh.total_output_tokens) AS total_output_tokens,
-				SUM(uh.total_llm_cost_usd) AS total_llm_cost_usd
+				COALESCE(SUM(uh.total_container_minutes), 0),
+				COALESCE(SUM(uh.total_input_tokens + uh.total_output_tokens), 0),
+				COALESCE(SUM(uh.total_llm_cost_usd), 0)
 			FROM usage_hourly uh
-			LEFT JOIN session_counts sc ON sc.capacity_tier = uh.capacity_tier
 			WHERE uh.org_id = @org_id AND uh.hour_utc >= @start AND uh.hour_utc < @end
-			  AND uh.user_id IS NULL AND uh.capacity_tier IS NOT NULL
-			GROUP BY uh.capacity_tier, sc.distinct_sessions
-			%s
-			LIMIT @limit`, orderClause)
-	default: // "user"
-		query = fmt.Sprintf(`
+			  AND uh.user_id IS NOT NULL AND uh.capacity_tier IS NULL`, args).Scan(&grandTotalMinutes, &grandTotalTokens, &grandTotalCost); err != nil {
+			return nil, fmt.Errorf("query breakdown grand total: %w", err)
+		}
+		query := fmt.Sprintf(`
 			WITH session_counts AS (
 				SELECT
 					s.triggered_by_user_id AS user_id,
 					COUNT(DISTINCT e.session_id) AS distinct_sessions
 				FROM container_usage_events e
-				JOIN sessions s ON s.id = e.session_id
+				JOIN sessions s
+				  ON s.id = e.session_id
+				 AND s.org_id = e.org_id
 				WHERE e.org_id = @org_id
 				  AND e.started_at < @end
-				  AND COALESCE(e.stopped_at, @now) > @start
+				  AND COALESCE(e.stopped_at, now()) > @start
 				  AND s.triggered_by_user_id IS NOT NULL
 				GROUP BY s.triggered_by_user_id
 			)
@@ -725,6 +990,7 @@ func (s *UsageRollupStore) GetBreakdown(ctx context.Context, orgID uuid.UUID, st
 				MAX(uh.peak_concurrent) AS peak_concurrent,
 				SUM(uh.total_input_tokens) AS total_input_tokens,
 				SUM(uh.total_output_tokens) AS total_output_tokens,
+				SUM(uh.total_input_tokens + uh.total_output_tokens) AS total_tokens,
 				SUM(uh.total_llm_cost_usd) AS total_llm_cost_usd
 			FROM usage_hourly uh
 			LEFT JOIN users u ON u.id = uh.user_id
@@ -734,44 +1000,129 @@ func (s *UsageRollupStore) GetBreakdown(ctx context.Context, orgID uuid.UUID, st
 			GROUP BY uh.user_id, u.name, u.email, sc.distinct_sessions
 			%s
 			LIMIT @limit`, orderClause)
+		rows, err := s.db.Query(ctx, query, args)
+		if err != nil {
+			return nil, fmt.Errorf("query breakdown: %w", err)
+		}
+		defer rows.Close()
+		return scanUsageBreakdownRows(rows, grandTotalMinutes, grandTotalTokens, grandTotalCost)
 	}
+
+	keyExpr := "uhe.capacity_key"
+	switch dimension {
+	case "agent":
+		keyExpr = "uhe.agent_type"
+	case "model":
+		keyExpr = "uhe.model_used"
+	case "reasoning":
+		keyExpr = "uhe.reasoning_effort"
+	}
+
+	where := `
+		WHERE uhe.org_id = @org_id AND uhe.hour_utc >= @start AND uhe.hour_utc < @end`
+	where = applyUsageExecutionFilters(where, args, "uhe", filters)
+	args["all_capacity"] = usageAllCapacityKey
+	if dimension == "capacity" {
+		where += ` AND uhe.capacity_key <> @all_capacity`
+	} else {
+		where += ` AND uhe.capacity_key = @all_capacity`
+	}
+
+	var grandTotalMinutes, grandTotalTokens, grandTotalCost float64
+	if err := s.db.QueryRow(ctx, `
+		SELECT
+			COALESCE(SUM(uhe.total_container_minutes), 0),
+			COALESCE(SUM(uhe.total_tokens), 0),
+			COALESCE(SUM(uhe.total_llm_cost_usd), 0)
+		FROM usage_hourly_execution uhe
+		`+where, args).Scan(&grandTotalMinutes, &grandTotalTokens, &grandTotalCost); err != nil {
+		return nil, fmt.Errorf("query execution breakdown grand totals: %w", err)
+	}
+
+	var sessionCountsCTE string
+	if dimension == "capacity" {
+		sessionCountsCTE = `
+			WITH session_counts AS (
+				SELECT
+					format('%scpu_%smb', round(e.cpu_limit)::int, e.memory_limit_mb) AS key,
+					COUNT(DISTINCT e.session_id) AS distinct_sessions
+				FROM container_usage_events e
+				JOIN sessions s
+				  ON s.id = e.session_id
+				 AND s.org_id = e.org_id
+				WHERE e.org_id = @org_id
+				  AND e.started_at < @end
+				  AND COALESCE(e.stopped_at, now()) > @start`
+		sessionCountsCTE = applySessionExecutionFilters(sessionCountsCTE, args, "s", filters)
+		sessionCountsCTE += `
+				GROUP BY format('%scpu_%smb', round(e.cpu_limit)::int, e.memory_limit_mb)
+			)`
+	} else {
+		sessionCountsCTE = `
+			WITH session_counts AS (
+				SELECT
+					` + sessionDimensionKeySQL(dimension, "s") + ` AS key,
+					COUNT(DISTINCT s.id) AS distinct_sessions
+				FROM sessions s
+				WHERE s.org_id = @org_id`
+		sessionCountsCTE = applySessionExecutionFilters(sessionCountsCTE, args, "s", filters)
+		sessionCountsCTE += `
+				  AND (
+					EXISTS (
+						SELECT 1
+						FROM container_usage_events e
+						WHERE e.org_id = s.org_id
+						  AND e.session_id = s.id
+						  AND e.started_at < @end
+						  AND COALESCE(e.stopped_at, now()) > @start
+					)
+					OR (
+						s.token_usage IS NOT NULL
+						AND s.completed_at IS NOT NULL
+						AND s.completed_at >= @start
+						AND s.completed_at < @end
+					)
+				  )
+				GROUP BY ` + sessionDimensionKeySQL(dimension, "s") + `
+			)`
+	}
+
+	query := sessionCountsCTE + fmt.Sprintf(`
+		SELECT
+			%s AS key,
+			%s AS label,
+			SUM(uhe.total_container_minutes) AS total_container_minutes,
+			COALESCE(sc.distinct_sessions, 0) AS total_sessions,
+			SUM(uhe.total_container_starts) AS total_container_starts,
+			MAX(uhe.peak_concurrent) AS peak_concurrent,
+			SUM(uhe.total_input_tokens) AS total_input_tokens,
+			SUM(uhe.total_output_tokens) AS total_output_tokens,
+			SUM(uhe.total_tokens) AS total_tokens,
+			SUM(uhe.total_llm_cost_usd) AS total_llm_cost_usd
+		FROM usage_hourly_execution uhe
+		LEFT JOIN session_counts sc ON sc.key = %s
+		%s
+		GROUP BY %s, sc.distinct_sessions
+		%s
+		LIMIT @limit`,
+		keyExpr,
+		breakdownLabelSQL(dimension, keyExpr),
+		keyExpr,
+		where,
+		keyExpr,
+		orderClause,
+	)
 
 	rows, err := s.db.Query(ctx, query, args)
 	if err != nil {
 		return nil, fmt.Errorf("query breakdown: %w", err)
 	}
 	defer rows.Close()
-
-	var result []models.UsageBreakdownRow
-	for rows.Next() {
-		var row models.UsageBreakdownRow
-		if err := rows.Scan(
-			&row.Key, &row.Label,
-			&row.TotalContainerMinutes, &row.TotalSessions, &row.TotalContainerStarts,
-			&row.PeakConcurrent,
-			&row.TotalInputTokens, &row.TotalOutputTokens, &row.TotalLLMCostUSD,
-		); err != nil {
-			return nil, fmt.Errorf("scan breakdown row: %w", err)
-		}
-		result = append(result, row)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate breakdown: %w", err)
-	}
-
-	// Compute percentages against the grand total (all dimensions, not just
-	// the LIMIT'd top N) so values reflect true share of org usage.
-	if grandTotalMinutes > 0 {
-		for i := range result {
-			result[i].Percentage = math.Round(result[i].TotalContainerMinutes/grandTotalMinutes*1000) / 10
-		}
-	}
-
-	return result, nil
+	return scanUsageBreakdownRows(rows, grandTotalMinutes, grandTotalTokens, grandTotalCost)
 }
 
 // GetExportRows returns raw rows for CSV export, streaming-friendly.
-func (s *UsageRollupStore) GetExportRows(ctx context.Context, orgID uuid.UUID, start, end time.Time, dimension string) (pgx.Rows, error) {
+func (s *UsageRollupStore) GetExportRows(ctx context.Context, orgID uuid.UUID, start, end time.Time, dimension string, filters UsageExecutionFilters) (pgx.Rows, error) {
 	args := pgx.NamedArgs{
 		"org_id": orgID,
 		"start":  start,
@@ -792,32 +1143,69 @@ func (s *UsageRollupStore) GetExportRows(ctx context.Context, orgID uuid.UUID, s
 			  AND uh.user_id IS NOT NULL AND uh.capacity_tier IS NULL
 			ORDER BY uh.hour_utc, u.email`
 	case "capacity":
+		args["all_capacity"] = usageAllCapacityKey
+		where := `WHERE uhe.org_id = @org_id AND uhe.hour_utc >= @start AND uhe.hour_utc < @end AND uhe.capacity_key <> @all_capacity`
+		where = applyUsageExecutionFilters(where, args, "uhe", filters)
 		query = `
-			SELECT uh.hour_utc, '' AS user_email, uh.capacity_tier,
-				uh.total_container_minutes, uh.total_sessions, uh.total_container_starts,
-				uh.peak_concurrent,
-				uh.total_input_tokens, uh.total_output_tokens, uh.total_llm_cost_usd
-			FROM usage_hourly uh
-			WHERE uh.org_id = @org_id AND uh.hour_utc >= @start AND uh.hour_utc < @end
-			  AND uh.user_id IS NULL AND uh.capacity_tier IS NOT NULL
-			ORDER BY uh.hour_utc, uh.capacity_tier`
+			SELECT uhe.hour_utc, '' AS user_email, uhe.capacity_key,
+				SUM(uhe.total_container_minutes), SUM(uhe.total_sessions), SUM(uhe.total_container_starts),
+				MAX(uhe.peak_concurrent),
+				SUM(uhe.total_input_tokens), SUM(uhe.total_output_tokens), SUM(uhe.total_llm_cost_usd)
+			FROM usage_hourly_execution uhe
+			` + where + `
+			GROUP BY uhe.hour_utc, uhe.capacity_key
+			ORDER BY uhe.hour_utc, uhe.capacity_key`
+	case "agent", "model", "reasoning":
+		args["all_capacity"] = usageAllCapacityKey
+		keyExpr := "uhe.agent_type"
+		if dimension == "model" {
+			keyExpr = "uhe.model_used"
+		} else if dimension == "reasoning" {
+			keyExpr = "uhe.reasoning_effort"
+		}
+		where := `WHERE uhe.org_id = @org_id AND uhe.hour_utc >= @start AND uhe.hour_utc < @end AND uhe.capacity_key = @all_capacity`
+		where = applyUsageExecutionFilters(where, args, "uhe", filters)
+		query = `
+			SELECT uhe.hour_utc, '' AS user_email, ` + keyExpr + `,
+				SUM(uhe.total_container_minutes), SUM(uhe.total_sessions), SUM(uhe.total_container_starts),
+				MAX(uhe.peak_concurrent),
+				SUM(uhe.total_input_tokens), SUM(uhe.total_output_tokens), SUM(uhe.total_llm_cost_usd)
+			FROM usage_hourly_execution uhe
+			` + where + `
+			GROUP BY uhe.hour_utc, ` + keyExpr + `
+			ORDER BY uhe.hour_utc, ` + keyExpr
 	default: // "none" — org totals
-		query = `
-			SELECT uh.hour_utc, '' AS user_email, '' AS capacity_tier,
-				uh.total_container_minutes, uh.total_sessions, uh.total_container_starts,
-				uh.peak_concurrent,
-				uh.total_input_tokens, uh.total_output_tokens, uh.total_llm_cost_usd
-			FROM usage_hourly uh
-			WHERE uh.org_id = @org_id AND uh.hour_utc >= @start AND uh.hour_utc < @end
-			  AND uh.user_id IS NULL AND uh.capacity_tier IS NULL
-			ORDER BY uh.hour_utc`
+		if filters.HasAny() {
+			args["all_capacity"] = usageAllCapacityKey
+			where := `WHERE uhe.org_id = @org_id AND uhe.hour_utc >= @start AND uhe.hour_utc < @end AND uhe.capacity_key = @all_capacity`
+			where = applyUsageExecutionFilters(where, args, "uhe", filters)
+			query = `
+				SELECT uhe.hour_utc, '' AS user_email, '' AS capacity_tier,
+					SUM(uhe.total_container_minutes), SUM(uhe.total_sessions), SUM(uhe.total_container_starts),
+					MAX(uhe.peak_concurrent),
+					SUM(uhe.total_input_tokens), SUM(uhe.total_output_tokens), SUM(uhe.total_llm_cost_usd)
+				FROM usage_hourly_execution uhe
+				` + where + `
+				GROUP BY uhe.hour_utc
+				ORDER BY uhe.hour_utc`
+		} else {
+			query = `
+				SELECT uh.hour_utc, '' AS user_email, '' AS capacity_tier,
+					uh.total_container_minutes, uh.total_sessions, uh.total_container_starts,
+					uh.peak_concurrent,
+					uh.total_input_tokens, uh.total_output_tokens, uh.total_llm_cost_usd
+				FROM usage_hourly uh
+				WHERE uh.org_id = @org_id AND uh.hour_utc >= @start AND uh.hour_utc < @end
+				  AND uh.user_id IS NULL AND uh.capacity_tier IS NULL
+				ORDER BY uh.hour_utc`
+		}
 	}
 
 	return s.db.Query(ctx, query, args)
 }
 
 // GetDailySessionCounts returns exact daily session counts keyed by the export dimension.
-func (s *UsageRollupStore) GetDailySessionCounts(ctx context.Context, orgID uuid.UUID, start, end time.Time, dimension, tzName string) ([]ExportDailySessionCountRow, error) {
+func (s *UsageRollupStore) GetDailySessionCounts(ctx context.Context, orgID uuid.UUID, start, end time.Time, dimension, tzName string, filters UsageExecutionFilters) ([]ExportDailySessionCountRow, error) {
 	args := pgx.NamedArgs{
 		"org_id": orgID,
 		"start":  start,
@@ -874,22 +1262,96 @@ func (s *UsageRollupStore) GetDailySessionCounts(ctx context.Context, orgID uuid
 			  ON e.org_id = @org_id
 			 AND e.started_at < LEAST(((days.local_day + interval '1 day') AT TIME ZONE @tz), @end)
 			 AND COALESCE(e.stopped_at, now()) > GREATEST((days.local_day AT TIME ZONE @tz), @start)
+			JOIN sessions s
+			  ON s.id = e.session_id
+			 AND s.org_id = e.org_id
+			WHERE 1=1`
+		query = applySessionExecutionFilters(query, args, "s", filters)
+		query += `
 			GROUP BY days.local_day, capacity_tier
 			ORDER BY days.local_day, capacity_tier`
-	default:
+	case "agent", "model", "reasoning":
+		keyExpr := "s.agent_type"
+		if dimension == "model" {
+			keyExpr = normalizedSessionModelSQL("s")
+		} else if dimension == "reasoning" {
+			keyExpr = normalizedSessionReasoningSQL("s")
+		}
 		query = daySeries + `
 			SELECT
 				to_char(days.local_day::date, 'YYYY-MM-DD') AS local_date,
 				'' AS user_email,
-				'' AS capacity_tier,
-				COUNT(DISTINCT e.session_id) AS sessions
+				` + keyExpr + ` AS capacity_tier,
+				COUNT(DISTINCT s.id) AS sessions
 			FROM days
-			JOIN container_usage_events e
-			  ON e.org_id = @org_id
-			 AND e.started_at < LEAST(((days.local_day + interval '1 day') AT TIME ZONE @tz), @end)
-			 AND COALESCE(e.stopped_at, now()) > GREATEST((days.local_day AT TIME ZONE @tz), @start)
-			GROUP BY days.local_day
-			ORDER BY days.local_day`
+			JOIN sessions s
+			  ON s.org_id = @org_id
+			 AND (
+			    EXISTS (
+			        SELECT 1
+			        FROM container_usage_events e
+			        WHERE e.org_id = s.org_id
+			          AND e.session_id = s.id
+			          AND e.started_at < LEAST(((days.local_day + interval '1 day') AT TIME ZONE @tz), @end)
+			          AND COALESCE(e.stopped_at, now()) > GREATEST((days.local_day AT TIME ZONE @tz), @start)
+			    )
+			    OR (
+			        s.token_usage IS NOT NULL
+			        AND s.completed_at >= GREATEST((days.local_day AT TIME ZONE @tz), @start)
+			        AND s.completed_at < LEAST(((days.local_day + interval '1 day') AT TIME ZONE @tz), @end)
+			    )
+			 )
+			WHERE 1=1`
+		query = applySessionExecutionFilters(query, args, "s", filters)
+		query += `
+			GROUP BY days.local_day, capacity_tier
+			ORDER BY days.local_day, capacity_tier`
+	default:
+		if filters.HasAny() {
+			query = daySeries + `
+				SELECT
+					to_char(days.local_day::date, 'YYYY-MM-DD') AS local_date,
+					'' AS user_email,
+					'' AS capacity_tier,
+					COUNT(DISTINCT s.id) AS sessions
+				FROM days
+				JOIN sessions s
+				  ON s.org_id = @org_id
+				 AND (
+					EXISTS (
+						SELECT 1
+						FROM container_usage_events e
+						WHERE e.org_id = s.org_id
+						  AND e.session_id = s.id
+						  AND e.started_at < LEAST(((days.local_day + interval '1 day') AT TIME ZONE @tz), @end)
+						  AND COALESCE(e.stopped_at, now()) > GREATEST((days.local_day AT TIME ZONE @tz), @start)
+					)
+					OR (
+						s.token_usage IS NOT NULL
+						AND s.completed_at >= GREATEST((days.local_day AT TIME ZONE @tz), @start)
+						AND s.completed_at < LEAST(((days.local_day + interval '1 day') AT TIME ZONE @tz), @end)
+					)
+				 )
+				WHERE 1=1`
+			query = applySessionExecutionFilters(query, args, "s", filters)
+			query += `
+				GROUP BY days.local_day
+				ORDER BY days.local_day`
+		} else {
+			query = daySeries + `
+				SELECT
+					to_char(days.local_day::date, 'YYYY-MM-DD') AS local_date,
+					'' AS user_email,
+					'' AS capacity_tier,
+					COUNT(DISTINCT e.session_id) AS sessions
+				FROM days
+				JOIN container_usage_events e
+				  ON e.org_id = @org_id
+				 AND e.started_at < LEAST(((days.local_day + interval '1 day') AT TIME ZONE @tz), @end)
+				 AND COALESCE(e.stopped_at, now()) > GREATEST((days.local_day AT TIME ZONE @tz), @start)
+				GROUP BY days.local_day
+				ORDER BY days.local_day`
+		}
 	}
 
 	rows, err := s.db.Query(ctx, query, args)
@@ -1015,7 +1477,12 @@ func (s *UsageRollupStore) DeleteOlderThan(ctx context.Context, cutoff time.Time
 	if err != nil {
 		return 0, fmt.Errorf("delete old usage_hourly: %w", err)
 	}
-	return tag.RowsAffected(), nil
+	executionTag, err := s.db.Exec(ctx, `DELETE FROM usage_hourly_execution WHERE hour_utc < @cutoff`,
+		pgx.NamedArgs{"cutoff": cutoff})
+	if err != nil {
+		return 0, fmt.Errorf("delete old usage_hourly_execution: %w", err)
+	}
+	return tag.RowsAffected() + executionTag.RowsAffected(), nil
 }
 
 // computePeakConcurrent finds the maximum number of overlapping intervals.
@@ -1082,4 +1549,110 @@ func computeDurationStats(durations []float64) (avg, p95 float64) {
 	p95 = sorted[idx]
 
 	return avg, p95
+}
+
+func normalizedSessionModelSQL(alias string) string {
+	return fmt.Sprintf("COALESCE(NULLIF(%s.token_usage->'native_usage'->>'model', ''), NULLIF(%s.model_override, ''), 'unknown')", alias, alias)
+}
+
+func normalizedSessionReasoningSQL(alias string) string {
+	return fmt.Sprintf("COALESCE(NULLIF(%s.reasoning_effort::text, ''), 'default')", alias)
+}
+
+func applyUsageExecutionFilters(where string, args pgx.NamedArgs, alias string, filters UsageExecutionFilters) string {
+	if filters.Agent != nil {
+		where += fmt.Sprintf(" AND %s.agent_type = @agent", alias)
+		args["agent"] = *filters.Agent
+	}
+	if filters.Model != nil {
+		where += fmt.Sprintf(" AND %s.model_used = @model", alias)
+		args["model"] = *filters.Model
+	}
+	if filters.Reasoning != nil {
+		where += fmt.Sprintf(" AND %s.reasoning_effort = @reasoning", alias)
+		args["reasoning"] = *filters.Reasoning
+	}
+	return where
+}
+
+func applySessionExecutionFilters(where string, args pgx.NamedArgs, alias string, filters UsageExecutionFilters) string {
+	if filters.Agent != nil {
+		where += fmt.Sprintf(" AND %s.agent_type = @agent", alias)
+		args["agent"] = *filters.Agent
+	}
+	if filters.Model != nil {
+		where += " AND " + normalizedSessionModelSQL(alias) + " = @model"
+		args["model"] = *filters.Model
+	}
+	if filters.Reasoning != nil {
+		where += " AND " + normalizedSessionReasoningSQL(alias) + " = @reasoning"
+		args["reasoning"] = *filters.Reasoning
+	}
+	return where
+}
+
+func sessionDimensionKeySQL(dimension, alias string) string {
+	switch dimension {
+	case "agent":
+		return alias + ".agent_type"
+	case "model":
+		return normalizedSessionModelSQL(alias)
+	case "reasoning":
+		return normalizedSessionReasoningSQL(alias)
+	default:
+		return alias + ".agent_type"
+	}
+}
+
+func breakdownLabelSQL(dimension, keyExpr string) string {
+	switch dimension {
+	case "agent":
+		return `CASE ` + keyExpr + `
+			WHEN 'codex' THEN 'Codex'
+			WHEN 'claude_code' THEN 'Claude Code'
+			WHEN 'gemini_cli' THEN 'Gemini CLI'
+			WHEN 'amp' THEN 'Amp'
+			WHEN 'pi' THEN 'Pi'
+			ELSE ` + keyExpr + ` END`
+	case "model":
+		return `CASE WHEN ` + keyExpr + ` = 'unknown' THEN 'Unknown' ELSE ` + keyExpr + ` END`
+	case "reasoning":
+		return `CASE
+			WHEN ` + keyExpr + ` = 'default' THEN 'Default'
+			WHEN ` + keyExpr + ` = 'xhigh' THEN 'XHigh'
+			ELSE initcap(` + keyExpr + `) END`
+	default:
+		return keyExpr
+	}
+}
+
+func scanUsageBreakdownRows(rows pgx.Rows, grandTotalMinutes, grandTotalTokens, grandTotalCost float64) ([]models.UsageBreakdownRow, error) {
+	var result []models.UsageBreakdownRow
+	for rows.Next() {
+		var row models.UsageBreakdownRow
+		if err := rows.Scan(
+			&row.Key, &row.Label,
+			&row.TotalContainerMinutes, &row.TotalSessions, &row.TotalContainerStarts,
+			&row.PeakConcurrent,
+			&row.TotalInputTokens, &row.TotalOutputTokens, &row.TotalTokens, &row.TotalLLMCostUSD,
+		); err != nil {
+			return nil, fmt.Errorf("scan breakdown row: %w", err)
+		}
+		result = append(result, row)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate breakdown: %w", err)
+	}
+	for i := range result {
+		if grandTotalMinutes > 0 {
+			result[i].Percentage = math.Round(result[i].TotalContainerMinutes/grandTotalMinutes*1000) / 10
+		}
+		if grandTotalTokens > 0 {
+			result[i].ShareOfTokens = math.Round(float64(result[i].TotalTokens)/grandTotalTokens*1000) / 10
+		}
+		if grandTotalCost > 0 {
+			result[i].ShareOfTokenCost = math.Round(result[i].TotalLLMCostUSD/grandTotalCost*1000) / 10
+		}
+	}
+	return result, nil
 }

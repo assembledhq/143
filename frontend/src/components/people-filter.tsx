@@ -1,8 +1,7 @@
 "use client";
 
 import { ChevronDown, Users } from "lucide-react";
-import { useMemo, useState } from "react";
-import { Badge } from "@/components/ui/badge";
+import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import {
   Command,
@@ -35,14 +34,6 @@ function serializeSelection(selectedUserIDs: string[], currentUser: User | null)
   return selectedUserIDs.join(",");
 }
 
-function filterChips(selectedUserIDs: string[], members: User[], currentUser: User | null) {
-  return selectedUserIDs.map((id) => {
-    if (id === currentUser?.id) return { id, label: "You" };
-    const member = members.find((item) => item.id === id);
-    return { id, label: member?.name.split(" ")[0] ?? "User" };
-  });
-}
-
 export function PeopleFilter({
   mode,
   selectedUserIDs,
@@ -54,7 +45,6 @@ export function PeopleFilter({
 }: PeopleFilterProps) {
   const [open, setOpen] = useState(false);
   const label = peopleFilterLabel(mode, selectedUserIDs, members, currentUser);
-  const chips = useMemo(() => filterChips(selectedUserIDs, members, currentUser), [currentUser, members, selectedUserIDs]);
 
   function setMine() {
     onFilterChange(null);
@@ -123,15 +113,6 @@ export function PeopleFilter({
                 Everyone
               </Button>
             </div>
-            {mode === "custom" && chips.length > 0 && (
-              <div className="mt-3 flex flex-wrap gap-1.5">
-                {chips.map((chip) => (
-                  <Badge key={chip.id} variant="secondary" className="text-xs">
-                    {chip.label}
-                  </Badge>
-                ))}
-              </div>
-            )}
           </div>
 
           <Command shouldFilter>
@@ -168,21 +149,6 @@ export function PeopleFilter({
           </Command>
         </PopoverContent>
       </Popover>
-
-      {mode === "custom" && chips.length > 0 && (
-        <div className="mt-2 flex flex-wrap gap-1.5">
-          {chips.slice(0, 2).map((chip) => (
-            <Badge key={chip.id} variant="outline" className="text-xs">
-              {chip.label}
-            </Badge>
-          ))}
-          {chips.length > 2 && (
-            <Badge variant="outline" className="text-xs">
-              +{chips.length - 2}
-            </Badge>
-          )}
-        </div>
-      )}
     </div>
   );
 }

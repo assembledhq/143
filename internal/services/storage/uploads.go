@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"mime"
 	"net/http"
 	"os"
 	"path"
@@ -22,6 +23,10 @@ import (
 type UploadStore interface {
 	// Save stores a file and returns the public URL to access it.
 	Save(ctx context.Context, key string, reader io.Reader, contentType string) (url string, err error)
+
+	// Open reads a previously uploaded file by storage key and returns a
+	// caller-owned reader plus the best-known content type.
+	Open(ctx context.Context, key string) (io.ReadCloser, string, error)
 
 	// URL returns the public URL for a previously-uploaded file.
 	URL(key string) string
@@ -57,7 +62,11 @@ func (s *S3UploadStore) fullKey(key string) string {
 }
 
 func (s *S3UploadStore) Save(ctx context.Context, key string, reader io.Reader, contentType string) (string, error) {
-	fullKey := s.fullKey(key)
+	cleanKey, err := validateUploadKey(key)
+	if err != nil {
+		return "", err
+	}
+	fullKey := s.fullKey(cleanKey)
 	input := &s3.PutObjectInput{
 		Bucket:               aws.String(s.bucket),
 		Key:                  aws.String(fullKey),
@@ -70,22 +79,49 @@ func (s *S3UploadStore) Save(ctx context.Context, key string, reader io.Reader, 
 	if _, err := s.client.PutObject(ctx, input); err != nil {
 		return "", fmt.Errorf("upload file %s: %w", fullKey, err)
 	}
-	return s.URL(key), nil
+	return s.URL(cleanKey), nil
 }
 
 func (s *S3UploadStore) URL(key string) string {
 	return s.baseURL + "/" + key
 }
 
+func (s *S3UploadStore) Open(ctx context.Context, key string) (io.ReadCloser, string, error) {
+	cleanKey, err := validateUploadKey(key)
+	if err != nil {
+		return nil, "", err
+	}
+	if s.client == nil {
+		return nil, "", fmt.Errorf("upload storage is not configured")
+	}
+	out, err := s.client.GetObject(ctx, &s3.GetObjectInput{
+		Bucket: aws.String(s.bucket),
+		Key:    aws.String(s.fullKey(cleanKey)),
+	})
+	if err != nil {
+		return nil, "", fmt.Errorf("open upload %s: %w", cleanKey, err)
+	}
+	contentType := "application/octet-stream"
+	if out.ContentType != nil && *out.ContentType != "" {
+		contentType = *out.ContentType
+	}
+	return out.Body, contentType, nil
+}
+
 // Serve fetches the file from S3 and streams it to the HTTP response.
 func (s *S3UploadStore) Serve(w http.ResponseWriter, r *http.Request, key string) {
+	cleanKey, err := validateUploadKey(key)
+	if err != nil {
+		http.Error(w, "invalid file key", http.StatusBadRequest)
+		return
+	}
 	if s.client == nil {
 		http.Error(w, "storage not configured", http.StatusNotFound)
 		return
 	}
 	out, err := s.client.GetObject(r.Context(), &s3.GetObjectInput{
 		Bucket: aws.String(s.bucket),
-		Key:    aws.String(s.fullKey(key)),
+		Key:    aws.String(s.fullKey(cleanKey)),
 	})
 	if err != nil {
 		http.Error(w, "file not found", http.StatusNotFound)
@@ -100,7 +136,7 @@ func (s *S3UploadStore) Serve(w http.ResponseWriter, r *http.Request, key string
 		w.Header().Set("Content-Length", fmt.Sprintf("%d", *out.ContentLength))
 	}
 	// Images display inline; other file types download as attachments.
-	fileName := path.Base(key)
+	fileName := path.Base(cleanKey)
 	if out.ContentType != nil && strings.HasPrefix(*out.ContentType, "image/") {
 		w.Header().Set("Content-Disposition", "inline")
 	} else {
@@ -128,12 +164,16 @@ func NewFileUploadStore(baseDir, baseURL string) *FileUploadStore {
 }
 
 func (f *FileUploadStore) Save(ctx context.Context, key string, reader io.Reader, _ string) (string, error) {
-	path := filepath.Join(f.baseDir, filepath.Clean(key))
-	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+	cleanKey, err := validateUploadKey(key)
+	if err != nil {
+		return "", err
+	}
+	filePath := filepath.Join(f.baseDir, filepath.FromSlash(cleanKey))
+	if err := os.MkdirAll(filepath.Dir(filePath), 0o750); err != nil {
 		return "", fmt.Errorf("create upload dir: %w", err)
 	}
 
-	file, err := os.Create(path) // #nosec G304 -- path is sanitized
+	file, err := os.Create(filePath) // #nosec G304 -- path is validated and rooted under baseDir
 	if err != nil {
 		return "", fmt.Errorf("create upload file: %w", err)
 	}
@@ -142,7 +182,7 @@ func (f *FileUploadStore) Save(ctx context.Context, key string, reader io.Reader
 	if _, err := io.Copy(file, reader); err != nil {
 		return "", fmt.Errorf("write upload file: %w", err)
 	}
-	return f.URL(key), ctx.Err()
+	return f.URL(cleanKey), ctx.Err()
 }
 
 func (f *FileUploadStore) URL(key string) string {
@@ -151,6 +191,48 @@ func (f *FileUploadStore) URL(key string) string {
 
 // Serve serves a locally-stored upload file.
 func (f *FileUploadStore) Serve(w http.ResponseWriter, r *http.Request, key string) {
-	path := filepath.Join(f.baseDir, filepath.Clean(key))
-	http.ServeFile(w, r, path)
+	cleanKey, err := validateUploadKey(key)
+	if err != nil {
+		http.Error(w, "invalid file key", http.StatusBadRequest)
+		return
+	}
+	filePath := filepath.Join(f.baseDir, filepath.FromSlash(cleanKey))
+	http.ServeFile(w, r, filePath)
+}
+
+func (f *FileUploadStore) Open(ctx context.Context, key string) (io.ReadCloser, string, error) {
+	cleanKey, err := validateUploadKey(key)
+	if err != nil {
+		return nil, "", err
+	}
+	filePath := filepath.Join(f.baseDir, filepath.FromSlash(cleanKey))
+	file, err := os.Open(filePath) // #nosec G304 -- path is validated and rooted under baseDir
+	if err != nil {
+		return nil, "", fmt.Errorf("open upload %s: %w", cleanKey, err)
+	}
+	contentType := mime.TypeByExtension(path.Ext(cleanKey))
+	if contentType == "" {
+		contentType = "application/octet-stream"
+	}
+	if err := ctx.Err(); err != nil {
+		_ = file.Close()
+		return nil, "", err
+	}
+	return file, contentType, nil
+}
+
+func validateUploadKey(key string) (string, error) {
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return "", fmt.Errorf("invalid upload key")
+	}
+	if strings.Contains(key, "\\") || strings.HasPrefix(key, "/") {
+		return "", fmt.Errorf("invalid upload key")
+	}
+	for _, part := range strings.Split(key, "/") {
+		if part == "" || part == "." || part == ".." {
+			return "", fmt.Errorf("invalid upload key")
+		}
+	}
+	return path.Clean(key), nil
 }

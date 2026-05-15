@@ -73,6 +73,36 @@ func TestFileUploadStore_SaveAndURL(t *testing.T) {
 	require.Equal(t, payload, data, "file content should match")
 }
 
+func TestFileUploadStore_Open(t *testing.T) {
+	t.Parallel()
+
+	baseDir := t.TempDir()
+	store := NewFileUploadStore(baseDir, "/api/v1/uploads/files")
+	key := "org-1/2026-05/screenshot.png"
+	body := []byte("png-data")
+	require.NoError(t, os.MkdirAll(filepath.Join(baseDir, "org-1/2026-05"), 0o750), "test fixture directory should be created")
+	require.NoError(t, os.WriteFile(filepath.Join(baseDir, key), body, 0o600), "test fixture file should be written")
+
+	rc, contentType, err := store.Open(context.Background(), key)
+	require.NoError(t, err, "Open should read a locally stored upload")
+	defer rc.Close()
+
+	got, err := io.ReadAll(rc)
+	require.NoError(t, err, "Open reader should be readable")
+	require.Equal(t, body, got, "Open should return the uploaded bytes")
+	require.Equal(t, "image/png", contentType, "Open should infer content type from the uploaded filename")
+}
+
+func TestFileUploadStore_OpenRejectsTraversal(t *testing.T) {
+	t.Parallel()
+
+	store := NewFileUploadStore(t.TempDir(), "/api/v1/uploads/files")
+
+	_, _, err := store.Open(context.Background(), "../secret.png")
+
+	require.Error(t, err, "Open should reject path traversal keys before storage access")
+}
+
 func TestFileUploadStore_URL(t *testing.T) {
 	t.Parallel()
 
@@ -149,6 +179,51 @@ func TestS3UploadStore_Serve(t *testing.T) {
 	require.Equal(t, "inline", w.Header().Get("Content-Disposition"))
 	require.Equal(t, "private, max-age=86400", w.Header().Get("Cache-Control"))
 	require.Equal(t, body, w.Body.Bytes())
+}
+
+func TestS3UploadStore_Open(t *testing.T) {
+	t.Parallel()
+
+	body := []byte("fake-image-data")
+	contentType := "image/png"
+	mock := &mockS3Client{
+		getObjectFunc: func(_ context.Context, input *s3.GetObjectInput, _ ...func(*s3.Options)) (*s3.GetObjectOutput, error) {
+			require.Equal(t, "mybucket", *input.Bucket, "Open should read from the configured bucket")
+			require.Equal(t, "uploads/org-1/2026-01/abc.png", *input.Key, "Open should apply the configured prefix")
+			return &s3.GetObjectOutput{
+				Body:        io.NopCloser(bytes.NewReader(body)),
+				ContentType: &contentType,
+			}, nil
+		},
+	}
+	store := NewS3UploadStore(mock, "mybucket", "uploads")
+
+	rc, gotContentType, err := store.Open(context.Background(), "org-1/2026-01/abc.png")
+	require.NoError(t, err, "Open should read an uploaded object from S3")
+	defer rc.Close()
+
+	got, err := io.ReadAll(rc)
+	require.NoError(t, err, "Open reader should be readable")
+	require.Equal(t, body, got, "Open should return the uploaded object bytes")
+	require.Equal(t, contentType, gotContentType, "Open should return the S3 content type")
+}
+
+func TestS3UploadStore_OpenRejectsTraversal(t *testing.T) {
+	t.Parallel()
+
+	called := false
+	mock := &mockS3Client{
+		getObjectFunc: func(_ context.Context, _ *s3.GetObjectInput, _ ...func(*s3.Options)) (*s3.GetObjectOutput, error) {
+			called = true
+			return nil, fmt.Errorf("should not be called")
+		},
+	}
+	store := NewS3UploadStore(mock, "mybucket", "uploads")
+
+	_, _, err := store.Open(context.Background(), "org-1/../../secret.png")
+
+	require.Error(t, err, "Open should reject path traversal keys before S3 access")
+	require.False(t, called, "Open should not call S3 for invalid keys")
 }
 
 func TestS3UploadStore_Serve_NonImageAttachment(t *testing.T) {

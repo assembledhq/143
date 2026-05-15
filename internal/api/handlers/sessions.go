@@ -24,6 +24,7 @@ import (
 	ghservice "github.com/assembledhq/143/internal/services/github"
 	humaninputsvc "github.com/assembledhq/143/internal/services/humaninput"
 	"github.com/assembledhq/143/internal/services/linear"
+	previewsvc "github.com/assembledhq/143/internal/services/preview"
 	"github.com/assembledhq/143/internal/services/sessiontimeline"
 	"github.com/assembledhq/143/internal/services/storage"
 	"github.com/go-chi/chi/v5"
@@ -36,6 +37,14 @@ import (
 // implements this interface; it is injected after construction via SetCanceller.
 type SessionCanceller interface {
 	CancelSession(sessionID uuid.UUID) bool
+}
+
+type sessionWorkerSelector interface {
+	ResolveNode(ctx context.Context, nodeID string) (previewsvc.WorkerNode, error)
+}
+
+type sessionWorkerCancelClient interface {
+	CancelSession(ctx context.Context, worker previewsvc.WorkerNode, req previewsvc.RemoteCancelSessionRequest) (*previewsvc.RemoteCancelSessionResponse, error)
 }
 
 type sessionPRTitleSyncer interface {
@@ -77,6 +86,9 @@ type SessionHandler struct {
 	logger           zerolog.Logger
 	audit            *db.AuditEmitter
 	canceller        SessionCanceller // optional — enables cancelling running sessions
+	workerSelector   sessionWorkerSelector
+	workerClient     sessionWorkerCancelClient
+	localNodeID      string
 	prTitleSyncer    sessionPRTitleSyncer
 	prAuthSigningKey []byte
 	frontendURL      string
@@ -369,6 +381,12 @@ func (h *SessionHandler) SetAuditEmitter(audit *db.AuditEmitter) {
 // SetCanceller injects the session canceller for stopping running agent sessions.
 func (h *SessionHandler) SetCanceller(c SessionCanceller) {
 	h.canceller = c
+}
+
+func (h *SessionHandler) SetWorkerRuntime(selector sessionWorkerSelector, client sessionWorkerCancelClient, localNodeID string) {
+	h.workerSelector = selector
+	h.workerClient = client
+	h.localNodeID = localNodeID
 }
 
 func (h *SessionHandler) SetPRTitleSyncer(syncer sessionPRTitleSyncer) {
@@ -2596,21 +2614,107 @@ func (h *SessionHandler) CancelSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if err := h.runStore.RequestCancel(r.Context(), orgID, sessionID); err != nil {
+		writeError(w, r, http.StatusInternalServerError, "CANCEL_REQUEST_FAILED", "failed to record cancel request", err)
+		return
+	}
+
 	// Signal the orchestrator to send SIGINT to the agent.
 	// The orchestrator will update the session status asynchronously when the
 	// agent execution terminates (to idle or cancelled).
-	if !h.canceller.CancelSession(sessionID) {
-		// The session is marked as running but isn't tracked in the cancel
-		// registry. This can happen if the session just finished or the worker
-		// is on a different node. Return 202 Accepted — the client should poll.
+	if h.canceller.CancelSession(sessionID) {
+		if _, err := consumeSessionCancelRequestDetached(r.Context(), h.runStore, orgID, sessionID); err != nil {
+			h.logger.Warn().Err(err).Str("session_id", sessionID.String()).Msg("failed to consume locally delivered session cancel request")
+		}
+	} else {
+		// The session is marked as running but isn't tracked in this process'
+		// registry. In production the API process is often not the worker that
+		// owns the live agent, so route a best-effort cancel job to the recorded
+		// sandbox worker before returning 202.
 		h.logger.Warn().
 			Str("session_id", sessionID.String()).
 			Msg("cancel requested but session not found in local cancel registry")
+		routed, err := h.routeRemoteCancel(r.Context(), orgID, session)
+		if err != nil {
+			h.logger.Warn().Err(err).Str("session_id", sessionID.String()).Msg("failed to route cancel directly to worker")
+		}
+		if routed {
+			writeJSON(w, http.StatusAccepted, models.SingleResponse[models.Session]{Data: session})
+			return
+		}
+		if err := h.enqueueRemoteCancel(r.Context(), orgID, session); err != nil {
+			writeError(w, r, http.StatusInternalServerError, "CANCEL_ENQUEUE_FAILED", "failed to route cancel to worker", err)
+			return
+		}
 	}
 
 	// Return the session as-is (still "running"). The status will be updated
 	// asynchronously by the orchestrator once the agent exits.
 	writeJSON(w, http.StatusAccepted, models.SingleResponse[models.Session]{Data: session})
+}
+
+func consumeSessionCancelRequestDetached(ctx context.Context, sessions *db.SessionStore, orgID, sessionID uuid.UUID) (bool, error) {
+	if sessions == nil {
+		return false, nil
+	}
+	consumeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	return sessions.ConsumeCancelRequest(consumeCtx, orgID, sessionID)
+}
+
+func (h *SessionHandler) routeRemoteCancel(ctx context.Context, orgID uuid.UUID, session models.Session) (bool, error) {
+	targetNodeID := models.SessionWorkerTarget(&session)
+	if targetNodeID == nil || h.workerSelector == nil || h.workerClient == nil {
+		return false, nil
+	}
+	if h.localNodeID != "" && *targetNodeID == h.localNodeID {
+		return false, nil
+	}
+	worker, err := h.workerSelector.ResolveNode(ctx, *targetNodeID)
+	if err != nil {
+		return false, err
+	}
+	resp, err := h.workerClient.CancelSession(ctx, worker, previewsvc.RemoteCancelSessionRequest{
+		OrgID:     orgID,
+		SessionID: session.ID,
+	})
+	if err != nil {
+		return false, err
+	}
+	return resp != nil && resp.Accepted, nil
+}
+
+func (h *SessionHandler) enqueueRemoteCancel(ctx context.Context, orgID uuid.UUID, session models.Session) error {
+	targetNodeID := models.SessionWorkerTarget(&session)
+	if targetNodeID == nil {
+		h.logger.Warn().
+			Str("session_id", session.ID.String()).
+			Msg("cancel requested for running session without recorded worker target")
+		return nil
+	}
+	if h.jobStore == nil {
+		h.logger.Warn().
+			Str("session_id", session.ID.String()).
+			Str("worker_node_id", *targetNodeID).
+			Msg("cancel requested but job store unavailable for worker routing")
+		return nil
+	}
+	dedupeKey := "cancel_session:" + session.ID.String()
+	payload := map[string]string{
+		"session_id": session.ID.String(),
+		"org_id":     orgID.String(),
+	}
+	if _, err := h.jobStore.EnqueueWithOpts(ctx, orgID, db.EnqueueOpts{
+		Queue:        "agent",
+		JobType:      "cancel_session",
+		Payload:      payload,
+		Priority:     10,
+		DedupeKey:    &dedupeKey,
+		TargetNodeID: targetNodeID,
+	}); err != nil {
+		return fmt.Errorf("enqueue cancel_session: %w", err)
+	}
+	return nil
 }
 
 func isTerminalStatus(status string) bool {

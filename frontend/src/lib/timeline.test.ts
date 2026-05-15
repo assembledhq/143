@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { buildTimeline, flattenTimelineResponse } from "./timeline";
+import { buildTimeline, buildTimelineFromResponse, flattenTimelineResponse } from "./timeline";
 import type { SessionMessage, SessionLog } from "./types";
 
 function makeMessage(overrides: Partial<SessionMessage> & { id: number; created_at: string }): SessionMessage {
@@ -84,6 +84,28 @@ describe("buildTimeline", () => {
     const result = buildTimeline([], logs);
     expect(result).toHaveLength(1);
     expect(result[0].kind).toBe("error");
+  });
+
+  it("classifies the benign Codex stdin diagnostic as a hidden log", () => {
+    const logs = [
+      makeLog({ id: 1, created_at: "2026-01-01T00:00:01Z", level: "error", message: "Reading additional input from stdin..." }),
+    ];
+    const result = buildTimeline([], logs);
+    expect(result).toHaveLength(1);
+    expect(result[0].kind).toBe("log");
+  });
+
+  it("normalizes benign Codex stdin diagnostics from timeline responses", () => {
+    const log = makeLog({ id: 1, created_at: "2026-01-01T00:00:01Z", level: "error", message: "Reading additional input from stdin..." });
+    const result = buildTimelineFromResponse([
+      {
+        kind: "error",
+        created_at: "2026-01-01T00:00:01Z",
+        log,
+      },
+    ]);
+    expect(result).toHaveLength(1);
+    expect(result[0].kind).toBe("log");
   });
 
   it("shows streamed assistant output logs as assistant_output when no persisted message exists", () => {

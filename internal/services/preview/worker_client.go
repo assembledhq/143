@@ -49,10 +49,31 @@ type RemoteStartPreviewRequest struct {
 	ProfileName   string                `json:"profile_name,omitempty"`
 }
 
+// StartPreviewJobPayload is the durable worker job payload for completing a
+// previously reserved preview startup.
+type StartPreviewJobPayload struct {
+	OrgID         uuid.UUID             `json:"org_id"`
+	UserID        uuid.UUID             `json:"user_id"`
+	SessionID     uuid.UUID             `json:"session_id"`
+	PreviewID     uuid.UUID             `json:"preview_id"`
+	Config        *models.PreviewConfig `json:"config,omitempty"`
+	BaseCommitSHA string                `json:"base_commit_sha,omitempty"`
+	ProfileName   string                `json:"profile_name,omitempty"`
+}
+
 // RemoteStopActivePreviewForSessionRequest targets preview teardown by session.
 type RemoteStopActivePreviewForSessionRequest struct {
 	OrgID     uuid.UUID `json:"org_id"`
 	SessionID uuid.UUID `json:"session_id"`
+}
+
+type RemoteCancelSessionRequest struct {
+	OrgID     uuid.UUID `json:"org_id"`
+	SessionID uuid.UUID `json:"session_id"`
+}
+
+type RemoteCancelSessionResponse struct {
+	Accepted bool `json:"accepted"`
 }
 
 // RemoteInspectElementRequest targets DOM inspection by coordinates.
@@ -389,4 +410,23 @@ func (c *WorkerPreviewClient) StopActivePreviewForSession(ctx context.Context, w
 		return false, err
 	}
 	return result.Stopped, nil
+}
+
+func (c *WorkerPreviewClient) CancelSession(ctx context.Context, worker WorkerNode, reqBody RemoteCancelSessionRequest) (*RemoteCancelSessionResponse, error) {
+	sessionID := reqBody.SessionID
+	req, err := c.newRequest(ctx, http.MethodPost, fmt.Sprintf("%s/internal/sessions/%s/cancel", worker.BaseURL, sessionID), auth.PreviewTokenClaims{
+		OrgID:        reqBody.OrgID,
+		TargetNodeID: worker.ID,
+		SessionID:    &sessionID,
+		Action:       "cancel_session",
+		ExpiresAt:    time.Now().Add(previewWorkerTokenTTL),
+	}, reqBody)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("cancel session on worker: %w", err)
+	}
+	return decodeWorkerResponse[RemoteCancelSessionResponse](resp)
 }

@@ -50,6 +50,11 @@ www.{$DOMAIN:143.dev} {
 }
 
 *.preview.{$DOMAIN:143.dev} {
+	tls {
+		dns cloudflare {env.CLOUDFLARE_API_TOKEN}
+		resolvers 1.1.1.1
+	}
+
 	@safe method GET HEAD OPTIONS
 	handle @safe {
 		reverse_proxy {

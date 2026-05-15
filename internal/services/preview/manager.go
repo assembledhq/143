@@ -215,21 +215,39 @@ func (m *Manager) StartPreview(ctx context.Context, input StartPreviewInput) (*m
 // follow up with LaunchPreview (success path) or AbortReservation (failure
 // path) — otherwise the preview row lingers in 'starting' with an active hold.
 func (m *Manager) ReservePreview(ctx context.Context, input StartPreviewInput) (*models.PreviewInstance, error) {
-	if m.provider == nil {
+	return m.reservePreview(ctx, m.store, input, m.workerNodeID, true)
+}
+
+// ReservePreviewForWorkerInTx reserves a visible starting preview row for a
+// selected worker inside the caller's transaction. It deliberately does not
+// require a local preview provider, so API-only nodes can pair the reservation
+// atomically with enqueueing the durable start_preview job.
+func (m *Manager) ReservePreviewForWorkerInTx(ctx context.Context, tx pgx.Tx, input StartPreviewInput, workerNodeID string) (*models.PreviewInstance, error) {
+	if tx == nil {
+		return nil, fmt.Errorf("transaction is required")
+	}
+	return m.reservePreview(ctx, m.store.WithTx(tx), input, workerNodeID, false)
+}
+
+func (m *Manager) reservePreview(ctx context.Context, store *db.PreviewStore, input StartPreviewInput, workerNodeID string, requireProvider bool) (*models.PreviewInstance, error) {
+	if requireProvider && m.provider == nil {
 		return nil, fmt.Errorf("preview provider is not configured")
+	}
+	if store == nil {
+		return nil, fmt.Errorf("preview store is not configured")
 	}
 	if errs := ValidateConfig(input.Config); len(errs) > 0 {
 		return nil, fmt.Errorf("invalid preview config: %s", strings.Join(errs, "; "))
 	}
 
-	existing, err := m.store.GetActivePreviewForSession(ctx, input.OrgID, input.SessionID)
+	existing, err := store.GetActivePreviewForSession(ctx, input.OrgID, input.SessionID)
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return nil, fmt.Errorf("check existing preview: %w", err)
 	} else if err == nil && existing != nil {
 		return nil, fmt.Errorf("session already has an active preview (id=%s)", existing.ID)
 	}
 
-	if err := m.checkConcurrencyCaps(ctx, input.OrgID, input.UserID); err != nil {
+	if err := m.checkConcurrencyCapsWithStore(ctx, store, input.OrgID, input.UserID, workerNodeID); err != nil {
 		return nil, err
 	}
 
@@ -247,7 +265,7 @@ func (m *Manager) ReservePreview(ctx context.Context, input StartPreviewInput) (
 		Name:           input.Config.Name,
 		Status:         models.PreviewStatusStarting,
 		Provider:       ProviderDocker,
-		WorkerNodeID:   m.workerNodeID,
+		WorkerNodeID:   workerNodeID,
 		PrimaryService: input.Config.Primary,
 		ConfigDigest:   configDigest,
 		BaseCommitSHA:  input.BaseCommitSHA,
@@ -265,7 +283,7 @@ func (m *Manager) ReservePreview(ctx context.Context, input StartPreviewInput) (
 		}
 	}
 
-	if err := m.store.CreatePreviewInstance(ctx, instance); err != nil {
+	if err := store.CreatePreviewInstance(ctx, instance); err != nil {
 		return nil, fmt.Errorf("create preview instance: %w", err)
 	}
 
@@ -275,7 +293,7 @@ func (m *Manager) ReservePreview(ctx context.Context, input StartPreviewInput) (
 	// to concurrent FinalizeContainerDestroy.
 	var holdErr error
 	for attempt := 0; attempt < 2; attempt++ {
-		if _, holdErr = m.store.AcquirePreviewHold(ctx, input.OrgID, instance.ID); holdErr == nil {
+		if _, holdErr = store.AcquirePreviewHold(ctx, input.OrgID, instance.ID); holdErr == nil {
 			break
 		}
 		m.logger.Warn().Err(holdErr).
@@ -284,7 +302,7 @@ func (m *Manager) ReservePreview(ctx context.Context, input StartPreviewInput) (
 			Msg("acquire preview hold failed; retrying")
 	}
 	if holdErr != nil {
-		if statusErr := m.store.UpdatePreviewStatus(ctx, input.OrgID, instance.ID, models.PreviewStatusFailed,
+		if statusErr := store.UpdatePreviewStatus(ctx, input.OrgID, instance.ID, models.PreviewStatusFailed,
 			fmt.Sprintf("acquire preview hold: %v", holdErr)); statusErr != nil {
 			m.logger.Warn().Err(statusErr).Str("preview_id", instance.ID.String()).Msg("failed to mark preview failed after hold error")
 		}
@@ -847,6 +865,7 @@ func (m *Manager) GetStatus(ctx context.Context, orgID, previewID uuid.UUID) (*m
 		Instance:       instance,
 		Services:       services,
 		Infrastructure: infra,
+		PreviewOrigin:  m.previewOrigin(previewID),
 	}, nil
 }
 
@@ -1208,6 +1227,14 @@ func (m *Manager) platformEnv(previewID uuid.UUID) map[string]string {
 	return map[string]string{"PREVIEW_ORIGIN": origin}
 }
 
+func (m *Manager) previewOrigin(previewID uuid.UUID) string {
+	env := m.platformEnv(previewID)
+	if env == nil {
+		return ""
+	}
+	return env["PREVIEW_ORIGIN"]
+}
+
 // =============================================================================
 // SnapshotCache accessor
 // =============================================================================
@@ -1226,8 +1253,12 @@ func (m *Manager) SnapshotCache() *SnapshotCache {
 // limits may briefly be exceeded. The database partial unique index on session_id
 // prevents duplicates per session; these caps are best-effort guardrails.
 func (m *Manager) checkConcurrencyCaps(ctx context.Context, orgID, userID uuid.UUID) error {
+	return m.checkConcurrencyCapsWithStore(ctx, m.store, orgID, userID, m.workerNodeID)
+}
+
+func (m *Manager) checkConcurrencyCapsWithStore(ctx context.Context, store *db.PreviewStore, orgID, userID uuid.UUID, workerNodeID string) error {
 	// Per-user cap.
-	userCount, err := m.store.CountActivePreviewsByUser(ctx, orgID, userID)
+	userCount, err := store.CountActivePreviewsByUser(ctx, orgID, userID)
 	if err != nil {
 		return fmt.Errorf("count user previews: %w", err)
 	}
@@ -1236,7 +1267,7 @@ func (m *Manager) checkConcurrencyCaps(ctx context.Context, orgID, userID uuid.U
 	}
 
 	// Per-org cap.
-	orgCount, err := m.store.CountActivePreviewsByOrg(ctx, orgID)
+	orgCount, err := store.CountActivePreviewsByOrg(ctx, orgID)
 	if err != nil {
 		return fmt.Errorf("count org previews: %w", err)
 	}
@@ -1246,7 +1277,7 @@ func (m *Manager) checkConcurrencyCaps(ctx context.Context, orgID, userID uuid.U
 
 	// Per-worker cap. This is the capacity guardrail: when the host is
 	// saturated, a fresh StartPreview would risk OOM-killing peers.
-	workerCount, err := m.store.CountActivePreviewsByWorker(ctx, m.workerNodeID)
+	workerCount, err := store.CountActivePreviewsByWorker(ctx, workerNodeID)
 	if err != nil {
 		return fmt.Errorf("count worker previews: %w", err)
 	}

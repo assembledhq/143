@@ -31,7 +31,7 @@ import (
 	"github.com/assembledhq/143/internal/models"
 )
 
-const codingCredentialsColumns = "id, org_id, user_id, provider, label, config, priority, status, created_by, last_verified_at, created_at, updated_at" // #nosec G101 -- SQL column list
+const codingCredentialsColumns = "id, org_id, user_id, provider, label, config, priority, status, created_by, last_verified_at, rate_limited_until, rate_limited_observed_at, rate_limit_message, created_at, updated_at" // #nosec G101 -- SQL column list
 
 // ErrCodingCredentialNotFound is returned by every Get/mutation method when
 // either no row matches or the row matches but lives in a different scope.
@@ -268,6 +268,60 @@ func (s *CodingCredentialStore) MarkRateLimited(id uuid.UUID) {
 	s.health.shed(id)
 }
 
+// MarkRateLimitedForScope records a durable temporary rate-limit marker and
+// also sheds the credential in memory so this worker skips it immediately.
+func (s *CodingCredentialStore) MarkRateLimitedForScope(ctx context.Context, scope models.Scope, id uuid.UUID, limit models.CodingCredentialRateLimit) error {
+	s.health.shed(id)
+	until := limit.Until
+	if until.IsZero() {
+		until = s.clock().Add(s.health.ttl)
+	}
+	var message *string
+	if limit.Message != "" {
+		message = &limit.Message
+	}
+	var provider models.ProviderName
+	if err := s.withScopedRowTx(ctx, scope, id, func(tx pgx.Tx, rowProvider models.ProviderName) error {
+		provider = rowProvider
+		args := pgx.NamedArgs{
+			"id":          id,
+			"org_id":      scope.OrgID,
+			"until":       until,
+			"message":     message,
+			"observed_at": s.clock(),
+		}
+		var query string
+		if scope.IsPersonal() {
+			args["user_id"] = *scope.UserID
+			query = `UPDATE coding_credentials
+				 SET rate_limited_until = @until,
+				     rate_limited_observed_at = @observed_at,
+				     rate_limit_message = @message,
+				     updated_at = now()
+				 WHERE id = @id AND org_id = @org_id AND user_id = @user_id`
+		} else {
+			query = `UPDATE coding_credentials
+				 SET rate_limited_until = @until,
+				     rate_limited_observed_at = @observed_at,
+				     rate_limit_message = @message,
+				     updated_at = now()
+				 WHERE id = @id AND org_id = @org_id AND user_id IS NULL`
+		}
+		tag, execErr := tx.Exec(ctx, query, args)
+		if execErr != nil {
+			return fmt.Errorf("mark credential rate limited: %w", execErr)
+		}
+		if tag.RowsAffected() == 0 {
+			return ErrCodingCredentialNotFound
+		}
+		return nil
+	}); err != nil {
+		return err
+	}
+	s.invalidate(scope, provider)
+	return nil
+}
+
 // MarkAuthRejected records a "do not pick" marker following an auth failure.
 // Called by the agent runtime via AgentEnv.ShedAuthRejected when a finished
 // run reports a 401-class signal that the token-expired retry could not
@@ -278,6 +332,13 @@ func (s *CodingCredentialStore) MarkRateLimited(id uuid.UUID) {
 // lint:allow-no-orgid reason="id was obtained from a scoped Pick; in-process cache keys by id only"
 func (s *CodingCredentialStore) MarkAuthRejected(id uuid.UUID) {
 	s.health.shed(id)
+}
+
+// MarkAuthRejectedForScope marks a credential invalid after a hard upstream
+// auth rejection and also sheds it in memory for this worker immediately.
+func (s *CodingCredentialStore) MarkAuthRejectedForScope(ctx context.Context, scope models.Scope, id uuid.UUID) error {
+	s.health.shed(id)
+	return s.UpdateStatus(ctx, scope, id, models.CodingCredentialStatusInvalid)
 }
 
 // ----- Lookup -----
@@ -562,7 +623,7 @@ func (s *CodingCredentialStore) PickRunnable(ctx context.Context, scope models.S
 	}
 
 	for _, tier := range groupByPriorityAndScope(creds) {
-		eligible := s.health.filter(tier)
+		eligible := s.filterAvailable(tier)
 		if len(eligible) == 0 {
 			continue
 		}
@@ -614,7 +675,7 @@ func (s *CodingCredentialStore) PickRunnableMulti(ctx context.Context, scope mod
 	sortResolvedCredentialRows(creds)
 
 	for _, tier := range groupByPriorityAndScope(creds) {
-		eligible := s.health.filter(tier)
+		eligible := s.filterAvailable(tier)
 		if len(eligible) == 0 {
 			continue
 		}
@@ -670,6 +731,25 @@ func groupByPriorityAndScope(creds []models.DecryptedCodingCredential) [][]model
 		out = append(out, cur)
 	}
 	return out
+}
+
+func (s *CodingCredentialStore) filterAvailable(creds []models.DecryptedCodingCredential) []models.DecryptedCodingCredential {
+	eligible := s.health.filter(creds)
+	now := s.clock()
+	out := make([]models.DecryptedCodingCredential, 0, len(eligible))
+	for _, cred := range eligible {
+		if credentialRateLimitedAt(cred, now) {
+			continue
+		}
+		out = append(out, cred)
+	}
+	return out
+}
+
+func credentialRateLimitedAt(cred models.DecryptedCodingCredential, now time.Time) bool {
+	return cred.Status == models.CodingCredentialStatusActive &&
+		cred.RateLimitedUntil != nil &&
+		cred.RateLimitedUntil.After(now)
 }
 
 // ----- Mutation -----
@@ -1392,18 +1472,21 @@ func (s *CodingCredentialStore) decryptRow(row models.CodingCredential) (*models
 		return nil, fmt.Errorf("parse %s config: %w", row.Provider, err)
 	}
 	return &models.DecryptedCodingCredential{
-		ID:             row.ID,
-		OrgID:          row.OrgID,
-		UserID:         row.UserID,
-		Provider:       row.Provider,
-		Label:          row.Label,
-		Config:         cfg,
-		Priority:       row.Priority,
-		Status:         row.Status,
-		CreatedBy:      row.CreatedBy,
-		LastVerifiedAt: row.LastVerifiedAt,
-		CreatedAt:      row.CreatedAt,
-		UpdatedAt:      row.UpdatedAt,
+		ID:                    row.ID,
+		OrgID:                 row.OrgID,
+		UserID:                row.UserID,
+		Provider:              row.Provider,
+		Label:                 row.Label,
+		Config:                cfg,
+		Priority:              row.Priority,
+		Status:                row.Status,
+		CreatedBy:             row.CreatedBy,
+		LastVerifiedAt:        row.LastVerifiedAt,
+		RateLimitedUntil:      row.RateLimitedUntil,
+		RateLimitedObservedAt: row.RateLimitedObservedAt,
+		RateLimitMessage:      row.RateLimitMessage,
+		CreatedAt:             row.CreatedAt,
+		UpdatedAt:             row.UpdatedAt,
 	}, nil
 }
 

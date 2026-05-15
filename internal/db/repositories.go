@@ -3,20 +3,30 @@ package db
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgerrcode"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/assembledhq/143/internal/models"
 )
 
+var ErrActiveGitHubRepositoryOwnershipConflict = errors.New("active github repository is already owned")
+
 type RepositoryStore struct {
-	db DBTX
+	db   DBTX
+	pool TxStarter
 }
 
 func NewRepositoryStore(db DBTX) *RepositoryStore {
-	return &RepositoryStore{db: db}
+	s := &RepositoryStore{db: db}
+	if pool, ok := db.(TxStarter); ok {
+		s.pool = pool
+	}
+	return s
 }
 
 func (s *RepositoryStore) Create(ctx context.Context, repo *models.Repository) error {
@@ -46,8 +56,7 @@ func (s *RepositoryStore) Create(ctx context.Context, repo *models.Repository) e
 
 // RepositoryFilters controls optional predicates on ListByOrg. Default behavior
 // (zero value) returns only active repos, which is what every picker UI wants;
-// set IncludeDisconnected to surface user-disconnected repos for the settings
-// page's "Reconnect" affordance.
+// set IncludeDisconnected to surface historical repo rows for settings views.
 type RepositoryFilters struct {
 	IncludeDisconnected bool
 }
@@ -171,6 +180,166 @@ func (s *RepositoryStore) UpsertFromGitHub(ctx context.Context, repo *models.Rep
 
 	row := s.db.QueryRow(ctx, query, args)
 	return row.Scan(&repo.ID, &repo.CreatedAt, &repo.UpdatedAt)
+}
+
+type GitHubRepoOwner struct {
+	RepositoryID uuid.UUID `db:"repository_id"`
+	OrgID        uuid.UUID `db:"org_id"`
+	OrgName      string    `db:"org_name"`
+	GitHubID     int64     `db:"github_id"`
+	FullName     string    `db:"full_name"`
+	Status       string    `db:"status"`
+}
+
+// GetActiveOwnerByGitHubID returns the sole active 143 owner for a GitHub repo.
+// lint:allow-no-orgid reason="global ownership lookup by GitHub repo id before routing webhooks or claim conflicts"
+func (s *RepositoryStore) GetActiveOwnerByGitHubID(ctx context.Context, githubID int64) (GitHubRepoOwner, error) {
+	query := `
+		SELECT r.id AS repository_id, r.org_id, o.name AS org_name, r.github_id, r.full_name, r.status
+		FROM repositories r
+		JOIN organizations o ON o.id = r.org_id
+		WHERE r.github_id = @github_id AND r.status = 'active'`
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{"github_id": githubID})
+	if err != nil {
+		return GitHubRepoOwner{}, fmt.Errorf("query active github repo owner: %w", err)
+	}
+	return pgx.CollectOneRow(rows, pgx.RowToStructByName[GitHubRepoOwner])
+}
+
+func (s *RepositoryStore) GetByOrgAndGitHubIDAnyStatus(ctx context.Context, orgID uuid.UUID, githubID int64) (models.Repository, error) {
+	query := `
+		SELECT id, org_id, integration_id, github_id, full_name, default_branch, private, language, description, clone_url, installation_id, status, last_synced_at, context_quality, settings, created_at, updated_at
+		FROM repositories
+		WHERE org_id = @org_id AND github_id = @github_id`
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{"org_id": orgID, "github_id": githubID})
+	if err != nil {
+		return models.Repository{}, fmt.Errorf("query repository by org and github id: %w", err)
+	}
+	return pgx.CollectOneRow(rows, pgx.RowToStructByName[models.Repository])
+}
+
+func (s *RepositoryStore) CountActiveByOrg(ctx context.Context, orgID uuid.UUID) (int, error) {
+	var count int
+	err := s.db.QueryRow(ctx, `
+		SELECT count(*)
+		FROM repositories
+		WHERE org_id = @org_id AND status = 'active'`,
+		pgx.NamedArgs{"org_id": orgID},
+	).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("count active repositories by org: %w", err)
+	}
+	return count, nil
+}
+
+func (s *RepositoryStore) ClaimFromGitHub(ctx context.Context, repo *models.Repository) error {
+	query := `
+		INSERT INTO repositories (org_id, integration_id, github_id, full_name, default_branch, private, language, description, clone_url, installation_id, status, settings)
+		VALUES (@org_id, @integration_id, @github_id, @full_name, @default_branch, @private, @language, @description, @clone_url, @installation_id, 'active', @settings)
+		ON CONFLICT (org_id, github_id) DO UPDATE
+		SET integration_id = EXCLUDED.integration_id,
+		    full_name = EXCLUDED.full_name,
+		    default_branch = EXCLUDED.default_branch,
+		    private = EXCLUDED.private,
+		    language = EXCLUDED.language,
+		    description = EXCLUDED.description,
+		    clone_url = EXCLUDED.clone_url,
+		    installation_id = EXCLUDED.installation_id,
+		    status = 'active',
+		    updated_at = now()
+		RETURNING id, created_at, updated_at`
+
+	settings := repo.Settings
+	if settings == nil {
+		settings = json.RawMessage(`{}`)
+	}
+
+	err := s.db.QueryRow(ctx, query, pgx.NamedArgs{
+		"org_id":          repo.OrgID,
+		"integration_id":  repo.IntegrationID,
+		"github_id":       repo.GitHubID,
+		"full_name":       repo.FullName,
+		"default_branch":  repo.DefaultBranch,
+		"private":         repo.Private,
+		"language":        repo.Language,
+		"description":     repo.Description,
+		"clone_url":       repo.CloneURL,
+		"installation_id": repo.InstallationID,
+		"settings":        settings,
+	}).Scan(&repo.ID, &repo.CreatedAt, &repo.UpdatedAt)
+	if err != nil {
+		if isActiveGitHubRepositoryOwnershipConflict(err) {
+			return fmt.Errorf("%w: %w", ErrActiveGitHubRepositoryOwnershipConflict, err)
+		}
+		return fmt.Errorf("claim github repository: %w", err)
+	}
+	repo.Status = string(models.RepositoryStatusActive)
+	return nil
+}
+
+func isActiveGitHubRepositoryOwnershipConflict(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) &&
+		pgErr.Code == pgerrcode.UniqueViolation &&
+		(pgErr.ConstraintName == "idx_repositories_active_github_id" || pgErr.ConstraintName == "")
+}
+
+func (s *RepositoryStore) ApplyGitHubClaims(ctx context.Context, orgID uuid.UUID, repos []*models.Repository, transferOwners map[int64]uuid.UUID) error {
+	if s.pool == nil {
+		for _, repo := range repos {
+			if repo.OrgID != orgID {
+				return fmt.Errorf("claim repository org mismatch: %s != %s", repo.OrgID, orgID)
+			}
+			if ownerOrgID, ok := transferOwners[repo.GitHubID]; ok {
+				if err := s.disconnectByOrgAndGitHubID(ctx, ownerOrgID, repo.GitHubID); err != nil {
+					return err
+				}
+			}
+			if err := s.ClaimFromGitHub(ctx, repo); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin github repo claim transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	txStore := NewRepositoryStore(tx)
+	for _, repo := range repos {
+		if repo.OrgID != orgID {
+			return fmt.Errorf("claim repository org mismatch: %s != %s", repo.OrgID, orgID)
+		}
+		if ownerOrgID, ok := transferOwners[repo.GitHubID]; ok {
+			if err := txStore.disconnectByOrgAndGitHubID(ctx, ownerOrgID, repo.GitHubID); err != nil {
+				return err
+			}
+		}
+		if err := txStore.ClaimFromGitHub(ctx, repo); err != nil {
+			return err
+		}
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit github repo claims: %w", err)
+	}
+	return nil
+}
+
+func (s *RepositoryStore) disconnectByOrgAndGitHubID(ctx context.Context, orgID uuid.UUID, githubID int64) error {
+	_, err := s.db.Exec(ctx, `
+		UPDATE repositories
+		SET status = 'disconnected', updated_at = now()
+		WHERE org_id = @org_id AND github_id = @github_id AND status = 'active'`,
+		pgx.NamedArgs{"org_id": orgID, "github_id": githubID},
+	)
+	if err != nil {
+		return fmt.Errorf("disconnect active github repo owner: %w", err)
+	}
+	return nil
 }
 
 // GetByFullName returns the active repository with the given owner/name slug,

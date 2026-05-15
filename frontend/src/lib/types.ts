@@ -84,6 +84,10 @@ export interface Integration {
   org_id: string;
   provider: string;
   github_app_installed?: boolean;
+  github_installation_id?: number;
+  github_account_login?: string;
+  github_repo_selection_required?: boolean;
+  github_active_repo_count?: number;
   /**
    * Surfaced by the backend when a provider rejects our access token (e.g.
    * Linear returns 401). Populated by deriveIntegrationStatus on the server
@@ -98,6 +102,26 @@ export interface Integration {
   status: string;
   last_synced_at?: string;
   created_at: string;
+}
+
+export type GitHubRepositoryClaimStatus =
+  | "unclaimed"
+  | "owned_by_current_org"
+  | "owned_by_other_org"
+  | "disconnected_in_current_org";
+
+export interface GitHubRepositoryClaimCandidate {
+  github_id: number;
+  full_name: string;
+  default_branch: string;
+  private: boolean;
+  clone_url: string;
+  installation_id: number;
+  status: GitHubRepositoryClaimStatus;
+  repository_id?: string;
+  owner_org_id?: string;
+  owner_org_name?: string;
+  can_transfer: boolean;
 }
 
 export interface Issue {
@@ -123,6 +147,80 @@ export interface Issue {
   complexity_label?: string;
   created_at: string;
   updated_at: string;
+}
+
+export type AutopilotRunState =
+  | 'not_started'
+  | 'queued'
+  | 'running'
+  | 'awaiting_input'
+  | 'needs_review'
+  | 'pr_open'
+  | 'merged'
+  | 'failed'
+  | 'skipped';
+
+export type AutopilotQueueAction =
+  | 'start_run'
+  | 'view_run'
+  | 'review'
+  | 'open_pr'
+  | 'retry'
+  | 'blocked';
+
+export interface AutopilotQueueRow {
+  id: string;
+  rank: number;
+  source: { type: string; key: string };
+  title: string;
+  repo?: { id: string; name: string };
+  issue_status: string;
+  customer_impact: { label: string; count: number };
+  implementation_ease: string;
+  low_hanging_fruit: {
+    label: string;
+    reasons: string[];
+    cluster_size: number;
+  };
+  display_run_state: AutopilotRunState;
+  latest_session?: {
+    id: string;
+    title: string;
+    updated_at: string;
+  };
+  latest_agent_run?: {
+    id: string;
+    status: string;
+    trigger_mode: 'auto' | 'manual';
+    started_at?: string;
+  };
+  latest_pr?: {
+    id: string;
+    number: number;
+    url: string;
+    status: string;
+    merged_at?: string;
+  };
+  available_action: AutopilotQueueAction;
+  action_disabled_reason?: string | null;
+}
+
+export interface AutopilotQueueSummary {
+  top_issue_id?: string;
+  autorunnable_count: number;
+  needs_review_count: number;
+  open_pr_count: number;
+  active_run_count: number;
+  ranked_issue_count: number;
+  analyzed_at?: string;
+}
+
+export interface AutopilotQueueResponse {
+  data: AutopilotQueueRow[];
+  meta: {
+    next_cursor?: string;
+    summary: AutopilotQueueSummary;
+  };
 }
 
 export interface Session {
@@ -793,6 +891,7 @@ export interface InvitationResponse {
   id: string;
   email?: string | null;
   github_username?: string | null;
+  acceptance_method: 'email' | 'github' | 'either';
   role: string;
   status: string;
   invited_by: {
@@ -874,6 +973,8 @@ export interface CodingAuth {
   status: CodingAuthStatus;
   is_default: boolean;
   last_verified_at?: string;
+  rate_limited_until?: string;
+  rate_limit_message?: string;
   last_used_at?: string;
   usage_note?: string;
   created_by?: string;
@@ -903,6 +1004,8 @@ export interface CodingCredentialSummary {
   is_default: boolean;
   usage_note?: string;
   last_verified_at?: string;
+  rate_limited_until?: string;
+  rate_limit_message?: string;
   created_by?: string;
   created_at: string;
   updated_at: string;
@@ -1393,6 +1496,11 @@ export interface UsageTimeseriesBucket {
   user_id?: string;
   user_name?: string;
   capacity_tier?: string;
+  agent_type?: string;
+  model_used?: string;
+  reasoning_effort?: string;
+  series_key?: string;
+  series_label?: string;
   total_container_minutes: number;
   total_sessions: number;
   total_container_starts: number;
@@ -1401,6 +1509,7 @@ export interface UsageTimeseriesBucket {
   p95_duration_sec: number;
   total_input_tokens: number;
   total_output_tokens: number;
+  total_tokens: number;
   total_llm_cost_usd: number;
 }
 
@@ -1419,8 +1528,12 @@ export interface UsageBreakdownRow {
   peak_concurrent: number;
   total_input_tokens: number;
   total_output_tokens: number;
+  total_tokens: number;
   total_llm_cost_usd: number;
   percentage: number;
+  share_of_sessions?: number;
+  share_of_token_cost?: number;
+  share_of_tokens?: number;
 }
 
 // Automation types
@@ -1435,6 +1548,8 @@ export interface Automation {
   name: string;
   goal: string;
   scope?: string;
+  icon_type: 'emoji';
+  icon_value: string;
   agent_type?: string;
   model_override?: string;
   reasoning_effort?: Session["reasoning_effort"];
