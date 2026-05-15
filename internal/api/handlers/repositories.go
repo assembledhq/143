@@ -32,7 +32,7 @@ func (h *RepositoryHandler) List(w http.ResponseWriter, r *http.Request) {
 	orgID := middleware.OrgIDFromContext(r.Context())
 	// Pickers (session/project/automation creation) are the dominant caller and
 	// always want active repos only; the integrations settings page opts in with
-	// ?include_disconnected=true so the user can still see and reconnect them.
+	// ?include_disconnected=true so historical rows can still be displayed.
 	filters := db.RepositoryFilters{
 		IncludeDisconnected: r.URL.Query().Get("include_disconnected") == "true",
 	}
@@ -140,11 +140,16 @@ func (h *RepositoryHandler) Disconnect(w http.ResponseWriter, r *http.Request) {
 	h.setRepoStatus(w, r, models.RepositoryStatusDisconnected)
 }
 
-// Reconnect flips a user-disconnected repo back to active. Requires an explicit
-// user action — an integration Sync does NOT silently revive disconnected repos
-// (UpsertFromGitHub deliberately omits status from the ON CONFLICT SET clause).
+// Reconnect used to flip a user-disconnected repo back to active. Active GitHub
+// ownership is now globally exclusive, so reactivation must go through the
+// GitHub repository claim endpoint where user repo access and transfer conflicts
+// are checked before the row becomes active again.
 func (h *RepositoryHandler) Reconnect(w http.ResponseWriter, r *http.Request) {
-	h.setRepoStatus(w, r, models.RepositoryStatusActive)
+	if _, err := uuid.Parse(chi.URLParam(r, "id")); err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid repository ID")
+		return
+	}
+	writeError(w, r, http.StatusConflict, "GITHUB_REPO_CLAIM_REQUIRED", "reactivate GitHub repositories from the integrations repository selection flow")
 }
 
 func (h *RepositoryHandler) setRepoStatus(w http.ResponseWriter, r *http.Request, status models.RepositoryStatus) {

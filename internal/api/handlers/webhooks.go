@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"strings"
@@ -13,16 +14,18 @@ import (
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
 	ghservice "github.com/assembledhq/143/internal/services/github"
-	"github.com/rs/zerolog"
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 )
 
 type WebhookHandler struct {
-	cfg              *config.Config
-	orgStore         *db.OrganizationStore
-	userStore        *db.UserStore
-	repoStore        *db.RepositoryStore
-	integrationStore *db.IntegrationStore
-	prService        *ghservice.PRService
+	cfg                 *config.Config
+	orgStore            *db.OrganizationStore
+	userStore           *db.UserStore
+	repoStore           *db.RepositoryStore
+	integrationStore    *db.IntegrationStore
+	githubInstallations *db.GitHubInstallationStore
+	prService           *ghservice.PRService
 }
 
 func NewWebhookHandler(cfg *config.Config, orgStore *db.OrganizationStore, userStore *db.UserStore, repoStore *db.RepositoryStore, integrationStore *db.IntegrationStore, prService *ghservice.PRService) *WebhookHandler {
@@ -34,6 +37,10 @@ func NewWebhookHandler(cfg *config.Config, orgStore *db.OrganizationStore, userS
 		integrationStore: integrationStore,
 		prService:        prService,
 	}
+}
+
+func (h *WebhookHandler) SetGitHubInstallationStore(store *db.GitHubInstallationStore) {
+	h.githubInstallations = store
 }
 
 func (h *WebhookHandler) HandleGitHub(w http.ResponseWriter, r *http.Request) {
@@ -128,83 +135,19 @@ func (h *WebhookHandler) handleInstallation(w http.ResponseWriter, r *http.Reque
 
 	switch event.Action {
 	case "created":
-		// Try to find an existing integration for this installation. The
-		// HandleGitHubAppInstalled endpoint (browser redirect) creates the
-		// integration with installation_id in its config before this webhook
-		// arrives, so check for it first.
-		var org *models.Organization
-		var integration *models.Integration
-		existingIntegration, lookupErr := h.integrationStore.GetByGitHubInstallationID(ctx, event.Installation.ID)
-		if lookupErr == nil {
-			integration = &existingIntegration
-			existingOrg, orgErr := h.orgStore.GetByID(ctx, integration.OrgID)
-			if orgErr == nil {
-				org = &existingOrg
-			}
-		}
-
-		if org == nil {
-			// Fall back to looking up the user by GitHub account ID.
-			user, err := h.userStore.GetByGitHubID(ctx, event.Installation.Account.ID)
-			if err == nil {
-				existingOrg, orgErr := h.orgStore.GetByID(ctx, user.OrgID)
-				if orgErr == nil {
-					org = &existingOrg
-				}
-			}
-		}
-		if org == nil {
-			// No matching user found — create a new org as a fallback.
-			newOrg := &models.Organization{
-				Name:     event.Installation.Account.Login + "'s Org",
-				Settings: json.RawMessage(`{}`),
-			}
-			if createErr := h.orgStore.Create(ctx, newOrg); createErr != nil {
-				writeError(w, r, http.StatusInternalServerError, "ORG_CREATE_FAILED", "failed to create organization", createErr)
-				return
-			}
-			org = newOrg
-		}
-
-		// Create integration if one doesn't already exist.
-		if integration == nil {
-			configJSON, marshalErr := json.Marshal(map[string]any{
-				"installation_id": event.Installation.ID,
-				"account_login":   event.Installation.Account.Login,
-			})
-			if marshalErr != nil {
-				zerolog.Ctx(r.Context()).Warn().Err(marshalErr).Msg("failed to marshal integration config")
-				writeError(w, r, http.StatusInternalServerError, "MARSHAL_FAILED", "failed to marshal integration config", marshalErr)
-				return
-			}
-			integration = &models.Integration{
-				OrgID:    org.ID,
-				Provider: models.IntegrationProviderGitHub,
-				Config:   configJSON,
-				Status:   models.IntegrationStatusActive,
-			}
-			if err := h.integrationStore.Create(ctx, integration); err != nil {
-				writeError(w, r, http.StatusInternalServerError, "INTEGRATION_CREATE_FAILED", "failed to create integration", err)
-				return
-			}
-		}
-
-		// Create repositories
-		for _, whRepo := range event.Repositories {
-			repo := &models.Repository{
-				OrgID:          org.ID,
-				IntegrationID:  integration.ID,
-				GitHubID:       whRepo.ID,
-				FullName:       whRepo.FullName,
-				DefaultBranch:  "main",
-				Private:        whRepo.Private,
-				CloneURL:       "https://github.com/" + whRepo.FullName + ".git",
+		if h.githubInstallations != nil {
+			inst := &models.GitHubInstallation{
 				InstallationID: event.Installation.ID,
+				AccountID:      event.Installation.Account.ID,
+				AccountLogin:   event.Installation.Account.Login,
 				Status:         "active",
-				Settings:       json.RawMessage(`{}`),
 			}
-			if err := h.repoStore.UpsertFromGitHub(ctx, repo); err != nil {
-				writeError(w, r, http.StatusInternalServerError, "REPOSITORY_UPSERT_FAILED", "failed to upsert repository", err)
+			if err := h.githubInstallations.UpsertInstallation(ctx, inst); err != nil {
+				writeError(w, r, http.StatusInternalServerError, "INSTALLATION_UPSERT_FAILED", "failed to record github installation", err)
+				return
+			}
+			if err := h.githubInstallations.RefreshOrgLinkAccountLogin(ctx, event.Installation.ID, event.Installation.Account.Login); err != nil {
+				writeError(w, r, http.StatusInternalServerError, "INSTALLATION_LINK_UPDATE_FAILED", "failed to refresh github installation links", err)
 				return
 			}
 		}
@@ -212,6 +155,16 @@ func (h *WebhookHandler) handleInstallation(w http.ResponseWriter, r *http.Reque
 		writeJSON(w, http.StatusOK, map[string]string{"status": "installation created"})
 
 	case "deleted":
+		if h.githubInstallations != nil {
+			if err := h.githubInstallations.SetInstallationStatus(ctx, event.Installation.ID, "deleted"); err != nil {
+				writeError(w, r, http.StatusInternalServerError, "INSTALLATION_UPDATE_FAILED", "failed to update github installation", err)
+				return
+			}
+			if err := h.githubInstallations.DeactivateOrgLinksByInstallationID(ctx, event.Installation.ID); err != nil {
+				writeError(w, r, http.StatusInternalServerError, "INSTALLATION_LINK_UPDATE_FAILED", "failed to deactivate github installation links", err)
+				return
+			}
+		}
 		// Disconnect all repos for this installation
 		if err := h.repoStore.DisconnectByInstallationID(ctx, event.Installation.ID); err != nil {
 			writeError(w, r, http.StatusInternalServerError, "DISCONNECT_FAILED", "failed to disconnect repositories", err)
@@ -233,32 +186,10 @@ func (h *WebhookHandler) handleInstallationRepositories(w http.ResponseWriter, r
 
 	ctx := r.Context()
 
-	// Look up the integration by installation_id to get org_id and integration_id
-	integration, err := h.integrationStore.GetByGitHubInstallationID(ctx, event.Installation.ID)
-	if err != nil {
-		writeError(w, r, http.StatusInternalServerError, "INTEGRATION_LOOKUP_FAILED", "failed to find integration for installation", err)
-		return
-	}
-
-	// For added repos, upsert them with proper org/integration context
-	for _, whRepo := range event.RepositoriesAdded {
-		repo := &models.Repository{
-			OrgID:          integration.OrgID,
-			IntegrationID:  integration.ID,
-			GitHubID:       whRepo.ID,
-			FullName:       whRepo.FullName,
-			DefaultBranch:  "main",
-			Private:        whRepo.Private,
-			CloneURL:       "https://github.com/" + whRepo.FullName + ".git",
-			InstallationID: event.Installation.ID,
-			Status:         "active",
-			Settings:       json.RawMessage(`{}`),
-		}
-		if err := h.repoStore.UpsertFromGitHub(ctx, repo); err != nil {
-			writeError(w, r, http.StatusInternalServerError, "REPOSITORY_UPSERT_FAILED", "failed to upsert repository", err)
-			return
-		}
-	}
+	// Added repositories expand the GitHub installation's accessible set, but
+	// they do not become active in a 143 organization until an admin explicitly
+	// claims them from the integrations UI.
+	_ = event.RepositoriesAdded
 
 	// For removed repos, mark as disconnected
 	for _, whRepo := range event.RepositoriesRemoved {
@@ -282,6 +213,13 @@ func (h *WebhookHandler) handlePullRequest(w http.ResponseWriter, r *http.Reques
 		writeError(w, r, http.StatusBadRequest, "INVALID_JSON", "failed to parse pull_request event")
 		return
 	}
+	owner, ok := h.githubWebhookRepoActiveOwner(w, r, event.Repository.ID)
+	if !ok {
+		return
+	}
+	if owner.OrgID != uuid.Nil {
+		event.OwnerOrgID = &owner.OrgID
+	}
 
 	if err := h.prService.HandlePullRequestEvent(r.Context(), event); err != nil {
 		writeError(w, r, http.StatusInternalServerError, "PR_EVENT_FAILED", "failed to process pull_request event", err)
@@ -301,6 +239,13 @@ func (h *WebhookHandler) handlePullRequestReview(w http.ResponseWriter, r *http.
 	if err := json.Unmarshal(body, &event); err != nil {
 		writeError(w, r, http.StatusBadRequest, "INVALID_JSON", "failed to parse pull_request_review event")
 		return
+	}
+	owner, ok := h.githubWebhookRepoActiveOwner(w, r, event.Repository.ID)
+	if !ok {
+		return
+	}
+	if owner.OrgID != uuid.Nil {
+		event.OwnerOrgID = &owner.OrgID
 	}
 
 	if err := h.prService.HandlePullRequestReviewEvent(r.Context(), event); err != nil {
@@ -322,6 +267,13 @@ func (h *WebhookHandler) handlePullRequestReviewComment(w http.ResponseWriter, r
 		writeError(w, r, http.StatusBadRequest, "INVALID_JSON", "failed to parse pull_request_review_comment event")
 		return
 	}
+	owner, ok := h.githubWebhookRepoActiveOwner(w, r, event.Repository.ID)
+	if !ok {
+		return
+	}
+	if owner.OrgID != uuid.Nil {
+		event.OwnerOrgID = &owner.OrgID
+	}
 
 	if err := h.prService.HandlePullRequestReviewCommentEvent(r.Context(), event); err != nil {
 		writeError(w, r, http.StatusInternalServerError, "REVIEW_COMMENT_EVENT_FAILED", "failed to process pull_request_review_comment event", err)
@@ -341,6 +293,13 @@ func (h *WebhookHandler) handleCheckSuite(w http.ResponseWriter, r *http.Request
 	if err := json.Unmarshal(body, &event); err != nil {
 		writeError(w, r, http.StatusBadRequest, "INVALID_JSON", "failed to parse check_suite event")
 		return
+	}
+	owner, ok := h.githubWebhookRepoActiveOwner(w, r, event.Repository.ID)
+	if !ok {
+		return
+	}
+	if owner.OrgID != uuid.Nil {
+		event.OwnerOrgID = &owner.OrgID
 	}
 
 	if err := h.prService.HandleCheckSuiteEvent(r.Context(), event); err != nil {
@@ -362,6 +321,13 @@ func (h *WebhookHandler) handleCheckRun(w http.ResponseWriter, r *http.Request, 
 		writeError(w, r, http.StatusBadRequest, "INVALID_JSON", "failed to parse check_run event")
 		return
 	}
+	owner, ok := h.githubWebhookRepoActiveOwner(w, r, event.Repository.ID)
+	if !ok {
+		return
+	}
+	if owner.OrgID != uuid.Nil {
+		event.OwnerOrgID = &owner.OrgID
+	}
 
 	if err := h.prService.HandleCheckRunEvent(r.Context(), event); err != nil {
 		writeError(w, r, http.StatusInternalServerError, "CHECK_RUN_FAILED", "failed to process check_run event", err)
@@ -369,4 +335,20 @@ func (h *WebhookHandler) handleCheckRun(w http.ResponseWriter, r *http.Request, 
 	}
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "processed"})
+}
+
+func (h *WebhookHandler) githubWebhookRepoActiveOwner(w http.ResponseWriter, r *http.Request, githubID int64) (db.GitHubRepoOwner, bool) {
+	if githubID == 0 {
+		return db.GitHubRepoOwner{}, true
+	}
+	owner, err := h.repoStore.GetActiveOwnerByGitHubID(r.Context(), githubID)
+	if err == nil {
+		return owner, true
+	}
+	if errors.Is(err, pgx.ErrNoRows) {
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ignored", "reason": "repo_not_claimed"})
+		return db.GitHubRepoOwner{}, false
+	}
+	writeError(w, r, http.StatusInternalServerError, "REPOSITORY_OWNER_LOOKUP_FAILED", "failed to look up repository owner", err)
+	return db.GitHubRepoOwner{}, false
 }

@@ -606,7 +606,19 @@ export const api = {
         project_slug: projectSlug,
       }),
     disconnect: (provider: string) => del(`/api/v1/integrations/${provider}/disconnect`),
-    syncGitHub: () => post<{ data: { repos_synced: number; errors: number } }>('/api/v1/integrations/github/sync'),
+    syncGitHub: () => post<{ data: { repos_synced: number; repos_seen?: number; errors: number } }>('/api/v1/integrations/github/sync'),
+    listGitHubRepositories: (installationId?: number) => {
+      const qs = installationId ? `?installation_id=${encodeURIComponent(String(installationId))}` : '';
+      return get<import('./types').ListResponse<import('./types').GitHubRepositoryClaimCandidate>>(
+        `/api/v1/integrations/github/repositories${qs}`,
+      );
+    },
+    claimGitHubRepositories: (installationId: number, githubIds: number[], allowTransfer = false) =>
+      post<{ data: { claimed: number } }>('/api/v1/integrations/github/repositories/claim', {
+        installation_id: installationId,
+        github_ids: githubIds,
+        allow_transfer: allowTransfer,
+      }),
   },
   codexAuth: {
     // `scope` defaults to "org" on the server; pass "personal" to write the
