@@ -61,6 +61,14 @@ func (s *runtimeTestSessionStore) BeginRuntime(context.Context, uuid.UUID, uuid.
 	return s.beginErr
 }
 
+func (s *runtimeTestSessionStore) RequestCancel(context.Context, uuid.UUID, uuid.UUID) error {
+	return nil
+}
+
+func (s *runtimeTestSessionStore) ConsumeCancelRequest(context.Context, uuid.UUID, uuid.UUID) (bool, error) {
+	return false, nil
+}
+
 func (s *runtimeTestSessionStore) RecordRuntimeProgress(_ context.Context, _ uuid.UUID, _ uuid.UUID, progressType models.RuntimeProgressType, strength models.RuntimeProgressStrength, observedAt time.Time) error {
 	s.recordRuntimeProgressCalls++
 	s.lastProgressType = progressType

@@ -1394,11 +1394,9 @@ func (h *AuthHandler) createInvitedUserWithPassword(ctx context.Context, token, 
 }
 
 // validateInvitation looks up and validates an invitation token.
-// It checks that the invitation is pending, not expired, and that either the
-// email or the GitHub login of the signing-in user matches the invitation.
-// For an email-only invitation, the email must match. For a GitHub-only
-// invitation, the GitHub login must match. If both identifiers are set on the
-// invitation, either a matching email or a matching GitHub login is accepted.
+// It checks that the invitation is pending, not expired, and that the
+// signing-in user satisfies the invitation's acceptance method. An invitation
+// can keep an email for notifications while still requiring GitHub OAuth.
 func (h *AuthHandler) validateInvitation(ctx context.Context, token, email, githubLogin string) (models.Invitation, uuid.UUID, string, *invitationError) {
 	return h.validateInvitationWithStore(ctx, h.invitationStore, token, email, githubLogin)
 }
@@ -1431,9 +1429,9 @@ func (h *AuthHandler) validateInvitationWithStore(ctx context.Context, invitatio
 // server's "is this user allowed to accept?" check.
 //
 // Match rules (mirror the ListPendingForUser store query):
-//   - email-only invite: the user's email (case-insensitive) must equal it
-//   - github-only invite: the user's github_login (case-insensitive) must equal it
-//   - both set: either match suffices
+//   - acceptance_method=email: the user's email must match
+//   - acceptance_method=github: the user's github_login must match
+//   - acceptance_method=either or legacy empty: either match suffices
 //   - empty user-side identifiers can never satisfy either branch
 //
 // All three failures return invitationError values with status codes that
@@ -1449,7 +1447,24 @@ func validateInvitationForRecipient(inv models.Invitation, email, githubLogin st
 	}
 	emailMatches := inv.Email != nil && email != "" && strings.EqualFold(*inv.Email, email)
 	githubMatches := inv.GitHubUsername != nil && githubLogin != "" && strings.EqualFold(*inv.GitHubUsername, githubLogin)
-	if !emailMatches && !githubMatches {
+	acceptanceMethod := inv.AcceptanceMethod
+	if acceptanceMethod == "" {
+		acceptanceMethod = models.InvitationAcceptanceMethodEither
+	}
+	if acceptanceMethod.Validate() != nil {
+		return &invitationError{http.StatusGone, "INVITE_INVALID", "this invitation is no longer valid"}
+	}
+
+	matched := false
+	switch acceptanceMethod {
+	case models.InvitationAcceptanceMethodEmail:
+		matched = emailMatches
+	case models.InvitationAcceptanceMethodGitHub:
+		matched = githubMatches
+	case models.InvitationAcceptanceMethodEither:
+		matched = emailMatches || githubMatches
+	}
+	if !matched {
 		return &invitationError{http.StatusBadRequest, "INVITE_MISMATCH", "this account does not match the invitation"}
 	}
 	return nil

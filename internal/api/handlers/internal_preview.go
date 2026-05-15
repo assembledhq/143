@@ -12,6 +12,7 @@ import (
 
 	"github.com/assembledhq/143/internal/api/middleware"
 	"github.com/assembledhq/143/internal/auth"
+	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
 	previewsvc "github.com/assembledhq/143/internal/services/preview"
 	"github.com/go-chi/chi/v5"
@@ -21,11 +22,13 @@ import (
 
 // InternalPreviewHandler handles authenticated app->worker preview RPC.
 type InternalPreviewHandler struct {
-	preview *PreviewHandler
-	manager *previewsvc.Manager
-	nodeID  string
-	secret  string
-	logger  zerolog.Logger
+	preview   *PreviewHandler
+	manager   *previewsvc.Manager
+	sessions  *db.SessionStore
+	canceller SessionCanceller
+	nodeID    string
+	secret    string
+	logger    zerolog.Logger
 }
 
 func NewInternalPreviewHandler(preview *PreviewHandler, manager *previewsvc.Manager, nodeID, secret string, logger zerolog.Logger) *InternalPreviewHandler {
@@ -36,6 +39,11 @@ func NewInternalPreviewHandler(preview *PreviewHandler, manager *previewsvc.Mana
 		secret:  secret,
 		logger:  logger,
 	}
+}
+
+func (h *InternalPreviewHandler) SetSessionCancelRuntime(sessions *db.SessionStore, canceller SessionCanceller) {
+	h.sessions = sessions
+	h.canceller = canceller
 }
 
 func (h *InternalPreviewHandler) authorize(w http.ResponseWriter, r *http.Request, action string) (*auth.PreviewTokenClaims, bool) {
@@ -186,6 +194,48 @@ func (h *InternalPreviewHandler) StopActivePreviewForSession(w http.ResponseWrit
 	}
 	writeJSON(w, http.StatusOK, models.SingleResponse[previewsvc.RemoteStopActivePreviewForSessionResponse]{
 		Data: previewsvc.RemoteStopActivePreviewForSessionResponse{Stopped: stopped},
+	})
+}
+
+func (h *InternalPreviewHandler) CancelSession(w http.ResponseWriter, r *http.Request) {
+	claims, ok := h.authorize(w, r, "cancel_session")
+	if !ok {
+		return
+	}
+	r = r.WithContext(middleware.WithOrgID(r.Context(), claims.OrgID))
+	orgID := middleware.OrgIDFromContext(r.Context())
+
+	sessionID, err := uuid.Parse(chi.URLParam(r, "sessionID"))
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_SESSION_ID", "invalid session id")
+		return
+	}
+	var body previewsvc.RemoteCancelSessionRequest
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_BODY", "invalid request body", err)
+		return
+	}
+	if body.OrgID != orgID {
+		writeError(w, r, http.StatusForbidden, "ORG_MISMATCH", "cancel token org does not match request")
+		return
+	}
+	if claims.SessionID == nil || *claims.SessionID != sessionID || body.SessionID != sessionID {
+		writeError(w, r, http.StatusForbidden, "SESSION_MISMATCH", "cancel token does not match the requested session")
+		return
+	}
+	if h.canceller == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "CANCEL_UNAVAILABLE", "session cancellation is not available")
+		return
+	}
+
+	accepted := h.canceller.CancelSession(sessionID)
+	if accepted && h.sessions != nil {
+		if _, err := consumeSessionCancelRequestDetached(r.Context(), h.sessions, orgID, sessionID); err != nil {
+			h.logger.Warn().Err(err).Str("session_id", sessionID.String()).Msg("failed to consume delivered session cancel request")
+		}
+	}
+	writeJSON(w, http.StatusAccepted, models.SingleResponse[previewsvc.RemoteCancelSessionResponse]{
+		Data: previewsvc.RemoteCancelSessionResponse{Accepted: accepted},
 	})
 }
 

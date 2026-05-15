@@ -453,6 +453,9 @@ type orchestratorServiceStub struct {
 	runAgentCalls        int
 	continueSessionCalls int
 	recoverSessionCalls  int
+	cancelSessionCalls   int
+	cancelSessionID      uuid.UUID
+	cancelSessionResult  bool
 	runAgentFn           func(ctx context.Context, run *models.Session) error
 	continueSessionFn    func(ctx context.Context, session *models.Session, opts *agent.ContinueSessionOptions) error
 	revertThreadFn       func(ctx context.Context, session *models.Session, thread *models.SessionThread) error
@@ -512,6 +515,12 @@ func (s *orchestratorServiceStub) RecoverSession(ctx context.Context, session *m
 	return nil
 }
 
+func (s *orchestratorServiceStub) CancelSessionByID(sessionID uuid.UUID) bool {
+	s.cancelSessionCalls++
+	s.cancelSessionID = sessionID
+	return s.cancelSessionResult
+}
+
 func (s *orchestratorServiceStub) ResolveSessionTimeout(ctx context.Context, orgID uuid.UUID) time.Duration {
 	if s.sessionTimeout > 0 {
 		return s.sessionTimeout
@@ -524,6 +533,48 @@ func (s *orchestratorServiceStub) ResolveAbsoluteRuntimeCeiling(ctx context.Cont
 		return s.runtimeCeiling
 	}
 	return 90 * time.Minute
+}
+
+func TestCancelSessionHandler_InterruptsLocalOrchestratorSession(t *testing.T) {
+	t.Parallel()
+
+	sessionID := uuid.New()
+	orgID := uuid.New()
+	orch := &orchestratorServiceStub{cancelSessionResult: true}
+	handler := newCancelSessionHandler(nil, &Services{Orchestrator: orch}, zerolog.Nop())
+	payload := []byte(fmt.Sprintf(`{"session_id":%q,"org_id":%q}`, sessionID.String(), orgID.String()))
+
+	err := handler(context.Background(), "cancel_session", payload)
+
+	require.NoError(t, err, "cancel_session should succeed when the local orchestrator accepts the cancel")
+	require.Equal(t, 1, orch.cancelSessionCalls, "cancel_session should call the orchestrator once")
+	require.Equal(t, sessionID, orch.cancelSessionID, "cancel_session should target the payload session")
+}
+
+func TestCancelSessionHandler_ConsumesDeliveredCancelWithDetachedContext(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	sessionID := uuid.New()
+	orgID := uuid.New()
+	orch := &orchestratorServiceStub{cancelSessionResult: true}
+	handler := newCancelSessionHandler(&Stores{Sessions: db.NewSessionStore(mock)}, &Services{Orchestrator: orch}, zerolog.Nop())
+	payload := []byte(fmt.Sprintf(`{"session_id":%q,"org_id":%q}`, sessionID.String(), orgID.String()))
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	mock.ExpectExec("UPDATE session_cancel_requests").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	err = handler(ctx, "cancel_session", payload)
+
+	require.NoError(t, err, "cancel_session should clear delivered cancel intent even after job context cancellation")
+	require.Equal(t, 1, orch.cancelSessionCalls, "cancel_session should still call the orchestrator")
+	require.NoError(t, mock.ExpectationsWereMet(), "delivered cancel request should be consumed")
 }
 
 func workerSessionRow(sessionID, issueID, orgID uuid.UUID, status string, currentTurn int, agentSessionID, snapshotKey *string) []any {
@@ -4487,6 +4538,73 @@ func TestRunAgentHandler_SandboxRaceLoserDeadLetters(t *testing.T) {
 	require.ErrorAs(t, err, &fatal, "ErrSandboxRaceLoser must dead-letter the duplicate job")
 	require.ErrorIs(t, err, agent.ErrSandboxRaceLoser, "handler must preserve the underlying race-loser error for telemetry")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met (loser must not mutate the row)")
+}
+
+func TestRunAgentHandler_StaleSandboxClearRetriesPastJobAgeAndFailsOnDeadLetter(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+	stores.SessionThreads = db.NewSessionThreadStore(mock)
+
+	orgID := uuid.New()
+	runID := uuid.New()
+	issueID := uuid.New()
+	threadID := uuid.New()
+
+	mock.ExpectQuery("SELECT .* FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(workerSessionColumns).AddRow(
+				workerSessionRow(runID, issueID, orgID, string(models.SessionStatusPending), 0, nil, nil)...,
+			),
+		)
+
+	orch := &orchestratorServiceStub{
+		runAgentFn: func(ctx context.Context, run *models.Session) error {
+			require.NotNil(t, run.PrimaryThreadID, "run_agent should carry the payload thread ID into the stale-clear path")
+			require.Equal(t, threadID, *run.PrimaryThreadID, "run_agent should preserve the primary thread ID from the job payload")
+			return fmt.Errorf("cleared stale container: %w", agent.ErrStaleSandboxIDCleared)
+		},
+	}
+	var logBuf bytes.Buffer
+	handler := newRunAgentHandler(stores, &Services{Orchestrator: orch}, zerolog.New(&logBuf))
+	handlerCtx := jobctx.WithDeadLetterHooks(context.Background())
+	payload := json.RawMessage(`{"session_id":"` + runID.String() + `","org_id":"` + orgID.String() + `","thread_id":"` + threadID.String() + `"}`)
+
+	err := handler(handlerCtx, "run_agent", payload)
+	require.Error(t, err, "stale sandbox clear should ask the worker to retry")
+	var retryable *RetryableError
+	require.ErrorAs(t, err, &retryable, "stale sandbox clear should remain retryable")
+	require.True(t, retryable.BypassMaxRetryDuration, "stale sandbox clear should retry even when the job was created before the generic retry window")
+	require.NoError(t, mock.ExpectationsWereMet(), "stale-clear retry should not mark the session failed before dead-letter")
+
+	errMsg := "Session stopped after cleaning up a stale sandbox but the retry could not be scheduled."
+	mock.ExpectQuery("UPDATE sessions").
+		WithArgs(
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(),
+		).
+		WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(
+			workerSessionRow(runID, issueID, orgID, string(models.SessionStatusFailed), 0, nil, nil)...,
+		))
+	mock.ExpectExec("UPDATE sessions[\\s\\S]+SET failure_explanation").
+		WithArgs(
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+		).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectExec("UPDATE session_threads[\\s\\S]+SET status = @status").
+		WithArgs(
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+		).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	jobctx.RunDeadLetterHooks(handlerCtx, errors.New(errMsg))
+	require.NoError(t, mock.ExpectationsWereMet(), "dead-letter hook should fail the session and thread with a visible stale-sandbox explanation; logs: %s", logBuf.String())
 }
 
 func TestContinueSessionHandler_UsesRuntimeCeilingDeadline(t *testing.T) {
