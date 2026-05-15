@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"path"
 	"regexp"
 	"strconv"
@@ -467,6 +468,7 @@ type Orchestrator struct {
 	credentials       CredentialProvider     // can be nil — disables integration-skills doc generation
 	memory            MemoryService          // can be nil
 	snapshots         storage.SnapshotStore  // can be nil — multi-turn disabled if nil
+	uploads           storage.UploadStore    // can be nil — uploaded attachments remain warnings if nil
 	fileReader        sandbox.FileReader     // can be nil — disables proactive mention-index warmup
 	mentionIndexes    *workspace.MentionIndexCache
 	usageTracker      UsageRecorder        // can be nil — billing tracking disabled if nil
@@ -648,6 +650,7 @@ type OrchestratorConfig struct {
 	UserCredentials   UserCredentialProvider   // optional — enables legacy personal/team credential resolution
 	CodingCredentials CodingCredentialProvider // optional — preferred unified resolver; consulted before the legacy cascade
 	Snapshots         storage.SnapshotStore    // optional — enables multi-turn snapshot/restore
+	Uploads           storage.UploadStore      // optional — resolves session uploads into sandbox files
 	FileReader        sandbox.FileReader       // optional — enables proactive mention-index warmup
 	MentionIndexes    *workspace.MentionIndexCache
 	UsageTracker      UsageRecorder         // optional — enables billing observability
@@ -730,6 +733,7 @@ func NewOrchestrator(cfg OrchestratorConfig) *Orchestrator {
 		credentials:       cfg.Credentials,
 		memory:            cfg.Memory,
 		snapshots:         cfg.Snapshots,
+		uploads:           cfg.Uploads,
 		fileReader:        cfg.FileReader,
 		mentionIndexes:    cfg.MentionIndexes,
 		usageTracker:      cfg.UsageTracker,
@@ -1030,6 +1034,11 @@ const retryableSnapshotSaveMaxAttempts = 3
 
 var retryableSnapshotSaveBackoff = 50 * time.Millisecond
 
+const (
+	uploadFilesURLPrefix           = "/api/v1/uploads/files/"
+	maxMaterializedAttachmentBytes = 10 << 20
+)
+
 func latestUserMessage(messages []models.SessionMessage) *models.SessionMessage {
 	for i := len(messages) - 1; i >= 0; i-- {
 		if messages[i].Role == models.MessageRoleUser {
@@ -1037,6 +1046,145 @@ func latestUserMessage(messages []models.SessionMessage) *models.SessionMessage 
 		}
 	}
 	return nil
+}
+
+func derefMessage(msg *models.SessionMessage) models.SessionMessage {
+	if msg == nil {
+		return models.SessionMessage{}
+	}
+	return *msg
+}
+
+func (o *Orchestrator) materializeAttachmentsForMessages(ctx context.Context, orgID uuid.UUID, sandbox *Sandbox, turnNumber int, messages []models.SessionMessage, log zerolog.Logger) []AgentAttachment {
+	var attachments []AgentAttachment
+	attachmentNumber := 0
+	for messageIndex, msg := range messages {
+		for _, rawURL := range msg.Attachments {
+			rawURL = strings.TrimSpace(rawURL)
+			if rawURL == "" {
+				continue
+			}
+			attachmentNumber++
+			attachment := AgentAttachment{
+				OriginalURL:  rawURL,
+				MessageIndex: messageIndex + 1,
+			}
+			key, firstParty, err := uploadKeyFromAttachmentURL(rawURL, orgID)
+			if err != nil {
+				attachment.Error = err.Error()
+				attachments = append(attachments, attachment)
+				continue
+			}
+			if !firstParty {
+				attachment.Error = "external attachments are not fetched in v1"
+				attachments = append(attachments, attachment)
+				continue
+			}
+			if o.uploads == nil {
+				attachment.Error = "upload storage is not configured for worker-side attachment reads"
+				attachments = append(attachments, attachment)
+				continue
+			}
+			reader, contentType, err := o.uploads.Open(ctx, key)
+			if err != nil {
+				attachment.Error = fmt.Sprintf("failed to read uploaded attachment: %s", err)
+				attachments = append(attachments, attachment)
+				continue
+			}
+			data, readErr := io.ReadAll(io.LimitReader(reader, maxMaterializedAttachmentBytes+1))
+			closeErr := reader.Close()
+			if readErr != nil {
+				attachment.Error = fmt.Sprintf("failed to read uploaded attachment: %s", readErr)
+				attachments = append(attachments, attachment)
+				continue
+			}
+			if closeErr != nil {
+				attachment.Error = fmt.Sprintf("failed to close uploaded attachment: %s", closeErr)
+				attachments = append(attachments, attachment)
+				continue
+			}
+			if len(data) > maxMaterializedAttachmentBytes {
+				attachment.Error = "uploaded attachment exceeds 10MB limit"
+				attachments = append(attachments, attachment)
+				continue
+			}
+			localPath := materializedAttachmentPath(sandbox, turnNumber, attachmentNumber, key)
+			if err := o.provider.WriteFile(ctx, sandbox, localPath, data); err != nil {
+				attachment.Error = fmt.Sprintf("failed to copy uploaded attachment into sandbox: %s", err)
+				attachments = append(attachments, attachment)
+				continue
+			}
+			attachment.LocalPath = localPath
+			attachment.ContentType = contentType
+			attachments = append(attachments, attachment)
+			log.Debug().
+				Str("attachment_url", rawURL).
+				Str("local_path", localPath).
+				Int("bytes", len(data)).
+				Msg("materialized session attachment into sandbox")
+		}
+	}
+	return attachments
+}
+
+func uploadKeyFromAttachmentURL(raw string, orgID uuid.UUID) (string, bool, error) {
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return "", false, fmt.Errorf("invalid attachment URL")
+	}
+	attachmentPath := raw
+	if parsed.Scheme != "" || parsed.Host != "" {
+		return "", false, nil
+	}
+	if !strings.HasPrefix(attachmentPath, uploadFilesURLPrefix) {
+		return "", false, nil
+	}
+	key := strings.TrimPrefix(attachmentPath, uploadFilesURLPrefix)
+	if key == "" {
+		return "", true, fmt.Errorf("uploaded attachment URL is missing a file key")
+	}
+	pathOrg, _, ok := strings.Cut(key, "/")
+	if !ok {
+		return "", true, fmt.Errorf("uploaded attachment URL has an invalid file key")
+	}
+	parsedOrgID, err := uuid.Parse(pathOrg)
+	if err != nil {
+		return "", true, fmt.Errorf("uploaded attachment URL has an invalid org id")
+	}
+	if parsedOrgID != orgID {
+		return "", true, fmt.Errorf("uploaded attachment belongs to a different organization")
+	}
+	return key, true, nil
+}
+
+func materializedAttachmentPath(sandbox *Sandbox, turnNumber, attachmentNumber int, key string) string {
+	homeDir := "/home/sandbox"
+	if sandbox != nil && sandbox.HomeDir != "" {
+		homeDir = sandbox.HomeDir
+	}
+	fileName := sanitizeAttachmentFileName(path.Base(key), attachmentNumber)
+	return path.Join(homeDir, ".143", "attachments", fmt.Sprintf("turn-%d", turnNumber), fmt.Sprintf("attachment-%d-%s", attachmentNumber, fileName))
+}
+
+func sanitizeAttachmentFileName(name string, attachmentNumber int) string {
+	name = strings.TrimSpace(name)
+	var b strings.Builder
+	for _, r := range name {
+		switch {
+		case r >= 'a' && r <= 'z',
+			r >= 'A' && r <= 'Z',
+			r >= '0' && r <= '9',
+			r == '.', r == '-', r == '_':
+			b.WriteRune(r)
+		default:
+			b.WriteByte('_')
+		}
+	}
+	cleaned := strings.Trim(b.String(), "._-")
+	if cleaned == "" {
+		return fmt.Sprintf("file-%d", attachmentNumber)
+	}
+	return cleaned
 }
 
 func shouldRetryClaudeResumeFromSnapshot(session *models.Session, prompt *AgentPrompt, result *AgentResult) bool {
@@ -1656,7 +1804,8 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 			return fmt.Errorf("fetch session messages: %w", err)
 		}
 	}
-	issue, linkedIssues, err := o.resolvePromptSeed(ctx, run, latestUserMessage(messages), issueSnapshot)
+	latestMsg := latestUserMessage(messages)
+	issue, linkedIssues, err := o.resolvePromptSeed(ctx, run, latestMsg, issueSnapshot)
 	if err != nil {
 		o.failRun(ctx, run, fmt.Sprintf("resolve prompt seed: %s", err))
 		return fmt.Errorf("resolve prompt seed: %w", err)
@@ -1738,8 +1887,8 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 			return PromptStyleIssueContext
 		}(),
 		UserMessage: func() string {
-			if msg := latestUserMessage(messages); msg != nil {
-				return msg.Content
+			if latestMsg != nil {
+				return latestMsg.Content
 			}
 			if run.AutomationRunID != nil && run.PMApproach != nil {
 				return strings.TrimSpace(*run.PMApproach)
@@ -1749,13 +1898,13 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 		RepoURL:    repoURL,
 		RepoBranch: branch,
 		References: func() []models.SessionInputReference {
-			refs := canonicalReferences(latestUserMessage(messages))
+			refs := canonicalReferences(latestMsg)
 			if len(refs) > 0 {
 				return refs
 			}
 			return manualSessionReferences(issue)
 		}(),
-		Commands: canonicalCommands(latestUserMessage(messages), run.AgentType),
+		Commands: canonicalCommands(latestMsg, run.AgentType),
 		ReasoningEffort: func() models.ReasoningEffort {
 			if run.ReasoningEffort == nil {
 				return ""
@@ -1801,12 +1950,6 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 		log.Warn().Err(revErr).Msg("failed to parse session revision context")
 	} else {
 		input.RevisionContext = revisionContext
-	}
-
-	prompt, err := adapter.PreparePrompt(ctx, input)
-	if err != nil {
-		o.failRun(ctx, run, fmt.Sprintf("prepare prompt: %s", err))
-		return fmt.Errorf("prepare prompt: %w", err)
 	}
 
 	// 7. Create sandbox with agent-specific env vars (API keys).
@@ -2058,25 +2201,33 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 	//    - Codex: auth.json is the primary (and only) auth mechanism.
 	//    - Claude Code: subscription credentials file is preferred, with
 	//      ANTHROPIC_API_KEY env var as the fallback.
+	authBillingMode := TokenBillingModeUnknown
 	switch run.AgentType {
 	case models.AgentTypeCodex:
 		mode, err := o.ensureCodexAuth(ctx, run, sandbox, sandboxCfg.Env)
 		if err != nil {
 			return err
 		}
-		prompt.UsageHint.BillingMode = mode
+		authBillingMode = mode
 	case models.AgentTypeClaudeCode:
 		mode, err := o.ensureClaudeCodeAuth(ctx, run, sandbox, sandboxCfg.Env)
 		if err != nil {
 			return err
 		}
-		prompt.UsageHint.BillingMode = mode
+		authBillingMode = mode
 	}
 
 	// 9b. Integration tools (143-tools CLI) are pre-installed in the container
 	// image. Credentials are injected via env vars (AgentEnv.Resolve), and the
 	// skills doc is injected into the prompt (BuildIntegrationSkills). No
 	// per-CLI config file injection needed — all agents can shell out directly.
+	input.Attachments = o.materializeAttachmentsForMessages(ctx, run.OrgID, sandbox, turnNumber, []models.SessionMessage{derefMessage(latestMsg)}, log)
+	prompt, err := adapter.PreparePrompt(ctx, input)
+	if err != nil {
+		o.failRun(ctx, run, fmt.Sprintf("prepare prompt: %s", err))
+		return fmt.Errorf("prepare prompt: %w", err)
+	}
+	prompt.UsageHint.BillingMode = authBillingMode
 	prompt.UsageHint = o.buildTokenUsageHint(ctx, run.AgentType, run.OrgID, run.TriggeredByUserID, sandboxCfg.Env, prompt.UsageHint)
 
 	// 10. Execute agent with log streaming.
@@ -2449,7 +2600,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	} else {
 		latestMsg = latestUserMessage(messages)
 	}
-	if latestMsg == nil || strings.TrimSpace(latestMsg.Content) == "" {
+	if latestMsg == nil || (strings.TrimSpace(latestMsg.Content) == "" && len(latestMsg.Attachments) == 0) {
 		o.failRun(ctx, session, "no user message found for continue_session")
 		return fmt.Errorf("no user message found")
 	}
@@ -3080,6 +3231,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	var prompt *AgentPrompt
 	var restoredWorkspaceFallbackPrompt func() (*AgentPrompt, error)
 	authBillingMode := TokenBillingModeUnknown
+	materializedAttachments := o.materializeAttachmentsForMessages(ctx, session.OrgID, sandbox, turnNumber, pendingMsgs, log)
 	if reusedExisting || hasSnapshot {
 		// Re-inject agent auth (Codex auth.json or Claude Code credentials.json).
 		// Cheap, and catches the case where the file was cleared or drifted
@@ -3131,6 +3283,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 					return PromptStyleIssueContext
 				}(),
 				UserMessage: userMessage,
+				Attachments: materializedAttachments,
 				References: func() []models.SessionInputReference {
 					refs := canonicalReferences(latestMsg)
 					if len(refs) > 0 {
@@ -3169,7 +3322,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 			// prior context when running a fresh exec. The snapshot already
 			// restored the workspace, so do not ask the agent to re-apply the
 			// stored diff.
-			basePrompt.UserPrompt = o.buildRestoredWorkspaceResumeContext(session, promptIssue, scopedMessages, userMessage)
+			basePrompt.UserPrompt = appendAgentAttachmentSection(o.buildRestoredWorkspaceResumeContext(session, promptIssue, scopedMessages, userMessage), materializedAttachments)
 			basePrompt.Continuation = false
 			basePrompt.RevisionContext = revisionContext
 			prompt = basePrompt
@@ -3187,7 +3340,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 			prompt = &AgentPrompt{
 				Continuation:    true,
 				ResumeSessionID: resumeSessionID,
-				UserMessage:     EnsureSlashCommandsInPrompt(userMessage, commands),
+				UserMessage:     appendAgentAttachmentSection(EnsureSlashCommandsInPrompt(userMessage, commands), materializedAttachments),
 				MaxTokens:       tokenLimitForMode(session.TokenMode),
 				ReasoningEffort: func() models.ReasoningEffort {
 					if session.ReasoningEffort == nil {
@@ -3203,7 +3356,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 					if err != nil {
 						return nil, fmt.Errorf("prepare prompt for restored-workspace fallback: %w", err)
 					}
-					basePrompt.UserPrompt = o.buildRestoredWorkspaceResumeContext(session, promptIssue, scopedMessages, userMessage)
+					basePrompt.UserPrompt = appendAgentAttachmentSection(o.buildRestoredWorkspaceResumeContext(session, promptIssue, scopedMessages, userMessage), materializedAttachments)
 					basePrompt.Continuation = false
 					basePrompt.RevisionContext = revisionContext
 					return basePrompt, nil
@@ -3243,6 +3396,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 				return PromptStyleIssueContext
 			}(),
 			UserMessage: latestMsg.Content,
+			Attachments: materializedAttachments,
 			References: func() []models.SessionInputReference {
 				refs := canonicalReferences(latestMsg)
 				if len(refs) > 0 {
@@ -3280,7 +3434,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		}
 
 		// Override UserPrompt with resume context (conversation history + diff).
-		basePrompt.UserPrompt = o.buildResumeContext(session, &issue, messages, userMessage)
+		basePrompt.UserPrompt = appendAgentAttachmentSection(o.buildResumeContext(session, &issue, messages, userMessage), materializedAttachments)
 		basePrompt.Continuation = false
 		basePrompt.RevisionContext = revisionContext
 		prompt = basePrompt
@@ -3882,6 +4036,40 @@ func (o *Orchestrator) buildRestoredWorkspaceResumeContext(session *models.Sessi
 	return b.String()
 }
 
+func appendAgentAttachmentSection(prompt string, attachments []AgentAttachment) string {
+	if len(attachments) == 0 {
+		return prompt
+	}
+	var b strings.Builder
+	b.WriteString(strings.TrimSpace(prompt))
+	b.WriteString("\n\n## Attached files\n")
+	for _, attachment := range attachments {
+		b.WriteString("- ")
+		if attachment.LocalPath != "" {
+			b.WriteString("`")
+			b.WriteString(attachment.LocalPath)
+			b.WriteString("`")
+			if attachment.ContentType != "" {
+				b.WriteString(" (")
+				b.WriteString(attachment.ContentType)
+				b.WriteString(")")
+			}
+		} else {
+			b.WriteString("unavailable")
+		}
+		if attachment.OriginalURL != "" {
+			b.WriteString(" from ")
+			b.WriteString(attachment.OriginalURL)
+		}
+		if attachment.Error != "" {
+			b.WriteString(" - warning: ")
+			b.WriteString(attachment.Error)
+		}
+		b.WriteString("\n")
+	}
+	return b.String()
+}
+
 func writeResumeIssueAndHistory(b *bytes.Buffer, issue *models.Issue, messages []models.SessionMessage) {
 	// Include the original issue description for context (especially
 	// important for non-manual sessions that may have no prior messages).
@@ -3902,6 +4090,15 @@ func writeResumeIssueAndHistory(b *bytes.Buffer, issue *models.Issue, messages [
 				role = "Assistant"
 			}
 			b.WriteString(fmt.Sprintf("**%s:** %s\n\n", role, msg.Content))
+			if len(msg.Attachments) > 0 {
+				b.WriteString("Attachments:\n")
+				for _, attachment := range msg.Attachments {
+					b.WriteString("- ")
+					b.WriteString(attachment)
+					b.WriteString("\n")
+				}
+				b.WriteString("\n")
+			}
 		}
 	}
 }
