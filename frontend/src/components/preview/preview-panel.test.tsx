@@ -17,6 +17,7 @@ const mockStart = vi.hoisted(() => vi.fn());
 const mockStop = vi.hoisted(() => vi.fn());
 const mockRestart = vi.hoisted(() => vi.fn());
 const mockBootstrap = vi.hoisted(() => vi.fn());
+const mockLogs = vi.hoisted(() => vi.fn());
 const mockConsoleBadgeState = vi.hoisted(() => ({ shouldThrow: false }));
 
 vi.mock("@/lib/api", () => ({
@@ -28,6 +29,7 @@ vi.mock("@/lib/api", () => ({
         stop: mockStop,
         restart: mockRestart,
         bootstrap: mockBootstrap,
+        logs: mockLogs,
       },
     },
   },
@@ -136,6 +138,7 @@ describe("PreviewPanel component", () => {
     mockStop.mockResolvedValue({});
     mockRestart.mockResolvedValue({});
     mockBootstrap.mockResolvedValue({ token: "tok-1" });
+    mockLogs.mockResolvedValue([]);
     mockConsoleBadgeState.shouldThrow = false;
 
     class MockResizeObserver {
@@ -536,6 +539,45 @@ describe("PreviewPanel component", () => {
 
     // Try Again button
     expect(screen.getByText("Try Again")).toBeInTheDocument();
+  });
+
+  it("lets users expand full startup logs for a failed preview", async () => {
+    const user = userEvent.setup();
+    const summary =
+      "preview service readiness probe failed: service \"server\" exited before becoming ready; last output: go: downloading google.golang.org/genproto/googleapis/rpc | [143-preview] running migrations... | Failed to create migrator…";
+    const fullLog =
+      "service \"server\" failed: exited with code 1\n--- last output ---\ngo: downloading google.golang.org/genproto/googleapis/rpc\n[143-preview] running migrations...\nFailed to create migrator: failed to open source, \"file://migrations\": duplicate migration file: 000125_github_installation_repo_claims.down.sql";
+
+    mockGet.mockResolvedValue(
+      makePreviewStatus({
+        status: "failed",
+        error: summary,
+      }),
+    );
+    mockLogs.mockResolvedValue([
+      {
+        id: "log-1",
+        preview_instance_id: "prev-1",
+        org_id: "org-1",
+        level: "error",
+        step: "start",
+        message: fullLog,
+        created_at: "2026-01-01T00:00:00Z",
+      },
+    ]);
+
+    renderWithProviders(<PreviewPanel {...DEFAULT_PROPS} />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Preview failed to start")).toBeInTheDocument();
+    });
+
+    await user.click(screen.getByRole("button", { name: "Show full error logs" }));
+
+    expect(
+      await screen.findByText(/duplicate migration file: 000125_github_installation_repo_claims\.down\.sql/),
+    ).toBeInTheDocument();
+    expect(mockLogs).toHaveBeenCalledWith("sess-1");
   });
 
   it("shows Failed badge when phase is failed", async () => {

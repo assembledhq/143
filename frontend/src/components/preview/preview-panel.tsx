@@ -33,6 +33,7 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
+import { ScrollArea } from "@/components/ui/scroll-area";
 import { cn } from "@/lib/utils";
 import { api } from "@/lib/api";
 import {
@@ -375,6 +376,20 @@ export function PreviewPanel({
   const hasStartupRows = services.length > 0 || infrastructure.length > 0;
   const showStartupProgress =
     (isActive && !isReady) || (status === "failed" && hasStartupRows);
+  const previewLogsQuery = useQuery({
+    queryKey: ["preview-logs", sessionId, instance?.id],
+    queryFn: () => api.sessions.preview.logs(sessionId),
+    enabled: status === "failed" && Boolean(instance),
+    retry: 1,
+  });
+  const startupErrorLogs = useMemo(() => {
+    const persisted = previewLogsQuery.data
+      ?.filter((log) => log.level === "error" || log.step === "start")
+      .map((log) => log.message.trim())
+      .filter(Boolean)
+      .join("\n\n");
+    return persisted || instance?.error || "";
+  }, [instance?.error, previewLogsQuery.data]);
 
   // Start preview
   const startMutation = useMutation({
@@ -986,9 +1001,10 @@ export function PreviewPanel({
             Preview failed to start
           </div>
           {instance.error && (
-            <p className="text-xs text-muted-foreground">{instance.error}</p>
+            <p className="text-xs leading-5 text-muted-foreground break-words">
+              {instance.error}
+            </p>
           )}
-          {/* failure_pattern and build_log will be surfaced when backend support is added */}
           <Button
             size="sm"
             variant="outline"
@@ -998,6 +1014,37 @@ export function PreviewPanel({
             <RefreshCw className="size-3.5" />
             Try Again
           </Button>
+          {(startupErrorLogs || previewLogsQuery.isLoading || previewLogsQuery.isError) && (
+            <Collapsible>
+              <CollapsibleTrigger asChild>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="group h-7 px-2 text-xs text-muted-foreground"
+                >
+                  Show full error logs
+                  <ChevronDown className="size-3.5 transition-transform duration-200 group-data-[state=open]:rotate-180" />
+                </Button>
+              </CollapsibleTrigger>
+              <CollapsibleContent className="pt-2">
+                {previewLogsQuery.isLoading ? (
+                  <div className="rounded-md border bg-background px-3 py-2 text-xs text-muted-foreground">
+                    Loading error logs...
+                  </div>
+                ) : previewLogsQuery.isError ? (
+                  <div className="rounded-md border border-destructive/20 bg-background px-3 py-2 text-xs text-muted-foreground">
+                    Could not load persisted preview logs. The startup summary above is still available.
+                  </div>
+                ) : (
+                  <ScrollArea className="max-h-72 rounded-md border bg-background">
+                    <pre className="whitespace-pre-wrap break-words p-3 font-mono text-xs leading-5 text-foreground">
+                      {startupErrorLogs || "No startup logs were captured for this failure."}
+                    </pre>
+                  </ScrollArea>
+                )}
+              </CollapsibleContent>
+            </Collapsible>
+          )}
           {hasStartupRows && (
             <Collapsible>
               <CollapsibleTrigger asChild>
