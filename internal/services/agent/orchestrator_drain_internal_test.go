@@ -282,6 +282,52 @@ func TestDrainQueuedMessagesAfterProcessedID_EnqueuesInitialRunQueuedPrompt(t *t
 	require.Equal(t, sessionID.String(), payload["session_id"], "initial run drain payload should target the original session")
 }
 
+// TestDrainQueuedMessages_LinearPromptedRunningSessionContract pins the
+// contract between the Linear-agent prompted handler and the orchestrator's
+// post-turn drain. When a `prompted` event lands while a turn is still
+// running, worker/handlers_linear_agent_prompted.go's
+// appendPromptedMessageToRunningSession inserts a session_messages row with:
+//
+//   - Role = MessageRoleUser
+//   - ThreadID = nil (session-scope, not thread-scope)
+//   - TurnNumber = currentTurn + 1
+//   - ID > processedMessageID (guaranteed by the sequence)
+//
+// and intentionally does NOT enqueue continue_session — it relies on this
+// drain to pick the message up. If the drain ever changes its filter (role,
+// thread scope, id ordering), the Linear-agent prompted handler will silently
+// strand follow-up @143 prompts. This test exists to fail loudly in that case.
+func TestDrainQueuedMessages_LinearPromptedRunningSessionContract(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	// processedMessageID = 10 represents the in-flight turn's most-recent
+	// processed user message. The Linear-appended row has id=11 (sequence-
+	// allocated after the running turn began).
+	processedID := int64(10)
+	linearAppended := models.SessionMessage{
+		ID:        processedID + 1,
+		OrgID:     orgID,
+		SessionID: sessionID,
+		Role:      models.MessageRoleUser,
+		ThreadID:  nil,
+		Content:   "follow-up @143 mention",
+	}
+
+	messages := &drainStubMessages{messages: []models.SessionMessage{linearAppended}}
+	sessions := &drainStubSessions{session: models.Session{Status: string(models.SessionStatusIdle)}}
+	jobs := &drainStubJobs{}
+	o := newDrainOrchestrator(messages, sessions, jobs, nil)
+
+	o.drainQueuedMessagesAfterProcessedID(context.Background(), &models.Session{ID: sessionID, OrgID: orgID}, processedID, nil, zerolog.Nop())
+
+	require.Len(t, jobs.enqueues, 1, "drain must enqueue continue_session for a Linear-agent-appended running-session prompt; otherwise follow-up @143 mentions are stranded")
+	require.Equal(t, "agent", jobs.enqueues[0].queue, "drain must enqueue on the agent queue so the worker picks it up")
+	require.Equal(t, "continue_session", jobs.enqueues[0].jobType)
+	require.Equal(t, continueSessionDrainDedupeKey(sessionID, processedID), jobs.enqueues[0].dedupeKey, "drain must use the drain-specific dedupe key — reusing the active continue_session key would collide with the still-running job")
+}
+
 func TestDrainQueuedMessages_ThreadScopeIgnoresOtherThreads(t *testing.T) {
 	t.Parallel()
 

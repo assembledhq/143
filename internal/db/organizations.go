@@ -89,6 +89,41 @@ func (s *OrganizationStore) UpdateSettings(ctx context.Context, orgID uuid.UUID,
 	return nil
 }
 
+// MergeLinearAgentSettings replaces ONLY the `linear_agent` sub-key of
+// organizations.settings, leaving every other key untouched. Used by the
+// admin enable-toggle and the OAuth post-install bootstrap so a concurrent
+// writer mutating a different settings sub-key (e.g. AgentConfig, OrgSize)
+// doesn't get clobbered by a whole-blob UPDATE.
+//
+// The caller passes the desired LinearAgentSettings value — we marshal it
+// and jsonb_set it into place. NULL is normalized to empty object so a
+// fresh row gets a coherent shape.
+// lint:allow-no-orgid reason="organizations is the root tenant table; orgID IS the org"
+func (s *OrganizationStore) MergeLinearAgentSettings(ctx context.Context, orgID uuid.UUID, settings models.LinearAgentSettings) error {
+	raw, err := json.Marshal(settings)
+	if err != nil {
+		return fmt.Errorf("marshal linear_agent settings: %w", err)
+	}
+	tag, err := s.db.Exec(ctx, `
+		UPDATE organizations
+		SET settings = jsonb_set(
+			COALESCE(settings, '{}'::jsonb),
+			'{linear_agent}',
+			@linear_agent::jsonb,
+			true
+		),
+		    updated_at = now()
+		WHERE id = @id`,
+		pgx.NamedArgs{"id": orgID, "linear_agent": raw})
+	if err != nil {
+		return fmt.Errorf("merge linear_agent settings: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("organization not found")
+	}
+	return nil
+}
+
 // MergeCodingAgentDefaults merges non-secret Amp/Pi defaults into
 // settings.agent_config.<agent> without replacing unrelated settings keys.
 // lint:allow-no-orgid reason="organizations is the root tenant table; orgID IS the org"

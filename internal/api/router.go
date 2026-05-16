@@ -2,7 +2,6 @@ package api
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net"
@@ -1196,11 +1195,10 @@ func (a linearAgentOrgWriterAdapter) SetLinearAgentEnabled(ctx context.Context, 
 		return fmt.Errorf("parse org settings: %w", err)
 	}
 	parsed.LinearAgent.Enabled = &enabled
-	encoded, err := json.Marshal(parsed)
-	if err != nil {
-		return fmt.Errorf("encode org settings: %w", err)
-	}
-	return a.orgs.UpdateSettings(ctx, orgID, encoded)
+	// Surgical merge of just the linear_agent sub-key so a concurrent
+	// admin edit to a sibling settings key (e.g. agent_config) isn't
+	// clobbered.
+	return a.orgs.MergeLinearAgentSettings(ctx, orgID, parsed.LinearAgent)
 }
 
 // linearAgentBootstrapAdapter applies the post-OAuth convenience defaults
@@ -1258,11 +1256,8 @@ func (a linearAgentBootstrapAdapter) Bootstrap(ctx context.Context, orgID uuid.U
 		return nil
 	}
 
-	encoded, err := json.Marshal(parsed)
-	if err != nil {
-		return fmt.Errorf("encode org settings: %w", err)
-	}
-	return a.orgs.UpdateSettings(ctx, orgID, encoded)
+	// Surgical jsonb_set merge — see MergeLinearAgentSettings for why.
+	return a.orgs.MergeLinearAgentSettings(ctx, orgID, parsed.LinearAgent)
 }
 
 func resolveRouterCodingCredentialStore(pool *pgxpool.Pool, cryptoSvc *crypto.Service, shared ...*db.CodingCredentialStore) *db.CodingCredentialStore {

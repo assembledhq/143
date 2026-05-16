@@ -1023,9 +1023,31 @@ func (c *graphQLClient) do(ctx context.Context, query string, variables map[stri
 		} `json:"errors"`
 	}
 	if err := json.Unmarshal(raw, &errCheck); err == nil && len(errCheck.Errors) > 0 {
-		return fmt.Errorf("linear graphql error: %s", truncateErrorMessage(errCheck.Errors[0].Message))
+		return fmt.Errorf("linear graphql error: %s", joinGraphQLErrorMessages(errCheck.Errors))
 	}
 	return json.Unmarshal(raw, target)
+}
+
+// joinGraphQLErrorMessages flattens Linear's `errors[]` array into a
+// single line. We deliberately surface every distinct error message (up
+// to a count cap) rather than just errors[0] — Linear can report related
+// validation failures across the array (e.g. "team not found" + "issue
+// not found") and showing only the first hides the operator-relevant
+// detail. The joined string is bounded by truncateErrorMessage, so a
+// pathological array of multi-KB messages still can't blow up logs.
+func joinGraphQLErrorMessages(errs []struct {
+	Message string `json:"message"`
+}) string {
+	const maxMessages = 5
+	parts := make([]string, 0, len(errs))
+	for i, e := range errs {
+		if i >= maxMessages {
+			parts = append(parts, fmt.Sprintf("…(%d more)", len(errs)-maxMessages))
+			break
+		}
+		parts = append(parts, e.Message)
+	}
+	return truncateErrorMessage(strings.Join(parts, "; "))
 }
 
 // maxLinearErrorMessageLen caps how much of a GraphQL error message we

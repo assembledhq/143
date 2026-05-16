@@ -69,7 +69,7 @@ func TestLinearAgentDispatcher_NonAgentEventIgnored(t *testing.T) {
 	jobs := &fakeJobs{}
 	d := newDispatcherForTest(t, jobs, true /*featureEnabled*/)
 	res := d.Dispatch(context.Background(), &models.Integration{ID: uuid.New(), OrgID: uuid.New()},
-		LinearAgentEventAppUserNotification, []byte(`{"type":"AppUserNotification","action":"created","payload":{}}`))
+		LinearAgentEventAppUserNotification, []byte(`{"type":"AppUserNotification","action":"created","payload":{}}`), nil)
 	if res.Status != "ignored" {
 		t.Fatalf("Status=%q want ignored", res.Status)
 	}
@@ -104,10 +104,10 @@ func TestLinearAgentDispatcher_PromptedWithoutCreatedEnqueuesRetryableJob(t *tes
 		WillReturnError(pgx.ErrNoRows)
 
 	body := []byte(`{"type":"AgentSessionEvent","action":"prompted","payload":{"agentSession":{"id":"as_racing","issueId":"iss_1","commentId":"comment_1","issue":{"id":"iss_1","teamId":"team_1","projectId":"project_1"}},"agentActivity":{"body":"Please add regression coverage."}}}`)
-	res := d.Dispatch(context.Background(), &models.Integration{ID: integrationID, OrgID: orgID}, LinearAgentEventAgentSession, body)
+	res := d.Dispatch(context.Background(), &models.Integration{ID: integrationID, OrgID: orgID}, LinearAgentEventAgentSession, body, nil)
 	require.Equal(t, "agent_dispatched", res.Status, "prompted race should still enqueue a worker retry job after webhook ack")
 	require.Len(t, jobs.calls, 1, "dispatcher should enqueue one prompted worker job")
-	require.Equal(t, "linear_agent_event:as_racing:prompted:comment_1", jobs.calls[0].DedupeKey, "dedupe should preserve the prompted comment id")
+	require.Equal(t, "linear_agent_event:"+orgID.String()+":as_racing:prompted:comment_1", jobs.calls[0].DedupeKey, "dedupe should preserve the prompted comment id and prefix the org id so two orgs sharing a Linear AgentSession ID can't collide")
 	payload, ok := jobs.calls[0].Payload.(map[string]any)
 	require.True(t, ok, "dispatcher should enqueue a map payload")
 	require.Equal(t, "prompted", payload["action"], "worker payload should identify prompted action")
@@ -157,7 +157,7 @@ func TestLinearAgentDispatcher_EnqueueFailureReturnsRetryableStatus(t *testing.T
 		))
 
 	body := []byte(`{"type":"AgentSessionEvent","action":"created","payload":{"agentSession":{"id":"as_enqueue_fail","issueId":"iss_1","issue":{"id":"iss_1","identifier":"ACS-1","teamId":"team_1"}}}}`)
-	res := d.Dispatch(context.Background(), &models.Integration{ID: integrationID, OrgID: orgID}, LinearAgentEventAgentSession, body)
+	res := d.Dispatch(context.Background(), &models.Integration{ID: integrationID, OrgID: orgID}, LinearAgentEventAgentSession, body, nil)
 	require.Equal(t, "enqueue_failed", res.Status, "enqueue failure must be visible to the webhook handler so the delivery is not marked processed")
 	require.Error(t, res.Err, "enqueue failure should be returned in the dispatch result for logging/response handling")
 	require.Len(t, jobs.calls, 1, "dispatcher should have attempted exactly one enqueue")
@@ -209,7 +209,7 @@ func TestLinearAgentDispatcher_PerTeamEnableOverrideCanPassOrgDisabledGate(t *te
 		))
 
 	body := []byte(`{"type":"AgentSessionEvent","action":"created","payload":{"agentSession":{"id":"as_1","issueId":"iss_1","issue":{"id":"iss_1","identifier":"ACS-1","teamId":"team_1"}}}}`)
-	res := d.Dispatch(context.Background(), &models.Integration{ID: integrationID, OrgID: orgID}, LinearAgentEventAgentSession, body)
+	res := d.Dispatch(context.Background(), &models.Integration{ID: integrationID, OrgID: orgID}, LinearAgentEventAgentSession, body, nil)
 	require.Equal(t, "agent_dispatched", res.Status, "a true per-team override should pass the coarse dispatcher gate")
 	require.Len(t, jobs.calls, 1, "dispatcher should enqueue the created worker job so the worker can apply team-key gating")
 	require.NoError(t, mock.ExpectationsWereMet(), "dispatcher should upsert the AgentSession row")

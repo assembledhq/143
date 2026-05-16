@@ -513,6 +513,18 @@ func (h *IngestionWebhookHandler) resolveIntegrationForWebhook(r *http.Request, 
 		if err != nil {
 			return models.Integration{}, newWebhookLookupErr(http.StatusNotFound, "NOT_FOUND", "integration not found")
 		}
+		// A disconnected integration must not dispatch downstream work. We
+		// return 401 (not 404) so the response shape matches the workspace_id
+		// path's "no active credential" rejection — and so an attacker
+		// holding a stale signing secret on a disabled integration cannot
+		// distinguish "wrong id" from "id exists but disconnected".
+		if integration.Status != models.IntegrationStatusActive {
+			zerolog.Ctx(r.Context()).Info().
+				Str("integration_id", integrationID.String()).
+				Str("status", string(integration.Status)).
+				Msg("webhook references inactive integration; rejecting")
+			return models.Integration{}, newWebhookLookupErr(http.StatusUnauthorized, "UNAUTHORIZED", "no active integration for the request payload")
+		}
 		return integration, nil
 	}
 

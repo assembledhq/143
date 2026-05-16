@@ -105,6 +105,27 @@ These flags from design 62 still apply:
   upgrade it via the Linear OAuth app dashboard to subscribe to
   Agent session events.
 
+## Kill switch and rollout
+
+The agent ships behind a process-wide kill switch in addition to the
+per-org `enabled` toggle:
+
+- `LINEAR_AGENT_ENABLED=true` (env var, default `false`) — must be true
+  on every server / worker node for the feature to handle webhooks. Flip
+  to `false` to **stop accepting new agent sessions** across every org
+  in the deployment, without touching per-org state.
+- **Drain semantics**: turning the kill switch off only gates new
+  inbound webhooks at the dispatcher. AgentSessions that already have a
+  `linear_agent_sessions` row continue to fan out milestone activities
+  (`Started`, `PROpened`, `PRMerged`) until they reach a terminal state.
+  This is deliberate — it lets you toggle the feature during an
+  incident without stranding running coding work mid-PR.
+- Per-org rollout is layered on top: `org_settings.linear_agent.enabled`
+  (default `false`) must also be true for an org's webhooks to be
+  dispatched. The per-team `enabled` map gates `created` events only;
+  follow-up `prompted` events on an already-live session ignore the
+  per-team gate so disabling a team mid-session doesn't strand work.
+
 ## Operator surfaces
 
 - `GET /api/v1/integrations/linear/agent/sessions` — recent agent

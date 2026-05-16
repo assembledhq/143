@@ -125,16 +125,24 @@ follow-ups are still governed by `allow_revision_per_prompt`.
 
 ## Activity stream
 
+Body strings here are authoritative copy that the implementation must
+match. Drift between this table and the runtime strings has been a
+source of confusion (the implementation lives in
+`internal/services/linear/agent_state.go`); the strings below were
+synced to match the implementation as of 2026-05-15. When changing copy,
+update both sides in the same PR.
+
 | 143 moment | AgentActivity | Idem key |
 |---|---|---|
-| Dispatcher (after `created`) | `thought` ephemeral: "Reading {KEY}…" | `bootstrap:opened` |
+| Dispatcher (after `created`) | `thought` ephemeral: "Reading {KEY} and resolving the right repo…" | `bootstrap:opened` |
 | `MilestoneLinked` | (suppressed — bootstrap already covered it) | — |
 | `MilestoneStarted` | `action`: "Starting coding session" + state pin `active` | `milestone:started` |
 | `MilestonePROpened` | `response`: "Opened PR #N." | `milestone:pr_opened` |
 | `MilestonePRMerged` | `action`: "PR #N merged." + state pin `complete` | `milestone:pr_merged` |
 | `MilestoneEndedNoPR` | `response`: "Done — no code changes were needed." + state pin `complete` | `milestone:ended_no_pr` |
-| `MilestoneFailed` | `error`: "Session failed. See the 143 deep link." + state pin `error` | `milestone:failed` |
+| `MilestoneFailed` | `error`: "Session failed. See the 143 deep link for details." + state pin `error` | `milestone:failed` |
 | Repo unmapped | `response`: "I don't have a repository configured…" + state pin `complete` | `bootstrap:unmapped_repo` |
+| Prompted-before-created timeout | `error`: "We didn't receive a session-start event from Linear in time…" + state pin `error` | `prompted:awaiting_created_timeout` |
 
 ## Failure modes
 
