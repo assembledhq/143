@@ -105,6 +105,20 @@ describe('LoginPage', () => {
     expect(screen.getByRole('tab', { name: 'Sign up' })).toBeInTheDocument();
   });
 
+  it('keeps the login form visible while auth status is still loading', () => {
+    useAuthMock.mockReturnValue({
+      user: null,
+      isLoading: true,
+      isAuthenticated: false,
+      logout: vi.fn(),
+    });
+
+    renderWithProviders(<LoginPage />);
+
+    expect(screen.getByRole('button', { name: 'Sign in' })).toBeInTheDocument();
+    expect(screen.queryByRole('status')).not.toBeInTheDocument();
+  });
+
   it('shows GitHub button', () => {
     renderWithProviders(<LoginPage />);
 

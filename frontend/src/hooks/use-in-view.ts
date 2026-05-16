@@ -15,7 +15,7 @@ export function useInView<T extends HTMLElement = HTMLDivElement>(
   const reducedMotion =
     typeof window !== "undefined" &&
     window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-  const [inView, setInView] = useState(reducedMotion);
+  const [inView, setInView] = useState(reducedMotion || typeof window === "undefined");
 
   useEffect(() => {
     if (reducedMotion) return;

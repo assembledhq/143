@@ -195,12 +195,17 @@ func TestStripSensitiveResponseHeaders(t *testing.T) {
 	t.Parallel()
 
 	h := make(http.Header)
-	h.Set("Set-Cookie", "session=abc123")
+	h.Add("Set-Cookie", "__Host-preview_session=preview-secret; Path=/; Secure; HttpOnly")
+	h.Add("Set-Cookie", "session_token=app-session; Path=/; HttpOnly")
+	h.Add("Set-Cookie", "csrf_token=csrf-token; Path=/")
 	h.Set("Content-Type", "text/html")
 
 	stripSensitiveResponseHeaders(h)
 
-	require.Empty(t, h.Get("Set-Cookie"))
+	require.Equal(t, []string{
+		"session_token=app-session; Path=/; HttpOnly",
+		"csrf_token=csrf-token; Path=/",
+	}, h.Values("Set-Cookie"))
 	require.Equal(t, "text/html", h.Get("Content-Type"))
 }
 
