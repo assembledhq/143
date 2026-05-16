@@ -825,7 +825,16 @@ func (s *PreviewStore) CreatePreviewService(ctx context.Context, svc *models.Pre
 			preview_instance_id, service_name, role, status, command, cwd, port
 		) VALUES (
 			@preview_instance_id, @service_name, @role, @status, @command, @cwd, @port
-		) RETURNING %s`, previewServiceColumns)
+		)
+		ON CONFLICT (preview_instance_id, service_name) DO UPDATE SET
+			role = EXCLUDED.role,
+			status = EXCLUDED.status,
+			command = EXCLUDED.command,
+			cwd = EXCLUDED.cwd,
+			port = EXCLUDED.port,
+			pid = NULL,
+			error = ''
+		RETURNING %s`, previewServiceColumns)
 
 	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
 		"preview_instance_id": svc.PreviewInstanceID,
@@ -905,7 +914,16 @@ func (s *PreviewStore) CreatePreviewInfrastructure(ctx context.Context, infra *m
 		) VALUES (
 			@preview_instance_id, @infra_name, @template, @container_id, @status,
 			@host, @port, @credentials_hash
-		) RETURNING %s`, previewInfraColumns)
+		)
+		ON CONFLICT (preview_instance_id, infra_name) DO UPDATE SET
+			template = EXCLUDED.template,
+			container_id = EXCLUDED.container_id,
+			status = EXCLUDED.status,
+			host = EXCLUDED.host,
+			port = EXCLUDED.port,
+			credentials_hash = EXCLUDED.credentials_hash,
+			error = ''
+		RETURNING %s`, previewInfraColumns)
 
 	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
 		"preview_instance_id": infra.PreviewInstanceID,
