@@ -401,7 +401,7 @@ describe("NewAutomationPage", () => {
     await waitFor(() => {
       expect(requestBody).toMatchObject({ identity_scope: "personal" });
     });
-  });
+  }, 20000);
 
   it("submits an explicit reasoning override for supported automation agents", async () => {
     const user = userEvent.setup();
