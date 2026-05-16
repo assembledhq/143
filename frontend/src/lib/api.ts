@@ -95,8 +95,8 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
   return parseSuccessBody<T>(res);
 }
 
-function get<T>(path: string): Promise<T> {
-  return request<T>(path);
+function get<T>(path: string, options?: RequestInit): Promise<T> {
+  return request<T>(path, options);
 }
 
 function post<T>(path: string, body?: unknown): Promise<T> {
@@ -339,7 +339,10 @@ export const api = {
     },
     recordView: (sessionId: string) => post<{ status: string }>(`/api/v1/sessions/${sessionId}/view`, {}),
     get: (id: string) => get<import('./types').SingleResponse<import('./types').SessionDetail>>(`/api/v1/sessions/${id}`),
-    getDiff: (id: string) => get<import('./types').SingleResponse<import('./types').SessionDiff>>(`/api/v1/sessions/${id}/diff`),
+    getDiff: (id: string) => get<import('./types').SingleResponse<import('./types').SessionDiff>>(
+      `/api/v1/sessions/${id}/diff`,
+      { cache: 'no-store' },
+    ),
     update: (id: string, body: { title: string }) =>
       patch<import('./types').SingleResponse<import('./types').Session>>(`/api/v1/sessions/${id}`, body),
     getLogs: (sessionId: string) => get<import('./types').ListResponse<import('./types').SessionLog>>(`/api/v1/sessions/${sessionId}/logs`),
