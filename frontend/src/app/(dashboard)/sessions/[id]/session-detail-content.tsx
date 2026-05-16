@@ -2773,6 +2773,7 @@ export function SessionDetailContent({ id }: { id: string }) {
   const {
     data: diffData,
     isLoading: isDiffLoading,
+    isFetching: isDiffFetching,
     isError: isDiffError,
     error: diffError,
     refetch: refetchDiff,
@@ -3379,6 +3380,7 @@ export function SessionDetailContent({ id }: { id: string }) {
       filesChanged: stats.files_changed,
     };
   }, [session?.diff_stats, sessionDiffPayload?.diff_stats]);
+  const diffStatsFileCount = diffStats?.filesChanged ?? 0;
   const diffLoadErrorText = isDiffError
     ? diffError instanceof ApiError
       ? diffError.message
@@ -3415,6 +3417,41 @@ export function SessionDetailContent({ id }: { id: string }) {
     diffSearchQuery,
     setDiffSearchQuery,
   } = diffViewState;
+  const emptyDiffRecoveryKeyRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (
+      !shouldLoadDiff ||
+      !sessionDiffPayload ||
+      isDiffLoading ||
+      isDiffFetching ||
+      isDiffError ||
+      diffStatsFileCount === 0 ||
+      diffFiles.length > 0 ||
+      !diffRevisionKey
+    ) {
+      return;
+    }
+
+    if (emptyDiffRecoveryKeyRef.current === diffRevisionKey) {
+      return;
+    }
+
+    emptyDiffRecoveryKeyRef.current = diffRevisionKey;
+    void refetchDiff();
+  }, [
+    diffFiles.length,
+    diffRevisionKey,
+    diffStatsFileCount,
+    isDiffError,
+    isDiffFetching,
+    isDiffLoading,
+    refetchDiff,
+    sessionDiffPayload,
+    shouldLoadDiff,
+  ]);
+  const isDiffDisplayLoading =
+    isDiffLoading ||
+    (isDiffFetching && diffStatsFileCount > 0 && diffFiles.length === 0);
 
   const {
     comments,
@@ -4526,7 +4563,7 @@ export function SessionDetailContent({ id }: { id: string }) {
           passRange={passRange}
           onPassRangeChange={setPassRange}
           emptyStatusText={
-            isDiffLoading
+            isDiffDisplayLoading
               ? "Loading changes..."
               : session.status === "running" || session.status === "pending"
               ? "Changes will appear here as the agent modifies files."
@@ -4808,7 +4845,7 @@ export function SessionDetailContent({ id }: { id: string }) {
           {centerMode === "review" && (
             <div className="h-full animate-in fade-in duration-150 flex flex-col">
               <div className="flex-1 min-h-0">
-                {isDiffLoading ? (
+                {isDiffDisplayLoading ? (
                   <div className="h-full w-full bg-muted/20 animate-pulse rounded-lg" />
                 ) : diffLoadErrorText ? (
                   <div className="flex h-full items-center justify-center p-6">
