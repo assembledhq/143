@@ -1120,8 +1120,18 @@ func TestFilterCodexStderrLines(t *testing.T) {
 			expect: "",
 		},
 		{
+			name:   "removes benign closed stdin router diagnostic",
+			input:  "2026-05-16T02:59:58.624143Z ERROR codex_core::tools::router: error=write_stdin failed: stdin is closed for this session; rerun exec_command with tty=true to keep stdin open",
+			expect: "",
+		},
+		{
 			name:   "removes benign stdin diagnostic while preserving real stderr",
 			input:  "Reading additional input from stdin...\nreal error line",
+			expect: "real error line",
+		},
+		{
+			name:   "removes closed stdin router diagnostic while preserving real stderr",
+			input:  "2026-05-16T02:59:58.624143Z ERROR codex_core::tools::router: error=write_stdin failed: stdin is closed for this session; rerun exec_command with tty=true to keep stdin open\nreal error line",
 			expect: "real error line",
 		},
 		{
@@ -1142,6 +1152,30 @@ func TestFilterCodexStderrLines(t *testing.T) {
 			require.Equal(t, tt.expect, filterCodexStderrLines(tt.input), "codex stderr filtering should only remove known benign diagnostics")
 		})
 	}
+}
+
+func TestEmitCodexStderrLogs_FlagsBenignDiagnosticsHidden(t *testing.T) {
+	t.Parallel()
+
+	logCh := make(chan agent.LogEntry, 10)
+	input := "2026-05-16T02:59:58.624143Z ERROR codex_core::tools::router: error=write_stdin failed: stdin is closed for this session; rerun exec_command with tty=true to keep stdin open"
+
+	filtered := emitCodexStderrLogs([]byte(input), logCh)
+	close(logCh)
+
+	var logs []agent.LogEntry
+	for entry := range logCh {
+		logs = append(logs, entry)
+	}
+
+	require.Empty(t, filtered, "benign diagnostic should not be returned as visible stderr")
+	require.Len(t, logs, 1, "benign diagnostic should be retained as a hidden log")
+	require.Equal(t, "debug", logs[0].Level, "hidden diagnostic should be emitted below user-visible error severity")
+	require.Equal(t, input, logs[0].Message, "hidden diagnostic should preserve the original message")
+	require.Equal(t, "hidden", logs[0].Metadata["visibility"], "hidden diagnostic should be marked hidden from the user")
+	require.Equal(t, "benign_runtime_diagnostic", logs[0].Metadata["diagnostic_class"], "hidden diagnostic should carry a reusable diagnostic class")
+	require.Equal(t, "codex", logs[0].Metadata["diagnostic_source"], "hidden diagnostic should identify its source")
+	require.Equal(t, "closed_stdin", logs[0].Metadata["diagnostic_kind"], "hidden diagnostic should identify the matched kind")
 }
 
 func TestParseCodexStreamLine_SuppressesRefreshTokenError(t *testing.T) {

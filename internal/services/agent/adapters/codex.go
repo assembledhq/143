@@ -160,14 +160,7 @@ func (a *CodexAdapter) Execute(ctx context.Context, sandbox *agent.Sandbox, prom
 	// Filter refresh-token errors once and reuse the result.
 	var filteredStderr string
 	if len(stderr) > 0 {
-		filteredStderr = filterCodexStderrLines(string(stderr))
-		if filteredStderr != "" {
-			logCh <- agent.LogEntry{
-				Timestamp: time.Now(),
-				Level:     "error",
-				Message:   filteredStderr,
-			}
-		}
+		filteredStderr = emitCodexStderrLogs(stderr, logCh)
 	}
 
 	if exitCode != 0 {
@@ -642,8 +635,64 @@ func filterCodexStderrLines(stderr string) string {
 	return strings.Join(kept, "\n")
 }
 
+func emitCodexStderrLogs(stderr []byte, logCh chan<- agent.LogEntry) string {
+	lines := strings.Split(string(stderr), "\n")
+	var kept []string
+	for _, line := range lines {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		if isRefreshTokenError(line) {
+			continue
+		}
+		if isBenignCodexDiagnostic(line) {
+			logCh <- agent.LogEntry{
+				Timestamp: time.Now(),
+				Level:     "debug",
+				Message:   line,
+				Metadata:  codexHiddenDiagnosticMetadata(codexDiagnosticKind(line)),
+			}
+			continue
+		}
+		kept = append(kept, line)
+	}
+	filtered := strings.Join(kept, "\n")
+	if filtered != "" {
+		logCh <- agent.LogEntry{
+			Timestamp: time.Now(),
+			Level:     "error",
+			Message:   filtered,
+		}
+	}
+	return filtered
+}
+
 func isBenignCodexDiagnostic(msg string) bool {
-	return strings.TrimSpace(msg) == "Reading additional input from stdin..."
+	trimmed := strings.TrimSpace(msg)
+	return trimmed == "Reading additional input from stdin..." ||
+		(strings.Contains(trimmed, "codex_core::tools::router:") &&
+			strings.Contains(trimmed, "write_stdin failed: stdin is closed for this session"))
+}
+
+func codexDiagnosticKind(msg string) string {
+	trimmed := strings.TrimSpace(msg)
+	if strings.Contains(trimmed, "codex_core::tools::router:") &&
+		strings.Contains(trimmed, "write_stdin failed: stdin is closed for this session") {
+		return "closed_stdin"
+	}
+	if trimmed == "Reading additional input from stdin..." {
+		return "stdin_notice"
+	}
+	return "unknown"
+}
+
+func codexHiddenDiagnosticMetadata(kind string) map[string]interface{} {
+	return map[string]interface{}{
+		"visibility":        "hidden",
+		"diagnostic_class":  "benign_runtime_diagnostic",
+		"diagnostic_source": "codex",
+		"diagnostic_kind":   kind,
+	}
 }
 
 // shellEscapeCodex escapes single quotes for use inside a single-quoted shell
