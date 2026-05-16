@@ -52,6 +52,10 @@ func signBody(secret string, body []byte) string {
 	return hex.EncodeToString(mac.Sum(nil))
 }
 
+func signedLinearIssueWebhookBody(ts time.Time) string {
+	return fmt.Sprintf(`{"webhookTimestamp":%d,"action":"create","type":"Issue","data":{"id":"LIN-1","title":"Bug","priority":1,"createdAt":"2024-01-01T00:00:00Z","updatedAt":"2024-01-02T00:00:00Z"}}`, ts.UnixMilli())
+}
+
 func TestIngestionWebhook_HandleSentry(t *testing.T) {
 	t.Parallel()
 
@@ -832,7 +836,7 @@ func TestIngestionWebhook_HandleLinear_UsesDocumentedSignatureHeader(t *testing.
 	orgID := uuid.New()
 	integrationID := uuid.New()
 	now := time.Now()
-	body := `{"action":"create","type":"Issue","data":{"id":"LIN-1","title":"Bug","priority":1,"createdAt":"2024-01-01T00:00:00Z","updatedAt":"2024-01-02T00:00:00Z"}}`
+	body := signedLinearIssueWebhookBody(time.Now())
 
 	mock, err := pgxmock.NewPool()
 	require.NoError(t, err, "test should create pgx mock")
@@ -891,6 +895,48 @@ func TestIngestionWebhook_HandleLinear_UsesDocumentedSignatureHeader(t *testing.
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+func TestIngestionWebhook_HandleLinear_RejectsStaleWebhookTimestamp(t *testing.T) {
+	t.Parallel()
+
+	secret := "linear-webhook-secret"
+	orgID := uuid.New()
+	integrationID := uuid.New()
+	now := time.Now()
+	body := signedLinearIssueWebhookBody(time.Now().Add(-2 * time.Minute))
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "test should create pgx mock")
+	defer mock.Close()
+
+	credMock := &mockWebhookSecretLookup{
+		cred: &models.DecryptedCredential{
+			ID:       uuid.New(),
+			OrgID:    orgID,
+			Provider: models.ProviderLinear,
+			Config:   models.LinearConfig{WebhookSecret: secret},
+			Status:   "active",
+		},
+	}
+	handler := setupIngestionHandler(t, mock, credMock)
+
+	mock.ExpectQuery("SELECT .+ FROM integrations WHERE id").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows([]string{"id", "org_id", "provider", "config", "status", "last_synced_at", "created_at"}).
+				AddRow(integrationID, orgID, "linear", json.RawMessage(`{}`), "active", nil, now),
+		)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/webhooks/linear?integration_id="+integrationID.String(), strings.NewReader(body))
+	req.Header.Set("Linear-Signature", signBody(secret, []byte(body)))
+	w := httptest.NewRecorder()
+
+	handler.HandleLinear(w, req)
+
+	require.Equal(t, http.StatusUnauthorized, w.Code, "stale signed Linear webhook payloads should be rejected before delivery creation")
+	require.Contains(t, w.Body.String(), "UNAUTHORIZED", "response should identify the signature/freshness failure")
+	require.NoError(t, mock.ExpectationsWereMet(), "stale webhook should not write a delivery row")
+}
+
 // TestIngestionWebhook_GlobalLinearSecretFallback pins the SaaS-deployment
 // contract: when no per-org Linear webhook secret is configured, the
 // signature verifier falls back to the shared LINEAR_WEBHOOK_SIGNING_SECRET
@@ -910,7 +956,7 @@ func TestIngestionWebhook_GlobalLinearSecretFallback(t *testing.T) {
 	orgID := uuid.New()
 	integrationID := uuid.New()
 	now := time.Now()
-	body := `{"action":"create","type":"Issue","data":{"id":"LIN-1","title":"Bug","priority":1,"createdAt":"2024-01-01T00:00:00Z","updatedAt":"2024-01-02T00:00:00Z"}}`
+	body := signedLinearIssueWebhookBody(time.Now())
 
 	// Helpers — every subtest exercises the same downstream path once the
 	// signature check resolves, so the DB expectations are shared.

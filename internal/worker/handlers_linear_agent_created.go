@@ -74,6 +74,15 @@ func handleLinearAgentCreated(
 	if err != nil {
 		return fmt.Errorf("resolve linear client: %w", err)
 	}
+	bootstrapIdentifier := row.LinearIssueIdentifier
+	if bootstrapIdentifier == "" {
+		bootstrapIdentifier = payload.LinearIssueID
+	}
+	if err := emitLinearAgentBootstrap(ctx, client, activities, row, bootstrapIdentifier, logger); err != nil {
+		logger.Warn().Err(err).
+			Str("agent_session_id", row.LinearAgentSessionID).
+			Msg("linear_agent_event: failed to re-emit bootstrap activity")
+	}
 
 	// 3. Fetch the live issue. We trust the live read over the
 	// dispatcher's webhook envelope because (a) labels and project
@@ -216,6 +225,13 @@ func createAndAttachLinearAgentSession(ctx context.Context, stores *Stores, orgI
 	}
 	committed = true
 	return nil
+}
+
+func emitLinearAgentBootstrap(ctx context.Context, client linear.Client, activities *db.LinearAgentActivityLogStore, row *db.LinearAgentSession, issueIdentifier string, logger zerolog.Logger) error {
+	if row == nil {
+		return errors.New("linear agent session row unavailable")
+	}
+	return emitOnce(ctx, client, activities, row.OrgID, row.ID, row.LinearAgentSessionID, linear.BootstrapActivity(issueIdentifier), logger)
 }
 
 // reconcileLinearAgentCreated re-runs the idempotent tail of the created
