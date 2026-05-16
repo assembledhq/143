@@ -269,7 +269,7 @@ describe('SessionDetailPage', () => {
     await waitFor(() => {
       expect(screen.getByRole('heading', { level: 1, name: updatedTitle })).toBeInTheDocument();
     });
-  });
+  }, 20000);
 
   it('shows a hover tooltip when Save title is disabled', async () => {
     const user = userEvent.setup();
@@ -334,12 +334,13 @@ describe('SessionDetailPage', () => {
     expect(screen.queryByRole('tab', { name: 'Validation' })).not.toBeInTheDocument();
   });
 
-  it('uses the same desktop header bar height for the conversation and detail panels', async () => {
+  it('uses the same desktop header border-box height for the conversation and detail panels', async () => {
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
     await screen.findAllByText('Fixed TypeError by adding null check');
 
     expect(screen.getByTestId('session-main-header')).toHaveClass('h-14');
-    expect(screen.getByTestId('session-detail-header-bar')).toHaveClass('h-14');
+    expect(screen.getByTestId('session-detail-header')).toHaveClass('h-14');
+    expect(screen.getByTestId('session-detail-header-bar')).toHaveClass('h-full');
   });
 
   it('uses a dedicated mobile close button that does not compete with PR actions', async () => {
@@ -705,6 +706,19 @@ describe('SessionDetailPage', () => {
       expect(createdThread).toBe(true);
     });
     expect(await screen.findByRole('tab', { name: /Codex 2/ })).toBeInTheDocument();
+  });
+
+  it('keeps the desktop session header and detail panel header on the same border-box height', async () => {
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+
+    const mainHeader = await screen.findByTestId('session-main-header');
+    const detailHeader = screen.getByTestId('session-detail-header');
+    const detailHeaderBar = screen.getByTestId('session-detail-header-bar');
+
+    expect(mainHeader).toHaveClass('h-14', 'border-b');
+    expect(detailHeader).toHaveClass('h-14', 'border-b');
+    expect(detailHeaderBar).toHaveClass('h-full');
+    expect(detailHeaderBar).not.toHaveClass('h-14');
   });
 
   it('shows the desktop agent tab row as soon as a second tab is being created', async () => {

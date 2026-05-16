@@ -4430,11 +4430,11 @@ export function SessionDetailContent({ id }: { id: string }) {
     >
       <div
         data-testid="session-detail-header"
-        className="border-b border-border shrink-0"
+        className={cn("border-b border-border shrink-0", SESSION_HEADER_HEIGHT_CLASSNAME)}
       >
         <div
           data-testid="session-detail-header-bar"
-          className={cn("flex items-center gap-2 min-w-0 px-2", SESSION_HEADER_HEIGHT_CLASSNAME)}
+          className="flex h-full items-center gap-2 min-w-0 px-2"
         >
           <div
             ref={detailTabsRef}
