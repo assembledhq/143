@@ -41,7 +41,7 @@ The system aggregates issues from support, Sentry, and Linear, prioritizes them 
 
 - `Sessions` is the main operating surface for active work: watching runs, reviewing diffs, following PR state, and giving agents guidance.
 - `Autopilot` is a supporting background automation surface. It has shifted from a recommendation-first briefing page to a unified **issue-and-run queue** that shows what the system is likely to work on automatically, what already ran, and what is available for manual kick-off. Detailed design: [implemented/75-autopilot-issue-and-run-queue.md](implemented/75-autopilot-issue-and-run-queue.md).
-- The Autopilot queue should sort **low-hanging fruit** to the top by combining impact and implementation straightforwardness, so teams can quickly inspect what background automation should pick up next.
+- The Autopilot queue should sort high **priority fit** upstream work to the top by combining impact and implementation straightforwardness; connected sessions and PRs appear only as row state/actions.
 - Each Autopilot issue row should make automation state explicit: whether it autoran, is queued/running, needs review, opened a PR, failed, or is ready for a manual kick-off.
 - The previous recommendation hero remains useful, but only as a compact summary strip above the queue rather than the dominant page artifact.
 - When required prerequisites are missing, route the user to `/onboarding` for the progressive setup sequence: (1) choose coding agent, (2) connect GitHub, (3) add optional integrations. The post-setup `Autopilot` surface stays focused on the issue-and-run queue.

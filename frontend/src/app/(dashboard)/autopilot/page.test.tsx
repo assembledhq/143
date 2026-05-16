@@ -278,7 +278,7 @@ describe("AutopilotPage", () => {
     renderWithProviders(<AutopilotPage />);
 
     expect((await screen.findAllByText("TypeError: Cannot read properties of undefined")).length).toBeGreaterThan(0);
-    expect(screen.getByText("Low-hanging fruit")).toBeInTheDocument();
+    expect(screen.getByText("Priority fit")).toBeInTheDocument();
     // Config footer rows
     expect(screen.getByText("Impact 35 · Severity 25 · Recency 20 · Revenue 20")).toBeInTheDocument();
     expect(screen.getByText("1 attached")).toBeInTheDocument();
@@ -388,5 +388,113 @@ describe("AutopilotPage", () => {
     await userEvent.click(screen.getByRole("button", { name: "Load more" }));
 
     expect(await screen.findByText("Late issue after page boundary")).toBeInTheDocument();
+  });
+
+  it("renders compact issue sources and consistent scoring badges", async () => {
+    mockSettings({
+      default_agent_type: "codex",
+      product_context: {
+        philosophy: "Ship reliability first.",
+        direction: "Payments hardening this quarter.",
+        focus_areas: ["auth"],
+        avoid_areas: [],
+      },
+    });
+    mockStatus({
+      is_running: false,
+      issues_reviewed: 0,
+      success_rate: 0,
+      success_count: 0,
+      total_delegated: 0,
+    });
+    mockLatestPlan(null);
+    mockDocuments([]);
+    mockIntegrations([
+      {
+        id: "github-1",
+        org_id: "org-1",
+        provider: "github",
+        status: "active",
+        created_at: "2026-03-20T00:00:00Z",
+      },
+    ]);
+    mockRepositories([
+      {
+        id: "repo-1",
+        org_id: "org-1",
+        integration_id: "integration-1",
+        github_id: 1,
+        full_name: "acme/app",
+        default_branch: "main",
+        private: true,
+        clone_url: "https://github.com/acme/app.git",
+        installation_id: 1,
+        status: "active",
+        settings: {},
+        created_at: "2026-03-20T00:00:00Z",
+        updated_at: "2026-03-20T00:00:00Z",
+      },
+    ]);
+    mockAgentReadiness();
+    server.use(
+      http.get("/api/v1/autopilot/queue", () =>
+        HttpResponse.json({
+          data: [
+            {
+              id: "issue-linear",
+              rank: 1,
+              source: { type: "linear", key: "737e9a4c-8d01-4d77-b64f-77a4743e7b20" },
+              title: "VIR-22: Create a branch instead of needing to push a PR",
+              issue_status: "triaged",
+              customer_impact: { label: "Low", count: 0 },
+              implementation_ease: "Medium",
+              low_hanging_fruit: {
+                label: "High",
+                reasons: ["eligible for automation"],
+                cluster_size: 1,
+              },
+              display_run_state: "not_started",
+              available_action: "blocked",
+              action_disabled_reason: "Select a repository before starting a run.",
+            },
+            {
+              id: "issue-manual",
+              rank: 2,
+              source: { type: "manual", key: "Manual-20260422232356-60685fba36584d41ad1cc22b32f9f11e" },
+              title: "Internal product note",
+              issue_status: "open",
+              customer_impact: { label: "Medium", count: 3 },
+              implementation_ease: "Low",
+              low_hanging_fruit: {
+                label: "Low",
+                reasons: [],
+                cluster_size: 1,
+              },
+              display_run_state: "not_started",
+              available_action: "blocked",
+              action_disabled_reason: "Select a repository before starting a run.",
+            },
+          ],
+          meta: {
+            summary: {
+              top_issue_id: "issue-linear",
+              autorunnable_count: 0,
+              needs_review_count: 0,
+              open_pr_count: 0,
+              active_run_count: 0,
+              ranked_issue_count: 2,
+            },
+          },
+        } satisfies AutopilotQueueResponse))
+    );
+
+    renderWithProviders(<AutopilotPage />);
+
+    expect(await screen.findByText("VIR-22")).toBeInTheDocument();
+    expect(screen.getAllByText("Low").length).toBeGreaterThanOrEqual(2);
+    expect(screen.getAllByText("Medium").length).toBeGreaterThanOrEqual(1);
+    expect(screen.getByText("Internal")).toBeInTheDocument();
+    expect(screen.queryByText(/737e9a4c/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/60685fba/)).not.toBeInTheDocument();
   });
 });
