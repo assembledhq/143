@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -151,4 +152,38 @@ func TestReviewLoopMigrationDoesNotReferenceSessionMessagesByIDOnly(t *testing.T
 	sql := string(body)
 	require.NotContains(t, sql, "REFERENCES session_messages(id)",
 		"session_messages is partitioned with primary key (id, created_at), so review loop message pointers must not FK to id alone")
+}
+
+func TestGitHubInstallationClaimsMigrationDeduplicatesInstallationsBeforeUpsert(t *testing.T) {
+	t.Parallel()
+
+	body, err := os.ReadFile("../../migrations/000126_github_installation_repo_claims.up.sql")
+	require.NoError(t, err, "test should read the GitHub installation claims migration")
+
+	sql := string(body)
+	require.Contains(t, sql, "WITH installation_candidates AS",
+		"migration should stage installation candidates before the upsert")
+	require.Contains(t, sql, "ROW_NUMBER() OVER",
+		"migration should rank candidates so each installation_id is upserted once")
+	require.Contains(t, sql, "PARTITION BY installation_id",
+		"migration should deduplicate by installation_id before ON CONFLICT DO UPDATE")
+	require.Contains(t, sql, "MIN(created_at) OVER (PARTITION BY installation_id) AS first_seen_created_at",
+		"migration should preserve the earliest integration timestamp for installation created_at")
+	require.Contains(t, sql, "WHERE candidate_rank = 1",
+		"migration should only upsert the selected candidate per installation")
+}
+
+func TestGitHubInstallationClaimsDownMigrationDropsChildLinksFirst(t *testing.T) {
+	t.Parallel()
+
+	body, err := os.ReadFile("../../migrations/000126_github_installation_repo_claims.down.sql")
+	require.NoError(t, err, "test should read the GitHub installation claims down migration")
+
+	sql := string(body)
+	linkDrop := strings.Index(sql, "DROP TABLE IF EXISTS github_installation_org_links")
+	installationDrop := strings.Index(sql, "DROP TABLE IF EXISTS github_installations")
+	require.NotEqual(t, -1, linkDrop, "down migration should drop github_installation_org_links")
+	require.NotEqual(t, -1, installationDrop, "down migration should drop github_installations")
+	require.Less(t, linkDrop, installationDrop,
+		"down migration should drop child org-link table before parent installations table")
 }

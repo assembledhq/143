@@ -3,6 +3,7 @@ import {
   formatDuration,
   getInitialComposerSelectedModel,
   getPendingEditableThreadUpdate,
+  invalidateSessionHumanInputRequests,
   trackInFlightAgentUpdate,
 } from "./session-detail-content";
 import type { SessionThread } from "@/lib/types";
@@ -98,6 +99,20 @@ describe("getInitialComposerSelectedModel", () => {
 
   it("uses the default composer selection when the created thread has no override", () => {
     expect(getInitialComposerSelectedModel(baseThread)).toBe("");
+  });
+});
+
+describe("invalidateSessionHumanInputRequests", () => {
+  it("invalidates the shared prefix so thread-scoped all-status queries refresh", () => {
+    const queryClient = {
+      invalidateQueries: vi.fn(),
+    };
+
+    invalidateSessionHumanInputRequests(queryClient, "session-1");
+
+    expect(queryClient.invalidateQueries).toHaveBeenCalledWith({
+      queryKey: ["session", "session-1", "human-input-requests"],
+    });
   });
 });
 

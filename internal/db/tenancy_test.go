@@ -33,6 +33,7 @@ func TestMultiTenancyAudit(t *testing.T) {
 		"validations",
 		"session_logs",
 		"session_questions",
+		"session_human_input_requests",
 		"issue_events",
 		"priority_scores",
 		"complexity_estimates",

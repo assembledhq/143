@@ -87,6 +87,7 @@ type DockerPreviewProvider struct {
 	executor SandboxExecutor
 	network  string // Docker network for preview infrastructure
 	logger   zerolog.Logger
+	dialer   previewDialer
 
 	mu       sync.RWMutex
 	previews map[string]*previewState // handle → state
@@ -95,6 +96,13 @@ type DockerPreviewProvider struct {
 	// preview starts hitting an absent image at the same moment share a
 	// single pull instead of fanning out N redundant streams.
 	imagePulls singleflight.Group
+}
+
+type previewDialer func(ctx context.Context, addr string) (net.Conn, error)
+
+func defaultPreviewDialer(ctx context.Context, addr string) (net.Conn, error) {
+	var dialer net.Dialer
+	return dialer.DialContext(ctx, "tcp", addr)
 }
 
 // previewState tracks all running components of a preview.
@@ -152,6 +160,8 @@ const serviceExitTailLines = 3
 // chrome that classifyLaunchError prepends.
 const serviceExitTailRunes = 200
 
+const previewDialTimeout = 5 * time.Second
+
 // DockerPreviewOption configures a DockerPreviewProvider.
 type DockerPreviewOption func(*DockerPreviewProvider)
 
@@ -159,6 +169,16 @@ type DockerPreviewOption func(*DockerPreviewProvider)
 func WithPreviewNetwork(network string) DockerPreviewOption {
 	return func(p *DockerPreviewProvider) {
 		p.network = network
+	}
+}
+
+// WithPreviewDialer overrides worker-to-sandbox TCP dialing. It is intended
+// for tests; production uses the default net.Dialer path.
+func WithPreviewDialer(dialer previewDialer) DockerPreviewOption {
+	return func(p *DockerPreviewProvider) {
+		if dialer != nil {
+			p.dialer = dialer
+		}
 	}
 }
 
@@ -174,6 +194,7 @@ func NewDockerPreviewProvider(
 		executor: executor,
 		network:  "143-sandbox",
 		logger:   logger,
+		dialer:   defaultPreviewDialer,
 		previews: make(map[string]*previewState),
 	}
 	for _, opt := range opts {
@@ -300,6 +321,12 @@ func (d *DockerPreviewProvider) StartPreview(ctx context.Context, sb *agent.Sand
 				d.cleanupState(handle)
 				return nil, fmt.Errorf("%w: primary service %q (port %d): %s", preview.ErrServiceNotReady, cfg.Primary, primaryCfg.Port, errMsg)
 			}
+			if err := d.verifyPrimaryReachable(ctx, state, cfg.Primary, primaryCfg.Port); err != nil {
+				errMsg, tail := d.recordServiceReadinessFailure(state, cfg.Primary, err)
+				notifyServiceFailed(observer, cfg.Primary, errMsg, tail)
+				d.cleanupState(handle)
+				return nil, fmt.Errorf("%w: primary service %q (port %d): %s", preview.ErrServiceNotReady, cfg.Primary, primaryCfg.Port, errMsg)
+			}
 			d.mu.Lock()
 			state.services[cfg.Primary].status = models.PreviewServiceStatusReady
 			pid := state.services[cfg.Primary].pid
@@ -352,6 +379,14 @@ func (d *DockerPreviewProvider) StartPreview(ctx context.Context, sb *agent.Sand
 				notifyServiceFailed(observer, name, errMsg, tail)
 				d.cleanupState(handle)
 				return nil, fmt.Errorf("%w: service %q (port %d): %s", preview.ErrServiceNotReady, name, svcCfg.Port, errMsg)
+			}
+			if name == cfg.Primary {
+				if err := d.verifyPrimaryReachable(ctx, state, name, svcCfg.Port); err != nil {
+					errMsg, tail := d.recordServiceReadinessFailure(state, name, err)
+					notifyServiceFailed(observer, name, errMsg, tail)
+					d.cleanupState(handle)
+					return nil, fmt.Errorf("%w: service %q (port %d): %s", preview.ErrServiceNotReady, name, svcCfg.Port, errMsg)
+				}
 			}
 			d.mu.Lock()
 			state.services[name].status = models.PreviewServiceStatusReady
@@ -498,12 +533,35 @@ func (d *DockerPreviewProvider) DialPreview(ctx context.Context, handle string) 
 	}
 
 	addr := net.JoinHostPort(sandboxIP, fmt.Sprintf("%d", state.primaryPort))
-	conn, err := net.DialTimeout("tcp", addr, 5*time.Second)
+	conn, err := d.dialPreviewAddr(ctx, addr)
 	if err != nil {
 		return nil, fmt.Errorf("dial preview at %s: %w", addr, err)
 	}
 
 	return &tcpPreviewStream{Conn: conn}, nil
+}
+
+func (d *DockerPreviewProvider) verifyPrimaryReachable(ctx context.Context, state *previewState, name string, port int) error {
+	sandboxIP, err := d.getSandboxIP(ctx, state.sandbox.ID)
+	if err != nil {
+		return fmt.Errorf("external reachability check failed for service %q: resolve sandbox IP: %w", name, err)
+	}
+
+	addr := net.JoinHostPort(sandboxIP, fmt.Sprintf("%d", port))
+	conn, err := d.dialPreviewAddr(ctx, addr)
+	if err != nil {
+		return fmt.Errorf("external reachability check failed for service %q at %s: %w", name, addr, err)
+	}
+	if err := conn.Close(); err != nil {
+		d.logger.Debug().Err(err).Str("service", name).Str("addr", addr).Msg("external preview reachability probe close failed")
+	}
+	return nil
+}
+
+func (d *DockerPreviewProvider) dialPreviewAddr(ctx context.Context, addr string) (net.Conn, error) {
+	dialCtx, cancel := context.WithTimeout(ctx, previewDialTimeout)
+	defer cancel()
+	return d.dialer(dialCtx, addr)
 }
 
 // =============================================================================

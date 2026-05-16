@@ -1109,9 +1109,10 @@ func parseSlackTimestamp(ts string) time.Time {
 func newRunAgentHandler(stores *Stores, services *Services, logger zerolog.Logger) JobHandler {
 	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
 		var input struct {
-			SessionID string `json:"session_id"`
-			OrgID     string `json:"org_id"`
-			ThreadID  string `json:"thread_id"`
+			SessionID           string `json:"session_id"`
+			OrgID               string `json:"org_id"`
+			ThreadID            string `json:"thread_id"`
+			HumanInputRequestID string `json:"human_input_request_id"`
 		}
 		if err := json.Unmarshal(payload, &input); err != nil {
 			return fmt.Errorf("unmarshal run_agent payload: %w", err)
@@ -1325,9 +1326,10 @@ func newCancelSessionHandler(stores *Stores, services *Services, logger zerolog.
 func newContinueSessionHandler(stores *Stores, services *Services, logger zerolog.Logger) JobHandler {
 	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
 		var input struct {
-			SessionID string `json:"session_id"`
-			OrgID     string `json:"org_id"`
-			ThreadID  string `json:"thread_id"`
+			SessionID           string `json:"session_id"`
+			OrgID               string `json:"org_id"`
+			ThreadID            string `json:"thread_id"`
+			HumanInputRequestID string `json:"human_input_request_id"`
 		}
 		if err := json.Unmarshal(payload, &input); err != nil {
 			return fmt.Errorf("unmarshal continue_session payload: %w", err)
@@ -1359,6 +1361,7 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 			Str("session_id", sessionID.String()).
 			Str("org_id", orgID.String()).
 			Str("thread_id", input.ThreadID).
+			Str("human_input_request_id", input.HumanInputRequestID).
 			Int("current_turn", session.CurrentTurn).
 			Dur("session_timeout", sessionTimeout).
 			Dur("runtime_ceiling", runtimeCeiling).
@@ -1369,6 +1372,14 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 		var hasThread bool
 		var continueOpts *agent.ContinueSessionOptions
 		var resultAgentSessionID string
+		var humanInputRequestID *uuid.UUID
+		if input.HumanInputRequestID != "" {
+			parsedHumanInputRequestID, parseErr := uuid.Parse(input.HumanInputRequestID)
+			if parseErr != nil {
+				return fmt.Errorf("parse human input request ID: %w", parseErr)
+			}
+			humanInputRequestID = &parsedHumanInputRequestID
+		}
 		// Captured by the OnTurnComplete callback so the post-success block
 		// below can persist per-thread result metadata (diff, summary,
 		// confidence) onto the thread row. Stays nil when the orchestrator
@@ -1411,6 +1422,7 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 					ModelOverride:        thread.ModelOverride,
 					ThreadAgentSessionID: thread.AgentSessionID,
 					ResultAgentSessionID: &resultAgentSessionID,
+					HumanInputRequestID:  humanInputRequestID,
 					ThreadID:             &threadIDLocal,
 					OnTurnComplete: func(result *agent.AgentResult) {
 						lastTurnResult = result
@@ -1421,6 +1433,11 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 					},
 				}
 			}
+		}
+		if continueOpts == nil && humanInputRequestID != nil {
+			continueOpts = &agent.ContinueSessionOptions{HumanInputRequestID: humanInputRequestID}
+		} else if continueOpts != nil && humanInputRequestID != nil {
+			continueOpts.HumanInputRequestID = humanInputRequestID
 		}
 
 		if err := services.Orchestrator.ContinueSession(jobCtx, &session, continueOpts); err != nil {

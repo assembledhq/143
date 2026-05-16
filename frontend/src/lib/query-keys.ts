@@ -18,6 +18,8 @@ export const queryKeys = {
     timeline: (id: string) => ["session", id, "timeline"] as const,
     pr: (id: string) => ["session", id, "pr"] as const,
     messages: (id: string) => ["session", id, "messages"] as const,
+    humanInputRequests: (id: string, status?: string | null, threadId?: string | null) =>
+      ["session", id, "human-input-requests", status ?? null, threadId ?? null] as const,
     composerFiles: (id: string, query: string) => ["session", id, "composer", "files", query] as const,
     threads: (id: string) => ["session", id, "threads"] as const,
     threadDetail: (sessionId: string, threadId: string) => ["session", sessionId, "thread", threadId] as const,

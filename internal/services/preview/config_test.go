@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/assembledhq/143/internal/models"
+	"github.com/assembledhq/143/internal/services/agent"
 	"github.com/stretchr/testify/require"
 )
 
@@ -673,22 +674,63 @@ func TestDetectReadiness(t *testing.T) {
 func TestResolveResourceLimits(t *testing.T) {
 	t.Parallel()
 
-	single := models.PreviewConfig{
-		Services: map[string]models.ServiceConfig{"app": {}},
-	}
-	multi := models.PreviewConfig{
-		Services: map[string]models.ServiceConfig{"a": {}, "b": {}},
+	tests := []struct {
+		name     string
+		cfg      models.PreviewConfig
+		expected models.ResourceLimits
+	}{
+		{
+			name: "single service uses small preview tier",
+			cfg: models.PreviewConfig{
+				Services: map[string]models.ServiceConfig{"app": {}},
+			},
+			expected: models.ResourceLimits{MemoryMB: 512, CPUMillis: 500},
+		},
+		{
+			name: "multi service without managed infrastructure uses standard preview tier",
+			cfg: models.PreviewConfig{
+				Services: map[string]models.ServiceConfig{"a": {}, "b": {}},
+			},
+			expected: models.ResourceLimits{MemoryMB: 1024, CPUMillis: 1000},
+		},
+		{
+			name: "multi service with managed infrastructure uses heavy preview tier",
+			cfg: models.PreviewConfig{
+				Services: map[string]models.ServiceConfig{"frontend": {}, "server": {}},
+				Infrastructure: map[string]models.InfrastructureConfig{
+					"db": {Template: "postgres-17"},
+				},
+			},
+			expected: models.ResourceLimits{MemoryMB: 2048, CPUMillis: 2000},
+		},
 	}
 
-	singleLimits := ResolveResourceLimits(&single)
-	if singleLimits.MemoryMB != 512 || singleLimits.CPUMillis != 500 {
-		t.Errorf("single = %+v, want {512, 500}", singleLimits)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			require.Equal(t, tt.expected, ResolveResourceLimits(&tt.cfg), "resource tier should match preview topology")
+		})
 	}
+}
 
-	multiLimits := ResolveResourceLimits(&multi)
-	if multiLimits.MemoryMB != 1024 || multiLimits.CPUMillis != 1000 {
-		t.Errorf("multi = %+v, want {1024, 1000}", multiLimits)
+func TestApplyResourceLimitsToSandboxConfig(t *testing.T) {
+	t.Parallel()
+
+	cfg := &models.PreviewConfig{
+		Services: map[string]models.ServiceConfig{
+			"frontend": {},
+			"server":   {},
+		},
+		Infrastructure: map[string]models.InfrastructureConfig{
+			"db": {Template: "postgres-17"},
+		},
 	}
+	sandboxCfg := agent.DefaultSandboxConfig()
+
+	ApplyResourceLimitsToSandboxConfig(&sandboxCfg, cfg)
+
+	require.Equal(t, 2048, sandboxCfg.MemoryLimitMB, "sandbox config should use the preview topology memory tier")
+	require.Equal(t, 2.0, sandboxCfg.CPULimit, "sandbox config should convert preview millicores into CPU cores")
 }
 
 func TestLookupInfraTemplate(t *testing.T) {

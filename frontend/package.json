@@ -11,8 +11,8 @@
     "start": "next start",
     "lint": "eslint . --max-warnings=0",
     "typecheck": "tsc --noEmit",
-    "test": "npm run lint && vitest",
-    "test:ci": "npm run lint && vitest run --reporter=dot"
+    "test": "vitest",
+    "test:ci": "vitest run --reporter=dot"
   },
   "dependencies": {
     "@sentry/nextjs": "^10.45.0",
@@ -23,7 +23,7 @@
     "cmdk": "^1.1.1",
     "geist": "^1.7.0",
     "lucide-react": "^0.574.0",
-    "next": "16.2.5",
+    "next": "16.2.6",
     "next-themes": "^0.4.6",
     "nuqs": "^2.8.8",
     "radix-ui": "^1.4.3",
@@ -57,6 +57,7 @@
     "vitest": "^4.0.18"
   },
   "overrides": {
+    "fast-uri": "3.1.2",
     "postcss": "8.5.14"
   }
 }

@@ -34,23 +34,50 @@ CREATE INDEX idx_github_installation_org_links_org
 CREATE INDEX idx_github_installation_org_links_installation
     ON github_installation_org_links (installation_id, status);
 
+WITH installation_candidates AS (
+    SELECT
+        (i.config->>'installation_id')::bigint AS installation_id,
+        COALESCE(NULLIF(i.config->>'account_id', '')::bigint, 0) AS account_id,
+        COALESCE(NULLIF(i.config->>'account_login', ''), split_part(r.full_name, '/', 1), 'unknown') AS account_login,
+        NULLIF(i.config->>'account_id', '') IS NULL AS missing_account_id,
+        NULLIF(i.config->>'account_login', '') IS NULL AS missing_account_login,
+        i.created_at,
+        i.id AS integration_id,
+        r.full_name
+    FROM integrations i
+    LEFT JOIN repositories r
+      ON r.integration_id = i.id
+    WHERE i.provider = 'github'
+      AND i.config ? 'installation_id'
+      AND NULLIF(i.config->>'installation_id', '') IS NOT NULL
+),
+ranked_installation_candidates AS (
+    SELECT
+        installation_id,
+        account_id,
+        account_login,
+        MIN(created_at) OVER (PARTITION BY installation_id) AS first_seen_created_at,
+        ROW_NUMBER() OVER (
+            PARTITION BY installation_id
+            ORDER BY
+                missing_account_id,
+                missing_account_login,
+                created_at ASC,
+                integration_id ASC,
+                full_name ASC NULLS LAST
+        ) AS candidate_rank
+    FROM installation_candidates
+)
 INSERT INTO github_installations (installation_id, account_id, account_login, status, created_at, updated_at)
-SELECT DISTINCT
-    (i.config->>'installation_id')::bigint AS installation_id,
-    COALESCE(NULLIF(i.config->>'account_id', '')::bigint, 0) AS account_id,
-    COALESCE(NULLIF(i.config->>'account_login', ''), split_part(r.full_name, '/', 1), 'unknown') AS account_login,
+SELECT
+    installation_id,
+    account_id,
+    account_login,
     'active',
-    min(i.created_at),
+    first_seen_created_at,
     now()
-FROM integrations i
-LEFT JOIN repositories r
-  ON r.integration_id = i.id
-WHERE i.provider = 'github'
-  AND i.config ? 'installation_id'
-  AND NULLIF(i.config->>'installation_id', '') IS NOT NULL
-GROUP BY (i.config->>'installation_id')::bigint,
-         COALESCE(NULLIF(i.config->>'account_id', '')::bigint, 0),
-         COALESCE(NULLIF(i.config->>'account_login', ''), split_part(r.full_name, '/', 1), 'unknown')
+FROM ranked_installation_candidates
+WHERE candidate_rank = 1
 ON CONFLICT (installation_id) DO UPDATE
 SET account_id = EXCLUDED.account_id,
     account_login = EXCLUDED.account_login,

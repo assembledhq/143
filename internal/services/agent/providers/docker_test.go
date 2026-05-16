@@ -2435,6 +2435,51 @@ func TestDockerProvider_ShellInjection(t *testing.T) {
 		}
 		require.True(t, foundFile, "tar payload should preserve the literal destination path")
 	})
+
+	t.Run("WriteFile to tmp does not rewrite tmp directory metadata", func(t *testing.T) {
+		t.Parallel()
+
+		var capturedCmd []string
+		conn := newCapturingConn()
+
+		mock := &mockDockerClient{}
+		mock.containerExecCreateFn = func(ctx context.Context, containerID string, config container.ExecOptions) (container.ExecCreateResponse, error) {
+			capturedCmd = config.Cmd
+			return container.ExecCreateResponse{ID: "exec-tmp-write"}, nil
+		}
+		mock.containerExecAttachFn = func(ctx context.Context, execID string, config container.ExecAttachOptions) (types.HijackedResponse, error) {
+			return types.HijackedResponse{Conn: conn, Reader: bufio.NewReader(conn)}, nil
+		}
+		mock.containerExecInspectFn = func(ctx context.Context, execID string) (container.ExecInspect, error) {
+			return container.ExecInspect{ExitCode: 0}, nil
+		}
+		p := NewDockerProvider(mock, newTestLogger())
+		sb := &agent.Sandbox{ID: "test-container", Provider: "docker", WorkDir: "/workspace", HomeDir: "/home/sandbox"}
+
+		err := p.WriteFile(context.Background(), sb, "/tmp/143-pr-commit-msg", []byte("commit message"))
+		require.NoError(t, err, "WriteFile should support existing absolute directories such as /tmp")
+		require.Equal(t, []string{"tar", "xf", "-", "-C", "/tmp"}, capturedCmd, "WriteFile should extract directly into /tmp instead of rewriting /tmp metadata")
+
+		tr := tar.NewReader(bytes.NewReader(conn.Captured()))
+		var foundFile bool
+		for {
+			hdr, readErr := tr.Next()
+			if errors.Is(readErr, io.EOF) {
+				break
+			}
+			require.NoError(t, readErr, "tar payload should be readable")
+			require.NotEqual(t, "tmp/", hdr.Name, "tar payload must not include the existing /tmp directory")
+			require.NotEqual(t, "tmp/143-pr-commit-msg", hdr.Name, "tar payload must be relative to /tmp, not rooted at /")
+			if hdr.Name != "143-pr-commit-msg" {
+				continue
+			}
+			foundFile = true
+			body, readErr := io.ReadAll(tr)
+			require.NoError(t, readErr, "tar file body should be readable")
+			require.Equal(t, []byte("commit message"), body, "tar payload should contain the requested file bytes")
+		}
+		require.True(t, foundFile, "tar payload should contain the tmp target file")
+	})
 }
 
 func TestDockerProvider_CloneRepo(t *testing.T) {
