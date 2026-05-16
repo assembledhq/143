@@ -279,10 +279,12 @@ func TestLinearAgentBootstrapAdapter_AutoEnablesWhenUnset(t *testing.T) {
 	}
 	require.NoError(t, adapter.Bootstrap(context.Background(), orgID))
 
-	var got models.OrgSettings
+	// capturedSettings now holds the LinearAgentSettings sub-document
+	// (the surgical jsonb_set merge target), not the whole OrgSettings.
+	var got models.LinearAgentSettings
 	require.NoError(t, json.Unmarshal(capturedSettings, &got))
-	require.NotNil(t, got.LinearAgent.Enabled, "Enabled must be set so future calls treat the choice as explicit and idempotent")
-	require.True(t, *got.LinearAgent.Enabled, "fresh install should auto-enable the inbound agent")
+	require.NotNil(t, got.Enabled, "Enabled must be set so future calls treat the choice as explicit and idempotent")
+	require.True(t, *got.Enabled, "fresh install should auto-enable the inbound agent")
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
@@ -355,12 +357,12 @@ func TestLinearAgentBootstrapAdapter_AutoPicksSoleRepoAsDefault(t *testing.T) {
 	}
 	require.NoError(t, adapter.Bootstrap(context.Background(), orgID))
 
-	var got models.OrgSettings
+	var got models.LinearAgentSettings
 	require.NoError(t, json.Unmarshal(capturedSettings, &got))
-	require.NotNil(t, got.LinearAgent.DefaultRepoID, "single-repo org should auto-set DefaultRepoID")
-	require.Equal(t, repoID, *got.LinearAgent.DefaultRepoID, "DefaultRepoID must point at the lone connected repo")
-	require.NotNil(t, got.LinearAgent.Enabled, "Enabled flip should still happen alongside the default-repo set")
-	require.True(t, *got.LinearAgent.Enabled)
+	require.NotNil(t, got.DefaultRepoID, "single-repo org should auto-set DefaultRepoID")
+	require.Equal(t, repoID, *got.DefaultRepoID, "DefaultRepoID must point at the lone connected repo")
+	require.NotNil(t, got.Enabled, "Enabled flip should still happen alongside the default-repo set")
+	require.True(t, *got.Enabled)
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
@@ -399,11 +401,11 @@ func TestLinearAgentBootstrapAdapter_SkipsDefaultRepoWhenMultipleRepos(t *testin
 	}
 	require.NoError(t, adapter.Bootstrap(context.Background(), orgID))
 
-	var got models.OrgSettings
+	var got models.LinearAgentSettings
 	require.NoError(t, json.Unmarshal(capturedSettings, &got))
-	require.Nil(t, got.LinearAgent.DefaultRepoID, "multi-repo org must NOT have a guessed default — admin picks explicitly")
-	require.NotNil(t, got.LinearAgent.Enabled, "Enabled flip is independent of repo-count guard")
-	require.True(t, *got.LinearAgent.Enabled)
+	require.Nil(t, got.DefaultRepoID, "multi-repo org must NOT have a guessed default — admin picks explicitly")
+	require.NotNil(t, got.Enabled, "Enabled flip is independent of repo-count guard")
+	require.True(t, *got.Enabled)
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 

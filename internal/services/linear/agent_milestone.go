@@ -14,6 +14,15 @@ import (
 // manual / project / automation paths — those sessions don't have a Linear
 // AgentSession to write to.
 //
+// Kill-switch / drain semantics: LINEAR_AGENT_ENABLED gates the dispatcher
+// (api/handlers/linear_agent_webhook.go) and the worker handler registration
+// (cmd/server/main.go). It does NOT gate this milestone fan-out: once a
+// `linear_agent_sessions` row exists, the milestone path keeps emitting
+// activities until the session reaches a terminal state, even after an
+// operator flips the kill switch off. This is intentional — the kill switch
+// is "stop accepting new sessions", not "kill in-flight sessions" — and lets
+// us toggle the feature during an incident without stranding running PRs.
+//
 // Best-effort: errors are logged but not surfaced to the caller. The
 // canonical record of session lifecycle still lives in the durable
 // attachment + rolling comment that HandleMilestone already wrote; agent
@@ -92,16 +101,17 @@ func (s *Service) HandleAgentMilestone(ctx context.Context, in MilestoneInput) e
 		return nil
 	}
 
-	// On PR open, pin externalUrls so Linear's AgentSession header
-	// deep-links to the 143 session. Best-effort like the rest of this
-	// method — the activity body already contains the PR URL, so the
-	// externalUrl pin is purely a header-level UX nicety.
+	// Pin externalUrls on every milestone where we have a stable 143
+	// session id to surface. AgentSessionUpdate is idempotent on Linear's
+	// side (same id+url combination → no-op), so re-pinning is free and
+	// it guarantees the deep link survives even if the MilestoneStarted
+	// emit succeeded but the subsequent UpdateSession call failed.
 	//
 	// We only ship the 143 session URL today; the PR URL itself is in
 	// the activity body. A future iteration can resolve the GitHub PR
 	// URL via the PR store and add it here as a second entry, at which
-	// point the set genuinely deserves the slice shape.
-	if in.Event == MilestonePROpened && in.PRNumber > 0 {
+	// point the slice shape carries its weight.
+	if pinExternalURLsForEvent(in.Event) {
 		if err := client.AgentSessionUpdate(ctx, AgentSessionUpdateInput{
 			AgentSessionID: row.LinearAgentSessionID,
 			ExternalURLs: []AgentSessionExternalURL{
@@ -111,6 +121,7 @@ func (s *Service) HandleAgentMilestone(ctx context.Context, in MilestoneInput) e
 			s.logger.Warn().Err(err).
 				Str("session_id", in.Session.ID.String()).
 				Str("agent_session_id", row.LinearAgentSessionID).
+				Str("event", string(in.Event)).
 				Msg("agent milestone: failed to pin external URLs on AgentSession")
 		}
 	}
@@ -127,6 +138,21 @@ func (s *Service) HandleAgentMilestone(ctx context.Context, in MilestoneInput) e
 	}
 
 	return nil
+}
+
+// pinExternalURLsForEvent returns true for milestone events where we want
+// the AgentSession header to point at the 143 session URL. We pin on the
+// first concrete progress event (Started) and on the PR-open event so the
+// header gets populated as early as possible AND has a second chance to
+// land if the first pin attempt failed. Terminal events are deliberately
+// excluded: the session header already shows whatever was last pinned, and
+// re-pinning right before close is purely overhead.
+func pinExternalURLsForEvent(event MilestoneEvent) bool {
+	switch event {
+	case MilestoneStarted, MilestonePROpened:
+		return true
+	}
+	return false
 }
 
 // terminalStateFor maps a milestone event to the cached state we should

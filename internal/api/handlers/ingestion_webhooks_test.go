@@ -577,6 +577,48 @@ func TestIngestionWebhook_HandleLinear_QueryParamStillWorks(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
+// TestIngestionWebhook_HandleLinear_RejectsDisconnectedIntegration pins the
+// rule that a stale ?integration_id=<uuid> URL pointing at a non-active
+// integration must be rejected at the resolver, before any HMAC verify or
+// downstream dispatch. Without this guard, a disconnected integration whose
+// signing secret has rotated could still spawn agent sessions or webhook
+// deliveries via a self-hosted-style URL.
+func TestIngestionWebhook_HandleLinear_RejectsDisconnectedIntegration(t *testing.T) {
+	t.Parallel()
+
+	for _, status := range []string{"inactive", "error"} {
+		status := status
+		t.Run(status, func(t *testing.T) {
+			t.Parallel()
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err)
+			defer mock.Close()
+
+			handler := setupIngestionHandler(t, mock, nil)
+			integrationID := uuid.New()
+			orgID := uuid.New()
+			now := time.Now()
+
+			mock.ExpectQuery("SELECT .+ FROM integrations WHERE id").
+				WithArgs(pgxmock.AnyArg()).
+				WillReturnRows(
+					pgxmock.NewRows([]string{"id", "org_id", "provider", "config", "status", "last_synced_at", "created_at"}).
+						AddRow(integrationID, orgID, "linear", json.RawMessage(`{}`), status, nil, now),
+				)
+
+			body := `{"action":"create","type":"Issue","data":{"id":"LIN-1","title":"Bug","priority":1,"createdAt":"2024-01-01T00:00:00Z","updatedAt":"2024-01-02T00:00:00Z"}}`
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/webhooks/linear?integration_id="+integrationID.String(), strings.NewReader(body))
+			w := httptest.NewRecorder()
+
+			handler.HandleLinear(w, req)
+
+			require.Equal(t, http.StatusUnauthorized, w.Code, "disconnected integration must produce 401, not silently proceed")
+			require.NoError(t, mock.ExpectationsWereMet(), "no downstream calls should have been made after rejection")
+		})
+	}
+}
+
 func TestIngestionWebhook_SignatureVerification(t *testing.T) {
 	t.Parallel()
 

@@ -65,10 +65,14 @@ type linearAgentEventEnvelope struct {
 			Body string `json:"body,omitempty"`
 		} `json:"agentActivity,omitempty"`
 	} `json:"payload"`
-	// AppUserID is the id of our @143 agent user as Linear sees it. We
-	// use it to filter out webhooks delivered to other apps that share a
-	// webhook URL (rare but possible in shared-tenant setups). Empty in
-	// AgentSessionEvent payloads — it lives on Linear's side.
+	// AppUserID is the id of the Linear app user this webhook is
+	// addressed to. Linear sets it on AppUserNotification deliveries and
+	// recent AgentSessionEvent payloads; older AgentSessionEvent
+	// deliveries omit it. When present, Dispatch compares it against the
+	// AppUserID the OAuth callback persisted on the integration and
+	// rejects mismatches (defense in depth against shared-tenant webhook
+	// URL setups). Empty here means "Linear didn't tell us the target
+	// user" — we don't filter on it in that case.
 	AppUserID string `json:"appUserId,omitempty"`
 }
 
@@ -168,17 +172,25 @@ func NewLinearAgentDispatcher(cfg LinearAgentDispatcherConfig) *LinearAgentDispa
 
 // DispatchResult is the post-Dispatch summary returned to the webhook
 // handler. Status is one of:
-//   - "agent_dispatched" — we recorded the row + enqueued + (best-effort)
-//     emitted the bootstrap thought
-//   - "feature_off"      — global kill switch / org opt-out / unknown event
-//   - "ignored"          — recognized but non-actionable (e.g. action not
+//   - "agent_dispatched"                 — row + worker enqueue + bootstrap emit all succeeded
+//   - "agent_dispatched_bootstrap_failed" — row + worker enqueue succeeded but the
+//     dispatcher-side bootstrap emit failed. Distinct from the happy path
+//     because it indicates a likely SLA breach (Linear's 10s first-activity
+//     ceiling is anchored on this emit). The worker still picks up the
+//     enqueued job, so user-visible state will recover, but the operator
+//     should be alerted on this outcome.
+//   - "feature_off"                       — global kill switch / org opt-out / unknown event
+//   - "ignored"                           — recognized but non-actionable (e.g. action not
 //     yet supported in this phase)
+//   - "enqueue_failed"                    — webhook delivery saved but worker enqueue
+//     failed; Linear will retry the delivery
 type DispatchResult struct {
 	Status               string
 	AgentSessionRowID    uuid.UUID
 	JobID                uuid.UUID
 	AgentSessionID       string
 	BootstrapEmitSkipped bool
+	BootstrapEmitFailed  bool
 	Err                  error
 }
 
@@ -186,11 +198,15 @@ type DispatchResult struct {
 // raw webhook body (signature verified upstream). integration is the
 // active Linear integration row that owns this webhook URL.
 //
+// preParsed, when non-nil, lets a caller that already body-sniffed the
+// envelope (e.g. to determine event_type) avoid re-parsing. nil is the
+// normal case — Dispatch unmarshals body itself.
+//
 // Dispatch is never expected to return an error — all failure modes resolve
 // to a 200 OK with an explanatory status string in DispatchResult.Status.
 // The 5s Linear SLA for ack is much tighter than 200 vs 4xx semantic
 // fidelity; ack first, log loudly, work asynchronously.
-func (d *LinearAgentDispatcher) Dispatch(ctx context.Context, integration *models.Integration, eventType LinearAgentEventType, body []byte, parsedEnvelope ...*linearAgentEventEnvelope) (result DispatchResult) {
+func (d *LinearAgentDispatcher) Dispatch(ctx context.Context, integration *models.Integration, eventType LinearAgentEventType, body []byte, preParsed *linearAgentEventEnvelope) (result DispatchResult) {
 	if d == nil {
 		// Nil-receiver short-circuit. We intentionally return *before*
 		// registering the deferred metrics record below — d.metrics
@@ -230,13 +246,19 @@ func (d *LinearAgentDispatcher) Dispatch(ctx context.Context, integration *model
 	}
 
 	var env linearAgentEventEnvelope
-	if len(parsedEnvelope) > 0 && parsedEnvelope[0] != nil {
-		env = *parsedEnvelope[0]
-	} else {
-		if err := json.Unmarshal(body, &env); err != nil {
-			d.logger.Warn().Err(err).Msg("failed to parse linear agent event envelope")
-			return DispatchResult{Status: "ignored"}
-		}
+	if preParsed != nil {
+		env = *preParsed
+	} else if err := json.Unmarshal(body, &env); err != nil {
+		// Post-HMAC-verify malformed body is loud: either Linear changed
+		// the wire contract under us, or someone with the signing secret
+		// is sending malformed payloads. Both warrant operator
+		// attention, not a quiet "ignored". The signature already
+		// authenticated the sender, so the body should be well-formed.
+		d.logger.Error().Err(err).
+			Str("integration_id", integration.ID.String()).
+			Int("body_bytes", len(body)).
+			Msg("agent dispatcher: HMAC verified but body failed to parse as AgentSessionEvent envelope")
+		return DispatchResult{Status: "ignored"}
 	}
 
 	action = linearAgentEventAction(env.Action)
@@ -250,6 +272,26 @@ func (d *LinearAgentDispatcher) Dispatch(ctx context.Context, integration *model
 			Str("integration_id", integration.ID.String()).
 			Msg("agent event missing agentSession.id or issueId; ignoring")
 		return DispatchResult{Status: "ignored"}
+	}
+
+	// AppUserID filter (defense in depth). If Linear addressed this webhook
+	// to a different app user that happens to share our webhook URL — rare
+	// today because Linear's per-app webhook routes events for that app
+	// only, but possible in shared-tenant or wildcard-subscription setups
+	// — skip it. We compare the envelope's appUserId against the AppUserID
+	// the OAuth callback persisted for this integration; mismatch means
+	// the webhook is not addressed to our agent. Empty on either side
+	// means "can't filter, fall through" (legacy installs, slimmer
+	// payloads). The check is intentionally before the agent-row upsert
+	// so a stray event doesn't pollute the bridge table.
+	if env.AppUserID != "" {
+		if expected, ok := decodeIntegrationAppUserID(integration.Config); ok && expected != "" && expected != env.AppUserID {
+			d.logger.Info().
+				Str("integration_id", integration.ID.String()).
+				Str("envelope_app_user_id", env.AppUserID).
+				Msg("agent event addressed to a different app user; ignoring")
+			return DispatchResult{Status: "ignored"}
+		}
 	}
 
 	// Per-org opt-in. Loaded once here so the worker doesn't re-fetch.
@@ -364,18 +406,26 @@ func (d *LinearAgentDispatcher) Dispatch(ctx context.Context, integration *model
 			d.logger.Warn().Err(emitErr).
 				Str("agent_session_id", row.LinearAgentSessionID).
 				Msg("agent bootstrap activity emit failed; reservation discarded so webhook retry can re-emit")
+			result.BootstrapEmitFailed = true
 		}
 		result.BootstrapEmitSkipped = emitRes.Skipped
 	}
 
-	// 3. Enqueue the worker job. Dedupe on (agent_session_id, action) so
-	// re-deliveries collapse. For prompted events the dedupe also
-	// includes the comment id (when present) so a different follow-up
-	// comment doesn't collapse onto a previous prompted job. Each
-	// dynamic part is URL-escaped so a Linear-side id that ever contains
-	// `:` can't smear two adjacent fields together.
+	// 3. Enqueue the worker job. Dedupe on (org_id, agent_session_id,
+	// action) so re-deliveries collapse. The jobs UNIQUE is (queue,
+	// dedupe_key) — not org-scoped — so prefixing the org id is what
+	// keeps two orgs from colliding if they ever share a Linear-side
+	// AgentSession ID (Linear ids are workspace-scoped opaque strings,
+	// so collision is astronomically unlikely today; the prefix is
+	// defense in depth against any future global-uniqueness regression).
+	// For prompted events the dedupe also includes the comment id (when
+	// present) so a different follow-up comment doesn't collapse onto a
+	// previous prompted job. Each dynamic part is URL-escaped so a
+	// Linear-side id that ever contains `:` can't smear two adjacent
+	// fields together.
 	dedupeParts := []string{
 		"linear_agent_event",
+		integration.OrgID.String(),
 		url.QueryEscape(row.LinearAgentSessionID),
 		url.QueryEscape(string(action)),
 	}
@@ -423,28 +473,25 @@ func (d *LinearAgentDispatcher) Dispatch(ctx context.Context, integration *model
 		return result
 	}
 	result.JobID = jobID
-	result.Status = "agent_dispatched"
+	// Differentiate the outcome label so a bootstrap emit failure (which
+	// usually means we missed the Linear 10s first-activity SLA) is
+	// pivotable independently of the happy path. The worker still picks
+	// up the enqueued job either way, so this is observability, not a
+	// correctness signal.
+	if result.BootstrapEmitFailed {
+		result.Status = "agent_dispatched_bootstrap_failed"
+	} else {
+		result.Status = "agent_dispatched"
+	}
 	d.logger.Info().
 		Str("agent_session_id", row.LinearAgentSessionID).
 		Str("action", string(action)).
 		Str("job_id", jobID.String()).
 		Bool("created_row", created).
 		Bool("bootstrap_emit_skipped", result.BootstrapEmitSkipped).
+		Bool("bootstrap_emit_failed", result.BootstrapEmitFailed).
 		Msg("linear agent event dispatched")
 	return result
-}
-
-// SetBootstrapEmitter wires the agent activity writer post-construction.
-// Separated from NewLinearAgentDispatcher because the writer needs a
-// resolved Client (per-org token), and we don't want the dispatcher's
-// constructor to require a per-org client factory at boot. Set is
-// idempotent and goroutine-safe in the sense that callers should only
-// invoke it during boot, before any webhook can land.
-func (d *LinearAgentDispatcher) SetBootstrapEmitter(e linearAgentBootstrapEmitter) {
-	if d == nil {
-		return
-	}
-	d.emitter = e
 }
 
 func hasEnabledTeamOverride(settings models.LinearAgentSettings) bool {
@@ -454,6 +501,22 @@ func hasEnabledTeamOverride(settings models.LinearAgentSettings) bool {
 		}
 	}
 	return false
+}
+
+// decodeIntegrationAppUserID extracts the persisted @143 agent user id from
+// the integration's config jsonb. Returns ok=false when the config is
+// malformed or the field is absent; callers treat that as "no filter
+// available" rather than a hard failure so a legacy install that predates
+// the agent flow still keeps working.
+func decodeIntegrationAppUserID(raw json.RawMessage) (string, bool) {
+	if len(raw) == 0 {
+		return "", false
+	}
+	var cfg models.LinearConfig
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		return "", false
+	}
+	return cfg.AppUserID, true
 }
 
 type linearAgentBootstrapWriter struct {

@@ -459,18 +459,48 @@ type SessionMessageAppendState struct {
 // a race to an already-running turn: the caller can append the message to the
 // running session without enqueueing a duplicate continuation.
 func (s *SessionStore) GetMessageAppendState(ctx context.Context, orgID, sessionID uuid.UUID) (SessionMessageAppendState, error) {
-	var state SessionMessageAppendState
-	err := s.db.QueryRow(ctx, `
+	return scanMessageAppendStateFromRow(s.db.QueryRow(ctx, sessionMessageAppendStateQuery(false), pgx.NamedArgs{
+		"id":     sessionID,
+		"org_id": orgID,
+	}))
+}
+
+// LockMessageAppendState is the SELECT ... FOR UPDATE variant of
+// GetMessageAppendState. The caller MUST already hold a transaction (passed
+// as tx) — the row lock is released on tx.Commit / tx.Rollback. Used by the
+// Linear agent prompted handler to read-and-pin status atomically before
+// inserting a queued user message under a still-running turn, so the
+// finisher's drain doesn't race the insert.
+//
+// Keeping the SQL co-located with the rest of the session queries (rather
+// than inlined in the worker package) means a future rename of `deleted_at`
+// or `status` rebuilds in one place.
+func (s *SessionStore) LockMessageAppendState(ctx context.Context, tx pgx.Tx, orgID, sessionID uuid.UUID) (SessionMessageAppendState, error) {
+	if tx == nil {
+		return SessionMessageAppendState{}, fmt.Errorf("LockMessageAppendState requires a non-nil tx")
+	}
+	return scanMessageAppendStateFromRow(tx.QueryRow(ctx, sessionMessageAppendStateQuery(true), pgx.NamedArgs{
+		"id":     sessionID,
+		"org_id": orgID,
+	}))
+}
+
+func sessionMessageAppendStateQuery(forUpdate bool) string {
+	const base = `
 		SELECT id, org_id, status, current_turn
 		FROM sessions
 		WHERE id = @id
 		  AND org_id = @org_id
-		  AND deleted_at IS NULL`,
-		pgx.NamedArgs{
-			"id":     sessionID,
-			"org_id": orgID,
-		}).Scan(&state.ID, &state.OrgID, &state.Status, &state.CurrentTurn)
-	if err != nil {
+		  AND deleted_at IS NULL`
+	if forUpdate {
+		return base + "\n\t\tFOR UPDATE"
+	}
+	return base
+}
+
+func scanMessageAppendStateFromRow(row pgx.Row) (SessionMessageAppendState, error) {
+	var state SessionMessageAppendState
+	if err := row.Scan(&state.ID, &state.OrgID, &state.Status, &state.CurrentTurn); err != nil {
 		return SessionMessageAppendState{}, err
 	}
 	return state, nil

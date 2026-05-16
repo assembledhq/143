@@ -65,11 +65,24 @@ CREATE INDEX idx_linear_agent_sessions_session
     ON linear_agent_sessions (session_id)
     WHERE session_id IS NOT NULL;
 
--- Sweeper / health-check index: "agent sessions whose worker job hasn't
--- completed and may need recovery". Bounded write rate, so a plain b-tree
--- on the timestamp pays its way.
+-- Operator-facing index: "show me recent agent sessions for org X in
+-- state Y" — admin UI and one-off SQL queries. The (org_id, state,
+-- created_at DESC) shape is wrong for the cross-org recovery sweeper,
+-- which is served by idx_linear_agent_sessions_state_updated_recovery
+-- below.
 CREATE INDEX idx_linear_agent_sessions_org_state_recent
     ON linear_agent_sessions (org_id, state, created_at DESC);
+
+-- Recovery sweeper index. The sweeper (ListPendingForRecovery) is
+-- cross-org by design and filters
+--   state IN ('pending','in_progress') AND updated_at < now() - interval
+-- so a partial b-tree leading with state and ordered by updated_at is the
+-- right shape. We keep it tiny by partial-indexing only the working set
+-- (terminal sessions are excluded). On a healthy system this index stays
+-- in the single-MB range.
+CREATE INDEX idx_linear_agent_sessions_state_updated_recovery
+    ON linear_agent_sessions (state, updated_at)
+    WHERE state IN ('pending', 'in_progress');
 
 -- ---------------------------------------------------------------------------
 -- linear_agent_activity_log
