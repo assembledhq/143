@@ -157,14 +157,16 @@ func (s *AutopilotQueueStore) ListQueue(ctx context.Context, orgID uuid.UUID, fi
 
 func buildAutopilotQueueQuery(orgID uuid.UUID, filters AutopilotQueueFilters, limit int, offset int) (string, pgx.NamedArgs) {
 	args := pgx.NamedArgs{
-		"org_id": orgID,
-		"limit":  limit,
-		"offset": offset,
+		"org_id":        orgID,
+		"limit":         limit,
+		"offset":        offset,
+		"manual_source": models.IssueSourceManual,
 	}
 
 	where := []string{
 		"i.org_id = @org_id",
 		"i.deleted_at IS NULL",
+		"i.source <> @manual_source",
 		`(
 			i.status IN ('open', 'triaged', 'in_progress')
 			OR EXISTS (
