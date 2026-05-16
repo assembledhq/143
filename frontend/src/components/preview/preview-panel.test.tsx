@@ -202,7 +202,15 @@ describe("PreviewPanel component", () => {
   });
 
   it('shows idle state when phase is "stopped"', async () => {
-    mockGet.mockResolvedValue(makePreviewStatus({ status: "stopped" }));
+    const startedAt = new Date(Date.now() - 5 * 60_000).toISOString();
+    const stoppedAt = new Date(Date.now() - 60_000).toISOString();
+    mockGet.mockResolvedValue(
+      makePreviewStatus({
+        status: "stopped",
+        created_at: startedAt,
+        stopped_at: stoppedAt,
+      }),
+    );
 
     renderWithProviders(<PreviewPanel {...DEFAULT_PROPS} />);
 
@@ -212,6 +220,8 @@ describe("PreviewPanel component", () => {
 
     // Should also render the status badge
     expect(screen.getByText("Stopped")).toBeInTheDocument();
+    expect(screen.getByText(/Started 5m ago/)).toBeInTheDocument();
+    expect(screen.getByText(/Stopped 1m ago/)).toBeInTheDocument();
   });
 
   it("treats async start success as startup in progress and resumes polling", async () => {
@@ -572,11 +582,17 @@ describe("PreviewPanel component", () => {
       expect(screen.getByText("Preview failed to start")).toBeInTheDocument();
     });
 
+    const startupLogRegion = screen.getByLabelText("Preview startup error logs");
+    expect(startupLogRegion).toHaveTextContent(summary);
+
     await user.click(screen.getByRole("button", { name: "Show full error logs" }));
 
-    expect(
-      await screen.findByText(/duplicate migration file: 000125_github_installation_repo_claims\.down\.sql/),
-    ).toBeInTheDocument();
+    await waitFor(() => {
+      expect(startupLogRegion).toHaveTextContent(
+        /duplicate migration file: 000125_github_installation_repo_claims\.down\.sql/,
+      );
+    });
+    expect(screen.getByRole("button", { name: "Show summary" })).toBeInTheDocument();
     expect(mockLogs).toHaveBeenCalledWith("sess-1");
   });
 

@@ -75,6 +75,13 @@ type QuestionStore interface {
 	AnswerLatestPendingBySession(ctx context.Context, orgID, sessionID uuid.UUID, answerText string, answeredBy uuid.UUID) (models.SessionQuestion, error)
 }
 
+// HumanInputRequestStore is the optional durable human-input surface used by
+// SendMessage to flip the latest pending free-text request on the target
+// thread to 'answered' when a composer send resumes an awaiting_input tab.
+type HumanInputRequestStore interface {
+	AnswerLatestPendingFreeTextByThread(ctx context.Context, orgID, sessionID, threadID uuid.UUID, answerText string, answeredBy uuid.UUID) (models.HumanInputRequest, error)
+}
+
 // ThreadStore defines the thread DB operations needed by the thread service.
 type ThreadStore interface {
 	Create(ctx context.Context, thread *models.SessionThread, maxThreads int) error
@@ -179,9 +186,10 @@ type SendMessageInput struct {
 // message create. The handler uses it to emit a SessionQuestionAnswered audit
 // after the tx commits — same shape as the session-level path.
 type SendMessageResult struct {
-	Message          *models.SessionMessage
-	ResolvedComments []models.SessionReviewComment
-	AnsweredQuestion *models.SessionQuestion
+	Message            *models.SessionMessage
+	ResolvedComments   []models.SessionReviewComment
+	AnsweredQuestion   *models.SessionQuestion
+	AnsweredHumanInput *models.HumanInputRequest
 }
 
 // Service handles thread business logic.
@@ -196,6 +204,7 @@ type Service struct {
 	txStarter          db.TxStarter                  // optional — required for SendMessage with ResolveReviewCommentIDs or awaiting_input answer
 	reviewCommentStore *db.SessionReviewCommentStore // optional — required for SendMessage with ResolveReviewCommentIDs
 	questionStore      QuestionStore                 // optional — required to answer pending questions on awaiting_input resume
+	humanInputStore    HumanInputRequestStore        // optional — required to answer pending human-input requests on awaiting_input resume
 	logger             zerolog.Logger
 }
 
@@ -254,6 +263,13 @@ func (s *Service) SetReviewCommentResolver(txStarter db.TxStarter, store *db.Ses
 // will resolve it on the next checkpoint).
 func (s *Service) SetQuestionStore(store QuestionStore) {
 	s.questionStore = store
+}
+
+// SetHumanInputRequestStore wires the optional durable human-input request
+// store. The txStarter must also be configured through SetReviewCommentResolver
+// because the implicit answer is committed atomically with the message row.
+func (s *Service) SetHumanInputRequestStore(store HumanInputRequestStore) {
+	s.humanInputStore = store
 }
 
 // CreateThread validates inputs and creates a blank idle thread.
@@ -557,13 +573,15 @@ func (s *Service) SendMessage(ctx context.Context, input SendMessageInput) (*Sen
 	// Mirrors sessions.go's predicate: revertStatus == awaiting_input &&
 	// userID != nil && questionStore != nil.
 	answerPendingQuestion := revertStatus == string(models.SessionStatusAwaitingInput) && input.UserID != nil && s.questionStore != nil
+	answerPendingHumanInput := preClaimThreadStatus == models.ThreadStatusAwaitingInput && input.UserID != nil && s.humanInputStore != nil
 
 	var (
-		resolvedComments []models.SessionReviewComment
-		answeredQuestion *models.SessionQuestion
+		resolvedComments   []models.SessionReviewComment
+		answeredQuestion   *models.SessionQuestion
+		answeredHumanInput *models.HumanInputRequest
 	)
-	if resolvingComments || answerPendingQuestion {
-		resolvedComments, answeredQuestion, err = s.createMessageInTx(ctx, msg, input, claimedSession, answerPendingQuestion)
+	if resolvingComments || answerPendingQuestion || answerPendingHumanInput {
+		resolvedComments, answeredQuestion, answeredHumanInput, err = s.createMessageInTx(ctx, msg, input, claimedSession, answerPendingQuestion, answerPendingHumanInput)
 	} else {
 		err = s.messageStore.Create(ctx, msg)
 	}
@@ -610,6 +628,9 @@ func (s *Service) SendMessage(ctx context.Context, input SendMessageInput) (*Sen
 		"thread_id":  input.ThreadID.String(),
 		"org_id":     input.OrgID.String(),
 	}
+	if answeredHumanInput != nil {
+		payload["human_input_request_id"] = answeredHumanInput.ID.String()
+	}
 	if _, err := s.jobStore.EnqueueWithOpts(ctx, input.OrgID, db.EnqueueOpts{
 		Queue:        "agent",
 		JobType:      "continue_session",
@@ -630,9 +651,10 @@ func (s *Service) SendMessage(ctx context.Context, input SendMessageInput) (*Sen
 	}
 
 	return &SendMessageResult{
-		Message:          msg,
-		ResolvedComments: resolvedComments,
-		AnsweredQuestion: answeredQuestion,
+		Message:            msg,
+		ResolvedComments:   resolvedComments,
+		AnsweredQuestion:   answeredQuestion,
+		AnsweredHumanInput: answeredHumanInput,
 	}, nil
 }
 
@@ -677,14 +699,14 @@ func (s *Service) queueMessageWaitingForSlot(ctx context.Context, input SendMess
 		msg.Attachments = input.Images
 	}
 
-	answeredQuestion, err := s.createQueuedMessage(ctx, msg, input, thread.Status)
+	answeredQuestion, answeredHumanInput, err := s.createQueuedMessage(ctx, msg, input, thread.Status)
 	if err != nil {
 		return nil, fmt.Errorf("create queued message: %w", err)
 	}
 	if err := s.threadStore.IncrementPendingMessages(ctx, input.OrgID, input.ThreadID); err != nil {
 		return nil, fmt.Errorf("increment queued message count: %w", err)
 	}
-	return &SendMessageResult{Message: msg, AnsweredQuestion: answeredQuestion}, nil
+	return &SendMessageResult{Message: msg, AnsweredQuestion: answeredQuestion, AnsweredHumanInput: answeredHumanInput}, nil
 }
 
 func (s *Service) queueClaimedThreadBehindSibling(ctx context.Context, input SendMessageInput, thread models.SessionThread, preClaimStatus models.ThreadStatus) (*SendMessageResult, error) {
@@ -711,22 +733,28 @@ func (s *Service) queueClaimedThreadBehindSibling(ctx context.Context, input Sen
 		msg.Attachments = input.Images
 	}
 
-	answeredQuestion, err := s.createQueuedMessage(ctx, msg, input, preClaimStatus)
+	answeredQuestion, answeredHumanInput, err := s.createQueuedMessage(ctx, msg, input, preClaimStatus)
 	if err != nil {
 		return nil, fmt.Errorf("create queued sibling message: %w", err)
 	}
 	if err := s.threadStore.IncrementPendingMessages(ctx, input.OrgID, input.ThreadID); err != nil {
 		return nil, fmt.Errorf("increment queued sibling message count: %w", err)
 	}
-	return &SendMessageResult{Message: msg, AnsweredQuestion: answeredQuestion}, nil
+	return &SendMessageResult{Message: msg, AnsweredQuestion: answeredQuestion, AnsweredHumanInput: answeredHumanInput}, nil
 }
 
-func (s *Service) createQueuedMessage(ctx context.Context, msg *models.SessionMessage, input SendMessageInput, threadStatus models.ThreadStatus) (*models.SessionQuestion, error) {
-	if threadStatus != models.ThreadStatusAwaitingInput || input.UserID == nil || s.questionStore == nil {
-		return nil, s.messageStore.Create(ctx, msg)
+func (s *Service) createQueuedMessage(ctx context.Context, msg *models.SessionMessage, input SendMessageInput, threadStatus models.ThreadStatus) (*models.SessionQuestion, *models.HumanInputRequest, error) {
+	// Durable human-input requests are intentionally not answered here:
+	// queued sends do not enqueue a continue_session job, so there is no
+	// payload that can carry human_input_request_id to the worker. The
+	// orchestrator answers the pending free-text request when it drains the
+	// queued message and creates the actual resume job.
+	answerPendingQuestion := threadStatus == models.ThreadStatusAwaitingInput && input.UserID != nil && s.questionStore != nil
+	if !answerPendingQuestion {
+		return nil, nil, s.messageStore.Create(ctx, msg)
 	}
-	_, answeredQuestion, err := s.createMessageInTx(ctx, msg, input, models.Session{}, true)
-	return answeredQuestion, err
+	_, answeredQuestion, _, err := s.createMessageInTx(ctx, msg, input, models.Session{}, true, false)
+	return answeredQuestion, nil, err
 }
 
 func threadStatusCanQueue(status models.ThreadStatus) bool {
@@ -909,14 +937,15 @@ func (s *Service) createMessageInTx(
 	input SendMessageInput,
 	claimedSession models.Session,
 	answerPendingQuestion bool,
-) ([]models.SessionReviewComment, *models.SessionQuestion, error) {
+	answerPendingHumanInput bool,
+) ([]models.SessionReviewComment, *models.SessionQuestion, *models.HumanInputRequest, error) {
 	if s.txStarter == nil {
-		return nil, nil, fmt.Errorf("tx starter not configured")
+		return nil, nil, nil, fmt.Errorf("tx starter not configured")
 	}
 
 	tx, err := s.txStarter.Begin(ctx)
 	if err != nil {
-		return nil, nil, fmt.Errorf("begin tx: %w", err)
+		return nil, nil, nil, fmt.Errorf("begin tx: %w", err)
 	}
 	committed := false
 	defer func() {
@@ -933,7 +962,7 @@ func (s *Service) createMessageInTx(
 
 	txMessageStore := db.NewSessionMessageStore(tx)
 	if err := txMessageStore.Create(ctx, msg); err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 
 	var resolved []models.SessionReviewComment
@@ -945,7 +974,7 @@ func (s *Service) createMessageInTx(
 		resolved, err = txCommentStore.ValidateAndResolveByIDs(
 			ctx, input.OrgID, input.SessionID, input.ResolveReviewCommentIDs, resolutionPass(&claimedSession))
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 	}
 
@@ -964,18 +993,36 @@ func (s *Service) createMessageInTx(
 					Str("session_id", input.SessionID.String()).
 					Msg("awaiting_input session resumed without a pending question to answer")
 			} else {
-				return nil, nil, fmt.Errorf("answer pending question: %w", qerr)
+				return nil, nil, nil, fmt.Errorf("answer pending question: %w", qerr)
 			}
 		} else {
 			answered = &question
 		}
 	}
 
+	var answeredHumanInput *models.HumanInputRequest
+	if answerPendingHumanInput {
+		txHumanInputStore := db.NewSessionHumanInputRequestStore(tx)
+		request, herr := txHumanInputStore.AnswerLatestPendingFreeTextByThread(ctx, input.OrgID, input.SessionID, input.ThreadID, input.Message, *input.UserID)
+		if herr != nil {
+			if errors.Is(herr, pgx.ErrNoRows) {
+				s.logger.Warn().
+					Str("session_id", input.SessionID.String()).
+					Str("thread_id", input.ThreadID.String()).
+					Msg("awaiting_input thread resumed without a pending free-text human input request to answer")
+			} else {
+				return nil, nil, nil, fmt.Errorf("answer pending human input request: %w", herr)
+			}
+		} else {
+			answeredHumanInput = &request
+		}
+	}
+
 	if err := tx.Commit(ctx); err != nil {
-		return nil, nil, fmt.Errorf("commit tx: %w", err)
+		return nil, nil, nil, fmt.Errorf("commit tx: %w", err)
 	}
 	committed = true
-	return resolved, answered, nil
+	return resolved, answered, answeredHumanInput, nil
 }
 
 // revertAfterSendFailure puts the session and thread back to their pre-send

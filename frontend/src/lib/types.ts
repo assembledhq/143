@@ -396,12 +396,13 @@ export interface SessionLog {
 }
 
 export interface SessionTimelineEntry {
-  kind: 'message' | 'assistant_output' | 'tool_group' | 'error' | 'log' | 'plan_output' | 'plan_message';
+  kind: 'message' | 'assistant_output' | 'tool_group' | 'error' | 'log' | 'plan_output' | 'plan_message' | 'human_input';
   created_at: string;
   message?: SessionMessage;
   log?: SessionLog;
   tool_use?: SessionLog;
   tool_result?: SessionLog;
+  human_input_request?: HumanInputRequest;
   turn_number?: number;
 }
 
@@ -473,6 +474,49 @@ export interface SessionQuestion {
   answered_at: string | null;
   answered_by: string | null;
   created_at: string;
+}
+
+export type HumanInputRequestKind = "free_text" | "single_choice" | "multi_choice" | "tool_approval" | "action_choice";
+export type HumanInputRequestStatus = "pending" | "answered" | "cancelled" | "expired" | "superseded";
+
+export interface HumanInputChoice {
+  id: string;
+  label: string;
+  description?: string;
+  preview?: string;
+  kind?: string;
+  destructive?: boolean;
+}
+
+export interface HumanInputRequest {
+  id: string;
+  org_id: string;
+  session_id: string;
+  thread_id?: string | null;
+  turn_number: number;
+  agent_type: string;
+  provider_request_id?: string | null;
+  request_kind: HumanInputRequestKind;
+  status: HumanInputRequestStatus;
+  title: string;
+  body: string;
+  context?: string | null;
+  blocks_phase?: string | null;
+  choices: HumanInputChoice[];
+  response_schema?: unknown;
+  provider_payload?: unknown;
+  answer_text?: string | null;
+  answer_payload?: unknown;
+  answered_by?: string | null;
+  answered_at?: string | null;
+  expires_at?: string | null;
+  created_at: string;
+}
+
+export interface HumanInputAnswerBody {
+  answer_text?: string;
+  selected_choice_ids?: string[];
+  answer_payload?: unknown;
 }
 
 export interface PullRequest {

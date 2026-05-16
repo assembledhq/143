@@ -810,7 +810,7 @@ func (h *PreviewHandler) GetPreview(w http.ResponseWriter, r *http.Request) {
 			writeError(w, r, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to get preview", err)
 			return
 		}
-		instance, err = h.store.GetLatestFailedPreviewForSession(r.Context(), orgID, sessionID)
+		instance, err = h.store.GetLatestTerminalPreviewForSession(r.Context(), orgID, sessionID)
 		if err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
 				writeError(w, r, http.StatusNotFound, "NO_ACTIVE_PREVIEW", "no active preview for this session")

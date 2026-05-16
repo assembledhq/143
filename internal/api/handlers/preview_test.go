@@ -2117,7 +2117,7 @@ func TestPreviewHandler_GetActivePreview_NoActivePreview(t *testing.T) {
 	mock.ExpectQuery("SELECT .+ FROM preview_instances").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(previewInstanceTestCols))
-	mock.ExpectQuery("SELECT [\\s\\S]+ FROM preview_instances[\\s\\S]+status = 'failed'").
+	mock.ExpectQuery("SELECT [\\s\\S]+ FROM preview_instances[\\s\\S]+status IN \\('stopped', 'expired', 'failed'\\)").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(previewInstanceTestCols))
 
@@ -2133,6 +2133,61 @@ func TestPreviewHandler_GetActivePreview_NoActivePreview(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "NO_ACTIVE_PREVIEW", resp.Error.Code)
 	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestPreviewHandler_GetPreview_ReturnsLatestStoppedPreviewWhenNoActivePreview(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	h := newPreviewHandlerWithMock(mock)
+	sessionID := uuid.New()
+	orgID := uuid.New()
+	userID := uuid.New()
+	previewID := uuid.New()
+	now := time.Now()
+	stoppedAt := now.Add(10 * time.Minute)
+	stoppedRow := newActivePreviewRow(previewID, sessionID, orgID, userID, now)
+	stoppedRow[6] = "stopped"
+	stoppedRow[16] = &stoppedAt
+
+	mock.ExpectQuery("SELECT .+ FROM preview_instances").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(previewInstanceTestCols))
+	mock.ExpectQuery("SELECT .+ FROM preview_instances[\\s\\S]+status IN \\('stopped', 'expired', 'failed'\\)").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(previewInstanceTestCols).
+				AddRow(stoppedRow...),
+		)
+	mock.ExpectQuery("SELECT .+ FROM preview_instances WHERE id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(previewInstanceTestCols).
+				AddRow(stoppedRow...),
+		)
+	mock.ExpectQuery("SELECT .+ FROM preview_services").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(handlerPreviewServiceTestCols))
+	mock.ExpectQuery("SELECT .+ FROM preview_infrastructure").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(handlerPreviewInfraTestCols))
+
+	req := httptest.NewRequest(http.MethodGet, "/preview", nil)
+	req = previewTestContextWithIDs(req, orgID, userID, sessionID.String())
+	w := httptest.NewRecorder()
+
+	h.GetPreview(w, req)
+	require.Equal(t, http.StatusOK, w.Code, "stopped preview history should return successfully: %s", w.Body.String())
+
+	var resp models.SingleResponse[*models.PreviewStatusResponse]
+	err = json.NewDecoder(w.Body).Decode(&resp)
+	require.NoError(t, err, "response body should be valid JSON")
+	require.Equal(t, models.PreviewStatusStopped, resp.Data.Instance.Status, "handler should return the latest stopped preview status")
+	require.NotNil(t, resp.Data.Instance.StoppedAt, "handler should include the preview stop timestamp")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
 func TestPreviewHandler_GetPreview_Success(t *testing.T) {

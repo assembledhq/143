@@ -619,6 +619,18 @@ export const handlers = [
     return HttpResponse.json({ data: [], meta: {} });
   }),
 
+  http.get('/api/v1/sessions/:id/human-input-requests', () => {
+    return HttpResponse.json({ data: [], meta: {} });
+  }),
+
+  http.post('/api/v1/sessions/:id/human-input-requests/:requestId/answer', () => {
+    return HttpResponse.json({ data: null });
+  }),
+
+  http.post('/api/v1/sessions/:id/human-input-requests/:requestId/cancel', () => {
+    return HttpResponse.json({ data: null });
+  }),
+
   http.post('/api/v1/issues/:id/fix', () => {
     return HttpResponse.json({
       data: mockSessions[0],
