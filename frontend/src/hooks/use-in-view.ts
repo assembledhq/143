@@ -14,11 +14,13 @@ export function useInView<T extends HTMLElement = HTMLDivElement>(
   const ref = useRef<T | null>(null);
   const reducedMotion =
     typeof window !== "undefined" &&
+    typeof window.matchMedia === "function" &&
     window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-  const [inView, setInView] = useState(reducedMotion || typeof window === "undefined");
+  const [inView, setInView] = useState(true);
 
   useEffect(() => {
     if (reducedMotion) return;
+    if (typeof IntersectionObserver === "undefined") return;
 
     const el = ref.current;
     if (!el) return;

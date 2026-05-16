@@ -1,7 +1,7 @@
 "use client";
 
 import Image from "next/image";
-import { Suspense, useState } from "react";
+import { Suspense, useEffect, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -12,7 +12,11 @@ import { Label } from "@/components/ui/label";
 import { api } from "@/lib/api";
 import { captureError } from "@/lib/errors";
 import { useAuth, useAuthProviders } from "@/hooks/use-auth";
-import { useEffect } from "react";
+
+function hasCSRFCookie(): boolean {
+  if (typeof document === "undefined") return false;
+  return document.cookie.split("; ").some((cookie) => cookie.startsWith("csrf_token="));
+}
 
 export default function LoginPage() {
   return (
@@ -26,7 +30,7 @@ function LoginPageContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const { isAuthenticated, isLoading: authLoading } = useAuth();
-  const { providers } = useAuthProviders();
+  const { providers, isLoading: providersLoading } = useAuthProviders();
 
   const invitation = searchParams.get("invitation") ?? undefined;
   const invitedEmail = searchParams.get("email") ?? "";
@@ -54,6 +58,8 @@ function LoginPageContent() {
   const [signUpName, setSignUpName] = useState("");
   const [signUpEmail, setSignUpEmail] = useState(identityEmail);
   const [signUpPassword, setSignUpPassword] = useState("");
+  const emailAuthReady = hasCSRFCookie();
+  const emailAuthPending = !emailAuthReady && (authLoading || providersLoading);
 
   useEffect(() => {
     if (!isSwitchAccount && !authLoading && isAuthenticated) {
@@ -71,6 +77,10 @@ function LoginPageContent() {
   const handleSignIn = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
+    if (!emailAuthReady) {
+      setError("Secure email sign-in is still initializing. Try again in a moment.");
+      return;
+    }
     setLoading(true);
     try {
       await api.auth.loginEmail(signInEmail, signInPassword);
@@ -87,6 +97,10 @@ function LoginPageContent() {
   const handleSignUp = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
+    if (!emailAuthReady) {
+      setError("Secure email sign-up is still initializing. Try again in a moment.");
+      return;
+    }
     setLoading(true);
     try {
       await api.auth.register(signUpEmail, signUpPassword, signUpName, invitation);
@@ -222,6 +236,14 @@ function LoginPageContent() {
             </div>
           )}
 
+          {!emailAuthReady && (
+            <CardDescription className="text-center text-xs">
+              {emailAuthPending
+                ? "Preparing secure email authentication..."
+                : "Secure email authentication could not be initialized. Refresh and try again."}
+            </CardDescription>
+          )}
+
           <Tabs value={tab} onValueChange={setTab}>
             <TabsList className="w-full">
               <TabsTrigger value="signin" className="flex-1">Sign in</TabsTrigger>
@@ -252,7 +274,12 @@ function LoginPageContent() {
                     required
                   />
                 </div>
-                <Button type="submit" className="w-full" loading={loading}>
+                <Button
+                  type="submit"
+                  className="w-full"
+                  loading={loading}
+                  disabled={loading || !emailAuthReady}
+                >
                   Sign in
                 </Button>
               </form>
@@ -295,7 +322,12 @@ function LoginPageContent() {
                     minLength={8}
                   />
                 </div>
-                <Button type="submit" className="w-full" loading={loading}>
+                <Button
+                  type="submit"
+                  className="w-full"
+                  loading={loading}
+                  disabled={loading || !emailAuthReady}
+                >
                   Create account
                 </Button>
               </form>

@@ -83,6 +83,9 @@ describe('LoginPage', () => {
       isLoading: false,
     });
 
+    document.cookie = 'csrf_token=; Max-Age=0; path=/';
+    document.cookie = 'csrf_token=test-csrf; path=/';
+
     Object.defineProperty(window, 'location', {
       value: createLocationMock(),
       writable: true,
@@ -117,6 +120,18 @@ describe('LoginPage', () => {
 
     expect(screen.getByRole('button', { name: 'Sign in' })).toBeInTheDocument();
     expect(screen.queryByRole('status')).not.toBeInTheDocument();
+  });
+
+  it('disables email submit until csrf warmup finishes', () => {
+    document.cookie = 'csrf_token=; Max-Age=0; path=/';
+    useAuthProvidersMock.mockReturnValue({
+      providers: { github: true, google: true, email: true },
+      isLoading: true,
+    });
+
+    renderWithProviders(<LoginPage />);
+
+    expect(screen.getByRole('button', { name: 'Sign in' })).toBeDisabled();
   });
 
   it('shows GitHub button', () => {
