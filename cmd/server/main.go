@@ -59,29 +59,6 @@ const (
 	httpShutdownTimeout       = 100 * time.Second
 )
 
-// linearAgentSettingsLoader adapts an OrganizationStore into the narrow
-// settings-loader interface used by linear.NewAgentRepoResolver. Mirrors
-// the same adapter in internal/api/router.go — separate copies because
-// each package wires its own dependency tree.
-type linearAgentSettingsLoader struct {
-	orgs *db.OrganizationStore
-}
-
-func (l linearAgentSettingsLoader) LoadAgentSettings(ctx context.Context, orgID uuid.UUID) (models.LinearAgentSettings, error) {
-	if l.orgs == nil {
-		return models.LinearAgentSettings{}, nil
-	}
-	org, err := l.orgs.GetByID(ctx, orgID)
-	if err != nil {
-		return models.LinearAgentSettings{}, err
-	}
-	parsed, err := models.ParseOrgSettings(org.Settings)
-	if err != nil {
-		return models.LinearAgentSettings{}, err
-	}
-	return parsed.LinearAgent, nil
-}
-
 func main() {
 	cfg := config.Load()
 	logger := logging.NewLogger(cfg.LogLevel, cfg.Env)
@@ -1277,32 +1254,23 @@ func buildServices(
 		SandboxGC:       sandboxGC,
 	}
 
-	// Linear inbound-agent worker wiring. Only constructs deps when the
-	// agent feature flag is on — the registration site short-circuits if
-	// the deps are nil, keeping the worker registration list clean for
-	// orgs that don't use the inbound agent path.
-	if cfg.LinearAgentEnabled {
+	// Linear inbound-agent worker wiring. The process-wide
+	// LINEAR_AGENT_ENABLED flag gates the webhook dispatcher, not the
+	// worker handler: disabling the flag must stop new inbound events while
+	// still allowing already-enqueued linear_agent_event jobs to drain.
+	if linearService != nil {
+		linearAgentSettingsView := db.LinearAgentSettingsView{Orgs: orgStore}
 		repoResolver := linear.NewAgentRepoResolver(
 			db.NewLinearTeamRepoMappingStore(pool),
-			linearAgentSettingsLoader{orgs: orgStore},
+			linearAgentSettingsView,
 			repoStore,
 		)
 		svc.LinearAgentDeps = &worker.LinearAgentEventHandlerDeps{
-			Stores:        nil, // populated below in BuildStores
-			Linear:        linearService,
-			RepoResolver:  repoResolver,
-			ProviderState: db.NewLinearProviderStateStore(pool),
-			SettingsLoader: func(ctx context.Context, orgID uuid.UUID) (models.LinearAgentSettings, error) {
-				org, err := orgStore.GetByID(ctx, orgID)
-				if err != nil {
-					return models.LinearAgentSettings{}, err
-				}
-				parsed, err := models.ParseOrgSettings(org.Settings)
-				if err != nil {
-					return models.LinearAgentSettings{}, err
-				}
-				return parsed.LinearAgent, nil
-			},
+			Stores:         nil, // populated below in BuildStores
+			Linear:         linearService,
+			RepoResolver:   repoResolver,
+			ProviderState:  db.NewLinearProviderStateStore(pool),
+			SettingsLoader: linearAgentSettingsView.LoadAgentSettings,
 			OrgSettingsLoader: func(ctx context.Context, orgID uuid.UUID) (models.OrgSettings, error) {
 				org, err := orgStore.GetByID(ctx, orgID)
 				if err != nil {

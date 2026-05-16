@@ -10,7 +10,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
@@ -133,6 +135,8 @@ var providerSignatureHeader = map[string]string{
 var providerDeliveryIDHeader = map[string]string{
 	"linear": "Linear-Delivery",
 }
+
+const linearWebhookTimestampSkew = time.Minute
 
 func (h *IngestionWebhookHandler) handleProvider(w http.ResponseWriter, r *http.Request, provider string) {
 	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20)) // 1MB limit
@@ -385,8 +389,64 @@ func (h *IngestionWebhookHandler) verifyProviderSignature(
 	if !verifyHMACSHA256(secret, body, signature) {
 		return fmt.Errorf("invalid webhook signature")
 	}
+	if provider == "linear" {
+		if err := validateLinearWebhookTimestamp(body, time.Now()); err != nil {
+			return err
+		}
+	}
 
 	return nil
+}
+
+func validateLinearWebhookTimestamp(body []byte, now time.Time) error {
+	var env struct {
+		WebhookTimestamp json.RawMessage `json:"webhookTimestamp"`
+	}
+	if err := json.Unmarshal(body, &env); err != nil {
+		return fmt.Errorf("invalid Linear webhook payload")
+	}
+	if len(env.WebhookTimestamp) == 0 {
+		return fmt.Errorf("missing Linear webhook timestamp")
+	}
+
+	ts, err := parseLinearWebhookTimestamp(env.WebhookTimestamp)
+	if err != nil {
+		return err
+	}
+	skew := now.Sub(ts)
+	if skew < 0 {
+		skew = -skew
+	}
+	if skew > linearWebhookTimestampSkew {
+		return fmt.Errorf("stale Linear webhook timestamp")
+	}
+	return nil
+}
+
+func parseLinearWebhookTimestamp(raw json.RawMessage) (time.Time, error) {
+	value := strings.TrimSpace(string(raw))
+	if value == "" || value == "null" {
+		return time.Time{}, fmt.Errorf("missing Linear webhook timestamp")
+	}
+	if strings.HasPrefix(value, `"`) {
+		var s string
+		if err := json.Unmarshal(raw, &s); err != nil {
+			return time.Time{}, fmt.Errorf("invalid Linear webhook timestamp")
+		}
+		if parsed, err := time.Parse(time.RFC3339Nano, s); err == nil {
+			return parsed, nil
+		}
+		value = strings.TrimSpace(s)
+	}
+
+	n, err := strconv.ParseInt(value, 10, 64)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("invalid Linear webhook timestamp")
+	}
+	if n > 1_000_000_000_000 {
+		return time.Unix(0, n*int64(time.Millisecond)), nil
+	}
+	return time.Unix(n, 0), nil
 }
 
 // resolveWebhookSecret returns the HMAC secret to verify this delivery

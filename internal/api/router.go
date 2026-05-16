@@ -343,6 +343,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	// uses the same actor=app token the rest of the writes do. Metrics
 	// recorder is shared with linearService.HandleAgentMilestone so a
 	// single OTel meter sees both inbound dispatches and outbound emits.
+	linearAgentSettingsView := db.LinearAgentSettingsView{Orgs: orgStore}
 	linearAgentDispatcher := handlers.NewLinearAgentDispatcher(handlers.LinearAgentDispatcherConfig{
 		Logger:         logger,
 		AgentSessions:  linearService.AgentSessionStore(),
@@ -350,17 +351,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 		Jobs:           jobStore,
 		Metrics:        linearAgentMetrics,
 		FeatureEnabled: cfg.LinearAgentEnabled,
-		SettingsLoader: func(ctx context.Context, orgID uuid.UUID) (models.LinearAgentSettings, error) {
-			org, err := orgStore.GetByID(ctx, orgID)
-			if err != nil {
-				return models.LinearAgentSettings{}, err
-			}
-			parsed, err := models.ParseOrgSettings(org.Settings)
-			if err != nil {
-				return models.LinearAgentSettings{}, err
-			}
-			return parsed.LinearAgent, nil
-		},
+		SettingsLoader: linearAgentSettingsView.LoadAgentSettings,
 		ClientForOrg: func(ctx context.Context, orgID uuid.UUID) (linear.Client, error) {
 			return linearService.ClientForOrg(ctx, orgID)
 		},
@@ -374,7 +365,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	linearAgentSettingsHandler := handlers.NewLinearAgentSettingsHandler(handlers.LinearAgentSettingsConfig{
 		Mappings:      db.NewLinearTeamRepoMappingStore(pool),
 		Credentials:   credentialStore,
-		Settings:      linearAgentSettingsLoader{orgStore: orgStore},
+		Settings:      linearAgentSettingsView,
 		AgentSessions: linearService.AgentSessionStore(),
 		Activities:    linearService.AgentActivityStore(),
 		Orgs:          linearAgentOrgWriterAdapter{orgs: orgStore},
@@ -1147,30 +1138,6 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	r.Mount("/", apiRoutes)
 
 	return r, gwSrv, recycleWorker, inspectorCloser, previewManager, nil
-}
-
-// linearAgentSettingsLoader adapts an OrganizationStore into the narrow
-// settings-loader interface the linear-agent dispatcher and settings
-// handler expect. Pulled out here rather than into a separate file
-// because it's pure router-side wiring; nothing else in the codebase
-// needs to construct one.
-type linearAgentSettingsLoader struct {
-	orgStore *db.OrganizationStore
-}
-
-func (l linearAgentSettingsLoader) LoadAgentSettings(ctx context.Context, orgID uuid.UUID) (models.LinearAgentSettings, error) {
-	if l.orgStore == nil {
-		return models.LinearAgentSettings{}, nil
-	}
-	org, err := l.orgStore.GetByID(ctx, orgID)
-	if err != nil {
-		return models.LinearAgentSettings{}, err
-	}
-	parsed, err := models.ParseOrgSettings(org.Settings)
-	if err != nil {
-		return models.LinearAgentSettings{}, err
-	}
-	return parsed.LinearAgent, nil
 }
 
 // linearAgentOrgWriterAdapter persists the per-org Enabled flag by

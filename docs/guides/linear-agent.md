@@ -111,9 +111,10 @@ The agent ships behind a process-wide kill switch in addition to the
 per-org `enabled` toggle:
 
 - `LINEAR_AGENT_ENABLED=true` (env var, default `false`) — must be true
-  on every server / worker node for the feature to handle webhooks. Flip
-  to `false` to **stop accepting new agent sessions** across every org
-  in the deployment, without touching per-org state.
+  on API nodes that receive Linear webhooks for the feature to accept
+  new inbound AgentSessions. Flip to `false` to **stop accepting new
+  agent sessions** across every org in the deployment, without touching
+  per-org state.
 - **Drain semantics**: turning the kill switch off only gates new
   inbound webhooks at the dispatcher. AgentSessions that already have a
   `linear_agent_sessions` row continue to fan out milestone activities
