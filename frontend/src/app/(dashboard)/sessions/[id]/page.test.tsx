@@ -188,11 +188,11 @@ describe('SessionDetailPage', () => {
     expect(link).toHaveAttribute('rel', 'noopener noreferrer');
   });
 
-  it('does not show a dedicated self-review button in session detail', async () => {
+  it('shows a disabled review-loop action when no session snapshot is available', async () => {
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
 
     await screen.findAllByText('Fixed TypeError by adding null check');
-    expect(screen.queryByRole('button', { name: 'Review' })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Review' })).toBeDisabled();
     expect(screen.queryByRole('button', { name: 'Code review' })).not.toBeInTheDocument();
   });
 

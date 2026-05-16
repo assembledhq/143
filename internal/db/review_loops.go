@@ -24,6 +24,7 @@ const reviewLoopSelectColumns = `id, org_id, session_id, automation_run_id, thre
 	bypassed_by_user_id, bypass_reason, loop_start_checkpoint_key, latest_checkpoint_key,
 	latest_summary, started_by_user_id, started_at, completed_at`
 
+// #nosec G101 -- these are database column names; *_message_id fields are not credentials.
 const reviewLoopPassSelectColumns = `id, org_id, loop_id, session_id, pass_index,
 	review_message_id, decision_message_id, fix_message_id, status, agent_decision,
 	review_output, fix_summary, review_started_at, review_completed_at,
