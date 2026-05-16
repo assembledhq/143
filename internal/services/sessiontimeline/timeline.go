@@ -17,6 +17,7 @@ const (
 type logMetadata struct {
 	Type                  string `json:"type"`
 	DuplicateOfTranscript bool   `json:"duplicate_of_transcript"`
+	Visibility            string `json:"visibility"`
 }
 
 type transcriptIdentity struct {
@@ -135,7 +136,7 @@ func Compose(messages []models.SessionMessage, logs []models.SessionLog, humanIn
 		}
 
 		switch {
-		case log.Level == "error":
+		case log.Level == "error" && !isHiddenLog(log):
 			entries = append(entries, models.SessionTimelineEntry{
 				Kind:      models.SessionTimelineKindError,
 				CreatedAt: log.Timestamp,
@@ -244,6 +245,10 @@ func isVisibleAssistantOutput(log models.SessionLog) bool {
 
 func metadataType(log *models.SessionLog) string {
 	return parseMetadata(log.Metadata).Type
+}
+
+func isHiddenLog(log *models.SessionLog) bool {
+	return parseMetadata(log.Metadata).Visibility == "hidden"
 }
 
 func parseMetadata(raw json.RawMessage) logMetadata {
