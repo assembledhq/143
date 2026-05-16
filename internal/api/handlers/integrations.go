@@ -1335,6 +1335,9 @@ func (h *IntegrationHandler) githubInstallationLink(ctx context.Context, orgID u
 		if installationID > 0 && cfg.InstallationID != installationID {
 			continue
 		}
+		if !h.githubInstallationAllowsConfigFallback(ctx, cfg.InstallationID) {
+			continue
+		}
 		if cfg.AccountLogin == "" {
 			cfg.AccountLogin = "unknown"
 		}
@@ -1362,6 +1365,20 @@ func (h *IntegrationHandler) githubInstallationLink(ctx context.Context, orgID u
 	}
 
 	return models.GitHubInstallationOrgLink{}, false
+}
+
+func (h *IntegrationHandler) githubInstallationAllowsConfigFallback(ctx context.Context, installationID int64) bool {
+	if h.githubInstallations == nil || installationID == 0 {
+		return true
+	}
+	installation, err := h.githubInstallations.GetByInstallationID(ctx, installationID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return true
+	}
+	if err != nil {
+		return false
+	}
+	return installation.Status == "" || installation.Status == "active"
 }
 
 func (h *IntegrationHandler) userIsAdminInOrg(ctx context.Context, userID, orgID uuid.UUID) bool {

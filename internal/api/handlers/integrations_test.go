@@ -1913,6 +1913,45 @@ func TestIntegrationHandler_GitHubInstallationLink_FallsBackToRepoInstallationFo
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+func TestIntegrationHandler_GitHubInstallationLink_DoesNotFallBackToDeletedInstallationConfig(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should initialize")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	integrationID := uuid.New()
+	now := time.Now().UTC()
+	handler := NewIntegrationHandler(
+		db.NewIntegrationStore(mock),
+		nil,
+		"",
+		"",
+		"http://localhost:8080",
+		"http://localhost:3000",
+	)
+	handler.githubInstallations = db.NewGitHubInstallationStore(mock)
+
+	mock.ExpectQuery("SELECT l.id, l.org_id, l.integration_id, l.installation_id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "org_id", "integration_id", "installation_id", "account_login", "linked_by_user_id", "status", "created_at", "updated_at"}))
+	mock.ExpectQuery("SELECT id, org_id, provider, config, status, last_synced_at, created_at FROM integrations WHERE org_id = @org_id AND provider = @provider AND status = 'active'").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "org_id", "provider", "config", "status", "last_synced_at", "created_at"}).
+			AddRow(integrationID, orgID, "github", json.RawMessage(`{"installation_id":12345,"account_login":"acme"}`), "active", nil, now))
+	mock.ExpectQuery("SELECT installation_id, account_id, account_login, account_type, repository_selection, status, created_at, updated_at").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"installation_id", "account_id", "account_login", "account_type", "repository_selection", "status", "created_at", "updated_at"}).
+			AddRow(int64(12345), int64(987), "acme", nil, nil, "deleted", now, now))
+
+	link, ok := handler.githubInstallationLink(context.Background(), orgID, 12345)
+
+	require.False(t, ok, "githubInstallationLink should not synthesize a link for a deleted GitHub installation")
+	require.Equal(t, models.GitHubInstallationOrgLink{}, link, "deleted installation fallback should return an empty link")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func TestIntegrationHandler_ClaimGitHubInstallationRepositories_MapsUniqueOwnershipRaceToConflict(t *testing.T) {
 	t.Parallel()
 
