@@ -67,6 +67,111 @@ func TestExtractPreviewID(t *testing.T) {
 	}
 }
 
+func TestShouldRecordPreviewLastPath(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		method  string
+		path    string
+		headers map[string]string
+		want    bool
+	}{
+		{
+			name:   "records document navigation from fetch metadata",
+			method: http.MethodGet,
+			path:   "/login",
+			headers: map[string]string{
+				"Sec-Fetch-Dest": "document",
+			},
+			want: true,
+		},
+		{
+			name:   "records document navigation from accept header",
+			method: http.MethodGet,
+			path:   "/sessions/abc",
+			headers: map[string]string{
+				"Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+			},
+			want: true,
+		},
+		{
+			name:   "skips root",
+			method: http.MethodGet,
+			path:   "/",
+			headers: map[string]string{
+				"Sec-Fetch-Dest": "document",
+			},
+			want: false,
+		},
+		{
+			name:   "skips platform heartbeat",
+			method: http.MethodGet,
+			path:   "/__143_heartbeat",
+			headers: map[string]string{
+				"Sec-Fetch-Dest": "empty",
+			},
+			want: false,
+		},
+		{
+			name:   "skips framework event stream",
+			method: http.MethodGet,
+			path:   "/framework-hmr",
+			headers: map[string]string{
+				"Accept": "text/event-stream",
+			},
+			want: false,
+		},
+		{
+			name:   "skips script asset",
+			method: http.MethodGet,
+			path:   "/assets/app.js",
+			headers: map[string]string{
+				"Sec-Fetch-Dest": "script",
+			},
+			want: false,
+		},
+		{
+			name:   "skips json fetch",
+			method: http.MethodGet,
+			path:   "/rpc/auth/me",
+			headers: map[string]string{
+				"Accept": "application/json",
+			},
+			want: false,
+		},
+		{
+			name:   "skips image asset",
+			method: http.MethodGet,
+			path:   "/favicon.ico",
+			headers: map[string]string{
+				"Sec-Fetch-Dest": "image",
+			},
+			want: false,
+		},
+		{
+			name:   "skips non-get request",
+			method: http.MethodPost,
+			path:   "/login",
+			headers: map[string]string{
+				"Accept": "text/html",
+			},
+			want: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			req := httptest.NewRequest(tt.method, tt.path, nil)
+			for key, value := range tt.headers {
+				req.Header.Set(key, value)
+			}
+			require.Equal(t, tt.want, shouldRecordPreviewLastPath(req), "gateway should only preserve user navigation paths for preview restore")
+		})
+	}
+}
+
 func TestEncodeDecode_CookieValue(t *testing.T) {
 	t.Parallel()
 	secret := []byte("test-secret-key-for-hmac")
