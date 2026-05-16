@@ -1096,6 +1096,48 @@ func TestWithProviderStateLockedUsesTransaction(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+func TestWithProviderStateLockedDuplicateStateEventStillCommits(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	issueID := uuid.New()
+	linkID := uuid.New()
+	mock.ExpectBegin()
+	mock.ExpectExec("INSERT INTO session_issue_link_provider_state").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("INSERT", 1))
+	mock.ExpectExec("SELECT 1 FROM session_issue_link_provider_state").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("SELECT", 1))
+	mock.ExpectQuery("SELECT state FROM session_issue_link_provider_state").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"state"}).AddRow([]byte(`{"identifier":"ACS-1"}`)))
+	mock.ExpectExec("INSERT INTO session_issue_link_state_events[\\s\\S]+ON CONFLICT \\(session_id, issue_id, event_kind\\) DO NOTHING").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("INSERT", 0))
+	mock.ExpectCommit()
+
+	svc := &Service{pool: mock, providerState: newFakeProviderStateStore(), stateEvents: newFakeStateEventStore()}
+	err = svc.withProviderStateLocked(context.Background(), orgID, linkID, func(ctx context.Context, _ providerStateStore, txEvents stateEventStore, _ db.LinearProviderState) error {
+		err := txEvents.Insert(ctx, orgID, db.LinearStateEventInput{
+			SessionID:      sessionID,
+			IssueID:        issueID,
+			EventKind:      db.LinearStateEventStarted,
+			TransitionFrom: "Backlog",
+			TransitionTo:   "In Progress",
+		})
+		require.ErrorIs(t, err, db.ErrLinearStateEventExists, "duplicate fire-once events should surface as the idempotent sentinel")
+		return nil
+	})
+	require.NoError(t, err, "duplicate state event handling should not abort the provider-state transaction")
+	require.NoError(t, mock.ExpectationsWereMet(), "duplicate event no-op must still allow the outer transaction to commit")
+}
+
 func TestServiceProviderStateSnapshotAndNotifier(t *testing.T) {
 	t.Parallel()
 
