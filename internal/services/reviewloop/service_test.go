@@ -22,9 +22,10 @@ func TestService_StartCreatesReviewThreadLoopPassAndMessage(t *testing.T) {
 	userID := uuid.New()
 	threadID := uuid.New()
 	messageID := int64(77)
+	snapshotKey := "snapshots/review-loop-start.tar.zst"
 	store := &fakeReviewLoopStore{}
 	threads := &fakeThreadService{
-		session: models.Session{ID: sessionID, OrgID: orgID, AgentType: models.AgentTypeClaudeCode, Status: string(models.SessionStatusIdle), SandboxState: string(models.SandboxStateSnapshotted)},
+		session: models.Session{ID: sessionID, OrgID: orgID, AgentType: models.AgentTypeClaudeCode, Status: string(models.SessionStatusIdle), SandboxState: string(models.SandboxStateSnapshotted), SnapshotKey: &snapshotKey},
 		thread:  models.SessionThread{ID: threadID, SessionID: sessionID, OrgID: orgID, AgentType: models.AgentTypeClaudeCode, Label: "Claude Review"},
 		message: models.SessionMessage{ID: messageID, SessionID: sessionID, OrgID: orgID, ThreadID: &threadID},
 	}
@@ -38,6 +39,7 @@ func TestService_StartCreatesReviewThreadLoopPassAndMessage(t *testing.T) {
 	require.NoError(t, err, "Start should create the review loop")
 	require.Equal(t, threadID, *loop.ThreadID, "Start should bind the loop to the review thread")
 	require.Equal(t, models.AgentTypeClaudeCode, loop.AgentType, "Start should default to the session agent")
+	require.Equal(t, &snapshotKey, loop.LoopStartCheckpointKey, "Start should record the snapshot checkpoint for the review loop")
 	require.Len(t, store.createdPasses, 1, "Start should create the first pass")
 	require.Equal(t, models.ReviewLoopPassStatusReviewing, store.createdPasses[0].Status, "first pass should start in reviewing state")
 	require.Equal(t, messageID, store.reviewMessageIDs[0], "Start should persist the review message id on the pass")
@@ -52,6 +54,7 @@ func TestService_StartRejectsExistingRunningLoop(t *testing.T) {
 	orgID := uuid.New()
 	sessionID := uuid.New()
 	threadID := uuid.New()
+	snapshotKey := "snapshots/review-loop-existing.tar.zst"
 	store := &fakeReviewLoopStore{
 		runningLoopBySession: models.SessionReviewLoop{
 			ID:        uuid.New(),
@@ -64,7 +67,7 @@ func TestService_StartRejectsExistingRunningLoop(t *testing.T) {
 		},
 	}
 	threads := &fakeThreadService{
-		session: models.Session{ID: sessionID, OrgID: orgID, AgentType: models.AgentTypeCodex, Status: string(models.SessionStatusIdle), SandboxState: string(models.SandboxStateSnapshotted)},
+		session: models.Session{ID: sessionID, OrgID: orgID, AgentType: models.AgentTypeCodex, Status: string(models.SessionStatusIdle), SandboxState: string(models.SandboxStateSnapshotted), SnapshotKey: &snapshotKey},
 	}
 	svc := NewService(store, threads)
 
@@ -77,6 +80,28 @@ func TestService_StartRejectsExistingRunningLoop(t *testing.T) {
 	require.Nil(t, loop, "Start should not return a loop when another loop is running")
 	require.Empty(t, store.createdLoops, "Start should not create another loop row")
 	require.Empty(t, threads.created, "Start should not create an orphan review thread")
+}
+
+func TestService_StartRejectsMissingSnapshot(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	store := &fakeReviewLoopStore{}
+	threads := &fakeThreadService{
+		session: models.Session{ID: sessionID, OrgID: orgID, AgentType: models.AgentTypeCodex, Status: string(models.SessionStatusCompleted), SandboxState: string(models.SandboxStateSnapshotted)},
+	}
+	svc := NewService(store, threads)
+
+	loop, err := svc.Start(context.Background(), orgID, sessionID, StartReviewLoopRequest{
+		MaxPasses: 2,
+		Source:    models.ReviewLoopSourceManual,
+	})
+
+	require.ErrorIs(t, err, ErrSessionSnapshotExpired, "Start should reject sessions without a restorable snapshot")
+	require.Nil(t, loop, "Start should not return a loop without a snapshot")
+	require.Empty(t, store.createdLoops, "Start should not create a loop row without a snapshot")
+	require.Empty(t, threads.created, "Start should not create a review thread without a snapshot")
 }
 
 func TestService_OnThreadTurnCompleteDirtyThenClean(t *testing.T) {
@@ -241,6 +266,36 @@ func TestService_OnThreadTurnCompleteAutomationPassLimitEnqueuesOpenPRGate(t *te
 	require.NoError(t, err, "pass-limit automation review should complete the terminal write")
 	require.Equal(t, loopID, store.needsHumanLoopID, "pass-limit automation review should mark the loop for human decision")
 	require.Equal(t, []string{"needs_human_open_pr"}, store.events, "pass-limit automation review should durably queue the PR gate with the terminal state")
+}
+
+func TestParseDecisionRequiresExactSentinel(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		summary   string
+		expected  models.ReviewLoopDecision
+		expectErr bool
+	}{
+		{name: "clean", summary: " REVIEW_CLEAN\n", expected: models.ReviewLoopDecisionClean},
+		{name: "needs fix", summary: "\nNEEDS_FIX_PASS ", expected: models.ReviewLoopDecisionNeedsFix},
+		{name: "ambiguous", summary: "NEEDS_FIX_PASS, not REVIEW_CLEAN", expectErr: true},
+		{name: "explanatory", summary: "REVIEW_CLEAN because all checks passed", expectErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			got, err := parseDecision(tt.summary)
+			if tt.expectErr {
+				require.ErrorIs(t, err, ErrUnrecognizedDecision, "parseDecision should reject non-exact or ambiguous decision text")
+				return
+			}
+			require.NoError(t, err, "parseDecision should accept exact sentinel text")
+			require.Equal(t, tt.expected, got, "parseDecision should return the expected sentinel")
+		})
+	}
 }
 
 type fakeReviewLoopStore struct {

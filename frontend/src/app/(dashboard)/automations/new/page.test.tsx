@@ -337,6 +337,72 @@ describe("NewAutomationPage", () => {
     });
   }, 20000);
 
+  it("submits pre-PR review disabled when the default agent does not support native review", async () => {
+    const user = userEvent.setup();
+    let requestBody: Record<string, unknown> | null = null;
+
+    server.use(
+      http.get("*/api/v1/settings", () => HttpResponse.json({
+        data: {
+          id: "org-1",
+          name: "Test Org",
+          settings: { default_agent_type: "gemini_cli" },
+        },
+      })),
+      http.get("*/api/v1/settings/credentials/resolved", () => HttpResponse.json({
+        data: [],
+        meta: {},
+      })),
+      http.get("*/api/v1/settings/credentials/team", () => HttpResponse.json({
+        data: [],
+        meta: {},
+      })),
+      http.get("*/api/v1/settings/coding-auths", () => HttpResponse.json({
+        data: [],
+        meta: {},
+      })),
+      http.get("*/api/v1/coding-credentials*", () => HttpResponse.json({
+        data: [],
+        meta: {},
+      })),
+      http.get("*/api/v1/repositories", () => HttpResponse.json({
+        data: [
+          {
+            id: "repo-1",
+            org_id: "org-1",
+            integration_id: "int-1",
+            github_id: 1,
+            full_name: "acme/repo",
+            default_branch: "main",
+            private: false,
+            clone_url: "https://github.com/acme/repo.git",
+            installation_id: 10,
+            status: "active",
+            settings: {},
+            created_at: "2026-03-05T12:00:00Z",
+            updated_at: "2026-03-05T12:00:00Z",
+          },
+        ],
+        meta: {},
+      })),
+      http.post("*/api/v1/automations", async ({ request }) => {
+        requestBody = await request.json() as Record<string, unknown>;
+        return HttpResponse.json({ data: { id: "auto-1" } });
+      }),
+    );
+
+    renderWithProviders(<NewAutomationPage />);
+
+    await waitFor(() => {
+      expect(screen.getByDisplayValue("Security sweep")).toBeInTheDocument();
+    });
+    await user.click(screen.getByRole("button", { name: "Create automation" }));
+
+    await waitFor(() => {
+      expect(requestBody).toMatchObject({ pre_pr_review_loops: 0 });
+    });
+  });
+
   it("submits a personal automation identity scope when selected", async () => {
     const user = userEvent.setup();
     let requestBody: Record<string, unknown> | null = null;

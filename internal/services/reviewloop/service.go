@@ -114,6 +114,9 @@ func (s *Service) Start(ctx context.Context, orgID, sessionID uuid.UUID, req Sta
 	if session.SandboxState == string(models.SandboxStateDestroyed) {
 		return nil, ErrSessionSnapshotExpired
 	}
+	if session.SnapshotKey == nil || strings.TrimSpace(*session.SnapshotKey) == "" {
+		return nil, ErrSessionSnapshotExpired
+	}
 	agentType := req.AgentType
 	if agentType == "" {
 		agentType = session.AgentType
@@ -320,10 +323,10 @@ func (s *Service) sendPlain(ctx context.Context, loop models.SessionReviewLoop, 
 }
 
 func parseDecision(summary string) (models.ReviewLoopDecision, error) {
-	switch {
-	case strings.Contains(summary, string(models.ReviewLoopDecisionClean)):
+	switch strings.TrimSpace(summary) {
+	case string(models.ReviewLoopDecisionClean):
 		return models.ReviewLoopDecisionClean, nil
-	case strings.Contains(summary, string(models.ReviewLoopDecisionNeedsFix)):
+	case string(models.ReviewLoopDecisionNeedsFix):
 		return models.ReviewLoopDecisionNeedsFix, nil
 	default:
 		return "", ErrUnrecognizedDecision

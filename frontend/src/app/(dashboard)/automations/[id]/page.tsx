@@ -99,6 +99,14 @@ function SettingsTab({ automation, canManage }: { automation: Automation; canMan
   const effectiveAgentType = model
     ? agentTypeForModel(model) ?? automation.agent_type ?? defaultAgentType
     : automation.agent_type ?? defaultAgentType;
+  const supportsNativeReviewLoop = effectiveAgentType === "codex" || effectiveAgentType === "claude_code";
+  const effectivePrePRReviewLoops = supportsNativeReviewLoop ? prePRReviewLoops : 0;
+  let prePRReviewDescription = "Off for agents without native review support.";
+  if (supportsNativeReviewLoop) {
+    prePRReviewDescription = effectivePrePRReviewLoops === 0
+      ? "Off"
+      : "Runs the coding agent's review/fix loop before opening a PR.";
+  }
   const showReasoningSelector = supportsReasoningEffort(effectiveAgentType);
   const reasoningOptions = getCodingAgentReasoningOptions(effectiveAgentType);
   const goalLength = automationGoalLengthState(goal);
@@ -117,7 +125,7 @@ function SettingsTab({ automation, canManage }: { automation: Automation; canMan
         timezone,
         model: model ?? "",
         identity_scope: identityScope,
-        pre_pr_review_loops: prePRReviewLoops,
+        pre_pr_review_loops: effectivePrePRReviewLoops,
         reasoning_effort: showReasoningSelector && reasoningEffort ? reasoningEffort : "",
         base_branch: baseBranch.trim() || undefined,
       }),
@@ -307,7 +315,7 @@ function SettingsTab({ automation, canManage }: { automation: Automation; canMan
             size="icon"
             aria-label="Decrease review passes"
             onClick={() => setPrePRReviewLoops((value) => Math.max(0, value - 1))}
-            disabled={!canManage}
+            disabled={!canManage || !supportsNativeReviewLoop}
           >
             <Minus className="h-4 w-4" />
           </Button>
@@ -317,12 +325,12 @@ function SettingsTab({ automation, canManage }: { automation: Automation; canMan
             type="number"
             min={0}
             max={5}
-            value={prePRReviewLoops}
+            value={effectivePrePRReviewLoops}
             onChange={(e) => {
               const parsed = parseInt(e.target.value, 10);
               setPrePRReviewLoops(Number.isNaN(parsed) ? 0 : Math.min(5, Math.max(0, parsed)));
             }}
-            disabled={!canManage}
+            disabled={!canManage || !supportsNativeReviewLoop}
             className="w-20 text-center"
           />
           <Button
@@ -331,13 +339,13 @@ function SettingsTab({ automation, canManage }: { automation: Automation; canMan
             size="icon"
             aria-label="Increase review passes"
             onClick={() => setPrePRReviewLoops((value) => Math.min(5, value + 1))}
-            disabled={!canManage}
+            disabled={!canManage || !supportsNativeReviewLoop}
           >
             <Plus className="h-4 w-4" />
           </Button>
         </div>
         <p className="text-xs text-muted-foreground">
-          {prePRReviewLoops === 0 ? "Off" : "Runs the coding agent's review/fix loop before opening a PR."}
+          {prePRReviewDescription}
         </p>
       </div>
       {canManage && (
