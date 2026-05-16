@@ -192,6 +192,33 @@ describe('TeamSettingsPage', () => {
     expect(screen.getByRole('button', { name: 'Revoke' })).toBeInTheDocument();
   });
 
+  it('labels expired invitations so admins know the invitee cannot accept them', async () => {
+    listInvitationsMock.mockResolvedValueOnce({
+      data: [
+        {
+          id: 'inv-expired',
+          email: null,
+          github_username: 'malfrine-assembled',
+          acceptance_method: 'github',
+          role: 'member',
+          status: 'expired',
+          invited_by: { id: 'user-1', name: 'Admin User' },
+          expires_at: '2026-02-01T00:00:00Z',
+          created_at: '2026-01-01T00:00:00Z',
+        },
+      ],
+      meta: {},
+    });
+
+    renderWithProviders(<TeamSettingsPage />);
+
+    expect(await screen.findByText('@malfrine-assembled')).toBeInTheDocument();
+    expect(screen.getByText('Expired')).toBeInTheDocument();
+    expect(
+      screen.getByText('The invitee will not see this invite. Revoke it and send a new one.'),
+    ).toBeInTheDocument();
+  });
+
   it('renders compact member metadata labels for mobile layouts', async () => {
     renderWithProviders(<TeamSettingsPage />);
 
