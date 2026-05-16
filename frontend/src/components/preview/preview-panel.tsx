@@ -34,7 +34,7 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { cn } from "@/lib/utils";
+import { cn, formatTimeAgo } from "@/lib/utils";
 import { api } from "@/lib/api";
 import {
   PREVIEW_ERROR_CODES,
@@ -368,6 +368,10 @@ export function PreviewPanel({
     [rawInfrastructure],
   );
   const status = instance?.status;
+  const lastPreviewStoppedAt =
+    status === "stopped" || status === "expired"
+      ? instance?.stopped_at || instance?.updated_at
+      : undefined;
   const isActive =
     status === "ready" ||
     status === "partially_ready" ||
@@ -1140,6 +1144,13 @@ export function PreviewPanel({
             <p className="text-xs text-muted-foreground">
               Start a preview to see live changes from the agent. Note that it can take a few minutes for the environment to finish booting.
             </p>
+            {instance?.created_at && lastPreviewStoppedAt && (
+              <p className="text-xs text-muted-foreground">
+                Started {formatTimeAgo(instance.created_at)}
+                <span aria-hidden="true" className="mx-1 text-muted-foreground/50">·</span>
+                Stopped {formatTimeAgo(lastPreviewStoppedAt)}
+              </p>
+            )}
           </div>
           <Button
             size="sm"
