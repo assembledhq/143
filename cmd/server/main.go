@@ -1039,6 +1039,15 @@ func buildServices(
 	identityResolver.SetIntegrations(integrationStore)
 	var sandboxAuthServer *sandboxauth.Server
 	if cfg.SandboxAuthSocketDir != "" {
+		if cfg.Env == "production" {
+			if err := sandboxauth.ValidateSocketDirForStartup(cfg.SandboxAuthSocketDir); err != nil {
+				logger.Error().
+					Err(err).
+					Str("socket_dir", cfg.SandboxAuthSocketDir).
+					Msg("sandbox auth: socket directory preflight failed — worker services disabled")
+				return nil
+			}
+		}
 		sandboxAuthServer = sandboxauth.NewServer(identityResolver, cfg.SandboxAuthSocketDir, logger)
 		logger.Info().
 			Str("socket_dir", cfg.SandboxAuthSocketDir).
