@@ -3,6 +3,8 @@ package worker
 import (
 	"context"
 	"errors"
+	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -123,4 +125,18 @@ func TestCreateAndAttachLinearAgentSessionUsesSingleTransaction(t *testing.T) {
 		require.Contains(t, err.Error(), "attach session", "error should identify the bridge attach step")
 		require.NoError(t, mock.ExpectationsWereMet(), "failed attach should roll back the uncommitted session rows")
 	})
+}
+
+func TestHandleLinearAgentCreatedReemitsBootstrapBeforeIssueFetch(t *testing.T) {
+	t.Parallel()
+
+	src, err := os.ReadFile("handlers_linear_agent_created.go")
+	require.NoError(t, err, "created handler source should be readable")
+
+	body := string(src)
+	emit := strings.Index(body, "emitLinearAgentBootstrap(")
+	fetch := strings.Index(body, "client.FetchIssue(ctx, issueIdent)")
+	require.NotEqual(t, -1, emit, "created handler should re-emit the dispatcher bootstrap activity")
+	require.NotEqual(t, -1, fetch, "created handler should still fetch the live Linear issue")
+	require.Less(t, emit, fetch, "worker bootstrap re-emit should happen before the potentially slower live issue fetch")
 }

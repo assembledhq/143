@@ -187,9 +187,9 @@ type Services struct {
 	TitleService    *services.SessionTitleService // nil-safe: session title regeneration
 	Linear          *linear.Service               // nil-safe: Linear session-linking disabled if nil
 	// LinearAgentDeps wires the inbound agent feature (assign / @-mention
-	// triggers a 143 session). Nil when the feature flag is off or the
-	// agent stores aren't constructed; the worker simply won't register
-	// the linear_agent_event handler in that case.
+	// triggers a 143 session). It is intentionally independent of the
+	// dispatcher kill switch so queued linear_agent_event jobs continue to
+	// drain when LINEAR_AGENT_ENABLED is turned off.
 	LinearAgentDeps *LinearAgentEventHandlerDeps
 	// EvalBatchStreams publishes lightweight pub/sub signals on every batch
 	// or run state transition so the eval-batch detail page can replace its

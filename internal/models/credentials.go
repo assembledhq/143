@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -479,20 +480,9 @@ func (c LinearConfig) HasAgentScopes() bool {
 // uses commas, but the OAuth spec leaves the separator implementation-defined
 // and other providers use spaces; accepting both keeps parsing robust.
 func splitScopeString(scope string) []string {
-	out := make([]string, 0, 4)
-	start := 0
-	for i := 0; i < len(scope); i++ {
-		if scope[i] == ',' || scope[i] == ' ' {
-			if start < i {
-				out = append(out, scope[start:i])
-			}
-			start = i + 1
-		}
-	}
-	if start < len(scope) {
-		out = append(out, scope[start:])
-	}
-	return out
+	return strings.FieldsFunc(scope, func(r rune) bool {
+		return r == ',' || r == ' '
+	})
 }
 
 func (c SlackConfig) Validate() error {

@@ -61,9 +61,9 @@ type AgentMilestoneActivity struct {
 func MilestoneActivity(event MilestoneEvent, prNumber int) (AgentMilestoneActivity, bool) {
 	switch event {
 	case MilestoneLinked:
-		// Suppressed — the dispatcher already emitted a "Reading
-		// {KEY}…" bootstrap thought to satisfy the 10s SLA. A second
-		// "Linked" thought would be redundant noise.
+		// Suppressed — the dispatcher/worker bootstrap path already
+		// emitted a "Reading {KEY}…" thought. A second "Linked" thought
+		// would be redundant noise.
 		return AgentMilestoneActivity{}, false
 
 	case MilestoneStarted:
@@ -120,10 +120,11 @@ func MilestoneActivity(event MilestoneEvent, prNumber int) (AgentMilestoneActivi
 	return AgentMilestoneActivity{}, false
 }
 
-// BootstrapActivity is the very first activity emitted by the dispatcher on
-// a `created` AgentSessionEvent. Emitting from the dispatcher (rather than
-// the worker) is what gives us the 10s first-activity SLA even when
-// run_agent is queued behind a concurrency cap.
+// BootstrapActivity is the very first activity emitted for a `created`
+// AgentSessionEvent. The dispatcher emits it to satisfy Linear's 10s
+// first-activity SLA; the worker re-emits with the same idem key so a
+// transient dispatcher-side Linear write failure can recover before the
+// live issue fetch or run_agent enqueue path does more work.
 //
 // IdemKey "bootstrap:opened" is single-fire across the whole AgentSession
 // lifecycle; the second-arrival writer short-circuits.
