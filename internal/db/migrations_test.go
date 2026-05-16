@@ -141,3 +141,14 @@ func TestAutomationsGoalLengthExpandMigrationRaisesConstraint(t *testing.T) {
 	require.Contains(t, upSQL, "char_length(goal) BETWEEN 1 AND 64000",
 		"up migration should raise the automation goal cap to 64000 characters")
 }
+
+func TestReviewLoopMigrationDoesNotReferenceSessionMessagesByIDOnly(t *testing.T) {
+	t.Parallel()
+
+	body, err := os.ReadFile("../../migrations/000130_review_agent_loops.up.sql")
+	require.NoError(t, err, "test should read the review loop migration")
+
+	sql := string(body)
+	require.NotContains(t, sql, "REFERENCES session_messages(id)",
+		"session_messages is partitioned with primary key (id, created_at), so review loop message pointers must not FK to id alone")
+}

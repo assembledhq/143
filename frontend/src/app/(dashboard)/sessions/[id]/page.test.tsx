@@ -272,6 +272,70 @@ describe('SessionDetailPage', () => {
     });
   });
 
+  it('opens the review loop in its returned agent tab', async () => {
+    const user = userEvent.setup();
+    const existingThread: SessionThread = {
+      id: 'thread-main',
+      session_id: 'session-98765432-abcd-ef01',
+      org_id: 'org-1',
+      agent_type: 'codex',
+      label: 'Codex 1',
+      status: 'completed',
+      current_turn: 1,
+      created_at: '2026-02-17T07:00:00Z',
+      cost_cents: 0,
+      pending_message_count: 0,
+    };
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({
+          data: {
+            ...mockSessions[1],
+            status: 'completed',
+            snapshot_key: 'snapshot-manual-review',
+            sandbox_state: 'snapshotted',
+            threads: [existingThread],
+          },
+        } satisfies SingleResponse<Session>);
+      }),
+      http.get('/api/v1/sessions/:id/review-loops', () => {
+        return HttpResponse.json({
+          data: [] as SessionReviewLoop[],
+          meta: {},
+        } satisfies ListResponse<SessionReviewLoop>);
+      }),
+      http.post('/api/v1/sessions/:id/review-loops', async ({ request, params }) => {
+        const body = await request.json() as { max_passes: number };
+        return HttpResponse.json({
+          data: {
+            id: 'review-loop-new-thread',
+            org_id: 'org-1',
+            session_id: params.id as string,
+            thread_id: 'thread-review',
+            status: 'running',
+            source: 'manual',
+            agent_type: 'codex',
+            max_passes: body.max_passes,
+            completed_passes: 0,
+            review_required: false,
+            started_at: '2026-02-17T07:12:00Z',
+          },
+        } satisfies SingleResponse<SessionReviewLoop>, { status: 201 });
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id="session-98765432-abcd-ef01" />);
+
+    expect(await screen.findByText('Codex 1')).toBeInTheDocument();
+
+    await user.click(await screen.findByRole('button', { name: 'Review' }));
+    await user.click(screen.getByRole('button', { name: 'Start review' }));
+
+    const reviewTab = await screen.findByRole('tab', { name: /Codex Review/ });
+    expect(reviewTab).toHaveAttribute('aria-selected', 'true');
+  });
+
   it('does not show a dedicated self-review button for viewers', async () => {
     server.use(
       http.get('/api/v1/auth/me', () => {

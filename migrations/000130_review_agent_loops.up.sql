@@ -55,9 +55,11 @@ CREATE TABLE session_review_loop_passes (
     session_id UUID NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
     pass_index INTEGER NOT NULL,
 
-    review_message_id BIGINT REFERENCES session_messages(id),
-    decision_message_id BIGINT REFERENCES session_messages(id),
-    fix_message_id BIGINT REFERENCES session_messages(id),
+    -- session_messages is partitioned with PRIMARY KEY (id, created_at), so
+    -- these are denormalized pointers rather than id-only foreign keys.
+    review_message_id BIGINT,
+    decision_message_id BIGINT,
+    fix_message_id BIGINT,
     status TEXT NOT NULL,
     agent_decision TEXT,
     review_output TEXT,

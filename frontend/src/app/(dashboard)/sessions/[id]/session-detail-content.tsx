@@ -117,7 +117,7 @@ import {
   readStoredViewedThreadIds,
   writeStoredViewedThreadIds,
 } from "@/lib/session-thread-views";
-import type { ListResponse, Session, SessionDetail, SessionInputCommand, SessionInputReference, SessionLog, SessionMessage, SessionReviewComment, SessionThread, SessionThreadFileEvent, SessionTimelineEntry, User, CodexAuthStatus, PullRequestHealthResponse, SingleResponse } from "@/lib/types";
+import type { ListResponse, Session, SessionDetail, SessionInputCommand, SessionInputReference, SessionLog, SessionMessage, SessionReviewComment, SessionReviewLoop, SessionThread, SessionThreadFileEvent, SessionTimelineEntry, User, CodexAuthStatus, PullRequestHealthResponse, SingleResponse } from "@/lib/types";
 import { AgentTabStrip, computeThreadOverlap } from "./agent-tab-strip";
 import {
   ThreadAttributionFilter,
@@ -277,6 +277,36 @@ export function getPendingEditableThreadUpdate(
 
 export function getInitialComposerSelectedModel(thread: SessionThread): string {
   return thread.model_override ?? "";
+}
+
+function reviewLoopThreadLabel(agentType: string): string {
+  switch (agentType) {
+    case "claude_code":
+      return "Claude Review";
+    case "codex":
+      return "Codex Review";
+    default:
+      return "Review";
+  }
+}
+
+function buildReviewLoopThreadPreview(loop: SessionReviewLoop, session?: Session): PendingThreadPreview | null {
+  if (!loop.thread_id) {
+    return null;
+  }
+  return {
+    id: loop.thread_id,
+    session_id: loop.session_id,
+    org_id: loop.org_id,
+    agent_type: loop.agent_type,
+    label: reviewLoopThreadLabel(loop.agent_type),
+    status: "running",
+    current_turn: 1,
+    created_at: loop.started_at,
+    cost_cents: 0,
+    pending_message_count: 0,
+    model_override: session?.agent_type === loop.agent_type ? session.model_override : undefined,
+  };
 }
 
 export function trackInFlightAgentUpdate(
@@ -2684,7 +2714,7 @@ export function SessionDetailContent({ id }: { id: string }) {
     return [...threads, pendingThreadPreview];
   }, [pendingThreadPreview, threads]);
   const nonInteractiveThreadIds = useMemo(
-    () => new Set(pendingThreadPreview ? [pendingThreadPreview.id] : []),
+    () => new Set(pendingThreadPreview?.id === "__pending-thread__" ? [pendingThreadPreview.id] : []),
     [pendingThreadPreview],
   );
   const [activeThreadId, setActiveThreadId] = useState<string | null>(null);
@@ -2695,8 +2725,8 @@ export function SessionDetailContent({ id }: { id: string }) {
   const [viewedThreadIdsLoadedForSessionId, setViewedThreadIdsLoadedForSessionId] = useState<string | null>(() => (
     typeof window === "undefined" ? null : id
   ));
-  const activeThread = threads.find((thread) => thread.id === activeThreadId) ?? null;
-  const activeThreadIndex = activeThread ? threads.findIndex((thread) => thread.id === activeThread.id) : -1;
+  const activeThread = chromeThreads.find((thread) => thread.id === activeThreadId) ?? null;
+  const activeThreadIndex = activeThread ? chromeThreads.findIndex((thread) => thread.id === activeThread.id) : -1;
   const isActive = session ? !terminalStatuses.has(session.status) : false;
   const isRunning = session?.status === "running";
   const currentTitle = session ? sessionTitle(session) : "";
@@ -2716,7 +2746,7 @@ export function SessionDetailContent({ id }: { id: string }) {
       return;
     }
 
-    if (threads.length === 0) {
+    if (chromeThreads.length === 0) {
       if (activeThreadId !== null) {
         setActiveThreadId(null);
       }
@@ -2745,10 +2775,10 @@ export function SessionDetailContent({ id }: { id: string }) {
       return;
     }
 
-    if (!activeThreadId || !threads.some((thread) => thread.id === activeThreadId)) {
-      setActiveThreadId(threads[0].id);
+    if (!activeThreadId || !chromeThreads.some((thread) => thread.id === activeThreadId)) {
+      setActiveThreadId(chromeThreads[0].id);
     }
-  }, [activeThreadId, hasResolvedInitialThreadSelection, id, isAuthLoading, session, threads, viewerScope]);
+  }, [activeThreadId, chromeThreads, hasResolvedInitialThreadSelection, id, isAuthLoading, session, threads, viewerScope]);
 
   useEffect(() => {
     if (!hasResolvedInitialThreadSelection || !viewerScope || !activeThreadId || typeof window === "undefined") {
@@ -3202,9 +3232,26 @@ export function SessionDetailContent({ id }: { id: string }) {
         model: session?.model_override,
         max_passes: reviewPasses,
       }),
-    onSuccess: () => {
+    onSuccess: (response) => {
       toast.success("Review loop started");
       setReviewPopoverOpen(false);
+      const reviewThread = buildReviewLoopThreadPreview(response.data, session);
+      if (reviewThread) {
+        setPendingThreadPreview(reviewThread);
+        queryClient.setQueryData<SingleResponse<SessionDetail>>(queryKeys.sessions.detail(id), (existing) => {
+          if (!existing) return existing;
+          const existingThreads = existing.data.threads ?? [];
+          return {
+            ...existing,
+            data: {
+              ...existing.data,
+              threads: [...existingThreads.filter((thread) => thread.id !== reviewThread.id), reviewThread],
+            },
+          };
+        });
+        setActiveThreadId(reviewThread.id);
+        setComposerSelectedModel(getInitialComposerSelectedModel(reviewThread));
+      }
       queryClient.invalidateQueries({ queryKey: queryKeys.sessions.reviewLoops(id) });
       queryClient.invalidateQueries({ queryKey: queryKeys.sessions.threads(id) });
       queryClient.invalidateQueries({ queryKey: queryKeys.sessions.detail(id) });
