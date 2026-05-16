@@ -159,6 +159,25 @@ func parseAgentStreamLine(
 			Message:   msg,
 		}
 
+	case isHumanInputEventType(event.Type):
+		req, ok := normalizeGenericHumanInputEvent(line, "")
+		if !ok {
+			logCh <- agent.LogEntry{
+				Timestamp: time.Now(),
+				Level:     "debug",
+				Message:   string(line),
+			}
+			return
+		}
+		result.RequiresHumanInput = true
+		logCh <- agent.LogEntry{
+			Timestamp:  time.Now(),
+			Level:      "human_input",
+			Message:    req.Body,
+			Metadata:   map[string]interface{}{"request_kind": string(req.Kind), "title": req.Title},
+			HumanInput: &req,
+		}
+
 	case event.Type == "result" || event.Type == "usage" ||
 		(cfg.DoneAsResult && event.Type == "done"):
 		content := event.Content

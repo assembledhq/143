@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { buildTimeline, buildTimelineFromResponse } from "./timeline";
+import { buildTimeline, buildTimelineFromResponse, flattenTimelineResponse } from "./timeline";
 import type { SessionMessage, SessionLog } from "./types";
 
 function makeMessage(overrides: Partial<SessionMessage> & { id: number; created_at: string }): SessionMessage {
@@ -225,5 +225,35 @@ describe("buildTimeline", () => {
 
   it("returns empty for empty inputs", () => {
     expect(buildTimeline([], [])).toEqual([]);
+  });
+});
+
+describe("flattenTimelineResponse", () => {
+  it("preserves human input requests separately from messages and logs", () => {
+    const request = {
+      id: "hir-1",
+      org_id: "org-1",
+      session_id: "session-1",
+      turn_number: 1,
+      agent_type: "claude_code" as const,
+      request_kind: "action_choice" as const,
+      status: "answered" as const,
+      title: "Choose next action",
+      body: "What next?",
+      choices: [],
+      created_at: "2026-01-01T00:00:00Z",
+    };
+
+    const flattened = flattenTimelineResponse([
+      {
+        kind: "human_input",
+        created_at: request.created_at,
+        human_input_request: request,
+      },
+    ]);
+
+    expect(flattened.messages).toEqual([]);
+    expect(flattened.logs).toEqual([]);
+    expect(flattened.humanInputs).toEqual([request]);
   });
 });
