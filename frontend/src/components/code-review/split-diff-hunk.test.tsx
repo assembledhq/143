@@ -136,6 +136,21 @@ describe("SplitDiffHunk", () => {
     expect(spans.length).toBeGreaterThanOrEqual(1);
   });
 
+  it("allows long split line content to wrap while preserving whitespace", () => {
+    const hunk = makeHunk([
+      {
+        type: "add",
+        content: "const token = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';",
+        oldLineNumber: null,
+        newLineNumber: 12,
+      },
+    ]);
+    const { container } = render(<SplitDiffHunk hunk={hunk} filePath="src/app.ts" />);
+    const content = container.querySelector('[data-testid="split-diff-line-content"]');
+    expect(content).toHaveClass("whitespace-pre-wrap");
+    expect(content).toHaveClass("break-words");
+  });
+
   it("renders comment thread when comments exist", () => {
     const comment: SessionReviewComment = {
       id: "c-1",
