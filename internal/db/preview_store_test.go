@@ -835,9 +835,45 @@ func TestPreviewStore_CreatePreviewService(t *testing.T) {
 		)
 
 	err = store.CreatePreviewService(context.Background(), svc)
-	require.NoError(t, err)
-	require.Equal(t, generatedID, svc.ID)
-	require.NoError(t, mock.ExpectationsWereMet())
+	require.NoError(t, err, "CreatePreviewService should insert the preview service")
+	require.Equal(t, generatedID, svc.ID, "CreatePreviewService should hydrate the generated service ID")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestPreviewStore_CreatePreviewService_UpsertsForRetry(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgx mock pool should be created")
+	defer mock.Close()
+
+	store := NewPreviewStore(mock)
+	now := time.Now()
+	generatedID := uuid.New()
+	previewID := uuid.New()
+
+	svc := &models.PreviewService{
+		PreviewInstanceID: previewID,
+		ServiceName:       "frontend",
+		Role:              models.PreviewServiceRolePrimary,
+		Status:            models.PreviewServiceStatusStarting,
+		Command:           []string{"npm", "run", "dev"},
+		Cwd:               "frontend",
+		Port:              3000,
+	}
+
+	mock.ExpectQuery("INSERT INTO preview_services.+ON CONFLICT \\(preview_instance_id, service_name\\).+DO UPDATE").
+		WithArgs(previewAnyArgs(7)...).
+		WillReturnRows(
+			pgxmock.NewRows(previewServiceTestCols).
+				AddRow(generatedID, previewID, "frontend", "primary", "starting",
+					[]string{"npm", "run", "dev"}, "frontend", 3000, nil, "", now),
+		)
+
+	err = store.CreatePreviewService(context.Background(), svc)
+	require.NoError(t, err, "CreatePreviewService should be idempotent for a retried launch")
+	require.Equal(t, generatedID, svc.ID, "CreatePreviewService should return the existing or inserted row")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
 func TestPreviewStore_ListServicesByPreview(t *testing.T) {
@@ -924,9 +960,46 @@ func TestPreviewStore_CreatePreviewInfrastructure(t *testing.T) {
 		)
 
 	err = store.CreatePreviewInfrastructure(context.Background(), infra)
-	require.NoError(t, err)
-	require.Equal(t, generatedID, infra.ID)
-	require.NoError(t, mock.ExpectationsWereMet())
+	require.NoError(t, err, "CreatePreviewInfrastructure should insert the preview infrastructure")
+	require.Equal(t, generatedID, infra.ID, "CreatePreviewInfrastructure should hydrate the generated infrastructure ID")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestPreviewStore_CreatePreviewInfrastructure_UpsertsForRetry(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgx mock pool should be created")
+	defer mock.Close()
+
+	store := NewPreviewStore(mock)
+	now := time.Now()
+	generatedID := uuid.New()
+	previewID := uuid.New()
+
+	infra := &models.PreviewInfrastructure{
+		PreviewInstanceID: previewID,
+		InfraName:         "db",
+		Template:          "postgres-17",
+		ContainerID:       "",
+		Status:            models.PreviewInfraStatusProvisioning,
+		Host:              "",
+		Port:              0,
+		CredentialsHash:   "",
+	}
+
+	mock.ExpectQuery("INSERT INTO preview_infrastructure.+ON CONFLICT \\(preview_instance_id, infra_name\\).+DO UPDATE").
+		WithArgs(previewAnyArgs(8)...).
+		WillReturnRows(
+			pgxmock.NewRows(previewInfraTestCols).
+				AddRow(generatedID, previewID, "db", "postgres-17",
+					"", "provisioning", "", 0, "", "", now),
+		)
+
+	err = store.CreatePreviewInfrastructure(context.Background(), infra)
+	require.NoError(t, err, "CreatePreviewInfrastructure should be idempotent for a retried launch")
+	require.Equal(t, generatedID, infra.ID, "CreatePreviewInfrastructure should return the existing or inserted row")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
 func TestPreviewStore_ListInfraByPreview(t *testing.T) {
