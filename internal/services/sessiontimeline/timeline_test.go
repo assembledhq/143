@@ -87,6 +87,20 @@ func TestComposeTimeline_KeepsDifferentAssistantOutputAndMessage(t *testing.T) {
 	require.Equal(t, models.SessionTimelineKindMessage, result[1].Kind, "assistant message should still be returned")
 }
 
+func TestComposeTimeline_HiddenVisibilityMetadataKeepsErrorAsLog(t *testing.T) {
+	t.Parallel()
+
+	logs := []models.SessionLog{
+		makeLog(t, func(log *models.SessionLog) {
+			log.Metadata = []byte(`{"visibility":"hidden","diagnostic_class":"benign_runtime_diagnostic"}`)
+		}, "2026-01-01T00:00:01Z", "error", "benign diagnostic"),
+	}
+
+	result := Compose(nil, logs)
+	require.Len(t, result, 1, "hidden diagnostic should remain in the timeline as a hidden log entry")
+	require.Equal(t, models.SessionTimelineKindLog, result[0].Kind, "hidden diagnostic should not be returned as a user-visible error")
+}
+
 func TestComposeTimeline_DedupesLegacyRowsWithoutMetadata(t *testing.T) {
 	t.Parallel()
 
