@@ -342,7 +342,7 @@ func (g *Gateway) handleProxy(w http.ResponseWriter, r *http.Request, previewID 
 
 	// Intercept heartbeat pings before recording activity so the heartbeat
 	// URL does not overwrite last_path (which is used for navigation restore).
-	if r.URL.Path == "/__143_heartbeat" {
+	if r.URL.Path == previewHeartbeatPath {
 		// Still record access for idle timeout tracking.
 		if err := g.manager.RecordAccess(r.Context(), orgID, previewID); err != nil {
 			g.logger.Warn().Err(err).Str("preview_id", previewID.String()).Msg("failed to record access")
@@ -355,13 +355,50 @@ func (g *Gateway) handleProxy(w http.ResponseWriter, r *http.Request, previewID 
 	if err := g.manager.RecordAccess(r.Context(), orgID, previewID); err != nil {
 		g.logger.Warn().Err(err).Str("preview_id", previewID.String()).Msg("failed to record access")
 	}
-	if r.URL.Path != "" && r.URL.Path != "/" && !strings.HasPrefix(r.URL.Path, "/__143_") {
+	if shouldRecordPreviewLastPath(r) {
 		if err := g.manager.RecordLastPath(r.Context(), orgID, previewID, r.URL.Path); err != nil {
 			g.logger.Warn().Err(err).Str("preview_id", previewID.String()).Msg("failed to record last path")
 		}
 	}
 
 	g.proxyToWorker(w, r, orgID, previewID)
+}
+
+const (
+	previewPlatformPathPrefix = "/__143_"
+	previewHeartbeatPath      = previewPlatformPathPrefix + "heartbeat"
+)
+
+func shouldRecordPreviewLastPath(r *http.Request) bool {
+	if r.Method != http.MethodGet {
+		return false
+	}
+
+	requestPath := r.URL.Path
+	if requestPath == "" || requestPath == "/" {
+		return false
+	}
+	if strings.HasPrefix(requestPath, previewPlatformPathPrefix) {
+		return false
+	}
+
+	// Browser navigations advertise Sec-Fetch-Dest: document. Framework
+	// internals, assets, EventSource/HMR, and fetch/XHR requests do not.
+	if fetchDest := r.Header.Get("Sec-Fetch-Dest"); fetchDest != "" {
+		return fetchDest == "document"
+	}
+
+	return acceptsHTMLDocument(r.Header.Get("Accept"))
+}
+
+func acceptsHTMLDocument(accept string) bool {
+	for _, rawPart := range strings.Split(accept, ",") {
+		mediaType := strings.ToLower(strings.TrimSpace(strings.SplitN(rawPart, ";", 2)[0]))
+		if mediaType == "text/html" || mediaType == "application/xhtml+xml" {
+			return true
+		}
+	}
+	return false
 }
 
 func (g *Gateway) proxyToWorker(w http.ResponseWriter, r *http.Request, orgID, previewID uuid.UUID) {
