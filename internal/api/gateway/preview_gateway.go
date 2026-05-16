@@ -711,9 +711,33 @@ func (g *Gateway) injectSecurityHeaders(h http.Header) {
 }
 
 func stripSensitiveResponseHeaders(h http.Header) {
-	// Remove Set-Cookie from sandbox responses. Our own session cookie is
-	// set directly in the exchange handler, not via proxy responses.
+	// Let sandbox apps manage their own preview-domain auth state (for example
+	// session_token and csrf_token) while protecting the gateway-owned preview
+	// access cookie from being replaced by the sandbox response.
+	setCookies := h.Values("Set-Cookie")
+	if len(setCookies) == 0 {
+		return
+	}
+
 	h.Del("Set-Cookie")
+	for _, raw := range setCookies {
+		switch setCookieName(raw) {
+		case "__Host-preview_session", "preview_session":
+			continue
+		default:
+			h.Add("Set-Cookie", raw)
+		}
+	}
+}
+
+func setCookieName(raw string) string {
+	parts := strings.SplitN(raw, ";", 2)
+	first := strings.TrimSpace(parts[0])
+	kv := strings.SplitN(first, "=", 2)
+	if len(kv) != 2 {
+		return ""
+	}
+	return strings.TrimSpace(kv[0])
 }
 
 func stripPreviewCookie(req *http.Request) {
