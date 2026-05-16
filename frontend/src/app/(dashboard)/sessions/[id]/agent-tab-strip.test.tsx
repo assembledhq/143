@@ -168,6 +168,7 @@ describe("AgentTabStrip", () => {
     expect(activeTab).toHaveClass("data-[state=active]:text-primary");
     expect(activeTab).toHaveClass("data-[state=active]:bg-transparent");
     expect(activeTab).toHaveClass("after:bg-[image:var(--gradient-primary)]");
+    expect(activeTab).toHaveClass("after:!bottom-[-3px]");
     expect(activeTab).not.toHaveClass("after:bg-none");
     expect(screen.getByRole("tab", { name: /review/i })).not.toHaveTextContent(/Completed/i);
     expect(screen.getByRole("button", { name: "Close Main tab" })).toBeInTheDocument();
