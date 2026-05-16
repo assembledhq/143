@@ -707,6 +707,19 @@ describe('SessionDetailPage', () => {
     expect(await screen.findByRole('tab', { name: /Codex 2/ })).toBeInTheDocument();
   });
 
+  it('keeps the desktop session header and detail panel header on the same border-box height', async () => {
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+
+    const mainHeader = await screen.findByTestId('session-main-header');
+    const detailHeader = screen.getByTestId('session-detail-header');
+    const detailHeaderBar = screen.getByTestId('session-detail-header-bar');
+
+    expect(mainHeader).toHaveClass('h-14', 'border-b');
+    expect(detailHeader).toHaveClass('h-14', 'border-b');
+    expect(detailHeaderBar).toHaveClass('h-full');
+    expect(detailHeaderBar).not.toHaveClass('h-14');
+  });
+
   it('shows the desktop agent tab row as soon as a second tab is being created', async () => {
     const sessionId = 'session-show-tab-row-while-creating';
     const threads: SessionThread[] = [
