@@ -727,10 +727,10 @@ export function PreviewPanel({
         </div>
 
         {/* Status badge */}
-        {status && (
+        {status && status !== "failed" && (
           <Badge variant="secondary" className={cn(statusColor(status))}>
             {status === "ready" && <CheckCircle2 className="size-3" />}
-            {(status === "failed" || status === "unhealthy") && <AlertTriangle className="size-3" />}
+            {status === "unhealthy" && <AlertTriangle className="size-3" />}
             {STATUS_LABELS[status]}
           </Badge>
         )}
@@ -1017,8 +1017,10 @@ export function PreviewPanel({
               id={startupErrorLogsId}
               aria-label="Preview startup error logs"
               className={cn(
-                "max-h-28 overflow-auto whitespace-pre-wrap break-words rounded-md bg-background/50 px-3 py-2 font-mono text-xs leading-5 text-muted-foreground",
-                showFullStartupLogs && "max-h-80 text-foreground",
+                "overflow-y-hidden whitespace-pre-wrap break-words rounded-md bg-background/50 px-3 py-2 font-mono text-xs leading-5 text-muted-foreground",
+                showFullStartupLogs
+                  ? "sm:max-h-[min(56vh,28rem)] text-foreground"
+                  : "line-clamp-6",
                 previewLogsQuery.isError && showFullStartupLogs && "text-muted-foreground",
               )}
             >
