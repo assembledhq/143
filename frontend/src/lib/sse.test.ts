@@ -57,6 +57,18 @@ describe("addSSEListener", () => {
     expect(handler).toHaveBeenCalledWith(payload);
   });
 
+  it("handles human input events via addEventListener", () => {
+    const source = createMockEventSource();
+    const handler = vi.fn();
+
+    addSSEListener(source as unknown as EventSource, SSE_EVENT.HUMAN_INPUT_UPDATED, handler);
+
+    const payload = { id: 12, session_id: "s1", level: "human_input", message: "answered", metadata: { status: "answered" }, turn_number: 1, created_at: "2026-01-01T00:00:00Z" };
+    source._fire("session_human_input.updated", JSON.stringify(payload));
+
+    expect(handler).toHaveBeenCalledWith(payload);
+  });
+
   it("ignores unparseable JSON for message events", () => {
     const source = createMockEventSource();
     const handler = vi.fn();
@@ -83,6 +95,8 @@ describe("SSE_EVENT constants", () => {
     expect(SSE_EVENT.LOG).toBe("message");
     expect(SSE_EVENT.STATUS).toBe("status");
     expect(SSE_EVENT.DONE).toBe("done");
+    expect(SSE_EVENT.HUMAN_INPUT_CREATED).toBe("session_human_input.created");
+    expect(SSE_EVENT.HUMAN_INPUT_UPDATED).toBe("session_human_input.updated");
     expect(SSE_EVENT.PULL_REQUEST_UPDATED).toBe("pull_request.updated");
   });
 });

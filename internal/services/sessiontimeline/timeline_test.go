@@ -273,6 +273,36 @@ func TestComposeTimeline_EmitsErrorAndGenericLogEntries(t *testing.T) {
 	require.Equal(t, models.SessionTimelineKindLog, result[1].Kind, "non-visible logs should render as generic log entries")
 }
 
+func TestComposeTimeline_IncludesHumanInputRequests(t *testing.T) {
+	t.Parallel()
+
+	requestID := uuid.New()
+	request := models.HumanInputRequest{
+		ID:        requestID,
+		SessionID: uuid.MustParse("11111111-1111-1111-1111-111111111111"),
+		OrgID:     uuid.MustParse("22222222-2222-2222-2222-222222222222"),
+		Kind:      models.HumanInputRequestKindActionChoice,
+		Status:    models.HumanInputRequestStatusAnswered,
+		Title:     "Choose next action",
+		Body:      "What should the agent do next?",
+		CreatedAt: mustTime(t, "2026-01-01T00:00:02Z"),
+	}
+	messages := []models.SessionMessage{
+		makeMessage(t, func(msg *models.SessionMessage) {
+			msg.ID = 10
+			msg.CreatedAt = mustTime(t, "2026-01-01T00:00:01Z")
+		}, "2026-01-01T00:00:01Z"),
+	}
+
+	result := Compose(messages, nil, []models.HumanInputRequest{request})
+
+	require.Len(t, result, 2, "human input requests should compose into timeline entries")
+	require.Equal(t, models.SessionTimelineKindMessage, result[0].Kind, "message should remain sorted before human input")
+	require.Equal(t, models.SessionTimelineKindHumanInput, result[1].Kind, "human input should get a durable timeline entry")
+	require.NotNil(t, result[1].HumanInputRequest, "human input timeline entry should carry the request")
+	require.Equal(t, requestID, result[1].HumanInputRequest.ID, "human input timeline entry should preserve request id")
+}
+
 func TestComposeTimeline_IgnoresAssistantMessagesWithoutMatchingTurnLogs(t *testing.T) {
 	t.Parallel()
 

@@ -34,8 +34,9 @@ func normalizeTranscriptContent(content string) string {
 	return strings.TrimRight(strings.Join(lines, "\n"), "\n")
 }
 
-// Compose merges session messages and logs into a server-owned timeline.
-func Compose(messages []models.SessionMessage, logs []models.SessionLog) []models.SessionTimelineEntry {
+// Compose merges session messages, logs, and durable human-input requests into
+// a server-owned timeline.
+func Compose(messages []models.SessionMessage, logs []models.SessionLog, humanInputs ...[]models.HumanInputRequest) []models.SessionTimelineEntry {
 	messages = dedupeAssistantTranscriptMessages(messages)
 	duplicateLogIDs := duplicateTranscriptLogIDs(messages, logs)
 
@@ -51,9 +52,15 @@ func Compose(messages []models.SessionMessage, logs []models.SessionLog) []model
 		ts     string
 		msg    *models.SessionMessage
 		log    *models.SessionLog
+		input  *models.HumanInputRequest
 	}
 
-	items := make([]tagged, 0, len(messages)+len(logs))
+	humanInputCount := 0
+	for _, requests := range humanInputs {
+		humanInputCount += len(requests)
+	}
+
+	items := make([]tagged, 0, len(messages)+len(logs)+humanInputCount)
 	for i := range messages {
 		msg := messages[i]
 		items = append(items, tagged{source: "message", ts: msg.CreatedAt.UTC().Format(timeSortLayout), msg: &msg})
@@ -64,6 +71,12 @@ func Compose(messages []models.SessionMessage, logs []models.SessionLog) []model
 			continue
 		}
 		items = append(items, tagged{source: "log", ts: log.Timestamp.UTC().Format(timeSortLayout), log: &log})
+	}
+	for _, requests := range humanInputs {
+		for i := range requests {
+			request := requests[i]
+			items = append(items, tagged{source: "human_input", ts: request.CreatedAt.UTC().Format(timeSortLayout), input: &request})
+		}
 	}
 
 	sort.Slice(items, func(i, j int) bool {
@@ -87,6 +100,15 @@ func Compose(messages []models.SessionMessage, logs []models.SessionLog) []model
 				}
 			}
 			entries = append(entries, entry)
+			i++
+			continue
+		}
+		if item.source == "human_input" {
+			entries = append(entries, models.SessionTimelineEntry{
+				Kind:              models.SessionTimelineKindHumanInput,
+				CreatedAt:         item.input.CreatedAt,
+				HumanInputRequest: item.input,
+			})
 			i++
 			continue
 		}

@@ -233,6 +233,8 @@ function getAssistantTurnNumber(entry: TimelineEntry): number | null {
       return entry.turnNumber;
     case "tool_group":
       return entry.toolUse.turn_number;
+    case "human_input":
+      return entry.data.turn_number;
   }
 }
 

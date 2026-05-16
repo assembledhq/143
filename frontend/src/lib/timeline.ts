@@ -1,4 +1,4 @@
-import type { SessionMessage, SessionLog, SessionTimelineEntry as SessionTimelineResponseEntry } from "./types";
+import type { HumanInputRequest, SessionMessage, SessionLog, SessionTimelineEntry as SessionTimelineResponseEntry } from "./types";
 
 /** Prefix added by the backend when a message is sent in plan mode. */
 export const PLAN_MODE_PREFIX = "[PLAN_MODE]\n";
@@ -17,7 +17,8 @@ export type TimelineEntry =
   | { kind: "error"; data: SessionLog }
   | { kind: "log"; data: SessionLog }
   | { kind: "plan_output"; data: SessionLog; turnNumber: number }
-  | { kind: "plan_message"; data: SessionMessage; turnNumber: number };
+  | { kind: "plan_message"; data: SessionMessage; turnNumber: number }
+  | { kind: "human_input"; data: HumanInputRequest };
 
 type TaggedTimelineItem =
   | { source: "message"; ts: string; data: SessionMessage }
@@ -221,6 +222,8 @@ export function timelineEntryFromResponse(entry: SessionTimelineResponseEntry): 
       return { kind: "plan_output", data: entry.log!, turnNumber: entry.turn_number! };
     case "plan_message":
       return { kind: "plan_message", data: entry.message!, turnNumber: entry.turn_number! };
+    case "human_input":
+      return { kind: "human_input", data: entry.human_input_request! };
   }
 }
 
@@ -238,6 +241,7 @@ export function timelineEntryCreatedAt(entry: TimelineEntry): string {
     case "log":
     case "plan_output":
     case "plan_message":
+    case "human_input":
       return entry.data.created_at;
   }
 }
@@ -249,9 +253,11 @@ export function sortTimelineEntries(entries: TimelineEntry[]): TimelineEntry[] {
 export function flattenTimelineResponse(entries: SessionTimelineResponseEntry[]): {
   messages: SessionMessage[];
   logs: SessionLog[];
+  humanInputs: HumanInputRequest[];
 } {
   const messages: SessionMessage[] = [];
   const logs: SessionLog[] = [];
+  const humanInputs: HumanInputRequest[] = [];
 
   for (const entry of entries) {
     switch (entry.kind) {
@@ -277,8 +283,13 @@ export function flattenTimelineResponse(entries: SessionTimelineResponseEntry[])
           logs.push(entry.tool_result);
         }
         break;
+      case "human_input":
+        if (entry.human_input_request) {
+          humanInputs.push(entry.human_input_request);
+        }
+        break;
     }
   }
 
-  return { messages, logs };
+  return { messages, logs, humanInputs };
 }

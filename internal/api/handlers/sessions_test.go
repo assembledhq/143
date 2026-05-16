@@ -3284,6 +3284,48 @@ func TestSessionHandler_StreamLogsViaPolling_ReloadFailureReturns(t *testing.T) 
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+func TestHumanInputSSEEventType(t *testing.T) {
+	t.Parallel()
+
+	updatedMetadata, err := json.Marshal(map[string]string{"event": string(sse.EventHumanInputUpdated)})
+	require.NoError(t, err, "updated metadata should marshal")
+
+	tests := []struct {
+		name       string
+		log        models.SessionLog
+		expected   sse.EventType
+		expectedOK bool
+	}{
+		{
+			name:       "human input without metadata is created",
+			log:        models.SessionLog{Level: "human_input"},
+			expected:   sse.EventHumanInputCreated,
+			expectedOK: true,
+		},
+		{
+			name:       "human input updated metadata is updated",
+			log:        models.SessionLog{Level: "human_input", Metadata: updatedMetadata},
+			expected:   sse.EventHumanInputUpdated,
+			expectedOK: true,
+		},
+		{
+			name:       "ordinary log has no named human input event",
+			log:        models.SessionLog{Level: "output"},
+			expectedOK: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			eventType, ok := humanInputSSEEventType(tt.log)
+			require.Equal(t, tt.expectedOK, ok, "event type detection should match expectation")
+			require.Equal(t, tt.expected, eventType, "event type detection should return expected event")
+		})
+	}
+}
+
 func TestSessionHandler_StreamLogsViaPolling_StatusAndDoneWriteFailures(t *testing.T) {
 	t.Parallel()
 

@@ -22,6 +22,7 @@ import (
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/services"
 	ghservice "github.com/assembledhq/143/internal/services/github"
+	humaninputsvc "github.com/assembledhq/143/internal/services/humaninput"
 	"github.com/assembledhq/143/internal/services/linear"
 	previewsvc "github.com/assembledhq/143/internal/services/preview"
 	"github.com/assembledhq/143/internal/services/sessiontimeline"
@@ -62,6 +63,8 @@ type SessionHandler struct {
 	runStore           *db.SessionStore
 	logStore           *db.SessionLogStore
 	questionStore      *db.SessionQuestionStore
+	humanInputStore    *db.SessionHumanInputRequestStore
+	humanInputService  *humaninputsvc.Service
 	pullRequestStore   *db.PullRequestStore
 	issueStore         *db.IssueStore
 	repoStore          *db.RepositoryStore
@@ -440,6 +443,22 @@ func (h *SessionHandler) SetPRAuthCredentialChecker(checker interface {
 func (h *SessionHandler) SetPRAuthFlow(signingKey, frontendURL string) {
 	h.prAuthSigningKey = []byte(signingKey)
 	h.frontendURL = frontendURL
+}
+
+func (h *SessionHandler) SetHumanInputRequestStore(store *db.SessionHumanInputRequestStore) {
+	h.humanInputStore = store
+	if store == nil {
+		h.humanInputService = nil
+		return
+	}
+	h.humanInputService = humaninputsvc.NewDBService(
+		h.runStore,
+		store,
+		h.questionStore,
+		h.messageStore,
+		h.threadStore,
+		h.jobStore,
+	)
 }
 
 func NewSessionHandler(
@@ -1158,7 +1177,7 @@ func (h *SessionHandler) streamLogsViaPolling(ctx context.Context, sw *sse.Write
 		return
 	}
 	for _, log := range logs {
-		if err := sw.WriteDataID(cache.SessionLogStreamID(log.ID), log); err != nil {
+		if err := writeSessionLogSSEEvent(sw, log); err != nil {
 			logger.Error().Err(err).Str("session_id", run.ID.String()).Msg("failed to write log event to SSE stream")
 			return
 		}
@@ -1211,7 +1230,7 @@ func (h *SessionHandler) streamLogsViaPolling(ctx context.Context, sw *sse.Write
 				return
 			}
 			for _, log := range newLogs {
-				if err := sw.WriteDataID(cache.SessionLogStreamID(log.ID), log); err != nil {
+				if err := writeSessionLogSSEEvent(sw, log); err != nil {
 					logger.Error().Err(err).Str("session_id", run.ID.String()).Msg("failed to write log event to SSE stream")
 					return
 				}
@@ -1265,7 +1284,7 @@ func (h *SessionHandler) streamLogsViaRedis(ctx context.Context, sw *sse.Writer,
 	lastDeliveredStreamID := lastEventID
 	for _, log := range logs {
 		streamID := cache.SessionLogStreamID(log.ID)
-		if err := sw.WriteDataID(streamID, log); err != nil {
+		if err := writeSessionLogSSEEventWithID(sw, streamID, log); err != nil {
 			logger.Error().Err(err).Str("session_id", run.ID.String()).Str("stream_id", streamID).Msg("failed to write replayed log event to SSE stream")
 			return false
 		}
@@ -1312,7 +1331,7 @@ func (h *SessionHandler) streamLogsViaRedis(ctx context.Context, sw *sse.Writer,
 				}
 				continue
 			}
-			if err := sw.WriteDataID(logEntry.StreamID, logEntry.Log); err != nil {
+			if err := writeSessionLogSSEEventWithID(sw, logEntry.StreamID, logEntry.Log); err != nil {
 				logger.Error().Err(err).Str("session_id", run.ID.String()).Str("stream_id", logEntry.StreamID).Msg("failed to write Redis log event to SSE stream")
 				return true
 			}
@@ -1396,6 +1415,45 @@ func shouldSkipRedisLog(ctx context.Context, streamID string, lastDeliveredStrea
 		return lastDeliveredStreamID, true
 	}
 	return "", false
+}
+
+func writeSessionLogSSEEvent(sw *sse.Writer, log models.SessionLog) error {
+	return writeSessionLogSSEEventWithID(sw, cache.SessionLogStreamID(log.ID), log)
+}
+
+func writeSessionLogSSEEventWithID(sw *sse.Writer, streamID string, log models.SessionLog) error {
+	if err := sw.WriteDataID(streamID, log); err != nil {
+		return err
+	}
+	if eventType, ok := humanInputSSEEventType(log); ok {
+		if err := sw.WriteEventID(eventType, streamID, log); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func humanInputSSEEventType(log models.SessionLog) (sse.EventType, bool) {
+	if log.Level != "human_input" {
+		return "", false
+	}
+	if len(log.Metadata) == 0 {
+		return sse.EventHumanInputCreated, true
+	}
+	var metadata struct {
+		Event string `json:"event"`
+	}
+	if err := json.Unmarshal(log.Metadata, &metadata); err != nil || metadata.Event == "" {
+		return sse.EventHumanInputCreated, true
+	}
+	switch sse.EventType(metadata.Event) {
+	case sse.EventHumanInputCreated:
+		return sse.EventHumanInputCreated, true
+	case sse.EventHumanInputUpdated:
+		return sse.EventHumanInputUpdated, true
+	default:
+		return "", false
+	}
 }
 
 // GetPullRequest returns the PR associated with an agent run, or null if none exists.
@@ -1781,6 +1839,217 @@ func (h *SessionHandler) AnswerQuestion(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, http.StatusOK, models.SingleResponse[models.SessionQuestion]{Data: question})
 }
 
+func (h *SessionHandler) ListHumanInputRequests(w http.ResponseWriter, r *http.Request) {
+	if h.humanInputService == nil {
+		writeError(w, r, http.StatusNotImplemented, "NOT_CONFIGURED", "human input requests are not configured")
+		return
+	}
+	orgID := middleware.OrgIDFromContext(r.Context())
+	sessionID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid session ID")
+		return
+	}
+
+	var filters db.HumanInputRequestFilters
+	if statusParam := strings.TrimSpace(r.URL.Query().Get("status")); statusParam != "" {
+		status := models.HumanInputRequestStatus(statusParam)
+		if err := status.Validate(); err != nil {
+			writeError(w, r, http.StatusBadRequest, "INVALID_STATUS", "invalid human input request status")
+			return
+		}
+		filters.Status = status
+	}
+	if threadParam := strings.TrimSpace(r.URL.Query().Get("thread_id")); threadParam != "" {
+		threadID, err := uuid.Parse(threadParam)
+		if err != nil {
+			writeError(w, r, http.StatusBadRequest, "INVALID_THREAD_ID", "invalid thread ID")
+			return
+		}
+		filters.ThreadID = &threadID
+	}
+
+	requests, err := h.humanInputService.List(r.Context(), orgID, sessionID, filters)
+	if err != nil {
+		if errors.Is(err, humaninputsvc.ErrNotFound) {
+			writeError(w, r, http.StatusNotFound, "NOT_FOUND", "session not found")
+			return
+		}
+		writeError(w, r, http.StatusInternalServerError, "LIST_FAILED", "failed to list human input requests", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, models.ListResponse[models.HumanInputRequest]{Data: requests})
+}
+
+func (h *SessionHandler) AnswerHumanInputRequest(w http.ResponseWriter, r *http.Request) {
+	if h.humanInputService == nil {
+		writeError(w, r, http.StatusNotImplemented, "NOT_CONFIGURED", "human input requests are not configured")
+		return
+	}
+	orgID := middleware.OrgIDFromContext(r.Context())
+	sessionID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid session ID")
+		return
+	}
+	requestID, err := uuid.Parse(chi.URLParam(r, "request_id"))
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_REQUEST_ID", "invalid human input request ID")
+		return
+	}
+	user := middleware.UserFromContext(r.Context())
+	if user == nil {
+		writeError(w, r, http.StatusUnauthorized, "UNAUTHORIZED", "user not found")
+		return
+	}
+
+	var body models.HumanInputAnswerInput
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_BODY", "invalid request body")
+		return
+	}
+
+	result, err := h.humanInputService.Answer(r.Context(), humaninputsvc.AnswerInput{
+		OrgID:     orgID,
+		SessionID: sessionID,
+		RequestID: requestID,
+		UserID:    user.ID,
+		Answer:    body,
+	})
+	if err != nil {
+		writeHumanInputServiceError(w, r, err)
+		return
+	}
+	answered := result.Request
+
+	requestIDStr := requestID.String()
+	answerLength := 0
+	if result.Message != nil {
+		answerLength = len(result.Message.Content)
+	}
+	details := map[string]any{
+		"request_id":    requestID.String(),
+		"session_id":    sessionID.String(),
+		"request_kind":  string(answered.Kind),
+		"status":        string(answered.Status),
+		"answered_by":   user.ID.String(),
+		"choice_count":  len(answered.Choices),
+		"answer_length": answerLength,
+	}
+	emitUserAuditWithSession(h.audit, r, models.AuditActionSessionHumanInputAnswered, models.AuditResourceSession, &requestIDStr, &sessionID, nil,
+		marshalAuditDetails(h.logger, details))
+	h.emitHumanInputUpdateLog(r.Context(), orgID, sessionID, answered, models.HumanInputRequestStatusAnswered)
+	writeJSON(w, http.StatusOK, models.SingleResponse[models.HumanInputRequest]{Data: answered})
+}
+
+func (h *SessionHandler) CancelHumanInputRequest(w http.ResponseWriter, r *http.Request) {
+	if h.humanInputService == nil {
+		writeError(w, r, http.StatusNotImplemented, "NOT_CONFIGURED", "human input requests are not configured")
+		return
+	}
+	orgID := middleware.OrgIDFromContext(r.Context())
+	sessionID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid session ID")
+		return
+	}
+	requestID, err := uuid.Parse(chi.URLParam(r, "request_id"))
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_REQUEST_ID", "invalid human input request ID")
+		return
+	}
+	user := middleware.UserFromContext(r.Context())
+	if user == nil {
+		writeError(w, r, http.StatusUnauthorized, "UNAUTHORIZED", "user not found")
+		return
+	}
+
+	result, err := h.humanInputService.Cancel(r.Context(), humaninputsvc.CancelInput{
+		OrgID:     orgID,
+		SessionID: sessionID,
+		RequestID: requestID,
+		UserID:    user.ID,
+	})
+	if err != nil {
+		writeHumanInputServiceError(w, r, err)
+		return
+	}
+	cancelled := result.Request
+
+	requestIDStr := requestID.String()
+	emitUserAuditWithSession(h.audit, r, models.AuditActionSessionHumanInputCancelled, models.AuditResourceSession, &requestIDStr, &sessionID, nil,
+		marshalAuditDetails(h.logger, map[string]any{
+			"request_id":   requestID.String(),
+			"session_id":   sessionID.String(),
+			"request_kind": string(cancelled.Kind),
+			"cancelled_by": user.ID.String(),
+		}))
+	h.emitHumanInputUpdateLog(r.Context(), orgID, sessionID, cancelled, models.HumanInputRequestStatusCancelled)
+	writeJSON(w, http.StatusOK, models.SingleResponse[models.HumanInputRequest]{Data: cancelled})
+}
+
+func writeHumanInputServiceError(w http.ResponseWriter, r *http.Request, err error) {
+	switch {
+	case errors.Is(err, humaninputsvc.ErrNotFound):
+		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "human input request not found")
+	case errors.Is(err, humaninputsvc.ErrSnapshotExpired):
+		writeError(w, r, http.StatusGone, "SNAPSHOT_EXPIRED", "this session's environment has expired and can no longer be continued")
+	case errors.Is(err, humaninputsvc.ErrInvalidAnswer):
+		writeError(w, r, http.StatusBadRequest, "INVALID_ANSWER", err.Error())
+	case errors.Is(err, humaninputsvc.ErrNotPending):
+		writeError(w, r, http.StatusConflict, "NOT_PENDING", "human input request is no longer pending")
+	case errors.Is(err, humaninputsvc.ErrRunningLimit):
+		writeError(w, r, http.StatusConflict, "RUNNING_LIMIT", "this session already has the maximum number of tabs running concurrently")
+	case errors.Is(err, humaninputsvc.ErrCheckpointPending):
+		writeError(w, r, http.StatusConflict, "CHECKPOINT_PENDING", "the agent is still saving its pause checkpoint; try again once the session is awaiting input")
+	case errors.Is(err, humaninputsvc.ErrNotResumable):
+		writeError(w, r, http.StatusConflict, "NOT_RESUMABLE", "session must be awaiting input or otherwise resumable to answer human input")
+	default:
+		writeError(w, r, http.StatusInternalServerError, "HUMAN_INPUT_FAILED", "failed to update human input request", err)
+	}
+}
+
+func (h *SessionHandler) emitHumanInputUpdateLog(ctx context.Context, orgID, sessionID uuid.UUID, req models.HumanInputRequest, status models.HumanInputRequestStatus) {
+	if h.logStore == nil {
+		return
+	}
+	message := "Human input request updated."
+	switch status {
+	case models.HumanInputRequestStatusAnswered:
+		message = "Human input request answered."
+	case models.HumanInputRequestStatusCancelled:
+		message = "Human input request cancelled."
+	}
+	log := &models.SessionLog{
+		SessionID:  sessionID,
+		OrgID:      orgID,
+		ThreadID:   req.ThreadID,
+		Level:      "human_input",
+		Message:    message,
+		TurnNumber: req.TurnNumber,
+		Metadata: marshalHumanInputLogMetadata(h.logger, map[string]interface{}{
+			"event":                  string(sse.EventHumanInputUpdated),
+			"human_input_request_id": req.ID.String(),
+			"provider_request_id":    req.ProviderRequestID,
+			"request_kind":           string(req.Kind),
+			"status":                 string(status),
+			"title":                  req.Title,
+		}),
+	}
+	if err := h.logStore.Create(ctx, log); err != nil {
+		zerolog.Ctx(ctx).Warn().Err(err).Str("session_id", sessionID.String()).Str("request_id", req.ID.String()).Msg("failed to emit human input update log")
+	}
+}
+
+func marshalHumanInputLogMetadata(logger zerolog.Logger, metadata map[string]interface{}) json.RawMessage {
+	raw, err := json.Marshal(metadata)
+	if err != nil {
+		logger.Warn().Err(err).Msg("failed to marshal human input log metadata")
+		return nil
+	}
+	return raw
+}
+
 // SendMessage handles POST /sessions/{id}/messages — sends a follow-up message
 // to an idle multi-turn session and enqueues a continue_session job.
 func (h *SessionHandler) SendMessage(w http.ResponseWriter, r *http.Request) {
@@ -1983,6 +2252,7 @@ func (h *SessionHandler) SendMessage(w http.ResponseWriter, r *http.Request) {
 
 	txRunStore := db.NewSessionStore(tx)
 	txQuestionStore := db.NewSessionQuestionStore(tx)
+	txHumanInputStore := db.NewSessionHumanInputRequestStore(tx)
 
 	// Try claiming an idle session first, then fall back to resuming a
 	// terminal session (completed/pr_created/failed/cancelled).
@@ -2024,7 +2294,21 @@ func (h *SessionHandler) SendMessage(w http.ResponseWriter, r *http.Request) {
 	// If the session was paused on a clarifying question, treat the follow-up
 	// message as the answer so question state stays in sync with the resumed run.
 	var answeredQuestion *models.SessionQuestion
+	var answeredHumanInput *models.HumanInputRequest
+	var humanInputRequestID *uuid.UUID
 	if revertStatus == string(models.SessionStatusAwaitingInput) && userID != nil && h.questionStore != nil {
+		if h.humanInputStore != nil {
+			request, err := txHumanInputStore.AnswerLatestPendingFreeTextBySession(r.Context(), orgID, sessionID, body.Message, *userID)
+			if err != nil {
+				if !errors.Is(err, pgx.ErrNoRows) {
+					writeError(w, r, http.StatusInternalServerError, "ANSWER_FAILED", "failed to resolve pending human input request", err)
+					return
+				}
+			} else {
+				answeredHumanInput = &request
+				humanInputRequestID = &request.ID
+			}
+		}
 		question, err := txQuestionStore.AnswerLatestPendingBySession(r.Context(), orgID, sessionID, body.Message, *userID)
 		if err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
@@ -2048,6 +2332,9 @@ func (h *SessionHandler) SendMessage(w http.ResponseWriter, r *http.Request) {
 	payload := map[string]string{
 		"session_id": sessionID.String(),
 		"org_id":     orgID.String(),
+	}
+	if humanInputRequestID != nil {
+		payload["human_input_request_id"] = humanInputRequestID.String()
 	}
 	if _, err := h.jobStore.EnqueueInTxWithOpts(r.Context(), tx, orgID, db.EnqueueOpts{
 		Queue:        "agent",
@@ -2083,6 +2370,19 @@ func (h *SessionHandler) SendMessage(w http.ResponseWriter, r *http.Request) {
 		}
 		emitUserAuditWithSession(h.audit, r, models.AuditActionSessionQuestionAnswered, models.AuditResourceSession, &qIDStr, &sessionID, nil,
 			marshalAuditDetails(h.logger, questionDetails))
+	}
+	if answeredHumanInput != nil {
+		requestIDStr := answeredHumanInput.ID.String()
+		emitUserAuditWithSession(h.audit, r, models.AuditActionSessionHumanInputAnswered, models.AuditResourceSession, &requestIDStr, &sessionID, nil,
+			marshalAuditDetails(h.logger, map[string]any{
+				"request_id":    answeredHumanInput.ID.String(),
+				"session_id":    answeredHumanInput.SessionID.String(),
+				"request_kind":  string(answeredHumanInput.Kind),
+				"status":        string(answeredHumanInput.Status),
+				"answer_length": len(body.Message),
+				"answered_by":   userID.String(),
+				"auto_answered": true,
+			}))
 	}
 	h.emitReviewCommentResolutionAudits(r, sessionID, msg.ID, resolvedComments)
 	h.maybeLinkLinearMidSession(r.Context(), orgID, sessionID, body.Message, linearReferenceText(body.References), userID)
@@ -2210,7 +2510,19 @@ func (h *SessionHandler) GetTimeline(w http.ResponseWriter, r *http.Request) {
 		logs = []models.SessionLog{}
 	}
 
-	timeline := sessiontimeline.Compose(messages, logs)
+	var humanInputs []models.HumanInputRequest
+	if h.humanInputStore != nil {
+		humanInputs, err = h.humanInputStore.ListBySession(r.Context(), orgID, sessionID, db.HumanInputRequestFilters{})
+		if err != nil {
+			writeError(w, r, http.StatusInternalServerError, "LIST_FAILED", "failed to list human input requests", err)
+			return
+		}
+	}
+	if humanInputs == nil {
+		humanInputs = []models.HumanInputRequest{}
+	}
+
+	timeline := sessiontimeline.Compose(messages, logs, humanInputs)
 	if timeline == nil {
 		timeline = []models.SessionTimelineEntry{}
 	}
