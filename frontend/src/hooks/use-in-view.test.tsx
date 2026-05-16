@@ -5,24 +5,27 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useInView } from "./use-in-view";
 
 function HookProbe() {
-  const { inView } = useInView();
-  return <div data-testid="hook-probe" data-in-view={String(inView)} />;
+  const { ref, inView } = useInView();
+  return <div ref={ref} data-testid="hook-probe" data-in-view={String(inView)} />;
 }
 
 describe("useInView", () => {
   const originalIntersectionObserver = globalThis.IntersectionObserver;
   const originalMatchMedia = window.matchMedia;
+  const originalGetBoundingClientRect = HTMLElement.prototype.getBoundingClientRect;
 
   beforeEach(() => {
-    globalThis.IntersectionObserver = vi.fn(() => ({
-      observe: vi.fn(),
-      disconnect: vi.fn(),
-      unobserve: vi.fn(),
-      takeRecords: vi.fn(() => []),
-      root: null,
-      rootMargin: "",
-      thresholds: [],
-    })) as unknown as typeof IntersectionObserver;
+    class MockIntersectionObserver implements IntersectionObserver {
+      readonly root = null;
+      readonly rootMargin = "";
+      readonly thresholds = [];
+      disconnect = vi.fn();
+      observe = vi.fn();
+      takeRecords = vi.fn(() => []);
+      unobserve = vi.fn();
+    }
+
+    globalThis.IntersectionObserver = MockIntersectionObserver as unknown as typeof IntersectionObserver;
     window.matchMedia = vi.fn().mockReturnValue({
       matches: false,
       media: "(prefers-reduced-motion: reduce)",
@@ -38,6 +41,7 @@ describe("useInView", () => {
   afterEach(() => {
     globalThis.IntersectionObserver = originalIntersectionObserver;
     window.matchMedia = originalMatchMedia;
+    HTMLElement.prototype.getBoundingClientRect = originalGetBoundingClientRect;
   });
 
   it("renders visible content on the server before hydration", () => {
@@ -56,5 +60,23 @@ describe("useInView", () => {
     render(<HookProbe />);
 
     expect(screen.getByTestId("hook-probe")).toHaveAttribute("data-in-view", "true");
+  });
+
+  it("marks below-the-fold content as not in view after layout measurement", () => {
+    HTMLElement.prototype.getBoundingClientRect = vi.fn(() => ({
+      x: 0,
+      y: 900,
+      top: 900,
+      left: 0,
+      bottom: 1100,
+      right: 200,
+      width: 200,
+      height: 200,
+      toJSON: () => ({}),
+    }));
+
+    render(<HookProbe />);
+
+    expect(screen.getByTestId("hook-probe")).toHaveAttribute("data-in-view", "false");
   });
 });

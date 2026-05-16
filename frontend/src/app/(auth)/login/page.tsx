@@ -18,6 +18,23 @@ function hasCSRFCookie(): boolean {
   return document.cookie.split("; ").some((cookie) => cookie.startsWith("csrf_token="));
 }
 
+function EmailAuthSkeleton() {
+  return (
+    <div data-testid="email-auth-skeleton" className="space-y-3 pt-1" aria-hidden="true">
+      <div className="h-9 w-full rounded-md bg-muted animate-pulse" />
+      <div className="space-y-2 pt-2">
+        <div className="h-4 w-12 rounded bg-muted animate-pulse" />
+        <div className="h-9 w-full rounded-md bg-muted animate-pulse" />
+      </div>
+      <div className="space-y-2">
+        <div className="h-4 w-16 rounded bg-muted animate-pulse" />
+        <div className="h-9 w-full rounded-md bg-muted animate-pulse" />
+      </div>
+      <div className="h-9 w-full rounded-md bg-muted animate-pulse" />
+    </div>
+  );
+}
+
 export default function LoginPage() {
   return (
     <Suspense>
@@ -236,103 +253,105 @@ function LoginPageContent() {
             </div>
           )}
 
-          {!emailAuthReady && (
+          {!emailAuthReady && !emailAuthPending && (
             <CardDescription className="text-center text-xs">
-              {emailAuthPending
-                ? "Preparing secure email authentication..."
-                : "Secure email authentication could not be initialized. Refresh and try again."}
+              Secure email authentication could not be initialized. Refresh and try again.
             </CardDescription>
           )}
 
-          <Tabs value={tab} onValueChange={setTab}>
-            <TabsList className="w-full">
-              <TabsTrigger value="signin" className="flex-1">Sign in</TabsTrigger>
-              <TabsTrigger value="signup" className="flex-1">Sign up</TabsTrigger>
-            </TabsList>
+          {emailAuthPending ? (
+            <EmailAuthSkeleton />
+          ) : (
+            <Tabs value={tab} onValueChange={setTab}>
+              <TabsList className="w-full">
+                <TabsTrigger value="signin" className="flex-1">Sign in</TabsTrigger>
+                <TabsTrigger value="signup" className="flex-1">Sign up</TabsTrigger>
+              </TabsList>
 
-            <TabsContent value="signin">
-              <form onSubmit={handleSignIn} className="space-y-3 pt-2">
-                <div className="space-y-1.5">
-                  <Label htmlFor="signin-email">Email</Label>
-                  <Input
-                    id="signin-email"
-                    type="email"
-                    placeholder="you@example.com"
-                    value={signInEmail}
-                    onChange={(e) => setSignInEmail(e.target.value)}
-                    readOnly={Boolean(invitation && identityEmail)}
-                    required
-                  />
-                </div>
-                <div className="space-y-1.5">
-                  <Label htmlFor="signin-password">Password</Label>
-                  <Input
-                    id="signin-password"
-                    type="password"
-                    value={signInPassword}
-                    onChange={(e) => setSignInPassword(e.target.value)}
-                    required
-                  />
-                </div>
-                <Button
-                  type="submit"
-                  className="w-full"
-                  loading={loading}
-                  disabled={loading || !emailAuthReady}
-                >
-                  Sign in
-                </Button>
-              </form>
-            </TabsContent>
+              <TabsContent value="signin">
+                <form onSubmit={handleSignIn} className="space-y-3 pt-2">
+                  <div className="space-y-1.5">
+                    <Label htmlFor="signin-email">Email</Label>
+                    <Input
+                      id="signin-email"
+                      type="email"
+                      placeholder="you@example.com"
+                      value={signInEmail}
+                      onChange={(e) => setSignInEmail(e.target.value)}
+                      readOnly={Boolean(invitation && identityEmail)}
+                      required
+                    />
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label htmlFor="signin-password">Password</Label>
+                    <Input
+                      id="signin-password"
+                      type="password"
+                      value={signInPassword}
+                      onChange={(e) => setSignInPassword(e.target.value)}
+                      required
+                    />
+                  </div>
+                  <Button
+                    type="submit"
+                    className="w-full"
+                    loading={loading}
+                    disabled={loading || !emailAuthReady}
+                  >
+                    Sign in
+                  </Button>
+                </form>
+              </TabsContent>
 
-            <TabsContent value="signup">
-              <form onSubmit={handleSignUp} className="space-y-3 pt-2">
-                <div className="space-y-1.5">
-                  <Label htmlFor="signup-name">Name</Label>
-                  <Input
-                    id="signup-name"
-                    type="text"
-                    placeholder="Your name"
-                    value={signUpName}
-                    onChange={(e) => setSignUpName(e.target.value)}
-                    required
-                  />
-                </div>
-                <div className="space-y-1.5">
-                  <Label htmlFor="signup-email">Email</Label>
-                  <Input
-                    id="signup-email"
-                    type="email"
-                    placeholder="you@example.com"
-                    value={signUpEmail}
-                    onChange={(e) => setSignUpEmail(e.target.value)}
-                    readOnly={Boolean(invitation && identityEmail)}
-                    required
-                  />
-                </div>
-                <div className="space-y-1.5">
-                  <Label htmlFor="signup-password">Password</Label>
-                  <Input
-                    id="signup-password"
-                    type="password"
-                    placeholder="At least 8 characters"
-                    value={signUpPassword}
-                    onChange={(e) => setSignUpPassword(e.target.value)}
-                    required
-                    minLength={8}
-                  />
-                </div>
-                <Button
-                  type="submit"
-                  className="w-full"
-                  loading={loading}
-                  disabled={loading || !emailAuthReady}
-                >
-                  Create account
-                </Button>
-              </form>
-            </TabsContent>
-          </Tabs>
+              <TabsContent value="signup">
+                <form onSubmit={handleSignUp} className="space-y-3 pt-2">
+                  <div className="space-y-1.5">
+                    <Label htmlFor="signup-name">Name</Label>
+                    <Input
+                      id="signup-name"
+                      type="text"
+                      placeholder="Your name"
+                      value={signUpName}
+                      onChange={(e) => setSignUpName(e.target.value)}
+                      required
+                    />
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label htmlFor="signup-email">Email</Label>
+                    <Input
+                      id="signup-email"
+                      type="email"
+                      placeholder="you@example.com"
+                      value={signUpEmail}
+                      onChange={(e) => setSignUpEmail(e.target.value)}
+                      readOnly={Boolean(invitation && identityEmail)}
+                      required
+                    />
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label htmlFor="signup-password">Password</Label>
+                    <Input
+                      id="signup-password"
+                      type="password"
+                      placeholder="At least 8 characters"
+                      value={signUpPassword}
+                      onChange={(e) => setSignUpPassword(e.target.value)}
+                      required
+                      minLength={8}
+                    />
+                  </div>
+                  <Button
+                    type="submit"
+                    className="w-full"
+                    loading={loading}
+                    disabled={loading || !emailAuthReady}
+                  >
+                    Create account
+                  </Button>
+                </form>
+              </TabsContent>
+            </Tabs>
+          )}
         </CardContent>
       </Card>
     </div>

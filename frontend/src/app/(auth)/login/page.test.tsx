@@ -122,7 +122,7 @@ describe('LoginPage', () => {
     expect(screen.queryByRole('status')).not.toBeInTheDocument();
   });
 
-  it('disables email submit until csrf warmup finishes', () => {
+  it('shows an email auth skeleton until csrf warmup finishes', () => {
     document.cookie = 'csrf_token=; Max-Age=0; path=/';
     useAuthProvidersMock.mockReturnValue({
       providers: { github: true, google: true, email: true },
@@ -131,7 +131,8 @@ describe('LoginPage', () => {
 
     renderWithProviders(<LoginPage />);
 
-    expect(screen.getByRole('button', { name: 'Sign in' })).toBeDisabled();
+    expect(screen.getByTestId('email-auth-skeleton')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Sign in' })).not.toBeInTheDocument();
   });
 
   it('shows GitHub button', () => {
