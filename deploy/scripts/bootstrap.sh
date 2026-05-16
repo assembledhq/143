@@ -22,6 +22,10 @@ chown deploy:deploy /var/log/143
 # Docker (idempotent)
 command -v docker &>/dev/null || (curl -fsSL https://get.docker.com | sh)
 
+# Provision-time helpers merge JSON config with jq. Cloud-init installs it
+# through package metadata, but SSH provisioning only runs this bootstrap.
+command -v jq &>/dev/null || (apt-get update && apt-get install -y jq)
+
 # Add deploy to docker group (must be after Docker install creates the group)
 usermod -aG docker deploy
 

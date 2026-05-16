@@ -411,6 +411,7 @@ func TestDeployPinsDockerDaemonDNSResolvers(t *testing.T) {
 
 	bootstrap, err := os.ReadFile("../deploy/scripts/bootstrap.sh")
 	require.NoError(t, err, "test should read bootstrap.sh")
+	require.Contains(t, string(bootstrap), "apt-get install -y jq", "bootstrap.sh should install jq because install-docker-dns.sh requires it during SSH provisioning")
 	require.Contains(t, string(bootstrap), "/opt/143/deploy/scripts/install-docker-dns.sh *", "bootstrap.sh sudoers Cmnd_Alias must allow install-docker-dns.sh — without it the deploy+sudo path fails on app/worker hosts")
 
 	provision, err := os.ReadFile("../deploy/scripts/provision.sh")
