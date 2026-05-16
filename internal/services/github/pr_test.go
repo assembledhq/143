@@ -3713,6 +3713,7 @@ func TestBuildPushScript_Structure(t *testing.T) {
 
 	script := buildPushScript(
 		"/home/user/repo",
+		"/home/user/.143-pr-commit-msg",
 		"Test User",
 		"test@example.com",
 		"143/abc123/fix-typo",
@@ -3721,7 +3722,7 @@ func TestBuildPushScript_Structure(t *testing.T) {
 
 	// Only the commit-msg file is created by the script; auth comes from
 	// the per-push credential socket, so there's nothing else to clean up.
-	require.Contains(t, script, "cleanup() { rm -f '/tmp/143-pr-commit-msg'; }")
+	require.Contains(t, script, "cleanup() { rm -f '/home/user/.143-pr-commit-msg'; }")
 	require.Contains(t, script, "trap cleanup EXIT")
 
 	// Author identity is set via git config with quoted values.
@@ -3732,7 +3733,7 @@ func TestBuildPushScript_Structure(t *testing.T) {
 	require.Contains(t, script, "cd '/home/user/repo'")
 
 	// Commit message is read from file (not argv).
-	require.Contains(t, script, "git commit -F '/tmp/143-pr-commit-msg'")
+	require.Contains(t, script, "git commit -F '/home/user/.143-pr-commit-msg'")
 
 	// Push uses --force-with-lease keyed on the remote SHA we just observed
 	// via ls-remote. Auth flows through credential.helper=!143-tools
@@ -3758,6 +3759,7 @@ func TestBuildPushScript_QuotesHostileBranchName(t *testing.T) {
 	// shellQuote's '\'' trick must keep the script well-formed.
 	script := buildPushScript(
 		"/home/user/repo",
+		"/home/user/.143-pr-commit-msg",
 		"Bot",
 		"bot@example.com",
 		"143/abc/it's-fine",
@@ -3946,6 +3948,7 @@ func TestPushSessionBranch(t *testing.T) {
 
 	const fakeHeadSHA = "abc1234567890abcdef1234567890abcdef12345"
 	successStdout := pushHeadSHASentinel + fakeHeadSHA + "\n"
+	commitMsgPath := pushCommitMsgPath(agent.DefaultSandboxConfig().HomeDir)
 
 	tests := []struct {
 		name                 string
@@ -3968,7 +3971,7 @@ func TestPushSessionBranch(t *testing.T) {
 		{
 			name:           "write commit message failure returns error",
 			snapshots:      &prTestSnapshotStore{payload: []byte("snapshot")},
-			provider:       &prTestSandboxProvider{writeErrs: map[string]error{pushCommitMsgPath: errors.New("disk full")}},
+			provider:       &prTestSandboxProvider{writeErrs: map[string]error{commitMsgPath: errors.New("disk full")}},
 			wantErrSubstr:  "write commit message to sandbox",
 			wantDestroyCnt: 1,
 		},
@@ -4071,7 +4074,7 @@ func TestPushSessionBranch(t *testing.T) {
 			} else {
 				require.NoError(t, err, "pushSessionBranch should succeed")
 				require.NotNil(t, result, "pushSessionBranch should return a non-nil result on success")
-				require.Equal(t, []byte("commit message"), tt.provider.writes[pushCommitMsgPath], "pushSessionBranch should write the commit message file")
+				require.Equal(t, []byte("commit message"), tt.provider.writes[commitMsgPath], "pushSessionBranch should write the commit message file under the sandbox home directory")
 				require.NotContains(t, tt.provider.lastExecCmd, "GIT_ASKPASS", "pushSessionBranch should auth via the credential socket, not askpass")
 				require.NotContains(t, tt.provider.lastExecCmd, "x-access-token", "pushSessionBranch should not embed credentials in the push URL")
 				require.Equal(t, tt.wantHeadSHA, result.HeadSHA, "pushSessionBranch should return the parsed HEAD SHA")
@@ -4758,7 +4761,7 @@ func TestCreatePR_SuccessPushesSnapshotBranchAndStoresPR(t *testing.T) {
 	require.Equal(t, "owner/repo", pr.GitHubRepo, "CreatePR should store the repository name")
 	require.Equal(t, 1, labelCalls, "CreatePR should add labels to the created PR")
 	require.Equal(t, true, createPRPayload["draft"], "CreatePR should honor the org default draft setting")
-	require.Contains(t, string(provider.writes[pushCommitMsgPath]), "Co-authored-by: Alice <alice@example.com>", "CreatePR should include a co-author trailer when using the app token for a user-triggered run")
+	require.Contains(t, string(provider.writes[pushCommitMsgPath(agent.DefaultSandboxConfig().HomeDir)]), "Co-authored-by: Alice <alice@example.com>", "CreatePR should include a co-author trailer when using the app token for a user-triggered run")
 	require.Contains(t, provider.lastExecCmd, "HEAD:refs/heads/", "CreatePR should push the restored branch before opening the PR")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 	_ = body
