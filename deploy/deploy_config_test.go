@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	"gopkg.in/yaml.v3"
 )
 
 func TestFrontendContainerBindsAllInterfaces(t *testing.T) {
@@ -631,4 +632,26 @@ func TestSandboxDNSConfigAlignment(t *testing.T) {
 	dockerfileText := string(dockerfile)
 	require.Contains(t, dockerfileText, "--server=127.0.0.11", "dnsmasq must forward to Docker's embedded resolver — that's the only place preview-infra container names are registered")
 	require.Contains(t, dockerfileText, "--no-resolv", "dnsmasq must ignore its own /etc/resolv.conf (which itself points at 127.0.0.11) to avoid a forwarding loop")
+}
+
+func TestWorkerCanReachSandboxBridge(t *testing.T) {
+	t.Parallel()
+
+	compose, err := os.ReadFile("../docker-compose.worker.yml")
+	require.NoError(t, err, "test should read the worker compose file")
+
+	var parsed struct {
+		Services map[string]struct {
+			Networks map[string]struct {
+				GatewayPriority int `yaml:"gw_priority"`
+			} `yaml:"networks"`
+		} `yaml:"services"`
+	}
+	require.NoError(t, yaml.Unmarshal(compose, &parsed), "worker compose should be valid YAML")
+
+	worker, ok := parsed.Services["worker"]
+	require.True(t, ok, "worker compose should define the worker service")
+	require.Contains(t, worker.Networks, "default", "worker must stay on the default compose network so it can reach chrome and other local services")
+	require.Contains(t, worker.Networks, "sandbox", "worker must join 143-sandbox so preview proxy dials can reach sandbox container IPs")
+	require.Greater(t, worker.Networks["default"].GatewayPriority, worker.Networks["sandbox"].GatewayPriority, "worker default gateway must stay on the compose default network so DB/private-fleet traffic does not route through the sandbox bridge")
 }

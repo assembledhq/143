@@ -115,7 +115,7 @@ import {
   readStoredViewedThreadIds,
   writeStoredViewedThreadIds,
 } from "@/lib/session-thread-views";
-import type { ListResponse, Session, SessionDetail, SessionInputCommand, SessionInputReference, SessionLog, SessionMessage, SessionReviewComment, SessionThread, SessionThreadFileEvent, SessionTimelineEntry, User, CodexAuthStatus, PullRequestHealthResponse, SingleResponse } from "@/lib/types";
+import type { HumanInputAnswerBody, HumanInputRequest, ListResponse, Session, SessionDetail, SessionInputCommand, SessionInputReference, SessionLog, SessionMessage, SessionReviewComment, SessionThread, SessionThreadFileEvent, SessionTimelineEntry, User, CodexAuthStatus, PullRequestHealthResponse, SingleResponse } from "@/lib/types";
 import { AgentTabStrip, computeThreadOverlap } from "./agent-tab-strip";
 import {
   ThreadAttributionFilter,
@@ -208,6 +208,14 @@ type PendingEditableThreadUpdate = {
   // present on this path so the backend treats omission separately.
   model: string | null;
 };
+
+type QueryInvalidator = {
+  invalidateQueries: (filters: { queryKey: readonly unknown[] }) => unknown;
+};
+
+export function invalidateSessionHumanInputRequests(queryClient: QueryInvalidator, sessionId: string): void {
+  queryClient.invalidateQueries({ queryKey: ["session", sessionId, "human-input-requests"] });
+}
 
 const statusConfig: Record<string, { color: string; label: string }> = {
   pending: { color: "bg-muted text-muted-foreground", label: "Pending" },
@@ -1899,6 +1907,7 @@ function ChatPanel({
 }: ChatPanelProps) {
   const queryClient = useQueryClient();
   const [streamedLogs, setStreamedLogs] = useState<SessionLog[]>([]);
+  const [dismissedHumanInputIds, setDismissedHumanInputIds] = useState<Set<string>>(() => new Set());
   const scrollRef = useRef<HTMLDivElement>(null);
   const isNearBottomRef = useRef(false);
   const initialAnchorAppliedRef = useRef(false);
@@ -1936,6 +1945,73 @@ function ChatPanel({
     refetchInterval: activeThread && workingStatusesSet.has(activeThread.status) ? 3000 : false,
   });
 
+  const humanInputStatusFilter = activeThreadId ? undefined : "pending";
+  const humanInputQuery = useQuery({
+    queryKey: queryKeys.sessions.humanInputRequests(sessionId, humanInputStatusFilter ?? null, activeThreadId ?? null),
+    queryFn: () => api.sessions.getHumanInputRequests(sessionId, { status: humanInputStatusFilter, threadId: activeThreadId ?? null }),
+    refetchInterval: isActive && (session.status === "awaiting_input" || activeThread?.status === "awaiting_input") ? 3000 : false,
+  });
+  const pendingHumanInputs = useMemo(() => {
+    const requests = humanInputQuery.data?.data ?? [];
+    return requests.filter((request) => {
+      if (request.status !== "pending") return false;
+      if (activeThreadId) return request.thread_id === activeThreadId;
+      return !request.thread_id;
+    });
+  }, [activeThreadId, humanInputQuery.data?.data]);
+  const canAnswerHumanInput = session.status === "awaiting_input" || activeThread?.status === "awaiting_input";
+  const autoOpenHumanInputId = canAnswerHumanInput
+    ? pendingHumanInputs.find((request) => !dismissedHumanInputIds.has(request.id))?.id ?? null
+    : null;
+
+  const invalidateHumanInput = useCallback(() => {
+    invalidateSessionHumanInputRequests(queryClient, sessionId);
+    queryClient.invalidateQueries({ queryKey: ["session", sessionId] });
+    queryClient.invalidateQueries({ queryKey: ["session", sessionId, "timeline"] });
+    if (activeThreadId) {
+      queryClient.invalidateQueries({ queryKey: queryKeys.sessions.threadMessages(sessionId, activeThreadId) });
+      queryClient.invalidateQueries({ queryKey: queryKeys.sessions.threadLogs(sessionId, activeThreadId) });
+    }
+  }, [activeThreadId, queryClient, sessionId]);
+
+  const answerHumanInputMutation = useMutation({
+    mutationFn: ({ request, body }: { request: HumanInputRequest; body: HumanInputAnswerBody }) =>
+      api.sessions.answerHumanInputRequest(sessionId, request.id, body),
+    onSuccess: () => {
+      invalidateHumanInput();
+    },
+    onError: (error) => {
+      toast.error(error instanceof ApiError ? error.message : "Failed to answer request");
+    },
+  });
+
+  const cancelHumanInputMutation = useMutation({
+    mutationFn: (request: HumanInputRequest) => api.sessions.cancelHumanInputRequest(sessionId, request.id),
+    onSuccess: () => {
+      invalidateHumanInput();
+    },
+    onError: (error) => {
+      toast.error(error instanceof ApiError ? error.message : "Failed to cancel request");
+    },
+  });
+
+  const handleAnswerHumanInput = useCallback(async (request: HumanInputRequest, body: HumanInputAnswerBody) => {
+    await answerHumanInputMutation.mutateAsync({ request, body });
+    setDismissedHumanInputIds((current) => new Set(current).add(request.id));
+  }, [answerHumanInputMutation]);
+
+  const handleCancelHumanInput = useCallback(async (request: HumanInputRequest) => {
+    await cancelHumanInputMutation.mutateAsync(request);
+    setDismissedHumanInputIds((current) => new Set(current).add(request.id));
+  }, [cancelHumanInputMutation]);
+
+  const handleDismissHumanInputAutoOpen = useCallback((request: HumanInputRequest) => {
+    setDismissedHumanInputIds((current) => {
+      if (current.has(request.id)) return current;
+      return new Set(current).add(request.id);
+    });
+  }, []);
+
   // Fetch the linked primary issue to display its description as the initial prompt.
   const primaryIssueId = session.primary_issue_id ?? undefined;
   const hasIssue = !!primaryIssueId;
@@ -1950,16 +2026,19 @@ function ChatPanel({
       activeThreadId ? message.thread_id === activeThreadId : !message.thread_id
     );
     if (activeThreadId) {
-      return buildTimeline(
+      const threadHumanInputEntries: TimelineEntry[] = (humanInputQuery.data?.data ?? [])
+        .filter((request) => request.thread_id === activeThreadId)
+        .map((request) => ({ kind: "human_input" as const, data: request }));
+      return sortTimelineEntries([...buildTimeline(
         mergePendingMessages(threadMessagesQuery.data?.data ?? [], optimisticForCurrentView),
         threadLogsQuery.data?.data ?? [],
-      );
+      ), ...threadHumanInputEntries]);
     }
     const flattenedTimeline = flattenTimelineResponse(timelineQuery.data?.data ?? []);
-    const entries = buildTimeline(
+    const entries = sortTimelineEntries([...buildTimeline(
       mergePendingMessages(flattenedTimeline.messages, optimisticForCurrentView),
       flattenedTimeline.logs,
-    );
+    ), ...flattenedTimeline.humanInputs.map((request) => ({ kind: "human_input" as const, data: request }))]);
     const issueDescription = issueQuery.data?.data?.description;
     if (!issueDescription) return entries;
     const hasTurn0UserMsg = entries.some((entry) => entry.kind === "message" && entry.data.role === "user" && entry.data.turn_number === 0);
@@ -1974,7 +2053,7 @@ function ChatPanel({
       created_at: session.created_at,
     };
     return [{ kind: "message" as const, data: syntheticMsg }, ...entries];
-  }, [activeThreadId, optimisticMessages, threadMessagesQuery.data?.data, threadLogsQuery.data?.data, timelineQuery.data?.data, issueQuery.data?.data?.description, sessionId, session.org_id, session.created_at]);
+  }, [activeThreadId, optimisticMessages, threadMessagesQuery.data?.data, threadLogsQuery.data?.data, timelineQuery.data?.data, issueQuery.data?.data?.description, sessionId, session.org_id, session.created_at, humanInputQuery.data?.data]);
 
   // Walk baseTimelineEntries once when it changes to derive the dedup keys
   // used to filter streamedLogs. Splitting this out of the timelineEntries
@@ -1984,6 +2063,7 @@ function ChatPanel({
     const fetchedLogIds = new Set<number>();
     const assistantTranscriptByTurn = new Map<number, Set<string>>();
     const planModeSeedMessages: SessionMessage[] = [];
+    const humanInputIds = new Set<string>();
 
     for (const entry of baseTimelineEntries) {
       switch (entry.kind) {
@@ -2015,14 +2095,20 @@ function ChatPanel({
             fetchedLogIds.add(entry.toolResult.id);
           }
           break;
+        case "human_input":
+          humanInputIds.add(entry.data.id);
+          break;
       }
     }
 
-    return { fetchedLogIds, assistantTranscriptByTurn, planModeSeedMessages };
+    return { fetchedLogIds, assistantTranscriptByTurn, planModeSeedMessages, humanInputIds };
   }, [baseTimelineEntries]);
 
   const timelineEntries = useMemo(() => {
-    const { fetchedLogIds, assistantTranscriptByTurn, planModeSeedMessages } = baseTimelineDedupKeys;
+    const { fetchedLogIds, assistantTranscriptByTurn, planModeSeedMessages, humanInputIds } = baseTimelineDedupKeys;
+    const humanInputEntries: TimelineEntry[] = pendingHumanInputs
+      .filter((request) => !humanInputIds.has(request.id))
+      .map((request) => ({ kind: "human_input", data: request }));
 
     const overlayLogs = streamedLogs.filter((log) => {
       if (fetchedLogIds.has(log.id)) return false;
@@ -2032,10 +2118,10 @@ function ChatPanel({
       return !assistantTranscriptByTurn.get(log.turn_number)?.has(normalizeTranscriptContent(log.message));
     });
 
-    if (overlayLogs.length === 0) return baseTimelineEntries;
+    if (overlayLogs.length === 0) return sortTimelineEntries([...baseTimelineEntries, ...humanInputEntries]);
     const overlayEntries = buildTimeline(planModeSeedMessages, overlayLogs).filter((entry) => entry.kind !== "message");
-    return sortTimelineEntries([...baseTimelineEntries, ...overlayEntries]);
-  }, [baseTimelineEntries, baseTimelineDedupKeys, streamedLogs]);
+    return sortTimelineEntries([...baseTimelineEntries, ...overlayEntries, ...humanInputEntries]);
+  }, [baseTimelineEntries, baseTimelineDedupKeys, pendingHumanInputs, streamedLogs]);
   const hasLoadedTimelineInputs = activeThreadId
     ? threadMessagesQuery.isFetched && threadLogsQuery.isFetched
     : timelineQuery.isFetched && (!hasIssue || issueQuery.isFetched);
@@ -2223,6 +2309,23 @@ function ChatPanel({
         if (!activeThreadId || log.thread_id === activeThreadId) {
           mergeLogs([log]);
         }
+        if (log.level === "human_input") {
+          invalidateSessionHumanInputRequests(queryClient, sessionId);
+        }
+      });
+
+      addSSEListener(eventSource, SSE_EVENT.HUMAN_INPUT_CREATED, () => {
+        invalidateSessionHumanInputRequests(queryClient, sessionId);
+        queryClient.invalidateQueries({ queryKey: ["session", sessionId, "timeline"] });
+      });
+
+      addSSEListener(eventSource, SSE_EVENT.HUMAN_INPUT_UPDATED, () => {
+        invalidateSessionHumanInputRequests(queryClient, sessionId);
+        queryClient.invalidateQueries({ queryKey: ["session", sessionId, "timeline"] });
+        if (activeThreadId) {
+          queryClient.invalidateQueries({ queryKey: queryKeys.sessions.threadMessages(sessionId, activeThreadId) });
+          queryClient.invalidateQueries({ queryKey: queryKeys.sessions.threadLogs(sessionId, activeThreadId) });
+        }
       });
 
       addSSEListener(eventSource, SSE_EVENT.STATUS, (updated) => {
@@ -2232,6 +2335,7 @@ function ChatPanel({
         // message posted by the backend is displayed immediately.
         if (updated.status !== "running") {
           queryClient.invalidateQueries({ queryKey: ["session", sessionId, "timeline"] });
+          invalidateSessionHumanInputRequests(queryClient, sessionId);
           if (activeThreadId) {
             queryClient.invalidateQueries({ queryKey: queryKeys.sessions.threadMessages(sessionId, activeThreadId) });
             queryClient.invalidateQueries({ queryKey: queryKeys.sessions.threadLogs(sessionId, activeThreadId) });
@@ -2243,6 +2347,7 @@ function ChatPanel({
         mergeSessionStatusUpdate(updated);
         eventSource?.close();
         queryClient.invalidateQueries({ queryKey: ["session", sessionId, "timeline"] });
+        invalidateSessionHumanInputRequests(queryClient, sessionId);
         if (activeThreadId) {
           queryClient.invalidateQueries({ queryKey: queryKeys.sessions.threadMessages(sessionId, activeThreadId) });
           queryClient.invalidateQueries({ queryKey: queryKeys.sessions.threadLogs(sessionId, activeThreadId) });
@@ -2383,6 +2488,18 @@ function ChatPanel({
               onDiffClick={onDiffClick}
               onApprovePlan={canSendMessage ? onApprovePlan : undefined}
               onAdjustPlan={canSendMessage ? onAdjustPlan : undefined}
+              humanInputSubmittingId={
+                answerHumanInputMutation.isPending
+                  ? answerHumanInputMutation.variables?.request.id ?? null
+                  : cancelHumanInputMutation.isPending
+                    ? cancelHumanInputMutation.variables?.id ?? null
+                    : null
+              }
+              autoOpenHumanInputId={autoOpenHumanInputId}
+              humanInputAnswerable={canAnswerHumanInput}
+              onAnswerHumanInput={handleAnswerHumanInput}
+              onCancelHumanInput={handleCancelHumanInput}
+              onDismissHumanInputAutoOpen={handleDismissHumanInputAutoOpen}
               getEntryContainerProps={getEntryContainerProps}
             />
           </>
@@ -3572,6 +3689,7 @@ export function SessionDetailContent({ id }: { id: string }) {
       }
       queryClient.invalidateQueries({ queryKey: ["session", id] });
       queryClient.invalidateQueries({ queryKey: ["session", id, "timeline"] });
+      invalidateSessionHumanInputRequests(queryClient, id);
       if (vars.activeThreadId) {
         queryClient.invalidateQueries({ queryKey: queryKeys.sessions.threadMessages(id, vars.activeThreadId) });
         queryClient.invalidateQueries({ queryKey: queryKeys.sessions.threadLogs(id, vars.activeThreadId) });

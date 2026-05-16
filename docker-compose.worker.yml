@@ -123,6 +123,15 @@ services:
     # expose 8080 on the public IP for monitoring.
     ports:
       - "${WORKER_PRIVATE_IP:?missing in /opt/143/.env.local}:8080:8080"
+    networks:
+      # The worker must join 143-sandbox to dial preview/sandbox container IPs,
+      # but DB/private-fleet traffic must keep using the normal compose bridge
+      # default gateway. If Docker picks 143-sandbox as the default route,
+      # startup DB pings go through the sandbox egress path and time out.
+      default:
+        gw_priority: 1
+      sandbox:
+        gw_priority: 0
     group_add:
       - ${DOCKER_GID:-988}
     volumes:
