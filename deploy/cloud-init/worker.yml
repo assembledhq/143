@@ -102,6 +102,19 @@ runcmd:
   # this step so .env.local stays the source of truth for per-host values.
   - su - deploy -c 'cat /opt/143/.env.local >> /opt/143/.env'
 
+  # Provision /var/run/143/sandbox-auth before docker compose starts. If this
+  # bind-mount source is missing, Docker creates it as root:root 0755 and the
+  # worker correctly refuses to open per-session GitHub credential sockets.
+  - |
+    cat > /etc/tmpfiles.d/143-sandbox-auth.conf <<'TMPFILES'
+    d /var/run/143 0755 root root -
+    d /var/run/143/sandbox-auth 0750 1000 1000 -
+    TMPFILES
+    systemd-tmpfiles --create /etc/tmpfiles.d/143-sandbox-auth.conf
+    mkdir -p /var/run/143/sandbox-auth
+    chown 1000:1000 /var/run/143/sandbox-auth
+    chmod 0750 /var/run/143/sandbox-auth
+
   # Start the worker
   - su - deploy -c 'cd /opt/143 && docker compose -f docker-compose.worker.yml up -d --remove-orphans'
 
