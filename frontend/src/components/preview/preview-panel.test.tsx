@@ -582,11 +582,17 @@ describe("PreviewPanel component", () => {
       expect(screen.getByText("Preview failed to start")).toBeInTheDocument();
     });
 
+    const startupLogRegion = screen.getByLabelText("Preview startup error logs");
+    expect(startupLogRegion).toHaveTextContent(summary);
+
     await user.click(screen.getByRole("button", { name: "Show full error logs" }));
 
-    expect(
-      await screen.findByText(/duplicate migration file: 000125_github_installation_repo_claims\.down\.sql/),
-    ).toBeInTheDocument();
+    await waitFor(() => {
+      expect(startupLogRegion).toHaveTextContent(
+        /duplicate migration file: 000125_github_installation_repo_claims\.down\.sql/,
+      );
+    });
+    expect(screen.getByRole("button", { name: "Show summary" })).toBeInTheDocument();
     expect(mockLogs).toHaveBeenCalledWith("sess-1");
   });
 
