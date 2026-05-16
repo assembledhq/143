@@ -2,7 +2,10 @@ package adapters
 
 import (
 	"context"
+	"encoding/json"
 	"io"
+	"os"
+	"os/exec"
 	"strings"
 	"testing"
 
@@ -348,12 +351,125 @@ func TestClaudeCodeAdapter_Execute_ContinuationWithSessionIDUsesResumeByID(t *te
 	require.False(t, exists, "deterministic resume should not write a fresh prompt file")
 }
 
+func TestPrepareClaudeHumanInputHooks_ConfiguresActionableToolApprovals(t *testing.T) {
+	t.Parallel()
+
+	provider := testutil.NewMockSandboxProvider()
+	sandbox := &agent.Sandbox{ID: "s1", WorkDir: "/workspace", HomeDir: "/home/sandbox"}
+
+	_, envPrefix, err := prepareClaudeHumanInputHooks(context.Background(), provider, sandbox, &agent.AgentPrompt{})
+	require.NoError(t, err, "prepareClaudeHumanInputHooks should write hook settings")
+	require.Contains(t, envPrefix, "CLAUDE_143_HUMAN_INPUT_TOOLS=", "hook command environment should carry the shared tool matcher list")
+	for _, matcher := range claudeHumanInputHookMatchers {
+		require.Contains(t, envPrefix, matcher, "hook command environment should include matcher %s", matcher)
+	}
+
+	settingsBytes := provider.Files["/home/sandbox/.143-claude-settings.json"]
+	require.NotEmpty(t, settingsBytes, "Claude settings should be written into the sandbox home")
+
+	var settings struct {
+		Hooks map[string][]struct {
+			Matcher string `json:"matcher"`
+		} `json:"hooks"`
+	}
+	require.NoError(t, json.Unmarshal(settingsBytes, &settings), "Claude settings should be valid JSON")
+	require.NotEmpty(t, settings.Hooks["PreToolUse"], "settings should configure PreToolUse hooks")
+
+	matchers := map[string]bool{}
+	for _, hook := range settings.Hooks["PreToolUse"] {
+		matchers[hook.Matcher] = true
+	}
+	for _, matcher := range []string{"AskUserQuestion", "Bash", "Edit", "MultiEdit", "Write", "WebFetch", "WebSearch"} {
+		require.True(t, matchers[matcher], "PreToolUse hooks should route %s approvals through 143", matcher)
+	}
+}
+
+func TestClaudeHumanInputHookScopesResumeAnswerToMatchingToolUse(t *testing.T) {
+	t.Parallel()
+
+	answer := map[string]any{
+		"ProviderRequestID": "toolu_expected",
+		"Status":            string(models.HumanInputRequestStatusAnswered),
+		"SelectedChoiceIDs": []string{"approve"},
+		"AnswerPayload":     map[string]any{"decision": "approve"},
+	}
+	output := runClaudeHumanInputHookForTest(t, map[string]any{
+		"tool_name":   "Bash",
+		"tool_use_id": "toolu_other",
+		"tool_input": map[string]any{
+			"command": "echo unrelated",
+		},
+	}, answer)
+
+	hookOutput := output["hookSpecificOutput"].(map[string]any)
+	require.Equal(t, "defer", hookOutput["permissionDecision"], "hook should defer unrelated tool uses instead of replaying another request answer")
+}
+
+func TestClaudeHumanInputHookConsumesMatchedResumeAnswer(t *testing.T) {
+	t.Parallel()
+
+	answerPath := writeClaudeHumanInputAnswerForTest(t, map[string]any{
+		"ProviderRequestID": "toolu_expected",
+		"Status":            string(models.HumanInputRequestStatusAnswered),
+		"SelectedChoiceIDs": []string{"approve"},
+		"AnswerPayload":     map[string]any{"decision": "approve"},
+	})
+	output := runClaudeHumanInputHookWithAnswerPathForTest(t, map[string]any{
+		"tool_name":   "Bash",
+		"tool_use_id": "toolu_expected",
+		"tool_input": map[string]any{
+			"command": "echo ok",
+		},
+	}, answerPath)
+
+	hookOutput := output["hookSpecificOutput"].(map[string]any)
+	require.Equal(t, "allow", hookOutput["permissionDecision"], "hook should apply the answer to the matching tool use")
+	_, err := os.Stat(answerPath)
+	require.True(t, os.IsNotExist(err), "hook should consume the answer file once it applies the matching answer")
+}
+
+func runClaudeHumanInputHookForTest(t *testing.T, event map[string]any, answer map[string]any) map[string]any {
+	t.Helper()
+	answerPath := writeClaudeHumanInputAnswerForTest(t, answer)
+	return runClaudeHumanInputHookWithAnswerPathForTest(t, event, answerPath)
+}
+
+func writeClaudeHumanInputAnswerForTest(t *testing.T, answer map[string]any) string {
+	t.Helper()
+	answerPath := t.TempDir() + "/answer.json"
+	answerBytes, err := json.Marshal(answer)
+	require.NoError(t, err, "test answer should marshal as JSON")
+	require.NoError(t, os.WriteFile(answerPath, answerBytes, 0o600), "test answer file should be written")
+	return answerPath
+}
+
+func runClaudeHumanInputHookWithAnswerPathForTest(t *testing.T, event map[string]any, answerPath string) map[string]any {
+	t.Helper()
+	hookPath := t.TempDir() + "/hook.mjs"
+	require.NoError(t, os.WriteFile(hookPath, []byte(claudeHumanInputHookScript), 0o700), "Claude human-input hook should be written for execution")
+
+	eventBytes, err := json.Marshal(event)
+	require.NoError(t, err, "test hook event should marshal as JSON")
+	cmd := exec.Command("node", hookPath)
+	cmd.Env = append(os.Environ(),
+		"CLAUDE_143_HUMAN_INPUT_TOOLS=AskUserQuestion,Bash,Edit,MultiEdit,Write,WebFetch,WebSearch",
+		"CLAUDE_143_HUMAN_INPUT_ANSWER="+answerPath,
+	)
+	cmd.Stdin = strings.NewReader(string(eventBytes))
+	outputBytes, err := cmd.CombinedOutput()
+	require.NoError(t, err, "Claude human-input hook should execute successfully: %s", string(outputBytes))
+
+	var output map[string]any
+	require.NoError(t, json.Unmarshal(outputBytes, &output), "Claude human-input hook should output valid JSON")
+	return output
+}
+
 func TestClaudeCodeAdapter_Execute_ContinuationWithoutSessionIDFallsBackToFreshExec(t *testing.T) {
 	t.Parallel()
 
 	provider := testutil.NewMockSandboxProvider()
 	provider.ExecFn = func(ctx context.Context, sb *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
-		if strings.HasPrefix(cmd, "claude") {
+		if strings.Contains(cmd, "claude --print") {
 			_, _ = stdout.Write([]byte(`{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"continuing the session"}]}}`))
 			return 0, nil
 		}
@@ -462,7 +578,7 @@ func TestClaudeCodeAdapter_Execute_CapturesResultEventSessionID(t *testing.T) {
 
 	provider := testutil.NewMockSandboxProvider()
 	provider.ExecFn = func(ctx context.Context, sb *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
-		if strings.HasPrefix(cmd, "claude") {
+		if strings.Contains(cmd, "claude --print") {
 			// Claude Code emits the session id on its terminal `result` event.
 			_, _ = stdout.Write([]byte(`{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"done"}]}}` + "\n" +
 				`{"type":"result","subtype":"success","result":"summary","session_id":"claude-session-xyz"}`))
@@ -643,6 +759,26 @@ func TestParseStreamOutput(t *testing.T) {
 				require.Equal(t, 1000, result.TokenUsage.InputTokens)
 				require.Equal(t, 500, result.TokenUsage.OutputTokens)
 				require.Equal(t, "sess-z", result.AgentSessionID)
+			},
+		},
+		{
+			name:   "result event with deferred AskUserQuestion emits human input request",
+			output: `{"type":"result","subtype":"success","stop_reason":"tool_deferred","session_id":"sess-z","deferred_tool_use":{"id":"toolu_01abc","name":"AskUserQuestion","input":{"questions":[{"header":"Framework","question":"Which framework?","multiSelect":false,"options":[{"label":"React","description":"Use React"},{"label":"Vue","description":"Use Vue"}]}]}}}`,
+			checkResult: func(t *testing.T, result *agent.AgentResult, logs []agent.LogEntry) {
+				t.Helper()
+				require.True(t, result.RequiresHumanInput, "deferred AskUserQuestion should pause the orchestrator")
+				require.Equal(t, "sess-z", result.AgentSessionID, "deferred result should still capture session id")
+				require.Len(t, logs, 2, "deferred result should log summary plus human input request")
+				require.Equal(t, "human_input", logs[1].Level, "deferred tool should emit a structured human input log")
+				require.NotNil(t, logs[1].HumanInput, "human input log should carry the normalized request")
+				require.Equal(t, "toolu_01abc", logs[1].HumanInput.ProviderRequestID, "provider request id should come from deferred tool id")
+				require.Equal(t, models.HumanInputRequestKindSingleChoice, logs[1].HumanInput.Kind, "single-select options should map to single_choice")
+				require.Equal(t, "Framework", logs[1].HumanInput.Title, "header should become the request title")
+				require.Equal(t, "Which framework?", logs[1].HumanInput.Body, "question should become the request body")
+				require.Equal(t, []models.HumanInputChoice{
+					{ID: "react", Label: "React", Description: "Use React"},
+					{ID: "vue", Label: "Vue", Description: "Use Vue"},
+				}, logs[1].HumanInput.Choices, "options should be normalized into action rows")
 			},
 		},
 		{

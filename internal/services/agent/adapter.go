@@ -274,6 +274,11 @@ type AgentPrompt struct {
 	// PreparePrompt is bypassed on continuation turns, so adapters that need
 	// repair-specific context read it from here. Nil for ordinary turns.
 	RevisionContext *RevisionContext
+	// HumanInputAnswer carries a normalized answer to a provider-native
+	// deferred request. Adapters with native resume hooks can translate this
+	// back into provider-specific callback payloads instead of treating the
+	// answer as plain follow-up text only.
+	HumanInputAnswer *HumanInputAnswer
 }
 
 // AgentResult is the outcome of an agent execution.
@@ -287,6 +292,30 @@ type AgentResult struct {
 	ConfidenceReasoning string
 	RiskFactors         []string
 	AgentSessionID      string // agent's internal session ID, used for --resume on subsequent turns
+	RequiresHumanInput  bool
+}
+
+type HumanInputRequest struct {
+	ProviderRequestID string
+	Kind              models.HumanInputRequestKind
+	Title             string
+	Body              string
+	Context           *string
+	BlocksPhase       *string
+	Choices           []models.HumanInputChoice
+	ResponseSchema    json.RawMessage
+	ProviderPayload   json.RawMessage
+}
+
+type HumanInputAnswer struct {
+	RequestID         uuid.UUID
+	ProviderRequestID string
+	Kind              models.HumanInputRequestKind
+	Status            models.HumanInputRequestStatus
+	AnswerText        *string
+	SelectedChoiceIDs []string
+	AnswerPayload     json.RawMessage
+	Choices           []models.HumanInputChoice
 }
 
 // TokenUsage tracks LLM token consumption and cost for an agent run.
@@ -353,11 +382,12 @@ type TokenUsageHint struct {
 
 // LogEntry represents a single log line emitted during agent execution.
 type LogEntry struct {
-	Timestamp time.Time              `json:"timestamp"`
-	Level     string                 `json:"level"` // info, debug, error, tool_use, output, question
-	Message   string                 `json:"message"`
-	ThreadID  *uuid.UUID             `json:"thread_id,omitempty"`
-	Metadata  map[string]interface{} `json:"metadata,omitempty"`
+	Timestamp  time.Time              `json:"timestamp"`
+	Level      string                 `json:"level"` // info, debug, error, tool_use, output, question
+	Message    string                 `json:"message"`
+	ThreadID   *uuid.UUID             `json:"thread_id,omitempty"`
+	Metadata   map[string]interface{} `json:"metadata,omitempty"`
+	HumanInput *HumanInputRequest     `json:"human_input,omitempty"`
 }
 
 // SandboxProvider abstracts sandbox lifecycle management.
