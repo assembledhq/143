@@ -50,6 +50,15 @@ describe("DiffLineRow", () => {
     expect(screen.getByText("highlighted")).toBeInTheDocument();
   });
 
+  it("allows long line content to wrap while preserving whitespace", () => {
+    const { container } = render(
+      <DiffLineRow line={makeLine({ content: "const token = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';" })} />
+    );
+    const content = container.querySelector('[data-testid="diff-line-content"]');
+    expect(content).toHaveClass("whitespace-pre-wrap");
+    expect(content).toHaveClass("break-words");
+  });
+
   it("renders non-breaking space for empty content", () => {
     const { container } = render(
       <DiffLineRow line={makeLine({ content: "" })} />
