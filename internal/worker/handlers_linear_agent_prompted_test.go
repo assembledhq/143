@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/assembledhq/143/internal/db"
+	"github.com/assembledhq/143/internal/jobctx"
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/services/linear"
 	"github.com/google/uuid"
@@ -80,6 +81,45 @@ func TestPromptedWithoutCreated(t *testing.T) {
 		"only the Lookup query should fire — no claims, no message inserts, no continue_session enqueue")
 }
 
+// TestPromptedDeadlineExceededWithoutBridgeRowReturnsTerminal pins the H4
+// fix: when the bridge row never appears (Linear sent prompted but no
+// created), the worker must stop retrying once the job's age exceeds
+// promptedAwaitingCreateDeadline. Without this bound, RetryableError's
+// preserveAttempts semantics combined with the 5s backoff would loop until
+// the global 8-min worker cap dead-letters the job — wasted work and no
+// user-facing signal.
+func TestPromptedDeadlineExceededWithoutBridgeRowReturnsTerminal(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "test should create pgx mock")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	mock.ExpectQuery("SELECT id, org_id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnError(pgx.ErrNoRows)
+
+	deps := LinearAgentEventHandlerDeps{
+		Stores: &Stores{},
+		Logger: zerolog.Nop(),
+	}
+	store := db.NewLinearAgentSessionStore(mock)
+
+	// Synthesize a job context whose CreatedAt is well past the
+	// awaiting-created deadline.
+	ctx := jobctx.WithJobCreatedAt(context.Background(), time.Now().Add(-2*promptedAwaitingCreateDeadline))
+
+	err = handleLinearAgentPrompted(ctx, deps, store, linearAgentEventPayload{
+		Action:               "prompted",
+		OrgID:                orgID.String(),
+		LinearAgentSessionID: "as_never_created",
+		LinearCommentID:      "comment_1",
+	}, zerolog.Nop())
+	require.NoError(t, err, "expired prompted-without-created job must drop terminally (return nil), not keep retrying")
+	require.NoError(t, mock.ExpectationsWereMet(), "only the Lookup query should fire on the terminal path")
+}
+
 func TestPromptedLookupMissRetriesForOutOfOrderCreated(t *testing.T) {
 	t.Parallel()
 
@@ -107,6 +147,34 @@ func TestPromptedLookupMissRetriesForOutOfOrderCreated(t *testing.T) {
 	require.ErrorAs(t, err, &retryable, "missing AgentSession row should retry because prompted can beat created delivery")
 	require.NotNil(t, retryable.RetryAfter, "lookup-miss retry should use the short prompted-created race backoff")
 	require.NoError(t, mock.ExpectationsWereMet(), "handler should only lookup the agent session before retrying")
+}
+
+// TestLinearFetchErrorIsTransient_TerminalErrors pins the bounded-retry
+// contract for the prompted handler's comment-fetch path. ErrUnauthorized
+// MUST be terminal because the worker's RetryableError contract does not
+// consume the Attempts counter — an "unauthorized is transient" classifier
+// would loop forever on a revoked token (see review finding H3).
+// ErrCommentNotFound is also terminal because Linear deleted the comment;
+// retrying produces the same 404.
+func TestLinearFetchErrorIsTransient_TerminalErrors(t *testing.T) {
+	t.Parallel()
+
+	require.False(t, linearFetchErrorIsTransient(linear.ErrUnauthorized),
+		"401 must be terminal so the handler falls back to placeholder text instead of retrying forever")
+	require.False(t, linearFetchErrorIsTransient(linear.ErrCommentNotFound),
+		"comment-not-found must be terminal — Linear deleted the comment")
+	require.False(t, linearFetchErrorIsTransient(nil), "nil error is not transient")
+}
+
+// TestLinearFetchErrorIsTransient_RetryableErrors pins that genuine transient
+// failures (rate limits, unknown / network) remain classified as retryable.
+func TestLinearFetchErrorIsTransient_RetryableErrors(t *testing.T) {
+	t.Parallel()
+
+	require.True(t, linearFetchErrorIsTransient(&linear.RateLimitError{RetryAfter: "10"}),
+		"rate-limit must be transient")
+	require.True(t, linearFetchErrorIsTransient(errors.New("dial tcp: connection refused")),
+		"network errors must be transient")
 }
 
 func TestResolvePromptedCommentBodyPrefersWebhookAgentActivityBody(t *testing.T) {

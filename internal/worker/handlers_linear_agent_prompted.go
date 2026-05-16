@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/assembledhq/143/internal/db"
+	"github.com/assembledhq/143/internal/jobctx"
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/services/linear"
 	"github.com/google/uuid"
@@ -23,6 +24,18 @@ import (
 // few inserts) completes, short enough that human-perceived latency on
 // the follow-up comment stays bounded.
 var promptedAwaitingCreateBackoff = 5 * time.Second
+
+// promptedAwaitingCreateDeadline bounds how long the worker will retry a
+// prompted event waiting on `created` before giving up. The
+// RetryableError contract does not consume the worker's Attempts counter
+// (worker.go preserveAttempts), so without an explicit deadline a prompted
+// job that never sees its sibling `created` would loop until the global
+// maxRetryableDuration (8 min) dead-letters it — silent to the user on
+// the Linear side. Two minutes is long enough to absorb out-of-order
+// webhook delivery and slow created paths (Linear API + session
+// bootstrapping) while still surfacing a real "stuck" condition to the
+// operator before the dead-letter sweep.
+var promptedAwaitingCreateDeadline = 2 * time.Minute
 
 // promptedAppendRaceBackoff is the short retry used when a prompted event
 // initially observes a running session, but the turn finishes before the
@@ -61,6 +74,18 @@ func handleLinearAgentPrompted(ctx context.Context, deps LinearAgentEventHandler
 	row, err := agentSessions.Lookup(ctx, orgID, payload.LinearAgentSessionID)
 	if err != nil {
 		if errors.Is(err, db.ErrLinearAgentSessionNotFound) {
+			if promptedDeadlineExceeded(ctx) {
+				logger.Error().Str("agent_session_id", payload.LinearAgentSessionID).
+					Dur("deadline", promptedAwaitingCreateDeadline).
+					Msg("linear_agent_event: prompted gave up waiting for created event; treating as terminal")
+				// No bridge row exists (created never arrived). We can't
+				// dedupe via activity_log without a row id, so we just
+				// drop the job and rely on operator visibility through the
+				// logged error. Returning nil marks the job complete so
+				// it doesn't continue to retry — Linear already 200'd at
+				// dispatcher time so there's no Linear-side resend.
+				return nil
+			}
 			logger.Warn().Str("agent_session_id", payload.LinearAgentSessionID).
 				Msg("prompted received before created row exists; retrying shortly")
 			return &RetryableError{
@@ -71,6 +96,17 @@ func handleLinearAgentPrompted(ctx context.Context, deps LinearAgentEventHandler
 		return fmt.Errorf("lookup agent session: %w", err)
 	}
 	if row.SessionID == nil {
+		if promptedDeadlineExceeded(ctx) {
+			logger.Error().Str("agent_session_id", payload.LinearAgentSessionID).
+				Str("row_id", row.ID.String()).
+				Dur("deadline", promptedAwaitingCreateDeadline).
+				Msg("linear_agent_event: prompted gave up waiting for created handler to attach session_id; emitting Linear error activity")
+			if emitErr := emitPromptedAwaitingCreatedTimeout(ctx, deps, agentSessions, row, orgID, logger); emitErr != nil {
+				logger.Warn().Err(emitErr).Str("row_id", row.ID.String()).
+					Msg("prompted: failed to emit timeout error activity; dropping job anyway")
+			}
+			return nil
+		}
 		// `created` hasn't completed yet. The dispatcher already 200'd
 		// Linear so Linear won't redeliver — only the worker's retry
 		// loop can keep this prompted alive. Return a retryable error
@@ -170,6 +206,44 @@ func handleLinearAgentPrompted(ctx context.Context, deps LinearAgentEventHandler
 	return nil
 }
 
+// promptedDeadlineExceeded returns true when the worker job has been
+// retrying for longer than promptedAwaitingCreateDeadline. The job's
+// CreatedAt comes from jobctx; in tests / direct callers without a job
+// context the function returns false so the legacy retry-forever behavior
+// stays intact for paths that explicitly opt out.
+func promptedDeadlineExceeded(ctx context.Context) bool {
+	createdAt, ok := jobctx.JobCreatedAtFromContext(ctx)
+	if !ok {
+		return false
+	}
+	return time.Since(createdAt) > promptedAwaitingCreateDeadline
+}
+
+// emitPromptedAwaitingCreatedTimeout closes a stuck AgentSession with an
+// error activity so the Linear user sees that we never managed to attach
+// the 143 session and won't be retrying. Best-effort: any failure is
+// logged by the caller; we never want a timeout-cleanup hiccup to keep
+// the job alive past its deadline.
+func emitPromptedAwaitingCreatedTimeout(ctx context.Context, deps LinearAgentEventHandlerDeps, agentSessions *db.LinearAgentSessionStore, row *db.LinearAgentSession, orgID uuid.UUID, logger zerolog.Logger) error {
+	if deps.Linear == nil || deps.Linear.AgentActivityStore() == nil || deps.ClientForOrg == nil {
+		return errors.New("linear activity surface not configured")
+	}
+	client, err := deps.ClientForOrg(ctx, orgID)
+	if err != nil {
+		return fmt.Errorf("resolve linear client for prompted-timeout: %w", err)
+	}
+	activity := linear.AgentMilestoneActivity{
+		Type:            models.LinearAgentActivityError,
+		Body:            "We didn't receive a session-start event from Linear in time to handle this follow-up. Re-assign the issue to @143 to try again.",
+		IdemKey:         "prompted:awaiting_created_timeout",
+		PinSessionState: string(models.LinearAgentSessionStateError),
+	}
+	if err := emitOnce(ctx, client, deps.Linear.AgentActivityStore(), orgID, row.ID, row.LinearAgentSessionID, activity, logger); err != nil {
+		return fmt.Errorf("emit prompted timeout error activity: %w", err)
+	}
+	return agentSessions.SetState(ctx, orgID, row.ID, models.LinearAgentSessionStateError)
+}
+
 func appendPromptedMessageAndEnqueueContinue(ctx context.Context, stores *Stores, orgID uuid.UUID, session models.Session, msg *models.SessionMessage) error {
 	if stores == nil || stores.Sessions == nil {
 		return errors.New("sessions store unavailable")
@@ -207,6 +281,20 @@ func appendPromptedMessageAndEnqueueContinue(ctx context.Context, stores *Stores
 	return nil
 }
 
+// respondRevisionPromptDisabled posts a "this session has ended and
+// revisions are disabled" response to Linear when a follow-up @143 prompt
+// lands on a terminal session that the org has opted out of reopening.
+//
+// Idempotency note: the idem key is "prompted:revision_disabled" keyed to
+// the bridge row id, so the response only emits ONCE per AgentSession,
+// even if the user pings @143 multiple times on the same closed session.
+// This is intentional — telling the user the same thing on every ping
+// would be noise; the first response is the user-actionable signal and
+// subsequent pings silently no-op via the Reserve UNIQUE collision. The
+// design table specifies "response per event" but this concrete tradeoff
+// (UX > strict per-event spec) is the right call for a static close
+// message. If we ever change the message to carry per-prompt context,
+// include the comment id in the idem key.
 func respondRevisionPromptDisabled(ctx context.Context, deps LinearAgentEventHandlerDeps, agentSessions *db.LinearAgentSessionStore, row *db.LinearAgentSession, orgID uuid.UUID, logger zerolog.Logger) error {
 	if deps.Linear == nil || deps.Linear.AgentActivityStore() == nil || deps.ClientForOrg == nil {
 		return nil
@@ -227,6 +315,28 @@ func respondRevisionPromptDisabled(ctx context.Context, deps LinearAgentEventHan
 	return agentSessions.SetState(ctx, orgID, row.ID, models.LinearAgentSessionStateComplete)
 }
 
+// appendPromptedMessageToRunningSession inserts a session_messages row for a
+// follow-up @143 prompt that arrived while the prior turn is still running.
+// It deliberately does NOT enqueue continue_session — the in-flight turn's
+// finisher does that.
+//
+// Drain contract (must stay in lockstep with the finisher):
+//
+//   - The orchestrator runs drainQueuedMessagesAfterProcessedID at the end of
+//     every turn (services/agent/orchestrator.go:3451) and also defensively
+//     in RunAgent's deferred path (orchestrator.go:1917). The drain lists
+//     all session_messages, picks user-role rows with id > processedMessageID,
+//     and enqueues continue_session with the drain-specific dedupe key.
+//   - We hold SELECT ... FOR UPDATE on the sessions row before the INSERT, so
+//     either (a) we win and the message lands before the finisher's drain
+//     reads it, or (b) the finisher already advanced the session past running
+//     and we observe a non-running status — in which case we return
+//     RetryableError and the worker re-enters the normal idle/resume branch
+//     above, which DOES enqueue continue_session itself.
+//
+// Net effect: the message never gets stranded — either the finisher's drain
+// picks it up, or the retry path's claim-idle/claim-for-resume runs the
+// normal append + enqueue.
 func appendPromptedMessageToRunningSession(
 	ctx context.Context,
 	deps LinearAgentEventHandlerDeps,
@@ -254,7 +364,7 @@ func appendPromptedMessageToRunningSession(
 		_ = tx.Rollback(ctx)
 	}()
 
-	lockedState, err := lockSessionAppendStateForUpdate(ctx, tx, orgID, appendState.ID)
+	lockedState, err := deps.Stores.Sessions.LockMessageAppendState(ctx, tx, orgID, appendState.ID)
 	if err != nil {
 		return fmt.Errorf("lock running session append state: %w", err)
 	}
@@ -285,25 +395,6 @@ func appendPromptedMessageToRunningSession(
 		Int("turn_number", msg.TurnNumber).
 		Msg("linear_agent_event: prompted -> message appended to running session")
 	return nil
-}
-
-func lockSessionAppendStateForUpdate(ctx context.Context, tx pgx.Tx, orgID, sessionID uuid.UUID) (db.SessionMessageAppendState, error) {
-	var state db.SessionMessageAppendState
-	err := tx.QueryRow(ctx, `
-		SELECT id, org_id, status, current_turn
-		FROM sessions
-		WHERE id = @id
-		  AND org_id = @org_id
-		  AND deleted_at IS NULL
-		FOR UPDATE`,
-		pgx.NamedArgs{
-			"id":     sessionID,
-			"org_id": orgID,
-		}).Scan(&state.ID, &state.OrgID, &state.Status, &state.CurrentTurn)
-	if err != nil {
-		return db.SessionMessageAppendState{}, err
-	}
-	return state, nil
 }
 
 // resolvePromptedCommentBody fetches the user's follow-up Linear comment
@@ -360,6 +451,17 @@ func resolvePromptedCommentBody(ctx context.Context, deps LinearAgentEventHandle
 // distinguish "Linear is flapping, retry" from "the comment is gone, fall
 // back". 5xx is treated as transient via the generic "linear API returned"
 // substring — the client wraps non-200 responses with that prefix.
+//
+// ErrUnauthorized is deliberately NOT transient. A 401 means the token is
+// rejected and only an admin re-authorize can fix it; retrying produces the
+// same failure forever and would stall every prompted job from this org
+// until manual intervention. Treating it as terminal lets the handler fall
+// through to the placeholder branch (session advances with a hint) and
+// surfaces the issue to the operator via the existing
+// linear.MarkIntegrationUnauthorized path on the next live Linear call.
+// The worker's RetryableError contract does not consume the Attempts
+// counter, so an infinite-retry classification here would never hit
+// MaxAttempts — terminal-on-401 is the only bound.
 func linearFetchErrorIsTransient(err error) bool {
 	if err == nil {
 		return false
@@ -368,8 +470,7 @@ func linearFetchErrorIsTransient(err error) bool {
 		return false
 	}
 	if errors.Is(err, linear.ErrUnauthorized) {
-		// Unauthorized may resolve after a token refresh; retry once.
-		return true
+		return false
 	}
 	var rl *linear.RateLimitError
 	if errors.As(err, &rl) {

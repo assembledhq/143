@@ -198,13 +198,22 @@ func (s *IntegrationStore) SetLinearWorkspaceID(ctx context.Context, orgID, inte
 			true
 		)
 		WHERE id = @id AND org_id = @org_id`
-	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
+	tag, err := s.db.Exec(ctx, query, pgx.NamedArgs{
 		"id":           integrationID,
 		"org_id":       orgID,
 		"workspace_id": workspaceID,
 	})
 	if err != nil {
 		return fmt.Errorf("set linear workspace_id: %w", err)
+	}
+	// Failing loud on zero rows turns a typo'd integration id into an
+	// immediate error rather than a silently-discarded write. The
+	// multi-tenant Linear webhook resolver depends on this row being
+	// findable, so a silent no-op here would surface much later as an
+	// undebuggable "no active integration" rejection on the webhook
+	// hot path.
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("set linear workspace_id: integration %s not found for org %s", integrationID, orgID)
 	}
 	return nil
 }

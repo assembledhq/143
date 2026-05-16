@@ -14,6 +14,20 @@ import (
 	"github.com/rs/zerolog"
 )
 
+// linearAgentSettingsMaxBodyBytes bounds POST/PATCH bodies on the agent
+// settings endpoints. The router already caps requests at 1MB; this is the
+// per-handler defense in depth so a future router refactor can't silently
+// remove the limit. The settings payloads are tiny structs (mapping rows
+// or enable flags), so 64KB is a comfortable ceiling.
+const linearAgentSettingsMaxBodyBytes int64 = 64 << 10
+
+// maxLinearIDLength bounds Linear-side string ids accepted via the
+// admin API. Linear ids today are short uuid-style opaque strings
+// (~36 chars); 64 leaves headroom for any future format change while
+// blocking an admin from pasting a megabyte of garbage into the
+// mapping table.
+const maxLinearIDLength = 64
+
 // LinearAgentSettingsHandler exposes the admin surface for the inbound
 // agent feature: the team→repo mapping CRUD, install status, the per-org
 // enable toggle, and the operator debug surface listing recent
@@ -182,12 +196,23 @@ func (h *LinearAgentSettingsHandler) UpsertMapping(w http.ResponseWriter, r *htt
 	}
 
 	var req upsertMappingRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	// Router middleware already enforces a 1MB limit, but cap individual
+	// handlers too: a future router refactor must not silently drop the
+	// guard, and decoding a multi-MB body just to fail later wastes work.
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, linearAgentSettingsMaxBodyBytes)).Decode(&req); err != nil {
 		writeError(w, r, http.StatusBadRequest, "INVALID_JSON", "failed to parse request body", err)
 		return
 	}
 	if req.LinearTeamID == "" {
 		writeError(w, r, http.StatusBadRequest, "INVALID_REQUEST", "linear_team_id is required")
+		return
+	}
+	if len(req.LinearTeamID) > maxLinearIDLength {
+		writeError(w, r, http.StatusBadRequest, "INVALID_REQUEST", "linear_team_id exceeds length limit")
+		return
+	}
+	if len(req.LinearProjectID) > maxLinearIDLength {
+		writeError(w, r, http.StatusBadRequest, "INVALID_REQUEST", "linear_project_id exceeds length limit")
 		return
 	}
 	if req.RepositoryID == uuid.Nil {
@@ -233,7 +258,7 @@ func (h *LinearAgentSettingsHandler) PatchSettings(w http.ResponseWriter, r *htt
 		return
 	}
 	var req PatchEnableRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, linearAgentSettingsMaxBodyBytes)).Decode(&req); err != nil {
 		writeError(w, r, http.StatusBadRequest, "INVALID_JSON", "failed to parse request body", err)
 		return
 	}

@@ -324,6 +324,22 @@ func TestHandleAgentMilestoneLogsExternalURLPinFailures(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "agent milestone should emit the activity before attempting the external URL pin")
 }
 
+// TestPinExternalURLsForEvent pins the set of milestone events on which we
+// pin the 143 session deep-link onto the AgentSession header. The set must
+// include Started so the link lands as early as possible, and PROpened so a
+// failed first pin gets a second chance. Terminal events are excluded
+// because re-pinning right before close is overhead with no UX benefit.
+func TestPinExternalURLsForEvent(t *testing.T) {
+	t.Parallel()
+
+	require.True(t, pinExternalURLsForEvent(MilestoneStarted), "Started must pin so the deep link surfaces before the run finishes")
+	require.True(t, pinExternalURLsForEvent(MilestonePROpened), "PROpened must pin as a retry of the Started pin")
+	require.False(t, pinExternalURLsForEvent(MilestoneLinked), "Linked is suppressed entirely")
+	require.False(t, pinExternalURLsForEvent(MilestonePRMerged), "terminal events do not need to re-pin")
+	require.False(t, pinExternalURLsForEvent(MilestoneEndedNoPR), "terminal events do not need to re-pin")
+	require.False(t, pinExternalURLsForEvent(MilestoneFailed), "terminal events do not need to re-pin")
+}
+
 func TestMilestoneFormattingAndStateHelpers(t *testing.T) {
 	t.Parallel()
 

@@ -209,6 +209,22 @@ func linearAgentPinSessionState(state models.LinearAgentSessionState) string {
 // activities where missing the response leaves the user without an
 // explanation; HandleAgentMilestone uses its own writer for at-most-once
 // milestone fan-out.
+//
+// EmitOrDiscard vs Emit: this wrapper deliberately uses EmitOrDiscard,
+// which discards the Reserve row on a failed Linear emit so retries can
+// re-attempt the emit. The trade-off is "duplicate notifications on retry
+// after a transport blip that Linear actually accepted" vs "permanent
+// silent drop of the response". For the activities routed through this
+// helper today — bootstrap:unmapped_repo, bootstrap:not_supported,
+// prompted:revision_disabled, prompted:awaiting_created_timeout — a
+// duplicate is idempotent on Linear's side (the body is a fixed close
+// message and the session state pin is the same), so the duplicate cost
+// is essentially zero while the silent-drop cost is the user never
+// learning why the agent went quiet. Milestone fan-out (HandleAgentMilestone)
+// uses Emit, not EmitOrDiscard, because milestones carry semantically
+// distinct payloads (PR numbers etc.) where a duplicate would be
+// user-visible noise.
+//
 // The caller's logger is passed through so writer-internal warnings
 // (e.g. failed best-effort AgentSessionUpdate pins) surface in operator
 // logs instead of disappearing into a Nop sink.

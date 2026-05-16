@@ -196,7 +196,17 @@ func (s *LinearProviderStateStore) Upsert(ctx context.Context, orgID, linkID uui
 		return fmt.Errorf("upsert linear provider state: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
-		return fmt.Errorf("upsert linear provider state: link_id %s exists under a different org", linkID)
+		// Zero rows affected here means either (a) the cross-org WHERE
+		// predicate on the DO UPDATE branch suppressed the update — the
+		// designed cross-org defense — or (b) the row was just deleted
+		// between any prior read and this write. Both cases are operator-
+		// actionable: (a) is a caller bug to fix, (b) is a benign race
+		// for which a retry will succeed. We collapse them into one
+		// error here because the rare race is observationally
+		// indistinguishable from the cross-org case at this layer; the
+		// alternative is a second SELECT just to discriminate, and the
+		// caller's retry budget swallows the race cheaply.
+		return fmt.Errorf("upsert linear provider state: no row written for link_id %s (org_id mismatch or row deleted concurrently)", linkID)
 	}
 	return nil
 }
@@ -270,7 +280,10 @@ func (s *LinearProviderStateStore) Merge(ctx context.Context, orgID, linkID uuid
 		return fmt.Errorf("upsert linear provider state for merge: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
-		return fmt.Errorf("merge linear provider state: link_id %s exists under a different org", linkID)
+		// See Upsert above: zero rows means org mismatch on the WHERE
+		// predicate or a concurrent delete. Both warrant the same
+		// retryable error here.
+		return fmt.Errorf("merge linear provider state: no row written for link_id %s (org_id mismatch or row deleted concurrently)", linkID)
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("commit linear provider state merge: %w", err)

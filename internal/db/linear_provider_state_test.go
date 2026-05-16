@@ -202,7 +202,7 @@ func TestLinearProviderStateStore_MergeRejectsCrossOrg(t *testing.T) {
 
 	err = store.Merge(context.Background(), orgID, linkID, LinearProviderState{LastWriteOutcome: "merged"})
 	require.Error(t, err, "Merge must reject a cross-org link_id collision")
-	require.Contains(t, err.Error(), "different org", "Merge error must identify the cross-org cause")
+	require.Contains(t, err.Error(), "no row written", "Merge error must surface zero-rows-affected so callers don't treat a cross-org rejection (or concurrent delete) as success")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
@@ -225,7 +225,7 @@ func TestLinearProviderStateStore_UpsertRejectsCrossOrgCollision(t *testing.T) {
 
 	err = NewLinearProviderStateStore(mock).Upsert(context.Background(), uuid.New(), uuid.New(), LinearProviderState{Identifier: "ACS-1"})
 	require.Error(t, err, "Upsert must reject cross-org link_id collision")
-	require.Contains(t, err.Error(), "different org", "Upsert error must identify the cross-org cause")
+	require.Contains(t, err.Error(), "no row written", "Upsert error must surface zero-rows-affected so callers don't treat a cross-org rejection (or concurrent delete) as success")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 

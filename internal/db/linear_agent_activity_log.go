@@ -121,6 +121,15 @@ func (s *LinearAgentActivityLogStore) Complete(ctx context.Context, orgID, rowID
 // emits that want stricter semantics than milestone emits: if the Linear
 // call fails, the slot is freed so the next replay actually re-emits
 // rather than short-circuiting on the corpse row.
+//
+// Zero rows affected is normal: it means either (a) the row was already
+// completed (linear_activity_id NOT NULL — Linear actually succeeded
+// after all), (b) a concurrent Discard freed the slot first, or (c) the
+// row was for a different org. None of those are caller bugs the writer
+// can recover from, and signaling them as errors would force callers to
+// special-case the benign races. Callers that genuinely need to know
+// whether *they* freed the slot should use DiscardByIdemKey and check
+// rows-affected themselves at the call site.
 func (s *LinearAgentActivityLogStore) Discard(ctx context.Context, orgID, rowID uuid.UUID) error {
 	_, err := s.db.Exec(ctx, `
 		DELETE FROM linear_agent_activity_log
