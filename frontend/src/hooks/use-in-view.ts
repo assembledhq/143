@@ -1,10 +1,19 @@
-import { useRef, useState, useEffect } from "react";
+import { useRef, useState, useEffect, useLayoutEffect } from "react";
 
 interface InViewOptions {
   /** Fraction from top of viewport where element triggers. Default 0.85. */
   threshold?: number;
   /** Stay true once triggered. Default true. */
   once?: boolean;
+}
+
+const useIsomorphicLayoutEffect =
+  typeof window === "undefined" ? useEffect : useLayoutEffect;
+
+function isElementInView(el: HTMLElement, threshold: number): boolean {
+  const rect = el.getBoundingClientRect();
+  const triggerLine = window.innerHeight * threshold;
+  return rect.top <= triggerLine && rect.bottom >= 0;
 }
 
 export function useInView<T extends HTMLElement = HTMLDivElement>(
@@ -14,11 +23,22 @@ export function useInView<T extends HTMLElement = HTMLDivElement>(
   const ref = useRef<T | null>(null);
   const reducedMotion =
     typeof window !== "undefined" &&
+    typeof window.matchMedia === "function" &&
     window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-  const [inView, setInView] = useState(reducedMotion);
+  const [inView, setInView] = useState(true);
+
+  useIsomorphicLayoutEffect(() => {
+    if (reducedMotion || typeof IntersectionObserver === "undefined") return;
+
+    const el = ref.current;
+    if (!el) return;
+
+    setInView(isElementInView(el, threshold));
+  }, [threshold, reducedMotion]);
 
   useEffect(() => {
     if (reducedMotion) return;
+    if (typeof IntersectionObserver === "undefined") return;
 
     const el = ref.current;
     if (!el) return;
