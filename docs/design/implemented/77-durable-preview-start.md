@@ -16,6 +16,8 @@ The worker job owns the slow path: sandbox reuse or hydrate, workspace `.143/con
 
 `GET /api/v1/sessions/{id}/preview` returns the latest failed preview when no active preview exists. This keeps async startup diagnostics visible in the preview panel while still allowing a new retry to reserve a fresh `starting` preview because failed rows are not active.
 
+Start jobs are at-least-once work. A worker can be replaced after it reserves the preview and creates child `preview_services` or `preview_infrastructure` rows, but before it persists a provider handle or marks the preview failed. Retrying the same job must therefore re-enter launch without tripping child-row uniqueness constraints; service and infrastructure child rows are upserted and reset to their starting/provisioning state for the same `(preview_instance_id, name)`.
+
 ## Routing
 
 Only initial startup moved to jobs. Stop, restart, bootstrap, proxy, console, screenshot, inspector, interaction, assertion, and visual-diff routes remain synchronous and worker-routed because they operate on an already-owned active preview.
