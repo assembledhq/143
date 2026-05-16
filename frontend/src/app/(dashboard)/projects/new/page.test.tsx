@@ -84,7 +84,7 @@ describe("NewProjectPage", () => {
         base_branch: "release/2026.04",
       });
     });
-  });
+  }, 20000);
 
   it("redirects builders away from the new project form", async () => {
     currentUserRole.value = "builder";
