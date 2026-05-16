@@ -290,7 +290,7 @@ export function AgentTabStrip({
                             disabled={isNonInteractive}
                             className={cn(
                               "h-7 max-w-[15rem] gap-1.5 rounded-md px-2 text-xs data-[state=active]:bg-transparent data-[state=active]:text-primary data-[state=active]:shadow-none",
-                              "after:bg-[image:var(--gradient-primary)] data-[state=active]:after:opacity-100",
+                              "after:!bottom-[-3px] after:bg-[image:var(--gradient-primary)] data-[state=active]:after:opacity-100",
                               showArchiveButton && "pr-8",
                               tabs.length === 1 && "data-[state=active]:bg-transparent data-[state=active]:shadow-none",
                               isNonInteractive && "cursor-default opacity-60",
