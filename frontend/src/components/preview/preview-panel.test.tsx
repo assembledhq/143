@@ -202,7 +202,15 @@ describe("PreviewPanel component", () => {
   });
 
   it('shows idle state when phase is "stopped"', async () => {
-    mockGet.mockResolvedValue(makePreviewStatus({ status: "stopped" }));
+    const startedAt = new Date(Date.now() - 5 * 60_000).toISOString();
+    const stoppedAt = new Date(Date.now() - 60_000).toISOString();
+    mockGet.mockResolvedValue(
+      makePreviewStatus({
+        status: "stopped",
+        created_at: startedAt,
+        stopped_at: stoppedAt,
+      }),
+    );
 
     renderWithProviders(<PreviewPanel {...DEFAULT_PROPS} />);
 
@@ -212,6 +220,8 @@ describe("PreviewPanel component", () => {
 
     // Should also render the status badge
     expect(screen.getByText("Stopped")).toBeInTheDocument();
+    expect(screen.getByText(/Started 5m ago/)).toBeInTheDocument();
+    expect(screen.getByText(/Stopped 1m ago/)).toBeInTheDocument();
   });
 
   it("treats async start success as startup in progress and resumes polling", async () => {

@@ -45,6 +45,10 @@ func (s *PreviewStore) WithTx(tx pgx.Tx) *PreviewStore {
 // This is a constant interpolated via fmt.Sprintf — safe because it is never user input.
 const activeStatusFilter = `('starting', 'ready', 'partially_ready', 'unhealthy')`
 
+// terminalStatusFilter is the SQL IN clause for preview statuses that can be
+// shown as the most recent preview history when no active preview exists.
+const terminalStatusFilter = `('stopped', 'expired', 'failed')`
+
 // --- Column lists ---
 
 const previewInstanceColumns = `id, session_id, org_id, user_id, profile_name, name, status,
@@ -187,6 +191,29 @@ func (s *PreviewStore) GetLatestFailedPreviewForSession(ctx context.Context, org
 	row, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.PreviewInstance])
 	if err != nil {
 		return nil, fmt.Errorf("get latest failed preview: %w", err)
+	}
+	return &row, nil
+}
+
+// GetLatestTerminalPreviewForSession returns the newest inactive preview row
+// for a session so the UI can show when the last preview ran and stopped.
+func (s *PreviewStore) GetLatestTerminalPreviewForSession(ctx context.Context, orgID, sessionID uuid.UUID) (*models.PreviewInstance, error) {
+	query := fmt.Sprintf(`SELECT %s FROM preview_instances
+		WHERE org_id = @org_id AND session_id = @session_id
+		AND status IN %s
+		ORDER BY created_at DESC
+		LIMIT 1`, previewInstanceColumns, terminalStatusFilter)
+
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
+		"org_id":     orgID,
+		"session_id": sessionID,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("query latest terminal preview: %w", err)
+	}
+	row, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.PreviewInstance])
+	if err != nil {
+		return nil, fmt.Errorf("get latest terminal preview: %w", err)
 	}
 	return &row, nil
 }
