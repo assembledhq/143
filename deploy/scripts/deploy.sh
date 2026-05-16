@@ -896,6 +896,18 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
       echo "  Step 1 will drain in-flight coding turns; plan for a maintenance window." >&2
       exit 1
     fi
+    # Provision /var/run/143/sandbox-auth before the worker service starts.
+    # New cloud-init bootstraps also do this, but deploys must repair existing
+    # hosts where Docker already auto-created the bind-mount source as
+    # root:root 0755.
+    sudo tee /etc/tmpfiles.d/143-sandbox-auth.conf >/dev/null <<'TMPFILES'
+d /var/run/143 0755 root root -
+d /var/run/143/sandbox-auth 0750 1000 1000 -
+TMPFILES
+    sudo systemd-tmpfiles --create /etc/tmpfiles.d/143-sandbox-auth.conf
+    sudo mkdir -p /var/run/143/sandbox-auth
+    sudo chown 1000:1000 /var/run/143/sandbox-auth
+    sudo chmod 0750 /var/run/143/sandbox-auth
     # Install iptables-persistent on hosts that predate it (no-op otherwise).
     sudo apt-get install -y --no-install-recommends iptables-persistent >/dev/null 2>&1 || true
     # Re-apply sandbox egress firewall. Script is idempotent — safe to run

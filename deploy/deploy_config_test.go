@@ -635,6 +635,45 @@ func TestSandboxDNSConfigAlignment(t *testing.T) {
 	require.Contains(t, dockerfileText, "--no-resolv", "dnsmasq must ignore its own /etc/resolv.conf (which itself points at 127.0.0.11) to avoid a forwarding loop")
 }
 
+func TestWorkerCloudInitProvisionsSandboxAuthSocketDirBeforeCompose(t *testing.T) {
+	t.Parallel()
+
+	cloudInit, err := os.ReadFile("../deploy/cloud-init/worker.yml")
+	require.NoError(t, err, "test should read the worker cloud-init template")
+	cloudInitText := string(cloudInit)
+
+	tmpfilesIndex := strings.Index(cloudInitText, "/etc/tmpfiles.d/143-sandbox-auth.conf")
+	chownIndex := strings.Index(cloudInitText, "chown 1000:1000 /var/run/143/sandbox-auth")
+	chmodIndex := strings.Index(cloudInitText, "chmod 0750 /var/run/143/sandbox-auth")
+	composeIndex := strings.Index(cloudInitText, "docker compose -f docker-compose.worker.yml up -d --remove-orphans")
+
+	require.NotEqual(t, -1, tmpfilesIndex, "worker cloud-init should install tmpfiles config for the sandbox auth socket dir")
+	require.NotEqual(t, -1, chownIndex, "worker cloud-init should force appuser ownership on the sandbox auth socket dir")
+	require.NotEqual(t, -1, chmodIndex, "worker cloud-init should force 0750 permissions on the sandbox auth socket dir")
+	require.NotEqual(t, -1, composeIndex, "worker cloud-init should still start the worker compose stack")
+	require.Less(t, tmpfilesIndex, composeIndex, "worker cloud-init must provision the bind-mount source before Docker compose can auto-create it")
+	require.Less(t, chownIndex, composeIndex, "worker cloud-init must set sandbox auth ownership before Docker compose starts")
+	require.Less(t, chmodIndex, composeIndex, "worker cloud-init must set sandbox auth permissions before Docker compose starts")
+}
+
+func TestWorkerDeployRepairsSandboxAuthSocketDirBeforeCompose(t *testing.T) {
+	t.Parallel()
+
+	deployScript, err := os.ReadFile("../deploy/scripts/deploy.sh")
+	require.NoError(t, err, "test should read the deploy script")
+	deployText := string(deployScript)
+
+	chownIndex := strings.Index(deployText, "sudo chown 1000:1000 /var/run/143/sandbox-auth")
+	chmodIndex := strings.Index(deployText, "sudo chmod 0750 /var/run/143/sandbox-auth")
+	composeIndex := strings.Index(deployText, "docker compose -f \"$COMPOSE_FILE\" up -d --no-deps --force-recreate \"$HEALTH_SERVICE\"")
+
+	require.NotEqual(t, -1, chownIndex, "worker deploy should repair sandbox auth socket dir ownership on existing hosts")
+	require.NotEqual(t, -1, chmodIndex, "worker deploy should repair sandbox auth socket dir permissions on existing hosts")
+	require.NotEqual(t, -1, composeIndex, "worker deploy should still recreate the worker service")
+	require.Less(t, chownIndex, composeIndex, "worker deploy must repair sandbox auth ownership before the new worker starts")
+	require.Less(t, chmodIndex, composeIndex, "worker deploy must repair sandbox auth permissions before the new worker starts")
+}
+
 func TestWorkerCanReachSandboxBridge(t *testing.T) {
 	t.Parallel()
 
