@@ -264,6 +264,22 @@ export default function TeamSettingsPage() {
     }
   };
 
+  const invitationStatusBadge = (status: string) => {
+    if (status === "expired") {
+      return (
+        <Badge variant="destructive" className="ml-2">
+          Expired
+        </Badge>
+      );
+    }
+
+    return (
+      <Badge variant="secondary" className="ml-2">
+        Pending
+      </Badge>
+    );
+  };
+
   const inviteDraftMatchesMode = inviteDraft?.mode === inviteMode;
   const emailDraftActive = inviteMode === "email" && inviteDraftMatchesMode;
   const githubDraftActive = inviteMode === "github" && inviteDraftMatchesMode;
@@ -454,12 +470,15 @@ export default function TeamSettingsPage() {
                     className="flex flex-col gap-3 px-4 py-3 sm:flex-row sm:items-center sm:justify-between"
                   >
                     <div className="min-w-0">
-                      <div className="text-xs font-medium truncate">
-                        {inv.email
-                          ? inv.email
-                          : inv.github_username
-                            ? `@${inv.github_username}`
-                            : "Unknown invitee"}
+                      <div className="flex min-w-0 items-center">
+                        <div className="truncate text-xs font-medium">
+                          {inv.email
+                            ? inv.email
+                            : inv.github_username
+                              ? `@${inv.github_username}`
+                              : "Unknown invitee"}
+                        </div>
+                        {invitationStatusBadge(inv.status)}
                       </div>
                       <div className="text-xs text-muted-foreground">
                         {inv.github_username && inv.email && (
@@ -470,6 +489,11 @@ export default function TeamSettingsPage() {
                           {capitalizeWords(inv.role)}
                         </Badge>
                       </div>
+                      {inv.status === "expired" && (
+                        <div className="mt-1 text-xs text-muted-foreground">
+                          The invitee will not see this invite. Revoke it and send a new one.
+                        </div>
+                      )}
                     </div>
                     <Button
                       variant="ghost"
