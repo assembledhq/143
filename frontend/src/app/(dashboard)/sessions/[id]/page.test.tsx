@@ -4356,6 +4356,45 @@ describe('SessionDetailPage', () => {
     expect((await screen.findAllByText('src/app.ts')).length).toBeGreaterThan(0);
   });
 
+  it('refetches stale empty diff data when the conversation files-changed button opens review', async () => {
+    const sessionWithDiff: Session = {
+      ...mockSessions[0],
+      diff: 'diff --git a/src/app.ts b/src/app.ts\n--- a/src/app.ts\n+++ b/src/app.ts\n@@ -1,3 +1,4 @@\n import express from "express";\n+import cors from "cors";\n const app = express();\n app.listen(3000);',
+      diff_stats: { added: 1, removed: 0, files_changed: 1 },
+    };
+    let diffRequestCount = 0;
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({ data: sessionWithoutRawDiff(sessionWithDiff) } satisfies SingleResponse<Session>);
+      }),
+      http.get('/api/v1/sessions/:id/diff', () => {
+        diffRequestCount += 1;
+        return HttpResponse.json({
+          data: {
+            session_id: sessionWithDiff.id,
+            diff: diffRequestCount === 1 ? '' : sessionWithDiff.diff,
+            diff_stats: sessionWithDiff.diff_stats,
+            diff_history: [],
+            diff_truncated: false,
+            diff_history_truncated: false,
+          },
+        } satisfies SingleResponse<SessionDiff>);
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+    await screen.findAllByText('Fixed TypeError by adding null check');
+
+    const user = userEvent.setup();
+    await user.click(await screen.findByText('1 file changed'));
+
+    expect((await screen.findAllByText('src/app.ts')).length).toBeGreaterThan(0);
+    await waitFor(() => {
+      expect(diffRequestCount).toBe(2);
+    });
+  });
+
   it('shows contextual empty state for completed session with no changes', async () => {
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
     await screen.findAllByText('Fixed TypeError by adding null check');
