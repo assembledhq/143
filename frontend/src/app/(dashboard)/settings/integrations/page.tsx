@@ -88,75 +88,73 @@ function GitHubRepositoryClaims({
 
   return (
     <>
-      <Card>
-        <CardHeader>
-          <CardTitle className="text-sm">GitHub repositories</CardTitle>
-          <CardDescription>
+      <div className="mt-3 border-t border-border pt-3">
+        <div className="mb-2">
+          <p className="text-xs font-medium text-foreground">Repository access</p>
+          <p className="mt-0.5 text-xs text-muted-foreground">
             Choose which repositories this 143 organization owns from the connected GitHub installation.
-          </CardDescription>
-        </CardHeader>
-        <CardContent>
-          {isLoading ? (
-            <p className="text-sm text-muted-foreground">Loading repositories...</p>
-          ) : error ? (
-            <p className="text-sm text-destructive">
-              {error instanceof Error ? error.message : "Failed to load GitHub repositories."}
-            </p>
-          ) : repos.length === 0 ? (
-            <p className="text-sm text-muted-foreground">No repositories are available to this GitHub App installation.</p>
-          ) : (
-            <div className="space-y-2">
-              {repos.map((repo) => {
-                const transfer = repo.status === "owned_by_other_org";
-                const canClaim = repo.status === "unclaimed" || repo.status === "disconnected_in_current_org" || (transfer && repo.can_transfer);
-                const pending = claimMutation.isPending && claimMutation.variables?.githubId === repo.github_id;
-                return (
-                  <div key={repo.github_id} className="flex items-center justify-between gap-3 rounded-md border border-border px-3 py-2">
-                    <div className="min-w-0">
-                      <div className="truncate text-sm font-medium">{repo.full_name}</div>
-                      <div className="mt-1 flex items-center gap-2">
-                        <Badge variant={repo.status === "owned_by_current_org" ? "secondary" : "outline"} className="text-xs">
-                          {claimStatusLabel(repo)}
-                        </Badge>
-                        {repo.private && <span className="text-xs text-muted-foreground">Private</span>}
-                      </div>
+          </p>
+        </div>
+        {isLoading ? (
+          <p className="text-sm text-muted-foreground">Loading repositories...</p>
+        ) : error ? (
+          <p className="text-sm text-destructive">
+            {error instanceof Error ? error.message : "Failed to load GitHub repositories."}
+          </p>
+        ) : repos.length === 0 ? (
+          <p className="text-sm text-muted-foreground">No repositories are available to this GitHub App installation.</p>
+        ) : (
+          <div className="space-y-2">
+            {repos.map((repo) => {
+              const transfer = repo.status === "owned_by_other_org";
+              const canClaim = repo.status === "unclaimed" || repo.status === "disconnected_in_current_org" || (transfer && repo.can_transfer);
+              const pending = claimMutation.isPending && claimMutation.variables?.githubId === repo.github_id;
+              return (
+                <div key={repo.github_id} className="flex items-center justify-between gap-3 rounded-md border border-border px-3 py-2">
+                  <div className="min-w-0">
+                    <div className="truncate text-sm font-medium">{repo.full_name}</div>
+                    <div className="mt-1 flex items-center gap-2">
+                      <Badge variant={repo.status === "owned_by_current_org" ? "secondary" : "outline"} className="text-xs">
+                        {claimStatusLabel(repo)}
+                      </Badge>
+                      {repo.private && <span className="text-xs text-muted-foreground">Private</span>}
                     </div>
-                    {canClaim ? (
-                      <Button
-                        size="sm"
-                        variant={transfer ? "outline" : "default"}
-                        loading={pending}
-                        disabled={pending}
-                        onClick={() => {
-                          if (transfer) setTransferRepo(repo);
-                          else claimMutation.mutate({ githubId: repo.github_id, allowTransfer: false });
-                        }}
-                      >
-                        {transfer ? "Transfer" : "Claim"}
-                      </Button>
-                    ) : null}
                   </div>
-                );
-              })}
-              {claimMutation.isError && (
-                <div className="flex flex-col items-start gap-2 rounded-md border border-destructive/30 bg-destructive/5 p-3">
-                  <p className="text-sm text-destructive">
-                    {claimError instanceof Error ? claimError.message : "Failed to claim repository."}
-                  </p>
-                  {needsGitHubUserAuth && (
-                    <Button size="sm" variant="outline" onClick={() => api.githubStatus.connect()}>
-                      Connect GitHub account
+                  {canClaim ? (
+                    <Button
+                      size="sm"
+                      variant={transfer ? "outline" : "default"}
+                      loading={pending}
+                      disabled={pending}
+                      onClick={() => {
+                        if (transfer) setTransferRepo(repo);
+                        else claimMutation.mutate({ githubId: repo.github_id, allowTransfer: false });
+                      }}
+                    >
+                      {transfer ? "Transfer" : "Claim"}
                     </Button>
-                  )}
+                  ) : null}
                 </div>
-              )}
-              {actionable.length === 0 && (
-                <p className="text-xs text-muted-foreground">All available repositories are already accounted for.</p>
-              )}
-            </div>
-          )}
-        </CardContent>
-      </Card>
+              );
+            })}
+            {claimMutation.isError && (
+              <div className="flex flex-col items-start gap-2 rounded-md border border-destructive/30 bg-destructive/5 p-3">
+                <p className="text-sm text-destructive">
+                  {claimError instanceof Error ? claimError.message : "Failed to claim repository."}
+                </p>
+                {needsGitHubUserAuth && (
+                  <Button size="sm" variant="outline" onClick={() => api.githubStatus.connect()}>
+                    Connect GitHub account
+                  </Button>
+                )}
+              </div>
+            )}
+            {actionable.length === 0 && (
+              <p className="text-xs text-muted-foreground">All available repositories are already accounted for.</p>
+            )}
+          </div>
+        )}
+      </div>
       <AlertDialog open={!!transferRepo} onOpenChange={(open) => !open && setTransferRepo(null)}>
         <AlertDialogContent>
           <AlertDialogHeader>
@@ -437,6 +435,14 @@ export default function IntegrationsPage() {
         onDisconnectRepo={(id) => disconnectRepoMutation.mutate(id)}
         onReconnectRepo={undefined}
         pendingRepoID={pendingRepoID}
+        githubExtra={
+          isAdmin && githubConnected ? (
+            <GitHubRepositoryClaims
+              installationId={githubIntegration?.github_installation_id}
+              enabled={githubConnected}
+            />
+          ) : undefined
+        }
         sentryConnected={Boolean(sentryIntegration)}
         linearConnected={Boolean(linearIntegration)}
         linearLoading={false}
@@ -464,12 +470,6 @@ export default function IntegrationsPage() {
         disconnectError={disconnectMutation.isError ? "Failed to disconnect." : null}
         readOnly={!isAdmin}
       />
-      {isAdmin && githubConnected && (
-        <GitHubRepositoryClaims
-          installationId={githubIntegration?.github_installation_id}
-          enabled={githubConnected}
-        />
-      )}
       {slackIntegration && isAdmin && <SlackChannelPicker />}
       </div>
 
