@@ -188,15 +188,16 @@ describe('SessionDetailPage', () => {
     expect(link).toHaveAttribute('rel', 'noopener noreferrer');
   });
 
-  it('shows a disabled review-loop action when no session snapshot is available', async () => {
+  it('shows a disabled review-loop action in the Overview readiness area when no session snapshot is available', async () => {
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
 
     await screen.findAllByText('Fixed TypeError by adding null check');
-    expect(screen.getByRole('button', { name: 'Review' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Review this work' })).toBeDisabled();
+    expect(within(screen.getByLabelText('Session detail actions')).queryByRole('button', { name: 'Review' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Code review' })).not.toBeInTheDocument();
   });
 
-  it('shows the review loop action after a PR exists when a snapshot is available', async () => {
+  it('shows the review loop action in Overview after a PR exists when a snapshot is available', async () => {
     server.use(
       http.get('/api/v1/sessions/:id', () => {
         return HttpResponse.json({
@@ -217,7 +218,8 @@ describe('SessionDetailPage', () => {
 
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
 
-    expect(await screen.findByRole('button', { name: 'Review' })).toBeInTheDocument();
+    expect(await screen.findByRole('button', { name: 'Review this work' })).toBeInTheDocument();
+    expect(within(screen.getByLabelText('Session detail actions')).queryByRole('button', { name: 'Review' })).not.toBeInTheDocument();
   });
 
   it('starts a manual review loop with the selected pass count', async () => {
@@ -263,7 +265,7 @@ describe('SessionDetailPage', () => {
 
     renderWithProviders(<SessionDetailContent id="session-98765432-abcd-ef01" />);
 
-    await user.click(await screen.findByRole('button', { name: 'Review' }));
+    await user.click(await screen.findByRole('button', { name: 'Review this work' }));
     await user.click(await screen.findByRole('button', { name: 'Increase review passes' }));
     await user.click(screen.getByRole('button', { name: 'Start review' }));
 
@@ -329,11 +331,74 @@ describe('SessionDetailPage', () => {
 
     expect(await screen.findByText('Codex 1')).toBeInTheDocument();
 
-    await user.click(await screen.findByRole('button', { name: 'Review' }));
+    await user.click(await screen.findByRole('button', { name: 'Review this work' }));
     await user.click(screen.getByRole('button', { name: 'Start review' }));
 
     const reviewTab = await screen.findByRole('tab', { name: /Codex Review/ });
     expect(reviewTab).toHaveAttribute('aria-selected', 'true');
+  });
+
+  it('starts a manual review loop from the mobile Overview sheet without relying on a popover', async () => {
+    vi.mocked(window.matchMedia).mockImplementation((query: string) => ({
+      matches: query === '(max-width: 767px)',
+      media: query,
+      onchange: null,
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      dispatchEvent: vi.fn(),
+    }));
+    const user = userEvent.setup();
+    let postCount = 0;
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({
+          data: {
+            ...mockSessions[1],
+            status: 'completed',
+            snapshot_key: 'snapshot-mobile-review',
+            sandbox_state: 'snapshotted',
+          },
+        } satisfies SingleResponse<Session>);
+      }),
+      http.get('/api/v1/sessions/:id/review-loops', () => {
+        return HttpResponse.json({
+          data: [] as SessionReviewLoop[],
+          meta: {},
+        } satisfies ListResponse<SessionReviewLoop>);
+      }),
+      http.post('/api/v1/sessions/:id/review-loops', async ({ request, params }) => {
+        postCount += 1;
+        const body = await request.json() as { max_passes: number };
+        return HttpResponse.json({
+          data: {
+            id: 'review-loop-mobile',
+            org_id: 'org-1',
+            session_id: params.id as string,
+            status: 'running',
+            source: 'manual',
+            agent_type: 'codex',
+            max_passes: body.max_passes,
+            completed_passes: 0,
+            review_required: false,
+            started_at: '2026-02-17T07:12:00Z',
+          },
+        } satisfies SingleResponse<SessionReviewLoop>, { status: 201 });
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id="session-98765432-abcd-ef01" />);
+
+    await user.click(await screen.findByRole('button', { name: 'Open session details' }));
+    const detailSheet = await screen.findByRole('dialog', { name: 'Session details' });
+    await user.click(within(detailSheet).getByRole('button', { name: 'Review this work' }));
+    await user.click(await screen.findByRole('button', { name: 'Start review' }));
+
+    await waitFor(() => {
+      expect(postCount).toBe(1);
+    });
   });
 
   it('does not show a dedicated self-review button for viewers', async () => {
