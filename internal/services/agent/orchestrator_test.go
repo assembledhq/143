@@ -1279,6 +1279,10 @@ type mockSessionThreadStore struct {
 		threadID uuid.UUID
 		status   models.ThreadStatus
 	}
+	completeTurnCalls []struct {
+		threadID uuid.UUID
+		turn     int
+	}
 }
 
 func (m *mockSessionThreadStore) UpdateStatus(_ context.Context, _, threadID uuid.UUID, status models.ThreadStatus) error {
@@ -1291,7 +1295,13 @@ func (m *mockSessionThreadStore) UpdateStatus(_ context.Context, _, threadID uui
 	return nil
 }
 
-func (m *mockSessionThreadStore) CompleteTurn(_ context.Context, _, _ uuid.UUID, _ int, _ string) error {
+func (m *mockSessionThreadStore) CompleteTurn(_ context.Context, _, threadID uuid.UUID, turn int, _ string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.completeTurnCalls = append(m.completeTurnCalls, struct {
+		threadID uuid.UUID
+		turn     int
+	}{threadID: threadID, turn: turn})
 	return nil
 }
 
@@ -1316,6 +1326,20 @@ func (m *mockSessionThreadStore) statuses() []models.ThreadStatus {
 	for _, c := range m.updateStatusCalls {
 		out = append(out, c.status)
 	}
+	return out
+}
+
+func (m *mockSessionThreadStore) completedTurns() []struct {
+	threadID uuid.UUID
+	turn     int
+} {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]struct {
+		threadID uuid.UUID
+		turn     int
+	}, len(m.completeTurnCalls))
+	copy(out, m.completeTurnCalls)
 	return out
 }
 
@@ -5384,6 +5408,89 @@ func TestContinueSession_PersistsTurnResultAndReturnsToIdle(t *testing.T) {
 	require.Equal(t, threadID, *d.logs.logs[0].ThreadID, "persisted output logs should keep the triggering thread id")
 	require.NotNil(t, d.logs.markedThreadID, "duplicate marker should preserve the thread id")
 	require.Equal(t, threadID, *d.logs.markedThreadID, "duplicate marker should use the triggering thread id")
+}
+
+func TestContinueSession_CancelReturnsPayloadThreadToIdle(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	threadID := uuid.New()
+	issue := testIssue(orgID)
+	issue.Source = models.IssueSourceManual
+	session := testRun(orgID, issue.ID)
+	session.Origin = models.SessionOriginManual
+	session.InteractionMode = models.SessionInteractionModeInteractive
+	session.ValidationPolicy = models.SessionValidationPolicyOnSessionEnd
+	session.Status = string(models.SessionStatusIdle)
+	session.CurrentTurn = 1
+	session.SnapshotKey = strPtr("snapshots/test/session.tar")
+	session.PrimaryThreadID = nil
+
+	cancelReg := agent.NewCancelRegistry(zerolog.Nop())
+
+	d := defaultDeps()
+	d.cancels = cancelReg
+	d.sessionThreads = &mockSessionThreadStore{}
+	d.issues.issue = issue
+	d.messages.messages = []models.SessionMessage{
+		{
+			ID:         1,
+			SessionID:  session.ID,
+			OrgID:      orgID,
+			ThreadID:   &threadID,
+			TurnNumber: 2,
+			Role:       models.MessageRoleUser,
+			Content:    "Please continue this stopped turn.",
+		},
+	}
+	d.snapshots.data = map[string][]byte{
+		*session.SnapshotKey: []byte("restored-snapshot"),
+	}
+	d.provider.RestoreFn = func(ctx context.Context, sb *agent.Sandbox, reader io.Reader) error {
+		_, err := io.ReadAll(reader)
+		return err
+	}
+	d.provider.SnapshotFn = func(ctx context.Context, sb *agent.Sandbox) (io.ReadCloser, error) {
+		return io.NopCloser(bytes.NewReader([]byte("cancelled-continue-snapshot"))), nil
+	}
+	d.provider.ExecFn = func(ctx context.Context, sb *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
+		if strings.HasPrefix(cmd, "git ") {
+			return 0, nil
+		}
+		return 1, errors.New("exec not available in test")
+	}
+
+	adapterStarted := make(chan struct{})
+	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
+		close(adapterStarted)
+		<-ctx.Done()
+		return &agent.AgentResult{
+			Summary:        "partial continued work",
+			ExitCode:       1,
+			AgentSessionID: "agent-continued-cancel",
+		}, ctx.Err()
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- buildOrchestrator(d).ContinueSession(context.Background(), session, &agent.ContinueSessionOptions{ThreadID: &threadID})
+	}()
+
+	<-adapterStarted
+	require.True(t, cancelReg.CancelSession(session.ID), "cancel should find the continued session")
+
+	err := <-done
+	require.Error(t, err, "ContinueSession should return the cancellation error")
+	require.Contains(t, err.Error(), "cancelled", "ContinueSession should classify the result as user cancelled")
+
+	turnUpdates := d.sessions.getTurnUpdates()
+	require.Len(t, turnUpdates, 1, "cancelled continue_session should return the session to idle with a checkpoint")
+	require.NotEmpty(t, turnUpdates[0].snapshotKey, "cancelled continue_session should persist a snapshot")
+
+	completedTurns := d.sessionThreads.completedTurns()
+	require.Len(t, completedTurns, 1, "cancelled continue_session should return the triggering thread to idle")
+	require.Equal(t, threadID, completedTurns[0].threadID, "cancelled continue_session should use the payload thread id when the session row has no PrimaryThreadID")
+	require.Equal(t, 2, completedTurns[0].turn, "cancelled continue_session should advance the triggering thread turn")
 }
 
 // TestContinueSession_RoutesToRequestedThreadAcrossSiblingTurns is the
