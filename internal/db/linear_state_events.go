@@ -7,7 +7,6 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
 )
 
 // LinearStateEventKind names a state-sync trigger so the fire-once unique
@@ -90,7 +89,7 @@ var ErrLinearStateEventExists = errors.New("linear state event already exists")
 // Insert records a state transition or skip decision. Returns
 // ErrLinearStateEventExists when the unique constraint blocks a duplicate.
 func (s *LinearStateEventStore) Insert(ctx context.Context, orgID uuid.UUID, in LinearStateEventInput) error {
-	_, err := s.db.Exec(ctx, `
+	tag, err := s.db.Exec(ctx, `
 		INSERT INTO session_issue_link_state_events (
 			org_id, session_id, issue_id, event_kind,
 			transition_from, transition_to, skipped_reason
@@ -99,7 +98,8 @@ func (s *LinearStateEventStore) Insert(ctx context.Context, orgID uuid.UUID, in 
 			@org_id, @session_id, @issue_id, @event_kind,
 			NULLIF(@transition_from, ''), NULLIF(@transition_to, ''),
 			NULLIF(@skipped_reason, '')
-		)`,
+		)
+		ON CONFLICT (session_id, issue_id, event_kind) DO NOTHING`,
 		pgx.NamedArgs{
 			"org_id":          orgID,
 			"session_id":      in.SessionID,
@@ -110,11 +110,10 @@ func (s *LinearStateEventStore) Insert(ctx context.Context, orgID uuid.UUID, in 
 			"skipped_reason":  string(in.SkippedReason),
 		})
 	if err != nil {
-		var pgErr *pgconn.PgError
-		if errors.As(err, &pgErr) && pgErr.Code == "23505" { // unique_violation
-			return ErrLinearStateEventExists
-		}
 		return fmt.Errorf("insert linear state event: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrLinearStateEventExists
 	}
 	return nil
 }

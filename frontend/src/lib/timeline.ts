@@ -32,10 +32,6 @@ function isVisibleAssistantOutput(log: SessionLog): boolean {
   return log.level === "output" && (!log.metadata || !log.metadata.type || isAssistantFinalMetadata(log.metadata));
 }
 
-function isBenignCodexDiagnostic(log: SessionLog): boolean {
-  return log.level === "error" && log.message.trim() === "Reading additional input from stdin...";
-}
-
 function metadataString(metadata: SessionLog["metadata"] | null | undefined, key: string): string | undefined {
   const value = metadata?.[key];
   return typeof value === "string" ? value : undefined;
@@ -176,7 +172,7 @@ export function buildTimeline(
       continue;
     }
 
-    if (log.level === "error" && !isBenignCodexDiagnostic(log)) {
+    if (log.level === "error") {
       entries.push({ kind: "error", data: log });
       i++;
       continue;
@@ -212,9 +208,6 @@ export function timelineEntryFromResponse(entry: SessionTimelineResponseEntry): 
     case "tool_group":
       return { kind: "tool_group", toolUse: entry.tool_use!, toolResult: entry.tool_result };
     case "error":
-      if (entry.log && isBenignCodexDiagnostic(entry.log)) {
-        return { kind: "log", data: entry.log };
-      }
       return { kind: "error", data: entry.log! };
     case "log":
       return { kind: "log", data: entry.log! };

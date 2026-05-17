@@ -411,6 +411,7 @@ func TestDeployPinsDockerDaemonDNSResolvers(t *testing.T) {
 
 	bootstrap, err := os.ReadFile("../deploy/scripts/bootstrap.sh")
 	require.NoError(t, err, "test should read bootstrap.sh")
+	require.Contains(t, string(bootstrap), "apt-get install -y jq", "bootstrap.sh should install jq because install-docker-dns.sh requires it during SSH provisioning")
 	require.Contains(t, string(bootstrap), "/opt/143/deploy/scripts/install-docker-dns.sh *", "bootstrap.sh sudoers Cmnd_Alias must allow install-docker-dns.sh — without it the deploy+sudo path fails on app/worker hosts")
 
 	provision, err := os.ReadFile("../deploy/scripts/provision.sh")
@@ -590,9 +591,14 @@ func TestSandboxDNSConfigAlignment(t *testing.T) {
 	provisionScript, err := os.ReadFile("../deploy/scripts/provision.sh")
 	require.NoError(t, err, "test should read the provisioning script")
 	provisionText := string(provisionScript)
-	require.Contains(t, provisionText, "--subnet "+sandboxSubnet, "provision.sh should create 143-sandbox with the pinned subnet so sandbox-dns gets a predictable static IP")
-	require.Contains(t, provisionText, `"$EXISTING_SANDBOX_SUBNET" != "`+sandboxSubnet+`"`, "provision.sh should fail loudly when an existing 143-sandbox network has a different subnet — silent reuse breaks the static-IP mapping")
 	require.NotContains(t, provisionText, "enable_icc=false", "provision.sh must not disable bridge ICC because sandboxes must reach sandbox-dns on the shared bridge")
+
+	reconcileScript, err := os.ReadFile("../deploy/scripts/reconcile-worker-host.sh")
+	require.NoError(t, err, "test should read the worker host reconciliation script")
+	reconcileText := string(reconcileScript)
+	require.Contains(t, reconcileText, `SANDBOX_SUBNET="`+sandboxSubnet+`"`, "reconcile-worker-host.sh should define the pinned sandbox subnet so sandbox-dns gets a predictable static IP")
+	require.Contains(t, reconcileText, `--subnet "$SANDBOX_SUBNET"`, "reconcile-worker-host.sh should create 143-sandbox with the pinned subnet variable")
+	require.Contains(t, reconcileText, `"$EXISTING_SANDBOX_SUBNET" != "$SANDBOX_SUBNET"`, "reconcile-worker-host.sh should fail loudly when an existing 143-sandbox network has a different subnet — silent reuse breaks the static-IP mapping")
 
 	// The sandbox resolv.conf writer is the single source of truth for the
 	// nameserver line. provision.sh and deploy.sh both call it so a content
@@ -601,14 +607,11 @@ func TestSandboxDNSConfigAlignment(t *testing.T) {
 	resolvScript, err := os.ReadFile("../deploy/scripts/sandbox-resolv-conf.sh")
 	require.NoError(t, err, "test should read the sandbox resolv.conf writer")
 	require.Contains(t, string(resolvScript), "nameserver "+sandboxDNSIP, "sandbox-resolv-conf.sh should write sandbox-dns's IP into /etc/143/sandbox-resolv.conf")
-	require.Contains(t, provisionText, "/opt/143/deploy/scripts/sandbox-resolv-conf.sh", "provision.sh should delegate to the shared writer instead of inlining the file content — keeps provision and deploy byte-aligned")
+	require.Contains(t, reconcileText, "/opt/143/deploy/scripts/sandbox-resolv-conf.sh", "reconcile-worker-host.sh should delegate to the shared writer instead of inlining the file content")
 	deployScript, err := os.ReadFile("../deploy/scripts/deploy.sh")
 	require.NoError(t, err, "test should read the deploy script")
 	deployText := string(deployScript)
-	require.Contains(t, deployText, "/opt/143/deploy/scripts/sandbox-resolv-conf.sh", "deploy.sh should refresh /etc/143/sandbox-resolv.conf on every worker deploy so a content change doesn't strand existing workers on stale DNS")
-	require.Contains(t, deployText, "run_sandbox_resolv_conf", "deploy.sh should wrap sandbox-resolv-conf.sh in a retryable helper so legacy workers missing the new sudoers grant self-repair")
-	require.Contains(t, deployText, "Retrying sandbox resolv.conf refresh after sudoers repair", "deploy.sh should retry sandbox-resolv-conf.sh after repairing sudoers so the first deploy that introduces the helper succeeds on legacy workers")
-	require.Contains(t, deployText, "sudo -n /opt/143/deploy/scripts/sandbox-resolv-conf.sh", "deploy.sh should invoke sandbox-resolv-conf.sh with sudo -n so missing sudoers fails fast instead of hanging in CI")
+	require.Contains(t, deployText, "sudo -n /opt/143/deploy/scripts/reconcile-worker-host.sh 143-sandbox", "deploy.sh should refresh worker host invariants through the canonical reconciliation script")
 	require.NotContains(t, deployText, "enable_icc=false", "deploy.sh must not create 143-sandbox with bridge ICC disabled because Docker blocks sandbox DNS before DOCKER-USER can carve it out")
 
 	compose, err := os.ReadFile("../docker-compose.worker.yml")
@@ -621,8 +624,7 @@ func TestSandboxDNSConfigAlignment(t *testing.T) {
 	cloudInit, err := os.ReadFile("../deploy/cloud-init/worker.yml")
 	require.NoError(t, err, "test should read the worker cloud-init template")
 	cloudInitText := string(cloudInit)
-	require.Contains(t, cloudInitText, "--subnet "+sandboxSubnet, "worker cloud-init should create 143-sandbox with the same pinned subnet as provision.sh so sandbox-dns can claim its static IP")
-	require.Contains(t, cloudInitText, "/opt/143/deploy/scripts/sandbox-resolv-conf.sh", "worker cloud-init should write /etc/143/sandbox-resolv.conf through the shared writer before starting the worker")
+	require.Contains(t, cloudInitText, "/opt/143/deploy/scripts/reconcile-worker-host.sh 143-sandbox", "worker cloud-init should reconcile worker host invariants before starting the worker")
 	require.Contains(t, cloudInitText, "cp /tmp/143-repo/Dockerfile.dnsmasq /opt/143/", "worker cloud-init should stage Dockerfile.dnsmasq before docker compose starts so sandbox-dns can build on first boot")
 	require.NotContains(t, cloudInitText, "enable_icc=false", "worker cloud-init must leave bridge ICC enabled so first-boot sandboxes can reach sandbox-dns")
 	require.Contains(t, provisionText, `"$PROJECT_DIR/Dockerfile.dnsmasq" root@"$HOST":/opt/143/`, "provision.sh should stage Dockerfile.dnsmasq before docker compose starts so sandbox-dns can build on fresh worker provisioning")
@@ -632,6 +634,60 @@ func TestSandboxDNSConfigAlignment(t *testing.T) {
 	dockerfileText := string(dockerfile)
 	require.Contains(t, dockerfileText, "--server=127.0.0.11", "dnsmasq must forward to Docker's embedded resolver — that's the only place preview-infra container names are registered")
 	require.Contains(t, dockerfileText, "--no-resolv", "dnsmasq must ignore its own /etc/resolv.conf (which itself points at 127.0.0.11) to avoid a forwarding loop")
+}
+
+func TestWorkerReconciliationOwnsSandboxAuthSocketDirBeforeCompose(t *testing.T) {
+	t.Parallel()
+
+	reconcileScript, err := os.ReadFile("../deploy/scripts/reconcile-worker-host.sh")
+	require.NoError(t, err, "test should read the worker host reconciliation script")
+	reconcileText := string(reconcileScript)
+	require.Contains(t, reconcileText, "/etc/tmpfiles.d/143-sandbox-auth.conf", "worker reconciliation should install tmpfiles config for the sandbox auth socket dir")
+	require.Contains(t, reconcileText, "chown 1000:1000 /var/run/143/sandbox-auth", "worker reconciliation should force appuser ownership on the sandbox auth socket dir")
+	require.Contains(t, reconcileText, "chmod 0750 /var/run/143/sandbox-auth", "worker reconciliation should force 0750 permissions on the sandbox auth socket dir")
+
+	cloudInit, err := os.ReadFile("../deploy/cloud-init/worker.yml")
+	require.NoError(t, err, "test should read the worker cloud-init template")
+	cloudInitText := string(cloudInit)
+
+	reconcileIndex := strings.Index(cloudInitText, "/opt/143/deploy/scripts/reconcile-worker-host.sh 143-sandbox")
+	composeIndex := strings.Index(cloudInitText, "docker compose -f docker-compose.worker.yml up -d --remove-orphans")
+
+	require.NotEqual(t, -1, reconcileIndex, "worker cloud-init should call worker host reconciliation")
+	require.NotEqual(t, -1, composeIndex, "worker cloud-init should still start the worker compose stack")
+	require.Less(t, reconcileIndex, composeIndex, "worker cloud-init must reconcile host invariants before Docker compose can auto-create bind-mount sources")
+}
+
+func TestWorkerDeployRunsReconciliationBeforeCompose(t *testing.T) {
+	t.Parallel()
+
+	deployScript, err := os.ReadFile("../deploy/scripts/deploy.sh")
+	require.NoError(t, err, "test should read the deploy script")
+	deployText := string(deployScript)
+
+	syncIndex := strings.Index(deployText, "$PROJECT_DIR/deploy/scripts/reconcile-worker-host.sh")
+	reconcileIndex := strings.LastIndex(deployText, "run_worker_host_reconcile")
+	composeIndex := strings.Index(deployText, "docker compose -f \"$COMPOSE_FILE\" up -d --no-deps --force-recreate \"$HEALTH_SERVICE\"")
+
+	require.NotEqual(t, -1, syncIndex, "worker deploy should sync reconcile-worker-host.sh before running it")
+	require.NotEqual(t, -1, reconcileIndex, "worker deploy should repair worker host invariants through the canonical reconciliation script")
+	require.NotEqual(t, -1, composeIndex, "worker deploy should still recreate the worker service")
+	require.Less(t, syncIndex, reconcileIndex, "worker deploy must sync the latest reconciliation script before executing it")
+	require.Less(t, reconcileIndex, composeIndex, "worker deploy must repair host invariants before the new worker starts")
+}
+
+func TestProvisionAndMakeExposeWorkerReconciliation(t *testing.T) {
+	t.Parallel()
+
+	provisionScript, err := os.ReadFile("../deploy/scripts/provision.sh")
+	require.NoError(t, err, "test should read the provisioning script")
+	require.Contains(t, string(provisionScript), "/opt/143/deploy/scripts/reconcile-worker-host.sh 143-sandbox", "worker provisioning should use the same host reconciliation path as cloud-init and deploy")
+
+	makefile, err := os.ReadFile("../Makefile")
+	require.NoError(t, err, "test should read the Makefile")
+	makefileText := string(makefile)
+	require.Contains(t, makefileText, "repair-worker-host", "Makefile should expose an obvious worker host repair command")
+	require.Contains(t, makefileText, "sudo -n /opt/143/deploy/scripts/reconcile-worker-host.sh 143-sandbox", "worker repair target should run the canonical reconciliation script on the host")
 }
 
 func TestWorkerCanReachSandboxBridge(t *testing.T) {

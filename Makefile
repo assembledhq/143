@@ -2,7 +2,7 @@
 SANDBOX_STAMP := sandbox/.build-stamp
 SANDBOX_SOURCES := sandbox/Dockerfile sandbox/versions.json
 
-.PHONY: dev dev-ngrok dev-local dev-frontend-only setup test test-race test-coverage test-pr test-coverage-diff test-main test-integration migrate-up migrate-down build frontend-dev frontend-lint frontend-typecheck frontend-check lint lint-bootstrap lint-schema lint-stores lint-tenancy hooks-install hooks-uninstall secrets-setup secrets-encrypt secrets-decrypt secrets-edit secrets-rotate provision-app provision-worker provision-db provision-logging provision-redis repair-deploy-sudoers deploy deploy-app deploy-worker deploy-db deploy-logging deploy-fleet logs logs-query setup-readonly-user db-psql db-query
+.PHONY: dev dev-ngrok dev-local dev-frontend-only setup test test-race test-coverage test-pr test-coverage-diff test-main test-integration migrate-up migrate-down build frontend-dev frontend-lint frontend-typecheck frontend-check lint lint-bootstrap lint-schema lint-stores lint-tenancy hooks-install hooks-uninstall secrets-setup secrets-encrypt secrets-decrypt secrets-edit secrets-rotate provision-app provision-worker provision-db provision-logging provision-redis repair-deploy-sudoers repair-worker-host deploy deploy-app deploy-worker deploy-db deploy-logging deploy-fleet logs logs-query setup-readonly-user db-psql db-query
 
 GOLANGCI_LINT_VERSION ?= v2.10.1
 GOLANGCI_LINT_BIN := $(CURDIR)/bin/golangci-lint
@@ -409,6 +409,16 @@ repair-deploy-sudoers:
 	@test -n "$(HOST)" || { echo "HOST is required. Usage: make repair-deploy-sudoers ROLE=<app|worker|db|logging|redis> HOST=<ip> [SSH_KEY=<path>]"; exit 1; }
 	$(check-ssh-key)
 	bash ./deploy/scripts/repair-deploy-sudoers.sh $(ROLE) $(HOST) $(SSH_KEY)
+
+# Re-apply canonical worker host invariants without tearing down containers.
+# Repairs sandbox network/firewall/resolv.conf, sandbox-auth socket dir, and
+# worker sysctl drift. Requires the host to already have /opt/143/deploy staged.
+# Usage:
+#   make repair-worker-host HOST=87.99.158.39
+repair-worker-host:
+	@test -n "$(HOST)" || { echo "HOST is required. Usage: make repair-worker-host HOST=<ip> [SSH_KEY=<path>]"; exit 1; }
+	$(check-ssh-key)
+	ssh -i $(SSH_KEY) -o BatchMode=yes -o StrictHostKeyChecking=accept-new deploy@$(HOST) 'sudo -n /opt/143/deploy/scripts/reconcile-worker-host.sh 143-sandbox'
 
 # Deploy (update) an already-provisioned node.
 # HOST is optional — falls back to the matching role in FLEET_HOSTS from .env.production.enc.

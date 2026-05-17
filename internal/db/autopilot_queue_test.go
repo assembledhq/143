@@ -39,7 +39,7 @@ func TestAutopilotQueueStore_ListQueue(t *testing.T) {
 			},
 			setupMock: func(mock pgxmock.PgxPoolIface) {
 				mock.ExpectQuery("FROM issues i").
-					WithArgs(pgx.NamedArgs{"org_id": orgID, "limit": 11, "offset": 0}).
+					WithArgs(pgx.NamedArgs{"org_id": orgID, "limit": 11, "offset": 0, "manual_source": models.IssueSourceManual}).
 					WillReturnRows(pgxmock.NewRows([]string{
 						"id", "rank", "source_type", "source_key", "title", "repo_id", "repo_name", "issue_status",
 						"customer_impact_label", "customer_impact_count", "implementation_ease", "low_hanging_fruit_label",
@@ -204,11 +204,13 @@ func TestBuildAutopilotQueueQuery(t *testing.T) {
 			name: "projects rank in scan order",
 			expectedSnippets: []string{
 				"SELECT\n\t\t\ti.id,\n\t\t\ti.rank,\n\t\t\ti.source_type",
+				"i.source <> @manual_source",
 			},
 			expectedArgs: pgx.NamedArgs{
-				"org_id": orgID,
-				"limit":  51,
-				"offset": 0,
+				"org_id":        orgID,
+				"limit":         51,
+				"offset":        0,
+				"manual_source": models.IssueSourceManual,
 			},
 		},
 		{
@@ -222,11 +224,12 @@ func TestBuildAutopilotQueueQuery(t *testing.T) {
 				"LIMIT @limit OFFSET @offset",
 			},
 			expectedArgs: pgx.NamedArgs{
-				"org_id":       orgID,
-				"limit":        51,
-				"offset":       0,
-				"run_state":    models.AutopilotRunStateRunning,
-				"trigger_mode": models.AutopilotTriggerModeAuto,
+				"org_id":        orgID,
+				"limit":         51,
+				"offset":        0,
+				"manual_source": models.IssueSourceManual,
+				"run_state":     models.AutopilotRunStateRunning,
+				"trigger_mode":  models.AutopilotTriggerModeAuto,
 			},
 		},
 		{
@@ -241,6 +244,7 @@ func TestBuildAutopilotQueueQuery(t *testing.T) {
 				"org_id":           orgID,
 				"limit":            51,
 				"offset":           0,
+				"manual_source":    models.IssueSourceManual,
 				"available_action": models.AutopilotQueueActionStartRun,
 			},
 		},

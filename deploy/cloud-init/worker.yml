@@ -78,23 +78,9 @@ runcmd:
   - su - deploy -c 'docker pull ghcr.io/assembledhq/143-sandbox:latest'
   - su - deploy -c 'docker pull chromedp/headless-shell:latest'
 
-  # Create the shared sandbox egress network with the same pinned subnet used
-  # by provision.sh and deploy.sh. The subnet lets sandbox-dns claim the static
-  # 172.30.0.2 IP that /etc/143/sandbox-resolv.conf points at. Leave bridge ICC
-  # at Docker's default so gVisor sandboxes can reach sandbox-dns on the bridge.
-  - su - deploy -c 'docker network inspect 143-sandbox >/dev/null 2>&1 || docker network create --driver bridge --subnet 172.30.0.0/24 --label managed-by=143 143-sandbox'
-
-  # Apply host-level egress rules: block sandbox traffic to cloud metadata
-  # and RFC1918. Must run AFTER the network exists (reads its subnet).
-  - /opt/143/deploy/scripts/sandbox-firewall.sh 143-sandbox
-
-  # Write the resolv.conf that sandboxes bind-mount at /etc/resolv.conf.
-  # This must stay aligned with the sandbox-dns static IP in the worker compose
-  # file, so use the same shared writer as provision.sh and deploy.sh.
-  - /opt/143/deploy/scripts/sandbox-resolv-conf.sh
-
-  # Apply kernel tuning
-  - sysctl -p /etc/sysctl.d/99-worker.conf
+  # Reconcile worker host invariants before the first compose up. This is the
+  # same idempotent path used by provision.sh, deploy.sh, and manual repair.
+  - /opt/143/deploy/scripts/reconcile-worker-host.sh 143-sandbox
 
   # Concatenate per-host identity (.env.local) into the shared .env so docker
   # compose can interpolate ${NODE_ID}, ${WORKER_PRIVATE_IP}, etc. when it

@@ -83,6 +83,9 @@ describe('LoginPage', () => {
       isLoading: false,
     });
 
+    document.cookie = 'csrf_token=; Max-Age=0; path=/';
+    document.cookie = 'csrf_token=test-csrf; path=/';
+
     Object.defineProperty(window, 'location', {
       value: createLocationMock(),
       writable: true,
@@ -103,6 +106,33 @@ describe('LoginPage', () => {
 
     expect(screen.getByRole('tab', { name: 'Sign in' })).toBeInTheDocument();
     expect(screen.getByRole('tab', { name: 'Sign up' })).toBeInTheDocument();
+  });
+
+  it('keeps the login form visible while auth status is still loading', () => {
+    useAuthMock.mockReturnValue({
+      user: null,
+      isLoading: true,
+      isAuthenticated: false,
+      logout: vi.fn(),
+    });
+
+    renderWithProviders(<LoginPage />);
+
+    expect(screen.getByRole('button', { name: 'Sign in' })).toBeInTheDocument();
+    expect(screen.queryByRole('status')).not.toBeInTheDocument();
+  });
+
+  it('shows an email auth skeleton until csrf warmup finishes', () => {
+    document.cookie = 'csrf_token=; Max-Age=0; path=/';
+    useAuthProvidersMock.mockReturnValue({
+      providers: { github: true, google: true, email: true },
+      isLoading: true,
+    });
+
+    renderWithProviders(<LoginPage />);
+
+    expect(screen.getByTestId('email-auth-skeleton')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Sign in' })).not.toBeInTheDocument();
   });
 
   it('shows GitHub button', () => {

@@ -1,7 +1,7 @@
 "use client";
 
 import Image from "next/image";
-import { Suspense, useState } from "react";
+import { Suspense, useEffect, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -12,7 +12,28 @@ import { Label } from "@/components/ui/label";
 import { api } from "@/lib/api";
 import { captureError } from "@/lib/errors";
 import { useAuth, useAuthProviders } from "@/hooks/use-auth";
-import { useEffect } from "react";
+
+function hasCSRFCookie(): boolean {
+  if (typeof document === "undefined") return false;
+  return document.cookie.split("; ").some((cookie) => cookie.startsWith("csrf_token="));
+}
+
+function EmailAuthSkeleton() {
+  return (
+    <div data-testid="email-auth-skeleton" className="space-y-3 pt-1" aria-hidden="true">
+      <div className="h-9 w-full rounded-md bg-muted animate-pulse" />
+      <div className="space-y-2 pt-2">
+        <div className="h-4 w-12 rounded bg-muted animate-pulse" />
+        <div className="h-9 w-full rounded-md bg-muted animate-pulse" />
+      </div>
+      <div className="space-y-2">
+        <div className="h-4 w-16 rounded bg-muted animate-pulse" />
+        <div className="h-9 w-full rounded-md bg-muted animate-pulse" />
+      </div>
+      <div className="h-9 w-full rounded-md bg-muted animate-pulse" />
+    </div>
+  );
+}
 
 export default function LoginPage() {
   return (
@@ -26,7 +47,7 @@ function LoginPageContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const { isAuthenticated, isLoading: authLoading } = useAuth();
-  const { providers } = useAuthProviders();
+  const { providers, isLoading: providersLoading } = useAuthProviders();
 
   const invitation = searchParams.get("invitation") ?? undefined;
   const invitedEmail = searchParams.get("email") ?? "";
@@ -54,6 +75,8 @@ function LoginPageContent() {
   const [signUpName, setSignUpName] = useState("");
   const [signUpEmail, setSignUpEmail] = useState(identityEmail);
   const [signUpPassword, setSignUpPassword] = useState("");
+  const emailAuthReady = hasCSRFCookie();
+  const emailAuthPending = !emailAuthReady && (authLoading || providersLoading);
 
   useEffect(() => {
     if (!isSwitchAccount && !authLoading && isAuthenticated) {
@@ -71,6 +94,10 @@ function LoginPageContent() {
   const handleSignIn = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
+    if (!emailAuthReady) {
+      setError("Secure email sign-in is still initializing. Try again in a moment.");
+      return;
+    }
     setLoading(true);
     try {
       await api.auth.loginEmail(signInEmail, signInPassword);
@@ -87,6 +114,10 @@ function LoginPageContent() {
   const handleSignUp = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
+    if (!emailAuthReady) {
+      setError("Secure email sign-up is still initializing. Try again in a moment.");
+      return;
+    }
     setLoading(true);
     try {
       await api.auth.register(signUpEmail, signUpPassword, signUpName, invitation);
@@ -100,7 +131,7 @@ function LoginPageContent() {
     }
   };
 
-  if (authLoading || (!isSwitchAccount && isAuthenticated)) {
+  if (!isSwitchAccount && isAuthenticated) {
     return (
       <div className="flex min-h-screen items-center justify-center bg-background px-4">
         <div className="w-full max-w-sm rounded-lg border border-border bg-card p-6 space-y-4">
@@ -222,85 +253,105 @@ function LoginPageContent() {
             </div>
           )}
 
-          <Tabs value={tab} onValueChange={setTab}>
-            <TabsList className="w-full">
-              <TabsTrigger value="signin" className="flex-1">Sign in</TabsTrigger>
-              <TabsTrigger value="signup" className="flex-1">Sign up</TabsTrigger>
-            </TabsList>
+          {!emailAuthReady && !emailAuthPending && (
+            <CardDescription className="text-center text-xs">
+              Secure email authentication could not be initialized. Refresh and try again.
+            </CardDescription>
+          )}
 
-            <TabsContent value="signin">
-              <form onSubmit={handleSignIn} className="space-y-3 pt-2">
-                <div className="space-y-1.5">
-                  <Label htmlFor="signin-email">Email</Label>
-                  <Input
-                    id="signin-email"
-                    type="email"
-                    placeholder="you@example.com"
-                    value={signInEmail}
-                    onChange={(e) => setSignInEmail(e.target.value)}
-                    readOnly={Boolean(invitation && identityEmail)}
-                    required
-                  />
-                </div>
-                <div className="space-y-1.5">
-                  <Label htmlFor="signin-password">Password</Label>
-                  <Input
-                    id="signin-password"
-                    type="password"
-                    value={signInPassword}
-                    onChange={(e) => setSignInPassword(e.target.value)}
-                    required
-                  />
-                </div>
-                <Button type="submit" className="w-full" loading={loading}>
-                  Sign in
-                </Button>
-              </form>
-            </TabsContent>
+          {emailAuthPending ? (
+            <EmailAuthSkeleton />
+          ) : (
+            <Tabs value={tab} onValueChange={setTab}>
+              <TabsList className="w-full">
+                <TabsTrigger value="signin" className="flex-1">Sign in</TabsTrigger>
+                <TabsTrigger value="signup" className="flex-1">Sign up</TabsTrigger>
+              </TabsList>
 
-            <TabsContent value="signup">
-              <form onSubmit={handleSignUp} className="space-y-3 pt-2">
-                <div className="space-y-1.5">
-                  <Label htmlFor="signup-name">Name</Label>
-                  <Input
-                    id="signup-name"
-                    type="text"
-                    placeholder="Your name"
-                    value={signUpName}
-                    onChange={(e) => setSignUpName(e.target.value)}
-                    required
-                  />
-                </div>
-                <div className="space-y-1.5">
-                  <Label htmlFor="signup-email">Email</Label>
-                  <Input
-                    id="signup-email"
-                    type="email"
-                    placeholder="you@example.com"
-                    value={signUpEmail}
-                    onChange={(e) => setSignUpEmail(e.target.value)}
-                    readOnly={Boolean(invitation && identityEmail)}
-                    required
-                  />
-                </div>
-                <div className="space-y-1.5">
-                  <Label htmlFor="signup-password">Password</Label>
-                  <Input
-                    id="signup-password"
-                    type="password"
-                    placeholder="At least 8 characters"
-                    value={signUpPassword}
-                    onChange={(e) => setSignUpPassword(e.target.value)}
-                    required
-                    minLength={8}
-                  />
-                </div>
-                <Button type="submit" className="w-full" loading={loading}>
-                  Create account
-                </Button>
-              </form>
-            </TabsContent>
-          </Tabs>
+              <TabsContent value="signin">
+                <form onSubmit={handleSignIn} className="space-y-3 pt-2">
+                  <div className="space-y-1.5">
+                    <Label htmlFor="signin-email">Email</Label>
+                    <Input
+                      id="signin-email"
+                      type="email"
+                      placeholder="you@example.com"
+                      value={signInEmail}
+                      onChange={(e) => setSignInEmail(e.target.value)}
+                      readOnly={Boolean(invitation && identityEmail)}
+                      required
+                    />
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label htmlFor="signin-password">Password</Label>
+                    <Input
+                      id="signin-password"
+                      type="password"
+                      value={signInPassword}
+                      onChange={(e) => setSignInPassword(e.target.value)}
+                      required
+                    />
+                  </div>
+                  <Button
+                    type="submit"
+                    className="w-full"
+                    loading={loading}
+                    disabled={loading || !emailAuthReady}
+                  >
+                    Sign in
+                  </Button>
+                </form>
+              </TabsContent>
+
+              <TabsContent value="signup">
+                <form onSubmit={handleSignUp} className="space-y-3 pt-2">
+                  <div className="space-y-1.5">
+                    <Label htmlFor="signup-name">Name</Label>
+                    <Input
+                      id="signup-name"
+                      type="text"
+                      placeholder="Your name"
+                      value={signUpName}
+                      onChange={(e) => setSignUpName(e.target.value)}
+                      required
+                    />
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label htmlFor="signup-email">Email</Label>
+                    <Input
+                      id="signup-email"
+                      type="email"
+                      placeholder="you@example.com"
+                      value={signUpEmail}
+                      onChange={(e) => setSignUpEmail(e.target.value)}
+                      readOnly={Boolean(invitation && identityEmail)}
+                      required
+                    />
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label htmlFor="signup-password">Password</Label>
+                    <Input
+                      id="signup-password"
+                      type="password"
+                      placeholder="At least 8 characters"
+                      value={signUpPassword}
+                      onChange={(e) => setSignUpPassword(e.target.value)}
+                      required
+                      minLength={8}
+                    />
+                  </div>
+                  <Button
+                    type="submit"
+                    className="w-full"
+                    loading={loading}
+                    disabled={loading || !emailAuthReady}
+                  >
+                    Create account
+                  </Button>
+                </form>
+              </TabsContent>
+            </Tabs>
+          )}
         </CardContent>
       </Card>
     </div>

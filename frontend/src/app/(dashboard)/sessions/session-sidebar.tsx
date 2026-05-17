@@ -20,6 +20,7 @@ import { useFilterSuffix, usePeopleFilter } from "@/hooks/use-people-filter";
 import { queryKeys } from "@/lib/query-keys";
 import { useOptimisticSessions, type OptimisticSession } from "@/contexts/optimistic-sessions";
 import { DiffStatsBadge } from "@/components/code-review/diff-stats-badge";
+import { SessionLinearBadge as SharedSessionLinearBadge } from "@/components/session-linear-badge";
 import { NoReposWarning } from "@/components/no-repos-warning";
 import type { ListResponse, SessionListItem, User } from "@/lib/types";
 import { prMergedAccent } from "@/lib/pr-status-styles";
@@ -127,13 +128,7 @@ function SessionLinearBadge({ session }: { session: SessionListItem }) {
   const linearLabel =
     session.linear_identifier_hint ??
     session.linked_issues?.find((issue) => issue.issue_source === "linear")?.external_id;
-  if (!linearLabel) return null;
-
-  return (
-    <span className="inline-flex shrink-0 rounded-md border border-border/60 bg-muted/50 px-1.5 py-0.5 text-xs text-muted-foreground">
-      {linearLabel}
-    </span>
-  );
+  return <SharedSessionLinearBadge label={linearLabel} />;
 }
 
 // ---------------------------------------------------------------------------
