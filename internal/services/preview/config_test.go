@@ -840,7 +840,10 @@ func TestCommittedDogfoodFrontendScriptBindsExternally(t *testing.T) {
 		if _, err := os.Stat(candidate); err == nil {
 			raw, err := os.ReadFile(candidate)
 			require.NoError(t, err, "test should read committed dogfood frontend preview script")
-			require.Contains(t, string(raw), "--hostname 0.0.0.0", "dogfood Next preview must bind externally so the worker proxy can dial the sandbox IP")
+			require.Contains(t, string(raw), "HOSTNAME=0.0.0.0", "dogfood Next preview must bind externally so the worker proxy can dial the sandbox IP")
+			require.Contains(t, string(raw), "npm run build", "dogfood Next preview should run a production build before serving")
+			require.Contains(t, string(raw), "node .next/standalone/frontend/server.js", "dogfood Next preview should serve the standalone production build")
+			require.NotContains(t, string(raw), "npm run dev", "dogfood Next preview must avoid dev server HMR in the preview gateway")
 			return
 		}
 		parent := filepath.Dir(dir)
