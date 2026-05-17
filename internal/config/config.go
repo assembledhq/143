@@ -21,8 +21,8 @@ import (
 // login-page banner that advertises credentials that won't actually sign in
 // — LogStatus warns about this at boot.
 const (
-	defaultDemoEmail    = "dogfood@143.dev"
-	defaultDemoPassword = "preview-dogfood"
+	defaultDemoEmail    = "preview-admin@143.dev"
+	defaultDemoPassword = "preview"
 )
 
 type Config struct {
@@ -47,8 +47,8 @@ type Config struct {
 	// login-page banner when DemoMode is on. Defaults must match the seeded
 	// admin in .143/seed.sql and the constants below — override via env
 	// only if you also regenerate the bcrypt hash in the seed.
-	DemoEmail    string `env:"DEMO_EMAIL"    envDefault:"dogfood@143.dev"`
-	DemoPassword string `env:"DEMO_PASSWORD" envDefault:"preview-dogfood"`
+	DemoEmail    string `env:"DEMO_EMAIL"    envDefault:"preview-admin@143.dev"`
+	DemoPassword string `env:"DEMO_PASSWORD" envDefault:"preview"`
 	// WorkerProcessCount controls how many worker loops run inside a single
 	// server process when MODE is "worker" or "all". Increase this on larger
 	// hosts to process more jobs/sandboxes in parallel.
