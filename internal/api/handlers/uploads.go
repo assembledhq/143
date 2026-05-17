@@ -291,7 +291,7 @@ func convertHEICToJPEGWithCommand(ctx context.Context, body []byte) ([]byte, err
 		return nil, err
 	}
 
-	converted, err := os.ReadFile(outputPath)
+	converted, err := os.ReadFile(outputPath) // #nosec G304 -- outputPath is created under tmpDir by this function and is not user-controlled
 	if err != nil {
 		return nil, fmt.Errorf("read converted JPEG: %w", err)
 	}
@@ -306,11 +306,10 @@ func runHEICConverter(ctx context.Context, inputPath, outputPath string) error {
 }
 
 func runHEICConverterWithLookPath(ctx context.Context, inputPath, outputPath string, lookPath func(string) (string, error)) error {
-	converterPath, err := lookPath("heif-convert")
-	if err != nil {
+	if _, err := lookPath("heif-convert"); err != nil {
 		return fmt.Errorf("missing HEIC converter: install heif-convert")
 	}
-	cmd := exec.CommandContext(ctx, converterPath, inputPath, outputPath)
+	cmd := exec.CommandContext(ctx, "heif-convert", inputPath, outputPath)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("heif-convert failed: %w: %s", err, strings.TrimSpace(string(output)))
