@@ -576,7 +576,7 @@ The default library now spans multiple categories instead of only five short sta
 
 | Category | Examples |
 |----------|----------|
-| Reliability | Find flaky tests, CI failure triage, Performance regression sweep |
+| Reliability | Find flaky tests, CI failure triage, Performance regression sweep, Check for missing indexes |
 | Security | Security sweep, Dependency drift review |
 | Maintenance | Codebase maintenance, Dead code cleanup |
 | Planning | Backlog triage |
