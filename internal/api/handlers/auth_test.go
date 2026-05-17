@@ -885,16 +885,16 @@ func TestAuthHandler_Providers(t *testing.T) {
 			cfg: &config.Config{
 				GitHubOAuthClientID: "gh-id",
 				DemoMode:            true,
-				DemoEmail:           "dogfood@143.dev",
-				DemoPassword:        "preview-dogfood",
+				DemoEmail:           "preview-admin@143.dev",
+				DemoPassword:        "preview",
 			},
 			expected: map[string]any{
 				"github":        false,
 				"google":        false,
 				"email":         true,
 				"demo":          true,
-				"demo_email":    "dogfood@143.dev",
-				"demo_password": "preview-dogfood",
+				"demo_email":    "preview-admin@143.dev",
+				"demo_password": "preview",
 			},
 		},
 	}
