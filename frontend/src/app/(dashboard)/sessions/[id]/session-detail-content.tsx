@@ -147,11 +147,14 @@ import { cn, sessionTitle, formatTimeAgo } from "@/lib/utils";
 import { activeSet, workingStatusesSet } from "@/lib/session-status-groups";
 import { MobileSessionTopBar } from "./mobile-session-top-bar";
 
-// Defer the diff viewer (shiki + diff-parser) until the user actually opens
-// review mode. Saves ~100KB+ from the initial session-detail bundle for the
-// common case of just chatting with the agent.
+const loadReviewDiffView = () =>
+  import("@/components/code-review/review-diff-view").then((m) => ({ default: m.ReviewDiffView }));
+
+// Defer the diff viewer until the user actually opens review mode. Saves
+// review-specific code from the initial session-detail bundle for the common
+// case of just chatting with the agent.
 const ReviewDiffView = dynamic(
-  () => import("@/components/code-review/review-diff-view").then((m) => ({ default: m.ReviewDiffView })),
+  loadReviewDiffView,
   {
     ssr: false,
     loading: () => <div className="h-full w-full bg-muted/20 animate-pulse rounded-lg" />,
@@ -2603,6 +2606,9 @@ export function SessionDetailContent({ id }: { id: string }) {
   const [centerMode, setCenterMode] = useState<"chat" | "review">(
     reviewParam === "active" ? "review" : "chat"
   );
+  const [hasMountedChatPanel, setHasMountedChatPanel] = useState(
+    reviewParam !== "active"
+  );
   const [detailTab, setDetailTab] = useState<DetailTab>(
     previewParam === "1" ? "preview" : "overview"
   );
@@ -2628,6 +2634,7 @@ export function SessionDetailContent({ id }: { id: string }) {
       if (suppressNextReviewParamClearRef.current) {
         suppressNextReviewParamClearRef.current = false;
       } else {
+        setHasMountedChatPanel(true);
         setCenterMode("chat");
       }
     }
@@ -2635,10 +2642,30 @@ export function SessionDetailContent({ id }: { id: string }) {
   }, [reviewParam]);
 
   useEffect(() => {
+    const urlReviewParam =
+      typeof window === "undefined"
+        ? null
+        : new URLSearchParams(window.location.search).get("review");
+    const nextReviewParam =
+      typeof window === "undefined" || window.location.search === ""
+        ? previousReviewParamRef.current
+        : urlReviewParam;
+    const isDirectReview = nextReviewParam === "active";
+    setHasMountedChatPanel(!isDirectReview);
+    previousReviewParamRef.current = nextReviewParam;
+    if (isDirectReview) {
+      setCenterMode("review");
+    }
+  }, [id]);
+
+  useEffect(() => {
     const syncReviewModeFromHistory = () => {
       const nextReviewParam = new URLSearchParams(window.location.search).get("review");
       suppressNextReviewParamClearRef.current = false;
       previousReviewParamRef.current = nextReviewParam;
+      if (nextReviewParam !== "active") {
+        setHasMountedChatPanel(true);
+      }
       setCenterMode(nextReviewParam === "active" ? "review" : "chat");
     };
 
@@ -2697,6 +2724,7 @@ export function SessionDetailContent({ id }: { id: string }) {
   // --- Exit review mode ---
   const exitReview = useCallback(() => {
     suppressNextReviewParamClearRef.current = false;
+    setHasMountedChatPanel(true);
     setCenterMode("chat");
     setReviewParam(null);
   }, [setReviewParam]);
@@ -2756,7 +2784,7 @@ export function SessionDetailContent({ id }: { id: string }) {
   );
   const session = data?.data;
   const members = membersData?.data ?? [];
-  const shouldLoadDiff = !!session && (
+  const shouldLoadDiff = (
     centerMode === "review" ||
     detailTab === "changes"
   );
@@ -2770,25 +2798,65 @@ export function SessionDetailContent({ id }: { id: string }) {
       session.diff_stats?.files_changed ?? "",
     ].join(":");
   }, [session]);
+  const fetchedDiffBeforeRevisionRef = useRef(false);
+  const observedDiffRevisionKeyRef = useRef<string | null>(null);
   const {
     data: diffData,
     isLoading: isDiffLoading,
     isFetching: isDiffFetching,
     isError: isDiffError,
+    isFetchedAfterMount: isDiffFetchedAfterMount,
     error: diffError,
     refetch: refetchDiff,
   } = useQuery({
-    queryKey: queryKeys.sessions.diff(id, diffRevisionKey),
-    queryFn: () => api.sessions.getDiff(id),
+    queryKey: queryKeys.sessions.diff(id),
+    queryFn: () => {
+      if (!diffRevisionKey) {
+        fetchedDiffBeforeRevisionRef.current = true;
+      }
+      return api.sessions.getDiff(id);
+    },
     enabled: shouldLoadDiff,
     staleTime: Infinity,
     refetchOnWindowFocus: false,
     retry: false,
   });
+  useEffect(() => {
+    fetchedDiffBeforeRevisionRef.current = false;
+    observedDiffRevisionKeyRef.current = null;
+  }, [id]);
+  useEffect(() => {
+    if (centerMode === "review") {
+      void loadReviewDiffView();
+    }
+  }, [centerMode]);
   const retryDiffLoad = useCallback(() => {
+    fetchedDiffBeforeRevisionRef.current = false;
     void refetchDiff();
   }, [refetchDiff]);
   const sessionDiffPayload = diffData?.data;
+  useEffect(() => {
+    if (!shouldLoadDiff || !diffRevisionKey) {
+      return;
+    }
+
+    if (observedDiffRevisionKeyRef.current === diffRevisionKey) {
+      return;
+    }
+
+    const isInitialRevision = observedDiffRevisionKeyRef.current === null;
+    observedDiffRevisionKeyRef.current = diffRevisionKey;
+
+    if (isInitialRevision && fetchedDiffBeforeRevisionRef.current) {
+      return;
+    }
+    if (isInitialRevision && (!sessionDiffPayload || isDiffFetchedAfterMount)) {
+      return;
+    }
+
+    fetchedDiffBeforeRevisionRef.current = false;
+    void refetchDiff();
+  }, [diffRevisionKey, isDiffFetchedAfterMount, refetchDiff, sessionDiffPayload, shouldLoadDiff]);
   const threads = useMemo(() => session?.threads ?? [], [session?.threads]);
   const [pendingThreadPreview, setPendingThreadPreview] = useState<PendingThreadPreview | null>(null);
   const chromeThreads = useMemo(() => {
@@ -4815,32 +4883,34 @@ export function SessionDetailContent({ id }: { id: string }) {
         ) : null}
         {/* Center content — either chat or diff review */}
         <div className="flex-1 min-h-0 relative">
-          {/* Chat panel — always mounted to preserve scroll, SSE connections, etc. */}
-          <div className={cn("h-full", centerMode !== "chat" && "hidden")}>
-            {threads.length > 0 && activeThread === null ? (
-              <div className="flex h-full items-center justify-center">
-                <div className="text-center space-y-2">
-                  <Loader2 className="h-5 w-5 animate-spin text-muted-foreground/40 mx-auto" />
-                  <p className="text-xs text-muted-foreground">Loading thread...</p>
+          {/* Chat panel stays mounted after first chat exposure to preserve scroll and live transcript state. */}
+          {hasMountedChatPanel ? (
+            <div className={cn("h-full", centerMode !== "chat" && "hidden")}>
+              {threads.length > 0 && activeThread === null ? (
+                <div className="flex h-full items-center justify-center">
+                  <div className="text-center space-y-2">
+                    <Loader2 className="h-5 w-5 animate-spin text-muted-foreground/40 mx-auto" />
+                    <p className="text-xs text-muted-foreground">Loading thread...</p>
+                  </div>
                 </div>
-              </div>
-            ) : (
-              <MemoizedChatPanel
-                key={activeThread ? `${id}:${activeThread.id}` : id}
-                session={session}
-                sessionId={id}
-                activeThread={activeThread ?? undefined}
-                isActive={isActive}
-                viewerScope={viewerScope}
-                optimisticMessages={optimisticMessages}
-                onDiffClick={handleChatDiffClick}
-                onApprovePlan={handleApprovePlan}
-                onAdjustPlan={handleAdjustPlan}
-                onRegisterScrollToLiveEdge={registerChatPanelScrollToLiveEdge}
-                onRegisterKeyboardControls={registerChatPanelKeyboardControls}
-              />
-            )}
-          </div>
+              ) : (
+                <MemoizedChatPanel
+                  key={activeThread ? `${id}:${activeThread.id}` : id}
+                  session={session}
+                  sessionId={id}
+                  activeThread={activeThread ?? undefined}
+                  isActive={isActive}
+                  viewerScope={viewerScope}
+                  optimisticMessages={optimisticMessages}
+                  onDiffClick={handleChatDiffClick}
+                  onApprovePlan={handleApprovePlan}
+                  onAdjustPlan={handleAdjustPlan}
+                  onRegisterScrollToLiveEdge={registerChatPanelScrollToLiveEdge}
+                  onRegisterKeyboardControls={registerChatPanelKeyboardControls}
+                />
+              )}
+            </div>
+          ) : null}
           {/* Review diff view — mounted only when active */}
           {centerMode === "review" && (
             <div className="h-full animate-in fade-in duration-150 flex flex-col">
