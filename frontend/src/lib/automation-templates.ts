@@ -1,6 +1,7 @@
 import type React from "react";
 import {
   ClipboardList,
+  Database,
   FileCheck,
   FileText,
   FlaskConical,
@@ -394,6 +395,40 @@ Verification
       "Clear evidence vs hypothesis labeling",
     ],
     tags: ["performance", "latency", "profiling"],
+    defaultInterval: 1,
+    defaultUnit: "weeks",
+  },
+  {
+    id: "missing-indexes",
+    name: "Check for missing indexes",
+    icon: Database,
+    category: "reliability",
+    summary: "Review recently added database queries and make sure they have the right supporting indexes without adding unnecessary write cost.",
+    goal: `What to do
+- Identify recently added or substantially changed database queries in this repository. Use the automation's available run context as the primary review window. If no last-run or PR window is available, inspect the last 7 days of commits when possible; otherwise review the most recent 20 commits and state the fallback you used.
+- For each credible query, capture the query text, call path, tables involved, filters, joins, ordering, limits, and expected cardinality before deciding whether an index is needed. Treat missing tenant or ownership scoping as the primary bug before optimizing a query.
+- Compare each query against the current schema, existing indexes, constraints, and migration history. Reuse or extend existing index patterns where possible instead of creating overlapping indexes.
+- Prioritize queries that are likely to run in production-facing paths, background jobs, dashboards, API list endpoints, or scheduled automation. Note whether the workload is read-heavy, write-heavy, or mixed so index cost is considered explicitly.
+- When evidence supports a change, open a focused index migration when the evidence is strong enough for a reviewer to approve or deny from the diff. Prefer narrowly justified composite, partial, covering, or order-supporting indexes only when the query pattern actually needs them.
+- Consider query rewrite, pagination, predicate order, or existing-index alignment before adding a new index. Some slow-looking queries are better fixed by avoiding OFFSET pagination, adding a LIMIT, aligning ORDER BY with an existing index, removing function-wrapped predicates, or eliminating N+1 access.
+
+Output requirements
+- Return a table of recent queries reviewed, including the source file or migration, query purpose, existing index coverage, risk level, and recommendation.
+- For each recommended index, include the exact columns and ordering, whether it should be unique or partial, and the migration/backfill/concurrent-build considerations that matter for this database.
+- If you implement a migration, keep it minimal, reversible, and consistent with the repository's migration style. For Postgres, check whether the migration runner wraps migrations in a transaction before using CREATE INDEX CONCURRENTLY, use the repo's naming conventions, and make the down migration drop the exact index you add. Include tests or schema checks where this repo normally validates migrations.
+- If no new index is warranted, say so explicitly and explain which existing index or small-table/cardinality assumption makes the current query acceptable.
+
+Verification
+- Use EXPLAIN or repository-local query-plan tooling when realistic fixtures, staging data, or documented commands are available. Label each recommendation as measured with representative data, measured with local/dev data only, schema-only inference, or needs production/staging plan.
+- Check that proposed indexes match the query predicate order, join keys, sort order, pagination strategy, and tenant or ownership filters used by the application.
+- Do not add indexes for tiny tables, rarely executed admin paths, speculative future queries, low-cardinality booleans without a selective partial predicate, columns already covered by a useful left-prefix composite index, queries satisfied by primary/unique/FK indexes, or cases where an existing index already satisfies the access pattern.
+- Account for write amplification, lock behavior, migration runtime, index name conventions, database engine differences, rollback safety, prepared-statement parameter skew, and production data distribution before proposing or applying an index.`,
+    outcomes: [
+      "Index recommendations tied to specific recent queries",
+      "Migration guidance that accounts for runtime and write cost",
+      "Clear measured-vs-inferred verification for each query",
+    ],
+    tags: ["database", "indexes", "performance"],
     defaultInterval: 1,
     defaultUnit: "weeks",
   },
