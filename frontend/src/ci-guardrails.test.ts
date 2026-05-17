@@ -35,7 +35,7 @@ describe("frontend CI guardrails", () => {
     expect(frontendTestJob).toContain("npx vitest run");
   });
 
-  it("keeps PR frontend tests fast and reserves coverage for main", () => {
+  it("keeps hot-path frontend tests fast and reserves coverage for scheduled/manual runs", () => {
     const workflow = fs.readFileSync(
       path.join(repoRoot, ".github", "workflows", "ci.yml"),
       "utf8"
@@ -52,8 +52,11 @@ describe("frontend CI guardrails", () => {
     const affectedTestsStep = frontendTestJob.match(
       /      - name: Run affected tests \(PR\)\n[\s\S]*?(?=\n      - name:|\n  [a-z0-9-]+:|\n$)/
     )?.[0];
+    const fullMainStep = frontendTestJob.match(
+      /      - name: Run full tests \(main\)\n[\s\S]*?(?=\n      - name:|\n  [a-z0-9-]+:|\n$)/
+    )?.[0];
     const fullCoverageStep = frontendTestJob.match(
-      /      - name: Run full tests with coverage \(main only\)\n[\s\S]*?(?=\n      - name:|\n  [a-z0-9-]+:|\n$)/
+      /      - name: Run full tests with coverage \(scheduled\/manual\)\n[\s\S]*?(?=\n      - name:|\n  [a-z0-9-]+:|\n$)/
     )?.[0];
 
     expect(affectedTestsStep).toBeDefined();
@@ -61,8 +64,13 @@ describe("frontend CI guardrails", () => {
     expect(affectedTestsStep).not.toContain("--coverage");
     expect(frontendTestJob).not.toContain("diff-cover");
 
+    expect(fullMainStep).toBeDefined();
+    expect(fullMainStep).toContain("if: github.event_name == 'push'");
+    expect(fullMainStep).not.toContain("--coverage");
+
     expect(fullCoverageStep).toBeDefined();
-    expect(fullCoverageStep).toContain("if: github.event_name == 'push'");
+    expect(fullCoverageStep).toContain("github.event_name == 'schedule'");
+    expect(fullCoverageStep).toContain("github.event_name == 'workflow_dispatch'");
     expect(fullCoverageStep).toContain("--coverage");
   });
 
