@@ -21,6 +21,7 @@ import {
   XCircle,
   X,
   Plus,
+  Minus,
   Square,
   PanelRightOpen,
   PanelRightClose,
@@ -74,6 +75,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { ChatTimeline } from "@/components/chat-timeline";
 import { SessionComposerAttachmentMenu } from "@/components/session-composer-attachment-menu";
 import { SessionComposerTriggerPicker, flattenGroups, type TriggerPickerGroup, type TriggerPickerPosition } from "@/components/session-composer-trigger-picker";
@@ -115,7 +117,7 @@ import {
   readStoredViewedThreadIds,
   writeStoredViewedThreadIds,
 } from "@/lib/session-thread-views";
-import type { HumanInputAnswerBody, HumanInputRequest, ListResponse, Session, SessionDetail, SessionInputCommand, SessionInputReference, SessionLog, SessionMessage, SessionReviewComment, SessionThread, SessionThreadFileEvent, SessionTimelineEntry, User, CodexAuthStatus, PullRequestHealthResponse, SingleResponse } from "@/lib/types";
+import type { HumanInputAnswerBody, HumanInputRequest, ListResponse, Session, SessionDetail, SessionInputCommand, SessionInputReference, SessionLog, SessionMessage, SessionReviewComment, SessionReviewLoop, SessionThread, SessionThreadFileEvent, SessionTimelineEntry, User, CodexAuthStatus, PullRequestHealthResponse, SingleResponse } from "@/lib/types";
 import { AgentTabStrip, computeThreadOverlap } from "./agent-tab-strip";
 import {
   ThreadAttributionFilter,
@@ -286,6 +288,36 @@ export function getPendingEditableThreadUpdate(
 
 export function getInitialComposerSelectedModel(thread: SessionThread): string {
   return thread.model_override ?? "";
+}
+
+function reviewLoopThreadLabel(agentType: string): string {
+  switch (agentType) {
+    case "claude_code":
+      return "Claude Review";
+    case "codex":
+      return "Codex Review";
+    default:
+      return "Review";
+  }
+}
+
+function buildReviewLoopThreadPreview(loop: SessionReviewLoop, session?: Session): PendingThreadPreview | null {
+  if (!loop.thread_id) {
+    return null;
+  }
+  return {
+    id: loop.thread_id,
+    session_id: loop.session_id,
+    org_id: loop.org_id,
+    agent_type: loop.agent_type,
+    label: reviewLoopThreadLabel(loop.agent_type),
+    status: "running",
+    current_turn: 1,
+    created_at: loop.started_at,
+    cost_cents: 0,
+    pending_message_count: 0,
+    model_override: session?.agent_type === loop.agent_type ? session.model_override : undefined,
+  };
 }
 
 export function trackInFlightAgentUpdate(
@@ -2620,6 +2652,8 @@ export function SessionDetailContent({ id }: { id: string }) {
   const [mobileReviewComposerOpen, setMobileReviewComposerOpen] = useState(false);
   const [mobileRenameOpen, setMobileRenameOpen] = useState(false);
   const [keyboardHelpOpen, setKeyboardHelpOpen] = useState(false);
+  const [reviewPopoverOpen, setReviewPopoverOpen] = useState(false);
+  const [reviewPasses, setReviewPasses] = useState(2);
   const [detailWidth, setDetailWidth] = useState(DEFAULT_DETAIL);
   const [activeFileIndex, setActiveFileIndex] = useState(0);
   const [isEditingTitle, setIsEditingTitle] = useState(false);
@@ -2866,7 +2900,7 @@ export function SessionDetailContent({ id }: { id: string }) {
     return [...threads, pendingThreadPreview];
   }, [pendingThreadPreview, threads]);
   const nonInteractiveThreadIds = useMemo(
-    () => new Set(pendingThreadPreview ? [pendingThreadPreview.id] : []),
+    () => new Set(pendingThreadPreview?.id === "__pending-thread__" ? [pendingThreadPreview.id] : []),
     [pendingThreadPreview],
   );
   const [activeThreadId, setActiveThreadId] = useState<string | null>(null);
@@ -2877,8 +2911,8 @@ export function SessionDetailContent({ id }: { id: string }) {
   const [viewedThreadIdsLoadedForSessionId, setViewedThreadIdsLoadedForSessionId] = useState<string | null>(() => (
     typeof window === "undefined" ? null : id
   ));
-  const activeThread = threads.find((thread) => thread.id === activeThreadId) ?? null;
-  const activeThreadIndex = activeThread ? threads.findIndex((thread) => thread.id === activeThread.id) : -1;
+  const activeThread = chromeThreads.find((thread) => thread.id === activeThreadId) ?? null;
+  const activeThreadIndex = activeThread ? chromeThreads.findIndex((thread) => thread.id === activeThread.id) : -1;
   const isActive = session ? !terminalStatuses.has(session.status) : false;
   const isRunning = session?.status === "running";
   const currentTitle = session ? sessionTitle(session) : "";
@@ -2898,7 +2932,7 @@ export function SessionDetailContent({ id }: { id: string }) {
       return;
     }
 
-    if (threads.length === 0) {
+    if (chromeThreads.length === 0) {
       if (activeThreadId !== null) {
         setActiveThreadId(null);
       }
@@ -2927,10 +2961,10 @@ export function SessionDetailContent({ id }: { id: string }) {
       return;
     }
 
-    if (!activeThreadId || !threads.some((thread) => thread.id === activeThreadId)) {
-      setActiveThreadId(threads[0].id);
+    if (!activeThreadId || !chromeThreads.some((thread) => thread.id === activeThreadId)) {
+      setActiveThreadId(chromeThreads[0].id);
     }
-  }, [activeThreadId, hasResolvedInitialThreadSelection, id, isAuthLoading, session, threads, viewerScope]);
+  }, [activeThreadId, chromeThreads, hasResolvedInitialThreadSelection, id, isAuthLoading, session, threads, viewerScope]);
 
   useEffect(() => {
     if (!hasResolvedInitialThreadSelection || !viewerScope || !activeThreadId || typeof window === "undefined") {
@@ -3311,6 +3345,17 @@ export function SessionDetailContent({ id }: { id: string }) {
   const isTerminalSession = terminalSessionStatuses.has(session?.status ?? "");
   const showExpiredPRAction = hasSessionChanges && !hasSnapshot && !hasPR && isTerminalSession;
   const needsGitHubStatus = canCreatePR || (hasPR && prData?.data?.status === "open");
+  const canManageSession = user?.role === "admin" || user?.role === "member" || user?.role === "builder";
+  const canUseNativeReviewLoop = session?.agent_type === "codex" || session?.agent_type === "claude_code";
+
+  const { data: reviewLoopsData } = useQuery({
+    queryKey: queryKeys.sessions.reviewLoops(id),
+    queryFn: () => api.sessions.listReviewLoops(id),
+    enabled: !!session,
+  });
+  const latestReviewLoop = reviewLoopsData?.data?.[0] ?? null;
+  const reviewLoopRunning = latestReviewLoop?.status === "running";
+  const canStartReviewLoop = !!session && canManageSession && canUseNativeReviewLoop && hasSnapshot && !isRunning && !reviewLoopRunning;
 
   const { data: ghStatus } = useQuery({
     queryKey: ["github-status"],
@@ -3363,6 +3408,43 @@ export function SessionDetailContent({ id }: { id: string }) {
         clearPRResumeParams();
       }
       toast.error(PR_ERROR_TOAST_MESSAGE, { duration: PR_ERROR_TOAST_DURATION_MS });
+    },
+  });
+
+  const startReviewLoopMutation = useMutation({
+    mutationFn: () =>
+      api.sessions.startReviewLoop(id, {
+        agent_type: session?.agent_type,
+        model: session?.model_override,
+        max_passes: reviewPasses,
+      }),
+    onSuccess: (response) => {
+      toast.success("Review loop started");
+      setReviewPopoverOpen(false);
+      const reviewThread = buildReviewLoopThreadPreview(response.data, session);
+      if (reviewThread) {
+        setPendingThreadPreview(reviewThread);
+        queryClient.setQueryData<SingleResponse<SessionDetail>>(queryKeys.sessions.detail(id), (existing) => {
+          if (!existing) return existing;
+          const existingThreads = existing.data.threads ?? [];
+          return {
+            ...existing,
+            data: {
+              ...existing.data,
+              threads: [...existingThreads.filter((thread) => thread.id !== reviewThread.id), reviewThread],
+            },
+          };
+        });
+        setActiveThreadId(reviewThread.id);
+        setComposerSelectedModel(getInitialComposerSelectedModel(reviewThread));
+      }
+      queryClient.invalidateQueries({ queryKey: queryKeys.sessions.reviewLoops(id) });
+      queryClient.invalidateQueries({ queryKey: queryKeys.sessions.threads(id) });
+      queryClient.invalidateQueries({ queryKey: queryKeys.sessions.detail(id) });
+    },
+    onError: (err) => {
+      const msg = err instanceof Error ? err.message : "Review loop could not be started";
+      toast.error(msg);
     },
   });
 
@@ -4563,6 +4645,108 @@ export function SessionDetailContent({ id }: { id: string }) {
             </TabsList>
           </div>
           <div aria-label="Session detail actions" className="flex items-center justify-end gap-2 shrink-0 pl-2">
+            {canManageSession && canUseNativeReviewLoop ? (
+              <Popover
+                open={reviewPopoverOpen}
+                onOpenChange={(open) => setReviewPopoverOpen(open && canStartReviewLoop && !startReviewLoopMutation.isPending)}
+              >
+                <DisabledTooltip
+                  disabled={!canStartReviewLoop || startReviewLoopMutation.isPending}
+                  content={
+                    reviewLoopRunning
+                      ? "Review loop is running"
+                      : !hasSnapshot
+                        ? "A reusable sandbox snapshot is required before review"
+                        : isRunning
+                          ? "Review can start after the current turn finishes"
+                          : "Start a review loop"
+                  }
+                >
+                  <PopoverTrigger asChild>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="h-7 text-xs gap-1.5"
+                      disabled={!canStartReviewLoop || startReviewLoopMutation.isPending}
+                    >
+                      {startReviewLoopMutation.isPending || reviewLoopRunning ? (
+                        <Loader2 className="h-3 w-3 animate-spin" />
+                      ) : (
+                        <ClipboardList className="h-3 w-3" />
+                      )}
+                      Review
+                    </Button>
+                  </PopoverTrigger>
+                </DisabledTooltip>
+                <PopoverContent align="end" className="w-72 space-y-3 p-3">
+                  <div className="space-y-1">
+                    <p className="text-sm font-medium">Review this work</p>
+                    <p className="text-xs text-muted-foreground">
+                      Run the agent review before you ship more changes.
+                    </p>
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="review-pass-count">Review passes</Label>
+                    <div className="flex items-center gap-2">
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="icon"
+                        className="h-8 w-8 shrink-0"
+                        aria-label="Decrease review passes"
+                        disabled={reviewPasses <= 1 || startReviewLoopMutation.isPending}
+                        onClick={() => setReviewPasses((current) => Math.max(1, current - 1))}
+                      >
+                        <Minus className="h-3.5 w-3.5" />
+                      </Button>
+                      <Input
+                        id="review-pass-count"
+                        aria-label="Review passes"
+                        type="number"
+                        min={1}
+                        max={5}
+                        value={reviewPasses}
+                        disabled={startReviewLoopMutation.isPending}
+                        onChange={(event) => {
+                          const next = Number.parseInt(event.target.value, 10);
+                          if (Number.isNaN(next)) {
+                            setReviewPasses(1);
+                            return;
+                          }
+                          setReviewPasses(Math.min(5, Math.max(1, next)));
+                        }}
+                        className="h-8 text-center"
+                      />
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="icon"
+                        className="h-8 w-8 shrink-0"
+                        aria-label="Increase review passes"
+                        disabled={reviewPasses >= 5 || startReviewLoopMutation.isPending}
+                        onClick={() => setReviewPasses((current) => Math.min(5, current + 1))}
+                      >
+                        <Plus className="h-3.5 w-3.5" />
+                      </Button>
+                    </div>
+                  </div>
+                  <Button
+                    type="button"
+                    size="sm"
+                    className="w-full gap-1.5"
+                    disabled={!canStartReviewLoop || startReviewLoopMutation.isPending}
+                    onClick={() => startReviewLoopMutation.mutate()}
+                  >
+                    {startReviewLoopMutation.isPending ? (
+                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                    ) : (
+                      <ClipboardList className="h-3.5 w-3.5" />
+                    )}
+                    Start review
+                  </Button>
+                </PopoverContent>
+              </Popover>
+            ) : null}
             {hasPR && prData?.data?.github_pr_url ? (
               <>
                 {prStatus === "closed" && (

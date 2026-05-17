@@ -265,7 +265,7 @@ multi-tab model when it lands.
   own findings, and repeats sequentially until the agent reports clean or the
   configured pass limit is reached. This is the primary orchestrated tab helper
   we are targeting, not just a blank tab preset. The detailed behavior lives in
-  [78-review-agent-loops.md](../future/78-review-agent-loops.md).
+  [78-review-agent-loops.md](78-review-agent-loops.md).
 
 ### Layout Modes
 
