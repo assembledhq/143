@@ -41,4 +41,27 @@ describe("automation template catalog", () => {
     expect(template?.goal).toContain("14-day window");
     expect(template?.goal).toContain("Do not classify a test as flaky from one failed run alone");
   });
+
+  it("guides recent-query index audits toward evidence-backed database changes", () => {
+    const template = getAutomationTemplate("recent-query-index-audit");
+
+    expect(template?.name).toBe("Recent query index audit");
+    expect(template?.goal).toContain("recently added or substantially changed database queries");
+    expect(template?.goal).toContain("last 7 days of commits");
+    expect(template?.goal).toContain("open a focused index migration when the evidence is strong");
+    expect(template?.goal).toContain("query text, call path, tables involved, filters, joins, ordering, limits, and expected cardinality");
+    expect(template?.goal).toContain("missing tenant or ownership scoping");
+    expect(template?.goal).toContain("EXPLAIN");
+    expect(template?.goal).toContain("measured with representative data");
+    expect(template?.goal).toContain("schema-only inference");
+    expect(template?.goal).toContain("migration");
+    expect(template?.goal).toContain("CREATE INDEX CONCURRENTLY");
+    expect(template?.goal).toContain("Do not add indexes for tiny tables");
+    expect(template?.goal).toContain("low-cardinality booleans");
+    expect(template?.goal).toContain("query rewrite, pagination, predicate order, or existing-index alignment");
+    expect(template?.goal).toContain("read-heavy, write-heavy, or mixed");
+    expect(template?.outcomes).toContain("Index recommendations tied to specific recent queries");
+    expect(template?.tags).toContain("database");
+    expect(template?.defaultUnit).toBe("weeks");
+  });
 });
