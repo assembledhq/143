@@ -2582,6 +2582,10 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		executionSession.AgentSessionID = opts.ThreadAgentSessionID
 		session = &executionSession
 	}
+	if opts != nil && opts.ThreadID != nil && *opts.ThreadID != uuid.Nil && (session.PrimaryThreadID == nil || *session.PrimaryThreadID == uuid.Nil) {
+		threadID := *opts.ThreadID
+		session.PrimaryThreadID = &threadID
+	}
 
 	// Determine whether we can restore from a snapshot or need a fresh start.
 	hasSnapshot := session.SnapshotKey != nil && *session.SnapshotKey != "" &&
