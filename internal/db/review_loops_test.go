@@ -101,6 +101,98 @@ func TestSessionReviewLoopStore_CreatePassAndLatestByLoop(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+func TestSessionReviewLoopStore_CreateLoopWithInitialPassIsAtomic(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	store := NewSessionReviewLoopStore(mock)
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	threadID := uuid.New()
+	loopID := uuid.New()
+	passID := uuid.New()
+	startedAt := time.Now().UTC()
+	reviewStartedAt := time.Now().UTC()
+
+	mock.ExpectBegin()
+	mock.ExpectQuery("INSERT INTO session_review_loops").
+		WithArgs(anyArgs(16)...).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "started_at"}).AddRow(loopID, startedAt))
+	mock.ExpectQuery("INSERT INTO session_review_loop_passes").
+		WithArgs(anyArgs(16)...).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "review_started_at"}).AddRow(passID, reviewStartedAt))
+	mock.ExpectCommit()
+
+	loop := &models.SessionReviewLoop{
+		OrgID:     orgID,
+		SessionID: sessionID,
+		ThreadID:  &threadID,
+		Status:    models.ReviewLoopStatusRunning,
+		Source:    models.ReviewLoopSourceManual,
+		AgentType: models.AgentTypeCodex,
+		MaxPasses: 2,
+	}
+	pass := &models.SessionReviewLoopPass{
+		OrgID:     orgID,
+		SessionID: sessionID,
+		PassIndex: 1,
+		Status:    models.ReviewLoopPassStatusReviewing,
+	}
+
+	err = store.CreateLoopWithInitialPass(context.Background(), loop, pass)
+
+	require.NoError(t, err, "CreateLoopWithInitialPass should create both rows atomically")
+	require.Equal(t, loopID, loop.ID, "CreateLoopWithInitialPass should return the loop id")
+	require.Equal(t, loopID, pass.LoopID, "CreateLoopWithInitialPass should attach the first pass to the loop")
+	require.Equal(t, passID, pass.ID, "CreateLoopWithInitialPass should return the pass id")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestSessionReviewLoopStore_CreateLoopWithInitialPassRollsBackOnPassFailure(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	store := NewSessionReviewLoopStore(mock)
+	orgID := uuid.New()
+	sessionID := uuid.New()
+
+	mock.ExpectBegin()
+	mock.ExpectQuery("INSERT INTO session_review_loops").
+		WithArgs(anyArgs(16)...).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "started_at"}).AddRow(uuid.New(), time.Now().UTC()))
+	mock.ExpectQuery("INSERT INTO session_review_loop_passes").
+		WithArgs(anyArgs(16)...).
+		WillReturnError(errors.New("pass insert failed"))
+	mock.ExpectRollback()
+
+	loop := &models.SessionReviewLoop{
+		OrgID:     orgID,
+		SessionID: sessionID,
+		Status:    models.ReviewLoopStatusRunning,
+		Source:    models.ReviewLoopSourceManual,
+		AgentType: models.AgentTypeCodex,
+		MaxPasses: 2,
+	}
+	pass := &models.SessionReviewLoopPass{
+		OrgID:     orgID,
+		SessionID: sessionID,
+		PassIndex: 1,
+		Status:    models.ReviewLoopPassStatusReviewing,
+	}
+
+	err = store.CreateLoopWithInitialPass(context.Background(), loop, pass)
+
+	require.Error(t, err, "CreateLoopWithInitialPass should fail when pass creation fails")
+	require.ErrorContains(t, err, "pass insert failed", "CreateLoopWithInitialPass should surface the pass insert failure")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func TestSessionReviewLoopStore_MarkPassCleanAndEnqueueOpenPRIsAtomic(t *testing.T) {
 	t.Parallel()
 
@@ -160,6 +252,90 @@ func TestSessionReviewLoopStore_MarkPassCleanAndEnqueueOpenPRRollsBackOnEnqueueF
 	err = store.MarkPassCleanAndEnqueueOpenPR(context.Background(), orgID, loopID, passID, models.ReviewLoopDecisionClean, "clean", payload, "open_pr:test")
 	require.Error(t, err, "clean terminal write should fail when open_pr cannot be enqueued")
 	require.ErrorContains(t, err, "enqueue open_pr", "clean terminal write should identify the failed enqueue")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestSessionReviewLoopStore_MarkPassNeedsHumanDecisionAndEnqueueOpenPRIsAtomic(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	store := NewSessionReviewLoopStore(mock)
+	orgID := uuid.New()
+	loopID := uuid.New()
+	passID := uuid.New()
+	jobID := uuid.New()
+
+	mock.ExpectBegin()
+	mock.ExpectExec("UPDATE session_review_loop_passes").
+		WithArgs(anyArgs(4)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectExec("UPDATE session_review_loops").
+		WithArgs(anyArgs(4)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectQuery("INSERT INTO jobs").
+		WithArgs(anyArgs(6)...).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(jobID))
+	mock.ExpectCommit()
+
+	payload := map[string]any{"session_id": uuid.New().String(), "org_id": orgID.String()}
+	err = store.MarkPassNeedsHumanDecisionAndEnqueueOpenPR(context.Background(), orgID, loopID, passID, models.ReviewLoopDecisionNeedsFix, "needs human", payload, "open_pr:test")
+	require.NoError(t, err, "needs-human terminal write should persist pass decision and enqueue open_pr atomically")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestSessionReviewLoopStore_MarkPassNeedsHumanDecisionIsAtomic(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	store := NewSessionReviewLoopStore(mock)
+	orgID := uuid.New()
+	loopID := uuid.New()
+	passID := uuid.New()
+
+	mock.ExpectBegin()
+	mock.ExpectExec("UPDATE session_review_loop_passes").
+		WithArgs(anyArgs(4)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectExec("UPDATE session_review_loops").
+		WithArgs(anyArgs(4)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectCommit()
+
+	err = store.MarkPassNeedsHumanDecision(context.Background(), orgID, loopID, passID, models.ReviewLoopDecisionNeedsFix, "needs human")
+	require.NoError(t, err, "needs-human terminal write should persist pass decision and loop state atomically")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestSessionReviewLoopStore_MarkLoopFailedAndEnqueueOpenPRIsAtomic(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	store := NewSessionReviewLoopStore(mock)
+	orgID := uuid.New()
+	loopID := uuid.New()
+	jobID := uuid.New()
+
+	mock.ExpectBegin()
+	mock.ExpectExec("UPDATE session_review_loops").
+		WithArgs(anyArgs(4)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectQuery("INSERT INTO jobs").
+		WithArgs(anyArgs(6)...).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(jobID))
+	mock.ExpectCommit()
+
+	payload := map[string]any{"session_id": uuid.New().String(), "org_id": orgID.String()}
+	err = store.MarkLoopFailedAndEnqueueOpenPR(context.Background(), orgID, loopID, "failed", payload, "open_pr:test")
+	require.NoError(t, err, "failed terminal write should enqueue open_pr atomically")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 

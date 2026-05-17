@@ -104,6 +104,35 @@ func TestService_StartRejectsMissingSnapshot(t *testing.T) {
 	require.Empty(t, threads.created, "Start should not create a review thread without a snapshot")
 }
 
+func TestService_StartCreatesLoopAndFirstPassAtomically(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	threadID := uuid.New()
+	snapshotKey := "snapshots/review-loop-atomic-start.tar.zst"
+	store := &fakeReviewLoopStore{
+		createLoopWithInitialPassErr: errors.New("insert pass failed"),
+	}
+	threads := &fakeThreadService{
+		session: models.Session{ID: sessionID, OrgID: orgID, AgentType: models.AgentTypeCodex, Status: string(models.SessionStatusIdle), SandboxState: string(models.SandboxStateSnapshotted), SnapshotKey: &snapshotKey},
+		thread:  models.SessionThread{ID: threadID, SessionID: sessionID, OrgID: orgID, AgentType: models.AgentTypeCodex, Label: "Codex Review"},
+		message: models.SessionMessage{ID: 77, SessionID: sessionID, OrgID: orgID, ThreadID: &threadID},
+	}
+	svc := NewService(store, threads)
+
+	loop, err := svc.Start(context.Background(), orgID, sessionID, StartReviewLoopRequest{
+		MaxPasses: 2,
+		Source:    models.ReviewLoopSourceManual,
+	})
+
+	require.ErrorContains(t, err, "insert pass failed", "Start should surface atomic loop/pass creation failures")
+	require.Nil(t, loop, "Start should not return a loop when atomic creation fails")
+	require.Empty(t, store.createdLoops, "Start should not leave a standalone running loop when first pass creation fails")
+	require.Empty(t, store.createdPasses, "Start should not record a pass when atomic creation fails")
+	require.Empty(t, threads.sent, "Start should not send the review command after atomic creation fails")
+}
+
 func TestService_OnThreadTurnCompleteDirtyThenClean(t *testing.T) {
 	t.Parallel()
 
@@ -265,7 +294,46 @@ func TestService_OnThreadTurnCompleteAutomationPassLimitEnqueuesOpenPRGate(t *te
 	err := svc.OnThreadTurnComplete(context.Background(), orgID, threadID, "NEEDS_FIX_PASS")
 	require.NoError(t, err, "pass-limit automation review should complete the terminal write")
 	require.Equal(t, loopID, store.needsHumanLoopID, "pass-limit automation review should mark the loop for human decision")
+	require.Equal(t, models.ReviewLoopDecisionNeedsFix, store.needsHumanDecision, "pass-limit automation review should persist the final agent decision")
 	require.Equal(t, []string{"needs_human_open_pr"}, store.events, "pass-limit automation review should durably queue the PR gate with the terminal state")
+}
+
+func TestService_OnThreadTurnCompleteAutomationDecisionFailureEnqueuesOpenPRGate(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	threadID := uuid.New()
+	loopID := uuid.New()
+	passID := uuid.New()
+	automationRunID := uuid.New()
+	store := &fakeReviewLoopStore{
+		runningLoop: models.SessionReviewLoop{
+			ID:              loopID,
+			OrgID:           orgID,
+			SessionID:       sessionID,
+			AutomationRunID: &automationRunID,
+			ThreadID:        &threadID,
+			Status:          models.ReviewLoopStatusRunning,
+			AgentType:       models.AgentTypeCodex,
+			MaxPasses:       1,
+		},
+		latestPass: models.SessionReviewLoopPass{
+			ID:        passID,
+			OrgID:     orgID,
+			LoopID:    loopID,
+			SessionID: sessionID,
+			PassIndex: 1,
+			Status:    models.ReviewLoopPassStatusDeciding,
+		},
+	}
+	svc := NewService(store, &fakeThreadService{})
+
+	err := svc.OnThreadTurnComplete(context.Background(), orgID, threadID, "REVIEW_CLEAN with commentary")
+
+	require.ErrorIs(t, err, ErrUnrecognizedDecision, "invalid automation review decision should still return the decision error")
+	require.Equal(t, loopID, store.failedLoopID, "invalid automation review decision should mark the loop failed")
+	require.Equal(t, []string{"failed_open_pr"}, store.events, "invalid automation review decision should durably queue the PR gate")
 }
 
 func TestParseDecisionRequiresExactSentinel(t *testing.T) {
@@ -299,20 +367,23 @@ func TestParseDecisionRequiresExactSentinel(t *testing.T) {
 }
 
 type fakeReviewLoopStore struct {
-	createdLoops         []models.SessionReviewLoop
-	createdPasses        []models.SessionReviewLoopPass
-	runningLoop          models.SessionReviewLoop
-	runningLoopBySession models.SessionReviewLoop
-	latestPass           models.SessionReviewLoopPass
-	reviewMessageIDs     []int64
-	markedReviewOutput   string
-	fixDecision          models.ReviewLoopDecision
-	cleanDecision        models.ReviewLoopDecision
-	cleanLoopID          uuid.UUID
-	needsHumanLoopID     uuid.UUID
-	fixSummary           string
-	terminalErr          error
-	events               []string
+	createdLoops                 []models.SessionReviewLoop
+	createdPasses                []models.SessionReviewLoopPass
+	createLoopWithInitialPassErr error
+	runningLoop                  models.SessionReviewLoop
+	runningLoopBySession         models.SessionReviewLoop
+	latestPass                   models.SessionReviewLoopPass
+	reviewMessageIDs             []int64
+	markedReviewOutput           string
+	fixDecision                  models.ReviewLoopDecision
+	cleanDecision                models.ReviewLoopDecision
+	cleanLoopID                  uuid.UUID
+	needsHumanDecision           models.ReviewLoopDecision
+	needsHumanLoopID             uuid.UUID
+	failedLoopID                 uuid.UUID
+	fixSummary                   string
+	terminalErr                  error
+	events                       []string
 }
 
 func (f *fakeReviewLoopStore) CreateLoop(_ context.Context, loop *models.SessionReviewLoop) error {
@@ -320,6 +391,17 @@ func (f *fakeReviewLoopStore) CreateLoop(_ context.Context, loop *models.Session
 	loop.StartedAt = time.Now().UTC()
 	f.createdLoops = append(f.createdLoops, *loop)
 	return nil
+}
+
+func (f *fakeReviewLoopStore) CreateLoopWithInitialPass(_ context.Context, loop *models.SessionReviewLoop, pass *models.SessionReviewLoopPass) error {
+	if f.createLoopWithInitialPassErr != nil {
+		return f.createLoopWithInitialPassErr
+	}
+	if err := f.CreateLoop(context.Background(), loop); err != nil {
+		return err
+	}
+	pass.LoopID = loop.ID
+	return f.CreatePass(context.Background(), pass)
 }
 
 func (f *fakeReviewLoopStore) CreatePass(_ context.Context, pass *models.SessionReviewLoopPass) error {
@@ -390,6 +472,23 @@ func (f *fakeReviewLoopStore) MarkLoopNeedsHumanDecision(_ context.Context, _ uu
 	return nil
 }
 
+func (f *fakeReviewLoopStore) MarkPassNeedsHumanDecision(_ context.Context, _ uuid.UUID, loopID, _ uuid.UUID, decision models.ReviewLoopDecision, _ string) error {
+	f.needsHumanLoopID = loopID
+	f.needsHumanDecision = decision
+	f.events = append(f.events, "needs_human")
+	return nil
+}
+
+func (f *fakeReviewLoopStore) MarkPassNeedsHumanDecisionAndEnqueueOpenPR(_ context.Context, _ uuid.UUID, loopID, _ uuid.UUID, decision models.ReviewLoopDecision, _ string, _ map[string]any, _ string) error {
+	if f.terminalErr != nil {
+		return f.terminalErr
+	}
+	f.needsHumanLoopID = loopID
+	f.needsHumanDecision = decision
+	f.events = append(f.events, "needs_human_open_pr")
+	return nil
+}
+
 func (f *fakeReviewLoopStore) MarkLoopNeedsHumanDecisionAndEnqueueOpenPR(_ context.Context, _ uuid.UUID, loopID uuid.UUID, _ string, _ map[string]any, _ string) error {
 	if f.terminalErr != nil {
 		return f.terminalErr
@@ -400,6 +499,15 @@ func (f *fakeReviewLoopStore) MarkLoopNeedsHumanDecisionAndEnqueueOpenPR(_ conte
 }
 
 func (f *fakeReviewLoopStore) MarkLoopFailed(_ context.Context, _ uuid.UUID, _ uuid.UUID, _ string) error {
+	return nil
+}
+
+func (f *fakeReviewLoopStore) MarkLoopFailedAndEnqueueOpenPR(_ context.Context, _ uuid.UUID, loopID uuid.UUID, _ string, _ map[string]any, _ string) error {
+	if f.terminalErr != nil {
+		return f.terminalErr
+	}
+	f.failedLoopID = loopID
+	f.events = append(f.events, "failed_open_pr")
 	return nil
 }
 

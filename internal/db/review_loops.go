@@ -31,6 +31,34 @@ const reviewLoopPassSelectColumns = `id, org_id, loop_id, session_id, pass_index
 	fix_started_at, fix_completed_at, summary`
 
 func (s *SessionReviewLoopStore) CreateLoop(ctx context.Context, loop *models.SessionReviewLoop) error {
+	return createLoopOn(ctx, s.db, loop)
+}
+
+func (s *SessionReviewLoopStore) CreateLoopWithInitialPass(ctx context.Context, loop *models.SessionReviewLoop, pass *models.SessionReviewLoopPass) error {
+	txStarter, ok := s.db.(TxStarter)
+	if !ok {
+		return fmt.Errorf("create review loop with initial pass requires transaction support")
+	}
+	tx, err := txStarter.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin review loop start tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	if err := createLoopOn(ctx, tx, loop); err != nil {
+		return err
+	}
+	pass.LoopID = loop.ID
+	if err := createPassOn(ctx, tx, pass); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit review loop start tx: %w", err)
+	}
+	return nil
+}
+
+func createLoopOn(ctx context.Context, q DBTX, loop *models.SessionReviewLoop) error {
 	if err := loop.Status.Validate(); err != nil {
 		return err
 	}
@@ -51,7 +79,7 @@ func (s *SessionReviewLoopStore) CreateLoop(ctx context.Context, loop *models.Se
 			@loop_start_checkpoint_key, @latest_checkpoint_key, @latest_summary, @started_by_user_id
 		)
 		RETURNING id, started_at`
-	err := s.db.QueryRow(ctx, query, pgx.NamedArgs{
+	err := q.QueryRow(ctx, query, pgx.NamedArgs{
 		"org_id":                    loop.OrgID,
 		"session_id":                loop.SessionID,
 		"automation_run_id":         loop.AutomationRunID,
@@ -140,6 +168,10 @@ func (s *SessionReviewLoopStore) GetLatestLoopByAutomationRun(ctx context.Contex
 }
 
 func (s *SessionReviewLoopStore) CreatePass(ctx context.Context, pass *models.SessionReviewLoopPass) error {
+	return createPassOn(ctx, s.db, pass)
+}
+
+func createPassOn(ctx context.Context, q DBTX, pass *models.SessionReviewLoopPass) error {
 	if err := pass.Status.Validate(); err != nil {
 		return err
 	}
@@ -155,7 +187,7 @@ func (s *SessionReviewLoopStore) CreatePass(ctx context.Context, pass *models.Se
 		)
 		RETURNING id, review_started_at`
 	var reviewStartedAt time.Time
-	err := s.db.QueryRow(ctx, query, pgx.NamedArgs{
+	err := q.QueryRow(ctx, query, pgx.NamedArgs{
 		"org_id":              pass.OrgID,
 		"loop_id":             pass.LoopID,
 		"session_id":          pass.SessionID,
@@ -296,14 +328,50 @@ func (s *SessionReviewLoopStore) MarkLoopNeedsHumanDecision(ctx context.Context,
 	return s.markLoopTerminal(ctx, orgID, loopID, models.ReviewLoopStatusNeedsHumanDecision, summary)
 }
 
-func (s *SessionReviewLoopStore) MarkLoopNeedsHumanDecisionAndEnqueueOpenPR(ctx context.Context, orgID, loopID uuid.UUID, summary string, payload map[string]any, dedupeKey string) error {
+func (s *SessionReviewLoopStore) MarkPassNeedsHumanDecision(ctx context.Context, orgID, loopID, passID uuid.UUID, decision models.ReviewLoopDecision, summary string) error {
+	if err := decision.Validate(); err != nil {
+		return err
+	}
+	return s.withTerminalTransition(ctx, func(tx pgx.Tx) error {
+		if err := markPassNeedsHumanDecisionOn(ctx, tx, orgID, passID, decision, summary); err != nil {
+			return err
+		}
+		return markLoopTerminalOn(ctx, tx, orgID, loopID, models.ReviewLoopStatusNeedsHumanDecision, summary)
+	})
+}
+
+func (s *SessionReviewLoopStore) MarkPassNeedsHumanDecisionAndEnqueueOpenPR(ctx context.Context, orgID, loopID, passID uuid.UUID, decision models.ReviewLoopDecision, summary string, payload map[string]any, dedupeKey string) error {
+	if err := decision.Validate(); err != nil {
+		return err
+	}
 	return s.withTerminalOpenPRJob(ctx, orgID, payload, dedupeKey, func(tx pgx.Tx) error {
+		if err := markPassNeedsHumanDecisionOn(ctx, tx, orgID, passID, decision, summary); err != nil {
+			return err
+		}
 		return markLoopTerminalOn(ctx, tx, orgID, loopID, models.ReviewLoopStatusNeedsHumanDecision, summary)
 	})
 }
 
 func (s *SessionReviewLoopStore) MarkLoopFailed(ctx context.Context, orgID, loopID uuid.UUID, summary string) error {
 	return s.markLoopTerminal(ctx, orgID, loopID, models.ReviewLoopStatusFailed, summary)
+}
+
+func (s *SessionReviewLoopStore) MarkLoopFailedAndEnqueueOpenPR(ctx context.Context, orgID, loopID uuid.UUID, summary string, payload map[string]any, dedupeKey string) error {
+	return s.withTerminalOpenPRJob(ctx, orgID, payload, dedupeKey, func(tx pgx.Tx) error {
+		return markLoopTerminalOn(ctx, tx, orgID, loopID, models.ReviewLoopStatusFailed, summary)
+	})
+}
+
+func markPassNeedsHumanDecisionOn(ctx context.Context, q DBTX, orgID, passID uuid.UUID, decision models.ReviewLoopDecision, summary string) error {
+	return execPassUpdateOn(ctx, q, `
+		UPDATE session_review_loop_passes
+		SET status = 'needs_fix',
+		    agent_decision = @agent_decision,
+		    summary = @summary
+		WHERE id = @id AND org_id = @org_id`, orgID, passID, pgx.NamedArgs{
+		"agent_decision": decision,
+		"summary":        summary,
+	})
 }
 
 func (s *SessionReviewLoopStore) CancelLoop(ctx context.Context, orgID, loopID uuid.UUID) error {
@@ -359,9 +427,28 @@ func markLoopTerminalOn(ctx context.Context, q DBTX, orgID, loopID uuid.UUID, st
 }
 
 func (s *SessionReviewLoopStore) withTerminalOpenPRJob(ctx context.Context, orgID uuid.UUID, payload map[string]any, dedupeKey string, transition func(pgx.Tx) error) error {
+	return s.withTerminalTransition(ctx, func(tx pgx.Tx) error {
+		if err := transition(tx); err != nil {
+			return err
+		}
+		jobDedupeKey := dedupeKey
+		if _, err := enqueueOn(ctx, tx, orgID, EnqueueOpts{
+			Queue:     "default",
+			JobType:   "open_pr",
+			Payload:   payload,
+			Priority:  5,
+			DedupeKey: &jobDedupeKey,
+		}); err != nil {
+			return fmt.Errorf("enqueue open_pr after review loop: %w", err)
+		}
+		return nil
+	})
+}
+
+func (s *SessionReviewLoopStore) withTerminalTransition(ctx context.Context, transition func(pgx.Tx) error) error {
 	txStarter, ok := s.db.(TxStarter)
 	if !ok {
-		return fmt.Errorf("review loop terminal open_pr enqueue requires transaction support")
+		return fmt.Errorf("review loop terminal transition requires transaction support")
 	}
 	tx, err := txStarter.Begin(ctx)
 	if err != nil {
@@ -371,16 +458,6 @@ func (s *SessionReviewLoopStore) withTerminalOpenPRJob(ctx context.Context, orgI
 
 	if err := transition(tx); err != nil {
 		return err
-	}
-	jobDedupeKey := dedupeKey
-	if _, err := enqueueOn(ctx, tx, orgID, EnqueueOpts{
-		Queue:     "default",
-		JobType:   "open_pr",
-		Payload:   payload,
-		Priority:  5,
-		DedupeKey: &jobDedupeKey,
-	}); err != nil {
-		return fmt.Errorf("enqueue open_pr after review loop: %w", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("commit review loop terminal tx: %w", err)
