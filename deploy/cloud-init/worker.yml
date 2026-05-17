@@ -34,9 +34,9 @@ users:
   - name: deploy
     groups: docker
     shell: /bin/bash
-    # No sudo here — narrow NOPASSWD grant is installed by deploy/scripts/bootstrap.sh
-    # on the first `make provision-<role>` run. Cloud-init's runcmd doesn't need
-    # sudo (it runs as root and uses `su - deploy -c ...` for deploy-owned steps).
+    # Routine deploys run selected host reconciliation helpers through
+    # deploy+sudo. The narrow NOPASSWD grant is written below so workers
+    # created only from cloud-init do not require a follow-up root SSH repair.
     ssh_authorized_keys:
       - ${SSH_PUBLIC_KEY}
 
@@ -55,6 +55,7 @@ runcmd:
   - apt-get update && apt-get install -y runsc
   - runsc install -- --ignore-cgroups --host-uds=open
   - systemctl restart docker
+  - visudo -cf /etc/sudoers.d/99-deploy
 
   # Set up GHCR access (token written to file to avoid leaking in cloud-init logs)
   - su - deploy -c 'cat /opt/143/.ghcr-token | docker login ghcr.io -u deploy --password-stdin && rm -f /opt/143/.ghcr-token'
@@ -138,3 +139,25 @@ write_files:
   - path: /etc/sysctl.d/99-worker.conf
     content: |
       vm.swappiness = 1
+
+  # Narrow NOPASSWD sudo for the deploy user. Keep this aligned with
+  # deploy/scripts/bootstrap.sh and repair-deploy-sudoers.sh: each entry mirrors
+  # a sudo call site used by routine worker deploys.
+  - path: /etc/sudoers.d/99-deploy
+    owner: root:root
+    permissions: '0440'
+    content: |
+      Cmnd_Alias DEPLOY_CMDS = \
+          /usr/bin/chown -R deploy\:deploy /opt/143/deploy/scripts, \
+          /usr/bin/chown -R deploy\:deploy /opt/143/deploy/vmalert, \
+          /usr/bin/chown -R deploy\:deploy /opt/143/deploy/grafana, \
+          /usr/bin/runsc install -- --ignore-cgroups --host-uds=open, \
+          /usr/bin/systemctl restart docker, \
+          /usr/bin/apt-get install -y --no-install-recommends iptables-persistent, \
+          /opt/143/deploy/scripts/sandbox-firewall.sh 143-sandbox, \
+          /opt/143/deploy/scripts/sandbox-resolv-conf.sh, \
+          /opt/143/deploy/scripts/reconcile-worker-host.sh 143-sandbox, \
+          /opt/143/deploy/scripts/install-log-rotation.sh *, \
+          /opt/143/deploy/scripts/install-docker-dns.sh *
+
+      deploy ALL=(root) NOPASSWD: DEPLOY_CMDS
