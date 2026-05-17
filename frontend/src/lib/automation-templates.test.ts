@@ -42,10 +42,10 @@ describe("automation template catalog", () => {
     expect(template?.goal).toContain("Do not classify a test as flaky from one failed run alone");
   });
 
-  it("guides recent-query index audits toward evidence-backed database changes", () => {
-    const template = getAutomationTemplate("recent-query-index-audit");
+  it("guides missing-index automations toward evidence-backed database changes", () => {
+    const template = getAutomationTemplate("missing-indexes");
 
-    expect(template?.name).toBe("Recent query index audit");
+    expect(template?.name).toBe("Check for missing indexes");
     expect(template?.goal).toContain("recently added or substantially changed database queries");
     expect(template?.goal).toContain("last 7 days of commits");
     expect(template?.goal).toContain("open a focused index migration when the evidence is strong");

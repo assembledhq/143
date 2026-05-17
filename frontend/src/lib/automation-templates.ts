@@ -399,8 +399,8 @@ Verification
     defaultUnit: "weeks",
   },
   {
-    id: "recent-query-index-audit",
-    name: "Recent query index audit",
+    id: "missing-indexes",
+    name: "Check for missing indexes",
     icon: Database,
     category: "reliability",
     summary: "Review recently added database queries and make sure they have the right supporting indexes without adding unnecessary write cost.",
