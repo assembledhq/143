@@ -339,7 +339,7 @@ function QueueTable({
   return (
     <div className="space-y-3">
       <Card className="overflow-hidden border-border/70">
-        <Table className="w-full table-fixed">
+        <Table className="w-full min-w-[64rem] table-auto">
           <TableHeader>
             <TableRow>
               <TableHead className="w-14">Rank</TableHead>
