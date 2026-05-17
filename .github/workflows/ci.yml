@@ -5,6 +5,9 @@ on:
     branches: [main]
   push:
     branches: [main]
+  schedule:
+    - cron: "17 10 * * *"
+  workflow_dispatch:
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
@@ -175,7 +178,7 @@ jobs:
   frontend-test:
     name: Frontend Test
     needs: changes
-    if: needs.changes.outputs.frontend == 'true' || needs.changes.outputs.ci == 'true' || github.event_name == 'push'
+    if: needs.changes.outputs.frontend == 'true' || needs.changes.outputs.ci == 'true' || github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -206,13 +209,18 @@ jobs:
         timeout-minutes: 10
         run: npx vitest run --changed=pr-base --passWithNoTests
 
-      - name: Run full tests with coverage (main only)
+      - name: Run full tests (main)
         if: github.event_name == 'push'
         timeout-minutes: 10
+        run: npx vitest run --reporter=dot
+
+      - name: Run full tests with coverage (scheduled/manual)
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        timeout-minutes: 20
         run: npx vitest run --coverage --coverage.reporter=text --coverage.reporter=json-summary --coverage.reporter=lcov
 
-      - name: Check frontend coverage floor (main only)
-        if: github.event_name == 'push'
+      - name: Check frontend coverage floor (scheduled/manual)
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
         run: |
           COVERAGE=$(cat coverage/coverage-summary.json | node -e "
             const data = JSON.parse(require('fs').readFileSync('/dev/stdin','utf8'));
@@ -228,7 +236,7 @@ jobs:
           fi
 
       - name: Upload coverage artifact
-        if: github.event_name == 'push'
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
         uses: actions/upload-artifact@v4
         with:
           name: frontend-coverage
