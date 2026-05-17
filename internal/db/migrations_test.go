@@ -51,10 +51,14 @@ func TestMigrationsAllowBuilderRole(t *testing.T) {
 	require.NoError(t, err, "test should read builder role migration")
 
 	sql := string(body)
-	require.Contains(t, sql, "chk_users_role CHECK (role IN ('admin', 'member', 'builder', 'viewer'))",
+	require.Contains(t, sql, "chk_users_role CHECK (role IN ('admin', 'member', 'builder', 'viewer')) NOT VALID",
 		"users role constraint should allow seeded builder users")
-	require.Contains(t, sql, "organization_memberships_role_check CHECK (role IN ('admin', 'member', 'builder', 'viewer'))",
+	require.Contains(t, sql, "VALIDATE CONSTRAINT chk_users_role",
+		"users role constraint should validate separately to reduce lock pressure")
+	require.Contains(t, sql, "organization_memberships_role_check CHECK (role IN ('admin', 'member', 'builder', 'viewer')) NOT VALID",
 		"membership role constraint should allow seeded builder memberships")
+	require.Contains(t, sql, "VALIDATE CONSTRAINT organization_memberships_role_check",
+		"membership role constraint should validate separately to reduce lock pressure")
 }
 
 // TestCopyCodingCredentialsMigrationStampsTeamDefaultMarker locks the
