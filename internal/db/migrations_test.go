@@ -163,7 +163,11 @@ func TestAutomationsGoalLengthExpandMigrationRaisesConstraint(t *testing.T) {
 func TestReviewLoopMigrationDoesNotReferenceSessionMessagesByIDOnly(t *testing.T) {
 	t.Parallel()
 
-	body, err := os.ReadFile("../../migrations/000130_review_agent_loops.up.sql")
+	files, err := filepath.Glob("../../migrations/*_review_agent_loops.up.sql")
+	require.NoError(t, err, "test should list review loop migrations")
+	require.Len(t, files, 1, "test should find exactly one review loop migration")
+
+	body, err := os.ReadFile(files[0])
 	require.NoError(t, err, "test should read the review loop migration")
 
 	sql := string(body)
