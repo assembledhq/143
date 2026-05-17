@@ -4,6 +4,10 @@ Use docs/design/overall.md as the overall design of the system, think of it as a
 
 When investigating bugs or unexpected behavior, three Make targets give read-only access to prod. All require `SSH_KEY` (defaults to `~/.ssh/143-deploy`) and resolve hosts/credentials from `.env.production.enc` via sops.
 
+### Production secrets guardrail
+
+Treat `.env.production.enc` as protected production configuration. Do not edit, regenerate, stage, or commit it unless the user explicitly asks for a production secret/config change. Read-only decrypts through the Make targets below are fine. Before finishing any work that involved prod debugging, check `git status --short -- .env.production.enc` and leave it clean unless the requested task was specifically to update production env.
+
 ### Querying the database
 
 - **`make db-query Q='SELECT ...'`** — runs a one-shot SQL query against the prod Postgres as the `readonly` role. SELECT-only, every connection is a read-only txn, bounded by a 30s `statement_timeout`. Use single quotes around `Q` and escape literal `$` as `$$` (Make eats single `$`). For an interactive session, use `make db-psql`.
