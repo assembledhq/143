@@ -26,6 +26,7 @@ import {
 import { cn } from "@/lib/utils";
 import { queryKeys } from "@/lib/query-keys";
 import { ApiError } from "@/lib/api";
+import { roleLabel } from "@/lib/roles";
 import { CreateOrgDialog } from "@/components/create-org-dialog";
 import { usePendingInvites } from "@/hooks/use-pending-invites";
 import type {
@@ -382,7 +383,7 @@ export function OrgSwitcher({ userEmail }: OrgSwitcherProps) {
                           {invite.org_name}
                         </span>
                         <span className="text-xs uppercase tracking-wide text-muted-foreground shrink-0">
-                          {invite.role}
+                          {roleLabel(invite.role)}
                         </span>
                       </div>
                       <div className="text-xs text-muted-foreground truncate">
@@ -460,7 +461,7 @@ export function OrgSwitcher({ userEmail }: OrgSwitcherProps) {
                   {m.org_name}
                 </span>
                 <span className="text-xs uppercase tracking-wide text-muted-foreground">
-                  {m.role}
+                  {roleLabel(m.role)}
                 </span>
                 {isActive && <Check className="h-3.5 w-3.5 text-foreground shrink-0" />}
               </DropdownMenuItem>
