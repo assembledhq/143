@@ -690,6 +690,22 @@ func TestProvisionAndMakeExposeWorkerReconciliation(t *testing.T) {
 	require.Contains(t, makefileText, "sudo -n /opt/143/deploy/scripts/reconcile-worker-host.sh 143-sandbox", "worker repair target should run the canonical reconciliation script on the host")
 }
 
+func TestWorkerCloudInitInstallsDeploySudoersGrant(t *testing.T) {
+	t.Parallel()
+
+	cloudInit, err := os.ReadFile("../deploy/cloud-init/worker.yml")
+	require.NoError(t, err, "test should read the worker cloud-init template")
+	cloudInitText := string(cloudInit)
+
+	require.Contains(t, cloudInitText, "/etc/sudoers.d/99-deploy", "worker cloud-init should install the deploy sudoers grant so cloud-init-only workers survive routine fleet deploys")
+	require.Contains(t, cloudInitText, "deploy ALL=(root) NOPASSWD: DEPLOY_CMDS", "worker cloud-init should grant only the narrow deploy command alias")
+	require.Contains(t, cloudInitText, "/opt/143/deploy/scripts/reconcile-worker-host.sh 143-sandbox", "worker cloud-init sudoers should allow deploy-time worker host reconciliation")
+	require.Contains(t, cloudInitText, "/opt/143/deploy/scripts/install-log-rotation.sh *", "worker cloud-init sudoers should allow deploy-time Docker log rotation")
+	require.Contains(t, cloudInitText, "/opt/143/deploy/scripts/install-docker-dns.sh *", "worker cloud-init sudoers should allow deploy-time Docker DNS pinning")
+	require.Contains(t, cloudInitText, "visudo -cf /etc/sudoers.d/99-deploy", "worker cloud-init should validate sudoers before first deploy depends on it")
+	require.NotContains(t, cloudInitText, "No sudo here", "worker cloud-init comments should not imply sudoers is external to cloud-init")
+}
+
 func TestWorkerCanReachSandboxBridge(t *testing.T) {
 	t.Parallel()
 
