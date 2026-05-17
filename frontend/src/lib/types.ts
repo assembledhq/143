@@ -363,6 +363,54 @@ export interface SessionThreadFileEvent {
   observed_at: string;
 }
 
+export type ReviewLoopStatus = 'running' | 'clean' | 'needs_human_decision' | 'failed' | 'cancelled';
+export type ReviewLoopSource = 'manual' | 'automation';
+export type ReviewLoopPassStatus = 'reviewing' | 'deciding' | 'fixing' | 'clean' | 'needs_fix' | 'failed';
+export type ReviewLoopDecision = 'REVIEW_CLEAN' | 'NEEDS_FIX_PASS';
+
+export interface SessionReviewLoop {
+  id: string;
+  org_id: string;
+  session_id: string;
+  automation_run_id?: string;
+  thread_id?: string;
+  status: ReviewLoopStatus;
+  source: ReviewLoopSource;
+  agent_type: string;
+  max_passes: number;
+  completed_passes: number;
+  review_required: boolean;
+  bypassed_by_user_id?: string;
+  bypass_reason?: string;
+  loop_start_checkpoint_key?: string;
+  latest_checkpoint_key?: string;
+  latest_summary?: string;
+  started_by_user_id?: string;
+  started_at: string;
+  completed_at?: string;
+  passes?: SessionReviewLoopPass[];
+}
+
+export interface SessionReviewLoopPass {
+  id: string;
+  org_id: string;
+  loop_id: string;
+  session_id: string;
+  pass_index: number;
+  review_message_id?: number;
+  decision_message_id?: number;
+  fix_message_id?: number;
+  status: ReviewLoopPassStatus;
+  agent_decision?: ReviewLoopDecision;
+  review_output?: string;
+  fix_summary?: string;
+  review_started_at?: string;
+  review_completed_at?: string;
+  fix_started_at?: string;
+  fix_completed_at?: string;
+  summary?: string;
+}
+
 export interface ForkResult {
   job_id: string;
 }
@@ -1557,6 +1605,7 @@ export interface Automation {
   max_concurrent: number;
   base_branch: string;
   identity_scope: AutomationIdentityScope;
+  pre_pr_review_loops: number;
   schedule_type: AutomationScheduleType;
   interval_value?: number;
   interval_unit?: 'hours' | 'days' | 'weeks';

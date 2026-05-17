@@ -1,8 +1,23 @@
 # Design: Review Agent Loops
 
-> **Status:** Not Started | **Last reviewed:** 2026-05-14
+> **Status:** Implemented | **Last reviewed:** 2026-05-15
 >
 > **Depends on:** [implemented/48-automations-separation.md](../implemented/48-automations-separation.md), [backlog/11-review-feedback-loop.md](../backlog/11-review-feedback-loop.md), [implemented/40-pr-creation-revamp.md](../implemented/40-pr-creation-revamp.md), [implemented/68-sandbox-agent-tabs-and-threads.md](../implemented/68-sandbox-agent-tabs-and-threads.md), [implemented/64-session-composer-slash-commands.md](../implemented/64-session-composer-slash-commands.md)
+
+## Implementation Summary
+
+Implemented as a shared backend review-loop primitive with persisted
+`session_review_loops` and `session_review_loop_passes` records, native
+structured `/review` messages for Codex and Claude Code, one review thread per
+loop, pass-limit enforcement, and automatic continuation from review to
+decision to fix to confirmation review.
+
+Manual session detail now exposes a `Review` action that starts a two-pass loop
+in the current sandbox. Automations persist `pre_pr_review_loops`; new
+automations default to one pass, existing rows backfill to zero, and the
+`open_pr` worker gate starts or waits for the automation review loop before
+publication. Clean automation loops enqueue PR creation again; loops that hit
+the pass limit block PR creation for human decision.
 
 ## Problem
 
@@ -326,15 +341,10 @@ The sequential contract is part of the product model:
 
 ### Checkpoints
 
-Capture checkpoints at:
-
-- loop start
-- before each fix pass
-- after each fix pass
-
-These checkpoints support resume after worker restart, stopping while keeping
-current changes, future loop revert, and comparing what changed because of the
-loop.
+The implemented loop records the session snapshot key available at loop start
+as `loop_start_checkpoint_key` and `latest_checkpoint_key`. Per-pass checkpoint
+capture remains a follow-up: the current loop relies on the existing
+thread/session snapshot behavior after each turn.
 
 ## Running After PR Creation
 
@@ -354,10 +364,13 @@ other post-PR session edits:
 This keeps review loops consistent with the current PR flow and avoids a hidden
 side effect where a review button silently updates a remote branch.
 
-## Required Review Settings
+## Future Review Policy Settings
 
-Organizations should be able to require a clean review loop before PR creation
-or merge-related actions, with role-specific policy.
+The implemented automation gate requires a clean review loop when
+`pre_pr_review_loops` is enabled for an automation. Broader org-level policy
+settings remain future work: organizations should be able to require a clean
+review loop before PR creation or merge-related actions, with role-specific
+policy.
 
 Recommended setting:
 
@@ -524,8 +537,6 @@ POST   /api/v1/sessions/{session_id}/review-loops
 GET    /api/v1/sessions/{session_id}/review-loops
 GET    /api/v1/sessions/{session_id}/review-loops/{loop_id}
 POST   /api/v1/sessions/{session_id}/review-loops/{loop_id}/cancel
-POST   /api/v1/sessions/{session_id}/review-loops/{loop_id}/resume
-POST   /api/v1/sessions/{session_id}/review-requirement/bypass
 ```
 
 Automation create/update/get payloads expose:
@@ -633,21 +644,21 @@ for both review and fixes.
 ### Auto-send versus prefill
 
 - **Auto-send:** best button UX and the target behavior.
-- **Prefill then user sends:** safer first rollout and avoids surprise spend.
+- **Prefill then user sends:** rejected for the implemented loop because it
+  leaves automation runs without a durable continuation point.
 
-Recommended rollout: prefill in the first development slice if needed, but keep
-the design target as auto-send with clear confirmation in the setup popover.
+Implemented behavior: auto-send the native review, decision, fix, and
+confirmation prompts through the durable thread/message path.
 
-## Rollout Plan
+## Rollout Status
 
 ### Phase 1: Visible manual review loop
 
 - Rename/link the design as review loops, not automation-only review.
-- Add `Review` button and setup popover with the pass-count stepper.
+- Add `Review` button.
 - Create one review-loop tab in the same sandbox.
 - Send native `/review` as a structured slash command.
 - Persist loop/pass records.
-- Show loop timeline in Overview.
 - Run one review pass and stop with the native output.
 
 ### Phase 2: Sequential fix and confirmation
@@ -662,49 +673,47 @@ the design target as auto-send with clear confirmation in the setup popover.
 
 - Add `pre_pr_review_loops` to automations.
 - Run the same loop before automation PR creation.
-- Show review/fix passes in automation run history.
+- Persist review/fix passes for automation run history surfaces.
 - Stop before PR creation when the agent still reports issues.
 
-### Phase 4: Policy and recovery
+### Deferred follow-up: Policy and recovery
 
 - Add role-specific review-loop requirement settings.
 - Add admin bypass with audit logging.
 - Capture and expose loop checkpoints.
-- Add cancel, stop-after-current-pass, and resume.
+- Add stop-after-current-pass and resume.
 - Add org/project defaults for pass count.
 
-## Testing Plan
+## Testing Coverage
 
 Backend:
 
 - store tests for loop/pass queries with required `org_id` filtering
-- handler tests for starting, canceling, resuming, and bypassing requirements
-- service tests for clean review, dirty-then-clean, pass-limit reached, review
-  failure, fix failure, and cancellation
-- service tests for role-specific review requirements and admin bypass
-- adapter tests proving `/review` commands are serialized per agent
+- handler/API coverage through route wiring and store-backed operations
+- service tests for starting loops, dirty-then-clean, and clean automation
+  loop PR resumption
+- worker tests proving automation PR creation starts review before pushing
 - prompt rendering tests for review, decision, and fix templates
 
 Frontend:
 
-- setup popover tests for default `2`, stepper limits, and unsupported agents
-- timeline tests for running, clean, pass-limit, failed, and canceled loops
-- tab-jump tests from timeline rows to review-loop messages
-- automation settings tests for `Off` and pass-count stepper behavior
-- prompt rendering tests proving the low-risk local nit instruction is included
-- PR action gate tests for builder-required, member-required, and admin-bypass
-  cases
+- type coverage for review loop API/types
+- session detail Review action wiring
+- automation create/edit pass-count controls
+- MSW coverage for review-loop API requests used by session detail tests
 
 Verification follows the normal repo rules: `go vet ./...`, `go build ./...`,
 `go test ./...` for backend changes, and frontend typecheck/lint/build for UI
 changes.
 
-## Open Questions
+## Deferred Follow-Ups
 
 1. How much raw review output should be retained long term versus summarized
    after the session snapshot expires?
 2. What is the right cost preview for 3-5 pass loops on large diffs?
-3. Should the review-loop tab be reusable for future review loops in the same
+3. Should manual review expose the full pass-count setup popover in the first
+   viewport action, or keep the current fast-start default of two passes?
+4. Should the review-loop tab be reusable for future review loops in the same
    session, or should each click create a fresh tab?
 
 ## Decision
