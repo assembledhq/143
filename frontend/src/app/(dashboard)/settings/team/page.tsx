@@ -40,7 +40,7 @@ import { PageHeader } from "@/components/page-header";
 import { PageContainer } from "@/components/page-container";
 import { useAuth } from "@/hooks/use-auth";
 import { AuditLogTrigger } from "@/components/audit/audit-log-trigger";
-import { capitalizeWords } from "@/lib/utils";
+import { roleLabel } from "@/lib/roles";
 import type {
   User,
   InvitationResponse,
@@ -304,7 +304,7 @@ export default function TeamSettingsPage() {
 
       {!canManageTeam && (
         <div className="rounded-md bg-muted px-3 py-2 text-xs text-muted-foreground">
-          Only admins can manage member roles, invitations, and removals.
+          Only admins can manage team roles, invitations, and removals.
         </div>
       )}
 
@@ -391,7 +391,7 @@ export default function TeamSettingsPage() {
                         <div className="flex items-center">
                         {isSelf || !canManageTeam ? (
                           <Badge variant={roleBadgeVariant(member.role)}>
-                            {capitalizeWords(member.role)}
+                            {roleLabel(member.role)}
                           </Badge>
                         ) : (
                           <Select
@@ -407,12 +407,12 @@ export default function TeamSettingsPage() {
                               aria-label={`Role for ${member.name}`}
                             >
                               <SelectValue>
-                                {capitalizeWords(member.role)}
+                                {roleLabel(member.role)}
                               </SelectValue>
                             </SelectTrigger>
                             <SelectContent>
                               <SelectItem value="admin">Admin</SelectItem>
-                              <SelectItem value="member">Member</SelectItem>
+                              <SelectItem value="member">Engineer</SelectItem>
                               <SelectItem value="builder">Builder</SelectItem>
                               <SelectItem value="viewer">Viewer</SelectItem>
                             </SelectContent>
@@ -486,7 +486,7 @@ export default function TeamSettingsPage() {
                         )}
                         Invited by {inv.invited_by.name} as{" "}
                         <Badge variant="outline" className="ml-0.5">
-                          {capitalizeWords(inv.role)}
+                          {roleLabel(inv.role)}
                         </Badge>
                       </div>
                       {inv.status === "expired" && (
@@ -527,7 +527,7 @@ export default function TeamSettingsPage() {
             <AlertDialogHeader>
               <AlertDialogTitle>Invite a member</AlertDialogTitle>
               <AlertDialogDescription>
-                Invite by email or GitHub username and choose the member&apos;s initial role.
+                Invite by email or GitHub username and choose the teammate&apos;s initial role.
               </AlertDialogDescription>
             </AlertDialogHeader>
             <form onSubmit={handleInvite} className="space-y-4">
@@ -788,11 +788,11 @@ export default function TeamSettingsPage() {
                 <Label htmlFor="invite-role">Role</Label>
                 <Select value={inviteRole} onValueChange={setInviteRole}>
                   <SelectTrigger id="invite-role" className="h-9 w-full">
-                    <SelectValue>{capitalizeWords(inviteRole)}</SelectValue>
+                    <SelectValue>{roleLabel(inviteRole)}</SelectValue>
                   </SelectTrigger>
                   <SelectContent>
                     <SelectItem value="admin">Admin</SelectItem>
-                    <SelectItem value="member">Member</SelectItem>
+                    <SelectItem value="member">Engineer</SelectItem>
                     <SelectItem value="builder">Builder</SelectItem>
                     <SelectItem value="viewer">Viewer</SelectItem>
                   </SelectContent>
@@ -832,11 +832,11 @@ export default function TeamSettingsPage() {
                 <>
                   You&apos;re about to change your own role from{" "}
                   <span className="font-medium">
-                    {capitalizeWords(pendingRoleChange?.member.role ?? "")}
+                    {roleLabel(pendingRoleChange?.member.role ?? "")}
                   </span>{" "}
                   to{" "}
                   <span className="font-medium">
-                    {capitalizeWords(pendingRoleChange?.newRole ?? "")}
+                    {roleLabel(pendingRoleChange?.newRole ?? "")}
                   </span>
                   . You may lose access to admin features and won&apos;t be able to undo this
                   yourself.
@@ -845,11 +845,11 @@ export default function TeamSettingsPage() {
                 <>
                   Change {pendingRoleChange?.member.name}&apos;s role from{" "}
                   <span className="font-medium">
-                    {capitalizeWords(pendingRoleChange?.member.role ?? "")}
+                    {roleLabel(pendingRoleChange?.member.role ?? "")}
                   </span>{" "}
                   to{" "}
                   <span className="font-medium">
-                    {capitalizeWords(pendingRoleChange?.newRole ?? "")}
+                    {roleLabel(pendingRoleChange?.newRole ?? "")}
                   </span>
                   ? Their permissions will update immediately.
                 </>

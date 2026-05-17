@@ -268,6 +268,27 @@ describe('TeamSettingsPage', () => {
     expect(await screen.findByRole('option', { name: 'Builder' })).toBeInTheDocument();
   });
 
+  it('labels the member role as Engineer while submitting the member value', async () => {
+    const user = userEvent.setup();
+    renderWithProviders(<TeamSettingsPage />);
+
+    await user.click(await screen.findByRole('button', { name: 'Invite' }));
+    await user.click(await screen.findByLabelText('Role'));
+
+    expect(await screen.findByRole('option', { name: 'Engineer' })).toBeInTheDocument();
+    expect(screen.queryByRole('option', { name: 'Member' })).not.toBeInTheDocument();
+    expect(screen.getByLabelText('Role')).toHaveTextContent('Engineer');
+
+    await user.click(screen.getByRole('option', { name: 'Engineer' }));
+    await user.type(screen.getByRole('textbox', { name: 'Email' }), 'engineer@test.com');
+    await user.click(screen.getByRole('button', { name: 'Add email' }));
+    await user.click(screen.getByRole('button', { name: 'Send invite to engineer@test.com' }));
+
+    await waitFor(() => {
+      expect(createInvitationMock).toHaveBeenCalledWith({ email: 'engineer@test.com', role: 'member' });
+    });
+  });
+
   it('offers builder in the member role selector for admins', async () => {
     const user = userEvent.setup();
     renderWithProviders(<TeamSettingsPage />);
@@ -275,6 +296,21 @@ describe('TeamSettingsPage', () => {
     await user.click(await screen.findByLabelText('Role for Member User'));
 
     expect(await screen.findByRole('option', { name: 'Builder' })).toBeInTheDocument();
+  });
+
+  it('labels existing member rows as Engineer', async () => {
+    const user = userEvent.setup();
+    renderWithProviders(<TeamSettingsPage />);
+
+    const roleSelectTrigger = await screen.findByRole('combobox', {
+      name: 'Role for Member User',
+    });
+
+    expect(roleSelectTrigger).toHaveTextContent('Engineer');
+
+    await user.click(roleSelectTrigger);
+    expect(await screen.findByRole('option', { name: 'Engineer' })).toBeInTheDocument();
+    expect(screen.queryByRole('option', { name: 'Member' })).not.toBeInTheDocument();
   });
 
   it('shows informative self action text instead of a dash placeholder', async () => {
@@ -372,8 +408,8 @@ describe('TeamSettingsPage', () => {
 
     // Both admin badge and select option contain "Admin" text
     expect(screen.getAllByText('Admin').length).toBeGreaterThanOrEqual(1);
-    // Other user should show "Member" role
-    expect(screen.getAllByText('Member').length).toBeGreaterThanOrEqual(1);
+    // Other user should show the Engineer label for the persisted member role.
+    expect(screen.getAllByText('Engineer').length).toBeGreaterThanOrEqual(1);
   });
 
   it('prompts for confirmation before changing another member role', async () => {
