@@ -44,6 +44,19 @@ func TestMigrationsDeclareSessionsModelUsedColumn(t *testing.T) {
 	require.Fail(t, "schema must add sessions.model_used because SessionStore.UpdateResult writes it")
 }
 
+func TestMigrationsAllowBuilderRole(t *testing.T) {
+	t.Parallel()
+
+	body, err := os.ReadFile("../../migrations/000130_builder_role_constraints.up.sql")
+	require.NoError(t, err, "test should read builder role migration")
+
+	sql := string(body)
+	require.Contains(t, sql, "chk_users_role CHECK (role IN ('admin', 'member', 'builder', 'viewer'))",
+		"users role constraint should allow seeded builder users")
+	require.Contains(t, sql, "organization_memberships_role_check CHECK (role IN ('admin', 'member', 'builder', 'viewer'))",
+		"membership role constraint should allow seeded builder memberships")
+}
+
 // TestCopyCodingCredentialsMigrationStampsTeamDefaultMarker locks the
 // step-3 INSERT to write `team_default_origin_user_id = uc.user_id`. The
 // down migration's orphan check and the dual-write mirror's cleanup both

@@ -16,10 +16,18 @@ This guide covers how to add preview support to a repo. For the underlying archi
 2. Open a session against the 143 repo (or anything on `main`).
 3. Click **Start Preview**.
 
-**Demo credentials** (shown on the login page when `DEMO_MODE=true`):
+**Demo credentials** (the admin login is shown on the login page when `DEMO_MODE=true`):
 
-- Email: `dogfood@143.dev`
-- Password: `preview-dogfood`
+- Email: `preview-admin@143.dev`
+- Password: `preview`
+
+Additional seeded users use the same password:
+
+| Email | Role |
+|---|---|
+| `preview-member@143.dev` | `member` |
+| `preview-builder@143.dev` | `builder` |
+| `preview-viewer@143.dev` | `viewer` |
 
 The banner renders whatever `DEMO_EMAIL` / `DEMO_PASSWORD` the server was started with (defaults match the values above and the seeded admin in `.143/seed.sql`). If you override those env vars, regenerate the bcrypt hash in `seed.sql` in lockstep or the banner will point at credentials that don't log in.
 
