@@ -17,7 +17,7 @@ import (
 func TestLinearAgentSessionStateMigrationVocabularyMatchesGoEnum(t *testing.T) {
 	t.Parallel()
 
-	const migrationFile = "000123_linear_agent.up.sql"
+	const migrationFile = "000132_linear_agent.up.sql"
 	path := filepath.Join("..", "..", "migrations", migrationFile)
 	contents, err := os.ReadFile(path)
 	require.NoError(t, err, "test should read the linear_agent migration")
@@ -45,7 +45,7 @@ func TestLinearAgentSessionStateMigrationVocabularyMatchesGoEnum(t *testing.T) {
 func TestLinearAgentActivityTypeMigrationVocabularyMatchesGoEnum(t *testing.T) {
 	t.Parallel()
 
-	const migrationFile = "000123_linear_agent.up.sql"
+	const migrationFile = "000132_linear_agent.up.sql"
 	path := filepath.Join("..", "..", "migrations", migrationFile)
 	contents, err := os.ReadFile(path)
 	require.NoError(t, err, "test should read the linear_agent migration")
