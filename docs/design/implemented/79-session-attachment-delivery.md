@@ -8,6 +8,8 @@ Session messages can persist uploaded files as `/api/v1/uploads/files/...` URLs,
 
 Coding-agent workers resolve first-party uploaded session attachments before building the agent prompt. For each upload URL under `/api/v1/uploads/files/{orgID}/...`, the worker verifies that the URL org matches the session org, opens the file through upload storage, copies it into the sandbox under `$HOME/.143/attachments/turn-{n}/`, and appends an `## Attached files` section to the prompt with the sandbox-local path and content type.
 
+HEIC/HEIF image uploads are normalized to JPEG by the upload API before they reach this worker path. OpenAI/Codex image inputs currently accept PNG, JPEG, WebP, and non-animated GIF; Claude/Claude Code image uploads accept JPEG, PNG, GIF, and WebP. Normalizing at ingress keeps stored attachment URLs previewable and prevents agent turns from receiving unsupported iPhone-native image containers.
+
 Unreadable uploads do not fail the turn. They are included in the same prompt section as warnings so the agent and user-visible logs preserve what was missing.
 
 ## Scope
