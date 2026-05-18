@@ -14,6 +14,8 @@ import {
   FileCode2,
   FolderTree,
   GitPullRequest,
+  GitBranch,
+  ChevronDown,
   Loader2,
   RefreshCw,
   CheckCircle2,
@@ -35,6 +37,12 @@ import { notify as toast } from "@/lib/notify";
 import { Badge } from "@/components/ui/badge";
 import { MarkdownContent } from "@/components/markdown";
 import { Button } from "@/components/ui/button";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { DisabledTooltip } from "@/components/ui/disabled-tooltip";
 import { ErrorNotice } from "@/components/ui/error-notice";
 import {
@@ -354,6 +362,7 @@ type PRAuthInterceptDetails = {
 // backend has rejected the action.
 type PRAuthPromptState =
   | ({ purpose: "create_pr" } & PRAuthInterceptDetails)
+  | ({ purpose: "create_branch" } & PRAuthInterceptDetails)
   | ({ purpose: "push_changes" } & PRAuthInterceptDetails)
   | { purpose: "merge_pr" };
 
@@ -2595,6 +2604,8 @@ export function SessionDetailContent({ id }: { id: string }) {
   }, [centerMode, exitReview, setPreviewParam]);
   const [localPRState, setLocalPRState] = useState<"idle" | "submitting" | "queued">("idle");
   const [localPRActionError, setLocalPRActionError] = useState<PRActionErrorState | null>(null);
+  const [localBranchState, setLocalBranchState] = useState<"idle" | "submitting" | "queued">("idle");
+  const [localBranchActionError, setLocalBranchActionError] = useState<PRActionErrorState | null>(null);
   const [localPushState, setLocalPushState] = useState<"idle" | "submitting" | "queued">("idle");
   const [localPushActionError, setLocalPushActionError] = useState<PRActionErrorState | null>(null);
   const [pendingPRAction, setPendingPRAction] = useState<"fix_tests" | "resolve_conflicts" | "merge" | null>(null);
@@ -2618,12 +2629,16 @@ export function SessionDetailContent({ id }: { id: string }) {
       const waitingForPushServer = localPushState !== "idle" &&
         s.pr_push_state !== "failed" &&
         s.pr_push_state !== "succeeded";
+      const branchInFlight = s.branch_creation_state === "queued" || s.branch_creation_state === "pushing";
+      const waitingForBranchServer = localBranchState !== "idle" &&
+        s.branch_creation_state !== "failed" &&
+        s.branch_creation_state !== "succeeded";
 
       // Poll while PR creation OR push-changes is in flight so the state
       // machine advances without waiting for the user to navigate. Keep
       // polling during the optimistic local phases too, since the best-effort
       // queued write can legitimately lag the 202 response.
-      return serverInFlight || waitingForServer || pushInFlight || waitingForPushServer ? 2000 : false;
+      return serverInFlight || waitingForServer || pushInFlight || waitingForPushServer || branchInFlight || waitingForBranchServer ? 2000 : false;
     },
   });
 
@@ -2950,6 +2965,29 @@ export function SessionDetailContent({ id }: { id: string }) {
     }
     prevPRPushStateRef.current = current;
   }, [session?.pr_push_state, session?.pr_push_error, prUrl, queryClient, id, pullRequestId]);
+  const prevBranchStateRef = useRef<string | undefined>(undefined);
+  useEffect(() => {
+    const prev = prevBranchStateRef.current;
+    const current = session?.branch_creation_state;
+    if (current === "succeeded") {
+      if (localBranchState !== "idle") {
+        setLocalBranchState("idle");
+      }
+      if (prev && prev !== current) {
+        toast.success("Branch created", session?.branch_url ? {
+          action: { label: "View \u2197", onClick: () => window.open(session.branch_url, "_blank", "noopener,noreferrer") },
+        } : undefined);
+      }
+    } else if (current === "failed") {
+      if (localBranchState !== "idle") {
+        setLocalBranchState("idle");
+      }
+      if (prev && prev !== current) {
+        toast.error(session?.branch_creation_error || "Failed to create branch", { duration: PR_ERROR_TOAST_DURATION_MS });
+      }
+    }
+    prevBranchStateRef.current = current;
+  }, [localBranchState, session?.branch_creation_state, session?.branch_creation_error, session?.branch_url]);
   const startRepairMutation = useMutation({
     mutationFn: async (action: "fix_tests" | "resolve_conflicts") => {
       if (!pullRequestId) {
@@ -3180,6 +3218,44 @@ export function SessionDetailContent({ id }: { id: string }) {
     },
   });
 
+  const createBranchMutation = useMutation({
+    mutationFn: (options?: { authorMode?: PRAuthorMode; resumeToken?: string }) =>
+      api.sessions.createBranch(id, options),
+    onMutate: () => {
+      setLocalBranchActionError(null);
+      setLocalBranchState("submitting");
+    },
+    onSuccess: (_data, options) => {
+      setLocalBranchActionError(null);
+      setLocalBranchState("queued");
+      if (options?.resumeToken) {
+        clearPRResumeParams();
+      }
+      queryClient.invalidateQueries({ queryKey: ["session", id] });
+    },
+    onError: (err, options) => {
+      if (err instanceof ApiError &&
+        (err.code === "GITHUB_PR_AUTHORSHIP_REQUIRED" || err.code === "GITHUB_PR_AUTHORSHIP_REAUTH_REQUIRED") &&
+        isPRAuthInterceptDetails(err.details)) {
+        setLocalBranchState("idle");
+        setLocalBranchActionError(null);
+        setPRAuthPrompt({ ...err.details, purpose: "create_branch" });
+        clearPRResumeParams();
+        return;
+      }
+      setLocalBranchState("idle");
+      const msg = err instanceof Error ? err.message : "Failed to create branch";
+      setLocalBranchActionError({
+        code: err instanceof ApiError ? err.code : undefined,
+        message: msg,
+      });
+      if (options?.resumeToken) {
+        clearPRResumeParams();
+      }
+      toast.error(msg, { duration: PR_ERROR_TOAST_DURATION_MS });
+    },
+  });
+
   const pushChangesMutation = useMutation({
     mutationFn: (options?: { authorMode?: PRAuthorMode; resumeToken?: string }) =>
       api.sessions.pushChangesToPR(id, options),
@@ -3227,9 +3303,11 @@ export function SessionDetailContent({ id }: { id: string }) {
     // any state change during the GitHub round-trip (e.g. another tab
     // creating the PR, or the PR getting closed). Fall back to the current
     // PR state for legacy tokens that predate the resume_action param.
-    const action: "create_pr" | "push_changes" =
+    const action: "create_pr" | "create_branch" | "push_changes" =
       resumeActionParam === "push_changes"
         ? "push_changes"
+        : resumeActionParam === "create_branch"
+          ? "create_branch"
         : resumeActionParam === "create_pr"
           ? "create_pr"
           : hasPR && prStatus === "open" && !!session?.has_unpushed_changes
@@ -3248,10 +3326,16 @@ export function SessionDetailContent({ id }: { id: string }) {
       pushChangesMutation.mutate({ authorMode: "user", resumeToken: resumePRParam });
       return;
     }
+    if (action === "create_branch") {
+      if (!canCreatePR) return;
+      resumeAttemptRef.current = resumePRParam;
+      createBranchMutation.mutate({ authorMode: "user", resumeToken: resumePRParam });
+      return;
+    }
     if (!canCreatePR) return;
     resumeAttemptRef.current = resumePRParam;
     createPRMutation.mutate({ authorMode: "user", resumeToken: resumePRParam });
-  }, [canCreatePR, createPRMutation, hasPR, hasSnapshot, isRunning, prStatus, pushChangesMutation, resumeActionParam, resumePRParam, session?.has_unpushed_changes]);
+  }, [canCreatePR, createBranchMutation, createPRMutation, hasPR, hasSnapshot, isRunning, prStatus, pushChangesMutation, resumeActionParam, resumePRParam, session?.has_unpushed_changes]);
 
   const diffStats = useMemo(() => {
     const stats = session?.diff_stats ?? sessionDiffPayload?.diff_stats;
@@ -4057,6 +4141,17 @@ export function SessionDetailContent({ id }: { id: string }) {
     createPRMutation.mutate(undefined);
   }, [createPRMutation, ghBlocked, localPRState]);
 
+  const createBranch = useCallback(() => {
+    if (localBranchState !== "idle" || createBranchMutation.isPending || !canCreatePR) {
+      return;
+    }
+    if (ghBlocked) {
+      setPRAuthPrompt({ purpose: "create_branch" });
+      return;
+    }
+    createBranchMutation.mutate(undefined);
+  }, [canCreatePR, createBranchMutation, ghBlocked, localBranchState]);
+
   const pushChangesFromKeyboard = useCallback(() => {
     if (localPushState !== "idle" || pushChangesMutation.isPending) {
       return;
@@ -4215,6 +4310,24 @@ export function SessionDetailContent({ id }: { id: string }) {
     prActionTitle = "Connect your GitHub account to create PRs";
   }
 
+  const branchState = session.branch_creation_state;
+  const queueingBranch = localBranchState === "submitting";
+  const creatingBranch =
+    (localBranchState === "queued" && branchState !== "failed" && branchState !== "succeeded") ||
+    branchState === "queued" ||
+    branchState === "pushing";
+  const branchActionDisabled = prActionDisabled || queueingBranch || creatingBranch || createBranchMutation.isPending;
+  const branchActionLabel = queueingBranch
+    ? "Queueing branch..."
+    : creatingBranch
+      ? "Creating branch..."
+      : branchState === "failed" || localBranchActionError
+        ? "Retry branch"
+        : "Create branch";
+  const branchActionTitle = localBranchActionError?.message ||
+    (branchState === "failed" ? session.branch_creation_error || "Branch creation failed" : undefined);
+  const branchURL = !hasPR && branchState === "succeeded" ? session.branch_url : undefined;
+
   // Push-changes button derived state. Mirrors the PR creation block above
   // but operates on session.pr_push_state and the backend-derived
   // has_unpushed_changes signal. Rendered inside the PR health banner
@@ -4355,25 +4468,65 @@ export function SessionDetailContent({ id }: { id: string }) {
                 </Button>
               </>
             ) : showPRAction && !prErrorNotice ? (
-              <DisabledTooltip disabled={prActionDisabled} content={prActionTitle}>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  className="h-7 text-xs gap-1.5"
-                  disabled={prActionDisabled}
-                  title={prActionTitle ? `${prActionTitle} (p c)` : `${prActionLabel} (p c)`}
-                  onClick={() => createPRMutation.mutate(undefined)}
-                >
-                  {prActionSpinning ? (
-                    <Loader2 className="h-3 w-3 animate-spin" />
-                  ) : prState === "failed" || localPRActionError ? (
-                    <AlertTriangle className="h-3 w-3" />
-                  ) : (
-                    <GitPullRequest className="h-3 w-3" />
-                  )}
-                  {prActionLabel}
-                </Button>
-              </DisabledTooltip>
+              <>
+                {branchURL ? (
+                  <Button asChild variant="outline" size="sm" className="h-7 text-xs gap-1.5" title="View branch">
+                    <a href={branchURL} target="_blank" rel="noopener noreferrer">
+                      <GitBranch className="h-3 w-3" />
+                      View branch
+                    </a>
+                  </Button>
+                ) : null}
+                <DisabledTooltip disabled={prActionDisabled} content={prActionTitle}>
+                  <div className="inline-flex">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="h-7 rounded-r-none border-r-0 text-xs gap-1.5"
+                      disabled={prActionDisabled}
+                      title={prActionTitle ? `${prActionTitle} (p c)` : `${prActionLabel} (p c)`}
+                      onClick={() => createPRMutation.mutate(undefined)}
+                    >
+                      {prActionSpinning ? (
+                        <Loader2 className="h-3 w-3 animate-spin" />
+                      ) : prState === "failed" || localPRActionError ? (
+                        <AlertTriangle className="h-3 w-3" />
+                      ) : (
+                        <GitPullRequest className="h-3 w-3" />
+                      )}
+                      {prActionLabel}
+                    </Button>
+                    <DropdownMenu>
+                      <DropdownMenuTrigger asChild>
+                        <Button
+                          variant="outline"
+                          size="icon"
+                          className="h-7 w-7 rounded-l-none"
+                          disabled={prActionDisabled}
+                          aria-label="More publish actions"
+                          title="More publish actions"
+                        >
+                          <ChevronDown className="h-3 w-3" />
+                        </Button>
+                      </DropdownMenuTrigger>
+                      <DropdownMenuContent align="end">
+                        <DropdownMenuItem
+                          onClick={createBranch}
+                          disabled={branchActionDisabled}
+                          title={branchActionTitle}
+                        >
+                          {queueingBranch || creatingBranch ? (
+                            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                          ) : (
+                            <GitBranch className="h-3.5 w-3.5" />
+                          )}
+                          {branchActionLabel}
+                        </DropdownMenuItem>
+                      </DropdownMenuContent>
+                    </DropdownMenu>
+                  </div>
+                </DisabledTooltip>
+              </>
             ) : null}
             <Button
               variant="ghost"
@@ -5038,6 +5191,8 @@ export function SessionDetailContent({ id }: { id: string }) {
                 ? "Merge this pull request as yourself?"
                 : prAuthPrompt?.purpose === "push_changes"
                   ? "Push these changes as yourself?"
+                  : prAuthPrompt?.purpose === "create_branch"
+                    ? "Create this branch as yourself?"
                   : "Open this pull request as yourself?"}
             </AlertDialogTitle>
             <AlertDialogDescription>
@@ -5047,6 +5202,10 @@ export function SessionDetailContent({ id }: { id: string }) {
                   ? prAuthPrompt.can_fallback_to_app
                     ? "Authorize GitHub once to push as you. If you skip this, 143 can still push the commits as the app."
                     : "Authorize GitHub once to push as you."
+                  : prAuthPrompt?.purpose === "create_branch"
+                    ? prAuthPrompt.can_fallback_to_app
+                      ? "Authorize GitHub once to create branches as you. If you skip this, 143 can still push the branch as the app."
+                      : "Authorize GitHub once to create branches as you."
                   : prAuthPrompt?.can_fallback_to_app
                     ? "Authorize GitHub once to open PRs as you. If you skip this, 143 can still open the PR as the app."
                     : "Authorize GitHub once to open PRs as you."}
@@ -5075,12 +5234,23 @@ export function SessionDetailContent({ id }: { id: string }) {
                 Push as 143
               </AlertDialogCancel>
             ) : null}
+            {prAuthPrompt?.purpose === "create_branch" && prAuthPrompt.can_fallback_to_app ? (
+              <AlertDialogCancel
+                onClick={(event) => {
+                  event.preventDefault();
+                  setPRAuthPrompt(null);
+                  createBranchMutation.mutate({ authorMode: "app" });
+                }}
+              >
+                Create as 143
+              </AlertDialogCancel>
+            ) : null}
             <AlertDialogAction
               onClick={(event) => {
                 event.preventDefault();
                 if (!prAuthPrompt) return;
                 const resumeToken =
-                  prAuthPrompt.purpose === "create_pr" || prAuthPrompt.purpose === "push_changes"
+                  prAuthPrompt.purpose === "create_pr" || prAuthPrompt.purpose === "create_branch" || prAuthPrompt.purpose === "push_changes"
                     ? prAuthPrompt.resume_token
                     : undefined;
                 api.githubStatus.connect(resumeToken || undefined);

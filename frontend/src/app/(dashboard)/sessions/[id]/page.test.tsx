@@ -3107,6 +3107,37 @@ describe('SessionDetailPage', () => {
     expect(screen.getByRole('button', { name: /Create PR/ })).not.toBeDisabled();
   });
 
+  it('shows a durable View branch link after branch-only publish succeeds', async () => {
+    const sessionWithBranch: Session = {
+      ...mockSessions[0],
+      status: 'completed',
+      diff: '--- a/file.ts\n+++ b/file.ts\n@@ -1 +1 @@\n-old\n+new',
+      diff_stats: { added: 1, removed: 1, files_changed: 1 },
+      snapshot_key: 'snap-abc',
+      branch_creation_state: 'succeeded',
+      branch_url: 'https://github.com/example/repo/tree/143/session-branch',
+    };
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({ data: sessionWithBranch } satisfies SingleResponse<Session>);
+      }),
+      http.get('/api/v1/sessions/:id/pr', () => {
+        return HttpResponse.json(
+          { error: { code: 'NOT_FOUND', message: 'pull request not found' } },
+          { status: 404 },
+        );
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+    await screen.findAllByText('Fixed TypeError by adding null check');
+
+    const viewBranchLink = await screen.findByRole('link', { name: 'View branch' });
+    expect(viewBranchLink).toHaveAttribute('href', 'https://github.com/example/repo/tree/143/session-branch');
+    expect(screen.getByRole('button', { name: /Create PR/ })).toBeInTheDocument();
+  });
+
   it('shows Create PR button for completed session with snapshot even when diff stats are missing', async () => {
     const sessionWithSnapshotOnly: Session = {
       ...mockSessions[0],

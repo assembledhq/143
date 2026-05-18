@@ -157,7 +157,7 @@ var sessionColumns = []string{
 	"runtime_extension_count", "runtime_extension_seconds", "runtime_stop_reason", "runtime_graceful_stop_at",
 	"checkpointed_at", "checkpoint_kind", "checkpoint_capability", "checkpoint_size_bytes", "checkpoint_error",
 	"recovery_state", "recovery_queued_at", "recovery_started_at", "recovery_attempt_count",
-	"target_branch", "working_branch", "base_commit_sha", "repository_id", "diff_stats", "diff_history", "input_manifest", "archived_at", "archived_by_user_id", "automation_run_id", "pr_creation_state", "pr_creation_error", "pr_push_state", "pr_push_error", "diff_collected_at", "latest_diff_snapshot_id",
+	"target_branch", "working_branch", "base_commit_sha", "repository_id", "diff_stats", "diff_history", "input_manifest", "archived_at", "archived_by_user_id", "automation_run_id", "pr_creation_state", "pr_creation_error", "pr_push_state", "pr_push_error", "branch_creation_state", "branch_creation_error", "branch_url", "diff_collected_at", "latest_diff_snapshot_id",
 	"has_unpushed_changes",
 	"linear_private", "linear_state_sync_disabled", "linear_identifier_hint", "linear_prepare_state",
 	"deleted_at", "git_identity_source", "git_identity_user_id", "created_at",
@@ -241,9 +241,10 @@ func TestPreLinearSessionColumnsLenStaysInSync(t *testing.T) {
 	const linearFieldsAdded = 4
 	const identityFieldsAdded = 2
 	const prPushFieldsAdded = 2
-	require.Equal(t, preLinearSessionColumnsLen+pendingSnapshotFieldsAdded+unpushedChangesFieldAdded+linearFieldsAdded+identityFieldsAdded+prPushFieldsAdded, len(sessionColumns),
+	const branchCreationFieldsAdded = 3
+	require.Equal(t, preLinearSessionColumnsLen+pendingSnapshotFieldsAdded+unpushedChangesFieldAdded+linearFieldsAdded+identityFieldsAdded+prPushFieldsAdded+branchCreationFieldsAdded, len(sessionColumns),
 		"sessionColumns shifted; bump preLinearSessionColumnsLen, pendingSnapshotFieldsAdded, "+
-			"unpushedChangesFieldAdded, linearFieldsAdded, identityFieldsAdded, or prPushFieldsAdded if a new migration added more session columns")
+			"unpushedChangesFieldAdded, linearFieldsAdded, identityFieldsAdded, prPushFieldsAdded, or branchCreationFieldsAdded if a new migration added more session columns")
 }
 
 // linearSessionDefaults returns the placeholder values for the derived
@@ -568,7 +569,15 @@ func padSessionIdentityColumns(row []interface{}) []interface{} {
 	if len(row) >= len(sessionColumns) {
 		return row
 	}
-	if len(row) != len(sessionColumns)-6 {
+	if len(row) == len(sessionColumns)-3 {
+		const branchCreationStateIndex = 76
+		padded := make([]interface{}, 0, len(sessionColumns))
+		padded = append(padded, row[:branchCreationStateIndex]...)
+		padded = append(padded, "idle", (*string)(nil), (*string)(nil))
+		padded = append(padded, row[branchCreationStateIndex:]...)
+		return padded
+	}
+	if len(row) != len(sessionColumns)-9 {
 		// Some other length we don't recognize — let the row through
 		// unchanged so the AddRow call surfaces the real mismatch.
 		return row
@@ -592,10 +601,16 @@ func padSessionIdentityColumns(row []interface{}) []interface{} {
 	withPRPush = append(withPRPush, "idle", (*string)(nil)) // pr_push_state, pr_push_error
 	withPRPush = append(withPRPush, withPending[prPushStateIndex:]...)
 
+	const branchCreationStateIndex = prPushStateIndex + 2
+	withBranch := make([]interface{}, 0, len(withPRPush)+3)
+	withBranch = append(withBranch, withPRPush[:branchCreationStateIndex]...)
+	withBranch = append(withBranch, "idle", (*string)(nil), (*string)(nil))
+	withBranch = append(withBranch, withPRPush[branchCreationStateIndex:]...)
+
 	padded := make([]interface{}, 0, len(sessionColumns))
-	padded = append(padded, withPRPush[:len(withPRPush)-1]...)
+	padded = append(padded, withBranch[:len(withBranch)-1]...)
 	padded = append(padded, nil, nil)
-	padded = append(padded, withPRPush[len(withPRPush)-1])
+	padded = append(padded, withBranch[len(withBranch)-1])
 	return padded
 }
 
@@ -7430,6 +7445,9 @@ func pushSessionRow(sessionID, issueID, orgID uuid.UUID, now time.Time, opts pus
 		"pr_creation_error":              (*string)(nil),
 		"pr_push_state":                  pushState,
 		"pr_push_error":                  (*string)(nil),
+		"branch_creation_state":          "idle",
+		"branch_creation_error":          (*string)(nil),
+		"branch_url":                     (*string)(nil),
 		"diff_collected_at":              nil,
 		"latest_diff_snapshot_id":        nil,
 		"has_unpushed_changes":           false,

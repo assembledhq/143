@@ -262,8 +262,12 @@ export interface Session {
   pr_creation_error?: string;
   pr_push_state?: "idle" | "queued" | "pushing" | "succeeded" | "failed";
   pr_push_error?: string;
+  branch_creation_state?: "idle" | "queued" | "pushing" | "succeeded" | "failed";
+  branch_creation_error?: string;
+  branch_url?: string;
   has_unpushed_changes?: boolean;
   target_branch?: string;
+  working_branch?: string;
   repository_id?: string;
   linked_issues?: Array<{
     id: string;

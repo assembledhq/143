@@ -94,6 +94,37 @@ func TestSessionStatusHelpers(t *testing.T) {
 	}
 }
 
+func TestBranchCreationState_Validate(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		value     BranchCreationState
+		expectErr bool
+	}{
+		{name: "idle", value: BranchCreationStateIdle},
+		{name: "queued", value: BranchCreationStateQueued},
+		{name: "pushing", value: BranchCreationStatePushing},
+		{name: "succeeded", value: BranchCreationStateSucceeded},
+		{name: "failed", value: BranchCreationStateFailed},
+		{name: "invalid", value: BranchCreationState("bogus"), expectErr: true},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			err := tt.value.Validate()
+			if tt.expectErr {
+				require.Error(t, err, "Validate should reject unknown branch creation states")
+				return
+			}
+			require.NoError(t, err, "Validate should accept known branch creation states")
+		})
+	}
+}
+
 func TestSessionInteractionMode_Validate(t *testing.T) {
 	t.Parallel()
 
