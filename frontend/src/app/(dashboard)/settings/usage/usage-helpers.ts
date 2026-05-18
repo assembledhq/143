@@ -103,6 +103,12 @@ export function formatCost(usd: number): string {
   return `$${usd.toFixed(2)}`;
 }
 
+export function formatEstimatedCost(usd: number, totalTokens: number): string {
+  if (usd === 0 && totalTokens > 0) return "Unavailable";
+  if (usd > 0 && usd < 0.01) return "<$0.01";
+  return formatCost(usd);
+}
+
 export function formatMinutes(minutes: number): string {
   if (minutes >= 60) {
     const hours = minutes / 60;

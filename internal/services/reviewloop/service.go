@@ -211,7 +211,7 @@ func (s *Service) OnThreadTurnComplete(ctx context.Context, orgID, threadID uuid
 	summary := strings.TrimSpace(assistantSummary)
 	switch pass.Status {
 	case models.ReviewLoopPassStatusReviewing:
-		msg, err := s.sendPlain(ctx, loop, prompts.ReviewLoopDecisionPrompt(), nil)
+		msg, err := s.sendPlain(ctx, loop, prompts.ReviewLoopDecisionPrompt(), nil, withContinuationDedupeKey(reviewLoopContinuationDedupeKey(loop.ID, pass.ID, "decision")))
 		if err != nil {
 			_ = s.failLoop(ctx, orgID, loop, fmt.Sprintf("failed to request review decision: %s", err))
 			return err
@@ -241,7 +241,7 @@ func (s *Service) OnThreadTurnComplete(ctx context.Context, orgID, threadID uuid
 			}
 			return nil
 		}
-		msg, err := s.sendPlain(ctx, loop, prompts.ReviewLoopFixPrompt(), nil)
+		msg, err := s.sendPlain(ctx, loop, prompts.ReviewLoopFixPrompt(), nil, withContinuationDedupeKey(reviewLoopContinuationDedupeKey(loop.ID, pass.ID, "fix")))
 		if err != nil {
 			_ = s.failLoop(ctx, orgID, loop, fmt.Sprintf("failed to start fix pass: %s", err))
 			return err
@@ -261,7 +261,7 @@ func (s *Service) OnThreadTurnComplete(ctx context.Context, orgID, threadID uuid
 		if err := s.store.CreatePass(ctx, next); err != nil {
 			return err
 		}
-		msg, err := s.sendReview(ctx, &loop, next, nil)
+		msg, err := s.sendReview(ctx, &loop, next, nil, withContinuationDedupeKey(reviewLoopContinuationDedupeKey(loop.ID, next.ID, "review")))
 		if err != nil {
 			_ = s.failLoop(ctx, orgID, loop, fmt.Sprintf("failed to start confirmation review: %s", err))
 			return err
@@ -290,7 +290,19 @@ func automationOpenPRDedupeKey(sessionID uuid.UUID) string {
 	return "open_pr:review_loop:" + sessionID.String()
 }
 
-func (s *Service) sendReview(ctx context.Context, loop *models.SessionReviewLoop, pass *models.SessionReviewLoopPass, userID *uuid.UUID) (*models.SessionMessage, error) {
+type sendOption func(*threadsvc.SendMessageInput)
+
+func withContinuationDedupeKey(key string) sendOption {
+	return func(input *threadsvc.SendMessageInput) {
+		input.ContinuationDedupeKeyOverride = &key
+	}
+}
+
+func reviewLoopContinuationDedupeKey(loopID, passID uuid.UUID, phase string) string {
+	return fmt.Sprintf("continue_session_review_loop:%s:%s:%s", loopID.String(), passID.String(), phase)
+}
+
+func (s *Service) sendReview(ctx context.Context, loop *models.SessionReviewLoop, pass *models.SessionReviewLoopPass, userID *uuid.UUID, opts ...sendOption) (*models.SessionMessage, error) {
 	arguments := strings.TrimPrefix(prompts.ReviewLoopReviewPrompt(prompts.ReviewLoopReviewPromptData{AgentType: loop.AgentType}), "/review")
 	arguments = strings.TrimSpace(arguments)
 	command := models.SessionInputCommand{
@@ -302,21 +314,30 @@ func (s *Service) sendReview(ctx context.Context, loop *models.SessionReviewLoop
 		Arguments: arguments,
 		Source:    models.SessionInputCommandSourceBuiltin,
 	}
-	return s.sendPlain(ctx, *loop, prompts.ReviewLoopReviewPrompt(prompts.ReviewLoopReviewPromptData{AgentType: loop.AgentType}), userID, command)
+	return s.sendPlain(ctx, *loop, prompts.ReviewLoopReviewPrompt(prompts.ReviewLoopReviewPromptData{AgentType: loop.AgentType}), userID, append(opts, withCommands(command))...)
 }
 
-func (s *Service) sendPlain(ctx context.Context, loop models.SessionReviewLoop, message string, userID *uuid.UUID, commands ...models.SessionInputCommand) (*models.SessionMessage, error) {
+func withCommands(commands ...models.SessionInputCommand) sendOption {
+	return func(input *threadsvc.SendMessageInput) {
+		input.Commands = commands
+	}
+}
+
+func (s *Service) sendPlain(ctx context.Context, loop models.SessionReviewLoop, message string, userID *uuid.UUID, opts ...sendOption) (*models.SessionMessage, error) {
 	if loop.ThreadID == nil {
 		return nil, fmt.Errorf("review loop has no thread")
 	}
-	result, err := s.runtime.SendMessage(ctx, threadsvc.SendMessageInput{
+	input := threadsvc.SendMessageInput{
 		SessionID: loop.SessionID,
 		OrgID:     loop.OrgID,
 		ThreadID:  *loop.ThreadID,
 		UserID:    userID,
 		Message:   message,
-		Commands:  commands,
-	})
+	}
+	for _, opt := range opts {
+		opt(&input)
+	}
+	result, err := s.runtime.SendMessage(ctx, input)
 	if err != nil {
 		return nil, err
 	}

@@ -10,6 +10,7 @@ import {
   formatMinutes,
   formatTokenCount,
   formatCost,
+  formatEstimatedCost,
   formatNumber,
   getDateRangePreset,
   groupByLocalDay,
@@ -139,6 +140,16 @@ describe('formatCost', () => {
   it('formats negative costs', () => {
     expect(formatCost(-1.5)).toBe('-$1.50');
     expect(formatCost(-0.005)).toBe('$0.00');
+  });
+});
+
+describe('formatEstimatedCost', () => {
+  it('shows unavailable when tokens exist but no USD cost was computed', () => {
+    expect(formatEstimatedCost(0, 1908300000)).toBe('Unavailable');
+  });
+
+  it('shows sub-cent costs without rounding them down to zero', () => {
+    expect(formatEstimatedCost(0.001, 7000)).toBe('<$0.01');
   });
 });
 
@@ -587,6 +598,34 @@ describe('UsageSummaryCards', () => {
     });
     expect(screen.getByText('10')).toBeInTheDocument();
     expect(screen.getByText('3')).toBeInTheDocument();
+    expect(screen.getByText('Est. API cost: $5.25')).toBeInTheDocument();
+  });
+
+  it('renders cost unavailable when tokens have no computed USD cost', async () => {
+    server.use(
+      http.get('*/api/v1/usage', () => {
+        return HttpResponse.json({
+          data: {
+            org_id: 'org-1',
+            period_start: '2026-04-01T00:00:00Z',
+            period_end: '2026-04-30T00:00:00Z',
+            total_container_minutes: 90,
+            total_sessions: 10,
+            peak_concurrent: 3,
+            by_capacity: [],
+            total_input_tokens: 2500000,
+            total_output_tokens: 800000,
+            total_llm_cost_usd: 0,
+          },
+        });
+      })
+    );
+    renderWithProviders(
+      <UsageSummaryCards start="2026-04-01T00:00:00Z" end="2026-04-30T00:00:00Z" />
+    );
+    await waitFor(() => {
+      expect(screen.getByText('Cost unavailable')).toBeInTheDocument();
+    });
   });
 });
 
@@ -657,6 +696,43 @@ describe('UsageBreakdownTable', () => {
     expect(screen.getByText('Minutes / Session')).toBeInTheDocument();
     expect(screen.getByText('Tokens / Session')).toBeInTheDocument();
     expect(screen.getByText('87.5%')).toBeInTheDocument();
+  });
+
+  it('does not render unavailable row costs as zero dollars', async () => {
+    server.use(
+      http.get('*/api/v1/usage/breakdown', () => {
+        return HttpResponse.json({
+          data: [
+            {
+              key: 'user-1',
+              label: 'alice@example.com',
+              total_container_minutes: 60,
+              total_sessions: 3,
+              total_container_starts: 3,
+              peak_concurrent: 1,
+              total_input_tokens: 5000,
+              total_output_tokens: 2000,
+              total_tokens: 7000,
+              total_llm_cost_usd: 0,
+              percentage: 60.0,
+              share_of_tokens: 87.5,
+            },
+          ],
+          meta: {},
+        });
+      })
+    );
+    renderWithProviders(
+      <UsageBreakdownTable
+        start="2026-04-01T00:00:00Z"
+        end="2026-04-30T00:00:00Z"
+        dimension="agent"
+      />
+    );
+    await waitFor(() => {
+      expect(screen.getByText('Unavailable')).toBeInTheDocument();
+    });
+    expect(screen.queryByText('$0.00')).not.toBeInTheDocument();
   });
 });
 

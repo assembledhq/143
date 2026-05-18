@@ -7,7 +7,7 @@ import { queryKeys } from "@/lib/query-keys";
 import { Card, CardContent } from "@/components/ui/card";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { Activity, Layers, Gauge, Cpu, Info } from "lucide-react";
-import { formatNumber, formatTokenCount, formatCost } from "./usage-helpers";
+import { formatNumber, formatTokenCount, formatEstimatedCost } from "./usage-helpers";
 import type { LucideIcon } from "lucide-react";
 
 interface UsageSummaryCardsProps {
@@ -73,6 +73,13 @@ export function UsageSummaryCards({ start, end }: UsageSummaryCardsProps) {
     output: summary?.total_output_tokens ?? 0,
     cost: summary?.total_llm_cost_usd ?? 0,
   };
+  const totalTokens = tokenTotals.input + tokenTotals.output;
+  const tokenCostSubtitle =
+    tokenTotals.cost > 0
+      ? `Est. API cost: ${formatEstimatedCost(tokenTotals.cost, totalTokens)}`
+      : totalTokens > 0
+        ? "Cost unavailable"
+        : undefined;
 
   if (isError) {
     return (
@@ -109,8 +116,8 @@ export function UsageSummaryCards({ start, end }: UsageSummaryCardsProps) {
       <KPICard
         icon={Cpu}
         label="LLM Tokens"
-        value={isLoading ? "" : formatTokenCount(tokenTotals.input + tokenTotals.output)}
-        subtitle={`~${formatCost(tokenTotals.cost)} est. cost`}
+        value={isLoading ? "" : formatTokenCount(totalTokens)}
+        subtitle={isLoading ? undefined : tokenCostSubtitle}
         loading={isLoading}
         labelTooltip={
           isLoading ? null : (
