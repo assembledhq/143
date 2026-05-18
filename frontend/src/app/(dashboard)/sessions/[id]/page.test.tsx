@@ -188,16 +188,16 @@ describe('SessionDetailPage', () => {
     expect(link).toHaveAttribute('rel', 'noopener noreferrer');
   });
 
-  it('shows a disabled review-loop action in the Overview readiness area when no session snapshot is available', async () => {
-    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+  it('shows a disabled review action in the Overview readiness area when no PR or session snapshot is available', async () => {
+    renderWithProviders(<SessionDetailContent id="session-98765432-abcd-ef01" />);
 
-    await screen.findAllByText('Fixed TypeError by adding null check');
-    expect(screen.getByRole('button', { name: 'Review this work' })).toBeDisabled();
+    expect(await screen.findByRole('button', { name: 'Review' })).toBeDisabled();
+    expect(screen.getByText('Review and fix with a selected agent before creating a PR.')).toBeInTheDocument();
     expect(within(screen.getByLabelText('Session detail actions')).queryByRole('button', { name: 'Review' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Code review' })).not.toBeInTheDocument();
   });
 
-  it('shows the review loop action in Overview after a PR exists when a snapshot is available', async () => {
+  it('moves the review action into PR health after a PR exists when a snapshot is available', async () => {
     server.use(
       http.get('/api/v1/sessions/:id', () => {
         return HttpResponse.json({
@@ -218,7 +218,10 @@ describe('SessionDetailPage', () => {
 
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
 
-    expect(await screen.findByRole('button', { name: 'Review this work' })).toBeInTheDocument();
+    expect(await screen.findByText('PR health')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Review' })).toBeInTheDocument();
+    expect(screen.queryByText('Review work')).not.toBeInTheDocument();
+    expect(screen.queryByText('Review this work')).not.toBeInTheDocument();
     expect(within(screen.getByLabelText('Session detail actions')).queryByRole('button', { name: 'Review' })).not.toBeInTheDocument();
   });
 
@@ -265,12 +268,68 @@ describe('SessionDetailPage', () => {
 
     renderWithProviders(<SessionDetailContent id="session-98765432-abcd-ef01" />);
 
-    await user.click(await screen.findByRole('button', { name: 'Review this work' }));
+    await user.click(await screen.findByRole('button', { name: 'Review' }));
     await user.click(await screen.findByRole('button', { name: 'Increase review passes' }));
     await user.click(screen.getByRole('button', { name: 'Start review' }));
 
     await waitFor(() => {
       expect(postedMaxPasses).toBe(3);
+    });
+  });
+
+  it('lets the review loop use a coding agent different from the main session agent', async () => {
+    const user = userEvent.setup();
+    let postedBody: { agent_type?: string; max_passes: number } | null = null;
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({
+          data: {
+            ...mockSessions[1],
+            status: 'completed',
+            agent_type: 'codex',
+            snapshot_key: 'snapshot-manual-review',
+            sandbox_state: 'snapshotted',
+          },
+        } satisfies SingleResponse<Session>);
+      }),
+      http.get('/api/v1/sessions/:id/review-loops', () => {
+        return HttpResponse.json({
+          data: [] as SessionReviewLoop[],
+          meta: {},
+        } satisfies ListResponse<SessionReviewLoop>);
+      }),
+      http.post('/api/v1/sessions/:id/review-loops', async ({ request, params }) => {
+        postedBody = await request.json() as { agent_type?: string; max_passes: number };
+        return HttpResponse.json({
+          data: {
+            id: 'review-loop-selected-agent',
+            org_id: 'org-1',
+            session_id: params.id as string,
+            status: 'running',
+            source: 'manual',
+            agent_type: postedBody.agent_type ?? 'codex',
+            max_passes: postedBody.max_passes,
+            completed_passes: 0,
+            review_required: false,
+            started_at: '2026-02-17T07:12:00Z',
+          },
+        } satisfies SingleResponse<SessionReviewLoop>, { status: 201 });
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id="session-98765432-abcd-ef01" />);
+
+    await user.click(await screen.findByRole('button', { name: 'Review' }));
+
+    expect(screen.queryByText('2 is the standard pass')).not.toBeInTheDocument();
+
+    await user.click(await screen.findByRole('combobox', { name: 'Review coding agent' }));
+    await user.click(await screen.findByRole('option', { name: 'Claude Code' }));
+    await user.click(screen.getByRole('button', { name: 'Start review' }));
+
+    await waitFor(() => {
+      expect(postedBody).toEqual({ agent_type: 'claude_code', max_passes: 2 });
     });
   });
 
@@ -331,7 +390,7 @@ describe('SessionDetailPage', () => {
 
     expect(await screen.findByText('Codex 1')).toBeInTheDocument();
 
-    await user.click(await screen.findByRole('button', { name: 'Review this work' }));
+    await user.click(await screen.findByRole('button', { name: 'Review' }));
     await user.click(screen.getByRole('button', { name: 'Start review' }));
 
     const reviewTab = await screen.findByRole('tab', { name: /Codex Review/ });
@@ -393,7 +452,7 @@ describe('SessionDetailPage', () => {
 
     await user.click(await screen.findByRole('button', { name: 'Open session details' }));
     const detailSheet = await screen.findByRole('dialog', { name: 'Session details' });
-    await user.click(within(detailSheet).getByRole('button', { name: 'Review this work' }));
+    await user.click(within(detailSheet).getByRole('button', { name: 'Review' }));
     await user.click(await screen.findByRole('button', { name: 'Start review' }));
 
     await waitFor(() => {

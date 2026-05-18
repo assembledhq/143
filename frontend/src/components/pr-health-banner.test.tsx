@@ -69,6 +69,31 @@ describe("PRHealthBanner", () => {
     expect(screen.queryByRole("button", { name: /^Merge$/ })).toBeNull();
   });
 
+  it("renders an optional Review action in the PR action row", async () => {
+    const onReview = vi.fn();
+    renderWithProviders(
+      <PRHealthBanner
+        health={baseHealth}
+        pendingAction={null}
+        repairError={null}
+        mergeAuthRequired={false}
+        onFixTests={vi.fn()}
+        onResolveConflicts={vi.fn()}
+        onMerge={vi.fn()}
+        reviewAction={{
+          disabled: false,
+          spinning: false,
+          onClick: onReview,
+        }}
+      />,
+    );
+
+    const button = screen.getByRole("button", { name: /^Review$/ });
+    expect(button).not.toBeDisabled();
+    await userEvent.setup().click(button);
+    expect(onReview).toHaveBeenCalledTimes(1);
+  });
+
 	it("renders the Merge button when can_merge is true and invokes onMerge", async () => {
 		const onMerge = vi.fn();
 		renderWithProviders(

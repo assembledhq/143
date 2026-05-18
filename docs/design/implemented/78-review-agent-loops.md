@@ -97,24 +97,25 @@ reviewer/fixer lanes.
 
 ### Manual session entry point
 
-Session detail exposes `Review this work` in the Overview readiness area rather
-than in the persistent header action cluster. It belongs with publish readiness
-controls because the user is asking, "is this ready to ship?", but it remains a
-secondary action so `Create PR` can stay the single primary shipping action.
+Session detail exposes a `Review` action in the Overview publish-readiness area
+rather than in the persistent header action cluster. Before a PR exists, the
+action appears in a compact review card. After a PR exists, it moves into the PR
+health action row next to `Merge`, `Fix tests`, and related PR actions.
 
-Clicking `Review this work` opens a focused setup dialog with one real decision:
-how many back-and-forth passes to allow. The dialog is used on mobile and desktop
-so the setup controls do not depend on a popover inside the mobile details sheet.
+Clicking `Review` opens a focused setup dialog with two decisions:
+which native-review-capable coding agent should review, and how many
+back-and-forth passes to allow. The dialog is used on mobile and desktop so the
+setup controls do not depend on a popover inside the mobile details sheet.
 
 ```text
-Review this work
+Review
 
-Agent
+Coding agent
 Claude Code
 Runs /review and fixes issues in this session's sandbox.
 
 Review passes
-[ - ] 2 [ + ]        Recommended
+[ - ] 2 [ + ]
 1 quick pass · 2 standard · 3+ deeper polish
 
 [ Start review ]
@@ -122,13 +123,14 @@ Review passes
 
 Design choices:
 
-- There is no separate reviewer/fixer selector. The selected agent owns both
-  review and fix turns in the same review-loop tab.
+- There is no separate reviewer/fixer selector. The chosen review agent owns
+  both review and fix turns in the same review-loop tab.
 - Default to `2` passes for manual sessions: review, fix, confirm.
-- The pass stepper allows `1..5`. `2` is visually marked as recommended.
-- The agent row is informational by default. It uses the current session agent
-  unless the user explicitly changes the model through the normal session/model
-  controls before starting the loop.
+- The pass stepper allows `1..5`.
+- The agent selector defaults to a supported coding agent different from the
+  main session agent when one exists, so users can get an independent second
+  pass without creating a separate session. The selector falls back to the main
+  session agent when no supported alternative exists.
 - The setup dialog must clearly state that the loop runs in the current sandbox.
 
 ### Manual session timeline
