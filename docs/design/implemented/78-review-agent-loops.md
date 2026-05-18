@@ -97,12 +97,14 @@ reviewer/fixer lanes.
 
 ### Manual session entry point
 
-Session detail exposes a compact `Review` button near the Overview PR/health
-area. It belongs with publish readiness controls because the user is asking,
-"is this ready to ship?"
+Session detail exposes `Review this work` in the Overview readiness area rather
+than in the persistent header action cluster. It belongs with publish readiness
+controls because the user is asking, "is this ready to ship?", but it remains a
+secondary action so `Create PR` can stay the single primary shipping action.
 
-Clicking `Review` opens a focused setup popover with one real decision: how
-many back-and-forth passes to allow.
+Clicking `Review this work` opens a focused setup dialog with one real decision:
+how many back-and-forth passes to allow. The dialog is used on mobile and desktop
+so the setup controls do not depend on a popover inside the mobile details sheet.
 
 ```text
 Review this work
@@ -127,7 +129,7 @@ Design choices:
 - The agent row is informational by default. It uses the current session agent
   unless the user explicitly changes the model through the normal session/model
   controls before starting the loop.
-- The popover must clearly state that the loop runs in the current sandbox.
+- The setup dialog must clearly state that the loop runs in the current sandbox.
 
 ### Manual session timeline
 
@@ -711,8 +713,8 @@ changes.
 1. How much raw review output should be retained long term versus summarized
    after the session snapshot expires?
 2. What is the right cost preview for 3-5 pass loops on large diffs?
-3. Should manual review expose the full pass-count setup popover in the first
-   viewport action, or keep the current fast-start default of two passes?
+3. Should manual review keep the full pass-count setup dialog, or add a
+   fast-start default of two passes?
 4. Should the review-loop tab be reusable for future review loops in the same
    session, or should each click create a fresh tab?
 
