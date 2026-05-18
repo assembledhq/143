@@ -1128,6 +1128,39 @@ func TestService_SendMessage(t *testing.T) {
 			},
 		},
 		{
+			name: "success with continuation dedupe override",
+			input: SendMessageInput{
+				SessionID: sessionID,
+				OrgID:     orgID,
+				ThreadID:  threadID,
+				UserID:    &userID,
+				Message:   "internal follow-up",
+				ContinuationDedupeKeyOverride: func() *string {
+					key := "continue_session_review_loop:loop:pass:decision"
+					return &key
+				}(),
+			},
+			setupDeps: func(deps *testDeps) {
+				deps.threadStore.claimIdleFn = func(_ context.Context, _, _, _ uuid.UUID) (models.SessionThread, error) {
+					return models.SessionThread{ID: threadID, SessionID: sessionID, OrgID: orgID, CurrentTurn: 1, Status: models.ThreadStatusRunning}, nil
+				}
+				deps.messageStore.createFn = func(_ context.Context, msg *models.SessionMessage) error {
+					msg.ID = 43
+					msg.CreatedAt = time.Now()
+					return nil
+				}
+				deps.jobStore.enqueueFn = func(_ context.Context, _ uuid.UUID, queue, jobType string, payload any, _ int, dedupeKey *string) (uuid.UUID, error) {
+					require.Equal(t, "agent", queue, "thread messages should use the agent queue")
+					require.Equal(t, "continue_session", jobType, "thread messages should reuse the continue-session worker")
+					require.IsType(t, map[string]string{}, payload, "thread message payload should be string keyed")
+					require.Equal(t, threadID.String(), payload.(map[string]string)["thread_id"], "thread id should still be included for worker attribution")
+					require.NotNil(t, dedupeKey, "override enqueue should carry a dedupe key")
+					require.Equal(t, "continue_session_review_loop:loop:pass:decision", *dedupeKey, "internal follow-up should use the caller-provided dedupe key")
+					return uuid.New(), nil
+				}
+			},
+		},
+		{
 			name: "claims parent session before creating thread message",
 			input: SendMessageInput{
 				SessionID: sessionID,
