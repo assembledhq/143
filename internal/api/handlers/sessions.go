@@ -1608,6 +1608,112 @@ func (h *SessionHandler) CreatePR(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusAccepted, map[string]string{"status": "queued"})
 }
 
+// CreateBranch handles POST /sessions/{id}/branch — enqueues a job that
+// pushes the session snapshot to GitHub without opening a pull request.
+func (h *SessionHandler) CreateBranch(w http.ResponseWriter, r *http.Request) {
+	orgID := middleware.OrgIDFromContext(r.Context())
+	sessionID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid session ID")
+		return
+	}
+
+	session, err := h.runStore.GetByID(r.Context(), orgID, sessionID)
+	if err != nil {
+		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "session not found")
+		return
+	}
+	if session.SandboxState == string(models.SandboxStateDestroyed) {
+		writeError(w, r, http.StatusGone, "SNAPSHOT_EXPIRED", ghservice.SnapshotExpiredPRMessage)
+		return
+	}
+	if session.SnapshotKey == nil || *session.SnapshotKey == "" {
+		writeError(w, r, http.StatusConflict, "SNAPSHOT_NOT_CAPTURED", ghservice.SnapshotNotCapturedPRMessage)
+		return
+	}
+	if session.PendingSnapshotKey != nil && *session.PendingSnapshotKey != "" {
+		writeError(w, r, http.StatusConflict, "SNAPSHOT_PENDING", "a snapshot upload is still finishing; try again in a moment")
+		return
+	}
+	if session.Status == string(models.SessionStatusRunning) {
+		writeError(w, r, http.StatusConflict, "SESSION_RUNNING", "wait for the session to finish before creating a branch")
+		return
+	}
+	switch session.BranchCreationState {
+	case models.BranchCreationStateQueued, models.BranchCreationStatePushing:
+		writeError(w, r, http.StatusConflict, "BRANCH_IN_FLIGHT", "branch creation already in progress")
+		return
+	}
+
+	var req struct {
+		AuthorMode  string `json:"author_mode,omitempty"`
+		ResumeToken string `json:"resume_token,omitempty"`
+	}
+	if r.Body != nil && r.ContentLength != 0 {
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+			writeError(w, r, http.StatusBadRequest, "INVALID_BODY", "invalid request body")
+			return
+		}
+	}
+	authorMode, err := parsePRAuthorMode(req.AuthorMode)
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_BODY", "invalid request body", err)
+		return
+	}
+
+	orgSettings := models.OrgSettings{PRAuthorship: models.PRAuthorshipUserPreferred}
+	if h.orgStore != nil {
+		if org, orgErr := h.orgStore.GetByID(r.Context(), orgID); orgErr == nil {
+			if parsed, parseErr := models.ParseOrgSettings(org.Settings); parseErr == nil {
+				orgSettings = parsed
+			}
+		}
+	}
+	if !h.requirePRAuthOrIntercept(w, r, prAuthInterceptParams{
+		SessionID:            sessionID,
+		OrgID:                orgID,
+		Session:              &session,
+		OrgSettings:          orgSettings,
+		AuthorMode:           authorMode,
+		ResumeToken:          req.ResumeToken,
+		Action:               prAuthActionCreateBranch,
+		ActionDescription:    "create this branch",
+		ResumeExpiredMessage: "GitHub authorization completed, but the branch resume request expired. Please click Create branch again.",
+	}) {
+		return
+	}
+
+	payload := map[string]any{
+		"session_id": sessionID.String(),
+		"org_id":     orgID.String(),
+	}
+	if authorMode != prAuthorModeAuto {
+		payload["author_mode"] = string(authorMode)
+	}
+	dedupeKey := fmt.Sprintf("create_branch:%s", sessionID)
+	if _, err := h.jobStore.Enqueue(r.Context(), orgID, "agent", "create_branch", payload, 5, &dedupeKey); err != nil {
+		writeError(w, r, http.StatusInternalServerError, "ENQUEUE_FAILED", "failed to enqueue branch creation job", err)
+		return
+	}
+	queued, err := h.runStore.TryMarkBranchCreationQueued(r.Context(), orgID, sessionID)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to mark branch creation as queued", err)
+		return
+	}
+	if !queued {
+		writeError(w, r, http.StatusConflict, "BRANCH_IN_FLIGHT", "branch creation already in progress")
+		return
+	}
+
+	sessionIDStr := sessionID.String()
+	details := sessionAuditSnapshot(&session, nil, map[string]any{
+		"job_type": "create_branch",
+	})
+	emitUserAuditWithSession(h.audit, r, models.AuditActionSessionBranchRequested, models.AuditResourceSession, &sessionIDStr, &session.ID, nil,
+		marshalAuditDetails(h.logger, details))
+	writeJSON(w, http.StatusAccepted, map[string]string{"status": "queued"})
+}
+
 // PushChangesToPR handles POST /sessions/{id}/pr/push — enqueues a job that
 // pushes any uncommitted/unpushed changes from the session sandbox up to the
 // existing PR's branch and updates the PR row's head_sha. The session must

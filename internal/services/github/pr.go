@@ -435,6 +435,12 @@ type CreatePRParams struct {
 	AuthorMode string `json:"author_mode,omitempty"`
 }
 
+type CreateBranchResult struct {
+	Name    string
+	URL     string
+	HeadSHA string
+}
+
 // CreatePR opens a GitHub PR from a completed agent session by restoring the
 // session's sandbox snapshot, committing any uncommitted changes, pushing to
 // a new remote branch, and opening a pull request against the repo's default
@@ -695,6 +701,102 @@ func (s *PRService) CreatePR(ctx context.Context, run *models.Session, params ..
 	}
 
 	return pr, nil
+}
+
+// CreateBranch pushes the session snapshot to the same remote branch that
+// CreatePR would use, but deliberately skips opening or storing a PullRequest
+// row. A later CreatePR call can still open a PR from the same branch.
+func (s *PRService) CreateBranch(ctx context.Context, run *models.Session, params ...CreatePRParams) (*CreateBranchResult, error) {
+	if s.sandboxProvider == nil || s.snapshots == nil {
+		return nil, fmt.Errorf("PRService: sandbox push dependencies not configured")
+	}
+	if run.SnapshotKey == nil || *run.SnapshotKey == "" {
+		return nil, ErrSnapshotNotCaptured
+	}
+	if run.RepositoryID == nil {
+		return nil, fmt.Errorf("session %s has no repository", run.ID)
+	}
+
+	var issue *models.Issue
+	if run.PrimaryIssueID != nil {
+		i, err := s.issues.GetByID(ctx, run.OrgID, *run.PrimaryIssueID)
+		if err == nil {
+			issue = &i
+		} else {
+			s.logger.Warn().Err(err).Str("issue_id", run.PrimaryIssueID.String()).Msg("CreateBranch: failed to look up issue, proceeding without it")
+		}
+	}
+	issue = issueWithLinearHumanKey(issue, run.LinkedIssues)
+
+	repo, err := s.repos.GetByID(ctx, run.OrgID, *run.RepositoryID)
+	if err != nil {
+		return nil, fmt.Errorf("get repository: %w", err)
+	}
+
+	orgSettings := models.OrgSettings{PRAuthorship: models.PRAuthorshipUserPreferred}
+	if s.orgs != nil {
+		if org, orgErr := s.orgs.GetByID(ctx, run.OrgID); orgErr == nil {
+			if parsed, parseErr := models.ParseOrgSettings(org.Settings); parseErr == nil {
+				orgSettings = parsed
+			}
+		}
+	}
+
+	var opts CreatePRParams
+	for _, param := range params {
+		if param.AuthorMode != "" {
+			opts.AuthorMode = param.AuthorMode
+		}
+	}
+	resolution, err := s.resolveToken(ctx, run, &repo, orgSettings, opts.AuthorMode)
+	if err != nil {
+		return nil, fmt.Errorf("resolve token: %w", err)
+	}
+
+	branchName := formatBranchName(run, issue)
+	commitMsg := formatCommitMessage(run, issue)
+	authorName, authorEmail := identity.CommitIdentity(resolution)
+	if !resolution.IsUserToken() && run.TriggeredByUserID != nil && s.users != nil {
+		if user, userErr := s.users.GetByID(ctx, run.OrgID, *run.TriggeredByUserID); userErr == nil {
+			if trailer := identity.CoAuthorTrailer(&user); trailer != "" {
+				commitMsg += "\n\n" + trailer
+			}
+		}
+	}
+
+	pushed, err := s.pushSessionBranch(ctx, run, &repo, orgSettings, *run.SnapshotKey, branchName, commitMsg, authorName, authorEmail)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		if pushed != nil && pushed.CapturedSnapshotPath != "" {
+			_ = os.Remove(pushed.CapturedSnapshotPath)
+		}
+	}()
+
+	if err := s.sessions.MarkLatestDiffSnapshotPushed(ctx, run.OrgID, run.ID, pushed.HeadSHA); err != nil {
+		s.logger.Warn().Err(err).Str("session_id", run.ID.String()).Msg("failed to mark latest diff snapshot as pushed after branch creation")
+	}
+	if pushed.CapturedSnapshotErr != nil {
+		s.logger.Warn().
+			Err(pushed.CapturedSnapshotErr).
+			Str("session_id", run.ID.String()).
+			Msg("post-branch sandbox snapshot capture failed; resume will see stale state")
+	} else if pushed.CapturedSnapshotPath != "" {
+		newSnapshotKey := fmt.Sprintf("snapshots/%s/%s/post-branch.tar.zst", run.OrgID, run.ID)
+		if setErr := s.sessions.SetPendingSnapshotKey(ctx, run.OrgID, run.ID, newSnapshotKey); setErr != nil {
+			s.logger.Warn().Err(setErr).Str("session_id", run.ID.String()).Msg("failed to set pending snapshot key")
+		} else {
+			s.dispatchPostPRSnapshotUpload(run.OrgID, run.ID, newSnapshotKey, pushed.CapturedSnapshotPath, pushed.CapturedSnapshotSize)
+			pushed.CapturedSnapshotPath = ""
+		}
+	}
+
+	return &CreateBranchResult{
+		Name:    branchName,
+		URL:     fmt.Sprintf("https://github.com/%s/tree/%s", repo.FullName, url.PathEscape(branchName)),
+		HeadSHA: pushed.HeadSHA,
+	}, nil
 }
 
 // ErrNoPullRequest is returned by PushChangesToPR when the session has no
