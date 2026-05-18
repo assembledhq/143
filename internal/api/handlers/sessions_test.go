@@ -171,10 +171,6 @@ var reviewLoopColumns = []string{
 	"latest_summary", "started_by_user_id", "started_at", "completed_at",
 }
 
-func reviewLoopRow(loopID, sessionID uuid.UUID, status, source string) []any {
-	return reviewLoopRowWithLatestCheckpoint(loopID, sessionID, status, source, nil)
-}
-
 func reviewLoopRowWithLatestCheckpoint(loopID, sessionID uuid.UUID, status, source string, latestCheckpointKey *string) []any {
 	now := time.Now()
 	return []any{
