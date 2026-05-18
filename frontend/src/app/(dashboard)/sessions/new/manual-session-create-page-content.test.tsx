@@ -5,6 +5,14 @@ import { ManualSessionCreatePageContent } from "./manual-session-create-page-con
 
 const DRAFT_STORAGE_KEY = "143:new-session-draft";
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((res) => {
+    resolve = res;
+  });
+  return { promise, resolve };
+}
+
 const mocks = vi.hoisted(() => ({
   settingsGetMock: vi.fn().mockResolvedValue({
     data: {
@@ -248,6 +256,53 @@ describe("ManualSessionCreatePageContent", () => {
 
     expect(await screen.findByTestId("no-repos-warning")).toBeInTheDocument();
     expect(screen.getByRole("combobox", { name: /Model override/i })).toBeInTheDocument();
+  });
+
+  it("does not show repository setup warning before the repository fetch resolves", async () => {
+    const repos = deferred<{ data: never[] }>();
+    mocks.repositoriesListMock.mockImplementationOnce(() => repos.promise);
+
+    renderWithProviders(<ManualSessionCreatePageContent />);
+
+    expect(await screen.findByRole("textbox", { name: "Manual session prompt" })).toBeInTheDocument();
+    expect(screen.queryByTestId("no-repos-warning")).not.toBeInTheDocument();
+
+    repos.resolve({ data: [] });
+
+    expect(await screen.findByTestId("no-repos-warning")).toBeInTheDocument();
+  });
+
+  it("does not show the agent configuration warning before setup queries resolve", async () => {
+    const settings = deferred<Awaited<ReturnType<typeof mocks.settingsGetMock>>>();
+    mocks.settingsGetMock.mockImplementationOnce(() => settings.promise);
+    mocks.resolvedCredsMock.mockResolvedValueOnce({
+      data: [
+        { provider: "openai", source: "none" },
+        { provider: "anthropic", source: "none" },
+        { provider: "gemini", source: "none" },
+        { provider: "amp", source: "none" },
+        { provider: "pi", source: "none" },
+      ],
+    });
+    mocks.codexAuthStatusMock.mockResolvedValueOnce({ data: { status: "none" } });
+    mocks.codingAuthsListMock.mockResolvedValueOnce({ data: [] });
+
+    renderWithProviders(<ManualSessionCreatePageContent />);
+
+    expect(await screen.findByRole("textbox", { name: "Manual session prompt" })).toBeInTheDocument();
+    expect(screen.queryByText(/No API key configured/)).not.toBeInTheDocument();
+
+    settings.resolve({
+      data: {
+        name: "Test Org",
+        settings: {
+          default_agent_type: "codex",
+          default_llm_model: "gpt-5.4-mini",
+        },
+      },
+    });
+
+    expect(await screen.findByText(/No API key configured for Codex/)).toBeInTheDocument();
   });
 
   it("uses a mobile settings sheet instead of inline repo and model controls on small screens", async () => {
@@ -497,12 +552,35 @@ describe("ManualSessionCreatePageContent", () => {
     expect(screen.getByRole("menuitem", { name: "Add linear issue" })).toBeInTheDocument();
   });
 
-  it("shows the linear issue action even when Linear is not configured", async () => {
+  it("hides the linear issue action when Linear is not configured", async () => {
     const user = userEvent.setup();
     mocks.integrationsListMock.mockResolvedValueOnce({ data: [] });
     renderWithProviders(<ManualSessionCreatePageContent />);
 
     await user.click(await screen.findByRole("button", { name: "Add files or photos" }));
+
+    expect(screen.queryByRole("menuitem", { name: "Add linear issue" })).not.toBeInTheDocument();
+  });
+
+  it("hides the linear issue action until the integrations fetch confirms active Linear", async () => {
+    const user = userEvent.setup();
+    const integrations = deferred<Awaited<ReturnType<typeof mocks.integrationsListMock>>>();
+    mocks.integrationsListMock.mockImplementationOnce(() => integrations.promise);
+    renderWithProviders(<ManualSessionCreatePageContent />);
+
+    await user.click(await screen.findByRole("button", { name: "Add files or photos" }));
+
+    expect(screen.queryByRole("menuitem", { name: "Add linear issue" })).not.toBeInTheDocument();
+
+    integrations.resolve({
+      data: [
+        {
+          id: "integration-linear",
+          provider: "linear",
+          status: "active",
+        },
+      ],
+    });
 
     expect(await screen.findByRole("menuitem", { name: "Add linear issue" })).toBeInTheDocument();
   });
